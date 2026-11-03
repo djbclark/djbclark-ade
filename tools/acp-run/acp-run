@@ -338,6 +338,9 @@ AGENTS = {
     # omp (oh-my-pi) native ACP server (`omp acp`, omp 18.12.2 verified 2026-10-19). Its Claude
     # API credits are a normal tier since 2026-10-19 (operator): no per-run approval.
     "omp": (["omp", "acp"], None),
+    # pi-acp bridges ACP to the installed Pi's JSONL RPC (2026-11-03).
+    # It reuses Pi's own model catalog, authentication and persistent sessions.
+    "pi": (["pi-acp"], None),
     # goose (Homebrew block-goose-cli 1.55.0, `goose acp`, 2026-10-23) through
     # ~/.local/bin/goose-scout: Bedrock Llama 4 Scout (us.meta.llama4-scout-17b-instruct-v1:0,
     # us-east-1) via goose-scout's private LiteLLM proxy (127.0.0.1:4012), whose callbacks curb
@@ -612,6 +615,9 @@ DENY_UNSUPPORTED = {
               " with a read-only brief and a diff check (subagents run yolo unless security-sensitive,"
               " operator 2026-10-15), or set CURSOR_CONFIG_DIR to a config with approvalMode allowlist",
 }
+DENY_UNSUPPORTED["pi"] = (
+    "pi-acp runs Pi tools locally without ACP permission requests; no deny mode is verified."
+    " Use --perm all; do not use this route for security-sensitive read-only work")
 DENY_UNSUPPORTED_OVERRIDE_ENV = {"cursor": "CURSOR_CONFIG_DIR"}
 DENY_UNSUPPORTED["kiro"] = (
     "kiro-cli acp runs read, grep, glob and workspace `code` edits without a session/request_permission"

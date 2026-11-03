@@ -214,7 +214,10 @@ finish_flag=$finish
                   provider's own default; without --mode, an inspect of this agent that lacks a Provider or a Mode
                   value exits 11 and starts nothing; for a claude successor --mode is a permission mode of the installed
                   claude CLI, else exit 2 before anything starts)
-       exit codes: 2 usage, 3 no host or unknown baton syntax, 4 draft in the input box, 5 no prompt (a busy pane is waited for up to SELF_SLASH_WAIT), 6 session still working,
+       Native Pi: external /compact [focus] disabled: public API cannot prove active main-editor focus.
+       --dry-run validates identity without writing, not admission. No --then or lifecycle support; --delay ignored.
+       Inherited Pi markers yield only to verified native children, never to an ancestor host.
+       exit codes: 2 usage/native Pi refusal, 3 no host or unknown baton syntax, 4 draft in the input box, 5 no prompt (a busy pane is waited for up to SELF_SLASH_WAIT), 6 session still working,
        7 refused (gap check, lifecycle already queued, or unproved Paseo clear/compact provider), 8 archive refused or Codex submission unconfirmed (identity, target change or no rollout receipt), 9 dispatched agent
        (ACP_RUN_AGENT=1): lifecycle actions and /compact run only in the top-level session,
        11 successor not started, not top-level or not verified, or the successor path aborted (nothing archived; this session stays usable),
@@ -292,6 +295,32 @@ if [ "$finish" = 1 ] && [ -n "$then" ] && [ "${SELF_SLASH_CHILD:-}" != "1" ]; th
 lifecycle=0
 case "$text" in /new|/clear|/reset|/quit|/exit|"/new "*|"/clear "*|"/reset "*|"/quit "*|"/exit "*) lifecycle=1;; esac
 [ "$finish" = 1 ] && lifecycle=1
+# Native Pi never guesses a terminal or sends a built-in as model text. Its
+# per-tool session identity must match an ancestor's pi-bridge registration.
+# Inherited Pi markers yield ONLY to a verified nearer native child, never to
+# host discovery after failed Pi identity. See pi-native-controls.md.
+if [ -n "${PI_SESSION_ID+x}${PI_SESSION_FILE+x}" ] || [ "${PI_CODING_AGENT:-}" = true ] || [ "${AI_AGENT:-}" = pi ]; then
+  native_helper="$(dirname "$(realpath "${BASH_SOURCE[0]}")")/../skills/autorename/pi_native.py"
+  native_backend=$(python3 "$native_helper" --backend) || exit 2
+  case "$native_backend" in
+    pi)
+      if [ "${ACP_RUN_AGENT:-}" = 1 ]; then
+        echo "self-slash: dispatched slice cannot run native Pi controls" >&2; exit 9
+      fi
+      if [ "$finish" = 1 ] || [ "$then_set" = 1 ] || [ -n "$successor" ]; then
+        echo "self-slash: native Pi takes /compact [focus] only, no lifecycle or --then options" >&2; exit 2
+      fi
+      if [ "$dry" = 1 ]; then exec python3 "$native_helper" --dry-run "$text"; fi
+      exec python3 "$native_helper" "$text";;
+    opencode)
+      # The next block dispatches ONLY the child's scoped native compact route.
+      if [ "$text" != /compact ] || [ "$finish" = 1 ] || [ "$then_set" = 1 ] || [ -n "$successor" ]; then
+        echo "self-slash: nested OpenCode accepts only scoped /compact; no inherited host fallback" >&2; exit 2
+      fi;;
+    *)
+      echo "self-slash: nearer native child has no supported control route; no inherited host fallback" >&2; exit 2;;
+  esac
+fi
 # A per-tool OpenCode plugin scope wins over inherited terminal/parent identities.
 # Native compaction queues this exact session at a safe point, including ACP slices;
 # it never invokes a parent lifecycle action. A reset requires a durable handoff and

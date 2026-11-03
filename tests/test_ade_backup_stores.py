@@ -224,6 +224,17 @@ def test_unknown_only_name_is_usage_error(env):
     assert run_main(mod, "--dest", str(dest), "--only", "nope") == 2
 
 
+def test_pi_backup_covers_sessions_and_acp_mapping_but_not_auth(tmp_path):
+    mod = load()
+    home = tmp_path / "home"
+    store = next(store for store in mod.build_stores(home) if store["name"] == "pi")
+    assert store["roots"] == [("sessions", home / ".pi/agent/sessions"),
+                              ("acp-session-map.json", home / ".pi/pi-acp/session-map.json")]
+    assert store["file_labels"] == ["acp-session-map.json"]
+    assert ".pi/agent/auth.json" in mod.EXCLUDE_PATHS
+    assert mod.is_excluded_name("auth.json")
+
+
 def test_exclude_names_cover_the_inventory_key_files():
     mod = load()
     for name in ("mcp.json", "mcp.json.bak-2026-10-12", "opencode.json.bak", "mcp_config.json.bak-2026-10-18",

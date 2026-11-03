@@ -2,7 +2,7 @@
 
 README for [`skill-everywhere`](../bin/skill-everywhere) (canonical script in
 this repository; compatibility command `~/ops/site-private/bin/skill-everywhere`). It makes a local skill available to
-every agent TUI on this machine (Claude Code, Codex, goose, omp, Copilot, Cursor, opencode,
+every agent TUI on this machine (Claude Code, Codex, goose, omp, Pi, Copilot, Cursor, opencode,
 zcode, Grok, Qwen, Devin, Cline, Muse, Antigravity and Hermes) by
 symlinking it into each one's skills dir (Grok Bot, on its own Linux box, gets
 a rendered copy instead; see its row in section 2), and this page says how to prove each
@@ -73,6 +73,7 @@ one of the two roots.
 | Devin (`devin`) | `~/.config/devin/skills` |
 | Cline (`cline`) | `~/.cline/skills` |
 | Hermes (`hermes`) | `~/.local/share/skill-everywhere/skills`, which Hermes put in its own `skills.external_dirs` |
+| Pi (`pi`) | `~/.agents/skills`, the same dir codex and goose use (added 2026-11-03), so the link is shared, never a second copy and not a native `~/.pi/agent/skills` farm. Duplicates that already exist are handled by `bin/pi-skill-dedup` ([docs/pi-skills.md](pi-skills.md)). |
 | Cursor (`cursor-agent`), Muse (`muse`) | already read `~/.claude/skills`; no extra link |
 | Grok (`grok`, including Grok Build) | `~/.grok/skills`. It also scans `~/.claude/skills` and `~/.agents/skills` and dedups by name. Verified 2026-10-04: a same-named `SKILL.md` under `~/.agents/skills/.trash` was the copy this session was offered, so `~/.grok/config.toml` ignores that trash dir and this script links the live skill here. |
 | zcode (`zcode`) | already reads `~/.agents/skills`; an extra link listed it twice. **Loaded ≠ slash-invocable:** zcode's typed `/` surface resolves only built-ins, plugins and `~/.zcode/commands/*.md`; a user skill needs a command wrapper there (`skills: <name>` frontmatter auto-mounts it). Wrappers for the universal set (baton, resume, handoff, loose, steps, helm, helm-all, session-finder, session-finder-all, skillopt-sleep, bigteam, autorename, hyades-docker) live in `~/src/djbclark-ade/zcode/commands/`, symlinked directly into `~/.zcode/commands/`; add one there when adding a slash-shaped skill. Until the TUI restarts it won't see new wrappers; in a running session the built-in `/skill <name>` reaches any loaded skill without one. |

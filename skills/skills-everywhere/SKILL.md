@@ -13,7 +13,7 @@ Links a skill into every agent TUI. Content lives in exactly one place —
 `~/ops/site-private/skills/<name>/` for private ones (only `1password`) —
 and every TUI gets a **direct symlink** to it; no hub, no chains (collapsed
 2026-10-14). Clients covered (the `targets` table in the script): Claude
-Code, Codex, goose (`~/.agents/skills`, shared with Codex), omp (oh-my-pi,
+Code, Codex, goose and Pi (`~/.agents/skills`, shared with Codex), omp (oh-my-pi,
 `~/.omp/agent/skills`), Copilot, Cursor,
 opencode, zcode, Grok, Qwen, Devin, Cline, Muse, Antigravity and Hermes,
 plus Grok Bot (`grokbot`, a rendered copy `ade-<name>` in
@@ -66,6 +66,33 @@ Run `--check` first when diagnosing a missing client, and preserve links owned
 by another installer. In link mode any chained link (same realpath, different
 readlink) is collapsed to the direct link. A link being present does not prove
 that a running TUI has reloaded its skills; start a new session when needed.
+
+## Pi shared discovery (2026-11-03)
+
+Pi natively discovers `~/.agents/skills/`, so its target uses that shared directory,
+not a second set of links in `~/.pi/agent/skills/`. `SKILL_EVERYWHERE_ONLY=pi`
+works even if Codex is not installed. Existing independently installed Pi skills
+are preserved; this command does not remove duplicate skill copies.
+
+For collision warnings, use `~/src/djbclark-ade/bin/pi-skill-dedup plan --pair
+/ABS/NATIVE/SKILL-DIR /ABS/SHARED/SKILL-DIR` first. The helper compares bundle
+contents, full modes, ownership and current caller access (not a proof of runtime
+equivalence), proposes exact loading exclusions, and supports reviewed plan/apply
+and receipt-based reversal without deleting resources. Unsupported exclusion syntax
+such as file URLs is refused. Settings ACLs/xattrs, Linux inode flags (`chattr`), macOS file flags or
+replacement group changes also require manual review; unsupported platforms or
+filesystems refuse writes. Apply/undo requires an
+active runtime claim on the real settings file; a development workspace claim is
+not enough. Never apply live changes as part of a skill-link sweep.
+
+Project-local graft is separate: `plan --project /ABS/PROJECT` can exclude only
+an equivalent local graft copy, never global graft for every project. Differing
+project-specific graft bundles are refused, not silently hidden. Both project and
+global keeper filters are checked: explicit disabled project entries can shadow
+global auto-discovery. Read
+[`docs/pi-skills.md`](../../docs/pi-skills.md) for supported layouts, runtime
+claim/install commands, limitations and safe reversal. Reload Pi after an approved
+resource change and verify the actual retained catalog paths.
 
 ## Codex access diagnosis
 

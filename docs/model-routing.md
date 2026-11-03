@@ -128,6 +128,30 @@ quoting a chain, and update its snapshot if you change one.
 
 ## The service matrix: aiuse line ↔ TUI/CLI ↔ billing
 
+**Pi admission (2026-11-03):** `acp-dispatch pi` maps only the explicitly supported
+`openai/gpt-6.1-sol` (code) and `openai/gpt-5.4-mini` (bulk/mechanical) model IDs to
+the independent aiuse `pi` API pool. Both dispatch and router use the same mapping;
+no bare IDs, arbitrary provider/model IDs, or `openai-codex/` subscription IDs are
+inferred. Adding a supported billing route requires an explicit mapping and tests.
+Codex subscription headroom never substitutes for Pi API capacity.
+
+Dispatch refuses unsupported, absent, stale, unknown or exhausted Pi capacity
+with exit 5 (`unavailable/headroom`) before any paid preflight or task. The minimum
+is the greater of 1%, the Pi profile's `reserve_floor`, and `--min-headroom`.
+This measurement gate also applies to dry runs, resumes, legacy records and route
+overrides; `--no-preflight` and `--min-headroom 0` cannot disable it. Pass-through
+`--acp-arg` values that could replace the billed model or the Pi process's credentials, endpoint,
+binary or config dir (`--model`, `--set`, `--meta`, `--agent-arg`, `--agent-env`, `--auth`, their `=`
+forms and prefixes such as `--mod`) are refused for Pi before any probe, and the runner refuses a stored
+command line carrying one or lacking its own `--model` (2026-11-03). Operator-side `ACP_RUN_ENV_PI`,
+`ACP_RUN_ARGS_PI` and `~/.config/acp-run.env` (`ACP_RUN_ENV_FILE`) are not dispatch inputs and are
+not covered by this guard. A resumed Pi record keeps the
+minimum it was admitted under (resume: at least 10%) and the runner rechecks that number. Initial
+admission and the runner's post-load/post-capacity-wait checks bypass the quota
+memo and use the existing freshness-aware snapshot reader. Unknown capacity is
+not unlimited capacity; neither credentials nor a model catalog prove headroom.
+Other providers' admission policies are unchanged.
+
 **How `bin/route_agent.py` reads pool state (2026-10-20):** it runs `aiuse --available --json`
 (argv list, 20 s timeout, exit 0 or 3 accepted), not the snapshot file, so routing and the
 quota gate see what `aiuse` itself reports: the operator credits override (`aiuse set-credits`,
@@ -163,6 +187,7 @@ where quota is going to waste. Mapping, verified 2026-08-23:
 | `claude` (mit) | **permanently gone** (operator, 2026-08-23) — removed from cswap | — | — | — |
 | `codex` | `codex` (v0.149) | ChatGPT Plus until 2026-10-18; **$100 plan (aiuse `prolite`) since 2026-10-19** | monthly sub | weekly (resets 2026-10-26; a 5-hour window may reappear) |
 | `antigravity` | `agy` (v1.1.18; ralph-tui-antigravity-plugin exists) | Google AI Pro | monthly sub | Gemini 5h/weekly **plus Claude/GPT 5h/weekly plus Gemini 4 Argon weekly** (its own pool family `gemini_argon` since aiuse 1.5; 2026-10-31: Gemini weekly 4% left, Argon 57%) |
+| `pi` | `pi` via `acp-run pi` (`pi-acp`; added 2026-11-03) | OpenAI API billing (aiuse `codex-api` scope), not the Codex subscription | credits (`access = "api"`, `api-only` eligible) | measured balance; fails closed without a reading (`reserve_floor` 1%, `measured_only`) |
 | `copilot` | `copilot` (v1.0.77; broke 2026-08-23 on stale pkg cache — fix: `rm -rf ~/Library/Caches/copilot/pkg`) | Individual Pro | monthly sub | premium requests (monthly) |
 | `cursor` | `cursor` (v3.17.8) | Cursor Pro | monthly sub | included / Auto / other-models (monthly) |
 | `grok` | `grok` (v1.0.5; ralph-tui-grok-plugin exists) | SuperGrok | monthly sub | usage limit |
@@ -446,7 +471,7 @@ The governor's and the guard's numbers live in `config/gates.toml` and a tempora
    "omp credits" is the Claude Max plan's monthly API credits, an expiring grant. A
    normal tier used with discernment: first for work that needs API access and cannot
    run through a TUI or ACP (kind `api-only`: SDK paths such as the Claude route in
-   `bin/failover.py`, a verdict classifier, batch jobs), otherwise ordinary `code` and
+   `bin/failover.py`, a verdict classifier, batch jobs; omp ranks first and pi's OpenAI API pool is the other eligible pool), otherwise ordinary `code` and
    `bulk` slices via `acp-run omp --model anthropic/claude-sonnet-5-5`, so the credits
    are fully used before they expire each month and never left unspent. No
    `ACP_OPERATOR_APPROVED=omp`. `route_agent.py` tags the route "burn before reset"

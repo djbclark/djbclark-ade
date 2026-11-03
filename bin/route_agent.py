@@ -78,8 +78,8 @@ preferences, because they encode consequences a score cannot see:
   2026-10-18, when GrokBot moved to its own Cursor pool);
 - hermes is never a delegation target (gated, never discovered as a routable
   service here); omp is an ordinary tier since 2026-10-19 (operator): its Claude
-  API credits are an expiring grant, first for `api-only` work (it is the only
-  pool in that kind) and otherwise for `code`/`bulk` slices, so they are spent
+  API credits are an expiring grant, first for `api-only` work (rank 1; pi's OpenAI API pool is the other
+  eligible pool) and otherwise for `code`/`bulk` slices, so they are spent
   before each monthly reset; `grant_days` gives it the burn-first bonus while the
   balance is far above an even spend over the month;
 - **never** route a slice to clinepass (NEVER_ROUTE) — it is the Hindsight/hermes
@@ -202,6 +202,9 @@ class Service:
     # of its binding window left, whatever `min_headroom` says (copilot:
     # GitHub-side Copilot review draws on it; grok was one until 2026-10-18).
     reserve_floor: float = 0.0
+    # True when `reserve_floor` only makes the pool fail closed without a measured reading (pi,
+    # 2026-11-03): it is a normal pool, not a reserve, so route() omits the RESERVE advice.
+    measured_only: bool = False
     # Days in the grant period when this pool is an expiring dollar grant rather than a
     # rolling window (omp's Claude API credits, 2026-10-19): aiuse reports an expiry
     # (`resets_at`) but no `window_minutes` or pace, so expected_waste() cannot compute
@@ -1843,7 +1846,7 @@ def route(kind: str, *, quota: dict[str, Any] | None = None,
         why.append("free tier")
     elif kind in ("bulk", "mechanical") and remaining is not None and remaining > 80:
         why.append("idle paid capacity")
-    if best.reserve_floor:
+    if best.reserve_floor and not best.measured_only:
         why.append(f"RESERVE: floor {best.reserve_floor:.0f}% left, one small slice, "
                    "check the window first")
     if best.note:
@@ -2188,12 +2191,25 @@ def antigravity_family(model: str | None) -> str | None:
     return "gemini" if m.startswith("gemini-") else None
 
 
+# Only these explicitly supported Pi API model IDs share the measured `pi` pool.
+# Do not infer billing from arbitrary OpenAI-compatible providers, bare IDs, or
+# openai-codex (subscription) models. Keep additions deliberate and tested.
+PI_OPENAI_MODELS = frozenset({"openai/gpt-6.1-sol", "openai/gpt-5.4-mini"})
+
+
+def pi_api_pool(model: str | None) -> tuple[str, str | None] | None:
+    """Independent Pi/OpenAI API capacity, never the Codex subscription."""
+    return ("pi", None) if model in PI_OPENAI_MODELS else None
+
+
 def map_agent_to_provider(agent: str, model: str | None) -> tuple[str, str | None] | None:
     """Map acp agent and model to aiuse (provider, pool_family). None if unknown.
 
     Kept in sync with acp-dispatch.map_agent_to_provider by hand (2026-10-18);
     calibrate must not import acp-dispatch while that file is mid-edit.
     """
+    if agent == "pi":
+        return pi_api_pool(model)
     if agent == "agy":
         family = antigravity_family(model)
         return ("antigravity", family) if family else None

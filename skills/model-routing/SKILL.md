@@ -25,6 +25,23 @@ Failure chains (what runs when the chosen model fails) are not here.
 Load `fallback-chains` and, if this change touches a chain, update that
 skill's snapshot in the same turn.
 
+## Pi and OpenAI API billing (2026-11-03)
+
+Pi is a first-class TUI and ACP target through `acp-run pi` and the `pi-acp`
+bridge. Its curated routing service is `pi`, backed by OpenAI API billing
+(`codex-api` scope in aiuse), separate from Codex CLI's subscription windows.
+Never substitute Codex subscription headroom for Pi's API balance. Missing
+measured Pi capacity fails closed; a model catalog or valid login is not a
+balance. Use `acp-run pi --info` to verify the available provider/model IDs and
+thinking options. API-only callers must select the billing pool appropriate
+to their SDK, not automatically use the first API-capable vendor.
+
+Code uses `openai/gpt-6.1-sol` at high; mechanical/bulk work uses
+`openai/gpt-5.4-mini` at low. Pi currently supports only `--perm all` in
+`acp-run`; security-sensitive work requiring enforced read-only tools uses a
+verified read-only route instead. The existing frontier-model gates still
+apply; this entry does not make Astra an everyday coding model.
+
 ## Probes (prefer these over a hand-kept snapshot; aiuse's own cache is fine while fresh)
 
 - **`aiuse --available`** (aiuse 3.1.4+, github.com/djbclark/aiuse) — the routing
@@ -338,8 +355,8 @@ Rules for any agent that dispatches to agy:
   expiring dollar grant, resets 2026-11-05). It is a **normal tier, used with
   discernment**: first for work that needs API access and cannot run through a TUI
   or ACP (kind **`api-only`**: SDK paths such as the Claude route in
-  `bin/failover.py`, a verdict classifier, batch/API-only jobs; omp is the only
-  pool in that kind and ranks first), otherwise for ordinary `code` and `bulk`
+  `bin/failover.py`, a verdict classifier, batch/API-only jobs; omp ranks first;
+  pi's OpenAI API pool is the other eligible pool), otherwise for ordinary `code` and `bulk`
   slices via `acp-run omp --model anthropic/claude-sonnet-5-5 [--effort L]`, so the
   credits are **fully used before they expire each month, never left unspent**.
   No `ACP_OPERATOR_APPROVED=omp` any more. **burn-before-reset:** `route_agent.py`

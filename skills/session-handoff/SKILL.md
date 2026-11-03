@@ -155,7 +155,7 @@ treat every owner as possibly live (step 4).
    no match, so exemption A does not fire on it (a new occupant of the pane would otherwise adopt a chain
    whose live successor has not yet checkpointed); only your own `then: /baton` line (C1), the watch role
    (C2) or a full-id match (`sid`, `paseo`, transcript) makes the chain yours. It also needs the row's
-   `agent` to fit `writer` (`claude*` to claude, `omp*` to omp, `codex` to codex, otherwise any); a row of
+   `agent` to fit `writer` (`claude*` to claude, `omp*` to omp, `pi*` to pi, `codex` to codex, otherwise any); a row of
    another agent is not the owner and is read as no match. Also read
    `~/src/djbclark-ade/bin/watch status --json`: a `holder.target` that equals or is a prefix of S, or equals the matched
    row's full `paseo` id (S may be only the row's 8-character `id`), with `alive: true`, is a live owner

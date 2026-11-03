@@ -1416,6 +1416,30 @@ class TestOmpReadyRoster(unittest.TestCase):
                       r.unrouted_why("code", {**case, "omp": {"remaining": 1.0}}))
 
 
+class TestPiApiTier(unittest.TestCase):
+    def test_pi_uses_independent_measured_api_capacity(self):
+        svc = r.BY_NAME["pi"]
+        self.assertEqual(svc.acp_agent, "pi")
+        self.assertEqual(svc.shares_pool, "")
+        self.assertGreater(svc.reserve_floor, 0)
+        self.assertTrue(svc.eligible("code"))
+        self.assertTrue(svc.eligible("api-only"))
+        self.assertIn("openai/", svc.models["code"])
+        self.assertIsNone(r.route("api-only", quota={"omp": {"remaining": 0.0}}))
+
+    def test_pi_api_capacity_does_not_depend_on_codex_subscription(self):
+        choice = r.route("api-only", quota={"omp": {"remaining": 0.0},
+                                           "pi": {"remaining": 80.0},
+                                           "codex": {"remaining": 0.0}})
+        self.assertIsNotNone(choice)
+        self.assertEqual(choice.service.name, "pi")
+
+    def test_empty_pi_api_pool_is_not_replaced_by_codex_capacity(self):
+        self.assertIsNone(r.route("api-only", quota={"omp": {"remaining": 0.0},
+                                                   "pi": {"remaining": 0.0},
+                                                   "codex": {"remaining": 100.0}}))
+
+
 class TestOmpCreditsTier(unittest.TestCase):
     """Operator 2026-10-19: omp (the Claude Max plan's monthly API credits) is a normal tier, no
     per-run approval: `api-only` work first, code/bulk so the grant is spent before it expires."""
@@ -1464,14 +1488,21 @@ class TestOmpCreditsTier(unittest.TestCase):
         self.assertNotIn("omp", {s.name for s in r.SERVICES if s.eligible("frontier")})
         self.assertEqual(r.route("judgment", quota=self.quota(omp={"remaining": 0.0})).service.name, "claude")
 
-    def test_api_only_is_a_kind_and_only_omp_takes_it(self):
+    def test_api_only_is_a_kind_for_both_api_billing_pools(self):
         self.assertIn("api-only", r.KINDS)
-        self.assertEqual([s.name for s in r.SERVICES if s.eligible("api-only")], ["omp"])
+        self.assertEqual([s.name for s in r.SERVICES if s.eligible("api-only")], ["omp", "pi"])
         c = r.route("api-only", quota=self.quota())
         self.assertIsNotNone(c)
         self.assertEqual(c.service.name, "omp")
         self.assertIn("claude", c.model)
         self.assertEqual(c.kind, "api-only")
+
+    def test_pi_floor_only_demands_a_measurement_and_is_not_advertised_as_a_reserve(self):
+        c = r.route("api-only", quota=self.quota(pi={"remaining": 80.0}), exclude={"omp"})
+        self.assertEqual(c.service.name, "pi")
+        self.assertTrue(c.service.reserve_floor)
+        self.assertNotIn("RESERVE", c.why)
+        self.assertIsNone(r.route("api-only", quota={**self.quota(), "pi": {"remaining": None}}, exclude={"omp"}))
 
     def test_api_only_ignores_the_acp_readiness_probe(self):
         """api-only is the caller's own API call, so a broken omp login does not block it."""

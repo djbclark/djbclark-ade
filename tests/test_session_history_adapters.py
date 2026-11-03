@@ -40,6 +40,9 @@ class AdapterTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.home = Path(self._tmp.name)
+        pi_env = mock.patch.dict("os.environ", {"PI_CODING_AGENT_DIR": "", "PI_CODING_AGENT_SESSION_DIR": ""})
+        pi_env.start()
+        self.addCleanup(pi_env.stop)
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
@@ -59,6 +62,49 @@ class AdapterTests(unittest.TestCase):
         cwd, title, msgs = s["load"]()
         self.assertEqual((cwd, title), ("/src/x", "Fix the flux capacitor"))
         self.assertEqual(msgs, [("user", "please repair the capacitor"), ("assistant", "capacitor repaired")])
+
+    def test_pi_reads_names_and_text_without_system_or_tool_content(self) -> None:
+        path = self.home / ".pi/agent/sessions/--src-x--/2026-11-03T00-00-00Z_custom_id.jsonl"
+        write_jsonl(path, [
+            {"type": "session", "version": 3, "id": "custom_id", "cwd": "/src/x"},
+            {"type": "message", "message": {"role": "system", "content": "private instructions"}},
+            {"type": "message", "message": {"role": "user", "content": "Hi"}},
+            {"type": "message", "message": {"role": "assistant", "content": [
+                {"type": "thinking", "thinking": "hidden"}, {"type": "text", "text": "Hello"}]}},
+            {"type": "message", "message": {"role": "toolResult", "content": "tool output"}},
+            {"type": "session_info", "name": "First name"},
+            {"type": "session_info", "name": "Final name"},
+            {"type": "message", "message": None},
+        ])
+        with path.open("a") as handle:
+            handle.write("null\n[]\ninvalid json\n")
+        mod = load("pi", self.home)
+        (session,) = list(mod.sessions())
+        self.assertEqual(session["key"], f"pi:{path.resolve()}")
+        self.assertEqual(session["sid"], "custom_id")
+        self.assertEqual(session["load"](), ("/src/x", "Final name", [("user", "Hi"), ("assistant", "Hello")]))
+        self.assertEqual(mod.RESUME(session["key"], "/src/x"), f"pi --session {path.resolve()}")
+
+    def test_pi_listing_is_stat_only_and_skips_symlinks(self) -> None:
+        path = self.home / ".pi/agent/sessions/--src-x--/timestamp_valid-id.jsonl"
+        write_jsonl(path, [{"type": "session", "id": "valid-id"}])
+        path.with_name("timestamp_link-id.jsonl").symlink_to(path)
+        mod = load("pi", self.home)
+        with mock.patch.object(mod, "_records", side_effect=AssertionError("listing must not parse")):
+            (session,) = list(mod.sessions())
+        self.assertEqual(session["sid"], "valid-id")
+
+    def test_pi_session_directory_overrides(self) -> None:
+        agent = self.home / "custom-agent"
+        direct = self.home / "custom-sessions"
+        write_jsonl(agent / "sessions/--src--/2026-11-03T15-25-31-559Z_agent-id.jsonl", [{"type": "session"}])
+        write_jsonl(direct / "--src--/2026-11-03T15-25-31-559Z_direct-id.jsonl", [{"type": "session"}])
+        mod = load("pi", self.home)
+        with mock.patch.dict("os.environ", {"PI_CODING_AGENT_DIR": str(agent)}):
+            self.assertEqual([s["sid"] for s in mod.sessions()], ["agent-id"])
+            with mock.patch.dict("os.environ", {"PI_CODING_AGENT_SESSION_DIR": str(direct)}):
+                self.assertEqual([s["sid"] for s in mod.sessions()], ["direct-id"])
+        self.assertEqual(mod.ROOT_ENV, ("PI_CODING_AGENT_DIR", "PI_CODING_AGENT_SESSION_DIR"))
 
     def test_grok_drops_synthetic_reminders_and_recovers_compacted_prompts(self) -> None:
         cwd_dir = self.home / ".grok/sessions/%2Fsrc%2Fy"

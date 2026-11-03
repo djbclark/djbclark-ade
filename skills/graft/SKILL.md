@@ -13,9 +13,10 @@ part in prose and name the exact `file:line` spans they cover, plus a wiring
 graph of who-calls-what. Querying a node costs a few hundred tokens; rebuilding
 that understanding by reading source costs thousands, and misses the edges.
 
-Every command below is `$0`, needs no API key, and returns in under a second.
-There are six of them. **Pick the one that fits the task, run it, act on the
-answer; don't chain tools hoping for more. Most tasks need one call.**
+The retrieval commands need no API key; latency includes any incremental graph
+refresh. There are six tool families below. **Pick the one that fits the task,
+run it, act on the answer; don't chain tools hoping for more. Most tasks need
+one call.**
 
 ## The tools
 
@@ -42,9 +43,9 @@ enclosing symbol** and ranked by coupling; it also reports files it couldn't rea
   over-specific regex (`func (s *Server) GenerateHandler`) returns nothing even
   when the code is indexed. If a grep misses, **loosen it** (drop the receiver
   and signature, keep the bare name) and retry `graft grep`. Do NOT switch to
-  raw `grep -rn`, which is slower and unranked.
-- `-i` case-insensitive; `--in <path>` scopes to a subtree. Raw `grep -rn` is
-  only for files graft genuinely doesn't index (docs, configs, brand-new files).
+  raw filesystem search for indexed code.
+- `-i` case-insensitive; `--in <path>` scopes to a subtree. Scoped `rg` is the
+  fallback for files graft genuinely doesn't index (docs, configs, new files).
 
 ### 3 · `graft skeleton <file>`: a file's API at a glance
 Signatures-only view of one file (every function / method / type with its span)
@@ -83,8 +84,10 @@ projection, rebuilt at the end of the turn rather than on each query, so after a
 they can lag. The tools above never do: prefer them, and treat a card's spans as
 stale if you have edited that file this turn.
 
-`build` is for the LLM layer (`--deep` adds a concept map; skip unless asked);
-`check` fails when `graft/` is stale, for CI.
+Use `build` to initialize this checkout's local graph when it is missing. If a
+query says it is answering from an ancestor's graph, do not treat unrelated hits
+as this repo's context: build locally first. An explicit `--deep` concept-map
+pass is separate; skip it unless asked. `check` detects stale graph data for CI.
 
 ## Scenarios: the shortest path through a coding task
 
@@ -93,7 +96,8 @@ stale if you have edited that file this turn.
 | Onboarding / "explain this codebase" | `graft map`, then read the named hub cards | 1 |
 | Understanding a flow ("how does X work") | `graft ask "<flow>" --source` | 1 |
 | Finding where a change belongs | `graft ask "where is <behavior>" --source` | 1 |
-| Editing a symbol you can already name | `graft grep "<symbol>"`, edit at the `file:line` (skip `ask`: you know where it is) | 1 |
+| Named symbol, location still unknown | `graft grep "<symbol>"`, then act on its `file:line` | 1 |
+| Need implementation detail at an already-known file/range | Native `read` / `Read` of that bounded span; no rediscovery | 1 |
 | Renaming / deleting / changing a signature | `graft callers <sym> --depth 2` first | 1 |
 | Refactor / multi-file change (before editing) | `graft callers <sym> --depth all`: map every connected file, don't stop at the first | 1 |
 | "What does this depend on?" | `graft callers <sym> --direction out` | 1 |
@@ -111,10 +115,13 @@ you already know where you're working, narrow with `graft ask "<task>" --in <sco
 - A node's `covers:` list already gives exact `file:line` for every symbol, so
   cite straight from it. The spans are generated from source and authoritative;
   don't re-open or re-grep files to "double-check".
-- When the task already names the file or symbol to change, go straight there:
-  `graft grep "<symbol>"` for the exact `file:line`, then edit. Reserve
-  `graft ask` for when you don't yet know where the code lives: an `ask`
-  round-trip is wasted on a target you can already name.
+- Distinguish discovery from inspection (operator clarification, 2026-11-03).
+  Get graph context for the task first, but once a file/range is known, use the
+  native `read` / `Read` tool for missing implementation detail. Do not run a new
+  `ask`, `skeleton`, or grep merely to re-find that span. If only a symbol is
+  known and its location is not, `graft grep "<symbol>"` is still the right next
+  call. For exact signatures or replacement text, a bounded source read is
+  better than reconstructing a truncated crux from memory.
 - Trust the answer and act. Reach for a second tool only when the first genuinely
   fell short: weak hits, a truncated span, or a need to be exhaustive.
 - If graft names a path that isn't on disk, its index is ahead of your checkout
@@ -144,11 +151,12 @@ total is parsed from.
 
 ## When graft isn't enough
 - Span truncated ("+N more lines"): open the file at that exact range.
-- A node lacks a detail: ask a more specific question; only then read source at
-  the exact `file:line`, never a whole file to rebuild understanding graft gives.
-- You may also grep / ls / cat inside `graft/` directly (plain markdown;
-  `graft/INDEX.md` indexes the nodes), but the tools above are faster and
-  exhaustive where it matters, so reach for them first.
+- A node names the location but lacks a detail: read the needed source span
+  directly. Ask again only for a genuinely unresolved conceptual/locational
+  question. Do not reread a whole file when the missing detail is local.
+- You may also read known markdown nodes under `graft/` directly with the
+  host's read tool (`graft/INDEX.md` lists them). Use the graph tools for
+  discovery and exhaustive indexed searches, not a recursive filesystem grep.
 
 When the graft MCP server is connected, these are exposed as tools too:
 `graft_find_code`, `graft_find_all`, `graft_file_api`, `graft_trace_calls` (with

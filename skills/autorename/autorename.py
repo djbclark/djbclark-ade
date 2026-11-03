@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Rename the current Claude Code, zcode, Grok, cursor-agent, OpenCode, Codex, or omp session.
+"""Rename the current Claude Code, zcode, Grok, cursor-agent, OpenCode, Codex, omp, or Pi session.
+
+Native Pi uses pi-bridge.ts and PI_SESSION_ID/PI_SESSION_FILE, never OMP's
+first-line title slot. It updates the live name through Pi's public API and
+preserves operator names with an in-process --auto guard. See pi-native-controls.md.
 
 A skill cannot invoke the built-in /rename, so this writes what it writes:
 
@@ -86,10 +90,13 @@ MAX_LEN = 80
 ZCODE_SID_RE = re.compile(r"\.zcode/cli/exec/(sess_[0-9a-fA-F-]+)/")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "session-finder"))
 import claude_identity  # noqa: E402  # the shared Claude session-id resolver
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import pi_native  # noqa: E402
 
 
 def clean(title: str) -> str:
-    title = re.sub(r"[\x00-\x1f\x7f]+", " ", title)
+    # C0/C1 controls, line/paragraph separators and bidi controls; the Pi bridge rejects the same set.
+    title = re.sub(r"[\x00-\x1f\x7f-\x9f\u2028\u2029\u202a-\u202e\u2066-\u2069]+", " ", title)
     title = re.sub(r"\s+", " ", title.replace('"', "")).strip().strip("'`")
     return title[:MAX_LEN].rstrip()
 
@@ -264,7 +271,7 @@ def grok_set_title(summary: Path, title: str) -> None:
 # Layout (cursor-agent 2026.10.01): ~/.cursor/chats/<md5(cwd)>/<uuid>/ holds
 # store.db (tables blobs, meta), meta.json and prompt_history.json.
 
-STATE_DIR = Path.home() / ".local/state/autorename"
+STATE_DIR = Path(os.environ.get("AUTORENAME_STATE_DIR", Path.home() / ".local/state/autorename"))
 AGENT_COMMS = {"cursor-agent": "cursor", "claude": "claude", "grok": "grok", "opencode": "opencode",
                "codex": "codex", "omp": "omp"}
 
@@ -679,6 +686,14 @@ def omp_set_title(reg: dict, title: str) -> bool:
 
 def session_id() -> str | None:
     """This session's id: omp, cursor-agent, OpenCode, or Grok when this process is one, else Claude Code, else zcode."""
+    child = pi_native.child_backend()
+    if child:
+        return child[2]
+    if pi_native.selected():
+        try:
+            return pi_native.registration()["session_id"]
+        except (OSError, ValueError, subprocess.SubprocessError):
+            return None
     if os.environ.get("OMPCODE") == "1":
         hit = nearest_agent_proc()
         if hit and hit[0] == "omp":
@@ -713,6 +728,11 @@ def session_id() -> str | None:
 
 def backend_for(sid: str) -> str:
     """Which store owns this id, including the Herdr-backed Codex session."""
+    child = pi_native.child_backend()
+    if child and child[2] == sid:
+        return child[0]
+    if pi_native.selected() and os.environ.get("PI_SESSION_ID") == sid:
+        return "pi"
     if sid.startswith("sess_"):
         return "zcode"
     if sid.startswith("ses_"):
@@ -745,6 +765,8 @@ def backend_for(sid: str) -> str:
 def read_title(sid: str) -> str | None:
     """Current title for a session id, whichever backend the id belongs to."""
     kind = backend_for(sid)
+    if kind == "pi":
+        return pi_native.registration(sid).get("title")
     if kind == "zcode":
         row = zcode_current_title(sid)
         return row[0] if row else None
@@ -778,7 +800,7 @@ def main() -> int:
     ap.add_argument("--show", action="store_true", help="print the current title and exit")
     ap.add_argument("--session-id", default=None,
                     help="session id (Claude Code uuid, cursor-agent chat id, Grok session id,"
-                         " OpenCode ses_…, zcode sess_…, Codex thread id, or omp session id);"
+                         " OpenCode ses_…, zcode sess_…, Codex thread id, omp or current Pi session id);"
                          " default: this session")
     ap.add_argument("--cursor-after-exit", type=int, default=None, help=argparse.SUPPRESS)
     ap.add_argument("--cursor-expect", default="", help=argparse.SUPPRESS)
@@ -788,7 +810,30 @@ def main() -> int:
         return cursor_apply_after_exit(args.session_id, args.cursor_after_exit,
                                        args.cursor_expect, args.title)
 
-    sid = args.session_id or session_id()
+    # Resolve a verified nearer child before inherited Pi markers. Never let an
+    # explicit ID escape to the Pi parent or let this path rename its host tab.
+    child = pi_native.child_backend()
+    if child and args.session_id is not None and args.session_id != child[2]:
+        print("autorename: explicit ID is not this child session; nothing renamed", file=sys.stderr)
+        return 2
+    # Keep Pi's mutation and pin check in the owning process. A failed Pi
+    # registration is a refusal, not permission to try an inherited backend.
+    if pi_native.marked() and child is None:
+        try:
+            reg = pi_native.registration(args.session_id)
+            if args.show:
+                print(f"{reg.get('title') or '(no custom title)'} ({reg.get('source')})")
+                return 0
+            if not args.title or not (title := clean(args.title)):
+                ap.error("a non-empty title is required")
+            result = pi_native.request(reg, "rename", title=title, auto=args.auto)
+            print(f"{result['status']}: {title}")
+            return 0
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            print(f"autorename: {exc}; nothing else renamed", file=sys.stderr)
+            return 2
+
+    sid = child[2] if child else args.session_id or session_id()
     if not sid:
         if os.environ.get("OMPCODE") == "1" and nearest_agent() == "omp":
             print("autorename: this omp has not registered with the autorename bridge; link"
@@ -801,7 +846,7 @@ def main() -> int:
               " nothing renamed", file=sys.stderr)
         return 2
 
-    kind = backend_for(sid)
+    kind = child[0] if child else backend_for(sid)
     transcript = None
     summary = None
     chat = None
@@ -830,7 +875,9 @@ def main() -> int:
             current = codex_pane_title()
             source = "auto"
         elif kind == "omp":
-            omp_reg = omp_registration(sid=sid)
+            omp_reg = omp_registration(pid=child[1], sid=sid) if child else omp_registration(sid=sid)
+            if child and omp_reg is None:
+                raise ValueError("owning OMP registration changed")
             current, source = omp_read(omp_session_file(sid, omp_reg))
         else:
             transcript = find_transcript(sid)
@@ -915,7 +962,8 @@ def main() -> int:
 
     state.parent.mkdir(parents=True, exist_ok=True)
     state.write_text(title + "\n", encoding="utf-8")
-    live += paseo_set_name(title, auto=args.auto)
+    if not child:
+        live += paseo_set_name(title, auto=args.auto)
     print(f"renamed: {title}{live}")
     return 0
 
