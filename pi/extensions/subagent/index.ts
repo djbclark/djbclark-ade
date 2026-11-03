@@ -12,7 +12,7 @@
  * Uses JSON mode to capture structured output from subagents.
  */
 
-import { spawn } from "node:child_process";
+import { type ChildProcess, spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -276,6 +276,27 @@ function getPiInvocation(args: string[]): { command: string; args: string[] } {
 
 type OnUpdateCallback = (partial: AgentToolResult<SubagentDetails>) => void;
 
+/**
+ * SIGTERM, then SIGKILL after a grace period only if the child has not actually exited
+ * (`proc.killed` only means a signal was sent). The timer is cleared on exit/close so a
+ * reused pid is never signalled.
+ */
+export function terminateChild(
+	proc: Pick<ChildProcess, "kill" | "exitCode" | "signalCode" | "once">,
+	graceMs = 5000,
+): void {
+	const exited = () => proc.exitCode !== null || proc.signalCode !== null;
+	if (exited()) return;
+	proc.kill("SIGTERM");
+	const timer = setTimeout(() => {
+		if (!exited()) proc.kill("SIGKILL");
+	}, graceMs);
+	timer.unref?.();
+	const clear = () => clearTimeout(timer);
+	proc.once("exit", clear);
+	proc.once("close", clear);
+}
+
 async function runSingleAgent(
 	defaultCwd: string,
 	agents: AgentConfig[],
@@ -405,9 +426,15 @@ async function runSingleAgent(
 				currentResult.stderr += data.toString();
 			});
 
-			proc.on("close", (code) => {
+			proc.on("close", (code, termSignal) => {
 				if (buffer.trim()) processLine(buffer);
-				resolve(code ?? 0);
+				// A signal-terminated child has code === null: that is a failure, never success.
+				if (code === null && termSignal) {
+					currentResult.errorMessage ||= `Subagent terminated by signal ${termSignal}`;
+					resolve(1);
+					return;
+				}
+				resolve(code ?? 1);
 			});
 
 			proc.on("error", (error) => {
@@ -418,10 +445,7 @@ async function runSingleAgent(
 			if (signal) {
 				const killProc = () => {
 					wasAborted = true;
-					proc.kill("SIGTERM");
-					setTimeout(() => {
-						if (!proc.killed) proc.kill("SIGKILL");
-					}, 5000);
+					terminateChild(proc);
 				};
 				if (signal.aborted) killProc();
 				else signal.addEventListener("abort", killProc, { once: true });
@@ -589,7 +613,7 @@ export default function (pi: ExtensionAPI) {
 
 				for (let i = 0; i < params.chain.length; i++) {
 					const step = params.chain[i];
-					const taskWithContext = step.task.replace(/\{previous\}/g, previousOutput);
+					const taskWithContext = step.task.replace(/\{previous\}/g, () => previousOutput);
 
 					// Create update callback that includes all previous results
 					const chainUpdate: OnUpdateCallback | undefined = onUpdate
