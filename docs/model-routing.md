@@ -187,6 +187,7 @@ where quota is going to waste. Mapping, verified 2026-08-23:
 | `claude` (mit) | **permanently gone** (operator, 2026-08-23) — removed from cswap | — | — | — |
 | `codex` | `codex` (v0.149) | ChatGPT Plus until 2026-10-18; **$100 plan (aiuse `prolite`) since 2026-10-19** | monthly sub | weekly (resets 2026-10-26; a 5-hour window may reappear) |
 | `antigravity` | `agy` (v1.1.18; ralph-tui-antigravity-plugin exists) | Google AI Pro | monthly sub | Gemini 5h/weekly **plus Claude/GPT 5h/weekly plus Gemini 4 Argon weekly** (its own pool family `gemini_argon` since aiuse 1.5; 2026-10-31: Gemini weekly 4% left, Argon 57%) |
+| `pi` | `pi` via `acp-run pi` (`pi-acp`; added 2026-11-03) | OpenAI API billing (aiuse `codex-api` scope), not the Codex subscription | credits (`access = "api"`, `api-only` eligible) | measured balance; fails closed without a reading (`reserve_floor` 1%, `measured_only`) |
 | `copilot` | `copilot` (v1.0.77; broke 2026-08-23 on stale pkg cache — fix: `rm -rf ~/Library/Caches/copilot/pkg`) | Individual Pro | monthly sub | premium requests (monthly) |
 | `cursor` | `cursor` (v3.17.8) | Cursor Pro | monthly sub | included / Auto / other-models (monthly) |
 | `grok` | `grok` (v1.0.5; ralph-tui-grok-plugin exists) | SuperGrok | monthly sub | usage limit |
@@ -470,7 +471,7 @@ The governor's and the guard's numbers live in `config/gates.toml` and a tempora
    "omp credits" is the Claude Max plan's monthly API credits, an expiring grant. A
    normal tier used with discernment: first for work that needs API access and cannot
    run through a TUI or ACP (kind `api-only`: SDK paths such as the Claude route in
-   `bin/failover.py`, a verdict classifier, batch jobs), otherwise ordinary `code` and
+   `bin/failover.py`, a verdict classifier, batch jobs; omp ranks first and pi's OpenAI API pool is the other eligible pool), otherwise ordinary `code` and
    `bulk` slices via `acp-run omp --model anthropic/claude-sonnet-5-5`, so the credits
    are fully used before they expire each month and never left unspent. No
    `ACP_OPERATOR_APPROVED=omp`. `route_agent.py` tags the route "burn before reset"

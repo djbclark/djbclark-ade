@@ -95,7 +95,8 @@ import pi_native  # noqa: E402
 
 
 def clean(title: str) -> str:
-    title = re.sub(r"[\x00-\x1f\x7f]+", " ", title)
+    # C0/C1 controls, line/paragraph separators and bidi controls; the Pi bridge rejects the same set.
+    title = re.sub(r"[\x00-\x1f\x7f-\x9f\u2028\u2029\u202a-\u202e\u2066-\u2069]+", " ", title)
     title = re.sub(r"\s+", " ", title.replace('"', "")).strip().strip("'`")
     return title[:MAX_LEN].rstrip()
 

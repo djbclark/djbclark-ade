@@ -297,6 +297,13 @@ print('42001 1 pi')
             assert "no inherited host fallback" in result.stderr
 
 
+@pytest.mark.parametrize("ch", ["\x85", "\x9f", "\u2028", "\u2029", "\u202a", "\u202e", "\u2066", "\u2069", "\x07", "\x7f"])
+def test_clean_strips_controls_like_the_bridge_rejects(native, monkeypatch, ch):
+    rename = load_autorename("autorename_clean_test", monkeypatch, native[0])
+    assert rename.clean(f"a{ch}b") == "a b"
+    assert rename.clean(ch) == ""
+
+
 def test_native_extension_contract(tmp_path):
     # The bridge is valid JS with JSDoc API types. Copy verbatim to .mjs, NOT a
     # mocked reimplementation or a regex-transpiled approximation of the module.
@@ -359,6 +366,10 @@ assert.match(request({action:'rename', title:'No', auto:true}).status, /skipped/
 assert.equal(title, 'Auto 2');
 assert.equal(request({action:'rename', title:'Explicit', auto:false}).status, 'renamed');
 assert.equal(reg().source, 'user');
+for (const bad of ['a\u0085b', 'a\u009fb', 'a\u2028b', 'a\u2029b', 'a\u202eb', 'a\u2066b', 'a\u2069b', 'a\u0007b', 'a\u007fb']) {
+  assert.equal(request({action:'rename', title:bad, auto:false}).accepted, false, JSON.stringify(bad));
+}
+assert.equal(title, 'Explicit');
 assert.equal(request({action:'rename', title:'Wrong', session_id:'parent'}).accepted, false);
 assert.equal(request({action:'rename', title:'Wrong', instance:'stale'}).accepted, false);
 assert.equal(request({action:'rename', title:'Wrong', expires:0}).accepted, false);

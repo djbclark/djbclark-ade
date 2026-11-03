@@ -223,7 +223,7 @@ models = { judgment = "opus --effort high", frontier = "fable --effort high", co
 # The Claude Max plan's monthly API credits (an expiring dollar grant; aiuse labels the pool
 # "omp credits", provider `omp`), reached through the omp TUI (`acp-run omp`, `omp acp`) or
 # any ANTHROPIC_API_KEY path. Operator 2026-10-19 lifted the 2026-10-15 per-run gate: a normal
-# tier, used with discernment. First for `api-only` work (rank 1, the only pool in that kind),
+# tier, used with discernment. First for `api-only` work (rank 1; pi's OpenAI API pool is also eligible),
 # otherwise `code` and `bulk` slices so the grant is fully spent before it expires; never left
 # unspent. Code ranks behind the use-it-or-lose-it agy pool (11) and claude (12) and ahead of
 # Cursor. `grant_days` makes the router treat the pool as an expiring grant: it earns the
@@ -259,6 +259,7 @@ good_at = { api-only = 2, code = 15, bulk = 35, mechanical = 20 }
 billing = "credits"
 access = "api"
 reserve_floor = 1.0
+measured_only = true
 max_parallel = 2
 note = "OpenAI API billing (codex-api scope), independent of the Codex subscription; requires measured capacity"
 models = { api-only = "openai/gpt-6.1-sol --effort medium", code = "openai/gpt-6.1-sol --effort high", bulk = "openai/gpt-5.4-mini --effort low", mechanical = "openai/gpt-5.4-mini --effort low" }

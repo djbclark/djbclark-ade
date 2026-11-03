@@ -1497,6 +1497,13 @@ class TestOmpCreditsTier(unittest.TestCase):
         self.assertIn("claude", c.model)
         self.assertEqual(c.kind, "api-only")
 
+    def test_pi_floor_only_demands_a_measurement_and_is_not_advertised_as_a_reserve(self):
+        c = r.route("api-only", quota=self.quota(pi={"remaining": 80.0}), exclude={"omp"})
+        self.assertEqual(c.service.name, "pi")
+        self.assertTrue(c.service.reserve_floor)
+        self.assertNotIn("RESERVE", c.why)
+        self.assertIsNone(r.route("api-only", quota={**self.quota(), "pi": {"remaining": None}}, exclude={"omp"}))
+
     def test_api_only_ignores_the_acp_readiness_probe(self):
         """api-only is the caller's own API call, so a broken omp login does not block it."""
         with mock.patch.dict(os.environ, {"ROUTE_AGENT_OMP_READY": "0"}):

@@ -50,6 +50,8 @@ Each doc carries its own summary.
 | [docs/skillopt-sleep.md](docs/skillopt-sleep.md) | nightly skill-edit cycle, `bin/skillopt-night` |
 | [docs/failover.md](docs/failover.md) | `bin/failover.py`: reuse it, never hand-roll a fallback |
 | [docs/pi-subagent.md](docs/pi-subagent.md) | Pi `subagent` extension: per-call model/thinking overrides, install |
+| [docs/pi-skills.md](docs/pi-skills.md) | `bin/pi-skill-dedup`: manual, claim-gated duplicate-skill exclusions for Pi |
+| [docs/pi-agent-profiles.md](docs/pi-agent-profiles.md) | canonical `.pi/agents/` Pi profiles shipped in the repo |
 | [docs/upstream-issues.md](docs/upstream-issues.md) | unfiled bug drafts for third-party projects |
 | [docs/mcp-servers.md](docs/mcp-servers.md) | MCP server roster (`claude mcp list`) |
 | [.claude/workflows/graph-audit.js](.claude/workflows/graph-audit.js) | runnable micro-graph example, `/graph-audit` |

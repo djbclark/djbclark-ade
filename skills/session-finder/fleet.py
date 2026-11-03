@@ -874,6 +874,19 @@ def _hermes_native(argv):
 
 
 # Native TUIs herdr does not detect that PROC_AGENTS (which `_proc_scan` also reads) must not take: recognised by exact argv only.
+def _pi_executable(argv0, argv):
+    """A Pi process is the `pi` executable itself, or node/bun running a script named `pi` (or Pi's `cli.js` entry): a
+    `pi` argument of another program (`vim pi`) does not make that program a Pi seat."""
+    exe = os.path.basename(argv0 or (argv[0] if argv else ""))
+    if exe == "pi":
+        return True
+    if exe in {"node", "nodejs", "bun"} and len(argv) > 1:
+        script = argv[1]
+        return os.path.basename(script) == "pi" or (
+            os.path.basename(script) == "cli.js" and "pi-coding-agent" in script)
+    return False
+
+
 def _pi_headless(argv):
     """Pi RPC/JSON workers and informational commands are not interactive seats."""
     for index, token in enumerate(argv):
@@ -979,7 +992,8 @@ def _tui_of(procs):
         names = [os.path.basename(pr["argv0"] or "")] + [os.path.basename(a) for a in argv[:2]]
         agent = (next((PROC_AGENTS[n] for n in names if n in PROC_AGENTS), None) or ("hermes" if _hermes_native(argv) else None)
                  or _native_extra(argv))
-        if agent == "pi" and (_pi_headless(argv) or not _pi_terminal(pr["pid"])):
+        if agent == "pi" and (not _pi_executable(pr["argv0"], argv) or _pi_headless(argv)
+                              or not _pi_terminal(pr["pid"])):
             continue
         if not agent or "stub" in argv[:4] and "herdr-sleeper" in " ".join(argv):
             continue
@@ -1040,7 +1054,7 @@ def _proc_scan(known_pids, known_panes, anc):
                 pi_argv = shlex.split(cmd)
             except ValueError:
                 continue
-            terminal = "" if _pi_headless(pi_argv) else _pi_terminal(pid)
+            terminal = "" if _pi_headless(pi_argv) or not _pi_executable("", pi_argv) else _pi_terminal(pid)
             if not terminal:
                 continue
         env = _where.env_of(pid) if _where else {}

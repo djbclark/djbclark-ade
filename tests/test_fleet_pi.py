@@ -111,3 +111,12 @@ def test_proc_scan_ignores_pi_rpc_worker(monkeypatch):
     line = "12345 1 Tue Nov 3 12:00:00 2026 node /tmp/pi --mode rpc"
     monkeypatch.setattr(fleet, "run", lambda *args, **kwargs: (0, line))
     assert fleet._proc_scan(set(), set(), {}) == []
+
+
+@pytest.mark.parametrize("argv", [["vim", "pi"], ["less", "/tmp/pi"], ["node", "/tmp/other", "pi"]])
+def test_program_with_pi_argument_is_not_a_seat(monkeypatch, argv):
+    monkeypatch.setattr(fleet, "_pi_terminal", lambda pid: "/dev/pts/4")
+    assert fleet._tui_of([{"argv": argv, "argv0": argv[0], "pid": 12345}])[0] is None
+    line = "12345 1 Tue Nov 3 12:00:00 2026 " + " ".join(argv)
+    monkeypatch.setattr(fleet, "run", lambda *args, **kwargs: (0, line))
+    assert fleet._proc_scan(set(), set(), {}) == []
