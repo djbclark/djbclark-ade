@@ -56,7 +56,7 @@ if (process.argv.includes("--mode")) {
 	define("configured", "model: anthropic/claude-sonnet-5\nthinking: high\ntools: [read, bash]");
 	define("model-only", "model: openrouter/vendor/model:high");
 	define("thinking-only", "thinking: low");
-	define("project", "model: local/project", projectDir);
+	define("project", "model: local/project\nthinking: low\ntools: [read]", projectDir);
 	define("plain", "model: local/shadow", projectDir);
 	const ctx = { cwd: path.join(root, "project"), hasUI: false,
 		// Prove these are NOT inherited: the brief requires child Pi defaults.
@@ -221,6 +221,30 @@ if (process.argv.includes("--mode")) {
 	await execute({ agent: "project", task: "test", agentScope: "project" }, [],
 		{ ...ctx, hasUI: true, ui: { confirm: async () => { confirmations++; return false; } } });
 	assert.equal(confirmations, 1); assert.equal(records().length, 0);
+	// Consent: the model-supplied confirmProjectAgents flag cannot relax it.
+	let dialog;
+	const approving = { ...ctx, hasUI: true, ui: { confirm: async (title, body) => { dialog = { title, body }; return true; } } };
+	clear();
+	const approved = await execute({ agent: "project", task: "test", agentScope: "both", confirmProjectAgents: false, thinking: "high" }, [], approving);
+	assert.ok(dialog, "prompt shown despite confirmProjectAgents:false"); assert.ok(!approved.isError);
+	assert.match(dialog.body, /project: tools=read, model=local\/project, thinking=high/);
+	assert.equal(records().length, 1); cases++;
+	// Headless: refused without the operator env override, allowed with exactly "1".
+	for (const [value, allowed] of [[undefined, false], ["", false], ["0", false], ["true", false], ["1", true]]) {
+		if (value === undefined) delete process.env.PI_SUBAGENT_ALLOW_PROJECT_AGENTS; else process.env.PI_SUBAGENT_ALLOW_PROJECT_AGENTS = value;
+		for (const mode of ["single", "parallel", "chain"]) {
+			clear();
+			const params = { ...wrap(mode, { agent: "project", task: "test" }), agentScope: "project", confirmProjectAgents: false };
+			const result = await execute(params);
+			assert.equal(records().length, allowed ? 1 : 0, `${mode} env=${value}`);
+			assert.equal(!!result.isError, !allowed);
+			if (!allowed) assert.match(result.content[0].text, /PI_SUBAGENT_ALLOW_PROJECT_AGENTS=1/);
+			cases++;
+		}
+	}
+	delete process.env.PI_SUBAGENT_ALLOW_PROJECT_AGENTS;
+	// User-scope agents never need consent, headless.
+	clear(); assert.ok(!(await execute({ agent: "plain", task: "test" })).isError); assert.equal(records().length, 1); cases++;
 	// A pre-aborted call keeps the original rejection behavior and carries config in its last update.
 	const controller = new AbortController(); controller.abort();
 	const updates = [];

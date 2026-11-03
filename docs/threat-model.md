@@ -60,7 +60,7 @@ What an attacker would want, in order of damage:
 | Cloud agents: Cursor Cloud Agents (`bin/cursor-cloud`) | **Untrusted writers** | They run off the Mac, get the repo URL and a prompt, and push branches to a **public** repo (`cursor/...`, or `--work-on-branch` the starting ref; `bin/cursor-cloud` never opens the PR). They hold no vault access. |
 | Codex (GitHub connector) | **Trusted-ish reader, comment-only** | Reviews PRs on request and posts review comments; it has no branch-writing path here (reviewer only today, `docs/queue.md`). Its findings are input to the lead, not a merge gate. |
 | Hermes bot (`~/.local/bin/hermes-ping`, `mcp__hermes__*`) | Channel outside this repo | `hermes-ping` is one-way (operator; its code is not in this repo). The MCP bridge is two-way: read/send messages and `permissions_respond` on Hermes's approval queue (`docs/mcp-servers.md`). |
-| GitHub Actions runners | Untrusted compute, no secrets | `.github/workflows/test.yml`: `permissions: contents: read`, triggers `push` to master, `pull_request`, `workflow_dispatch`; runs `pytest` on Ubuntu on every trigger and on macOS only on a manual dispatch with `macos: true` (2026-10-29); no `secrets.*` referenced. |
+| GitHub Actions runners | Untrusted compute, no secrets | `.github/workflows/test.yml`: `permissions: contents: read`, triggers `push` to master, `pull_request`, `workflow_dispatch`; runs `pytest` on Ubuntu (preceded by a Node 24 `npm ci --ignore-scripts` of `pi/extensions/subagent` for its tests) on every trigger and on macOS only on a manual dispatch with `macos: true` (2026-10-29); no `secrets.*` referenced. |
 | vps-primary | **Trusted** (proposal decision Q18, 2026-10-19) | Future state: holds plaintext sessions and keys; its compromise exposes every session (proposal 10, risk 10). Not part of the Mac code today. |
 | Third-party MCP servers (`docs/mcp-servers.md`: hermes, beeper, hindsight, ghost-os, claude.ai connectors, ...) | Run as the operator or are remote | Twelve are denied in Claude Code via `deniedMcpServers` since 2026-10-10; `graft` MCP removed 2026-10-18. The roster table is a 2026-08-23 snapshot. |
 | Third-party PR authors and commenters | Untrusted | Anyone can open a PR or issue on a public repo. |
@@ -259,6 +259,9 @@ others, and the merge path is unenforced. "Control" is what exists; "Gap" is wha
   (`.github/workflows/test.yml`); `bin/web-get` pins `pypdf==6.19.0`. Actions are referenced by major tag.
   skillopt is installed by `uv tool install` from upstream main and gated by a reviewed-commit receipt
   check (`bin/skillopt-night`).
+  The Linux job also runs `npm ci --ignore-scripts` in `pi/extensions/subagent` (devDependencies for the
+  extension's offline tests): the committed `package-lock.json` pins every package to a registry.npmjs.org
+  URL with an integrity hash (checked 2026-11-03: all 123 entries), and lifecycle scripts never run.
 * **Gap.** The ACP client dependency is a range, not a pin; actions are tags, not SHAs; CI runs
   `brew install` from default taps and the Linux job runs an unpinned `apt-get install -y -qq gawk`. The
   proposal (Q22) accepts Homebrew's curl-pipe installer and relies on `tools.toml` checksum pins that do

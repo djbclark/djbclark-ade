@@ -507,11 +507,22 @@ const SubagentParams = Type.Object({
 	tasks: Type.Optional(Type.Array(TaskItem, { description: "Array of {agent, task} for parallel execution" })),
 	chain: Type.Optional(Type.Array(ChainItem, { description: "Array of {agent, task} for sequential execution" })),
 	agentScope: Type.Optional(AgentScopeSchema),
-	confirmProjectAgents: Type.Optional(
-		Type.Boolean({ description: "Prompt before running project-local agents. Default: true.", default: true }),
-	),
 	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process (single mode)" })),
 });
+
+/** Effective model/thinking shown in the consent dialog: each invocation entry naming the agent, else frontmatter. */
+function invocationEntriesFor(params: any, agent: AgentConfig): SelectedConfig[] {
+	const entries = [...(params.chain ?? []), ...(params.tasks ?? []), ...(params.agent ? [params] : [])];
+	return entries.filter((e: any) => e.agent === agent.name);
+}
+function invocationModelFor(params: any, agent: AgentConfig): string | undefined {
+	const set = new Set(invocationEntriesFor(params, agent).map((e) => selectConfig(e, agent).model ?? "(Pi default)"));
+	return set.size ? [...set].join(" | ") : agent.model;
+}
+function invocationThinkingFor(params: any, agent: AgentConfig): string | undefined {
+	const set = new Set(invocationEntriesFor(params, agent).map((e) => selectConfig(e, agent).thinking ?? "(Pi default)"));
+	return set.size ? [...set].join(" | ") : agent.thinking;
+}
 
 export default function (pi: ExtensionAPI) {
 	pi.registerTool({
@@ -531,7 +542,6 @@ export default function (pi: ExtensionAPI) {
 			const agentScope: AgentScope = params.agentScope ?? "user";
 			const discovery = discoverAgents(ctx.cwd, agentScope);
 			const agents = discovery.agents;
-			const confirmProjectAgents = params.confirmProjectAgents ?? true;
 
 			const hasChain = (params.chain?.length ?? 0) > 0;
 			const hasTasks = (params.tasks?.length ?? 0) > 0;
@@ -568,7 +578,10 @@ export default function (pi: ExtensionAPI) {
 				};
 			}
 
-			if ((agentScope === "project" || agentScope === "both") && confirmProjectAgents && ctx.hasUI) {
+			// Project agents are repo-controlled. Consent is not a model-controllable parameter: a UI
+			// session always prompts; a headless session refuses unless the operator sets
+			// PI_SUBAGENT_ALLOW_PROJECT_AGENTS=1 in the environment.
+			if (agentScope === "project" || agentScope === "both") {
 				const requestedAgentNames = new Set<string>();
 				if (params.chain) for (const step of params.chain) requestedAgentNames.add(step.agent);
 				if (params.tasks) for (const t of params.tasks) requestedAgentNames.add(t.agent);
@@ -579,17 +592,33 @@ export default function (pi: ExtensionAPI) {
 					.filter((a): a is AgentConfig => a?.source === "project");
 
 				if (projectAgentsRequested.length > 0) {
+					const mode = hasChain ? "chain" : hasTasks ? "parallel" : "single";
 					const names = projectAgentsRequested.map((a) => a.name).join(", ");
 					const dir = discovery.projectAgentsDir ?? "(unknown)";
-					const ok = await ctx.ui.confirm(
-						"Run project-local agents?",
-						`Agents: ${names}\nSource: ${dir}\n\nProject agents are repo-controlled. Only continue for trusted repositories.`,
-					);
-					if (!ok)
+					if (ctx.hasUI) {
+						const describe = (a: AgentConfig) =>
+							`- ${a.name}: tools=${a.tools?.join(",") ?? "(Pi default)"}, model=${invocationModelFor(params, a) ?? "(Pi default)"}, thinking=${invocationThinkingFor(params, a) ?? "(Pi default)"}`;
+						const ok = await ctx.ui.confirm(
+							"Run project-local agents?",
+							`Agents:\n${projectAgentsRequested.map(describe).join("\n")}\nSource: ${dir}\n\nProject agents are repo-controlled. Only continue for trusted repositories.`,
+						);
+						if (!ok)
+							return {
+								content: [{ type: "text", text: "Canceled: project-local agents not approved." }],
+								details: makeDetails(mode)([]),
+							};
+					} else if (process.env.PI_SUBAGENT_ALLOW_PROJECT_AGENTS !== "1") {
 						return {
-							content: [{ type: "text", text: "Canceled: project-local agents not approved." }],
-							details: makeDetails(hasChain ? "chain" : hasTasks ? "parallel" : "single")([]),
+							content: [
+								{
+									type: "text",
+									text: `Refused: project-local agents (${names}) need interactive approval; none is available. The operator can set PI_SUBAGENT_ALLOW_PROJECT_AGENTS=1 to allow them headless.`,
+								},
+							],
+							details: makeDetails(mode)([]),
+							isError: true,
 						};
+					}
 				}
 			}
 
