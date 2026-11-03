@@ -768,8 +768,16 @@ RO_GIT_HELPER_KEYS = re.compile(
     # a partial (blobless) clone fetches missing objects lazily, which runs the transport and its helpers
     r"|core\.sshcommand|core\.gitproxy|core\.askpass|credential\.(.+\.)?helper|remote\..+\.(uploadpack|receivepack)"
     # config-based hooks (git 2.54+): `hook.<name>.command` runs on `hook.<name>.event`, e.g. post-index-change
-    r"|hook\..+\.command",
+    r"|hook\..+\.command"
+    # `git <cmd> --help` viewers (refused as arguments too, judged here in case a path reaches one)
+    r"|man\..+\.(cmd|path)|man\.viewer|help\.browser|web\.browser|browser\..+\.(cmd|path)|instaweb\..+",
     re.IGNORECASE)
+# Programs a git helper command may start with (the operator's usual helpers, none of which runs the file
+# or text it is given as code): git's own `git-*` helpers (git-lfs, git-credential-*, a signing wrapper),
+# the gh/ssh/gpg families, credential-helper short names, and true/false/cat.
+RO_HELPER_PROGRAMS = re.compile(
+    r"git-[A-Za-z0-9_.+-]+|gh|ssh|ssh-keygen|ssh-add|gpg|gpg2|gpgsm|true|false|cat|osxkeychain|cache|store|manager"
+    r"|manager-core|libsecret|wincred|credential-[A-Za-z0-9_-]+")
 # Programs that run their arguments as code or hand them to another program: a helper command starting
 # with one is refused whatever its words look like (a `-c` string or script name is no path to inspect).
 RO_INTERPRETER = re.compile(
@@ -805,6 +813,11 @@ def ro_helper_value_ok(value, root):
     if not words:
         return False
     first = os.path.expanduser(words[0])
+    if not RO_HELPER_PROGRAMS.fullmatch(os.path.basename(first)):
+        # an absolute path is no proof of a harmless program: `/usr/bin/tclsh` or `m4` as a textconv runs
+        # the file git hands it. Only programs known to be helpers (not interpreters) pass; extend the list
+        # for an operator's own helper.
+        return False
     if "=" in first or first.startswith("-") or ("/" in first and not os.path.isabs(first)):
         return False  # a leading assignment, an option, or a relative program path
     for i, word in enumerate(words):
@@ -1007,6 +1020,11 @@ def ro_segment(words, cwd, depth):
         while len(args) >= 2 and args[0] == "-C":
             base = os.path.join(base, args[1]) if base else None
             args = args[2:]
+        # `git log --help` runs man.<viewer>.cmd / the browser: any help request is refused (git matches
+        # `--help` and its prefixes, `-h` is usage); no read needs one
+        if any(x == "-h" or (x.startswith("--h") and not x.startswith("--hidden")) for x in args[1:]
+               if x != "--"):
+            return False
         return (bool(args) and args[0] in RO_GIT and base is not None and not ro_long_bad(args[1:], "git")
                 and not ro_short_bad(args[1:]) and ro_git_repo_ok(base))
     if ro_long_bad(args, name):
@@ -1120,7 +1138,8 @@ def denial_continue_text(perm, denial):
 # (2026-10-31: "claude-fable-5-1 declined this request (cyber); retried with claude-opus-4-8."); the
 # chunk is the whole message. acp-run logs it as a `fallback` row so acp-dispatch records who answered.
 MODEL_FALLBACK_RE = re.compile(
-    r"\s*\*\*Model fallback:\*\*\s*(\S+) declined this request \(([^)]*)\); retried with (\S+?)\.(?:\s|$)")
+    r"\s*\*\*Model fallback:\*\*\s*(\S+) declined this request \(([^)]*)\); retried with (\S+?)\."
+    r"(?:\s+The session will continue on \S+?\.)?\s*")
 
 
 def tripwire_exempt_kinds(agent, perm, extra=""):
@@ -2566,9 +2585,12 @@ class RunClient(Client):
             # it is UI chrome, not the answer.
             if str(dump(update).get("messageId") or "").startswith("turninfo_"):
                 return
-            fb = MODEL_FALLBACK_RE.match(update.content.text)
+            # the notice is a chunk of its own; text the agent typed that merely quotes it (or continues
+            # after it) does not match as a whole. It is still the agent's message stream, so the row says
+            # `verified: False`: nothing in ACP proves the adapter, not the model, wrote it.
+            fb = MODEL_FALLBACK_RE.fullmatch(update.content.text)
             if fb and not self.fallback:
-                self.fallback = {"from": fb.group(1), "reason": fb.group(2), "to": fb.group(3)}
+                self.fallback = {"from": fb.group(1), "reason": fb.group(2), "to": fb.group(3), "verified": False}
                 self.rec("fallback", self.fallback)
                 print(f"acp-run: model fallback: {fb.group(1)} declined ({fb.group(2)}); answered by"
                       f" {fb.group(3)}", file=sys.stderr)

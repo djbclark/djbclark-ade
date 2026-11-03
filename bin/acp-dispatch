@@ -1921,7 +1921,10 @@ def applied_model(rec: dict) -> str | None:
 def model_fallback(rec: dict) -> dict | None:
     """{"from", "reason", "to"} of the model switch acp-run logged as a `fallback` row (the session's
     model declined the request and another answered, 2026-10-31: Fable's cyber safeguard, answered by
-    claude-opus-4-8), else None. Old logs have no row."""
+    claude-opus-4-8), else None. Old logs have no row. Only a claude slice can have one (the notice is
+    claude-agent-acp's); the row is `verified: False`, since it is read from the message stream."""
+    if rec.get("agent") != "claude":
+        return None
     found = None
     try:
         with Path(rec["log"]).open() as log:
@@ -1935,7 +1938,7 @@ def model_fallback(rec: dict) -> dict | None:
                 data = row.get("data") or {}
                 if row.get("kind") == "fallback" and data.get("to"):
                     found = {"from": str(data.get("from") or ""), "reason": str(data.get("reason") or ""),
-                             "to": str(data["to"])}
+                             "to": str(data["to"]), "verified": bool(data.get("verified"))}
     except (FileNotFoundError, KeyError, TypeError, OSError):
         pass
     return found
@@ -3612,8 +3615,8 @@ def check_record(path: Path) -> tuple[str, str, str, str]:
         det = f"{det}; {moved}" if det else moved
     if rec.get("answered_model"):
         asked = rec.get("fallback_from") or rec.get("model_applied") or rec.get("model") or "?"
-        answered = (f"ANSWERED BY {rec['answered_model']}, not {asked}"
-                    f" (model fallback: {rec.get('fallback_reason') or 'declined'})")
+        answered = (f"REPORTED ANSWERED BY {rec['answered_model']}, not {asked} (a model-fallback notice in the"
+                    f" agent's message stream, unverified: {rec.get('fallback_reason') or 'declined'})")
         det = f"{det}; {answered}" if det else answered
     msgs = inbox_messages(path)
     if msgs:
