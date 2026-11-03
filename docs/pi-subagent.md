@@ -13,15 +13,23 @@ independently, per child:
 
 1. the invocation value;
 2. the agent profile frontmatter (`model:`, `thinking:`), e.g. `frontier-astra` has
-   `model: openai/gpt-6-astra:high`, `thinking: high`; `astra-worker` is the write-capable twin;
+   `model: openai/gpt-6-astra:high`, `thinking: high`; `astra-worker` has the same model and thinking but a wider tool set (`read, bash, edit, write` against `read, bash, write`, so it can edit files, not only write a report) and is restricted by its prompt to one claimed workspace;
 3. Pi's own default (the flag is then omitted; the parent's model is not inherited).
 
 The chosen values are passed as `--model` / `--thinking` and reported in the tool output
 (`model=..., thinking=...`; `default` means Pi's default) and in `details.results[].selectedConfig`.
 Model IDs are passed through untouched, so `provider/model`, nested namespaces
 (`openai/gpt-6-astra`) and the `:high` suffix form work as Pi defines them; an explicit `thinking`
-beats a suffix. Invalid values (empty model, unknown effort, bad frontmatter) fail that child
-before any process starts. Top-level `model`/`thinking` with `tasks` or `chain` is rejected; put
+beats a suffix. A frontmatter `thinking` also beats a `:suffix` on an invocation `model`
+(`{model: "x/y:low"}` with frontmatter `thinking: high` runs at high), so to change effort
+for one call, pass the `thinking` parameter, not a suffix.
+
+Invalid values (empty model, unknown effort) fail that child before any process starts. A
+malformed frontmatter `model:`/`thinking:` fails the agent only for the field the invocation
+does not set: an invocation `thinking` makes a bad frontmatter `thinking` irrelevant, and the
+same for `model`. In chain mode every step's agent and configuration is checked first
+("Chain not started: step N ..."), so a bad later step stops the chain before any earlier,
+possibly write-capable, step runs. Top-level `model`/`thinking` with `tasks` or `chain` is rejected; put
 them on each item. Example: `{agent: "frontier-astra", task: "...", thinking: "xhigh"}`.
 
 ## Install

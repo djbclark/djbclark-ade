@@ -29,7 +29,7 @@ import {
 import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { type AgentConfig, type AgentScope, discoverAgents } from "./agents.ts";
-import { ConfigProperties, configError, selectConfig, type SelectedConfig } from "./config.ts";
+import { ConfigProperties, configError, effectiveConfigError, selectConfig, type SelectedConfig } from "./config.ts";
 
 const MAX_PARALLEL_TASKS = 8;
 const MAX_CONCURRENCY = 4;
@@ -290,7 +290,7 @@ async function runSingleAgent(
 ): Promise<SingleResult> {
 	const agent = agents.find((a) => a.name === agentName);
 	const selectedConfig = selectConfig(invocationConfig, agent);
-	const invalidConfig = configError(invocationConfig) ?? agent?.configError;
+	const invalidConfig = effectiveConfigError(invocationConfig, agent?.configErrors);
 
 	if (!agent || invalidConfig) {
 		const available = agents.map((a) => `"${a.name}"`).join(", ") || "none";
@@ -572,6 +572,20 @@ export default function (pi: ExtensionAPI) {
 			if (params.chain && params.chain.length > 0) {
 				const results: SingleResult[] = [];
 				let previousOutput = "";
+
+				// Pre-pass: a bad later step must fail the chain before any earlier (possibly write-capable) step runs.
+				for (let i = 0; i < params.chain.length; i++) {
+					const step = params.chain[i];
+					const agent = agents.find((a) => a.name === step.agent);
+					if (agent && !effectiveConfigError(step, agent.configErrors)) continue;
+					const bad = await runSingleAgent(ctx.cwd, agents, step.agent, step.task, step.cwd, i + 1, signal,
+						undefined, makeDetails("chain"), step);
+					return {
+						content: [{ type: "text", text: `Chain not started: step ${i + 1} (${step.agent}) invalid: ${getResultOutput(bad)}` }],
+						details: makeDetails("chain")([bad]),
+						isError: true,
+					};
+				}
 
 				for (let i = 0; i < params.chain.length; i++) {
 					const step = params.chain[i];

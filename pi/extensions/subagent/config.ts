@@ -20,15 +20,35 @@ export const ConfigProperties = {
 	})),
 };
 
+export interface ConfigErrors {
+	model?: string;
+	thinking?: string;
+}
+
 // Also validate at execution: tool_call hooks may mutate arguments after schema validation.
-export function configError(config: { model?: unknown; thinking?: unknown }): string | undefined {
+export function fieldErrors(config: { model?: unknown; thinking?: unknown }): ConfigErrors {
+	const errors: ConfigErrors = {};
 	if (config.model !== undefined && (typeof config.model !== "string" || !config.model.trim())) {
-		return "model must be a nonempty string";
+		errors.model = "model must be a nonempty string";
 	}
 	if (config.thinking !== undefined && !THINKING_LEVELS.includes(config.thinking as ThinkingLevel)) {
-		return `thinking must be one of: ${THINKING_LEVELS.join(", ")}`;
+		errors.thinking = `thinking must be one of: ${THINKING_LEVELS.join(", ")}`;
 	}
-	return undefined;
+	return errors;
+}
+
+export function configError(config: { model?: unknown; thinking?: unknown }): string | undefined {
+	const e = fieldErrors(config);
+	return e.model ?? e.thinking;
+}
+
+/** Errors that matter: an agent's bad frontmatter field is moot when the invocation overrides that field. */
+export function effectiveConfigError(invocation: SelectedConfig, agentErrors?: ConfigErrors): string | undefined {
+	const own = configError(invocation);
+	if (own) return own;
+	const model = invocation.model === undefined ? agentErrors?.model : undefined;
+	const thinking = invocation.thinking === undefined ? agentErrors?.thinking : undefined;
+	return model ?? thinking;
 }
 
 export function selectConfig(invocation: SelectedConfig, agent?: SelectedConfig): SelectedConfig {

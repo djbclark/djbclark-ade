@@ -129,6 +129,29 @@ if (process.argv.includes("--mode")) {
 		assert.equal(records().length, 0);
 		cases++;
 	}
+	// Bad frontmatter is moot for a field the invocation overrides (invocation > frontmatter), fatal otherwise.
+	for (const mode of ["single", "parallel", "chain"]) {
+		await verify(mode, { agent: "invalid-3", thinking: "low" }, { model: undefined, thinking: "low" });
+		await verify(mode, { agent: "invalid-1", model: "openai/gpt-6-astra" }, { model: "openai/gpt-6-astra", thinking: undefined });
+		await verify(mode, { agent: "invalid-0", model: "local/ok" }, { model: "local/ok", thinking: undefined });
+		for (const item of [{ agent: "invalid-3", model: "local/ok" }, { agent: "invalid-1", thinking: "low" }]) {
+			clear();
+			const result = await execute(wrap(mode, { task: "test", ...item }));
+			assert.ok(result.isError || result.details.results[0].exitCode === 1);
+			assert.match(result.content[0].text, /must be/);
+			assert.equal(records().length, 0);
+			cases++;
+		}
+	}
+	// Chain pre-pass: a bad later step fails the chain before any earlier step runs.
+	for (const bad of [{ agent: "invalid-3", task: "b" }, { agent: "missing", task: "b" }, { agent: "plain", task: "b", thinking: "turbo" }]) {
+		clear();
+		const result = await execute({ chain: [{ agent: "plain", task: "a" }, bad] });
+		assert.equal(result.isError, true);
+		assert.match(result.content[0].text, /Chain not started: step 2/);
+		assert.equal(records().length, 0);
+		cases++;
+	}
 	// Actual schema rejects missing nested required fields. Mode validation handles empty/mixed calls.
 	for (const params of [{ tasks: [{ task: "test" }] }, { chain: [{ agent: "plain" }] }]) {
 		assert.equal(Check(tool.parameters, params), false); cases++;
