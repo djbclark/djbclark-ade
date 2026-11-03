@@ -42,6 +42,6 @@ History prints shell-quoted `pi --session <absolute file>` commands: Pi resumes 
 file in its recorded working directory, without directory-sensitive ID lookup or a
 custom-root environment dependency. Missing working directories retain Pi's native
 interactive prompt. History JSON includes `sessionKey`. Exact Pi liveness requires
-matching files, or a full ID plus project cwd when fleet has no file; an ID alone
-never suffices. A file known to differ never falls back to the ID. Cwd-only evidence
+matching absolute session files; a full ID plus project cwd names no storage root, so it
+stays `LIVE?` (and never hides another root's history). An ID alone never suffices. A file known to differ never falls back to the ID. Cwd-only evidence
 remains the weaker `LIVE?` label.

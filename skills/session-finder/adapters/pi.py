@@ -70,7 +70,7 @@ def sessions():
     if os.environ.get("PI_CODING_AGENT_SESSION_DIR"):
         root = Path(os.environ["PI_CODING_AGENT_SESSION_DIR"]).expanduser()
     for path in (*root.glob("*.jsonl"), *root.glob("*/*.jsonl")):
-        if path.is_symlink() or path.parent.is_symlink():
+        if path.is_symlink() or path.parent != root and path.parent.is_symlink():
             continue
         try:
             stat = path.stat()

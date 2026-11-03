@@ -609,7 +609,7 @@ never ask the operator to press Enter as the normal delivery path.
    Adapters (2026-11-03): agy, claude, cline, codex, copilot, crush, cursor, goose, grok, hermes, muse,
    omp, opencode, pi, qwen, zcode and todo. Pi indexes native JSONL session text and titles;
    history resumes with shell-quoted `pi --session <absolute file>` in Pi's recorded cwd, including custom stores.
-   Pi keys are file-scoped (custom IDs may repeat across projects); exact-live matches require file or project identity.
+   Pi keys are file-scoped (custom IDs may repeat across projects); exact-live matches require an absolute session-file identity (2026-11-03); an ID plus project cwd names no storage root and stays `LIVE?`, never hiding another root's history.
    Native seats require stdin AND stdout on their controlling foreground terminal; inherited tmux metadata must name that
    same terminal. RPC/JSON/print workers, including implicit pipe-backed print mode, are excluded from seat discovery but
    remain agent ancestry boundaries. Unreadable terminal evidence fails closed (2026-11-03).

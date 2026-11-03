@@ -155,7 +155,6 @@ def test_session_find_all_keeps_other_root_history_for_live_id(tmp_path, monkeyp
 def test_pi_target_keeps_flag_kind(monkeypatch):
     import fleet
     assert fleet._pi_sid(["pi", "--session-id", "daily.jsonl"]) == "daily.jsonl"
-    assert fleet._pi_sid(["pi", "--session-id=daily.jsonl"]) == "daily.jsonl"
     assert fleet._pi_sid(["pi", "--session", "/abs/t_x.jsonl"]) == "/abs/t_x.jsonl"
     assert fleet._pi_sid(["pi", "--session", "abc12345"]) == "abc12345"
     # relative files depend on the launch cwd, which a scan cannot prove
@@ -173,3 +172,39 @@ def test_proc_scan_never_fabricates_file_identity(monkeypatch):
         monkeypatch.setattr(fleet, "_where", SimpleNamespace(env_of=lambda pid: {}, lookup=lambda *a: {"cwd": "/project"}))
         rows = fleet._proc_scan(set(), set(), {})
         assert rows[0]["sid"] == want
+
+
+def test_relative_pi_path_is_not_a_file_identity(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    assert history_identity("pi", "sessions/t_x.jsonl", "/p")[1] == "id"
+    assert history_identity("pi", "x", "/p", "pi:rel/t_x.jsonl")[1] == "id"
+
+
+def test_pi_sid_follows_pi_parser(tmp_path):
+    import fleet
+    assert fleet._pi_sid(["pi", "--session", "aaaa", "--session", "bbbb"]) == "bbbb"
+    assert fleet._pi_sid(["pi", "--session=bbbb"]) is None
+    assert fleet._pi_sid(["pi", "--session", "bbbb", "--no-session"]) is None
+    assert fleet._pi_sid(["pi", "--fork", "x", "--session", "bbbb"]) is None
+
+
+def test_lossy_ps_path_with_spaces_is_not_fabricated(tmp_path):
+    import fleet
+    real = tmp_path / "My Docs" / "t_x.jsonl"
+    real.parent.mkdir()
+    real.write_text("{}")
+    truncated = ["pi", "--session", str(tmp_path / "My")]
+    assert fleet._pi_sid(truncated, lossy=True) is None
+    assert fleet._pi_sid(["pi", "--session", str(real)], lossy=True) == str(real)
+    assert fleet._pi_sid(["pi", "--session", str(tmp_path / "gone.jsonl")], lossy=True) is None
+    assert fleet._pi_sid(["pi", "--session", str(tmp_path / "gone.jsonl")]) == str(tmp_path / "gone.jsonl")
+
+
+def test_flat_store_under_symlinked_root_is_indexed(tmp_path, monkeypatch):
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / "timestamp_flat_id.jsonl").write_text('{"type":"session","id":"flat_id"}\n')
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    monkeypatch.setenv("PI_CODING_AGENT_SESSION_DIR", str(link))
+    assert [s["sid"] for s in load("adapters/pi").sessions()] == ["flat_id"]

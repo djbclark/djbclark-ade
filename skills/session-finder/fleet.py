@@ -922,24 +922,29 @@ def _pi_terminal(pid):
                            and os.path.realpath(streams[fd]) == terminal for fd in (0, 1)) else ""
 
 
-def _pi_sid(argv):
+def _pi_sid(argv, lossy=False):
     """Full native ID or absolute file target; never inherit a parent's PI_SESSION_ID.
 
-    `--session-id` is always an ID (a dotted `daily.jsonl` is not a file). `--session` is an ID/prefix or a file;
-    a relative file is resolved by Pi against its launch cwd, which a scan cannot know (the session may have
-    switched cwd on resume), so it yields no identity rather than a fabricated one."""
+    Follows Pi's parser: the last `--session`/`--session-id` wins (a space-separated value; `--session=x` is
+    rejected by Pi), and `--no-session`/`--fork` mean no resumed identity. `--session-id` is always an ID (a
+    dotted `daily.jsonl` is not a file). A relative file is resolved by Pi against its launch cwd, which a scan
+    cannot know, so it yields no identity. `lossy` argv (shlex of `ps` text) loses spaces in paths: an absolute
+    value is then accepted only when it is an existing .jsonl file."""
+    flag = value = None
     for i, token in enumerate(argv):
         if token == "--":
             break
-        flag, sep, value = token.partition("=")
-        if flag in {"--session", "--session-id"}:
-            value = value if sep else (argv[i + 1] if i + 1 < len(argv) else None)
-            if not value:
-                return None
-            if flag == "--session-id":
-                return None if "/" in value else value
-            return value if os.path.isabs(value) or not ("/" in value or value.endswith(".jsonl")) else None
-    return None
+        if token in {"--no-session", "--fork"}:
+            return None
+        if token in {"--session", "--session-id"}:
+            flag, value = token, (argv[i + 1] if i + 1 < len(argv) else None)
+    if not value:
+        return None
+    if flag == "--session-id":
+        return None if "/" in value or lossy and not re.fullmatch(r"[\w.-]+", value) else value
+    if os.path.isabs(value):
+        return value if not lossy or value.endswith(".jsonl") and os.path.isfile(value) else None
+    return value if not ("/" in value or value.endswith(".jsonl")) else None
 
 
 def _native_extra(argv):
@@ -1053,7 +1058,7 @@ def _proc_scan(known_pids, known_panes, anc):
         if m:
             sid = m.group(1)
         if agent == "pi":
-            sid = _pi_sid(pi_argv)
+            sid = _pi_sid(pi_argv, lossy=True)
         s = _rec(id=f"pid{pid}", agent=agent, sid=sid, pid=pid, cwd=w.get("cwd", ""), where=w.get("where", ""),
                  focus=w.get("focus", ""), title=w.get("title", ""), self=pid in anc, host="terminal",
                  reach="no channel: use its focus command", status="unknown")
