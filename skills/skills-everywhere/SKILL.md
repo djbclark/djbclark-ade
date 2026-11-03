@@ -72,9 +72,27 @@ that a running TUI has reloaded its skills; start a new session when needed.
 Pi natively discovers `~/.agents/skills/`, so its target uses that shared directory,
 not a second set of links in `~/.pi/agent/skills/`. `SKILL_EVERYWHERE_ONLY=pi`
 works even if Codex is not installed. Existing independently installed Pi skills
-are preserved; this command does not remove duplicate skill copies. Diagnose
-startup collision warnings by comparing both copies before choosing which path
-to exclude or reconcile. Reload Pi after changing its skill resources.
+are preserved; this command does not remove duplicate skill copies.
+
+For collision warnings, use `~/src/djbclark-ade/bin/pi-skill-dedup plan --pair
+/ABS/NATIVE/SKILL-DIR /ABS/SHARED/SKILL-DIR` first. The helper compares bundle
+contents, full modes, ownership and current caller access (not a proof of runtime
+equivalence), proposes exact loading exclusions, and supports reviewed plan/apply
+and receipt-based reversal without deleting resources. Unsupported exclusion syntax
+such as file URLs is refused. Settings ACLs/xattrs, Linux inode flags (`chattr`), macOS file flags or
+replacement group changes also require manual review; unsupported platforms or
+filesystems refuse writes. Apply/undo requires an
+active runtime claim on the real settings file; a development workspace claim is
+not enough. Never apply live changes as part of a skill-link sweep.
+
+Project-local graft is separate: `plan --project /ABS/PROJECT` can exclude only
+an equivalent local graft copy, never global graft for every project. Differing
+project-specific graft bundles are refused, not silently hidden. Both project and
+global keeper filters are checked: explicit disabled project entries can shadow
+global auto-discovery. Read
+[`docs/pi-skills.md`](../../docs/pi-skills.md) for supported layouts, runtime
+claim/install commands, limitations and safe reversal. Reload Pi after an approved
+resource change and verify the actual retained catalog paths.
 
 ## Codex access diagnosis
 
