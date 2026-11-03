@@ -274,7 +274,7 @@ def fleet_running(agents):
             # an exited ACP launch stays in launches.jsonl with status idle: fleet marks it finished
             if r.get("finished") or r.get("ended") or (r.get("launch") or {}).get("result") is not None:
                 continue
-            sid = (r.get("transcript") or r.get("sid")) if r["agent"] == "pi" else r.get("sid")
+            sid = (r.get("transcript") or r.get("sid")) if r["agent"] in ("pi", "omp") else r.get("sid")
             ident = history_identity(r["agent"], sid, r.get("cwd") or "") if sid else None
             # A Pi ID (+cwd) does not name a storage root: only a file identity is exact; the rest stays LIVE?
             if ident and (r["agent"] != "pi" or ident[1] == "file"):
@@ -398,7 +398,8 @@ def _main() -> int:
     from nativeid import history_identity
     for (key, rank, role, snip, count), (agent, sid, cwd, title, mtime) in picked:
         exact = sid in leased.get(agent, ())
-        is_live = exact or sid in live.get(agent, set()) or history_identity(agent, sid, cwd, key) in fl_exact
+        is_live = (exact or sid in live.get(agent, set()) or history_identity(agent, sid, cwd, key) in fl_exact
+                   or (agent == "omp" and (agent, sid) in fl_exact))  # an omp fleet row with no transcript path: the id alone
         likely = not is_live and (sid in unsure.get(agent, ()) or (
             agent in blind and (agent, cwd) in fl_cwds and time.time() - mtime < 600))
         out.append({"agent": agent, "sessionId": sid, "sessionKey": key, "live": is_live,

@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from nativeid import native_id, history_identity, omp_native_id  # noqa: E402
+from nativeid import native_id, history_identity  # noqa: E402
 import claude_identity  # noqa: E402
 import where as _where  # noqa: E402
 
@@ -204,7 +204,8 @@ def main() -> int:
             # ID+cwd is not a storage root: only file identities may merge fleet rows with, or hide, history hits
             return ident if ident[1] == "file" else ident + (id(row),)
         if row.get("agent") == "omp":
-            return omp_native_id(sid)  # a transcript path with a header id (`daily.jsonl`) is the id the history adapter reports
+            # the file when a transcript path is known (the same id lives in more than one store), else the id the history reports
+            return history_identity("omp", row.get("transcript") or sid, row.get("cwd") or "", row.get("sessionKey") or "")
         return native_id(sid)  # preserve the other families' existing matching contract
 
     exited_ids = set()
@@ -236,6 +237,12 @@ def main() -> int:
         # (ids compared as the history adapters report them: an omp fleet row's id is a transcript path)
         live_ids = {identity(r) for r in rows if identity(r) not in exited_ids}
         exited = {identity(r): r for r in rows if identity(r) in exited_ids}
+
+        def joined(h, table):
+            """What TABLE (keyed by identity) holds for history hit H: its own identity, or for an omp hit the bare id, which is how
+            a fleet row that carries no transcript path is keyed."""
+            ident = identity(h)
+            return table[ident] if ident in table else table.get(("omp", h["sessionId"])) if h.get("agent") == "omp" else None
         try:
             r = subprocess.run([sys.executable, "-I", str(Path(__file__).resolve().parent / "session-history.py"), "--json",
                                 "--limit", "80", "--", *a.keywords], capture_output=True, text=True, timeout=600, check=False)
@@ -251,17 +258,24 @@ def main() -> int:
             found = []
         # asked for 80, not 20: live sessions are dropped below, and must not crowd out the ended hits
         found = [f for f in found if isinstance(f, dict) and f.get("sessionId")]
-        for i, h in enumerate(f for f in found if identity(f) not in live_ids and not f.get("live")):
-            row = exited.get(identity(h))
+        # A hit the history calls live (an omp session a running omp holds, per `omp session lease`) is dropped only when a fleet row
+        # is that session; with none it is listed with the hit's own fields (no pid). An open todo note is `live` too and stays unlisted.
+        live_table = {k: True for k in live_ids}
+        for i, h in enumerate(f for f in found if not joined(f, live_table)):
+            row = joined(h, exited)
             if row:
                 row["score"] = max(row["score"], max(1, 40 - i))
                 row["match"] = h.get("snippet") or row["match"]  # why it matched, not the fleet's delivery hint
                 row["resume"] = h.get("resume", "")
                 continue
-            rows.append({"name": None, "pid": None, "sessionId": h["sessionId"], "status": "ended", "cwd": h.get("cwd") or None,
+            if h.get("live") and h.get("agent") == "todo":
+                continue
+            running = bool(h.get("live"))
+            rows.append({"name": None, "pid": None, "sessionId": h["sessionId"], "status": h.get("state") if running else "ended",
+                         "state": h.get("state"), "cwd": h.get("cwd") or None,
                          "titles": [h["title"]] if h.get("title") else [], "score": max(1, 40 - i), "match": h.get("snippet", ""),
-                         "live": False, "self": False, "agent": h.get("agent", ""), "finished": "",
-                         "where": None, "resume": h.get("resume", "")})
+                         "live": running, "self": False, "agent": h.get("agent", ""), "finished": "",
+                         "where": None, "resume": "" if running else h.get("resume", "")})
 
     if a.list:
         hits = rows

@@ -33,6 +33,12 @@ def omp_native_id(sid) -> str:
 def history_identity(agent, sid, cwd="", key=""):
     """Pi custom IDs are project-local. Prefer file identity when it is available."""
     if agent == "omp":
+        # A native omp id repeats across stores (the default one and a profile): with a transcript path (a history key, a fleet row's
+        # id) the identity is that file, as for Pi; an id alone is only the fallback when no path exists.
+        path = key[4:] if key.startswith("omp:/") else str(sid) if "/" in str(sid) else ""
+        if path and os.path.isabs(path):
+            file = Path(path)
+            return (agent, "file", str((file if file.suffix == ".jsonl" else file.with_name(file.name + ".jsonl")).expanduser().resolve()))
         return (agent, omp_native_id(sid))
     if agent != "pi":
         return (agent, native_id(sid))
