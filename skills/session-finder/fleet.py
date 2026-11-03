@@ -875,15 +875,20 @@ def _hermes_native(argv):
 
 # Native TUIs herdr does not detect that PROC_AGENTS (which `_proc_scan` also reads) must not take: recognised by exact argv only.
 def _pi_executable(argv0, argv):
-    """A Pi process is the `pi` executable itself, or node/bun running a script named `pi` (or Pi's `cli.js` entry): a
-    `pi` argument of another program (`vim pi`) does not make that program a Pi seat."""
+    """A Pi process is the `pi` executable itself, or node/bun running a script named `pi` (or Pi's `cli.js` entry, the
+    `@earendil-works/pi-coding-agent` package): a `pi` argument of another program (`vim pi`) does not make that program
+    a Pi seat, and neither does the npm-installed OMP (`@oh-my-pi/pi-coding-agent/dist/cli.js`), which shares the package name."""
     exe = os.path.basename(argv0 or (argv[0] if argv else ""))
     if exe == "pi":
         return True
     if exe in {"node", "nodejs", "bun"} and len(argv) > 1:
         script = argv[1]
+        parts = script.split("/")
+        if "@oh-my-pi" in parts:
+            return False
         return os.path.basename(script) == "pi" or (
-            os.path.basename(script) == "cli.js" and "pi-coding-agent" in script.split("/"))
+            os.path.basename(script) == "cli.js"
+            and any(a == "@earendil-works" and b == "pi-coding-agent" for a, b in zip(parts, parts[1:])))
     return False
 
 

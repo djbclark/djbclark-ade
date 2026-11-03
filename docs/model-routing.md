@@ -139,18 +139,36 @@ Dispatch refuses unsupported, absent, stale, unknown or exhausted Pi capacity
 with exit 5 (`unavailable/headroom`) before any paid preflight or task. The minimum
 is the greater of 1%, the Pi profile's `reserve_floor`, and `--min-headroom`.
 This measurement gate also applies to dry runs, resumes, legacy records and route
-overrides; `--no-preflight` and `--min-headroom 0` cannot disable it. Pass-through
-`--acp-arg` values that could replace the billed model or the Pi process's credentials, endpoint,
-binary or config dir (`--model`, `--set`, `--meta`, `--agent-arg`, `--agent-env`, `--auth`, their `=`
-forms and prefixes such as `--mod`) are refused for Pi before any probe, and the runner refuses a stored
-command line carrying one or lacking its own `--model` (2026-11-03). Operator-side `ACP_RUN_ENV_PI`,
-`ACP_RUN_ARGS_PI` and `~/.config/acp-run.env` (`ACP_RUN_ENV_FILE`) are not dispatch inputs and are
-not covered by this guard. A resumed Pi record keeps the
+overrides; `--no-preflight` and `--min-headroom 0` cannot disable it. The pass-through contract below covers Pi
+like every agent. Operator-side `ACP_RUN_ENV_PI`, `ACP_RUN_ARGS_PI` and `~/.config/acp-run.env`
+(`ACP_RUN_ENV_FILE`) are not dispatch inputs and are not covered by it. A resumed Pi record keeps the
 minimum it was admitted under (resume: at least 10%) and the runner rechecks that number. Initial
 admission and the runner's post-load/post-capacity-wait checks bypass the quota
 memo and use the existing freshness-aware snapshot reader. Unknown capacity is
 not unlimited capacity; neither credentials nor a model catalog prove headroom.
 Other providers' admission policies are unchanged.
+
+**`--acp-arg` identity contract (2026-11-03):** admission and every gate (frontier, fable-xhigh,
+plenty, fallback, per-model pool, spend) judge `--model`, so a pass-through option that replaces it or the agent's
+credentials is not an admitted slice. For the **guarded** agents (`pi`, `omp`, `codex`, `claude`; every other agent is an
+explicit `unreviewed` row that still passes everything through) `acp-dispatch` refuses `--model`, `--meta`,
+`--agent-arg`, `--agent-env`, `--auth`, their `--opt=value` forms, abbreviations (`--mod`, `--agent-e`) and
+packed tokens (`'--model x'`), and `--set` unless its key is a reasoning-effort option (`effort`,
+`reasoning_effort`, `reasoning`, `thought`, `thought_level`, `thinking_level`). A dispatch refuses with exit 2
+before any gate, probe or record; the runner (`spawn_refusal`) refuses a stored command carrying a second
+`--model` or any of these, a stored `--model` that is not the admitted one, and a stored `acp_arg` carrying one
+(normal, deferred, resumed and legacy records alike) with exit 5 before spawning. `--effort`/`--context` are the
+first-class way to pick effort and window; `--tripwire-exempt-kinds`, `--resume`, `--session-id`, `--mode` and the
+other non-identity options still pass. A caller that truly needs a replacement runs `acp-run` directly (omp's own
+guard there: `tools/acp-run/README.md`, `ACP_RUN_OMP_ANY_MODEL=1` is the operator-side override). The policy
+table, how to add an agent row and the per-TUI status are in `docs/agent-guard-contract.md`.
+
+**omp admission (2026-11-03):** `omp` is mapped to its own aiuse `omp` pool (Claude API credits) in both maps
+(`acp-dispatch` and `route_agent.map_agent_to_provider`), so the record carries `service: omp`, `--min-headroom`
+and the in-flight reservation judge it, and `reroute`/`--escalate` exclude it. With no fresh omp reading the
+slice is admitted: like every ordinary pool and the planner's `pool_usable`, only a reserve (`reserve_floor`) or a
+fallback-only pool fails closed. A measured reading below the record's `min_headroom` refuses (exit 5), for a
+resumed or legacy record too, in the runner's recheck after the load and capacity waits.
 
 **How `bin/route_agent.py` reads pool state (2026-10-20):** it runs `aiuse --available --json`
 (argv list, 20 s timeout, exit 0 or 3 accepted), not the snapshot file, so routing and the
@@ -283,7 +301,8 @@ class `config`, exit 1. `acp-dispatch` takes `--effort` and `--context` as
 first-class flags (checked with the model before the job is written, stored on
 the record, kept by `resume`):
 `acp-dispatch <agent> --model M --kind K --effort high --context 500k`. `--acp-arg`
-still forwards other flags; a dash-leading value needs `--acp-arg=--meta`.
+still forwards other flags except the identity-changing ones (see the contract above); a dash-leading value
+needs `--acp-arg=--tripwire-exempt-kinds`.
 
 **A quota stop is resumed in place, automatically** (operator 2026-10-18: a
 session's thinking is work; three codex slices stopped by the 5-hour limit were
