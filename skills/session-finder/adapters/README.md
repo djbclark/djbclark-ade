@@ -8,11 +8,13 @@ One file per agent. Contract (the core, `session-history.py`, loads every `*.py`
                "sid": "<native session id>",
                "fp": "<size:mtime or row count>",   # changes iff the session changed
                "mtime": <epoch float>,    # last activity
+               "supersedes": ["old-key"], # optional migration: same-agent/id/cwd legacy rows retired after successful load
                "load": <callable>}        # -> (cwd, title, [(role, text), ...]); role is "user"|"assistant"
     def live() -> set[str]:               # optional: native sids that are running now
     def live_info() -> dict:              # optional, for messaging: sid -> {"pid", "procStart", "name"}
     RESUME = "codex resume {sid}"         # optional hint printed for ended sessions
                                           # (or a function (sid, cwd) -> command, already shell-quoted: crush.py)
+    RESUME_USES_KEY = True                # optional: pass the stable key instead of sid to RESUME (Pi file targets)
     LIVE_LABEL, ENDED_LABEL = "OPEN", "closed"   # optional: what to print instead of LIVE/ended
     ROOT_ENV = ("CODEX_HOME",)            # REQUIRED if the adapter reads an environment variable to find its store:
                                           # `--install` copies those variables (when set) into the launchd job
@@ -29,4 +31,17 @@ Pi (`pi.py`, added 2026-11-03) reads native JSONL under `~/.pi/agent/sessions`,
 or the `PI_CODING_AGENT_DIR` / `PI_CODING_AGENT_SESSION_DIR` overrides. Only user
 and assistant text is indexed; thinking and tool output are excluded. The most
 recent nonempty `session_info` name supplies the title. Listing is stat-only
-and skips symlink session files/directories. Resume with `pi --session ID`.
+and skips symlink session files/directories. As of 2026-11-03, keys are
+`pi:<canonical absolute session file>`; the native ID is retained separately, including
+underscores. Flat custom stores and project-grouped stores are supported. Successful
+indexing retires a same-project former `pi:<id>` key; other-project orphans are preserved.
+An orphan legacy key cannot produce a safe
+resume hint. No native session file is modified.
+
+History prints shell-quoted `pi --session <absolute file>` commands: Pi resumes that
+file in its recorded working directory, without directory-sensitive ID lookup or a
+custom-root environment dependency. Missing working directories retain Pi's native
+interactive prompt. History JSON includes `sessionKey`. Exact Pi liveness requires
+matching absolute session files; a full ID plus project cwd names no storage root, so it
+stays `LIVE?` (and never hides another root's history). An ID alone never suffices. A file known to differ never falls back to the ID. Cwd-only evidence
+remains the weaker `LIVE?` label.

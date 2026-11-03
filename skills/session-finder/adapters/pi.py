@@ -6,11 +6,20 @@ Session names are append-only session_info records; the last nonempty name wins.
 import json
 import os
 import re
+import shlex
 from pathlib import Path
 
 AGENT = "pi"
 ROOT_ENV = ("PI_CODING_AGENT_DIR", "PI_CODING_AGENT_SESSION_DIR")
-RESUME = "pi --session {sid}"
+RESUME_USES_KEY = True
+
+
+def RESUME(key, cwd):
+    # File targets bypass directory-sensitive ID lookup, including custom roots.
+    # Pi restores the recorded cwd itself; a missing cwd gets Pi's normal prompt.
+    return shlex.join(["pi", "--session", key[3:]]) if key.startswith("pi:/") else ""
+
+
 ROOT = Path.home() / ".pi/agent/sessions"
 SID = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?")
 
@@ -60,8 +69,8 @@ def sessions():
     root = Path(configured).expanduser() / "sessions" if configured else ROOT
     if os.environ.get("PI_CODING_AGENT_SESSION_DIR"):
         root = Path(os.environ["PI_CODING_AGENT_SESSION_DIR"]).expanduser()
-    for path in root.glob("*/*.jsonl"):
-        if path.is_symlink() or path.parent.is_symlink():
+    for path in (*root.glob("*.jsonl"), *root.glob("*/*.jsonl")):
+        if path.is_symlink() or path.parent != root and path.parent.is_symlink():
             continue
         try:
             stat = path.stat()
@@ -72,6 +81,7 @@ def sessions():
         timestamp, separator, sid = path.stem.partition("_")
         if not timestamp or not separator or not SID.fullmatch(sid):
             continue
-        yield {"key": f"pi:{sid}", "sid": sid,
+        yield {"key": f"pi:{path.resolve()}", "sid": sid,
+               "supersedes": [f"pi:{sid}"],  # retire the old, globally colliding key after a successful load
                "fp": f"{stat.st_size}:{stat.st_mtime_ns}", "mtime": stat.st_mtime,
                "load": lambda p=path: _read(p)}
