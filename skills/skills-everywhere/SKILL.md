@@ -79,8 +79,9 @@ For collision warnings, use `~/src/djbclark-ade/bin/pi-skill-dedup plan --pair
 contents, full modes, ownership and current caller access (not a proof of runtime
 equivalence), proposes exact loading exclusions, and supports reviewed plan/apply
 and receipt-based reversal without deleting resources. Unsupported exclusion syntax
-such as file URLs is refused. Settings ACLs/xattrs or replacement group changes
-also require manual review. Apply/undo requires an
+such as file URLs is refused. Settings ACLs/xattrs, Linux inode flags (`chattr`), macOS file flags or
+replacement group changes also require manual review; unsupported platforms or
+filesystems refuse writes. Apply/undo requires an
 active runtime claim on the real settings file; a development workspace claim is
 not enough. Never apply live changes as part of a skill-link sweep.
 

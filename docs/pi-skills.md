@@ -86,9 +86,23 @@ Settings must be caller-owned, single-linked, and not group/world writable, with
 matching real/effective identities. Replacement refuses if the temporary file
 would change the owner/group (including setgid-parent group inheritance). It does
 not try to chown or copy security metadata: settings or temporary files with
-extended attributes, ACLs or file flags require manual review. Linux xattrs and
-Darwin's separate ACL marker are checked; an unreadable/unsupported metadata probe
-fails closed. Metadata is checked again before replacement. No guarantee is made
+extended attributes, ACLs or file flags require manual review. Metadata policy
+(2026-11-03), checked on the original and on the fresh temporary inode and again
+before replacement:
+
+- Linux: xattrs (`os.listxattr`, which covers POSIX ACLs) and inode flags via
+  `FS_IOC_GETFLAGS`. Any flag other than the filesystem-internal layout bits
+  (extents, inline data, huge file) is refused, e.g. `chattr +d` NODUMP, `+i`, `+a`,
+  `+C`, which an atomic replacement would silently drop. A filesystem that does not
+  support the ioctl fails closed (no apply/undo there).
+- macOS: xattrs through `os.listxattr` when Python has it, otherwise a size-only
+  `listxattr(2)` call through ctypes (never reads names/values); nonzero BSD
+  `st_flags`; and the separate ACL marker from a fixed-argv `/bin/ls -lde`. The
+  libc/ACL probe code has only been exercised by the real-macOS test run, never
+  proven by Linux mocks; any probe failure fails closed.
+- Other platforms: unsupported; apply/undo refuse every settings write.
+
+Metadata is checked again before replacement. No guarantee is made
 for concurrent metadata changes or directory-fsync/power-loss durability.
 Plan/receipt files use mode 0600; keep them private (they contain resource paths).
 No credentials

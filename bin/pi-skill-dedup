@@ -198,12 +198,63 @@ def make_plan(agent, project, requested):
             "pairs": verified, "additions": additions}
 
 
+# Linux inode flags that are filesystem-internal layout state, not user policy;
+# a fresh inode on the same filesystem gets them again. Every other bit
+# (immutable, append-only, NODUMP, NOCOW, compression, project inherit, ...) is
+# policy a replacement inode would silently lose, so any such bit is refused.
+LINUX_LAYOUT_FLAGS = 0x80000 | 0x10000000 | 0x40000000  # EXTENTS, INLINE_DATA, HUGE_FILE
+
+
+def linux_inode_flags(path):
+    """FS_IOC_GETFLAGS of a regular file; raises Refused when it cannot be read."""
+    try:
+        import ctypes
+        import fcntl
+        size = ctypes.sizeof(ctypes.c_long)
+        request = (2 << 30) | (size << 16) | (ord("f") << 8) | 1  # _IOR('f', 1, long)
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+        try:
+            buffer = bytearray(size)
+            fcntl.ioctl(fd, request, buffer, True)
+        finally:
+            os.close(fd)
+        return int.from_bytes(buffer, sys.byteorder)
+    except (OSError, ImportError, ValueError) as exc:
+        raise Refused("settings inode flags could not be verified") from exc
+
+
+def darwin_has_xattrs(path):
+    """True when any xattr exists; uses os.listxattr or libc, else refuses."""
+    if hasattr(os, "listxattr"):
+        return bool(os.listxattr(path))
+    try:
+        import ctypes
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.listxattr.restype = ctypes.c_ssize_t
+        libc.listxattr.argtypes = [ctypes.c_char_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
+        # XATTR_NOFOLLOW (1); size-only query, never reads attribute names/values.
+        size = libc.listxattr(os.fsencode(path), None, 0, 1)
+    except (OSError, AttributeError, ValueError) as exc:
+        raise Refused("settings extended attributes could not be verified") from exc
+    if size < 0:
+        raise Refused("settings extended attributes could not be verified")
+    return size > 0
+
+
 def plain_metadata(path):
     """Refuse metadata a replacement inode would lose; never copy ACLs blindly."""
-    if sys.platform not in ("linux", "darwin") or not hasattr(os, "listxattr"):
+    if sys.platform == "linux":
+        if not hasattr(os, "listxattr"):
+            raise Refused("cannot verify extended settings metadata on this platform")
+        if os.listxattr(path):
+            raise Refused("settings extended attributes/flags require manual review")
+        if linux_inode_flags(path) & ~LINUX_LAYOUT_FLAGS:
+            raise Refused("settings extended attributes/flags require manual review")
+    elif sys.platform == "darwin":
+        if darwin_has_xattrs(path) or getattr(os.stat(path), "st_flags", None) != 0:
+            raise Refused("settings extended attributes/flags require manual review")
+    else:
         raise Refused("cannot verify extended settings metadata on this platform")
-    if os.listxattr(path) or getattr(path.stat(), "st_flags", 0):
-        raise Refused("settings extended attributes/flags require manual review")
     if sys.platform == "darwin":
         # Darwin ACLs are separate from xattrs. ls -e marks any ACL with '+'.
         # Capture only: never expose filenames, ACL principals or settings values.

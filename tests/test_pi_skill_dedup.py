@@ -379,7 +379,7 @@ def test_same_modes_different_effective_access_or_ownership_are_not_equivalent(c
 def test_settings_extended_metadata_refused(case, monkeypatch, attribute, where):
     ns = runpy.run_path(str(TOOL))
     monkeypatch.setattr(os, "listxattr", lambda p: [attribute] if (
-        (Path(p) == case.settings) == (where == "original")) else [])
+        (Path(p) == case.settings) == (where == "original")) else [], raising=False)
     before = case.settings.read_bytes()
     with pytest.raises(ns["Refused"], match="extended attributes"):
         ns["atomic"](case.settings, b'changed', expected=before)
@@ -390,7 +390,8 @@ def test_settings_extended_metadata_refused(case, monkeypatch, attribute, where)
 def test_darwin_acl_probe_fails_closed(case, monkeypatch, mode, refused):
     ns = runpy.run_path(str(TOOL))
     monkeypatch.setattr(sys, "platform", "darwin")
-    monkeypatch.setattr(os, "listxattr", lambda p: [])
+    monkeypatch.setattr(os, "listxattr", lambda p: [], raising=False)
+    monkeypatch.setattr(os, "stat", lambda p: SimpleNamespace(st_flags=0))
     def probe(argv, **kwargs):
         assert argv == ["/bin/ls", "-lde", str(case.settings)]
         assert kwargs["capture_output"] and kwargs["env"]["LC_ALL"] == "C"
@@ -406,12 +407,84 @@ def test_darwin_acl_probe_fails_closed(case, monkeypatch, mode, refused):
 def test_darwin_acl_probe_timeout_refused(case, monkeypatch):
     ns = runpy.run_path(str(TOOL))
     monkeypatch.setattr(sys, "platform", "darwin")
-    monkeypatch.setattr(os, "listxattr", lambda p: [])
+    monkeypatch.setattr(os, "listxattr", lambda p: [], raising=False)
+    monkeypatch.setattr(os, "stat", lambda p: SimpleNamespace(st_flags=0))
     def timeout(argv, **kwargs):
         raise subprocess.TimeoutExpired(argv, 10)
     monkeypatch.setattr(subprocess, "run", timeout)
     with pytest.raises(ns["Refused"], match="ACL"):
         ns["plain_metadata"](case.settings)
+
+
+def linux_only():
+    if sys.platform != "linux":
+        pytest.skip("Linux inode-flag behavior is only exercised on Linux")
+
+
+@pytest.mark.parametrize("flags,refused", [(0, False), (0x80000, False), (0x40, True),
+                                           (0x10, True), (0x80000 | 0x800000, True)])
+@pytest.mark.parametrize("where", ["original", "temporary"])
+def test_linux_inode_flags_policy(case, monkeypatch, flags, refused, where):
+    linux_only()
+    ns = runpy.run_path(str(TOOL))
+    monkeypatch.setitem(ns["plain_metadata"].__globals__, "linux_inode_flags",
+                        lambda p: flags if (Path(p) == case.settings) == (where == "original") else 0)
+    before = case.settings.read_bytes()
+    if refused:
+        with pytest.raises(ns["Refused"], match="flags"):
+            ns["atomic"](case.settings, b'{"x":1}\n', expected=before)
+        assert case.settings.read_bytes() == before
+    else:
+        ns["atomic"](case.settings, b'{"x":1}\n', expected=before)
+        assert case.settings.read_bytes() == b'{"x":1}\n'
+
+
+def test_linux_inode_flag_probe_failure_refused(case, monkeypatch):
+    linux_only()
+    ns = runpy.run_path(str(TOOL))
+    import fcntl
+    def unsupported(*args):
+        raise OSError(25, "Inappropriate ioctl")
+    monkeypatch.setattr(fcntl, "ioctl", unsupported)
+    before = case.settings.read_bytes()
+    with pytest.raises(ns["Refused"], match="inode flags could not be verified"):
+        ns["atomic"](case.settings, b'{"x":1}\n', expected=before)
+    assert case.settings.read_bytes() == before
+
+
+def test_linux_real_probe_returns_integer(case):
+    linux_only()
+    ns = runpy.run_path(str(TOOL))
+    try:
+        flags = ns["linux_inode_flags"](case.settings)
+    except ns["Refused"]:
+        pytest.skip("filesystem does not support FS_IOC_GETFLAGS")
+    assert isinstance(flags, int) and flags >= 0
+
+
+def test_darwin_missing_xattr_api_uses_libc_or_refuses(case, monkeypatch):
+    ns = runpy.run_path(str(TOOL))
+    monkeypatch.delattr(os, "listxattr", raising=False)
+    if sys.platform == "darwin":
+        # Real native libc probe on a temp file (this is the only Darwin proof).
+        assert ns["darwin_has_xattrs"](case.settings) in (False, True)
+        return
+    import ctypes
+    def broken(*args, **kwargs):
+        raise OSError("no libc")
+    monkeypatch.setattr(ctypes, "CDLL", broken)
+    with pytest.raises(ns["Refused"], match="extended attributes could not be verified"):
+        ns["darwin_has_xattrs"](case.settings)
+
+
+def test_darwin_nonzero_or_missing_file_flags_refused(case, monkeypatch):
+    ns = runpy.run_path(str(TOOL))
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(os, "listxattr", lambda p: [], raising=False)
+    for info in (SimpleNamespace(st_flags=2), SimpleNamespace()):
+        monkeypatch.setattr(os, "stat", lambda p, info=info: info)
+        with pytest.raises(ns["Refused"], match="flags"):
+            ns["plain_metadata"](case.settings)
 
 
 def test_replacement_group_mismatch_refused(case, monkeypatch):
