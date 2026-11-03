@@ -111,7 +111,7 @@ class TestModelFallback(unittest.TestCase):
                 {"kind": "fallback", "data": {"from": "claude-fable-5-1", "reason": "cyber",
                                               "to": "claude-opus-4-8"}}])
             self.assertEqual(MOD.model_fallback(rec),
-                             {"from": "claude-fable-5-1", "reason": "cyber", "to": "claude-opus-4-8", "verified": False})
+                             {"from": "claude-fable-5-1", "reason": "cyber", "to": "claude-opus-4-8"})
 
     def test_only_a_claude_slice_can_have_a_fallback(self):
         with tempfile.TemporaryDirectory() as tmp:

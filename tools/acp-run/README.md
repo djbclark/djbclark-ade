@@ -33,12 +33,15 @@ acp-run codex -C ~/src/repo --interactive --inbox /tmp/codex-in   # a session yo
    `fetch`) run without a permission request and are answered yes if they ask;
    any other tool trips the tripwire (exit 77) and any other request is refused,
    except an `execute` request whose command line passes `readonly_command` (an
-   allow-list: cat, ls, rg, git log/show/diff, a plain `curl` GET, joined by `|` `&&` `;`;
-   it runs outside codex's sandbox, so the list refuses `#`, program paths outside
-   `/usr/bin` `/bin` `/opt/homebrew/bin`, long options that run a program (prefixes
-   included, `--` is no stop), unquoted globs, braces, `~` and backslashes, and `git` unless the request's cwd finds an
-   ordinary repository whose config (`git config --list`, env-injected keys included) names no diff/textconv/
-   filter/fsmonitor/gpg/hooksPath helper (`core.hooksPath` too: `git status` refreshes the index, which runs `post-index-change`) whose command has shell syntax or any word that is a relative path, inside the repo or a file of the tree; a helper that starts with an interpreter or wrapper (sh, python, env, ...) is refused; a `curl` needs a leading `-q` when ~/.curlrc exists and `rg` needs `--no-config` as its FIRST argument when RIPGREP_CONFIG_PATH is set; `git ... --help` is refused (it runs the man/browser viewer config); a helper is judged as an allow-list shape (program from a short known list: git-*, gh, ssh, gpg, true, ...; an absolute out-of-tree or bare program, no shell syntax, newline or leading assignment, no interpreter/launcher word anywhere, `=value` only absolute or digits) for git config (`hook.*.command`, `core.askPass` included) and for `GIT_SSH_COMMAND`/`GIT_SSH`/`GIT_PROXY_COMMAND`/`GIT_ASKPASS`/`SSH_ASKPASS`/`GIT_EXEC_PATH`, and so are relative sshCommand/gitProxy/credential/uploadpack helpers (a blobless clone fetches lazily); a `curl` GET can carry read data in its URL, as WebFetch can). When codex's
+   allow-list: cat, ls, rg, a plain `curl` GET, joined by `|` `&&` `;`; never `git`, `fd`, `file` or `graft`);
+   it runs outside codex's sandbox, so the list refuses `#`, unquoted globs, braces, `~` and backslashes, program
+   paths outside `/usr/bin` `/bin` `/opt/homebrew/bin`, long options that run a program (prefixes included, `--`
+   is no stop), `rg` without `--no-config` as its FIRST argument while RIPGREP_CONFIG_PATH is set and `curl`
+   without a leading `-q` while a curlrc exists (a `curl` GET can carry read data in its URL, as WebFetch can).
+   `git` is refused on purpose: a git read in codex's sandbox asks for nothing, so a request for git needs more
+   than the sandbox gives, and git then runs the repository's own config (diff.external, textconv, fsmonitor,
+   hooks, ssh/proxy/credential helpers, ext:: transports, submodule configs) as programs outside it; the agent
+   is told to go on without the call. When codex's
    only refusal option is `cancel` (it ends the turn), acp-run continues the same session up to 3 times (the exit check judges the last turn's words, not an earlier turn's "I will look next"; the summary line says `refusal_end=1` when the final turn ended on a refusal).
    claude gets a session whose built-in tools are only Read, Grep, Glob, LS,
    WebFetch and WebSearch (`_meta.claudeCode.options.tools`; no user settings, no

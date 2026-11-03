@@ -25,13 +25,6 @@ OBSERVED = ("/opt/homebrew/bin/bash -lc 'timeout 25 rtk curl -fsSL "
 READS = [
     OBSERVED,
     "rg -n 'foo' src | head -50",
-    "git log --oneline -5",
-    "git -C {REPO}/sub diff HEAD~1 -- a.py",
-    "git -C sub log -2",
-    "git log --oneline -3 -- README.md",
-    "git grep -n foo -- src",
-    "git diff --stat",
-    "git show HEAD:README.md",
     "tail -n 20 build.log",
     "cat a.txt >/dev/null 2>&1",
     "cat a.txt > /dev/null",
@@ -41,19 +34,13 @@ READS = [
     "rg 'a|b' src | head",
     "cat 'a b.txt'",
     "cat a '2'>/dev/null",
-    "git log --pretty=oneline -3",
-    "git log --pretty=format:%h -2",
-    "git ls-files --exclude-standard",
     "rg 'a.*b|c?' src",
     "rg \"fo[o]\" src",
-    "git grep -n 'fn (main|run)' -- src",
     "sed -n '1,200p' file.txt",
     "cat a.txt b.txt 2>/dev/null",
-    "ls -la && git status --short",
+    "ls -la && pwd",
     "/opt/homebrew/bin/bash -lc 'rg -n needle .'",
     "find . -name '*.py'",
-    "/usr/bin/git log -3",
-    "rtk git log -1",
     "sed -n '3,5p' file.txt",
 ]
 WRITES = [
@@ -157,18 +144,28 @@ WRITES = [
     "git diff --help",
     "git -C sub show -h",
     "git log --he",
+    # git is refused outright: each of these is a plain read that would run repository config as programs
+    "git log --oneline -5",
+    "git diff --stat",
+    "git status --short",
+    "git show HEAD:README.md",
+    "git grep -n foo -- src",
+    "git log --pretty=oneline -3",
+    "git -C sub log -2",
+    "/usr/bin/git log -3",
+    "rtk git log -1",
+    "ls -la && git status --short",
+    "git ls-files --exclude-standard",
+    "git blame README.md",
+    "git cat-file -p HEAD",
     "tail -f app.log",
     "tail -F app.log",
     "tail --follow app.log",
-    "git -C {REPO}/evil diff HEAD~1 HEAD",
+    "git -C evil diff HEAD~1 HEAD",
     "git -C evil status",
-    "git -C {NOREPO} log",
-    "git -C {REPO}/evil/objects log",
+    "git -C /tmp log",
+    "git -C evil/objects log",
 ]
-# the same commands judged with cwd inside the bare repository, and with no cwd at all
-EVIL_CWD = ["git diff", "git log", "git status"]
-OUTSIDE_CWD = ["git log", "git -C . diff"]
-
 
 def probe() -> dict[str, object]:
     code = textwrap.dedent("""\
@@ -179,154 +176,33 @@ def probe() -> dict[str, object]:
         import os, tempfile
         cases = json.load(sys.stdin)
         tmp = tempfile.mkdtemp(prefix="ro-denial-")
-        os.environ["HOME"] = os.path.join(tmp, "home"); os.makedirs(os.environ["HOME"])  # no ~/.curlrc, no global git config
-        for k in ("CURL_HOME", "XDG_CONFIG_HOME"):
+        os.environ["HOME"] = os.path.join(tmp, "home"); os.makedirs(os.environ["HOME"])  # no ~/.curlrc
+        for k in ("CURL_HOME", "XDG_CONFIG_HOME", "RIPGREP_CONFIG_PATH"):
             os.environ.pop(k, None)
-        REPO, NOREPO = os.path.join(tmp, "repo"), os.path.join(tmp, "norepo")
-        import subprocess
-        os.makedirs(os.path.join(REPO, "sub"))
-        subprocess.run(["git", "init", "-q", REPO], check=True)
-        os.makedirs(os.path.join(REPO, "evil", "objects")); os.makedirs(os.path.join(REPO, "evil", "refs"))
-        for f in ("HEAD", "config"):
-            open(os.path.join(REPO, "evil", f), "w").write("x")
-        os.makedirs(NOREPO)
-        fix = lambda c: c.replace("{REPO}", REPO).replace("{NOREPO}", NOREPO)
         out = {}
-        out["reads"] = [mod.readonly_command(fix(c), REPO) for c in cases["reads"]]
-        out["writes"] = [mod.readonly_command(fix(c), REPO) for c in cases["writes"]]
-        out["evil_cwd"] = [mod.readonly_command(c, os.path.join(REPO, "evil")) for c in cases["evil_cwd"]]
-        out["no_cwd"] = [mod.readonly_command(c, None) for c in cases["outside_cwd"]]
-        out["norepo_cwd"] = [mod.readonly_command(c, NOREPO) for c in cases["outside_cwd"]]
-        out["cat_no_cwd"] = mod.readonly_command("cat a.txt", None)
-        out["tool_cwd"] = [mod.tool_cwd(types.SimpleNamespace(raw_input={"cwd": REPO})),
-                           mod.tool_cwd(types.SimpleNamespace(raw_input={"cwd": "rel"})),
-                           mod.tool_cwd(types.SimpleNamespace(raw_input=None))]
-        out["repo"] = REPO
-        # a `.git` file: only a linked worktree / submodule gitdir outside the tree passes
-        def gitfile(name, target):
-            d = os.path.join(tmp, name); os.makedirs(d)
-            open(os.path.join(d, ".git"), "w").write("gitdir: " + target + "\\n")
-            return d
-        wt = os.path.join(tmp, "main", ".git", "worktrees", "w"); os.makedirs(wt)
-        evil_dir = os.path.join(tmp, "hostile"); os.makedirs(evil_dir)
-        inside = os.path.join(tmp, "gf-in"); os.makedirs(os.path.join(inside, "x"))
-        open(os.path.join(inside, ".git"), "w").write("gitdir: ./x\\n")
-        junk = os.path.join(tmp, "gf-junk"); os.makedirs(junk)
-        open(os.path.join(junk, ".git"), "w").write("junk")
-        out["gitfile"] = {
-            "worktree": mod.ro_git_dir_ok(gitfile("gf-ok", wt)) is not None,
-            "hostile_dir": mod.ro_git_dir_ok(gitfile("gf-evil", evil_dir)) is not None,
-            "inside_tree": mod.ro_git_dir_ok(inside) is not None,
-            "dangling": mod.ro_git_dir_ok(gitfile("gf-gone", os.path.join(tmp, "nope", ".git", "worktrees", "w"))) is not None,
-            "not_a_gitfile": mod.ro_git_dir_ok(junk) is not None}
-        # git config helpers: a helper key naming a tracked script (relative path, or a path inside the
-        # repo) is refused; the operator's own absolute or bare-name helpers are not
-        def conf_repo(name, *settings):
-            d = os.path.join(tmp, name)
-            subprocess.run(["git", "init", "-q", d], check=True)
-            open(os.path.join(d, "conv.py"), "w").write("")
-            for k, v in settings:
-                subprocess.run(["git", "-C", d, "config", k, v], check=True)
-            return mod.readonly_command("git diff HEAD~1", d)
-        out["git_config"] = {
-            "plain": conf_repo("c-plain"),
-            "external_relative": conf_repo("c-ext", ("diff.external", "./scripts/diff.sh")),
-            "external_inside": conf_repo("c-ext2", ("diff.external", os.path.join(tmp, "c-ext2", "x.sh"))),
-            "external_slash": conf_repo("c-ext3", ("diff.external", "tools/d")),
-            "textconv": conf_repo("c-tc", ("diff.py.textconv", "scripts/tc.sh")),
-            "command": conf_repo("c-cmd", ("diff.py.command", "./x")),
-            "fsmonitor": conf_repo("c-fs", ("core.fsmonitor", ".githooks/fsmon")),
-            "filter_clean": conf_repo("c-fc", ("filter.x.clean", "./clean.sh %f")),
-            "gpg_program": conf_repo("c-gpg", ("gpg.program", "bin/sign")),
-            "ssh_program": conf_repo("c-gpg2", ("gpg.ssh.program", "./sign")),
-            "interpreter_script": conf_repo("c-int", ("diff.py.textconv", "/bin/sh tools/convert.sh")),
-            "interpreter_bare_file": conf_repo("c-int2", ("diff.py.textconv", "python3 conv.py")),
-            "shell_syntax": conf_repo("c-sh", ("diff.external", "/usr/bin/true; ./x")),
-            "option_words_ok": conf_repo("c-opt", ("diff.external", "/usr/bin/true --flag")),
-            "hookspath_relative": conf_repo("c-hk", ("core.hooksPath", ".githooks")),
-            "hookspath_husky": conf_repo("c-hk2", ("core.hooksPath", ".husky/_")),
-            "hookspath_bare_word": conf_repo("c-hk3", ("core.hooksPath", "true")),
-            "hookspath_inside": conf_repo("c-hk4", ("core.hooksPath", os.path.join(tmp, "c-hk4", "hooks"))),
-            "hookspath_absolute_outside": conf_repo("c-hk5", ("core.hooksPath", "/usr/local/share/git-hooks")),
-            "alternate_refs": conf_repo("c-alt", ("core.alternateRefsCommand", "tools/refs.sh")),
-            "sh_dash_c": conf_repo("c-shc", ("diff.external", "/bin/sh -c 'sh payload'")),
-            "sh_script": conf_repo("c-shs", ("diff.py.textconv", "/bin/bash helper")),
-            "python_script": conf_repo("c-py", ("diff.py.textconv", "/usr/bin/python3 helper")),
-            "env_wrapper": conf_repo("c-envw", ("diff.py.textconv", "/usr/bin/env helper")),
-            "exec_path_value": conf_repo("c-ep", ("diff.py.textconv", "/usr/bin/true --exec-path=tools")),
-            "dash_c_value": conf_repo("c-dc", ("diff.py.textconv", "/usr/bin/true -c core.hooksPath=tools")),
-            "launcher_npx": conf_repo("c-npx", ("diff.py.textconv", "/opt/homebrew/bin/npx conv")),
-            "launcher_bundle": conf_repo("c-bun", ("diff.py.textconv", "/usr/bin/bundle exec conv")),
-            "ssh_command_relative": conf_repo("c-ssh", ("core.sshCommand", "tools/ssh")),
-            "git_proxy_relative": conf_repo("c-gp", ("core.gitProxy", "./proxy")),
-            "credential_relative": conf_repo("c-cr", ("credential.helper", "!./cred")),
-            "uploadpack_relative": conf_repo("c-up", ("remote.origin.uploadpack", "tools/up")),
-            "absolute_value_ok": conf_repo("c-av", ("diff.py.textconv", "/usr/bin/true --out=/tmp/x")),
-            "gh_credential_helper_ok": conf_repo("c-gh", ("credential.https://github.com.helper", "!/opt/homebrew/bin/gh auth git-credential"),
-                                                 ("credential.helper", "osxkeychain"), ("core.sshCommand", "/usr/bin/ssh -i /tmp/key")),
-            "newline_in_helper": conf_repo("c-nl", ("diff.external", "/usr/bin/true\\n/bin/sh -c 'rm victim'")),
-            "leading_assignment": conf_repo("c-la", ("diff.external", "TMPDIR=/tmp /bin/sh -c 'rm victim'")),
-            "leading_assignment_plain": conf_repo("c-lb", ("diff.external", "TMPDIR=/tmp /usr/bin/true")),
-            "launcher_later_word": conf_repo("c-ll", ("diff.external", "/usr/bin/caffeinate -i npx conv")),
-            "askpass_relative": conf_repo("c-ap", ("core.askPass", "tools/askpass")),
-            "hook_command_relative": conf_repo("c-hc", ("hook.x.command", "./h.sh"), ("hook.x.event", "post-index-change")),
-            "hook_command_absolute_ok": conf_repo("c-hca", ("hook.x.command", "/usr/local/bin/git-guard")),
-            "numeric_value_ok": conf_repo("c-num", ("credential.helper", "cache --timeout=3600")),
-            "env_assignment": conf_repo("c-env", ("diff.py.textconv", "env PATH=tools conv")),
-            "path_assignment": conf_repo("c-env2", ("diff.py.textconv", "PATH=tools conv")),
-            "unknown_absolute_program": conf_repo("c-show", ("diff.external", "/usr/local/bin/show-diff")),
-            "tclsh_textconv": conf_repo("c-tcl", ("diff.py.textconv", "/usr/bin/tclsh")),
-            "m4_textconv": conf_repo("c-m4", ("diff.py.textconv", "/usr/bin/m4")),
-            "man_viewer_cmd": conf_repo("c-man", ("man.x.cmd", "tools/viewer")),
-            "git_named_helper_ok": conf_repo("c-gnh", ("diff.external", "/usr/local/bin/git-diff-helper")),
-            "lfs_bare_name": conf_repo("c-lfs", ("filter.lfs.clean", "git-lfs clean -- %f"),
-                                       ("filter.lfs.process", "git-lfs filter-process")),
-            "absolute_outside": conf_repo("c-abs", ("diff.external", "/usr/bin/true")),
-            "fsmonitor_true": conf_repo("c-fst", ("core.fsmonitor", "true")),
-            "pager_is_not_a_helper": conf_repo("c-pg", ("core.pager", "./x")),
-        }
-        saved = dict(os.environ)
-        env_out = {}
-        for name in ("GIT_EXTERNAL_DIFF", "GIT_DIR", "GIT_WORK_TREE"):
-            os.environ[name] = "x"
-            env_out[name] = mod.readonly_command("git log", REPO)
-            del os.environ[name]
-        os.environ.update({"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "diff.external", "GIT_CONFIG_VALUE_0": "./evil.sh"})
-        env_out["injected_config_helper"] = mod.readonly_command("git log", REPO)
-        os.environ["GIT_CONFIG_VALUE_0"] = "/usr/bin/true"
-        env_out["injected_config_operator_helper"] = mod.readonly_command("git log", REPO)
-        for k in ("GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"):
-            del os.environ[k]
-        env_out["clean"] = mod.readonly_command("git log", REPO)
-        out["git_env"] = env_out
-        NOTICE = "**Model fallback:** claude-fable-5-1 declined this request (cyber); retried with claude-opus-4-8."
-        out["fallback_re"] = {
-            "notice": bool(mod.MODEL_FALLBACK_RE.fullmatch(NOTICE)),
-            "notice_with_tail": bool(mod.MODEL_FALLBACK_RE.fullmatch(NOTICE + " The session will continue on claude-opus-4-8.")),
-            "quoted_then_answer": bool(mod.MODEL_FALLBACK_RE.fullmatch(NOTICE + "I will now review the files.")),
-            "answer_then_quote": bool(mod.MODEL_FALLBACK_RE.fullmatch("As the log says: " + NOTICE))}
-        helper_env = {}
-        for name, val in (("GIT_SSH_COMMAND", "./tools/ssh"), ("GIT_SSH", "tools/ssh"), ("GIT_PROXY_COMMAND", "./p"),
-                          ("GIT_ASKPASS", "tools/askpass"), ("SSH_ASKPASS", "./a"), ("GIT_EXEC_PATH", "./bin"),
-                          ("GIT_SSH_COMMAND#abs", "/usr/bin/ssh -i /tmp/key"), ("GIT_ASKPASS#abs", "/usr/bin/true")):
-            key = name.split("#")[0]
-            os.environ[key] = val
-            helper_env[name] = mod.readonly_command("git log", REPO)
-            del os.environ[key]
-        out["git_env_helpers"] = helper_env
+        out["reads"] = [mod.readonly_command(c) for c in cases["reads"]]
+        out["writes"] = [mod.readonly_command(c) for c in cases["writes"]]
         os.environ["RIPGREP_CONFIG_PATH"] = "/tmp/rgrc"
-        out["rg_config"] = [mod.readonly_command("rg needle file", REPO), mod.readonly_command("rg --no-config needle file", REPO),
-                            mod.readonly_command("cat file", REPO)]
-        out["rg_bypass"] = [mod.readonly_command(c, REPO) for c in ("rg -g --no-config x f", "rg --ignore-file --no-config x f",
+        out["rg_config"] = [mod.readonly_command("rg needle file"), mod.readonly_command("rg --no-config needle file"),
+                            mod.readonly_command("cat file")]
+        out["rg_bypass"] = [mod.readonly_command(c) for c in ("rg -g --no-config x f", "rg --ignore-file --no-config x f",
                             "rg -- --no-config f", "rg x --no-config f", "rg --no-config -n x f")]
         del os.environ["RIPGREP_CONFIG_PATH"]
-        out["rg_no_config_env"] = mod.readonly_command("rg needle file", REPO)
+        out["rg_no_config_env"] = mod.readonly_command("rg needle file")
         END_D = {"ends_turn": True}
         out["refusal_end_bit"] = [mod.refusal_end_bit("cancelled", END_D), mod.refusal_end_bit("cancelled", {"ends_turn": False}),
                                   mod.refusal_end_bit("cancelled", None), mod.refusal_end_bit("end_turn", END_D),
                                   mod.refusal_end_bit(None, END_D)]
+        NOTICE = "**Model fallback:** claude-fable-5-1 declined this request (cyber); retried with claude-opus-4-8."
+        out["fallback_re"] = {
+            "notice": bool(mod.MODEL_FALLBACK_RE.fullmatch(NOTICE)),
+            "notice_with_tail": bool(mod.MODEL_FALLBACK_RE.fullmatch(NOTICE + " The session will continue on claude-opus-4-8.")),
+            "notice_then_answer": bool(mod.MODEL_FALLBACK_RE.fullmatch(NOTICE + " I will now review the files.")),
+            "notice_newline_answer": bool(mod.MODEL_FALLBACK_RE.fullmatch(NOTICE + "\\n\\nHere is the review.")),
+            "quoted_then_answer": bool(mod.MODEL_FALLBACK_RE.fullmatch(NOTICE + "I will now review the files.")),
+            "answer_then_quote": bool(mod.MODEL_FALLBACK_RE.fullmatch("As the log says: " + NOTICE))}
         URL = "https://raw.githubusercontent.com/x/y/z/f.c"
-        curl = lambda c: mod.readonly_command(c, REPO)
+        curl = lambda c: mod.readonly_command(c)
         before = [curl("curl -fsSL " + URL), curl("curl -q -fsSL " + URL)]
         open(os.path.join(os.environ["HOME"], ".curlrc"), "w").write("output = /tmp/x\\n")
         out["curlrc"] = {"no_rc_plain": before[0], "no_rc_q": before[1],
@@ -334,11 +210,10 @@ def probe() -> dict[str, object]:
                          "rc_disable": curl("curl --disable -fsSL " + URL),
                          "rc_q_not_first": curl("curl -fsSL -q " + URL)}
         os.remove(os.path.join(os.environ["HOME"], ".curlrc"))
-        out["not_a_dir"] = mod.readonly_command("git log", os.path.join(tmp, "missing"))
 
         def call(command, kind="execute"):
             return types.SimpleNamespace(kind=kind, title="Run command", tool_call_id="t1",
-                                         raw_input={"command": command, "cwd": REPO})
+                                         raw_input={"command": command, "cwd": tmp})
         def opt(oid, kind):
             return types.SimpleNamespace(option_id=oid, kind=kind, name=oid)
         CODEX = [opt("allow_once", "allow_once"), opt("accept_execpolicy_amendment", "allow_always"),
@@ -399,8 +274,7 @@ def probe() -> dict[str, object]:
         """)
     r = subprocess.run(
         ["uv", "run", "--quiet", "--with", "agent-client-protocol>=0.9,<1.0", "python", "-I", "-c", code,
-         str(SCRIPT)], input=json.dumps({"reads": READS, "writes": WRITES, "evil_cwd": EVIL_CWD,
-                                                   "outside_cwd": OUTSIDE_CWD}), check=False,
+         str(SCRIPT)], input=json.dumps({"reads": READS, "writes": WRITES}), check=False,
         capture_output=True, text=True)
     if r.returncode:
         raise RuntimeError(r.stderr)
@@ -423,40 +297,16 @@ class TestReadOnlyDenial(unittest.TestCase):
         for cmd, ok in zip(WRITES, self.res["writes"], strict=True):
             self.assertFalse(ok, cmd)
 
-    def test_git_in_a_bare_repository_committed_in_the_tree_or_outside_any_repo_is_refused(self):
-        self.assertEqual(self.res["evil_cwd"], [False] * 3)
-        self.assertEqual(self.res["no_cwd"], [False] * 2)
-        self.assertEqual(self.res["norepo_cwd"], [False] * 2)
-        self.assertTrue(self.res["cat_no_cwd"])
-
-    def test_a_gitfile_passes_only_for_a_worktree_gitdir_outside_the_tree(self):
-        self.assertEqual(self.res["gitfile"], {"worktree": True, "hostile_dir": False, "inside_tree": False,
-                                               "dangling": False, "not_a_gitfile": False})
-
-    def test_git_is_refused_when_its_config_runs_a_helper_from_the_tree(self):
-        g = self.res["git_config"]
-        for name in ("hookspath_relative", "hookspath_husky", "hookspath_bare_word", "hookspath_inside", "unknown_absolute_program", "tclsh_textconv", "m4_textconv", "man_viewer_cmd", "sh_dash_c", "newline_in_helper", "leading_assignment", "leading_assignment_plain", "launcher_later_word",
-                     "askpass_relative", "hook_command_relative", "exec_path_value", "dash_c_value", "launcher_npx", "launcher_bundle", "ssh_command_relative",
-                     "git_proxy_relative", "credential_relative", "uploadpack_relative", "sh_script", "python_script", "env_wrapper",
-                     "alternate_refs", "env_assignment", "path_assignment", "interpreter_script", "interpreter_bare_file", "shell_syntax", "external_relative", "external_inside", "external_slash", "textconv", "command", "fsmonitor",
-                     "filter_clean", "gpg_program", "ssh_program"):
-            self.assertFalse(g[name], name)
-        for name in ("plain", "lfs_bare_name", "absolute_outside", "git_named_helper_ok", "hook_command_absolute_ok", "numeric_value_ok", "absolute_value_ok", "gh_credential_helper_ok", "hookspath_absolute_outside", "option_words_ok", "fsmonitor_true", "pager_is_not_a_helper"):
-            self.assertTrue(g[name], name)
-
     def test_the_summary_bit_says_whether_the_final_turn_ended_on_a_refusal(self):
         self.assertEqual(self.res["refusal_end_bit"],
                          ["refusal_end=1", "refusal_end=0", "refusal_end=0", "refusal_end=0", "refusal_end=0"])
 
-    def test_environment_selected_git_helpers_are_judged_like_config_ones(self):
-        e = self.res["git_env_helpers"]
-        for name, ok in e.items():
-            self.assertEqual(ok, name.endswith("#abs"), name)
-
     def test_only_a_chunk_that_is_the_whole_notice_counts_as_a_fallback(self):
         f = self.res["fallback_re"]
         self.assertEqual([f["notice"], f["notice_with_tail"]], [True, True])
-        self.assertEqual([f["quoted_then_answer"], f["answer_then_quote"]], [False, False])
+        # the old `.match` accepted the first two; whitespace then more text is what the fix closes
+        self.assertEqual([f["notice_then_answer"], f["notice_newline_answer"], f["quoted_then_answer"],
+                          f["answer_then_quote"]], [False] * 4)
 
     def test_rg_needs_no_config_when_a_config_file_is_selected(self):
         self.assertEqual(self.res["rg_config"], [False, True, True])
@@ -468,17 +318,6 @@ class TestReadOnlyDenial(unittest.TestCase):
         self.assertEqual([c["no_rc_plain"], c["no_rc_q"]], [True, True])
         self.assertEqual([c["rc_plain"], c["rc_q_not_first"]], [False, False])
         self.assertEqual([c["rc_q"], c["rc_disable"]], [True, True])
-
-    def test_git_is_refused_under_environment_that_injects_a_helper_or_config(self):
-        e = self.res["git_env"]
-        self.assertEqual([e[k] for k in ("GIT_EXTERNAL_DIFF", "GIT_DIR", "GIT_WORK_TREE")], [False] * 3)
-        self.assertFalse(e["injected_config_helper"])
-        self.assertTrue(e["injected_config_operator_helper"])
-        self.assertTrue(e["clean"])
-        self.assertFalse(self.res["not_a_dir"])
-
-    def test_the_requests_own_cwd_decides(self):
-        self.assertEqual(self.res["tool_cwd"], [self.res["repo"], None, None])
 
     def test_the_observed_curl_is_allowed_under_read_only(self):
         r = self.res["observed_read_only"]

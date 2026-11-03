@@ -1922,7 +1922,7 @@ def model_fallback(rec: dict) -> dict | None:
     """{"from", "reason", "to"} of the model switch acp-run logged as a `fallback` row (the session's
     model declined the request and another answered, 2026-10-31: Fable's cyber safeguard, answered by
     claude-opus-4-8), else None. Old logs have no row. Only a claude slice can have one (the notice is
-    claude-agent-acp's); the row is `verified: False`, since it is read from the message stream."""
+    claude-agent-acp's); the notice is read from the message stream, so it is reported as unverified."""
     if rec.get("agent") != "claude":
         return None
     found = None
@@ -1938,7 +1938,7 @@ def model_fallback(rec: dict) -> dict | None:
                 data = row.get("data") or {}
                 if row.get("kind") == "fallback" and data.get("to"):
                     found = {"from": str(data.get("from") or ""), "reason": str(data.get("reason") or ""),
-                             "to": str(data["to"]), "verified": bool(data.get("verified"))}
+                             "to": str(data["to"])}
     except (FileNotFoundError, KeyError, TypeError, OSError):
         pass
     return found
