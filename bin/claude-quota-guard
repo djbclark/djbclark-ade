@@ -882,13 +882,17 @@ def cmd_install(args) -> int:
     if os.environ.get("CLAUDE_QUOTA_GUARD_LAUNCH_AGENTS"):   # this tool's older override beats ADE_SCHED_LAUNCH_AGENTS
         overrides["agents_dir"] = str(_path("CLAUDE_QUOTA_GUARD_LAUNCH_AGENTS", HOME / "Library/LaunchAgents"))
     try:
-        ade_sched.install(job, args.backend if args.backend != "auto" else None, activate=False,
+        r = ade_sched.install(job, args.backend if args.backend != "auto" else None, activate=False,
                               allow_no_linger=args.allow_no_linger, **overrides)
     except ade_sched.SchedError as e:
         print(f"claude-quota-guard: {e}", file=sys.stderr)
         # 1-3 mean watch/tight/critical here: a bad job or a failed activation is a config error (64), never one of them
         return e.code if e.code == ade_sched.EX_UNAVAILABLE else EX_CONFIG
-    print("(a bootout error for a job that is not loaded yet is harmless)")
+    except OSError as e:                       # the unit/plist could not be written
+        print(f"claude-quota-guard: --install: {e}", file=sys.stderr)
+        return EX_CONFIG
+    if any("bootout" in argv for argv in r.activation):   # launchd only
+        print("(a bootout error for a job that is not loaded yet is harmless)")
     return 0
 
 

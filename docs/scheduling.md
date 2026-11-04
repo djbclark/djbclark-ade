@@ -3,7 +3,7 @@
 The repo's unattended jobs (sweeps, watchers, collectors) are written as launchd plists in [`launchd/`](../launchd/) and
 [`config/launchd/`](../config/launchd/). Those plists stay the **source of truth**. [`bin/ade_sched.py`](../bin/ade_sched.py)
 (a library, issue #279 slice S0) and its CLI [`bin/ade-sched`](../bin/ade-sched) read a plist, fill its placeholders and
-install it on whatever this machine schedules with:
+install it on whatever this machine schedules with: (Python 3.10 or later for `ade-sched` itself; `pr-policy`, `context-budget-check` and `claude-quota-guard` need 3.11+ for `tomllib`, so on Ubuntu 22.04, whose python3 is 3.10, install a newer Python first; 2026-11-04):
 
 | backend | what it writes | how it activates |
 | --- | --- | --- |

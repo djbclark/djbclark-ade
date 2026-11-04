@@ -2088,3 +2088,26 @@ def test_the_frontier_advice_names_a_profile_only_when_one_is_the_source(rig, mo
     text = mod._advice("watch", "r", "available", None, standing, ["weekly"], 50.0, 15.0)
     assert text.startswith("1. Claude quota watch: Opus 5.5") and "(" not in text.splitlines()[0]
     assert mod._advice("watch", "r", "available", None, standing, ["weekly", "alert"], 50.0, 15.0) == mod._advice("watch", "r")
+
+
+# -- --install never exits 1-3 (watch/tight/critical) on a scheduler error (adversary rounds 1-2, 2026-11-04) ------
+
+def test_install_bad_backend_is_a_config_error_64_not_tight(rig):
+    r = rig.guard("--install", ADE_SCHED_BACKEND="bogus")
+    assert r.returncode == 64, (r.returncode, r.stderr)
+
+
+def test_install_unwritable_dir_is_a_config_error_64_not_watch(rig):
+    blocker = rig.tmp / "a-file"
+    blocker.write_text("")
+    r = rig.guard("--install", CLAUDE_QUOTA_GUARD_LAUNCH_AGENTS=str(blocker / "LaunchAgents"), **_launchd_env(rig))
+    assert r.returncode == 64, (r.returncode, r.stderr)
+    assert "Traceback" not in r.stderr
+
+
+def test_bootout_note_only_with_a_bootout_line(rig):
+    r = rig.guard("--install", **_launchd_env(rig))
+    assert r.returncode == 0 and "harmless" in r.stdout
+    env, _ = _fake_sched(rig)
+    r = rig.guard("--install", **env)
+    assert r.returncode == 0 and "harmless" not in r.stdout
