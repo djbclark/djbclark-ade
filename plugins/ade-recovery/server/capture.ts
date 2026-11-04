@@ -28,10 +28,12 @@ import {
   addInterruption,
   addMissing,
   interruptIfStaleDaemon,
+  noteUnobservedActivity,
   openTurn,
   reconcile,
   type RecordBody,
 } from "./reconcile.ts";
+import { PASEO_NEWER_TOLERANCE_MS } from "./verdict.ts";
 
 export type { RecordBody } from "./reconcile.ts";
 
@@ -73,6 +75,13 @@ export interface CaptureDeps {
   safeComponent?(s: string): unknown;
   realpath?(p: string): Promise<string>;
   timeouts?: Partial<CaptureTimeouts>;
+  /** The resolved $PASEO_HOME, stored in each record so the CLI reads the daemon's store. */
+  paseoHome?: string | null;
+  /**
+   * Read only: `updatedAt` of Paseo's stored record for the agent (`<PASEO_HOME>/agents/<dir>/<id>.json`),
+   * or null when unavailable. Absent: the init cross-check is skipped.
+   */
+  paseoUpdatedAt?(agentId: string): string | null;
 }
 
 export interface CaptureTimeouts {
@@ -211,6 +220,8 @@ export class Capture {
   private lock: { release(): void } | null;
 
   private agents: Map<string, AgentEntry>;
+  /** When an event for each agent was first accepted before init finished (it may bump Paseo's updatedAt). */
+  private firstSeen: Map<string, number>;
   private foreignNames: Set<string>;
   private lostNames: Set<string>;
   private writes: CoalescingQueue;
@@ -236,6 +247,7 @@ export class Capture {
     this.dir = null;
     this.lock = null;
     this.agents = new Map();
+    this.firstSeen = new Map();
     this.foreignNames = new Set();
     this.lostNames = new Set();
     const onError = (key: string, error: unknown): void =>
@@ -249,23 +261,23 @@ export class Capture {
   // ---------------------------------------------------------------- hooks
 
   onCreate(agent: HookAgent, paseo: PaseoLike): void {
-    this.accept(paseo, (seq, p) => this.applyCreate(agent, seq, p));
+    this.accept(paseo, (seq, p) => this.applyCreate(agent, seq, p), agent?.id);
   }
 
   onTurnBefore(agent: HookAgent, turnId: string | null, paseo: PaseoLike): void {
-    this.accept(paseo, (seq, p) => this.applyTurnBefore(agent, turnId ?? null, seq, p));
+    this.accept(paseo, (seq, p) => this.applyTurnBefore(agent, turnId ?? null, seq, p), agent?.id);
   }
 
   onTurnAfter(agent: HookAgent, turnId: string | null, outcome: TurnOutcome, paseo: PaseoLike): void {
-    this.accept(paseo, (seq, p) => this.applyTurnAfter(agent, turnId ?? null, outcome, seq, p));
+    this.accept(paseo, (seq, p) => this.applyTurnAfter(agent, turnId ?? null, outcome, seq, p), agent?.id);
   }
 
   onClose(agent: HookAgent, paseo: PaseoLike): void {
-    this.accept(paseo, (seq) => this.applyClose(agent, seq));
+    this.accept(paseo, (seq) => this.applyClose(agent, seq), agent?.id);
   }
 
   onArchive(agent: HookAgent, archivedAt: string, paseo: PaseoLike): void {
-    this.accept(paseo, (seq) => this.applyArchive(agent, archivedAt, seq));
+    this.accept(paseo, (seq) => this.applyArchive(agent, archivedAt, seq), agent?.id);
   }
 
   // ---------------------------------------------------------------- inspection (tests, cleanup)
@@ -327,7 +339,7 @@ export class Capture {
 
   // ---------------------------------------------------------------- dispatch
 
-  private accept(paseo: PaseoLike, apply: (seq: number, paseo: PaseoLike) => void): void {
+  private accept(paseo: PaseoLike, apply: (seq: number, paseo: PaseoLike) => void, agentId?: unknown): void {
     try {
       this.seq += 1;
       const seq = this.seq;
@@ -335,6 +347,9 @@ export class Capture {
       if (this.modeValue === "active" || this.modeValue === "read-only") {
         this.safeApply(apply, seq, paseo);
         return;
+      }
+      if (typeof agentId === "string" && agentId !== "" && !this.firstSeen.has(agentId)) {
+        this.firstSeen.set(agentId, this.deps.now());
       }
       if (this.modeValue === "inert") {
         if (this.deps.now() - this.initFailedAt < this.timeouts.initRetryMs) return;
@@ -450,6 +465,7 @@ export class Capture {
 
     // 3. load every record.
     const loaded: RecordBody[] = [];
+    const writtenAt = new Map<string, string>();
     for (const name of store.listAgents(dir)) {
       let result: LoadResult;
       try {
@@ -465,6 +481,7 @@ export class Capture {
       }
       const body = toBody(result.record);
       const at = this.iso();
+      writtenAt.set(body.paseoAgentId, result.record.writtenAt);
       if (result.source === "prev" || result.problems.includes("corrupt-fell-back-to-prev")) {
         // The lost generation may have held an interruption: never let the last turn
         // read as cleanly observed on the strength of an older generation.
@@ -502,7 +519,36 @@ export class Capture {
       this.log("reconciled", { changes: w.changes.join(",") });
       this.scheduleWrite(w.agentId, true);
     }
+
+    // 5. Paseo's own store, for EVERY loaded record: an update after our last generation means
+    // something happened while the plugin was not observing (a turn and a stop, an archive). The
+    // next generation's writtenAt would hide it from the CLI's paseo-record-newer, so it becomes a
+    // sticky interruption now. An event already waiting for the agent may have caused the bump
+    // itself, so only an update before that event counts for it.
+    this.crossCheckPaseo(writtenAt);
     this.modeValue = "active";
+  }
+
+  private crossCheckPaseo(writtenAt: Map<string, string>): void {
+    const read = this.deps.paseoUpdatedAt;
+    if (!read) return;
+    for (const [agentId, w] of writtenAt) {
+      const entry = this.agents.get(agentId);
+      if (!entry?.body) continue;
+      let updatedAt: string | null = null;
+      try {
+        updatedAt = read(agentId);
+      } catch (error) {
+        this.log("paseo store read failed", { error: errorName(error) });
+        continue;
+      }
+      const before = this.firstSeen.get(agentId) ?? Number.POSITIVE_INFINITY;
+      if (noteUnobservedActivity(entry.body, w, updatedAt, before, PASEO_NEWER_TOLERANCE_MS, this.iso())) {
+        this.log("unobserved activity", { source: "paseo-store" });
+        this.scheduleWrite(agentId, true);
+      }
+    }
+    this.firstSeen.clear();
   }
 
   // ---------------------------------------------------------------- event application
@@ -713,6 +759,7 @@ export class Capture {
     body.bootId = host.bootId;
     body.platform = host.platform;
     body.machineId = host.machineId ?? null;
+    if (typeof this.deps.paseoHome === "string" && this.deps.paseoHome !== "") body.paseoHome = this.deps.paseoHome;
     body.daemonInstance = this.daemonInstance;
     // agent.title is deliberately not stored (it can carry a command line).
     addMissing(body, "toolCalls", TOOL_CALLS_REASON, at);

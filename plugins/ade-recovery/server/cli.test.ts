@@ -205,15 +205,16 @@ test("Paseo's stored record: archived there is do-not-resume (paseo-archived); n
   paseoAgent(w, "p1", { updatedAt: new Date(Date.now() + 60_000).toISOString(), archivedAt: null });
   const newer = cli(w, "show", "p1", "--json");
   assert.equal(newer.code, 1, newer.out);
-  assert.deepEqual(JSON.parse(newer.out).reasons, ["paseo-record-newer"]);
+  assert.deepEqual(JSON.parse(newer.out).reasons.sort(), ["interrupted:unobserved-activity", "paseo-record-newer", "tools-unobserved"]);
+  assert.ok(JSON.parse(newer.out).interruptions.some((i: { evidence: string }) => i.evidence === "unobserved-activity"));
   paseoAgent(w, "p1", { updatedAt: "2020-01-01T00:00:00.000Z", archivedAt: null });
   const older = cli(w, "show", "p1", "--json");
   assert.equal(older.code, 0, older.out);
   assert.equal(JSON.parse(older.out).info.includes("paseo-record-unavailable"), false);
   fs.writeFileSync(path.join(w.paseo, "agents", "nonexistent", "p1.json"), "{corrupt");
   const corrupt = cli(w, "show", "p1", "--json");
-  assert.equal(corrupt.code, 0, "a corrupt Paseo record never blocks by itself");
-  assert.ok(JSON.parse(corrupt.out).info.includes("paseo-record-unavailable"));
+  assert.equal(corrupt.code, 1, "upstream skips a corrupt record too: Paseo does not know the agent");
+  assert.deepEqual(JSON.parse(corrupt.out).reasons, ["paseo-record-missing"]);
 });
 
 test("the daemon's server-id file: a mismatch is other-server, a match passes", async () => {
@@ -243,4 +244,50 @@ test("PASEO_HOME with a leading ~ resolves against HOME, for the agents dir and 
   const j = JSON.parse(r.stdout);
   assert.ok(j.reasons.includes("paseo-archived"));
   assert.equal(j.recoveryScheduledElsewhere, true);
+});
+
+// Adversary round 2, N3b: a readable agents dir without the agent's record blocks.
+test("Paseo's agents dir readable but no <id>.json: needs-review, paseo-record-missing", async () => {
+  const w = world();
+  await cleanRepoRecord(w, "m1");
+  fs.mkdirSync(path.join(w.paseo, "agents", "proj"), { recursive: true });
+  const r = cli(w, "show", "m1", "--json");
+  assert.equal(r.code, 1, r.out + r.err);
+  const j = JSON.parse(r.out);
+  assert.deepEqual(j.reasons, ["paseo-record-missing"]);
+  assert.equal(j.paseoRecordMissing, true);
+  assert.equal(j.info.includes("paseo-record-unavailable"), false);
+  assert.match(cli(w, "show", "m1").out, /stored record missing/);
+});
+
+test("the record's own paseoHome wins over the shell's PASEO_HOME; a relative one is ignored", () => {
+  const w = world();
+  put(w, "h1", { paseoHome: w.paseo });
+  paseoAgent(w, "h1", { updatedAt: new Date().toISOString(), archivedAt: new Date().toISOString() });
+  const env = { ...w.env, PASEO_HOME: path.join(w.base, "some-other-home") };
+  const run = () => spawnSync(process.execPath, ["--disable-warning=ExperimentalWarning", CLI, "show", "h1", "--json", "--no-live"], { env, encoding: "utf8", timeout: 60000 });
+  const r = run();
+  assert.equal(r.status, 2, r.stdout + r.stderr);
+  const j = JSON.parse(r.stdout);
+  assert.ok(j.reasons.includes("paseo-archived"));
+  assert.equal(j.paseoHome, w.paseo);
+  assert.equal(j.paseoHomeSource, "record");
+  put(w, "h1", { paseoHome: "paseo" }); // relative: not trusted, the env's is used
+  const r2 = run();
+  const j2 = JSON.parse(r2.stdout);
+  assert.equal(j2.paseoHomeSource, "env");
+  assert.equal(j2.paseoHome, path.join(w.base, "some-other-home"));
+  assert.equal(j2.reasons.includes("paseo-archived"), false);
+});
+
+// Adversary round 2, N4: session-recovery state is read through the bounded reader.
+test("a FIFO as session-recovery state.json does not hang the CLI", () => {
+  const w = world();
+  put(w, "f1");
+  const sr = path.join(w.paseo, "plugin-data", "session-recovery");
+  fs.mkdirSync(sr, { recursive: true });
+  execFileSync("mkfifo", [path.join(sr, "state.json")]);
+  const r = spawnSync(process.execPath, ["--disable-warning=ExperimentalWarning", CLI, "show", "f1", "--json", "--no-live"], { env: w.env, encoding: "utf8", timeout: 15000 });
+  assert.notEqual(r.status, null, "the CLI finished (no blocking read of a FIFO)");
+  assert.equal(JSON.parse(r.stdout).recoveryScheduledElsewhere, null);
 });

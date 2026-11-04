@@ -300,3 +300,26 @@ test("a null start with another pid or boot is still another daemon", async () =
   assert.deepEqual(r.calls, []);
   assert.deepEqual(out.map((w) => w.changes[0]), ["daemon-restart", "boot-id-changed"]);
 });
+
+// Adversary round 2, N3a: the sticky interruption survives the history cap and is added once.
+test("addInterruption keeps unobserved-activity past the cap; noteUnobservedActivity bounds", async () => {
+  const { addInterruption: add, noteUnobservedActivity } = await import("./reconcile.ts");
+  const rec: { interruptions?: import("./types.ts").Interruption[] } = { interruptions: [] };
+  add(rec, { detectedAt: "2026-11-04T00:00:00.000Z", evidence: "unobserved-activity", turnKey: null, detail: "" }, 3);
+  for (let i = 0; i < 10; i++) add(rec, { detectedAt: "2026-11-04T01:00:00.000Z", evidence: "daemon-restart", turnKey: `k${i}`, detail: "" }, 3);
+  assert.equal(rec.interruptions!.length, 3);
+  assert.equal(rec.interruptions![0]!.evidence, "unobserved-activity");
+  assert.deepEqual(rec.interruptions!.slice(1).map((i) => i.turnKey), ["k8", "k9"]);
+
+  const body = { interruptions: [] } as unknown as import("./reconcile.ts").RecordBody;
+  const W = "2026-11-04T11:00:00.000Z";
+  const at = "2026-11-04T12:00:00.000Z";
+  const before = Date.parse("2026-11-04T12:00:00.000Z");
+  assert.equal(noteUnobservedActivity(body, W, "2026-11-04T11:00:02.000Z", before, 2000, at), false, "within tolerance");
+  assert.equal(noteUnobservedActivity(body, W, "2026-11-04T11:59:59.000Z", before, 2000, at), false, "at the waking event");
+  assert.equal(noteUnobservedActivity(body, W, null, before, 2000, at), false);
+  assert.equal(noteUnobservedActivity(body, "bad", "2026-11-04T11:30:00.000Z", before, 2000, at), false);
+  assert.equal(noteUnobservedActivity(body, W, "2026-11-04T11:30:00.000Z", before, 2000, at), true);
+  assert.equal(noteUnobservedActivity(body, W, "2026-11-04T11:40:00.000Z", Number.POSITIVE_INFINITY, 2000, at), false, "added once");
+  assert.equal(body.interruptions!.length, 1);
+});

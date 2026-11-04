@@ -88,7 +88,13 @@ export type InterruptionEvidence =
   | "closed-without-turn-end"
   | "canceled-during-shutdown"
   | "writer-dead"
-  | "agent-missing";
+  | "agent-missing"
+  /**
+   * Paseo's stored agent record changed after this record was written, while the plugin was not
+   * observing (seen at init, or by the CLI). Sticky: a later observed turn never clears it, and
+   * the verdict blocks on it whatever the turn order.
+   */
+  | "unobserved-activity";
 
 export interface Interruption {
   detectedAt: string;
@@ -130,6 +136,8 @@ export interface RecoveryRecord {
   platform: string;
   // identity (optional)
   machineId?: string | null; // absent in records written before it existed: hostname is compared then
+  /** The plugin's resolved $PASEO_HOME (absolute); the CLI prefers it over its own env. */
+  paseoHome?: string | null;
   cwdRealpath?: string | null;
   workspaceId?: string | null;
   parentAgentId?: string | null;
@@ -170,6 +178,11 @@ export interface LiveEvidence {
   paseoUpdatedAt?: string | null;
   /** The daemon's server id (`PASEO_SERVER_ID`, else `<PASEO_HOME>/server-id`). */
   paseoServerId?: string | null;
+  /**
+   * true: `<PASEO_HOME>/agents` is readable and holds no valid `<id>.json` (Paseo no longer has
+   * the agent: needs-review, paseo-record-missing). false or undefined: found, or not checked.
+   */
+  paseoRecordMissing?: boolean;
 }
 
 export interface LoadResult {

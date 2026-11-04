@@ -46,16 +46,32 @@ export function paseoServerId(home: string, env: NodeJS.ProcessEnv = process.env
 /** What the CLI takes from Paseo's stored agent record (docs/data-model.md, "Agent Record"). */
 export interface PaseoAgentRecordEvidence {
   archivedAt: string | null;
-  /** The record's `updatedAt` (a required ISO string upstream), else the file mtime. */
+  /** The record's `updatedAt` (a required string upstream), else the file mtime when it does not parse. */
   updatedAt: string | null;
   updatedAtSource: "updatedAt" | "mtime";
 }
 
-/** A regular file's text, or null (missing, not a regular file, too large, unreadable). A FIFO never blocks. */
-function readSmallFile(file: string, maxBytes: number): string | null {
+/**
+ * found: a valid record. missing: `<home>/agents` is readable and holds no valid `<id>.json`
+ * (upstream remove() unlinks it; upstream also skips a file that fails its schema, so Paseo does
+ * not know the agent either). unavailable: no agents directory, an unreadable one, or an unsafe id.
+ */
+export type PaseoAgentLookup =
+  | { status: "found"; record: PaseoAgentRecordEvidence }
+  | { status: "missing" }
+  | { status: "unavailable" };
+
+/**
+ * A regular file's text, or null (missing, not a regular file, too large, unreadable). Opened with
+ * O_NONBLOCK, so a FIFO never blocks; fstat then refuses anything but a regular file of at most
+ * `maxBytes`. `noFollow` adds O_NOFOLLOW: a symlink is refused.
+ */
+export function readSmallFile(file: string, maxBytes: number, opts: { noFollow?: boolean } = {}): string | null {
   let fd: number;
   try {
-    fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK ?? 0));
+    const flags =
+      fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK ?? 0) | (opts.noFollow ? (fs.constants.O_NOFOLLOW ?? 0) : 0);
+    fd = fs.openSync(file, flags);
   } catch {
     return null;
   }
@@ -74,8 +90,21 @@ function readSmallFile(file: string, maxBytes: number): string | null {
   }
 }
 
+/**
+ * One candidate file, as upstream scanDisk would load it: a regular file (Dirent.isFile(), so a
+ * symlink is skipped; lstat here, O_NOFOLLOW on open) that parses and passes a minimal slice of
+ * upstream's STORED_AGENT_SCHEMA (`id` and `updatedAt` strings, `archivedAt` string|null|absent),
+ * with `id` equal to the agent id. null otherwise.
+ */
 function readAgentFile(file: string, agentId: string): PaseoAgentRecordEvidence | null {
-  const raw = readSmallFile(file, MAX_AGENT_RECORD_BYTES);
+  let st: fs.Stats;
+  try {
+    st = fs.lstatSync(file);
+  } catch {
+    return null;
+  }
+  if (!st.isFile()) return null;
+  const raw = readSmallFile(file, MAX_AGENT_RECORD_BYTES, { noFollow: true });
   if (raw === null) return null;
   let v: unknown;
   try {
@@ -85,28 +114,23 @@ function readAgentFile(file: string, agentId: string): PaseoAgentRecordEvidence 
   }
   if (!v || typeof v !== "object" || Array.isArray(v)) return null;
   const r = v as Record<string, unknown>;
-  if (r.id !== agentId) return null; // upstream keys the record by its id field
+  if (typeof r.id !== "string" || r.id !== agentId) return null; // upstream keys the record by its id field
+  if (typeof r.updatedAt !== "string") return null; // required upstream: the record is skipped without it
+  if (r.archivedAt !== undefined && r.archivedAt !== null && typeof r.archivedAt !== "string") return null;
   const archivedAt = typeof r.archivedAt === "string" && r.archivedAt !== "" ? r.archivedAt : null;
-  if (typeof r.updatedAt === "string" && Number.isFinite(Date.parse(r.updatedAt))) {
+  if (Number.isFinite(Date.parse(r.updatedAt))) {
     return { archivedAt, updatedAt: r.updatedAt, updatedAtSource: "updatedAt" };
   }
-  let mtime: string | null = null;
-  try {
-    mtime = fs.statSync(file).mtime.toISOString();
-  } catch {
-    mtime = null;
-  }
-  return { archivedAt, updatedAt: mtime, updatedAtSource: "mtime" };
+  return { archivedAt, updatedAt: st.mtime.toISOString(), updatedAtSource: "mtime" };
 }
 
 /**
  * Paseo's stored record for `agentId`, read only: `<home>/agents/<project-dir>/<id>.json` (one
- * level, as upstream AgentStorage.scanDisk) and the legacy `<home>/agents/<id>.json`. null when
- * absent, unreadable or corrupt. Several copies: the latest updatedAt wins, and any archived copy
- * marks it archived (fail closed).
+ * level, as upstream AgentStorage.scanDisk) and the legacy `<home>/agents/<id>.json`. Several
+ * copies: the latest updatedAt wins, and any archived copy marks it archived (fail closed).
  */
-export function readPaseoAgentRecord(home: string, agentId: string): PaseoAgentRecordEvidence | null {
-  if (!SAFE_ID.test(agentId)) return null;
+export function lookupPaseoAgentRecord(home: string, agentId: string): PaseoAgentLookup {
+  if (!SAFE_ID.test(agentId)) return { status: "unavailable" };
   const base = path.join(home, "agents");
   const files = [path.join(base, `${agentId}.json`)];
   try {
@@ -114,7 +138,7 @@ export function readPaseoAgentRecord(home: string, agentId: string): PaseoAgentR
       if (d.isDirectory()) files.push(path.join(base, d.name, `${agentId}.json`));
     }
   } catch {
-    return null;
+    return { status: "unavailable" };
   }
   let best: PaseoAgentRecordEvidence | null = null;
   let archivedAt: string | null = null;
@@ -126,6 +150,19 @@ export function readPaseoAgentRecord(home: string, agentId: string): PaseoAgentR
     const bt = best?.updatedAt ? Date.parse(best.updatedAt) : Number.NaN;
     if (best === null || (Number.isFinite(t) && (!Number.isFinite(bt) || t > bt))) best = e;
   }
-  if (best === null) return null;
-  return { ...best, archivedAt: best.archivedAt ?? archivedAt };
+  if (best === null) return { status: "missing" };
+  return { status: "found", record: { ...best, archivedAt: best.archivedAt ?? archivedAt } };
+}
+
+/** The found record of lookupPaseoAgentRecord, else null (missing and unavailable alike). */
+export function readPaseoAgentRecord(home: string, agentId: string): PaseoAgentRecordEvidence | null {
+  const r = lookupPaseoAgentRecord(home, agentId);
+  return r.status === "found" ? r.record : null;
+}
+
+/** A recorded `paseoHome` the CLI may use: a string, absolute, no NUL, bounded; else null. */
+export function validRecordedPaseoHome(v: unknown): string | null {
+  if (typeof v !== "string" || v === "" || v.length > 4096 || v.includes("\0")) return null;
+  if (!path.isAbsolute(v)) return null;
+  return path.resolve(v);
 }

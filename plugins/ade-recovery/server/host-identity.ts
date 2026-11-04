@@ -10,6 +10,46 @@ import { execFileSync } from "node:child_process";
 import type { HostIdentity, ProcessIdentity } from "./types.ts";
 
 const SUBPROCESS_TIMEOUT_MS = 2000;
+/** Total budget for one identity probe across all its candidate binaries (not per binary). */
+export const PROBE_BUDGET_MS = 2000;
+
+export type ProbeRunner = (bin: string, args: string[], timeoutMs: number) => string;
+
+const defaultRunner: ProbeRunner = (bin, args, timeoutMs) =>
+  execFileSync(bin, args, {
+    env: minimalEnv(),
+    timeout: timeoutMs,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "ignore"],
+    maxBuffer: 1024 * 1024,
+  });
+
+/**
+ * The first candidate binary whose output `parse` accepts, under ONE deadline of `budgetMs` for
+ * all of them: each run gets only the time left, and none starts once it is spent. The callers
+ * cache the result, so a probe runs at most once per process (macOS ioreg, sysctl).
+ */
+export function probeFirst(
+  bins: readonly string[],
+  args: string[],
+  parse: (out: string) => string | null,
+  budgetMs: number = PROBE_BUDGET_MS,
+  run: ProbeRunner = defaultRunner,
+  now: () => number = Date.now,
+): string | null {
+  const deadline = now() + budgetMs;
+  for (const bin of bins) {
+    const left = deadline - now();
+    if (left <= 0) break;
+    try {
+      const v = parse(run(bin, args, left));
+      if (v) return v;
+    } catch {
+      // timeout, ENOENT or a non-zero exit: try the next location while time is left
+    }
+  }
+  return null;
+}
 
 function validPid(pid: unknown): pid is number {
   return typeof pid === "number" && Number.isSafeInteger(pid) && pid >= 1;
@@ -104,23 +144,7 @@ export function bootId(): string | null {
       value = null;
     }
   } else if (process.platform === "darwin") {
-    for (const bin of ["/usr/sbin/sysctl", "sysctl"]) {
-      try {
-        const out = execFileSync(bin, ["-n", "kern.bootsessionuuid"], {
-          env: minimalEnv(),
-          timeout: SUBPROCESS_TIMEOUT_MS,
-          encoding: "utf8",
-          stdio: ["ignore", "pipe", "ignore"],
-          maxBuffer: 64 * 1024,
-        }).trim();
-        if (out) {
-          value = out;
-          break;
-        }
-      } catch {
-        // try the next location
-      }
-    }
+    value = probeFirst(["/usr/sbin/sysctl", "sysctl"], ["-n", "kern.bootsessionuuid"], (out) => out.trim() || null);
   }
   bootCache = { value };
   return value;
@@ -158,21 +182,8 @@ export function machineId(): string | null {
   if (process.platform === "linux") {
     value = machineIdFromFiles(LINUX_MACHINE_ID_FILES);
   } else if (process.platform === "darwin") {
-    for (const bin of ["/usr/sbin/ioreg", "ioreg"]) {
-      try {
-        const out = execFileSync(bin, ["-rd1", "-c", "IOPlatformExpertDevice"], {
-          env: minimalEnv(),
-          timeout: SUBPROCESS_TIMEOUT_MS,
-          encoding: "utf8",
-          stdio: ["ignore", "pipe", "ignore"],
-          maxBuffer: 1024 * 1024,
-        });
-        value = parseIoregPlatformUuid(out);
-        if (value) break;
-      } catch {
-        // try the next location
-      }
-    }
+    // One 2 s budget for both locations (it was 2 s each), run once and cached.
+    value = probeFirst(["/usr/sbin/ioreg", "ioreg"], ["-rd1", "-c", "IOPlatformExpertDevice"], parseIoregPlatformUuid);
   }
   machineCache = { value };
   return value;

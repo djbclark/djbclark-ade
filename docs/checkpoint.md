@@ -230,13 +230,18 @@ G.1. What it captures, per agent, in one record:
   or recorded at create).
 - tracked fingerprint: sha256 over the changed paths (the union of worktree vs HEAD and index vs
   HEAD, with `--no-renames --ignore-submodules=dirty`). Per path it covers the content: a regular
-  file by its blob id from `git hash-object --no-filters` (no `-w`), a symlink by its target, a
-  gitlink by the submodule's HEAD, other types by a marker. It also covers the raw HEAD and index
+  file by its blob id from `git hash-object --no-filters -- <paths>` (argv, never `--stdin-paths`,
+  never `-w`), a symlink by its target, a gitlink by the submodule's HEAD, other types by a marker.
+  An initialised submodule (up to 16, depth 1) also adds a sha256 of its `git status --porcelain=v2`
+  and the content of its changed files, with the submodule's own filter drivers blanked; more than
+  16, a nested submodule whose commit moved, or any git failure fails closed (needs review). It also covers the raw HEAD and index
   diffs (`--raw --no-abbrev`: modes, object ids, status letters), so a chmod, a file-to-symlink
   change or a staged-only change moves it.
 - untracked paths (capped, redacted names) and a stat fingerprint over path, size and mtime.
   Contents are never read.
-- interruption history, last 20. A later turn never clears it.
+- interruption history, last 20. A later turn never clears it, and the cap never drops an
+  `unobserved-activity` entry (G.5).
+- `paseoHome`: the plugin's resolved `$PASEO_HOME` (absolute), so the CLI reads the daemon's store.
 - `missingTelemetry`: each field it could not read, with the reason.
 
 G.2. What it never does:
@@ -256,9 +261,10 @@ with the previous generation at `<agent>.prev.json`. Files are 0600 in 0700 dire
 `writer.lock` names the writer by pid and start token. Each record carries a sha256 integrity
 digest; a corrupt current file falls back to `.prev.json`.
 The CLI also reads Paseo's own store, read only (never written): `<PASEO_HOME>/agents/*/<id>.json`
-and `<PASEO_HOME>/server-id` (or `PASEO_SERVER_ID`). `PASEO_HOME` resolves as upstream does: default
-`~/.paseo`, a leading `~/` expands, a relative value resolves against the cwd, and an empty value
-resolves to the cwd (upstream's `??`). Details in G.7.
+and `<PASEO_HOME>/server-id` (or `PASEO_SERVER_ID`); the plugin reads the same agent records at init
+(G.5). `PASEO_HOME` resolves as upstream does: default `~/.paseo`, a leading `~/` expands, a relative
+value resolves against the cwd, and an empty value resolves to the cwd (upstream's `??`). The CLI
+prefers the record's `paseoHome` when it is an absolute path. Details in G.7.
 
 G.5. Verdicts (`bin/paseo-checkpoint show` and `list`). Precedence: do-not-resume beats
 needs-review, which beats resumable-native.
@@ -276,7 +282,14 @@ needs-review, which beats resumable-native.
   - `other-server`: the record's server differs from the server directory it sits in, or from the
     server id read from `PASEO_SERVER_ID` or `<PASEO_HOME>/server-id`;
   - `paseo-record-newer`: Paseo's agent record `updatedAt` is more than 2 s after the record's own
-    timestamp;
+    timestamp (the CLI then also adds `interrupted:unobserved-activity`);
+  - `paseo-record-missing`: `<PASEO_HOME>/agents` is readable but holds no valid `<id>.json` for the
+    agent (upstream `remove()` unlinks it; a symlinked file, or one failing upstream's schema, is
+    skipped there too, so it counts as absent);
+  - `interrupted:unobserved-activity`: at init the plugin found Paseo's `updatedAt` more than 2 s
+    after the record's last generation, for any loaded record (not only one left in flight). It is
+    sticky: it blocks whatever the turn order, a later observed turn never clears it, and it does not
+    excuse a `canceled-outside-shutdown`;
   - `no-live-evidence`, `no-record`, `no-turns`, `no-persistence-handle`;
   - `interrupted:<evidence>` or `interrupted:unrecorded`, `tools-unobserved` (tool calls are not
     captured in v1), `live-turn-active`, `turn-outcome-unknown`, `turn-ended-during-shutdown`,
@@ -286,14 +299,29 @@ needs-review, which beats resumable-native.
   - `recovery-scheduled-elsewhere`;
   - load problems `corrupt-fell-back-to-prev`, `corrupt-no-valid-generation`, `unknown-schema`,
     and `missing-identity:<field>`.
-- Info only, never blocking: `paseo-server-id-unavailable`, `paseo-record-unavailable`,
+- Info only, never blocking: `paseo-server-id-unavailable`, `paseo-record-unavailable` (no
+  readable agents directory),
   `boot-id-changed`, `prior-interruptions:<n>`, `generation:<n>`, `record-age:<s>`, `load:<current|prev>`.
 - `--no-live` skips live git, which adds `git-evidence-missing`, so the verdict is `needs-review`.
   A do-not-resume condition still wins over it, so `--no-live` never turns a stop into a review.
 - Residual, D1 to confirm: hooks are best-effort. An event missed while the plugin was down (an
   archive, a new turn, a stop) is caught only through Paseo's record (`updatedAt`), so the Paseo
-  store check is the backstop. `paseo-record-newer` can also give a false `needs-review` on a mode,
-  title or permission change, which bumps `updatedAt` with no turn.
+  store check is the backstop: the plugin's init check (`unobserved-activity`, which the next
+  generation's `writtenAt` cannot hide) and the CLI's (`paseo-record-newer`). Limits:
+  - `updatedAt` is one timestamp. At init, an update counts only if it is older than the plugin's
+    first event for that agent (that event may have bumped it), so activity that the waking event's
+    own bump overwrites is not seen;
+  - a mode, title, label or permission change bumps `updatedAt` with no turn: a false `needs-review`;
+  - a bump whose hook is still in flight when init reads the store also reads as unobserved (fail
+    closed).
+- Covered since round 2 (N2): edits inside a submodule's working tree. Submodule working-tree state is
+  fingerprinted via `git status --porcelain=v2`. Residual: edits inside a depth-2 submodule's
+  worktree are not seen, and a repo with more than 16 initialised submodules always needs review.
+- Residual (writer lock): machine ids that match while both the hostname and the boot id differ are
+  treated as another host (a cloned `/etc/machine-id`, cloned VMs), so the lock is not taken over.
+  Linux only: on macOS the IOPlatformUUID is bound to the hardware, and a renamed-and-rebooted Mac is
+  common, so there the guard is off. A renamed-and-rebooted Linux host keeps its stale
+  `writer.lock`, and its plugin stays read-only until the operator removes the file.
 
 G.6. Shutdown detection: `$PASEO_HOME/local-credential` is present while the daemon runs and absent
 once it shuts down. A turn cancelled while it is absent is recorded as `canceled-during-shutdown`
@@ -307,12 +335,16 @@ G.7. CLI, read only:
 - Exit codes (show): 0 resumable-native, 1 needs-review, 2 do-not-resume, 3 not found, 64 usage
   error. Exit codes (list): 0 ok, 64 usage error. Both: 70 is an unexpected error (the CLI's catch-all),
   or the `bin/paseo-checkpoint` wrapper cannot run (node missing or below 22.18, `cli.ts` not found,
-  symlink loop). `--help` does not list 70.
+  symlink loop). `--help` lists 70 too.
 - Paseo's store, read only: `<PASEO_HOME>/agents/*/<id>.json` (one directory level, plus the legacy
-  `<PASEO_HOME>/agents/<id>.json`) and the server id from `PASEO_SERVER_ID`, else `<PASEO_HOME>/server-id`.
-  It feeds the `paseo-archived`, `paseo-record-newer` and `other-server` checks in G.5.
+  `<PASEO_HOME>/agents/<id>.json`; regular files only, and a record needs string `id` and `updatedAt`,
+  as upstream's schema does) and the server id from `PASEO_SERVER_ID`, else `<PASEO_HOME>/server-id`.
+  It feeds the `paseo-archived`, `paseo-record-newer`, `paseo-record-missing` and `other-server`
+  checks in G.5. `PASEO_HOME` is the record's `paseoHome` when that is an absolute path (`show`
+  prints which, `paseoHomeSource`), else the environment's. session-recovery's `state.json` is read
+  through the same bounded reader (regular files only, size-capped, a FIFO never blocks).
 - Environment: `ADE_STATE_ROOT` / `XDG_STATE_HOME` (state base), `PASEO_HOME` (default `~/.paseo`;
-  resolved as in G.4), `PASEO_SERVER_ID`.
+  resolved as in G.4; used when the record names none), `PASEO_SERVER_ID`.
 
 G.8. Status (2026-11-04): not installed on any daemon. Installing a live plugin waits for the
 operator's yes (AGENTS.md order 11). Tests: `bin/pytest -q tests/test_ade_recovery_plugin.py`.

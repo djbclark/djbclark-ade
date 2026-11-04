@@ -123,3 +123,32 @@ test("sameHost: machine ids decide when both are known; hostname only as the fal
   assert.equal(sameHost({ host: "" }, { host: "" }), false);
   assert.equal(sameHost(null, { host: "h" }), false);
 });
+
+// Adversary round 2, N6b: one 2 s budget across all candidate binaries, never 2 s each.
+test("probeFirst: one total budget; the next binary gets only the time left, none once it is spent", async () => {
+  const { probeFirst, PROBE_BUDGET_MS } = await import("./host-identity.ts");
+  assert.equal(PROBE_BUDGET_MS, 2000);
+  let clock = 0;
+  const now = () => clock;
+  const seen: Array<[string, number]> = [];
+  const hang = (bin: string, _a: string[], t: number): string => {
+    seen.push([bin, t]);
+    clock += t; // a run that hangs until its timeout
+    throw new Error("ETIMEDOUT");
+  };
+  assert.equal(probeFirst(["/usr/sbin/ioreg", "ioreg"], [], (o) => o || null, 2000, hang, now), null);
+  assert.deepEqual(seen, [["/usr/sbin/ioreg", 2000]], "the second binary is not started once the budget is spent");
+  seen.length = 0;
+  clock = 0;
+  const slowThenOk = (bin: string, _a: string[], t: number): string => {
+    seen.push([bin, t]);
+    if (bin === "a") {
+      clock += 1500;
+      throw new Error("ENOENT");
+    }
+    return "VALUE";
+  };
+  assert.equal(probeFirst(["a", "b"], [], (o) => o || null, 2000, slowThenOk, now), "VALUE");
+  assert.deepEqual(seen, [["a", 2000], ["b", 500]]);
+  assert.equal(probeFirst(["x"], [], () => null, 2000, () => "out", now), null, "unparsed output is null");
+});

@@ -805,3 +805,77 @@ test("records carry the machine id from the host identity", async () => {
   await h.capture.idle();
   assert.equal(h.lastWrite("agent-1").machineId, "d165c2d88d894a4787be219662b439ad");
 });
+
+// Adversary round 2, N3a: Paseo's store is cross-checked at init for EVERY loaded record, and an
+// update the plugin did not observe becomes a sticky interruption a later write cannot hide.
+function idleOnDisk(id: string): Map<string, LoadResult> {
+  const disk = new Map<string, LoadResult>();
+  const body = baseBody(id, {
+    turns: [{ turnKey: `${DI}:1`, turnId: "t0", startedAt: "2026-11-04T10:00:00.000Z", endedAt: "2026-11-04T10:59:00.000Z", outcome: { kind: "completed" }, duringShutdown: false }],
+  });
+  disk.set(id, { record: sealedFrom(body), source: "current", problems: [], maxGenerationSeen: 1 }); // writtenAt 11:00
+  return disk;
+}
+
+test("init: an idle record that Paseo updated while the plugin was down gets a sticky unobserved-activity", async () => {
+  const h = harness({ disk: idleOnDisk("agent-1") });
+  const reads: string[] = [];
+  h.deps.paseoUpdatedAt = (id) => {
+    reads.push(id);
+    return id === "agent-1" ? "2026-11-04T11:30:00.000Z" : null;
+  };
+  const p = fakePaseo();
+  h.capture.onCreate(agent("other"), p); // another agent's event wakes the plugin
+  await h.capture.idle();
+  assert.ok(reads.includes("agent-1"), "every loaded record is checked, not only turn-in-flight ones");
+  const rec = h.lastWrite("agent-1");
+  assert.deepEqual(rec.interruptions!.map((i) => i.evidence), ["unobserved-activity"]);
+  assert.equal(p.calls.filter((c) => c === "refresh:agent-1").length, 0, "an idle record needs no SDK call");
+  // A later observed turn (and its newer writtenAt) does not clear it.
+  h.advance(60_000);
+  h.capture.onTurnBefore(agent("agent-1"), "t1", p);
+  h.capture.onTurnAfter(agent("agent-1"), "t1", { kind: "completed" }, p);
+  h.capture.onClose(agent("agent-1"), p);
+  await h.capture.idle();
+  assert.deepEqual(h.lastWrite("agent-1").interruptions!.map((i) => i.evidence), ["unobserved-activity"]);
+});
+
+test("init: Paseo's bump from the event that woke the plugin, or one within tolerance, is not unobserved", async () => {
+  // The agent's own event arrives at 12:00 and Paseo stamped updatedAt then.
+  const h1 = harness({ disk: idleOnDisk("agent-1") });
+  h1.deps.paseoUpdatedAt = () => "2026-11-04T12:00:00.500Z";
+  h1.capture.onTurnBefore(agent("agent-1"), "t1", fakePaseo());
+  await h1.capture.idle();
+  assert.deepEqual(h1.lastWrite("agent-1").interruptions, []);
+  // An update before that event still counts.
+  const h2 = harness({ disk: idleOnDisk("agent-1") });
+  h2.deps.paseoUpdatedAt = () => "2026-11-04T11:30:00.000Z";
+  h2.capture.onTurnBefore(agent("agent-1"), "t1", fakePaseo());
+  await h2.capture.idle();
+  assert.deepEqual(h2.lastWrite("agent-1").interruptions!.map((i) => i.evidence), ["unobserved-activity"]);
+  // Within the 2 s tolerance of writtenAt, or unavailable: nothing.
+  for (const v of ["2026-11-04T11:00:01.900Z", null, "not-a-date"]) {
+    const h = harness({ disk: idleOnDisk("agent-1") });
+    h.deps.paseoUpdatedAt = () => v;
+    h.capture.onCreate(agent("other"), fakePaseo());
+    await h.capture.idle();
+    assert.equal(h.writes.some((w) => w.agentId === "agent-1"), false, `updatedAt ${v}: nothing written`);
+  }
+  // A reader that throws is logged, never fatal.
+  const h3 = harness({ disk: idleOnDisk("agent-1") });
+  h3.deps.paseoUpdatedAt = () => {
+    throw new Error("EACCES /secret/path");
+  };
+  h3.capture.onCreate(agent("other"), fakePaseo());
+  await h3.capture.idle();
+  assert.equal(h3.capture.mode, "active");
+  assert.ok(h3.logs.some((l) => l.startsWith("paseo store read failed")));
+});
+
+test("records carry the plugin's resolved paseoHome (N3b)", async () => {
+  const h = harness();
+  h.deps.paseoHome = "/home/u/.paseo";
+  h.capture.onCreate(agent(), fakePaseo());
+  await h.capture.idle();
+  assert.equal(h.lastWrite("agent-1").paseoHome, "/home/u/.paseo");
+});

@@ -348,3 +348,30 @@ test("same hostname, another machine id: held-by-other-host; an old lock without
 test("selfWriterInfo records the machine id", () => {
   assert.equal(selfWriterInfo().machineId, hostIdentity().machineId ?? null);
 });
+
+// Adversary round 2, N6a: cloned machine ids (cloned VMs) with another hostname AND boot id are
+// another host for takeover; a rename on the same boot, or a reboot under the same name, is not.
+test("same machine id, hostname and boot id both differ: held-by-other-host (cloned-VM guard)", async () => {
+  const { clonedMachineSuspect } = await import("./writer-lock.ts");
+  const dir = tmpDir();
+  const c = await sleeper();
+  const pid = c.pid!;
+  const start = processStart(pid);
+  await stop(c); // dead here, but on a clone it could be alive: never taken over
+  fakeLock(dir, { pid, start, host: "clone-a.local", machineId: MID, bootId: "other-boot-0000" });
+  const me = () => ({ ...hostIdentity(), host: "clone-b.local", machineId: MID, bootId: "this-boot-1111" });
+  assert.equal(lockHolderAlive(dir, me), null, "liveness on another host is unknown");
+  const r = acquireLock(dir, { ...selfWriterInfo(), host: "clone-b.local", machineId: MID }, { host: me });
+  assert.equal(r.held, false, JSON.stringify(r));
+  assert.match(JSON.stringify(r), /held-by-other-host/);
+  // A reboot under the same name is still a takeover.
+  const sameName = () => ({ ...hostIdentity(), host: "clone-a.local", machineId: MID, bootId: "this-boot-1111" });
+  assert.equal(lockHolderAlive(dir, sameName), false);
+  assert.equal(clonedMachineSuspect({ host: "a", bootId: "b1", machineId: MID }, { host: "b", bootId: "b1", machineId: MID }), false, "rename, same boot");
+  assert.equal(clonedMachineSuspect({ host: "a", bootId: "b1", machineId: MID }, { host: "b", bootId: "b2", machineId: MID, platform: "darwin" }), false, "macOS rename + reboot is the same Mac");
+  assert.equal(clonedMachineSuspect({ host: "a", bootId: "b1", machineId: MID }, { host: "b", bootId: "b2", machineId: MID, platform: "linux" }), true, "linux clone");
+  assert.equal(clonedMachineSuspect({ host: "a", bootId: "b1", machineId: MID }, { host: "a", bootId: "b2", machineId: MID }), false, "reboot, same name");
+  assert.equal(clonedMachineSuspect({ host: "a", bootId: "b1", machineId: null }, { host: "b", bootId: "b2", machineId: MID }), false, "no machine id: hostname decides");
+  assert.equal(clonedMachineSuspect({ host: "a", bootId: null, machineId: MID }, { host: "b", bootId: "b2", machineId: MID }), false, "boot unknown");
+  assert.equal(clonedMachineSuspect({ host: "a", bootId: "b1", machineId: MID }, { host: "b", bootId: "b2", machineId: MID.toUpperCase() }), true);
+});
