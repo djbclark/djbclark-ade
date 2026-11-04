@@ -29,7 +29,12 @@ Claude part: [secret-deny.md](secret-deny.md)), 3 (`bin/post-edit-check`, Claude
    findings never reach the model), and that Claude accepts the new `Read(...)` deny rules.
 6. **Applying the template** to the live `~/.claude/settings.json` (hook entries, deny rules, `retro` skill override)
    waits for djbclark's yes (order 11); `ade-update` does not render templates.
-7. **D7**: run `bin/instruction-lint` over `~/AGENTS.md` and `home-agents.mdc` (outside the repo), and make the
+7. **secret_read_gate.py budget (adversary round 4 MEDIUM, approved as a limit)**: cache a word set aside after its
+   1 s `WORD_S` so a repeat costs nothing, and cap the first pass (per-word share of the remaining budget, or a 0.05 s
+   quick pass first) so crafted slow glob words cannot starve a later glob read; add a test with repeated and distinct
+   slow words before `cat ~/.ssh/id_*`. Also (LOW, pre-existing) treat a shlex word containing a newline as text, so a
+   heredoc with unbalanced backticks (writing `skills/cow-workspaces/SKILL.md`) does not take 8 s.
+8. **D7**: run `bin/instruction-lint` over `~/AGENTS.md` and `home-agents.mdc` (outside the repo), and make the
    `retired-term` warnings an error once the D7 sweep lands. `.cursor/rules/graft.mdc` has no graft markers, so its
    "Graft" heading draws one `heading-skill` warning.
 

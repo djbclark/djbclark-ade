@@ -25,7 +25,8 @@ wildcard never consumes a leading `.`) and pinning (the token's wildcards may no
 text; a cheap test on the token's literals, `**/` read as "" or `/`, skips the rules it cannot spell). So every word gets
 at least that check, `cat ~/.ssh/id_*` and `find . -name '*.key'` block, while `echo *`, `grep 'a.*'` and `ls
 /*/*/*/*/*/*/*/x*` pass. A glob word gets WORD_S on its first try; one that runs longer is retried after every other word,
-so a slow word cannot use up the time a later `cat ~/.ssh/id_*` needs.
+so one slow word cannot use up the time a later `cat ~/.ssh/id_*` needs (about eight crafted slow words still can:
+docs/secret-deny.md C7; literal paths are checked first and are not exposed).
 
 Grep (2026-11-04): Claude's Grep runs ripgrep with `--hidden`, so it reads dotfiles and descends into `~/.ssh`. Its root
 (`path`, else the cwd) is walked breadth-first (bounded: depth, entries, time; VCS dirs and node_modules skipped) and the

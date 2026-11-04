@@ -147,7 +147,11 @@ config change).
   exits 0 with a one-line `secret-read-gate: ... allowing (fail open)` notice on stderr. The Bash glob walk (B1c) does
   not reach that budget: it stops at its own bounds (20000 entries, 2 s, leaving at least 3 s of the 8 s) and falls back
   to the pattern check, with no notice (2026-11-04). A glob word whose check runs past its own 1 s is retried after
-  every other word (B1c), so the 8 s fail-open is reached only after every other word has been checked. A directory that opens but cannot be read to the end
+  every other word (B1c), so one slow word cannot starve a later read. Limit (adversary round 4, 2026-11-04): about
+  eight crafted slow glob words (each repeat or variant spends its own 1 s) still use up the 8 s before a later glob
+  read such as `cat ~/.ssh/id_*` is reached, and the call fails open; a later literal path (`cat ~/.ssh/id_rsa`) is
+  checked first and still blocks. Ordinary code tokens are fast; the fix (cache set-aside words, cap the first pass) is
+  queued in `docs/queue.md`. A directory that opens but cannot be read to the end
   (`/proc/1/map_files`) is skipped by both walks, as the shell and ripgrep skip it; before 2026-11-04 it raised and
   failed the hook open. A Grep walk that hits its own bound allows silently, unless its glob's text blocks (B1b) or the
   root is above a home-level deny (C4). The hook is registered without `onFailure: block`, so a broken hook never
