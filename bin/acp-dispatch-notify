@@ -1,0 +1,74 @@
+#!/usr/bin/env python3
+"""Wait for a dispatch and notify its lead without inheriting the lead's identity.
+
+Usage: acp-dispatch-notify RECORD --target PASEO_AGENT_ID
+Run in the background where the harness cannot track background Bash calls.
+Uses acp-dispatch-wait, not another polling loop. Exit 0: delivered and waiter
+succeeded; 1: delivery not proven (Hermes fallback attempted); otherwise the
+waiter's exit code. Never cancels, reruns, or resumes a slice.
+"""
+from __future__ import annotations
+
+import argparse
+import contextlib
+import io
+import json
+from pathlib import Path
+import subprocess
+import sys
+import uuid
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def notify(target: str, message: str) -> tuple[int, str]:
+    # Reuse relay's notification context: scrub env AND ancestor identity, as its
+    # own deferred-delivery notices do. Clearing PASEO_AGENT_ID alone is not enough.
+    sys.path.insert(0, str(ROOT / "skills/session-finder"))
+    import relay
+
+    output = io.StringIO()
+    with relay.as_caller("acp-dispatch completion", scrub=True, notice=True), contextlib.redirect_stdout(output):
+        rc = relay.main([target, message, "--fyi", "--wait", "30", "--json"], sweep=False)
+    lines = output.getvalue().splitlines()
+    return rc, lines[-1] if lines else "notification returned no receipt"
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("record", type=Path)
+    parser.add_argument("--target", required=True, type=uuid.UUID)
+    args = parser.parse_args(argv)
+    record = args.record.resolve()
+    try:
+        data = json.loads(record.read_text())
+        report = Path(data["report"])
+        if not report.is_absolute():
+            raise ValueError("report path must be absolute")
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        parser.error(f"unreadable dispatch record: {exc}")
+    rc = subprocess.run([str(ROOT / "bin/acp-dispatch-wait"), str(record), str(report) + ".done"]).returncode
+    message = f"Dispatch waiter exited {rc}. Record: {record}. Check finalized record and .done before reading the report; do not rerun the slice."
+    try:
+        relay_rc, receipt = notify(str(args.target), message)
+    except Exception as exc:
+        relay_rc, receipt = 1, f"notification failed: {type(exc).__name__}"
+    print(receipt, flush=True)
+    try:
+        proof = json.loads(receipt)
+        delivered = isinstance(proof, dict) and proof.get("result") == "delivered"
+    except (ValueError, TypeError):
+        delivered = False
+    # Accepted/queued is not delivered. Do not resend an uncertain notification;
+    # alert the operator instead, preserving the one send's existing relay state.
+    if relay_rc or not delivered:
+        try:
+            subprocess.run([str(Path.home() / ".local/bin/hermes-ping"), f"ade: dispatch completion delivery unproven for {record}; {receipt[:300]}"], check=False)
+        except OSError as exc:
+            print(f"Hermes fallback failed: {exc}", file=sys.stderr)
+        return 1
+    return rc if rc >= 0 else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
