@@ -35,7 +35,43 @@
       "ScheduleWakeup",
       "SendFeedback",
       "Workflow",
-      "mcp__basic-memory__delete_project"
+      "mcp__basic-memory__delete_project",
+      "Read(**/.env)",
+      "Read(**/*.key)",
+      "Read(**/*.p12)",
+      "Read(**/*.pfx)",
+      "Read(**/*-key.pem)",
+      "Read(**/*.key.pem)",
+      "Read(**/privkey*.pem)",
+      "Read(**/id_rsa)",
+      "Read(**/id_ecdsa)",
+      "Read(**/id_ed25519)",
+      "Read(~/.ssh/id_rsa)",
+      "Read(~/.ssh/id_ecdsa)",
+      "Read(~/.ssh/id_ed25519)",
+      "Read(~/.aws/credentials)",
+      "Read(~/.netrc)",
+      "Read(~/.config/gh/hosts.yml)",
+      "Read(~/.docker/config.json)",
+      "Read(~/.kube/config)",
+      "Edit(**/.env)",
+      "Edit(**/*.key)",
+      "Edit(**/*.p12)",
+      "Edit(**/*.pfx)",
+      "Edit(**/*-key.pem)",
+      "Edit(**/*.key.pem)",
+      "Edit(**/privkey*.pem)",
+      "Edit(**/id_rsa)",
+      "Edit(**/id_ecdsa)",
+      "Edit(**/id_ed25519)",
+      "Edit(~/.ssh/id_rsa)",
+      "Edit(~/.ssh/id_ecdsa)",
+      "Edit(~/.ssh/id_ed25519)",
+      "Edit(~/.aws/credentials)",
+      "Edit(~/.netrc)",
+      "Edit(~/.config/gh/hosts.yml)",
+      "Edit(~/.docker/config.json)",
+      "Edit(~/.kube/config)"
     ],
     "defaultMode": "bypassPermissions"
   },
@@ -286,6 +322,16 @@
       }
     ],
     "PreToolUse": [
+      {
+        "matcher": "Read|Edit|MultiEdit|Write|NotebookEdit|Grep|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$HOME/.claude/hooks/secret_read_gate.py\"",
+            "timeout": 15
+          }
+        ]
+      },
       {
         "matcher": "Grep|Glob|Bash",
         "hooks": [
