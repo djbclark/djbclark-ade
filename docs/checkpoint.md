@@ -204,11 +204,81 @@ F5. The recovery ladder, in the plan's native, existing-plugin, new-plugin order
 `paseo send`, `agent reload` and `agent import` are the resume mechanism (F2). (2)
 `sm1ee/session-recovery` gives automatic continuation once approved (F4), with `enabled=false`
 until then. (3) Passive capture of artifact evidence (repo, base and head, dirty-tree hash,
-untracked paths, tool-call titles, interruption evidence) by an ADE plugin. This is planned in
-this change, as the first G1 module, because nothing in F1 to F4 records C1 to C4 evidence. A
-later edit will point this item at the plugin path.
+untracked paths, interruption evidence; tool-call receipts are deferred to G1) by an ADE plugin. It is
+`plugins/ade-recovery` (section G), a standalone passive plugin whose records G1 reads later
+(kept separate because G1's future `agent.open.before` tools would make every capture fix reload
+idle agents).
 
 F6. Legacy `acp-dispatch --checkpoint` (CHECKPOINT_TEXT, stale-report check, ACP resume/load,
 fresh-session fallback via checkpoint_context) is frozen as of 2026-11-04. It keeps working for
 dispatched slices until D5 replaces `acp-dispatch`, gets no new features, and its resume ladder
 is superseded by F5. Tracked in [issue 278](https://github.com/djbclark/djbclark-ade/issues/278).
+
+## G. Interim implementation: ade-recovery v1 (2026-11-04)
+
+Code and tests: `plugins/ade-recovery` (OVERVIEW.md, `server/types.ts`), reader `bin/paseo-checkpoint`.
+Issue 278. Status and the probes it depends on are in G.8.
+
+G.1. What it captures, per agent, in one record:
+- identity: serverId, Paseo agent id, provider, cwd, host, boot id, platform, workspace and parent ids.
+- persistence: `sessionId` and the sha256 of the native handle. The handle itself is never written.
+- lifecycle: state, daemon instance, `closedAt`, `archivedAt`.
+- the last 20 turns, with outcome codes only.
+- git evidence: repo top, linked-worktree flag, branch, head, and base (merge-base with origin HEAD,
+  or recorded at create).
+- tracked fingerprint: sha256 over path and blob id from `git hash-object --no-filters` (no `-w`)
+  for each tracked change against HEAD.
+- untracked paths (capped, redacted names) and a stat fingerprint over path, size and mtime.
+  Contents are never read.
+- interruption history, last 20. A later turn never clears it.
+- `missingTelemetry`: each field it could not read, with the reason.
+
+G.2. What it never does:
+- send a prompt, reload, archive, create, close or interrupt an agent;
+- call `timeline.refetch`, which loads provider history and can start a provider;
+- write to git: no stage, commit, stash, reset, or `hash-object -w`;
+- store tool calls, titles or command lines.
+
+G.3. Hooks: exactly five notification hooks: `agent.create.after`, `agent.turn.before`,
+`agent.turn.after`, `agent.close.after`, `agent.archive.after`. It does not register
+`agent.open.before`, because that makes Paseo invalidate open sessions on every plugin start or
+reload (F3; [`skills/ade-paseo-plugin/SKILL.md`](skills/ade-paseo-plugin/SKILL.md), "In this repo").
+
+G.4. Where records live:
+`${ADE_STATE_ROOT:-${XDG_STATE_HOME:-~/.local/state}}/ade/<serverId>/ade-recovery/recovery/v1/<agent>.json`,
+with the previous generation at `<agent>.prev.json`. Files are 0600 in 0700 directories. A
+`writer.lock` names the writer by pid and start token. Each record carries a sha256 integrity
+digest; a corrupt current file falls back to `.prev.json`.
+
+G.5. Verdicts (`bin/paseo-checkpoint show` and `list`):
+- `resumable-native`: only when the last turn ended cleanly, was observed, the tree still matches,
+  and no interruption came later.
+- `needs-review`: an interrupted turn, and any case that is neither of the other two. `--no-live`
+  also gives this verdict.
+- `do-not-resume`: a user stop or an archive.
+
+G.6. Shutdown detection: `$PASEO_HOME/local-credential` is present while the daemon runs and absent
+once it shuts down. A turn cancelled while it is absent is recorded as `canceled-during-shutdown`
+evidence, not as a user stop.
+
+G.7. CLI, read only:
+- `bin/paseo-checkpoint list [--json] [--server-id S] [--no-live]`: one line per recorded agent.
+- `bin/paseo-checkpoint show AGENT_ID [--json] [--server-id S] [--no-live]`: verdict, reason codes
+  and evidence for one agent.
+- `--no-live` skips live git against the record's cwd, so the verdict then needs review.
+- Exit codes (show): 0 resumable-native, 1 needs-review, 2 do-not-resume, 3 not found, 64 usage
+  error. Exit codes (list): 0 ok, 64 usage error.
+- Environment: `ADE_STATE_ROOT` / `XDG_STATE_HOME` (state base), `PASEO_HOME` (default `~/.paseo`).
+
+G.8. Status (2026-11-04): not installed on any daemon. Installing a live plugin waits for the
+operator's yes (AGENTS.md order 11). Tests: `bin/pytest -q tests/test_ade_recovery_plugin.py`.
+D1 must confirm these probes on the operator's daemon first:
+- the SDK handle is usable after a hook returns;
+- `hosts.list` is permitted to the plugin;
+- `local-credential` is present while the daemon runs;
+- Paseo's compiler accepts `.ts` relative imports;
+- `process.ppid` is the daemon;
+- shutdown hook order.
+
+G.9. Deferred to G1: tool-call receipts, C5 effect receipts, artifact snapshots, retention, and an
+RPC for reading records.
