@@ -7,8 +7,15 @@ import { loadRecord, listAgents } from "./store.ts";
 import { stateBase, stateRoot } from "./state-root.ts";
 import { lockHolderAlive } from "./writer-lock.ts";
 import { hostIdentity, processAlive, sameHost } from "./host-identity.ts";
-import { paseoHome, paseoServerId, readPaseoAgentRecord, type PaseoAgentRecordEvidence } from "./paseo-home.ts";
-import { judge } from "./verdict.ts";
+import {
+  lookupPaseoAgentRecord,
+  paseoHome,
+  paseoServerId,
+  readSmallFile,
+  validRecordedPaseoHome,
+  type PaseoAgentRecordEvidence,
+} from "./paseo-home.ts";
+import { judge, PASEO_NEWER_TOLERANCE_MS } from "./verdict.ts";
 import { gitEvidence } from "./git-evidence.ts";
 
 const USAGE = `usage: paseo-checkpoint <command> [options]
@@ -34,8 +41,11 @@ exit code 70 (both): internal error, or (from the bin/paseo-checkpoint wrapper) 
 
 Paseo's own store is read too, read only: <PASEO_HOME>/agents/*/<id>.json (archivedAt set:
 do-not-resume, paseo-archived; updatedAt more than 2 s after the record: needs-review,
-paseo-record-newer) and the daemon's server id (PASEO_SERVER_ID, else <PASEO_HOME>/server-id;
-a mismatch: other-server). Unreadable evidence never blocks by itself (info only).
+paseo-record-newer and interrupted:unobserved-activity; the agents directory readable but no
+valid <id>.json: needs-review, paseo-record-missing) and the daemon's server id (PASEO_SERVER_ID,
+else <PASEO_HOME>/server-id; a mismatch: other-server). An absent or unreadable store never
+blocks by itself (info only). PASEO_HOME is the one the plugin stored in the record when it is
+an absolute path, else the environment's.
 
 environment: ADE_STATE_ROOT / XDG_STATE_HOME (state base), PASEO_HOME (default ~/.paseo; a
 leading ~ expands and a relative value resolves against the cwd, as Paseo does), PASEO_SERVER_ID
@@ -44,6 +54,8 @@ leading ~ expands and a relative value resolves against the cwd, as Paseo does),
 const EXIT: Record<Verdict, number> = { "resumable-native": 0, "needs-review": 1, "do-not-resume": 2 };
 const OPEN_PHASES = new Set(["watching", "waiting", "interrupted", "scheduled", "review", "sending", "resumed"]);
 const SAFE = /^[A-Za-z0-9_-]{1,128}$/;
+/** session-recovery's state.json cap: a FIFO, a device or a huge file is never read. */
+const MAX_RECOVERY_STATE_BYTES = 16 * 1024 * 1024;
 
 interface Opts {
   json: boolean;
@@ -117,9 +129,11 @@ async function collect(env: NodeJS.ProcessEnv, only: string | null): Promise<Ent
 
 /** Read-only look at session-recovery's state: true when it holds an open record for this agent. */
 function recoveryScheduledElsewhere(home: string, agentId: string, sessionId: string | undefined): boolean | null {
+  const raw = readSmallFile(path.join(home, "plugin-data", "session-recovery", "state.json"), MAX_RECOVERY_STATE_BYTES);
+  if (raw === null) return null;
   let state: unknown;
   try {
-    state = JSON.parse(fs.readFileSync(path.join(home, "plugin-data", "session-recovery", "state.json"), "utf8"));
+    state = JSON.parse(raw);
   } catch {
     return null;
   }
@@ -139,14 +153,20 @@ interface Judged {
   entry: Entry;
   result: VerdictResult;
   live: LiveEvidence;
-  computed: Interruption | null;
+  computed: Interruption[];
   paseo: PaseoAgentRecordEvidence | null;
+  paseoHome: string;
+  paseoHomeSource: "record" | "env";
 }
 
 async function evaluate(entry: Entry, opts: Opts, env: NodeJS.ProcessEnv): Promise<Judged> {
   const rec = entry.load.record;
   const host = hostIdentity();
-  const home = paseoHome(env);
+  // The plugin's own resolved PASEO_HOME wins: a shell whose PASEO_HOME differs from the daemon's
+  // (a launchd plist, say) would otherwise read the wrong store and turn the backstop off.
+  const recorded = validRecordedPaseoHome(rec?.paseoHome);
+  const home = recorded ?? paseoHome(env);
+  const homeSource: "record" | "env" = recorded !== null ? "record" : "env";
   let paseo: PaseoAgentRecordEvidence | null = null;
   let git: GitEvidence | null = null;
   if (rec && !opts.noLive && rec.cwd) git = await gitEvidence(rec.cwd, AbortSignal.timeout(25_000));
@@ -162,27 +182,49 @@ async function evaluate(entry: Entry, opts: Opts, env: NodeJS.ProcessEnv): Promi
     serverId: entry.serverId,
   };
   if (rec) {
-    const stored = readPaseoAgentRecord(home, rec.paseoAgentId);
+    const lookup = lookupPaseoAgentRecord(home, rec.paseoAgentId);
+    const stored = lookup.status === "found" ? lookup.record : null;
     live.paseoArchived = stored === null ? null : stored.archivedAt !== null;
     live.paseoUpdatedAt = stored === null ? null : stored.updatedAt;
+    live.paseoRecordMissing = lookup.status === "missing";
     live.paseoServerId = paseoServerId(home, env);
     paseo = stored;
   }
   let load = entry.load;
-  let computed: Interruption | null = null;
+  const computed: Interruption[] = [];
   if (rec && rec.state === "turn-in-flight" && recordWriterAlive === false) {
     const last = rec.turns?.[rec.turns.length - 1];
-    computed = {
+    computed.push({
       detectedAt: new Date(live.now).toISOString(),
       evidence: "writer-dead",
       turnKey: last?.turnKey ?? null,
       detail: `record writer pid ${rec.writer.pid} is not alive`,
-    };
-    const patched: RecoveryRecord = { ...rec, interruptions: [...(rec.interruptions ?? []), computed] };
+    });
+  }
+  // The plugin's init check, made here against the record as it stands, so it holds even when
+  // the plugin never restarted to make it.
+  const pu = Date.parse(String(live.paseoUpdatedAt ?? ""));
+  const wa = Date.parse(String(rec?.writtenAt ?? ""));
+  if (
+    rec &&
+    Number.isFinite(pu) &&
+    Number.isFinite(wa) &&
+    pu - wa > PASEO_NEWER_TOLERANCE_MS &&
+    !(rec.interruptions ?? []).some((i) => i?.evidence === "unobserved-activity")
+  ) {
+    computed.push({
+      detectedAt: new Date(live.now).toISOString(),
+      evidence: "unobserved-activity",
+      turnKey: null,
+      detail: "Paseo's agent record changed after the last generation",
+    });
+  }
+  if (rec && computed.length > 0) {
+    const patched: RecoveryRecord = { ...rec, interruptions: [...(rec.interruptions ?? []), ...computed] };
     load = { ...load, record: patched };
   }
   const result = await judge(load, live);
-  return { entry, result, live, computed, paseo };
+  return { entry, result, live, computed, paseo, paseoHome: home, paseoHomeSource: homeSource };
 }
 
 function summary(j: Judged) {
@@ -202,13 +244,16 @@ function summary(j: Judged) {
     provider: rec?.provider ?? null,
     cwd: rec?.cwd ?? null,
     lastTurn: last,
-    interruptions: [...(rec?.interruptions ?? []), ...(j.computed ? [j.computed] : [])],
+    interruptions: [...(rec?.interruptions ?? []), ...j.computed],
     liveGit: j.live.git ? { head: j.live.git.head, branch: j.live.git.branch, errors: j.live.git.errors } : null,
     writerAlive: j.live.writerAlive,
     recordWriterAlive: j.live.recordWriterAlive,
     recoveryScheduledElsewhere: j.live.recoveryScheduledElsewhere,
     paseoRecord: j.paseo,
+    paseoRecordMissing: j.live.paseoRecordMissing ?? false,
     paseoServerId: j.live.paseoServerId ?? null,
+    paseoHome: j.paseoHome,
+    paseoHomeSource: j.paseoHomeSource,
   };
 }
 
@@ -273,7 +318,7 @@ async function cmdShow(opts: Opts, env: NodeJS.ProcessEnv): Promise<number> {
       `live git   ${s.liveGit ? `head ${s.liveGit.head ?? "-"} branch ${s.liveGit.branch ?? "-"} errors ${s.liveGit.errors.join(",") || "-"}` : "not captured"}`,
       `writer     lock holder alive ${s.writerAlive}, record writer alive ${s.recordWriterAlive}`,
       `recovery   scheduled elsewhere ${s.recoveryScheduledElsewhere}`,
-      `paseo      ${s.paseoRecord ? `archivedAt ${s.paseoRecord.archivedAt ?? "-"} updatedAt ${s.paseoRecord.updatedAt ?? "-"} (${s.paseoRecord.updatedAtSource})` : "stored record unavailable"}, server id ${s.paseoServerId ?? "unavailable"}`,
+      `paseo      ${s.paseoRecord ? `archivedAt ${s.paseoRecord.archivedAt ?? "-"} updatedAt ${s.paseoRecord.updatedAt ?? "-"} (${s.paseoRecord.updatedAtSource})` : s.paseoRecordMissing ? "stored record missing" : "stored record unavailable"}, server id ${s.paseoServerId ?? "unavailable"}, home ${s.paseoHome} (${s.paseoHomeSource})`,
       `interrupts ${s.interruptions.map((i) => i.evidence).join(", ") || "-"}`,
     ];
     process.stdout.write(lines.join("\n") + "\n");

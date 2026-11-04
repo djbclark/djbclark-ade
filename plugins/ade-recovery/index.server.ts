@@ -14,7 +14,7 @@ import { gitEvidence } from "./server/git-evidence.ts";
 import { daemonIdentity, hostIdentity, processStart } from "./server/host-identity.ts";
 import { ensureRoot, safeComponent, stateRoot } from "./server/state-root.ts";
 import { listAgents, loadRecord, sweepTmp, writeGeneration } from "./server/store.ts";
-import { paseoHome } from "./server/paseo-home.ts";
+import { lookupPaseoAgentRecord, paseoHome } from "./server/paseo-home.ts";
 import { acquireLock, selfWriterInfo } from "./server/writer-lock.ts";
 
 /** The hooks this plugin registers, in order. */
@@ -74,6 +74,7 @@ function stderrLog(message: string, extra?: Record<string, unknown>): void {
 }
 
 export function productionDeps(env: NodeJS.ProcessEnv = process.env): CaptureDeps {
+  const home = paseoHome(env);
   return {
     store: {
       stateRoot: (serverId) => stateRoot(serverId, env),
@@ -92,6 +93,12 @@ export function productionDeps(env: NodeJS.ProcessEnv = process.env): CaptureDep
     hashJson: (value) => sha256Hex(canonicalJson(value)),
     safeComponent,
     realpath: (p) => fs.promises.realpath(p),
+    paseoHome: home,
+    // Read only, the same reader the CLI uses.
+    paseoUpdatedAt: (agentId) => {
+      const r = lookupPaseoAgentRecord(home, agentId);
+      return r.status === "found" ? r.record.updatedAt : null;
+    },
   };
 }
 

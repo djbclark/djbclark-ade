@@ -75,7 +75,11 @@ export function judge(load: LoadResult, live: LiveEvidence | null): VerdictResul
   // as a user stop: the safe direction.
   const turns: TurnRecord[] = Array.isArray(r.turns) ? r.turns : [];
   const last: TurnRecord | null = turns.length > 0 ? turns[turns.length - 1] : null;
-  const ints: Interruption[] = Array.isArray(r.interruptions) ? r.interruptions : [];
+  const allInts: Interruption[] = Array.isArray(r.interruptions) ? r.interruptions : [];
+  // unobserved-activity is sticky: it blocks whatever the turn order (a later observed turn does
+  // not clear it), and it does not explain a cancel, so it is kept out of the ordering below.
+  const unobserved = allInts.filter((i) => i?.evidence === "unobserved-activity");
+  const ints = allInts.filter((i) => i?.evidence !== "unobserved-activity");
   const later = interruptionsAfter(ints, last);
   const prior = ints.length - later.length;
   if (prior > 0) info.push(`prior-interruptions:${prior}`);
@@ -96,7 +100,8 @@ export function judge(load: LoadResult, live: LiveEvidence | null): VerdictResul
     if (live.paseoServerId === null) info.push("paseo-server-id-unavailable");
     else if (typeof live.paseoServerId === "string" && live.paseoServerId !== r.serverId) add(reasons, "other-server");
     if (live.paseoArchived === true) add(stop, "paseo-archived");
-    if (live.paseoArchived === null || live.paseoUpdatedAt === null) info.push("paseo-record-unavailable");
+    if (live.paseoRecordMissing === true) add(reasons, "paseo-record-missing");
+    else if (live.paseoArchived === null || live.paseoUpdatedAt === null) info.push("paseo-record-unavailable");
     const pu = ms(live.paseoUpdatedAt);
     const wa = ms(r.writtenAt);
     if (pu !== null && wa !== null && pu - wa > PASEO_NEWER_TOLERANCE_MS) add(reasons, "paseo-record-newer");
@@ -111,7 +116,8 @@ export function judge(load: LoadResult, live: LiveEvidence | null): VerdictResul
 
   // Interruptions after the last turn started: never resumable; tool calls are not captured in v1.
   for (const i of later) add(reasons, `interrupted:${typeof i?.evidence === "string" ? i.evidence : "unknown"}`);
-  if (later.length > 0) add(reasons, "tools-unobserved");
+  if (unobserved.length > 0) add(reasons, "interrupted:unobserved-activity");
+  if (later.length > 0 || unobserved.length > 0) add(reasons, "tools-unobserved");
 
   // Live turn: a turn is open, nothing has interrupted it, and a writer that could still be
   // recording it is alive. (A recorded interruption wins: a live writer then is a new daemon's.)

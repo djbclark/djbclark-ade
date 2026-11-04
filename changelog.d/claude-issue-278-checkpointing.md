@@ -7,3 +7,7 @@
 
 - Changed `docs/checkpoint.md` sections F and G (2026-11-04): F5 item (3) now names `plugins/ade-recovery`, and section G records the interim ade-recovery v1 implementation, what it captures and never does, its hooks and record location, its verdicts, and the D1 probes it depends on (issue 278). (#278)
 - Changed `acp-dispatch --checkpoint` to be frozen until D5 replaces `acp-dispatch`, with no new features (2026-11-04; its resume ladder is superseded by checkpoint F5) (issue 278). (#278)
+
+### Fixed
+
+- Fixed `plugins/ade-recovery` evidence gaps found by adversarial review before merge (2026-11-04): renames, submodule commits and working-tree edits, mode and symlink changes, and file names with a newline, leading quote or trailing CR now change the tracked fingerprint; host comparison uses a stable machine id; `bin/paseo-checkpoint` cross-checks Paseo's own agent record (`paseo-archived`, `paseo-record-newer`, `paseo-record-missing`, `other-server`) and activity Paseo saw while the plugin was down is a sticky `unobserved-activity` interruption (issue 278). (#278)

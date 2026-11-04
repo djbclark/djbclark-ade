@@ -4,7 +4,10 @@
 // nonce (see claim()); after linking, the winner re-reads the lock and compares its nonce.
 // Host: the machine id decides (hostname drifts on macOS), the hostname only when either side has
 // no machine id (an older lock). Residual: a holder on another machine (shared home) is never
-// judged; it is reported, not taken over.
+// judged; it is reported, not taken over. Cloned-VM guard: machine ids that match while BOTH the
+// hostname and the boot id differ read as another host (a cloned /etc/machine-id), not as a
+// reboot. Residual of that guard: one machine that was renamed AND rebooted keeps its stale lock
+// (read-only) until the operator removes writer.lock.
 
 import fs from "node:fs";
 import path from "node:path";
@@ -111,9 +114,27 @@ type HolderState =
   | { stale: true; why: "malformed" | "boot-id-changed" | "holder-dead" }
   | { stale: false; why: "held-by-live-writer" | "holder-liveness-unknown" | "held-by-other-host" };
 
+/**
+ * Machine ids match, yet the hostname AND the boot id both differ: likely a cloned VM, not a reboot.
+ * Not applied on macOS: IOPlatformUUID is bound to the hardware (a cloned /etc/machine-id is the
+ * Linux case), while a renamed-and-rebooted Mac is common and would otherwise stay read-only.
+ */
+export function clonedMachineSuspect(
+  h: { host?: unknown; bootId?: unknown; machineId?: unknown },
+  me: { host?: unknown; bootId?: unknown; machineId?: unknown; platform?: unknown },
+): boolean {
+  if (me.platform === "darwin") return false;
+  const hm = typeof h.machineId === "string" && h.machineId !== "";
+  const mm = typeof me.machineId === "string" && me.machineId !== "";
+  if (!hm || !mm) return false; // the hostname already decided sameHost
+  const hostDiffers = typeof h.host === "string" && typeof me.host === "string" && h.host !== me.host;
+  const bootDiffers = typeof h.bootId === "string" && typeof me.bootId === "string" && h.bootId !== me.bootId;
+  return hostDiffers && bootDiffers;
+}
+
 function judgeHolder(h: LockContent | null, me: HostIdentity): HolderState {
   if (h === null) return { stale: true, why: "malformed" };
-  if (!sameHost(h, me)) return { stale: false, why: "held-by-other-host" };
+  if (!sameHost(h, me) || clonedMachineSuspect(h, me)) return { stale: false, why: "held-by-other-host" };
   if (h.bootId !== null && me.bootId !== null && h.bootId !== me.bootId) return { stale: true, why: "boot-id-changed" };
   const alive = processAlive({ pid: h.pid, start: h.start });
   if (alive === false) return { stale: true, why: "holder-dead" };

@@ -58,7 +58,43 @@ export function addInterruption(
 ): void {
   const list = record.interruptions ? [...record.interruptions] : [];
   list.push(interruption);
-  record.interruptions = list.length > max ? list.slice(list.length - max) : list;
+  if (list.length <= max) {
+    record.interruptions = list;
+    return;
+  }
+  // The cap never drops the sticky unobserved-activity entry: keep the oldest one in front.
+  let kept = list.slice(list.length - max);
+  const sticky = list.find((i) => i?.evidence === "unobserved-activity");
+  if (sticky && !kept.some((i) => i?.evidence === "unobserved-activity")) kept = [sticky, ...kept.slice(1)];
+  record.interruptions = kept;
+}
+
+/**
+ * Paseo's stored agent record says the agent changed after `writtenAt` (beyond `toleranceMs`) and
+ * before `before` (the time the plugin first saw an event for it, which may itself have bumped
+ * `updatedAt`): append the sticky `unobserved-activity` interruption, once. Returns true when added.
+ */
+export function noteUnobservedActivity(
+  record: RecordBody,
+  writtenAt: string | null | undefined,
+  paseoUpdatedAt: string | null | undefined,
+  before: number,
+  toleranceMs: number,
+  at: string,
+): boolean {
+  const w = typeof writtenAt === "string" ? Date.parse(writtenAt) : Number.NaN;
+  const u = typeof paseoUpdatedAt === "string" ? Date.parse(paseoUpdatedAt) : Number.NaN;
+  if (!Number.isFinite(w) || !Number.isFinite(u)) return false;
+  if (u - w <= toleranceMs) return false;
+  if (Number.isFinite(before) && u >= before - toleranceMs) return false;
+  if ((record.interruptions ?? []).some((i) => i?.evidence === "unobserved-activity")) return false;
+  addInterruption(record, {
+    detectedAt: at,
+    evidence: "unobserved-activity",
+    turnKey: null,
+    detail: "Paseo's agent record changed after the last generation while the plugin was not observing",
+  });
+  return true;
 }
 
 /** Add a missing-telemetry entry once per field. */
