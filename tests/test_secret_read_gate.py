@@ -15,6 +15,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -167,8 +168,125 @@ def test_grep(env, inp, want):
     assert blocked(env, "Grep", inp) is want
 
 
-def test_grep_home_with_extension_glob_does_not_reach_hidden_dirs(env):
+# Claude's Grep is ripgrep with --hidden (2026-11-04 adversary finding A1): it reads dotfiles and enters ~/.ssh.
+def secrets_in_home(env):
+    (env["home"] / ".ssh" / "id_ed25519").write_text("PRIVATE\n")
+    (env["home"] / ".aws").mkdir()
+    (env["home"] / ".aws" / "credentials").write_text("[default]\n")
+
+
+@pytest.mark.parametrize("inp", [
+    {"pattern": "x", "path": "$HOME"},
+    {"pattern": "x", "path": "~"},
+    {"pattern": "x", "path": "$HOME/.aws", "output_mode": "content"},
+    {"pattern": "x", "glob": "credentials", "path": "$HOME"},
+])
+def test_grep_home_repros_block(env, inp):
+    secrets_in_home(env)
+    assert blocked(env, "Grep", inp), inp
+
+
+def test_grep_hidden_glob_repro_blocks_when_env_exists(env):
+    (env["proj"] / ".env").write_text("A=1\n")
+    assert blocked(env, "Grep", {"pattern": "x", "glob": ".e*"})
+
+
+def test_grep_home_with_extension_glob_reaches_hidden_dirs(env):
+    secrets_in_home(env)
     assert not blocked(env, "Grep", {"pattern": "x", "path": str(env["home"]), "glob": "*.py"})
+    (env["home"] / ".ssh" / "notes.py").write_text("x\n")   # under ~/.ssh/**, and *.py reaches it with --hidden
+    assert blocked(env, "Grep", {"pattern": "x", "path": str(env["home"]), "glob": "*.py"})
+
+
+def test_grep_of_a_clean_project_passes(env):
+    (env["proj"] / "src").mkdir()
+    (env["proj"] / "src" / "app.py").write_text("x\n")
+    (env["proj"] / ".env.example").write_text("A=\n")
+    (env["proj"] / ".github").mkdir()
+    (env["proj"] / ".github" / "ci.yml").write_text("x\n")
+    assert not blocked(env, "Grep", {"pattern": "x"})
+    assert not blocked(env, "Grep", {"pattern": "x", "path": str(env["proj"])})
+    assert not blocked(env, "Grep", {"pattern": "x", "path": "src"})
+
+
+def test_grep_of_a_project_with_env_blocks_unless_the_glob_leaves_it_out(env):
+    (env["proj"] / "src").mkdir()
+    (env["proj"] / "src" / "app.py").write_text("x\n")
+    (env["proj"] / "config").mkdir()
+    (env["proj"] / "config" / ".env").write_text("A=1\n")
+    rc, err = run(env, "Grep", {"pattern": "x"})
+    assert rc == 2 and "config/.env" in err and "narrower path" in err and "glob" in err
+    assert err.count("\n") == 1
+    assert blocked(env, "Grep", {"pattern": "x", "path": str(env["proj"])})
+    assert not blocked(env, "Grep", {"pattern": "x", "glob": "*.py"})
+    assert not blocked(env, "Grep", {"pattern": "x", "glob": "!.env"})
+    assert not blocked(env, "Grep", {"pattern": "x", "glob": "!config"})
+    assert not blocked(env, "Grep", {"pattern": "x", "path": "src"})
+    assert blocked(env, "Grep", {"pattern": "x", "glob": "*"})
+    assert blocked(env, "Grep", {"pattern": "x", "glob": "config/*"})
+    assert blocked(env, "Grep", {"pattern": "x", "glob": "*.py *"})    # any reading of a split glob counts
+
+
+def test_grep_walk_skips_vcs_dirs_and_does_not_follow_symlinks(env):
+    (env["proj"] / ".git").mkdir()
+    (env["proj"] / ".git" / "id_rsa").write_text("x\n")
+    (env["tmp"] / "outside").mkdir()
+    (env["tmp"] / "outside" / ".env").write_text("A=1\n")
+    (env["proj"] / "linked").symlink_to(env["tmp"] / "outside")
+    assert not blocked(env, "Grep", {"pattern": "x"})
+
+
+def test_grep_root_above_home_blocks(env):
+    (env["home"] / ".ssh" / "id_rsa").write_text("PRIVATE\n")
+    assert blocked(env, "Grep", {"pattern": "x", "path": "/"})
+    assert blocked(env, "Grep", {"pattern": "x", "path": str(env["tmp"])})
+
+
+def grep_inproc(hook, policy, path, glob=None, cwd="/"):
+    ti = {"pattern": "x", "path": path}
+    if glob:
+        ti["glob"] = glob
+    return hook.check({"tool_name": "Grep", "tool_input": ti, "cwd": cwd}, policy)
+
+
+def test_grep_truncated_walk_fails_open_except_above_a_home_deny(tmp_path, monkeypatch):
+    hook = load_hook()
+    home, proj = tmp_path / "home", tmp_path / "proj"
+    for d in (home, proj):
+        d.mkdir()
+        for i in range(10):
+            (d / ("f%d.txt" % i)).write_text("x\n")
+    (proj / "zz").mkdir()
+    (proj / "zz" / ".env").write_text("A=1\n")
+    policy = hook.Policy(["~/.netrc", ".env"], [], homes=[str(home)], fold=False)
+    assert grep_inproc(hook, policy, str(proj))[1] == ".env"          # the whole walk finds it
+    assert grep_inproc(hook, policy, str(home)) is None               # small home, no secret in it
+    monkeypatch.setattr(hook, "MAX_WALK_ENTRIES", 5)
+    assert grep_inproc(hook, policy, str(proj)) is None               # bound hit: fail open
+    hit = grep_inproc(hook, policy, str(home))
+    assert hit and hit[1] == "~/.netrc" and "narrower path" in hit[3]  # bound hit above a home deny: block
+    assert grep_inproc(hook, policy, str(tmp_path))[1] == "~/.netrc"
+    monkeypatch.setattr(hook, "MAX_WALK_ENTRIES", 20000)
+    monkeypatch.setattr(hook, "MAX_WALK_DEPTH", 0)
+    (home / "d").mkdir()
+    assert grep_inproc(hook, policy, str(proj)) is None               # depth bound: fail open
+    assert grep_inproc(hook, policy, str(home)) is not None
+
+
+def test_grep_glob_readings():
+    hook = load_hook()
+    g = hook.GrepGlob("*.py", False)
+    assert g.reaches("a.py") and g.reaches(".env.py") and g.reaches("sub/x.py") and not g.reaches(".env")
+    g = hook.GrepGlob("!.env", False)
+    assert g.reaches("a.py") and not g.reaches(".env") and not g.reaches("sub/.env")
+    g = hook.GrepGlob("!.ssh", False)
+    assert not g.reaches(".ssh/id_rsa")
+    g = hook.GrepGlob("*.{py,env}", False)
+    assert g.reaches("a.env") and not g.reaches("a.key")
+    g = hook.GrepGlob("*.py,*.key", False)        # one glob, or two split on the comma: either may be what runs
+    assert g.reaches("a.key")
+    g = hook.GrepGlob("src/*.py", False)
+    assert g.reaches("src/a.py") and not g.reaches("lib/a.py")
 
 
 # ---- Bash ------------------------------------------------------------------------------------------------------------
@@ -332,6 +450,60 @@ def test_analysis_budget_fails_open(monkeypatch, capsys):
     monkeypatch.delenv("SECRET_DENY_POLICY", raising=False)
     assert hook.main() == 0
     assert "OutOfTime" in capsys.readouterr().err
+
+
+def test_bash_glob_expansion_is_lazy_and_capped(monkeypatch, tmp_path):
+    """Adversary finding B2 (2026-11-04): `ls /*/*/*/*/*/*` took 6.3 s in glob.glob, outside the budget."""
+    hook = load_hook()
+    pulled = []
+
+    def endless(pattern):
+        i = 0
+        while True:
+            pulled.append(i)
+            yield "/nowhere/f%d.txt" % i
+            i += 1
+    monkeypatch.setattr(hook.globmod, "iglob", endless)
+    ck = hook.Checker(hook.Policy([".env"], [], homes=[str(tmp_path)], fold=False), str(tmp_path))
+    assert ck.glob("/*/*/*/*/*/*") is None
+    assert len(pulled) == hook.MAX_GLOB_HITS
+
+
+def test_bash_glob_expansion_respects_the_budget(monkeypatch, tmp_path, capsys):
+    hook = load_hook()
+
+    def slow(pattern):
+        while True:
+            time.sleep(0.05)
+            yield "/nowhere/f.txt"
+    monkeypatch.setattr(hook.globmod, "iglob", slow)
+    monkeypatch.setattr(hook, "BUDGET_S", 0.3)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(
+        {"tool_name": "Bash", "tool_input": {"command": "ls /*/*/*/*/*/*"}, "cwd": str(tmp_path)})))
+    monkeypatch.delenv("SECRET_DENY_OFF", raising=False)
+    monkeypatch.delenv("SECRET_DENY_POLICY", raising=False)
+    t0 = time.monotonic()
+    assert hook.main() == 0
+    assert time.monotonic() - t0 < 3
+    assert "OutOfTime" in capsys.readouterr().err
+
+
+def test_tilde_user_is_expanded(tmp_path):
+    """Adversary finding C5 (2026-11-04): `~user/...` names the same home as `~/...`."""
+    pwd = pytest.importorskip("pwd")
+    try:
+        user = pwd.getpwuid(os.getuid()).pw_name
+    except KeyError:
+        pytest.skip("no passwd entry for this uid")
+    home = os.path.expanduser("~" + user)
+    if home.startswith("~"):
+        pytest.skip("~user does not expand here")
+    hook = load_hook()
+    ck = hook.Checker(hook.Policy(["~/.netrc"], [], homes=[home], fold=False), str(tmp_path))
+    assert ck.path("~%s/.netrc" % user)
+    assert hook.check_command(ck, "cat ~%s/.netrc" % user)
+    assert ck.path("~%s/notes.txt" % user) is None
+    assert ck.path("~no-such-user-xyz/.netrc") is None
 
 
 def test_nul_in_a_path_is_not_a_path(env):

@@ -6,17 +6,25 @@ this hook reads (found from this file's realpath: <repo>/claude/hooks/ -> <repo>
 it). docs/secret-deny.md says what is enforced where and the honest limits.
 
 What it inspects: Read/Edit/MultiEdit/Write/NotebookEdit `file_path`/`notebook_path`; Grep `path` and `glob`; a Bash
-`command` (shlex tokens, `<file`, `--x=file`, `a:b` parts, `~`/`$HOME`/`${HOME}`, glob tokens); Codex `apply_patch`
-file headers (`*** Add|Update|Delete File:`, `*** Move to:`) in any string of a non-file tool's input. Glob is not gated
-(it returns names only). Each candidate path is evaluated as given, absolutized against the payload's `cwd`, and as its
-realpath, separately: the call is blocked when ANY candidate matches a deny pattern and no allow pattern matches that same
-candidate. A pattern ending in `/**` also denies its directory (`grep -r x ~/.ssh`, `tar c ~/.ssh`).
+`command` (shlex tokens, `<file`, `--x=file`, `a:b` parts, `~`/`~user`/`$HOME`/`${HOME}`, glob tokens); Codex
+`apply_patch` file headers (`*** Add|Update|Delete File:`, `*** Move to:`) in any string of a non-file tool's input. Glob
+is not gated (it returns names only). Each candidate path is evaluated as given, absolutized against the payload's `cwd`,
+and as its realpath, separately: the call is blocked when ANY candidate matches a deny pattern and no allow pattern
+matches that same candidate. A pattern ending in `/**` also denies its directory (`grep -r x ~/.ssh`, `tar c ~/.ssh`).
 
-A glob (a Bash token with `*`, `?`, `[...]` or `{a,b}`; Grep's `glob`) is expanded against the filesystem and each match
-checked as a path. When nothing matches, the pattern itself is checked: it blocks when some path could match it and a
-deny pattern and no allow pattern, under two rules that keep code and regexes from tripping it: the hidden-file rule (a
-wildcard never consumes a leading `.`) and pinning (the token's wildcards may not stand in for a deny pattern's literal
-text). So `cat ~/.ssh/id_*` and `find . -name '*.key'` block, while `echo *`, `grep 'a.*'` and Grep `glob: "*.py"` pass.
+A Bash glob token (`*`, `?`, `[...]` or `{a,b}`) is expanded against the filesystem (lazily, at most MAX_GLOB_HITS
+matches, inside the time budget) and each match checked as a path. When nothing matches, the pattern itself is checked:
+it blocks when some path could match it and a deny pattern and no allow pattern, under two rules that keep code and
+regexes from tripping it: the hidden-file rule (a wildcard never consumes a leading `.`) and pinning (the token's
+wildcards may not stand in for a deny pattern's literal text). So `cat ~/.ssh/id_*` and `find . -name '*.key'` block,
+while `echo *` and `grep 'a.*'` pass.
+
+Grep (2026-11-04): Claude's Grep runs ripgrep with `--hidden`, so it reads dotfiles and descends into `~/.ssh`. Its root
+(`path`, else the cwd) is walked breadth-first (bounded: depth, entries, time; VCS dirs and node_modules skipped) and the
+call blocks when a denied file under it is one the `glob` lets through, naming the file and how to leave it out. When the
+walk hits a bound it fails open, except for a root that contains a home-level deny (`~`, `/home`, `/`), which blocks.
+`.gitignore` is not consulted, so a gitignored `.env` still blocks a whole-project Grep (the price of not parsing ignore
+files). The glob is also checked as a pattern (pinning, no hidden-file rule): `glob: ".env*"` blocks, `"*.py"` passes.
 
 Block: exit 2 with one line on stderr naming the rule and docs/secret-deny.md (Claude and Codex both block on 2).
 Fail open: bad stdin, a missing or corrupt policy, or any exception exits 0 with a short stderr notice, so a bug never
@@ -50,6 +58,10 @@ MAX_GLOB_HITS = 500
 MAX_BRACE = 64
 MAX_STATES = 200000     # product-automaton budget; exhausting it counts as an overlap (blocks)
 BUDGET_S = 8.0          # whole-call analysis budget; past it the hook fails open (the settings timeout is 15 s)
+WALK_S = 4.0            # Grep root walk budget (inside BUDGET_S); past it the walk counts as truncated
+MAX_WALK_DEPTH = 6      # directory levels below a Grep root
+MAX_WALK_ENTRIES = 20000
+WALK_SKIP = {".git", ".svn", ".hg", ".bzr", ".jj", ".sl", "node_modules"}   # Grep's VCS exclusions, plus node_modules
 PATCH_BEGIN = re.compile(r"^\*\*\* Begin Patch[ \t]*$", re.MULTILINE)
 PATCH_END = re.compile(r"^\*\*\* End Patch[ \t]*$", re.MULTILINE)
 PATCH_HEADER = re.compile(r"^\*\*\* (?:(?:Add|Update|Delete) File|Move to):[ \t]*(.+?)[ \t]*$", re.MULTILINE)
@@ -344,6 +356,29 @@ class Policy:
         for pat in allow:
             for g in absolute_forms(pat, homes):
                 self.allow.append(Rule(pat, g, fold))
+        # One alternation of every deny regex: a cheap first test for the Grep walk's many paths.
+        self.any_deny = re.compile("|".join("(?:%s)" % r.regex.pattern for r in self.deny),
+                                   re.DOTALL | (re.IGNORECASE if fold else 0))
+        # Where each absolute deny rule lives: the directory holding its first wildcard, or a literal path's parent.
+        # A Grep root at or above one of these (`~`, `/home`, `/`) can reach that secret.
+        self.anchors = []
+        for r in self.deny:
+            if not r.prefix.startswith("/"):
+                continue
+            whole = len(r.prefix) == len(r.atoms)
+            anchor = os.path.dirname(r.prefix) if whole else r.prefix.rsplit("/", 1)[0]
+            anchor = anchor or "/"
+            if anchor not in [a for a, _ in self.anchors]:
+                self.anchors.append((anchor, r.name))
+
+    def anchor_under(self, root: str):
+        """(anchor, rule name) of an absolute deny rule whose anchor is `root` or lies below it, or None."""
+        key = root.lower() if self.fold else root
+        base = key.rstrip("/") + "/"
+        for anchor, name in self.anchors:
+            if anchor == key or anchor.startswith(base):
+                return anchor, name
+        return None
 
     def verdict(self, path: str):
         """The deny rule name a concrete absolute path hits, or None (no deny, or an allow matches this path)."""
@@ -354,15 +389,15 @@ class Policy:
                 return r.name
         return None
 
-    def pattern_verdict(self, glob_str: str, prefix: str = ""):
-        """The deny rule name some path matching the glob (a shell or ripgrep glob: hidden-file rule, `prefix` taken
-        literally) could hit with no allow covering it, or None."""
-        key = (glob_str, prefix)
+    def pattern_verdict(self, glob_str: str, prefix: str = "", dotfile: bool = True):
+        """The deny rule name some path matching the glob (`prefix` taken literally) could hit with no allow covering
+        it, or None. `dotfile` applies the shell's hidden-file rule; Grep's ripgrep runs with `--hidden`, so not there."""
+        key = (glob_str, prefix, dotfile)
         if key not in self._verdicts:
-            self._verdicts[key] = self._pattern_verdict(glob_str, prefix)
+            self._verdicts[key] = self._pattern_verdict(glob_str, prefix, dotfile)
         return self._verdicts[key]
 
-    def _pattern_verdict(self, glob_str: str, prefix: str):
+    def _pattern_verdict(self, glob_str: str, prefix: str, dotfile: bool = True):
         ats = atoms(glob_str.lower() if self.fold else glob_str, prefix.lower() if self.fold else prefix)
         lead = literal_prefix(ats)
         text = token_text(ats)
@@ -372,7 +407,7 @@ class Policy:
                 continue   # their fixed leading text differs: no common path
             if text is not None and not all(run in text for run in r.runs):
                 continue   # the token does not spell this rule's literal text (pinning, see nonempty)
-            if nonempty([ats, r.atoms], allows, dotfile_first=True, pin_first=True):
+            if nonempty([ats, r.atoms], allows, dotfile_first=dotfile, pin_first=True):
                 return r.name
         return None
 
@@ -403,6 +438,11 @@ def expand_home(s: str) -> str:
     s = s.replace("${HOME}", home).replace("$HOME", home)
     if s == "~" or s.startswith("~/"):
         s = home + s[1:]
+    elif s.startswith("~"):
+        try:
+            s = os.path.expanduser(s)   # `~user/...`: that user's home (unchanged when there is no such user)
+        except (KeyError, ValueError, OSError):
+            pass
     return s
 
 
@@ -481,15 +521,17 @@ class Checker:
         return None
 
     def _glob_one(self, raw: str, pat: str):
-        if os.path.isabs(pat):
-            hits = globmod.glob(pat)
-        else:
-            hits = globmod.glob(os.path.join(globmod.escape(self.cwd), pat))
-        if hits:
-            for h in hits[:MAX_GLOB_HITS]:
-                found = self.path(h)
-                if found:
-                    return found
+        full = pat if os.path.isabs(pat) else os.path.join(globmod.escape(self.cwd), pat)
+        n = 0
+        for h in globmod.iglob(full):   # lazy: a huge expansion (`/*/*/*/*/*/*`) stays inside the budget
+            tick()
+            n += 1
+            found = self.path(h)
+            if found:
+                return found
+            if n >= MAX_GLOB_HITS:
+                break
+        if n:
             return None
         if os.path.isabs(pat):
             hit = self.policy.pattern_verdict(pat)
@@ -505,6 +547,151 @@ class Checker:
             tick()
             self._words[raw] = self.glob(raw) if is_glob(raw) else self.path(raw)
         return self._words[raw]
+
+
+# ---- Grep: ripgrep with --hidden over a root ------------------------------------------------------------------------
+def _grep_glob_regex(alt: str, cross: bool, fold: bool):
+    """A ripgrep `--glob` as a regex over a path relative to the search root (gitignore rules: no `/` but a trailing
+    one matches a name at any depth, else it is anchored at the root). `cross` lets `*` cross `/` too (a superset)."""
+    a = alt.rstrip("/") or alt
+    if a.startswith("/"):
+        a = a[1:]
+    elif "/" not in a:
+        a = "**/" + a
+    ats = atoms(a.lower() if fold else a)
+    if cross:
+        ats = [(DSTAR, None) if k == STAR else (k, c) for k, c in ats]
+    return to_regex(ats, fold)
+
+
+def _rel_hits(rx, rel: str) -> bool:
+    """The glob matches the file or one of its directories below the root (a matched directory covers its files)."""
+    parts = rel.split("/")
+    return any(rx.fullmatch("/".join(parts[:i])) for i in range(1, len(parts) + 1))
+
+
+class GrepGlob:
+    """Which files under the root Grep's `glob` lets ripgrep read. Every plausible reading of the string counts (as one
+    glob; split on whitespace; split on whitespace and commas outside braces), and a file is reached when ANY reading
+    reaches it: positive globs are matched loosely (`*` may cross `/`, case folded on macOS), `!` exclusions strictly,
+    so the doubt always falls on the side of reaching the file."""
+
+    def __init__(self, g: str, fold: bool):
+        ws = g.split()
+        cs = [p for part in ws for p in (part.split(",") if "{" not in part else [part]) if p]
+        readings = [[g]]
+        for parts in (ws, cs):
+            if parts and parts not in readings:
+                readings.append(parts)
+        self.positives = []
+        self.readings = []
+        for parts in readings:
+            pos, neg = [], []
+            for part in parts:
+                negp = part.startswith("!")
+                body = part[1:] if negp else part
+                if not body:
+                    continue
+                for alt in expand_braces(body):
+                    if negp:
+                        neg.append(_grep_glob_regex(alt, False, False))
+                    else:
+                        pos.append(_grep_glob_regex(alt, True, fold))
+                        if alt not in self.positives:
+                            self.positives.append(alt)
+            self.readings.append((pos, neg))
+
+    def reaches(self, rel: str) -> bool:
+        for pos, neg in self.readings:
+            if pos and not any(_rel_hits(rx, rel) for rx in pos):
+                continue
+            if any(_rel_hits(rx, rel) for rx in neg):
+                continue
+            return True
+        return False
+
+
+def grep_walk(policy: Policy, roots: list, reach):
+    """Breadth-first over roots[0] (its other forms name the same files): ((rule, path) of the first denied file the glob
+    reaches, or None, truncated). Symlinks are not followed (ripgrep's default); VCS dirs and node_modules are skipped."""
+    deadline = min(_DEADLINE[0] - 1.0, time.monotonic() + WALK_S)
+    todo = [("", 0)]
+    n, truncated, i = 0, False, 0
+    while i < len(todo):
+        rel, depth = todo[i]
+        i += 1
+        if time.monotonic() > deadline:
+            return None, True
+        try:
+            it = os.scandir(os.path.join(roots[0], rel) if rel else roots[0])
+        except OSError:
+            continue
+        with it:
+            for e in it:
+                n += 1
+                if n > MAX_WALK_ENTRIES or (n % 256 == 0 and time.monotonic() > deadline):
+                    return None, True
+                r = rel + "/" + e.name if rel else e.name
+                try:
+                    is_dir = e.is_dir(follow_symlinks=False)
+                except OSError:
+                    is_dir = False
+                if is_dir:
+                    if e.name in WALK_SKIP:
+                        continue
+                    if depth + 1 > MAX_WALK_DEPTH:
+                        truncated = True
+                        continue
+                    todo.append((r, depth + 1))
+                    continue
+                for root in roots:
+                    p = root.rstrip("/") + "/" + r
+                    if policy.any_deny.fullmatch(p):
+                        rule = policy.verdict(p)
+                        if rule and reach(r):
+                            return (rule, p), False
+    return None, truncated
+
+
+def check_grep(ck: Checker, policy: Policy, ti: dict, cwd: str):
+    """(rule, path, hint) when Grep (ripgrep --hidden) could read a denied file, else None."""
+    raw = ti.get("path") if isinstance(ti.get("path"), str) and ti.get("path") else None
+    narrow = "pass a narrower path"
+    found = ck.path(raw or cwd)
+    if found:
+        return found + (narrow,)
+    root = os.path.normpath(os.path.join(cwd, expand_home(raw or cwd)))
+    g = ti.get("glob") if isinstance(ti.get("glob"), str) and ti.get("glob").strip() else None
+    gg = GrepGlob(g, policy.fold) if g else None
+    if os.path.isdir(root):
+        roots = [root]
+        try:
+            real = os.path.realpath(root)
+            if real != root:
+                roots.append(real)
+        except (OSError, ValueError):
+            pass
+        hit, truncated = grep_walk(policy, roots, gg.reaches if gg else (lambda rel: True))
+        if hit:
+            name = os.path.basename(hit[1])
+            return hit + ("Grep reads hidden files; %s or a glob that leaves it out (e.g. '*.py', or '!%s')"
+                          % (narrow, name),)
+        if truncated:
+            for form in roots:
+                anc = policy.anchor_under(form)
+                if anc:
+                    return (anc[1], form, "this tree holds %s and is too big to check; %s (a project directory)"
+                            % (anc[0], narrow))
+    elif os.path.exists(root):
+        return None   # a file: ripgrep reads just it, and ck.path checked it
+    if gg:
+        base = root.rstrip("/") + "/"
+        for alt in gg.positives:
+            pat = alt.lstrip("/") if "/" in alt.rstrip("/") else "**/" + alt
+            hit = policy.pattern_verdict(pat, base, dotfile=False)
+            if hit:
+                return hit, os.path.join(root, g), "use a glob that cannot match it"
+    return None
 
 
 def shell_words(cmd: str) -> list:
@@ -569,7 +756,7 @@ def check_command(ck: Checker, cmd: str):
 
 
 def check(payload: dict, policy: Policy):
-    """(tool, rule, path) when the call must be blocked, else None."""
+    """(tool, rule, path) or (tool, rule, path, hint) when the call must be blocked, else None."""
     tool = payload.get("tool_name") or ""
     ti = payload.get("tool_input")
     if tool in UNGATED or not isinstance(ti, dict):
@@ -587,20 +774,8 @@ def check(payload: dict, policy: Policy):
                     return (tool,) + found
         return None
     if tool == "Grep":
-        base = ti.get("path") if isinstance(ti.get("path"), str) and ti.get("path") else None
-        if base:
-            found = ck.path(base)
-            if found:
-                return (tool,) + found
-        g = ti.get("glob")
-        if isinstance(g, str) and g:
-            root = os.path.normpath(os.path.join(cwd, expand_home(base or ".")))
-            for pat in expand_braces(g):
-                pat = pat if "/" in pat else "**/" + pat
-                hit = policy.pattern_verdict(pat, root.rstrip("/") + "/")
-                if hit:
-                    return tool, hit, os.path.join(root, g)
-        return None
+        found = check_grep(ck, policy, ti, cwd)
+        return (tool,) + found if found else None
     # Bash, and any other tool (Codex `apply_patch`, `shell`, `exec_command`): its command and patch headers.
     cmd = ti.get("command")
     if isinstance(cmd, list):
@@ -652,10 +827,11 @@ def main() -> int:
         return 0
     if not hit:
         return 0
-    tool, rule, path = hit
+    tool, rule, path = hit[:3]
+    hint = "; " + hit[3] if len(hit) > 3 and hit[3] else ""
     shown = path if len(path) <= 200 else path[:200] + "..."
-    sys.stderr.write("secret-read-gate: blocked %s on %s: deny rule %r in config/secret-deny.toml; see %s\n"
-                     % (tool, shown.replace("\n", " "), rule, DOC))
+    sys.stderr.write("secret-read-gate: blocked %s on %s: deny rule %r in config/secret-deny.toml%s; see %s\n"
+                     % (tool, shown.replace("\n", " "), rule, hint.replace("\n", " "), DOC))
     return 2
 
 
