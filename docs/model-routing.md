@@ -128,8 +128,9 @@ quoting a chain, and update its snapshot if you change one.
 
 ## The service matrix: aiuse line ↔ TUI/CLI ↔ billing
 
-**Pi admission (2026-11-03):** `acp-dispatch pi` maps only the explicitly supported
-`openai/gpt-6.1-sol` (code) and `openai/gpt-5.4-mini` (bulk/mechanical) model IDs to
+**Pi admission (2026-11-03; Astra added 2026-11-04):** `acp-dispatch pi` maps only the explicitly supported
+`openai/gpt-6.1-sol` (code), `openai/gpt-5.4-mini` (bulk/mechanical) and `openai/gpt-6-astra` (frontier
+kind only, the existing frontier gate applies) model IDs to
 the independent aiuse `pi` API pool. Both dispatch and router use the same mapping;
 no bare IDs, arbitrary provider/model IDs, or `openai-codex/` subscription IDs are
 inferred. Adding a supported billing route requires an explicit mapping and tests.
