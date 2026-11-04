@@ -19,6 +19,8 @@ repository permission is write or admin (maintain reads as write); Forgejo, the 
 trusted_authors and invited collaborators with write, admin or owner permission (Forgejo reports site admins as
 "owner" of every repository, so a non-collaborator is never trusted on permission alone). A bot is checked like
 anyone else: list it in trusted_authors (e.g. "dependabot[bot]") to leave its pull requests ready.
+Approving one outside pull request: add the approved_label (default "pr-policy-approved"; setting a label needs
+triage or write access, so its author cannot) and mark it ready (GitHub) or drop the WIP prefix (Forgejo).
 State: ~/.local/state/pr-policy (PR_POLICY_STATE_DIR): changes.jsonl, one line per change
 made; state.json, the error keys already reported (only once hermes-ping succeeded); run.log, the launchd job's output.
 Revert one repository: add it to exempt_repos, then `gh api -X PATCH repos/OWNER/NAME -f
@@ -72,6 +74,8 @@ def read_secret(name: str) -> str:
     val = p.stdout.rstrip("\r\n")
     if p.returncode != 0 or not val:
         raise ApiError(f"sudo-secretspec get {name} failed (rc={p.returncode})")
+    if not all(33 <= ord(c) <= 126 for c in val):   # http.client echoes an invalid header value in its ValueError
+        raise ApiError(f"sudo-secretspec get {name}: the value is not one printable token (length {len(val)})")
     return val
 
 
@@ -125,9 +129,12 @@ class Api:
                 msg = str(json.loads(e.read() or b"{}").get("message", ""))[:200]
             except (ValueError, AttributeError, OSError):
                 pass
-            raise ApiError(f"{method} {where.path}: HTTP {e.code} {msg}".rstrip()) from None
+            raise ApiError(self.scrub(f"{method} {where.path}: HTTP {e.code} {msg}".rstrip())) from None
         except (urllib.error.URLError, OSError, ValueError) as e:
-            raise ApiError(f"{method} {where.path}: {type(e).__name__}: {e}") from None
+            raise ApiError(self.scrub(f"{method} {where.path}: {type(e).__name__}: {e}")) from None
+
+    def scrub(self, text: str) -> str:
+        return text.replace(self.token, "<token>") if self.token else text
 
     def pages(self, path: str):
         if self.kind == "github":
@@ -150,6 +157,12 @@ class Api:
 
 def q(s: str) -> str:
     return urllib.parse.quote(s, safe="")
+
+
+def approved(it: dict, cfg: dict) -> bool:
+    """djbclark's approval of an outside pull request: the approved_label, which only triage/write access can set."""
+    want = cfg.get("approved_label", "pr-policy-approved").lower()
+    return any(str((lab or {}).get("name", "")).lower() == want for lab in it.get("labels") or [])
 
 
 def github_plan(api: Api, cfg: dict, login: str, stats: dict) -> tuple[list[dict], list[str]]:
@@ -180,7 +193,7 @@ def github_plan(api: Api, cfg: dict, login: str, stats: dict) -> tuple[list[dict
         for it in api.pages("/search/issues?" + urllib.parse.urlencode({"q": query, "per_page": 100})):
             repo = it.get("repository_url", "").rsplit("/repos/", 1)[-1]
             who = (it.get("user") or {}).get("login", "")
-            if (repo in exempt or it.get("draft") or who.lower() in trusted
+            if (repo in exempt or it.get("draft") or who.lower() in trusted or approved(it, cfg)
                     or repo.split("/")[0].lower() not in {o.lower() for o in owners}):
                 continue
             stats["github_open_prs"] += 1
@@ -210,7 +223,7 @@ def forgejo_plan(api: Api, cfg: dict, login: str, stats: dict) -> tuple[list[dic
                 repo = (it.get("repository") or {}).get("full_name", "")
                 who = (it.get("user") or {}).get("login", "")
                 if (repo.split("/")[0].lower() not in owners or repo in exempt or (it.get("pull_request") or {}).get("draft")
-                        or who.lower() in trusted):
+                        or who.lower() in trusted or approved(it, cfg)):
                     continue
                 stats["forgejo_open_prs"] += 1
                 key = (repo, who.lower())

@@ -25,14 +25,16 @@ def gh_repo(name, policy="all", archived=False, prs=True):
             "has_pull_requests": prs, "pull_request_creation_policy": policy}
 
 
-def gh_pr(repo, n, who, draft=False, kind="User"):
+def gh_pr(repo, n, who, draft=False, kind="User", labels=()):
     return {"repository_url": f"https://api.github.com/repos/{repo}", "number": n, "draft": draft,
-            "html_url": f"https://github.com/{repo}/pull/{n}", "node_id": f"PR_{repo}_{n}", "user": {"login": who, "type": kind}}
+            "html_url": f"https://github.com/{repo}/pull/{n}", "node_id": f"PR_{repo}_{n}", "user": {"login": who, "type": kind},
+            "labels": [{"name": x} for x in labels]}
 
 
-def fj_pr(repo, n, who, title="t", draft=False):
+def fj_pr(repo, n, who, title="t", draft=False, labels=()):
     return {"repository": {"full_name": repo}, "number": n, "title": title, "user": {"login": who},
-            "html_url": f"https://forgejo.example/{repo}/pulls/{n}", "pull_request": {"draft": draft}}
+            "html_url": f"https://forgejo.example/{repo}/pulls/{n}", "pull_request": {"draft": draft},
+            "labels": [{"name": x} for x in labels]}
 
 
 class World:
@@ -206,6 +208,28 @@ def test_plan_is_read_only_and_lists_every_change(env):
     assert drafts == [("forgejo", "djbclark/barnowl", 4), ("forgejo", "djbclark/get", 7), ("github", "frdminc/x", 1)]
     assert writes(env.world) == []
     assert not (env.tmp / "state" / "changes.jsonl").exists()
+
+
+def test_an_approved_outside_pull_request_stays_ready(env):
+    w = env.world
+    w.gh_search.append(gh_pr("frdminc/x", 9, "stranger", labels=("PR-Policy-Approved",)))
+    w.fj_search.append(fj_pr("djbclark/get", 10, "readpal", labels=("pr-policy-approved",)))
+    w.gh_search.append(gh_pr("frdminc/x", 11, "stranger", labels=("approved",)))
+    out = json.loads(env("plan", "--json").stdout)
+    drafts = {(a["repo"], a["number"]) for a in out["actions"] if a["kind"] == "draft"}
+    assert ("frdminc/x", 9) not in drafts and ("djbclark/get", 10) not in drafts
+    assert ("frdminc/x", 11) in drafts and ("frdminc/x", 1) in drafts
+
+
+def test_a_token_that_is_not_one_printable_word_is_refused_unechoed(env, tmp_path):
+    bad = tmp_path / "bad-secretspec"
+    bad.write_text("#!/bin/sh\nprintf 'sekrit with\\tspace\\n'\n")
+    bad.chmod(0o755)
+    p = env("plan", "--json", extra={"PR_POLICY_SECRETSPEC": str(bad)})
+    assert p.returncode == 1
+    errs = json.loads(p.stdout)["errors"]
+    assert any("not one printable token (length 17)" in e for e in errs)
+    assert "sekrit" not in p.stdout + p.stderr and env.world.requests == []
 
 
 def test_quiet_plan_still_lists_pending_changes(env):

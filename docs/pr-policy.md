@@ -39,6 +39,11 @@ A bot gets no exemption for being a bot (an app installed on someone else's fork
 it in `trusted_authors` (for example `"dependabot[bot]"`) to keep its pull requests ready. On 2026-11-04 no bot had
 opened a pull request on these repositories in six months.
 
+**Approving one outside pull request:** add the label `pr-policy-approved` (`approved_label` in the config), then mark
+it ready (GitHub) or remove the `WIP: ` prefix (Forgejo). A labelled pull request is left alone; without the label the
+next run would make it a draft again. Setting a label needs triage or write access, so the author cannot approve
+their own pull request this way.
+
 ## Commands
 
 | Command | Does |
@@ -60,7 +65,9 @@ the next run would report a change it did not make.
 1. Tokens are the sudo-secretspec names in the config (`GITHUB_TOKEN`, djbclark's `repo`-scope token;
    `DJBCLARK_FORGEJO_MIT_EDU_TOKEN`), read with `sudo-secretspec get` once per run, held in memory, never printed or logged.
    `get`, not `run`, is deliberate (AGENTS.md review rule 3): `run` would hand every declared secret to the job and to
-   each child it starts, `hermes-ping` included.
+   each child it starts, `hermes-ping` included. A value that is not one printable token is refused (its length is
+   reported, never the value), since `http.client` quotes an invalid header value in its exception; every error text
+   is also scrubbed of the token.
 2. A token goes only to its own API origin, scheme and host both, over https (plain http is allowed for 127.0.0.1
    only, for the tests); redirects are not followed, and a pagination link to another origin is refused.
 3. State in `~/.local/state/pr-policy/` (`PR_POLICY_STATE_DIR`): `changes.jsonl`, one line per change made (before,
