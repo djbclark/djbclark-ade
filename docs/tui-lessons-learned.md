@@ -26,7 +26,7 @@ Retired, folded, or not adopted (plan §D + rulings 2026-11-04):
    already has `alibaba` / `alibaba-cn`.
 7. **A7 `goose` / `goose-scout`** — retire again (D8): operator 2026-10-03 removal; Scout return
    ran nothing; Bedrock via opencode if needed.
-8. **A8 `muse`** — retire, pending djbclark's answer to H5 (D9 asked "is there a use for it?"): disabled in
+8. **A8 `muse`** — **pending H5** (the plan asks "is there a use for it?"); removed only after an affirmative answer: disabled in
    aiuse since 2026-10-08; only non-ACP headless TUI; zero slices.
 9. **A9 `aider`** — retire (D10): no ACP, no Paseo, no slices; opencode covers the job.
 10. **A10 `kiro-cli`** — retire (D11): operator 2026-10-25 never-route; acp-run row already `--`.
@@ -68,7 +68,7 @@ gateway, never a coding target).
    vendor (e.g. zcode `1310` weekly limit with a Beijing-time reset; copilot premium text
    JSON-escaped in session-log events). Classify at the source (`fail=quota` + reset), preflight
    before launch, and decide from `remaining_percent`, never bare `used_percent`. Commits
-   `61f22572`, `5b789b5f`; `skills/bigteam/SKILL.md` failure table.
+   `4a6e4d59`, `5b789b5f`; `skills/bigteam/SKILL.md` failure table.
 6. **B6 Model-id and catalog drift is normal.** Catalogs can be per-account; tool snapshots fail
    open after upgrades; effort lists differ between TUI UI and API. Read back every knob
    (`applied:` line, measured context) and fail as `config` on mismatch.
@@ -106,41 +106,33 @@ gateway, never a coding target).
 
 ## C. Money and quota
 
-1. **C1 Three Anthropic money surfaces (2026-11-04).** (a) Console **API-credit grant** for the
-   org linked to the API key — what omp's Anthropic Messages API can spend; (b) claude.ai Usage
-   **cloud-session / Usage-credits** meters; (c) Console **tier spend caps**. Confusing (b) for
-   (a) made aiuse report a large "Claude API credits" balance while omp API calls returned HTTP
-   400 "Your credit balance is too low…" (billing sessions 2026-11-04; aiuse historically keyed
-   `window_id: claude-cloud-credits`, commit `02c0eb8` on 2026-10-15).
-2. **C2 Reported billing facts that disagree — leave unresolved.** Session **23adbb25** (2026-11-04):
-   real omp grant is the monthly Console API credit (~$200/month example), linked 2026-10-13, next
-   credit 2026-11-06, **currently spent**; CodexBar Platform picked the wrong Console org; cloud-
-   session ~$249/$250 was the wrong meter labelled as API credits. Session **501a7e0d** (rulings):
-   the `$250` cloud-session row is a **one-time** Claude Code cloud-session credit (Max), spendable
-   only through `claude --cloud` / claude.ai/code, expiring 2026-11-04 23:59 PT, which omp can
-   **never** spend; monthly API credit exists only after **one** Console org is linked at
-   Settings → Billing → API credits (one link per plan). Both agree cloud-session ≠ omp spend and
-   that org pinning matters; they differ on grant size/schedule, one-time vs monthly framing of the
-   $250 row, and exact empty-grant timing. Treat both as reported; do not pick a winner in this
-   doc — consolidation verifies against the Console UI after the aiuse fix lands.
-3. **C3 "Credit balance is too low" ≠ Claude Code OAuth quota.** The 400 is Console API prepaid
-   for the key's org. Claude Max subscription quota is a separate surface spent only by `claude`
-   (plan B1). Route and preflight must treat the billing 400 as quota/exhausted, not opaque
-   `preflight` that skips `note-exhausted` (billing session 2026-11-04).
-4. **C4 Pin the Console organization.** Multi-org CodexBar may pick the first readable Console
-   org, not the one linked to omp's key (CodexBar#4654). Configure `[credits.omp] organization`
-   (and grant clock fields) after the aiuse `claudeplatform` collector lands (billing sessions 2026-11-04).
-5. **C5 Route off a live probe, not only a reading.** Until measurement and preflight agree, a
-   high aiuse headroom can keep offering omp while the API refuses. Prefer: corrected aiuse omp
-   row **plus** a live probe that maps billing 400 → `note-exhausted` with a sensible reset.
-6. **C6 Subscription OAuth in a third-party harness (omp, until 2026-11-03).** omp's only active
-   Anthropic credential after 2026-11-03 is an API key; its subscription OAuth login was disabled
-   that day. Until then, omp's ~1,077 slices that month drew on the Claude Max **weekly** pool
-   through OAuth — third-party-harness use Anthropic forbids since 2026-04-04 (billing session 2026-11-04;
-   plan B1/F4). omp also held Cursor, Copilot, Antigravity, Codex, Go, Z.ai and xAI logins (used
-   ~2026-08-20..10-13, deleted 2026-10-13); Copilot premium through omp reportedly exceeded 100%.
-   Lesson: disable foreign subscription OAuth in omp/opencode; enforce with the acp-run guard in
-   B11 / ruling D3 — do not rely on docs alone.
+1. **C1 One vendor, several money surfaces (2026-11-04).** Anthropic has at least three: the
+   **API-credit grant** of the Console organization an API key belongs to (what an API-key harness
+   such as omp spends), claude.ai **cloud-session and usage credits** (spent only by Claude Code's
+   own cloud sessions), and Console **spend caps**. A meter for one surface was read as another, so
+   aiuse reported a healthy omp balance while every API call returned HTTP 400 "Your credit balance
+   is too low" (aiuse keyed the omp row off a `claude-cloud-credits` window, commit `02c0eb8`). Map
+   each pool to the surface its client actually draws on, from the vendor's billing docs.
+2. **C2 Measure the organization the key belongs to.** A multi-organization account lets a
+   collector read the first organization it can see rather than the one the key is in (CodexBar
+   issue 4654). Pin the organization in configuration, and compare a measured reading with the API's
+   own answer before trusting it.
+3. **C3 A credit-balance refusal is not a quota window.** The 400 above is the key's API balance;
+   a subscription's weekly window is a separate surface spent only by the vendor's own client
+   (plan B1). Route and preflight must turn the refusal into "pool unavailable until a bounded
+   recheck", not an opaque preflight failure the router forgets.
+4. **C4 Route off a live answer, not only a reading.** A cached reading can say "usable" while the
+   provider refuses the same request; a dispatcher has to record the refusal where the router reads
+   it (`aiuse note-exhausted`) and recheck later, so the next slice is not routed into the same wall.
+5. **C5 A subscription login does not belong in a third-party harness.** Anthropic forbids
+   subscription OAuth outside its own clients (since 2026-04-04), Google forbids Antigravity OAuth
+   outside Antigravity (clause 6), and Cursor staff called a third-party harness's Cursor provider a
+   ToS violation (2026-08-10). A multi-provider harness that still holds such a login can spend that
+   plan without anyone noticing. Keep only API keys in omp and opencode, and enforce it with the
+   acp-run guard of the ruling (B11) rather than relying on docs.
+6. **C6 Fixture values copied from a misread meter lock the mistake in.** Tests that encoded the
+   wrong surface's balance as the success case kept the misreading green. Build fixtures from the
+   vendor's documented field, and re-probe before acting (standing order 4).
 7. **C7 Billing is tracked by vendor, not by TUI.** The company money goes to (FOCUS
    `InvoiceIssuerName`) owns the pool; one TUI may spend several vendors' credits (omp: Anthropic
    API + OpenAI API after the pi fold). Brands label clients; vendors label invoices (ruling 2026-11-04).
@@ -149,10 +141,6 @@ gateway, never a coding target).
    (B5). ChatGPT stays on `codex` here because `bin/local-review` needs it (B2). Z.ai GLM and
    Copilot Pro officially support OpenCode (B6, B7). Never install subscription-bridge plugins
    (F4). Keep both **omp** and **opencode** (ruling 2026-11-04).
-9. **C9 Fixture dollars that match a known-wrong UI meter are a smell.** Tests that encoded the
-   cloud-session $250 row as the omp success case locked in the wrong wallet (billing session 2026-11-04). Re-probe
-   before acting (standing order 4).
-
 ## D. Per retired TUI
 
 ### D1. zcode (Z.ai GLM Coding Plan)
@@ -262,12 +250,13 @@ gateway, never a coding target).
 ### D8. muse (Meta Muse Code)
 
 1. **D8a For / why.** Non-ACP headless TUI; models also via opencode-go `muse-spark-*`; disabled
-   in aiuse; retiring by default unless djbclark names a use (H5 still open on 2026-11-04).
+   in aiuse; **pending H5** on 2026-11-04: registry, skill-target and machine removal wait for djbclark's answer.
 2. **D8b Gotchas.** None operational (0 slices). Session store and unversioned local binary noted
    in inventory docs (2026-10-19). Headless invocation discipline still applies (B8).
 3. **D8c Replaced by.** Nothing required; opencode-go Muse-named models if wanted.
 4. **D8d Where it lived.** Broad: aiuse `src/aiuse/collectors/muse.py` (130 lines), ade
-   skill/doc/test rows, `bin/skillopt_sources.py`, backup-stores; drop from skill-everywhere in G1.
+   skill/doc/test rows, `bin/skillopt_sources.py`, backup-stores; drop from skill-everywhere only after H5
+   (the plan: "muse after H5").
 
 ### D9. aider
 
@@ -409,17 +398,18 @@ gateway, never a coding target).
 2. **G2 Cline drain.** Move `paseo-new-seat` default off `--provider cline`; retarget
    `DANN_SUBSTRATE` to omp + cline-pass; remove cline from skill-everywhere / acp-run without
    cutting `clinepass` out of Hermes's chain (plan G1 warning).
-3. **G3 Billing / routing (plan H7; billing sessions and rulings of 2026-11-04).** Land aiuse `fix/omp-promo-credits-only`;
-   operator `[credits.omp]` org + grant clock; CodexBar cookies / org picker; map "credit balance
-   is too low" → quota + `note-exhausted`; clear stale omp preflight `ok: true` caches. **Resolve
-   C2** against the Console UI (23adbb25 vs 501a7e0d). Add acp-run foreign-credential guard (B11).
+3. **G3 Billing / routing (plan H7).** Land the aiuse fix that reads omp's API-credit surface for the
+   key's pinned organization (C1, C2); the operator sets that organization and the grant's clock in
+   aiuse's config; make `acp-dispatch` turn a credit-balance refusal into a bounded
+   `note-exhausted` (C3, C4); verify the measured reading against the Console after both land; add
+   the acp-run foreign-credential guard (B11, C5).
 4. **G4 Operator / machine (order 11).** G4 uninstall list needs djbclark's yes. Whether to
    archive site-private memory notes after folding lessons here. Keep `bin/ade-backup-stores`
    credential exclusions as a named exception (plan G3). `feat/fleet-migrate` remains a successor
    with no PR (pi-support session 2026-11-03).
 5. **G5 Plan questions closed or still open.** Closed by ruling: H4 (fold pi → omp) and H3 (cline
-   retires). Still open: H5 (muse; retiring by default); operational: H1 roster now eight keepers — confirm
-   in G1 docs PR; H2 dsh uninstall vs unrouted trial; H6 X Subscription wait; H7 after C2
+   retires). Still open: H5 (muse, pending; no removal before an affirmative answer); operational: H1 roster now eight keepers — confirm
+   in G1 docs PR; H2 dsh uninstall vs unrouted trial; H6 X Subscription wait; H7 after the G3
    verification. Migration order unchanged in spirit: registry/docs → trials (GLM + SIPB via
    opencode) → re-point routing → machine removal after yes → plan decisions E1–E4. After drain,
    **this document** plus CHANGELOG/handoff history should be the only intentional mentions of
