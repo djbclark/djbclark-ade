@@ -19,7 +19,7 @@ Retired, folded, or not adopted (plan §D + rulings 2026-11-04):
 3. **A3 `crush` (+ `crush-acp`)** — retire (D3): local build of unmerged charmbracelet/crush#2450;
    SIPB models already on opencode's `sipb` provider.
 4. **A4 `venicecode`** — retire (D4): upstream archived 2026-08-31; OpenCode has a `venice`
-   provider; Venice API barely funded / disabled in aiuse.
+   provider; Venice is disabled in aiuse's config.
 5. **A5 `dsh`** — do not adopt (D5): DeepSeek Harness developer preview with promised breaking
    changes; DeepSeek V4 already on OpenCode Go.
 6. **A6 `qwen-code`** — retire (D7): Alibaba coding plan disabled in aiuse; zero slices; opencode
@@ -109,10 +109,10 @@ gateway, never a coding target).
 1. **C1 One vendor, several money surfaces (2026-11-04).** Anthropic has at least three: the
    **API-credit grant** of the Console organization an API key belongs to (what an API-key harness
    such as omp spends), claude.ai **cloud-session and usage credits** (spent only by Claude Code's
-   own cloud sessions), and Console **spend caps**. A meter for one surface was read as another, so
-   aiuse reported a healthy omp balance while every API call returned HTTP 400 "Your credit balance
-   is too low" (aiuse keyed the omp row off a `claude-cloud-credits` window, commit `02c0eb8`). Map
-   each pool to the surface its client actually draws on, from the vendor's billing docs.
+   own cloud sessions), and Console **spend caps**. A collector that reads one surface (say, cloud-session credits) as another (the API key's
+   organization balance) reports a pool as available while every API call is refused with "credit
+   balance is too low". Map each pool to the surface its client actually draws on, from the
+   vendor's billing docs.
 2. **C2 Measure the organization the key belongs to.** A multi-organization account lets a
    collector read the first organization it can see rather than the one the key is in (CodexBar
    issue 4654). Pin the organization in configuration, and compare a measured reading with the API's
