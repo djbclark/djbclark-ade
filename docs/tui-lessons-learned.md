@@ -26,7 +26,7 @@ Retired, folded, or not adopted (plan §D + rulings 2026-11-04):
    already has `alibaba` / `alibaba-cn`.
 7. **A7 `goose` / `goose-scout`** — retire again (D8): operator 2026-10-03 removal; Scout return
    ran nothing; Bedrock via opencode if needed.
-8. **A8 `muse`** — **pending H5** (the plan asks "is there a use for it?"); removed only after an affirmative answer: disabled in
+8. **A8 `muse`** — **pending H5** (the plan asks "is there a use for it?"); no removal without djbclark's explicit approval to retire muse: disabled in
    aiuse since 2026-10-08; only non-ACP headless TUI; zero slices.
 9. **A9 `aider`** — retire (D10): no ACP, no Paseo, no slices; opencode covers the job.
 10. **A10 `kiro-cli`** — retire (D11): operator 2026-10-25 never-route; acp-run row already `--`.
@@ -240,7 +240,7 @@ gateway, never a coding target).
 2. **D7b Gotchas.** ACP `chat` mode still ran shell; Scout tool-call loops needed a proxy callback
    (rules prepend + repeat stop); Desktop cask resurrected via ansible until
    `goose_desktop_enabled=false` enforced absence; LiteLLM alias removal does not revoke keys;
-   Bedrock key deactivated 2026-10-29 → 403 even if ENABLED. Commit `6332ef05`; acp-run goose
+   a deactivated credential returns 403 even where another status still reads ENABLED. Commit `6332ef05`; acp-run goose
    section.
 3. **D7c Replaced by.** opencode Bedrock provider if needed; proxy-callback guard pattern kept
    conceptually for weak models (B13).
@@ -408,7 +408,7 @@ gateway, never a coding target).
    credential exclusions as a named exception (plan G3). `feat/fleet-migrate` remains a successor
    with no PR (pi-support session 2026-11-03).
 5. **G5 Plan questions closed or still open.** Closed by ruling: H4 (fold pi → omp) and H3 (cline
-   retires). Still open: H5 (muse, pending; no removal before an affirmative answer); operational: H1 roster now eight keepers — confirm
+   retires). Still open: H5 (muse, pending; no removal without djbclark's explicit approval to retire it); operational: H1 roster now eight keepers — confirm
    in G1 docs PR; H2 dsh uninstall vs unrouted trial; H6 X Subscription wait; H7 after the G3
    verification. Migration order unchanged in spirit: registry/docs → trials (GLM + SIPB via
    opencode) → re-point routing → machine removal after yes → plan decisions E1–E4. After drain,
