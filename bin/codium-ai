@@ -18,7 +18,12 @@
 #   stop; unsaved files come back through hot exit) and started again. To open a file
 #   in a window that already has the key, use plain `codium FILE`.
 # - Never run it under `sh -x`: the trace prints the key.
+# Exit codes: 1 no key, 2 refused (settings entry missing, VSCodium running), 69 not macOS (EX_UNAVAILABLE).
 set -eu
+if [ "$(uname -s)" != Darwin ]; then
+  echo "codium-ai: macOS only: it uses ~/Library/Application Support, osascript and /opt/homebrew/bin/codium" >&2
+  exit 69
+fi
 restart=0
 if [ "${1:-}" = "--restart" ]; then
   restart=1

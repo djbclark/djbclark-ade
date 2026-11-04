@@ -120,10 +120,11 @@ class TestLauncher(unittest.TestCase):
                 self.assertEqual(self.run_launcher(*args).returncode, 2)
         self.assertEqual(self.calls(), [])
 
-    def test_a_missing_helper_exits_1(self):
+    def test_a_missing_helper_exits_69(self):
         r = self.run_launcher("list", "--json", extra={"PASEO_SET_MODEL_HELPER": str(self.root / "nope")})
-        self.assertEqual(r.returncode, 1)
-        self.assertIn("cannot run", r.stderr)
+        self.assertEqual(r.returncode, 69)
+        self.assertIn("macOS only", r.stderr)
+        self.assertIn("PASEO_SET_MODEL_HELPER", r.stderr)
 
 
 @unittest.skipUnless(NODE, "node not on PATH")
