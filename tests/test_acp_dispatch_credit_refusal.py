@@ -4,7 +4,7 @@
 When Anthropic returns HTTP 400 invalid_request_error "Your credit balance is too low
 to access the Anthropic API...", acp-dispatch classifies `credit`, notes the pool
 exhausted via aiuse (reset from the row's resets_at / expires_at / available_at /
-credits stamp, else a fixed 6 h back-off), and a later dispatch is refused on headroom
+credits stamp, capped at 6 h; otherwise a 6 h back-off), and a later dispatch is refused on headroom
 before launch. Synthetic fakes only: no live agent, aiuse or network.
 """
 from __future__ import annotations
@@ -14,6 +14,8 @@ import os
 import runpy
 import textwrap
 import unittest
+from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 from pathlib import Path
 from typing import override
 
@@ -25,7 +27,7 @@ CREDIT_MSG = (
     '"Your credit balance is too low to access the Anthropic API. Please go to Plans '
     '& Billing to upgrade or purchase credits."}}'
 )
-RESET_AT = "2026-11-06T05:00:00+00:00"
+RESET_AT = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
 
 
 class TestCreditFailureClass(unittest.TestCase):
@@ -41,8 +43,28 @@ class TestCreditFailureClass(unittest.TestCase):
         self.assertEqual(self.cls(
             "Your credit balance is too low to access the Anthropic API."), "credit")
 
-    def test_credit_balance_too_low_pair_matches_generally(self):
-        self.assertEqual(self.cls("provider said: credit balance is too low"), "credit")
+    def test_incidental_credit_words_are_not_refusals(self):
+        for text in (
+            "Anthropic: credit balance is sufficient; threshold too low",
+            "Anthropic: credit balance is not too low",
+            "provider said: credit balance is too low",
+        ):
+            self.assertNotEqual(self.cls(text), "credit", text)
+
+    def test_auth_wins_over_incidental_credit_words(self):
+        self.assertEqual(self.cls(
+            "FAILED auth: invalid authentication token; credit balance is sufficient; threshold too low"), "auth")
+        self.assertEqual(self.cls("FAILED auth: invalid authentication token; " + CREDIT_MSG), "auth")
+
+    def test_exit0_failed_tool_credit_output_does_not_note(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            log = Path(td) / "run.jsonl"
+            log.write_text(json.dumps({"data": {"sessionUpdate": "tool_call_update",
+                "status": "failed", "output": CREDIT_MSG}}) + "\n")
+            note = self.mod["exit0_quota_note"]({"agent": "omp", "model": OMP, "log": str(log)})
+        self.assertIsNone(note)
+
 
     def test_other_400s_are_not_credit(self):
         for text in (
@@ -208,6 +230,34 @@ class TestCreditResetStampUnit(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.mod = runpy.run_path(str(SCRIPT))
+
+    def test_far_future_resets_are_capped(self):
+        import tempfile
+        fixed = datetime(2026, 11, 4, tzinfo=timezone.utc)
+        far = "2099-01-01T00:00:00+00:00"
+        g = self.mod["record_credit_refusal_in_aiuse"].__globals__
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "row.json"
+            cases = (
+                ({"available": [{"provider": "omp", "expires_at": far}]}, "ROUTE_AGENT_AIUSE_JSON", CREDIT_MSG),
+                ({"snapshot": {"accounts": [{"provider": "omp", "expires_at": far}]}}, "AIUSE_SNAPSHOT", CREDIT_MSG),
+                ({"available": []}, "ROUTE_AGENT_AIUSE_JSON", CREDIT_MSG + " quotaResetTimeStamp:" + far),
+                ({"available": []}, "ROUTE_AGENT_AIUSE_JSON", CREDIT_MSG + " resets in 900 hours"),
+            )
+            for payload, envkey, text in cases:
+                with self.subTest(envkey=envkey, text=text):
+                    path.write_text(json.dumps(payload))
+                    with patch.dict(os.environ, {envkey: str(path), "ACP_DISPATCH_AIUSE": "fake-aiuse"}):
+                        if envkey == "AIUSE_SNAPSHOT":
+                            os.environ.pop("ROUTE_AGENT_AIUSE_JSON", None)
+                        with patch.dict(g, {"now_utc": lambda: fixed}), patch.object(
+                                g["subprocess"], "run") as call:
+                            call.return_value.returncode = 0
+                            when = self.mod["failure_class"](text, 1)[1]
+                            self.mod["record_credit_refusal_in_aiuse"]("omp", OMP, text, 1, when)
+                            argv = call.call_args.args[0]
+                            reset = datetime.fromisoformat(argv[argv.index("--resets-at") + 1])
+                            self.assertEqual(reset, fixed + timedelta(hours=6))
 
     def test_expires_at_on_available_row(self):
         import tempfile

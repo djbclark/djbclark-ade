@@ -2839,7 +2839,7 @@ def _parse_stamp(value) -> datetime | None:
 
 
 
-CREDIT_BACKOFF = "6h"  # Anthropic credit-balance refusal with no row reset/expiry (2026-11-04)
+CREDIT_BACKOFF = "6h"  # Maximum retry horizon for Anthropic credit refusals (2026-11-04)
 
 
 def _stamp_from_mapping(obj: dict, keys: tuple[str, ...] = ("resets_at", "expires_at", "available_at")) -> list[datetime]:
@@ -2916,19 +2916,19 @@ def record_credit_refusal_in_aiuse(agent: str, model: str | None, text: str, rc:
     """Notify aiuse that Anthropic credit balance refused this pool (same note-exhausted path as quota).
 
     Reset: parsed from the refusal text when present, else the pool row's resets_at / expires_at /
-    available_at / credits stamp from aiuse, else a fixed 6 h back-off. Never invents a calendar date.
+    available_at / credits stamp from aiuse, else a fixed 6 h back-off. All timestamps are capped at now + 6 h.
     """
     mapping = map_agent_to_provider(agent, model)
     if mapping is None:
         return "unknown_agent", "; aiuse not notified: unknown agent"
 
-    reset = parse_reset_for_aiuse(text, when_match, agent)
-    if reset is None:
+    # Expiry need not mean replenishment: always recheck within the backoff horizon.
+    cap = now_utc() + timedelta(hours=int(CREDIT_BACKOFF.removesuffix("h")))
+    stamp = parse_reset_datetime(text, when_match, agent=agent)
+    if stamp is None:
         stamp = aiuse_pool_reset_stamp(agent, model)
-        if stamp is not None:
-            reset = ("--resets-at", stamp.astimezone(timezone.utc).isoformat())
-        else:
-            reset = ("--resets-in", CREDIT_BACKOFF)
+    reset = (("--resets-at", min(stamp, cap).astimezone(timezone.utc).isoformat())
+             if stamp is not None else ("--resets-in", CREDIT_BACKOFF))
 
     override = os.environ.get("ACP_DISPATCH_AIUSE")
     if override and override.lower() in ("off", "0", "false", "none", "no"):
@@ -3370,12 +3370,6 @@ def failure_class(text: str, rc: int | None, *, preflight: bool = False) -> tupl
     when = re.search(r"(?:try again|resets?|refresh(?:es)?|retry|limit will reset) "
                      r"(at|in|after|on(?= (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)))"
                      r" ([^\n.\"'\\]{1,64})", text, re.IGNORECASE)
-    # Anthropic API credit-balance refusal (2026-11-04): HTTP 400 invalid_request_error with
-    # "Your credit balance is too low to access the Anthropic API...". Distinct from quota (rate
-    # windows): take the pool out of routing via note-exhausted. Match the Anthropic wording and
-    # the general "credit balance" + "too low" pair; not every 400.
-    if "credit balance" in low and "too low" in low:
-        return "credit", when
     quota_terms = ("limit exhausted", "usage limit", "quota exhausted", "resource_exhausted",
                    "individual quota reached", "rate limit exceeded", "insufficient quota",
                    *COPILOT_QUOTA_TERMS)
@@ -3396,6 +3390,11 @@ def failure_class(text: str, rc: int | None, *, preflight: bool = False) -> tupl
         return "timeout", when
     if _outage_phrases(low, text, preflight=preflight):
         return "outage", when
+    # Require both the exact positive refusal and an Anthropic error marker. Existing
+    # error classes above retain precedence over incidental credit text.
+    if ("credit balance is too low" in low
+            and any(marker in low for marker in ("anthropic", "invalid_request_error", "plans & billing"))):
+        return "credit", when
     return (None if rc in (None, 0) else f"exit {rc}"), when
 
 
@@ -3904,12 +3903,9 @@ def exit0_quota_note(rec: dict) -> tuple[str, str] | None:
     if not text:
         return None
     cls, when = failure_class(text, 0)
-    if cls not in ("quota", "credit"):
+    if cls != "quota":
         return None
-    if cls == "credit":
-        _, extra = record_credit_refusal_in_aiuse(agent, model, text, 0, when)
-    else:
-        _, extra = record_quota_refusal_in_aiuse(agent, model, text, 0, when)
+    _, extra = record_quota_refusal_in_aiuse(agent, model, text, 0, when)
     forget_preflight(agent, model)
     bits = [agent] + ([model] if model else []) + (
         [f"retry {when.group(1).lower()} {when.group(2).strip()}"] if when else [])
