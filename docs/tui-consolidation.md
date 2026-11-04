@@ -2,12 +2,13 @@
 
 **Summary.** This Mac has 21 agent CLIs/TUIs installed (plus the general `venice` CLI). Eleven of them
 ran an `acp-dispatch` slice in the last 30 days, and four of those eleven did 89% of the work. The
-plan keeps **9**: the five clients that are the only allowed way to spend a monthly plan (claude,
+plan keeps **10**: the five clients that are the only allowed way to spend a monthly plan (claude,
 codex, agy, cursor-agent, grok), the two Claude/OpenAI API-credit harnesses (omp, pi), one open
-multi-provider harness that absorbs every pool that is not vendor-locked (opencode), and the
-messaging gateway (hermes). It retires or folds the other 12, including both new installs
-(`venicecode` and `dsh`). Every live quota pool keeps a client. Nothing has been removed; section G
-says which steps are inside djbclark-ade and which need djbclark's yes (standing order 11).
+multi-provider harness that absorbs every pool that is not vendor-locked (opencode), the messaging
+gateway (hermes), and cline as the ClinePass client behind Dann's substrate (operator, 2026-10-23).
+It retires or folds the other 11, including both new installs (`venicecode` and `dsh`). Every live
+quota pool keeps a client. Nothing has been removed; section G says which steps are inside
+djbclark-ade and which need djbclark's yes (standing order 11).
 
 Snapshot sources, all taken 2026-11-04 10:10-10:40 EST: `aiuse --json`, `acp-run --list`, each
 binary's `--version`, the 1,736 job records under `~/.local/state/bigteam/*/jobs/` (all from the
@@ -36,7 +37,7 @@ Markdown) that name the agent: the upkeep each one costs this repo.
 | A12 | `crush` 0.99.0 + `crush-acp` fork build | SIPB (free) | fork build / no | 2 (2) | 0 | 34 | retire (D3) |
 | A13 | `venicecode` 0.0.0-dev (built 2026-11-04) | Venice API (disabled in aiuse) | no / no | 0 | 0 | 0 | retire (D4) |
 | A14 | `dsh` 0.2.1-rc.5 (installed 2026-11-04) | DeepSeek API (disabled in aiuse) | plugin bridge / no | 0 | 0 | 0 | do not adopt now (D5) |
-| A15 | `cline` 3.0.74 | ClinePass (reserved for hermes inference) | yes / yes | 0 | 15 | 36 | retire the TUI (D6) |
+| A15 | `cline` 3.0.74 | ClinePass (lifeline of Hermes and Dann) | yes / yes | 0 | 15 | 36 | keep, never a slice target (C10, D6) |
 | A16 | `qwen` 0.26.6 (qwen-code) | Alibaba coding plan (disabled in aiuse) | yes / yes | 0 | 0 | 18 | retire (D7) |
 | A17 | `goose` 1.57.0 via `goose-scout` | Bedrock PAYG (Llama 4 Scout) | yes / disabled | 0 | 0 | 8 | retire again (D8) |
 | A18 | `muse` (Meta Muse Code) | none measured (disabled in aiuse) | no / plugin | 0 | 0 | 17 | ask (D9) |
@@ -67,7 +68,7 @@ This decides what cannot be folded. Checked on the web 2026-11-04 (sources in se
 | B9 | Venice | the API is metered: Pro includes about $1/month of API use and "a paid subscription does not include free or unlimited API usage" [11] | Venice is a pay-as-you-go route, not a plan |
 | B10 | DeepSeek | API key, pay as you go | any harness; prepaid tier retired here since 2026-08-23 |
 
-## C. Target roster (9)
+## C. Target roster (10)
 
 1. **C1 `claude`**: the only client for the Max pool (B1); judgment and code tier; 177 code files
    already built around it.
@@ -79,7 +80,9 @@ This decides what cannot be folded. Checked on the web 2026-11-04 (sources in se
    `default`, 8 on Composer, one on Grok 4.7 and one on Claude Sonnet 5.5, which matters for E1.
 5. **C5 `grok`**: the SuperGrok pool and the `realtime-web` kind (X search).
 6. **C6 `omp`**: the workhorse, 62% of all slices, spending the monthly Claude API grant before it
-   expires.
+   expires. On 2026-11-04 at 10:24 EST the Anthropic API refused an omp preflight with "Your credit
+   balance is too low to access the Anthropic API" while aiuse read $249.27 of $250 left and
+   `route_agent.py plan` still routed judgment to omp at "100% left" (H7).
 7. **C7 `pi`**: the OpenAI API pool (added 2026-11-03, a deliberate operator decision). Both pi and
    omp are Pi-family harnesses, so one could serve both pools; H4 asks whether to fold them later.
 8. **C8 `opencode`**: the one open harness. It already holds the OpenCode Go, SIPB, Zen-free and
@@ -88,24 +91,35 @@ This decides what cannot be folded. Checked on the web 2026-11-04 (sources in se
    API keys if those accounts are ever re-enabled (D4, D5).
 9. **C9 `hermes`**: the messaging gateway (`hermes-ping`, relay route). Not a coding target; listed
    so nobody removes it with the coding TUIs.
+10. **C10 `cline`**: not a slice target (operator-gated, `discovery.never_route` lists clinepass),
+    but `[substrate].lifeline = ["clinepass"]` makes ClinePass the lifeline of both Hermes and Dann
+    (operator, 2026-10-23). Hermes reaches it through LiteLLM; Dann does not: `bin/paseo-new-seat`
+    defaults to `--provider cline --model cline-pass/deepseek-v4.1-flash`, and `DANN_SUBSTRATE` in
+    `bin/route_agent.py` fails over between the Paseo `cline` and `opencode` providers. The Cline
+    client stays while that ruling stands (D6).
 
-The roster drops `skill-everywhere` from 17 targets to 11 (goose, qwen, devin, cline, muse and
-zcode go; 10 if copilot goes too, D2) and the `acp-run --list` registry from 17 rows to 9.
+The roster drops `skill-everywhere` from 17 targets to 12 (goose, qwen, devin, muse and zcode go;
+11 if copilot goes too, D2) and the `acp-run --list` registry from 17 rows to 11 (10 without
+copilot).
 
 ## D. Retire or fold
 
 1. **D1 zcode into opencode.** Z.ai lists OpenCode as a supported client for the GLM Coding Plan
    (B6), and OpenCode's catalog (models.dev) has a `zai-coding-plan` provider (7 models on
-   2026-11-04). zcode costs 45 code files (an acp-run denylist shim, `bin/zcode-key-auth`,
-   session-finder, helm, autorename and self-slash adapters) and has no Paseo provider of its own.
-   Gate: run the same GLM-5.3 slices through
+   2026-11-04; it reads `ZHIPU_API_KEY`). zcode costs 45 code files (an acp-run denylist shim,
+   `bin/zcode-key-auth`, session-finder, helm, autorename and self-slash adapters, `bin/failover.py`
+   and `bin/skillopt-night`) and has no Paseo provider of its own. The key reaches opencode through
+   `sudo-secretspec run`, never pasted into `opencode auth login` or `opencode.json`; if a
+   credential-store write proves unavoidable, it is a named exception like `bin/zcode-key-auth`
+   (review rule 3). Gate: run the same GLM-5.3 slices through
    `acp-run opencode --model zai-coding-plan/glm-5.3` and confirm aiuse's `zai` 5-hour window moves
    (proof the plan, not an API balance, paid). Then switch the `zai` service's `agent` in
    `config/routing.toml` and retire `zcode`, `zcode-acp-server` and Paseo's `glm-acp-agent`. Keep
    the zcode session-store reader until its history is no longer harvested.
 2. **D2 copilot into opencode.** Since 2026-10-30 the Copilot pool is "used only via GitHub or on
    explicit request; never route or burn", and GitHub-side Copilot review does not use the local
-   CLI. An explicit request can go through opencode's GitHub Copilot provider (B7). Lowest priority:
+   CLI. An explicit request can go through opencode's `github-copilot` provider (B7), its
+   `GITHUB_TOKEN` through `sudo-secretspec run` like D1's key. Lowest priority:
    Paseo has a Copilot provider and the CLI is GitHub's own, so this is tidying, not a fix.
 3. **D3 crush: retire.** It came back on 2026-10-11 only "to use mit-sipb-llms" (memory
    `project_crush_removed_2026-10-08`), through an ACP build of the unmerged upstream PR 2450 in
@@ -130,10 +144,12 @@ zcode go; 10 if copilot goes too, D2) and the `acp-run --list` registry from 17 
    disabled, and DeepSeek V4 models are already on the OpenCode Go plan (`deepseek-v4-pro` ran 16
    slices this month). Uninstall, or keep it as an unrouted trial and revisit when it leaves
    preview; either way leave it out of `acp-run`, routing and `skill-everywhere` (H2).
-6. **D6 cline: retire the TUI.** cline is operator-gated, ClinePass is reserved for hermes inference
-   (aiuse `disabled_services`), and that inference reaches ClinePass through the LiteLLM proxy, not
-   the TUI. 15 historical Paseo agents, none dispatched this month. H3 asks before removal, because
-   the ClinePass terms may tie the key to Cline's client.
+6. **D6 cline: keep (C10).** An earlier draft retired it on the belief that ClinePass is reached
+   only through LiteLLM; that holds for Hermes and Hindsight, not for Dann, whose seats and substrate
+   failover run on the Paseo `cline` provider. Folding it would mean moving `paseo-new-seat`'s default
+   and `DANN_SUBSTRATE`'s clinepass leg off the Cline client, which reverses the 2026-10-23 ruling,
+   so it is H3's question, not a step. Separately, `config/routing.toml` line 92 says "the TUI is
+   uninstalled", which is stale: cline 3.0.74 is installed and `acp-run --list` shows it.
 7. **D7 qwen: retire.** The Alibaba plan is disabled in aiuse; no slices. If it comes back, opencode
    already has the `alibaba` and `alibaba-cn` providers configured.
 8. **D8 goose: retire again.** djbclark, 2026-10-03: "Remove goose from everywhere, we decided not to
@@ -184,36 +200,49 @@ tools.
 
 ## G. Migration, in order, each step its own PR or operator action
 
-1. **G1 Docs and registry (inside djbclark-ade, the lead's call).** Mark D3-D12 retired in
-   `config/routing.toml` and `docs/model-routing.md` (whose service matrix still says Cursor Pro and
-   lists devin as dormant), drop the devin and kiro rows from `tools/acp-run` (both already `--`),
-   remove goose, qwen, devin, cline and muse from `bin/skill-everywhere` after H3 and H5, and add
-   `venicecode` and `dsh` to `discovery.never_route` until they are gone.
+1. **G1 Docs and registry (inside djbclark-ade, the lead's call).** Mark only the items with no open
+   question and no live dependency retired: D4, D7, D8, D10, D11 and D12, in `config/routing.toml`
+   and `docs/model-routing.md` (whose service matrix still says Cursor Pro and lists devin as
+   dormant). Drop the devin and kiro rows from `tools/acp-run` (both already `--`), remove goose,
+   qwen and devin from `bin/skill-everywhere` (muse after H5), add `venicecode` and `dsh` to
+   `discovery.never_route` until they are gone, and correct the stale "TUI is uninstalled" comment
+   (D6). Never touch the `clinepass` service or `[substrate].lifeline`: `hermes_chain` in
+   `bin/route_agent.py` drops a retired api service, so marking it would also cut ClinePass out of
+   Hermes's generated chain.
 2. **G2 Trials (inside djbclark-ade).** D1's GLM-through-opencode slices with the aiuse window
    check, and two SIPB slices through `acp-run opencode --model sipb/qwen3.6:35b-a3b-q4_K_M` to
    replace crush. Read the result from the job records and the pool readings, not from exit codes.
-3. **G3 Re-point routing (inside djbclark-ade).** `zai` and the free SIPB service move to
-   `agent = "opencode"`; remove the crush service; keep `route_agent.py` aliases so old records still
-   resolve.
+3. **G3 Re-point routing (inside djbclark-ade, after G2 passes).** Point the `zai` service at
+   `agent = "opencode"`; re-point the `crush` service (the only SIPB row) to `agent = "opencode"`
+   with model `sipb/qwen3.6:35b-a3b-q4_K_M`, renamed `sipb` with an alias `crush` to `sipb` so old
+   records still resolve. In the same PR: replace crush and zcode in `bin/skillopt-night`
+   (`DEFAULT_ALLOW`, keeping the `ADAPTER_SOURCES` readers for history) and `bin/failover.py`
+   (their `Tui` rows), drop the qwen, goose, zcode and crush rows from `tools/acp-run` and the zcode
+   target from `bin/skill-everywhere`, then mark D3 retired. D5 and D9 are marked only after H2 and
+   H5.
 4. **G4 Machine-side removal (outside djbclark-ade: needs djbclark's yes, order 11).** Uninstall
    venicecode (binary, `~/src/venicecode`, `~/.config/venice-opencode-isolated`, and its
    `brew-fast-upgrade` pass), dsh (if H2 says uninstall; also its `brew-fast-upgrade` pass and the
    `dsh_repair_native_binding.py` hook), qwen-code, block-goose-cli and `goose-scout`, aider, the
    Kiro CLI app, crush with `crush-acp` and `~/src/crush-acp`, and zcode after G3; drop their bashrc
-   wrappers; disable the matching Paseo providers (`qwen-code`, `glm-acp-agent`, and `cline`/`muse`
-   per H3/H5). Back up each tool's local state first, as the 2026-10-08 crush removal did.
+   wrappers; disable the matching Paseo providers (`qwen-code`, `glm-acp-agent`, and `muse` per H5;
+   never `cline` while C10 stands). Back up each tool's local state first, as the 2026-10-08 crush
+   removal did.
 5. **G5 Plans (djbclark).** E1-E4.
 
 ## H. Open questions
 
-1. **H1** Approve the 9-agent roster in C?
+1. **H1** Approve the 10-agent roster in C?
 2. **H2** dsh: uninstall now, or keep as an unrouted trial until it leaves developer preview?
-3. **H3** cline: does ClinePass work without the Cline client (it does through LiteLLM today), so the
-   TUI can go?
+3. **H3** cline: keep it as Dann's substrate client (the 2026-10-23 ruling, C10), or move Dann's seats
+   and substrate leg to opencode-go and then retire the Cline client? Hermes and Hindsight already
+   reach ClinePass through LiteLLM.
 4. **H4** Fold pi into omp later (one Pi-family harness for both API pools), or keep one harness per
    pool as decided on 2026-11-03?
 5. **H5** muse: is there a use for it?
 6. **H6** E1: wait a month of cursor data before considering the X Subscription switch?
+7. **H7** omp's credit refusal (C6): the grant may have lapsed or not reach this key, and aiuse and
+   the router both still count it as available. Fix the reading now, or queue it?
 
 ## I. Sources (fetched 2026-11-04)
 

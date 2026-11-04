@@ -3,13 +3,14 @@
 Work the operator has explicitly queued. Newest first. Items leave this file
 when they ship (into the relevant doc) or when they're dropped (say why).
 
-## Agent TUI consolidation: 21 installed, keep 9 (2026-11-04; proposal, djbclark rules on it)
+## Agent TUI consolidation: 21 installed, keep 10 (2026-11-04; proposal, djbclark rules on it)
 
 [docs/tui-consolidation.md](tui-consolidation.md): inventory with 30-day dispatch counts, which plans
-only work in the vendor's client, the 9-agent target roster, what to retire or fold into opencode
-(zcode, copilot, crush, venicecode, dsh, cline, qwen, goose, muse, aider, kiro, devin), plan
-decisions (the X Subscription switch is permanent), and migration steps G1-G5. Nothing removed; the
-machine-side steps (G4) wait for djbclark's yes under standing order 11. Open questions H1-H6.
+only work in the vendor's client, the 10-agent target roster (cline stays as Dann's substrate client),
+what to retire or fold into opencode (zcode, copilot, crush, venicecode, dsh, qwen, goose, muse,
+aider, kiro, devin), plan decisions (the X Subscription switch is permanent), and migration steps
+G1-G5. Nothing removed; the machine-side steps (G4) wait for djbclark's yes under standing order 11.
+Open questions H1-H7, including omp's API credit refusal of 2026-11-04 (H7).
 
 ## Interruption recovery architecture (2026-11-04; implementation pending)
 
