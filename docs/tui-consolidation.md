@@ -2,8 +2,8 @@
 
 **Summary.** This Mac has 21 agent CLIs/TUIs installed (plus the general `venice` CLI). Eleven of them
 ran an `acp-dispatch` slice in the last 30 days, and four of those eleven did 89% of the work. The
-plan keeps **10**: the five clients that are the only allowed way to spend a monthly plan (claude,
-codex, agy, cursor-agent, grok), the two Claude/OpenAI API-credit harnesses (omp, pi), one open
+plan keeps **10**: the five vendor clients the monthly plans need (claude, agy, cursor-agent and
+grok are the only allowed way to spend theirs; codex stays for `bin/local-review`, B2), the two Claude/OpenAI API-credit harnesses (omp, pi), one open
 multi-provider harness that absorbs every pool that is not vendor-locked (opencode), the messaging
 gateway (hermes), and cline as the ClinePass client behind Dann's substrate (operator, 2026-10-23).
 It retires or folds the other 11, including both new installs (`venicecode` and `dsh`). Every live
@@ -119,7 +119,9 @@ copilot).
 2. **D2 copilot into opencode.** Since 2026-10-30 the Copilot pool is "used only via GitHub or on
    explicit request; never route or burn", and GitHub-side Copilot review does not use the local
    CLI. An explicit request can go through opencode's `github-copilot` provider (B7), its
-   `GITHUB_TOKEN` through `sudo-secretspec run` like D1's key. Lowest priority:
+   `GITHUB_TOKEN` through `sudo-secretspec run` like D1's key (unverified: the provider may need
+   GitHub's device login instead, which writes opencode's own auth store and would be D1's named
+   exception; check it in the trial). Lowest priority:
    Paseo has a Copilot provider and the CLI is GitHub's own, so this is tidying, not a fix.
 3. **D3 crush: retire.** It came back on 2026-10-11 only "to use mit-sipb-llms" (memory
    `project_crush_removed_2026-10-08`), through an ACP build of the unmerged upstream PR 2450 in
@@ -219,7 +221,10 @@ tools.
    (`DEFAULT_ALLOW`, keeping the `ADAPTER_SOURCES` readers for history) and `bin/failover.py`
    (their `Tui` rows), drop the qwen, goose, zcode and crush rows from `tools/acp-run` and the zcode
    target from `bin/skill-everywhere`, then mark D3 retired. D5 and D9 are marked only after H2 and
-   H5.
+   H5. A follow-up PR removes the remaining crush and zcode references (`dispatch.extra.crush` in
+   `config/routing.toml`, `bin/acp-dispatch`, `bin/agent_guard.py`, `bin/crush-context-check`,
+   `bin/ade-backup-stores`, `bin/web-digest-mcp`, `bin/skillopt_sources.py`) once G4 has removed the
+   binaries. D2 gets its own trial and PR only if djbclark wants it (lowest priority).
 4. **G4 Machine-side removal (outside djbclark-ade: needs djbclark's yes, order 11).** Uninstall
    venicecode (binary, `~/src/venicecode`, `~/.config/venice-opencode-isolated`, and its
    `brew-fast-upgrade` pass), dsh (if H2 says uninstall; also its `brew-fast-upgrade` pass and the
@@ -234,9 +239,10 @@ tools.
 
 1. **H1** Approve the 10-agent roster in C?
 2. **H2** dsh: uninstall now, or keep as an unrouted trial until it leaves developer preview?
-3. **H3** cline: keep it as Dann's substrate client (the 2026-10-23 ruling, C10), or move Dann's seats
-   and substrate leg to opencode-go and then retire the Cline client? Hermes and Hindsight already
-   reach ClinePass through LiteLLM.
+3. **H3** cline: keep it as Dann's substrate client (the 2026-10-23 ruling, C10)? The recommendation
+   is yes: `DANN_SUBSTRATE`'s other leg is already opencode-go, so moving the clinepass leg there
+   too would leave Dann without a second provider to fail over to. Retiring the Cline client needs
+   a different second provider first. Hermes and Hindsight already reach ClinePass through LiteLLM.
 4. **H4** Fold pi into omp later (one Pi-family harness for both API pools), or keep one harness per
    pool as decided on 2026-11-03?
 5. **H5** muse: is there a use for it?
