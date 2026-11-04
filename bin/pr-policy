@@ -40,6 +40,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
+from xml.sax.saxutils import escape as xml_escape
 
 ADE = Path(__file__).resolve().parent.parent
 HOME = Path.home()
@@ -203,7 +204,8 @@ def github_plan(api: Api, cfg: dict, login: str, stats: dict) -> tuple[list[dict
                 cache[key] = st != 404 and (d or {}).get("permission") in TRUSTED_GITHUB
             if not cache[key]:
                 acts.append({"forge": "github", "kind": "draft", "repo": repo, "number": it["number"],
-                             "url": it.get("html_url", ""), "author": who, "node_id": it["node_id"]})
+                             "url": it.get("html_url", ""), "author": who,
+                             "label": cfg.get("approved_label", "pr-policy-approved")})
     except ApiError as e:
         errs.append(f"github search: {e}")
     return acts, errs
@@ -236,7 +238,8 @@ def forgejo_plan(api: Api, cfg: dict, login: str, stats: dict) -> tuple[list[dic
                     cache[key] = ok
                 if not cache[key]:
                     acts.append({"forge": "forgejo", "kind": "draft", "repo": repo, "number": it["number"],
-                                 "url": it.get("html_url", ""), "author": who, "title": it.get("title", ""), "prefix": prefix})
+                                 "url": it.get("html_url", ""), "author": who, "prefix": prefix,
+                                 "label": cfg.get("approved_label", "pr-policy-approved")})
         except ApiError as e:
             errs.append(f"forgejo {owner}: {e}")
     return acts, errs
@@ -245,8 +248,16 @@ def forgejo_plan(api: Api, cfg: dict, login: str, stats: dict) -> tuple[list[dic
 GRAPHQL_DRAFT = "mutation($id: ID!) { convertPullRequestToDraft(input: {pullRequestId: $id}) { pullRequest { isDraft } } }"
 
 
+def still_due(cur: dict | None, act: dict) -> bool:
+    """The pull request, read just now, is still open, ready, unapproved and by the same author (search lags edits)."""
+    cur = cur or {}
+    return (cur.get("state") == "open" and not cur.get("draft") and not approved(cur, {"approved_label": act["label"]})
+            and str((cur.get("user") or {}).get("login", "")).lower() == act["author"].lower())
+
+
 def apply_one(gh: Api | None, fj: Api | None, act: dict) -> bool:
-    """Make one change; False when the repository already had it (the repository listing lags a PATCH by seconds)."""
+    """Make one change; False when it is no longer due. The repository listing lags a PATCH by seconds and search lags
+    a label or a ready-for-review, so each target is re-read first."""
     if act["forge"] == "github" and act["kind"] == "lock":
         _, cur, _ = gh.call("GET", f"/repos/{act['repo']}")
         if (cur or {}).get("pull_request_creation_policy") == act["after"]:
@@ -256,13 +267,19 @@ def apply_one(gh: Api | None, fj: Api | None, act: dict) -> bool:
         if got != act["after"]:
             raise ApiError(f"{act['repo']}: pull_request_creation_policy reads {got!r} after the PATCH")
     elif act["forge"] == "github":
-        _, d, _ = gh.call("POST", "/graphql", {"query": GRAPHQL_DRAFT, "variables": {"id": act["node_id"]}})
+        _, cur, _ = gh.call("GET", f"/repos/{act['repo']}/pulls/{act['number']}")
+        if not still_due(cur, act):
+            return False
+        _, d, _ = gh.call("POST", "/graphql", {"query": GRAPHQL_DRAFT, "variables": {"id": cur["node_id"]}})
         pr = (((d or {}).get("data") or {}).get("convertPullRequestToDraft") or {}).get("pullRequest") or {}
         if (d or {}).get("errors") or not pr.get("isDraft"):
             msg = "; ".join(str(e.get("message", ""))[:160] for e in (d or {}).get("errors") or [])
             raise ApiError(f"{act['url']}: not converted to draft {msg}".rstrip())
     else:
-        title = (act["prefix"] + act["title"])[:TITLE_MAX]
+        _, cur, _ = fj.call("GET", f"/repos/{act['repo']}/pulls/{act['number']}")
+        if not still_due(cur, act):
+            return False
+        title = (act["prefix"] + str(cur.get("title", "")))[:TITLE_MAX]
         _, d, _ = fj.call("PATCH", f"/repos/{act['repo']}/pulls/{act['number']}", {"title": title})
         if not (d or {}).get("draft"):
             raise ApiError(f"{act['url']}: still not a draft after the {act['prefix']!r} prefix")
@@ -309,7 +326,7 @@ def describe(act: dict) -> str:
 
 
 def append_change(act: dict, result: str) -> None:
-    rec = {k: v for k, v in act.items() if k not in ("node_id", "title", "prefix")}
+    rec = {k: v for k, v in act.items() if k not in ("prefix", "label")}
     rec |= {"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "result": result}
     d = state_dir()
     d.mkdir(parents=True, exist_ok=True)
@@ -419,7 +436,9 @@ def cmd_install(a) -> int:
     if not (ade / "bin/pr-policy").is_file() or not tpl.is_file():
         return die(f"no bin/pr-policy or {tpl.name} under {ade}", 2)
     sd = state_dir().expanduser().resolve()
-    text = tpl.read_text().replace("__ADE__", str(ade)).replace("__HOME__", str(HOME)).replace("__STATE__", str(sd))
+    text = tpl.read_text()
+    for key, val in (("__ADE__", ade), ("__HOME__", HOME), ("__STATE__", sd)):
+        text = text.replace(key, xml_escape(str(val)))
     if a.dry_run:
         print(text)
         return 0

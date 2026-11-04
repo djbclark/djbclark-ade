@@ -51,6 +51,7 @@ class World:
         self.fj_perm_any = "owner"   # what Forgejo says for a site admin who is no collaborator
         self.stale_patch = False
         self.direct: dict[str, dict] = {}   # what GET /repos/O/R says when the listing lags behind it
+        self.pull_direct: dict[tuple, dict] = {}   # what GET .../pulls/N says when search lags behind it
         self.link_next = None
         self.redirect_org = None
         self.requests: list[tuple[str, str, str]] = []
@@ -107,6 +108,13 @@ def make_handler(w: World):
                 repo, who = f"{parts[3]}/{parts[4]}", urllib.parse.unquote(parts[6])
                 perm = w.gh_perm.get((repo, who))
                 return self.send(200, {"permission": perm}) if perm else self.send(404, {"message": "Not Found"})
+            if p.startswith("/gh/repos/") and len(parts) == 7 and parts[5] == "pulls" and method == "GET":
+                repo, n = f"{parts[3]}/{parts[4]}", int(parts[6])
+                for it in w.gh_search:
+                    if it["repository_url"].endswith("/repos/" + repo) and it["number"] == n:
+                        return self.send(200, {"state": "open", "draft": it["draft"], "labels": it["labels"], "user": it["user"],
+                                               "node_id": it["node_id"], **w.pull_direct.get(("gh", repo, n), {})})
+                return self.send(404, {"message": "Not Found"})
             if p.startswith("/gh/repos/") and len(parts) == 5 and method == "GET":
                 repo = f"{parts[3]}/{parts[4]}"
                 for r in w.user_repos + w.org_repos:
@@ -130,6 +138,13 @@ def make_handler(w: World):
                 if p.endswith("/permission"):
                     return self.send(200, {"permission": w.fj_collab.get((repo, who)) or w.fj_perm_any})
                 return self.send(204) if w.fj_collab.get((repo, who)) else self.send(404, {"message": "not found"})
+            if p.startswith("/fj/api/v1/repos/") and "/pulls/" in p and method == "GET":
+                repo, n = f"{parts[5]}/{parts[6]}", int(parts[8])
+                for it in w.fj_search:
+                    if it["repository"]["full_name"] == repo and it["number"] == n:
+                        return self.send(200, {"state": "open", "draft": it["pull_request"]["draft"], "labels": it["labels"],
+                                               "user": it["user"], "title": it["title"], **w.pull_direct.get(("fj", repo, n), {})})
+                return self.send(404, {"message": "not found"})
             if p.startswith("/fj/api/v1/repos/") and "/pulls/" in p and method == "PATCH":
                 repo, n = f"{parts[5]}/{parts[6]}", int(parts[8])
                 title = self.body()["title"]
@@ -219,6 +234,32 @@ def test_an_approved_outside_pull_request_stays_ready(env):
     drafts = {(a["repo"], a["number"]) for a in out["actions"] if a["kind"] == "draft"}
     assert ("frdminc/x", 9) not in drafts and ("djbclark/get", 10) not in drafts
     assert ("frdminc/x", 11) in drafts and ("frdminc/x", 1) in drafts
+
+
+def test_a_pull_request_changed_since_the_search_is_reread(env):
+    w = env.world
+    w.pull_direct[("gh", "frdminc/x", 1)] = {"labels": [{"name": "pr-policy-approved"}]}
+    w.pull_direct[("fj", "djbclark/barnowl", 4)] = {"draft": True}
+    w.pull_direct[("fj", "djbclark/get", 7)] = {"title": "renamed"}
+    p = env("apply", "--yes")
+    assert p.returncode == 0, p.stderr
+    assert not any(m == "POST" and path == "/gh/graphql" for m, path, _ in w.requests)
+    assert not any(m == "PATCH" and "/barnowl/pulls/4" in path for m, path, _ in w.requests)
+    assert "same   github  draft  https://github.com/frdminc/x/pull/1" in p.stdout
+    titles = {(it["repository"]["full_name"], it["number"]): it["title"] for it in w.fj_search}
+    assert titles[("djbclark/get", 7)] == "WIP: renamed" and titles[("djbclark/barnowl", 4)] == "Touhou"
+
+
+def test_install_escapes_paths_in_the_plist(env, tmp_path):
+    ade = tmp_path / "a&b<c"
+    (ade / "bin").mkdir(parents=True)
+    (ade / "config/launchd").mkdir(parents=True)
+    (ade / "bin/pr-policy").write_text("")
+    (ade / "config/launchd/com.djbclark.pr-policy.plist").write_text(
+        (REPO / "config/launchd/com.djbclark.pr-policy.plist").read_text())
+    p = env("install", "--dry-run", "--ade", str(ade))
+    assert p.returncode == 0, p.stderr
+    assert plistlib.loads(p.stdout.encode())["ProgramArguments"][0] == str(ade.resolve() / "bin/pr-policy")
 
 
 def test_a_token_that_is_not_one_printable_word_is_refused_unechoed(env, tmp_path):

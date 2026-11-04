@@ -56,9 +56,10 @@ their own pull request this way.
 Exit codes: 0 done or nothing to do, 1 an API or secret error (the other changes still ran), 2 usage or config
 error, 69 `install`/`uninstall` off macOS.
 
-Before a change the tool re-reads the repository itself: the repository listing lags a PATCH by seconds
-(2026-11-04: all nine `frdminc` repositories listed `all` right after a successful PATCH), and without the re-read
-the next run would report a change it did not make.
+Before a change the tool re-reads its target: the repository listing lags a PATCH by seconds (2026-11-04: all nine
+`frdminc` repositories listed `all` right after a successful PATCH), and search lags a new label or a
+ready-for-review, so a pull request is re-read and left alone unless it is still open, ready, unapproved and by the
+same author (on Forgejo the prefix goes on the title as it reads now).
 
 ## Credentials and safety
 
