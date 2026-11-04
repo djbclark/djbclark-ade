@@ -1,13 +1,13 @@
 // paseo-checkpoint: read-only recovery verdicts from ade-recovery records.
 // Never writes, sweeps, locks, or calls Paseo. Live git goes through the same hardened exec as the plugin.
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import type { GitEvidence, Interruption, LiveEvidence, LoadResult, RecoveryRecord, Verdict, VerdictResult } from "./types.ts";
 import { loadRecord, listAgents } from "./store.ts";
 import { stateBase, stateRoot } from "./state-root.ts";
 import { lockHolderAlive } from "./writer-lock.ts";
-import { hostIdentity, processAlive } from "./host-identity.ts";
+import { hostIdentity, processAlive, sameHost } from "./host-identity.ts";
+import { paseoHome, paseoServerId, readPaseoAgentRecord, type PaseoAgentRecordEvidence } from "./paseo-home.ts";
 import { judge } from "./verdict.ts";
 import { gitEvidence } from "./git-evidence.ts";
 
@@ -31,7 +31,13 @@ options:
 exit codes (show): 0 resumable-native, 1 needs-review, 2 do-not-resume, 3 not found, 64 usage error
 exit codes (list): 0 ok, 64 usage error
 
-environment: ADE_STATE_ROOT / XDG_STATE_HOME (state base), PASEO_HOME (default ~/.paseo)
+Paseo's own store is read too, read only: <PASEO_HOME>/agents/*/<id>.json (archivedAt set:
+do-not-resume, paseo-archived; updatedAt more than 2 s after the record: needs-review,
+paseo-record-newer) and the daemon's server id (PASEO_SERVER_ID, else <PASEO_HOME>/server-id;
+a mismatch: other-server). Unreadable evidence never blocks by itself (info only).
+
+environment: ADE_STATE_ROOT / XDG_STATE_HOME (state base), PASEO_HOME (default ~/.paseo; a
+leading ~ expands and a relative value resolves against the cwd, as Paseo does), PASEO_SERVER_ID
 `;
 
 const EXIT: Record<Verdict, number> = { "resumable-native": 0, "needs-review": 1, "do-not-resume": 2 };
@@ -109,8 +115,7 @@ async function collect(env: NodeJS.ProcessEnv, only: string | null): Promise<Ent
 }
 
 /** Read-only look at session-recovery's state: true when it holds an open record for this agent. */
-function recoveryScheduledElsewhere(env: NodeJS.ProcessEnv, agentId: string, sessionId: string | undefined): boolean | null {
-  const home = env.PASEO_HOME || path.join(os.homedir(), ".paseo");
+function recoveryScheduledElsewhere(home: string, agentId: string, sessionId: string | undefined): boolean | null {
   let state: unknown;
   try {
     state = JSON.parse(fs.readFileSync(path.join(home, "plugin-data", "session-recovery", "state.json"), "utf8"));
@@ -134,24 +139,34 @@ interface Judged {
   result: VerdictResult;
   live: LiveEvidence;
   computed: Interruption | null;
+  paseo: PaseoAgentRecordEvidence | null;
 }
 
 async function evaluate(entry: Entry, opts: Opts, env: NodeJS.ProcessEnv): Promise<Judged> {
   const rec = entry.load.record;
   const host = hostIdentity();
+  const home = paseoHome(env);
+  let paseo: PaseoAgentRecordEvidence | null = null;
   let git: GitEvidence | null = null;
   if (rec && !opts.noLive && rec.cwd) git = await gitEvidence(rec.cwd, AbortSignal.timeout(25_000));
   let recordWriterAlive: boolean | null = null;
-  if (rec && rec.host === host.host) recordWriterAlive = (await processAlive(rec.writer)) ?? null;
+  if (rec && sameHost(rec, host)) recordWriterAlive = (await processAlive(rec.writer)) ?? null;
   const live: LiveEvidence = {
     now: Date.now(),
     host,
     git,
     writerAlive: await lockHolderAlive(entry.dir),
     recordWriterAlive,
-    recoveryScheduledElsewhere: rec ? recoveryScheduledElsewhere(env, rec.paseoAgentId, rec.persistence?.sessionId) : null,
+    recoveryScheduledElsewhere: rec ? recoveryScheduledElsewhere(home, rec.paseoAgentId, rec.persistence?.sessionId) : null,
     serverId: entry.serverId,
   };
+  if (rec) {
+    const stored = readPaseoAgentRecord(home, rec.paseoAgentId);
+    live.paseoArchived = stored === null ? null : stored.archivedAt !== null;
+    live.paseoUpdatedAt = stored === null ? null : stored.updatedAt;
+    live.paseoServerId = paseoServerId(home, env);
+    paseo = stored;
+  }
   let load = entry.load;
   let computed: Interruption | null = null;
   if (rec && rec.state === "turn-in-flight" && recordWriterAlive === false) {
@@ -166,7 +181,7 @@ async function evaluate(entry: Entry, opts: Opts, env: NodeJS.ProcessEnv): Promi
     load = { ...load, record: patched };
   }
   const result = await judge(load, live);
-  return { entry, result, live, computed };
+  return { entry, result, live, computed, paseo };
 }
 
 function summary(j: Judged) {
@@ -191,6 +206,8 @@ function summary(j: Judged) {
     writerAlive: j.live.writerAlive,
     recordWriterAlive: j.live.recordWriterAlive,
     recoveryScheduledElsewhere: j.live.recoveryScheduledElsewhere,
+    paseoRecord: j.paseo,
+    paseoServerId: j.live.paseoServerId ?? null,
   };
 }
 
@@ -255,6 +272,7 @@ async function cmdShow(opts: Opts, env: NodeJS.ProcessEnv): Promise<number> {
       `live git   ${s.liveGit ? `head ${s.liveGit.head ?? "-"} branch ${s.liveGit.branch ?? "-"} errors ${s.liveGit.errors.join(",") || "-"}` : "not captured"}`,
       `writer     lock holder alive ${s.writerAlive}, record writer alive ${s.recordWriterAlive}`,
       `recovery   scheduled elsewhere ${s.recoveryScheduledElsewhere}`,
+      `paseo      ${s.paseoRecord ? `archivedAt ${s.paseoRecord.archivedAt ?? "-"} updatedAt ${s.paseoRecord.updatedAt ?? "-"} (${s.paseoRecord.updatedAtSource})` : "stored record unavailable"}, server id ${s.paseoServerId ?? "unavailable"}`,
       `interrupts ${s.interruptions.map((i) => i.evidence).join(", ") || "-"}`,
     ];
     process.stdout.write(lines.join("\n") + "\n");

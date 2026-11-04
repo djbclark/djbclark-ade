@@ -1,6 +1,6 @@
 {
-  "name": "user-canceled",
-  "note": "a user stop stays stopped",
+  "name": "canceled-outside-shutdown",
+  "note": "any cancel outside shutdown stays stopped (the upstream cancel reason is generic: a user stop, a reload interrupt or a provider cancel)",
   "load": {
     "record": {
       "schema": "ade.recovery.passive/v1",
@@ -176,7 +176,7 @@
   "expect": {
     "verdict": "do-not-resume",
     "reasons": [
-      "user-canceled"
+      "canceled-outside-shutdown"
     ]
   }
 }

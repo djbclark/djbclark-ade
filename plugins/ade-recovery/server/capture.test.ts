@@ -748,3 +748,60 @@ test("shuttingDown that throws is read as shutting down (no git)", async () => {
   assert.equal(h.gitCalls.length, 0);
   assert.ok(h.writes.length > 0);
 });
+
+// Adversary finding 8 (partial): an init failure logs a code or name, never the raw message.
+test("init failure logs the error code and name only, never a message carrying a path", async () => {
+  const h = harness();
+  h.deps.store.ensureRoot = () => {
+    const e = new Error("EACCES: permission denied, mkdir '/Users/secret-user/.local/state/ade'") as NodeJS.ErrnoException;
+    e.code = "EACCES";
+    throw e;
+  };
+  h.capture.onCreate(agent(), fakePaseo());
+  await h.capture.idle();
+  assert.equal(h.capture.mode, "inert");
+  const inert = h.logs.filter((l) => l.startsWith("inert"));
+  assert.equal(inert.length, 1, h.logs.join("\n"));
+  assert.match(inert[0]!, /"reason":"error:EACCES"/);
+  assert.equal(h.logs.some((l) => l.includes("secret-user") || l.includes("/Users/")), false, h.logs.join("\n"));
+});
+
+test("init failure with our own reason code keeps the code (no-server-id)", async () => {
+  const h = harness();
+  h.capture.onCreate(agent(), fakePaseo({ serverId: null }));
+  await h.capture.idle();
+  assert.ok(h.logs.some((l) => l.includes('"reason":"no-server-id:invalid"')), h.logs.join("\n"));
+});
+
+// Adversary finding 2: the previous load read the daemon start as null (slow ps); same pid, same boot.
+test("init: a record from the same daemon pid and boot with a null start takes the refresh path", async () => {
+  const disk = new Map<string, LoadResult>();
+  const nullDI = `${DAEMON.pid}:null:${BOOT}`;
+  const body = baseBody("agent-1", {
+    state: "turn-in-flight",
+    daemonInstance: nullDI,
+    turns: [{ turnKey: `${nullDI}:1`, turnId: "t1", startedAt: "2026-11-04T10:00:00.000Z", endedAt: null, outcome: null, duringShutdown: false }],
+  });
+  disk.set("agent-1", { record: sealedFrom(body), source: "current", problems: [], maxGenerationSeen: 1 });
+  const h = harness({ disk });
+  const p = fakePaseo({ refresh: async (id) => ({ id, status: "running", activeTurnId: "t1" }) });
+  h.capture.onTurnBefore(agent("other"), "x", p);
+  await h.capture.idle();
+  assert.ok(p.calls.includes("refresh:agent-1"), `asked the SDK: ${p.calls.join(",")}`);
+  assert.equal(h.writes.some((w) => w.agentId === "agent-1"), false, "still running the same turn: kept, nothing written");
+  // The turn then ends under the current (known) start: no daemon-restart interruption appears.
+  h.capture.onTurnAfter(agent("agent-1"), "t1", { kind: "completed" }, p);
+  await h.capture.idle();
+  const rec = h.lastWrite("agent-1");
+  assert.deepEqual(rec.interruptions, []);
+  assert.equal(rec.state, "idle");
+  assert.equal(rec.daemonInstance, DI);
+});
+
+test("records carry the machine id from the host identity", async () => {
+  const h = harness();
+  h.deps.host.hostIdentity = () => ({ host: "testhost", bootId: BOOT, platform: "linux", machineId: "d165c2d88d894a4787be219662b439ad" });
+  h.capture.onCreate(agent(), fakePaseo());
+  await h.capture.idle();
+  assert.equal(h.lastWrite("agent-1").machineId, "d165c2d88d894a4787be219662b439ad");
+});

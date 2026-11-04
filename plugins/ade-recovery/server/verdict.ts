@@ -4,6 +4,10 @@
 
 import type { GitEvidence, Interruption, LiveEvidence, LoadResult, RecoveryRecord, TurnRecord, VerdictResult } from "./types.ts";
 import { missingIdentityField } from "./record.ts";
+import { sameHost } from "./host-identity.ts";
+
+/** Paseo's stored record may trail ours by this much (clock and flush order) before it counts as newer. */
+export const PASEO_NEWER_TOLERANCE_MS = 2_000;
 
 /** Load problems that block on their own (everything else from the loader is detail, or unknown). */
 const LOAD_BLOCKING = new Set(["unknown-schema", "corrupt-fell-back-to-prev", "corrupt-no-valid-generation"]);
@@ -66,7 +70,9 @@ export function judge(load: LoadResult, live: LiveEvidence | null): VerdictResul
   const missing = missingIdentityField(r as unknown as Record<string, unknown>);
   if (missing !== null) add(reasons, `missing-identity:${missing}`);
 
-  // do-not-resume: archived, or a user stop (canceled, not during shutdown, nothing interrupted it later).
+  // do-not-resume: archived, or any cancel outside shutdown with nothing interrupting it later. The
+  // upstream cancel reason is generic, so a reload interrupt or a provider-side cancel reads the same
+  // as a user stop: the safe direction.
   const turns: TurnRecord[] = Array.isArray(r.turns) ? r.turns : [];
   const last: TurnRecord | null = turns.length > 0 ? turns[turns.length - 1] : null;
   const ints: Interruption[] = Array.isArray(r.interruptions) ? r.interruptions : [];
@@ -75,14 +81,25 @@ export function judge(load: LoadResult, live: LiveEvidence | null): VerdictResul
   if (prior > 0) info.push(`prior-interruptions:${prior}`);
   if (r.state === "archived" || (r.archivedAt !== null && r.archivedAt !== undefined)) add(stop, "archived");
   const outcome = last?.outcome?.kind ?? null;
-  if (last && outcome === "canceled" && !last.duringShutdown && later.length === 0) add(stop, "user-canceled");
+  if (last && outcome === "canceled" && !last.duringShutdown && later.length === 0) add(stop, "canceled-outside-shutdown");
 
   // Host and server.
   if (!live) {
     add(reasons, "no-live-evidence");
   } else {
     if (live.serverId !== null && live.serverId !== undefined && live.serverId !== r.serverId) add(reasons, "other-server");
-    if (!live.host || live.host.host !== r.host) add(reasons, "other-host");
+    // Machine id when both sides have one; hostname only when either lacks it (older records).
+    if (!live.host || !sameHost(live.host, r)) add(reasons, "other-host");
+    // Paseo's own store (read only by the CLI): hooks are best-effort, so what the plugin did not
+    // observe (an archive, a new turn, a stop while it was down) shows up here. Unavailable
+    // evidence never blocks by itself.
+    if (live.paseoServerId === null) info.push("paseo-server-id-unavailable");
+    else if (typeof live.paseoServerId === "string" && live.paseoServerId !== r.serverId) add(reasons, "other-server");
+    if (live.paseoArchived === true) add(stop, "paseo-archived");
+    if (live.paseoArchived === null || live.paseoUpdatedAt === null) info.push("paseo-record-unavailable");
+    const pu = ms(live.paseoUpdatedAt);
+    const wa = ms(r.writtenAt);
+    if (pu !== null && wa !== null && pu - wa > PASEO_NEWER_TOLERANCE_MS) add(reasons, "paseo-record-newer");
     if (live.host && typeof live.host.bootId === "string" && typeof r.bootId === "string" && live.host.bootId !== r.bootId) {
       info.push("boot-id-changed");
     }
@@ -109,7 +126,7 @@ export function judge(load: LoadResult, live: LiveEvidence | null): VerdictResul
     add(reasons, "no-turns");
   } else {
     const clean = !!last.endedAt && (outcome === "completed" || outcome === "failed") && !last.duringShutdown;
-    if (!clean && !stop.includes("user-canceled") && later.length === 0 && !liveTurn) {
+    if (!clean && !stop.includes("canceled-outside-shutdown") && later.length === 0 && !liveTurn) {
       if (last.endedAt && last.duringShutdown) add(reasons, "turn-ended-during-shutdown");
       else add(reasons, "turn-outcome-unknown");
     }

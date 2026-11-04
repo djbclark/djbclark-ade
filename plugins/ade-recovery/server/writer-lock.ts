@@ -2,15 +2,17 @@
 // seen empty (finding 9). Stale iff the holder's pid is dead, its start token differs (PID reuse),
 // or its boot id differs. A stale lock is removed only under a takeover guard named after its
 // nonce (see claim()); after linking, the winner re-reads the lock and compares its nonce.
-// Residual: a holder on another host (shared home) is never judged; it is reported, not taken over.
+// Host: the machine id decides (hostname drifts on macOS), the hostname only when either side has
+// no machine id (an older lock). Residual: a holder on another machine (shared home) is never
+// judged; it is reported, not taken over.
 
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
-import type { WriterInfo } from "./types.ts";
+import type { HostIdentity, WriterInfo } from "./types.ts";
 import { LOCK_FILE, PLUGIN_ID, PLUGIN_VERSION, TMP_PREFIX } from "./constants.ts";
 import { canonicalJson, sha256Hex } from "./canonical.ts";
-import { bootId, daemonIdentity, hostIdentity, processAlive, selfIdentity } from "./host-identity.ts";
+import { bootId, daemonIdentity, hostIdentity, processAlive, sameHost, selfIdentity } from "./host-identity.ts";
 
 export type LockContent = WriterInfo & { nonce: string; acquiredAt: string };
 
@@ -40,6 +42,8 @@ export interface NotHeld {
 export interface AcquireOptions {
   /** Test hook: runs right after a successful link, before the nonce re-read. */
   afterLink?: () => void;
+  /** Test hook: this host's identity (default hostIdentity()). */
+  host?: () => HostIdentity;
 }
 
 /** WriterInfo for this process. */
@@ -54,6 +58,7 @@ export function selfWriterInfo(): WriterInfo {
     daemon: daemonIdentity(),
     host: h.host,
     bootId: h.bootId,
+    machineId: h.machineId ?? null,
   };
 }
 
@@ -73,6 +78,8 @@ function parseLock(raw: string): LockContent | null {
     if (v.start !== null && typeof v.start !== "string") return null;
     if (typeof v.host !== "string") return null;
     if (v.bootId !== null && typeof v.bootId !== "string") return null;
+    // machineId is optional (locks written before it existed); an ill-typed one reads as absent.
+    if (v.machineId !== undefined && v.machineId !== null && typeof v.machineId !== "string") v.machineId = null;
     if (typeof v.nonce !== "string" || v.nonce === "") return null;
     return v as unknown as LockContent;
   } catch {
@@ -104,10 +111,9 @@ type HolderState =
   | { stale: true; why: "malformed" | "boot-id-changed" | "holder-dead" }
   | { stale: false; why: "held-by-live-writer" | "holder-liveness-unknown" | "held-by-other-host" };
 
-function judgeHolder(h: LockContent | null): HolderState {
+function judgeHolder(h: LockContent | null, me: HostIdentity): HolderState {
   if (h === null) return { stale: true, why: "malformed" };
-  const me = hostIdentity();
-  if (h.host !== me.host) return { stale: false, why: "held-by-other-host" };
+  if (!sameHost(h, me)) return { stale: false, why: "held-by-other-host" };
   if (h.bootId !== null && me.bootId !== null && h.bootId !== me.bootId) return { stale: true, why: "boot-id-changed" };
   const alive = processAlive({ pid: h.pid, start: h.start });
   if (alive === false) return { stale: true, why: "holder-dead" };
@@ -122,7 +128,7 @@ function stripLock(h: LockContent | null): WriterInfo | null {
 }
 
 /** Is the holder named in writer.lock alive? false: no lock or a dead/stale holder; null: unknown. */
-export function lockHolderAlive(dir: string): boolean | null {
+export function lockHolderAlive(dir: string, host: () => HostIdentity = hostIdentity): boolean | null {
   let raw: string | null;
   try {
     raw = readRaw(dir);
@@ -132,7 +138,7 @@ export function lockHolderAlive(dir: string): boolean | null {
   if (raw === null) return false;
   const h = parseLock(raw);
   if (h === null) return null;
-  const s = judgeHolder(h);
+  const s = judgeHolder(h, host());
   if (s.stale) return false;
   return s.why === "held-by-live-writer" ? true : null;
 }
@@ -179,7 +185,14 @@ type ClaimResult = { ok: true; nonce: string } | { ok: false; holder: LockConten
  * holder's lock is never removed by a contender: at most one winner, and a winner never loses
  * its lock to a slow contender that judged an older lock stale.
  */
-function claim(dir: string, file: string, info: WriterInfo, depth: number, afterLink?: () => void): ClaimResult {
+function claim(
+  dir: string,
+  file: string,
+  info: WriterInfo,
+  depth: number,
+  me: HostIdentity,
+  afterLink?: () => void,
+): ClaimResult {
   const nonce = crypto.randomBytes(16).toString("hex");
   const content: LockContent = { ...info, nonce, acquiredAt: new Date().toISOString() };
   const tmp = path.join(dir, `${TMP_PREFIX}lock-${process.pid}-${rand()}`);
@@ -201,13 +214,13 @@ function claim(dir: string, file: string, info: WriterInfo, depth: number, after
       const raw = readFileOrNull(file);
       if (raw === null) continue; // released or taken over meanwhile: link again
       const holder = parseLock(raw);
-      const state = judgeHolder(holder);
+      const state = judgeHolder(holder, me);
       if (!state.stale) return { ok: false, holder, reason: depth === 0 ? state.why : "lost-race" };
       if (depth >= MAX_TAKEOVER_DEPTH) return { ok: false, holder, reason: "lost-race" };
       const staleKey =
         holder !== null && /^[0-9a-f]{8,64}$/.test(holder.nonce) ? holder.nonce : sha256Hex(raw).slice(0, 32);
       const guardFile = path.join(dir, `${TMP_PREFIX}takeover-${staleKey}`);
-      const guard = claim(dir, guardFile, info, depth + 1);
+      const guard = claim(dir, guardFile, info, depth + 1, me);
       if (!guard.ok) return { ok: false, holder: depth === 0 ? holder : guard.holder, reason: "lost-race" };
       try {
         if (readFileOrNull(file) === raw) fs.rmSync(file, { force: true });
@@ -225,7 +238,7 @@ export function acquireLock(dir: string, info: WriterInfo, opts: AcquireOptions 
   const lock = lockPath(dir);
   let r: ClaimResult;
   try {
-    r = claim(dir, lock, info, 0, opts.afterLink);
+    r = claim(dir, lock, info, 0, (opts.host ?? hostIdentity)(), opts.afterLink);
   } catch (e) {
     return { held: false, holder: null, reason: `error:${(e as NodeJS.ErrnoException).code ?? "unknown"}` };
   }

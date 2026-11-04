@@ -38,9 +38,14 @@ export interface AgentSnapshot {
 }
 
 export interface HostIdentity {
-  host: string;
+  host: string; // os.hostname(): display text; it drifts (macOS network/Bonjour renames)
   bootId: string | null; // Linux /proc/sys/kernel/random/boot_id, macOS kern.bootsessionuuid
   platform: string; // process.platform
+  /**
+   * Stable machine id: Linux /etc/machine-id (or /var/lib/dbus/machine-id), macOS IOPlatformUUID;
+   * null when unreadable. Optional so identities written before it existed still load.
+   */
+  machineId?: string | null;
 }
 
 /** A process identity that survives PID reuse: pid plus its start token. */
@@ -55,6 +60,7 @@ export interface WriterInfo extends ProcessIdentity {
   daemon: ProcessIdentity; // process.ppid and its start token
   host: string;
   bootId: string | null;
+  machineId?: string | null; // absent in locks and records written before it existed
 }
 
 export interface GitEvidence {
@@ -123,6 +129,7 @@ export interface RecoveryRecord {
   bootId: string | null;
   platform: string;
   // identity (optional)
+  machineId?: string | null; // absent in records written before it existed: hostname is compared then
   cwdRealpath?: string | null;
   workspaceId?: string | null;
   parentAgentId?: string | null;
@@ -155,6 +162,14 @@ export interface LiveEvidence {
   recordWriterAlive: boolean | null; // the writer named in the record is alive
   recoveryScheduledElsewhere: boolean | null; // session-recovery has an open record for the agent
   serverId?: string | null; // expected server id, when the caller knows it
+  // Paseo's own store, read only by the CLI. undefined: not checked; null: checked, unavailable
+  // (never blocks by itself; adds info paseo-record-unavailable / paseo-server-id-unavailable).
+  /** archivedAt is set in `<PASEO_HOME>/agents/<dir>/<id>.json`. */
+  paseoArchived?: boolean | null;
+  /** That record's `updatedAt` (else its file mtime), ISO 8601. */
+  paseoUpdatedAt?: string | null;
+  /** The daemon's server id (`PASEO_SERVER_ID`, else `<PASEO_HOME>/server-id`). */
+  paseoServerId?: string | null;
 }
 
 export interface LoadResult {

@@ -173,3 +173,74 @@ test("a corrupt record is reported, never repaired", () => {
   assert.ok(JSON.parse(r.out).reasons.some((x: string) => x.startsWith("corrupt-")));
   assert.deepEqual(listing(w.dir), before);
 });
+
+// Adversary finding 4: Paseo's own store is checked, read only.
+function paseoAgent(w: World, id: string, body: Record<string, unknown>) {
+  const d = path.join(w.paseo, "agents", "nonexistent");
+  fs.mkdirSync(d, { recursive: true });
+  fs.writeFileSync(path.join(d, `${id}.json`), JSON.stringify({ id, provider: "claude", cwd: "/nonexistent", ...body }));
+}
+
+async function cleanRepoRecord(w: World, id: string, over: Partial<RecoveryRecord> = {}) {
+  const repo = tmp();
+  git(repo, "init", "-q", "-b", "main");
+  fs.writeFileSync(path.join(repo, "a.txt"), "1\n");
+  git(repo, "add", "."); git(repo, "commit", "-q", "-m", "i");
+  put(w, id, { cwd: repo, git: { latest: await gitEvidence(repo) }, ...over });
+}
+
+test("Paseo's stored record: archived there is do-not-resume (paseo-archived); newer is paseo-record-newer", async () => {
+  const w = world();
+  await cleanRepoRecord(w, "p1");
+  const before = cli(w, "show", "p1", "--json");
+  assert.equal(before.code, 0, before.out + before.err);
+  assert.ok(JSON.parse(before.out).info.includes("paseo-record-unavailable"), "absent store: info only");
+  const now = new Date().toISOString();
+  paseoAgent(w, "p1", { updatedAt: now, archivedAt: now });
+  const archived = cli(w, "show", "p1", "--json");
+  assert.equal(archived.code, 2, archived.out + archived.err);
+  const a = JSON.parse(archived.out);
+  assert.ok(a.reasons.includes("paseo-archived"), a.reasons.join(","));
+  assert.equal(a.paseoRecord.archivedAt, now);
+  paseoAgent(w, "p1", { updatedAt: new Date(Date.now() + 60_000).toISOString(), archivedAt: null });
+  const newer = cli(w, "show", "p1", "--json");
+  assert.equal(newer.code, 1, newer.out);
+  assert.deepEqual(JSON.parse(newer.out).reasons, ["paseo-record-newer"]);
+  paseoAgent(w, "p1", { updatedAt: "2020-01-01T00:00:00.000Z", archivedAt: null });
+  const older = cli(w, "show", "p1", "--json");
+  assert.equal(older.code, 0, older.out);
+  assert.equal(JSON.parse(older.out).info.includes("paseo-record-unavailable"), false);
+  fs.writeFileSync(path.join(w.paseo, "agents", "nonexistent", "p1.json"), "{corrupt");
+  const corrupt = cli(w, "show", "p1", "--json");
+  assert.equal(corrupt.code, 0, "a corrupt Paseo record never blocks by itself");
+  assert.ok(JSON.parse(corrupt.out).info.includes("paseo-record-unavailable"));
+});
+
+test("the daemon's server-id file: a mismatch is other-server, a match passes", async () => {
+  const w = world();
+  await cleanRepoRecord(w, "s1");
+  fs.writeFileSync(path.join(w.paseo, "server-id"), "srv1\n");
+  const ok = cli(w, "show", "s1", "--json");
+  assert.equal(ok.code, 0, ok.out + ok.err);
+  assert.equal(JSON.parse(ok.out).paseoServerId, "srv1");
+  fs.writeFileSync(path.join(w.paseo, "server-id"), "srv_elsewhere\n");
+  const bad = cli(w, "show", "s1", "--json");
+  assert.equal(bad.code, 1);
+  assert.deepEqual(JSON.parse(bad.out).reasons, ["other-server"]);
+});
+
+// Adversary finding 7: PASEO_HOME=~/... resolves as upstream does (the session-recovery state too).
+test("PASEO_HOME with a leading ~ resolves against HOME, for the agents dir and session-recovery state", () => {
+  const w = world();
+  put(w, "t1");
+  const env = { ...w.env, PASEO_HOME: "~/paseo" }; // HOME is w.base, and w.paseo is <base>/paseo
+  paseoAgent(w, "t1", { updatedAt: new Date().toISOString(), archivedAt: new Date().toISOString() });
+  const sr = path.join(w.paseo, "plugin-data", "session-recovery");
+  fs.mkdirSync(sr, { recursive: true });
+  fs.writeFileSync(path.join(sr, "state.json"), JSON.stringify({ records: { t1: { id: "t1", phase: "scheduled" } } }));
+  const r = spawnSync(process.execPath, ["--disable-warning=ExperimentalWarning", CLI, "show", "t1", "--json", "--no-live"], { env, encoding: "utf8", timeout: 60000 });
+  assert.equal(r.status, 2, r.stdout + r.stderr);
+  const j = JSON.parse(r.stdout);
+  assert.ok(j.reasons.includes("paseo-archived"));
+  assert.equal(j.recoveryScheduledElsewhere, true);
+});

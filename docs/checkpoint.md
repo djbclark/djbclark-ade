@@ -255,11 +255,12 @@ G.5. Verdicts (`bin/paseo-checkpoint show` and `list`):
   and no interruption came later.
 - `needs-review`: an interrupted turn, and any case that is neither of the other two. `--no-live`
   also gives this verdict.
-- `do-not-resume`: a user stop or an archive.
+- `do-not-resume`: any cancel outside shutdown (`canceled-outside-shutdown`: Paseo's cancel reason
+  is generic, so a reload interrupt or a provider-side cancel counts as a stop too), or an archive.
 
 G.6. Shutdown detection: `$PASEO_HOME/local-credential` is present while the daemon runs and absent
 once it shuts down. A turn cancelled while it is absent is recorded as `canceled-during-shutdown`
-evidence, not as a user stop.
+evidence, not as `canceled-outside-shutdown`.
 
 G.7. CLI, read only:
 - `bin/paseo-checkpoint list [--json] [--server-id S] [--no-live]`: one line per recorded agent.
