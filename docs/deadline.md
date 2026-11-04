@@ -19,7 +19,7 @@ deadline extend review-123 --by 30m --reason "reviewer still running"           
 deadline done review-123                                                                     # deregister (run does this itself)
 deadline ls [--agents]                                                                      # records; --agents shows the Paseo idle reading
 deadline sweep [--dry-run] [--json]                                                         # the enforcer; launchd runs it every 60 s
-deadline install [--ade DIR] [--dry-run]  |  deadline uninstall                             # the launchd job (macOS)
+deadline install [--ade DIR] [--dry-run] [--backend auto|launchd|systemd|cron] [--agents auto|on|off] [--allow-no-linger]  |  deadline uninstall [--backend ...]   # the sweep job
 ```
 
 `--on-expire`: `kill` (default: SIGTERM to the process group, SIGKILL after `--grace`, default 60 s; Hermes is pinged), `notify` (owner and Hermes
@@ -113,7 +113,6 @@ never outlives its own `--timeout`/`--wait` by more than the margin plus the swe
 
 `local-review` does not register its own deadline yet (B9 rule 1; `bg` does since 2026-11-01, below); `local-review` still bounds its load wait with
 `--load-wait` (default 1800 s) and, through `load-watch admit --wait`, now holds an `admit-wait-<pid>` deadline of its own for that gate.
-Linux has no systemd unit for the sweep (`install` is macOS launchd only; `sweep` itself runs on both).
 
 ## `bg` records and the holder (2026-11-02)
 
@@ -143,8 +142,30 @@ This is the interim piece: the plan's B9 launchd watchdog absorbs it (`docs/pase
 
 ## Install
 
-`deadline install` writes `~/Library/LaunchAgents/com.djbclark.deadline-sweep.plist` from `config/launchd/` and bootstraps it. It refuses from a
-linked worktree unless `--ade DIR` names the canonical checkout. The lead installs it after review.
+`deadline install` reads `config/launchd/com.djbclark.deadline-sweep.plist`, fills `__ADE__`, `__HOME__` and `__STATE__` into the parsed plist and installs
+it through the shared scheduler (`bin/ade_sched.py`, [scheduling.md](scheduling.md)); it refuses from a linked worktree unless `--ade DIR` names the
+canonical checkout. The lead installs it after review. Options:
+
+- `--backend auto|launchd|systemd|cron` (default `auto`: launchd on macOS, a systemd user timer on Linux, cron when there is no systemd).
+- `--agents auto|on|off` (default `auto`): `off` appends `--no-agents` to the sweep argv. `auto` is `on` only if `paseo` is found on the PATH the *job*
+  runs with (the plist's `PATH` plus `~/.local/bin`), else `off`; the install prints which it chose and why.
+- `--allow-no-linger` (systemd): install although `loginctl` reports `Linger=no`. Without it that is exit 69, because a user manager without linger stops
+  its timers at the last logout.
+- `--dry-run`: print every file and command, change nothing.
+
+Exit codes: 0 done; 1 an activation command failed; 2 a bad job, a linked worktree, or a bad plist; 69 no usable scheduler (none found, the systemd user
+manager unreachable, `Linger=no` without `--allow-no-linger`, or cron asked to do what it cannot). `deadline uninstall [--backend ...]` removes the job
+(not installed is exit 0); records are kept.
+
+### Linux (2026-11-04)
+
+macOS: `~/Library/LaunchAgents/com.djbclark.deadline-sweep.plist`, as before. Linux: `com.djbclark.deadline-sweep.service` and `.timer` in
+`~/.config/systemd/user` (`OnUnitActiveSec=60s`, `KillMode=process` so the detached workers survive the sweep, `DEADLINE_STATE_DIR` in the environment),
+activated with `systemctl --user daemon-reload` and `enable` of the timer. Check with `bin/ade-sched status com.djbclark.deadline-sweep` and
+`systemctl --user list-timers`.
+
+**The bot box today** runs `deadline sweep --no-agents` from monit every 5 minutes. After `deadline install` on that box, remove the monit entry by
+hand: two schedulers are safe (every record is under its own flock) but they double the agent scan. `deadline` never edits monit configuration.
 
 ## Delivery and ownership details (PR 223 review, 2026-11-01)
 
