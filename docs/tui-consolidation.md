@@ -223,8 +223,11 @@ tools.
    target from `bin/skill-everywhere`, then mark D3 retired. D5 and D9 are marked only after H2 and
    H5. A follow-up PR removes the remaining crush and zcode references (`dispatch.extra.crush` in
    `config/routing.toml`, `bin/acp-dispatch`, `bin/agent_guard.py`, `bin/crush-context-check`,
-   `bin/ade-backup-stores`, `bin/web-digest-mcp`, `bin/skillopt_sources.py`) once G4 has removed the
-   binaries. D2 gets its own trial and PR only if djbclark wants it (lowest priority).
+   `bin/web-digest-mcp`) once G4 has removed the binaries. Two files keep theirs: the credential
+   exclusions in `bin/ade-backup-stores` (`EXCLUDE_NAMES`, `EXCLUDE_PATHS`) stay permanently, because
+   the credential files outlive the binaries, and the history harvesters in `bin/skillopt_sources.py`
+   stay per D1 (its store-list entries for the stores themselves may go once the history is
+   harvested). D2 gets its own trial and PR only if djbclark wants it (lowest priority).
 4. **G4 Machine-side removal (outside djbclark-ade: needs djbclark's yes, order 11).** Uninstall
    venicecode (binary, `~/src/venicecode`, `~/.config/venice-opencode-isolated`, and its
    `brew-fast-upgrade` pass), dsh (if H2 says uninstall; also its `brew-fast-upgrade` pass and the
