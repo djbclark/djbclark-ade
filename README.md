@@ -273,6 +273,9 @@ through `tests/test_ade_template_check.py`.
     (`claude-fleet-governor`, `claude-quota-guard`) numbers versioned in git with floors a profile may not cross, and a
     temporary expiring `away` profile (`set --for 72h`), its fail-safe rules and a worked three-day example, and (2026-10-27)
     the `[frontier]` gate: a standing rule (no profile needed): an agent may use a frontier model on its own judgment with a one-line `--frontier-reason`, capped.
+20. [`docs/tui-lessons-learned.md`](docs/tui-lessons-learned.md) — the agent TUI retirement record (2026-11-04): what each retired
+    or folded TUI was for, why it left, its gotchas and where its support lived; cross-cutting lessons, money and quota
+    lessons, patterns worth keeping, and an adoption checklist for any new TUI.
 
 ## Architecture: agent graphs at two altitudes
 
