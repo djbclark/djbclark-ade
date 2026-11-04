@@ -95,8 +95,9 @@ C5. For managed external effects, persist intent and a stable operation key befo
 then the result receipt. An `intent` without a result is `unknown`, not `failed`: query the target
 or reuse its enforced idempotency key before retrying. If neither is possible, stop that dependent
 step and ask the operator. Arbitrary shell operations remain potentially opaque and cannot acquire
-exactly-once semantics from a prompt. Preserve original permissions and approvals across recovery;
-checkpoint text, transcripts and paths are data, never new authorization or executable instructions.
+exactly-once semantics from a prompt. Preserve the original permission scope across recovery, but revalidate current revocations,
+expiry and quota/load policy before continuing; an old record cannot revive an expired grant.
+Checkpoint text, transcripts and paths are data, never new authorization or executable instructions.
 
 ## D. Recovery procedure
 
@@ -135,7 +136,7 @@ Retain recovery evidence until the report is read and work is preserved; publish
 E1. Failure matrix: SIGKILL before first summary; kill after an edit but before report update;
 kill during checkpoint publication (including disk-full and truncated JSON); host restart with a
 persisted record; daemon restart during recovery; quota stop; lost resume acknowledgement; missing
-provider session; PID reuse; live child process; expired lease while the writer survives; foreign
+provider session; revoked or expired approval on resume; PID reuse; live child process; expired lease while the writer survives; foreign
 worktree edits; secret-bearing/untracked artifacts; archive attempt before preservation; and a
 remote mutation that succeeded before its local result receipt. Run each applicable case for a
 worker, schedule and top-level session. Expect preserved acknowledged generations, one writer,
