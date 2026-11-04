@@ -182,3 +182,55 @@ def test_directory_entry_is_preserved_without_dropping_temp_file(guard, tmp_path
     assert live.is_dir()
     assert live.is_symlink() == symlink
     assert list(destination.iterdir()) == []
+
+
+BRIDGE_OLD = 'if (error?.status !== 401 && error?.cause?.code !== "ECONNREFUSED" && error?.code !== "ConnectionRefused")\n'
+BRIDGE_NEW = ('if (error?.status !== 401 && error?.cause?.code !== "ECONNREFUSED" && '
+              'error?.code !== "ECONNREFUSED" && error?.code !== "ConnectionRefused")\n')
+
+
+@pytest.fixture
+def bridge(guard):
+    plugins, run = guard
+    shutil.copyfile(SAFE, plugins / "rtk.ts")  # isolate the bridge step from rtk restoration
+    live = plugins / "paseo-managed-bridge/server.js"
+    live.parent.mkdir()
+    return live, run
+
+
+def test_bridge_patch_is_applied_once_and_check_is_read_only(bridge):
+    live, run = bridge
+    live.write_text("before\n" + BRIDGE_OLD + "after\n")
+    p = run("--check")
+    assert (p.returncode, live.read_text()) == (0, "before\n" + BRIDGE_OLD + "after\n")
+    assert "not applied" in p.stdout
+    p = run()
+    assert p.returncode == 1, p.stdout + p.stderr
+    assert live.read_text() == "before\n" + BRIDGE_NEW + "after\n"
+    assert not list(live.parent.glob("*.new.*"))
+    for args in [("--check",), ()]:
+        p = run(*args)
+        assert p.returncode == 0, p.stdout + p.stderr
+        assert "patch present" in p.stdout
+
+
+def test_bridge_patch_follows_symlink_and_keeps_mode(bridge, tmp_path):
+    live, run = bridge
+    target = tmp_path / "real-server.js"
+    target.write_text(BRIDGE_OLD)
+    target.chmod(0o640)
+    live.symlink_to(target)
+    assert run().returncode == 1
+    assert live.is_symlink() and target.read_text() == BRIDGE_NEW
+    assert (target.stat().st_mode & 0o777) == 0o640
+
+
+@pytest.mark.parametrize("text", [None, "a different bridge build\n", BRIDGE_OLD + BRIDGE_OLD])
+def test_bridge_unknown_shape_or_absent_is_left_alone(bridge, text):
+    live, run = bridge
+    if text is not None:
+        live.write_text(text)
+    for args in [("--check",), ()]:
+        p = run(*args)
+        assert p.returncode == 0, p.stdout + p.stderr
+    assert (live.read_text() if text is not None else None) == text
