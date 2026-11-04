@@ -2,7 +2,8 @@
 //
 // Runs once, after lazy init has taken the writer lock and loaded every record. It only
 // READS through the SDK (`agents.ref(id).refresh()`), and only for a record written by
-// this same daemon instance (a plugin reload): a record from another daemon or boot is
+// this same daemon instance (a plugin reload), or by an instance that cannot be told apart
+// from it (same pid and boot, a start token unknown): a record from another daemon or boot is
 // decided from the record alone. It never sends, reloads, archives, interrupts or
 // creates. A later turn never clears an interruption: `interruptions[]` is history.
 
@@ -73,7 +74,36 @@ export function addMissing(
   record.missingTelemetry = list;
 }
 
-/** Evidence for a record written by another daemon (or boot), or null for this one. */
+/** A "<pid>:<start>:<bootId>" daemon instance split up; the start token (ps lstart) may hold colons. */
+export function parseDaemonInstance(s: unknown): { pid: string; start: string | null; boot: string | null } | null {
+  if (typeof s !== "string") return null;
+  const first = s.indexOf(":");
+  const last = s.lastIndexOf(":");
+  if (first <= 0 || last <= first) return null;
+  const pid = s.slice(0, first);
+  if (!/^\d+$/.test(pid)) return null;
+  const start = s.slice(first + 1, last);
+  const boot = s.slice(last + 1);
+  return { pid, start: start === "" || start === "null" ? null : start, boot: boot === "" || boot === "null" ? null : boot };
+}
+
+/**
+ * The same daemon pid on the same boot, but a start token is unknown on either side (a slow
+ * `ps` on a loaded macOS host reads null): the instance cannot be told apart, so it is
+ * "unknown", not "another daemon" (adversary finding 2). The caller then asks the SDK.
+ */
+export function daemonInstanceUnknown(recorded: unknown, current: string): boolean {
+  const a = parseDaemonInstance(recorded);
+  const b = parseDaemonInstance(current);
+  if (!a || !b) return false;
+  if (a.pid !== b.pid || a.boot === null || b.boot === null || a.boot !== b.boot) return false;
+  return a.start === null || b.start === null;
+}
+
+/**
+ * Evidence for a record written by another daemon (or boot), or null for this one. An unknown
+ * instance (daemonInstanceUnknown) is null too: reconcile takes the refresh path for it.
+ */
 export function staleDaemonEvidence(
   record: Pick<RecordBody, "daemonInstance" | "bootId">,
   ctx: { daemonInstance: string; bootId: string | null },
@@ -83,6 +113,7 @@ export function staleDaemonEvidence(
   // another daemon's (the conservative reading).
   if (record.daemonInstance === undefined) return "daemon-restart";
   if (record.bootId && ctx.bootId && record.bootId !== ctx.bootId) return "boot-id-changed";
+  if (daemonInstanceUnknown(record.daemonInstance, ctx.daemonInstance)) return null;
   return "daemon-restart";
 }
 

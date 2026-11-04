@@ -6,7 +6,6 @@
 // type stripping runs it with no npm install.
 
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import type { HookAgent, PaseoLike, TurnOutcome } from "./server/types.ts";
 import { Capture, type CaptureDeps } from "./server/capture.ts";
@@ -15,6 +14,7 @@ import { gitEvidence } from "./server/git-evidence.ts";
 import { daemonIdentity, hostIdentity, processStart } from "./server/host-identity.ts";
 import { ensureRoot, safeComponent, stateRoot } from "./server/state-root.ts";
 import { listAgents, loadRecord, sweepTmp, writeGeneration } from "./server/store.ts";
+import { paseoHome } from "./server/paseo-home.ts";
 import { acquireLock, selfWriterInfo } from "./server/writer-lock.ts";
 
 /** The hooks this plugin registers, in order. */
@@ -49,12 +49,8 @@ export interface PluginOptions {
   exit?: (code: number) => void;
 }
 
-/** `$PASEO_HOME` (default ~/.paseo). */
-export function paseoHome(env: NodeJS.ProcessEnv = process.env): string {
-  const home = env.PASEO_HOME;
-  if (home && path.isAbsolute(home)) return home;
-  return path.join(env.HOME || os.homedir(), ".paseo");
-}
+/** `$PASEO_HOME`, resolved as the daemon resolves it (server/paseo-home.ts, shared with the CLI). */
+export { paseoHome };
 
 /**
  * The daemon deletes `$PASEO_HOME/local-credential` first when it stops (bootstrap.ts

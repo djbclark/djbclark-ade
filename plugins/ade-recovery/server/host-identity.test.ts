@@ -1,15 +1,21 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import os from "node:os";
+import fs from "node:fs";
+import path from "node:path";
 import { spawn, execFileSync } from "node:child_process";
 import {
   bootId,
   daemonIdentity,
   hostIdentity,
+  machineId,
+  machineIdFromFiles,
+  parseIoregPlatformUuid,
   parseProcStatStart,
   processAlive,
   processStart,
   processStartViaPs,
+  sameHost,
   selfIdentity,
 } from "./host-identity.ts";
 
@@ -76,4 +82,44 @@ test("processAlive: same pid+start true, PID reuse false, dead false, unknown st
   if (process.getuid?.() !== 0 && processStart(1) !== null) {
     assert.equal(processAlive({ pid: 1, start: processStart(1) }), true, "EPERM still means alive");
   }
+});
+
+// Adversary finding 3: hostnames drift; the machine id is the host key.
+test("machineIdFromFiles: first valid id; uninitialized, empty and missing files are skipped", () => {
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), "ade-mid-"));
+  const f = (n: string, v: string) => {
+    fs.writeFileSync(path.join(d, n), v);
+    return path.join(d, n);
+  };
+  const missing = path.join(d, "missing");
+  assert.equal(machineIdFromFiles([missing, f("a", "uninitialized\n"), f("b", "\n"), f("c", "D165C2D88D894A4787BE219662B439AD\n")]), "d165c2d88d894a4787be219662b439ad");
+  assert.equal(machineIdFromFiles([missing, f("e", "bad id with spaces")]), null);
+});
+
+test("parseIoregPlatformUuid reads IOPlatformUUID from ioreg output", () => {
+  const out = `+-o J316sAP  <class IOPlatformExpertDevice, id 0x100000215, registered>
+    {
+      "IOPlatformSerialNumber" = "XXXXXXXXXX"
+      "IOPlatformUUID" = "0A1B2C3D-4E5F-6071-8293-A4B5C6D7E8F9"
+    }`;
+  assert.equal(parseIoregPlatformUuid(out), "0A1B2C3D-4E5F-6071-8293-A4B5C6D7E8F9");
+  assert.equal(parseIoregPlatformUuid("nothing here"), null);
+});
+
+test("hostIdentity carries the machine id (Linux: /etc/machine-id when present)", () => {
+  const h = hostIdentity();
+  assert.equal(h.machineId, machineId());
+  if (process.platform === "linux" && fs.existsSync("/etc/machine-id")) {
+    assert.equal(h.machineId, fs.readFileSync("/etc/machine-id", "utf8").trim().toLowerCase());
+  }
+});
+
+test("sameHost: machine ids decide when both are known; hostname only as the fallback", () => {
+  const mid = "d165c2d88d894a4787be219662b439ad";
+  assert.equal(sameHost({ host: "old-name.local", machineId: mid }, { host: "new-name.local", machineId: mid.toUpperCase() }), true, "rename, same machine");
+  assert.equal(sameHost({ host: "same", machineId: mid }, { host: "same", machineId: "ffffffffffffffffffffffffffffffff" }), false, "same name, another machine");
+  assert.equal(sameHost({ host: "h" }, { host: "h", machineId: mid }), true, "old record without machineId: hostname");
+  assert.equal(sameHost({ host: "h", machineId: null }, { host: "other", machineId: mid }), false);
+  assert.equal(sameHost({ host: "" }, { host: "" }), false);
+  assert.equal(sameHost(null, { host: "h" }), false);
 });

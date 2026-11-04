@@ -300,3 +300,51 @@ test("real race: 8 processes contend for a stale lock; exactly one wins and keep
     }
   }
 });
+
+// Adversary finding 3: a hostname rename must not leave capture read-only forever.
+const MID = "d165c2d88d894a4787be219662b439ad";
+const renamed = () => ({ ...hostIdentity(), host: "renamed-host.local", machineId: MID });
+
+test("hostname renamed, same machine id: a dead holder is stale and taken over, not held-by-other-host", async () => {
+  const dir = tmpDir();
+  const c = await sleeper();
+  const pid = c.pid!;
+  const start = processStart(pid);
+  await stop(c);
+  fakeLock(dir, { pid, start, host: "old-host.local", machineId: MID });
+  assert.equal(lockHolderAlive(dir, renamed), false);
+  const r = acquireLock(dir, { ...selfWriterInfo(), host: "renamed-host.local", machineId: MID }, { host: renamed });
+  assert.equal(r.held, true, JSON.stringify(r));
+  assert.equal(readLock(dir)?.machineId, MID);
+  if (r.held) r.release();
+});
+
+test("hostname renamed, same machine id: a live holder is held-by-live-writer, and an unknown start stays unknown", () => {
+  const dir = tmpDir();
+  fakeLock(dir, { pid: process.pid, start: processStart(process.pid), host: "old-host.local", machineId: MID });
+  const r = acquireLock(dir, selfWriterInfo(), { host: renamed });
+  assert.equal(r.held, false);
+  if (!r.held) assert.equal(r.reason, "held-by-live-writer");
+  assert.equal(lockHolderAlive(dir, renamed), true);
+  fakeLock(dir, { pid: process.pid, start: null, host: "old-host.local", machineId: MID });
+  const r2 = acquireLock(dir, selfWriterInfo(), { host: renamed });
+  if (!r2.held) assert.equal(r2.reason, "holder-liveness-unknown");
+  assert.equal(r2.held, false);
+});
+
+test("same hostname, another machine id: held-by-other-host; an old lock without machineId falls back to the hostname", () => {
+  const dir = tmpDir();
+  const me = { ...hostIdentity(), machineId: MID };
+  fakeLock(dir, { pid: 1, start: null, machineId: "ffffffffffffffffffffffffffffffff" });
+  const r = acquireLock(dir, selfWriterInfo(), { host: () => me });
+  assert.equal(r.held, false);
+  if (!r.held) assert.equal(r.reason, "held-by-other-host");
+  fakeLock(dir, { pid: 1, start: null, host: "old-host.local" }); // no machineId field at all
+  const r2 = acquireLock(dir, selfWriterInfo(), { host: () => me });
+  assert.equal(r2.held, false);
+  if (!r2.held) assert.equal(r2.reason, "held-by-other-host");
+});
+
+test("selfWriterInfo records the machine id", () => {
+  assert.equal(selfWriterInfo().machineId, hostIdentity().machineId ?? null);
+});

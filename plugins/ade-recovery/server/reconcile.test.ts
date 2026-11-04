@@ -5,7 +5,9 @@ import {
   addInterruption,
   addMissing,
   interruptIfStaleDaemon,
+  daemonInstanceUnknown,
   openTurn,
+  parseDaemonInstance,
   reconcile,
   staleDaemonEvidence,
   type RecordBody,
@@ -246,4 +248,55 @@ test("helpers: openTurn, addMissing once per field, staleDaemonEvidence, interru
   const idle = rec("z", { state: "idle", daemonInstance: "old" });
   assert.equal(interruptIfStaleDaemon(idle, { daemonInstance: DI, bootId: "boot-A" }, "t"), null);
   assert.equal(idle.state, "idle");
+});
+
+// Adversary finding 2: a slow `ps` reads the daemon start as null on one plugin load.
+test("parseDaemonInstance keeps colons in a ps lstart token and reads null parts", () => {
+  assert.deepEqual(parseDaemonInstance("100:Wed Nov 4 22:37:01 2026:boot-A"), { pid: "100", start: "Wed Nov 4 22:37:01 2026", boot: "boot-A" });
+  assert.deepEqual(parseDaemonInstance("100:null:boot-A"), { pid: "100", start: null, boot: "boot-A" });
+  assert.deepEqual(parseDaemonInstance("100:5000:null"), { pid: "100", start: "5000", boot: null });
+  for (const bad of ["d1", "x:1:b", ":1:b", "100:b", undefined, 7]) assert.equal(parseDaemonInstance(bad), null, String(bad));
+});
+
+test("daemonInstanceUnknown: same pid and boot with a null start on either side only", () => {
+  assert.equal(daemonInstanceUnknown("100:null:boot-A", DI), true);
+  assert.equal(daemonInstanceUnknown(DI, "100:null:boot-A"), true);
+  assert.equal(daemonInstanceUnknown("100:null:boot-A", "100:null:boot-A"), true);
+  assert.equal(daemonInstanceUnknown("101:null:boot-A", DI), false, "another pid");
+  assert.equal(daemonInstanceUnknown("100:null:boot-B", DI), false, "another boot");
+  assert.equal(daemonInstanceUnknown("100:null:null", "100:5000:null"), false, "boot unknown: no proof of the same boot");
+  assert.equal(daemonInstanceUnknown("100:4999:boot-A", DI), false, "two known, different starts: another daemon");
+});
+
+test("a null daemon start token is unknown: the refresh path, never daemon-restart", async () => {
+  assert.equal(staleDaemonEvidence({ daemonInstance: "100:null:boot-A", bootId: "boot-A" }, { daemonInstance: DI, bootId: "boot-A" }), null);
+  // Still running the same turn: kept, nothing written.
+  const running = refresher({ a: { id: "a", status: "running", activeTurnId: "t1" } });
+  assert.deepEqual(await reconcile([rec("a", { daemonInstance: "100:null:boot-A" })], ctx(running.refresh)), []);
+  assert.deepEqual(running.calls, ["a"], "asked the SDK");
+  // The current read is the null one; the record has the real start.
+  const flipped = refresher({ a: { id: "a", status: "running", activeTurnId: "t1" } });
+  assert.deepEqual(await reconcile([rec("a")], ctx(flipped.refresh, { daemonInstance: "100:null:boot-A" })), []);
+  assert.deepEqual(flipped.calls, ["a"]);
+  // Idle now: the turn end was missed (outcome unknown), not an interruption.
+  const idle = refresher({ a: { id: "a", status: "idle", activeTurnId: null } });
+  const out = await reconcile([rec("a", { daemonInstance: "100:null:boot-A" })], ctx(idle.refresh));
+  assert.equal(out.length, 1);
+  assert.equal(out[0]!.record.state, "idle");
+  assert.deepEqual(out[0]!.record.interruptions, []);
+  assert.deepEqual(out[0]!.changes, ["turn-outcome-unknown"]);
+  // upsert's stale check agrees: no interruption is added for the unknown instance.
+  const live = rec("b", { daemonInstance: "100:null:boot-A" });
+  assert.equal(interruptIfStaleDaemon(live, { daemonInstance: DI, bootId: "boot-A" }, "t"), null);
+  assert.equal(live.state, "turn-in-flight");
+});
+
+test("a null start with another pid or boot is still another daemon", async () => {
+  const r = refresher({});
+  const out = await reconcile(
+    [rec("a", { daemonInstance: "99:null:boot-A" }), rec("b", { daemonInstance: "100:null:boot-OLD", bootId: "boot-OLD" })],
+    ctx(r.refresh),
+  );
+  assert.deepEqual(r.calls, []);
+  assert.deepEqual(out.map((w) => w.changes[0]), ["daemon-restart", "boot-id-changed"]);
 });

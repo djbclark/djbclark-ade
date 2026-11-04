@@ -282,7 +282,7 @@ test("shutdown: a canceled turn is recorded as an interruption with no git and n
   assert.equal(v.verdict, "needs-review");
   assert.ok(v.reasons.includes("interrupted:canceled-during-shutdown"));
   assert.ok(v.reasons.includes("tools-unobserved"));
-  assert.equal(v.reasons.includes("user-canceled"), false, "a shutdown is not a user stop");
+  assert.equal(v.reasons.includes("canceled-outside-shutdown"), false, "a shutdown cancel is not canceled-outside-shutdown");
 });
 
 test("a user cancel outside shutdown reads as do-not-resume", async (t) => {
@@ -297,7 +297,7 @@ test("a user cancel outside shutdown reads as do-not-resume", async (t) => {
   await capture.idle();
   const v = judge(loadRecord(e.dir, a.id), await live(e.repo, e.dir));
   assert.equal(v.verdict, "do-not-resume");
-  assert.ok(v.reasons.includes("user-canceled"));
+  assert.ok(v.reasons.includes("canceled-outside-shutdown"));
 });
 
 test("null turnId: before(null) and after(null) are not paired", async (t) => {

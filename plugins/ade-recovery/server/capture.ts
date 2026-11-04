@@ -151,6 +151,25 @@ function errorName(error: unknown): string {
   return "error";
 }
 
+/** Thrown by init with a fixed reason code (no paths, no command output). */
+class InitError extends Error {
+  constructor(code: string) {
+    super(code);
+    this.name = "InitError";
+  }
+}
+
+/**
+ * The reason logged when init fails: an InitError's fixed code, else the error's errno code or
+ * name only. A raw message can carry filesystem paths (adversary finding 8), so it is never logged.
+ */
+export function initFailureReason(error: unknown): string {
+  if (error instanceof InitError) return error.message;
+  const code = (error as { code?: unknown } | null)?.code;
+  if (typeof code === "string" && /^[A-Za-z0-9_-]{1,40}$/.test(code)) return `${errorName(error)}:${code}`;
+  return errorName(error);
+}
+
 function isTooLarge(error: unknown): boolean {
   if (!error || typeof error !== "object") return false;
   const e = error as { code?: unknown; message?: unknown };
@@ -344,7 +363,7 @@ export class Capture {
     this.modeValue = "initializing";
     this.initPromise = this.init(paseo)
       .catch((error: unknown) => {
-        this.failInit(error instanceof Error ? error.message : String(error));
+        this.failInit(initFailureReason(error));
       })
       .finally(() => {
         this.initPromise = null;
@@ -389,6 +408,7 @@ export class Capture {
           daemon,
           host: this.hostId.host,
           bootId: this.hostId.bootId,
+          machineId: this.hostId.machineId ?? null,
         };
 
     // 1. server id: never a shared key; no id means inert.
@@ -401,10 +421,10 @@ export class Capture {
       );
       serverId = hosts?.self?.serverId ?? null;
     } catch (error) {
-      throw new Error(`no-server-id:${errorName(error)}`);
+      throw new InitError(`no-server-id:${errorName(error)}`);
     }
-    if (typeof serverId !== "string" || !this.isSafe(serverId)) throw new Error("no-server-id:invalid");
-    if (this.closing) throw new Error("closed-during-init");
+    if (typeof serverId !== "string" || !this.isSafe(serverId)) throw new InitError("no-server-id:invalid");
+    if (this.closing) throw new InitError("closed-during-init");
     this.serverId = serverId;
 
     // 2. root and lock.
@@ -473,7 +493,7 @@ export class Capture {
       now: this.deps.now,
       timeoutMs: this.timeouts.refreshMs,
     });
-    if (this.closing) throw new Error("closed-during-init");
+    if (this.closing) throw new InitError("closed-during-init");
     for (const w of writes) {
       const entry = this.agents.get(w.agentId);
       if (!entry) continue;
@@ -661,6 +681,7 @@ export class Capture {
         host: host.host,
         bootId: host.bootId,
         platform: host.platform,
+        machineId: host.machineId ?? null,
         workspaceId: null,
         parentAgentId: null,
         persistence: null,
@@ -691,6 +712,7 @@ export class Capture {
     body.host = host.host;
     body.bootId = host.bootId;
     body.platform = host.platform;
+    body.machineId = host.machineId ?? null;
     body.daemonInstance = this.daemonInstance;
     // agent.title is deliberately not stored (it can carry a command line).
     addMissing(body, "toolCalls", TOOL_CALLS_REASON, at);
