@@ -72,8 +72,9 @@ same author (on Forgejo the prefix goes on the title as it reads now).
 2. A token goes only to its own API origin, scheme and host both, over https (plain http is allowed for 127.0.0.1
    only, for the tests); redirects are not followed, and a pagination link to another origin is refused.
 3. State in `~/.local/state/pr-policy/` (`PR_POLICY_STATE_DIR`): `changes.jsonl`, one line per change made (before,
-   after, URL, result); `state.json`, the error keys already reported, recorded only once `hermes-ping` succeeded so a
-   failed ping is retried next run (written atomically); `run.log`, the job's output.
+   after, URL, result); `state.json`, the error keys already reported and the change URLs not yet reported (at most
+   500), settled only once `hermes-ping` succeeded so a failed ping is retried next run (written atomically);
+   `run.log`, the job's output. A failed permission lookup is an error for that one pull request; the scan goes on.
 
 ## Reverting
 

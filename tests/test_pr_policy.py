@@ -52,6 +52,7 @@ class World:
         self.stale_patch = False
         self.direct: dict[str, dict] = {}   # what GET /repos/O/R says when the listing lags behind it
         self.pull_direct: dict[tuple, dict] = {}   # what GET .../pulls/N says when search lags behind it
+        self.perm_fail: set[tuple] = set()   # (repo, login) whose GitHub permission lookup answers 500
         self.link_next = None
         self.redirect_org = None
         self.requests: list[tuple[str, str, str]] = []
@@ -106,6 +107,8 @@ def make_handler(w: World):
             parts = p.split("/")
             if p.startswith("/gh/repos/") and p.endswith("/permission"):
                 repo, who = f"{parts[3]}/{parts[4]}", urllib.parse.unquote(parts[6])
+                if (repo, who) in w.perm_fail:
+                    return self.send(500, {"message": "boom"})
                 perm = w.gh_perm.get((repo, who))
                 return self.send(200, {"permission": perm}) if perm else self.send(404, {"message": "Not Found"})
             if p.startswith("/gh/repos/") and len(parts) == 7 and parts[5] == "pulls" and method == "GET":
@@ -248,6 +251,28 @@ def test_a_pull_request_changed_since_the_search_is_reread(env):
     assert "same   github  draft  https://github.com/frdminc/x/pull/1" in p.stdout
     titles = {(it["repository"]["full_name"], it["number"]): it["title"] for it in w.fj_search}
     assert titles[("djbclark/get", 7)] == "WIP: renamed" and titles[("djbclark/barnowl", 4)] == "Touhou"
+
+
+def test_a_failed_permission_lookup_skips_only_that_pull_request(env):
+    w = env.world
+    w.perm_fail.add(("frdminc/x", "friend"))
+    w.gh_search.append(gh_pr("djbclark/c", 12, "lurker"))
+    p = env("plan", "--json", "--only", "github")
+    out = json.loads(p.stdout)
+    assert p.returncode == 1 and any("frdminc/x/pull/2" in e and "HTTP 500" in e for e in out["errors"])
+    drafts = {(a["repo"], a["number"]) for a in out["actions"] if a["kind"] == "draft"}
+    assert drafts == {("frdminc/x", 1), ("djbclark/c", 12)}
+
+
+def test_changes_whose_ping_failed_are_reported_next_run(env):
+    p = env("apply", "--yes", "--notify", "--quiet", extra={"PING_FAIL": "1"})
+    assert p.returncode == 0 and "hermes-ping failed" in p.stderr
+    assert not env.pings.exists()
+    env("apply", "--yes", "--notify", "--quiet")
+    pings = env.pings.read_text().splitlines()
+    assert len(pings) == 1 and pings[0].startswith("djbclark-ade: pr-policy: 6 change(s): ")
+    env("apply", "--yes", "--notify", "--quiet")
+    assert len(env.pings.read_text().splitlines()) == 1
 
 
 def test_install_escapes_paths_in_the_plist(env, tmp_path):

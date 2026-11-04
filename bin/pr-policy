@@ -22,7 +22,8 @@ anyone else: list it in trusted_authors (e.g. "dependabot[bot]") to leave its pu
 Approving one outside pull request: add the approved_label (default "pr-policy-approved"; setting a label needs
 triage or write access, so its author cannot) and mark it ready (GitHub) or drop the WIP prefix (Forgejo).
 State: ~/.local/state/pr-policy (PR_POLICY_STATE_DIR): changes.jsonl, one line per change
-made; state.json, the error keys already reported (only once hermes-ping succeeded); run.log, the launchd job's output.
+made; state.json, the error keys already reported and the change URLs not yet reported (both settled only once
+hermes-ping succeeded); run.log, the launchd job's output.
 Revert one repository: add it to exempt_repos, then `gh api -X PATCH repos/OWNER/NAME -f
 pull_request_creation_policy=all`.
 """
@@ -50,6 +51,7 @@ TRUSTED_GITHUB = {"admin", "write"}
 TRUSTED_FORGEJO = {"owner", "admin", "write"}
 MAX_PAGES = 100
 TITLE_MAX = 255
+UNSENT_MAX = 500
 
 
 class ApiError(Exception):
@@ -200,7 +202,11 @@ def github_plan(api: Api, cfg: dict, login: str, stats: dict) -> tuple[list[dict
             stats["github_open_prs"] += 1
             key = (repo, who.lower())
             if key not in cache:
-                st, d, _ = api.call("GET", f"/repos/{repo}/collaborators/{q(who)}/permission", ok404=True)
+                try:
+                    st, d, _ = api.call("GET", f"/repos/{repo}/collaborators/{q(who)}/permission", ok404=True)
+                except ApiError as e:
+                    errs.append(f"github {it.get('html_url') or repo}: {e}")
+                    continue
                 cache[key] = st != 404 and (d or {}).get("permission") in TRUSTED_GITHUB
             if not cache[key]:
                 acts.append({"forge": "github", "kind": "draft", "repo": repo, "number": it["number"],
@@ -230,11 +236,15 @@ def forgejo_plan(api: Api, cfg: dict, login: str, stats: dict) -> tuple[list[dic
                 stats["forgejo_open_prs"] += 1
                 key = (repo, who.lower())
                 if key not in cache:
-                    st, _, _ = api.call("GET", f"/repos/{repo}/collaborators/{q(who)}", ok404=True)
-                    ok = False
-                    if st != 404:
-                        _, d, _ = api.call("GET", f"/repos/{repo}/collaborators/{q(who)}/permission")
-                        ok = (d or {}).get("permission") in TRUSTED_FORGEJO
+                    try:
+                        st, _, _ = api.call("GET", f"/repos/{repo}/collaborators/{q(who)}", ok404=True)
+                        ok = False
+                        if st != 404:
+                            _, d, _ = api.call("GET", f"/repos/{repo}/collaborators/{q(who)}/permission")
+                            ok = (d or {}).get("permission") in TRUSTED_FORGEJO
+                    except ApiError as e:
+                        errs.append(f"forgejo {it.get('html_url') or repo}: {e}")
+                        continue
                     cache[key] = ok
                 if not cache[key]:
                     acts.append({"forge": "forgejo", "kind": "draft", "repo": repo, "number": it["number"],
@@ -402,18 +412,22 @@ def cmd_run(a, write: bool) -> int:
               f"{stats['github_open_prs']} GitHub and {stats['forgejo_open_prs']} Forgejo open pull requests from others"
               + (f"; {len(errs)} error(s)" if errs else ""))
     if write and a.notify:
-        reported = set(load_state().get("errors", []))
+        st = load_state()
+        reported = set(st.get("errors", []))
+        changed = [u for u in st.get("unsent", []) if isinstance(u, str)] + [x["url"] for x in done]
         new_errs = sorted(set(errs) - reported)
         delivered = True
-        if done or new_errs:
+        if changed or new_errs:
             parts = []
-            if done:
-                urls = [x["url"] for x in done[:3]]
-                parts.append(f"{len(done)} change(s): " + ", ".join(urls) + (f" (+{len(done) - 3} more)" if len(done) > 3 else ""))
+            if changed:
+                parts.append(f"{len(changed)} change(s): " + ", ".join(changed[:3])
+                             + (f" (+{len(changed) - 3} more)" if len(changed) > 3 else ""))
             if new_errs:
                 parts.append(f"{len(new_errs)} new error(s), first: {new_errs[0][:160]}")
             delivered = notify(f"djbclark-ade: pr-policy: {'; '.join(parts)}; log {state_dir()}")
-        save_state({"errors": sorted(set(errs) if delivered else set(errs) & reported)})   # undelivered: report again next run
+        # undelivered: the changes and the new errors are reported again next run
+        save_state({"errors": sorted(set(errs) if delivered else set(errs) & reported),
+                    "unsent": [] if delivered else changed[-UNSENT_MAX:]})
     return 1 if errs else 0
 
 
