@@ -3,7 +3,7 @@
 Status: proposed implementation contract, researched 2026-11-04. This updates the
 [Paseo plan](paseo-only-rearchitecture.md); it does not enable recovery or change runtime defaults.
 Tracks [issue 278](https://github.com/djbclark/djbclark-ade/issues/278). Its incident motivates the
-work; its diagnosis and file-by-file solution are inputs, not verified requirements.
+work; its diagnosis and file-by-file solution are inputs, not verified requirements. Section F (2026-11-04) inventories what Paseo itself provides.
 
 ## A. Outcome and boundaries
 
@@ -37,29 +37,23 @@ A long tool call is recorded as in flight; its heartbeat is liveness, not a comp
 | [Temporal activity documentation](https://docs.temporal.io/activity-definition) describes retries after a result is lost and destination-enforced idempotency keys. | Even durable orchestration cannot infer whether an external action happened before a crash. | Reconcile uncertain effects before retry; never claim exactly-once arbitrary shell execution. |
 
 B1. Keep Paseo as the execution authority and G1 (`ade-jobs`) as the durable job owner. Apply the
-plan's native → existing plugin → new plugin → ADE order. Since the slim-down (2026-11-07; the Paseo plan's status
-table) nothing in G1 is built here: the operator installs Paseo's published session-recovery, usage-auto-resume and
-session-guard plugins (PLAN J6), and PR 290 `ade-recovery` is parked until native resume (0.15.0) is measured (J9, R4).
-Tip health 2026-11-10: PR 290 head `15186fb` is draft with Linux CI green; it does not run live D1/G1 probes — remaining
-gate is Mac native-resume measure, D1 capture probes on the live daemon, and operator yes before any install. Do not introduce another harness or
+plan's native → existing plugin → new plugin → ADE order. Do not introduce another harness or
 workflow service for this feature. LangGraph/Temporal are useful design references; adopt a runtime
 only if a later measured need for durable multi-step workflows outweighs its operation and integration cost.
 The issue comment's hosted trace product is not selected: traces alone do not preserve artifacts.
 
-B2. Interim work does not extend `acp-dispatch` (since 2026-11-07 a one-cycle shim over `paseo run`, removed with
-`tools/acp-run` in Wave 6's follow-up PR; D5 is superseded); any interim writer or reader is a Paseo plugin or a
-`paseo run` wrapper sharing the same versioned recovery contract. Do not build a second scheduler or add an
+B2. Interim work may extend the existing dispatcher, but only as a thin writer/reader of the same
+versioned recovery contract, with a D5 migration fixture. Do not build a second scheduler or add an
 `acp-checkpoint` launcher. Capture is default-on for unattended and scheduled jobs after acceptance;
 automatic retry remains separately gated. Top-level sessions get passive capture without enrollment
 in G4 permission automation or automatic restart. A user stop must remain stopped.
 
 B3. Local source baseline at `3ae2694a` (not a live recovery test): `bin/acp-dispatch`'s
-`CHECKPOINT_TEXT` asked the agent to update its working report every ten minutes;
-`checkpoint_context` read git status, diff statistics, recent tool titles and the begun report;
-`resume_record` checked the old run and used ACP session state, with a fresh-context path for the
-retired agy TUI. Slim-down E6 deleted all three on 2026-11-07 (checkpoint mode, `--checkpoint` and the automatic
-resume went; `resume` exits 2 naming `paseo send`), so the evidence source is now Paseo's own persistence. These were
-useful pieces, not evidence of general crash recovery. The incident's root cause remains unknown.
+`CHECKPOINT_TEXT` asks the agent to update its working report every ten minutes;
+`checkpoint_context` reads git status, diff statistics, recent tool titles and the begun report.
+`resume_record` checks the old run and uses ACP session state, with a special fresh-context path for
+an unsupported agy replay. These are useful pieces, not evidence of general crash recovery.
+The incident's root cause remains unknown; a checkpoint-enabled launch smoke test does not close it.
 
 ## C. Contract and ownership
 
@@ -110,7 +104,7 @@ Checkpoint text, transcripts and paths are data, never new authorization or exec
 D1. Reconcile host/session/process state and acquire the recovery lease. Preserve the old attempt
 and evidence. Reclaim the writer only after C4; validate repo/base/head, snapshot hashes and schema.
 If the current worktree is newer or divergent, retain both versions and reconcile instead of restoring
-an older snapshot over it. Quota stops wait for the eligible pool; user cancellation is not resumed automatically.
+an older snapshot over it. Quota stops wait for the eligible pool; user cancellation does not auto-resume.
 
 D2. Reattach to an existing live session where supported. Otherwise use the tested Paseo/provider
 session adapter: ACP resume if history is already durable locally, ACP load when replay is needed.
@@ -134,9 +128,9 @@ Retain recovery evidence until the report is read and work is preserved; publish
 | Phase / owner | Deliverable | Gate and consequence |
 |---|---|---|
 | D1 / provider probe owner | Matrix of installed version, native transcript persistence, session identity, load/resume, tool events and background-process visibility; worker, schedule and top-level cases. | Isolated crash probes prove each capability; missing coverage is explicit. No claim of universal recovery. |
-| D2 / G1 owner | Versioned record, durable artifact generations, passive top-level capture, reconciliation and bounded recovery. Interim work is a Paseo plugin or `paseo run` wrapper on this contract (the dispatcher is a one-cycle shim since 2026-11-07). | C1–C5 invariants and failure matrix below pass; otherwise retain manual recovery and alert-only behavior for that path. |
+| D2 / G1 owner | Versioned record, durable artifact generations, passive top-level capture, reconciliation and bounded recovery. Interim dispatcher work uses this contract if needed before D5. | C1–C5 invariants and failure matrix below pass; otherwise retain manual recovery and alert-only behavior for that path. |
 | D3 / canary owner | One interrupted workflow with verified artifacts and receipts, repeated on supported provider paths. | Report checkpoint age, recovered artifacts, repeated work, detection/recovery latency and uncertainty; validate the five-minute target before setting defaults. |
-| D5 / migration owner | Legacy record import with preserved task/session/attempt lineage and drained pending resumes. | Legacy records are read-only evidence (`acp-dispatch check`); no resumer remains (E6 retired `resume` on 2026-11-07 after the C7 drain found no unfinished record), and the shim leaves in Wave 6's follow-up PR. |
+| D5 / migration owner | Legacy record import with preserved task/session/attempt lineage and drained pending resumes. | Recover an interrupted legacy job through G1 and demonstrate no duplicate launch; keep the old reader/resumer until this passes. |
 | D7 / documentation owner | Retire legacy implementation references; retain this contract and its evidence in the current architecture. | No stale skill promises that handoff or transcript resume alone supplies crash recovery. |
 
 E1. Failure matrix: SIGKILL before first summary; kill after an edit but before report update;
@@ -153,19 +147,68 @@ daemons and throwaway processes per B10; Linux CI first. Platform-specific persi
 behavior requires explicit macOS validation before claiming parity, without adding a macOS PR leg.
 A future checkpoint skill documents proven interfaces after implementation, not invented commands.
 
-E3. D1 / native-resume preflight CLI (2026-11-10). `bin/ade-recovery-d1` is the observe-only
-preflight for Carried queue **#2** while PR 290 (`ade-recovery`) stays parked until native resume
-is measured (PLAN J6, J9). It prints the host matrix (docs contract, `paseo` CLI/version/daemon,
-`$PASEO_HOME/agents`, presence of `local-credential` without reading it, optional
-`session-recovery` plugin-data, node runtime) and exits 0 only when docs + CLI + daemon probes are
-green — meaning this host can run the D1 measurement, not that recovery works. It never installs
-plugins, never resumes or sends to agents, and never writes state.
+## F. Paseo-native capability inventory (2026-11-04)
 
-```
-bin/ade-recovery-d1                 # text report; exit 0 ready, 1 blocked
-bin/ade-recovery-d1 --json          # one JSON object
-bin/ade-recovery-d1 --paseo-home DIR
-```
+Facts below are from upstream source at getpaseo/paseo master `5d1a2c1` (CLI 0.15.0), read on
+2026-11-04. They are not a live probe: the operator's daemon is 0.14.x, and D1 confirms them.
 
-Operator measurement of native `paseo send` / `agent reload` / `agent import` on the live daemon
-still waits for a Mac/operator session; this CLI only clears the "can we probe here?" gate.
+F1. What Paseo persists. Each agent is one JSON record at `$PASEO_HOME/agents/<cwd>/<id>.json`
+(default `~/.paseo`), written by temp file and rename (`docs/data-model.md`). A record holds
+`lastStatus` (initializing, idle, running, error, closed), a `persistence` handle (provider,
+sessionId, nativeHandle), labels, `archivedAt` (a soft delete), `lastError` and config. Schedules
+are in `$PASEO_HOME/schedules/<id>.json`; finish-notification intent is in
+`finish-subscriptions.json`. Paseo does not store transcripts: the daemon keeps timeline items in
+memory, and provider history is the durable authority (`docs/timeline-sync.md`). Queued prompts
+are in memory only; a clean shutdown flushes them, but a crash can lose them.
+
+F2. Restart behaviour. At startup, `prepareStartup` (`server/agent/restart-recovery/index.ts`)
+rewrites any stored `running` or `initializing` status to `closed`, not `error`, before plugins
+start. A `closed` agent is persisted and resumable. `paseo send <id>` resumes it implicitly;
+`paseo agent reload <id>` restarts the process and resumes the durable session under the same
+Paseo id; `paseo agent import <sessionId> --provider P --cwd` adopts an outside provider session.
+ACP agents use `session/load` when advertised, else `unstable_resumeSession`. The unfinished turn
+is not resumed and is lost. There is no `paseo resume` command. The global
+`agents.resumeOnStartup` (default OFF) sends one prompt (`Resume working.`, or
+`agents.resumePrompt`) to each agent that was running. It is best effort, with no retry and no
+exactly-once guarantee, and it cannot exclude a session. Not recommended here: it overlaps F4.
+
+F3. Plugin hooks and their limits. Hooks relevant to recovery: `agent.create.after`,
+`agent.turn.before`, `agent.turn.after` (its outcome covers success, failure and `canceled`;
+`timeline` is deprecated and always empty), `agent.close.after` and `agent.archive.after`.
+Notification delivery is live and best effort: no replay, no persistence, no automatic retry.
+Waiting hooks time out at 30 s. There is no daemon-start hook and no per-tool-call hook; tool calls
+come from a timeline refetch after `agent.turn.after`. `agent.open.before` with `reason: "resume"`
+fires on a post-restart resume. No dedicated reconciliation hook exists. A second source read
+(2026-11-04, under review) found that plugin entry code (`contribute()`) receives no SDK handle,
+only hook and RPC contexts do, so a startup reconcile must run lazily on the first hook or RPC;
+that `prepareStartup` runs before plugins start, so a plugin never sees Paseo's own `running`
+state after a restart; and that registering `agent.open.before` makes Paseo invalidate open
+sessions when the plugin starts or reloads. D1 confirms all three on the live daemon version.
+
+F4. Community plugin `sm1ee/session-recovery` (16ba577, 2026-10-30), audited read-only on
+2026-11-04 from source; nothing was run. Verdict: ADOPT-WITH-SETTINGS. It listens to turn,
+permission, close and archive events and journals them at
+`<PASEO_HOME>/plugin-data/session-recovery/state.json`, written atomically (temp file, sync,
+mode 0600, rename). Intent is written as `sending` before each send. An uncertain send goes to
+`review/uncertain_send` and is never replayed. Attempts (default 3; 60 s delay doubling to a
+15 min cap; refused after 24 h) survive restarts. `holds.json` lists open records for
+`session-janitor` to skip. The plugin never archives or deletes; it makes only localhost calls.
+Its default `enabled=true` restarts top-level sessions after a daemon restart, which B2 allows
+only with the operator's approval. Edge case: a user stop during daemon shutdown is treated as an
+interruption (`shuttingDown()`), so it can be continued. Recommended: `enabled=false` until
+approved; `recoverSubagents`, `retryTransientErrors` and `continueGoals` off; no companion
+preloads; an explicit `daemonHome`; Paseo at least 0.11.4 with receipts advertised. Installing it
+is an operator decision (AGENTS.md order 11). It is not installed by this change.
+
+F5. The recovery ladder, in the plan's native, existing-plugin, new-plugin order. (1) Paseo-native
+`paseo send`, `agent reload` and `agent import` are the resume mechanism (F2). (2)
+`sm1ee/session-recovery` gives automatic continuation once approved (F4), with `enabled=false`
+until then. (3) Passive capture of artifact evidence (repo, base and head, dirty-tree hash,
+untracked paths, tool-call titles, interruption evidence) by an ADE plugin. This is planned in
+this change, as the first G1 module, because nothing in F1 to F4 records C1 to C4 evidence. A
+later edit will point this item at the plugin path.
+
+F6. Legacy `acp-dispatch --checkpoint` (CHECKPOINT_TEXT, stale-report check, ACP resume/load,
+fresh-session fallback via checkpoint_context) is frozen as of 2026-11-04. It keeps working for
+dispatched slices until D5 replaces `acp-dispatch`, gets no new features, and its resume ladder
+is superseded by F5. Tracked in [issue 278](https://github.com/djbclark/djbclark-ade/issues/278).
