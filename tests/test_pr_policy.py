@@ -164,6 +164,7 @@ token_secret = "GH_TOK"
 owners = ["djbclark", "frdminc"]
 policy = "collaborators_only"
 exempt_repos = ["frdminc/skip"]
+trusted_authors = ["Dependabot[bot]"]
 [forgejo]
 host = "forgejo.example"
 api = "{base}/fj/api/v1"
@@ -177,11 +178,12 @@ exempt_repos = []
     fake_ss.chmod(0o755)
     ping_log = tmp_path / "pings.txt"
     fake_ping = tmp_path / "hermes-ping"
-    fake_ping.write_text(f"#!/bin/sh\nprintf '%s\\n' \"$1\" >> {ping_log}\n")
+    fake_ping.write_text(f"#!/bin/sh\n[ -n \"$PING_FAIL\" ] && exit 1\nprintf '%s\\n' \"$1\" >> {ping_log}\n")
     fake_ping.chmod(0o755)
     e = {**os.environ, "HOME": str(tmp_path), "PR_POLICY_CONFIG": str(cfg), "PR_POLICY_SECRETSPEC": str(fake_ss),
          "PR_POLICY_PING": str(fake_ping), "PR_POLICY_STATE_DIR": str(tmp_path / "state")}
     e.pop("FAIL_SECRET", None)
+    e.pop("PING_FAIL", None)
 
     def run(*args, extra=None):
         return subprocess.run([sys.executable, str(CLI), *args], env={**e, **(extra or {})}, capture_output=True, text=True, timeout=60)
@@ -244,7 +246,20 @@ def test_link_to_another_host_is_refused(env):
     env.world.link_next = "http://evil.invalid/gh/user/repos?page=2"
     p = env("plan", "--json")
     assert p.returncode == 1
-    assert any("another host" in e for e in json.loads(p.stdout)["errors"])
+    assert any("another origin: http://evil.invalid" in e for e in json.loads(p.stdout)["errors"])
+
+
+def test_link_with_another_scheme_on_the_same_host_is_refused(env):
+    env.world.link_next = env.base.replace("http://", "https://") + "/gh/user/repos?page=2"
+    p = env("plan", "--json")
+    assert p.returncode == 1
+    assert any("another origin: https://127.0.0.1" in e for e in json.loads(p.stdout)["errors"])
+
+
+def test_a_bot_is_checked_like_anyone_unless_trusted(env):
+    env.cfg.write_text(env.cfg.read_text().replace('trusted_authors = ["Dependabot[bot]"]\n', ""))
+    out = json.loads(env("plan", "--json", "--only", "github").stdout)
+    assert ("djbclark/a", 3) in [(a["repo"], a.get("number")) for a in out["actions"] if a["kind"] == "draft"]
 
 
 def test_redirect_is_not_followed_with_the_token(env):
@@ -297,6 +312,16 @@ def test_notify_once_per_change_run_and_once_per_new_error(env):
     for _ in range(2):
         p = env("apply", "--yes", "--notify", "--quiet", extra={"FAIL_SECRET": "FJ_TOK"})
         assert p.returncode == 1 and "sudo-secretspec get FJ_TOK failed" in p.stderr
+    pings = env.pings.read_text().splitlines()
+    assert len(pings) == 2 and "1 new error(s)" in pings[1]
+
+
+def test_an_error_whose_ping_failed_is_reported_again(env):
+    env("apply", "--yes", "--notify", "--quiet")
+    fail = {"FAIL_SECRET": "FJ_TOK"}
+    p = env("apply", "--yes", "--notify", "--quiet", extra={**fail, "PING_FAIL": "1"})
+    assert p.returncode == 1 and "hermes-ping failed" in p.stderr
+    env("apply", "--yes", "--notify", "--quiet", extra=fail)
     pings = env.pings.read_text().splitlines()
     assert len(pings) == 2 and "1 new error(s)" in pings[1]
 

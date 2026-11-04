@@ -9,6 +9,7 @@ token_secret = "GITHUB_TOKEN"
 owners = ["djbclark", "frdminc"]   # the token's own login (user repos) and organisations it administers
 policy = "collaborators_only"      # pull_request_creation_policy for every live repository with pull requests on
 exempt_repos = []                  # "owner/name" entries left alone, policy and drafts both
+trusted_authors = []               # logins whose pull requests stay ready without write access, e.g. "dependabot[bot]"
 
 [forgejo]
 host = "forgejo.mit.edu"
@@ -16,3 +17,4 @@ token_secret = "DJBCLARK_FORGEJO_MIT_EDU_TOKEN"
 owners = ["djbclark"]
 draft_prefix = "WIP: "             # Forgejo's draft marker (server WORK_IN_PROGRESS_PREFIXES, default "WIP:,[WIP]")
 exempt_repos = []
+trusted_authors = []

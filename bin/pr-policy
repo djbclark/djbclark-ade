@@ -14,12 +14,13 @@ repository created later. Config: config/pr-policy.toml. Doc: docs/pr-policy.md.
   pr-policy uninstall
 
 Exit codes: 0 done (or nothing to do), 1 an API or secret error (the rest still ran), 2 usage or config error,
-69 install off macOS. Trusted authors: GitHub, the token's login and anyone whose repository permission is write or
-admin (maintain reads as write); Forgejo, the token's login, the repository owner and invited collaborators with
-write, admin or owner permission (Forgejo reports site admins as "owner" of every repository, so a non-collaborator
-is never trusted on permission alone). Bot accounts (GitHub type "Bot") are left alone: only an owner installs an
-app on his repository. State: ~/.local/state/pr-policy (PR_POLICY_STATE_DIR): changes.jsonl, one line per change
-made; state.json, the error keys already reported; run.log, the launchd job's output.
+69 install off macOS. Trusted authors: GitHub, the token's login, the config's trusted_authors and anyone whose
+repository permission is write or admin (maintain reads as write); Forgejo, the token's login, the repository owner,
+trusted_authors and invited collaborators with write, admin or owner permission (Forgejo reports site admins as
+"owner" of every repository, so a non-collaborator is never trusted on permission alone). A bot is checked like
+anyone else: list it in trusted_authors (e.g. "dependabot[bot]") to leave its pull requests ready.
+State: ~/.local/state/pr-policy (PR_POLICY_STATE_DIR): changes.jsonl, one line per change
+made; state.json, the error keys already reported (only once hermes-ping succeeded); run.log, the launchd job's output.
 Revert one repository: add it to exempt_repos, then `gh api -X PATCH repos/OWNER/NAME -f
 pull_request_creation_policy=all`.
 """
@@ -95,13 +96,13 @@ class Api:
         u = urllib.parse.urlsplit(base)
         if u.scheme != "https" and u.hostname not in ("127.0.0.1", "localhost"):
             raise ApiError(f"refusing to send a token over {u.scheme or 'no scheme'}: {base}")
-        self.base, self.netloc, self.token, self.kind = base.rstrip("/"), u.netloc, token, kind
+        self.base, self.scheme, self.netloc, self.token, self.kind = base.rstrip("/"), u.scheme, u.netloc, token, kind
 
     def call(self, method: str, path: str, data: dict | None = None, ok404: bool = False):
         url = path if path.startswith(("http://", "https://")) else self.base + path
         where = urllib.parse.urlsplit(url)
-        if where.netloc != self.netloc:
-            raise ApiError(f"refusing to send the token to another host: {where.netloc}")
+        if (where.scheme, where.netloc) != (self.scheme, self.netloc):
+            raise ApiError(f"refusing to send the token to another origin: {where.scheme}://{where.netloc}")
         hdr = {"User-Agent": "djbclark-ade-pr-policy"}
         if self.kind == "github":
             hdr |= {"Accept": "application/vnd.github+json", "Authorization": f"Bearer {self.token}"}
@@ -173,13 +174,13 @@ def github_plan(api: Api, cfg: dict, login: str, stats: dict) -> tuple[list[dict
     if not owners:
         return acts, errs
     query = " ".join(["is:pr", "is:open", "draft:false", "archived:false", *(f"user:{o}" for o in owners), f"-author:{login}"])
+    trusted = {t.lower() for t in cfg.get("trusted_authors", [])} | {login.lower()}
     cache: dict = {}
     try:
         for it in api.pages("/search/issues?" + urllib.parse.urlencode({"q": query, "per_page": 100})):
             repo = it.get("repository_url", "").rsplit("/repos/", 1)[-1]
-            user = it.get("user") or {}
-            who = user.get("login", "")
-            if (repo in exempt or it.get("draft") or user.get("type") == "Bot" or who.lower() == login.lower()
+            who = (it.get("user") or {}).get("login", "")
+            if (repo in exempt or it.get("draft") or who.lower() in trusted
                     or repo.split("/")[0].lower() not in {o.lower() for o in owners}):
                 continue
             stats["github_open_prs"] += 1
@@ -201,6 +202,7 @@ def forgejo_plan(api: Api, cfg: dict, login: str, stats: dict) -> tuple[list[dic
     exempt = set(cfg.get("exempt_repos", []))
     owners = {o.lower() for o in cfg.get("owners", [])}
     prefix = cfg.get("draft_prefix", "WIP: ")
+    trusted = owners | {t.lower() for t in cfg.get("trusted_authors", [])} | {login.lower()}
     cache: dict = {}
     for owner in cfg.get("owners", []):
         try:
@@ -208,7 +210,7 @@ def forgejo_plan(api: Api, cfg: dict, login: str, stats: dict) -> tuple[list[dic
                 repo = (it.get("repository") or {}).get("full_name", "")
                 who = (it.get("user") or {}).get("login", "")
                 if (repo.split("/")[0].lower() not in owners or repo in exempt or (it.get("pull_request") or {}).get("draft")
-                        or who.lower() in owners | {login.lower()}):
+                        or who.lower() in trusted):
                     continue
                 stats["forgejo_open_prs"] += 1
                 key = (repo, who.lower())
@@ -317,12 +319,16 @@ def save_state(st: dict) -> None:
     os.replace(tmp, d / "state.json")
 
 
-def notify(text: str) -> None:
+def notify(text: str) -> bool:
     exe = os.environ.get("PR_POLICY_PING") or shutil.which("hermes-ping") or str(HOME / ".local/bin/hermes-ping")
     try:
-        subprocess.run([exe, text], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
+        p = subprocess.run([exe, text], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
+        if p.returncode == 0:
+            return True
     except (OSError, subprocess.TimeoutExpired):
-        print("pr-policy: hermes-ping failed", file=sys.stderr)
+        pass
+    print("pr-policy: hermes-ping failed", file=sys.stderr)
+    return False
 
 
 def cmd_run(a, write: bool) -> int:
@@ -366,8 +372,9 @@ def cmd_run(a, write: bool) -> int:
               f"{stats['github_open_prs']} GitHub and {stats['forgejo_open_prs']} Forgejo open pull requests from others"
               + (f"; {len(errs)} error(s)" if errs else ""))
     if write and a.notify:
-        st = load_state()
-        new_errs = sorted(set(errs) - set(st.get("errors", [])))
+        reported = set(load_state().get("errors", []))
+        new_errs = sorted(set(errs) - reported)
+        delivered = True
         if done or new_errs:
             parts = []
             if done:
@@ -375,8 +382,8 @@ def cmd_run(a, write: bool) -> int:
                 parts.append(f"{len(done)} change(s): " + ", ".join(urls) + (f" (+{len(done) - 3} more)" if len(done) > 3 else ""))
             if new_errs:
                 parts.append(f"{len(new_errs)} new error(s), first: {new_errs[0][:160]}")
-            notify(f"djbclark-ade: pr-policy: {'; '.join(parts)}; log {state_dir()}")
-        save_state({"errors": sorted(set(errs))})
+            delivered = notify(f"djbclark-ade: pr-policy: {'; '.join(parts)}; log {state_dir()}")
+        save_state({"errors": sorted(set(errs) if delivered else set(errs) & reported)})   # undelivered: report again next run
     return 1 if errs else 0
 
 

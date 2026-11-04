@@ -30,11 +30,14 @@ not used: they bound volume, they do not stop it.
 
 | Forge | Trusted author |
 |---|---|
-| GitHub | the token's login; anyone whose repository permission is `write` or `admin` (`maintain` reads as `write`); accounts of type `Bot` (only the owner installs an app) |
-| Forgejo | the token's login; the repository owner; an invited collaborator (`GET /repos/O/R/collaborators/U` is 204) with `write`, `admin` or `owner` permission |
+| GitHub | the token's login; `trusted_authors`; anyone whose repository permission is `write` or `admin` (`maintain` reads as `write`) |
+| Forgejo | the token's login; the repository owner; `trusted_authors`; an invited collaborator (`GET /repos/O/R/collaborators/U` is 204) with `write`, `admin` or `owner` permission |
 
 Forgejo's permission endpoint answers `owner` for its site admins on every repository (2026-11-04: `xy` and
 `almonds` on `djbclark/barnowl`, neither a collaborator), so permission alone never makes a Forgejo author trusted.
+A bot gets no exemption for being a bot (an app installed on someone else's fork is not one djbclark chose); list
+it in `trusted_authors` (for example `"dependabot[bot]"`) to keep its pull requests ready. On 2026-11-04 no bot had
+opened a pull request on these repositories in six months.
 
 ## Commands
 
@@ -56,10 +59,11 @@ the next run would report a change it did not make.
 
 1. Tokens are the sudo-secretspec names in the config (`GITHUB_TOKEN`, djbclark's `repo`-scope token;
    `DJBCLARK_FORGEJO_MIT_EDU_TOKEN`), read with `sudo-secretspec get` once per run, held in memory, never printed or logged.
-2. A token goes only to its own API host over https (plain http is allowed for 127.0.0.1 only, for the tests);
-   redirects are not followed, and a pagination link to another host is refused.
+2. A token goes only to its own API origin, scheme and host both, over https (plain http is allowed for 127.0.0.1
+   only, for the tests); redirects are not followed, and a pagination link to another origin is refused.
 3. State in `~/.local/state/pr-policy/` (`PR_POLICY_STATE_DIR`): `changes.jsonl`, one line per change made (before,
-   after, URL, result); `state.json`, the error keys already reported (written atomically); `run.log`, the job's output.
+   after, URL, result); `state.json`, the error keys already reported, recorded only once `hermes-ping` succeeded so a
+   failed ping is retried next run (written atomically); `run.log`, the job's output.
 
 ## Reverting
 
