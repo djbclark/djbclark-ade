@@ -21,6 +21,8 @@ const MAX_SUBMODULE_PROBES = 64;
 const SUBMODULE_TIMEOUT_MS = 5_000;
 /** Initialised submodules whose own worktree is scanned for dirt (status + changed-file content). */
 const MAX_SUBMODULE_SCANS = 16;
+/** rev-parse probes of gitlinks that turn out not to be initialised; a separate, larger budget. */
+const MAX_SUBMODULE_UNINIT_PROBES = 256;
 /** `ls-files --stage` lists every index entry; room for roughly 700k paths. */
 const GITLINK_SCAN_MAX_STDOUT = 64 * 1024 * 1024;
 /** hash-object takes its paths by argv in chunks of at most this many bytes or paths. */
@@ -206,6 +208,11 @@ export async function gitEvidence(cwd: string, signal?: AbortSignal): Promise<Gi
   const topFilters = new Set<string>();
   const cfg = await git("filter-config", toplevel, ["config", "--get-regexp", "-z", "^filter\\."], { quietFail: true });
   if (cfg.ok) for (const n of filterNames(cfg.out)) topFilters.add(n);
+  // A driver name containing `=` cannot be blanked through `-c` argv (git splits at the first `=`),
+  // and exec.ts offers no env option: fail closed, run no diff that could spawn the driver.
+  const unsafeName = (n: string) => n.includes("=") || /[\0\n\r]/.test(n);
+  const unsafeTop = [...topFilters].some(unsafeName);
+  if (unsafeTop) ev.errors.push("filter-name:unsafe");
   filterOverrides = blankFilters(topFilters);
 
   // 6. tracked changes: union of (worktree vs HEAD) and (index vs HEAD).
@@ -215,17 +222,19 @@ export async function gitEvidence(cwd: string, signal?: AbortSignal): Promise<Gi
   // by step 6b instead, because `=none` would make git run `status` inside each submodule with
   // that submodule's own filter drivers, which are not blanked here.
   const changed = new Set<string>();
-  let trackedOk = true;
+  let trackedOk = !unsafeTop;
   const splitZ = (s: string) => s.split("\0").filter((x) => x.length > 0);
   const common = ["-z", "--no-renames", "--ignore-submodules=dirty", "--no-ext-diff", "--no-textconv"];
-  if (ev.head) {
+  if (trackedOk && ev.head) {
     const d = await git("diff", toplevel, ["diff", "--name-only", ...common, "HEAD"]);
     if (d.ok) for (const p of splitZ(d.out)) changed.add(p);
     else trackedOk = false;
   }
-  const dc = await git("diff-cached", toplevel, ["diff", "--cached", "--name-only", ...common]);
-  if (dc.ok) for (const p of splitZ(dc.out)) changed.add(p);
-  else trackedOk = false;
+  if (trackedOk) {
+    const dc = await git("diff-cached", toplevel, ["diff", "--cached", "--name-only", ...common]);
+    if (dc.ok) for (const p of splitZ(dc.out)) changed.add(p);
+    else trackedOk = false;
+  }
 
   // Raw diffs carry modes (chmod, file<->symlink, gitlink) and the HEAD and index object ids
   // (staged content, gitlink commits). `--no-abbrev`: an abbreviated id grows with the object
@@ -279,6 +288,7 @@ export async function gitEvidence(cwd: string, signal?: AbortSignal): Promise<Gi
       }
     }
     let scans = 0;
+    let uninit = 0;
     for (const link of [...links].sort()) {
       if (!trackedOk) break;
       const abs = path.join(toplevel, link);
@@ -290,12 +300,11 @@ export async function gitEvidence(cwd: string, signal?: AbortSignal): Promise<Gi
         continue; // deleted: listed by the diffs
       }
       if (!st.isDirectory()) continue; // replaced by a file or symlink: listed by the diffs
-      if (scans >= MAX_SUBMODULE_SCANS) {
+      if (uninit >= MAX_SUBMODULE_UNINIT_PROBES) {
         ev.truncated = true;
-        ev.errors.push("submodule-dirty:limit");
+        ev.errors.push("submodule-uninit:limit");
         break;
       }
-      scans++;
       const tl = await git("submodule-dirty", abs, ["rev-parse", "--show-toplevel"], { timeoutMs: SUBMODULE_TIMEOUT_MS });
       if (!tl.ok) {
         trackedOk = false; // a broken gitfile: its worktree cannot be read as a repository
@@ -307,7 +316,16 @@ export async function gitEvidence(cwd: string, signal?: AbortSignal): Promise<Gi
       } catch {
         own = false;
       }
-      if (!own) continue; // uninitialised: an empty directory of this repo, covered by step 7
+      if (!own) {
+        uninit++; // uninitialised: an empty directory of this repo, covered by step 7
+        continue;
+      }
+      if (scans >= MAX_SUBMODULE_SCANS) {
+        ev.truncated = true;
+        ev.errors.push("submodule-dirty:limit");
+        break;
+      }
+      scans++;
       // The submodule's own filter drivers (its config may define ones this repo does not).
       const sc = await git("submodule-filter-config", abs, ["config", "--get-regexp", "-z", "^filter\\."], {
         timeoutMs: SUBMODULE_TIMEOUT_MS,
@@ -318,7 +336,13 @@ export async function gitEvidence(cwd: string, signal?: AbortSignal): Promise<Gi
         trackedOk = false;
         break;
       }
-      const extra = blankFilters(sc.ok ? filterNames(sc.out).filter((n) => !topFilters.has(n)) : []);
+      const subNames = sc.ok ? filterNames(sc.out).filter((n) => !topFilters.has(n)) : [];
+      if (subNames.some(unsafeName)) {
+        ev.errors.push("filter-name:unsafe");
+        trackedOk = false;
+        break;
+      }
+      const extra = blankFilters(subNames);
       const s = await git(
         "submodule-status",
         abs,
