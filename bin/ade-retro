@@ -12,7 +12,8 @@ usage: ade-retro --since YYYY-MM-DD [--until YYYY-MM-DD] [--repo OWNER/NAME] [--
               {tool, repo, since, until, prs, changelog:[{section, text, pr, source}], handoffs:[{path, date, title}], notes}
 
 Sources, all read-only (this tool writes nothing anywhere):
-  * merged PRs: `gh pr list --state merged --search "merged:SINCE..UNTIL"`;
+  * merged PRs: REST search, `gh api -X GET search/issues -f q="repo:R is:pr is:merged merged:SINCE..UNTIL" --paginate`
+    (no GraphQL: `gh pr list` returns 403 in cloud sessions; no headRefName; search caps at 1000 results, noted);
   * changelog entries whose trailing `(#N)` is one of those PRs, from CHANGELOG.md and from the changelog.d/*.md
     fragments at HEAD (fragment parser loaded from bin/changelog-fold);
   * when gh fails: the fragments added to git in the window (`git log --diff-filter=A -- changelog.d/`, filtered by
@@ -126,22 +127,49 @@ def origin_repo(root):
     return "%s/%s" % (m.group(1), m.group(2)) if m else None
 
 
+def parse_pages(text):
+    """`gh api --paginate` prints one JSON document PER PAGE, concatenated (as bin/pr-wait's parse_pages): decode all."""
+    dec, docs, i, n = json.JSONDecoder(), [], 0, len(text)
+    while True:
+        while i < n and text[i].isspace():
+            i += 1
+        if i >= n:
+            return docs
+        doc, i = dec.raw_decode(text, i)
+        docs.append(doc)
+
+
 def merged_prs(repo, since, until):
-    argv = ["gh", "pr", "list", "--repo", repo, "--state", "merged", "--search",
-            "merged:%s..%s" % (since, until), "--limit", "500",
-            "--json", "number,title,mergedAt,author,url,headRefName"]
+    """(prs, error, note): REST search (GraphQL `gh pr list` is refused with 403 in cloud sessions)."""
+    q = "repo:%s is:pr is:merged merged:%s..%s" % (repo, since, until)
+    argv = ["gh", "api", "-X", "GET", "search/issues", "-f", "q=" + q, "-f", "per_page=100", "--paginate"]
     rc, out, err = run(argv)
     if rc != 0:
-        return None, "gh pr list failed (rc=%d): %s" % (rc, (err or out).strip()[:200])
+        return None, "gh api search/issues failed (rc=%d): %s" % (rc, (err or out).strip()[:200]), None
     try:
-        data = json.loads(out or "[]")
+        docs = parse_pages(out or "")
     except ValueError as e:
-        return None, "gh pr list printed unreadable JSON (%s)" % e
-    if not isinstance(data, list):
-        return None, "gh pr list printed JSON that is not a list"
-    prs = [p for p in data if isinstance(p, dict) and isinstance(p.get("number"), int)]
+        return None, "gh api search/issues printed unreadable JSON (%s)" % e, None
+    items, total = [], 0
+    for doc in docs:
+        if not isinstance(doc, dict) or not isinstance(doc.get("items"), list):
+            return None, "gh api search/issues printed JSON without an items list", None
+        items += doc["items"]
+        if isinstance(doc.get("total_count"), int):
+            total = max(total, doc["total_count"])
+    prs = []
+    for it in items:
+        if not isinstance(it, dict) or not isinstance(it.get("number"), int):
+            continue
+        user = it.get("user") if isinstance(it.get("user"), dict) else {}
+        pr = it.get("pull_request") if isinstance(it.get("pull_request"), dict) else {}
+        prs.append({"number": it["number"], "title": it.get("title", ""), "url": it.get("html_url", ""),
+                    "author": {"login": user.get("login", "")}, "mergedAt": pr.get("merged_at")})
     prs.sort(key=lambda p: (p.get("mergedAt") or "", p["number"]))
-    return prs, None
+    note = None
+    if total > len(items):
+        note = "search capped: total_count %d but only %d PRs returned (search returns at most 1000); the list is incomplete" % (total, len(items))
+    return prs, None, note
 
 
 def git_added_fragments(root, since, until, fold, notes):
@@ -207,7 +235,9 @@ def build(args, root):
         notes.append("no --repo given and no github.com origin remote: merged PRs skipped")
         failed = True
     else:
-        prs, err = merged_prs(repo, since, until)
+        prs, err, note = merged_prs(repo, since, until)
+        if note:
+            notes.append(note)
         if err:
             notes.append(err)
             failed = True

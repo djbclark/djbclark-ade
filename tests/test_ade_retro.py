@@ -19,6 +19,9 @@ d = os.environ["FAKE_GH_DIR"]
 with open(os.path.join(d, "calls.log"), "a") as f:
     f.write(json.dumps(sys.argv[1:]) + "\n")
 s = json.load(open(os.path.join(d, "scenario.json")))
+if sys.argv[1:2] != ["api"] or "search/issues" not in sys.argv:  # only REST search is answered (GraphQL is 403)
+    sys.stderr.write("HTTP 403: GraphQL not allowed")
+    sys.exit(1)
 sys.stdout.write(s.get("out", ""))
 sys.stderr.write(s.get("err", ""))
 sys.exit(s.get("rc", 0))
@@ -87,18 +90,24 @@ def world(tmp_path: Path):
     return w
 
 
-PRS = [
-    {"number": 11, "title": "Ship old thing", "mergedAt": "2026-11-01T09:00:00Z", "author": {"login": "dj"},
-     "url": "https://github.com/acme/widgets/pull/11", "headRefName": "old"},
-    {"number": 12, "title": "Fix bug", "mergedAt": "2026-11-02T09:00:00Z", "author": {"login": "dj"},
-     "url": "https://github.com/acme/widgets/pull/12", "headRefName": "in-window"},
-    {"number": 15, "title": "Doc only", "mergedAt": "2026-11-03T09:00:00Z", "author": {"login": "dj"},
-     "url": "https://github.com/acme/widgets/pull/15", "headRefName": "docs"},
-]
+def item(n, title, merged, branch=""):
+    return {"number": n, "title": title, "html_url": "https://github.com/acme/widgets/pull/%d" % n,
+            "user": {"login": "dj"}, "pull_request": {"merged_at": merged}}
+
+
+PRS = [item(11, "Ship old thing", "2026-11-01T09:00:00Z"), item(12, "Fix bug", "2026-11-02T09:00:00Z"),
+       item(15, "Doc only", "2026-11-03T09:00:00Z")]
+
+
+def search(items, total=None, pages=1):
+    """gh api --paginate output: one JSON object per page, concatenated."""
+    per = max(1, -(-len(items) // pages))
+    return "".join(json.dumps({"total_count": len(items) if total is None else total,
+                               "items": items[i:i + per]}) for i in range(0, max(len(items), 1), per))
 
 
 def test_gh_success_json(world) -> None:
-    world.scenario(out=json.dumps(PRS))
+    world.scenario(out=search(PRS))
     r = world.run("--since", "2026-11-01", "--until", "2026-11-07", "--json")
     assert r.returncode == 0, r.stderr
     rep = json.loads(r.stdout)
@@ -107,14 +116,28 @@ def test_gh_success_json(world) -> None:
     assert {(e["pr"], e["source"]) for e in rep["changelog"]} == {(11, "CHANGELOG.md"), (12, "changelog.d/in-window.md")}
     assert [h["date"] for h in rep["handoffs"]] == ["2026-11-03"]
     assert rep["handoffs"][0]["title"] == "Handoff in window"
+    assert rep["prs"][1] == {"number": 12, "title": "Fix bug", "url": "https://github.com/acme/widgets/pull/12",
+                             "author": {"login": "dj"}, "mergedAt": "2026-11-02T09:00:00Z"}
     argv = world.calls()[0]
-    assert argv[:2] == ["pr", "list"] and "acme/widgets" in argv
-    assert argv[argv.index("--search") + 1] == "merged:2026-11-01..2026-11-07"
-    assert "--limit" in argv and "500" in argv
+    assert argv[:4] == ["api", "-X", "GET", "search/issues"] and "--paginate" in argv
+    assert "q=repo:acme/widgets is:pr is:merged merged:2026-11-01..2026-11-07" in argv
+    assert "per_page=100" in argv and "pr" not in argv[:1]
+
+
+def test_search_pages_are_concatenated_and_cap_is_noted(world) -> None:
+    world.scenario(out=search(PRS, total=1500, pages=3))
+    rep = json.loads(world.run("--since", "2026-11-01", "--until", "2026-11-07", "--json").stdout)
+    assert [p["number"] for p in rep["prs"]] == [11, 12, 15]
+    assert any("search capped" in n and "1500" in n for n in rep["notes"])
+
+
+def test_search_without_items_is_a_source_failure(world) -> None:
+    world.scenario(out='{"message": "x"}')
+    assert world.run("--since", "2026-11-01", "--until", "2026-11-07").returncode == 3
 
 
 def test_markdown_headings_and_gap(world) -> None:
-    world.scenario(out=json.dumps(PRS))
+    world.scenario(out=search(PRS))
     r = world.run("--since", "2026-11-01", "--until", "2026-11-07")
     assert r.returncode == 0
     for h in ("## A. Merged PRs", "## B. Changelog", "## C. Handoffs", "## D. Gaps"):
@@ -131,14 +154,14 @@ def test_gh_failure_falls_back_to_git_fragments_window_edges(world) -> None:
     assert rep["prs"] == []
     assert sorted(e["pr"] for e in rep["changelog"]) == [12, 13, 14]  # not 8 (before) or 9 (after)
     assert all(e["source"].startswith("git:changelog.d/") for e in rep["changelog"])
-    assert any("gh pr list failed" in n for n in rep["notes"])
+    assert any("gh api search/issues failed" in n for n in rep["notes"])
 
 
 def test_gh_failure_markdown_still_prints_report(world) -> None:
     world.scenario(rc=4, err="boom")
     r = world.run("--since", "2026-11-01", "--until", "2026-11-07")
     assert r.returncode == 3
-    assert "## D. Gaps" in r.stdout and "gh pr list failed" in r.stdout
+    assert "## D. Gaps" in r.stdout and "gh api search/issues failed" in r.stdout
 
 
 def test_gh_unreadable_json_is_a_source_failure(world) -> None:
@@ -171,16 +194,16 @@ def test_usage_errors(world) -> None:
 
 
 def test_until_defaults_to_today_and_repo_flag_wins(world) -> None:
-    world.scenario(out="[]")
+    world.scenario(out=search([]))
     r = world.run("--since", "2026-11-01", "--repo", "other/thing", "--json")
     assert r.returncode == 0
     rep = json.loads(r.stdout)
     assert rep["repo"] == "other/thing" and rep["until"] >= "2026-11-04"
-    assert "other/thing" in world.calls()[0]
+    assert "q=repo:other/thing is:pr is:merged merged:2026-11-01..%s" % rep["until"] in world.calls()[0]
 
 
 def test_read_only(world) -> None:
-    world.scenario(out=json.dumps(PRS))
+    world.scenario(out=search(PRS))
     before = subprocess.run(["git", "-C", str(world.root), "status", "--porcelain"], capture_output=True, text=True).stdout
     mtimes = {p: p.stat().st_mtime_ns for p in world.root.rglob("*") if ".git" not in p.parts and p.is_file()}
     world.run("--since", "2026-11-01", "--until", "2026-11-07")
