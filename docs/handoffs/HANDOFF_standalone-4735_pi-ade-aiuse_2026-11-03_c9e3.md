@@ -12,6 +12,8 @@ created_at: 2026-11-03T10:01:53-05:00
 writer: pi
 ---
 
+> **Superseded in part (2026-11-03 21:30 EST): all work below is merged or released. Read section N at the end first; sections C, D, K and L are historical.**
+
 # A. Handoff — finish Pi/ADE integration and fully release aiuse
 
 ## B. The Goal
@@ -151,3 +153,31 @@ aiuse --available --json
 ```
 
 M2. Resume prompt: read this handoff and Tier 1, verify ownership/claims and quota, then continue K1-K5. User requires full aiuse release and incidental fixes. No work may be discarded. Do not use this native session's inherited host to reset or fabricate a successful successor launch. Document-only fallback is required if no verified governed successor route is available; report the limitation honestly.
+
+## N. Update 2026-11-03 21:30 EST: this section and the Tier 1 log supersede sections C, D, K, L and M2
+
+N1. **All work in this document is merged or released.** Sections C to D and K (workspaces, blockers, next steps) describe the state at 10:01 EST and MUST NOT be re-executed.
+
+N1a. [PR 273](https://github.com/djbclark/djbclark-ade/pull/273), merge `1608f0429561e3ea141bb7d591a7cc08822e120f`: Pi first-class support. It integrates the dispatch, history, native-controls, skill-cleanup and subagent slices. Every D1 to D5 blocker was fixed and re-reviewed. The subagent extension is installed as a symlink, `~/.pi/agent/extensions/subagent` pointing to `~/src/djbclark-ade/pi/extensions/subagent`; the stock copy is backed up at `~/.pi/agent/backup/subagent-stock-2026-08-01`. Docs: `docs/pi-subagent.md`, `docs/pi-skills.md`, `docs/pi-agent-profiles.md`.
+
+N1b. aiuse 3.14.0 is released (GitHub, PyPI and Homebrew verified, `brew test` passed), main `705ea00` in `~/src/aiuse`. CodexBar's `openai` provider is enabled so pi shows in the default `aiuse` output as `payg_api` spend with no balance; rollback is `codexbar config disable --provider openai`, before-state saved under `~/.local/state/handoffs/standalone-4735-artifacts/`.
+
+N1c. Fleet-migrate (`ebd6ed1a`) was told Pi/ADE is complete and acked, twice. Do not message it again without new content.
+
+N2. **OMP audit phase.** Four read-only reviewers audited the OMP side for the bug classes found on Pi and confirmed 12 bugs, A1 to A12. Two PRs fixed them, each reviewed against its exact head.
+
+N2a. [PR 275](https://github.com/djbclark/djbclark-ade/pull/275), merge `19592ba94c66281782b7140fe5990cc5a6fefbc8`, safety A1 to A4. `bin/agent_guard.py` holds one policy table: Pi, omp, codex and claude are guarded (an identity-changing `--acp-arg` after admission is refused, including `--model=` forms, argparse abbreviations, resume and stored records); 13 other acp-run agents are explicit `unreviewed` rows with unchanged pass-through behaviour. `omp_model_refusal` in `tools/acp-run/acp-run`. omp is mapped to its pool in `bin/acp-dispatch` and `bin/route_agent.py`, failing open without a fresh reading. `fleet._pi_executable` requires `@earendil-works` and rejects `@oh-my-pi`. Contract: `docs/agent-guard-contract.md`.
+
+N2b. [PR 274](https://github.com/djbclark/djbclark-ade/pull/274), merge `36e8b7a1c9e8d21130a77ef2ddaabc3bff5a93e2`, hygiene A5 to A12. A `fleet.EXACT_EXECUTABLES` table drives relay `named_hits`, `descends_from` and `turn_is_above`. omp history liveness uses `omp session lease --json`; a failure reports `LIVE?`, never `ended`. omp indexes `~/.omp/profiles/*/agent/sessions` and the default store, with file-scoped keys and a shared reader `skills/session-finder/jsonl_session.py`. `session-find --all` lists lease-live hits fleet cannot see. `autorename.clean()` and both bridges strip Cc, Cf, Zl, Zp and bidi controls but keep U+200C and U+200D. `PI_CODING_AGENT_*` env stores are deliberately not followed for omp, because Pi shares them.
+
+N3. **Open, none urgent.**
+
+N3a. Blocked on quota: add the "copy" and "copy-colors" meanings from `~/ops/site-private-djbclark/memory/feedback_prompts_go_to_clipboard.md` to `~/AGENTS.md` item 15 and `cursor/home-agents.mdc`. Only Claude Opus 5.5+ may edit them, via `acp-dispatch claude --model opus --kind judgment`. Claude is exhausted until about Nov 5; omp was gated until Fri Nov 6 5:00am. Never bypass the gates.
+
+N3b. Optional: `aiuse set-credits pi --remaining USD --total USD --granted DATE --expires DATE` needs the operator's OpenAI console figures, and makes pi appear in `aiuse --available`.
+
+N3c. Cross-TUI rollout, wanted later and unscheduled: (1) flip the `unreviewed` rows in `AGENT_GUARDS` and the status table in `docs/agent-guard-contract.md`; (2) add exact-executable rows to `fleet.EXACT_EXECUTABLES`; (3) make project-agent consent consistent across TUIs, never a model-controlled flag; (4) strip terminal escapes from and cap `failureDetail()` in `pi/extensions/subagent/index.ts`, skipping running parallel tasks; (5) `session-find --all` shows a `LIVE?` hit as `ended` (in `docs/queue.md`); (6) decide whether omp admission should fail closed (Pi does); (7) `ACP_RUN_OMP_ANY_MODEL=1` can be set by an agent before a foreground run; (8) direct `acp-run omp` checks only `--agent-arg` flags; (9) `thinking` is not a safe `--set` key for guarded agents, use `--effort`; (10) the header comment in `bin/agent_guard.py` names a nonexistent test file, the check is in `tests/test_acp_dispatch_identity.py`.
+
+N4. **Cleanup state.** All slice and omp worktrees and branches are removed and their claims released. Foreign edits found in the old `pi-first-class` worktree are saved at `~/.local/state/handoffs/standalone-4735-artifacts/foreign-edits-pi-first-class-wt.patch`. The `.gitignore` modification in `~/src/djbclark-ade` is unrelated and untouched. Nothing is running.
+
+N5. **Resume checks.** `gh pr view 273 -R djbclark/djbclark-ade --json state` (same for 274 and 275) reads MERGED; `aiuse --version` reads 3.14.0; `aiuse --available --json` before any routing.
