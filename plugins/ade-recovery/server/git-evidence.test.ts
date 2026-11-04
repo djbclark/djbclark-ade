@@ -236,7 +236,8 @@ test("a commit inside a submodule changes the fingerprint", async () => {
   assert.equal(e0.trackedChanged, 0);
   fs.writeFileSync(path.join(d, "s", "a.txt"), "sub change\n");
   const dirty = await gitEvidence(d);
-  assert.equal(dirty.trackedChanged, 0, "dirty submodule content is ignored (=dirty)");
+  assert.deepEqual(dirty.trackedPaths, ["s"], "a dirty submodule worktree is a changed path");
+  assert.notEqual(dirty.trackedFingerprint, e0.trackedFingerprint);
   git(path.join(d, "s"), "commit", "-q", "-am", "inner");
   const e1 = await gitEvidence(d);
   assert.deepEqual(e1.trackedPaths, ["s"]);
@@ -319,4 +320,100 @@ test("a tracked path below a symlinked directory is not followed", async () => {
   assert.ok(Date.now() - t0 < 5000);
   assert.ok(ev.trackedFingerprint);
   assert.deepEqual(ev.errors, []);
+});
+
+// Adversary round 2, N1: names `--stdin-paths` cannot carry (a newline; a leading quote, which it
+// C-unquotes; a trailing CR, which it drops) must still have their content hashed.
+
+test("a content edit to a path with a newline, a leading quote or a trailing CR changes the fingerprint", async () => {
+  for (const name of ["we\nird", '"a.txt"', "b.txt\r"]) {
+    const d = mkrepo();
+    const p = path.join(d, name);
+    fs.writeFileSync(p, "1\n");
+    git(d, "add", "--", name); git(d, "commit", "-q", "-m", "odd name");
+    fs.writeFileSync(p, "agent edit\n");
+    const a = await gitEvidence(d);
+    assert.ok(a.trackedFingerprint, `${JSON.stringify(name)}: fingerprint nulled (${a.errors.join(",")})`);
+    assert.deepEqual(a.errors, [], JSON.stringify(name));
+    assert.equal(a.truncated, false);
+    assert.equal(a.trackedChanged, 1, JSON.stringify(name));
+    assert.equal((await gitEvidence(d)).trackedFingerprint, a.trackedFingerprint, `${JSON.stringify(name)}: stable`);
+    fs.writeFileSync(p, "someone else's edit\n");
+    const b = await gitEvidence(d);
+    assert.ok(b.trackedFingerprint);
+    assert.notEqual(b.trackedFingerprint, a.trackedFingerprint, `${JSON.stringify(name)}: edit invisible`);
+  }
+});
+
+// Adversary round 2, N2: edits inside a submodule's own worktree.
+
+function mksuper(): { d: string; s: string } {
+  const sub = mkrepo();
+  const d = mkrepo();
+  git(d, "-c", "protocol.file.allow=always", "submodule", "add", "-q", sub, "s");
+  git(d, "commit", "-q", "-m", "add submodule");
+  return { d, s: path.join(d, "s") };
+}
+
+test("a submodule worktree edit changes the fingerprint, a second edit changes it again, and it is stable", async () => {
+  const { d, s } = mksuper();
+  const e0 = await gitEvidence(d);
+  assert.equal(e0.trackedChanged, 0);
+  fs.writeFileSync(path.join(s, "a.txt"), "agent edit\n");
+  const e1 = await gitEvidence(d);
+  assert.ok(e1.trackedFingerprint, e1.errors.join(","));
+  assert.deepEqual(e1.errors, []);
+  assert.deepEqual(e1.trackedPaths, ["s"]);
+  assert.notEqual(e1.trackedFingerprint, e0.trackedFingerprint);
+  // Same tree twice: same fingerprint, also after a touch that leaves the content alone.
+  assert.equal((await gitEvidence(d)).trackedFingerprint, e1.trackedFingerprint);
+  const t = new Date(Date.now() + 5000);
+  fs.utimesSync(path.join(s, "a.txt"), t, t);
+  assert.equal((await gitEvidence(d)).trackedFingerprint, e1.trackedFingerprint, "touch moved it");
+  fs.writeFileSync(path.join(s, "a.txt"), "someone else\n");
+  const e2 = await gitEvidence(d);
+  assert.ok(e2.trackedFingerprint);
+  assert.notEqual(e2.trackedFingerprint, e1.trackedFingerprint, "second edit invisible");
+  assert.equal((await gitEvidence(d)).trackedFingerprint, e2.trackedFingerprint);
+  // A new untracked file inside the submodule moves it too.
+  fs.writeFileSync(path.join(s, "new.txt"), "n\n");
+  const e3 = await gitEvidence(d);
+  assert.notEqual(e3.trackedFingerprint, e2.trackedFingerprint);
+  assert.equal((await gitEvidence(d)).trackedFingerprint, e3.trackedFingerprint);
+  // Restoring the submodule restores the clean fingerprint.
+  fs.rmSync(path.join(s, "new.txt"));
+  git(s, "checkout", "-q", "--", "a.txt");
+  assert.equal((await gitEvidence(d)).trackedFingerprint, e0.trackedFingerprint);
+});
+
+test("the submodule scan runs none of the submodule's filter drivers and writes nothing there", async () => {
+  const { d, s } = mksuper();
+  const marker = path.join(tmp(), "sub-filter-ran");
+  const script = path.join(tmp(), "filter.sh");
+  fs.writeFileSync(script, `#!/bin/sh\ntouch '${marker}'\ncat\n`, { mode: 0o755 });
+  git(s, "config", "filter.subonly.clean", script);
+  git(s, "config", "filter.subonly.process", script);
+  fs.writeFileSync(path.join(s, ".gitattributes"), "*.txt filter=subonly\n");
+  fs.writeFileSync(path.join(s, "a.txt"), "dirty in submodule\n");
+  const gitDir = git(s, "rev-parse", "--absolute-git-dir").trim();
+  const idx = path.join(gitDir, "index");
+  const before = fs.statSync(idx);
+  await new Promise((r) => setTimeout(r, 20));
+  const ev = await gitEvidence(d);
+  assert.ok(!fs.existsSync(marker), "submodule filter driver ran");
+  assert.ok(ev.trackedFingerprint, ev.errors.join(","));
+  assert.deepEqual(ev.trackedPaths, ["s"]);
+  const after = fs.statSync(idx);
+  assert.equal(after.mtimeMs, before.mtimeMs);
+  assert.ok(!fs.existsSync(idx + ".lock"));
+});
+
+test("an uninitialised submodule is not scanned and does not null the fingerprint", async () => {
+  const { d } = mksuper();
+  const clone = path.join(tmp(), "clone");
+  git(d, "clone", "-q", d, clone);
+  const ev = await gitEvidence(clone);
+  assert.ok(ev.trackedFingerprint, ev.errors.join(","));
+  assert.deepEqual(ev.errors, []);
+  assert.equal(ev.trackedChanged, 0);
 });
