@@ -30,6 +30,7 @@ options:
 
 exit codes (show): 0 resumable-native, 1 needs-review, 2 do-not-resume, 3 not found, 64 usage error
 exit codes (list): 0 ok, 64 usage error
+exit code 70 (both): internal error, or (from the bin/paseo-checkpoint wrapper) node missing or < 22.18
 
 Paseo's own store is read too, read only: <PASEO_HOME>/agents/*/<id>.json (archivedAt set:
 do-not-resume, paseo-archived; updatedAt more than 2 s after the record: needs-review,
