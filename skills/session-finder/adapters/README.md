@@ -37,10 +37,11 @@ FIFO named `*.jsonl` is skipped, never waited on), JSON lines that are not objec
 `RecursionError`) skipped, and the native id taken from a canonical `<ISO timestamp>_<id>` file name, else from the first-line
 `session` header (omp: within the first 4 lines, its `title` record comes first).
 
-omp (`omp.py`, reworked 2026-11-03) indexes every store it can find: `~/.omp/agent/sessions/<project>/`, every
-`~/.omp/profiles/<name>/agent/sessions/<project>/`, `$PI_CODING_AGENT_DIR/sessions/<project>/` and the flat
-`$PI_CODING_AGENT_SESSION_DIR/` (the two variables are in `ROOT_ENV`; `PI_CONFIG_DIR` and the profile variables are names, not
-paths, and are not followed). Keys are `omp:<absolute session file>` (the old `omp:<id>` row is retired once its file is
+omp (`omp.py`, reworked 2026-11-03) indexes `~/.omp/agent/sessions/<project>/` and every
+`~/.omp/profiles/<name>/agent/sessions/<project>/`. Store-relocating variables (`PI_CODING_AGENT_DIR`,
+`PI_CODING_AGENT_SESSION_DIR`, `--session-dir`) are not followed, and omp has no `ROOT_ENV`: Pi reads the same variables, so a
+store they name may hold Pi sessions that must not be indexed or resumed as omp. `PI_CONFIG_DIR` and the profile variables are
+names, not paths, and are not followed either. Keys are `omp:<absolute session file>` (the old `omp:<id>` row is retired once its file is
 re-indexed), so equal ids in two stores, or two `daily.jsonl` files, no longer collide. The resume hint is
 `omp --resume=<id>` for a canonical file in the default store and `omp --resume=<absolute file>` for every other store or a
 noncanonical name, so it needs no profile or directory variable in the caller's environment. Liveness: `live_among` runs

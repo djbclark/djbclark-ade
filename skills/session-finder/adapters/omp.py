@@ -4,11 +4,11 @@ Line 1 is a `title` record, then a `session` record (id, cwd), then `message` re
 `message.role` is user/assistant and whose content is a list of blocks (`text`, `thinking`,
 `toolCall`). Tool results, thinking and custom records are not indexed.
 
-Stores (all indexed, one history): the default agent directory `~/.omp/agent/sessions` (bucketed by project); every named profile,
-`~/.omp/profiles/<name>/agent/sessions`; `$PI_CODING_AGENT_DIR/sessions` (omp honours it for the default profile only); and the flat directory
-`$PI_CODING_AGENT_SESSION_DIR` (omp's `--session-dir` holds its `.jsonl` files directly). The two directory variables are copied into the launchd job (ROOT_ENV). `PI_CONFIG_DIR` and the
-profile variables name a directory or profile rather than a path, so they are not followed: every profile under `~/.omp/profiles` is
-indexed anyway, and a `PI_CODING_AGENT_DIR` that omp ignores in a named profile only adds a store that is normally absent.
+Stores (all indexed, one history): the default agent directory `~/.omp/agent/sessions` and every named profile,
+`~/.omp/profiles/<name>/agent/sessions` (both bucketed by project). The environment variables that relocate a store
+(`PI_CODING_AGENT_DIR`, `PI_CODING_AGENT_SESSION_DIR`, `--session-dir`) are NOT followed: Pi reads the same variables
+(adapters/pi.py), so a store they name may hold Pi sessions, which must not be indexed, or resumed, as omp. `PI_CONFIG_DIR` and the
+profile variables are not followed either (a name, not a path; every profile under `~/.omp/profiles` is indexed anyway).
 
 Keys are `omp:<absolute session file>`: ids repeat across stores and an id taken from a file name collides (`daily.jsonl` in two
 projects). The native id comes from a canonical `<ISO timestamp>_<id>` file name, else from the header (`jsonl_session`), and the old
@@ -20,7 +20,6 @@ shared by all profiles). A missing `omp`, a failing call or a malformed answer r
 LIVE?; the adapter never reports ended without an answer.
 """
 import json
-import os
 import shlex
 import subprocess
 import sys
@@ -30,7 +29,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # the shared re
 from jsonl_session import SID, STAMP, native_sid, records  # noqa: E402
 
 AGENT = "omp"
-ROOT_ENV = ("PI_CODING_AGENT_DIR", "PI_CODING_AGENT_SESSION_DIR")
 RESUME_USES_KEY = True
 CONFIG = Path.home() / ".omp"
 ROOT = CONFIG / "agent" / "sessions"
@@ -77,23 +75,15 @@ def _read(path):
 
 
 def _stores():
-    """(directory, flat) pairs: a flat store holds the .jsonl files directly, the others one bucket per project."""
-    out = []
-    if os.environ.get("PI_CODING_AGENT_SESSION_DIR"):
-        out.append((Path(os.environ["PI_CODING_AGENT_SESSION_DIR"]).expanduser(), True))
-    if os.environ.get("PI_CODING_AGENT_DIR"):
-        out.append((Path(os.environ["PI_CODING_AGENT_DIR"]).expanduser() / "sessions", False))
-    out.append((ROOT, False))
-    out += [(p, False) for p in sorted((CONFIG / "profiles").glob("*/agent/sessions"))]
-    return out
+    """The session directories, one bucket per project below each."""
+    return [ROOT, *sorted((CONFIG / "profiles").glob("*/agent/sessions"))]
 
 
 def sessions():
     seen = set()
-    for root, flat in _stores():
-        files = root.glob("*.jsonl") if flat else root.glob("*/*.jsonl")
-        for path in files:
-            if path.is_symlink() or path.parent != root and path.parent.is_symlink():
+    for root in _stores():
+        for path in root.glob("*/*.jsonl"):
+            if path.is_symlink() or path.parent.is_symlink():
                 continue
             try:
                 st = path.stat()

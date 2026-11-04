@@ -41,20 +41,21 @@ def home(tmp_path, monkeypatch):
     return tmp_path
 
 
-def test_every_store_is_indexed_with_file_scoped_keys(home, monkeypatch):
+def test_default_and_profile_stores_are_indexed_with_file_scoped_keys_and_pi_variables_are_not_followed(home, monkeypatch):
     default = session(home / f".omp/agent/sessions/-src-a/{STAMP}_same-id.jsonl", "same-id")
     profile = session(home / f".omp/profiles/company/agent/sessions/-src-a/{STAMP}_same-id.jsonl", "same-id")
-    agent_dir = session(home / f"elsewhere/sessions/-src-a/{STAMP}_agent-id.jsonl", "agent-id")
-    flat = session(home / f"flat/{STAMP}_flat-id.jsonl", "flat-id")
-    session(home / f"flat/{STAMP}_flat-id/{STAMP}_subagent.jsonl", "subagent-id")  # an artifact directory is not a session store
+    # Pi reads these variables too: a store they name may hold Pi sessions, which must never be indexed (or resumed) as omp
+    session(home / f"elsewhere/sessions/-src-a/{STAMP}_pi-agent-dir.jsonl", "pi-agent-dir")
+    session(home / f"flat/{STAMP}_pi-session-dir.jsonl", "pi-session-dir")
+    session(home / f"flat/-src-a/{STAMP}_pi-bucket.jsonl", "pi-bucket")
     monkeypatch.setenv("PI_CODING_AGENT_DIR", str(home / "elsewhere"))
     monkeypatch.setenv("PI_CODING_AGENT_SESSION_DIR", str(home / "flat"))
     omp = load("adapters/omp", home)
     rows = {r["key"]: r for r in omp.sessions()}
-    assert set(rows) == {f"omp:{p.resolve()}" for p in (default, profile, agent_dir, flat)}
+    assert set(rows) == {f"omp:{p.resolve()}" for p in (default, profile)}
     assert rows[f"omp:{default.resolve()}"]["sid"] == rows[f"omp:{profile.resolve()}"]["sid"] == "same-id"
-    assert rows[f"omp:{flat.resolve()}"]["supersedes"] == ["omp:flat-id"]
-    assert omp.ROOT_ENV == ("PI_CODING_AGENT_DIR", "PI_CODING_AGENT_SESSION_DIR")
+    assert rows[f"omp:{default.resolve()}"]["supersedes"] == ["omp:same-id"]
+    assert not hasattr(omp, "ROOT_ENV")  # nothing in the environment relocates an omp store here
     cwd, _, msgs = rows[f"omp:{profile.resolve()}"]["load"]()
     assert (cwd, msgs) == ("/w", [("user", "okapi question here")])
 
