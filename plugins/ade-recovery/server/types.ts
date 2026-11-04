@@ -23,7 +23,8 @@ export type TurnOutcome =
 export interface PaseoLike {
   hosts: { list(): Promise<{ self?: { serverId?: string } | null } & Record<string, unknown>> };
   agents: {
-    ref(id: string): { refresh(): Promise<AgentSnapshot | null> };
+    // The real SDK resolves to `{agent, project} | null`; server/snapshot.ts normalises it.
+    ref(id: string): { refresh(): Promise<unknown> };
   };
 }
 
