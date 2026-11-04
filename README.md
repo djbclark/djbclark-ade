@@ -15,6 +15,10 @@ their old paths are symlinks into this checkout).
 > retired). Machine-side uninstall is not planned. Screen control is the
 > [`paseo-screen`](skills/paseo-screen/SKILL.md) skill (Paseo plugin).
 
+The path forward also includes [checkpoint and interruption recovery](docs/checkpoint.md)
+(2026-11-04, planned): preserving work across crashes and quota stops, with verified recovery gates
+in the Paseo migration. Conversation resume, artifact preservation and external effects are separate.
+
 ## The pieces
 
 1. **Many TUIs.** Claude Code, Codex, Hermes, Cursor, opencode, Cline,

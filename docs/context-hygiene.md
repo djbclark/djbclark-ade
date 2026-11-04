@@ -7,17 +7,21 @@ money by repeatedly compacting an expensive one.
 
 ## 1. Natural task boundaries
 
-1. At a completed task, checkpoint before beginning unrelated work. Write the
+Terminology clarified 2026-11-04: this section describes controlled **handoffs**.
+Continuous protection against unplanned interruption is the separate, planned
+[checkpoint contract](checkpoint.md); a boundary handoff alone cannot provide it.
+
+1. At a completed task, write a handoff before beginning unrelated work. Write the
    owned Tier 1 log and handoff with absolute paths, branch/head, dirty files,
    unresolved decisions, active job records, unread results and exact next steps.
 2. A top-level session on a supported host runs the `handoff` skill and lets its
    Step 9 queue one new-session/baton cycle. A dispatched slice writes a
    document-only handoff; it must never clear or archive its parent.
 3. Never throw away an unsent draft, interrupt a running worker, or reset before
-   the checkpoint is durable. Re-arm existing jobs instead of launching their
+   the handoff is durable. Re-arm existing jobs instead of launching their
    work again. A failed lifecycle operation is reported, not retried in a loop.
 4. A larger fixed instruction/tool baseline is not removable conversation.
-   Repeated compactions of that baseline waste tokens. Preserve the checkpoint,
+   Repeated compactions of that baseline waste tokens. Preserve the handoff,
    reduce the attached instructions/tools, or continue on a suitable model.
 
 ## 2. Earlier Claude nudges

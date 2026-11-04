@@ -3,6 +3,14 @@
 Work the operator has explicitly queued. Newest first. Items leave this file
 when they ship (into the relevant doc) or when they're dropped (say why).
 
+## Interruption recovery architecture (2026-11-04; implementation pending)
+
+[Issue 278](https://github.com/djbclark/djbclark-ade/issues/278) is incorporated into the
+[Paseo plan](paseo-only-rearchitecture.md) through the [checkpoint contract](checkpoint.md).
+Next: D1 provider/capture probes, then G1 persistence and failure-injection gates, D3 canary,
+and D5 legacy record recovery before dispatcher retirement. Any interim dispatcher patch must
+use the shared contract. No runtime defaults changed; see contract section E for owners and gates.
+
 ## relay: card-blocked records should fail fast (2026-10-31; proposal, djbclark rules on it)
 
 Evidence, Dann VPS 2 (techno-euphora), 2026-10-31: its three relays to the lead (`20261031-001833-f7f88f`, `20261031-002136-e8aafa`, `20261031-003108-a98a16`) each expired after 360 min with the reason

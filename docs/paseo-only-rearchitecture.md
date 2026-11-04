@@ -17,6 +17,11 @@ Many files still describe herdr or Orca as live until phase D7's sweep.
 **D7 conflict resolved (2026-10-31):** `bin/herdr-server-run` and `config/launchd/dev.herdr.server.plist` STAY: the installed
 herdr server and the `herdr4paseo` / `paseo4herdr` bridges run on them, so D7's deletion of herdr tooling excludes both.
 
+**Recovery amendment 2026-11-04:** [issue 278](https://github.com/djbclark/djbclark-ade/issues/278)
+is incorporated as the [checkpoint and recovery contract](checkpoint.md). This is planned work,
+not a shipped guarantee. It extends D1/D2/D3/D5 and G1 to preserve interrupted workers, schedules
+and top-level sessions. Its evidence table evaluates the issue's recommendations independently.
+
 ## A. The ruling (djbclark, 2026-10-29 and 2026-10-30)
 
 1. **Paseo only.** No herdr, no tuios, no other harness (Orca, Superset/Paradev, TUICommander, raw tmux
@@ -409,6 +414,13 @@ ops-promotion pilot passes.
 Least reversible steps: deleting the dispatch record format (D5; kept readable until calibration moves),
 worktree removal on archive (B4), and the instruction-file rewrites (D7). Each happens only after its gate.
 
+### D8. Recovery acceptance overlay (2026-11-04; not a later phase)
+
+The [checkpoint contract, section E](checkpoint.md#e-path-forward-and-acceptance-gates) adds gates
+to D1, D2, D3 and D5 in that order. G1 owns recovery; any interim dispatcher extension shares its
+schema and migration tests. D5 cannot retire a resumer while an interrupted job still depends on it.
+D7 keeps the contract in current docs when this migration plan moves to history.
+
 ## E. Carry-overs (not part of this plan; must not be lost)
 
 1. PR 118 (CI waiver, docs-only class): parked at head `d55a8b4b` with adversary r9 BLOCK (push needs
@@ -527,6 +539,12 @@ C9, r2 C3 and C8, r3 N2, r4 R4).
    the worker's id, provider and mode. `jobs.get` for the owner; `jobs.finish` for the worker;
    `jobs.extend(taskId, seconds, reason)` for the owner, only before T and capped in total (default: the
    original deadline), each extension recorded in the ledger; `jobs.reconcile` (astra C1, Fable 3.1, adversary r3 N2).
+   **Recovery amendment (2026-11-04):** G1 also owns the [checkpoint contract](checkpoint.md):
+   durable artifact generations and operation receipts, capture independent of a final agent report,
+   and reconciliation before replay. Passive capture covers top-level sessions without giving them
+   G4 automation or permitting automatic restart after a user stop. Native resume is capability-tested;
+   an uncertain external effect blocks dependent retry. Capture defaults and recovery defaults are
+   separate. This extends the proposed interface; it is not implemented by `jobs.submit` today.
 2. **`ade-gate` (plugin)**: `agent.create.before` runs `aiuse` (cached about 60 s) and
    `bin/load-watch admit --json` with no wait (the admission predicate `acp-dispatch` already uses; exit 75
    means too hot, so the gate refuses with the load named and the launcher retries outside the hook, which
