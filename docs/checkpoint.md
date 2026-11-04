@@ -3,7 +3,7 @@
 Status: proposed implementation contract, researched 2026-11-04. This updates the
 [Paseo plan](paseo-only-rearchitecture.md); it does not enable recovery or change runtime defaults.
 Tracks [issue 278](https://github.com/djbclark/djbclark-ade/issues/278). Its incident motivates the
-work; its diagnosis and file-by-file solution are inputs, not verified requirements. Section F (2026-11-04) inventories what Paseo itself provides.
+work; its diagnosis and file-by-file solution are inputs, not verified requirements. Section F (2026-11-04) inventories what Paseo itself provides, and section G (2026-11-04) records the interim ade-recovery v1 implementation.
 
 ## A. Outcome and boundaries
 
@@ -221,13 +221,19 @@ Issue 278. Status and the probes it depends on are in G.8.
 
 G.1. What it captures, per agent, in one record:
 - identity: serverId, Paseo agent id, provider, cwd, host, boot id, platform, workspace and parent ids.
+  Host is `machineId` (a stable OS machine id, compared case-insensitively); the hostname is the
+  fallback only when either side lacks a machine id.
 - persistence: `sessionId` and the sha256 of the native handle. The handle itself is never written.
 - lifecycle: state, daemon instance, `closedAt`, `archivedAt`.
 - the last 20 turns, with outcome codes only.
 - git evidence: repo top, linked-worktree flag, branch, head, and base (merge-base with origin HEAD,
   or recorded at create).
-- tracked fingerprint: sha256 over path and blob id from `git hash-object --no-filters` (no `-w`)
-  for each tracked change against HEAD.
+- tracked fingerprint: sha256 over the changed paths (the union of worktree vs HEAD and index vs
+  HEAD, with `--no-renames --ignore-submodules=dirty`). Per path it covers the content: a regular
+  file by its blob id from `git hash-object --no-filters` (no `-w`), a symlink by its target, a
+  gitlink by the submodule's HEAD, other types by a marker. It also covers the raw HEAD and index
+  diffs (`--raw --no-abbrev`: modes, object ids, status letters), so a chmod, a file-to-symlink
+  change or a staged-only change moves it.
 - untracked paths (capped, redacted names) and a stat fingerprint over path, size and mtime.
   Contents are never read.
 - interruption history, last 20. A later turn never clears it.
@@ -249,14 +255,45 @@ G.4. Where records live:
 with the previous generation at `<agent>.prev.json`. Files are 0600 in 0700 directories. A
 `writer.lock` names the writer by pid and start token. Each record carries a sha256 integrity
 digest; a corrupt current file falls back to `.prev.json`.
+The CLI also reads Paseo's own store, read only (never written): `<PASEO_HOME>/agents/*/<id>.json`
+and `<PASEO_HOME>/server-id` (or `PASEO_SERVER_ID`). `PASEO_HOME` resolves as upstream does: default
+`~/.paseo`, a leading `~/` expands, a relative value resolves against the cwd, and an empty value
+resolves to the cwd (upstream's `??`). Details in G.7.
 
-G.5. Verdicts (`bin/paseo-checkpoint show` and `list`):
-- `resumable-native`: only when the last turn ended cleanly, was observed, the tree still matches,
-  and no interruption came later.
-- `needs-review`: an interrupted turn, and any case that is neither of the other two. `--no-live`
-  also gives this verdict.
-- `do-not-resume`: any cancel outside shutdown (`canceled-outside-shutdown`: Paseo's cancel reason
-  is generic, so a reload interrupt or a provider-side cancel counts as a stop too), or an archive.
+G.5. Verdicts (`bin/paseo-checkpoint show` and `list`). Precedence: do-not-resume beats
+needs-review, which beats resumable-native.
+- `resumable-native`: only when every check passes: the last turn ended cleanly (completed or
+  failed, not during shutdown) and was observed, no interruption came later, no stop code below
+  applies, and the live tree matches the last capture.
+- `do-not-resume` (stop codes):
+  - `archived`: the record's state or `archivedAt` says archived;
+  - `paseo-archived`: Paseo's own agent record has `archivedAt` set;
+  - `canceled-outside-shutdown`: the last turn was canceled outside shutdown and nothing interrupted
+    it later. Paseo's cancel reason is generic, so a user's stop, a reload interrupt or a
+    provider-side cancel all count.
+- `needs-review` (reason codes, any one suffices):
+  - `other-host`: machine id differs (hostname only as fallback);
+  - `other-server`: the record's server differs from the server directory it sits in, or from the
+    server id read from `PASEO_SERVER_ID` or `<PASEO_HOME>/server-id`;
+  - `paseo-record-newer`: Paseo's agent record `updatedAt` is more than 2 s after the record's own
+    timestamp;
+  - `no-live-evidence`, `no-record`, `no-turns`, `no-persistence-handle`;
+  - `interrupted:<evidence>` or `interrupted:unrecorded`, `tools-unobserved` (tool calls are not
+    captured in v1), `live-turn-active`, `turn-outcome-unknown`, `turn-ended-during-shutdown`,
+    `state-unknown`;
+  - `git-evidence-missing` (also set with info `git-evidence-truncated` or
+    `git-latest-predates-turn-end`), `head-diverged`, `dirty-tree-changed`, `untracked-changed`;
+  - `recovery-scheduled-elsewhere`;
+  - load problems `corrupt-fell-back-to-prev`, `corrupt-no-valid-generation`, `unknown-schema`,
+    and `missing-identity:<field>`.
+- Info only, never blocking: `paseo-server-id-unavailable`, `paseo-record-unavailable`,
+  `boot-id-changed`, `prior-interruptions:<n>`, `generation:<n>`, `record-age:<s>`, `load:<current|prev>`.
+- `--no-live` skips live git, which adds `git-evidence-missing`, so the verdict is `needs-review`.
+  A do-not-resume condition still wins over it, so `--no-live` never turns a stop into a review.
+- Residual, D1 to confirm: hooks are best-effort. An event missed while the plugin was down (an
+  archive, a new turn, a stop) is caught only through Paseo's record (`updatedAt`), so the Paseo
+  store check is the backstop. `paseo-record-newer` can also give a false `needs-review` on a mode,
+  title or permission change, which bumps `updatedAt` with no turn.
 
 G.6. Shutdown detection: `$PASEO_HOME/local-credential` is present while the daemon runs and absent
 once it shuts down. A turn cancelled while it is absent is recorded as `canceled-during-shutdown`
@@ -268,8 +305,14 @@ G.7. CLI, read only:
   and evidence for one agent.
 - `--no-live` skips live git against the record's cwd, so the verdict then needs review.
 - Exit codes (show): 0 resumable-native, 1 needs-review, 2 do-not-resume, 3 not found, 64 usage
-  error. Exit codes (list): 0 ok, 64 usage error.
-- Environment: `ADE_STATE_ROOT` / `XDG_STATE_HOME` (state base), `PASEO_HOME` (default `~/.paseo`).
+  error. Exit codes (list): 0 ok, 64 usage error. Both: 70 is an unexpected error (the CLI's catch-all),
+  or the `bin/paseo-checkpoint` wrapper cannot run (node missing or below 22.18, `cli.ts` not found,
+  symlink loop). `--help` does not list 70.
+- Paseo's store, read only: `<PASEO_HOME>/agents/*/<id>.json` (one directory level, plus the legacy
+  `<PASEO_HOME>/agents/<id>.json`) and the server id from `PASEO_SERVER_ID`, else `<PASEO_HOME>/server-id`.
+  It feeds the `paseo-archived`, `paseo-record-newer` and `other-server` checks in G.5.
+- Environment: `ADE_STATE_ROOT` / `XDG_STATE_HOME` (state base), `PASEO_HOME` (default `~/.paseo`;
+  resolved as in G.4), `PASEO_SERVER_ID`.
 
 G.8. Status (2026-11-04): not installed on any daemon. Installing a live plugin waits for the
 operator's yes (AGENTS.md order 11). Tests: `bin/pytest -q tests/test_ade_recovery_plugin.py`.

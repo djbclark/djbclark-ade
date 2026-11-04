@@ -1,7 +1,7 @@
 ### Added
 
 - Added `plugins/ade-recovery` (2026-11-04), a passive Paseo plugin that records recovery evidence for interrupted agents: identity, a sha256 of the native handle, the last 20 turns' outcome codes, read-only git evidence (head, base, tracked and untracked fingerprints) and interruption history, under `<state base>/ade/<serverId>/ade-recovery/recovery/v1/`. It registers five notification hooks only and never sends, reloads, archives, creates or interrupts an agent (issue 278, [docs/checkpoint.md](docs/checkpoint.md) section G). (#278)
-- Added `bin/paseo-checkpoint` (2026-11-04), a read-only `list` and `show` of those records with the verdicts `resumable-native`, `needs-review` and `do-not-resume` and their exit codes (issue 278). (#278)
+- Added `bin/paseo-checkpoint` (2026-11-04), a read-only `list` and `show` of those records with the verdicts `resumable-native`, `needs-review` and `do-not-resume` and their exit codes, cross-checked read-only against Paseo's own agent records and server id (issue 278). (#278)
 
 ### Changed
 
