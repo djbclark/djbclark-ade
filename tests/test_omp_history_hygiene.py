@@ -225,3 +225,23 @@ def test_the_legacy_filename_keyed_row_is_retired_not_duplicated(home):
     assert list(db.execute("SELECT key, sid FROM files")) == [(f"omp:{q.resolve()}", "id-q")]
     assert db.execute("SELECT count(*) FROM msgs WHERE key='omp:daily'").fetchone() == (0,)
     assert sh.update(db, [omp], {"omp"}) == {"omp": (1, 0)}
+
+
+def test_a_lease_on_an_id_held_by_two_stores_is_uncertain_for_both_copies(home):
+    """`omp session lease` is keyed by session id: with the default store and a profile both holding id `dup-id`, one running omp holds the
+    lease and either file could be the one, so both are LIVE? with their resume hints; a unique id keeps the exact LIVE."""
+    session(home / f".omp/agent/sessions/-src-a/{STAMP}_dup-id.jsonl", "dup-id")
+    session(home / f".omp/profiles/company/agent/sessions/-src-a/{STAMP}_dup-id.jsonl", "dup-id")
+    session(home / f".omp/agent/sessions/-src-b/{STAMP}_solo-id.jsonl", "solo-id")
+    bin_dir = fake_omp(home, 'echo \'{"held":["dup-id","solo-id"],"unknown":[]}\'\n')
+    env = {k: v for k, v in os.environ.items() if k not in ("PI_CODING_AGENT_DIR", "PI_CODING_AGENT_SESSION_DIR", "CODEX_HOME", "CLAUDE_CONFIG_DIR")}
+    env.update(HOME=str(home), SESSION_INDEX_DIR=str(home / "idx"), PATH=f"{bin_dir}:/usr/bin:/bin")
+    done = subprocess.run([sys.executable, "-I", str(SF / "session-history.py"), "--json", "--agent", "omp", "--", "okapi"],
+                          env=env, capture_output=True, text=True, check=False, timeout=120)
+    assert done.returncode == 0, done.stderr
+    rows = json.loads(done.stdout)
+    dups = [r for r in rows if r["sessionId"] == "dup-id"]
+    assert len(dups) == 2
+    assert all((r["state"], r["live"]) == ("LIVE?", False) and r["resume"] for r in dups)
+    (solo,) = [r for r in rows if r["sessionId"] == "solo-id"]
+    assert (solo["state"], solo["live"]) == ("LIVE", True)

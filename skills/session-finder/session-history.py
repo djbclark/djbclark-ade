@@ -393,6 +393,12 @@ def _main() -> int:
                 leased[agent], unsure[agent] = (set(x) for x in probe(sids))
             except Exception:
                 leased[agent], unsure[agent] = set(), set(sids)
+            # a probe answers per native id: with that id in several indexed files (omp: the default store and a profile) it cannot say
+            # which copy runs, so none is exactly live (LIVE?, resume kept)
+            shared = {x for x in leased[agent]
+                      if db.execute("SELECT count(*) FROM files WHERE agent=? AND sid=?", (agent, x)).fetchone()[0] > 1}
+            leased[agent] -= shared
+            unsure[agent] |= shared
     out = []
     sys.path.insert(0, str(HERE))
     from nativeid import history_identity
