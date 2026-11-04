@@ -25,7 +25,7 @@ Checks (finding `check` ids):
                         case folded) that appears in 2 or more distinct real files: one copy
                         should link to the other. One finding per duplicated text, at the first
                         file; `detail` names the other files and lines.
-  retired-term   warn   a line naming a retired tool (herdr, orca, tmux, superset, paradev,
+  retired-term   warn   a line naming a D7 sweep term (a tool retired or being retired from docs; some, like relay.py, acp-run and cow pastures, are still live) (herdr, orca, tmux, superset, paradev,
                         tuicommander, tuios, cow pasture, relay.py, acp-run, acp-dispatch):
                         case-insensitive, word-bounded (`orchestration` and `orcas` do not hit);
                         the names `herdr4paseo` and `paseo4herdr` are exempt. One finding per line.
@@ -215,7 +215,7 @@ class Linter:
                     found.append(t)
             if found:
                 self.add("retired-term", "warn", path, i,
-                         "names retired tool(s): %s" % ", ".join(found), ln)
+                         "names D7 sweep term(s): %s" % ", ".join(found), ln)
         return cands
 
     def lint_duplicates(self, per_file):
@@ -274,7 +274,7 @@ def run(argv):
     ap = argparse.ArgumentParser(
         prog=TOOL,
         description="Read-only lint for agent instruction files: directory trees, text "
-                    "duplicated across files, retired tool names, headings that restate a skill.",
+                    "duplicated across files, D7 sweep terms, headings that restate a skill.",
         epilog="Exit status: 0 no errors (warnings still printed), 1 errors (or any warning "
                "with --strict), 2 usage or internal error (class name only).")
     ap.add_argument("files", nargs="*", metavar="FILE",

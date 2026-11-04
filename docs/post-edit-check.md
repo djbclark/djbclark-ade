@@ -7,9 +7,9 @@ fast, narrow syntax check on that file and says nothing unless something is brok
 
 | File | Check |
 |---|---|
-| `.py`, or a python shebang | `ruff check --isolated --no-cache --select E9,F63,F7,F82 --output-format concise` if ruff is on PATH, else an in-memory `compile()` (no `.pyc`) |
+| `.py`, or a python shebang | `ruff check --isolated --no-cache --select E9,F63,F7,F82 --output-format concise` if ruff is on PATH, else an in-memory `compile()` (no `.pyc`). The `compile()` fallback reports only when the python running the hook is 3.10 or newer (macOS `/usr/bin/python3` is 3.9 and could false-flag newer syntax such as `match`); on older ones it is skipped |
 | `.sh`, `.bash`, or an sh/bash shebang | `bash -n` |
-| `.json` | `jq empty` if jq is on PATH, else `json.load` |
+| `.json` | `jq empty` if jq is on PATH, else `json.load`. JSONC-capable files are skipped (comments and trailing commas are valid there): `*.jsonc`, `tsconfig*.json`, `jsconfig*.json`, anything under a `.vscode/` directory, `devcontainer.json`, `.devcontainer.json` |
 | `.toml` | `tomllib` (skipped on Python older than 3.11) |
 | `*.tmpl`, other types, missing or deleted files, files over 2 MB | skipped |
 

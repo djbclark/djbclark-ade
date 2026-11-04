@@ -14,7 +14,7 @@ usage: ade-retro --since YYYY-MM-DD [--until YYYY-MM-DD] [--repo OWNER/NAME] [--
 Sources, all read-only (this tool writes nothing anywhere):
   * merged PRs: REST search, `gh api -X GET search/issues -f q="repo:R is:pr is:merged merged:SINCE..UNTIL" --paginate`
     (no GraphQL: `gh pr list` returns 403 in cloud sessions; no headRefName; search caps at 1000 results, noted);
-  * changelog entries whose trailing `(#N)` is one of those PRs, from CHANGELOG.md and from the changelog.d/*.md
+  * changelog entries whose trailing `(#N)` (or `(DATE, #N)`) is one of those PRs, from CHANGELOG.md and from the changelog.d/*.md
     fragments at HEAD (fragment parser loaded from bin/changelog-fold);
   * when gh fails: the fragments added to git in the window (`git log --diff-filter=A -- changelog.d/`, filtered by
     committer date), each read
@@ -42,7 +42,15 @@ from pathlib import Path
 EXIT_OK, EXIT_USAGE, EXIT_PARTIAL = 0, 2, 3
 TIMEOUT = 60
 HERE = Path(__file__).resolve().parent
-PR_END = re.compile(r"\(#(\d+)\)\.?$")
+PR_END = re.compile(r"\(([^()]*)\)\.?$")  # the final parenthesised group, e.g. (#31) or (2026-10-23, #31).
+PR_NUM = re.compile(r"#(\d+)")
+
+
+def entry_pr(text):
+    """PR number from the last #N inside the final parenthesised group at the end of an entry, else None."""
+    m = PR_END.search(text)
+    nums = PR_NUM.findall(m.group(1)) if m else []
+    return int(nums[-1]) if nums else None
 HANDOFF_DATE = re.compile(r"_(\d{4}-\d{2}-\d{2})_")
 SECTION_ORDER = ("Added", "Changed", "Deprecated", "Removed", "Fixed", "Security")
 
@@ -113,8 +121,7 @@ def collect(sections, source, wanted, out):
     for heading, entries in sections.items():
         for lines in entries:
             text = entry_body(lines)
-            m = PR_END.search(text)
-            pr = int(m.group(1)) if m else None
+            pr = entry_pr(text)
             if wanted is None or pr in wanted:
                 out.append({"section": heading, "text": text, "pr": pr, "source": source})
 

@@ -122,6 +122,7 @@ def test_retired_term_is_a_word_bounded_warning(tmp_path):
     for t in ("relay.py", "acp-run", "cow pasture", "tmux"):
         assert t in got[4]
     assert all(f["severity"] == "warn" for f in checks(d, "retired-term"))
+    assert all("D7 sweep term" in f["detail"] and "retired" not in f["detail"] for f in checks(d, "retired-term"))
 
 
 def test_strict_makes_warnings_fail(tmp_path):

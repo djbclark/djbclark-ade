@@ -90,6 +90,8 @@ def test_missing_and_large_skipped(tmp_path):
 
 
 def test_py_fallback_without_ruff(tmp_path):
+    if sys.version_info < (3, 10):
+        pytest.skip("compile() fallback is skipped on python < 3.10")
     env = stub_env(tmp_path)  # empty PATH: no ruff
     bad = write(tmp_path, "b.py", "def f(:\n")
     r = run([bad], env=env)
@@ -102,6 +104,16 @@ def test_json_fallback_without_jq(tmp_path):
     env = stub_env(tmp_path)
     assert run([write(tmp_path, "b.json", "{")], env=env).returncode == 2
     assert run([write(tmp_path, "g.json", "{}")], env=env).returncode == 0
+
+
+@pytest.mark.parametrize("rel", ["tsconfig.json", "tsconfig.build.json", "jsconfig.json", "a.jsonc",
+                                 ".vscode/settings.json", "devcontainer.json", ".devcontainer.json"])
+@pytest.mark.parametrize("nojq", [False, True])
+def test_jsonc_files_are_skipped(tmp_path, rel, nojq):
+    (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+    f = write(tmp_path, rel, '{\n // c\n "a": {"b": 1,},\n}\n')
+    r = run([f], env=stub_env(tmp_path) if nojq else None)
+    assert r.returncode == 0 and r.stderr == ""
 
 
 def test_sh_skipped_without_bash(tmp_path):

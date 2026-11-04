@@ -15,9 +15,14 @@ Usage:
 One check per file, by type:
     .py or python shebang   ruff check --isolated --no-cache --select E9,F63,F7,F82
                             --output-format concise (if ruff is on PATH), else an
-                            in-memory compile() (no .pyc is written)
+                            in-memory compile() (no .pyc is written; the compile() fallback
+                            reports only when the running python is >= 3.10, older ones can
+                            false-flag newer syntax)
     .sh/.bash or sh/bash    bash -n
-    .json                   jq empty (if jq is on PATH), else json.load
+    .json                   jq empty (if jq is on PATH), else json.load; JSONC-capable files
+                            (*.jsonc, tsconfig*.json, jsconfig*.json, anything under .vscode/,
+                            devcontainer.json, .devcontainer.json) are skipped: comments and
+                            trailing commas are valid there
     .toml                   tomllib (skipped where tomllib is missing, Python < 3.11)
     *.tmpl, anything else, a missing or deleted file, a file over 2 MB: skipped
 
@@ -88,6 +93,15 @@ def first_line(path):
         return ""
 
 
+def is_jsonc(path):
+    """JSON that tools read as JSONC (comments, trailing commas): never flagged."""
+    norm = path.replace("\\", "/").lower()
+    base = norm.rsplit("/", 1)[-1]
+    return (base.endswith(".jsonc") or base.startswith(("tsconfig", "jsconfig"))
+            or base in ("devcontainer.json", ".devcontainer.json")
+            or ".vscode" in norm.split("/")[:-1])
+
+
 def kind_of(path):
     low = path.lower()
     if low.endswith(".tmpl"):
@@ -97,7 +111,7 @@ def kind_of(path):
     if low.endswith((".sh", ".bash")):
         return "sh"
     if low.endswith(".json"):
-        return "json"
+        return None if is_jsonc(path) else "json"
     if low.endswith(".toml"):
         return "toml"
     line = first_line(path)
@@ -117,6 +131,8 @@ def check_py(path, budget):
             return [l for l in out.splitlines() if l.strip()]
         if rc == 0 or rc is not None:
             return []
+    if sys.version_info < (3, 10):
+        return []  # this python may not parse newer syntax (match, etc.): do not guess
     try:
         with open(path, "rb") as f:
             src = f.read()

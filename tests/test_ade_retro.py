@@ -202,6 +202,22 @@ def test_until_defaults_to_today_and_repo_flag_wins(world) -> None:
     assert "q=repo:other/thing is:pr is:merged merged:2026-11-01..%s" % rep["until"] in world.calls()[0]
 
 
+@pytest.mark.parametrize("text,pr", [
+    ("Did a thing. (#31)", 31), ("Did a thing. (#31).", 31),
+    ("Did a thing. (2026-10-23, #31).", 31), ("Did a thing (2026-10-23, #31)", 31),
+    ("Mentions #5 and (see #6) mid-text. (2026-10-23, #7, #31).", 31),
+    ("Mentions (#6) early, no trailing PR.", None), ("No parens at all", None),
+    ("Ends in (2026-10-23).", None),
+])
+def test_entry_pr_endings(text, pr) -> None:
+    import importlib.machinery, importlib.util
+    loader = importlib.machinery.SourceFileLoader("ade_retro_mod", str(TOOL))
+    spec = importlib.util.spec_from_loader("ade_retro_mod", loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    assert mod.entry_pr(text) == pr
+
+
 def test_read_only(world) -> None:
     world.scenario(out=search(PRS))
     before = subprocess.run(["git", "-C", str(world.root), "status", "--porcelain"], capture_output=True, text=True).stdout
