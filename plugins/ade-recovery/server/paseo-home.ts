@@ -49,6 +49,20 @@ export interface PaseoAgentRecordEvidence {
   /** The record's `updatedAt` (a required string upstream), else the file mtime when it does not parse. */
   updatedAt: string | null;
   updatedAtSource: "updatedAt" | "mtime";
+  /**
+   * When the agent last DID something: `lastActivityAt`, else `updatedAt`, else the file mtime.
+   * This, not `updatedAt`, is what the unobserved-activity checks compare. Upstream (read
+   * 2026-11-04): STORED_AGENT_SCHEMA (agent/agent-storage.ts:51-52) has `updatedAt: z.string()` and
+   * `lastActivityAt: z.string().optional()`; toStoredAgentRecord (agent/agent-projections.ts:90-91)
+   * sets BOTH from the live agent's updatedAt, so any touch of a loaded agent (a turn, a stop, a
+   * mode change) moves `lastActivityAt`; persistence-hooks.ts:114-118 (resolveStoredAgentUpdatedAt)
+   * says renaming, labelling, restoring from archive, marking unread and clearing attention "all
+   * move `updatedAt` on an unloaded agent without touching `lastActivityAt`" (e.g. session.ts:7862-7878,
+   * the bulk attention clear). Comparing `updatedAt` turned those store-only changes into a
+   * permanent needs-review (adversary round 3, B2).
+   */
+  activityAt: string | null;
+  activitySource: "lastActivityAt" | "updatedAt" | "mtime";
 }
 
 /**
@@ -118,36 +132,57 @@ function readAgentFile(file: string, agentId: string): PaseoAgentRecordEvidence 
   if (typeof r.updatedAt !== "string") return null; // required upstream: the record is skipped without it
   if (r.archivedAt !== undefined && r.archivedAt !== null && typeof r.archivedAt !== "string") return null;
   const archivedAt = typeof r.archivedAt === "string" && r.archivedAt !== "" ? r.archivedAt : null;
-  if (Number.isFinite(Date.parse(r.updatedAt))) {
-    return { archivedAt, updatedAt: r.updatedAt, updatedAtSource: "updatedAt" };
+  const updated: Pick<PaseoAgentRecordEvidence, "updatedAt" | "updatedAtSource"> = Number.isFinite(Date.parse(r.updatedAt))
+    ? { updatedAt: r.updatedAt, updatedAtSource: "updatedAt" }
+    : { updatedAt: st.mtime.toISOString(), updatedAtSource: "mtime" };
+  // lastActivityAt is optional upstream (older records lack it): absent or unparseable falls back.
+  const activity: Pick<PaseoAgentRecordEvidence, "activityAt" | "activitySource"> =
+    typeof r.lastActivityAt === "string" && Number.isFinite(Date.parse(r.lastActivityAt))
+      ? { activityAt: r.lastActivityAt, activitySource: "lastActivityAt" }
+      : { activityAt: updated.updatedAt, activitySource: updated.updatedAtSource };
+  return { archivedAt, ...updated, ...activity };
+}
+
+/**
+ * The project directories under `<home>/agents` (one level, as upstream AgentStorage.scanDisk), or
+ * null when that directory is missing or unreadable. A caller that looks up many agents in one pass
+ * lists them once and hands the result to lookupPaseoAgentRecord (adversary round 3, B5).
+ */
+export function listPaseoAgentDirs(home: string): string[] | null {
+  const base = path.join(home, "agents");
+  try {
+    return fs
+      .readdirSync(base, { withFileTypes: true })
+      .filter((d) => d.isDirectory())
+      .map((d) => d.name);
+  } catch {
+    return null;
   }
-  return { archivedAt, updatedAt: st.mtime.toISOString(), updatedAtSource: "mtime" };
 }
 
 /**
  * Paseo's stored record for `agentId`, read only: `<home>/agents/<project-dir>/<id>.json` (one
  * level, as upstream AgentStorage.scanDisk) and the legacy `<home>/agents/<id>.json`. Several
- * copies: the latest updatedAt wins, and any archived copy marks it archived (fail closed).
+ * copies: the latest activity time wins (fail closed), and any archived copy marks it archived.
+ * `dirs`: a listPaseoAgentDirs result to reuse (null: unreadable); listed here when omitted.
  */
-export function lookupPaseoAgentRecord(home: string, agentId: string): PaseoAgentLookup {
+export function lookupPaseoAgentRecord(
+  home: string,
+  agentId: string,
+  dirs: string[] | null = listPaseoAgentDirs(home),
+): PaseoAgentLookup {
   if (!SAFE_ID.test(agentId)) return { status: "unavailable" };
+  if (dirs === null) return { status: "unavailable" };
   const base = path.join(home, "agents");
-  const files = [path.join(base, `${agentId}.json`)];
-  try {
-    for (const d of fs.readdirSync(base, { withFileTypes: true })) {
-      if (d.isDirectory()) files.push(path.join(base, d.name, `${agentId}.json`));
-    }
-  } catch {
-    return { status: "unavailable" };
-  }
+  const files = [path.join(base, `${agentId}.json`), ...dirs.map((d) => path.join(base, d, `${agentId}.json`))];
   let best: PaseoAgentRecordEvidence | null = null;
   let archivedAt: string | null = null;
   for (const f of files) {
     const e = readAgentFile(f, agentId);
     if (!e) continue;
     if (e.archivedAt && !archivedAt) archivedAt = e.archivedAt;
-    const t = e.updatedAt === null ? Number.NaN : Date.parse(e.updatedAt);
-    const bt = best?.updatedAt ? Date.parse(best.updatedAt) : Number.NaN;
+    const t = e.activityAt === null ? Number.NaN : Date.parse(e.activityAt);
+    const bt = best?.activityAt ? Date.parse(best.activityAt) : Number.NaN;
     if (best === null || (Number.isFinite(t) && (!Number.isFinite(bt) || t > bt))) best = e;
   }
   if (best === null) return { status: "missing" };

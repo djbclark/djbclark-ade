@@ -78,10 +78,13 @@ export interface CaptureDeps {
   /** The resolved $PASEO_HOME, stored in each record so the CLI reads the daemon's store. */
   paseoHome?: string | null;
   /**
-   * Read only: `updatedAt` of Paseo's stored record for the agent (`<PASEO_HOME>/agents/<dir>/<id>.json`),
-   * or null when unavailable. Absent: the init cross-check is skipped.
+   * Read only, called once per init pass: a reader of the activity time of Paseo's stored record
+   * for an agent (`<PASEO_HOME>/agents/<dir>/<id>.json`: `lastActivityAt`, else `updatedAt`; see
+   * paseo-home.ts PaseoAgentRecordEvidence.activityAt), null when unavailable. The factory lets the
+   * reader list the agents directory once for the pass (adversary round 3, B5). Absent: the init
+   * cross-check is skipped.
    */
-  paseoUpdatedAt?(agentId: string): string | null;
+  paseoActivityReader?(): (agentId: string) => string | null;
 }
 
 export interface CaptureTimeouts {
@@ -120,6 +123,7 @@ interface AgentEntry {
 
 interface Buffered {
   seq: number;
+  agentId: string | null;
   paseo: PaseoLike;
   apply(seq: number, paseo: PaseoLike): void;
 }
@@ -220,8 +224,19 @@ export class Capture {
   private lock: { release(): void } | null;
 
   private agents: Map<string, AgentEntry>;
-  /** When an event for each agent was first accepted before init finished (it may bump Paseo's updatedAt). */
+  /**
+   * When an event for each agent was first BUFFERED before init finished (it may bump Paseo's
+   * activity time, and it is applied once init succeeds). Never set for a dropped event, and
+   * cleared when init fails (its buffer is then dropped): a dropped event must not excuse the bump
+   * it caused (adversary round 3, B1).
+   */
   private firstSeen: Map<string, number>;
+  /**
+   * Agents with at least one hook event that was never applied (inert window, init buffer full,
+   * buffer discarded after a failed init). Each gets the sticky unobserved-activity
+   * (detail `events-dropped`) at the next successful init, whatever Paseo's store says.
+   */
+  private droppedFor: Set<string>;
   private foreignNames: Set<string>;
   private lostNames: Set<string>;
   private writes: CoalescingQueue;
@@ -248,6 +263,7 @@ export class Capture {
     this.lock = null;
     this.agents = new Map();
     this.firstSeen = new Map();
+    this.droppedFor = new Set();
     this.foreignNames = new Set();
     this.lostNames = new Set();
     const onError = (key: string, error: unknown): void =>
@@ -348,16 +364,19 @@ export class Capture {
         this.safeApply(apply, seq, paseo);
         return;
       }
-      if (typeof agentId === "string" && agentId !== "" && !this.firstSeen.has(agentId)) {
-        this.firstSeen.set(agentId, this.deps.now());
-      }
+      const id = typeof agentId === "string" && agentId !== "" ? agentId : null;
       if (this.modeValue === "inert") {
-        if (this.deps.now() - this.initFailedAt < this.timeouts.initRetryMs) return;
+        if (this.deps.now() - this.initFailedAt < this.timeouts.initRetryMs) {
+          this.noteDropped(id);
+          return;
+        }
       }
       if (this.buffer.length >= MAX_BUFFERED_EVENTS) {
         this.dropped += 1;
+        this.noteDropped(id);
       } else {
-        this.buffer.push({ seq, paseo, apply });
+        this.buffer.push({ seq, agentId: id, paseo, apply });
+        if (id !== null && !this.firstSeen.has(id)) this.firstSeen.set(id, this.deps.now());
       }
       this.startInit(paseo);
     } catch (error) {
@@ -386,8 +405,12 @@ export class Capture {
         this.buffer = [];
         if (this.modeValue === "active" || this.modeValue === "read-only") {
           for (const b of buffered) this.safeApply(b.apply, b.seq, b.paseo);
-        } else if (buffered.length > 0 || this.dropped > 0) {
-          this.log("dropped events while inert", { count: buffered.length + this.dropped });
+          if (this.modeValue === "active") this.markDropped();
+        } else {
+          for (const b of buffered) this.noteDropped(b.agentId);
+          if (buffered.length > 0 || this.dropped > 0) {
+            this.log("dropped events while inert", { count: buffered.length + this.dropped });
+          }
         }
         if (this.dropped > 0 && this.modeValue === "active") {
           this.log("dropped events beyond the init buffer", { count: this.dropped });
@@ -405,6 +428,8 @@ export class Capture {
     this.lock = null;
     this.modeValue = this.closing ? "closed" : "inert";
     this.initFailedAt = this.deps.now();
+    // The buffer is about to be dropped: its events no longer excuse anything.
+    this.firstSeen.clear();
     this.logOnce(`inert:${reason}`, "inert: recording nothing", { reason });
   }
 
@@ -520,18 +545,28 @@ export class Capture {
       this.scheduleWrite(w.agentId, true);
     }
 
-    // 5. Paseo's own store, for EVERY loaded record: an update after our last generation means
+    // 5. Paseo's own store, for EVERY loaded record: activity after our last generation means
     // something happened while the plugin was not observing (a turn and a stop, an archive). The
     // next generation's writtenAt would hide it from the CLI's paseo-record-newer, so it becomes a
-    // sticky interruption now. An event already waiting for the agent may have caused the bump
-    // itself, so only an update before that event counts for it.
+    // sticky interruption now. An event already buffered for the agent (and so about to be applied)
+    // may have caused the bump itself, so only an update before that event counts for it; a dropped
+    // event excuses nothing (droppedFor marks its agent unconditionally once init succeeds).
     this.crossCheckPaseo(writtenAt);
     this.modeValue = "active";
   }
 
   private crossCheckPaseo(writtenAt: Map<string, string>): void {
-    const read = this.deps.paseoUpdatedAt;
-    if (!read) return;
+    const factory = this.deps.paseoActivityReader;
+    let read: ((agentId: string) => string | null) | null = null;
+    try {
+      read = factory ? factory() : null;
+    } catch (error) {
+      this.log("paseo store read failed", { error: errorName(error) });
+    }
+    if (!read) {
+      this.firstSeen.clear();
+      return;
+    }
     for (const [agentId, w] of writtenAt) {
       const entry = this.agents.get(agentId);
       if (!entry?.body) continue;
@@ -549,6 +584,39 @@ export class Capture {
       }
     }
     this.firstSeen.clear();
+  }
+
+  /** An event for `agentId` was not (and will not be) applied. */
+  private noteDropped(agentId: string | null): void {
+    if (agentId !== null) this.droppedFor.add(agentId);
+  }
+
+  /**
+   * After a successful init (active mode): every agent with a dropped event that has a record gets
+   * the sticky unobserved-activity now; one without a record yet gets it in upsert, when its next
+   * event creates the record.
+   */
+  private markDropped(): void {
+    for (const agentId of [...this.droppedFor]) {
+      const entry = this.agents.get(agentId);
+      if (!entry?.body) continue;
+      this.droppedFor.delete(agentId);
+      if (this.addDroppedInterruption(entry.body)) {
+        this.log("unobserved activity", { source: "events-dropped" });
+        this.scheduleWrite(agentId);
+      }
+    }
+  }
+
+  private addDroppedInterruption(body: RecordBody): boolean {
+    if ((body.interruptions ?? []).some((i) => i?.evidence === "unobserved-activity")) return false;
+    addInterruption(body, {
+      detectedAt: this.iso(),
+      evidence: "unobserved-activity",
+      turnKey: null,
+      detail: "events-dropped",
+    });
+    return true;
   }
 
   // ---------------------------------------------------------------- event application
@@ -745,6 +813,10 @@ export class Capture {
       }
     }
     const body = entry.body;
+    if (this.modeValue === "active" && this.droppedFor.delete(agent.id)) {
+      // An earlier event for this agent was dropped before its record existed.
+      if (this.addDroppedInterruption(body)) this.log("unobserved activity", { source: "events-dropped" });
+    }
     // A turn left in flight by another daemon is an interruption, before identity moves on.
     interruptIfStaleDaemon(body, { daemonInstance: this.daemonInstance, bootId: host.bootId }, at);
     body.schema = SCHEMA;

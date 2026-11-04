@@ -101,8 +101,8 @@ export function judge(load: LoadResult, live: LiveEvidence | null): VerdictResul
     else if (typeof live.paseoServerId === "string" && live.paseoServerId !== r.serverId) add(reasons, "other-server");
     if (live.paseoArchived === true) add(stop, "paseo-archived");
     if (live.paseoRecordMissing === true) add(reasons, "paseo-record-missing");
-    else if (live.paseoArchived === null || live.paseoUpdatedAt === null) info.push("paseo-record-unavailable");
-    const pu = ms(live.paseoUpdatedAt);
+    else if (live.paseoArchived === null || live.paseoActivityAt === null) info.push("paseo-record-unavailable");
+    const pu = ms(live.paseoActivityAt);
     const wa = ms(r.writtenAt);
     if (pu !== null && wa !== null && pu - wa > PASEO_NEWER_TOLERANCE_MS) add(reasons, "paseo-record-newer");
     if (live.host && typeof live.host.bootId === "string" && typeof r.bootId === "string" && live.host.bootId !== r.bootId) {

@@ -281,15 +281,18 @@ needs-review, which beats resumable-native.
   - `other-host`: machine id differs (hostname only as fallback);
   - `other-server`: the record's server differs from the server directory it sits in, or from the
     server id read from `PASEO_SERVER_ID` or `<PASEO_HOME>/server-id`;
-  - `paseo-record-newer`: Paseo's agent record `updatedAt` is more than 2 s after the record's own
-    timestamp (the CLI then also adds `interrupted:unobserved-activity`);
+  - `paseo-record-newer`: Paseo's agent record's activity time (`lastActivityAt`, else `updatedAt`,
+    see the residual below) is more than 2 s after the record's own timestamp (the CLI then also adds
+    `interrupted:unobserved-activity`);
   - `paseo-record-missing`: `<PASEO_HOME>/agents` is readable but holds no valid `<id>.json` for the
     agent (upstream `remove()` unlinks it; a symlinked file, or one failing upstream's schema, is
     skipped there too, so it counts as absent);
-  - `interrupted:unobserved-activity`: at init the plugin found Paseo's `updatedAt` more than 2 s
-    after the record's last generation, for any loaded record (not only one left in flight). It is
-    sticky: it blocks whatever the turn order, a later observed turn never clears it, and it does not
-    excuse a `canceled-outside-shutdown`;
+  - `interrupted:unobserved-activity`: at init the plugin found Paseo's activity time more than 2 s
+    after the record's last generation, for any loaded record (not only one left in flight); or a
+    hook event for the agent was dropped (detail `events-dropped`: it arrived in the 30 s after a
+    failed init, beyond the 500-event init buffer, or in a buffer a failed init discarded), which
+    marks the agent at the next successful init whatever Paseo's store says. It is sticky: it
+    blocks whatever the turn order, a later observed turn or generation never clears it, and it does not excuse a `canceled-outside-shutdown`;
   - `no-live-evidence`, `no-record`, `no-turns`, `no-persistence-handle`;
   - `interrupted:<evidence>` or `interrupted:unrecorded`, `tools-unobserved` (tool calls are not
     captured in v1), `live-turn-active`, `turn-outcome-unknown`, `turn-ended-during-shutdown`,
@@ -305,13 +308,24 @@ needs-review, which beats resumable-native.
 - `--no-live` skips live git, which adds `git-evidence-missing`, so the verdict is `needs-review`.
   A do-not-resume condition still wins over it, so `--no-live` never turns a stop into a review.
 - Residual, D1 to confirm: hooks are best-effort. An event missed while the plugin was down (an
-  archive, a new turn, a stop) is caught only through Paseo's record (`updatedAt`), so the Paseo
-  store check is the backstop: the plugin's init check (`unobserved-activity`, which the next
-  generation's `writtenAt` cannot hide) and the CLI's (`paseo-record-newer`). Limits:
-  - `updatedAt` is one timestamp. At init, an update counts only if it is older than the plugin's
-    first event for that agent (that event may have bumped it), so activity that the waking event's
-    own bump overwrites is not seen;
-  - a mode, title, label or permission change bumps `updatedAt` with no turn: a false `needs-review`;
+  archive, a new turn, a stop) is caught only through Paseo's record, so the Paseo store check is
+  the backstop: the plugin's init check (`unobserved-activity`, which the next generation's
+  `writtenAt` cannot hide) and the CLI's (`paseo-record-newer`). Which field (2026-11-04, adversary
+  round 3): both compare `lastActivityAt`, falling back to `updatedAt` when it is absent (records
+  older Paseo wrote) or does not parse, then to the file mtime. Upstream's `toStoredAgentRecord`
+  (`agent-projections.ts:90-91`) sets both fields from a loaded agent's `updatedAt`, so a turn or
+  a stop moves `lastActivityAt`; renaming, labelling, unarchiving, marking unread and clearing
+  attention move only `updatedAt` on an unloaded agent (`persistence-hooks.ts:114-118`,
+  `session.ts:7862-7878`), and no longer read as activity. Limits:
+  - the time is one timestamp. At init, an update counts only if it is older than the plugin's
+    first BUFFERED event for that agent (that event, applied once init succeeds, may have bumped
+    it), so activity that the waking event's own bump overwrites is not seen. A dropped event
+    excuses nothing: it marks its agent instead;
+  - still a false, permanent `needs-review` (the interruption is sticky): any change Paseo
+    persists for a LOADED agent while the plugin is not observing, with no turn (a mode or
+    permission change, say: `toStoredAgentRecord` writes `lastActivityAt` with every live
+    persist), a store-only change to a record without `lastActivityAt`, and an event the plugin
+    dropped even when it changed nothing;
   - a bump whose hook is still in flight when init reads the store also reads as unobserved (fail
     closed).
 - Covered since round 2 (N2): edits inside a submodule's working tree. Submodule working-tree state is
@@ -338,7 +352,8 @@ G.7. CLI, read only:
   symlink loop). `--help` lists 70 too.
 - Paseo's store, read only: `<PASEO_HOME>/agents/*/<id>.json` (one directory level, plus the legacy
   `<PASEO_HOME>/agents/<id>.json`; regular files only, and a record needs string `id` and `updatedAt`,
-  as upstream's schema does) and the server id from `PASEO_SERVER_ID`, else `<PASEO_HOME>/server-id`.
+  as upstream's schema does; `lastActivityAt` is optional, as upstream; `show` prints both times and
+  which one it compared, `activitySource`) and the server id from `PASEO_SERVER_ID`, else `<PASEO_HOME>/server-id`.
   It feeds the `paseo-archived`, `paseo-record-newer`, `paseo-record-missing` and `other-server`
   checks in G.5. `PASEO_HOME` is the record's `paseoHome` when that is an absolute path (`show`
   prints which, `paseoHomeSource`), else the environment's. session-recovery's `state.json` is read

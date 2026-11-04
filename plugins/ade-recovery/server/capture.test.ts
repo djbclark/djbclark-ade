@@ -10,7 +10,11 @@ import type {
   RecoveryRecord,
   WriterInfo,
 } from "./types.ts";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { Capture, MAX_BUFFERED_EVENTS, type CaptureDeps, type LockResult, type RecordBody } from "./capture.ts";
+import { judge } from "./verdict.ts";
 
 const DAEMON = { pid: 4242, start: "777" };
 const BOOT = "boot-1";
@@ -820,7 +824,7 @@ function idleOnDisk(id: string): Map<string, LoadResult> {
 test("init: an idle record that Paseo updated while the plugin was down gets a sticky unobserved-activity", async () => {
   const h = harness({ disk: idleOnDisk("agent-1") });
   const reads: string[] = [];
-  h.deps.paseoUpdatedAt = (id) => {
+  h.deps.paseoActivityReader = () => (id) => {
     reads.push(id);
     return id === "agent-1" ? "2026-11-04T11:30:00.000Z" : null;
   };
@@ -843,27 +847,27 @@ test("init: an idle record that Paseo updated while the plugin was down gets a s
 test("init: Paseo's bump from the event that woke the plugin, or one within tolerance, is not unobserved", async () => {
   // The agent's own event arrives at 12:00 and Paseo stamped updatedAt then.
   const h1 = harness({ disk: idleOnDisk("agent-1") });
-  h1.deps.paseoUpdatedAt = () => "2026-11-04T12:00:00.500Z";
+  h1.deps.paseoActivityReader = () => () => "2026-11-04T12:00:00.500Z";
   h1.capture.onTurnBefore(agent("agent-1"), "t1", fakePaseo());
   await h1.capture.idle();
   assert.deepEqual(h1.lastWrite("agent-1").interruptions, []);
   // An update before that event still counts.
   const h2 = harness({ disk: idleOnDisk("agent-1") });
-  h2.deps.paseoUpdatedAt = () => "2026-11-04T11:30:00.000Z";
+  h2.deps.paseoActivityReader = () => () => "2026-11-04T11:30:00.000Z";
   h2.capture.onTurnBefore(agent("agent-1"), "t1", fakePaseo());
   await h2.capture.idle();
   assert.deepEqual(h2.lastWrite("agent-1").interruptions!.map((i) => i.evidence), ["unobserved-activity"]);
   // Within the 2 s tolerance of writtenAt, or unavailable: nothing.
   for (const v of ["2026-11-04T11:00:01.900Z", null, "not-a-date"]) {
     const h = harness({ disk: idleOnDisk("agent-1") });
-    h.deps.paseoUpdatedAt = () => v;
+    h.deps.paseoActivityReader = () => () => v;
     h.capture.onCreate(agent("other"), fakePaseo());
     await h.capture.idle();
     assert.equal(h.writes.some((w) => w.agentId === "agent-1"), false, `updatedAt ${v}: nothing written`);
   }
   // A reader that throws is logged, never fatal.
   const h3 = harness({ disk: idleOnDisk("agent-1") });
-  h3.deps.paseoUpdatedAt = () => {
+  h3.deps.paseoActivityReader = () => () => {
     throw new Error("EACCES /secret/path");
   };
   h3.capture.onCreate(agent("other"), fakePaseo());
@@ -878,4 +882,152 @@ test("records carry the plugin's resolved paseoHome (N3b)", async () => {
   h.capture.onCreate(agent(), fakePaseo());
   await h.capture.idle();
   assert.equal(h.lastWrite("agent-1").paseoHome, "/home/u/.paseo");
+});
+
+test("init: the Paseo reader is built once per init pass; a factory that throws is logged, never fatal (B5)", async () => {
+  const disk = idleOnDisk("agent-1");
+  for (const [k, v] of idleOnDisk("agent-2")) disk.set(k, v);
+  const h = harness({ disk });
+  let passes = 0;
+  const reads: string[] = [];
+  h.deps.paseoActivityReader = () => {
+    passes += 1;
+    return (id) => {
+      reads.push(id);
+      return null;
+    };
+  };
+  h.capture.onCreate(agent("other"), fakePaseo());
+  await h.capture.idle();
+  assert.equal(passes, 1, "one reader (one agents-dir listing) for the whole pass");
+  assert.deepEqual(reads.sort(), ["agent-1", "agent-2"]);
+  const h2 = harness({ disk: idleOnDisk("agent-1") });
+  h2.deps.paseoActivityReader = () => {
+    throw new Error("EACCES /secret/path");
+  };
+  h2.capture.onCreate(agent("other"), fakePaseo());
+  await h2.capture.idle();
+  assert.equal(h2.capture.mode, "active");
+  assert.ok(h2.logs.some((l) => l.startsWith("paseo store read failed") && !l.includes("/secret")));
+});
+
+// Adversary round 3, B1: an event the plugin drops must not excuse the Paseo bump it caused.
+const FIXTURE_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "verdicts");
+
+/** The verdict for a clean, closed, otherwise resumable record carrying `interruptions`. */
+function verdictWith(interruptions: RecordBody["interruptions"]): string {
+  const fx = JSON.parse(fs.readFileSync(path.join(FIXTURE_DIR, "01-clean-completed-turn.json"), "utf8"));
+  const r = fx.load.record;
+  r.state = "closed";
+  r.closedAt = r.writtenAt;
+  r.interruptions = structuredClone(interruptions ?? []);
+  fx.live.paseoArchived = false;
+  // Paseo's bump from the dropped cancel predates the close generation's writtenAt.
+  fx.live.paseoActivityAt = new Date(Date.parse(r.writtenAt) - 60_000).toISOString();
+  return judge(fx.load, fx.live).verdict;
+}
+
+test("B1 regression: a turn dropped in the inert window, then a clean init and a shutdown close, ends non-resumable", async () => {
+  assert.equal(verdictWith([]), "resumable-native", "the shape the dropped events would otherwise leave");
+  let fail = true;
+  const h = harness({ disk: idleOnDisk("agent-1"), timeouts: { initRetryMs: 30_000 } });
+  // Paseo's store moved at 12:00:10, from the stop the plugin dropped.
+  h.deps.paseoActivityReader = () => (id) => (id === "agent-1" ? "2026-11-04T12:00:10.000Z" : null);
+  const p = fakePaseo({
+    hostsList: async () => {
+      if (fail) throw new Error("boom");
+      return { self: { serverId: SERVER } };
+    },
+  });
+  h.capture.onCreate(agent("other"), p); // first init fails transiently: inert
+  await h.capture.idle();
+  assert.equal(h.capture.mode, "inert");
+  fail = false;
+  h.advance(1000);
+  h.capture.onTurnBefore(agent("agent-1"), "t1", p); // dropped: inside the 30 s retry window
+  h.advance(9000);
+  h.capture.onTurnAfter(agent("agent-1"), "t1", { kind: "canceled", reason: "x" } as never, p); // dropped
+  h.advance(60_000);
+  h.capture.onCreate(agent("other2"), p); // the retry init succeeds
+  await h.capture.idle();
+  assert.equal(h.capture.mode, "active");
+  const marked = h.lastWrite("agent-1").interruptions!;
+  assert.ok(
+    marked.some((i) => i.evidence === "unobserved-activity"),
+    `the dropped events give a sticky unobserved-activity: ${JSON.stringify(marked)}`,
+  );
+  // Daemon shutdown's close.after writes a newer generation; the interruption stays.
+  h.setShutdown(true);
+  h.capture.onClose(agent("agent-1"), p);
+  await h.capture.idle();
+  const last = h.lastWrite("agent-1");
+  assert.equal(last.state, "closed");
+  assert.ok(last.interruptions!.some((i) => i.evidence === "unobserved-activity"));
+  assert.notEqual(verdictWith(last.interruptions), "resumable-native");
+});
+
+test("B1: dropped events mark their agent unconditionally, whatever Paseo's store says", async () => {
+  // (a) inert window, no Paseo reader at all.
+  const h = harness({ disk: idleOnDisk("agent-1") });
+  let fail = true;
+  const p = fakePaseo({
+    hostsList: async () => {
+      if (fail) throw new Error("boom");
+      return { self: { serverId: SERVER } };
+    },
+  });
+  h.capture.onCreate(agent("other"), p);
+  await h.capture.idle();
+  fail = false;
+  h.capture.onTurnBefore(agent("agent-1"), "t1", p); // dropped inside the 1 s window
+  h.advance(2000);
+  h.capture.onCreate(agent("other2"), p);
+  await h.capture.idle();
+  const ints = h.lastWrite("agent-1").interruptions!;
+  assert.deepEqual(ints.map((i) => [i.evidence, i.detail]), [["unobserved-activity", "events-dropped"]]);
+  assert.ok(h.logs.some((l) => l.includes('"source":"events-dropped"')));
+});
+
+test("B1: a failed init drops its buffer; those agents are marked at the next successful init and firstSeen is cleared", async () => {
+  let fail = true;
+  const h = harness({ disk: idleOnDisk("agent-1") });
+  // The store's bump is from agent-1's own (buffered, then discarded) event: no excuse once dropped.
+  h.deps.paseoActivityReader = () => () => "2026-11-04T12:00:00.500Z";
+  const p = fakePaseo({
+    hostsList: async () => {
+      if (fail) throw new Error("boom");
+      return { self: { serverId: SERVER } };
+    },
+  });
+  h.capture.onTurnBefore(agent("agent-1"), "t1", p); // buffered, then discarded by the failed init
+  h.capture.onCreate(agent("new-1"), p); // no record yet: marked when its next event creates one
+  await h.capture.idle();
+  assert.equal(h.capture.mode, "inert");
+  fail = false;
+  h.advance(2000);
+  h.capture.onCreate(agent("other"), p);
+  await h.capture.idle();
+  assert.deepEqual(h.lastWrite("agent-1").interruptions!.map((i) => i.evidence), ["unobserved-activity"]);
+  assert.equal(h.writes.some((w) => w.agentId === "new-1"), false, "no record and no event yet");
+  h.capture.onTurnBefore(agent("new-1"), "t9", p);
+  await h.capture.idle();
+  assert.deepEqual(h.lastWrite("new-1").interruptions!.map((i) => [i.evidence, i.detail]), [["unobserved-activity", "events-dropped"]]);
+});
+
+test("B1: an event dropped beyond the init buffer marks its agent; buffered events still excuse their own bump", async () => {
+  let resolveHosts!: (v: unknown) => void;
+  const disk = idleOnDisk("agent-1");
+  for (const [k, v] of idleOnDisk("agent-2")) disk.set(k, v);
+  const h = harness({ disk });
+  // agent-2's bump is from its own buffered event; agent-1's store is unreadable, so only the drop marks it.
+  h.deps.paseoActivityReader = () => (id) => (id === "agent-2" ? "2026-11-04T12:00:00.500Z" : null);
+  const p = fakePaseo({ hostsList: () => new Promise((r) => (resolveHosts = r)) });
+  h.capture.onTurnBefore(agent("agent-2"), "t1", p); // buffered and applied: excuses its own bump
+  for (let i = 0; i < MAX_BUFFERED_EVENTS - 1; i += 1) h.capture.onCreate(agent(`a${i}`), p);
+  h.capture.onTurnBefore(agent("agent-1"), "t1", p); // beyond the buffer: dropped
+  await new Promise((r) => setImmediate(r));
+  resolveHosts({ self: { serverId: SERVER } });
+  await h.capture.idle();
+  assert.deepEqual(h.lastWrite("agent-1").interruptions!.map((i) => [i.evidence, i.detail]), [["unobserved-activity", "events-dropped"]]);
+  assert.deepEqual(h.lastWrite("agent-2").interruptions, []);
 });

@@ -71,19 +71,20 @@ export function addInterruption(
 
 /**
  * Paseo's stored agent record says the agent changed after `writtenAt` (beyond `toleranceMs`) and
- * before `before` (the time the plugin first saw an event for it, which may itself have bumped
- * `updatedAt`): append the sticky `unobserved-activity` interruption, once. Returns true when added.
+ * before `before` (the time the plugin first buffered an event for it, which may itself have bumped
+ * it). The time compared is Paseo's activity time (`lastActivityAt`, else `updatedAt`; see
+ * paseo-home.ts). Appends the sticky `unobserved-activity` interruption, once; true when added.
  */
 export function noteUnobservedActivity(
   record: RecordBody,
   writtenAt: string | null | undefined,
-  paseoUpdatedAt: string | null | undefined,
+  paseoActivityAt: string | null | undefined,
   before: number,
   toleranceMs: number,
   at: string,
 ): boolean {
   const w = typeof writtenAt === "string" ? Date.parse(writtenAt) : Number.NaN;
-  const u = typeof paseoUpdatedAt === "string" ? Date.parse(paseoUpdatedAt) : Number.NaN;
+  const u = typeof paseoActivityAt === "string" ? Date.parse(paseoActivityAt) : Number.NaN;
   if (!Number.isFinite(w) || !Number.isFinite(u)) return false;
   if (u - w <= toleranceMs) return false;
   if (Number.isFinite(before) && u >= before - toleranceMs) return false;
