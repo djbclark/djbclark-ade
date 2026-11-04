@@ -359,7 +359,7 @@ def cmd_run(a, write: bool) -> int:
                 errs.append(str(e))
     if a.json:
         print(json.dumps({"applied": write, "actions": acts, "done": len(done), "errors": errs, "stats": stats}, indent=2))
-    elif not (a.quiet and not done and not errs):
+    elif not (a.quiet and not (done if write else acts) and not errs):
         verb = "changed" if write else "would change"
         for act in acts:
             if write:

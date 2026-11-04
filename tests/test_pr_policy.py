@@ -208,6 +208,11 @@ def test_plan_is_read_only_and_lists_every_change(env):
     assert not (env.tmp / "state" / "changes.jsonl").exists()
 
 
+def test_quiet_plan_still_lists_pending_changes(env):
+    p = env("plan", "--quiet")
+    assert p.returncode == 0 and "would change 6" in p.stdout and "github  lock   djbclark/a" in p.stdout
+
+
 def test_apply_without_yes_is_plan(env):
     p = env("apply")
     assert p.returncode == 0 and "would change 6" in p.stdout

@@ -59,6 +59,8 @@ the next run would report a change it did not make.
 
 1. Tokens are the sudo-secretspec names in the config (`GITHUB_TOKEN`, djbclark's `repo`-scope token;
    `DJBCLARK_FORGEJO_MIT_EDU_TOKEN`), read with `sudo-secretspec get` once per run, held in memory, never printed or logged.
+   `get`, not `run`, is deliberate (AGENTS.md review rule 3): `run` would hand every declared secret to the job and to
+   each child it starts, `hermes-ping` included.
 2. A token goes only to its own API origin, scheme and host both, over https (plain http is allowed for 127.0.0.1
    only, for the tests); redirects are not followed, and a pagination link to another origin is refused.
 3. State in `~/.local/state/pr-policy/` (`PR_POLICY_STATE_DIR`): `changes.jsonl`, one line per change made (before,
