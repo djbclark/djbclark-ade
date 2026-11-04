@@ -1,0 +1,352 @@
+#!/usr/bin/env python3
+"""instruction-lint: read-only lint for agent instruction files (issue 284, 2026-11-04).
+
+    instruction-lint [--root DIR] [--skills-dir DIR]... [--json] [--strict] [FILE...]
+
+Keeps the always-loaded instruction files (the text every session pays for before its first
+prompt) short and non-stale. It NEVER writes anything: every file is opened read-only.
+
+Files: with no FILE, `AGENTS.md`, `CLAUDE.md`, `GEMINI.md` and `.cursor/rules/*.mdc` under
+--root (default `.`) that exist; a missing default is silently absent. With FILE arguments,
+exactly those files (a missing or unreadable one is exit 2). Files are deduplicated by realpath, so
+the `CLAUDE.md -> AGENTS.md` symlink is read once (the second name is listed under `skipped`).
+--skills-dir DIR (repeatable; default `<root>/skills`) names the folders whose subfolders
+holding a SKILL.md are the skill names for the heading-skill check.
+
+The graft block, every line from `<!-- graft:start -->` to `<!-- graft:end -->` (each marker
+alone on its line; an unclosed start runs to the end of the file), is machine-generated and is
+excluded from every check below. Line numbers stay true.
+
+Checks (finding `check` ids):
+  tree           error  a paragraph or fenced block with 2 or more directory-tree lines
+                        (`├──`, `└──`, `|--`, `` `-- ``, `+--`); tree listings rot, link to the
+                        directory instead. Markdown table separator rows are not tree lines.
+  duplicate      error  a paragraph or fenced block of 80+ characters (whitespace collapsed,
+                        case folded) that appears in 2 or more distinct real files: one copy
+                        should link to the other. One finding per duplicated text, at the first
+                        file; `detail` names the other files and lines.
+  retired-term   warn   a line naming a retired tool (herdr, orca, tmux, superset, paradev,
+                        tuicommander, tuios, cow pasture, relay.py, acp-run, acp-dispatch):
+                        case-insensitive, word-bounded (`orchestration` and `orcas` do not hit);
+                        the names `herdr4paseo` and `paseo4herdr` are exempt. One finding per line.
+  heading-skill  warn   a heading whose slug equals a skill name, or starts with one followed by
+                        `-`: the skill already documents that topic, so the heading is likely a
+                        stale copy of it. Skill names are the `skills/*/` folders with a SKILL.md
+                        and their front-matter `name`.
+
+Output: plain text (a summary line, then one `severity [check] path:line - detail` line per
+finding, with no document text echoed); --json emits
+{"tool","root","files","skipped","findings":[{check,severity,path,line,detail,key}],
+"summary":{"error","warn"}}. There is no timestamp, so two runs over the same tree are
+byte-identical. `key` is the first 12 hex of sha1("check|path|normalised text"), stable under
+line-number drift (a repeated identical text in one file gets "#2", "#3"... in its hash input).
+
+Exit status: 0 no errors (warnings are still printed), 1 errors (or any warning with --strict),
+2 bad usage, an unreadable root or file, or an internal error (which prints only the exception
+class name: its message could carry file text).
+"""
+import argparse
+import glob
+import hashlib
+import json
+import os
+import re
+import stat
+import sys
+
+TOOL = "instruction-lint"
+GRAFT_START = "<!-- graft:start -->"
+GRAFT_END = "<!-- graft:end -->"
+DEFAULT_FILES = ("AGENTS.md", "CLAUDE.md", "GEMINI.md")
+READ_CAP = 2 << 20  # read at most 2 MiB of one file
+MIN_DUP_CHARS = 80
+TREE_MIN_LINES = 2
+
+FENCE_RE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})")
+TREE_RE = re.compile(r"^[\s│|]*(?:├──|└──|\|--|`--|\+--)")
+TABLE_SEP_RE = re.compile(r"^[\s|:\-]+$")
+HEADING_RE = re.compile(r"^ {0,3}#{1,6}[ \t]+(.+?)[ \t#]*$")
+RETIRED_TERMS = ("herdr", "orca", "tmux", "superset", "paradev", "tuicommander", "tuios",
+                 "cow.pasture", r"relay\.py", "acp-run", "acp-dispatch")
+RETIRED_RE = re.compile(r"(?<![A-Za-z0-9_])(%s)(?![A-Za-z0-9_])" % "|".join(RETIRED_TERMS),
+                        re.IGNORECASE)
+EXEMPT_RE = re.compile(r"herdr4paseo|paseo4herdr", re.IGNORECASE)
+FM_NAME_RE = re.compile(r"^name:[ \t]*(.+?)[ \t]*$", re.MULTILINE)
+
+
+def norm(text):
+    """Whitespace collapsed, case folded: the comparison form of a text."""
+    return " ".join(text.split()).casefold()
+
+
+def slugify(text):
+    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+
+
+def mask_graft(lines):
+    """Blank every line of the graft block (markers included), keeping line numbers true."""
+    out = []
+    inside = False
+    for ln in lines:
+        s = ln.strip()
+        if not inside and s == GRAFT_START:
+            inside = True
+            out.append("")
+        elif inside:
+            out.append("")
+            if s == GRAFT_END:
+                inside = False
+        else:
+            out.append(ln)
+    return out
+
+
+def segments(lines):
+    """Split into (first line number, kind, lines): a fenced block ('fence', fences included;
+    an unclosed fence runs to the end) or a run of non-blank lines ('para')."""
+    segs = []
+    para = None
+    fence = None
+    for i, ln in enumerate(lines, 1):
+        if fence is not None:
+            segs[-1][2].append(ln)
+            m = FENCE_RE.match(ln)
+            if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence) \
+                    and not ln.strip().strip(fence[0]):
+                fence = None
+            continue
+        m = FENCE_RE.match(ln)
+        if m:
+            para = None
+            fence = m.group(1)
+            segs.append((i, "fence", [ln]))
+        elif ln.strip():
+            if para is None:
+                para = (i, "para", [])
+                segs.append(para)
+            para[2].append(ln)
+        else:
+            para = None
+    return segs
+
+
+def read_text(path):
+    """The file's text (at most READ_CAP bytes), or None when it is not a readable regular file."""
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
+    try:
+        fd = os.open(path, flags)
+        with os.fdopen(fd, "rb") as f:
+            if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+                return None
+            data = f.read(READ_CAP)
+    except OSError:
+        return None
+    return data.decode("utf-8", errors="replace").lstrip("﻿")
+
+
+def skill_names(dirs):
+    """Slugged skill names: subfolders holding a SKILL.md, plus the front-matter `name`."""
+    names = set()
+    for d in dirs:
+        try:
+            entries = sorted(os.listdir(d))
+        except OSError:
+            continue
+        for e in entries:
+            md = os.path.join(d, e, "SKILL.md")
+            if e.startswith((".", "_")) or not os.path.isfile(md):
+                continue
+            names.add(slugify(e))
+            text = read_text(md) or ""
+            if text.startswith("---"):
+                head = text.split("\n---", 1)[0]
+                m = FM_NAME_RE.search(head)
+                if m:
+                    names.add(slugify(m.group(1).strip("\"'")))
+    names.discard("")
+    return names
+
+
+class Linter:
+    def __init__(self, skills):
+        self.skills = skills
+        self.findings = []
+        self._seen = {}
+
+    def add(self, check, severity, path, line, detail, text):
+        base = "%s|%s|%s" % (check, path, norm(text))
+        n = self._seen.get(base, 0) + 1
+        self._seen[base] = n
+        if n > 1:
+            base += "#%d" % n
+        key = hashlib.sha1(base.encode("utf-8", "replace")).hexdigest()[:12]
+        self.findings.append({"check": check, "severity": severity, "path": path,
+                              "line": line, "detail": detail, "key": key})
+
+    def lint_file(self, path, lines):
+        """Per-file checks; returns [(norm text, line)] of the duplicate candidates."""
+        segs = segments(lines)
+        cands = []
+        for start, kind, seg in segs:
+            tree = [i for i, ln in enumerate(seg) if TREE_RE.match(ln) and not TABLE_SEP_RE.match(ln)]
+            if len(tree) >= TREE_MIN_LINES:
+                self.add("tree", "error", path, start + tree[0],
+                         "%d directory-tree lines in one block; link to the directory instead"
+                         % len(tree), "\n".join(seg))
+            text = norm("\n".join(seg))
+            if len(text) >= MIN_DUP_CHARS:
+                cands.append((text, start))
+            if kind != "para":
+                continue
+            for i, ln in enumerate(seg):
+                m = HEADING_RE.match(ln)
+                if m and self.skills:
+                    s = slugify(m.group(1))
+                    hits = [k for k in self.skills if s == k or s.startswith(k + "-")]
+                    if hits:
+                        self.add("heading-skill", "warn", path, start + i,
+                                 "heading matches skill `%s`; link to the skill instead of "
+                                 "restating it" % max(hits, key=len), m.group(1))
+        for i, ln in enumerate(lines, 1):
+            found = []
+            for m in RETIRED_RE.finditer(EXEMPT_RE.sub(lambda e: " " * len(e.group(0)), ln)):
+                t = m.group(1).lower()
+                if t not in found:
+                    found.append(t)
+            if found:
+                self.add("retired-term", "warn", path, i,
+                         "names retired tool(s): %s" % ", ".join(found), ln)
+        return cands
+
+    def lint_duplicates(self, per_file):
+        """per_file: [(path, [(text, line)])] in file order; one finding per cross-file text."""
+        where = {}
+        for path, cands in per_file:
+            for text, line in cands:
+                where.setdefault(text, []).append((path, line))
+        for text, locs in where.items():
+            files = []
+            for p, _ in locs:
+                if p not in files:
+                    files.append(p)
+            if len(files) < 2:
+                continue
+            first = locs[0]
+            others = ", ".join("%s:%d" % loc for loc in locs[1:] if loc[0] != first[0])
+            self.add("duplicate", "error", first[0], first[1],
+                     "%d chars also appear in %s; keep one copy and link to it"
+                     % (len(text), others), text)
+
+
+def display(path, root):
+    ap = os.path.abspath(path)
+    return os.path.relpath(ap, root) if ap == root or ap.startswith(root + os.sep) else ap
+
+
+def collect(args, root):
+    """The files to read as [(display path, abs path)], plus skipped notes. ValueError = usage."""
+    skipped = []
+    if args.files:
+        cands = [os.path.abspath(f) for f in args.files]
+        explicit = True
+    else:
+        cands = [os.path.join(root, n) for n in DEFAULT_FILES]
+        cands += sorted(glob.glob(os.path.join(glob.escape(root), ".cursor", "rules", "*.mdc")))
+        explicit = False
+    out = []
+    real_seen = {}
+    for p in cands:
+        shown = display(p, root)
+        if not os.path.exists(p):
+            if explicit:
+                raise ValueError("no such file: %s" % shown)
+            continue
+        real = os.path.realpath(p)
+        if real in real_seen:
+            skipped.append("%s: same file as %s" % (shown, real_seen[real]))
+            continue
+        real_seen[real] = shown
+        out.append((shown, p))
+    return out, skipped
+
+
+def run(argv):
+    ap = argparse.ArgumentParser(
+        prog=TOOL,
+        description="Read-only lint for agent instruction files: directory trees, text "
+                    "duplicated across files, retired tool names, headings that restate a skill.",
+        epilog="Exit status: 0 no errors (warnings still printed), 1 errors (or any warning "
+               "with --strict), 2 usage or internal error (class name only).")
+    ap.add_argument("files", nargs="*", metavar="FILE",
+                    help="files to lint (default: AGENTS.md CLAUDE.md GEMINI.md and "
+                         ".cursor/rules/*.mdc under --root)")
+    ap.add_argument("--root", default=".", help="directory holding the default files (default: .)")
+    ap.add_argument("--skills-dir", action="append", default=[], metavar="DIR",
+                    help="skills folder for the heading-skill check; repeatable "
+                         "(default: <root>/skills)")
+    ap.add_argument("--json", action="store_true",
+                    help="emit one JSON object (tool, root, files, skipped, findings, summary)")
+    ap.add_argument("--strict", action="store_true", help="exit 1 on warnings too")
+    args = ap.parse_args(argv)
+
+    root = os.path.abspath(os.path.expanduser(args.root))
+    if not os.path.isdir(root):
+        print("%s: root is not a directory: %s" % (TOOL, root), file=sys.stderr)
+        return 2
+    try:
+        targets, skipped = collect(args, root)
+    except ValueError as e:
+        print("%s: %s" % (TOOL, e), file=sys.stderr)
+        return 2
+    sdirs = [os.path.abspath(os.path.expanduser(d)) for d in args.skills_dir] \
+        or [os.path.join(root, "skills")]
+
+    linter = Linter(skill_names(sdirs))
+    per_file = []
+    files = []
+    for shown, path in targets:
+        text = read_text(path)
+        if text is None:
+            if args.files:
+                print("%s: cannot read %s" % (TOOL, shown), file=sys.stderr)
+                return 2
+            skipped.append("%s: not readable" % shown)
+            continue
+        files.append(shown)
+        lines = mask_graft(text.replace("\r\n", "\n").split("\n"))
+        per_file.append((shown, linter.lint_file(shown, lines)))
+    linter.lint_duplicates(per_file)
+
+    findings = sorted(linter.findings, key=lambda f: (f["path"], f["line"], f["check"], f["key"]))
+    summary = {"error": sum(1 for f in findings if f["severity"] == "error"),
+               "warn": sum(1 for f in findings if f["severity"] == "warn")}
+    if args.json:
+        print(json.dumps({"tool": TOOL, "root": root, "files": files, "skipped": skipped,
+                          "findings": findings, "summary": summary}, indent=2))
+    else:
+        print("%s: %d error(s), %d warning(s) in %d file(s) (root: %s)"
+              % (TOOL, summary["error"], summary["warn"], len(files), root))
+        for s in skipped:
+            print("  skipped: %s" % s)
+        for f in findings:
+            print("  %s [%s] %s:%d - %s" % (f["severity"], f["check"], f["path"], f["line"],
+                                            f["detail"]))
+    return 1 if summary["error"] or (args.strict and summary["warn"]) else 0
+
+
+def main(argv=None):
+    try:
+        sys.stdout.reconfigure(errors="backslashreplace")
+    except (AttributeError, ValueError):
+        pass
+    try:
+        return run(argv)
+    except SystemExit:
+        raise
+    except Exception as e:  # exit 1 means "errors found"; a broken run must never look like it
+        print("%s: internal error: %s" % (TOOL, type(e).__name__), file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())
