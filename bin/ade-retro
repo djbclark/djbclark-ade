@@ -9,12 +9,14 @@ usage: ade-retro --since YYYY-MM-DD [--until YYYY-MM-DD] [--repo OWNER/NAME] [--
   --root DIR  repository checkout to read changelog.d/, CHANGELOG.md, docs/handoffs/ and git history from
               (default: the checkout this script is in).
   --json      print JSON instead of Markdown:
-              {tool, repo, since, until, prs, changelog:[{section, text, pr, source}], handoffs:[{path, date, title}], notes}
+              {tool, repo, since, until, prs, changelog:[{section, text, pr, prs, source}], handoffs:[{path, date, title}], notes}
+              (`prs`: every number of the entry's final group; `pr`: the last of them in the window)
 
 Sources, all read-only (this tool writes nothing anywhere):
   * merged PRs: REST search, `gh api -X GET search/issues -f q="repo:R is:pr is:merged merged:SINCE..UNTIL" --paginate`
     (no GraphQL: `gh pr list` returns 403 in cloud sessions; no headRefName; search caps at 1000 results, noted);
-  * changelog entries whose trailing `(#N)` (or `(DATE, #N)`) is one of those PRs, from CHANGELOG.md and from the changelog.d/*.md
+  * changelog entries whose trailing `(#N)` (or `(DATE, #N)`, or `(#N, #M)`: any of them) is one of those PRs, from
+    CHANGELOG.md and from the changelog.d/*.md
     fragments at HEAD (fragment parser loaded from bin/changelog-fold);
   * when gh fails: the fragments added to git in the window (`git log --diff-filter=A -- changelog.d/`, filtered by
     committer date), each read
@@ -46,11 +48,16 @@ PR_END = re.compile(r"\(([^()]*)\)\.?$")  # the final parenthesised group, e.g. 
 PR_NUM = re.compile(r"#(\d+)")
 
 
-def entry_pr(text):
-    """PR number from the last #N inside the final parenthesised group at the end of an entry, else None."""
+def entry_prs(text):
+    """Every #N inside the final parenthesised group at the end of an entry, in order: `(#12, #13)` is [12, 13]."""
     m = PR_END.search(text)
-    nums = PR_NUM.findall(m.group(1)) if m else []
-    return int(nums[-1]) if nums else None
+    return [int(n) for n in PR_NUM.findall(m.group(1))] if m else []
+
+
+def entry_pr(text):
+    """The last PR number of entry_prs, else None (the entry's `pr` field when no window narrows it)."""
+    nums = entry_prs(text)
+    return nums[-1] if nums else None
 HANDOFF_DATE = re.compile(r"_(\d{4}-\d{2}-\d{2})_")
 SECTION_ORDER = ("Added", "Changed", "Deprecated", "Removed", "Fixed", "Security")
 
@@ -117,13 +124,16 @@ def entry_body(lines):
 
 
 def collect(sections, source, wanted, out):
-    """Append entries of `sections` to `out`; wanted=None keeps all, else only those whose (#N) is in the set."""
+    """Append entries of `sections` to `out`; wanted=None keeps all, else only those with a (#N) in the set. `prs` lists
+    every number of the final group; `pr` is the last one in the window (the last one at all when unfiltered)."""
     for heading, entries in sections.items():
         for lines in entries:
             text = entry_body(lines)
-            pr = entry_pr(text)
-            if wanted is None or pr in wanted:
-                out.append({"section": heading, "text": text, "pr": pr, "source": source})
+            prs = entry_prs(text)
+            hits = prs if wanted is None else [n for n in prs if n in wanted]
+            if wanted is None or hits:
+                out.append({"section": heading, "text": text, "pr": hits[-1] if hits else None, "prs": prs,
+                            "source": source})
 
 
 def origin_repo(root):
@@ -308,7 +318,7 @@ def render(rep, repo_known_prs):
     out += ["- `%s` (%s) %s" % (h["path"], h["date"], h["title"]) for h in rep["handoffs"]] or ["No handoffs dated in the window."]
     out += ["", "## D. Gaps", ""]
     gaps = list(rep["notes"])
-    have = {e["pr"] for e in rep["changelog"]}
+    have = {n for e in rep["changelog"] for n in (e.get("prs") or [e.get("pr")])}
     for p in rep["prs"]:
         if p["number"] not in have:
             gaps.append("PR #%d has no changelog entry (internal or doc-only PRs may skip): %s" % (p["number"], p.get("title", "")))

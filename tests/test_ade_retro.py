@@ -210,12 +210,48 @@ def test_until_defaults_to_today_and_repo_flag_wins(world) -> None:
     ("Ends in (2026-10-23).", None),
 ])
 def test_entry_pr_endings(text, pr) -> None:
+    assert retro_mod().entry_pr(text) == pr
+
+
+def retro_mod():
     import importlib.machinery, importlib.util
     loader = importlib.machinery.SourceFileLoader("ade_retro_mod", str(TOOL))
     spec = importlib.util.spec_from_loader("ade_retro_mod", loader)
     mod = importlib.util.module_from_spec(spec)
     loader.exec_module(mod)
-    assert mod.entry_pr(text) == pr
+    return mod
+
+
+@pytest.mark.parametrize("text,prs", [
+    ("Did two things. (#12, #13)", [12, 13]), ("Did two things (2026-10-23, #12, #13).", [12, 13]),
+    ("Mentions #5 mid-text. (#31)", [31]), ("No parens at all", []),
+])
+def test_entry_prs_lists_every_number_of_the_final_group(text, prs) -> None:
+    """Adversary finding D2 (2026-11-04): `(#12, #13)` was read as 13 only, so a window holding just #12 lost it."""
+    assert retro_mod().entry_prs(text) == prs
+
+
+def test_entry_naming_two_prs_matches_the_one_in_the_window(world) -> None:
+    commit_file(world.root, "changelog.d/shared.md", "### Changed\n\n- Changed for two PRs. (#15, #40)\n",
+                "2026-11-03T12:00:00")
+    world.scenario(out=search(PRS))
+    r = world.run("--since", "2026-11-01", "--until", "2026-11-07", "--json")
+    assert r.returncode == 0, r.stderr
+    shared = [e for e in json.loads(r.stdout)["changelog"] if e["source"] == "changelog.d/shared.md"]
+    assert [(e["pr"], e["prs"]) for e in shared] == [(15, [15, 40])]
+    md = world.run("--since", "2026-11-01", "--until", "2026-11-07").stdout
+    assert "Changed for two PRs" in md and "PR #15 has no changelog entry" not in md
+
+
+def test_collect_matches_any_number_in_the_window() -> None:
+    mod = retro_mod()
+    sections = {"Added": [["- Shared work. (#12, #13)"]], "Fixed": [["- Other. (#20)"]]}
+    out = []
+    mod.collect(sections, "CHANGELOG.md", {12}, out)
+    assert [(e["section"], e["pr"], e["prs"]) for e in out] == [("Added", 12, [12, 13])]
+    out = []
+    mod.collect(sections, "x", None, out)
+    assert [(e["pr"], e["prs"]) for e in out] == [(13, [12, 13]), (20, [20])]
 
 
 def test_read_only(world) -> None:

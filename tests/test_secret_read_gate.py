@@ -155,9 +155,11 @@ def test_dotdot_is_normalised(env):
     ({"pattern": "x", "path": ".env"}, True),
     ({"pattern": "x", "path": "~/.ssh"}, True),
     ({"pattern": "x", "path": "~/.ssh/config"}, False),
-    ({"pattern": "x", "glob": ".env*"}, True),
-    ({"pattern": "x", "glob": "*.{env,key}"}, True),
-    ({"pattern": "x", "glob": "**/*.key"}, True),
+    ({"pattern": "x", "glob": ".env*"}, False),              # C2: the walk saw the whole (empty) project
+    ({"pattern": "x", "glob": ".env*", "path": "missing"}, True),   # no tree to walk: the glob's text is checked
+    ({"pattern": "x", "glob": "*.{env,key}", "path": "missing"}, True),
+    ({"pattern": "x", "glob": "**/*.key", "path": "missing"}, True),
+    ({"pattern": "x", "glob": "*.py", "path": "missing"}, False),
     ({"pattern": "x", "glob": "*.py"}, False),
     ({"pattern": "x", "glob": "*"}, False),
     ({"pattern": "x", "glob": "*.{ts,tsx}"}, False),
@@ -225,6 +227,63 @@ def test_grep_of_a_project_with_env_blocks_unless_the_glob_leaves_it_out(env):
     assert blocked(env, "Grep", {"pattern": "x", "glob": "*"})
     assert blocked(env, "Grep", {"pattern": "x", "glob": "config/*"})
     assert blocked(env, "Grep", {"pattern": "x", "glob": "*.py *"})    # any reading of a split glob counts
+
+
+def test_grep_clean_walk_skips_the_pattern_check(env):
+    """Adversary finding C2 (2026-11-04): after a complete walk the glob's text was still run through the overlap
+    engine (2.6 s for a long brace glob), and `.env*` blocked in a project with no such file."""
+    for d in ("src", "web", "docs"):
+        (env["proj"] / d).mkdir()
+        for ext in ("py", "ts", "tsx", "md"):
+            (env["proj"] / d / ("a." + ext)).write_text("x\n")
+    glob = "**/*.{ts,tsx,js,jsx,mjs,cjs,py,pyi,go,rs,java,kt,swift,rb,php,md,json,yaml,yml,toml,css,html}"
+    t0 = time.monotonic()
+    rc, err = run(env, "Grep", {"pattern": "x", "glob": glob})
+    assert (rc, err) == (0, "") and time.monotonic() - t0 < 2.0
+    assert not blocked(env, "Grep", {"pattern": "x", "glob": ".env*"})
+    (env["proj"] / "web" / ".env.local").write_text("A=1\n")
+    assert blocked(env, "Grep", {"pattern": "x", "glob": ".env*"})
+
+
+def test_grep_cut_short_walk_falls_back_to_the_glob_text(tmp_path, monkeypatch):
+    hook = load_hook()
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    for i in range(10):
+        (proj / ("f%d.txt" % i)).write_text("x\n")
+    policy = hook.Policy([".env", ".env.*"], [], homes=[str(tmp_path / "home")], fold=False)
+    assert grep_inproc(hook, policy, str(proj), glob=".env*") is None          # complete walk, no .env
+    monkeypatch.setattr(hook, "MAX_WALK_ENTRIES", 3)
+    hit = grep_inproc(hook, policy, str(proj), glob=".env*")                     # cut short: the text decides
+    assert hit and hit[1] in (".env", ".env.*")
+    assert grep_inproc(hook, policy, str(proj), glob="*.py") is None
+    assert grep_inproc(hook, policy, str(proj)) is None                          # no glob: fail open as before
+
+
+def test_grep_type_narrows_the_walk(env):
+    """Adversary finding C3 (2026-11-04): `type` was ignored, so `{"type": "py"}` blocked beside a .env."""
+    (env["proj"] / "src").mkdir()
+    (env["proj"] / "src" / "app.py").write_text("x\n")
+    (env["proj"] / ".env").write_text("A=1\n")
+    assert blocked(env, "Grep", {"pattern": "x"})
+    for t in ("py", "js", "ts", "go", "rust", "java", "c", "cpp", "sh", "md", "json", "yaml", "toml", "rb", "php",
+              "swift", "kotlin", "html", "css"):
+        assert not blocked(env, "Grep", {"pattern": "x", "type": t}), t
+    assert not blocked(env, "Grep", {"pattern": "x", "type": "py", "glob": "*"})
+    rc, err = run(env, "Grep", {"pattern": "x", "type": "nosuchtype"})   # unknown: unfiltered, and the hint says glob
+    assert rc == 2 and "glob" in err and "nosuchtype" in err
+    (env["proj"] / ".env.py").write_text("A=1\n")                       # a denied file the type does read
+    assert blocked(env, "Grep", {"pattern": "x", "type": "py"})
+
+
+def test_grep_type_filter_names():
+    hook = load_hook()
+    py = hook.rg_type_filter("py", False)
+    assert py("a.py") and py("sub/b.pyi") and not py(".env") and not py("x.py/.env")
+    yml = hook.rg_type_filter("yaml", False)
+    assert yml(".config/gh/hosts.yml")
+    assert hook.rg_type_filter("nosuchtype", False) is None
+    assert hook.rg_type_filter("c", True)("A.H")
 
 
 def test_grep_walk_skips_vcs_dirs_and_does_not_follow_symlinks(env):
@@ -360,6 +419,22 @@ def test_large_heredoc_with_code_is_fast_and_allowed(env):
     assert (rc, err) == (0, "")
 
 
+def test_heredoc_with_double_star_words_is_fast_and_allowed(env):
+    """Adversary finding C1 (2026-11-04): a `**` word skipped the literal-text filter; 100 lines took 8 s."""
+    body = "\n".join("x = a[0] * b[i] ** 2 + f(*args, **kw%d)" % i for i in range(200))
+    t0 = time.monotonic()
+    rc, err = run(env, "Bash", {"command": "cat > x.py <<'EOF'\n" + body + "\nEOF"})
+    assert (rc, err) == (0, "")
+    assert time.monotonic() - t0 < 2.0
+
+
+def test_token_text_drops_double_star_but_not_double_star_slash():
+    hook = load_hook()
+    assert hook.token_text(hook.atoms("**kw0")) == "kw0"
+    assert hook.token_text(hook.atoms("a**")) == "a"
+    assert hook.token_text(hook.atoms("a/**/b")) is None
+
+
 # ---- Codex payloads ---------------------------------------------------------------------------------------------------
 def patch(*headers, body="+x\n"):
     return "*** Begin Patch\n" + "".join("%s\n%s" % (h, body) for h in headers) + "*** End Patch\n"
@@ -452,32 +527,86 @@ def test_analysis_budget_fails_open(monkeypatch, capsys):
     assert "OutOfTime" in capsys.readouterr().err
 
 
-def test_bash_glob_expansion_is_lazy_and_capped(monkeypatch, tmp_path):
-    """Adversary finding B2 (2026-11-04): `ls /*/*/*/*/*/*` took 6.3 s in glob.glob, outside the budget."""
+class FakeEntry:
+    def __init__(self, name, is_dir=True, link=False):
+        self.name, self._dir, self._link = name, is_dir, link
+
+    def is_dir(self, follow_symlinks=True):
+        return self._dir
+
+    def is_symlink(self):
+        return self._link
+
+
+class FakeDir:
+    def __init__(self, entries, delay=0.0):
+        self.entries, self.delay = entries, delay
+
+    def __iter__(self):
+        for e in self.entries:
+            if self.delay:
+                time.sleep(self.delay)
+            yield e
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def deep_tree(delay=0.0, files=False):
+    """A synthetic scandir: every directory holds 50 subdirectories (and, with `files`, 50 files), forever."""
+    reads = []
+
+    def scandir(path):
+        reads.append(path)
+        ents = [FakeEntry("d%d" % i) for i in range(50)]
+        if files:
+            ents += [FakeEntry("f%d.txt" % i, is_dir=False) for i in range(50)]
+        return FakeDir(ents, delay)
+    return scandir, reads
+
+
+def checker(hook, tmp_path, deny=(".env", ".env.*", "~/.ssh/**")):
+    return hook.Checker(hook.Policy(list(deny), [], homes=[str(tmp_path)], fold=False), str(tmp_path))
+
+
+def test_bash_glob_walk_of_a_tree_that_never_matches_is_bounded(monkeypatch, tmp_path):
+    """Adversary finding B1 (2026-11-04): iglob's time check ran per match, so `ls /*/*/*/*/*/*/*/zzqq*` (no match,
+    /proc/*/root loops) ran past 60 s. The walk now counts every entry it reads."""
     hook = load_hook()
-    pulled = []
+    scandir, reads = deep_tree()
+    monkeypatch.setattr(hook, "_scandir", scandir)
+    seen = []
+    ck = checker(hook, tmp_path)
+    real_pv = ck.policy.pattern_verdict
+    monkeypatch.setattr(ck.policy, "pattern_verdict", lambda *a, **k: seen.append(a[0]) or real_pv(*a, **k))
+    t0 = time.monotonic()
+    assert ck.glob("/*/*/*/*/*/*/*/zzqq*") is None
+    assert time.monotonic() - t0 < 2.0
+    assert ck._scanned == hook.MAX_GLOB_SCAN + 1
+    assert seen == ["/*/*/*/*/*/*/*/zzqq*"]                # cut short: the pattern was checked instead
+    assert ck.glob("/*/*/*/*/*/*/*/.env*") is not None     # and the pattern check still blocks a secret's name
 
-    def endless(pattern):
-        i = 0
-        while True:
-            pulled.append(i)
-            yield "/nowhere/f%d.txt" % i
-            i += 1
-    monkeypatch.setattr(hook.globmod, "iglob", endless)
-    ck = hook.Checker(hook.Policy([".env"], [], homes=[str(tmp_path)], fold=False), str(tmp_path))
-    assert ck.glob("/*/*/*/*/*/*") is None
-    assert len(pulled) == hook.MAX_GLOB_HITS
 
-
-def test_bash_glob_expansion_respects_the_budget(monkeypatch, tmp_path, capsys):
+def test_bash_glob_walk_time_bound_still_checks_every_word(monkeypatch, tmp_path):
     hook = load_hook()
+    scandir, _ = deep_tree(delay=0.01)
+    monkeypatch.setattr(hook, "_scandir", scandir)
+    monkeypatch.setattr(hook, "GLOB_S", 0.3)
+    ck = checker(hook, tmp_path)
+    t0 = time.monotonic()
+    found = hook.check_command(ck, "ls /*/*/*/*/*/*/*/zzqq* /*/*/*/*/*/*/*/yy* %s/.ssh/id_*" % tmp_path)
+    assert found and found[0] == "~/.ssh/**"
+    assert time.monotonic() - t0 < 2.0
 
-    def slow(pattern):
-        while True:
-            time.sleep(0.05)
-            yield "/nowhere/f.txt"
-    monkeypatch.setattr(hook.globmod, "iglob", slow)
-    monkeypatch.setattr(hook, "BUDGET_S", 0.3)
+
+def test_bash_glob_time_bound_through_main_allows_without_failing_open(monkeypatch, tmp_path, capsys):
+    hook = load_hook()
+    scandir, _ = deep_tree(delay=0.05)
+    monkeypatch.setattr(hook, "_scandir", scandir)
+    monkeypatch.setattr(hook, "GLOB_S", 0.3)
     monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(
         {"tool_name": "Bash", "tool_input": {"command": "ls /*/*/*/*/*/*"}, "cwd": str(tmp_path)})))
     monkeypatch.delenv("SECRET_DENY_OFF", raising=False)
@@ -485,7 +614,80 @@ def test_bash_glob_expansion_respects_the_budget(monkeypatch, tmp_path, capsys):
     t0 = time.monotonic()
     assert hook.main() == 0
     assert time.monotonic() - t0 < 3
-    assert "OutOfTime" in capsys.readouterr().err
+    assert capsys.readouterr().err == ""                    # a bounded walk, then the pattern: no fail-open notice
+
+
+def test_bash_glob_hits_are_capped_then_the_pattern_is_checked(monkeypatch, tmp_path):
+    hook = load_hook()
+    scandir, _ = deep_tree(files=True)
+    monkeypatch.setattr(hook, "_scandir", scandir)
+    ck = checker(hook, tmp_path)
+    checked = []
+    real_path = ck.path
+    monkeypatch.setattr(ck, "path", lambda raw: checked.append(raw) or real_path(raw))
+    assert ck.glob("/*/*.txt") is None
+    assert len(checked) == hook.MAX_GLOB_HITS
+
+
+def test_bash_glob_walk_survives_a_symlink_loop(tmp_path):
+    hook = load_hook()
+    root = tmp_path / "w"
+    (root / "a").mkdir(parents=True)
+    (root / "self").symlink_to(".")
+    (root / "a" / "up").symlink_to("..")
+    (root / "a" / "real").mkdir()
+    ck = checker(hook, tmp_path)
+    t0 = time.monotonic()
+    assert ck.glob(str(root) + "/*/*/*/*/*/*/*/*/*/zzqq*") is None
+    assert time.monotonic() - t0 < 2.0
+    assert ck._scanned < 50                                 # the symlinked directories were not entered
+    state = {"complete": True}
+    assert sorted(ck.expand(str(root), ["*", "*"], state)) == [str(root / "a" / "real"), str(root / "a" / "up")]
+    assert state["complete"] is False                       # `self` was skipped, so the walk says so
+
+
+def test_bash_glob_final_symlink_match_is_checked_through_realpath(env):
+    (env["proj"] / "d").mkdir()
+    (env["proj"] / ".env").write_text("A=1\n")
+    (env["proj"] / "d" / "notes.txt").symlink_to(env["proj"] / ".env")
+    assert blocked(env, "Bash", {"command": "cat d/*.txt"})
+
+
+def test_unreadable_directory_midway_is_skipped_not_an_error(monkeypatch, tmp_path):
+    """/proc/1/map_files opens but fails on read (EACCES): that raised out of the hook and failed it open."""
+    hook = load_hook()
+
+    class Failing(FakeDir):
+        def __iter__(self):
+            yield FakeEntry("zzqq1", is_dir=False)
+            raise PermissionError(13, "Permission denied")
+    monkeypatch.setattr(hook, "_scandir", lambda path: Failing([]))
+    ck = checker(hook, tmp_path)
+    state = {"complete": True}
+    assert list(ck.expand("/", ["zzqq*"], state)) == ["/zzqq1"] and state["complete"]
+    monkeypatch.setattr(hook.os, "scandir", lambda path: Failing([]))
+    assert hook.grep_walk(ck.policy, [str(tmp_path)], lambda rel: True) == (None, False)
+
+
+def test_bash_glob_walk_hidden_names_follow_the_shell(tmp_path):
+    hook = load_hook()
+    (tmp_path / ".hid").mkdir()
+    (tmp_path / ".hid" / "a.txt").write_text("x\n")
+    (tmp_path / "vis").mkdir()
+    (tmp_path / "vis" / "a.txt").write_text("x\n")
+    ck = checker(hook, tmp_path)
+    state = {"complete": True}
+    assert list(ck.expand(str(tmp_path), ["*", "a.txt"], state)) == [str(tmp_path / "vis" / "a.txt")]
+    assert list(ck.expand(str(tmp_path), [".h*", "*.txt"], state)) == [str(tmp_path / ".hid" / "a.txt")]
+
+
+def test_bash_deep_root_glob_repro_is_fast(env):
+    """The adversary's repro on the real filesystem, through the hook."""
+    t0 = time.monotonic()
+    rc, err = run(env, "Bash", {"command": "ls /*/*/*/*/*/*/*/zzqq*"})
+    assert (rc, err) == (0, "")
+    assert time.monotonic() - t0 < 8.0
+    assert run(env, "Bash", {"command": "ls /*/*/*/*/*/*/*/zzqq* ~/.ssh/id_*"})[0] == 2
 
 
 def test_tilde_user_is_expanded(tmp_path):

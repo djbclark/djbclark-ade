@@ -35,17 +35,29 @@ config change).
     directories, so it reads `.env` and descends into `~/.ssh`. The hook blocks a Grep whose root (`path`, else the
     session directory) is a denied file or inside a denied `dir/**`, and otherwise walks the root breadth-first (at most 6
     levels, 20000 entries and 4 s; `.git`, `.svn`, `.hg`, `.bzr`, `.jj`, `.sl` and `node_modules` skipped; symlinks not
-    followed, as ripgrep does not) looking for a denied, not-allowed file that the `glob` lets through. A hit blocks, and
-    the message names the file and asks for a narrower `path` or a `glob` that leaves it out (`*.py`, `!.env`). When the
-    walk hits a bound it allows (fail open), except for a root at or above a home-level deny (`~`, `~/.aws`, `/home`,
-    `/`), which blocks: those trees are big, and they hold `~/.ssh`. The `glob` is matched as ripgrep does (no `/`: a name
-    at any depth; with `/`: from the root; `!` excludes; a matched directory covers its files), counting every way the
-    string may be split (whole, on whitespace, on commas outside braces), and is also checked as a pattern with no file on
-    disk (B3), so `glob: ".env*"` blocks in an empty project.
+    followed, as ripgrep does not) looking for a denied, not-allowed file that the `glob` and the `type` let through. A
+    hit blocks, and the message names the file and asks for a narrower `path` or a `glob` that leaves it out (`*.py`,
+    `!.env`). When the walk hits a bound it allows (fail open), except for a root at or above a home-level deny (`~`,
+    `~/.aws`, `/home`, `/`), which blocks: those trees are big, and they hold `~/.ssh`. The `glob` is matched as ripgrep
+    does (no `/`: a name at any depth; with `/`: from the root; `!` excludes; a matched directory covers its files),
+    counting every way the string may be split (whole, on whitespace, on commas outside braces). The `type` (2026-11-04)
+    narrows the walk to the file names ripgrep gives it for `py`, `js`, `ts`, `go`, `rust`, `java`, `c`, `cpp`, `sh`,
+    `md`, `json`, `yaml`, `toml`, `rb`, `php`, `swift`, `kotlin`, `html` and `css` (so `type: "py"` passes beside a `.env`
+    and blocks beside a `.env.py`); any other type narrows nothing, and the block message then suggests a `glob`. The
+    `glob`'s text is checked as a pattern (B3) only when the walk could not see the whole tree: the root does not exist,
+    or the walk was cut short by a bound (2026-11-04: after a complete walk the files themselves have answered, so
+    `glob: ".env*"` passes in a project with no `.env`-named file and blocks beside one).
   - **B1c.** `Bash`: the `command`, split with `shlex` into words; also the part after `=` (`--config=.env`) and each
-    `:`-separated part (`-v ~/.aws/credentials:/c`), with `~`, `~user`, `$HOME` and `${HOME}` expanded. Words with glob
-    characters are expanded against the disk, lazily and inside the time budget, checking at most the first 500 matches;
-    when nothing matches, the pattern itself is checked (B3).
+    `:`-separated part (`-v ~/.aws/credentials:/c`), with `~`, `~user`, `$HOME` and `${HOME}` expanded. Every literal
+    word is checked first; then the words with glob characters are expanded against the disk by the hook's own walk,
+    one path segment at a time (corrected 2026-11-04: the earlier `glob.iglob` checked its time only per match, so `ls
+    /*/*/*/*/*/*/*/zzqq*`, which matches nothing and loops through `/proc/*/root`, ran past 60 s). The walk follows the
+    shell: a wildcard never matches a leading `.`; a directory a wildcard matches is entered only when it is not a
+    symlink (so symlink loops end); a final match may be a symlink and is checked through its realpath (B1f). It reads at
+    most 20000 directory entries and 2 s per call, all glob words together, and checks at most 500 matches per word.
+    When nothing matches, or the walk was cut short (a bound, the match cap, or a symlinked directory left unentered),
+    the pattern itself is checked (B3), so every word gets at least that check and a bound never lets one through
+    unchecked. Measured 2026-11-04: that repro takes 0.07 s through the hook.
   - **B1d.** Codex `apply_patch` headers (`*** Add File:`, `*** Update File:`, `*** Delete File:`, `*** Move to:`) inside a
     `*** Begin Patch` block, in the command or any other string of a non-file tool. The patch body is not read, so a patch
     whose code mentions `.env` passes.
@@ -62,7 +74,7 @@ config change).
   a `~/` rule) and cannot reopen a file inside a directory that is denied whole. A name with no `/` is written
   `**/name`, which Claude reads relative to the session directory, so the three key names are also listed under `~/.ssh/`.
   Render owns every `Read(`/`Edit(` entry in that list: one added by hand is removed on the next render.
-- **B3. A glob that matches nothing on disk** blocks only when some path could match it, a deny pattern and no allow
+- **B3. A glob that matches nothing on disk** (or that a walk could not finish: B1b, B1c) blocks only when some path could match it, a deny pattern and no allow
   pattern, with two rules against false alarms from code and regexes. The word must spell the deny pattern's literal text
   itself (pinning: `echo *`, `grep 'a.*'`, `x * y` in a heredoc and Grep `glob: "*.py"` pass, while `.env*` and `*.key`
   block). For a Bash word, a wildcard also never consumes a leading `.` (the shell's hidden-file rule). Grep gets no such
@@ -79,8 +91,11 @@ config change).
   - **C1b.** Command substitution and quoting tricks: `cat $(printf .env)`, `` cat `echo .env` ``, `cat .e''nv`.
   - **C1c.** Variables other than `HOME`: `f=.env; cat $f`, `cat $XDG_CONFIG_HOME/gh/hosts.yml`, `$OLDPWD`.
   - **C1d.** Encoded or computed paths: base64, hex, `printf '\x2eenv'`, `rev`, brace ranges built at run time.
-  - **C1e.** Glob matches beyond the cap: a word whose expansion has more than 500 matches is checked only on its first
-    500, so a secret later in the list passes.
+  - **C1e.** Glob matches beyond the bounds: a word whose expansion has more than 500 matches, or that the walk cuts
+    short (20000 entries or 2 s per call), is checked on the matches found and then only as a pattern (B3), so a secret
+    the walk did not reach passes when the word does not spell its name (`cat */*/*` over a tree of more than 20000
+    entries passes when `a/b/server.key` lies past the bound; `cat */*/*.key` blocks). A symlinked directory a wildcard matches is not entered: `cat */x` where
+    `d -> ~/.ssh` is checked as a pattern only.
   - **C1f.** `shopt -s dotglob` (or zsh `GLOB_DOTS`) followed by `cat *`: the hook applies the default hidden-file rule,
     so `*` is not taken to reach `.env`.
   - **C1g.** `cd` followed by a relative name that is not itself denied; `~user` for a user other than the policy's home.
@@ -97,17 +112,25 @@ config change).
   (`*.py`, `!.env`) or a narrower `path`. The walk stops at 6 levels, 20000 entries or 4 s and then allows, so a secret
   deeper or later than that in a big non-home tree is not seen; a root at or above a home-level deny (`~`, `/home`,
   `/`) blocks instead whenever the walk is cut short, so a whole-home Grep is refused in practice. `node_modules` is not
-  walked, though ripgrep reads it when it is not gitignored. Measured 2026-11-04: a Grep of this repository's root
-  (about 1200 entries) adds about 45 ms; a 20000-entry walk of `/usr` about 100 ms.
+  walked, though ripgrep reads it when it is not gitignored. The `type` map (B1b) is the hook's copy of ripgrep's, for
+  19 common types: a type ripgrep reads more names for than the copy lists could reach a denied file the walk thinks it
+  skips; the denied names (A1) fall in those types only by extension (`.env.py`, `hosts.yml`, `config.json`), which the
+  copy covers. Measured 2026-11-04: a Grep of this repository's root (about 1200 entries) adds about 45 ms; a
+  20000-entry walk of `/usr` about 100 ms; a long brace glob (`**/*.{ts,tsx,...}`, 22 extensions) 0.05 s, down from 5.7 s
+  when its text was also run through the pattern check after a complete walk.
 - **C5. False positives.** A word that is itself a denied name is blocked wherever it appears: `echo .env`, `grep -n .env
   README.md`, a heredoc whose code holds a bare `.env` word. Escape the pattern (`grep -n '\.env' README.md`), write
   files with the Write tool rather than a heredoc, or have the operator set `SECRET_DENY_OFF=1` in the environment Claude
   Code starts from. `ls ~/.ssh` is blocked too (the directory rule).
 - **C6. Case.** Paths are matched case-sensitively except on macOS, where `.ENV` opens `.env`.
 - **C7. Fail open.** Bad hook input, a missing or corrupt policy JSON, an internal error, or analysis longer than 8 s
-  (Bash glob expansion included, since 2026-11-04) exits 0 with a one-line `secret-read-gate: ... allowing (fail open)`
-  notice on stderr. A Grep walk that hits its own bound allows silently, except above a home-level deny (C4). The hook is registered without
-  `onFailure: block`, so a broken hook never blocks every Read; the static rules (B2) still hold then.
+  exits 0 with a one-line `secret-read-gate: ... allowing (fail open)` notice on stderr. The Bash glob walk (B1c) does
+  not reach that budget: it stops at its own bounds (20000 entries, 2 s, leaving at least 3 s of the 8 s) and falls back
+  to the pattern check, with no notice (2026-11-04). A directory that opens but cannot be read to the end
+  (`/proc/1/map_files`) is skipped by both walks, as the shell and ripgrep skip it; before 2026-11-04 it raised and
+  failed the hook open. A Grep walk that hits its own bound allows silently, unless its glob's text blocks (B1b) or the
+  root is above a home-level deny (C4). The hook is registered without `onFailure: block`, so a broken hook never
+  blocks every Read; the static rules (B2) still hold then.
 
 ## D. Changing the policy
 
@@ -122,6 +145,7 @@ config change).
 - **D4.** The live settings come from the template through the normal install path; the hook reaches
   `~/.claude/hooks/secret_read_gate.py` as a symlink into this checkout (`bin/ade-update` reports a missing link), and
   finds the policy JSON from its own realpath (`../../config/`; `SECRET_DENY_POLICY` overrides it).
-- **D5.** Tests: `tests/test_secret_read_gate.py` (the matrix, symlinks, Grep's walk and glob readings, Bash, Codex
-  patches, fail-open, the glob cap and budget, Python 3.9 syntax) and `tests/test_render_secret_deny.py` (render into copies of the template: idempotent, `--check`, tags and
+- **D5.** Tests: `tests/test_secret_read_gate.py` (the matrix, symlinks, Grep's walk, glob readings and `type` map, Bash,
+  Codex patches, fail-open, the glob walk's bounds on a synthetic endless tree and a symlink loop, heredoc speed, Python
+  3.9 syntax) and `tests/test_render_secret_deny.py` (render into copies of the template: idempotent, `--check`, tags and
   other entries kept, the committed JSON equals a fresh render).

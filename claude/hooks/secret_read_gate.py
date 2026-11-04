@@ -12,19 +12,24 @@ is not gated (it returns names only). Each candidate path is evaluated as given,
 and as its realpath, separately: the call is blocked when ANY candidate matches a deny pattern and no allow pattern
 matches that same candidate. A pattern ending in `/**` also denies its directory (`grep -r x ~/.ssh`, `tar c ~/.ssh`).
 
-A Bash glob token (`*`, `?`, `[...]` or `{a,b}`) is expanded against the filesystem (lazily, at most MAX_GLOB_HITS
-matches, inside the time budget) and each match checked as a path. When nothing matches, the pattern itself is checked:
-it blocks when some path could match it and a deny pattern and no allow pattern, under two rules that keep code and
-regexes from tripping it: the hidden-file rule (a wildcard never consumes a leading `.`) and pinning (the token's
-wildcards may not stand in for a deny pattern's literal text). So `cat ~/.ssh/id_*` and `find . -name '*.key'` block,
-while `echo *` and `grep 'a.*'` pass.
+A Bash command's literal words are all checked first (cheap). Then each glob word (`*`, `?`, `[...]` or `{a,b}`) is
+expanded against the filesystem by the hook's own segment-by-segment walk (os.scandir; a wildcard never matches a leading
+`.`; a symlinked directory matched by a wildcard is not entered, so `/proc/*/root` loops end; a final match may be a
+symlink and is checked through its realpath), and each match checked as a path. The walk is bounded for the whole call:
+MAX_GLOB_SCAN directory entries, MAX_GLOB_HITS matches per word and GLOB_S seconds. When nothing matches, or the walk was
+cut short (a bound, or a symlinked directory skipped), the pattern itself is checked: it blocks when some path could
+match it and a deny pattern and no allow pattern, under two rules that keep code and regexes from tripping it: the
+hidden-file rule (a wildcard never consumes a leading `.`) and pinning (the token's wildcards may not stand in for a deny
+pattern's literal text). So every word gets at least that check, `cat ~/.ssh/id_*` and `find . -name '*.key'` block,
+while `echo *`, `grep 'a.*'` and `ls /*/*/*/*/*/*/*/x*` pass.
 
 Grep (2026-11-04): Claude's Grep runs ripgrep with `--hidden`, so it reads dotfiles and descends into `~/.ssh`. Its root
 (`path`, else the cwd) is walked breadth-first (bounded: depth, entries, time; VCS dirs and node_modules skipped) and the
-call blocks when a denied file under it is one the `glob` lets through, naming the file and how to leave it out. When the
-walk hits a bound it fails open, except for a root that contains a home-level deny (`~`, `/home`, `/`), which blocks.
-`.gitignore` is not consulted, so a gitignored `.env` still blocks a whole-project Grep (the price of not parsing ignore
-files). The glob is also checked as a pattern (pinning, no hidden-file rule): `glob: ".env*"` blocks, `"*.py"` passes.
+call blocks when a denied file under it is one the `glob` (and a known `type`, as its extensions) lets through, naming the
+file and how to leave it out. When the walk hits a bound it fails open, except for a root that contains a home-level deny
+(`~`, `/home`, `/`), which blocks. `.gitignore` is not consulted, so a gitignored `.env` still blocks a whole-project Grep
+(the price of not parsing ignore files). Only when the root does not exist or the walk was cut short is the glob also
+checked as a pattern (pinning, no hidden-file rule): then `glob: ".env*"` blocks and `"*.py"` passes.
 
 Block: exit 2 with one line on stderr naming the rule and docs/secret-deny.md (Claude and Codex both block on 2).
 Fail open: bad stdin, a missing or corrupt policy, or any exception exits 0 with a short stderr notice, so a bug never
@@ -34,7 +39,7 @@ Runs under Python 3.9 (macOS /usr/bin/python3): no tomllib, no `match`, no runti
 """
 from __future__ import annotations
 
-import glob as globmod
+import fnmatch
 import json
 import os
 import re
@@ -54,7 +59,10 @@ FILE_TOOLS = {
 UNGATED = {"Glob"}
 MAX_TOKEN = 4096        # PATH_MAX; a longer token is a heredoc body or data, not a path
 MAX_TOKENS = 20000
-MAX_GLOB_HITS = 500
+MAX_GLOB_HITS = 500       # matches checked per Bash glob word; past it the word's pattern is checked too
+MAX_GLOB_SCAN = 20000     # directory entries the Bash glob walk may read in one call
+GLOB_S = 2.0              # Bash glob walk time in one call (inside BUDGET_S); past it every glob word gets the pattern check
+GLOB_MARGIN_S = 3.0       # BUDGET_S time the glob walk always leaves for the checks that follow it
 MAX_BRACE = 64
 MAX_STATES = 200000     # product-automaton budget; exhausting it counts as an overlap (blocks)
 BUDGET_S = 8.0          # whole-call analysis budget; past it the hook fails open (the settings timeout is 15 s)
@@ -109,16 +117,17 @@ def literal_runs(ats: list) -> list:
 
 
 def token_text(ats: list):
-    """A token's literals with its `*` atoms dropped and each `?` as a break, or None when it holds `**` (whose `/`
-    may be either). Under pinning every literal run of a deny pattern is spelled by token literals with only empty
-    `*` matches between them, so a run absent from this text rules the overlap out."""
+    """A token's literals with its `*` and `**` atoms dropped and each `?` as a break, or None when it holds `**/` (whose
+    `/` may be either). Under pinning every literal run of a deny pattern is spelled by token literals with only empty
+    wildcard matches between them, so a run absent from this text rules the overlap out. A `**` not followed by `/` has
+    no literal move (unlike `**/`), so it drops out like `*` (2026-11-04: `f(**kw0)` in a heredoc cost 80 ms a word)."""
     out = []
     for kind, c in ats:
         if kind == LIT:
             out.append(c)
         elif kind == QM:
             out.append("\x00")
-        elif kind != STAR:
+        elif kind not in (STAR, DSTAR):
             return None
     return "".join(out)
 
@@ -488,6 +497,17 @@ def concrete(path: str, cwd: str) -> list:
     return seen
 
 
+_scandir = os.scandir   # the Bash glob walk's directory reader (a test replaces it with a synthetic tree)
+_SEG_RX = {}
+
+
+def seg_regex(seg: str):
+    rx = _SEG_RX.get(seg)
+    if rx is None:
+        rx = _SEG_RX[seg] = re.compile(fnmatch.translate(seg))
+    return rx
+
+
 class Checker:
     def __init__(self, policy: Policy, cwd: str):
         self.policy = policy
@@ -498,6 +518,8 @@ class Checker:
             real = cwd
         self.cwds = [cwd] if real == cwd else [cwd, real]
         self._words = {}
+        self._scanned = 0        # directory entries the glob walk has read in this call
+        self._glob_until = None  # the glob walk's deadline, set on its first use
 
     def path(self, raw: str):
         """(rule, shown path) for a literal path, or None."""
@@ -520,19 +542,83 @@ class Checker:
                 return found
         return None
 
+    def expand(self, base: str, segs: list, state: dict):
+        """Paths under `base` (taken literally) matching the glob segments, depth first and lazily, as the shell expands
+        them: a wildcard segment never matches a leading `.`; a literal segment is joined as is (and followed, as the
+        shell does). A symlinked directory matched by a wildcard is not entered (`/proc/*/root` and `a -> ..` loop);
+        a final match may be a symlink (the caller checks its realpath). Every entry read counts against MAX_GLOB_SCAN
+        and the call's GLOB_S deadline; hitting either, or skipping a symlinked directory, sets state["complete"] False."""
+        if self._glob_until is None:
+            self._glob_until = min(time.monotonic() + GLOB_S, _DEADLINE[0] - GLOB_MARGIN_S)
+        until = self._glob_until
+        stack = [(base, 0)]
+        while stack:
+            d, i = stack.pop()
+            seg = segs[i]
+            last = i == len(segs) - 1
+            if not GLOB_CHARS.intersection(seg):
+                self._scanned += 1
+                if self._scanned > MAX_GLOB_SCAN or time.monotonic() > until:
+                    state["complete"] = False
+                    return
+                p = os.path.join(d, seg)
+                if last:
+                    if os.path.lexists(p):
+                        yield p
+                elif os.path.isdir(p):
+                    stack.append((p, i + 1))
+                continue
+            rx = seg_regex(seg)
+            dot = seg.startswith(".")
+            found, sub = [], []
+            try:
+                it = _scandir(d)
+            except OSError:
+                continue
+            try:
+                with it:
+                    for e in it:   # reading can fail midway too (EACCES on /proc/1/map_files): the shell sees no more
+                        self._scanned += 1
+                        if self._scanned > MAX_GLOB_SCAN or time.monotonic() > until:
+                            state["complete"] = False
+                            return
+                        name = e.name
+                        if (name[:1] == "." and not dot) or not rx.match(name):
+                            continue
+                        p = os.path.join(d, name)
+                        if last:
+                            found.append(p)
+                            continue
+                        try:
+                            if e.is_symlink():
+                                state["complete"] = False
+                            elif e.is_dir(follow_symlinks=False):
+                                sub.append((p, i + 1))
+                        except OSError:
+                            continue
+            except OSError:
+                pass
+            for p in found:
+                yield p
+            stack.extend(reversed(sub))
+
     def _glob_one(self, raw: str, pat: str):
-        full = pat if os.path.isabs(pat) else os.path.join(globmod.escape(self.cwd), pat)
+        base = "/" if os.path.isabs(pat) else self.cwd
+        segs = [x for x in pat.split("/") if x]
+        state = {"complete": True}
         n = 0
-        for h in globmod.iglob(full):   # lazy: a huge expansion (`/*/*/*/*/*/*`) stays inside the budget
-            tick()
-            n += 1
-            found = self.path(h)
-            if found:
-                return found
-            if n >= MAX_GLOB_HITS:
-                break
-        if n:
+        if segs:
+            for h in self.expand(base, segs, state):
+                n += 1
+                found = self.path(h)
+                if found:
+                    return found
+                if n >= MAX_GLOB_HITS:
+                    state["complete"] = False
+                    break
+        if n and state["complete"]:
             return None
+        # No match, or a walk cut short: the pattern itself (so a bound never lets a word through unchecked).
         if os.path.isabs(pat):
             hit = self.policy.pattern_verdict(pat)
             return (hit, raw) if hit else None
@@ -626,31 +712,73 @@ def grep_walk(policy: Policy, roots: list, reach):
             it = os.scandir(os.path.join(roots[0], rel) if rel else roots[0])
         except OSError:
             continue
-        with it:
-            for e in it:
-                n += 1
-                if n > MAX_WALK_ENTRIES or (n % 256 == 0 and time.monotonic() > deadline):
-                    return None, True
-                r = rel + "/" + e.name if rel else e.name
-                try:
-                    is_dir = e.is_dir(follow_symlinks=False)
-                except OSError:
-                    is_dir = False
-                if is_dir:
-                    if e.name in WALK_SKIP:
+        try:
+            with it:
+                for e in it:   # reading can fail midway (EACCES): ripgrep cannot read the rest either
+                    n += 1
+                    if n > MAX_WALK_ENTRIES or (n % 256 == 0 and time.monotonic() > deadline):
+                        return None, True
+                    r = rel + "/" + e.name if rel else e.name
+                    try:
+                        is_dir = e.is_dir(follow_symlinks=False)
+                    except OSError:
+                        is_dir = False
+                    if is_dir:
+                        if e.name in WALK_SKIP:
+                            continue
+                        if depth + 1 > MAX_WALK_DEPTH:
+                            truncated = True
+                            continue
+                        todo.append((r, depth + 1))
                         continue
-                    if depth + 1 > MAX_WALK_DEPTH:
-                        truncated = True
-                        continue
-                    todo.append((r, depth + 1))
-                    continue
-                for root in roots:
-                    p = root.rstrip("/") + "/" + r
-                    if policy.any_deny.fullmatch(p):
-                        rule = policy.verdict(p)
-                        if rule and reach(r):
-                            return (rule, p), False
+                    for root in roots:
+                        p = root.rstrip("/") + "/" + r
+                        if policy.any_deny.fullmatch(p):
+                            rule = policy.verdict(p)
+                            if rule and reach(r):
+                                return (rule, p), False
+        except OSError:
+            continue
     return None, truncated
+
+
+# ripgrep's file types (`rg --type-list`, 2026-11-04) for Grep's `type`: the file names each one reads. A type not here
+# leaves the walk unfiltered (every file counts), which can only block more.
+RG_TYPES = {
+    "py": ("*.py", "*.pyi"),
+    "js": ("*.js", "*.jsx", "*.mjs", "*.cjs", "*.vue"),
+    "ts": ("*.ts", "*.tsx", "*.mts", "*.cts"),
+    "go": ("*.go",),
+    "rust": ("*.rs",),
+    "java": ("*.java", "*.jsp", "*.jspx", "*.properties"),
+    "c": ("*.[chH]", "*.[chH].in", "*.cats"),
+    "cpp": ("*.[ChH]", "*.cc", "*.[ch]pp", "*.[ch]xx", "*.hh", "*.inl", "*.[ChH].in", "*.cc.in", "*.[ch]pp.in",
+            "*.[ch]xx.in", "*.hh.in"),
+    "sh": ("*.sh", "*.bash", "*.zsh", "*.ksh", "*.csh", "*.tcsh", "*.bashrc", "*.cshrc", "*.kshrc", "*.zshrc",
+           ".bashrc", "bashrc", ".bash_profile", "bash_profile", ".bash_login", "bash_login", ".bash_logout",
+           "bash_logout", ".profile", "profile", ".login", ".logout", ".cshrc", ".kshrc", ".tcshrc", ".zshrc",
+           "zshrc", ".zshenv", "zshenv", ".zprofile", "zprofile", ".zlogin", "zlogin", ".zlogout", "zlogout"),
+    "md": ("*.md", "*.markdown", "*.mdown", "*.mdwn", "*.mkd", "*.mkdn", "*.mdx"),
+    "json": ("*.json", "*.jsonl", "*.sarif", "composer.lock"),
+    "yaml": ("*.yaml", "*.yml"),
+    "toml": ("*.toml", "Cargo.lock"),
+    "rb": ("*.rb", "*.gemspec", "*.rbw", "Gemfile", ".irbrc", "Rakefile", "config.ru"),
+    "php": ("*.php", "*.php3", "*.php4", "*.php5", "*.php7", "*.php8", "*.pht", "*.phtml"),
+    "swift": ("*.swift",),
+    "kotlin": ("*.kt", "*.kts"),
+    "html": ("*.htm", "*.html", "*.ejs"),
+    "css": ("*.css", "*.scss"),
+}
+
+
+def rg_type_filter(t: str, fold: bool):
+    """A test on a path relative to the Grep root for a known ripgrep type (its base name against the type's globs),
+    or None for an unknown type."""
+    globs = RG_TYPES.get(t)
+    if globs is None:
+        return None
+    rx = re.compile("|".join("(?:%s)" % fnmatch.translate(g) for g in globs), re.IGNORECASE if fold else 0)
+    return lambda rel: bool(rx.match(rel.rsplit("/", 1)[-1]))
 
 
 def check_grep(ck: Checker, policy: Policy, ti: dict, cwd: str):
@@ -663,6 +791,17 @@ def check_grep(ck: Checker, policy: Policy, ti: dict, cwd: str):
     root = os.path.normpath(os.path.join(cwd, expand_home(raw or cwd)))
     g = ti.get("glob") if isinstance(ti.get("glob"), str) and ti.get("glob").strip() else None
     gg = GrepGlob(g, policy.fold) if g else None
+    t = ti.get("type").strip() if isinstance(ti.get("type"), str) and ti.get("type").strip() else None
+    tf = rg_type_filter(t, policy.fold) if t else None
+    if t and tf is None:
+        narrow += " (type %r is not one this hook maps to file names, so it narrows nothing here: use glob, e.g. " \
+                  "'*.%s')" % (t, t)
+
+    def reach(rel):
+        if tf is not None and not tf(rel):
+            return False
+        return gg.reaches(rel) if gg else True
+
     if os.path.isdir(root):
         roots = [root]
         try:
@@ -671,19 +810,21 @@ def check_grep(ck: Checker, policy: Policy, ti: dict, cwd: str):
                 roots.append(real)
         except (OSError, ValueError):
             pass
-        hit, truncated = grep_walk(policy, roots, gg.reaches if gg else (lambda rel: True))
+        hit, truncated = grep_walk(policy, roots, reach)
         if hit:
             name = os.path.basename(hit[1])
             return hit + ("Grep reads hidden files; %s or a glob that leaves it out (e.g. '*.py', or '!%s')"
                           % (narrow, name),)
-        if truncated:
-            for form in roots:
-                anc = policy.anchor_under(form)
-                if anc:
-                    return (anc[1], form, "this tree holds %s and is too big to check; %s (a project directory)"
-                            % (anc[0], narrow))
+        if not truncated:
+            return None   # the whole tree was seen: what the glob reaches is known, so its text proves nothing more
+        for form in roots:
+            anc = policy.anchor_under(form)
+            if anc:
+                return (anc[1], form, "this tree holds %s and is too big to check; %s (a project directory)"
+                        % (anc[0], narrow))
     elif os.path.exists(root):
         return None   # a file: ripgrep reads just it, and ck.path checked it
+    # The root is missing or the walk was cut short: the glob's text stands in for the files not seen.
     if gg:
         base = root.rstrip("/") + "/"
         for alt in gg.positives:
@@ -743,12 +884,22 @@ def strings(obj):
 
 
 def check_command(ck: Checker, cmd: str):
+    """Patch headers, then every literal word (cheap), then the glob words (a bounded walk, then their pattern)."""
     shell, headers = split_patch(cmd) if PATCH_BEGIN.search(cmd) else (cmd, [])
     for p in headers:
         found = ck.path(p)
         if found:
             return found
-    for w in shell_words(shell):
+    words = shell_words(shell)
+    globs = []
+    for w in words:
+        if is_glob(w):
+            globs.append(w)
+            continue
+        found = ck.word(w)
+        if found:
+            return found
+    for w in globs:
         found = ck.word(w)
         if found:
             return found
