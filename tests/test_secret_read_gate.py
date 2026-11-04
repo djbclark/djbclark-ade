@@ -266,14 +266,38 @@ def test_grep_type_narrows_the_walk(env):
     (env["proj"] / "src" / "app.py").write_text("x\n")
     (env["proj"] / ".env").write_text("A=1\n")
     assert blocked(env, "Grep", {"pattern": "x"})
-    for t in ("py", "js", "ts", "go", "rust", "java", "c", "cpp", "sh", "md", "json", "yaml", "toml", "rb", "php",
-              "swift", "kotlin", "html", "css"):
+    for t in TYPE_NAMES:
         assert not blocked(env, "Grep", {"pattern": "x", "type": t}), t
-    assert not blocked(env, "Grep", {"pattern": "x", "type": "py", "glob": "*"})
+    assert not blocked(env, "Grep", {"pattern": "x", "type": "py", "glob": "!.env"})   # `!` alone combines with type
     rc, err = run(env, "Grep", {"pattern": "x", "type": "nosuchtype"})   # unknown: unfiltered, and the hint says glob
-    assert rc == 2 and "glob" in err and "nosuchtype" in err
+    assert rc == 2 and "glob" in err and "nosuchtype" in err and "'*.nosuchtype'" not in err
     (env["proj"] / ".env.py").write_text("A=1\n")                       # a denied file the type does read
     assert blocked(env, "Grep", {"pattern": "x", "type": "py"})
+
+
+TYPE_NAMES = ("py", "js", "ts", "go", "rust", "java", "c", "cpp", "sh", "md", "json", "yaml", "toml", "ruby", "php",
+              "swift", "kotlin", "html", "css")
+
+
+@pytest.mark.parametrize("inp,want", [
+    # Adversary round 3 (2026-11-04), checked against /usr/bin/rg 14.1.0: a positive glob decides alone, whatever the
+    # type (`rg --hidden -t ts -g 'src/**' -l SECRET` lists src/.env), and the last matching glob wins.
+    ({"type": "ts", "glob": "src/**"}, True),
+    ({"type": "py", "glob": "*"}, True),
+    ({"type": "py", "glob": ".env"}, True),
+    ({"type": "ts"}, False),
+    ({"type": "ts", "glob": "!.env"}, False),
+    ({"type": "ts", "glob": "!src"}, False),
+    ({"glob": "!.env *"}, True),                    # split on whitespace: `-g '!.env' -g '*'` reads .env
+    ({"glob": "* !.env"}, False),
+    ({"glob": "src/** !src/.env"}, False),
+    ({"glob": "!src/.env src/**"}, True),
+])
+def test_grep_glob_and_type_combine_as_ripgrep_does(env, inp, want):
+    (env["proj"] / "src").mkdir()
+    (env["proj"] / "src" / ".env").write_text("SECRET=1\n")
+    (env["proj"] / "src" / "a.ts").write_text("SECRET\n")
+    assert blocked(env, "Grep", dict(inp, pattern="SECRET")) is want, inp
 
 
 def test_grep_type_filter_names():
@@ -283,7 +307,26 @@ def test_grep_type_filter_names():
     yml = hook.rg_type_filter("yaml", False)
     assert yml(".config/gh/hosts.yml")
     assert hook.rg_type_filter("nosuchtype", False) is None
+    assert hook.rg_type_filter("rb", False) is None              # ripgrep's Ruby type is `ruby`
+    assert hook.rg_type_filter("ruby", False)("Gemfile")
     assert hook.rg_type_filter("c", True)("A.H")
+    assert sorted(hook.RG_TYPES) == sorted(TYPE_NAMES)
+
+
+def test_grep_type_map_covers_ripgrep():
+    """Every mapped type is a ripgrep type, and the map lists every name ripgrep reads for it (more is harmless)."""
+    rg = shutil.which("rg")
+    if rg is None:
+        pytest.skip("no rg on this machine")
+    out = subprocess.run([rg, "--type-list"], capture_output=True, text=True, timeout=30).stdout
+    listed = {}
+    for line in out.splitlines():
+        name, _, globs = line.partition(":")
+        listed[name.strip()] = {g.strip() for g in globs.split(",") if g.strip()}
+    hook = load_hook()
+    for t, globs in hook.RG_TYPES.items():
+        assert t in listed, t
+        assert listed[t] <= set(globs), (t, listed[t] - set(globs))
 
 
 def test_grep_walk_skips_vcs_dirs_and_does_not_follow_symlinks(env):
@@ -346,6 +389,16 @@ def test_grep_glob_readings():
     assert g.reaches("a.key")
     g = hook.GrepGlob("src/*.py", False)
     assert g.reaches("src/a.py") and not g.reaches("lib/a.py")
+    g = hook.GrepGlob("!.env *", False)            # the last matching glob decides (ripgrep's override order)
+    assert g.reaches(".env")
+    g = hook.GrepGlob("* !.env", False)
+    assert not g.reaches(".env") and g.reaches("a.py")
+    g = hook.GrepGlob("!.envdir/", False)          # a trailing `/` excludes directories only
+    assert g.reaches(".envdir") and not g.reaches(".envdir/f")
+    py = hook.rg_type_filter("py", False)
+    assert hook.GrepGlob("*", False).reaches(".env", py)        # a positive glob reads it whatever the type
+    assert not hook.GrepGlob("!x", False).reaches(".env", py)   # `!` only: the type still filters
+    assert hook.GrepGlob("!x", False).reaches("a.py", py)
 
 
 # ---- Bash ------------------------------------------------------------------------------------------------------------
@@ -428,11 +481,85 @@ def test_heredoc_with_double_star_words_is_fast_and_allowed(env):
     assert time.monotonic() - t0 < 2.0
 
 
-def test_token_text_drops_double_star_but_not_double_star_slash():
+def test_token_items_and_spells():
     hook = load_hook()
-    assert hook.token_text(hook.atoms("**kw0")) == "kw0"
-    assert hook.token_text(hook.atoms("a**")) == "a"
-    assert hook.token_text(hook.atoms("a/**/b")) is None
+    items = hook.token_items
+    assert items(hook.atoms("**kw0")) == list("kw0")
+    assert items(hook.atoms("a**")) == ["a"]
+    assert items(hook.atoms("a/**/b")) == ["a", "/", None, "b"]
+    assert items(hook.atoms("a?b")) == ["a", "\x00", "b"]
+    sp = hook.spells
+    assert sp(items(hook.atoms("/h/.ssh/id_*")), "/h/.ssh/")
+    assert sp(items(hook.atoms("**/node_modules/**")), "/node")
+    assert not sp(items(hook.atoms("**/node_modules/**")), ".env")
+    assert sp(items(hook.atoms("x**/.env")), "x/.env") and sp(items(hook.atoms("x**/.env")), "x.env")
+    assert sp(items(hook.atoms(".e*nv")), ".env")             # `*` may match "" between the deny's literals
+    assert not sp(items(hook.atoms(".e?nv")), ".env")         # `?` must take a character by a wildcard move
+    assert sp(items(hook.atoms("**/.e**/nv")), ".env")        # `**/` spells "" ...
+    assert not sp(items(hook.atoms("**/.e**/v")), ".env")     # ... or "/", never "n"
+
+
+def test_double_star_slash_prefilter_keeps_verdicts():
+    """The `**/` pre-filter only skips work: the verdict for each token equals the full engine's."""
+    hook = load_hook()
+    deny = [".env", ".env.*", "*.key", "*-key.pem", "privkey*.pem", "id_rsa", "~/.ssh/**", "~/.aws/credentials"]
+    pol = hook.Policy(deny, [".env.example", "*.pub", "~/.ssh/config"], homes=["/h"], fold=False)
+    toks = ["**/node_modules/**", "**/*.log", "**/.env", "**/.env*", "**/*.key", "/h/**/.ssh/**", "/h/.ssh/**",
+            "**/id_*", "**/privkey*", "**/.e**/nv", "**/*.ke?", "/h/**/credentials", "**/x/**/*.pem", "**/*-key.pem"]
+    for tok in toks:
+        ats = hook.atoms(tok, "/p/")
+        full = None
+        for r in pol.deny:
+            if hook.nonempty([ats, r.atoms], [a.atoms for a in pol.allow], dotfile_first=True, pin_first=True):
+                full = r.name
+                break
+        assert pol.pattern_verdict(tok, "/p/") == full, tok
+
+
+def gitignore_heredoc():
+    pats = ["**/node_modules/**", "**/*.log", "dist/", "**/build/**", "**/.cache/**", "**/coverage/**", "*.tmp",
+            "**/__pycache__/**", "**/*.pyc", "**/.DS_Store", "**/target/**", "out/"]
+    lines = [p.replace("node_modules", "nm%d" % i).replace("build", "b%d" % i).replace("*.log", "*.log%d" % i)
+             .replace("dist/", "d%d/" % i) for i, p in ((i, pats[i % len(pats)]) for i in range(60))]
+    return "cat > .gitignore <<'EOF'\n" + "\n".join(lines) + "\nEOF"
+
+
+def test_gitignore_heredoc_with_double_star_lines_is_fast(env):
+    """Adversary round 3 (2026-11-04): each `**/` word took 0.1-0.7 s in the pattern check, so a 60-line .gitignore
+    heredoc followed by `cat ~/.ssh/id_*` ran past the 8 s budget and failed open."""
+    for d in ("src/a", "src/b", "web"):
+        (env["proj"] / d).mkdir(parents=True)
+        (env["proj"] / d / "x.py").write_text("x\n")
+    t0 = time.monotonic()
+    rc, err = run(env, "Bash", {"command": gitignore_heredoc() + "\ncat ~/.ssh/id_*"})
+    assert rc == 2 and "~/.ssh/**" in err, err
+    assert time.monotonic() - t0 < 3.0
+    t0 = time.monotonic()
+    assert run(env, "Bash", {"command": gitignore_heredoc()}) == (0, "")
+    assert time.monotonic() - t0 < 3.0
+
+
+def test_slow_glob_word_is_retried_after_the_others(monkeypatch, tmp_path):
+    hook = load_hook()
+    ck = checker(hook, tmp_path)
+    real_pv = ck.policy.pattern_verdict
+
+    def slow_pv(glob_str, prefix="", dotfile=True):
+        if "zzslowzz" in glob_str:
+            while True:
+                hook.tick()
+        return real_pv(glob_str, prefix, dotfile)
+    monkeypatch.setattr(ck.policy, "pattern_verdict", slow_pv)
+    monkeypatch.setattr(hook, "WORD_S", 0.2)
+    hook._DEADLINE[0] = time.monotonic() + 5.0
+    t0 = time.monotonic()
+    found = hook.check_command(ck, "ls zzslowzz* %s/.ssh/id_*" % tmp_path)   # the slow word comes first
+    assert found and found[0] == "~/.ssh/**"
+    assert time.monotonic() - t0 < 1.0
+    hook._DEADLINE[0] = time.monotonic() + 0.5
+    with pytest.raises(hook.OutOfTime):                                     # alone, it still ends in fail open
+        hook.check_command(hook.Checker(ck.policy, str(tmp_path)), "ls zzslowzz*")
+    assert hook._WORD_DEADLINE[0] == float("inf")
 
 
 # ---- Codex payloads ---------------------------------------------------------------------------------------------------
@@ -642,8 +769,67 @@ def test_bash_glob_walk_survives_a_symlink_loop(tmp_path):
     assert time.monotonic() - t0 < 2.0
     assert ck._scanned < 50                                 # the symlinked directories were not entered
     state = {"complete": True}
-    assert sorted(ck.expand(str(root), ["*", "*"], state)) == [str(root / "a" / "real"), str(root / "a" / "up")]
+    got = list(ck.expand(str(root), ["*", "*"], state))
+    assert sorted(p for p, m in got if m) == [str(root / "a" / "real"), str(root / "a" / "up")]
+    assert [p for p, m in got if not m] == [str(root / "self")]   # the link itself is handed back to be checked
     assert state["complete"] is False                       # `self` was skipped, so the walk says so
+    t0 = time.monotonic()
+    assert ck.glob(str(root) + "/**/zzqq*") is None         # `**` does not enter symlinked directories either
+    assert time.monotonic() - t0 < 2.0
+
+
+def test_bash_glob_wildcard_symlinked_dir_is_checked_itself(env):
+    """Adversary round 3 (2026-11-04): `d -> ~/.ssh` matched by a wildcard was skipped unchecked."""
+    (env["home"] / ".ssh" / "id_ed25519").write_text("PRIVATE\n")
+    (env["proj"] / "d").symlink_to(env["home"] / ".ssh")
+    rc, err = run(env, "Bash", {"command": "cat */id_*"})
+    assert rc == 2 and "~/.ssh/**" in err
+    assert blocked(env, "Bash", {"command": "ls */x"})
+    (env["proj"] / "d").unlink()
+    (env["proj"] / "d").symlink_to(env["tmp"])               # a link to a harmless directory passes
+    (env["proj"] / "notes").symlink_to(env["proj"] / "README") # a link to a file is not one the walk enters
+    assert not blocked(env, "Bash", {"command": "cat */x"})
+
+
+def test_bash_double_star_is_recursive(env):
+    """Adversary round 3 (2026-11-04): `**` (zsh's default, bash's globstar) was walked as `*`, so `grep -n TODO **/*`
+    passed beside a/b/server.key."""
+    (env["proj"] / "a" / "b").mkdir(parents=True)
+    (env["proj"] / "a" / "b" / "notes.txt").write_text("x\n")
+    assert not blocked(env, "Bash", {"command": "grep -n TODO **/*"})
+    (env["proj"] / "a" / "b" / "server.key").write_text("K\n")
+    for cmd in ("grep -n TODO **/*", "grep -rn TODO **", "cat a/**/*", "cat **/b/*"):
+        assert blocked(env, "Bash", {"command": cmd}), cmd
+    assert not blocked(env, "Bash", {"command": "cat **/*.txt"})
+
+
+def test_bash_double_star_walk_rules(tmp_path):
+    hook = load_hook()
+    (tmp_path / "a" / "b").mkdir(parents=True)
+    (tmp_path / "a" / "b" / "f").write_text("x\n")
+    (tmp_path / "a" / "g").write_text("x\n")
+    (tmp_path / ".hid" / "c").mkdir(parents=True)
+    (tmp_path / ".hid" / "c" / "f").write_text("x\n")
+    ck = checker(hook, tmp_path)
+    state = {"complete": True}
+    got = sorted(p for p, m in ck.expand(str(tmp_path), ["**", "f"], state) if m)
+    assert got == [str(tmp_path / "a" / "b" / "f")] and state["complete"]   # zero or more levels, never hidden ones
+    got = sorted(p for p, m in ck.expand(str(tmp_path), ["**"], state) if m)
+    assert got == [str(tmp_path / "a"), str(tmp_path / "a" / "b"), str(tmp_path / "a" / "b" / "f"),
+                   str(tmp_path / "a" / "g")]
+    got = sorted(p for p, m in ck.expand(str(tmp_path), ["a", "**", "*"], state) if m)
+    assert str(tmp_path / "a" / "g") in got and str(tmp_path / "a" / "b" / "f") in got
+
+
+def test_bash_double_star_walk_is_bounded(monkeypatch, tmp_path):
+    hook = load_hook()
+    scandir, _ = deep_tree(files=True)
+    monkeypatch.setattr(hook, "_scandir", scandir)
+    ck = checker(hook, tmp_path)
+    t0 = time.monotonic()
+    assert ck.glob("/**/zzqq*") is None
+    assert time.monotonic() - t0 < 2.0 and ck._scanned == hook.MAX_GLOB_SCAN + 1
+    assert ck.glob("/**/.env*") is not None                 # cut short: the pattern check still blocks
 
 
 def test_bash_glob_final_symlink_match_is_checked_through_realpath(env):
@@ -664,7 +850,7 @@ def test_unreadable_directory_midway_is_skipped_not_an_error(monkeypatch, tmp_pa
     monkeypatch.setattr(hook, "_scandir", lambda path: Failing([]))
     ck = checker(hook, tmp_path)
     state = {"complete": True}
-    assert list(ck.expand("/", ["zzqq*"], state)) == ["/zzqq1"] and state["complete"]
+    assert list(ck.expand("/", ["zzqq*"], state)) == [("/zzqq1", True)] and state["complete"]
     monkeypatch.setattr(hook.os, "scandir", lambda path: Failing([]))
     assert hook.grep_walk(ck.policy, [str(tmp_path)], lambda rel: True) == (None, False)
 
@@ -677,8 +863,8 @@ def test_bash_glob_walk_hidden_names_follow_the_shell(tmp_path):
     (tmp_path / "vis" / "a.txt").write_text("x\n")
     ck = checker(hook, tmp_path)
     state = {"complete": True}
-    assert list(ck.expand(str(tmp_path), ["*", "a.txt"], state)) == [str(tmp_path / "vis" / "a.txt")]
-    assert list(ck.expand(str(tmp_path), [".h*", "*.txt"], state)) == [str(tmp_path / ".hid" / "a.txt")]
+    assert list(ck.expand(str(tmp_path), ["*", "a.txt"], state)) == [(str(tmp_path / "vis" / "a.txt"), True)]
+    assert list(ck.expand(str(tmp_path), [".h*", "*.txt"], state)) == [(str(tmp_path / ".hid" / "a.txt"), True)]
 
 
 def test_bash_deep_root_glob_repro_is_fast(env):
