@@ -101,6 +101,41 @@ PASEO_STATUS = {"running": "working", "idle": "idle"}
 PROC_AGENTS = {"claude": "claude", "codex": "codex", "cursor-agent": "cursor", "opencode": "opencode",
                "zcode": "zcode", "pi": "pi", "copilot": "copilot", "qwen": "qwen", "agy": "agy",
                "muse": "muse", "cline": "cline", "hermes": "hermes", "grok": "grok", "devin": "devin"}
+
+
+def omp_executable(argv0, argv):
+    """True for an omp process: the `omp` executable itself (also `omp -p`, `omp --mode rpc`, `omp __omp_worker_*`), or node/bun
+    running a script named `omp` or omp's `cli.js` entry (under an `oh-my-pi` or `@oh-my-pi` directory). A program that only
+    has `omp` among its arguments (`vim omp`, `less omp`) is not one. (omp's own package is `@oh-my-pi/pi-coding-agent`, the same directory
+    name as Pi's: told apart by the `oh-my-pi` scope, and `exact_agent` tests omp before Pi, so an omp process is never reported as Pi.)"""
+    exe = os.path.basename(argv0 or (argv[0] if argv else ""))
+    if exe == "omp":
+        return True
+    if exe in {"node", "nodejs", "bun"} and len(argv) > 1:
+        script = argv[1]
+        return os.path.basename(script) == "omp" or (
+            os.path.basename(script) in {"cli.js", "cli.ts"} and bool({"oh-my-pi", "@oh-my-pi"} & set(script.split("/"))))
+    return False
+
+
+# THE exact-executable table (2026-11-03): agent label -> test(argv0, argv) that is true only for a process that IS that agent (its
+# own executable, or an interpreter running its script), never for a program that merely has the agent's name as an argument
+# (`vim omp`). Every other label is UNREVIEWED: it keeps the older rule, the basename of argv0 or of one of the first two command-line
+# words is a PROC_AGENTS name. Flipping a row is one entry here; relay.py (`named_hits`, `descends_from`, `turn_is_above`) reads this.
+EXACT_EXECUTABLES = {"omp": omp_executable, "pi": lambda argv0, argv: _pi_executable(argv0, argv)}
+
+
+def exact_agent(argv0, argv):
+    """The label of the EXACT_EXECUTABLES row that process (argv0, argv) is, else None; one label per process, omp tested first (its
+    `cli.js` is named like Pi's, so a Pi test that cannot tell them apart never claims an omp). Unreviewed agents are never returned."""
+    return next((label for label, is_it in EXACT_EXECUTABLES.items() if is_it(argv0, argv)), None)
+
+
+def legacy_agents(words):
+    """The labels of the unreviewed agents (PROC_AGENTS names outside EXACT_EXECUTABLES) among the basenames of WORDS, in order."""
+    return [PROC_AGENTS[n] for n in map(os.path.basename, words) if n in PROC_AGENTS and PROC_AGENTS[n] not in EXACT_EXECUTABLES]
+
+
 PROC_SKIP = re.compile(r"(acp|mcp|--acp|gateway|dashboard|language-server|lsp|sleeper|serve\b|Helper|node_modules|"
                        r"claude-agent-acp|codex-acp| -p |--print|exec |run |\bresume-globally\b)")
 STRIP = re.compile(r"<(system-reminder|local-command-[a-z]+|command-[a-z]+|pasted_content)\b.*?</\1>", re.DOTALL)

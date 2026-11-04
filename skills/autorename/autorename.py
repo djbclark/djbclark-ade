@@ -80,6 +80,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+import unicodedata
 from collections.abc import Iterable
 from datetime import datetime, timezone
 from pathlib import Path
@@ -87,6 +88,8 @@ from typing import Any
 
 MARK = '"type":"custom-title"'
 MAX_LEN = 80
+INVISIBLE = frozenset({"Cc", "Cf", "Zl", "Zp"})
+JOINERS = frozenset({"\u200c", "\u200d"})
 ZCODE_SID_RE = re.compile(r"\.zcode/cli/exec/(sess_[0-9a-fA-F-]+)/")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "session-finder"))
 import claude_identity  # noqa: E402  # the shared Claude session-id resolver
@@ -95,8 +98,10 @@ import pi_native  # noqa: E402
 
 
 def clean(title: str) -> str:
-    # C0/C1 controls, line/paragraph separators and bidi controls; the Pi bridge rejects the same set.
-    title = re.sub(r"[\x00-\x1f\x7f-\x9f\u2028\u2029\u202a-\u202e\u2066-\u2069]+", " ", title)
+    # Unicode categories Cc (C0/C1 controls), Cf (bidi marks and isolates, zero-width space/word joiner, BOM), Zl and Zp (line and
+    # paragraph separators); the Pi and omp bridges reject the same set. U+200C/U+200D (ZWNJ/ZWJ) stay: they are part of the text of
+    # Persian, Devanagari and emoji sequences (a ZWJ family), and splitting a word at them changes it.
+    title = "".join(" " if unicodedata.category(c) in INVISIBLE and c not in JOINERS else c for c in title)
     title = re.sub(r"\s+", " ", title.replace('"', "")).strip().strip("'`")
     return title[:MAX_LEN].rstrip()
 

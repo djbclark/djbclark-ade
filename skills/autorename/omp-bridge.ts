@@ -80,6 +80,8 @@ export default function (pi: Pi) {
     const result: Record<string, unknown> = { nonce, title, accepted: false, error: null };
     try {
       if (!title) throw new Error("empty title");
+      // Same set autorename.py clean() strips: controls, bidi/zero-width/format characters, line and paragraph separators (U+200C/U+200D stay).
+      if (/(?![\u200c\u200d])[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(title)) throw new Error("invalid title");
       // "user": omp's automatic titling must not overwrite it afterwards.
       result.accepted = (await pi.setSessionName(title, "user")) !== false;
       publish(current);

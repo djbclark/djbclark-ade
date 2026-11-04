@@ -84,10 +84,12 @@ def update(db, mods, only=()):
             )
             db.execute("INSERT OR REPLACE INTO files VALUES (?,?,?,?,?,?,?)",
                        (s["key"], m.AGENT, s["sid"], s["fp"], cwd or "", title or "", s["mtime"]))
-            for old_key in s.get("supersedes", ()):
+            for old in s.get("supersedes", ()):
+                # a bare key was stored under this session's sid; a (key, sid) pair under another one (a sid once taken from a file name)
+                old_key, old_sid = (old, s["sid"]) if isinstance(old, str) else old
                 if old_key != s["key"] and db.execute(
                     "SELECT 1 FROM files WHERE key=? AND agent=? AND sid=? AND cwd=?",
-                    (old_key, m.AGENT, s["sid"], cwd or ""),
+                    (old_key, m.AGENT, old_sid, cwd or ""),
                 ).fetchone():
                     db.execute("DELETE FROM msgs WHERE key=?", (old_key,))
                     db.execute("DELETE FROM files WHERE key=?", (old_key,))
@@ -272,7 +274,7 @@ def fleet_running(agents):
             # an exited ACP launch stays in launches.jsonl with status idle: fleet marks it finished
             if r.get("finished") or r.get("ended") or (r.get("launch") or {}).get("result") is not None:
                 continue
-            sid = (r.get("transcript") or r.get("sid")) if r["agent"] == "pi" else r.get("sid")
+            sid = (r.get("transcript") or r.get("sid")) if r["agent"] in ("pi", "omp") else r.get("sid")
             ident = history_identity(r["agent"], sid, r.get("cwd") or "") if sid else None
             # A Pi ID (+cwd) does not name a storage root: only a file identity is exact; the rest stays LIVE?
             if ident and (r["agent"] != "pi" or ident[1] == "file"):
@@ -375,22 +377,44 @@ def _main() -> int:
     resume = {m.AGENT: getattr(m, "RESUME", "") for m in mods}
     resume_keys = {m.AGENT for m in mods if getattr(m, "RESUME_USES_KEY", False)}
     blind = {m.AGENT for m in mods if not hasattr(m, "live")}
+    probes = {m.AGENT: m.live_among for m in mods if hasattr(m, "live_among")}
     picked = [(hit, db.execute("SELECT agent, sid, cwd, title, mtime FROM files WHERE key=?", (hit[0],)).fetchone())
               for hit in sorted(((k, *v) for k, v in best.items()), key=lambda h: h[1])[: a.limit]]
     # the fleet scan (herdr, orca, paseo, ps: seconds when a service stalls) only when a printed hit needs it
     need = blind & {row[0] for _, row in picked}
     fl_exact, fl_cwds = fleet_running(need) if need else (set(), set())
+    # An adapter's own exact check (omp: its session lease) of just the printed hits: (running, unknown) sids. A probe that
+    # raises leaves every one of its hits unknown, never ended.
+    leased, unsure, exact_keys = {}, {}, set()
+    for agent, probe in probes.items():
+        sids = sorted({row[1] for _, row in picked if row[0] == agent})
+        if sids:
+            try:
+                leased[agent], unsure[agent] = (set(x) for x in probe(sids))
+            except Exception:
+                leased[agent], unsure[agent] = set(), set(sids)
+            # a probe answers per native id: with that id in several indexed files (omp: the default store and a profile) it cannot say
+            # which copy runs, so none is exactly live (LIVE?, resume kept)
+            shared = {x for x in leased[agent]
+                      if db.execute("SELECT count(*) FROM files WHERE agent=? AND sid=?", (agent, x)).fetchone()[0] > 1}
+            leased[agent] -= shared
+            unsure[agent] |= shared
     out = []
     sys.path.insert(0, str(HERE))
     from nativeid import history_identity
     for (key, rank, role, snip, count), (agent, sid, cwd, title, mtime) in picked:
-        is_live = sid in live.get(agent, set()) or history_identity(agent, sid, cwd, key) in fl_exact
-        likely = (not is_live and agent in blind and (agent, cwd) in fl_cwds and time.time() - mtime < 600)
+        exact = sid in leased.get(agent, ())
+        is_live = (exact or sid in live.get(agent, set()) or history_identity(agent, sid, cwd, key) in fl_exact
+                   or (agent == "omp" and (agent, sid) in fl_exact))  # an omp fleet row with no transcript path: the id alone
+        likely = not is_live and (sid in unsure.get(agent, ()) or (
+            agent in blind and (agent, cwd) in fl_cwds and time.time() - mtime < 600))
         out.append({"agent": agent, "sessionId": sid, "sessionKey": key, "live": is_live,
                     "state": "LIVE?" if likely else labels.get(agent, ("LIVE", "ended"))[0 if is_live else 1], "cwd": cwd,
                     "title": title, "lastActive": time.strftime("%Y-%m-%d %H:%M", time.localtime(mtime)),
                     "hits": count, "role": role, "snippet": " ".join(snip.split()),
                     "resume": resume_hint(resume.get(agent, ""), key if agent in resume_keys else sid, cwd)})
+        if exact:
+            exact_keys.add(key)
     if info:
         sys.path.insert(0, str(HERE))  # python -I drops the script dir
         import where as _where
@@ -412,7 +436,7 @@ def _main() -> int:
                 if r["where"]["focus"]:
                     print(f"    focus: {r['where']['focus']}")
             print(f"    {r['role']}: {clean(r['snippet'])}")
-            if r["resume"] and (not r["live"] or r["agent"] in blind):  # fleet-derived LIVE is not authoritative
+            if r["resume"] and (not r["live"] or (r["agent"] in blind and r["sessionKey"] not in exact_keys)):  # fleet-derived LIVE is not authoritative
                 print(f"    resume: {r['resume']}")
     return 0 if out else 1
 

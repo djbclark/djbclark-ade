@@ -11,6 +11,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import shlex
 import sqlite3
 import subprocess
 import sys
@@ -48,7 +49,8 @@ class AdapterTests(unittest.TestCase):
         self._tmp.cleanup()
 
     def test_omp_reads_user_and_assistant_text_only(self) -> None:
-        write_jsonl(self.home / ".omp/agent/sessions/-src-x/2026-10-31T17-00-00-000Z_abc-123.jsonl", [
+        path = self.home / ".omp/agent/sessions/-src-x/2026-10-31T17-00-00-000Z_abc-123.jsonl"
+        write_jsonl(path, [
             {"type": "title", "title": "Fix the flux capacitor"},
             {"type": "session", "id": "abc-123", "cwd": "/src/x"},
             {"type": "message", "message": {"role": "user", "content": [{"type": "text", "text": "please repair the capacitor"}]}},
@@ -58,7 +60,9 @@ class AdapterTests(unittest.TestCase):
         ])
         mod = load("omp", self.home)
         (s,) = list(mod.sessions())
-        self.assertEqual((s["key"], s["sid"]), ("omp:abc-123", "abc-123"))
+        self.assertEqual((s["key"], s["sid"]), (f"omp:{path.resolve()}", "abc-123"))
+        self.assertEqual(s["supersedes"], ["omp:abc-123"])
+        self.assertEqual(mod.RESUME(s["key"], "/src/x"), "omp --resume=abc-123")
         cwd, title, msgs = s["load"]()
         self.assertEqual((cwd, title), ("/src/x", "Fix the flux capacitor"))
         self.assertEqual(msgs, [("user", "please repair the capacitor"), ("assistant", "capacitor repaired")])
@@ -90,7 +94,7 @@ class AdapterTests(unittest.TestCase):
         write_jsonl(path, [{"type": "session", "id": "valid-id"}])
         path.with_name("timestamp_link-id.jsonl").symlink_to(path)
         mod = load("pi", self.home)
-        with mock.patch.object(mod, "_records", side_effect=AssertionError("listing must not parse")):
+        with mock.patch.object(mod, "records", side_effect=AssertionError("listing must not parse")):
             (session,) = list(mod.sessions())
         self.assertEqual(session["sid"], "valid-id")
 
@@ -223,7 +227,10 @@ class StatusTests(unittest.TestCase):
             r = subprocess.run([sys.executable, "-I", str(SF / "session-history.py"), "--json", "giraffe"],
                                env=env, capture_output=True, text=True, check=False)
             self.assertEqual(r.returncode, 0, r.stderr)
-            self.assertEqual(json.loads(r.stdout)[0]["resume"], "omp --resume='x;touch pwned'")
+            # the file name holds no valid id, so the header's "x" names the session and the hint names the file
+            (hit,) = json.loads(r.stdout)
+            self.assertEqual((hit["sessionId"], shlex.split(hit["resume"])), (
+                "x", ["omp", f"--resume={(home / '.omp/agent/sessions/-s/2026-10-31T00-00-00-000Z_x;touch pwned.jsonl').resolve()}"]))
 
 
 class HardeningTests(unittest.TestCase):
@@ -286,7 +293,8 @@ class LiveLabelTests(unittest.TestCase):
                 {"agent": "codex", "status": "failed", "sid": None, "cwd": "/launch2"}]
         with mock.patch.dict(sys.modules, {"fleet": mock.Mock(sessions=lambda: rows)}):
             exact, cwds = sh.fleet_running({"omp", "codex", "hermes"})
-        self.assertEqual(exact, {("omp", "abc-1"), ("hermes", "20261029-1"), ("hermes", "cron_17af0eeb3949_20260813_075144")})
+        # an omp fleet row's id is its transcript: the identity is that file (the same id may live in another store)
+        self.assertEqual(exact, {("omp", "file", "/h/.omp/agent/sessions/-s/2026-10-31T17-00-00-000Z_abc-1.jsonl"), ("hermes", "20261029-1"), ("hermes", "cron_17af0eeb3949_20260813_075144")})
         self.assertEqual(cwds, {("omp", "/s"), ("codex", "/c"), ("hermes", "/")})  # closed rows are not running
 
     def test_a_process_backed_unknown_row_is_running_only_while_its_process_is(self) -> None:
@@ -521,7 +529,9 @@ class SessionFindAllTests(unittest.TestCase):
         omp = {**row, "id": "L3", "agent": "omp", "sid": "/h/.omp/agent/sessions/-s/2026-10-31T17-00-00-000Z_abc-1", "name": "n3"}
         omp_run = {**running, "id": "L4", "agent": "omp", "sid": "/h/.omp/agent/sessions/-s/2026-10-31T17-00-00-000Z_run-2", "name": "n4"}
         hits = [{"agent": "codex", "sessionId": sid, "live": False, "title": "", "cwd": "/w", "snippet": "okapi", "resume": f"r {sid}"}
-                for sid in ("S-done", "S-run", "S-old", "abc-1", "run-2")]  # omp history ids are the bare uuids
+                for sid in ("S-done", "S-run", "S-old")]
+        hits += [{"agent": "omp", "sessionId": sid, "sessionKey": f"omp:/h/.omp/agent/sessions/-s/2026-10-31T17-00-00-000Z_{sid}.jsonl",
+                  "live": False, "title": "", "cwd": "/w", "snippet": "okapi", "resume": f"r {sid}"} for sid in ("abc-1", "run-2")]  # bare uuids + file keys
 
         def fake_run(argv, **kw):  # noqa: ANN001
             return subprocess.CompletedProcess(argv, 0, json.dumps(hits), "")
@@ -542,6 +552,96 @@ class SessionFindAllTests(unittest.TestCase):
         self.assertTrue(got["S-done"]["live"])  # still the fleet's row, with FINISHED set
         self.assertEqual(got["S-done"]["finished"], "done")
         self.assertEqual(got["S-old"]["status"], "ended")
+
+    def test_an_omp_fleet_transcript_with_a_noncanonical_name_matches_its_header_id(self) -> None:
+        """`daily.jsonl` with header id `header-id`: history reports `header-id`, the fleet row's id is the path; one row, and the fleet
+        liveness fallback matches (2026-11-03, review of PR 274)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            transcript = Path(tmp) / "-s" / "daily.jsonl"
+            write_jsonl(transcript, [{"type": "title", "title": ""}, {"type": "session", "id": "header-id", "cwd": "/w"}])
+            spec = importlib.util.spec_from_file_location("t_session_find_hdr", SF / "session-find.py")
+            sf = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(sf)
+            sh_spec = importlib.util.spec_from_file_location("t_sh_hdr", SF / "session-history.py")
+            sh = importlib.util.module_from_spec(sh_spec)
+            sh_spec.loader.exec_module(sh)
+            row = {"agent": "omp", "id": "L3", "sid": str(transcript), "status": "idle", "cwd": "/w", "title": "okapi work", "name": "n3",
+                   "where": "", "focus": "", "finished": ""}
+            hits = [{"agent": "omp", "sessionId": "header-id", "sessionKey": f"omp:{transcript.resolve()}", "live": False, "title": "", "cwd": "/w", "snippet": "okapi", "resume": "r"}]
+            out = []
+            with mock.patch.object(sf, "live_sessions", return_value=[]), \
+                    mock.patch.object(sf.subprocess, "run", lambda argv, **kw: subprocess.CompletedProcess(argv, 0, json.dumps(hits), "")), \
+                    mock.patch.dict(sys.modules, {"fleet": mock.Mock(sessions=lambda: [row])}), \
+                    mock.patch.object(sys, "argv", ["session-find.py", "--all", "--json", "--", "okapi"]), \
+                    mock.patch("builtins.print", side_effect=lambda *a, **k: out.append(a[0])):
+                sf.main()
+                self.assertEqual([r["sessionId"] for r in json.loads(out[-1])], [str(transcript)])  # the fleet row only: no second, ended copy
+                exact, _ = sh.fleet_running({"omp"})
+            self.assertEqual(exact, {("omp", "file", str(transcript.resolve()))})
+            self.assertEqual(sys.modules["nativeid"].history_identity("omp", "header-id", "/w", f"omp:{transcript.resolve()}"),
+                             ("omp", "file", str(transcript.resolve())))
+            # an unreadable file falls back to the name-derived id
+            self.assertEqual(sys.modules["nativeid"].omp_native_id(str(Path(tmp) / "gone" / "nofile.jsonl")), "nofile")
+            self.assertEqual(sys.modules["nativeid"].omp_native_id("/x/2026-11-03T14-30-49-957Z_abc-1"), "abc-1")
+
+    def _find_all(self, hits, rows):
+        spec = importlib.util.spec_from_file_location("t_session_find_live", SF / "session-find.py")
+        sf = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(sf)
+        out = []
+        with mock.patch.object(sf, "live_sessions", return_value=[]), \
+                mock.patch.object(sf.subprocess, "run", lambda argv, **kw: subprocess.CompletedProcess(argv, 0, json.dumps(hits), "")), \
+                mock.patch.dict(sys.modules, {"fleet": mock.Mock(sessions=lambda: rows)}), \
+                mock.patch.object(sys, "argv", ["session-find.py", "--all", "--json", "--", "okapi"]), \
+                mock.patch("builtins.print", side_effect=lambda *a, **k: out.append(a[0])):
+            sf.main()
+        return {r["sessionId"]: r for r in json.loads(out[-1])}
+
+    def test_a_lease_held_omp_hit_without_a_fleet_row_is_listed_with_its_own_fields_and_an_open_todo_stays_unlisted(self) -> None:
+        """omp outside herdr has no fleet row: the history's `live` hit (omp session lease) used to be dropped as 'the fleet lists it', and
+        the session vanished (exit 1, no output). An open todo note is `live` with state OPEN: unchanged, still not a session hit."""
+        key = "omp:/h/.omp/agent/sessions/-s/2026-10-31T17-00-00-000Z_held-1.jsonl"
+        hits = [{"agent": "omp", "sessionId": "held-1", "sessionKey": key, "live": True, "state": "LIVE", "title": "t", "cwd": "/w",
+                 "snippet": "okapi", "resume": "omp --resume=held-1"},
+                {"agent": "todo", "sessionId": "note-1", "sessionKey": "todo:p:note-1", "live": True, "state": "OPEN", "title": "[open] x",
+                 "cwd": "", "snippet": "okapi", "resume": ""}]
+        got = self._find_all(hits, [])
+        self.assertEqual(sorted(got), ["held-1"])
+        r = got["held-1"]
+        self.assertEqual((r["live"], r["state"], r["status"], r["pid"], r["resume"], r["agent"]), (True, "LIVE", "LIVE", None, "", "omp"))
+        # with a fleet row for that very transcript the hit is the fleet's, not listed twice
+        row = {"agent": "omp", "id": "L1", "sid": key[4:-6], "status": "idle", "cwd": "/w", "title": "okapi work", "name": "n1",
+               "where": "", "focus": "", "finished": ""}
+        self.assertEqual(sorted(self._find_all(hits, [row])), [key[4:-6]])
+
+    def test_the_same_omp_id_in_two_stores_is_two_sessions_for_liveness_and_listing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            name = "2026-11-03T14-30-49-957Z_same-id.jsonl"
+            default = home / ".omp/agent/sessions/-s" / name
+            profile = home / ".omp/profiles/company/agent/sessions/-s" / name
+            for p in (default, profile):
+                write_jsonl(p, [{"type": "session", "id": "same-id", "cwd": "/w"}])
+            sh_spec = importlib.util.spec_from_file_location("t_sh_stores", SF / "session-history.py")
+            sh = importlib.util.module_from_spec(sh_spec)
+            sh_spec.loader.exec_module(sh)
+            row = {"agent": "omp", "status": "idle", "sid": str(default.with_suffix("")), "cwd": "/w"}
+            with mock.patch.dict(sys.modules, {"fleet": mock.Mock(sessions=lambda: [row])}):
+                exact, _ = sh.fleet_running({"omp"})
+            ident = sys.modules["nativeid"].history_identity
+            self.assertIn(ident("omp", "same-id", "/w", f"omp:{default.resolve()}"), exact)
+            self.assertNotIn(ident("omp", "same-id", "/w", f"omp:{profile.resolve()}"), exact)  # the other store's copy is not live
+            # session-find: the live default-store file is the fleet's row; the profile copy is still a hit of its own
+            hit = lambda p: {"agent": "omp", "sessionId": "same-id", "sessionKey": f"omp:{p.resolve()}", "live": False,  # noqa: E731
+                             "title": "", "cwd": "/w", "snippet": "okapi", "resume": f"omp --resume={p}"}
+            frow = {"agent": "omp", "id": "L1", "sid": str(default.with_suffix("")), "status": "idle", "cwd": "/w", "title": "okapi", "name": "n",
+                    "where": "", "focus": "", "finished": ""}
+            got = self._find_all([hit(default), hit(profile)], [frow])
+            self.assertEqual(sorted(got), sorted([str(default.with_suffix("")), "same-id"]))
+            self.assertEqual(got["same-id"]["resume"], f"omp --resume={profile}")
+            # a fleet row that carries no path (an id from argv) can only join by id
+            got = self._find_all([hit(default), hit(profile)], [{**frow, "sid": "same-id"}])
+            self.assertEqual(sorted(got), ["same-id"])
 
     def test_a_failed_history_search_is_exit_2_not_no_hits(self) -> None:
         spec = importlib.util.spec_from_file_location("t_session_find_fail", SF / "session-find.py")
