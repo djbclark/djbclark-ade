@@ -2195,7 +2195,7 @@ def antigravity_family(model: str | None) -> str | None:
 # Only these explicitly supported Pi API model IDs share the measured `pi` pool.
 # Do not infer billing from arbitrary OpenAI-compatible providers, bare IDs, or
 # openai-codex (subscription) models. Keep additions deliberate and tested.
-PI_OPENAI_MODELS = frozenset({"openai/gpt-6.1-sol", "openai/gpt-5.4-mini"})
+PI_OPENAI_MODELS = frozenset({"openai/gpt-6.1-sol", "openai/gpt-5.4-mini", "openai/gpt-6-astra"})
 
 
 def pi_api_pool(model: str | None) -> tuple[str, str | None] | None:

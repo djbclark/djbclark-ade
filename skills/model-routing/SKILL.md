@@ -39,8 +39,8 @@ to their SDK, not automatically use the first API-capable vendor.
 Code uses `openai/gpt-6.1-sol` at high; mechanical/bulk work uses
 `openai/gpt-5.4-mini` at low. Pi currently supports only `--perm all` in
 `acp-run`; security-sensitive work requiring enforced read-only tools uses a
-verified read-only route instead. The existing frontier-model gates still
-apply; this entry does not make Astra an everyday coding model.
+verified read-only route instead. `openai/gpt-6-astra` is an admitted Pi model
+(2026-11-04) but the frontier-model gates still apply; it is not an everyday coding model.
 
 ## Probes (prefer these over a hand-kept snapshot; aiuse's own cache is fine while fresh)
 

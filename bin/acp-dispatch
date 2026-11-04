@@ -371,8 +371,9 @@ Re-dispatching the --name of a record whose runner is still waiting is refused (
 name whose cloud record is unfinished (status running, any pid): `resume RECORD` it instead.
 (execute_record's older wait_for_capacity stays as the backstop at 4x cpus or critical memory pressure.)
 
-Pi API admission (2026-11-03): only openai/gpt-6.1-sol and openai/gpt-5.4-mini
-map to aiuse's independent `pi` pool, never `codex`. Missing, stale, exhausted or
+Pi API admission (2026-11-03; openai/gpt-6-astra added 2026-11-04): only openai/gpt-6.1-sol,
+openai/gpt-5.4-mini and openai/gpt-6-astra map to aiuse's independent `pi` pool, never `codex`. The
+frontier gate still applies to Astra (--kind frontier). Missing, stale, exhausted or
 unsupported capacity refuses with exit 5 before preflight, including dry runs,
 resumes and route overrides. At least max(1%, Pi reserve_floor, --min-headroom)
 must remain. The runner rechecks fresh capacity after load and capacity waits,

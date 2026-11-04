@@ -15,6 +15,10 @@ MODELS = (("code", "openai/gpt-6.1-sol"),
 UNSUPPORTED = (None, "gpt-6.1-sol", "openai-codex/gpt-6.1-sol",
                "anthropic/claude-sonnet-5-5", "other/gpt-5.4-mini",
                "openai/unknown", "openai/gpt-6.1-sol-extra")
+# Near-misses of the admitted Astra id. They hit the frontier gate before the Pi route check in a
+# real dispatch, so they are asserted at the mapping level only.
+ASTRA_NEAR_MISSES = ("gpt-6-astra", "openai-codex/gpt-6-astra", "openai/gpt-6-astra-extra")
+ASTRA = "openai/gpt-6-astra"
 
 
 def payload(state: str, codex: float = 100) -> dict:
@@ -296,3 +300,35 @@ class TestPiDispatchAdmission(LoadGate):
         self.assertTrue(calls["pi_capacity_refusal"])
         self.assertLess(calls["pi_capacity_refusal"][0], calls["preflight"][0])
         self.assertLess(calls["pi_capacity_refusal"][0], calls["execute_record"][0])
+
+
+class TestPiAstraAdmission(LoadGate):
+    """openai/gpt-6-astra shares the measured pi pool (2026-11-04) but stays behind the frontier gate."""
+
+    def quota_env(self, state: str) -> dict[str, str]:
+        path = self.tmp / "pi-available.json"
+        path.write_text(json.dumps(payload(state, 100)))
+        return {"ROUTE_AGENT_AIUSE_JSON": str(path)}
+
+    def test_astra_maps_to_pi_pool_in_dispatch_and_router_never_codex(self):
+        mod = self.load_module()
+        router = mod.route_module()
+        self.assertEqual(mod.map_agent_to_provider("pi", ASTRA), ("pi", None))
+        self.assertEqual(router.map_agent_to_provider("pi", ASTRA), ("pi", None))
+        self.assertIsNone(mod.pi_capacity_refusal("pi", ASTRA, 80))
+        self.assertIn("headroom", mod.pi_capacity_refusal("pi", ASTRA, 0.5))
+        self.assertIn("measured", mod.pi_capacity_refusal("pi", ASTRA, None))
+        for model in ASTRA_NEAR_MISSES:
+            with self.subTest(model=model):
+                self.assertIsNone(mod.map_agent_to_provider("pi", model))
+                self.assertIsNone(router.map_agent_to_provider("pi", model))
+                self.assertIn("unsupported Pi billing route", mod.pi_capacity_refusal("pi", model, 80))
+
+    def test_astra_without_frontier_kind_is_refused_and_spends_nothing(self):
+        result = self.dispatch_agent(
+            "pi", ASTRA, "--kind", "code", "--no-model-check", "--est-pct", "1",
+            name="astra-code", env=self.quota_env("healthy"))
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("is a frontier model; use --kind frontier", result.stdout + result.stderr)
+        self.assertFalse((self.out / "astra-code.jsonl").exists())
+        self.assertEqual(self.preflight_probes(), 0)
