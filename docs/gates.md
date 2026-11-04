@@ -13,7 +13,7 @@ them for a bounded time (a planned absence) without anyone editing code, an env 
 
 The gates: [`bin/claude-fleet-governor`](../bin/claude-fleet-governor) (`[governor]`, launchd every 300 s, downshifts
 Opus/Fable agents to Sonnet at tight/critical) and [`bin/claude-quota-guard`](../bin/claude-quota-guard)
-(`[quota_guard]`, launchd every 15 min, feeds `claude/hooks/quota_nudge.py`; the governor also reads its level). A profile
+(`[quota_guard]`, every 15 min via launchd or a systemd user timer, `claude-quota-guard --install`, docs/scheduling.md, feeds `claude/hooks/quota_nudge.py`; the governor also reads its level). A profile
 never changes a code path, only these numbers.
 
 ## Precedence
