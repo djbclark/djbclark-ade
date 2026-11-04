@@ -264,6 +264,17 @@ def test_a_failed_permission_lookup_skips_only_that_pull_request(env):
     assert drafts == {("frdminc/x", 1), ("djbclark/c", 12)}
 
 
+def test_an_error_gone_before_the_next_run_is_still_reported(env):
+    env("apply", "--yes", "--notify", "--quiet")
+    p = env("apply", "--yes", "--notify", "--quiet", extra={"FAIL_SECRET": "FJ_TOK", "PING_FAIL": "1"})
+    assert p.returncode == 1
+    env("apply", "--yes", "--notify", "--quiet")
+    pings = env.pings.read_text().splitlines()
+    assert len(pings) == 2 and "1 new error(s), first: forgejo: sudo-secretspec get FJ_TOK failed" in pings[1]
+    env("apply", "--yes", "--notify", "--quiet")
+    assert len(env.pings.read_text().splitlines()) == 2
+
+
 def test_changes_whose_ping_failed_are_reported_next_run(env):
     p = env("apply", "--yes", "--notify", "--quiet", extra={"PING_FAIL": "1"})
     assert p.returncode == 0 and "hermes-ping failed" in p.stderr

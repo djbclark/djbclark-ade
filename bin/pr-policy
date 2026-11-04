@@ -22,8 +22,8 @@ anyone else: list it in trusted_authors (e.g. "dependabot[bot]") to leave its pu
 Approving one outside pull request: add the approved_label (default "pr-policy-approved"; setting a label needs
 triage or write access, so its author cannot) and mark it ready (GitHub) or drop the WIP prefix (Forgejo).
 State: ~/.local/state/pr-policy (PR_POLICY_STATE_DIR): changes.jsonl, one line per change
-made; state.json, the error keys already reported and the change URLs not yet reported (both settled only once
-hermes-ping succeeded); run.log, the launchd job's output.
+made; state.json, the error keys already reported and the change URLs and errors not yet reported (settled only
+once hermes-ping succeeded); run.log, the launchd job's output.
 Revert one repository: add it to exempt_repos, then `gh api -X PATCH repos/OWNER/NAME -f
 pull_request_creation_policy=all`.
 """
@@ -415,7 +415,8 @@ def cmd_run(a, write: bool) -> int:
         st = load_state()
         reported = set(st.get("errors", []))
         changed = [u for u in st.get("unsent", []) if isinstance(u, str)] + [x["url"] for x in done]
-        new_errs = sorted(set(errs) - reported)
+        pending_errs = [e for e in st.get("unsent_errors", []) if isinstance(e, str)]
+        new_errs = pending_errs + sorted(set(errs) - reported - set(pending_errs))
         delivered = True
         if changed or new_errs:
             parts = []
@@ -425,9 +426,10 @@ def cmd_run(a, write: bool) -> int:
             if new_errs:
                 parts.append(f"{len(new_errs)} new error(s), first: {new_errs[0][:160]}")
             delivered = notify(f"djbclark-ade: pr-policy: {'; '.join(parts)}; log {state_dir()}")
-        # undelivered: the changes and the new errors are reported again next run
-        save_state({"errors": sorted(set(errs) if delivered else set(errs) & reported),
-                    "unsent": [] if delivered else changed[-UNSENT_MAX:]})
+        # undelivered: these changes and errors are reported next run, even if the error is gone by then
+        save_state({"errors": sorted(set(errs)),
+                    "unsent": [] if delivered else changed[-UNSENT_MAX:],
+                    "unsent_errors": [] if delivered else new_errs[-UNSENT_MAX:]})
     return 1 if errs else 0
 
 
