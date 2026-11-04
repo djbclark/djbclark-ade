@@ -1,0 +1,6 @@
+{
+  "id": "ade-recovery",
+  "name": "ADE recovery",
+  "description": "Passive recovery evidence for interrupted agents (issue 278)",
+  "requirements": { "paseo": ">=0.14.0" }
+}
