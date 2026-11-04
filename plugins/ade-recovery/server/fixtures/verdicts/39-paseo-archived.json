@@ -173,7 +173,7 @@
     "recoveryScheduledElsewhere": false,
     "serverId": "srv1",
     "paseoArchived": true,
-    "paseoUpdatedAt": "2026-11-04T10:06:05.000Z",
+    "paseoActivityAt": "2026-11-04T10:06:05.000Z",
     "paseoServerId": "srv1"
   },
   "expect": {

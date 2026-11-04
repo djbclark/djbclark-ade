@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
-import { lookupPaseoAgentRecord, paseoHome, paseoServerId, readPaseoAgentRecord, readSmallFile, validRecordedPaseoHome } from "./paseo-home.ts";
+import { listPaseoAgentDirs, lookupPaseoAgentRecord, paseoHome, paseoServerId, readPaseoAgentRecord, readSmallFile, validRecordedPaseoHome } from "./paseo-home.ts";
 import { paseoHome as fromIndex } from "../index.server.ts";
 
 const tmp = () => fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ade-paseo-home-")));
@@ -56,7 +56,13 @@ test("readPaseoAgentRecord: archivedAt and updatedAt from <home>/agents/*/<id>.j
   const home = tmp();
   assert.equal(readPaseoAgentRecord(home, "a1"), null, "no agents dir");
   agentFile(home, "work-repo", "a1", { id: "a1", updatedAt: "2026-11-04T10:00:00.000Z", archivedAt: null });
-  assert.deepEqual(readPaseoAgentRecord(home, "a1"), { archivedAt: null, updatedAt: "2026-11-04T10:00:00.000Z", updatedAtSource: "updatedAt" });
+  assert.deepEqual(readPaseoAgentRecord(home, "a1"), {
+    archivedAt: null,
+    updatedAt: "2026-11-04T10:00:00.000Z",
+    updatedAtSource: "updatedAt",
+    activityAt: "2026-11-04T10:00:00.000Z",
+    activitySource: "updatedAt",
+  }, "no lastActivityAt (older records): activity falls back to updatedAt");
   agentFile(home, "work-repo", "a1", { id: "a1", updatedAt: "2026-11-04T11:00:00.000Z", archivedAt: "2026-11-04T11:00:00.000Z" });
   assert.equal(readPaseoAgentRecord(home, "a1")?.archivedAt, "2026-11-04T11:00:00.000Z");
   assert.equal(readPaseoAgentRecord(home, "nobody"), null);
@@ -143,4 +149,44 @@ test("validRecordedPaseoHome accepts only an absolute path; readSmallFile refuse
     assert.equal(readSmallFile(path.join(d, "link"), 100, { noFollow: true }), null);
     assert.equal(readSmallFile(path.join(d, "link"), 100)?.length, 100);
   }
+});
+
+// Adversary round 3, B2: store-only changes (attention clear, unread, rename, label, unarchive)
+// move updatedAt on an unloaded agent but not lastActivityAt (upstream persistence-hooks.ts:114-118).
+test("activityAt: lastActivityAt wins over a newer store-only updatedAt; unparseable falls back", () => {
+  const home = tmp();
+  agentFile(home, "p", "a1", { id: "a1", updatedAt: "2026-11-04T12:00:00.000Z", lastActivityAt: "2026-11-04T10:00:00.000Z" });
+  const r = readPaseoAgentRecord(home, "a1");
+  assert.equal(r?.updatedAt, "2026-11-04T12:00:00.000Z");
+  assert.equal(r?.activityAt, "2026-11-04T10:00:00.000Z");
+  assert.equal(r?.activitySource, "lastActivityAt");
+  agentFile(home, "p", "a2", { id: "a2", updatedAt: "2026-11-04T12:00:00.000Z", lastActivityAt: "soon" });
+  assert.deepEqual(
+    [readPaseoAgentRecord(home, "a2")?.activityAt, readPaseoAgentRecord(home, "a2")?.activitySource],
+    ["2026-11-04T12:00:00.000Z", "updatedAt"],
+  );
+  const f = agentFile(home, "p", "a3", { id: "a3", updatedAt: "nope", lastActivityAt: 5 });
+  const r3 = readPaseoAgentRecord(home, "a3");
+  assert.equal(r3?.activitySource, "mtime");
+  assert.equal(r3?.activityAt, fs.statSync(f).mtime.toISOString());
+  // Several copies: the latest activity wins.
+  agentFile(home, "q", "a1", { id: "a1", updatedAt: "2026-11-04T09:00:00.000Z", lastActivityAt: "2026-11-04T11:00:00.000Z" });
+  assert.equal(readPaseoAgentRecord(home, "a1")?.activityAt, "2026-11-04T11:00:00.000Z");
+});
+
+test("listPaseoAgentDirs lists once for many lookups (B5); null is unavailable", () => {
+  const home = tmp();
+  assert.equal(listPaseoAgentDirs(home), null);
+  agentFile(home, "p", "a1", { id: "a1", updatedAt: "2026-11-04T10:00:00.000Z" });
+  agentFile(home, null, "legacy", { id: "legacy", updatedAt: "2026-11-04T10:00:00.000Z" });
+  const dirs = listPaseoAgentDirs(home);
+  assert.deepEqual(dirs, ["p"]);
+  assert.equal(lookupPaseoAgentRecord(home, "a1", dirs).status, "found");
+  assert.equal(lookupPaseoAgentRecord(home, "legacy", dirs).status, "found");
+  assert.deepEqual(lookupPaseoAgentRecord(home, "zz", dirs), { status: "missing" });
+  assert.deepEqual(lookupPaseoAgentRecord(home, "a1", null), { status: "unavailable" });
+  // The listing passed in is what is read: a directory added later is not seen in that pass.
+  agentFile(home, "later", "b1", { id: "b1", updatedAt: "2026-11-04T10:00:00.000Z" });
+  assert.deepEqual(lookupPaseoAgentRecord(home, "b1", dirs), { status: "missing" });
+  assert.equal(lookupPaseoAgentRecord(home, "b1").status, "found");
 });

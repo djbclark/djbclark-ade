@@ -173,7 +173,7 @@
     "recoveryScheduledElsewhere": false,
     "serverId": "srv1",
     "paseoArchived": null,
-    "paseoUpdatedAt": null,
+    "paseoActivityAt": null,
     "paseoRecordMissing": true,
     "paseoServerId": "srv1"
   },

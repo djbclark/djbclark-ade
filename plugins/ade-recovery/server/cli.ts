@@ -40,8 +40,8 @@ exit codes (list): 0 ok, 64 usage error
 exit code 70 (both): internal error, or (from the bin/paseo-checkpoint wrapper) node missing or < 22.18
 
 Paseo's own store is read too, read only: <PASEO_HOME>/agents/*/<id>.json (archivedAt set:
-do-not-resume, paseo-archived; updatedAt more than 2 s after the record: needs-review,
-paseo-record-newer and interrupted:unobserved-activity; the agents directory readable but no
+do-not-resume, paseo-archived; lastActivityAt (else updatedAt) more than 2 s after the record:
+needs-review, paseo-record-newer and interrupted:unobserved-activity; the agents directory readable but no
 valid <id>.json: needs-review, paseo-record-missing) and the daemon's server id (PASEO_SERVER_ID,
 else <PASEO_HOME>/server-id; a mismatch: other-server). An absent or unreadable store never
 blocks by itself (info only). PASEO_HOME is the one the plugin stored in the record when it is
@@ -185,7 +185,7 @@ async function evaluate(entry: Entry, opts: Opts, env: NodeJS.ProcessEnv): Promi
     const lookup = lookupPaseoAgentRecord(home, rec.paseoAgentId);
     const stored = lookup.status === "found" ? lookup.record : null;
     live.paseoArchived = stored === null ? null : stored.archivedAt !== null;
-    live.paseoUpdatedAt = stored === null ? null : stored.updatedAt;
+    live.paseoActivityAt = stored === null ? null : stored.activityAt;
     live.paseoRecordMissing = lookup.status === "missing";
     live.paseoServerId = paseoServerId(home, env);
     paseo = stored;
@@ -202,8 +202,9 @@ async function evaluate(entry: Entry, opts: Opts, env: NodeJS.ProcessEnv): Promi
     });
   }
   // The plugin's init check, made here against the record as it stands, so it holds even when
-  // the plugin never restarted to make it.
-  const pu = Date.parse(String(live.paseoUpdatedAt ?? ""));
+  // the plugin never restarted to make it. It compares lastActivityAt (else updatedAt), never a
+  // store-only updatedAt bump: see PaseoAgentRecordEvidence.activityAt in paseo-home.ts.
+  const pu = Date.parse(String(live.paseoActivityAt ?? ""));
   const wa = Date.parse(String(rec?.writtenAt ?? ""));
   if (
     rec &&
@@ -318,7 +319,7 @@ async function cmdShow(opts: Opts, env: NodeJS.ProcessEnv): Promise<number> {
       `live git   ${s.liveGit ? `head ${s.liveGit.head ?? "-"} branch ${s.liveGit.branch ?? "-"} errors ${s.liveGit.errors.join(",") || "-"}` : "not captured"}`,
       `writer     lock holder alive ${s.writerAlive}, record writer alive ${s.recordWriterAlive}`,
       `recovery   scheduled elsewhere ${s.recoveryScheduledElsewhere}`,
-      `paseo      ${s.paseoRecord ? `archivedAt ${s.paseoRecord.archivedAt ?? "-"} updatedAt ${s.paseoRecord.updatedAt ?? "-"} (${s.paseoRecord.updatedAtSource})` : s.paseoRecordMissing ? "stored record missing" : "stored record unavailable"}, server id ${s.paseoServerId ?? "unavailable"}, home ${s.paseoHome} (${s.paseoHomeSource})`,
+      `paseo      ${s.paseoRecord ? `archivedAt ${s.paseoRecord.archivedAt ?? "-"} updatedAt ${s.paseoRecord.updatedAt ?? "-"} (${s.paseoRecord.updatedAtSource}) activity ${s.paseoRecord.activityAt ?? "-"} (${s.paseoRecord.activitySource})` : s.paseoRecordMissing ? "stored record missing" : "stored record unavailable"}, server id ${s.paseoServerId ?? "unavailable"}, home ${s.paseoHome} (${s.paseoHomeSource})`,
       `interrupts ${s.interruptions.map((i) => i.evidence).join(", ") || "-"}`,
     ];
     process.stdout.write(lines.join("\n") + "\n");

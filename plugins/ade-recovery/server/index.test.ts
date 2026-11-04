@@ -8,7 +8,7 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import type { AgentSnapshot, GitEvidence, HookAgent, LiveEvidence, PaseoLike, TurnOutcome } from "./types.ts";
-import contribute, { HOOK_NAMES, createRecoveryPlugin, type HookContextLike, type ServerLike } from "../index.server.ts";
+import contribute, { HOOK_NAMES, createRecoveryPlugin, productionDeps, type HookContextLike, type ServerLike } from "../index.server.ts";
 import { loadRecord, listAgents } from "./store.ts";
 import { stateRoot } from "./state-root.ts";
 import { lockHolderAlive, readLock } from "./writer-lock.ts";
@@ -413,4 +413,15 @@ test("disconnect (daemon gone): flush, release the lock, exit 0", async (t) => {
   assert.equal(exitCode, 0);
   assert.equal(fs.existsSync(path.join(e.dir, "writer.lock")), false);
   assert.equal(loadRecord(e.dir, "dc").record?.state, "turn-in-flight");
+});
+
+test("production Paseo reader: lastActivityAt from the daemon's store, one agents-dir listing per pass (B2, B5)", (t) => {
+  const e = tempEnv(t);
+  const d = path.join(e.paseoHome, "agents", "proj");
+  fs.mkdirSync(d, { recursive: true });
+  const rec = { id: "a1", provider: "claude", cwd: e.repo, updatedAt: "2026-11-04T12:00:00.000Z", lastActivityAt: "2026-11-04T10:00:00.000Z" };
+  fs.writeFileSync(path.join(d, "a1.json"), JSON.stringify(rec));
+  const read = productionDeps(e.env).paseoActivityReader!();
+  assert.equal(read("a1"), "2026-11-04T10:00:00.000Z", "a store-only updatedAt bump is not activity");
+  assert.equal(read("nobody"), null);
 });

@@ -174,8 +174,11 @@ export interface LiveEvidence {
   // (never blocks by itself; adds info paseo-record-unavailable / paseo-server-id-unavailable).
   /** archivedAt is set in `<PASEO_HOME>/agents/<dir>/<id>.json`. */
   paseoArchived?: boolean | null;
-  /** That record's `updatedAt` (else its file mtime), ISO 8601. */
-  paseoUpdatedAt?: string | null;
+  /**
+   * That record's activity time, ISO 8601: `lastActivityAt`, else `updatedAt`, else its file mtime
+   * (paseo-home.ts PaseoAgentRecordEvidence.activityAt says why not `updatedAt`).
+   */
+  paseoActivityAt?: string | null;
   /** The daemon's server id (`PASEO_SERVER_ID`, else `<PASEO_HOME>/server-id`). */
   paseoServerId?: string | null;
   /**

@@ -207,6 +207,16 @@ test("Paseo's stored record: archived there is do-not-resume (paseo-archived); n
   assert.equal(newer.code, 1, newer.out);
   assert.deepEqual(JSON.parse(newer.out).reasons.sort(), ["interrupted:unobserved-activity", "paseo-record-newer", "tools-unobserved"]);
   assert.ok(JSON.parse(newer.out).interruptions.some((i: { evidence: string }) => i.evidence === "unobserved-activity"));
+  // B2: a store-only change (attention clear, unread, rename, label, unarchive) moves updatedAt
+  // but not lastActivityAt: not unobserved activity.
+  paseoAgent(w, "p1", { updatedAt: new Date(Date.now() + 60_000).toISOString(), lastActivityAt: "2020-01-01T00:00:00.000Z", archivedAt: null });
+  const storeOnly = cli(w, "show", "p1", "--json");
+  assert.equal(storeOnly.code, 0, storeOnly.out);
+  assert.equal(JSON.parse(storeOnly.out).paseoRecord.activitySource, "lastActivityAt");
+  paseoAgent(w, "p1", { updatedAt: "2020-01-01T00:00:00.000Z", lastActivityAt: new Date(Date.now() + 60_000).toISOString(), archivedAt: null });
+  const active = cli(w, "show", "p1", "--json");
+  assert.equal(active.code, 1, active.out);
+  assert.ok(JSON.parse(active.out).reasons.includes("paseo-record-newer"));
   paseoAgent(w, "p1", { updatedAt: "2020-01-01T00:00:00.000Z", archivedAt: null });
   const older = cli(w, "show", "p1", "--json");
   assert.equal(older.code, 0, older.out);
