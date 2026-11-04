@@ -40,7 +40,31 @@ set -euo pipefail
 for t in sed readlink realpath grep head awk; do
   command -v "g$t" >/dev/null || eval "g$t() { $t \"\$@\"; }"
 done
-ade_root="${SKILL_EVERYWHERE_ADE:-$HOME/src/djbclark-ade/skills}"
+# Default public-skills dir: the repo this script lives in, found from its own real path
+# (it is installed as a symlink; plain `readlink` loop + `cd -P` works on bash 3.2/BSD).
+# Falls back to ~/src/djbclark-ade/skills when the script is not inside a checkout.
+self_root() {
+  local src=${BASH_SOURCE[0]} dir link
+  while [[ -L $src ]]; do
+    dir=$(cd -P "$(dirname "$src")" && pwd) || return 1
+    link=$(readlink "$src") || return 1
+    [[ $link == /* ]] && src=$link || src=$dir/$link
+  done
+  dir=$(cd -P "$(dirname "$src")/.." && pwd) || return 1
+  # A linked worktree (order 9: every change is made in one) is removed after its merge, so links into it
+  # would dangle: use the primary checkout that owns it, when that is a checkout of this repo too.
+  local common
+  common=$(git -C "$dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || common=
+  if [[ $common == */.git && ${common%/.git} != "$dir" && -f ${common%/.git}/bin/skill-everywhere ]]; then
+    dir=${common%/.git}
+  fi
+  [[ -f $dir/bin/skill-everywhere && -d $dir/skills ]] && printf '%s' "$dir"
+}
+if [[ -z ${SKILL_EVERYWHERE_ADE:-} ]]; then
+  if repo_root=$(self_root 2>/dev/null); then SKILL_EVERYWHERE_ADE=$repo_root/skills
+  else SKILL_EVERYWHERE_ADE=$HOME/src/djbclark-ade/skills; fi
+fi
+ade_root=$SKILL_EVERYWHERE_ADE
 priv_root="${SKILL_EVERYWHERE_PRIVATE:-${OPS_ROOT:-$HOME/ops}/site-private/skills}"
 
 # binary|skills dir to link into, or "via <dir>" when the TUI already reads a

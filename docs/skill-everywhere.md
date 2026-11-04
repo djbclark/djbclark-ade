@@ -29,13 +29,15 @@ and can advertise the trash skill under the live name. Hide it with
 
 ## 1. Link it
 
+Run `bin/skill-everywhere` from your checkout (or the installed `~/.local/bin/skill-everywhere` symlink). The public skills dir defaults to `skills/` of the repo the script's real path sits in (symlinks followed), falling back to `~/src/djbclark-ade/skills` outside a checkout; `SKILL_EVERYWHERE_ADE` overrides both.
+
 ```sh
-~/src/djbclark-ade/bin/skill-everywhere --all                # sync all shared skills
-~/src/djbclark-ade/bin/skill-everywhere --check --all        # exit 1 for installed-target gaps
-~/src/djbclark-ade/bin/skill-everywhere --dry-run --all      # preview all repairs
-~/src/djbclark-ade/bin/skill-everywhere <name>...          # link, idempotent
-~/src/djbclark-ade/bin/skill-everywhere --check <name>...  # status only
-~/src/djbclark-ade/bin/skill-everywhere --remove <name>... # undo
+skill-everywhere --all                # sync all shared skills
+skill-everywhere --check --all        # exit 1 for installed-target gaps
+skill-everywhere --dry-run --all      # preview all repairs
+skill-everywhere <name>...          # link, idempotent
+skill-everywhere --check <name>...  # status only
+skill-everywhere --remove <name>... # undo
 ```
 
 `--all` (2026-10-25) discovers readable `*/SKILL.md` files directly under both
