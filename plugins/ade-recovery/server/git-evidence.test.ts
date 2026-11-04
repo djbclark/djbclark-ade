@@ -417,3 +417,47 @@ test("an uninitialised submodule is not scanned and does not null the fingerprin
   assert.deepEqual(ev.errors, []);
   assert.equal(ev.trackedChanged, 0);
 });
+
+// Adversary round 3, B3: only initialised gitlinks count against the 16-scan budget.
+function addGitlinks(d: string, n: number, init: boolean): void {
+  const sha = git(d, "rev-parse", "HEAD").trim();
+  for (let i = 0; i < n; i++) {
+    const name = `g${String(i).padStart(2, "0")}`;
+    fs.mkdirSync(path.join(d, name));
+    if (init) {
+      git(path.join(d, name), "init", "-q", "-b", "main");
+      git(path.join(d, name), "commit", "-q", "--allow-empty", "-m", "x");
+    }
+    git(d, "update-index", "--add", "--cacheinfo", `160000,${sha},${name}`);
+  }
+}
+test("17 uninitialised gitlinks do not exhaust the scan budget", async () => {
+  const d = mkrepo();
+  addGitlinks(d, 17, false);
+  const ev = await gitEvidence(d);
+  assert.ok(!ev.errors.includes("submodule-dirty:limit"), ev.errors.join(","));
+  assert.equal(ev.truncated, false);
+});
+test("17 initialised gitlinks exceed the scan budget", async () => {
+  const d = mkrepo();
+  addGitlinks(d, 17, true);
+  const ev = await gitEvidence(d);
+  assert.equal(ev.truncated, true);
+  assert.ok(ev.errors.includes("submodule-dirty:limit"), ev.errors.join(","));
+});
+
+// Adversary round 3, B4: a filter driver named with `=` cannot be blanked, so nothing may run it.
+test("a clean filter driver whose name contains '=' must not run", async () => {
+  const d = mkrepo();
+  const marker = path.join(d, "..", `marker-eq-${path.basename(d)}`);
+  const script = path.join(tmp(), "filter.sh");
+  fs.writeFileSync(script, `#!/bin/sh\ntouch '${marker}'\ncat\n`, { mode: 0o755 });
+  git(d, "config", "filter.a=b.clean", script);
+  git(d, "config", "filter.a=b.process", script);
+  fs.writeFileSync(path.join(d, ".gitattributes"), "*.txt filter=a=b\n");
+  fs.writeFileSync(path.join(d, "a.txt"), "dirty with filter\n");
+  const ev = await gitEvidence(d);
+  assert.ok(!fs.existsSync(marker), "filter driver ran");
+  assert.equal(ev.trackedFingerprint, null);
+  assert.ok(ev.errors.includes("filter-name:unsafe"));
+});
