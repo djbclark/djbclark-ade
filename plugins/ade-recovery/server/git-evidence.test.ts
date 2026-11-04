@@ -201,3 +201,122 @@ test("an aborted signal yields errors, not a throw", async () => {
   const ev = await gitEvidence(d, AbortSignal.abort());
   assert.ok(ev.errors.length > 0);
 });
+
+// Adversary round 1, finding 1: changes the fingerprint used to miss.
+
+test("staged rename then restoring the old path changes the fingerprint", async () => {
+  const d = mkrepo();
+  fs.writeFileSync(path.join(d, "a.txt"), "hello world content\n".repeat(20));
+  git(d, "add", "a.txt"); git(d, "commit", "-q", "-m", "big");
+  git(d, "mv", "a.txt", "r.txt");
+  const e1 = await gitEvidence(d);
+  assert.deepEqual(e1.trackedPaths, ["a.txt", "r.txt"]);
+  git(d, "checkout", "HEAD", "--", "a.txt");
+  const e2 = await gitEvidence(d);
+  assert.deepEqual(e2.trackedPaths, ["r.txt"]);
+  assert.ok(e1.trackedFingerprint && e2.trackedFingerprint);
+  assert.notEqual(e1.trackedFingerprint, e2.trackedFingerprint);
+  // The reverse: an identical staged copy, then the original deleted.
+  const d2 = mkrepo();
+  fs.copyFileSync(path.join(d2, "a.txt"), path.join(d2, "c.txt"));
+  git(d2, "add", "c.txt");
+  const f1 = await gitEvidence(d2);
+  fs.rmSync(path.join(d2, "a.txt"));
+  const f2 = await gitEvidence(d2);
+  assert.deepEqual(f2.trackedPaths, ["a.txt", "c.txt"]);
+  assert.notEqual(f1.trackedFingerprint, f2.trackedFingerprint);
+});
+
+test("a commit inside a submodule changes the fingerprint", async () => {
+  const sub = mkrepo();
+  const d = mkrepo();
+  git(d, "-c", "protocol.file.allow=always", "submodule", "add", "-q", sub, "s");
+  git(d, "commit", "-q", "-m", "add submodule");
+  const e0 = await gitEvidence(d);
+  assert.equal(e0.trackedChanged, 0);
+  fs.writeFileSync(path.join(d, "s", "a.txt"), "sub change\n");
+  const dirty = await gitEvidence(d);
+  assert.equal(dirty.trackedChanged, 0, "dirty submodule content is ignored (=dirty)");
+  git(path.join(d, "s"), "commit", "-q", "-am", "inner");
+  const e1 = await gitEvidence(d);
+  assert.deepEqual(e1.trackedPaths, ["s"]);
+  assert.ok(e1.trackedFingerprint);
+  assert.notEqual(e1.trackedFingerprint, e0.trackedFingerprint);
+  assert.deepEqual(e1.errors, []);
+  fs.writeFileSync(path.join(d, "s", "a.txt"), "second\n");
+  git(path.join(d, "s"), "commit", "-q", "-am", "inner 2");
+  const e2 = await gitEvidence(d);
+  assert.deepEqual(e2.trackedPaths, ["s"]);
+  assert.notEqual(e2.trackedFingerprint, e1.trackedFingerprint, "a second submodule commit moves it again");
+  assert.equal((await gitEvidence(d)).trackedFingerprint, e2.trackedFingerprint);
+});
+
+test("chmod +x changes the fingerprint", async () => {
+  const d = mkrepo();
+  fs.writeFileSync(path.join(d, "a.txt"), "edited\n");
+  const e1 = await gitEvidence(d);
+  fs.chmodSync(path.join(d, "a.txt"), 0o755);
+  const e2 = await gitEvidence(d);
+  assert.notEqual(e1.trackedFingerprint, e2.trackedFingerprint);
+  // core.fileMode=false hides the mode from git; the exec bit is still recorded.
+  git(d, "config", "core.fileMode", "false");
+  const e3 = await gitEvidence(d);
+  fs.chmodSync(path.join(d, "a.txt"), 0o644);
+  const e4 = await gitEvidence(d);
+  assert.notEqual(e3.trackedFingerprint, e4.trackedFingerprint);
+});
+
+test("symlink retarget changes the fingerprint; a file<->symlink swap with the same bytes too", async () => {
+  const d = mkrepo();
+  fs.symlinkSync("a.txt", path.join(d, "l"));
+  git(d, "add", "l"); git(d, "commit", "-q", "-m", "link");
+  fs.rmSync(path.join(d, "l")); fs.symlinkSync("x-target", path.join(d, "l"));
+  const e1 = await gitEvidence(d);
+  fs.rmSync(path.join(d, "l")); fs.symlinkSync("y-target", path.join(d, "l"));
+  const e2 = await gitEvidence(d);
+  assert.deepEqual(e2.trackedPaths, ["l"]);
+  assert.notEqual(e1.trackedFingerprint, e2.trackedFingerprint);
+  fs.rmSync(path.join(d, "l")); fs.symlinkSync("x-target", path.join(d, "l"));
+  assert.equal((await gitEvidence(d)).trackedFingerprint, e1.trackedFingerprint);
+  fs.rmSync(path.join(d, "l")); fs.writeFileSync(path.join(d, "l"), "x-target");
+  const e3 = await gitEvidence(d);
+  assert.ok(e3.trackedFingerprint);
+  assert.notEqual(e3.trackedFingerprint, e1.trackedFingerprint);
+});
+
+test("a symlink to /dev/zero, to a directory, or a fifo neither hangs nor nulls the fingerprint", async () => {
+  const d = mkrepo();
+  const elsewhere = tmp();
+  const cases: Array<[string, () => void]> = [
+    ["dev-zero", () => fs.symlinkSync("/dev/zero", path.join(d, "a.txt"))],
+    ["directory", () => fs.symlinkSync(elsewhere, path.join(d, "a.txt"))],
+    ["fifo", () => execFileSync("mkfifo", [path.join(d, "a.txt")])],
+  ];
+  const prints = new Set<string>();
+  for (const [name, make] of cases) {
+    fs.rmSync(path.join(d, "a.txt"), { force: true });
+    make();
+    const t0 = Date.now();
+    const ev = await gitEvidence(d);
+    assert.ok(Date.now() - t0 < 5000, `${name}: took ${Date.now() - t0} ms`);
+    assert.ok(ev.trackedFingerprint, `${name}: fingerprint nulled (${ev.errors.join(",")})`);
+    assert.deepEqual(ev.errors, [], name);
+    assert.ok(ev.trackedPaths.includes("a.txt"), name);
+    prints.add(ev.trackedFingerprint!);
+  }
+  assert.equal(prints.size, cases.length);
+});
+
+test("a tracked path below a symlinked directory is not followed", async () => {
+  const d = mkrepo();
+  fs.mkdirSync(path.join(d, "dir"));
+  fs.writeFileSync(path.join(d, "dir", "zero"), "z\n");
+  git(d, "add", "dir"); git(d, "commit", "-q", "-m", "dir");
+  fs.rmSync(path.join(d, "dir"), { recursive: true });
+  fs.symlinkSync("/dev", path.join(d, "dir"));
+  const t0 = Date.now();
+  const ev = await gitEvidence(d);
+  assert.ok(Date.now() - t0 < 5000);
+  assert.ok(ev.trackedFingerprint);
+  assert.deepEqual(ev.errors, []);
+});
