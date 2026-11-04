@@ -18,7 +18,7 @@ deadline beat review-123 --checkpoint /abs/path/state.json                      
 deadline extend review-123 --by 30m --reason "reviewer still running"                       # BEFORE expiry only; capped (default cap = budget)
 deadline done review-123                                                                     # deregister (run does this itself)
 deadline ls [--agents]                                                                      # records; --agents shows the Paseo idle reading
-deadline sweep [--dry-run] [--json]                                                         # the enforcer; launchd runs it every 60 s
+deadline sweep [--dry-run] [--json]                                                         # the enforcer; launchd or a systemd user timer runs it every 60 s
 deadline install [--ade DIR] [--dry-run] [--backend auto|launchd|systemd|cron] [--agents auto|on|off] [--allow-no-linger]  |  deadline uninstall [--backend ...]   # the sweep job
 ```
 

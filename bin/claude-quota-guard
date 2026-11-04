@@ -17,7 +17,7 @@ UserPromptSubmit hook claude/hooks/quota_nudge.py, and pings once per upward cro
                                    `systemctl --user ...`); never activates it itself
 
 Levels and exit codes: 0 ok, 1 watch, 2 tight, 3 critical, 10 aiuse could not be read (level
-fields left untouched; see below), 64 bad CLAUDE_QUOTA_GUARD_THRESHOLDS, 69 `--install` with no usable
+fields left untouched; see below), 64 bad CLAUDE_QUOTA_GUARD_THRESHOLDS (or an `--install` job that is invalid or failed to write), 69 `--install` with no usable
 scheduler (ADE_SCHED_BACKEND=none, none found, or systemd linger off without --allow-no-linger; docs/scheduling.md). The binding window
 is the lowest `remaining_percent` among the Claude rows' windows (weekly, 5-hour and Fable's
 sublimit):
@@ -886,7 +886,9 @@ def cmd_install(args) -> int:
                               allow_no_linger=args.allow_no_linger, **overrides)
     except ade_sched.SchedError as e:
         print(f"claude-quota-guard: {e}", file=sys.stderr)
-        return e.code
+        # 1-3 mean watch/tight/critical here: a bad job or a failed activation is a config error (64), never one of them
+        return e.code if e.code == ade_sched.EX_UNAVAILABLE else EX_CONFIG
+    print("(a bootout error for a job that is not loaded yet is harmless)")
     return 0
 
 

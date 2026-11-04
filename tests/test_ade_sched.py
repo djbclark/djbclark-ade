@@ -642,3 +642,16 @@ def test_cli_exit_codes(fake):
             env={**fake.env, "FAKE_LINGER": "no"})
     assert p.returncode == 0, p.stderr
     assert (fake.units / "com.djbclark.deadline-sweep.timer").exists()
+
+
+def test_imports_on_python_3_10():
+    """bin/deadline imports ade_sched at load, and a Linux host's python3 may be 3.10 (Ubuntu 22.04): no 3.11+ typing
+    names, and the source parses as 3.10 (adversary A1, 2026-11-04: `typing.Self` broke every deadline subcommand)."""
+    import ast
+    src = (Path(__file__).resolve().parents[1] / "bin" / "ade_sched.py").read_text()
+    tree = ast.parse(src, feature_version=(3, 10))
+    newer = {"Self", "LiteralString", "Never", "assert_never", "reveal_type", "TypeVarTuple", "Unpack",
+             "Required", "NotRequired", "dataclass_transform", "override"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == "typing":
+            assert not newer & {a.name for a in node.names}
