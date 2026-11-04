@@ -285,9 +285,35 @@ def test_a_missing_claude_is_unmeasurable_not_a_crash(tmp_path, capsys, monkeypa
 def test_install_plan_changes_nothing(monkeypatch, capsys, tmp_path):
     monkeypatch.setenv("CONTEXT_BUDGET_NO_INSTALL", "1")
     monkeypatch.setenv("CONTEXT_BUDGET_LAUNCH_AGENTS", str(tmp_path))
-    rc, out = run(capsys, "install")
+    rc, out = run(capsys, "install", "--backend", "launchd")
     assert rc == 0 and "com.djbclark.context-budget.plist" in out and list(tmp_path.iterdir()) == []
-    rc, out = run(capsys, "uninstall")
+    rc, out = run(capsys, "uninstall", "--backend", "launchd")
     assert rc == 0 and "bootout" in out
     plist = (ROOT / "launchd" / "com.djbclark.context-budget.plist").read_text()
     assert "<integer>3</integer>" in plist and "<integer>50</integer>" in plist
+
+
+def test_launchd_plan_is_the_templated_plist_filled_in(monkeypatch, capsys, tmp_path):
+    """On the Mac from the canonical checkout the job is what the old hard-coded plist said, with this checkout and HOME."""
+    monkeypatch.setenv("CONTEXT_BUDGET_NO_INSTALL", "1")
+    monkeypatch.setenv("CONTEXT_BUDGET_LAUNCH_AGENTS", str(tmp_path))
+    monkeypatch.setenv("HOME", "/Users/djbclark")
+    rc, out = run(capsys, "install", "--backend", "launchd")
+    assert rc == 0 and f"{ROOT}/bin/context-budget-check" in out and "/Users/djbclark/.local/state/context-budget/launchd.out" in out
+    assert "__ADE__" not in out and "__HOME__" not in out
+
+
+def test_systemd_plan_is_a_persistent_0350_calendar_timer(monkeypatch, capsys, tmp_path):
+    monkeypatch.setenv("CONTEXT_BUDGET_NO_INSTALL", "1")
+    monkeypatch.setenv("ADE_SCHED_UNIT_DIR", str(tmp_path / "units"))
+    rc, out = run(capsys, "install", "--backend", "systemd")
+    assert rc == 0
+    assert "OnCalendar=*-*-* 03:50:00" in out and "Persistent=true" in out
+    assert "com.djbclark.context-budget.timer" in out and f"{ROOT}/bin/context-budget-check" in out
+    assert not (tmp_path / "units").exists()  # a plan writes nothing
+
+
+def test_no_scheduler_is_exit_69(monkeypatch, capsys, tmp_path):
+    monkeypatch.setenv("ADE_SCHED_BACKEND", "none")
+    rc = cbc.main(["install", "--dry-run"])
+    assert rc == 69 and "context-budget-check install" in capsys.readouterr().err

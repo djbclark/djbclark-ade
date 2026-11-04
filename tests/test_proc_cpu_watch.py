@@ -172,15 +172,14 @@ def test_install_refuses_a_linked_worktree(cbw, tmp_path, monkeypatch, capsys):
     (wt / ".git").write_text("gitdir: /elsewhere\n")
     (wt / "bin" / "proc-cpu-watch").write_text("")
     monkeypatch.setattr(cbw, "ADE", wt)
-    monkeypatch.setattr(cbw.shutil, "which", lambda n: "/bin/true")
-    calls = []
-    monkeypatch.setattr(cbw.subprocess, "run", lambda *a, **k: calls.append(a))
+    calls = _fake_sched(cbw, monkeypatch, tmp_path)
 
     class A:
         cmd = "install"
         ade = None
+        backend = "launchd"
     assert cbw.cmd_install(A()) == 2
-    assert not calls and "linked worktree" in capsys.readouterr().err
+    assert not calls() and "linked worktree" in capsys.readouterr().err
 
 
 def test_install_refuses_a_cow_pasture(cbw, tmp_path, monkeypatch, capsys):
@@ -193,15 +192,14 @@ def test_install_refuses_a_cow_pasture(cbw, tmp_path, monkeypatch, capsys):
     (primary / ".git").mkdir(parents=True)
     assert cbw.disposable_checkout(past) and not cbw.disposable_checkout(primary)
     monkeypatch.setattr(cbw, "ADE", past)
-    monkeypatch.setattr(cbw.shutil, "which", lambda n: "/bin/true")
-    calls = []
-    monkeypatch.setattr(cbw.subprocess, "run", lambda *a, **k: calls.append(a))
+    calls = _fake_sched(cbw, monkeypatch, tmp_path)
 
     class A:
         cmd = "install"
         ade = None
+        backend = "launchd"
     assert cbw.cmd_install(A()) == 2
-    assert not calls and "cow pasture" in capsys.readouterr().err
+    assert not calls() and "cow pasture" in capsys.readouterr().err
 
 
 def _window(cbw, monkeypatch, first, second):
@@ -236,28 +234,45 @@ def test_read_ps_parses_start_time_and_command(cbw, monkeypatch):
     assert procs[101]["cmd"] == "/A/CodexBar.app/Contents/MacOS/CodexBar --port 1" and procs[102]["ppid"] == 101
 
 
-def _install(cbw, tmp_path, monkeypatch, ade_name):
-    import plistlib
-    monkeypatch.setattr(cbw, "HOME", tmp_path / "home")  # no ~/Library/LaunchAgents yet
-    ade = tmp_path / ade_name
+def _fake_sched(cbw, monkeypatch, tmp_path):
+    """Point ade_sched at a fake launchctl (it appends its argv to a log) and throwaway agent/unit dirs; pretend to be
+    on darwin. Returns a function listing the recorded launchctl argv lists."""
+    log = tmp_path / "launchctl.log"
+    fake = tmp_path / "launchctl"
+    fake.write_text(f'#!/bin/sh\necho "$@" >> {log}\n')
+    fake.chmod(0o755)
+    monkeypatch.setattr(cbw, "PLATFORM", "darwin")
+    monkeypatch.setattr(cbw, "SCHED_OVERRIDES", {"launchctl": str(fake), "agents_dir": str(tmp_path / "LaunchAgents"),
+                                                  "unit_dir": str(tmp_path / "units"), "lock_path": str(tmp_path / "lock")})
+    return lambda: [l.split() for l in log.read_text().splitlines()] if log.exists() else []
+
+
+def _make_ade(tmp_path, name):
+    ade = tmp_path / name
     (ade / "bin").mkdir(parents=True)
     (ade / ".git").mkdir()
     (ade / "bin" / "proc-cpu-watch").write_text("")
-    monkeypatch.setattr(cbw.shutil, "which", lambda n: "/bin/true")
-    calls = []
+    return ade
 
-    def run(args, **k):
-        import subprocess
-        calls.append(args)
-        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
-    monkeypatch.setattr(cbw.subprocess, "run", run)
 
-    class A:
-        cmd = "install"
-    A.ade = str(ade)
-    rc = cbw.cmd_install(A())
-    dest = tmp_path / "home" / "Library/LaunchAgents" / f"{cbw.LABEL}.plist"
-    return rc, calls, dest, ade, plistlib
+class _Args:
+    cmd = "install"
+    backend = "launchd"
+    dry_run = False
+    allow_no_linger = False
+
+    def __init__(self, ade, **kw):
+        self.ade = str(ade)
+        self.__dict__.update(kw)
+
+
+def _install(cbw, tmp_path, monkeypatch, ade_name):
+    import plistlib
+    calls = _fake_sched(cbw, monkeypatch, tmp_path)
+    ade = _make_ade(tmp_path, ade_name)
+    rc = cbw.cmd_install(_Args(ade))
+    dest = tmp_path / "LaunchAgents" / f"{cbw.LABEL}.plist"
+    return rc, calls(), dest, ade, plistlib
 
 
 def test_install_writes_a_valid_plist_for_special_paths_and_passes_the_state_dir(cbw, tmp_path, monkeypatch):
@@ -268,7 +283,7 @@ def test_install_writes_a_valid_plist_for_special_paths_and_passes_the_state_dir
     assert doc["Label"] == "com.djbclark.codexbar-cpu-watch"
     assert doc["EnvironmentVariables"]["CBW_STATE_DIR"] == str(cbw.STATE_DIR)
     assert doc["StandardOutPath"] == f"{cbw.STATE_DIR}/launchd.out"
-    assert [c[1] for c in calls] == ["bootout", "bootstrap"]
+    assert [c[0] for c in calls] == ["bootout", "bootstrap"]
 
 
 def test_install_changes_nothing_when_the_plist_cannot_be_built(cbw, tmp_path, monkeypatch, capsys):
@@ -276,6 +291,37 @@ def test_install_changes_nothing_when_the_plist_cannot_be_built(cbw, tmp_path, m
     rc, calls, dest, _, _ = _install(cbw, tmp_path, monkeypatch, "ade")
     assert rc == 2 and not calls and not dest.exists()  # the old job was never booted out
     assert "nothing changed" in capsys.readouterr().err
+
+
+def test_install_without_a_scheduler_is_69(cbw, tmp_path, monkeypatch, capsys):
+    """No launchctl/systemctl/crontab at all (ADE_SCHED_BACKEND=none): exit 69, was 2 before 2026-11-04."""
+    _fake_sched(cbw, monkeypatch, tmp_path)
+    monkeypatch.setenv("ADE_SCHED_BACKEND", "none")
+    ade = _make_ade(tmp_path, "ade")
+    assert cbw.cmd_install(_Args(ade, backend="auto")) == 69
+    assert "proc-cpu-watch install" in capsys.readouterr().err
+
+
+def test_the_codexbar_target_is_macos_only_but_opencode_is_not(cbw, tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(cbw, "PLATFORM", "linux")
+    monkeypatch.setattr(cbw, "SCHED_OVERRIDES", {"unit_dir": str(tmp_path / "units"), "agents_dir": str(tmp_path / "LA")})
+    ade = _make_ade(tmp_path, "ade")
+    assert cbw.cmd_install(_Args(ade, backend="systemd", dry_run=True)) == 69
+    assert "macOS" in capsys.readouterr().err
+    cbw.use_target("opencode")
+    assert cbw.cmd_install(_Args(ade, backend="systemd", dry_run=True)) == 0
+
+
+def test_systemd_dry_run_renders_a_300_second_timer(cbw, tmp_path, monkeypatch, capsys):
+    cbw.use_target("opencode")
+    monkeypatch.setattr(cbw, "SCHED_OVERRIDES", {"unit_dir": str(tmp_path / "units"), "lock_path": str(tmp_path / "lock")})
+    ade = _make_ade(tmp_path, "ade")
+    assert cbw.cmd_install(_Args(ade, backend="systemd", dry_run=True)) == 0
+    out = capsys.readouterr().out
+    assert "OnUnitActiveSec=300s" in out and "com.djbclark.opencode-cpu-watch.timer" in out
+    assert f"{ade.resolve()}/bin/proc-cpu-watch" in out and "sample" in out and "opencode" in out
+    assert "CBW_STATE_DIR" in out
+    assert not (tmp_path / "units").exists() and not cbw.STATE_DIR.exists()  # a dry run writes nothing
 
 
 def test_a_reused_pid_outside_the_tree_is_not_counted(cbw, monkeypatch):
@@ -329,20 +375,10 @@ def test_opencode_roots_are_the_serve_executable_not_any_argument(cbw):
 def test_install_for_the_opencode_target(cbw, tmp_path, monkeypatch):
     import plistlib
     cbw.use_target("opencode")
-    monkeypatch.setattr(cbw, "HOME", tmp_path / "home")
-    ade = tmp_path / "ade"
-    (ade / "bin").mkdir(parents=True)
-    (ade / ".git").mkdir()
-    (ade / "bin" / "proc-cpu-watch").write_text("")
-    monkeypatch.setattr(cbw.shutil, "which", lambda n: "/bin/true")
-    import subprocess
-    monkeypatch.setattr(cbw.subprocess, "run", lambda args, **k: subprocess.CompletedProcess(args, 0, stdout="", stderr=""))
-
-    class A:
-        cmd = "install"
-    A.ade = str(ade)
-    assert cbw.cmd_install(A()) == 0
-    doc = plistlib.loads((tmp_path / "home/Library/LaunchAgents/com.djbclark.opencode-cpu-watch.plist").read_bytes())
+    _fake_sched(cbw, monkeypatch, tmp_path)
+    ade = _make_ade(tmp_path, "ade")
+    assert cbw.cmd_install(_Args(ade)) == 0
+    doc = plistlib.loads((tmp_path / "LaunchAgents/com.djbclark.opencode-cpu-watch.plist").read_bytes())
     assert doc["Label"] == "com.djbclark.opencode-cpu-watch"
     assert doc["ProgramArguments"][-2:] == ["--target", "opencode"]
     assert doc["EnvironmentVariables"]["CBW_STATE_DIR"] == str(cbw.STATE_DIR)

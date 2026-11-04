@@ -3,7 +3,7 @@
 
     context-budget-check [--from-file PATH [--dir LABEL]] [--dry-run] [--config PATH]
                          [--state-dir DIR] [--date YYYY-MM-DD] [--json]
-    context-budget-check install | uninstall
+    context-budget-check install | uninstall [--backend auto|launchd|systemd|cron] [--allow-no-linger] [--dry-run]
 
 Runs `claude -p "/context"` in each directory of config/context-budget.toml (default
 ~/src/djbclark-ade and ~; a /context call makes no model request), parses the category table plus
@@ -23,9 +23,12 @@ Why it exists: the 2026-10-10 preamble trim regrew by 2026-10-18 through three c
 --from-file parses a saved /context output instead of running claude (tests, dry runs); --dir names
 the directory it stands for (default the first in the config). --dry-run prints the ping instead of
 sending it and writes no state. The `claude` and `hermes-ping` paths come from CONTEXT_BUDGET_CLAUDE
-and CONTEXT_BUDGET_PING. install/uninstall load or remove the launchd job
-(launchd/com.djbclark.context-budget.plist, 03:50 daily, after skillopt-night at 03:30);
-CONTEXT_BUDGET_NO_INSTALL=1 only prints the plan.
+and CONTEXT_BUDGET_PING. install/uninstall write or remove the 03:50 daily job (launchd/com.djbclark.context-budget.plist, after skillopt-night
+at 03:30) through bin/ade_sched.py: a LaunchAgent on the Mac, a systemd user timer (OnCalendar, Persistent=true) on Linux,
+a crontab block as the fallback (docs/scheduling.md). --dry-run, or CONTEXT_BUDGET_NO_INSTALL=1, prints every file and
+command and changes nothing; CONTEXT_BUDGET_LAUNCH_AGENTS still redirects the LaunchAgents directory. install/uninstall
+exit: 0 done; 1 an activation command failed; 2 bad job or a linked worktree (the job would point into a directory that is
+deleted: install from the primary checkout); 69 no usable scheduler, or systemd Linger=no without --allow-no-linger.
 
 Exit: 0 every directory within budget and not grown, 1 a breach or a rise (pinged), 2 bad usage,
 3 a directory could not be measured (claude failed or the output did not parse). A directory that
@@ -386,35 +389,30 @@ def cmd_run(a: argparse.Namespace) -> int:
     return 3 if failures else (1 if alerts else 0)
 
 
-def launch_agents() -> Path:
-    return Path(os.environ.get("CONTEXT_BUDGET_LAUNCH_AGENTS") or Path.home() / "Library" / "LaunchAgents")
-
-
-def _launchctl(*argv: str) -> int:
-    return subprocess.run(["launchctl", *argv], check=False, stdout=subprocess.DEVNULL,
-                          stderr=subprocess.DEVNULL).returncode
-
-
 def cmd_install(a: argparse.Namespace) -> int:
-    dest = launch_agents() / PLIST_SRC.name
-    domain = f"gui/{os.getuid()}"
-    if os.environ.get("CONTEXT_BUDGET_NO_INSTALL") == "1":
-        verb = f"launchctl bootstrap {domain} {dest}" if a.command == "install" else f"launchctl bootout {domain}/{LABEL}; remove {dest}"
-        print(f"would {'copy ' + str(PLIST_SRC) + ' -> ' + str(dest) + '; ' if a.command == 'install' else ''}{verb}")
-        return 0
-    _launchctl("bootout", f"{domain}/{LABEL}")
-    if a.command == "uninstall":
-        dest.unlink(missing_ok=True)
-        print(f"removed {dest}")
-        return 0
-    state_dir(None).mkdir(parents=True, exist_ok=True)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest.with_name(dest.name + ".tmp")
-    shutil.copyfile(PLIST_SRC, tmp)
-    os.replace(tmp, dest)
-    rc = _launchctl("bootstrap", domain, str(dest))
-    print(f"installed {dest}; bootstrap rc={rc}")
-    return rc
+    """Install/uninstall the nightly job through bin/ade_sched.py (launchd, systemd or cron; docs/scheduling.md)."""
+    sys.path[:0] = [d for d in (os.path.dirname(os.path.realpath(__file__)),) if d not in sys.path]   # python3 -I
+    import ade_sched
+    over: dict[str, str] = {}
+    if os.environ.get("CONTEXT_BUDGET_LAUNCH_AGENTS"):   # kept for older callers; ADE_SCHED_LAUNCH_AGENTS is the shared one
+        over["agents_dir"] = os.environ["CONTEXT_BUDGET_LAUNCH_AGENTS"]
+    dry = os.environ.get("CONTEXT_BUDGET_NO_INSTALL") == "1" or a.dry_run
+    try:
+        if a.command == "uninstall":
+            gone = ade_sched.uninstall(LABEL, a.backend, dry_run=dry, **over)
+            if not dry:
+                print(f"removed {LABEL}" if gone else f"{LABEL} was not installed")
+            return 0
+        if not dry:
+            state_dir(None).mkdir(parents=True, exist_ok=True)
+        job = ade_sched.Job.from_plist(PLIST_SRC)   # __ADE__: this checkout; a linked worktree is refused (exit 2)
+        ade_sched.install(job, a.backend, dry_run=dry, allow_no_linger=a.allow_no_linger, **over)
+    except ade_sched.SchedError as e:
+        print(f"context-budget-check {a.command}: {e}", file=sys.stderr)
+        return e.code
+    if not dry:
+        print(f"installed {LABEL}")
+    return 0
 
 
 def main(argv: list[str]) -> int:
@@ -427,6 +425,9 @@ def main(argv: list[str]) -> int:
     p.add_argument("--state-dir", help="where <date>.json files live (default ~/.local/state/context-budget)")
     p.add_argument("--date", help="today's date, YYYY-MM-DD (tests)")
     p.add_argument("--json", action="store_true", help="also print the parsed entries and alerts as JSON")
+    p.add_argument("--backend", choices=["auto", "launchd", "systemd", "cron"], default="auto",
+                   help="install/uninstall: scheduler (default auto: launchd on macOS, a systemd user timer on Linux, else cron)")
+    p.add_argument("--allow-no-linger", action="store_true", help="install on systemd although loginctl Linger=no")
     a = p.parse_args(argv)
     if a.command in ("install", "uninstall"):
         return cmd_install(a)
