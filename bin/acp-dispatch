@@ -165,7 +165,7 @@ stop that cannot be resumed automatically (no session id, agent without load/res
 attempts exhausted) stays exit 3 and the `check` line ends with the exact
 `acp-dispatch resume <record>` command and the retry time.
 
-Failure classes (NO-REPORT line): `quota`, `auth`, `refused`, `outage`, `timeout`, `transient`
+Failure classes (NO-REPORT line): `quota`, `credit`, `auth`, `refused`, `outage`, `timeout`, `transient`
 (acp-run's FAILED transient: a truncated reply, an http/2 CANCEL), `killed`, `lost`, `exit N`.
 2026-10-18: a transient failure on a pool whose headroom is below 10% (the --min-headroom default,
 read with `pool_reading`, the reading a resume refusal uses) is a quota stop in disguise — a cursor
@@ -2838,6 +2838,125 @@ def _parse_stamp(value) -> datetime | None:
     return stamp if stamp.tzinfo else stamp.astimezone()
 
 
+
+CREDIT_BACKOFF = "6h"  # Anthropic credit-balance refusal with no row reset/expiry (2026-11-04)
+
+
+def _stamp_from_mapping(obj: dict, keys: tuple[str, ...] = ("resets_at", "expires_at", "available_at")) -> list[datetime]:
+    """Future timezone-aware stamps from the named fields of a dict (aiuse row / window / credits)."""
+    now = now_utc()
+    out: list[datetime] = []
+    for key in keys:
+        stamp = _parse_stamp(obj.get(key)) if isinstance(obj, dict) else None
+        if stamp and stamp > now:
+            out.append(stamp.astimezone(timezone.utc) if stamp.tzinfo else stamp)
+    return out
+
+
+def aiuse_pool_reset_stamp(agent: str, model: str | None) -> datetime | None:
+    """Soonest future reset/expiry on the pool's aiuse row, for a credit refusal that names no time.
+
+    Reads `resets_at`, `expires_at` and `available_at` on the account, each window, and an optional
+    `credits` block — without requiring the window to look exhausted (the meter can still show
+    headroom while Anthropic refuses for an empty credit balance). Snapshot file first; then a
+    canned `ROUTE_AGENT_AIUSE_JSON` available row when present. Never probes live. Never guesses a date.
+    """
+    mapping = map_agent_to_provider(agent, model)
+    if mapping is None:
+        return None
+    provider, family = mapping
+    now = now_utc()
+    stamps: list[datetime] = []
+
+    def take(obj: dict) -> None:
+        stamps.extend(_stamp_from_mapping(obj))
+        credits = obj.get("credits")
+        if isinstance(credits, dict):
+            stamps.extend(_stamp_from_mapping(credits))
+
+    # Canned available JSON (tests / ROUTE_AGENT_AIUSE_JSON) wins over the snapshot file, as
+    # load_snapshot does: never mix a fixture's expiry with the machine's live snapshot.
+    canned = os.environ.get("ROUTE_AGENT_AIUSE_JSON")
+    if canned:
+        try:
+            raw = Path(canned).read_text()
+            payload = json.loads(raw[raw.find("{"):] if "{" in raw else raw)
+        except (OSError, ValueError):
+            payload = None
+        if isinstance(payload, dict):
+            for row in _pool_entries(payload.get("available") or [], provider, family):
+                take(row)
+                for w in row.get("windows") or []:
+                    take(w)
+            for row in _pool_entries(payload.get("excluded") or [], provider, family):
+                take(row)
+    else:
+        path = Path(os.environ.get("AIUSE_SNAPSHOT") or route_module().SNAPSHOT)
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, ValueError):
+            data = None
+        if isinstance(data, dict):
+            snap = data.get("snapshot", data)
+            for acct in _pool_entries(snap.get("accounts") or [], provider, None):
+                if acct.get("error"):
+                    continue
+                take(acct)
+                for w in acct.get("windows") or []:
+                    if family and w.get("pool_family") not in (None, family):
+                        continue
+                    take(w)
+
+    future = [s for s in stamps if s > now]
+    return min(future) if future else None
+
+
+def record_credit_refusal_in_aiuse(agent: str, model: str | None, text: str, rc: int | None,
+                                   when_match: re.Match | None) -> tuple[str, str]:
+    """Notify aiuse that Anthropic credit balance refused this pool (same note-exhausted path as quota).
+
+    Reset: parsed from the refusal text when present, else the pool row's resets_at / expires_at /
+    available_at / credits stamp from aiuse, else a fixed 6 h back-off. Never invents a calendar date.
+    """
+    mapping = map_agent_to_provider(agent, model)
+    if mapping is None:
+        return "unknown_agent", "; aiuse not notified: unknown agent"
+
+    reset = parse_reset_for_aiuse(text, when_match, agent)
+    if reset is None:
+        stamp = aiuse_pool_reset_stamp(agent, model)
+        if stamp is not None:
+            reset = ("--resets-at", stamp.astimezone(timezone.utc).isoformat())
+        else:
+            reset = ("--resets-in", CREDIT_BACKOFF)
+
+    override = os.environ.get("ACP_DISPATCH_AIUSE")
+    if override and override.lower() in ("off", "0", "false", "none", "no"):
+        return "disabled", ""
+
+    aiuse_bin = override or shutil.which("aiuse") or "aiuse"
+    provider, family = mapping
+    flag, val = reset
+    cmd = [aiuse_bin, "note-exhausted", provider]
+    if family:
+        cmd.extend(["--family", family])
+    cmd.extend([flag, val])
+    reason = f"acp-dispatch: credit refusal ({agent}{', ' + model if model else ''}) exit {rc}"
+    cmd.extend(["--reason", reason])
+
+    try:
+        proc = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=10)
+        if proc.returncode != 0:
+            err = proc.stderr.strip() or f"exit {proc.returncode}"
+            print(f"acp-dispatch: warning: aiuse note-exhausted failed ({err})", file=sys.stderr)
+            return "failed", ""
+    except (OSError, subprocess.TimeoutExpired) as e:
+        print(f"acp-dispatch: warning: aiuse note-exhausted failed ({e})", file=sys.stderr)
+        return "failed", ""
+
+    return "ok", ""
+
+
 def aiuse_reset_time(agent: str, model: str | None) -> datetime | None:
     """The pool's next reset from aiuse's own snapshot (`resets_at` of an exhausted window, else the
     account's `available_at`), for a refusal whose text names no time. Never probes."""
@@ -3251,6 +3370,12 @@ def failure_class(text: str, rc: int | None, *, preflight: bool = False) -> tupl
     when = re.search(r"(?:try again|resets?|refresh(?:es)?|retry|limit will reset) "
                      r"(at|in|after|on(?= (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)))"
                      r" ([^\n.\"'\\]{1,64})", text, re.IGNORECASE)
+    # Anthropic API credit-balance refusal (2026-11-04): HTTP 400 invalid_request_error with
+    # "Your credit balance is too low to access the Anthropic API...". Distinct from quota (rate
+    # windows): take the pool out of routing via note-exhausted. Match the Anthropic wording and
+    # the general "credit balance" + "too low" pair; not every 400.
+    if "credit balance" in low and "too low" in low:
+        return "credit", when
     quota_terms = ("limit exhausted", "usage limit", "quota exhausted", "resource_exhausted",
                    "individual quota reached", "rate limit exceeded", "insufficient quota",
                    *COPILOT_QUOTA_TERMS)
@@ -3633,6 +3758,8 @@ def preflight(acp_run: str, agent: str, model: str | None) -> tuple[bool, str, s
         reset = parse_reset_for_aiuse(combined, when, agent)
         if cls == "quota":
             record_quota_refusal_in_aiuse(agent, model, combined, None if proc is None else proc.returncode, when)
+        elif cls == "credit":
+            record_credit_refusal_in_aiuse(agent, model, combined, None if proc is None else proc.returncode, when)
         elif cls == "outage":
             note_outage_in_aiuse(agent, model, combined)
         detail = " ".join(combined.split())[-400:] or f"exit {None if proc is None else proc.returncode}"
@@ -3711,12 +3838,14 @@ def failure_note(stderr: Path, rc: int | None, agent: str, model: str | None,
         # stop in disguise: same NO-REPORT quota line, so check and auto-resume take the quota path
         cls = "quota"
         extra = f"; transient error on a pool at {starved:.1f}% headroom: treated as quota"
-    if cls in ("quota", "outage", "transient"):
+    if cls in ("quota", "credit", "outage", "transient"):
         forget_preflight(agent, model)
     if starved is not None:
         pass        # aiuse already shows the empty pool; the error text names no reset time to note
     elif cls == "quota":
         _, extra = record_quota_refusal_in_aiuse(agent, model, text, rc, when)
+    elif cls == "credit":
+        _, extra = record_credit_refusal_in_aiuse(agent, model, text, rc, when)
     elif cls in ("outage", "transient"):
         note_outage_in_aiuse(agent, model, text)
     if cls == "fake-tool-calls":
@@ -3775,13 +3904,16 @@ def exit0_quota_note(rec: dict) -> tuple[str, str] | None:
     if not text:
         return None
     cls, when = failure_class(text, 0)
-    if cls != "quota":
+    if cls not in ("quota", "credit"):
         return None
-    _, extra = record_quota_refusal_in_aiuse(agent, model, text, 0, when)
+    if cls == "credit":
+        _, extra = record_credit_refusal_in_aiuse(agent, model, text, 0, when)
+    else:
+        _, extra = record_quota_refusal_in_aiuse(agent, model, text, 0, when)
     forget_preflight(agent, model)
     bits = [agent] + ([model] if model else []) + (
         [f"retry {when.group(1).lower()} {when.group(2).strip()}"] if when else [])
-    note = (f"{NO_REPORT_PREFIX} quota ({', '.join(bits)}): acp-run exit 0; the agent stopped "
+    note = (f"{NO_REPORT_PREFIX} {cls} ({', '.join(bits)}): acp-run exit 0; the agent stopped "
             f"before writing DONE, so nothing above is a deliverable{extra} (appended by acp-dispatch)")
     return note, text
 
