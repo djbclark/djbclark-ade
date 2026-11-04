@@ -200,7 +200,7 @@ gateway, never a coding target).
 ### D4. venicecode (Venice API)
 
 1. **D4a For / why.** OpenCode fork for array-content / Venice; wired 2026-11-04 session then
-   retired (archived upstream, disabled Venice plan, native `venice` provider) (D4).
+   retired (archived upstream, Venice disabled in aiuse's config, native `venice` provider) (D4).
 2. **D4b Gotchas.** `sudo-secretspec run` injects all secrets → strip `AWS_*` or Bedrock hijacks;
    OpenCode v2 singular dir names (`plugin`, `command`); isolated config dir +
    `OPENCODE_DISABLE_DEFAULT_PLUGINS`; never web-session bridge plugins (B11). Parallel
