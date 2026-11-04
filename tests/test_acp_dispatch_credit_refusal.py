@@ -43,6 +43,14 @@ class TestCreditFailureClass(unittest.TestCase):
         self.assertEqual(self.cls(
             "Your credit balance is too low to access the Anthropic API."), "credit")
 
+    def test_acp_run_provider_label_is_refined_to_credit(self):
+        # acp-run files the refusal under the generic `provider` label (FAILED provider / fail=provider)
+        envelope = (f"acp-run: FAILED provider: {CREDIT_MSG}\n"
+                    "acp-run: agent=omp stop=error secs=1.0 tools=0 fail=provider\n")
+        self.assertEqual(self.cls(envelope), "credit")
+        self.assertEqual(self.cls("acp-run: FAILED provider: Error: 400 upstream unavailable\n"
+                                  "acp-run: agent=omp stop=error fail=provider\n"), "provider")
+
     def test_incidental_credit_words_are_not_refusals(self):
         for text in (
             "Anthropic: credit balance is sufficient; threshold too low",
@@ -94,7 +102,8 @@ class TestCreditRefusalDispatch(Base):
         assert zcode in fake, "shared FAKE preflight case changed; update this test"
         fake = fake.replace(
             zcode,
-            zcode + f"\n      credit) echo '{CREDIT_MSG}' >&2; exit 1;;",
+            zcode + (f"\n      credit) echo '{CREDIT_MSG}' >&2; "
+                     f"echo 'acp-run: FAILED provider: {CREDIT_MSG}' >&2; exit 1;;"),
             1,
         )
         quota = '  quota)    echo "FAILED quota" >&2; exit 1;;'
@@ -102,7 +111,8 @@ class TestCreditRefusalDispatch(Base):
         fake = fake.replace(
             quota,
             quota + (f"\n  credit)   echo '{CREDIT_MSG}' >&2; "
-                     'echo "acp-run: agent=omp stop=error secs=1.0 tools=0 fail=credit" >&2; exit 1;;'),
+                     f"echo 'acp-run: FAILED provider: {CREDIT_MSG}' >&2; "
+                     'echo "acp-run: agent=omp stop=error secs=1.0 tools=0 fail=provider" >&2; exit 1;;'),
             1,
         )
         self.fake.write_text(fake)
@@ -210,9 +220,12 @@ class TestCreditRefusalDispatch(Base):
 
     def test_plain_400_does_not_note_exhausted(self):
         # swap credit mode for a generic 400 so classification is not credit
-        credit_arm = f"      credit) echo '{CREDIT_MSG}' >&2; exit 1;;"
-        plain = ('      credit) echo \'Error: 400 {"type":"error","error":{"type":"invalid_request_error",'
-                 '"message":"messages.0.content: Field required"}}\' >&2; exit 1;;')
+        credit_arm = (f"      credit) echo '{CREDIT_MSG}' >&2; "
+                      f"echo 'acp-run: FAILED provider: {CREDIT_MSG}' >&2; exit 1;;")
+        plain_err = ('Error: 400 {"type":"error","error":{"type":"invalid_request_error",'
+                     '"message":"messages.0.content: Field required"}}')
+        plain = (f"      credit) echo '{plain_err}' >&2; "
+                 f"echo 'acp-run: FAILED provider: {plain_err}' >&2; exit 1;;")
         fake = self.fake.read_text()
         assert credit_arm in fake
         self.fake.write_text(fake.replace(credit_arm, plain, 1))

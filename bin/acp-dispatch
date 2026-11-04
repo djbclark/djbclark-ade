@@ -3383,6 +3383,12 @@ def failure_class(text: str, rc: int | None, *, preflight: bool = False) -> tupl
         return "auth", when
     if rc == 127 and re.search(r"(?m)^acp-run: \S+ not installed$", text):
         return "not-installed", when       # the binary was missing: infrastructure, not the slice
+    # Anthropic's credit-balance refusal: the exact positive phrase plus an Anthropic error marker.
+    # It comes after quota, auth and not-installed (they keep precedence over incidental credit
+    # text) but before acp-run's own label, which files it under the generic `provider` (2026-11-04).
+    if ("credit balance is too low" in low
+            and any(marker in low for marker in ("anthropic", "invalid_request_error", "plans & billing"))):
+        return "credit", when
     m = re.search(r"\bfail=([\w-]+)", text) or re.search(r"FAILED ([\w-]+)", text)
     if m:
         return m.group(1), when
@@ -3390,11 +3396,6 @@ def failure_class(text: str, rc: int | None, *, preflight: bool = False) -> tupl
         return "timeout", when
     if _outage_phrases(low, text, preflight=preflight):
         return "outage", when
-    # Require both the exact positive refusal and an Anthropic error marker. Existing
-    # error classes above retain precedence over incidental credit text.
-    if ("credit balance is too low" in low
-            and any(marker in low for marker in ("anthropic", "invalid_request_error", "plans & billing"))):
-        return "credit", when
     return (None if rc in (None, 0) else f"exit {rc}"), when
 
 
