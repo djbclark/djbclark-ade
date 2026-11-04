@@ -70,6 +70,7 @@
     "terminus-kira": "user-invocable-only",
     "setup-modern-cli": "user-invocable-only",
     "teach": "user-invocable-only",
+    "retro": "user-invocable-only",
     "dialogue": "user-invocable-only",
     "effort-routing": "user-invocable-only",
     "coderabbit-feeder": "user-invocable-only",
@@ -222,6 +223,11 @@
             "type": "command",
             "command": "{{ .home }}/ops/site-djbclark/macos/graft-hook-timeout-fix/graft-hook-guard.sh node \"{{ .home }}/.claude/helpers/graft-hooks.cjs\" post-edit",
             "timeout": 15
+          },
+          {
+            "type": "command",
+            "command": "\"$HOME\"/ops/site-private/bin/hook-deadline 2 \"$HOME\"/src/djbclark-ade/bin/post-edit-check --hook",
+            "timeout": 20
           }
         ]
       },

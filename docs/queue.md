@@ -3,6 +3,36 @@
 Work the operator has explicitly queued. Newest first. Items leave this file
 when they ship (into the relevant doc) or when they're dropped (say why).
 
+## Issue 284 follow-ups: NDC Oslo 2026 ideas (2026-11-04; branch `claude/issue-284-ndc-oslo-ideas`)
+
+[Issue 284](https://github.com/djbclark/djbclark-ade/issues/284) shipped items 1 (`bin/instruction-lint`), 2 (secret read-deny,
+Claude part: [secret-deny.md](secret-deny.md)), 3 (`bin/post-edit-check`, Claude part), 5 (`/steps plan`) and 6
+(`bin/ade-retro`, `retro` skill). Still open, each needing a probe or a ruling first:
+
+1. **Item 4, goal / verify-until-pass loop: not built.** Evaluate the Paseo registry plugin `37chengshan/goal-mode`
+   ([plugin scan](paseo-plugins-scan-2026-10-19.md) line 82) first (Paseo directive). Then propose `verifyCmd`/`verifyMax`
+   on G1 `jobs.submit`/`jobs.finish`: `jobs.finish` runs it in the worker's workspace within the job's deadline (tests
+   through `bg`), a non-zero rc refuses the finish and returns the output tail, attempts go in the ledger, and running
+   out records `verify-failed`. `acp-run --verify` has no D5 replacement today. A home-grown Claude Stop hook was
+   declined: it would run a command from a state file at every stop (a sandbox escape once item 3 below lands), and
+   `docs/queue.md` "Ralph on OpenCode v2" parks Ralph-style work. djbclark rules on it.
+2. **Codex and opencode wiring** for `secret_read_gate.py` and `post-edit-check --hook`: first check the Codex hook
+   timeout unit (graft writes 8000-15000 in `.codex/hooks.json`: milliseconds or seconds?), whether Codex's PreToolUse
+   matcher fires on `apply_patch`, whether graft rewrites `.codex/hooks.json`, and opencode's rule precedence for
+   `permission.read` (last match wins is unverified). An opencode `tool.execute.after` plugin for post-edit-check
+   waits for an installer (`opencode-plugin-guard` manages rtk only).
+3. **Claude sandbox `filesystem.denyRead` trial**: the only OS-level wall against `cat .env` through Bash. It changes
+   how every Bash call runs under `bypassPermissions`, so trial it in one session first.
+4. **A Codex `[permissions.<profile>.filesystem]` deny-read profile**: test openai/codex#22179 (`cat .env` passed a
+   `**/.env` deny) on the installed build first.
+5. **Live checks**: whether `hook-deadline` (site-private) passes exit 2 through (if it maps 2 to 0, post-edit-check's
+   findings never reach the model), and that Claude accepts the new `Read(...)` deny rules.
+6. **Applying the template** to the live `~/.claude/settings.json` (hook entries, deny rules, `retro` skill override)
+   waits for djbclark's yes (order 11); `ade-update` does not render templates.
+7. **D7**: run `bin/instruction-lint` over `~/AGENTS.md` and `home-agents.mdc` (outside the repo), and make the
+   `retired-term` warnings an error once the D7 sweep lands. `.cursor/rules/graft.mdc` has no graft markers, so its
+   "Graft" heading draws one `heading-skill` warning.
+
 ## Interruption recovery architecture (2026-11-04; implementation pending)
 
 [Issue 278](https://github.com/djbclark/djbclark-ade/issues/278) is incorporated into the
