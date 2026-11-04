@@ -3,6 +3,14 @@
 Work the operator has explicitly queued. Newest first. Items leave this file
 when they ship (into the relevant doc) or when they're dropped (say why).
 
+## Agent TUI consolidation: 21 installed, keep 9 (2026-11-04; proposal, djbclark rules on it)
+
+[docs/tui-consolidation.md](tui-consolidation.md): inventory with 30-day dispatch counts, which plans
+only work in the vendor's client, the 9-agent target roster, what to retire or fold into opencode
+(zcode, copilot, crush, venicecode, dsh, cline, qwen, goose, muse, aider, kiro, devin), plan
+decisions (the X Subscription switch is permanent), and migration steps G1-G5. Nothing removed; the
+machine-side steps (G4) wait for djbclark's yes under standing order 11. Open questions H1-H6.
+
 ## Interruption recovery architecture (2026-11-04; implementation pending)
 
 [Issue 278](https://github.com/djbclark/djbclark-ade/issues/278) is incorporated into the
