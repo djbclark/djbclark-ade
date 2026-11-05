@@ -154,7 +154,9 @@ def test_cron_line_runs_a_nasty_path_intact(tmp_path):
     j = job(ProgramArguments=[sys.executable, "-c", code, NASTY], WorkingDirectory=str(d),
             EnvironmentVariables={"V": NASTY, "OUT": str(out)}, StandardOutPath=str(d / "log %1"),
             StandardErrorPath=str(d / "log %1"))
-    block, _ = S.render_cron(j, home="/h")
+    home = tmp_path / "home"
+    (home / ".local/state/ade").mkdir(parents=True)     # install creates it; the run's flock -n lock lives there
+    block, _ = S.render_cron(j, home=str(home))
     line = next(ln for ln in block.splitlines() if not ln.startswith("#"))
     assert "%" not in re.sub(r"\\%", "", line)          # every % is escaped for cron
     cmd = line.split(" ", 5)[5].replace("\\%", "%")      # what cron hands to /bin/sh
@@ -672,3 +674,12 @@ def test_imports_on_python_3_10():
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom) and node.module == "typing":
             assert not newer & {a.name for a in node.names}
+
+
+
+def test_cron_runs_are_serialized_with_flock(tmp_path):
+    """cron starts a new copy while the last still runs; launchd and systemd never do (Codex P2 on PR 291)."""
+    block, notes = S.render_cron(job(StartInterval=600), home="/h", flock="/usr/bin/flock")
+    assert "/usr/bin/flock -n /h/.local/state/ade/" in block and ".cron.lock /usr/bin/env " in block
+    block, notes = S.render_cron(job(StartInterval=600), home="/h", flock=None)
+    assert "flock" not in block and any("overlap" in n for n in notes)

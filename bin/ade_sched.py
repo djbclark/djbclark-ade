@@ -462,9 +462,11 @@ def cron_end(label: str) -> str:
     return f"# END ade-sched:{label}"
 
 
-def render_cron(job: Job, home: str | None = None) -> tuple[str, list[str]]:
+def render_cron(job: Job, home: str | None = None, flock: str | None = "auto") -> tuple[str, list[str]]:
     """The crontab block (BEGIN/END markers included, newline-terminated), notes. KeepAlive and a StartInterval under 60 s
-    raise 69. `home` fills ~/.local/bin at the front of PATH (default $HOME)."""
+    raise 69. `home` fills ~/.local/bin at the front of PATH (default $HOME). `flock` (default: found on PATH; None: off)
+    wraps each run in `flock -n ~/.local/state/ade/LABEL.cron.lock`, so a run that outlasts its interval is not started
+    twice (launchd and systemd never overlap a job; cron would)."""
     if job.supervised:
         raise SchedError(EX_UNAVAILABLE, f"{job.label}: KeepAlive needs a supervisor and cron cannot supervise; use systemd or launchd")
     home = home or os.environ.get("HOME") or str(Path.home())
@@ -488,9 +490,16 @@ def render_cron(job: Job, home: str | None = None) -> tuple[str, list[str]]:
     prefix = [f"{home}/.local/bin", *PATH_PREFIX]
     env = {"PATH": ":".join(prefix + [p for p in _path_entries(job) if p not in prefix])}
     env.update((k, v) for k, v in job.env.items() if k != "PATH")
+    if flock == "auto":
+        flock = shutil.which("flock")
     cmd = ""
     if job.cwd:
         cmd += f"cd {shlex.quote(job.cwd)} && "
+    if flock:
+        _clean(flock, "flock")
+        cmd += shlex.join([flock, "-n", f"{home}/.local/state/ade/{job.label}.cron.lock"]) + " "
+    else:
+        notes.append(f"{job.label}: no flock on PATH: a run that outlasts its interval can overlap the next one")
     cmd += "/usr/bin/env " + " ".join(shlex.quote(f"{k}={v}") for k, v in env.items()) + " "
     cmd += shlex.join(job.argv)
     if job.stdout and job.stdout == job.stderr:
@@ -883,6 +892,7 @@ def install(job: Job, backend: str | Backend | None = None, *, dry_run: bool = F
         if not c.crontab:
             raise SchedError(EX_UNAVAILABLE, "no crontab binary")
         _log_dirs(job)
+        (_home(c.env) / ".local/state/ade").mkdir(parents=True, exist_ok=True)   # where each run's flock -n lock lives
         with _CronLock(c.lock):
             cur, _ = drop_cron_block(_crontab_read(c), job.label)
             _activate(c, [c.crontab, "-"], stdin=cur + (r.cron_block or ""))
