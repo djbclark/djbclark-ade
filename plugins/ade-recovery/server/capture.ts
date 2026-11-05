@@ -702,6 +702,7 @@ export class Capture {
   // ---------------------------------------------------------------- event application
 
   private applyCreate(agent: HookAgent, seq: number, paseo: PaseoLike): void {
+    this.unmatchedEnds.delete(agent.id); // a create/close/archive between end and start: no late start
     const entry = this.upsert(agent);
     if (!entry) return;
     const body = entry.body as RecordBody;
@@ -723,7 +724,8 @@ export class Capture {
     const turns = body.turns ? [...body.turns] : [];
     if (this.isLateStart(agent.id, turnId, turns)) {
       // turn.after for this very turn already arrived (hook order is not guaranteed): its start.
-      this.scheduleWrite(agent.id);
+      // No write: the body is unchanged, and a fresh writtenAt would hide a wrongly swallowed
+      // start from the CLI's paseo-record-newer check (adversary round 5, B1).
       return;
     }
     const previous = openTurn({ turns });
@@ -832,6 +834,7 @@ export class Capture {
   }
 
   private applyClose(agent: HookAgent, _seq: number): void {
+    this.unmatchedEnds.delete(agent.id);
     const entry = this.upsert(agent);
     if (!entry) return;
     const body = entry.body as RecordBody;
@@ -854,6 +857,7 @@ export class Capture {
   }
 
   private applyArchive(agent: HookAgent, archivedAt: string, _seq: number): void {
+    this.unmatchedEnds.delete(agent.id);
     const entry = this.upsert(agent);
     if (!entry) return;
     const body = entry.body as RecordBody;
@@ -976,6 +980,12 @@ export class Capture {
       } catch (error) {
         if (isWriterLost(error)) {
           this.log("generation write abandoned: this writer no longer owns the state root");
+          if (!own.stopped && this.modeValue === "active") {
+            // The lock vanished or changed hands while we live: stop writing, say so once
+            // (adversary round 5, B2). The CLI then reads the writer as gone.
+            this.modeValue = "read-only";
+            this.logOnce("writer-lost", "read-only: writer.lock no longer carries our nonce; writing nothing");
+          }
           return;
         }
         if (!isTooLarge(error)) {
