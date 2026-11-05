@@ -189,3 +189,19 @@ def test_default_root_from_linked_worktree_uses_primary_checkout(tmp_path):
                        env=env, capture_output=True, text=True, timeout=30)
     assert str(primary.resolve() / "skills") in r.stderr, r.stderr
     assert str(tmp_path / "wt" / "skills") not in r.stderr
+
+
+def test_canonical_checkout_wins_when_it_exists(tmp_path):
+    """With ~/src/djbclark-ade present, its skills/ is the default even when the script runs from another checkout
+    (a pasture or second clone must not report false gaps or link into a removable copy; adversary on PR 292)."""
+    home = tmp_path / "home"
+    canon = home / "src" / "djbclark-ade"
+    (canon / "bin").mkdir(parents=True)
+    (canon / "skills").mkdir()
+    (canon / "bin" / "skill-everywhere").write_text("")
+    env = dict(os.environ, HOME=str(home), BASH_ENV="/dev/null",
+               SKILL_EVERYWHERE_PRIVATE=str(tmp_path / "none"), SKILL_EVERYWHERE_ONLY="nonesuch")
+    env.pop("SKILL_EVERYWHERE_ADE", None)
+    env.pop("ENV", None)
+    r = subprocess.run([str(SCRIPT), "--check", "no-such-skill-xyz"], env=env, capture_output=True, text=True, timeout=30)
+    assert str(canon / "skills") in r.stderr, r.stderr
