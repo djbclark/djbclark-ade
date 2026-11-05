@@ -26,7 +26,7 @@ sending it and writes no state. The `claude` and `hermes-ping` paths come from C
 and CONTEXT_BUDGET_PING. install/uninstall write or remove the 03:50 daily job (launchd/com.djbclark.context-budget.plist, after skillopt-night
 at 03:30) through bin/ade_sched.py: a LaunchAgent on the Mac, a systemd user timer (OnCalendar, Persistent=true) on Linux,
 a crontab block as the fallback (docs/scheduling.md). --dry-run, or CONTEXT_BUDGET_NO_INSTALL=1, prints every file and
-command and changes nothing; CONTEXT_BUDGET_LAUNCH_AGENTS still redirects the LaunchAgents directory. install/uninstall
+command and changes nothing (it still detects the scheduler, so it exits 69 where none is usable); CONTEXT_BUDGET_LAUNCH_AGENTS still redirects the LaunchAgents directory. install/uninstall
 exit: 0 done; 1 an activation command failed; 2 bad job or a linked worktree (the job would point into a directory that is
 deleted: install from the primary checkout); 69 no usable scheduler, or systemd Linger=no without --allow-no-linger.
 

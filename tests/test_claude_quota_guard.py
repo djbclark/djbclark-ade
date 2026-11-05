@@ -11,6 +11,7 @@ import json
 import os
 import plistlib
 import shlex
+import shutil
 import stat
 import subprocess
 import sys
@@ -144,7 +145,8 @@ class Rig:
                "CLAUDE_QUOTA_GUARD_LAUNCH_AGENTS": str(self.launch_agents),
                "CLAUDE_QUOTA_NUDGE_STATE": str(self.nudges),
                "GATES_TOML": self.closed_gates(),
-               "CLAUDE_QUOTA_GUARD_NOW": self.now.isoformat()}
+               "CLAUDE_QUOTA_GUARD_NOW": self.now.isoformat(),
+               "CLAUDE_QUOTA_GUARD_ALLOW_WORKTREE": "1"}   # the suite itself may run from a linked worktree
         env.update(over)
         return env
 
@@ -2111,3 +2113,20 @@ def test_bootout_note_only_with_a_bootout_line(rig):
     env, _ = _fake_sched(rig)
     r = rig.guard("--install", **env)
     assert r.returncode == 0 and "harmless" not in r.stdout
+
+
+def test_install_from_a_linked_worktree_is_refused(rig, tmp_path):
+    """--install from a linked worktree would schedule a copy deleted after the merge (adversary confirm, PR 293)."""
+    primary = tmp_path / "primary"
+    (primary / "bin").mkdir(parents=True)
+    for name in ("claude-quota-guard", "ade_sched.py", "ade_gates.py"):
+        shutil.copy2(GUARD.parent / name, primary / "bin" / name)
+    git = ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"]
+    for argv in (["init", "-q"], ["add", "-A"], ["commit", "-qm", "i"], ["worktree", "add", "-q", str(tmp_path / "wt"), "-b", "wt"]):
+        subprocess.run([*git, *argv], cwd=primary, check=True, capture_output=True)
+    env = rig.env(**_launchd_env(rig))
+    env.pop("CLAUDE_QUOTA_GUARD_ALLOW_WORKTREE")
+    r = subprocess.run([sys.executable, "-I", str(tmp_path / "wt" / "bin" / "claude-quota-guard"), "--install"],
+                       env=env, capture_output=True, text=True, timeout=60)
+    assert r.returncode == 64 and "linked worktree" in r.stderr, (r.returncode, r.stderr)
+    assert not rig.launch_agents.exists()

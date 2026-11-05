@@ -358,7 +358,8 @@ def cmd_install(a):
     try:
         if a.cmd == "uninstall":
             gone = ade_sched.uninstall(LABEL, backend, dry_run=dry, **SCHED_OVERRIDES)
-            print(f"removed {LABEL}" if gone else f"{LABEL} was not installed")
+            if not dry:
+                print(f"removed {LABEL}" if gone else f"{LABEL} was not installed")
             return 0
         ade = Path(a.ade).expanduser().resolve() if a.ade else ADE
         if not a.ade and disposable_checkout(ade):

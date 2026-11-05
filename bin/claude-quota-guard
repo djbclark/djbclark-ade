@@ -17,7 +17,7 @@ UserPromptSubmit hook claude/hooks/quota_nudge.py, and pings once per upward cro
                                    `systemctl --user ...`); never activates it itself
 
 Levels and exit codes: 0 ok, 1 watch, 2 tight, 3 critical, 10 aiuse could not be read (level
-fields left untouched; see below), 64 bad CLAUDE_QUOTA_GUARD_THRESHOLDS (or an `--install` job that is invalid or failed to write), 69 `--install` with no usable
+fields left untouched; see below), 64 bad CLAUDE_QUOTA_GUARD_THRESHOLDS (or an `--install` job that is invalid, failed to write, or was asked for from a linked worktree; CLAUDE_QUOTA_GUARD_ALLOW_WORKTREE=1 allows that), 69 `--install` with no usable
 scheduler (ADE_SCHED_BACKEND=none, none found, or systemd linger off without --allow-no-linger; docs/scheduling.md). The binding window
 is the lowest `remaining_percent` among the Claude rows' windows (weekly, 5-hour and Fable's
 sublimit):
@@ -866,6 +866,11 @@ def cmd_install(args) -> int:
     """Write the scheduler job through bin/ade_sched.py (launchd plist, systemd user units or a cron block) and print the
     activation commands; never activates (activate=False)."""
     script = Path(__file__).resolve()
+    if ade_sched.is_linked_worktree(script.parent.parent) and os.environ.get("CLAUDE_QUOTA_GUARD_ALLOW_WORKTREE") != "1":
+        # the job would run a copy that is deleted after the worktree's merge (adversary confirm on PR 293)
+        print(f"claude-quota-guard: --install from a linked worktree ({script.parent.parent}); run it from the primary "
+              "checkout", file=sys.stderr)
+        return EX_CONFIG
     log = HOME / ".local/state/ade/claude-quota-guard.launchd.log"
     job = ade_sched.Job.from_dict({
         "Label": LABEL,

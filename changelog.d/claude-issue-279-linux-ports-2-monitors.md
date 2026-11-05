@@ -4,4 +4,4 @@
 
 ### Changed
 
-- Exit 69 from those installers now means "no usable scheduler" (it was "not macOS"); `proc-cpu-watch install` returns 69 instead of 2 without one, and refuses `--target codexbar` off macOS. `claude-quota-guard --install` maps a bad job or an unwritable file to 64, never 1-3. `load-watch` reads swap from `/proc/meminfo` off macOS, and `load-watch guard reset` exits 69 without launchctl instead of a traceback. (#293)
+- Exit 69 from those installers now means "no usable scheduler" (it was "not macOS"); `proc-cpu-watch install` returns 69 instead of 2 without one, and refuses `--target codexbar` off macOS. `claude-quota-guard --install` maps a bad job or an unwritable file to 64, never 1-3, and refuses (64) to install from a linked worktree unless `CLAUDE_QUOTA_GUARD_ALLOW_WORKTREE=1`. `load-watch` reads swap from `/proc/meminfo` off macOS, and `load-watch guard reset` exits 69 without launchctl instead of a traceback. (#293)
