@@ -206,8 +206,18 @@ export async function gitEvidence(cwd: string, signal?: AbortSignal): Promise<Gi
 
   // Blank configured filter drivers (read config only; runs nothing).
   const topFilters = new Set<string>();
-  const cfg = await git("filter-config", toplevel, ["config", "--get-regexp", "-z", "^filter\\."], { quietFail: true });
-  if (cfg.ok) for (const n of filterNames(cfg.out)) topFilters.add(n);
+  // Names only (`--name-only`): a huge dummy `filter.*` value cannot push real driver names past
+  // the stdout cap. Only exit 0 (parsed) or exit 1 with empty output (no matches) is success; any
+  // other result fails closed below (null fingerprint, no diff, no hash-object).
+  const discoverFilters = async (label: string, root: string, timeoutMs?: number): Promise<string[] | null> => {
+    const r = await git(label, root, ["config", "--name-only", "--get-regexp", "-z", "^filter\\."], { quietFail: true, timeoutMs });
+    if (r.ok) return filterNames(r.out);
+    if (r.why === "exit-1" && r.raw.length === 0) return [];
+    ev.errors.push(`${label}:failed`);
+    return null;
+  };
+  const topDiscovered = await discoverFilters("filter-discovery", toplevel);
+  for (const n of topDiscovered ?? []) topFilters.add(n);
   // A driver name containing `=` cannot be blanked through `-c` argv (git splits at the first `=`),
   // and exec.ts offers no env option: fail closed, run no diff that could spawn the driver.
   const unsafeName = (n: string) => n.includes("=") || /[\0\n\r]/.test(n);
@@ -222,7 +232,7 @@ export async function gitEvidence(cwd: string, signal?: AbortSignal): Promise<Gi
   // by step 6b instead, because `=none` would make git run `status` inside each submodule with
   // that submodule's own filter drivers, which are not blanked here.
   const changed = new Set<string>();
-  let trackedOk = !unsafeTop;
+  let trackedOk = !unsafeTop && topDiscovered !== null;
   const splitZ = (s: string) => s.split("\0").filter((x) => x.length > 0);
   const common = ["-z", "--no-renames", "--ignore-submodules=dirty", "--no-ext-diff", "--no-textconv"];
   if (trackedOk && ev.head) {
@@ -327,16 +337,12 @@ export async function gitEvidence(cwd: string, signal?: AbortSignal): Promise<Gi
       }
       scans++;
       // The submodule's own filter drivers (its config may define ones this repo does not).
-      const sc = await git("submodule-filter-config", abs, ["config", "--get-regexp", "-z", "^filter\\."], {
-        timeoutMs: SUBMODULE_TIMEOUT_MS,
-        quietFail: true,
-      });
-      if (!sc.ok && sc.why !== "exit-1") {
-        ev.errors.push(`submodule-filter-config:${sc.why}`);
+      const sc = await discoverFilters("submodule-filter-discovery", abs, SUBMODULE_TIMEOUT_MS);
+      if (sc === null) {
         trackedOk = false;
         break;
       }
-      const subNames = sc.ok ? filterNames(sc.out).filter((n) => !topFilters.has(n)) : [];
+      const subNames = sc.filter((n) => !topFilters.has(n));
       if (subNames.some(unsafeName)) {
         ev.errors.push("filter-name:unsafe");
         trackedOk = false;

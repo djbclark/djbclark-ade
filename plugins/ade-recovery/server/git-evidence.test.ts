@@ -461,3 +461,44 @@ test("a clean filter driver whose name contains '=' must not run", async () => {
   assert.equal(ev.trackedFingerprint, null);
   assert.ok(ev.errors.includes("filter-name:unsafe"));
 });
+
+// Cursor Security MEDIUM (PR 290): filter-driver discovery lists names only, so a huge dummy value
+// cannot hide a real driver behind the stdout cap.
+test("a huge dummy filter value does not hide a real clean driver", async () => {
+  const d = mkrepo();
+  const marker = path.join(tmp(), "ran");
+  const script = path.join(tmp(), "filter.sh");
+  fs.writeFileSync(script, `#!/bin/sh\ntouch ${marker}\ncat\n`, { mode: 0o755 });
+  fs.appendFileSync(path.join(d, ".git", "config"), `[filter "zzz"]\n\tclean = ${"x".repeat(9 * 1024 * 1024)}\n`);
+  git(d, "config", "filter.x.clean", script);
+  git(d, "config", "filter.x.process", script);
+  fs.writeFileSync(path.join(d, ".gitattributes"), "*.txt filter=x\n");
+  fs.writeFileSync(path.join(d, "a.txt"), "dirty with filter\n");
+  const ev = await gitEvidence(d);
+  assert.ok(!fs.existsSync(marker), "filter driver ran");
+  assert.ok(ev.trackedFingerprint === null || ev.errors.length === 0, "neither blanked nor failed closed");
+  assert.ok(ev.trackedFingerprint !== null, "names-only discovery should still succeed");
+});
+
+test("a failed top-level filter discovery fails closed and runs no diff or hash-object", async () => {
+  const d = mkrepo();
+  fs.writeFileSync(path.join(d, "a.txt"), "dirty\n");
+  const bin = tmp();
+  const log = path.join(bin, "calls.log");
+  const real = execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
+  fs.writeFileSync(
+    path.join(bin, "git"),
+    `#!/bin/sh\nfor a in "$@"; do\n  case "$a" in\n    --get-regexp) exit 5;;\n    diff|hash-object) echo "$a" >> ${log};;\n  esac\ndone\nexec ${real} "$@"\n`,
+    { mode: 0o755 },
+  );
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${bin}:${oldPath}`;
+  try {
+    const ev = await gitEvidence(d);
+    assert.equal(ev.trackedFingerprint, null);
+    assert.ok(ev.errors.includes("filter-discovery:failed"), ev.errors.join(","));
+    assert.ok(!fs.existsSync(log), "a diff or hash-object ran after failed discovery");
+  } finally {
+    process.env.PATH = oldPath;
+  }
+});
