@@ -10,12 +10,15 @@ UserPromptSubmit hook claude/hooks/quota_nudge.py, and pings once per upward cro
 
   claude-quota-guard [check]       probe, write the state file, ping on a rise; exit code = level
   claude-quota-guard status [--json]   print the state file, no probing
-  claude-quota-guard --install     write the launchd job (every 15 min) and print the
-                                   `launchctl bootstrap` line; never runs launchctl itself
+  claude-quota-guard --install [--backend auto|launchd|systemd|cron] [--allow-no-linger]
+                                   write the scheduler job (every 15 min: launchd plist, systemd
+                                   user .service/.timer, or cron block, via bin/ade_sched.py) and
+                                   print the activation commands (`launchctl bootstrap` or
+                                   `systemctl --user ...`); never activates it itself
 
 Levels and exit codes: 0 ok, 1 watch, 2 tight, 3 critical, 10 aiuse could not be read (level
-fields left untouched; see below), 64 bad CLAUDE_QUOTA_GUARD_THRESHOLDS, 69 `--install` off macOS (launchd
-only; run `check` every 15 min from a systemd user timer or cron instead). The binding window
+fields left untouched; see below), 64 bad CLAUDE_QUOTA_GUARD_THRESHOLDS (or an `--install` job that is invalid or failed to write), 69 `--install` with no usable
+scheduler (ADE_SCHED_BACKEND=none, none found, or systemd linger off without --allow-no-linger; docs/scheduling.md). The binding window
 is the lowest `remaining_percent` among the Claude rows' windows (weekly, 5-hour and Fable's
 sublimit):
   watch    weekly left < 40, Fable sublimit left < 15, or any Claude `conserve` alert
@@ -67,7 +70,7 @@ so a projection alert alone stops raising `tight` while the operator is away; it
 
 Env (tests): CLAUDE_QUOTA_GUARD_AIUSE (default ~/.local/bin/aiuse), _SNAPSHOTS (default
 ~/.cache/aiuse/snapshots), _STATE (default ~/.local/state/ade/quota-guard.json), _PING
-(default ~/.local/bin/hermes-ping), _LAUNCH_AGENTS (default ~/Library/LaunchAgents), _NOW
+(default ~/.local/bin/hermes-ping), _LAUNCH_AGENTS (default ~/Library/LaunchAgents; wins over ADE_SCHED_LAUNCH_AGENTS), _NOW
 (ISO time standing in for the clock).
 """
 from __future__ import annotations
@@ -78,7 +81,6 @@ import fcntl
 import json
 import math
 import os
-import plistlib
 import re
 import shlex
 import subprocess
@@ -90,6 +92,7 @@ from pathlib import Path
 
 sys.path[:0] = [d for d in (os.path.dirname(os.path.realpath(__file__)),) if d not in sys.path]   # python3 -I has no script dir
 import ade_gates  # noqa: E402
+import ade_sched  # noqa: E402
 
 HOME = Path.home()
 LABEL = "com.djbclark.claude-quota-guard"
@@ -115,7 +118,6 @@ LEVELS = ("ok", "watch", "tight", "critical")
 EXIT_CODES = {"ok": 0, "watch": 1, "tight": 2, "critical": 3}
 EX_UNREADABLE = 10
 EX_CONFIG = 64  # bad CLAUDE_QUOTA_GUARD_THRESHOLDS: never 1-3, which mean watch/tight/critical
-EX_NO_LAUNCHD = 69  # --install off macOS (EX_UNAVAILABLE)
 AIUSE_NOTHING_USABLE = 3
 
 
@@ -861,16 +863,11 @@ def cmd_status(args) -> int:
 
 
 def cmd_install(args) -> int:
+    """Write the scheduler job through bin/ade_sched.py (launchd plist, systemd user units or a cron block) and print the
+    activation commands; never activates (activate=False)."""
     script = Path(__file__).resolve()
-    if sys.platform != "darwin":
-        print(f"claude-quota-guard: launchd only; on Linux run `{shlex.quote(str(script))} check` every "
-              "15 min from a systemd user timer or cron", file=sys.stderr)
-        return EX_NO_LAUNCHD
-    la = _path("CLAUDE_QUOTA_GUARD_LAUNCH_AGENTS", HOME / "Library/LaunchAgents")
-    dest = la / f"{LABEL}.plist"
-    log_dir = HOME / ".local/state/ade"
-    log = log_dir / "claude-quota-guard.launchd.log"
-    job = {
+    log = HOME / ".local/state/ade/claude-quota-guard.launchd.log"
+    job = ade_sched.Job.from_dict({
         "Label": LABEL,
         "ProgramArguments": [str(script), "check"],
         "EnvironmentVariables": {"PATH": f"{HOME}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"},
@@ -880,16 +877,22 @@ def cmd_install(args) -> int:
         "LowPriorityIO": True,
         "StandardOutPath": str(log),
         "StandardErrorPath": str(log),
-    }
-    log_dir.mkdir(parents=True, exist_ok=True)  # launchd will not create the log's directory
-    la.mkdir(parents=True, exist_ok=True)
-    tmp = dest.with_suffix(".plist.tmp")
-    tmp.write_bytes(plistlib.dumps(job))
-    os.replace(tmp, dest)
-    print(f"wrote {dest}")
-    uid = os.getuid()
-    print(shlex.join(["launchctl", "bootout", f"gui/{uid}/{LABEL}"]) + " 2>/dev/null; "
-          + shlex.join(["launchctl", "bootstrap", f"gui/{uid}", str(dest)]))
+    }, source="claude-quota-guard --install")
+    overrides = {}
+    if os.environ.get("CLAUDE_QUOTA_GUARD_LAUNCH_AGENTS"):   # this tool's older override beats ADE_SCHED_LAUNCH_AGENTS
+        overrides["agents_dir"] = str(_path("CLAUDE_QUOTA_GUARD_LAUNCH_AGENTS", HOME / "Library/LaunchAgents"))
+    try:
+        r = ade_sched.install(job, args.backend if args.backend != "auto" else None, activate=False,
+                              allow_no_linger=args.allow_no_linger, **overrides)
+    except ade_sched.SchedError as e:
+        print(f"claude-quota-guard: {e}", file=sys.stderr)
+        # 1-3 mean watch/tight/critical here: a bad job or a failed activation is a config error (64), never one of them
+        return e.code if e.code == ade_sched.EX_UNAVAILABLE else EX_CONFIG
+    except OSError as e:                       # the unit/plist could not be written
+        print(f"claude-quota-guard: --install: {e}", file=sys.stderr)
+        return EX_CONFIG
+    if any("bootout" in argv for argv in r.activation):   # launchd only
+        print("(a bootout error for a job that is not loaded yet is harmless)")
     return 0
 
 
@@ -897,7 +900,12 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="claude-quota-guard", description=__doc__.split("\n\n")[0])
     ap.add_argument("command", nargs="?", choices=("check", "status"), default="check")
     ap.add_argument("--json", action="store_true", help="print the state as JSON")
-    ap.add_argument("--install", action="store_true", help="write the launchd job; print the bootstrap line")
+    ap.add_argument("--install", action="store_true",
+                    help="write the scheduler job (launchd plist, systemd user units or cron block); print the activation commands")
+    ap.add_argument("--backend", choices=("auto", "launchd", "systemd", "cron"), default="auto",
+                    help="--install: the scheduler (default auto; env ADE_SCHED_BACKEND, `none` turns it off: exit 69)")
+    ap.add_argument("--allow-no-linger", action="store_true",
+                    help="--install on systemd: proceed although linger is off (timers stop at logout)")
     args = ap.parse_args(argv)
     try:
         if args.install:

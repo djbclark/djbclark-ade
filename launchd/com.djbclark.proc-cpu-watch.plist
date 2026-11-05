@@ -2,14 +2,14 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!-- proc-cpu-watch (bin/proc-cpu-watch): every 300 s one 3 s CPU sample of the @TARGET@ process tree into
      @STATE@/samples.jsonl. No model, no pings. One template for every target: `proc-cpu-watch install` with a target T
-     fills @ADE@, @STATE@ and @TARGET@ (and adds CBW_STATE_DIR) and installs it as com.djbclark.T-cpu-watch;
+     fills __ADE__, @STATE@ and @TARGET@ (and adds CBW_STATE_DIR) and installs it as com.djbclark.T-cpu-watch;
      `uninstall` with that target removes it. -->
 <plist version="1.0">
 <dict>
   <key>Label</key><string>com.djbclark.@TARGET@-cpu-watch</string>
   <key>ProgramArguments</key>
   <array>
-    <string>@ADE@/bin/proc-cpu-watch</string>
+    <string>__ADE__/bin/proc-cpu-watch</string>
     <string>sample</string>
     <string>--target</string>
     <string>@TARGET@</string>

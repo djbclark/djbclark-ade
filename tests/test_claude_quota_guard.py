@@ -438,12 +438,22 @@ def test_status_reads_the_state_without_probing(rig):
     assert json.loads(j.stdout)["level"] == "tight"
 
 
-needs_launchd = pytest.mark.skipif(sys.platform != "darwin", reason="--install is launchd only")
+def _fake_sched(rig, linger="yes"):
+    """Fake systemctl/loginctl in a temp dir (nothing real is touched); returns the env overrides for rig.guard."""
+    log = rig.tmp / "sched.log"
+    rig._script(rig.fakebin / "systemctl", f'echo "systemctl $@" >> {log}\n')
+    rig._script(rig.fakebin / "loginctl", f'echo "{linger}"\n')
+    return {"ADE_SCHED_BACKEND": "systemd", "ADE_SCHED_SYSTEMCTL": str(rig.fakebin / "systemctl"),
+            "ADE_SCHED_LOGINCTL": str(rig.fakebin / "loginctl"), "ADE_SCHED_UNIT_DIR": str(rig.tmp / "units"),
+            "ADE_SCHED_LOCK": str(rig.tmp / "sched.lock")}, log
 
 
-@needs_launchd
+def _launchd_env(rig):
+    return {"ADE_SCHED_BACKEND": "launchd", "ADE_SCHED_LAUNCHCTL": str(rig.fakebin / "launchctl")}
+
+
 def test_install_writes_the_plist_and_prints_but_never_runs_launchctl(rig):
-    r = rig.guard("--install")
+    r = rig.guard("--install", **_launchd_env(rig))
     assert r.returncode == 0, r.stderr
     plist = rig.launch_agents / "com.djbclark.claude-quota-guard.plist"
     job = plistlib.loads(plist.read_bytes())
@@ -457,22 +467,50 @@ def test_install_writes_the_plist_and_prints_but_never_runs_launchctl(rig):
     assert not rig.launchctl_log.exists()
 
 
-@needs_launchd
 def test_the_printed_bootstrap_line_is_shell_quoted(rig):
     spaced = rig.tmp / "Launch Agents; touch pwned"
-    r = rig.guard("--install", CLAUDE_QUOTA_GUARD_LAUNCH_AGENTS=str(spaced))
+    r = rig.guard("--install", CLAUDE_QUOTA_GUARD_LAUNCH_AGENTS=str(spaced), **_launchd_env(rig))
     assert r.returncode == 0, r.stderr
     plist = spaced / "com.djbclark.claude-quota-guard.plist"
     assert shlex.join(["launchctl", "bootstrap", f"gui/{os.getuid()}", str(plist)]) in r.stdout
     assert f"launchctl bootstrap gui/{os.getuid()} {plist}" not in r.stdout     # the unquoted form
 
 
-def test_install_off_macos_fails_with_69_and_writes_nothing(rig, monkeypatch, capsys):
-    mod = _load_guard_module(monkeypatch, rig)
-    monkeypatch.setattr(sys, "platform", "linux")
-    assert mod.main(["--install"]) == 69
-    err = capsys.readouterr().err
-    assert "launchd only" in err and "systemd user timer or cron" in err and "check" in err
+def test_install_backend_flag_beats_the_env(rig):
+    r = rig.guard("--install", "--backend", "launchd", ADE_SCHED_BACKEND="none")
+    assert r.returncode == 0, r.stderr
+    assert (rig.launch_agents / "com.djbclark.claude-quota-guard.plist").exists()
+
+
+def test_install_on_systemd_writes_user_units_and_prints_systemctl_without_running_it(rig):
+    env, log = _fake_sched(rig)
+    r = rig.guard("--install", **env)
+    assert r.returncode == 0, r.stderr
+    units = rig.tmp / "units"
+    svc = (units / "com.djbclark.claude-quota-guard.service").read_text()
+    assert f'ExecStart="{GUARD}" "check"' in svc
+    timer = (units / "com.djbclark.claude-quota-guard.timer").read_text()
+    assert "OnUnitActiveSec=900s" in timer
+    assert "systemctl --user" in r.stdout and "com.djbclark.claude-quota-guard.timer" in r.stdout
+    ran = log.read_text() if log.exists() else ""     # the module may probe `--version`; it must never activate
+    assert not any(v in ran for v in ("daemon-reload", "enable", "restart"))
+    assert not rig.launch_agents.exists()
+
+
+def test_install_on_systemd_without_linger_fails_with_69_unless_allowed(rig):
+    env, _ = _fake_sched(rig, linger="no")
+    r = rig.guard("--install", **env)
+    assert r.returncode == 69 and "enable-linger" in r.stderr and "--allow-no-linger" in r.stderr
+    assert not (rig.tmp / "units").exists()
+    r = rig.guard("--install", "--allow-no-linger", **env)
+    assert r.returncode == 0, r.stderr
+    assert (rig.tmp / "units" / "com.djbclark.claude-quota-guard.timer").exists()
+
+
+def test_install_with_scheduling_off_fails_with_69_and_writes_nothing(rig):
+    r = rig.guard("--install", ADE_SCHED_BACKEND="none")
+    assert r.returncode == 69, r.stderr
+    assert "claude-quota-guard:" in r.stderr and "ADE_SCHED_BACKEND" in r.stderr
     assert not rig.launch_agents.exists() and not (rig.home / "Library").exists()
 
 
@@ -2050,3 +2088,26 @@ def test_the_frontier_advice_names_a_profile_only_when_one_is_the_source(rig, mo
     text = mod._advice("watch", "r", "available", None, standing, ["weekly"], 50.0, 15.0)
     assert text.startswith("1. Claude quota watch: Opus 5.5") and "(" not in text.splitlines()[0]
     assert mod._advice("watch", "r", "available", None, standing, ["weekly", "alert"], 50.0, 15.0) == mod._advice("watch", "r")
+
+
+# -- --install never exits 1-3 (watch/tight/critical) on a scheduler error (adversary rounds 1-2, 2026-11-04) ------
+
+def test_install_bad_backend_is_a_config_error_64_not_tight(rig):
+    r = rig.guard("--install", ADE_SCHED_BACKEND="bogus")
+    assert r.returncode == 64, (r.returncode, r.stderr)
+
+
+def test_install_unwritable_dir_is_a_config_error_64_not_watch(rig):
+    blocker = rig.tmp / "a-file"
+    blocker.write_text("")
+    r = rig.guard("--install", CLAUDE_QUOTA_GUARD_LAUNCH_AGENTS=str(blocker / "LaunchAgents"), **_launchd_env(rig))
+    assert r.returncode == 64, (r.returncode, r.stderr)
+    assert "Traceback" not in r.stderr
+
+
+def test_bootout_note_only_with_a_bootout_line(rig):
+    r = rig.guard("--install", **_launchd_env(rig))
+    assert r.returncode == 0 and "harmless" in r.stdout
+    env, _ = _fake_sched(rig)
+    r = rig.guard("--install", **env)
+    assert r.returncode == 0 and "harmless" not in r.stdout
