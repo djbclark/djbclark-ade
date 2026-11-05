@@ -4721,6 +4721,8 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
 
     if a.agent == CLOUD_AGENT:
         return dispatch_cloud(a, previous, kind, service)
+    if a.detach and not getattr(a, "dry_run", False):
+        require_launchctl()           # exit 69 on Linux, before any probe, brief, record or runner
     acp_run = a.acp_run or shutil.which("acp-run")
     if not acp_run:
         die("acp-run not on PATH (and no --acp-run given)")
@@ -5033,8 +5035,6 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
             if would:
                 print(f"would refuse: class={would}{binding_window_note(windows) or (f' (no fresh reading for {fb_svc.window or fb_svc.name})' if no_reading else '')}")
         return 0
-    if a.detach:
-        require_launchctl()           # exit 69 on Linux, before a record or runner is written
     if a.detach and _LOAD_RESERVATION.get("path"):
         # the runner releases through the binary that admitted (an override included): recorded BEFORE it is runnable
         rec["load_watch"] = _LOAD_RESERVATION["path"]

@@ -61,7 +61,12 @@ self_root() {
   [[ -f $dir/bin/skill-everywhere && -d $dir/skills ]] && printf '%s' "$dir"
 }
 if [[ -z ${SKILL_EVERYWHERE_ADE:-} ]]; then
-  if repo_root=$(self_root 2>/dev/null); then SKILL_EVERYWHERE_ADE=$repo_root/skills
+  # The canonical checkout wins when it exists (the Mac's behaviour is unchanged, and a run from a cow pasture or a
+  # second clone neither reports false gaps nor links into a copy that is later removed); the script's own checkout is
+  # the default only on a host whose canonical checkout lives elsewhere (#279, adversary confirm on PR 292).
+  if [[ -f $HOME/src/djbclark-ade/bin/skill-everywhere && -d $HOME/src/djbclark-ade/skills ]]; then
+    SKILL_EVERYWHERE_ADE=$HOME/src/djbclark-ade/skills
+  elif repo_root=$(self_root 2>/dev/null); then SKILL_EVERYWHERE_ADE=$repo_root/skills
   else SKILL_EVERYWHERE_ADE=$HOME/src/djbclark-ade/skills; fi
 fi
 ade_root=$SKILL_EVERYWHERE_ADE

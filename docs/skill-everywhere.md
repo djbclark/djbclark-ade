@@ -29,7 +29,7 @@ and can advertise the trash skill under the live name. Hide it with
 
 ## 1. Link it
 
-Run `bin/skill-everywhere` from your checkout (or the installed `~/.local/bin/skill-everywhere` symlink). The public skills dir defaults to `skills/` of the repo the script's real path sits in (symlinks followed), falling back to `~/src/djbclark-ade/skills` outside a checkout; `SKILL_EVERYWHERE_ADE` overrides both.
+Run `bin/skill-everywhere` from your checkout (or the installed `~/.local/bin/skill-everywhere` symlink). The public skills dir is `~/src/djbclark-ade/skills` when that checkout exists; otherwise (a host whose checkout lives elsewhere) it is `skills/` of the repo the script's real path sits in (symlinks followed; a linked worktree resolves to its primary checkout). `SKILL_EVERYWHERE_ADE` overrides both (2026-11-05).
 
 ```sh
 skill-everywhere --all                # sync all shared skills
