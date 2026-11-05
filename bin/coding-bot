@@ -27,7 +27,8 @@ that needs them and finds none in its environment re-executes itself once under 
 into memory and deletes them and every other secret from the environment before any child starts. Neither value is
 printed or logged, and a task that contains either is refused. The key goes only to api2.cursor.sh, and a redirect is
 never followed. $CLIP and $PBPASTE name the clipboard tools (a test hook; default: ~/ops/site-private-djbclark/bin/clip,
-then `clip` on PATH, and `pbpaste`).
+then `clip` on PATH, and `pbpaste`); after those it uses the platform's own tool: pbcopy/pbpaste (macOS),
+wl-copy/wl-paste (Linux, with $WAYLAND_DISPLAY), xclip then xsel (Linux, with $DISPLAY).
 Replies: control characters are stripped; `deliver` trusts the local user (it cannot tell the bot from anyone who can
 run it), so a reply is data. A later final reply for an id supersedes an earlier one.
 
@@ -191,7 +192,8 @@ RUN_GUARD = "CODING_BOT_UNDER_RUN"
 # What a child process (clip, pbpaste, git, ssh) may inherit once the credentials are in memory. `sudo-secretspec run`
 # puts EVERY declared secret into the environment; none of the others, nor ours, may leak to a child. Proxy and CA
 # overrides are NOT kept: they could point the Bearer key at a caller-chosen machine (see scrub_network_env).
-KEEP_ENV = re.compile(r"(PATH|HOME|USER|LOGNAME|SHELL|TMPDIR|TERM|LANG|SSH_AUTH_SOCK|LC_\w*|CODING_BOT_\w+|CLIP|PBPASTE)")
+KEEP_ENV = re.compile(r"(PATH|HOME|USER|LOGNAME|SHELL|TMPDIR|TERM|LANG|SSH_AUTH_SOCK|LC_\w*|CODING_BOT_\w+|CLIP|PBPASTE"
+                      r"|DISPLAY|WAYLAND_DISPLAY|XAUTHORITY|XDG_RUNTIME_DIR)")
 
 
 def needs_credentials(cmd: str) -> bool:
@@ -317,20 +319,68 @@ def records(name: str) -> list[dict]:
     return parse(p.read_bytes().decode("utf-8", "replace"), name)
 
 
+CLIP_TIMEOUT = 15
+
+
+def platform_clipboard(direction: str) -> list[list[str]]:
+    """Argv lists of the platform's own clipboard tools for "copy" or "paste", best first, only those installed and
+    only where their display is set: wl-* needs $WAYLAND_DISPLAY, xclip/xsel need $DISPLAY (never called without)."""
+    out: list[list[str]] = []
+
+    def add(exe: str, *args: str) -> None:
+        path = shutil.which(exe)
+        if path:
+            out.append([path, *args])
+
+    copy = direction == "copy"
+    if sys.platform == "darwin":
+        add("pbcopy" if copy else "pbpaste")
+        return out
+    if os.environ.get("WAYLAND_DISPLAY"):
+        add(*(("wl-copy",) if copy else ("wl-paste", "--no-newline")))
+    if os.environ.get("DISPLAY"):
+        add("xclip", "-selection", "clipboard", "-in" if copy else "-out")
+        add("xsel", "--clipboard", "--input" if copy else "--output")
+    return out
+
+
+def clipboard_hint() -> str:
+    """What to install when nothing worked, named for this OS."""
+    if sys.platform == "darwin":
+        return "pbcopy/pbpaste ship with macOS; set $CLIP/$PBPASTE or put the operator's clip on PATH"
+    return "install wl-clipboard (needs $WAYLAND_DISPLAY), xclip or xsel (need $DISPLAY), or set $CLIP/$PBPASTE"
+
+
 def clip(text: str) -> bool:
-    """The operator's `clip` first (it fixes LC_CTYPE and takes -q); a `clip` on PATH only as a fallback."""
+    """The operator's `clip` first (it fixes LC_CTYPE and takes -q); a `clip` on PATH next; then the platform's tools
+    (pbcopy, wl-copy, xclip, xsel), each tried until one succeeds."""
     for exe in (os.environ.get("CLIP"), str(Path.home() / "ops/site-private-djbclark/bin/clip"), shutil.which("clip")):
         if exe and os.access(exe, os.X_OK):
             return subprocess.run([exe, "-q"], input=text, text=True, check=False).returncode == 0
+    for argv in platform_clipboard("copy"):
+        try:
+            # xclip/xsel fork to keep owning the selection: their stdout/stderr must not be the caller's pipes.
+            r = subprocess.run(argv, input=text.encode("utf-8"), stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, check=False, timeout=CLIP_TIMEOUT)
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if r.returncode == 0:
+            return True
     return False
 
 
 def paste() -> str | None:
+    env = {**os.environ, "LC_CTYPE": "UTF-8"}
     exe = os.environ.get("PBPASTE") or shutil.which("pbpaste")
-    if not exe:
-        return None
-    r = subprocess.run([exe], capture_output=True, check=False, env={**os.environ, "LC_CTYPE": "UTF-8"})
-    return r.stdout.decode("utf-8", "replace") if r.returncode == 0 else None
+    candidates = [[exe]] if exe else platform_clipboard("paste")
+    for argv in candidates:
+        try:
+            r = subprocess.run(argv, capture_output=True, check=False, env=env, timeout=CLIP_TIMEOUT)
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if r.returncode == 0:
+            return r.stdout.decode("utf-8", "replace")
+    return None
 
 
 def project() -> str:
@@ -416,7 +466,7 @@ def webhook_post(url: str, key: str, payload: dict) -> tuple[bool, str]:
 
 
 def clipboard_or_3(what: str, text: str) -> int:
-    return 0 if clip(text) else fail(f"{what}: could not reach the clipboard tool (clip)", 3)
+    return 0 if clip(text) else fail(f"{what}: could not reach the clipboard tool (clip); {clipboard_hint()}", 3)
 
 
 def do_send(a: argparse.Namespace, text: str, url: str | None, key: str | None,
@@ -476,7 +526,7 @@ def last_line(text: str) -> str:
 def cmd_deliver(a: argparse.Namespace) -> int:
     raw = paste() if a.clipboard else sys.stdin.read(MAX_TEXT + 1)
     if raw is None:
-        return fail("deliver: could not read the clipboard", 3)
+        return fail(f"deliver: could not read the clipboard; {clipboard_hint()}", 3)
     if len(raw) > MAX_TEXT:  # the raw size, before cleaning or stripping can shrink it
         return fail(f"deliver: the reply is over {MAX_TEXT} characters; not filed")
     text = clean(raw).strip()

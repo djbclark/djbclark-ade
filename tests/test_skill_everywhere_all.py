@@ -1,5 +1,6 @@
 """Bulk skill discovery and reconciliation, with isolated HOME and no live clients."""
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -141,3 +142,50 @@ def test_unsafe_discovered_name_fails_before_any_links(catalog):
     result = run(catalog, "--all")
     assert result.returncode == 2 and "unsafe skill directory" in result.stderr
     assert not (home / ".agents").exists()
+
+
+def test_default_root_resolves_from_symlinked_script(tmp_path):
+    """No SKILL_EVERYWHERE_ADE and no ~/src/djbclark-ade: the repo of the script's real path is used."""
+    home = tmp_path / "home"
+    home.mkdir()
+    link = tmp_path / "linkdir" / "skill-everywhere"
+    link.parent.mkdir()
+    link.symlink_to(SCRIPT)
+    env = dict(os.environ, HOME=str(home), BASH_ENV="/dev/null",
+               SKILL_EVERYWHERE_PRIVATE=str(tmp_path / "none"), SKILL_EVERYWHERE_ONLY="nonesuch")
+    env.pop("SKILL_EVERYWHERE_ADE", None)
+    env.pop("ENV", None)
+    r = subprocess.run([str(link), "--check", "no-such-skill-xyz"], env=env,
+                       capture_output=True, text=True, timeout=30)
+    root = SCRIPT.resolve().parents[1]
+    common = subprocess.run(["git", "-C", str(root), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+                            capture_output=True, text=True).stdout.strip()
+    if common.endswith("/.git") and Path(common).parent != root and (Path(common).parent / "bin/skill-everywhere").is_file():
+        root = Path(common).parent        # the suite runs from a linked worktree: the script resolves its primary checkout
+    expected = root / "skills" / "no-such-skill-xyz"
+    assert str(expected.parent) in r.stderr, r.stderr
+    assert str(home) not in r.stderr
+
+
+def test_default_root_from_linked_worktree_uses_primary_checkout(tmp_path):
+    """Run from a linked worktree, the default root is the primary checkout's skills/ (a worktree is removed after
+    its merge, so links into it would dangle)."""
+    primary = tmp_path / "primary"
+    (primary / "bin").mkdir(parents=True)
+    (primary / "skills").mkdir()
+    (primary / "skills" / ".keep").write_text("")
+    shutil.copy2(SCRIPT, primary / "bin" / "skill-everywhere")
+    git = ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"]
+    for argv in (["init", "-q"], ["add", "-A"], ["commit", "-qm", "init"],
+                 ["worktree", "add", "-q", str(tmp_path / "wt"), "-b", "wt"]):
+        subprocess.run([*git, *argv], cwd=primary, check=True, capture_output=True)
+    home = tmp_path / "home"
+    home.mkdir()
+    env = dict(os.environ, HOME=str(home), BASH_ENV="/dev/null",
+               SKILL_EVERYWHERE_PRIVATE=str(tmp_path / "none"), SKILL_EVERYWHERE_ONLY="nonesuch")
+    env.pop("SKILL_EVERYWHERE_ADE", None)
+    env.pop("ENV", None)
+    r = subprocess.run([str(tmp_path / "wt" / "bin" / "skill-everywhere"), "--check", "no-such-skill-xyz"],
+                       env=env, capture_output=True, text=True, timeout=30)
+    assert str(primary.resolve() / "skills") in r.stderr, r.stderr
+    assert str(tmp_path / "wt" / "skills") not in r.stderr

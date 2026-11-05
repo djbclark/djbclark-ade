@@ -403,6 +403,8 @@ Exit codes (dispatch and check):
          env LW_MAX_AGENTS, 0 = off) refused, for the whole --load-wait budget (the refusal names `refused=...`);
          nothing was launched, retry later
          (`check` on such a record exits 75 too)
+    69   launchd unavailable (EX_UNAVAILABLE): `--detach` or `reap --install` found no launchctl (Linux; honours
+         ACP_DISPATCH_LAUNCHCTL); macOS only, on Linux use `paseo run` (acp-dispatch is replaced in D5)
     124  timed out waiting for the .done marker (--detach without --no-wait)
     (a reaped record's acp-run exit is 255 `lost` when neither an exit file nor launchd knows it;
      a signalled runner's is 128+signal, e.g. 143 for SIGTERM)
@@ -1939,7 +1941,9 @@ def reap_items(items: list[str], quiet: bool = False) -> int:
 
 def reap_install(uninstall: bool = False) -> int:
     """Copy launchd/com.djbclark.acp-dispatch-reap.plist to ~/Library/LaunchAgents and bootstrap it
-    (the way skillopt-night installs its job); ACP_DISPATCH_LAUNCH_AGENTS overrides the directory."""
+    (the way skillopt-night installs its job); ACP_DISPATCH_LAUNCH_AGENTS overrides the directory.
+    Exit 69 without launchctl (Linux), before anything is written."""
+    require_launchctl()
     dest = Path(os.environ.get("ACP_DISPATCH_LAUNCH_AGENTS") or Path.home() / "Library" / "LaunchAgents") / REAP_PLIST.name
     domain = f"gui/{os.getuid()}"
     lc = launchctl_bin()
@@ -2911,6 +2915,14 @@ def pool_headroom_live(agent: str, model: str | None) -> tuple[float | None, str
 
 def launchctl_bin() -> str:
     return os.environ.get("ACP_DISPATCH_LAUNCHCTL") or "launchctl"
+
+
+def require_launchctl() -> None:
+    """Exit 69 (EX_UNAVAILABLE) when launchctl is not found/executable (Linux): acp-dispatch's launchd paths are
+    macOS only and it is replaced by `paseo run` (docs/paseo-only-rearchitecture.md C1, D5)."""
+    if not shutil.which(launchctl_bin()):
+        die("launchd paths are macOS only; on Linux use `paseo run` (acp-dispatch is replaced in D5, "
+            "docs/paseo-only-rearchitecture.md C1)", 69)
 
 
 def submit_launchd(label: str, runner: Path, out_log: Path, err_log: Path) -> str | None:
@@ -5021,6 +5033,8 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
             if would:
                 print(f"would refuse: class={would}{binding_window_note(windows) or (f' (no fresh reading for {fb_svc.window or fb_svc.name})' if no_reading else '')}")
         return 0
+    if a.detach:
+        require_launchctl()           # exit 69 on Linux, before a record or runner is written
     if a.detach and _LOAD_RESERVATION.get("path"):
         # the runner releases through the binary that admitted (an override included): recorded BEFORE it is runnable
         rec["load_watch"] = _LOAD_RESERVATION["path"]

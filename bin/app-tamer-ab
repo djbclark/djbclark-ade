@@ -9,7 +9,12 @@
 #   utc,phase,load1,per_core,churn_pages_s,swap_used_mb,at_running,at_cpu_s
 # at_cpu_s is cumulative CPU seconds of App Tamer plus its helper (0 when not running); its delta is the cost.
 # Read-only on the system: it signals and kills nothing. Phase changes are explicit commands, never automatic.
+# Exit codes: 2 usage, 69 not macOS (EX_UNAVAILABLE).
 set -u
+if [ "$(uname -s)" != Darwin ]; then
+  echo "app-tamer-ab: macOS only: it compares against the Mac app App Tamer and reads BSD ps -axo and sysctl vm.swapusage" >&2
+  exit 69
+fi
 dir="${AB_DIR:-$HOME/.local/state/load-watch/app-tamer-ab}"
 csv="$dir/samples.csv"
 mkdir -p "$dir"

@@ -12,6 +12,7 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -418,6 +419,116 @@ class TestArguments(Base):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("the task", self.pasteboard.read_text())
         self.assertFalse(other.exists())
+
+
+class TestPlatformClipboard(Base):
+    """Without $CLIP/$PBPASTE the platform's own tool is used: wl-* only with $WAYLAND_DISPLAY, xclip/xsel only with
+    $DISPLAY. Each fake records its argv (and, for a copier, its stdin) to a file named after it."""
+
+    TOOLS = ("wl-copy", "wl-paste", "xclip", "xsel")
+
+    @override
+    def setUp(self) -> None:
+        super().setUp()
+        root = Path(self.tmp.name)
+        self.tools = root / "tools"
+        self.tools.mkdir()
+        self.calls = root / "calls"
+        self.calls.mkdir()
+        git = shutil.which("git")
+        if git:  # `prompt` asks git for the project name; nothing else from the host may be on PATH
+            (self.tools / "git").symlink_to(git)
+
+    def fake(self, name: str, *, fail: bool = False) -> None:
+        """argv to calls/<name>.argv; a paste-style call (-out, --output, --no-newline) prints the pasteboard,
+        any other call stores its stdin there."""
+        body = (f"#!/bin/sh\necho \"$@\" > '{self.calls}/{name}.argv'\n"
+                + ("exit 1\n" if fail else ""))
+        script = self.tools / name
+        script.write_text(body + "case \"$*\" in\n"
+                          f"  *-out*|*--output*|*--no-newline*) /bin/cat '{self.pasteboard}';;\n"
+                          f"  *) /bin/cat > '{self.pasteboard}';;\nesac\n")
+        script.chmod(0o755)
+
+    def run_cli(self, *args: str, stdin: str | None = None, **env: str) -> subprocess.CompletedProcess[str]:
+        return self.cli(*args, stdin=stdin, CLIP="", PBPASTE="", PATH=str(self.tools), **env)
+
+    def used(self) -> set[str]:
+        return {p.stem for p in self.calls.glob("*.argv")}
+
+    def test_wayland_uses_wl_copy_and_never_xclip(self) -> None:
+        for t in ("wl-copy", "xclip"):
+            self.fake(t)
+        r = self.run_cli("prompt", "the task", WAYLAND_DISPLAY="wayland-0", DISPLAY=":0")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.used(), {"wl-copy"})
+        self.assertIn("the task", self.pasteboard.read_text())
+
+    def test_x11_prefers_xclip_with_clipboard_selection(self) -> None:
+        for t in ("xclip", "xsel"):
+            self.fake(t)
+        r = self.run_cli("prompt", "the task", DISPLAY=":0")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.used(), {"xclip"})
+        self.assertEqual((self.calls / "xclip.argv").read_text().split(), ["-selection", "clipboard", "-in"])
+        self.assertIn("the task", self.pasteboard.read_text())
+
+    def test_xsel_when_xclip_is_missing_or_fails(self) -> None:
+        self.fake("xclip", fail=True)
+        self.fake("xsel")
+        r = self.run_cli("prompt", "the task", DISPLAY=":0")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.used(), {"xclip", "xsel"})
+        self.assertEqual((self.calls / "xsel.argv").read_text().split(), ["--clipboard", "--input"])
+
+    def test_no_display_means_no_x_or_wayland_tool_is_called(self) -> None:
+        for t in self.TOOLS:
+            self.fake(t)
+        r = self.run_cli("prompt", "the task")
+        self.assertEqual(r.returncode, 3)
+        self.assertEqual(self.used(), set())
+        self.assertIn("wl-clipboard", r.stderr)
+        self.assertIn("xclip", r.stderr)
+        self.assertIn("xsel", r.stderr)
+
+    def test_wl_copy_is_not_used_with_only_x11(self) -> None:
+        self.fake("wl-copy")
+        r = self.run_cli("prompt", "the task", DISPLAY=":0")
+        self.assertEqual((r.returncode, self.used()), (3, set()))
+
+    def test_paste_uses_wl_paste_without_trailing_newline(self) -> None:
+        self.fake("wl-paste")
+        self.fake("xclip")
+        self.cli("send", "task")
+        self.pasteboard.write_text("the answer is 42\nDONE\n")
+        r = self.run_cli("deliver", "--clipboard", "--re", "ade-1", WAYLAND_DISPLAY="wayland-0", DISPLAY=":0")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.used(), {"wl-paste"})
+        self.assertEqual((self.calls / "wl-paste.argv").read_text().split(), ["--no-newline"])
+
+    def test_paste_uses_xclip_out_then_xsel_output(self) -> None:
+        self.fake("xclip", fail=True)
+        self.fake("xsel")
+        self.cli("send", "task")
+        self.pasteboard.write_text("the answer is 42\nDONE\n")
+        r = self.run_cli("deliver", "--clipboard", "--re", "ade-1", DISPLAY=":0")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual((self.calls / "xclip.argv").read_text().split(), ["-selection", "clipboard", "-out"])
+        self.assertEqual((self.calls / "xsel.argv").read_text().split(), ["--clipboard", "--output"])
+
+    def test_paste_without_a_display_is_exit_3_and_names_the_tools(self) -> None:
+        for t in self.TOOLS:
+            self.fake(t)
+        r = self.run_cli("deliver", "--clipboard", "--re", "ade-1")
+        self.assertEqual((r.returncode, self.used()), (3, set()))
+        self.assertIn("wl-clipboard", r.stderr)
+
+    def test_the_display_variables_survive_the_credential_scrub(self) -> None:
+        self.fake("xclip")
+        r = self.cli("prompt", "t", hook=True, CLIP="", PBPASTE="", PATH=str(self.tools), DISPLAY=":0",
+                     CODING_BOT_UNDER_RUN="1")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.used(), {"xclip"})
 
 
 class TestReplyHandling(Base):

@@ -21,7 +21,8 @@ this is the mechanism. Verified by re-fetching the agent afterwards; exit 4 mean
 the request but the feature still reads off. Idempotent (exit 0 "already on").
 
 Exit codes: 0 set and verified (or listed), 1 other error, 2 usage, 3 no such agent,
-4 the re-fetch shows another model (or the feature did not take).
+4 the re-fetch shows another model (or the feature did not take), 69 macOS only: the Paseo Helper binary
+(the app bundle, or PASEO_SET_MODEL_HELPER) does not exist (EX_UNAVAILABLE).
 
 The work runs in Paseo's bundled Electron node through bin/paseo-set-model.mjs (argv list, no
 shell). Env: PASEO_SET_MODEL_HELPER (default: the Paseo Helper binary in /Applications/Paseo.app),
@@ -39,7 +40,7 @@ DEFAULT_HELPER = f"{APP}/Frameworks/Paseo Helper.app/Contents/MacOS/Paseo Helper
 DEFAULT_CLI_DIST = f"{APP}/Resources/app.asar/node_modules/@getpaseo/cli/dist"
 MJS = Path(os.path.realpath(__file__)).with_name("paseo-set-model.mjs")
 
-USAGE = (__doc__ or "").split("\n\n")[1].strip("\n") + "\n\nexit codes: 0 ok, 1 error, 2 usage, 3 no such agent, 4 model not applied\n"
+USAGE = (__doc__ or "").split("\n\n")[1].strip("\n") + "\n\nexit codes: 0 ok, 1 error, 2 usage, 3 no such agent, 4 model not applied, 69 helper missing (macOS only)\n"
 
 
 def usage() -> int:
@@ -73,6 +74,10 @@ def main(argv: list[str]) -> int:
     else:
         return usage()
     helper = os.environ.get("PASEO_SET_MODEL_HELPER") or DEFAULT_HELPER
+    if not os.access(helper, os.X_OK):
+        print(f"paseo-set-model: macOS only: Paseo Helper not found at {helper}; install Paseo.app or set "
+              "PASEO_SET_MODEL_HELPER to a Paseo Helper (Electron node) binary", file=sys.stderr)
+        return 69
     env = dict(os.environ)
     env["ELECTRON_RUN_AS_NODE"] = "1"
     env["PASEO_NODE_ENV"] = "production"
