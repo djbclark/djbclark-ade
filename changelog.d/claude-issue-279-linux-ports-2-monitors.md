@@ -1,6 +1,6 @@
 ### Added
 
-- `load-watch install`, `proc-cpu-watch install`, `context-budget-check install` and `claude-quota-guard --install` work on Linux through `bin/ade-sched`, with `--backend`, `--allow-no-linger` and `--dry-run` (`load-watch` also `--ade`). (#293)
+- `load-watch install`, `proc-cpu-watch install`, `context-budget-check install` and `claude-quota-guard --install` work on Linux through `bin/ade-sched`, with `--backend` and `--allow-no-linger`, and `--dry-run` on all but `claude-quota-guard`, whose `--install` only ever writes the files and prints the activation commands (`load-watch` also `--ade`). (#293)
 
 ### Changed
 
