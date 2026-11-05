@@ -1,22 +1,47 @@
 {
-  "statusLine": {
-    "type": "command",
-    "command": "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/helpers/graft-statusline.cjs\""
-  },
-  "subagentStatusLine": {
-    "type": "command",
-    "command": "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/helpers/graft-statusline.cjs\""
-  },
-  "footerLinksRegexes": [
-    "graft/[\\w./-]+\\.md"
-  ],
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
   "permissions": {
+    "defaultMode": "acceptEdits",
     "allow": [
-      "Bash(trail:*)",
-      "Bash(graft:*)",
-      "Bash(npx graft:*)",
-      "Bash(graft-dev:*)",
-      "Bash(node dist/cli.js:*)"
+      "Bash",
+      "Edit",
+      "Write",
+      "Read",
+      "Glob",
+      "Grep",
+      "WebFetch",
+      "WebSearch",
+
+      "mcp__claude-code-remote__add_repo",
+      "mcp__claude-code-remote__list_repos",
+
+      "mcp__github__list_pull_requests",
+      "mcp__github__list_issues",
+      "mcp__github__issue_read",
+      "mcp__github__pull_request_read",
+      "mcp__github__list_commits",
+      "mcp__github__get_commit",
+      "mcp__github__list_branches",
+      "mcp__github__list_tags",
+      "mcp__github__list_releases",
+      "mcp__github__get_file_contents",
+      "mcp__github__get_me",
+      "mcp__github__actions_get",
+      "mcp__github__actions_list",
+      "mcp__github__get_job_logs",
+      "mcp__github__get_check_run",
+
+      "mcp__Firecrawl__firecrawl_scrape",
+      "mcp__Firecrawl__firecrawl_search",
+      "mcp__Firecrawl__firecrawl_developer_search"
+    ],
+    "deny": [
+      "Bash(git push --force:*)",
+      "Bash(git push -f:*)",
+      "Bash(rm -rf /*)",
+      "mcp__github__merge_pull_request",
+      "mcp__github__delete_file",
+      "mcp__github__create_repository"
     ]
   }
 }
