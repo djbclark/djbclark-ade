@@ -7,15 +7,17 @@
     deadline extend NAME --by DUR --reason TEXT                 only before expiry; total capped by --max-extend (default = budget); else exit 2
     deadline done NAME [--rc N]                                 deregister
     deadline ls [--json] [--agents]                             records (and, with --agents, the Paseo no-progress reading)
-    deadline sweep [--dry-run] [--json] [--no-agents] [--agents-now]    THE ENFORCER (launchd runs it every 60 s)
+    deadline sweep [--dry-run] [--json] [--no-agents] [--agents-now]    THE ENFORCER (the installed job runs it every 60 s)
     deadline run --budget DUR [--heartbeat DUR] [--grace DUR] [--name NAME] [--owner ID] [--on-expire ...] -- CMD...
-    deadline install [--ade DIR] [--dry-run] | uninstall        the launchd job (macOS)
+    deadline install [--ade DIR] [--dry-run] [--backend auto|launchd|systemd|cron] [--agents auto|on|off] [--allow-no-linger]
+    deadline uninstall [--backend ...]                          the sweep job: launchd (macOS), a systemd user timer or cron (Linux)
 
 DUR is seconds (90, 1.5) or units (90s, 5m, 2h, 1h30m). Exit: 0 ok; 1 failed or unknown name; 2 refused (bad input, extension
-refused, name already live, a reserved name, install from a linked worktree, and the registration guards: the pid is not running or has
+refused, name already live, a reserved name, install from a linked worktree or a bad job, and the registration guards: the pid is not running or has
 no readable start time, is the caller's ancestor or in the caller's group/session, or is not in --pgid, and the default `kill` with no
 --pid/--pgid: an announce-only wait must say --on-expire notify|relay|reroute:RECORD); `run` returns the command's rc (128+N for a
-signal death), or 124 when the enforcer stopped the command. A stop that failed (the process is still alive) is state `kill-failed`
+signal death), or 124 when the enforcer stopped the command. `install`/`uninstall`: 69 = no usable scheduler
+(none found, systemd user manager unreachable, Linger=no without --allow-no-linger), 1 = an activation command failed. A stop that failed (the process is still alive) is state `kill-failed`
 (non-terminal), never `expired`; the owner is told whatever the action.
 
 --holder PID (announce-only notify/relay records, so no --pid/--pgid; exit 2 otherwise, or for a pid that is not running): the process whose heartbeats
@@ -65,6 +67,9 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
+
+sys.path[:0] = [d for d in (os.path.dirname(os.path.realpath(__file__)),) if d not in sys.path]   # python3 -I has no script dir
+import ade_sched  # noqa: E402
 
 HOME = Path.home()
 ADE = Path(__file__).resolve().parent.parent
@@ -1366,29 +1371,41 @@ def is_linked_worktree(path: Path) -> bool:
     return rc1 == 0 and rc2 == 0 and gd != cd
 
 
+def want_agents(mode: str, job) -> tuple[bool, str]:
+    """--agents auto|on|off: is the Paseo agent scan on for the installed sweep? auto = on only when `paseo` is on the PATH the JOB
+    runs with (the plist's PATH plus ~/.local/bin), not this shell's."""
+    if mode != "auto":
+        return mode == "on", mode
+    path = os.pathsep.join([str(HOME / ".local/bin"), *job.env.get("PATH", "").split(os.pathsep)])
+    found = shutil.which("paseo", path=path)
+    return bool(found), f"auto: paseo {'found at ' + found if found else 'not found on the job PATH'}"
+
+
 def cmd_install(a) -> int:
-    if sys.platform != "darwin" and not a.dry_run:
-        return die("launchd is macOS only", 69)
-    ade, tpl, dest = install_paths(a)
+    ade, tpl, _ = install_paths(a)
     if not a.ade and is_linked_worktree(ADE):
         return die(f"{ADE} is a linked worktree: install from the canonical checkout, or pass --ade DIR", 2)
     if not (ade / "bin/deadline").is_file() or not tpl.is_file():
         return die(f"no bin/deadline or {tpl.name} under {ade}", 2)
     sd = state_dir().expanduser().resolve()
-    text = (tpl.read_text().replace("__ADE__", str(ade)).replace("__HOME__", str(HOME))
-            .replace("__STATE__", str(sd)))   # the job sweeps, and logs into, the state dir this install was run with
-    if a.dry_run:
-        print(text)
-        return 0
-    state_dir().mkdir(parents=True, exist_ok=True)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_text(text)
-    dom = f"gui/{os.getuid()}"
-    sh(["launchctl", "bootout", f"{dom}/{LABEL}"], timeout=30)
-    rc, out = sh(["launchctl", "bootstrap", dom, str(dest)], timeout=30)
-    if rc != 0:
-        return die(f"bootstrap failed: {out}", 1)
-    print(f"installed {LABEL} (every 60 s, no model) from {ade}; state {state_dir()}")
+    # the job sweeps, and logs into, the state dir this install was run with
+    subst = {"__ADE__": str(ade), "__HOME__": str(HOME), "__STATE__": str(sd)}
+    try:
+        job = ade_sched.Job.from_plist(tpl, subst, ade=ade)
+        on, why = want_agents(a.agents, job)
+        if not on:
+            raw = dict(job.raw)
+            raw["ProgramArguments"] = [*raw["ProgramArguments"], "--no-agents"]
+            job = ade_sched.Job.from_dict(raw, source=job.source, subst={}, ade=ade)
+        print(f"deadline: agent scan {'on' if on else 'off (--no-agents)'} ({why})", file=sys.stderr if a.dry_run else sys.stdout)
+        if not a.dry_run:
+            state_dir().mkdir(parents=True, exist_ok=True)
+        r = ade_sched.install(job, None if a.backend == "auto" else a.backend, dry_run=a.dry_run,
+                              allow_no_linger=a.allow_no_linger)
+    except ade_sched.SchedError as e:
+        return die(str(e), e.code)
+    if not a.dry_run:
+        print(f"installed {LABEL} on {r.backend} (every 60 s, no model) from {ade}; state {state_dir()}")
     return 0
 
 
@@ -1465,8 +1482,10 @@ def cmd_work(a) -> int:
 
 
 def cmd_uninstall(a) -> int:
-    sh(["launchctl", "bootout", f"gui/{os.getuid()}/{LABEL}"], timeout=30)
-    (HOME / "Library/LaunchAgents" / f"{LABEL}.plist").unlink(missing_ok=True)
+    try:
+        ade_sched.uninstall(LABEL, None if a.backend == "auto" else a.backend)
+    except ade_sched.SchedError as e:
+        return die(str(e), e.code)
     print(f"removed {LABEL} (records kept at {state_dir()})")
     return 0
 
@@ -1540,10 +1559,14 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(fn=cmd_run)
 
     for nm, fn in (("install", cmd_install), ("uninstall", cmd_uninstall)):
-        s = sub.add_parser(nm, help=f"{nm} the launchd sweep job")
+        s = sub.add_parser(nm, help=f"{nm} the sweep job (launchd, systemd or cron)")
+        s.add_argument("--backend", choices=["auto", "launchd", "systemd", "cron"], default="auto")
         if nm == "install":
             s.add_argument("--ade", help="install from this checkout (required from a linked worktree)")
-            s.add_argument("--dry-run", action="store_true", help="print the plist, change nothing")
+            s.add_argument("--dry-run", action="store_true", help="print what would be written (and run), change nothing")
+            s.add_argument("--agents", choices=["auto", "on", "off"], default="auto",
+                           help="Paseo agent scan in the sweep: off adds --no-agents; auto = on only if paseo is on the job's PATH")
+            s.add_argument("--allow-no-linger", action="store_true", help="systemd: install although Linger=no")
         s.set_defaults(fn=fn)
     return p
 

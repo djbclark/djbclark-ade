@@ -5,16 +5,19 @@ GitHub: every live repository of the configured owners gets pull_request_creatio
 "Pull requests: Collaborators only", 2026-02-13), so nobody without write access can open one. Forgejo has no such
 setting, so there, and on GitHub for a pull request opened before the setting, an open pull request whose author is
 not trusted is kept a draft: GitHub convertPullRequestToDraft, Forgejo a "WIP: " title prefix. Merging needs djbclark
-either way. The launchd job com.djbclark.pr-policy re-applies all of it every 10 min, which is what covers a
+either way. The scheduled job com.djbclark.pr-policy re-applies all of it every 10 min, which is what covers a
 repository created later. Config: config/pr-policy.toml. Doc: docs/pr-policy.md.
 
   pr-policy plan [--json] [--only github|forgejo]       what apply would change; read-only (exit 0, 1 on an API error)
   pr-policy apply [--yes] [--notify] [--quiet] [--only F]   without --yes it is plan; --yes makes the changes
-  pr-policy install [--ade DIR] [--dry-run]              launchd job (macOS): `apply --yes --notify --quiet` every 600 s
-  pr-policy uninstall
+  pr-policy install [--ade DIR] [--dry-run] [--backend auto|launchd|systemd|cron] [--allow-no-linger]
+                                                         the job (launchd, systemd user timer or cron): `apply --yes --notify --quiet`
+                                                         every 600 s. Install on ONE host only, or every PR is pinged twice.
+  pr-policy uninstall [--backend ...]
 
 Exit codes: 0 done (or nothing to do), 1 an API or secret error (the rest still ran), 2 usage or config error,
-69 install off macOS. Trusted authors: GitHub, the token's login, the config's trusted_authors and anyone whose
+69 install/uninstall with no usable scheduler
+(none found, systemd user manager unreachable, Linger=no without --allow-no-linger). Trusted authors: GitHub, the token's login, the config's trusted_authors and anyone whose
 repository permission is write or admin (maintain reads as write); Forgejo, the token's login, the repository owner,
 trusted_authors and invited collaborators with write, admin or owner permission (Forgejo reports site admins as
 "owner" of every repository, so a non-collaborator is never trusted on permission alone). A bot is checked like
@@ -41,7 +44,9 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from xml.sax.saxutils import escape as xml_escape
+
+sys.path[:0] = [d for d in (os.path.dirname(os.path.realpath(__file__)),) if d not in sys.path]   # python3 -I has no script dir
+import ade_sched  # noqa: E402
 
 ADE = Path(__file__).resolve().parent.parent
 HOME = Path.home()
@@ -443,8 +448,6 @@ def is_linked_worktree(path: Path) -> bool:
 
 
 def cmd_install(a) -> int:
-    if sys.platform != "darwin" and not a.dry_run:
-        return die("launchd is macOS only", 69)
     ade = Path(a.ade).expanduser().resolve() if a.ade else ADE
     if not a.ade and is_linked_worktree(ADE):
         return die(f"{ADE} is a linked worktree: install from the canonical checkout, or pass --ade DIR", 2)
@@ -452,32 +455,24 @@ def cmd_install(a) -> int:
     if not (ade / "bin/pr-policy").is_file() or not tpl.is_file():
         return die(f"no bin/pr-policy or {tpl.name} under {ade}", 2)
     sd = state_dir().expanduser().resolve()
-    text = tpl.read_text()
-    for key, val in (("__ADE__", ade), ("__HOME__", HOME), ("__STATE__", sd)):
-        text = text.replace(key, xml_escape(str(val)))
-    if a.dry_run:
-        print(text)
-        return 0
-    sd.mkdir(parents=True, exist_ok=True)
-    dest = HOME / "Library/LaunchAgents" / f"{LABEL}.plist"
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest.with_name(f".{dest.name}.{os.getpid()}.tmp")
-    tmp.write_text(text)
-    os.replace(tmp, dest)
-    dom = f"gui/{os.getuid()}"
-    subprocess.run(["launchctl", "bootout", f"{dom}/{LABEL}"], capture_output=True, timeout=30)
-    p = subprocess.run(["launchctl", "bootstrap", dom, str(dest)], capture_output=True, text=True, timeout=30)
-    if p.returncode != 0:
-        return die(f"bootstrap failed: {(p.stderr or p.stdout).strip()}", 1)
-    print(f"installed {LABEL} (every 600 s, no model) from {ade}; state {sd}")
+    try:
+        job = ade_sched.Job.from_plist(tpl, {"__ADE__": str(ade), "__HOME__": str(HOME), "__STATE__": str(sd)}, ade=ade)
+        if not a.dry_run:
+            sd.mkdir(parents=True, exist_ok=True)
+        r = ade_sched.install(job, None if a.backend == "auto" else a.backend, dry_run=a.dry_run,
+                              allow_no_linger=a.allow_no_linger)
+    except ade_sched.SchedError as e:
+        return die(str(e), e.code)
+    if not a.dry_run:
+        print(f"installed {LABEL} on {r.backend} (every 600 s, no model) from {ade}; state {sd}")
     return 0
 
 
 def cmd_uninstall(a) -> int:
-    if sys.platform != "darwin":
-        return die("launchd is macOS only", 69)
-    subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}/{LABEL}"], capture_output=True, timeout=30)
-    (HOME / "Library/LaunchAgents" / f"{LABEL}.plist").unlink(missing_ok=True)
+    try:
+        ade_sched.uninstall(LABEL, None if a.backend == "auto" else a.backend)
+    except ade_sched.SchedError as e:
+        return die(str(e), e.code)
     print(f"removed {LABEL} (state kept at {state_dir()})")
     return 0
 
@@ -497,7 +492,10 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("install")
     s.add_argument("--ade")
     s.add_argument("--dry-run", action="store_true")
-    sub.add_parser("uninstall")
+    s.add_argument("--backend", choices=["auto", "launchd", "systemd", "cron"], default="auto")
+    s.add_argument("--allow-no-linger", action="store_true", help="systemd: install although Linger=no")
+    s = sub.add_parser("uninstall")
+    s.add_argument("--backend", choices=["auto", "launchd", "systemd", "cron"], default="auto")
     return p
 
 

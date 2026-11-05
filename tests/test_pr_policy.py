@@ -286,6 +286,11 @@ def test_changes_whose_ping_failed_are_reported_next_run(env):
     assert len(env.pings.read_text().splitlines()) == 1
 
 
+def plist_of(out: str) -> dict:
+    """The XML plist inside `--dry-run` output (ade_sched prefixes `# <path>` and appends `# run:` lines)."""
+    return plistlib.loads(out[out.index("<?xml"):out.index("</plist>") + len("</plist>")].encode())
+
+
 def test_install_escapes_paths_in_the_plist(env, tmp_path):
     ade = tmp_path / "a&b<c"
     (ade / "bin").mkdir(parents=True)
@@ -293,9 +298,9 @@ def test_install_escapes_paths_in_the_plist(env, tmp_path):
     (ade / "bin/pr-policy").write_text("")
     (ade / "config/launchd/com.djbclark.pr-policy.plist").write_text(
         (REPO / "config/launchd/com.djbclark.pr-policy.plist").read_text())
-    p = env("install", "--dry-run", "--ade", str(ade))
+    p = env("install", "--backend", "launchd", "--dry-run", "--ade", str(ade))
     assert p.returncode == 0, p.stderr
-    assert plistlib.loads(p.stdout.encode())["ProgramArguments"][0] == str(ade.resolve() / "bin/pr-policy")
+    assert plist_of(p.stdout)["ProgramArguments"][0] == str(ade.resolve() / "bin/pr-policy")
 
 
 def test_a_token_that_is_not_one_printable_word_is_refused_unechoed(env, tmp_path):
@@ -445,10 +450,59 @@ def test_bad_config_schema_exits_2(env):
 
 
 def test_install_dry_run_renders_the_template(env):
-    p = env("install", "--dry-run", "--ade", str(REPO))
+    p = env("install", "--backend", "launchd", "--dry-run", "--ade", str(REPO))
     assert p.returncode == 0, p.stderr
     assert "__" not in p.stdout
-    pl = plistlib.loads(p.stdout.encode())
+    pl = plist_of(p.stdout)
     assert pl["Label"] == "com.djbclark.pr-policy"
     assert pl["ProgramArguments"] == [str(REPO / "bin/pr-policy"), "apply", "--yes", "--notify", "--quiet"]
     assert pl["EnvironmentVariables"]["PR_POLICY_STATE_DIR"] == str((env.tmp / "state").resolve())
+
+
+def _fake_sched(tmp: Path, linger: str = "yes") -> dict:
+    """Fake systemctl/loginctl that log their argv (tests/test_ade_sched.py pattern)."""
+    b = tmp / "fakebin"
+    b.mkdir(exist_ok=True)
+    log = tmp / "sched.log"
+    for name, body in (("systemctl", f'echo "systemctl $*" >> "{log}"\ncase "$*" in --version) echo "systemd 255 (255.4)";; esac\nexit 0\n'),
+                       ("loginctl", f'echo "loginctl $*" >> "{log}"\necho "{linger}"\n')):
+        (b / name).write_text("#!/bin/sh\n" + body)
+        (b / name).chmod(0o755)
+    return {"ADE_SCHED_SYSTEMCTL": str(b / "systemctl"), "ADE_SCHED_LOGINCTL": str(b / "loginctl"),
+            "ADE_SCHED_UNIT_DIR": str(tmp / "units"), "ADE_SCHED_LAUNCH_AGENTS": str(tmp / "agents"),
+            "ADE_SCHED_LOCK": str(tmp / "lock/l"), "USER": "tester"}
+
+
+def test_install_dry_run_systemd_renders_timer(env):
+    p = env("install", "--backend", "systemd", "--dry-run", "--ade", str(REPO), extra=_fake_sched(env.tmp))
+    assert p.returncode == 0, p.stderr
+    assert "OnUnitActiveSec=600s" in p.stdout and "KillMode=process" in p.stdout and "__" not in p.stdout
+    assert f"PR_POLICY_STATE_DIR={(env.tmp / 'state').resolve()}" in p.stdout
+    assert not (env.tmp / "units").exists()
+
+
+def test_install_systemd_writes_units_and_activates_and_uninstalls(env):
+    fk = _fake_sched(env.tmp)
+    p = env("install", "--backend", "systemd", "--ade", str(REPO), extra=fk)
+    assert p.returncode == 0, p.stderr
+    units = env.tmp / "units"
+    assert (units / "com.djbclark.pr-policy.service").is_file() and (units / "com.djbclark.pr-policy.timer").is_file()
+    calls = (env.tmp / "sched.log").read_text()
+    assert "loginctl show-user" in calls and "systemctl --user daemon-reload" in calls
+    assert "systemctl --user enable com.djbclark.pr-policy.timer" in calls
+    u = env("uninstall", "--backend", "systemd", extra=fk)
+    assert u.returncode == 0, u.stderr
+    assert not list(units.glob("com.djbclark.pr-policy.*"))
+
+
+def test_install_systemd_without_linger_is_69_unless_allowed(env):
+    fk = _fake_sched(env.tmp, linger="no")
+    p = env("install", "--backend", "systemd", "--ade", str(REPO), extra=fk)
+    assert p.returncode == 69 and "enable-linger" in p.stderr and not (env.tmp / "units").exists()
+    p = env("install", "--backend", "systemd", "--allow-no-linger", "--ade", str(REPO), extra=fk)
+    assert p.returncode == 0, p.stderr
+    assert (env.tmp / "units/com.djbclark.pr-policy.timer").is_file()
+
+
+def test_uninstall_on_linux_is_not_69_when_nothing_is_installed(env):
+    assert env("uninstall", "--backend", "systemd", extra=_fake_sched(env.tmp)).returncode == 0

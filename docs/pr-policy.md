@@ -50,11 +50,13 @@ their own pull request this way.
 |---|---|
 | `pr-policy plan [--json] [--only github\|forgejo]` | what `apply` would change; read-only |
 | `pr-policy apply --yes [--notify] [--quiet]` | makes the changes; without `--yes` it is `plan`. `--notify` sends one `hermes-ping` per run that changed something or hit an error not reported before; `--quiet` prints nothing when nothing changed |
-| `pr-policy install [--ade DIR] [--dry-run]` | renders [`config/launchd/com.djbclark.pr-policy.plist`](../config/launchd/com.djbclark.pr-policy.plist) into `~/Library/LaunchAgents` and bootstraps it; refuses a linked worktree unless `--ade` is given |
-| `pr-policy uninstall` | boots the job out and removes its plist; state is kept |
+| `pr-policy install [--ade DIR] [--dry-run] [--backend auto\|launchd\|systemd\|cron] [--allow-no-linger]` | fills [`config/launchd/com.djbclark.pr-policy.plist`](../config/launchd/com.djbclark.pr-policy.plist) and installs it through `bin/ade_sched.py` ([scheduling.md](scheduling.md)): a LaunchAgent on macOS, a systemd user timer (`OnUnitActiveSec=600s`) on Linux, cron otherwise; refuses a linked worktree unless `--ade` is given; `Linger=no` is exit 69 unless `--allow-no-linger` |
+| `pr-policy uninstall [--backend ...]` | removes the job (not installed: exit 0); state is kept |
+
+**Install on one host only.** The job pings about each change it makes; with it installed on two machines every pull request is converted and pinged twice. Pick one host (the always-on one) and `pr-policy uninstall` elsewhere.
 
 Exit codes: 0 done or nothing to do, 1 an API or secret error (the other changes still ran), 2 usage or config
-error, 69 `install`/`uninstall` off macOS.
+error, 69 `install`/`uninstall` with no usable scheduler (none found, systemd user manager unreachable, `Linger=no` without `--allow-no-linger`).
 
 Before a change the tool re-reads its target: the repository listing lags a PATCH by seconds (2026-11-04: all nine
 `frdminc` repositories listed `all` right after a successful PATCH), and search lags a new label or a

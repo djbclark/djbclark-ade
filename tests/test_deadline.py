@@ -271,17 +271,113 @@ def test_agent_scan_is_throttled_without_force(env):
     assert len(env.calls("PASEO")) == n, "second sweep inside 5 min must not call paseo again"
 
 
+def plist_of(out: str) -> dict:
+    """The XML plist inside `--dry-run` output (ade_sched prefixes `# <path>` and appends `# run:` lines)."""
+    return plistlib.loads(out[out.index("<?xml"):out.index("</plist>") + len("</plist>")].encode())
+
+
 def test_install_dry_run_renders_a_valid_plist(env, tmp_path):
     ade = tmp_path / "ade"
     (ade / "bin").mkdir(parents=True)
     (ade / "config/launchd").mkdir(parents=True)
     shutil.copy(SCRIPT, ade / "bin/deadline")
     shutil.copy(ROOT / "config/launchd/com.djbclark.deadline-sweep.plist", ade / "config/launchd/")
-    r = env.run("install", "--ade", str(ade), "--dry-run")
+    r = env.run("install", "--backend", "launchd", "--agents", "on", "--ade", str(ade), "--dry-run")
     assert r.returncode == 0, r.stderr
-    p = plistlib.loads(r.stdout.encode())
+    p = plist_of(r.stdout)
     assert p["Label"] == "com.djbclark.deadline-sweep" and p["StartInterval"] == 60
     assert p["ProgramArguments"] == [f"{ade.resolve()}/bin/deadline", "sweep"] and "__" not in r.stdout
+
+
+def _fake_sched(tmp: Path, linger: str = "yes") -> dict:
+    """Fake systemctl/loginctl that log their argv (tests/test_ade_sched.py pattern); returns the env that points ade_sched at them."""
+    b = tmp / "fakebin"
+    b.mkdir(exist_ok=True)
+    log = tmp / "sched.log"
+    for name, body in (("systemctl", f'echo "systemctl $*" >> "{log}"\ncase "$*" in --version) echo "systemd 255 (255.4)";; esac\nexit 0\n'),
+                       ("loginctl", f'echo "loginctl $*" >> "{log}"\necho "{linger}"\n')):
+        (b / name).write_text("#!/bin/sh\n" + body)
+        (b / name).chmod(0o755)
+    (tmp / "home").mkdir(exist_ok=True)
+    return {"ADE_SCHED_SYSTEMCTL": str(b / "systemctl"), "ADE_SCHED_LOGINCTL": str(b / "loginctl"),
+            "ADE_SCHED_UNIT_DIR": str(tmp / "units"), "ADE_SCHED_LAUNCH_AGENTS": str(tmp / "agents"),
+            "ADE_SCHED_LOCK": str(tmp / "lock/l"), "HOME": str(tmp / "home"), "USER": "tester"}
+
+
+def _mk_ade(tmp_path: Path) -> Path:
+    ade = tmp_path / "ade"
+    (ade / "bin").mkdir(parents=True)
+    (ade / "config/launchd").mkdir(parents=True)
+    shutil.copy(SCRIPT, ade / "bin/deadline")
+    shutil.copy(ROOT / "config/launchd/com.djbclark.deadline-sweep.plist", ade / "config/launchd/")
+    return ade
+
+
+def test_install_dry_run_systemd_renders_timer_and_service(env, tmp_path):
+    ade = _mk_ade(tmp_path)
+    r = env.run("install", "--backend", "systemd", "--ade", str(ade), "--dry-run", **_fake_sched(tmp_path))
+    assert r.returncode == 0, r.stderr
+    assert "OnUnitActiveSec=60s" in r.stdout and "KillMode=process" in r.stdout
+    assert f"DEADLINE_STATE_DIR={env.state.resolve()}" in r.stdout and "__" not in r.stdout
+    assert f"{ade.resolve()}/bin/deadline" in r.stdout and not (tmp_path / "units").exists()
+
+
+def test_install_agents_off_adds_no_agents_to_execstart(env, tmp_path):
+    ade = _mk_ade(tmp_path)
+    fk = _fake_sched(tmp_path)
+    r = env.run("install", "--backend", "systemd", "--agents", "off", "--ade", str(ade), "--dry-run", **fk)
+    line = next(ln for ln in r.stdout.splitlines() if ln.startswith("ExecStart="))
+    assert line.endswith('"sweep" "--no-agents"') and "agent scan off" in r.stderr
+    on = env.run("install", "--backend", "systemd", "--agents", "on", "--ade", str(ade), "--dry-run", **fk).stdout
+    assert "--no-agents" not in on
+
+
+def test_install_agents_auto_looks_for_paseo_on_the_job_path(env, tmp_path):
+    ade = _mk_ade(tmp_path)
+    fk = _fake_sched(tmp_path)
+    r = env.run("install", "--backend", "systemd", "--ade", str(ade), "--dry-run", **fk)
+    assert "--no-agents" in r.stdout and "paseo not found" in r.stderr
+    (tmp_path / "home/.local/bin").mkdir(parents=True)
+    (tmp_path / "home/.local/bin/paseo").write_text("#!/bin/sh\n")
+    (tmp_path / "home/.local/bin/paseo").chmod(0o755)
+    r = env.run("install", "--backend", "systemd", "--ade", str(ade), "--dry-run", **fk)
+    assert "--no-agents" not in r.stdout and "paseo found at" in r.stderr
+
+
+def test_install_systemd_writes_units_and_activates(env, tmp_path):
+    ade = _mk_ade(tmp_path)
+    fk = _fake_sched(tmp_path)
+    r = env.run("install", "--backend", "systemd", "--agents", "off", "--ade", str(ade), **fk)
+    assert r.returncode == 0, r.stderr
+    units = tmp_path / "units"
+    assert (units / "com.djbclark.deadline-sweep.service").is_file() and (units / "com.djbclark.deadline-sweep.timer").is_file()
+    calls = (tmp_path / "sched.log").read_text()
+    assert "loginctl show-user" in calls and "systemctl --user daemon-reload" in calls
+    assert "systemctl --user enable com.djbclark.deadline-sweep.timer" in calls and env.state.is_dir()
+    u = env.run("uninstall", "--backend", "systemd", **fk)
+    assert u.returncode == 0, u.stderr
+    assert not list(units.glob("com.djbclark.deadline-sweep.*"))
+
+
+def test_install_systemd_without_linger_is_69_unless_allowed(env, tmp_path):
+    ade = _mk_ade(tmp_path)
+    fk = _fake_sched(tmp_path, linger="no")
+    r = env.run("install", "--backend", "systemd", "--ade", str(ade), **fk)
+    assert r.returncode == 69 and "enable-linger" in r.stderr and not (tmp_path / "units").exists()
+    r = env.run("install", "--backend", "systemd", "--allow-no-linger", "--ade", str(ade), **fk)
+    assert r.returncode == 0, r.stderr
+    assert (tmp_path / "units/com.djbclark.deadline-sweep.timer").is_file()
+
+
+def test_uninstall_on_linux_is_not_69_when_nothing_is_installed(env, tmp_path):
+    r = env.run("uninstall", "--backend", "systemd", **_fake_sched(tmp_path))
+    assert r.returncode == 0, r.stderr
+
+
+def test_install_with_no_scheduler_is_69(env, tmp_path):
+    ade = _mk_ade(tmp_path)
+    r = env.run("install", "--ade", str(ade), "--dry-run", ADE_SCHED_BACKEND="none", **_fake_sched(tmp_path))
+    assert r.returncode == 69
 
 
 # ---------- PR 223 adversary round 1: failed kill, run/sweep race, start-time and ancestry guards, names ----------
@@ -982,8 +1078,8 @@ def test_install_renders_the_configured_state_dir_into_env_and_log_paths(env, tm
     (ade / "config/launchd").mkdir(parents=True)
     shutil.copy(SCRIPT, ade / "bin/deadline")
     shutil.copy(ROOT / "config/launchd/com.djbclark.deadline-sweep.plist", ade / "config/launchd/")
-    r = env.run("install", "--ade", str(ade), "--dry-run")
-    p = plistlib.loads(r.stdout.encode())
+    r = env.run("install", "--backend", "launchd", "--ade", str(ade), "--dry-run")
+    p = plist_of(r.stdout)
     sd = str(env.state.resolve())
     assert p["EnvironmentVariables"]["DEADLINE_STATE_DIR"] == sd
     assert p["StandardOutPath"] == p["StandardErrorPath"] == f"{sd}/sweep.log" and "__" not in r.stdout
