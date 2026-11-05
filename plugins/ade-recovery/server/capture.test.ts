@@ -11,10 +11,21 @@ import type {
   WriterInfo,
 } from "./types.ts";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { Capture, MAX_BUFFERED_EVENTS, type CaptureDeps, type LockResult, type RecordBody } from "./capture.ts";
+import {
+  Capture,
+  LATE_TURN_START_MS,
+  MAX_BUFFERED_EVENTS,
+  type CaptureDeps,
+  type LockResult,
+  type RecordBody,
+} from "./capture.ts";
 import { judge } from "./verdict.ts";
+import { ensureRoot } from "./state-root.ts";
+import { listAgents, loadRecord, sweepTmp, writeGeneration } from "./store.ts";
+import { acquireLock, readLock, selfWriterInfo } from "./writer-lock.ts";
 
 const DAEMON = { pid: 4242, start: "777" };
 const BOOT = "boot-1";
@@ -457,6 +468,100 @@ test("a turn.before arriving after its own turn.after does not reopen the turn",
   assert.ok(rec.missingTelemetry!.some((m) => m.field === "turnStart"));
 });
 
+/** The verdict for the clean fixture overlaid with `body`'s state, turns and interruptions. */
+function verdictOfRecord(body: RecordBody): ReturnType<typeof judge> {
+  const fx = JSON.parse(fs.readFileSync(path.join(FIXTURE_DIR, "01-clean-completed-turn.json"), "utf8"));
+  const r = fx.load.record;
+  r.state = body.state;
+  r.closedAt = body.closedAt ?? null;
+  r.turns = structuredClone(body.turns ?? []);
+  r.interruptions = structuredClone(body.interruptions ?? []);
+  // The harness clock runs at 12:00; the fixture's git captures postdate every turn end.
+  r.git.latest.capturedAt = "2026-11-04T13:00:00.000Z";
+  fx.live.git.capturedAt = "2026-11-04T13:00:00.000Z";
+  return judge(fx.load, fx.live);
+}
+
+test("P1 regression: a turn.before reusing a completed turn's id opens a new in-flight turn; a crash leaves it interrupted", async () => {
+  const h = harness();
+  const p = fakePaseo();
+  h.capture.onTurnBefore(agent(), "T1", p);
+  h.capture.onTurnAfter(agent(), "T1", { kind: "completed" }, p);
+  await h.capture.idle();
+  const done = h.lastWrite("agent-1");
+  assert.equal(done.state, "idle");
+  assert.equal(verdictOfRecord(done).verdict, "resumable-native", "the shape a dropped reopen would leave");
+  // The session reopens and the provider reuses the id (allowed by the hook contract).
+  h.advance(1000);
+  h.capture.onTurnBefore(agent(), "T1", p);
+  await h.capture.idle();
+  const rec = h.lastWrite("agent-1");
+  assert.equal(rec.state, "turn-in-flight");
+  assert.equal(rec.turns!.length, 2);
+  assert.deepEqual(rec.turns![0]!.outcome, { kind: "completed" }, "the completed turn stays completed");
+  assert.equal(rec.turns![1]!.turnId, "T1");
+  assert.equal(rec.turns![1]!.endedAt, null);
+  assert.notEqual(rec.turns![1]!.turnKey, rec.turns![0]!.turnKey);
+  assert.notEqual(verdictOfRecord(rec).verdict, "resumable-native");
+
+  // Crash: the next daemon (another pid and start) loads that generation and reconciles it.
+  const disk = new Map<string, LoadResult>();
+  disk.set("agent-1", { record: sealedFrom(rec, 7), source: "current", problems: [], maxGenerationSeen: 7 });
+  const h2 = harness({ disk });
+  h2.deps.host = { ...h2.deps.host, daemonIdentity: () => ({ pid: 5151, start: "888" }) };
+  h2.capture.onCreate(agent("other"), p);
+  await h2.capture.idle();
+  const after = h2.lastWrite("agent-1");
+  assert.equal(after.state, "interrupted");
+  assert.deepEqual(
+    after.interruptions!.map((i) => [i.evidence, i.turnKey]),
+    [["daemon-restart", rec.turns![1]!.turnKey]],
+  );
+  const v = verdictOfRecord(after);
+  assert.notEqual(v.verdict, "resumable-native");
+  assert.ok(v.reasons.includes("interrupted:daemon-restart"), JSON.stringify(v));
+});
+
+test("P1: a late turn.before is swallowed once; a later one with the same id is a reopen", async () => {
+  const h = harness();
+  const p = fakePaseo();
+  h.capture.onTurnAfter(agent(), "t9", { kind: "completed" }, p); // end first: start not yet seen
+  h.capture.onTurnBefore(agent(), "t9", p); // its own late start
+  h.capture.onTurnBefore(agent(), "t9", p); // a reopen reusing the id
+  await h.capture.idle();
+  const rec = h.lastWrite("agent-1");
+  assert.equal(rec.turns!.length, 2);
+  assert.deepEqual(rec.turns![0]!.outcome, { kind: "completed" });
+  assert.equal(rec.turns![1]!.endedAt, null);
+  assert.equal(rec.state, "turn-in-flight");
+});
+
+test("P1: a turn.before for an unmatched end's id after the late-start window opens a new turn", async () => {
+  const h = harness();
+  const p = fakePaseo();
+  h.capture.onTurnAfter(agent(), "t9", { kind: "completed" }, p);
+  await h.capture.idle(); // applied now (lazy init buffers the first event), before the clock moves
+  h.advance(LATE_TURN_START_MS + 1);
+  h.capture.onTurnBefore(agent(), "t9", p);
+  await h.capture.idle();
+  const rec = h.lastWrite("agent-1");
+  assert.equal(rec.turns!.length, 2);
+  assert.equal(rec.state, "turn-in-flight");
+});
+
+test("P1: another turn's start in between ends the pairing; the old id is then a reopen", async () => {
+  const h = harness();
+  const p = fakePaseo();
+  h.capture.onTurnAfter(agent(), "t9", { kind: "completed" }, p);
+  h.capture.onTurnBefore(agent(), "t10", p);
+  h.capture.onTurnAfter(agent(), "t10", { kind: "completed" }, p);
+  h.capture.onTurnBefore(agent(), "t9", p);
+  await h.capture.idle();
+  const rec = h.lastWrite("agent-1");
+  assert.deepEqual(rec.turns!.map((t) => [t.turnId, t.endedAt === null]), [["t9", false], ["t10", false], ["t9", true]]);
+  assert.equal(rec.state, "turn-in-flight");
+});
+
 test("archive sets archived state and the payload's archivedAt", async () => {
   const h = harness();
   const p = fakePaseo();
@@ -726,6 +831,84 @@ test("close: releases the lock, drops later events, never throws, is idempotent"
   h.capture.onTurnBefore(agent(), "t1", p);
   await h.capture.idle();
   assert.equal(h.writes.length, before);
+});
+
+test("P2 regression: a write outlasting the close deadline keeps the lock, never publishes, and never overwrites a newer writer", async () => {
+  // withTimeout's timer is unref'd: keep the loop alive while the write waits on the gate.
+  const keepAlive = setInterval(() => undefined, 1000);
+  let openGate: () => void = () => undefined;
+  try {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), "ade-recovery-capture-"));
+    const dir = ensureRoot(path.join(base, "root"));
+    let gate: Promise<void> | null = null;
+    let blocked = 0;
+    const h = harness();
+    h.deps.host = { ...h.deps.host, writerInfo: selfWriterInfo }; // a real, live lock holder (this process)
+    h.deps.store = {
+      stateRoot: () => dir,
+      ensureRoot: () => dir,
+      acquireLock: (d, info) => acquireLock(d, info),
+      writeGeneration: (d, id, body, guard) =>
+        writeGeneration(d, id, body, {
+          owner: guard ? () => guard.owner() : undefined,
+          io: {
+            async write(fh, data) {
+              if (gate) {
+                blocked += 1;
+                await gate;
+              }
+              await fh.writeFile(data);
+            },
+          },
+        }),
+      loadRecord,
+      listAgents,
+      sweepTmp,
+    };
+    const p = fakePaseo();
+    h.capture.onCreate(agent(), p);
+    await h.capture.idle();
+    const settled = loadRecord(dir, "agent-1").record!;
+    assert.equal(settled.state, "idle");
+    const lockFile = path.join(dir, "writer.lock");
+    const ours = readLock(dir)!;
+    assert.equal(ours.pid, process.pid);
+
+    gate = new Promise<void>((r) => (openGate = r));
+    h.capture.onTurnBefore(agent(), "t1", p);
+    for (let i = 0; i < 1000 && blocked === 0; i += 1) await new Promise((r) => setTimeout(r, 2));
+    assert.equal(blocked, 1, "the turn.before write is stuck in io.write");
+    await h.capture.close(30);
+    assert.equal(h.capture.mode, "closed");
+    assert.equal(readLock(dir)?.nonce, ours.nonce, "the lock is kept while the write may still publish");
+    const contender = acquireLock(dir, selfWriterInfo());
+    assert.equal(contender.held, false, "no second writer while ours is alive and holds the lock");
+    assert.ok(h.logs.some((l) => l.startsWith("writer lock kept until in-flight writes settle")));
+
+    openGate();
+    for (let i = 0; i < 500 && fs.existsSync(lockFile); i += 1) await new Promise((r) => setTimeout(r, 2));
+    assert.equal(fs.existsSync(lockFile), false, "released once the write settled");
+    const disk = loadRecord(dir, "agent-1").record!;
+    assert.equal(disk.generation, settled.generation, "the stopped write published nothing");
+    assert.equal(disk.state, "idle");
+    assert.ok(h.logs.some((l) => l.startsWith("generation write abandoned")));
+
+    // A second writer now takes the root and writes a newer generation; nothing of ours lands on it.
+    const b = acquireLock(dir, selfWriterInfo());
+    assert.equal(b.held, true);
+    const newer = await writeGeneration(dir, "agent-1", { ...structuredClone(disk), state: "closed" } as never, {
+      owner: () => (b.held ? b.stillHeld() : false),
+    });
+    await h.capture.idle();
+    await new Promise((r) => setTimeout(r, 20));
+    const final = loadRecord(dir, "agent-1").record!;
+    assert.equal(final.generation, newer.generation);
+    assert.equal(final.state, "closed");
+    if (b.held) b.release();
+  } finally {
+    openGate();
+    clearInterval(keepAlive);
+  }
 });
 
 test("bad payloads never throw out of a hook", async () => {

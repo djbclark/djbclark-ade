@@ -316,6 +316,69 @@ test("ENOSPC mid-write: rejects, previous generation intact, no temp left, gener
   assert.equal(loadRecord(dir, "e").record?.generation, next.generation);
 });
 
+test("owner check: false or throwing refuses before any temp file, code EWRITERLOST", async () => {
+  const dir = tmpRoot();
+  await writeGeneration(dir, "o", draft("o"));
+  const before = fs.readFileSync(path.join(dir, "o.json"));
+  await assert.rejects(writeGeneration(dir, "o", draft("o"), { owner: () => false }), { code: "EWRITERLOST" });
+  await assert.rejects(
+    writeGeneration(dir, "o", draft("o"), { owner: () => { throw new Error("EIO"); } }),
+    { code: "EWRITERLOST" },
+  );
+  assert.deepEqual(fs.readFileSync(path.join(dir, "o.json")), before);
+  assert.deepEqual(tmpNames(dir), []);
+  assert.equal((await writeGeneration(dir, "o", draft("o"), { owner: () => true })).generation, 2);
+});
+
+test("P2: a slow write whose lock is lost mid-write never renames over a second writer's newer generation", async () => {
+  const dir = tmpRoot();
+  await writeGeneration(dir, "slow", draft("slow"));
+  const a = acquireLock(dir, selfWriterInfo());
+  assert.equal(a.held, true);
+  let openGate: () => void = () => undefined;
+  const gate = new Promise<void>((r) => (openGate = r));
+  let blocked = false;
+  const keepAlive = setInterval(() => undefined, 1000);
+  try {
+    const pending = writeGeneration(dir, "slow", draft("slow", { state: "turn-in-flight" }), {
+      owner: () => (a.held ? a.stillHeld() : false),
+      io: {
+        async write(fh, data) {
+          blocked = true;
+          await gate;
+          await fh.writeFile(data);
+        },
+      },
+    });
+    const outcome = pending.then(
+      () => "published",
+      (e: NodeJS.ErrnoException) => e.code,
+    );
+    for (let i = 0; i < 1000 && !blocked; i += 1) await new Promise((r) => setTimeout(r, 2));
+    assert.equal(blocked, true);
+    // Ownership moves on while A's write is stuck (A released; B takes the lock and writes, from
+    // another process, a newer generation).
+    if (a.held) a.release();
+    const b = acquireLock(dir, selfWriterInfo());
+    assert.equal(b.held, true);
+    const child = await runChild(dir, "slow", 1);
+    assert.equal(child.code, 0, child.stderr);
+    const bGen = loadRecord(dir, "slow").record!;
+    assert.notEqual(bGen.writer.pid, process.pid, "the newer generation is the second writer's");
+    openGate();
+    assert.equal(await outcome, "EWRITERLOST");
+    const final = loadRecord(dir, "slow").record!;
+    assert.equal(final.generation, bGen.generation);
+    assert.equal(final.writer.pid, bGen.writer.pid);
+    assert.equal(final.state, "idle");
+    assert.deepEqual(tmpNames(dir), []);
+    if (b.held) b.release();
+  } finally {
+    openGate();
+    clearInterval(keepAlive);
+  }
+});
+
 test("record over the size cap is refused and the previous generation kept", async () => {
   const dir = tmpRoot();
   await writeGeneration(dir, "big", draft("big"));

@@ -80,7 +80,9 @@ export function productionDeps(env: NodeJS.ProcessEnv = process.env): CaptureDep
       stateRoot: (serverId) => stateRoot(serverId, env),
       ensureRoot,
       acquireLock,
-      writeGeneration: (dir, agentId, body) => writeGeneration(dir, agentId, body),
+      // The guard is re-checked before every rename: no publish once the lock is not ours (PR 290).
+      writeGeneration: (dir, agentId, body, guard) =>
+        writeGeneration(dir, agentId, body, guard ? { owner: () => guard.owner() } : {}),
       loadRecord,
       listAgents,
       sweepTmp: (dir) => sweepTmp(dir),

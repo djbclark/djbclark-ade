@@ -38,16 +38,25 @@ import { PASEO_NEWER_TOLERANCE_MS } from "./verdict.ts";
 export type { RecordBody } from "./reconcile.ts";
 
 export type LockResult =
-  | { held: true; release(): void }
+  | { held: true; release(): void; stillHeld?(): boolean }
   | { held: false; holder: WriterInfo | null; reason: string };
+
+/** Passed to every generation write: the store re-checks it right before each rename. */
+export interface WriteGuard {
+  /** False once this writer may no longer publish (lock released or lost, close deadline passed). */
+  owner(): boolean;
+}
 
 /** The durability layer (Slice A), injected so tests can replace it. */
 export interface CaptureStore {
   stateRoot(serverId: string): string;
   ensureRoot(dir: string): unknown;
   acquireLock(dir: string, info: WriterInfo): LockResult;
-  /** Seals and atomically writes the next generation for `agentId`. */
-  writeGeneration(dir: string, agentId: string, body: RecordBody): Promise<unknown>;
+  /**
+   * Seals and atomically writes the next generation for `agentId`. Must call `guard.owner()`
+   * immediately before publishing (each rename) and abandon the write, rejecting, when it is false.
+   */
+  writeGeneration(dir: string, agentId: string, body: RecordBody, guard?: WriteGuard): Promise<unknown>;
   loadRecord(dir: string, agentId: string): LoadResult;
   listAgents(dir: string): string[];
   sweepTmp(dir: string): unknown;
@@ -105,6 +114,13 @@ const DEFAULT_TIMEOUTS: CaptureTimeouts = {
   closeFlushMs: 1_500,
 };
 
+/**
+ * A turn.before that matches a turn whose turn.after arrived first (with no start observed) is that
+ * same turn's late start only within this window of the end; later, it is a reopen that reuses the
+ * id (the hook contract allows a repeat turnId after a session reopens) and opens a new turn.
+ */
+export const LATE_TURN_START_MS = 10_000;
+
 /** Events held while lazy init settles; later ones are dropped and counted. */
 export const MAX_BUFFERED_EVENTS = 500;
 /** Concurrent git captures across all agents. */
@@ -119,6 +135,20 @@ interface AgentEntry {
   /** On disk under an unknown (newer) schema: never overwritten. */
   foreign: boolean;
   gitSeq: Record<GitSlot, number>;
+}
+
+/** One lock acquisition's right to publish generations. */
+interface Ownership {
+  lock: { release(): void; stillHeld?(): boolean };
+  /** Set when this writer must publish nothing more (close deadline passed, or released). */
+  stopped: boolean;
+}
+
+/** A turn created by a turn.after whose turn.before had not arrived (it may still, late). */
+interface UnmatchedEnd {
+  turnKey: string;
+  turnId: string;
+  at: number;
 }
 
 interface Buffered {
@@ -189,6 +219,11 @@ function isTooLarge(error: unknown): boolean {
   return /too[ _-]?large/i.test(`${String(e.code ?? "")} ${String(e.message ?? "")}`);
 }
 
+/** The store refused to publish because the write guard said this writer no longer owns the root. */
+function isWriterLost(error: unknown): boolean {
+  return !!error && typeof error === "object" && (error as { code?: unknown }).code === "EWRITERLOST";
+}
+
 function withoutPaths(ev: GitEvidence | null | undefined): GitEvidence | null | undefined {
   if (!ev) return ev;
   const dropped = ev.trackedPaths.length > 0 || ev.untrackedPaths.length > 0;
@@ -222,6 +257,13 @@ export class Capture {
   private serverId: string | null;
   private dir: string | null;
   private lock: { release(): void } | null;
+  /** The current lock's publishing right; captured by each write when it is scheduled. */
+  private ownership: Ownership | null;
+  /**
+   * Per agent, the last turn opened by an unmatched turn.after (no start seen) in this capture. Only
+   * that turn may swallow a late turn.before with its id; any later turn.before consumes the entry.
+   */
+  private unmatchedEnds: Map<string, UnmatchedEnd>;
 
   private agents: Map<string, AgentEntry>;
   /**
@@ -261,6 +303,8 @@ export class Capture {
     this.serverId = null;
     this.dir = null;
     this.lock = null;
+    this.ownership = null;
+    this.unmatchedEnds = new Map();
     this.agents = new Map();
     this.firstSeen = new Map();
     this.droppedFor = new Set();
@@ -324,10 +368,17 @@ export class Capture {
   /**
    * Stop: accept no more events, abort git, flush pending writes (bounded), release the
    * writer lock, drop in-memory state. Idempotent; never throws.
+   *
+   * The lock is never released while a generation write may still publish (PR 290, Codex P2): a
+   * write that outlasts the flush deadline is told to stop (the store re-checks ownership before
+   * each rename and abandons it), and the lock is released only once every write has settled. A
+   * write that never settles keeps the lock until this process exits; a stale-holder takeover
+   * (dead pid, or a different start token) then frees it, safely, since nothing here runs anymore.
    */
   async close(flushMs: number = this.timeouts.closeFlushMs): Promise<void> {
     if (this.modeValue === "closed") return;
     this.closing = true;
+    let flushed = false;
     try {
       for (const c of this.controllers) c.abort();
       this.buffer = [];
@@ -339,18 +390,19 @@ export class Capture {
         })(),
         flushMs,
         "flush",
-      ).catch(() => this.log("flush did not finish before close"));
+      ).then(
+        () => {
+          flushed = true;
+        },
+        () => this.log("flush did not finish before close"),
+      );
     } catch {
       // never throw from cleanup
     }
-    try {
-      this.lock?.release();
-    } catch (error) {
-      this.log("lock release failed", { error: errorName(error) });
-    }
-    this.lock = null;
+    this.relinquish(!flushed);
     this.modeValue = "closed";
     this.agents.clear();
+    this.unmatchedEnds.clear();
   }
 
   // ---------------------------------------------------------------- dispatch
@@ -420,17 +472,44 @@ export class Capture {
   }
 
   private failInit(reason: string): void {
-    try {
-      this.lock?.release();
-    } catch {
-      // ignore
-    }
-    this.lock = null;
+    // Writes already scheduled under this lock (a prev fallback, a reconcile) may still be running:
+    // the lock goes only once they have settled. After close() has returned (its deadline passed
+    // while init ran) they must publish nothing more.
+    this.relinquish(this.modeValue === "closed");
     this.modeValue = this.closing ? "closed" : "inert";
     this.initFailedAt = this.deps.now();
     // The buffer is about to be dropped: its events no longer excuse anything.
     this.firstSeen.clear();
     this.logOnce(`inert:${reason}`, "inert: recording nothing", { reason });
+  }
+
+  /**
+   * Give up the writer lock without ever releasing it under a write that may still publish. No new
+   * write is scheduled under it from now on. `stop`: writes still running must publish nothing more
+   * (each abandons at its next ownership check). The lock is released at once when no write is in
+   * flight, else when the write queue has settled (never, if a write hangs: see close()).
+   */
+  private relinquish(stop: boolean): void {
+    const own = this.ownership;
+    const lock = this.lock;
+    this.ownership = null;
+    this.lock = null;
+    if (!lock) return;
+    const release = (): void => {
+      if (own) own.stopped = true;
+      try {
+        lock.release();
+      } catch (error) {
+        this.log("lock release failed", { error: errorName(error) });
+      }
+    };
+    if (stop && own) own.stopped = true;
+    if (this.writes.size() === 0) {
+      release();
+      return;
+    }
+    this.log("writer lock kept until in-flight writes settle", { stopped: stop });
+    void this.writes.idle().then(release, release);
   }
 
   private async init(paseo: PaseoLike): Promise<void> {
@@ -482,6 +561,7 @@ export class Capture {
       return;
     }
     this.lock = lock;
+    this.ownership = { lock, stopped: false };
     if (this.isShuttingDown()) {
       // Either the daemon is already stopping, or this daemon keeps no local-credential
       // (then every capture reads as shutdown-time: no git, never resumable). Say which.
@@ -641,12 +721,8 @@ export class Capture {
     if (!entry) return;
     const body = entry.body as RecordBody;
     const turns = body.turns ? [...body.turns] : [];
-    const prefix = `${this.daemonInstance}:`;
-    if (
-      turnId !== null &&
-      turns.some((t) => t.turnId === turnId && t.turnKey.startsWith(prefix) && t.endedAt !== null)
-    ) {
-      // turn.after for this turn already arrived (hook order is not guaranteed).
+    if (this.isLateStart(agent.id, turnId, turns)) {
+      // turn.after for this very turn already arrived (hook order is not guaranteed): its start.
       this.scheduleWrite(agent.id);
       return;
     }
@@ -668,6 +744,24 @@ export class Capture {
       this.scheduleGit(agent.id, ["atTurnStart"], seq);
       this.scheduleRefresh(agent.id, paseo);
     }
+  }
+
+  /**
+   * Is this turn.before the late start of a turn whose turn.after already arrived? Only when the
+   * agent's last unmatched end (a turn.after with no start seen, in this capture) has this turnId,
+   * is still the newest turn with it, and ended within LATE_TURN_START_MS. Every turn.before
+   * consumes the entry: a completed turn's id seen again later is a reopen, and opens a new turn.
+   */
+  private isLateStart(agentId: string, turnId: string | null, turns: TurnRecord[]): boolean {
+    const pending = this.unmatchedEnds.get(agentId);
+    this.unmatchedEnds.delete(agentId);
+    if (!pending || turnId === null || pending.turnId !== turnId) return false;
+    if (this.deps.now() - pending.at > LATE_TURN_START_MS) return false;
+    for (let i = turns.length - 1; i >= 0; i -= 1) {
+      const t = turns[i] as TurnRecord;
+      if (t.turnId === turnId) return t.turnKey === pending.turnKey && t.endedAt !== null;
+    }
+    return false;
   }
 
   private applyTurnAfter(
@@ -711,6 +805,7 @@ export class Capture {
         duringShutdown: false,
       };
       turns.push(turn);
+      if (turnId !== null) this.unmatchedEnds.set(agent.id, { turnKey: turn.turnKey, turnId, at: this.deps.now() });
     }
     turn.endedAt = at;
     turn.outcome = mapOutcome(outcome);
@@ -841,6 +936,16 @@ export class Capture {
 
   // ---------------------------------------------------------------- writes and detached work
 
+  /** May a write scheduled under `own` still publish? The lock file must still carry our nonce. */
+  private owns(own: Ownership): boolean {
+    if (own.stopped) return false;
+    try {
+      return own.lock.stillHeld ? own.lock.stillHeld() === true : true;
+    } catch {
+      return false;
+    }
+  }
+
   private sideEffectsAllowed(): boolean {
     return this.modeValue === "active" && !this.closing && !this.isShuttingDown();
   }
@@ -857,15 +962,22 @@ export class Capture {
   private scheduleWrite(agentId: string, duringInit = false): Promise<void> {
     if (!duringInit && this.modeValue !== "active") return Promise.resolve();
     const entry = this.agents.get(agentId);
-    if (!entry || entry.foreign || !entry.body || !this.dir) return Promise.resolve();
+    const own = this.ownership;
+    if (!entry || entry.foreign || !entry.body || !this.dir || !own) return Promise.resolve();
     const dir = this.dir;
+    const guard: WriteGuard = { owner: () => this.owns(own) };
     return this.writes.run(`w:${agentId}`, async () => {
+      if (!this.owns(own)) return;
       const current = this.agents.get(agentId)?.body;
       if (!current) return;
       const body = structuredClone(current);
       try {
-        await this.deps.store.writeGeneration(dir, agentId, body);
+        await this.deps.store.writeGeneration(dir, agentId, body, guard);
       } catch (error) {
+        if (isWriterLost(error)) {
+          this.log("generation write abandoned: this writer no longer owns the state root");
+          return;
+        }
         if (!isTooLarge(error)) {
           this.log("generation write failed; previous generation kept", { error: errorName(error) });
           return;
@@ -877,8 +989,9 @@ export class Capture {
           atTurnStart: withoutPaths(git.atTurnStart),
           latest: withoutPaths(git.latest),
         };
+        if (!this.owns(own)) return;
         try {
-          await this.deps.store.writeGeneration(dir, agentId, body);
+          await this.deps.store.writeGeneration(dir, agentId, body, guard);
         } catch (again) {
           this.log("generation write failed even without path lists", { error: errorName(again) });
         }
