@@ -421,6 +421,8 @@ class TestArguments(Base):
         self.assertFalse(other.exists())
 
 
+@unittest.skipIf(sys.platform == "darwin", "Linux clipboard fallbacks: on macOS coding-bot uses pbcopy/pbpaste only "
+                 "(Codex P1 on PR 292: the manual macOS run must stay green)")
 class TestPlatformClipboard(Base):
     """Without $CLIP/$PBPASTE the platform's own tool is used: wl-* only with $WAYLAND_DISPLAY, xclip/xsel only with
     $DISPLAY. Each fake records its argv (and, for a copier, its stdin) to a file named after it."""
