@@ -161,6 +161,16 @@ def test_symlink_then_dotdot_is_resolved_before_collapsing(env):
     assert blocked(env, "Bash", {"command": "cat link/../hosts.yml"})
 
 
+def test_normalized_spelling_symlink_is_still_resolved(env):
+    # Mirror case (adversary on PR 289): x -> secret, link -> d/e; a tool that normalizes `link/../x` by text
+    # opens x, so realpath(normpath) must still be checked beside realpath(join).
+    (env["home"] / ".netrc").write_text("machine x password y\n")
+    (env["proj"] / "x").symlink_to(env["home"] / ".netrc")
+    (env["proj"] / "d" / "e").mkdir(parents=True)
+    (env["proj"] / "link").symlink_to(env["proj"] / "d" / "e")
+    assert blocked(env, "Read", {"file_path": "link/../x"})
+
+
 # ---- Grep ------------------------------------------------------------------------------------------------------------
 @pytest.mark.parametrize("inp,want", [
     ({"pattern": "x", "path": ".env"}, True),

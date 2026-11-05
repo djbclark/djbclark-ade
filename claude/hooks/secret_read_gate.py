@@ -529,9 +529,11 @@ def concrete(path: str, cwd: str) -> list:
     full = os.path.normpath(joined)
     out.append(full)
     try:
-        # realpath of the UNnormalized join: `link/../x` opens x beside link's target, not beside link
-        # (normpath would collapse `link/..` first and check the wrong file; Codex review on PR 289).
+        # Both realpaths: the kernel opens `link/../x` beside link's target (realpath of the unnormalized join,
+        # Codex review on PR 289), while a tool that normalizes `..` by text first opens the normalized path,
+        # which may itself be a symlink to a secret (adversary on PR 289). Checking more paths only blocks more.
         out.append(os.path.realpath(joined))
+        out.append(os.path.realpath(full))
     except (OSError, ValueError):
         pass
     seen = []
