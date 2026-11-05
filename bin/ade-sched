@@ -62,7 +62,8 @@ def _common(p: argparse.ArgumentParser, top: bool) -> None:
         return {"default": v if top else argparse.SUPPRESS}
     p.add_argument("--backend", choices=("auto", *ade_sched.BACKENDS), **dflt("auto"))
     p.add_argument("--ade", metavar="DIR", **dflt(None))
-    p.add_argument("--set", action="append", metavar="KEY=VALUE", dest="subst", **dflt([]))
+    # its own dest on a subcommand: an append there would REPLACE the top-level list, dropping earlier --set values
+    p.add_argument("--set", action="append", metavar="KEY=VALUE", dest="subst" if top else "sub_subst", **dflt([]))
     p.add_argument("--dry-run", action="store_true", **dflt(False))
     p.add_argument("--no-activate", action="store_true", **dflt(False))
     p.add_argument("--allow-no-linger", action="store_true", **dflt(False))
@@ -79,7 +80,9 @@ def parse(argv: list[str]) -> argparse.Namespace:
         _common(sp, top=False)
         if arg:
             sp.add_argument(arg, nargs=nargs) if nargs else sp.add_argument(arg)
-    return ap.parse_args(argv)
+    a = ap.parse_args(argv)
+    a.subst = [*a.subst, *getattr(a, "sub_subst", [])]   # --set before and after the subcommand both count
+    return a
 
 
 def _subst(a: argparse.Namespace) -> dict[str, str]:
