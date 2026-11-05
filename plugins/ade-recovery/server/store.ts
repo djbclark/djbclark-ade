@@ -3,7 +3,8 @@
 // .tmp-prev-* name (copy+fsync where links are refused) -> rename to prev] -> rename tmp to current
 // -> fsync dir. A corrupt current never overwrites a good prev; no fixed temp name can collide
 // (finding 8). fsync ordering is not verified by the tests (it needs dm-flakey or LazyFS), and
-// macOS fsync does not flush the drive cache (no F_FULLFSYNC from Node).
+// macOS fsync does not flush the drive cache (no F_FULLFSYNC from Node). With WriteOptions.owner,
+// each rename is preceded by the caller's ownership check; a failed check publishes nothing.
 
 import fs from "node:fs";
 import fsp from "node:fs/promises";
@@ -33,6 +34,13 @@ export interface StoreIo {
 
 export interface WriteOptions {
   io?: Partial<StoreIo>;
+  /**
+   * Ownership check, called before the write starts and again immediately before each rename (prev,
+   * then current). False (or a throw) abandons the write with code EWRITERLOST: the temp files are
+   * removed and nothing is published. A writer that lost writer.lock, or that is closing past its
+   * deadline, must never rename a stale generation over a newer writer's record (PR 290, Codex P2).
+   */
+  owner?: () => boolean;
 }
 
 const defaultIo: StoreIo = {
@@ -228,6 +236,23 @@ async function copyToPrevTmp(io: StoreIo, current: string, tmpPrev: string): Pro
   }
 }
 
+function writerLost(): Error {
+  const err = new Error("this writer no longer owns the state root; generation not published");
+  (err as NodeJS.ErrnoException).code = "EWRITERLOST";
+  return err;
+}
+
+function checkOwner(opts: WriteOptions): void {
+  if (!opts.owner) return;
+  let ok = false;
+  try {
+    ok = opts.owner() === true;
+  } catch {
+    ok = false;
+  }
+  if (!ok) throw writerLost();
+}
+
 function tooLarge(bytes: number): Error {
   const err = new Error(`record is ${bytes} bytes, over the ${MAX_RECORD_BYTES}-byte cap; previous generation kept`);
   (err as NodeJS.ErrnoException).code = "ERECORDTOOLARGE";
@@ -239,6 +264,7 @@ async function writeOnce(dir: string, agentId: string, draft: RecordDraft, opts:
   if (draft.paseoAgentId !== agentId) {
     throw new Error(`record paseoAgentId ${JSON.stringify(draft.paseoAgentId)} does not match ${JSON.stringify(agentId)}`);
   }
+  checkOwner(opts);
   const p = paths(dir, agentId);
   const ck = path.resolve(dir) + "\0" + p.key;
   let entry = cache.get(ck);
@@ -283,6 +309,7 @@ async function writeOnce(dir: string, agentId: string, draft: RecordDraft, opts:
     } finally {
       await fh.close();
     }
+    checkOwner(opts);
     if (entry.currentValid) {
       let copied = true;
       try {
@@ -293,6 +320,7 @@ async function writeOnce(dir: string, agentId: string, draft: RecordDraft, opts:
       }
       if (copied) {
         crash("after-prev-link");
+        checkOwner(opts);
         await fsp.rename(tmpPrev, p.prev);
         // POSIX rename() does nothing when both names already link the same inode (prev and
         // current share one after a crash at after-prev-rename), leaving tmpPrev behind.
@@ -300,6 +328,7 @@ async function writeOnce(dir: string, agentId: string, draft: RecordDraft, opts:
         crash("after-prev-rename");
       }
     }
+    checkOwner(opts);
     await fsp.rename(tmp, p.current);
     renamed = true;
     entry.currentValid = true;
@@ -320,7 +349,8 @@ async function writeOnce(dir: string, agentId: string, draft: RecordDraft, opts:
  * Write the next generation of an agent's record. Generation = max(readable generation, highest
  * generation seen, including corrupt files and failed writes) + 1. Over MAX_RECORD_BYTES: rejects
  * with code ERECORDTOOLARGE. ENOSPC and other I/O errors reject; the previous generation stays
- * intact. Calls for the same agent in this process are serialized.
+ * intact. Calls for the same agent in this process are serialized. With `opts.owner`, a write whose
+ * owner check fails before a rename rejects with code EWRITERLOST and publishes nothing.
  */
 export function writeGeneration(
   dir: string,
