@@ -536,6 +536,20 @@ test("P1: a late turn.before is swallowed once; a later one with the same id is 
   assert.equal(rec.state, "turn-in-flight");
 });
 
+test("round 5 B1: a close between an unmatched end and a reused-id start makes it a reopen, not a late start", async () => {
+  const h = harness();
+  const p = fakePaseo();
+  h.capture.onTurnAfter(agent(), "t9", { kind: "completed" }, p); // end, start never seen
+  h.capture.onClose(agent(), p);
+  h.capture.onTurnBefore(agent(), "t9", p); // reopen within the 10 s window, same id
+  await h.capture.idle();
+  const rec = h.lastWrite("agent-1");
+  assert.equal(rec.state, "turn-in-flight");
+  assert.equal(rec.turns!.length, 2);
+  assert.equal(rec.turns![1]!.endedAt, null);
+  assert.notEqual(verdictOfRecord(rec).verdict, "resumable-native");
+});
+
 test("P1: a turn.before for an unmatched end's id after the late-start window opens a new turn", async () => {
   const h = harness();
   const p = fakePaseo();
