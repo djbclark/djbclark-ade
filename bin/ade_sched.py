@@ -796,6 +796,9 @@ def drop_cron_block(text: str, label: str) -> tuple[str, bool]:
                 inside = False
             continue
         kept.append(line)
+    if inside:      # a BEGIN without its END: dropping "the rest" would delete the operator's own lines
+        raise SchedError(EX_ACTIVATE, f"crontab has '{begin}' with no '{end}' (a hand-edited block?); "
+                                      f"fix it with crontab -e; the crontab was not changed")
     out = "".join(kept)
     if out and not out.endswith("\n"):
         out += "\n"

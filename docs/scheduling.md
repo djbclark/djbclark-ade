@@ -60,7 +60,7 @@ Placeholders are filled into the **parsed** plist (strings inside values, never 
 stays a value). `__ADE__`/`@ADE@` (the checkout, realpath) and `__HOME__`/`@HOME@` are always filled; everything else
 comes from `--set` (or `subst=` in the API) and wins over the defaults. Each string is filled in one pass, so a filled
 value is never filled again. Any `__NAME__` or `@NAME@` left afterwards is **exit 2**. The plists in use on 2026-11-04 need:
-`config/launchd/*`: `__STATE__`; `launchd/com.djbclark.proc-cpu-watch.plist`: `@TARGET@`, `@STATE@`;
+`config/launchd/com.djbclark.deadline-sweep.plist` and `com.djbclark.pr-policy.plist`: `__STATE__`; `launchd/com.djbclark.proc-cpu-watch.plist`: `@TARGET@`, `@STATE@`;
 `launchd/com.djbclark.session-history-update.plist`: `__REPO__`, `__INDEX_DIR__`. Several plists still hard-code
 `/Users/djbclark`; they parse and render as they are (later #279 slices template them).
 
@@ -93,7 +93,7 @@ has no such key, and ade-sched leaves it out of the launchd copy. The API takes 
 | `ADE_SCHED_LOCK` | `${XDG_STATE_HOME:-~/.local/state}/ade/ade-sched.lock` | `lock_path=` |
 
 A keyword beats the env variable, so an installer keeps honouring its own older override (`ACP_DISPATCH_LAUNCHCTL`,
-`*_LAUNCH_AGENTS`) by passing it through. `tests/conftest.py` pins all six variables to `/usr/bin/true` and a throwaway
+`*_LAUNCH_AGENTS`) by passing it through. `tests/conftest.py` pins all seven variables (four binaries, two directories, the lock) to `/usr/bin/true` and a throwaway
 directory, unconditionally, so no test touches a real launchd, systemd or crontab.
 
 ## Linger

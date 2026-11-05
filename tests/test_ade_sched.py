@@ -511,6 +511,14 @@ def test_drop_cron_block():
     assert S.drop_cron_block("a", "x") == ("a\n", False)
 
 
+def test_drop_cron_block_refuses_an_unterminated_block():
+    """A BEGIN with no END must not swallow the operator's following lines (adversary confirm on PR 291)."""
+    text = "0 1 * * * mine\n" + S.cron_begin("x") + "\n* * * * * job\n5 5 * * * also-mine\n"
+    with pytest.raises(S.SchedError) as e:
+        S.drop_cron_block(text, "x")
+    assert e.value.code == S.EX_ACTIVATE and "not changed" in str(e.value)
+
+
 # -- launchd ---------------------------------------------------------------------------------------------------------
 
 def test_launchd_install_status_uninstall(fake):
