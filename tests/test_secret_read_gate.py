@@ -150,6 +150,17 @@ def test_dotdot_is_normalised(env):
     assert blocked(env, "Read", {"file_path": "sub/../.env"})
 
 
+def test_symlink_then_dotdot_is_resolved_before_collapsing(env):
+    # Codex review, PR 289: link -> ~/.config/gh/subdir, so link/../hosts.yml opens ~/.config/gh/hosts.yml;
+    # normalising first would check proj/hosts.yml instead.
+    sub = env["home"] / ".config" / "gh" / "subdir"
+    sub.mkdir(parents=True)
+    (env["home"] / ".config" / "gh" / "hosts.yml").write_text("oauth_token: x\n")
+    (env["proj"] / "link").symlink_to(sub)
+    assert blocked(env, "Read", {"file_path": "link/../hosts.yml"})
+    assert blocked(env, "Bash", {"command": "cat link/../hosts.yml"})
+
+
 # ---- Grep ------------------------------------------------------------------------------------------------------------
 @pytest.mark.parametrize("inp,want", [
     ({"pattern": "x", "path": ".env"}, True),

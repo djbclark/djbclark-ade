@@ -525,10 +525,13 @@ def concrete(path: str, cwd: str) -> list:
     out = []
     if os.path.isabs(path):
         out.append(path)
-    full = os.path.normpath(os.path.join(cwd, path))
+    joined = os.path.join(cwd, path)
+    full = os.path.normpath(joined)
     out.append(full)
     try:
-        out.append(os.path.realpath(full))
+        # realpath of the UNnormalized join: `link/../x` opens x beside link's target, not beside link
+        # (normpath would collapse `link/..` first and check the wrong file; Codex review on PR 289).
+        out.append(os.path.realpath(joined))
     except (OSError, ValueError):
         pass
     seen = []

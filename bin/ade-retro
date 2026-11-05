@@ -15,6 +15,9 @@ usage: ade-retro --since YYYY-MM-DD [--until YYYY-MM-DD] [--repo OWNER/NAME] [--
 Sources, all read-only (this tool writes nothing anywhere):
   * merged PRs: REST search, `gh api -X GET search/issues -f q="repo:R is:pr is:merged merged:SINCE..UNTIL" --paginate`
     (no GraphQL: `gh pr list` returns 403 in cloud sessions; no headRefName; search caps at 1000 results, noted);
+    a PR's title is kept only when its author_association is OWNER, MEMBER or COLLABORATOR, otherwise it reads
+    "(title withheld: author association X)": a title is remote text an agent reads (2026-11-05, PR 289);
+    each JSON PR also carries `association`;
   * changelog entries whose trailing `(#N)` (or `(DATE, #N)`, or `(#N, #M)`: any of them) is one of those PRs, from
     CHANGELOG.md and from the changelog.d/*.md
     fragments at HEAD (fragment parser loaded from bin/changelog-fold);
@@ -180,13 +183,23 @@ def merged_prs(repo, since, until):
             continue
         user = it.get("user") if isinstance(it.get("user"), dict) else {}
         pr = it.get("pull_request") if isinstance(it.get("pull_request"), dict) else {}
-        prs.append({"number": it["number"], "title": it.get("title", ""), "url": it.get("html_url", ""),
-                    "author": {"login": user.get("login", "")}, "mergedAt": pr.get("merged_at")})
+        assoc = it.get("author_association") if isinstance(it.get("author_association"), str) else ""
+        title = it.get("title", "") if isinstance(it.get("title"), str) else ""
+        if assoc not in TRUSTED_ASSOC:
+            # A PR title is remote text an agent reads (Codex security review, PR 289): keep only titles
+            # written by the owner, members or collaborators.
+            title = "(title withheld: author association %s)" % (assoc or "unknown")
+        prs.append({"number": it["number"], "title": title, "url": it.get("html_url", ""),
+                    "author": {"login": user.get("login", "")}, "association": assoc,
+                    "mergedAt": pr.get("merged_at")})
     prs.sort(key=lambda p: (p.get("mergedAt") or "", p["number"]))
     note = None
     if total > len(items):
         note = "search capped: total_count %d but only %d PRs returned (search returns at most 1000); the list is incomplete" % (total, len(items))
     return prs, None, note
+
+
+TRUSTED_ASSOC = ("OWNER", "MEMBER", "COLLABORATOR")
 
 
 def git_added_fragments(root, since, until, fold, notes):
