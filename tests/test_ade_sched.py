@@ -621,6 +621,15 @@ def test_cli_render_under_isolated_mode(fake):
     assert p.returncode == 2
 
 
+
+def test_cli_set_before_and_after_the_subcommand_both_count(fake):
+    """argparse's subcommand append replaced the top-level --set list (Codex P2 on PR 291)."""
+    plist = str(REPO / "launchd/com.djbclark.proc-cpu-watch.plist")
+    p = cli("--set", "@STATE@=/st", "--backend", "systemd", "render", plist, "--set", "@TARGET@=opencode",
+            "--ade", str(fake.tmp), env=fake.env)
+    assert p.returncode == 0, p.stderr
+    assert "opencode" in p.stdout and "/st" in p.stdout
+
 def test_cli_install_status_uninstall_cron(fake):
     plist = str(REPO / "config/launchd/com.djbclark.pr-policy.plist")
     p = cli("install", "--backend", "cron", plist, "--set", f"__STATE__={fake.tmp}/st", "--ade", str(fake.tmp),
