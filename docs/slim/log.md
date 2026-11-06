@@ -52,6 +52,13 @@ Operator: "Try to minimize the number of blocking things like this in the future
 
 **Wave 0 closed 2026-11-06**: tag on origin, three merges done, slim branch carries master fb3b9deb. Still open from the operator list: shared-checkout reset and `git worktree prune` (now in the Wave 2 batch, step 7). Wave 1 (reads only, no merge) starts on the W1 approval; it does not need the tag.
 
+## Wave 2 progress (2026-11-06, evening)
+
+- E2: writer done (full suite: 164 failed vs 166 baseline, zero new by id); review BLOCK (stale ignore path, references in kept docs, edits to two E1 files) → repaired → APPROVE at 35e03c1. Merge waits on the C7 paste. Ruling: E1 merges before E2.
+- E1: writer done (82 files moved with history to site-djbclark `slim-intake/2026-11`, secrets scan clean, suite no new failure); review BLOCK: two live site-djbclark callers missed (`bin/bg-offload` forgejo scripts, watchdogd `hermes-quota` template calling `change-hermes` by the old path), root default should be `site-public-djbclark`; repairs in progress on both branches (site edits under the J2b grant).
+- E9: writer done (77 files, −9,245 lines; batch tests green vs baseline); review running with the full suite.
+- Wave 3 started early: E3 (Opus), E4 (Sonnet; done, bin/watch default patch pending, review running), E5 (Opus) writers; E10 after the Wave 2 merges.
+
 ## Wave 1 (started 2026-11-06 20:05Z)
 
 W1 round 1 done 20:40Z (99 agents, 11.1M tokens, 39 min): 627 rows, 263 KEEP rows, 31 voted (cap 100), 2 refuted (`failover.py`, `bin/pytest`), 50 rows disagree with the plan, 119 unlisted paths, critic: 12 missing-path groups, 27 inconsistencies, 9 uncovered outside dependents, 15 questions (answered in `docs/slim/ledger-rulings.md`). Round 2 done 21:35Z (282 agents in all, 19.5M tokens): all 92 code KEEP rows voted, 12 refuted (8 are reference lines in kept files that the plan already rewrites; new: the six vendored `ade-paseo*` skills are REPLACE in Wave 3 by Paseo's shipped skills, the redundant `claude/commands/*` wrappers are DELETE, `session-history.py` and its plist DELETE, `npm_metadata.py` DELETE). Ledger v2 with a Lead column; the critic's 26 round-2 questions are answered as R2-n in `docs/slim/ledger-rulings.md`. Wave 1 closed; the ledger is posted, not awaited.
@@ -78,6 +85,8 @@ Nothing in E2, E3, E4 or E6 merges before this is pasted. All read-only except s
 6. C1 live processes: `launchctl list | grep com.djbclark` and `pgrep -fl 'acp-run|acp-dispatch' || echo none`. Expected: deadline-sweep, pr-policy, load-watch listed; no acp-run process.
 8. J2 pool audit input (ledger ruling 10): `aiuse --json` (or `aiuse pools`), so the lead can settle which paid plans are reachable only through omp or opencode before E9's machine-side uninstalls.
 9. `bg`'s live path (ledger ruling 14): `ls -la ~/ops/site-private/bin/bg ~/ops/site-public-djbclark/bin/bg 2>&1`.
+11. site-djbclark has two `book-to-kb` skills after E1 (`tools/book-to-kb/skills/book-to-kb` with its own `install.sh`, and the moved `skills/book-to-kb`): say which one wins; the other is deleted there in a follow-up.
+12. Confirm the Mac checkout name `~/ops/site-public-djbclark` (E1's third skill root defaults to it; `ls -d ~/ops/site-public-djbclark ~/ops/site-djbclark 2>&1`).
 10. The adhoc adversary record (report B1b): `ls ~/.local/state/bigteam/adhoc-2026-11-02/jobs/ && launchctl list | grep adversary-pr254f || echo none`.
 7. Wave 0 leftovers (tag and branch deletions done): in the shared checkout `git status` (stop on another session's edits), then `git fetch origin && git checkout master && git reset --keep origin/master`; then `git worktree prune`.
 
