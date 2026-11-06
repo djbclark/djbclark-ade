@@ -46,6 +46,32 @@ for Claude-only a symlink needs no tool. (ii) v1 proposed `git subtree split`;
 paths in one pass. (iii) v1 listed `session-finder` as plain DELETE; it is the
 most shared dependency in the fleet (report I3) and gets a shim.
 
+A6. **Changelog read directly (0.14.0 → 0.15.3, 2026-11-06), four items the
+brief under-weighted:**
+  - **`getpaseo/claude-code-entrypoint-env`** (0.14.0 notes): an official
+    optional plugin that launches Claude sessions with
+    `CLAUDE_CODE_ENTRYPOINT=Paseo`, "a community workaround for subscription
+    limits draining faster" (#7976, #8164). Cheapest quota lever on the
+    table; added to J6 as a default.
+  - **Plugin hooks and per-agent tools** (0.14.0 #7938, #7983; 0.15.0 #8081,
+    #8117): a plugin can give tools to specific agents, add MCP servers when a
+    session opens, and run `worktree.create.before` / `worktree.create.after`
+    before setup and agents start. That is the natural home for the trimmed
+    claim registry (D9: register the claim when Paseo creates the worktree,
+    refuse a second agent at `create.before`) and for an `ask` tool, instead
+    of git hooks and a relay. Recorded as the D9 implementation option.
+  - **Terminals survive daemon restarts, crashes and supported updates**
+    (0.15.0 #7644, #8155), and interrupted agents can resume in their
+    conversation (opt-in): together they retire the "quiesce before a Paseo
+    restart" practice in `docs/queue.md` once verified on 0.15.x (Wave 3
+    check), and they are the native half of D11.
+  - **Claude settings files are no longer discarded when Paseo adds its launch
+    settings** (0.15.0 #8148): PR 289's `agents/claude/settings.json.tmpl`
+    rendering is safe under Paseo; the fixed skill batching for new ACP agents
+    (#8387) removes one reason `skill-everywhere` existed.
+  Not relevant to the split: first-run setup and project suggestions (0.15.2),
+  voice defaults, mobile terminal rendering, the Windows daemon fix (0.15.1).
+
 ## B. Scope and constraints
 
 B1. **In scope.** Move the non-ADE parts to `djbclark/site-djbclark` (E1);
@@ -125,7 +151,7 @@ C6. **Evidence to keep**: `docs/checkins/`, `docs/handoffs/`,
 | D6 Fan-out and slices | `bigteam`, `acp-dispatch` (5.9k), `acp-run` (5.3k) | native subagents and `paseo run --no-wait --output-schema`; `lerenn/playbooks` (approval-gated YAML pipelines), `gpambrozio/firstmate` (247), `gyuha/agent-team` (57); Claude Code workflows for the lead's own fan-out | REPLACE with a shim (E6): `acp-dispatch` becomes a thin `paseo run` wrapper keeping the exit-code contract and the outcome record for one cycle, then goes |
 | D7 Skills in every agent | `skill-everywhere`, `skill-get`, `fix-skill-frontmatter.py` | Claude-only: one symlink `~/.claude/skills → <repo>/skills` (no tool); other surviving providers: `npx skills add <repo>` (MIT; a snapshot, re-run on change, vercel-labs/skills#748); `gpambrozio/skills` (902) to list and invoke; `agentskills/skills-ref validate` for lint | REPLACE (E10) |
 | D8 Scheduler for the kept jobs | launchd plists; PR 291's `ade-sched` | no existing tool refuses on missing linger or wraps `flock -n`; `gpambrozio/launchd-jobs` is macOS-only visibility; Paseo schedules run agents, not shell jobs | KEEP `ade-sched` (land PR 291); Paseo schedules replace the nightly agent jobs (`skillopt-night`, `routing-recalibrate`) |
-| D9 Exclusive workspace claims | `ade_claims.py` (2.3k), `ade-git-guard`, `libexec/` hooks | none exists; Paseo's one-worktree-per-agent makes most claims implicit; `git worktree lock` only blocks prune | KEEP, trimmed to owner + expiry + refuse-add/commit-in-foreign-workspace; fix the `claim ls` mismatch (E8) |
+| D9 Exclusive workspace claims | `ade_claims.py` (2.3k), `ade-git-guard`, `libexec/` hooks | none exists; Paseo's one-worktree-per-agent makes most claims implicit; `git worktree lock` only blocks prune; since 0.15.0 a plugin can hook `worktree.create.before/after` and give tools to specific agents (A6) | KEEP, trimmed to owner + expiry + refuse-add/commit-in-foreign-workspace; fix the `claim ls` mismatch (E8); Wave 4 decides whether the trimmed registry lives in a ~100-line Paseo plugin hook instead of git hooks |
 | D10 Merge gate | `pr-wait` (2.3k), `local-review` (Codex) | GitHub ruleset: required status check from a ~40-line Action that validates the adversary marker against the head, required conversation resolution; `gh pr checks --watch --required` to wait; `claude -p --json-schema` (verified on 2.1.318) for a local Claude review with a parsed verdict; `codex review` has no JSON and no per-request strength knob (brief 2026-11-06) | REPLACE (E8): the Action is the one piece of new code, and it replaces 4.6k lines |
 | D11 Recovery evidence | PR 290 `ade-recovery` (3.3k TS) | native resume (0.15.0) + `session-recovery` first | PARK (R4) |
 | D12 Moving dirs with history | — | `git filter-repo --paths-from-file` on a fresh clone (installed here, a40bce5) | ADOPT (E1) |
@@ -371,7 +397,8 @@ J6. **Plugins to install** (each is trusted daemon code; defaults in bold):
 **tell-agent**, **asks** or your **questions-please**, **baton**,
 **session-guard**, **usage-auto-resume**, **vitals**, **skills**, `pr-radar`,
 `session-janitor`, `plan-auto`, `zerosub` (only if you run several Claude
-subscriptions). Also: turn on **Resume agents after restart** (0.15.0).
+subscriptions), and the official **`getpaseo/claude-code-entrypoint-env`**
+(A6; default yes). Also: turn on **Resume agents after restart** (0.15.0).
 J7. Final landing: one PR from the slim branch, or lift protection for a
 fast-forward? (The PR route keeps the new Action as the gate.)
 J8. Review rules after: marker validated by CI (E8), Codex advisory,
