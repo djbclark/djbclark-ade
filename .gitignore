@@ -14,3 +14,4 @@ skills/*/.paseo-managed-files.json
 
 # Identity guard test repositories left by an interrupted run.
 /.identity-test-*/
+.aider*
