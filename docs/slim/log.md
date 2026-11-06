@@ -71,6 +71,11 @@ J2 pool audit (lead's reading, ruling 10 / R2-12..15): Paseo providers that each
 
 Waivers given by the operator 2026-11-06 ("B waive both"): the sleeping pane w1:p1 and the four dirty worktrees. **C7 PASSED.** E2 may merge after E1; E3/E4/E6 are clear of this gate.
 
+## Wave 4 started (2026-11-07 ~00:45Z), E10 and Wave 3b still open
+
+- Briefs `docs/slim/briefs/wave4-E8-gate.md`, `wave4-E6-shim.md`, `wave4-E7-route.md`. E8 and E6 writers (Opus 5.5 high, own worktrees) dispatched together: E8 owns `bin/review-launch`, `bin/review-pr`, `bin/adversary_marker.py` and the Action; E6 calls review-launch by path and stubs it. E7 waits for the Wave 3b merge (it touches `route_agent.py` and `config/routing.toml` after 3b removes the retired pool rows). Nothing on the Mac changes: the App, the `merge-gate` environment and the ruleset are operator steps in E8's report, batched into the final-merge list.
+- Order of merges to come: E10 (Wave 3 closes), 3b, E8, E6, E7.
+
 ## Wave 4 research filed (2026-11-07 ~00:30Z)
 
 - `docs/slim/research/wave4-2026-11-06.md`: Claude Code 2.1.319 and Paseo 0.15.3 run by the researcher; GitHub changelog read. **E8's Action changes trigger**: `pull_request_target` is blocked by default in public repositories from 2026-12-02 (brownouts 2026-11-09 and 2026-11-16) and its ref is now the default branch, so the Action runs on `workflow_run` (after the `pull_request`-triggered `Tests` workflow) plus `workflow_dispatch -f pr=N` for body-edit re-runs; the App-minted status, the ruleset's `integration_id` pin and the `master`-only environment stand (the environment is reachable by `workflow_run`, whose ref is the default branch, and not by any `pull_request` run). **E6**: no per-run tool set or MCP config through Paseo, no `--prompt-file`, `--output-schema` not with `--no-wait`, Claude's default mode is `auto`: the Claude restricted modes stay on `bin/review-launch`, other providers map `--perm` to a verified provider mode, prompts are argv pointers to the brief. **E7**: `paseo provider ls --json` (`loading` first; `modes` are labels), `paseo provider models`, `paseo usage ls --json` with non-`available` reports as unknown. Rulings: `docs/slim/ledger-rulings.md`, "Wave 4 research".
