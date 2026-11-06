@@ -108,7 +108,9 @@ security review on `e8ac2a28` (P2) replaced the deny rules with the native
 ignored, since deny rules cannot enumerate every host path; the confirm on
 `2fce19fb` (APPROVE, 3 low) made the outside-read check run per installed
 Claude version before a launch, reconciled `--settings` with
-`settingSources: []`, and added the key's own exemption to the check.
+`settingSources: []`, and added the key's own exemption to the check; the
+confirm on `8f1c0177` (APPROVE, 2 low) let an accepted exemption pass the
+launch check and keyed its cache on the launcher's settings too.
 
 ## B. Scope and constraints
 
@@ -446,9 +448,11 @@ an arbitrary path outside the worktree (a temp file the check creates, plus
 `~/.config/gh/hosts.yml`, `~/.ssh`, and `~/.claude/projects/` and
 `~/.claude.json` for the key's "files Claude Code itself needs" exemption,
 each refused or its exposure recorded as accepted in the slice) and the
-launch is refused unless each read is refused. The check runs **on the Mac
-before a launch, once per installed `claude --version` with the result
-cached**, as well as in the suite: a suite run in CI cannot vouch for the
+launch is refused unless each read is refused, except for an exemption path
+whose exposure the slice recorded as accepted. The check runs **on the Mac
+before a launch, once per installed `claude --version` plus a hash of the
+launcher's own `--settings` JSON and arguments, with the result cached under
+that key** (a change to either re-runs it), as well as in the suite: a suite run in CI cannot vouch for the
 version installed on the Mac, and an older Claude Code that does not know
 the key fails the check and so cannot run the review. Deny rules for the
 named secret paths stay as a second layer, never the first,
