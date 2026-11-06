@@ -5,6 +5,7 @@ detached worktree at the exact head with the base pinned by SHA; a scrubbed envi
 from the run's own init event, never assumed; the untrusted-author refusal; the descendant kill at the end and
 at the timeout. The live self-check against a real Claude is an operator step (docs/review-boundary.md).
 """
+from __future__ import annotations
 
 import json
 import os

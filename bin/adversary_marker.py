@@ -7,7 +7,7 @@
   adversary_marker.py --event FILE [--event-name NAME] [--repo OWNER/NAME] [--api-answers FILE]
       what `.github/workflows/adversary-marker.yml` runs: find the PR the event is about, read its body
       and head through the API, decide, re-read the head, and post the `adversary-marker` commit status
-      on that head (success only for a live APPROVE naming it). `--api-answers` serves canned API
+      on that head (success only for a live APPROVE naming it; MARKER_POST_AS=check-run posts a check run instead). `--api-answers` serves canned API
       answers from a JSON file and prints the status it would post instead of posting (the tests' entry)
 
 The marker (AGENTS.md review rule 1, its five properties):
@@ -940,8 +940,23 @@ class Api:
     def post_status(self, repo: str, sha: str, body: dict) -> None:
         if not self.status_token:
             raise ApiError("no STATUS_TOKEN: the ade-merge-gate App token was not minted")
-        self._req("POST", f"repos/{repo}/statuses/{sha}", self.status_token, body)
+        if os.environ.get("MARKER_POST_AS") == "check-run":
+            self._req("POST", f"repos/{repo}/check-runs", self.status_token, check_run_body(sha, body))
+        else:
+            self._req("POST", f"repos/{repo}/statuses/{sha}", self.status_token, body)
         self.posted.append({"sha": sha, **body})
+
+
+def check_run_body(sha: str, status: dict) -> dict:
+    """The same verdict as a CHECK RUN (the fallback if a commit status from the App does not satisfy the ruleset's
+    `integration_id` pin, research item 18, unverified 2026-11-06): set `MARKER_POST_AS: check-run` on the step and give
+    the App "Checks: write". The check's name is the status context, so the ruleset entry does not change."""
+    out = {"name": status["context"], "head_sha": sha, "status": "completed",
+           "conclusion": "success" if status["state"] == "success" else "failure",
+           "output": {"title": status["description"], "summary": status["description"]}}
+    if status.get("target_url"):
+        out["details_url"] = status["target_url"]
+    return out
 
 
 class CannedApi:

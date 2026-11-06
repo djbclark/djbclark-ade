@@ -1287,6 +1287,14 @@ def test_the_cli_refuses_bad_usage(tmp_path):
     assert cli("--bogus").returncode == 2
 
 
+def test_the_check_run_fallback_carries_the_same_verdict_under_the_same_name():
+    status = {"state": "success", "context": "adversary-marker", "description": f"APPROVE at {H1[:12]}", "target_url": "u"}
+    body = adversary_marker.check_run_body(H1, status)
+    assert body["name"] == "adversary-marker" and body["head_sha"] == H1 and body["conclusion"] == "success"
+    assert body["status"] == "completed" and body["details_url"] == "u"
+    assert adversary_marker.check_run_body(H1, {**status, "state": "failure"})["conclusion"] == "failure"
+
+
 def test_gate_without_a_collected_verdict_fails_closed():
     r = adversary_marker.gate(None, True)
     assert not r["merge_ready"] and r["merge_blockers"] == ["adversary-unreadable"]
