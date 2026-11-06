@@ -361,7 +361,7 @@ Names and paths only. Never print or copy a key.
 5.5. Parallel and Crawl4AI are keyless. Exa's MCP has a keyless tier (6.7);
    its REST API needs `EXA_API_KEY` (5.6). Firecrawl (2026-10-14):
    `sudo-secretspec` entries `FIRECRAWL_SELFHOST_API_KEY` (the bearer token of
-   the self-hosted gate) and `FIRECRAWL_API_KEY` (commercial free plan: `bench/firecrawl/fc-bench`; the
+   the self-hosted gate) and `FIRECRAWL_API_KEY` (commercial free plan: site-djbclark's `bench/firecrawl/fc-bench`; the
    router gets it only with the 2026-10-18 opt-in). The shared server gets
    the gate token, and the SIPB and LiteLLM keys for `query`/`json`, at `just shared-mcp-apply-secrets`, into its 0600 plist; the
    `firecrawl-mcp` child sees neither, only a per-process router token.

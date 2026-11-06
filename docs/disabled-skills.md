@@ -172,6 +172,9 @@ in `~/.claude/settings.json` does hold, whatever re-links the folder:
    days to 2026-10-18. Added after /doctor the same day, also unused by the
    model: `dialogue`, `effort-routing`, `coderabbit-feeder`, `graft` (the
    `graft` CLI and its hooks stay) and `herdr-tidy`.
+   (2026-11-06: the four `siyuan*` were deleted from djbclark-ade and `terminus-kira`,
+   `setup-modern-cli`, `teach` and `coderabbit-feeder` moved to site-djbclark's `skills/`;
+   their keys stay until the template edit that goes with that move.)
 
 `"skillListingBudgetFraction": 0.007` caps the listing at 7k tokens. Past the
 cap, descriptions are dropped least-used first; names stay. `/doctor` shows
