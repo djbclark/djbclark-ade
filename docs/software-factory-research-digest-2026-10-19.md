@@ -76,7 +76,7 @@ October 2026; Node 22 is required on every host.
 ### 3.2 agent-stack: an existing OpenRig glue project
 
 korallis/agent-stack (Apache-2.0, 35 stars, created 2026-09-28, last push 2026-10-05, Linux only)
-is OpenRig plus Claude Code, Codex, CLIProxyAPI, TypeSafe Jev and Playwright, with a merge gate
+is OpenRig plus Claude Code, Codex, CLIProxyAPI, TypeSafe Jev [jev removed 2026-11-06] and Playwright, with a merge gate
 that is the most complete one found in any open project:
 
 1. CI required checks green on the exact candidate head.

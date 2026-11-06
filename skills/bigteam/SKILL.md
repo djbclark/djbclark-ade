@@ -426,7 +426,7 @@ Prefer one shared checkout with strict file ownership over a worktree per agent:
 disjoint files in one tree need no merge, and merging five branches costs more
 than it saves at this granularity. Reach for a Paseo worktree or
 `git worktree` only when slices genuinely must touch the same file.
-When a slice must stay off the live checkout, create the worktree or pasture
+When a slice must stay off the live checkout, create the worktree
 yourself and pass *it* as `-C`; never `-C` the live tree with a brief that says
 "work in a worktree" (2026-10-23: the slice's first relative-path edit landed in
 the live `~/src/djbclark-ade` and had to be moved back by hand).

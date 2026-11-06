@@ -348,7 +348,7 @@ Rules for any agent that dispatches to agy:
 - **OpenCode Go Plus subscription**: one shared monthly allowance, not free fan-out.
   `config/go-model-policy.json` classifies routine models versus bounded advisors.
 - **Free**: sipb (MIT-hosted, `opencode` provider `sipb`).
-- **Prepaid real money, gated**: opencode-zen, openrouter, deepseek —
+- **Prepaid real money, gated**: opencode-zen (openrouter and deepseek were removed 2026-11-06) —
   never by default (the gate scripts were removed 2026-11-06).
 - **The Claude API credits, omp (operator 2026-10-19; gate lifted)**: the pool
   `aiuse` labels "omp credits" is the Claude Max plan's monthly API credits (an
@@ -897,7 +897,7 @@ method that runs the waves.
    `acp-run` and `acp-dispatch` refuse it by an approval gate); **cline**,
    uninstalled 2026-10-17 and gated the same way (Hermes's ClinePass pool is
    separate and stays); the
-   prepaid pools (opencode-zen paid, openrouter, deepseek) without a fresh
+   prepaid pools (opencode-zen paid; openrouter and deepseek were removed 2026-11-06) without a fresh
    operator decision; a credits-backed model (Claude usage credits, Codex
    credits, OpenCode Go "Use balance"; **not** the Claude Max plan's monthly API
    credits, the omp tier of 2026-10-19) or re-enabling a disabled toggle to reach
@@ -985,7 +985,7 @@ method that runs the waves.
     matters only once the flat subscriptions run out: inside a subscription's quota a strong model costs nothing
     extra. `config/routing.toml` ranks the tiers this way (`bin/route_agent.py policy --md`); other code routes in it
     (agy-claude Opus burn-first, zai GLM-5.3 38.9%, alibaba qwen3.8-max 34.3%, clinepass, the unpinned opencode-zen,
-    openrouter and deepseek pools) are overflow behind tier 1 or burn-first, not tier-1 choices. This item is the
+    openrouter and deepseek pools, removed 2026-11-06) are overflow behind tier 1 or burn-first, not tier-1 choices. This item is the
     reason, not new numbers.
 
 **Where the numbers live (2026-10-18).** The routing policy is data, and

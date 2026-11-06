@@ -39,7 +39,7 @@ Route (djbclark 2026-10-08: "use ACP if possible … other methods have proven t
      a handoff; an acp-run one cannot (self-slash exits 9 under ACP_RUN_AGENT=1). Not verified live before
      2026-10-25: see skills/handoff Step 9.
   --pane: host in that herdr pane. If a finished Claude session still sits there idle, it is sent /exit
-  first (what herdr-sleeper does); a pane with a draft in its input box is refused.
+  first (what the removed herdr-sleeper did); a pane with a draft in its input box is refused.
   --baton: the brief tells the session to follow the baton skill from the named Tier 1 chain
   (resolved from --chain, else the chain whose workspace is DIR), then do the instruction.
 State: ~/.local/state/session-finder/launches.jsonl and launch-<id>/ (brief, log, out, runner).

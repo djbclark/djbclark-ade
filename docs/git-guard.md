@@ -25,7 +25,7 @@ fully resolved ref name, and a non-zero exit aborts the transaction. So:
 ## Integration status (2026-10-25)
 
 The guard, the hooks and the claim library exist. Nothing calls them in a live session yet. Call sites to wire (not done
-in this PR): W2 `cow-pasture create` runs `ade-git-guard install <new pasture>` (a pasture's `clonefile` copy of `.git/hooks`
+in this PR): W2 (the workspace launcher; `cow-pasture`, its first home, was removed 2026-11-06) runs `ade-git-guard install <new pasture>` (a pasture's `clonefile` copy of `.git/hooks`
 inherits a stub anyway); W3 `acp-dispatch` exports `ADE_CLAIM_ID` and runs `ade-git-guard install` in the repository at
 claim time; W4 `acp-run` puts `libexec/agent-bin` first on the PATH of every agent it launches; the operator runs
 `ade-git-guard install <repo>` once over `~/src/*` and `~/orca/projects/*` (the dangerous case is agent B in primary P moving

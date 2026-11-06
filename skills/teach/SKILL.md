@@ -97,8 +97,8 @@ item at a time: a few paragraphs about that item, then its picklist (step 3).
    is enabled only for the trial: `claude plugin enable`, `/reload-plugins`,
    measure, and the closing question offers `Disable again`.
 6. **Close the day:** one AskUserQuestion per installed thing: `Keeper, add to
-   docs/history/apply-toolchain-prompt.md (Recommended)` / `Keep but don't document` / `Uninstall`.
-   Keepers get a row in `~/src/djbclark-ade/docs/history/apply-toolchain-prompt.md` §0.6
+   apply-toolchain-prompt.md (Recommended)` / `Keep but don't document` / `Uninstall`.
+   Keepers get a row in `~/src/djbclark-ade/docs/apply-toolchain-prompt.md` §0.6
    "Claude Code mods" table (one line, what it gives the user, install note).
 7. **Tick and commit.** Change `- [ ] **Day N**` to `- [x] **Day N, YYYY-MM-DD**`
    (today's date; the repeat and recap logic reads it)

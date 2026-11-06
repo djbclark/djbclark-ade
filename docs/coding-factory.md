@@ -33,7 +33,7 @@ below is written that way: vendor-selected in Phase 0, not baked in.
 | Coders | claude, codex, copilot CLI 1.0.86, cursor-agent, devin, opencode, grok, agy on PATH; ~25 agents in Orca's roster | Live. OpenHands, gemini, droid, amp, kilo, jules are **not** installed. |
 | Orchestration | **Orca** macro-graph (task DAG, `worker_done`, heterogeneous fleet verified); Claude Code dynamic workflows | Live. Coordinator is an agent session, not an event: Orca has **no** GitHub-webhook or issue trigger (open upstream requests #11040, #12400, #20646). Cow-pasture dispatch still stalls on Claude's trust dialog. (Orca since retired from djbclark-ade 2026-10-31.) |
 | Continuous controller | **Ralph TUI + beads** | **Dormant.** Binary absent from PATH and `~/.bun/bin`; its four controller workspaces lived under `~/src/ops-worktrees/`, deleted 2026-08-23. Config survives at `~/.config/ralph-tui/`. README's "third altitude" claim needs this caveat. |
-| Workspaces | `bin/cow-pasture` (APFS CoW, secrets scrubbed) | Live. |
+| Workspaces | `bin/cow-pasture` (APFS CoW, secrets scrubbed) | Removed 2026-11-06; Paseo worktrees now. |
 | CI | stayturgid: `collection-build`; Shizuku fork: Android CI + Build App; site-djbclark: monitor-only workflows, **no test CI**; djbclark-ade: none | Partial. |
 | AI review | Copilot code review runs on stayturgid PRs (dynamic workflow, last runs 2026-07-30); `coderabbit-feeder` for CodeRabbit | Live but advisory: nothing is a *required* check. |
 | Merge gate | branch protection / rulesets / `allow_auto_merge` | **Absent on every repo.** djbclark-ade has been public since 2026-10-08 (was private on a free plan when this was written), so rulesets and branch protection are unavailable there without Pro or going public. |

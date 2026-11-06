@@ -213,9 +213,9 @@ where quota is going to waste. Mapping, verified 2026-08-23:
 | `zai` | `zcode` TUI (Z.ai's own, v0.16.9; `zcode -p`; GLM-5.3 / GLM-5.3-Flash × low/high/max; not in Orca's roster or herdr's agent kinds (both retired from djbclark-ade 2026-10-31)) | lite | monthly sub | 5h + weekly |
 | `clinepass` | Cline TUI (Orca agent `cline`; Orca retired from djbclark-ade 2026-10-31) + LiteLLM proxy `localhost:4000` (`clinepass-deepseek`, `clinepass-minimax-m3`, `clinepass-kimi-k3`) consumed by Hindsight + hermes | Cline API key | subscription windows | 5h + weekly + monthly |
 | `opencode-go` | `opencode` Go Plus (`opencode-go/*`); routine MiniMax M3 (bulk), GPT-6 Luna (mechanical); never a code slice (djbclark 2026-10-30); DeepSeek V4.1 Flash is the main-loop substrate model only | $40/month | subscription shared allowance | 5h + weekly + monthly |
-| `opencode-zen` | `opencode` provider `opencode` (`opencode/*`: claude, gpt, gemini, deepseek, glm catalogs) via gated `opencode-ralph-tui-zen` | prepaid | **prepaid balance** | balance |
-| `openrouter` | gated `opencode-ralph-tui-openrouter` | prepaid | **prepaid balance** | balance |
-| `deepseek` | gated `opencode-ralph-tui-deepseek` | prepaid | **prepaid balance** | balance |
+| `opencode-zen` | `opencode` provider `opencode` (`opencode/*`: claude, gpt, gemini, deepseek, glm catalogs) (gate script removed 2026-11-06) | prepaid | **prepaid balance** | balance |
+| `openrouter` | (row removed from `config/routing.toml` 2026-11-06 with the gate scripts) | prepaid | **prepaid balance** | balance |
+| `deepseek` | (row removed from `config/routing.toml` 2026-11-06 with the gate scripts) | prepaid | **prepaid balance** | balance |
 | `devin` | `devin` (v3000.5.20) — **disabled in Orca's TUI roster** (Orca retired from djbclark-ade 2026-10-31), so its 100%-unused windows are deliberate dormancy | ? | sub (ACUs) | daily + weekly |
 | `alibaba` / `alibabatokenplan` / `qwencloud` | `bl` (Bailian, v1.17.1; bailian-* skills) | **ID verification pending, expected live ~2026-08-26** | token plan + PAYG | — until verified |
 | `muse` | the Muse service (own account via gmail; `opencode-go/muse-spark-1.2-contributor` surfaces its models) | ? | ? | ? |

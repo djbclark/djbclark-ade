@@ -1,8 +1,8 @@
 # Orchestration practices: decide cheaply, reason expensively, verify centrally
 
 Snapshot **2026-10-11**. The rules every orchestration skill here follows
-(`bigteam`, `research`, `dialogue`, `model-routing`, `effort-routing`,
-(`ralph-tui-orchestration` removed 2026-11-06)). Each skill carries the short form of the rules it
+(`bigteam`, `research`, `dialogue`, `model-routing`, `effort-routing`;
+`ralph-tui-orchestration` was removed 2026-11-06). Each skill carries the short form of the rules it
 needs and links here for the reasons and sources.
 
 **Standing operator requirement:** every orchestration skill must be able to
