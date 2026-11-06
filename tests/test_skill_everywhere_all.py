@@ -67,6 +67,26 @@ def test_all_discovers_both_roots_and_linked_skills_once(catalog, tmp_path):
     assert "already linked" in run(catalog, "--all").stdout
 
 
+def test_site_root_is_a_third_root_after_public_and_private(catalog, tmp_path):
+    home, public, private, env = catalog
+    site = tmp_path / "site skills"
+    site.mkdir()
+    env["SKILL_EVERYWHERE_SITE"] = str(site)
+    moved = skill(site, "report")
+    skill(site, "steps")
+    source = skill(public, "steps")
+    applied = run(catalog, "--all")
+    assert applied.returncode == 0, applied.stderr + applied.stdout
+    links = home / ".agents" / "skills"
+    assert sorted(p.name for p in links.iterdir()) == ["report", "steps"]
+    assert (links / "report").readlink() == moved
+    assert (links / "steps").readlink() == source
+    named = run(catalog, "--check", "report")
+    assert named.returncode == 0 and "linked" in named.stdout
+    missing = run(catalog, "--check", "nowhere")
+    assert missing.returncode == 1 and str(site / "nowhere") in missing.stderr
+
+
 def test_pi_only_links_shared_directory_without_native_duplicates(catalog):
     home, public, _, env = catalog
     source = skill(public, "steps")

@@ -19,6 +19,11 @@ churn can no longer break skill loading):
   `~/src/djbclark-ade/skills/<name>`
 - private skills: `~/ops/site-private/skills/<name>/` (real directory; only
   `1password` today) — link target `~/ops/site-private/skills/<name>`
+- site skills (since 2026-11-06, the skills moved out of this repo by the
+  slim-down): `~/ops/site-djbclark/skills/<name>/` in the site-djbclark repo
+  (`SKILL_EVERYWHERE_SITE` overrides the root) — link target
+  `~/ops/site-djbclark/skills/<name>`. A name in more than one root resolves
+  public, then private, then site.
 
 Editing the git copy updates every agent. Never copy: a
 copy drifts silently. `~/.agents/skills/handoff` is a symlink to the git
@@ -38,8 +43,8 @@ and can advertise the trash skill under the live name. Hide it with
 ~/src/djbclark-ade/bin/skill-everywhere --remove <name>... # undo
 ```
 
-`--all` (2026-10-25) discovers readable `*/SKILL.md` files directly under both
-shared roots, including linked directories. It deduplicates names with public
+`--all` (2026-10-25) discovers readable `*/SKILL.md` files directly under the
+three shared roots (the site root added 2026-11-06), including linked directories. It deduplicates names with public
 precedence and excludes hidden/helper directories. It cannot be combined with
 names or `--remove`. The all-mode check returns 1 for missing, chained, stale or
 conflicting installed targets; explicit-name check output/semantics remain
