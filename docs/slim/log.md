@@ -71,6 +71,11 @@ J2 pool audit (lead's reading, ruling 10 / R2-12..15): Paseo providers that each
 
 Waivers given by the operator 2026-11-06 ("B waive both"): the sleeping pane w1:p1 and the four dirty worktrees. **C7 PASSED.** E2 may merge after E1; E3/E4/E6 are clear of this gate.
 
+## Wave 4 research filed (2026-11-07 ~00:30Z)
+
+- `docs/slim/research/wave4-2026-11-06.md`: Claude Code 2.1.319 and Paseo 0.15.3 run by the researcher; GitHub changelog read. **E8's Action changes trigger**: `pull_request_target` is blocked by default in public repositories from 2026-12-02 (brownouts 2026-11-09 and 2026-11-16) and its ref is now the default branch, so the Action runs on `workflow_run` (after the `pull_request`-triggered `Tests` workflow) plus `workflow_dispatch -f pr=N` for body-edit re-runs; the App-minted status, the ruleset's `integration_id` pin and the `master`-only environment stand (the environment is reachable by `workflow_run`, whose ref is the default branch, and not by any `pull_request` run). **E6**: no per-run tool set or MCP config through Paseo, no `--prompt-file`, `--output-schema` not with `--no-wait`, Claude's default mode is `auto`: the Claude restricted modes stay on `bin/review-launch`, other providers map `--perm` to a verified provider mode, prompts are argv pointers to the brief. **E7**: `paseo provider ls --json` (`loading` first; `modes` are labels), `paseo provider models`, `paseo usage ls --json` with non-`available` reports as unknown. Rulings: `docs/slim/ledger-rulings.md`, "Wave 4 research".
+- The researcher's "four read tools" became `{Read, Grep, Glob, StructuredOutput}` (`--json-schema` injects the last; `LS` is not a tool in 2.1.319); bypass is silently downgraded to acceptEdits, so the launcher refuses it itself.
+
 ## Wave 3 merges (2026-11-06 ~23:50Z onward)
 
 - E5 merged at 8c05930 (worktree branch `worktree-agent-af59a42109b4c5868`, head 2e15726, APPROVE after one repair round: the ancestor walk now stops at the agent's own CLI, archived agents are listed out with `paseo ls -g --background`, loose heavy work reaches the operator). Conflicts: docs/scheduling.md (plist count sentence combined), tests/test_session_history_adapters.py (both E9's and E5's removals taken; E3 deletes the file). Merger's lines and fragment at 90982fa.
