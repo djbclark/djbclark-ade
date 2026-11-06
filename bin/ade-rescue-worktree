@@ -1,0 +1,278 @@
+#!/usr/bin/env python3
+"""ade-rescue-worktree: rescue a worktree's work before Paseo removes it (plan D1.3/B4, docs/d1-implementation-plan.md T6).
+
+The body of a `paseo.json` `worktree.teardown` command. Paseo runs teardown commands in the worktree before it
+deletes a Paseo-owned worktree on archive; a non-zero exit makes Paseo keep the worktree (Paseo source,
+`workspace-archive-service.ts` `maybeRemoveDirectory`, checked 2026-11-02 against v0.15.0-beta.1's source tree).
+So this tool exits non-zero only when the LOCAL rescue failed, and 0 once the local rescue stands.
+
+USAGE
+  ade-rescue-worktree --repo NAME --branch B --worktree PATH [--remote NAME] [--dry-run] [--json]
+
+  --repo NAME      label for the rescue directory (letters, digits, `.`, `_`, `-`)
+  --branch B       the worktree's branch (in a teardown: "$PASEO_BRANCH_NAME")
+  --worktree PATH  the worktree (in a teardown: "$PASEO_WORKTREE_PATH")
+  --remote NAME    after the local rescue, push rescue/<branch>-<date> (tracked changes only) to this remote
+  --dry-run        report what would be rescued; write nothing, create no ref, push nothing
+  --json           print one JSON object on stdout instead of text lines
+
+STEPS
+  1. `git stash create` (tracked changes, index and work tree; no untracked files) into refs/rescue/<branch>;
+     a stash commit with no ref is unreachable, the ref is what the bundle carries. A clean tree makes no ref.
+  2. `git bundle create branch.bundle refs/heads/<branch> [refs/rescue/<branch>] [refs/rescue-head/<branch>]`:
+     the full history (self-contained, verifies in any repo); refs/rescue-head/<branch> is HEAD when the worktree
+     is not on <branch>. `git bundle verify` must pass before anything is renamed into place.
+  3. untracked.tar: `git ls-files -z -o --exclude-standard` (untracked, not ignored), written by Python's tarfile
+     (symlinks kept as links; an untracked nested repository is added whole).
+  4. All of it plus manifest.json goes to a 0700 temp directory beside the final one, then `os.replace` to
+     $ADE_RESCUE_ROOT/<repo>/<branch>-<UTC date>/ (default root ~/.local/state/ade/rescue, every level 0700).
+  5. Only then, with --remote: `git push <remote> <stash or branch tip>:refs/heads/rescue/<branch>-<date>`. A push
+     failure exits 0 with "pushed": false (the local rescue stands); it is logged to stderr, to the rescue
+     directory's push.json and to $ADE_RESCUE_ROOT/rescue.log.
+
+EXIT
+  0 local rescue written (push may have failed: read "pushed"); with --dry-run, the plan was computed
+  1 the local rescue failed (nothing renamed into place; Paseo then keeps the worktree)
+  2 usage error, not a git worktree, or the branch does not exist
+"""
+from __future__ import annotations
+
+import argparse
+import datetime as _dt
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+
+PUSH_TIMEOUT_S = 120
+GIT_TIMEOUT_S = 600
+REPO_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+class Usage(Exception):
+    pass
+
+
+class RescueFailed(Exception):
+    pass
+
+
+def git(cwd: str, *args: str, check: bool = True, timeout: int = GIT_TIMEOUT_S, env: dict | None = None):
+    r = subprocess.run(["git", "-C", cwd, *args], capture_output=True, text=True, timeout=timeout, env=env)
+    if check and r.returncode != 0:
+        raise RescueFailed(f"git {' '.join(args)} failed (rc {r.returncode}): {r.stderr.strip()[:500]}")
+    return r
+
+
+def rescue_root() -> str:
+    return os.environ.get("ADE_RESCUE_ROOT") or os.path.join(os.path.expanduser("~"), ".local", "state", "ade", "rescue")
+
+
+def makedirs_0700(path: str) -> None:
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    os.chmod(path, 0o700)
+
+
+def sha256_file(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def write_json_atomic(path: str, data: dict) -> None:
+    fd, tmp = tempfile.mkstemp(prefix=".tmp-", dir=os.path.dirname(path))
+    with os.fdopen(fd, "w") as f:
+        json.dump(data, f, indent=2, sort_keys=True)
+        f.write("\n")
+    os.replace(tmp, path)
+
+
+def append_log(line: dict) -> None:
+    try:
+        root = rescue_root()
+        makedirs_0700(root)
+        fd = os.open(os.path.join(root, "rescue.log"), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(fd, "a") as f:
+            f.write(json.dumps(line, sort_keys=True) + "\n")
+    except OSError as e:  # the log is a convenience; the result record and stderr carry the facts
+        print(f"ade-rescue-worktree: cannot append rescue.log: {e}", file=sys.stderr)
+
+
+def untracked_files(wt: str) -> list[str]:
+    r = subprocess.run(["git", "-C", wt, "ls-files", "-z", "-o", "--exclude-standard"],
+                       capture_output=True, timeout=GIT_TIMEOUT_S)
+    if r.returncode != 0:
+        raise RescueFailed(f"git ls-files failed: {r.stderr.decode(errors='replace').strip()[:500]}")
+    return [p for p in r.stdout.decode("utf-8", "surrogateescape").split("\0") if p]
+
+
+def write_tar(wt: str, files: list[str], dest: str) -> None:
+    with tarfile.open(dest, "w") as tf:
+        for rel in files:
+            # A path ending in "/" is an untracked nested repository: ls-files does not descend into it.
+            tf.add(os.path.join(wt, rel.rstrip("/")), arcname=rel.rstrip("/"), recursive=rel.endswith("/"))
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    class P(argparse.ArgumentParser):
+        def error(self, message):  # exit 2 through our own path so --json still gets a record
+            raise Usage(message)
+
+    p = P(prog="ade-rescue-worktree", add_help=True)
+    p.add_argument("--repo", required=True)
+    p.add_argument("--branch", required=True)
+    p.add_argument("--worktree", required=True)
+    p.add_argument("--remote")
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--json", action="store_true")
+    return p.parse_args(argv)
+
+
+def validate(a: argparse.Namespace) -> dict:
+    if not REPO_RE.match(a.repo) or a.repo in (".", ".."):
+        raise Usage(f"--repo must match {REPO_RE.pattern}: {a.repo!r}")
+    wt = os.path.realpath(a.worktree)
+    if not os.path.isdir(wt):
+        raise Usage(f"--worktree is not a directory: {a.worktree}")
+    top = git(wt, "rev-parse", "--show-toplevel", check=False)
+    if top.returncode != 0:
+        raise Usage(f"--worktree is not a git work tree: {a.worktree}")
+    wt = top.stdout.strip()
+    if git(wt, "check-ref-format", "--branch", a.branch, check=False).returncode != 0:
+        raise Usage(f"--branch is not a valid branch name: {a.branch!r}")
+    tip = git(wt, "rev-parse", "--verify", "-q", f"refs/heads/{a.branch}^{{commit}}", check=False)
+    if tip.returncode != 0:
+        raise Usage(f"branch does not exist: {a.branch}")
+    head = git(wt, "rev-parse", "--verify", "-q", "HEAD^{commit}", check=False).stdout.strip()
+    if a.remote and git(wt, "remote", "get-url", a.remote, check=False).returncode != 0:
+        raise Usage(f"no such remote: {a.remote}")
+    return {"worktree": wt, "tip": tip.stdout.strip(), "head": head}
+
+
+def rescue(a: argparse.Namespace, info: dict) -> dict:
+    wt, branch = info["worktree"], a.branch
+    stamp = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    safe = branch.replace("/", "-")
+    res: dict = {"repo": a.repo, "branch": branch, "worktree": wt, "branchTip": info["tip"], "head": info["head"],
+                 "date": stamp, "dryRun": a.dry_run, "remote": a.remote, "pushed": None}
+
+    stash = git(wt, "stash", "create").stdout.strip() or None  # objects only: no ref, no reflog, tree untouched
+    files = untracked_files(wt)
+    res.update(stashCommit=stash, untrackedCount=len(files))
+    head_ref = None
+    if info["head"] and info["head"] != info["tip"]:
+        head_ref = f"refs/rescue-head/{branch}"
+    root_repo = os.path.join(rescue_root(), a.repo)
+    final = os.path.join(root_repo, f"{safe}-{stamp}")
+    res["rescueDir"] = final
+    if a.dry_run:
+        res["refs"] = [f"refs/heads/{branch}"] + ([f"refs/rescue/{branch}"] if stash else []) + ([head_ref] if head_ref else [])
+        res["untracked"] = files[:200]
+        return res
+
+    makedirs_0700(root_repo)
+    tmp = tempfile.mkdtemp(prefix=f".tmp-{safe}-{stamp}-", dir=root_repo)
+    os.chmod(tmp, 0o700)
+    try:
+        refs = [f"refs/heads/{branch}"]
+        if stash:
+            git(wt, "update-ref", "-m", "ade-rescue-worktree", f"refs/rescue/{branch}", stash)
+            refs.append(f"refs/rescue/{branch}")
+        if head_ref:
+            git(wt, "update-ref", "-m", "ade-rescue-worktree", head_ref, info["head"])
+            refs.append(head_ref)
+        bundle = os.path.join(tmp, "branch.bundle")
+        git(wt, "bundle", "create", bundle, *refs)
+        git(wt, "bundle", "verify", bundle)
+        tar = os.path.join(tmp, "untracked.tar")
+        write_tar(wt, files, tar)
+        with tarfile.open(tar) as tf:
+            if len(tf.getnames()) < len(files):
+                raise RescueFailed("untracked.tar holds fewer entries than git listed")
+        res["refs"] = refs
+        res["artifacts"] = {
+            "branch.bundle": {"sha256": sha256_file(bundle), "bytes": os.path.getsize(bundle)},
+            "untracked.tar": {"sha256": sha256_file(tar), "bytes": os.path.getsize(tar)},
+        }
+        write_json_atomic(os.path.join(tmp, "manifest.json"), res)
+        n = 0
+        while os.path.exists(final):  # same branch rescued twice in one second
+            n += 1
+            final = os.path.join(root_repo, f"{safe}-{stamp}-{n}")
+        os.replace(tmp, final)
+        res["rescueDir"] = final
+    except BaseException:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise
+    res["rescuedAt"] = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    write_json_atomic(os.path.join(final, "manifest.json"), res)
+
+    if a.remote:
+        dest = f"refs/heads/rescue/{branch}-{stamp}"
+        env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
+        try:
+            r = git(wt, "push", "--porcelain", a.remote, f"{stash or info['tip']}:{dest}", check=False,
+                    timeout=PUSH_TIMEOUT_S, env=env)
+            ok, detail = r.returncode == 0, (r.stderr.strip() or r.stdout.strip())[-1000:]
+        except subprocess.TimeoutExpired:
+            ok, detail = False, f"push timed out after {PUSH_TIMEOUT_S} s"
+        res.update(pushed=ok, pushRef=dest)
+        push_rec = {"pushed": ok, "remote": a.remote, "ref": dest, "detail": detail,
+                    "at": _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
+        write_json_atomic(os.path.join(final, "push.json"), push_rec)
+        if not ok:
+            res["pushError"] = detail
+            print(f"ade-rescue-worktree: push to {a.remote} failed; local rescue stands in {final}: {detail[-300:]}",
+                  file=sys.stderr)
+        write_json_atomic(os.path.join(final, "manifest.json"), res)
+    append_log({k: res.get(k) for k in ("date", "repo", "branch", "worktree", "rescueDir", "stashCommit",
+                                        "untrackedCount", "remote", "pushed", "pushError")})
+    return res
+
+
+def emit(res: dict, as_json: bool) -> None:
+    if as_json:
+        print(json.dumps(res, sort_keys=True))
+        return
+    for k in ("rescueDir", "branch", "branchTip", "stashCommit", "untrackedCount", "remote", "pushed", "pushRef",
+              "pushError", "error"):
+        if res.get(k) is not None:
+            print(f"{k}: {res[k]}")
+
+
+def main(argv: list[str]) -> int:
+    as_json = "--json" in argv
+    try:
+        a = parse_args(argv)
+        info = validate(a)
+    except Usage as e:
+        emit({"ok": False, "exit": 2, "error": str(e)}, as_json)
+        print(f"ade-rescue-worktree: {e}", file=sys.stderr)
+        return 2
+    except (RescueFailed, subprocess.TimeoutExpired, OSError) as e:
+        emit({"ok": False, "exit": 2, "error": str(e)}, as_json)
+        print(f"ade-rescue-worktree: {e}", file=sys.stderr)
+        return 2
+    try:
+        res = rescue(a, info)
+    except (RescueFailed, subprocess.TimeoutExpired, OSError, tarfile.TarError) as e:
+        rec = {"ok": False, "exit": 1, "error": str(e), "repo": a.repo, "branch": a.branch, "worktree": info["worktree"]}
+        append_log(rec)
+        emit(rec, as_json)
+        print(f"ade-rescue-worktree: local rescue FAILED, the worktree must be kept: {e}", file=sys.stderr)
+        return 1
+    res["ok"] = True
+    res["exit"] = 0
+    emit(res, as_json)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

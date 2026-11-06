@@ -1,0 +1,6 @@
+# config/paseo-teardown-repos: repos a slice may target in a Paseo worktree workspace (plan D1.3/B4, question 11).
+# One repo per line: NAME (the --repo label ade-rescue-worktree files the rescue under) then the source checkout
+# path, whitespace-separated; `#` starts a comment. Each listed repo carries the paseo.json teardown in
+# config/paseo.json.example. D2's G2 check refuses a slice for a repo not listed here; D1 only drafts the list
+# (lead's draft, reviewed in the D1 PR; 2026-11-02).
+djbclark-ade  ~/src/djbclark-ade

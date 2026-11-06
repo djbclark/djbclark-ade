@@ -1,0 +1,8 @@
+{
+  "id": "origin-probe",
+  "name": "origin-probe",
+  "description": "D1 probe T11: logs agent lifecycle hook payloads (one JSON line each) to $ORIGIN_LOG. Install ONLY in an isolated test home.",
+  "requirements": {
+    "paseo": ">=0.15.0-beta.1"
+  }
+}
