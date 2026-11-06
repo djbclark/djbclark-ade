@@ -52,6 +52,21 @@ Operator: "Try to minimize the number of blocking things like this in the future
 
 **Wave 0 closed 2026-11-06**: tag on origin, three merges done, slim branch carries master fb3b9deb. Still open from the operator list: shared-checkout reset and `git worktree prune` (now in the Wave 2 batch, step 7). Wave 1 (reads only, no merge) starts on the W1 approval; it does not need the tag.
 
+## C7 drain gate (operator output received 2026-11-06 ~22:05Z; raw file kept in the lead's scratch, not committed: 5,650 lines, mostly job listings)
+
+1. herdr sleeper: ONE pane asleep, `w1:p1` (claude, slept 2026-10-08T21:28, title "Title"); nothing orphaned; the journal's last event is 2026-11-01. **Waiver asked** (default: waived; a month old, its transcript stays resumable with `claude --resume`).
+2. acp-dispatch records: 203 job dirs listed; the `.done` marker sits beside each report file, not in `jobs/`, so the listing cannot show resumability; `launchctl list | grep acp-dispatch`: none; `pgrep acp-run|acp-dispatch`: none. **One follow-up command asked** (unfinished records without a `.done`).
+3. worktrees: 116 entries; 74 dirty lines, of which the `.claude/settings.json` / `.cursor/hooks.json` pairs in ~10 worktrees are the graft hook-path rewrite (report F5, noise). Substantive: `djbclark-ade` shared checkout `.aider*` untracked (gitignored since PR 296); `djbclark-ade-checkpoint-d1-wt` (PR 290's D1 probe, parked); `djbclark-ade-failover-tmp-sweep-wt` (edits to `failover.py`, `skillopt-night`, both DELETE); `djbclark-ade-bridge-guard-wt` (an untracked handoff doc); `djbclark-ade-route-scope-wt` (F4). cow pastures: aiuse and cmdb ones, outside this repo. **Waiver asked for the four** (default: waived; none is edited by Wave 2).
+4. relay: 320 delivered, 8 failed, 21 expired, 45 cancelled; none non-final. PASS.
+5. bigteam inboxes: none. PASS.
+6. launchd: deadline-sweep, pr-policy, load-watch loaded (PASS); also loaded and to be booted out at the final merge: skillopt-sleep (E10), rumination-watch, session-history-update, context-budget, routing-recalibrate (E5), claude-fleet-governor (exit 10) and claude-quota-guard (exit 1) (E7), acp-dispatch-reap (E6), watch (Wave 3b), opencode-cpu-watch, codexbar-cpu-watch (E9 Wave 3 part), acpdispatch.n2maskfix.reset (one-shot, exited). No acp-run process.
+8. aiuse: the output was cut at 200 lines (the script's `head`); only the antigravity account was read (Gemini weekly exhausted, Claude/GPT weekly exhausted, Argon 98 %). **Full account list asked.**
+9. `bg`: `~/ops/site-private/bin/bg` is a symlink to `../../site-public-djbclark/bin/bg`; site-public owns it. PASS.
+10. adhoc `adversary-pr254f`: record modified 11:04 after its lock (10:47); no launchd job. PASS.
+12. both `~/ops/site-djbclark` and `~/ops/site-public-djbclark` exist; E1's default `site-public-djbclark` is right either way. PASS.
+
+Verdict: the gate for E2 (herdr sleeper) passes on the item-1 waiver; the gate for E3/E4/E6 passes on items 2 (pending the follow-up) and 3 (waiver).
+
 ## Wave 2 progress (2026-11-06, evening)
 
 - E2: writer done (full suite: 164 failed vs 166 baseline, zero new by id); review BLOCK (stale ignore path, references in kept docs, edits to two E1 files) → repaired → APPROVE at 35e03c1. Merge waits on the C7 paste. Ruling: E1 merges before E2.
