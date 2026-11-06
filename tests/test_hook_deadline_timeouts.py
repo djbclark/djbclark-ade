@@ -30,7 +30,9 @@ def wrapped_hooks() -> list[tuple[str, float, object]]:
 
 class HookDeadlineTimeoutsTest(unittest.TestCase):
     def test_some_hooks_are_wrapped(self) -> None:
-        self.assertGreaterEqual(len(wrapped_hooks()), 6)
+        # Six wrapped hooks until 2026-11-06; the slim-down removed prior_art_nudge (three objects), so the template
+        # keeps four (quota_nudge, post-edit-check, context_size_nudge twice).
+        self.assertGreaterEqual(len(wrapped_hooks()), 4)
 
     def test_outer_timeout_leaves_room_for_a_loaded_machine(self) -> None:
         for event, deadline, timeout in wrapped_hooks():
