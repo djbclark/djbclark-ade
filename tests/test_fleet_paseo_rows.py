@@ -282,14 +282,6 @@ def test_helm_shows_a_blocked_paseo_agent_as_an_open_permission_item_it_cannot_p
     assert "allow|deny <agent> -- <request id>" in str(e.value)    # the same `--` the card text carries: an id read as an option is "approve every card"
 
 
-def test_relay_refuses_a_paseo_agent_with_a_pending_card_and_names_the_paseo_ui(paseo):
-    import relay  # noqa: PLC0415
-    paseo.permits.write_text(json.dumps([card(OMP)]))
-    r = next(r for r in rows() if r["paseo"] == OMP)
-    why = relay.hard_stop(r)
-    assert why and "Paseo UI" in why and "helm.py" not in why and "allow|deny <agent> -- <request id>" in why
-
-
 def test_every_pending_card_is_kept_with_its_request_id_and_helm_prints_a_command_per_card(paseo):
     """M1 (adversary): `paseo permit allow AGENT` with no request id approves ALL cards and `deny` without one fails."""
     paseo.permits.write_text(json.dumps([card(OMP, "Bash", "echo safe", "req-a"), card(CLINE, "x", "y", "other"),
@@ -346,11 +338,3 @@ def test_the_printed_command_ends_option_parsing_before_the_request_id(paseo):
     assert f"`paseo permit allow {OMP} -- 0-ok.id:1`" in text
 
 
-def test_a_paseo_agent_with_no_claude_row_is_not_found_by_its_workspace_title(paseo):
-    """L3: titles come from the first prompt ("/baton", "say hi"); an id or a Paseo id names the agent, a title does not."""
-    import relay  # noqa: PLC0415
-    ss = rows() + [fleet._rec(id="cafe0001", agent="claude", name="Dann", sid="s" * 36)]    # a registry session called Dann too
-    assert [s["id"] for s in relay.find("Dann", ss)] == ["cafe0001"]
-    assert [s["paseo"] for s in relay.find(CLINE, ss)] == [CLINE] and [s["paseo"] for s in relay.find(OMP[:8], ss)] == [OMP]
-    on_paseo = fleet._rec(id="cafe0002", agent="claude", name="peer-1", sid="t" * 36, host="paseo", paseo=CLAUDE)
-    assert relay.find("peer-1", [on_paseo]) == [on_paseo]    # a Claude agent Paseo hosts keeps its session name

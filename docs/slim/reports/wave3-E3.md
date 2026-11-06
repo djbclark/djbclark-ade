@@ -5,8 +5,8 @@ branch `worktree-agent-a4772e28ffb7daa78`, based on `claude/determined-maxwell-u
 master fb3b9de first, so the brief and this report sit beside each other). Brief: `docs/slim/briefs/wave3-E3-finder.md`.
 Not pushed (the lead merges). No Paseo daemon was run: every `paseo` call in the tests is a fake on PATH.
 
-Commits: 3bfeb5a (claude_identity move), 5f8a4a6 (the shim, deadline), 4fb10d1 (deletions, KEEP-file edits), and the
-commit that adds this report. Not done here, on purpose: E3b (`fleet.py`, `tests/test_fleet_*.py`), `prompt_line.py`
+Commits: 3bfeb5a (claude_identity move), 5f8a4a6 (the shim, deadline), 4fb10d1 (deletions, KEEP-file edits), af265dc
+(report draft), and the commit with the H3b test fixes and the suite result. Not done here, on purpose: E3b (`fleet.py`, `tests/test_fleet_*.py`), `prompt_line.py`
 (E4), AGENTS.md, README.md, docs/skills.md, CHANGELOG.md, docs/queue.md, the settings template.
 
 ## A. The shim
@@ -184,8 +184,9 @@ watchers' `--no-ack` flag against the old relay's delivery watch: that contract 
 
 C4. Test cases removed from KEEP test files (their subjects went): `tests/test_codex_shell_env_policy.py`
 `test_a_relay_deliverer_has_no_owner_id_in_its_tools` (the old relay's `deliverer_env`); `tests/test_fleet_pi.py`
-`test_native_transcript_ids_preserve_underscores` (nativeid); `tests/test_claude_identity.py` the fleet/relay halves
-(see D2).
+`test_native_transcript_ids_preserve_underscores` (nativeid); `tests/test_fleet_paseo_rows.py` two cases that called
+the old relay (H3b); `tests/test_claude_identity.py` the fleet/relay halves (see D2). `tests/test_rumination_watch_target.py`
+one case marked xfail for E5 (H3b).
 
 ## D. Edits in KEEP files
 
@@ -345,7 +346,28 @@ H2. Targeted run (the brief's list plus every KEEP test this slice edited: `test
 H3. Full suite, run exactly as `docs/slim/baseline.md` ran it (`uv run --with pytest --with pytest-timeout --with pyyaml
 --with 'agent-client-protocol>=0.9,<1.0' python -m pytest tests/ -q --timeout=120`):
 
-SUITE_RESULT_PLACEHOLDER
+H3a. Result at 4fb10d1: **166 failed, 9,402 passed, 53 skipped, 1 error, 1,985 subtests passed, 2,817 s**, rc=1 (the
+baseline: 166 failed, 10,141 passed, 54 skipped). Compared by test id with the baseline's failure list: three new
+failures, three baseline failures gone (they were in deleted files: `test_launch_turns.py` 1, `test_session_relay.py` 2).
+The one error is a teardown error of `test_self_slash_codex.py::CodexWaiterTests::test_an_identical_older_message_in_a_session_that_appears_after_the_submit_is_not_a_receipt`,
+a baseline failure (the file fails 12 in the baseline). The passed count falls by the 23 deleted test files.
+
+H3b. The three new failures, fixed in the report's commit and rerun (`bin/pytest -q tests/test_fleet_paseo_rows.py
+tests/test_rumination_watch_target.py`: 93 passed, 1 xfailed):
+- `tests/test_fleet_paseo_rows.py::test_relay_refuses_a_paseo_agent_with_a_pending_card_and_names_the_paseo_ui` and
+  `::test_a_paseo_agent_with_no_claude_row_is_not_found_by_its_workspace_title` imported the old relay.py
+  (`relay.hard_stop`, `relay.find`). Their subject went, so the two cases were removed from the file (the file stays
+  for E3b). The second one carries a finding (adversary L3, 2026-10-2x): a Paseo agent's title comes from its first
+  prompt (`/baton`, "say hi"), so the old relay never resolved an agent by title. The brief (1a) asks the shim to
+  resolve by `name`; it does, only on an exact and unique match (two hits are exit 3), but a title is still a weak
+  address: **lead, decide** whether to drop the `name` rule and resolve by id/shortId only.
+- `tests/test_rumination_watch_target.py::test_the_relay_send_contract_this_reads_still_exists` reads relay.py's
+  source for the send parser's `--json` and the `result`/`state: queued` report fields, which the shim does not have:
+  a true signal that `bin/rumination-watch` breaks on the shim (it also passes `--no-ack` and `--why`, exit 64). Marked
+  `xfail(strict=True)` with the reason "rumination-watch ... is deleted in E5 (merge E5 before or with E3)", so it
+  fails loudly if it ever passes again; E5 deletes the file with rumination-watch.
+
+H3c. Baseline rows to drop (deleted test files): `tests/test_launch_turns.py` (1) and `tests/test_session_relay.py` (2).
 
 ## I. Lost on purpose
 

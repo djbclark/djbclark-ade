@@ -15,6 +15,8 @@ import json
 import time
 from pathlib import Path
 
+import pytest
+
 BIN = Path(__file__).resolve().parent.parent / "bin"
 LIVE = "d2a505dd-8c93-4ba5-8684-e98a3865a1ae"
 
@@ -810,6 +812,8 @@ def test_the_send_reads_relays_json_report_not_its_prose(monkeypatch, tmp_path):
     assert rw.to_session("x") == "queued"
 
 
+@pytest.mark.xfail(strict=True, reason="docs/slim E3 (2026-11-06): relay.py is a paseo-send shim with no --json report; "
+                   "rumination-watch, which needs it, is deleted in E5 (merge E5 before or with E3)")
 def test_the_relay_send_contract_this_reads_still_exists(monkeypatch, tmp_path):
     """CI cannot see drift in another tool's output, so it reads that tool's own source.
 
