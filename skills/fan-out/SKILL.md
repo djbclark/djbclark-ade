@@ -34,7 +34,7 @@ sub-agent's final message: the harness cuts that at 4,000 characters.
 A slice that edits code gets its own linked worktree (AGENTS.md order 9:
 `git worktree add -b NAME ~/src/<repo>-NAME-wt origin/master`) and runs as a Paseo agent there:
 
-    ~/src/djbclark-ade/bin/acp-dispatch codex --model gpt-6.1-sol --kind code --name NAME \
+    ~/src/djbclark-ade/bin/acp-dispatch claude --model sonnet --kind code --name NAME \
         -f brief.md -C ~/src/<repo>-NAME-wt --task TASK --detach --no-wait
 
 `acp-dispatch` writes `~/.local/state/bigteam/TASK/NAME-brief.md` (your brief plus the footer), gates on
