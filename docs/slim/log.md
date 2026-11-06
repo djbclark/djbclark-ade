@@ -71,6 +71,13 @@ J2 pool audit (lead's reading, ruling 10 / R2-12..15): Paseo providers that each
 
 Waivers given by the operator 2026-11-06 ("B waive both"): the sleeping pane w1:p1 and the four dirty worktrees. **C7 PASSED.** E2 may merge after E1; E3/E4/E6 are clear of this gate.
 
+## Wave 3 merges (2026-11-06 ~23:50Z onward)
+
+- E5 merged at 8c05930 (worktree branch `worktree-agent-af59a42109b4c5868`, head 2e15726, APPROVE after one repair round: the ancestor walk now stops at the agent's own CLI, archived agents are listed out with `paseo ls -g --background`, loose heavy work reaches the operator). Conflicts: docs/scheduling.md (plist count sentence combined), tests/test_session_history_adapters.py (both E9's and E5's removals taken; E3 deletes the file). Merger's lines and fragment at 90982fa.
+- E4 merged at aca3a9d (worktree branch `worktree-agent-a1901adc45a1860e6`, head c9319dd, APPROVE after two repair rounds). Conflict in bin/claude-quota-guard (E9's agy removal and E4's self-slash removal combined). Merger's lines (README helm/autorename rows, the commands-wrapper row, two docs/skills.md rows, the autorename hook object in the template) and fragment lines in the next commit. The live `~/.claude/settings.json` hook line for `skills/autorename/autorename_nudge.py` joins the C2 operator edit.
+- Order kept: E5 before E3 (rumination-watch); E3b (fleet.py, where.py, nested_pty.py, tests/test_fleet_*.py, test_nested_pty.py) after E3; E10 last.
+- Targeted tests of E4+E5 on a detached copy of the merged head: `/tmp/slim-t2.log`.
+
 ## Wave 2 closed; Wave 3 merging (2026-11-06 ~23:00Z)
 
 - E9 merged at 4ac820f (worktree branch `worktree-agent-a469de6c7fc476388`, head b525ba4, APPROVE after two repair rounds); conflicts with E1/E2 resolved in docs/model-routing.md (E2's "removed" rows kept, E9's dropped rows gone), skills/model-routing/SKILL.md (both notes combined), tests/test_skill_everywhere_all.py (E1's five tests kept, the pi test dropped), tools/acp-run/README.md (E9's trimmed paragraph). Merger's lines at aed8f2f: three AGENTS.md pi doc rows, rule 3's zcode-key-auth/codium-ai note; E9's fragment folded into the branch fragment. changelog-fold and ade-template-check clean. Full suite on a detached copy of aed8f2f running (`/tmp/slim-verify-w2.log`).
