@@ -74,3 +74,8 @@ Nothing in E2, E3, E4 or E6 merges before this is pasted. All read-only except s
 5. Bigteam inboxes: `find ~/.local/state/bigteam -name 'inbox*' -newer ~/.local/state/bigteam -type f 2>/dev/null | head`; expected: none unread.
 6. C1 live processes: `launchctl list | grep com.djbclark` and `pgrep -fl 'acp-run|acp-dispatch' || echo none`. Expected: deadline-sweep, pr-policy, load-watch listed; no acp-run process.
 7. Wave 0 leftovers (the proxy cannot do these): `git tag -a pre-slim-2026-11-06 -m 'Base of the slim-down: master after PRs 289, 291 and 296' fb3b9deb044cfde79cdc7ab2623224e2d8d7658a && git push origin pre-slim-2026-11-06`; `git push origin --delete claude/issue-284-ndc-oslo-ideas gitignore-aider`; shared checkout `git reset --keep origin/master`; `git worktree prune`.
+
+Facts from the site-djbclark clone (2026-11-06, `djbclark/site-djbclark` @ f11d8218, attached with push access as the E1 destination):
+
+- `bin/fleet-watch` is in site-djbclark (`bin/fleet-watch`, beside `bin/bg`, `hook-deadline`, `hermes-ping`); PLAN.md C3's "home unverified" is settled: it is site-public, not site-private, and AGENTS.md's doc-table row pointing at a local `bin/fleet-watch` is wrong (E11 fixes the row).
+- `skills/README.md` there says the hub layer was retired on 2026-10-14 ("nothing should link here any more"; public skills live in djbclark-ade, private ones in site-private). J2a makes that directory a third `skill-everywhere` root again for the moved skills, so the E1 intake branch rewrites that README in the same change, and `bin/skill-everywhere` gains the root (E1 owns that one edit, PLAN.md E10).
