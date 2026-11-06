@@ -11,7 +11,7 @@ Commits: 3bfeb5a (claude_identity move), 5f8a4a6 (the shim, deadline), 4fb10d1 (
 
 ## A. The shim
 
-A1. `skills/session-finder/relay.py`, 166 lines, stdlib only (the brief said about 100; the extra lines are A4's two
+A1. `skills/session-finder/relay.py`, 170 lines, stdlib only (the brief said about 100; the extra lines are A4's two
 refusals and the help epilog). Line 2 carries the removal line, "Shim, removed in the follow-up PR after one live cycle
 (PLAN.md F, Wave 6; at the latest 2026-11-20)".
 
@@ -21,9 +21,13 @@ prefix `[relay from $RELAY_SENDER_NAME]` when the caller has no `$PASEO_AGENT_ID
 `paseo agent inspect ID --json` → write the text to a private temp file → `paseo send ID --prompt-file F --behavior
 steer --no-wait --json` → read `.status` → with `--wait S`, `paseo wait ID --timeout S --json` → read `.status`.
 
-A3. Resolution order (first rule with any hit wins; more than one hit is exit 3 "matches N Paseo agents (ids)"):
-exact `id` or `shortId`; exact `name`; a prefix of 4+ characters of `id` or `shortId`. `self` is `$PASEO_AGENT_ID`
-(unset: not a Paseo agent, exit 3).
+A3. Resolution (lead's ruling, 2026-11-06, after this report's first version: the brief's 1a `name` rule is dropped,
+since a title comes from the first prompt and is a weak address, adversary L3): the exact `id`, else a prefix of 4+
+characters of `shortId`, which must be unique (more than one hit is exit 3 "matches N Paseo agents (ids)"). `self` is
+`$PASEO_AGENT_ID` (unset: exit 3). A target that is an agent's name gets exit 3 with "target X is a Paseo agent's
+name, not its id: pass the id (`paseo ls -a -g` shows it)"; anything else that resolves to nothing gets the retirement
+text. A prefix of the full id longer than the shortId is not accepted. Every caller in this slice passes an id
+(deadline: the owner id it recorded; load-watch: the session's id).
 
 A4. Two additions to the brief's 1b, both kept from the old relay's Paseo route because `docs/threat-model.md` relies on
 them (standing order 6: flagged here): (a) a text that starts with `/` or the full-width slash after the whitespace and
@@ -47,7 +51,8 @@ A5. Status mapping. `paseo send` exits 0 for every status (research item 1), so 
 | wait `.status` `timeout` | `wait timed out after S s` | 2 |
 | wait `.status` `permission` | `permission (pending: `paseo permit ls`)` | 2 |
 | any `paseo` non-zero exit, no binary, unparseable JSON, no answer in time (ls 30 s, inspect 30 s, send 60 s, wait S+30 s) | the stderr, on stderr | 1 |
-| target not exactly one Paseo agent | `relay.py reaches Paseo agents only since 2026-11-06 (herdr and Orca panes retired 2026-10-31); target X is not a Paseo agent` | 3 |
+| target a name | `relay.py reaches Paseo agents only since 2026-11-06 (herdr and Orca panes retired 2026-10-31); target X is a Paseo agent's name, not its id: pass the id (`paseo ls -a -g` shows it)` | 3 |
+| target not exactly one Paseo agent by id or shortId prefix | `relay.py reaches Paseo agents only since 2026-11-06 (herdr and Orca panes retired 2026-10-31); target X is not a Paseo agent` | 3 |
 | usage error, leading `/`, `--via`, `--pending`/`--sweep`/`--retire`/`--transfer-expectations`/`--expect-ack` | the refusal | 64 |
 
 Usage errors are 64, not argparse's 2, so a typo is never read as "not delivered". `--ack` takes an optional NAME:
@@ -64,7 +69,8 @@ usage: relay.py [-h] [--message-file PATH] [--ack [NAME]] [--wait S]
 Send MESSAGE to one Paseo agent with `paseo send --no-wait --json` and report its delivery status.
 
 positional arguments:
-  TARGET               Paseo agent id, id/shortId prefix, name, or `self`
+  TARGET               Paseo agent id, unique shortId prefix, or `self` (not a
+                       name)
   MESSAGE              the text (exactly one of MESSAGE and --message-file)
 
 options:
@@ -82,9 +88,10 @@ exit status:
   1   paseo failed: not installed, exited non-zero (no daemon, unknown agent), gave no JSON, or did not answer in time
   2   not delivered: `queued` (accepted by the daemon, not yet delivered), `timeout`, `permission`, `error`; or --wait timed out or hit a permission;
       or not sent, because `paseo agent inspect` shows the target archived or with a pending permission or question card
-  3   TARGET is not exactly one Paseo agent (relay.py reaches Paseo agents only since 2026-11-06 (herdr and Orca panes retired 2026-10-31))
+  3   TARGET is not exactly one Paseo agent by id or shortId prefix, or is a name (relay.py reaches Paseo agents only since 2026-11-06 (herdr and Orca panes retired 2026-10-31))
   64  usage error, a text starting with `/` (it would run a built-in in the target), or a retired flag: --via (relay.py reaches Paseo agents only since 2026-11-06 (herdr and Orca panes retired 2026-10-31)); --pending, --sweep, --retire, --transfer-expectations, --expect-ack (retired 2026-11-06: Paseo has no outbox; see `paseo permit ls` for pending permissions)
-TARGET is a Paseo agent id, a prefix of its id or shortId, its name (title), or `self` ($PASEO_AGENT_ID), as `paseo ls -a -g --json` lists it.
+TARGET is a Paseo agent id, a unique prefix (4+ characters) of its shortId, or `self` ($PASEO_AGENT_ID), as `paseo ls -a -g` lists them;
+never a name (title): a name is exit 3, pass the id.
 A sender with no $PASEO_AGENT_ID (a launchd job) is named in a `[relay from NAME]` prefix, NAME from $RELAY_SENDER_NAME.
 Shim: removed in the follow-up PR after one live cycle, at the latest 2026-11-20.
 ```
@@ -324,11 +331,13 @@ the request), and the ack is verified by reading your own inbox; nothing records
 
 ## H. Tests
 
-H1. `bin/pytest -q tests/test_relay_shim.py`: 40 passed. It covers: `sent`/`completed` → 0 `delivered` with
+H1. `bin/pytest -q tests/test_relay_shim.py`: 40 passed at 99a7ccb; after the A3 ruling, 44 (with
+`tests/test_deadline.py tests/test_deadline_wrappers.py`: 159 passed, 2 failed, both baseline `[dispatch]` rows). It covers: `sent`/`completed` → 0 `delivered` with
 `--behavior steer`, `--no-wait`, `--json` and the `[relay from ...]` prefix; `queued` → 2 and no `wait`; `timeout`,
 `permission`, `error` → 2; `paseo` exit 1, unparseable JSON, failing `ls` → 1; no `paseo` on PATH → 1; four non-Paseo
-targets (a herdr pane, a name, a dispatch record path, `self` unset) → 3 with the retirement text; ambiguous name and
-prefix → 3; id, shortId, 12-char prefix, name resolve; `self` = `$PASEO_AGENT_ID` with no prefix; `RELAY_SENDER_NAME`
+targets (a herdr pane, a name, a dispatch record path, `self` unset) → 3 with the retirement text; an ambiguous shortId
+prefix → 3; the id and 8-, 6- and 5-character shortId prefixes resolve; a name (`lead`, `twin`) → 3 with "pass the id";
+a 12-character id prefix and a 3-character prefix → 3; `self` = `$PASEO_AGENT_ID` with no prefix; `RELAY_SENDER_NAME`
 in the prefix; `--wait` → `paseo wait ID --timeout S --json` (`idle` 0, `timeout` 2, `permission` 2, failure 1);
 `--message-file -` reads stdin exactly and a file works; `--ack NAME` and bare `--ack`; the five outbox flags (also
 `--flag=value`) and `--via` refused 64 before any `paseo` call; usage errors 64; a leading `/` (four forms) refused
@@ -359,8 +368,7 @@ tests/test_rumination_watch_target.py`: 93 passed, 1 xfailed):
   (`relay.hard_stop`, `relay.find`). Their subject went, so the two cases were removed from the file (the file stays
   for E3b). The second one carries a finding (adversary L3, 2026-10-2x): a Paseo agent's title comes from its first
   prompt (`/baton`, "say hi"), so the old relay never resolved an agent by title. The brief (1a) asks the shim to
-  resolve by `name`; it does, only on an exact and unique match (two hits are exit 3), but a title is still a weak
-  address: **lead, decide** whether to drop the `name` rule and resolve by id/shortId only.
+  resolve by `name`; the first version did. Lead's ruling (2026-11-06): drop it, id or unique shortId prefix only (A3).
 - `tests/test_rumination_watch_target.py::test_the_relay_send_contract_this_reads_still_exists` reads relay.py's
   source for the send parser's `--json` and the `result`/`state: queued` report fields, which the shim does not have:
   a true signal that `bin/rumination-watch` breaks on the shim (it also passes `--no-ack` and `--why`, exit 64). Marked

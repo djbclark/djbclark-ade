@@ -83,7 +83,7 @@ def env(tmp_path: Path) -> Env:
 @pytest.mark.parametrize("status", ["sent", "completed"])
 def test_sent_or_completed_is_delivered(env: Env, status: str) -> None:
     env.answer("send", {"status": status})
-    r = env.run("lead", "hello")
+    r = env.run(A1, "hello")
     assert (r.returncode, r.stdout.strip()) == (0, "delivered"), r.stderr
     (send,) = env.sent()
     assert send["argv"][:2] == ["send", A1] and "--no-wait" in send["argv"] and "--json" in send["argv"]
@@ -93,7 +93,7 @@ def test_sent_or_completed_is_delivered(env: Env, status: str) -> None:
 
 def test_queued_is_accepted_not_delivered(env: Env) -> None:
     env.answer("send", {"status": "queued"})
-    r = env.run("lead", "hello", "--wait", "5")
+    r = env.run(A1, "hello", "--wait", "5")
     assert r.returncode == 2 and r.stdout.startswith("queued (accepted by the daemon, not yet delivered"), r.stdout
     assert not [c for c in env.calls() if c["argv"][0] == "wait"], "a message not delivered is not waited on"
 
@@ -101,39 +101,39 @@ def test_queued_is_accepted_not_delivered(env: Env) -> None:
 @pytest.mark.parametrize("status", ["timeout", "permission", "error"])
 def test_every_other_status_exits_2_although_paseo_exited_0(env: Env, status: str) -> None:
     env.answer("send", {"status": status})
-    r = env.run("lead", "hello")
+    r = env.run(A1, "hello")
     assert (r.returncode, r.stdout.strip()) == (2, status)
 
 
 def test_an_archived_target_or_one_on_a_card_is_never_sent(env: Env) -> None:
     """docs/threat-model.md: a send answers a pending permission card and unarchives an archived agent."""
     env.answer("agent", {"Archived": True, "PendingPermissions": []})
-    r = env.run("lead", "hello")
+    r = env.run(A1, "hello")
     assert r.returncode == 2 and "archived" in r.stdout
     env.answer("agent", {"Archived": False, "PendingPermissions": [{"id": "p1", "tool": "Bash"}]})
-    r = env.run("lead", "hello")
+    r = env.run(A1, "hello")
     assert r.returncode == 2 and r.stdout.startswith("permission (not sent") and "paseo permit ls" in r.stdout
     assert not env.sent()
     assert [c["argv"] for c in env.calls() if c["argv"][0] == "agent"][0] == ["agent", "inspect", A1, "--json"]
     env.fail("agent")
-    assert env.run("lead", "hello").returncode == 1 and not env.sent()
+    assert env.run(A1, "hello").returncode == 1 and not env.sent()
 
 
 def test_paseo_failing_is_exit_1_with_its_stderr(env: Env) -> None:
     env.fail("send")
-    r = env.run("lead", "hello")
+    r = env.run(A1, "hello")
     assert r.returncode == 1 and "daemon not running" in r.stderr and "delivered" not in r.stdout
     env.answer("send", {})
     (env.dir / "send.rc").unlink()
     (env.dir / "send.json").write_text("not json")
-    r = env.run("lead", "hello")
+    r = env.run(A1, "hello")
     assert r.returncode == 1 and "no JSON" in r.stderr
     env.fail("ls")
-    assert env.run("lead", "hello").returncode == 1
+    assert env.run(A1, "hello").returncode == 1
 
 
 def test_no_paseo_on_path_is_exit_1(env: Env) -> None:
-    r = env.run("lead", "hello", PATH=str(env.dir))
+    r = env.run(A1, "hello", PATH=str(env.dir))
     assert r.returncode == 1 and "paseo is not on PATH" in r.stderr
 
 
@@ -146,17 +146,29 @@ def test_a_target_that_is_not_a_paseo_agent_is_refused_with_the_retirement(env: 
     assert not env.sent()
 
 
-def test_an_ambiguous_name_or_prefix_is_refused(env: Env) -> None:
-    for target in ("twin", "4f0c"):
-        r = env.run(target, "hello")
-        assert r.returncode == 3 and "matches 2 Paseo agents" in r.stderr, (target, r.stderr)
+def test_an_ambiguous_shortid_prefix_is_refused(env: Env) -> None:
+    r = env.run("4f0c", "hello")
+    assert r.returncode == 3 and "matches 2 Paseo agents" in r.stderr, r.stderr
     assert not env.sent()
 
 
-@pytest.mark.parametrize("target", [A1, A1[:8], A1[:12], "lead"])
-def test_an_id_prefix_shortid_or_name_resolves(env: Env, target: str) -> None:
+@pytest.mark.parametrize("target", [A1, A1[:8], A1[:6], A1[:5]])
+def test_an_id_or_a_unique_shortid_prefix_resolves(env: Env, target: str) -> None:
     assert env.run(target, "hello").returncode == 0
     assert env.sent()[0]["argv"][1] == A1
+
+
+@pytest.mark.parametrize("target", ["lead", "twin"])
+def test_a_name_is_never_a_target(env: Env, target: str) -> None:
+    """Lead's ruling (2026-11-06; adversary L3): a title comes from the first prompt, so it is a weak address."""
+    r = env.run(target, "hello")
+    assert r.returncode == 3 and "is a Paseo agent's name, not its id: pass the id (`paseo ls -a -g` shows it)" in r.stderr, r.stderr
+    assert not env.sent()
+
+
+@pytest.mark.parametrize("target", [A1[:12], A1[:3]])
+def test_a_long_id_prefix_or_a_short_one_is_not_a_target(env: Env, target: str) -> None:
+    assert env.run(target, "hello").returncode == 3 and not env.sent()
 
 
 def test_self_is_paseo_agent_id_and_a_paseo_sender_gets_no_prefix(env: Env) -> None:
@@ -167,45 +179,45 @@ def test_self_is_paseo_agent_id_and_a_paseo_sender_gets_no_prefix(env: Env) -> N
 
 
 def test_a_declared_sender_is_named(env: Env) -> None:
-    assert env.run("lead", "x", RELAY_SENDER_NAME="deadline").returncode == 0
+    assert env.run(A1, "x", RELAY_SENDER_NAME="deadline").returncode == 0
     assert env.sent()[0]["text"] == "[relay from deadline] x"
 
 
 def test_wait_maps_to_paseo_wait_timeout(env: Env) -> None:
-    r = env.run("lead", "hello", "--wait", "20")
+    r = env.run(A1, "hello", "--wait", "20")
     assert r.returncode == 0 and r.stdout.split() == ["delivered", "idle"]
     (wait,) = [c for c in env.calls() if c["argv"][0] == "wait"]
     assert wait["argv"] == ["wait", A1, "--timeout", "20", "--json"]
     env.answer("wait", {"status": "timeout"})
-    r = env.run("lead", "hello", "--wait", "2.5")
+    r = env.run(A1, "hello", "--wait", "2.5")
     assert r.returncode == 2 and "wait timed out after 2.5 s" in r.stdout
     env.answer("wait", {"status": "permission"})
-    r = env.run("lead", "hello", "--wait", "3")
+    r = env.run(A1, "hello", "--wait", "3")
     assert r.returncode == 2 and r.stdout.splitlines()[-1].startswith("permission")
     env.fail("wait")
-    assert env.run("lead", "hello", "--wait", "3").returncode == 1
+    assert env.run(A1, "hello", "--wait", "3").returncode == 1
 
 
 def test_message_file_dash_reads_stdin_exactly(env: Env, tmp_path: Path) -> None:
     text = "a `backtick`, $(not run) and \"quotes\"\nsecond line\n"
-    r = env.run("lead", "--message-file", "-", stdin=text, PASEO_AGENT_ID=A2)
+    r = env.run(A1, "--message-file", "-", stdin=text, PASEO_AGENT_ID=A2)
     assert r.returncode == 0, r.stderr
     assert env.sent()[-1]["text"] == text[:-1]    # one trailing newline dropped, nothing else changed
     f = tmp_path / "m.txt"
     f.write_text("from a file", encoding="utf-8")
-    assert env.run("lead", "--message-file", str(f), PASEO_AGENT_ID=A2).returncode == 0
+    assert env.run(A1, "--message-file", str(f), PASEO_AGENT_ID=A2).returncode == 0
     assert env.sent()[-1]["text"] == "from a file"
 
 
 def test_ack_name_appends_the_request_and_bare_ack_appends_nothing(env: Env) -> None:
-    assert env.run("lead", "hi", "--ack", "me-1", PASEO_AGENT_ID=A2).returncode == 0
+    assert env.run(A1, "hi", "--ack", "me-1", PASEO_AGENT_ID=A2).returncode == 0
     assert env.sent()[-1]["text"] == "hi\n\nReply with `ack me-1` through relay.py."
-    assert env.run("lead", "--message-file", "-", "--ack", "--wait", "20", stdin="hi", PASEO_AGENT_ID=A2).returncode == 0
+    assert env.run(A1, "--message-file", "-", "--ack", "--wait", "20", stdin="hi", PASEO_AGENT_ID=A2).returncode == 0
     assert env.sent()[-1]["text"] == "hi"
 
 
 @pytest.mark.parametrize("args", [["--pending"], ["--sweep"], ["--retire", "X", "--reason", "y"], ["--transfer-expectations", "old"],
-                                  ["lead", "hi", "--expect-ack", "T1"], ["lead", "hi", "--expect-ack=T1"]])
+                                  [A1, "hi", "--expect-ack", "T1"], [A1, "hi", "--expect-ack=T1"]])
 def test_the_outbox_flags_are_refused_as_retired(env: Env, args: list[str]) -> None:
     r = env.run(*args)
     assert r.returncode == 64 and "retired 2026-11-06: Paseo has no outbox; see `paseo permit ls` for pending permissions" in r.stderr
@@ -213,7 +225,7 @@ def test_the_outbox_flags_are_refused_as_retired(env: Env, args: list[str]) -> N
 
 
 def test_via_is_refused_with_the_route_retirement(env: Env) -> None:
-    r = env.run("lead", "hi", "--via", "pane")
+    r = env.run(A1, "hi", "--via", "pane")
     assert r.returncode == 64 and "relay.py reaches Paseo agents only since 2026-11-06" in r.stderr and not env.calls()
 
 
@@ -221,12 +233,12 @@ def test_via_is_refused_with_the_route_retirement(env: Env) -> None:
 def test_a_text_that_would_run_a_built_in_is_never_sent(env: Env, text: str) -> None:
     """Kept from the old relay.py (adversary round 2): Paseo trims whitespace and zero-width characters before its slash parser."""
     for extra in ({}, {"PASEO_AGENT_ID": A2}):    # with or without the `[relay from ...]` prefix
-        r = env.run("lead", text, **extra)
+        r = env.run(A1, text, **extra)
         assert r.returncode == 64 and "would run a built-in" in r.stderr
     assert not env.calls()
 
 
-@pytest.mark.parametrize("args", [["lead"], ["lead", "hi", "--message-file", "-"], ["lead", "--idle", "5", "hi"], ["lead", "   "]])
+@pytest.mark.parametrize("args", [[A1], [A1, "hi", "--message-file", "-"], [A1, "--idle", "5", "hi"], [A1, "   "]])
 def test_usage_errors_are_64_never_a_delivery_status(env: Env, args: list[str]) -> None:
     assert env.run(*args, stdin="x").returncode == 64
     assert not env.sent()

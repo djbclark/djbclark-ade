@@ -27,9 +27,10 @@ EPILOG = f"""exit status:
   1   paseo failed: not installed, exited non-zero (no daemon, unknown agent), gave no JSON, or did not answer in time
   2   not delivered: `queued` (accepted by the daemon, not yet delivered), `timeout`, `permission`, `error`; or --wait timed out or hit a permission;
       or not sent, because `paseo agent inspect` shows the target archived or with a pending permission or question card
-  3   TARGET is not exactly one Paseo agent ({RETIRED_ROUTES})
+  3   TARGET is not exactly one Paseo agent by id or shortId prefix, or is a name ({RETIRED_ROUTES})
   64  usage error, a text starting with `/` (it would run a built-in in the target), or a retired flag: --via ({RETIRED_ROUTES}); {', '.join(RETIRED_FLAGS)} ({RETIRED_OUTBOX})
-TARGET is a Paseo agent id, a prefix of its id or shortId, its name (title), or `self` ($PASEO_AGENT_ID), as `paseo ls -a -g --json` lists it.
+TARGET is a Paseo agent id, a unique prefix (4+ characters) of its shortId, or `self` ($PASEO_AGENT_ID), as `paseo ls -a -g` lists them;
+never a name (title): a name is exit 3, pass the id.
 A sender with no $PASEO_AGENT_ID (a launchd job) is named in a `[relay from NAME]` prefix, NAME from $RELAY_SENDER_NAME.
 Shim: removed in the follow-up PR after one live cycle, at the latest {REMOVE_BY}."""
 
@@ -65,8 +66,9 @@ def resolve(target: str, rows: list[dict]) -> list[dict]:
         target = os.environ.get("PASEO_AGENT_ID", "")
         if not target:
             return []
-    for match in (lambda r: target in (r.get("id"), r.get("shortId")), lambda r: r.get("name") == target,
-                  lambda r: len(target) >= 4 and any(str(r.get(k) or "").startswith(target) for k in ("id", "shortId"))):
+    # an id, or a prefix of a shortId; never a name: a title comes from the first prompt (`/baton`, "say hi"), a weak address
+    # (adversary L3; lead's ruling, 2026-11-06)
+    for match in (lambda r: r.get("id") == target, lambda r: len(target) >= 4 and str(r.get("shortId") or "").startswith(target)):
         hits = [r for r in rows if isinstance(r, dict) and match(r)]
         if hits:
             return hits
@@ -88,7 +90,7 @@ def main(argv: list[str]) -> int:
             return 64
     ap = Parser(prog="relay.py", description="Send MESSAGE to one Paseo agent with `paseo send --no-wait --json` and report its delivery status.",
                 epilog=EPILOG, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("target", metavar="TARGET", help="Paseo agent id, id/shortId prefix, name, or `self`")
+    ap.add_argument("target", metavar="TARGET", help="Paseo agent id, unique shortId prefix, or `self` (not a name)")
     ap.add_argument("message", metavar="MESSAGE", nargs="?", help="the text (exactly one of MESSAGE and --message-file)")
     ap.add_argument("--message-file", metavar="PATH", help="read the text from PATH, UTF-8 (`-`: stdin); for text with backticks, `$` or quotes")
     ap.add_argument("--ack", metavar="NAME", nargs="?", const="", help="append \"Reply with `ack NAME` through relay.py\" to the text; "
@@ -117,8 +119,10 @@ def main(argv: list[str]) -> int:
     rows = rows.get("agents", []) if isinstance(rows, dict) else rows if isinstance(rows, list) else []
     hits = resolve(a.target, rows)
     if len(hits) != 1:
-        why = f"target {a.target} matches {len(hits)} Paseo agents ({', '.join(str(h.get('id')) for h in hits)})" if hits else \
-            f"target {a.target} is not a Paseo agent"
+        named = [r for r in rows if isinstance(r, dict) and r.get("name") == a.target]
+        why = (f"target {a.target} matches {len(hits)} Paseo agents ({', '.join(str(h.get('id')) for h in hits)})" if hits else
+               f"target {a.target} is a Paseo agent's name, not its id: pass the id (`paseo ls -a -g` shows it)" if named else
+               f"target {a.target} is not a Paseo agent")
         print(f"relay.py: {RETIRED_ROUTES}; {why}", file=sys.stderr)
         return 3
     aid = str(hits[0]["id"])
