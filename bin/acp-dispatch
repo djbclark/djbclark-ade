@@ -923,7 +923,7 @@ def dispatch(a: argparse.Namespace) -> int:
     write_record(record, rec)
     if boundary == "review-launch":
         if a.detach and a.no_wait:
-            with stderr.open("a") as err:
+            with (out / f"{a.name}-runner.log").open("a") as err:      # review-launch's own stderr goes to `stderr`
                 child = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "_review-run", str(record)],
                                          stdin=subprocess.DEVNULL, stdout=err, stderr=err, start_new_session=True)
             update_record(record, pid=child.pid)
