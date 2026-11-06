@@ -54,7 +54,8 @@ distinguishes the two wordings), so the backstop survives a dropped wake.
 An ineffective-compaction (blocked) session is exactly the one that must hand
 off rather than loop compactions, so handoff outranks `blocked` in the context
 notice. The directive routes the model through the handoff skill and
-`self-slash "/new"`; it never instructs a raw `/new`, `/clear`, `/reset` or
+the handoff skill's `/new` step (written as `self-slash "/new"` until `bin/self-slash` was removed on 2026-11-06,
+slim-down E4); it never instructs a raw `/new`, `/clear`, `/reset` or
 `--finish --successor`, and it always carries "Never clear a parent session".
 
 ## Install and activate

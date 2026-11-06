@@ -64,7 +64,7 @@ An absolute backstop asks at ASK_TOTAL, 50k+ under the auto-compaction wall.
 
 Levels: 1 = early (delegate from now on; no compaction yet);
 2+ = handoff + /new at a finished task, /compact only to continue in-context
-(self-slash in herdr/Orca; elsewhere auto-compaction), or, mid-turn, finish the
+(auto-compaction), or, mid-turn, finish the
 current edit and hand off within a few tool rounds (_midtask_note); again every
 REPEAT_EVERY of further growth. A compaction resets the floor and the level, so
 the hard tier fires again at ASK_TOTAL (by total, not by growth) after regrowth.
@@ -82,7 +82,6 @@ an alarm at DEADLINE_SECONDS exits 0 with no output.
 import json
 import os
 import re
-import shutil
 import signal
 import sys
 import tempfile
@@ -117,7 +116,7 @@ SUCCESSOR_SONNET = "claude/claude-sonnet-5-5"
 EARLY_GROWTH = 32_000   # 2026-10-25: delegate earlier; this alone never compacts
 # ~/.claude/settings.json "autoCompactWindow" (set 2026-10-15, 300k since
 # 2026-10-18): Claude Code compacts by itself near this size, on every host, so
-# outside herdr/Orca the level-2 note no longer asks the operator. The real
+# the level-2 note no longer asks the operator. The real
 # trigger is the window less the "Autocompact buffer" /context shows (~33k):
 # AUTO_COMPACT_WALL = 267k (measured 2026-10-23..28: 72 auto compactions,
 # preTokens 266k-285k, median ~268k).
@@ -487,89 +486,22 @@ def _early_message(total, growth):
     )
 
 
-def _which(name):
-    # The same PATH bin/self-slash searches: it exports PATH="/opt/homebrew/bin:$PATH" before
-    # choosing a host (self-slash line ~87), and a hook's inherited PATH may lack that prefix
-    # (Codex on PR 19, 2026-10-20).  Tests replace this; the hook never spawns orca itself.
-    return shutil.which(name, path="/opt/homebrew/bin:" + os.environ.get("PATH", os.defpath))
-
-
-def _self_slash_host():
-    # The same host selection as bin/self-slash, in its order (2026-10-20, Codex on PR 19):
-    # a herdr pane only with HERDR_ENV=1 (a stale HERDR_PANE_ID alone is not one), an Orca
-    # terminal only when the orca CLI is on PATH, else a Paseo agent (2026-10-19: `paseo
-    # wait` then `paseo send` of the root-only built-ins).  None: self-slash would refuse.
-    if os.environ.get("HERDR_ENV") == "1" and os.environ.get("HERDR_PANE_ID"):
-        return "herdr"
-    if os.environ.get("ORCA_TERMINAL_HANDLE") and _which("orca"):
-        return "orca"
-    if os.environ.get("PASEO_AGENT_ID") and _paseo_cli():
-        return "paseo"
-    return None
-
-
-def _paseo_cli():
-    # self-slash (lines ~141-142): PASEO_CLI, else paseo on PATH, and it must be executable;
-    # otherwise it exits 3 and the operator types the command (Codex on PR 19, 2026-10-20).
-    cli = os.environ.get("PASEO_CLI") or _which("paseo")
-    return bool(cli) and os.access(cli, os.X_OK)
-
-
-def _can_self_slash():
-    return _self_slash_host() is not None
-
-
-def _paseo_finish_note():
-    # On Paseo /quit is not a command (it reaches Claude as plain text), so ending a
-    # session there is --finish, which archives the agent once idle (2026-10-20).
-    # Archiving is the operator's choice (loose Rule 4), never something the model
-    # decides alone.
-    if _self_slash_host() != "paseo":
-        return ""
-    return (" On Paseo, a finished task with nothing to continue: offer the `loose` Rule 4 "
-            "choices (handoff and continue, or finish and archive, which is "
-            "~/src/djbclark-ade/bin/self-slash --finish as the last action; it archives "
-            "this agent once idle, and /quit does nothing there) rather than archiving "
-            "yourself.")
-
-
-def _step9_text(successor):
-    """What the handoff's Step 9 runs: the successor form (Paseo only) or /new."""
-    if successor and _self_slash_host() == "paseo":
-        spec, why = successor
-        return (f"~/src/djbclark-ade/bin/self-slash --finish --successor {spec} --thinking high "
-                f"({why}: it starts a NEW agent on {spec.split('/', 1)[1]} that runs /baton, "
-                "then archives this one; the pre-handoff transcript survives only in the "
-                "handoff document and the archived agent's log)")
-    return "~/src/djbclark-ade/bin/self-slash \"/new\" ONCE and queues /baton into the fresh session"
-
-
 def _successor_note(successor):
-    """Where the successor form is unavailable (herdr, Orca, no host): relaunch by hand."""
-    if not successor or _self_slash_host() == "paseo":
+    """The Fable-lead ruling (2026-10-23): a Fable session, or a tight quota guard, hands off to Opus/Sonnet."""
+    if not successor:
         return ""
     spec, why = successor
-    return (f" Note: {why}; self-slash --successor needs Paseo, so after the handoff tell the "
-            f"operator to relaunch `claude --model {spec.split('/', 1)[1]}` in this pane.")
+    return (f" Note: {why}; after the handoff tell the operator to relaunch "
+            f"`claude --model {spec.split('/', 1)[1]}` rather than continuing on this model.")
 
 
 def _boundary_message(total, successor=None):
-    # self-slash refuses outside herdr, Orca and Paseo: there the operator types /new.
-    if _can_self_slash():
-        new = (f"(its Step 9 runs {_step9_text(successor)})" if successor and _self_slash_host() == "paseo"
-               else "(its Step 9 runs ~/src/djbclark-ade/bin/self-slash \"/new\" and queues /baton)")
-    else:
-        new = "and then tell the operator /new is ready"
     return (
         f"Context is {total:,}. At the next task completion, if the following "
         f"work is not a direct continuation, run the `handoff` skill "
-        f"{new} instead of /compact: a fresh session re-writes ~46k, a "
+        f"and then tell the operator /new is ready instead of /compact: a fresh session re-writes ~46k, a "
         "compaction re-writes ~72k plus a summariser call and leaves ~104k "
         "behind. Do not compact mid-task."
-        + (" Do not run /new yourself as well: self-slash refuses the second one. Only the "
-           "top-level session does this; a sub-agent or dispatched slice treats a handoff "
-           "as document-only." if _can_self_slash() else "")
-        + _paseo_finish_note()
         + _successor_note(successor)
     )
 
@@ -602,33 +534,8 @@ def _midtask_note(total, in_context):
 
 def _ask_message(total, growth, repeat, successor=None):
     lead = "Context is still growing" if repeat else "Context is large"
-    if _can_self_slash():
-        # A herdr pane, Orca terminal or Paseo agent can queue its own /new or /compact
-        # (standing operator ruling 2026-10-09, memory/feedback_self_compact.md).
-        return (
-            f"{lead}: {total:,} tokens (+{growth:,} since the session started "
-            "or last compacted). Handle it yourself, without asking (operator "
-            "2026-10-15): first choice when the current task is finished (a "
-            "task done, never mid-edit or with a sub-agent result unread), same "
-            "topic or not: run the `handoff` "
-            "skill (it writes the Tier 2 document; its Step 9 runs "
-            + _step9_text(successor)
-            + ", so do not run /new yourself as well) and end the turn "
-            "(a fresh session re-writes ~46k). Only the top-level session does this; "
-            "a sub-agent or dispatched slice treats a handoff as document-only. "
-            "Only if the work must continue "
-            "in-context: save what the next turn needs, run self-slash "
-            "\"/compact <focus>\" ONCE and end the turn. Only if self-slash "
-            "refuses (a draft on the input line) ask the operator for /new or "
-            "/compact."
-            + _paseo_finish_note() + _successor_note(successor) + " "
-            + _midtask_note(total, "the /compact path above") + " "
-            + _COST_NOTE
-        )
-    # Bare branch (no herdr, Orca or Paseo host; every ACP slice lands here too, since acp-run
-    # scrubs PASEO_AGENT_ID): it has no self-slash path, and says nothing of a handoff being
-    # document-only for a dispatched slice (known limit, round 2 F5: the hook cannot tell a
-    # slice from the top-level session; the handoff skill itself states the rule).
+    # bin/self-slash is gone (2026-11-06, slim-down E4): there is no path to queue a /compact for the session, so
+    # auto-compaction takes it (a Claude session cannot run built-in slash commands itself).
     return (
         f"{lead}: {total:,} tokens (+{growth:,} since the session started or "
         "last compacted). Do not ask: Claude Code compacts this session by "
@@ -641,7 +548,7 @@ def _ask_message(total, growth, repeat, successor=None):
         "document) and tell the operator /new is ready (a fresh session "
         "re-writes ~46k); keep going in-context only when the work must "
         "continue. "
-        + _midtask_note(total, "let the auto-compaction take it") + " "
+        + _midtask_note(total, "let the auto-compaction take it") + _successor_note(successor) + " "
         + _COST_NOTE
     )
 

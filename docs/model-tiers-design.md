@@ -51,7 +51,7 @@ can be two kinds; it is listed under its main kind, with the other kind noted.
 | A1.17 | `bin/claude-fleet-governor:41-48,564,576-581` | Fable becomes Opus at any level (no lead on frontier-1). Opus/Fable become Sonnet at tight/critical. A Fable original is restored as Opus |
 | A1.18 | `bin/claude-quota-guard:96` | `watch_fable = 15.0` (frontier-1 sublimit watch trigger; mirrored in `config/gates.toml [quota_guard]` on feat/gates-profile) |
 | A1.19 | `bin/claude-quota-guard:122-145` | `_advice`: "no Fable or Opus Agent-tool sub-agents", "a lead on Opus or Fable hands off ... Sonnet 5.5 high"; also (d) |
-| A1.20 | `claude/hooks/context_size_nudge.py:220-241` | `_successor_target`: Fable to Opus; tight: Fable/Opus to Sonnet; critical: Fable to Opus (differs from the governor, which takes critical to Sonnet: R7) |
+| A1.20 | `claude/hooks/context_size_nudge.py:220-241` | `_successor_target`: Fable to Opus (2026-11-06, slim-down E4: the hook now only names a `claude --model X` relaunch for the operator; the `self-slash --finish --successor` form is gone); tight: Fable/Opus to Sonnet; critical: Fable to Opus (differs from the governor, which takes critical to Sonnet: R7) |
 | A1.21 | `claude/hooks/frontier_agent_gate.py:17,27,30` | `FRONTIER_AGENTS = {"fable-deep": "Fable"}`, `"fable" in model`, approval key `fable-deep` |
 | A1.22 | `claude/hooks/jev_effort_hook.py:103` (jev removed 2026-11-06) | `("opus","fable")` substring = judgment or frontier session |
 | A1.23 | `bin/watch:445-446` | refuses a route whose model contains `fable` |
@@ -376,7 +376,7 @@ adversary command with `resolve(claude, judgment, omp)`, `{until}` = the profile
 | level | text |
 | --- | --- |
 | watch | `Claude quota watch: no {F1} (frontier) or {J} (judgment) Agent-tool sub-agents. Adversary rounds via {ADV}. Route code/bulk slices to other pools.` |
-| tight | `Claude quota tight: no {F1} or {J} Agent-tool sub-agents. Adversary rounds via {ADV}. Route code/bulk slices to other pools. A lead on {J} or {F1} hands off now and continues on {E} high: self-slash --finish --successor claude/{E_id} --thinking high (Paseo; herdr/Orca: handoff then relaunch on {E}). No acp-dispatch claude slices.` |
+| tight | `Claude quota tight: no {F1} or {J} Agent-tool sub-agents. Adversary rounds via {ADV}. Route code/bulk slices to other pools. A lead on {J} or {F1} hands off now and continues on {E} high: [2026-11-06: bin/self-slash removed; the live text is `env -u PASEO_AGENT_ID -u PASEO_AGENT_CWD paseo run ...`] self-slash --finish --successor claude/{E_id} --thinking high (Paseo; herdr/Orca: handoff then relaunch on {E}). No acp-dispatch claude slices.` |
 | critical | today's critical text with the same substitutions |
 
 **Away** (`frontier1_judged = 1` in the active profile):

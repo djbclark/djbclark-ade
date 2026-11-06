@@ -1,3 +1,5 @@
+> **Moved to docs/history/ (2026-11-06, slim-down E4):** `/helm` and `/helm-all` are gone; use `paseo permit ls` and the asks / questions-please plugin. A record only.
+
 # helm — every waiting agent session, answered from one window
 
 > **Retired from djbclark-ade (2026-10-31), a design record from 2026-10-06 to 2026-10-08:** herdr (bar its two Paseo bridges) and Orca are no longer

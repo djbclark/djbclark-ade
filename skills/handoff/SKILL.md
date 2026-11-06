@@ -342,10 +342,10 @@ start omp by hand in a new pane or tab. With omp not listed, a codex or grok suc
 reached only by `acp-run agy` slices, home rule 29, never as a successor; `acp-run` sessions are never handoff
 hops). **At `critical` this paragraph replaces every Claude path in the rest of Step 9:** the Fable branch
 (a) below, the "verify the successor" by-hand fallback (a governor-steered session still runs that verify step,
-with these providers), the partial-handoff recipe's `paseo-new-seat --provider claude`, the `/clear` then
+with these providers), the partial-handoff recipe's `paseo run --provider claude`, the `/clear` then
 `/baton` or `self-slash "/new"` retry after a refusal, and the Orca "relaunch `claude --model <m>`" line. A
 refusal retry or a by-hand start reruns the guard advice's command (omp, else codex or grok), never claude. The
-partial-handoff recipe is the exception to "the guard advice's command": it keeps `paseo-new-seat` (the
+partial-handoff recipe is the exception to "the guard advice's command": it keeps `paseo run` (the
 `--finish --successor` form archives the session it keeps) with `--provider omp --model
 anthropic/claude-sonnet-5-5 --thinking high` and no `--mode` (omp has its own default; a claude mode id means
 nothing to it), else codex with `--provider codex --model gpt-6.1-sol --mode full-access` and the first prompt
@@ -453,17 +453,19 @@ tab ever opened ("several workspaces share this cwd"). After any `self-slash` th
 `--finish --successor` form archives this agent when it works, so do not use it. Write the handoff (Steps 1-7, scoped to the slice and
 written to its own chain), then start a separate top-level agent in this agent's workspace and leave this one running. This is not
 `/handoff paseo` (the durable transfer of the whole session, which ends this one): use this recipe only when the operator keeps this
-session, and `/handoff paseo` when this session is the one being handed on:
+session, and `/handoff paseo` when this session is the one being handed on. The `env -u` prefix keeps `paseo run` from
+parenting the new agent to this one (run.ts parents it to the caller); verify `ParentAgentId` is null as in Step 9. This
+session is not archived by the recipe; where a successor replaces a session, the successor archives its predecessor by id
+(`paseo agent archive PRED_ID`) once it has answered, because a running agent cannot archive itself and `--force` cascades
+to its children (`skills/ade-paseo-handoff`):
 
 ```bash
-~/src/djbclark-ade/bin/paseo-new-seat --title "<short title>" --provider claude --model claude-sonnet-5-5 --thinking medium \
+env -u PASEO_AGENT_ID -u PASEO_AGENT_CWD paseo run --no-wait --title "<short title>" --provider claude --model claude-sonnet-5-5 --thinking medium \
   --mode bypassPermissions --cwd <this agent's cwd> --workspace <wks_ id> --json \
-  --prompt "/baton ~/.local/state/handoffs/chains/<chain-key>/SESSION_LOG.md"
+  "/baton ~/.local/state/handoffs/chains/<chain-key>/SESSION_LOG.md"
 ```
 
-The `wks_` id is `workspaceId` in `$PASEO_HOME/agents/*/<your agent id>.json` (`~/.paseo` when unset). Exit 4 with `"mode":"bypassPermissions","modeApplied":true`
-is fine for claude only (the shield is for auto-accept; this mode is already yolo); an exit 4 on an omp, codex or grok seat is not covered by that note: check the new agent's
-mode with `paseo agent inspect <new id> --json` before calling it fine. Verify as above, and `paseo logs <new id>` shows the
+The `wks_` id is `workspaceId` in `$PASEO_HOME/agents/*/<your agent id>.json` (`~/.paseo` when unset). Check the new agent's mode with `paseo agent inspect <new id> --json` (`paseo agent mode <new id> --list` shows the provider's modes) before calling it fine; omp, codex and grok use their own mode ids. Verify as above, and `paseo logs <new id>` shows the
 `/baton` was read. Skip Step 8's autorename for a partial handoff: it would rename the session the operator keeps using.
 
 **Document only:** skip this step when a skill that clears the session itself runs the handoff, when

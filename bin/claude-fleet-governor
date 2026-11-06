@@ -609,18 +609,21 @@ def plan_moves(agents: list[dict[str, Any]], windows: dict[str, dict[str, Any]],
         for a in live:
             if a.get("status") == "running" and not a.get("parentAgentId") and a["id"][:7] not in already:
                 plan.append({"kind": "steer", "id": a["id"], "short": a["id"][:7], "period": period,
-                             "text": steer_text(trig[1])})
+                             "text": steer_text(trig[1], a["id"])})
     return plan
 
 
-def steer_text(w: dict[str, Any]) -> str:
+def steer_text(w: dict[str, Any], agent_id: str = "PRED_ID") -> str:
     ex = w["exhaust_at"]
     when = (f"projected out {hhmm(ex)} before its {hhmm(w['resets_at'])} reset"
             if ex is not None and ex < w["resets_at"]
             else f"{w['left']:.0f}% left, its reset is {hhmm(w['resets_at'])}")
     return (f"Claude subscription critical: {short_label(w['label'])} {w['used']:.0f}% used, {when}. "
             "Finish the current step, write your Tier 1 handoff, then run "
-            f"~/src/djbclark-ade/bin/self-slash --finish --successor {HANDOFF_SUCCESSOR} --thinking high "
+            f"`env -u PASEO_AGENT_ID -u PASEO_AGENT_CWD paseo run --no-wait --provider {HANDOFF_SUCCESSOR.split('/', 1)[0]} --model {HANDOFF_SUCCESSOR.split('/', 1)[1]} "
+            "--thinking high --workspace \"$PASEO_WORKSPACE_ID\" "
+            f"\"/baton <handoff path>, then archive {agent_id} (your predecessor) with `paseo agent archive {agent_id}` "
+            "once you have answered\"`; the successor archives you by id (a running agent cannot archive itself) "
             "(API credits, off the subscription).")
 
 

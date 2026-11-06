@@ -122,14 +122,24 @@ AIUSE_NOTHING_USABLE = 3
 class ConfigError(Exception):
     pass
 
-_SELF_SLASH = ("`~/src/djbclark-ade/bin/self-slash --finish --successor claude/claude-sonnet-5-5 "
-               "--thinking high`")
+# bin/self-slash is gone (2026-11-06, slim-down E4): a successor is a new TOP-LEVEL Paseo agent (the env prefix keeps
+# `paseo run` from parenting it to the caller); it archives its predecessor by id once it has answered (a running agent
+# cannot archive itself, and --force would cascade to its children).
+_SUCCESSOR_TAIL = ("; the successor archives its predecessor by id once it has answered "
+                   "(`paseo agent archive PRED_ID`; the prompt above hands it the id)")
+# The successor cannot know its predecessor's id unless told: the double-quoted prompt expands $PASEO_AGENT_ID in the
+# predecessor's own shell.
+_SUCCESSOR_PROMPT = ('\"/baton <handoff path>, then archive $PASEO_AGENT_ID (your predecessor) with '
+                     '`paseo agent archive $PASEO_AGENT_ID` once you have answered\"')
+_SELF_SLASH = ("`env -u PASEO_AGENT_ID -u PASEO_AGENT_CWD paseo run --no-wait --provider claude --model claude-sonnet-5-5 "
+               "--thinking high --workspace \"$PASEO_WORKSPACE_ID\" " + _SUCCESSOR_PROMPT + "`" + _SUCCESSOR_TAIL)
 # At `critical` the Claude Code subscription is the exhausted pool. omp is off its dollar pool (API
 # credits: skills/model-routing/SKILL.md, claude-fleet-governor) but shares the Claude weekly rate
 # window, so aiuse gates it when every weekly window is exhausted (adversary r1 on PR 126, A1): omp
 # is a successor and keeps working only while `aiuse --available --json` still lists it.
-_SELF_SLASH_OMP = ("`~/src/djbclark-ade/bin/self-slash --finish --successor omp/anthropic/claude-sonnet-5-5 "
-                   "--thinking high`")
+_SELF_SLASH_OMP = ("`env -u PASEO_AGENT_ID -u PASEO_AGENT_CWD paseo run --no-wait --provider omp "
+                   "--model anthropic/claude-sonnet-5-5 --thinking high "
+                   "--workspace \"$PASEO_WORKSPACE_ID\" " + _SUCCESSOR_PROMPT + "`" + _SUCCESSOR_TAIL)
 _ADVERSARY = "`acp-dispatch omp --model anthropic/claude-opus-5-5 --kind judgment --effort high`"
 _RUNNING_PROJECTED = re.compile(r"projected to run out.*before reset", re.I | re.S)
 
@@ -174,7 +184,7 @@ def _advice(level: str, resets_at: str | None, source: str = "available",
         items[0] = "Claude quota tight: no Fable or Opus Agent-tool sub-agents."
         items += [
             f"A lead on Opus or Fable hands off now and continues on Sonnet 5.5 high: {_SELF_SLASH} "
-            "(Paseo; herdr/Orca: handoff then relaunch on Sonnet).",
+            "(Paseo; elsewhere: handoff then relaunch on Sonnet).",
             "No `acp-dispatch claude` slices.",
         ]
     if level == "critical":
@@ -186,12 +196,12 @@ def _advice(level: str, resets_at: str | None, source: str = "available",
         # Only the Claude Code subscription pool is exhausted. Work does not stop: a codex, grok
         # or opencode session never spends it, an omp one keeps working while aiuse lists omp, and a
         # Claude Code lead moves on (2026-10-29: idle omp sessions read "hand off, stop" as applying to
-        # them). self-slash takes an omp successor on Paseo only; herdr takes claude/MODEL and Orca none
-        # (bin/self-slash), so those hosts start omp by hand.
+        # them). The successor is a Paseo agent (`paseo run`); outside Paseo the handoff is written and omp
+        # is started by hand.
         items[3] = ("A Claude Code lead (provider claude, subscription) hands off now and continues off the "
                     "subscription. While `aiuse --available --json` lists omp: on Paseo an omp successor, "
-                    f"{_SELF_SLASH_OMP}; on herdr or Orca write the handoff, then start omp by hand in a new "
-                    "pane or tab (self-slash refuses an omp successor there). Without omp listed: a codex or "
+                    f"{_SELF_SLASH_OMP}; outside Paseo write the handoff, then start omp by hand in a new "
+                    "pane or tab. Without omp listed: a codex or "
                     "grok successor the same way.")
         items.append("No new Claude Code subscription work (Agent-tool sub-agents of a Claude Code session "
                      f"included) until the reset at {resets_at or 'unknown'}. This is not a stop order: a "

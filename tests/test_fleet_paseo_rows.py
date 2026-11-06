@@ -17,10 +17,8 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "skills" / "session-finder"))
-sys.path.insert(0, str(ROOT / "skills" / "helm"))
 
 import fleet  # noqa: E402  # pyright: ignore[reportMissingImports]
-import helm  # noqa: E402  # pyright: ignore[reportMissingImports]
 
 CLINE = "aaaaaaaa-1111-4000-8000-000000000001"
 CLAUDE = "aaaaaaaa-1111-4000-8000-000000000002"
@@ -178,11 +176,6 @@ def test_reach_text_tells_a_non_steering_agent_from_a_steering_one(paseo):
     assert "queued at its next tool round" in got[OMP] and "cannot steer" not in got[OMP]
 
 
-def test_helm_keeps_a_listed_paseo_agent_out_of_the_attention_queue(paseo):
-    r = rows()[0]
-    assert r["status"] == "idle" and not r["sid"]
-    it = helm.classify(r, {})
-    assert (it["kind"], it["open"]) == ("remote", False)
 
 
 # ---- the queued lows of 2026-10-23 (paseo-listing adversary) ----
@@ -191,15 +184,6 @@ def card(agent_id: str, name: str = "AskUserQuestion", description: str = "1. ye
     return {"id": req, "agentId": agent_id, "agentShortId": agent_id[:7], "name": name, "description": description}
 
 
-def test_helm_keeps_a_claude_on_paseo_agent_in_the_attention_queue(monkeypatch):
-    """L1: a Claude agent Paseo hosts has a transcript (a sid): its question reaches helm like any Claude TUI's."""
-    s = fleet._rec(id="deadbeef", agent="claude", host="paseo", chan=("paseo", CLAUDE), paseo=CLAUDE, sid="s" * 36,
-                   status="blocked", cwd="/x/y")
-    ask = {"questions": [{"question": "Which?", "options": [{"label": "a"}, {"label": "b"}]}]}
-    monkeypatch.setattr(helm, "transcript", lambda sid: Path("t.jsonl"))
-    monkeypatch.setattr(helm, "parse", lambda p: {"last_text": "", "pending": [("toolu_1", "AskUserQuestion", ask)]})
-    it = helm.classify(s, {})
-    assert (it["kind"], it["open"]) == ("question", True)
 
 
 def test_a_slow_cli_is_cut_off_at_the_timeout_even_when_it_would_list_agents(paseo, monkeypatch, tmp_path):
@@ -270,16 +254,6 @@ def test_a_failed_card_listing_leaves_the_rows_as_they_were(paseo, monkeypatch):
     assert paseo.log.read_text().splitlines() == ["ls -g --json --background"]
 
 
-def test_helm_shows_a_blocked_paseo_agent_as_an_open_permission_item_it_cannot_press_keys_for(paseo):
-    paseo.permits.write_text(json.dumps([card(OMP)]))
-    r = next(r for r in rows() if r["paseo"] == OMP)
-    it = helm.classify(r, {})
-    assert (it["kind"], it["open"], it["reachable"]) == ("permission", True, False)
-    text = helm.render(it)
-    assert "AskUserQuestion: 1. yes / 2. no" in text and "paseo permit" in text and "helm.py keys" not in text
-    with pytest.raises(SystemExit) as e:
-        helm.cmd_keys(type("A", (), {"id": it["id"], "key": ["1"]}), {})
-    assert "allow|deny <agent> -- <request id>" in str(e.value)    # the same `--` the card text carries: an id read as an option is "approve every card"
 
 
 def test_relay_refuses_a_paseo_agent_with_a_pending_card_and_names_the_paseo_ui(paseo):
@@ -290,60 +264,16 @@ def test_relay_refuses_a_paseo_agent_with_a_pending_card_and_names_the_paseo_ui(
     assert why and "Paseo UI" in why and "helm.py" not in why and "allow|deny <agent> -- <request id>" in why
 
 
-def test_every_pending_card_is_kept_with_its_request_id_and_helm_prints_a_command_per_card(paseo):
-    """M1 (adversary): `paseo permit allow AGENT` with no request id approves ALL cards and `deny` without one fails."""
-    paseo.permits.write_text(json.dumps([card(OMP, "Bash", "echo safe", "req-a"), card(CLINE, "x", "y", "other"),
-                                         card(OMP, "Bash", "rm -rf ~", "req-b")]))
-    r = next(r for r in rows() if r["paseo"] == OMP)
-    assert [c["id"] for c in r["paseo_cards"]] == ["req-a", "req-b"]
-    assert r["paseo_pending"] == "2 cards, the first: Bash: echo safe"
-    text = helm.render(helm.classify(r, {}))
-    for req in ("req-a", "req-b"):
-        assert f"`paseo permit allow {OMP} -- {req}`" in text and f"`paseo permit deny {OMP} -- {req}`" in text
-    assert "Bash: rm -rf ~" in text
-    assert re.findall(rf"paseo permit (?:allow|deny)(?! {OMP} -- req-)", text) == []    # never a command without its request id
 
 
-def test_a_new_card_reopens_a_skipped_paseo_item(paseo):
-    paseo.permits.write_text(json.dumps([card(OMP, "Bash", "echo safe", "req-a")]))
-    one = helm.classify(next(r for r in rows() if r["paseo"] == OMP), {})
-    paseo.permits.write_text(json.dumps([card(OMP, "Bash", "echo safe", "req-a"), card(OMP, "Bash", "rm -rf ~", "req-b")]))
-    two = helm.classify(next(r for r in rows() if r["paseo"] == OMP), {})
-    assert one["fp"] != two["fp"]
-    assert helm.classify(next(r for r in rows() if r["paseo"] == OMP), {})["fp"] == two["fp"]    # stable while nothing changes
-    paseo.permits.write_text(json.dumps([card(OMP, "Bash", "echo safe", "req-a"), card(OMP, "Bash", "rm -rf ~", "req-c")]))
-    assert helm.classify(next(r for r in rows() if r["paseo"] == OMP), {})["fp"] not in (one["fp"], two["fp"])    # same texts as `two`, new request id
 
 
-def test_helm_lists_up_to_eight_cards_and_points_at_paseo_permit_ls_for_the_rest(paseo):
-    paseo.permits.write_text(json.dumps([card(OMP, "Bash", f"cmd {n}", f"req-{n}") for n in range(10)]))
-    text = helm.render(helm.classify(next(r for r in rows() if r["paseo"] == OMP), {}))
-    assert f"paseo permit allow {OMP} -- req-7`" in text and "req-8" not in text
-    assert "and 2 more cards: `paseo permit ls`" in text
 
 
-def test_a_request_id_that_is_not_a_plain_token_gets_no_command(paseo):
-    paseo.permits.write_text(json.dumps([card(OMP, "Bash", "echo", "x; rm -rf ~")]))
-    r = next(r for r in rows() if r["paseo"] == OMP)
-    assert r["paseo_cards"][0]["id"] is None
-    text = helm.render(helm.classify(r, {}))
-    assert "paseo permit allow" not in text and "Paseo UI" in text
 
 
-@pytest.mark.parametrize("rid", ["--all", "-h", "-", "-x", "--input", ".hidden", ":x", "a" * 81])
-def test_a_request_id_the_paseo_cli_would_read_as_an_option_gets_no_command(paseo, rid):
-    """L-A (adversary 2): `permit allow AGENT --all` approves every card; an id must start alphanumeric and be at most 80 characters."""
-    paseo.permits.write_text(json.dumps([card(OMP, "Bash", "echo", rid)]))
-    r = next(r for r in rows() if r["paseo"] == OMP)
-    assert r["paseo_cards"][0]["id"] is None
-    text = helm.render(helm.classify(r, {}))
-    assert "paseo permit allow" not in text and "Paseo UI" in text
 
 
-def test_the_printed_command_ends_option_parsing_before_the_request_id(paseo):
-    paseo.permits.write_text(json.dumps([card(OMP, "Bash", "echo", "0-ok.id:1")]))
-    text = helm.render(helm.classify(next(r for r in rows() if r["paseo"] == OMP), {}))
-    assert f"`paseo permit allow {OMP} -- 0-ok.id:1`" in text
 
 
 def test_a_paseo_agent_with_no_claude_row_is_not_found_by_its_workspace_title(paseo):

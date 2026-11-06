@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One Claude session id for every identity read (2026-11-02, PR 248 scope addition 3; autorename got the same rule in PR 259).
+"""One Claude session id for every identity read (2026-11-02, PR 248 scope addition 3).
 
 A /baton successor inherits its predecessor's CLAUDE_CODE_SESSION_ID, and a non-Claude agent started from a Claude shell inherits CLAUDE_PID. With
 the session id now beating the pane match in fleet, a stale id would resolve a successor to its predecessor. The registry
@@ -195,17 +195,6 @@ class TestAutorenameAndAdeClaimsShareIt(Base):
             return proc.returncode, out.strip()
         self.assertEqual(run(env), (0, STALE))    # no CLAUDE_PID: the env var
         self.assertEqual(run({"PATH": os.environ["PATH"]}), (1, ""))
-
-    def test_autorename_uses_the_same_helper(self) -> None:
-        import importlib.util
-        spec = importlib.util.spec_from_file_location("autorename_t", Path(__file__).resolve().parent.parent / "skills/autorename/autorename.py")
-        assert spec and spec.loader
-        ar = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(ar)
-        self.register()
-        with mock.patch.object(ar, "ancestor_pids", lambda: list(self.ancestors)):
-            self.assertEqual(ar.registered_claude_session_id(), LIVE)
-        self.assertIs(ar.claude_identity.registered_session_id, cid.registered_session_id)
 
 
 class TestThePaneCaseStillHolds(sh.TestOwnSessionIdBeatsThePane):
