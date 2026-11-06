@@ -299,7 +299,7 @@ C3), and `load-watch`'s attribution plus `context-watch` are rewritten to read
 runs `cmd_sample` through attribution on a synthetic sustained spike
 (`bin/load-watch:1227-1233` calls it unguarded; a `ModuleNotFoundError` there
 would disable the threat model's runaway-load response),
-`context-budget-check` (DECIDE J3: it is also PR 289's hook host),
+`context-budget-check` KEEP as a Paseo schedule (J3; PR 289's hook host),
 `launchd/com.djbclark.{rumination-watch,session-history-update,context-budget,routing-recalibrate,skillopt-sleep,zcode-key-auth}.plist`.
 
 E6. **S-acp: SHIM then delete.** `acp-dispatch` becomes a wrapper over
@@ -552,8 +552,9 @@ scripts stay in the state dir as history; their job is the E8 Action plus
 `local-review` and `pr-wait`, all of which Waves 3–4 replace, so "decide
 after the split" is decided by the split. Retire them, or port them onto
 `paseo run` plus the E8 Action? Must be answered before Wave 3.
-J3. `context-budget-check`: keep (PR 289 hooks into it) or fold its one
-check into `instruction-lint`?
+J3. [answered 2026-11-06: **keep**, run as a Paseo schedule; its launchd
+plist goes; PR 289's hook stays wired] `context-budget-check`: keep (PR 289
+hooks into it) or fold its one check into `instruction-lint`?
 J4. Dormant pieces: delete `jev`, `prior_art_nudge`, `skillopt-night`
 (default yes to all three)?
 J5. `docs/queue.md`: triage into a doc, or into `anh-chu/tasks` (124
