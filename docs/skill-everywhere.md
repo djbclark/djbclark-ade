@@ -136,32 +136,26 @@ to run `reload-plugins` the same way. Claude Code slash wrappers live in
 `~/src/djbclark-ade/claude/commands/` and are symlinked directly into
 `~/.claude/commands/`.
 
-## 3a. Paseo's skill sync and our vendored Paseo skills (2026-10-23, renamed 2026-11-02)
+## 3a. Paseo's skill sync and Paseo's own skills (2026-10-23, rewritten 2026-11-06)
 
-**Our six vendored Paseo skills carry an `ade-` prefix** (`ade-paseo`, `ade-paseo-advisor`, `ade-paseo-committee`,
-`ade-paseo-handoff`, `ade-paseo-help`, `ade-paseo-plugin`) **so Paseo never touches them.** Paseo owns skills by
-name: every name in its bundle (`paseo`, `paseo-advisor`, `paseo-committee`, `paseo-handoff`, `paseo-help`,
-`paseo-plugin`) is compared in `~/.agents/skills/<name>` and `~/.claude/skills/<name>` with its bundled copy, and a
-difference is "drift" that the daemon's startup sync and any skills install, update or save rewrite. Under the old
-unprefixed names those entries were directory links into this repo, so each rewrite landed here (2026-10-19, twice on
-2026-10-24 by the dev daemon, and 2026-11-01 21:33:38 with the installed 0.15.0-beta.1 bundle; manifests
-`.paseo-managed-files.json` beside each). A name Paseo does not ship is invisible to all of its code paths, in every
-build and every Paseo home.
+**The six vendored copies (`ade-paseo`, `ade-paseo-advisor`, `ade-paseo-committee`, `ade-paseo-handoff`,
+`ade-paseo-help`, `ade-paseo-plugin`) were deleted 2026-11-06** (slim-down R2-2, Wave 3b); Paseo's own shipped skills
+replace them: `paseo`, `paseo-advisor`, `paseo-committee`, `paseo-handoff`, `paseo-help`, `paseo-plugin`. Paseo owns
+those names: every name in its bundle is compared in `~/.agents/skills/<name>` and `~/.claude/skills/<name>` with its
+bundled copy, and the daemon's startup sync and any skills install, update or save rewrite a difference. That is
+harmless now that no entry of those names is a link into this repo (it was not before 2026-11-02: the unprefixed
+links were overwritten, getpaseo/paseo#7700, and the repo copies were renamed `ade-*` for that reason).
 
-1. **Keep every Paseo home's selection empty**: `agents.skills.selection = {"mode":"custom","skills":[]}` in
-   `~/.paseo/config.json` and in every dev or test home before its daemon starts (`~/src/paseo/.dev/paseo-home` has
-   it). With `{"mode":"all"}` (the default) Paseo installs its own unprefixed copies beside ours, and their broad
-   triggers ("handoff", "second opinion", "stuck") compete with the narrowed ones. The persisted path is
-   `agents.skills.selection`; a top-level `"skills"` key is rejected by `paseo reload`.
-2. With an empty selection Paseo's settings screen lists any leftover unprefixed copies as "to be removed"; after
-   the rename that removal is harmless (they are not ours).
-3. Re-vendoring a newer Paseo bundle is done by hand (`skills/ade-paseo/UPSTREAM.md`), keeping the prefix.
-4. Tried and dropped before the rename: the empty selection alone (it is per Paseo home, while every home writes the
-   one real `$HOME` skill dirs), and a real directory holding per-file symlinks (Paseo's sync throws before writing,
-   but Cursor's loader rejects a `SKILL.md` symlink that resolves outside its skills root, codex `gpt-6-astra` review
-   2026-10-23).
-5. Upstream: [getpaseo/paseo#7700](https://github.com/getpaseo/paseo/issues/7700), #7853, `docs/upstream-issues.md`
-   item 10.
+1. **Operator step (final-merge batch)**: install Paseo's bundle with `npx skills add getpaseo/paseo`, or switch each
+   Paseo home's `agents.skills.selection` in `~/.paseo/config.json` from `{"mode":"custom","skills":[]}` to the bundle
+   (`{"mode":"all"}` is the default; the persisted path is `agents.skills.selection`, a top-level `"skills"` key is
+   rejected by `paseo reload`). Remove any leftover `~/.agents/skills/ade-paseo*` and `~/.claude/skills/ade-paseo*`
+   links that now dangle.
+2. Their broad triggers ("handoff", "second opinion", "stuck") compete with this repo's `handoff` skill until D3
+   (native-resume trial) and E6 (`dialogue`) land; if they steal requests, narrow the selection to `paseo`,
+   `paseo-help` and `paseo-plugin` rather than editing a copy.
+3. No re-vendoring: the three local patches of the old `skills/ade-paseo/UPSTREAM.md` (narrowed triggers, an interim
+   worktree-isolation line, the `ade-` prefix) are gone with it (version control has it).
 
 ## 4. When the table is wrong
 

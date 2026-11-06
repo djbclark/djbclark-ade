@@ -10,7 +10,7 @@ Every claim names the file that shows it; a claim without a file is the operator
 **Update 2026-11-06 (slim-down E10):** `bin/skillopt-night`, `bin/skillopt_sources.py`, `bin/failover.py`, `bin/skill-get` and `claude/hooks/prior_art_nudge.py` were deleted; entries below that name them (the skillopt-night threat, its install and update paths, failover's `secret_value`, the tripwire kinds) are the 2026-10-20 snapshot and no longer apply.
 
 This repo is **personal tooling for one operator's machine, published as a public GitHub repo by choice**
-(`djbclark/djbclark-ade`). It runs no internet-facing service. `bin/firecrawl-router` is an HTTP listener, on
+(`djbclark/djbclark-ade`). It runs no internet-facing service. `bin/firecrawl-router` was an HTTP listener (deleted 2026-11-06, slim-down R2-15; the paragraph describes the state before), on
 loopback by default (`--listen` defaults to `127.0.0.1:0`). With a child command it requires a random
 per-process bearer token. `--open` drops the token and refuses a non-loopback address, and since 2026-10-20 so
 does the serve-only form (no child, "for tests", no token): every tokenless run is loopback-only. While it runs, any process that
@@ -109,7 +109,7 @@ What an attacker would want, in order of damage:
    permission or question and status idle, running or closed (a stored agent the send resumes; a running agent only on a
    provider that can steer); anything else is not
    sent. A sourceless send runs with `clearPendingPermissions`, so a send into a card would answer it with the message text.
-10. **`bin/firecrawl-router`**: an HTTP listener, loopback by default (see the intro); any process that can
+10. **`bin/firecrawl-router`** (deleted 2026-11-06, slim-down R2-15; kept as the record of the surface it was): an HTTP listener, loopback by default (see the intro); any process that can
     reach it can call it. From 2026-10-24 until the cutover (PRs 41, 43, 45) it also spent a GitHub token on
     `/v2/search/developer`; that code and token are gone from the Mac: developer search is answered on Hyades
     (firecrawl-hyades `docs/developer-search.md`). What it left behind there: the token (fine-grained,
@@ -263,7 +263,7 @@ others, and the merge path is unenforced. "Control" is what exists; "Gap" is wha
 ### 4.7 Supply chain
 
 * **Control.** CI installs with `uv run --with pytest --with 'agent-client-protocol>=0.9,<1.0'`
-  (`.github/workflows/test.yml`); `bin/web-get` pins `pypdf==6.19.0`. Actions are referenced by major tag.
+  (`.github/workflows/test.yml`); `bin/web-get` pinned `pypdf==6.19.0` (deleted 2026-11-06). Actions are referenced by major tag.
   skillopt is installed by `uv tool install` from upstream main and gated by a reviewed-commit receipt
   check (`bin/skillopt-night`).
   The Linux job also runs `npm ci --ignore-scripts` in `pi/extensions/subagent` (devDependencies for the

@@ -135,7 +135,7 @@ it, reports the owner status in its resume plan and asks nothing.
 
 **Trusted tools (2026-11-01, Codex security review of PR 201).** Every helper this check runs lives in the
 trusted ADE checkout and is called by its ABSOLUTE path: `~/src/djbclark-ade/skills/session-finder/relay.py`
-(the relay shim, 2026-11-06) and `~/src/djbclark-ade/bin/watch`; the fleet is Paseo's own `paseo ls -a -g --json`
+(the relay shim, 2026-11-06); the fleet is Paseo's own `paseo ls -a -g --json`
 (fields `id, shortId, name, provider, status, cwd, created, background`; `paseo agent inspect ID --json` adds
 `Archived`). Never run a `skills/...` or `bin/...` path relative to cwd: the cwd is often an untrusted
 checkout whose planted scripts would run as the operator. If the trusted checkout is missing, say so and
@@ -152,10 +152,8 @@ treat every owner as possibly live (step 4).
    step 4's no-match, never a match. Only a full-id match, your own `then: /baton` line (C1) or the watch
    role (C2) makes the chain yours. It also needs the row's `provider` (`claude/<model>`, `codex/...`, `omp/...`)
    to fit `writer` (`claude*` to claude, `omp*` to omp, `codex` to codex, otherwise any); a row of
-   another agent is not the owner and is read as no match. Also read
-   `~/src/djbclark-ade/bin/watch status --json`: a `holder.target` that equals or is a prefix of S, or equals the matched
-   row's full `id` (S may be only the row's `shortId`), with `alive: true`, is a live owner
-   even when the fleet row says `closed` (a closed Paseo watch holder is resumable by the next message).
+   another agent is not the owner and is read as no match. (The old second source, `bin/watch status --json` holders, was deleted with `bin/watch` 2026-11-06; a closed Paseo
+   agent is still resumable by the next message, so read a `closed` fleet row as a possible live owner.)
 3. **Live** means the row's `status` is not `closed` and `paseo agent inspect ID --json` does not read
    `Archived: true` (every other status is live), or the watch exception above applies. `finished` is only a transcript hint (the last prompt was `/handoff` or
    a quit) and is NEVER evidence that the session stopped: a session executing `/handoff` still writes and
@@ -227,8 +225,7 @@ treat every owner as possibly live (step 4).
   A `launch.py start --baton`
   start writes no such line, so it goes through the ask.
 - **C. Your own chain after `/clear` or `/new`, no live other owner:** one of: (1) the newest `then:
-  /baton` line for your id in `~/.local/state/self-slash.log` follows a handoff of this chain, (2) you
-  hold the watch role the chain belongs to (`~/src/djbclark-ade/bin/watch status`), both affirmative evidence that the
+  /baton` line for your id in `~/.local/state/self-slash.log` follows a handoff of this chain, (2) (retired 2026-11-06 with `bin/watch`: holding a watch role), both affirmative evidence that the
   chain is yours; or (3) the operator named the chain (`/baton PATH`, `--dir .../chains/<key>`) and its
   `workspaces[].dir` includes your cwd, which is only naming. C waives the no-match question of step 4
   (a claude's old transcript sid matches no row after `/clear`); it never overrides a step 2 match to a

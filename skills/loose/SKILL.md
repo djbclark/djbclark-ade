@@ -227,10 +227,9 @@ sub-agent or a dispatched slice shares or inherits the parent's agent id, so it 
 Rule 4's `self-slash`, `--finish` or Step 9; it treats a handoff as document-only and
 reports.
 
-**Never offer or run finish for a session that holds a watch role** (`bin/watch status` names the
-holder; the load, CFEngine and Paseo watchers are such sessions). on Paseo `self-slash --finish` refuses them with
-exit 12 (2026-10-25: a /baton-resumed load watcher queued its own archive; it fails open if `watch status` fails, and
-herdr/Orca watchers are retired from djbclark-ade 2026-10-31 and not guarded; check `bin/watch status` yourself if one exists). Offer handoff and continue, or
+**Never offer or run finish for a session that holds a standing watcher role** (the load, CFEngine and Paseo watchers
+are such sessions; 2026-10-25: a /baton-resumed load watcher queued its own archive). The `bin/watch` registry that
+named the holder and the exit-12 guard were deleted 2026-11-06, so check yourself. Offer handoff and continue, or
 keep working; to end it, hand the role over first.
 
 A built-in like `/quit` is not a skill, but you can queue it yourself (operator,

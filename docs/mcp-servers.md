@@ -20,7 +20,7 @@ why, and how to re-enable. This table is otherwise the 2026-08-23 snapshot.
 | `ghost-os` | stdio: `/opt/homebrew/bin/ghost mcp` | user | macOS UI automation via accessibility tree + vision. **Blocked in Claude Code since 2026-10-10** (`deniedMcpServers`) |
 | `hindsight` | stdio: `node ~/.hindsight/coding-agents/dist/mcp-server.js` | user | Per-repo Hindsight coding-agent memory (the 🧠 banner) |
 | `hindsight-shared` | HTTP: `http://127.0.0.1:8888/mcp/hermes-shared/` | user | Shared Hindsight bank (`hermes-shared` in the URL is the bank name) |
-| `firecrawl` | HTTP: `http://127.0.0.1:18804/mcp` (LaunchAgent `com.djbclark.firecrawl-mcp`) | all agent TUIs | Scrape, search, crawl, map on self-hosted Firecrawl (SIPB Hyades) through `firecrawl-router`; the firecrawl skill, `~/ops/site-public-djbclark/skills/firecrawl/SKILL.md` (moved 2026-11-06). `firecrawl_developer_search` is answered by the Hyades API itself (a `devsearch` sidecar over the GitHub search API, 2026-10-24), see below |
+| `firecrawl` | HTTP: `http://127.0.0.1:18804/mcp` (LaunchAgent `com.djbclark.firecrawl-mcp`) | all agent TUIs | Scrape, search, crawl, map on self-hosted Firecrawl (SIPB Hyades) through `firecrawl-router` (deleted from this repo 2026-11-06; whatever listens on that port now is machine-side, not this repo's); the firecrawl skill, `~/ops/site-public-djbclark/skills/firecrawl/SKILL.md` (moved 2026-11-06). `firecrawl_developer_search` is answered by the Hyades API itself (a `devsearch` sidecar over the GitHub search API, 2026-10-24), see below |
 | claude.ai Gmail / Google Calendar / Google Drive | HTTPS (Google-hosted) | claude.ai account | Remote connectors managed on claude.ai, not in local config |
 
 ## Firecrawl developer search (2026-10-24)
