@@ -1,0 +1,2 @@
+### Removed
+- Removed `bin/watch`, `config/watch.toml`, `skills/watch`, `skills/paseowatch` and `skills/cfenginewatch` (the two upstream watchers become Paseo schedules), `bin/web-get`, `bin/web-digest`, `bin/firecrawl-router` and the web-access half of `skills/fallback-chains`, the pi and zcode leftovers (`pi/extensions/subagent`, `zcode/commands/`), the `.pi/`, `.kiro/`, `.windsurf/`, `.gemini/` and `.adal/` provider directories, and the six vendored `skills/ade-paseo*` skills (Paseo's own `paseo*` skills replace them) (#0)
