@@ -38,8 +38,7 @@ sudo-secretspec, ralph-tui-create-*, ...) stay where their installer put them.
 orchestration and session-hygiene skills since 2026-10-08 (`autorename` joined
 that day) and of every hand-written skill since 2026-10-09.
 **A new skill always goes here** (operator standing rule, 2026-10-09). **Edit a
-skill here, never through a TUI path.** `/helm-all`, `/session-finder-all`,
-`/resume` and `/paseo-screen` are thin Claude command wrappers in
+skill here, never through a TUI path.** `/resume` and `/paseo-screen` are thin Claude command wrappers in
 [`claude/commands/`](../claude/commands/). The `herdr-tidy` and `reorg-orca`
 skills (and their `/herdr-tidy`, `/orca-tidy` wrappers) were retired from
 djbclark-ade on 2026-10-31; the tools stay installed on the machine.
@@ -48,7 +47,6 @@ djbclark-ade on 2026-10-31; the tools stay installed on the machine.
 
 | Skill | What it does | How to use |
 |---|---|---|
-| `autorename` | Titles the current Claude Code, zcode, Grok, cursor-agent, OpenCode, Codex (in a herdr pane), omp or Pi session like `/rename` and names its own tab (the Paseo tab, or the herdr tab label); with no argument it never renames a workspace or moves a tab (2026-10-30). `/autorename all` is retired (2026-10-31) and refused in every host; `herdr_place.py` stays until the D4/D6 drain. omp needs the `omp-bridge.ts` extension symlinked into `~/.omp/agent/extensions/` and an omp restart. A once-per-session nudge asks for that title (Claude Code and zcode on UserPromptSubmit, Grok on Stop in `~/.grok/hooks/autorename.json`, cursor-agent via the `~/.claude/settings.json` hook it also loads, as `beforeSubmitPrompt`; Grok discards UserPromptSubmit context, hence Stop). `workspace-layout.md` is the record of the retired herdr layout pass. | `/autorename`; `/autorename all` is retired (2026-10-31) and refused in every host; it used to run the full herdr reorg (create and rename workspaces, move tabs; rename a tab only when its label is a single digit); "name this session". Special workspaces and their top-of-herdr order come from `~/.config/autorename/workspaces.conf`. Runs by itself as the last step of `/handoff`. |
 | `handoff` | Deep Tier 2 handoff document, chain-tagged and mined from the whole conversation; its last step (9) clears this session with `self-slash "/new"`, which queues one `/baton` into the fresh session, or, on Paseo when the session runs on Fable, the quota guard says tight/critical or the operator asks for another model, runs `self-slash --finish --successor claude/claude-opus-5-5 --thinking high` (Sonnet 5.5 when the guard says tight; plain `/new` when the session already runs on the target model), a new agent that starts with `/baton` (2026-10-23) (skipped for a doc-only handoff, and never run by a sub-agent or dispatched slice, 2026-10-20). On Paseo the pre-`/clear` transcript is not kept by `paseo logs` once `/baton` runs (2026-10-20; UI unverified), so what the operator must read goes into the handoff document, the Tier 1 pointer and the hermes-ping. | `/handoff`; "do a handoff"; before ending a long session. |
 | `session-handoff` | Reads and writes the Tier 1 pointer (`SESSION_LOG.md`) for any git repo. | Runs at session start and end; "update session log". |
 | `baton` | Resumes a workspace from its Tier 1 pointer. | `/baton` or `/resume` at the start of a session. |
@@ -60,7 +58,6 @@ djbclark-ade on 2026-10-31; the tools stay installed on the machine.
 | `steps` | Walks open items one multiple-choice prompt at a time, recommendation first. On Grok Bot the prompt is a `SendToUser` question widget (section 2d, 2026-10-23). Plan mode (section 6, 2026-11-04, explicit only): interviews the operator on 3-5 real design forks before a plan is written. | `/steps` (optionally item numbers or a topic); `/steps plan [topic\|file]`; "walk me through it". |
 | `retro` | Periodic self-review (2026-11-04): runs `bin/ade-retro --since DATE` (merged PRs, changelog entries, handoffs in the window) and writes a short retrospective: what shipped, what recurred, what to queue, instruction-file rules worth adding. Read-only. | `/retro`, "retro since 2026-10-28". |
 | `session-finder` | Finds which session is or ever was on a topic, where it lives, and how to continue it. | `/session-finder`, `/session-finder-all` (adds ended sessions); "tell the agent doing X ...". |
-| `helm` | Answers every waiting session of every TUI from one window. Lead mode (`/helm lead`, alias `/watch lead`) contacts every running agent, unblocks what rules and probes settle, and takes their picklist questions through `relay.py` instead of cards. | `/helm`, `/helm-all`, `/helm auto`, `/helm lead`; "what needs me", "unblock every agent". |
 
 ## Orchestration and routing
 

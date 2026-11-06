@@ -11,6 +11,7 @@
   retired accounts are `never_route` in discovery, so an aiuse account for one is never surfaced as a dispatchable service. The `github` kind now has no pool. (#0)
 - `bin/skill-everywhere` no longer links goose, pi, agy, copilot, qwen, devin, cline, muse or zcode. (#0)
 - Removed `bin/proc-cpu-watch`, `bin/session-load-watch`, `bin/rumination-watch`, `bin/routing-recalibrate`, the `loadwatch` skill and the proc-cpu-watch, rumination-watch, routing-recalibrate, session-history-update and context-budget launchd plists (slim-down E5) (#0).
+- Removed `skills/helm` and `/helm-all` (`paseo permit ls` and the asks / questions-please plugins are the operator inbox), `bin/self-slash`, `bin/paseo-self`, `bin/opencode-self-compact`, `skills/autorename` (its `workspace-layout.md` is now `docs/workspace-layout.md`), `bin/paseo-new-seat` (`paseo run`), `bin/paseo-bypass-watch` (`paseo agent mode`); `bin/watch` launches watchers with `paseo run --no-wait` (slim-down E4) (#0).
 
 ### Changed
 - `bin/route_agent.py` and `bin/acp-dispatch` lost the Pi capacity gate, the `agy` model-family mapping, the agy report-path and resume special cases and the
@@ -18,3 +19,4 @@
 - Changed `load-watch`: it attributes a spike to a Paseo agent from `paseo ls -g --background --json` by working directory (the walk up stopping at the agent's own CLI), tells it with `paseo send --no-wait --json` (reading `.status`; `queued` is not delivered), sends work that several agents share or that it cannot attribute to the operator, and drops the relay.py channel and `watcher set --relay`/`--sid` (slim-down E5) (#0).
 - Changed `context-budget-check`: `install`/`uninstall` removed (exit 2); it runs as a nightly Paseo schedule (J3) (#0).
 - Changed `context-watch`: it no longer imports session-finder's `fleet.py` (slim-down E5) (#0).
+- Changed the quota-guard and fleet-governor successor advice and the handoff skill: a successor is launched with `env -u PASEO_AGENT_ID -u PASEO_AGENT_CWD paseo run …` and archives its predecessor by id once it has answered; the context nudge leaves compaction to auto-compaction (slim-down E4) (#0).
