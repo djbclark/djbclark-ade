@@ -124,3 +124,19 @@ stopped.
   slim branch so the record is in one place.
 - Nothing else until #289 and #291 land on master, after which the slim
   branch rebases on master and inherits them.
+
+## R8. Open PRs no check-in covers (live list 2026-11-06; provisional, the owner may still report)
+
+| PR | Branch | Touches | Provisional |
+|---|---|---|---|
+| 194 | `finder-consent-agents-cleanup` | AGENTS.md: drop date annotations and incident narratives | DISCARD; E11 rewrites AGENTS.md wholesale, and this would conflict with every slice |
+| 208 | `astra-readonly` | acp-run / acp-dispatch read-only advise slices | DISCARD (E6 deletes both) |
+| 227 | `bottom-config-uncapped-command` | bottom-config doc | DISCARD here; E1c moves `bottom-config` to site-djbclark, re-apply the one hunk there if still wanted |
+| 231 | `mds-client-probe` | load-watch mds probe | PARK with #293 (E5) |
+| 254 | `habits-gate-subshell` | `bash_habits_gate` parsing fix | LAND if small and green (a Claude hook, KEEP), else PARK to Wave 5 |
+| 256 | `open-clean-env` | `bin/open-clean`, launch apps without the agent env | PARK; a Mac-only utility, decide in E1/E2 audit (likely MOVE to site-djbclark) |
+| 260 | `route-repo-scope` | route_agent per-repo pools (opencode-go) | DISCARD under H1 Claude-only; PARK otherwise (E7) |
+| 269 | `coding-bot-peer-link` | coding-bot over peer-link | DISCARD under H1; PARK otherwise (H2a iv) |
+| 281 | `fix/opencode-bridge-econnrefused-guard` | opencode-plugin-guard | DISCARD under H1 (E9); PARK otherwise |
+
+Operator does: nothing yet; these wait for batch 2 and H1. If an owner reports, its ruling supersedes this row.
