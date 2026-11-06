@@ -24,6 +24,10 @@
 #   ade-git-guard git-ARGS...             the same, called by name
 #   ade-git-guard install [DIR]           install the hook stubs into DIR's repository (exit 2 not a repository,
 #                                         78 core.hooksPath is set, 73 NAME.pre-ade is in the way)
+#   ade-git-guard claim ls [--state S] [--json]
+#                                         list what the claim registry holds (`ade_claims.py list`; S is active,
+#                                         released, merged or expired; 2026-11-06, slim-down E8: before, the
+#                                         listing existed only as `bin/ade_claims.py list`)
 #   ade-git-guard --real-git              print the git this guard would run
 #   ade-git-guard --help
 #
@@ -112,6 +116,19 @@ if [ "${self##*/}" = "ade-git-guard" ]; then
       run_python install "${@:2}"
       rc=$?
       case "$rc" in 126) echo "ade-git-guard: install needs python3 and bin/ade_claims.py" >&2; exit 1 ;; *) exit "$rc" ;; esac
+      ;;
+    claim)
+      case "${2:-}" in
+        ls | list)
+          run_python list "${@:3}"
+          rc=$?
+          case "$rc" in 126) echo "ade-git-guard: claim ls needs python3 and bin/ade_claims.py" >&2; exit 1 ;; *) exit "$rc" ;; esac
+          ;;
+        *)
+          echo "usage: ade-git-guard claim ls [--state active|released|merged|expired] [--json]" >&2
+          exit 2
+          ;;
+      esac
       ;;
   esac
 fi

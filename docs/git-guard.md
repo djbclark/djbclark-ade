@@ -40,15 +40,26 @@ operator's shell, Orca and IDEs never go through the shim.
 | `ade-git-guard git-ARGS...` | The same, called by name. |
 | `ade-git-guard install [DIR]` | Write the chain-preserving hook stubs into `$(git rev-parse --git-common-dir)/hooks` of DIR's repository (one install covers every linked worktree). Idempotent. An existing hook of the same name is renamed `NAME.pre-ade` and runs after ours. Exit 0 ok, 2 not a repository, 78 `core.hooksPath` is set (git would never run the stubs; unset it or call the stubs from the directory it names), 73 `NAME.pre-ade` is already in the way. |
 | `ade-git-guard --real-git` | Print the git the guard would run. |
-| `ade_claims.py new --id ID --path DIR --branch B --base-sha S [...]` | Create a claim and its pointer; exit 3 id exists, 4 path held by another owner's active claim. |
-| `ade_claims.py show ID [--field F]`, `find [DIR]`, `list [--state S] [--json]`, `set-state ID active\|released\|merged` | Read and change claims; exit 1 when not found. |
+| `ade-git-guard claim ls [--state active\|released\|merged\|expired] [--json]` | List what the claim registry holds: id, state, branch, owner, path, `expires_at` (2026-11-06; until then the listing was only `ade_claims.py list`, PLAN C5). Exit 2 for any other `claim` verb. |
+| `ade_claims.py new --id ID --path DIR --branch B --base-sha S [--ttl HOURS] [...]` | Create a claim and its pointer; it expires after `--ttl` hours (default 72, 0 = never); exit 3 id exists, 4 path held by another owner's active claim. |
+| `ade_claims.py list [--state S] [--json]` | What `claim ls` runs. |
 | `ade_claims.py guard -- GIT_ARGS...` | What the shim runs. |
 | `ade_claims.py hook-ref STATE`, `hook-push REMOTE URL` | What the two hooks run (stdin is git's). |
 
 Exit codes: 77 = refused (`EX_NOPERM`); any other code of a shimmed call is the real git's (a call a hook refused ends
 with git's own 128 and `fatal: ... aborted by the reference-transaction hook`). Every `ade_claims.py` subcommand exits 0
-ok, 1 not found, 2 usage, 3 id exists, 4 path owned by another owner's active claim, 77 refused; `install` also 73 and 78
+ok, 2 usage, 3 id exists, 4 path owned by another owner's active claim, 77 refused; `install` also 73 and 78
 (78 also when git does not say whether `core.hooksPath` is set; an empty `core.hooksPath` is "set").
+
+## Claims: owner and expiry (trimmed 2026-11-06, slim-down E8, D9)
+
+A claim names its owner (`owner.record`, `owner.session`, `allow`) and, since 2026-11-06, when it stops guarding
+(`expires_at`, set by `new --ttl`, default 72 h). An active claim past its `expires_at` is **expired**: the shim and the hooks
+treat its workspace as unclaimed, `claim ls` shows it as `expired`, and another owner may claim the path. Expiry is read, not
+written, so an agent that died never leaves a workspace guarded for good; a record with no `expires_at` (all records before
+2026-11-06) never expires, and one that does not parse keeps the protection on. The CLI verbs `show`, `find` and
+`set-state` had no caller and were removed the same day (the library functions stay for the guard, the hooks and the tests);
+a claim is ended by its owner's tooling with `ade_claims.set_state(id, "released")`, or simply expires.
 
 ## Who is guarded
 

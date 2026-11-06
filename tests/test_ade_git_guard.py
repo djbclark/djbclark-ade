@@ -455,7 +455,8 @@ def test_claim_schema_is_exactly_design_3_4(tmp_path):
                               owner_record="rec", owner_agent="codex", owner_model="m", lead="L", allow=["L"],
                               role="builder", purpose="p", created_by="me")
     assert set(c) == {"v", "id", "path", "repo_origin", "branch", "base_sha", "owner", "lead", "allow", "role",
-                      "purpose", "created_at", "created_by", "state", "released_at", "inherited_dirt_patch"}
+                      "purpose", "created_at", "created_by", "state", "released_at", "inherited_dirt_patch",
+                      "expires_at"}   # expires_at: slim-down E8 (D9), 2026-11-06
     assert set(c["owner"]) == {"record", "session", "agent", "model"}
     assert c["v"] == 1 and c["state"] == "active" and c["released_at"] is None
     assert c["path"] == str(tmp_path.resolve()) and c["created_at"].endswith("Z")
@@ -531,7 +532,7 @@ def test_caller_identity_prefers_the_explicit_claim_id():
     assert not ade_claims.is_agent_env({"ACP_RUN_AGENT": "0"}) and not ade_claims.is_agent_env({})
 
 
-def test_cli_new_show_find_list_set_state(tmp_path, state):
+def test_cli_new_and_list(tmp_path, state):
     repo = mk_repo(tmp_path, state)
     env = base_env(state)
     cli = [sys.executable, str(ROOT / "bin" / "ade_claims.py")]
@@ -543,14 +544,70 @@ def test_cli_new_show_find_list_set_state(tmp_path, state):
              "--owner-agent", "omp", "--allow", "lead1", "--purpose", "demo")
     assert r.returncode == 0 and Path(r.stdout.strip()) == state / "claims" / "w1.json"
     assert (repo / ".git" / "ade-claim").read_text().strip() == "w1"
-    assert json.loads(call("find").stdout)["id"] == "w1"
-    assert call("show", "w1", "--field", "branch").stdout.strip() == "b"
-    assert call("show", "nope").returncode == 1
-    assert "w1\tactive\tb" in call("list").stdout
-    assert call("set-state", "w1", "released").returncode == 0
-    assert call("find").returncode == 1                       # released: not active
+    assert ade_claims.find_claim(ade_claims.find_workspace(repo))["id"] == "w1"
+    line = call("list").stdout
+    assert "w1\tactive\tb" in line and line.rstrip().split("\t")[-1].endswith("Z"), "a new claim expires (72 h)"
+    ade_claims.set_state("w1", "released")
+    assert ade_claims.find_claim(ade_claims.find_workspace(repo)) is None          # released: not active
     assert json.loads(call("list", "--state", "released", "--json").stdout)[0]["state"] == "released"
     assert call("new", "--id", "../x", "--path", str(repo), "--branch", "b", "--base-sha", "a").returncode == 2
+    for gone in ("show", "find", "set-state"):     # no caller: removed 2026-11-06 (slim-down E8, D9)
+        assert call(gone, "w1").returncode == 2, gone
+
+
+def test_ade_git_guard_claim_ls_lists_what_the_registry_holds(tmp_path, state):
+    """C5 (PLAN): `ade-git-guard claim ls` did not exist; it now lists the registry, as `ade_claims.py list` does."""
+    repo = mk_repo(tmp_path, state)
+    claim(repo, "A")
+    claim(mk_repo(tmp_path, state, "r2"), "R", branch="other")
+    ade_claims.set_state("R", "released")
+    env = base_env(state)
+    r = subprocess.run([str(GUARD), "claim", "ls"], env=env, capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stderr
+    rows = [ln.split("\t") for ln in r.stdout.splitlines()]
+    assert [(row[0], row[1]) for row in rows] == [("A", "active"), ("R", "released")]
+    r = subprocess.run([str(GUARD), "claim", "ls", "--state", "active", "--json"], env=env, capture_output=True, text=True, timeout=60)
+    assert [c["id"] for c in json.loads(r.stdout)] == ["A"]
+    lib = subprocess.run([sys.executable, str(ROOT / "bin" / "ade_claims.py"), "list"], env=env, capture_output=True, text=True, timeout=60)
+    assert lib.stdout == subprocess.run([str(GUARD), "claim", "ls"], env=env, capture_output=True, text=True, timeout=60).stdout
+    assert subprocess.run([str(GUARD), "claim", "bogus"], env=env, capture_output=True, text=True, timeout=60).returncode == 2
+
+
+def test_an_expired_claim_guards_nothing_and_frees_its_path(tmp_path, state):
+    repo = mk_repo(tmp_path, state)
+    claim(repo, "A")
+    dirty(repo)
+    assert run(state, ["add", "f"], repo, who="B").returncode == 77          # active: a foreign workspace
+    ade_claims.update_claim("A", expires_at="2000-01-01T00:00:00Z")
+    c = ade_claims.read_claim("A")
+    assert ade_claims.is_expired(c) and not ade_claims.claim_state_active(c) and ade_claims.shown_state(c) == "expired"
+    assert [x["id"] for x in ade_claims.list_claims("expired")] == ["A"] and ade_claims.list_claims("active") == []
+    assert run(state, ["add", "f"], repo, who="B").returncode == 0            # expired: it no longer guards
+    ade_claims.create_claim(ade_claims.make_claim(id="B1", path=repo, branch="main", base_sha="s", owner_record="B"))
+    assert [x["id"] for x in ade_claims.list_claims("active")] == ["B1"], "another owner may claim the expired path"
+    assert ade_claims.read_claim("A")["state"] == "active", "expiry is read, never written"
+
+
+@pytest.mark.parametrize("value,expired", [(None, False), ("", False), ("not a date", False), (7, False),
+                                           ("2000-01-01T00:00:00Z", True), ("2999-01-01T00:00:00Z", False)])
+def test_expiry_is_read_with_get_and_an_unreadable_value_keeps_the_claim(tmp_path, state, value, expired):
+    claim(mk_repo(tmp_path, state), "A")
+    if value is None:
+        raw = json.loads((state / "claims" / "A.json").read_text())
+        raw.pop("expires_at", None)                 # a record written before 2026-11-06
+        (state / "claims" / "A.json").write_text(json.dumps(raw))
+    else:
+        ade_claims.update_claim("A", expires_at=value)
+    assert ade_claims.claim_state_active(ade_claims.read_claim("A")) is (not expired)
+
+
+def test_ttl_sets_or_omits_the_expiry_and_rejects_nonsense(tmp_path):
+    assert ade_claims.make_claim(id="a", path=tmp_path, branch="b", base_sha="s", ttl_hours=0)["expires_at"] is None
+    assert ade_claims.make_claim(id="a", path=tmp_path, branch="b", base_sha="s", ttl_hours=None)["expires_at"] is None
+    assert ade_claims.make_claim(id="a", path=tmp_path, branch="b", base_sha="s")["expires_at"].endswith("Z")
+    for bad in (-1.0, float("nan"), 24 * 400.0):
+        with pytest.raises(ValueError):
+            ade_claims.make_claim(id="a", path=tmp_path, branch="b", base_sha="s", ttl_hours=bad)
 
 
 # ============================================================================================
@@ -1049,8 +1106,9 @@ def test_reclaim_releases_the_old_record_and_reactivation_rechecks_the_path(tmp_
     ade_claims.create_claim(mk("B", "other"))
     with pytest.raises(ade_claims.PathClaimed):
         ade_claims.set_state("A", "active")
-    cli = [sys.executable, str(ROOT / "bin" / "ade_claims.py")]
-    r = subprocess.run([*cli, "set-state", "A", "active"], env=base_env(state), capture_output=True, text=True, timeout=60)
+    cli = [sys.executable, str(ROOT / "bin" / "ade_claims.py")]   # the CLI's exit 4 for a path another owner holds
+    r = subprocess.run([*cli, "new", "--id", "C", "--path", str(repo), "--branch", "b", "--base-sha", "s", "--owner-record", "third",
+                        "--no-pointer"], env=base_env(state), capture_output=True, text=True, timeout=60)
     assert r.returncode == 4
 
 
