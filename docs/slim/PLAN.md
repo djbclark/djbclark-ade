@@ -307,8 +307,19 @@ E6. **S-acp: SHIM then delete.** `acp-dispatch` becomes a wrapper over
 the exit-code contract (3 no report, 4 BLOCKED, 124 timeout), the report
 file and `.done` record, `outcome` → `route_agent.py calibrate` records, the
 `--kind frontier` admission check (`bin/agent_guard.py` and its two tests stay
-with it, report B1d), **the `load-watch admit` pre-launch gate (exit 75)**, and
-the brief footer. `acp-run` stays as the **launch interface** tendcf, nix2cf,
+with it, report B1d), **the `load-watch admit` pre-launch gate (exit 75)**, **the restricted
+permission policies** (`--perm read-only` and `--perm deny`, today enforced by
+`acp-run`'s per-agent tool filtering, settings stripping and tripwire: the
+shim maps each to a verified Paseo configuration for the provider, for
+Claude `permissionMode: plan` plus `disallowedTools` for edits and shell, and
+**refuses the launch** when no verified equivalent exists, because the
+shipped Claude template defaults to `bypassPermissions` and these modes
+protect prompt-injection-sensitive reviews), **the live-agent count**
+(`count_agents()` counts `acp-run` processes and releases the `load-watch
+admit --max-agents` reservation only once one is countable; a `paseo run
+--no-wait` child never is, so the count is ported to `paseo ls -a -g --json`
+before the shim ships, with a handoff test that a burst of shim launches
+still hits the 14-agent cap), and the brief footer. `acp-run` stays as the **launch interface** tendcf, nix2cf,
 Plektra and paseo4herdr call (C3) until each of those files is migrated to
 `paseo run` or the operator accepts the break per file; E7's registry switch
 to `paseo provider ls` does not by itself allow its deletion. `acp-run` and
@@ -365,9 +376,11 @@ unchanged** (a BLOCK naming the current head counts anywhere, 7+ hex prefix
 included; malformed and fetch-failed always block; the JSON is delimited by
 its own braces; an APPROVE in a fenced block or with the placeholder head is
 documentation): three earlier rounds found false APPROVEs and a hidden BLOCK,
-so the port is judged by those tests, not by line count. Per J8, unresolved
-Codex threads do not gate the merge: the ruleset requires the Action and CI,
-not conversation resolution. AGENTS.md review rules 1, 9, 11 shrink to:
+so the port is judged by those tests, not by line count. Per J8 (answered 2026-11-06, the operator's explicit choice over the
+fail-closed thread gate `pr-wait` enforced), unresolved Codex threads do not
+gate the merge: the ruleset requires the Action and CI, not conversation
+resolution; Codex findings stay visible as threads and the lead reads them
+before merging. E8 does not start before J8 is answered (it is). AGENTS.md review rules 1, 9, 11 shrink to:
 marker required and validated by CI; Codex per J8; local review is Claude.
 
 E9. **S-nonclaude (TUI retirement waves 3+, E9i)**: the retirement plan is
