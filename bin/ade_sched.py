@@ -321,12 +321,20 @@ def _keep_alive_restart(job: Job) -> tuple[str, list[str]]:
     return "always", notes
 
 
-def _oncalendar(c: Mapping[str, int]) -> str:
+def _oncalendar(c: Mapping[str, int]) -> list[str]:
+    """OnCalendar= values for one StartCalendarInterval dict. launchd (like cron) fires when EITHER Day or Weekday matches
+    if both are given, while one systemd expression would need both: that pair becomes two expressions."""
     def two(k: str) -> str:
         return f"{c[k]:02d}" if k in c else "*"
     days = ("Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat")
-    dow = f"{days[c['Weekday'] % 7]} " if "Weekday" in c else ""
-    return f"{dow}*-{two('Month')}-{two('Day')} {two('Hour')}:{two('Minute')}:00"
+
+    def expr(weekday: bool, day: bool) -> str:
+        dow = f"{days[c['Weekday'] % 7]} " if weekday and "Weekday" in c else ""
+        dom = two("Day") if day else "*"
+        return f"{dow}*-{two('Month')}-{dom} {two('Hour')}:{two('Minute')}:00"
+    if "Weekday" in c and "Day" in c:
+        return [expr(True, False), expr(False, True)]
+    return [expr(True, True)]
 
 
 def _calendar_period(c: Mapping[str, int]) -> int:
@@ -420,7 +428,7 @@ def render_systemd(job: Job, version: int | None = None) -> tuple[dict[str, str]
         elif job.run_at_load:
             tim.append("OnActiveSec=1s")
         for c in job.calendar:
-            tim.append(f"OnCalendar={_oncalendar(c)}")
+            tim += [f"OnCalendar={e}" for e in _oncalendar(c)]
         tim.append("AccuracySec=1s")   # systemd's default is 1 min: a 60 s sweep would drift to 2 min
         if job.calendar:
             tim.append("Persistent=true")
@@ -497,6 +505,9 @@ def render_cron(job: Job, home: str | None = None, flock: str | None = "auto") -
         cmd += f"cd {shlex.quote(job.cwd)} && "
     if flock:
         _clean(flock, "flock")
+        # mkdir -p first: a block pasted by hand (--no-activate, --dry-run) before ~/.local/state/ade exists would
+        # otherwise fail every run in flock, silently when the job has no log (adversary C1 on PR 291)
+        cmd += f"mkdir -p {shlex.quote(home + '/.local/state/ade')} && "
         cmd += shlex.join([flock, "-n", f"{home}/.local/state/ade/{job.label}.cron.lock"]) + " "
     else:
         notes.append(f"{job.label}: no flock on PATH: a run that outlasts its interval can overlap the next one")

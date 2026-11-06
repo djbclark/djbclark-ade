@@ -683,3 +683,21 @@ def test_cron_runs_are_serialized_with_flock(tmp_path):
     assert "/usr/bin/flock -n /h/.local/state/ade/" in block and ".cron.lock /usr/bin/env " in block
     block, notes = S.render_cron(job(StartInterval=600), home="/h", flock=None)
     assert "flock" not in block and any("overlap" in n for n in notes)
+
+
+def test_day_and_weekday_together_fire_on_either_like_launchd():
+    """launchd (and cron) fire when Day OR Weekday matches; one systemd expression would need both, so the pair becomes
+    two OnCalendar= lines (Codex P2 on PR 291)."""
+    files, _ = S.render_systemd(job(StartInterval=None, StartCalendarInterval={"Day": 1, "Weekday": 1, "Hour": 9, "Minute": 0}))
+    tim = files["t.job.timer"]
+    assert "OnCalendar=Mon *-*-* 09:00:00" in tim and "OnCalendar=*-*-01 09:00:00" in tim
+    assert "Mon *-*-01" not in tim
+    block, _ = S.render_cron(job(StartInterval=None, StartCalendarInterval={"Day": 1, "Weekday": 1, "Hour": 9, "Minute": 0}),
+                             home="/h")
+    assert "0 9 1 * 1 " in block                                  # cron's own day-of-month/weekday OR
+
+
+def test_pasted_cron_block_creates_its_lock_dir():
+    """A block printed by --no-activate/--dry-run and pasted before ~/.local/state/ade exists must still run (adversary C1)."""
+    block, _ = S.render_cron(job(StartInterval=600), home="/h", flock="/usr/bin/flock")
+    assert "mkdir -p /h/.local/state/ade && /usr/bin/flock -n /h/.local/state/ade/" in block
