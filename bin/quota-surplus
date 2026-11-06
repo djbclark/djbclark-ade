@@ -63,6 +63,7 @@ import importlib.util
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -184,7 +185,10 @@ def policy_from_routing(aiuse_disabled: dict | None = None) -> Policy:
         kinds = tuple(sorted(models, key=lambda k: (k != "frontier", (svc.good_at or {}).get(k, 99))))
         agent = getattr(svc, "agent", "") or svc.name
         first = kinds[0] if kinds else ""
-        dispatch = DISPATCH_OVERRIDE.get(svc.name) or (f"acp-run {agent} --model {models[first]}" if first else "")
+        # routing values are "<model> [--effort LEVEL]"; a model id may hold a backslash (zai's builtin:...\GLM-5.3), so
+        # the printed line is shell-quoted per argument (local-review P2 on 911bf68)
+        dispatch = DISPATCH_OVERRIDE.get(svc.name) or (
+            shlex.join(["acp-run", agent, "--model", *str(models[first]).split()]) if first else "")
         repos, seats = routing_scope(svc)
         first_model = models.get(first, "")
         try:

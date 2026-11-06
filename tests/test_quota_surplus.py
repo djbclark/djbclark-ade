@@ -416,6 +416,18 @@ def test_routing_policy_marks_argon_frontier_and_scopes_opencode_go(qs):
     assert pol.for_row("opencode-go", None).allow_repos == ("techno-euphora",)
 
 
+def test_dispatch_line_survives_the_shell(qs):
+    # local-review P2 on 911bf68: zai's model id holds a backslash the shell would eat unquoted
+    import shlex
+    pol = qs.policy_from_routing({})
+    zai = pol.for_row("zai", None)
+    argv = shlex.split(zai.dispatch)
+    assert argv[:3] == ["acp-run", "zcode", "--model"] and "\\GLM-" in argv[3]
+    for pp in pol.pools.values():
+        if pp.dispatch:
+            assert shlex.split(pp.dispatch)[0] == "acp-run"
+
+
 def test_work_list_of_this_repo_parses(qs):
     items = qs.find_work([REPO])
     assert len(items) >= 5
