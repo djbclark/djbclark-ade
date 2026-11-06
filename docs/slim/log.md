@@ -69,7 +69,7 @@ Follow-ups (operator, 2026-11-06 ~22:20Z): C1 `UNFINISHED` scan over every job r
 
 J2 pool audit (lead's reading, ruling 10 / R2-12..15): Paseo providers that each carry a paid plan: claude, codex, cursor, antigravity, opencode (opencode-go, sipb; zai lite folds into it when zcode goes); the grok CLI stays as the only SuperGrok route (no Paseo grok provider known); grok-bot stays with peer-link (E9j). Retire in Wave 3's E9 part: pi (API pool, not a plan), zcode (fold into opencode's zai route), omp (no plan in aiuse; the pi→omp port is moot), glm-acp-agent (not listed). Asked the operator once whether omp holds a plan aiuse cannot see; silence = retire. Small-context provider (R2-15): none survives → `web-get`, `web-digest*`, `firecrawl-router` go in Wave 3's E9 part. Cursor stays (R2-14).
 
-Verdict: the gate for E2 (herdr sleeper) passes on the item-1 waiver; the gate for E3/E4/E6 passes on item 3's waiver (item 2 passed).
+Waivers given by the operator 2026-11-06 ("B waive both"): the sleeping pane w1:p1 and the four dirty worktrees. **C7 PASSED.** E2 may merge after E1; E3/E4/E6 are clear of this gate.
 
 ## Wave 2 progress (2026-11-06, evening)
 
