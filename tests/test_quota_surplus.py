@@ -323,6 +323,21 @@ def test_relay_delivery_tracked_per_lead_and_retried(qs, tmp_path):
     assert ep["relays"]["bbbb2222"]["attempts"] == qs.MAX_RELAY_ATTEMPTS
 
 
+def test_abandoned_relay_runner_is_retried(qs):
+    # local-review P2 on 4ef594c: a runner killed before writing its outcome must not read "running" forever
+    alerts, state = alerts_of(qs, argon_data())
+    started = []
+    relay = lambda argv, out: started.append(out) or True     # noqa: E731
+    qs.notify(alerts, state, NOW, dry_run=False, rows=[LEADS[1]], items=[], ping=lambda t: True, relay=relay)
+    qs.notify(alerts, state, NOW + timedelta(minutes=30), dry_run=False, rows=[LEADS[1]], items=[],
+              ping=lambda t: True, relay=relay)
+    assert len(started) == 1                                  # within the runner's bound: still running
+    qs.notify(alerts, state, NOW + timedelta(seconds=qs.RELAY_RUN_TIMEOUT_S + 700), dry_run=False, rows=[LEADS[1]],
+              items=[], ping=lambda t: True, relay=relay)
+    rec = state["episodes"][alerts[0]["episode"]]["relays"]["bbbb2222"]
+    assert len(started) == 2 and rec["attempts"] == 2 and rec["last_rc"] == 124
+
+
 def test_relay_runner_records_relay_exit_status(qs, tmp_path):
     out = tmp_path / "o.json"
     assert qs.main(["_relay-run", str(out), "--", sys.executable, "-c", "import sys; sys.exit(4)"]) == 0

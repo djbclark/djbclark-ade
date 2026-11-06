@@ -667,6 +667,7 @@ def send_ping(text: str) -> bool:
 
 
 MAX_RELAY_ATTEMPTS = 3
+RELAY_RUN_TIMEOUT_S = 2400        # _relay-run's own bound on relay.py (above relay's --idle 1800)
 
 
 def spawn_relay(argv: list[str], out: str) -> bool:
@@ -693,7 +694,8 @@ def spawn_relay(argv: list[str], out: str) -> bool:
 def relay_run(out: str, argv: list[str]) -> int:
     """`_relay-run OUT -- ARGV`: run relay.py to its end and record its exit status in OUT (atomically)."""
     try:
-        r = subprocess.run(argv, capture_output=True, text=True, timeout=2400, check=False, stdin=subprocess.DEVNULL)
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=RELAY_RUN_TIMEOUT_S, check=False,
+                           stdin=subprocess.DEVNULL)
         rec = {"rc": r.returncode, "tail": (r.stdout + r.stderr)[-500:]}
     except (OSError, subprocess.SubprocessError) as e:
         rec = {"rc": 127, "tail": str(e)[:500]}
@@ -768,7 +770,12 @@ def notify(alerts: list[dict], state: dict, now: datetime, *, dry_run: bool, row
             if rec:
                 rc = relay_outcome(rec.get("out"))
                 if rc is None:
-                    continue                                   # still running (an --idle wait)
+                    started_at = parse_ts(rec.get("started_at"))
+                    # a runner killed (or a reboot) before it wrote its outcome would read "running" forever: past its
+                    # own bound plus slack it is abandoned and counts as a failed attempt (local-review P2 on 4ef594c)
+                    if started_at is None or (now - started_at).total_seconds() <= RELAY_RUN_TIMEOUT_S + 600:
+                        continue                               # still running (an --idle wait)
+                    rc = 124
                 if rc == 0:
                     rec["delivered_at"] = now.isoformat()
                     continue
