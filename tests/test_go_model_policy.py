@@ -80,7 +80,7 @@ def test_dispatch_cannot_bypass_cost_gate_with_route_override(tmp_path, extra):
     result = subprocess.run([sys.executable, str(ROOT / "bin/acp-dispatch"), "opencode",
                              "--model", "opencode-go/kimi-k3", "--name", "never-launch",
                              "--task", "cost-policy-test", "-p", "do not run", "--dry-run",
-                             "--no-model-check", *extra], capture_output=True, text=True,
+                             *extra], capture_output=True, text=True,
                             timeout=20, check=False,
                             env={**os.environ, "HOME": str(tmp_path), "ACP_DISPATCH_STATE": str(state),
                                  "ACP_OPERATOR_APPROVED": "route-override"})
@@ -89,18 +89,20 @@ def test_dispatch_cannot_bypass_cost_gate_with_route_override(tmp_path, extra):
     assert not list(state.glob("**/jobs/*.json"))
 
 
-def test_bounded_advisor_dry_run_is_allowed_without_inference(tmp_path):
+def test_bounded_advice_is_refused_without_a_verified_read_only_mode(tmp_path):
+    # Go advice needs --perm read-only, and the acp-dispatch Paseo shim (slim-down E6, 2026-11-06) has no verified
+    # read-only mode for opencode: the bounded advisor that acp-run's --go-advisory used to run is refused, not run.
     result = subprocess.run([sys.executable, str(ROOT / "bin/acp-dispatch"), "opencode",
                              "--model", "opencode-go/kimi-k3", "--name", "safe-advice",
                              "--task", "cost-policy-test", "-p", "offline dry run", "--dry-run",
-                             "--no-model-check", "--kind", "judgment", "--role", "advise",
+                             "--kind", "judgment", "--role", "advise",
                              "--perm", "read-only", "--timeout", "600",
-                             "--out", str(tmp_path / "jobs"),
-                             "--acp-run", str(ROOT / "tools/acp-run/acp-run")], capture_output=True, text=True,
+                             "--out", str(tmp_path / "jobs")], capture_output=True, text=True,
                             timeout=20, check=False,
                             env={**os.environ, "HOME": str(tmp_path)})
-    assert result.returncode == 0, result.stderr
-    assert "--go-advisory" in result.stdout
+    assert result.returncode == 2, result.stderr
+    assert "Go advisory use needs --perm read-only" in result.stderr
+    assert not (tmp_path / "jobs").exists()
 
 
 def test_routine_router_refuses_a_costly_config_regression():

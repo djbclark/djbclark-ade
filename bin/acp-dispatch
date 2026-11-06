@@ -737,10 +737,7 @@ def unavailable(out: Path, a: argparse.Namespace, reason: str, cls: str, code: i
 
 
 def gate_policy(a: argparse.Namespace, service: str | None, approved: set[str]) -> None:
-    """The refusals that need no reading: operator gates, Go cost policy, frontier kind and role, eligibility."""
-    if a.agent in OPERATOR_GATED and a.agent not in approved:
-        die(f"{a.agent} needs specific, explicit operator approval for this run; ask first, then set "
-            f"ACP_OPERATOR_APPROVED={a.agent}")
+    """The refusals that need no reading: the fable gate, Go cost policy, frontier kind and role, eligibility."""
     if "fable" in a.model.lower() and (a.effort or "").lower() in FABLE_GATED_EFFORTS and "fable-xhigh" not in approved:
         die(f"fable at --effort {a.effort} needs explicit operator approval for this run; use --effort high, or ask "
             "first, then set ACP_OPERATOR_APPROVED=fable-xhigh")
@@ -787,6 +784,10 @@ def dispatch(a: argparse.Namespace) -> int:
         die(f"`acp-dispatch {a.agent}` was retired with the Paseo shim (slim-down E6): {RETIRED[a.agent]}")
     if a.agent not in PROVIDERS:
         die(f"unknown agent {a.agent!r}: acp-dispatch launches Paseo providers, one of {', '.join(PROVIDERS)}")
+    approved, router = approved_tokens(), route_module()
+    if a.agent in OPERATOR_GATED and a.agent not in approved:
+        die(f"{a.agent} needs specific, explicit operator approval for this run; ask first, then set "
+            f"ACP_OPERATOR_APPROVED={a.agent}")
     if not a.model:
         die("--model is required (an agent's own default is the expensive one; `paseo provider models P` lists them)")
     if not MODEL_RE.match(a.model) or (a.effort and not MODEL_RE.match(a.effort)):
@@ -799,10 +800,11 @@ def dispatch(a: argparse.Namespace) -> int:
         die("timeouts must be 0 or more")
     if a.no_wait and not a.detach:
         die("--no-wait needs --detach")
+    if a.kind not in router.KINDS:
+        die(f"--kind is required, one of: {', '.join(router.KINDS)} (route_agent.py plan --kinds KIND)")
     a.dir = str(Path(a.dir).expanduser().resolve())
     if not Path(a.dir).is_dir():
         die(f"-C {a.dir} is not a directory")
-    approved, router = approved_tokens(), route_module()
     service = resolve_service(a.agent, a.model)
     gate_policy(a, service, approved)
     frontier_reason = None
@@ -822,7 +824,8 @@ def dispatch(a: argparse.Namespace) -> int:
         provider_entry(provider)
         boundary, mode = "paseo-mode", READ_ONLY_MODES[provider]
     else:
-        die(f"--perm {a.perm} is refused for {a.agent}: Paseo has no verified "
+        die(f"--perm {a.perm} is refused for {a.agent}: "
+            f"{'Go advisory use needs --perm read-only, and ' if getattr(a, 'go_advisory', False) else ''}Paseo has no verified "
             f"{'no-tool' if a.perm == 'deny' else 'non-editing'} mode for it (only claude has the review-launch "
             "boundary; codex has the read-only provider mode)")
     REPO_FLOORS.update(router.repo_floors(router.repo_of(a.dir)))   # the -C repo's estimate-floor override
@@ -1273,16 +1276,15 @@ def main(argv: list[str] | None = None) -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("agent", help=f"a Paseo provider: {', '.join(PROVIDERS)}")
     ap.add_argument("--model", help="required; becomes --provider P/M")
-    ap.add_argument("--kind", required=True, help="a route_agent kind (route_agent.py plan --kinds KIND)")
+    ap.add_argument("--kind", help="required: a route_agent kind (route_agent.py plan --kinds KIND)")
     ap.add_argument("--role", choices=("advise", "exec"), help="frontier only; default advise")
     ap.add_argument("--frontier-reason", metavar="TEXT", help="--kind frontier: claims the frontier allowance")
     ap.add_argument("--name", required=True, help="slice name; names every output file")
     ap.add_argument("-p", "--prompt")
     ap.add_argument("-f", "--prompt-file", help="the brief (a file); a copy with the footer goes to the out dir")
     ap.add_argument("-C", "--dir", default=".", help="the directory the agent works in (default: cwd)")
-    where = ap.add_mutually_exclusive_group()
-    where.add_argument("--task", help="out dir is ~/.local/state/bigteam/<task>/ (default adhoc-<date>)")
-    where.add_argument("--out", help="explicit out dir instead of --task")
+    ap.add_argument("--task", help="out dir is ~/.local/state/bigteam/<task>/ (default adhoc-<date>)")
+    ap.add_argument("--out", help="explicit out dir instead of --task (which is then only recorded)")
     ap.add_argument("--effort", metavar="LEVEL", help="paseo run --thinking LEVEL (not passed to review-launch)")
     ap.add_argument("--perm", choices=("all", "read-only", "deny"), default="all")
     ap.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT, help="the slice's budget in seconds (0 none)")
@@ -1297,11 +1299,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-load-gate", action="store_true")
     ap.add_argument("--min-headroom", type=float, default=10.0)
     ap.add_argument("--est-pct", type=float, help="estimated percent of the binding quota window this slice uses")
-    a = ap.parse_args(argv)
-    kinds = route_module().KINDS
-    if a.kind not in kinds:
-        die(f"--kind must be one of: {', '.join(kinds)}")
-    return dispatch(a)
+    return dispatch(ap.parse_args(argv))
 
 
 if __name__ == "__main__":
