@@ -219,6 +219,9 @@ def test_gnu_deny_reason_names_the_g_tool():
     "echo $((stat -c))",
     "echo $(( (1 + 2) * 3 )) | cut -d/ -f1",
     "sed=2; echo $((1<(sed)))",
+    # Escaped inner backticks execute only portable commands.
+    r"x=$((`echo \`printf 1 | gsed -n 1p\`` + 1))",
+    r"x=$((`echo \`printf 1\`` + 1))",
 ])
 def test_gnu_flags_that_work_or_do_not_apply_pass(command):
     assert not denied(command)
@@ -245,6 +248,10 @@ def test_gnu_flags_that_work_or_do_not_apply_pass(command):
     "echo $(( $(date -d x +%s) + 1 ))",
     "x=$((`date -d yesterday +%s` + 1))",
     "x=$((sed -n 1p f); printf x)",
+    # Escaped backticks belong to a nested command, not to the outer pair.
+    r"x=$((`echo \`printf 1 | sed -n 1p\`` + 1))",
+    r"x=$((`echo \`printf 1 | cut --complement -f1\`` + 1))",
+    r"x=$((`echo \`date -d yesterday +%s\`` + 1))",
 ])
 def test_escaped_parens_and_subshell_groups_stay_checked(command):
     assert denied(command)

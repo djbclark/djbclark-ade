@@ -188,8 +188,39 @@ def command_views(plain: str) -> list[str]:
 
 
 def _backtick_bodies(text: str) -> list[str]:
-    """The commands in the backtick pairs of `text` (an arithmetic expression otherwise runs none)."""
-    return re.findall(r"`([^`]*)`", text)
+    """Backtick command bodies, including escaped nested substitutions inside arithmetic.
+
+    A backslash protects a backtick from closing the current pair. Bash removes
+    that escape when executing its body, where the nested pair becomes active.
+    Use a worklist rather than recursion for arbitrarily nested input.
+    """
+    bodies: list[str] = []
+    pending = [text]
+    while pending:
+        source = pending.pop()
+        body: list[str] | None = None
+        i = 0
+        while i < len(source):
+            ch = source[i]
+            if ch == "\\" and i + 1 < len(source):
+                nxt = source[i + 1]
+                if body is not None:
+                    # Backtick substitution removes escapes only for these chars.
+                    body.append(nxt if nxt in "\\$`" else ch + nxt)
+                i += 2
+                continue
+            if ch == "`":
+                if body is None:
+                    body = []
+                else:
+                    command = "".join(body)
+                    bodies.append(command)
+                    pending.append(command)
+                    body = None
+            elif body is not None:
+                body.append(ch)
+            i += 1
+    return bodies
 
 
 def words(stage: str) -> list[str]:
