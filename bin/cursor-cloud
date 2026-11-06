@@ -2,7 +2,7 @@
 """cursor-cloud: launch and inspect Cursor Cloud Agents from the terminal (2026-10-19).
 
 Cloud Agents are included in every paid Cursor plan and billed at API price against the
-included usage (docs/ade-everywhere-proposal.md §11.5). This is the launch place the lead
+included usage (docs/history/ade-everywhere-proposal.md §11.5). This is the launch place the lead
 uses for a mechanical slice that can leave the Mac. Rules it enforces:
 
 1. The API key is CURSOR_API_KEY from sudo-secretspec. When it is not in the environment the

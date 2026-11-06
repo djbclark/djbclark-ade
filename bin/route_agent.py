@@ -84,7 +84,7 @@ preferences, because they encode consequences a score cannot see:
   balance is far above an even spend over the month;
 - **never** route a slice to clinepass (NEVER_ROUTE) — it is the Hindsight/hermes
   lifeline and stays only in `hermes_chain`;
-- the prepaid tier (opencode-zen, openrouter, deepseek) is retired until an
+- the prepaid tier (opencode-zen) is retired until an
   explicit operator top-up.
 
 Every route comes with a `--model [--effort]` suggestion and the
@@ -2156,8 +2156,6 @@ def apply_substrate(agent: str, chain: list[dict[str, Any]]) -> tuple[int, str]:
             or f"set rc={proc.returncode} ({primary['model']})")
 
 
-JEV = Path(__file__).resolve().parent / "jev"
-
 # Dispatch state root (same default as acp-dispatch). Overridable for tests.
 ACP_DISPATCH_STATE = Path(os.environ.get("ACP_DISPATCH_STATE")
                           or (Path.home() / ".local" / "state" / "bigteam"))
@@ -2531,27 +2529,6 @@ def format_calibrate_table(report: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def shadow_kind(brief_path: str, incumbent: str, service: str | None) -> None:
-    """Log what the deciders (Jev, GLiDE) say a brief's kind is, beside the caller's kind.
-
-    Site `agent-choice`; detached, so it never delays or changes the route. With the
-    jev mode off it exits at once. Any failure is swallowed.
-    """
-    try:
-        text = Path(brief_path).read_text(errors="replace")[:4000]
-        args = [str(JEV), "decide", "--site", "agent-choice",
-                "--question", "What kind of work is this delegated task?",
-                "--incumbent", incumbent, "--meta", f"service={service or ''}", "--timeout", "5"]
-        for kind in KINDS:
-            args += ["--option", kind]
-        child = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
-                                 stderr=subprocess.DEVNULL, text=True, start_new_session=True)
-        child.stdin.write(text)
-        child.stdin.close()
-    except Exception:
-        pass
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Route work to a vendor")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -2560,8 +2537,8 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--json", action="store_true")
     r.add_argument("--min-headroom", type=float, default=15.0)
     r.add_argument("--repo", help="repository the slice works in, for [dispatch.repo_overrides] (default: the cwd's origin remote)")
-    r.add_argument("--brief", help="the slice's brief file: its kind is also asked of Jev and "
-                   "GLiDE in shadow (site agent-choice); never changes the route")
+    r.add_argument("--brief", help="the slice's brief file (accepted and ignored since 2026-11-06, when the "
+                   "Jev shadow ask was removed)")
     pl = sub.add_parser("plan", help="assign a wave of slice kinds to services now")
     pl.add_argument("--kinds", required=True,
                     help="comma list, hardest first, e.g. code,code,research,bulk")
@@ -2572,7 +2549,7 @@ def main(argv: list[str] | None = None) -> int:
     pl.add_argument("--repo", help="repository the slices work in, for [dispatch.repo_overrides] (default: the cwd's origin remote)")
     pl.add_argument("--json", action="store_true")
     pl.add_argument("--brief", action="append", default=[],
-                    help="brief file per kind, in --kinds order (repeat; shadow-asks Jev and GLiDE)")
+                    help="brief file per kind, in --kinds order (repeat; accepted and ignored since 2026-11-06)")
     sub.add_parser("show", help="snapshot age, headroom, pace, expected waste")
     sub.add_parser("services", help="every service discovered right now")
     hc = sub.add_parser("hermes-chain", help="generate Hermes's provider chain")
@@ -2626,8 +2603,6 @@ def main(argv: list[str] | None = None) -> int:
         if args.brief:
             if len(args.brief) != len(kinds):
                 parser.error("--brief must be given once per kind, in --kinds order")
-            for brief, (k, c) in zip(args.brief, rows):
-                shadow_kind(brief, k, c.service.name if c else None)
         stale = (not quota) or age is None or age > STALE_SOFT
         if args.json:
             print(json.dumps({
@@ -2769,8 +2744,6 @@ def main(argv: list[str] | None = None) -> int:
 
     choice = route(args.kind, quota=quota, min_headroom=args.min_headroom, exclude=operator_disabled(),
                    repo=(args.repo or repo_of(os.getcwd())))
-    if args.brief:
-        shadow_kind(args.brief, args.kind, choice.service.name if choice else None)
     if choice is None:
         print(json.dumps({"kind": args.kind, "service": None,
                           "reason": "no eligible service with headroom"}))

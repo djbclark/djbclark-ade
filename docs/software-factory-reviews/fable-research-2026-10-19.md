@@ -168,7 +168,7 @@ Files (repo-relative to `~/src/djbclark-ade` unless absolute):
 8. `skills/model-routing/SKILL.md:28-69, 71-116, 209-236, 240-356, 385-388, 466-668, 670-689`.
 9. `config/routing.toml:14-49, 66-128, 141-257, 292-304, 315-334, 339-359`.
 10. `skills/cow-workspaces/SKILL.md:14-35, 37-58, 60-87, 89-108`; `docs/orca-integration.md:122-169, 193-222`.
-11. `docs/failover.md:9-69, 71-102, 142-196`; `docs/jev.md:92-101, 133-170`; `docs/queue.md:6-18, 62-92`.
+11. `docs/failover.md:9-69, 71-102, 142-196`; `docs/jev.md:92-101 [jev removed 2026-11-06], 133-170`; `docs/queue.md:6-18, 62-92`.
 12. `bin/load-watch:2-49`; `~/ops/site-private/bin/bg:19-33, 42-50`.
 13. `skills/forgejo-ci/SKILL.md:15-18, 30-77, 79-91, 133, 161-194`.
 14. `skills/tell-chief-of-staff/SKILL.md:9-29`; `~/.local/bin/hermes-ping:1-33, 102-110`; `~/.hermes/hermes-agent/website/docs/user-guide/messaging/telegram.md:1390-1411, 1419`.

@@ -6,7 +6,7 @@
                                      ended sessions that still hold open items: a handoff whose
                                      next steps nobody picked up, a last reply that asked a question,
                                      a pane herdr-tidy closed (its ledger carries the resume command),
-                                     or a herdr-sleeper journal entry whose pane is gone
+                                     or a leftover sleeper-journal entry whose pane is gone
     fleet.py show <id> [--json]      one session with its transcript tail
     fleet.py conflicts --cwd DIR [--sid ID]
                                      who else works in that repo: working sessions (exit 1: do not start
@@ -1426,7 +1426,7 @@ def _chain_logs(days):
 
 
 def replay_flags(argv, kind="claude"):
-    """Launch flags worth replaying on a resume: claude's allow-list (herdr-sleeper's); nothing for other kinds,
+    """Launch flags worth replaying on a resume: claude's allow-list (the removed herdr-sleeper's); nothing for other kinds,
     whose resume tokens carry everything we can vouch for."""
     if kind != "claude":
         return []
@@ -1471,7 +1471,7 @@ def sleeper_journal():
 
 
 def sleeper_resume(entry):
-    """The by-hand resume line for a journal entry, the way herdr-sleeper's manual_command spells it."""
+    """The by-hand resume line for a journal entry, the way the removed herdr-sleeper's manual_command spelled it."""
     return resume_command(entry.get("kind") or "claude", entry.get("uuid"), entry.get("cwd") or "", entry.get("argv"))
 
 

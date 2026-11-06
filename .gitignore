@@ -18,3 +18,6 @@ skills/*/.paseo-managed-files.json
 
 # Claude Code agent worktrees (Agent tool isolation: worktree; claude --worktree).
 .claude/worktrees/
+
+# Paseo baton plugin handoff files.
+.paseo/

@@ -5035,10 +5035,6 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
                  + footer_text(agent_report, a.lead, inbox=record_inbox(record),
                                replies=record_replies(record)).rstrip() + "\n"
                  + deny_note + checkpoint_note + budget)
-    if not previous and not a.dry_run:
-        # Detached Jev/GLiDE shadow; never blocks or changes the outcome. Skip on --dry-run.
-        route_module().shadow_kind(str(brief), kind or "", service)
-
     acp_cmd = [acp_run, a.agent, "-C", str(Path(a.dir).resolve()), "--add-dir", str(out), "-f", str(brief),
                *(["--model", a.model] if a.model else []),
                *(["--effort", effort] if effort else []), *(["--context", context] if context else []),

@@ -1,3 +1,5 @@
+moved from docs/ on 2026-11-06 by the slim-down, E2
+
 STATUS: complete
 
 # Prior art: reproducible, synchronized personal AI coding-agent environment (2026-10-19)

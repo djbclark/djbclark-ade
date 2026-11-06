@@ -53,7 +53,7 @@ can be two kinds; it is listed under its main kind, with the other kind noted.
 | A1.19 | `bin/claude-quota-guard:122-145` | `_advice`: "no Fable or Opus Agent-tool sub-agents", "a lead on Opus or Fable hands off ... Sonnet 5.5 high"; also (d) |
 | A1.20 | `claude/hooks/context_size_nudge.py:220-241` | `_successor_target`: Fable to Opus; tight: Fable/Opus to Sonnet; critical: Fable to Opus (differs from the governor, which takes critical to Sonnet: R7) |
 | A1.21 | `claude/hooks/frontier_agent_gate.py:17,27,30` | `FRONTIER_AGENTS = {"fable-deep": "Fable"}`, `"fable" in model`, approval key `fable-deep` |
-| A1.22 | `claude/hooks/jev_effort_hook.py:103` | `("opus","fable")` substring = judgment or frontier session |
+| A1.22 | `claude/hooks/jev_effort_hook.py:103` (jev removed 2026-11-06) | `("opus","fable")` substring = judgment or frontier session |
 | A1.23 | `bin/watch:445-446` | refuses a route whose model contains `fable` |
 | A1.24 | `bin/failover.py:104,212-216` | `DENY` includes `opus`, `fable` (judgment and above denied as failover); the claude route is `haiku`/`sonnet` only |
 

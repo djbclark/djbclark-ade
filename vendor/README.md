@@ -11,7 +11,6 @@ the whole system without leaving it.
 
 | Here | Canonical / live location | Notes |
 |---|---|---|
-| `gate-scripts/opencode-ralph-tui*` | `~/.local/bin/` (executable live copies) | The prepaid-balance gate launchers (deepseek/zen/openrouter + plain free-tier). Previously untracked anywhere. No secrets inside — keys load at runtime from `~/.config/codexbar/config.json`, which is never vendored. If you edit, update both places. |
 | `hermes/claude-collaboration.SKILL.md` | `~/.hermes/skills/autonomous-ai-agents/claude-collaboration/SKILL.md` (live, loaded by Hermes) | Teaches Hermes to proactively offer Claude delegation when a task is hard for it, and the 2026-08-23 Claude↔Hermes MCP bridge facts. If you edit, update both places. See docs/mcp-servers.md. |
 
 ## Pointers (own homes; not vendored)

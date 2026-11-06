@@ -2,7 +2,7 @@
 
 Summary: what two frontier reads, an OpenRig study and a landscape sweep say about adding the
 software factory (`docs/software-factory-design.md`, DRAFT v2) to the ADE-everywhere plan
-(`docs/ade-everywhere-proposal.md`). Verdict: add it as a thin state machine over `acp-dispatch`,
+(`docs/history/ade-everywhere-proposal.md`). Verdict: add it as a thin state machine over `acp-dispatch`,
 a parallel "Phase F" starting after Phase 1's CI workflow lands; borrow five ideas from OpenRig
 and agent-stack now; do not adopt OpenRig as a third fabric. Thirteen questions for djbclark are
 listed in §5, numbered on from the Fable report's SF-Q1 to SF-Q9. Everything dated here was
@@ -76,7 +76,7 @@ October 2026; Node 22 is required on every host.
 ### 3.2 agent-stack: an existing OpenRig glue project
 
 korallis/agent-stack (Apache-2.0, 35 stars, created 2026-09-28, last push 2026-10-05, Linux only)
-is OpenRig plus Claude Code, Codex, CLIProxyAPI, TypeSafe Jev and Playwright, with a merge gate
+is OpenRig plus Claude Code, Codex, CLIProxyAPI, TypeSafe Jev [jev removed 2026-11-06] and Playwright, with a merge gate
 that is the most complete one found in any open project:
 
 1. CI required checks green on the exact candidate head.

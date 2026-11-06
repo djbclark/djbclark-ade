@@ -1,3 +1,5 @@
+moved from docs/ on 2026-11-06 by the slim-down, E2
+
 STATUS: done
 
 # ADE everywhere v2.1: digest of the Fable 5.1 and Codex gpt-6-astra reviews, for v2.2 (2026-10-19)

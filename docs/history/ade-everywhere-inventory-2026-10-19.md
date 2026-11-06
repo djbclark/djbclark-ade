@@ -1,3 +1,5 @@
+moved from docs/ on 2026-11-06 by the slim-down, E2
+
 # ADE everywhere: inventory of the current environment (2026-10-19)
 
 Evidence for [ade-everywhere-proposal.md](ade-everywhere-proposal.md). Gathered by a

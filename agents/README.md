@@ -1,7 +1,7 @@
 # agents/ templates
 
 The four config files that matter most were tracked nowhere
-([docs/ade-everywhere-proposal.md](../docs/ade-everywhere-proposal.md) section 2 and 8 item 1). Phase 0
+([docs/history/ade-everywhere-proposal.md](../docs/history/ade-everywhere-proposal.md) section 2 and 8 item 1). Phase 0
 item 4.4 (2026-10-20) tracks them here as **templates**: the live file's structure, key order and comments, with
 every secret, account id, host name and home path replaced by a placeholder. This is the section 4.2 layout
 (`agents/<tui>/<file>.tmpl`); nothing here is applied yet. The proposal's chezmoi apply (section 4.4) will render

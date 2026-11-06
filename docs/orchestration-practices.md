@@ -1,8 +1,8 @@
 # Orchestration practices: decide cheaply, reason expensively, verify centrally
 
 Snapshot **2026-10-11**. The rules every orchestration skill here follows
-(`bigteam`, `research`, `dialogue`, `model-routing`, `effort-routing`,
-`ralph-tui-orchestration`). Each skill carries the short form of the rules it
+(`bigteam`, `research`, `dialogue`, `model-routing`, `effort-routing`;
+`ralph-tui-orchestration` was removed 2026-11-06). Each skill carries the short form of the rules it
 needs and links here for the reasons and sources.
 
 **Standing operator requirement:** every orchestration skill must be able to
@@ -30,7 +30,7 @@ agent has an ACP mode, and the per-CLI headless forms only where it has none
    only a non-quota exit 3 is a re-task decision for the judgment tier.
 2. **A typed decision model**, a call that returns a probability per option
    and no text. TypeSafe's Jev is one (the `typesafe-ai` skill; needs a
-   TypeSafe API key, stored in `sudo-secretspec` as `TYPESAFE_API_KEY` since 2026-10-11, **in shadow mode only since 2026-10-11** (`bin/jev`, `docs/jev.md`)). Code reads
+   TypeSafe API key, stored in `sudo-secretspec` as `TYPESAFE_API_KEY` since 2026-10-11, **in shadow mode only; `bin/jev` removed 2026-11-06**). Code reads
    the probability and applies a threshold. Never ask a model how confident
    it is; read the distribution.¹ ⁴
 3. **A cheap text model** at low effort (haiku, a free pool), with a closed

@@ -253,7 +253,7 @@ The following insertion is **proposed**, using the recommended answers above; re
 | `bin/load-watch` | 1–49 load thresholds and CI eligibility registry contract. |
 | `/Users/djbclark/ops/site-private/bin/bg` | 1–33 load/QoS/wait; 42–65 slots/CPU defaults; 106–118 CI registry behavior. Proposal's stricter one-heavy-job rule takes precedence over generic capacity defaults. |
 | `docs/orca-integration.md` | 19–47 macro DAG commands/worker acknowledgement; 91–96 late completion; 122–155 outdated cow integration statement. |
-| `docs/jev.md` | 3–6 shadow scope; 92–101 retired dispatch-verdict and deterministic replacement. |
+| `docs/jev.md` (removed 2026-11-06) | 3–6 shadow scope; 92–101 retired dispatch-verdict and deterministic replacement. |
 | `docs/queue.md` | 6–16 current Codex read-only failure/workaround; 74–103 denied-tool/project-hook concerns. These are blocker records, not proof the workarounds provide containment. |
 | `/Users/djbclark/.claude/agents/adversary.md` | 1–26 model/effort/tools, read-only review, APPROVE/BLOCK, required evidence and incomplete-review disclosure. |
 | `skills/forgejo-ci/SKILL.md` | 15–19 current GitHub versus Hyades routing; 21–28 canonical skill provenance; 30–47 microVM/runner/image/port constraints; 133 Apple-container comparison. |
