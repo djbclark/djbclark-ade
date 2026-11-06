@@ -114,7 +114,10 @@ def main(argv):
         return 0
     if cmd == "matrix":
         rows, out, base = argv[2:5]
-        provs = {}
+        try:   # a re-run of a subset of providers updates those rows and keeps the others
+            provs = dict(json.load(open(out)).get("providers", {}))
+        except (OSError, ValueError):
+            provs = {}
         for ln in open(rows):
             ln = ln.strip()
             if ln:

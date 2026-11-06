@@ -84,7 +84,8 @@ for p in $PROVIDERS; do
   pj agent archive --force "$id" >/dev/null 2>&1 || pj archive --force "$id" >/dev/null 2>&1 || true
 done
 
-mkdir -p "$ACC_RESULTS"
+mkdir -p "$ACC_RESULTS/d1-01-evidence"   # /var/folders is reaped by the OS: keep the transcripts with the results (2026-11-06: run 1's were emptied)
+for d in "$ACC_BASE"/ev-*; do rm -rf "$ACC_RESULTS/d1-01-evidence/${d##*/ev-}"; cp -R "$d" "$ACC_RESULTS/d1-01-evidence/${d##*/ev-}"; done
 python3 "$here/lib/steer_analyze.py" matrix "$results" "$ACC_RESULTS/steer-matrix.json" "$ACC_BASE" || fail "matrix could not be written" "{\"rows\":\"$results\"}"
 bad=$(python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); print(",".join(p for p,v in m["providers"].items() if v.get("verdict") in ("interrupts","lost","unanswered")))' "$ACC_RESULTS/steer-matrix.json")
 gone=$(python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); print(",".join(p for p,v in m["providers"].items() if v.get("verdict") in ("provider-error","no-tool","create-failed")))' "$ACC_RESULTS/steer-matrix.json")

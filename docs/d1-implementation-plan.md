@@ -135,6 +135,23 @@ Accept: every provider has a verdict; a provider that interrupts is "queue only"
 (`config/ade-providers.toml`, name proposed, question 11).
 Cost: one short paid turn per provider; run the cheapest model per provider (question 2).
 
+**Checked 2026-11-02 (slice d1-t4-steer; run 1 on CLI and isolated daemon 0.15.0-beta.1, re-run of codex, omp, hermes, grok on 0.15.2 after the CLI updated itself; verdicts in `~/.local/state/ade/acceptance/2026-11-03/steer-matrix.json`, run on the isolated daemon only, cheapest model per provider, one 60 s `sleep` turn each, a `--behavior steer` send 4 to 10 s into it; both runs agree):**
+
+| provider (model) | verdict | evidence |
+|---|---|---|
+| codex (`gpt-6-luna`, mode `full-access`) | **steers** | marker is a user entry mid-sleep; ONE `sleep 60` tool entry; `FIRST` then the marker, same turn; turn ended about 59 s after the send |
+| omp (`anthropic/claude-haiku-5-5`) | **steers** | same shape (an omp shape run with `sleep 30` showed it too); API credits, about 0.006 USD |
+| hermes (`xai-oauth:grok-4.7`) | **steers, but restarts the tool** | marker delivered mid-turn and answered after `FIRST`, but `terminal: sleep 60` ran a second time (two tool entries): the turn survived, the tool call did not |
+| grok (`grok-4.7-build-fast`) | **interrupts: queue only** | the Thought says "The sleep command was cancelled by the harness"; one sleep entry; no `FIRST` answer and the agent still `running` after the 30 s quiet window |
+| copilot (`gemini-3.8-flash`) | no verdict: `provider-error` | `Error: You have exceeded your monthly quota` |
+| cursor (`composer-2.5`) | no verdict: no tool call | turn ended at once with `Upgrade your plan to continue` |
+| glm-acp-agent (`glm-5.3-flash`) | no verdict: `provider-error` | `No API key found` (`Z_AI_API_KEY`): no key under the test home |
+| qwen-code (`qwen3.5-plus(openai)`) | no verdict: `provider-error` | `401 invalid access token or token expired` |
+| claude, cline, opencode | **skipped: pool protected** | djbclark 2026-11-02: no Claude subscription, clinepass or opencode-go turns |
+| antigravity | no steering | recorded without a probe, as the task says |
+
+**Accept is NOT fully met:** three providers have a verdict (codex, omp, hermes steer), grok is proven `queue only`; copilot, cursor, glm-acp-agent and qwen-code have a recorded reason instead of a verdict, and claude, cline, opencode are skipped. Treat every provider without a `steers` verdict as `queue only` in G3's table (`config/ade-providers.toml`) until a re-run says otherwise (hermes: `steers`, but a running shell tool restarts). Re-run needs: copilot quota back, cursor plan, glm `Z_AI_API_KEY`, qwen-code login (then `PROVIDERS='copilot cursor' bash tests/paseo-acceptance/d1-01-steer.sh`: a subset re-run updates only those rows); the three protected pools need djbclark's yes or an omp-routed Claude check (omp's `anthropic/*` models are the Claude API path and already steer). Method facts: a fresh isolated home knows only the built-in providers, so `lib/common.sh` `isolated_up` takes `ACC_PROVIDER_IDS` (ids copied from the live `agents.providers`; refused if their `env` names a KEY, TOKEN, SECRET or PASS; no credential is copied); `paseo logs ID --json` prints the timeline as PLAIN TEXT blocks (`[User]`, `[Shell]`, `[Thought]`, `[Wait]`, untagged assistant text), so `lib/steer_analyze.py` parses blocks, not JSON; the probe approves pending permits itself (`allow_pending`) because ACC yolo mode ids differ per ACP provider. Transcripts: `<results>/d1-01-evidence/<provider>/` for the four re-run providers; run 1's copies under `$TMPDIR` were emptied by the OS reaper before they were saved, and the other four rows keep only the matrix analysis. No `ade-acc-steer` daemon or socket was left (`isolated_down`).
+
 ### T5. D1.2 Card option answers
 
 Files: `d1-02-card-option.sh` (SCOPE `second daemon only`).
