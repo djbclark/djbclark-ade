@@ -47,4 +47,4 @@ CHANGELOG lines. If an agent TUI still lacks a new skill, start a new session;
 a present link does not prove a running TUI reloaded its catalog.
 
 Docs: README "Update (this machine)"; `bin/ade-update` (usage text at the top);
-`skills/skills-everywhere/SKILL.md` for the link step.
+`bin/skill-everywhere` (usage text at the top) for the link step.

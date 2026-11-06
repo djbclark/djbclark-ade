@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!-- Nightly fresh-session context budget check (bin/context-budget-check, config/context-budget.toml).
-     Installed by `context-budget-check install`, 03:50 daily, after skillopt-night (03:30). It runs
+     Installed by `context-budget-check install`, 03:50 daily. It runs
      `claude -p "/context"` in each configured directory (no model request), writes
      ~/.local/state/context-budget/<date>.json and sends one hermes-ping line on a budget breach
      or a rise of 2k tokens or more in any row. Since 2026-11-04 (issue 284) it also runs

@@ -8,6 +8,8 @@
 #     skill-everywhere --remove <name>...   remove links this script would make
 #     --dry-run (-n) with link or --remove: print the changes, make none
 #     SKILL_EVERYWHERE_ONLY=grokbot,claude limits the run to those targets
+#     After a new skill is linked, run `/reload-skills` in running Claude sessions (per-skill symlinks are the
+#     documented mechanism; a directory-level symlink is not, so none is used).
 #     SKILL_EVERYWHERE_NO_COPY=1 skips the copy target (grokbot): ade-update sets it for a non-canonical checkout, which
 #     is a report-only run, so such a run neither lists nor renders the Grok Bot copy
 #     The grokbot copy refuses a skill holding a symlink that is not a link to a regular file inside the skill (one that
@@ -94,7 +96,7 @@ if ((all)); then
   ((${#names[@]})) || { echo "error: no readable shared SKILL.md files under $ade_root, $priv_root or $site_root" >&2; exit 2; }
   set -- "${names[@]}"
 fi
-[[ $# -gt 0 ]] || { gsed -n '2,15p' "$0" >&2; exit 2; }
+[[ $# -gt 0 ]] || { gsed -n '2,14p' "$0" >&2; exit 2; }
 only="${SKILL_EVERYWHERE_ONLY:-}"
 no_copy=0; [[ -z ${SKILL_EVERYWHERE_NO_COPY:-} ]] || no_copy=1
 wanted() { [[ -z $only || ",$only," == *",$1,"* ]]; }

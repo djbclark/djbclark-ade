@@ -10,7 +10,7 @@ database; no data changes), and the live Hermes `state.db` is never handed to `h
 
   1. single live SQLite files: the SQLite online backup API (`Connection.backup`), never a `cp` of a
      WAL database;
-  2. per-session SQLite trees (Cursor, Antigravity): each db the same way, its sidecar (`meta.json`,
+  2. per-session SQLite trees (Cursor): each db the same way, its sidecar (`meta.json`,
      `<uuid>.meta`) copied beside it;
   3. file stores: an own directory walk (no `shutil.copytree`) that drops every credential file name and path
      (inventory section 5 item 5), the `credential-bak` vault, symlinks inside a store and non-regular files; a configured
@@ -146,26 +146,11 @@ COUNTER_RE = re.compile(
 ALLOW = [
     # token usage metrics and budgets, not credentials
     ("hermes-state", "messages", "token_count", "count of tokens in a message"),
-    ("zcode-db", "dwf_run", "spent_tokens", "tokens spent by a workflow run"),
-    ("zcode-db", "model_usage", "computed_total_tokens", "token usage counter"),
-    ("zcode-db", "model_usage", "provider_total_tokens", "token usage counter"),
-    ("zcode-db", "model_usage", "first_token_at", "timestamp of the first streamed token"),
-    ("zcode-db", "model_usage", "time_to_first_token_ms", "latency metric"),
-    ("zcode-db", "turn_usage", "computed_total_tokens", "token usage counter"),
-    ("zcode-db", "turn_usage", "first_token_at", "timestamp of the first streamed token"),
-    ("zcode-db", "turn_usage", "time_to_first_token_ms", "latency metric"),
-    ("zcode-db", "session_target", "token_budget", "token budget of a session target"),
     ("codex-db", "thread_goals", "token_budget", "token budget of a thread goal"),
-    ("copilot-db", "assistant_usage_events", "inter_token_latency_ms", "latency metric"),
-    ("copilot-db", "assistant_usage_events", "time_to_first_token_ms", "latency metric"),
-    ("copilot-db", "assistant_usage_events", "token_details_json", "per-event token usage breakdown (a usage-event row)"),
     # identifiers and job leases, not secrets
     ("codex-db", "remote_control_enrollments", "account_id", "account identifier; the table has no secret column"),
     ("codex-db", "threads", "creator_account_id", "account identifier of the thread creator"),
     ("codex-db", "jobs", "ownership_token", "work-queue lease marker for a memories job"),
-    ("cline-db", "cron_runs", "claim_token", "work-queue lease marker for a cron run"),
-    ("cline-db", "schedules", "claim_token", "work-queue lease marker for a schedule"),
-    ("cline-db", "agenda_task_runs", "claim_token", "work-queue lease marker for a task run"),
 ]
 
 
@@ -206,7 +191,8 @@ def build_stores(home):
     def files(name, *roots, file_labels=()):
         return {"name": name, "kind": "files", "roots": [(label, h / rel) for label, rel in roots],
                 "file_labels": list(file_labels)}
-    agy = ".gemini/antigravity"
+    # (zcode, crush, copilot, antigravity, qwen, cline, pi and muse stores removed 2026-11-06, slim-down E10: those TUIs
+    # retired. Their credential exclusions below stay, as the named exception.)
     return [
         files("handoffs", ("handoffs", ".local/state/handoffs")),
         tree("cursor-acp-sessions", ".cursor/acp-sessions", ["*/store.db"], ["meta.json"], required=["meta.json"]),
@@ -214,52 +200,19 @@ def build_stores(home):
         files("cursor-projects", ("projects", ".cursor/projects")),
         sqlite("hermes-state", ".hermes/state.db"),
         sqlite("opencode", ".local/share/opencode/opencode.db"),
-        sqlite("zcode-db", ".zcode/cli/db/db.sqlite", ".zcode/v2/tasks-index.sqlite"),
-        files("zcode-files", ("rollout", ".zcode/cli/rollout"), ("artifacts", ".zcode/cli/artifacts"),
-              ("memories", ".zcode/cli/memories"), ("acp-lazy-sessions.json", ".zcode/v2/acp-lazy-sessions.json"),
-              file_labels=["acp-lazy-sessions.json"]),
-        sqlite("crush-acp", ".local/share/crush-acp/crush.db"),
-        sqlite("crush-tui", ".config/crush/.crush/crush.db"),
-        sqlite("crush-repo", "src/djbclark-ade/.crush/crush.db"),
-        files("crush-files", ("projects.json", ".local/share/crush/projects.json"),
-              file_labels=["projects.json"]),
         sqlite("codex-db", ".codex/state_5.sqlite", ".codex/logs_2.sqlite", ".codex/memories_1.sqlite",
                ".codex/goals_1.sqlite"),
         files("codex-files", ("sessions", ".codex/sessions"), ("session_index.jsonl", ".codex/session_index.jsonl"),
               file_labels=["session_index.jsonl"]),
-        sqlite("copilot-db", ".copilot/session-store.db"),
-        files("copilot-files", ("session-state", ".copilot/session-state")),
-        tree("antigravity-cli-db", f"{agy}-cli", ["conversations/*.db", "conversation_summaries.db"], ["{stem}.meta"]),
-        tree("antigravity-ide-db", agy, ["conversations/*.db", "conversation_summaries.db"], ["{stem}.meta"]),
-        tree("antigravity-acp-db", f"{agy}-acp", ["conversations/*.db", "conversation_summaries.db"], ["{stem}.meta"]),
-        files("antigravity-cli-files", ("brain", f"{agy}-cli/brain"), ("history.jsonl", f"{agy}-cli/history.jsonl"),
-              ("annotations", f"{agy}-cli/annotations"), ("implicit", f"{agy}-cli/implicit"),
-              ("jetbox_summaries_proto.pb", f"{agy}-cli/jetbox_summaries_proto.pb"),
-              file_labels=["history.jsonl", "jetbox_summaries_proto.pb"]),
-        files("antigravity-ide-files", ("brain", f"{agy}/brain"),
-              ("agyhub_summaries_proto.pb", f"{agy}/agyhub_summaries_proto.pb"),
-              ("antigravity_state.pbtxt", f"{agy}/antigravity_state.pbtxt"),
-              file_labels=["agyhub_summaries_proto.pb", "antigravity_state.pbtxt"]),
-        files("antigravity-acp-files", ("brain", f"{agy}-acp/brain")),
         files("claude", ("projects", ".claude/projects"), ("file-history", ".claude/file-history"),
               ("session-env", ".claude/session-env"), ("tasks", ".claude/tasks"), ("teams", ".claude/teams"),
               ("sessions", ".claude/sessions"), ("history.jsonl", ".claude/history.jsonl"),
               file_labels=["history.jsonl"]),
-        files("qwen", ("projects", ".qwen/projects")),
-        files("cline", ("sessions", ".cline/data/sessions")),
-        tree("cline-db", ".cline/data/db", ["*.db"], []),
         files("grok", ("sessions", ".grok/sessions"), ("memory-v2", ".grok/memory-v2"), ("memtrace", ".grok/memtrace")),
         sqlite("grok-db", ".grok/worktrees.db"),
         files("gemini-cli", ("tmp", ".gemini/tmp")),
         files("omp", ("sessions", ".omp/agent/sessions")),
         sqlite("omp-db", ".omp/agent/history.db"),
-        files("pi", ("sessions", ".pi/agent/sessions"),
-              ("acp-session-map.json", ".pi/pi-acp/session-map.json"),
-              file_labels=["acp-session-map.json"]),
-        files("muse", ("sessions", ".local/share/muse/sessions"),
-              ("tui-history.jsonl", ".local/share/muse/tui-history.jsonl"),
-              file_labels=["tui-history.jsonl"]),
-        sqlite("muse-db", ".local/share/muse/session-index.db"),
         files("paseo", ("agents", ".paseo/agents"), ("projects", ".paseo/projects"),
               ("agent-requests", ".paseo/agent-requests")),
         files("herdr", ("session.json", ".config/herdr/session.json"),

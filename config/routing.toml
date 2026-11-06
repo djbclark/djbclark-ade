@@ -26,7 +26,7 @@
 # Kinds of work. Deliberately few — a taxonomy nobody can apply is worse than
 # a coarse one that gets used.
 # `api-only` (operator 2026-10-19): work that needs the Claude API and cannot run through a
-# TUI or ACP (SDK paths such as the Claude route in bin/failover.py, a verdict classifier,
+# TUI or ACP (SDK paths such as a Claude API call (a model chain is `paseo run`'s job), a verdict classifier,
 # a batch or API-only job). omp's Claude API credits are
 # eligible (pi's OpenAI API pool was retired 2026-11-06); select the provider appropriate for the SDK. The caller makes the API
 # call itself and `route_agent.py route --kind api-only` reports capacity.

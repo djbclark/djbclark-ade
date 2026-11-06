@@ -224,14 +224,12 @@ def test_unknown_only_name_is_usage_error(env):
     assert run_main(mod, "--dest", str(dest), "--only", "nope") == 2
 
 
-def test_pi_backup_covers_sessions_and_acp_mapping_but_not_auth(tmp_path):
+def test_retired_tui_credential_paths_stay_excluded():
+    """Named exception (slim-down E9h Q4): the stores of retired TUIs are gone, their credential exclusions stay."""
     mod = load()
-    home = tmp_path / "home"
-    store = next(store for store in mod.build_stores(home) if store["name"] == "pi")
-    assert store["roots"] == [("sessions", home / ".pi/agent/sessions"),
-                              ("acp-session-map.json", home / ".pi/pi-acp/session-map.json")]
-    assert store["file_labels"] == ["acp-session-map.json"]
-    assert ".pi/agent/auth.json" in mod.EXCLUDE_PATHS
+    for path in (".pi/agent/auth.json", ".zcode/v2/credentials.json", ".copilot/data.db", ".local/share/crush/crush.json",
+                 ".cline/data/settings/providers.json", ".gemini/antigravity-acp/acp_token.json"):
+        assert path in mod.EXCLUDE_PATHS
     assert mod.is_excluded_name("auth.json")
 
 
@@ -639,6 +637,32 @@ def real(tmp_path, monkeypatch):
     return load(), home, tmp_path
 
 
+def fixture_stores(mod, monkeypatch):
+    """Generic store shapes for engine tests that used to borrow a retired TUI's store (E10, 2026-11-06): a sqlite
+    store, a sqlite tree with `{stem}.meta` sidecars, a files store with a single-file root. Added to the real list."""
+    real_build = mod.build_stores
+
+    def stores(h):
+        extra = [
+            {"name": "crush-acp", "kind": "sqlite", "files": [h / ".local/share/crush-acp/crush.db"]},
+            {"name": "zcode-db", "kind": "sqlite", "files": [h / ".zcode/cli/db/db.sqlite", h / ".zcode/v2/tasks-index.sqlite"]},
+            {"name": "crush-files", "kind": "files", "roots": [("projects.json", h / ".local/share/crush/projects.json")],
+             "file_labels": ["projects.json"]},
+            {"name": "muse", "kind": "files", "roots": [("sessions", h / ".local/share/muse/sessions"),
+                                                        ("tui-history.jsonl", h / ".local/share/muse/tui-history.jsonl")],
+             "file_labels": ["tui-history.jsonl"]},
+            {"name": "cline-db", "kind": "sqlite-tree", "root": h / ".cline/data/db", "dbs": ["*.db"], "sidecars": [],
+             "required": []},
+            {"name": "antigravity-cli-db", "kind": "sqlite-tree", "root": h / ".gemini/antigravity-cli",
+             "dbs": ["conversations/*.db", "conversation_summaries.db"], "sidecars": ["{stem}.meta"], "required": []},
+            {"name": "antigravity-ide-db", "kind": "sqlite-tree", "root": h / ".gemini/antigravity",
+             "dbs": ["conversations/*.db", "conversation_summaries.db"], "sidecars": ["{stem}.meta"], "required": []},
+        ]
+        return real_build(h) + extra
+
+    monkeypatch.setattr(mod, "build_stores", stores)
+
+
 def default_generation(home):
     gens = [p for p in (home / ".local/state/ade/backups").iterdir() if not p.name.endswith(".part")]
     assert len(gens) == 1
@@ -673,8 +697,9 @@ def test_strict_stores_exits_1_on_a_missing_store_and_still_writes_the_generatio
     assert mod.main(["--only", "handoffs", "--dry-run", "--dest", str(home / "o2")]) == 0
 
 
-def test_a_store_with_some_paths_missing_is_recorded_per_path(real):
+def test_a_store_with_some_paths_missing_is_recorded_per_path(real, monkeypatch):
     mod, home, _ = real
+    fixture_stores(mod, monkeypatch)
     con = make_wal_db(home / ".zcode/cli/db/db.sqlite", ["x"])
     con.close()  # .zcode/v2/tasks-index.sqlite is absent
     dest = home / "out" / "bk"
@@ -1076,8 +1101,9 @@ def test_links_above_the_last_glob_component_are_one_skip_each_whatever_they_lea
     assert plan["file_count"] == 2 and plan["skipped_count"] == 3
 
 
-def test_antigravity_conversations_behind_a_linked_directory_are_skipped(real):
+def test_antigravity_conversations_behind_a_linked_directory_are_skipped(real, monkeypatch):
     mod, home, tmp = real
+    fixture_stores(mod, monkeypatch)
     outside = tmp / "convs"
     make_wal_db(outside / "c1.db", ["SECRET-LINKED-CONV-ROW"]).close()
     (outside / "c1.meta").write_text("{}")
@@ -1491,8 +1517,9 @@ def test_copy_regular_refuses_a_fifo_without_blocking(real):
 
 # --- Codex pass 8 on PR 24 (2026-10-20): Muse tui-history.jsonl, dry-run exclusion parity, strict schema check ---
 
-def test_muse_backs_up_tui_history_and_records_it_missing_when_absent(real):
+def test_muse_backs_up_tui_history_and_records_it_missing_when_absent(real, monkeypatch):
     mod, home, _ = real
+    fixture_stores(mod, monkeypatch)
     muse = home / ".local/share/muse"
     (muse / "sessions").mkdir(parents=True)
     (muse / "sessions/s1.jsonl").write_text('{"m": 1}\n')
@@ -1511,8 +1538,9 @@ def test_muse_backs_up_tui_history_and_records_it_missing_when_absent(real):
     assert entry["missing"] == [str(muse / "tui-history.jsonl")]
 
 
-def test_dry_run_skips_an_excluded_sqlite_tree_db_like_the_real_copy(real, capsys):
+def test_dry_run_skips_an_excluded_sqlite_tree_db_like_the_real_copy(real, capsys, monkeypatch):
     mod, home, _ = real
+    fixture_stores(mod, monkeypatch)
     db_dir = home / ".cline/data/db"
     make_wal_db(db_dir / "ok.db", ["row"]).close()
     make_wal_db(db_dir / "data.db", ["SENTINEL-EXCLUDED-DB"]).close()  # data.db is an excluded credential name
@@ -1588,6 +1616,7 @@ def test_a_sidecar_swapped_for_a_symlink_after_the_check_is_an_error_not_followe
 
 def test_a_single_file_root_is_copied_through_copy_regular_and_a_swapped_link_is_refused(real, monkeypatch):
     mod, home, tmp = real
+    fixture_stores(mod, monkeypatch)
     muse = home / ".local/share/muse"
     (muse / "sessions").mkdir(parents=True)
     history = muse / "tui-history.jsonl"
@@ -1615,8 +1644,9 @@ def test_a_single_file_root_is_copied_through_copy_regular_and_a_swapped_link_is
     assert entry["status"] == "partial" and "became a symlink" in entry["errors"][0]["error"]
 
 
-def test_a_followed_single_file_root_link_is_copied_from_its_target(real):
+def test_a_followed_single_file_root_link_is_copied_from_its_target(real, monkeypatch):
     mod, home, _ = real
+    fixture_stores(mod, monkeypatch)
     muse = home / ".local/share/muse"
     (muse / "sessions").mkdir(parents=True)
     (home / "data").mkdir()
@@ -1665,6 +1695,7 @@ def test_ro_connect_refuses_a_swap_between_the_nofollow_open_and_sqlite_opening_
 
 def test_a_linked_sqlite_source_is_refused_when_swapped_after_the_check_through_the_store_path(real, monkeypatch):
     mod, home, tmp = real
+    fixture_stores(mod, monkeypatch)
     outside = tmp / "outside2.db"
     make_wal_db(outside, ["SENTINEL-SWAPPED-STORE-ROW"]).close()
     db = home / ".local/share/crush-acp/crush.db"
@@ -1700,8 +1731,9 @@ def test_wal_size_ignores_a_symlinked_wal(real):
 
 # --- Codex pass 11 on PR 24 (2026-10-20): Crush files, a walk that never trusts a path string, optional sidecars ---
 
-def test_crush_json_is_never_backed_up_and_projects_json_is(real):
+def test_crush_json_is_never_backed_up_and_projects_json_is(real, monkeypatch):
     mod, home, _ = real
+    fixture_stores(mod, monkeypatch)
     crush = home / ".local/share/crush"
     crush.mkdir(parents=True)
     (crush / "crush.json").write_text('{"api_key": "SENTINEL-CRUSH-API-KEY", "refresh_token": "SENTINEL-CRUSH-REFRESH"}')
@@ -1748,6 +1780,7 @@ def test_dry_run_records_an_entry_whose_lstat_fails_as_an_error_like_the_copy(re
 
 def test_check_schemas_never_opens_an_excluded_tree_database(real, capsys, monkeypatch):
     mod, home, _ = real
+    fixture_stores(mod, monkeypatch)
     db_dir = home / ".cline/data/db"
     make_wal_db(db_dir / "ok.db", ["row"]).close()
     make_wal_db(db_dir / "data.db", ["SENTINEL-EXCLUDED-DB"]).close()
@@ -1893,8 +1926,9 @@ def test_ro_connect_refuses_a_parent_directory_swapped_for_a_symlink_and_reads_n
     con.close()
 
 
-def test_an_optional_sidecar_that_is_a_symlink_is_a_recorded_skip_and_the_store_stays_ok(real, capsys):
+def test_an_optional_sidecar_that_is_a_symlink_is_a_recorded_skip_and_the_store_stays_ok(real, capsys, monkeypatch):
     mod, home, _ = real
+    fixture_stores(mod, monkeypatch)
     conv = home / ".gemini/antigravity-cli/conversations"
     conv.mkdir(parents=True)
     make_wal_db(conv / "c1.db", ["row"]).close()
@@ -1935,6 +1969,7 @@ def swap_parent_after_gate(mod, monkeypatch, gated, parent, outside_parent, tmp)
 
 def test_a_standalone_sqlite_parent_swapped_for_a_symlink_after_the_gate_is_an_error_not_copied(real, monkeypatch):
     mod, home, tmp = real
+    fixture_stores(mod, monkeypatch)
     db = home / ".local/share/crush-acp/crush.db"
     make_wal_db(db, ["inside"]).close()
     outside = tmp / "outside-crush"
@@ -1967,6 +2002,7 @@ def test_a_file_store_directory_root_with_a_parent_swapped_after_the_gate_is_an_
 
 def test_a_file_store_single_file_root_with_a_parent_swapped_after_the_gate_is_an_error_not_copied(real, monkeypatch):
     mod, home, tmp = real
+    fixture_stores(mod, monkeypatch)
     history = home / ".local/share/muse/tui-history.jsonl"
     history.parent.mkdir(parents=True)
     history.write_text('{"h": 1}\n')

@@ -16,7 +16,7 @@ carries the same text as an XML comment). Edit the plist, then install again; ne
 
 **Which jobs belong here (Paseo directive F2, [paseo-only-rearchitecture.md](paseo-only-rearchitecture.md)).** System jobs
 (monitors, collectors, record reaping, watchdogs, sweeps) use launchd on the Mac and systemd on Linux, through this tool.
-Judgment jobs that run an agent (skillopt-night, triage, reports) use Paseo schedules (`paseo schedule create --cron ...`),
+Judgment jobs that run an agent (triage, reports) use Paseo schedules (`paseo schedule create --cron ...`),
 not ade-sched.
 
 ## Commands
@@ -119,7 +119,7 @@ prints the state.
 | `WorkingDirectory` | `WorkingDirectory=` | `cd DIR &&` |
 | `StandardOutPath` / `StandardErrorPath` | `StandardOutput=append:P` / `StandardError=append:P` (systemd 240+; 236-239 `file:`, which truncates; older: the journal, with a note); the parent dir is created | `>>P 2>&1`, or separate redirects; a missing one goes to `/dev/null` |
 | `Nice`, `LowPriorityIO`, `ProcessType=Background` | `Nice=` (Background without Nice: 10), `IOSchedulingClass=idle` | ignored, with a note |
-| (oneshot defaults) | `KillMode=process` (launchd leaves setsid-detached workers alive: bin/deadline's sweep and skillopt-night start them), `TimeoutStartSec=max(3 x StartInterval, 300 s)`; a calendar job: max(its shortest gap, capped at a day, 300 s) | — |
+| (oneshot defaults) | `KillMode=process` (launchd leaves setsid-detached workers alive: bin/deadline's sweep starts them), `TimeoutStartSec=max(3 x StartInterval, 300 s)`; a calendar job: max(its shortest gap, capped at a day, 300 s) | — |
 | any other key | kept in the launchd copy; a note on systemd and cron | |
 
 Refused with exit 2 on every backend: a newline, CR or NUL in any argument, environment value, working directory or log

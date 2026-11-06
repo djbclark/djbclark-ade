@@ -1247,7 +1247,7 @@ def reroute_command(rec: dict, record_path: Path) -> str | None:
 def git_identity_warning(repo: Path) -> str | None:
     """Why commits in `repo` would not be the operator's, or None (2026-10-18).
 
-    A skillopt-night replay wrote an upstream maintainer's identity into a shared worktree
+    A replay (the retired skillopt-night) wrote an upstream maintainer's identity into a shared worktree
     .git/config and a later slice committed under it. acp-run's identity guard refuses such
     commits; this says so before the slice runs. Never raises."""
     def get(*args: str) -> str:
@@ -1901,7 +1901,7 @@ def reap_items(items: list[str], quiet: bool = False) -> int:
 
 def reap_install(uninstall: bool = False) -> int:
     """Copy launchd/com.djbclark.acp-dispatch-reap.plist to ~/Library/LaunchAgents and bootstrap it
-    (the way skillopt-night installs its job); ACP_DISPATCH_LAUNCH_AGENTS overrides the directory."""
+    (the way the other launchd installers do); ACP_DISPATCH_LAUNCH_AGENTS overrides the directory."""
     dest = Path(os.environ.get("ACP_DISPATCH_LAUNCH_AGENTS") or Path.home() / "Library" / "LaunchAgents") / REAP_PLIST.name
     domain = f"gui/{os.getuid()}"
     lc = launchctl_bin()

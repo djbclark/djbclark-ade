@@ -24,7 +24,7 @@ Why it exists: the 2026-10-10 preamble trim regrew by 2026-10-18 through three c
 the directory it stands for (default the first in the config). --dry-run prints the ping instead of
 sending it and writes no state. The `claude` and `hermes-ping` paths come from CONTEXT_BUDGET_CLAUDE
 and CONTEXT_BUDGET_PING. install/uninstall load or remove the launchd job
-(launchd/com.djbclark.context-budget.plist, 03:50 daily, after skillopt-night at 03:30);
+(launchd/com.djbclark.context-budget.plist, 03:50 daily);
 CONTEXT_BUDGET_NO_INSTALL=1 only prints the plan.
 
 --instruction-lint (opt-in, report-only) also runs bin/instruction-lint over each measured directory
