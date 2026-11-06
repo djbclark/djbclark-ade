@@ -1,4 +1,5 @@
-"""bin/load-watch: the ci-only registry `bg` reads, the sample window, and incident acks. No launchd, no relay."""
+"""bin/load-watch: the ci-only registry `bg` reads, the sample window, incident acks and the watcher's `paseo send`. No launchd.
+The find-and-tell hot path (attribution through a fake `paseo`) is tests/test_load_watch_find_and_tell.py."""
 import importlib.machinery
 import importlib.util
 import itertools
@@ -73,7 +74,7 @@ def _sampler(tmp_path, monkeypatch):
     monkeypatch.setattr(lw.os, "getloadavg", lambda: (40.0, 40.0, 40.0))
     monkeypatch.setattr(lw.os, "cpu_count", lambda: 8)
     monkeypatch.setattr(lw, "ps_table", lambda: {"1": (0, 0, 0.1, "x")})
-    monkeypatch.setattr(lw, "attribute", lambda use, span, parent: ({}, []))
+    monkeypatch.setattr(lw, "attribute", lambda use, span, parent: ({}, [], [], None))
     monkeypatch.setattr(lw, "guard", lambda *args: None)
 
     class A:
@@ -103,7 +104,7 @@ def test_unexplained_load_reaches_the_watcher_hourly(tmp_path, monkeypatch):
     load = {"v": 40.0}
     monkeypatch.setattr(lw.os, "getloadavg", lambda: (load["v"],) * 3)
     sent = []
-    monkeypatch.setattr(lw, "send_to", lambda w, text: sent.append(text) or True)
+    monkeypatch.setattr(lw, "paseo_send", lambda w, text: sent.append(text) or "sent")
     lw.save_watcher({"channel": "paseo", "target": "agent-a"})
 
     def episode(start):
@@ -254,7 +255,7 @@ def _work(monkeypatch, procs, parent, cmds, cwds, tops, rows=None, session_top="
     monkeypatch.setattr(lw, "main_worktree", lambda top: "")
     monkeypatch.setattr(lw, "pasture_source", lambda top: "")
     monkeypatch.setattr(lw, "registry", lambda: rows or {})
-    session = {"id": "s1", "pid": 1000, "agent": "claude", "name": "ade-87", "cwd": "/r/ade"}
+    session = {"id": "s1", "agent": "claude/opus", "name": "ade-87", "cwd": "/r/ade"}
     g = {"session": session, "cores": sum(c for _, c in procs),
          "procs": [{"pid": pid, "cores": c, "cmd": "rustc x"} for pid, c in procs]}
     return lw, g, lw.work_repos(g, session_top, parent, cmds)
@@ -333,6 +334,7 @@ def test_brief_for_the_2056_incident(monkeypatch):
 
 def test_proc_cwds_parses_one_lsof_call(monkeypatch):
     lw = load_module()
+    monkeypatch.setattr(lw, "PROC_CWD", False)  # the macOS path (no /proc)
     calls = []
     out = "p100\nn/r/a\np101\nn/tmp/x y\n"
     monkeypatch.setattr(lw.subprocess, "run", lambda argv, **kw: calls.append(argv) or
@@ -342,12 +344,27 @@ def test_proc_cwds_parses_one_lsof_call(monkeypatch):
     assert lw.proc_cwds([]) == {} and len(calls) == 1
 
 
-def fake_paseo(tmp_path, rc=0):
-    """A `paseo` stand-in that appends its argv (one JSON list per line) to sent.jsonl."""
+def test_proc_cwds_reads_proc_on_linux_without_lsof(monkeypatch, tmp_path):
+    """Review rule 5: Linux reads /proc/PID/cwd (no lsof needed); a pid that exited is left out."""
+    lw = load_module()
+    monkeypatch.setattr(lw, "PROC_CWD", True)
+    links = {"/proc/100/cwd": "/r/a", "/proc/101/cwd": "/tmp/x y"}
+
+    def readlink(path):
+        if path in links:
+            return links[path]
+        raise FileNotFoundError(path)
+    monkeypatch.setattr(lw.os, "readlink", readlink)
+    monkeypatch.setattr(lw.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no lsof on Linux")))
+    assert lw.proc_cwds([101, 100, 102]) == {"100": "/r/a", "101": "/tmp/x y"}
+
+
+def fake_paseo(tmp_path, rc=0, status="sent"):
+    """A `paseo` stand-in that appends its argv (one JSON list per line) to sent.jsonl and prints `{"status": STATUS}`."""
     log = tmp_path / "sent.jsonl"
     cli = tmp_path / "paseo"
     cli.write_text(f"#!{sys.executable}\nimport json, sys\nopen({str(log)!r}, 'a').write(json.dumps(sys.argv[1:]) + '\\n')\n"
-                   f"sys.exit({rc})\n")
+                   f"print(json.dumps({{'agentId': sys.argv[-2], 'status': {status!r}}}))\nsys.exit({rc})\n")
     cli.chmod(0o755)
     return cli, log
 
@@ -360,16 +377,16 @@ def run_env(tmp_path, env, *args):
 
 def test_watcher_set_from_paseo_env_show_clear(tmp_path):
     cli, log = fake_paseo(tmp_path)
-    env = {"PASEO_AGENT_ID": "agent-a", "PASEO_CLI": str(cli), "CLAUDE_CODE_SESSION_ID": "sid-a"}
+    env = {"PASEO_AGENT_ID": "agent-a", "PASEO_CLI": str(cli)}
     assert run_env(tmp_path, {}, "watcher", "show").returncode == 1
     r = run_env(tmp_path, env, "watcher", "set", "--name", "lw", "--chain", "load-spike-monitor-t")
     assert r.returncode == 0 and "paseo agent-a" in r.stdout
     w = json.loads(run_env(tmp_path, {}, "watcher", "show", "--json").stdout)
-    assert (w["channel"], w["target"], w["sid"], w["paseo_cli"], w["chain"]) == \
-        ("paseo", "agent-a", "sid-a", str(cli), "load-spike-monitor-t")
+    assert (w["channel"], w["target"], w["paseo_cli"], w["chain"]) == ("paseo", "agent-a", str(cli), "load-spike-monitor-t")
+    assert "sid" not in w
     assert not log.exists()  # nobody to tell on a first set
     assert run_env(tmp_path, {}, "watcher", "clear", "someone-else").returncode == 1
-    assert run_env(tmp_path, {}, "watcher", "clear", "sid-a").returncode == 0
+    assert run_env(tmp_path, {}, "watcher", "clear", "agent-a").returncode == 0
     assert run_env(tmp_path, {}, "watcher", "show").returncode == 1
 
 
@@ -393,7 +410,8 @@ def fake_send(monkeypatch, lw, results, clock=None):
         argvs.append(argv)
         timeouts.append(kw.get("timeout"))
         res = results[min(len(argvs), len(results)) - 1]
-        return subprocess.CompletedProcess(argv, res[0], res[2] if len(res) > 2 else "", res[1])
+        out = res[2] if len(res) > 2 else (SENT if res[0] == 0 else "")
+        return subprocess.CompletedProcess(argv, res[0], out, res[1])
 
     monkeypatch.setattr(lw.subprocess, "run", run)
     monkeypatch.setattr(lw.time, "sleep", lambda s: pauses.append(s))
@@ -407,6 +425,8 @@ def err(code, message="x"):
 
 
 PASEO_W = {"channel": "paseo", "target": "agent-a", "paseo_cli": "paseo-fake"}
+SENT = json.dumps({"agentId": "agent-a", "status": "sent", "message": "Message sent, not waiting for completion"})
+QUEUED = json.dumps({"agentId": "agent-a", "status": "queued", "message": "Message queued for delivery after two quiet seconds"})
 UNREACHABLE = err("DAEMON_UNREACHABLE", "Cannot connect to daemon")
 
 
@@ -553,14 +573,22 @@ def test_send_to_a_non_restart_failure_does_not_set_the_process_flag(monkeypatch
     assert lw.send_to(PASEO_W, "a") is False and lw._paseo_down is False
 
 
-def test_send_to_relay_channel_never_sets_or_reads_the_process_flag(monkeypatch):
+def test_send_reads_status_never_the_exit_code(monkeypatch):
+    """`paseo send` exits 0 for a queued line too (research 2026-11-06 item 1): only `.status` decides."""
     lw = load_module()
-    argvs, pauses, _ = fake_send(monkeypatch, lw, [(1, UNREACHABLE)])
-    assert lw.send_to({"channel": "relay", "target": "t"}, "hi") is False
-    assert lw._paseo_down is False
-    lw._paseo_down = True
-    fake_send(monkeypatch, lw, [(0, "")])
-    assert lw.send_to({"channel": "relay", "target": "t"}, "hi") is True and lw._paseo_down is True
+    fake_send(monkeypatch, lw, [(0, "", QUEUED)])
+    assert lw.paseo_send(PASEO_W, "hi") == "queued"
+    assert lw.send_to(PASEO_W, "hi") is False            # queued is not delivered
+    for out in ("", "not json", "[]", '{"status": ""}', '{"status": 3}'):
+        fake_send(monkeypatch, lw, [(0, "", out)])
+        assert lw.paseo_send(PASEO_W, "hi") == "unknown" and lw.send_to(PASEO_W, "hi") is False, out
+    fake_send(monkeypatch, lw, [(0, "", json.dumps({"type": "single", "data": {"status": "sent"}}))])
+    assert lw.paseo_send(PASEO_W, "hi") == "sent"
+
+
+def test_send_without_a_paseo_binary_is_failed_not_an_exception(monkeypatch):
+    lw = load_module()
+    assert lw.paseo_send({"channel": "paseo", "target": "a", "paseo_cli": "/nonexistent/paseo"}, "hi") == "failed"
 
 
 def test_send_to_timeout_and_oserror_do_not_escape(monkeypatch):
@@ -575,55 +603,45 @@ def test_send_to_timeout_and_oserror_do_not_escape(monkeypatch):
     assert not pauses
 
 
-def test_send_to_relay_channel_is_one_attempt_even_on_a_restart_code(monkeypatch):
-    lw = load_module()
-    argvs, pauses, _ = fake_send(monkeypatch, lw, [(1, UNREACHABLE), (0, "")])
-    assert lw.send_to({"channel": "relay", "target": "t"}, "hi") is False
-    assert len(argvs) == 1 and not pauses and "relay.py" in argvs[0][1] and "--json" not in argvs[0]
-    assert argvs[0][2:] == ["t", "hi", "--no-defer", "--no-ack"] and "--" not in argvs[0]
-
-
-def test_send_to_relay_defers_only_when_asked_for_the_registration_check(monkeypatch):
-    lw = load_module()
-    argvs, _, _ = fake_send(monkeypatch, lw, [(0, "")])
-    assert lw.send_to({"channel": "relay", "target": "t"}, "hi", defer=True) is True
-    assert argvs[0][2:] == ["t", "hi", "--no-ack"]
-
-
-def test_notify_never_lets_relay_queue_the_incident_brief(monkeypatch):
+def test_notify_reads_queued_as_not_delivered_and_offers_the_fixer(monkeypatch):
     lw = load_module()
     argvs = []
 
     def run(argv, **kw):
         argvs.append(argv)
-        return subprocess.CompletedProcess(argv, 1, "", "relay: [x] not sent: it is working")
+        return subprocess.CompletedProcess(argv, 0, QUEUED, "")
     monkeypatch.setattr(lw.subprocess, "run", run)
-    g = {"session": {"id": "abcd1234", "sid": "abcd1234-0000", "agent": "omp", "name": "n", "where": "herdr"},
+    monkeypatch.setattr(lw, "HERMES_PING", Path("/nonexistent/hermes-ping"))
+    g = {"session": {"id": "abcd1234-0000", "agent": "claude/opus", "name": "n", "cwd": "/r/a"},
          "procs": [{"cmd": "cargo build", "cores": 3.0}], "cores": 3.0}
-    relayed, ping = lw.notify("inc1", g, "/tmp/top", "/tmp/brief.md", 12.0, 8, False)
-    assert relayed is False and "could not reach it" in ping and "acp-dispatch cursor" in ping
-    relay_argv = next(a for a in argvs if "relay.py" in a[1])
-    assert relay_argv[-2:] == ["--no-defer", "--no-ack"] and relay_argv[2] == "abcd1234-0000"
+    status, ping = lw.notify("inc1", g, "/tmp/top", "/tmp/brief.md", 12.0, 8, False)
+    assert status == "queued" and "queued it, not delivered" in ping and "acp-dispatch cursor" in ping
+    send = argvs[0]
+    assert send[1:5] == ["send", "--no-wait", "--json", "--behavior"] and send[-2] == "abcd1234-0000"
+    assert "relay.py" not in " ".join(send)
 
 
 def test_watcher_set_needs_a_session(tmp_path):
     assert run_env(tmp_path, {}, "watcher", "set").returncode == 2
 
 
-def test_tell_watcher_skips_relayed_offender_and_stamps(tmp_path, monkeypatch):
+def test_tell_watcher_skips_the_told_offender_and_stamps(tmp_path, monkeypatch):
     lw = load_module()
     monkeypatch.setattr(lw, "STATE_DIR", tmp_path)
     sent = []
-    monkeypatch.setattr(lw, "send_to", lambda w, text: sent.append((w["target"], text)) or True)
+    monkeypatch.setattr(lw, "paseo_send", lambda w, text: sent.append((w["target"], text)) or "sent")
     assert lw.tell_watcher("x.", False) is None  # no watcher registered
-    lw.save_watcher({"channel": "paseo", "target": "agent-a", "sid": "sid-a"})
-    assert lw.tell_watcher("x.", False, skip={"sid-a"}) is None and not sent
+    lw.save_watcher({"channel": "paseo", "target": "agent-a"})
+    assert lw.tell_watcher("x.", False, skip={"agent-a"}) is None and not sent
     assert lw.tell_watcher("load 30.", False) is True
-    assert sent[0][0] == "agent-a" and "load 30." in sent[0][1] and "loadwatch skill" in sent[0][1]
+    assert sent[0][0] == "agent-a" and "load 30." in sent[0][1] and lw.WATCHER_HOWTO in sent[0][1]
+    assert "loadwatch" not in sent[0][1] and "load-watch ack ID" in sent[0][1]  # the instruction itself (R2-11)
     assert "last_ok" in json.loads((tmp_path / "watcher.json").read_text())
-    monkeypatch.setattr(lw, "send_to", lambda w, text: False)
-    assert lw.tell_watcher("y.", False) is False
-    assert "last_fail" in json.loads((tmp_path / "watcher.json").read_text())
+    for st in ("failed", "queued"):
+        monkeypatch.setattr(lw, "paseo_send", lambda w, text, st=st: st)
+        assert lw.tell_watcher("y.", False) is False
+        assert "last_fail" in json.loads((tmp_path / "watcher.json").read_text())
+    assert "queued, not delivered" in (tmp_path / "sample.log").read_text()
 
 
 def test_watcher_record_must_be_well_formed(tmp_path, monkeypatch):
@@ -632,3 +650,26 @@ def test_watcher_record_must_be_well_formed(tmp_path, monkeypatch):
     for bad in ("[]", "{}", '{"channel": "smoke", "target": "x"}', "not json"):
         (tmp_path / "watcher.json").write_text(bad)
         assert lw.watcher() is None
+
+
+def test_a_relay_channel_watcher_reaches_nobody_and_show_says_so(tmp_path, monkeypatch):
+    """The relay.py channel is gone (slim-down E5, 2026-11-06): an older record is no watcher, and `show` names the fix."""
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "watcher.json").write_text(json.dumps({"channel": "relay", "target": "sess-1"}))
+    r = run_env(tmp_path, {}, "watcher", "show")
+    assert r.returncode == 1 and "relay channel" in r.stderr and "--paseo ID" in r.stderr
+    lw = load_module()
+    monkeypatch.setattr(lw, "STATE_DIR", state)
+    assert lw.watcher() is None
+    assert run_env(tmp_path, {}, "watcher", "set", "--relay", "x").returncode == 2  # the flag is gone
+
+
+def test_watcher_test_names_a_queued_line(tmp_path):
+    for status, rc, word in (("sent", 0, "sent to paseo agent-a"), ("queued", 0, "queued, not delivered, for paseo agent-a"),
+                             ("error", 1, "could not reach (error) paseo agent-a")):
+        cli, _log = fake_paseo(tmp_path, status=status)
+        env = {"PASEO_AGENT_ID": "agent-a", "PASEO_CLI": str(cli)}
+        assert run_env(tmp_path, env, "watcher", "set").returncode == 0
+        r = run_env(tmp_path, {}, "watcher", "test")
+        assert (r.returncode, r.stdout.strip()) == (rc, word), status
