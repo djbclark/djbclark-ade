@@ -370,8 +370,24 @@ Codex threads gate the merge is J8; until answered the ruleset does not
 require conversation resolution. AGENTS.md review rules 1, 9, 11 shrink to:
 marker required and validated by CI; Codex per J8; local review is Claude.
 
-E9. **S-nonclaude (TUI retirement waves 3+, E9i)**: retire what
-`tui-retire/PLAN.md` decided (J2c supplies the file, J2 the list; the brief needs it on a
+E9. **S-nonclaude (TUI retirement waves 3+, E9i)**: the retirement plan is
+`docs/slim/tui-retire-plan.md` (2026-11-04, wind-down 2026-11-06). Its
+rulings: keep claude, codex, agy, cursor-agent, grok, omp, opencode, hermes;
+retire pi (folds into omp), cline, zcode and copilot CLI (fold into
+opencode), crush, venicecode, qwen-code, goose, aider, kiro-cli, devin, muse,
+dsh. Its wave 3 (the six decided removals, 57 files / ~270 lines, briefs
+`brief-w3-{code,skills,docs}.md` and `wave3-owned.json` on the Mac) never ran
+(load gate), and its later waves (zcode/crush trials through opencode, pi→omp
+ports then pi removal, cline and the `paseo-new-seat --provider cline`
+default, copilot CLI, muse, machine uninstall with state backed up first, the
+147 memory notes to an archive folder, the bigteam SKILL.md merge-ready line)
+are this slice's list. **J2's rule (one Paseo provider per paid plan)
+supersedes the keep list where they differ**: the agy TUI retires too (the
+Google AI plan is reached through Paseo's `antigravity` provider), and omp and
+opencode survive only if a paid plan is reachable solely through them (omp's
+Claude API-credit grant, opencode's GLM/SIPB routes), settled from the aiuse
+pools in the Wave 1 audit. Retire what the file decided (J2c supplies the
+file, J2 the rule; the brief needs it on a
 branch, not on the Mac): for each retired provider delete its config dir
 (`pi/`, `omp/`, `zcode/`, `opencode/`, `opencode-plugins/`, `opencode.json`,
 `GEMINI.md`), its `agents/` template, its `bin/` helpers
@@ -506,8 +522,10 @@ Which of these survive after the TUI retirement:
 Pi, omp, Codex CLI, Cursor, Antigravity, Grok, zcode, opencode, Hermes,
 Copilot (via Paseo), glm-acp-agent, qwen-code? `paseo provider ls` plus the
 retire list is enough. [answered] this work is Claude-only; the fleet is not.
-J2c. Push `~/.local/state/bigteam/tui-retire/PLAN.md` to a branch
-(`docs/tui-retire-plan`) so the cloud lead can read it (E9 needs it).
+J2c. [answered 2026-11-06: pushed as branch `docs/tui-retire-plan-2` @
+2c108f66, copied to `docs/slim/tui-retire-plan.md`] Push
+`~/.local/state/bigteam/tui-retire/PLAN.md` to a branch so the cloud lead
+can read it (E9 needs it).
 J2a. Homes for the E1 "probably another home" pieces (unchanged from v1 H2a): `book-to-kb` →
 site-private? `change-hermes*` → site-private? Grok-bot pieces → peer-link
 repo per E9j, or `coding-bot-mailbox`? `barnowl` → the barnowl fork?
