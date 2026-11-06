@@ -26,15 +26,24 @@ Branch: the slim branch is `claude/determined-maxwell-uvddaz` (this session's de
 
 Nothing yet.
 
+### Merged by the lead (operator, 2026-11-06 19:35Z: "handle all merges now and in the future")
+
+- PR 289 squash-merged at head beb417db (REST merge with `sha` pinned, the API form of `--match-head-commit`): master 734b7d9b.
+- PR 291 squash-merged at head e95816eb: master 00839c48. Branch `claude/issue-279-linux-ports-1-sched` kept: PR 293 is stacked on it (R3).
+- PR 296: waits on `pytest-linux` on 9946ed38 (Codex code and security reviews completed, no findings; Cursor approved); merged on the green wake.
+- The slim branch merged master in (merge commit, no rewrite of pushed history).
+- Not done: deleting branch `claude/issue-284-ndc-oslo-ideas` (the proxy refuses ref deletion over the API and over `git push --delete`); operator step 3a below.
+
 ### Operator steps (in this order)
 
-1. Merge PR 289: `gh pr merge 289 --squash --match-head-commit beb417db6e811080db6434eb788427743696a54c`.
-2. Merge PR 291: `gh pr merge 291 --squash --match-head-commit e95816ebf83b36d388243d142839134dba79b4f8`. Do not delete branch `claude/issue-279-linux-ports-1-sched` until GitHub has retargeted PR 293 (R3).
-3. Merge PR 296: `gh pr merge 296 --squash --match-head-commit 9946ed388315e345a29d81326ce33a1a23fb4e86`.
+1. ~~Merge PR 289~~ done.
+2. ~~Merge PR 291~~ done.
+3. ~~Merge PR 296~~ by the lead on the green wake.
+3a. Delete the merged branch: `git push origin --delete claude/issue-284-ndc-oslo-ideas` (and `gitignore-aider` once PR 296 reads MERGED). The cloud proxy cannot delete refs.
 4. On the Mac, in the shared checkout: `cd ~/src/djbclark-ade && git status` (stop if another session's edits are there: their owner migrates them, order 9), then `git fetch origin && git checkout master && git reset --keep origin/master` (drops the local 9946ed38, now merged; `--keep` refuses rather than discarding uncommitted edits).
 5. On the Mac: `cd ~/src/djbclark-ade && git worktree prune && git worktree list | wc -l` (89–115 entries at check-in, report I6; prune removes only entries whose directory is gone).
 6. Approve or resize the W1 workflow (section H of PLAN.md) proposed in the lead's Wave 0 reply, then the ledger once it exists.
 
 ### Gate
 
-Wave 0 closes when steps 1–3 are merged and the tag exists. Wave 1 (reads only, no merge) starts on the W1 approval; it does not need the tag.
+Wave 0 closes when PR 296 is merged and the tag exists. Wave 1 (reads only, no merge) starts on the W1 approval; it does not need the tag.
