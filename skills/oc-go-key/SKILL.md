@@ -99,7 +99,7 @@ entity is dark, now with a working credential. Re-prompt it:
    cut off mid-work. Check your own last state and continue it; do not restart from the beginning."
 ```
 
-Find the id from the fleet (`skills/session-finder/fleet.py`), the registry row, or the tab the
+Find the id from `paseo ls -a -g --json` (session-finder's `fleet.py` was removed 2026-11-06), the registry row, or the tab the
 session is in — give `relay.py` an **id**, never a name. This applies to your own seat too: after
 rotating for yourself, continue in place rather than opening a new tab.
 

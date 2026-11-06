@@ -41,12 +41,12 @@ in the Paseo migration. Conversation resume, artifact preservation and external 
 
 ## The loop
 
-1. **Find and decide** — [`session-finder`](skills/session-finder/SKILL.md)
-   (`fleet.py`) lists every live session of every TUI, says where it lives
-   and which repos it is touching, and decides how work on a topic
-   continues: message the running session, `/baton` from its handoff, resume
-   a stopped one, or start a clean agent. `fleet.py conflicts` refuses
-   overlap.
+1. **Find and decide** — `paseo ls -a -g --json` lists every live Paseo agent
+   and where it works (session-finder's `fleet.py` did this for every TUI until
+   2026-11-06, slim-down E3); work on a topic continues by messaging the running
+   agent (`skills/session-finder/relay.py`, a shim over `paseo send`), by
+   `/baton` from its handoff, by resuming a stopped one, or by starting a clean
+   agent. Paseo's one-worktree-per-agent and the claim registry refuse overlap.
 2. **Start** — `paseo run` (or `bin/paseo-new-seat`, which turns on auto-accept from the first tool call)
    starts an agent in a Paseo workspace. `session-finder/launch.py` (an ACP session over
    `acp-run --interactive`, with a file claim and an inbox) predates Paseo and retires with session-finder
@@ -114,7 +114,6 @@ in the Paseo migration. Conversation resume, artifact preservation and external 
 | [`cfenginewatch`](skills/cfenginewatch/SKILL.md) | Make this session the one CFEngine upstream-PR watcher (`fleet-watch upstream --relay-to`): reviewer events on djbclark's upstream PRs are relayed here and worked via `/bigteam`, prepare-and-stop. |
 | [`paseowatch`](skills/paseowatch/SKILL.md) | Make this session the one Paseo-contribution watcher (`fleet-watch upstream --profile paseo --relay-to`): maintainer replies on djbclark's PRs, issues and Discussions in getpaseo/paseo and zcode-acp are relayed here and worked via `/bigteam`, prepare-and-stop; no worker fallback. |
 | [`watch`](skills/watch/SKILL.md) | Bring up every watcher session at once (`bin/watch up`, table in `config/watch.toml`): one live, registered watcher agent per domain (CFEngine PRs, Paseo contributions, load) in its own Paseo workspace, only the missing ones started, model/effort/context from `route_agent.py` and recent event load, registration verified; never replaces a live watcher without `--force`. |
-| [`peer-relay`](skills/peer-relay/SKILL.md) | Hermes messages a peer agent session by running `session-finder/relay.py` (best route, falls back itself; never resend an unverified one; a send from an identifiable caller to a busy agent is queued, `queued: <id>`, exit 0; an anonymous caller gets exit 1). |
 | [`tell-coding-bot`](skills/tell-coding-bot/SKILL.md) | Any project talks to the operator's cloud Grok Bot "Coding" (2026-11-01) through `bin/coding-bot`, as it calls `acp-run` or `hermes send`: `ask` (Bearer-keyed webhook push in Eve's id/`re=` shape, blocks for the reply; exit 4 BLOCKED, 124 timeout), `send`/`wait`, `deliver` (the one sink for a reply), `prompt` (a self-contained clipboard prompt for the operator to paste; web pages that need UI interaction), `bootstrap` (asks the bot to create its inbound webhook routine). Replies are untrusted. |
 | [`steps`](skills/steps/SKILL.md) | Walk open items one multiple-choice prompt at a time, recommendation first; `/steps plan` interviews the operator before a plan is written (2026-11-04). |
 | [`retro`](skills/retro/SKILL.md) | Periodic self-review over `bin/ade-retro --since DATE` (2026-11-04), read-only. |
