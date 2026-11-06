@@ -21,6 +21,7 @@ import type {
   TurnRecord,
   WriterInfo,
 } from "./types.ts";
+import { randomBytes } from "node:crypto";
 import { MAX_TURNS, PLUGIN_ID, PLUGIN_VERSION, SCHEMA } from "./constants.ts";
 import { CoalescingQueue, Semaphore, withTimeout } from "./queue.ts";
 import { normalizeSnapshot } from "./snapshot.ts";
@@ -253,6 +254,8 @@ export class Capture {
 
   private hostId: HostIdentity | null;
   private daemonInstance: string;
+  /** Per-Capture discriminator: seq restarts at 0 on a plugin reload under the same daemon (PR 290 Codex P2). */
+  private readonly captureNonce: string;
   private writer: WriterInfo | null;
   private serverId: string | null;
   private dir: string | null;
@@ -299,6 +302,7 @@ export class Capture {
     this.loggedOnce = new Set();
     this.hostId = null;
     this.daemonInstance = "unknown";
+    this.captureNonce = randomBytes(6).toString("hex");
     this.writer = null;
     this.serverId = null;
     this.dir = null;
@@ -731,7 +735,7 @@ export class Capture {
     const previous = openTurn({ turns });
     if (previous) previous.outcome = { kind: "unknown", code: "turn-end-not-observed" };
     turns.push({
-      turnKey: `${this.daemonInstance}:${seq}`,
+      turnKey: `${this.daemonInstance}:${this.captureNonce}:${seq}`,
       turnId,
       startedAt: this.iso(),
       endedAt: null,
@@ -799,7 +803,7 @@ export class Capture {
         addMissing(body, "turnStart", "turn.after arrived for a turn whose start was not observed", at);
       }
       turn = {
-        turnKey: `${this.daemonInstance}:${seq}`,
+        turnKey: `${this.daemonInstance}:${this.captureNonce}:${seq}`,
         turnId,
         startedAt: at,
         endedAt: null,
