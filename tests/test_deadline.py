@@ -560,7 +560,7 @@ def test_failed_owner_notice_is_retried_until_delivered_not_marked_done(env):
 
 
 def test_notice_retries_are_bounded(env):
-    Path(env.base["DL_RELAY_FAIL"]).write_text("3")   # 3 = unverified under --ack: not delivery proof
+    Path(env.base["DL_RELAY_FAIL"]).write_text("2")   # 2 = not delivered (queued, timeout, permission, error): not delivery proof
     assert start(env, "never", "--budget", "5", "--on-expire", "relay").returncode == 0
     for i in range(20):
         env.run("sweep", "--no-agents", now=T0 + 10 + i * 1000)
@@ -630,13 +630,15 @@ def test_an_empty_group_with_no_leader_start_is_gone_not_unverified(env, inproc)
     assert dl.target_status({"pid": None, "pgid": 987654, "pgid_start": None}) == "gone"
 
 
-def test_owner_relay_declares_a_sender_and_asks_for_delivery_proof(env):
+def test_owner_relay_declares_a_sender_and_uses_the_shims_flags(env):
+    """The relay shim (2026-11-06, docs/slim E3) reads delivery from `paseo send --json`; --wait would wait for the owner to go idle."""
     assert start(env, "proof", "--budget", "5", "--on-expire", "relay").returncode == 0
     env.run("sweep", "--no-agents", now=T0 + 10)
     log = env.log.read_text()
-    assert "RELAY owner-1 --message-file - --ack --wait 20" in log and "SENDER deadline" in log
+    assert "RELAY owner-1 --message-file -\n" in log and "SENDER deadline" in log
+    assert "--wait" not in log and "--ack" not in log
     p = __import__("plistlib").loads((ROOT / "config/launchd/com.djbclark.deadline-sweep.plist").read_text().replace("__HOME__", "/h").replace("__ADE__", "/a").encode())
-    assert p["EnvironmentVariables"]["RELAY_SENDER_NAME"] == "deadline-sweep", "a launchd job has no session: relay.py would refuse it with exit 4"
+    assert p["EnvironmentVariables"]["RELAY_SENDER_NAME"] == "deadline-sweep", "a launchd job has no Paseo id: the shim names it in its sender prefix"
 
 
 def test_waiting_registrar_never_holds_a_lock_on_an_unlinked_inode(env, inproc):
