@@ -3,7 +3,6 @@
 
     context-budget-check [--from-file PATH [--dir LABEL]] [--dry-run] [--config PATH]
                          [--state-dir DIR] [--date YYYY-MM-DD] [--json] [--instruction-lint]
-    context-budget-check install | uninstall
 
 Runs `claude -p "/context"` in each directory of config/context-budget.toml (default
 ~/src/djbclark-ade and ~; a /context call makes no model request), parses the category table plus
@@ -23,9 +22,16 @@ Why it exists: the 2026-10-10 preamble trim regrew by 2026-10-18 through three c
 --from-file parses a saved /context output instead of running claude (tests, dry runs); --dir names
 the directory it stands for (default the first in the config). --dry-run prints the ping instead of
 sending it and writes no state. The `claude` and `hermes-ping` paths come from CONTEXT_BUDGET_CLAUDE
-and CONTEXT_BUDGET_PING. install/uninstall load or remove the launchd job
-(launchd/com.djbclark.context-budget.plist, 03:50 daily, after skillopt-night at 03:30);
-CONTEXT_BUDGET_NO_INSTALL=1 only prints the plan.
+and CONTEXT_BUDGET_PING.
+
+Schedule (J3, 2026-11-06): it runs nightly as a Paseo schedule, an agent that runs
+`context-budget-check --instruction-lint` and reports what it printed (the script sends its own ping). The
+launchd job and the `install`/`uninstall` subcommands were removed; the operator creates the schedule:
+
+    paseo schedule create --cron "50 3 * * *" --timezone <the Mac's IANA zone> --name context-budget \\
+      --provider claude/<model> --cwd ~/src/djbclark-ade \\
+      "Run ~/src/djbclark-ade/bin/context-budget-check --instruction-lint. Report its exit code and output in one
+       paragraph; change nothing. Exit 1 is a budget breach or a rise, 3 a directory it could not measure."
 
 --instruction-lint (opt-in, report-only) also runs bin/instruction-lint over each measured directory
 (`--json --root <dir>`, 30 s timeout each; the script path comes from CONTEXT_BUDGET_LINT) and prints one
@@ -51,8 +57,6 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 CONFIG = REPO / "config" / "context-budget.toml"
-LABEL = "com.djbclark.context-budget"
-PLIST_SRC = REPO / "launchd" / f"{LABEL}.plist"
 CLAUDE_TIMEOUT_S = 180
 PING_PREFIX = "djbclark-ade"
 LINT = REPO / "bin" / "instruction-lint"
@@ -430,40 +434,10 @@ def cmd_run(a: argparse.Namespace) -> int:
     return 3 if failures else (1 if alerts else 0)
 
 
-def launch_agents() -> Path:
-    return Path(os.environ.get("CONTEXT_BUDGET_LAUNCH_AGENTS") or Path.home() / "Library" / "LaunchAgents")
-
-
-def _launchctl(*argv: str) -> int:
-    return subprocess.run(["launchctl", *argv], check=False, stdout=subprocess.DEVNULL,
-                          stderr=subprocess.DEVNULL).returncode
-
-
-def cmd_install(a: argparse.Namespace) -> int:
-    dest = launch_agents() / PLIST_SRC.name
-    domain = f"gui/{os.getuid()}"
-    if os.environ.get("CONTEXT_BUDGET_NO_INSTALL") == "1":
-        verb = f"launchctl bootstrap {domain} {dest}" if a.command == "install" else f"launchctl bootout {domain}/{LABEL}; remove {dest}"
-        print(f"would {'copy ' + str(PLIST_SRC) + ' -> ' + str(dest) + '; ' if a.command == 'install' else ''}{verb}")
-        return 0
-    _launchctl("bootout", f"{domain}/{LABEL}")
-    if a.command == "uninstall":
-        dest.unlink(missing_ok=True)
-        print(f"removed {dest}")
-        return 0
-    state_dir(None).mkdir(parents=True, exist_ok=True)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest.with_name(dest.name + ".tmp")
-    shutil.copyfile(PLIST_SRC, tmp)
-    os.replace(tmp, dest)
-    rc = _launchctl("bootstrap", domain, str(dest))
-    print(f"installed {dest}; bootstrap rc={rc}")
-    return rc
-
-
 def main(argv: list[str]) -> int:
     p = argparse.ArgumentParser(prog="context-budget-check", description=__doc__.split("\n\n")[0])
-    p.add_argument("command", nargs="?", choices=["run", "install", "uninstall"], default="run")
+    p.add_argument("command", nargs="?", choices=["run", "install", "uninstall"], default="run",
+                   help="run (the default); install and uninstall were removed 2026-11-06 (a Paseo schedule runs it)")
     p.add_argument("--from-file", help="parse this saved /context output instead of running claude")
     p.add_argument("--dir", help="config directory label the --from-file output stands for")
     p.add_argument("--dry-run", action="store_true", help="print the ping, send nothing, write no state")
@@ -476,7 +450,9 @@ def main(argv: list[str]) -> int:
                         "directory and report its counts; report-only, never changes the exit code")
     a = p.parse_args(argv)
     if a.command in ("install", "uninstall"):
-        return cmd_install(a)
+        print(f"context-budget-check: `{a.command}` was removed 2026-11-06 with the launchd job; it runs as a Paseo "
+              "schedule (see the usage text for the `paseo schedule create` line)", file=sys.stderr)
+        return 2
     return cmd_run(a)
 
 
