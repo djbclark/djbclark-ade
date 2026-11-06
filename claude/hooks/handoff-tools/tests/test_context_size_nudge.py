@@ -1,9 +1,8 @@
 """Contract tests for context_size_nudge.py's tiers, floor and paging, and for
-bin/self-slash's /compact-/new gap (2026-10-18 rewrite: the old tests asserted
+the hook's messages (2026-10-18 rewrite: the old tests asserted
 SOFT_THRESHOLD/HARD_THRESHOLD and a `hermes send` call the hook no longer has)."""
 import json
 import os
-import shutil
 import subprocess
 import sys
 import time
@@ -12,8 +11,6 @@ from pathlib import Path
 import pytest
 
 HOOKS_DIR = Path(__file__).resolve().parents[2]
-REPO = HOOKS_DIR.parents[1]
-SELF_SLASH = REPO / "bin" / "self-slash"
 sys.path.insert(0, str(HOOKS_DIR))
 
 import context_size_nudge as nudge  # noqa: E402
@@ -48,13 +45,6 @@ def _append(path, text):
 def hook(monkeypatch, tmp_path, capsys):
     """Run the hook once per call; returns (stdout, pings sent)."""
     monkeypatch.setattr(nudge, "STATE_PATH", tmp_path / "state.json")
-    monkeypatch.setattr(nudge, "QUOTA_GUARD_PATH", tmp_path / "quota-guard.json")  # absent unless a test writes it
-    monkeypatch.delenv("HERDR_ENV", raising=False)
-    monkeypatch.delenv("HERDR_PANE_ID", raising=False)
-    monkeypatch.delenv("ORCA_TERMINAL_HANDLE", raising=False)
-    monkeypatch.delenv("PASEO_AGENT_ID", raising=False)
-    monkeypatch.setattr(nudge, "_which", lambda name: None)  # no orca CLI unless a test says so
-    monkeypatch.setenv("PASEO_CLI", "/usr/bin/true")  # a Paseo host needs an executable CLI
     pings = []
     monkeypatch.setattr(
         subprocess, "Popen", lambda cmd, **kwargs: pings.append(cmd),
@@ -224,11 +214,9 @@ def test_hard_text_says_what_to_do_mid_task_bare(hook, tmp_path):
     assert "at the next natural boundary" not in out
 
 
-def test_hard_text_says_what_to_do_mid_task_self_slash(hook, tmp_path, monkeypatch):
-    monkeypatch.setenv("HERDR_ENV", "1")
-    monkeypatch.setenv("HERDR_PANE_ID", "w1:p1")
-    out, _ = hook("s-mid-herdr", _transcript(tmp_path, 100_000, nudge.ASK_TOTAL))
-    assert "Context is large" in out and "self-slash" in out
+def test_hard_text_says_what_to_do_mid_task(hook, tmp_path):
+    out, _ = hook("s-mid", _transcript(tmp_path, 100_000, nudge.ASK_TOTAL))
+    assert "Context is large" in out and "self-slash" not in out
     assert "finish the current edit" in out
     assert "before the next tool round beyond" in out
     assert "at the next natural boundary" not in out
@@ -261,22 +249,11 @@ def test_midtask_note_keeps_the_in_context_path_open():
         assert "let the auto-compaction" not in note
 
 
-def test_bare_branch_does_not_point_at_a_compact_path_it_lacks(hook, tmp_path):
-    """The bare message (no herdr/Orca/Paseo, also every ACP slice) has no /compact path:
-    the mid-task note must say to let the auto-compaction take it (adversary round 2, F2)."""
-    out, _ = hook("s-bare-alt", _transcript(tmp_path, 100_000, nudge.ASK_TOTAL))
-    assert "/compact path above" not in out
-    assert "(or, if the work must continue in-context, let the auto-compaction take it)" in out
-    assert "keep going and let" not in out
-
-
-def test_self_slash_branch_points_at_its_own_compact_path(hook, tmp_path, monkeypatch):
-    monkeypatch.setenv("HERDR_ENV", "1")
-    monkeypatch.setenv("HERDR_PANE_ID", "w1:p1")
-    out, _ = hook("s-slash-alt", _transcript(tmp_path, 100_000, nudge.ASK_TOTAL))
-    assert "the /compact path above" in out
-    assert "let the auto-compaction take it" not in out
-    assert out.index('self-slash "/compact <focus>"') < out.index("the /compact path above")
+def test_the_in_context_path_says_to_run_compact_yourself(hook, tmp_path):
+    """2026-11-06 (slim-down E4): bin/self-slash is gone; a Claude session issues its own /compact."""
+    out, _ = hook("s-compact-alt", _transcript(tmp_path, 100_000, nudge.ASK_TOTAL))
+    assert "(or, if the work must continue in-context, run /compact yourself now, with a focus line)" in out
+    assert "let the auto-compaction take it" not in out and "self-slash" not in out
 
 
 def test_a_small_dip_does_not_reprint_the_hard_tier(hook, tmp_path):
@@ -537,29 +514,6 @@ def test_a_stored_level_above_what_the_total_can_compute_is_clamped(hook, tmp_pa
     assert hook.state()["s-clamp"]["level"] == 2
 
 
-def _host(monkeypatch, var):
-    """Set one self-slash host the way bin/self-slash selects it: a herdr pane needs
-    HERDR_ENV=1 as well, an Orca terminal needs the orca CLI on PATH."""
-    monkeypatch.setenv(var, "w1:p1")
-    if var == "HERDR_PANE_ID":
-        monkeypatch.setenv("HERDR_ENV", "1")
-    if var == "ORCA_TERMINAL_HANDLE":
-        monkeypatch.setattr(nudge, "_which", lambda name: "/usr/local/bin/orca" if name == "orca" else None)
-
-
-@pytest.mark.parametrize("var", ["HERDR_PANE_ID", "ORCA_TERMINAL_HANDLE", "PASEO_AGENT_ID"])
-def test_ask_message_in_herdr_or_orca_puts_new_before_compact(hook, tmp_path, monkeypatch, var):
-    _host(monkeypatch, var)
-    out, _ = hook("s-herdr-" + var, _transcript(tmp_path, 46_000, 46_000 + nudge.ASK_GROWTH))
-    assert "Handle it yourself" in out
-    assert out.index('self-slash "/new"') < out.index('"/compact <focus>"')
-    assert out.index("`handoff` skill") < out.index('"/compact <focus>"')
-    assert "must continue in-context" in out
-    # The boundary note fires in the same call (total >= 150k) and names self-slash here.
-    assert 'the `handoff` skill (its Step 9 runs ~/src/djbclark-ade/bin/self-slash "/new" and queues /baton) instead of /compact' in out
-    assert "Do not run /new yourself as well" in out
-
-
 def test_repeat_ask_every_100k(hook, tmp_path):
     path = _transcript(tmp_path, 46_000, 46_000 + nudge.ASK_GROWTH)
     hook("s-rep", path)
@@ -663,288 +617,3 @@ def test_reads_large_transcript_from_tail_only(hook, tmp_path):
     out, pings = hook("s-big", path)
     assert "Context is large" in out
     assert len(pings) == 1
-
-
-# bin/self-slash: --dry-run runs the same gap check a real call does, so the
-# refusal is testable without a live pane. The Orca host needs only $ORCA_TERMINAL_HANDLE
-# and an `orca` on PATH (never called on a dry run).
-_needs_self_slash = pytest.mark.skipif(
-    not (shutil.which("orca") and shutil.which("gdate") and shutil.which("ggrep")),
-    reason="self-slash dry run needs orca, gdate and ggrep on PATH",
-)
-
-
-def _self_slash(tmp_path, text, handle="th1", log_lines=()):
-    log = tmp_path / ".local" / "state" / "self-slash.log"
-    log.parent.mkdir(parents=True, exist_ok=True)
-    if log_lines:
-        log.write_text("".join(line + "\n" for line in log_lines))
-    env = {k: v for k, v in os.environ.items()
-           if k not in ("HERDR_ENV", "HERDR_PANE_ID", "CURSOR_AGENT", "SELF_SLASH_COMPACT_GAP")}
-    env.update(HOME=str(tmp_path), ORCA_TERMINAL_HANDLE=handle)
-    return subprocess.run([str(SELF_SLASH), "--dry-run", text], env=env,
-                          capture_output=True, text=True, timeout=30)
-
-
-def _self_slash_paseo(tmp_path, text, agent="ag1"):
-    """The Paseo host: $PASEO_AGENT_ID and a CLI path; a dry run never calls the CLI."""
-    log = tmp_path / ".local" / "state" / "self-slash.log"
-    log.parent.mkdir(parents=True, exist_ok=True)
-    env = {k: v for k, v in os.environ.items()
-           if k not in ("HERDR_ENV", "HERDR_PANE_ID", "ORCA_TERMINAL_HANDLE", "CURSOR_AGENT",
-                        "SELF_SLASH_COMPACT_GAP")}
-    env.update(HOME=str(tmp_path), PASEO_AGENT_ID=agent, PASEO_CLI="/usr/bin/true")
-    return subprocess.run([str(SELF_SLASH), "--dry-run", text], env=env,
-                          capture_output=True, text=True, timeout=30)
-
-
-@pytest.mark.skipif(not (shutil.which("gdate") and shutil.which("ggrep")),
-                    reason="self-slash dry run needs gdate and ggrep on PATH")
-def test_self_slash_paseo_host_maps_new_to_clear(tmp_path):
-    r = _self_slash_paseo(tmp_path, "/new")
-    assert r.returncode == 0, r.stderr
-    assert "would send to paseo ag1" in r.stdout and ": /clear" in r.stdout
-    r = _self_slash_paseo(tmp_path, "/compact keep the open items")
-    assert r.returncode == 0, r.stderr
-    assert ": /compact keep the open items" in r.stdout
-
-
-@pytest.mark.skipif(not (shutil.which("gdate") and shutil.which("ggrep")),
-                    reason="self-slash dry run needs gdate and ggrep on PATH")
-def test_self_slash_paseo_needs_a_cli(tmp_path):
-    env = {k: v for k, v in os.environ.items()
-           if k not in ("HERDR_ENV", "HERDR_PANE_ID", "ORCA_TERMINAL_HANDLE", "PASEO_CLI")}
-    # The script prepends /opt/homebrew/bin to PATH, so a bare PATH cannot hide a real
-    # paseo; a non-executable PASEO_CLI is the refusal path.
-    env.update(HOME=str(tmp_path), PASEO_AGENT_ID="ag1", PASEO_CLI="/nonexistent/paseo")
-    r = subprocess.run([str(SELF_SLASH), "--dry-run", "/compact"], env=env,
-                       capture_output=True, text=True, timeout=30)
-    assert r.returncode == 3 and "no paseo CLI" in r.stderr
-
-
-def _now():
-    return time.strftime("%Y-%m-%d %H:%M:%S")
-
-
-@_needs_self_slash
-@pytest.mark.parametrize("sent", ["/compact focus", "/new", "/clear", "/reset"])
-@pytest.mark.parametrize("text", ["/new", "/compact x", "/clear", "/reset"])
-def test_self_slash_refuses_reset_family_within_gap(tmp_path, sent, text):
-    r = _self_slash(tmp_path, text, log_lines=[f"{_now()} orca th1: sent {sent}"])
-    assert r.returncode == 7, r.stderr
-    assert "not sending" in r.stderr
-
-
-@_needs_self_slash
-def test_self_slash_allows_after_gap_other_pane_and_other_commands(tmp_path):
-    lines = [f"{_now()} orca th1: sent /new", "2026-01-01 00:00:00 orca th2: sent /compact"]
-    assert _self_slash(tmp_path, "/rename foo", log_lines=lines).returncode == 0
-    assert _self_slash(tmp_path, "/new", handle="th2").returncode == 0
-    assert _self_slash(tmp_path, "/new", handle="th3").returncode == 0
-
-
-@_needs_self_slash
-def test_self_slash_not_sent_lines_do_not_count(tmp_path):
-    lines = [f"{_now()} orca th1: NOT sent: /compact was already sent to orca th1 5s ago",
-             f"{_now()} orca th1: waiter 123 still queued after 900s; NOT sent: /new"]
-    assert _self_slash(tmp_path, "/new", log_lines=lines).returncode == 0
-
-
-def test_paseo_host_gets_the_finish_note(hook, tmp_path, monkeypatch):
-    monkeypatch.setenv("PASEO_AGENT_ID", "agent-1")
-    out, _ = hook("s-paseo", _transcript(tmp_path, 46_000, 46_000 + nudge.ASK_GROWTH))
-    assert "self-slash --finish" in out and "archives this agent" in out
-    # the model offers the loose Rule 4 choices; it does not archive itself
-    assert "offer the `loose` Rule 4 choices" in out and "rather than archiving yourself" in out
-    assert "finish as the last action instead" not in out
-    assert 'self-slash "/new" ONCE' in out
-    assert "so do not run /new yourself as well" in out
-
-
-@pytest.mark.parametrize("var", ["HERDR_PANE_ID", "ORCA_TERMINAL_HANDLE"])
-def test_finish_note_is_paseo_only(hook, tmp_path, monkeypatch, var):
-    _host(monkeypatch, var)
-    monkeypatch.setenv("PASEO_AGENT_ID", "agent-1")  # herdr and Orca win in self-slash
-    out, _ = hook("s-nofinish-" + var, _transcript(tmp_path, 46_000, 46_000 + nudge.ASK_GROWTH))
-    assert "--finish" not in out
-
-
-@pytest.mark.parametrize("var", ["HERDR_PANE_ID", "ORCA_TERMINAL_HANDLE"])
-def test_finish_note_when_the_other_host_var_is_stale(hook, tmp_path, monkeypatch, var):
-    # A HERDR_PANE_ID without HERDR_ENV=1, or an ORCA_TERMINAL_HANDLE with no orca CLI,
-    # is not a host for self-slash: it falls through to Paseo, and so does the note
-    # (Codex P2 on PR 19, 2026-10-20).
-    monkeypatch.setenv(var, "w1:p1")
-    monkeypatch.setenv("PASEO_AGENT_ID", "agent-1")
-    out, _ = hook("s-stale-" + var, _transcript(tmp_path, 46_000, 46_000 + nudge.ASK_GROWTH))
-    assert "self-slash --finish" in out
-
-
-@pytest.mark.parametrize("cli", ["unset", "/nonexistent/paseo", "not-executable"])
-def test_paseo_host_needs_an_executable_cli(hook, tmp_path, monkeypatch, cli):
-    # self-slash exits 3 when PASEO_AGENT_ID is set but no paseo CLI is usable (PASEO_CLI
-    # unset and none on PATH, or not executable); the hook must not promise Step 9 there.
-    monkeypatch.setenv("PASEO_AGENT_ID", "agent-1")
-    if cli == "unset":
-        monkeypatch.delenv("PASEO_CLI", raising=False)
-    elif cli == "not-executable":
-        f = tmp_path / "paseo"
-        f.write_text("")
-        f.chmod(0o600)
-        monkeypatch.setenv("PASEO_CLI", str(f))
-    else:
-        monkeypatch.setenv("PASEO_CLI", cli)
-    out, _ = hook("s-nocli-" + cli.replace("/", "_"), _transcript(tmp_path, 46_000, 46_000 + nudge.ASK_GROWTH))
-    assert "tell the operator /new is ready" in out
-    assert "--finish" not in out
-
-
-def test_orca_lookup_searches_self_slash_path(monkeypatch, tmp_path):
-    # self-slash prepends /opt/homebrew/bin to PATH before picking the host; the hook's
-    # lookup must see the same prefix even when the hook's own PATH lacks it.
-    seen = {}
-
-    def fake_which(name, path=None):
-        seen["path"] = path
-        return None
-
-    monkeypatch.setattr(nudge.shutil, "which", fake_which)
-    monkeypatch.setenv("PATH", str(tmp_path))
-    assert nudge._which("orca") is None
-    assert seen["path"].split(os.pathsep)[0] == "/opt/homebrew/bin"
-    assert str(tmp_path) in seen["path"].split(os.pathsep)
-
-
-@pytest.mark.parametrize("var", ["HERDR_PANE_ID", "ORCA_TERMINAL_HANDLE"])
-def test_stale_host_var_alone_means_no_self_slash(hook, tmp_path, monkeypatch, var):
-    monkeypatch.setenv(var, "w1:p1")
-    out, _ = hook("s-stale-alone-" + var, _transcript(tmp_path, 46_000, 46_000 + nudge.ASK_GROWTH))
-    assert "tell the operator /new is ready" in out
-    assert "--finish" not in out
-
-
-# --- successor form (2026-10-23): a Fable session, or a tight quota guard, hands off to Opus/Sonnet ---
-
-def _model_transcript(tmp_path, model, *sizes, name="model-transcript.jsonl"):
-    path = tmp_path / name
-    lines = []
-    for s in sizes:
-        record = json.loads(_usage(s))
-        record["message"]["model"] = model
-        record["message"]["role"] = "assistant"
-        lines.append(json.dumps(record) + "\n")
-    path.write_text("".join(lines))
-    return path
-
-
-def _guard(tmp_path, level):
-    (tmp_path / "quota-guard.json").write_text(json.dumps({"level": level}))
-
-
-_OPUS_FORM = "self-slash --finish --successor claude/claude-opus-5-5 --thinking high"
-
-
-def test_fable_session_on_paseo_names_the_successor_form_in_both_messages(hook, tmp_path, monkeypatch):
-    monkeypatch.setenv("PASEO_AGENT_ID", "agent-1")
-    path = _model_transcript(tmp_path, nudge.FABLE_MODEL, 46_000, nudge.BOUNDARY_TOTAL)
-    out, _ = hook("s-fable", path)
-    assert out.count(_OPUS_FORM) == 1 and "At the next task completion" in out  # the boundary message
-    assert 'self-slash "/new"' not in out
-    assert "this session runs on Fable" in out
-    _append(path, _model_transcript(tmp_path, nudge.FABLE_MODEL, 46_000 + nudge.ASK_GROWTH,
-                                    name="x.jsonl").read_text())
-    out, _ = hook("s-fable", path)
-    assert "Context is large" in out and _OPUS_FORM in out  # the ask message
-    assert "archived agent's log" in out
-    assert 'self-slash "/new"' not in out
-    assert "so do not run /new yourself as well" in out
-
-
-def test_other_models_keep_the_new_form(hook, tmp_path, monkeypatch):
-    monkeypatch.setenv("PASEO_AGENT_ID", "agent-1")
-    out, _ = hook("s-opus", _model_transcript(tmp_path, "claude-opus-5-5", 46_000, nudge.BOUNDARY_TOTAL))
-    assert "--successor" not in out
-    assert 'self-slash "/new" and queues /baton' in out
-
-
-@pytest.mark.parametrize("level, model, spec", [
-    ("tight", "claude-opus-5-5", "claude-sonnet-5-5"),
-    ("tight", nudge.FABLE_MODEL, "claude-sonnet-5-5"),
-    ("critical", nudge.FABLE_MODEL, "claude-opus-5-5"),
-])
-def test_guard_level_picks_the_successor_even_on_a_non_fable_model(hook, tmp_path, monkeypatch, level, model, spec):
-    monkeypatch.setenv("PASEO_AGENT_ID", "agent-1")
-    _guard(tmp_path, level)
-    out, _ = hook("s-guard-" + level + model, _model_transcript(tmp_path, model, 46_000, nudge.BOUNDARY_TOTAL))
-    assert f"--successor claude/{spec} --thinking high" in out
-    assert f"the quota guard says {level}" in out
-
-
-@pytest.mark.parametrize("content", [None, "not json", '{"level": 3}', '{"level": "ok"}', "[]"])
-def test_absent_or_unusable_guard_state_changes_nothing(hook, tmp_path, monkeypatch, content):
-    monkeypatch.setenv("PASEO_AGENT_ID", "agent-1")
-    if content is not None:
-        (tmp_path / "quota-guard.json").write_text(content)
-    out, _ = hook("s-noguard", _model_transcript(tmp_path, "claude-opus-5-5", 46_000, nudge.BOUNDARY_TOTAL))
-    assert "--successor" not in out and 'self-slash "/new"' in out
-
-
-@pytest.mark.parametrize("var", ["HERDR_PANE_ID", "ORCA_TERMINAL_HANDLE"])
-def test_successor_is_not_offered_on_herdr_or_orca(hook, tmp_path, monkeypatch, var):
-    _host(monkeypatch, var)
-    out, _ = hook("s-fable-" + var, _model_transcript(tmp_path, nudge.FABLE_MODEL, 46_000, nudge.BOUNDARY_TOTAL))
-    assert "--successor claude" not in out
-    assert "relaunch `claude --model claude-opus-5-5`" in out
-    assert 'self-slash "/new"' in out
-
-
-def test_sidechain_and_synthetic_records_do_not_decide_the_model(tmp_path):
-    path = tmp_path / "t.jsonl"
-    rows = [
-        {"message": {"model": "claude-opus-5-5", "role": "assistant"}},
-        {"isSidechain": True, "message": {"model": nudge.FABLE_MODEL, "role": "assistant"}},
-        {"message": {"model": "<synthetic>", "role": "assistant"}},
-    ]
-    path.write_text("".join(json.dumps(r) + "\n" for r in rows))
-    assert nudge._last_assistant_model(path) == "claude-opus-5-5"
-    assert nudge._last_assistant_model(tmp_path / "missing.jsonl") is None
-
-
-@pytest.mark.parametrize("level, model", [
-    ("tight", "claude-sonnet-5-5"), ("tight", "claude-sonnet-5-5[1m]"),
-    ("critical", "claude-opus-5-5"), ("critical", "claude-opus-5-5[1m]"),
-    ("critical", "claude-sonnet-5-5"),
-])
-def test_a_session_already_on_the_target_gets_plain_new_not_a_same_model_successor(hook, tmp_path, monkeypatch, level, model):
-    monkeypatch.setenv("PASEO_AGENT_ID", "agent-1")
-    _guard(tmp_path, level)
-    out, _ = hook("s-same-" + level + model, _model_transcript(tmp_path, model, 46_000, nudge.BOUNDARY_TOTAL))
-    assert "--successor" not in out
-    assert 'self-slash "/new" and queues /baton' in out
-    assert nudge._successor_target(model, level) is None
-
-
-@pytest.mark.parametrize("model", ["claude-fable-5-1[1m]", "claude-fable-5-2", "claude-fable-6"])
-def test_l5_any_fable_id_with_or_without_a_suffix_is_detected(model):
-    assert nudge._successor_target(model, "") == (nudge.SUCCESSOR_OPUS, "this session runs on Fable")
-    assert nudge._successor_target("claude-opus-5-5[1m]", "") is None
-
-
-@pytest.mark.parametrize("level", ["tight", "critical"])
-@pytest.mark.parametrize("model", [None, "", "claude-haiku-4-5", "claude-haiku-4-5[1m]", "gpt-6"])
-def test_r2_l4_guard_never_moves_an_unknown_or_lower_model_up(level, model):
-    assert nudge._successor_target(model, level) is None
-
-
-def test_r2_l4_guard_moves_only_models_known_to_be_above_the_target():
-    assert nudge._successor_target("claude-opus-5-5", "tight") == (nudge.SUCCESSOR_SONNET, "the quota guard says tight")
-    assert nudge._successor_target("claude-fable-5-1[1m]", "tight")[0] == nudge.SUCCESSOR_SONNET
-    assert nudge._successor_target(nudge.FABLE_MODEL, "critical")[0] == nudge.SUCCESSOR_OPUS
-    assert nudge._successor_target("claude-opus-5-5", "critical") is None
-
-
-def test_r2_l4_unreadable_model_under_a_guard_hands_off_with_plain_new(hook, tmp_path, monkeypatch):
-    monkeypatch.setenv("PASEO_AGENT_ID", "agent-1")
-    _guard(tmp_path, "critical")
-    out, _ = hook("s-nomodel", _transcript(tmp_path, 46_000, nudge.BOUNDARY_TOTAL))  # no assistant model
-    assert "--successor" not in out and 'self-slash "/new"' in out

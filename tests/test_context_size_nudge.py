@@ -23,9 +23,6 @@ def box(tmp_path, monkeypatch, capsys):
     spec.loader.exec_module(hook)
     monkeypatch.setattr(hook, "STATE_PATH", tmp_path / "state.json")
     monkeypatch.setattr(hook, "LOG_PATH", tmp_path / "log.jsonl", raising=False)
-    monkeypatch.setattr(hook, "_session_successor", lambda _: None)
-    monkeypatch.setattr(hook, "_can_self_slash", lambda: False)
-    monkeypatch.setattr(hook, "_self_slash_host", lambda: None)
     monkeypatch.setattr(hook, "_send_ping", lambda *args: None)
     clock = [1_800_000_000.0]
     # Patching time.time works before the implementation imports time, too.
@@ -128,9 +125,7 @@ def test_append_is_one_os_write_with_append_flag(box, monkeypatch):
     assert flags and flags[0] & os.O_APPEND
 
 
-@pytest.mark.parametrize("self_slash", [False, True])
-def test_posttooluse_json_matches_plain_prompt_messages(box, monkeypatch, self_slash):
-    monkeypatch.setattr(box.hook, "_can_self_slash", lambda: self_slash)
+def test_posttooluse_json_matches_plain_prompt_messages(box):
     plain = box(300_000, sid="prompt")
     output = box(300_000, event="PostToolUse", sid="tool")
     sentence = ("this reminder runs when a prompt is submitted and between tool rounds "

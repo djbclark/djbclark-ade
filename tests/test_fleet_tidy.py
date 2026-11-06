@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for the safe-close pieces of session-finder/fleet.py and helm/helm.py (the herdr-tidy skill was retired from djbclark-ade 2026-10-31; fleet.py still reads its close ledger).
+"""Tests for the safe-close pieces of session-finder/fleet.py (the herdr-tidy skill was retired from djbclark-ade 2026-10-31; fleet.py still reads its close ledger).
 
 Everything that touches herdr, ps, transcripts or the sleeper journal is stubbed at the module
 boundary, so these run without herdr and never read the live journal or ledger.
@@ -16,10 +16,8 @@ from typing import ClassVar
 
 ROOT = Path(__file__).resolve().parent.parent / "skills"
 sys.path.insert(0, str(ROOT / "session-finder"))
-sys.path.insert(0, str(ROOT / "helm"))
 
 import fleet
-import helm
 
 
 class Patched(unittest.TestCase):
@@ -282,26 +280,6 @@ class TestEndedOrder(Patched):
         self.patch(fleet, "_sleeping_items", lambda *a: [{"kind": "sleeping", "id": "sleep:y", "updated": now, "cwd": "/d3"}])
         kinds = [it["kind"] for it in fleet.ended_open(14)]
         self.assertEqual(kinds, ["handoff", "closed", "sleeping"])
-
-
-class TestHelm(unittest.TestCase):
-    def test_busy_background_is_never_open(self):
-        s = {"id": "x", "agent": "zcode", "name": "", "title": "", "where": "herdr", "focus": "", "status": "busy-background",
-             "cwd": "/r", "chan": ("herdr", "w1:p1"), "self": False, "busy": ["12 bg just ci"]}
-        it = helm.classify(s, {})
-        self.assertEqual(it["kind"], "busy-background")
-        self.assertFalse(it["open"])
-        self.assertIn("BUSY IN THE BACKGROUND", helm.render(it))
-
-    def test_ended_kinds_rank_below_handoffs(self):
-        self.assertGreater(helm.ENDED_UNLOCK["handoff"], helm.ENDED_UNLOCK["closed"])
-        self.assertGreater(helm.ENDED_UNLOCK["ended-question"], helm.ENDED_UNLOCK["sleeping"])
-
-    def test_render_closed_and_sleeping(self):
-        base = {"id": "closed:1", "agent": "claude", "name": "", "title": "t", "where": "ended", "focus": "", "project": "p",
-                "unlock": 8, "pane": "w1:p1", "why": "finished with /handoff", "resume": "cd /r && claude --resume s", "mb": 1.2}
-        self.assertIn("CLOSED BY herdr-tidy", helm.render({**base, "kind": "closed"}))
-        self.assertIn("SLEEPING PANE GONE", helm.render({**base, "kind": "sleeping", "id": "sleep:1"}))
 
 
 if __name__ == "__main__":

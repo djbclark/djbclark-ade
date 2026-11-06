@@ -4,7 +4,7 @@
 A headless launch (launch.py one-turn path, dispatched through acp-dispatch) records
 `dispatch: true` and a `report` path. When the agent wrote `BLOCKED: <question>` as the
 report's first line (acp-dispatch exit 4) the launch is a `blocked` session whose final text is
-that line, so helm shows it as a `reply` item the operator answers with `launch.py reply`.
+that line, so the operator answers it with `launch.py reply`.
 When it finished with no report (exit 3) it is a delivery failure named by launch id, not a
 reply item.
 """
@@ -18,10 +18,8 @@ from typing import Any, override
 
 ROOT = Path(__file__).resolve().parent.parent / "skills"
 sys.path.insert(0, str(ROOT / "session-finder"))
-sys.path.insert(0, str(ROOT / "helm"))
 
 import fleet  # noqa: E402  # pyright: ignore[reportMissingImports]
-import helm  # noqa: E402  # pyright: ignore[reportMissingImports]
 
 
 class TestDispatchLaunchState(unittest.TestCase):
@@ -79,29 +77,7 @@ class TestDispatchLaunchState(unittest.TestCase):
         self.assertEqual(status, "working")
         self.assertIsNone(result)
 
-    def test_helm_classifies_the_blocked_launch_as_a_reply_item_and_renders_the_question(self) -> None:
-        d = self.launch(4, "BLOCKED: do I own ~/opt/cfengine-dev?\n")
-        status, final, result = fleet.launch_state(d)
-        s: dict[str, Any] = {"id": "L1", "agent": "codex", "name": "n", "title": "t", "where": "", "focus": "",
-                             "status": status, "cwd": str(self.tmp), "host": "acp", "sid": "L1", "chan": None, "self": False,
-                             "launch": {**d, "final": final, "result": result, "alive": False}}
-        it = helm.classify(s, {})
-        self.assertEqual(it["kind"], "reply")
-        self.assertEqual(it["detail"], "BLOCKED: do I own ~/opt/cfengine-dev?")
-        text = helm.render(it)
-        self.assertIn("BLOCKED: do I own", text)
-        self.assertIn("launch.py reply L1", text)
 
-    def test_helm_classifies_the_no_report_launch_as_done_with_the_failure_text(self) -> None:
-        d = self.launch(3, None)
-        status, final, result = fleet.launch_state(d)
-        s: dict[str, Any] = {"id": "L1", "agent": "codex", "name": "n", "title": "t", "where": "", "focus": "",
-                             "status": status, "cwd": str(self.tmp), "host": "acp", "sid": "L1", "chan": None, "self": False,
-                             "launch": {**d, "final": final, "result": result, "alive": False}}
-        it = helm.classify(s, {})
-        self.assertEqual(it["kind"], "done")
-        self.assertEqual(it["exit"], 3)
-        self.assertIn("DELIVERY FAILURE", helm.render(it))
 
 
 if __name__ == "__main__":
