@@ -14,5 +14,5 @@ has it. Paseo is the only harness.
 ## Renaming
 
 - Workspace: `paseo workspace rename "$PASEO_WORKSPACE_ID" "<topic>-pw"`.
-- There is no agent-title rename command in the Paseo CLI (slim-down research item 5, 2026-11-06); set the title at launch with
-  `paseo run --title T`.
+- Agent title: `paseo agent update "$PASEO_AGENT_ID" --name "<name>"` (read in the Paseo 0.15.3 source,
+  `packages/cli/src/commands/agent/index.ts`, 2026-11-06; not run against a daemon), or set it at launch with `paseo run --title T`.

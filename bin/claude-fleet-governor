@@ -620,8 +620,9 @@ def steer_text(w: dict[str, Any]) -> str:
             else f"{w['left']:.0f}% left, its reset is {hhmm(w['resets_at'])}")
     return (f"Claude subscription critical: {short_label(w['label'])} {w['used']:.0f}% used, {when}. "
             "Finish the current step, write your Tier 1 handoff, then run "
-            f"~/src/djbclark-ade/bin/self-slash --finish --successor {HANDOFF_SUCCESSOR} --thinking high "
-            "(API credits, off the subscription).")
+            f"`paseo run --no-wait --provider {HANDOFF_SUCCESSOR.split('/', 1)[0]} --model {HANDOFF_SUCCESSOR.split('/', 1)[1]} "
+            "--thinking high --workspace \"$PASEO_WORKSPACE_ID\" \"/baton <handoff path>\"`, then "
+            "`paseo agent archive \"$PASEO_AGENT_ID\"` (API credits, off the subscription).")
 
 
 def describe_move(m: dict[str, Any]) -> str:

@@ -393,7 +393,7 @@ class TestCriticalSteer(Base):
             self.assertTrue(text.startswith("Claude subscription critical: 5-hour 85% used, projected out 13:36Z "
                                             "before its 15:00Z reset."), text)
             self.assertIn("write your Tier 1 handoff", text)
-            self.assertIn("~/src/djbclark-ade/bin/self-slash --finish --successor omp/anthropic/claude-sonnet-5-5 "
+            self.assertIn("paseo run --no-wait --provider omp --model anthropic/claude-sonnet-5-5 "
                           "--thinking high", text)
         self.assertEqual(set(self.e.state_json()["steered"][self.e.resets.strftime("%Y-%m-%dT%H:%M:%SZ")]),
                          {"aaaaaaa", "bbbbbbb"})

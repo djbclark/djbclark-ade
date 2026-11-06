@@ -207,7 +207,7 @@ def test_advice_grows_with_level(rig):
     rig.set_aiuse(aiuse_fixture(weekly=25))
     assert rig.guard().returncode == 2
     tight = rig.state_json()["advice"]
-    assert "--finish --successor claude/claude-sonnet-5-5 --thinking high" in tight
+    assert "paseo run --no-wait --provider claude --model claude-sonnet-5-5 --thinking high" in tight
     assert "No `acp-dispatch claude` slices" in tight
     assert "until the reset" not in tight
     rig.set_aiuse(aiuse_fixture(weekly=5))
@@ -219,11 +219,11 @@ def test_advice_grows_with_level(rig):
     # it is only unaffected while aiuse still lists it (adversary r1 on PR 126, A1).
     assert "not a stop order" in crit and "codex, grok, agy, zai or opencode is unaffected" in crit
     assert "omp keeps working only while `aiuse --available --json` still lists it" in crit
-    assert "--finish --successor omp/anthropic/claude-sonnet-5-5 --thinking high" in crit
-    assert "--finish --successor claude/claude-sonnet-5-5" not in crit
+    assert "paseo run --no-wait --provider omp --model anthropic/claude-sonnet-5-5 --thinking high" in crit
+    assert "--provider claude --model claude-sonnet-5-5" not in crit
     assert "hand off, stop" not in crit and "of any kind" not in crit
-    # herdr and Orca refuse an omp successor (bin/self-slash): the text must say what to do there.
-    assert "on herdr or Orca write the handoff, then start omp by hand" in crit
+    # Outside Paseo there is no `paseo run`: the text must say what to do there.
+    assert "outside Paseo write the handoff, then start omp by hand" in crit
 
 
 def test_five_hour_critical_names_the_five_hour_reset(rig):
