@@ -134,7 +134,7 @@ Also the **live hook commands in the hand-maintained `~/.claude/settings.json`**
 on PostToolUse and UserPromptSubmit, `jev_effort_hook.py` on UserPromptSubmit,
 `quota_nudge.py`; a hook pointing at a deleted file runs on every tool call
 and prompt fleet-wide, so the operator edits that file as a named step before
-the final merge (E2, E10, D4 list it). Every deletion names the links and
+the final merge; E2, E10 and D4 cite this paragraph. Every deletion names the links and
 hook lines it breaks; the operator relinks, removes or edits.
 
 C3. **Outside files that name our tools** (report I4; order 11: per J2b the slim lead has the merge decisions for
@@ -192,7 +192,7 @@ C6. **Evidence to keep**: `docs/checkins/`, `docs/handoffs/`,
 | D1 Agent-to-agent messages | `session-finder/relay.py` (+ hooks, 7.4k test lines) | native `paseo send <id> --behavior steer|interrupt` and `send_agent_prompt`; `omercnet/tell-agent` 2.0.1 (44 installs) for the `/tell` command; cross-host via connected hosts (0.13.0) | REPLACE, shim one cycle (E3) |
 | D2 Operator inbox of questions and permissions | `helm`, `/helm-all`, PR 261's ledger | native `paseo permit`, `list_pending_permissions`; `fullstackhouse/asks` (57), `wangfh5/agent-inbox` (6, new 11-03), the operator's own `djbclark/questions-please` (5) | REPLACE (E4); the operator's plugin first |
 | D3 Handoff and resume | `handoff`, `session-handoff`, `baton`, `hand`, PR 290's plugin | native resume after restart (0.15.0, opt-in), `/paseo-handoff`, `dennyferra/baton` 0.3.1 (16), `sm1ee/session-recovery` (20) | REPLACE for the live-agent case; KEEP the Tier 1 pointer file format (it is the cross-session record the operator reads); PR 290 PARKED until Wave 3 measures the native path |
-| D4 Quota pause and resume, surplus | `claude-quota-guard`, `ade_gates`, `gate-profile`, `claude-fleet-governor`, PR 270 | `paseo usage --json`; `tomgrin10/session-guard` 0.5.1 (pause at quota, continue after reset), `babo-jeonguk/usage-auto-resume` (254), `kapybara-org/zerosub` 1.5.1 (560, several subscriptions) ; `aborakati/usage-monitor` (351) for display; `codexbar usage --format json` where Paseo lacks a window | REPLACE the gate enforcement with session-guard/usage-auto-resume (E7); KEEP `context-watch` and `quota_nudge.py` only if the plugins cannot nudge a running session |
+| D4 Quota pause and resume, surplus | `claude-quota-guard`, `ade_gates`, `gate-profile`, `claude-fleet-governor`, PR 270 | `paseo usage --json`; `tomgrin10/session-guard` 0.5.1 (pause at quota, continue after reset), `babo-jeonguk/usage-auto-resume` (254), `kapybara-org/zerosub` 1.5.1 (560, several subscriptions) ; `aborakati/usage-monitor` (351) for display; `codexbar usage --format json` where Paseo lacks a window | REPLACE the gate enforcement with session-guard/usage-auto-resume (E7); KEEP `context-watch` and `quota_nudge.py` only if the plugins cannot nudge a running session; if `quota_nudge.py` goes, its `~/.claude/settings.json` hook line is an operator edit before the final merge (C2) |
 | D5 Host load and runaway processes | `load-watch` (2.2k), `proc-cpu-watch`, `session-load-watch` | `tomgrin10/vitals` 1.0.0, `zedobaia/resources` (154), `itsjustanks/daemon` (70) show and stop; none "finds the agent behind the spike and tells it", and none is a **pre-launch admission gate** | KEEP load-watch's two interfaces: `admit` (the pre-launch gate `bg`, `acp-dispatch`, `local-review` and `deadline_wait.py` call, exit 75 when too hot; `bin/load-watch:1631-1878`) and find-and-tell, delivered by `paseo send`; delete the pane-typing delivery, `proc-cpu-watch` and `session-load-watch` (E5) |
 | D6 Fan-out and slices | `bigteam`, `acp-dispatch` (5.9k), `acp-run` (5.3k) | native subagents and `paseo run --no-wait --output-schema`; `lerenn/playbooks` (approval-gated YAML pipelines), `gpambrozio/firstmate` (247), `gyuha/agent-team` (57); Claude Code workflows for the lead's own fan-out | REPLACE with a shim (E6): `acp-dispatch` becomes a thin `paseo run` wrapper keeping the exit-code contract and the outcome record for one cycle, then goes |
 | D7 Skills in every agent | `skill-everywhere`, `skill-get`, `fix-skill-frontmatter.py` | Claude-only: one symlink `~/.claude/skills → <repo>/skills` (no tool); other surviving providers: `npx skills add <repo>` (MIT; a snapshot, re-run on change, vercel-labs/skills#748); `gpambrozio/skills` (902) to list and invoke; `agentskills/skills-ref validate` for lint | KEEP `skill-everywhere` trimmed while any non-Claude provider or the site-private root survives; delete the rest (E10) |
@@ -234,7 +234,8 @@ the same slice so nothing disappears from the agents at landing (J2a).
 way (J2a answered); the `tell-coding-bot` pointer skill stays here (E9j).
 
 E2. **S-dead**: `ade-scan-state*` (+3.9k tests), `seat-name`, `jev`,
-`jev-eval`, `docs/jev.md`, `claude/hooks/jev_effort_hook.py`, `ralph-tui-orchestration`, `jevlike`,
+`jev-eval`, `docs/jev.md`, `claude/hooks/jev_effort_hook.py` (the operator
+removes its `~/.claude/settings.json` hook line before the final merge, C2), `ralph-tui-orchestration`, `jevlike`,
 `skillopt-sleep-learned`, `plugins/herdr-sleeper` (D14), `docs/agent-sleep.md`,
 `vendor/` entries pointing at retired tools, the `docs/ade-everywhere-*` series
 and `docs/apply-toolchain-prompt.md` → `docs/history/`. `cow-workspaces` and
@@ -273,8 +274,9 @@ KEEP in this slice, the three skills are updated in the same slice, a
 forwarding stub stays at the old path for one cycle, and the W2 sweep greps
 the old path; `fleet.py` stays until `load-watch`'s
 attribution and `context-watch` read Paseo (`paseo ls -a -g --json`) instead,
-which is part of E5, then goes. The shim and its one test go at the end of
-Wave 6 once C3's outside files are updated.
+which is part of E5, then goes. The shim and its one test ship in the final
+PR and are removed in the follow-up PR after one live cycle (F, Wave 6), once
+C3's outside files are updated; no slice deletes them on the branch.
 Standing order 10 is rewritten: "a message is sent with `paseo send` and its
 exit status read; a non-zero exit is reported, never assumed delivered".
 
@@ -331,8 +333,9 @@ still hits the 14-agent cap), and the brief footer. `acp-run` stays as the **lau
 Plektra and paseo4herdr call (C3) until each of those files is migrated to
 `paseo run` or the operator accepts the break per file; E7's registry switch
 to `paseo provider ls` does not by itself allow its deletion. `acp-run` and
-`tests/test_acp_run_*` (4.5k) go with the shims at the end of Wave 6; until
-then only its dead agent adapters (retired providers, E9) are trimmed.
+`tests/test_acp_run_*` (4.5k) go with the shims in the follow-up PR after one
+live cycle (F, Wave 6); until then only its dead agent adapters (retired
+providers, E9) are trimmed.
 `acp-dispatch-wait`, the
 reap plist, the launchd runner scripts and the one-shot `acp-dispatch
 auto-resume RECORD` jobs (`bin/acp-dispatch:34`; a `paseo run` shim does not
@@ -425,8 +428,10 @@ is an operator step with a backup first.
 
 E10. **S-skills-sync** (Wave 3 or later, behind an operator check on the
 Mac that every surviving target still sees every skill): `skill-everywhere`
-serves two roots (this repo and `~/ops/site-private/skills`, e.g. `1password`,
-`bin/skill-everywhere:44`) and several targets (Claude, Hermes' external dir,
+serves two roots today (this repo and `~/ops/site-private/skills`, e.g.
+`1password`, `bin/skill-everywhere:44`) and three after E1 adds
+`~/ops/site-djbclark/skills` (E1 owns that one edit of `bin/skill-everywhere`
+in Wave 2; E10 owns every later change to it in Wave 3) and several targets (Claude, Hermes' external dir,
 `~/.agents/skills` for Pi and omp, cursor via `~/.claude/skills`, the grokbot
 copy); a single symlink covers only the Claude target of the repo root. So:
 KEEP `skill-everywhere` trimmed to the surviving targets until the last
@@ -437,7 +442,8 @@ trimmed (pull + `skill-everywhere --check`, `bin/ade-update:24-37`); `skillopt-n
 `skillopt_sources.py`, `skillopt-sleep`, `docs/skillopt-sleep.md` and the
 `skillopt-sleep` plist DELETE (J4, answered); `ade-backup-stores` KEEP trimmed to the surviving stores
 with the credential exclusions as a named exception (E9h Q4); `bm-lint`,
-`graft` skill KEEP; `prior_art_nudge.py` DELETE (J4, answered).
+`graft` skill KEEP; `prior_art_nudge.py` DELETE (J4, answered; its two `~/.claude/settings.json`
+hook lines are an operator edit before the final merge, C2).
 
 E11. **S-docs** (last): README under 150 lines with a generated roster;
 AGENTS.md re-based on Paseo (orders 9 and 10 reworded, the retirement box
@@ -458,7 +464,7 @@ at the end. `graft build` last.
 | 0 | DONE: check-ins (37 + 5), rulings R1–R8, evidence and the consolidated report on the branch. OPEN: baseline suite (running in the cloud, `docs/slim/baseline.md` when it ends; batch-1 reports note tests that fail on master in containers); land PR 289 and PR 291 on master (pytest-linux pending on both); land `gitignore-aider` (one line) by PR and reset the shared checkout's master; tag `pre-slim-2026-11-06`; `git worktree prune` on the Mac; J1, J2, J2a, J2b, J2c, J11 and J3–J10 all answered 2026-11-06 | serial | all of the above |
 | 1 | Audits (a) `bin/`, (b) `skills/`, (c) `tests/` map, (d) `docs/` + queue, (e) outside dependents and links (C2, C3) ; lead writes `docs/slim/ledger.md`; **workflow** (section H, W1); operator approves the ledger once | 5 readers | ledger approved |
 | 2 | E1 (unlink, uninstall-vendored, move to site-djbclark), E2 (dead), E9 (retired providers only) | 3–4 writers + reviewers | **C7 drain gate passed first**; suite green; refs zero outside AGENTS.md and README (**workflow** W2) |
-| 3 | E3 shim, E4, E5, E10; **order inside the wave**: E5's attribution rewrite merges before E3 deletes `fleet.py`; **operator steps first**: upgrade the Mac daemon to 0.15.x in a quiesced window per `docs/queue.md` (evidence F records 0.14.x; an unfinished turn is lost on restart until terminal persistence is verified), install the J6 plugins, evaluate `session-recovery` with native resume OFF (J6), then verify for one day before the REPLACE deletions merge | 3 | same; **the E3 shim merges only after the in-repo relay callers are on it and the C3 relay consumers are migrated or waived per file** |
+| 3 | E3 shim, E4, E5, E10; **order inside the wave**: E5's attribution rewrite merges before E3 deletes `fleet.py`; **operator steps first**: upgrade the Mac daemon to 0.15.x in a quiesced window per `docs/queue.md` (evidence F records 0.14.x; an unfinished turn is lost on restart until terminal persistence is verified), install the J6 plugins, evaluate `session-recovery` with native resume OFF, then the one bounded native-resume trial (J6), then verify for one day before the REPLACE deletions merge | 3 | same; **the E3 shim merges only after the in-repo relay callers are on it and the C3 relay consumers are migrated or waived per file** |
 | 4 | E6 shim and bigteam, then E7 and E8; E6 and E7 as sibling cloud sessions | 2–3 | same; the lander and feeder plists are unloaded and removed (J11, operator step); **`acp-run` is not deleted here**: C3's acp consumers are migrated or waived per file first (PRs opened and merged by the lead per J2b, asking when unsure) |
 | 5 | E11; AGENTS.md and README (Opus `high`; lead at `xhigh`); **workflow** W3 | 2 | suite green; `graft build` |
 | 6 | **The shims and `acp-run` ship in the final PR** (nothing on the Mac changes before the final merge, so a shim that is removed on the branch never runs live); C7 and the C1 live-process checks are **re-run as the final PR's merge gate**, output pasted into the PR; the shims and `acp-run` are removed in a **follow-up PR after one live cycle** (two weeks, or sooner when every C3 file is migrated or waived and `relay.py`/`acp-dispatch` logs show no caller); upstream filings (gaps found in Paseo: a quota-pause primitive, a workspace claim primitive, if still missing); final PR to master (J7); delete `slim/*` branches after MERGED | serial | done |
@@ -528,9 +534,10 @@ I4. Native resume (0.15.0) is opt-in and new: Wave 3 evaluates
 `session-recovery` with it OFF, then one bounded trial in a quiet window with
 launches refused (J6); a clean trial leaves it on, a mass wake turns it off;
 the result decides PR 290.
-I5. The suite fails on master in containers for 9 acp-dispatch tests plus
-self-slash, wait-file and git-hook tests (missing `g*` wrappers; report
-01BvGHLy): the baseline records them so deletions are not blamed.
+I5. The suite fails on master in containers (166 failures across 19 test
+files, `docs/slim/baseline.md`, 2026-11-06; mostly git-hook, self-slash and
+acp-dispatch tests that need the Mac or the `g*` wrappers): the baseline
+records them so deletions are not blamed.
 I6. The Mac is the only place plugins, launchd and Paseo settings change
 (B2): every such step is an operator step with the exact command in the
 brief, and a slice that needs it waits.
@@ -608,7 +615,9 @@ the other goes in the follow-up PR; **native resume gets one bounded trial**:
 turned on by the operator for one daemon restart in a quiet window with the
 fleet idle and `load-watch admit` refusing launches, measured, and **left ON
 if it behaves** (a mass-wake incident turns it off); the trial's result
-decides PR 290 (J9)]
+decides PR 290 (J9); the trial runs with the fleet idle and launches refused,
+so it cannot show the busy-fleet mass wake of report I7, and its write-up
+says so]
 **Plugins to install** (each is trusted daemon code; defaults in bold):
 **tell-agent**, **asks** or your **questions-please**, **baton**,
 **session-guard**, **usage-auto-resume**, **vitals**, **skills**, `pr-radar`,
@@ -621,7 +630,10 @@ report I7: one mass wake pushed load to 394): Wave 3 evaluates
 on.
 J7. [answered 2026-11-06: **one PR at the end of Wave 6**, gated by the E8
 Action, CI and the adversary marker; the operator merges with
-`--match-head-commit`; protection stays on] Final landing: one PR from the
+`--match-head-commit`; protection stays on. Reconciled with A1/I1 after the
+final adversary confirm: the shims ship in that PR and a **small follow-up
+PR** removes them after one live cycle (F, Wave 6, I8); the operator was told
+and can override] Final landing: one PR from the
 slim branch, or lift protection for a fast-forward?
 J8. [answered 2026-11-06: **yes**: rule 1 stays, enforced by the E8 Action;
 rule 9 becomes "read Codex threads, fix what is real, no resolution gate";
