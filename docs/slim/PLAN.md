@@ -409,18 +409,18 @@ copy); a single symlink covers only the Claude target of the repo root. So:
 KEEP `skill-everywhere` trimmed to the surviving targets until the last
 non-Claude provider retires and site-private has its own install path (J2a);
 DELETE `skill-get`, `fix-skill-frontmatter.py`, `skills-everywhere` skill;
-`npx skills add` (external code) only after a J4 yes; `ade-update` KEEP
+`npx skills add` (external code; J4 yes) for the surviving non-Claude providers; `ade-update` KEEP
 trimmed (pull + `skill-everywhere --check`, `bin/ade-update:24-37`); `skillopt-night`,
-`skillopt_sources.py`, `skillopt-sleep` DECIDE (J4; default DELETE, its reader
-was never verified); `ade-backup-stores` KEEP trimmed to the surviving stores
+`skillopt_sources.py`, `skillopt-sleep`, `docs/skillopt-sleep.md` and the
+`skillopt-sleep` plist DELETE (J4, answered); `ade-backup-stores` KEEP trimmed to the surviving stores
 with the credential exclusions as a named exception (E9h Q4); `bm-lint`,
-`graft` skill KEEP; `prior_art_nudge.py` DELETE (J4).
+`graft` skill KEEP; `prior_art_nudge.py` DELETE (J4, answered).
 
 E11. **S-docs** (last): README under 150 lines with a generated roster;
 AGENTS.md re-based on Paseo (orders 9 and 10 reworded, the retirement box
 replaced by one line and a link to `docs/history/`); `docs/queue.md` (2,079
-lines) triaged into closed / carried (one line each) / moved to a task
-plugin (J5); `docs/` keeps `paseo-only-rearchitecture.md` (marked superseded
+lines) triaged into closed / carried (one line each, staying in the doc, J5)
+/ done; `docs/` keeps `paseo-only-rearchitecture.md` (marked superseded
 where this plan differs), `threat-model.md`, `git-guard.md`,
 `orchestration-practices.md` (rewritten), `tui-lessons-learned.md`,
 `scheduling.md` (PR 291), `secret-deny.md` (PR 289), `checkpoint.md`; the rest
@@ -555,10 +555,13 @@ after the split" is decided by the split. Retire them, or port them onto
 J3. [answered 2026-11-06: **keep**, run as a Paseo schedule; its launchd
 plist goes; PR 289's hook stays wired] `context-budget-check`: keep (PR 289
 hooks into it) or fold its one check into `instruction-lint`?
-J4. Dormant pieces: delete `jev`, `prior_art_nudge`, `skillopt-night`
-(default yes to all three)?
-J5. `docs/queue.md`: triage into a doc, or into `anh-chu/tasks` (124
-installs) / `activechoon/kanban-md`?
+J4. [answered 2026-11-06: **delete all three**, with their tests, docs and
+plists (E2, E10); `npx skills add` (vercel-labs/skills, MIT) may be used for
+any surviving non-Claude provider] Dormant pieces: delete `jev`,
+`prior_art_nudge`, `skillopt-night`?
+J5. [answered 2026-11-06: **stays a doc**; carried items one line each in
+`docs/queue.md`, no task plugin] `docs/queue.md`: triage into a doc, or into
+`anh-chu/tasks` / `activechoon/kanban-md`?
 J6. [answered 2026-11-06: **all twelve** (the eight defaults and the four
 optionals), each after a Sonnet subagent's source summary; installed by the
 operator in Wave 3; `pr-radar` then replaces pr-wait's waiting half and
@@ -584,8 +587,10 @@ kept, local review by Claude.
 J9. [answered 2026-11-06: **park** until Wave 3 measures the native path;
 land only if a gap remains] PR 290 (`ade-recovery`): park until Wave 3
 measures native resume (R4), or land now?
-J10. Start the execution in this session, or in a fresh cloud session with
-the prompt in section K? (Recommendation in K.)
+J10. [answered 2026-11-06: **a fresh cloud session**, Fable 5.1 at high,
+started with the K2 prompt once PR 295 lands; this session finishes PR 295
+and stops] Start the execution in this session, or in a fresh cloud session
+with the prompt in section K?
 
 ## K. Starting the work
 
