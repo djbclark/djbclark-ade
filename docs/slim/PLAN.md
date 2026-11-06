@@ -90,6 +90,13 @@ labels J2a/J2b/J2c are distinct; shared files go to the serial merger; the
 Mac daemon upgrade to 0.15.x is an operator step before Wave 3; fleet-watch's
 home is marked unverified.
 
+A8. **Round 4 (2026-11-06, Codex security review on head `56ad1cea`, one P2):**
+E8's local Claude review runs through the E6 restricted shim (read-only
+mode) and keeps `local-review`'s isolation checks as tests (detached worktree
+at the exact head, pinned base, scrubbed environment, transcript-proven
+read-only sandbox, untrusted-author refusal, descendant kill); D10 and J8
+restate it.
+
 ## B. Scope and constraints
 
 B1. **In scope.** Move the non-ADE parts to `djbclark/site-djbclark` (E1);
@@ -198,7 +205,7 @@ C6. **Evidence to keep**: `docs/checkins/`, `docs/handoffs/`,
 | D7 Skills in every agent | `skill-everywhere`, `skill-get`, `fix-skill-frontmatter.py` | Claude-only: one symlink `~/.claude/skills → <repo>/skills` (no tool); other surviving providers: `npx skills add <repo>` (MIT; a snapshot, re-run on change, vercel-labs/skills#748); `gpambrozio/skills` (902) to list and invoke; `agentskills/skills-ref validate` for lint | KEEP `skill-everywhere` trimmed while any non-Claude provider, the site-private root or the site-djbclark root survives without its own install path; delete the rest (E10) |
 | D8 Scheduler for the kept jobs | launchd plists; PR 291's `ade-sched` | no existing tool refuses on missing linger or wraps `flock -n`; `gpambrozio/launchd-jobs` is macOS-only visibility; Paseo schedules run agents, not shell jobs | KEEP `ade-sched` (land PR 291); Paseo schedules replace the nightly agent jobs (`routing-recalibrate`; `skillopt-night` is deleted, J4) and run the agent that executes `context-budget-check` nightly (J3); the shell sweeps (`deadline`, `pr-policy`, `load-watch`) stay on `ade-sched` |
 | D9 Exclusive workspace claims | `ade_claims.py` (2.3k), `ade-git-guard`, `libexec/` hooks | none exists; Paseo's one-worktree-per-agent makes most claims implicit; `git worktree lock` only blocks prune; since 0.15.0 a plugin can hook `worktree.create.before/after` and give tools to specific agents (A6) | KEEP, trimmed to owner + expiry + refuse-add/commit-in-foreign-workspace; fix the `claim ls` mismatch (E8); Wave 4 decides whether the trimmed registry lives in a ~100-line Paseo plugin hook instead of git hooks |
-| D10 Merge gate | `pr-wait` (2.3k), `local-review` (Codex) | GitHub ruleset: required status check from a ~40-line Action that validates the adversary marker against the head; `gh pr checks --watch --required` to wait; `claude -p --json-schema` (verified on 2.1.318) for a local Claude review with a parsed verdict; `codex review` has no JSON and no per-request strength knob (brief 2026-11-06) | REPLACE (E8): the Action is the one piece of new code, and it replaces 4.6k lines |
+| D10 Merge gate | `pr-wait` (2.3k), `local-review` (Codex) | GitHub ruleset: required status check from a ~40-line Action that validates the adversary marker against the head; `gh pr checks --watch --required` to wait; `claude -p --json-schema` (verified on 2.1.318) for a local Claude review with a parsed verdict, run through the E6 read-only shim with `local-review`'s isolation checks kept (E8); `codex review` has no JSON and no per-request strength knob (brief 2026-11-06) | REPLACE (E8): the Action is the one piece of new code, and it replaces 4.6k lines |
 | D11 Recovery evidence | PR 290 `ade-recovery` (3.3k TS) | native resume (0.15.0) + `session-recovery` first | PARK (R4) |
 | D12 Moving dirs with history | — | `git filter-repo --paths-from-file` on a fresh clone (installed here, a40bce5) | ADOPT (E1) |
 | D13 Instruction-file lint | PR 289's `instruction-lint` | no CLAUDE.md/AGENTS.md linter exists; `skills-ref validate` covers SKILL.md | KEEP instruction-lint (lands with PR 289); use skills-ref for skills |
@@ -391,7 +398,21 @@ real `claim ls` (C5), `libexec/`, `git-commit-own`, `ops-post-checkout-guard`,
 `changelog-fold`. REPLACE `pr-wait` and `local-review` (D10): one Action
 (`.github/workflows/adversary-marker.yml`) + a ruleset requiring it +
 `gh pr checks --watch --required`; the local Claude review is `claude -p
---json-schema` with the marker as output. **The Action ports pr-wait's
+--json-schema` with the marker as output, **run through the E6 restricted
+shim in its read-only mode, never a bare `claude -p`** (Codex security
+review, 2026-11-06: the checked-in Claude template defaults to
+`bypassPermissions` and exposes Bash and `mcp__hermes`, so a bare invocation
+lets a public PR's diff or AGENTS.md prompt-inject a mandatory review into
+operator-level actions). **The replacement keeps every isolation check
+`bin/local-review` has today**, as tests, before `local-review` is deleted: a
+clean detached worktree at the exact head with the base pinned by SHA
+(`bin/local-review:435`); a scrubbed environment with no token, secret,
+password, `GH_*` or `GITHUB_*` variable; a read-only sandbox proven from the
+run's own transcript, not assumed (`:512-515`); the untrusted-author refusal
+(exit 2 unless `--allow-untrusted`, Codex Security Review on PR 130,
+`:377`); and the descendant kill at the end or at timeout (`:592-603`). The
+review process itself cannot post to GitHub or send messages: the lead reads
+the parsed verdict and writes the marker. **The Action ports pr-wait's
 marker semantics, review rule 1 properties 1–5, and pr-wait's marker tests
 unchanged** (a BLOCK naming the current head counts anywhere, 7+ hex prefix
 included; malformed and fetch-failed always block; the JSON is delimited by
@@ -648,7 +669,8 @@ and can override] Final landing: one PR from the
 slim branch, or lift protection for a fast-forward?
 J8. [answered 2026-11-06: **yes**: rule 1 stays, enforced by the E8 Action;
 rule 9 becomes "read Codex threads, fix what is real, no resolution gate";
-rule 11's local review is `claude -p --json-schema`; rule 10 stays] Review
+rule 11's local review is `claude -p --json-schema` through the E6
+read-only shim, keeping `local-review`'s isolation checks (E8); rule 10 stays] Review
 rules after: marker validated by CI (E8), Codex advisory, changelog fragments
 kept, local review by Claude.
 J9. [answered 2026-11-06: **park** until Wave 3 measures the native path;
