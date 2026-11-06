@@ -98,9 +98,9 @@ DEAD_STATUS = {"error", "archived"}
 # A retired (`x ...`) agent in one of these has no turn in flight, so a sweep may archive it.
 QUIET_STATUS = {"idle", "closed"}
 # Providers whose yolo is a permission MODE at launch (`paseo run --mode`): codex starts in `auto` (Default Permissions),
-# where an unattended watcher can stall on a prompt (found 2026-10-27). claude's was paseo-new-seat's auto_accept feature,
-# which `paseo run` lacks; its bypass mode is the equivalent. Other providers (omp, ...) get no mode: check them with
-# `paseo agent mode ID --list`.
+# where an unattended watcher can stall on a prompt (found 2026-10-27). claude already ran in bypassPermissions under
+# paseo-new-seat (its auto_accept was a separate shield, not a mode). Other providers (omp, ...) get no mode: check them
+# with `paseo agent mode ID --list`.
 YOLO_MODE = {"codex": "full-access", "claude": "bypassPermissions"}
 UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 CTX_BIG_TOKENS = 120_000
@@ -768,13 +768,12 @@ def launch(domain: str, row: dict, dflt: dict, pv: Paseo, plan: dict, replaces: 
     argv.append(prompt_for(domain, row, title))
     rc, out, err = run(argv, 120)
     aid = ""
-    for ln in reversed(out.strip().splitlines()):
-        try:
-            obj = json.loads(ln)
+    try:    # `paseo run --json` prints one pretty-printed (multi-line) document
+        obj = json.loads(out)
+        if isinstance(obj, dict):
             aid = str(obj.get("agentId") or obj.get("id") or "")
-            break
-        except ValueError:
-            continue
+    except ValueError:
+        pass
     if not aid:
         drop_rec(domain)
         return 1, f"not launched: paseo run rc={rc}: {(err or out).strip()[:200]}"

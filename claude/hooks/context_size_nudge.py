@@ -64,7 +64,7 @@ An absolute backstop asks at ASK_TOTAL, 50k+ under the auto-compaction wall.
 
 Levels: 1 = early (delegate from now on; no compaction yet);
 2+ = handoff + /new at a finished task, /compact only to continue in-context
-(the session runs /compact itself; otherwise auto-compaction), or, mid-turn, finish the
+(auto-compaction), or, mid-turn, finish the
 current edit and hand off within a few tool rounds (_midtask_note); again every
 REPEAT_EVERY of further growth. A compaction resets the floor and the level, so
 the hard tier fires again at ASK_TOTAL (by total, not by growth) after regrowth.
@@ -103,6 +103,14 @@ if not LOG_PATH.is_absolute():
     LOG_PATH = Path.home() / ".claude" / "state" / "context-nudge-log.jsonl"
 LOG_MAX_BYTES = 2 * 1024 * 1024
 POST_TOOL_CHECK_SECONDS = 20
+# Written by the quota guard (another slice, 2026-10-23); may not exist.  Only `level` is read.
+QUOTA_GUARD_PATH = Path.home() / ".local" / "state" / "ade" / "quota-guard.json"
+# djbclark, 2026-10-23: lead sessions run on Opus 5.5 high (Sonnet 5.5 when quota is tight),
+# not Fable (a Fable lead burned ~30% of a week's Claude quota).
+FABLE_MODEL = "claude-fable-5-1"
+SUCCESSOR_OPUS = "claude/claude-opus-5-5"
+SUCCESSOR_SONNET = "claude/claude-sonnet-5-5"
+
 # Compaction is not free (see History, 2026-10-10): only compact once the
 # context has grown enough above the post-compaction floor to pay it back.
 EARLY_GROWTH = 32_000   # 2026-10-25: delegate earlier; this alone never compacts
@@ -397,6 +405,40 @@ def _last_assistant_model(transcript_path):
     return None
 
 
+def _guard_level():
+    """`level` of the quota guard's state file ("" when absent or unreadable)."""
+    try:
+        data = json.loads(QUOTA_GUARD_PATH.read_text())
+        level = data.get("level") if isinstance(data, dict) else None
+    except Exception:
+        return ""
+    return level if isinstance(level, str) else ""
+
+
+def _successor_target(model, guard_level):
+    """(provider/model spec, why) when this session should hand off to another model, else None.
+
+    Fable (any claude-fable-* id, a "[1m]" style suffix ignored) means Opus 5.5.  A quota guard
+    saying tight or critical moves a session only DOWN, and only from a model known to be above the
+    target: tight (Sonnet 5.5) from Fable or Opus, critical (Opus 5.5) from Fable.  An unknown model
+    (None: the transcript tail had no assistant record), Haiku, or a session already on the target
+    or below gets None, i.e. a plain /new, never a same-model or upward successor (adversary
+    2026-10-23, observation 8 and round 2 L4; the handoff skill's Step 9 uses the same rule)."""
+    base = (model or "").split("[", 1)[0]
+    fable = base.startswith("claude-fable")
+    if guard_level == "tight":
+        if fable or base.startswith("claude-opus"):
+            return SUCCESSOR_SONNET, "the quota guard says tight"
+        return None
+    if guard_level == "critical":
+        if fable:
+            return SUCCESSOR_OPUS, "the quota guard says critical"
+        return None
+    if fable:
+        return SUCCESSOR_OPUS, "this session runs on Fable"
+    return None
+
+
 def _first_context_tokens(transcript_path):
     """The session's first usage block (its starting context), or None."""
     try:
@@ -444,13 +486,23 @@ def _early_message(total, growth):
     )
 
 
-def _boundary_message(total):
+def _successor_note(successor):
+    """The Fable-lead ruling (2026-10-23): a Fable session, or a tight quota guard, hands off to Opus/Sonnet."""
+    if not successor:
+        return ""
+    spec, why = successor
+    return (f" Note: {why}; after the handoff tell the operator to relaunch "
+            f"`claude --model {spec.split('/', 1)[1]}` rather than continuing on this model.")
+
+
+def _boundary_message(total, successor=None):
     return (
         f"Context is {total:,}. At the next task completion, if the following "
         f"work is not a direct continuation, run the `handoff` skill "
         f"and then tell the operator /new is ready instead of /compact: a fresh session re-writes ~46k, a "
         "compaction re-writes ~72k plus a summariser call and leaves ~104k "
         "behind. Do not compact mid-task."
+        + _successor_note(successor)
     )
 
 
@@ -480,10 +532,10 @@ def _midtask_note(total, in_context):
     return lead + "right after it, with no further tool rounds" + alternative
 
 
-def _ask_message(total, growth, repeat):
+def _ask_message(total, growth, repeat, successor=None):
     lead = "Context is still growing" if repeat else "Context is large"
-    # Every agent lands here (2026-11-06, slim-down E4: bin/self-slash is gone): a Claude session can issue its own
-    # /compact, and a handoff ends in a /new the operator types.
+    # bin/self-slash is gone (2026-11-06, slim-down E4): there is no path to queue a /compact for the session, so
+    # auto-compaction takes it (a Claude session cannot run built-in slash commands itself).
     return (
         f"{lead}: {total:,} tokens (+{growth:,} since the session started or "
         "last compacted). Do not ask: Claude Code compacts this session by "
@@ -496,9 +548,13 @@ def _ask_message(total, growth, repeat):
         "document) and tell the operator /new is ready (a fresh session "
         "re-writes ~46k); keep going in-context only when the work must "
         "continue. "
-        + _midtask_note(total, "run /compact yourself now, with a focus line") + " "
+        + _midtask_note(total, "let the auto-compaction take it") + _successor_note(successor) + " "
         + _COST_NOTE
     )
+
+
+def _session_successor(transcript_path):
+    return _successor_target(_last_assistant_model(transcript_path), _guard_level())
 
 
 def _load_state():
@@ -729,7 +785,8 @@ def _check_state(data, event, session_id, transcript_path):
         if level == 1:
             messages.append((_early_message(total, growth), "early"))
         else:
-            messages.append((_ask_message(total, growth, repeat=fired >= 2), "ask"))
+            messages.append((_ask_message(total, growth, repeat=fired >= 2,
+                                         successor=_session_successor(transcript_path)), "ask"))
     # Never lower the stored level on a dip: a compaction or a real shrink already reset it
     # above, and a smaller dip must not let the next climb past the tier reprint the message.
     session_state["level"] = max(level, fired)
@@ -737,7 +794,7 @@ def _check_state(data, event, session_id, transcript_path):
     # Once per session id, not per compaction: a /new starts a new id.
     if total >= BOUNDARY_TOTAL and not session_state.get("boundary"):
         session_state["boundary"] = True
-        messages.append((_boundary_message(total), "boundary"))
+        messages.append((_boundary_message(total, successor=_session_successor(transcript_path)), "boundary"))
 
     if messages:
         message = "\n".join(text for text, _ in messages)

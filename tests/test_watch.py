@@ -59,7 +59,7 @@ json.dump(s, open(f, "w"))
 open(d + "/seat.log", "a").write(json.dumps(sys.argv[1:]) + "\\n")
 if not os.environ.get("STUB_NO_REGISTER"):
     open(d + "/role", "w").write(aid + "\\nname: watch stub\\nsince: 2026-10-25 10:00:00\\n")
-print(json.dumps({"id": aid, "shortId": aid[:8], "autoAccept": True}))
+print(json.dumps({"agentId": aid, "status": "created", "provider": "stub", "cwd": os.getcwd(), "title": "t"}, indent=2))
 '''
 
 FW_STUB = '''#!/usr/bin/env python3

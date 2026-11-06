@@ -122,16 +122,20 @@ AIUSE_NOTHING_USABLE = 3
 class ConfigError(Exception):
     pass
 
-# bin/self-slash is gone (2026-11-06, slim-down E4): a successor is a new Paseo agent, then the old one is archived.
-_SELF_SLASH = ("`paseo run --no-wait --provider claude --model claude-sonnet-5-5 --thinking high --workspace "
-               "\"$PASEO_WORKSPACE_ID\" \"/baton <handoff path>\"`, then `paseo agent archive \"$PASEO_AGENT_ID\"`")
+# bin/self-slash is gone (2026-11-06, slim-down E4): a successor is a new TOP-LEVEL Paseo agent (the env prefix keeps
+# `paseo run` from parenting it to the caller); it archives its predecessor by id once it has answered (a running agent
+# cannot archive itself, and --force would cascade to its children).
+_SUCCESSOR_TAIL = ("; the successor archives its predecessor by id once it has answered "
+                   "(`paseo agent archive PRED_ID`, PRED_ID being your own agent id)")
+_SELF_SLASH = ("`env -u PASEO_AGENT_ID -u PASEO_AGENT_CWD paseo run --no-wait --provider claude --model claude-sonnet-5-5 "
+               "--thinking high --workspace \"$PASEO_WORKSPACE_ID\" \"/baton <handoff path>\"`" + _SUCCESSOR_TAIL)
 # At `critical` the Claude Code subscription is the exhausted pool. omp is off its dollar pool (API
 # credits: skills/model-routing/SKILL.md, claude-fleet-governor) but shares the Claude weekly rate
 # window, so aiuse gates it when every weekly window is exhausted (adversary r1 on PR 126, A1): omp
 # is a successor and keeps working only while `aiuse --available --json` still lists it.
-_SELF_SLASH_OMP = ("`paseo run --no-wait --provider omp --model anthropic/claude-sonnet-5-5 --thinking high "
-                   "--workspace \"$PASEO_WORKSPACE_ID\" \"/baton <handoff path>\"`, then "
-                   "`paseo agent archive \"$PASEO_AGENT_ID\"`")
+_SELF_SLASH_OMP = ("`env -u PASEO_AGENT_ID -u PASEO_AGENT_CWD paseo run --no-wait --provider omp "
+                   "--model anthropic/claude-sonnet-5-5 --thinking high "
+                   "--workspace \"$PASEO_WORKSPACE_ID\" \"/baton <handoff path>\"`" + _SUCCESSOR_TAIL)
 _ADVERSARY = "`acp-dispatch omp --model anthropic/claude-opus-5-5 --kind judgment --effort high`"
 _RUNNING_PROJECTED = re.compile(r"projected to run out.*before reset", re.I | re.S)
 

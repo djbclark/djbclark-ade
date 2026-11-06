@@ -620,9 +620,10 @@ def steer_text(w: dict[str, Any]) -> str:
             else f"{w['left']:.0f}% left, its reset is {hhmm(w['resets_at'])}")
     return (f"Claude subscription critical: {short_label(w['label'])} {w['used']:.0f}% used, {when}. "
             "Finish the current step, write your Tier 1 handoff, then run "
-            f"`paseo run --no-wait --provider {HANDOFF_SUCCESSOR.split('/', 1)[0]} --model {HANDOFF_SUCCESSOR.split('/', 1)[1]} "
-            "--thinking high --workspace \"$PASEO_WORKSPACE_ID\" \"/baton <handoff path>\"`, then "
-            "`paseo agent archive \"$PASEO_AGENT_ID\"` (API credits, off the subscription).")
+            f"`env -u PASEO_AGENT_ID -u PASEO_AGENT_CWD paseo run --no-wait --provider {HANDOFF_SUCCESSOR.split('/', 1)[0]} --model {HANDOFF_SUCCESSOR.split('/', 1)[1]} "
+            "--thinking high --workspace \"$PASEO_WORKSPACE_ID\" \"/baton <handoff path>\"`; the successor archives its "
+            "predecessor by id once it has answered (`paseo agent archive PRED_ID`, PRED_ID being your own agent id; a "
+            "running agent cannot archive itself) (API credits, off the subscription).")
 
 
 def describe_move(m: dict[str, Any]) -> str:

@@ -22,6 +22,7 @@ def box(tmp_path, monkeypatch, capsys):
     hook = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(hook)
     monkeypatch.setattr(hook, "STATE_PATH", tmp_path / "state.json")
+    monkeypatch.setattr(hook, "_session_successor", lambda _: None)
     monkeypatch.setattr(hook, "LOG_PATH", tmp_path / "log.jsonl", raising=False)
     monkeypatch.setattr(hook, "_send_ping", lambda *args: None)
     clock = [1_800_000_000.0]
