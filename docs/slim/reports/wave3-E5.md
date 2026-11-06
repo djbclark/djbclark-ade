@@ -3,11 +3,12 @@
 Writer: one Claude agent (Opus 5.5) in its own worktree, branch `worktree-agent-af59a42109b4c5868`, based on
 `claude/determined-maxwell-uvddaz` at 7762c1e (fast-forwarded from master fb3b9de, docs-only). Nothing pushed. Commits:
 5a03c40 (deletions), eecadc3 (load-watch), 9e4f56d (context-watch), a4b3063 (context-budget-check), 1e98908 (a doc
-reference), and this report. Brief: `docs/slim/briefs/wave3-E5-watch.md`.
+reference), and this report; then one review-repair commit (walk stops at the agent CLI, archived agents out, the
+`loose` notice, `completed` delivered, per-row cwd errors, `status` expiries). Brief: `docs/slim/briefs/wave3-E5-watch.md`.
 
-Three places where this slice departs from the brief or from a ruling, each argued below: **A7** (load-watch reads
-`paseo ls -a -g` as briefed, but `-a` lists archived agents too), **B3** (context-watch keeps `-g --background`, not
-`-a -g`), **D3** (`scripts/github-ci-run` is KEPT: it has a live caller outside `skills/loadwatch`, so R2-23's grep was
+Places where this slice departs from the brief or from a ruling, each argued below: **A7** (load-watch now reads
+`paseo ls -g --background`, not the brief's `-a -g`: proposed in the first version, accepted by the review ruling of
+2026-11-06), **B3** (context-watch keeps `-g --background`, not `-a -g`), **D3** (`scripts/github-ci-run` is KEPT: it has a live caller outside `skills/loadwatch`, so R2-23's grep was
 wrong).
 
 ## A. load-watch
@@ -17,20 +18,24 @@ A1. **Removed** (line numbers in the file before eecadc3, 2,188 lines): the `SF`
 (:556-566) and its `where` text (:569); `relay_env` (:621-625); the relay channel in `send_to` (:639-683, now
 `paseo_send`); the relay and `sid` paths of `watcher set/clear` (:726-741) and the `--relay`/`--sid` flags (:2170-2171);
 the "Investigate per the loadwatch skill" pointers (:694, :1123); the `self-slash` comment (:653); the relay, fleet.py
-and pane sentences of the docstring (:17-18, :29-33, :48-54, :66). The file is now 2,366 lines: it **grew** by 178,
+and pane sentences of the docstring (:17-18, :29-33, :48-54, :66). The file is now 2,404 lines (2,366 before the review repair): it **grew** by 216,
 because the cwd join, the two operator notices and their docstrings are new code. The KEEP interfaces are untouched:
 `admit` (:1631-1878 then; the exit-75 contract, memory gates, reservations, deadline), `sample`, `release`, `renew`,
 `watcher`, `ci`, `guard`, `install`. The plist `launchd/com.djbclark.load-watch.plist` stays where it is (C1); only
 its XML comment changed (it said "types one line into its pane" and "2 per core").
 
-A2. **Attribution design** (`paseo_agents`, `attribute`, `top_rows`, `proc_cwds`). `paseo ls -a -g --json` gives
-`id, shortId, name, provider, status, cwd` (with `~`), no pid and no session id (research item 2), so the join is by
-working directory:
+A2. **Attribution design** (`paseo_agents`, `attribute`, `top_rows`, `proc_cwds`). `paseo ls -g --background --json`
+(archived agents out, background agents in) gives `id, shortId, name, provider, status, cwd` (with `~`), no pid and no
+session id (research item 2), so the join is by working directory:
 1. every process with at least 0.1 cores over the window, of this uid, has its ancestor chain read from the samples;
 2. one cwd read for all of them: `/proc/PID/cwd` on Linux (`PROC_CWD`), one `lsof -a -d cwd -Fpn -p ...` on macOS
    (review rule 5; `work_repos` gets the Linux path too);
 3. the process belongs to the agent whose cwd (`~` expanded, realpath) equals its own cwd, else its nearest
-   ancestor's (a cargo or brew child in a temp dir);
+   ancestor's (a cargo or brew child in a temp dir); **the walk stops at the first agent CLI** (the process itself
+   or an ancestor whose first two argv words' basename is in `AGENT_CLIS` or is a listed provider's head): that
+   agent's cwd is the last that may decide, so work is never pinned on the Paseo daemon, a multiplexer or a shell
+   above the agent that happens to share a cwd with another agent (review HIGH, 2026-11-06: an agent in `~` running
+   rustc in /tmp/build was blamed on the idle agent in wt-a where the daemon started);
 4. failing that, to the agent whose cwd is in the same git top-level as the process's own cwd (a Gradle daemon, a
    build in a subdirectory: the old "only session in its git repo" rule);
 5. **exactly one** agent at that cwd or repo owns it; **several** make the row `unsure` (not guessed); **none** make it
@@ -46,12 +51,17 @@ A3. **Operator notices** (the existing Hermes + watcher path, now one helper `op
 2. `noattrib`: no `paseo` on PATH, `paseo ls` failing, non-JSON, a non-list, or **any exception inside attribution**
    (cmd_sample now wraps the call, PLAN E5's unguarded :1227-1233): "load N on C cores for 5+ min and load-watch could
    not name the agent behind it: <why>; top: <three process lines>; <not_cpu summary>";
-3. `nocpu`: unchanged, only when attribution worked and nothing explains the load.
+3. `loose`: a process matched to no agent with at least `LW_MIN_CORES`: its process lines (pid, cores, command),
+   **whether or not an agent was told in the same sample** (review MEDIUM: a told agent used to suppress this path);
+4. `nocpu`: only when attribution worked, no agent was told and no single unmatched process reaches `LW_MIN_CORES`:
+   "and no agent's build and no single process above 1.5 cores explains it" (reworded; "no agent build behind it" was
+   false when a multi-core unmatched process existed).
+One of these per hot episode (`loose_logged`), as before.
 
 A4. **Delivery**: `paseo_send` runs `paseo send --no-wait --json --behavior steer -- ID TEXT` with `PASEO_AGENT_ID`
 unset, keeps the DAEMON_* retry rules, and returns the `.status` word from stdout (`sent`, `queued`, another word,
-`unknown`, `failed`); the exit code is read only to decide whether to look for a transient error code. `sent` (or
-`completed`) is delivered; `queued` is logged as "queued, not delivered" in `sample.log` (incident line and watcher
+`unknown`, `failed`); the exit code is read only to decide whether to look for a transient error code. `sent` and
+`completed` are delivered (`DELIVERED`, one tuple used by `notify`, `send_to`, `tell_watcher` and `watcher test`); `queued` is logged as "queued, not delivered" in `sample.log` (incident line and watcher
 line) and the Hermes ping says "paseo send queued it, not delivered" and carries the `acp-dispatch cursor` fixer line.
 Incident records gain `delivery` and `agent_id`; `relayed` stays as a bool (`delivery == "sent"`) so older records and
 readers still load (review rule 6). `watcher test` prints `sent to`, `queued, not delivered, for` or
@@ -67,7 +77,7 @@ A6. **The message text** (`WATCHER_HOWTO`, appended to every line the watcher ge
 > As the load watcher: verify against the processes, not this line (`/bin/ps -axo pid,ppid,%cpu,state,etime,command -r
 > | head -20` and `/usr/bin/top -l 2 -s 5 -o cpu -n 20` by full path, since some agent shells shadow ps and top;
 > `~/src/djbclark-ade/bin/load-watch status`, `incidents -n 5`, and `admit --json` for memory churn and free memory).
-> Map a heavy process to its Paseo agent by working directory (`paseo ls -a -g --json`, `paseo agent inspect ID`); if it
+> Map a heavy process to its Paseo agent by working directory (`paseo ls -g --background --json`, `paseo agent inspect ID`); if it
 > was not told, send it one line with `paseo send --no-wait --json ID "..."` and read `.status` (`queued` is not
 > delivered). Load without CPU is processes stuck in state U, swap, or a pile at background priority. Never kill, stop
 > or throttle another agent's or djbclark's work without his yes: steer future runs to CI (`load-watch ci decide`),
@@ -79,14 +89,16 @@ The blamed agent's line is unchanged in substance: "load-watch INC: load N on C 
 what-to-do list (only "at your pane" became "watching your session").
 
 A7. **Limits, stated plainly.**
-1. **`-a` includes archived agents** (Paseo `ls.ts`: `-a` sets `includeArchived` and `includeBackground`), and the
-   JSON has no archived field to filter them out. A checkout where an archived agent once ran next to a live one reads
-   as a shared cwd, so that work goes to the operator as `unsure` instead of to the live agent; and work whose only
-   matching agent is archived is "told" to an archived agent (what `paseo send` does to an archived agent, resume or
-   refuse, was not verified). I followed the brief; **proposal**: switch the one constant `PASEO_LS` to
-   `("ls", "-g", "--background", "--json")` (non-archived, background included), which is what context-watch reads.
+1. **Archived agents are out** (ruling 2026-11-06, accepting this report's first-version proposal):
+   `PASEO_LS = ("ls", "-g", "--background", "--json")`. `-a` would have listed archived agents too, with no JSON field
+   to tell them apart, turning a checkout with an archived and a live agent into a shared cwd, or sending a
+   find-and-tell to an archived agent. Leftover work of an archived agent is now unmatched: the `loose` notice.
 2. Several live agents on one worktree (or one repo, for the git-top rule) are never told: by design, the operator is.
-3. A process that `cd`s outside every agent's cwd and repo, and whose ancestors also do, is loose (nocpu path).
+3. A process that `cd`s outside every agent's cwd and repo, and whose ancestors up to the nearest agent CLI also do,
+   is unmatched (the `loose` notice when it uses LW_MIN_CORES, else only counted in `nocpu`). An agent CLI outside
+   `AGENT_CLIS` whose provider is not in the listing is walked past, as before the fix.
+6. A `paseo ls` row whose cwd cannot be resolved (a NUL in it) is skipped alone; it never turns the sample into
+   `noattrib`. `status` shows every `KEY-watcher` cooldown with its hourly expiry.
 4. Another user's processes (root builds through sudo) are never attributed.
 5. Paseo agents only: a bare Claude Code or other TUI outside Paseo is invisible to attribution now (fleet.py saw
    herdr panes and bare TUIs). That is the retirement's intent, and is in section I.
@@ -163,7 +175,9 @@ E2. Tests: `tests/conftest.py` drops the `RW_NO_DEPLOY` guard (rumination-watch'
 
 E3. **Outside my files, flagged**: `tests/test_session_history_adapters.py` (E3's) read the deleted
 session-history-update plist in two `render_plist` tests; I removed those two tests (a comment marks the spot) so the
-suite stays green until E3 deletes the script. `bin/route_agent.py` and `tests/test_route_agent.py` name nothing of
+suite stays green until E3 deletes the script. `skills/session-finder/session-history.py:149,195,202` (its `install`)
+still reads `launchd/com.djbclark.session-history-update.plist`: until E3 deletes that file, `session-history.py
+install` finds no plist (the :195 check fails). `bin/route_agent.py` and `tests/test_route_agent.py` name nothing of
 routing-recalibrate (grep, 2026-11-06): no edit needed. `bin/ade-template-check` lists no plists: no edit needed
 (`tests/test_ade_template_check.py` passes).
 
@@ -188,7 +202,7 @@ session-load-watch and rumination-watch as relay callers. E4: `bin/self-slash:59
 
 F4. Changelog fragment (rule 10; not written, CHANGELOG is the merger's), under `### Removed` and `### Changed`:
 - Removed `bin/proc-cpu-watch`, `bin/session-load-watch`, `bin/rumination-watch`, `bin/routing-recalibrate`, the `loadwatch` skill and the proc-cpu-watch, rumination-watch, routing-recalibrate, session-history-update and context-budget launchd plists (slim-down E5).
-- Changed `load-watch`: it attributes a spike to a Paseo agent from `paseo ls -a -g --json` by working directory, tells it with `paseo send --no-wait --json` (reading `.status`; `queued` is not delivered), sends work that several agents share or that it cannot attribute (no `paseo`) to the operator, and drops the relay.py channel and `watcher set --relay`/`--sid` (slim-down E5).
+- Changed `load-watch`: it attributes a spike to a Paseo agent from `paseo ls -g --background --json` by working directory (the walk up stopping at the agent's own CLI), tells it with `paseo send --no-wait --json` (reading `.status`; `queued` is not delivered), sends work that several agents share or that it cannot attribute (no `paseo`) to the operator, and drops the relay.py channel and `watcher set --relay`/`--sid` (slim-down E5).
 - Changed `context-budget-check`: `install`/`uninstall` removed (exit 2); it runs as a nightly Paseo schedule (J3).
 - Changed `context-watch`: no longer imports session-finder's `fleet.py` (slim-down E5).
 
@@ -216,8 +230,8 @@ G10. Nothing else on the Mac changes: `com.djbclark.load-watch` keeps running `b
 
 ## H. Tests
 
-H1. Hot path (`tests/test_load_watch_find_and_tell.py`, 7 tests): `cmd_sample` over three samples of a synthetic
-sustained spike (load 40 on 8 cores, 400 s) with a fake `paseo` first on PATH (canned `ls -a -g --json` with `~` cwds,
+H1. Hot path (`tests/test_load_watch_find_and_tell.py`, 12 tests): `cmd_sample` over three samples of a synthetic
+sustained spike (load 40 on 8 cores, 400 s) with a fake `paseo` first on PATH (canned `ls -g --background --json`, argv asserted, with `~` cwds,
 broken rows included; `send` logs argv and prints `.status`), a fake `hermes-ping` and a fake process table and cwds.
 It asserts: the cargo child in a temp dir is attributed to agent A through its ancestor's cwd; A's own `claude` process
 is not counted; one `paseo send --no-wait --json --behavior steer -- A <line with the incident id and brief path>`; the
@@ -226,7 +240,11 @@ the watcher's lines carry WATCHER_HOWTO; `queued` is recorded as `delivery: queu
 gets the fixer line; **with no `paseo` on PATH every sample returns 0, no incident is written, and the operator ping
 names "no `paseo` on PATH" with the process lines, once per episode**; a `RuntimeError` inside attribution is the same
 notice ("attribution failed (RuntimeError)"); `paseo ls` failures are reasons, not exceptions; the git-top rule; an
-agent in `~` or `/` owns nothing. Also new in `tests/test_load_watch.py`: `.status` over exit code, a missing binary is
+agent in `~` or `/` owns nothing. Added for the review (2026-11-06): the adversary's probe (the walk stops at `claude`
+in `~`, or at any `AGENT_CLIS` binary, so rustc in /tmp/build is unmatched, not the idle wt-a agent's; with a plain shell
+in between the same chain still joins); a told agent no longer hides unmatched multi-core work (the `loose` ping names
+pid, cores and command, once per episode); `completed` is delivered in `notify`; one NUL-cwd row is skipped alone; `status`
+prints the hourly expiry of `noattrib-watcher` and `unsure:<cwd>-watcher`. Also new in `tests/test_load_watch.py`: `.status` over exit code, a missing binary is
 `failed`, the Linux `/proc` cwd path, the relay-record `show` message, `watcher test` wording.
 
 H2. The brief's list plus the slice's other touched files: `bin/pytest -q tests/test_load_watch.py
@@ -245,8 +263,11 @@ summary's `FAILED`/`ERROR` lines against `docs/slim/baseline.md`'s full list): 4
    `TestCardAlert::test_a_message_that_waited_past_the_threshold_pings_once_naming_target_card_sender_and_message`,
    `TestCardAlert::test_a_ping_that_fails_is_logged_and_never_costs_the_message`) and
    `tests/test_acp_dispatch_reap.py::TestSignalledRunner::test_sigterm_to_the_runner_finalizes_with_143`. This slice
-   touches neither relay.py nor acp-dispatch, and re-run alone both files pass (27 passed, rc=0): timing under the
-   shared load, not a regression.
+   touches neither relay.py nor acp-dispatch. Re-run alone, `test_relay_card_alert.py` plus the
+   `TestSignalledRunner` class passed (27 tests, rc=0; I first wrote "both files pass", which was wrong: I had not run
+   the whole of `test_acp_dispatch_reap.py`). Both whole files alone are 71 tests: 70 passed and 1 failed, the
+   baseline `TestReap::test_done_report_with_marker_finalizes_as_done` (coordinator's re-run). So the four are timing
+   failures under the shared load, not a regression.
 2. Gone: `tests/test_local_review.py::test_a_hung_codex_is_killed_with_its_group_and_the_run_is_failed` passed here.
 3. The deleted test files had no baseline failures. The passed count is higher than the baseline's because the
    suite moved on (master and the slim branch since `da6b2e7d`), less the ~4,600 lines of deleted tests.

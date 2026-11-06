@@ -74,7 +74,7 @@ def _sampler(tmp_path, monkeypatch):
     monkeypatch.setattr(lw.os, "getloadavg", lambda: (40.0, 40.0, 40.0))
     monkeypatch.setattr(lw.os, "cpu_count", lambda: 8)
     monkeypatch.setattr(lw, "ps_table", lambda: {"1": (0, 0, 0.1, "x")})
-    monkeypatch.setattr(lw, "attribute", lambda use, span, parent: ({}, [], [], None))
+    monkeypatch.setattr(lw, "attribute", lambda use, span, parent, cmds=None: ({}, [], [], None))
     monkeypatch.setattr(lw, "guard", lambda *args: None)
 
     class A:
@@ -115,7 +115,7 @@ def test_unexplained_load_reaches_the_watcher_hourly(tmp_path, monkeypatch):
         at(start + 500)  # cools off: the next spike is a new episode
 
     episode(1000)
-    assert len(sent) == 1 and "no agent build behind it" in sent[0]
+    assert len(sent) == 1 and "no agent's build and no single process above 1.5 cores explains it" in sent[0]
     episode(2000)                      # 1000 s later: inside the hour
     assert len(sent) == 1
     episode(1000 + lw.WATCHER_NOCPU_S + 100)

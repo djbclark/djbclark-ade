@@ -26,13 +26,16 @@ candidate.
 
 Each sample is one `ps` call and `os.getloadavg()`: no model, no network. A sample counts as hot when
 the 1-minute load per core is at least LW_LOAD_PER_CORE (4.0; was 2.0 until 2026-11-01, when djbclark called 3.5 per core "not too bad for this system": on this 16 GB, 8-core Mac the real limit is memory pressure and process churn, not the load average). After LW_SUSTAIN_S (300) seconds of
-continuously hot samples it attributes the mean CPU of the samples in that window to Paseo agents (`paseo ls -a -g
---json`, slim-down E5, 2026-11-06; it carries no pid and no session id, so the join is by working directory: a process
+continuously hot samples it attributes the mean CPU of the samples in that window to Paseo agents (`paseo ls -g
+--background --json`, slim-down E5, 2026-11-06; it carries no pid and no session id, so the join is by working directory: a process
 belongs to the one agent whose cwd equals its own cwd or its nearest ancestor's (`/proc/PID/cwd` on Linux, `lsof` on
 macOS), else to the one agent in its cwd's git repo, such as a Gradle daemon's). Several agents on that cwd or repo is never
 guessed: the process lines and the candidate agents go to the operator notice (Hermes every LW_COOLDOWN_H per cwd, the
-watcher hourly). No `paseo`, a failed `paseo ls` or an attribution crash is an operator notice too ("could not name the
-agent"), never an exception that stops the sampler. For each agent above LW_MIN_CORES (1.5) cores it writes a brief,
+watcher hourly). The walk up a process's ancestors stops at the first agent CLI (AGENT_CLIS and the listed providers), so
+work is never pinned on a daemon or shell above the agent; a process that joins no agent and uses LW_MIN_CORES or more
+goes to the operator with its process line, even when another agent was told in the same sample. No `paseo`, a failed
+`paseo ls` or an attribution crash is an operator notice too ("could not name the agent"), never an exception that stops
+the sampler. For each agent above LW_MIN_CORES (1.5) cores it writes a brief,
 sends the agent one line naming it (`paseo send --no-wait --json --behavior steer`, its `.status` read, never the exit
 code: `sent` is delivered, `queued` is logged "queued, not delivered"), and sends one hermes-ping (with a ready
 `acp-dispatch cursor` line for a fixer unless the line was `sent`). An agent or repo is not told again
@@ -259,15 +262,19 @@ def git_top(path):
 
 
 # ---- attribution: which Paseo agent ran the work (slim-down E5, 2026-11-06) ----------------------------------
-# `paseo ls -a -g --json` is the agent list: id, shortId, name, provider ("claude/<model>"), status, cwd (with `~` for
-# the home directory) and background, but no pid, no session id and no labels (docs/slim/research/wave3-2026-11-06.md
+# `paseo ls -g --background --json` is the agent list (archived agents left out: the JSON has no field that would tell
+# them apart): id, shortId, name, provider ("claude/<model>"), status, cwd (with `~` for the home directory) and
+# background, but no pid, no session id and no labels (docs/slim/research/wave3-2026-11-06.md
 # item 2). So a process is joined to an agent by working directory, never by ancestry: its own cwd, else the nearest
 # ancestor's (a cargo or brew child runs in a temp dir), equal to exactly one agent's cwd; failing that, its own cwd's
 # git top-level equal to exactly one agent's (a daemon such as Gradle's, or a build in a subdirectory). Several agents
 # on the same cwd (or repo) is NOT guessed: the process, its cwd and the candidate agents go to the operator notice.
 # An agent whose cwd is / or the home directory is never joined (it would own every daemon and app started there).
-PASEO_LS = ("ls", "-a", "-g", "--json")
+PASEO_LS = ("ls", "-g", "--background", "--json")  # every workspace, background agents in, archived agents out
 PROC_CWD = os.path.exists("/proc/self/cwd")  # Linux: read /proc/PID/cwd; macOS (no /proc): lsof (review rule 5)
+
+
+DELIVERED = ("sent", "completed")  # `paseo send` .status words that mean the line arrived; `queued` does not
 
 
 def paseo_cli():
@@ -292,7 +299,7 @@ def expand_cwd(cwd):
 
 
 def paseo_agents():
-    """(agents, None) from `paseo ls -a -g --json`, each {id, short, name, provider, status, cwd}; or (None, why) when
+    """(agents, None) from `paseo ls -g --background --json`, each {id, short, name, provider, status, cwd}; or (None, why) when
     there is no `paseo`, it fails, times out or prints something that is not a list of agents. Never raises."""
     cli = paseo_cli()
     try:
@@ -313,7 +320,10 @@ def paseo_agents():
     for row in rows:
         if not isinstance(row, dict) or not isinstance(row.get("id"), str) or not row["id"]:
             continue
-        cwd = expand_cwd(row["cwd"]) if isinstance(row.get("cwd"), str) else ""
+        try:
+            cwd = expand_cwd(row["cwd"]) if isinstance(row.get("cwd"), str) else ""
+        except ValueError:  # a NUL in the path: this row only
+            cwd = ""
         if not cwd:
             continue  # an agent with no usable cwd can never be joined
         agents.append({"id": row["id"], "short": str(row.get("shortId") or row["id"][:8]),
@@ -326,11 +336,21 @@ def agent_label(a):
     return f"{a['short']} {a['name'] or '-'} ({a['provider'] or '?'}, {a['status'] or '?'})"
 
 
+# Agent CLIs by binary name: a walk up from a busy process stops at the first of these (with the providers `paseo ls`
+# names), so work is never pinned on whatever daemon, multiplexer or shell above the agent shares a cwd with another one.
+AGENT_CLIS = frozenset({"claude", "codex", "opencode", "omp", "pi", "gemini", "copilot", "cursor-agent", "grok", "agy",
+                        "crush", "kimi", "qwen", "goose", "aider", "amp", "droid", "kiro-cli", "acp-run"})
+
+
+def cli_heads(cmd):
+    return {os.path.basename(w) for w in cmd.split()[:2]}
+
+
 def own_process(agent, cmd):
     """True when `cmd` is the agent's own CLI (the provider's binary: `claude`, `codex`, ...): its TUI's CPU is not
     build work, as the pid exclusion was before Paseo."""
     head = agent["provider"].split("/")[0]
-    return bool(head) and head in {os.path.basename(w) for w in cmd.split()[:2]}
+    return bool(head) and head in cli_heads(cmd)
 
 
 def top_rows(use, span):
@@ -344,15 +364,19 @@ def top_rows(use, span):
     return rows
 
 
-def attribute(use, span, parent):
+def attribute(use, span, parent, cmds=None):
     """Group the window's CPU by Paseo agent. Returns (per-agent groups, loose rows, unsure rows, why): `unsure` rows
     joined several agents (each carries `cwd` and `candidates`), `loose` rows joined none, and `why` is None, or the
-    reason there is no attribution at all (no `paseo`, a failed `paseo ls`): then every row is loose. Never raises
-    for a missing or broken `paseo`."""
+    reason there is no attribution at all (no `paseo`, a failed `paseo ls`): then every row is loose. `cmds` (pid ->
+    command, the window's and the live table's) lets the walk up the ancestors stop at the first agent CLI: that
+    agent's cwd decides, and if it joins no agent (or several) the row is loose (or unsure), never attributed to an agent
+    higher up. Never raises for a missing or broken `paseo`."""
+    cmds = cmds or {}
     rows = top_rows(use, span)
     agents, why = paseo_agents()
     if agents is None:
         return {}, [r for _p, _u, r in rows], [], why
+    clis = AGENT_CLIS | {a["provider"].split("/")[0] for a in agents if a["provider"]}
     by_cwd = {}
     broad = {"/", os.path.realpath(HOME)}  # an agent sitting in / or ~ would own every daemon and app: never joined there
     for a in agents:
@@ -365,6 +389,8 @@ def attribute(use, span, parent):
         chain, q = [], pid
         while q and q not in ("0", "1") and len(chain) < 64:
             chain.append(q)
+            if cli_heads(cmds.get(q, "") or use.get(q, [0, 0, ""])[2]) & clis:
+                break  # an agent's own CLI: its cwd is the last one that may decide
             q = str(parent.get(q, ""))
         chains[pid] = chain
     cwds = proc_cwds({q for c in chains.values() for q in c})
@@ -660,18 +686,18 @@ Written {stamp()} by `~/src/djbclark-ade/bin/load-watch` (no model). Load was {l
 
 def notify(inc, g, top, path, load1, ncpu, dry):
     """Tell the blamed agent by `paseo send` (its `.status` read, never the exit code) and Hermes. Returns (status, ping):
-    status is `sent` (delivered), `queued` (accepted, not delivered), `failed`, or `dry`."""
+    status is `sent` or `completed` (delivered, DELIVERED), `queued` (accepted, not delivered), `failed`, or `dry`."""
     s = g["session"]
     cmd = sorted(g["procs"], key=lambda p: -p["cores"])[0]["cmd"][:60] if g["procs"] else "the session itself"
     line = (f"load-watch {inc}: load {load1:.0f} on {ncpu} cores for {SUSTAIN_S / 60:g}+ min; your processes used "
             f"~{g['cores']:.1f} cores ({cmd}). After your current step, read {path} and act on it.")
     status = "dry" if dry else paseo_send({"channel": "paseo", "target": s["id"]}, line)
     who = f"{s.get('agent')} {s.get('name') or s['id']}"
-    told = {"sent": "told it", "queued": "paseo send queued it, not delivered", "dry": "dry run"}.get(
-        status, f"could not reach it (paseo send: {status})")
+    told = ("told it" if status in DELIVERED else
+            {"queued": "paseo send queued it, not delivered", "dry": "dry run"}.get(status, f"could not reach it (paseo send: {status})"))
     ping = (f"djbclark-ade: load-watch {inc}: {who} used ~{g['cores']:.1f} cores at load {load1:.0f} "
             f"({cmd}); {told}; brief {path}")
-    if status not in ("sent", "dry"):  # the code-slice pick (route_agent.py plan, 2026-10-18); he runs it after a yes to a CI copy
+    if status not in (*DELIVERED, "dry"):  # the code-slice pick (route_agent.py plan, 2026-10-18); he runs it after a yes to a CI copy
         ping += (f"; to hand it to a fixer: ~/src/djbclark-ade/bin/acp-dispatch cursor --model default --kind code "
                  f"--name load-watch-{Path(path).stem} --task load-watch "
                  f"-C {top or s.get('cwd') or HOME} -f {path} --detach --no-wait")
@@ -695,7 +721,7 @@ WATCHER_HOWTO = (
     "As the load watcher: verify against the processes, not this line (`/bin/ps -axo pid,ppid,%cpu,state,etime,command -r "
     "| head -20` and `/usr/bin/top -l 2 -s 5 -o cpu -n 20` by full path, since some agent shells shadow ps and top; "
     "`~/src/djbclark-ade/bin/load-watch status`, `incidents -n 5`, and `admit --json` for memory churn and free memory). "
-    "Map a heavy process to its Paseo agent by working directory (`paseo ls -a -g --json`, `paseo agent inspect ID`); if it was "
+    "Map a heavy process to its Paseo agent by working directory (`paseo ls -g --background --json`, `paseo agent inspect ID`); if it was "
     "not told, send it one line with `paseo send --no-wait --json ID \"...\"` and read `.status` (`queued` is not delivered). "
     "Load without CPU is processes stuck in state U, swap, or a pile at background priority. Never kill, stop or throttle "
     "another agent's or djbclark's work without his yes: steer future runs to CI (`load-watch ci decide`), guard a "
@@ -805,7 +831,7 @@ def paseo_send(w, text):
 
 def send_to(w, text):
     """paseo_send, as a yes or no: True only when the line was delivered (`sent`, or `completed`)."""
-    return paseo_send(w, text) in ("sent", "completed")
+    return paseo_send(w, text) in DELIVERED
 
 
 def tell_watcher(text, dry, skip=()):
@@ -818,7 +844,7 @@ def tell_watcher(text, dry, skip=()):
         print(f"watcher {w['channel']} {w['target']}: {text}")
         return None
     st = paseo_send(w, f"load-watch, to the load watcher: {text} {WATCHER_HOWTO}")
-    ok = st in ("sent", "completed")
+    ok = st in DELIVERED
     w["last_ok" if ok else "last_fail"] = stamp()
     save_watcher(w)
     log(f"watcher {w['target']} " + ("queued, not delivered" if st == "queued" else st))
@@ -859,7 +885,7 @@ def cmd_watcher(a):
         st = paseo_send(w, a.target or "load-watch test: this agent is the registered load watcher.")
         print({"sent": "sent to", "completed": "sent to", "queued": "queued, not delivered, for"}.get(
             st, f"could not reach ({st})") + f" {w['channel']} {w['target']}")
-        return 0 if st in ("sent", "completed", "queued") else 1
+        return 0 if st in (*DELIVERED, "queued") else 1
     # set: from --paseo, else this process's own Paseo agent
     target = a.paseo or os.environ.get("PASEO_AGENT_ID")
     if not target:
@@ -1358,7 +1384,7 @@ def cmd_sample(a):
         use, span = window(st)
         parent = ppids(st, table)
         try:  # the threat model's runaway-load response: a failed attribution reaches the operator, never stops sampling
-            groups, loose, unsure, why_none = attribute(use, span, parent)
+            groups, loose, unsure, why_none = attribute(use, span, parent, proc_cmds(st, table))
         except Exception as e:  # noqa: BLE001
             log(f"attribution error: {e!r}")
             groups, unsure, why_none = {}, [], f"attribution failed ({e.__class__.__name__})"
@@ -1387,12 +1413,12 @@ def cmd_sample(a):
                 path.write_text(brief(inc, g, work, load1, ncpu))
             delivery, ping = notify(inc, g, top, path, load1, ncpu, a.dry_run)
             watched = tell_watcher(ping.removeprefix("djbclark-ade: ") + ".", a.dry_run,
-                                   skip={s["id"]} if delivery == "sent" else ())
+                                   skip={s["id"]} if delivery in DELIVERED else ())
             rec = {"id": inc, "t": stamp(t), "load1": round(load1, 1), "ncpu": ncpu, "cores": round(g["cores"], 2),
                    "agent": s.get("agent"), "session": s.get("name") or s["id"], "agent_id": s["id"],
                    "cwd": s.get("cwd"), "repo": top, "repo_guess": work["guess"],
                    "repos": [{k: r[k] for k in ("top", "cores", "bg_cores", "rule")} for r in work["repos"]],
-                   "procs": g["procs"][:8], "relayed": delivery == "sent", "delivery": delivery,
+                   "procs": g["procs"][:8], "relayed": delivery in DELIVERED, "delivery": delivery,
                    "watcher_told": watched, "brief": str(path), "dry_run": a.dry_run}
             if a.dry_run:
                 print(json.dumps(rec, indent=1))
@@ -1409,10 +1435,14 @@ def cmd_sample(a):
             for row in loose[:5]:
                 print(f"unattributed: pid {row['pid']} {row['cores']} cores {row['cmd'][:100]}")
         unsure_told = unsure_notice(st, t, unsure, load1, ncpu, a.dry_run)
-        if not told and not unsure_told and not st.get("loose_logged"):
+        # work matched to no agent, at least MIN_CORES in one process: the operator hears it with the process lines,
+        # whether or not an agent was told in this sample (2026-11-06 review: a told agent must not hide it)
+        heavy = [r for r in loose if r["cores"] >= MIN_CORES]
+        if (why_none or heavy or not (told or unsure_told)) and not st.get("loose_logged"):
             why = not_cpu(use, span, ncpu)
             tops = "; ".join(f"{r['cores']} {r['cmd'][:60]}" for r in loose[:3])
             log(("sustained load, no agent attribution (" + why_none + "); " if why_none else
+                 f"sustained load, {sum(r['cores'] for r in heavy):.1f} cores matched to no agent; " if heavy else
                  "sustained load, no agent session above threshold; ") + why + "; top: " + tops)
             st["loose_logged"] = True
             # 2026-10-18: load 90 from memory starvation and a hung AFS aklog blamed no agent and told no one
@@ -1420,10 +1450,18 @@ def cmd_sample(a):
                 msg = (f"load {load1:.0f} on {ncpu} cores for {SUSTAIN_S / 60:g}+ min and load-watch could not name the "
                        f"agent behind it: {why_none}; top: {tops or 'none'}; {why}")
                 key = "noattrib"
+            elif heavy:
+                msg = (f"load {load1:.0f} on {ncpu} cores for {SUSTAIN_S / 60:g}+ min; ~{sum(r['cores'] for r in heavy):.1f} "
+                       f"cores ran in processes matched to no Paseo agent: "
+                       + "; ".join(f"pid {r['pid']} {r['cores']} cores `{r['cmd'][:80]}`" for r in heavy[:4]) + f"; {why}")
+                key = "loose"
             else:
-                msg = f"load {load1:.0f} on {ncpu} cores for {SUSTAIN_S / 60:g}+ min and no agent build behind it; {why}"
+                msg = (f"load {load1:.0f} on {ncpu} cores for {SUSTAIN_S / 60:g}+ min, and no agent's build and no single "
+                       f"process above {MIN_CORES:g} cores explains it; {why}")
                 key = "nocpu"
-            if not a.dry_run:
+            if a.dry_run:
+                print(f"operator notice ({key}): {msg}")
+            else:
                 operator_notice(st, t, key, msg)
     elif not hot:
         st.pop("loose_logged", None)
@@ -1508,7 +1546,7 @@ def cmd_status(a):
     if _num(cs):
         print(f"  calm boost: calm for {now() - cs:.0f}/{ADMIT_BOOST_CALM_S:g} s (the {ADMIT_BOOST_PER_CORE:g}/core boost applies after that; any hot reading resets it)")
     for k, v in st.get("cooldown", {}).items():
-        print(f"  cooldown {k} until {stamp(v + (WATCHER_NOCPU_S if k in ('nocpu-watcher', 'churn-watcher') else COOLDOWN_S))}")
+        print(f"  cooldown {k} until {stamp(v + (WATCHER_NOCPU_S if k.endswith('-watcher') else COOLDOWN_S))}")
     return 0
 
 
