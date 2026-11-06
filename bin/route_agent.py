@@ -2,7 +2,8 @@
 """Pick which vendor should run a piece of work, from capability and headroom.
 
 Routing here has been manual, which means it defaults to whatever is familiar.
-Measured on 2026-08-23: antigravity, opencode-go, zai and devin were all at
+Measured on 2026-08-23: antigravity, opencode-go, zai and devin (all since retired from this
+router, 2026-11-06) were all at
 roughly 0% used while claude carried the entire session. That is paid capacity
 expiring unused every cycle, and it repeats.
 
@@ -39,8 +40,7 @@ built at call time from what this machine can actually dispatch, in this order:
 1. `acp-run --list` — the agent table every launcher uses; only `ok` rows
    (binary present) count.
 2. the non-ACP headless TUIs (`NON_ACP_HEADLESS`, from model-routing's
-   per-CLI headless table; since 2026-10-08 only muse, zcode now rides
-   `acp-run` through `zcode-acp-server`), each only if its binary is on PATH.
+   per-CLI headless table; empty since muse retired, 2026-11-06), each only if its binary is on PATH.
 3. Orca's enabled agent roster — **off by default** (`ROUTE_AGENT_INCLUDE_ORCA=1`
    turns it on), and even then intersected with installed binaries. Orca's
    roster is its stock TUI list: on 2026-10-08, 12 of its 28 enabled names
@@ -73,13 +73,12 @@ preferences, because they encode consequences a score cannot see:
   on the normal ranking, it is not forced first;
 - Fable is a sublimit (at most 50%) of the SAME Claude weekly window, not a
   separate allowance: a Fable run bills the shared window too;
-- copilot is the one reserve, with a hard floor (`reserve_floor`): GitHub-side
-  Copilot review runs on it; never deplete it (grok was a reserve until
-  2026-10-18, when GrokBot moved to its own Cursor pool);
+- there is no reserve pool now (copilot, the one reserve with a hard floor, retired from the router
+  2026-11-06: Paseo's Copilot provider replaces the CLI; grok was a reserve until 2026-10-18, when
+  GrokBot moved to its own Cursor pool);
 - hermes is never a delegation target (gated, never discovered as a routable
   service here); omp is an ordinary tier since 2026-10-19 (operator): its Claude
-  API credits are an expiring grant, first for `api-only` work (rank 1; pi's OpenAI API pool is the other
-  eligible pool) and otherwise for `code`/`bulk` slices, so they are spent
+  API credits are an expiring grant, first for `api-only` work (rank 1) and otherwise for `code`/`bulk` slices, so they are spent
   before each monthly reset; `grant_days` gives it the burn-first bonus while the
   balance is far above an even spend over the month;
 - **never** route a slice to clinepass (NEVER_ROUTE) — it is the Hindsight/hermes
@@ -136,7 +135,7 @@ ACP_RUN = (os.environ.get("ACP_RUN")
 # TUIs with a verified headless form but no usable ACP route, so acp-run does
 # not list them: skills/model-routing/SKILL.md, "Per-CLI headless forms (no ACP
 # mode, or fallback)". Each counts only while its binary is on PATH.
-NON_ACP_HEADLESS = frozenset({"muse"})  # zcode joined acp-run 2026-10-08 (zcode-acp-server)
+NON_ACP_HEADLESS: frozenset[str] = frozenset()  # muse retired 2026-11-06; zcode joined acp-run 2026-10-08, retired 2026-11-06
 STALE_HARD = 6 * 3600      # beyond this, treat headroom as unknown
 STALE_SOFT = 25 * 60       # aiuse's own `fresh` threshold; older = re-collect before a wave
 
@@ -149,7 +148,7 @@ class Service:
     name: str                       # aiuse provider key
     cli: str                        # how it is actually invoked
     # kind -> fitness rank, lower is better. Per-kind rather than one number
-    # because fitness is not a single axis: antigravity is the best home for
+    # because fitness is not a single axis: one pool is the best home for
     # bulk and the wrong home for careful coding, and a flat rank cannot say
     # both.
     good_at: dict[str, int]
@@ -184,7 +183,7 @@ class Service:
     # `pool_family`). Windows of that family are measured for this service
     # alone; the provider's other windows stay with the provider's own
     # service. Add a row with `pool=` to give any provider's second pool its
-    # own routing entry (copilot, cursor, ...) once aiuse reports it. Do NOT
+    # own routing entry (cursor, ...) once aiuse reports it. Do NOT
     # use it for a model sublimit of a shared pool (Claude's `fable`): that
     # one is bounded by the parent windows and must stay with them.
     pool: tuple[str, str] | None = None
@@ -193,17 +192,17 @@ class Service:
     # over several pools instead of drowning the best-ranked one.
     max_parallel: int = 4
     # The acp-run agent name when it differs from the aiuse provider id
-    # (antigravity -> agy, zai -> zcode, opencode-go -> opencode, ...).
+    # (opencode-go -> opencode, ...).
     agent: str = ""
     # kind -> "<model> [--effort LEVEL]" to pass to acp-run/acp-dispatch.
     # Ids as that agent's `--info` lists them (tools/acp-run/README.md).
     models: dict[str, str] = field(default_factory=dict)
     # A reserve pool's hard floor: never route to it with less than this much
-    # of its binding window left, whatever `min_headroom` says (copilot:
-    # GitHub-side Copilot review draws on it; grok was one until 2026-10-18).
+    # of its binding window left, whatever `min_headroom` says (none now;
+    # copilot was one, grok was one until 2026-10-18).
     reserve_floor: float = 0.0
     # True when `reserve_floor` only makes the pool fail closed without a measured reading (pi,
-    # 2026-11-03): it is a normal pool, not a reserve, so route() omits the RESERVE advice.
+    # 2026-11-03, retired 2026-11-06): it is a normal pool, not a reserve, so route() omits the RESERVE advice.
     measured_only: bool = False
     # Days in the grant period when this pool is an expiring dollar grant rather than a
     # rolling window (omp's Claude API credits, 2026-10-19): aiuse reports an expiry
@@ -1374,7 +1373,6 @@ class Choice:
         kind = f" --kind {self.kind}" if self.kind else ""
         if self.model:
             # Quote only the model id: suggest_model may append " --effort …".
-            # zcode ids contain a backslash (builtin:zai-coding-plan\GLM-5.3).
             parts = self.model.split(None, 1)
             model = shlex.quote(parts[0]) + (f" {parts[1]}" if len(parts) > 1 else "")
             return f"acp-dispatch {agent} --model {model}{extra}{kind}"
@@ -2163,44 +2161,16 @@ ACP_DISPATCH_STATE = Path(os.environ.get("ACP_DISPATCH_STATE")
                           or (Path.home() / ".local" / "state" / "bigteam"))
 
 # Copied from bin/acp-dispatch (do not import: slice B edits that file). Agent
-# name → (aiuse provider, pool_family). agy/cursor/opencode are model-dependent.
+# name → (aiuse provider, pool_family). cursor/opencode are model-dependent.
 _AGENT_PROVIDER_MAP: dict[str, tuple[str, str | None]] = {
     "claude": ("claude", None),
     "codex": ("codex", None),
-    "copilot": ("copilot", None),
     "cursor": ("cursor", None),
     "cursor-cloud": ("cursor-cloud", None),
-    "cline": ("clinepass", None),
     "opencode": ("opencode-go", None),
-    "zcode": ("zai", None),
     "grok": ("grok", None),
     "omp": ("omp", None),
 }
-
-
-def antigravity_family(model: str | None) -> str | None:
-    """aiuse pool_family an agy model draws on (schema 1.5): `gemini-4-argon*` -> `gemini_argon` (its own weekly window),
-    every other `gemini-*` -> `gemini` (Flash), `claude-*`/`gpt-*` -> `claude_gpt`; None for anything else. This is the
-    one code copy of the table `aiuse schema` publishes as prose under `semantics.model_pool_family` (a machine could
-    not read it): acp-dispatch's `map_agent_to_provider` calls this, and failover.py (which cannot import the router)
-    keeps a `pool_by_model` row that tests/test_argon_frontier.py checks against it."""
-    m = (model or "").lower()
-    if m.startswith(("claude-", "gpt-")):
-        return "claude_gpt"
-    if m.startswith("gemini-4-argon"):
-        return "gemini_argon"
-    return "gemini" if m.startswith("gemini-") else None
-
-
-# Only these explicitly supported Pi API model IDs share the measured `pi` pool.
-# Do not infer billing from arbitrary OpenAI-compatible providers, bare IDs, or
-# openai-codex (subscription) models. Keep additions deliberate and tested.
-PI_OPENAI_MODELS = frozenset({"openai/gpt-6.1-sol", "openai/gpt-5.4-mini", "openai/gpt-6-astra"})
-
-
-def pi_api_pool(model: str | None) -> tuple[str, str | None] | None:
-    """Independent Pi/OpenAI API capacity, never the Codex subscription."""
-    return ("pi", None) if model in PI_OPENAI_MODELS else None
 
 
 def map_agent_to_provider(agent: str, model: str | None) -> tuple[str, str | None] | None:
@@ -2209,11 +2179,6 @@ def map_agent_to_provider(agent: str, model: str | None) -> tuple[str, str | Non
     Kept in sync with acp-dispatch.map_agent_to_provider by hand (2026-10-18);
     calibrate must not import acp-dispatch while that file is mid-edit.
     """
-    if agent == "pi":
-        return pi_api_pool(model)
-    if agent == "agy":
-        family = antigravity_family(model)
-        return ("antigravity", family) if family else None
     if agent == "cursor":
         if not model or model in ("default", "auto"):
             return "cursor", "auto"

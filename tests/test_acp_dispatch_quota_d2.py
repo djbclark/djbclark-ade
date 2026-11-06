@@ -91,7 +91,7 @@ EXTRA_MODES = textwrap.dedent("""\
 def make_fake(base_fake: str) -> str:
     out = base_fake.replace(
         'for x in "$@"; do',
-        'if [ "$1" = "--list" ]; then echo "ok zcode /usr/local/bin/zcode"; '
+        'if [ "$1" = "--list" ]; then echo "ok opencode /usr/local/bin/opencode"; '
         'echo "ok agy /usr/local/bin/agy"; echo "ok claude /usr/local/bin/claude"; exit 0; fi\n'
         'for x in "$@"; do', 1)
     # the dedented FAKE indents case labels 2 spaces; anchor on the bare label
@@ -186,11 +186,11 @@ agent = "agy"
 models = { code = "m1 --effort high" }
 
 [[service]]
-name = "zai"
-cli = "zcode"
+name = "opencode-go"
+cli = "opencode"
 good_at = { code = 10, bulk = 2 }
 billing = "subscription"
-agent = "zcode"
+agent = "opencode"
 models = { code = "m1 --effort high", bulk = "m1 --effort low" }
 """
 
@@ -281,24 +281,6 @@ class TestResetFormatsD2(unittest.TestCase):
         now = datetime(2026, 10, 18, 1, 0).astimezone()
         text = "FAILED quota: quota exhausted: retry in 2 hours, 47 minutes"
         self.assertEqual(prd(text, self.parse(text), now), now + timedelta(hours=2, minutes=47))
-
-    def test_zcode_zoneless_stamp_is_beijing_time(self):
-        """Lead MSG 2: `2026-10-19 04:22:46` is 2026-10-18T20:22:46+00:00 (Asia/Shanghai)."""
-        prd, prfa = self.mod["parse_reset_datetime"], self.mod["parse_reset_for_aiuse"]
-        text = "1308 Usage limit reached for 5 hour. Your limit will reset at 2026-10-19 04:22:46"
-        now = datetime(2026, 10, 18, 1, 0).astimezone()
-        want = datetime(2026, 10, 18, 20, 22, 46, tzinfo=timezone.utc)
-        self.assertEqual(prd(text, self.parse(text), now, agent="zcode"), want)
-        flag, val = prfa(text, self.parse(text), agent="zcode")
-        self.assertEqual((flag, val), ("--resets-at", "2026-10-18T20:22:46+00:00"))
-        # every other agent's zone-less stamp stays the local clock, as before
-        local = datetime(2026, 10, 19, 4, 22, 46).astimezone()
-        self.assertEqual(prd(text, self.parse(text), now, agent="codex"), local)
-        # a stamp that carries its own zone is never reinterpreted
-        zoned = "limit will reset at 2026-10-19 04:22:46+02:00"
-        self.assertEqual(prd(zoned, None, now, agent="zcode"),
-                         datetime.fromisoformat("2026-10-19T04:22:46+02:00"))
-
 
 class TestCopilotQuotaClass(unittest.TestCase):
     """2026-11-01: GitHub Copilot's quota stops classify as `quota` (so far_reset says reroute)."""
@@ -409,20 +391,6 @@ class TestCopilotQuotaClass(unittest.TestCase):
 class TestFarResetSkips(QuotaBase):
     """Item 2: a reset beyond auto_resume_max_wait_hours is rerouted, not scheduled."""
 
-    def test_agy_weekly_cap_skips_and_hints_a_reroute(self):
-        r = self.dispatch_agent("agy", "claude-opus-5-5-high", "--kind", "code", mode="quota_far")
-        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
-        rec = self.record()
-        ar = rec["auto_resume"]
-        self.assertEqual((ar["state"], ar.get("far_reset")), ("skipped", True))
-        self.assertIn("reroute instead of waiting", ar["detail"])
-        self.assertIn("is more than 6 h away", ar["detail"])       # the reset time is named
-        self.assertEqual(self.launchctl(), [])                      # nothing sat in launchd
-        c = run(["check", str(self.record_path())], env=self.base_env())
-        self.assertEqual(c.returncode, 3, c.stdout)
-        self.assertIn("reroute now:", c.stdout)
-        self.assertIn("--agent zcode --model m1", c.stdout)         # top code route minus agy's pool
-
     def test_copilot_monthly_quota_without_reset_is_far_and_rerouted(self):
         # fix-get's record shape (2026-11-01): quota NO-REPORT, exit 1, no reset text, aiuse has no
         # copilot pool; it used to schedule a 30 min back-off resume on Copilot, three times
@@ -442,19 +410,18 @@ class TestFarResetSkips(QuotaBase):
         self.assertNotIn("--agent copilot", c.stdout)               # the stopped pool is excluded
 
     def test_non_copilot_without_reset_still_resumes_in_place(self):
-        r = self.dispatch_agent("zcode", "m1", "--kind", "code", mode="quota_copilot_monthly")
+        r = self.dispatch_agent("opencode", "m1", "--kind", "code", mode="quota_copilot_monthly")
         ar = self.record()["auto_resume"]
         self.assertEqual(ar["state"], "scheduled", r.stdout + r.stderr)
         self.assertEqual(ar["reset_source"], "backoff")
 
-    def test_the_rule_is_agent_general_zcode_weekly(self):
-        r = self.dispatch_agent("zcode", "m1", "--kind", "code", mode="quota_far")
+    def test_the_rule_is_agent_general_opencode_weekly(self):
+        r = self.dispatch_agent("opencode", "m1", "--kind", "code", mode="quota_far")
         self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
         self.assertEqual(self.record()["auto_resume"]["state"], "skipped")
         c = run(["check", str(self.record_path())], env=self.base_env())
         self.assertIn("reroute now:", c.stdout)
-        self.assertIn("--agent agy --model m1", c.stdout)           # zai excluded, agy's pool wins
-
+        
     def test_no_eligible_pool_keeps_the_manual_hint(self):
         r = self.dispatch_agent("codex", "m1", "--kind", "frontier", mode="quota_far")
         self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
@@ -470,7 +437,7 @@ class TestFarResetSkips(QuotaBase):
         return {"TZ": NY, "ACP_DISPATCH_NOW": WAKE_CASES[case][0]}
 
     def test_short_reset_still_schedules_with_a_wake(self):
-        r = self.dispatch_agent("zcode", "m1", "--kind", "code", mode="quota_reply",
+        r = self.dispatch_agent("opencode", "m1", "--kind", "code", mode="quota_reply",
                                 env=self.frozen("no-transition"))
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)       # resume-scheduled
         rec = self.record()
@@ -486,7 +453,7 @@ class TestFarResetSkips(QuotaBase):
         self.assertIn("schedule wake", self.sudo_log.read_text())
 
     def test_wake_unavailable_is_recorded_not_fatal(self):
-        r = self.dispatch_agent("zcode", "m1", "--kind", "code", mode="quota_reply",
+        r = self.dispatch_agent("opencode", "m1", "--kind", "code", mode="quota_reply",
                                 env={"SUDO_FAIL": "1"})
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         ar = self.record()["auto_resume"]
@@ -495,7 +462,7 @@ class TestFarResetSkips(QuotaBase):
         self.assertIn("password is required", ar["wake"])
 
     def test_reroute_cancels_the_wake_with_the_same_time(self):
-        self.dispatch_agent("zcode", "m1", "--kind", "code", mode="quota_reply",
+        self.dispatch_agent("opencode", "m1", "--kind", "code", mode="quota_reply",
                             env=self.frozen("fall-back"))
         want = WAKE_CASES["fall-back"][2]
         rr = run(["reroute", str(self.record_path()), "--agent", "claude", "--model", "m1",
@@ -513,7 +480,7 @@ class TestWakeAcrossDst(QuotaBase):
 
     def check_case(self, case: str) -> None:
         now, not_before, wake, iso = WAKE_CASES[case]
-        r = self.dispatch_agent("zcode", "m1", "--kind", "code", mode="quota_reply",
+        r = self.dispatch_agent("opencode", "m1", "--kind", "code", mode="quota_reply",
                                 env={"TZ": NY, "ACP_DISPATCH_NOW": now})
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         ar = self.record()["auto_resume"]
@@ -613,44 +580,9 @@ class TestWakeAcrossDst(QuotaBase):
 class TestExit0Quota(QuotaBase):
     """Item 4: rc 0 no longer skips quota detection; items 6-7 ride the same path."""
 
-    def test_agy_exit0_quota_in_log_is_a_quota_stop(self):
-        # the stamp is built from the real clock so the reset stays "6 days out" whenever this runs
-        stamp = (datetime.now(timezone.utc) + FAR_RESET).strftime("%Y-%m-%dT%H:%M:%SZ")
-        r = self.dispatch_agent("agy", "claude-opus-5-5-high", "--kind", "code",
-                                mode="quota_exit0_log",
-                                env={"ACP_DISPATCH_AIUSE": str(self.fake_aiuse),
-                                     "QUOTA_RESET_STAMP": stamp})
-        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
-        rec = self.record()
-        self.assertTrue(rec["failure"].startswith("NO-REPORT: quota (agy, claude-opus-5-5-high, "
-                                                  "retry in 148h22m36s)"), rec["failure"])
-        self.assertIn("acp-run exit 0", rec["failure"])
-        ar = rec["auto_resume"]                       # reset 6 days out: skipped, reroute hint
-        self.assertEqual((ar["state"], ar.get("far_reset")), ("skipped", True))
-        # aiuse was notified exactly as the non-zero path does (family: the claude_gpt pool)
-        self.assertEqual(len(self.aiuse_notes()), 1, self.aiuse_notes())
-        self.assertIn(f"note-exhausted antigravity --family claude_gpt --resets-at {stamp}",
-                      self.aiuse_notes()[0])
-        c = run(["check", str(self.record_path())], env=self.base_env())
-        self.assertEqual(c.returncode, 3, c.stdout)
-        self.assertIn("reroute now:", c.stdout)
-
-    def test_zcode_exit0_partial_report_auto_resumes_with_beijing_reset(self):
-        r = self.dispatch_agent("zcode", "m1", "--kind", "code", mode="quota_zcode_exit0",
-                                env={"ACP_DISPATCH_AIUSE": str(self.fake_aiuse)})
-        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)       # resume-scheduled
-        rec = self.record()
-        self.assertEqual(rec["status"], "resume-scheduled")
-        self.assertTrue(rec["failure"].startswith("NO-REPORT: quota (zcode"), rec["failure"])
-        ar = rec["auto_resume"]
-        self.assertEqual(ar["state"], "scheduled")
-        self.assertEqual(ar["reset_source"], "stderr")
-        self.assertEqual(len(self.aiuse_notes()), 1, self.aiuse_notes())
-        self.assertIn("--resets-at 2026-10-18T20:22:46+00:00", self.aiuse_notes()[0])
-
     def test_partial_checkpoint_report_gate_is_widened(self):
         """Lead MSG 1: the schedule gate fired on st == no-report only; partial must fire too."""
-        self.dispatch_agent("zcode", "m1", "--kind", "code", mode="quota_zcode_exit0")
+        self.dispatch_agent("opencode", "m1", "--kind", "code", mode="quota_zcode_exit0")
         rec = self.record()
         Path(rec["report"]).write_text("STATUS: working\nstep one done\n")  # strip the note line
         f = run(["finalize", str(self.record_path()), "--exit", "0"], env=self.base_env())
@@ -659,7 +591,7 @@ class TestExit0Quota(QuotaBase):
         self.assertEqual(rec["auto_resume"]["state"], "scheduled")   # the earlier schedule stands
 
     def test_a_done_report_never_auto_resumes(self):
-        r = self.dispatch_agent("zcode", "m1", "--kind", "code", mode="timeout_wrapup",
+        r = self.dispatch_agent("opencode", "m1", "--kind", "code", mode="timeout_wrapup",
                                 env={"ACP_DISPATCH_AIUSE": str(self.fake_aiuse)})
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)       # done + acp-run exit 124
         rec = self.record()
@@ -668,7 +600,7 @@ class TestExit0Quota(QuotaBase):
         self.assertEqual(self.aiuse_notes(), [])
 
     def test_a_clean_success_is_not_flagged(self):
-        r = self.dispatch_agent("zcode", "m1", "--kind", "code", mode="writes",
+        r = self.dispatch_agent("opencode", "m1", "--kind", "code", mode="writes",
                                 env={"ACP_DISPATCH_AIUSE": str(self.fake_aiuse)})
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         rec = self.record()
@@ -679,7 +611,7 @@ class TestExit0Quota(QuotaBase):
     def test_quota_words_in_the_agents_own_work_are_not_a_refusal(self):
         """Only runtime events near the log's end count: tool output and thoughts that mention
         quota (a slice working on acp-dispatch itself) must not mark the pool exhausted."""
-        self.dispatch_agent("zcode", "m1", "--kind", "code", mode="quota_words_in_work",
+        self.dispatch_agent("opencode", "m1", "--kind", "code", mode="quota_words_in_work",
                             env={"ACP_DISPATCH_AIUSE": str(self.fake_aiuse)})
         rec = self.record()
         self.assertFalse(str(rec.get("failure") or "").startswith("NO-REPORT: quota"), rec.get("failure"))
@@ -728,13 +660,13 @@ class TestEscalation(QuotaBase):
         self.assertIn("route_agent.py plan", r.stderr)
 
     def test_escalate_and_agent_are_mutually_exclusive(self):
-        self.dispatch_agent("zcode", "m1", "--kind", "code", mode="agent_metrics")
+        self.dispatch_agent("opencode", "m1", "--kind", "code", mode="agent_metrics")
         r = run(["reroute", str(self.record_path()), "--agent", "claude", "--model", "m1",
                  "--escalate", "--acp-run", str(self.fake)], env=self.base_env())
         self.assertEqual(r.returncode, 2)
 
     def test_escalate_reroutes_one_rung_up_with_gates(self):
-        self.dispatch_agent("zcode", "m1", "--kind", "code", mode="agent_metrics")
+        self.dispatch_agent("opencode", "m1", "--kind", "code", mode="agent_metrics")
         c = run(["check", str(self.record_path())], env=self.base_env())
         self.assertEqual(c.returncode, 3, c.stdout)
         self.assertIn("escalate:", c.stdout)
@@ -750,11 +682,11 @@ class TestEscalation(QuotaBase):
         self.assertEqual(new["rerouted_from"], str(self.record_path().resolve()))
 
     def test_partial_records_get_the_hint_too_but_quota_ones_do_not(self):
-        self.dispatch_agent("zcode", "m1", "--kind", "code", mode="partial", name="p1")
+        self.dispatch_agent("opencode", "m1", "--kind", "code", mode="partial", name="p1")
         c = run(["check", str(self.record_path("p1"))], env=self.base_env())
         self.assertEqual(c.returncode, 1, c.stdout)
         self.assertIn("--escalate (-> judgment)", c.stdout)
-        self.dispatch_agent("zcode", "m1", "--kind", "code", mode="quota_far", name="q1")
+        self.dispatch_agent("opencode", "m1", "--kind", "code", mode="quota_far", name="q1")
         c = run(["check", str(self.record_path("q1"))], env=self.base_env())
         self.assertNotIn("--escalate", c.stdout)          # quota carries its own reroute rule
         self.assertIn("reroute now:", c.stdout)

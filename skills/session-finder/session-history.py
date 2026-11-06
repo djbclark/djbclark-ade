@@ -295,7 +295,7 @@ def resume_hint(template, sid: str, cwd: str) -> str:
     (a newline ends a shell comment or a quoted string a template might sit in)."""
     if not template or any(ord(c) < 32 or c == "\x7f" for c in sid + (cwd or "")):
         return ""
-    if callable(template):  # an adapter whose command depends on the session (crush: its project's data dir)
+    if callable(template):  # an adapter whose command depends on the session (a per-project data dir)
         return template(sid, cwd or "")
     return template.format(sid=shlex.quote(sid), cwd=shlex.quote(cwd or ""))
 

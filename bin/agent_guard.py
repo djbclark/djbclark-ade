@@ -38,12 +38,10 @@ class AgentGuard:
 _PENDING = AgentGuard(UNREVIEWED)
 # One row per acp-run agent (test_agent_guard pins that none is missing). `cursor-cloud` never reaches acp-run.
 AGENT_GUARDS: dict[str, AgentGuard] = {
-    "pi": AgentGuard(GUARDED, gates=("kind eligibility", "independent API capacity (measured, fail closed)"), pool="pi"),
     "omp": AgentGuard(GUARDED, gates=("kind eligibility", "Claude API credits headroom"), pool="omp"),
     "codex": AgentGuard(GUARDED, gates=("frontier model", "plenty gate", "pool headroom"), pool="codex"),
     "claude": AgentGuard(GUARDED, gates=("frontier model", "fable-xhigh approval", "pool headroom"), pool="claude"),
-    **{name: _PENDING for name in ("copilot", "opencode", "cursor", "qwen", "devin", "cline", "hermes", "goose",
-                                   "zcode", "agy", "grok", "crush", "kiro")},
+    **{name: _PENDING for name in ("opencode", "cursor", "hermes", "grok")},
 }
 
 

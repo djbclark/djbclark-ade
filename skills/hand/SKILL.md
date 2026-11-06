@@ -22,6 +22,6 @@ never reaches the `handoff` skill.
 Per-TUI spelling (2026-11-04): `/hand` in Claude Code, Cursor, Copilot, Grok,
 Qwen, Cline, Antigravity, Hermes (skill route), omp, Pi, zcode and opencode;
 `$hand` in Codex (its `/prompts:hand` form is deprecated and not installed).
-The operator wrappers live in `omp/commands/`, `pi/prompts/`, `zcode/commands/`
+The operator wrappers live in `omp/commands/`, `zcode/commands/`
 and `opencode/commands/` because those TUIs do not turn a plain skill into a
 bare `/name` command. Muse and goose are unverified, see `docs/hand-alias.md`.

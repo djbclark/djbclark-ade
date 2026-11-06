@@ -35,11 +35,9 @@ review and rework. Concretely:
    (Fable is a <=50% sublimit of the shared weekly and bills the 5-hour window
    too).
 2. **Everyday work goes to the other pools** so those windows stay free:
-   agy's Claude/GPT pool, Cursor Auto, zai GLM-5.3, opencode-go, agy Gemini,
-   crush/SIPB. Every slice names its **vendor × model × effort × context**,
+   Cursor Auto, opencode-go. Every slice names its **vendor × model × effort × context**,
    at the minimum spec that does it well; never redo work already paid for.
-3. **The reserve is never depleted** (copilot: floor 60% left, one small
-   slice, only for `github` slices; grok has been an ordinary pool since
+3. **There is no reserve pool now** (copilot, the last, left the router 2026-11-06; grok has been an ordinary pool since
    2026-10-18); **hermes is never a target**;
    **omp (the Claude API credits) is a normal tier since 2026-10-19**: `api-only`
    work first, else `code`/`bulk` slices so the credits are spent before the
@@ -81,7 +79,7 @@ before slicing:
    files.
 4. **Pools are shared.** Re-probe `aiuse --available` right before each batch
    (the other run drains the same windows), leave headroom, and don't put both
-   runs on a burst-limited pool at once (agy's ~60 requests/hour is machine-wide).
+   runs on a burst-limited pool at once.
 5. **Hands off its tabs.** Never reuse, close or message the other run's
    Paseo tabs or agents. To coordinate, tell its session (`session-finder`).
 
@@ -110,11 +108,10 @@ because no snapshot sees a pool drained in the last few minutes.
 
 ### Reading the numbers — a misreading here already cost a dispatch round
 
-Read every number per `model-routing`'s *Reading quota numbers* and *agy has a
-burst limit* (the one copy of those rules): used is consumed, the fullest window
+Read every number per `model-routing`'s *Reading quota numbers* (the one copy of
+those rules): used is consumed, the fullest window
 binds, one TUI can hold several model-family pools (retry the vendor's other
-pool before reassigning), re-probe before each batch, and agy only via
-`acp-run agy`, no probe loops. `acp-dispatch` enforces the target preflight
+pool before reassigning), re-probe before each batch, no probe loops. `acp-dispatch` enforces the target preflight
 with `"Reply with exactly: OK"`, caches a pass per agent/model for ten minutes,
 and refuses measured pools below 10% left. `aiuse --available` already encodes
 the first three in its output.
@@ -128,14 +125,13 @@ Classify every pool before assigning anything:
 | **exhausted** | `remaining_percent` ≈ 0 on ANY window of that pool | skip that pool entirely (the same vendor's other model-family pool may be fine) |
 | **frontier** | Claude Fable 5.1 and codex `gpt-6-astra` | only a slice that really needs a frontier model to look it over (a security-relevant or concurrency fix's final review, debugging that defeated real attempts, a whole-corpus read); one per pool per wave, two on claude under the standing allowance while the quota guard passes (2026-10-27, `docs/gates.md`); in-flight slices reserve quota (2026-10-18); see *Pool policy* below |
 | **lifeline** | another agent runs on it | use with care and never let it run out; see *Reserve pools* below (clinepass and Claude itself) |
-| **reserve** | copilot (GitHub-side review) | hard floor 60% left (`route_agent.py` `reserve_floor`), one small slice at a time, only for kind `github`; a missing or stale reading means do not use. Grok was one until 2026-10-18 (GrokBot moved to its own Cursor pool): now an ordinary subscription pool for `realtime-web`, `research` and `bulk`, behind the burn-first pools |
+| **reserve** | none now (copilot, the last, left the router 2026-11-06) | a reserve pool has a hard floor (`route_agent.py` `reserve_floor`); a missing or stale reading means do not use. Grok was one until 2026-10-18 (GrokBot moved to its own Cursor pool): now an ordinary subscription pool for `realtime-web`, `research` and `bulk`, behind the burn-first pools |
 | **never** | hermes; the prepaid pools; credits-backed models (not the Max plan's API credits: omp, below) | not a target by any route; `acp-run`/`acp-dispatch` refuse hermes behind an approval gate |
 | **api credits** | omp: the Claude Max plan's monthly API credits (expiring grant, operator 2026-10-19) | kind `api-only` first (SDK paths, verdict classifiers, batch jobs), else `code`/`bulk` via `acp-run omp --model anthropic/claude-sonnet-5-5` so they are spent before each expiry; `route_agent.py` marks it "burn before reset" when far above an even spend; needs a working omp Anthropic login (`omp login`) |
-| **burn-first** | a pool whose window resets and the allowance is lost, with >= 40% left on every window (`aiuse` raises a `kind:"burn"` alert). Today: **agy's Claude/GPT pool** (`acp-run agy --model claude-opus-5-5 --effort high` / `--model claude-sonnet-5-5 --effort high`, agy 1.4.1 (2026-10-18) dropped the effort-suffixed ids), and any provider's idle second pool | assign it first for code, review and research, 2-3 slices at once (judgment goes to Claude and omp first, codex's Sol at high only while plentiful; 2026-10-25); see *agy Claude/GPT pool* below |
-| **shared allowance** | a GitHub-side feature draws on the same subscription | usable, but spend modestly and keep a margin; see *Copilot* under *Reserve pools* below |
+| **burn-first** | a pool whose window resets and the allowance is lost, with >= 40% left on every window (`aiuse` raises a `kind:"burn"` alert). Today: Cursor Auto (agy's Claude/GPT pool was the main case until agy retired, 2026-11-06), and any provider's idle second pool | assign it first for code, review and research, 2-3 slices at once (judgment goes to Claude and omp first, codex's Sol at high only while plentiful; 2026-10-25) |
 | **prepaid** | real money | never without a fresh explicit operator decision |
 | **excluded** | operator has ruled it out | respect it, with its end condition (below) |
-| **operator-gated** | the operator must approve each use (hermes, cline; omp until 2026-10-19) | never plan, probe or dispatch it without the operator's specific, explicit yes for this run; see *Operator-gated agents* below |
+| **operator-gated** | the operator must approve each use (hermes; cline until it retired 2026-11-06; omp until 2026-10-19) | never plan, probe or dispatch it without the operator's specific, explicit yes for this run; see *Operator-gated agents* below |
 
 ### Pool policy — who gets which slice (operator, 2026-10-15)
 
@@ -153,8 +149,8 @@ a fan-out needs from it:
    the lead checks `<name>-stderr.txt` for `acp-run: applied: model=...
    effort=... ctx=...` (exit 1 class `config` = the request did not land).
    Context stays at the agent's default unless the slice reads a whole corpus
-   or a long log (`--context 500k` / `1m`; bigger windows bill more on xAI,
-   Cursor and Copilot).
+   or a long log (`--context 500k` / `1m`; bigger windows bill more on xAI
+   and Cursor).
 2. **`judgment` slices** (architecture, adjudication; 2026-10-25) go to `acp-dispatch claude
    --model opus --kind judgment --effort high` first; omp Opus on the credits is next, and Codex
    `gpt-6.1-sol --effort high` (`--kind judgment`, rank 3) is an eligible, lower-ranked pool only
@@ -193,70 +189,28 @@ a fan-out needs from it:
    one-slice cap, 2026-10-18): a "small issues" wave is not frontier work
    (2026-10-18).
 3. **`code`, `research`, `bulk`, `mechanical` slices** go to the everyday
-   pools, in `plan`'s order: agy Claude/GPT (>= 40% left; `claude-opus-5-5
-   --effort high` for code, `claude-sonnet-5-5` for volume), Cursor Auto
-   (`cursor --model default`), zai (`zcode --model GLM-5.3 --effort high`;
-   `GLM-5.3-Flash --effort low` for bulk), opencode-go (`opencode --model
+   pools, in `plan`'s order: Cursor Auto
+   (`cursor --model default`), opencode-go (`opencode --model
    opencode-go/deepseek-v4.1-flash`; MiniMax M3 for bulk, Luna for mechanical work;
-   costly Go models are bounded advisors per `model-routing`), agy Gemini (`agy --model gemini-3.8-flash --effort
-   medium`) for bulk and big-context reads, crush (`sipb-llms:qwen3.6:35b-a3b-q4_K_M`,
-   free) for light bulk. Claude's own Sonnet/Haiku only as small Agent-tool
+   costly Go models are bounded advisors per `model-routing`). Claude's own Sonnet/Haiku only as small Agent-tool
    sub-agents (they bill the orchestrator's pool).
-4. **`github` slices** are the only use of copilot, and only above its 60%
-   floor; `gh` from any other agent covers most GitHub work. **Grok** takes
+4. **`github` slices** have no pool since copilot retired (2026-11-06); `gh` from any other agent covers most
+   GitHub work. **Grok** takes
    `realtime-web` slices first and `research`/`bulk` behind the burn-first
    pools; it has no floor (an ordinary subscription pool since 2026-10-18).
-5. **Never**: hermes (gated in `acp-run`/`acp-dispatch`), cline, prepaid or
+5. **Never**: hermes (gated in `acp-run`/`acp-dispatch`), prepaid or
    credits-backed models (the Claude API credits via omp are a pool, item 3), clinepass (never a bigteam target: `NEVER_ROUTE` in
-   `route_agent.py`; it stays in Hermes's chain), devin, an all-vendor fan-out.
+   `route_agent.py`; it stays in Hermes's chain), an all-vendor fan-out.
 6. **Start on the cheap eligible tier and escalate on a verified failure**
    (operator, 2026-10-18; it replaces "route up when unsure"): move the slice
    with `acp-dispatch reroute <record> --agent A --model M`, and tell the next
    re-plan what moved (item 6 of *Dynamic routing*).
 
-### agy Claude/GPT pool — assign it first while it has headroom (operator, 2026-10-10)
+### Burn-first second pools
 
-The operator wants agy's Claude/GPT pool used heavily whenever it has room
-(`aiuse` read 5h 100% left, weekly 49% left and a *critical* burn alert on
-2026-10-10). It is a **separate pool from agy's Gemini** and from Claude's own
-window, so spending it costs nothing that orchestration needs.
-
-1. **Probe it as its own pool.** `aiuse --available` lists it as `antigravity
-   claude_gpt`, apart from `antigravity gemini`. Decide from its two windows'
-   `remaining_percent`; either one under 15% means skip it this batch.
-2. **Assignment order for a Claude-class code, review or research slice**
-   (implementation, reviews, research synthesis): the agy Claude/GPT pool
-   first, then the other everyday pools in `plan`'s order; judgment follows
-   *Pool policy* item 2 above (2026-10-25). `--model claude-opus-5-5 --effort high` for the hard
-   slices, `--model claude-sonnet-5-5 --effort high` for volume. Mechanical edits and bulk reading still go to the free and Gemini
-   pools first; do not spend Opus on them just because it is idle.
-3. **The ACP route reaches it through a client-name workaround (2026-10-10).** agy_acp_server 1.3.0 offers non-Gemini models only to clients whose ACP `clientInfo.name` is `zed`, `xcode` or `JetBrains.*` (`supports_third_party_models()` in its `model_selection.py`), so `acp-run` identifies itself to agy as `zed` (0b56897).
-   Before that, the server listed only `gemini-*` models and `claude-opus-5-5-high` failed with
-   `no model` (google-antigravity/antigravity-cli#1168, pingdotgg/t3code#16489). The gate is
-   deliberate in Google's code, so this is a client-name workaround, not a bug fix, and a later
-   `.par` release could close it. `acp-run agy --info` lists the ids (today
-   bare `claude-opus-5-5` and `claude-sonnet-5-5` (agy 1.4.1, 2026-10-18; effort is the `thinking_level` option, set with `--effort low|medium|high`, no longer an id suffix),
-   `gpt-oss-120b-medium`, plus `gemini-*` and `gemini-pro-agent`, the ACP id of Gemini 3.1 Pro
-   High). `acp-dispatch` now checks `--model` against that list before it detaches and exits 2
-   with `have:`. If no `claude-*` id is listed, the workaround has stopped working: route to
-   codex (`gpt-6-astra`) or claude.
-4. **Only through ACP:** `acp-run agy -C <dir> -p '<prompt>' --model <m>` with the
-   usual `acp-dispatch` wrapper, never `agy -p`. Run **2-3 agy slices at a time**
-   and re-probe between batches; a heavy Opus-high run drained it in ~35 minutes on
-   2026-10-03. A 429 or `RESOURCE_EXHAUSTED` on a `claude-*` model means that pool
-   is spent; try a `gemini-*` model before leaving agy.
-   **agy's file tools see only `-C`** (it ignores `--add-dir`; 2026-10-11).
-   `acp-dispatch` relays the report from `<-C>/.acp-dispatch/` by itself. Every
-   other file the brief names (an earlier report, a decision note, a log) must be
-   copied into `<-C>/.acp-dispatch/` first, and the brief must point there.
-5. **Not a replacement for the judgment tier:** use it as the independent reviewer
-   of a decision claude or codex makes (Step 6), not as the one deciding.
-6. **`bin/route_agent.py route --kind code`** applies the same rule (the
-   `antigravity-claude` service, `burn_first` at >= 40% headroom). Any other
-   provider that reports an independent second pool (copilot, cursor, once
-   re-enabled in `aiuse`) gets the same treatment by adding a `Service` with
-   `pool=(provider, pool_family)` there; classify it as burn-first here whenever
-   its idle window will reset unused.
+A provider that reports an independent second pool whose idle window resets unused (cursor's Auto pool today) is
+added to `bin/route_agent.py` as a `Service` with `pool=(provider, pool_family)` and classified burn-first here
+(agy's Claude/GPT pool was the case this section was written for; it retired 2026-11-06 with agy).
 
 ### Vendors come back on their own
 
@@ -1024,20 +978,13 @@ front of the operator if it removes something they deliberately built.
 
 | symptom | cause | action |
 | --- | --- | --- |
-| `copilot` hangs or `shared writer lock ... changed` | headless `--allow-all-tools` disables itself when it can't reach a policy server, then waits for an approval no TTY can give | reassign the slice; keep copilot timeout-bounded |
-| `agy` CLI returns `RESOURCE_EXHAUSTED (code 429)` on every model while `aiuse` shows headroom, or looks hung for ~2m20s | per-client burst limit on the CLI login (2026-10-03: ~304 requests in 3 h); the CLI retries 8 times in-process, and `--print-timeout` cuts it with exit 0 and partial output | stop; `grep 'attempt [0-9]* failed' ~/.gemini/antigravity-cli/log/cli-*.log`; use `acp-run agy` or reassign; do not loop probes |
-| `agy` runs with a flag as its prompt | `-p` is a required-value string flag | always `-p='<prompt>'`; a non-zero exit here is the guard working |
-| `zcode` hangs with ~0 CPU | `--mode build`/`edit` gates tools behind an impossible approval | default yolo only; `ZCode Built-in skipped` on stderr is benign |
 | `opencode.json` turns up modified | every `opencode run` rewrites it in cwd | `git checkout -- opencode.json`, or avoid in tracked repos |
 | `opencode/*` model fails on funds | that's the prepaid Zen catalogue | use `opencode-go/*` for the free bundle |
-| a stray empty dir appears | agy has done this | `git status --porcelain` after every batch |
-| `.zcode/acp/sandbox.json` appears in the repo | `acp-dispatch zcode` writes its per-cwd sandbox config into `-C <repo>` (2026-10-09); a graft hook in a subdirectory cwd also drops a nested `graft/` + `.gitignore`/`.ignore` there | both are regenerable: `rm -rf .zcode` (and the nested graft trio when the repo root already has `graft/`) before committing |
 | `acp-run` exits 1 with `FAILED quota/plan/auth/transient/refused` (or 5: empty reply, every permission denied) | since 2026-10-05 acp-run detects provider failures that arrive as a normal `end_turn` (plan-gated reply, reply cut off by a transport error, quota text); `refused` (2026-10-10) is the model declining (a short reply starting "Sorry, I cannot ..." / "I must decline ..."), never retried, and acp-dispatch ends the report `NO-REPORT: refused (<agent>, <model>): <first sentence>` (exit 3) instead of recovering it as a deliverable: re-route the slice to another model (agy `gemini-pro-agent` declined a security-advisory slice) or reword the brief's authorization context; `reply truncated; edits may be present` means check the tree; a `quota` stop is resumed in place automatically (`resume-scheduled`, exit 1; 2026-10-18) | read the stderr line and the log; for quota, let the scheduled resume run (or run the printed `acp-dispatch resume <record>` after the reset); reassign only a non-quota failure; for truncated, review what was edited |
 | no notification when an agent finishes | it was launched with a trailing shell `&` and no `run_in_background` call, so the harness is not tracking it | run each slice as a foreground command in its own `run_in_background: true` call (Step 4) |
 | a wait loop never ends | `until ! pgrep -f '<pattern>'` matches its own shell | wait on the report file, a PID or `wait`; bound it with `timeout` |
 | `RESOURCE_EXHAUSTED` / "usage limit" from a vendor you thought had headroom | `used_percent` read as free; or the pool was drained since the probe; or that model family's pool is spent while a sibling pool is fine | decide from `remaining_percent`, preflight, re-probe per batch, retry on the sibling model family |
 | seven `opencode-go/*` slices fail in 15-21 s with `ServiceUnavailableError` / `Internal service failure` | the pool is in an outage, which quota snapshots do not show | automatic preflight exits 5, records a 15-minute outage override, and launches no slice; re-plan with `--exclude opencode-go` |
-| zcode says `1310 ... Weekly/Monthly Limit Exhausted` with a reset time | z.ai's pool is exhausted but aiuse has no live collector for the TUI | automatic preflight classifies quota, records the reset for `zai`, exits 5 and launches nothing; re-plan with `--exclude zai` |
 
 ## What this skill is not for, and when to use it unasked
 

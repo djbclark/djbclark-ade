@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """session-finder's full-text history index (2026-10-31).
 
-  * omp, grok and goose have adapters (before: 2,028 omp, 220 grok and 82 goose sessions were invisible).
+  * omp and grok have adapters (before: 2,028 omp and 220 grok sessions were invisible; goose's went with goose, 2026-11-06).
   * cursor yields one entry per session id: a session under two project dirs used to flip-flop.
   * `session-history.py --status` is read-only and reports unindexed sessions; `--update-only` records the
     time of the last full pass and fixes what `--status` found.
@@ -12,7 +12,6 @@ import importlib.util
 import json
 import os
 import shlex
-import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -158,24 +157,6 @@ class AdapterTests(unittest.TestCase):
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertEqual(json.loads(r.stdout)[0]["title"], "Quokka migration plan")
 
-    def test_goose_reads_text_blocks(self) -> None:
-        db_path = self.home / ".local/share/goose/sessions/sessions.db"
-        db_path.parent.mkdir(parents=True)
-        db = sqlite3.connect(db_path)
-        db.executescript("""
-            CREATE TABLE sessions(id TEXT, name TEXT, working_dir TEXT, updated_at TEXT);
-            CREATE TABLE messages(id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, role TEXT, content_json TEXT);
-        """)
-        db.execute("INSERT INTO sessions VALUES('g1','Goose chat','/src/z','2026-10-31 12:00:00')")
-        db.execute("INSERT INTO messages(session_id, role, content_json) VALUES('g1','user',?)",
-                   (json.dumps([{"type": "text", "text": "hello goose"}, {"type": "toolRequest", "id": "1"}]),))
-        db.commit()
-        db.close()
-        mod = load("goose", self.home)
-        (s,) = list(mod.sessions())
-        self.assertEqual(s["key"], "goose:g1")
-        self.assertEqual(s["load"](), ("/src/z", "Goose chat", [("user", "hello goose")]))
-
     def test_cursor_yields_one_entry_per_session_id_the_newest(self) -> None:
         for slug, mtime in (("proj-old", 1_000_000_000), ("proj-new", 1_000_000_500)):
             p = self.home / f".cursor/projects/{slug}/agent-transcripts/dup-1/dup-1.jsonl"
@@ -234,7 +215,7 @@ class StatusTests(unittest.TestCase):
 
 
 class HardeningTests(unittest.TestCase):
-    """Adversary round 2 (PR 191): R1 agy comment, R2 relative index dir, R3 crash exit code, R5 abbreviations."""
+    """Adversary round 2 (PR 191): R1 agy comment (removed with agy), R2 relative index dir, R3 crash exit code, R5 abbreviations."""
 
     @staticmethod
     def _env(tmp: str, idx: str) -> dict[str, str]:
@@ -246,15 +227,13 @@ class HardeningTests(unittest.TestCase):
         return subprocess.run([sys.executable, "-I", str(SF / "session-history.py"), *args], env=self._env(tmp, idx),
                               capture_output=True, text=True, check=False, cwd=cwd)
 
-    def test_resume_hint_is_empty_for_control_characters_and_agy_has_no_id_in_its_comment(self) -> None:
+    def test_resume_hint_is_empty_for_control_characters(self) -> None:
         spec = importlib.util.spec_from_file_location("t_sh", SF / "session-history.py")
         sh = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(sh)
         self.assertEqual(sh.resume_hint("x --resume {sid}", "a\nb", "/s"), "")
         self.assertEqual(sh.resume_hint("cd {cwd}", "a", "/s\x00"), "")
         self.assertEqual(sh.resume_hint("x {sid}", "a b", "/s"), "x 'a b'")
-        agy = load("agy", Path("/nonexistent-home"))
-        self.assertNotIn("{sid}", agy.RESUME)  # the id sat inside a shell comment, where quoting does nothing
 
     def test_status_accepts_a_relative_index_dir(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -345,87 +324,6 @@ class LiveLabelTests(unittest.TestCase):
         sh = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(sh)
         self.assertEqual(sh.clean("a\x1b[31mb\nc\x7fd\x85e"), "a?[31mb?c?d?e")
-
-    def test_crush_reads_text_parts_only(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            db_path = Path(tmp) / ".local/share/crush-acp/crush.db"
-            db_path.parent.mkdir(parents=True)
-            db = sqlite3.connect(db_path)
-            db.executescript("CREATE TABLE sessions(id, title, message_count, updated_at);"
-                             "CREATE TABLE messages(id, session_id, role, parts, created_at);")
-            db.execute("INSERT INTO sessions VALUES('c1','Crush chat',2,1790000000)")
-            db.execute("INSERT INTO messages VALUES('m1','c1','user',?,1)", (json.dumps([{"type": "text", "data": {"text": "hello crush"}}]),))
-            db.execute("INSERT INTO messages VALUES('m2','c1','assistant',?,2)", (json.dumps([{"type": "reasoning", "data": {"thinking": "secret"}}]),))
-            db.commit()
-            db.close()
-            mod = load("crush", Path(tmp))
-            (s,) = list(mod.sessions())
-            self.assertEqual(s["load"](), ("", "Crush chat", [("user", "hello crush")]))
-
-    def test_crush_indexes_project_databases_with_their_project_and_resume_command(self) -> None:
-        def make_db(path: Path, sid: str, text: str) -> None:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            db = sqlite3.connect(path)
-            db.executescript("CREATE TABLE sessions(id, title, message_count, updated_at);"
-                             "CREATE TABLE messages(id, session_id, role, parts, created_at);")
-            db.execute("INSERT INTO sessions VALUES(?,?,1,1790000000)", (sid, "t " + sid))
-            db.execute("INSERT INTO messages VALUES('m',?,'user',?,1)", (sid, json.dumps([{"type": "text", "data": {"text": text}}])))
-            db.commit()
-            db.close()
-
-        with tempfile.TemporaryDirectory() as tmp:
-            home = Path(tmp)
-            share = home / ".local/share"
-            make_db(share / "crush-acp/crush.db", "root1", "shared database text")
-            proj = home / "src/my proj"
-            make_db(proj / ".crush/crush.db", "proj1", "project local text")
-            gone = home / "src/gone"  # registered, database absent
-            (share / "crush-acp/projects.json").write_text(json.dumps({"projects": [
-                {"path": str(proj), "data_dir": str(proj / ".crush")}, {"path": str(gone), "data_dir": str(gone / ".crush")}]}))
-            (share / "crush").mkdir()
-            (share / "crush/projects.json").write_text(json.dumps({"projects": [  # the shared database again, and the project again
-                {"path": str(home / "src/other"), "data_dir": str(share / "crush-acp")},
-                {"path": str(proj), "data_dir": str(proj / ".crush")}]}))
-            mod = load("crush", home)
-            found = {s["sid"]: s for s in mod.sessions()}
-            self.assertEqual(sorted(found), ["proj1", "root1"])  # each database once, the missing one skipped
-            self.assertEqual(found["root1"]["key"], "crush:root1")
-            self.assertEqual(found["proj1"]["load"](), (str(proj), "t proj1", [("user", "project local text")]))
-            self.assertEqual(found["root1"]["load"]()[0], "")
-            sh_spec = importlib.util.spec_from_file_location("t_sh_crush", SF / "session-history.py")
-            sh = importlib.util.module_from_spec(sh_spec)
-            sh_spec.loader.exec_module(sh)
-            self.assertEqual(sh.resume_hint(mod.RESUME, "proj1", str(proj)),
-                             f"cd '{proj}' && crush -D '{proj / '.crush'}' --session proj1")
-            self.assertEqual(sh.resume_hint(mod.RESUME, "root1", ""), "crush -D ~/.local/share/crush-acp --session root1")
-
-    def test_crush_keeps_two_databases_registered_for_one_project(self) -> None:
-        def make_db(path: Path, sid: str) -> None:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            db = sqlite3.connect(path)
-            db.executescript("CREATE TABLE sessions(id, title, message_count, updated_at);"
-                             "CREATE TABLE messages(id, session_id, role, parts, created_at);")
-            db.execute("INSERT INTO sessions VALUES(?,?,0,1790000000)", (sid, "t " + sid))
-            db.commit()
-            db.close()
-
-        with tempfile.TemporaryDirectory() as tmp:
-            home = Path(tmp)
-            share = home / ".local/share"
-            proj = home / "src/p"
-            make_db(proj / ".crush-a/crush.db", "a1")  # first registration: no database
-            make_db(proj / ".crush-b/crush.db", "b1")
-            make_db(proj / ".crush-c/crush.db", "c1")
-            (share / "crush-acp").mkdir(parents=True)
-            (share / "crush").mkdir()
-            (share / "crush-acp/projects.json").write_text(json.dumps({"projects": [
-                {"path": str(proj), "data_dir": str(proj / ".crush-missing")}, {"path": str(proj), "data_dir": str(proj / ".crush-b")}]}))
-            (share / "crush/projects.json").write_text(json.dumps({"projects": [
-                {"path": str(proj), "data_dir": str(proj / ".crush-c")}, {"path": str(proj), "data_dir": str(proj / ".crush-a")}]}))
-            mod = load("crush", home)
-            self.assertEqual(sorted(s["sid"] for s in mod.sessions()), ["a1", "b1", "c1"])
-            for sid, d in (("a1", ".crush-a"), ("b1", ".crush-b"), ("c1", ".crush-c")):  # resume names the database holding the session
-                self.assertEqual(mod.resume(sid, str(proj)), f"cd {proj} && crush -D {proj / d} --session {sid}")
 
     def test_install_renders_the_configured_index_directory_into_the_job(self) -> None:
         plist = (ROOT / "launchd" / "com.djbclark.session-history-update.plist").read_text()

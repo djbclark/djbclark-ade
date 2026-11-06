@@ -64,7 +64,7 @@ value is never filled again. Any `__NAME__` or `@NAME@` left afterwards is **exi
 `launchd/com.djbclark.session-history-update.plist`: `__REPO__`, `__INDEX_DIR__`. Several plists still hard-code
 `/Users/djbclark`; they parse and render as they are (later #279 slices template them).
 
-XML comments are stripped before parsing: three plists (acp-dispatch-reap, rumination-watch, zcode-key-auth, 2026-11-04)
+XML comments are stripped before parsing: two plists (acp-dispatch-reap, rumination-watch; a third, zcode-key-auth, was removed 2026-11-06)
 have `--` inside a comment, which XML forbids and Python's parser rejects while launchd accepts it.
 
 **ade-sched's own plist key.** `KillMode` (`control-group`, `mixed`, `process`, `none`) sets systemd's KillMode; launchd

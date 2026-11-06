@@ -15,7 +15,7 @@ from test_acp_dispatch import run
 from test_acp_dispatch_load_gate import LoadGate
 
 OMP = "anthropic/claude-sonnet-5-5"
-GUARDED = ("pi", "omp", "codex", "claude")
+GUARDED = ("omp", "codex", "claude")
 ACP_RUN = Path(__file__).resolve().parents[1] / "tools" / "acp-run" / "acp-run"
 
 REPLACEMENTS = (["--model", "x/y"], ["--model=x/y"], ["--mod", "x/y"], ["--mod=x/y"], ["--m", "x"], ["--model x/y"],
@@ -58,7 +58,7 @@ class IdentityGuard(LoadGate):
 
     def test_replacement_refuses_before_any_gate_probe_or_record_for_every_agent(self):
         for agent, model, kind in (("omp", OMP, "code"), ("codex", "gpt-6.1-sol", "frontier"),
-                                   ("claude", "sonnet", "code"), ("pi", "openai/gpt-6.1-sol", "code")):
+                                   ("claude", "sonnet", "code")):
             for index, extra in enumerate(REPLACEMENTS):
                 with self.subTest(agent=agent, extra=extra):
                     name = f"{agent}-{index}"
@@ -83,7 +83,7 @@ class IdentityGuard(LoadGate):
         for agent in GUARDED:
             row = guard.policy(agent)
             self.assertTrue(row.gates and row.identity, agent)
-            model = {"pi": "openai/gpt-6.1-sol", "omp": OMP}.get(agent, "gpt-6.1-sol")
+            model = {"omp": OMP}.get(agent, "gpt-6.1-sol")
             self.assertEqual(mod.resolve_service(agent, model), row.pool, agent)
 
     def test_unreviewed_agents_keep_todays_pass_through(self):
@@ -134,7 +134,7 @@ class IdentityGuard(LoadGate):
 
     def test_stored_command_and_acp_arg_refuse_a_replacement_for_every_agent(self):
         for agent in GUARDED:
-            model = "openai/gpt-6.1-sol" if agent == "pi" else OMP
+            model = OMP
             primary = f"acp-run {agent} --model {model} --perm all"
             for rec in ({"cmd": f"{primary} --model=other/x"}, {"cmd": f"{primary} --model other/x"},
                         {"cmd": f"{primary} --mod x"}, {"cmd": f"{primary} --agent-env ANTHROPIC_API_KEY=x"},

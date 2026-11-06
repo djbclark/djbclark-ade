@@ -15,7 +15,6 @@ One thin skill, [`skills/hand`](../skills/hand/SKILL.md), reads and follows `han
 |---|---|---|---|
 | Claude Code | `/hand` | skill | none: official command reference, 121 commands, no `hand*` |
 | omp | `/hand` | `omp/commands/hand.md` linked to `~/.omp/agent/commands/` | none: only `handoff`, no aliases of it |
-| Pi | `/hand` | `pi/prompts/hand.md` linked to `~/.pi/agent/prompts/` | none: full built-in list read from the install |
 | zcode | `/hand` | `zcode/commands/hand.md` linked to `~/.zcode/commands/` | none found in the install |
 | opencode | `/hand` | `opencode/commands/hand.md` linked to `~/.config/opencode/commands/` | none found in the binary |
 | Cursor, Copilot, Grok, Qwen, Cline, Antigravity | `/hand` | skill | none (official lists) |

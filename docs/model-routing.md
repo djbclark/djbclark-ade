@@ -47,14 +47,10 @@ quoting a chain, and update its snapshot if you change one.
 > whole-corpus reads, adversarial review); (2) **Fable and "claude" are one
 > pool**: Fable is a <=50% sublimit of the shared weekly and bills the 5-hour
 > window too, so the "separate Fable weekly" wording below is **wrong**; (3)
-> everyday work goes to the other pools (agy Claude/GPT, Cursor Auto, zai
-> GLM-5.3, opencode-go (bulk and mechanical only, never code: djbclark 2026-10-30), agy Gemini, crush/SIPB) at the minimum spec that does
+> everyday work goes to the other pools (Cursor Auto, opencode-go (bulk and mechanical only, never code: djbclark 2026-10-30)) at the minimum spec that does
 > it well, proactively through `/bigteam` and minimum-spec sub-agents; (4)
-> **grok and copilot are reserves** (**grok released 2026-10-18**: GrokBot moved to its own Cursor pool, so grok is an ordinary subscription pool and copilot the only reserve) with a hard floor of 60% left (GrokBot and
-> GitHub-side Copilot review ran on them; copilot read 100% used that day);
-> after an adversarial review the same day, only an explicit kind reaches
-> them (`github` for copilot, `realtime-web` for grok), a stale or missing
-> reading fails closed, `acp-dispatch claude` is judgment-only (Fable xhigh;
+> **grok was a reserve until 2026-10-18** (GrokBot moved to its own Cursor pool, so grok is an ordinary subscription pool; copilot, the other reserve, retired from the router 2026-11-06: Paseo's Copilot provider replaces the CLI, and the `github` kind has no pool);
+> `realtime-web` reaches grok, `acp-dispatch claude` is judgment-only (Fable xhigh;
 > Haiku lookups go through the Agent tool), and clinepass is `NEVER_ROUTE`;
 > (5) **hermes is never a delegation target** (gated in acp-run/acp-dispatch);
 > **omp, the Claude API credits, is a normal tier since 2026-10-19** (operator:
@@ -65,89 +61,15 @@ quoting a chain, and update its snapshot if you change one.
 > compact earlier via `self-slash`; a topic change runs the `handoff` skill then
 > `/new`). Snapshot numbers below are older and only illustrate the shape.
 >
-> **Update 2026-10-10 (operator): use agy's Claude/GPT pool heavily while it has
-> headroom** (5h 100% left, weekly 49% left, critical burn alert). Via
-> `acp-run agy --model claude-opus-5-5 --effort high` / `--model claude-sonnet-5-5 --effort high` (agy 1.4.1, 2026-10-18, dropped the effort-suffixed ids), 2-3 slices
-> at a time, gated on `aiuse --available`; `skills/model-routing/SKILL.md`
-> (*Reading quota numbers* item 4) and `skills/bigteam/SKILL.md` (*agy Claude/GPT
-> pool*) carry the rule, `bin/route_agent.py` the `antigravity-claude` service.
->
-> **Revised later on 2026-10-10: Claude/GPT over ACP need a client-name workaround.** The agy
-> ACP server listed only `gemini-*` models, so `claude-opus-5-5-high` failed with `no model`
-> while `aiuse` showed the pool at 100% left. The cause is client-side:
-> agy_acp_server 1.3.0 offers non-Gemini models only to clients whose ACP `clientInfo.name` is `zed`, `xcode` or `JetBrains.*` (`supports_third_party_models()` in its `model_selection.py`), so `acp-run` identifies itself to agy as `zed` (0b56897).
-> `acp-run agy --info` then listed `claude-opus-5-5-{low,medium,high}`,
-> `claude-sonnet-5-5-{low,medium,high}` and `gpt-oss-120b-medium`, and a
-> `claude-sonnet-5-5-low` probe answered. Since agy 1.4.1 (2026-10-18) it lists bare `claude-opus-5-5` and `claude-sonnet-5-5` and takes the effort as `--effort`. The gate is deliberate in Google's code
-> (google-antigravity/antigravity-cli#1168 and pingdotgg/t3code#16489 report it), so this
-> is a workaround, not a fix, and a later `.par` release could close it. `acp-dispatch`
-> checks `--model` before it detaches. Detail: `skills/bigteam/SKILL.md` (*agy Claude/GPT
-> pool*, item 3).
->
-> **Update 2026-10-31 (operator): Gemini 4 Argon is a routable `frontier` model, FALLBACK ONLY: used when
-> codex `gpt-6-astra` OR Fable is short of quota, never while both have it.** Reachable through agy (`acp-run
-> agy --model gemini-4-argon --effort high`, 1M context; `agy models` lists `gemini-4-argon-{low,medium,high}`).
-> A tiny Argon call moved only its own window, so **aiuse schema 1.5 (aiuse PR 42) files it as its own pool
-> family `gemini_argon`** beside `gemini`; **this needs aiuse 1.5**. Before 1.5 the window sat inside family
-> `gemini` and a 4%-left Gemini weekly would hide Argon's 57%. djbclark-ade maps a model to its family in one
-> helper, `route_agent.antigravity_family` (`gemini-4-argon*` to `gemini_argon`, other `gemini-*` to `gemini`;
-> acp-dispatch calls it, and `bin/failover.py` carries the same prefix row because it cannot import
-> route_agent; aiuse's `semantics.model_pool_family` is prose in `aiuse schema`, not an importable function).
-> Service `antigravity-argon` (`config/routing.toml`, rank 5 in `frontier`, `pool = ["antigravity",
-> "gemini_argon"]`, `fallback_after = ["codex", "claude"]`) is skipped while every service it falls back
-> behind is usable: codex is short when the slice does not fit what acp-dispatch will demand of it for astra (one estimate for every service and kind, measured history binding a pool with no floor too; per quota window, the 60% estimate floor until
-> 3 slices are measured, then their median; not the router's 15%; in tendcf and nix2cf only, a 20% repo override
-> from `[dispatch.repo_overrides]`, operator 2026-11-01, resolved from the `-C` directory's origin remote), claude is
-> short when the Fable sublimit is below `frontier1_min_left` (Argon then replaces the Opus downgrade).
-> It fails closed: no fresh reading of its window, or a frozen or stale one, means the planner never picks it
-> and `acp-dispatch` exits 5 naming the window. `acp-dispatch` enforces the fallback too (exit 2; the
-> `route-override` approval escapes it), at dispatch, again after the load wait (foreground) and again right before the spawn after every wait
-> (foreground and detached runner: a primary that recovered refuses it, exit 2, same message). The planner orders it structurally: it
-> never outranks a usable pool it falls back behind, whatever the scores say (a tie or a better score
-> after pace and pressure penalties does not matter); it takes only the overflow of a named pool a wave cap or `exclude` removed. Needs `--kind frontier` like astra and Fable; the item-1e frontier
-> allowance (claude, codex) does not cover it.
-> Gemini 4 Carbon is not reachable through agy yet (Google's staged rollout, 2026-10-28): recheck weekly.
-> Detail: `skills/model-routing/SKILL.md` item 1b.
->
-> **Correction 2026-10-03: "route bulk work to antigravity first" has a limit
-> that `aiuse` cannot see.** The agy CLI has a per-login burst limit, roughly
-> **60 generation requests an hour** (inferred; Google publishes none). On
-> 2026-10-03 about 304 CLI requests in 12:00 to 14:59 (the busiest earlier hour
-> was 68; one Opus-high review alone was 47) were followed from 15:42 by an instant
-> `RESOURCE_EXHAUSTED (code 429)` on every model, for 8+ hours, while `aiuse`
-> showed Gemini 5h 100% left / weekly 71% left and Claude+GPT 5h 100% left /
-> weekly 49% left. **The agy CLI and its ACP server fail independently**:
-> `acp-run agy --model gemini-3.8-flash-medium` answered in 6.5 s at 22:54 on the
-> same account. Headroom in `aiuse` does not guarantee the CLI can generate.
-> So for agy: use `acp-run agy` rather than `agy -p`; always pass
-> `--print-timeout`, and read a log line `attempt N failed (RESOURCE_EXHAUSTED` as
-> a fast fail; no probe loops (one probe, reuse the answer); burn the
-> Claude/GPT pool while `aiuse` shows headroom (2026-10-10 update above); and if one client 429s while `aiuse`
-> shows headroom, try the other. Detail and the source skill:
-> `skills/model-routing/SKILL.md` ("agy has a burst limit").
+> **Retired 2026-11-06 (slim-down E9): the agy TUI, with its `antigravity-claude`, `antigravity` and
+> `antigravity-argon` services.** The Google AI Pro plan is reached through Paseo's antigravity provider; the router
+> no longer routes to it, and its three updates (the Claude/GPT pool, the `zed` client-name workaround,
+> Gemini 4 Argon as a frontier fallback) and the 2026-10-03 burst-limit correction are in git history, with the lessons
+> in [tui-lessons-learned.md](tui-lessons-learned.md).
 
 ## The service matrix: aiuse line ↔ TUI/CLI ↔ billing
 
-**Pi admission (2026-11-03; Astra added 2026-11-04):** `acp-dispatch pi` maps only the explicitly supported
-`openai/gpt-6.1-sol` (code), `openai/gpt-5.4-mini` (bulk/mechanical) and `openai/gpt-6-astra` (frontier
-kind only, the existing frontier gate applies) model IDs to
-the independent aiuse `pi` API pool. Both dispatch and router use the same mapping;
-no bare IDs, arbitrary provider/model IDs, or `openai-codex/` subscription IDs are
-inferred. Adding a supported billing route requires an explicit mapping and tests.
-Codex subscription headroom never substitutes for Pi API capacity.
-
-Dispatch refuses unsupported, absent, stale, unknown or exhausted Pi capacity
-with exit 5 (`unavailable/headroom`) before any paid preflight or task. The minimum
-is the greater of 1%, the Pi profile's `reserve_floor`, and `--min-headroom`.
-This measurement gate also applies to dry runs, resumes, legacy records and route
-overrides; `--no-preflight` and `--min-headroom 0` cannot disable it. The pass-through contract below covers Pi
-like every agent. Operator-side `ACP_RUN_ENV_PI`, `ACP_RUN_ARGS_PI` and `~/.config/acp-run.env`
-(`ACP_RUN_ENV_FILE`) are not dispatch inputs and are not covered by it. A resumed Pi record keeps the
-minimum it was admitted under (resume: at least 10%) and the runner rechecks that number. Initial
-admission and the runner's post-load/post-capacity-wait checks bypass the quota
-memo and use the existing freshness-aware snapshot reader. Unknown capacity is
-not unlimited capacity; neither credentials nor a model catalog prove headroom.
-Other providers' admission policies are unchanged.
+**Pi admission (2026-11-03) was removed with pi (2026-11-06):** `acp-dispatch pi` and the `pi` API pool no longer exist.
 
 **`--acp-arg` identity contract (2026-11-03):** admission and every gate (frontier, fable-xhigh,
 plenty, fallback, per-model pool, spend) judge `--model`, so a pass-through option that replaces it or the agent's
@@ -205,24 +127,18 @@ where quota is going to waste. Mapping, verified 2026-08-23:
 | `claude` (gmail) | `claude` (Claude Code; cswap acct 2; Orca/ralph-tui drive it (Orca retired from djbclark-ade 2026-10-31; Paseo is the harness now)) | Max-class | monthly sub | 5h + weekly; **Fable is a <=50% sublimit of the same weekly** (aiuse `max_share_of_parent_percent`), not a separate pool (corrected 2026-10-15) |
 | `claude` (mit) | **permanently gone** (operator, 2026-08-23) — removed from cswap | — | — | — |
 | `codex` | `codex` (v0.149) | ChatGPT Plus until 2026-10-18; **$100 plan (aiuse `prolite`) since 2026-10-19** | monthly sub | weekly (resets 2026-10-26; a 5-hour window may reappear) |
-| `antigravity` | `agy` (v1.1.18; ralph-tui-antigravity-plugin exists) | Google AI Pro | monthly sub | Gemini 5h/weekly **plus Claude/GPT 5h/weekly plus Gemini 4 Argon weekly** (its own pool family `gemini_argon` since aiuse 1.5; 2026-10-31: Gemini weekly 4% left, Argon 57%) |
-| `pi` | `pi` via `acp-run pi` (`pi-acp`; added 2026-11-03) | OpenAI API billing (aiuse `codex-api` scope), not the Codex subscription | credits (`access = "api"`, `api-only` eligible) | measured balance; fails closed without a reading (`reserve_floor` 1%, `measured_only`) |
-| `copilot` | `copilot` (v1.0.77; broke 2026-08-23 on stale pkg cache — fix: `rm -rf ~/Library/Caches/copilot/pkg`) | Individual Pro | monthly sub | premium requests (monthly) |
 | `cursor` | `cursor` (v3.17.8) | Cursor Pro | monthly sub | included / Auto / other-models (monthly) |
 | `grok` | `grok` (v1.0.5; ralph-tui-grok-plugin exists) | SuperGrok | monthly sub | usage limit |
-| `zai` | `zcode` TUI (Z.ai's own, v0.16.9; `zcode -p`; GLM-5.3 / GLM-5.3-Flash × low/high/max; not in Orca's roster or herdr's agent kinds (both retired from djbclark-ade 2026-10-31)) | lite | monthly sub | 5h + weekly |
-| `clinepass` | Cline TUI (Orca agent `cline`; Orca retired from djbclark-ade 2026-10-31) + LiteLLM proxy `localhost:4000` (`clinepass-deepseek`, `clinepass-minimax-m3`, `clinepass-kimi-k3`) consumed by Hindsight + hermes | Cline API key | subscription windows | 5h + weekly + monthly |
+| `clinepass` | (the Cline TUI retired 2026-11-06; the API key bundle stays) LiteLLM proxy `localhost:4000` (`clinepass-deepseek`, `clinepass-minimax-m3`, `clinepass-kimi-k3`) consumed by Hindsight + hermes | Cline API key | subscription windows | 5h + weekly + monthly |
 | `opencode-go` | `opencode` Go Plus (`opencode-go/*`); routine MiniMax M3 (bulk), GPT-6 Luna (mechanical); never a code slice (djbclark 2026-10-30); DeepSeek V4.1 Flash is the main-loop substrate model only | $40/month | subscription shared allowance | 5h + weekly + monthly |
 | `opencode-zen` | `opencode` provider `opencode` (`opencode/*`: claude, gpt, gemini, deepseek, glm catalogs) via gated `opencode-ralph-tui-zen` | prepaid | **prepaid balance** | balance |
 | `openrouter` | gated `opencode-ralph-tui-openrouter` | prepaid | **prepaid balance** | balance |
 | `deepseek` | gated `opencode-ralph-tui-deepseek` | prepaid | **prepaid balance** | balance |
-| `devin` | `devin` (v3000.5.20) — **disabled in Orca's TUI roster** (Orca retired from djbclark-ade 2026-10-31), so its 100%-unused windows are deliberate dormancy | ? | sub (ACUs) | daily + weekly |
-| `alibaba` / `alibabatokenplan` / `qwencloud` | `bl` (Bailian, v1.17.1; bailian-* skills) | **ID verification pending, expected live ~2026-08-26** | token plan + PAYG | — until verified |
-| `muse` | the Muse service (own account via gmail; `opencode-go/muse-spark-1.2-contributor` surfaces its models) | ? | ? | ? |
 | (not in aiuse) | `opencode` provider `sipb` — MIT SIPB-hosted models (ollama-style: qwen3-coder:30b, deepseek-r1:32b, gemma…). **For agent/coding use, only `qwen3.6:35b-a3b-q4_K_M` runs tasks reliably** — deepseek-r1:32b fabricates success, qwq:32b truncates every agent-sized stream, exaone-deep:32b/gemma3:27b return the over-long `null`; see forgejo.mit.edu/djbclark/sipb-llms `report/REPORT.md` §3.1 | MIT affiliation | free | none |
 
-Monthly-subscription pools: claude, codex, antigravity, copilot, cursor,
-grok, zai, clinepass (window-shaped), devin, opencode-go. Free: sipb.
+Monthly-subscription pools: claude, codex, cursor,
+grok, clinepass (window-shaped), opencode-go. Free: sipb. (antigravity, copilot, zai, devin, alibaba and
+pi were retired from the router 2026-11-06; the table above is the live set.)
 Prepaid real money: opencode-zen, openrouter, deepseek — all three
 **effectively empty on 2026-08-23** (Zen -$0.04, DeepSeek $0.00,
 OpenRouter $1.13), and gated anyway by the wrapper scripts, which require
@@ -233,7 +149,7 @@ prepaid tier is retired for now** — revisit only on an explicit top-up.
 ## The registry is `acp-run --list`
 
 **Since 2026-10-08 the registry is `acp-run --list`** (plus the installed
-non-ACP headless TUIs, now only muse). Orca's agent roster, once read by
+non-ACP headless TUIs, none since muse retired 2026-11-06). Orca's agent roster, once read by
 `bin/route_agent.py` only with `ROUTE_AGENT_INCLUDE_ORCA=1` (intersected with
 installed binaries, because 12 of its 28 enabled names were not installed
 here), is retired from djbclark-ade (2026-10-31): do not route through it.
@@ -243,6 +159,8 @@ of the roster and its macro-graph `worker-start --agent <name>` dispatch was
 removed from this page (git history has it).
 
 ## What's going to waste (aiuse history, 76 snapshots)
+
+*Dated snapshots from 2026-08; the antigravity, devin, zai and copilot pools named in them were retired from the router 2026-11-06.*
 
 Chronically unused, i.e. already paid for — route suitable work here
 first: **antigravity** (~96-100% left every cycle; aiuse's own top
@@ -281,8 +199,8 @@ from the first `{` instead, or the parse fails with "Extra data".
 
 ## Effort and context levers per service
 
-Updated 2026-10-15. The old "no separate effort knob" line for grok, cursor,
-copilot, agy and opencode is retired: each of those has an effort control,
+Updated 2026-10-15. The old "no separate effort knob" line for grok, cursor
+and opencode is retired: each of those has an effort control,
 and several have a context-size control. The full table (exact model ids,
 effort spellings, context sizes, and what is not reachable) is
 `tools/acp-run/README.md`, section "Per-agent choices: vendor, model, effort,
@@ -292,8 +210,7 @@ Ask for a bigger window when the work is a whole-corpus read or a long log:
 `acp-run <agent> --model M --effort high --context 500k` (also `256k`, `1m`,
 and the sizes that agent's section lists). Leave the default for a small edit.
 A bigger window bills more per token on some services (xAI long-context rates
-from a 200k prompt; Cursor input above 256k at 2×, Fast at 3×; Copilot's long
-tier costs more AI credits) and can be slower. Order: provider, model, other
+from a 200k prompt; Cursor input above 256k at 2×, Fast at 3×) and can be slower. Order: provider, model, other
 `--set`, effort, context. A level or size the agent cannot take exits 2 before
 any prompt and lists the valid values. Stderr, before the summary:
 `acp-run: applied: model=... effort=... ctx=...`. Unreadable values are
@@ -313,16 +230,11 @@ auto-resume RECORD` under launchd for the reset time (acp-run's stderr, else
 aiuse's `resets_at`, else a 30-min back-off) plus 5 min; the runner gates on
 `aiuse --available --json --live` (20% left, 6 checks 10 min apart), then
 reopens the same ACP session (`acp-run --resume`) with a prompt saying the stop
-was the limit, not the agent. **Exception: agy on a non-Gemini model**
-(2026-10-18): agy_acp_server strips the thought signatures Vertex Claude needs
-on every session/load, so the reopened session 400s with `thinking.signature:
-Field required`
-(https://github.com/google-antigravity/antigravity-cli/issues/1281; untested since f633339: acp-run now
-reopens agy with `session/resume`, which agy advertises, and a Gemini session resumed that way with nothing
-replayed; whether resume also strips Claude signatures is unknown: retest after the Claude/GPT weekly
-reset, 2026-10-24); `resume` (manual or automatic) starts a new session instead,
+was the limit, not the agent. (The one exception, agy on a non-Gemini model, whose server could not
+replay Claude thought signatures, retired with agy 2026-11-06; `resume_unsupported()` stays as the hook for a
+session that cannot be reopened: `resume` then starts a new session
 with a checkpoint (git status and diff stat, the old session's last tool calls,
-the report it began), and acp-run fails a reply that is a provider error JSON
+the report it began).) and acp-run fails a reply that is a provider error JSON
 as class `provider`. Up to 3 attempts per slice; the record's
 `auto_resume` field shows state, attempt, `not_before_iso` and the launchd
 label. The `rearm` waiter waits through it; `check` says `resume-scheduled`
@@ -355,18 +267,11 @@ resumed session.
 
 1. **claude.** Effort `low` / `medium` / `high` / `xhigh` / `max` via `--effort` (Opus 4.6 and Sonnet 4.6 have no `xhigh`; Haiku 4.5 and older have none). `--context 200k` sets `CLAUDE_CODE_DISABLE_1M_CONTEXT=1`. `--context 1m` is the model's own window and does not add `[1m]`. Any other size exits 2. Workflow `agent()` and Orca `worker-start --model --effort` still set the session tier.
 2. **codex.** Effort includes `ultra` on gpt-6.1-sol, gpt-6-astra, gpt-6-sol, gpt-5.6-sol and gpt-5.6-terra; luna models stop at `max`. Context is fixed by the model: gpt-6.1-sol 500000 (475000 effective); every other visible model 272000 (258400); all have `max_context_window` 872000. `--context 500k` only with `--model gpt-6.1-sol`; `--context 272k` only on the others; anything else exits 2 (the message names `--model gpt-6.1-sol`). The launch-time `CODEX_CONFIG` (`model_context_window`, merged with any `CODEX_CONFIG` already set; a value that is not a JSON object exits 2) is how the size is set. The window in effect is 95% of SIZE (`--context 400k` reads back 380000, `applied: ctx=400k/380000`); a read-back that is not 95% of SIZE is failure class `config`. The flag does not swap the model. `~/.codex/config.toml` still holds the CLI default.
-3. **copilot.** `--effort` sets `reasoning_effort` (launch `--reasoning-effort` is the same knob). `auto` and `claude-haiku-4.5` have no option. Context is a launch flag: `200k` / `256k` / `272k` become `--context default`; `1m` becomes `--context long_context`. The words `default` and `long` are not `--context` values. `--model` is repeated on that server command because `set_config_option model` resets the tier. A tier that does not land is failure class `config`, exit 1. acp-run does not filter on Copilot's 1M product table. Long measured 922000 on gpt-5.5 and costs more AI credits.
 4. **opencode.** `--effort` is the variant list on the `effort` option (`default` means no variant). `--context` exits 2. `limit.context` is fixed per model in the models.dev catalog.
 5. **cursor.** `--effort` picks the `thought_level` option whose id is not `thinking` (`reasoning_effort`, `effort`, or `reasoning`). `xhigh` matches `extra-high`. `--set reasoning_effort=LEVEL` works only on grok-4.7, claude-sonnet-5-5, claude-haiku-5-5, gemini-4-argon and gemini-3.8-flash. `--context` sets option `context` where the model has one (`256k`/`500k`, `300k`/`1m`, `200k`/`1m`, `272k`/`1m`).
 6. **grok.** Effort is option `reasoning_effort`: `low` / `medium` / `high` / `xhigh` on grok-4.7, grok-4.7-build-fast and grok-4.6; grok-4.5 stops at `high`. Context is `session/set_model` `_meta.contextWindow`, and the size must be one that model offers. grok-4.7 is `256k` / `500k` (`300k` exits 2). (The `ocx-*` ids, OpenAI models through the opencodex proxy, went with the proxy on 2026-10-19.) Read-back is `_x.ai/session/info` `context.total`.
-7. **qwen.** No clamp: only a listed `reasoning_effort` value is accepted. Toggle-only models (qwen3.5-plus, qwen3.6-plus, qwen3.7-plus, kimi-k2.5, qwen3-max-2026-01-23) offer `none` / `default`; `low` exits 2. qwen3.8-max offers `none` / `low` / `medium` / `xhigh` (`high` and `max` exit 2). glm-5, glm-4.7 and MiniMax-M2.5 offer low through max. The coder models have no option. `--model qwen3.8-max` selects `qwen3.8-max(openai)`. `--context` exits 2.
-8. **cline.** `--effort` is the launch flag `--thinking` (`none` / `low` / `medium` / `high` / `xhigh`). `max` exits 2. `default` adds no flag. There is no ACP option, so effort read-back is `(unverified)`. Omitted, ACP sends `reasoning_effort` `none`. `--context` exits 2.
 9. **hermes.** `--model` works via `session/set_model` (read-back `(unverified)`). `--effort` and `--context` exit 2. `config_options` is null and `--set` is stored and ignored. A bigger window is a model id such as `openai-codex:gpt-6-astra-900k`. An ambiguous short name (`claude-sonnet-5.5`) exits 2. Effort in `config.yaml` `agent.reasoning_effort` is what the process starts with.
-10. **zcode.** acp-run sets `ZCODE_BIN` (fixed 2026-10-15), so `--model` works. `acp-dispatch` still treats it as optional. Effort is option `thought`: GLM-5.3 and GLM-5.3-Flash are `low` / `high` / `max` (default max). `medium` and `xhigh` exit 2; there is no neighbor map. `--context N` sets `ZCODE_ACP_AUTO_COMPACT_THRESHOLD` (a compaction cap, not a window); ctx read-back is `(unverified)`. The GLM-5.3 window itself is fixed at 1,000,000. A 2026-10-15 prompt died `project_token_login_failed` at z.ai, unrelated to acp-run.
-11. **agy.** `--effort low` / `medium` / `high` rewrites the model id to `<base>-<level>` (`gemini-3.8-flash`, `claude-opus-5-5`, `claude-sonnet-5-5`). `xhigh` and `max` exit 2. They are not rewritten to high. `gpt-oss-120b` is fixed at medium. `--context` exits 2 (Gemini 3.x Flash is 1,048,576; Claude and GPT-OSS windows were not measured).
-12. **crush.** `--model` is `session/set_model` and works only with a private data dir (`ACP_RUN_CRUSH_DATA`, or `--perm deny`, or `--strip-user-config`); otherwise exit 2. The default `CRUSH_GLOBAL_DATA` (`~/.local/share/crush-acp`) is not enough. `--effort` and `--context` exit 2. Read-back is `(unverified)`. The SIPB models here have no `reasoning_levels`.
 13. **bl.** Model choice per call. No effort or context knob in this matrix. Token Plan vs PAYG routing stays in the bailian-web-search skill.
-14. **devin.** Not installed.
 
 Exact ids, levels and sizes: `tools/acp-run/README.md`, section "Per-agent choices: vendor, model, effort, context (2026-10-15)". Regenerate with `acp-run <agent> --info --all-models`.
 
@@ -403,11 +308,6 @@ Exact ids, levels and sizes: `tools/acp-run/README.md`, section "Per-agent choic
   everyday kind. (2026-10-19: the account is now the $100
   plan, `prolite`; the 5-hour note predates the upgrade, so re-calibrate with
   `route_agent.py calibrate` before relying on "one hard slice".)
-- **Gemini via agy** — big-context reading, summarization, multimodal,
-  bulk research; the most-wasted subscription → default overflow for
-  non-critical bulk. Its Claude/GPT windows are unexplored.
-- **Copilot** — GitHub-shaped work (PR review, inline suggestions, repo
-  Q&A) on the premium-request pool.
 - **Cursor Pro** — IDE-centric composer sessions; its "Auto" pool for
   cheap interactive edits.
   Cursor Cloud Agents are launched with `bin/cursor-cloud launch --repo <url>
@@ -425,19 +325,6 @@ Exact ids, levels and sizes: `tools/acp-run/README.md`, section "Per-agent choic
   eligible after every local Cursor row, never a kind's default.
 - **Grok (SuperGrok, 45% left)** — realtime X/news/web angle, quick
   standalone questions.
-- **z.ai GLM (lite) via zcode** — budget bulk coding on its own
-  5h/weekly windows. Since 2026-10-08 `acp-run zcode` (third-party
-  `zcode-acp-server`) drives it. acp-run sets `ZCODE_BIN` to the package's
-  `vendor/zcode.cjs` (fixed 2026-10-15). The earlier "refuses every switch"
-  failures were that missing variable: the server followed `which zcode`, a
-  symlink, and never injected `ZCODE_BUILTIN_PROVIDER_CONFIG_FILE`. `--model`
-  works and stays optional in `acp-dispatch`. Effort is option `thought`
-  (`low` / `high` / `max` on GLM-5.3, default max; no neighbor map). The
-  window is fixed at 1,000,000; `--context N` is only a compact cap.
-  A 2026-10-15 prompt died `project_token_login_failed` at the z.ai login,
-  unrelated to acp-run. Detail is the levers section above and
-  `tools/acp-run/README.md`. Headless `zcode -p` stays as the fallback and
-  runs GLM-5.3 at max.
 - **OpenCode Go Plus** — shared paid subscription allowance. Routine Flash,
   MiniMax and Luna models only for execution; costly models require bounded
   read-only advice. See `config/go-model-policy.json` and the cost guard in
@@ -446,8 +333,6 @@ Exact ids, levels and sizes: `tools/acp-run/README.md`, section "Per-agent choic
   experiments where a 30B-class local model suffices.
 - **ClinePass via LiteLLM** — reserved plumbing for Hindsight/hermes;
   not a general routing target.
-- **Devin** — autonomous end-to-end PR-shaped tasks; currently 100%
-  unused, activation is an open operator question.
 
 ## Routing policy (2026-10-15; the one copy is `skills/model-routing/SKILL.md`)
 
@@ -476,41 +361,34 @@ The governor's and the guard's numbers live in `config/gates.toml` and a tempora
    unless `ACP_OPERATOR_APPROVED=frontier-exec`; `xhigh` needs `ACP_OPERATOR_APPROVED=fable-xhigh`). Fable is a <=50%
    sublimit of the one shared Claude weekly (and bills the 5h window); under
    10% of its cap the router suggests `opus --effort high`.
-2. **Everyday work on the other pools**, cheapest adequate first: agy
-   Claude/GPT (>= 40% left), Cursor Auto, codex `gpt-6.1-sol` / `gpt-6-luna`
+2. **Everyday work on the other pools**, cheapest adequate first: Cursor Auto,
+   codex `gpt-6.1-sol` / `gpt-6-luna`
    (only while every codex window has >= 50% left, operator 2026-10-25; never
-   astra), zai GLM-5.3, opencode-go (bulk and mechanical only), agy Gemini
-   for bulk and big-context reads, crush/SIPB for light bulk. Minimum spec
+   astra), opencode-go (bulk and mechanical only). Minimum spec
    (model × effort × context) that does it well. Start on the cheap eligible
    tier and escalate through `acp-dispatch reroute` on a verified failure
    (operator, 2026-10-18; it replaced "route up when unsure").
-   **Exception, 2026-10-03:** antigravity's CLI has a burst limit (roughly 60
-   generation requests an hour per login) that `aiuse` cannot see, so spread its
-   work over hours, prefer `acp-run agy`, and never fan out a batch at it.
 2a. **The Claude API credits (omp, operator 2026-10-19)**: the pool `aiuse` labels
    "omp credits" is the Claude Max plan's monthly API credits, an expiring grant. A
    normal tier used with discernment: first for work that needs API access and cannot
    run through a TUI or ACP (kind `api-only`: SDK paths such as the Claude route in
-   `bin/failover.py`, a verdict classifier, batch jobs; omp ranks first and pi's OpenAI API pool is the other eligible pool), otherwise ordinary `code` and
+   `bin/failover.py`, a verdict classifier, batch jobs; omp ranks first), otherwise ordinary `code` and
    `bulk` slices via `acp-run omp --model anthropic/claude-sonnet-5-5`, so the credits
    are fully used before they expire each month and never left unspent. No
    `ACP_OPERATOR_APPROVED=omp`. `route_agent.py` tags the route "burn before reset"
    while the balance is 30+ points above an even spend over the month; omp's own
    default model is Copilot's, so `acp-run omp` insists on `--model anthropic/...`.
    One copy of the rule: `skills/model-routing/SKILL.md`.
-3. **Reserve, floor 60% left, one small slice, only when that vendor is the
-   point:** copilot (GitHub-side Copilot review). grok is an ordinary pool since
-   2026-10-18 (GrokBot has its own Cursor pool).
+3. **Reserve:** none now (copilot, the last, retired from the router 2026-11-06; grok has been an
+   ordinary pool since 2026-10-18, GrokBot has its own Cursor pool).
 4. **Never:** hermes as a target; clinepass (Hindsight/hermes lifeline); prepaid or
    credits-backed models without a fresh operator decision (the Claude Max plan's
-   monthly API credits, run through omp, are the exception: see 2a); devin; an
+   monthly API credits, run through omp, are the exception: see 2a); an
    all-vendor fan-out.
 5. **Probes over memory**: `aiuse --available` (exit 3 = nothing usable;
    ignore `kind:"conserve"` pace alerts for go/no-go), `cswap list` (Claude:
    5h, 7d and Fable together), `route_agent.py plan --kinds ...`, then
    `acp-run <agent> --info` for ids; re-plan at every slice boundary.
-   Probe agy **once** and reuse the answer: every `agy -p` is a generation request
-   against its hourly burst budget (see the 2026-10-03 correction).
 6. **Context hygiene:** Claude Code compacts by itself at 400k
    (`autoCompactWindow`); herdr/Orca sessions (retired from djbclark-ade 2026-10-31; `self-slash` keeps those hosts until D6) and Paseo sessions compact earlier at a natural
    boundary via `self-slash`; a topic change runs the `handoff` skill then
@@ -601,9 +479,7 @@ memory is updated under a flock.
 
 ## Formerly open questions — resolved by operator, 2026-08-23
 
-- zai GLM lite is consumed by the `zcode` TUI.
-- `muse` is the Muse service itself (own account).
-- Devin is dormant deliberately (also disabled in Orca's roster; Orca retired from djbclark-ade 2026-10-31).
+- (zai/zcode, muse and Devin were retired 2026-11-06.)
 - Bailian is awaiting ID verification, expected live ~2026-08-26.
 - Prepaid tier retired until an explicit top-up.
 - MIT Claude account is gone forever; removed from cswap 2026-08-23.

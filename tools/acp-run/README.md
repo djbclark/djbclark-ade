@@ -3,16 +3,11 @@
 Run one prompt through a coding agent over the
 [Agent Client Protocol](https://agentclientprotocol.com) (ACP), headless, and get
 the agent's final message on stdout. It is how one agent on this machine hands a
-self-contained task to another vendor's agent: Claude Code, Codex, Copilot,
-opencode, Cursor, Qwen Code, Devin, Cline, Hermes, Antigravity (`agy`), Grok and
-zcode (through the third-party `zcode-acp-server`), OMP, and Pi (through
-`pi-acp`, bridging Pi's JSONL RPC). Vendor, model, effort and
-context for each agent are in the 2026-10-15 section below. acp-run sets
-`ZCODE_BIN` to that package's `vendor/zcode.cjs` when the file is present, so
-`--model` works (fixed 2026-10-15; the 2026-10-11 "refuses every switch" note
-was the missing variable, measured while the weekly limit was also exhausted).
-A 2026-10-15 prompt still died at the z.ai login (`project_token_login_failed`),
-which is outside acp-run.
+self-contained task to another vendor's agent: Claude Code, Codex,
+opencode, Cursor, Hermes, Grok and OMP. (Copilot, Qwen Code, Devin, Cline,
+Antigravity (`agy`), zcode, Pi, Crush, goose and kiro had adapters until the 2026-11-06 slim-down retired them; the
+lessons are in `docs/tui-lessons-learned.md`.) Vendor, model, effort and
+context for each agent are in the 2026-10-15 section below.
 
 A single-file [uv script](https://docs.astral.sh/uv/guides/scripts/) on the
 official Python SDK (`agent-client-protocol`); no daemon, no state beyond its
@@ -22,29 +17,9 @@ logs. MIT licensed. The SDK is pinned below 1.0 until 1.0 is tested.
 acp-run --list                                  # agents and the command each runs
 acp-run claude --info                           # modes, config options, auth methods
 acp-run codex -C ~/src/repo --add-dir ~/.local/state/bigteam/task -p 'Reply with exactly: OK' --model gpt-6-astra
-acp-run copilot -C ~/src/repo -f brief.md --perm deny --timeout 1200 > report.md
+acp-run claude -C ~/src/repo -f brief.md --perm deny --timeout 1200 > report.md
 acp-run codex -C ~/src/repo --interactive --inbox /tmp/codex-in   # a session you keep prompting
 ```
-
-## Pi (2026-11-03)
-
-Install the latest `pi-acp` (`npm install -g pi-acp`) alongside the installed
-`@earendil-works/pi-coding-agent`. The bridge launches the installed Pi executable
-rather than bundling a separate model runtime. Pi keeps its own provider login
-and session files; `acp-run` does not copy credentials.
-
-```sh
-acp-run pi --info
-acp-run pi --model openai/gpt-6.1-sol --effort high -C ~/src/repo -p 'Reply with exactly: OK'
-```
-
-The adapter advertises model selection and `thought_level` through ACP config
-options, so normal `--model` and `--effort` verification applies. Thinking modes
-are **not permission modes**: do not select a thinking level as a yolo setting.
-Only `--perm all` is supported: Pi executes tools locally without ACP permission
-requests, and unverified `deny`/`read-only` runs are refused before prompting.
-The adapter supports loading persisted sessions. OpenAI API use belongs to the
-independent `pi` billing pool (`codex-api` scope), not the Codex subscription.
 
 ## What it adds over a bare ACP client
 
@@ -62,9 +37,7 @@ independent `pi` billing pool (`codex-api` scope), not the Codex subscription.
    MCP servers, mode `default`); codex the `read-only` mode (its sandbox runs shell commands
    unasked, so an unasked `execute` does not trip there, 2026-10-19); opencode a
    `permission` block (`OPENCODE_CONFIG_CONTENT`) allowing read, glob, grep, list,
-   webfetch, websearch and denying the rest; zcode `plan` mode with the backend session
-   limited to Read, Glob, Grep, LS, WebFetch and WebSearch and Bash, Write, Edit and the
-   other mutating tools removed (`zcode-denylist-shim.cjs`, below). Every other agent is
+   webfetch, websearch and denying the rest. Every other agent is
    refused with exit 2 and a one-line reason (no equivalent mode verified);
    `acp-run <agent> --info` lists the `perm_modes` an agent supports. `deny` gives
    claude no tools at all, so it is for a text-only answer, never a review that
@@ -79,25 +52,9 @@ independent `pi` billing pool (`codex-api` scope), not the Codex subscription.
      after an adversary review found four agents ran tools without ever asking):
      claude-agent-acp gets a session with no built-in tools, no user settings
      (so no `bypassPermissions` default or allow rules), no MCP servers and no
-     bypass (`_meta.claudeCode.options`), then mode `default`; zcode starts in
-     `plan` (`ZCODE_ACP_MODE`) with its tools removed from the session and a per-run
-     settings file (`ZCODE_CLI_SETTINGS_FILE`, removed afterwards) with MCP servers,
-     plugins, skills, subagents and hooks off. The tool removal is
-     `tools/acp-run/zcode-denylist-shim.cjs`, started as `ZCODE_BIN` from the per-run dir
-     (2026-10-24): `zcode app-server --stdio` ignores `--disallowed-tools` (so
-     `ZCODE_DISALLOWED_TOOLS` and the settings file's `permission.disallowedTools` removed
-     nothing; a live read-only run was offered Bash and ran `ls` unasked, since plan mode
-     lets read-only shell through) and zcode-acp-server's `session/create` carries no
-     `toolDenylist`. The shim adds `toolDenylist` (`ZCODE_DISALLOWED_TOOLS`) and
-     `toolAllowlist` (`ZCODE_ACP_RUN_ALLOWLIST`: the reading tools under read-only, a name
-     no tool has under deny) to `session/create`, `session/resume` and `session/send`
-     (`send` takes no allowlist). Without a real `vendor/zcode.cjs` the run fails with
-     exit 1 (config) rather than start unguarded. Left over under deny: the Task and
-     plan-mode control tools; the two read-only built-in MCP tools
-     (`mcp__web_reader__webReader`, `mcp__4_5v_mcp__analyze_image`) under read-only;
-     agy runs in mode `default`; crush runs without `--yolo` (now added only
-     under `all`) and, since 2026-10-13, with **no tools at all** (below);
-     opencode gets `OPENCODE_CONFIG_CONTENT={"permission":"deny"}`.
+     bypass (`_meta.claudeCode.options`), then mode `default`;
+     opencode gets `OPENCODE_CONFIG_CONTENT={"permission":"deny"}`. (zcode, agy and crush had their own
+     deny machinery here until they retired, 2026-11-06.)
      Grok under `--perm deny` drops `--always-approve` and runs on a per-run
      `GROK_HOME` (Per-agent choices, item 6).
      A tripwire backs this up: any non-think tool call that starts or completes
@@ -105,15 +62,13 @@ independent `pi` billing pool (`codex-api` scope), not the Codex subscription.
      fallback runs with `--tools ""`, `--strict-mcp-config`, `--disallowedTools '*'`
      and `--setting-sources project` (no user hooks), and always reads its prompt
      from stdin. `--tripwire-exempt-kinds read,search` lets tool calls of those
-     read-only ACP kinds run unasked without tripping (failover passes it for agy
-     only; any other kind is a usage error). Options are never abbreviated (`allow_abbrev=False`): `--per all`
+     read-only ACP kinds run unasked without tripping (any other kind is a usage error). Options are never abbreviated (`allow_abbrev=False`): `--per all`
      is an error, not `--perm all`.
      Since 2026-10-13 a `deny` run that is not `--interactive` also starts
-     **opencode and agy without the user's plugins, MCP servers and hooks**
-     (claude and zcode already ran that way). On the 2026-10-13 SkillOpt-Sleep
+     **opencode without the user's plugins, MCP servers and hooks**
+     (claude already ran that way). On the 2026-10-13 SkillOpt-Sleep
      night all 21 failed attempts died while the agent started: opencode's
-     "Location plugins did not finish activating" and agy's "MCP: 7 server(s)
-     still connecting after 32s". Neither agent has a switch for it, so each gets
+     "Location plugins did not finish activating". It has no switch for it, so it gets
      a per-run 0700 temp config, removed after the run; the user's own files are
      only read, never changed:
      - opencode (v2.0.27): `OPENCODE_CONFIG_DIR=<tmp>` replaces
@@ -128,46 +83,6 @@ independent `pi` billing pool (`codex-api` scope), not the Codex subscription.
        (`opencode-go/`) live in opencode's data dir and still work. Not stripped:
        skills in `~/.claude/skills` and `~/.agents/skills` (opencode reads them
        with no switch to turn it off) and any `.well-known` remote config.
-     - agy: `GEMINI_HOME=<tmp>` is a shadow like `~/.local/share/agy-acp-home`
-       (symlinks to everything in `~/.gemini`, login included) whose `config/`
-       has an empty `mcp_config.json`, an empty `hooks.json` and an empty
-       `plugins/` (agy plugins carry their own MCP servers and hooks). Workspace
-       `.agents/` plugins in `-C` are not stripped.
-     - crush (crush-acp 88a67503, `crush_strip_config`): `CRUSH_GLOBAL_CONFIG=<tmp>/config`
-       holds a `crushrc` that defines no-op shell functions `mcp`, `lsp`, `hook`
-       and `permissions` (crush's interpreter resolves a function before its
-       config builtin; checked against the real build), passes `option` through
-       only for `request-timeout`, `disable-skill`, `auto-summarize`,
-       `provider-auto-update`, `default-providers` and `metrics`, then `source`s
-       the user's `crushrc` in place (its provider and API key are never copied).
-       A user `crush.json` there is copied with only `$schema`, `providers`,
-       `models` and a few options. Moving the config dir also drops crush's
-       global context files (`CRUSH.md` beside it, `AGENTS.md` above it), and
-       `CRUSH_SKILLS_DIR=<tmp>/skills` (empty) lists no global skill. A user
-       `crushrc` that says `command`/`builtin` before a config builtin, or
-       `unset -f`, could get past the shadows, so the strip refuses it (the run
-       keeps the user's config and says so; tools stay off either way). Not
-       scanned: files the user's `crushrc` itself `source`s.
-     **crush under every `deny` run (`crush_deny_dir`, 2026-10-13):** crush-acp asks
-     permission for `bash`, `edit`, `write`, `fetch` and `download`, but runs its
-     read-only tools (`glob`, `grep`, `ls`, `view`, `sourcegraph`, LSP lookups)
-     and bash's built-in safe commands without asking; on the 2026-10-13 03:43
-     SkillOpt-Sleep canary it ran `glob` unasked and the tripwire fired. Neither
-     ACP mode (`ask`, `code`) changes that. Crush builds each agent's tools from an
-     allow list (`allToolNames()` minus `options.disabled_tools`), so acp-run
-     disables every name on it (`CRUSH_TOOLS`) in two per-run config layers:
-     `CRUSH_GLOBAL_DATA=<tmp>/data` (merged after the user's global config) and
-     the workspace file under `--data-dir <tmp>/project` (merged last, after any
-     project `crush.json`/`crushrc`), with `auto_lsp: false` and
-     `permissions.skip_requests: false`. Crush merges config arrays by appending,
-     so no other layer can take a tool back off the list. MCP servers a project
-     config names (from `-C` up to the git root) get `disabled: true` there.
-     `--data-dir` also keeps crush's session database out of `-C`. The catalog
-     cache `providers.json` is copied in. This half has no fallback and applies
-     with `--interactive` and `--keep-user-config` too; it is logged as a
-     `deny_config` record. Result (2026-10-13, the real failover preflight): the
-     canary prompt got 0 tool calls (the model wrote a fake `<bash ...>` as text),
-     no file, rc 0; `Reply with exactly: OK` answered OK.
      The log gets a `user_config` record naming what was stripped (server, plugin
      and key names only, never values) and the result record `user_config:
      "stripped"`. `--keep-user-config` or `ACP_RUN_KEEP_USER_CONFIG=1` keeps the
@@ -177,16 +92,10 @@ independent `pi` billing pool (`codex-api` scope), not the Codex subscription.
      stderr, naming the file. `--perm all` and `--interactive` runs are
      unchanged unless `--strip-user-config` is given.
      `--strip-user-config` (env `ACP_RUN_STRIP_USER_CONFIG=1`, 2026-10-13) applies
-     the same strip under any non-interactive `--perm` for opencode, agy, crush,
-     zcode and grok. It is a startup-reliability switch, not a permission control: the
+     the same strip under any non-interactive `--perm` for opencode and grok. It is a startup-reliability switch, not a permission control: the
      SkillOpt-Sleep night runs `--perm all --strip-user-config` (operator,
      2026-10-13). Outside deny nothing permission-related is added: opencode gets
-     no `OPENCODE_CONFIG_CONTENT`, agy and zcode keep their `--perm all` yolo modes,
-     crush keeps every built-in tool (a per-run `crush-strip-` data dir and
-     `--data-dir` with only `auto_lsp: false` and project MCP servers disabled,
-     logged as `strip_config`; crushrc `mcp`/`lsp`/`hook`/`permissions` shadowed as
-     under deny), and zcode gets a per-run `ZCODE_CLI_SETTINGS_FILE` with MCP,
-     plugins, skills and hooks off and the user's `permission` block untouched.
+     no `OPENCODE_CONFIG_CONTENT`.
      Temp dirs are `acp-run-<agent>-strip-<pid>-*` and are swept like deny dirs.
      Under `--perm deny` the flag adds nothing; `--keep-user-config` wins.
      Hardening after the adversary review (2026-10-13): config layers are
@@ -200,11 +109,10 @@ independent `pi` billing pool (`codex-api` scope), not the Codex subscription.
      starts (LSP servers, formatters, crash dumps). What it buys is that nothing
      secret is left on disk after a SIGKILL. The temp dir is built after the
      signal handlers are in place and removed before the cancel/kill waits
-     (opencode, zcode) or right after the agent has been stopped (agy, which can
-     still write a rotated credential under its home while it shuts down), so
+     (opencode) or right after the agent has been stopped (grok, which can
+     still write a rotated token under its home while it shuts down), so
      SIGTERM and early errors leave nothing behind. It is not removed right after `session/new`: opencode
-     watches its config dir and reloads on change, and agy keeps reading its
-     home. Dirs are named `acp-run-<agent>-deny-<pid>-*`, and every deny run
+     watches its config dir and reloads on change. Dirs are named `acp-run-<agent>-deny-<pid>-*`, and every deny run
      first sweeps this user's such dirs under the temp base that are older than
      3 hours, belong to a dead pid (1-7 digits; anything else is never swept),
      and are real dirs (never symlinks): that covers runs killed with SIGKILL.
@@ -215,23 +123,20 @@ independent `pi` billing pool (`codex-api` scope), not the Codex subscription.
    unadvertised, it is still sent, falling back with a one-line log to a retry
    without it if rejected. Lets an agent whose file tools are confined to its
    workspace roots read and write outside `-C` (such as `acp-dispatch` report
-   folders). **agy ignores it** (2026-10-11): agy_acp_server 1.3.0 accepts the
-   field but never passes it to its allowed-directory list, so agy's file tools
-   still refuse paths outside `-C`.
+   folders).
 4. **`--model`, `--mode`, `--effort LEVEL`, `--context SIZE` and `--set ID=VALUE`**
    for any config option `--info` lists. Since 2026-10-15, `--effort` and
    `--context` are the normalized names (`256k`, `500k`, `1m`, and the other
    sizes that agent's section lists). Order: provider, model, other `--set`
    and mode, then effort, then context. A value the agent or the chosen model
    cannot take is a usage error (exit 2) before any prompt, and it lists the
-   valid values. qwen, zcode and agy do not clamp. Stderr, before the summary
+   valid values. Stderr, before the summary
    line: `acp-run: applied: model=... effort=... ctx=...` (also on the JSONL
    `result` record as `applied`, a separate `applied` record, and `--json`).
    Unreadable values are `(unverified)`. A requested value the agent reports
    differently is failure class `config`, exit 1. On cursor,
    `--set reasoning_effort=LEVEL` hits only option id `reasoning_effort`
-   (`grok-4.7`, `claude-sonnet-5-5`, `claude-haiku-5-5`, `gemini-4-argon`,
-   `gemini-3.8-flash`). Use `--effort` on the other cursor models.
+   (`grok-4.7`, `claude-sonnet-5-5`, `claude-haiku-5-5`, ...). Use `--effort` on the other cursor models.
    `--info --model M [--effort] [--context] [--set]` applies that combination
    with no prompt. `--info --all-models` is the per-model option matrix.
    The per-agent section below is the table.
@@ -321,7 +226,7 @@ bypass it either.
     a warning on stderr and preserves exit 0 (off by default; callers decide).
 
     ```sh
-    acp-run crush -C dir -p '...' --verify 'python3 -m unittest' --verify-retries 2
+    acp-run opencode -C dir -p '...' --verify 'python3 -m unittest' --verify-retries 2
     ```
 
 ## Per-agent choices: vendor, model, effort, context (2026-10-15)
@@ -330,7 +235,7 @@ Landed 2026-10-15 (6528ccf, 77bd2bf, 0221561, faead67, ada7620). Value lists are
 
 1. `--effort`: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `ultra`, `default`. Aliases, not clamps: `extra-high`=`xhigh`, `off`=`none`. `--context`: `200k`, `256k`, `272k`, `400k`, `500k`, `1m`, or a positive integer (`k`=1000, `m`=1,000,000).
 2. Order, every agent: provider, model, other `--set` and mode, effort, context. A model switch resets effort and context and changes which values exist.
-3. A LEVEL or SIZE the agent or model cannot take exits 2 before any prompt and names the valid values. qwen, zcode and agy do not clamp. agy `xhigh`/`max` exit 2.
+3. A LEVEL or SIZE the agent or model cannot take exits 2 before any prompt and names the valid values.
 4. Read-back, stderr before the summary line: `acp-run: applied: model=... effort=... ctx=...`. Same fields on the JSONL `result` record (`applied`), a separate `applied` record, and `--json`. Unreadable values are marked `(unverified)` (`effort=high(unverified)`). A requested value the agent reports differently is failure class `config`, exit 1 (option response before the prompt, or `usage_update.size` after the turn). Under `--interactive` the line is still printed; a post-turn window mismatch does not change the exit code.
 5. `--meta JSON` deep-merges into `session/new` `_meta` over `systemPrompt` and the deny meta. `--agent-arg ARG` (repeatable) appends to the launch command. `--agent-env K=V` (repeatable; one argument may be `K=V,K2=V2`, split only before another `NAME=`) appends to the child environment. Per host, `~/.config/acp-run.env` or `$ACP_RUN_ENV_FILE`: `ACP_RUN_ARGS_<AGENT>` (shell-split), `ACP_RUN_ENV_<AGENT>="K=V,K=V"`.
 6. `HERDR_PANE_ID`, `HERDR_ENV`, `HERDR_WORKSPACE_ID` and `HERDR_TAB_ID` (the last two since 2026-10-25, when the Codex tool environment began to pass the herdr ids on), `PASEO_AGENT_ID`, `PASEO_AGENT_CWD` and `ORCA_TERMINAL_HANDLE` and `ADE_OPENCODE_SESSION_ID` and `ADE_OPENCODE_DIRECTORY` are removed on every run, and `ACP_RUN_AGENT=1` is set (2026-10-20: `bin/self-slash` refuses lifecycle actions when it sees the marker; a slice that kept `PASEO_AGENT_ID` could `/clear` or archive the caller's Paseo agent). (`ACP_RUN` itself is taken: it holds the acp-run path for `session-finder`.) Under `--perm deny`, grok starts without `--always-approve` on a per-run `GROK_HOME`: symlinks to `~/.grok` except `hooks/`, `skills/`, `plugins/`, `installed-plugins/` and `config.toml`. The copy drops `[[hooks.*]]`, `[plugins]`, `[mcp_servers.*]`, `ui.permission_mode`, `ui.yolo`, and ends with `[permission] ask = ["*"]` (deny > ask > allow). tomllib requires the copy to equal the original minus exactly those parts; otherwise grok keeps the user's home and the run says so. A token rewritten as a regular file in the temp home is copied back. `--strip-user-config` is the same strip without the permission table. Every other non-interactive grok run (`--perm all`, what `acp-dispatch` uses) also starts on a stripped `GROK_HOME` without the user's hooks, skills and plugins (2026-10-15), keeping MCP servers, the permission mode and auth (no `ask` rule); the `user_config` log record names the `home`. `ACP_RUN_GROK_USER_HOOKS=1` (or `--keep-user-config`) keeps `~/.grok`; `--interactive` always does.
@@ -369,17 +274,6 @@ Context is fixed by the model: gpt-6.1-sol 500000 (475000 effective); every othe
 
 Fast: `--set fast-mode=on` or `off` (all 7). `service_tier` `fast` (priority) / `flex` / default. Priority copy: 6.1-sol and 6-astra "2x speed, increased usage"; 6-sol and 6-luna "1.5x speed"; 5.6 "1.5x speed, increased usage". `features.fast_mode`.
 
-### copilot
-
-https://github.blog/changelog/2026-06-04-larger-context-windows-and-configurable-reasoning-levels-for-github-copilot/ , https://docs.github.com/en/copilot/reference/ai-models/supported-models , github/copilot-cli#3481 — CLI 1.0.95.
-
-GitHub login only. Not passed through: `COPILOT_PROVIDER_TYPE` `openai`/`azure`/`anthropic`, `_BASE_URL` `_API_KEY` `_API_KEY_COMMAND` `_BEARER_TOKEN` `_WIRE_API` (`completions`/`responses`) `_TRANSPORT` (`http`/`websockets`) `_MODEL_ID` `_WIRE_MODEL` `_MAX_PROMPT_TOKENS` `_MAX_OUTPUT_TOKENS` `_HEADERS`, `COPILOT_OFFLINE=true`.
-
-Models: `auto` (listed twice, first wins; ACP starts on `claude-sonnet-5.5`, not TUI `model: auto`), `claude-sonnet-5.5`, `claude-sonnet-5`, `claude-fable-5.1`, `claude-fable-5`, `claude-opus-5.5`, `claude-opus-5`, `claude-opus-4.8`, `claude-opus-4.8-fast` (fast mode; 30× `_meta.copilotUsage`), `claude-haiku-5.5`, `claude-haiku-4.5`, `gpt-6.1-sol`, `gpt-6-sol`, `gpt-6-luna`, `gpt-6-astra`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.3-codex`, `gpt-5-mini`, `mai-code-1.1-flash`, `gemini-3.8-flash`, `gemini-3.7-flash`, `grok-4.7`, `grok-4.6`, `grok-4.5`, `kimi-k3`, `gemini-4-argon`. `copilot help config` also `claude-sonnet-4.6`. **That is the CLI 1.0.95 catalog; what a given account is offered differs: `acp-run copilot --info` on djbclark's account, CLI 1.0.105, 2026-11-02, lists 15 ids: `auto`, `claude-sonnet-5.5`, `claude-sonnet-5`, `claude-haiku-5.5`, `claude-haiku-4.5`, `gpt-6-luna`, `gpt-6.1-terra`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.3-codex`, `mai-code-1.1-flash`, `gemini-3.8-flash`, `grok-4.7`, `grok-4.6`, `kimi-k3` (no Opus, Fable, Sol, Astra; `pick_config` rejects any id not offered, so run `--info` before dispatching a model).** `--auto-tier efficiency|balance|intelligence` is not wired (`COPILOT_AUTO_TIER`, model `auto` only).
-
-Effort option `reasoning_effort` (launch `--reasoning-effort` is the same knob and survives a model switch). CLI set `none minimal low medium high xhigh max`; picker is the subset; default `medium`. `low,medium,high,xhigh,max`: sonnet-5.5, sonnet-5, fable-5.1, fable-5, opus-5.5, opus-5, opus-4.8, opus-4.8-fast, haiku-5.5, gpt-6-astra (each prefixed `claude-` or bare gpt as in the model list). `none,low,medium,high,xhigh,max`: gpt-6.1-sol, gpt-6-sol, gpt-6-luna, gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna. `none,low,medium,high,xhigh`: gpt-5.5, gpt-5.4, gpt-5.4-mini. `low,medium,high,xhigh`: gpt-5.3-codex, grok-4.7, grok-4.6. `low,medium,high`: gpt-5-mini, mai-code-1.1-flash, gemini-3.8-flash, gemini-3.7-flash, grok-4.5, gemini-4-argon. `low,high,max`: kimi-k3. No option: `auto`, `claude-haiku-4.5` (CLI `--reasoning-effort` with `--model auto` exits 1).
-
-Context is a launch flag, not an ACP option: `200k`/`256k`/`272k` → `--context default`; `1m` → `--context long_context`; else exit 2. `--model` is repeated on that server command, because `session/set_config_option model` resets the tier (measured 272000 vs 922000). Read-back by tier: ≤300000 default, ≥800000 long. Measured default 272000 (gpt-5.4, gpt-5.5); long 922000 on gpt-5.5 (picker "1.1M"); long costs more credits. Copilot's 1M table, not filtered by acp-run: Claude Sonnet 4.6/5/5.5, Opus 4.8/5/5.5 and fast, Haiku 5.5, Fable 5/5.1, GPT-5.3-Codex, 5.4, 5.5, 5.6 Luna/Sol/Terra, GPT-6 Astra/Luna/Sol, 6.1 Sol, Kimi K3. A miss is `FAILED config`. TUI: `/model`+Tab, `contextTier`, `/model --session`.
 
 ### opencode
 
@@ -407,27 +301,7 @@ https://cursor.com/docs/models/grok-4-7 , https://cursor.com/docs/cli/reference/
 6. Gemini 4 Argon and 3.8 Flash: [reasoning_effort] `low`/`medium`/`high`. 3.7 Flash: [effort] `low`/`medium`/`high`. 3.6 Flash: [effort] `minimal`/`low`/`medium`/`high`. 3.1 Pro, 3 Flash, 3.5 Flash, 2.5 Flash: none.
 7. Muse Spark 1.3: context `300k`/`1m`; [effort] `minimal`/`low`/`medium`/`high` (default)/`xhigh`/`max`. Kimi K3: [reasoning] `low`/`high`/`max` (default max). K2.7 Code: none. GLM 5.2: `high`/`max`. GLM 5.3 and 5.3 Flash: `low`/`high`/`max`.
 
-### qwen
 
-https://qwenlm.github.io/qwen-code-docs/en/users/configuration/model-providers/ , https://github.com/QwenLM/qwen-code/blob/main/docs/users/configuration/settings.md , QwenLM/qwen-code#8698 — 0.25.1.
-
-Not a flag: `--auth-type` `openai` `openai-responses` `anthropic` `qwen-oauth` `gemini` `vertex-ai`. Entries live in `settings.json` `modelProviders.<authType>[]`. Here, 10 Coding Plan models at `https://coding-intl.dashscope.aliyuncs.com/v1`; Bailian `qwen3.8-max` at `https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1`. `--info` auth: `openai` only. Suffix `(openai)` is the authType. Live: `--model qwen3.8-max --effort low` → `qwen3.8-max(openai)`, effort low, ctx 1m.
-
-Models: `qwen3.5-plus`, `qwen3.6-plus` (Pro only), `qwen3.7-plus`, `glm-5`, `kimi-k2.5`, `MiniMax-M2.5`, `qwen3-coder-plus`, `qwen3-coder-next`, `qwen3-max-2026-01-23`, `glm-4.7`, `qwen3.8-max`. Also `fastModel`, `advisorModel`, `--advisor`, `/model --fast --vision --voice --compaction --image`. `/model --fast` picks `fastModel`, not effort.
-
-Effort option `reasoning_effort`: only a listed value. `none`/`default` only on `qwen3.5-plus`, `qwen3.6-plus`, `qwen3.7-plus`, `kimi-k2.5`, `qwen3-max-2026-01-23`. `qwen3.8-max`: `none` `low` `medium` `xhigh` (default `xhigh`); `high` and `max` exit 2. `glm-5`, `glm-4.7`, `MiniMax-M2.5`: `none` `default` `low` `medium` `high` `xhigh` `max`. Coders `qwen3-coder-plus`, `qwen3-coder-next`: no option. TUI `/effort` is the wider `low`–`max`. glm/MiniMax extra tiers may be `enable_thinking` no-ops on the Coding Plan (not re-checked with `--openai-logging`). Vendor notifications without a prefix are extension notifications.
-
-Context exits 2. `generationConfig.contextWindowSize`: `qwen3.5-plus` `qwen3.6-plus` `qwen3.7-plus` `qwen3-coder-plus` 1000000; `kimi-k2.5` `qwen3-coder-next` `qwen3-max-2026-01-23` 262144; `glm-5` `glm-4.7` 202752; `MiniMax-M2.5` 196608; `qwen3.8-max` unset (models.dev; live turn 1m). A lower size only compacts earlier. `context.autoCompactThreshold` 0.85.
-
-### cline
-
-https://docs.cline.bot/cli/cli-reference , https://docs.cline.bot/usage/acp , https://docs.cline.bot/sdk/model-providers , cline/cline#14820 — 3.0.71.
-
-`--set provider=cline` (313, usage billing), `cline-pass` (18; acp-run default, before the model), `openai-codex` (9). TUI `cline auth -p ID -k KEY -m MODEL` (30+ providers).
-
-`cline/` examples: `anthropic/claude-sonnet-5.5` (default there), `claude-opus-5.5`, `claude-opus-5`, `claude-fable-5.1`, `claude-haiku-5.5`, `openai/gpt-6.1-sol` and `-pro`, `gpt-6-sol` and `-pro`, `gpt-6-luna` and `-pro`, `gpt-6-astra` and `-pro`, `x-ai/grok-4.7`, `grok-4.6`, `google/gemini-3.8-flash`, `meta/muse-spark-1.3`, `~openai/gpt-sol-latest`, `:free` (313). `cline-pass/`: `mimo-v2.6-flash` (ACP default), `mimo-v2.6-pro`, `deepseek-v4.1-flash`, `deepseek-v4-pro`, `glm-5.3`, `glm-5.3-flash`, `kimi-k3`, `qwen3.7-plus`, `qwen3.7-max`, `qwen3.8-max`, `minimax-m3`, `mimo-v2.5`, `mimo-v2.5-pro`, `muse-spark-1.3-contributor`. `cline-free/`: `solar-mini4`, `mimo-v2.6-flash`, `step-5-preview`, `muse-spark-1.3-contributor`. `openai-codex`: `gpt-6.1-sol`, `gpt-6-luna`, `gpt-6-sol`, `gpt-6-astra`, `gpt-5.6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.5`, `gpt-5.3-codex-spark`. TUI's saved `cline-pass/deepseek-v4.1-flash` is not the ACP start. `-pro` ids are models, not a fast flag.
-
-`--effort` is launch `--thinking` `none` `low` `medium` `high` `xhigh`. `max` exits 2. `default` adds nothing. No ACP option: effort read-back `(unverified)`. Omitted, ACP sends `reasoning_effort: "none"` (file `~/.cline/data/settings/providers.json` says `medium` and is ignored). Bare CLI `--thinking` means medium. `--context` exits 2 (catalog window; `ModelInfo.contextWindow` for custom models only). `--compaction agentic|basic|off` (default `agentic`) is not `--context`.
 
 ### hermes
 
@@ -439,31 +313,7 @@ https://docs.cline.bot/cli/cli-reference , https://docs.cline.bot/usage/acp , ht
 
 `--context` exits 2. Bigger window = model id `openai-codex:gpt-6-astra-900k`, `openai-codex:gpt-6-sol-900k`. Resolve: `model.context_length`, `providers.<p>.models.<m>.context_length`, `~/.hermes/context_length_cache.yaml`, endpoint, models.dev, else 128K. Cache: gpt-5.5 codex 272000, nous 1050000. `compression.threshold` 0.4, `threshold_tokens` 100000. `-pro` `-fast` `-flex` `-900k` are ids (`gpt-6-astra-pro` and the same suffixes).
 
-### zcode
 
-https://docs.z.ai/guides/llm/glm-5.3 , zcode-acp-server README — CLI 0.16.9, zcode-app-cli 3.15.3-35, server 0.69.3.
-
-acp-run sets `ZCODE_BIN=<pkg>/vendor/zcode.cjs` when that file and `vendor/provider/zcode-builtin.json` exist. `--model` works because of that. Fixed 2026-10-15: earlier the server used `which zcode` (symlink, no `.js`), skipped `ZCODE_BUILTIN_PROVIDER_CONFIG_FILE`, and rejected every switch ("unsupported config option or switch failed: model"). The 2026-10-11 weekly-limit note was a different failure. Dispatch still allows omitting `--model` (two models). A 2026-10-15 prompt died `project_token_login_failed` at z.ai, same on the old binary. `--info` proven; a turn is not.
-
-**Login that does not expire (2026-10-18): the account provider in manual mode.** `account:zai-individual-coding-plan` (the `builtin:zai-coding-plan\GLM-5.3` ids) has a second auth mode, the one the desktop app uses: with `account-provider:<id>:auth-source` = `manual` in `~/.zcode/v2/credentials.json` it sends the Coding Plan API key stored for that account and never does the OAuth exchange that fails a day after each `zcode login` (zai-org/feedback#1001). `bin/zcode-key-auth apply` sets it from sudo-secretspec's `ZAI_CODING_PLAN_API_KEY` (zcode's `enc:v1` AES-256-GCM, read from the 3.15.3 bundle); launchd re-checks every 6 h and pings only on a repair. Proved with a HOME holding no OAuth or JWT entry: a turn completed. **Never run `zcode login` now**: it writes `oauth` back (the launchd check undoes it). The paragraph below stays true: the separate API-key providers are still not selectable (#1067).
-
-Provider switch not shown to work (2026-10-16: `builtin:zai` with a Coding Plan API key in `~/.zcode/v2/config.json` is listed and even becomes a new session's `currentValue`, but `set_config_option(model)` to it fails `Provider Registry 中不存在 Model`, `zcode --model builtin:zai/GLM-5.3 --prompt` exits 1 the same way, and `ZCODE_PROVIDER=builtin:zai` is ignored: every turn ran on `account:zai-individual-coding-plan`. Filed zai-org/feedback#1067; the key stays in sudo-secretspec as `ZAI_CODING_PLAN_API_KEY` for when a build can use it. Until then zcode is account login only, and an expired login is acp-dispatch class `auth`, zai-org/feedback#1001.) Plan ids: `account:{zai,bigmodel}-{individual,team}-coding-plan` and `start-plan`, `account:*-offpeak-idle-plan`, `account:*-highspeed-card` (10), plus `builtin:zai-coding-plan`, `builtin:zai` (API key), `builtin:bigmodel*`, `builtin:zai-start-plan`. Custom `~/.zcode/v2/provider_config.json`. Here only `builtin:zai-coding-plan` is on. `zai-start-plan` = `coding_plan_not_entitled`. Pin: `ZCODE_PROVIDER=builtin:zai-coding-plan`. Probes of `builtin:zai` and `builtin:zai-start-plan` still returned only coding-plan GLM-5.3.
-
-Models: `builtin:zai-coding-plan\GLM-5.3`, `builtin:zai-coding-plan\GLM-5.3-Flash` (a bare `--model GLM-5.3` or `GLM-5.3-Flash` means the coding-plan id, 2026-10-24: the list also holds `builtin:zai\GLM-5.3`, the API-key pool, and a full id still works). Registry also GLM-5.2, GLM-5-Turbo (start/team), GLM-5.1/4.x custom. A switch resets effort to `max`.
-
-Effort option `thought`. GLM-5.3 and Flash: `low` `high` `max` (default `max`, cannot disable). GLM-5.2: `disabled` `high` `max`. GLM-5-Turbo and GLM-5.1: `disabled` `enabled`. No map onto a neighbor: `medium` and `xhigh` exit 2 on GLM-5.3. `default` keeps the model default. `disabled` aliases to `none` and matches an option that canonicalizes to `none`.
-
-Windows fixed: 5.3 / Flash / 5.2 = 1000000 (out 128000); 5-Turbo, 5.1, glm-5, 4.x = 200000; GLM-4.5 = 131072; custom id `[1m]` = 1000000; `properties.contextWindow` sets a custom model. `--context N` is `ZCODE_ACP_AUTO_COMPACT_THRESHOLD` (compact once `contextUsed` ≥ N), not a larger window. ctx `(unverified)`. No fast toggle.
-
-### agy
-
-`agy --help`; CLI 1.3.5, server 1.3.0. https://antigravity.google/docs/models is stale (3.6 Flash, Claude 4.6). `agy models` not run.
-
-OAuth offers Gemini, Claude, GPT-OSS, the last two only when `clientInfo.name` is `zed` / JetBrains / Xcode (acp-run sends `zed`). Creds: `oauth-personal` (here), `oauth-business` (no Claude/GPT-OSS), `GEMINI_API_KEY` with optional `GOOGLE_GEMINI_BASE_URL`, Vertex (Gemini-only hard-coded list: 3.1 Pro, 3.5/3.6/3.7/3.8 Flash). No `--provider`, no `--auth-method`.
-
-Ids: `gemini-3.8-flash-{high,medium,low}`, `claude-opus-5-5-{low,medium,high}`, `claude-sonnet-5-5-{low,medium,high}`, `gpt-oss-120b-medium`. API key adds `gemini-3.1-pro-high`, `gemini-3.1-pro-low` (base `gemini-3.1-pro-preview`). `AGY_ACP_DEFAULT_MODEL` default `gemini-3.8-flash-high`.
-
-agy 1.4.1 (2026-10-18) lists bare ids (`gemini-4-argon`, `gemini-3.8-flash`, `claude-opus-5-5`, `claude-sonnet-5-5`, `gpt-oss-120b-medium`) plus a `thinking_level` option (low/medium/high, default high), which `--effort` sets like any other effort option. Before 1.4.1, `--effort low|medium|high` picked `<base>-<level>` (`claude-opus-5-5` + high → `claude-opus-5-5-high`); acp-run still does that when no thought-level option is offered. `xhigh` and `max` exit 2, not rewritten to high. `agy -p --effort max` can reach them; acp-run does not call it. `gpt-oss-120b` is fixed `-medium`. ThinkingLevel: 1 LOW, 2 MEDIUM, 3 HIGH, 4 MINIMAL, 5 EXTRA_HIGH. Options: `model`, `mode` only. `--context` exits 2. Gemini 3.x Flash and 3.1 Pro: 1048576. OAuth `maxTokens` from CCPA `fetchAvailableModels`. Claude and GPT-OSS windows not measured.
 
 ### omp
 
@@ -479,45 +329,7 @@ the guard (2026-11-03). `--info` is exempt; `ACP_RUN_OMP_ANY_MODEL=1` overrides 
 Needs an enabled Anthropic login in omp
 (`omp login`); with an expired one the run ends `No API key found for anthropic` (2026-10-19).
 
-### kiro
 
-`kiro-cli acp` (Homebrew cask `kiro-cli` 2.34.0, added 2026-10-25), native ACP. Under `--perm all`
-acp-run starts `kiro-cli acp --trust-all-tools` (`-a`; a flag of `acp` and `chat`, not of the root
-command), the YOLO of the `~/.bashrc` `kiro-cli()` function. `--perm deny` and `--perm read-only` are refused
-(exit 2): Kiro runs workspace reads, grep, glob and `code` edits without a permission request
-([built-in tools](https://kiro.dev/docs/reference/built-in-tools)), so deny could only trip after the tool
-ran. Use `--perm all` with a read-only brief and a diff check. `acp-dispatch`'s preflight reruns with
-`--perm all` after that refusal.
-First run on a machine (2026-10-25): `session/new` blocks while Kiro downloads the 83 MB
-`all-MiniLM-L6-v2` semantic-search model to `~/.semantic_search/models/` (a restart begins the
-download again), about 66 s here (kirodotdev/Kiro#12118), so the default 2 x 40 s handshake would time out
-and every retry restart it. acp-run gives kiro 120 s per try (`HANDSHAKE_TIMEOUT`;
-`--handshake-timeout S` or `ACP_RUN_HANDSHAKE_TIMEOUT` overrides). Later runs: `Reply with exactly: OK`
-took 4.4 s.
-`route_agent.py` never routes it (`[discovery].never_route`): dispatch it by name. The macOS input
-method (`kiro-cli integrations install input-method`) is not needed and cannot be enabled on macOS 27
-(aws/amazon-q-developer-cli#3916).
-
-### goose
-
-`goose acp` (Homebrew `block-goose-cli` 1.55.0, added 2026-10-23), launched through
-`~/.local/bin/goose-scout`: AWS Bedrock Llama 4 Scout (`us.meta.llama4-scout-17b-instruct-v1:0`,
-us-east-1). Since 2026-10-23 goose-scout routes goose (provider `litellm`, non-streaming) through a
-private LiteLLM proxy on 127.0.0.1:4012 (`~/.config/goose-scout/`, started on demand under
-sudo-secretspec, which injects `AWS_BEARER_TOKEN_BEDROCK`). Its callbacks prepend a rules file to
-the system prompt, turn an `echo hi`-style shell reply into text, and stop a tool call that repeats
-one already run this turn (re-asking Scout without tools for the answer). Before the proxy, Scout
-answered "say hi" with five shell calls and repeated `ls /tmp | head -3` until timeout.
-`GOOSE_SCOUT_BACKEND=bedrock` restores the direct route.
-**Off since 2026-10-28** (`~/.config/goose-scout/DISABLED`, memory pressure); since 2026-10-29
-its Bedrock API key is also deactivated, so even removing the marker gives 403 until Bedrock is
-re-enabled (djbclark-ade issue 141).
-
-Session modes: `auto` (yolo, YOLO_SET), `approve`, `smart_approve`, `chat`. DENY_SET uses
-`approve`: `chat` set over ACP still ran the shell tool (tripwire, 2026-10-23); with `approve`
-goose asks and acp-run denies (perm=0+/1-). Verified 2026-10-23: `just say hi` -> text, tools=0;
-`Run the shell command: echo yolo-test` -> tools=1 perm=0+/0-. goose reports Scout's context as
-10m.
 
 ### grok
 
@@ -529,26 +341,12 @@ Effort `reasoning_effort`, also sent as `reasoningEffort` on the window's `sessi
 
 Context: `session/set_model` `_meta.contextWindow`. Must be in initialize `modelState.availableModels[]._meta.contextWindows`. Measured: four xAI ids 256000 (default) and 500000. `300k` on 4.7 exits 2 (`valid: 256k, 500k`). Config ids `context_window` / `context` / `contextWindow` return "Invalid params". Read-back: `_x.ai/session/info` `context.total`. Live `grok-4.7` low + 500k → `acp-run: applied: model=grok-4.7 effort=low ctx=500k`. TUI `/context-window`, `[model.X] context_window`, `context_windows=[256000,500000]`. Session-scoped; follows a model that lists it; smaller triggers auto-compact. Long-context price from a 200k prompt.
 
-### crush
 
-https://github.com/charmbracelet/crush/pull/2450 — crush-acp v0.98.2, `88a675032c64`.
-
-Catalog 41 providers / 1793 models: aihubmix 349, vercel 297, openrouter 283, venice 125, cortecs 99, opencode-zen 85, opencode-go 38, ionet 37, copilot 35, openai 32, anthropic 18, gemini 11, xai 7, plus bedrock, azure, vertexai, groq, deepseek, zai, moonshot. `provider add`: `openai` `openai-compat` `openrouter` `vercel` `anthropic` `google` `azure` `bedrock` `google-vertex` `hyper` `litellm` `llamacpp` `lmstudio` `ollama` `omlx`. Here: `sipb-llms` in `~/.config/crush/crushrc` (`qwen3.6:35b-a3b-q4_K_M`, `qwen3.5:35b`), Hyper login in the interactive dir. Data dir `~/.local/share/crush-acp` (`CRUSH_GLOBAL_DATA`); `ACP_RUN_CRUSH_DATA` moves it.
-
-ACP models: `sipb-llms:qwen3.5:35b`, `sipb-llms:qwen3.6:35b-a3b-q4_K_M` (current). TUI large/small Ctrl+P, Tab. `--model` is `session/set_model` and crush writes `crush.json` `models.large` (`ScopeGlobal`). Allowed only with `ACP_RUN_CRUSH_DATA`, `--perm deny`, or `--strip-user-config`; else exit 2 (default dir is shared). Read-back `(unverified)`.
-
-`--effort` exits 2. SIPB models: `can_reason`, no `reasoning_levels`, `extra_body` `reasoning_effort: high`. Catalog: fable/opus and gpt-6.1-sol `low,medium,high,xhigh,max`; gpt-6-sol and gpt-6-luna also `none`; gemini 3.8 and grok-4.5 `low,medium,high`; deepseek-v4-flash `low,high,max`; most open models `low,medium,high`; 565 none. Schema lists only `low,medium,high`; crush uses the model's list. `think` bool for Anthropic/Hyper. No `/set_reasoning_effort` turn.
-
-`--context` exits 2. Catalog mostly 1000000–1050000; grok-4.5 500000; copilot Claude 200000–264000; opencode-go glm/kimi ~1M. crushrc `--context-window` (SIPB 32768). `max_tokens` schema max 200000. `disable_auto_summarize`.
-
-### devin
-
-Not installed (`devin-cli` 3000.11.3 via `brew install --cask devin-cli`). Registry: https://agentrq.com/docs/agents/devin .
 
 ## Dispatch slice controls (2026-10-11)
 
 An advisory review that must *read* the repo runs with `--perm read-only`
-(claude, codex, opencode, zcode; elsewhere `--perm all` with a brief that says "do
+(claude, codex, opencode; elsewhere `--perm all` with a brief that says "do
 not edit" and a diff check). Under `--perm deny` claude gets a session with no
 built-in tools at all, so a reading review printed its tool calls as text and
 ended in seconds (2026-10-19, two frontier slices lost, then recovered as
@@ -571,9 +369,8 @@ unlimited. Already-running record-based waiters follow later extensions.
 checked with the model before anything is written
 (`acp-run <agent> --info --model M --effort E --context C`), stored on the job
 record, and kept by `resume`. `--acp-arg` still forwards other flags except model/credential changers (`--model`, `--meta`,
-`--agent-arg`, `--agent-env`, `--auth`, `--set` but effort keys: refused for pi, omp, codex and claude (docs/agent-guard-contract.md)); a
-dash-leading value needs `--acp-arg=--tripwire-exempt-kinds`. zcode `--model` is accepted and
-still optional.
+`--agent-arg`, `--agent-env`, `--auth`, `--set` but effort keys: refused for omp, codex and claude (docs/agent-guard-contract.md)); a
+dash-leading value needs `--acp-arg=--tripwire-exempt-kinds`.
 
 `acp-dispatch extend <out>/jobs/<name>.json 3600` adds an hour to a running
 slice. Use `0` to remove its deadline. The command atomically writes the control
@@ -630,11 +427,7 @@ into earlier calls, the fields `route_agent.py calibrate` re-ranks pools from.
 before merge, even when the fixed work then merged.
 An unfinished record, or no flag at all, is refused with exit 2.
 
-For `agy`, the footer instead names
-`<-C>/.acp-dispatch/<task>-<name>-report.md` and its `.done`. Dispatch adds
-`.acp-dispatch/` once to the workspace repository's local Git exclude file
-(non-Git workspaces need no exclude). Finalize moves the report to the normal
-out folder before publishing its `.done`. Records retain both pairs of paths.
+(For agy, retired 2026-11-06, the footer named a report under the workspace's `.acp-dispatch/` and finalize moved it to the out folder; the record fields that hold both paths stay.) Records retain both pairs of paths.
 
 ## Interactive mode
 
@@ -882,65 +675,9 @@ policy never falls back to a permissive default. If a checkout helper exists but
 cannot load its policy, the run is refused rather than falling back to an installed
 snapshot.
 
-The agent table reflects the machine it was written on (for example Cline is
-pinned to the `cline-pass` provider, and `agy` runs Google's first-party ACP
-server from `~/.local/share/agy-acp-server/`); edit `AGENTS`, `DEFAULT_SET` and
-`YOLO_SET` at the top of the script for yours.
-
-`agy` notes (verified 2026-10-09): YOLO is the session config option
-`mode=yolo` (`default | auto_edit | yolo`), set automatically. agy runs
-commands in whichever of its workspaces sorts first, often its own skills
-dir rather than `-C`, so acp-run names the working directory at the top of
-the prompt. It also drops any inherited `HTTPS_PROXY` for agy (the opencodex
-proxy, uninstalled 2026-10-19, answered it with 407).
-
-**The clientInfo gate (2026-10-10).** agy_acp_server 1.3.0 offers its
-non-Gemini models (`claude-opus-5-5-*`, `claude-sonnet-5-5-*`,
-`gpt-oss-120b-medium`) only to clients whose ACP `clientInfo.name` it
-recognises as Zed, Xcode or JetBrains; any other name gets the `gemini-*`
-models alone, and `--model claude-...` fails with "no model". acp-run
-therefore sends `zed` for agy (`CLIENT_NAME` in the script). Upstream:
-google-antigravity/antigravity-cli#1168, pingdotgg/t3code#16489. If
-`acp-run agy --info` lists no `claude-*` value, check that first.
-
-**Which server (compared 2026-10-10).** acp-run keeps Google's own
-`agy_acp_server.par` 1.3.0, the newest release (ACP registry
-`antigravity-acp` and dl.google.com; agy CLI 1.3.3 ships no newer ACP
-server). Since 2026-10-17 acp-run runs the newest version dir under
-`~/.local/share/agy-acp-server/` instead of a hard-coded 1.3.0, and agy is kept at the
-registry's latest (1.4.1 that day; on Linux the registry adds `--uid=`). Checked again 2026-10-18:
-agy CLI 1.4.2 (Homebrew) still runs server 1.4.1, the newest published (the registry lists 1.4.1;
-dl.google.com answers 404 for 1.4.2, 1.4.3 and 1.5.0). The 1.3.0 notes
-in this file are as tested then. The alternatives and why not:
-
-1. simonepri/refined-antigravity-acp 1.4.2 wraps the same binary, so it
-   inherits the gate (our opt-in `REFINED_AGY_CLIENT_NAME`,
-   simonepri/refined-antigravity-acp#49, is unmerged); it replaces the
-   `mode` option and renames models to base id plus `thought_level`,
-   injects steering prompts and rewrites the session SQLite. Its hang,
-   crash-recycle and loop fixes are the reason to revisit it if those
-   show up in agy runs.
-2. shubzkothekar/antigravity-acp (Bun) spawns the `agy` CLI per prompt,
-   the path with the hidden burst limit, and downloads its own `agy`.
-3. An `agy -p` adapter of our own: the same burst-limit problem.
-
-To try another server for one run, set `ACP_RUN_AGY_SERVER` to its
-command (one path, `~` expanded), for example a newer server unpacked to
-`~/.local/share/agy-acp-server/<version>/agy_acp_server.par`, or
-`$(command -v refined-antigravity-acp)` once #49 lands (it needs
-`REFINED_AGY_ACP_BIN` pointing at the 1.3.0 binary and its
-`REFINED_AGY_CLIENT_NAME`). Unset it to go back. Check `--info` for the
-`mode` option and model ids before relying on it: `YOLO_SET` and
-`--model` use the stock server's names.
-
-## Crush data dir (2026-10-14)
-
-`acp-run crush` hands crush-acp `CRUSH_GLOBAL_DATA=~/.local/share/crush-acp`, the same dir the
-interactive `crush` shell function uses, so a model picked in the TUI is also the model
-`acp-run` runs on. `ACP_RUN_CRUSH_DATA=<dir>` moves it for one run (`~` expanded); the SIPB
-benchmark (`skills/sipb-llm-bench/bench.py`) sets it to a private dir with the model under test
-pinned in `crush.json` and the catalog cache `providers.json` copied in, so it never edits the
-shared file.
+The agent table reflects the machine it was written on; edit `AGENTS`, `DEFAULT_SET` and
+`YOLO_SET` at the top of the script for yours. (The `agy` notes, the clientInfo gate, the server comparison and the
+Crush data dir section went with those agents, 2026-11-06; the repo history has them.)
 
 ## Why not acpx?
 

@@ -45,7 +45,6 @@ try:
     import where as _where
 except (ImportError, SyntaxError):   # SyntaxError: an older python (3.9) that cannot parse it; locate nothing
     _where = None
-import nested_pty as _nested
 import claude_identity as _cid
 
 HOME = str(Path.home())
@@ -67,16 +66,13 @@ SLEEPER_JOURNALS = [Path(os.environ.get("HERDR_PLUGIN_STATE_DIR") or _XDG_STATE 
                     Path(os.environ.get("HERDR_SLEEPER_STATE") or _XDG_STATE / "herdr-sleeper") / "sleeping.json"]
 # a session's own servers: children that are not work in flight (MCP servers, language servers, keep-awake)
 SERVER_PROCS = re.compile(r"(\bmcp\b|-mcp\b|langserver|language-server|\blsp\b|marksman|token-savior|caffeinate|"
-                          r"maestro\.cli|1password|extrabar|zcode-node-repl|zcode-cli)", re.IGNORECASE)
+                          r"maestro\.cli|1password|extrabar)", re.IGNORECASE)
 # how each TUI resumes a session by id (verified against `<tui> --help` on this machine, 2026-10-08; herdr-sleeper's
 # KINDS table agrees). {flags} are the launch flags worth replaying, {sid} the session id.
 RESUME_FORMS = {"claude": "claude{flags} --resume {sid}", "opencode": "opencode{flags} -s {sid}",
                 "codex": "codex{flags} resume {sid}", "cursor": "cursor-agent{flags} --resume {sid}",
-                "copilot": "copilot{flags} --resume={sid}", "hermes": "hermes{flags} --resume {sid}",
-                "qwen": "qwen{flags} --resume {sid}", "agy": "agy{flags} --conversation {sid}",
-                "omp": "omp{flags} --resume={sid}", "pi": "pi{flags} --session {sid}",
-                "zcode": "zcode{flags} --resume {sid}",
-                "muse": "muse resume {sid}", "cline": "cline --id {sid}"}
+                "hermes": "hermes{flags} --resume {sid}",
+                "omp": "omp{flags} --resume={sid}", "pi": "pi{flags} --session {sid}"}
 # claude launch flags a resume may replay (the allow-list herdr-sleeper uses); everything else is dropped
 REPLAY_BOOL = {"--dangerously-skip-permissions", "--verbose"}
 REPLAY_VALUE = {"--model", "--permission-mode", "--add-dir", "--effort"}
@@ -86,7 +82,7 @@ REG_STATUS = {"busy": "working", "shell": "working", "waiting": "blocked", "idle
 # Paseo providers whose agent can take a message into a RUNNING turn (`paseo send --behavior steer` queues it).
 # Read from the Paseo 0.x daemon bundle on 2026-10-23: ClaudeAgentSession, CodexAppServerAgentSession, OmpAgentSession,
 # OpenCodeAgentSession and PiRpcAgentSession implement steerActiveTurn. Every provider that `extends: acp` in
-# ~/.paseo/config.json (cline, grok, copilot, ...) runs ACPAgentSession, which has none: Paseo then INTERRUPTS the
+# ~/.paseo/config.json (grok, copilot, ...) runs ACPAgentSession, which has none: Paseo then INTERRUPTS the
 # running turn and starts the sent text as a new one (agent-manager steerOrReplaceActiveTurn: "replaced"). Plugin
 # providers (antigravity, muse, hoplite) steer only when they negotiate "prompt.steer": unknown, so not listed.
 PASEO_STEER_PROVIDERS = frozenset({"claude", "codex", "omp", "opencode", "pi"})
@@ -99,8 +95,7 @@ PASEO_LS_TIMEOUT = 20
 PASEO_STATUS = {"running": "working", "idle": "idle"}
 # binary name -> agent label, for TUIs running outside herdr (herdr panes are taken from herdr itself)
 PROC_AGENTS = {"claude": "claude", "codex": "codex", "cursor-agent": "cursor", "opencode": "opencode",
-               "zcode": "zcode", "pi": "pi", "copilot": "copilot", "qwen": "qwen", "agy": "agy",
-               "muse": "muse", "cline": "cline", "hermes": "hermes", "grok": "grok", "devin": "devin"}
+               "pi": "pi", "hermes": "hermes", "grok": "grok"}
 
 
 def omp_executable(argv0, argv):
@@ -807,8 +802,7 @@ def _paseo_rows(have, anc, include_archived=False):
 
 def pane_procs(pane):
     """Foreground processes of a herdr pane (`pane process-info`): [{pid, name, argv, cwd}], shell pid.
-    None when herdr could not read them (unknown is not empty). A pane whose only foreground process is Kiro's terminal shim is
-    answered with the foreground processes of its inner PTY when `nested_pty` can prove them (the cwd is then '': ps has none)."""
+    None when herdr could not read them (unknown is not empty)."""
     info = herdr_json("pane", "process-info", "--pane", pane).get("process_info")
     if not isinstance(info, dict):
         return None, None
@@ -817,57 +811,7 @@ def pane_procs(pane):
         argv = pr.get("argv") or ([pr["cmdline"]] if pr.get("cmdline") else [])
         procs.append({"pid": pr.get("pid"), "name": pr.get("name") or pr.get("argv0") or "", "argv": argv,
                       "argv0": pr.get("argv0") or "", "cwd": pr.get("cwd") or ""})
-    inner = _kiro_inner(procs, info.get("shell_pid"))
-    if inner is _KIRO_UNKNOWN:      # a confirmed shim whose inner side could not be read: unknown, not a plain shell
-        return None, info.get("shell_pid")
-    return inner or procs, info.get("shell_pid")
-
-
-class _KiroUnknown:
-    """Sentinel result of `_kiro_inner`: the pane IS a Kiro shim but its inner foreground could not be read (ps failed, empty or
-    a live process's argv unreadable). Distinct from None (not a shim, or the chain is absent/ambiguous: herdr's answer stands)
-    and from a list (proven)."""
-    def __repr__(self):
-        return "<kiro inner unknown>"
-
-
-_KIRO_UNKNOWN = _KiroUnknown()
-
-
-def _pid_alive(pid):
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except OSError:      # EPERM: it exists
-        return True
-    return True
-
-
-def _kiro_inner(procs, shell_pid):
-    """The inner-PTY foreground processes behind a Kiro shim in `pane_procs` shape (proven: a non-empty list, its group leader
-    included), None (not a shim, or no/ambiguous nested chain), or `_KIRO_UNKNOWN` (a shim that could not be read). A member that
-    exited after the ps snapshot is skipped; if the leader itself exited the foreground job is gone and herdr's answer stands."""
-    if not isinstance(shell_pid, int) or len(procs) != 1 or procs[0].get("argv0") != _nested.OUTER_ARGV0:
-        return None
-    rc, text = run(*_nested.PS_ARGS, timeout=5)
-    table = _nested.parse_ps(text) if rc == 0 else {}
-    if not table:      # ps failed, timed out, or printed nothing: `ps -ax` never legitimately does
-        return _KIRO_UNKNOWN
-    rows = _nested.inner_foreground(procs, shell_pid, table)
-    if not rows:
-        return None
-    command = lambda pid: run("ps", "-ww", "-o", "command=", "-p", str(pid), timeout=5)[1].strip()
-    out = []
-    for r in rows:
-        argv = _nested.argv_of(r, command)
-        if not argv:
-            if _pid_alive(r["pid"]):
-                return _KIRO_UNKNOWN
-            continue
-        out.append({"pid": r["pid"], "name": os.path.basename(r["comm"]), "argv": argv, "argv0": argv[0], "cwd": ""})
-    leader = rows[0]["pgid"]
-    return out if any(p["pid"] == leader for p in out) else None
+    return procs, info.get("shell_pid")
 
 
 SID_IN_ARGV = re.compile(r"(?:--resume|--session|--conversation|--id|-s|-r)(?:=|$)")
@@ -1003,10 +947,6 @@ def _pi_sid(argv, lossy=False):
 def _native_extra(argv):
     """Exact native interactive entries, excluding service and one-shot commands."""
     base = [os.path.basename(a) for a in argv[:2]]
-    if base and base[0] == ".cline" and "--tui" in argv[1:] and not {"--acp", "--headless", "--zen", "hub", "core"}.intersection(argv[1:]):
-        return "cline"
-    if len(base) == 2 and base[0] == "goose" and base[1] == "session":
-        return "goose"
     if len(base) == 2 and base[0] == "node" and base[1] == "mastracode":
         return "mastra"
     return None
@@ -1015,18 +955,6 @@ def _native_extra(argv):
 def _tui_of(procs):
     """(agent label, pid, session id, argv) of the TUI running in a pane, from its foreground processes."""
     procs = list(procs or [])
-    # npm's Cline launcher waits for its cached native TUI. Select that actual
-    # TUI, rather than treating it as background work below the Node launcher.
-    # Restrict this preference to the exact sibling cache used by that launcher.
-    for pr in procs:
-        argv = pr["argv"]
-        if _native_extra(argv) != "cline":
-            continue
-        launcher = str(Path(argv[0]).with_name("cline"))
-        if any(len(p["argv"]) >= 2 and os.path.basename(p["argv"][0]) == "node"
-               and os.path.realpath(p["argv"][1]) == os.path.realpath(launcher) for p in procs):
-            procs = [pr] + [p for p in procs if p is not pr]
-            break
     for pr in procs:
         argv = pr["argv"]
         names = [os.path.basename(pr["argv0"] or "")] + [os.path.basename(a) for a in argv[:2]]

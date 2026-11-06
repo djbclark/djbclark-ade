@@ -580,13 +580,6 @@ class TestCheckSignalHint(ReapBase):
         self.assertIn("resume in place", out)
         self.assertIn("restart-resume failed: boom", out)
 
-    def test_agy_on_a_non_gemini_model_resumes_in_a_new_session(self):
-        # resume_record continues such a slice with a checkpoint instead of refusing it
-        out = self.checked(agent="agy", model="claude-sonnet-4-5")
-        self.assertIn("resume in place", out)
-        self.assertIn("continues in a new session with a checkpoint", out)
-        self.assertNotIn("no resumable session", out)
-
     def test_refused_and_auth_keep_their_own_hint(self):
         out = self.checked("NO-REPORT: refused (the model declined)")
         self.assertNotIn("resume in place", out)
