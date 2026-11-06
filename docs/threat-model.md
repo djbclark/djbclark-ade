@@ -47,8 +47,8 @@ What an attacker would want, in order of damage:
 6. **Transcripts**, which hold whatever agents printed, occasionally a secret (proposal 4.5 item 5).
 7. **The Hermes/Telegram channel**: a message path to the operator's phone, and two-way tools
    (`mcp__hermes__*`, `docs/mcp-servers.md`).
-8. **launchd jobs** that persist across logins: `launchd/*.plist` (acp-dispatch-reap, context-budget,
-   load-watch, routing-recalibrate, skillopt-sleep, zcode-key-auth) plus per-slice `launchctl submit` jobs
+8. **launchd jobs** that persist across logins: `launchd/*.plist` (acp-dispatch-reap, load-watch, skillopt-sleep; context-budget,
+   routing-recalibrate and zcode-key-auth were deleted 2026-11-06 by the slim-down) plus per-slice `launchctl submit` jobs
    (`bin/acp-dispatch` `runner_script`).
 9. **The operator's machine itself** (a 16 GB Mac): availability under agent fan-out
    (`bin/acp-dispatch` `machine_overloaded`, load reached 230 on 2026-10-12).
@@ -244,14 +244,14 @@ others, and the merge path is unenforced. "Control" is what exists; "Gap" is wha
 ### 4.6 launchd persistence
 
 * **Control.** Plists are installed by tools' own subcommands (`acp-dispatch reap --install`,
-  `load-watch install`, `zcode-key-auth install`, `context-budget-check` and `skillopt-night install`),
+  `load-watch install` and `skillopt-night install`; `zcode-key-auth install` and `context-budget-check install` were removed 2026-11-06),
   copied from `launchd/` to `~/Library/LaunchAgents`. No installer was found (2026-10-20) for
-  `launchd/com.djbclark.routing-recalibrate.plist`; how it is installed is unverified. Per-slice jobs remove
+  `launchd/com.djbclark.routing-recalibrate.plist` (deleted 2026-11-06; a Paseo schedule replaces it if wanted). Per-slice jobs remove
   their own label on exit; a sweep reaps dead ones.
 * **Gap.** A plist in a PR is code that runs as the operator at every login: review label,
   `ProgramArguments`, `WorkingDirectory`, `PATH` (fixed paths under `/Users/djbclark/...`). Every shipped
   plist runs its script from the live checkout, so a change to `bin/load-watch` (every 20 s),
-  `bin/acp-dispatch`, `bin/zcode-key-auth`, `bin/context-budget-check`, `bin/routing-recalibrate` or
+  `bin/acp-dispatch`, `bin/context-budget-check` (`zcode-key-auth` and `routing-recalibrate` were removed 2026-11-06) or
   `bin/skillopt-night` runs within one schedule tick of being pulled or checked out there, without
   reinstalling anything. Review those scripts as you would a plist. Merging is deployment.
 

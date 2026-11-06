@@ -10,7 +10,11 @@
 - `config/routing.toml` dropped the `pi`, `antigravity`, `antigravity-claude`, `antigravity-argon`, `zai`, `alibaba`, `crush`, `devin` and `copilot` services; the
   retired accounts are `never_route` in discovery, so an aiuse account for one is never surfaced as a dispatchable service. The `github` kind now has no pool. (#0)
 - `bin/skill-everywhere` no longer links goose, pi, agy, copilot, qwen, devin, cline, muse or zcode. (#0)
+- Removed `bin/proc-cpu-watch`, `bin/session-load-watch`, `bin/rumination-watch`, `bin/routing-recalibrate`, the `loadwatch` skill and the proc-cpu-watch, rumination-watch, routing-recalibrate, session-history-update and context-budget launchd plists (slim-down E5) (#0).
 
 ### Changed
 - `bin/route_agent.py` and `bin/acp-dispatch` lost the Pi capacity gate, the `agy` model-family mapping, the agy report-path and resume special cases and the
   copilot, cline and zcode provider-map entries. (#0)
+- Changed `load-watch`: it attributes a spike to a Paseo agent from `paseo ls -g --background --json` by working directory (the walk up stopping at the agent's own CLI), tells it with `paseo send --no-wait --json` (reading `.status`; `queued` is not delivered), sends work that several agents share or that it cannot attribute to the operator, and drops the relay.py channel and `watcher set --relay`/`--sid` (slim-down E5) (#0).
+- Changed `context-budget-check`: `install`/`uninstall` removed (exit 2); it runs as a nightly Paseo schedule (J3) (#0).
+- Changed `context-watch`: it no longer imports session-finder's `fleet.py` (slim-down E5) (#0).
