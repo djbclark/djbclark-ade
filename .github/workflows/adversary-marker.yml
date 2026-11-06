@@ -1,0 +1,64 @@
+name: Adversary marker
+
+# The merge gate for AGENTS.md review rule 1 (slim-down E8, 2026-11-06; docs/review-boundary.md).
+# It reads the PR body's `<!-- adversary-verdict:v1 {...} -->` marker through the API and posts the
+# commit status `adversary-marker` on the PR head: success only for a live APPROVE naming that head.
+#
+# Why these triggers (Wave 4 research, 2026-11-06): `pull_request_target` is blocked by default in public
+# repositories from 2026-12-02, and a `pull_request` workflow is read from the PR's own merge ref, so a PR
+# could replace this file. `workflow_run` and `workflow_dispatch` run this file and the checked-out module
+# from the DEFAULT branch; nothing from the PR is checked out or run. The `merge-gate` environment allows
+# deployments from `master` only, so its App key is unreachable from any `pull_request` run, and the ruleset
+# pins the required check to the App's integration id, so a status posted by any other workflow (a PR may
+# add one with `permissions: {statuses: write}`) does not count. A PR that edits or deletes the Tests
+# workflow gets no `adversary-marker` status at all, which fails closed (the check is required).
+#
+# A body edit (writing the marker after the push) is not a Tests run: re-check with
+#   gh workflow run adversary-marker.yml -f pr=N
+
+on:
+  workflow_run:
+    workflows: ["Tests"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: Pull request number to re-check (after the marker was written or edited)
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: adversary-marker-${{ github.event.inputs.pr || github.event.workflow_run.pull_requests[0].number || github.event.workflow_run.head_sha }}
+  cancel-in-progress: true
+
+jobs:
+  marker:
+    # Belt and braces beside the environment's branch policy: a dispatch from any other ref does nothing.
+    if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: merge-gate
+    permissions:
+      pull-requests: read
+      contents: read
+    steps:
+      - name: Check out the default branch (never the PR)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Mint the ade-merge-gate App token
+        id: app-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.MERGE_GATE_CLIENT_ID }}
+          private-key: ${{ secrets.MERGE_GATE_PRIVATE_KEY }}
+          permission-statuses: write
+
+      - name: Judge the marker and post the status
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          STATUS_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: python3 -I bin/adversary_marker.py --event "$GITHUB_EVENT_PATH" --event-name "$GITHUB_EVENT_NAME" --repo "$GITHUB_REPOSITORY"
