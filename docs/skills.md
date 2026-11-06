@@ -57,7 +57,6 @@ djbclark-ade on 2026-10-31; the tools stay installed on the machine.
 | `peer-relay` | Teaches Hermes to message a peer session with `relay.py` by absolute path, read its exit codes (a `queued: <id>` line is exit 0: delivered when the peer is idle) and never resend an unverified message. Drafted here 2026-10-23; Hermes installs it itself. | A peer must be told, asked or answered; "tell the agent doing X". |
 | `steps` | Walks open items one multiple-choice prompt at a time, recommendation first. On Grok Bot the prompt is a `SendToUser` question widget (section 2d, 2026-10-23). Plan mode (section 6, 2026-11-04, explicit only): interviews the operator on 3-5 real design forks before a plan is written. | `/steps` (optionally item numbers or a topic); `/steps plan [topic\|file]`; "walk me through it". |
 | `retro` | Periodic self-review (2026-11-04): runs `bin/ade-retro --since DATE` (merged PRs, changelog entries, handoffs in the window) and writes a short retrospective: what shipped, what recurred, what to queue, instruction-file rules worth adding. Read-only. | `/retro`, "retro since 2026-10-28". |
-| `session-finder` | Finds which session is or ever was on a topic, where it lives, and how to continue it. | `/session-finder`, `/session-finder-all` (adds ended sessions); "tell the agent doing X ...". |
 
 ## Orchestration and routing
 
@@ -70,7 +69,7 @@ djbclark-ade on 2026-10-31; the tools stay installed on the machine.
 | `dialogue` | Runs a multi-model dialogue (for example Grok, Fable, Astra) that produces one artifact with a final-word model: fixed rounds through pinned routes, footers with point ids and dissent, a final-word state-file gate, noise strip and protocol lint. | "have the models chat about it and write X"; "three-model dialogue". Script: `skills/dialogue/scripts/dialogue.py`. |
 | `skillopt-sleep` | Reviews and steers the nightly SkillOpt-Sleep cycle (`bin/skillopt-night`, launchd 03:30) that mines every agent's sessions and stages gated skill edits: last night's report, free mock dry-run, per-skill adoption, the backend failover chain. | `/skillopt-sleep`; "what did the agents learn last night", "adopt the proposal". Guide: `docs/skillopt-sleep.md`. |
 
-Moved to site-djbclark (`~/ops/site-public-djbclark/skills`, the third `skill-everywhere` root) on 2026-11-06: `gmail-search`, `ovhcloud-api`, `aws-rules`, `terminus-kira`, `diskfree`, `bottom-config`, `setup-modern-cli`, `teach`, `todo`, `report`, `greptile`, `coderabbit-feeder`, `firecrawl`, `barnowl`; `book-to-kb` is `tools/book-to-kb` there. Deleted: `siyuan*`, `cow-workspaces`, `ralph-tui-orchestration`, `skillopt-sleep-learned`.
+`session-finder` is now only the `relay.py` shim over `paseo send` (2026-11-06, slim-down E3; its search, history index and launcher are gone). Moved to site-djbclark (`~/ops/site-public-djbclark/skills`, the third `skill-everywhere` root) on 2026-11-06: `gmail-search`, `ovhcloud-api`, `aws-rules`, `terminus-kira`, `diskfree`, `bottom-config`, `setup-modern-cli`, `teach`, `todo`, `report`, `greptile`, `coderabbit-feeder`, `firecrawl`, `barnowl`; `book-to-kb` is `tools/book-to-kb` there. Deleted: `siyuan*`, `cow-workspaces`, `ralph-tui-orchestration`, `skillopt-sleep-learned`.
 
 ## Knowledge and search
 

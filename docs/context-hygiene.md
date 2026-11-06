@@ -187,7 +187,7 @@ window and ignores `autoCompactWindow` (upstream getpaseo/paseo#4949, open 2026-
 `--json` (list of records for scripts), `--min-pct N` (hide emptier agents and unknown sizes; compared
 unrounded), `--source auto|paseo|recent`, `--recent-minutes M` (both numbers finite and not negative,
 else exit 2). Read-only, writes not even bytecode, exit 0 always (2 for bad usage). Titles and cwd go
-through `fleet.py`'s `clean_text` onto one line; ids must be uuids. It is
+through `context-watch`'s `clean_text` (copied from the removed `fleet.py`, 2026-11-06) onto one line; ids must be uuids. It is
 not wired into `fleet-watch` or `settings.json`.
 
 1. **Tokens.** The newest non-sidechain assistant usage block of the session transcript,
