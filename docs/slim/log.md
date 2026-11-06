@@ -71,6 +71,12 @@ J2 pool audit (lead's reading, ruling 10 / R2-12..15): Paseo providers that each
 
 Waivers given by the operator 2026-11-06 ("B waive both"): the sleeping pane w1:p1 and the four dirty worktrees. **C7 PASSED.** E2 may merge after E1; E3/E4/E6 are clear of this gate.
 
+## Wave 2 closed; Wave 3 merging (2026-11-06 ~23:00Z)
+
+- E9 merged at 4ac820f (worktree branch `worktree-agent-a469de6c7fc476388`, head b525ba4, APPROVE after two repair rounds); conflicts with E1/E2 resolved in docs/model-routing.md (E2's "removed" rows kept, E9's dropped rows gone), skills/model-routing/SKILL.md (both notes combined), tests/test_skill_everywhere_all.py (E1's five tests kept, the pi test dropped), tools/acp-run/README.md (E9's trimmed paragraph). Merger's lines at aed8f2f: three AGENTS.md pi doc rows, rule 3's zcode-key-auth/codium-ai note; E9's fragment folded into the branch fragment. changelog-fold and ade-template-check clean. Full suite on a detached copy of aed8f2f running (`/tmp/slim-verify-w2.log`).
+- Ruling (ledger-rulings.md, "Wave 3 merge gates re-read"): Wave 3 slices merge to the branch on APPROVE; the day-of-verification and C3 per-file gates move to the final PR's checklist; C3 migrations start now in parallel.
+- E10 writer started from aed8f2f. E3 (845735b) and E5 (4db4047) under review; E4 approved at c9319dd, merges after E5 and E3 (order: E5, E3, E4; E3b after E5).
+
 ## Wave 2 merged (2026-11-06 ~22:40Z)
 
 - E1 merged at 826da46 (worktree branch `worktree-agent-a4b7b27ccf9493f12`, head 6dc2093, APPROVE after one repair round); site-djbclark `slim-intake/2026-11` at fee6ac5 (pushed; direct-commit repo: the lead merges it to master at the final merge, naming the five files edited outside the moved set: AGENTS.md, bin/bg-offload, claude/README.md, cursor/home-agents.mdc, roles/watchdogd/templates/watchdogd.d/hermes-quota.toml.j2).
