@@ -75,6 +75,7 @@ Waivers given by the operator 2026-11-06 ("B waive both"): the sleeping pane w1:
 
 - Briefs `docs/slim/briefs/wave4-E8-gate.md`, `wave4-E6-shim.md`, `wave4-E7-route.md`. E8 and E6 writers (Opus 5.5 high, own worktrees) dispatched together: E8 owns `bin/review-launch`, `bin/review-pr`, `bin/adversary_marker.py` and the Action; E6 calls review-launch by path and stubs it. E7 waits for the Wave 3b merge (it touches `route_agent.py` and `config/routing.toml` after 3b removes the retired pool rows). Nothing on the Mac changes: the App, the `merge-gate` environment and the ruleset are operator steps in E8's report, batched into the final-merge list.
 - Order of merges to come: E10 (Wave 3 closes), 3b, E8, E6, E7.
+- **Full suite on the Wave 2 head aed8f2f** (detached worktree, 2026-11-07): 155 failed, 9,654 passed, 32 skipped, 1,897 subtests passed in 2,603 s, rc=1; every failing test id is in the baseline list (`comm -13` empty): **no new failure**. The count fell from 166 because E1/E2/E9 deleted baseline-failing files. Log `/tmp/slim-verify-w2.log` in the lead's container.
 
 ## Wave 4 research filed (2026-11-07 ~00:30Z)
 
