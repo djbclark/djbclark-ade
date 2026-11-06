@@ -822,6 +822,10 @@ command). Append to docs/slim/log.md after every wave: what merged, what
 was lost on purpose, what the operator must do by hand.
 ```
 
+## K2. Wave 1 amendments (2026-11-06, lead; detail in `docs/slim/ledger-rulings.md`)
+
+The W1 ledger (`docs/slim/ledger.md`, 627 rows) amends this plan where the evidence contradicted it: E7's "KEEP the model-chain half of `failover.py`" is withdrawn (its only live importer is `skillopt-night`, DELETE; ruling 1); `codex-env-policy-apply` is struck from E9's retired-helper list (Codex is kept; ruling 9); `tests/test_acp_run_*` are SHIM with `acp-run`, not deleted in-slice (ruling 3); E11's docs keep-list gains "a doc whose tool is KEEP stays, trimmed" (ruling 7); `agents/claude/settings.json.tmpl` and `.github/workflows/test.yml` join the serial merger's shared files (ruling 8); the C2 hook list is four files, not two (`autorename_nudge.py` and `relay_prose_nudge.py` added); `fleet.py` is SHIM with the E5 gate; the five symlinked skills are UNLINK. Section D's D12 is corrected: `git filter-repo` needs a select line and a rename line per path (`docs/slim/research/wave2-2026-11-06.md`); E2 gains the precondition of a committed `.worktreeinclude`; D7's single `~/.claude/skills` symlink is unconfirmed (per-skill links are documented).
+
 ## L. Sources (read 2026-11-06)
 
 Check-ins: `docs/checkins/*.md` (5 batch-1 reports), `slim-down-checkins-2026-11-06.md`
