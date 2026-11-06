@@ -50,16 +50,18 @@ a burst: 2026-11-03, four parallel agy runs spent a 25% Argon surplus in ~10 min
 `list-work` reads docs/surplus-work.md in each repo under ~/src (or each --repo), most valuable first (format: that file
 in djbclark-ade); `--pool POOL` (a service or provider/family) keeps only items that pool may serve: its fit and, for a
 repo-scoped pool, its repos. Exit: 0 done, 2 usage (an unknown --pool too), 3 aiuse unreadable (no verdict, nothing sent
-or recorded).
+or recorded), 75 another check/notify held `<state>.lock` past QUOTA_SURPLUS_LOCK_TIMEOUT (300 s; nothing read, sent or
+recorded). check and notify (not --dry-run) hold that lock for their whole read-modify-write of the state file.
 Environment: QUOTA_SURPLUS_STATE, QUOTA_SURPLUS_PING (hermes-ping), QUOTA_SURPLUS_RELAY (relay.py), QUOTA_SURPLUS_FLEET
 (fleet.py), QUOTA_SURPLUS_LEADS, QUOTA_SURPLUS_SRC (~/src), QUOTA_SURPLUS_NOW (ISO time, tests), QUOTA_SURPLUS_MIN_SURPLUS,
-_ACT_SCORE, _HORIZON_WEEKLY_H, _HORIZON_SHORT_H, _RENOTIFY_H.
+_ACT_SCORE, _HORIZON_WEEKLY_H, _HORIZON_SHORT_H, _RENOTIFY_H, _LOCK_TIMEOUT.
 """
 from __future__ import annotations
 
 import argparse
 import importlib.machinery
 import importlib.util
+import fcntl
 import json
 import os
 import re
@@ -67,6 +69,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -82,6 +85,7 @@ HORIZON_WEEKLY_H = 6.0
 HORIZON_SHORT_H = 1.5
 EPISODE_TOLERANCE_S = 600
 RENOTIFY_H = 24.0
+LOCK_TIMEOUT_S = 300.0
 WEIGHT = {"frontier": 2.0, "subscription": 1.5, "free": 0.5}
 NO_ALERT_BILLING = {"credits", "prepaid"}
 # djbclark's ruling (2026-11-03, via lead 7c58015b): running out is fine on these aiuse providers, never on the others.
@@ -813,6 +817,20 @@ def main(argv: list[str] | None = None) -> int:
                       else "no surplus work item fits")
         return 0
 
+    if args.dry_run:
+        return run_and_report(args)
+    # check and notify both read, change and replace the state file: hold one exclusive lock for the whole cycle so an
+    # interactive check cannot erase a notify's notified_at/cooldown (local-review P2 on 28bd211)
+    lock = state_lock(env_float("QUOTA_SURPLUS_LOCK_TIMEOUT", LOCK_TIMEOUT_S))
+    if lock is None:
+        print(f"quota-surplus: busy: another run holds {state_path()}.lock; nothing read, sent or recorded",
+              file=sys.stderr)
+        return 75
+    with lock:
+        return run_and_report(args)
+
+
+def run_and_report(args) -> int:
     rc, verdicts, state = run_check(args)
     if rc:
         return rc
@@ -835,6 +853,23 @@ def main(argv: list[str] | None = None) -> int:
     if not args.dry_run:
         save_state(state)
     return 0
+
+
+def state_lock(timeout_s: float):
+    """An open, exclusively flock'ed `<state>.lock` file (closing it releases the lock), or None after timeout_s."""
+    p = Path(f"{state_path()}.lock")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    fh = p.open("a")
+    deadline = time.monotonic() + max(0.0, timeout_s)
+    while True:
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return fh
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                fh.close()
+                return None
+            time.sleep(0.2)
 
 
 if __name__ == "__main__":
