@@ -661,7 +661,7 @@ method that runs the waves.
    slower. Read `acp-run: applied: model=... effort=... ctx=...`; the per-agent
    table is `tools/acp-run/README.md` (2026-10-15).
 6. **The reserve, never depleted:** none now. copilot, the last reserve, left the router 2026-11-06 (Paseo's Copilot
-   provider replaces the CLI; its allowance rules are in git history). **Grok is no longer a reserve (2026-10-18):** GrokBot (the
+   provider replaces the CLI). The Copilot allowance rules below still bind work on Paseo's `copilot` provider. **Grok is no longer a reserve (2026-10-18):** GrokBot (the
    cloud Chief of Staff) moved to its own separate Cursor pool when djbclark
    upgraded to the $60 Cursor plan, so the `grok` TUI is an ordinary
    subscription pool (`realtime-web`, `research`, `bulk`; no floor), ranked
@@ -671,6 +671,31 @@ method that runs the waves.
    (`NEVER_ROUTE` in `route_agent.py`; it stays in Hermes's chain as its
    lifeline; aiuse `[disabled_services]`). Claude itself: keep enough 5h headroom to finish
    integrating what is in flight, because orchestration runs from it.
+   **Exception (djbclark, 2026-11-01):** from the moment djbclark says the Copilot allowance is about to be lost
+   (its counters reset on the 1st of each month, 00:00 UTC, and unused allowance never carries over; GitHub docs
+   "Usage-based billing for individuals", https://docs.github.com/en/copilot/concepts/billing/usage-based-billing-for-individuals,
+   read 2026-11-01), the floor, the `github`-only limit and the concurrency caps (`max_parallel = 1`) are lifted
+   until the next 00:00 UTC on the 1st, at most 24 hours, and no longer: open a
+   Paseo tab on provider `copilot` (the router and `acp-dispatch` have no copilot agent since 2026-11-06). The `load-watch admit` gate still applies, because the limit is local memory.
+   The router has no copilot reading any more, so the dashboard check below is the only guard.
+   **Included allowance only, never money:** Copilot has billed per token since 2026-06-01 (input, cached input
+   and output tokens priced per model, converted to AI credits at 1 credit = $0.01; GitHub docs "Usage-based billing
+   for individuals", read 2026-11-01); a prompt with many tool-call turns is many model calls, so tool calls are NOT
+   free, and long turns on big contexts cost more, cached input less. Usage past the allowance is charged to the
+   payment method unless a Bundled AI credits budget of $0 with "Stop usage when budget limit is reached" is set.
+   Before the first dispatch check the usage dashboard for what is left and confirm that $0 stop is set; stop
+   dispatching when the allowance is spent; never run on purchased credits (item 7 still binds). Models, by
+   Terminal-Bench 4.0 score first (Vals AI, https://www.vals.ai/benchmarks/terminal-bench-4, 2026-10-29) and token
+   price second (GitHub docs "Models and pricing",
+   https://docs.github.com/en/copilot/reference/copilot-billing/models-and-pricing, read 2026-11-01; $ per M
+   tokens in/out): `claude-sonnet-5.5` (64.1%, $2/$10; $16.51 per test) for code and judgment, `gpt-6.1-terra`
+   (49.5%, $1/$5; $2.16 per test) for bulk and for an advisory second opinion (weaker than Sonnet, so never a gate;
+   djbclark's account is offered no Opus, Fable, Sol or Astra on Copilot). Those ids were listed by the retired Copilot CLI on 2026-11-02; Paseo's `copilot` provider lists its own models, so
+   pick an id it offers, not a price-page id. `kimi-k3` (17.2% on Vals, $3/$15, $12.48 per test) and `gemini-3.8-flash` (19.7%,
+   $0.75/$3.75 promotional through 2026-12-31, but $8.65 per test: cheap per token, not per task) score below the
+   tier-2 bar of item 14: never code, never a review or gate; `gemini-3.8-flash` for bulk that a stronger model
+   reviews, `kimi-k3` for diversity only. Avoid `auto` (its model, and so its price, is not chosen by you). Prices
+   and scores change: re-read both pages before relying on these.
 7. **Never:** **hermes** as a delegation target (the operator's own assistant;
    `acp-run` and `acp-dispatch` refuse it by an approval gate); the
    prepaid pools (opencode-zen paid, openrouter, deepseek) without a fresh

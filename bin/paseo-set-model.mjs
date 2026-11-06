@@ -20,7 +20,7 @@ const load = (rel) => import(pathToFileURL(path.join(DIST, rel)).href);
 
 // A leading `provider/` on a model names a provider; only these are treated as one, because an
 // omp model id is itself `anthropic/claude-…` and must pass through whole.
-const PROVIDERS = new Set(["claude", "codex", "opencode", "omp", "pi", "copilot", "gemini", "cursor", "grok", "zai"]);
+const PROVIDERS = new Set(["claude", "codex", "opencode", "omp", "copilot", "gemini", "cursor", "grok"]);
 
 const modelOf = (a) => a.model ?? a.config?.model ?? a.runtimeInfo?.model ?? "?";
 const summary = (a) => ({

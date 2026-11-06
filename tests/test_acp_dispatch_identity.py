@@ -89,13 +89,13 @@ class IdentityGuard(LoadGate):
     def test_unreviewed_agents_keep_todays_pass_through(self):
         mod = self.load_module()
         guard = mod.guard_module()
-        for agent in ("agy", "zcode", "opencode", "never-heard-of-it"):
+        for agent in ("grok", "hermes", "opencode", "never-heard-of-it"):
             self.assertEqual(guard.policy(agent).status, guard.UNREVIEWED)
             for args in REPLACEMENTS:
                 self.assertIsNone(guard.identity_override(agent, args), (agent, args))
             self.assertIsNone(guard.record_refusal({"agent": agent, "model": "m", "acp_arg": ["--model=x"],
                                                     "cmd": f"acp-run {agent} --model m --model x"}))
-        r = self.dispatch_agent("zcode", "GLM-5.3-Flash", "--no-model-check", "--dry-run", "--acp-arg=--meta={}")
+        r = self.dispatch_agent("opencode", "opencode-go/minimax-m3", "--no-model-check", "--dry-run", "--acp-arg=--meta={}")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
     def test_the_audit_bypasses_of_the_frontier_and_model_gates_are_closed(self):

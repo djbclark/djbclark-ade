@@ -66,6 +66,8 @@ quoting a chain, and update its snapshot if you change one.
 > no longer routes to it, and its three updates (the Claude/GPT pool, the `zed` client-name workaround,
 > Gemini 4 Argon as a frontier fallback) and the 2026-10-03 burst-limit correction are in git history, with the lessons
 > in [tui-lessons-learned.md](tui-lessons-learned.md).
+>
+> **Money note (kept from the retired antigravity service):** Google AI Pro does NOT include API access; the subscription is chat-interface only, and a Gemini API key bills separately. Reaching the plan through Paseo's antigravity provider spends the subscription; wiring Hermes or any agent to a `GEMINI_API_KEY` would spend real money.
 
 ## The service matrix: aiuse line ↔ TUI/CLI ↔ billing
 

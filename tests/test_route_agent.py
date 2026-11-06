@@ -78,11 +78,11 @@ class TestStandingRules(unittest.TestCase):
         self.assertEqual(c.service.name, "claude")
 
     def test_judgment_reaches_codex_only_when_claude_is_tight_and_codex_is_plentiful(self):
-        # antigravity at 100% must not win judgment work. Since 2026-10-25 codex's judgment
+        # a bulk pool at 100% must not win judgment work. Since 2026-10-25 codex's judgment
         # row (rank 3, gpt-6.1-sol at high) is an eligible, lower-ranked pool while its quota is
         # plentiful: the router weighs pressure, burn and pace as well as rank, so it wins
         # when claude is short of room (it won at claude=15% too), never while claude has plenty.
-        q = dict(IDLE, antigravity={"remaining": 100.0}, claude={"remaining": 20.0})
+        q = dict(IDLE, **{"cursor-auto": {"remaining": 100.0}}, claude={"remaining": 20.0})
         self.assertEqual(r.route("judgment", quota=q).service.name, "claude")
         q = dict(IDLE, claude={"remaining": 5.0})
         c = r.route("judgment", quota=q)
@@ -114,20 +114,20 @@ class TestOpencodeGoTakesNoCode(unittest.TestCase):
 class TestWasteBurning(unittest.TestCase):
     def test_bulk_goes_to_idle_capacity(self):
         c = r.route("bulk", quota=IDLE)
-        self.assertIn(c.service.name, {"antigravity", "opencode-go"})
+        self.assertIn(c.service.name, {"cursor-auto", "opencode-go"})
         self.assertGreater(c.remaining, 90)
 
     def test_mechanical_prefers_the_free_tier(self):
         self.assertEqual(r.route("mechanical", quota=IDLE).service.name, "opencode-go")
 
     def test_headroom_shifts_bulk_away_from_a_drained_pool(self):
-        drained = dict(IDLE, antigravity={"remaining": 5.0})
-        self.assertNotEqual(r.route("bulk", quota=drained).service.name, "antigravity")
+        drained = dict(IDLE, **{"opencode-go": {"remaining": 5.0}})
+        self.assertNotEqual(r.route("bulk", quota=drained).service.name, "opencode-go")
 
     def test_min_headroom_excludes_tight_services(self):
-        q = dict(IDLE, antigravity={"remaining": 10.0})
+        q = dict(IDLE, **{"opencode-go": {"remaining": 10.0}})
         c = r.route("bulk", quota=q, min_headroom=15.0)
-        self.assertNotEqual(c.service.name, "antigravity")
+        self.assertNotEqual(c.service.name, "opencode-go")
 
     def test_default_headroom_excludes_note_exhausted_pool(self):
         q = dict(IDLE, codex={"remaining": 0.0, "windows": {"weekly": 0.0}})
@@ -187,6 +187,17 @@ class TestDiscovery(unittest.TestCase):
         for retired in ("zai", "antigravity", "copilot", "devin", "alibaba", "crush"):
             self.assertNotIn(retired, names, "a retired TUI's aiuse account is never a routable service")
         self.assertEqual(r.ALIASES["openclaude"], "claude")
+
+    def test_retired_tui_names_are_never_discovered(self):
+        """Adapted from the old clinepass-alias test: a `cline` (or other retired TUI) account in aiuse, or a
+        retired agent in acp-run's list, must not become a routable service."""
+        names_in = ("cline", "agy", "qwen", "goose", "zcode", "pi", "crush", "muse", "kiro", "devin", "copilot", "aider", "venicecode")
+        quota = {name: {"remaining": 100.0} for name in IDLE}
+        quota.update({n: {"remaining": 100.0} for n in names_in})
+        names = {s.name for s in r.discover(quota)}
+        for n in names_in:
+            self.assertNotIn(n, names)
+        self.assertIn("clinepass", names)
 
     @mock.patch.dict(os.environ, {"ROUTE_AGENT_OMP_READY": "0"})   # omp-ready: TestOmpReadyRoster
     def test_measured_idle_capacity_beats_unmeasured(self):
@@ -1610,14 +1621,14 @@ class TestQuotaFromAiuseAvailable(unittest.TestCase):
     def test_non_finite_percentages_never_read_as_headroom(self):
         for bad in ("NaN", "Infinity", "-Infinity"):
             with self.subTest(bad):
-                body = ('{"age_seconds": 5, "available": [{"provider": "copilot", "windows": '
+                body = ('{"age_seconds": 5, "available": [{"provider": "grok", "windows": '
                         f'[{{"label": "premium", "headroom_percent": {bad}}}]}}]}}')
                 path = self.write("nan.json", body)
                 quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
-                self.assertIsNone(quota["copilot"]["remaining"])
+                self.assertIsNone(quota["grok"]["remaining"])
                 for kind in r.KINDS:
                     choice = r.route(kind, quota={**IDLE, **quota})
-                    self.assertFalse(choice and choice.service.name == "copilot", kind)
+                    self.assertFalse(choice and choice.service.name == "grok", kind)
 
     def test_percentages_are_clamped(self):
         row = {"provider": "codex", "windows": [{"label": "w", "headroom_percent": 250}]}
@@ -1866,13 +1877,13 @@ class TestQuotaFromAiuseAvailable(unittest.TestCase):
 
     def test_excluded_pool_without_a_snapshot_row_reads_zero_and_is_never_routed(self):
         path = self.rows_payload([self.GOOD_ROW], excluded=[
-            {"provider": "zai", "pool_family": None, "reason": "operator"}])
+            {"provider": "grok", "pool_family": None, "reason": "operator"}])
         quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
-        self.assertEqual(quota["zai"]["remaining"], 0.0)
-        self.assertTrue(quota["zai"]["excluded"])
+        self.assertEqual(quota["grok"]["remaining"], 0.0)
+        self.assertTrue(quota["grok"]["excluded"])
         for kind in r.KINDS:
             choice = r.route(kind, quota={**IDLE, **quota})
-            self.assertFalse(choice and choice.service.name == "zai", kind)
+            self.assertFalse(choice and choice.service.name == "grok", kind)
 
     def test_excluded_pool_with_a_snapshot_row_reads_zero(self):
         path = self.rows_payload([{"provider": "codex", "usable_now": True,
@@ -1892,22 +1903,22 @@ class TestQuotaFromAiuseAvailable(unittest.TestCase):
 
     def test_invalid_excluded_rows_are_ignored_not_a_fallback(self):
         path = self.rows_payload([self.GOOD_ROW], excluded=[
-            "junk", {"provider": 3}, {"provider": ""}, {"provider": "zai", "pool_family": 7}])
+            "junk", {"provider": 3}, {"provider": ""}, {"provider": "grok", "pool_family": 7}])
         quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
         self.assertEqual(r.QuotaSource.kind, "canned")
         self.assertEqual(quota["omp"]["remaining"], 70.0)
-        self.assertNotIn("zai", quota)
+        self.assertNotIn("grok", quota)
 
     def test_excluded_is_not_consulted_on_the_file_fallback(self):
-        path = self.rows_payload(["junk"], excluded=[{"provider": "zai"}])
+        path = self.rows_payload(["junk"], excluded=[{"provider": "grok"}])
         quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
         self.assertEqual(r.QuotaSource.kind, "snapshot")
-        self.assertNotIn("zai", quota)
+        self.assertNotIn("grok", quota)
 
     def test_excluded_is_not_applied_from_a_stale_payload(self):
-        path = self.rows_payload([], excluded=[{"provider": "zai"}], fresh=False)
+        path = self.rows_payload([], excluded=[{"provider": "grok"}], fresh=False)
         quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
-        self.assertNotIn("zai", quota)
+        self.assertNotIn("grok", quota)
 
     def test_windowless_headroom_is_rounded_like_the_windowed_form(self):
         row = {"provider": "codex", "usable_now": True, "headroom_percent": 5.345454545}

@@ -1102,6 +1102,9 @@ FAILURE_CLASSES = [
             r"invalid api[ _-]?key",
             r"unauthori[sz]ed",
             r"\b401\b",
+            # an auth wall inside an "Internal error" envelope (zcode, 2026-10-16..18) read as transient and was
+            # retried; bin/acp-dispatch AUTH_TERMS still treats the exact code as auth. No \b: it follows "project_".
+            r"token_login_failed",
         ],
     ),
     (
@@ -2020,7 +2023,7 @@ OMP_MODEL_FLAGS = ("--model", "--models", "--smol", "--slow", "--plan", "--prewa
 def omp_model_refusal(a):
     """Why this omp run may spend something other than the Claude API credits omp is routed for, else None.
 
-    omp's own default is github-copilot/gpt-5.6-luna, which spends the Copilot reserve (operator 2026-10-19), so a
+    omp's own default is github-copilot/gpt-5.6-luna, which spends the Copilot allowance (operator 2026-10-19), so a
     prompt run needs `--model anthropic/<claude model>`: the provider prefix is required (`github-copilot/claude-...`
     is a Copilot model), a --resume run is judged like any other (it still launches `omp --model M acp`; a bare
     `--resume ID` would start omp on its default), and no --agent-arg may name the model, provider, profile, role
@@ -2031,7 +2034,7 @@ def omp_model_refusal(a):
     model = a.model or ""
     if not (model.startswith("anthropic/") and "claude" in model[len("anthropic/"):].lower()):
         return ("omp needs --model anthropic/<claude model> (its configured default is"
-                " github-copilot/gpt-5.6-luna, which would spend the Copilot reserve, not the"
+                " github-copilot/gpt-5.6-luna, which would spend the Copilot allowance, not the"
                 " Claude API credits; a github-copilot/claude-... model is a Copilot model, and --resume needs it too);"
                 " ACP_RUN_OMP_ANY_MODEL=1 overrides")
     for arg in getattr(a, "agent_arg", None) or []:

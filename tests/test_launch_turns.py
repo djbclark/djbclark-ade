@@ -91,7 +91,7 @@ class TestDryRun(LaunchCase):
     def test_dry_run_writes_nothing(self) -> None:
         for extra in (["--agent", "claude", "--model", "m"],
                       ["--agent", "claude", "--model", "m", "--kind", "judgment", "--no-interactive"],
-                      ["--agent", "muse", "--host", "herdr"]):
+                      ["--agent", "claude", "--host", "herdr"]):
             host = [] if "--host" in extra else ["--host", "none"]
             r = self.run_launch("start", "--cwd", str(self.repo), "-p", "x", "--dry-run", "--json", *host, *extra)
             self.assertEqual(r.returncode, 0, r.stderr)

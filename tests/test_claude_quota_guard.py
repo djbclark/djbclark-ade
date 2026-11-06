@@ -217,7 +217,7 @@ def test_advice_grows_with_level(rig):
     # Critical advice must not read as a stop order for sessions on other pools (2026-10-29: idle
     # omp sessions stopped on "hand off, stop"), but omp shares the Claude weekly rate window, so
     # it is only unaffected while aiuse still lists it (adversary r1 on PR 126, A1).
-    assert "not a stop order" in crit and "codex, grok, agy, zai or opencode is unaffected" in crit
+    assert "not a stop order" in crit and "codex, grok or opencode is unaffected" in crit
     assert "omp keeps working only while `aiuse --available --json` still lists it" in crit
     assert "--finish --successor omp/anthropic/claude-sonnet-5-5 --thinking high" in crit
     assert "--finish --successor claude/claude-sonnet-5-5" not in crit

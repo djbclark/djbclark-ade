@@ -18,6 +18,10 @@
 # `models` is the acp-run `--model [--effort L]` suggestion per kind; `agent`
 # is the acp-run agent name when it differs from the aiuse provider id.
 
+# Google AI Pro (Paseo's antigravity provider; the router has no service for it since 2026-11-06) does NOT include API access:
+# subscriptions are chat-interface only and a Gemini API key bills separately, so wiring Hermes or any agent to a
+# GEMINI_API_KEY would spend real money.
+
 [routing]
 # Kinds of work. Deliberately few — a taxonomy nobody can apply is worse than
 # a coarse one that gets used.
@@ -89,13 +93,12 @@ suggest_better_delta = 3
 # Retired TUIs whose accounts aiuse still reports (slim-down E9, 2026-11-06): no acp-run agent drives them any
 # more (Google's plan is reached through Paseo's antigravity provider, Copilot through Paseo's Copilot provider), so
 # discovery must not surface the provider as an unprofiled, dispatchable service.
-never_route = ["hermes", "clinepass", "antigravity", "zai", "alibaba", "devin", "copilot", "pi", "crush", "kiro"]
+never_route = ["hermes", "clinepass", "antigravity", "zai", "alibaba", "devin", "copilot", "pi", "crush", "kiro",
+               "cline", "agy", "qwen", "goose", "zcode", "muse", "aider", "venicecode"]
 operator_gated = []
-# Discovery names the TUI; aiuse names the account behind it. Without this
-# map, discovery would surface `cline` as a brand-new service and hand it bulk
-# work — silently defeating the never-bulk rule that protects clinepass, which
-# is Hindsight's and hermes's inference lifeline. Any alias inherits the
-# curated service's constraints rather than becoming a second entry.
+# Discovery names the TUI; aiuse names the account behind it. An alias folds a TUI or fork name onto the curated
+# service that already covers it, so it never becomes a second entry. The retired TUIs have no alias: they are
+# `never_route` above.
 aliases = { claude-agent-teams = "claude", openclaude = "claude", opencode = "opencode-go", kimi = "opencode-go" }
 
 [dispatch]

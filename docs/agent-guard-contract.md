@@ -44,9 +44,9 @@ passed the substring test, a post-`acp` `--agent-arg=--model` swapped the model,
 
 | Agent | Row | Notes |
 |---|---|---|
-| pi | guarded | measured-only API pool (`pi`) |
+| pi | retired | row removed 2026-11-06 (pi left acp-run) |
 | omp | guarded | `omp` pool; acp-run's own model guard too |
 | codex | guarded | frontier, plenty and pool gates judge `--model` |
 | claude | guarded | frontier and fable-xhigh gates judge `--model` |
-| copilot, opencode, cursor, qwen, devin, cline, hermes, goose, zcode, agy, grok, crush, kiro | unreviewed | today's pass-through; flip when reviewed |
+| opencode, cursor, hermes, grok | unreviewed | today's pass-through; flip when reviewed |
 | cursor-cloud | n/a | no acp-run |

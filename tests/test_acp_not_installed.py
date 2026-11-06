@@ -117,10 +117,30 @@ class TestAcpRunNamesTheWrappedExecutable(unittest.TestCase):
     the executable-name logic stays)."""
 
     def acp(self, *args: str, wait: str = "0.5") -> subprocess.CompletedProcess[str]:
-        # PATH has env (/usr/bin) but never crush-acp
+        # PATH has env (/usr/bin) but no agent binary
         env = {**os.environ, "PATH": "/usr/bin:/bin", "ACP_RUN_BIN_WAIT": wait, "ACP_RUN_BIN_POLL": "0.1"}
         return subprocess.run([UV, "run", "--quiet", "--script", str(ACP_RUN), *args], env=env, check=False,
                               stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120)
+
+    def test_opencode_with_no_binary_waits_then_exits_127(self):
+        # the wait and exit-127 path that crush's env-wrapped command used to cover end to end
+        r = self.acp("opencode", "-p", "hi", "--timeout", "5", "--perm", "all")
+        self.assertEqual(r.returncode, 127, r.stderr)
+        self.assertIn("opencode not found on PATH; waiting up to 0.5 s", r.stderr)
+        self.assertIn("acp-run: opencode not installed", r.stderr)
+
+    def test_opencode_with_the_wait_disabled_is_still_not_installed(self):
+        r = self.acp("opencode", "-p", "hi", "--timeout", "5", "--perm", "all", wait="0")
+        self.assertEqual(r.returncode, 127, r.stderr)
+        self.assertNotIn("waiting", r.stderr)
+        self.assertIn("acp-run: opencode not installed", r.stderr)
+
+    def test_list_marks_a_missing_agent(self):
+        r = self.acp("--list")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        rows = [ln for ln in r.stdout.splitlines() if ln[3:].startswith("opencode ")]
+        self.assertEqual(len(rows), 1, r.stdout)
+        self.assertTrue(rows[0].startswith("-- "), rows[0])
 
     def test_the_executable_skips_env_and_its_assignments(self):
         import ast

@@ -180,7 +180,7 @@ Otherwise `transient` stays. For transient and outage `check` suggests `reroute 
 `resume in place: acp-dispatch resume RECORD --detach --no-wait` (no "after the reset": there is none;
 or, while the login sweep's restart-resume is running, `resume-scheduled`; or `no resumable session`
 when `resume` itself would refuse: no log or command in the record, no session id, an agent that can
-neither load nor resume; an agy session on a non-Gemini model is resumed in a new session with a
+neither load nor resume; a session `resume_unsupported()` names is resumed in a new session with a
 checkpoint, as `resume` does) and never `--escalate`. Only a recorded `killed:` or `lost` class gets it: a
 refused, auth or quota stop that a signal also ended keeps its own hint, and an `auth` class gets the login
 hint (`codex login`, ...) instead of `--escalate` (2026-10-20). Exit codes are unchanged.
@@ -3977,7 +3977,7 @@ def check_record(path: Path) -> tuple[str, str, str, str]:
         # the tier, the same as a transport error: no `--escalate`, resume in place when the session can
         # be reopened (2026-10-20; the record path of 4be8684 and the login sweep of 180d8b8 do the same).
         # "Can be reopened" is what resume_record accepts: a record with log and cmd and a session id
-        # the agent can load, or an agy session on a non-Gemini model, which continues in a new session.
+        # the agent can load, or a session resume_unsupported() names, which continues in a new session.
         sid, supported = session_info(rec)
         broken = resume_unsupported(rec)
         rr = rec.get("restart_resume") or {}
@@ -5804,7 +5804,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--perm", default="all", help="all (default) | read-only: the agent may read and nothing else, any other tool trips (exit 77); "
                          "claude, codex, opencode; an advisory review needs it | "
                          "deny: no tools at all (--role advise refuses it): every permission request refused and a tripwire (exit 77) on any "
-                         "tool that runs without asking, reads included (crush and agy read unasked: add "
+                         "tool that runs without asking, reads included (an agent that reads unasked needs "
                          "--acp-arg=--tripwire-exempt-kinds=read,search; cursor cannot deny at all, acp-run "
                          "refuses it: review it under all with a read-only brief and a diff check). "
                          "Subagents run yolo unless security-sensitive (operator 2026-10-15). "
