@@ -5,6 +5,10 @@ __pycache__/
 .ruff_cache/
 .zcode/
 
+# SkillOpt-Sleep dirs: kept until the operator removes the harvested dirs (E10 report G).
+/.skillopt-sleep/
+/.skillopt-sleep-handoff/
+
 # Paseo's skill sync marker (it writes one beside each bundled skill it manages; see docs/skill-everywhere.md 3a).
 skills/*/.paseo-managed-files.json
 

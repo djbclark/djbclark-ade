@@ -655,8 +655,6 @@ def fixture_stores(mod, monkeypatch):
              "required": []},
             {"name": "antigravity-cli-db", "kind": "sqlite-tree", "root": h / ".gemini/antigravity-cli",
              "dbs": ["conversations/*.db", "conversation_summaries.db"], "sidecars": ["{stem}.meta"], "required": []},
-            {"name": "antigravity-ide-db", "kind": "sqlite-tree", "root": h / ".gemini/antigravity",
-             "dbs": ["conversations/*.db", "conversation_summaries.db"], "sidecars": ["{stem}.meta"], "required": []},
         ]
         return real_build(h) + extra
 

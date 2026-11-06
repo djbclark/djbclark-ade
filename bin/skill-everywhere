@@ -96,7 +96,7 @@ if ((all)); then
   ((${#names[@]})) || { echo "error: no readable shared SKILL.md files under $ade_root, $priv_root or $site_root" >&2; exit 2; }
   set -- "${names[@]}"
 fi
-[[ $# -gt 0 ]] || { gsed -n '2,14p' "$0" >&2; exit 2; }
+[[ $# -gt 0 ]] || { gsed -n '2,17p' "$0" >&2; exit 2; }
 only="${SKILL_EVERYWHERE_ONLY:-}"
 no_copy=0; [[ -z ${SKILL_EVERYWHERE_NO_COPY:-} ]] || no_copy=1
 wanted() { [[ -z $only || ",$only," == *",$1,"* ]]; }

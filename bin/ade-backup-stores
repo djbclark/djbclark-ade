@@ -10,7 +10,7 @@ database; no data changes), and the live Hermes `state.db` is never handed to `h
 
   1. single live SQLite files: the SQLite online backup API (`Connection.backup`), never a `cp` of a
      WAL database;
-  2. per-session SQLite trees (Cursor): each db the same way, its sidecar (`meta.json`,
+  2. per-session SQLite trees (Cursor, Antigravity): each db the same way, its sidecar (`meta.json`,
      `<uuid>.meta`) copied beside it;
   3. file stores: an own directory walk (no `shutil.copytree`) that drops every credential file name and path
      (inventory section 5 item 5), the `credential-bak` vault, symlinks inside a store and non-regular files; a configured
@@ -191,8 +191,9 @@ def build_stores(home):
     def files(name, *roots, file_labels=()):
         return {"name": name, "kind": "files", "roots": [(label, h / rel) for label, rel in roots],
                 "file_labels": list(file_labels)}
-    # (zcode, crush, copilot, antigravity, qwen, cline, pi and muse stores removed 2026-11-06, slim-down E10: those TUIs
-    # retired. Their credential exclusions below stay, as the named exception.)
+    # (zcode, crush, copilot, antigravity-cli, qwen, cline, pi and muse stores removed 2026-11-06, slim-down E10: those TUIs
+    # retired; antigravity-ide and antigravity-acp stay, Antigravity being a kept Paseo provider. Their credential exclusions below stay, as the named exception.)
+    agy = ".gemini/antigravity"
     return [
         files("handoffs", ("handoffs", ".local/state/handoffs")),
         tree("cursor-acp-sessions", ".cursor/acp-sessions", ["*/store.db"], ["meta.json"], required=["meta.json"]),
@@ -204,6 +205,13 @@ def build_stores(home):
                ".codex/goals_1.sqlite"),
         files("codex-files", ("sessions", ".codex/sessions"), ("session_index.jsonl", ".codex/session_index.jsonl"),
               file_labels=["session_index.jsonl"]),
+        tree("antigravity-ide-db", agy, ["conversations/*.db", "conversation_summaries.db"], ["{stem}.meta"]),
+        tree("antigravity-acp-db", f"{agy}-acp", ["conversations/*.db", "conversation_summaries.db"], ["{stem}.meta"]),
+        files("antigravity-ide-files", ("brain", f"{agy}/brain"),
+              ("agyhub_summaries_proto.pb", f"{agy}/agyhub_summaries_proto.pb"),
+              ("antigravity_state.pbtxt", f"{agy}/antigravity_state.pbtxt"),
+              file_labels=["agyhub_summaries_proto.pb", "antigravity_state.pbtxt"]),
+        files("antigravity-acp-files", ("brain", f"{agy}-acp/brain")),
         files("claude", ("projects", ".claude/projects"), ("file-history", ".claude/file-history"),
               ("session-env", ".claude/session-env"), ("tasks", ".claude/tasks"), ("teams", ".claude/teams"),
               ("sessions", ".claude/sessions"), ("history.jsonl", ".claude/history.jsonl"),
