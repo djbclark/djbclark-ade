@@ -18,3 +18,32 @@ Numbered as the critic numbered them (section F4). Each is applied in the ledger
 15. **Root and provider files with no row** (`AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `opencode.json`, `skills-lock.json`, `.pi/`, `.kiro/`, `.windsurf/`, `.cursor/`, `.gemini/`, `.adal/`, `.codex/`, `.agents/`, `.claude-plugin/`, `.mcp.json`, `claude/agents/`, `.claude/`, `graft/`): E9 enumerates the provider directories in its brief (one row each, delete with the provider); E11 owns the root files; `graft/` is rebuilt last. No ledger rows now.
 
 Also from the critic, applied without a question: stale "live process" notes on `acp-dispatch`, `acp-run` and `acp-dispatch-wait` rows are superseded by J1 (all three slices exited); the five symlinked skills read UNLINK, not DELETE; `skills/session-finder/fleet.py` is SHIM with the E5 gate, not KEEP; `tools/acp-run` sub-files and `skills/session-finder` sub-files (adapters/, where.py, nested_pty.py, prompt_line.py) inherit their parent's row; `/etc/sudoers.d/acp-dispatch-pmset` joins the Wave 4 operator batch as a removal step.
+
+## Round 2 (2026-11-06 21:35Z, 92 code KEEP rows voted, 12 refuted; the critic's second list, numbered R2-n)
+
+R2-1. The rulings file overrides the rows: the ledger's **Lead** column carries each ruling (this file is its source); rows are not rewritten.
+R2-2. **`skills/ade-paseo*` (six vendored Paseo skills)**: three refuters are right that upstream ships them (`skills/ade-paseo/UPSTREAM.md`: vendored from getpaseo/paseo @ fcda2f1 with three local patches: narrowed descriptions so upstream's "handoff"/"stuck" triggers did not steal requests from this repo's `handoff` skill and `dialogue`; an interim worktree-isolation line; the `ade-` prefix because Paseo overwrites unprefixed names, getpaseo/paseo#7700). Patch 1's reason disappears when D3 replaces `handoff`/`baton` with native `/paseo-handoff` and E6 replaces `dialogue`; patch 2 was interim. Ruling: REPLACE in Wave 3 (E10) by Paseo's own shipped skills (`npx skills add getpaseo/paseo`, or the Paseo home's skill selection switched from `{"mode":"custom","skills":[]}` to the bundle), an operator step after the D3 trial; until then KEEP. The redundant `claude/commands/*.md` wrappers (`paseo-screen`, `retro`, `steps`: each skill's `name:` already exposes the slash command; `skillopt-sleep` goes with J4; `teach` moves with E1) are DELETE in E10.
+R2-3. herdr server: as ruling 6 (one DECIDE at the C7 gate for all four rows; `tests/test_ade_sched.py:650` is edited then).
+R2-4. **`skills/session-finder/session-history.py` and `launchd/com.djbclark.session-history-update.plist`**: DELETE (the script indexes transcripts for session-finder, which goes; no KEEP consumer); the plist in E5, the script in E3; the installed LaunchAgent joins the Wave 3 operator batch (`launchctl bootout gui/$UID/com.djbclark.session-history-update`).
+R2-5. context-budget: confirmed (J3): the plist and the `install`/`uninstall` subcommands go in E5; `tests/test_context_budget_check.py:285-292` is rewritten in the same slice; the check itself stays as a Paseo schedule.
+R2-6. `claude-quota-guard`: its installed `check` LaunchAgent stays until E7's frontier gate reads `paseo usage ls --json` (research wave3 item 6: the command is `usage ls`, percentages per window); `com.djbclark.claude-fleet-governor` is booted out with E7 (Wave 4 operator batch).
+R2-7. `tests/test_fleet_*.py` (7 files): SHIM with `fleet.py`; deleted in E5 when `fleet.py` goes.
+R2-8. `tests/test_bigteam_prune.py`: MOVE with diskfree (already in the E1 brief).
+R2-9. acp-dispatch tests: the shim's one test is seeded from `test_acp_dispatch.py` (exit codes and record) and `test_acp_dispatch_load_gate.py` (admit gate, cap); `_classify`, `_outcome`, `_brief_footer` contribute one assertion each; the rest go in E6 (`_cursor_cloud`, `_frontier_reason`, `_routing` after their DECIDE rows resolve).
+R2-10. `effort-routing` and `fallback-chains`: fold both into `model-routing` (E7, as PLAN E7 says); `fallback-chains`' web-access half follows `web-get` (DECIDE, R2-15).
+R2-11. `skills/loadwatch`: DELETE in E5; load-watch's find-and-tell message is reworded to carry the instruction itself (one paragraph), not a skill pointer.
+R2-12. `create-hook`, `btww`, `hand`: one shared DECIDE pending `aiuse --json` (ruling 10; operator batch line 8).
+R2-13. omp and opencode: the same pool audit gates the ~25 DECIDE rows; Wave 3's E9 part runs after the paste.
+R2-14. Cursor: on J2's keep list (cursor-agent); stays unless the pool audit shows its plan is reachable through another provider; `cursor-cloud` rows DECIDE until then.
+R2-15. Small-context provider: DECIDE at Wave 3 after the audit; if none survives, `web-get`, `web-digest*`, `firecrawl-router` and their tests go in Wave 3's E9 part.
+R2-16. `dialogue` and `research`: the 1-hour Claude-subagent port is attempted in E6 (`dialogue.py:751` is the seam); DELETE if it fails the hour (PLAN E6).
+R2-17. `tell-chief-of-staff`: E6/E9j (pointer stays here, code to peer-link); E1 leaves it.
+R2-18. `quota_nudge.py` and `cswap_quota_context.sh` (and their live hook lines): DECIDE after session-guard is verified on the Mac (D4); if removed, the hook lines join C2's operator edit.
+R2-19. Confirmed: the lead trims the template's four DELETE hook lines, the `herdr-agent-state.sh` hook and the DELETE-skill entries at merge (ruling 8); the live `~/.claude/settings.json` edit for the four C2 hook files is the operator's before the final merge.
+R2-20. `bg`: operator batch line 9.
+R2-21. `fleet-watch`: `site-djbclark/bin/fleet-watch` (seen in the clone); the paused watchers' LaunchAgents are listed by batch line 6 (`launchctl list | grep com.djbclark`).
+R2-22. Provider dot-dirs: keep the kept providers' dirs (`.cursor`, `.codex`, `.agents`, `.claude-plugin`); delete only retired providers' (`.kiro`, `.windsurf`, `.gemini`, `.adal`, `.pi`) in E9's Wave 3 part after the audit.
+R2-23. `scripts/github-ci-run`: nothing in site-djbclark names it (grep of the clone, 2026-11-06); only `skills/loadwatch/SKILL.md:178` (DELETE) does. DECIDE in E5: delete unless the operator uses it by hand.
+R2-24. adhoc `adversary-pr254f` record and its launchd label: operator batch line 10.
+R2-25. aiuse `opencode-go` exclusion: PR 260 first (C3), then drop only if opencode retires.
+R2-26. `bin/npm_metadata.py` and its test (0 refs): DELETE in E10.

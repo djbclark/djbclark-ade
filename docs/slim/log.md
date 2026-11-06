@@ -54,7 +54,9 @@ Operator: "Try to minimize the number of blocking things like this in the future
 
 ## Wave 1 (started 2026-11-06 20:05Z)
 
-W1 round 1 done 20:40Z (99 agents, 11.1M tokens, 39 min): 627 rows, 263 KEEP rows, 31 voted (cap 100), 2 refuted (`failover.py`, `bin/pytest`), 50 rows disagree with the plan, 119 unlisted paths, critic: 12 missing-path groups, 27 inconsistencies, 9 uncovered outside dependents, 15 questions (answered in `docs/slim/ledger-rulings.md`). Round 2 (the remaining 61 code KEEP rows, 183 refuters + 1 critic) started 20:41Z; the ledger is regenerated from it. Ledger posted as v1; Wave 2 briefs follow without waiting.
+W1 round 1 done 20:40Z (99 agents, 11.1M tokens, 39 min): 627 rows, 263 KEEP rows, 31 voted (cap 100), 2 refuted (`failover.py`, `bin/pytest`), 50 rows disagree with the plan, 119 unlisted paths, critic: 12 missing-path groups, 27 inconsistencies, 9 uncovered outside dependents, 15 questions (answered in `docs/slim/ledger-rulings.md`). Round 2 done 21:35Z (282 agents in all, 19.5M tokens): all 92 code KEEP rows voted, 12 refuted (8 are reference lines in kept files that the plan already rewrites; new: the six vendored `ade-paseo*` skills are REPLACE in Wave 3 by Paseo's shipped skills, the redundant `claude/commands/*` wrappers are DELETE, `session-history.py` and its plist DELETE, `npm_metadata.py` DELETE). Ledger v2 with a Lead column; the critic's 26 round-2 questions are answered as R2-n in `docs/slim/ledger-rulings.md`. Wave 1 closed; the ledger is posted, not awaited.
+
+Added to the operator batch: line 10 (adhoc `adversary-pr254f` record exited?).
 
 W1 as designed: 5 Sonnet readers (bin, skills, tests, docs, outside), dedup by path, 3-lens refute per KEEP row, 1 Opus critic; cap 100 agents. The ledger (`docs/slim/ledger.md`) is written by the lead from its output and posted, not awaited (H ruling).
 
@@ -76,6 +78,7 @@ Nothing in E2, E3, E4 or E6 merges before this is pasted. All read-only except s
 6. C1 live processes: `launchctl list | grep com.djbclark` and `pgrep -fl 'acp-run|acp-dispatch' || echo none`. Expected: deadline-sweep, pr-policy, load-watch listed; no acp-run process.
 8. J2 pool audit input (ledger ruling 10): `aiuse --json` (or `aiuse pools`), so the lead can settle which paid plans are reachable only through omp or opencode before E9's machine-side uninstalls.
 9. `bg`'s live path (ledger ruling 14): `ls -la ~/ops/site-private/bin/bg ~/ops/site-public-djbclark/bin/bg 2>&1`.
+10. The adhoc adversary record (report B1b): `ls ~/.local/state/bigteam/adhoc-2026-11-02/jobs/ && launchctl list | grep adversary-pr254f || echo none`.
 7. Wave 0 leftovers (tag and branch deletions done): in the shared checkout `git status` (stop on another session's edits), then `git fetch origin && git checkout master && git reset --keep origin/master`; then `git worktree prune`.
 
 Facts from the site-djbclark clone (2026-11-06, `djbclark/site-djbclark` @ f11d8218, attached with push access as the E1 destination):
