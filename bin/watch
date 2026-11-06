@@ -89,7 +89,7 @@ ROUTE_AGENT = os.environ.get("WATCH_ROUTE_AGENT") or str(HERE / "route_agent.py"
 FLEET_WATCH = os.environ.get("WATCH_FLEET_WATCH") or str(HOME / "ops/site-private/bin/fleet-watch")
 LOAD_WATCH = os.environ.get("WATCH_LOAD_WATCH") or str(HERE / "load-watch")
 
-EFFORTS = ["minimal", "low", "medium", "high"]   # ceiling is high on purpose: watchers coordinate, /bigteam slices code
+EFFORTS = ["minimal", "low", "medium", "high"]   # ceiling is high on purpose: watchers coordinate, /fan-out slices code
 # `closed` is NOT dead: Paseo's idle-runtime collector ("Collected idle agent runtime" in daemon.log) closes the
 # runtime of an idle agent but keeps it listed (un-archived) with its persistence handle, and the next message
 # resumes the same session (agent-loading.ts ensureAgentLoaded). Found 2026-10-31: a collected watcher was
@@ -217,7 +217,7 @@ class Paseo:
           collected  listed with status `closed`: the idle runtime was garbage collected, the session is persisted
                      and resumable, the next message wakes the SAME conversation; never replace it
           dead       listed with status `error`
-          archived   absent from `ls -g --background` but present in `ls -g -a`: retired on purpose, never auto-resumed
+          archived   absent from `ls -g --background` but present in `ls -g -a`: retired on purpose, never resumed automatically
           gone       absent from both
           unknown    the daemon could not be asked (never 'gone': callers must not launch on it)"""
         if self.agents() is None:

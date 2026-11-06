@@ -1,7 +1,7 @@
 # Orchestration practices: decide cheaply, reason expensively, verify centrally
 
 Snapshot **2026-10-11**. The rules every orchestration skill here follows
-(`bigteam`, `research`, `dialogue`, `model-routing`, `effort-routing`;
+(`fan-out` (since 2026-11-06), `research`, `dialogue`, `model-routing`, `effort-routing`;
 `ralph-tui-orchestration` was removed 2026-11-06). Each skill carries the short form of the rules it
 needs and links here for the reasons and sources.
 
@@ -80,7 +80,7 @@ A vague brief makes parallel agents duplicate work, leave gaps, or misread
 the task, and the ambiguity is copied into every slice.² ³ Every brief has:
 
 1. **Objective:** one paragraph, what done looks like.
-2. **Owned paths:** one owner per file (bigteam Step 2).
+2. **Owned paths:** one owner per file (fan-out section 1).
 3. **Inputs:** the selected context from section 2, and where to look.
 4. **Tool guidance:** which tools and sources fit (graft before grep, the
    KB before the web).²

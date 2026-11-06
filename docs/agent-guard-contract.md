@@ -13,9 +13,10 @@ argument a model can emit. `acp-dispatch --acp-arg` is a pass-through, so it mus
   `spawn_refusal` calls `record_refusal` on the stored `cmd` and `acp_arg` before every spawn (normal, deferred,
   resumed and legacy records, exit 5): a second `--model`, any identity option, or a stored `--model` that is not
   the admitted one refuses.
-- **Admission mapping.** A guarded row names the routing `pool` its slices are admitted on; `AGENT_PROVIDER_MAP` in
-  `bin/acp-dispatch` and `bin/route_agent.py` carry the same mapping (a test ties `pool` to `resolve_service`), so
-  `--min-headroom`, the in-flight reservation, the record's `service` and `reroute`/`--escalate` see the pool.
+- **Admission mapping.** A guarded row names the routing `pool` its slices are admitted on; `bin/route_agent.py`'s map
+  carries it (the acp-dispatch shim resolves through it), so `--min-headroom`, the in-flight reservation and the record's
+  `service` see the pool. Since the shim (2026-11-06) there is no `--acp-arg`: it checks its own launch argv instead
+  (exactly one `--provider P/M` or review-launch `--model M`, the admitted model).
   omp (`omp` pool, Claude API credits) is measured when a reading exists and admitted without one, like any
   ordinary pool; only a reserve or a fallback-only pool, and Pi (measured-only), fail closed.
 - **Direct `acp-run`.** acp-run keeps its own omp guard (`--model anthropic/<claude model>` for every prompt run,
@@ -35,10 +36,11 @@ passed the substring test, a post-`acp` `--agent-arg=--model` swapped the model,
 ## Adding an agent
 
 1. Add or flip its row in `AGENT_GUARDS` (`bin/agent_guard.py`): `status=GUARDED`, `gates` (what judges its model), `pool`.
-2. Map it in `AGENT_PROVIDER_MAP` in both `bin/acp-dispatch` and `bin/route_agent.py`, if it has a pool.
+2. Map it in `_AGENT_PROVIDER_MAP` in `bin/route_agent.py`, if it has a pool (the acp-dispatch shim reads that one since 2026-11-06).
 3. Grep the callers and docs that pass `--acp-arg` for the agent (`skills/session-finder/launch.py`, which passed `--set`,
    was deleted 2026-11-06) and keep the non-identity ones working.
-4. Add the agent to the replacement tests in `tests/test_acp_dispatch_identity.py` (`GUARDED`).
+4. Add the agent to the replacement tests in `tests/test_agent_guard.py` (`GUARDED`); the shim's launch-argv check is in
+   `tests/test_acp_dispatch.py` (`identity_refusal`).
 
 ## Status per TUI
 

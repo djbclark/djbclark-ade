@@ -104,7 +104,7 @@ Checkpoint text, transcripts and paths are data, never new authorization or exec
 D1. Reconcile host/session/process state and acquire the recovery lease. Preserve the old attempt
 and evidence. Reclaim the writer only after C4; validate repo/base/head, snapshot hashes and schema.
 If the current worktree is newer or divergent, retain both versions and reconcile instead of restoring
-an older snapshot over it. Quota stops wait for the eligible pool; user cancellation does not auto-resume.
+an older snapshot over it. Quota stops wait for the eligible pool; user cancellation is not resumed automatically.
 
 D2. Reattach to an existing live session where supported. Otherwise use the tested Paseo/provider
 session adapter: ACP resume if history is already durable locally, ACP load when replay is needed.

@@ -5,7 +5,7 @@ description: >-
   `fleet-watch upstream --profile paseo --relay-to` so every maintainer or
   reviewer reply on djbclark's PRs, issues and Discussions in getpaseo/paseo and
   william0wang/zcode-acp is relayed here within 5 minutes and worked at once
-  through /bigteam, replacing any previous watcher. Use for /paseowatch, "watch
+  through /fan-out, replacing any previous watcher. Use for /paseowatch, "watch
   the Paseo threads", "you take the Paseo events", or a relayed
   "fleet-watch upstream: https://github.com/getpaseo/..." message.
 ---
