@@ -33,7 +33,7 @@
 
 ## H. Tests with the baseline diff
 - Required list: `tests/test_skill_everywhere_all.py tests/test_ade_update.py tests/test_ade_backup_stores.py tests/test_web_get.py tests/test_web_digest.py tests/test_route_agent.py`: 652 passed, 4 skipped, 1 failed: `tests/test_web_get.py::test_crwl_gets_js_delay`, which is in the baseline list (not a regression).
-- Full suite (`bin/pytest -q tests/`, background): see the line appended below.
+- Full suite (`bin/pytest -q tests/`, 42 min): 152 failed, 8974 passed, 32 skipped, 1 error (baseline: 166 failed). Every failing file is in the baseline table (git_hooks 45, self_slash* 41, git_guard 10, local_review 6, acp_dispatch 6, wait_file 3, acp_run_git_identity 3, deadline_wrappers 2, quota_d2 2, web_get 1, launch_turns 1, dispatch_reap 1) and none is a test this slice touched; the one ERROR is a self_slash_codex test in a baseline-failing file. Baseline rows absent now (bigteam_prune, session_relay, ade_scan_state) were fixed or deleted by other waves, not by E10. Note: `pytest` at repo root also collects `claude/hooks/handoff-tools/tests`, whose `test_context_size_nudge.py` basename collides with `tests/`; run `tests/` only.
 
 ## I. Lost on purpose
 - The nightly skill-edit cycle (SkillOpt-Sleep and its transcript-source harvest).
