@@ -288,6 +288,9 @@ def test_grep_type_narrows_the_walk(env):
     (env["proj"] / ".env").write_text("A=1\n")
     assert blocked(env, "Grep", {"pattern": "x"})
     for t in TYPE_NAMES:
+        if t == "sh":   # ripgrep 15.2's sh type reads .env and *.env (2026-11-06): the walk must reach it
+            assert blocked(env, "Grep", {"pattern": "x", "type": t}), t
+            continue
         assert not blocked(env, "Grep", {"pattern": "x", "type": t}), t
     assert not blocked(env, "Grep", {"pattern": "x", "type": "py", "glob": "!.env"})   # `!` alone combines with type
     rc, err = run(env, "Grep", {"pattern": "x", "type": "nosuchtype"})   # unknown: unfiltered, and the hint says glob
@@ -335,7 +338,9 @@ def test_grep_type_filter_names():
 
 
 def test_grep_type_map_covers_ripgrep():
-    """Every mapped type is a ripgrep type, and the map lists every name ripgrep reads for it (more is harmless)."""
+    """Every mapped type is a ripgrep type, and the globs the hook uses (the static map unioned with the live
+    `rg --type-list`) list every name ripgrep reads for it (more is harmless). The static map alone may lag a newer
+    ripgrep; that lag is reported, not failed, since the live union covers it wherever rg is on PATH."""
     rg = shutil.which("rg")
     if rg is None:
         pytest.skip("no rg on this machine")
@@ -345,9 +350,87 @@ def test_grep_type_map_covers_ripgrep():
         name, _, globs = line.partition(":")
         listed[name.strip()] = {g.strip() for g in globs.split(",") if g.strip()}
     hook = load_hook()
+    live = hook.rg_live_types()
+    assert live, "rg --type-list read nothing"
     for t, globs in hook.RG_TYPES.items():
         assert t in listed, t
-        assert listed[t] <= set(globs), (t, listed[t] - set(globs))
+        used = set(hook.rg_type_globs(t, live))
+        assert listed[t] <= used, (t, listed[t] - used)
+        assert set(globs) <= used
+        if not listed[t] <= set(globs):
+            print("static RG_TYPES[%r] lags this rg by %s" % (t, sorted(listed[t] - set(globs))))
+
+
+def fake_rg(env, type_list, sleep=0, rc=0):
+    """A fake `rg` first on PATH whose `--type-list` prints `type_list` (after `sleep` s, exiting `rc`)."""
+    bindir = env["tmp"] / "fakebin"
+    bindir.mkdir(exist_ok=True)
+    rg = bindir / "rg"
+    rg.write_text("#!/bin/sh\nsleep %s\nprintf '%%s\\n' %s\nexit %d\n"
+                  % (sleep, " ".join("'%s'" % line for line in type_list), rc))
+    rg.chmod(0o755)
+    env["env"]["PATH"] = str(bindir) + os.pathsep + env["env"].get("PATH", "")
+
+
+def test_grep_type_unions_the_live_rg_type_list(env):
+    """Codex security review on PR 289 (2026-11-06): ripgrep 15.2's `sh` type reads `.env` and `*.env`, so a static
+    map copied from 14.1.0 let `type: sh` pass beside a .env that rg reads. The static map now lists them, and the live
+    `rg --type-list` is unioned in, so a newer rg can only widen a type."""
+    (env["proj"] / "src").mkdir()
+    (env["proj"] / "src" / "a.py").write_text("x\n")
+    (env["proj"] / ".env").write_text("A=1\n")
+    fake_rg(env, ["sh: *.sh, .env, *.env", "py: *.py, .env"])
+    assert blocked(env, "Grep", {"pattern": "x", "type": "sh"})
+    assert blocked(env, "Grep", {"pattern": "x", "type": "py"})          # only the live list names .env for py
+    assert not blocked(env, "Grep", {"pattern": "x", "type": "go"})      # a type the fake does not list: static only
+    fake_rg(env, ["py: *.pyi"])                                          # a narrower live list narrows nothing
+    (env["proj"] / ".env").unlink()
+    (env["proj"] / ".env.py").write_text("A=1\n")
+    assert blocked(env, "Grep", {"pattern": "x", "type": "py"})
+
+
+@pytest.mark.parametrize("sleep,rc", [(0, 1), (5, 0)])
+def test_grep_type_live_rg_failure_is_ignored(env, sleep, rc):
+    """A failing or hanging `rg --type-list` is ignored within its ~1 s: the static map stands alone."""
+    (env["proj"] / "a.py").write_text("x\n")
+    (env["proj"] / ".env").write_text("A=1\n")
+    fake_rg(env, ["py: *.py, .env"], sleep=sleep, rc=rc)
+    t0 = time.monotonic()
+    rc_, err = run(env, "Grep", {"pattern": "x", "type": "py"})
+    assert (rc_, err) == (0, "") and time.monotonic() - t0 < 3.0
+    assert blocked(env, "Grep", {"pattern": "x", "type": "sh"})          # the static sh lists .env either way
+
+
+def test_grep_type_filter_live_globs():
+    hook = load_hook()
+    live = {"py": ["*.py", "*.{env,cfg}", "conf/*.ini"], "nosuchtype": ["*"]}
+    f = hook.rg_type_filter("py", False, live)
+    assert f("a.py") and f("x/b.env") and f("c.cfg") and f("conf/d.ini") and not f("e.txt")
+    assert hook.rg_type_filter("nosuchtype", False, live) is None        # unknown to the static map: unfiltered
+    assert hook._split_type_globs(" *.sh, .env,*.{a,b} ") == ["*.sh", ".env", "*.{a,b}"]
+
+
+def test_grep_root_symlink_then_dotdot_walks_the_kernel_resolved_root(env):
+    """Codex review on PR 289 (2026-11-06): with link -> ~/.config/gh/subdir, `path: "link/.."` makes ripgrep search
+    ~/.config/gh (the kernel resolves the link before `..`), but the hook normalized first and walked the project."""
+    sub = env["home"] / ".config" / "gh" / "subdir"
+    sub.mkdir(parents=True)
+    (env["home"] / ".config" / "gh" / "hosts.yml").write_text("oauth_token: SECRETX\n")
+    (env["proj"] / "link").symlink_to(sub)
+    rg = shutil.which("rg")
+    if rg:   # the premise: ripgrep really reads hosts.yml through `link/..`
+        r = subprocess.run([rg, "--hidden", "-l", "SECRETX", "link/.."], capture_output=True, text=True,
+                           cwd=str(env["proj"]), timeout=30)
+        assert "hosts.yml" in r.stdout, (r.returncode, r.stdout, r.stderr)
+    rc, err = run(env, "Grep", {"pattern": "SECRETX", "path": "link/.."})
+    assert rc == 2 and "hosts.yml" in err, err
+    assert blocked(env, "Grep", {"pattern": "SECRETX", "path": str(env["proj"] / "link" / "..")})
+    assert not blocked(env, "Grep", {"pattern": "SECRETX", "path": "link"})   # subdir itself holds no secret
+    # The mirror: the normalized root is the one holding the secret (a normalizing tool searches it).
+    (env["proj"] / ".env").write_text("A=1\n")
+    (env["tmp"] / "elsewhere" / "deep").mkdir(parents=True)
+    (env["proj"] / "link2").symlink_to(env["tmp"] / "elsewhere" / "deep")
+    assert blocked(env, "Grep", {"pattern": "x", "path": "link2/.."})
 
 
 def test_grep_walk_skips_vcs_dirs_and_does_not_follow_symlinks(env):
@@ -608,8 +691,36 @@ def test_codex_patch_body_mentioning_env_is_allowed(env):
 def test_codex_patch_inside_a_bash_heredoc(env):
     cmd = "apply_patch <<'EOF'\n" + patch("*** Update File: .env") + "EOF\n"
     assert blocked(env, "Bash", {"command": cmd})
-    cmd_ok = "apply_patch <<'EOF'\n" + patch("*** Add File: a.py", body='+x = ".env"\n') + "EOF\n"
+    cmd_ok = "apply_patch <<'EOF'\n" + patch("*** Add File: a.py", body='+x = 1\n') + "EOF\n"
     assert not blocked(env, "Bash", {"command": cmd_ok})
+    # Under Bash every word counts, a patch body's too (2026-11-06): a bare `.env` word there is C5's false positive.
+    cmd_env = "apply_patch <<'EOF'\n" + patch("*** Add File: a.py", body='+x = ".env"\n') + "EOF\n"
+    assert blocked(env, "Bash", {"command": cmd_env})
+
+
+@pytest.mark.parametrize("cmd", [
+    "*** Begin Patch\ncat ~/.ssh/id_rsa\n*** End Patch",
+    "*** Begin Patch\ncat .env\n*** End Patch",
+    "echo hi\n*** Begin Patch\n*** Add File: a.py\n+x\ncat .env\n*** End Patch\n",
+])
+def test_bash_runs_the_lines_of_a_patch_block(env, cmd):
+    """Cursor review on PR 289 (2026-11-06): a Bash command's `*** Begin Patch` regions were dropped from the shell
+    words, but Bash runs those lines."""
+    assert blocked(env, "Bash", {"command": cmd}), cmd
+    assert blocked(env, "Bash", {"command": ["bash", "-lc", cmd]}), cmd
+    assert blocked(env, "shell", {"command": ["bash", "-lc", cmd]}), cmd   # Codex's shell tool too
+
+
+def test_genuine_apply_patch_payload_reads_only_headers(env):
+    ok = patch("*** Update File: src/app.py", body='-x\n+load(".env")\n')
+    assert not blocked(env, "apply_patch", {"command": ok})
+    assert not blocked(env, "apply_patch", {"input": ok})
+    assert not blocked(env, "custom_tool", {"command": ok})               # a patch-only payload of a non-shell tool
+    bad = patch("*** Add File: .env", body="+SECRET=1\n")
+    assert blocked(env, "apply_patch", {"command": bad})
+    assert blocked(env, "apply_patch", {"input": bad})
+    # A non-shell tool whose text is more than a patch: the text outside counts, and with it the region's words.
+    assert blocked(env, "custom_tool", {"command": "cat x\n" + ok})
 
 
 def test_codex_shell_argv_list(env):

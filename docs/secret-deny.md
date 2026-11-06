@@ -37,7 +37,12 @@ config change).
     levels, 20000 entries and 4 s; `.git`, `.svn`, `.hg`, `.bzr`, `.jj`, `.sl` and `node_modules` skipped; symlinks not
     followed, as ripgrep does not) looking for a denied, not-allowed file that the `glob` and the `type` let through. A
     hit blocks, and the message names the file and asks for a narrower `path` or a `glob` that leaves it out (`*.py`,
-    `!.env`). When the walk hits a bound it allows (fail open), except for a root at or above a home-level deny (`~`,
+    `!.env`). The root is taken in every form B1f gives a file (2026-11-06, Codex review on PR 289): with `link ->
+    ~/.config/gh/subdir`, `path: "link/.."` makes ripgrep search `~/.config/gh` (the kernel resolves the link before
+    `..`; checked with `/usr/bin/rg --hidden`, which lists `link/../hosts.yml`), while the hook used to normalize the
+    text first and walk the project. Now each distinct directory among the realpath of the unnormalized join, the
+    normalized path and its realpath is walked, the 4 s shared between them, and a denied file under any one blocks.
+    When the walk hits a bound it allows (fail open), except for a root at or above a home-level deny (`~`,
     `~/.aws`, `/home`, `/`), which blocks: those trees are big, and they hold `~/.ssh`. The `glob` is matched as ripgrep
     does (no `/`: a name at any depth; with `/`: from the root; `!` excludes, and a `!` glob with a trailing `/`
     excludes directories only; a matched directory covers its files), counting every way the string may be split
@@ -51,7 +56,12 @@ config change).
     no positive glob matches when there is one. So `{"type": "ts", "glob": "src/**"}`, `{"type": "py", "glob": "*"}` and
     `{"type": "py", "glob": ".env"}` block beside a `src/.env`, while `!` globs alone (`{"type": "py", "glob":
     "!.env"}`) still combine with the type. Any other type (Ruby's is `ruby`; `rb` is not a ripgrep type) narrows
-    nothing, and the block message then suggests a `glob` naming the files. The
+    nothing, and the block message then suggests a `glob` naming the files. A type's file names depend on the ripgrep
+    version (2026-11-06, Codex security review on PR 289: ripgrep 15.2's `sh` reads `.env` and `*.env`, so `type: sh`
+    beside a `.env` passed the hook while rg read the file): the hook's `sh` now lists `.env` and `*.env`, and when an
+    `rg` is on PATH the hook runs `rg --type-list` once per Grep call that names a mapped type (an argv list, at most
+    1 s inside the 8 s budget, any failure ignored) and adds that rg's names for the type to its own, so a newer rg can
+    only widen the filter; a type the hook's map does not know still walks unfiltered whatever that rg says. The
     `glob`'s text is checked as a pattern (B3) only when the walk could not see the whole tree: the root does not exist,
     or the walk was cut short by a bound (2026-11-04: after a complete walk the files themselves have answered, so
     `glob: ".env*"` passes in a project with no `.env`-named file and blocks beside one).
@@ -73,8 +83,14 @@ config change).
     and one that runs longer is set aside and retried, with the rest of the 8 s, after every other word, so a slow word
     cannot use up the time a later `cat ~/.ssh/id_*` needs.
   - **B1d.** Codex `apply_patch` headers (`*** Add File:`, `*** Update File:`, `*** Delete File:`, `*** Move to:`) inside a
-    `*** Begin Patch` block, in the command or any other string of a non-file tool. The patch body is not read, so a patch
-    whose code mentions `.env` passes.
+    `*** Begin Patch` block, in the command or any other string of a non-file tool. Only a genuine patch payload leaves the
+    patch body out of the shell words, so a patch whose code mentions `.env` passes there: the `apply_patch` tool, or a
+    tool that is not a shell whose text is patch blocks and nothing else. A shell tool's command (`Bash`, and Codex's
+    `shell`, `local_shell`, `exec_command`, `unified_exec`, `shell_command`, `container.exec`) is analyzed whole, patch
+    lines included, with the headers checked as well (corrected 2026-11-06, Cursor review on PR 289: the hook dropped
+    the lines between `*** Begin Patch` and `*** End Patch` from a Bash command, but Bash runs them, so `*** Begin
+    Patch`, `cat ~/.ssh/id_rsa`, `*** End Patch` passed). So under Bash an `apply_patch <<'EOF'` heredoc whose body
+    holds a bare `.env` word now blocks (C5).
   - **B1e.** Not `Glob`: it returns names, not contents.
   - **B1f.** Each path is checked three ways, separately: as given, absolute against the payload's `cwd`, and its
     realpath. Any of them denied, with no allow matching that same form, blocks. So a symlink `notes.txt -> .env`, or
@@ -132,14 +148,19 @@ config change).
   deeper or later than that in a big non-home tree is not seen; a root at or above a home-level deny (`~`, `/home`,
   `/`) blocks instead whenever the walk is cut short, so a whole-home Grep is refused in practice. `node_modules` is not
   walked, though ripgrep reads it when it is not gitignored. The `type` map (B1b) is the hook's copy of ripgrep's, for
-  19 common types, copied from `rg --type-list` of ripgrep 14.1.0 (2026-11-04; the suite checks, where `rg` is
-  installed, that each is a ripgrep type and that the copy lists every name ripgrep gives it): a later ripgrep that
-  reads more names for a type could reach a denied file the walk thinks it skips; the denied names (A1) fall in those
-  types only by extension (`.env.py`, `hosts.yml`, `config.json`), which the copy covers. Measured 2026-11-04: a Grep of this repository's root (about 1200 entries) adds about 45 ms; a
+  19 common types, copied from `rg --type-list` of ripgrep 14.1.0 (2026-11-04) plus `.env` and `*.env` in `sh` from
+  ripgrep 15.2 (2026-11-06), unioned at run time with the `rg` on PATH (B1b; the suite checks, where `rg` is installed,
+  that each is a ripgrep type and that the union lists every name that rg gives it, and prints where the static copy
+  lags). The rg on PATH is a proxy: Claude Code's Grep may run its own bundled ripgrep, so a bundled ripgrep newer
+  than both the copy and the PATH rg that reads more names for a type could still reach a denied file the walk thinks
+  it skips. Measured 2026-11-04: a Grep of this repository's root (about 1200 entries) adds about 45 ms; 2026-11-06, a
+  `type: py` Grep of the root (about 1300 entries), with the `rg --type-list` run, 58 ms through the hook (44 ms
+  before); a
   20000-entry walk of `/usr` about 100 ms; a long brace glob (`**/*.{ts,tsx,...}`, 22 extensions) 0.05 s, down from 5.7 s
   when its text was also run through the pattern check after a complete walk.
 - **C5. False positives.** A word that is itself a denied name is blocked wherever it appears: `echo .env`, `grep -n .env
-  README.md`, a heredoc whose code holds a bare `.env` word. Escape the pattern (`grep -n '\.env' README.md`), write
+  README.md`, a heredoc whose code holds a bare `.env` word (since 2026-11-06 also an `apply_patch` heredoc's patch body
+  under Bash, B1d; Codex's own `apply_patch` tool is not affected). Escape the pattern (`grep -n '\.env' README.md`), write
   files with the Write tool rather than a heredoc, or have the operator set `SECRET_DENY_OFF=1` in the environment Claude
   Code starts from. `ls ~/.ssh` is blocked too (the directory rule).
 - **C6. Case.** Paths are matched case-sensitively except on macOS, where `.ENV` opens `.env`.
@@ -170,8 +191,9 @@ config change).
 - **D4.** The live settings come from the template through the normal install path; the hook reaches
   `~/.claude/hooks/secret_read_gate.py` as a symlink into this checkout (`bin/ade-update` reports a missing link), and
   finds the policy JSON from its own realpath (`../../config/`; `SECRET_DENY_POLICY` overrides it).
-- **D5.** Tests: `tests/test_secret_read_gate.py` (the matrix, symlinks, Grep's walk, glob readings, how `glob` and
-  `type` combine and the `type` map against `rg --type-list`, Bash, `**` recursion, symlinked directories, Codex
-  patches, fail-open, the glob walk's bounds on a synthetic endless tree and a symlink loop, heredoc speed including a
+- **D5.** Tests: `tests/test_secret_read_gate.py` (the matrix, symlinks, Grep's walk, a Grep root `link/..`, glob
+  readings, how `glob` and `type` combine, the `type` map and its live union against the installed `rg --type-list` and
+  a fake `rg` on PATH (widening, a narrower list, a failing and a hanging one), Bash, the lines of a patch block under
+  Bash, `**` recursion, symlinked directories, Codex patches, fail-open, the glob walk's bounds on a synthetic endless tree and a symlink loop, heredoc speed including a
   60-line `.gitignore`, the per-word budget, Python 3.9 syntax) and `tests/test_render_secret_deny.py` (render into copies of the template: idempotent, `--check`, tags and
   other entries kept, the committed JSON equals a fresh render).

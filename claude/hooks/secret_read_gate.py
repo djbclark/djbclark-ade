@@ -6,8 +6,10 @@ this hook reads (found from this file's realpath: <repo>/claude/hooks/ -> <repo>
 it). docs/secret-deny.md says what is enforced where and the honest limits.
 
 What it inspects: Read/Edit/MultiEdit/Write/NotebookEdit `file_path`/`notebook_path`; Grep `path` and `glob`; a Bash
-`command` (shlex tokens, `<file`, `--x=file`, `a:b` parts, `~`/`~user`/`$HOME`/`${HOME}`, glob tokens); Codex
-`apply_patch` file headers (`*** Add|Update|Delete File:`, `*** Move to:`) in any string of a non-file tool's input. Glob
+`command` (shlex tokens, `<file`, `--x=file`, `a:b` parts, `~`/`~user`/`$HOME`/`${HOME}`, glob tokens; every word, the
+lines of a `*** Begin Patch` block included, since the shell runs them); Codex `apply_patch` file headers (`*** Add|Update|
+Delete File:`, `*** Move to:`) in any string of a non-file tool's input, and only for a genuine patch payload (SHELL_TOOLS,
+PATCH_TOOLS, patch_payload) is a patch block's body left out of the shell words. Glob
 is not gated (it returns names only). Each candidate path is evaluated as given, absolutized against the payload's `cwd`,
 and as its realpath, separately: the call is blocked when ANY candidate matches a deny pattern and no allow pattern
 matches that same candidate. A pattern ending in `/**` also denies its directory (`grep -r x ~/.ssh`, `tar c ~/.ssh`).
@@ -29,10 +31,13 @@ so one slow word cannot use up the time a later `cat ~/.ssh/id_*` needs (about e
 docs/secret-deny.md C7; literal paths are checked first and are not exposed).
 
 Grep (2026-11-04): Claude's Grep runs ripgrep with `--hidden`, so it reads dotfiles and descends into `~/.ssh`. Its root
-(`path`, else the cwd) is walked breadth-first (bounded: depth, entries, time; VCS dirs and node_modules skipped) and the
-call blocks when a denied file under it is one the `glob` and `type` let through, as ripgrep combines them (the last
+(`path`, else the cwd) is walked breadth-first (bounded: depth, entries, time shared by every root; VCS dirs and
+node_modules skipped); every distinct directory the root may name is walked, as concrete() gives a file's forms
+(2026-11-06: `link/..` searches beside link's target, a normalizing tool searches the normalized path), and the
+call blocks when a denied file under one is one the `glob` and `type` let through, as ripgrep combines them (the last
 matching glob decides; a positive glob reads a file whatever the `type`; a known `type`, as its file names, filters only
-the files no positive glob decides), naming the file and how to leave it out. When the walk hits a bound it fails open,
+the files no positive glob decides; its names are RG_TYPES unioned with `rg --type-list` of the rg on PATH), naming the
+file and how to leave it out. When the walk hits a bound it fails open,
 except for a root that contains a home-level deny
 (`~`, `/home`, `/`), which blocks. `.gitignore` is not consulted, so a gitignored `.env` still blocks a whole-project Grep
 (the price of not parsing ignore files). Only when the root does not exist or the walk was cut short is the glob also
@@ -51,6 +56,8 @@ import json
 import os
 import re
 import shlex
+import shutil
+import subprocess
 import sys
 import time
 
@@ -64,6 +71,10 @@ FILE_TOOLS = {
     "NotebookRead": ("notebook_path", "file_path"),
 }
 UNGATED = {"Glob"}
+# Tools whose `command` a shell runs: every word of it is analyzed, `*** Begin Patch` regions included. Codex's names
+# are listed too (an extra name only makes the hook check more).
+SHELL_TOOLS = {"Bash", "shell", "local_shell", "exec_command", "unified_exec", "shell_command", "container.exec"}
+PATCH_TOOLS = {"apply_patch", "ApplyPatch"}   # Codex's patch tool: its patch regions are data, only headers are paths
 MAX_TOKEN = 4096        # PATH_MAX; a longer token is a heredoc body or data, not a path
 MAX_TOKENS = 20000
 MAX_GLOB_HITS = 500       # matches checked per Bash glob word; past it the word's pattern is checked too
@@ -810,10 +821,12 @@ class GrepGlob:
         return False
 
 
-def grep_walk(policy: Policy, roots: list, reach):
+def grep_walk(policy: Policy, roots: list, reach, deadline=None):
     """Breadth-first over roots[0] (its other forms name the same files): ((rule, path) of the first denied file the glob
-    reaches, or None, truncated). Symlinks are not followed (ripgrep's default); VCS dirs and node_modules are skipped."""
-    deadline = min(_DEADLINE[0] - 1.0, time.monotonic() + WALK_S)
+    reaches, or None, truncated). Symlinks are not followed (ripgrep's default); VCS dirs and node_modules are skipped.
+    `deadline` is shared by every root of one Grep call (default: WALK_S from now, inside the call's budget)."""
+    if deadline is None:
+        deadline = min(_DEADLINE[0] - 1.0, time.monotonic() + WALK_S)
     todo = [("", 0)]
     n, truncated, i = 0, False, 0
     while i < len(todo):
@@ -856,8 +869,10 @@ def grep_walk(policy: Policy, roots: list, reach):
 
 
 # ripgrep's file types for Grep's `type`: the file names each one reads, copied from `rg --type-list` of ripgrep 14.1.0
-# (2026-11-04; Ruby is `ruby`, not `rb`). A type not here leaves the walk unfiltered (every file counts), which can
-# only block more; a name here that ripgrep drops only makes the walk reach more.
+# (2026-11-04; Ruby is `ruby`, not `rb`), plus `.env` and `*.env` in `sh`, which ripgrep 15.2 added (2026-11-06, Codex
+# security review on PR 289). A type not here leaves the walk unfiltered (every file counts), which can only block more;
+# a name here that ripgrep drops only makes the walk reach more. At run time the globs of an `rg` on PATH are added to a
+# type's (rg_type_globs), so a newer ripgrep can only widen the filter, never narrow it.
 RG_TYPES = {
     "py": ("*.py", "*.pyi"),
     "js": ("*.cjs", "*.js", "*.jsx", "*.mjs", "*.vue"),
@@ -871,7 +886,7 @@ RG_TYPES = {
     "sh": ("*.bash", "*.bashrc", "*.csh", "*.cshrc", "*.ksh", "*.kshrc", "*.sh", "*.tcsh", "*.zsh", ".bash_login",
            ".bash_logout", ".bash_profile", ".bashrc", ".cshrc", ".kshrc", ".login", ".logout", ".profile", ".tcshrc",
            ".zlogin", ".zlogout", ".zprofile", ".zshenv", ".zshrc", "bash_login", "bash_logout", "bash_profile",
-           "bashrc", "profile", "zlogin", "zlogout", "zprofile", "zshenv", "zshrc"),
+           "bashrc", "profile", "zlogin", "zlogout", "zprofile", "zshenv", "zshrc", ".env", "*.env"),
     "md": ("*.markdown", "*.md", "*.mdown", "*.mdwn", "*.mdx", "*.mkd", "*.mkdn"),
     "json": ("*.json", "*.sarif", "composer.lock"),
     "yaml": ("*.yaml", "*.yml"),
@@ -885,14 +900,85 @@ RG_TYPES = {
 }
 
 
-def rg_type_filter(t: str, fold: bool):
-    """A test on a path relative to the Grep root for a known ripgrep type (its base name against the type's globs),
-    or None for an unknown type."""
+RG_LIST_S = 1.0   # `rg --type-list` time, inside BUDGET_S; past it (or on any failure) the static map stands alone
+
+
+def _split_type_globs(s: str) -> list:
+    """`rg --type-list` globs of one type: comma-separated, a comma inside `{...}` kept."""
+    out, cur, depth = [], [], 0
+    for ch in s:
+        if ch == "{":
+            depth += 1
+        elif ch == "}" and depth:
+            depth -= 1
+        if ch == "," and not depth:
+            out.append("".join(cur).strip())
+            cur = []
+            continue
+        cur.append(ch)
+    out.append("".join(cur).strip())
+    return [g for g in out if g]
+
+
+def rg_live_types() -> dict:
+    """{type: [globs]} from `rg --type-list` of the rg on PATH (argv list, at most RG_LIST_S and never past the call's
+    budget), or {} when there is no rg or it fails. Only ever added to the static map, so a bad answer cannot narrow."""
+    try:
+        rg = shutil.which("rg")
+        left = _DEADLINE[0] - time.monotonic() - 2.0
+        if not rg or left <= 0.05:
+            return {}
+        r = subprocess.run([rg, "--type-list"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                           stderr=subprocess.DEVNULL, timeout=min(RG_LIST_S, left))
+        if r.returncode != 0:
+            return {}
+        out = {}
+        for line in r.stdout.decode("utf-8", "replace").splitlines():
+            name, sep, rest = line.partition(":")
+            if sep and name.strip():
+                out[name.strip()] = _split_type_globs(rest)
+        return out
+    except Exception:
+        return {}
+
+
+def rg_type_globs(t: str, live=None):
+    """The globs ripgrep's type `t` reads: the static map's, unioned with the live rg's (`live`, else rg_live_types()).
+    None for a type the static map does not know (the walk is then unfiltered, whatever the live rg says)."""
     globs = RG_TYPES.get(t)
     if globs is None:
         return None
-    rx = re.compile("|".join("(?:%s)" % fnmatch.translate(g) for g in globs), re.IGNORECASE if fold else 0)
-    return lambda rel: bool(rx.match(rel.rsplit("/", 1)[-1]))
+    if live is None:
+        live = rg_live_types()
+    out = list(globs)
+    for g in live.get(t) or ():
+        if g not in out:
+            out.append(g)
+    return out
+
+
+def rg_type_filter(t: str, fold: bool, live=None):
+    """A test on a path relative to the Grep root for a known ripgrep type (its base name against the type's globs;
+    a glob holding `/` against the whole relative path too), or None for an unknown type."""
+    globs = rg_type_globs(t, live)
+    if globs is None:
+        return None
+    base_rx, path_rx = [], []
+    for g in globs:
+        for alt in expand_braces(g):
+            (path_rx if "/" in alt else base_rx).append("(?:%s)" % fnmatch.translate(alt))
+    try:
+        flags = re.IGNORECASE if fold else 0
+        brx = re.compile("|".join(base_rx), flags) if base_rx else None
+        prx = re.compile("|".join(path_rx), flags) if path_rx else None
+    except re.error:
+        return None   # a glob this hook cannot read: filter nothing (blocks more, never less)
+
+    def ok(rel):
+        if brx is not None and brx.match(rel.rsplit("/", 1)[-1]):
+            return True
+        return bool(prx is not None and (prx.match(rel) or prx.match(rel.rsplit("/", 1)[-1])))
+    return ok
 
 
 def check_grep(ck: Checker, policy: Policy, ti: dict, cwd: str):
@@ -902,7 +988,10 @@ def check_grep(ck: Checker, policy: Policy, ti: dict, cwd: str):
     found = ck.path(raw or cwd)
     if found:
         return found + (narrow,)
-    root = os.path.normpath(os.path.join(cwd, expand_home(raw or cwd)))
+    # Every root ripgrep might search, as concrete() gives a file (2026-11-06, Codex review on PR 289): the kernel
+    # resolves `link/..` beside link's target (rg searches ~/.config/gh for `link/..` when link -> ~/.config/gh/subdir),
+    # while a normalizing tool searches the normalized path. Each distinct directory is walked; any hit blocks.
+    cands = concrete(expand_home(raw or cwd), cwd)
     g = ti.get("glob") if isinstance(ti.get("glob"), str) and ti.get("glob").strip() else None
     gg = GrepGlob(g, policy.fold) if g else None
     t = ti.get("type").strip() if isinstance(ti.get("type"), str) and ti.get("type").strip() else None
@@ -917,36 +1006,49 @@ def check_grep(ck: Checker, policy: Policy, ti: dict, cwd: str):
             return gg.reaches(rel, tf)
         return tf(rel) if tf is not None else True
 
-    if os.path.isdir(root):
-        roots = [root]
-        try:
-            real = os.path.realpath(root)
-            if real != root:
-                roots.append(real)
-        except (OSError, ValueError):
-            pass
-        hit, truncated = grep_walk(policy, roots, reach)
+    groups, unseen = [], []   # groups: [forms] per distinct directory (its realpath as key); unseen: missing roots
+    for c in cands:
+        if os.path.isdir(c):
+            try:
+                key = os.path.realpath(c)
+            except (OSError, ValueError):
+                key = c
+            for grp in groups:
+                if grp[0] == key:
+                    break
+            else:
+                grp = [key, []]
+                groups.append(grp)
+            for form in (c, key):
+                if form not in grp[1]:
+                    grp[1].append(form)
+        elif not os.path.exists(c):
+            unseen.append(c)
+        # else a file: ripgrep reads just it, and ck.path checked it
+    deadline = min(_DEADLINE[0] - 1.0, time.monotonic() + WALK_S)   # one walk budget for every root
+    for _, roots in groups:
+        hit, truncated = grep_walk(policy, roots, reach, deadline)
         if hit:
             name = os.path.basename(hit[1])
             return hit + ("Grep reads hidden files; %s or a glob that leaves it out (e.g. '*.py', or '!%s')"
                           % (narrow, name),)
         if not truncated:
-            return None   # the whole tree was seen: what the glob reaches is known, so its text proves nothing more
+            continue   # the whole tree was seen: what the glob reaches is known, so its text proves nothing more
         for form in roots:
             anc = policy.anchor_under(form)
             if anc:
                 return (anc[1], form, "this tree holds %s and is too big to check; %s (a project directory)"
                         % (anc[0], narrow))
-    elif os.path.exists(root):
-        return None   # a file: ripgrep reads just it, and ck.path checked it
-    # The root is missing or the walk was cut short: the glob's text stands in for the files not seen.
+        unseen.extend(roots)
+    # A root is missing or its walk was cut short: the glob's text stands in for the files not seen.
     if gg:
-        base = root.rstrip("/") + "/"
-        for alt in gg.positives:
-            pat = alt.lstrip("/") if "/" in alt.rstrip("/") else "**/" + alt
-            hit = policy.pattern_verdict(pat, base, dotfile=False)
-            if hit:
-                return hit, os.path.join(root, g), "use a glob that cannot match it"
+        for root in unseen:
+            base = root.rstrip("/") + "/"
+            for alt in gg.positives:
+                pat = alt.lstrip("/") if "/" in alt.rstrip("/") else "**/" + alt
+                hit = policy.pattern_verdict(pat, base, dotfile=False)
+                if hit:
+                    return hit, os.path.join(root, g), "use a glob that cannot match it"
     return None
 
 
@@ -998,11 +1100,21 @@ def strings(obj):
                 yield s
 
 
-def check_command(ck: Checker, cmd: str):
+def check_command(ck: Checker, cmd: str, shell_tool: bool = True):
     """Patch headers, then every literal word (cheap), then the glob words without `**` (a bounded walk, then their
     pattern), then those with `**` (the costly ones), each glob word within WORD_S; last, with the rest of the call's
-    budget, the words that ran past WORD_S (and when that budget ends, OutOfTime fails the call open as before)."""
-    shell, headers = split_patch(cmd) if PATCH_BEGIN.search(cmd) else (cmd, [])
+    budget, the words that ran past WORD_S (and when that budget ends, OutOfTime fails the call open as before).
+
+    For a shell tool (`shell_tool`, the default) every word of the text is analyzed, `*** Begin Patch` regions included:
+    the shell runs them (2026-11-06, Cursor review on PR 289: `*** Begin Patch\\ncat ~/.ssh/id_rsa\\n*** End Patch`
+    is three commands to Bash), and their headers are checked as well. Only a genuine patch payload (a non-shell tool
+    such as Codex `apply_patch`) has its patch regions left out of the shell words, so a patch body that mentions
+    `.env` passes there."""
+    if PATCH_BEGIN.search(cmd):
+        rest, headers = split_patch(cmd)
+        shell = cmd if shell_tool else rest
+    else:
+        shell, headers = cmd, []
     for p in headers:
         found = ck.path(p)
         if found:
@@ -1028,6 +1140,17 @@ def check_command(ck: Checker, cmd: str):
     return None
 
 
+def patch_payload(tool: str, text: str) -> bool:
+    """True when `text` is a genuine Codex apply_patch payload, whose `*** Begin Patch` regions are patch data and not
+    shell: the tool is a patch tool, or a tool that is not a shell holds patch blocks and nothing else (2026-11-06).
+    A shell tool's text is never one: the shell runs every line of it."""
+    if tool in SHELL_TOOLS:
+        return False
+    if tool in PATCH_TOOLS:
+        return True
+    return bool(PATCH_BEGIN.search(text)) and not split_patch(text)[0].strip()
+
+
 def check(payload: dict, policy: Policy):
     """(tool, rule, path) or (tool, rule, path, hint) when the call must be blocked, else None."""
     tool = payload.get("tool_name") or ""
@@ -1051,14 +1174,13 @@ def check(payload: dict, policy: Policy):
         return (tool,) + found if found else None
     # Bash, and any other tool (Codex `apply_patch`, `shell`, `exec_command`): its command and patch headers.
     cmd = ti.get("command")
-    if isinstance(cmd, list):
-        for part in cmd:
-            if isinstance(part, str):
-                found = check_command(ck, part)
-                if found:
-                    return (tool,) + found
-    elif isinstance(cmd, str):
-        found = check_command(ck, cmd)
+    parts = []
+    if isinstance(cmd, str):
+        parts = [cmd]
+    elif isinstance(cmd, list):
+        parts = [p for p in cmd if isinstance(p, str)]
+    for part in parts:
+        found = check_command(ck, part, shell_tool=not patch_payload(tool, part))
         if found:
             return (tool,) + found
     for s in strings({k: v for k, v in ti.items() if k != "command"}):
