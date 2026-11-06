@@ -100,7 +100,9 @@ scrubbed environment, boundary proven from the run's init event,
 untrusted-author refusal, descendant kill); D10 and J8 restate it. The Opus
 adversary pass on the first draft (`560f4009`, BLOCK, 2 medium) found that
 the shim the review relied on was itself deleted in the follow-up PR and that
-read-only mode's `WebFetch`/`WebSearch` were an exfiltration path.
+read-only mode's `WebFetch`/`WebSearch` were an exfiltration path; its
+confirm on `995763ec` (APPROVE) added that `review-launch` lands first in
+Wave 4 and that deny rules, not the Bash-only sandbox, confine `Read`.
 
 ## B. Scope and constraints
 
@@ -421,8 +423,9 @@ than E6's read-only mode: the tool allowlist is `Read`, `Grep`, `Glob`,
 `LS` only (**no `WebFetch` or `WebSearch`**: Codex's read-only sandbox has no
 network, and a network tool is the exfiltration path for anything an
 injected diff makes the model read), reads are confined to the review
-worktree (Claude Code's sandbox with network denied, or deny rules for every
-path outside it; `~/.config/gh/hosts.yml` and `~/.ssh` are the test cases),
+worktree by **permission deny rules for every path outside it** (Claude
+Code's sandbox covers only Bash, which is not in the allowlist, so it is not
+the mechanism; `~/.config/gh/hosts.yml` and `~/.ssh` are the test cases),
 `settingSources: []`, strict MCP with no servers, hooks empty, bypass mode
 refused, and the tripwire (exit 77 on any call outside the allowlist). **It
 keeps every isolation check `bin/local-review` has today**, as tests, before
@@ -523,7 +526,7 @@ at the end. `graft build` last.
 | 1 | Audits (a) `bin/`, (b) `skills/`, (c) `tests/` map, (d) `docs/` + queue, (e) outside dependents and links (C2, C3) ; lead writes `docs/slim/ledger.md`; **workflow** (section H, W1); operator approves the ledger once | 5 readers | ledger approved |
 | 2 | E1 (unlink, uninstall-vendored, move to site-djbclark), E2 (dead), E9 (retired providers only) | 3–4 writers + reviewers | **C7 drain gate passed first**; suite green; refs zero outside AGENTS.md and README (**workflow** W2) |
 | 3 | E3 shim, E4, E5, E10; **order inside the wave**: E5's attribution rewrite merges before E3 deletes `fleet.py`; **operator steps first**: upgrade the Mac daemon to 0.15.x in a quiesced window per `docs/queue.md` (evidence F records 0.14.x; an unfinished turn is lost on restart until terminal persistence is verified), install the J6 plugins, evaluate `session-recovery` with native resume OFF, then the one bounded native-resume trial (J6), then verify for one day before the REPLACE deletions merge | 3 | same; **the E3 shim merges only after the in-repo relay callers are on it and the C3 relay consumers are migrated or waived per file** |
-| 4 | E6 shim and bigteam, then E7 and E8; E6 and E7 as sibling cloud sessions | 2–3 | same; the lander and feeder plists are unloaded and removed (J11, operator step); **`acp-run` is not deleted here**: C3's acp consumers are migrated or waived per file first (PRs opened and merged by the lead per J2b, asking when unsure) |
+| 4 | `bin/review-launch` and its boundary tests first (owned by E8, needed by E6's shim), then the E6 shim and bigteam, then E7 and the rest of E8; E6 and E7 as sibling cloud sessions | 2–3 | same; the lander and feeder plists are unloaded and removed (J11, operator step); **`acp-run` is not deleted here**: C3's acp consumers are migrated or waived per file first (PRs opened and merged by the lead per J2b, asking when unsure) |
 | 5 | E11; AGENTS.md and README (Opus `high`; lead at `xhigh`); **workflow** W3 | 2 | suite green; `graft build` |
 | 6 | **The shims and `acp-run` ship in the final PR** (nothing on the Mac changes before the final merge, so a shim that is removed on the branch never runs live); C7 and the C1 live-process checks are **re-run as the final PR's merge gate**, output pasted into the PR; the shims and `acp-run` are removed in a **follow-up PR after one live cycle** (two weeks, or sooner when every C3 file is migrated or waived and `relay.py`/`acp-dispatch` logs show no caller), **keeping `bin/review-launch` and its tests (E8): rule 11's review is permanent and so is its boundary**; upstream filings (gaps found in Paseo: a quota-pause primitive, a workspace claim primitive, if still missing); final PR to master (J7); delete `slim/*` branches after MERGED | serial | done |
 
