@@ -277,6 +277,9 @@ through `tests/test_ade_template_check.py`.
     the `[frontier]` gate: a standing rule (no profile needed): an agent may use a frontier model on its own judgment with a one-line `--frontier-reason`, capped.
 19. [`docs/pr-policy.md`](docs/pr-policy.md) — `bin/pr-policy` (2026-11-04): who may open pull requests on djbclark's GitHub
     and Forgejo repositories, what GitHub and Forgejo can and cannot enforce, the trust rules, the launchd job, and how to revert.
+20. [`docs/tui-lessons-learned.md`](docs/tui-lessons-learned.md) — the agent TUI retirement record (2026-11-04): what each retired
+    or folded TUI was for, why it left, its gotchas and where its support lived; cross-cutting lessons, money and quota
+    lessons, patterns worth keeping, and an adoption checklist for any new TUI.
 
 ## Architecture: agent graphs at two altitudes
 
