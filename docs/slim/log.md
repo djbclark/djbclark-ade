@@ -71,6 +71,25 @@ J2 pool audit (lead's reading, ruling 10 / R2-12..15): Paseo providers that each
 
 Waivers given by the operator 2026-11-06 ("B waive both"): the sleeping pane w1:p1 and the four dirty worktrees. **C7 PASSED.** E2 may merge after E1; E3/E4/E6 are clear of this gate.
 
+## Wave 2 merged (2026-11-06 ~22:40Z)
+
+- E1 merged at 826da46 (worktree branch `worktree-agent-a4b7b27ccf9493f12`, head 6dc2093, APPROVE after one repair round); site-djbclark `slim-intake/2026-11` at fee6ac5 (pushed; direct-commit repo: the lead merges it to master at the final merge, naming the five files edited outside the moved set: AGENTS.md, bin/bg-offload, claude/README.md, cursor/home-agents.mdc, roles/watchdogd/templates/watchdogd.d/hermes-quota.toml.j2).
+- E2 merged at d756030 (worktree branch `worktree-agent-ad5e8b64e18a63e8b`, head 35e03c1, APPROVE after one repair round; C7 passed with the operator's waivers). Conflicts resolved: `.gitignore` keeps both appended blocks; `.gnu-tools-check-ignore` keeps the history path only (E1 removed the setup-modern-cli line).
+- Merger's lines applied at 1ac230b: 18 README rows, 21 docs/skills.md rows, 10 template skillOverrides and the siyuan MCP entry and the jev hook object, 2 AGENTS.md doc-table rows (jev, agent-sleep), the README numbered-doc items 4 and 13, the ralph-tui paragraph; fragment `changelog.d/claude-determined-maxwell-uvddaz.md` (PR number `#0` until the final PR exists). Checks: changelog-fold --check 0, ade-template-check 0, instruction-lint 0 (3 retired-term warnings in AGENTS.md, E11's), gnu-tools-check 39 findings (fewer than base). Targeted tests of both slices run on the merged branch (log `/tmp/w2-merge-tests.log`).
+- The c688cc check-in report (answering for 7c54a88c) landed as `docs/checkins/2026-11-06-c688cc.md` from the operator's upload.
+- E9: writer at b525ba4 (two repair rounds; eight test files green bar the baseline detached test); confirm pass running. Merges after APPROVE, with its fragment folded into the branch fragment.
+- Ruling R2-23 corrected (E5 found it): `scripts/github-ci-run` has a live caller, site-djbclark `bin/bg-offload`; KEEP.
+
+### Operator batch for the final merge (Wave 6), growing: from the E1 and E2 reports (full detail in `docs/slim/reports/wave2-E1.md` section E and `wave2-E2.md` section E)
+
+1. Merge site-djbclark `slim-intake/2026-11` into its master (lead), pull it on the Mac, then `ade update`, then `~/src/djbclark-ade/bin/skill-everywhere --all` (relinks the 14 moved skills from the new root; `report` first, dialogue/research/retro call it by name).
+2. Relink by hand the five unlinked skills from their own repos (sudo-secretspec, forgejo, hyades-docker, forgejo-ci, sipb-llm-bench) or `npx skills add` them; `skill-everywhere --remove siyuan siyuan-article-import siyuan-excalidraw siyuan-markdown`; run `tools/book-to-kb/install.sh` in site-djbclark to repoint the `book-to-kb` links.
+3. Bin links: `~/.local/bin/{swift,xcodebuild}` → site-djbclark `bin/heavy-shim`; `~/.local/bin/codium-ai`, `~/.local/bin/change-hermes` → site-djbclark `bin/`; `~/.claude/commands/teach.md` → site-djbclark `claude/commands/teach.md`; remove `~/.local/bin/{jev,seat-name,ade-scan-state,cow-pasture}` and any `opencode-ralph-tui*` copies.
+4. Forced-command keys: the Mac's `authorized_keys` line for the Grok Bot box key names `change-hermes-ssh-gate` by the old path (→ `/Users/djbclark/ops/site-public-djbclark/bin/change-hermes-ssh-gate`); pastebin's `authorized_keys` names `barnowl/scripts/bo-ssh` by the old path (pastebin needs the site-djbclark checkout). Re-render the watchdogd role (hermes-quota template now names the site path).
+5. Grok Bot box: its skills sync reads djbclark-ade `origin/master` only; the moved skills drop out of its set unless it also reads site-djbclark.
+6. `~/.claude/settings.json`: remove the `jev_effort_hook.py` hook entry and `~/.claude/hooks/jev_effort_hook.py` (C2 list, growing).
+7. `herdr plugin unlink djbclark.herdr-sleeper` (form unverified against herdr's CLI; the link was `herdr plugin link plugins/herdr-sleeper`); `cow remove` the pastures under `~/.cow/pastures` when done.
+
 ## Wave 2 progress (2026-11-06, evening)
 
 - E2: writer done (full suite: 164 failed vs 166 baseline, zero new by id); review BLOCK (stale ignore path, references in kept docs, edits to two E1 files) → repaired → APPROVE at 35e03c1. Merge waits on the C7 paste. Ruling: E1 merges before E2.
