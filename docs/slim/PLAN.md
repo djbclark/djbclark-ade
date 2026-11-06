@@ -438,7 +438,7 @@ at the end. `graft build` last.
 | 3 | E3 shim, E4, E5, E10; **order inside the wave**: E5's attribution rewrite merges before E3 deletes `fleet.py`; **operator steps first**: upgrade the Mac daemon to 0.15.x in a quiesced window per `docs/queue.md` (evidence F records 0.14.x; an unfinished turn is lost on restart until terminal persistence is verified), install the J6 plugins, evaluate `session-recovery` with native resume OFF (J6), then verify for one day before the REPLACE deletions merge | 3 | same; **the E3 shim merges only after the in-repo relay callers are on it and the C3 relay consumers are migrated or waived per file** |
 | 4 | E6 shim and bigteam, then E7 and E8; E6 and E7 as sibling cloud sessions | 2–3 | same; **`acp-run` is not deleted here**: C3's acp consumers are migrated or waived per file first (proposed to the operator as PRs if J2b allows) |
 | 5 | E11; AGENTS.md and README (Opus `high`; lead at `xhigh`); **workflow** W3 | 2 | suite green; `graft build` |
-| 6 | Shims and `acp-run` removed (E3, E6) only after every C3 file is migrated or waived; upstream filings (gaps found in Paseo: a quota-pause primitive, a workspace claim primitive, if still missing); final PR to master or J7; delete `slim/*` branches after MERGED; lander/feeder per J11 | serial | done |
+| 6 | Shims and `acp-run` removed (E3, E6) only after every C3 file is migrated or waived; upstream filings (gaps found in Paseo: a quota-pause primitive, a workspace claim primitive, if still missing); final PR to master or J7; delete `slim/*` branches after MERGED; lander/feeder plists removed (J11: retire; operator step) | serial | done |
 
 Each wave: a Sonnet research subagent re-checks Paseo and Claude Code docs
 for that wave's area (both moved weekly in October); briefs; writers;
@@ -526,7 +526,14 @@ J2c. [answered 2026-11-06: pushed as branch `docs/tui-retire-plan-2` @
 2c108f66, copied to `docs/slim/tui-retire-plan.md`] Push
 `~/.local/state/bigteam/tui-retire/PLAN.md` to a branch so the cloud lead
 can read it (E9 needs it).
-J2a. Homes for the E1 "probably another home" pieces (unchanged from v1 H2a): `book-to-kb` →
+J2a. [answered 2026-11-06: **everything to site-djbclark**, one destination;
+the E1 slice runs a secrets scan (`git secrets`-style patterns plus a read of
+each file) on every moved file and stops to ask on any hit before the push;
+`book-to-kb` and `change-hermes*` included; E9j (PR 269's wrapper code to
+peer-link) stands as the earlier explicit ruling, the pointer skill goes to
+site-djbclark; site-private keeps its own skills root, so E10's
+`skill-everywhere` keeps serving it] Homes for the E1 "probably another home"
+pieces (unchanged from v1 H2a): `book-to-kb` →
 site-private? `change-hermes*` → site-private? Grok-bot pieces → peer-link
 repo per E9j, or `coding-bot-mailbox`? `barnowl` → the barnowl fork?
 `aws-rules`, `ovhcloud-api` → public site-djbclark or private?
@@ -537,8 +544,11 @@ replacement line is not obvious; each repo is attached with `add_repo` where
 reachable from the cloud, otherwise the diff goes to the operator per file]
 Outside files (C3): may the split propose edits as PRs to tendcf, nix2cf,
 Plektra, paseo4herdr and site-public, or report only?
-J11. Lander and feeder (`~/.local/state/bigteam/deepseek-review-2026-10-30/`,
-booted out per E9k): they build on `acp-dispatch-wait`, `relay.py`, `fleet.py`,
+J11. [answered 2026-11-06: **retire**; the plists `com.djbclark.ade-lander`
+and `ade-feeder` are unloaded and removed in Wave 4 (operator step), the
+scripts stay in the state dir as history; their job is the E8 Action plus
+`gh pr checks --watch --required` and Paseo schedules] Lander and feeder
+(`~/.local/state/bigteam/deepseek-review-2026-10-30/`, booted out per E9k): they build on `acp-dispatch-wait`, `relay.py`, `fleet.py`,
 `local-review` and `pr-wait`, all of which Waves 3–4 replace, so "decide
 after the split" is decided by the split. Retire them, or port them onto
 `paseo run` plus the E8 Action? Must be answered before Wave 3.
