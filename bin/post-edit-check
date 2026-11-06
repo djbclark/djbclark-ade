@@ -1,0 +1,296 @@
+#!/usr/bin/env python3
+"""post-edit-check: a fast, narrow syntax check of the file an agent just edited.
+
+Usage:
+    post-edit-check [--hook] [--budget SECONDS] [FILE...]
+
+    --hook           read a PostToolUse JSON payload on stdin. Files come from
+                     tool_input.file_path (Claude Write/Edit/MultiEdit) and from Codex
+                     apply_patch headers ("*** Add File:", "*** Update File:",
+                     "*** Move to:") found in any string inside tool_input. Relative
+                     paths resolve against the payload's "cwd".
+    --budget SECONDS total time for all checks (default 1.5). Every subprocess gets the
+                     time left as its timeout; running out is silent and exits 0.
+
+One check per file, by type:
+    .py or python shebang   ruff check --isolated --no-cache --select E9,F63,F7,F82
+                            --output-format concise (if ruff is on PATH), else an
+                            in-memory compile() (no .pyc is written; the compile() fallback
+                            reports only when the running python is >= 3.10, older ones can
+                            false-flag newer syntax)
+    .sh/.bash or sh/bash    bash -n
+    .json                   jq empty (if jq is on PATH), else json.load; JSONC-capable files
+                            (*.jsonc, tsconfig*.json, jsconfig*.json, anything under .vscode/,
+                            devcontainer.json, .devcontainer.json) are skipped: comments and
+                            trailing commas are valid there
+    .toml                   tomllib (skipped where tomllib is missing, Python < 3.11)
+    *.tmpl, anything else, a missing or deleted file, a file over 2 MB: skipped
+
+NEVER runs tests or type checkers. Tests are slow and heavy; bg_test_gate exists because
+unslotted test runs drove the machine load to 180-220. This hook fires after every edit,
+so it only catches syntax errors and undefined names, and the ruff select list stays
+narrow so pre-existing style problems in a file never nag.
+
+Output only on failure: the problem lines on stderr (at most 40), exit 2.
+
+Exit codes:
+    0   clean, skipped, out of budget, or (in --hook mode) unreadable stdin
+    2   at least one problem found
+    64  usage error (CLI mode only)
+
+Runs on Python 3.9+, stdlib only.
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+
+MAX_BYTES = 2 * 1024 * 1024
+MAX_LINES = 40
+DEFAULT_BUDGET = 1.5
+PATCH_RE = re.compile(r"^\*\*\* (?:Add File|Update File|Move to):[ \t]*(.+?)[ \t]*$", re.M)
+RUFF_ARGS = ["check", "--isolated", "--no-cache", "--select", "E9,F63,F7,F82",
+             "--output-format", "concise"]
+
+
+class OutOfBudget(Exception):
+    pass
+
+
+class Budget:
+    def __init__(self, seconds):
+        self.end = time.monotonic() + seconds
+
+    def left(self):
+        rem = self.end - time.monotonic()
+        if rem <= 0.01:
+            raise OutOfBudget()
+        return rem
+
+
+def run(budget, argv):
+    """Run argv under the remaining budget; returns (rc, combined output)."""
+    try:
+        r = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                           stderr=subprocess.STDOUT, timeout=budget.left())
+    except subprocess.TimeoutExpired:
+        raise OutOfBudget()
+    except OSError:
+        return None, ""
+    return r.returncode, r.stdout.decode("utf-8", "replace")
+
+
+def first_line(path):
+    try:
+        with open(path, "rb") as f:
+            return f.readline(200).decode("utf-8", "replace")
+    except OSError:
+        return ""
+
+
+def is_jsonc(path):
+    """JSON that tools read as JSONC (comments, trailing commas): never flagged."""
+    norm = path.replace("\\", "/").lower()
+    base = norm.rsplit("/", 1)[-1]
+    return (base.endswith(".jsonc") or base.startswith(("tsconfig", "jsconfig"))
+            or base in ("devcontainer.json", ".devcontainer.json")
+            or ".vscode" in norm.split("/")[:-1])
+
+
+def kind_of(path):
+    low = path.lower()
+    if low.endswith(".tmpl"):
+        return None
+    if low.endswith(".py"):
+        return "py"
+    if low.endswith((".sh", ".bash")):
+        return "sh"
+    if low.endswith(".json"):
+        return None if is_jsonc(path) else "json"
+    if low.endswith(".toml"):
+        return "toml"
+    line = first_line(path)
+    if line.startswith("#!"):
+        if "python" in line:
+            return "py"
+        if re.search(r"\b(ba)?sh\b", line):
+            return "sh"
+    return None
+
+
+def check_py(path, budget):
+    ruff = shutil.which("ruff")
+    if ruff:
+        rc, out = run(budget, [ruff] + RUFF_ARGS + [path])
+        if rc == 1:
+            return [l for l in out.splitlines() if l.strip()]
+        if rc == 0 or rc is not None:
+            return []
+    if sys.version_info < (3, 10):
+        return []  # this python may not parse newer syntax (match, etc.): do not guess
+    try:
+        with open(path, "rb") as f:
+            src = f.read()
+        compile(src, path, "exec")
+    except SyntaxError as e:
+        return ["%s:%s:%s: SyntaxError: %s" % (path, e.lineno or 1, e.offset or 1, e.msg)]
+    except ValueError as e:
+        return ["%s: %s" % (path, e)]
+    except OSError:
+        return []
+    return []
+
+
+def check_sh(path, budget):
+    bash = shutil.which("bash")
+    if not bash:
+        return []
+    rc, out = run(budget, [bash, "-n", path])
+    if rc not in (None, 0):
+        return [l for l in out.splitlines() if l.strip()] or ["%s: bash -n failed" % path]
+    return []
+
+
+def check_json(path, budget):
+    jq = shutil.which("jq")
+    if jq:
+        rc, out = run(budget, [jq, "empty", path])
+        if rc is not None:
+            if rc == 0:
+                return []
+            return [l for l in out.splitlines() if l.strip()] or ["%s: invalid JSON" % path]
+    try:
+        with open(path, "rb") as f:
+            json.loads(f.read().decode("utf-8"))
+    except (ValueError, UnicodeDecodeError) as e:
+        return ["%s: invalid JSON: %s" % (path, e)]
+    except OSError:
+        return []
+    return []
+
+
+def check_toml(path, budget):
+    try:
+        import tomllib  # type: ignore
+    except ImportError:
+        return []
+    try:
+        with open(path, "rb") as f:
+            tomllib.load(f)
+    except tomllib.TOMLDecodeError as e:
+        return ["%s: invalid TOML: %s" % (path, e)]
+    except (OSError, UnicodeDecodeError):
+        return []
+    return []
+
+
+CHECKS = {"py": check_py, "sh": check_sh, "json": check_json, "toml": check_toml}
+
+
+def check_file(path, budget):
+    try:
+        if not os.path.isfile(path) or os.path.getsize(path) > MAX_BYTES:
+            return []
+    except OSError:
+        return []
+    kind = kind_of(path)
+    return CHECKS[kind](path, budget) if kind else []
+
+
+def strings_in(obj):
+    if isinstance(obj, str):
+        yield obj
+    elif isinstance(obj, dict):
+        for v in obj.values():
+            yield from strings_in(v)
+    elif isinstance(obj, list):
+        for v in obj:
+            yield from strings_in(v)
+
+
+def hook_files(raw):
+    try:
+        payload = json.loads(raw)
+    except ValueError:
+        return []
+    if not isinstance(payload, dict):
+        return []
+    ti = payload.get("tool_input")
+    cwd = payload.get("cwd") if isinstance(payload.get("cwd"), str) else None
+    paths = []
+    if isinstance(ti, dict) and isinstance(ti.get("file_path"), str):
+        paths.append(ti["file_path"])
+    for s in strings_in(ti):
+        paths.extend(PATCH_RE.findall(s))
+    out = []
+    for p in paths:
+        if cwd and not os.path.isabs(p):
+            p = os.path.join(cwd, p)
+        if p not in out:
+            out.append(p)
+    return out
+
+
+def main(argv):
+    hook = False
+    budget_s = DEFAULT_BUDGET
+    files = []
+    args = list(argv)
+    usage_err = None
+    while args:
+        a = args.pop(0)
+        if a == "--hook":
+            hook = True
+        elif a == "--budget" or a.startswith("--budget="):
+            val = a.split("=", 1)[1] if "=" in a else (args.pop(0) if args else "")
+            try:
+                budget_s = float(val)
+            except ValueError:
+                usage_err = "bad --budget value: %r" % val
+        elif a in ("-h", "--help"):
+            sys.stdout.write(__doc__)
+            return 0
+        elif a == "--":
+            files.extend(args)
+            args = []
+        elif a.startswith("-"):
+            usage_err = "unknown option: %s" % a
+        else:
+            files.append(a)
+    if usage_err and not hook:
+        sys.stderr.write("post-edit-check: %s\nusage: post-edit-check [--hook] [--budget SECONDS] [FILE...]\n" % usage_err)
+        return 64
+    if hook:
+        if usage_err:
+            return 0
+        try:
+            files = files + hook_files(sys.stdin.read())
+        except (OSError, UnicodeDecodeError):
+            return 0
+    elif not files:
+        sys.stderr.write("usage: post-edit-check [--hook] [--budget SECONDS] [FILE...]\n")
+        return 64
+    budget = Budget(budget_s)
+    problems = []
+    try:
+        for f in files:
+            problems.extend(check_file(f, budget))
+    except OutOfBudget:
+        return 0
+    except Exception:  # a checker bug must never block an edit
+        return 0
+    if not problems:
+        return 0
+    if len(problems) > MAX_LINES:
+        problems = problems[:MAX_LINES] + ["... (%d more lines)" % (len(problems) - MAX_LINES)]
+    sys.stderr.write("\n".join(problems) + "\n")
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

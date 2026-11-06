@@ -291,3 +291,58 @@ def test_install_plan_changes_nothing(monkeypatch, capsys, tmp_path):
     assert rc == 0 and "bootout" in out
     plist = (ROOT / "launchd" / "com.djbclark.context-budget.plist").read_text()
     assert "<integer>3</integer>" in plist and "<integer>50</integer>" in plist
+
+
+# ---------------------------------------------------------------- --instruction-lint (report-only)
+
+def lint_stub(tmp_path, errors, warnings, rc=1):
+    stub = tmp_path / "lint_stub.py"
+    stub.write_text("import json, sys\n"
+                    "print(json.dumps({'summary': {'error': %d, 'warn': %d}, 'argv': sys.argv[1:]}))\n"
+                    "sys.exit(%d)\n" % (errors, warnings, rc))
+    return stub
+
+
+def test_instruction_lint_flag_reports_and_leaves_the_exit_code(tmp_path, capsys, monkeypatch):
+    monkeypatch.setenv("CONTEXT_BUDGET_LINT", str(lint_stub(tmp_path, 2, 7)))
+    cfg = config(tmp_path, total=99000, memory=99000, skills=99000, mcp_tools=99000, mcp_instructions=99000)
+    args = ("--from-file", str(FIXTURE), "--config", str(cfg), "--dry-run", "--date", "2026-10-18")
+    rc, out = run(capsys, *args, "--instruction-lint")
+    assert rc == 0  # lint errors do not change the exit code
+    assert f"LINT {DIR}: 2 errors, 7 warnings" in out
+    assert "would ping" not in out  # and never ping on their own
+    rc, out = run(capsys, *args)
+    assert rc == 0 and "LINT" not in out  # opt-in
+
+
+def test_instruction_lint_clause_joins_an_existing_ping(tmp_path, capsys, monkeypatch):
+    monkeypatch.setenv("CONTEXT_BUDGET_LINT", str(lint_stub(tmp_path, 0, 3, rc=0)))
+    rc, out = run(capsys, "--from-file", str(FIXTURE), "--config", str(config(tmp_path)),
+                  "--dry-run", "--date", "2026-10-18", "--instruction-lint")
+    assert rc == 1  # the breach, as without the flag
+    ping = [ln for ln in out.splitlines() if ln.startswith("would ping:")][0]
+    assert ping.endswith("; instruction-lint 0 errors, 3 warnings")
+
+
+def test_instruction_lint_passes_json_and_the_dir(tmp_path, monkeypatch):
+    monkeypatch.setenv("CONTEXT_BUDGET_LINT", str(lint_stub(tmp_path, 0, 0, rc=0)))
+    seen = {}
+    real = cbc.subprocess.run
+
+    def spy(argv, **kw):
+        seen["argv"], seen["timeout"] = argv, kw.get("timeout")
+        return real(argv, **kw)
+    monkeypatch.setattr(cbc.subprocess, "run", spy)
+    assert cbc.lint_dir(str(tmp_path)) == {"errors": 0, "warnings": 0}
+    assert seen["argv"][1:] == [str(tmp_path / "lint_stub.py"), "--json", "--root", str(tmp_path)]
+    assert seen["timeout"] == 30
+
+
+def test_instruction_lint_failure_is_unavailable_not_a_crash(tmp_path, capsys, monkeypatch):
+    monkeypatch.setenv("CONTEXT_BUDGET_LINT", str(tmp_path / "no-such-lint"))
+    assert "error" in cbc.lint_dir(str(tmp_path))
+    assert cbc.lint_clause({"x": {"error": "exit 2"}}) == ""
+    cfg = config(tmp_path, total=99000, memory=99000, skills=99000, mcp_tools=99000, mcp_instructions=99000)
+    rc, out = run(capsys, "--from-file", str(FIXTURE), "--config", str(cfg), "--dry-run",
+                  "--date", "2026-10-18", "--instruction-lint")
+    assert rc == 0 and f"LINT {DIR}: unavailable" in out

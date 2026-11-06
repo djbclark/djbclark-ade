@@ -28,6 +28,17 @@ os.environ["ACP_DISPATCH_NO_LOAD_GATE"] = "1"  # unconditional: an outer "" or "
 # leave a real launchd job behind: test_acp_dispatch.py gives finalize a fake launchctl that
 # records its arguments; anything else gets a no-op.
 os.environ.setdefault("ACP_DISPATCH_LAUNCHCTL", "/usr/bin/true")
+# bin/ade_sched.py (bin/ade-sched, 2026-11-04) installs jobs on launchd, systemd or cron. No test may touch the real ones:
+# every scheduler binary is a no-op and the agent/unit dirs and the crontab lock live in a throwaway directory.
+# Unconditional, like RELAY_DEFER_DIR: an outer value must not point the suite at a real scheduler or ~/.config/systemd/user.
+# tests/test_ade_sched.py passes fake binaries and dirs per test.
+for _var in ("ADE_SCHED_LAUNCHCTL", "ADE_SCHED_SYSTEMCTL", "ADE_SCHED_LOGINCTL", "ADE_SCHED_CRONTAB"):
+    os.environ[_var] = "/usr/bin/true"
+_SCHED_ROOT = Path(tempfile.mkdtemp(prefix="ade-sched-suite-"))
+atexit.register(shutil.rmtree, _SCHED_ROOT, ignore_errors=True)
+os.environ["ADE_SCHED_LAUNCH_AGENTS"] = str(_SCHED_ROOT / "LaunchAgents")
+os.environ["ADE_SCHED_UNIT_DIR"] = str(_SCHED_ROOT / "systemd-user")
+os.environ["ADE_SCHED_LOCK"] = str(_SCHED_ROOT / "ade-sched.lock")
 # `reap` throttles dir sweeps younger than 60 s through a machine-wide stamp (2026-10-18).
 # Off in tests: dir sweeps must always run and must never touch the real machine's stamp;
 # test_acp_dispatch_waiter.py turns the throttle on explicitly per test.

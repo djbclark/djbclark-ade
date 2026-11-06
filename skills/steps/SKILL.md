@@ -5,8 +5,8 @@ description: >-
   multiple-choice prompt (AskUserQuestion; clarify on Hermes; a SendToUser
   question widget on Grok Bot) with the recommended option first, acting on
   each answer before the next. Use for /steps (optionally with item numbers or
-  a topic), "step me through it", "one at a time", "walk me through" a list of
-  items or pending decisions.
+  a topic), /steps plan (interview before writing a plan), "step me through it",
+  "one at a time", "walk me through" a list of items or pending decisions.
 ---
 
 # steps — one open item at a time, recommendation first
@@ -247,6 +247,26 @@ What ends the loop:
 End with a table: item, his choice, outcome (done / queued / skipped / left
 open), covering every round. Number any remaining open items so he can run
 `/steps` on them again.
+
+## 6. Plan mode (`/steps plan [topic|file]`) — explicit only
+
+Run only when the operator explicitly invokes `/steps plan`. Never offered
+automatically, and a plain `/steps` never starts it.
+
+1. **Read the material.** Read the plan or spec file if one is named. Scan the
+   relevant code for the real design forks: `graft ask` and `graft skeleton`
+   when graft is available, else Grep and Read.
+2. **List 3-5 open decisions.** Genuinely open and non-obvious. Drop facts the
+   code answers and decisions the operator has already made.
+3. **Ask one per prompt**, with the prompt tool chosen in "Prompt tool" above.
+   Recommended option first, marked `(recommended)`; each option one line with
+   its trade-off; numbered per standing order 5. Act on each answer before the
+   next prompt (section 2 and 3 apply).
+4. **Write no code** before the interview ends.
+5. **Then write the plan.** If the operator named a plan file, append
+   `## Interview decisions (YYYY-MM-DD)` to it, with each decision and its
+   answer. If no file was named, print that section in the reply. Then print
+   the plan itself, about 25 lines, in this file's style.
 
 ## What this is not
 
