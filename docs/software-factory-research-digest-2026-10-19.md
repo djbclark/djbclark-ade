@@ -2,7 +2,7 @@
 
 Summary: what two frontier reads, an OpenRig study and a landscape sweep say about adding the
 software factory (`docs/software-factory-design.md`, DRAFT v2) to the ADE-everywhere plan
-(`docs/ade-everywhere-proposal.md`). Verdict: add it as a thin state machine over `acp-dispatch`,
+(`docs/history/ade-everywhere-proposal.md`). Verdict: add it as a thin state machine over `acp-dispatch`,
 a parallel "Phase F" starting after Phase 1's CI workflow lands; borrow five ideas from OpenRig
 and agent-stack now; do not adopt OpenRig as a third fabric. Thirteen questions for djbclark are
 listed in §5, numbered on from the Fable report's SF-Q1 to SF-Q9. Everything dated here was

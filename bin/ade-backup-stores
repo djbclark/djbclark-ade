@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """ade-backup-stores: one consistent copy of every agent session store, plus the Hermes JSONL export.
 
-ADE-everywhere Phase 0 (docs/ade-everywhere-proposal.md section 8 item 1), implementing section 3 of
-docs/ade-everywhere-inventory-2026-10-20-stores.md. Nothing in any source store is deleted or modified:
+ADE-everywhere Phase 0 (docs/history/ade-everywhere-proposal.md section 8 item 1), implementing section 3 of
+docs/history/ade-everywhere-inventory-2026-10-20-stores.md. Nothing in any source store is deleted or modified:
 SQLite sources are opened `mode=ro` (which can still create zero-length `-wal`/`-shm` files beside a quiet
 database; no data changes), and the live Hermes `state.db` is never handed to `hermes` (see item 4).
 

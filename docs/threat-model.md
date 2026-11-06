@@ -2,7 +2,7 @@
 
 Snapshot **2026-10-20**, written for reviewers (Codex's GitHub security review is set to read this file for
 every PR, operator; the `adversary` sub-agent and Cursor's review checks may too) and as the baseline the
-ADE-everywhere plan ([ade-everywhere-proposal.md](ade-everywhere-proposal.md) sections 1-4 and 11) assumes.
+ADE-everywhere plan ([ade-everywhere-proposal.md](history/ade-everywhere-proposal.md) sections 1-4 and 11) assumes.
 Every claim names the file that shows it; a claim without a file is the operator's statement and is marked
 "operator". Re-read the code before relying on a line here: facts rot.
 
@@ -317,7 +317,7 @@ tampered state file can do is still a finding (section 6 item 6).
 7. **Docs carry dated snapshots**; a mismatch between a doc and the code is a doc bug to fix in the same
    PR. But when a PR removes or weakens a control this doc names (for example `autoCreatePR: False`,
    `shlex.quote` in a runner script, the `sudo-secretspec run` re-exec), treat it as a security finding first.
-8. **`ade-scan-state --remote` trusts the origin's advertised refs** (2026-10-23, Codex pass 56 on PR 27): a hostile
+8. **(Removed 2026-11-06 with the tool.) `ade-scan-state --remote` trusted the origin's advertised refs** (2026-10-23, Codex pass 56 on PR 27): a hostile
    origin that names a local-only commit makes it count as pushed. Origins are the operator's own; the scan deletes
    nothing, and the generated report says (limit 10) that `clean and pushed` is not proof of possession. The size
    of the advertisement is bounded too (2026-10-23): `ls-remote` is read in chunks, and more than 16 MiB (`LS_REMOTE_MAX_BYTES`)

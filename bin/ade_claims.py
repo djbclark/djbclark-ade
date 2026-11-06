@@ -2,7 +2,7 @@
 """ade_claims: the workspace claim library, the git-guard rules and the ref hooks (isolation slice W1, 2026-10-24; O2 redesign
 2026-10-25).
 
-One claim per workspace (a cow pasture or a linked worktree): who owns it, which branch, which base.
+One claim per workspace (a Paseo or linked worktree): who owns it, which branch, which base.
 Design: design-isolation-report.md 3.4 (schema), 3.5.4 (guard); frontier-pr59-design-report.md (O2). TWO ENFORCEMENT POINTS:
   1. git's own hooks guard REFS: `libexec/git-hooks/reference-transaction` and `pre-push` (installed per repository by
      `install`, run through `hook-ref` / `hook-push` below). git resolves every option, refspec, mapping and alias to the
@@ -10,8 +10,8 @@ Design: design-isolation-report.md 3.4 (schema), 3.5.4 (guard); frontier-pr59-de
   2. `bin/ade-git-guard`, the PATH shim, runs `ade_claims.py guard -- GIT_ARGS...` for what hooks cannot see (a foreign
      workspace, the shared checkout's destructive forms, worktree verbs, rename/copy destinations) and FAILS CLOSED on what it
      cannot read.
-Integration stage as of 2026-10-25: W1 (this file, the shim and the hooks) exists; W2 (cow-pasture installs the hooks into a new
-pasture), W3 (acp-dispatch exports ADE_CLAIM_ID) and W4 (acp-run puts the shim on agents' PATH) are NOT wired yet, so nothing
+Integration stage as of 2026-10-25: W1 (this file, the shim and the hooks) exists; W2 (the workspace launcher installs the hooks into a new
+workspace; cow-pasture, its first home, was removed 2026-11-06), W3 (acp-dispatch exports ADE_CLAIM_ID) and W4 (acp-run puts the shim on agents' PATH) are NOT wired yet, so nothing
 calls the guard in a live session. Repositories get the hooks from `ade-git-guard install` or lazily from the shim.
 
 THIS IS A SEATBELT, NOT A SANDBOX (design 5.7). It stops an agent's accidental or careless git; it does not
@@ -1269,7 +1269,7 @@ def shared_destructive(call: GitCall) -> Optional[Rule]:
 
 
 FOREIGN_ALT = ("only read-only git runs here (status, log, show, diff, rev-parse, ls-files, grep, `branch --list`, ...); to edit, "
-               "make your own workspace (`bin/cow-pasture create`, or `acp-dispatch --workspace auto`)")
+               "make your own workspace (a Paseo worktree, or `acp-dispatch --workspace auto`)")
 
 
 @dataclasses.dataclass

@@ -369,9 +369,8 @@ bind every slice to a vendor up front:
    `code`, `research`, `bulk`, `mechanical` or `github` (the router's kinds).
 2. **Plan a wave:** `~/src/djbclark-ade/bin/route_agent.py plan --kinds
    judgment,code,research,bulk` (hardest first; `--json` for scripts; when the
-   brief files already exist, add one `--brief FILE` per kind in the same order,
-   which only logs what Jev and GLiDE think each kind is, never changes the
-   plan: `docs/jev.md` "Dual review"). It reads the
+   brief files already exist, add one `--brief FILE` per kind in the same order;
+   accepted and ignored since 2026-11-06). It reads the
    aiuse snapshot (instant, no tokens), ranks by fitness and headroom, applies
    the burn-first rule, the reserve floors and the judgment rule (Claude first, omp next, codex Sol/high only while plentiful; 2026-10-25),
    and **spreads the wave** with each service's `max_parallel` (agy Claude/GPT
@@ -425,7 +424,7 @@ agents in the same file will silently lose each other's edits.
 
 Prefer one shared checkout with strict file ownership over a worktree per agent:
 disjoint files in one tree need no merge, and merging five branches costs more
-than it saves at this granularity. Reach for `cow-workspaces` or
+than it saves at this granularity. Reach for a Paseo worktree or
 `git worktree` only when slices genuinely must touch the same file.
 When a slice must stay off the live checkout, create the worktree or pasture
 yourself and pass *it* as `-C`; never `-C` the live tree with a brief that says
@@ -631,7 +630,7 @@ until the work is committed or recorded in a repo.
    checks.** A slice that runs the test suite N times under load needs
    N × (suite time + `bg`'s load wait, minutes when load is high) on top of the
    edits; 1500 s does not cover a six-finding fix plus a per-finding mutation
-   check (2026-10-08: the D-fix slice on herdr-sleeper was cancelled at 1704 s
+   check (2026-10-08: the D-fix slice on a sleeper plugin was cancelled at 1704 s
    in its mutation check, after 683 tests had passed, and the report, the last
    step of the brief, was never written). So: order every brief **edits →
    tests → write the report → optional verification (mutation checks, extra

@@ -15,8 +15,8 @@
 #
 # Installed as libexec/agent-bin/git (a relative symlink to ../../bin/ade-git-guard). Integration stage as of
 # 2026-10-25: only this guard, the hooks and bin/ade_claims.py exist (slice W1). Slices W3 (acp-dispatch exports
-# ADE_CLAIM_ID), W4 (acp-run puts libexec/agent-bin first on the PATH of every agent it launches) and W2 (cow-pasture
-# installs the hooks into a new pasture) are NOT wired yet, so nothing reaches git through here until they land; the
+# ADE_CLAIM_ID), W4 (acp-run puts libexec/agent-bin first on the PATH of every agent it launches) and W2 (the workspace launcher
+# installs the hooks into a new Paseo worktree; cow-pasture was removed 2026-11-06) are NOT wired yet, so nothing reaches git through here until they land; the
 # operator's shell, Orca and IDEs never will.
 # Design: design-isolation-report.md 3.4-3.5 (2026-10-24); O2 design: frontier-pr59-design-report.md (2026-10-25).
 #

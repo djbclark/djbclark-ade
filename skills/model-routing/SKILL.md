@@ -349,7 +349,7 @@ Rules for any agent that dispatches to agy:
   `config/go-model-policy.json` classifies routine models versus bounded advisors.
 - **Free**: sipb (MIT-hosted, `opencode` provider `sipb`).
 - **Prepaid real money, gated**: opencode-zen, openrouter, deepseek —
-  only via the `opencode-ralph-tui-*` gate scripts, never by default.
+  never by default (the gate scripts were removed 2026-11-06).
 - **The Claude API credits, omp (operator 2026-10-19; gate lifted)**: the pool
   `aiuse` labels "omp credits" is the Claude Max plan's monthly API credits (an
   expiring dollar grant, resets 2026-11-05). It is a **normal tier, used with
@@ -601,8 +601,8 @@ Herdr-hosted TUIs (retired from djbclark-ade, 2026-10-31; history only, verified
 - `herdr pane read` prints plain text; every other command prints one JSON
   envelope, `{"error":…}` **with exit 0** on failure — parse the envelope.
 - `herdr agent prompt <target> "/exit"` cleanly ends a Claude session and
-  returns the pane to its shell; the `herdr-sleeper` plugin in djbclark-ade
-  builds on this (see docs/agent-sleep.md). Never `/exit` a pane whose
+  returns the pane to its shell; a herdr sleeper plugin once built
+  on this (removed 2026-11-06). Never `/exit` a pane whose
   composer holds unsent text: the draft dies with the process.
 - A prompt can land unsubmitted (`agent_prompt_stalled`, or the text sits on
   the prompt line, maybe as `[Pasted text #1]`; herdr #1878/#2063, a
@@ -1013,7 +1013,7 @@ not send those to a frontier model at high effort. Cheapest rung first:
 
 1. **Code**: `route_agent.py`, exit codes, `aiuse --available`, a table.
 2. **A typed decision model** that returns a probability per option (TypeSafe
-   Jev; `typesafe-ai` skill). Shadow mode only since 2026-10-11 (`bin/jev`, `docs/jev.md`). The key is
+   Jev; `typesafe-ai` skill). `bin/jev` was removed 2026-11-06 (it only ran in shadow). The key is
    in `sudo-secretspec` as `TYPESAFE_API_KEY` (2026-10-11; reach it with
    `sudo-secretspec run`); a shadow-mode trial comes before it decides anything.
 3. **A cheap text model** at low effort, with a closed option list and a
