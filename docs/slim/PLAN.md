@@ -530,8 +530,13 @@ J2a. Homes for the E1 "probably another home" pieces (unchanged from v1 H2a): `b
 site-private? `change-hermes*` → site-private? Grok-bot pieces → peer-link
 repo per E9j, or `coding-bot-mailbox`? `barnowl` → the barnowl fork?
 `aws-rules`, `ovhcloud-api` → public site-djbclark or private?
-J2b. Outside files (C3): may the split propose edits as PRs to tendcf,
-nix2cf, Plektra, paseo4herdr and site-public, or report only?
+J2b. [answered 2026-11-06: **the slim lead gets the merge decisions** for the
+C3 migration edits in tendcf, nix2cf, Plektra, paseo4herdr and site-public
+(an order 11 yes for those edits), and asks the operator for input when a
+replacement line is not obvious; each repo is attached with `add_repo` where
+reachable from the cloud, otherwise the diff goes to the operator per file]
+Outside files (C3): may the split propose edits as PRs to tendcf, nix2cf,
+Plektra, paseo4herdr and site-public, or report only?
 J11. Lander and feeder (`~/.local/state/bigteam/deepseek-review-2026-10-30/`,
 booted out per E9k): they build on `acp-dispatch-wait`, `relay.py`, `fleet.py`,
 `local-review` and `pr-wait`, all of which Waves 3–4 replace, so "decide
