@@ -310,7 +310,7 @@ test("turn lifecycle: before opens a keyed turn, after closes it; git per bounda
   assert.equal(rec.turns?.length, 1);
   const turn = rec.turns![0]!;
   assert.equal(turn.turnId, "t1");
-  assert.equal(turn.turnKey, `${DI}:2`, "turnKey is daemonInstance:seq");
+  assert.match(turn.turnKey, new RegExp(`^${DI.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}:[0-9a-f]{12}:2$`), "turnKey is daemonInstance:captureNonce:seq");
   assert.equal(turn.endedAt, null);
   assert.ok(rec.git?.atTurnStart);
   h.capture.onTurnAfter(agent(), "t1", { kind: "completed" }, p);
@@ -660,8 +660,22 @@ test("events that arrive while init runs are buffered and applied in order", asy
   const rec = h.lastWrite("agent-1");
   assert.equal(rec.state, "idle");
   assert.equal(rec.turns!.length, 1);
-  assert.equal(rec.turns![0]!.turnKey, `${DI}:2`);
+  assert.ok(rec.turns![0]!.turnKey.startsWith(`${DI}:`) && rec.turns![0]!.turnKey.endsWith(":2"));
   assert.deepEqual(rec.turns![0]!.outcome, { kind: "completed" });
+});
+
+test("PR 290 Codex P2: two Captures under the same daemon never mint the same turnKey", async () => {
+  const a = harness();
+  const b = harness();
+  const p = fakePaseo();
+  a.capture.onTurnBefore(agent(), "t1", p);
+  b.capture.onTurnBefore(agent(), "t1", p);
+  await a.capture.idle();
+  await b.capture.idle();
+  const ka = a.lastWrite("agent-1").turns!.at(-1)!.turnKey;
+  const kb = b.lastWrite("agent-1").turns!.at(-1)!.turnKey;
+  assert.equal(ka.split(":").at(-1), kb.split(":").at(-1), "same seq in both");
+  assert.notEqual(ka, kb, "a reload must not reuse a persisted turn's key");
 });
 
 test("the init buffer holds at most 500 events; the rest are dropped and logged", async () => {
