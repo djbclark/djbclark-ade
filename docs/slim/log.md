@@ -13,7 +13,7 @@ Branch: the slim branch is `claude/determined-maxwell-uvddaz` (this session's de
 - **PR 291** (head `e95816ebf83b36d388243d142839134dba79b4f8`): same checks `success`; marker APPROVE on that head; all 4 Codex threads resolved. Merge-ready; not merged (operator step, R3). PR 293 is stacked on its branch and is already draft.
 - **gitignore-aider**: branch `origin/gitignore-aider` @ 9946ed38 (djbclark's commit from the shared checkout, report F1). Adversary (Opus 5.5, high) APPROVE, 3 LOW. Opened as [PR 296](https://github.com/djbclark/djbclark-ade/pull/296) with the marker; the commit is unchanged. No changelog fragment (not user-visible, rule 10).
 - **Rulings already carried out** (open-PR list, 2026-11-06): PRs 261, 292 and 294 are closed; 270, 290 and 293 are draft. Still open and non-draft, per R8's provisional rows: 194, 208, 227, 231, 254, 256, 260, 269, 281.
-- **Tag `pre-slim-2026-11-06`**: points at master fb3b9deb (after PRs 289, 291 and 296, before any slim change). Created locally in the lead's checkout; pushing a tag is refused by the cloud proxy (`git push` and the refs API both), so it exists on origin only once the operator pushes it (step 3b).
+- **Tag `pre-slim-2026-11-06`**: points at master fb3b9deb (after PRs 289, 291 and 296, before any slim change). Created locally in the lead's checkout; pushing a tag is refused by the cloud proxy (`git push` and the refs API both), pushed by the operator with `gh api` on 2026-11-06 (verified: `refs/tags/pre-slim-2026-11-06` → fb3b9deb on origin).
 - **J questions**: J1, J2, J2a, J2b, J2c, J3–J11 all carry an answer in PLAN.md; none is open.
 - **R6 (batch-2 stragglers)**: the consolidated report (37 agents) covers it; its section H lists the two unverified herdr panes (w20:pM, w36:pB) and five agents named without a report (c987a634, d8891c91, 1d003359, 01BvGHLzKz, 7c54a88c-as-c688cc). J1 is answered (the three slices exited). Treated as satisfied for Wave 1 (reads only); the C7 drain gate before Wave 2 is where a late straggler still matters.
 
@@ -39,8 +39,7 @@ Nothing yet.
 1. ~~Merge PR 289~~ done.
 2. ~~Merge PR 291~~ done.
 3. ~~Merge PR 296~~ done.
-3b. Create the tag on origin (the cloud proxy refuses tag pushes): `git fetch origin master && git tag -a pre-slim-2026-11-06 -m 'Base of the slim-down: master after PRs 289, 291 and 296' fb3b9deb044cfde79cdc7ab2623224e2d8d7658a && git push origin pre-slim-2026-11-06`.
-3a. Delete the merged branches: `git push origin --delete claude/issue-284-ndc-oslo-ideas` (and `gitignore-aider` once PR 296 reads MERGED). The cloud proxy cannot delete refs.
+3a/3b. ~~Tag and branch deletions~~ done by the operator with `gh api` (2026-11-06; the cloud proxy drops tag pushes and ref deletions silently).
 4. On the Mac, in the shared checkout: `cd ~/src/djbclark-ade && git status` (stop if another session's edits are there: their owner migrates them, order 9), then `git fetch origin && git checkout master && git reset --keep origin/master` (drops the local 9946ed38, now merged; `--keep` refuses rather than discarding uncommitted edits).
 5. On the Mac: `cd ~/src/djbclark-ade && git worktree prune && git worktree list | wc -l` (89–115 entries at check-in, report I6; prune removes only entries whose directory is gone).
 6. Approve or resize the W1 workflow (section H of PLAN.md) proposed in the lead's Wave 0 reply, then the ledger once it exists.
@@ -51,7 +50,7 @@ Operator: "Try to minimize the number of blocking things like this in the future
 
 ### Gate
 
-Wave 0 closes when the tag is on origin (step 3b). Every merge is done; the slim branch carries master fb3b9deb. Wave 1 (reads only, no merge) starts on the W1 approval; it does not need the tag.
+**Wave 0 closed 2026-11-06**: tag on origin, three merges done, slim branch carries master fb3b9deb. Still open from the operator list: shared-checkout reset and `git worktree prune` (now in the Wave 2 batch, step 7). Wave 1 (reads only, no merge) starts on the W1 approval; it does not need the tag.
 
 ## Wave 1 (started 2026-11-06 20:05Z)
 
@@ -73,7 +72,7 @@ Nothing in E2, E3, E4 or E6 merges before this is pasted. All read-only except s
 4. Queued relay acks: `python3 ~/src/djbclark-ade/skills/session-finder/relay.py --pending --summary`. Expected: empty, or each of the eight ids in report I3 retired with `relay.py --retire ID --reason "slim-down C7"`.
 5. Bigteam inboxes: `find ~/.local/state/bigteam -name 'inbox*' -newer ~/.local/state/bigteam -type f 2>/dev/null | head`; expected: none unread.
 6. C1 live processes: `launchctl list | grep com.djbclark` and `pgrep -fl 'acp-run|acp-dispatch' || echo none`. Expected: deadline-sweep, pr-policy, load-watch listed; no acp-run process.
-7. Wave 0 leftovers (the proxy cannot do these): `git tag -a pre-slim-2026-11-06 -m 'Base of the slim-down: master after PRs 289, 291 and 296' fb3b9deb044cfde79cdc7ab2623224e2d8d7658a && git push origin pre-slim-2026-11-06`; `git push origin --delete claude/issue-284-ndc-oslo-ideas gitignore-aider`; shared checkout `git reset --keep origin/master`; `git worktree prune`.
+7. Wave 0 leftovers (tag and branch deletions done): in the shared checkout `git status` (stop on another session's edits), then `git fetch origin && git checkout master && git reset --keep origin/master`; then `git worktree prune`.
 
 Facts from the site-djbclark clone (2026-11-06, `djbclark/site-djbclark` @ f11d8218, attached with push access as the E1 destination):
 
