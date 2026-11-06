@@ -30,7 +30,7 @@ os.environ["ACP_DISPATCH_NO_LOAD_GATE"] = "1"  # unconditional: an outer "" or "
 os.environ.setdefault("ACP_DISPATCH_LAUNCHCTL", "/usr/bin/true")
 # bin/ade_sched.py (bin/ade-sched, 2026-11-04) installs jobs on launchd, systemd or cron. No test may touch the real ones:
 # every scheduler binary is a no-op and the agent/unit dirs and the crontab lock live in a throwaway directory.
-# Unconditional, like RELAY_DEFER_DIR: an outer value must not point the suite at a real scheduler or ~/.config/systemd/user.
+# Unconditional: an outer value must not point the suite at a real scheduler or ~/.config/systemd/user.
 # tests/test_ade_sched.py passes fake binaries and dirs per test.
 for _var in ("ADE_SCHED_LAUNCHCTL", "ADE_SCHED_SYSTEMCTL", "ADE_SCHED_LOGINCTL", "ADE_SCHED_CRONTAB"):
     os.environ[_var] = "/usr/bin/true"
@@ -70,17 +70,11 @@ os.environ["CLAUDE_QUOTA_GUARD_STATE"] = "/nonexistent/claude-quota-guard-state.
 # unconditionally; tests/test_gates.py points them at fixtures per test.
 for _var in ("GATE_PROFILE_STATE", "GATE_PROFILE_LOG", "GATE_PROFILE_PING", "GATE_PROFILE_GOVERNOR", "GATE_PROFILE_GUARD"):
     os.environ[_var] = f"/nonexistent/{_var.lower()}"
-# relay.py reads RELAY_DEFER_DIR once, at import: every test module that loads it (test_relay_*.py, test_session_relay.py)
-# gets a throwaway queue directory, so no test reads, sweeps, expires or prunes the operator's real deferred-send queue
-# ~/.local/state/relay/deferred (2026-10-24: test_session_relay.py ran relay.main(), whose opportunistic sweep expired and
-# pruned real records and started real deliverers). Unconditional: an outer value must not point the suite at a real queue.
-# tests/test_zz_relay_real_state_untouched.py proves a freshly loaded relay.py points at this directory, never the real one.
-REAL_RELAY_DIR = Path.home() / ".local/state/relay"
-_DEFER_ROOT = Path(tempfile.mkdtemp(prefix="relay-suite-defer-"))
+# fleet.LINKS_FILE (who has messaged whom, and who ever acked; the old relay.py wrote it, fleet.py list reads it, 2026-10-25): never the
+# operator's real ledger. Unconditional. (The old relay.py's RELAY_DEFER_DIR queue went with it, 2026-11-06, docs/slim E3; this goes with
+# fleet.py in E3b.)
+_DEFER_ROOT = Path(tempfile.mkdtemp(prefix="relay-suite-links-"))
 atexit.register(shutil.rmtree, _DEFER_ROOT, ignore_errors=True)
-os.environ["RELAY_DEFER_DIR"] = str(_DEFER_ROOT / "relay" / "deferred")
-# fleet.LINKS_FILE (who has messaged whom, and who ever acked; relay.py writes it, fleet.py list reads it, 2026-10-25): never the
-# operator's real ledger. Unconditional, like RELAY_DEFER_DIR.
 os.environ["RELAY_LINKS_FILE"] = str(_DEFER_ROOT / "relay" / "links.json")
 # pr-wait, `load-watch admit --wait` and acp-dispatch-wait register their own deadline unless DEADLINE_NAME is set (2026-11-02, bin/deadline_wait.py).
 # An existing test that runs one of them must neither write the real ~/.local/state/deadlines nor see an extra supervising process: a SET (empty)

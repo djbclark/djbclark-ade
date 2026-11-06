@@ -36,8 +36,8 @@ passed the substring test, a post-`acp` `--agent-arg=--model` swapped the model,
 
 1. Add or flip its row in `AGENT_GUARDS` (`bin/agent_guard.py`): `status=GUARDED`, `gates` (what judges its model), `pool`.
 2. Map it in `AGENT_PROVIDER_MAP` in both `bin/acp-dispatch` and `bin/route_agent.py`, if it has a pool.
-3. Grep the callers and docs that pass `--acp-arg` for the agent (`skills/session-finder/launch.py` passes `--set`)
-   and keep the non-identity ones working.
+3. Grep the callers and docs that pass `--acp-arg` for the agent (`skills/session-finder/launch.py`, which passed `--set`,
+   was deleted 2026-11-06) and keep the non-identity ones working.
 4. Add the agent to the replacement tests in `tests/test_acp_dispatch_identity.py` (`GUARDED`).
 
 ## Status per TUI

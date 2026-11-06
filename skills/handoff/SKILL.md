@@ -87,7 +87,7 @@ Step 4 there). A record is open when it has no `"closed"` key and its `owner` is
 this session (`me` below: the shared resolver, because a successor inherits its predecessor's `$CLAUDE_CODE_SESSION_ID`):
 
 ```bash
-me=$(python3 ~/src/djbclark-ade/skills/session-finder/claude_identity.py || echo "${CLAUDE_CODE_SESSION_ID:-}")
+me=$(python3 ~/src/djbclark-ade/bin/claude_identity.py) || { echo "claude_identity.py found no session id; set me by hand" >&2; me=; }   # no || $CLAUDE_CODE_SESSION_ID: that is the stale one
 for f in ~/.local/state/bigteam/*/jobs/*.json; do [ -e "$f" ] || continue
   jq -r --arg me "$me" 'select(.owner==$me and (has("closed")|not))
     | [input_filename, .report, .done, .rearm, .cmd] | @tsv' "$f"; done
@@ -320,11 +320,9 @@ nothing retired on any failure; detached jobs move only through the successor's 
 old agent is retired only after that check: Paseo archives it, herdr (retired from djbclark-ade 2026-10-31; its `herdr-tidy` is gone) leaves its pane idle and
 never closes it (djbclark rule: no throwing away work). **The new agent is always a real TUI, never an ACP
 session, when the operator is expected to read and answer it (djbclark, 2026-10-25: an `acp-run` pane shows only
-"⚙ Terminal" lines and failed commands, no transcript to read or steer).** On herdr (retired from djbclark-ade 2026-10-31; `launch.py` keeps this host branch until D6, never start it for new work) that is `herdr tab create
+"⚙ Terminal" lines and failed commands, no transcript to read or steer).** On herdr (retired from djbclark-ade 2026-10-31; `launch.py`, which drove it, was deleted 2026-11-06, docs/slim E3) that was `herdr tab create
 --workspace "$HERDR_WORKSPACE_ID" --cwd DIR --no-focus`, `herdr agent start NAME --kind claude --pane PANE --
-<yolo, --model, --effort>`, then `herdr agent prompt NAME "<brief>"`; `launch.py start --baton` and
-`launch.py successor` do exactly that (claude and codex; yolo is `--dangerously-skip-permissions` /
-`--dangerously-bypass-approvals-and-sandbox`), and `--acp` is the opt-out. Dispatched slices and unattended runs
+<yolo, --model, --effort>`, then `herdr agent prompt NAME "<brief>"`; start new work on Paseo. Dispatched slices and unattended runs
 keep `acp-dispatch` and `acp-run`; they are never handoff hops. A TUI session can take `/new`, `/compact` and
 another handoff, an `acp-run` one cannot (`self-slash` exits 9 under `ACP_RUN_AGENT=1`). On Paseo the successor
 is already a real agent with a transcript the operator can open.

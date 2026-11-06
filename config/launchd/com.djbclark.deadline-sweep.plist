@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!-- Template: `deadline install` replaces __ADE__ (the djbclark-ade checkout), __HOME__ and __STATE__ (the state dir).
-     RELAY_SENDER_NAME declares this job's identity: relay.py refuses (exit 4) a sender with no session and no declared label. -->
+     RELAY_SENDER_NAME declares this job's identity: the relay shim (2026-11-06) names it in a `[relay from NAME]` prefix, a launchd job having no Paseo id. -->
 <plist version="1.0">
 <dict>
   <key>Label</key><string>com.djbclark.deadline-sweep</string>

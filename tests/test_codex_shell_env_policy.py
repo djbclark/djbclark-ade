@@ -285,18 +285,6 @@ class DetachedChildren(unittest.TestCase):
         self.assertLessEqual({k for k in got if k.startswith("HERDR_")}, set(ROUTING))  # nothing but service paths
         self.assertNotIn("PASEO_AGENT_ID", got)
 
-    def test_a_relay_deliverer_has_no_owner_id_in_its_tools(self) -> None:
-        spec = importlib.util.spec_from_file_location("relay_under_test", ROOT / "skills" / "session-finder" / "relay.py")
-        relay = importlib.util.module_from_spec(spec)
-        sys.modules["relay_under_test"] = relay
-        spec.loader.exec_module(relay)
-        with mock.patch.dict(os.environ, {**self.caller_env(), **HERDR_NEIGHBOURS}, clear=True):
-            env = relay.deliverer_env()
-        self.assertEqual([k for k in env if k.startswith("HERDR_") and k != "HERDR_BIN_PATH"], [])  # the deliverer's own, deliberate keep
-        got = tool_env(self.toml, {**env, "HOME": self.home})
-        self.assertEqual([k for k in got if k in OWNER], [])
-        self.assertLessEqual({k for k in got if k.startswith("HERDR_")}, {"HERDR_BIN_PATH"})
-
     def test_the_unscrubbed_caller_environment_would_leak_the_ids(self) -> None:
         # Why the scrub matters now: without it the same Codex hands all six names to its tools.
         got = tool_env(self.toml, self.caller_env())

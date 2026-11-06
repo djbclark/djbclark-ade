@@ -415,7 +415,7 @@ SESSION_ENV = ("PASEO_AGENT_ID", "HERDR_PANE_ID", "CLAUDE_CODE_SESSION_ID", "HER
 
 def clean_env() -> dict:
     """Environment for the relay and the workers: NO inherited session identity (a Paseo agent that registered a deadline would
-    otherwise make relay.py see the destination as itself: "that is this session"), and a declared sender label instead."""
+    otherwise send under the registrar's own Paseo id), and a declared sender label instead."""
     env = {k: v for k, v in os.environ.items() if k not in SESSION_ENV}
     env["RELAY_SENDER_NAME"] = os.environ.get("RELAY_SENDER_NAME") or "deadline"
     return env
@@ -449,11 +449,15 @@ def hermes_ping(msg: str) -> str:
 
 
 def relay_rc(owner: str, text: str) -> tuple[int, str]:
-    """Send to the owner with delivery proof requested (`--ack`: exit 0 only when delivered, 1 not delivered, 3 unverified). The
-    sender is declared (RELAY_SENDER_NAME) so a launchd job, which has no session identity, is not refused with exit 4."""
+    """Send to the owner through the relay shim (2026-11-06, docs/slim E3): exit 0 only when `paseo send --json` read sent or completed;
+    2 not delivered (queued, timeout, permission, error, or a target not idle/running with no card), 1 paseo failed, 3 not a Paseo agent,
+    4 no sender; anything but 0 stays pending and is retried. clean_env drops PASEO_AGENT_ID, so this send is sourceless and its `sent` is
+    delivery (an agent's send would only ever read `queued`, exit 5).
+    No `--wait`: the shim's --wait waits for the owner to go idle, which a busy owner never does in 20 s, and a retry would send the notice
+    again. The sender is declared (RELAY_SENDER_NAME): the shim names it in a `[relay from NAME]` prefix, a launchd job having no Paseo id."""
     if not owner or owner == "-":
         return 0, "relay skipped: no owner"
-    argv = tool("DEADLINE_RELAY", "skills/session-finder/relay.py") + [owner, "--message-file", "-", "--ack", "--wait", "20"]
+    argv = tool("DEADLINE_RELAY", "skills/session-finder/relay.py") + [owner, "--message-file", "-"]
     try:
         r = subprocess.run(argv, input=text, capture_output=True, text=True, timeout=90,
                            env=clean_env())

@@ -33,7 +33,7 @@ archive, keep working); never write another handoff automatically.
 
 A `/baton` can arrive three ways: typed by the operator, queued by `self-slash "/new"` (the same agent, fresh
 context), or as the first prompt of a successor another session started (`self-slash --finish --successor` on
-Paseo or herdr (herdr retired from djbclark-ade 2026-10-31, live until D6), `launch.py start --baton`). Treat all three alike. Since 2026-10-25 a successor the operator will
+Paseo or herdr (herdr retired from djbclark-ade 2026-10-31, live until D6); `launch.py start --baton` was deleted 2026-11-06). Treat all three alike. Since 2026-10-25 a successor the operator will
 talk to is a real TUI (an `acp-run` pane has no readable transcript); a session that does turn out to be an
 `acp-run` client (`ACP_RUN_AGENT=1`) cannot use `self-slash` (exit 9), so it ends with a document-only handoff.
 
@@ -87,7 +87,8 @@ under the task directory the Tier 1 pointer names; never adopt a record whose
 3. Point the record at this session so the next handoff lists it: set
    `owner` to this session's id, from the shared resolver (a successor inherits its predecessor's
    `$CLAUDE_CODE_SESSION_ID`, which is stale):
-   `jq --arg o "$(python3 ~/src/djbclark-ade/skills/session-finder/claude_identity.py || echo "$CLAUDE_CODE_SESSION_ID")" '.owner=$o' f > f.tmp && mv -f f.tmp f`.
+   `o=$(python3 ~/src/djbclark-ade/bin/claude_identity.py) && jq --arg o "$o" '.owner=$o' f > f.tmp && mv -f f.tmp f || echo "no session id: owner left unchanged" >&2`
+   (no `|| echo $CLAUDE_CODE_SESSION_ID` fallback: that is the predecessor's stale id).
 4. When the waiter returns, read the report, act on it, then **close the
    record** by appending `"closed": <epoch seconds>` with the same
    temp-file-and-`mv -f` form (`.closed=(now|floor)`). Records are closed, never

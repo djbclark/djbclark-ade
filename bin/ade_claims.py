@@ -424,11 +424,11 @@ def owner_label(claim: dict[str, Any]) -> str:
 
 
 def _own_claude_session_id() -> Optional[str]:
-    """This process's Claude Code session id from the shared resolver (skills/session-finder/claude_identity.py): the registry first, the env var only
+    """This process's Claude Code session id from the shared resolver (bin/claude_identity.py): the registry first, the env var only
     as the fallback. A /baton successor inherits its predecessor's CLAUDE_CODE_SESSION_ID, so the bare env var would name the wrong owner. A checkout
     without the helper (it is imported by path, not installed) keeps the env var."""
     try:
-        helper = str(Path(__file__).resolve().parent.parent / "skills" / "session-finder")
+        helper = str(Path(__file__).resolve().parent)    # bin/claude_identity.py (moved from skills/session-finder/, 2026-11-06)
         if helper not in sys.path:
             sys.path.insert(0, helper)
         import claude_identity  # type: ignore[import-not-found]
@@ -1477,7 +1477,7 @@ def _target_decision(call: GitCall, wss: list[Optional[Workspace]], ident: Optio
             c = claim_at(t)
             if c is not None and not is_mine(c, ident):
                 return _foreign(c, f"worktree {verb} of a claimed workspace",
-                                "ask the owner (session-finder/relay.py) to remove it; read-only `git worktree list` is fine")
+                                "ask the owner (a Paseo agent: `skills/session-finder/relay.py OWNER --message-file -`) to remove it; read-only `git worktree list` is fine")
             if verb == "remove" and force and c is None:
                 return Decision(False, "worktree remove --force",
                                 "`git worktree remove <path>` without --force (git then refuses a dirty tree), or claim it first",
@@ -1851,7 +1851,7 @@ def refusal_text(decision: Decision, call: GitCall) -> str:
             f"{_esc(decision.detail.get('cwd', call.cwd))}\n"
             + who +
             f"  Safe alternative: {_esc(decision.message)}.\n"
-            f"  Ask the owner through session-finder/relay.py; exit 77 is an answer, not an obstacle to route around. "
+            f"  Ask the owner (a Paseo agent) with `skills/session-finder/relay.py OWNER --message-file -`; exit 77 is an answer, not an obstacle to route around. "
             f"Logged in {_esc(guard_log_path())}.\n")
 
 
@@ -2022,7 +2022,7 @@ def _hook_refusal(rule: str, d: Decision, via: str, what: str, env: dict[str, st
                      + (f"  claim {_esc(d.claim_id)}: {_esc(d.owner)}; you are {me}.\n" if d.claim_id else
                         f"  {_esc(d.owner)}; you are {me}.\n")
                      + f"  Safe alternative: {_esc(d.message)}.\n"
-                     "  Ask the owner through session-finder/relay.py; exit 77 is an answer, not an obstacle to route "
+                     "  Ask the owner (a Paseo agent) with `skills/session-finder/relay.py OWNER --message-file -`; exit 77 is an answer, not an obstacle to route "
                      f"around. Logged in {_esc(guard_log_path())}.\n")
     return EXIT_REFUSED
 
