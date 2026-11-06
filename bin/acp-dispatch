@@ -833,7 +833,7 @@ def owner_session_id() -> str:
     predecessor's CLAUDE_CODE_SESSION_ID; an ancestor or a detached job's living Claude), else the env var as before; the same resolver as ade_claims and the handoff listing, so an owner is written
     and read the same way. The raw env var when the helper is missing."""
     try:
-        helper = str(Path(__file__).resolve().parent.parent / "skills" / "session-finder")
+        helper = str(Path(__file__).resolve().parent)    # bin/claude_identity.py (moved from skills/session-finder/, 2026-11-06)
         if helper not in sys.path:
             sys.path.insert(0, helper)
         import claude_identity

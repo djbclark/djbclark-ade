@@ -91,8 +91,8 @@ MAX_LEN = 80
 INVISIBLE = frozenset({"Cc", "Cf", "Zl", "Zp"})
 JOINERS = frozenset({"\u200c", "\u200d"})
 ZCODE_SID_RE = re.compile(r"\.zcode/cli/exec/(sess_[0-9a-fA-F-]+)/")
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "session-finder"))
-import claude_identity  # noqa: E402  # the shared Claude session-id resolver
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "bin"))
+import claude_identity  # noqa: E402  # the shared Claude session-id resolver (bin/claude_identity.py)
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import pi_native  # noqa: E402
 
@@ -120,8 +120,8 @@ def find_transcript(sid: str) -> Path | None:
 
 def registered_claude_session_id() -> str | None:
     """The registry's session id for the Claude Code that owns this shell, or None (then CLAUDE_CODE_SESSION_ID is the fallback). The rules (CLAUDE_PID
-    must be an ancestor, its registry file's pid and procStart must match, a uuid sessionId) live in skills/session-finder/claude_identity.py, the one
-    copy every identity read shares (relay, fleet, session-find, ade_claims); this passes autorename's own process-table walk."""
+    must be an ancestor, its registry file's pid and procStart must match, a uuid sessionId) live in bin/claude_identity.py, the one
+    copy every identity read shares (fleet, ade_claims, acp-dispatch); this passes autorename's own process-table walk."""
     return claude_identity.registered_session_id(lambda: ancestor_pids())
 
 

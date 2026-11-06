@@ -87,7 +87,8 @@ under the task directory the Tier 1 pointer names; never adopt a record whose
 3. Point the record at this session so the next handoff lists it: set
    `owner` to this session's id, from the shared resolver (a successor inherits its predecessor's
    `$CLAUDE_CODE_SESSION_ID`, which is stale):
-   `jq --arg o "$(python3 ~/src/djbclark-ade/skills/session-finder/claude_identity.py || echo "$CLAUDE_CODE_SESSION_ID")" '.owner=$o' f > f.tmp && mv -f f.tmp f`.
+   `o=$(python3 ~/src/djbclark-ade/bin/claude_identity.py) && jq --arg o "$o" '.owner=$o' f > f.tmp && mv -f f.tmp f || echo "no session id: owner left unchanged" >&2`
+   (no `|| echo $CLAUDE_CODE_SESSION_ID` fallback: that is the predecessor's stale id).
 4. When the waiter returns, read the report, act on it, then **close the
    record** by appending `"closed": <epoch seconds>` with the same
    temp-file-and-`mv -f` form (`.closed=(now|floor)`). Records are closed, never

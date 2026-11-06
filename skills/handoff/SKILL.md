@@ -87,7 +87,7 @@ Step 4 there). A record is open when it has no `"closed"` key and its `owner` is
 this session (`me` below: the shared resolver, because a successor inherits its predecessor's `$CLAUDE_CODE_SESSION_ID`):
 
 ```bash
-me=$(python3 ~/src/djbclark-ade/skills/session-finder/claude_identity.py || echo "${CLAUDE_CODE_SESSION_ID:-}")
+me=$(python3 ~/src/djbclark-ade/bin/claude_identity.py) || { echo "claude_identity.py found no session id; set me by hand" >&2; me=; }   # no || $CLAUDE_CODE_SESSION_ID: that is the stale one
 for f in ~/.local/state/bigteam/*/jobs/*.json; do [ -e "$f" ] || continue
   jq -r --arg me "$me" 'select(.owner==$me and (has("closed")|not))
     | [input_filename, .report, .done, .rearm, .cmd] | @tsv' "$f"; done

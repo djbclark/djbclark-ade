@@ -424,11 +424,11 @@ def owner_label(claim: dict[str, Any]) -> str:
 
 
 def _own_claude_session_id() -> Optional[str]:
-    """This process's Claude Code session id from the shared resolver (skills/session-finder/claude_identity.py): the registry first, the env var only
+    """This process's Claude Code session id from the shared resolver (bin/claude_identity.py): the registry first, the env var only
     as the fallback. A /baton successor inherits its predecessor's CLAUDE_CODE_SESSION_ID, so the bare env var would name the wrong owner. A checkout
     without the helper (it is imported by path, not installed) keeps the env var."""
     try:
-        helper = str(Path(__file__).resolve().parent.parent / "skills" / "session-finder")
+        helper = str(Path(__file__).resolve().parent)    # bin/claude_identity.py (moved from skills/session-finder/, 2026-11-06)
         if helper not in sys.path:
             sys.path.insert(0, helper)
         import claude_identity  # type: ignore[import-not-found]
