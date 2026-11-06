@@ -11,8 +11,8 @@
    fired the autorename hook, which renamed the caller's herdr tab).
 3. The model is applied first for every agent, then the other options (a model switch resets
    effort and changes which effort values exist); pick_config tries every option of a category and
-   strips a trailing "(openai)" from model tokens (qwen).
-4. zcode-acp-server gets ZCODE_BIN (its model switch failed without it); the tripwire names the tool.
+   strips a trailing "(openai)" from model tokens.
+4. The tripwire names the tool.
 acp-run imports the ACP SDK, so the script is loaded in a `uv run --with` subprocess against fakes.
 """
 from __future__ import annotations
@@ -178,7 +178,7 @@ PROBE = textwrap.dedent("""\
                 # PASEO_HOME, which acp-run rightly leaves alone (adversary round 2, 2026-10-20).
                 "host_vars": sorted(k for k in ("PASEO_AGENT_ID", "PASEO_AGENT_CWD", "ORCA_TERMINAL_HANDLE",
                                                 "ADE_OPENCODE_SESSION_ID", "ADE_OPENCODE_DIRECTORY", "ACP_RUN_AGENT") if k in env),
-                "grok_home": env.get("GROK_HOME"), "zcode_bin": env.get("ZCODE_BIN"),
+                "grok_home": env.get("GROK_HOME"),
                 "user_config": [r["data"] for r in rows if r["kind"] == "user_config"]}
 
     def upd(kind, tid, status=None, tkind=None, title=None):
@@ -195,16 +195,16 @@ PROBE = textwrap.dedent("""\
             return {"id": oid, "category": cat, "type": "select", "options": [{"value": v, "name": v} for v in vals]}
         cursor = [opt("thinking", "thought_level", ["true", "false"]),
                   opt("effort", "thought_level", ["low", "extra-high"])]
-        qwen = [opt("model", "model", ["qwen3.8-max(openai)", "glm-5(openai)", "qwen3.5-plus(openai)"])]
+        sfx = [opt("model", "model", ["big-max(openai)", "glm-5(openai)", "plus-3.5(openai)"])]
         out = {"second_option": mod.pick_config(cursor, "extra-high", "thought_level"),
-               "qwen_suffix": mod.pick_config(qwen, "qwen3.8-max", "model"),
-               "qwen_exact": mod.pick_config(qwen, "glm-5(openai)", "model")}
+               "sfx_suffix": mod.pick_config(sfx, "big-max", "model"),
+               "sfx_exact": mod.pick_config(sfx, "glm-5(openai)", "model")}
         try:
             mod.pick_config(cursor, "max", "thought_level")
         except SystemExit as e:
             out["miss"] = str(e)
         try:
-            mod.pick_config(qwen, "kimi", "model")
+            mod.pick_config(sfx, "kimi", "model")
         except SystemExit as e:
             out["miss_single"] = str(e)
         try:
@@ -212,26 +212,6 @@ PROBE = textwrap.dedent("""\
         except SystemExit as e:
             out["no_option"] = str(e)
         return out
-
-    def zcode():
-        pkg = home / "lib" / "zcode-app-cli"
-        (pkg / "bin").mkdir(parents=True)
-        (pkg / "vendor" / "provider").mkdir(parents=True)
-        (pkg / "bin" / "zcode.js").write_text("")
-        (pkg / "bin" / "zcode.js").chmod(0o755)
-        (pkg / "vendor" / "zcode.cjs").write_text("")
-        (pkg / "vendor" / "provider" / "zcode-builtin.json").write_text("{}")
-        (home / "bin").mkdir()
-        (home / "bin" / "zcode").symlink_to(pkg / "bin" / "zcode.js")
-        old = os.environ["PATH"]
-        os.environ["PATH"] = str(home / "bin") + os.pathsep + old
-        try:
-            found = mod.zcode_bin()
-            (pkg / "vendor" / "provider" / "zcode-builtin.json").unlink()
-            missing = mod.zcode_bin()
-        finally:
-            os.environ["PATH"] = old
-        return {"found": found == str((pkg / "vendor" / "zcode.cjs").resolve()), "got": found, "missing": missing}
 
     async def main():
         return {
@@ -249,11 +229,11 @@ PROBE = textwrap.dedent("""\
             "spawn_grok_all": await spawn("grok", "all"),
             "spawn_grok_strip": await spawn("grok", "all", strip_flag=True),
             "spawn_codex": await spawn("codex", "all"),
-            "spawn_zcode": await spawn("zcode", "all"),
+            "spawn_opencode": await spawn("opencode", "all"),
             "tripwire": await tripwire_title(),
             "order": [list(mod.order_sets(d)) for d in (
                 {"mode": "x", "effort": "y", "model": "m", "provider": "p"}, {"mode": "x"}, {"model": "m", "a": "b"})],
-            "picks": picks(), "zcode": zcode(),
+            "picks": picks(),
             "scrub": list(mod.SCRUB_ENV),
         }
 
@@ -388,20 +368,15 @@ class TestGrokDenyAndScrub(unittest.TestCase):
         # (agents/codex/config.toml.tmpl), so acp-run must not hand a detached agent the caller's workspace or tab.
         for k in ("HERDR_PANE_ID", "HERDR_ENV", "HERDR_WORKSPACE_ID", "HERDR_TAB_ID"):
             self.assertIn(k, self.r["scrub"])
-        for name in ("spawn_grok_deny", "spawn_grok_all", "spawn_codex", "spawn_zcode"):
+        for name in ("spawn_grok_deny", "spawn_grok_all", "spawn_codex", "spawn_opencode"):
             with self.subTest(name=name):
                 self.assertEqual(self.r[name]["herdr"], [])
 
     def test_paseo_and_orca_self_ids_never_reach_the_agent_and_a_marker_does(self):
         # 2026-10-20: PASEO_AGENT_ID in a dispatched slice let its self-slash clear/archive the caller's agent.
-        for name in ("spawn_grok_deny", "spawn_grok_all", "spawn_codex", "spawn_zcode"):
+        for name in ("spawn_grok_deny", "spawn_grok_all", "spawn_codex", "spawn_opencode"):
             with self.subTest(name=name):
                 self.assertEqual(self.r[name]["host_vars"], ["ACP_RUN_AGENT"])
-
-    def test_zcode_gets_its_cli_entry(self):
-        self.assertTrue(self.r["zcode"]["found"], self.r["zcode"])
-        self.assertIsNone(self.r["zcode"]["missing"])
-        self.assertIsNone(self.r["spawn_codex"]["zcode_bin"])
 
     def test_tripwire_names_the_tool_not_its_id(self):
         self.assertEqual(self.r["tripwire"], "tool 'read_file' ran without a permission request under --perm deny")
@@ -412,10 +387,10 @@ class TestGrokDenyAndScrub(unittest.TestCase):
     def test_pick_config_tries_every_option_and_strips_a_suffix(self):
         p = self.r["picks"]
         self.assertEqual(p["second_option"], ["effort", "extra-high"])
-        self.assertEqual(p["qwen_suffix"], ["model", "qwen3.8-max(openai)"])
-        self.assertEqual(p["qwen_exact"], ["model", "glm-5(openai)"])
+        self.assertEqual(p["sfx_suffix"], ["model", "big-max(openai)"])
+        self.assertEqual(p["sfx_exact"], ["model", "glm-5(openai)"])
         self.assertEqual(p["miss"], "acp-run: no thought_level 'max'; thinking: have: true, false | effort: have: low, extra-high")
-        self.assertEqual(p["miss_single"], "acp-run: no model 'kimi'; have: qwen3.8-max(openai), glm-5(openai), qwen3.5-plus(openai)")
+        self.assertEqual(p["miss_single"], "acp-run: no model 'kimi'; have: big-max(openai), glm-5(openai), plus-3.5(openai)")
         self.assertIn("offers no 'model' config option", p["no_option"])
 
 

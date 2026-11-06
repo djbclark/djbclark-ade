@@ -77,7 +77,7 @@ def probe_tool_calls() -> dict[str, object]:
         # without asking (2026-10-19: `graft ask` tripped a research slice); only execute is contained
         out["trip_codex"] = {f"{p}/{k}": trips(p, k, agent="codex") for p in ("deny", "read-only")
                              for k in ("execute", "edit", "other", "read")}
-        out["exempt_extra"] = sorted(mod.tripwire_exempt_kinds("agy", "all", "read,search"))
+        out["exempt_extra"] = sorted(mod.tripwire_exempt_kinds("grok", "all", "read,search"))
         out["decide"] = {"ro_read": allows("read-only", "read", "Read x"),
                          "ro_fetch": allows("read-only", "fetch", "WebFetch x"),
                          "ro_edit": allows("read-only", "edit", "Edit x"),
@@ -87,7 +87,7 @@ def probe_tool_calls() -> dict[str, object]:
                          "deny_read": allows("deny", "read", "Read x"),
                          "all_edit": allows("all", "edit", "Edit x")}
         out["modes"] = {a: mod.perm_modes(a) for a in
-                        ("claude", "codex", "opencode", "zcode", "agy", "grok", "cursor", "crush")}
+                        ("claude", "codex", "opencode", "grok", "cursor")}
         out["claude_tools"] = mod.READONLY_META["claude"]["claudeCode"]["options"]["tools"]
         out["select_exit"] = [mod.select_exit("end_turn", "", 2, 0, 0, "read-only", None),
                               mod.select_exit("end_turn", "hi", 0, 0, 0, "read-only", None)]
@@ -186,9 +186,9 @@ class TestReadOnlyPolicy(unittest.TestCase):
     def test_supported_agents(self):
         m = self.res["modes"]
         assert isinstance(m, dict)
-        for agent in ("claude", "codex", "opencode", "zcode"):
+        for agent in ("claude", "codex", "opencode"):
             self.assertIn("read-only", m[agent], agent)
-        for agent in ("agy", "grok", "cursor", "crush"):
+        for agent in ("grok", "cursor"):
             self.assertNotIn("read-only", m[agent], agent)
         self.assertNotIn("deny", m["cursor"])
 
