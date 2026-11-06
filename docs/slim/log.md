@@ -52,3 +52,25 @@ Operator: "Try to minimize the number of blocking things like this in the future
 ### Gate
 
 Wave 0 closes when the tag is on origin (step 3b). Every merge is done; the slim branch carries master fb3b9deb. Wave 1 (reads only, no merge) starts on the W1 approval; it does not need the tag.
+
+## Wave 1 (started 2026-11-06 20:05Z)
+
+W1 running: 5 Sonnet readers (bin, skills, tests, docs, outside), dedup by path, 3-lens refute per KEEP row, 1 Opus critic; cap 100 agents. The ledger (`docs/slim/ledger.md`) is written by the lead from its output and posted, not awaited (H ruling).
+
+Facts found while preparing Wave 2 (so a slice does not trip on them):
+
+- `git filter-repo` was not installed in this container (PLAN.md D12 recorded a40bce5 from the previous session's container); installed here with pip, version a40bce5.
+- tendcf and nix2cf live at `frdminc/tendcf` and `frdminc/nix2cf` on GitHub (push access); Plektra at `djbclark/plektra-djbclark`, paseo4herdr at `djbclark/paseo4herdr`, site-djbclark and site-private at `djbclark/`. All five C3 repos are attachable from the cloud (J2b), as is the E1 destination.
+- PLAN.md C7 names `bin/cow-pasture ls` and `acp-dispatch ls`; neither exists. `cow-pasture` has create/remove/scrub/trust/check/untrust and reads `cow list --json`; acp-dispatch has check/resume/wait/tell/outcome, and its records are the files under `~/.local/state/bigteam/*/jobs/`. The batch below uses the real commands.
+
+### Operator batch for Wave 2 (the C7 drain gate; run on the Mac, paste the output here as one block)
+
+Nothing in E2, E3, E4 or E6 merges before this is pasted. All read-only except step 7.
+
+1. Sleeping herdr panes holding a Claude session: `herdr plugin action invoke djbclark.herdr-sleeper.list` (or `~/src/djbclark-ade/plugins/herdr-sleeper/herdr-sleeper list; ~/src/djbclark-ade/plugins/herdr-sleeper/herdr-sleeper log | tail -20`). Expected: nothing sleeping, nothing orphaned.
+2. Resumable acp-dispatch records: `ls -la ~/.local/state/bigteam/*/jobs/ 2>/dev/null | grep -v '\.done'` and `launchctl list | grep -i acp-dispatch`. Expected: every record has a `.done`, no launchd job.
+3. Worktrees and pastures: `cd ~/src/djbclark-ade && git worktree list` and `cow list --json 2>/dev/null | head -50`; for each listed path, `git -C PATH status --short | head -3` (clean = nothing printed). A dirty one is its owner's to migrate (order 9) or yours to waive by name (report F4, F5, F7).
+4. Queued relay acks: `python3 ~/src/djbclark-ade/skills/session-finder/relay.py --pending --summary`. Expected: empty, or each of the eight ids in report I3 retired with `relay.py --retire ID --reason "slim-down C7"`.
+5. Bigteam inboxes: `find ~/.local/state/bigteam -name 'inbox*' -newer ~/.local/state/bigteam -type f 2>/dev/null | head`; expected: none unread.
+6. C1 live processes: `launchctl list | grep com.djbclark` and `pgrep -fl 'acp-run|acp-dispatch' || echo none`. Expected: deadline-sweep, pr-policy, load-watch listed; no acp-run process.
+7. Wave 0 leftovers (the proxy cannot do these): `git tag -a pre-slim-2026-11-06 -m 'Base of the slim-down: master after PRs 289, 291 and 296' fb3b9deb044cfde79cdc7ab2623224e2d8d7658a && git push origin pre-slim-2026-11-06`; `git push origin --delete claude/issue-284-ndc-oslo-ideas gitignore-aider`; shared checkout `git reset --keep origin/master`; `git worktree prune`.
