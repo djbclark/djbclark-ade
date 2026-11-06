@@ -75,6 +75,10 @@ P=paseo   # the Paseo CLI
 
 ## 2. Contact
 
+0. **Wake agents in small batches, never all at once.** Every idle or `closed` agent that gets a message starts a turn and loads its
+   session, and many at once exhaust memory. On 2026-11-06 a "continue" to about 25 agents in one burst drove load1 from about 5 to
+   360, swap to 15.1 of 16 GB, and froze herdr (`pane list` timed out). Send to at most 4 agents, then wait until
+   `~/src/djbclark-ade/bin/load-watch admit` is ok again before the next 4. A broadcast follows the same rule.
 1. Every live agent except headless slices and Hermes conversations (idle, working, busy-background, standing roles) gets the brief in
    item 4: `$R <ident> --message-file F --expect-ack <ID> --ack`. `<ID>` is a short token: `lead-` plus the first 8 hex of the agent id,
    or for a herdr pane the pane id with `:` turned into `-`. An expectation id is 1-40 characters `[A-Za-z0-9._-]`, and an id still
