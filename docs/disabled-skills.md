@@ -174,7 +174,7 @@ in `~/.claude/settings.json` does hold, whatever re-links the folder:
    `graft` CLI and its hooks stay) and `herdr-tidy`.
    (2026-11-06: the four `siyuan*` were deleted from djbclark-ade and `terminus-kira`,
    `setup-modern-cli`, `teach` and `coderabbit-feeder` moved to site-djbclark's `skills/`;
-   their keys stay until the template edit that goes with that move.)
+   the `siyuan*` keys go with the template edit for that; the other keys stay valid by name.)
 
 `"skillListingBudgetFraction": 0.007` caps the listing at 7k tokens. Past the
 cap, descriptions are dropped least-used first; names stay. `/doctor` shows
