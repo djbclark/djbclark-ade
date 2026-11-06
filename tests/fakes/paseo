@@ -49,6 +49,9 @@ def act(agent, prompt):
         agent["status"] = "idle"
         return
     m = re.search(r"writing the report to (\S+) and then touching (\S+),", prompt)
+    if mode == "nothing":
+        agent["status"] = "idle"
+        return
     if mode == "reply":
         r = re.search(r"write your reply to (\S+?)[,.]? ", prompt)
         if r:

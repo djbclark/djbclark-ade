@@ -168,11 +168,12 @@ pages. On a host with `model-routing` / `effort-routing` skills, follow them.
 
 ## On this machine (skip elsewhere)
 
-1. **Workers, refuter, writer and reviewer are `/bigteam` slices, not only
+1. **Workers, refuter, writer and reviewer are `fan-out` slices, not only
    Claude sub-agents.** Dispatch each brief with `acp-dispatch <agent> --model M
    --kind <kind> --name N --task research-<slug> -C <run-folder-parent> -f <brief-file>`
    (`--kind research` on the everyday pools, `frontier` for astra and Fable;
-   codex, zcode, opencode, cursor-agent, copilot, agy via `acp-run`; the
+   codex, opencode, cursor, grok, omp as Paseo providers: `acp-dispatch` is a `paseo run` shim since
+   2026-11-06, `--perm read-only` is Claude's review boundary or refused; the
    `model-routing` skill and the `aiuse` rules in `~/CLAUDE.md` give the
    mechanics). Reasons: the reads stay out of the lead's context, the
    quota spreads across vendors, and the reviewer gets a genuinely different
@@ -204,7 +205,7 @@ pages. On a host with `model-routing` / `effort-routing` skills, follow them.
    (`acp-dispatch agy --model <m> --kind research`, only ever via ACP, never `agy -p`;
    `--model claude-opus-5-5 --effort high` (agy 1.4.1, 2026-10-18, dropped the effort-suffixed ids) draws its Claude/GPT pool, which `aiuse`
    lists as `antigravity claude_gpt`, burn-first while >= 40% left, see
-   bigteam. Over ACP the `claude-*`/`gpt-*` ids appear only because
+   the model-routing skill. Over ACP the `claude-*`/`gpt-*` ids appear only because
    acp-run identifies itself to agy as `zed`: agy_acp_server 1.3.0 hides
    non-Gemini models from other clients (deliberate in Google's
    `supports_third_party_models()`), which is why a dispatch on 2026-10-10
