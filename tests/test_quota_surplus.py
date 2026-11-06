@@ -281,28 +281,53 @@ def test_idle_five_hour_windows_never_page(qs):
 def test_failed_ping_and_no_relay_leaves_episode_unnotified(qs):
     alerts, state = alerts_of(qs, argon_data())
     acts = qs.notify(alerts, state, NOW, dry_run=False, rows=[], items=[], ping=lambda t: False,
-                     relay=lambda a: True)
+                     relay=lambda a, out: True)
     ep = state["episodes"][alerts[0]["episode"]]
     assert "failed" in [a["action"] for a in acts]
     assert not ep.get("notified_at") and ep.get("failed_at") and not state.get("pools")
     sent = []                                          # next run retries
     qs.notify(alerts, state, NOW + timedelta(minutes=15), dry_run=False, rows=[], items=[], ping=ok_ping(sent),
-              relay=lambda a: True)
+              relay=lambda a, out: True)
     assert len(sent) == 1 and state["episodes"][alerts[0]["episode"]].get("notified_at")
 
 
-def test_started_relay_is_not_delivery_and_is_not_repeated(qs):
-    # local-review P2 on b2053c1: a launched relay may still be refused; only a successful ping marks the episode
+def test_relay_delivery_tracked_per_lead_and_retried(qs, tmp_path):
+    # local-review P2s on b2053c1 and 3fec121: a launched relay is not a delivery; each lead is tracked on its own and a
+    # failed relay is retried even after the operator ping succeeded
     alerts, state = alerts_of(qs, argon_data())
-    relays = []
-    qs.notify(alerts, state, NOW, dry_run=False, rows=[LEADS[1]], items=[], ping=lambda t: False,
-              relay=lambda a: relays.append(a) or True)
     ep = state["episodes"][alerts[0]["episode"]]
-    assert not ep.get("notified_at") and ep.get("relayed_at") and len(relays) == 1
-    sent = []                                          # the retry pings again but does not relay twice
-    qs.notify(alerts, state, NOW + timedelta(minutes=15), dry_run=False, rows=[LEADS[1]], items=[],
-              ping=ok_ping(sent), relay=lambda a: relays.append(a) or True)
-    assert len(sent) == 1 and len(relays) == 1 and ep.get("notified_at")
+    started = []
+
+    def relay(argv, out):
+        started.append((argv[2], out))
+        return True
+
+    def run(minutes, ping):
+        return qs.notify(alerts, state, NOW + timedelta(minutes=minutes), dry_run=False, rows=LEADS[:2], items=[],
+                         ping=ping, relay=relay)
+
+    run(0, lambda t: False)
+    assert not ep.get("notified_at") and len(started) == 2                   # both leads started, nothing delivered
+    sent = []
+    run(15, ok_ping(sent))                                                   # relays still running: not restarted
+    assert len(sent) == 1 and ep.get("notified_at") and len(started) == 2
+    outs = dict(started)
+    Path(outs["aaaa1111"]).write_text(json.dumps({"rc": 0}))
+    Path(outs["bbbb2222"]).write_text(json.dumps({"rc": 1}))
+    run(30, ok_ping(sent))                       # the refused lead is retried, the delivered one is not; no new page
+    assert [t for t, _ in started[2:]] == ["bbbb2222"] and len(sent) == 1
+    assert ep["relays"]["aaaa1111"].get("delivered_at") and ep["relays"]["bbbb2222"]["attempts"] == 2
+    for k in range(3, 6):                        # capped at MAX_RELAY_ATTEMPTS
+        Path(started[-1][1]).write_text(json.dumps({"rc": 1}))
+        run(15 * k + 30, ok_ping(sent))
+    assert ep["relays"]["bbbb2222"]["attempts"] == qs.MAX_RELAY_ATTEMPTS
+
+
+def test_relay_runner_records_relay_exit_status(qs, tmp_path):
+    out = tmp_path / "o.json"
+    assert qs.main(["_relay-run", str(out), "--", sys.executable, "-c", "import sys; sys.exit(4)"]) == 0
+    assert qs.relay_outcome(str(out)) == 4
+    assert qs.relay_outcome(str(tmp_path / "missing.json")) is None
 
 
 def test_dry_run_sends_and_marks_nothing(qs):
