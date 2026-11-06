@@ -114,7 +114,9 @@ launch check and keyed its cache on the launcher's settings too. Codex's
 security review on `f61cea21` (P2, round 8) moved the marker Action to
 `pull_request_target` from base code with no PR checkout, posting a status
 to the head SHA and re-running on body edits, with a test PR that modifies
-the workflow.
+the workflow; the adversary confirm on `a05bd3b6` (APPROVE, 1 medium) added
+read-only default token permissions, explicit `permissions`, concurrency
+with a head re-check before posting, and a spoof-workflow test PR.
 
 ## B. Scope and constraints
 
@@ -492,10 +494,22 @@ workflow triggers on `pull_request_target` (`opened`, `synchronize`,
 the PR**, reads the PR body and head SHA through the API with the
 workflow's own read token, and **posts a commit status to the PR head SHA**
 (the ruleset's required check reads that status; a `pull_request_target`
-run's own check attaches to the base branch's SHA, not the head); it needs
-no write permission beyond `statuses: write`, and its test suite includes a
-PR that modifies the workflow file (the modified copy must have no effect on
-the verdict). Per J8 (answered 2026-11-06, the operator's explicit choice over the
+run's own check attaches to the base branch's SHA, not the head); it
+declares `permissions: {pull-requests: read, statuses: write}` explicitly
+and nothing more. **A status is matched by its context name only**, so a
+branch pushed by someone with push access (here, the operator's own agents)
+could add a second `pull_request` workflow beside it that posts a green
+status under the same context with its own token; fork PRs cannot, their
+token is read-only. So the slice also **sets the repository's default
+workflow token permissions to read-only** (an operator step in the
+repository settings; then only the base workflow holds `statuses: write`),
+adds `concurrency: {group: adversary-marker-<PR>, cancel-in-progress:
+true}` and re-reads the body and head SHA just before posting, posting only
+if the head is unchanged (an `edited` run and a `synchronize` run can
+overlap, and a stale APPROVE must not land after a BLOCK edit); and its test
+suite includes a PR that modifies the workflow file **and a PR that adds a
+spoofing workflow beside it**, both of which must leave the required check
+failing. Per J8 (answered 2026-11-06, the operator's explicit choice over the
 fail-closed thread gate `pr-wait` enforced), unresolved Codex threads do not
 gate the merge: the ruleset requires the Action and CI, not conversation
 resolution; Codex findings stay visible as threads and the lead reads them
