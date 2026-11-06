@@ -110,7 +110,11 @@ ignored, since deny rules cannot enumerate every host path; the confirm on
 Claude version before a launch, reconciled `--settings` with
 `settingSources: []`, and added the key's own exemption to the check; the
 confirm on `8f1c0177` (APPROVE, 2 low) let an accepted exemption pass the
-launch check and keyed its cache on the launcher's settings too.
+launch check and keyed its cache on the launcher's settings too. Codex's
+security review on `f61cea21` (P2, round 8) moved the marker Action to
+`pull_request_target` from base code with no PR checkout, posting a status
+to the head SHA and re-running on body edits, with a test PR that modifies
+the workflow.
 
 ## B. Scope and constraints
 
@@ -220,7 +224,7 @@ C6. **Evidence to keep**: `docs/checkins/`, `docs/handoffs/`,
 | D7 Skills in every agent | `skill-everywhere`, `skill-get`, `fix-skill-frontmatter.py` | Claude-only: one symlink `~/.claude/skills → <repo>/skills` (no tool); other surviving providers: `npx skills add <repo>` (MIT; a snapshot, re-run on change, vercel-labs/skills#748); `gpambrozio/skills` (902) to list and invoke; `agentskills/skills-ref validate` for lint | KEEP `skill-everywhere` trimmed while any non-Claude provider, the site-private root or the site-djbclark root survives without its own install path; delete the rest (E10) |
 | D8 Scheduler for the kept jobs | launchd plists; PR 291's `ade-sched` | no existing tool refuses on missing linger or wraps `flock -n`; `gpambrozio/launchd-jobs` is macOS-only visibility; Paseo schedules run agents, not shell jobs | KEEP `ade-sched` (land PR 291); Paseo schedules replace the nightly agent jobs (`routing-recalibrate`; `skillopt-night` is deleted, J4) and run the agent that executes `context-budget-check` nightly (J3); the shell sweeps (`deadline`, `pr-policy`, `load-watch`) stay on `ade-sched` |
 | D9 Exclusive workspace claims | `ade_claims.py` (2.3k), `ade-git-guard`, `libexec/` hooks | none exists; Paseo's one-worktree-per-agent makes most claims implicit; `git worktree lock` only blocks prune; since 0.15.0 a plugin can hook `worktree.create.before/after` and give tools to specific agents (A6) | KEEP, trimmed to owner + expiry + refuse-add/commit-in-foreign-workspace; fix the `claim ls` mismatch (E8); Wave 4 decides whether the trimmed registry lives in a ~100-line Paseo plugin hook instead of git hooks |
-| D10 Merge gate | `pr-wait` (2.3k), `local-review` (Codex) | GitHub ruleset: required status check from a ~40-line Action that validates the adversary marker against the head; `gh pr checks --watch --required` to wait; `claude -p --json-schema` (verified on 2.1.318) for a local Claude review with a parsed verdict, launched by the permanent E8 review boundary (`bin/review-launch`: four read tools, no network, reads confined to the worktree by `permissions.blockReadsOutsideWorkingDirectories`, fail-closed when ignored) with `local-review`'s isolation checks kept; `codex review` has no JSON and no per-request strength knob (brief 2026-11-06) | REPLACE (E8): the Action is the one piece of new code, and it replaces 4.6k lines |
+| D10 Merge gate | `pr-wait` (2.3k), `local-review` (Codex) | GitHub ruleset: required status check from a ~40-line Action that validates the adversary marker against the head, run on `pull_request_target` from base code with no PR checkout and posted as a status on the head SHA (E8); `gh pr checks --watch --required` to wait; `claude -p --json-schema` (verified on 2.1.318) for a local Claude review with a parsed verdict, launched by the permanent E8 review boundary (`bin/review-launch`: four read tools, no network, reads confined to the worktree by `permissions.blockReadsOutsideWorkingDirectories`, fail-closed when ignored) with `local-review`'s isolation checks kept; `codex review` has no JSON and no per-request strength knob (brief 2026-11-06) | REPLACE (E8): the Action is the one piece of new code, and it replaces 4.6k lines |
 | D11 Recovery evidence | PR 290 `ade-recovery` (3.3k TS) | native resume (0.15.0) + `session-recovery` first | PARK (R4) |
 | D12 Moving dirs with history | — | `git filter-repo --paths-from-file` on a fresh clone (installed here, a40bce5) | ADOPT (E1) |
 | D13 Instruction-file lint | PR 289's `instruction-lint` | no CLAUDE.md/AGENTS.md linter exists; `skills-ref validate` covers SKILL.md | KEEP instruction-lint (lands with PR 289); use skills-ref for skills |
@@ -477,7 +481,21 @@ unchanged** (a BLOCK naming the current head counts anywhere, 7+ hex prefix
 included; malformed and fetch-failed always block; the JSON is delimited by
 its own braces; an APPROVE in a fenced block or with the placeholder head is
 documentation): three earlier rounds found false APPROVEs and a hidden BLOCK,
-so the port is judged by those tests, not by line count. Per J8 (answered 2026-11-06, the operator's explicit choice over the
+so the port is judged by those tests, not by line count. **The Action runs
+from trusted base code, never from the PR's own tree** (Codex security
+review on `f61cea21`, 2026-11-06): a `pull_request`-triggered workflow is
+read from the PR's merge ref, so an untrusted branch could replace
+`adversary-marker.yml` with an always-green job and the ruleset would bless
+that unreviewed head, which trusted local `pr-wait` never could. So the
+workflow triggers on `pull_request_target` (`opened`, `synchronize`,
+`reopened`, `edited`, so a body edit re-runs it), **checks out nothing from
+the PR**, reads the PR body and head SHA through the API with the
+workflow's own read token, and **posts a commit status to the PR head SHA**
+(the ruleset's required check reads that status; a `pull_request_target`
+run's own check attaches to the base branch's SHA, not the head); it needs
+no write permission beyond `statuses: write`, and its test suite includes a
+PR that modifies the workflow file (the modified copy must have no effect on
+the verdict). Per J8 (answered 2026-11-06, the operator's explicit choice over the
 fail-closed thread gate `pr-wait` enforced), unresolved Codex threads do not
 gate the merge: the ruleset requires the Action and CI, not conversation
 resolution; Codex findings stay visible as threads and the lead reads them
