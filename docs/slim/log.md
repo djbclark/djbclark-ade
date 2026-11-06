@@ -75,20 +75,20 @@ Facts found while preparing Wave 2 (so a slice does not trip on them):
 
 ### Operator batch for Wave 2 (the C7 drain gate; run on the Mac, paste the output here as one block)
 
-Nothing in E2, E3, E4 or E6 merges before this is pasted. All read-only except step 7.
+Nothing in E2, E3, E4 or E6 merges before this is pasted. Items 1-6, 8-10 and 12 are read-only and are one script (the lead sent it in chat on 2026-11-06; it writes `~/slim-c7-<date>.txt`); 7 changes state; 11 is a decision.
 
-1. Sleeping herdr panes holding a Claude session: `herdr plugin action invoke djbclark.herdr-sleeper.list` (or `~/src/djbclark-ade/plugins/herdr-sleeper/herdr-sleeper list; ~/src/djbclark-ade/plugins/herdr-sleeper/herdr-sleeper log | tail -20`). Expected: nothing sleeping, nothing orphaned.
-2. Resumable acp-dispatch records: `ls -la ~/.local/state/bigteam/*/jobs/ 2>/dev/null | grep -v '\.done'` and `launchctl list | grep -i acp-dispatch`. Expected: every record has a `.done`, no launchd job.
-3. Worktrees and pastures: `cd ~/src/djbclark-ade && git worktree list` and `cow list --json 2>/dev/null | head -50`; for each listed path, `git -C PATH status --short | head -3` (clean = nothing printed). A dirty one is its owner's to migrate (order 9) or yours to waive by name (report F4, F5, F7).
-4. Queued relay acks: `python3 ~/src/djbclark-ade/skills/session-finder/relay.py --pending --summary`. Expected: empty, or each of the eight ids in report I3 retired with `relay.py --retire ID --reason "slim-down C7"`.
-5. Bigteam inboxes: `find ~/.local/state/bigteam -name 'inbox*' -newer ~/.local/state/bigteam -type f 2>/dev/null | head`; expected: none unread.
-6. C1 live processes: `launchctl list | grep com.djbclark` and `pgrep -fl 'acp-run|acp-dispatch' || echo none`. Expected: deadline-sweep, pr-policy, load-watch listed; no acp-run process.
-8. J2 pool audit input (ledger ruling 10): `aiuse --json` (or `aiuse pools`), so the lead can settle which paid plans are reachable only through omp or opencode before E9's machine-side uninstalls.
-9. `bg`'s live path (ledger ruling 14): `ls -la ~/ops/site-private/bin/bg ~/ops/site-public-djbclark/bin/bg 2>&1`.
-11. site-djbclark has two `book-to-kb` skills after E1 (`tools/book-to-kb/skills/book-to-kb` with its own `install.sh`, and the moved `skills/book-to-kb`): say which one wins; the other is deleted there in a follow-up.
-12. Confirm the Mac checkout name `~/ops/site-public-djbclark` (E1's third skill root defaults to it; `ls -d ~/ops/site-public-djbclark ~/ops/site-djbclark 2>&1`).
-10. The adhoc adversary record (report B1b): `ls ~/.local/state/bigteam/adhoc-2026-11-02/jobs/ && launchctl list | grep adversary-pr254f || echo none`.
-7. Wave 0 leftovers (tag and branch deletions done): in the shared checkout `git status` (stop on another session's edits), then `git fetch origin && git checkout master && git reset --keep origin/master`; then `git worktree prune`.
+1. Sleeping herdr panes holding a Claude session: `~/src/djbclark-ade/plugins/herdr-sleeper/herdr-sleeper list` and `... log | tail -20`. Expected: nothing sleeping, nothing orphaned.
+2. Resumable acp-dispatch records: `ls -la ~/.local/state/bigteam/*/jobs/ | grep -v '\.done'`; `launchctl list | grep -i acp-dispatch`. Expected: every record has a `.done`, no launchd job.
+3. Worktrees and pastures: `git worktree list` plus `git -C PATH status --short` per path; `cow list --json`. A dirty one is its owner's to migrate (order 9) or yours to waive by name (report F4, F5, F7).
+4. Queued relay acks: `relay.py --pending --summary`. Expected: empty, or each of the eight ids in report I3 retired with `relay.py --retire ID --reason "slim-down C7"`.
+5. Bigteam inboxes: `find ~/.local/state/bigteam -name 'inbox*' -type f -newer ~/.local/state/bigteam`. Expected: none.
+6. C1 live jobs and processes: `launchctl list | grep com.djbclark`; `pgrep -fl 'acp-run|acp-dispatch'`. Expected: deadline-sweep, pr-policy, load-watch listed; no acp-run process.
+7. Wave 0 leftovers (state-changing, by hand): in the shared checkout `git status` (stop on another session's edits), then `git fetch origin && git checkout master && git reset --keep origin/master`; then `git worktree prune`.
+8. J2 pool audit input (ledger ruling 10): `aiuse --json`, so the lead can settle which paid plans are reachable only through omp or opencode before E9's Wave 3 part.
+9. `bg`'s live path (ruling 14): `ls -la ~/ops/site-private/bin/bg ~/ops/site-public-djbclark/bin/bg`.
+10. The adhoc adversary record (report B1b): `ls ~/.local/state/bigteam/adhoc-2026-11-02/jobs/`; `launchctl list | grep adversary-pr254f`.
+11. Decision: site-djbclark has two `book-to-kb` skills after E1 (`tools/book-to-kb/skills/book-to-kb` with its own `install.sh`, and the moved `skills/book-to-kb`): which wins; the other is deleted there in a follow-up.
+12. Checkout name: `ls -d ~/ops/site-public-djbclark ~/ops/site-djbclark` (E1's third skill root defaults to `site-public-djbclark`).
 
 Facts from the site-djbclark clone (2026-11-06, `djbclark/site-djbclark` @ f11d8218, attached with push access as the E1 destination):
 
