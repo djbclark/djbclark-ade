@@ -190,9 +190,8 @@ def test_an_inspect_answer_of_another_shape_fails_closed(env: Env, shape: object
     ({"Archived": "false"}, "archived"),
     ({"PendingPermissions": [{"id": "p1", "tool": "Bash"}]}, "permission or question card"),
     ({"PendingPermissions": None}, "permission or question card"),
-    ({"Status": "error"}, "'error', not idle or running"),
+    ({"Status": "error"}, "'error', not idle, running or closed"),
     ({"Status": "initializing"}, "'initializing'"),
-    ({"Status": "closed"}, "'closed'"),
     ({"Status": None}, "None"),
 ])
 def test_an_inspect_that_is_not_exactly_sendable_is_refused(env: Env, fields: dict, word: str) -> None:
@@ -203,6 +202,13 @@ def test_an_inspect_that_is_not_exactly_sendable_is_refused(env: Env, fields: di
         assert r.returncode == 2 and r.stdout.startswith("not sent:") and word in r.stdout, (fields, r.stdout)
     assert not env.sent()
     assert [c["argv"] for c in env.calls() if c["argv"][0] == "agent"][0] == ["agent", "inspect", A1, "--json"]
+
+
+def test_a_closed_agent_is_resumable_and_gets_the_send(env: Env) -> None:
+    """`closed` is a stored agent not loaded in this daemon run; Paseo loads it before the prompt (adversary N1, 2026-10-31)."""
+    env.inspect(Status="closed", Provider="cline")    # never running, so the steer check does not apply
+    assert env.run(A1, "hello").returncode == 0 and env.sent()
+    assert env.run(A1, "hello", PASEO_AGENT_ID=A2).returncode == 5
 
 
 def test_a_failed_inspect_is_not_sent_exit_2(env: Env) -> None:

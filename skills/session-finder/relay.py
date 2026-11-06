@@ -31,7 +31,8 @@ DELIVERED = ("sent", "completed")
 ACCEPTED_TEXT = ("queued (accepted by the daemon; Paseo batches every agent-to-agent message and reports no later delivery; "
                  "proof is the peer's ack)")
 ZERO_WIDTH = "​‌‍⁠﻿᠎"
-SENDABLE = ("idle", "running")
+SENDABLE = ("idle", "running", "closed")    # closed: a stored agent not loaded in this daemon run; the send loads it first
+# (agent-manager.ts:2265-2281, agent-prompt.ts:342; the old relay allowed it, adversary N1 2026-10-31). Never running: no steer check.
 # Providers whose session implements steerActiveTurn in Paseo 0.15.3 (providers/{claude,omp,pi}/agent.ts, codex-app-server-agent.ts,
 # opencode-agent.ts). `paseo agent inspect`'s Capabilities carries no steer flag (cli inspect.ts:33-38,118-127), so this list decides;
 # a Capabilities key naming steer, if a later Paseo adds one, wins. Any other provider's running turn would be REPLACED by a steer.
@@ -45,7 +46,7 @@ EPILOG = f"""exit status:
   1   paseo failed: not installed, exited non-zero (no daemon, unknown agent), gave no JSON, or did not answer in time
   2   not delivered: `queued` for a sourceless send, `timeout`, `permission`, `error`, or no status; --wait timed out or hit a
       permission; or not sent: `paseo agent inspect` failed, gave another shape or id, shows the target archived, with a pending
-      permission or question card, in a status other than idle or running, or running on a provider that cannot steer
+      permission or question card, in a status other than idle, running or closed (resumable), or running on a provider that cannot steer
   3   TARGET is not exactly one Paseo agent by id or shortId prefix, or is a name ({RETIRED_ROUTES})
   4   no sender: neither $PASEO_AGENT_ID nor $RELAY_SENDER_NAME names who sends (no anonymous sends, 2026-10-25)
   64  usage error, a message file or stdin that is not UTF-8, a --wait that is negative or not finite, a text starting with `/`
@@ -112,7 +113,7 @@ def refusal(info: object, aid: str) -> str | None:
         return f"{aid} waits on a permission or question card (`paseo permit ls`), or inspect does not say it does not"
     status = info.get("Status")
     if status not in SENDABLE:
-        return f"{aid} is {status!r}, not idle or running"
+        return f"{aid} is {status!r}, not idle, running or closed"
     if status == "running":
         caps = info.get("Capabilities") if isinstance(info.get("Capabilities"), dict) else {}
         steer = [v for k, v in caps.items() if "steer" in str(k).lower()]

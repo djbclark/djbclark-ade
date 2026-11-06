@@ -103,7 +103,8 @@ What an attacker would want, in order of damage:
    sender's `PASEO_AGENT_ID` (a caller that is not a Paseo agent prefixes `[relay from <name>] `), so a receiving
    agent sees a peer, not the operator (advisory: Paseo does not verify the sender id, see 4.1); the shim refuses
    text starting with `/`, and sends only when `paseo agent inspect` returns exactly the target's id, `Archived: false`, no pending
-   permission or question and status idle or running (a running agent only on a provider that can steer); anything else is not
+   permission or question and status idle, running or closed (a stored agent the send resumes; a running agent only on a
+   provider that can steer); anything else is not
    sent. A sourceless send runs with `clearPendingPermissions`, so a send into a card would answer it with the message text.
 10. **`bin/firecrawl-router`**: an HTTP listener, loopback by default (see the intro); any process that can
     reach it can call it. From 2026-10-24 until the cutover (PRs 41, 43, 45) it also spent a GitHub token on

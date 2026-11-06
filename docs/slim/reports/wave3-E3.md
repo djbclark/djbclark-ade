@@ -40,8 +40,10 @@ A4. Gates beyond the brief's 1b (standing order 6: flagged here):
   `/` or the full-width `／` is refused, exit 64: it would run a built-in in the target.
 - b. **Inspect, fail closed** (review F2): the send goes ahead only when `paseo agent inspect ID --json` returns a dict
   whose `Id` equals the resolved id, `Archived` is boolean `false`, `PendingPermissions` is an empty list and `Status` is
-  `idle` or `running`. A failed inspect, any other shape (`{}`, a list, a nested object, a string, null), another `Id`,
-  `Archived` true or missing, a non-empty or missing `PendingPermissions`, or `Status` `initializing`, `error`, `closed` or
+  `idle`, `running` or `closed` (confirm review: `closed` is a stored agent not loaded in this daemon run, which the send
+  loads first, `agent-manager.ts:2265-2281`, `agent-prompt.ts:342`; the old relay allowed it, adversary N1 2026-10-31; it is
+  never running, so A4c does not apply). A failed inspect, any other shape (`{}`, a list, a nested object, a string, null), another `Id`,
+  `Archived` true or missing, a non-empty or missing `PendingPermissions`, or `Status` `initializing`, `error` or
   missing: exit 2, `not sent: <reason>` naming the status. Doubly needed for a sourceless send: the daemon runs it with
   `clearPendingPermissions: true` (server `session.ts:8806`), so a send into a card would answer it with the message text.
   The field names are from `packages/cli/src/commands/agent/inspect.ts:14-49,129-155`.
@@ -125,7 +127,7 @@ exit status:
   1   paseo failed: not installed, exited non-zero (no daemon, unknown agent), gave no JSON, or did not answer in time
   2   not delivered: `queued` for a sourceless send, `timeout`, `permission`, `error`, or no status; --wait timed out or hit a
       permission; or not sent: `paseo agent inspect` failed, gave another shape or id, shows the target archived, with a pending
-      permission or question card, in a status other than idle or running, or running on a provider that cannot steer
+      permission or question card, in a status other than idle, running or closed (resumable), or running on a provider that cannot steer
   3   TARGET is not exactly one Paseo agent by id or shortId prefix, or is a name (relay.py reaches Paseo agents only since 2026-11-06 (herdr and Orca panes retired 2026-10-31))
   4   no sender: neither $PASEO_AGENT_ID nor $RELAY_SENDER_NAME names who sends (no anonymous sends, 2026-10-25)
   64  usage error, a message file or stdin that is not UTF-8, a --wait that is negative or not finite, a text starting with `/`
@@ -364,7 +366,7 @@ fleet-watch's home, which C3 called unverified): it breaks on the shim and needs
 G1. Text for E11 (the review's F1 ruling): "A message is sent with the relay shim (`skills/session-finder/relay.py`, until
 2026-11-20) or `paseo send --json`. A sourceless send (deadline, load-watch) is delivered when `.status` reads `sent` or
 `completed` (exit 0); an agent's send is accepted (exit 5, queued by the daemon) and proven only by the peer's `ack <id>`;
-exit 2 is not delivered; never `$?`." Paseo 0.15.3 queues every agent-to-agent message and reports no later delivery
+exit 2 is not delivered; never `paseo send`'s `$?`." Paseo 0.15.3 queues every agent-to-agent message and reports no later delivery
 (A5), so for an agent the named ack is the only proof. PLAN.md E3's draft ("a message is sent with `paseo send` and its
 exit status read") is wrong for `paseo send`, which exits 0 for every status.
 
@@ -380,8 +382,8 @@ H1. `bin/pytest -q tests/test_relay_shim.py`: 40 passed at 99a7ccb; after the A3
 `queued` to every send whose environment carries `PASEO_AGENT_ID` and `sent` otherwise, as 0.15.3's daemon does; an
 agent's send is exit 5 with the accepted text and `--wait` after it reports `target ...` with exit 5; a sourceless
 `queued` is 2; inspect answers `{}`, `[]`, a list, a nested object, a string, null, a wrong `Id`, `Archived` true, null or
-`"false"`, `PendingPermissions` non-empty or null, `Status` error, initializing, closed or null, and a failed inspect are
-all exit 2 with no send; a running agent on claude, codex, opencode, omp, pi is sent, on cline, grok, kiro, copilot or no
+`"false"`, `PendingPermissions` non-empty or null, `Status` error, initializing or null, and a failed inspect are
+all exit 2 with no send, while `Status` closed (resumable) is sent; a running agent on claude, codex, opencode, omp, pi is sent, on cline, grok, kiro, copilot or no
 provider is "busy, not sent", and a `Capabilities` steer key wins; no sender or a label that sanitises to nothing is 4
 with no `paseo` call, and a hostile label is cut to the safe set and 64 characters; non-UTF-8 file and stdin are 64;
 `--wait` nan, inf, -inf, -1, -0.5 are 64; leading `/` after U+3000, U+2028, U+00A0, U+2003, U+180E, U+2060, U+205F is 64;
