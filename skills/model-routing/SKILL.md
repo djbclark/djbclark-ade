@@ -1002,8 +1002,8 @@ deliverable, and a tree edit is flagged); `--role exec` needs
 `acp-dispatch reroute` (item 4). Scoring is pace- and reset-aware: a computed
 burn-first bonus goes to a pool that would waste quota at its reset, and a pace
 penalty to a pool burning fast. `route_agent.py calibrate` reports done rates
-per service and kind, and `bin/routing-recalibrate` (monthly, launchd) has Opus
-re-rank `good_at` from them.
+per service and kind; `bin/routing-recalibrate` (monthly, launchd) had Opus
+re-rank `good_at` from them until 2026-11-06 (deleted; it may return as a Paseo schedule).
 
 ## Multiple-choice decisions are not reasoning (2026-10-11)
 

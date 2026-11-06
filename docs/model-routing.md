@@ -550,8 +550,8 @@ defaults, and escalation uses its selected route's effort when supplied.
 Scoring is pace- and reset-aware: a computed
 burn-first bonus goes to a pool that would waste quota at its reset, and a pace
 penalty to a pool burning fast. `route_agent.py calibrate` reports done rates,
-and `bin/routing-recalibrate` (monthly, launchd) has Opus re-rank `good_at`
-from them.
+and `bin/routing-recalibrate` (monthly, launchd) had Opus re-rank `good_at`
+from them until 2026-11-06 (deleted in the slim-down; it may return as a Paseo schedule).
 
 **Lead sessions, adversary rounds and the quota guard (2026-10-23).** On 2026-10-20 the
 Claude Code weekly window hit 100% at 17:07Z, 2.6 days before its reset, and every

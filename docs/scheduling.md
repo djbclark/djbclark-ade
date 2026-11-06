@@ -60,11 +60,11 @@ Placeholders are filled into the **parsed** plist (strings inside values, never 
 stays a value). `__ADE__`/`@ADE@` (the checkout, realpath) and `__HOME__`/`@HOME@` are always filled; everything else
 comes from `--set` (or `subst=` in the API) and wins over the defaults. Each string is filled in one pass, so a filled
 value is never filled again. Any `__NAME__` or `@NAME@` left afterwards is **exit 2**. The plists in use on 2026-11-04 need:
-`config/launchd/com.djbclark.deadline-sweep.plist` and `com.djbclark.pr-policy.plist`: `__STATE__`; `launchd/com.djbclark.proc-cpu-watch.plist`: `@TARGET@`, `@STATE@`;
-`launchd/com.djbclark.session-history-update.plist`: `__REPO__`, `__INDEX_DIR__`. Several plists still hard-code
+`config/launchd/com.djbclark.deadline-sweep.plist` and `com.djbclark.pr-policy.plist`: `__STATE__` (the `@TARGET@`/`@STATE@` and
+`__REPO__`/`__INDEX_DIR__` plists, proc-cpu-watch and session-history-update, were deleted in the 2026-11-06 slim-down). Several plists still hard-code
 `/Users/djbclark`; they parse and render as they are (later #279 slices template them).
 
-XML comments are stripped before parsing: three plists (acp-dispatch-reap, rumination-watch, zcode-key-auth, 2026-11-04)
+XML comments are stripped before parsing: three plists (acp-dispatch-reap, rumination-watch, zcode-key-auth, 2026-11-04; rumination-watch's was deleted 2026-11-06)
 have `--` inside a comment, which XML forbids and Python's parser rejects while launchd accepts it.
 
 **ade-sched's own plist key.** `KillMode` (`control-group`, `mixed`, `process`, `none`) sets systemd's KillMode; launchd

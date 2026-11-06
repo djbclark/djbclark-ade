@@ -427,44 +427,8 @@ class LiveLabelTests(unittest.TestCase):
             for sid, d in (("a1", ".crush-a"), ("b1", ".crush-b"), ("c1", ".crush-c")):  # resume names the database holding the session
                 self.assertEqual(mod.resume(sid, str(proj)), f"cd {proj} && crush -D {proj / d} --session {sid}")
 
-    def test_install_renders_the_configured_index_directory_into_the_job(self) -> None:
-        plist = (ROOT / "launchd" / "com.djbclark.session-history-update.plist").read_text()
-        with tempfile.TemporaryDirectory() as tmp:
-            idx = Path(tmp) / "my <idx> & dir"
-            with mock.patch.dict(os.environ, {"SESSION_INDEX_DIR": str(idx)}):
-                spec = importlib.util.spec_from_file_location("t_sh_plist", SF / "session-history.py")
-                sh = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(sh)
-            with mock.patch.dict(os.environ, {"CODEX_HOME": "", "CLAUDE_CONFIG_DIR": ""}):
-                out = sh.render_plist(plist, Path("/repo"))  # adapter roots unset or empty: none are written
-            self.assertNotIn("CODEX_HOME", out)
-            self.assertNotIn("__", out)  # no placeholder left, comment included
-            import plistlib
-            d = plistlib.loads(out.encode())
-            self.assertEqual(d["EnvironmentVariables"]["SESSION_INDEX_DIR"], str(idx.resolve()))
-            self.assertEqual(d["StandardOutPath"], f"{idx.resolve()}/update.out")
-            self.assertEqual(d["StandardErrorPath"], f"{idx.resolve()}/update.err")
-            self.assertEqual(d["ProgramArguments"][3], "/repo/skills/session-finder/session-history.py")
-
-
-    def test_install_carries_every_set_adapter_root_variable_into_the_job(self) -> None:
-        import plistlib
-        plist = (ROOT / "launchd" / "com.djbclark.session-history-update.plist").read_text()
-        spec = importlib.util.spec_from_file_location("t_sh_plist2", SF / "session-history.py")
-        sh = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(sh)
-        with mock.patch.dict(os.environ, {"CODEX_HOME": "/alt/codex & co", "CLAUDE_CONFIG_DIR": "~/alt-claude"}):
-            d = plistlib.loads(sh.render_plist(plist, Path("/repo")).encode())
-        env = d["EnvironmentVariables"]
-        self.assertEqual(env["CODEX_HOME"], "/alt/codex & co")
-        self.assertEqual(env["CLAUDE_CONFIG_DIR"], str(Path.home() / "alt-claude"))  # launchd does not expand `~`
-        self.assertIn("SESSION_INDEX_DIR", env)
-        self.assertIn("PATH", env)
-        with mock.patch.dict(os.environ, {"CODEX_HOME": "/alt/codex"}):
-            os.environ.pop("CLAUDE_CONFIG_DIR", None)
-            env = plistlib.loads(sh.render_plist(plist, Path("/repo")).encode())["EnvironmentVariables"]
-        self.assertEqual(env["CODEX_HOME"], "/alt/codex")
-        self.assertNotIn("CLAUDE_CONFIG_DIR", env)  # only variables that are set
+    # The two render_plist tests read launchd/com.djbclark.session-history-update.plist, deleted in slim-down E5
+    # (R2-4, 2026-11-06); session-history.py itself goes in E3.
 
     def test_every_environment_variable_an_adapter_reads_is_declared_in_its_root_env(self) -> None:
         """An adapter that finds its store through an environment variable without declaring it would index a
