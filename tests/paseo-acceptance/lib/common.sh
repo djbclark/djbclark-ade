@@ -93,6 +93,31 @@ ok = (c.get("daemon", {}).get("listen") == sys.argv[2] and c.get("pluginsEnabled
       and c.get("features", {}).get("dictation", {}).get("enabled") is False)
 sys.exit(0 if ok else 1)
 PY
+  # ACC_PROVIDER_IDS="omp grok ...": copy those entries of the live config's agents.providers (command lines, labels; read-only
+  # on the live file) into the fresh home's config.json BEFORE the daemon starts. A fresh home knows only the built-in providers.
+  # An entry whose env holds a KEY/TOKEN/SECRET/PASS name is refused: no credential is ever copied (T4, 2026-11-02).
+  if [ -n "${ACC_PROVIDER_IDS:-}" ]; then
+    python3 - "$ACC_LIVE_CONFIG" "$PASEO_HOME/config.json" $ACC_PROVIDER_IDS <<'PY' || _acc_refuse "copying provider entries from the live config failed"
+import json, os, sys
+live = json.load(open(sys.argv[1])).get("agents", {}).get("providers", {})
+dst_path = sys.argv[2]
+dst = json.load(open(dst_path))
+out = dst.setdefault("agents", {}).setdefault("providers", {})
+for pid in sys.argv[3:]:
+    entry = live.get(pid)
+    if entry is None:
+        sys.exit("no provider %r in the live config" % pid)
+    bad = [k for k in (entry.get("env") or {}) if any(s in k.upper() for s in ("KEY", "TOKEN", "SECRET", "PASS"))]
+    if bad:
+        sys.exit("provider %r env names a credential (%s): refused" % (pid, ",".join(bad)))
+    out[pid] = entry
+tmp = dst_path + ".tmp"
+with open(tmp, "w") as f:
+    json.dump(dst, f, indent=2)
+os.chmod(tmp, 0o600)
+os.replace(tmp, dst_path)
+PY
+  fi
   (umask 077; openssl rand -hex 24 > "$base/password") || _acc_refuse "cannot generate the password"
   (
     for v in $(compgen -A export -X '!PASEO_*'); do unset "$v"; done
