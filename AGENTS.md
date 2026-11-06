@@ -48,9 +48,6 @@ Each doc carries its own summary.
 | [docs/helm.md](docs/helm.md) | `/helm` ([skills/helm/](skills/helm/)): answer every waiting session from one window |
 | [docs/skillopt-sleep.md](docs/skillopt-sleep.md) | nightly skill-edit cycle, `bin/skillopt-night` |
 | [docs/failover.md](docs/failover.md) | `bin/failover.py`: reuse it, never hand-roll a fallback |
-| [docs/pi-subagent.md](docs/pi-subagent.md) | Pi `subagent` extension: per-call model/thinking overrides, install |
-| [docs/pi-skills.md](docs/pi-skills.md) | `bin/pi-skill-dedup`: manual, claim-gated duplicate-skill exclusions for Pi |
-| [docs/pi-agent-profiles.md](docs/pi-agent-profiles.md) | canonical `.pi/agents/` Pi profiles shipped in the repo |
 | [docs/upstream-issues.md](docs/upstream-issues.md) | unfiled bug drafts for third-party projects |
 | [docs/mcp-servers.md](docs/mcp-servers.md) | MCP server roster (`claude mcp list`) |
 | [.claude/workflows/graph-audit.js](.claude/workflows/graph-audit.js) | runnable micro-graph example, `/graph-audit` |
@@ -275,7 +272,7 @@ pull request here is expected to meet these; flag any it misses.
    (`bg bin/pytest -q tests/test_x.py`: the bare `python3` has no pytest); CI runs `pytest` directly.
 3. **Secrets only via `sudo-secretspec run`**: a key never appears in argv, a
    log, a tracked file or a test fixture. The one place a key is written is a
-   third-party tool's own credential store (`bin/zcode-key-auth`); `bin/codium-ai`
+   third-party tool's own credential store (`bin/zcode-key-auth`, removed 2026-11-06 with zcode); `bin/codium-ai` (moved to site-djbclark 2026-11-06)
    uses `get` instead of `run` so that VSCodium receives one key, not every declared
    secret, and `bin/pr-policy` (an unattended launchd job) uses `get` so it holds its two tokens in
    memory while its children (`hermes-ping`) inherit none; presence is proved by length or hash, never
