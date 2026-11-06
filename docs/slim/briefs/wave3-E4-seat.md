@@ -1,0 +1,33 @@
+# Brief E4 (S-seat): helm, self-slash, autorename and the paseo-* helpers
+
+Wave 3 of `docs/slim/PLAN.md` (E4, D2). Writer: one Claude agent in its own worktree of djbclark-ade on branch `claude/determined-maxwell-uvddaz`. Read first: PLAN.md E4 and D2; `docs/slim/research/wave3-2026-11-06.md` items 3 and 5 (`paseo permit`, `paseo workspace rename`, `paseo agent mode`, no `paseo agent rename`); `docs/slim/ledger.md` rows for E4; `docs/slim/ledger-rulings.md` items 8, 10, 12 and R2-12, R2-14; `docs/slim/research/plugins-trust-2026-11-06.md` entries 2 and 3 (asks, questions-please: the helm replacement). AGENTS.md orders 2 and 9.
+
+**Merge gate** (lead): the helm deletion merges after the operator has installed asks and questions-please and run them for a day (PLAN F Wave 3, "verify for one day before the REPLACE deletions merge"); the rest merges with the C3 per-file gate for Plektra and paseo4herdr (they name autorename and self-slash, report I4d/I4e). Do the work now.
+
+## 1. Scope
+
+1a. **helm** (D2 REPLACE): DELETE `skills/helm/` (SKILL.md, helm.py, lead.md, auto.md, the rest), `claude/commands/helm-all.md`, `tests/test_helm_question_status.py`, `tests/test_helm_send_unknown.py`; `docs/helm.md` → `docs/history/` with the one-line header. The replacement sentence for the report: "`paseo permit ls` lists pending permissions; the asks or questions-please plugin is the operator's inbox; `/helm` and `/helm-all` are gone". PR 294's stagger rule (R5): one sentence for E11's orchestration-practices rewrite, put it in the report.
+
+1b. **self-slash**: DELETE `bin/self-slash`, `skills/session-finder/prompt_line.py` (shared with relay.py until E3 lands; E3 leaves it to you; delete it only if `grep -rn prompt_line` shows no other importer at that moment, else report), `tests/test_self_slash.py`, `tests/test_self_slash_codex.py`, `tests/test_self_slash_prompt_wait.py`, `tests/test_prompt_line.py`, `bin/opencode-self-compact` (ledger: "goes with self-slash at the latest"; its test too), `bin/paseo-self` (→ `$PASEO_AGENT_ID`). `claude/hooks/context_size_nudge.py` is KEEP: its text tells the agent to use self-slash to queue `/compact`; rewrite it to say "run `/compact` yourself now" (a Claude session can issue its own slash command); do not promise that `paseo send` runs a slash command (unverified). Run `tests/test_context_size_nudge.py`.
+
+1c. **autorename**: DELETE `skills/autorename/` except `workspace-layout.md`, which moves to `docs/workspace-layout.md` trimmed to the Paseo naming (`-pw/-pt`; the herdr `-t/-p` scheme is gone) with AGENTS.md's pointer left for E11 (ruling 12); DELETE `tests/test_autorename_*.py` (five files). The `autorename_nudge.py` hook: its live `~/.claude/settings.json` line is the operator's (C2, now four files); its template line is the merger's. The 20-line rename helper the plan allows: **not written** (default); the report gives the one-liner `paseo workspace rename "$PASEO_WORKSPACE_ID" "<name>"` and notes that there is no agent-title rename (research item 5; check `packages/cli/src/commands/agent/update.ts` in the Paseo clone at `/tmp/claude-0/ps/src` if it still exists, else say unverified).
+
+1d. **paseo-* helpers**: DELETE `bin/paseo-new-seat`, `bin/paseo-new-seat.mjs`, `tests/test_paseo_new_seat_mode.py`, `tests/test_paseo_new_seat_probe.py` (replacement: `paseo run --provider P --model M --title T`; `skills/handoff/SKILL.md` names paseo-new-seat: reword that step, handoff is KEEP), `bin/paseo-bypass-watch`, `tests/test_paseo_bypass_watch.py` (replacement: `paseo agent mode ID --list`, `paseo agent mode ID bypass|plan`). **`bin/paseo-set-model` and `.mjs`**: the ledger says `bin/route_agent.py` "substrate" needs it (a KEEP file). Read `route_agent.py` for every call or path to paseo-set-model; if it is a runtime call, KEEP both files and say so in the report (E7 decides the port); if it is text or a dry-run hint, DELETE with `tests/test_paseo_set_model.py` and reword route_agent.py's text (reference-only edit, ruling 11).
+
+1e. **Not in this slice**: `skills/hand`, `skills/btww`, `omp/commands`, `pi/prompts/hand.md` (DECIDE, R2-12, pool audit); `skills/handoff` and `skills/baton` (D3, Wave 3b after the native-resume trial); `skills/ade-paseo-handoff` (E3 edits it, R2-2 replaces it later); the Plektra and paseo4herdr edits (the lead, J2b).
+
+## 2. Method
+
+2a. Delete, then `grep -rn` every removed name (`helm`, `helm-all`, `self-slash`, `self_slash`, `prompt_line`, `autorename`, `paseo-new-seat`, `paseo-bypass-watch`, `paseo-self`, `paseo-set-model`, `opencode-self-compact`): zero hits outside the usual exemptions (`AGENTS.md`, `README.md`, `docs/queue.md`, `docs/history/`, `docs/slim/`, `docs/checkins/`, `docs/handoffs/`, `changelog.d/`, `graft/`); README rows, `docs/skills.md` rows, the template's lines (hook, skillOverrides, `skills/helm` entries) are the merger's: report them. `helm` is a short word: check each hit. Hits in `bin/claude-fleet-governor`, `bin/claude-quota-guard` (E7's files) naming self-slash or paseo-set-model: reword (reference-only, ruling 11) and run their tests.
+
+2b. `vendor/README.md` has a helm pointer (ledger E2 row): remove the row.
+
+2c. Tests: `bin/pytest -q tests/test_context_size_nudge.py tests/test_claude_fleet_governor.py tests/test_claude_quota_guard.py tests/test_route_agent.py tests/test_launch_successor.py` (the last may be E3's deletion: check), then the full suite in the background (`bin/pytest -q > /tmp/e4-suite.log 2>&1; echo rc=$? > /tmp/e4-suite.rc`) against `docs/slim/baseline.md`: no new failure (the baseline's 41 self-slash failures disappear with their files).
+
+## 3. Report (`docs/slim/reports/wave3-E4.md`)
+
+A. deleted (files, lines), B. `workspace-layout.md` move and trim, C. the paseo-set-model finding (runtime call or text; what you did), D. reference edits in KEEP files (file:line), E. merger's lines (README, docs/skills.md, template, vendor/README.md, AGENTS.md rows: self-slash host branches, autorename herdr half, `/autorename all`), F. operator steps: the C2 hook line for `autorename_nudge.py`; the `paseo4herdr` and Plektra lines that name autorename or self-slash today and their replacement (for the lead's J2b edits); `~/.local/bin` or other symlinks the Mac has to deleted bin files (from the check-in report C2 list), G. the replacement sentences (helm, self-slash, autorename, each helper), H. tests with the baseline diff, I. lost on purpose, one line each.
+
+## 4. Do not
+
+Touch `skills/hand`, `skills/btww`, `skills/handoff`, `skills/baton`, `skills/ade-paseo-handoff` beyond the one paseo-new-seat reword in handoff; touch AGENTS.md, README.md, docs/skills.md, CHANGELOG.md, docs/queue.md, the template; touch the Mac; write the rename helper.
