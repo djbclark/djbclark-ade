@@ -365,9 +365,9 @@ unchanged** (a BLOCK naming the current head counts anywhere, 7+ hex prefix
 included; malformed and fetch-failed always block; the JSON is delimited by
 its own braces; an APPROVE in a fenced block or with the placeholder head is
 documentation): three earlier rounds found false APPROVEs and a hidden BLOCK,
-so the port is judged by those tests, not by line count. Whether unresolved
-Codex threads gate the merge is J8; until answered the ruleset does not
-require conversation resolution. AGENTS.md review rules 1, 9, 11 shrink to:
+so the port is judged by those tests, not by line count. Per J8, unresolved
+Codex threads do not gate the merge: the ruleset requires the Action and CI,
+not conversation resolution. AGENTS.md review rules 1, 9, 11 shrink to:
 marker required and validated by CI; Codex per J8; local review is Claude.
 
 E9. **S-nonclaude (TUI retirement waves 3+, E9i)**: the retirement plan is
@@ -505,7 +505,7 @@ I6. The Mac is the only place plugins, launchd and Paseo settings change
 brief, and a slice that needs it waits.
 I7. Codex cloud reviews have no strength knob and the `codex-review-state`
 markers are undocumented (brief 2026-11-06): the Action in E8 reads only our
-own marker; whether Codex threads gate the merge is J8.
+own marker; Codex findings are read as threads, not as a gate (J8).
 
 ## J. Questions for the operator (answered ones kept for the record)
 
@@ -575,8 +575,11 @@ J7. [answered 2026-11-06: **one PR at the end of Wave 6**, gated by the E8
 Action, CI and the adversary marker; the operator merges with
 `--match-head-commit`; protection stays on] Final landing: one PR from the
 slim branch, or lift protection for a fast-forward?
-J8. Review rules after: marker validated by CI (E8), Codex advisory,
-changelog fragments kept, local review by Claude. Yes?
+J8. [answered 2026-11-06: **yes**: rule 1 stays, enforced by the E8 Action;
+rule 9 becomes "read Codex threads, fix what is real, no resolution gate";
+rule 11's local review is `claude -p --json-schema`; rule 10 stays] Review
+rules after: marker validated by CI (E8), Codex advisory, changelog fragments
+kept, local review by Claude.
 J9. [answered 2026-11-06: **park** until Wave 3 measures the native path;
 land only if a gap remains] PR 290 (`ade-recovery`): park until Wave 3
 measures native resume (R4), or land now?
