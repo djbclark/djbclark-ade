@@ -13,7 +13,7 @@ Branch: the slim branch is `claude/determined-maxwell-uvddaz` (this session's de
 - **PR 291** (head `e95816ebf83b36d388243d142839134dba79b4f8`): same checks `success`; marker APPROVE on that head; all 4 Codex threads resolved. Merge-ready; not merged (operator step, R3). PR 293 is stacked on its branch and is already draft.
 - **gitignore-aider**: branch `origin/gitignore-aider` @ 9946ed38 (djbclark's commit from the shared checkout, report F1). Adversary (Opus 5.5, high) APPROVE, 3 LOW. Opened as [PR 296](https://github.com/djbclark/djbclark-ade/pull/296) with the marker; the commit is unchanged. No changelog fragment (not user-visible, rule 10).
 - **Rulings already carried out** (open-PR list, 2026-11-06): PRs 261, 292 and 294 are closed; 270, 290 and 293 are draft. Still open and non-draft, per R8's provisional rows: 194, 208, 227, 231, 254, 256, 260, 269, 281.
-- **Tag `pre-slim-2026-11-06`**: not yet created. The repository has no tags. It is created on master once PRs 289, 291 and 296 are merged, so it marks the base the slim branch rebases onto. This session is subscribed to those three PRs and tags on the merge wake.
+- **Tag `pre-slim-2026-11-06`**: points at master fb3b9deb (after PRs 289, 291 and 296, before any slim change). Created locally in the lead's checkout; pushing a tag is refused by the cloud proxy (`git push` and the refs API both), so it exists on origin only once the operator pushes it (step 3b).
 - **J questions**: J1, J2, J2a, J2b, J2c, J3–J11 all carry an answer in PLAN.md; none is open.
 - **R6 (batch-2 stragglers)**: the consolidated report (37 agents) covers it; its section H lists the two unverified herdr panes (w20:pM, w36:pB) and five agents named without a report (c987a634, d8891c91, 1d003359, 01BvGHLzKz, 7c54a88c-as-c688cc). J1 is answered (the three slices exited). Treated as satisfied for Wave 1 (reads only); the C7 drain gate before Wave 2 is where a late straggler still matters.
 
@@ -30,7 +30,7 @@ Nothing yet.
 
 - PR 289 squash-merged at head beb417db (REST merge with `sha` pinned, the API form of `--match-head-commit`): master 734b7d9b.
 - PR 291 squash-merged at head e95816eb: master 00839c48. Branch `claude/issue-279-linux-ports-1-sched` kept: PR 293 is stacked on it (R3).
-- PR 296: waits on `pytest-linux` on 9946ed38 (Codex code and security reviews completed, no findings; Cursor approved); merged on the green wake.
+- PR 296 squash-merged at head 9946ed38 after `pytest-linux` went green (Codex code and security reviews completed, no findings; Cursor approved): master fb3b9deb.
 - The slim branch merged master in (merge commit, no rewrite of pushed history).
 - Not done: deleting branch `claude/issue-284-ndc-oslo-ideas` (the proxy refuses ref deletion over the API and over `git push --delete`); operator step 3a below.
 
@@ -38,12 +38,13 @@ Nothing yet.
 
 1. ~~Merge PR 289~~ done.
 2. ~~Merge PR 291~~ done.
-3. ~~Merge PR 296~~ by the lead on the green wake.
-3a. Delete the merged branch: `git push origin --delete claude/issue-284-ndc-oslo-ideas` (and `gitignore-aider` once PR 296 reads MERGED). The cloud proxy cannot delete refs.
+3. ~~Merge PR 296~~ done.
+3b. Create the tag on origin (the cloud proxy refuses tag pushes): `git fetch origin master && git tag -a pre-slim-2026-11-06 -m 'Base of the slim-down: master after PRs 289, 291 and 296' fb3b9deb044cfde79cdc7ab2623224e2d8d7658a && git push origin pre-slim-2026-11-06`.
+3a. Delete the merged branches: `git push origin --delete claude/issue-284-ndc-oslo-ideas` (and `gitignore-aider` once PR 296 reads MERGED). The cloud proxy cannot delete refs.
 4. On the Mac, in the shared checkout: `cd ~/src/djbclark-ade && git status` (stop if another session's edits are there: their owner migrates them, order 9), then `git fetch origin && git checkout master && git reset --keep origin/master` (drops the local 9946ed38, now merged; `--keep` refuses rather than discarding uncommitted edits).
 5. On the Mac: `cd ~/src/djbclark-ade && git worktree prune && git worktree list | wc -l` (89–115 entries at check-in, report I6; prune removes only entries whose directory is gone).
 6. Approve or resize the W1 workflow (section H of PLAN.md) proposed in the lead's Wave 0 reply, then the ledger once it exists.
 
 ### Gate
 
-Wave 0 closes when PR 296 is merged and the tag exists. Wave 1 (reads only, no merge) starts on the W1 approval; it does not need the tag.
+Wave 0 closes when the tag is on origin (step 3b). Every merge is done; the slim branch carries master fb3b9deb. Wave 1 (reads only, no merge) starts on the W1 approval; it does not need the tag.
