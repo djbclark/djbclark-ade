@@ -136,8 +136,12 @@ C3. **Outside files that name our tools** (report I4; order 11: these are
 proposals until the operator says yes per file): tendcf and nix2cf AGENTS.md
 (`acp-dispatch --kind frontier`, `acp-run`, `relay.py`, `route_agent`, quota
 gates, `load-watch admit`, `deadline`, `session_log.py`, `cfenginewatch`);
-Plektra (`acp-dispatch`, `relay.py`, `autorename`, `self-slash`); paseo4herdr
-(`acp-dispatch`, `relay.py`, `self-slash`); `~/ops/site-public-djbclark/home-agents.md`
+CFEngine (`cfenginewatch`, `watch`, `fleet-watch`; I4b); Paseo upstream
+(`paseowatch`; I4c); Plektra (`acp-dispatch`, `relay.py`, `autorename`,
+`self-slash`; I4d); paseo4herdr (`acp-dispatch`, `relay.py`, `self-slash`; I4e);
+Pi (`pi/extensions/subagent`, `hand` links, `agent_guard.py`; I4f);
+sudo-secretspec, aiuse, paseo-runner (`relay.py`, `acp-dispatch`/`acp-run`
+as clients; I4g); `~/ops/site-public-djbclark/home-agents.md`
 item 40 (`coding-bot`); `~/.config/aiuse/config.toml` (`opencode-go`
 exclusion, drop after PR 260 is decided). `session_log.py` named there is
 `claude/hooks/handoff-tools/session_log.py` (the Tier 1 pointer writer,
@@ -160,14 +164,17 @@ session-find.py and ade_claims.py still trust it (I5); adversary markers go
 stale after a master merge (I8).
 
 C7. **Drain gate (restored from the rearchitecture's D0.2; a gate before
-E2, E4 and E6):** `plugins/herdr-sleeper/herdr-sleeper list` and its journal
+E2, E3, E4 and E6):** `plugins/herdr-sleeper/herdr-sleeper list` and its journal
 empty (no sleeping pane still holds a Claude session UUID); no `acp-dispatch`
 record resumable or with a scheduled `auto-resume` launchd job
 (`acp-dispatch ls`, `launchctl list | grep acp-dispatch`); every cow pasture
 and linked worktree clean and pushed or explicitly abandoned by its owner
-(`bin/cow-pasture ls`, `git worktree list`); the three C1 slices exited (J1).
-The operator runs these on the Mac and pastes the output into
-`docs/slim/log.md`; nothing in E2, E4 or E6 merges before that.
+(`bin/cow-pasture ls`, `git worktree list`), or, for an item with no reporting
+owner (report F4, F5, F7), waived by the operator; `relay.py --pending` empty or
+each expectation retired (report I3 lists eight queued, unverified acks); the
+bigteam inboxes drained; the three C1 slices exited (J1, answered). The
+operator runs these on the Mac and pastes the output into `docs/slim/log.md`;
+nothing in E2, E3, E4 or E6 merges before that.
 
 C6. **Evidence to keep**: `docs/checkins/`, `docs/handoffs/`,
 `docs/tui-lessons-learned.md`, `docs/checkpoint.md` F and G
@@ -183,7 +190,7 @@ C6. **Evidence to keep**: `docs/checkins/`, `docs/handoffs/`,
 | D4 Quota pause and resume, surplus | `claude-quota-guard`, `ade_gates`, `gate-profile`, `claude-fleet-governor`, PR 270 | `paseo usage --json`; `tomgrin10/session-guard` 0.5.1 (pause at quota, continue after reset), `babo-jeonguk/usage-auto-resume` (254), `kapybara-org/zerosub` 1.5.1 (560, several subscriptions) ; `aborakati/usage-monitor` (351) for display; `codexbar usage --format json` where Paseo lacks a window | REPLACE the gate enforcement with session-guard/usage-auto-resume (E7); KEEP `context-watch` and `quota_nudge.py` only if the plugins cannot nudge a running session |
 | D5 Host load and runaway processes | `load-watch` (2.2k), `proc-cpu-watch`, `session-load-watch` | `tomgrin10/vitals` 1.0.0, `zedobaia/resources` (154), `itsjustanks/daemon` (70) show and stop; none "finds the agent behind the spike and tells it", and none is a **pre-launch admission gate** | KEEP load-watch's two interfaces: `admit` (the pre-launch gate `bg`, `acp-dispatch`, `local-review` and `deadline_wait.py` call, exit 75 when too hot; `bin/load-watch:1631-1878`) and find-and-tell, delivered by `paseo send`; delete the pane-typing delivery, `proc-cpu-watch` and `session-load-watch` (E5) |
 | D6 Fan-out and slices | `bigteam`, `acp-dispatch` (5.9k), `acp-run` (5.3k) | native subagents and `paseo run --no-wait --output-schema`; `lerenn/playbooks` (approval-gated YAML pipelines), `gpambrozio/firstmate` (247), `gyuha/agent-team` (57); Claude Code workflows for the lead's own fan-out | REPLACE with a shim (E6): `acp-dispatch` becomes a thin `paseo run` wrapper keeping the exit-code contract and the outcome record for one cycle, then goes |
-| D7 Skills in every agent | `skill-everywhere`, `skill-get`, `fix-skill-frontmatter.py` | Claude-only: one symlink `~/.claude/skills → <repo>/skills` (no tool); other surviving providers: `npx skills add <repo>` (MIT; a snapshot, re-run on change, vercel-labs/skills#748); `gpambrozio/skills` (902) to list and invoke; `agentskills/skills-ref validate` for lint | REPLACE (E10) |
+| D7 Skills in every agent | `skill-everywhere`, `skill-get`, `fix-skill-frontmatter.py` | Claude-only: one symlink `~/.claude/skills → <repo>/skills` (no tool); other surviving providers: `npx skills add <repo>` (MIT; a snapshot, re-run on change, vercel-labs/skills#748); `gpambrozio/skills` (902) to list and invoke; `agentskills/skills-ref validate` for lint | KEEP `skill-everywhere` trimmed while any non-Claude provider or the site-private root survives; delete the rest (E10) |
 | D8 Scheduler for the kept jobs | launchd plists; PR 291's `ade-sched` | no existing tool refuses on missing linger or wraps `flock -n`; `gpambrozio/launchd-jobs` is macOS-only visibility; Paseo schedules run agents, not shell jobs | KEEP `ade-sched` (land PR 291); Paseo schedules replace the nightly agent jobs (`skillopt-night`, `routing-recalibrate`) |
 | D9 Exclusive workspace claims | `ade_claims.py` (2.3k), `ade-git-guard`, `libexec/` hooks | none exists; Paseo's one-worktree-per-agent makes most claims implicit; `git worktree lock` only blocks prune; since 0.15.0 a plugin can hook `worktree.create.before/after` and give tools to specific agents (A6) | KEEP, trimmed to owner + expiry + refuse-add/commit-in-foreign-workspace; fix the `claim ls` mismatch (E8); Wave 4 decides whether the trimmed registry lives in a ~100-line Paseo plugin hook instead of git hooks |
 | D10 Merge gate | `pr-wait` (2.3k), `local-review` (Codex) | GitHub ruleset: required status check from a ~40-line Action that validates the adversary marker against the head, required conversation resolution; `gh pr checks --watch --required` to wait; `claude -p --json-schema` (verified on 2.1.318) for a local Claude review with a parsed verdict; `codex review` has no JSON and no per-request strength knob (brief 2026-11-06) | REPLACE (E8): the Action is the one piece of new code, and it replaces 4.6k lines |
@@ -245,8 +252,18 @@ gate, not a Wave 6 one. Every other route, `launch.py`, `where.py`, `nested_pty.
 it shows four: `bin/load-watch:266` (`fleet.sessions()` in the find half of
 D5), `bin/context-watch:74`, `bin/ade_claims.py:434` and `bin/acp-dispatch:839`
 (`claude_identity.owner_session_id()`, the fix for the C5/I5 wrong-owner
-bug). So: `claude_identity.py` (and `nativeid.py` if it needs it) move to
-`bin/` as KEEP in this slice; `fleet.py` stays until `load-watch`'s
+bug). Path callers that the "deleted name" rule would not flag because the
+file moves rather than disappears: `skills/handoff/SKILL.md:90` and
+`skills/baton/SKILL.md:90` (`python3 .../session-finder/claude_identity.py ||
+echo $CLAUDE_CODE_SESSION_ID`, whose `||` would silently fall back to the
+stale id), `skills/session-handoff/SKILL.md:137-148,170,185` (`fleet.py --json`,
+`relay.py` by absolute path), and `bin/route_agent.py:1600` (reads the
+`~/.local/state/session-finder` root for calibration records: a read-only
+state path that stays, named here so the search does not count it as a hit).
+So: `claude_identity.py` (and `nativeid.py` if it needs it) move to `bin/` as
+KEEP in this slice, the three skills are updated in the same slice, a
+forwarding stub stays at the old path for one cycle, and the W2 sweep greps
+the old path; `fleet.py` stays until `load-watch`'s
 attribution and `context-watch` read Paseo (`paseo ls -a -g --json`) instead,
 which is part of E5, then goes. The shim and its one test go at the end of
 Wave 6 once C3's outside files are updated.
@@ -271,9 +288,10 @@ DELETE after the audit confirms `paseo run` + `paseo agent mode`,
 E5. **S-watch**: KEEP `deadline`, `deadline_wait.py`, `wait-file`,
 `pr-policy` (+ its plist), `ade-sched` (PR 291). KEEP `load-watch` trimmed
 (D5), its plist path updated in the same change (C1). DELETE
-`proc-cpu-watch`, `session-load-watch`, `rumination-watch`, `bin/watch`,
-`skills/watch`, `skills/loadwatch`, `paseowatch`, `cfenginewatch` (the two
-upstream watchers become Paseo schedules reading `fleet-watch`'s briefs,
+`proc-cpu-watch`, `session-load-watch`, `rumination-watch`, `skills/loadwatch`;
+DELETE `bin/watch`, `skills/watch`, `paseowatch`, `cfenginewatch` **after the
+C3 per-file gate** (the paused fleet-watch registrations, C1, depend on
+`bin/watch`; the two upstream watchers become Paseo schedules reading `fleet-watch`'s briefs,
 **after the C3 per-file gate**: tendcf, nix2cf and CFEngine name them,
 report I4a-c; `fleet-watch` itself is outside this repo, home unverified,
 C3), and `load-watch`'s attribution plus `context-watch` are rewritten to read
@@ -316,7 +334,8 @@ DELETE `routing-recalibrate` (+plist; becomes a Paseo schedule if still
 wanted), `go_model_policy.py` and the opencode-go rules once opencode is
 retired (J2), `claude-fleet-governor`, `gate-profile` and the **Claude-quota half** of
 `ade_gates.py` / `config/gates.toml` / `docs/gates.md` once
-session-guard/usage-auto-resume are verified live (D4); the **frontier half**
+session-guard/usage-auto-resume are verified live (D4) **and after the C3
+per-file gate** (tendcf and nix2cf name the quota gates, report B9b, I4a); the **frontier half**
 (`load_frontier`, `FRONTIER_DEFAULTS`, `judged_pool_block`, `read_guard_state`,
 the `[frontier]` table) is KEEP because the kept `route_agent.py` imports it
 unconditionally (`bin/route_agent.py:122`, used at 1293-1313): either it stays
@@ -375,7 +394,7 @@ KEEP `skill-everywhere` trimmed to the surviving targets until the last
 non-Claude provider retires and site-private has its own install path (J2a);
 DELETE `skill-get`, `fix-skill-frontmatter.py`, `skills-everywhere` skill;
 `npx skills add` (external code) only after a J4 yes; `ade-update` KEEP
-trimmed (pull + relink the one symlink); `skillopt-night`,
+trimmed (pull + `skill-everywhere --check`, `bin/ade-update:24-37`); `skillopt-night`,
 `skillopt_sources.py`, `skillopt-sleep` DECIDE (J4; default DELETE, its reader
 was never verified); `ade-backup-stores` KEEP trimmed to the surviving stores
 with the credential exclusions as a named exception (E9h Q4); `bm-lint`,
@@ -400,7 +419,7 @@ at the end. `graft build` last.
 | 0 | DONE: check-ins (37 + 5), rulings R1–R8, evidence and the consolidated report on the branch. OPEN: baseline suite (running in the cloud, `docs/slim/baseline.md` when it ends; batch-1 reports note tests that fail on master in containers); operator confirms C1's three slices exited (J1); land PR 289 and PR 291 on master (pytest-linux pending on both); land `gitignore-aider` (one line) by PR and reset the shared checkout's master; tag `pre-slim-2026-11-06`; `git worktree prune` on the Mac; J1, J2, J2a, J2b, J2c and J11 answered | serial | all of the above |
 | 1 | Audits (a) `bin/`, (b) `skills/`, (c) `tests/` map, (d) `docs/` + queue, (e) outside dependents and links (C2, C3) ; lead writes `docs/slim/ledger.md`; **workflow** (section H, W1); operator approves the ledger once | 5 readers | ledger approved |
 | 2 | E1 (unlink, uninstall-vendored, move to site-djbclark), E2 (dead), E9 (retired providers only) | 3–4 writers + reviewers | **C7 drain gate passed first**; suite green; refs zero outside AGENTS.md and README (**workflow** W2) |
-| 3 | E3 shim, E4, E5, E10; **operator steps first**: upgrade the Mac daemon to 0.15.x (evidence F records 0.14.x), install the J6 plugins, evaluate `session-recovery` with native resume OFF (J6), then verify for one day before the REPLACE deletions merge | 3 | same; **the E3 shim merges only after the in-repo relay callers are on it and the C3 relay consumers are migrated or waived per file** |
+| 3 | E3 shim, E4, E5, E10; **order inside the wave**: E5's attribution rewrite merges before E3 deletes `fleet.py`; **operator steps first**: upgrade the Mac daemon to 0.15.x in a quiesced window per `docs/queue.md` (evidence F records 0.14.x; an unfinished turn is lost on restart until terminal persistence is verified), install the J6 plugins, evaluate `session-recovery` with native resume OFF (J6), then verify for one day before the REPLACE deletions merge | 3 | same; **the E3 shim merges only after the in-repo relay callers are on it and the C3 relay consumers are migrated or waived per file** |
 | 4 | E6 shim and bigteam, then E7 and E8; E6 and E7 as sibling cloud sessions | 2–3 | same; **`acp-run` is not deleted here**: C3's acp consumers are migrated or waived per file first (proposed to the operator as PRs if J2b allows) |
 | 5 | E11; AGENTS.md and README (Opus `high`; lead at `xhigh`); **workflow** W3 | 2 | suite green; `graft build` |
 | 6 | Shims and `acp-run` removed (E3, E6) only after every C3 file is migrated or waived; upstream filings (gaps found in Paseo: a quota-pause primitive, a workspace claim primitive, if still missing); final PR to master or J7; delete `slim/*` branches after MERGED; lander/feeder per J11 | serial | done |
@@ -459,8 +478,9 @@ operator ticks per file before Wave 6.
 I3. Plugins are unsandboxed daemon code: J6 is per plugin; a Sonnet subagent
 summarises each plugin's source before the operator installs it; prefer
 install counts and recent updates (D-table).
-I4. Native resume (0.15.0) is opt-in and new: Wave 3 turns it on and watches
-for one day before PR 290 is discarded or landed.
+I4. Native resume (0.15.0) is opt-in and new: Wave 3 evaluates
+`session-recovery` with it OFF and runs a measured trial only (J6), before
+PR 290 is discarded or landed.
 I5. The suite fails on master in containers for 9 acp-dispatch tests plus
 self-slash, wait-file and git-hook tests (missing `g*` wrappers; report
 01BvGHLy): the baseline records them so deletions are not blamed.
@@ -469,7 +489,7 @@ I6. The Mac is the only place plugins, launchd and Paseo settings change
 brief, and a slice that needs it waits.
 I7. Codex cloud reviews have no strength knob and the `codex-review-state`
 markers are undocumented (brief 2026-11-06): the Action in E8 reads only our
-own marker; Codex findings are read as threads, never as a gate.
+own marker; whether Codex threads gate the merge is J8.
 
 ## J. Questions for the operator (answered ones kept for the record)
 
@@ -488,7 +508,7 @@ Copilot (via Paseo), glm-acp-agent, qwen-code? `paseo provider ls` plus the
 retire list is enough. [answered] this work is Claude-only; the fleet is not.
 J2c. Push `~/.local/state/bigteam/tui-retire/PLAN.md` to a branch
 (`docs/tui-retire-plan`) so the cloud lead can read it (E9 needs it).
-J2a. Homes for the E1d pieces (unchanged from v1 H2a): `book-to-kb` →
+J2a. Homes for the E1 "probably another home" pieces (unchanged from v1 H2a): `book-to-kb` →
 site-private? `change-hermes*` → site-private? Grok-bot pieces → peer-link
 repo per E9j, or `coding-bot-mailbox`? `barnowl` → the barnowl fork?
 `aws-rules`, `ovhcloud-api` → public site-djbclark or private?

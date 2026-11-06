@@ -1,6 +1,6 @@
 # Paseo-native recovery inventory (section F of docs/checkpoint.md on PR 290's branch, 2026-11-04)
 
-Taken verbatim for Wave 3 (E5/D2). Source branch `claude/issue-278-checkpointing` @ 15186fb2; PR 290 is parked (checkin-rulings R4).
+Taken verbatim for Wave 3 (D3/D11). Source branch `claude/issue-278-checkpointing` @ 15186fb2; PR 290 is parked (checkin-rulings R4).
 
 ## F. Paseo-native capability inventory (2026-11-04)
 

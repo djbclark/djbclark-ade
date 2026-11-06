@@ -32,8 +32,8 @@ branch cherry-picks the named files.
   layer, not harness glue; none depends on a deletion target. The slim-down
   will later strip the Codex `apply_patch` paths from the gate and
   `post-edit-check` only if and when Codex is retired (J2; "Claude-only" is
-  this work, not the fleet), and (E5) decide whether `ade-retro` runs as a
-  Paseo schedule. `instruction-lint` is useful to the E11 docs sweep
+  this work, not the fleet), and (Wave 3, D8) decide whether `ade-retro` runs
+  as a Paseo schedule. `instruction-lint` is useful to the E11 docs sweep
   itself.
 - Dependency: `agents/claude/settings.json.tmpl` and
   `tests/test_secret_deny_repo.py` move together if `agents/` ever moves; the
@@ -69,7 +69,7 @@ branch cherry-picks the named files.
 
 ## R4. Issue 278, session 01BvGHM3, PR 290, branch `claude/issue-278-checkpointing`
 
-- Ruling: PARK (draft) until Wave 3, where E5/D2 evaluate native Paseo resume
+- Ruling: PARK (draft) until Wave 3, where D3/D11 evaluate native Paseo resume
   and `sm1ee/session-recovery` on the Mac. Reason: the operator's own route
   order (2026-11-05: native resume, then the session-recovery plugin, then a
   new passive plugin) was not exhausted; the plugin was built as the interim
