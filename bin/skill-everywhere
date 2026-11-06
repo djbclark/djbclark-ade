@@ -32,9 +32,7 @@
 # A TUI whose binary is not installed is skipped. Being linked is not the same
 # as being loaded: re-verify with the per-TUI check in skill-everywhere.md
 # (the README next to this script).
-# This script makes no model calls. When re-verifying, probe agy at most ONCE (one
-# batched prompt, --print-timeout): looped agy -p probes helped lock out its CLI on
-# 2026-10-03 (see skills/model-routing, "agy has a burst limit").
+# This script makes no model calls.
 export PATH="/opt/homebrew/bin:$PATH"
 set -euo pipefail
 # GNU tools carry a g prefix on the Mac (Homebrew). On GNU/Linux, e.g. the
@@ -53,27 +51,16 @@ site_root="${SKILL_EVERYWHERE_SITE:-${OPS_ROOT:-$HOME/ops}/site-public-djbclark/
 # omp (oh-my-pi) added 2026-10-13: it also reads ~/.agents/skills, but dedups
 # by realpath, so its native dir lists each skill once and keeps working if
 # its agents provider is turned off.
-# pi added 2026-11-03: it natively scans ~/.agents/skills. Use the shared
-# directory directly; a second link in ~/.pi/agent/skills causes name collisions.
-# goose added 2026-10-29: its global skill dir IS ~/.agents/skills (the same
-# one codex uses), so it links there directly rather than into a dir of its
-# own; the links are shared, not duplicated, when both TUIs are installed.
+# (goose, pi, agy, copilot, qwen, devin, cline, muse and zcode rows removed 2026-11-06, slim-down E9:
+# those TUIs retired; the links they held in ~/.agents/skills, ~/.gemini/antigravity-cli/skills,
+# ~/.copilot/skills, ~/.qwen/skills, ~/.config/devin/skills and ~/.cline/skills are the operator's to remove.)
 targets='
 claude|~/.claude/skills
 codex|~/.agents/skills
-goose|~/.agents/skills
-pi|~/.agents/skills
-agy|~/.gemini/antigravity-cli/skills
-copilot|~/.copilot/skills
 opencode|~/.config/opencode/skills
-qwen|~/.qwen/skills
-devin|~/.config/devin/skills
-cline|~/.cline/skills
 hermes|~/.local/share/skill-everywhere/skills
 cursor-agent|via ~/.claude/skills
 grok|~/.grok/skills
-muse|via ~/.claude/skills
-zcode|via ~/.agents/skills
 omp|~/.omp/agent/skills
 grokbot|copy ~/agent-data/workflows
 '
@@ -268,7 +255,7 @@ for name in "$@"; do
           ((dry)) || printf '  %-13s relinked direct (was %s)\n' "$bin" "$state"
         elif [[ $state == dangling\ * ]]; then
           # Nobody owns a link whose target is gone (2026-10-15: 36 links in
-          # ~/.cline/skills still pointed at the pre-2026-10-09 site-private
+          # a TUI's skills dir still pointed at the pre-2026-10-09 site-private
           # path); replace it rather than preserve a dead pointer.
           act "relink $link" ln -sfn "$src" "$link"
           ((dry)) || printf '  %-13s relinked (was %s)\n' "$bin" "$state"

@@ -6,6 +6,8 @@ ADE-everywhere plan ([ade-everywhere-proposal.md](history/ade-everywhere-proposa
 Every claim names the file that shows it; a claim without a file is the operator's statement and is marked
 "operator". Re-read the code before relying on a line here: facts rot.
 
+**Update 2026-11-06 (slim-down E9):** `bin/zcode-key-auth` (and its launchd job and `~/.zcode` credential-store write) was removed with the zcode TUI; the lines below that name it are the 2026-10-20 snapshot.
+
 This repo is **personal tooling for one operator's machine, published as a public GitHub repo by choice**
 (`djbclark/djbclark-ade`). It runs no internet-facing service. `bin/firecrawl-router` is an HTTP listener, on
 loopback by default (`--listen` defaults to `127.0.0.1:0`). With a child command it requires a random

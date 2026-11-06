@@ -45,9 +45,9 @@ class TestCalibrate(unittest.TestCase):
     def test_groups_skips_placeholders_and_maps_service(self):
         _write_job(self.root, "t1", "a", self._rec())
         _write_job(self.root, "t2", "b", self._rec(
-            agent="agy", model="claude-opus-5-5-high", kind="judgment",
+            agent="omp", model="anthropic/claude-opus-5-5", kind="judgment",
             status="no-report",
-            failure="NO-REPORT: quota (agy, claude-opus-5-5-high): acp-run exit 1",
+            failure="NO-REPORT: quota (omp, anthropic/claude-opus-5-5): acp-run exit 1",
         ))
         _write_job(self.root, "t3", "c", self._rec(model="m1", status="done"))
         _write_job(self.root, "t4", "d", self._rec(
@@ -70,7 +70,7 @@ class TestCalibrate(unittest.TestCase):
         report = r.calibrate_report(state_dir=self.root, now=self.now, min_n=99)
         services = {(g["service"], g["model"], g["kind"]) for g in report["groups"]}
         self.assertIn(("claude", "sonnet", "code"), services)
-        self.assertIn(("antigravity-claude", "claude-opus-5-5-high", "judgment"),
+        self.assertIn(("omp", "anthropic/claude-opus-5-5", "judgment"),
                       services)
         self.assertIn(("cursor-auto", "default", "?"), services)
         self.assertIn(("codex", "gpt-6-astra", "frontier"), services)
@@ -81,10 +81,10 @@ class TestCalibrate(unittest.TestCase):
                 if g["service"] == "claude" and g["model"] == "sonnet"),
             1,
         )
-        agy = next(g for g in report["groups"]
-                   if g["service"] == "antigravity-claude")
-        self.assertEqual(agy["no_report"], 1)
-        self.assertEqual(agy["quota_stop"], 1)
+        omp = next(g for g in report["groups"]
+                   if g["service"] == "omp")
+        self.assertEqual(omp["no_report"], 1)
+        self.assertEqual(omp["quota_stop"], 1)
         codex = next(g for g in report["groups"] if g["service"] == "codex")
         self.assertEqual(codex["median_measured_usage_pct"], 2.5)
         self.assertEqual(codex["outcome"]["ci_pass_rate"], 100.0)
@@ -96,25 +96,25 @@ class TestCalibrate(unittest.TestCase):
         recent = self.now.timestamp()
         old = (self.now - timedelta(days=20)).timestamp()
         _write_job(self.root, "new", "j", self._rec(
-            agent="zcode", model="GLM-5.3", kind="code",
+            agent="omp", model="anthropic/claude-sonnet-5-5", kind="code",
             started=recent, finished=recent,
         ))
         _write_job(self.root, "old", "j", self._rec(
-            agent="zcode", model="GLM-5.3", kind="code",
+            agent="omp", model="anthropic/claude-sonnet-5-5", kind="code",
             started=old, finished=old,
         ))
         report = r.calibrate_report(
             state_dir=self.root, now=self.now, since_days=7, min_n=99)
         self.assertEqual(len(report["groups"]), 1)
         self.assertEqual(report["groups"][0]["n"], 1)
-        self.assertEqual(report["groups"][0]["service"], "zai")
+        self.assertEqual(report["groups"][0]["service"], "omp")
 
     def test_in_flight_excluded_from_groups(self):
         _write_job(self.root, "done", "j", self._rec(
-            agent="zcode", model="GLM-5.3", kind="code", status="done",
+            agent="omp", model="anthropic/claude-sonnet-5-5", kind="code", status="done",
         ))
         _write_job(self.root, "run", "j", self._rec(
-            agent="zcode", model="GLM-5.3", kind="code",
+            agent="omp", model="anthropic/claude-sonnet-5-5", kind="code",
             status="running", finished=None,
         ))
         _write_job(self.root, "nofin", "j", self._rec(
@@ -131,16 +131,16 @@ class TestCalibrate(unittest.TestCase):
             "no-report",
         )
         self.assertEqual(
-            r._no_report_class({"failure": "NO-REPORT: quota (agy): x"}),
+            r._no_report_class({"failure": "NO-REPORT: quota (omp): x"}),
             "quota",
         )
 
     def test_suggestions_respect_min_and_thresholds(self):
-        # Three code-eligible services (min_peers=2 others): zai poor,
+        # Three code-eligible services (min_peers=2 others): omp poor,
         # cursor-auto and cursor good.
         for i in range(6):
             _write_job(self.root, f"bad{i}", "j", self._rec(
-                agent="zcode", model="GLM-5.3", kind="code",
+                agent="omp", model="anthropic/claude-sonnet-5-5", kind="code",
                 status="no-report" if i < 5 else "done",
                 failure="NO-REPORT: exit 1",
             ))
@@ -162,7 +162,7 @@ class TestCalibrate(unittest.TestCase):
 
         report = r.calibrate_report(state_dir=self.root, now=self.now, min_n=5)
         sug = {(s["service"], s["suggest_rank_delta"]) for s in report["suggestions"]}
-        self.assertIn(("zai", r.CALIBRATE_SUGGEST_WORSE_DELTA), sug)
+        self.assertIn(("omp", r.CALIBRATE_SUGGEST_WORSE_DELTA), sug)
         self.assertIn(("cursor-auto", -r.CALIBRATE_SUGGEST_BETTER_DELTA), sug)
         self.assertIn(("cursor", -r.CALIBRATE_SUGGEST_BETTER_DELTA), sug)
         self.assertFalse(any(s["service"] == "opencode-go" for s in report["suggestions"]))
@@ -184,15 +184,15 @@ class TestCalibrate(unittest.TestCase):
         # Raw table: 6 done + 6 quota = 50% done_rate; suggestion basis = 100%.
         for i in range(6):
             _write_job(self.root, f"ok{i}", "j", self._rec(
-                agent="zcode", model="GLM-5.3", kind="code", status="done",
+                agent="omp", model="anthropic/claude-sonnet-5-5", kind="code", status="done",
             ))
         for i in range(6):
             _write_job(self.root, f"q{i}", "j", self._rec(
-                agent="zcode", model="GLM-5.3", kind="code",
+                agent="omp", model="anthropic/claude-sonnet-5-5", kind="code",
                 status="no-report",
-                failure="NO-REPORT: quota (zai): exit 1",
+                failure="NO-REPORT: quota (omp): exit 1",
             ))
-        # Two peers at ~50% so zai's filtered 100% is clearly better.
+        # Two peers at ~50% so omp's filtered 100% is clearly better.
         for i in range(6):
             _write_job(self.root, f"p1{i}", "j", self._rec(
                 agent="cursor", model="default", kind="code",
@@ -206,12 +206,12 @@ class TestCalibrate(unittest.TestCase):
                 failure="NO-REPORT: exit 1",
             ))
         report = r.calibrate_report(state_dir=self.root, now=self.now, min_n=5)
-        zai = next(g for g in report["groups"] if g["service"] == "zai")
-        self.assertEqual(zai["n"], 12)
-        self.assertEqual(zai["done"], 6)
-        self.assertEqual(zai["done_rate"], 50.0)
-        self.assertEqual(zai["quota_stop"], 6)
-        sug = next(s for s in report["suggestions"] if s["service"] == "zai")
+        omp = next(g for g in report["groups"] if g["service"] == "omp")
+        self.assertEqual(omp["n"], 12)
+        self.assertEqual(omp["done"], 6)
+        self.assertEqual(omp["done_rate"], 50.0)
+        self.assertEqual(omp["quota_stop"], 6)
+        sug = next(s for s in report["suggestions"] if s["service"] == "omp")
         self.assertEqual(sug["done_rate"], 100.0)
         self.assertEqual(sug["n"], 6)
         self.assertEqual(sug["suggest_rank_delta"], -r.CALIBRATE_SUGGEST_BETTER_DELTA)
@@ -220,7 +220,7 @@ class TestCalibrate(unittest.TestCase):
         # Only two eligible code services → each has one peer < min_peers=2.
         for i in range(6):
             _write_job(self.root, f"a{i}", "j", self._rec(
-                agent="zcode", model="GLM-5.3", kind="code",
+                agent="omp", model="anthropic/claude-sonnet-5-5", kind="code",
                 status="no-report" if i < 5 else "done",
                 failure="NO-REPORT: exit 1",
             ))

@@ -17,7 +17,7 @@ One file per agent. Contract (the core, `session-history.py`, loads every `*.py`
                                           # an sid in neither is ended. A failed probe must return every sid as unknown (history prints
                                           # LIVE?), never ended (omp: `omp session lease --json`)
     RESUME = "codex resume {sid}"         # optional hint printed for ended sessions
-                                          # (or a function (sid, cwd) -> command, already shell-quoted: crush.py)
+                                          # (or a function (sid, cwd) -> command, already shell-quoted)
     RESUME_USES_KEY = True                # optional: pass the stable key instead of sid to RESUME (Pi and omp file targets)
     LIVE_LABEL, ENDED_LABEL = "OPEN", "closed"   # optional: what to print instead of LIVE/ended
     ROOT_ENV = ("CODEX_HOME",)            # REQUIRED if the adapter reads an environment variable to find its store:

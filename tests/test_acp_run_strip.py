@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-"""Tests for tools/acp-run/acp-run starting opencode and agy without the user's plugins,
-MCP servers and hooks under --perm deny (2026-10-13).
+"""Tests for tools/acp-run/acp-run starting opencode without the user's plugins,
+MCP servers and hooks under --perm deny (2026-10-13; the agy half was removed with agy, 2026-11-06).
 
 On the 2026-10-13 SkillOpt-Sleep night every failed attempt died while the agent started:
-opencode's plugins never finished activating and agy's 7 MCP servers were still
-connecting. Under --perm deny (not --interactive) acp-run now gives opencode a per-run
-OPENCODE_CONFIG_DIR with only provider/model keys and agy a per-run GEMINI_HOME with
-empty mcp_config.json/hooks.json/plugins, logs a "user_config" record, removes the temp
+opencode's plugins never finished activating. Under --perm deny (not --interactive)
+acp-run now gives opencode a per-run
+OPENCODE_CONFIG_DIR with only provider/model keys, logs a "user_config" record, removes the temp
 dir afterwards, and keeps everything as before under --keep-user-config,
 ACP_RUN_KEEP_USER_CONFIG=1, --perm all or --interactive. All against a fake HOME and a
 fake agent: no real agent starts and no model is called.
@@ -77,26 +76,6 @@ PROBE = textwrap.dedent("""\
         shutil.rmtree(d)
         return out
 
-    def agy():
-        d, info = mod.agy_deny_home()
-        c = d / "config"
-        out = {"info": info, "dir_mode": mode(d),
-               "top": {x.name: x.is_symlink() for x in d.iterdir()},
-               "config": {x.name: x.is_symlink() for x in c.iterdir()},
-               "mcp": json.loads((c / "mcp_config.json").read_text()),
-               "hooks": json.loads((c / "hooks.json").read_text()),
-               "plugins": sorted(x.name for x in (c / "plugins").iterdir()),
-               "oauth_target": os.readlink(d / "oauth_creds.json")}
-        shutil.rmtree(d)
-        out["gone"] = not d.exists()
-        g = home / ".gemini"
-        out["real_intact"] = {
-            "oauth": (g / "oauth_creds.json").read_text(),
-            "mcp": json.loads((g / "config" / "mcp_config.json").read_text()),
-            "plugins": sorted(x.name for x in (g / "config" / "plugins").iterdir()),
-            "hooks": (g / "config" / "hooks.json").read_text()}
-        return out
-
     def oc_error(env):
         try:
             mod.opencode_deny_config(env)
@@ -140,8 +119,8 @@ PROBE = textwrap.dedent("""\
         target = Path(tempfile.mkdtemp())
         (target / "keep.txt").write_text("x")
         names = {"dead_old": "acp-run-opencode-deny-999999-abcd1234",
-                 "nopid_old": "acp-run-agy-deny-odedcp3y",
-                 "dead_fresh": "acp-run-zcode-deny-999998-abcd1234",
+                 "nopid_old": "acp-run-grok-deny-odedcp3y",
+                 "dead_fresh": "acp-run-grok-deny-999998-abcd1234",
                  "live_old": f"acp-run-opencode-deny-{os.getppid()}-abcd1234",
                  "other_old": "something-else-old"}
         for n in names.values():
@@ -150,11 +129,11 @@ PROBE = textwrap.dedent("""\
         link = base / "acp-run-opencode-deny-999997-linkxxxx"
         link.symlink_to(target)
         planted = ["acp-run-x-deny-99999999999-a", "acp-run-opencode-deny-99999999999-abc",
-                   "acp-run-agy-deny-999995-abc\\n"]
+                   "acp-run-grok-deny-999995-abc\\n"]
         for n in planted:
             (base / n).mkdir()
             os.utime(base / n, (old, old))
-        afile = base / "acp-run-agy-deny-999996-filexxxx"
+        afile = base / "acp-run-grok-deny-999996-filexxxx"
         afile.write_text("x")
         for k, n in names.items():
             if k != "dead_fresh":
@@ -216,12 +195,10 @@ PROBE = textwrap.dedent("""\
         "sweep": sweep(),
         "s_oc_broken": strip("opencode", "deny", xdg="broken"),
         "s_oc_mkdtemp": strip("opencode", "deny", mkdtemp_fails=True),
-        "s_agy_mkdtemp": strip("agy", "deny", mkdtemp_fails=True),
         "oc": oc({"XDG_CONFIG_HOME": str(home / ".config")}),
         "oc_explicit": oc({"XDG_CONFIG_HOME": str(home / ".config"),
                            "OPENCODE_CONFIG": str(home / "explicit.json")}),
         "oc_none": oc({"XDG_CONFIG_HOME": str(home / "nowhere")}),
-        "agy": agy(),
         "jsonc": mod.jsonc_loads('{"a": "x // y /* z */", /* c */ "b": 1 // d\\n}'),
         "s_oc_deny": strip("opencode", "deny"),
         "s_oc_flag": strip("opencode", "deny", keep=True),
@@ -229,8 +206,6 @@ PROBE = textwrap.dedent("""\
         "s_oc_env0": strip("opencode", "deny", env_keep="0"),
         "s_oc_all": strip("opencode", "all"),
         "s_oc_interactive": strip("opencode", "deny", interactive=True),
-        "s_agy_deny": strip("agy", "deny"),
-        "s_zcode_deny": strip("zcode", "deny"),
         "s_claude_deny": strip("claude", "deny"),
     }))
     """)
@@ -242,31 +217,16 @@ FAKE_AGENT = textwrap.dedent("""\
     import json, os, sys
     from pathlib import Path
     keys = ("OPENCODE_CONFIG_DIR", "OPENCODE_CONFIG", "OPENCODE_CONFIG_CONTENT",
-            "OPENCODE_DISABLE_PROJECT_CONFIG", "OPENCODE_CONFIG_PROJECT_DISABLE", "GEMINI_HOME")
+            "OPENCODE_DISABLE_PROJECT_CONFIG", "OPENCODE_CONFIG_PROJECT_DISABLE")
     out = {k: os.environ.get(k) for k in keys}
     out["all_env"] = dict(os.environ)
     out["acp_run_pid"] = os.getppid()
     d = os.environ.get("OPENCODE_CONFIG_DIR")
     if d and Path(d, "opencode.json").exists():
         out["opencode_json"] = json.loads(Path(d, "opencode.json").read_text())
-    g = os.environ.get("GEMINI_HOME")
-    if g and Path(g, "config", "mcp_config.json").exists():
-        out["agy_mcp"] = json.loads(Path(g, "config", "mcp_config.json").read_text())
     fake_out = Path(os.environ["FAKE_OUT"])
     fake_out.write_text(json.dumps(out))
     mode = os.environ.get("FAKE_MODE", "exit")
-    if os.environ.get("FAKE_ON_TERM") == "recreate":
-        import signal, time
-
-        def on_term(*_):
-            # like agy rotating a credential under its home while it is being stopped
-            g = os.environ["GEMINI_HOME"]
-            os.makedirs(g, exist_ok=True)
-            Path(g, "rotated.json").write_text("{}")
-            Path(str(fake_out) + ".term").write_text(g)
-            time.sleep(0.3)
-            os._exit(0)
-        signal.signal(signal.SIGTERM, on_term)
     if mode == "exit":
         sys.exit(0)  # die before the handshake: acp-run fails fast, then cleans up
 
@@ -283,7 +243,7 @@ FAKE_AGENT = textwrap.dedent("""\
         elif m == "session/new":
             send({"id": i, "result": {"sessionId": "s1", "configOptions": [{"id": "model", "name": "Model", "category": "model", "type": "select", "currentValue": "sipb/test", "options": [{"value": "sipb/test", "name": "Test"}]}]}})
         elif m == "session/prompt":
-            cfg = os.environ.get("OPENCODE_CONFIG_DIR") or os.environ.get("GEMINI_HOME")
+            cfg = os.environ.get("OPENCODE_CONFIG_DIR")
             Path(str(fake_out) + ".turn").write_text(json.dumps({"cfg": cfg, "exists": bool(cfg) and Path(cfg).exists()}))
             if mode == "hang":
                 pending = i
@@ -319,23 +279,11 @@ def write_home(home: Path) -> None:
     (home / "commas" / "opencode").mkdir(parents=True)
     (home / "commas" / "opencode" / "opencode.jsonc").write_text(
         '{"model": "sipb/x", // c\n "provider": {"sipb": {"models": {"x": {},},},},}')
-    g = home / ".gemini"
-    (g / "config" / "plugins" / "flutter").mkdir(parents=True)
-    (g / "config" / "plugins" / "flutter" / "mcp_config.json").write_text('{"mcpServers": {"dart": {}}}')
-    (g / "antigravity-cli").mkdir()
-    (g / "oauth_creds.json").write_text('{"refresh_token": "' + SECRET + '"}')
-    (g / "settings.json").write_text("{}")
-    (g / "config" / "config.json").write_text('{"plugins": {"flutter": {"enabled": true}}}')
-    (g / "config" / "mcp_config.json").write_text(json.dumps({"mcpServers": {
-        "basic-memory": {"serverUrl": "http://127.0.0.1:18796/mcp"},
-        "exa": {"serverUrl": "https://mcp.exa.ai/mcp", "headers": {"x-api-key": SECRET}}}}))
-    (g / "config" / "mcp_config.json.bak-old").write_text("{}")
-    (g / "config" / "hooks.json").write_text('{"PreToolUse": [{"command": "orca-status"}]}')
 
 
 # The end-to-end classes put a fake agent named like the real one (opencode, ...) first on PATH.
 # The child gets only that dir and the system dirs, and uv is called by absolute path, so a real
-# opencode/agy/crush/zcode can never start: no network, no credentials, no quota. Two traps
+# opencode can never start: no network, no credentials, no quota. Two traps
 # (2026-10-18): `uv run` prepends the dir of the interpreter it picks to the child's PATH, and for
 # Homebrew's python that dir is /opt/homebrew/bin, where a real opencode sits ahead of the fake
 # (the real one answered "Authentication required" and failed 12 tests); and the system PATH alone
@@ -479,7 +427,7 @@ class TestStripUserConfig(unittest.TestCase):
         self.assertIn("x", w["provider"]["sipb"]["models"])
 
     def test_build_error_falls_back_to_the_user_config_with_a_stderr_line(self):
-        for key, agent in (("s_oc_mkdtemp", "opencode"), ("s_agy_mkdtemp", "agy")):
+        for key, agent in (("s_oc_mkdtemp", "opencode"),):
             s = self.r[key]
             self.assertEqual(s["info"]["action"], "kept", key)
             self.assertIn("No space left", s["info"]["why"], key)
@@ -490,7 +438,7 @@ class TestStripUserConfig(unittest.TestCase):
     def test_planted_huge_pid_names_never_break_the_sweep(self):
         w = self.r["sweep"]
         for n in ("acp-run-x-deny-99999999999-a", "acp-run-opencode-deny-99999999999-abc",
-                  "acp-run-agy-deny-999995-abc\n"):
+                  "acp-run-grok-deny-999995-abc\n"):
             self.assertIn(n, w["left"], "not matched (bounded pid, fullmatch), so never swept")
         self.assertTrue(self.r["robust"]["pid_big"], "an unbounded pid counts as alive")
 
@@ -511,43 +459,11 @@ class TestStripUserConfig(unittest.TestCase):
         for k in ("dead_fresh", "live_old", "other_old"):
             self.assertIn(n[k], w["left"], k)
         self.assertIn("acp-run-opencode-deny-999997-linkxxxx", w["left"], "a symlink is never swept")
-        self.assertIn("acp-run-agy-deny-999996-filexxxx", w["left"], "a file is never swept")
+        self.assertIn("acp-run-grok-deny-999996-filexxxx", w["left"], "a file is never swept")
         self.assertTrue(w["target_intact"])
 
     def test_jsonc_comments_outside_strings_only(self):
         self.assertEqual(self.r["jsonc"], {"a": "x // y /* z */", "b": 1})
-
-    # --- agy home construction ---
-    def test_agy_home_has_no_mcp_hooks_or_plugins(self):
-        a = self.r["agy"]
-        self.assertEqual(a["mcp"], {"mcpServers": {}})
-        self.assertEqual(a["hooks"], {})
-        self.assertEqual(a["plugins"], [])
-        self.assertFalse(a["config"]["mcp_config.json"])
-        self.assertFalse(a["config"]["hooks.json"])
-        self.assertFalse(a["config"]["plugins"])
-        self.assertNotIn("mcp_config.json.bak-old", a["config"])
-        self.assertTrue(a["config"]["config.json"], "the rest of config/ is linked")
-        self.assertEqual(a["dir_mode"], "0o700")
-
-    def test_agy_home_keeps_the_login(self):
-        a = self.r["agy"]
-        self.assertTrue(a["top"]["oauth_creds.json"])
-        self.assertTrue(a["top"]["antigravity-cli"])
-        self.assertTrue(a["oauth_target"].endswith(".gemini/oauth_creds.json"))
-        self.assertNotIn("config", [k for k, v in a["top"].items() if v], "config/ is a real dir")
-
-    def test_agy_info_and_cleanup_leave_the_real_home_intact(self):
-        a = self.r["agy"]
-        self.assertEqual(a["info"]["mcp_servers"], ["basic-memory", "exa"])
-        self.assertEqual(a["info"]["plugins"], ["flutter"])
-        self.assertNotIn(SECRET, json.dumps(a["info"]))
-        self.assertTrue(a["gone"])
-        real = a["real_intact"]
-        self.assertIn(SECRET, real["oauth"])
-        self.assertEqual(sorted(real["mcp"]["mcpServers"]), ["basic-memory", "exa"])
-        self.assertEqual(real["plugins"], ["flutter"])
-        self.assertIn("orca-status", real["hooks"])
 
     # --- when it applies, and the override ---
     def test_deny_strips_opencode_env(self):
@@ -568,17 +484,11 @@ class TestStripUserConfig(unittest.TestCase):
         self.assertEqual(self.r["s_oc_env0"]["info"]["action"], "stripped", "=0 does not keep")
 
     def test_perm_all_interactive_and_other_agents_untouched(self):
-        for key in ("s_oc_all", "s_oc_interactive", "s_zcode_deny", "s_claude_deny"):
+        for key in ("s_oc_all", "s_oc_interactive", "s_claude_deny"):
             s = self.r[key]
             self.assertIsNone(s["info"], key)
             self.assertTrue(s["passed"], key)
             self.assertEqual(s["env"], {"OPENCODE_CONFIG": str(self.home / "explicit.json"), "KEEP": "me"}, key)
-
-    def test_agy_deny_returns_a_temp_home(self):
-        s = self.r["s_agy_deny"]
-        self.assertIsNotNone(s["dir"])
-        self.assertEqual(s["info"]["action"], "stripped")
-
 
 class TestStripEndToEnd(unittest.TestCase):
     """The real main()/run() against a fake agent that records its env and exits."""
@@ -586,6 +496,7 @@ class TestStripEndToEnd(unittest.TestCase):
     tmp: ClassVar[Path]
     home: ClassVar[Path]
     bin: ClassVar[Path]
+    bin_broken: ClassVar[Path]
     cache: ClassVar[str]
 
     @classmethod
@@ -599,7 +510,9 @@ class TestStripEndToEnd(unittest.TestCase):
         fake = cls.bin / "opencode"
         fake.write_text(FAKE_AGENT)
         fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
-        broken = cls.bin / "broken-agent"
+        cls.bin_broken = cls.tmp / "bin-broken"
+        cls.bin_broken.mkdir()
+        broken = cls.bin_broken / "opencode"
         broken.write_text("#!/nonexistent/interpreter\n")
         broken.chmod(broken.stat().st_mode | stat.S_IXUSR)
         cls.cache = uv_cache()
@@ -621,8 +534,8 @@ class TestStripEndToEnd(unittest.TestCase):
             old = time.time() - 4 * 3600
             os.utime(d / planted, (old, old))
         e = {**os.environ, "HOME": str(self.home), "UV_CACHE_DIR": self.cache,
-             **hermetic_env(self.bin), "FAKE_OUT": str(out), "FAKE_MODE": mode,
-             "ACP_RUN_AGY_SERVER": str(self.bin / fake), "TMPDIR": str(d)}
+             **hermetic_env(self.bin_broken if fake == "broken-agent" else self.bin),
+             "FAKE_OUT": str(out), "FAKE_MODE": mode, "TMPDIR": str(d)}
         # XDG_CONFIG_HOME too: a host that sets it (GitHub runners) would hide the fake HOME's config
         for k in ("ACP_RUN_KEEP_USER_CONFIG", "OPENCODE_CONFIG", "OPENCODE_CONFIG_DIR", "XDG_CONFIG_HOME",
                   "HERDR_PANE_ID", "HERDR_ENV"):
@@ -671,15 +584,6 @@ class TestStripEndToEnd(unittest.TestCase):
         self.assertTrue(r["planted_left"])
         self.assertNotIn("Traceback", r["stderr"])
 
-    def test_agy_home_is_removed_after_the_agent_stopped(self):
-        # the fake agy recreates its GEMINI_HOME and writes a file there on SIGTERM;
-        # removing the dir before _kill would leave that file behind
-        r = self.run_acp("agy", "--perm", "deny", "--mode", "default", mode="hang", sigterm=True,
-                         env={"FAKE_ON_TERM": "recreate"})
-        self.assertEqual(r["rc"], 143, r["stderr"])
-        self.assertIn("acp-run-agy-deny-", r["term"] or "", "the agent wrote under its home while stopping")
-        self.assertEqual(r["leftovers"], [])
-
     def test_sigterm_mid_turn_removes_the_temp_dir(self):
         r = self.run_acp("opencode", "--perm", "deny", mode="hang", sigterm=True)
         self.assertEqual(r["rc"], 143, r["stderr"])
@@ -689,7 +593,7 @@ class TestStripEndToEnd(unittest.TestCase):
     def test_early_exception_removes_the_temp_dir(self):
         # the agent cannot even be started (missing interpreter): run() fails in
         # create_subprocess_exec, after the temp config was built
-        r = self.run_acp("agy", "--perm", "deny", fake="broken-agent")
+        r = self.run_acp("opencode", "--perm", "deny", fake="broken-agent")
         self.assertEqual(r["rc"], 1, r["stderr"])
         self.assertEqual(r["user_config"][0]["action"], "stripped")
         self.assertEqual(r["leftovers"], [])
@@ -764,23 +668,6 @@ class TestStripEndToEnd(unittest.TestCase):
         self.assertIsNone(seen["OPENCODE_DISABLE_PROJECT_CONFIG"])
         self.assertEqual(r["user_config"], [])
         self.assertNotIn("user_config", r["result"])
-
-    def test_agy_deny_gets_a_temp_home_without_mcp(self):
-        r = self.run_acp("agy", "--perm", "deny")
-        seen = r["seen"]
-        self.assertIn("acp-run-agy-deny-", seen["GEMINI_HOME"], r["stderr"])
-        self.assertEqual(seen["agy_mcp"], {"mcpServers": {}})
-        self.assertEqual(r["user_config"][0]["mcp_servers"], ["basic-memory", "exa"])
-        self.assertEqual(r["leftovers"], [])
-        self.assertFalse(Path(seen["GEMINI_HOME"]).exists())
-        self.assertTrue((self.home / ".gemini" / "oauth_creds.json").exists())
-
-    def test_agy_perm_all_keeps_the_shared_shadow_home(self):
-        r = self.run_acp("agy", "--perm", "all")
-        self.assertEqual(r["seen"]["GEMINI_HOME"], str(self.home / ".local/share/agy-acp-home"))
-        self.assertEqual(sorted(r["seen"]["agy_mcp"]["mcpServers"]), ["basic-memory", "exa"])
-        self.assertEqual(r["user_config"], [])
-
 
 if __name__ == "__main__":
     unittest.main()

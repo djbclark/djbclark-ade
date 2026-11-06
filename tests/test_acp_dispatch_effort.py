@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import importlib.machinery
 import importlib.util
-import json
 import unittest
 from pathlib import Path
 
@@ -88,15 +87,6 @@ class Effort(base.Base):
         argv = self.args_file.read_text().split("\n")
         self.assertEqual(argv[-3:-1], ["--tripwire-exempt-kinds", "read"])
         self.assertIn("--effort", argv)
-
-    def test_zcode_accepts_a_model_now_and_still_does_not_need_one(self):
-        r = self.dispatch_agent("zcode", "GLM-5.3-Flash", "--no-model-check", "--dry-run", env=self.env())
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("--model GLM-5.3-Flash", r.stdout)
-        r = base.run(["zcode", "--kind", "bulk", "--name", "z", "-p", "hi", "--out", str(self.out),
-                      "--acp-run", str(self.fake), "--dry-run", "-C", str(self.repo)],
-                     env=self.base_env("writes", **self.env()))
-        self.assertEqual(r.returncode, 0, r.stderr)
 
     def test_resume_keeps_the_flags(self):
         r = self.dispatch("--effort", "low", "--context", "500k", env=self.env())

@@ -112,33 +112,35 @@ class TestAcpRunWaits(unittest.TestCase):
 
 
 class TestAcpRunNamesTheWrappedExecutable(unittest.TestCase):
-    """Codex 4322594869 (PR 18): YOLO_CMD['crush'] starts with `env NAME=VAL ... crush-acp`, so
-    shutil.which(cmd[0]) found /usr/bin/env and crush skipped the binary wait and the exit-127 path."""
+    """Codex 4322594869 (PR 18): a launch command `env NAME=VAL ... PROGRAM` made shutil.which(cmd[0])
+    find /usr/bin/env and skip the binary wait and the exit-127 path (crush's was one; crush retired 2026-11-06,
+    the executable-name logic stays)."""
 
     def acp(self, *args: str, wait: str = "0.5") -> subprocess.CompletedProcess[str]:
-        # PATH has env (/usr/bin) but never crush-acp
+        # PATH has env (/usr/bin) but no agent binary
         env = {**os.environ, "PATH": "/usr/bin:/bin", "ACP_RUN_BIN_WAIT": wait, "ACP_RUN_BIN_POLL": "0.1"}
         return subprocess.run([UV, "run", "--quiet", "--script", str(ACP_RUN), *args], env=env, check=False,
                               stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120)
 
-    def test_crush_with_no_crush_acp_waits_then_exits_127(self):
-        r = self.acp("crush", "-p", "hi", "--timeout", "5", "--perm", "all")
+    def test_codex_with_no_binary_waits_then_exits_127(self):
+        # the wait and exit-127 path that crush's env-wrapped command used to cover end to end
+        r = self.acp("codex", "-p", "hi", "--timeout", "5", "--perm", "all")
         self.assertEqual(r.returncode, 127, r.stderr)
-        self.assertIn("crush-acp not found on PATH; waiting up to 0.5 s", r.stderr)
-        self.assertIn("acp-run: crush-acp not installed", r.stderr)
+        self.assertIn("codex-acp not found on PATH; waiting up to 0.5 s", r.stderr)
+        self.assertIn("acp-run: codex-acp not installed", r.stderr)
 
-    def test_crush_with_the_wait_disabled_is_still_not_installed(self):
-        r = self.acp("crush", "-p", "hi", "--timeout", "5", "--perm", "all", wait="0")
+    def test_codex_with_the_wait_disabled_is_still_not_installed(self):
+        r = self.acp("codex", "-p", "hi", "--timeout", "5", "--perm", "all", wait="0")
         self.assertEqual(r.returncode, 127, r.stderr)
         self.assertNotIn("waiting", r.stderr)
-        self.assertIn("acp-run: crush-acp not installed", r.stderr)
+        self.assertIn("acp-run: codex-acp not installed", r.stderr)
 
-    def test_list_marks_crush_missing_when_only_env_is_on_path(self):
+    def test_list_marks_a_missing_agent(self):
         r = self.acp("--list")
         self.assertEqual(r.returncode, 0, r.stderr)
-        crush = [ln for ln in r.stdout.splitlines() if ln[3:].startswith("crush ")]
-        self.assertEqual(len(crush), 1, r.stdout)
-        self.assertTrue(crush[0].startswith("-- "), crush[0])
+        rows = [ln for ln in r.stdout.splitlines() if ln[3:].startswith("codex ")]
+        self.assertEqual(len(rows), 1, r.stdout)
+        self.assertTrue(rows[0].startswith("-- "), rows[0])
 
     def test_the_executable_skips_env_and_its_assignments(self):
         import ast
@@ -148,8 +150,8 @@ class TestAcpRunNamesTheWrappedExecutable(unittest.TestCase):
         ns: dict = {"os": os}
         exec(compile(ast.Module(fn, []), str(ACP_RUN), "exec"), ns)     # noqa: S102 - the repo's own file
         exe = ns["agent_executable"]
-        self.assertEqual(exe(["env", "A=1", "B=x=y", "crush-acp", "acp", "--yolo"]), "crush-acp")
-        self.assertEqual(exe(["env", "crush-acp"]), "crush-acp")
+        self.assertEqual(exe(["env", "A=1", "B=x=y", "agent-acp", "acp", "--yolo"]), "agent-acp")
+        self.assertEqual(exe(["env", "agent-acp"]), "agent-acp")
         self.assertEqual(exe(["claude-agent-acp"]), "claude-agent-acp")
         self.assertEqual(exe(["codex-acp", "A=1"]), "codex-acp")        # only env's own assignments are skipped
         self.assertEqual(exe(["env"]), "env")

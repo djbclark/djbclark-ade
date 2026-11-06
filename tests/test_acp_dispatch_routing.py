@@ -102,7 +102,7 @@ class TestCodexEverydayGate(RoutingDispatch):
         self.assertIn("route-override", r.stderr)
         listed = r.stderr.split("eligible:", 1)[1].split(";", 1)[0]
         self.assertNotIn("codex", listed)
-        self.assertIn("zai", listed)
+        self.assertIn("claude", listed)
 
     def test_the_threshold_is_inclusive_and_the_tightest_window_binds(self):
         self.assertEqual(self.code("gpt-6.1-sol", 50.0).returncode, 0)

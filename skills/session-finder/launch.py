@@ -30,7 +30,7 @@ Route (djbclark 2026-10-08: "use ACP if possible … other methods have proven t
      runs from Orca, else a herdr tab in the workspace that already holds that repo (a new workspace
      when none fits), else detached with no terminal. The pane is reported to herdr as an agent
      (`pane report-agent`, source session-finder) so helm and fleet list it like any other.
-  2. Agents with no ACP route (zcode, muse) get `herdr agent start --kind` + `agent prompt`.
+  2. Agents with no ACP route (none now: zcode and muse retired 2026-11-06) get `herdr agent start --kind` + `agent prompt`.
   3. A real TUI, not acp-run, when a human is expected to read and answer the new agent (djbclark 2026-10-25: an
      ACP pane shows only "⚙ Terminal" lines, no transcript): `--baton` on herdr with claude or codex starts one by
      default (`herdr tab create`, `herdr agent start NAME --kind K --pane P -- <yolo, --model, effort>`, then
@@ -66,8 +66,8 @@ ACP_RUN = os.environ.get("ACP_RUN") or shutil.which("acp-run") or str(Path.home(
 # The headless (one turn and exit) path goes through acp-dispatch (bin/acp-dispatch, 2026-10-08): the
 # shared delivery footer, <id>-report.md + .done + jobs record, and exit 3 "no report" / 4 "BLOCKED:".
 ACP_DISPATCH = os.environ.get("ACP_DISPATCH") or shutil.which("acp-dispatch") or str(HERE.parent.parent / "bin" / "acp-dispatch")
-ACP_AGENTS = {"claude", "codex", "copilot", "opencode", "cursor", "qwen", "cline", "hermes", "agy", "devin"}
-HERDR_KINDS = {"claude", "codex", "cursor", "opencode", "copilot", "qwen", "cline", "hermes", "agy", "muse", "grok", "devin"}
+ACP_AGENTS = {"claude", "codex", "opencode", "cursor", "hermes"}
+HERDR_KINDS = {"claude", "codex", "cursor", "opencode", "hermes", "grok"}
 EXCLUDED = {"grok"}   # operator exclusion 2026-10-06 (bigteam: Current exclusions)
 SKILLS = Path.home() / "src/djbclark-ade/skills"
 STATE = fleet.STATE_DIR

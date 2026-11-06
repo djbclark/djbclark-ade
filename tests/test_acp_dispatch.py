@@ -1019,27 +1019,6 @@ class TestSliceControls(Base):
         self.assertEqual(Path(rec["report"]).read_text(), old)
         self.assertTrue(Path(rec["done"]).exists())
 
-    def test_resume_of_an_agy_claude_slice_continues_in_a_new_session(self):
-        # agy_acp_server strips thought signatures on session/load, so a reopened Claude
-        # session 400s on its first turn (2026-10-18): continue fresh, with a checkpoint
-        self.dispatch()
-        rec = self.record()
-        rec.update(agent="agy", model="claude-opus-5-5", model_applied="claude-opus-5-5")
-        self.record_path().write_text(json.dumps(rec))
-        with Path(rec["log"]).open("a") as log:
-            log.write(json.dumps({"kind": "update", "data": {
-                "sessionUpdate": "tool_call", "title": "Running edit_file"}}) + "\n")
-        r = run(["resume", str(self.record_path()), "--timeout", "0"], env=self.base_env())
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("continuing in a new session", r.stderr)
-        rec = self.record()
-        self.assertNotIn("--resume", rec["cmd"])
-        brief = Path(rec["brief"]).read_text()
-        self.assertTrue(brief.startswith("This continues a slice"), brief[:200])
-        self.assertIn("Running edit_file", brief)
-        self.assertIn("Git status of the working tree", brief)
-        self.assertEqual(brief.count("## Delivery contract"), 1)
-
     def test_resume_of_an_agy_gemini_slice_reopens_its_session(self):
         self.dispatch()
         rec = self.record()
@@ -1105,39 +1084,6 @@ class TestSliceControls(Base):
             self.assertEqual(run(["extend", str(self.record_path()), str(value)]).returncode, 0)
         self.assertEqual(Path(rec["log"] + ".extend").read_text(), "70\n")
         self.assertEqual(self.record()["timeout"], 2470)
-
-    def test_agy_delivers_from_non_git_workspace(self):
-        r = self.dispatch_agent("agy", "m1", "--task", "test-task")
-        self.assertEqual(r.returncode, 0, r.stderr)
-        rec = self.record()
-        inner = self.repo / ".acp-dispatch" / "test-task-s1-report.md"
-        self.assertEqual(Path(rec["agent_report"]), inner.resolve())
-        self.assertIn(str(inner.resolve()), Path(rec["brief"]).read_text())
-        self.assertFalse(inner.exists())
-        self.assertTrue(Path(rec["report"]).exists())
-        self.assertTrue(Path(rec["done"]).exists())
-
-    def test_agy_git_exclude_appended_once(self):
-        subprocess.run(["git", "init", "-q", str(self.repo)], check=True)
-        for name in ("s1", "s2"):
-            r = self.dispatch_agent("agy", "m1", name=name)
-            self.assertEqual(r.returncode, 0, r.stderr)
-        exclude = self.repo / ".git" / "info" / "exclude"
-        self.assertEqual(exclude.read_text().splitlines().count(".acp-dispatch/"), 1)
-
-    def test_agy_finalize_moves_inner_report_and_marker_before_out_done(self):
-        self.dispatch_agent("agy", "m1")
-        rec = self.record()
-        self.assertIn(str(Path(rec["agent_report"]).parent), rec["cmd"])
-        Path(rec["done"]).unlink()
-        Path(rec["agent_report"]).write_text("STATUS: working\nnew inner result\nDONE\n")
-        Path(rec["agent_done"]).touch()
-        r = run(["finalize", str(self.record_path()), "--exit", "0"])
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("new inner result", Path(rec["report"]).read_text())
-        self.assertFalse(Path(rec["agent_report"]).exists())
-        self.assertFalse(Path(rec["agent_done"]).exists())
-        self.assertTrue(Path(rec["done"]).exists())
 
     def test_acp_run_gets_the_wrapup_prompt_naming_the_report(self):
         self.dispatch()
@@ -1233,31 +1179,6 @@ class TestAiuseNoteExhausted(Base):
     def calls(self) -> list[str]:
         return self.calls_file.read_text().splitlines() if self.calls_file.exists() else []
 
-    def test_quota_refusal_agy_claude_records_antigravity_claude_gpt_resets_at(self):
-        env = {"ACP_DISPATCH_AIUSE": str(self.fake_aiuse)}
-        r = self.dispatch_agent("agy", "claude-opus-5-5-high", "--no-auto-resume", mode="quota_ts", env=env)
-        self.assertEqual(r.returncode, 3)
-        calls = self.calls()
-        self.assertEqual(len(calls), 1)
-        self.assertIn("note-exhausted antigravity --family claude_gpt --resets-at 2026-10-11T02:46:28Z", calls[0])
-        self.assertIn("--reason", calls[0])
-
-    def test_quota_refusal_agy_gemini_records_antigravity_gemini_resets_in(self):
-        env = {"ACP_DISPATCH_AIUSE": str(self.fake_aiuse)}
-        r = self.dispatch_agent("agy", "gemini-2.5-pro", "--no-auto-resume", mode="quota_gemini", env=env)
-        self.assertEqual(r.returncode, 3)
-        calls = self.calls()
-        self.assertEqual(len(calls), 1)
-        self.assertIn("note-exhausted antigravity --family gemini --resets-in 6d6h", calls[0])
-
-    def test_quota_refusal_agy_gpt_records_antigravity_claude_gpt_resets_in(self):
-        env = {"ACP_DISPATCH_AIUSE": str(self.fake_aiuse)}
-        r = self.dispatch_agent("agy", "gpt-oss-120b", "--no-auto-resume", mode="quota_reply", env=env)
-        self.assertEqual(r.returncode, 3)
-        calls = self.calls()
-        self.assertEqual(len(calls), 1)
-        self.assertIn("note-exhausted antigravity --family claude_gpt --resets-in 2h47m", calls[0])
-
     def test_quota_refusal_codex_records_codex_resets_at_from_clock_time(self):
         env = {"ACP_DISPATCH_AIUSE": str(self.fake_aiuse)}
         r = self.dispatch_agent("codex", "m1", "--no-auto-resume", mode="quota_partial", env=env)
@@ -1304,34 +1225,6 @@ class TestAiuseNoteExhausted(Base):
         self.assertIn("class=outage", r.stdout)
         self.assertIn("note-exhausted codex --resets-in 15m --reason outage:", self.calls()[0])
         self.assertEqual(self.record()["status"], "unavailable")
-
-    def test_zcode_1310_preflight_is_quota_with_reset(self):
-        env = {"ACP_DISPATCH_AIUSE": str(self.fake_aiuse), "PREFLIGHT_MODE": "zcode_quota",
-               "ACP_DISPATCH_PREFLIGHT": str(self.tmp / "preflight"),
-               "PREFLIGHT_COUNT": str(self.tmp / "preflight-count"),
-               "AIUSE_SNAPSHOT": str(self.tmp / "missing.json")}
-        result = run(["zcode", "--kind", "bulk", "--name", "s1", "-p", "do it", "-C", str(self.repo),
-                      "--out", str(self.out), "--acp-run", str(self.fake)], env=env)
-        self.assertEqual(result.returncode, 5)
-        self.assertIn("class=quota", result.stdout)
-        # D2/MSG 2: zcode zone-less stamps are Beijing time, so aiuse gets the UTC instant
-        self.assertIn("note-exhausted zai --resets-at 2026-10-14T14:56:01+00:00", self.calls()[0])
-        old = self.out / "jobs" / "s1.json"
-        before = old.read_bytes()
-        rec = json.loads(before)
-        self.assertEqual(rec["prompt"], "do it")
-        self.assertEqual(rec["perm"], "all")
-        self.assertNotIn("session_id", rec)
-        self.assertFalse((self.out / "s1.jsonl").exists())
-        recovered = run(["reroute", str(old), "--agent", "claude", "--model", "m1",
-                         "--kind", "judgment", "--acp-run", str(self.fake), "--no-preflight"],
-                        env=self.base_env())
-        self.assertEqual(recovered.returncode, 0, recovered.stdout + recovered.stderr)
-        new = json.loads((self.out / "jobs" / "s1-reroute-1.json").read_text())
-        self.assertEqual(new["rerouted_from"], str(old.resolve()))
-        self.assertIn("do it", new["prompt"])
-        self.assertEqual(new["perm"], "all")
-        self.assertEqual(old.read_bytes(), before)
 
     def test_agent_metrics_stderr_is_not_classified_as_outage(self):
         env = {"ACP_DISPATCH_AIUSE": str(self.fake_aiuse)}

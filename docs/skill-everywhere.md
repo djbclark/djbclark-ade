@@ -2,8 +2,8 @@
 
 README for [`skill-everywhere`](../bin/skill-everywhere) (canonical script in
 this repository; compatibility command `~/ops/site-private/bin/skill-everywhere`). It makes a local skill available to
-every agent TUI on this machine (Claude Code, Codex, goose, omp, Pi, Copilot, Cursor, opencode,
-zcode, Grok, Qwen, Devin, Cline, Muse, Antigravity and Hermes) by
+every agent TUI on this machine (Claude Code, Codex, omp, Cursor, opencode,
+Grok and Hermes; goose, Pi, Copilot, zcode, Qwen, Devin, Cline, Muse and Antigravity were dropped 2026-11-06) by
 symlinking it into each one's skills dir (Grok Bot, on its own Linux box, gets
 a rendered copy instead; see its row in section 2), and this page says how to prove each
 TUI actually loads it. Until 2026-10-08 this was the `skill-everywhere` skill;
@@ -64,7 +64,7 @@ Report that rather than overwriting it. In link mode the script also
 whose readlink differs is replaced with the direct link.
 
 **Retiring a skill:** run `--remove <name>` and re-point anything that loads
-it by name (Hermes `skill-slash` handlers, Claude/zcode command wrappers)
+it by name (Hermes `skill-slash` handlers, Claude command wrappers)
 before deleting its directory. `--remove` also works
 after the directory is gone: it removes only links whose target is exactly
 `<root>/<name>` for one of the three roots.
@@ -75,24 +75,16 @@ after the directory is gone: it removes only links whose target is exactly
 |---|---|
 | Claude Code (`claude`) | `~/.claude/skills` |
 | Codex (`codex`) | `~/.agents/skills` |
-| goose (`goose`) | `~/.agents/skills` (its global skills dir; shared with Codex, linked once). Verified 2026-10-29 with `goose skills list`. It also falls back to `~/.claude/skills`, so a machine with Claude installed can list a skill twice; goose dedups by name. |
-| Copilot (`copilot`) | `~/.copilot/skills` |
 | opencode (`opencode`) | `~/.config/opencode/skills` |
-| Qwen Code (`qwen`) | `~/.qwen/skills` |
-| Devin (`devin`) | `~/.config/devin/skills` |
-| Cline (`cline`) | `~/.cline/skills` |
 | Hermes (`hermes`) | `~/.local/share/skill-everywhere/skills`, which Hermes put in its own `skills.external_dirs` |
-| Pi (`pi`) | `~/.agents/skills`, the same dir codex and goose use (added 2026-11-03), so the link is shared, never a second copy and not a native `~/.pi/agent/skills` farm. Duplicates that already exist are handled by `bin/pi-skill-dedup` ([docs/pi-skills.md](pi-skills.md)). |
-| Cursor (`cursor-agent`), Muse (`muse`) | already read `~/.claude/skills`; no extra link |
+| Cursor (`cursor-agent`) | already read `~/.claude/skills`; no extra link |
 | Grok (`grok`, including Grok Build) | `~/.grok/skills`. It also scans `~/.claude/skills` and `~/.agents/skills` and dedups by name. Verified 2026-10-04: a same-named `SKILL.md` under `~/.agents/skills/.trash` was the copy this session was offered, so `~/.grok/config.toml` ignores that trash dir and this script links the live skill here. |
-| zcode (`zcode`) | already reads `~/.agents/skills`; an extra link listed it twice. **Loaded ≠ slash-invocable:** zcode's typed `/` surface resolves only built-ins, plugins and `~/.zcode/commands/*.md`; a user skill needs a command wrapper there (`skills: <name>` frontmatter auto-mounts it). Wrappers for the universal set (baton, resume, handoff, loose, steps, helm, helm-all, session-finder, session-finder-all, skillopt-sleep, bigteam, autorename, hyades-docker) live in `~/src/djbclark-ade/zcode/commands/`, symlinked directly into `~/.zcode/commands/`; add one there when adding a slash-shaped skill. Until the TUI restarts it won't see new wrappers; in a running session the built-in `/skill <name>` reaches any loaded skill without one. |
-| Antigravity (`agy`) | `~/.gemini/antigravity-cli/skills` (agy CLI 1.2.16; links are followed). Verified with `/skills` in interactive agy. Headless `agy -p` answers never mention user skills, not even the installer's bailian ones, so check agy interactively. `~/.gemini/config/skills` and `~/.gemini/antigravity/skills` are not read by the CLI |
 | omp / oh-my-pi (`omp`) | `~/.omp/agent/skills` (native, highest skill priority; added 2026-10-13). omp also reads `~/.agents/skills`, but de-duplicates by `realpath`, so the second link does not list a skill twice. omp ignores `~/.claude/skills` unless `claude` is in its `enabledProviders`. Prove it with `omp -p --no-title "<step 3 prompt>"` from a scratch dir. |
 | Grok Bot (`grokbot`, no binary; present when `~/agent-data/workflows` exists) | **Copy, not link** (added 2026-10-23): Grok Bot runs on its own Linux box (`HOME=/home/box`) and reads `~/agent-data/workflows/<slug>/SKILL.md` as plain files, so no link into a Mac checkout could resolve. The script renders `ade-<name>/`: symlinks dereferenced (only a link to a regular file inside the skill; a skill holding any other link, one that leaves the skill, dangles or names a directory or special file, is refused: `--check` reports `unsafe source symlink`; link mode copies nothing, leaves any existing copy alone and exits 1; 2026-10-23),  a "managed copy" banner after the front matter (Mac-only paths, Grok Bot's approval rules win; its link and the marker's `source=` name the root the skill came from, djbclark-ade, site-djbclark or site-private, since 2026-11-06), and a `.skill-everywhere` marker. Only a dir with that marker is updated or removed; `--check` reports `copied`, `stale copy`, `missing` or `not ours`. `SKILL_EVERYWHERE_NO_COPY=1` skips this target (`ade-update` sets it for a non-canonical `--repo`, which is report-only and may be an untrusted PR branch), so a report-only run prints no `grokbot` row and renders nothing. On the box run it with `SKILL_EVERYWHERE_ONLY=grokbot`, or the box's own claude, agy, cline and hermes get links too. The box's nightly driver is `/home/box/agent-data/shared/skills-sync/sync.sh` (fetches `origin/master`, picks which skills suit Grok Bot, keeps a manifest, runs this script). |
 | `/btww` (side question, 2026-11-01) | Skill `btww` **names the TUI's native side-question command, or says it has none; it never answers the question** (a skill is an ordinary turn, so it cannot be non-interrupting or off-transcript). Native: Claude `/btw`, Codex `/side`, agy `/btw`, Cursor `/btw`, Grok `/btw`, omp `/btw`, Hermes `/btw`, Copilot `/btw` (alias `/ask`), opencode `/btw`, Qwen `/btw`, Muse `/side` (alias `/btw`); none in zcode, Cline, goose or Grok Bot; Devin not installed. All first-party: the third-party `copilot-btw` and `opencode-btw` plugins are not needed. Real aliases: omp `omp/commands/btww.md` (`side: true`, linked to `~/.omp/agent/commands/btww.md`), Hermes CLI `quick_commands.btww` alias to `btw` (`~/.hermes/config.yaml`, template `agents/hermes/config.yaml.tmpl`). zcode: `zcode/commands/btww.md`. Claude cannot alias a built-in. Details: `skills/btww/SKILL.md`. |
 
 `aiuse --json` providers with no TUI of their own (alibaba, deepseek,
-openrouter, litellm, opencode-zen, clinepass, grok) are API pools behind the
+openrouter, litellm, opencode-zen, clinepass, grok; antigravity, copilot, zai and devin since 2026-11-06) are API pools behind the
 TUIs above, so they need nothing.
 
 **Hermes owns `~/.hermes/`; never edit it yourself.** If the script warns that
@@ -109,24 +101,13 @@ the table, ask each TUI from an empty scratch dir with stdin closed:
 > verbatim; otherwise reply NOSKILL.
 
 Use the recipes in `memory/feedback_headless_tui_invocation.md`. On 2026-10-03,
-`cursor-agent` needed `--trust` and `devin` needed
-`--respect-workspace-trust false` in a scratch dir. Offline checks:
-`muse skills list` and `hermes skills list`; for agy, `/skills` in an interactive session. A NOSKILL from a model can be
+`cursor-agent` needed `--trust` in a scratch dir. Offline check:
+`hermes skills list`. A NOSKILL from a model can be
 wrong. When in doubt, ask it to list every skill name it has: that is how Cursor
 turned out to be fine.
 
 Codex was verified the same day: `codex exec -s read-only` quoted the
 `steps` description verbatim from `~/.agents/skills`.
-
-**agy: probe it at most once, never in a loop.** The rules and the 2026-10-03
-lockout are in the `model-routing` skill ("agy has a burst limit"). For this
-check: the offline proof is `skill-everywhere --check <name>` (the link exists)
-plus one interactive `/skills`, which makes no generation request; if a headless
-probe is unavoidable, run exactly one with `--print-timeout 60s`, batch every
-skill name into that one prompt ("list every skill name you have") and reuse the
-answer. It has to be the CLI, not `acp-run agy`, only because the ACP server's
-shadow GEMINI_HOME (`~/.local/share/agy-acp-home`) reads different skill
-directories, so an ACP answer cannot prove what the CLI sees.
 
 A check can fail for reasons that have nothing to do with where the skill was
 put: a usage limit, an expired login, or no provider configured. Report those

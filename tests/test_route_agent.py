@@ -78,11 +78,11 @@ class TestStandingRules(unittest.TestCase):
         self.assertEqual(c.service.name, "claude")
 
     def test_judgment_reaches_codex_only_when_claude_is_tight_and_codex_is_plentiful(self):
-        # antigravity at 100% must not win judgment work. Since 2026-10-25 codex's judgment
+        # a bulk pool at 100% must not win judgment work. Since 2026-10-25 codex's judgment
         # row (rank 3, gpt-6.1-sol at high) is an eligible, lower-ranked pool while its quota is
         # plentiful: the router weighs pressure, burn and pace as well as rank, so it wins
         # when claude is short of room (it won at claude=15% too), never while claude has plenty.
-        q = dict(IDLE, antigravity={"remaining": 100.0}, claude={"remaining": 20.0})
+        q = dict(IDLE, **{"cursor-auto": {"remaining": 100.0}}, claude={"remaining": 20.0})
         self.assertEqual(r.route("judgment", quota=q).service.name, "claude")
         q = dict(IDLE, claude={"remaining": 5.0})
         c = r.route("judgment", quota=q)
@@ -114,43 +114,34 @@ class TestOpencodeGoTakesNoCode(unittest.TestCase):
 class TestWasteBurning(unittest.TestCase):
     def test_bulk_goes_to_idle_capacity(self):
         c = r.route("bulk", quota=IDLE)
-        self.assertIn(c.service.name, {"antigravity", "opencode-go"})
+        self.assertIn(c.service.name, {"cursor-auto", "opencode-go"})
         self.assertGreater(c.remaining, 90)
 
     def test_mechanical_prefers_the_free_tier(self):
         self.assertEqual(r.route("mechanical", quota=IDLE).service.name, "opencode-go")
 
     def test_headroom_shifts_bulk_away_from_a_drained_pool(self):
-        drained = dict(IDLE, antigravity={"remaining": 5.0})
-        self.assertNotEqual(r.route("bulk", quota=drained).service.name, "antigravity")
+        drained = dict(IDLE, **{"opencode-go": {"remaining": 5.0}})
+        self.assertNotEqual(r.route("bulk", quota=drained).service.name, "opencode-go")
 
     def test_min_headroom_excludes_tight_services(self):
-        q = dict(IDLE, antigravity={"remaining": 10.0})
+        q = dict(IDLE, **{"opencode-go": {"remaining": 10.0}})
         c = r.route("bulk", quota=q, min_headroom=15.0)
-        self.assertNotEqual(c.service.name, "antigravity")
-
-    def test_default_headroom_gate_excludes_below_fifteen(self):
-        q = dict(IDLE, antigravity={"remaining": 14.9})
-        self.assertNotEqual(r.route("bulk", quota=q).service.name, "antigravity")
+        self.assertNotEqual(c.service.name, "opencode-go")
 
     def test_default_headroom_excludes_note_exhausted_pool(self):
         q = dict(IDLE, codex={"remaining": 0.0, "windows": {"weekly": 0.0}})
         self.assertNotEqual(r.route("code", quota=q).service.name, "codex")
 
-    def test_github_work_routes_to_copilot(self):
-        self.assertEqual(r.route("github", quota=IDLE).service.name, "copilot")
-
-
 class TestDegradation(unittest.TestCase):
     def test_works_with_no_quota_at_all(self):
         """A stale or missing cache must degrade to capability-only routing,
-        except for the reserve pool (copilot), which fails closed without a fresh
-        reading (review 2026-10-15): github stays queued. realtime-web routes
+        except the `github` kind, which no pool serves since copilot retired (2026-11-06). realtime-web routes
         again since grok stopped being a reserve (2026-10-18)."""
         for kind in r.KINDS:
             c = r.route(kind, quota={})
             if kind == "github":
-                self.assertIsNone(c, f"{kind} is reserve-only and must not route unmeasured")
+                self.assertIsNone(c, f"{kind} has no serving pool")
             else:
                 self.assertIsNotNone(c, f"{kind} should still route without quota")
 
@@ -160,6 +151,9 @@ class TestDegradation(unittest.TestCase):
 
     def test_every_kind_is_servable(self):
         for kind in r.KINDS:
+            if kind == "github":      # copilot, its one pool, retired 2026-11-06
+                self.assertIsNone(r.route(kind, quota=IDLE), kind)
+                continue
             self.assertIsNotNone(r.route(kind, quota=IDLE), kind)
 
     def test_alternatives_exclude_the_winner(self):
@@ -176,7 +170,7 @@ class TestDiscovery(unittest.TestCase):
 
     def test_discovery_includes_curated_services(self):
         names = {s.name for s in r.discover(IDLE)}
-        for curated in ("claude", "codex", "antigravity", "copilot"):
+        for curated in ("claude", "codex", "cursor-auto", "omp"):
             self.assertIn(curated, names)
 
     def test_unknown_provider_becomes_routable_conservatively(self):
@@ -186,24 +180,24 @@ class TestDiscovery(unittest.TestCase):
         self.assertFalse(svc.judgment_tier, "unprofiled services must not take judgment")
 
     def test_aliases_do_not_become_second_services(self):
-        """`cline` is clinepass's TUI; a duplicate entry would dodge never-bulk."""
+        """`claude-agent-teams` is claude's; a duplicate entry would dodge its constraints."""
         names = {s.name for s in r.discover(IDLE)}
-        for alias in ("cline", "claude-agent-teams"):
+        for alias in ("claude-agent-teams", "openclaude"):
             self.assertNotIn(alias, names)
-        self.assertTrue(all(s.cli.startswith("zcode") and s.acp_agent == "zcode"
-                            for s in r.discover(IDLE) if s.name == "zai"))
-        self.assertEqual(r.ALIASES["cline"], "clinepass")
+        for retired in ("zai", "antigravity", "copilot", "devin", "alibaba", "crush"):
+            self.assertNotIn(retired, names, "a retired TUI's aiuse account is never a routable service")
+        self.assertEqual(r.ALIASES["openclaude"], "claude")
 
-    def test_alias_does_not_create_a_second_clinepass(self):
-        """`cline` is clinepass's TUI. It must fold onto the curated service
-        rather than appearing as an extra pool, or headroom gets double
-        counted and constraints are evaluated twice."""
-        quota = {name: {"remaining": 0.0} for name in IDLE}
-        quota["clinepass"] = {"remaining": 100.0}
-        quota["cline"] = {"remaining": 100.0}
+    def test_retired_tui_names_are_never_discovered(self):
+        """Adapted from the old clinepass-alias test: a `cline` (or other retired TUI) account in aiuse, or a
+        retired agent in acp-run's list, must not become a routable service."""
+        names_in = ("cline", "agy", "qwen", "goose", "zcode", "pi", "crush", "muse", "kiro", "devin", "copilot", "aider", "venicecode")
+        quota = {name: {"remaining": 100.0} for name in IDLE}
+        quota.update({n: {"remaining": 100.0} for n in names_in})
         names = {s.name for s in r.discover(quota)}
+        for n in names_in:
+            self.assertNotIn(n, names)
         self.assertIn("clinepass", names)
-        self.assertNotIn("cline", names)
 
     @mock.patch.dict(os.environ, {"ROUTE_AGENT_OMP_READY": "0"})   # omp-ready: TestOmpReadyRoster
     def test_measured_idle_capacity_beats_unmeasured(self):
@@ -242,8 +236,7 @@ class TestDiscovery(unittest.TestCase):
 
 ACP_LIST = """ok claude    claude-agent-acp
 ok codex     codex-acp
-ok cline     cline --acp
-ok agy       /Users/x/.local/share/agy-acp-server/1.3.0/agy_acp_server.par
+ok openclaude  openclaude acp
 ok fresh-acp-agent  fresh-acp-agent acp
 -- devin     devin acp
 -- phantom-acp  phantom-acp acp
@@ -280,29 +273,12 @@ class TestDiscoverySources(unittest.TestCase):
         self.assertNotIn("phantom-acp", names, "`--` rows have no binary")
 
     def test_acp_rows_pass_through_aliases(self):
-        """`cline`/`agy` are TUIs of curated services; a second entry would
-        dodge the constraints that protect clinepass."""
+        """`openclaude` is a TUI of a curated service; a second entry would
+        dodge that service's constraints."""
         with sources(acp=ACP_LIST):
             names = self.names()
-        for alias in ("cline", "agy"):
-            self.assertNotIn(alias, names)
-        self.assertIn("clinepass", names)
-        self.assertIn("antigravity", names)
-
-    def test_non_acp_headless_tuis_count_only_while_installed(self):
-        self.assertEqual(r.NON_ACP_HEADLESS, {"muse"})
-        with sources(installed=()):
-            self.assertNotIn("muse", self.names())
-        with sources(installed=("muse",)):
-            self.assertIn("muse", self.names())
-
-    def test_headless_tuis_pass_through_aliases(self):
-        """zcode is zai's TUI: it folds onto zai, not a duplicate; muse has none."""
-        with sources(installed=("zcode", "muse")):
-            names = self.names()
-        self.assertNotIn("zcode", names)
-        self.assertIn("zai", names)
-        self.assertIn("muse", names)
+        self.assertNotIn("openclaude", names)
+        self.assertIn("claude", names)
 
     def test_phantom_orca_names_are_not_routable_by_default(self):
         phantoms = {"amp", "ante", "autohand", "droid", "kiro", "trae"}
@@ -311,9 +287,9 @@ class TestDiscoverySources(unittest.TestCase):
         self.assertFalse(phantoms & names, phantoms & names)
 
     def test_orca_source_when_enabled_is_intersected_with_installed(self):
-        with sources(orca={"aider", "amp"}, installed=("aider",), include_orca=True):
+        with sources(orca={"newagent", "amp"}, installed=("newagent",), include_orca=True):
             names = self.names()
-        self.assertIn("aider", names)
+        self.assertIn("newagent", names)
         self.assertNotIn("amp", names, "enabled in Orca but not installed")
 
     def test_acp_run_failure_degrades_to_no_acp_agents(self):
@@ -326,51 +302,7 @@ class TestDiscoverySources(unittest.TestCase):
     def test_acp_agents_parses_live_format(self):
         with mock.patch.object(r, "acp_list_output", return_value=ACP_LIST):
             self.assertEqual(r.acp_agents(),
-                             {"claude", "codex", "cline", "agy", "fresh-acp-agent"})
-
-
-class TestAgyClaudeGptPool(unittest.TestCase):
-    """agy's Claude/GPT window is its own service (operator, 2026-10-10)."""
-
-    def snapshot(self, tmp, claude_gpt_left, gemini_left=100.0):
-        path = Path(tmp) / "latest.json"
-        path.write_text(r.json.dumps({"snapshot": {"accounts": [{
-            "provider": "antigravity", "billing_kind": "subscription_window",
-            "windows": [
-                {"label": "Gemini 5-hour", "remaining_percent": gemini_left,
-                 "pool_family": "gemini"},
-                {"label": "Claude/GPT weekly", "remaining_percent": claude_gpt_left,
-                 "pool_family": "claude_gpt"},
-            ]}]}, "collected_at": r.datetime.now(r.UTC).isoformat()}))
-        return path
-
-    def load(self, **kw):
-        import tempfile
-        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(r, "SNAPSHOT", self.snapshot(tmp, **kw)):
-            return r.load_snapshot()[0]
-
-    def test_pools_are_split_so_neither_drags_the_other(self):
-        q = self.load(claude_gpt_left=3.0)
-        self.assertEqual(q["antigravity"]["remaining"], 100.0)
-        self.assertEqual(q["antigravity-claude"]["remaining"], 3.0)
-
-    def test_code_routes_to_the_claude_pool_while_it_has_headroom(self):
-        q = {**IDLE, "antigravity-claude": {"remaining": 49.0}}
-        self.assertEqual(r.route("code", quota=q).service.name, "antigravity-claude")
-
-    def test_drained_claude_pool_is_skipped_but_gemini_pool_is_not(self):
-        q = {**IDLE, "antigravity-claude": {"remaining": 5.0}}
-        self.assertNotEqual(r.route("code", quota=q).service.name, "antigravity-claude")
-        self.assertEqual(r.route("bulk", quota=q).service.name, "antigravity")
-
-    def test_never_judgment_tier(self):
-        q = {**IDLE, "antigravity-claude": {"remaining": 100.0}}
-        self.assertNotEqual(r.route("judgment", quota=q).service.name, "antigravity-claude")
-
-    def test_alias_agy_does_not_create_a_second_service(self):
-        names = [s.name for s in r.discover({**IDLE, "antigravity-claude": {"remaining": 90.0}})]
-        self.assertEqual(names.count("antigravity-claude"), 1)
-        self.assertNotIn("agy", names)
+                             {"claude", "codex", "openclaude", "fresh-acp-agent"})
 
 
 class TestPoolSplitIsGeneral(unittest.TestCase):
@@ -391,29 +323,29 @@ class TestPoolSplitIsGeneral(unittest.TestCase):
 class TestPlanWave(unittest.TestCase):
     """`plan` spreads one wave over pools and re-plans from live headroom."""
 
-    Q: ClassVar[dict[str, Any]] = {**IDLE, "antigravity-claude": {"remaining": 90.0}}
+    Q: ClassVar[dict[str, Any]] = {**IDLE, "cursor-auto": {"remaining": 90.0}}
 
     def test_wave_respects_max_parallel_then_spills_to_the_next_pool(self):
         rows = r.plan(["code"] * 5, quota=self.Q)
         names = [c.service.name for _, c in rows]
-        cap = next(s for s in r.SERVICES if s.name == "antigravity-claude").max_parallel
-        self.assertEqual(names[:cap], ["antigravity-claude"] * cap)
-        self.assertNotEqual(names[cap], "antigravity-claude")
+        cap = next(s for s in r.SERVICES if s.name == "cursor-auto").max_parallel
+        self.assertEqual(names[:cap], ["cursor-auto"] * cap)
+        self.assertNotEqual(names[cap], "cursor-auto")
 
     def test_replan_follows_a_pool_that_just_drained(self):
         before = r.plan(["code"], quota=self.Q)[0][1].service.name
-        after = r.plan(["code"], quota={**self.Q, "antigravity-claude": {"remaining": 4.0}})[0][1].service.name
-        self.assertEqual(before, "antigravity-claude")
-        self.assertNotEqual(after, "antigravity-claude")
+        after = r.plan(["code"], quota={**self.Q, "cursor-auto": {"remaining": 4.0}})[0][1].service.name
+        self.assertEqual(before, "cursor-auto")
+        self.assertNotEqual(after, "cursor-auto")
 
     def test_exclude_skips_a_service_that_just_failed(self):
-        c = r.plan(["code"], quota=self.Q, exclude={"antigravity-claude"})[0][1]
-        self.assertNotEqual(c.service.name, "antigravity-claude")
+        c = r.plan(["code"], quota=self.Q, exclude={"cursor-auto"})[0][1]
+        self.assertNotEqual(c.service.name, "cursor-auto")
 
     def test_plan_applies_default_fifteen_percent_headroom(self):
-        q = {**self.Q, "antigravity-claude": {"remaining": 14.0}}
+        q = {**self.Q, "cursor-auto": {"remaining": 14.0}}
         c = r.plan(["code"], quota=q)[0][1]
-        self.assertNotEqual(c.service.name, "antigravity-claude")
+        self.assertNotEqual(c.service.name, "cursor-auto")
 
     def test_plan_skips_note_exhausted_pool(self):
         q = {**self.Q, "codex": {"remaining": 0.0}}
@@ -423,7 +355,7 @@ class TestPlanWave(unittest.TestCase):
 
     @mock.patch.dict(os.environ, {"ROUTE_AGENT_OMP_READY": "0"})   # omp-ready: TestOmpReadyRoster
     def test_no_room_comes_back_as_none_not_an_error(self):
-        drained = {k: {"remaining": 1.0} for k in {*IDLE, "antigravity-claude"}}
+        drained = {k: {"remaining": 1.0} for k in {*IDLE, "cursor-auto"}}
         rows = r.plan(["code"], quota=drained)
         self.assertIsNone(rows[0][1])
 
@@ -461,89 +393,89 @@ class TestExhaustedAndStaleReadings(unittest.TestCase):
     def test_exhausted_state_counts_as_zero_remaining(self):
         """A window with state == 'exhausted' counts as 0 remaining even if remaining_percent is positive."""
         accts = [{
-            "provider": "antigravity",
+            "provider": "cursor",
             "windows": [{
-                "label": "Claude/GPT weekly",
-                "pool_family": "claude_gpt",
+                "label": "Auto monthly",
+                "pool_family": "auto",
                 "remaining_percent": 47.6,
                 "state": "exhausted",
             }],
         }]
         q = self.load(accts)
-        self.assertEqual(q["antigravity-claude"]["remaining"], 0.0)
+        self.assertEqual(q["cursor-auto"]["remaining"], 0.0)
 
     def test_zero_headroom_percent_counts_as_zero_remaining(self):
         """A window with headroom_percent == 0 counts as 0 remaining."""
         accts = [{
-            "provider": "antigravity",
+            "provider": "cursor",
             "windows": [{
-                "label": "Claude/GPT weekly",
-                "pool_family": "claude_gpt",
+                "label": "Auto monthly",
+                "pool_family": "auto",
                 "remaining_percent": 50.0,
                 "headroom_percent": 0.0,
                 "state": "ok",
             }],
         }]
         q = self.load(accts)
-        self.assertEqual(q["antigravity-claude"]["remaining"], 0.0)
+        self.assertEqual(q["cursor-auto"]["remaining"], 0.0)
 
     def test_old_reading_by_age_seconds_treated_as_unmeasured_none(self):
         """An account older than STALE_SOFT (25 min) has its headroom treated as None."""
         accts = [{
-            "provider": "antigravity",
+            "provider": "cursor",
             "age_seconds": 1800.0,  # 30 min > STALE_SOFT (1500s)
             "windows": [{
-                "label": "Claude/GPT weekly",
-                "pool_family": "claude_gpt",
+                "label": "Auto monthly",
+                "pool_family": "auto",
                 "remaining_percent": 90.0,
                 "state": "ok",
             }],
         }]
         q = self.load(accts)
-        self.assertIsNone(q["antigravity-claude"]["remaining"])
+        self.assertIsNone(q["cursor-auto"]["remaining"])
 
     def test_old_reading_by_collected_at_treated_as_unmeasured_none(self):
         """An account whose collected_at is older than STALE_SOFT has headroom treated as None."""
         old_time = (datetime.now(UTC) - timedelta(minutes=35)).isoformat()
         accts = [{
-            "provider": "antigravity",
+            "provider": "cursor",
             "collected_at": old_time,
             "windows": [{
-                "label": "Claude/GPT weekly",
-                "pool_family": "claude_gpt",
+                "label": "Auto monthly",
+                "pool_family": "auto",
                 "remaining_percent": 90.0,
                 "state": "ok",
             }],
         }]
         q = self.load(accts)
-        self.assertIsNone(q["antigravity-claude"]["remaining"])
+        self.assertIsNone(q["cursor-auto"]["remaining"])
 
     def test_old_reading_does_not_get_burn_first_bonus(self):
         """When headroom is None (unmeasured), burn_first bonus is not applied."""
-        # claude has 30% headroom, antigravity-claude is unmeasured (None)
-        q = {**IDLE, "antigravity-claude": {"remaining": None}, "claude": {"remaining": 30.0}}
-        # Unmeasured: rank 11 + unmeasured pressure 5 and no bonus. Measured at
-        # 90%: rank 11 + 0.25 - BURN_FIRST_BONUS. The gap must show the bonus.
+        # claude has 30% headroom, cursor-auto is unmeasured (None)
+        q = {**IDLE, "cursor-auto": {"remaining": None}, "claude": {"remaining": 30.0}}
+        # Unmeasured: rank 14 + unmeasured pressure 5 and no bonus. Measured at
+        # 90%: rank 14 + 0.25 - BURN_FIRST_BONUS. The gap must show the bonus.
         unmeasured = r.route("code", quota=q)
-        measured = r.route("code", quota={**q, "antigravity-claude": {"remaining": 90.0}})
-        self.assertEqual(measured.service.name, "antigravity-claude")
-        if unmeasured.service.name == "antigravity-claude":
+        measured = r.route("code", quota={**q, "cursor-auto": {"remaining": 90.0}})
+        self.assertEqual(measured.service.name, "cursor-auto")
+        if unmeasured.service.name == "cursor-auto":
             self.assertGreaterEqual(unmeasured.score - measured.score, r.BURN_FIRST_BONUS)
 
     def test_exhausted_state_on_old_reading_still_counts_as_zero(self):
         """An override on an older account reading still registers as 0.0 remaining (exhausted)."""
         accts = [{
-            "provider": "antigravity",
+            "provider": "cursor",
             "age_seconds": 2400.0,  # 40 min
             "windows": [{
-                "label": "Claude/GPT weekly",
-                "pool_family": "claude_gpt",
+                "label": "Auto monthly",
+                "pool_family": "auto",
                 "remaining_percent": 47.6,
                 "state": "exhausted",
             }],
         }]
         q = self.load(accts)
-        self.assertEqual(q["antigravity-claude"]["remaining"], 0.0)
+        self.assertEqual(q["cursor-auto"]["remaining"], 0.0)
 
 
 
@@ -560,21 +492,6 @@ class TestRoutingPolicy2026_10_15(unittest.TestCase):
             c = r.route(kind, quota=q)
             self.assertNotEqual(c.service.name if c else None, "hermes")
 
-    def test_reserve_floor_blocks_copilot_below_sixty_percent(self):
-        q = {name: {"remaining": 0.0} for name in (*IDLE, "antigravity-claude")}
-        q["copilot"] = {"remaining": 59.0}
-        self.assertIsNone(r.route("github", quota=q))
-        # Generic kinds never reach the reserve, whatever its headroom.
-        q["copilot"] = {"remaining": 100.0}
-        for kind in ("research", "bulk", "code"):
-            c = r.route(kind, quota=q)
-            self.assertNotIn(c.service.name if c else None, {"copilot"}, kind)
-        q["copilot"] = {"remaining": 61.0}
-        self.assertEqual(r.route("github", quota=q).service.name, "copilot")
-        # A reserve with no reading at all fails closed.
-        q["copilot"] = {}
-        self.assertIsNone(r.route("github", quota=q))
-
     def test_grok_is_an_ordinary_pool_since_grokbot_moved_off_it(self):
         # 2026-10-18: GrokBot runs on its own Cursor pool, so grok has no floor.
         svc = next(s for s in r.SERVICES if s.name == "grok")
@@ -582,16 +499,16 @@ class TestRoutingPolicy2026_10_15(unittest.TestCase):
         self.assertGreater(svc.max_parallel, 1)
         for kind in ("realtime-web", "research", "bulk"):
             self.assertTrue(svc.eligible(kind), kind)
-        q = {name: {"remaining": 0.0} for name in (*IDLE, "antigravity-claude")}
+        q = {name: {"remaining": 0.0} for name in IDLE}
         q["grok"] = {"remaining": 20.0}
         self.assertEqual(r.route("realtime-web", quota=q).service.name, "grok")
-        # Behind the burn-first pools: with antigravity open, research goes there.
-        q["antigravity"] = {"remaining": 90.0}
+        # Behind the burn-first pools: with cursor-auto open, research goes there.
+        q["cursor-auto"] = {"remaining": 90.0}
         q["grok"] = {"remaining": 90.0}
-        self.assertEqual(r.route("research", quota=q).service.name, "antigravity")
+        self.assertEqual(r.route("research", quota=q).service.name, "cursor-auto")
 
     def test_everyday_code_avoids_the_frontier_pools_when_others_have_room(self):
-        q = {**IDLE, "antigravity-claude": {"remaining": 0.0}, "cursor-auto": {"remaining": 75.0}}
+        q = {**IDLE, "cursor-auto": {"remaining": 75.0}}
         c = r.route("code", quota=q)
         self.assertNotIn(c.service.name, {"claude", "codex"})
 
@@ -738,21 +655,14 @@ class TestFrontierConservative2026_10_18(unittest.TestCase):
         gate = {"frontier1_per_wave": 2.0, "frontier2_per_wave": 1.0, "frontier1_judged": 1.0, "frontier2_judged": 1.0,
                 "frontier1_min_left": 10.0, "frontier2_min_left": 60.0}
         with mock.patch.dict(os.environ, self.gate_env(profile=False)):
-            self.assertEqual([r.frontier_per_wave(p, gate, IDLE) for p in ("claude", "codex", "antigravity-claude", "unknown")], [2, 1, 1, 1])
+            self.assertEqual([r.frontier_per_wave(p, gate, IDLE) for p in ("claude", "codex", "cursor-auto", "unknown")], [2, 1, 1, 1])
             self.assertEqual(r.frontier_per_wave("codex", {**gate, "frontier1_per_wave": 1.0, "frontier2_per_wave": 3.0}, IDLE), 3)
 
     def test_dispatch_line_uses_the_acp_agent_name(self):
-        q = {**IDLE, "antigravity-claude": {"remaining": 90.0}}
-        c = r.route("code", quota=q)
-        self.assertEqual(c.service.name, "antigravity-claude")
-        self.assertTrue(c.dispatch.startswith("acp-dispatch agy --model claude-opus-5-5"))
-
-    def test_dispatch_quotes_zcode_model_with_backslash(self):
-        # F12: zcode ids contain a backslash; shlex.split must round-trip the model token.
-        svc = next(s for s in r.SERVICES if s.name == "zai")
-        choice = r.Choice(svc, 80.0, 1.0, model=r"builtin:zai-coding-plan\GLM-5.3", kind="code")
-        parts = shlex.split(choice.dispatch)
-        self.assertEqual(parts[parts.index("--model") + 1], r"builtin:zai-coding-plan\GLM-5.3")
+        svc = r.BY_NAME["cursor-auto"]            # the aiuse name is cursor-auto, the acp-run agent is cursor
+        c = r.Choice(svc, 90.0, 1.0, model="default", kind="code")
+        self.assertTrue(c.dispatch.startswith("acp-dispatch cursor --model default"))
+        self.assertEqual(shlex.split(r.Choice(svc, 90.0, 1.0, model=r"vendor\model", kind="code").dispatch)[3], r"vendor\model")
 
     def test_plan_json_carries_model_and_dispatch(self):
         rows = r.plan(["judgment", "bulk"], quota=IDLE)
@@ -827,16 +737,14 @@ class TestRoutingPolicyToml(unittest.TestCase):
                        "bulk": "gpt-6-luna --effort low", "mechanical": "gpt-6-luna --effort low"},
             "pool": None, "max_parallel": 1, "agent": "", "burn_first": False,
         },
-        "antigravity-claude": {
-            "cli": "agy (acp-run agy --model claude-opus-5-5 --effort high | claude-sonnet-5-5)",
-            "good_at": {"code": 11, "research": 3, "mechanical": 6},
+        "cursor-auto": {
+            "cli": "cursor (Auto pool)",
+            "good_at": {"code": 14, "mechanical": 4, "bulk": 6, "research": 12},
             "billing": "subscription",
             "judgment_tier": False,
-            "models": {"code": "claude-opus-5-5 --effort high",
-                       "research": "claude-sonnet-5-5 --effort high",
-                       "mechanical": "claude-sonnet-5-5 --effort low"},
-            "pool": ("antigravity", "claude_gpt"), "max_parallel": 3,
-            "agent": "agy", "burn_first": True,
+            "models": {"code": "default", "mechanical": "default", "bulk": "default", "research": "default"},
+            "pool": ("cursor", "auto"), "max_parallel": 2,
+            "agent": "cursor", "burn_first": True,
         },
     }
 
@@ -1179,7 +1087,7 @@ class TestQualityBand(unittest.TestCase):
 
     # The live readings when `plan --kinds code` picked Gemini Flash (r40): every r11-r20 code
     # pool was under the 15% headroom floor, and Flash had 98% left.
-    CASE = {"antigravity-claude": {"remaining": 0.0}, "antigravity": {"remaining": 97.8},
+    CASE = {"antigravity": {"remaining": 97.8},
             "opencode-go": {"remaining": 2.5}, "zai": {"remaining": 12.2},
             "cursor-auto": {"remaining": 0.0}, "cursor": {"remaining": 11.2},
             # claude was not a code pool then (code added 2026-10-18 by the operator); drained
@@ -1188,9 +1096,6 @@ class TestQualityBand(unittest.TestCase):
             "opencode-zen-free": {"remaining": 100.0}, "clinepass": {"remaining": 100.0},
             "devin": {"remaining": 100.0}, "alibaba": {"remaining": 100.0},
             "crush": {"remaining": 100.0}}
-
-    def test_flash_is_not_a_code_pool(self):
-        self.assertFalse(r.BY_NAME["antigravity"].eligible("code"))
 
     @mock.patch.dict(os.environ, {"ROUTE_AGENT_OMP_READY": "0"})   # omp-ready: TestOmpReadyRoster
     def test_the_2026_10_18_case_queues_code_instead_of_routing_far_down(self):
@@ -1212,7 +1117,7 @@ class TestQualityBand(unittest.TestCase):
         far = [s.name for s in services
                if s.eligible("code") and s.rank_for("code") - best.rank_for("code") > gap]
         self.assertTrue(far, "fixture should include pools outside the band")
-        q = dict(self.CASE, zai={"remaining": 50.0})
+        q = dict(self.CASE, cursor={"remaining": 50.0})
         c = r.route("code", quota=q)
         self.assertIsNotNone(c)
         self.assertNotIn(c.service.name, far)
@@ -1329,10 +1234,10 @@ class TestCodexEverydayKinds(unittest.TestCase):
         for kind in ("bulk", "mechanical"):          # free and idle pools stay first
             c = r.route(kind, quota=q)
             self.assertNotEqual(c.service.name, "codex", kind)
-        better = self.drained(codex={"remaining": 100.0}, **{"antigravity-claude": {"remaining": 90.0}})
-        self.assertEqual(r.route("code", quota=better).service.name, "antigravity-claude")
-        only = self.drained(codex={"remaining": 100.0}, zai={"remaining": 90.0})
-        self.assertEqual(r.route("code", quota=only).service.name, "codex")   # r15 beats zai r16
+        better = self.drained(codex={"remaining": 100.0}, **{"cursor-auto": {"remaining": 90.0}})
+        self.assertEqual(r.route("code", quota=better).service.name, "cursor-auto")
+        only = self.drained(codex={"remaining": 100.0}, cursor={"remaining": 90.0})
+        self.assertEqual(r.route("code", quota=only).service.name, "codex")   # r15 beats cursor r20
 
     def test_a_wave_puts_one_slice_on_codex(self):
         q = self.drained(codex={"remaining": 100.0})
@@ -1374,7 +1279,7 @@ class TestOmpReadyRoster(unittest.TestCase):
         self.assertEqual(r.route("bulk", quota=q).service.name, "fresh-pool")
 
     def test_omp_is_the_room_when_every_other_code_pool_is_drained(self):
-        drained = {k: {"remaining": 1.0} for k in {*IDLE, "antigravity-claude"}}
+        drained = {k: {"remaining": 1.0} for k in IDLE}
         self.assertIsNone(r.plan(["code"], quota={**drained, "omp": {"remaining": 1.0}})[0][1])
         c = r.plan(["code"], quota={**drained, "omp": {"remaining": 100.0}})[0][1]
         self.assertIsNotNone(c)
@@ -1390,30 +1295,6 @@ class TestOmpReadyRoster(unittest.TestCase):
         self.assertIsNone(r.route("code", quota={**case, "omp": {"remaining": 1.0}}))
         self.assertIn("quality_max_rank_gap",
                       r.unrouted_why("code", {**case, "omp": {"remaining": 1.0}}))
-
-
-class TestPiApiTier(unittest.TestCase):
-    def test_pi_uses_independent_measured_api_capacity(self):
-        svc = r.BY_NAME["pi"]
-        self.assertEqual(svc.acp_agent, "pi")
-        self.assertEqual(svc.shares_pool, "")
-        self.assertGreater(svc.reserve_floor, 0)
-        self.assertTrue(svc.eligible("code"))
-        self.assertTrue(svc.eligible("api-only"))
-        self.assertIn("openai/", svc.models["code"])
-        self.assertIsNone(r.route("api-only", quota={"omp": {"remaining": 0.0}}))
-
-    def test_pi_api_capacity_does_not_depend_on_codex_subscription(self):
-        choice = r.route("api-only", quota={"omp": {"remaining": 0.0},
-                                           "pi": {"remaining": 80.0},
-                                           "codex": {"remaining": 0.0}})
-        self.assertIsNotNone(choice)
-        self.assertEqual(choice.service.name, "pi")
-
-    def test_empty_pi_api_pool_is_not_replaced_by_codex_capacity(self):
-        self.assertIsNone(r.route("api-only", quota={"omp": {"remaining": 0.0},
-                                                   "pi": {"remaining": 0.0},
-                                                   "codex": {"remaining": 100.0}}))
 
 
 class TestOmpCreditsTier(unittest.TestCase):
@@ -1441,7 +1322,6 @@ class TestOmpCreditsTier(unittest.TestCase):
         self.assertNotIn("omp", r.OPERATOR_GATED)
         self.assertNotIn("omp", r.POLICY["dispatch"]["operator_gated"])
         self.assertIn("hermes", r.POLICY["dispatch"]["operator_gated"])
-        self.assertIn("cline", r.OPERATOR_GATED)
 
     def test_omp_is_eligible_for_code_and_bulk_without_operator_approval(self):
         env = {k: v for k, v in os.environ.items() if k != "ACP_OPERATOR_APPROVED"}
@@ -1464,21 +1344,14 @@ class TestOmpCreditsTier(unittest.TestCase):
         self.assertNotIn("omp", {s.name for s in r.SERVICES if s.eligible("frontier")})
         self.assertEqual(r.route("judgment", quota=self.quota(omp={"remaining": 0.0})).service.name, "claude")
 
-    def test_api_only_is_a_kind_for_both_api_billing_pools(self):
+    def test_api_only_is_a_kind_for_the_api_billing_pool(self):
         self.assertIn("api-only", r.KINDS)
-        self.assertEqual([s.name for s in r.SERVICES if s.eligible("api-only")], ["omp", "pi"])
+        self.assertEqual([s.name for s in r.SERVICES if s.eligible("api-only")], ["omp"])
         c = r.route("api-only", quota=self.quota())
         self.assertIsNotNone(c)
         self.assertEqual(c.service.name, "omp")
         self.assertIn("claude", c.model)
         self.assertEqual(c.kind, "api-only")
-
-    def test_pi_floor_only_demands_a_measurement_and_is_not_advertised_as_a_reserve(self):
-        c = r.route("api-only", quota=self.quota(pi={"remaining": 80.0}), exclude={"omp"})
-        self.assertEqual(c.service.name, "pi")
-        self.assertTrue(c.service.reserve_floor)
-        self.assertNotIn("RESERVE", c.why)
-        self.assertIsNone(r.route("api-only", quota={**self.quota(), "pi": {"remaining": None}}, exclude={"omp"}))
 
     def test_api_only_ignores_the_acp_readiness_probe(self):
         """api-only is the caller's own API call, so a broken omp login does not block it."""
@@ -1515,7 +1388,6 @@ class TestOmpCreditsTier(unittest.TestCase):
         q = self.quota(**{"omp": {"remaining": 90.0, "resets_at": soon,
                                   "window_minutes": None, "pace_ratio": None}})
         q["claude"] = {"remaining": 60.0}
-        q["antigravity-claude"] = {"remaining": 0.0}
         c = r.route("code", quota=q)
         self.assertEqual(c.service.name, "omp")
         self.assertIn("burn before reset", c.why)
@@ -1725,14 +1597,15 @@ class TestQuotaFromAiuseAvailable(unittest.TestCase):
     def test_non_finite_percentages_never_read_as_headroom(self):
         for bad in ("NaN", "Infinity", "-Infinity"):
             with self.subTest(bad):
-                body = ('{"age_seconds": 5, "available": [{"provider": "copilot", "windows": '
+                body = ('{"age_seconds": 5, "available": [{"provider": "grok", "windows": '
                         f'[{{"label": "premium", "headroom_percent": {bad}}}]}}]}}')
                 path = self.write("nan.json", body)
                 quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
-                self.assertIsNone(quota["copilot"]["remaining"])
+                self.assertIsNone(quota["grok"]["remaining"])
                 for kind in r.KINDS:
                     choice = r.route(kind, quota={**IDLE, **quota})
-                    self.assertFalse(choice and choice.service.name == "copilot", kind)
+                    if choice and choice.service.name == "grok":
+                        self.assertIsNone(choice.remaining, kind)   # unmeasured, never NaN read as headroom
 
     def test_percentages_are_clamped(self):
         row = {"provider": "codex", "windows": [{"label": "w", "headroom_percent": 250}]}
@@ -1866,11 +1739,39 @@ class TestQuotaFromAiuseAvailable(unittest.TestCase):
          "headroom_percent": 20.0},
         {"provider": "claude", "pool_family": "fable", "usable_now": True,
          "headroom_percent": 2.5},
-        {"provider": "antigravity", "pool_family": "gemini", "usable_now": True,
+        {"provider": "cursor", "pool_family": "third_party", "usable_now": True,
          "headroom_percent": 16.0},
-        {"provider": "antigravity", "pool_family": "claude_gpt", "usable_now": False,
+        {"provider": "cursor", "pool_family": "auto", "usable_now": False,
          "headroom_percent": 0},
     ]
+
+    def test_foreign_family_windows_never_create_or_loosen_another_pool(self):
+        exhausted = {"state": "exhausted", "headroom_percent": 0.0}
+        self.accounts = [
+            {"provider": "cursor", "age_seconds": 30, "windows": [
+                {"label": "auto", "pool_family": "auto", **exhausted},
+                {"label": "tp", "pool_family": "third_party", "headroom_percent": 50.0}]},
+        ]
+        rows = [
+            {"provider": "cursor", "pool_family": "third_party", "usable_now": True,
+             "headroom_percent": 50.0, "windows": [
+                 {"label": "tp", "pool_family": "third_party", "headroom_percent": 50.0},
+                 {"label": "auto", "pool_family": "auto", "headroom_percent": 63.5}]},
+        ]
+        quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(self.rows_payload(rows))})
+        self.assertEqual(quota["cursor-auto"]["remaining"], 0.0)   # the auto window inside the third_party row does not loosen it
+        self.assertEqual(quota["cursor"]["remaining"], 50.0)
+
+    def test_foreign_window_may_tighten_an_existing_pool(self):
+        rows = [
+            {"provider": "cursor", "pool_family": "third_party", "usable_now": True,
+             "headroom_percent": 80.0, "windows": [
+                 {"label": "auto", "pool_family": "auto", "headroom_percent": 10.0}]},
+            {"provider": "cursor", "pool_family": "auto", "usable_now": True,
+             "headroom_percent": 60.0},
+        ]
+        quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(self.rows_payload(rows))})
+        self.assertEqual(quota["cursor-auto"]["remaining"], 10.0)
 
     def test_rows_without_windows_follow_the_contract_fields(self):
         # a payload with no age at all reads stale by design, so the fixture carries one
@@ -1879,8 +1780,8 @@ class TestQuotaFromAiuseAvailable(unittest.TestCase):
         self.assertEqual(quota["claude"]["remaining"], 20.0)
         self.assertEqual(quota["claude"]["sublimits"], {"fable": 2.5})
         self.assertEqual(quota["opencode-go"]["remaining"], 8.0)
-        self.assertEqual(quota["antigravity"]["remaining"], 16.0)
-        self.assertEqual(quota["antigravity-claude"]["remaining"], 0.0)
+        self.assertEqual(quota["cursor"]["remaining"], 16.0)
+        self.assertEqual(quota["cursor-auto"]["remaining"], 0.0)
 
     def test_plan_refuses_the_pools_under_min_headroom(self):
         path = self.rows_payload(self.FAILOVER_FIXTURE_ROWS)
@@ -1888,7 +1789,7 @@ class TestQuotaFromAiuseAvailable(unittest.TestCase):
         quota = {**{k: v for k, v in quota.items()}}
         for kind in ("code", "bulk"):
             choice = r.route(kind, quota=quota, min_headroom=25)
-            for refused in ("claude", "opencode-go", "antigravity", "antigravity-claude"):
+            for refused in ("claude", "opencode-go", "cursor", "cursor-auto"):
                 self.assertFalse(choice and choice.service.name == refused, (kind, refused))
 
     def test_row_with_windows_keeps_detail_and_the_tighter_remaining(self):
@@ -1949,41 +1850,6 @@ class TestQuotaFromAiuseAvailable(unittest.TestCase):
 
     # -- adversary round 4 ------------------------------------------------------------------
 
-    def test_foreign_family_windows_never_create_or_loosen_another_pool(self):
-        exhausted = {"state": "exhausted", "headroom_percent": 0.0}
-        self.accounts = [
-            {"provider": "cursor", "age_seconds": 30, "windows": [
-                {"label": "auto", "pool_family": "auto", **exhausted},
-                {"label": "tp", "pool_family": "third_party", "headroom_percent": 50.0}]},
-            {"provider": "antigravity", "age_seconds": 30, "windows": [
-                {"label": "g", "pool_family": "gemini", "headroom_percent": 80.0},
-                {"label": "cg", "pool_family": "claude_gpt", **exhausted}]},
-        ]
-        rows = [
-            {"provider": "cursor", "pool_family": "third_party", "usable_now": True,
-             "headroom_percent": 50.0, "windows": [
-                 {"label": "tp", "pool_family": "third_party", "headroom_percent": 50.0},
-                 {"label": "auto", "pool_family": "auto", "headroom_percent": 63.5}]},
-            {"provider": "antigravity", "pool_family": "gemini", "usable_now": True,
-             "headroom_percent": 80.0, "windows": [
-                 {"label": "g", "pool_family": "gemini", "headroom_percent": 80.0},
-                 {"label": "cg", "pool_family": "claude_gpt", "headroom_percent": 70.0}]},
-        ]
-        quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(self.rows_payload(rows))})
-        self.assertEqual(quota["cursor-auto"]["remaining"], 0.0)
-        self.assertEqual(quota["antigravity-claude"]["remaining"], 0.0)
-
-    def test_foreign_window_may_tighten_an_existing_pool(self):
-        rows = [
-            {"provider": "antigravity", "pool_family": "gemini", "usable_now": True,
-             "headroom_percent": 80.0, "windows": [
-                 {"label": "cg", "pool_family": "claude_gpt", "headroom_percent": 10.0}]},
-            {"provider": "antigravity", "pool_family": "claude_gpt", "usable_now": True,
-             "headroom_percent": 60.0},
-        ]
-        quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(self.rows_payload(rows))})
-        self.assertEqual(quota["antigravity-claude"]["remaining"], 10.0)
-
     def test_fable_cap_merges_to_the_tighter_in_either_order(self):
         fable = {"provider": "claude", "pool_family": "fable", "usable_now": True,
                  "headroom_percent": 2.0}
@@ -2016,13 +1882,13 @@ class TestQuotaFromAiuseAvailable(unittest.TestCase):
 
     def test_excluded_pool_without_a_snapshot_row_reads_zero_and_is_never_routed(self):
         path = self.rows_payload([self.GOOD_ROW], excluded=[
-            {"provider": "zai", "pool_family": None, "reason": "operator"}])
+            {"provider": "grok", "pool_family": None, "reason": "operator"}])
         quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
-        self.assertEqual(quota["zai"]["remaining"], 0.0)
-        self.assertTrue(quota["zai"]["excluded"])
+        self.assertEqual(quota["grok"]["remaining"], 0.0)
+        self.assertTrue(quota["grok"]["excluded"])
         for kind in r.KINDS:
             choice = r.route(kind, quota={**IDLE, **quota})
-            self.assertFalse(choice and choice.service.name == "zai", kind)
+            self.assertFalse(choice and choice.service.name == "grok", kind)
 
     def test_excluded_pool_with_a_snapshot_row_reads_zero(self):
         path = self.rows_payload([{"provider": "codex", "usable_now": True,
@@ -2042,22 +1908,22 @@ class TestQuotaFromAiuseAvailable(unittest.TestCase):
 
     def test_invalid_excluded_rows_are_ignored_not_a_fallback(self):
         path = self.rows_payload([self.GOOD_ROW], excluded=[
-            "junk", {"provider": 3}, {"provider": ""}, {"provider": "zai", "pool_family": 7}])
+            "junk", {"provider": 3}, {"provider": ""}, {"provider": "grok", "pool_family": 7}])
         quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
         self.assertEqual(r.QuotaSource.kind, "canned")
         self.assertEqual(quota["omp"]["remaining"], 70.0)
-        self.assertNotIn("zai", quota)
+        self.assertNotIn("grok", quota)
 
     def test_excluded_is_not_consulted_on_the_file_fallback(self):
-        path = self.rows_payload(["junk"], excluded=[{"provider": "zai"}])
+        path = self.rows_payload(["junk"], excluded=[{"provider": "grok"}])
         quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
         self.assertEqual(r.QuotaSource.kind, "snapshot")
-        self.assertNotIn("zai", quota)
+        self.assertNotIn("grok", quota)
 
     def test_excluded_is_not_applied_from_a_stale_payload(self):
-        path = self.rows_payload([], excluded=[{"provider": "zai"}], fresh=False)
+        path = self.rows_payload([], excluded=[{"provider": "grok"}], fresh=False)
         quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
-        self.assertNotIn("zai", quota)
+        self.assertNotIn("grok", quota)
 
     def test_windowless_headroom_is_rounded_like_the_windowed_form(self):
         row = {"provider": "codex", "usable_now": True, "headroom_percent": 5.345454545}

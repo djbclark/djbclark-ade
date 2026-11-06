@@ -2,7 +2,7 @@
 """acp-dispatch — one consistent way to hand a slice to an agent and get its report back.
 
     acp-dispatch <agent> --model M --kind KIND --name NAME (-p PROMPT | -f BRIEF) [-C DIR]
-                 (--model may be omitted for zcode only, which has just two models)
+                 (--model is required)
                  (--kind is required on a fresh dispatch: route_agent.KINDS; resume/reroute
                   inherit it from the record; a pre-change record with no kind still continues)
                  [--role advise|exec]   (frontier only; default advise; other kinds record exec)
@@ -109,7 +109,7 @@ before anything is written or detached, by `acp-run <agent> --info --model M --e
 (it applies them to a fresh session without a prompt): an agent or model that cannot take the value
 exits 2 here with acp-run's list of valid values. --acp-arg still passes other flags through (a dash-leading
 value needs --acp-arg=--tripwire-exempt-kinds), but never one that could change the admitted model or the agent's
-credentials (2026-11-03, for the guarded agents pi, omp, codex and claude; the rest are `unreviewed` rows of
+credentials (2026-11-03, for the guarded agents omp, codex and claude; the rest are `unreviewed` rows of
 bin/agent_guard.py, still pass-through; docs/agent-guard-contract.md): --model, --meta, --agent-arg, --agent-env, --auth, their `=` forms and
 abbreviations (--mod, --agent-e), and --set unless its key is a reasoning-effort option (effort, reasoning_effort,
 reasoning, thought, thought_level, thinking_level) exit 2 before any gate or probe; the runner and a resume refuse a stored
@@ -180,7 +180,7 @@ Otherwise `transient` stays. For transient and outage `check` suggests `reroute 
 `resume in place: acp-dispatch resume RECORD --detach --no-wait` (no "after the reset": there is none;
 or, while the login sweep's restart-resume is running, `resume-scheduled`; or `no resumable session`
 when `resume` itself would refuse: no log or command in the record, no session id, an agent that can
-neither load nor resume; an agy session on a non-Gemini model is resumed in a new session with a
+neither load nor resume; a session `resume_unsupported()` names is resumed in a new session with a
 checkpoint, as `resume` does) and never `--escalate`. Only a recorded `killed:` or `lost` class gets it: a
 refused, auth or quota stop that a signal also ended keeps its own hint, and an `auth` class gets the login
 hint (`codex login`, ...) instead of `--escalate` (2026-10-20). Exit codes are unchanged.
@@ -221,7 +221,7 @@ in the session log, not acp-run's stderr) is caught: finalize scans the log too 
 and the report is not DONE, notifies aiuse and writes the same `NO-REPORT: quota` line, so
 check and auto-resume treat it as a quota stop. (4) A quota stop on a partial checkpoint report
 auto-resumes as well — the report is its checkpoint; a DONE report never does. (5) A zone-less
-`limit will reset at ...` from zcode is Beijing time (UTC+8), not the local clock.
+`limit will reset at ...` is read as the local clock (zcode's was Beijing time until it retired, 2026-11-06).
 
 Cheap-first escalation (operator decision 1.4, 2026-10-18): a slice that failed on its tier
 (no-report or partial, not quota, not BLOCKED) climbs ONE rung of the `[escalation]` ladder in
@@ -371,14 +371,8 @@ Re-dispatching the --name of a record whose runner is still waiting is refused (
 name whose cloud record is unfinished (status running, any pid): `resume RECORD` it instead.
 (execute_record's older wait_for_capacity stays as the backstop at 4x cpus or critical memory pressure.)
 
-Pi API admission (2026-11-03; openai/gpt-6-astra added 2026-11-04): only openai/gpt-6.1-sol,
-openai/gpt-5.4-mini and openai/gpt-6-astra map to aiuse's independent `pi` pool, never `codex`. The
-frontier gate still applies to Astra (--kind frontier). Missing, stale, exhausted or
-unsupported capacity refuses with exit 5 before preflight, including dry runs,
-resumes and route overrides. At least max(1%, Pi reserve_floor, --min-headroom)
-must remain. The runner rechecks fresh capacity after load and capacity waits,
-even for legacy records. --no-preflight does not skip this measurement gate.
-The --acp-arg identity guard above covers Pi; ACP_RUN_ENV_PI, ACP_RUN_ARGS_PI and
+Pi API admission (2026-11-03) was removed with pi (2026-11-06). The --acp-arg identity guard above is
+unchanged; ACP_RUN_ENV_<AGENT>, ACP_RUN_ARGS_<AGENT> and
 ~/.config/acp-run.env are operator-side and not covered. omp (the Claude API credits) is mapped to its own
 `omp` pool: --min-headroom and the reservation judge it, the record carries service omp, and a reroute
 excludes it. No fresh omp reading admits the slice (an ordinary pool; only a reserve or a fallback-only pool
@@ -511,16 +505,12 @@ WRAPUP_TEXT = (
     "Your reply is only `written: {report}`."
 )
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
-# Agents that may be dispatched without --model. zcode-acp-server's model switch failed for every call until
-# 2026-10-15 ("unsupported config option or switch failed: model"); acp-run now gives it ZCODE_BIN, which
-# fixes it, so --model is accepted; it stays optional because the agent has only two models.
-MODEL_OPTIONAL_AGENTS = {"zcode"}
+# Agents that may be dispatched without --model (none since zcode retired, 2026-11-06).
+MODEL_OPTIONAL_AGENTS: set[str] = set()
 # Never dispatched without the operator's specific, explicit approval for that run (operator 2026-10-15);
 # the same gate is in acp-run.
 # hermes (operator 2026-10-15: "hermes should never be used" as a delegation target) needs
 # ACP_OPERATOR_APPROVED=<agent>; acp-run applies the same gate. omp left the gate 2026-10-19.
-# cline (operator 2026-10-17): uninstalled, left in place for a deliberate re-enable; Hermes
-# keeps its own ClinePass API pool.
 # Values from config/routing.toml [dispatch] (via route_agent.POLICY), filled in place by
 # load_policy() on first routing use (2026-10-18). They used to be derived at import, so every
 # invocation paid for route_agent and its config parse even when it never routed — a trivial
@@ -664,8 +654,9 @@ MODEL_CACHE = Path(os.environ.get("ACP_DISPATCH_MODEL_CACHE", str(Path.home() / 
 MODEL_CACHE_TTL = 6 * 3600
 INFO_TIMEOUT = 150               # claude's session/new alone takes 13-24 s (acp-run HANDSHAKE_TIMEOUT)
 # Agents whose model list depends on another config option set first (cline: provider, from
-# acp-run's DEFAULT_SET), so --info's list may not be the one acp-run matches against.
-MODEL_CHECK_SKIP = {"cline"}
+# acp-run's DEFAULT_SET), so --info's list may not be the one acp-run matches against. Empty since
+# cline retired (2026-11-06).
+MODEL_CHECK_SKIP: set[str] = set()
 NO_REPORT_PREFIX = "NO-REPORT:"
 ACP_EXIT_NOTE = "; acp-run exit="
 
@@ -1109,7 +1100,7 @@ def refuse_kind(service: str | None, kind: str, quota: dict | None = None) -> No
 
 def kind_service(agent: str, service: str | None) -> Any:
     """The routing profile that decides eligibility for agent/service, or None: the service by
-    name, else the agent's alias (qwen→alibaba) for an agent with no aiuse pool."""
+    name, else the agent's alias for an agent with no aiuse pool."""
     router = route_module()
     svc = router.BY_NAME.get(service) if service else None
     if svc is None:
@@ -1151,28 +1142,6 @@ def fallback_gate_refusal(svc: Any, kind: str | None, repo: str | None) -> str |
     return router.fallback_block(svc, kind, router.load_snapshot(bypass_memo=True)[0], repo=repo)
 
 
-def pi_capacity_refusal(agent: str, model: str | None, remaining: float | None,
-                        min_headroom: float = 0) -> str | None:
-    """Pi's measured API capacity is mandatory, including resumes/route overrides.
-
-    `remaining` comes from the router's freshness-aware snapshot reader, never
-    credentials, the model catalog, or a Codex subscription reading.
-    """
-    if agent != "pi":
-        return None
-    router = route_module()
-    if router.pi_api_pool(model) is None:
-        return "unsupported Pi billing route: use an explicitly supported openai/ model with measured Pi API capacity"
-    if remaining is None:
-        return "no fresh quota reading for pi: Pi API capacity must be measured"
-    # A zero --min-headroom cannot disable the independent API reserve floor.
-    svc = router.BY_NAME.get("pi")
-    floor = max(1.0, svc.reserve_floor if svc else 0.0, float(min_headroom or 0))
-    if remaining < floor:
-        return f"Pi API headroom {remaining:.1f}% < minimum {floor:.1f}%"
-    return None
-
-
 def guard_module():
     """bin/agent_guard.py: the per-agent pass-through identity policy, one function for dispatch and the runner."""
     bindir = str(Path(__file__).resolve().parent)
@@ -1191,17 +1160,11 @@ def spawn_refusal(rec: dict, after: str = "the load wait") -> tuple[str, int, st
     headroom, and the estimate against each window (unreserved: the in-flight reservation was dispatch's, and
     `runner_inflight_recheck` holds the cap). (2) is ELIGIBILITY, which route-override skips and a resume never had; (3) is
     MEASUREMENT, which no override skips (round 7 of PR 224): it follows the pool and the record's `min_headroom`, never
-    the `fallback_gate` stamp. A resume skips both, as at dispatch. Pi's independent API
-    measurement is mandatory even for resumes and legacy kind-less records."""
+    the `fallback_gate` stamp. A resume skips both, as at dispatch."""
     agent = rec.get("agent") or ""
     why = guard_module().record_refusal(rec)    # the stored cmd and acp_arg are what runs (every route a record took)
     if why:
         return "headroom", UNAVAILABLE_EXIT, f"{why} (refused after {after})"
-    if agent == "pi":
-        remaining, reading = pool_reading("pi", rec.get("model"), fresh=True)
-        why = pi_capacity_refusal("pi", rec.get("model"), remaining, rec.get("min_headroom") or 0)
-        if why:
-            return "headroom", UNAVAILABLE_EXIT, f"{why} after {after}"
     if agent == "omp" and (rec.get("resume_count") or not rec.get("kind")) and float(rec.get("min_headroom") or 0) > 0:
         # a resume or kind-less legacy record skips the generic pool check below; omp's credits are a measured grant, so
         # a reading that exists still binds the minimum the record was admitted under. No fresh reading is not a refusal
@@ -1222,8 +1185,7 @@ def spawn_refusal(rec: dict, after: str = "the load wait") -> tuple[str, int, st
             return "fallback", FALLBACK_REFUSED_EXIT, why
     if rec.get("min_headroom") is None:
         return None                      # a record from before this check: dispatch's snapshot stands
-    if rec.get("agent") != "pi":
-        remaining, reading = pool_reading(rec.get("agent") or "", rec.get("model"), fresh=not rec.get("plenty_gate"))
+    remaining, reading = pool_reading(rec.get("agent") or "", rec.get("model"), fresh=not rec.get("plenty_gate"))
     if remaining is None:
         if svc is not None and svc.fallback_after:
             return ("headroom", UNAVAILABLE_EXIT,
@@ -2147,23 +2109,8 @@ def extend_locked(record: Path, seconds: int) -> int:
 
 
 def agent_report_path(agent: str, root: Path, out: Path, task: str | None, name: str) -> Path:
-    if agent != "agy":
-        return out / f"{name}-report.md"
-    inner = root / ".acp-dispatch"
-    inner.mkdir(exist_ok=True)
-    git = subprocess.run(["git", "-C", str(root), "rev-parse", "--git-path", "info/exclude"],
-                         check=False, capture_output=True, text=True)
-    if git.returncode == 0:
-        exclude = Path(git.stdout.strip())
-        if not exclude.is_absolute():
-            exclude = root / exclude
-        old = exclude.read_text() if exclude.exists() else ""
-        if ".acp-dispatch/" not in old.splitlines():
-            exclude.parent.mkdir(parents=True, exist_ok=True)
-            with exclude.open("a") as f:
-                f.write(("\n" if old and not old.endswith("\n") else "") + ".acp-dispatch/\n")
-    tag = re.sub(r"[^A-Za-z0-9._-]", "_", task or out.name)
-    return inner / f"{tag}-{name}-report.md"
+    # the agy case (a report inside the workspace) retired with agy, 2026-11-06
+    return out / f"{name}-report.md"
 
 
 # ---------------------------------------------------------------- tell (lead messages)
@@ -2335,19 +2282,12 @@ def model_values(info: dict) -> list[dict] | None:
     return None
 
 
-# zcode lists each GLM model under builtin:zai\ (API key) and builtin:zai-coding-plan\ (the everyday
-# Coding Plan pool); a bare name means the second. Mirror of acp-run's ZCODE_DEFAULT_PROVIDER.
-ZCODE_DEFAULT_PROVIDER = "builtin:zai-coding-plan\\"
-
-
 def match_model(values: list[dict], want: str) -> tuple[bool, str]:
     """Mirror of acp-run match_value: an exact value or name, else a unique run of dash-separated
     tokens (a trailing "[...]" or "(...)" ignored on both sides), else the same across `:` and `/`
     (hermes: nous:anthropic/claude-x). (ok, why-not)."""
     if any(want in (v.get("value"), v.get("name")) for v in values):
         return True, ""
-    if any(str(v.get("value")).lower() == ZCODE_DEFAULT_PROVIDER + want.lower() for v in values):
-        return True, ""   # zcode: a bare "GLM-5.3" is the coding-plan pool's model
 
     def toks(x: object, split: str) -> list[str]:
         return re.split(split, re.sub(r"(\[[^\]]*\]|\([^)]*\))$", "", str(x or "")).lower())
@@ -2478,16 +2418,12 @@ def check_options(acp_run: str, agent: str, model: str | None, effort: str | Non
 # ---------------------------------------------------------------- failure note
 
 # acp-run agent name -> aiuse provider id (`aiuse --json` accounts[].provider), pool family None.
-# agy is mapped per model in map_agent_to_provider (its Claude/GPT and Gemini pools are separate).
 AGENT_PROVIDER_MAP: dict[str, tuple[str, str | None]] = {
     "claude": ("claude", None),
     "codex": ("codex", None),
-    "copilot": ("copilot", None),
     "cursor": ("cursor", None),
     "cursor-cloud": ("cursor-cloud", None),
-    "cline": ("clinepass", None),
     "opencode": ("opencode-go", None),
-    "zcode": ("zai", None),
     "grok": ("grok", None),
     "omp": ("omp", None),     # the Claude API credits grant (aiuse provider `omp`), 2026-11-03: it had no pool admission
 }
@@ -2495,12 +2431,6 @@ AGENT_PROVIDER_MAP: dict[str, tuple[str, str | None]] = {
 
 def map_agent_to_provider(agent: str, model: str | None) -> tuple[str, str | None] | None:
     """Map acp agent and model to aiuse (provider, pool_family). None if unknown."""
-    if agent == "pi":
-        return route_module().pi_api_pool(model)
-    if agent == "agy":
-        # claude_gpt / gemini / gemini_argon: one table, route_agent.antigravity_family (aiuse schema 1.5)
-        family = route_module().antigravity_family(model)
-        return ("antigravity", family) if family else None
     if agent == "cursor":
         # `default` is Cursor's Auto pool (acp-run README, "Per-agent choices"); every
         # other id draws on the third-party pool. aiuse reports them as two windows that
@@ -2628,17 +2558,12 @@ def _duration_seconds(val: str) -> int | None:
 
 
 def _plain_reset_stamp(val: str, agent: str | None) -> datetime | None:
-    """A zone-less `limit will reset at YYYY-MM-DD HH:MM:SS` as an aware datetime. zcode's is
-    Beijing time (operator 2026-10-18: aiuse's live probe of the z.ai 5-hour window returned
-    resets_at 2026-10-18T20:22:46+00:00 for `2026-10-19 04:22:46`, which is 04:22:46 at UTC+8);
-    reading it as local pushed not_before four hours late. Every other agent's is the local
-    clock."""
+    """A zone-less `limit will reset at YYYY-MM-DD HH:MM:SS` as an aware datetime (the local
+    clock; zcode's Beijing-time case retired with zcode, 2026-11-06)."""
     try:
         stamp = datetime.fromisoformat(val.strip().replace(" ", "T"))
     except ValueError:
         return None
-    if agent == "zcode" and stamp.tzinfo is None:
-        return stamp.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
     return stamp if stamp.tzinfo else stamp.astimezone()
 
 
@@ -2709,7 +2634,7 @@ def parse_reset_for_aiuse(text: str, when_match: re.Match | None,
     if m_plain:
         stamped = _plain_reset_stamp(m_plain.group(1), agent)
         if stamped is not None:
-            # in UTC so aiuse never has to guess a zone (zcode's zone-less stamp is +08:00)
+            # in UTC so aiuse never has to guess a zone (a zone-less stamp is local)
             return "--resets-at", stamped.astimezone(timezone.utc).isoformat()
 
     if not when_match:
@@ -3321,13 +3246,9 @@ AUTH_TERMS = ("project_token_login_failed", "token_login_failed", "login_failed"
               "invalid authentication token", "oauth token has expired", "oauth token revoked",
               "login expired", "please run /login", "not logged in", "authentication_error")
 AUTH_HINTS = {
-    # Never `zcode login` (2026-10-18): it flips the account provider back to the OAuth exchange that
-    # expires daily (zai-org/feedback#1001); bin/zcode-key-auth keeps it on the Coding Plan API key.
-    "zcode": "zcode left the Coding Plan API key: run `zcode-key-auth apply` (never `zcode login`, zai-org/feedback#1001)",
     "codex": "codex login expired: run `codex login`",
     "claude": "Claude Code login expired: run `claude auth login`",
     "cursor": "cursor-agent login expired: run `cursor-agent login`",
-    "copilot": "copilot login expired: run `gh auth login`",
     "grok": "grok login expired: run `grok login`",
 }
 
@@ -4056,7 +3977,7 @@ def check_record(path: Path) -> tuple[str, str, str, str]:
         # the tier, the same as a transport error: no `--escalate`, resume in place when the session can
         # be reopened (2026-10-20; the record path of 4be8684 and the login sweep of 180d8b8 do the same).
         # "Can be reopened" is what resume_record accepts: a record with log and cmd and a session id
-        # the agent can load, or an agy session on a non-Gemini model, which continues in a new session.
+        # the agent can load, or a session resume_unsupported() names, which continues in a new session.
         sid, supported = session_info(rec)
         broken = resume_unsupported(rec)
         rr = rec.get("restart_resume") or {}
@@ -4498,16 +4419,7 @@ def execute_record(record: Path, tee: bool = False) -> int:
 
 def resume_unsupported(rec: dict) -> str | None:
     """Why the record's own session cannot be reopened even though the agent advertises
-    session/load, else None. agy_acp_server strips every stored thought signature on session/load
-    and set_session_model (a Gemini workaround, b/541293285); Vertex Claude rejects the replay with
-    `messages.1.content.0.thinking.signature: Field required`, so an agy session on a non-Gemini
-    model fails its first resumed turn every time (2026-10-18, two slices; root cause:
-    https://x.com/Davidwuuu92/status/2110264348870631635; reported upstream as
-    https://github.com/google-antigravity/antigravity-cli/issues/1281: drop this when it is fixed)."""
-    model = (rec.get("model_applied") or rec.get("model") or "").lower()
-    if rec.get("agent") == "agy" and not model.startswith("gemini"):
-        return (f"agy cannot reopen a {model or 'non-Gemini'} session: its ACP server strips the"
-                " thought signatures Claude needs on session/load")
+    session/load, else None. Always None since agy (the one case) retired, 2026-11-06."""
     return None
 
 
@@ -4834,7 +4746,7 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
         # printed its tool calls as text and was recovered as "done" (2026-10-19, two frontier
         # slices). An advisory run reads, so it needs --perm read-only.
         die("--role advise with --perm deny is refused: deny gives the agent no tools, so it cannot"
-            " read what it is asked to review; use --perm read-only (claude, codex, opencode, zcode)")
+            " read what it is asked to review; use --perm read-only (claude, codex, opencode)")
 
     if a.agent == CLOUD_AGENT:
         return dispatch_cloud(a, previous, kind, service)
@@ -4902,10 +4814,7 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
     # `fresh`: the load gate ran inline and may have waited, so this look must not reuse the 30 s aiuse memo
     # the first look filled (Codex review of PR 73); a deferred or skipped gate waited nothing.
     remaining, reading = pool_reading(a.agent, a.model,
-                                      fresh=a.agent == "pi" or (gate_info is not None and not gate_deferred))
-    pi_refusal = pi_capacity_refusal(a.agent, a.model, remaining, a.min_headroom)
-    if pi_refusal:
-        return unavailable_record(out, a, pi_refusal, "headroom", remaining, estimate, previous)
+                                      fresh=(gate_info is not None and not gate_deferred))
     # The plenty gate was judged above on a reading taken BEFORE the load wait, which may have lasted
     # up to --load-wait; judge it again on this one (adversary 7802361, A1). A detached --no-wait
     # runner repeats it after its own wait (plenty_gate_refusal). route-override and a resume skip it,
@@ -5102,9 +5011,9 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
         rec["fallback_gate"], rec["gate_repo"] = True, REPO_NAME
     if not previous and kind:
         rec["min_headroom"] = a.min_headroom
-    if a.agent in ("pi", "omp"):
-        # the minimum Pi/omp was admitted under (a resume's own 10 %, or a higher one it already carried) travels with
-        # the record, so the runner's rechecks judge the same number; an old Pi record without it keeps the 1 % floor
+    if a.agent == "omp":
+        # the minimum omp was admitted under (a resume's own 10 %, or a higher one it already carried) travels with
+        # the record, so the runner's rechecks judge the same number
         rec["min_headroom"] = max(float(a.min_headroom or 0), float((previous or {}).get("min_headroom") or 0))
     if gate_deferred:
         # the launchd runner has none of this process's environment or load_policy(): hand it the resolved values
@@ -5866,7 +5775,7 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="acp-dispatch", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("agent", help="an acp-run agent (acp-run --list)")
-    ap.add_argument("--model", help="required except for zcode (optional there since acp-run sets ZCODE_BIN); acp-run <agent> --info lists values")
+    ap.add_argument("--model", help="required; acp-run <agent> --info lists values")
     ap.add_argument("--kind", choices=_routing_policy.KINDS,
                     help="required on a fresh dispatch (route_agent kinds); resume/reroute inherit from the record")
     ap.add_argument("--role", choices=("advise", "exec"),
@@ -5889,9 +5798,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--context", metavar="SIZE",
                     help="acp-run --context: 200k|256k|272k|400k|500k|1m or a token count; checked with the model")
     ap.add_argument("--perm", default="all", help="all (default) | read-only: the agent may read and nothing else, any other tool trips (exit 77); "
-                         "claude, codex, opencode, zcode; an advisory review needs it | "
+                         "claude, codex, opencode; an advisory review needs it | "
                          "deny: no tools at all (--role advise refuses it): every permission request refused and a tripwire (exit 77) on any "
-                         "tool that runs without asking, reads included (crush and agy read unasked: add "
+                         "tool that runs without asking, reads included (an agent that reads unasked needs "
                          "--acp-arg=--tripwire-exempt-kinds=read,search; cursor cannot deny at all, acp-run "
                          "refuses it: review it under all with a read-only brief and a diff check). "
                          "Subagents run yolo unless security-sensitive (operator 2026-10-15). "

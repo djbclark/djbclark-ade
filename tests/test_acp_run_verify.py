@@ -225,12 +225,12 @@ class TestVerify(unittest.TestCase):
         self.assertIn("--verify-retries N", p.stdout)
         self.assertIn("--verify-timeout SECS", p.stdout)
 
-        p_bad = subprocess.run([str(SCRIPT), "crush", "-p", "hi", "--verify", "true", "--verify-retries", "-1"],
+        p_bad = subprocess.run([str(SCRIPT), "codex", "-p", "hi", "--verify", "true", "--verify-retries", "-1"],
                                capture_output=True, text=True)
         self.assertNotEqual(p_bad.returncode, 0)
         self.assertIn("--verify-retries must be 0 or more", p_bad.stderr)
 
-        p_bad_to = subprocess.run([str(SCRIPT), "crush", "-p", "hi", "--verify", "true", "--verify-timeout", "0"],
+        p_bad_to = subprocess.run([str(SCRIPT), "codex", "-p", "hi", "--verify", "true", "--verify-timeout", "0"],
                                   capture_output=True, text=True)
         self.assertNotEqual(p_bad_to.returncode, 0)
         self.assertIn("--verify-timeout must be positive", p_bad_to.stderr)

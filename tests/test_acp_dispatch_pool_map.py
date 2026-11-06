@@ -32,7 +32,8 @@ class CursorPoolsTest(unittest.TestCase):
 
     def test_other_agents_unchanged(self):
         self.assertEqual(acpd.map_agent_to_provider("claude", "fable"), ("claude", None))
-        self.assertEqual(acpd.map_agent_to_provider("zcode", "GLM-5.3-Flash"), ("zai", None))
+        self.assertEqual(acpd.map_agent_to_provider("omp", "anthropic/claude-sonnet-5-5"), ("omp", None))
+        self.assertIsNone(acpd.map_agent_to_provider("zcode", "GLM-5.3-Flash"), "zcode retired 2026-11-06")
         self.assertIsNone(acpd.map_agent_to_provider("hermes", None))
 
 

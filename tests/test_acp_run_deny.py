@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """Tests for tools/acp-run/acp-run's real --perm deny (adversary review 2026-10-12, C1).
 
-`--perm deny` used to answer only permission requests, and four agents never sent any:
-claude-agent-acp inherited settings.json's bypassPermissions, zcode-acp-server started in
-yolo, crush-acp ran with --yolo and opencode allowed tools by default. Now under deny
-acp-run sets the strictest mode per agent, passes deny env and session/new _meta, drops
-crush's --yolo, and trips (exit 77) when a non-think tool starts or completes without a
+`--perm deny` used to answer only permission requests, and some agents never sent any:
+claude-agent-acp inherited settings.json's bypassPermissions and opencode allowed tools by
+default (zcode and crush were the other two until they retired, 2026-11-06). Now under deny
+acp-run sets the strictest mode per agent, passes deny env and session/new _meta, and trips (exit 77) when a non-think tool starts or completes without a
 permission request. acp-run imports the ACP SDK, so it is loaded in a `uv run --with`
 subprocess and driven against fakes.
 """
@@ -103,34 +102,8 @@ PROBE = textwrap.dedent("""\
             mod.subprocess.run = real
         return seen
 
-    def zcode_settings():
-        import os, shutil, tempfile
-        from pathlib import Path
-        home = Path(tempfile.mkdtemp())
-        (home / ".zcode" / "cli").mkdir(parents=True)
-        (home / ".zcode" / "cli" / "setting.json").write_text(json.dumps({
-            "permission": {"mode": "yolo", "autoApproveHighRisk": True},
-            "features": {"mcp": True, "subagent": True, "skill": True},
-            "mcp": {"servers": {"basic-memory": {"command": "x"}}},
-            "plugins": {"enabled": True, "enabledPlugins": {"p@m": True}},
-            "hooks": {"enabled": True, "events": {"Stop": [{"command": "x"}]}},
-            "storage": {"dir": "~/.zcode"}}))
-        old = os.environ.get("HOME")
-        os.environ["HOME"] = str(home)
-        try:
-            d = mod.zcode_deny_settings()
-        finally:
-            os.environ["HOME"] = old
-        out = {"settings": json.loads((d / "cli" / "setting.json").read_text()),
-               "config": json.loads((d / "cli" / "config.json").read_text()),
-               "mode": oct((d.stat().st_mode) & 0o777)}
-        shutil.rmtree(d)
-        shutil.rmtree(home)
-        return out
-
     async def main():
         return {
-            "zcode_settings": zcode_settings(),
             "trip_running": await turn("deny", [("update", upd("tool_call", "t1", "in_progress", "execute"))],
                                       wait_cancel=True),
             "trip_last_update": await turn("deny", [("update", upd("tool_call", "t1", "pending", "read")),
@@ -139,15 +112,15 @@ PROBE = textwrap.dedent("""\
                                                     ("perm", "t1"),
                                                     ("update", upd("tool_call_update", "t1", "failed"))]),
             "think_ok": await turn("deny", [("update", upd("tool_call", "t1", "completed", "think"))]),
-            # --tripwire-exempt-kinds read (agy): an unasked read runs, an unasked execute still trips
+            # --tripwire-exempt-kinds read: an unasked read runs, an unasked execute still trips
             "exempt_read": await turn("deny", [("update", upd("tool_call", "t1", "in_progress", "read")),
                                               ("update", upd("tool_call_update", "t1", "completed"))],
                                       exempt=("read",)),
             "exempt_exec": await turn("deny", [("update", upd("tool_call", "t1", "completed", "execute"))],
                                       exempt=("read",)),
             "no_exempt_read": await turn("deny", [("update", upd("tool_call", "t1", "completed", "read"))]),
-            # crush-acp: in_progress 1 ms before its permission request, then denied -> failed
-            "crush_order": await turn("deny", [("update", upd("tool_call", "t1", "pending", "execute")),
+            # an agent that sends in_progress 1 ms before its permission request, then denied -> failed
+            "in_progress_order": await turn("deny", [("update", upd("tool_call", "t1", "pending", "execute")),
                                               ("update", upd("tool_call_update", "t1", "in_progress")),
                                               ("perm", "t1"),
                                               ("update", upd("tool_call_update", "t1", "failed")),
@@ -158,10 +131,7 @@ PROBE = textwrap.dedent("""\
             "sessions": await sessions(),
             "fallback_deny": fallback("deny"),
             "fallback_all": fallback("all"),
-            "crush_base": mod.AGENTS["crush"][0],
-            "crush_yolo": mod.YOLO_CMD["crush"],
             "opencode_env": json.loads(mod.DENY_ENV["opencode"]["OPENCODE_CONFIG_CONTENT"]),
-            "zcode_env": mod.DENY_ENV["zcode"],
             "deny_set": mod.DENY_SET,
             "exit": mod.EXIT_TRIPWIRE,
         }
@@ -206,7 +176,7 @@ class TestPermDeny(unittest.TestCase):
         self.assertNotEqual(t["code"], 77)
 
     def test_in_progress_just_before_the_permission_request_is_not_a_trip(self):
-        t = self.r["crush_order"]
+        t = self.r["in_progress_order"]
         self.assertIsNone(t["tripped"])
         self.assertTrue(t["finished"])
         self.assertNotEqual(t["code"], 77)
@@ -254,22 +224,6 @@ class TestPermDeny(unittest.TestCase):
         self.assertNotIn("--dangerously-skip-permissions", d["cmd"])
         self.assertIn("--dangerously-skip-permissions", self.r["fallback_all"]["cmd"])
 
-    def test_zcode_deny_settings_turn_off_mcp_plugins_hooks(self):
-        z = self.r["zcode_settings"]
-        st = z["settings"]
-        self.assertEqual(st["mcp"], {"servers": {}})
-        self.assertEqual(st["features"], {"mcp": False, "subagent": False, "skill": False})
-        self.assertFalse(st["plugins"]["enabled"])
-        self.assertEqual(st["plugins"]["enabledPlugins"], {})
-        self.assertFalse(st["hooks"]["enabled"])
-        self.assertEqual(st["permission"]["mode"], "plan")
-        self.assertFalse(st["permission"]["autoApproveHighRisk"])
-        for tool in ("Agent", "Skill", "SendMessage", "TaskOutput", "TaskStop", "mcp__*", "Bash"):
-            self.assertIn(tool, st["permission"]["disallowedTools"])
-        self.assertEqual(st["storage"], {"dir": "~/.zcode"}, "unrelated keys are kept")
-        self.assertFalse(z["config"]["hooks"]["enabled"])
-        self.assertEqual(z["mode"], "0o700")
-
     def test_fallback_skips_user_settings_under_deny(self):
         d = self.r["fallback_deny"]["cmd"]
         self.assertEqual(d[d.index("--setting-sources") + 1], "project")
@@ -280,16 +234,9 @@ class TestPermDeny(unittest.TestCase):
         self.assertEqual(r.returncode, 2, r.stderr)
         self.assertIn("unrecognized arguments: --per", r.stderr)
 
-    def test_crush_yolo_only_under_perm_all(self):
-        self.assertNotIn("--yolo", self.r["crush_base"])
-        self.assertIn("--yolo", self.r["crush_yolo"])
-
     def test_deny_env_and_modes(self):
         self.assertEqual(self.r["opencode_env"], {"permission": "deny"})
-        self.assertEqual(self.r["zcode_env"]["ZCODE_ACP_MODE"], "plan")
-        self.assertIn("Bash", self.r["zcode_env"]["ZCODE_DISALLOWED_TOOLS"])
         self.assertEqual(self.r["deny_set"]["claude"], {"mode": "default"})
-        self.assertEqual(self.r["deny_set"]["zcode"], {"mode": "plan"})
         self.assertEqual(self.r["exit"], 77)
 
 
