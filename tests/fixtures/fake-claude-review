@@ -1,0 +1,140 @@
+#!/usr/bin/env python3
+"""A fake `claude` for tests/test_review_launch.py: it emits a canned `--output-format stream-json` stream.
+
+Driven by $FAKE_CLAUDE_SCENARIO (a JSON file, read at every call) and logging each call to $FAKE_CLAUDE_LOG
+(one JSON line: argv, environment, cwd, whether it was the self-check, what .review-launch/ held, the cwd's
+git HEAD). The stream's shapes are the ones Claude Code 2.1.319 produced on 2026-11-06 (a prelude event before
+the init event, StructuredOutput as a tool_use, `permission_denials` in the result).
+
+Scenario keys for a LAUNCH (a prompt without the self-check mark): init (merged into the init event), no_init,
+init_after_assistant, hook_event, tool_uses ([{name, input}]), output, no_structured, is_error, no_result,
+sleep (seconds before the output), spawn ("group" | "session": start a `sleep 300` child, its pid written to
+pid_file), exit, denials. For the SELF-CHECK: check = refuse (default) | leak | leak_quiet | readable_md |
+skip:<name> | control_fails | trip, check_init (merged into its init event). version / version_rc answer
+`claude --version`.
+"""
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+
+MARK = "BOUNDARY SELF-CHECK"
+scen = {}
+if os.environ.get("FAKE_CLAUDE_SCENARIO") and os.path.exists(os.environ["FAKE_CLAUDE_SCENARIO"]):
+    with open(os.environ["FAKE_CLAUDE_SCENARIO"]) as f:
+        scen = json.load(f)
+args = sys.argv[1:]
+if args == ["--version"]:
+    print(scen.get("version", "9.9.9 (Claude Code)"))
+    sys.exit(scen.get("version_rc", 0))
+prompt = args[args.index("--") + 1] if "--" in args else ""
+is_check = MARK in prompt
+
+
+def val(flag):
+    return args[args.index(flag) + 1] if flag in args else None
+
+
+def log():
+    path = os.environ.get("FAKE_CLAUDE_LOG")
+    if not path:
+        return
+    inputs = {}
+    d = os.path.join(os.getcwd(), ".review-launch")
+    if os.path.isdir(d):
+        for n in sorted(os.listdir(d)):
+            with open(os.path.join(d, n), errors="replace") as f:
+                inputs[n] = f.read()
+    try:
+        head = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, timeout=30).stdout.strip()
+    except OSError:
+        head = ""
+    with open(path, "a") as f:
+        f.write(json.dumps({"argv": args, "env": dict(os.environ), "cwd": os.getcwd(), "check": is_check,
+                            "inputs": inputs, "head": head, "listing": sorted(os.listdir(os.getcwd()))}) + "\n")
+
+
+def emit(ev):
+    sys.stdout.write(json.dumps(ev) + "\n")
+    sys.stdout.flush()
+
+
+log()
+tools = (val("--tools") or "").split(",")
+init = {"type": "system", "subtype": "init", "cwd": os.getcwd(), "tools": sorted(t for t in tools + ["StructuredOutput"] if t),
+        "mcp_servers": [], "permissionMode": val("--permission-mode"), "additional_directories": [],
+        "skills": ["code-review", "verify"], "agents": ["Explore", "general-purpose"], "plugins": [{"name": "cc-plugin-x"}],
+        "claude_code_version": "9.9.9", "model": "fake-model", "apiKeySource": "none"}
+init.update(scen.get("check_init" if is_check else "init", {}))
+emit({"type": "system", "subtype": "ui_invalidate"})   # 2.1.319: the init event is not the first line
+if not is_check and scen.get("hook_event"):
+    emit({"type": "system", "subtype": "hook_started", "hook_name": "SessionStart"})
+if is_check or not (scen.get("no_init") or scen.get("init_after_assistant")):
+    emit(init)
+if not is_check and scen.get("spawn"):
+    child = subprocess.Popen(["sleep", "300"], start_new_session=scen["spawn"] == "session")
+    with open(scen["pid_file"], "w") as f:
+        f.write(str(child.pid))
+if not is_check and scen.get("sleep"):
+    time.sleep(scen["sleep"])
+
+n = [0]
+
+
+def tool(name, inp, content, is_error=False, decision="accept"):
+    n[0] += 1
+    tid = f"toolu_{n[0]:03d}"
+    emit({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": tid, "name": name, "input": inp}]}})
+    emit({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": tid, "content": content,
+                                                   "is_error": is_error}]},
+          "tool_result_meta": [{"id": tid, "permission_decision": {"decision": decision}}]})
+    return tid
+
+
+denials = []
+if is_check:
+    mode = scen.get("check", "refuse")
+    results = []
+    for line in prompt.splitlines():
+        m = re.match(r"- ([\w-]+): (Read file_path|Glob path)=(\S+)", line)
+        if not m:
+            continue
+        name, how, path = m.groups()
+        if mode == f"skip:{name}":
+            continue
+        if mode == "trip" and name == "gh-hosts":
+            emit({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "toolu_bash", "name": "Bash",
+                                                                "input": {"command": "cat " + path}}]}})
+        inp = {"file_path": path} if how == "Read file_path" else {"path": path, "pattern": "*"}
+        tname = "Read" if how == "Read file_path" else "Glob"
+        readable = (name == "control" and mode != "control_fails") or (name == "outside-temp" and mode in ("leak", "leak_quiet")) \
+            or (name == "claude-md" and mode == "readable_md")
+        if readable:
+            content = ""
+            if mode != "leak_quiet" and os.path.isfile(path):
+                with open(path) as f:
+                    content = f.read()
+            tool(tname, inp, content)
+        else:
+            tid = tool(tname, inp, f"File is outside {os.getcwd()}; the permissions.blockReadsOutsideWorkingDirectories "
+                                   "setting blocks reads", is_error=True, decision="deny")
+            denials.append({"tool_name": tname, "tool_use_id": tid, "tool_input": inp})
+        results.append({"name": name, "read_ok": readable})
+    output = {"results": results}
+else:
+    for tu in scen.get("tool_uses", []):
+        tool(tu["name"], tu.get("input", {}), tu.get("content", "ok"))
+    if scen.get("init_after_assistant"):
+        emit(init)
+    m = re.search(r"HEAD_SHA: ([0-9a-f]{40})", prompt)
+    output = scen.get("output") or ({"verdict": "APPROVE", "head": m.group(1), "findings": [], "note": "fake"} if m else {"ok": True})
+    denials = scen.get("denials", [])
+emit({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "toolu_so", "name": "StructuredOutput", "input": output}]}})
+if is_check or not scen.get("no_result"):
+    err = bool(scen.get("is_error")) and not is_check
+    emit({"type": "result", "subtype": "error_during_execution" if err else "success", "is_error": err,
+          "structured_output": None if (scen.get("no_structured") and not is_check) else output,
+          "permission_denials": denials, "num_turns": 3, "result": json.dumps(output)})
+sys.exit(0 if is_check else scen.get("exit", 0))
