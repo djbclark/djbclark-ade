@@ -46,8 +46,6 @@ Each doc carries its own summary.
 | [docs/ai-memory-landscape.md](docs/ai-memory-landscape.md) | the six levels of AI memory and their status |
 | [docs/coding-factory.md](docs/coding-factory.md) | unattended issue→PR→auto-merge (2026-09-21) |
 | [docs/helm.md](docs/helm.md) | `/helm` ([skills/helm/](skills/helm/)): answer every waiting session from one window |
-| [docs/skillopt-sleep.md](docs/skillopt-sleep.md) | nightly skill-edit cycle, `bin/skillopt-night` |
-| [docs/failover.md](docs/failover.md) | `bin/failover.py`: reuse it, never hand-roll a fallback |
 | [docs/upstream-issues.md](docs/upstream-issues.md) | unfiled bug drafts for third-party projects |
 | [docs/mcp-servers.md](docs/mcp-servers.md) | MCP server roster (`claude mcp list`) |
 | [.claude/workflows/graph-audit.js](.claude/workflows/graph-audit.js) | runnable micro-graph example, `/graph-audit` |

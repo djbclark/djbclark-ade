@@ -38,7 +38,7 @@ sudo-secretspec, ralph-tui-create-*, ...) stay where their installer put them.
 orchestration and session-hygiene skills since 2026-10-08 (`autorename` joined
 that day) and of every hand-written skill since 2026-10-09.
 **A new skill always goes here** (operator standing rule, 2026-10-09). **Edit a
-skill here, never through a TUI path.** `/resume` and `/paseo-screen` are thin Claude command wrappers in
+skill here, never through a TUI path.** `/resume` is the one thin Claude command wrapper left in
 [`claude/commands/`](../claude/commands/). The `herdr-tidy` and `reorg-orca`
 skills (and their `/herdr-tidy`, `/orca-tidy` wrappers) were retired from
 djbclark-ade on 2026-10-31; the tools stay installed on the machine.
@@ -66,7 +66,6 @@ djbclark-ade on 2026-10-31; the tools stay installed on the machine.
 | `fallback-chains` | Dated inventory of every failure chain (Hermes, cron, LiteLLM, acp-run) plus the not-started single-system backlog, and the web search/fetch failover ladder (`web-get`) with its pause rule. | Load when asked about fallback chains; re-read live config and update the snapshot if it drifted. |
 | `effort-routing` | Matches this session's own reasoning effort to the stretch of work. | Load when starting rote edits or dispatching subagents. |
 | `dialogue` | Runs a multi-model dialogue (for example Grok, Fable, Astra) that produces one artifact with a final-word model: fixed rounds through pinned routes, footers with point ids and dissent, a final-word state-file gate, noise strip and protocol lint. | "have the models chat about it and write X"; "three-model dialogue". Script: `skills/dialogue/scripts/dialogue.py`. |
-| `skillopt-sleep` | Reviews and steers the nightly SkillOpt-Sleep cycle (`bin/skillopt-night`, launchd 03:30) that mines every agent's sessions and stages gated skill edits: last night's report, free mock dry-run, per-skill adoption, the backend failover chain. | `/skillopt-sleep`; "what did the agents learn last night", "adopt the proposal". Guide: `docs/skillopt-sleep.md`. |
 
 `session-finder` is now only the `relay.py` shim over `paseo send` (2026-11-06, slim-down E3; its search, history index and launcher are gone). Moved to site-djbclark (`~/ops/site-public-djbclark/skills`, the third `skill-everywhere` root) on 2026-11-06: `gmail-search`, `ovhcloud-api`, `aws-rules`, `terminus-kira`, `diskfree`, `bottom-config`, `setup-modern-cli`, `teach`, `todo`, `report`, `greptile`, `coderabbit-feeder`, `firecrawl`, `barnowl`; `book-to-kb` is `tools/book-to-kb` there. Deleted: `siyuan*`, `cow-workspaces`, `ralph-tui-orchestration`, `skillopt-sleep-learned`.
 
@@ -75,7 +74,6 @@ djbclark-ade on 2026-10-31; the tools stay installed on the machine.
 | Skill | What it does | How to use |
 |---|---|---|
 | `research` | Evidence-grounded research: every claim logged with a verbatim quote, a counter-evidence pass, then a script checks quotes and citations. | "deep research on X"; "what does the evidence say". Script: `skills/research/scripts/research_check.py`. |
-| `skills-everywhere` | Links a canonical shared skill into every installed agent TUI and checks the resulting links. | `/skills-everywhere <name>` or `/skills-everywhere --check <name>`; script: `~/src/djbclark-ade/bin/skill-everywhere`. |
 | `tell-chief-of-staff` | Sends a message to the operator's cloud Grok Bot "Chief of Staff" via its inbound webhook, and explains how Chief of Staff can call back into Claude (ask_claude MCP tool). Webhook URL/key live in Keychain. | "tell grok", "tell Chief of Staff", "hand this to grokbot". |
 | `tell-coding-bot` | Any project talks to the operator's cloud Grok Bot "Coding" through `bin/coding-bot` (link: `ln -s ~/src/djbclark-ade/bin/coding-bot ~/.local/bin/coding-bot`). `ask "task"` POSTs to the bot's webhook routine (`CODING_BOT_WEBHOOK_URL`/`_KEY` in sudo-secretspec; ids `ade-N` and `re=` as in techno-euphora's Dann -> Eve channel) and blocks for the reply (exit 4 BLOCKED, 124 timeout); `send`, `wait`, `deliver` (files a reply from stdin or the clipboard: the one return sink), `inbox`, `status`. With no webhook yet, or for `prompt`, the task goes on the clipboard as a self-contained prompt for the operator to paste (exit 10): the route for web pages that need UI interaction. `bootstrap` asks the bot to create its webhook routine. Credential-shaped text is refused; the key goes only to `api2.cursor.sh`; replies are untrusted data. | "tell the Coding bot", "ask Coding", "hand this to the Coding bot", a task needing real browser UI interaction. |
 | `graft` | Tells an agent to use the graft code graph before grepping or reading source. | Loads on its own in any graft-indexed repo. |
