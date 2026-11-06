@@ -162,6 +162,11 @@ def test_after_a_reset_waits_for_a_fresh_reading_with_the_new_resets_at(qs):
     early["available"][0]["collected_at"] = (NOW + timedelta(hours=1)).isoformat()
     v = only(qs.assess(early, policy(qs), after, state=state), "antigravity/gemini_argon")
     assert v["verdict"] == "no-verdict" and "before the reset" in v["reason"]
+    # local-review P2 on b2053c1: the held reading must not move the baseline, so the next run still holds it
+    later = after + timedelta(minutes=15)
+    qs.record(state, qs.assess(early, policy(qs), after, state=state), after)
+    v = only(qs.assess(early, policy(qs), later, state=state), "antigravity/gemini_argon")
+    assert v["verdict"] == "no-verdict" and "before the reset" in v["reason"]
     # a reading whose resets_at is still the old one (jitter included) proves nothing either
     same = argon_data(remaining=90, hours=2.08 - 2.2 + 0.05, pace=0.1, now=after)
     same["available"][0]["windows"][0]["resets_at"] = (NOW + timedelta(hours=2.08, seconds=120)).isoformat()
@@ -286,11 +291,18 @@ def test_failed_ping_and_no_relay_leaves_episode_unnotified(qs):
     assert len(sent) == 1 and state["episodes"][alerts[0]["episode"]].get("notified_at")
 
 
-def test_failed_ping_but_relay_started_counts_as_notified(qs):
+def test_started_relay_is_not_delivery_and_is_not_repeated(qs):
+    # local-review P2 on b2053c1: a launched relay may still be refused; only a successful ping marks the episode
     alerts, state = alerts_of(qs, argon_data())
+    relays = []
     qs.notify(alerts, state, NOW, dry_run=False, rows=[LEADS[1]], items=[], ping=lambda t: False,
-              relay=lambda a: True)
-    assert state["episodes"][alerts[0]["episode"]].get("notified_at")
+              relay=lambda a: relays.append(a) or True)
+    ep = state["episodes"][alerts[0]["episode"]]
+    assert not ep.get("notified_at") and ep.get("relayed_at") and len(relays) == 1
+    sent = []                                          # the retry pings again but does not relay twice
+    qs.notify(alerts, state, NOW + timedelta(minutes=15), dry_run=False, rows=[LEADS[1]], items=[],
+              ping=ok_ping(sent), relay=lambda a: relays.append(a) or True)
+    assert len(sent) == 1 and len(relays) == 1 and ep.get("notified_at")
 
 
 def test_dry_run_sends_and_marks_nothing(qs):

@@ -37,7 +37,8 @@ one is the same episode); a new resets_at is a new episode. `notify` sends each 
 most once per renotify_h (24 h) across episodes: one hermes-ping, and one relay.py line (`--fyi`, never `--steer`;
 `--idle 1800` for a Claude Paseo target) to each live lead seat (a fleet.py row whose name or title starts with the word
 `LEAD` in capitals, plus any agent id in QUOTA_SURPLUS_LEADS, comma-separated, e.g. a `/helm lead` session). An episode
-counts as notified only when the ping succeeded or a relay started; otherwise the next run tries again. Relays run
+counts as notified only when hermes-ping succeeded (a started relay is not a delivery); otherwise the next run pings again,
+and the leads get the relay once per episode. Relays run
 detached (log: ~/.local/state/quota-surplus/relay.log) so an --idle wait never holds the timer. A corrupt state file is
 kept aside as state.json.corrupt and the run starts from empty state (at most one repeat page per open episode).
 `notify --dry-run` prints what it would send and sends nothing.
@@ -312,11 +313,11 @@ def assess(data: dict, policy: Policy, now: datetime, *, min_surplus: float = MI
                 # 2026-11-02: Argon still refused 5 min after aiuse dropped the window; only a reading taken after the
                 # reset that shows the NEW resets_at proves the headroom is back.
                 if reset <= prev + timedelta(seconds=EPISODE_TOLERANCE_S):
-                    out.append({**item, "verdict": "no-verdict",
+                    out.append({**item, "verdict": "no-verdict", "reset_hold": True,
                                 "reason": f"reset at {prev.isoformat()} passed; waiting for a reading with the new resets_at"})
                     continue
                 if collected is None or collected < prev:
-                    out.append({**item, "verdict": "no-verdict",
+                    out.append({**item, "verdict": "no-verdict", "reset_hold": True,
                                 "reason": f"reading collected before the reset at {prev.isoformat()}"})
                     continue
             if str(w.get("state") or "") == "exhausted":
@@ -429,7 +430,8 @@ def record(state: dict, verdicts: list[dict], now: datetime) -> None:
     wins = state.setdefault("windows", {})
     for v in verdicts:
         r = parse_ts(v.get("resets_at"))
-        if r is not None and r > now:
+        # a reading held by the reset-passed rule must not move the baseline it failed against (local-review P2)
+        if r is not None and r > now and not v.get("reset_hold"):
             wins[window_key(v["pool"], v.get("window"))] = {"resets_at": v.get("resets_at"), "seen_at": now.isoformat()}
     eps = state.setdefault("episodes", {})
     for a in (v for v in verdicts if v.get("verdict") == "alert"):
@@ -683,8 +685,9 @@ def notify(alerts: list[dict], state: dict, now: datetime, *, dry_run: bool, row
            renotify_h: float = RENOTIFY_H) -> list[dict]:
     """Send each new `act` episode once, a pool at most once per renotify_h. Returns the actions (sent or planned).
 
-    An episode (and its pool's cooldown) is marked notified only when the ping succeeded or a relay started; a total
-    failure leaves it for the next run."""
+    An episode (and its pool's cooldown) is marked notified only when hermes-ping succeeded: a started relay is not a
+    delivery (AGENTS.md order 10), so it never counts. Relays go to the leads once per episode (`relayed_at`), so a ping
+    retried on the next run does not relay again."""
     actions: list[dict] = []
     todo = [a for a in alerts if a.get("verdict") == "alert" and a.get("severity") == "act"
             and not (state.get("episodes", {}).get(a.get("episode") or "", {}) or {}).get("notified_at")]
@@ -705,21 +708,26 @@ def notify(alerts: list[dict], state: dict, now: datetime, *, dry_run: bool, row
         if not dry_run:
             reached = bool(ping(text))
         n_work = len(work_for(a, items))
-        for row in lead_seats(rows):
-            repo, seat = seat_scope(row)
-            if not in_scope(a, repo, seat):
-                continue
-            argv = relay_argv(relay_py, row, relay_text(a, now, n_work))
-            actions.append({"episode": a.get("episode"), "action": "relay", "target": row.get("id"), "argv": argv})
-            if not dry_run:
-                reached = bool(relay(argv)) or reached
+        ep = state.setdefault("episodes", {}).setdefault(a["episode"], {})
+        if not ep.get("relayed_at"):
+            started = False
+            for row in lead_seats(rows):
+                repo, seat = seat_scope(row)
+                if not in_scope(a, repo, seat):
+                    continue
+                argv = relay_argv(relay_py, row, relay_text(a, now, n_work))
+                actions.append({"episode": a.get("episode"), "action": "relay", "target": row.get("id"), "argv": argv})
+                if not dry_run:
+                    started = bool(relay(argv)) or started
+            if started:
+                ep["relayed_at"] = now.isoformat()
         if dry_run:
             continue
         if reached:
-            state["episodes"][a["episode"]]["notified_at"] = now.isoformat()
+            ep["notified_at"] = now.isoformat()
             state.setdefault("pools", {})[a["pool"]] = {"notified_at": now.isoformat(), "episode": a["episode"]}
         else:
-            state["episodes"][a["episode"]]["failed_at"] = now.isoformat()
+            ep["failed_at"] = now.isoformat()
             actions.append({"episode": a.get("episode"), "action": "failed"})
     return actions
 
