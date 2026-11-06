@@ -129,10 +129,10 @@ does not collide with a core command (including `/steps`) is native skill
 slash: the gateway injects `SKILL.md` and the agent runs. Do not also
 register that name in `~/.hermes/plugins/skill-slash`. A plugin handler
 return is a user reply, so it dumps the skill markdown and the agent never
-calls `clarify`. Do not register `/helm`, `/baton`, or `/session-finder`
-there either: native skill slash already owns them. The plugin still
-registers `/helm-all`, `/session-finder-all`, and `/skill <name>` (those
-names are not native skill commands). Enable `skill-slash`
+calls `clarify`. Do not register `/helm` or `/baton` there either: native
+skill slash already owns them. The plugin still registers `/helm-all` and
+`/skill <name>` (those names are not native skill commands; `/session-finder`
+and `/session-finder-all` went with the skill, 2026-11-06, docs/slim E3). Enable `skill-slash`
 in `plugins.enabled`. Since 2026-10-06 `skill-everywhere` auto-nudges the
 running gateway (`reload-plugins` control socket) so a plugin command like
 `/helm-all` dispatches immediately —

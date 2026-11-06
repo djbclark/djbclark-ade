@@ -557,9 +557,9 @@ def notify(inc, g, top, path, load1, ncpu, dry):
     if not dry:
         target = s.get("sid") or s["id"]
         try:
-            # --no-defer: the brief is time-critical, so a busy session that cannot take it now is "could not reach it"
-            # (the fixer line below), never "queued": a queued brief arrives after the load spike it is about
-            r = subprocess.run([sys.executable, str(SF / "relay.py"), target, line, "--no-defer", "--no-ack"], capture_output=True,
+            # the relay shim (2026-11-06, docs/slim E3) exits 0 only when `paseo send` read sent/completed: a queued brief (it arrives
+            # after the load spike it is about) is exit 2, "could not reach it" (the fixer line below)
+            r = subprocess.run([sys.executable, str(SF / "relay.py"), target, line], capture_output=True,
                                text=True, timeout=60, env=relay_env())
             relayed = r.returncode == 0
         except (OSError, subprocess.TimeoutExpired):
@@ -637,10 +637,10 @@ def send_transient(r):
 
 
 def send_to(w, text, defer=False):
-    """One line into the watcher's session: `paseo send` for a Paseo agent (relay.py cannot reach one: no pane),
-    else relay.py with --no-defer (an incident brief is time-critical: a busy watcher that cannot take it now is not
-    reached, and the caller's fixer path runs). DEFER=True (only the `watcher test` registration check) lets relay.py
-    queue it for a busy watcher. True only when the channel says it delivered it (or, DEFER, queued it). The paseo channel retries up to
+    """One line into the watcher's session: `paseo send` for a Paseo agent, else the relay shim (2026-11-06, docs/slim E3), which
+    exits 0 only for a delivered send (a queued one is exit 2: the incident brief is time-critical, so a busy watcher is not reached and
+    the caller's fixer path runs). DEFER is kept for the `watcher test` caller and no longer changes the relay argv (the shim has no
+    outbox). True only when the channel says it delivered it. The paseo channel retries up to
     SEND_RETRIES times, SEND_RETRY_PAUSE_S apart and inside SEND_RETRY_BUDGET_S, but only when the failure's
     error code is exactly one of SEND_TRANSIENT (the daemon is restarting); relay.py gets one attempt. Once a
     send has given up on such a code, later calls in the same process make one attempt (`_paseo_down`).
@@ -658,7 +658,7 @@ def send_to(w, text, defer=False):
         argv = [cli, "send", "--no-wait", "--json", "--behavior", "steer", "--", w["target"], text]
         retries = 0 if _paseo_down else SEND_RETRIES
     else:
-        env, argv = relay_env(), [sys.executable, str(SF / "relay.py"), w["target"], text, *([] if defer else ["--no-defer"]), "--no-ack"]
+        env, argv = relay_env(), [sys.executable, str(SF / "relay.py"), w["target"], text]
         retries = 0
     started = time.monotonic()
     for attempt in range(retries + 1):

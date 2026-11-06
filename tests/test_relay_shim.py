@@ -55,6 +55,7 @@ class Env:
         self.answer("ls", ROWS)
         self.answer("send", {"status": "sent", "agentId": A1})
         self.answer("wait", {"status": "idle"})
+        self.answer("agent", {"Id": A1, "Archived": False, "PendingPermissions": []})    # `paseo agent inspect ID --json`
 
     def answer(self, cmd: str, obj: object) -> None:
         (self.dir / f"{cmd}.json").write_text(json.dumps(obj))
@@ -102,6 +103,20 @@ def test_every_other_status_exits_2_although_paseo_exited_0(env: Env, status: st
     env.answer("send", {"status": status})
     r = env.run("lead", "hello")
     assert (r.returncode, r.stdout.strip()) == (2, status)
+
+
+def test_an_archived_target_or_one_on_a_card_is_never_sent(env: Env) -> None:
+    """docs/threat-model.md: a send answers a pending permission card and unarchives an archived agent."""
+    env.answer("agent", {"Archived": True, "PendingPermissions": []})
+    r = env.run("lead", "hello")
+    assert r.returncode == 2 and "archived" in r.stdout
+    env.answer("agent", {"Archived": False, "PendingPermissions": [{"id": "p1", "tool": "Bash"}]})
+    r = env.run("lead", "hello")
+    assert r.returncode == 2 and r.stdout.startswith("permission (not sent") and "paseo permit ls" in r.stdout
+    assert not env.sent()
+    assert [c["argv"] for c in env.calls() if c["argv"][0] == "agent"][0] == ["agent", "inspect", A1, "--json"]
+    env.fail("agent")
+    assert env.run("lead", "hello").returncode == 1 and not env.sent()
 
 
 def test_paseo_failing_is_exit_1_with_its_stderr(env: Env) -> None:
@@ -200,6 +215,15 @@ def test_the_outbox_flags_are_refused_as_retired(env: Env, args: list[str]) -> N
 def test_via_is_refused_with_the_route_retirement(env: Env) -> None:
     r = env.run("lead", "hi", "--via", "pane")
     assert r.returncode == 64 and "relay.py reaches Paseo agents only since 2026-11-06" in r.stderr and not env.calls()
+
+
+@pytest.mark.parametrize("text", ["/clear", "  /new", "​﻿/compact", "／quit"])
+def test_a_text_that_would_run_a_built_in_is_never_sent(env: Env, text: str) -> None:
+    """Kept from the old relay.py (adversary round 2): Paseo trims whitespace and zero-width characters before its slash parser."""
+    for extra in ({}, {"PASEO_AGENT_ID": A2}):    # with or without the `[relay from ...]` prefix
+        r = env.run("lead", text, **extra)
+        assert r.returncode == 64 and "would run a built-in" in r.stderr
+    assert not env.calls()
 
 
 @pytest.mark.parametrize("args", [["lead"], ["lead", "hi", "--message-file", "-"], ["lead", "--idle", "5", "hi"], ["lead", "   "]])

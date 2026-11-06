@@ -68,7 +68,7 @@ Verify startup once with `paseo inspect <agent-id> --json` and verify the return
 
 For a durable continuation, first use **handoff** to write and commit the Tier 2 brief in the claimed task worktree and **session-handoff** to update the owned Tier 1 chain. Put the explicit chain pointer in the initial prompt; a bare `/baton` from a shared checkout can resume another chain. Do not run handoff's same-session `/new` when transferring to Paseo.
 
-After startup and any expectation transfer below, tell every still-relevant peer the new agent ID/title, workspace ID/name, task worktree and chain pointer through **peer-relay**. Check `delivered`; carry queued/unverified records without resending. A permission/question-card refusal remains blocked: report it and leave the notice for after that card is resolved, never bypass it. Preserve the old transcript until the receiver is verified; do not archive a workspace containing other agents or terminals.
+After startup and any expectation transfer below, tell every still-relevant peer the new agent ID/title, workspace ID/name, task worktree and chain pointer with the relay shim (`~/src/djbclark-ade/skills/session-finder/relay.py` `PEER --message-file -`, which reads `paseo send --json`'s `.status`, 2026-11-06). Check `delivered`; a `queued` or other status is not delivered: carry it in the Tier 2 document without resending. A permission/question-card refusal remains blocked: report it and leave the notice for after that card is resolved, never bypass it. Preserve the old transcript until the receiver is verified; do not archive a workspace containing other agents or terminals.
 
 ## Retire the predecessor, and register the successor with peers (djbclark, 2026-10-30)
 
@@ -98,43 +98,30 @@ Dann's. The Dann-specific reading, with commands and a dated seat map, is
    cannot hand off to it, cannot relay to it, and cannot notice it was archived; that is a one-way
    link and it is how an entity splits. A notice names the agent id and tab title, the **role** it
    answers to and the role it is being told about, and that this id supersedes any earlier id for that
-   role. Send it through **peer-relay** and read the status word: unsent until `delivered` or an
+   role. Send it with the relay shim and read the status word: unsent until `delivered` (exit 0) or an
    `ack <id>`. An idle peer gets a plain prompt, never `--steer`. **The role is the durable address
    and the id is the instance** — ids go in the notice and in the routing table, never in a brief as
    if they were permanent.
 
-## Peer notices belong to the successor (operator, 2026-10-27)
+## Peer notices belong to the successor (operator, 2026-10-27; relay shim, 2026-11-06)
 
-
-`relay.py --expect-ack` and the first-contact footer tell the peer to reply to the **sender's own** id (`relay.py` footer, `me[id]`),
-and the expectation watches the **sender's** transcript. A notice sent by the retiring session therefore sends every late ack to a
-window that is about to close (2026-10-27: a peer's ack reached the old session after the transfer and would have been lost).
+Paseo has no outbox and no expectation ledger: `relay.py --expect-ack`, `--pending`, `--sweep` and `--transfer-expectations` were
+retired on 2026-11-06 (the shim refuses them, exit 64). A late `ack TOKEN` therefore reaches whichever id the peer was told to
+answer, and a notice sent by the retiring session sends every late ack to a window that is about to close (2026-10-27: a peer's ack
+reached the old session after the transfer and would have been lost).
 
 1. The retiring session sends no location notice. It puts the durable peer list in the Tier 2 document: per peer the id, title,
-   workspace, any relay record ID already sent with its status (`delivered`, `queued`, `unverified`, `failed` or blocked by a
-   question card) and the ack token it was asked for.
-2. Before the old session finishes, it verifies that the successor accepted this duty (the successor's named ack).
-   This acceptance ack is separate from the late peer acks being adopted. The old session then finishes; no step depends
-   on its model or window forwarding a late reply.
-3. The **successor FIRST transfers** expectations already sent by the old session:
-   `relay.py --transfer-expectations OLD_SENDER` (or repeat `--id TOKEN` to select), then `relay.py --pending` / `--sweep`.
-   OLD_SENDER is its exact fleet id, full session id or Paseo id and must name one row carrying `finished`: Claude transcript
-   `/handoff` or `/quit`, or ACP `done` (heuristics, not proof of process exit; ACP can take another turn). A non-Claude Paseo
-   agent cannot be transferred yet: it has no `finished` evidence and is refused, exit 2. Live, missing, ambiguous and self rows
-   are also refused, exit 2. A same-pane successor sharing the old fleet id cannot transfer, even with distinct session ids.
-   Unswept acks in the OLD transcript are settled as `acked` rather than transferred. Tokens skipped for ownership/target safety
-   are listed as `skipped`. JSON/text report `transferred`, `acked`, `skipped` and `missing`; any explicit `--id` not transferred
-   exits 1 with `missing: [...]` (including absent, closed, another sender's, skipped, or just settled as `acked`). Partial transfers
-   still take effect. With no explicit ids, zero transfers exits 0. Never resend notices already sent or hand-edit their records.
-4. **THEN the successor tells peers** to address late `ack TOKEN` replies to its surviving id, from its real identity
-   (`relay.py PEER "<text>" --expect-ack NEW_TOKEN`; first contact asks for a named ack). Use a fresh token for a deliberate
-   new return-path check. An ack sent to the SUCCESSOR before the transfer offset is not counted. Transfer forwards no messages.
-   Queued, unverified and card-blocked statuses survive unchanged and are never called delivered; notify a blocked peer after
-   its card resolves, not around it.
-5. Acceptance scenario: the old session finishes before a peer's delayed ack and before a queued notice delivers. While its
-   finished fleet row still exists, the successor transfers the open expectation, THEN tells the peer its surviving address.
-   `relay.py --pending` lists the new owner; the later ack to the successor resolves it by `relay.py --sweep`. An ack already
-   in the old transcript is instead settled during transfer. The queued notice remains queued until relay reports `delivered`.
+   workspace, the status of anything already sent (`delivered`, `queued`, `timeout`, or blocked by a permission card) and the ack
+   token it asked for.
+2. Before it finishes, the retiring session sends the successor the handoff text and proves the return path: `~/src/djbclark-ade/skills/session-finder/relay.py`
+   `<successor-id> --message-file BRIEF --ack <own id> --wait S` (that is `paseo send --no-wait --json`, read `.status`: `sent` or
+   `completed` is delivered, `queued` is not; then `paseo wait <successor-id> --timeout S --json`), then reads the successor's
+   named ack. No step depends on the old window forwarding a late reply.
+3. **THEN the successor tells peers** to address late `ack TOKEN` replies to its surviving id, from its own identity
+   (`~/src/djbclark-ade/skills/session-finder/relay.py` `PEER --message-file - --ack NEW_TOKEN`; first contact asks for a named ack). An open token the old session was owed
+   is asked for again by the successor; nothing transfers it.
+4. Statuses are never upgraded: `queued`, `timeout` and `permission` stay not delivered. Notify a blocked peer after its card
+   resolves (`paseo permit ls`), not around it.
 
 CLI gotcha (2026-10-27): `paseo logs --json` prints rendered text, not parseable JSON, on this install; `inspect` and `logs` do not
 share an encoding. Match a token in logs as text.

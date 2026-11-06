@@ -130,8 +130,9 @@ the task, and the ambiguity is copied into every slice.² ³ Every brief has:
    `wait` on `gh pr checks --watch` with nothing depending on it, and the
    operator had to interrupt. **Why it is worse than idle: an agent inside a
    long blocking wait never goes idle, so it cannot receive any relayed
-   message** (`relay.py` defers a text to a working target until it is idle):
-   it is deaf as well as silent. On 2026-11-02 the lead's messages sat queued
+   message** (Paseo queues a text for a working target until it has been quiet
+   for 2 s, and the relay shim reports that as `queued`, not delivered,
+   2026-11-06): it is deaf as well as silent. On 2026-11-02 the lead's messages sat queued
    for hours behind such waits and were read from relay's deferred folder by
    hand. Do other work; if there is none, end the turn with a status line (what
    runs, where its log is, what to check next) and let the result wake you.
@@ -145,10 +146,10 @@ the task, and the ambiguity is copied into every slice.² ³ Every brief has:
 8. **A reply that cannot be delivered because its target waits on a question
    or permission card is the operator's to unblock** (2026-11-02: a relay
    waited 184 minutes behind a card, and the target's own reply to the lead
-   sat behind one too). `relay.py` defers the text behind the card as before,
-   and now sends ONE `hermes-ping` naming target, card, sender and message id
-   once it has waited 30 minutes (`RELAY_CARD_ALERT_S`, 0 = off). Report the
-   message as queued behind a card and move on; do not retry or poll it.
+   sat behind one too). The relay shim (2026-11-06) reports such a send as
+   `permission` or `queued` (exit 2, not delivered); its old card alert went with
+   the outbox. `paseo permit ls` shows the pending card. Report the message as
+   queued behind a card and move on; do not retry or poll it.
 
 ## 6. Checks: focused first, full suite before commit
 

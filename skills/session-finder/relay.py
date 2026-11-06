@@ -21,12 +21,14 @@ RETIRED_ROUTES = "relay.py reaches Paseo agents only since 2026-11-06 (herdr and
 RETIRED_FLAGS = ("--pending", "--sweep", "--retire", "--transfer-expectations", "--expect-ack")
 RETIRED_OUTBOX = "retired 2026-11-06: Paseo has no outbox; see `paseo permit ls` for pending permissions"
 DELIVERED = ("sent", "completed")
+SLASH_STRIP = " \t\r\n ​‌‍⁠﻿"
 EPILOG = f"""exit status:
   0   delivered: `paseo send --json` read `sent` or `completed` (with --wait: and `paseo wait` then read `idle`)
   1   paseo failed: not installed, exited non-zero (no daemon, unknown agent), gave no JSON, or did not answer in time
-  2   not delivered: `queued` (accepted by the daemon, not yet delivered), `timeout`, `permission`, `error`; or --wait timed out or hit a permission
+  2   not delivered: `queued` (accepted by the daemon, not yet delivered), `timeout`, `permission`, `error`; or --wait timed out or hit a permission;
+      or not sent, because `paseo agent inspect` shows the target archived or with a pending permission or question card
   3   TARGET is not exactly one Paseo agent ({RETIRED_ROUTES})
-  64  usage error, or a retired flag: --via ({RETIRED_ROUTES}); {', '.join(RETIRED_FLAGS)} ({RETIRED_OUTBOX})
+  64  usage error, a text starting with `/` (it would run a built-in in the target), or a retired flag: --via ({RETIRED_ROUTES}); {', '.join(RETIRED_FLAGS)} ({RETIRED_OUTBOX})
 TARGET is a Paseo agent id, a prefix of its id or shortId, its name (title), or `self` ($PASEO_AGENT_ID), as `paseo ls -a -g --json` lists it.
 A sender with no $PASEO_AGENT_ID (a launchd job) is named in a `[relay from NAME]` prefix, NAME from $RELAY_SENDER_NAME.
 Shim: removed in the follow-up PR after one live cycle, at the latest {REMOVE_BY}."""
@@ -102,6 +104,8 @@ def main(argv: list[str]) -> int:
     text = text[:-1] if text.endswith("\n") else text
     if not text.strip():
         ap.error("the message is empty")
+    if text.lstrip(SLASH_STRIP).startswith(("/", "／")):    # Paseo trims these before its slash-command parser (old relay.py, adversary round 2)
+        ap.error("not sent: text starting with '/' would run a built-in; peers do not run another session's built-ins")
     if a.ack:
         text += f"\n\nReply with `ack {a.ack}` through relay.py."
     if not os.environ.get("PASEO_AGENT_ID"):
@@ -118,6 +122,18 @@ def main(argv: list[str]) -> int:
         print(f"relay.py: {RETIRED_ROUTES}; {why}", file=sys.stderr)
         return 3
     aid = str(hits[0]["id"])
+    # never into a card or an archive (docs/threat-model.md): a send answers a pending permission, and unarchives an archived agent
+    rc, info, err = paseo("agent", "inspect", aid, "--json", timeout=30)
+    if rc:
+        print(f"relay.py: paseo agent inspect failed: {err}", file=sys.stderr)
+        return 1
+    info = info if isinstance(info, dict) else {}
+    if info.get("Archived") or info.get("archived"):
+        print(f"not sent: {aid} is archived (a send would unarchive it); unarchive it in Paseo first")
+        return 2
+    if info.get("PendingPermissions") or info.get("pendingPermissions"):
+        print(f"permission (not sent: {aid} waits on a permission or question card: `paseo permit ls`)")
+        return 2
     with tempfile.TemporaryDirectory(prefix="relay-shim-") as tmp:    # a file, not argv: no text in `ps`, no option parsing of a leading `-`
         path = os.path.join(tmp, "message.txt")
         with open(path, "w", encoding="utf-8") as fh:

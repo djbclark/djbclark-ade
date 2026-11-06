@@ -9,7 +9,6 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "skills" / "session-finder"))
 import fleet  # noqa: E402
-from nativeid import native_id  # noqa: E402
 
 
 @pytest.mark.parametrize("flags", [[], ["--mode", "text"], ["--mode=text"], ["--", "--print"]])
@@ -27,16 +26,6 @@ def test_pi_headless_is_not_a_seat(flags):
     argv = ["node", "/tmp/pi", *flags]
     record = {"argv": argv, "argv0": "node", "pid": 12345}
     assert fleet._tui_of([record]) == (None, None, None, None)
-
-
-@pytest.mark.parametrize("sid,expected", [
-    ("custom_session_id", "custom_session_id"),
-    ("/tmp/pi/timestamp_custom_session_id.jsonl", "custom_session_id"),
-    ("/tmp/omp/timestamp_native-id.jsonl", "native-id"),
-    ("/tmp/native-id.jsonl", "native-id"),
-])
-def test_native_transcript_ids_preserve_underscores(sid, expected):
-    assert native_id(sid) == expected
 
 
 @pytest.mark.parametrize("platform", ["linux", "darwin"])

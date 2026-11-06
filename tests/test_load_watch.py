@@ -580,14 +580,15 @@ def test_send_to_relay_channel_is_one_attempt_even_on_a_restart_code(monkeypatch
     argvs, pauses, _ = fake_send(monkeypatch, lw, [(1, UNREACHABLE), (0, "")])
     assert lw.send_to({"channel": "relay", "target": "t"}, "hi") is False
     assert len(argvs) == 1 and not pauses and "relay.py" in argvs[0][1] and "--json" not in argvs[0]
-    assert argvs[0][2:] == ["t", "hi", "--no-defer", "--no-ack"] and "--" not in argvs[0]
+    assert argvs[0][2:] == ["t", "hi"] and "--" not in argvs[0]    # the relay shim's flag set (2026-11-06, docs/slim E3)
 
 
-def test_send_to_relay_defers_only_when_asked_for_the_registration_check(monkeypatch):
+def test_send_to_relay_registration_check_uses_the_shims_flags(monkeypatch):
+    """The relay shim has no outbox (2026-11-06, docs/slim E3): DEFER no longer adds or drops a flag."""
     lw = load_module()
     argvs, _, _ = fake_send(monkeypatch, lw, [(0, "")])
     assert lw.send_to({"channel": "relay", "target": "t"}, "hi", defer=True) is True
-    assert argvs[0][2:] == ["t", "hi", "--no-ack"]
+    assert argvs[0][2:] == ["t", "hi"]
 
 
 def test_notify_never_lets_relay_queue_the_incident_brief(monkeypatch):
@@ -603,7 +604,7 @@ def test_notify_never_lets_relay_queue_the_incident_brief(monkeypatch):
     relayed, ping = lw.notify("inc1", g, "/tmp/top", "/tmp/brief.md", 12.0, 8, False)
     assert relayed is False and "could not reach it" in ping and "acp-dispatch cursor" in ping
     relay_argv = next(a for a in argvs if "relay.py" in a[1])
-    assert relay_argv[-2:] == ["--no-defer", "--no-ack"] and relay_argv[2] == "abcd1234-0000"
+    assert relay_argv[2:] == ["abcd1234-0000", relay_argv[3]] and relay_argv[3].startswith("load-watch inc1:")    # the shim's flag set
 
 
 def test_watcher_set_needs_a_session(tmp_path):
