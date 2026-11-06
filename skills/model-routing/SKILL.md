@@ -237,8 +237,7 @@ and *Current exclusions*.
   `aiuse` labels "omp credits" is the Claude Max plan's monthly API credits (an
   expiring dollar grant, resets 2026-11-05). It is a **normal tier, used with
   discernment**: first for work that needs API access and cannot run through a TUI
-  or ACP (kind **`api-only`**: SDK paths such as the Claude route in
-  `bin/failover.py`, a verdict classifier, batch/API-only jobs; omp ranks first),
+  or ACP (kind **`api-only`**: SDK paths such as a Claude API call (a model chain is `paseo run`'s job), a verdict classifier, batch/API-only jobs; omp ranks first),
   otherwise for ordinary `code` and `bulk`
   slices via `acp-run omp --model anthropic/claude-sonnet-5-5 [--effort L]`, so the
   credits are **fully used before they expire each month, never left unspent**.

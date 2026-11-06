@@ -1,3 +1,4 @@
+<!-- moved from docs/ on 2026-11-06 by the slim-down (E10) -->
 # failover — one chain library for every tool that must not stop on one dead pool
 
 `bin/failover.py` (2026-10-12) runs a task through an ordered chain of agent

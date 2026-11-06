@@ -1,7 +1,7 @@
 """ade_gates: the Claude quota gates' numbers, from code defaults, config/gates.toml, a temporary profile and env JSON.
 
 Imported by bin/claude-fleet-governor, bin/claude-quota-guard and bin/gate-profile (they run under `python3 -I`, so each
-puts this directory on sys.path first, the way bin/acp-dispatch does for failover.py). Not a program.
+puts this directory on sys.path first, the way bin/acp-dispatch does). Not a program.
 
   load_gates(gate, now, defaults) -> (thresholds, info)      gate: "governor" | "quota_guard" | "frontier"
 

@@ -280,7 +280,7 @@ class Job:
 
     @property
     def effective_kill_mode(self) -> str | None:
-        """launchd leaves a job's setsid-detached children alive (bin/deadline's sweep, skillopt-night); systemd's default
+        """launchd leaves a job's setsid-detached children alive (bin/deadline's sweep); systemd's default
         control-group mode would kill them when ExecStart exits. So a oneshot defaults to `process`."""
         if self.kill_mode:
             return self.kill_mode

@@ -5,7 +5,7 @@ __pycache__/
 .ruff_cache/
 .zcode/
 
-# SkillOpt-Sleep staging, evidence and handoff rounds (bin/skillopt-night): local, sensitive.
+# SkillOpt-Sleep dirs: kept until the operator removes the harvested dirs (E10 report G).
 /.skillopt-sleep/
 /.skillopt-sleep-handoff/
 

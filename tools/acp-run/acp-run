@@ -425,8 +425,8 @@ def bin_settle(found: str, poll: float) -> None:
 # trips only if its permission request has not arrived within this grace.
 TRIP_GRACE_S = 2.0
 # ACP tool kinds a caller may exempt from the tripwire with --tripwire-exempt-kinds
-# (read-only kinds only; never execute, edit, delete, move, fetch or other). Used by
-# failover.
+# (read-only kinds only; never execute, edit, delete, move, fetch or other). No caller
+# since 2026-11-06 (failover.py deleted).
 TRIPWIRE_EXEMPTABLE = ("read", "search")
 # --perm read-only (2026-10-19): the agent may use tools of these ACP kinds without asking; any
 # other tool call trips (EXIT_TRIPWIRE) exactly as under --perm deny, and a permission request for

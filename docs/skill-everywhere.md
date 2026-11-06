@@ -35,6 +35,8 @@ and can advertise the trash skill under the live name. Hide it with
 
 ## 1. Link it
 
+After a new skill is linked, run `/reload-skills` in running Claude sessions (per-skill symlinks are the documented mechanism; a directory-level symlink is not, so none is used).
+
 ```sh
 ~/src/djbclark-ade/bin/skill-everywhere --all                # sync all shared skills
 ~/src/djbclark-ade/bin/skill-everywhere --check --all        # exit 1 for installed-target gaps

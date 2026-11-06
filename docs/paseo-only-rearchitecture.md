@@ -240,7 +240,7 @@ Counts are `rg -li` over the repo on 2026-10-29, excluding `graft/` and `docs/ha
 | `watch` roles, `fleet-watch` (in `~/ops/site-private/bin`, not this repo), `paseowatch`/`cfenginewatch` (`fleet-watch upstream --relay-to` uses relay.py), `tell-chief-of-staff` | — | REWRITE in D6 | `paseo send` from the launchd script; schedules only where a run needs judgment (F2) |
 | `load-watch` (`session-load-watch` and `rumination-watch` deleted 2026-11-06, slim-down E5), `bg`, gates, `wait-file` | — | KEEP (launchd, F2); drop pane typing | deliver via `paseo send` |
 | `claude-quota-guard`, `context-watch`, `context_size_nudge` (provider hooks) | — | KEEP | they run inside the provider; G2 enforces the same gates for launches that bypass the hook |
-| `pr-wait`, `ade-git-guard`, `git-commit-own`, `local-review`, graft, `aiuse`, `web-get`, `failover.py`; `ci-waiver` once parked PR 118 lands (not on master) | — | KEEP (harness-neutral) | n/a |
+| `pr-wait`, `ade-git-guard`, `git-commit-own`, `local-review`, graft, `aiuse`, `web-get` (`failover.py` deleted 2026-11-06, slim-down E10: the model chain is `paseo run`'s); `ci-waiver` once parked PR 118 lands (not on master) | — | KEEP (harness-neutral) | n/a |
 | Running Paseo plugins not covered elsewhere (`paseo plugin ls`, 2026-10-30): `better-paseo` (chat timeline and agent board; its approve/deny and archive buttons act only on the operator's click), `herald` (speaks when an agent waits; it denies tool requests only from its own summary helpers; it used to **hard-delete** (`paseo delete`) every agent labelled `herald.role=summarizer`, selected by that label, until djbclark set `cleanup.deleteHelpers:false` on 2026-10-30), `reopen-archived` (reopens archived workspaces with their agent), `skills` (skills browser), `forges` (no description; no permission, archive or prompt calls; it vendors an unused `agent.create` MCP-injection helper) | — | KEEP; herald's hard delete off and asserted (B4.3, G2.8) | none answers another agent's card or archives on its own. No running plugin attaches tools or MCP servers today (`better-paseo` and `usage-auto-resume` hook the legacy `agent.session_open` and return neither). This inventory is a snapshot: plugins track latest, so D2's catalog check (open-time tools and create-time `mcpServers`) reruns on every plugin install or upgrade |
 | `cow-workspaces` | — | RETIRE | Paseo worktree workspaces plus `fresh-worktrees` (running) and setup hooks; the claim stays (B4) |
 | `adversary` and other provider sub-agents | — | KEEP (provider-native) | or as a Paseo subagent in D5 |
@@ -458,7 +458,7 @@ D7 keeps the contract in current docs when this migration plan moves to history.
    with the source of truth in `sudo-secretspec`. Note: the Mac daemon runs with the Paseo relay off; push
    goes from the daemon to Expo directly (research B2), which D1 verifies with the phone off the tailnet.
 2. **Unattended runs**: split by job kind. Paseo schedules only for runs that need judgment
-   (`skillopt-night`, triage, reports); launchd (systemd on Linux) for monitors, collectors, record reaping
+   (e.g. `context-budget-check`, triage, reports); launchd (systemd on Linux) for monitors, collectors, record reaping
    and the watchdog. Schedules that keep worktrees need archive-on-finish turned off in the app first.
    **A scheduled run's success is its output, not the end of its turn (amended 2026-11-01).** Paseo marks
    a schedule run `succeeded` when the agent's turn ends, so a run that delegates and ends its turn reads as

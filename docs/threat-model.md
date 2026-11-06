@@ -7,6 +7,7 @@ Every claim names the file that shows it; a claim without a file is the operator
 "operator". Re-read the code before relying on a line here: facts rot.
 
 **Update 2026-11-06 (slim-down E9):** `bin/zcode-key-auth` (and its launchd job and `~/.zcode` credential-store write) was removed with the zcode TUI; the lines below that name it are the 2026-10-20 snapshot.
+**Update 2026-11-06 (slim-down E10):** `bin/skillopt-night`, `bin/skillopt_sources.py`, `bin/failover.py`, `bin/skill-get` and `claude/hooks/prior_art_nudge.py` were deleted; entries below that name them (the skillopt-night threat, its install and update paths, failover's `secret_value`, the tripwire kinds) are the 2026-10-20 snapshot and no longer apply.
 
 This repo is **personal tooling for one operator's machine, published as a public GitHub repo by choice**
 (`djbclark/djbclark-ade`). It runs no internet-facing service. `bin/firecrawl-router` is an HTTP listener, on

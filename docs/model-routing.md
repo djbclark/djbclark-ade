@@ -373,8 +373,7 @@ The governor's and the guard's numbers live in `config/gates.toml` and a tempora
 2a. **The Claude API credits (omp, operator 2026-10-19)**: the pool `aiuse` labels
    "omp credits" is the Claude Max plan's monthly API credits, an expiring grant. A
    normal tier used with discernment: first for work that needs API access and cannot
-   run through a TUI or ACP (kind `api-only`: SDK paths such as the Claude route in
-   `bin/failover.py`, a verdict classifier, batch jobs; omp ranks first), otherwise ordinary `code` and
+   run through a TUI or ACP (kind `api-only`: SDK paths such as a Claude API call (a model chain is `paseo run`'s job), a verdict classifier, batch jobs; omp ranks first), otherwise ordinary `code` and
    `bulk` slices via `acp-run omp --model anthropic/claude-sonnet-5-5`, so the credits
    are fully used before they expire each month and never left unspent. No
    `ACP_OPERATOR_APPROVED=omp`. `route_agent.py` tags the route "burn before reset"
