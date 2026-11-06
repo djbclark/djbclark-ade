@@ -8,10 +8,10 @@
 # HOW:      ACC_TCP_PORT=<claimed loopback port> bash tests/paseo-acceptance/d1-04-archive-parent-child.sh
 #           PROBE_PROVIDER (default codex), PROBE_MODEL (default gpt-6-luna, the cheapest codex model), PROBE_MODE (default full-access);
 #           claude-family only through omp: PROBE_PROVIDER=omp PROBE_MODEL=anthropic/claude-haiku-4-5 PROBE_MODE=full, never the Claude subscription
-# NEEDS:    isolated daemon on a TCP loopback port (the daemon injects agent MCP only for a TCP listener, lib/common.sh); one cheap
-#           provider; one parent turn (it makes two 60 s children)
-# STATUS:   2026-11-02: first run on a Unix-socket daemon: the codex parent answered "create_agent isn't available" (no MCP over a Unix
-#           listener), so the probe now needs ACC_TCP_PORT.
+# NEEDS:    isolated daemon on a claimed TCP loopback port (agent MCP is injected only for a TCP listener and with daemon.mcp.injectIntoAgents=true,
+#           which this probe sets in the TEST home only); one cheap provider; one parent turn (it makes two 60 s children)
+# STATUS:   run 2026-11-06 on 127.0.0.1:18809 (docs/d1-implementation-plan.md T7): exit 1 by design of the Accept line: the attached child is
+#           archived with its parent (cascade, never ran), the detached child survived and finished.
 #
 # One parent turn creates two children, A and B, both through MCP create_agent (agent-scoped, so lineage is set). A is detached
 # ('paseo agent detach') before the parent is archived, B is not: one paid parent turn answers both halves of the task.
@@ -26,6 +26,10 @@ M=${PROBE_MODEL:-gpt-6-luna}
 MODE=${PROBE_MODE:-full-access}
 SPEC="$P/$M"
 isolated_up lineage; trap isolated_down EXIT
+# Agent MCP tools reach an agent only with daemon.mcp.injectIntoAgents=true (default false, T8) AND a TCP listener (Unix: no URL).
+live_sha=$(live_config_sha)
+paseo daemon config set daemon.mcp.injectIntoAgents true --home "$PASEO_HOME" >/dev/null 2>"$ACC_BASE/config-mcp.err" || die "enabling mcp.injectIntoAgents failed ($ACC_BASE/config-mcp.err)"
+[ "$(live_config_sha)" = "$live_sha" ] || die "the LIVE config hash changed after enabling mcp.injectIntoAgents; restore $ACC_LIVE_CONFIG from a backup now"
 EV="$ACC_BASE/evidence"; mkdir -p "$EV"
 
 # snap LABEL: save 'paseo ls -a --json' as $EV/ls-LABEL.json. field LABEL ID KEY: one field of that snapshot ('gone' if absent).

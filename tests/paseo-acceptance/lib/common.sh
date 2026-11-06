@@ -155,6 +155,10 @@ isolated_down() {
   printf '%s\n' "$pids" > "$ACC_BASE/daemon.tree"; mv -f "$ACC_BASE/daemon.pid" "$ACC_BASE/daemon.pid.stopped"
   rm -f "$ACC_BASE/paseo.sock"
   [ -z "$left" ] || { echo "isolated_down: still alive after KILL:$left" >&2; return 1; }
+  # A claimed TCP port must be free again (never kill whatever holds it: report only).
+  if [ -n "${ACC_TCP_PORT:-}" ] && lsof -nP -iTCP:"$ACC_TCP_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+    echo "isolated_down: 127.0.0.1:$ACC_TCP_PORT still has a listener after the daemon tree stopped" >&2; return 1
+  fi
   if [ "${ACC_CLEAN:-0}" = 1 ] && [ "$(cat "$ACC_BASE/home/.ade-acceptance-home" 2>/dev/null)" = fresh ]; then
     rm -rf "$ACC_BASE"
   fi
