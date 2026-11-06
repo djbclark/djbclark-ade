@@ -525,8 +525,9 @@ I3. Plugins are unsandboxed daemon code: J6 is per plugin; a Sonnet subagent
 summarises each plugin's source before the operator installs it; prefer
 install counts and recent updates (D-table).
 I4. Native resume (0.15.0) is opt-in and new: Wave 3 evaluates
-`session-recovery` with it OFF and runs a measured trial only (J6), before
-PR 290 is discarded or landed.
+`session-recovery` with it OFF, then one bounded trial in a quiet window with
+launches refused (J6); a clean trial leaves it on, a mass wake turns it off;
+the result decides PR 290.
 I5. The suite fails on master in containers for 9 acp-dispatch tests plus
 self-slash, wait-file and git-hook tests (missing `g*` wrappers; report
 01BvGHLy): the baseline records them so deletions are not blamed.
@@ -598,18 +599,26 @@ J5. [answered 2026-11-06: **stays a doc**; carried items one line each in
 `docs/queue.md`, no task plugin] `docs/queue.md`: triage into a doc, or into
 `anh-chu/tasks` / `activechoon/kanban-md`?
 J6. [answered 2026-11-06: **all twelve** (the eight defaults and the four
-optionals), each after a Sonnet subagent's source summary; installed by the
-operator in Wave 3; `pr-radar` then replaces pr-wait's waiting half and
-`session-janitor` replaces herdr-sleeper outright; native resume stays OFF]
+optionals) **plus `sm1ee/session-recovery` as the thirteenth**, each after a
+Sonnet subagent's source summary; installed by the operator in Wave 3;
+`pr-radar` then replaces pr-wait's waiting half and `session-janitor`
+replaces herdr-sleeper outright; for the operator inbox **both** `asks` and
+`questions-please` are installed and the one still used after a week stays,
+the other goes in the follow-up PR; **native resume gets one bounded trial**:
+turned on by the operator for one daemon restart in a quiet window with the
+fleet idle and `load-watch admit` refusing launches, measured, and **left ON
+if it behaves** (a mass-wake incident turns it off); the trial's result
+decides PR 290 (J9)]
 **Plugins to install** (each is trusted daemon code; defaults in bold):
 **tell-agent**, **asks** or your **questions-please**, **baton**,
 **session-guard**, **usage-auto-resume**, **vitals**, **skills**, `pr-radar`,
 `session-janitor`, `plan-auto`, `zerosub` (only if you run several Claude
 subscriptions), and the official **`getpaseo/claude-code-entrypoint-env`**
-(A6; default yes). **Native "Resume agents after restart" stays OFF by
-default** (evidence F: best effort, no exactly-once, cannot exclude a
-session; report I7: one mass wake pushed load to 394): Wave 3 evaluates
-`session-recovery` with it off, and turns it on only for a measured trial.
+(A6; default yes). Native "Resume agents after restart" is OFF until Wave 3's **one bounded
+trial** (evidence F: best effort, no exactly-once, cannot exclude a session;
+report I7: one mass wake pushed load to 394): Wave 3 evaluates
+`session-recovery` with it off first, then the trial; a clean trial leaves it
+on.
 J7. [answered 2026-11-06: **one PR at the end of Wave 6**, gated by the E8
 Action, CI and the adversary marker; the operator merges with
 `--match-head-commit`; protection stays on] Final landing: one PR from the
