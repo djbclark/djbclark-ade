@@ -45,6 +45,10 @@ Nothing yet.
 5. On the Mac: `cd ~/src/djbclark-ade && git worktree prune && git worktree list | wc -l` (89–115 entries at check-in, report I6; prune removes only entries whose directory is gone).
 6. Approve or resize the W1 workflow (section H of PLAN.md) proposed in the lead's Wave 0 reply, then the ledger once it exists.
 
+### Ruling taken (2026-11-06)
+
+Operator: "Try to minimize the number of blocking things like this in the future." Applied as PLAN.md H: workflows start on the stated count; the ledger is posted, not awaited; Mac-only steps are batched per wave. W1 started at once (5 readers, 3-vote refute per KEEP row, 1 critic, cap 100 agents).
+
 ### Gate
 
 Wave 0 closes when the tag is on origin (step 3b). Every merge is done; the slim branch carries master fb3b9deb. Wave 1 (reads only, no merge) starts on the W1 approval; it does not need the tag.
