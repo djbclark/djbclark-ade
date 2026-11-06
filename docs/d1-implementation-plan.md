@@ -247,6 +247,22 @@ Do: parent creates a child through MCP `create_agent` (agent-scoped, so lineage 
 Accept: child survives archive of the parent (status still `running`, finishes). If not, successors stay
 top-level permanently (C1); record whether `detach` changes the outcome.
 
+**Checked 2026-11-06 (slice d1-t7-parent-child; system clock that day, brief said 2026-11-02; CLI and daemon 0.15.2): FAIL for an attached child, PASS for a detached one.**
+Run on the isolated daemon on claimed `127.0.0.1:18809`, one `codex/gpt-6-luna` parent turn that made two children through its own injected MCP
+`create_agent` (both `ParentAgentId` = parent; `notifyOnFinish` false), each told to run `sleep 60`. Child A was `paseo agent detach`ed first
+(its `ParentAgentId` became null), child B was not; then `paseo archive <parent>` (rc 0, `archived`). Result: **B was archived 0.4 s after the parent
+(`archivedAt` 11:24:39.978 against 11:24:39.586), listed `closed` from t+1 s, and never ran its `sleep`** (its log holds only the prompt): archiving a parent
+cascades to its running children and interrupts them. **A stayed `running` at +1/5/15/30 s, ran `sleep 60`, replied `CHILD-A-DONE`, and was never archived.**
+So the Accept line fails as written, but `detach` flips the outcome: **a successor (or any child that must outlive its parent) has to be detached
+before the parent is archived, or created top-level (C1: top-level is not forced, detach-then-archive is enough; G-side code must archive
+parents only after detaching every running child, and verify `ParentAgentId` is null first, as `paseo-handoff` already does).** Setup facts for any
+probe needing agent MCP, corrected from the earlier draft of this paragraph: the agent only gets MCP tools with **both** `daemon.mcp.injectIntoAgents=true`
+(default false, T8) **and** a TCP listener (bundle: `createAgentMcpBaseUrl` returns null for Unix; a Unix daemon was tried only without the setting).
+Run 2 (TCP, setting still false): the parent said PARENT-DONE and created nothing; run 3 (TCP plus setting): both children created. `isolated_up`
+takes `ACC_TCP_PORT=N` (refuses unless claimed in `ports.yml`, refuses if a listener exists); `isolated_down` now fails loudly if the port still
+has a listener (checked: free after the run). Record `~/.local/state/ade/acceptance/2026-11-06/d1-04-archive-parent-child.json`; evidence under the
+run's `ACC_BASE/evidence` (`ls-*.json`, `inspect-*`, `logs-a/b.txt`). Not tried: `--force`, a child that is idle at archive time, the Claude providers.
+
 ### T8. D1.5 Daemon restart keeps queued prompts, pending `notifyOnFinish` and schedules
 
 Files: `d1-05-restart-persistence.sh` (`DESTRUCTIVE: second daemon only`).

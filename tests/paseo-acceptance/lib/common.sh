@@ -59,7 +59,11 @@ _acc_tree() {
 
 # _acc_refuse MSG: tear down whatever isolated_up started, keep ACC_BASE for evidence, exit 2.
 _acc_refuse() { ACC_CLEAN=0 isolated_down; die "isolated_up refused: $1 (evidence kept in ${ACC_BASE:-?})"; }
-
+# Agent MCP (create_agent, send_agent_prompt, ...) is injected into agents only when the daemon listens on TCP: the daemon's
+# createAgentMcpBaseUrl returns null for a Unix listener (checked 2026-11-02 in the 0.15.0-beta.1 bundle, and by a codex agent on a
+# Unix-socket isolated daemon answering "create_agent isn't available"). A probe that needs MCP sets ACC_TCP_PORT=N, a loopback
+# port already claimed in site-djbclark/registry/ports.yml (refused otherwise, and refused if something already listens there).
+#
 # isolated_up NAME: fresh home under $TMPDIR/ade-acc-NAME.XXXXXX, Unix-socket listener (decision 1), plugins off
 # (no session-janitor, herald or telegram), dictation off (its first start downloads a ~600 MB local speech model),
 # a random password, `paseo daemon run` under a saved PID.
@@ -72,21 +76,28 @@ _acc_refuse() { ACC_CLEAN=0 isolated_down; die "isolated_up refused: $1 (evidenc
 # root of the tree isolated_down stops), status.pid (the pid `paseo status` reports: the DaemonRunner child of
 # daemon.pid; the server worker that logs is its child), status.json, daemon.out, password and paseo.sock.
 isolated_up() {
-  local name="${1:?usage: isolated_up NAME}" tmp="${TMPDIR:-/tmp}" base sock live_sha i kv up=0
+  local name="${1:?usage: isolated_up NAME}" tmp="${TMPDIR:-/tmp}" base sock live_sha i kv up=0 listen ports="${ACC_PORTS_YML:-$HOME/ops/site-djbclark/registry/ports.yml}"
   tmp="${tmp%/}"
   live_sha=$(live_config_sha); [ -n "$live_sha" ] || die "cannot hash the live config $ACC_LIVE_CONFIG"
   base=$(mktemp -d "$tmp/ade-acc-$name.XXXXXX") || die "mktemp failed under $tmp"
   chmod 700 "$base"; sock="$base/paseo.sock"
   export ACC_BASE="$base" PASEO_HOME="$base/home"
   [ "${#sock}" -lt 104 ] || _acc_refuse "socket path is ${#sock} bytes, over sun_path's 104: use a shorter TMPDIR"
+  listen="unix://$sock"
+  if [ -n "${ACC_TCP_PORT:-}" ]; then
+    case "$ACC_TCP_PORT" in ''|*[!0-9]*) _acc_refuse "ACC_TCP_PORT=$ACC_TCP_PORT is not a port number";; esac
+    ggrep -q -E "port: *$ACC_TCP_PORT[,} ]" "$ports" 2>/dev/null || _acc_refuse "port $ACC_TCP_PORT is not claimed in $ports (rule 17: claim through the lead first)"
+    ! lsof -nP -iTCP:"$ACC_TCP_PORT" -sTCP:LISTEN >/dev/null 2>&1 || _acc_refuse "something already listens on 127.0.0.1:$ACC_TCP_PORT"
+    listen="127.0.0.1:$ACC_TCP_PORT"
+  fi
   { mkdir -m 700 "$PASEO_HOME" && echo fresh > "$PASEO_HOME/.ade-acceptance-home"; } || _acc_refuse "cannot create $PASEO_HOME"
-  for kv in "daemon.listen=unix://$sock" pluginsEnabled=false features.dictation.enabled=false; do
+  for kv in "daemon.listen=$listen" pluginsEnabled=false features.dictation.enabled=false; do
     paseo daemon config set "${kv%%=*}" "${kv#*=}" --home "$PASEO_HOME" >/dev/null 2>>"$base/config.err" \
       || _acc_refuse "config set ${kv%%=*} failed"
     [ "$(live_config_sha)" = "$live_sha" ] \
       || _acc_refuse "the LIVE config hash changed after 'config set ${kv%%=*}'; restore $ACC_LIVE_CONFIG from a backup now"
   done
-  python3 - "$PASEO_HOME/config.json" "unix://$sock" <<'PY' || _acc_refuse "fresh config.json lacks the listener, pluginsEnabled=false or dictation off"
+  python3 - "$PASEO_HOME/config.json" "$listen" <<'PY' || _acc_refuse "fresh config.json lacks the listener, pluginsEnabled=false or dictation off"
 import json, sys
 c = json.load(open(sys.argv[1]))
 ok = (c.get("daemon", {}).get("listen") == sys.argv[2] and c.get("pluginsEnabled") is False
@@ -128,7 +139,7 @@ PY
   echo $! > "$base/daemon.pid"
   for i in $(seq 1 60); do
     kill -0 "$(cat "$base/daemon.pid")" 2>/dev/null || _acc_refuse "isolated daemon exited during start-up; see $base/daemon.out"
-    if [ -S "$sock" ] && pj status --json > "$base/status.json" 2>/dev/null \
+    if { [ -n "${ACC_TCP_PORT:-}" ] || [ -S "$sock" ]; } && pj status --json > "$base/status.json" 2>/dev/null \
       && python3 -c 'import json, sys; d = json.load(open(sys.argv[1])); sys.exit(0 if d.get("connectedDaemon") == "reachable" and d.get("serverId") else 1)' "$base/status.json"; then
       up=1; break
     fi
@@ -169,6 +180,10 @@ isolated_down() {
   printf '%s\n' "$pids" > "$ACC_BASE/daemon.tree"; mv -f "$ACC_BASE/daemon.pid" "$ACC_BASE/daemon.pid.stopped"
   rm -f "$ACC_BASE/paseo.sock"
   [ -z "$left" ] || { echo "isolated_down: still alive after KILL:$left" >&2; return 1; }
+  # A claimed TCP port must be free again (never kill whatever holds it: report only).
+  if [ -n "${ACC_TCP_PORT:-}" ] && lsof -nP -iTCP:"$ACC_TCP_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+    echo "isolated_down: 127.0.0.1:$ACC_TCP_PORT still has a listener after the daemon tree stopped" >&2; return 1
+  fi
   if [ "${ACC_CLEAN:-0}" = 1 ] && [ "$(cat "$ACC_BASE/home/.ade-acceptance-home" 2>/dev/null)" = fresh ]; then
     rm -rf "$ACC_BASE"
   fi
