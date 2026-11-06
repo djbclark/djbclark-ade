@@ -192,6 +192,35 @@ the local rescue still exists; record (`d1-03.json`) whether a failing teardown 
 worktree, and `session-janitor`'s current mode. If anything is lost: no slice moves to Paseo workspaces.
 Also: `config/paseo-teardown-repos` lists the repos slices may target (question 11), and the G2 refusal check is
 D2's, not D1's.
+**Checked 2026-11-02 (slice d1-t6-rescue; CLI and isolated daemon 0.15.0-beta.1; one `codex/gpt-5.6-luna` turn per run;
+throwaway repo, `origin` and `private` bare remotes created under `ACC_BASE`): T6's acceptance holds, with one plan change.**
+Built: `bin/ade-rescue-worktree` (steps 1-5 as above; the bundle is the full history of the branch plus `refs/rescue/<branch>`,
+so it verifies in an empty repo; `$ADE_RESCUE_ROOT` overrides the root for tests and probes; exit 0 rescued, `pushed:false` on
+a refused push, 1 local rescue failed, 2 usage), `tests/test_ade_rescue_worktree.py` (6 passed, `bg bin/pytest`),
+`config/paseo.json.example` (the teardown snippet, `"$PASEO_BRANCH_NAME"`/`"$PASEO_WORKTREE_PATH"`, the variables Paseo sets),
+`config/paseo-teardown-repos` (draft: `djbclark-ade` only). Results (`~/.local/state/ade/acceptance/2026-11-03/`):
+1. **`paseo archive <last agent>` does not run teardown and does not remove the worktree** (run 1, `$TMPDIR/ade-acc-rescue0.4nFipX`;
+   run 2 again, 20 s): the workspace stays active and the work stays on disk. The teardown runs on a **workspace-scope** archive
+   (`paseo workspace archive`, archive-on-merge, the MCP archive tool; Paseo source `workspace-archive-service.ts`). **Plan change for
+   D2:** a slice ends with `paseo workspace archive <wks>`, not an agent archive, or its worktree and workspace leak (nothing is lost).
+2. `d1-03-archive-rescue` **pass** (`$TMPDIR/ade-acc-rescue0.xRhKUX`): teardown ran with both variables set; rescue exit 0; dir 0700;
+   bundle carries `refs/heads/<branch>` and `refs/rescue/<branch>` and verifies standalone; restored: the unpushed commit, the
+   staged and the unstaged change; `untracked.tar` = `u.txt` only (ignored `x.log` absent); the bundle was verified inside the
+   teardown while the worktree existed (archive call +0.59 s teardown start, +1.16 s teardown end, +1.29 s worktree seen gone); the
+   `private` remote got `rescue/<branch>-<date>` with tracked files and no untracked file; the worktree was removed.
+3. `d1-03b-teardown-failure` **pass** (`$TMPDIR/ade-acc-rescue1.cm1hSQ`): the refusing remote (pre-receive exit 1) left
+   `pushed:false` with the hook's message, rescue exit 0, the local rescue complete and verified, no ref on the remote. The
+   teardown was then made to exit 3: **a failing teardown stops Paseo removing the worktree, but the workspace is archived anyway**
+   (`workspace archive` exit 0; daemon log "Worktree teardown failed during archive; workspace already archived"; the
+   directory stayed under `home/worktrees/` for 45 s and after). So a rescue failure (exit 1) keeps the work, and leaves an
+   orphaned worktree no active workspace lists: D2 needs a sweep for those.
+4. `session-janitor`'s mode: not running on the isolated daemon (`pluginsEnabled false`); live (files read, no `paseo` call):
+   `config.json` `plugins.session-janitor.enabled = false`, settings in
+   `~/.paseo/plugin-settings/session-janitor/preferences.json` `.values`: `enabled true`, `archiveChildren false`,
+   `deleteChildren false`, `deleteMain false`, `archiveAfterHours 6`, `waitForParentArchive true` (answers where decision 7's
+   three settings live). Observation for T2: the isolated daemon's log shows a plugin `worktree-include` loaded although
+   `pluginsEnabled` is false (a built-in, presumably; `plugin ls` reported none running).
+Not lost in any run. Record names are the probes' (`d1-03-archive-rescue.json`, `d1-03b-teardown-failure.json`), not `d1-03.json`.
 
 ### T7. D1.4 Archive a parent with a running child
 
