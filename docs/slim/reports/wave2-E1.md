@@ -4,7 +4,7 @@ Writer: one Claude agent (Opus 5.5) in worktree `/home/user/djbclark-ade/.claude
 branch `worktree-agent-a4b7b27ccf9493f12` (the brief named `claude/determined-maxwell-uvddaz`; the lead started this agent in its
 own worktree branch, fast-forwarded here to the slim branch head 21384c9 before the first commit). Brief:
 `docs/slim/briefs/wave2-E1-move.md`. djbclark-ade commits: `3f35486` (unlink, delete, move, `skill-everywhere` root, test, docs),
-`3209bfc` (reference rewordings), and this report. Not pushed (the lead merges).
+`3209bfc` (reference rewordings), `2214d07` (this report), and the review repair (section I). Not pushed (the lead merges).
 
 ## A. What moved
 
@@ -20,13 +20,21 @@ site-djbclark commits on `slim-intake/2026-11` (base `origin/master` f11d8218):
 - `f3a273f2e7222a67455b0895efcd80954c75c35a`: the merge that brings every path below (second parent 4b87808, the filtered
   history: 112 commits).
 - `f8ae50f3aba1164698946165cf88360fa3f9a17f`: `skills/README.md` rewritten (section 2c), CHANGELOG line, moved files' own
-  paths repointed from `~/src/djbclark-ade/...` to `~/ops/site-djbclark/...` (barnowl SKILL.md:14,181; bottom-config
+  paths repointed from `~/src/djbclark-ade/...` to `~/ops/site-djbclark/...`, corrected to `~/ops/site-public-djbclark/...`
+  in 3bc38c1 (barnowl SKILL.md:14,181; bottom-config
   SKILL.md:29-30; greptile SKILL.md:43; report SKILL.md:8-9; teach SKILL.md:15-16; claude/commands/teach.md:6;
   bin/change-hermes-ssh-gate:4; the "canonical source" lines of firecrawl, gmail-search, ovhcloud-api, setup-modern-cli).
   References to tools that stay in djbclark-ade (`load-watch`, `firecrawl-router`, `session-finder`, `self-slash`,
   `apply-toolchain-prompt.md`) were left as they are.
 - `d2176afcf385f0354c74522a31cb4e075d4c7143`: `.gnu-tools-check-ignore` gains `skills/setup-modern-cli/*` (the line that left
   djbclark-ade's file).
+- `3bc38c1884b1b7e16eb175fc1054d60f6df0974c`: the review repair (section I): `bin/bg-offload:180-184` and
+  `cursor/home-agents.mdc:133` take `git-forgejo`/`forgejo-api` from `~/src/sipb-agent-skills/skills/forgejo/scripts`;
+  `roles/watchdogd/templates/watchdogd.d/hermes-quota.toml.j2:19,28` run
+  `/Users/djbclark/ops/site-public-djbclark/bin/change-hermes`; one sentence each for the third root in `AGENTS.md:205-207`,
+  `claude/README.md:14-17`, `cursor/home-agents.mdc:126-127`; every `~/ops/site-djbclark` in the moved files (including 4
+  pre-existing ones: diskfree SKILL.md:95,279, teach SKILL.md:117, firecrawl SKILL.md:150) now `~/ops/site-public-djbclark`;
+  `skills/README.md` names the two `book-to-kb` versions.
 
 | Path | Newest imported commit (site-djbclark) | Commits carried |
 |---|---|---|
@@ -77,11 +85,10 @@ commit message and in `skills/README.md`).
    `siyuan-excalidraw/scripts/upload_asset.py`, `siyuan-markdown/scripts/insert_image.py`); no test names `skills/_shared`
    (the `_shared` hits in `tests/` are test-function names such as `test_..._shared_checkout`).
 3. B3 MOVE removal: every path in section A, `git rm -r` (82 files).
-4. B4 Edits that go with them: `bin/skill-everywhere` third root `site_root="${SKILL_EVERYWHERE_SITE:-${OPS_ROOT:-$HOME/ops}/site-djbclark/skills}"`
-   (`bin/skill-everywhere:47`), read by `--all` (`:92`) and by name lookup after public and private (`:203`), in both error
-   texts (`:102`, `:206`) and the header (`:19`, `:25`); new test
-   `tests/test_skill_everywhere_all.py::test_site_root_is_a_third_root_after_public_and_private`; `docs/skill-everywhere.md:22-26,46-47`
-   (rule 8); `.gnu-tools-check-ignore` loses the `setup-modern-cli` comment and glob; `docs/threat-model.md:29` names
+4. B4 Edits that go with them: `bin/skill-everywhere` third root, default
+   `${OPS_ROOT:-$HOME/ops}/site-public-djbclark/skills` since the repair (first `site-djbclark`, section I), override
+   `SKILL_EVERYWHERE_SITE`, read by `--all` and by name lookup after public and private, in both error texts and the header;
+   tests in `tests/test_skill_everywhere_all.py`; `docs/skill-everywhere.md` (rule 8); `.gnu-tools-check-ignore` loses the `setup-modern-cli` comment and glob; `docs/threat-model.md:29` names
    `~/src/sudo-secretspec/skills/sudo-secretspec/SKILL.md`.
 5. B5 Reference rewordings in KEEP files (commit 3209bfc): `bin/load-watch:22` (heavy-shim is site-djbclark's),
    `bin/load-watch:537-538` (the CI-offload skill's home `~/src/loopback-port-shim/skills/`, no longer the removed
@@ -145,7 +152,8 @@ addresses, IP addresses and `sudo-secretspec get|run` lines.
    firecrawl, gmail-search, greptile, ovhcloud-api, report, setup-modern-cli, teach, terminus-kira, todo), `bench/` and
    `bin/{app-tamer-ab,heavy-shim,codium-ai,change-hermes,change-hermes-ssh-gate}` with their history to site-djbclark;
    unlinked the five peer-repo skills; deleted the vendored `siyuan*` and `skills/_shared`. Added: `skill-everywhere`
-   reads a third root, `~/ops/site-djbclark/skills` (`SKILL_EVERYWHERE_SITE`)."
+   reads a third root, `~/ops/site-public-djbclark/skills` (`SKILL_EVERYWHERE_SITE`); `--check --all` warns about an absent
+   root; `--remove` of a gone skill matches all three roots; Grok Bot copies name the root they came from."
 6. D6 `.github/workflows/test.yml`: no line names a moved or deleted test.
 7. D7 `docs/queue.md`: 10 lines name moved or unlinked skills (exempt; E11).
 8. D8 Hits left on purpose in files another slice of this wave deletes or moves (ruling 11): `skills/cow-workspaces/SKILL.md:62-69`,
@@ -173,9 +181,9 @@ addresses, IP addresses and `sudo-secretspec get|run` lines.
 Order after the final merge: (1) merge `slim-intake/2026-11` and pull the site-djbclark checkout; (2) `ade update`, which
 removes the moved directories, so their links dangle; (3) `~/src/djbclark-ade/bin/skill-everywhere --all`, which relinks a
 dangling link to its source in the new root (link mode replaces a dangling link). `ade update` checks only djbclark-ade's
-own `skills/*`, so it does not do step 3. Before step 3, check that `~/ops/site-djbclark` resolves to the site-djbclark
-checkout: the check-ins name the Mac's checkout `~/ops/site-public-djbclark`, and 35 lines here name `~/ops/site-djbclark`; if
-only the first exists, export `SKILL_EVERYWHERE_SITE=~/ops/site-public-djbclark/skills` or add the link.
+own `skills/*`, so it does not do step 3. The site root is `~/ops/site-public-djbclark/skills` (the Mac checkout, per
+site-djbclark's `bin/deploy_ops_release.py:26,419` and `AGENTS.md:18,160,189`; `~/ops/site-djbclark` is the July-era name);
+`skill-everywhere --check --all` now says so in one warning line if that directory is absent.
 
 Skill links (each is `<dir>/<name> -> ~/src/djbclark-ade/skills/<name>` in every installed target dir:
 `~/.claude/skills`, `~/.agents/skills` (codex, goose, pi, zcode), `~/.gemini/antigravity-cli/skills`, `~/.copilot/skills`,
@@ -187,8 +195,11 @@ Skill links (each is `<dir>/<name> -> ~/src/djbclark-ade/skills/<name>` in every
 2. E2 `barnowl`: same; also pastebin.xvm.mit.edu's `~/.ssh/authorized_keys` forced command names
    `$HOME/src/djbclark-ade/skills/barnowl/scripts/bo-ssh` (old SKILL.md:181): it breaks when pastebin's checkout updates;
    pastebin needs the site-djbclark checkout and the line repointed (the moved SKILL.md:181 now names
-   `$HOME/ops/site-djbclark/...`).
-3. E3 `book-to-kb`: relink.
+   `$HOME/ops/site-public-djbclark/...`, which assumes the Mac's layout on pastebin; adjust to pastebin's checkout).
+3. E3 `book-to-kb`: two versions now sit in site-djbclark, the moved `skills/book-to-kb/` and the packaged tool's
+   `tools/book-to-kb/skills/book-to-kb/` (a different text, about 215 `diff` lines), and `tools/book-to-kb/install.sh` links
+   `<agent dir>/book-to-kb` at the tools copy, the same link name `skill-everywhere` makes. Pick one (operator batch);
+   `skill-everywhere` leaves a link to the other copy alone and exits 1. Neither was deleted (`skills/README.md` says so).
 4. E4 `bottom-config`: relink.
 5. E5 `coderabbit-feeder`: relink.
 6. E6 `diskfree`: relink.
@@ -199,7 +210,7 @@ Skill links (each is `<dir>/<name> -> ~/src/djbclark-ade/skills/<name>` in every
 11. E11 `report`: relink first among these (dialogue, research, retro and `bin/ade-retro` call it by name).
 12. E12 `setup-modern-cli`: relink.
 13. E13 `teach`: relink; also `~/.claude/commands/teach.md` links `~/src/djbclark-ade/claude/commands/teach.md`:
-    relink to `~/ops/site-djbclark/claude/commands/teach.md` or remove (`ade update`'s command-link check covers
+    relink to `~/ops/site-public-djbclark/claude/commands/teach.md` or remove (`ade update`'s command-link check covers
     djbclark-ade's `claude/commands/` only).
 14. E14 `terminus-kira`: relink.
 15. E15 `todo`: relink.
@@ -219,11 +230,20 @@ Bin links and outside files:
 19. E19 `~/.local/bin/codium-ai` -> `~/src/djbclark-ade/bin/codium-ai`: relink.
 20. E20 `~/.local/bin/change-hermes` -> `~/src/djbclark-ade/bin/change-hermes`: relink; the Mac's `~/.ssh/authorized_keys`
     forced command for the Grok Bot box key names `/Users/djbclark/src/djbclark-ade/bin/change-hermes-ssh-gate` (the gate's
-    own comment, now updated on the site side): repoint it; the box's own copy of `change-hermes` (remote mode) comes from
+    own comment, now `/Users/djbclark/ops/site-public-djbclark/bin/change-hermes-ssh-gate` on the site side): repoint it; the box's own copy of `change-hermes` (remote mode) comes from
     wherever the box syncs it, check that it does not track djbclark-ade master only.
 21. E21 `bin/app-tamer-ab`: any running `nohup app-tamer-ab run` keeps its old file open; a restart uses the new path.
 22. E22 Grok Bot box: `/home/box/agent-data/shared/skills-sync/sync.sh` fetches djbclark-ade `origin/master` and renders
     `ade-<name>` copies; the 15 moved skills drop out of its set at the next sync unless it also reads site-djbclark.
+23. E23 Done on the intake branch (3bc38c1), Mac step left: `bin/bg-offload` now finds `git-forgejo` and `forgejo-api` in
+    `~/src/sipb-agent-skills/skills/forgejo/scripts` (the unlink removed the `~/src/djbclark-ade/skills/forgejo` path it used),
+    and `cursor/home-agents.mdc:133` names the same path; `roles/watchdogd/templates/watchdogd.d/hermes-quota.toml.j2:19,28`
+    run `/Users/djbclark/ops/site-public-djbclark/bin/change-hermes`. **Re-render the watchdogd role on the Mac** after the
+    merge: the rendered `watchdogd.d/hermes-quota.toml` still names `/Users/djbclark/src/djbclark-ade/bin/change-hermes`, which
+    `ade update` removes.
+24. E24 The four moved test files (`tests/test_barnowl_skill.py`, `tests/test_bigteam_prune.py`,
+    `tests/test_change_hermes_{auto,lock}.py`) run in no CI on site-djbclark: its workflows run only
+    `tests/test_tendcf_consent.py`, and `just test` is local. The operator decides whether to add them to a workflow.
 
 ## F. Tests
 
@@ -252,7 +272,8 @@ Bin links and outside files:
 
 ## G. site-djbclark branch
 
-`djbclark/site-djbclark` branch `slim-intake/2026-11`, head `d2176afcf385f0354c74522a31cb4e075d4c7143` (pushed; verified with
+`djbclark/site-djbclark` branch `slim-intake/2026-11`, head `3bc38c1884b1b7e16eb175fc1054d60f6df0974c` after the repair
+(first push d2176af; both pushes verified with
 `gh api repos/djbclark/site-djbclark/branches/slim-intake%2F2026-11`). No PR: site-djbclark's master is not protected
 (`gh api .../branches/master/protection`: 404 "Branch not protected") and its CLAUDE.md lands by direct commit to master, so
 the lead merges the branch (fast-forward from master f11d8218, which it contains). Open a PR from
@@ -260,8 +281,8 @@ https://github.com/djbclark/site-djbclark/pull/new/slim-intake/2026-11 if a revi
 
 ## H. Left undone, and why
 
-1. H1 `~/ops/site-djbclark` vs `~/ops/site-public-djbclark` (section E): not checkable from the container; the default
-   follows the brief, with `SKILL_EVERYWHERE_SITE` as the override.
+1. H1 (resolved in the repair) The site root defaults to `~/ops/site-public-djbclark/skills`, not the brief's
+   `~/ops/site-djbclark/skills` (section I).
 2. H2 No PR opened on site-djbclark (section G).
 3. H3 The shared files of section D (merger's), AGENTS.md, CHANGELOG.md and the template: not edited, per the brief.
 4. H4 `skills/tell-coding-bot`, `skills/tell-chief-of-staff`, `bin/open-clean`, `skills/jevlike`: not touched (1d).
@@ -270,6 +291,30 @@ https://github.com/djbclark/site-djbclark/pull/new/slim-intake/2026-11 if a revi
 6. H6 `bin/load-watch:24,76` still name the `forgejo-ci` skill by name (it exists in loopback-port-shim); only the dead path
    at 538 was reworded. E5 trims load-watch and may drop the lines.
 7. H7 The 23 pre-existing `gnu-tools-check` findings in moved files (F4) were not fixed: out of scope for a move.
-8. H8 Correction: the site-djbclark merge commit f3a273f and djbclark-ade commit 3f35486 say "6 bin tools" in their subject;
+8. H8 Correction: the site-djbclark merge commit f3a273f and djbclark-ade commit 3f35486 say six bin tools in their subject;
    it is 5 (`app-tamer-ab`, `heavy-shim`, `codium-ai`, `change-hermes`, `change-hermes-ssh-gate`). Both lists in the bodies,
    the site-djbclark CHANGELOG line and this report name the 5 correctly; the pushed commit is not rewritten.
+
+## I. Review repair (2026-11-06, after the lead's BLOCK)
+
+1. I1 site-djbclark 3bc38c1: the forgejo script paths, the watchdogd `change-hermes` path, the third-root sentence in three
+   docs, `~/ops/site-public-djbclark` in every moved file, the `book-to-kb` note (section A, last bullet; section E23, E3).
+   `bash -n bin/bg-offload` passes; `tests/test_watchdogd.py` 50 passed; `tests/test_bg_offload.py` times out at its first test
+   (`test_a_held_targeted_run_is_offloaded_and_passes`, over 60 s) here, and the same test times out the same way at master
+   f11d8218 in a scratch clone, so the timeout is not caused by this change.
+2. I2 djbclark-ade `bin/skill-everywhere`:
+   1. I2a default site root `${OPS_ROOT:-$HOME/ops}/site-public-djbclark/skills` (`SKILL_EVERYWHERE_SITE` kept);
+   2. I2b `--check --all` prints `warning: skill root <dir> does not exist; its skills are not checked` once per absent root
+      (stderr, exit code unchanged); link-mode `--all` stays quiet;
+   3. I2c the `--remove` comment says three roots, and with the skill gone each link is matched against `<root>/<name>` for
+      all three roots (`gone_srcs`), not only the public one;
+   4. I2d Grok Bot copies: the `.skill-everywhere` marker's `source=` and the banner's link follow the root
+      (`djbclark-ade`, `site-djbclark` with its GitHub URL, `site-private` with no link); a djbclark-ade skill renders byte
+      for byte as before, so existing copies stay `copied`;
+   5. I2e usage text: `--all` syncs public/private/site skills, `--check --all` warns per absent root.
+3. I3 Tests: four new cases in `tests/test_skill_everywhere_all.py` (default root, absent-root warning, `--remove` of a gone
+   site skill, Grok Bot provenance per root), and the fixture now pins `SKILL_EVERYWHERE_SITE` to an empty directory so a real
+   `OPS_ROOT` cannot leak the operator's site skills into a run. `bin/pytest -q tests/test_skill_everywhere_all.py
+   tests/test_ade_update.py`: 112 passed, rc=0. No full suite (per the lead).
+4. I4 `docs/skill-everywhere.md`: the site root's path and default, the absent-root warning, `--remove` across three roots, the
+   Grok Bot provenance. `docs/mcp-servers.md:23,195`: `~/ops/site-public-djbclark`.
