@@ -147,7 +147,7 @@ C6. **Evidence to keep**: `docs/checkins/`, `docs/handoffs/`,
 | D2 Operator inbox of questions and permissions | `helm`, `/helm-all`, PR 261's ledger | native `paseo permit`, `list_pending_permissions`; `fullstackhouse/asks` (57), `wangfh5/agent-inbox` (6, new 11-03), the operator's own `djbclark/questions-please` (5) | REPLACE (E4); the operator's plugin first |
 | D3 Handoff and resume | `handoff`, `session-handoff`, `baton`, `hand`, PR 290's plugin | native resume after restart (0.15.0, opt-in), `/paseo-handoff`, `dennyferra/baton` 0.3.1 (16), `sm1ee/session-recovery` (20) | REPLACE for the live-agent case; KEEP the Tier 1 pointer file format (it is the cross-session record the operator reads); PR 290 PARKED until Wave 3 measures the native path |
 | D4 Quota pause and resume, surplus | `claude-quota-guard`, `ade_gates`, `gate-profile`, `claude-fleet-governor`, PR 270 | `paseo usage --json`; `tomgrin10/session-guard` 0.5.1 (pause at quota, continue after reset), `babo-jeonguk/usage-auto-resume` (254), `kapybara-org/zerosub` 1.5.1 (560, several subscriptions) ; `aborakati/usage-monitor` (351) for display; `codexbar usage --format json` where Paseo lacks a window | REPLACE the gate enforcement with session-guard/usage-auto-resume (E7); KEEP `context-watch` and `quota_nudge.py` only if the plugins cannot nudge a running session |
-| D5 Host load and runaway processes | `load-watch` (2.2k), `proc-cpu-watch`, `session-load-watch` | `tomgrin10/vitals` 1.0.0, `zedobaia/resources` (154), `itsjustanks/daemon` (70) show and stop; none "finds the agent behind the spike and tells it" | KEEP load-watch trimmed to find-and-tell, delivered by `paseo send`; delete proc-cpu-watch and session-load-watch (E5) |
+| D5 Host load and runaway processes | `load-watch` (2.2k), `proc-cpu-watch`, `session-load-watch` | `tomgrin10/vitals` 1.0.0, `zedobaia/resources` (154), `itsjustanks/daemon` (70) show and stop; none "finds the agent behind the spike and tells it", and none is a **pre-launch admission gate** | KEEP load-watch's two interfaces: `admit` (the pre-launch gate `bg`, `acp-dispatch`, `local-review` and `deadline_wait.py` call, exit 75 when too hot; `bin/load-watch:1631-1878`) and find-and-tell, delivered by `paseo send`; delete the pane-typing delivery, `proc-cpu-watch` and `session-load-watch` (E5) |
 | D6 Fan-out and slices | `bigteam`, `acp-dispatch` (5.9k), `acp-run` (5.3k) | native subagents and `paseo run --no-wait --output-schema`; `lerenn/playbooks` (approval-gated YAML pipelines), `gpambrozio/firstmate` (247), `gyuha/agent-team` (57); Claude Code workflows for the lead's own fan-out | REPLACE with a shim (E6): `acp-dispatch` becomes a thin `paseo run` wrapper keeping the exit-code contract and the outcome record for one cycle, then goes |
 | D7 Skills in every agent | `skill-everywhere`, `skill-get`, `fix-skill-frontmatter.py` | Claude-only: one symlink `~/.claude/skills → <repo>/skills` (no tool); other surviving providers: `npx skills add <repo>` (MIT; a snapshot, re-run on change, vercel-labs/skills#748); `gpambrozio/skills` (902) to list and invoke; `agentskills/skills-ref validate` for lint | REPLACE (E10) |
 | D8 Scheduler for the kept jobs | launchd plists; PR 291's `ade-sched` | no existing tool refuses on missing linger or wraps `flock -n`; `gpambrozio/launchd-jobs` is macOS-only visibility; Paseo schedules run agents, not shell jobs | KEEP `ade-sched` (land PR 291); Paseo schedules replace the nightly agent jobs (`skillopt-night`, `routing-recalibrate`) |
@@ -189,10 +189,19 @@ and `docs/apply-toolchain-prompt.md` → `docs/history/`. `cow-workspaces` and
 `bin/cow-pasture` (Paseo worktrees + `fresh-worktrees` + built-in
 `.worktreeinclude`).
 
-E3. **S-finder: SHIM then delete.** New `relay.py` = 60 lines: resolve the
+E3. **S-finder: SHIM then delete.** New `relay.py` (~100 lines): resolve the
 target to a Paseo agent id (`paseo ls -a -g --json`), call `paseo send`, print
 `delivered` on exit 0, refuse anything that is not a Paseo agent with a
-message naming the retirement date. Every other route, `fleet.py`,
+message naming the retirement date. **It keeps the flags its KEEP callers
+use**: `--message-file` (`-` for stdin), `--ack` and `--wait N` (mapped to
+`paseo send` + `paseo wait --timeout N`), because `bin/deadline:446-451`
+sends owner notices that way and `deadline` is KEEP; `deadline` is updated in
+the same slice if the mapping changes its exit codes. **The shim is installed
+only after** (a) every in-repo caller is on the shim's flag set (audit (e) in
+Wave 1 lists them) and (b) the C3 outside files that name `relay.py` are
+migrated or the operator accepts, per file, that non-Paseo routes (herdr and
+Orca panes, retired 2026-10-31) stop working for them; that is a Wave 3
+gate, not a Wave 6 one. Every other route, `fleet.py`,
 `launch.py`, `where.py`, `nested_pty.py`, adapters, `peer-relay`,
 `relay_prose_nudge.py`, and the 7.4k+1.7k+0.7k test lines go now. The shim
 and its one test go at the end of Wave 6 once C3's outside files are updated.
@@ -203,7 +212,10 @@ E4. **S-seat**: `helm` and `/helm-all` REPLACE (D2); `self-slash` DELETE (its
 one Paseo-era use, queuing `/compact` into the own pane, is `paseo send
 --behavior steer` to self); `autorename` DELETE except a 20-line
 `paseo workspace rename` helper if the operator still wants auto-titles;
-`hand`, `btww` DELETE (D3; `moyf/sidechat` or `nilbus/tangent` if wanted);
+`hand`, `btww` DELETE **for retired providers only**; for a provider J2 keeps,
+their links and the linked implementation stay until that provider's own
+retirement (E9 promises this; `moyf/sidechat` or `nilbus/tangent` for the
+side-question case if wanted);
 `paseo-new-seat`, `paseo-set-model`, `paseo-self`, `paseo-bypass-watch`:
 DELETE after the audit confirms `paseo run` + `paseo agent mode`,
 `PASEO_AGENT_ID`, and `j0rdsta/plan-auto` cover them (expected: all four).
@@ -223,9 +235,14 @@ E6. **S-acp: SHIM then delete.** `acp-dispatch` becomes a wrapper over
 the exit-code contract (3 no report, 4 BLOCKED, 124 timeout), the report
 file and `.done` record, `outcome` → `route_agent.py calibrate` records, the
 `--kind frontier` admission check (`bin/agent_guard.py` and its two tests stay
-with it, report B1d), and the brief footer. `acp-run` is kept only as the
-registry read by `route_agent.py` until E7 switches that to `paseo provider ls`,
-then deleted with `tests/test_acp_run_*` (4.5k). `acp-dispatch-wait`, the
+with it, report B1d), **the `load-watch admit` pre-launch gate (exit 75)**, and
+the brief footer. `acp-run` stays as the **launch interface** tendcf, nix2cf,
+Plektra and paseo4herdr call (C3) until each of those files is migrated to
+`paseo run` or the operator accepts the break per file; E7's registry switch
+to `paseo provider ls` does not by itself allow its deletion. `acp-run` and
+`tests/test_acp_run_*` (4.5k) go with the shims at the end of Wave 6; until
+then only its dead agent adapters (retired providers, E9) are trimmed.
+`acp-dispatch-wait`, the
 reap plist, the launchd runner scripts, `tests/test_acp_dispatch_*` (5.4k) go
 in this slice; the shim gets one new test. `bigteam` DELETE (its job is the
 lead's own `Agent`/`Workflow` fan-out plus `paseo run`; a one-page skill
@@ -241,9 +258,15 @@ retired providers removed from `config/routing.toml` and `docs/model-routing.md`
 `failover.py` KEEP only the model-chain half (its route half is `paseo run`);
 DELETE `routing-recalibrate` (+plist; becomes a Paseo schedule if still
 wanted), `go_model_policy.py` and the opencode-go rules once opencode is
-retired (J2b), `claude-fleet-governor`, `gate-profile`, `ade_gates.py`,
-`config/gates.toml`, `docs/gates.md` once session-guard/usage-auto-resume are
-verified live (D4), `claude-cost-whatif`; KEEP `claude-cost-mix` (small,
+retired (J2b), `claude-fleet-governor`, `gate-profile` and the **Claude-quota half** of
+`ade_gates.py` / `config/gates.toml` / `docs/gates.md` once
+session-guard/usage-auto-resume are verified live (D4); the **frontier half**
+(`load_frontier`, `FRONTIER_DEFAULTS`, `judged_pool_block`, `read_guard_state`,
+the `[frontier]` table) is KEEP because the kept `route_agent.py` imports it
+unconditionally (`bin/route_agent.py:122`, used at 1293-1313): either it stays
+as a trimmed `ade_gates.py` or it is ported into `route_agent.py` in the same
+slice, and the slice's test is that `route_agent.py policy` still runs;
+`claude-cost-whatif`; KEEP `claude-cost-mix` (small,
 local). `skills/model-routing` is rewritten around Claude tiers (section G)
 plus the surviving providers' rows; `effort-routing`, `fallback-chains` fold
 into it. PR 270 (`quota-surplus`) PARKED: if session-guard covers "spend
@@ -299,10 +322,10 @@ at the end. `graft build` last.
 | 0 | DONE: check-ins (37 + 5), rulings R1–R8, evidence taken. OPEN: baseline suite (running in the cloud, `docs/slim/baseline.md` when it ends; batch-1 reports note tests that fail on master in containers); operator confirms C1's three slices exited (J1); land PR 289 and PR 291 on master (pytest-linux pending on both); land `gitignore-aider` (one line) by PR and reset the shared checkout's master; tag `pre-slim-2026-11-06`; `git worktree prune` on the Mac; J2 answered | serial | all of the above |
 | 1 | Audits (a) `bin/`, (b) `skills/`, (c) `tests/` map, (d) `docs/` + queue, (e) outside dependents and links (C2, C3) ; lead writes `docs/slim/ledger.md`; **workflow** (section H, W1); operator approves the ledger once | 5 readers | ledger approved |
 | 2 | E1, E2, E10, E9 (retired providers only) | 3–4 writers + reviewers | suite green; refs zero (**workflow** W2) |
-| 3 | E3 shim, E4, E5; the operator installs the D2–D5 plugins named in J6 and turns on native resume, then verifies for one day before the REPLACE deletions merge | 3 | same |
-| 4 | E6 shim and bigteam, then E7 and E8; E6 and E7 as sibling cloud sessions | 2–3 | same; C3 outside-file edits proposed to the operator |
+| 3 | E3 shim, E4, E5; the operator installs the D2–D5 plugins named in J6 and turns on native resume, then verifies for one day before the REPLACE deletions merge | 3 | same; **the E3 shim merges only after the in-repo relay callers are on it and the C3 relay consumers are migrated or waived per file** |
+| 4 | E6 shim and bigteam, then E7 and E8; E6 and E7 as sibling cloud sessions | 2–3 | same; **`acp-run` is not deleted here**: C3's acp consumers are migrated or waived per file first (proposed to the operator as PRs if J2b allows) |
 | 5 | E11; AGENTS.md and README (Opus `high`; lead at `xhigh`); **workflow** W3 | 2 | suite green; `graft build` |
-| 6 | Shims removed (E3, E6) after C3 is done; upstream filings (gaps found in Paseo: a quota-pause primitive, a workspace claim primitive, if still missing); final PR to master or J7; delete `slim/*` branches after MERGED; decide lander/feeder (E9k) | serial | done |
+| 6 | Shims and `acp-run` removed (E3, E6) only after every C3 file is migrated or waived; upstream filings (gaps found in Paseo: a quota-pause primitive, a workspace claim primitive, if still missing); final PR to master or J7; delete `slim/*` branches after MERGED; decide lander/feeder (E9k) | serial | done |
 
 Each wave: a Sonnet research subagent re-checks Paseo and Claude Code docs
 for that wave's area (both moved weekly in October); briefs; writers;

@@ -136,7 +136,7 @@ stopped.
 | 254 | `habits-gate-subshell` | `bash_habits_gate` parsing fix | LAND if small and green (a Claude hook, KEEP), else PARK to Wave 5 |
 | 256 | `open-clean-env` | `bin/open-clean`, launch apps without the agent env | PARK; a Mac-only utility, decide in E1/E2 audit (likely MOVE to site-djbclark) |
 | 260 | `route-repo-scope` | route_agent per-repo pools (opencode-go) | DISCARD under H1 Claude-only; PARK otherwise (E7) |
-| 269 | `coding-bot-peer-link` | coding-bot over peer-link | DISCARD under H1; PARK otherwise (H2a iv) |
+| 269 | `coding-bot-peer-link` | coding-bot over peer-link | TRANSFER, then close: the operator ruled (consolidated report E9j) that the wrapper is re-homed into frdminc/peer-link with one repair round there, `~/.local/bin/coding-bot` and home-agents.md item 40 repointed, and a short `tell-coding-bot` pointer skill kept here; the slim branch takes nothing from the PR but keeps the branch and worktree `~/src/djbclark-ade-cb-pl-wt` until the transfer lands (superseded the earlier DISCARD, 2026-11-06, Codex P2 on PR 295) |
 | 281 | `fix/opencode-bridge-econnrefused-guard` | opencode-plugin-guard | DISCARD under H1 (E9); PARK otherwise |
 
 Operator does: nothing yet; these wait for batch 2 and H1. If an owner reports, its ruling supersedes this row.
