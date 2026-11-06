@@ -91,11 +91,16 @@ Mac daemon upgrade to 0.15.x is an operator step before Wave 3; fleet-watch's
 home is marked unverified.
 
 A8. **Round 4 (2026-11-06, Codex security review on head `56ad1cea`, one P2):**
-E8's local Claude review runs through the E6 restricted shim (read-only
-mode) and keeps `local-review`'s isolation checks as tests (detached worktree
-at the exact head, pinned base, scrubbed environment, transcript-proven
-read-only sandbox, untrusted-author refusal, descendant kill); D10 and J8
-restate it.
+E8's local Claude review is launched by a permanent review boundary
+(`bin/review-launch`: four read tools, no network, reads confined to the
+worktree, empty settings/MCP/hooks, bypass refused, tripwire) that E6's shim
+reuses and the follow-up deletion keeps, and it keeps `local-review`'s
+isolation checks as tests (detached worktree at the exact head, pinned base,
+scrubbed environment, boundary proven from the run's init event,
+untrusted-author refusal, descendant kill); D10 and J8 restate it. The Opus
+adversary pass on the first draft (`560f4009`, BLOCK, 2 medium) found that
+the shim the review relied on was itself deleted in the follow-up PR and that
+read-only mode's `WebFetch`/`WebSearch` were an exfiltration path.
 
 ## B. Scope and constraints
 
@@ -205,7 +210,7 @@ C6. **Evidence to keep**: `docs/checkins/`, `docs/handoffs/`,
 | D7 Skills in every agent | `skill-everywhere`, `skill-get`, `fix-skill-frontmatter.py` | Claude-only: one symlink `~/.claude/skills → <repo>/skills` (no tool); other surviving providers: `npx skills add <repo>` (MIT; a snapshot, re-run on change, vercel-labs/skills#748); `gpambrozio/skills` (902) to list and invoke; `agentskills/skills-ref validate` for lint | KEEP `skill-everywhere` trimmed while any non-Claude provider, the site-private root or the site-djbclark root survives without its own install path; delete the rest (E10) |
 | D8 Scheduler for the kept jobs | launchd plists; PR 291's `ade-sched` | no existing tool refuses on missing linger or wraps `flock -n`; `gpambrozio/launchd-jobs` is macOS-only visibility; Paseo schedules run agents, not shell jobs | KEEP `ade-sched` (land PR 291); Paseo schedules replace the nightly agent jobs (`routing-recalibrate`; `skillopt-night` is deleted, J4) and run the agent that executes `context-budget-check` nightly (J3); the shell sweeps (`deadline`, `pr-policy`, `load-watch`) stay on `ade-sched` |
 | D9 Exclusive workspace claims | `ade_claims.py` (2.3k), `ade-git-guard`, `libexec/` hooks | none exists; Paseo's one-worktree-per-agent makes most claims implicit; `git worktree lock` only blocks prune; since 0.15.0 a plugin can hook `worktree.create.before/after` and give tools to specific agents (A6) | KEEP, trimmed to owner + expiry + refuse-add/commit-in-foreign-workspace; fix the `claim ls` mismatch (E8); Wave 4 decides whether the trimmed registry lives in a ~100-line Paseo plugin hook instead of git hooks |
-| D10 Merge gate | `pr-wait` (2.3k), `local-review` (Codex) | GitHub ruleset: required status check from a ~40-line Action that validates the adversary marker against the head; `gh pr checks --watch --required` to wait; `claude -p --json-schema` (verified on 2.1.318) for a local Claude review with a parsed verdict, run through the E6 read-only shim with `local-review`'s isolation checks kept (E8); `codex review` has no JSON and no per-request strength knob (brief 2026-11-06) | REPLACE (E8): the Action is the one piece of new code, and it replaces 4.6k lines |
+| D10 Merge gate | `pr-wait` (2.3k), `local-review` (Codex) | GitHub ruleset: required status check from a ~40-line Action that validates the adversary marker against the head; `gh pr checks --watch --required` to wait; `claude -p --json-schema` (verified on 2.1.318) for a local Claude review with a parsed verdict, launched by the permanent E8 review boundary (`bin/review-launch`: four read tools, no network, reads confined to the worktree) with `local-review`'s isolation checks kept; `codex review` has no JSON and no per-request strength knob (brief 2026-11-06) | REPLACE (E8): the Action is the one piece of new code, and it replaces 4.6k lines |
 | D11 Recovery evidence | PR 290 `ade-recovery` (3.3k TS) | native resume (0.15.0) + `session-recovery` first | PARK (R4) |
 | D12 Moving dirs with history | — | `git filter-repo --paths-from-file` on a fresh clone (installed here, a40bce5) | ADOPT (E1) |
 | D13 Instruction-file lint | PR 289's `instruction-lint` | no CLAUDE.md/AGENTS.md linter exists; `skills-ref validate` covers SKILL.md | KEEP instruction-lint (lands with PR 289); use skills-ref for skills |
@@ -339,7 +344,10 @@ review could send messages or approve pending requests), **bypass mode
 refused** for a restricted run whatever the provider's default, a **tripwire
 equivalent** that ends the run with exit 77 on any call outside the
 allowlist, and **boundary tests** that prove each of these before the shim
-ships; `permissionMode: plan` plus a denylist is not equivalent. The shim
+ships; `permissionMode: plan` plus a denylist is not equivalent. For the
+Claude provider these modes are the E8 review boundary (`bin/review-launch`,
+which outlives the shim; its review mode is the stricter four-read-tool,
+no-network one, its read-only mode this six-tool one). The shim
 **refuses the launch** when the provider cannot be configured that way, because these modes protect
 prompt-injection-sensitive reviews), **the live-agent count**
 (`count_agents()` counts `acp-run` processes and releases the `load-watch
@@ -352,7 +360,8 @@ Plektra and paseo4herdr call (C3) until each of those files is migrated to
 to `paseo provider ls` does not by itself allow its deletion. `acp-run` and
 `tests/test_acp_run_*` (4.5k) go with the shims in the follow-up PR after one
 live cycle (F, Wave 6); until then only its dead agent adapters (retired
-providers, E9) are trimmed.
+providers, E9) are trimmed. **`bin/review-launch` and its boundary tests
+(E8) are not part of that deletion.**
 `acp-dispatch-wait`, the
 reap plist, the launchd runner scripts and the one-shot `acp-dispatch
 auto-resume RECORD` jobs (`bin/acp-dispatch:34`; a `paseo run` shim does not
@@ -398,21 +407,38 @@ real `claim ls` (C5), `libexec/`, `git-commit-own`, `ops-post-checkout-guard`,
 `changelog-fold`. REPLACE `pr-wait` and `local-review` (D10): one Action
 (`.github/workflows/adversary-marker.yml`) + a ruleset requiring it +
 `gh pr checks --watch --required`; the local Claude review is `claude -p
---json-schema` with the marker as output, **run through the E6 restricted
-shim in its read-only mode, never a bare `claude -p`** (Codex security
-review, 2026-11-06: the checked-in Claude template defaults to
-`bypassPermissions` and exposes Bash and `mcp__hermes`, so a bare invocation
-lets a public PR's diff or AGENTS.md prompt-inject a mandatory review into
-operator-level actions). **The replacement keeps every isolation check
-`bin/local-review` has today**, as tests, before `local-review` is deleted: a
-clean detached worktree at the exact head with the base pinned by SHA
-(`bin/local-review:435`); a scrubbed environment with no token, secret,
-password, `GH_*` or `GITHUB_*` variable; a read-only sandbox proven from the
-run's own transcript, not assumed (`:512-515`); the untrusted-author refusal
-(exit 2 unless `--allow-untrusted`, Codex Security Review on PR 130,
-`:377`); and the descendant kill at the end or at timeout (`:592-603`). The
-review process itself cannot post to GitHub or send messages: the lead reads
-the parsed verdict and writes the marker. **The Action ports pr-wait's
+--json-schema` with the marker as output, **launched with the review
+boundary, never a bare `claude -p`** (Codex security review, 2026-11-06: the
+checked-in Claude template defaults to `bypassPermissions` and exposes Bash
+and `mcp__hermes`, so a bare invocation lets a public PR's diff or AGENTS.md
+prompt-inject a mandatory review into operator-level actions). **The review
+boundary is a small permanent launcher owned by E8** (`bin/review-launch`,
+one Claude invocation and its tests): it is the launch boundary E6's shim
+reuses for its restricted modes while the shim lives, and it is **not**
+removed with the shims and `acp-run` in the follow-up PR (E6, Wave 6):
+the review is permanent, so its boundary is. Its review mode is stricter
+than E6's read-only mode: the tool allowlist is `Read`, `Grep`, `Glob`,
+`LS` only (**no `WebFetch` or `WebSearch`**: Codex's read-only sandbox has no
+network, and a network tool is the exfiltration path for anything an
+injected diff makes the model read), reads are confined to the review
+worktree (Claude Code's sandbox with network denied, or deny rules for every
+path outside it; `~/.config/gh/hosts.yml` and `~/.ssh` are the test cases),
+`settingSources: []`, strict MCP with no servers, hooks empty, bypass mode
+refused, and the tripwire (exit 77 on any call outside the allowlist). **It
+keeps every isolation check `bin/local-review` has today**, as tests, before
+`local-review` is deleted: a clean detached worktree at the exact head with
+the base pinned by SHA (`bin/local-review:426-435`); a scrubbed environment
+with no token, secret, password, `GH_*` or `GITHUB_*` variable (`:310-311`,
+`SECRET_ENV_RE` at `:98`); the boundary proven from the run's own output, not
+assumed: where `local-review` reads Codex's `sandbox: read-only` transcript
+line (`:512-515`), the Claude run is launched with `--output-format
+stream-json` and the test asserts that the init event's tool list is exactly
+the four read tools and its MCP server list is empty, else the result is
+`unreadable` and blocks; the untrusted-author refusal (exit 2 unless
+`--allow-untrusted`, Codex Security Review on PR 130, `:373-377`); and the
+descendant kill at the end or at timeout (`:592-603`). The review process
+itself cannot post to GitHub or send messages: the lead reads the parsed
+verdict and writes the marker. **The Action ports pr-wait's
 marker semantics, review rule 1 properties 1–5, and pr-wait's marker tests
 unchanged** (a BLOCK naming the current head counts anywhere, 7+ hex prefix
 included; malformed and fetch-failed always block; the JSON is delimited by
@@ -499,7 +525,7 @@ at the end. `graft build` last.
 | 3 | E3 shim, E4, E5, E10; **order inside the wave**: E5's attribution rewrite merges before E3 deletes `fleet.py`; **operator steps first**: upgrade the Mac daemon to 0.15.x in a quiesced window per `docs/queue.md` (evidence F records 0.14.x; an unfinished turn is lost on restart until terminal persistence is verified), install the J6 plugins, evaluate `session-recovery` with native resume OFF, then the one bounded native-resume trial (J6), then verify for one day before the REPLACE deletions merge | 3 | same; **the E3 shim merges only after the in-repo relay callers are on it and the C3 relay consumers are migrated or waived per file** |
 | 4 | E6 shim and bigteam, then E7 and E8; E6 and E7 as sibling cloud sessions | 2–3 | same; the lander and feeder plists are unloaded and removed (J11, operator step); **`acp-run` is not deleted here**: C3's acp consumers are migrated or waived per file first (PRs opened and merged by the lead per J2b, asking when unsure) |
 | 5 | E11; AGENTS.md and README (Opus `high`; lead at `xhigh`); **workflow** W3 | 2 | suite green; `graft build` |
-| 6 | **The shims and `acp-run` ship in the final PR** (nothing on the Mac changes before the final merge, so a shim that is removed on the branch never runs live); C7 and the C1 live-process checks are **re-run as the final PR's merge gate**, output pasted into the PR; the shims and `acp-run` are removed in a **follow-up PR after one live cycle** (two weeks, or sooner when every C3 file is migrated or waived and `relay.py`/`acp-dispatch` logs show no caller); upstream filings (gaps found in Paseo: a quota-pause primitive, a workspace claim primitive, if still missing); final PR to master (J7); delete `slim/*` branches after MERGED | serial | done |
+| 6 | **The shims and `acp-run` ship in the final PR** (nothing on the Mac changes before the final merge, so a shim that is removed on the branch never runs live); C7 and the C1 live-process checks are **re-run as the final PR's merge gate**, output pasted into the PR; the shims and `acp-run` are removed in a **follow-up PR after one live cycle** (two weeks, or sooner when every C3 file is migrated or waived and `relay.py`/`acp-dispatch` logs show no caller), **keeping `bin/review-launch` and its tests (E8): rule 11's review is permanent and so is its boundary**; upstream filings (gaps found in Paseo: a quota-pause primitive, a workspace claim primitive, if still missing); final PR to master (J7); delete `slim/*` branches after MERGED | serial | done |
 
 Each wave: a Sonnet research subagent re-checks Paseo and Claude Code docs
 for that wave's area (both moved weekly in October); briefs; writers;
@@ -669,8 +695,8 @@ and can override] Final landing: one PR from the
 slim branch, or lift protection for a fast-forward?
 J8. [answered 2026-11-06: **yes**: rule 1 stays, enforced by the E8 Action;
 rule 9 becomes "read Codex threads, fix what is real, no resolution gate";
-rule 11's local review is `claude -p --json-schema` through the E6
-read-only shim, keeping `local-review`'s isolation checks (E8); rule 10 stays] Review
+rule 11's local review is `claude -p --json-schema` launched by the E8
+review boundary, keeping `local-review`'s isolation checks (E8); rule 10 stays] Review
 rules after: marker validated by CI (E8), Codex advisory, changelog fragments
 kept, local review by Claude.
 J9. [answered 2026-11-06: **park** until Wave 3 measures the native path;
