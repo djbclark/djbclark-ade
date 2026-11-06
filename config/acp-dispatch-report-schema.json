@@ -1,0 +1,9 @@
+{
+  "$comment": "bin/acp-dispatch's structured output for a restricted Claude run through bin/review-launch (slim-down E6, 2026-11-06): the whole report, in the delivery contract's shape, as one string.",
+  "type": "object",
+  "properties": {
+    "report": {"type": "string", "description": "The full report: first line STATUS: or BLOCKED:, last line DONE."}
+  },
+  "required": ["report"],
+  "additionalProperties": false
+}
