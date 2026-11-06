@@ -278,7 +278,9 @@ pull request here is expected to meet these; flag any it misses.
    log, a tracked file or a test fixture. The one place a key is written is a
    third-party tool's own credential store (`bin/zcode-key-auth`); `bin/codium-ai`
    uses `get` instead of `run` so that VSCodium receives one key, not every declared
-   secret; presence is proved by length or hash, never by printing the value.
+   secret, and `bin/pr-policy` (an unattended launchd job) uses `get` so it holds its two tokens in
+   memory while its children (`hermes-ping`) inherit none; presence is proved by length or hash, never
+   by printing the value.
 4. **`subprocess` gets argv lists, never `shell=True`** (sole exception:
    acp-run's `--verify`, an operator-supplied command). Where a shell string
    is unavoidable (launchd runner scripts, text typed into a pane, printed

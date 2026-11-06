@@ -1,0 +1,22 @@
+# bin/pr-policy (2026-11-04): who may open pull requests on djbclark's repositories. docs/pr-policy.md.
+# Tokens are sudo-secretspec names, read with `get` once per run and never logged.
+
+[meta]
+schema = 1
+
+[github]
+token_secret = "GITHUB_TOKEN"
+owners = ["djbclark", "frdminc"]   # the token's own login (user repos) and organisations it administers
+policy = "collaborators_only"      # pull_request_creation_policy for every live repository with pull requests on
+exempt_repos = []                  # "owner/name" entries left alone, policy and drafts both
+trusted_authors = []               # logins whose pull requests stay ready without write access, e.g. "dependabot[bot]"
+approved_label = "pr-policy-approved"   # djbclark's approval of one outside pull request: it is left ready
+
+[forgejo]
+host = "forgejo.mit.edu"
+token_secret = "DJBCLARK_FORGEJO_MIT_EDU_TOKEN"
+owners = ["djbclark"]
+draft_prefix = "WIP: "             # Forgejo's draft marker (server WORK_IN_PROGRESS_PREFIXES, default "WIP:,[WIP]")
+exempt_repos = []
+trusted_authors = []
+approved_label = "pr-policy-approved"

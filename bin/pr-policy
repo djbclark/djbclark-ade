@@ -1,0 +1,517 @@
+#!/usr/bin/env python3
+"""pr-policy: only djbclark (and the collaborators he invited) open ready pull requests on his repositories.
+
+GitHub: every live repository of the configured owners gets pull_request_creation_policy=collaborators_only (GitHub's
+"Pull requests: Collaborators only", 2026-02-13), so nobody without write access can open one. Forgejo has no such
+setting, so there, and on GitHub for a pull request opened before the setting, an open pull request whose author is
+not trusted is kept a draft: GitHub convertPullRequestToDraft, Forgejo a "WIP: " title prefix. Merging needs djbclark
+either way. The launchd job com.djbclark.pr-policy re-applies all of it every 10 min, which is what covers a
+repository created later. Config: config/pr-policy.toml. Doc: docs/pr-policy.md.
+
+  pr-policy plan [--json] [--only github|forgejo]       what apply would change; read-only (exit 0, 1 on an API error)
+  pr-policy apply [--yes] [--notify] [--quiet] [--only F]   without --yes it is plan; --yes makes the changes
+  pr-policy install [--ade DIR] [--dry-run]              launchd job (macOS): `apply --yes --notify --quiet` every 600 s
+  pr-policy uninstall
+
+Exit codes: 0 done (or nothing to do), 1 an API or secret error (the rest still ran), 2 usage or config error,
+69 install off macOS. Trusted authors: GitHub, the token's login, the config's trusted_authors and anyone whose
+repository permission is write or admin (maintain reads as write); Forgejo, the token's login, the repository owner,
+trusted_authors and invited collaborators with write, admin or owner permission (Forgejo reports site admins as
+"owner" of every repository, so a non-collaborator is never trusted on permission alone). A bot is checked like
+anyone else: list it in trusted_authors (e.g. "dependabot[bot]") to leave its pull requests ready.
+Approving one outside pull request: add the approved_label (default "pr-policy-approved"; setting a label needs
+triage or write access, so its author cannot) and mark it ready (GitHub) or drop the WIP prefix (Forgejo).
+State: ~/.local/state/pr-policy (PR_POLICY_STATE_DIR): changes.jsonl, one line per change
+made; state.json, the error keys already reported and the change URLs and errors not yet reported (settled only
+once hermes-ping succeeded); run.log, the launchd job's output.
+Revert one repository: add it to exempt_repos, then `gh api -X PATCH repos/OWNER/NAME -f
+pull_request_creation_policy=all`.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+import tomllib
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+from xml.sax.saxutils import escape as xml_escape
+
+ADE = Path(__file__).resolve().parent.parent
+HOME = Path.home()
+LABEL = "com.djbclark.pr-policy"
+REASON = "pr-policy: enforce the pull request policy on djbclark's repositories"
+TRUSTED_GITHUB = {"admin", "write"}
+TRUSTED_FORGEJO = {"owner", "admin", "write"}
+MAX_PAGES = 100
+TITLE_MAX = 255
+UNSENT_MAX = 500
+
+
+class ApiError(Exception):
+    pass
+
+
+def state_dir() -> Path:
+    return Path(os.environ.get("PR_POLICY_STATE_DIR") or HOME / ".local/state/pr-policy")
+
+
+def die(msg: str, code: int) -> int:
+    print(f"pr-policy: {msg}", file=sys.stderr)
+    return code
+
+
+def read_secret(name: str) -> str:
+    exe = os.environ.get("PR_POLICY_SECRETSPEC") or "sudo-secretspec"
+    try:
+        p = subprocess.run([exe, "get", name, "--reason", REASON], stdin=subprocess.DEVNULL,
+                           capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise ApiError(f"sudo-secretspec get {name}: {type(e).__name__}") from None
+    val = p.stdout.rstrip("\r\n")
+    if p.returncode != 0 or not val:
+        raise ApiError(f"sudo-secretspec get {name} failed (rc={p.returncode})")
+    if not all(33 <= ord(c) <= 126 for c in val):   # http.client echoes an invalid header value in its ValueError
+        raise ApiError(f"sudo-secretspec get {name}: the value is not one printable token (length {len(val)})")
+    return val
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):   # urllib would carry Authorization to wherever a 3xx points
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
+def next_link(header: str) -> str | None:
+    for part in header.split(","):
+        seg = part.split(";")
+        if len(seg) > 1 and any(s.strip() == 'rel="next"' for s in seg[1:]):
+            return seg[0].strip().lstrip("<").rstrip(">")
+    return None
+
+
+class Api:
+    def __init__(self, base: str, token: str, kind: str):
+        u = urllib.parse.urlsplit(base)
+        if u.scheme != "https" and u.hostname not in ("127.0.0.1", "localhost"):
+            raise ApiError(f"refusing to send a token over {u.scheme or 'no scheme'}: {base}")
+        self.base, self.scheme, self.netloc, self.token, self.kind = base.rstrip("/"), u.scheme, u.netloc, token, kind
+
+    def call(self, method: str, path: str, data: dict | None = None, ok404: bool = False):
+        url = path if path.startswith(("http://", "https://")) else self.base + path
+        where = urllib.parse.urlsplit(url)
+        if (where.scheme, where.netloc) != (self.scheme, self.netloc):
+            raise ApiError(f"refusing to send the token to another origin: {where.scheme}://{where.netloc}")
+        hdr = {"User-Agent": "djbclark-ade-pr-policy"}
+        if self.kind == "github":
+            hdr |= {"Accept": "application/vnd.github+json", "Authorization": f"Bearer {self.token}"}
+        else:
+            hdr |= {"Accept": "application/json", "Authorization": f"token {self.token}"}
+        body = None
+        if data is not None:
+            body = json.dumps(data).encode()
+            hdr["Content-Type"] = "application/json"
+        req = urllib.request.Request(url, data=body, method=method, headers=hdr)
+        try:
+            with _OPENER.open(req, timeout=30) as r:
+                raw = r.read()
+                return r.status, (json.loads(raw) if raw else None), r.headers
+        except urllib.error.HTTPError as e:
+            if ok404 and e.code == 404:
+                return 404, None, e.headers
+            msg = ""
+            try:
+                msg = str(json.loads(e.read() or b"{}").get("message", ""))[:200]
+            except (ValueError, AttributeError, OSError):
+                pass
+            raise ApiError(self.scrub(f"{method} {where.path}: HTTP {e.code} {msg}".rstrip())) from None
+        except (urllib.error.URLError, OSError, ValueError) as e:
+            raise ApiError(self.scrub(f"{method} {where.path}: {type(e).__name__}: {e}")) from None
+
+    def scrub(self, text: str) -> str:
+        return text.replace(self.token, "<token>") if self.token else text
+
+    def pages(self, path: str):
+        if self.kind == "github":
+            url: str | None = path
+            for _ in range(MAX_PAGES):
+                if not url:
+                    return
+                _, data, h = self.call("GET", url)
+                yield from (data.get("items", []) if isinstance(data, dict) else data or [])
+                url = next_link(h.get("Link", "") or "")
+            raise ApiError(f"GET {path}: more than {MAX_PAGES} pages")
+        sep = "&" if "?" in path else "?"
+        for page in range(1, MAX_PAGES + 1):
+            _, data, _ = self.call("GET", f"{path}{sep}limit=50&page={page}")
+            if not data:
+                return
+            yield from data
+        raise ApiError(f"GET {path}: more than {MAX_PAGES} pages")
+
+
+def q(s: str) -> str:
+    return urllib.parse.quote(s, safe="")
+
+
+def approved(it: dict, cfg: dict) -> bool:
+    """djbclark's approval of an outside pull request: the approved_label, which only triage/write access can set."""
+    want = cfg.get("approved_label", "pr-policy-approved").lower()
+    return any(str((lab or {}).get("name", "")).lower() == want for lab in it.get("labels") or [])
+
+
+def github_plan(api: Api, cfg: dict, login: str, stats: dict) -> tuple[list[dict], list[str]]:
+    acts: list[dict] = []
+    errs: list[str] = []
+    policy = cfg.get("policy", "collaborators_only")
+    exempt = set(cfg.get("exempt_repos", []))
+    owners = cfg.get("owners", [])
+    for owner in owners:
+        path = ("/user/repos?affiliation=owner&per_page=100" if owner.lower() == login.lower()
+                else f"/orgs/{q(owner)}/repos?type=all&per_page=100")
+        try:
+            for r in api.pages(path):
+                stats["github_repos"] += 1
+                if r.get("archived") or r.get("has_pull_requests") is False or r.get("full_name") in exempt:
+                    continue
+                if r.get("pull_request_creation_policy") != policy:
+                    acts.append({"forge": "github", "kind": "lock", "repo": r["full_name"], "url": r.get("html_url", ""),
+                                 "before": r.get("pull_request_creation_policy"), "after": policy})
+        except ApiError as e:
+            errs.append(f"github {owner}: {e}")
+    if not owners:
+        return acts, errs
+    query = " ".join(["is:pr", "is:open", "draft:false", "archived:false", *(f"user:{o}" for o in owners), f"-author:{login}"])
+    trusted = {t.lower() for t in cfg.get("trusted_authors", [])} | {login.lower()}
+    cache: dict = {}
+    try:
+        for it in api.pages("/search/issues?" + urllib.parse.urlencode({"q": query, "per_page": 100})):
+            repo = it.get("repository_url", "").rsplit("/repos/", 1)[-1]
+            who = (it.get("user") or {}).get("login", "")
+            if (repo in exempt or it.get("draft") or who.lower() in trusted or approved(it, cfg)
+                    or repo.split("/")[0].lower() not in {o.lower() for o in owners}):
+                continue
+            stats["github_open_prs"] += 1
+            key = (repo, who.lower())
+            if key not in cache:
+                try:
+                    st, d, _ = api.call("GET", f"/repos/{repo}/collaborators/{q(who)}/permission", ok404=True)
+                except ApiError as e:
+                    errs.append(f"github {it.get('html_url') or repo}: {e}")
+                    continue
+                cache[key] = st != 404 and (d or {}).get("permission") in TRUSTED_GITHUB
+            if not cache[key]:
+                acts.append({"forge": "github", "kind": "draft", "repo": repo, "number": it["number"],
+                             "url": it.get("html_url", ""), "author": who,
+                             "label": cfg.get("approved_label", "pr-policy-approved")})
+    except ApiError as e:
+        errs.append(f"github search: {e}")
+    return acts, errs
+
+
+def forgejo_plan(api: Api, cfg: dict, login: str, stats: dict) -> tuple[list[dict], list[str]]:
+    acts: list[dict] = []
+    errs: list[str] = []
+    exempt = set(cfg.get("exempt_repos", []))
+    owners = {o.lower() for o in cfg.get("owners", [])}
+    prefix = cfg.get("draft_prefix", "WIP: ")
+    trusted = owners | {t.lower() for t in cfg.get("trusted_authors", [])} | {login.lower()}
+    cache: dict = {}
+    for owner in cfg.get("owners", []):
+        try:
+            for it in api.pages(f"/repos/issues/search?type=pulls&state=open&owner={q(owner)}"):
+                repo = (it.get("repository") or {}).get("full_name", "")
+                who = (it.get("user") or {}).get("login", "")
+                if (repo.split("/")[0].lower() not in owners or repo in exempt or (it.get("pull_request") or {}).get("draft")
+                        or who.lower() in trusted or approved(it, cfg)):
+                    continue
+                stats["forgejo_open_prs"] += 1
+                key = (repo, who.lower())
+                if key not in cache:
+                    try:
+                        st, _, _ = api.call("GET", f"/repos/{repo}/collaborators/{q(who)}", ok404=True)
+                        ok = False
+                        if st != 404:
+                            _, d, _ = api.call("GET", f"/repos/{repo}/collaborators/{q(who)}/permission")
+                            ok = (d or {}).get("permission") in TRUSTED_FORGEJO
+                    except ApiError as e:
+                        errs.append(f"forgejo {it.get('html_url') or repo}: {e}")
+                        continue
+                    cache[key] = ok
+                if not cache[key]:
+                    acts.append({"forge": "forgejo", "kind": "draft", "repo": repo, "number": it["number"],
+                                 "url": it.get("html_url", ""), "author": who, "prefix": prefix,
+                                 "label": cfg.get("approved_label", "pr-policy-approved")})
+        except ApiError as e:
+            errs.append(f"forgejo {owner}: {e}")
+    return acts, errs
+
+
+GRAPHQL_DRAFT = "mutation($id: ID!) { convertPullRequestToDraft(input: {pullRequestId: $id}) { pullRequest { isDraft } } }"
+
+
+def still_due(cur: dict | None, act: dict) -> bool:
+    """The pull request, read just now, is still open, ready, unapproved and by the same author (search lags edits)."""
+    cur = cur or {}
+    return (cur.get("state") == "open" and not cur.get("draft") and not approved(cur, {"approved_label": act["label"]})
+            and str((cur.get("user") or {}).get("login", "")).lower() == act["author"].lower())
+
+
+def apply_one(gh: Api | None, fj: Api | None, act: dict) -> bool:
+    """Make one change; False when it is no longer due. The repository listing lags a PATCH by seconds and search lags
+    a label or a ready-for-review, so each target is re-read first."""
+    if act["forge"] == "github" and act["kind"] == "lock":
+        _, cur, _ = gh.call("GET", f"/repos/{act['repo']}")
+        if (cur or {}).get("pull_request_creation_policy") == act["after"]:
+            return False
+        _, d, _ = gh.call("PATCH", f"/repos/{act['repo']}", {"pull_request_creation_policy": act["after"]})
+        got = (d or {}).get("pull_request_creation_policy")
+        if got != act["after"]:
+            raise ApiError(f"{act['repo']}: pull_request_creation_policy reads {got!r} after the PATCH")
+    elif act["forge"] == "github":
+        _, cur, _ = gh.call("GET", f"/repos/{act['repo']}/pulls/{act['number']}")
+        if not still_due(cur, act):
+            return False
+        _, d, _ = gh.call("POST", "/graphql", {"query": GRAPHQL_DRAFT, "variables": {"id": cur["node_id"]}})
+        pr = (((d or {}).get("data") or {}).get("convertPullRequestToDraft") or {}).get("pullRequest") or {}
+        if (d or {}).get("errors") or not pr.get("isDraft"):
+            msg = "; ".join(str(e.get("message", ""))[:160] for e in (d or {}).get("errors") or [])
+            raise ApiError(f"{act['url']}: not converted to draft {msg}".rstrip())
+    else:
+        _, cur, _ = fj.call("GET", f"/repos/{act['repo']}/pulls/{act['number']}")
+        if not still_due(cur, act):
+            return False
+        title = (act["prefix"] + str(cur.get("title", "")))[:TITLE_MAX]
+        _, d, _ = fj.call("PATCH", f"/repos/{act['repo']}/pulls/{act['number']}", {"title": title})
+        if not (d or {}).get("draft"):
+            raise ApiError(f"{act['url']}: still not a draft after the {act['prefix']!r} prefix")
+    return True
+
+
+def load_config(path: Path) -> dict:
+    try:
+        cfg = tomllib.loads(path.read_text())
+    except (OSError, tomllib.TOMLDecodeError) as e:
+        raise SystemExit(die(f"{path}: {e}", 2)) from None
+    if (cfg.get("meta") or {}).get("schema") != 1:
+        raise SystemExit(die(f"{path}: [meta] schema must be 1", 2))
+    return cfg
+
+
+def connect(cfg: dict, only: str | None):
+    gh = fj = None
+    gh_login = fj_login = ""
+    errs: list[str] = []
+    if "github" in cfg and only in (None, "github"):
+        c = cfg["github"]
+        try:
+            gh = Api(c.get("api", "https://api.github.com"), read_secret(c["token_secret"]), "github")
+            gh_login = gh.call("GET", "/user")[1]["login"]
+        except (ApiError, KeyError, TypeError) as e:
+            gh = None
+            errs.append(f"github: {e}")
+    if "forgejo" in cfg and only in (None, "forgejo"):
+        c = cfg["forgejo"]
+        try:
+            fj = Api(c.get("api") or f"https://{c['host']}/api/v1", read_secret(c["token_secret"]), "forgejo")
+            fj_login = fj.call("GET", "/user")[1]["login"]
+        except (ApiError, KeyError, TypeError) as e:
+            fj = None
+            errs.append(f"forgejo: {e}")
+    return gh, gh_login, fj, fj_login, errs
+
+
+def describe(act: dict) -> str:
+    if act["kind"] == "lock":
+        return f"github  lock   {act['repo']}  pull_request_creation_policy {act['before']} -> {act['after']}"
+    return f"{act['forge']:<7} draft  {act['url']}  (author {act['author']})"
+
+
+def append_change(act: dict, result: str) -> None:
+    rec = {k: v for k, v in act.items() if k not in ("prefix", "label")}
+    rec |= {"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "result": result}
+    d = state_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    with open(d / "changes.jsonl", "a", encoding="utf-8") as f:   # append-only log: one write per line
+        f.write(json.dumps(rec, sort_keys=True) + "\n")
+
+
+def load_state() -> dict:
+    try:
+        return json.loads((state_dir() / "state.json").read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def save_state(st: dict) -> None:
+    d = state_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    tmp = d / f".state.{os.getpid()}.tmp"
+    tmp.write_text(json.dumps(st, sort_keys=True))
+    os.replace(tmp, d / "state.json")
+
+
+def notify(text: str) -> bool:
+    exe = os.environ.get("PR_POLICY_PING") or shutil.which("hermes-ping") or str(HOME / ".local/bin/hermes-ping")
+    try:
+        p = subprocess.run([exe, text], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
+        if p.returncode == 0:
+            return True
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    print("pr-policy: hermes-ping failed", file=sys.stderr)
+    return False
+
+
+def cmd_run(a, write: bool) -> int:
+    cfg = load_config(Path(a.config or os.environ.get("PR_POLICY_CONFIG") or ADE / "config/pr-policy.toml"))
+    stats = {"github_repos": 0, "github_open_prs": 0, "forgejo_open_prs": 0}
+    gh, gh_login, fj, fj_login, errs = connect(cfg, a.only)
+    acts: list[dict] = []
+    if gh:
+        x, e = github_plan(gh, cfg["github"], gh_login, stats)
+        acts += x
+        errs += e
+    if fj:
+        x, e = forgejo_plan(fj, cfg["forgejo"], fj_login, stats)
+        acts += x
+        errs += e
+    done: list[dict] = []
+    same: list[dict] = []
+    if write:
+        for act in acts:
+            try:
+                if apply_one(gh, fj, act):
+                    append_change(act, "ok")
+                    done.append(act)
+                else:
+                    same.append(act)
+            except ApiError as e:
+                append_change(act, f"error: {e}")
+                errs.append(str(e))
+    if a.json:
+        print(json.dumps({"applied": write, "actions": acts, "done": len(done), "errors": errs, "stats": stats}, indent=2))
+    elif not (a.quiet and not (done if write else acts) and not errs):
+        verb = "changed" if write else "would change"
+        for act in acts:
+            if write:
+                print(("ok     " if act in done else "same   " if act in same else "FAILED ") + describe(act))
+            else:
+                print(describe(act))
+        for e in errs:
+            print(f"error  {e}", file=sys.stderr)
+        print(f"pr-policy: {verb} {len(done) if write else len(acts)}; checked {stats['github_repos']} GitHub repositories, "
+              f"{stats['github_open_prs']} GitHub and {stats['forgejo_open_prs']} Forgejo open pull requests from others"
+              + (f"; {len(errs)} error(s)" if errs else ""))
+    if write and a.notify:
+        st = load_state()
+        reported = set(st.get("errors", []))
+        changed = [u for u in st.get("unsent", []) if isinstance(u, str)] + [x["url"] for x in done]
+        pending_errs = [e for e in st.get("unsent_errors", []) if isinstance(e, str)]
+        new_errs = pending_errs + sorted(set(errs) - reported - set(pending_errs))
+        delivered = True
+        if changed or new_errs:
+            parts = []
+            if changed:
+                parts.append(f"{len(changed)} change(s): " + ", ".join(changed[:3])
+                             + (f" (+{len(changed) - 3} more)" if len(changed) > 3 else ""))
+            if new_errs:
+                parts.append(f"{len(new_errs)} new error(s), first: {new_errs[0][:160]}")
+            delivered = notify(f"djbclark-ade: pr-policy: {'; '.join(parts)}; log {state_dir()}")
+        # undelivered: these changes and errors are reported next run, even if the error is gone by then
+        save_state({"errors": sorted(set(errs)),
+                    "unsent": [] if delivered else changed[-UNSENT_MAX:],
+                    "unsent_errors": [] if delivered else new_errs[-UNSENT_MAX:]})
+    return 1 if errs else 0
+
+
+def is_linked_worktree(path: Path) -> bool:
+    def rev(arg: str) -> str:
+        p = subprocess.run(["git", "-C", str(path), "rev-parse", "--path-format=absolute", arg],
+                           capture_output=True, text=True, timeout=30)
+        return p.stdout.strip() if p.returncode == 0 else ""
+    gd, cd = rev("--git-dir"), rev("--git-common-dir")
+    return bool(gd and cd) and gd != cd
+
+
+def cmd_install(a) -> int:
+    if sys.platform != "darwin" and not a.dry_run:
+        return die("launchd is macOS only", 69)
+    ade = Path(a.ade).expanduser().resolve() if a.ade else ADE
+    if not a.ade and is_linked_worktree(ADE):
+        return die(f"{ADE} is a linked worktree: install from the canonical checkout, or pass --ade DIR", 2)
+    tpl = ade / "config/launchd" / f"{LABEL}.plist"
+    if not (ade / "bin/pr-policy").is_file() or not tpl.is_file():
+        return die(f"no bin/pr-policy or {tpl.name} under {ade}", 2)
+    sd = state_dir().expanduser().resolve()
+    text = tpl.read_text()
+    for key, val in (("__ADE__", ade), ("__HOME__", HOME), ("__STATE__", sd)):
+        text = text.replace(key, xml_escape(str(val)))
+    if a.dry_run:
+        print(text)
+        return 0
+    sd.mkdir(parents=True, exist_ok=True)
+    dest = HOME / "Library/LaunchAgents" / f"{LABEL}.plist"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_name(f".{dest.name}.{os.getpid()}.tmp")
+    tmp.write_text(text)
+    os.replace(tmp, dest)
+    dom = f"gui/{os.getuid()}"
+    subprocess.run(["launchctl", "bootout", f"{dom}/{LABEL}"], capture_output=True, timeout=30)
+    p = subprocess.run(["launchctl", "bootstrap", dom, str(dest)], capture_output=True, text=True, timeout=30)
+    if p.returncode != 0:
+        return die(f"bootstrap failed: {(p.stderr or p.stdout).strip()}", 1)
+    print(f"installed {LABEL} (every 600 s, no model) from {ade}; state {sd}")
+    return 0
+
+
+def cmd_uninstall(a) -> int:
+    if sys.platform != "darwin":
+        return die("launchd is macOS only", 69)
+    subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}/{LABEL}"], capture_output=True, timeout=30)
+    (HOME / "Library/LaunchAgents" / f"{LABEL}.plist").unlink(missing_ok=True)
+    print(f"removed {LABEL} (state kept at {state_dir()})")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="pr-policy", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest="cmd", required=True)
+    for name in ("plan", "apply"):
+        s = sub.add_parser(name)
+        s.add_argument("--config")
+        s.add_argument("--only", choices=["github", "forgejo"])
+        s.add_argument("--json", action="store_true")
+        s.add_argument("--quiet", action="store_true", help="print nothing when there is nothing to change")
+        if name == "apply":
+            s.add_argument("--yes", action="store_true", help="make the changes (without it, apply is plan)")
+            s.add_argument("--notify", action="store_true", help="hermes-ping once per run that changed something or hit a new error")
+    s = sub.add_parser("install")
+    s.add_argument("--ade")
+    s.add_argument("--dry-run", action="store_true")
+    sub.add_parser("uninstall")
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    a = build_parser().parse_args(argv)
+    if a.cmd == "plan":
+        a.notify = False
+        return cmd_run(a, write=False)
+    if a.cmd == "apply":
+        return cmd_run(a, write=a.yes)
+    if a.cmd == "install":
+        return cmd_install(a)
+    return cmd_uninstall(a)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
