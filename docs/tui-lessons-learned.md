@@ -93,7 +93,8 @@ gateway, never a coding target).
     (2026-04-04) and Google (Antigravity clause 6) suspend for it; Cursor ToS §1.5 forbids
     omp/opencode holding an active Cursor credential (staff note 2026-08-10). Same pattern covers
     Venice web-session proxies (plan §F4). Ruling D3: add an acp-run guard refusing omp/opencode
-    runs while a Cursor, Antigravity, or Anthropic-subscription credential is active in them.
+    runs while a Cursor login, an Antigravity OAuth login or an Anthropic subscription OAuth login is
+    active in them; ordinary vendor API keys (an Anthropic API key in omp) stay allowed.
 12. **B12 Attribute pools to TUIs only from the operator or the vendor's mapping.** crush was
     wrongly labelled ClinePass then zai before operator correction; model-routing keeps a per-pool
     "only client" column (plan §B). Billing is tracked by **vendor** (FOCUS `InvoiceIssuerName`),
