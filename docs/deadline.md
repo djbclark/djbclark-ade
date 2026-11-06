@@ -176,8 +176,9 @@ hand: two schedulers are safe (every record is under its own flock) but they dou
    ran the command; and it only advances or finishes the record carrying its own `reg_id`, so an old `run` whose terminal name was registered again
    cannot mark the new registration done.
 3. The owner relay reads delivery proof from the relay shim (2026-11-06, docs/slim E3: `relay.py OWNER --message-file -`, which reads `paseo send
-   --json`'s `.status`: exit 0 only for `sent` or `completed`; 2 not delivered (`queued`, `timeout`, `permission`, `error`), 1 paseo failed and 3 not a
-   Paseo agent stay pending and are retried) and declares its sender (`RELAY_SENDER_NAME`, `deadline-sweep` in the launchd plist, `deadline` otherwise),
+   --json`'s `.status`: exit 0 only for `sent` or `completed`, which a sourceless send such as deadline's gets; 2 not delivered (`queued`, `timeout`,
+   `permission`, `error`, or a target `paseo agent inspect` does not show idle or running with no card), 1 paseo failed, 3 not a Paseo agent and 4 no
+   sender stay pending and are retried) and declares its sender (`RELAY_SENDER_NAME`, `deadline-sweep` in the launchd plist, `deadline` otherwise),
    which the shim names in a `[relay from NAME]` prefix, since a launchd job has no Paseo id.
 4. A stop is confirmed only when the target is `gone` (or its pid was recycled). `unverified` (a leaderless group whose anchor exited while other
    members may still run) is never a confirmed stop: the record goes to `kill-failed`, the owner is told, nothing is rerouted. An empty group is `gone`.

@@ -176,8 +176,8 @@ treat every owner as possibly live (step 4).
    live successor would be excluded. `writer` only orders the list (same provider first). Name them in the
    question. Never proceed on a silent "no owner found".
 5. **A live owner other than you:** relay ONE question to it (what may you resume, what overlaps) with
-   `~/src/djbclark-ade/skills/session-finder/relay.py <row id> --message-file - --ack <your id>` (`delivered`,
-   exit 0, is proof; `queued` and every other status, exit 2, is not) and ask the operator too; take no write action until the owner answers or
+   `~/src/djbclark-ade/skills/session-finder/relay.py <row id> --message-file - --ack <your id>` (from a Paseo agent exit 5,
+   accepted, is the normal result and is proven only by the owner's `ack <your id>`; exit 2 is not sent) and ask the operator too; take no write action until the owner answers or
    the operator, told the owner is live, decides. Unanswered is not consent.
 
 **Exemptions (resume without asking; state which one in the resume plan):**

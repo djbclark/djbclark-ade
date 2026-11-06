@@ -11,15 +11,20 @@ Commits: 3bfeb5a (claude_identity move), 5f8a4a6 (the shim, deadline), 4fb10d1 (
 
 ## A. The shim
 
-A1. `skills/session-finder/relay.py`, 170 lines, stdlib only (the brief said about 100; the extra lines are A4's two
-refusals and the help epilog). Line 2 carries the removal line, "Shim, removed in the follow-up PR after one live cycle
+A0. Revised after the E3 review (BLOCK, two HIGH; repaired at the head named in the reply). F1 changed the status
+contract (A5), F2 made the inspect gate fail closed (A4b), F3 added the steer check (A4c), F4 the sender rule (A4d), F5
+the input checks (A4e). Read against Paseo 0.15.3 source (getpaseo/paseo 9f68af0, the clone at `/tmp/claude-0/ps/src`).
+
+A1. `skills/session-finder/relay.py`, 238 lines, stdlib only (the brief said about 100; the rest is the review's gates
+and the help epilog). Line 2 carries the removal line, "Shim, removed in the follow-up PR after one live cycle
 (PLAN.md F, Wave 6; at the latest 2026-11-20)".
 
-A2. Flow: refuse a retired flag (before argparse) → read the text (positional or `--message-file`, `-` = stdin, UTF-8,
-BOM dropped, one trailing newline dropped, nothing else changed) → refuse a leading `/` → append the `--ack NAME` line →
-prefix `[relay from $RELAY_SENDER_NAME]` when the caller has no `$PASEO_AGENT_ID` → `paseo ls -a -g --json` → resolve →
-`paseo agent inspect ID --json` → write the text to a private temp file → `paseo send ID --prompt-file F --behavior
-steer --no-wait --json` → read `.status` → with `--wait S`, `paseo wait ID --timeout S --json` → read `.status`.
+A2. Flow: refuse a retired flag (before argparse) → check `--wait` → read the text (positional or `--message-file`, `-` =
+stdin, decoded as UTF-8 from bytes, BOM dropped, one trailing newline dropped, nothing else changed) → refuse a leading `/`
+→ settle the sender (A4d) and prefix `[relay from LABEL]` for a sourceless sender → append the `--ack NAME` line → `paseo
+ls -a -g --json` → resolve (A3) → `paseo agent inspect ID --json` and the gate (A4b, A4c) → write the text to a private
+temp file → `paseo send ID --prompt-file F --behavior steer --no-wait --json` → read `.status` (A5) → with `--wait S`,
+`paseo wait ID --timeout S --json`.
 
 A3. Resolution (lead's ruling, 2026-11-06, after this report's first version: the brief's 1a `name` rule is dropped,
 since a title comes from the first prompt and is a weak address, adversary L3): the exact `id`, else a prefix of 4+
@@ -29,36 +34,63 @@ name, not its id: pass the id (`paseo ls -a -g` shows it)"; anything else that r
 text. A prefix of the full id longer than the shortId is not accepted. Every caller in this slice passes an id
 (deadline: the owner id it recorded; load-watch: the session's id).
 
-A4. Two additions to the brief's 1b, both kept from the old relay's Paseo route because `docs/threat-model.md` relies on
-them (standing order 6: flagged here): (a) a text that starts with `/` or the full-width slash after the whitespace and
-zero-width characters Paseo trims is refused (exit 64), since it would run a built-in in the target; (b) before the
-send, `paseo agent inspect` must not show `Archived` or a non-empty `PendingPermissions`: a send answers a pending card
-and unarchives an archived agent (exit 2, "not sent"). Two deviations from 1b's exact argv: `--behavior steer`
-(without `$PASEO_AGENT_ID`, as for `deadline` and every launchd caller, Paseo's default is interrupt, which cancels the
-target's running turn; the old relay passed steer too) and `--prompt-file` (no message text in `ps`, and a text starting
-with `-` is never read as an option). The inspect field names (`Archived`, `PendingPermissions`) are from the Wave 3
-research (item 2), not from a live daemon: verify them in the first live cycle.
+A4. Gates beyond the brief's 1b (standing order 6: flagged here):
+- a. **Leading `/`** (kept from the old relay; `docs/threat-model.md`): after stripping every Unicode whitespace
+  character (`str.isspace`) and the zero-width set U+200B, U+200C, U+200D, U+2060, U+FEFF, U+180E, a text starting with
+  `/` or the full-width `／` is refused, exit 64: it would run a built-in in the target.
+- b. **Inspect, fail closed** (review F2): the send goes ahead only when `paseo agent inspect ID --json` returns a dict
+  whose `Id` equals the resolved id, `Archived` is boolean `false`, `PendingPermissions` is an empty list and `Status` is
+  `idle` or `running`. A failed inspect, any other shape (`{}`, a list, a nested object, a string, null), another `Id`,
+  `Archived` true or missing, a non-empty or missing `PendingPermissions`, or `Status` `initializing`, `error`, `closed` or
+  missing: exit 2, `not sent: <reason>` naming the status. Doubly needed for a sourceless send: the daemon runs it with
+  `clearPendingPermissions: true` (server `session.ts:8806`), so a send into a card would answer it with the message text.
+  The field names are from `packages/cli/src/commands/agent/inspect.ts:14-49,129-155`.
+- c. **No steer, no send into a running turn** (review F3): with `--behavior steer`, a provider that cannot steer has its
+  running turn replaced (`agent-prompt.ts:38-60`). Inspect's `Capabilities` has no steer flag (it carries only
+  `Streaming`, `Persistence`, `DynamicModes`, `McpServers`: `inspect.ts:33-38,118-127`), so the shim uses the providers
+  whose session implements `steerActiveTurn` in 0.15.3 (`claude`, `codex`, `opencode`, `omp`, `pi`: `providers/{claude,omp,
+  pi}/agent.ts`, `codex-app-server-agent.ts`, `opencode-agent.ts`). A `running` agent on any other provider (cline, grok,
+  kiro, copilot, a plugin provider, an empty provider) is exit 2 "busy, not sent (provider X cannot steer: its running
+  turn would be replaced)"; an `idle` one gets the send. A `Capabilities` key naming steer, if a later Paseo adds one,
+  wins over the list. Residual: a steer-capable provider can still decline a steer at runtime (compaction, a Codex review
+  turn), and Paseo then replaces the turn; a plugin provider that negotiates `prompt.steer` is refused while running.
+- d. **No anonymous sends** (review F4; the 2026-10-25 ruling): a sender with no `$PASEO_AGENT_ID` must name itself in
+  `$RELAY_SENDER_NAME`, which is cut to letters, digits, `-`, `_`, `.`, `:` and 64 characters before it enters the
+  `[relay from LABEL]` header; an empty label is exit 4 before any `paseo` call. `bin/deadline`'s `clean_env` drops
+  `PASEO_AGENT_ID` and sets `RELAY_SENDER_NAME` (`deadline` or the plist's `deadline-sweep`); load-watch's `relay_env`
+  sets `load-watch`.
+- e. **Input** (review F5): a message file or stdin that is not UTF-8 is exit 64; a `--wait` that is NaN, infinite or
+  negative is exit 64.
+- f. Two deviations from 1b's exact argv: `--behavior steer` (without `$PASEO_AGENT_ID` Paseo's default is interrupt,
+  which cancels the target's running turn; the old relay passed steer too) and `--prompt-file` (no message text in `ps`,
+  and a text starting with `-` is never read as an option).
 
-A5. Status mapping. `paseo send` exits 0 for every status (research item 1), so `$?` is never read as delivery:
+A5. Status mapping (review F1). `paseo send` exits 0 for every status, so `$?` is never read as delivery. And Paseo's
+daemon **queues every send that carries a source agent**: the CLI passes `sourceAgentId` whenever `$PASEO_AGENT_ID` is set
+(`packages/cli/src/commands/agent/send.ts:202-207`), and the server enqueues such a message and sets `deliveryStatus:
+"queued"` before dispatch (`packages/server/src/server/session.ts:8774-8793`), reporting no later delivery. So an agent's
+send never reads `sent`; the first version's "queued: not yet delivered: the target has not been quiet for 2 s" was wrong
+(the "two quiet seconds" is only the CLI's message text, `send.ts:219-221`).
 
-| `paseo` result | shim prints | exit |
-|---|---|---|
-| send `.status` `sent` or `completed` | `delivered` | 0 (then `--wait`, if given) |
-| send `.status` `queued` | `queued (accepted by the daemon, not yet delivered: the target has not been quiet for 2 s)` | 2 |
-| send `.status` `timeout`, `permission`, `error`, or anything else / none | the status word (`no status`) | 2 |
-| inspect: archived, or a pending permission or question | `not sent: ... archived ...` / `permission (not sent: ...)` | 2 |
-| wait `.status` `idle` | `idle` | 0 |
-| wait `.status` `timeout` | `wait timed out after S s` | 2 |
-| wait `.status` `permission` | `permission (pending: `paseo permit ls`)` | 2 |
-| any `paseo` non-zero exit, no binary, unparseable JSON, no answer in time (ls 30 s, inspect 30 s, send 60 s, wait S+30 s) | the stderr, on stderr | 1 |
-| target a name | `relay.py reaches Paseo agents only since 2026-11-06 (herdr and Orca panes retired 2026-10-31); target X is a Paseo agent's name, not its id: pass the id (`paseo ls -a -g` shows it)` | 3 |
-| target not exactly one Paseo agent by id or shortId prefix | `relay.py reaches Paseo agents only since 2026-11-06 (herdr and Orca panes retired 2026-10-31); target X is not a Paseo agent` | 3 |
-| usage error, leading `/`, `--via`, `--pending`/`--sweep`/`--retire`/`--transfer-expectations`/`--expect-ack` | the refusal | 64 |
+| sender | `paseo` result | shim prints | exit |
+|---|---|---|---|
+| any | send `.status` `sent` or `completed` | `delivered` | 0 (then `--wait`, if given) |
+| an agent (`$PASEO_AGENT_ID` set) | send `.status` `queued` (always, from 0.15.3's daemon) | `queued (accepted by the daemon; Paseo batches every agent-to-agent message and reports no later delivery; proof is the peer's ack)` | **5** |
+| sourceless (deadline, load-watch) | send `.status` `queued` | `queued (accepted by the daemon, not delivered)` | 2 |
+| any | send `.status` `timeout`, `permission`, `error`, or none | the status word (`no status`) | 2 |
+| any | inspect gate (A4b, A4c) | `not sent: <reason>` | 2 |
+| after exit 0 | wait `idle` / `timeout` / `permission` | `idle` / `wait timed out after S s` / `permission (...)` | 0 / 2 / 2 (wait failing: 1) |
+| after exit 5 | wait, whatever it reads | `target idle`, `target wait timed out after S s`, `target permission ...`, `target wait failed: ...` | 5 (the target's state, never delivery) |
+| any | `paseo` non-zero, no binary, unparseable JSON, no answer in time (ls 30 s, inspect 30 s, send 60 s, wait S+30 s) on ls or send | the stderr, on stderr | 1 |
+| any | target a name / not exactly one agent by id or shortId prefix | the retirement text plus the reason | 3 |
+| sourceless | no usable `$RELAY_SENDER_NAME` | `no sender: ...` | 4 |
+| any | usage error, leading `/`, not UTF-8, bad `--wait`, `--via`, the outbox flags | the refusal | 64 |
 
-Usage errors are 64, not argparse's 2, so a typo is never read as "not delivered". `--ack` takes an optional NAME:
-with one it appends "Reply with `ack NAME` through relay.py." to the text; bare (as `bin/deadline` used to pass it) it
-appends nothing, since delivery is always read from the status. A bare `--ack` must follow MESSAGE (argparse would read
-the text as NAME otherwise; the help says so).
+Usage errors are 64, not argparse's 2, so a typo is never read as "not delivered". `--ack` takes an optional NAME: with
+one it appends "Reply with `ack NAME` through relay.py." to the text; bare (as `bin/deadline` used to pass it) it appends
+nothing. For an agent sender `--ack <your id>` is the only proof there is: exit 5 is the normal result in
+`session-handoff` and `ade-paseo-handoff`, and the ack is read from the sender's own inbox. A bare `--ack` must follow
+MESSAGE (argparse would read the text as NAME otherwise; the help says so).
 
 A6. `--help` as committed:
 
@@ -66,7 +98,7 @@ A6. `--help` as committed:
 usage: relay.py [-h] [--message-file PATH] [--ack [NAME]] [--wait S]
                 TARGET [MESSAGE]
 
-Send MESSAGE to one Paseo agent with `paseo send --no-wait --json` and report its delivery status.
+Send MESSAGE to one Paseo agent with `paseo send --no-wait --json` and report what Paseo says became of it.
 
 positional arguments:
   TARGET               Paseo agent id, unique shortId prefix, or `self` (not a
@@ -78,31 +110,41 @@ options:
   --message-file PATH  read the text from PATH, UTF-8 (`-`: stdin); for text
                        with backticks, `$` or quotes
   --ack [NAME]         append "Reply with `ack NAME` through relay.py" to the
-                       text; bare --ack appends nothing (delivery is always
-                       read from the status); put MESSAGE before a bare --ack
-  --wait S             after a delivered send, `paseo wait TARGET --timeout
-                       S`: exit 0 only when it reads idle
+                       text; bare --ack appends nothing; put MESSAGE before a
+                       bare --ack
+  --wait S             after a delivered (0) or accepted (5) send, `paseo wait
+                       TARGET --timeout S`; for a delivered send exit 0 only
+                       when it reads idle; for an accepted one it reports the
+                       target's state only
 
 exit status:
-  0   delivered: `paseo send --json` read `sent` or `completed` (with --wait: and `paseo wait` then read `idle`)
+  0   delivered: a sourceless send (no $PASEO_AGENT_ID: deadline, load-watch) read `sent` or `completed`
+      (with --wait: and `paseo wait` then read `idle`)
+  5   accepted: a send from a Paseo agent ($PASEO_AGENT_ID set) read `queued`; the daemon queues every agent-to-agent message
+      and reports no later delivery, so the proof is the peer's `ack <id>` (--wait then reports the target's state, never delivery)
   1   paseo failed: not installed, exited non-zero (no daemon, unknown agent), gave no JSON, or did not answer in time
-  2   not delivered: `queued` (accepted by the daemon, not yet delivered), `timeout`, `permission`, `error`; or --wait timed out or hit a permission;
-      or not sent, because `paseo agent inspect` shows the target archived or with a pending permission or question card
+  2   not delivered: `queued` for a sourceless send, `timeout`, `permission`, `error`, or no status; --wait timed out or hit a
+      permission; or not sent: `paseo agent inspect` failed, gave another shape or id, shows the target archived, with a pending
+      permission or question card, in a status other than idle or running, or running on a provider that cannot steer
   3   TARGET is not exactly one Paseo agent by id or shortId prefix, or is a name (relay.py reaches Paseo agents only since 2026-11-06 (herdr and Orca panes retired 2026-10-31))
-  64  usage error, a text starting with `/` (it would run a built-in in the target), or a retired flag: --via (relay.py reaches Paseo agents only since 2026-11-06 (herdr and Orca panes retired 2026-10-31)); --pending, --sweep, --retire, --transfer-expectations, --expect-ack (retired 2026-11-06: Paseo has no outbox; see `paseo permit ls` for pending permissions)
+  4   no sender: neither $PASEO_AGENT_ID nor $RELAY_SENDER_NAME names who sends (no anonymous sends, 2026-10-25)
+  64  usage error, a message file or stdin that is not UTF-8, a --wait that is negative or not finite, a text starting with `/`
+      (it would run a built-in in the target), or a retired flag: --via (relay.py reaches Paseo agents only since 2026-11-06 (herdr and Orca panes retired 2026-10-31)); --pending, --sweep, --retire, --transfer-expectations, --expect-ack
+      (retired 2026-11-06: Paseo has no outbox; see `paseo permit ls` for pending permissions)
 TARGET is a Paseo agent id, a unique prefix (4+ characters) of its shortId, or `self` ($PASEO_AGENT_ID), as `paseo ls -a -g` lists them;
 never a name (title): a name is exit 3, pass the id.
-A sender with no $PASEO_AGENT_ID (a launchd job) is named in a `[relay from NAME]` prefix, NAME from $RELAY_SENDER_NAME.
+A sender with no $PASEO_AGENT_ID (a launchd job) is named in a `[relay from NAME]` prefix, NAME from $RELAY_SENDER_NAME
+(letters, digits, `-`, `_`, `.`, `:`; at most 64).
 Shim: removed in the follow-up PR after one live cycle, at the latest 2026-11-20.
 ```
 
 A7. `bin/deadline` (1f): its owner notice passed `--message-file - --ack --wait 20`. All three are in the shim's set, but
 `--wait 20` changed meaning (old: verify delivery for 20 s; shim: wait for the owner to go idle), so a busy owner would
 read as "not delivered" and the notice would be sent again up to `NOTICE_TRIES` (5) times. The call is now
-`relay.py OWNER --message-file -` (`bin/deadline:458`; docstring :451-456 states the new exit codes); `docs/deadline.md`
-item 3 and `tests/test_deadline.py` follow. Residual risk, flagged: a `queued` notice (exit 2) is retried and so may
-arrive twice once Paseo delivers the first copy. `deadline`'s `clean_env` still strips `PASEO_AGENT_ID`, so the notice
-carries `[relay from deadline-sweep]`.
+`relay.py OWNER --message-file -` (`bin/deadline:460`; docstring :451-458 states the exit codes); `docs/deadline.md`
+item 3 and `tests/test_deadline.py` follow. `clean_env` drops `PASEO_AGENT_ID`, so the notice is a sourceless send:
+`sent` is delivery (exit 0) and it carries `[relay from deadline-sweep]`. Residual risk, flagged: a sourceless `queued`
+(exit 2), which 0.15.3's daemon does not produce for a sourceless send, would be retried and could arrive twice.
 
 ## B. The import and path search
 
@@ -319,20 +361,31 @@ fleet-watch's home, which C3 called unverified): it breaks on the shim and needs
 
 ## G. Standing order 10, the rewrite (AGENTS.md is E11's)
 
-G1. Text for E11: "A message is sent with `paseo send --json` (or the relay shim, `skills/session-finder/relay.py`,
-until 2026-11-20); it is delivered when `.status` reads `sent` or `completed`; `queued` is accepted, not delivered; a
-timeout or a pending permission also exits 0 and is read from `.status`, never from `$?`." The shim's exit codes say
-the same (0 delivered, 2 not delivered), so a caller of the shim may read its `$?`; a caller of `paseo send` may not.
-PLAN.md E3's draft ("a message is sent with `paseo send` and its exit status read") is wrong for `paseo send`, as
-research item 1 says.
+G1. Text for E11 (the review's F1 ruling): "A message is sent with the relay shim (`skills/session-finder/relay.py`, until
+2026-11-20) or `paseo send --json`. A sourceless send (deadline, load-watch) is delivered when `.status` reads `sent` or
+`completed` (exit 0); an agent's send is accepted (exit 5, queued by the daemon) and proven only by the peer's `ack <id>`;
+exit 2 is not delivered; never `$?`." Paseo 0.15.3 queues every agent-to-agent message and reports no later delivery
+(A5), so for an agent the named ack is the only proof. PLAN.md E3's draft ("a message is sent with `paseo send` and its
+exit status read") is wrong for `paseo send`, which exits 0 for every status.
 
-G2. The rest of order 10 carries over: the first message to a new peer asks for a named ack (`--ack <your id>` appends
-the request), and the ack is verified by reading your own inbox; nothing records an expectation any more.
+G2. The rest of order 10 carries over: every message from an agent that needs to be known delivered asks for a named ack
+(`--ack <your id>` appends the request), the ack is verified by reading your own inbox, and a peer that does not ack is
+reported to the operator, never assumed read. Nothing records an expectation any more.
 
 ## H. Tests
 
-H1. `bin/pytest -q tests/test_relay_shim.py`: 40 passed at 99a7ccb; after the A3 ruling, 44 (with
-`tests/test_deadline.py tests/test_deadline_wrappers.py`: 159 passed, 2 failed, both baseline `[dispatch]` rows). It covers: `sent`/`completed` → 0 `delivered` with
+H1. `bin/pytest -q tests/test_relay_shim.py`: 40 passed at 99a7ccb; after the A3 ruling, 44; after the review repair,
+86; with `tests/test_deadline.py tests/test_deadline_wrappers.py`: 201 passed, 2 failed, both baseline
+(`test_deadline_wrappers.py::...[dispatch]`, `ggrep: command not found`). The repair's tests: the fake `paseo` answers
+`queued` to every send whose environment carries `PASEO_AGENT_ID` and `sent` otherwise, as 0.15.3's daemon does; an
+agent's send is exit 5 with the accepted text and `--wait` after it reports `target ...` with exit 5; a sourceless
+`queued` is 2; inspect answers `{}`, `[]`, a list, a nested object, a string, null, a wrong `Id`, `Archived` true, null or
+`"false"`, `PendingPermissions` non-empty or null, `Status` error, initializing, closed or null, and a failed inspect are
+all exit 2 with no send; a running agent on claude, codex, opencode, omp, pi is sent, on cline, grok, kiro, copilot or no
+provider is "busy, not sent", and a `Capabilities` steer key wins; no sender or a label that sanitises to nothing is 4
+with no `paseo` call, and a hostile label is cut to the safe set and 64 characters; non-UTF-8 file and stdin are 64;
+`--wait` nan, inf, -inf, -1, -0.5 are 64; leading `/` after U+3000, U+2028, U+00A0, U+2003, U+180E, U+2060, U+205F is 64;
+`--help` names every exit code and no longer says "quiet for 2 s". The list below is the first version's. It covers: `sent`/`completed` → 0 `delivered` with
 `--behavior steer`, `--no-wait`, `--json` and the `[relay from ...]` prefix; `queued` → 2 and no `wait`; `timeout`,
 `permission`, `error` → 2; `paseo` exit 1, unparseable JSON, failing `ls` → 1; no `paseo` on PATH → 1; four non-Paseo
 targets (a herdr pane, a name, a dispatch record path, `self` unset) → 3 with the retirement text; an ambiguous shortId
@@ -392,3 +445,23 @@ I5. session-finder's search half (live and ended sessions by topic, the FTS5 his
 is the live list.
 I6. The old relay's delivery witness (a transcript showing the text upgraded "accepted" to "delivered"): the shim
 trusts Paseo's `sent`.
+I7. Sending into a running turn of a provider that cannot steer (review F3): the shim refuses it, exit 2 "busy, not
+sent (provider cannot steer)", where Paseo would replace the turn; send again when the agent is idle. A steer-capable
+provider can still decline one steer at runtime, and then Paseo replaces its turn (A4c).
+I8. Delivery proof for an agent's message: Paseo queues every agent-to-agent message and reports no later delivery, so an
+agent's send is exit 5, accepted, and only the peer's `ack <id>` proves it (A5, G1).
+
+## J. Review notes (E3 review, 2026-11-06)
+
+J1. F7 (lost unit tests for `where.py` and `fleet.py` internals): the deleted relay tests (`test_relay_paseo.py`,
+`test_session_relay.py`, the two `test_fleet_paseo_rows.py` cases, H3b) also exercised `where.paseo_agent` and fleet rows.
+Accepted: E3b deletes `fleet.py`, `where.py` and `nested_pty.py` next, after E5; until then `tests/test_fleet_*.py` and
+`tests/test_nested_pty.py` still cover what load-watch's hot path imports.
+J2. F8 (load-watch's notify target): `notify` sends to `s.get("sid") or s["id"]` from `fleet.sessions()`, which for a
+non-Paseo Claude session is a session id the shim cannot resolve (exit 3, "could not reach it", and the fixer line runs).
+E5's rewrite of load-watch's attribution to `paseo ls -a -g --json` supersedes this call; this slice only put its flags on
+the shim's set (D4). load-watch runs from launchd with no `$PASEO_AGENT_ID`, so its sends are sourceless (exit 0 on `sent`).
+J3. F9 (`ade-paseo-handoff` step 2): the retiring session's brief to its successor is an agent's send, so it now expects
+exit 5, accepted, and waits for the successor's named `ack <own id>`; `--wait` only says the successor went idle
+(`skills/ade-paseo-handoff/SKILL.md:116-120`). The same holds for its peer notices (:71, :101-102) and for
+`skills/session-handoff/SKILL.md:178-180`.

@@ -450,7 +450,9 @@ def hermes_ping(msg: str) -> str:
 
 def relay_rc(owner: str, text: str) -> tuple[int, str]:
     """Send to the owner through the relay shim (2026-11-06, docs/slim E3): exit 0 only when `paseo send --json` read sent or completed;
-    2 not delivered (queued, timeout, permission, error), 1 paseo failed, 3 not a Paseo agent; anything but 0 stays pending and is retried.
+    2 not delivered (queued, timeout, permission, error, or a target not idle/running with no card), 1 paseo failed, 3 not a Paseo agent,
+    4 no sender; anything but 0 stays pending and is retried. clean_env drops PASEO_AGENT_ID, so this send is sourceless and its `sent` is
+    delivery (an agent's send would only ever read `queued`, exit 5).
     No `--wait`: the shim's --wait waits for the owner to go idle, which a busy owner never does in 20 s, and a retry would send the notice
     again. The sender is declared (RELAY_SENDER_NAME): the shim names it in a `[relay from NAME]` prefix, a launchd job having no Paseo id."""
     if not owner or owner == "-":
