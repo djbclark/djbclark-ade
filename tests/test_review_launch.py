@@ -1,6 +1,6 @@
 """bin/review-launch (the review boundary) and bin/review-pr, against a fake `claude` and a fake `gh` on PATH.
 
-The isolation checks bin/local-review had (slim-down E8, 2026-11-06, ported before it was deleted): a clean
+The isolation checks the removed Codex local review had (slim-down E8, 2026-11-06, ported before it was deleted): a clean
 detached worktree at the exact head with the base pinned by SHA; a scrubbed environment; the boundary proven
 from the run's own init event, never assumed; the untrusted-author refusal; the descendant kill at the end and
 at the timeout. The live self-check against a real Claude is an operator step (docs/review-boundary.md).

@@ -1,8 +1,8 @@
-"""bin/adversary_marker.py: the adversary-verdict marker parser (moved from bin/pr-wait, 2026-11-06, slim-down E8)
+"""bin/adversary_marker.py: the adversary-verdict marker parser (moved from the removed PR waiter, 2026-11-06, slim-down E8)
 and the Action's event logic (.github/workflows/adversary-marker.yml).
 
-The marker tests below the banner "adversary verdict MARKER in the PR body" moved from tests/test_pr_wait.py
-UNCHANGED: only `load_module()` (now the imported module) and the `gate()` helper's last two lines (pr-wait's
+The marker tests below the banner "adversary verdict MARKER in the PR body" moved from the waiter's test file
+UNCHANGED: only `load_module()` (now the imported module) and the `gate()` helper's last two lines (the waiter's
 `assess()` became `adversary_marker.gate()`, its adversary branch) differ. They are the acceptance test of the
 port (AGENTS.md review rule 1's five properties). The Action's tests are at the end.
 """
@@ -22,7 +22,7 @@ import adversary_marker  # noqa: E402
 
 
 def load_module():
-    """The module under test (pr-wait's tests loaded the script by path; this one is importable)."""
+    """The module under test (the waiter's tests loaded the script by path; this one is importable)."""
     return adversary_marker
 
 
@@ -150,7 +150,7 @@ def test_a_malformed_marker_beside_a_good_one_still_reports_the_verdict() -> Non
 
 
 def gate(body: str, required: bool = True, head: str = ADV_HEAD) -> tuple[bool, list[str]]:
-    """Run the REAL gate (`gate`, pr-wait's `assess` adversary branch), not a copy of its predicate.
+    """Run the REAL gate (`gate`, the waiter's `assess` adversary branch), not a copy of its predicate.
 
     The first version of these tests only called `adversary_verdict` / a copied predicate, so the
     gate itself (the blocker names, the report-only default, `malformed` handling) was untested —

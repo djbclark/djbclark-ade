@@ -6,13 +6,13 @@ text can link.
 ## The rule
 
 **Before any command or wait that may run longer than ~2 min, register a deadline, or use `deadline run`.**
-Hours were lost on 2026-11-01 to waits with no bound (`load-watch admit --wait` up to 2 h, a review wait of 2 h, `pr-wait` unbounded,
+Hours were lost on 2026-11-01 to waits with no bound (`load-watch admit --wait` up to 2 h, a review wait of 2 h, a PR waiter unbounded,
 a lead blocked in a wait). A deadline names the maximum, an owner who is told when it passes, and what happens then.
 
 ## Commands (`bin/deadline`; `deadline --help` is the reference)
 
 ```sh
-deadline run --budget 20m --heartbeat 5m --owner "$PASEO_AGENT_ID" -- bin/pr-wait 123      # register, run in its own group, deregister
+deadline run --budget 20m --heartbeat 5m --owner "$PASEO_AGENT_ID" -- gh pr checks 123 --watch --required   # register, run, deregister
 deadline start review-123 --budget 2h --owner "$PASEO_AGENT_ID" --on-expire relay          # a wait with no process to kill
 deadline beat review-123 --checkpoint /abs/path/state.json                                  # heartbeat + latest checkpoint
 deadline extend review-123 --by 30m --reason "reviewer still running"                       # BEFORE expiry only; capped (default cap = budget)
@@ -69,17 +69,16 @@ exits between two `run` polls is not `lost`: while its `run` registrar is alive 
 
 ## Waiters register themselves (2026-11-02)
 
-`bin/pr-wait`, `bin/load-watch admit --wait S` (S > 0; a pure check waits for nothing) and `bin/acp-dispatch-wait` register a deadline for their own
+`bin/load-watch admit --wait S` (S > 0; a pure check waits for nothing) and `bin/acp-dispatch-wait` register a deadline for their own
 wait by default, through `deadline run` (B9 rule 2; budgets are the plan's B9 rule 3). A waiter holds no work, so on expiry the action is `kill` of
 **its own process group** and nothing else: nothing is lost, and the caller sees exit 124 (re-run it).
 Two exceptions. `acp-dispatch-wait` exits **76**, never 124: 124 already means "the record's `wait_timeout` passed" (the slice timed out), and a lead that
 read a deadline stop as that would re-task a slice that is still running; 76 means only the waiter was stopped, so re-arm with the same line. It tells the
-two apart by the record's state (`expired`) after `deadline run` returns 124. And `load-watch admit`: its callers (`acp-dispatch`, `local-review`, `bg`) fail OPEN on an exit they do not know, so a deadline stop is
+two apart by the record's state (`expired`) after `deadline run` returns 124. And `load-watch admit`: its callers (`acp-dispatch`, `bg`) fail OPEN on an exit they do not know, so a deadline stop is
 answered as **exit 75, "still too hot"** (with a stderr line), the answer the wait would have given had it run out.
 
 |waiter|name|budget|heartbeat|
 |---|---|---|---|
-|`pr-wait PR`|`pr-wait-<repo>-<PR>-<pid>`|min(`--timeout`, 60 min) + 60 s|before every `gh` call and per poll; timeout 5 min or 4 polls + 2 min if longer|
 |`load-watch admit --wait S`|`admit-wait-<pid>`|min(S, 30 min) + 60 s (the admission class maximum)|per poll; timeout 5 min|
 |`acp-dispatch-wait RECORD DONE`|`dispatch-wait-<record file name>-<pid>`|min(the record's `wait_timeout` read at arm time, 2 h) + 60 s (2 h when 0 or unreadable; 2 h is the longest a lead's tool holds a waiter, so a longer slice is covered by re-arming on 76)|per 60 s pass; timeout 10 min|
 
@@ -90,7 +89,7 @@ never outlives its own `--timeout`/`--wait` by more than the margin plus the swe
 1. **Why a supervisor.** `deadline start --pid` refuses the registrar's own parent (safety rule 3), so a process cannot register itself. The waiter
    runs *itself* under `deadline run --name N --budget B --heartbeat H --on-expire kill -- SELF ARGS` and returns its exit code; the inner copy
    waits. `bin/deadline` is unchanged, and `done` on every exit path (success, failure, signals: the supervisor forwards SIGTERM/SIGINT/SIGHUP
-   once) is `deadline run`'s own bounded stop. `bin/deadline_wait.py` is the shared code for the two Python waiters; `acp-dispatch-wait` does the
+   once) is `deadline run`'s own bounded stop. `bin/deadline_wait.py` is the Python waiter's code (the PR waiter that shared it was removed 2026-11-06, slim-down E8); `acp-dispatch-wait` does the
    same in bash. The price is one resident `deadline run` Python process per registered waiter (`acp-dispatch-wait` was bash-only by design on
    2026-10-18; `--no-deadline` restores that; whether this waiter should be opt-in is the operator's call).
    Names carry the supervisor's pid (each run leaves one terminal record file until `prune` removes it after 7 days), so a second waiter for the same PR (another repo, a new head) or record (a re-arm) is never refused as "name already live".
@@ -105,14 +104,15 @@ never outlives its own `--timeout`/`--wait` by more than the margin plus the swe
    **Signals.** SIGTERM/INT/HUP to the supervisor stop the wait with the bounded stop of `deadline run`; the bash supervisor starts `deadline run` in its
    own process group (`set -m`), so a signal sent to the whole caller group reaches it once, never twice (a second signal means SIGKILL without grace).
    `done` holds for every *catchable* exit; a SIGKILLed supervisor cannot stop its child, so the supervised copy checks the supervisor's pid on every
-   poll (beat; the bash waiter every 10 s tick) and ends itself with 143: no orphaned wait, no stale `pr-wait` duplicate-guard lock. The enforcer still bounds it.
+   poll (beat; the bash waiter every 10 s tick) and ends itself with 143: no orphaned wait. The enforcer still bounds it.
 4. **Tests** (`tests/test_deadline_wrappers.py`) run each waiter against a temp `DEADLINE_STATE_DIR`; `tests/conftest.py` exports an empty
    `DEADLINE_NAME` so no other test registers in the real state directory.
 
 ## Known gaps (follow-ups, `docs/queue.md`)
 
-`local-review` does not register its own deadline yet (B9 rule 1; `bg` does since 2026-11-01, below); `local-review` still bounds its load wait with
-`--load-wait` (default 1800 s) and, through `load-watch admit --wait`, now holds an `admit-wait-<pid>` deadline of its own for that gate.
+`bin/review-pr` and `gh pr checks --watch` do not register a deadline of their own (2026-11-06): run them under `deadline run` (the example
+above); `bin/review-launch` bounds its own run with `--timeout` (default 900 s) and kills the run's process group at the end. `bg` registers since
+2026-11-01 (below).
 
 ## `bg` records and the holder (2026-11-02)
 

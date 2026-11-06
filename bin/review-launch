@@ -25,7 +25,7 @@ THE LAUNCH (every flag is fixed; nothing is passed through):
   "disableBypassPermissionsMode": "disable", "deny": [Read(~/.ssh/**) and the other secret paths]}}: the key
   confines Read/Grep/Glob to the worktree in every mode, bypass included (Claude Code >= 2.1.257); the deny
   rules are a second layer, never the first. The environment drops every variable whose name says token,
-  secret, password, credential or api key, and every GH_* and GITHUB_* one (local-review's SECRET_ENV_RE);
+  secret, password, credential or api key, and every GH_* and GITHUB_* one (the removed Codex local review's SECRET_ENV_RE);
   HOME, PATH and CLAUDE_CONFIG_DIR stay (OAuth needs HOME). The prompt is argv (after `--`), never a file in
   the worktree.
 

@@ -43,11 +43,11 @@ For each request:
    documentation and be ignored (a BLOCK naming this head is rescued from the
    raw body anyway, but write it raw) — for the teammate to paste into the PR
    body.
-   `pr-wait` reads that marker and **not** your prose, so a verdict written only
+   The merge gate (the `adversary-marker` Action, `bin/adversary_marker.py`) reads that marker and **not** your prose, so a verdict written only
    as sentences is invisible to the gate. Two mistakes hard-block the PR as
    `malformed`: `verdict` is exactly `APPROVE` or `BLOCK` in capitals ("APPROVE,
    no findings" maps to `APPROVE`), and `head` must be the **full 40-character
-   sha** — write it out in full, never a `…`/`...` abbreviation. `pr-wait` can
+   sha** — write it out in full, never a `…`/`...` abbreviation. The gate can
    still rescue a BLOCK whose head is a 7+ hex prefix, some of it written with an
    ellipsis, but do not rely on it: a BLOCK whose shortened head is not a prefix
    of this head is `malformed`, and an APPROVE with any shortened sha is

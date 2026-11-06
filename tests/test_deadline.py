@@ -526,7 +526,7 @@ def test_orphan_lock_files_are_pruned(env):
     assert not (env.state / ".tmp1.lock").exists()
 
 
-# ---------- PR 223 local-review round 1: group identity, notice delivery, name reservation, registration binding, background agents ----------
+# ---------- PR 223 local Codex review round 1: group identity, notice delivery, name reservation, registration binding, background agents ----------
 
 def test_leaderless_group_is_anchored_on_a_live_member_and_never_trusted_bare(env):
     c = subprocess.Popen(["sh", "-c", "sleep 60 & sleep 61 & exit 0"], start_new_session=True)
@@ -599,7 +599,7 @@ def test_agent_scan_includes_background_workspaces(env):
     assert any(ln == "PASEO ls -g --background --json" for ln in env.calls("PASEO"))
 
 
-# ---------- PR 223 local-review round 2: survivors after the leader, unverifiable stops, relay sender + proof, lock inodes, prune race ----------
+# ---------- PR 223 local Codex review round 2: survivors after the leader, unverifiable stops, relay sender + proof, lock inodes, prune race ----------
 
 def test_run_keeps_enforcing_until_the_group_is_stopped_after_the_leader_exits(env):
     # the leader dies on SIGTERM; a grandchild ignores it and must still get its SIGKILL and the recovery from `run` itself
@@ -684,7 +684,7 @@ def test_prune_never_deletes_a_name_that_was_registered_again_meanwhile(env, inp
     assert not (env.state / "ancient.json").exists(), "a genuinely old terminal record is still pruned"
 
 
-# ---------- PR 223 local-review round 3: anchor left its group, ps failures, startup handshake, async recovery ----------
+# ---------- PR 223 local Codex review round 3: anchor left its group, ps failures, startup handshake, async recovery ----------
 
 def test_a_live_anchor_that_left_the_group_does_not_vouch_for_it(env, inproc):
     dl = inproc
@@ -740,7 +740,7 @@ def test_recovery_io_runs_off_the_enforcement_pass(env):
     assert rec["recovery"]["state"] == "done" and rec["notice"]["done"] is True and len(env.calls("RELAY")) == 1
 
 
-# ---------- PR 223 local-review round 4: async agent alerts, no inherited session id, member-anchor reuse, worker bound to reg_id, cancellation ----------
+# ---------- PR 223 local Codex review round 4: async agent alerts, no inherited session id, member-anchor reuse, worker bound to reg_id, cancellation ----------
 
 def test_agent_alerts_run_off_the_enforcement_pass(env):
     (env.tmp / "ls.json").write_text(json.dumps([{"id": "aaaaaaaa-0000", "shortId": "aaaaaaa", "name": "idle", "status": "running"}]))
@@ -816,7 +816,7 @@ def test_interrupting_run_starts_the_grace_and_ends_in_sigkill(env):
         p.wait()
 
 
-# ---------- PR 223 local-review round 5: cancel after a notify-only expiry, absolute reroute paths, agent scan off the pass ----------
+# ---------- PR 223 local Codex review round 5: cancel after a notify-only expiry, absolute reroute paths, agent scan off the pass ----------
 
 def test_interrupting_run_after_a_notify_only_expiry_still_stops_the_command(env):
     p = subprocess.Popen([sys.executable, str(SCRIPT), "run", "--budget", "1", "--grace", "1", "--name", "notifycancel", "--owner", "o",
@@ -863,7 +863,7 @@ def test_agent_scan_runs_off_the_enforcement_pass(env):
     assert len(env.calls("PASEO")) == n
 
 
-# ---------- PR 223 local-review round 6: cancel survivors, cancel while stopping, pending notices vs name reuse, quarantine under lock ----------
+# ---------- PR 223 local Codex review round 6: cancel survivors, cancel while stopping, pending notices vs name reuse, quarantine under lock ----------
 
 def test_cancel_after_notify_only_expiry_kills_a_grandchild_that_outlives_the_leader(env):
     p = subprocess.Popen([sys.executable, str(SCRIPT), "run", "--budget", "1", "--grace", "1", "--name", "orphancancel", "--owner", "o",
@@ -939,7 +939,7 @@ def test_quarantine_rechecks_under_the_lock(env, inproc):
     held.__exit__()
 
 
-# ---------- PR 223 local-review round 7: zombie leaders keep their start time, heartbeat expiry blocks extend/beat ----------
+# ---------- PR 223 local Codex review round 7: zombie leaders keep their start time, heartbeat expiry blocks extend/beat ----------
 
 def test_a_recycled_pid_that_is_a_zombie_is_still_reused(env, inproc):
     dl = inproc
@@ -968,7 +968,7 @@ def test_extend_and_beat_are_refused_after_the_heartbeat_timeout(env):
     assert env.run("extend", "hbx", "--by", "10", "--reason", "ok", now=T0 + 60).returncode == 0
 
 
-# ---------- PR 223 local-review round 8: run with surviving group members, target vanishing during registration ----------
+# ---------- PR 223 local Codex review round 8: run with surviving group members, target vanishing during registration ----------
 
 def test_run_enforces_the_budget_on_group_members_that_outlive_the_leader(env):
     r = env.run("run", "--budget", "1", "--grace", "1", "--name", "bgkid", "--owner", "o", "--on-expire", "relay", "--",
@@ -1003,7 +1003,7 @@ def test_a_target_vanishing_between_the_two_start_time_reads_is_refused_not_a_cr
     assert rec is None and "vanished or changed" in err
 
 
-# ---------- PR 223 local-review round 9: leaderless group needs a verified member, cancel after persistence retires the registration ----------
+# ---------- PR 223 local Codex review round 9: leaderless group needs a verified member, cancel after persistence retires the registration ----------
 
 def test_a_group_whose_leader_is_gone_needs_a_verified_member_before_it_is_signalled(env, inproc):
     dl = inproc
@@ -1052,7 +1052,7 @@ def test_linux_identity_token_carries_the_boot_id(env, inproc, monkeypatch):
     assert dl.proc_info(os.getpid())[0] != a[0], "the same pid and start tick after a reboot must not match"
 
 
-# ---------- PR 223 local-review round 11: kill retries continue past a notice retry, install keeps the state dir ----------
+# ---------- PR 223 local Codex review round 11: kill retries continue past a notice retry, install keeps the state dir ----------
 
 def test_a_notice_retry_does_not_skip_the_sigkill_retry_of_a_kill_failed_record(env, inproc, monkeypatch):
     dl = inproc
@@ -1087,7 +1087,7 @@ def test_install_renders_the_configured_state_dir_into_env_and_log_paths(env, tm
     assert p["StandardOutPath"] == p["StandardErrorPath"] == f"{sd}/sweep.log" and "__" not in r.stdout
 
 
-# ---------- PR 223 local-review round 12: anchor captured at registration, exhausted notice retries escalate once ----------
+# ---------- PR 223 local Codex review round 12: anchor captured at registration, exhausted notice retries escalate once ----------
 
 def test_start_captures_a_member_anchor_so_a_reaped_leader_does_not_make_it_lost(env):
     c = subprocess.Popen(["sh", "-c", "sleep 60 & sleep 61 & wait"], start_new_session=True)
@@ -1116,7 +1116,7 @@ def test_exhausted_owner_notice_retries_escalate_to_the_operator_once(env):
     assert env.record("unreach")["notice"]["escalated"] is True
 
 
-# ---------- PR 223 local-review round 13: case-insensitive names, deleted records are not advanced from the sweep snapshot ----------
+# ---------- PR 223 local Codex review round 13: case-insensitive names, deleted records are not advanced from the sweep snapshot ----------
 
 def test_names_differing_only_in_case_are_one_name(env):
     assert start(env, "Job", "--budget", "10", "--on-expire", "notify").returncode == 0
@@ -1136,7 +1136,7 @@ def test_sweep_skips_a_record_deleted_after_its_snapshot(env, inproc, monkeypatc
     assert env.calls("RELAY") == []
 
 
-# ---------- PR 223 local-review round 14: a failed automatic reroute is reported, once-only dispatch preserved ----------
+# ---------- PR 223 local Codex review round 14: a failed automatic reroute is reported, once-only dispatch preserved ----------
 
 def test_a_failed_reroute_notifies_the_owner_and_the_operator_without_a_second_dispatch(env):
     Path(env.base["DL_DISPATCH_FAIL"]).write_text("x")

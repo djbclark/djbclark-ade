@@ -148,7 +148,7 @@ def origin_repo(root):
 
 
 def parse_pages(text):
-    """`gh api --paginate` prints one JSON document PER PAGE, concatenated (as bin/pr-wait's parse_pages): decode all."""
+    """`gh api --paginate` prints one JSON document PER PAGE, concatenated (the same shape the removed PR waiter decoded): decode all."""
     dec, docs, i, n = json.JSONDecoder(), [], 0, len(text)
     while True:
         while i < n and text[i].isspace():

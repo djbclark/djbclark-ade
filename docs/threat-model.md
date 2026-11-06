@@ -203,8 +203,11 @@ others, and the merge path is unenforced. "Control" is what exists; "Gap" is wha
 * **Control (procedure only).** AGENTS.md, Code review section (PR 9, merged 2026-10-20), rule
   1 requires the PR body to carry the adversary verdict as a machine-readable marker naming the head
   reviewed (`<!-- adversary-verdict:v1 {...} -->`, since 2026-10-25), and whoever merges to use
-  `gh pr merge --squash --match-head-commit <reviewed sha>`. `bin/pr-wait` reads that marker as of
-  2026-10-27 (PR 66) and reports it; it does not read prose. The adversary runs on request before a PR is
+  `gh pr merge --squash --match-head-commit <reviewed sha>`. The marker parser (in the PR waiter from
+  2026-10-27, PR 66; moved unchanged to `bin/adversary_marker.py` on 2026-11-06, slim-down E8) reads that
+  marker; it does not read prose. Since 2026-11-06 the `adversary-marker` Action posts it as a commit status
+  from the `ade-merge-gate` App; it becomes an enforced control only once the operator's ruleset requires
+  that status pinned to the App (`docs/review-boundary.md`; until then this section's gaps stand). The adversary runs on request before a PR is
   opened, never on PR open. Automatic on PR open: Cursor's Security Agent and Approval Agent. Codex's code review ("Codex Review")
   ran after an `@codex review` comment on PR 10, and Codex's Security Review ran with it, labelled
   "Automatically triggered" (the repo setting is "whenever code review runs"); whether either runs unasked on
@@ -221,7 +224,7 @@ others, and the merge path is unenforced. "Control" is what exists; "Gap" is wha
   automatically. It is not a review: do not count it as a control, do not read GitHub's "Approved" badge as
   human approval, and do not add a ruleset whose required-approval count it could satisfy.
 * **Gap 3.** The PR body is written by the author, so a verdict **marker** is self-asserted: nothing
-  fetches the adversary's report and compares. `bin/pr-wait` now checks the marker's shape and that its
+  fetches the adversary's report and compares. The parser checks the marker's shape and that its
   `head` equals the PR head, which catches a stale or typo'd verdict — but a fabricated APPROVE marker
   for the correct head is still indistinguishable from a real one. Treat it as a claim.
   Nothing enforces any of this: no required check, no required review, and nothing stops a direct push to

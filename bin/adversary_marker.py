@@ -14,11 +14,11 @@ The marker (AGENTS.md review rule 1, its five properties):
 
     <!-- adversary-verdict:v1 {"verdict":"APPROVE"|"BLOCK","head":"<40-hex>"} -->
 
-The parser below (from the "adversary verdict" banner to `adversary_from_doc`) is `bin/pr-wait`'s, moved
-here UNCHANGED on 2026-11-06 (slim-down E8): three adversary rounds found false APPROVEs and a hidden
-BLOCK in earlier versions, so the port is judged by pr-wait's marker tests, which moved with it to
-`tests/test_adversary_marker.py` and pass unchanged. `gate()` is the adversary branch of pr-wait's
-`assess()`, also unchanged except that an unreadable document is named `adversary-unreadable`. The new
+The parser below (from the "adversary verdict" banner to `adversary_from_doc`) is the removed PR
+waiter's (its lines 263-1047), moved here UNCHANGED on 2026-11-06 (slim-down E8, docs/slim/reports/wave4-E8.md):
+three adversary rounds found false APPROVEs and a hidden BLOCK in earlier versions, so the port is judged
+by the waiter's marker tests, which moved with it to `tests/test_adversary_marker.py` and pass unchanged.
+`gate()` is the adversary branch of the waiter's `assess()`, also unchanged except that an unreadable document is named `adversary-unreadable`. The new
 code is the event handling at the end (`find_prs`, `judge_pr`, `run_event`).
 
 Trust model of the Action (PLAN E8, amended by the Wave 4 research, 2026-11-06): the workflow runs on
@@ -832,10 +832,10 @@ def adversary_from_doc(doc: dict, head: str) -> dict:
     return out
 
 
-# ---- the gate: pr-wait's assess() adversary branch ----------------------------------------------------
+# ---- the gate: the PR waiter's assess() adversary branch---------------------------------------------------
 
 def gate(adversary: dict | None, adversary_required: bool = True) -> dict:
-    """pr-wait's `assess()` adversary branch, moved unchanged (the warning for an unreadable document is
+    """The removed PR waiter's `assess()` adversary branch, moved unchanged (the warning for an unreadable document is
     renamed `adversary-unreadable`). The Action always calls it with `adversary_required=True`: the ruleset
     makes the status required, so there is no report-only mode in CI. The flag stays so the moved tests,
     which pin the report-only default too, run unchanged.
@@ -863,7 +863,7 @@ def gate(adversary: dict | None, adversary_required: bool = True) -> dict:
             if adversary_required or fetch_failed or malformed:
                 blockers.append(adversary_warnings[-1])
     else:
-        # No verdict was collected at all: fail closed (pr-wait reported the same case as fetch_failed).
+        # No verdict was collected at all: fail closed (the waiter reported the same case as fetch_failed).
         adversary_warnings.append("adversary-unreadable")
         blockers.append("adversary-unreadable")
     return {"merge_ready": not blockers, "merge_blockers": blockers,
