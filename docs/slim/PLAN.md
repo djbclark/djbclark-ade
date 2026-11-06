@@ -558,7 +558,11 @@ J4. Dormant pieces: delete `jev`, `prior_art_nudge`, `skillopt-night`
 (default yes to all three)?
 J5. `docs/queue.md`: triage into a doc, or into `anh-chu/tasks` (124
 installs) / `activechoon/kanban-md`?
-J6. **Plugins to install** (each is trusted daemon code; defaults in bold):
+J6. [answered 2026-11-06: **all twelve** (the eight defaults and the four
+optionals), each after a Sonnet subagent's source summary; installed by the
+operator in Wave 3; `pr-radar` then replaces pr-wait's waiting half and
+`session-janitor` replaces herdr-sleeper outright; native resume stays OFF]
+**Plugins to install** (each is trusted daemon code; defaults in bold):
 **tell-agent**, **asks** or your **questions-please**, **baton**,
 **session-guard**, **usage-auto-resume**, **vitals**, **skills**, `pr-radar`,
 `session-janitor`, `plan-auto`, `zerosub` (only if you run several Claude
