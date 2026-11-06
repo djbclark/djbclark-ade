@@ -35,7 +35,43 @@
       "ScheduleWakeup",
       "SendFeedback",
       "Workflow",
-      "mcp__basic-memory__delete_project"
+      "mcp__basic-memory__delete_project",
+      "Read(**/.env)",
+      "Read(**/*.key)",
+      "Read(**/*.p12)",
+      "Read(**/*.pfx)",
+      "Read(**/*-key.pem)",
+      "Read(**/*.key.pem)",
+      "Read(**/privkey*.pem)",
+      "Read(**/id_rsa)",
+      "Read(**/id_ecdsa)",
+      "Read(**/id_ed25519)",
+      "Read(~/.ssh/id_rsa)",
+      "Read(~/.ssh/id_ecdsa)",
+      "Read(~/.ssh/id_ed25519)",
+      "Read(~/.aws/credentials)",
+      "Read(~/.netrc)",
+      "Read(~/.config/gh/hosts.yml)",
+      "Read(~/.docker/config.json)",
+      "Read(~/.kube/config)",
+      "Edit(**/.env)",
+      "Edit(**/*.key)",
+      "Edit(**/*.p12)",
+      "Edit(**/*.pfx)",
+      "Edit(**/*-key.pem)",
+      "Edit(**/*.key.pem)",
+      "Edit(**/privkey*.pem)",
+      "Edit(**/id_rsa)",
+      "Edit(**/id_ecdsa)",
+      "Edit(**/id_ed25519)",
+      "Edit(~/.ssh/id_rsa)",
+      "Edit(~/.ssh/id_ecdsa)",
+      "Edit(~/.ssh/id_ed25519)",
+      "Edit(~/.aws/credentials)",
+      "Edit(~/.netrc)",
+      "Edit(~/.config/gh/hosts.yml)",
+      "Edit(~/.docker/config.json)",
+      "Edit(~/.kube/config)"
     ],
     "defaultMode": "bypassPermissions"
   },
@@ -70,6 +106,7 @@
     "terminus-kira": "user-invocable-only",
     "setup-modern-cli": "user-invocable-only",
     "teach": "user-invocable-only",
+    "retro": "user-invocable-only",
     "dialogue": "user-invocable-only",
     "effort-routing": "user-invocable-only",
     "coderabbit-feeder": "user-invocable-only",
@@ -222,6 +259,11 @@
             "type": "command",
             "command": "{{ .home }}/ops/site-djbclark/macos/graft-hook-timeout-fix/graft-hook-guard.sh node \"{{ .home }}/.claude/helpers/graft-hooks.cjs\" post-edit",
             "timeout": 15
+          },
+          {
+            "type": "command",
+            "command": "\"$HOME\"/ops/site-private/bin/hook-deadline 2 \"$HOME\"/src/djbclark-ade/bin/post-edit-check --hook",
+            "timeout": 20
           }
         ]
       },
@@ -280,6 +322,16 @@
       }
     ],
     "PreToolUse": [
+      {
+        "matcher": "Read|Edit|MultiEdit|Write|NotebookEdit|Grep|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$HOME/.claude/hooks/secret_read_gate.py\"",
+            "timeout": 15
+          }
+        ]
+      },
       {
         "matcher": "Grep|Glob|Bash",
         "hooks": [

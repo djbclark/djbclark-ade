@@ -11,3 +11,6 @@ the latest numbered list.
 
 Ask **one** item per prompt, recommended option first, act on the answer
 before asking the next.
+
+If the first argument is `plan`, follow the skill's section 6 Plan mode with
+the rest as the topic or file.
