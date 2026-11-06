@@ -37,10 +37,12 @@ one is the same episode); a new resets_at is a new episode. `notify` sends each 
 most once per renotify_h (24 h) across episodes: one hermes-ping, and one relay.py line (`--fyi`, never `--steer`;
 `--idle 1800` for a Claude Paseo target) to each live lead seat (a fleet.py row whose name or title starts with the word
 `LEAD` in capitals, plus any agent id in QUOTA_SURPLUS_LEADS, comma-separated, e.g. a `/helm lead` session). An episode
-counts as notified only when hermes-ping succeeded (a started relay is not a delivery); otherwise the next run pings again,
-and the leads get the relay once per episode. Relays run
-detached (log: ~/.local/state/quota-surplus/relay.log) so an --idle wait never holds the timer. A corrupt state file is
-kept aside as state.json.corrupt and the run starts from empty state (at most one repeat page per open episode).
+counts as paged only when hermes-ping exited 0, and each lead as reached only when its relay.py run exited 0 (a started
+relay is not a delivery): relays run detached through `quota-surplus _relay-run OUT -- ARGV`, which records relay's exit
+status in ~/.local/state/quota-surplus/relays/, so an --idle wait never holds the timer; a failed ping or relay is
+retried on the next run, each lead on its own, up to 3 relay attempts (log: ~/.local/state/quota-surplus/relay.log).
+A corrupt state file is kept aside as state.json.corrupt and the run starts from empty state (at most one repeat page
+per open episode).
 `notify --dry-run` prints what it would send and sends nothing.
 The relay line advises at most N concurrent slices (surplus // the pool's route_agent estimate floor, 0 = do not dispatch;
 else 1-2; never above
@@ -664,9 +666,13 @@ def send_ping(text: str) -> bool:
     return r.returncode == 0
 
 
-def spawn_relay(argv: list[str]) -> bool:
-    """Detached: an --idle 1800 wait must not hold the 15-minute timer (the plist sets AbandonProcessGroup).
-    True when the relay process started (its delivery is relay.py's to report, in relay.log)."""
+MAX_RELAY_ATTEMPTS = 3
+
+
+def spawn_relay(argv: list[str], out: str) -> bool:
+    """Start relay.py detached through this script's `_relay-run`, which writes relay's exit status to `out` when it ends
+    (an --idle 1800 wait must not hold the 15-minute timer; the plist sets AbandonProcessGroup). True when it started;
+    delivery is judged later from `out` (relay_outcome), never from the launch (AGENTS.md order 10)."""
     log = state_path().parent / "relay.log"
     try:
         log.parent.mkdir(parents=True, exist_ok=True)
@@ -675,7 +681,8 @@ def spawn_relay(argv: list[str]) -> bool:
             fh.flush()
             # relay.py refuses a sender it cannot name (exit 4); a launchd run has no session, so declare one
             env = dict(os.environ, RELAY_SENDER_NAME=os.environ.get("RELAY_SENDER_NAME") or "quota-surplus")
-            subprocess.Popen(argv, stdout=fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+            subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "_relay-run", out, "--", *argv],
+                             stdout=fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                              start_new_session=True, env=env)
     except OSError as e:
         print(f"quota-surplus: relay failed to start: {e}", file=sys.stderr)
@@ -683,22 +690,48 @@ def spawn_relay(argv: list[str]) -> bool:
     return True
 
 
-def in_cooldown(state: dict, pool: str, now: datetime, renotify_h: float) -> bool:
-    last = parse_ts(((state.get("pools") or {}).get(pool) or {}).get("notified_at"))
-    return last is not None and (now - last).total_seconds() < renotify_h * 3600
+def relay_run(out: str, argv: list[str]) -> int:
+    """`_relay-run OUT -- ARGV`: run relay.py to its end and record its exit status in OUT (atomically)."""
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=2400, check=False, stdin=subprocess.DEVNULL)
+        rec = {"rc": r.returncode, "tail": (r.stdout + r.stderr)[-500:]}
+    except (OSError, subprocess.SubprocessError) as e:
+        rec = {"rc": 127, "tail": str(e)[:500]}
+    p = Path(out)
+    tmp = p.with_name(p.name + ".tmp")
+    tmp.write_text(json.dumps(rec))
+    os.replace(tmp, p)
+    return 0
+
+
+def relay_outcome(out: str | None) -> int | None:
+    """relay.py's exit status from its outcome file, or None while it runs (no file yet)."""
+    try:
+        rc = json.loads(Path(out).read_text()).get("rc") if out else None
+    except (OSError, ValueError, AttributeError):
+        return None
+    return rc if isinstance(rc, int) else 1
+
+
+def in_cooldown(state: dict, pool: str, now: datetime, renotify_h: float, episode: str | None = None) -> bool:
+    """True when `pool` was paged within renotify_h for an episode other than `episode`."""
+    rec = (state.get("pools") or {}).get(pool) or {}
+    last = parse_ts(rec.get("notified_at"))
+    return last is not None and rec.get("episode") != episode and (now - last).total_seconds() < renotify_h * 3600
 
 
 def notify(alerts: list[dict], state: dict, now: datetime, *, dry_run: bool, rows: list[dict] | None = None,
            items: list[dict] | None = None, ping=send_ping, relay=spawn_relay,
            renotify_h: float = RENOTIFY_H) -> list[dict]:
-    """Send each new `act` episode once, a pool at most once per renotify_h. Returns the actions (sent or planned).
+    """Page each new `act` episode once, a pool at most once per renotify_h. Returns the actions (sent or planned).
 
-    An episode (and its pool's cooldown) is marked notified only when hermes-ping succeeded: a started relay is not a
-    delivery (AGENTS.md order 10), so it never counts. Relays go to the leads once per episode (`relayed_at`), so a ping
-    retried on the next run does not relay again."""
+    The operator ping and each lead relay are tracked separately, and none counts until it is known to have succeeded:
+    the episode's `notified_at` (and the pool cooldown) only after hermes-ping exits 0; each lead in `relays[id]` only once
+    its relay.py run exited 0 (delivered or queued by relay itself). A relay still running is left alone; one that
+    failed is retried on the next run, up to MAX_RELAY_ATTEMPTS, whatever the ping did."""
     actions: list[dict] = []
-    todo = [a for a in alerts if a.get("verdict") == "alert" and a.get("severity") == "act"
-            and not (state.get("episodes", {}).get(a.get("episode") or "", {}) or {}).get("notified_at")]
+    eps = state.setdefault("episodes", {})
+    todo = [a for a in alerts if a.get("verdict") == "alert" and a.get("severity") == "act"]
     if not todo:
         return actions
     rows = fleet_rows() if rows is None else rows
@@ -706,37 +739,55 @@ def notify(alerts: list[dict], state: dict, now: datetime, *, dry_run: bool, row
     relay_py = os.environ.get("QUOTA_SURPLUS_RELAY") or str(REPO / "skills/session-finder/relay.py")
     planned: set[str] = set()
     for a in todo:
-        if in_cooldown(state, a["pool"], now, renotify_h) or a["pool"] in planned:
-            actions.append({"episode": a.get("episode"), "action": "cooldown", "pool": a["pool"]})
+        ep = eps.setdefault(a["episode"], {})
+        if in_cooldown(state, a["pool"], now, renotify_h, a["episode"]) or a["pool"] in planned:
+            if not ep.get("notified_at"):
+                actions.append({"episode": a.get("episode"), "action": "cooldown", "pool": a["pool"]})
             continue
         planned.add(a["pool"])
-        text = ping_text(a, now)
-        actions.append({"episode": a.get("episode"), "action": "ping", "text": text})
-        reached = False
-        if not dry_run:
-            reached = bool(ping(text))
+        if not ep.get("notified_at"):
+            text = ping_text(a, now)
+            actions.append({"episode": a.get("episode"), "action": "ping", "text": text})
+            if not dry_run:
+                if ping(text):
+                    ep["notified_at"] = now.isoformat()
+                    state.setdefault("pools", {})[a["pool"]] = {"notified_at": now.isoformat(), "episode": a["episode"]}
+                else:
+                    ep["failed_at"] = now.isoformat()
+                    actions.append({"episode": a.get("episode"), "action": "failed"})
         n_work = len(work_for(a, items))
-        ep = state.setdefault("episodes", {}).setdefault(a["episode"], {})
-        if not ep.get("relayed_at"):
-            started = False
-            for row in lead_seats(rows):
-                repo, seat = seat_scope(row)
-                if not in_scope(a, repo, seat):
+        relays = ep.setdefault("relays", {})
+        for row in lead_seats(rows):
+            repo, seat = seat_scope(row)
+            if not in_scope(a, repo, seat):
+                continue
+            target = str(row.get("id"))
+            rec = relays.get(target) or {}
+            if rec.get("delivered_at"):
+                continue
+            if rec:
+                rc = relay_outcome(rec.get("out"))
+                if rc is None:
+                    continue                                   # still running (an --idle wait)
+                if rc == 0:
+                    rec["delivered_at"] = now.isoformat()
                     continue
-                argv = relay_argv(relay_py, row, relay_text(a, now, n_work))
-                actions.append({"episode": a.get("episode"), "action": "relay", "target": row.get("id"), "argv": argv})
-                if not dry_run:
-                    started = bool(relay(argv)) or started
-            if started:
-                ep["relayed_at"] = now.isoformat()
-        if dry_run:
-            continue
-        if reached:
-            ep["notified_at"] = now.isoformat()
-            state.setdefault("pools", {})[a["pool"]] = {"notified_at": now.isoformat(), "episode": a["episode"]}
-        else:
-            ep["failed_at"] = now.isoformat()
-            actions.append({"episode": a.get("episode"), "action": "failed"})
+                rec["last_rc"] = rc
+                if int(rec.get("attempts") or 0) >= MAX_RELAY_ATTEMPTS:
+                    continue
+            argv = relay_argv(relay_py, row, relay_text(a, now, n_work))
+            actions.append({"episode": a.get("episode"), "action": "relay", "target": target, "argv": argv})
+            if dry_run:
+                continue
+            attempt = int(rec.get("attempts") or 0) + 1
+            out = str(state_path().parent / "relays" / f"{abs(hash((a['episode'], target, attempt))):x}-{attempt}.json")
+            Path(out).parent.mkdir(parents=True, exist_ok=True)
+            try:
+                Path(out).unlink()
+            except FileNotFoundError:
+                pass
+            if relay(argv, out):
+                relays[target] = {**rec, "attempts": attempt, "out": out, "started_at": now.isoformat()}
     return actions
 
 
@@ -777,6 +828,9 @@ def fmt_verdict(v: dict) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    raw = sys.argv[1:] if argv is None else argv
+    if raw[:1] == ["_relay-run"] and len(raw) >= 4 and raw[2] == "--":
+        return relay_run(raw[1], raw[3:])          # internal: started by spawn_relay
     ap = argparse.ArgumentParser(prog="quota-surplus", description=__doc__.split("\n\n")[0],
                                  formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
     sub = ap.add_subparsers(dest="cmd", required=True)
