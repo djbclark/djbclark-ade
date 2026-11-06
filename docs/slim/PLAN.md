@@ -571,8 +571,10 @@ subscriptions), and the official **`getpaseo/claude-code-entrypoint-env`**
 default** (evidence F: best effort, no exactly-once, cannot exclude a
 session; report I7: one mass wake pushed load to 394): Wave 3 evaluates
 `session-recovery` with it off, and turns it on only for a measured trial.
-J7. Final landing: one PR from the slim branch, or lift protection for a
-fast-forward? (The PR route keeps the new Action as the gate.)
+J7. [answered 2026-11-06: **one PR at the end of Wave 6**, gated by the E8
+Action, CI and the adversary marker; the operator merges with
+`--match-head-commit`; protection stays on] Final landing: one PR from the
+slim branch, or lift protection for a fast-forward?
 J8. Review rules after: marker validated by CI (E8), Codex advisory,
 changelog fragments kept, local review by Claude. Yes?
 J9. [answered 2026-11-06: **park** until Wave 3 measures the native path;
