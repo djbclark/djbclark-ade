@@ -10,7 +10,7 @@ A1. **Goal.** Turn djbclark-ade from a 123k-line Python repo (49.7k in `bin/`,
 20.8k in `skills/`, 88.6k in `tests/`, 26k lines of docs, 65 skills, 76 `bin/`
 tools, 55 docs; counted 2026-11-06) into a small policy layer on top of Paseo,
 with everything that is not an agentic-development-environment concern moved to
-its own repo, and everything Paseo (or a Paseo plugin, or an existing
+`djbclark/site-djbclark` (or the repo H2a names), and everything Paseo (or a Paseo plugin, or an existing
 open-source tool) already does deleted.
 
 A2. **Constraints the operator set (2026-11-06).** All work in Claude cloud
@@ -195,15 +195,45 @@ DECIDE (H question). Every slice ends with: zero references to a deleted name
 outside `docs/history/` (`grep -rn`), its tests gone or green, its README and
 `docs/skills.md` rows gone, a `changelog.d/slim-2026-11.md` line.
 
-E1. **S-move: non-ADE skills → new repo.** MOVE: `siyuan`, `siyuan-*` (3),
-`gmail-search`, `barnowl`, `book-to-kb`, `ovhcloud-api`, `aws-rules`,
-`hyades-docker`, `forgejo`, `forgejo-ci`, `terminus-kira`, `diskfree`,
-`bottom-config`, `setup-modern-cli`, `teach`, `todo`, `report`,
-`sipb-llm-bench`, `firecrawl`, `greptile`, `coderabbit-feeder`, `bench/`,
-`tests/test_barnowl_skill.py`, `bin/app-tamer-ab`, `bin/heavy-shim`,
-`bin/codium-ai`, `bin/change-hermes*` (Hermes box admin). Method: `git subtree
-split` or `git filter-repo` per path so history travels; the new repo is MIT
-too. Independent of every other slice; runs first.
+E1. **S-move: non-ADE pieces → `djbclark/site-djbclark`** (operator ruling
+2026-11-06: "stuff that should not be in djbclark-ade should likely go in the
+site-djbclark repo; full permission"; it is public on GitHub, this session can
+attach it with `add_repo` and push). Three different operations, not one:
+
+  - **E1a. Unlink, nothing to move.** Five skill dirs are already symlinks into
+    other repos (docs/skills.md, 2026-10-16): `forgejo` and `hyades-docker` →
+    `~/src/sipb-agent-skills`, `sipb-llm-bench` → `~/src/sipb-llms`,
+    `forgejo-ci` → `~/src/loopback-port-shim`, `sudo-secretspec` →
+    `~/src/sudo-secretspec`. Delete the links and their README/docs rows; the
+    canonical files stay where they are. H2a asks whether site-djbclark should
+    carry the links instead.
+  - **E1b. Vendored upstream copies: install, don't move.** `siyuan`,
+    `siyuan-*` (3) are a vendored copy of `zhiluop/siyuan-skills` (MIT).
+    Delete the copy; site-djbclark (or the operator's skills dir) installs the
+    upstream with `npx skills add zhiluop/siyuan-skills` (H4). Same rule for any
+    other `UPSTREAM.md`-marked skill.
+  - **E1c. Move with history** (`git subtree split` per path, applied to a
+    branch of site-djbclark): `gmail-search`, `barnowl`, `ovhcloud-api`,
+    `aws-rules`, `terminus-kira`, `diskfree`, `bottom-config`,
+    `setup-modern-cli`, `teach`, `todo`, `report`, `greptile`,
+    `coderabbit-feeder`, `firecrawl`, `bench/`, `tests/test_barnowl_skill.py`,
+    `bin/app-tamer-ab`, `bin/heavy-shim`, `bin/codium-ai`. Each lands under
+    site-djbclark `skills/` (the pre-2026-10-14 hub) or `bin/`, with its
+    README row. Pushed to a branch `slim-intake/2026-11` on site-djbclark; the
+    operator fast-forwards it (the `~/ops` plain-master practice of
+    `~/CLAUDE.md` item 21 applies there, so the lead does not push to its
+    master unasked).
+  - **E1d. Probably another home (H2a decides):** `book-to-kb` (its
+    implementation is `~/ops/site-private/bin/book-kb`), `change-hermes*`
+    (Hermes box admin; host details), `bin/coding-bot`, `skills/tell-coding-bot`,
+    `skills/tell-chief-of-staff` (the Grok bots; `djbclark/coding-bot-mailbox`
+    and `djbclark/bot-briefs` exist), `barnowl` (the fork
+    `djbclark/barnowl` and `barnowl-test-evidence` exist), `plugins/herdr-sleeper`
+    (its own repo `djbclark/herdr-sleeper` already exists: delete the copy).
+
+Runs first; independent of every other slice. Nothing private (host names
+with secrets, account ids) goes to a public repo: anything of that kind goes
+to `site-private`, after H2a.
 
 E2. **S-dead: Phase-0 and zero-reference tools.** DELETE: `bin/ade-scan-state`,
 `bin/ade-scan-state-doc` (+3.9k test lines; the 2026-10-20 scan is history),
@@ -319,7 +349,7 @@ its date. `CHANGELOG.md` folded once by the lead at the end (review rule 10).
 |---|---|---|---|
 | 0 | B1–B5 | serial | all agents `CHECKIN DONE`; H1, H2 answered |
 | 1 | audits: (a) `bin/`, (b) `skills/`, (c) `tests/` map, (d) `docs/`+queue, (e) Paseo plugins + repos + licences (web); lead synthesises `docs/slim/ledger.md`; operator approves the ledger once | 5 readers, no writers | ledger approved |
-| 2 | E1 (move), E2 (dead), E10 (sync), E9-under-H1 | 3–4 writers + reviewers | suite green, refs zero |
+| 2 | E1 (unlink, uninstall-vendored, move to site-djbclark), E2 (dead), E10 (sync), E9-under-H1 | 3–4 writers + reviewers | suite green, refs zero |
 | 3 | E3 (finder), E4 (seat), E5 (watch) | 3 writers + reviewers | same; plugins from H3 installed and verified live on the Mac by the operator before the REPLACE deletions merge |
 | 4 | E6 (acp), then E7 (route) and E8 (git); E6 and E7 as sibling cloud sessions | 2–3 | same |
 | 5 | E11 docs; AGENTS.md and README (Opus `high`, lead at `xhigh`) | 2 | suite green; `graft build` |
@@ -363,9 +393,17 @@ in general, E7 collapses to one skill and E9 deletes the other TUIs' support
 vendors stay for routing, E7 and E9 keep their multi-vendor shape and only lose
 the unverified parts. The first pass assumed the former; say which.
 
-H2. **Name and home of the new repo for E1** (suggested: `djbclark/djbclark-skills`,
-MIT, same `skills/<name>/SKILL.md` layout, installed with `npx skills add`), and
-whether the Hermes-box admin tools (`change-hermes*`) go there or to `~/ops`.
+H2. **Destination: answered 2026-11-06, `djbclark/site-djbclark`** for E1c, with
+full permission to push there. **H2a, still open, per item:** (i) should
+site-djbclark carry the five symlinks of E1a, or does nothing need to point at
+sipb-agent-skills, sipb-llms, loopback-port-shim and sudo-secretspec any more?
+(ii) `book-to-kb` → `site-private`, beside `bin/book-kb`? (iii) `change-hermes*`
+→ `site-private` (host details) or site-djbclark `roles/`? (iv) the Grok bot
+pieces (`coding-bot`, `tell-coding-bot`, `tell-chief-of-staff`) → `coding-bot-mailbox`
+or `bot-briefs`? (v) `barnowl` skill → the `djbclark/barnowl` fork, `sipb-agent-skills`,
+or site-djbclark? (vi) `aws-rules` and `ovhcloud-api` carry account facts:
+site-djbclark (public) or site-private? Default if unanswered: site-djbclark
+for everything except (ii) and (iii), which default to site-private.
 
 H3. **Which Paseo plugins may be installed** (D2; each is trusted daemon code):
 the lead's shortlist, by install count and fit, is `omercnet/tell-agent`,
