@@ -1,0 +1,7 @@
+{
+  "worktree": {
+    "teardown": [
+      "\"$HOME/src/djbclark-ade/bin/ade-rescue-worktree\" --repo djbclark-ade --branch \"$PASEO_BRANCH_NAME\" --worktree \"$PASEO_WORKTREE_PATH\" --remote origin --json"
+    ]
+  }
+}

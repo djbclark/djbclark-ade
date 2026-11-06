@@ -144,6 +144,31 @@ parent, a plain `paseo` caller) answers option 2 through the surface a parent us
 MCP tool `respond_to_permission` through `mcp` from an agent (`MCP_STEP` branch, needs the tool catalog).
 Accept: the agent's next turn shows the chosen option's text. If neither works, B3 and G4 are redesigned
 (cards go to the operator): the probe prints that consequence.
+**Checked 2026-11-02 (slice d1-t5-card, CLI and isolated daemon both 0.15.0-beta.1): PASS, B3 and G4 stand for omp-hosted cards.**
+The claude provider was NOT probed (djbclark 2026-11-02: the Claude subscription pool must not run out); the probe uses the
+`omp` provider with `anthropic/claude-haiku-4-5` (API credits), whose `ask` tool raises a question card
+(`providers/omp/question-ui.js`: `kind: "question"`, tool name `OMP ask`, header `Response`). Results, two haiku turns,
+`~/.local/state/ade/acceptance/<UTC date>/d1-02-card-option.json`, evidence in the probe's `ACC_BASE`:
+(a) `paseo permit allow AGENT REQ --input '{"answers":{"Response":"teal-9"}}'` (option 2 of `crimson-7`/`teal-9`) was
+accepted (rc 0) and the agent's next turn read `PICKED: teal-9`, never option 1; (b) the paseo MCP tool
+`list_pending_permissions` listed the card (normalized payload, `kind: "question"`) and `respond_to_permission`
+`{agentId, requestId, response:{behavior:"allow", updatedInput:{answers:{Response:"teal-9"}}}}` returned `{success:true}`
+and the agent's next turn read `PICKED: teal-9`. Both surfaces end in `agentManager.respondToPermission`.
+Answer shape depends on the provider: omp keys `answers` by the card's `header` (`Response`); for Claude the server
+(`providers/claude/agent.js`, `resolveClaudeAskUserQuestionAnswers`) accepts `answers` keyed by the full question text or
+its `header`, and codex keys by `question.header`: [INFERENCE] from source, not run (claude pool protected; codex not
+tried). A parent that answers a card must read the card's `questions[].header`/`question` from `list_pending_permissions`
+rather than hard-code `Response`.
+**Plan-changing finding:** the daemon injects the `paseo` MCP server into its agents only when its listener is TCP
+(`bootstrap.js createAgentMcpBaseUrl` returns null for a Unix socket). The isolated daemon (decision 1: Unix socket)
+therefore gives its agents NO paseo MCP tools; a first run with an omp "parent" showed it falling back to `paseo permit
+allow` through bash. Any D1 probe whose contract is an agent calling a paseo MCP tool (T7 archive parent with a running
+child, T10 tab creation by an agent, the real parent path of B3) cannot run on a Unix-socket isolated daemon: either claim
+a port in `site-djbclark/registry/ports.yml` (through the lead) and give `isolated_up` a TCP listener option, or call
+`/mcp/agents` over the socket as `lib/mcp_call.py` does (what this probe did). Also: `omp` is not enabled in a fresh
+home; `paseo daemon config set agents.providers '{"omp":{"enabled":true}}' --home H` hot-reloads (the dotted
+`agents.providers.omp.enabled` path is refused: "replace its containing object with JSON"); the live config hash was
+unchanged.
 
 ### T6. D1.3 Archive rescue and the `paseo.json` teardown (blocks D2's gate; the largest task)
 
@@ -167,6 +192,35 @@ the local rescue still exists; record (`d1-03.json`) whether a failing teardown 
 worktree, and `session-janitor`'s current mode. If anything is lost: no slice moves to Paseo workspaces.
 Also: `config/paseo-teardown-repos` lists the repos slices may target (question 11), and the G2 refusal check is
 D2's, not D1's.
+**Checked 2026-11-02 (slice d1-t6-rescue; CLI and isolated daemon 0.15.0-beta.1; one `codex/gpt-5.6-luna` turn per run;
+throwaway repo, `origin` and `private` bare remotes created under `ACC_BASE`): T6's acceptance holds, with one plan change.**
+Built: `bin/ade-rescue-worktree` (steps 1-5 as above; the bundle is the full history of the branch plus `refs/rescue/<branch>`,
+so it verifies in an empty repo; `$ADE_RESCUE_ROOT` overrides the root for tests and probes; exit 0 rescued, `pushed:false` on
+a refused push, 1 local rescue failed, 2 usage), `tests/test_ade_rescue_worktree.py` (6 passed, `bg bin/pytest`),
+`config/paseo.json.example` (the teardown snippet, `"$PASEO_BRANCH_NAME"`/`"$PASEO_WORKTREE_PATH"`, the variables Paseo sets),
+`config/paseo-teardown-repos` (draft: `djbclark-ade` only). Results (`~/.local/state/ade/acceptance/2026-11-03/`):
+1. **`paseo archive <last agent>` does not run teardown and does not remove the worktree** (run 1, `$TMPDIR/ade-acc-rescue0.4nFipX`;
+   run 2 again, 20 s): the workspace stays active and the work stays on disk. The teardown runs on a **workspace-scope** archive
+   (`paseo workspace archive`, archive-on-merge, the MCP archive tool; Paseo source `workspace-archive-service.ts`). **Plan change for
+   D2:** a slice ends with `paseo workspace archive <wks>`, not an agent archive, or its worktree and workspace leak (nothing is lost).
+2. `d1-03-archive-rescue` **pass** (`$TMPDIR/ade-acc-rescue0.xRhKUX`): teardown ran with both variables set; rescue exit 0; dir 0700;
+   bundle carries `refs/heads/<branch>` and `refs/rescue/<branch>` and verifies standalone; restored: the unpushed commit, the
+   staged and the unstaged change; `untracked.tar` = `u.txt` only (ignored `x.log` absent); the bundle was verified inside the
+   teardown while the worktree existed (archive call +0.59 s teardown start, +1.16 s teardown end, +1.29 s worktree seen gone); the
+   `private` remote got `rescue/<branch>-<date>` with tracked files and no untracked file; the worktree was removed.
+3. `d1-03b-teardown-failure` **pass** (`$TMPDIR/ade-acc-rescue1.cm1hSQ`): the refusing remote (pre-receive exit 1) left
+   `pushed:false` with the hook's message, rescue exit 0, the local rescue complete and verified, no ref on the remote. The
+   teardown was then made to exit 3: **a failing teardown stops Paseo removing the worktree, but the workspace is archived anyway**
+   (`workspace archive` exit 0; daemon log "Worktree teardown failed during archive; workspace already archived"; the
+   directory stayed under `home/worktrees/` for 45 s and after). So a rescue failure (exit 1) keeps the work, and leaves an
+   orphaned worktree no active workspace lists: D2 needs a sweep for those.
+4. `session-janitor`'s mode: not running on the isolated daemon (`pluginsEnabled false`); live (files read, no `paseo` call):
+   `config.json` `plugins.session-janitor.enabled = false`, settings in
+   `~/.paseo/plugin-settings/session-janitor/preferences.json` `.values`: `enabled true`, `archiveChildren false`,
+   `deleteChildren false`, `deleteMain false`, `archiveAfterHours 6`, `waitForParentArchive true` (answers where decision 7's
+   three settings live). Observation for T2: the isolated daemon's log shows a plugin `worktree-include` loaded although
+   `pluginsEnabled` is false (a built-in, presumably; `plugin ls` reported none running).
+Not lost in any run. Record names are the probes' (`d1-03-archive-rescue.json`, `d1-03b-teardown-failure.json`), not `d1-03.json`.
 
 ### T7. D1.4 Archive a parent with a running child
 
@@ -192,6 +246,17 @@ Files: `d1-05-restart-persistence.sh` (`DESTRUCTIVE: second daemon only`).
 Do: set up one of each (queued send to a busy agent, `create_agent` with `notifyOnFinish`, `paseo schedule create`),
 `paseo --home X restart`, then diff: queue survives, the finish notification arrives once, the schedule exists
 and fires. Accept: none lost; else G1 and G3 persist and reconcile themselves (their designs already say so).
+
+**Checked 2026-11-02 (slice d1-t8-restart, CLI and isolated daemon both 0.15.0-beta.1; provider omp, model anthropic/claude-haiku-4-5, API credits; PASS, G1 and G3 may rely on the daemon's own persistence for these three records, but see the caveats).**
+`d1-05-restart-persistence.sh` run against an isolated daemon; record `~/.local/state/ade/acceptance/2026-11-03/d1-05-restart-persistence.json` (UTC date), evidence copied to `.../d1-05-evidence/`, live daemon snapshot, agent count and config hash unchanged.
+1. **The restart command.** `paseo --home <isolated> restart --json` restarts the worker and keeps the supervisor: `supervisorPid` equal before and after (the pid `paseo status` reports), `previousWorkerPid` replaced by a new `workerPid`; 15 to 22 s end to end. `lib/common.sh` `isolated_restart_guard` (asserts `PASEO_HOME` is exactly `$ACC_BASE/home` on physical paths, not a symlink, not the live home or inside it, marker `fresh`, and that the daemon answering there has the serverId `isolated_up` saved and not the live one) then `isolated_restart_now` (repeats the path checks, drops `PASEO_HOST`/`PASEO_LISTEN`, always passes `--home`). Five negative cases refuse with exit 2 before any CLI call: `PASEO_HOME` unset, `~/.paseo`, a fresh-marker dir that is not `$ACC_BASE/home`, a symlink to `~/.paseo`, `_now` without the guard.
+2. **Prompt steered into a busy agent: survives, once.** `paseo send --behavior steer` into a running omp turn put the prompt in the agent's timeline before the restart (count 1) and after it (count 1). There is no CLI queue: `send` has only `steer|interrupt`, and the daemon keeps no persisted prompt queue for it, so "queued" means steered into the turn. Provider-dependent: in the first run the steer ended omp's turn (status `idle` straight after), in the second the agent stayed `running`.
+3. **The only in-memory queue, the daemon's two-second `AgentMessageDelivery` window, survives a restart that lands inside it.** MCP `send_agent_prompt` (agent-scoped) returns a queued receipt and dispatches after two quiet seconds; the restart began 42 ms after the receipt (first run: 175 ms) and the message was in the target's timeline exactly once afterwards (reading the bundle: `AgentMessageDelivery.close()` flushes pending messages; not observed whether the flush happened before or after the worker stopped). Measured once per run with the restart within 1.5 s of the send; not a guarantee for a kill (`isolated_down`, a crash) rather than a `restart`.
+4. **`notifyOnFinish`: the subscription is durable and fires once.** `create_agent` with `notifyOnFinish:true` called as parent P (`/mcp/agents?callerAgentId=P`) writes `<home>/finish-subscriptions.json` (one record `callerAgentId`, `childAgentId`, `requireParentOwnership`, `id`); the file is identical after the restart, and the child (running at the restart, then resumed by omp) finished once and P's timeline holds exactly one `[Agent finished] <title>` notice (one more after 20 s: still one); the record was removed after delivery. This relies on `notifyOnFinish` existing only for an agent-scoped caller: a top-level MCP or CLI `run` has no parent callback (`notifying = Boolean(callerAgentId && notifyOnFinish)`).
+5. **Schedules: persisted, unchanged, fire after the restart.** `paseo schedule create --cron '* * * * *'` is stored as `<home>/schedules/<id>.json`; `schedule inspect` before and after the restart agrees on id, name, prompt, cadence, target, createdAt, maxRuns, expiresAt; the next cron fire (`scheduledFor 04:08:00`, after the restart ended at second 32) `succeeded` with the agent's reply (`SCHED-RAN`); `schedule run-once` also succeeded.
+6. **Caveat that changes G3: a schedule run in flight at the restart is not resumed, it is recorded `failed` and consumes a run.** An accidental overlap in the exploration run (a cron fire 18 s before the restart finished) wrote `status: failed`, `agentId: null`, `error: "Daemon restarted before the scheduled run completed"`, and with `--max-runs 1` the schedule became `completed`, `nextRunAt: null` (evidence `d1-05-evidence/accidental-inflight-schedule.json`). G3 must not treat `maxRuns` as proof of N successful runs and must check `runs[].status` after any restart; the probe records `minuteBoundaryInsideRestart` so a run that collides is visible rather than a false failure.
+7. **What a restart does to a running agent turn (not asked, but G1 needs it):** the turn is aborted (run 1, omp logs `[Wait] Operation aborted`), the agent shows `closed` or `idle` right after, and omp continues it with `[User] Resume working.` (text from omp, not found in Paseo's bundle) when the next prompt arrives: the child finished its original task `CHILD-DONE` that way. Do not rely on a turn surviving a restart; rely on a message having been delivered.
+8. **Setup facts a later probe needs.** The isolated daemon's default is `daemon.mcp.injectIntoAgents=false` (the code reads `?? false`), which makes every agent-scoped MCP call fail with JSON-RPC `-32601 Method not found` (no tools registered): set `paseo daemon config set daemon.mcp.injectIntoAgents true --home <isolated>` before creating agents (the policy is fixed at agent creation). The Unix-socket daemon still injects no MCP URL into agents, so the probe calls `/mcp/agents` itself (`lib/mcp_call_as.py`, a superset of `lib/mcp_call.py` from branch d1-t5-card, kept separate to avoid a merge conflict: fold them). omp runs a long `bash` call as a background job and waits; a restart aborts that wait. `bin/bg` refuses this probe (a linked worktree has no CI route and it is not a test suite), so it was run directly; one run is about 6 minutes and six haiku turns.
 
 ### T9. D1.6 Schedule behaviour across sleep, and the janitor settings location
 
@@ -220,6 +285,29 @@ the `paseo` reopen call) and resume the same agent; record whether `agent.open.b
 Accept: a written answer for G2.8 ("signal exists: <field>" or "none") and for G1's orchestrator list
 ("catalog recomputed on reopen: yes/no"). If no, the registration flow (V3) cannot be create, merge id, reopen;
 G1 then needs the list read at `jobs.submit` time instead.
+
+**Checked 2026-11-02 (slice d1-t11-origin; CLI and isolated daemon 0.15.0-beta.1, provider `antigravity/gemini-3.8-flash-low`, about 15 one-word turns across exploration and runs):**
+hook names and the plugin shape are confirmed (paseo.sh/docs/plugins/hooks.md, and the daemon source `agent-manager.js` `createAgentInternal`
+and `buildLaunchContext`): a plugin is `paseo-plugin.json` + `index.server.ts` calling `server.addHook(name, handler)`; the fixture was rewritten to
+that shape (the draft's `plugin.json`/`index.js`/`api.on` did not exist). Helpers: `lib/origin-probe.sh` (plugin setup, MCP over the unix socket),
+`lib/origin-diff.py`. The isolated home starts with `pluginsEnabled=false`; the probes turn it on in the TEST home only
+(`paseo daemon config set pluginsEnabled true`, then `plugin install` + `plugin reload`, hot, no restart). Results: `d1-07b-create-origin.json`, `d1-10-reopen-hook.json`.
+**G2.8 answer (d1-07b, pass): none.** `agent.create.before` receives only `{request: {config, env?}}` (config: provider, model, cwd, title); the daemon's
+`options` (labels, owner, workspaceId, source) are not in it. A CLI `paseo run`, an MCP `create_agent` with no caller, and a plugin-SDK
+`paseo.agents.create` (the same `daemonClient.createAgent` the app uses) log identical key sets in `agent.create.before`, `agent.open.before` (labels `{}`, reason
+`create`) and `agent.create.after`; the Desktop/mobile UI create cannot be scripted (N/A, it sends the same request). Only an agent-originated MCP create (the
+agent's own MCP client, `?callerAgentId=`, needs `daemon.mcp.injectIntoAgents=true` on that daemon, default false) carries a signal, and not in `create.before`:
+`agent.open.before` `labels["paseo.parent-agent-id"]` and `labels["paseo.parent-server-id"]`, and `agent.create.after` `agent.parentAgentId`
+(`create.before` differs only by an incidental `config.modeId`). So G2.8's herald-label refusal cannot key on "plugin-SDK vs MCP vs CLI"; the only usable
+discriminator is parentage (subagent vs root), at `open.before`/`create.after`, and the `deleteHelpers:false` assertion stays the control for the rest.
+Note: an agent-scoped `create_agent` that names `cwd` is parsed as the legacy relationship/workspace shape and refused; omit `cwd` and it inherits the caller's workspace.
+**V3 / G1 answer (d1-10, pass): catalog recomputed on reopen: yes.** `agent.open.before` fires again, per open of the same agent id: `reason: "refresh"` on
+`paseo agent reload` (the `refresh_agent_request` that `reopen-archived` sends after restoring a workspace); `reason: "resume"` on archive then `paseo agent reload`
+(which also unarchives: `archivedAt` null afterwards); `reason: "refresh"` on the first send after `paseo plugin reload origin-probe` (stale session reopened
+before the next idle prompt); `reason: "resume"` on the first send after a daemon worker restart. An idle follow-up `send` fires nothing (session reused). So the
+flow create, merge id, reopen works with a `agent.open.before` reader, provided the reopen is one of `agent reload`, archive+reload, a plugin reload followed by a prompt, or a restart.
+Limit: `reopen-archived` itself was not run (it refuses a Unix-socket listener and its workspace-restore request has no CLI form); only its `refresh_agent_request` leg was exercised.
+The D2 case "newly registered orchestrator gains `jobs.submit` after reopen, unregistered does not" stays as written.
 
 ### T12. D1.8 vps-primary security prerequisites (needs djbclark's yes; touches `~/ops`, order 11)
 

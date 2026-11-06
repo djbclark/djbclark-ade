@@ -161,6 +161,52 @@ isolated_down() {
   return 0
 }
 
+# isolated_restart_guard / isolated_restart_now / isolated_restart [TIMEOUT_S]: `paseo --home <isolated home> restart` of the
+# ISOLATED daemon only (T8, D1.5). The command can never resolve to ~/.paseo: the guard asserts, on physical paths, that
+# PASEO_HOME is exactly $ACC_BASE/home (the directory isolated_up created, marker 'fresh'), is not a symlink, is not the live
+# home or inside it, and that the daemon answering on it has the serverId isolated_up saved and not the live daemon's.
+# `isolated_restart_now` repeats the path assertions (no CLI calls, so it adds no latency) and then runs the restart with an
+# explicit --home; PASEO_HOST and PASEO_LISTEN are dropped for the call (an inherited endpoint must not redirect it).
+# `isolated_restart` = guard + now; a probe that needs the restart within milliseconds of another call runs the guard
+# first and `_now` last. `paseo restart` restarts the worker and keeps its supervisor (`paseo daemon run`, daemon.pid), so
+# isolated_down still stops the whole tree. Writes ACC_BASE/restart.json and status-after.json; sets RESTART_PID_BEFORE/AFTER
+# (the supervisor pid `paseo status` reports; restart.json carries previousWorkerPid and workerPid) and RESTART_RC.
+_acc_restart_home() {
+  local real live base
+  require_isolated
+  [ ! -L "$PASEO_HOME" ] || die "isolated_restart: PASEO_HOME is a symlink"
+  real=$(cd "$PASEO_HOME" && pwd -P); live=$(cd "$ACC_LIVE_HOME" && pwd -P); base=$(cd "${ACC_BASE:?}" && pwd -P)
+  [ "$real" != "$live" ] || die "isolated_restart: PASEO_HOME resolves to the live home"
+  case "$real" in "$live"/*) die "isolated_restart: $real is inside the live home";; esac
+  [ "$real" = "$base/home" ] || die "isolated_restart: $real is not \$ACC_BASE/home ($base/home)"
+  ACC_RESTART_HOME="$real"
+}
+isolated_restart_guard() {
+  local saved now live_id
+  _acc_restart_home
+  saved=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["serverId"])' "$ACC_BASE/status.json") || die "isolated_restart: no saved serverId"
+  now=$(env -u PASEO_HOST -u PASEO_LISTEN paseo --home "$ACC_RESTART_HOME" status --json 2>/dev/null \
+    | python3 -c 'import json, sys; print(json.load(sys.stdin).get("serverId") or "")')
+  [ -n "$now" ] && [ "$now" = "$saved" ] || die "isolated_restart: daemon on $ACC_RESTART_HOME has serverId '$now', expected the saved '$saved'"
+  live_id=$(live_snapshot | ggrep -o 'serverId=[^;]*' | gsed 's/^serverId=//')
+  [ -z "$live_id" ] || [ "$live_id" != "$saved" ] || die "isolated_restart: the isolated serverId equals the live daemon's"
+  RESTART_GUARDED="$ACC_RESTART_HOME"
+}
+isolated_restart_now() {
+  local tmo="${1:-120}"
+  _acc_restart_home
+  [ "${RESTART_GUARDED:-}" = "$ACC_RESTART_HOME" ] || die "isolated_restart_now: run isolated_restart_guard first"
+  RESTART_PID_BEFORE=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("pid") or "")' "$ACC_BASE/status.json" 2>/dev/null)
+  RESTART_T0=$(gdate +%s%3N)
+  env -u PASEO_HOST -u PASEO_LISTEN paseo --home "$ACC_RESTART_HOME" restart --json --timeout "$tmo" > "$ACC_BASE/restart.json" 2> "$ACC_BASE/restart.err"
+  RESTART_RC=$?
+  RESTART_T1=$(gdate +%s%3N)
+  env -u PASEO_HOST -u PASEO_LISTEN paseo --home "$ACC_RESTART_HOME" status --json > "$ACC_BASE/status-after.json" 2>/dev/null
+  RESTART_PID_AFTER=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("pid") or "")' "$ACC_BASE/status-after.json" 2>/dev/null)
+  return "$RESTART_RC"
+}
+isolated_restart() { isolated_restart_guard && isolated_restart_now "$@"; }
+
 # live_snapshot: pid, startedAt and serverId of the LIVE daemon (explicit --home: PASEO_HOME may point at a test home).
 live_snapshot() {
   paseo --home "$ACC_LIVE_HOME" status --json 2>/dev/null | python3 -c '
