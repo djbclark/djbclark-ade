@@ -1,0 +1,150 @@
+#!/usr/bin/env -S python3 -I
+"""ade-sched: install a checked-in launchd plist on this machine's scheduler (launchd, systemd user units or cron).
+
+usage:
+  ade-sched [options] backend               the backend auto-detection picks, its unit/agent dir, the linger state
+  ade-sched [options] render PLIST          print what install would write (one `# <path>` header per artifact)
+  ade-sched [options] install PLIST         write and activate the job
+  ade-sched [options] uninstall LABEL       remove it (not installed: exit 0)
+  ade-sched [options] status [LABEL...]     installed / active / next run; no LABEL: every job ade-sched generated
+
+options (before or after the subcommand):
+  --backend auto|launchd|systemd|cron   default auto (env ADE_SCHED_BACKEND; `none` there turns scheduling off, exit 69)
+  --ade DIR             the checkout that fills __ADE__ / @ADE@ (default: the one this script is in; install refuses
+                        that default with exit 2 when it is a linked git worktree, which is deleted after its merge)
+  --set KEY=VALUE       fill a placeholder, literally as written in the plist (__STATE__=..., @TARGET@=...); repeatable
+  --dry-run             install/uninstall: print the artifacts and commands, change nothing
+  --no-activate         install/uninstall: write or remove the files, print the activation commands instead of running them
+  --allow-no-linger     systemd install: proceed when loginctl says Linger=no (default: exit 69 before writing, because
+                        user timers stop at logout); never runs sudo, prints `sudo loginctl enable-linger USER`
+
+Auto-detection: darwin with launchctl -> launchd; a booted systemd whose `systemctl --user is-system-running` answers
+running/degraded/starting/initializing -> systemd; booted systemd with no reachable user manager -> exit 69 (never a
+silent cron); otherwise crontab on PATH -> cron. Placeholders __ADE__ and __HOME__ are always filled; any other
+__NAME__ or @NAME@ left unfilled is exit 2, and so is an EnvironmentVariables name that looks like a secret
+(KEY/TOKEN/SECRET/PASSWORD). A oneshot systemd job gets KillMode=process (setsid-detached children survive, as on
+launchd; plist key KillMode overrides), TimeoutStartSec=max(3 x StartInterval, 300s) and AccuracySec=1s. On systemd and
+cron, ~/.local/bin:/usr/local/bin:/usr/bin:/bin go first in PATH (plist PATHs are Mac paths).
+
+Overrides (env): ADE_SCHED_LAUNCHCTL, ADE_SCHED_SYSTEMCTL, ADE_SCHED_LOGINCTL, ADE_SCHED_CRONTAB (binaries);
+ADE_SCHED_LAUNCH_AGENTS (default ~/Library/LaunchAgents), ADE_SCHED_UNIT_DIR (default
+${XDG_CONFIG_HOME:-~/.config}/systemd/user), ADE_SCHED_LOCK (the crontab edit lock, default
+${XDG_STATE_HOME:-~/.local/state}/ade/ade-sched.lock).
+
+exit: 0 ok; 1 an activation command failed (its stderr is quoted); 2 bad job or usage; 3 status: a LABEL is not
+installed; 69 no usable scheduler (none forced, none found, systemd user manager unreachable, Linger=no on a systemd
+install without --allow-no-linger, KeepAlive or a StartInterval under 60 s on cron). A `crontab -l` failure other than
+"no crontab" is exit 1 and the crontab is left untouched.
+
+Notes and warnings (unmapped plist keys, cron rounding) go to stderr and do not change the exit status.
+docs/scheduling.md is the manual.
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+
+sys.path[:0] = [d for d in (os.path.dirname(os.path.realpath(__file__)),) if d not in sys.path]   # python3 -I has no script dir
+import ade_sched
+
+
+class _Parser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:   # argparse's own exit 2 is our usage code; keep the doc's usage text
+        print(__doc__.split("\n\n", 2)[1], file=sys.stderr)
+        print(f"ade-sched: {message}", file=sys.stderr)
+        raise SystemExit(ade_sched.EX_USAGE)
+
+
+def _common(p: argparse.ArgumentParser, top: bool) -> None:
+    """The options, on the top parser (with the defaults) and on every subcommand (SUPPRESS: set only when given there)."""
+    def dflt(v: object) -> dict[str, object]:
+        return {"default": v if top else argparse.SUPPRESS}
+    p.add_argument("--backend", choices=("auto", *ade_sched.BACKENDS), **dflt("auto"))
+    p.add_argument("--ade", metavar="DIR", **dflt(None))
+    # its own dest on a subcommand: an append there would REPLACE the top-level list, dropping earlier --set values
+    p.add_argument("--set", action="append", metavar="KEY=VALUE", dest="subst" if top else "sub_subst", **dflt([]))
+    p.add_argument("--dry-run", action="store_true", **dflt(False))
+    p.add_argument("--no-activate", action="store_true", **dflt(False))
+    p.add_argument("--allow-no-linger", action="store_true", **dflt(False))
+
+
+def parse(argv: list[str]) -> argparse.Namespace:
+    ap = _Parser(prog="ade-sched", description="install a launchd plist on launchd, systemd or cron",
+                 formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
+    _common(ap, top=True)
+    sub = ap.add_subparsers(dest="cmd", required=True, parser_class=_Parser)
+    for name, arg, nargs in (("backend", None, None), ("render", "plist", None), ("install", "plist", None),
+                             ("uninstall", "label", None), ("status", "labels", "*")):
+        sp = sub.add_parser(name)
+        _common(sp, top=False)
+        if arg:
+            sp.add_argument(arg, nargs=nargs) if nargs else sp.add_argument(arg)
+    a = ap.parse_args(argv)
+    a.subst = [*a.subst, *getattr(a, "sub_subst", [])]   # --set before and after the subcommand both count
+    return a
+
+
+def _subst(a: argparse.Namespace) -> dict[str, str]:
+    subst: dict[str, str] = {}   # __ADE__/__HOME__ come from Job.from_plist(ade=...), which knows whether --ade was given
+    for item in a.subst:
+        key, sep, val = item.partition("=")
+        if not sep or not key:
+            raise ade_sched.SchedError(ade_sched.EX_USAGE, f"--set wants KEY=VALUE, not {item!r}")
+        subst[key] = val
+    return subst
+
+
+def main(argv: list[str] | None = None) -> int:
+    a = parse(sys.argv[1:] if argv is None else argv)
+    if a.ade and not os.path.isdir(a.ade):
+        print(f"ade-sched: --ade {a.ade} is not a directory", file=sys.stderr)
+        return ade_sched.EX_USAGE
+    backend = None if a.backend == "auto" else a.backend
+    try:
+        if a.cmd == "backend":
+            b = ade_sched.detect(backend)
+            print(f"backend: {b.name} ({b.reason})")
+            if b.name == "launchd":
+                print(f"agents: {ade_sched.launch_agents_dir(b.env)}")
+            elif b.name == "systemd":
+                print(f"units: {ade_sched.unit_dir(b.env)}")
+                print(f"linger: {ade_sched.linger(b.env) or 'unknown'}")
+            else:
+                print(f"crontab: {ade_sched.tool('crontab', b.env)}")
+            return 0
+        if a.cmd in ("render", "install"):
+            job = ade_sched.Job.from_plist(a.plist, _subst(a), ade=a.ade)
+            if a.cmd == "render":
+                r = ade_sched.render(job, ade_sched.detect(backend))
+                for n in r.notes:
+                    print(f"ade-sched: note: {n}", file=sys.stderr)
+                ade_sched.print_artifacts(r, sys.stdout)
+                return 0
+            r = ade_sched.install(job, backend, dry_run=a.dry_run, activate=not a.no_activate,
+                                  allow_no_linger=a.allow_no_linger)
+            if not a.dry_run:
+                print(f"ade-sched: installed {job.label} on {r.backend}", file=sys.stderr)
+            return 0
+        if a.cmd == "uninstall":
+            found = ade_sched.uninstall(a.label, backend, dry_run=a.dry_run, activate=not a.no_activate)
+            if not a.dry_run:
+                print(f"ade-sched: {'removed' if found else 'not installed:'} {a.label}", file=sys.stderr)
+            return 0
+        b = ade_sched.detect(backend)
+        labels = a.labels or ade_sched.installed_labels(b)
+        missing = 0
+        for label in labels:
+            s = ade_sched.status(label, b)
+            missing += not s.installed
+            act = "unknown" if s.active is None else "active" if s.active else "inactive"
+            print(f"{label}\t{s.backend}\t{'installed' if s.installed else 'not-installed'}\t{act}\t"
+                  f"next={s.next_run or '-'}")
+        return ade_sched.EX_NOT_INSTALLED if missing and a.labels else 0
+    except ade_sched.SchedError as e:
+        print(f"ade-sched: {e}", file=sys.stderr)
+        return e.code
+
+
+if __name__ == "__main__":
+    sys.exit(main())
