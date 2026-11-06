@@ -733,3 +733,14 @@ Common failures:
 - Transformer has no effect: `query.itemType` does not match the source type, the transform returned `undefined`, or it threw and was skipped; check the app console for `[Plugins] Timeline transformer failed`.
 - Slash command not offered: name collides with a built-in or another plugin, the context is `agent` on a draft, or the composer has attachments.
 - Append rejected: the caller is not a plugin session, `data` exceeds 64 KiB, or the host predates `features.pluginTimelineItems`.
+
+## In this repo (2026-11-04)
+
+- In-repo plugins live under `plugins/<id>/`. `plugins/ade-recovery` is the first passive one.
+- TypeScript runs by Node type stripping: relative imports end in `.ts`, there are no npm
+  dependencies, and shared types are imported with `import type` so runtime code stays type-free.
+- Tests run `node --test` through a pytest wrapper: `bin/pytest -q tests/test_ade_recovery_plugin.py`.
+- Registering `agent.open.before` makes Paseo invalidate open sessions on every plugin start or
+  reload, so passive plugins must not register it.
+- `timeline.refetch` on a non-live agent loads its history and can start a provider, so a passive
+  plugin must not call it.

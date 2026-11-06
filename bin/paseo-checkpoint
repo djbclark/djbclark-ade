@@ -1,0 +1,45 @@
+#!/bin/sh
+# paseo-checkpoint: read-only recovery verdicts from the ade-recovery plugin's records.
+# Run `paseo-checkpoint --help` for usage. POSIX sh; symlinks are resolved by hand (old macOS lacks the GNU flag).
+set -eu
+
+# Resolve this script's real location through any chain of symlinks.
+src=$0
+n=0
+while [ -h "$src" ]; do
+  n=$((n + 1))
+  if [ "$n" -gt 40 ]; then
+    echo "paseo-checkpoint: too many symlink levels resolving '$0'" >&2
+    exit 70
+  fi
+  dir=$(cd -P "$(dirname -- "$src")" >/dev/null 2>&1 && pwd) || exit 70
+  link=$(readlink -- "$src") || exit 70
+  case $link in
+    /*) src=$link ;;
+    *) src=$dir/$link ;;
+  esac
+done
+bindir=$(cd -P "$(dirname -- "$src")" >/dev/null 2>&1 && pwd) || exit 70
+root=$(dirname -- "$bindir")
+cli=$root/plugins/ade-recovery/server/cli.ts
+if [ ! -f "$cli" ]; then
+  echo "paseo-checkpoint: cannot find '$cli'" >&2
+  exit 70
+fi
+
+if ! command -v node >/dev/null 2>&1; then
+  echo "paseo-checkpoint: node (>= 22.18) is required" >&2
+  exit 70
+fi
+ver=$(node -p 'process.versions.node' 2>/dev/null) || ver=0.0.0
+major=${ver%%.*}
+rest=${ver#*.}
+minor=${rest%%.*}
+case $major in '' | *[!0-9]*) major=0 ;; esac
+case $minor in '' | *[!0-9]*) minor=0 ;; esac
+if [ "$major" -lt 22 ] || { [ "$major" -eq 22 ] && [ "$minor" -lt 18 ]; }; then
+  echo "paseo-checkpoint: node >= 22.18 is required (found $ver)" >&2
+  exit 70
+fi
+
+exec node --disable-warning=ExperimentalWarning "$cli" "$@"

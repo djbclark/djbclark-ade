@@ -1,0 +1,51 @@
+{
+  "name": "unknown-schema",
+  "load": {
+    "record": null,
+    "source": "none",
+    "problems": [
+      "unknown-schema"
+    ],
+    "maxGenerationSeen": 9
+  },
+  "live": {
+    "now": 1793786826000,
+    "host": {
+      "host": "host-a",
+      "bootId": "boot-1",
+      "platform": "linux"
+    },
+    "git": {
+      "capturedAt": "2026-11-04T10:07:06.000Z",
+      "repoTop": "/work",
+      "isLinkedWorktree": false,
+      "branch": "main",
+      "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "base": {
+        "ref": "refs/remotes/origin/HEAD",
+        "sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "method": "merge-base-origin-head"
+      },
+      "trackedFingerprint": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "trackedChanged": 1,
+      "trackedPaths": [
+        "src/x.ts"
+      ],
+      "untrackedCount": 0,
+      "untrackedPaths": [],
+      "untrackedFingerprint": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "truncated": false,
+      "errors": []
+    },
+    "writerAlive": false,
+    "recordWriterAlive": false,
+    "recoveryScheduledElsewhere": false,
+    "serverId": "srv1"
+  },
+  "expect": {
+    "verdict": "needs-review",
+    "reasons": [
+      "unknown-schema"
+    ]
+  }
+}
