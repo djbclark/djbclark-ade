@@ -314,7 +314,7 @@ would disable the threat model's runaway-load response),
 
 E6. **S-acp: SHIM then delete.** `acp-dispatch` becomes a wrapper over
 `paseo run --provider <p> --model <m> --no-wait --output-schema`, keeping:
-the exit-code contract (3 no report, 4 BLOCKED, 124 timeout), the report
+the exit-code contract (3 no report, 4 BLOCKED, 77 tripwire, 124 timeout), the report
 file and `.done` record, `outcome` → `route_agent.py calibrate` records, the
 `--kind frontier` admission check (`bin/agent_guard.py` and its two tests stay
 with it, report B1d), **the `load-watch admit` pre-launch gate (exit 75)**, **the restricted
@@ -323,13 +323,17 @@ permission policies** (`--perm read-only` and `--perm deny`, today enforced by
 read-only run exposes only the six read tools and a deny run none, user
 settings, MCP servers and hooks are stripped, and every other call trips. The
 shim must reproduce that boundary, not approximate it: a **tool allowlist**
-(the six read tools, or none), **empty MCP, settings and hooks** for the run
-(the shipped Claude template allows `mcp__hermes`, through which an injected
-review could send messages or approve pending requests), a **tripwire
-equivalent** that aborts on any call outside the allowlist, and **boundary
-tests** that prove each of the three before the shim ships; `permissionMode:
-plan` plus a denylist is not equivalent. The shim **refuses the launch** when
-the provider cannot be configured that way, because these modes protect
+(the six read tools `Read`, `Grep`, `Glob`, `LS`, `WebFetch`, `WebSearch`, or
+none under deny; a provider's own verified read-only sandbox, as Codex's
+session mode is today, counts as equivalent), **empty MCP, settings and
+hooks** for the run (`settingSources: []`, strict MCP with no servers: the
+shipped Claude template allows `mcp__hermes`, through which an injected
+review could send messages or approve pending requests), **bypass mode
+refused** for a restricted run whatever the provider's default, a **tripwire
+equivalent** that ends the run with exit 77 on any call outside the
+allowlist, and **boundary tests** that prove each of these before the shim
+ships; `permissionMode: plan` plus a denylist is not equivalent. The shim
+**refuses the launch** when the provider cannot be configured that way, because these modes protect
 prompt-injection-sensitive reviews), **the live-agent count**
 (`count_agents()` counts `acp-run` processes and releases the `load-watch
 admit --max-agents` reservation only once one is countable; a `paseo run
