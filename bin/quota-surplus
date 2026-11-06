@@ -3,7 +3,7 @@
 
     quota-surplus check [--json] [--dry-run] [--live] [--input FILE]
     quota-surplus notify [--dry-run] [--live] [--input FILE]
-    quota-surplus list-work [--repo PATH ...] [--fit frontier|bulk] [--json]
+    quota-surplus list-work [--repo PATH ...] [--fit frontier|bulk] [--pool POOL] [--json]
 
 djbclark, 2026-11-02: the Gemini 4 Argon weekly window held 25% at 00:30Z and reset at 02:35Z; the operator noticed by hand
 and nothing in the fleet would have spent it. This script is the periodic check (launchd, every 15 min, after review:
@@ -17,29 +17,42 @@ ALGORITHM, per pool and window of `aiuse --available --json` (every field read w
   alert        when surplus >= min_surplus_pct (15) AND 0 < hours_left <= horizon (6 h for a window of a day or more,
                  1.5 h for a shorter one, the 5-hour windows) AND the pool is usable now
   score        = surplus * weight; weight 2.0 for a frontier pool (a model of [dispatch].frontier_models), 1.5 for a paid
-                 subscription, 0.5 for a free pool, 1.0 otherwise; severity `act` when score >= act_score (25), else `info`
-  never        prepaid credits (aiuse `credits` windows, billing `credits`/`prepaid`: the omp API grant), a service the routing
-                 marks never_route or operator_gated, access `forbidden`, retired, or one in aiuse [disabled_services]
+                 subscription, 0.5 for a free pool, 1.0 otherwise; severity `act` when score >= act_score (25), else `info`.
+                 A window shorter than a day is `info` at most (it refills all the time; the weekly window binds), and so
+                 is a surplus that buys no whole slice at the pool's estimate floor.
+  only         pools where running out is fine (djbclark, 2026-11-03): agy (antigravity), omp API credits, codex, zcode
+                 (zai), cursor, grok. NEVER the Claude subscription, opencode-go or cline/clinepass, nor any pool not
+                 named. Also skipped: other `credits` rows, a service the routing marks never_route or operator_gated,
+                 access `forbidden`, retired, or one in aiuse [disabled_services].
   no verdict   a stale or missing reading (aiuse `fresh` false or `stale` true; its `stale_reason` is reported), a window
-                 without resets_at or window_minutes, a pool not usable now: never an alert.
-A repo-scoped pool (opencode-go, cline/clinepass: techno-euphora and Hermes only; route_agent's allow_repos/allow_seats
-when the routing has them) is offered only to leads and work lists of the repos and seats on its list.
+                 without resets_at or window_minutes, a window aiuse marks `exhausted` (an agent-reported refusal beats
+                 its percentage), and after a reset time passes until a reading collected after it shows the NEW
+                 resets_at (2026-11-02: Argon still refused 5 min after aiuse dropped the window). Never an alert.
+A repo-scoped pool (opencode-go: techno-euphora and Hermes only; route_agent's allow_repos/allow_seats when the routing
+has them) is offered only to leads and work lists of the repos and seats on its list.
 
 `check` records each alert's first sighting in the state file (~/.local/state/quota-surplus/state.json, written
 atomically; not with --dry-run). An episode is the pool + window + resets_at (a resets_at within 10 minutes of a recorded
-one is the same episode); a new resets_at is a new episode. `notify` sends each new `act` episode ONCE: one hermes-ping,
-and one relay.py line (`--fyi`, never `--steer`; `--idle 1800` for a Claude Paseo target) to each live lead seat (a fleet.py
-row whose name or title starts `LEAD`, or names `helm lead`/`watch lead`). Relays run detached (log:
-~/.local/state/quota-surplus/relay.log) so an --idle wait never holds the timer. `notify --dry-run` prints them, sends nothing.
-The relay line advises at most N concurrent slices (surplus // the pool's route_agent estimate floor, else 1-2; never above
+one is the same episode); a new resets_at is a new episode. `notify` sends each new `act` episode ONCE, and a pool at
+most once per renotify_h (24 h) across episodes: one hermes-ping, and one relay.py line (`--fyi`, never `--steer`;
+`--idle 1800` for a Claude Paseo target) to each live lead seat (a fleet.py row whose name or title starts with the word
+`LEAD` in capitals, plus any agent id in QUOTA_SURPLUS_LEADS, comma-separated, e.g. a `/helm lead` session). An episode
+counts as notified only when the ping succeeded or a relay started; otherwise the next run tries again. Relays run
+detached (log: ~/.local/state/quota-surplus/relay.log) so an --idle wait never holds the timer. A corrupt state file is
+kept aside as state.json.corrupt and the run starts from empty state (at most one repeat page per open episode).
+`notify --dry-run` prints what it would send and sends nothing.
+The relay line advises at most N concurrent slices (surplus // the pool's route_agent estimate floor, 0 = do not dispatch;
+else 1-2; never above
 its max_parallel), a `check --live` between them, and that a provider's "Usage Limit Reached" overrides aiuse (aiuse lags
 a burst: 2026-11-03, four parallel agy runs spent a 25% Argon surplus in ~10 min while aiuse still read 25%).
 
 `list-work` reads docs/surplus-work.md in each repo under ~/src (or each --repo), most valuable first (format: that file
-in djbclark-ade). Exit: 0 done, 2 usage, 3 aiuse unreadable (no verdict, nothing sent or recorded).
+in djbclark-ade); `--pool POOL` (a service or provider/family) keeps only items that pool may serve: its fit and, for a
+repo-scoped pool, its repos. Exit: 0 done, 2 usage (an unknown --pool too), 3 aiuse unreadable (no verdict, nothing sent
+or recorded).
 Environment: QUOTA_SURPLUS_STATE, QUOTA_SURPLUS_PING (hermes-ping), QUOTA_SURPLUS_RELAY (relay.py), QUOTA_SURPLUS_FLEET
-(fleet.py), QUOTA_SURPLUS_SRC (~/src), QUOTA_SURPLUS_NOW (ISO time, tests), QUOTA_SURPLUS_MIN_SURPLUS, _ACT_SCORE,
-_HORIZON_WEEKLY_H, _HORIZON_SHORT_H.
+(fleet.py), QUOTA_SURPLUS_LEADS, QUOTA_SURPLUS_SRC (~/src), QUOTA_SURPLUS_NOW (ISO time, tests), QUOTA_SURPLUS_MIN_SURPLUS,
+_ACT_SCORE, _HORIZON_WEEKLY_H, _HORIZON_SHORT_H, _RENOTIFY_H.
 """
 from __future__ import annotations
 
@@ -53,7 +66,7 @@ import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -66,14 +79,18 @@ ACT_SCORE = 25.0
 HORIZON_WEEKLY_H = 6.0
 HORIZON_SHORT_H = 1.5
 EPISODE_TOLERANCE_S = 600
+RENOTIFY_H = 24.0
 WEIGHT = {"frontier": 2.0, "subscription": 1.5, "free": 0.5}
 NO_ALERT_BILLING = {"credits", "prepaid"}
-# Fallback scope while the routing has no allow_repos/allow_seats (PR 260): djbclark, 2026-10-19 and 2026-11-02.
-DEFAULT_SCOPES = {"opencode-go": (("techno-euphora",), ("hermes",)),
-                  "cline": (("techno-euphora",), ("hermes",)),
-                  "clinepass": (("techno-euphora",), ("hermes",))}
+# djbclark's ruling (2026-11-03, via lead 7c58015b): running out is fine on these aiuse providers, never on the others.
+EXHAUST_OK = frozenset({"antigravity", "omp", "codex", "zai", "cursor", "grok", "grok-bot"})
+NEVER_EXHAUST = frozenset({"claude", "opencode-go", "cline", "clinepass"})
+# Fallback scope while the routing has no allow_repos/allow_seats (PR 260): djbclark, 2026-11-02. cline/clinepass need
+# none here: NEVER_EXHAUST and the routing's never_route/operator_gated already keep them out of every alert.
+DEFAULT_SCOPES = {"opencode-go": (("techno-euphora",), ("hermes",))}
 SURPLUS_FILE = "docs/surplus-work.md"
-LEAD_RE = re.compile(r"^\s*LEAD\b|\b(helm|watch) lead\b", re.I)
+# Strict: the word LEAD in capitals at the start of the seat's name or title ("LEAD paseo-only rearch"), not "Lead review".
+LEAD_RE = re.compile(r"^LEAD(\s|$)")
 
 
 def env_float(name: str, default: float) -> float:
@@ -161,7 +178,7 @@ def policy_from_routing(aiuse_disabled: dict | None = None) -> Policy:
             blocked = "access forbidden"
         elif getattr(svc, "retired", False):
             blocked = "retired"
-        elif getattr(svc, "billing", "") in NO_ALERT_BILLING:
+        elif getattr(svc, "billing", "") in NO_ALERT_BILLING and svc.name not in EXHAUST_OK:
             blocked = f"{svc.billing}: prepaid credits roll over"
         kinds = tuple(sorted(models, key=lambda k: (k != "frontier", (svc.good_at or {}).get(k, 99))))
         agent = getattr(svc, "agent", "") or svc.name
@@ -214,11 +231,28 @@ def expected_burn(w: dict, minutes_left: float, window_minutes: float) -> float 
     return max(0.0, min(burn, float(remaining)))
 
 
+def ruling_block(provider: str) -> str | None:
+    """Why djbclark's 2026-11-03 ruling keeps `provider` out of every alert, or None (running out is fine there)."""
+    if provider in NEVER_EXHAUST:
+        return f"djbclark 2026-11-03: running out is never fine on {provider}"
+    if provider not in EXHAUST_OK:
+        return "not on djbclark's 2026-11-03 run-out-is-fine list"
+    return None
+
+
+def window_key(pool: str, label: Any) -> str:
+    return f"{pool}|{label}"
+
+
 def assess(data: dict, policy: Policy, now: datetime, *, min_surplus: float = MIN_SURPLUS_PCT,
            act_score: float = ACT_SCORE, horizon_weekly_h: float = HORIZON_WEEKLY_H,
-           horizon_short_h: float = HORIZON_SHORT_H) -> list[dict]:
-    """One verdict per pool window: verdict `alert` (with severity), `none`, `skip` or `no-verdict`."""
+           horizon_short_h: float = HORIZON_SHORT_H, state: dict | None = None) -> list[dict]:
+    """One verdict per pool window: verdict `alert` (with severity), `none`, `skip` or `no-verdict`.
+
+    `state` (the state file) supplies each window's last resets_at seen in the future: once that time has passed, a
+    window has no verdict until a reading collected after it shows a NEW resets_at."""
     out: list[dict] = []
+    seen_resets = (state or {}).get("windows") if isinstance((state or {}).get("windows"), dict) else {}
     disabled = set(policy.disabled) | set((data.get("disabled_services") or {}).keys())
     seen: set[tuple[str, str | None]] = set()
     for row in data.get("available") or []:
@@ -235,8 +269,12 @@ def assess(data: dict, policy: Policy, now: datetime, *, min_surplus: float = MI
                 "max_parallel": pp.max_parallel, "slice_cost": pp.slice_cost}
         windows = [w for w in (row.get("windows") or []) if isinstance(w, dict)]
         credits = (row.get("binding_window") == "credits" or any(w.get("label") == "credits" for w in windows))
-        reason = None
-        if credits:
+        reason = ruling_block(provider)
+        if reason:
+            pass
+        elif credits and pp.billing not in NO_ALERT_BILLING:
+            # a credits row is an expiring grant only for a service the routing bills as credits (omp's API grant,
+            # which the ruling lets run out); any other credits balance rolls over
             reason = "credits: prepaid credits roll over"
         elif pp.blocked:
             reason = pp.blocked
@@ -252,6 +290,7 @@ def assess(data: dict, policy: Policy, now: datetime, *, min_surplus: float = MI
                         row.get("stale_reason")})
             continue
         usable = row.get("usable_now") is not False
+        collected = parse_ts(row.get("collected_at"))
         for w in windows:
             label = w.get("label")
             reset = parse_ts(w.get("resets_at"))
@@ -268,16 +307,34 @@ def assess(data: dict, policy: Policy, now: datetime, *, min_surplus: float = MI
             if minutes_left <= 0:
                 out.append({**item, "verdict": "no-verdict", "reason": "reset already passed: stale reading"})
                 continue
+            prev = parse_ts(((seen_resets or {}).get(window_key(pool, label)) or {}).get("resets_at"))
+            if prev is not None and prev <= now:
+                # 2026-11-02: Argon still refused 5 min after aiuse dropped the window; only a reading taken after the
+                # reset that shows the NEW resets_at proves the headroom is back.
+                if reset <= prev + timedelta(seconds=EPISODE_TOLERANCE_S):
+                    out.append({**item, "verdict": "no-verdict",
+                                "reason": f"reset at {prev.isoformat()} passed; waiting for a reading with the new resets_at"})
+                    continue
+                if collected is None or collected < prev:
+                    out.append({**item, "verdict": "no-verdict",
+                                "reason": f"reading collected before the reset at {prev.isoformat()}"})
+                    continue
+            if str(w.get("state") or "") == "exhausted":
+                out.append({**item, "verdict": "no-verdict",
+                            "reason": "aiuse marks the window exhausted (a provider refusal beats its percentage)"})
+                continue
             burn = expected_burn(w, minutes_left, float(wm))
             if burn is None:
                 out.append({**item, "verdict": "no-verdict", "reason": "no remaining_percent"})
                 continue
             surplus = float(rem) - burn
-            horizon = horizon_weekly_h if float(wm) >= 1440 else horizon_short_h
+            short = float(wm) < 1440
+            horizon = horizon_short_h if short else horizon_weekly_h
             weight = WEIGHT["frontier"] if pp.frontier else WEIGHT.get(pp.billing, 1.0)
             score = surplus * weight
             item.update(expected_burn=round(burn, 1), surplus=round(surplus, 1), horizon_h=horizon,
                         weight=weight, score=round(score, 1))
+            buys_none = bool(pp.slice_cost) and surplus < float(pp.slice_cost or 0)
             if not usable:
                 out.append({**item, "verdict": "none", "reason": "not usable now"})
             elif hours_left > horizon:
@@ -285,12 +342,15 @@ def assess(data: dict, policy: Policy, now: datetime, *, min_surplus: float = MI
             elif surplus < min_surplus:
                 out.append({**item, "verdict": "none", "reason": f"surplus {surplus:.1f}% < {min_surplus:g}%"})
             else:
-                out.append({**item, "verdict": "alert", "severity": "act" if score >= act_score else "info"})
+                act = score >= act_score and not short and not buys_none
+                why = " (a window under a day)" if short and score >= act_score else (
+                    " (buys no whole slice)" if buys_none and score >= act_score else "")
+                out.append({**item, "verdict": "alert", "severity": "act" if act else "info", "info_why": why})
     # A frontier pool missing from `--available` (aiuse drops an exhausted or unusable pool, 2026-11-03: Argon after an
     # agent-reported quota refusal) has no reading: say so, so its absence is not read as "nothing to spend".
     for (prov, fam), pp in policy.pools.items():
         if (pp.frontier and not pp.blocked and (prov, fam) not in seen and prov not in disabled
-                and pp.service not in disabled):
+                and pp.service not in disabled and ruling_block(prov) is None):
             out.append({"pool": f"{prov}/{fam}" if fam else prov, "service": pp.service, "provider": prov,
                         "pool_family": fam, "frontier": True, "window": None, "verdict": "no-verdict",
                         "reason": "no reading in aiuse --available (exhausted, excluded or not collected)"})
@@ -303,13 +363,34 @@ def state_path() -> Path:
     return Path(os.environ.get("QUOTA_SURPLUS_STATE") or HOME / ".local/state/quota-surplus/state.json")
 
 
-def load_state() -> dict:
+def load_state(keep_aside: bool = True) -> dict:
+    """The state file, or empty state. A corrupt file is kept aside as `<name>.corrupt` (never silently overwritten;
+    with keep_aside False, a dry run, it is left in place)."""
+    empty = {"episodes": {}, "windows": {}, "pools": {}}
+    p = state_path()
     try:
-        d = json.loads(state_path().read_text())
-    except (OSError, ValueError):
-        return {"episodes": {}}
+        raw = p.read_text()
+    except FileNotFoundError:
+        return empty
+    except OSError as e:
+        print(f"quota-surplus: cannot read {p}: {e}", file=sys.stderr)
+        return empty
+    try:
+        d = json.loads(raw)
+    except ValueError:
+        d = None
     if not isinstance(d, dict) or not isinstance(d.get("episodes"), dict):
-        return {"episodes": {}}
+        if keep_aside:
+            try:
+                os.replace(p, p.with_name(p.name + ".corrupt"))
+            except OSError:
+                pass
+        print(f"quota-surplus: corrupt state {p}" + (f" kept as {p.name}.corrupt" if keep_aside else "")
+              + "; starting from empty state", file=sys.stderr)
+        return empty
+    for k in ("windows", "pools"):
+        if not isinstance(d.get(k), dict):
+            d[k] = {}
     return d
 
 
@@ -343,9 +424,15 @@ def episode_of(state: dict, alert: dict) -> str:
     return f"{pool_key}|{alert.get('resets_at')}"
 
 
-def record(state: dict, alerts: list[dict], now: datetime) -> None:
+def record(state: dict, verdicts: list[dict], now: datetime) -> None:
+    """Note each window's future resets_at (for the reset-passed rule) and each alert's episode."""
+    wins = state.setdefault("windows", {})
+    for v in verdicts:
+        r = parse_ts(v.get("resets_at"))
+        if r is not None and r > now:
+            wins[window_key(v["pool"], v.get("window"))] = {"resets_at": v.get("resets_at"), "seen_at": now.isoformat()}
     eps = state.setdefault("episodes", {})
-    for a in alerts:
+    for a in (v for v in verdicts if v.get("verdict") == "alert"):
         key = episode_of(state, a)
         a["episode"] = key
         ep = eps.setdefault(key, {"pool_key": f"{a['pool']}|{a.get('window')}", "resets_at": a.get("resets_at"),
@@ -354,10 +441,13 @@ def record(state: dict, alerts: list[dict], now: datetime) -> None:
         ep["severity"] = a.get("severity")
         ep["surplus"] = a.get("surplus")
         a["notified_at"] = ep.get("notified_at")
-    # prune episodes a day past their reset
+    # prune episodes a day past their reset, and window marks a week past theirs
     for key in [k for k, ep in eps.items() if isinstance(ep, dict) and (r := parse_ts(ep.get("resets_at")))
                 and (now - r).total_seconds() > 86400]:
         del eps[key]
+    for key in [k for k, w in wins.items() if isinstance(w, dict) and (r := parse_ts(w.get("resets_at")))
+                and (now - r).total_seconds() > 8 * 86400]:
+        del wins[key]
 
 
 # -- aiuse ----------------------------------------------------------------------------------
@@ -492,32 +582,36 @@ def slice_advice(alert: dict) -> tuple[int, int | None]:
     cap = max(1, int(alert.get("max_parallel") or 1))
     cost = alert.get("slice_cost")
     if cost:
-        total = int(float(alert.get("surplus") or 0) // float(cost))
-        return max(1, min(cap, total)), total
+        total = max(0, int(float(alert.get("surplus") or 0) // float(cost)))
+        return min(cap, total), total
     return min(2, cap), None
 
 
 def relay_text(alert: dict, now: datetime, n_work: int) -> str:
     n, total = slice_advice(alert)
     buys = f" (it buys about {total} at ~{alert['slice_cost']:g}% each)" if total is not None else ""
+    advice = (f"Run at most {n} concurrent slice{'s' if n != 1 else ''}{buys} and re-check `quota-surplus check --live` "
+              f"between them" if n else
+              f"It buys no whole slice{buys}: do not dispatch to it")
     return (f"quota surplus (use it or lose it): {alert['pool']} ({alert.get('window')}) has "
             f"{float(alert['remaining_percent']):.0f}% left and resets {local_reset(alert, now)}; about "
             f"{alert['surplus']:.0f}% will be lost at the current pace. Dispatch line: {alert.get('dispatch') or '?'}. "
-            f"Run at most {n} concurrent slice{'s' if n != 1 else ''}{buys} and re-check `quota-surplus check --live` "
-            f"between them: aiuse lags a burst, and a provider 'Usage Limit Reached' overrides its reading. "
-            f"Pick read-only items that finish before the reset: `quota-surplus list-work"
-            f"{' --fit frontier' if alert.get('frontier') else ''}` ({n_work} items in docs/surplus-work.md lists); "
+            f"{advice}: aiuse lags a burst, and a provider 'Usage Limit Reached' overrides its reading. "
+            f"Pick read-only items that finish before the reset: `quota-surplus list-work --pool "
+            f"{alert.get('service') or alert['pool']}` ({n_work} items in docs/surplus-work.md lists); "
             f"skill quota-surplus. FYI, no reply needed.")
 
 
-def lead_seats(fleet_rows: list[dict]) -> list[dict]:
+def lead_seats(fleet_rows: list[dict], extra_ids: list[str] | None = None) -> list[dict]:
+    """Live seats whose name or title starts with the word LEAD in capitals, plus the ids in QUOTA_SURPLUS_LEADS."""
+    if extra_ids is None:
+        extra_ids = [s.strip() for s in os.environ.get("QUOTA_SURPLUS_LEADS", "").split(",") if s.strip()]
     seats = []
     for r in fleet_rows:
         if not isinstance(r, dict) or r.get("finished") or r.get("status") in ("closed", "finished", "archived"):
             continue
-        label = f"{r.get('name') or ''} {r.get('title') or ''}"
-        if LEAD_RE.search(str(r.get("name") or "")) or LEAD_RE.search(str(r.get("title") or "")) or \
-                re.search(r"\b(helm|watch) lead\b", label, re.I):
+        if (LEAD_RE.match(str(r.get("name") or "")) or LEAD_RE.match(str(r.get("title") or ""))
+                or str(r.get("id") or "") in extra_ids):
             seats.append(r)
     return seats
 
@@ -560,22 +654,37 @@ def send_ping(text: str) -> bool:
     return r.returncode == 0
 
 
-def spawn_relay(argv: list[str]) -> None:
-    """Detached: an --idle 1800 wait must not hold the 15-minute timer (the plist sets AbandonProcessGroup)."""
+def spawn_relay(argv: list[str]) -> bool:
+    """Detached: an --idle 1800 wait must not hold the 15-minute timer (the plist sets AbandonProcessGroup).
+    True when the relay process started (its delivery is relay.py's to report, in relay.log)."""
     log = state_path().parent / "relay.log"
-    log.parent.mkdir(parents=True, exist_ok=True)
-    with log.open("a") as fh:
-        fh.write(f"{datetime.now(UTC).isoformat()} {json.dumps(argv[2:])}\n")
-        fh.flush()
-        # relay.py refuses a sender it cannot name (exit 4); a launchd run has no session, so declare one
-        env = dict(os.environ, RELAY_SENDER_NAME=os.environ.get("RELAY_SENDER_NAME") or "quota-surplus")
-        subprocess.Popen(argv, stdout=fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-                         start_new_session=True, env=env)
+    try:
+        log.parent.mkdir(parents=True, exist_ok=True)
+        with log.open("a") as fh:
+            fh.write(f"{datetime.now(UTC).isoformat()} {json.dumps(argv[2:])}\n")
+            fh.flush()
+            # relay.py refuses a sender it cannot name (exit 4); a launchd run has no session, so declare one
+            env = dict(os.environ, RELAY_SENDER_NAME=os.environ.get("RELAY_SENDER_NAME") or "quota-surplus")
+            subprocess.Popen(argv, stdout=fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                             start_new_session=True, env=env)
+    except OSError as e:
+        print(f"quota-surplus: relay failed to start: {e}", file=sys.stderr)
+        return False
+    return True
+
+
+def in_cooldown(state: dict, pool: str, now: datetime, renotify_h: float) -> bool:
+    last = parse_ts(((state.get("pools") or {}).get(pool) or {}).get("notified_at"))
+    return last is not None and (now - last).total_seconds() < renotify_h * 3600
 
 
 def notify(alerts: list[dict], state: dict, now: datetime, *, dry_run: bool, rows: list[dict] | None = None,
-           items: list[dict] | None = None, ping=send_ping, relay=spawn_relay) -> list[dict]:
-    """Send each new `act` episode once. Returns the actions (sent or, with dry_run, planned)."""
+           items: list[dict] | None = None, ping=send_ping, relay=spawn_relay,
+           renotify_h: float = RENOTIFY_H) -> list[dict]:
+    """Send each new `act` episode once, a pool at most once per renotify_h. Returns the actions (sent or planned).
+
+    An episode (and its pool's cooldown) is marked notified only when the ping succeeded or a relay started; a total
+    failure leaves it for the next run."""
     actions: list[dict] = []
     todo = [a for a in alerts if a.get("verdict") == "alert" and a.get("severity") == "act"
             and not (state.get("episodes", {}).get(a.get("episode") or "", {}) or {}).get("notified_at")]
@@ -584,11 +693,17 @@ def notify(alerts: list[dict], state: dict, now: datetime, *, dry_run: bool, row
     rows = fleet_rows() if rows is None else rows
     items = find_work() if items is None else items
     relay_py = os.environ.get("QUOTA_SURPLUS_RELAY") or str(REPO / "skills/session-finder/relay.py")
+    planned: set[str] = set()
     for a in todo:
+        if in_cooldown(state, a["pool"], now, renotify_h) or a["pool"] in planned:
+            actions.append({"episode": a.get("episode"), "action": "cooldown", "pool": a["pool"]})
+            continue
+        planned.add(a["pool"])
         text = ping_text(a, now)
         actions.append({"episode": a.get("episode"), "action": "ping", "text": text})
+        reached = False
         if not dry_run:
-            ping(text)
+            reached = bool(ping(text))
         n_work = len(work_for(a, items))
         for row in lead_seats(rows):
             repo, seat = seat_scope(row)
@@ -597,10 +712,24 @@ def notify(alerts: list[dict], state: dict, now: datetime, *, dry_run: bool, row
             argv = relay_argv(relay_py, row, relay_text(a, now, n_work))
             actions.append({"episode": a.get("episode"), "action": "relay", "target": row.get("id"), "argv": argv})
             if not dry_run:
-                relay(argv)
-        if not dry_run:
+                reached = bool(relay(argv)) or reached
+        if dry_run:
+            continue
+        if reached:
             state["episodes"][a["episode"]]["notified_at"] = now.isoformat()
+            state.setdefault("pools", {})[a["pool"]] = {"notified_at": now.isoformat(), "episode": a["episode"]}
+        else:
+            state["episodes"][a["episode"]]["failed_at"] = now.isoformat()
+            actions.append({"episode": a.get("episode"), "action": "failed"})
     return actions
+
+
+def pool_policy(policy: Policy, name: str) -> PoolPolicy | None:
+    """The pool a lead names: a routing service (`opencode-go`, `antigravity-argon`) or an aiuse provider[/family]."""
+    for (prov, fam), pp in policy.pools.items():
+        if name in (pp.service, f"{prov}/{fam}" if fam else prov):
+            return pp
+    return None
 
 
 # -- CLI ------------------------------------------------------------------------------------
@@ -611,14 +740,13 @@ def run_check(args) -> tuple[int, list[dict], dict]:
         print("quota-surplus: no verdict: aiuse unreadable")
         return 3, [], {}
     now = now_utc()
+    state = load_state(keep_aside=not args.dry_run)
     verdicts = assess(data, policy_from_routing(data.get("disabled_services")), now,
                       min_surplus=env_float("QUOTA_SURPLUS_MIN_SURPLUS", MIN_SURPLUS_PCT),
                       act_score=env_float("QUOTA_SURPLUS_ACT_SCORE", ACT_SCORE),
                       horizon_weekly_h=env_float("QUOTA_SURPLUS_HORIZON_WEEKLY_H", HORIZON_WEEKLY_H),
-                      horizon_short_h=env_float("QUOTA_SURPLUS_HORIZON_SHORT_H", HORIZON_SHORT_H))
-    state = load_state()
-    alerts = [v for v in verdicts if v["verdict"] == "alert"]
-    record(state, alerts, now)
+                      horizon_short_h=env_float("QUOTA_SURPLUS_HORIZON_SHORT_H", HORIZON_SHORT_H), state=state)
+    record(state, verdicts, now)
     return 0, verdicts, state
 
 
@@ -626,8 +754,8 @@ def fmt_verdict(v: dict) -> str:
     head = f"{v['pool']:<28} {str(v.get('window') or ''):<26}"
     if v["verdict"] == "alert":
         return (f"{v['severity'].upper():<4} {head} {v['remaining_percent']:.0f}% left, ~{v['surplus']:.0f}% lost at "
-                f"reset in {v['hours_left']:.1f}h (score {v['score']:g}); {v.get('dispatch') or ''}"
-                + (" [notified]" if v.get("notified_at") else ""))
+                f"reset in {v['hours_left']:.1f}h (score {v['score']:g}){v.get('info_why') or ''}; "
+                f"{v.get('dispatch') or ''}" + (" [notified]" if v.get("notified_at") else ""))
     tag = {"none": "ok", "skip": "skip", "no-verdict": "NO VERDICT"}[v["verdict"]]
     return f"{tag:<4} {head} {v.get('reason')}"
 
@@ -646,6 +774,7 @@ def main(argv: list[str] | None = None) -> int:
     lw = sub.add_parser("list-work")
     lw.add_argument("--repo", action="append", type=Path, help="repository directory (repeatable; default ~/src/*)")
     lw.add_argument("--fit", choices=["frontier", "bulk"])
+    lw.add_argument("--pool", help="only items this pool (a service or provider/family) may serve, scope included")
     lw.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
 
@@ -653,6 +782,14 @@ def main(argv: list[str] | None = None) -> int:
         items = find_work([p.expanduser() for p in args.repo] if args.repo else None)
         if args.fit:
             items = [i for i in items if args.fit in i["fit"] or "any" in i["fit"]]
+        if args.pool:
+            pp = pool_policy(policy_from_routing({}), args.pool)
+            if pp is None:
+                print(f"quota-surplus: unknown pool {args.pool!r} (a routing service or provider/family)",
+                      file=sys.stderr)
+                return 2
+            items = work_for({"frontier": pp.frontier, "allow_repos": list(pp.allow_repos),
+                              "allow_seats": list(pp.allow_seats)}, items)
         if args.json:
             print(json.dumps(items, indent=2))
         else:
@@ -660,7 +797,8 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"{i['repo']}#{i['n']} [{i.get('value', '?')}] {i['task']} | kind {i.get('kind', '?')} | size "
                       f"{i.get('size', '?')} | fit {','.join(i['fit'])} | {'read-only' if i['read_only'] else 'writes'}")
             if not items:
-                print("no surplus work lists (docs/surplus-work.md) found")
+                print("no surplus work lists (docs/surplus-work.md) found" if not (args.fit or args.pool)
+                      else "no surplus work item fits")
         return 0
 
     rc, verdicts, state = run_check(args)
@@ -676,7 +814,8 @@ def main(argv: list[str] | None = None) -> int:
         if not args.dry_run:
             save_state(state)
         return 0
-    actions = notify(verdicts, state, now, dry_run=args.dry_run)
+    actions = notify(verdicts, state, now, dry_run=args.dry_run,
+                     renotify_h=env_float("QUOTA_SURPLUS_RENOTIFY_H", RENOTIFY_H))
     for a in actions:
         print(json.dumps(a))
     if not actions:

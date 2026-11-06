@@ -16,19 +16,26 @@ notice. The algorithm, thresholds and exit codes are in the script's usage text 
 ## 1. Read the surplus
 
 1. `~/src/djbclark-ade/bin/quota-surplus check` (add `--live` to re-collect a stale reading). `ACT` lines are worth
-   spending; `NO VERDICT` means the reading is stale or missing: re-check with `--live` before acting on it, never guess.
+   spending; `NO VERDICT` means the reading is stale, missing or `exhausted`, or a reset has passed and no reading taken
+   since shows the new `resets_at`: re-check with `--live` before acting on it, never guess. (2026-11-02: Argon still
+   refused 5 min after aiuse dropped the window.)
 2. Note the pool, the hours left and the dispatch line on the `ACT` line (Argon: `acp-run agy --model gemini-4-argon
    --effort high`, because acp-dispatch cannot read a fresh Argon window yet).
+3. Only pools where running out is fine are ever offered (djbclark, 2026-11-03): agy, omp API credits, codex, zcode,
+   cursor, grok. Never spend the Claude subscription, opencode-go or cline down for a surplus.
+4. Who gets the notice: live seats whose name or title starts with the word `LEAD` in capitals (`LEAD paseo-only
+   rearch`), plus any agent id in `QUOTA_SURPLUS_LEADS`; name a lead seat that way to receive them. A pool pages at most
+   once a day; a 5-hour window never pages (`info` only).
 
 ## 2. Pick the work
 
-1. `quota-surplus list-work --fit frontier` for a frontier pool (gpt-6-astra, Fable, Gemini 4 Argon), `--fit bulk` for any
-   other; most valuable first, read-only first. `--repo PATH` narrows it to one repository.
-2. A repo-scoped pool (opencode-go, cline: techno-euphora and Hermes only) is spent only on that repo's items; the notice
-   already goes only to those seats.
-3. Order: **read-only reviews and second opinions first** (nothing to land or clean up, and a reset mid-way loses
+1. `quota-surplus list-work --pool POOL` (the pool the notice names, e.g. `antigravity-argon`) keeps only the items that
+   pool may serve: frontier items for a frontier pool, bulk ones otherwise, and for a repo-scoped pool (opencode-go:
+   techno-euphora and Hermes only) only its repos' items. Most valuable first, read-only first. `--repo PATH` narrows it
+   to one repository.
+2. Order: **read-only reviews and second opinions first** (nothing to land or clean up, and a reset mid-way loses
    nothing but the half-done read), then research and design, then writing work.
-4. **Never start an item that cannot finish before the reset**: size S is under 30 min, M under 2 h, L longer. With
+3. **Never start an item that cannot finish before the reset**: size S is under 30 min, M under 2 h, L longer. With
    under 30 min left take S only; with under 2 h take S or M.
 
 ## 3. Dispatch
