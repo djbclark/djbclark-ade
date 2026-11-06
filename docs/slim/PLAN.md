@@ -575,8 +575,9 @@ J7. Final landing: one PR from the slim branch, or lift protection for a
 fast-forward? (The PR route keeps the new Action as the gate.)
 J8. Review rules after: marker validated by CI (E8), Codex advisory,
 changelog fragments kept, local review by Claude. Yes?
-J9. PR 290 (`ade-recovery`): park until Wave 3 measures native resume
-(R4), or land now?
+J9. [answered 2026-11-06: **park** until Wave 3 measures the native path;
+land only if a gap remains] PR 290 (`ade-recovery`): park until Wave 3
+measures native resume (R4), or land now?
 J10. Start the execution in this session, or in a fresh cloud session with
 the prompt in section K? (Recommendation in K.)
 
