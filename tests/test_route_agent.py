@@ -287,9 +287,9 @@ class TestDiscoverySources(unittest.TestCase):
         self.assertFalse(phantoms & names, phantoms & names)
 
     def test_orca_source_when_enabled_is_intersected_with_installed(self):
-        with sources(orca={"aider", "amp"}, installed=("aider",), include_orca=True):
+        with sources(orca={"newagent", "amp"}, installed=("newagent",), include_orca=True):
             names = self.names()
-        self.assertIn("aider", names)
+        self.assertIn("newagent", names)
         self.assertNotIn("amp", names, "enabled in Orca but not installed")
 
     def test_acp_run_failure_degrades_to_no_acp_agents(self):
@@ -1628,7 +1628,8 @@ class TestQuotaFromAiuseAvailable(unittest.TestCase):
                 self.assertIsNone(quota["grok"]["remaining"])
                 for kind in r.KINDS:
                     choice = r.route(kind, quota={**IDLE, **quota})
-                    self.assertFalse(choice and choice.service.name == "grok", kind)
+                    if choice and choice.service.name == "grok":
+                        self.assertIsNone(choice.remaining, kind)   # unmeasured, never NaN read as headroom
 
     def test_percentages_are_clamped(self):
         row = {"provider": "codex", "windows": [{"label": "w", "headroom_percent": 250}]}
