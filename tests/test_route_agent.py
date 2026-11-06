@@ -1768,6 +1768,34 @@ class TestQuotaFromAiuseAvailable(unittest.TestCase):
          "headroom_percent": 0},
     ]
 
+    def test_foreign_family_windows_never_create_or_loosen_another_pool(self):
+        exhausted = {"state": "exhausted", "headroom_percent": 0.0}
+        self.accounts = [
+            {"provider": "cursor", "age_seconds": 30, "windows": [
+                {"label": "auto", "pool_family": "auto", **exhausted},
+                {"label": "tp", "pool_family": "third_party", "headroom_percent": 50.0}]},
+        ]
+        rows = [
+            {"provider": "cursor", "pool_family": "third_party", "usable_now": True,
+             "headroom_percent": 50.0, "windows": [
+                 {"label": "tp", "pool_family": "third_party", "headroom_percent": 50.0},
+                 {"label": "auto", "pool_family": "auto", "headroom_percent": 63.5}]},
+        ]
+        quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(self.rows_payload(rows))})
+        self.assertEqual(quota["cursor-auto"]["remaining"], 0.0)   # the auto window inside the third_party row does not loosen it
+        self.assertEqual(quota["cursor"]["remaining"], 50.0)
+
+    def test_foreign_window_may_tighten_an_existing_pool(self):
+        rows = [
+            {"provider": "cursor", "pool_family": "third_party", "usable_now": True,
+             "headroom_percent": 80.0, "windows": [
+                 {"label": "auto", "pool_family": "auto", "headroom_percent": 10.0}]},
+            {"provider": "cursor", "pool_family": "auto", "usable_now": True,
+             "headroom_percent": 60.0},
+        ]
+        quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(self.rows_payload(rows))})
+        self.assertEqual(quota["cursor-auto"]["remaining"], 10.0)
+
     def test_rows_without_windows_follow_the_contract_fields(self):
         # a payload with no age at all reads stale by design, so the fixture carries one
         path = self.rows_payload(self.FAILOVER_FIXTURE_ROWS)
