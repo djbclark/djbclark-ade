@@ -34,7 +34,7 @@ site-djbclark commits on `slim-intake/2026-11` (base `origin/master` f11d8218):
   `/Users/djbclark/ops/site-public-djbclark/bin/change-hermes`; one sentence each for the third root in `AGENTS.md:205-207`,
   `claude/README.md:14-17`, `cursor/home-agents.mdc:126-127`; every `~/ops/site-djbclark` in the moved files (including 4
   pre-existing ones: diskfree SKILL.md:95,279, teach SKILL.md:117, firecrawl SKILL.md:150) now `~/ops/site-public-djbclark`;
-  `skills/README.md` names the two `book-to-kb` versions.
+  `skills/README.md` noted the two `book-to-kb` versions (the operator then chose `tools/book-to-kb`; the moved copy was deleted at 86832d2).
 
 | Path | Newest imported commit (site-djbclark) | Commits carried |
 |---|---|---|

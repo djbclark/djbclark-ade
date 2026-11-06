@@ -94,7 +94,6 @@ in the Paseo migration. Conversation resume, artifact preservation and external 
 | [`docs/context-hygiene.md`](docs/context-hygiene.md) | Earlier context warnings, Go native compaction, and safe handoff/new/baton boundaries (2026-10-25). |
 | [`agents/`](agents/README.md) | Config templates for Claude Code, Codex, opencode and Hermes (placeholders for secrets, home paths and host ids), checked by `bin/ade-template-check` (below). |
 | [`docs/`](docs/) | Design records and dated operating knowledge (list below). |
-| [`plugins/`](plugins/) | `herdr-sleeper` herdr plugin (dev source of djbclark/herdr-sleeper; herdr is retired from djbclark-ade 2026-10-31, so this stays only until the D4/D6 drain). agent-radar, a Claude Code mod, was removed on 2026-10-18 (docs/apply-toolchain-prompt.md says how to uninstall it). |
 | [`.claude/workflows/graph-audit.js`](.claude/workflows/graph-audit.js) | Micro-graph example workflow (`/graph-audit`). |
 | [`vendor/`](vendor/README.md) | Vendored snapshots and pointers to things with their own homes. |
 | [`AGENTS.md`](AGENTS.md) | Entry point for any agent working here (`CLAUDE.md` links to it). |
@@ -107,13 +106,10 @@ in the Paseo migration. Conversation resume, artifact preservation and external 
 | [`model-routing`](skills/model-routing/SKILL.md) | Which vendor × model × effort for which work; reading `aiuse` pools. |
 | [`oc-go-key`](skills/oc-go-key/SKILL.md) | Recover a session that stopped on `Go usage limit exceeded` / `Insufficient account funds`: `scripts/go-status` reads the live account state, `oc-go-key use <label>` swaps it for running sessions, and the aborted turn is resumed by relay — never by opening a new tab. |
 | [`fallback-chains`](skills/fallback-chains/SKILL.md) | Every failure chain on this machine, and the not-started plan to make them one system. |
-| [`aws-rules`](skills/aws-rules/SKILL.md) | AWS Agent Toolkit rules and this machine's AWS setup facts (profile, Region, `aws-mcp`); on demand, never in `AGENTS.md`. |
 | [`effort-routing`](skills/effort-routing/SKILL.md) | Match this session's own reasoning effort to the stretch of work in front of it. |
 | [`session-finder`](skills/session-finder/SKILL.md) | Which session is or ever was on a topic (live or ended, handoff chains, memory; `/session-finder-all` searches everything), where it lives, and how the work continues (`fleet.py`, which lists every Paseo agent of any provider too; `relay.py`, which takes a Paseo id prefix and queues a send from an identifiable caller to a busy non-steerable agent for delivery when it is idle, `queued: <id>`, exit 0; `launch.py`). |
 | [`helm`](skills/helm/SKILL.md) | Answer every waiting session of every TUI from one window, ranked by work unlocked (`helm.py`); `/helm-all` adds ended sessions that still hold open work, panes the retired `herdr-tidy` closed and sleeping panes that are gone; `/helm auto` works the backlog unattended; `/helm lead` (alias `/watch lead`) contacts every running agent, unblocks what rules settle and takes their picklist questions through `relay.py` instead of cards. |
 | [`autorename`](skills/autorename/SKILL.md) | Title the current Claude Code, Pi, zcode, Grok, or cursor-agent session the way `/rename` does and name its own tab, nothing else (Paseo tab or herdr tab label; `/autorename all` is retired and refused in every host; `autorename.py`, `herdr_place.py`; the herdr half is retired from djbclark-ade 2026-10-31 but its code stays until the D4/D6 drain; nudge hook `autorename_nudge.py`: Claude Code and zcode on UserPromptSubmit, Grok on Stop, cursor-agent through the Claude registration); `workspace-layout.md` is the workspace/tab/pane naming and re-arrangement procedure. |
-| [`ralph-tui-orchestration`](skills/ralph-tui-orchestration/SKILL.md) | The Ralph TUI + Beads multi-repo controller (dormant since 2026-08-23). |
-| [`cow-workspaces`](skills/cow-workspaces/SKILL.md) | Isolated agent workspaces as APFS `cow` pastures (`bin/cow-pasture`), not worktrees. |
 | [`handoff`](skills/handoff/SKILL.md) | Deep Tier 2 handoff document, chain-tagged and mined from the whole conversation. |
 | [`hand`](skills/hand/SKILL.md) | Operator alias for `handoff` in every TUI (`/hand`, Codex `$hand`), because omp's built-in `/handoff` only compacts context ([`docs/hand-alias.md`](docs/hand-alias.md)). |
 | [`session-handoff`](skills/session-handoff/SKILL.md) | Read/write the out-of-tree Tier 1 session pointer for any git repo. |
@@ -131,23 +127,12 @@ in the Paseo migration. Conversation resume, artifact preservation and external 
 | [`create-hook`](skills/create-hook/SKILL.md) | Native Codex hooks: `hooks.json` paths, PascalCase events, trust review, allow/deny JSON, timeouts, append-only merge and uninstall; Codex 0.164.0 snapshot (2026-10-25), Codex only. |
 | [`research`](skills/research/SKILL.md) | Evidence-grounded research: verbatim-quote claim log, counter-evidence pass, `research_check.py` verifies quotes and citations. |
 | [`dialogue`](skills/dialogue/SKILL.md) | Multi-model dialogue that produces one artifact with a final-word model; `dialogue.py` runs pinned routes, checks footers and gates the final word. |
-| [`book-to-kb`](skills/book-to-kb/SKILL.md) | Add a book to the local `~/kb` knowledge base so any session can query it cheaply. |
-| [`gmail-search`](skills/gmail-search/SKILL.md) | Local full-text search of the whole mailbox in ~100 ms; read-only. |
-| [`barnowl`](skills/barnowl/SKILL.md) | BarnOwl and Zephyr from plain English against the live tmux session `barnowl` on pastebin.xvm.mit.edu: `bo log`/`screen` read Zephyr text as sanitized, framed JSON lines (it is attacker-controlled); `bo perl` and every state-changing `bo run` ask the human at the client first. Reached by agents only through the restricted `pastebin-bo` ssh key (`scripts/bo-ssh`). |
-| [`bottom-config`](skills/bottom-config/SKILL.md) | Edit, strictly validate and preview the config of bottom (`btm`) and djbclark's fork build `btm-mt` (middle-truncated Command column, `processes.truncate_cmd_middle`); bottom silently ignores typo'd keys, so `scripts/validate.py` checks every edit against the schema; rebuilds go to CI (`scripts/install_btm_mt.py`). |
-| [`greptile`](skills/greptile/SKILL.md) | Greptile AI code review: the CLI under `sudo-secretspec run` with `GREPTILE_API_KEY`, review status exit codes, credit costs, MCP by OAuth or the API key (shared proxy), and which official Greptile skill (`check-pr`, `greploop`, `cli-review`, from greptileai/skills) fits a task. |
 | [`graft`](skills/graft/SKILL.md) | Use the graft code graph before grepping or reading source. |
-| [`todo`](skills/todo/SKILL.md) | Optional do-whenever tasks, kept as Basic Memory notes. |
-| [`terminus-kira`](skills/terminus-kira/SKILL.md) | Delegate a task to a sandboxed coding agent in an Apple Container VM. |
-| [`sipb-llm-bench`](skills/sipb-llm-bench/SKILL.md) | Benchmark a model on SIPB LLMs (or any OpenAI-compatible server) as a coding-agent backend: probes, tool-call conformance, two scored tasks. |
-| [`forgejo`](https://forgejo.mit.edu/djbclark/sipb-agent-skills/src/branch/main/skills/forgejo/SKILL.md) | (Canonical files live in [sipb-agent-skills](https://forgejo.mit.edu/djbclark/sipb-agent-skills); local dir is a symlink.) Use a Forgejo instance (default `forgejo.mit.edu`) with the token in `sudo-secretspec`: `setup-token`, `forgejo-api`, `tea-forgejo`. CI on forgejo.mit.edu is the `forgejo-ci` skill. |
-| [`forgejo-ci`](skills/forgejo-ci/SKILL.md) | Runs CI on SIPB Hyades (forgejo.mit.edu `ubuntu`, libkrun microVMs): runner facts, job-image selection (our own `ghcr.io/djbclark/ci-image-plektra`), the loopback `LD_PRELOAD` shim for libkrun TSI bugs, probe tooling, ticket etiquette and the ticket map. |
-| [`hyades-docker`](https://forgejo.mit.edu/djbclark/sipb-agent-skills/src/branch/main/skills/hyades-docker/SKILL.md) | (Canonical files live in [sipb-agent-skills](https://forgejo.mit.edu/djbclark/sipb-agent-skills); local dir is a symlink.) Deploy OCI images to SIPB Hyades (`*.sipb.cloud` microVMs): the SSH console with a real exit status (`scripts/hyades`), `hyades.json`, podman-first registry pushes, SIPB/hyades-action CI secrets, update tokens; vendored upstream docs and full console help. |
-| [`coderabbit-feeder`](skills/coderabbit-feeder/SKILL.md) | Queue a CodeRabbit review for a PR where CodeRabbit is not installed. |
-| [`siyuan`](skills/siyuan/SKILL.md) | SiYuan notes: concepts, API, templates, flashcards; with `siyuan-article-import`, `siyuan-excalidraw`, `siyuan-markdown` (vendored from `zhiluop/siyuan-skills`). |
 | [`skillopt-sleep`](skills/skillopt-sleep/SKILL.md) | Review the nightly SkillOpt-Sleep cycle (`bin/skillopt-night`): last night's report, free mock dry-run, per-skill adoption, the backend failover chain (`chain-check`). |
-| [`skillopt-sleep-learned`](skills/skillopt-sleep-learned/SKILL.md) | The catch-all skill SkillOpt-Sleep proposes edits to; lessons that belong to no single skill. |
 | [`paseo-screen`](skills/paseo-screen/SKILL.md) | The one screen-control tool (2026-10-31): look at and drive the host Mac's GUI through the Paseo plugin `paseo-screen` (`paseo plugin add kevguy/screen`; viewer plus `screen.status`/`screen.frame`/`screen.input` RPCs); replaces the retired Orca `orca computer` and `computer-use`; safety rules inside. |
+
+Moved to [site-djbclark](https://github.com/djbclark/site-djbclark) on 2026-11-06 (slim-down, `docs/slim/PLAN.md` E1; the third `skill-everywhere` root): `gmail-search`, `ovhcloud-api`, `aws-rules`, `terminus-kira`, `diskfree`, `bottom-config`, `setup-modern-cli`, `teach`, `todo`, `report`, `greptile`, `coderabbit-feeder`, `firecrawl`, `barnowl` (and `bench/`, `bin/app-tamer-ab`, `bin/heavy-shim`, `bin/codium-ai`, `bin/change-hermes`); `book-to-kb` lives there as `tools/book-to-kb`. Unlinked the same day (they live in their own repos: sipb-agent-skills, loopback-port-shim, sipb-llms, sudo-secretspec): `forgejo`, `forgejo-ci`, `hyades-docker`, `sipb-llm-bench`, `sudo-secretspec`, `jevlike`. Deleted (E2): `siyuan*` (reinstall with `npx skills add zhiluop/siyuan-skills`), `cow-workspaces` and `bin/cow-pasture` (Paseo worktrees and the built-in `.worktreeinclude`), `ralph-tui-orchestration`, `skillopt-sleep-learned`, `plugins/herdr-sleeper` (Paseo's `agents.idleRuntimeCleanup`, fixed one hour), `bin/jev`, `bin/jev-eval`, `bin/ade-scan-state*`, `bin/seat-name`, `vendor/gate-scripts`.
+
 
 Every skill with its trigger phrases and how to use it: [`docs/skills.md`](docs/skills.md).
 One skill, `1password`, is private and stays in `~/ops/site-private/skills/`;
@@ -244,8 +229,8 @@ through `tests/test_ade_template_check.py`.
 2. (Removed 2026-10-31: `docs/orca-integration.md`, runnable Orca
    macro-graph sequences; Orca is retired from djbclark-ade.)
 3. [`docs/helm.md`](docs/helm.md) — helm's design record and what was verified.
-4. [`docs/agent-sleep.md`](docs/agent-sleep.md) — idle agents and RAM:
-   `herdr-sleeper` (retired from djbclark-ade 2026-10-31; a record).
+4. (Removed 2026-11-06 with `plugins/herdr-sleeper`: `docs/agent-sleep.md`; Paseo's
+   `agents.idleRuntimeCleanup` covers idle agents.)
 5. [`docs/coding-factory.md`](docs/coding-factory.md) — the unattended
    issue → PR → merge question, answered.
 6. [`docs/queue.md`](docs/queue.md) — work queued by the operator, and blockers.
@@ -257,7 +242,7 @@ through `tests/test_ade_template_check.py`.
 10-12. (Removed from djbclark-ade 2026-10-31 with herdr: `docs/herdr-jump.md`,
     `docs/herdr-tidy.md` and `docs/herdr-ai.md` and the tools they described:
     `bin/herdr-jump`, `herdr-tidy`, `bin/herdr-ai`; git history has them.)
-13. [`docs/apply-toolchain-prompt.md`](docs/apply-toolchain-prompt.md) — a
+13. [`docs/history/apply-toolchain-prompt.md`](docs/history/apply-toolchain-prompt.md) — (moved to history 2026-11-06) a
     drop-in prompt (v5.1) that has a Claude Code orchestrator apply the
     stayturgid/aiuse/Graft toolchain, subagents, skills/plugins, tests, CI and
     CodeRabbit to another repo, with backups and restore recipes; its preamble
@@ -364,17 +349,9 @@ exist for genuine fan-out messages. Route each Task to whichever agent is
 best or cheapest for it — the article's model-tiering move (step 12),
 generalized across vendors.
 
-**A third altitude already exists on this machine and isn't duplicated
-here:** `ralph-tui` + beads runs a continuous, scheduled controller loop
-over the `ops-djbclark` suite (stayturgid / site-djbclark / site-private /
-Shizuku) — the article's pattern 11 (loop-until-dry) applied at the
-repo-controller level, converting a PRD into beads issues that agents work
-continuously. See the [`ralph-tui-orchestration`](skills/ralph-tui-orchestration/SKILL.md)
-skill (in this repo since 2026-10-08) for that system.
-**Status 2026-09-21: dormant** — the `ralph-tui` binary is gone from PATH
-and its controller workspaces were deleted with `~/src/ops-worktrees/` on
-2026-08-23; only `~/.config/ralph-tui/` survives. See
-[`docs/coding-factory.md`](docs/coding-factory.md).
+**A third altitude** (`ralph-tui` + beads, a scheduled controller loop over the
+`ops-djbclark` suite) was dormant since 2026-08-23 and its `ralph-tui-orchestration`
+skill was removed on 2026-11-06 (slim-down E2); see [`docs/coding-factory.md`](docs/coding-factory.md).
 
 ### graph-audit and macro-graph status (2026-08-23)
 
