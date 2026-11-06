@@ -401,6 +401,20 @@ def test_grep_type_live_rg_failure_is_ignored(env, sleep, rc):
     assert blocked(env, "Grep", {"pattern": "x", "type": "sh"})          # the static sh lists .env either way
 
 
+@pytest.mark.parametrize("n", [201, 60000])
+def test_grep_type_live_rg_flood_is_ignored(env, n):
+    """Adversary on PR 289 (2026-11-06): a fake rg printing 60,000 `sh` globs made the regex compile run past the
+    budget and the call fail open. A flooded answer (too many globs, or more than 64 KiB) is now ignored whole."""
+    (env["proj"] / "a.py").write_text("x\n")
+    (env["proj"] / ".env").write_text("A=1\n")
+    fake_rg(env, ["sh: " + ", ".join("*.x%d" % i for i in range(n))])
+    t0 = time.monotonic()
+    assert blocked(env, "Grep", {"pattern": "x", "type": "sh"})          # the static sh lists .env
+    assert time.monotonic() - t0 < 5.0
+    hook = load_hook()
+    assert hook.RG_LIST_MAX_GLOBS == 200 and hook.RG_LIST_MAX_BYTES == 65536
+
+
 def test_grep_type_filter_live_globs():
     hook = load_hook()
     live = {"py": ["*.py", "*.{env,cfg}", "conf/*.ini"], "nosuchtype": ["*"]}

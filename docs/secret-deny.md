@@ -61,7 +61,9 @@ config change).
     beside a `.env` passed the hook while rg read the file): the hook's `sh` now lists `.env` and `*.env`, and when an
     `rg` is on PATH the hook runs `rg --type-list` once per Grep call that names a mapped type (an argv list, at most
     1 s inside the 8 s budget, any failure ignored) and adds that rg's names for the type to its own, so a newer rg can
-    only widen the filter; a type the hook's map does not know still walks unfiltered whatever that rg says. The
+    only widen the filter; a type the hook's map does not know still walks unfiltered whatever that rg says. An answer
+    over 64 KiB, or naming more than 200 globs for one type, is ignored whole (adversary, 2026-11-06: a planted `rg`
+    printing 60,000 globs used to push the regex compile past the budget and fail the call open). The
     `glob`'s text is checked as a pattern (B3) only when the walk could not see the whole tree: the root does not exist,
     or the walk was cut short by a bound (2026-11-04: after a complete walk the files themselves have answered, so
     `glob: ".env*"` passes in a project with no `.env`-named file and blocks beside one).

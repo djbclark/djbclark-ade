@@ -901,6 +901,8 @@ RG_TYPES = {
 
 
 RG_LIST_S = 1.0   # `rg --type-list` time, inside BUDGET_S; past it (or on any failure) the static map stands alone
+RG_LIST_MAX_BYTES = 65536   # a longer `rg --type-list` answer is ignored (14.1.0 prints about 9 KiB)
+RG_LIST_MAX_GLOBS = 200     # so is one naming more globs for a type (the largest real type has a few dozen)
 
 
 def _split_type_globs(s: str) -> list:
@@ -930,13 +932,16 @@ def rg_live_types() -> dict:
             return {}
         r = subprocess.run([rg, "--type-list"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                            stderr=subprocess.DEVNULL, timeout=min(RG_LIST_S, left))
-        if r.returncode != 0:
+        if r.returncode != 0 or len(r.stdout) > RG_LIST_MAX_BYTES:
             return {}
         out = {}
         for line in r.stdout.decode("utf-8", "replace").splitlines():
             name, sep, rest = line.partition(":")
             if sep and name.strip():
-                out[name.strip()] = _split_type_globs(rest)
+                globs = _split_type_globs(rest)
+                if len(globs) > RG_LIST_MAX_GLOBS:
+                    return {}       # an rg that floods its answer is ignored whole: the static map stands alone
+                out[name.strip()] = globs
         return out
     except Exception:
         return {}
