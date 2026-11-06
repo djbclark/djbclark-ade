@@ -24,7 +24,8 @@ folded into this split (E9i); all decided TUIs are uninstalled machine-side
 with state backed up first, muse retired, copilot CLI support removed in
 favour of Paseo's Copilot provider, the 147 memory notes archived (E9h);
 PR 269 is re-homed into frdminc/peer-link with a pointer skill left here
-(E9j); lander and feeder stay booted out until the split ends (E9k).
+(E9j); lander and feeder stay booted out; J11 (answered) retires them,
+plists removed in Wave 4.
 
 A3. **Paseo moved** (research brief, 2026-11-06): 0.15.3 is current; 10
 releases since 2026-10-26. New and relevant: **native resume after restart**
@@ -103,8 +104,7 @@ plugin, then an existing repo (whole or copied; relicensing allowed), over our
 own code; ask before copying external code, adopting a repo whole, or
 installing a plugin not already running; nothing is changed on the Mac by a
 cloud session (installs, launchd, Paseo settings are operator steps in each
-brief); master is PR-only, so the final landing is one PR or a lifted
-protection (J7).
+brief); master is PR-only, so the final landing is one PR at the end (J7, answered).
 
 B3. **Not in scope.** Dann/Eve/techno-euphora, aiuse, paseo-runner,
 sudo-secretspec, the Paseo plugins in their own repos, CFEngine upstream work.
@@ -114,8 +114,7 @@ They are listed in the report as toolbox users only.
 
 C1. **Live processes and jobs on the Mac** (report B1, B4–B7): three detached
 `acp-dispatch` slices (tendcf, fork-cmdb, q10-policy) needed `acp-dispatch`
-and `acp-run` until they exited (0.5–1.5 h from 2026-11-06 ~11:00; J1 asks
-for confirmation); `com.djbclark.load-watch` runs `bin/load-watch sample` by
+and `acp-run` until they exited (0.5–1.5 h from 2026-11-06 ~11:00; J1, answered: all three exited); `com.djbclark.load-watch` runs `bin/load-watch sample` by
 absolute path from the shared checkout; `com.djbclark.deadline-sweep` runs
 every 60 s; `com.djbclark.pr-policy` every 600 s from the shared checkout
 (run `bin/pr-policy uninstall` before moving it, or reinstall from the new
@@ -130,10 +129,16 @@ command links (omp, pi, zcode, opencode), every skill linked by
 `skill-everywhere`, `~/.local/bin/herdr-sleeper` (may already dangle), and
 herdr's own plugin registration `herdr plugin link plugins/herdr-sleeper`
 (`plugins/herdr-sleeper/README.md:61`), which points into this repo.
-Every deletion names the links it breaks; the operator relinks or removes.
+Also the **live hook commands in the hand-maintained `~/.claude/settings.json`**
+(`agents/claude/settings.json.tmpl` is not applied automatically): `prior_art_nudge.py`
+on PostToolUse and UserPromptSubmit, `jev_effort_hook.py` on UserPromptSubmit,
+`quota_nudge.py`; a hook pointing at a deleted file runs on every tool call
+and prompt fleet-wide, so the operator edits that file as a named step before
+the final merge (E2, E10, D4 list it). Every deletion names the links and
+hook lines it breaks; the operator relinks, removes or edits.
 
-C3. **Outside files that name our tools** (report I4; order 11: these are
-proposals until the operator says yes per file): tendcf and nix2cf AGENTS.md
+C3. **Outside files that name our tools** (report I4; order 11: per J2b the slim lead has the merge decisions for
+these five repos and asks when unsure; anything outside them is a proposal): tendcf and nix2cf AGENTS.md
 (`acp-dispatch --kind frontier`, `acp-run`, `relay.py`, `route_agent`, quota
 gates, `load-watch admit`, `deadline`, `session_log.py`, `cfenginewatch`);
 CFEngine (`cfenginewatch`, `watch`, `fleet-watch`; I4b); Paseo upstream
@@ -191,9 +196,9 @@ C6. **Evidence to keep**: `docs/checkins/`, `docs/handoffs/`,
 | D5 Host load and runaway processes | `load-watch` (2.2k), `proc-cpu-watch`, `session-load-watch` | `tomgrin10/vitals` 1.0.0, `zedobaia/resources` (154), `itsjustanks/daemon` (70) show and stop; none "finds the agent behind the spike and tells it", and none is a **pre-launch admission gate** | KEEP load-watch's two interfaces: `admit` (the pre-launch gate `bg`, `acp-dispatch`, `local-review` and `deadline_wait.py` call, exit 75 when too hot; `bin/load-watch:1631-1878`) and find-and-tell, delivered by `paseo send`; delete the pane-typing delivery, `proc-cpu-watch` and `session-load-watch` (E5) |
 | D6 Fan-out and slices | `bigteam`, `acp-dispatch` (5.9k), `acp-run` (5.3k) | native subagents and `paseo run --no-wait --output-schema`; `lerenn/playbooks` (approval-gated YAML pipelines), `gpambrozio/firstmate` (247), `gyuha/agent-team` (57); Claude Code workflows for the lead's own fan-out | REPLACE with a shim (E6): `acp-dispatch` becomes a thin `paseo run` wrapper keeping the exit-code contract and the outcome record for one cycle, then goes |
 | D7 Skills in every agent | `skill-everywhere`, `skill-get`, `fix-skill-frontmatter.py` | Claude-only: one symlink `~/.claude/skills → <repo>/skills` (no tool); other surviving providers: `npx skills add <repo>` (MIT; a snapshot, re-run on change, vercel-labs/skills#748); `gpambrozio/skills` (902) to list and invoke; `agentskills/skills-ref validate` for lint | KEEP `skill-everywhere` trimmed while any non-Claude provider or the site-private root survives; delete the rest (E10) |
-| D8 Scheduler for the kept jobs | launchd plists; PR 291's `ade-sched` | no existing tool refuses on missing linger or wraps `flock -n`; `gpambrozio/launchd-jobs` is macOS-only visibility; Paseo schedules run agents, not shell jobs | KEEP `ade-sched` (land PR 291); Paseo schedules replace the nightly agent jobs (`skillopt-night`, `routing-recalibrate`) |
+| D8 Scheduler for the kept jobs | launchd plists; PR 291's `ade-sched` | no existing tool refuses on missing linger or wraps `flock -n`; `gpambrozio/launchd-jobs` is macOS-only visibility; Paseo schedules run agents, not shell jobs | KEEP `ade-sched` (land PR 291); Paseo schedules replace the nightly agent jobs (`routing-recalibrate`; `skillopt-night` is deleted, J4) and run the agent that executes `context-budget-check` nightly (J3); the shell sweeps (`deadline`, `pr-policy`, `load-watch`) stay on `ade-sched` |
 | D9 Exclusive workspace claims | `ade_claims.py` (2.3k), `ade-git-guard`, `libexec/` hooks | none exists; Paseo's one-worktree-per-agent makes most claims implicit; `git worktree lock` only blocks prune; since 0.15.0 a plugin can hook `worktree.create.before/after` and give tools to specific agents (A6) | KEEP, trimmed to owner + expiry + refuse-add/commit-in-foreign-workspace; fix the `claim ls` mismatch (E8); Wave 4 decides whether the trimmed registry lives in a ~100-line Paseo plugin hook instead of git hooks |
-| D10 Merge gate | `pr-wait` (2.3k), `local-review` (Codex) | GitHub ruleset: required status check from a ~40-line Action that validates the adversary marker against the head, required conversation resolution; `gh pr checks --watch --required` to wait; `claude -p --json-schema` (verified on 2.1.318) for a local Claude review with a parsed verdict; `codex review` has no JSON and no per-request strength knob (brief 2026-11-06) | REPLACE (E8): the Action is the one piece of new code, and it replaces 4.6k lines |
+| D10 Merge gate | `pr-wait` (2.3k), `local-review` (Codex) | GitHub ruleset: required status check from a ~40-line Action that validates the adversary marker against the head; `gh pr checks --watch --required` to wait; `claude -p --json-schema` (verified on 2.1.318) for a local Claude review with a parsed verdict; `codex review` has no JSON and no per-request strength knob (brief 2026-11-06) | REPLACE (E8): the Action is the one piece of new code, and it replaces 4.6k lines |
 | D11 Recovery evidence | PR 290 `ade-recovery` (3.3k TS) | native resume (0.15.0) + `session-recovery` first | PARK (R4) |
 | D12 Moving dirs with history | — | `git filter-repo --paths-from-file` on a fresh clone (installed here, a40bce5) | ADOPT (E1) |
 | D13 Instruction-file lint | PR 289's `instruction-lint` | no CLAUDE.md/AGENTS.md linter exists; `skills-ref validate` covers SKILL.md | KEEP instruction-lint (lands with PR 289); use skills-ref for skills |
@@ -222,11 +227,14 @@ wanted); move with history via `git filter-repo` on a fresh clone:
 `bottom-config`, `setup-modern-cli`, `teach`, `todo`, `report`, `greptile`,
 `coderabbit-feeder`, `firecrawl`, `bench/`, `bin/app-tamer-ab`, `bin/heavy-shim`,
 `bin/codium-ai`, `bin/open-clean` (PR 256, if it lands), onto a branch
-`slim-intake/2026-11` of site-djbclark. `barnowl`, `book-to-kb`,
-`change-hermes*`, the Grok-bot pieces: per J2a.
+`slim-intake/2026-11` of site-djbclark; each moved file passes a secrets scan
+first, and site-djbclark's `skills/` is added as a `skill-everywhere` root in
+the same slice so nothing disappears from the agents at landing (J2a).
+`barnowl`, `book-to-kb`, `change-hermes*` and the Grok-bot skills go the same
+way (J2a answered); the `tell-coding-bot` pointer skill stays here (E9j).
 
 E2. **S-dead**: `ade-scan-state*` (+3.9k tests), `seat-name`, `jev`,
-`jev-eval`, `docs/jev.md`, `ralph-tui-orchestration`, `jevlike`,
+`jev-eval`, `docs/jev.md`, `claude/hooks/jev_effort_hook.py`, `ralph-tui-orchestration`, `jevlike`,
 `skillopt-sleep-learned`, `plugins/herdr-sleeper` (D14), `docs/agent-sleep.md`,
 `vendor/` entries pointing at retired tools, the `docs/ade-everywhere-*` series
 and `docs/apply-toolchain-prompt.md` → `docs/history/`. `cow-workspaces` and
@@ -300,7 +308,7 @@ runs `cmd_sample` through attribution on a synthetic sustained spike
 (`bin/load-watch:1227-1233` calls it unguarded; a `ModuleNotFoundError` there
 would disable the threat model's runaway-load response),
 `context-budget-check` KEEP as a Paseo schedule (J3; PR 289's hook host),
-`launchd/com.djbclark.{rumination-watch,session-history-update,context-budget,routing-recalibrate,skillopt-sleep,zcode-key-auth}.plist`.
+`launchd/com.djbclark.{rumination-watch,session-history-update,context-budget,routing-recalibrate}.plist` (the `context-budget` plist goes with its `install`/`uninstall` subcommands, J3; the `skillopt-sleep` plist is E10's and `zcode-key-auth`'s is E9's, so each file has one deleting slice).
 
 E6. **S-acp: SHIM then delete.** `acp-dispatch` becomes a wrapper over
 `paseo run --provider <p> --model <m> --no-wait --output-schema`, keeping:
@@ -336,8 +344,8 @@ subagents without acp-run after a 1-hour port; else DELETE. `coding-bot`,
 `tell-coding-bot`, `tell-chief-of-staff`: per E9j, a pointer skill stays,
 the code moves to peer-link's repo.
 
-E7. **S-route**: KEEP `route_agent.py` (the fleet still runs Pi, omp, Codex,
-Cursor, Copilot-via-Paseo; report A3), with its registry switched from
+E7. **S-route**: KEEP `route_agent.py` (J2: one Paseo provider per paid plan, several
+plans, so routing stays), with its registry switched from
 `acp-run --list` to `paseo provider ls --json` (rearchitecture C2) and the
 retired providers removed from `config/routing.toml` and `docs/model-routing.md`;
 `failover.py` KEEP only the model-chain half (its route half is `paseo run`);
@@ -399,8 +407,10 @@ supersedes the keep list where they differ**: the agy TUI retires too (the
 Google AI plan is reached through Paseo's `antigravity` provider), and omp and
 opencode survive only if a paid plan is reachable solely through them (omp's
 Claude API-credit grant, opencode's GLM/SIPB routes), settled from the aiuse
-pools in the Wave 1 audit. Retire what the file decided (J2c supplies the
-file, J2 the rule; the brief needs it on a
+pools in the Wave 1 audit; **the Q1 machine-side uninstall of opencode, zcode
+and the `glm-acp-agent` provider waits for that audit** (an irreversible step
+must not break J2's own rule), and the pi→omp ports happen only if omp
+survives it. Retire what the file decided (J2c supplies the file, J2 the rule; the brief needs it on a
 branch, not on the Mac): for each retired provider delete its config dir
 (`pi/`, `omp/`, `zcode/`, `opencode/`, `opencode-plugins/`, `opencode.json`,
 `GEMINI.md`), its `agents/` template, its `bin/` helpers
@@ -445,13 +455,13 @@ at the end. `graft build` last.
 
 | Wave | Content | Width | Gate |
 |---|---|---|---|
-| 0 | DONE: check-ins (37 + 5), rulings R1–R8, evidence and the consolidated report on the branch. OPEN: baseline suite (running in the cloud, `docs/slim/baseline.md` when it ends; batch-1 reports note tests that fail on master in containers); operator confirms C1's three slices exited (J1); land PR 289 and PR 291 on master (pytest-linux pending on both); land `gitignore-aider` (one line) by PR and reset the shared checkout's master; tag `pre-slim-2026-11-06`; `git worktree prune` on the Mac; J1, J2, J2a, J2b, J2c and J11 answered | serial | all of the above |
+| 0 | DONE: check-ins (37 + 5), rulings R1–R8, evidence and the consolidated report on the branch. OPEN: baseline suite (running in the cloud, `docs/slim/baseline.md` when it ends; batch-1 reports note tests that fail on master in containers); land PR 289 and PR 291 on master (pytest-linux pending on both); land `gitignore-aider` (one line) by PR and reset the shared checkout's master; tag `pre-slim-2026-11-06`; `git worktree prune` on the Mac; J1, J2, J2a, J2b, J2c, J11 and J3–J10 all answered 2026-11-06 | serial | all of the above |
 | 1 | Audits (a) `bin/`, (b) `skills/`, (c) `tests/` map, (d) `docs/` + queue, (e) outside dependents and links (C2, C3) ; lead writes `docs/slim/ledger.md`; **workflow** (section H, W1); operator approves the ledger once | 5 readers | ledger approved |
 | 2 | E1 (unlink, uninstall-vendored, move to site-djbclark), E2 (dead), E9 (retired providers only) | 3–4 writers + reviewers | **C7 drain gate passed first**; suite green; refs zero outside AGENTS.md and README (**workflow** W2) |
 | 3 | E3 shim, E4, E5, E10; **order inside the wave**: E5's attribution rewrite merges before E3 deletes `fleet.py`; **operator steps first**: upgrade the Mac daemon to 0.15.x in a quiesced window per `docs/queue.md` (evidence F records 0.14.x; an unfinished turn is lost on restart until terminal persistence is verified), install the J6 plugins, evaluate `session-recovery` with native resume OFF (J6), then verify for one day before the REPLACE deletions merge | 3 | same; **the E3 shim merges only after the in-repo relay callers are on it and the C3 relay consumers are migrated or waived per file** |
-| 4 | E6 shim and bigteam, then E7 and E8; E6 and E7 as sibling cloud sessions | 2–3 | same; **`acp-run` is not deleted here**: C3's acp consumers are migrated or waived per file first (proposed to the operator as PRs if J2b allows) |
+| 4 | E6 shim and bigteam, then E7 and E8; E6 and E7 as sibling cloud sessions | 2–3 | same; the lander and feeder plists are unloaded and removed (J11, operator step); **`acp-run` is not deleted here**: C3's acp consumers are migrated or waived per file first (PRs opened and merged by the lead per J2b, asking when unsure) |
 | 5 | E11; AGENTS.md and README (Opus `high`; lead at `xhigh`); **workflow** W3 | 2 | suite green; `graft build` |
-| 6 | Shims and `acp-run` removed (E3, E6) only after every C3 file is migrated or waived; upstream filings (gaps found in Paseo: a quota-pause primitive, a workspace claim primitive, if still missing); final PR to master or J7; delete `slim/*` branches after MERGED; lander/feeder plists removed (J11: retire; operator step) | serial | done |
+| 6 | **The shims and `acp-run` ship in the final PR** (nothing on the Mac changes before the final merge, so a shim that is removed on the branch never runs live); C7 and the C1 live-process checks are **re-run as the final PR's merge gate**, output pasted into the PR; the shims and `acp-run` are removed in a **follow-up PR after one live cycle** (two weeks, or sooner when every C3 file is migrated or waived and `relay.py`/`acp-dispatch` logs show no caller); upstream filings (gaps found in Paseo: a quota-pause primitive, a workspace claim primitive, if still missing); final PR to master (J7); delete `slim/*` branches after MERGED | serial | done |
 
 Each wave: a Sonnet research subagent re-checks Paseo and Claude Code docs
 for that wave's area (both moved weekly in October); briefs; writers;
@@ -501,7 +511,14 @@ off (operator, 2026-11-06).
 ## I. Risks, v2
 
 I1. A shim that is "temporary" becomes permanent: both shims carry a removal
-date (end of Wave 6) and a test that fails after it.
+date (the follow-up PR, two weeks after the final merge at the latest) and a
+test that fails after it.
+I8. Because every wave gate is a merge onto the branch (J7: one PR), the Mac
+sees the whole change at once at the final merge: records created after Wave
+0 (resumable `acp-dispatch` records, scheduled `auto-resume` jobs, sleeping
+panes, dirty worktrees) are never drained by the Wave 2 gate. Mitigation:
+C7 and C1 re-run as the final PR's merge gate (F, Wave 6), and the shims are
+live for one cycle before their follow-up removal.
 I2. An outside project breaks when the shim goes: C3 is a checklist the
 operator ticks per file before Wave 6.
 I3. Plugins are unsandboxed daemon code: J6 is per plugin; a Sonnet subagent
@@ -527,8 +544,9 @@ J1. [answered 2026-11-06: yes, all three exited] Did the three detached
 `acp-dispatch ls`.) Wave 2 cannot start while they run.
 J2. **Providers.** [answered 2026-11-06: **one Paseo provider per paid
 monthly plan**, Paseo-native where it exists; every TUI that only duplicates a
-plan retires (agy TUI, zcode, opencode, qwen-code, muse, and Pi/omp unless a
-plan is reachable only through them); the Google AI plan is reached through
+plan retires (agy TUI, qwen-code, muse outright; zcode, opencode, Pi and omp
+unless a paid plan is reachable only through them, which the Wave 1 pool
+audit settles before any machine-side uninstall, E9); the Google AI plan is reached through
 Paseo's `antigravity` provider (official `antigravity-acp`), not the agy TUI;
 the plan list is derived from aiuse's pools and confirmed by the operator]
 Which of these survive after the TUI retirement:
@@ -543,9 +561,11 @@ J2a. [answered 2026-11-06: **everything to site-djbclark**, one destination;
 the E1 slice runs a secrets scan (`git secrets`-style patterns plus a read of
 each file) on every moved file and stops to ask on any hit before the push;
 `book-to-kb` and `change-hermes*` included; E9j (PR 269's wrapper code to
-peer-link) stands as the earlier explicit ruling, the pointer skill goes to
-site-djbclark; site-private keeps its own skills root, so E10's
-`skill-everywhere` keeps serving it] Homes for the E1 "probably another home"
+peer-link) stands as the earlier explicit ruling and the `tell-coding-bot`
+pointer skill stays here (A2, E6, R8: a pointer agents cannot see does
+nothing); site-djbclark's `skills/` becomes a third `skill-everywhere` root
+(the pre-2026-10-14 hub) so the moved skills keep their links in every
+surviving agent; site-private keeps its own root] Homes for the E1 "probably another home"
 pieces (unchanged from v1 H2a): `book-to-kb` →
 site-private? `change-hermes*` → site-private? Grok-bot pieces → peer-link
 repo per E9j, or `coding-bot-mailbox`? `barnowl` → the barnowl fork?
@@ -565,8 +585,10 @@ scripts stay in the state dir as history; their job is the E8 Action plus
 `local-review` and `pr-wait`, all of which Waves 3–4 replace, so "decide
 after the split" is decided by the split. Retire them, or port them onto
 `paseo run` plus the E8 Action? Must be answered before Wave 3.
-J3. [answered 2026-11-06: **keep**, run as a Paseo schedule; its launchd
-plist goes; PR 289's hook stays wired] `context-budget-check`: keep (PR 289
+J3. [answered 2026-11-06: **keep**; a Paseo schedule runs an agent that
+executes it nightly and reports (D8's "schedules run agents" is why the shell
+sweeps stay on ade-sched); its launchd plist and `install`/`uninstall`
+subcommands go; PR 289's hook stays wired] `context-budget-check`: keep (PR 289
 hooks into it) or fold its one check into `instruction-lint`?
 J4. [answered 2026-11-06: **delete all three**, with their tests, docs and
 plists (E2, E10); `npx skills add` (vercel-labs/skills, MIT) may be used for

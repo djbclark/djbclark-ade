@@ -132,7 +132,7 @@ stopped.
 |---|---|---|---|
 | 194 | `finder-consent-agents-cleanup` | AGENTS.md: drop date annotations and incident narratives | DISCARD; E11 rewrites AGENTS.md wholesale, and this would conflict with every slice |
 | 208 | `astra-readonly` | acp-run / acp-dispatch read-only advise slices | DISCARD (E6 deletes both) |
-| 227 | `bottom-config-uncapped-command` | bottom-config doc | DISCARD here; E1c moves `bottom-config` to site-djbclark, re-apply the one hunk there if still wanted |
+| 227 | `bottom-config-uncapped-command` | bottom-config doc | DISCARD here; E1 moves `bottom-config` to site-djbclark, re-apply the one hunk there if still wanted |
 | 231 | `mds-client-probe` | load-watch mds probe | PARK with #293 (E5) |
 | 254 | `habits-gate-subshell` | `bash_habits_gate` parsing fix | LAND if small and green (a Claude hook, KEEP), else PARK to Wave 5 |
 | 256 | `open-clean-env` | `bin/open-clean`, launch apps without the agent env | PARK; a Mac-only utility, decide in E1/E2 audit (likely MOVE to site-djbclark) |
@@ -140,4 +140,4 @@ stopped.
 | 269 | `coding-bot-peer-link` | coding-bot over peer-link | TRANSFER, then close: the operator ruled (consolidated report E9j) that the wrapper is re-homed into frdminc/peer-link with one repair round there, `~/.local/bin/coding-bot` and home-agents.md item 40 repointed, and a short `tell-coding-bot` pointer skill kept here; the slim branch takes nothing from the PR but keeps the branch and worktree `~/src/djbclark-ade-cb-pl-wt` until the transfer lands (superseded the earlier DISCARD, 2026-11-06, Codex P2 on PR 295) |
 | 281 | `fix/opencode-bridge-econnrefused-guard` | opencode-plugin-guard | PARK per the operator's E9c answer ("wait until after the split; its fate follows whether opencode support survives"), not DISCARD |
 
-Operator does: nothing yet; these wait for J2. If an owner reports, its ruling supersedes this row.
+Operator does: nothing yet; J2 is answered by rule; each row's provider condition is settled by the Wave 1 pool audit. If an owner reports, its ruling supersedes this row.
