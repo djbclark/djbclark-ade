@@ -319,12 +319,18 @@ file and `.done` record, `outcome` → `route_agent.py calibrate` records, the
 `--kind frontier` admission check (`bin/agent_guard.py` and its two tests stay
 with it, report B1d), **the `load-watch admit` pre-launch gate (exit 75)**, **the restricted
 permission policies** (`--perm read-only` and `--perm deny`, today enforced by
-`acp-run`'s per-agent tool filtering, settings stripping and tripwire: the
-shim maps each to a verified Paseo configuration for the provider, for
-Claude `permissionMode: plan` plus `disallowedTools` for edits and shell, and
-**refuses the launch** when no verified equivalent exists, because the
-shipped Claude template defaults to `bypassPermissions` and these modes
-protect prompt-injection-sensitive reviews), **the live-agent count**
+`acp-run`'s per-agent tool filtering, settings stripping and tripwire: a
+read-only run exposes only the six read tools and a deny run none, user
+settings, MCP servers and hooks are stripped, and every other call trips. The
+shim must reproduce that boundary, not approximate it: a **tool allowlist**
+(the six read tools, or none), **empty MCP, settings and hooks** for the run
+(the shipped Claude template allows `mcp__hermes`, through which an injected
+review could send messages or approve pending requests), a **tripwire
+equivalent** that aborts on any call outside the allowlist, and **boundary
+tests** that prove each of the three before the shim ships; `permissionMode:
+plan` plus a denylist is not equivalent. The shim **refuses the launch** when
+the provider cannot be configured that way, because these modes protect
+prompt-injection-sensitive reviews), **the live-agent count**
 (`count_agents()` counts `acp-run` processes and releases the `load-watch
 admit --max-agents` reservation only once one is countable; a `paseo run
 --no-wait` child never is, so the count is ported to `paseo ls -a -g --json`
