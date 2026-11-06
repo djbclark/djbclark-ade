@@ -1,7 +1,7 @@
 # deadline: a registered maximum run time, enforced from outside
 
-2026-11-01. Why a new doc and not a section in `skills/loadwatch/SKILL.md`: loadwatch is the load watcher's role card; a deadline is
-a rule every agent and script follows, whatever it runs, so it needs its own page that AGENTS-level text can link.
+2026-11-01. A deadline is a rule every agent and script follows, whatever it runs, so it has its own page that AGENTS-level
+text can link.
 
 ## The rule
 

@@ -33,8 +33,9 @@ the guess 1M if settings `model` carries `[1m]`, else 200k. Not read: project-le
 `--autocompact`, other models' windows. The nudge hook hard-codes its own 300k window
 (`AUTO_COMPACT_WINDOW`), so the two disagree if settings change it; only the buffer is shared.
 
-Agent text (titles, cwd) and ids are untrusted: text goes through fleet.py's `clean_text` (imported)
-and onto one line; ids must match the uuid pattern before they reach a path or an argv.
+Agent text (titles, cwd) and ids are untrusted: text goes through `clean_text` (escape sequences, control,
+bidi and zero-width characters out; copied from session-finder's fleet.py on 2026-11-06 so this tool no
+longer imports it) and onto one line; ids must match the uuid pattern (PASEO_ID) before they reach a path or an argv.
 
 Which agents (--source, default auto):
   paseo   `paseo ls -g --background --json` (CONTEXT_WATCH_PASEO or `paseo` on PATH): every agent whose provider is
@@ -64,6 +65,7 @@ import shutil
 import subprocess
 import sys
 import time
+import unicodedata
 from pathlib import Path
 
 sys.dont_write_bytecode = True  # before the imports by path below: "nothing is written" includes __pycache__
@@ -71,8 +73,21 @@ DEFAULT_MODEL_WINDOW = 200_000
 LONG_MODEL_WINDOW = 1_000_000
 MAX_WINDOW = 10_000_000  # a configured window above this is taken as junk (unset)
 HOOK = Path(__file__).resolve().parent.parent / "claude" / "hooks" / "context_size_nudge.py"
-FLEET = Path(__file__).resolve().parent.parent / "skills" / "session-finder" / "fleet.py"
 _loaded = {}
+
+# A Paseo agent id or a Claude session id: a uuid, checked before either reaches a path or an argv.
+PASEO_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+# clean_text, HIDDEN and ANSI: copied from skills/session-finder/fleet.py (2026-11-06, slim-down E5; fleet.py goes in E3).
+HIDDEN = "\u115f\u1160\u3164\uffa0\u2800"    # fillers and blanks that render as nothing
+ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b.?")
+
+
+def clean_text(text):
+    """Text from another agent or process as plain data: escape sequences, control characters (C0 bar newline and tab, DEL,
+    C1), Unicode format characters (bidi overrides and isolates, zero-width), blank fillers and variation selectors removed."""
+    return "".join(ch for ch in ANSI.sub("", text)
+                   if ch in "\n\t" or not (ch < " " or "\x7f" <= ch <= "\x9f" or unicodedata.category(ch) in ("Cf", "Zl", "Zp")
+                                           or ch in HIDDEN or "\ufe00" <= ch <= "\ufe0f" or "\U000e0100" <= ch <= "\U000e01ef")).strip()
 
 
 def _import(name, path):
@@ -86,10 +101,6 @@ def _import(name, path):
 
 def _hook():
     return _import("context_size_nudge", HOOK)
-
-
-def _fleet():
-    return _import("fleet", FLEET)
 
 
 def read_settings():
@@ -185,7 +196,7 @@ def session_of(state):
     for key in ("persistence", "runtimeInfo"):
         block = state.get(key)
         sid = block.get("sessionId") if isinstance(block, dict) else None
-        if isinstance(sid, str) and _fleet().PASEO_ID.fullmatch(sid):
+        if isinstance(sid, str) and PASEO_ID.fullmatch(sid):
             return sid
     return None
 
@@ -260,7 +271,7 @@ def paseo_rows(settings, agents):
     for a in agents:
         provider = a.get("provider")
         agent_id = a.get("id")
-        if (not isinstance(agent_id, str) or not _fleet().PASEO_ID.fullmatch(agent_id)
+        if (not isinstance(agent_id, str) or not PASEO_ID.fullmatch(agent_id)
                 or not isinstance(provider, str) or not provider.startswith("claude")):
             continue
         state = agent_state(agent_id)
@@ -281,7 +292,7 @@ def recent_rows(settings, minutes):
     rows = []
     for path in glob.glob(os.path.join(glob.escape(str(projects_dir())), "*", "*.jsonl")):
         session = Path(path).stem
-        if not _fleet().PASEO_ID.fullmatch(session):
+        if not PASEO_ID.fullmatch(session):
             continue
         try:
             if os.stat(path).st_mtime < cutoff:
@@ -295,9 +306,9 @@ def recent_rows(settings, minutes):
 
 
 def _plain(text):
-    """Agent- or prompt-controlled text as one plain line: fleet.py's clean_text (escape sequences, control and
+    """Agent- or prompt-controlled text as one plain line: clean_text (escape sequences, control and
     bidi characters out), then every run of whitespace, newlines included, to one space."""
-    return " ".join(_fleet().clean_text(str(text)).split())
+    return " ".join(clean_text(str(text)).split())
 
 
 def _k(n):
@@ -341,9 +352,8 @@ def main(argv=None):
 
     try:
         _hook()
-        _fleet()
     except Exception as e:
-        print(f"context-watch: cannot load {HOOK} or {FLEET}: {e}", file=sys.stderr)
+        print(f"context-watch: cannot load {HOOK}: {e}", file=sys.stderr)
         return 0
     settings = read_settings()
 
