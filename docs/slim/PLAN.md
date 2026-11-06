@@ -277,7 +277,10 @@ upstream watchers become Paseo schedules reading `fleet-watch`'s briefs,
 **after the C3 per-file gate**: tendcf, nix2cf and CFEngine name them,
 report I4a-c; `fleet-watch` itself is outside this repo, home unverified,
 C3), and `load-watch`'s attribution plus `context-watch` are rewritten to read
-`paseo ls -a -g --json` so `fleet.py` can go (E3),
+`paseo ls -a -g --json` so `fleet.py` can go (E3), with a hot-path test that
+runs `cmd_sample` through attribution on a synthetic sustained spike
+(`bin/load-watch:1227-1233` calls it unguarded; a `ModuleNotFoundError` there
+would disable the threat model's runaway-load response),
 `context-budget-check` (DECIDE J3: it is also PR 289's hook host),
 `launchd/com.djbclark.{rumination-watch,session-history-update,context-budget,routing-recalibrate,skillopt-sleep,zcode-key-auth}.plist`.
 
@@ -318,7 +321,14 @@ session-guard/usage-auto-resume are verified live (D4); the **frontier half**
 the `[frontier]` table) is KEEP because the kept `route_agent.py` imports it
 unconditionally (`bin/route_agent.py:122`, used at 1293-1313): either it stays
 as a trimmed `ade_gates.py` or it is ported into `route_agent.py` in the same
-slice, and the slice's test is that `route_agent.py policy` still runs;
+slice. **The frontier gate also needs fresh quota state**: `read_guard_state()`
+reads `~/.local/state/ade/quota-guard.json`, which `bin/claude-quota-guard
+check` produces, and `judged_guard_block()` rejects state older than 30
+minutes (`bin/ade_gates.py:530-537`); so the state-producing half of
+`claude-quota-guard` (the launchd `check`) is KEEP until the frontier
+consumers read `paseo usage --json` instead, which is part of this slice, and
+the slice's test exercises `route_agent.py frontier_per_wave()` with fresh
+and with stale state, not only that `route_agent.py policy` runs;
 `claude-cost-whatif`; KEEP `claude-cost-mix` (small,
 local). `skills/model-routing` is rewritten around Claude tiers (section G)
 plus the surviving providers' rows; `effort-routing`, `fallback-chains` fold
