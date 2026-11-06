@@ -115,8 +115,11 @@ security review on `f61cea21` (P2, round 8) moved the marker Action to
 `pull_request_target` from base code with no PR checkout, posting a status
 to the head SHA and re-running on body edits, with a test PR that modifies
 the workflow; the adversary confirm on `a05bd3b6` (APPROVE, 1 medium) added
-read-only default token permissions, explicit `permissions`, concurrency
-with a head re-check before posting, and a spoof-workflow test PR.
+explicit `permissions`, concurrency with a head re-check before posting, and
+a spoof-workflow test PR; its pass on `f706210b` (BLOCK) retracted its own
+read-only-default fix (a workflow's `permissions:` re-grants `statuses:
+write` on a same-repo branch) in favour of a dedicated GitHub App posting
+the status from a `master`-only environment secret, pinned in the ruleset.
 
 ## B. Scope and constraints
 
@@ -494,22 +497,34 @@ workflow triggers on `pull_request_target` (`opened`, `synchronize`,
 the PR**, reads the PR body and head SHA through the API with the
 workflow's own read token, and **posts a commit status to the PR head SHA**
 (the ruleset's required check reads that status; a `pull_request_target`
-run's own check attaches to the base branch's SHA, not the head); it
-declares `permissions: {pull-requests: read, statuses: write}` explicitly
-and nothing more. **A status is matched by its context name only**, so a
-branch pushed by someone with push access (here, the operator's own agents)
-could add a second `pull_request` workflow beside it that posts a green
-status under the same context with its own token; fork PRs cannot, their
-token is read-only. So the slice also **sets the repository's default
-workflow token permissions to read-only** (an operator step in the
-repository settings; then only the base workflow holds `statuses: write`),
-adds `concurrency: {group: adversary-marker-<PR>, cancel-in-progress:
-true}` and re-reads the body and head SHA just before posting, posting only
-if the head is unchanged (an `edited` run and a `synchronize` run can
-overlap, and a stale APPROVE must not land after a BLOCK edit); and its test
-suite includes a PR that modifies the workflow file **and a PR that adds a
-spoofing workflow beside it**, both of which must leave the required check
-failing. Per J8 (answered 2026-11-06, the operator's explicit choice over the
+run's own check attaches to the base branch's SHA, not the head). **A
+status is matched by its context name only**, so a branch pushed by someone
+with push access (here, the operator's own agents) could add a second
+`pull_request` workflow beside it that posts a green status under the same
+context; fork PRs cannot, their token is read-only. A read-only default for
+the workflow token does **not** close this: a workflow file's own
+`permissions: {statuses: write}` re-grants it on a same-repo branch (the
+adversary's first fix, retracted by the adversary on the next pass). So the
+status comes from a **source a PR cannot reproduce**: (a) the Action posts
+the status as a **dedicated GitHub App** (`ade-merge-gate`), with a token
+minted from the App's private key; (b) that key is an **environment secret**
+whose deployment branch policy allows `master` only, which a
+`pull_request_target` run can reach (its ref is the base branch) and a
+`pull_request` run cannot (its ref is `refs/pull/N/merge`); (c) the
+ruleset's required status check **pins its expected source to that App**;
+(d) the workflow's own `GITHUB_TOKEN` is `permissions: {pull-requests:
+read}` only, since the App's token does the posting. The read-only default
+stays as defence in depth, never described as the mechanism. Creating the
+App, installing it on the repository and storing its key in the
+`merge-gate` environment are **operator steps before the ruleset is
+switched** (Wave 4, beside J11's). The Action adds `concurrency: {group:
+adversary-marker-<PR>, cancel-in-progress: true}` and re-reads the body and
+head SHA just before posting, posting only if the head is unchanged (an
+`edited` run and a `synchronize` run can overlap, and a stale APPROVE must
+not land after a BLOCK edit); and its test suite includes a PR that modifies
+the workflow file **and a PR that adds a spoofing workflow beside it, which
+declares `permissions: {statuses: write}` explicitly**, both of which must
+leave the required check failing. Per J8 (answered 2026-11-06, the operator's explicit choice over the
 fail-closed thread gate `pr-wait` enforced), unresolved Codex threads do not
 gate the merge: the ruleset requires the Action and CI, not conversation
 resolution; Codex findings stay visible as threads and the lead reads them
@@ -588,7 +603,7 @@ at the end. `graft build` last.
 | 1 | Audits (a) `bin/`, (b) `skills/`, (c) `tests/` map, (d) `docs/` + queue, (e) outside dependents and links (C2, C3) ; lead writes `docs/slim/ledger.md`; **workflow** (section H, W1); operator approves the ledger once | 5 readers | ledger approved |
 | 2 | E1 (unlink, uninstall-vendored, move to site-djbclark), E2 (dead), E9 (retired providers only) | 3–4 writers + reviewers | **C7 drain gate passed first**; suite green; refs zero outside AGENTS.md and README (**workflow** W2) |
 | 3 | E3 shim, E4, E5, E10; **order inside the wave**: E5's attribution rewrite merges before E3 deletes `fleet.py`; **operator steps first**: upgrade the Mac daemon to 0.15.x in a quiesced window per `docs/queue.md` (evidence F records 0.14.x; an unfinished turn is lost on restart until terminal persistence is verified), install the J6 plugins, evaluate `session-recovery` with native resume OFF, then the one bounded native-resume trial (J6), then verify for one day before the REPLACE deletions merge | 3 | same; **the E3 shim merges only after the in-repo relay callers are on it and the C3 relay consumers are migrated or waived per file** |
-| 4 | `bin/review-launch` and its boundary tests first (owned by E8, needed by E6's shim), then the E6 shim and bigteam, then E7 and the rest of E8; E6 and E7 as sibling cloud sessions | 2–3 | same; the lander and feeder plists are unloaded and removed (J11, operator step); **`acp-run` is not deleted here**: C3's acp consumers are migrated or waived per file first (PRs opened and merged by the lead per J2b, asking when unsure) |
+| 4 | `bin/review-launch` and its boundary tests first (owned by E8, needed by E6's shim), then the E6 shim and bigteam, then E7 and the rest of E8; E6 and E7 as sibling cloud sessions; **operator steps before E8's ruleset switch**: create the `ade-merge-gate` GitHub App, install it on the repository, store its private key in the `merge-gate` environment restricted to `master` | 2–3 | same; the lander and feeder plists are unloaded and removed (J11, operator step); **`acp-run` is not deleted here**: C3's acp consumers are migrated or waived per file first (PRs opened and merged by the lead per J2b, asking when unsure) |
 | 5 | E11; AGENTS.md and README (Opus `high`; lead at `xhigh`); **workflow** W3 | 2 | suite green; `graft build` |
 | 6 | **The shims and `acp-run` ship in the final PR** (nothing on the Mac changes before the final merge, so a shim that is removed on the branch never runs live); C7 and the C1 live-process checks are **re-run as the final PR's merge gate**, output pasted into the PR; the shims and `acp-run` are removed in a **follow-up PR after one live cycle** (two weeks, or sooner when every C3 file is migrated or waived and `relay.py`/`acp-dispatch` logs show no caller), **keeping `bin/review-launch` and its tests (E8): rule 11's review is permanent and so is its boundary**; upstream filings (gaps found in Paseo: a quota-pause primitive, a workspace claim primitive, if still missing); final PR to master (J7); delete `slim/*` branches after MERGED | serial | done |
 
