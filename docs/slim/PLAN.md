@@ -105,7 +105,10 @@ confirm on `995763ec` (APPROVE) added that `review-launch` lands first in
 Wave 4 and that deny rules, not the Bash-only sandbox, confine `Read`; Codex's
 security review on `e8ac2a28` (P2) replaced the deny rules with the native
 `permissions.blockReadsOutsideWorkingDirectories` key, fail-closed when
-ignored, since deny rules cannot enumerate every host path.
+ignored, since deny rules cannot enumerate every host path; the confirm on
+`2fce19fb` (APPROVE, 3 low) made the outside-read check run per installed
+Claude version before a launch, reconciled `--settings` with
+`settingSources: []`, and added the key's own exemption to the check.
 
 ## B. Scope and constraints
 
@@ -427,20 +430,28 @@ than E6's read-only mode: the tool allowlist is `Read`, `Grep`, `Glob`,
 network, and a network tool is the exfiltration path for anything an
 injected diff makes the model read), reads are confined to the review
 worktree by the **native key `permissions.blockReadsOutsideWorkingDirectories:
-true`** in the run's `--settings` JSON, with the worktree as the only working
-directory (no `--add-dir`): the permissions doc (read 2026-11-06) says the
+true`** in the run's `--settings` JSON (a per-run flag, not a settings
+source, so `settingSources: []`, which drops the user, project and local
+files, does not suppress it; the outside-read check below proves the key
+took effect), with the worktree as the only working directory (no
+`--add-dir`): the permissions doc (read 2026-11-06) says the
 file tools then refuse reads outside the working directories in every mode,
 `bypassPermissions` included, apart from files Claude Code itself needs
 (Codex security review, round 7: enumerated deny rules cannot cover an
 unenumerated host path, and `!` negation of an absolute deny pattern cannot
 reopen only the worktree, so deny rules are not the mechanism; nor is Claude
 Code's sandbox, which covers only Bash, which is not in the allowlist). The
-launcher **fails closed when the key is ignored**: its boundary test reads an
-arbitrary path outside the worktree (a temp file the test creates, plus
-`~/.config/gh/hosts.yml` and `~/.ssh`) and the launch is refused unless each
-read is refused; an older Claude Code that does not know the key fails that
-test and so cannot run the review. Deny rules for the named secret paths
-stay as a second layer, never the first,
+launcher **fails closed when the key is ignored**: its boundary check reads
+an arbitrary path outside the worktree (a temp file the check creates, plus
+`~/.config/gh/hosts.yml`, `~/.ssh`, and `~/.claude/projects/` and
+`~/.claude.json` for the key's "files Claude Code itself needs" exemption,
+each refused or its exposure recorded as accepted in the slice) and the
+launch is refused unless each read is refused. The check runs **on the Mac
+before a launch, once per installed `claude --version` with the result
+cached**, as well as in the suite: a suite run in CI cannot vouch for the
+version installed on the Mac, and an older Claude Code that does not know
+the key fails the check and so cannot run the review. Deny rules for the
+named secret paths stay as a second layer, never the first,
 `settingSources: []`, strict MCP with no servers, hooks empty, bypass mode
 refused, and the tripwire (exit 77 on any call outside the allowlist). **It
 keeps every isolation check `bin/local-review` has today**, as tests, before
