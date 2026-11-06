@@ -1,3 +1,5 @@
+moved from docs/ on 2026-11-06 by the slim-down, E2
+
 # Codex review of ADE everywhere v1: accept/reject digest (2026-10-19)
 
 Source: Opus sub-agent digest of the Codex review, written for proposal v2 (session ee9e515d). Each finding was re-verified against its primary source on 2026-10-19 unless marked review-only.

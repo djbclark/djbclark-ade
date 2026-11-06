@@ -533,19 +533,3 @@ billing = "prepaid"
 note = "paid half of opencode-zen; prepaid tier retired 2026-08-23"
 retired = true
 agent = "opencode"
-
-[[service]]
-name = "openrouter"
-cli = "opencode-ralph-tui-openrouter"
-good_at = { code = 50, bulk = 50 }
-billing = "prepaid"
-note = "prepaid retired 2026-08-23"
-retired = true
-
-[[service]]
-name = "deepseek"
-cli = "opencode-ralph-tui-deepseek"
-good_at = { code = 50, bulk = 50 }
-billing = "prepaid"
-note = "prepaid retired 2026-08-23"
-retired = true

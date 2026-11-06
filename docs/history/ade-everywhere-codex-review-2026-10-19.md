@@ -1,3 +1,5 @@
+moved from docs/ on 2026-11-06 by the slim-down, E2
+
 STATUS: complete
 
 # ADE everywhere — advisory findings

@@ -1,3 +1,5 @@
+moved from docs/ on 2026-11-06 by the slim-down, E2
+
 # ADE-everywhere Phase 0, slice 1: installed agent session store inventory (2026-10-20)
 
 Phase 0, slice 1 of `docs/ade-everywhere-proposal.md` §8 (preserve and classify). Written by a zcode GLM-5.3 research slice (`phase0-inventory-2`, 2026-10-20, read-only) from the brief in `~/.local/state/bigteam/ade-2026-10-20-phase0-queue/brief-phase0-inventory.md`; reviewed by the lead. It supersedes the store rows of §6 in [ade-everywhere-inventory-2026-10-19.md](ade-everywhere-inventory-2026-10-19.md) and feeds slice 2 (the `.backup` copies and exports) and slice 3 (the bigteam and Orca scan).

@@ -1,3 +1,5 @@
+moved from docs/ on 2026-11-06 by the slim-down, E2
+
 # ADE everywhere v2.1 — advisory review
 
 Reviewed 2026-10-19 against the proposal, the v1 review and its evaluation, the measured inventory, and existing ADE/acp-run documentation, in the requested order. No working-tree files, git configuration, installed tools, caches, or services were changed by this reviewer. Other sessions modified README/acp-run documentation during the review; the relevant sections and references were refreshed before delivery. Evidence downloads and this report are confined to the requested report directory. This is source/documentation verification and design analysis, not an executed migration, benchmark, or acceptance test.

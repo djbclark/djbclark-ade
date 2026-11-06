@@ -1,3 +1,5 @@
+moved from docs/ on 2026-11-06 by the slim-down, E2
+
 # Prompt: apply the djbclark / frdminc / Graft development toolchain to a repo
 
 Version 5.13 (2026-11-02). Supersedes 5.12, 5.11, 5.10, 5.9, 5.8, 5.7, 5.6, 5.5, 5.4, 5.3, 5.2 and 5.1 (2026-10-09) and Version 5

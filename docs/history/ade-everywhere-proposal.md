@@ -1,3 +1,5 @@
+moved from docs/ on 2026-11-06 by the slim-down, E2
+
 # ADE everywhere: one repo that recreates the whole agent environment on any machine
 
 Proposal, version 2.4, 2026-10-20 (v2.3 of 2026-10-19 plus Q26, section 9.4). Status: **decided**: all twenty-six questions answered
