@@ -242,6 +242,54 @@ def test_closed_or_non_heredocs_pass(command):
     assert not denied(command)
 
 
+@pytest.mark.parametrize("command", [
+    "open -a Quicksilver",                                  # the 2026-11-02 leak
+    "open https://example.com",
+    "/usr/bin/open -a 'Default Folder X'",
+    "cd /tmp && open .",
+    "make; open -R f",
+    "echo go | open -f",
+    "FOO=1 open x",
+    "env FOO=1 open x",
+    "env -u HOME open x",                                   # env without -i still leaks
+    "sudo open x",
+    "time open x",
+    "nohup open -a Ghostty &",
+    "ls | xargs open",
+    "timeout 5 open x",
+    "x=$(open -g y)",
+    "(open x)",
+])
+def test_bare_open_is_denied(command):
+    out = run(command)
+    assert out and out.get("permissionDecision") == "deny"
+    assert "bin/open-clean" in out["permissionDecisionReason"]
+
+
+@pytest.mark.parametrize("command", [
+    "~/src/djbclark-ade/bin/open-clean -a Quicksilver",
+    "open-clean https://example.com",
+    "env -i HOME=$HOME PATH=/usr/bin /usr/bin/open -a X",   # a scrubbed environment
+    "env -i open x",
+    "env --ignore-environment open x",
+    "sudo env -i open x",
+    "xdg-open https://example.com",
+    "opencode run x",
+    "openssl x509 -in c.pem",
+    "cat open; ls open",                                    # a file named open
+    "rg -n open src/",
+    "git open",
+    "echo 'open -a X' > note.txt",                          # inside quotes
+    "echo \"open x\"",
+    "cat <<'EOF' > f\nopen -a X\nEOF",                      # heredoc body
+    "ls  # open x later",
+    "./open x",
+    "man open",
+])
+def test_clean_launches_and_other_open_words_pass(command):
+    assert not denied(command)
+
+
 def test_unterminated_heredoc_reason_names_the_consequence():
     """The reason must say bash does not fail, because that is the surprising part."""
     out = run("cat > /tmp/msg.md <<'EOF'\nno terminator\n")
