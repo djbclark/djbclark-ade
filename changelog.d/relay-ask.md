@@ -3,3 +3,6 @@
 
 ### Changed
 - `relay.py --cancel` refuses (exit 2) a queued message addressed to the caller: a message is read when it is delivered, and only its sender or the operator from a shell cancels it (#261)
+
+### Security
+- The question ledger proves who is asking, answering or withdrawing: a process that only exports another session's `PASEO_AGENT_ID` or `CLAUDE_CODE_SESSION_ID` is refused (exit 2) by `--ask`, `--inbox`, `--inbox --mine`, `--answer` and `--withdraw` (a Paseo agent must host the process, a Claude session must be in the registry); records, the operator token and `--ask --message-file` are read only when regular files of the user (no symlink, no FIFO), a loose operator token is replaced, the ledger directory is 0700 and never a symlink, and `--cancel` refuses when it cannot tell who is asking (#261)

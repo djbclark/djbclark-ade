@@ -402,29 +402,36 @@ bypass a permission denial; grok is excluded (2026-10-06).
 
 A decision for a lead is a RECORD the lead reads when it chooses, never text typed into its turn. A lead on a card or in a turn cannot be sent text, so every reply to it
 queued (cap 20) and the only way to free the queue was `--cancel`, which destroys the text. One 0600 file per question, `~/.local/state/relay/asks/q-YYYYMMDD-HHMMSS-xxxxxx.json`
-(`asks` is a sibling of the deferred directory, so `RELAY_DEFER_DIR` moves it), written atomically under `.ask.lock`; `asks.log` beside it holds one line per event, never the question.
-Fields: `v` 1, `id`, `project` (the asker's cwd basename), `from` {ident, label, paseo, fleet}, `to` {id, paseo, name}, `question`, `options` (2 to 6, each at most 200 characters), `recommend`
+(`asks` is a sibling of the deferred directory, so `RELAY_DEFER_DIR` moves it), written atomically; every state change is a read-modify-write under `.ask.lock` with the record re-read inside the hold (an answer's delivery
+is MERGED into the fresh record, a sweep deletes under the lock); `asks.log` beside it holds one line per event, never the question. The directory is 0700 and is never used when it is a symlink or another user's; a record or
+token that is a symlink, a FIFO or another user's file is not read.
+Fields: `v` 1, `id`, `project` (the asker's cwd basename), `from` {ident, label, paseo, fleet, sid}, `to` {id, paseo, name, sid}, `question`, `options` (2 to 6, each at most 200 characters), `recommend`
 (1-based, 0 none), `created`, `expires` (6 h; `--defer-for S`, at most 24 h), `state` (`open` | `seen` | `answered` | `withdrawn` | `expired`), `seen_at`, `seen_by`,
-`answer` {pick, text, note, by, via, at, delivery} (null until answered), `nudge` (the wake-up record's id), `nonce` (a per-question secret, `secrets.token_urlsafe(16)`).
+`answer` {pick, text, note, by, via, at, delivery, seen_by_asker} (null until answered), `nudge` (the wake-up record's id), `nonce` (a per-question secret, `secrets.token_urlsafe(16)`).
+**Who is who (2026-11-06, Argon review of PR 261):** every ledger command reads the caller through `ledger_identity`, which is `sender_identity` (the identity path of `defer_send`) plus a PROOF that an environment variable
+cannot give: a Paseo agent that HOSTS this process or an ancestor (`hosted_by`), a Claude session the registry proves (`claude_identity`, never `CLAUDE_CODE_SESSION_ID` alone), else a row whose own process is an ancestor.
+A process that only exports another session's `PASEO_AGENT_ID` or `CLAUDE_CODE_SESSION_ID` has no identity here: exit 2 from `--ask`, `--inbox`, `--inbox --mine`, `--answer` and `--withdraw`. A party is matched by its
+Paseo agent, else by fleet id AND the session id recorded (a pane id is reused by the next TUI).
 
 1. `relay.py --ask LEAD "question" | --message-file PATH|- --option A --option B [--recommend N] [--defer-for S] [--json]`: writes the record, opens your `--expect-ack` under the same id
    (so `--sweep` says OVERDUE and ASSUMED LOST as for any peer question), and queues ONE wake-up text to the lead (`kind: nudge`, collapsed per target, outside the per-target, per-sender
-   and total caps, no failure notice). A card on the lead does not stop it: nothing is typed into the lead. Exit 2: no identifiable sender, this session, fewer than 2 or more than 6 options, an
-   option over 200 or a question over 2000 characters, or a send option (`--no-defer`, `--plan`, `--idle`, `--steer`, `--via`, `--expect-ack`, `--fyi`, `--needs-reply`, `--ack`, `--no-ack`). Never wait or poll for the answer.
+   and total caps, no failure notice; it is cancelled again when no question is open for the lead: answered, withdrawn, expired or read). A card on the lead does not stop it: nothing is typed into the lead. Exit 2: no PROVEN
+   sender, this session, fewer than 2 or more than 6 options, an option over 200 or a question over 2000 characters, too many live questions (20 per asker, 50 per lead, 200 in all), a `--message-file` that is a symlink, a
+   FIFO, not yours or over 64 KiB, or a send option (`--no-defer`, `--plan`, `--idle`, `--steer`, `--via`, `--expect-ack`, `--fyi`, `--needs-reply`, `--ack`, `--no-ack`). Never wait or poll for the answer.
 2. `relay.py --inbox [--wait S] [--all] [--json]` (the lead): its questions oldest first, in full; `open` becomes `seen` (`seen_by` = your id). A withdrawn one is shown once. `--all` adds the last day's finished ones, read
-   only. `--wait S` returns at once when an `open` question exists, else polls every 5 s; exit 0 something printed, 1 nothing, 124 timed out. `--json` is a list of records without their nonce. A caller with no session
+   only. `--wait S` returns at once when anything `--inbox` would print exists (an `open` or `seen` question, a withdrawal not yet shown), else polls every 5 s; exit 0 something printed, 1 nothing, 124 timed out. `--json` is a list of records without their nonce. A caller relay cannot PROVE a session for
    is refused (exit 2) unless it gives `--operator-token-file PATH` (the operator token, as for `--answer`), which reads every question and changes nothing.
    **`relay.py --inbox --mine [--all] [--json]` (the ASKER's authoritative path to its answers, 2026-11-02):** your OWN answered questions you have not seen, in full, oldest first; each is marked `answer.seen_by_asker`
    as it is printed, so it is in the unseen list exactly once (`--all` also lists the seen ones, read only). It reads the ledger, never the deferral queue (20 per target), so a full queue or a failed `ack q-ID pick N`
-   send cannot hide an answer: that send is best-effort on top. Run it when the pick did not arrive, and before reporting a question unanswered. Exit 0 something printed, 1 nothing, 2 no session.
+   send cannot hide an answer: that send is best-effort on top. Marking it also settles your expectation (nothing goes OVERDUE for an answer you hold). Run it when the pick did not arrive, and before reporting a question unanswered. Exit 0 something printed, 1 nothing, 2 no PROVEN session.
 3. `relay.py --answer q-ID N [--note TEXT]`: the addressed lead, or the operator: `--nonce X --operator-token-file PATH [--via-label L]` (the record's nonce AND a file holding the operator token,
-   `~/.local/state/relay/operator.token`, 0600, made by relay on the first question; a caller with no session is NOT the operator). `answered` is written first (the commit point); the asker then gets the line
+   `~/.local/state/relay/operator.token`, 0600 and yours, made by relay on the first question, replaced by a fresh token when found loose, a symlink or a FIFO; a caller with no session, or one that only exports an id, is NOT the operator). `answered` is written first (the commit point); the asker then gets the line
    `ack q-ID pick N: <option text>[ — note]` through the ordinary send path (queued when it is working; an operator's goes out as `[relay from operator]`). Exit 0 delivered or handed to its route unproven (a Paseo agent has no transcript to prove it), 1 queued or failed (the
    answer stays in the record: `--inbox --all`), 2 not allowed, unknown id or N outside 1..options (nothing written), 10 already answered (prints the first answer), 11 withdrawn or expired. The asker acts only on a line whose id and
    option text match its open question; the first `ack q-ID` wins.
-4. `relay.py --withdraw q-ID`: the asker only (exit 2 otherwise); it retires the asker's expectation.
-5. `--cancel ID` refuses (exit 2) a queued record addressed to the caller; `--pending` lists questions as `kind: ask` rows (never the question, except as `--text`'s clipped preview); `--sweep` expires live ones
-   past `expires` and prunes final ones after a week (`asks: N expired, M pruned`).
+4. `relay.py --withdraw q-ID`: the proven asker only (exit 2 otherwise); it retires the asker's expectation.
+5. `--cancel ID` refuses (exit 2) a queued record addressed to the caller, and also when relay cannot tell who is asking; `--pending` lists questions as `kind: ask` rows (never the question, except as `--text`'s clipped preview); `--sweep` expires live ones
+   past `expires` and prunes final ones after a week (`asks: N expired, M pruned`). A delivered (or handed-over) `--answer` settles the asker's expectation whatever the delivery watch proved; so does the asker's `--inbox --mine`.
 
 
 ## Verified peer messaging (2026-10-25, standing order 10; docs/queue.md "Verified peer messaging")

@@ -13,6 +13,7 @@ import itertools
 import json
 import os
 import stat
+import threading
 import time
 from typing import Any
 from unittest import mock
@@ -21,16 +22,24 @@ import test_relay_fallback as fb  # noqa: E402  # pyright: ignore[reportMissingI
 
 relay = fb.relay
 LEAD, ALICE, BOB, CAROL = ("11111111-0000-4000-8000-00000000000%d" % i for i in (1, 2, 3, 4))
+MALLORY = "99999999-0000-4000-8000-000000000009"    # a Paseo agent that is nobody's lead or asker
+FAKE_PID = 424242    # the process Paseo's daemon hosts for the caller, in the ancestry the tests give relay
+CSID = "dddddddd-0000-4000-8000-0000000000d4"    # a Claude session id
 
 
 class Base(fb.Harness):
-    """Four Paseo rows (a lead, two askers, a bystander); the caller is the one PASEO_AGENT_ID names; the Paseo CLI and the deliverer are stubs."""
+    """Four Paseo rows (a lead, two askers, a bystander). The caller's identity is modelled the way the machine proves it: `as_agent(X)` makes FAKE_PID, an ancestor of
+    this process, the process Paseo's daemon hosts for X (`where.paseo_agent` is the seam; relay.hosted_by and the ledger's identity_proven run for real), and also exports
+    PASEO_AGENT_ID, which fleet takes for `self`. `as_forged(X)` only exports the variable. The Paseo CLI and the deliverer are stubs."""
 
     def setUp(self) -> None:
         super().setUp()
-        saved = relay.hosted_by
-        relay.hosted_by = lambda a: False
-        self.addCleanup(setattr, relay, "hosted_by", saved)
+        self.hosting: dict[int, str] = {}
+        for obj, name, val in ((relay.fleet, "ancestors", lambda: {FAKE_PID}), (relay.where, "env_of", lambda pid: {}),
+                               (relay.where, "paseo_agent", lambda pid, env: self.hosting.get(pid))):
+            patcher = mock.patch.object(obj, name, val)
+            patcher.start()
+            self.addCleanup(patcher.stop)
         self.sent: list[tuple[str, str]] = []
         self.rows = {
             "lead": fb.sess(id="11111111", name="lead", agent="claude", host="paseo", paseo=LEAD, chan=("paseo", LEAD), status="working"),
@@ -59,14 +68,27 @@ class Base(fb.Harness):
 
     @staticmethod
     def is_self(row: dict[str, Any]) -> bool:
-        agent = os.environ.get("PASEO_AGENT_ID")
-        return bool(agent and row.get("paseo") == agent)
+        """fleet's own rule, which is forgeable: a Paseo row is `self` by PASEO_AGENT_ID alone, a Claude row by CLAUDE_CODE_SESSION_ID alone, a herdr row by HERDR_PANE_ID."""
+        agent, csid, pane = os.environ.get("PASEO_AGENT_ID"), os.environ.get("CLAUDE_CODE_SESSION_ID"), os.environ.get("HERDR_PANE_ID")
+        chan = row.get("chan") or (None, None)
+        return (bool(agent and row.get("paseo") == agent) or bool(csid and row.get("agent") == "claude" and row.get("sid") == csid and not row.get("paseo"))
+                or bool(pane and chan[0] == "herdr" and chan[1] == pane))
 
     def as_agent(self, agent: str | None) -> None:
+        """The caller is Paseo agent AGENT: its process is hosted by it, and the variable says so. None: a process with no session at all."""
+        self.hosting.clear()
         if agent is None:
             os.environ.pop("PASEO_AGENT_ID", None)
         else:
             os.environ["PASEO_AGENT_ID"] = agent
+            self.hosting[FAKE_PID] = agent
+
+    def as_forged(self, agent: str, hosted_by: str | None = None) -> None:
+        """A process that merely exports PASEO_AGENT_ID=AGENT; it may genuinely be hosted by HOSTED_BY, another agent."""
+        self.hosting.clear()
+        os.environ["PASEO_AGENT_ID"] = agent
+        if hosted_by:
+            self.hosting[FAKE_PID] = hosted_by
 
     def go(self, *argv: str) -> tuple[int, str, str]:
         out, err = io.StringIO(), io.StringIO()
@@ -292,7 +314,7 @@ class TestAnswer(Base):
         r = self.rec(q)
         self.assertEqual((r["state"], r["answer"]["pick"], r["answer"]["text"], r["answer"]["by"], r["answer"]["delivery"], r["answer"]["note"]),
                          ("answered", 2, "No, wait", LEAD, "delivered", "after lunch"))
-        self.assertEqual([t.split("] ", 1)[1] for p, t in self.sent if p == ALICE], [f"ack {q} pick 2: No, wait \u2014 after lunch"])    # under the lead's `[relay from ...]` header
+        self.assertEqual([t.rsplit("] ", 1)[-1] if t.startswith("[relay from") else t for p, t in self.sent if p == ALICE], [f"ack {q} pick 2: No, wait \u2014 after lunch"])    # a hosted lead is labelled by Paseo itself; a header, when there is one, is not the text
         self.assertEqual(relay.expect_read(q)["state"], "acked")    # the answer closed the asker's expectation
         self.sent.clear()
         rc, out, err = self.lead_answers(q, "1")    # a second answer is refused and prints the first one
@@ -444,3 +466,371 @@ class TestWithdrawCancelPendingSweep(Base):
     def test_a_sweep_without_a_ledger_prints_what_it_always_printed(self) -> None:
         self.assertNotIn("asks:", self.go("--sweep")[1])
         self.assertFalse(relay.ask_root().exists())
+
+
+def run_bounded(fn: Any, seconds: float = 10) -> Any:
+    """FN() in a thread, failing the test (not hanging the suite) when it does not return: what a FIFO would do to an unguarded open."""
+    box: list[Any] = []
+    t = threading.Thread(target=lambda: box.append(fn()), daemon=True)
+    t.start()
+    t.join(seconds)
+    assert box, f"{fn} did not return within {seconds}s"
+    return box[0]
+
+
+class TestIdentityIsProven(Base):
+    """A process with no identity cannot forge an answer (Argon review of PR 261, P1-1/P1-2): fleet marks a row `self` from PASEO_AGENT_ID or CLAUDE_CODE_SESSION_ID alone, and
+    `sender_row` returns a lone `self` row unchecked, so every ledger command proves the caller (identity_proven) before it trusts it."""
+
+    def setup_questions(self) -> tuple[str, str]:
+        q_open = self.ask(ALICE, "Merge it now")
+        q_done = self.ask(BOB, "Rebase first")
+        self.as_agent(LEAD)
+        self.assertEqual(self.go("--answer", q_done, "1")[0], 0)
+        self.sent.clear()
+        return q_open, q_done
+
+    def test_a_forged_paseo_agent_id_is_refused_by_every_ledger_command(self) -> None:
+        q_open, q_done = self.setup_questions()
+        asks = len(relay.ask_all())
+        before = {r["id"]: r for r in relay.ask_all()}
+        for hosted in (None, MALLORY):    # a process nothing hosts, and one genuinely hosted by ANOTHER agent that exports the lead's id
+            self.as_forged(LEAD, hosted)
+            self.assertEqual(self.go("--answer", q_open, "1")[0], 2, hosted)
+            self.assertEqual(self.go("--inbox")[0], 2, hosted)
+            self.assertEqual(self.go("--inbox", "--json")[0], 2, hosted)
+            self.as_forged(ALICE, hosted)
+            self.assertEqual(self.go("--withdraw", q_open)[0], 2, hosted)
+            self.assertEqual(self.go("--ask", "lead", "Impersonated?", "--option", "A", "--option", "B")[0], 2, hosted)
+            self.as_forged(BOB, hosted)
+            self.assertEqual(self.go("--inbox", "--mine")[0], 2, hosted)
+        self.assertEqual({r["id"]: r for r in relay.ask_all()}, before)    # no question was read, answered, withdrawn, marked seen or added
+        self.assertEqual((len(relay.ask_all()), self.sent), (asks, []))
+
+    def test_the_genuine_session_is_still_served_beside_the_forger(self) -> None:
+        q_open, q_done = self.setup_questions()
+        self.as_forged(LEAD, MALLORY)
+        self.assertEqual(self.go("--inbox")[0], 2)
+        self.as_agent(LEAD)
+        self.assertEqual(self.go("--inbox")[0], 0)
+        self.as_agent(BOB)
+        self.assertEqual(self.go("--inbox", "--mine")[0], 0)
+        self.as_agent(ALICE)
+        self.assertEqual(self.go("--withdraw", q_open)[0], 0)
+
+    def test_a_claude_session_id_in_the_environment_is_proved_by_the_registry_only(self) -> None:
+        self.rows["claudy"] = fb.sess(id="c1c1c1c1", name="claudy", agent="claude", sid=CSID, status="idle", chan=("herdr", "w9:p9"))
+        self.as_agent(None)
+        os.environ["CLAUDE_CODE_SESSION_ID"] = CSID    # fleet takes this row for `self` on the variable alone
+        argv = ("--ask", "lead", "Q?", "--option", "A", "--option", "B")
+        self.assertEqual(self.go(*argv)[0], 2)
+        self.assertEqual(relay.ask_all(), [])
+        sessions = self.tmp / "claude" / "sessions"
+        sessions.mkdir(parents=True)
+        (sessions / "777.json").write_text(json.dumps({"pid": 777, "sessionId": CSID}))
+        os.environ.update(CLAUDE_CONFIG_DIR=str(self.tmp / "claude"), CLAUDE_PID="777")
+        with mock.patch.object(relay.fleet, "ancestors", lambda: {777}):    # the real claude_identity: CLAUDE_PID is an ancestor and its registry file names the session
+            rc, out, err = self.go(*argv)
+        self.assertEqual(rc, 0, (out, err))
+        self.assertEqual([r["from"]["fleet"] for r in relay.ask_all()], ["c1c1c1c1"])
+
+    def test_a_pane_that_a_new_session_now_holds_is_not_the_old_lead(self) -> None:
+        row = fb.sess(id="55555555", name="hlead", agent="cline", sid="eeeeeeee-0000-4000-8000-0000000000e1", status="working", chan=("herdr", "w5:p5"))
+        row["pid"] = FAKE_PID
+        self.rows["hlead"] = row
+        q = self.ask(ALICE, "Merge it now", to="hlead")
+        self.assertEqual(self.rec(q)["to"]["sid"], row["sid"])
+        self.as_agent(None)
+        os.environ["HERDR_PANE_ID"] = "w5:p5"
+        row["sid"] = "eeeeeeee-0000-4000-8000-0000000000e2"    # the next TUI in the same pane: same pane id, another session
+        self.assertEqual(self.go("--inbox")[0], 1)    # nothing is addressed to it
+        self.assertEqual(self.go("--answer", q, "1")[0], 2)
+        self.assertEqual(self.rec(q)["state"], "open")
+        row["sid"] = self.rec(q)["to"]["sid"]    # the lead itself
+        self.assertEqual(self.go("--inbox")[0], 0)
+        self.assertEqual(self.rec(q)["state"], "seen")
+
+
+class TestLockDiscipline(Base):
+    """One discipline: re-read under the ledger lock for every transition (Argon P1-3, P1-4, P2-3)."""
+
+    def during_nudge(self, act: Any) -> Any:
+        orig = relay.queue_nudge
+
+        def hook(s: dict[str, Any], listed: Any) -> Any:
+            saved = dict(relay.CTX)    # `act` is a whole relay run of its own in this process: ask_cmd's context is put back after it
+            try:
+                act()
+            finally:
+                relay.CTX.clear()
+                relay.CTX.update(saved)
+            return orig(s, listed)
+        return mock.patch.object(relay, "queue_nudge", hook)
+
+    def test_an_answer_during_the_nudge_window_leaves_the_expectation_settled(self) -> None:
+        def operator_answers() -> None:
+            q = relay.ask_all()[-1]
+            self.as_agent(None)
+            self.assertEqual(self.go("--answer", q["id"], "1", "--nonce", q["nonce"], "--operator-token-file", str(relay.operator_token_path()))[0], 0)
+        self.as_agent(ALICE)
+        with self.during_nudge(operator_answers):
+            rc, out, err = self.go("--ask", "lead", "Q?", "--option", "A", "--option", "B")
+        self.assertEqual(rc, 0, (out, err))
+        q = relay.ask_all()[-1]["id"]
+        self.assertEqual((self.rec(q)["state"], relay.expect_read(q)["state"]), ("answered", "acked"))    # main's link bookkeeping did not reopen it
+
+    def test_a_withdrawal_during_the_nudge_window_leaves_the_expectation_retired(self) -> None:
+        def asker_withdraws() -> None:
+            self.assertEqual(self.go("--withdraw", relay.ask_all()[-1]["id"])[0], 0)
+        self.as_agent(ALICE)
+        with self.during_nudge(asker_withdraws):
+            self.assertEqual(self.go("--ask", "lead", "Q?", "--option", "A", "--option", "B")[0], 0)
+        q = relay.ask_all()[-1]["id"]
+        self.assertEqual((self.rec(q)["state"], relay.expect_read(q)["state"]), ("withdrawn", "retired"))
+
+    def test_the_delivery_merge_keeps_seen_by_asker_set_while_the_answer_was_being_sent(self) -> None:
+        q = self.ask(ALICE)
+
+        def asker_reads_during_the_send(asker: str, line: str, operator: bool) -> tuple[int, str, str]:
+            relay.ask_transition(q, ("answered",), derive=lambda r: {"answer": {**r["answer"], "seen_by_asker": 1234.5}})    # what `--inbox --mine` does
+            return 0, "", ""
+        self.as_agent(LEAD)
+        with mock.patch.object(relay, "send_answer_line", asker_reads_during_the_send):
+            self.assertEqual(self.go("--answer", q, "2")[0], 0)
+        a = self.rec(q)["answer"]
+        self.assertEqual((a["seen_by_asker"], a["delivery"], a["pick"]), (1234.5, "delivered", 2))
+        self.as_agent(ALICE)
+        self.assertEqual(self.go("--inbox", "--mine")[0], 1)    # exactly once: it is not unseen again
+
+    def test_the_sweep_prunes_only_a_record_that_is_still_old_when_it_holds_the_lock(self) -> None:
+        q = self.ask(ALICE)
+        self.as_agent(LEAD)
+        self.go("--answer", q, "1")
+        stale = {**self.rec(q), "finished": time.time() - relay.DEFER_KEEP - 10}    # the snapshot a sweep took
+        self.patch(q, finished=time.time())    # the record was touched since
+        with mock.patch.object(relay, "ask_all", lambda: [stale]):
+            self.assertEqual(relay.ask_sweep()["pruned"], 0)
+        self.assertIsNotNone(relay.ask_read(q))
+        self.patch(q, finished=time.time() - relay.DEFER_KEEP - 10)
+        self.assertEqual(relay.ask_sweep()["pruned"], 1)
+        self.assertIsNone(relay.ask_read(q))
+
+    def test_a_question_that_cannot_be_written_leaves_no_open_expectation(self) -> None:
+        self.as_agent(ALICE)
+        with mock.patch.object(relay, "ask_write", side_effect=OSError("disk full")):
+            self.assertEqual(self.go("--ask", "lead", "Q?", "--option", "A", "--option", "B")[0], 2)
+        self.assertEqual([p.name for p in relay.expect_dir().glob("q-*.json")], [])
+
+
+class TestNudgeLifetime(Base):
+    """A wake-up text belongs to an OPEN question: when none is open for the lead it is cancelled (Argon P2-3)."""
+
+    def nudges(self) -> list[dict[str, Any]]:
+        return [r for r in relay.rec_all() if r.get("kind") == "nudge"]
+
+    def test_it_is_cancelled_when_the_last_open_question_is_answered_not_before(self) -> None:
+        q1, q2 = self.ask(ALICE), self.ask(BOB, "Rebase first")
+        self.assertEqual([n["state"] for n in self.nudges()], ["queued"])
+        self.as_agent(LEAD)
+        self.go("--answer", q1, "1")
+        self.assertEqual([n["state"] for n in self.nudges()], ["queued"])    # q2 still waits
+        self.go("--answer", q2, "1")
+        self.assertEqual([n["state"] for n in self.nudges()], ["cancelled"])
+
+    def test_it_is_cancelled_when_the_only_question_is_withdrawn_expired_or_read(self) -> None:
+        q = self.ask(ALICE)
+        self.as_agent(ALICE)
+        self.go("--withdraw", q)
+        self.assertEqual([n["state"] for n in self.nudges()], ["cancelled"])
+        q = self.ask(ALICE, "Again")
+        self.assertEqual(sorted(n["state"] for n in self.nudges()), ["cancelled", "queued"])    # a new question gets a new wake-up
+        self.patch(q, expires=time.time() - 1)
+        relay.ask_sweep()
+        self.assertEqual(sorted(n["state"] for n in self.nudges()), ["cancelled", "cancelled"])
+        self.ask(ALICE, "Third")
+        self.as_agent(LEAD)
+        self.assertEqual(self.go("--inbox")[0], 0)    # read: nothing is left to wake it for
+        self.assertEqual(sorted(n["state"] for n in self.nudges()), ["cancelled", "cancelled", "cancelled"])
+
+    def test_a_nudge_cancelled_before_it_was_found_is_queued_again(self) -> None:
+        real = relay.defer_send
+        calls = []
+
+        def cancel_the_first(*args: Any, **kw: Any) -> int:
+            rc = real(*args, **kw)
+            if not calls:
+                calls.append(1)
+                relay.finish(relay.rec_all()[-1]["id"], "cancelled", "raced", allowed=("queued",), notify=None)
+            return rc
+        self.as_agent(ALICE)
+        with mock.patch.object(relay, "defer_send", cancel_the_first):
+            q = self.ask(ALICE)
+        live = [n for n in self.nudges() if n["state"] == "queued"]
+        self.assertEqual((len(live), self.rec(q)["nudge"]), (1, live[0]["id"]))
+
+
+class TestExpectationSettles(Base):
+    """An answered question never pages the operator as OVERDUE (Argon P2-1)."""
+
+    def test_a_delivered_answer_settles_the_expectation_without_a_delivery_watch(self) -> None:
+        self.assertEqual(os.environ.get("RELAY_NO_ACK"), "1")    # the harness default: no watch, so the verified closer proves nothing
+        q = self.ask(ALICE)
+        self.as_agent(LEAD)
+        self.assertEqual(self.go("--answer", q, "1")[0], 0)
+        self.assertEqual(relay.expect_read(q)["state"], "acked")
+
+    def test_an_answer_the_queue_refused_leaves_it_open_until_the_asker_reads_it(self) -> None:
+        self.rows["alice"]["agent"], self.rows["alice"]["status"] = "cline", "working"
+        q = self.ask(ALICE)
+        self.ordinary(relay.DEFER_PER_TARGET, target=ALICE)
+        self.as_agent(LEAD)
+        self.assertEqual(self.go("--answer", q, "1")[0], 1)
+        self.assertEqual(relay.expect_read(q)["state"], "open")
+        self.as_agent(ALICE)
+        self.assertEqual(self.go("--inbox", "--mine")[0], 0)
+        self.assertEqual(relay.expect_read(q)["state"], "acked")    # the asker has its answer: nothing is overdue
+
+    def test_the_queued_marker_is_read_from_the_structured_result_not_from_echoed_text(self) -> None:
+        q = self.ask(ALICE)
+        self.as_agent(LEAD)
+        self.assertEqual(self.go("--answer", q, "1", "--note", "queued: 20261102-100000-abcdef")[0], 0)
+        self.assertEqual(self.rec(q)["answer"]["delivery"], "delivered")
+
+
+class TestCaps(Base):
+    def test_live_questions_are_capped_per_asker_per_lead_and_in_total(self) -> None:
+        for name, value, who in (("ASK_PER_SENDER", 2, ALICE), ("ASK_PER_TARGET", 3, CAROL), ("ASK_TOTAL", 4, CAROL)):
+            for r in relay.ask_all():
+                relay.ask_path(r["id"]).unlink()
+            with self.subTest(cap=name), mock.patch.multiple(relay, ASK_PER_SENDER=20, ASK_PER_TARGET=50, ASK_TOTAL=200), mock.patch.object(relay, name, value):
+                self.ask(ALICE)
+                self.ask(ALICE, "Two")
+                if name == "ASK_PER_SENDER":
+                    self.as_agent(ALICE)
+                    self.assertEqual(self.go("--ask", "lead", "Three", "--option", "A", "--option", "B")[0], 2)
+                    self.as_agent(BOB)    # another asker is not held to it
+                    self.assertEqual(self.go("--ask", "lead", "Other", "--option", "A", "--option", "B")[0], 0)
+                else:
+                    self.ask(BOB, "Three")
+                    if name == "ASK_TOTAL":
+                        self.ask(BOB, "Four")
+                    self.as_agent(who)
+                    self.assertEqual(self.go("--ask", "lead", "Over", "--option", "A", "--option", "B")[0], 2)
+                    self.assertNotIn("Over", [r["question"] for r in relay.ask_all()])
+
+    def test_an_answered_question_no_longer_counts(self) -> None:
+        with mock.patch.object(relay, "ASK_PER_SENDER", 1):
+            q = self.ask(ALICE)
+            self.as_agent(LEAD)
+            self.go("--answer", q, "1")
+            self.ask(ALICE, "Next")
+
+
+class TestInboxWait(Base):
+    def test_wait_returns_for_a_seen_question_and_for_an_unshown_withdrawal(self) -> None:
+        q = self.ask(ALICE)
+        self.as_agent(LEAD)
+        self.assertEqual(self.go("--inbox")[0], 0)    # now `seen`
+        with mock.patch.object(relay.time, "sleep", side_effect=AssertionError("parked with a question waiting")):
+            self.assertEqual(self.go("--inbox", "--wait", "30")[0], 0)
+        self.as_agent(ALICE)
+        self.go("--withdraw", q)
+        self.as_agent(LEAD)
+        with mock.patch.object(relay.time, "sleep", side_effect=AssertionError("parked with a withdrawal to show")):
+            rc, out, _ = self.go("--inbox", "--wait", "30")
+        self.assertEqual(rc, 0)
+        self.assertIn("WITHDRAWN", out)
+
+
+class TestHardening(Base):
+    """Symlinks, FIFOs, foreign files and modes (Argon P2-4); a cancel guard that fails closed (P2-5, partly)."""
+
+    def test_a_loose_operator_token_is_replaced_not_trusted(self) -> None:
+        p = relay.operator_token_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("leaked-token\n")
+        os.chmod(p, 0o644)
+        tok = relay.operator_token()
+        self.assertNotEqual(tok, "leaked-token")
+        self.assertEqual(stat.S_IMODE(p.stat().st_mode), 0o600)
+        self.assertEqual(relay.read_token(p), tok)
+        loose = self.tmp / "loose.token"
+        loose.write_text(tok + "\n")
+        os.chmod(loose, 0o644)
+        self.assertEqual(relay.read_token(loose), "")    # the right bytes in a file others can read prove nothing
+        self.assertTrue(relay.operator_proves(p))
+        self.assertFalse(relay.operator_proves(loose))
+
+    def test_a_fifo_or_symlink_token_never_hangs_and_proves_nothing(self) -> None:
+        fifo = self.tmp / "fifo.token"
+        os.mkfifo(fifo)
+        self.assertEqual(run_bounded(lambda: relay.read_token(fifo)), "")
+        real = self.tmp / "real.token"
+        real.write_text("x" * 40 + "\n")
+        os.chmod(real, 0o600)
+        link = self.tmp / "link.token"
+        link.symlink_to(real)
+        self.assertEqual(relay.read_token(link), "")
+        p = relay.operator_token_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        os.mkfifo(p)    # the token's own path is a FIFO: it is replaced, atomically, by a real 0600 file
+        tok = run_bounded(relay.operator_token)
+        self.assertTrue(stat.S_ISREG(p.lstat().st_mode) and stat.S_IMODE(p.lstat().st_mode) == 0o600)
+        self.assertEqual(relay.read_token(p), tok)
+
+    def test_a_symlinked_ledger_directory_is_never_used(self) -> None:
+        elsewhere = self.tmp / "elsewhere"
+        elsewhere.mkdir()
+        relay.ask_root().parent.mkdir(parents=True, exist_ok=True)
+        relay.ask_root().symlink_to(elsewhere)
+        self.as_agent(ALICE)
+        self.assertEqual(self.go("--ask", "lead", "Q?", "--option", "A", "--option", "B")[0], 2)
+        self.assertEqual(list(elsewhere.iterdir()), [])
+        self.assertEqual(relay.ask_all(), [])
+        self.assertEqual([p.name for p in relay.expect_dir().glob("q-*.json")] if relay.expect_dir().is_dir() else [], [])
+
+    def test_the_ledger_directory_is_made_and_kept_0700(self) -> None:
+        relay.ask_root().parent.mkdir(parents=True, exist_ok=True)
+        relay.ask_root().mkdir(mode=0o755)
+        os.chmod(relay.ask_root(), 0o755)
+        q = self.ask(ALICE)
+        self.assertEqual((stat.S_IMODE(relay.ask_root().stat().st_mode), stat.S_IMODE(relay.ask_path(q).stat().st_mode)), (0o700, 0o600))
+
+    def test_a_record_that_is_a_symlink_or_a_fifo_is_not_read(self) -> None:
+        q = self.ask(ALICE)
+        path = relay.ask_path(q)
+        copy = self.tmp / "copy.json"
+        copy.write_text(path.read_text())
+        path.unlink()
+        path.symlink_to(copy)
+        self.assertIsNone(relay.ask_read(q))
+        path.unlink()
+        os.mkfifo(path)
+        self.assertIsNone(run_bounded(lambda: relay.ask_read(q)))
+        self.assertEqual(run_bounded(relay.ask_all), [])
+
+    def test_ask_reads_only_a_small_regular_file_of_this_user(self) -> None:
+        argv = ("--ask", "lead", "--option", "A", "--option", "B")
+        self.as_agent(ALICE)
+        fifo = self.tmp / "q.fifo"
+        os.mkfifo(fifo)
+        self.assertEqual(run_bounded(lambda: self.go(*argv[:2], "--message-file", str(fifo), *argv[2:]))[0], 2)
+        real = self.tmp / "q.txt"
+        real.write_text("Merge it now?")
+        link = self.tmp / "q.link"
+        link.symlink_to(real)
+        self.assertEqual(self.go(*argv[:2], "--message-file", str(link), *argv[2:])[0], 2)
+        big = self.tmp / "big.txt"
+        big.write_text("x" * (relay.ASK_FILE_MAX + 10))
+        self.assertEqual(self.go(*argv[:2], "--message-file", str(big), *argv[2:])[0], 2)
+        self.assertEqual(relay.ask_all(), [])
+        self.assertEqual(self.go(*argv[:2], "--message-file", str(real), *argv[2:])[0], 0)
+
+    def test_cancel_fails_closed_when_it_cannot_tell_who_is_asking(self) -> None:
+        self.ordinary(1)
+        rid = relay.rec_all()[0]["id"]
+        with mock.patch.object(relay.fleet, "sessions", side_effect=RuntimeError("paseo ls failed")):
+            rc, _, err = self.go("--cancel", rid)
+        self.assertEqual(rc, 2)
+        self.assertIn("could not tell who you are", err)
+        self.assertEqual(relay.rec_read(rid)["state"], "queued")

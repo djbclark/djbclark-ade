@@ -11,8 +11,8 @@
     relay.py --inbox [--wait S] [--all] [--json]  |  --answer Q-ID N [--note TEXT] [--nonce X --operator-token-file PATH [--via-label L]]  |  --withdraw Q-ID
     relay.py --inbox --mine [--all] [--json]  |  --inbox --operator-token-file PATH [--all] [--json]
         (--inbox --mine is the ASKER's authoritative path to its answers: its own answered questions it has not seen, in full, marked `answer.seen_by_asker`; it reads the
-        ledger, never the deferral queue, so a full queue (20 per target) or a failed `ack Q-ID pick N` send cannot hide an answer. A caller with no session gets
-        no --inbox without the operator token file: exit 2.)
+        ledger, never the deferral queue, so a full queue (20 per target) or a failed `ack Q-ID pick N` send cannot hide an answer. A caller relay cannot PROVE a session
+        for (a process that only exports another session's PASEO_AGENT_ID or CLAUDE_CODE_SESSION_ID) is refused by every ledger command, exit 2, and gets no --inbox without the operator token file.)
         (the question ledger, 2026-11-02: a decision for a lead is a record under ~/.local/state/relay/asks/, never text typed into its turn; the lead reads it with
         --inbox and answers with --answer, and the asker gets `ack Q-ID pick N: <option>`. --ask exit 2 refused; --inbox exit 0 printed, 1 nothing, 124 timed out;
         --answer exit 0 delivered or handed to its route unproven, 1 queued or failed (the answer stays recorded), 2 not allowed or no such option, 10 already answered,
@@ -2375,6 +2375,8 @@ DEFER_ID = re.compile(r"\d{8}-\d{6}-[0-9a-f]{6}")
 ASK_ID = re.compile(r"q-\d{8}-\d{6}-[0-9a-f]{6}")
 ASK_OPTIONS = (2, 6)       # fewest and most options of one question
 ASK_OPTION_MAX, ASK_QUESTION_MAX = 200, 2000
+ASK_PER_SENDER, ASK_PER_TARGET, ASK_TOTAL = 20, 50, 200    # live (open or seen) questions: per asker, per lead, in the whole ledger; over a bound `--ask` is refused
+ASK_FILE_MAX = 1 << 16     # bytes `--ask --message-file` reads
 ASK_FINAL = ("answered", "withdrawn", "expired")
 ASK_LIVE = ("open", "seen")
 ASK_RECORD_VERSION = 1
@@ -3613,8 +3615,9 @@ def cancel_cmd(rid):
     if peek is not None and peek.get("state") == "queued":    # a message ADDRESSED TO THE CALLER is read when it is delivered, never destroyed by its reader (2026-11-02: a lead cancelled the replies owed to it)
         try:
             me = sender_row(fleet.sessions())
-        except Exception:    # noqa: BLE001 - no identity, no refusal: the operator in a shell keeps `--cancel`
-            me = None
+        except Exception as e:    # noqa: BLE001 - fail CLOSED: a guard that cannot tell who is asking must not read "nobody" as the operator in a shell
+            print(f"relay: {rid} is queued and cannot be cancelled now: relay could not tell who you are ({type(e).__name__}); retry", file=sys.stderr)
+            return 2
         tgt = peek.get("target") if isinstance(peek.get("target"), dict) else {}
         if me and me.get("id") and ((me.get("paseo") and me.get("paseo") == tgt.get("paseo")) or me["id"] == tgt.get("id")):    # ids only: a session id is no identity here (pane TUIs of one conversation share it)
             print(f"relay: {rid} is addressed to you: a queued message is read when it is delivered (end your turn so the deliverer can send it); "
@@ -3638,18 +3641,41 @@ def cancel_cmd(rid):
 
 
 # ---- the question ledger: --ask, --inbox, --answer, --withdraw -------------------------------------------------------------
-# One 0600 record per question under `asks/` beside the deferred directory. The state change under `.ask.lock` is the commit point of
-# every transition; `asks.log` holds one line per event and never the question.
+# One 0600 record per question under `asks/` beside the deferred directory. ONE lock discipline: every state change is a read-modify-write under
+# `.ask.lock` that re-reads the record inside the hold (`ask_transition`); nothing is written from a copy read earlier, and nothing is deleted
+# outside the lock. `asks.log` holds one line per event and never the question. Lock order: `.ask.lock` is never held while another lock is taken
+# (the expectation lock, the deferral state lock), so there is no cycle.
 
 def ask_root():
     """The ledger directory: a sibling of the deferred directory, so RELAY_DEFER_DIR (and every test's pinned DEFER_DIR) moves both."""
     return DEFER_DIR.parent / "asks"
 
 
+def ask_open(path):
+    """A read-only descriptor for PATH: O_NOFOLLOW (a symlink is refused), O_NONBLOCK (a FIFO never hangs the open), and only a regular file owned by this
+    user (or root). OSError otherwise."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_uid not in (os.getuid(), 0):
+            raise OSError(f"{path} is not a regular file of this user")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
 def ask_dir():
+    """The ledger directory, made 0700 when absent. A symlink, a non-directory or a directory of another user is never used (OSError)."""
     d = ask_root()
-    d.mkdir(parents=True, exist_ok=True, mode=0o700)
-    with contextlib.suppress(OSError):
+    try:
+        st = os.lstat(d)
+    except FileNotFoundError:
+        d.mkdir(parents=True, exist_ok=True, mode=0o700)
+        st = os.lstat(d)
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
+        raise OSError(f"{d} is not a directory of this user (a symlink or another user's directory is never used)")
+    if stat.S_IMODE(st.st_mode) != 0o700:
         os.chmod(d, 0o700)
     return d
 
@@ -3659,11 +3685,11 @@ def ask_path(qid):
 
 
 def ask_read(qid):
-    """The question record QID as a dict, or None (a malformed id, missing, unreadable or a symlink). Every field is read with .get by the callers."""
+    """The question record QID as a dict, or None (a malformed id, missing, unreadable, a symlink, a FIFO, another user's file). Every field is read with .get by the callers."""
     if not ASK_ID.fullmatch(qid or ""):
         return None
     try:
-        with os.fdopen(os.open(ask_path(qid), os.O_RDONLY | os.O_NOFOLLOW)) as fh:
+        with os.fdopen(ask_open(ask_path(qid))) as fh:
             r = json.load(fh)
     except (OSError, ValueError):
         return None
@@ -3684,9 +3710,9 @@ def ask_write(rec):
 
 
 def ask_all():
-    """Every question record, oldest first (created, then id). Reads only: it never makes the directory."""
+    """Every question record, oldest first (created, then id). Reads only: it never makes the directory, and a symlinked one is no ledger."""
     d = ask_root()
-    if not d.is_dir():
+    if d.is_symlink() or not d.is_dir():
         return []
     rows = [r for p in d.glob("q-*.json") if ASK_ID.fullmatch(p.stem) for r in [ask_read(p.stem)] if r]
     return sorted(rows, key=lambda r: (_num(r.get("created")), r["id"]))
@@ -3710,13 +3736,16 @@ def ask_log(rec, event, why=""):
             fh.write(line)
 
 
-def ask_transition(qid, allowed, **changes):
-    """Apply CHANGES to question QID when its state is one of ALLOWED, under the ledger lock; the record, or None."""
+def ask_transition(qid, allowed, derive=None, **changes):
+    """Apply CHANGES to question QID when its state, READ INSIDE THE HOLD of the ledger lock, is one of ALLOWED, plus DERIVE(fresh record)'s changes (so a field
+    another process set meanwhile, such as `answer.seen_by_asker`, is merged, never overwritten from a stale copy); the record, or None."""
     with ask_lock():
         rec = ask_read(qid)
         if rec is None or rec.get("state") not in allowed:
             return None
         rec.update(changes)
+        if derive:
+            rec.update(derive(rec))
         ask_write(rec)
         return rec
 
@@ -3726,33 +3755,66 @@ def ask_fold(text):
     return " ".join(CONTROL.sub(" ", str(text or "")).split())
 
 
+def ask_target_key(rec):
+    to = rec.get("to") if isinstance(rec.get("to"), dict) else {}
+    return to.get("paseo") or to.get("id") or ""
+
+
+def ask_release_nudge(rec):
+    """A wake-up text exists for the lead's OPEN questions: when none is open for the target of REC any more (answered, withdrawn, expired, or read), its
+    queued `kind: nudge` record is cancelled, so the lead is not woken by text about a question that no longer waits. One that is already `sending`
+    stays (the deliverer owns it). Best effort: a failure never undoes the transition that called it."""
+    key = ask_target_key(rec)
+    if not key:
+        return
+    try:
+        if any(r.get("state") == "open" and ask_target_key(r) == key for r in ask_all()):
+            return
+        for n in rec_all():
+            if n.get("kind") == "nudge" and n.get("state") == "queued" and target_key(n) == key:
+                finish(n["id"], "cancelled", "no open question is waiting for it any more", allowed=("queued",), notify=None)
+    except Exception as e:    # noqa: BLE001
+        ask_log(rec, "error", f"could not release the nudge: {type(e).__name__}")
+
+
 def operator_token_path():
     return ask_root().parent / "operator.token"
 
 
 def read_token(path):
-    """The stripped start of the token file PATH ("" when it cannot be read: a symlink, a missing or a non-UTF-8 file)."""
+    """The stripped start of the token file PATH. "" when it cannot be read or must not be trusted: a symlink, a FIFO or other non-regular file, another
+    user's file, or one that group or others can access."""
     try:
-        with os.fdopen(os.open(Path(path).expanduser(), os.O_RDONLY | os.O_NOFOLLOW), encoding="utf-8") as fh:
+        with os.fdopen(ask_open(Path(path).expanduser()), encoding="utf-8") as fh:
+            if stat.S_IMODE(os.fstat(fh.fileno()).st_mode) & 0o077:
+                return ""
             return fh.read(512).strip()
     except (OSError, ValueError):
         return ""
 
 
 def operator_token():
-    """The operator token, a random secret in a 0600 file relay creates on first use. Whoever can read the file speaks for the operator."""
+    """The operator token, a random secret in a 0600 file relay creates on first use. Whoever can read the file speaks for the operator. A file that cannot be
+    trusted (loose mode, a symlink, a FIFO, empty, another user's) is REPLACED, atomically, by a fresh token: a token that was ever readable by others is spent."""
     p = operator_token_path()
     tok = read_token(p)
     if tok:
         return tok
     p.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    tok = secrets.token_urlsafe(32)
-    try:
-        fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-    except FileExistsError:
-        return read_token(p)    # another relay made it first
-    with os.fdopen(fd, "w") as fh:
-        fh.write(tok + "\n")
+    with _flock(p.parent / ".operator.token.lock"):
+        tok = read_token(p)    # another relay may have made it while this one waited
+        if tok:
+            return tok
+        tok = secrets.token_urlsafe(32)
+        fd, tmp = tempfile.mkstemp(dir=p.parent, prefix=".token-")    # 0600
+        try:
+            with os.fdopen(fd, "w") as fh:
+                fh.write(tok + "\n")
+            os.replace(tmp, p)    # replaces a symlink or a FIFO as a name, never follows it
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
+            raise
     return tok
 
 
@@ -3760,6 +3822,40 @@ def operator_proves(path):
     """True when the token file PATH holds the operator token (constant-time compare)."""
     given, real = read_token(path), operator_token()
     return bool(given) and bool(real) and hmac.compare_digest(given.encode(), real.encode())
+
+
+def identity_proven(me):
+    """True when fleet row ME is provably THIS process's session, by evidence an environment variable cannot forge: a Paseo agent that hosts this process or an
+    ancestor (`hosted_by`: the Paseo Daemon is the parent and the id is in ITS environment), a Claude session the registry proves (`claude_identity` through
+    `fleet.own_claude_session_id`, never `CLAUDE_CODE_SESSION_ID` alone), else a row whose own process is an ancestor. `fleet` marks a row `self` from
+    `PASEO_AGENT_ID` or `CLAUDE_CODE_SESSION_ID` alone (and `sender_row` returns a lone `self` row unchecked): a process that merely exports another
+    session's id is that row there, and here it is nobody."""
+    pa = me.get("paseo") or ""
+    if UUID.fullmatch(pa):
+        return hosted_by(pa)
+    if me.get("agent") == "claude" and me.get("sid"):
+        return fleet.own_claude_session_id(registry_only=True) == me["sid"]
+    return bool(set(fleet.row_pids(me)) & set(fleet.ancestors()))
+
+
+def ledger_identity(listed):
+    """`sender_identity` (the one identity path of defer_send) plus the proof of it (`identity_proven`): the same tuple, but a caller whose row only an environment
+    variable names gets no identity at all (`me` empty, no ident, label `unknown`), exactly as a caller with no session. EVERY ledger command reads the caller here."""
+    me, sender_paseo, ident, hops, label, unreachable = sender_identity(listed)
+    if not (me.get("id") and ident and identity_proven(me)):
+        return {}, "", "", hops, "unknown", False
+    return me, sender_paseo, ident, hops, label, unreachable
+
+
+def ask_party_is(me, party):
+    """True when proven caller ME is PARTY, a record's `from` ({ident, paseo, fleet, sid}) or `to` ({id, paseo, sid}): the same Paseo agent; else the same fleet
+    id AND, when the record kept one, the same session id (a pane id is reused by the next TUI: the id alone names nobody)."""
+    if not (me.get("id") and isinstance(party, dict)):
+        return False
+    if party.get("paseo"):
+        return me.get("paseo") == party["paseo"]
+    fid = party.get("fleet") or party.get("id")
+    return bool(fid) and fid == me["id"] and (not party.get("sid") or party["sid"] == (me.get("sid") or ""))
 
 
 def ask_age(rec, now):
@@ -3778,22 +3874,30 @@ def ask_view(now, show_text=False):
 
 
 def ask_sweep(now=None):
-    """The sweep rule of the ledger: a live question past its expiry becomes `expired` (the asker's expectation going OVERDUE is its signal), a final one older
-    than DEFER_KEEP is deleted. Counts. One record a hand edit broke is skipped."""
+    """The sweep rule of the ledger, every record under the ledger lock with its state re-read inside the hold: a live question past its expiry becomes `expired`
+    (the asker's expectation going OVERDUE is its signal), a final one older than DEFER_KEEP is deleted. Counts. One record a hand edit broke is skipped."""
     now = now or time.time()
     n = {"expired": 0, "pruned": 0}
     for r in ask_all():
+        done = None
         try:
-            if r.get("state") in ASK_LIVE and now > _num(r.get("expires")):
-                done = ask_transition(r["id"], ASK_LIVE, state="expired", finished=now)
-                if done is not None:
-                    ask_log(done, "expired")
+            with ask_lock():
+                cur = ask_read(r["id"])
+                if cur is None:
+                    continue
+                if cur.get("state") in ASK_LIVE and now > _num(cur.get("expires")):
+                    cur.update(state="expired", finished=now)
+                    ask_write(cur)
                     n["expired"] += 1
-            elif r.get("state") in ASK_FINAL and now - _num(r.get("finished"), _num(r.get("created"))) > DEFER_KEEP:
-                ask_path(r["id"]).unlink()
-                n["pruned"] += 1
+                    done = cur
+                elif cur.get("state") in ASK_FINAL and now - _num(cur.get("finished"), _num(cur.get("created"))) > DEFER_KEEP:
+                    ask_path(cur["id"]).unlink()
+                    n["pruned"] += 1
         except (ValueError, TypeError, OSError):
             continue
+        if done is not None:
+            ask_log(done, "expired")
+            ask_release_nudge(done)
     return n
 
 
@@ -3802,11 +3906,53 @@ def ask_refuse(why):
     return 2
 
 
+def expect_open(qid, me, s, mark):
+    """Turn the reservation `expect_reserve` made for question QID into the OPEN expectation, under the expectation lock. Done BEFORE the question record is
+    written, so nothing that can act on the question (an answer, a withdrawal) ever finds a reservation that a later write would reopen."""
+    now = time.time()
+    with _flock(defer_dir() / ".expect.lock"):
+        atomic_json(expect_dir() / f"{qid}.json", {"id": qid, "state": "open", "created": now, "acked": None, "within": EXPECT_WITHIN, **expect_identity(me, s, mark)})
+
+
+def expect_drop(qid):
+    """Remove the expectation of a question that was never written."""
+    with contextlib.suppress(Exception), _flock(defer_dir() / ".expect.lock"):
+        (expect_dir() / f"{qid}.json").unlink()
+
+
+def queue_nudge(s, listed):
+    """(record id or "", word) of the ONE wake-up text for target S: a `kind: nudge` record collapsed per target, outside every cap. A nudge cancelled between the
+    question being written and the nudge being found (ask_release_nudge) is queued again, once."""
+    ns = types.SimpleNamespace(defer_for=None, expect_ack=None, fyi=False, needs_reply=False, json=True, ack=False, wait=0)
+    nudge, word = "", ""
+    for _ in range(2):
+        out, err = io.StringIO(), io.StringIO()
+        NUDGE[0] = True
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                nrc = defer_send(s, ns, NUDGE_TEXT, listed, "inbox nudge")
+        except Exception as e:    # noqa: BLE001 - the record is the truth: a failed wake-up never undoes the question
+            nrc, err = 1, io.StringIO(f"{type(e).__name__}: {e}")
+        finally:
+            NUDGE[0] = False
+        if nrc != 0:
+            return "", "not queued: " + (([ln for ln in err.getvalue().splitlines() if ln.strip()] or ["unknown"])[-1].strip()[:200])
+        try:
+            info = json.loads([ln for ln in out.getvalue().splitlines() if ln.startswith("{")][-1])
+            nudge, word = info["record"], ("already queued" if info.get("duplicate_of") else "queued")
+        except (ValueError, IndexError, KeyError):
+            return "", "not queued: no record id"
+        if (rec_read(nudge) or {}).get("state") != "cancelled":
+            break
+    return nudge, word
+
+
 def ask_cmd(a, question):
     """`relay.py --ask LEAD "question" --option A --option B [--recommend N] [--defer-for S] [--json]`: write the question record (exit 0), open the asker's
-    expectation under the same id, and queue ONE wake-up text for the lead (a `kind: nudge` record, collapsed per target, outside every cap). Nothing
-    else is ever typed into the lead. Exit 2: no identifiable sender, a target that is this session or cannot be messaged, fewer than 2 or more than 6
-    options, an option over 200 characters, a question over 2000, or an option of the send commands that means nothing here."""
+    expectation under the same id (BEFORE the record exists), and queue ONE wake-up text for the lead (a `kind: nudge` record, collapsed per target, outside every
+    cap). Nothing else is ever typed into the lead. Exit 2: no PROVEN sender (`ledger_identity`), a target that is this session or cannot be messaged, fewer than 2 or
+    more than 6 options, an option over 200 characters, a question over 2000, too many live questions (ASK_PER_SENDER, ASK_PER_TARGET, ASK_TOTAL), or an option of
+    the send commands that means nothing here."""
     for flag, on in (("--no-defer", a.no_defer), ("--plan", a.plan), ("--idle", a.idle is not None), ("--steer", a.steer), ("--via", a.via is not None),
                      ("--expect-ack", a.expect_ack is not None), ("--needs-reply", a.needs_reply), ("--fyi", a.fyi), ("--ack", a.ack), ("--no-ack", a.no_ack)):
         if on:
@@ -3825,9 +3971,9 @@ def ask_cmd(a, question):
     if not 0 <= recommend <= len(options):
         return ask_refuse(f"--recommend N is 1..{len(options)} (the option number), or 0 for none")
     listed = fleet.sessions()
-    me, sender_paseo, ident, _hops, label, unreachable = sender_identity(listed)
+    me, sender_paseo, ident, _hops, label, unreachable = ledger_identity(listed)
     if SENDER_OVERRIDE[0] or unreachable or not (ident and me.get("id")) or label == "unknown":
-        return ask_refuse("not asked: --ask needs a session the answer can reach (its own Paseo id or fleet row), and this caller has none")
+        return ask_refuse("not asked: --ask needs a session the answer can reach and relay can PROVE it is (a Paseo agent that hosts this process, or a registry-proven Claude), and this caller has none")
     target = a.ask
     hits = find(target, listed)
     if not hits and not UUID.fullmatch(target):
@@ -3841,50 +3987,42 @@ def ask_cmd(a, question):
     if (stop and not card_why(stop)) or same_session(me, {"id": s["id"], "paseo": s.get("paseo") or ""}):
         return ask_refuse(f"[{s['id']}] not asked: {stop or 'that is this session'}")
     agent = s["chan"][1] if (s.get("chan") or (None,))[0] == "paseo" else s.get("paseo") or ""
+    live = [r for r in ask_all() if r.get("state") in ASK_LIVE]
+    tkey = agent or s["id"]
+    for n, cap, what in ((sum(ask_party_is(me, r.get("from")) for r in live), ASK_PER_SENDER, "from you"), (sum(ask_target_key(r) == tkey for r in live), ASK_PER_TARGET, "for that lead"),
+                         (len(live), ASK_TOTAL, "in the ledger")):
+        if n >= cap:
+            return ask_refuse(f"not asked: {n} questions {what} are still open or unseen (at most {cap}); withdraw one, or wait for an answer")
     now = time.time()
     qid = "q-" + time.strftime("%Y%m%d-%H%M%S", time.localtime(now)) + "-" + hashlib.sha256((uuid.uuid4().hex + question).encode()).hexdigest()[:6]
     tx_me = Path(me["transcript"]) if me.get("transcript") else None
     mark = tx_me.stat().st_size if tx_me and tx_me.is_file() else 0
     if not expect_reserve(qid, me["id"]):    # the id is the expectation id: a clash is a fresh id away, and never silent
         return ask_refuse(f"not asked: expectation {qid} is already open")
-    CTX["reserved"] = (qid, me["id"])    # main releases it when nothing was written
-    expect_stamp(qid, me, s, mark, None)
+    expect_open(qid, me, s, mark)    # open BEFORE the record is visible: an answer or a withdrawal can only ever find it open
     rec = {"v": ASK_RECORD_VERSION, "id": qid, "project": ask_fold(Path(me.get("cwd") or own_cwd() or "").name)[:40],
-           "from": {"ident": ident, "label": label, "paseo": sender_paseo, "fleet": me["id"]},
-           "to": {"id": s["id"], "paseo": agent, "name": s.get("name") or ""}, "question": question, "options": options, "recommend": recommend,
+           "from": {"ident": ident, "label": label, "paseo": sender_paseo, "fleet": me["id"], "sid": me.get("sid") or ""},
+           "to": {"id": s["id"], "paseo": agent, "name": s.get("name") or "", "sid": s.get("sid") or ""}, "question": question, "options": options, "recommend": recommend,
            "created": now, "expires": now + min(a.defer_for if a.defer_for is not None else DEFER_FOR, DEFER_MAX), "state": "open",
            "seen_at": 0, "seen_by": "", "answer": None, "nudge": "", "nonce": secrets.token_urlsafe(16)}
-    with ask_lock():
-        ask_write(rec)
+    try:
+        with ask_lock():
+            ask_write(rec)
+    except BaseException:
+        expect_drop(qid)
+        raise
     ask_log(rec, "asked", f"{len(options)} options")
     with contextlib.suppress(Exception):
         operator_token()    # the operator's token file exists from the first question on
-    CTX.update(me=me, s=s, expect=qid, within=None, terminator=False, text=question, leads=[], mark=mark, sent=True)    # main opens the expectation and records the link
-    nudge, nudge_state = "", ""
-    ns = types.SimpleNamespace(defer_for=None, expect_ack=None, fyi=False, needs_reply=False, json=True, ack=False, wait=0)
-    out, err = io.StringIO(), io.StringIO()
-    NUDGE[0] = True
-    try:
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            nrc = defer_send(s, ns, NUDGE_TEXT, listed, "inbox nudge")
-    except Exception as e:    # noqa: BLE001 - the record is the truth: a failed wake-up never undoes the question
-        nrc, err = 1, io.StringIO(f"{type(e).__name__}: {e}")
-    finally:
-        NUDGE[0] = False
-    if nrc == 0:
-        with contextlib.suppress(ValueError, IndexError, KeyError):
-            info = json.loads([ln for ln in out.getvalue().splitlines() if ln.startswith("{")][-1])
-            nudge = info["record"]
-            nudge_state = "already queued" if info.get("duplicate_of") else "queued"
+    CTX.update(me=me, s=s, terminator=False, text=question, leads=[], mark=mark, sent=True)    # main records the link; the expectation is already open and main must not reopen it
+    nudge, nudge_state = queue_nudge(s, listed)
     if nudge:
         ask_transition(qid, ASK_LIVE, nudge=nudge)
-    else:
-        nudge_state = "not queued: " + (([ln for ln in err.getvalue().splitlines() if ln.strip()] or ["unknown"])[-1].strip()[:200])
     CTX["accepted"] = False
     if a.json:
-        print(json.dumps({"id": qid, "state": "open", "to": rec["to"], "expires_in": int(rec["expires"] - now), "nudge": nudge, "nudge_state": nudge_state}, ensure_ascii=False))
+        print(json.dumps({"id": qid, "state": "open", "to": {"id": s["id"], "paseo": agent, "name": s.get("name") or ""}, "expires_in": int(rec["expires"] - now), "nudge": nudge, "nudge_state": nudge_state}, ensure_ascii=False))
     else:
-        print(f"asked: {qid} (nudge {nudge_state}); the answer arrives as `ack {qid} pick N: <option>`; `relay.py --withdraw {qid}` takes it back")
+        print(f"asked: {qid} (nudge {nudge_state}); the answer arrives as `ack {qid} pick N: <option>`, and `relay.py --inbox --mine` returns it whatever became of that line; `relay.py --withdraw {qid}` takes it back")
     return 0
 
 
@@ -3913,15 +4051,14 @@ def ask_show(r, now):
 
 def inbox_mine(a, me, ident):
     """`relay.py --inbox --mine [--all] [--json]`: the asker's AUTHORITATIVE way to learn an answer. The caller's OWN questions that were answered and that it has not seen yet, in
-    full, oldest first; each is marked `answer.seen_by_asker` (a time) as it is printed, so a question is in the "unseen" list exactly once. It reads the ledger, never the
-    deferral queue, so a full queue (20 per target) or a failed `ack q-ID pick N` send cannot hide an answer. `--all` also prints the ones already seen, read only. Exit 0
-    something printed, 1 nothing, 2 no session."""
+    full, oldest first; each is marked `answer.seen_by_asker` (a time) as it is printed, so a question is in the "unseen" list exactly once, and its expectation is settled
+    (the asker has the answer). It reads the ledger, never the deferral queue, so a full queue (20 per target) or a failed `ack q-ID pick N` send cannot hide an answer. `--all`
+    also prints the ones already seen, read only. Exit 0 something printed, 1 nothing, 2 no PROVEN session."""
     if not (me.get("id") and ident):
-        return ask_refuse("--inbox --mine needs a session the questions can be tied to, and this caller has none")
+        return ask_refuse("--inbox --mine needs a session the questions can be tied to and relay can prove (a Paseo agent that hosts this process, or a registry-proven Claude), and this caller has none")
     now, shown = time.time(), []
     for r in ask_all():
-        frm = r.get("from") if isinstance(r.get("from"), dict) else {}
-        if frm.get("ident") != ident or r.get("state") != "answered":
+        if r.get("state") != "answered" or not ask_party_is(me, r.get("from")):
             continue
         ans = r.get("answer") if isinstance(r.get("answer"), dict) else {}
         if ans.get("seen_by_asker"):
@@ -3931,11 +4068,14 @@ def inbox_mine(a, me, ident):
         with ask_lock():    # check and mark in one hold: two readers never both find it unseen
             cur = ask_read(r["id"]) or r
             cans = cur.get("answer") if isinstance(cur.get("answer"), dict) else {}
-            if cur.get("state") == "answered" and not cans.get("seen_by_asker"):
+            marked = cur.get("state") == "answered" and not cans.get("seen_by_asker")
+            if marked:
                 cur = {**cur, "answer": {**cans, "seen_by_asker": now}}
                 ask_write(cur)
-                ask_log(cur, "answer seen by its asker")
-                shown.append(cur)
+        if marked:
+            ask_log(cur, "answer seen by its asker")
+            expect_settle(cur["id"], "ask-mine")    # the asker has its answer: nothing is overdue
+            shown.append(cur)
     if a.json:
         print(json.dumps([ask_row(r, now) for r in shown], ensure_ascii=False))
     elif not shown:
@@ -3948,12 +4088,13 @@ def inbox_mine(a, me, ident):
 def inbox_cmd(a, wait_s):
     """`relay.py --inbox [--wait S] [--all] [--json]`: the questions addressed to this session, oldest first, in full; an `open` one becomes `seen` (the witness that
     the lead read it). A withdrawn one is shown once, so it is not put to the operator. `--all` adds the last day's answered, withdrawn and expired ones, read only.
-    WAIT_S: return at once when an `open` question exists, else poll every DEFER_POLL seconds for one, exit 124 when none came in time (the committed state is
-    read before parking, so no wake-up is lost). `--mine`: the asker's own answered questions (inbox_mine). `--operator-token-file P` (the operator's token, as for
-    `--answer`) reads EVERY question and changes nothing; a caller with no session and no token is refused (exit 2): any local process could otherwise read every question.
+    WAIT_S: return at once when anything the listing below would print exists (an `open` or `seen` question, a withdrawal not yet shown), else poll every DEFER_POLL
+    seconds, exit 124 when none came in time (the committed state is read before parking, so no wake-up is lost). `--mine`: the asker's own answered questions
+    (inbox_mine). `--operator-token-file P` (the operator's token, as for `--answer`) reads EVERY question and changes nothing; a caller relay cannot PROVE a session
+    for, and without the token, is refused (exit 2): any local process could otherwise read every question.
     Exit 0 when something was printed, 1 when nothing, 2 refused, 124 on a timeout. Never the nonce."""
     listed = fleet.sessions()
-    me, _sp, ident, _h, label, _u = sender_identity(listed)
+    me, _sp, ident, _h, label, _u = ledger_identity(listed)
     if a.mine:
         if a.operator_token_file is not None:
             return ask_refuse("--mine is the asker's own view: it does not take --operator-token-file")
@@ -3961,14 +4102,18 @@ def inbox_cmd(a, wait_s):
     operator = a.operator_token_file is not None
     if operator and not operator_proves(a.operator_token_file):
         return ask_refuse("the operator proof was refused (the token does not match)")
-    reader = None if operator else me if me.get("id") else None
+    reader = None if operator else me if (me.get("id") and ident) else None
     if reader is None and not operator:
-        return ask_refuse("--inbox needs a session to read the questions addressed to it; the operator's view of every question takes --operator-token-file")
+        return ask_refuse("--inbox needs a session relay can prove (a Paseo agent that hosts this process, or a registry-proven Claude) to read the questions addressed to it; "
+                          "the operator's view of every question takes --operator-token-file")
 
     def mine():
-        return [r for r in ask_all() if reader is None or same_session(reader, r.get("to"))]
+        return [r for r in ask_all() if reader is None or ask_party_is(reader, r.get("to"))]
+
+    def waiting(r):
+        return r.get("state") in ASK_LIVE or (r.get("state") == "withdrawn" and not r.get("withdrawn_seen"))
     deadline = None if not wait_s else time.time() + wait_s
-    while wait_s and not any(r.get("state") == "open" for r in mine()):
+    while wait_s and not any(waiting(r) for r in mine()):
         if time.time() >= deadline:
             print(f"relay: no question arrived within {wait_s:g}s", file=sys.stderr)
             return 124
@@ -3979,6 +4124,7 @@ def inbox_cmd(a, wait_s):
         if st == "open" and reader is not None:
             r = ask_transition(r["id"], ("open",), state="seen", seen_at=now, seen_by=ident or label) or ask_read(r["id"]) or r
             ask_log(r, "seen", f"by {ident}")
+            ask_release_nudge(r)
         elif st == "withdrawn" and reader is not None and not r.get("withdrawn_seen"):
             r = ask_transition(r["id"], ("withdrawn",), withdrawn_seen=True) or r
         elif st in ASK_FINAL and not (a.all and now - _num(r.get("finished"), _num(r.get("created"))) < 86400):
@@ -3994,9 +4140,9 @@ def inbox_cmd(a, wait_s):
 
 
 def answer_authority(rec, a, listed):
-    """(by, via, why): who may answer RECORD. The addressed lead (a verified session of the record's `to`; a nonce, when given, must match) or the operator (the
-    record's nonce AND `--operator-token-file` holding the operator token); `by` is the lead's ident or `operator`, VIA the `--via-label` of an operator answer.
-    Anyone else: by None and the reason."""
+    """(by, via, why): who may answer RECORD. The addressed lead (a session relay PROVES this process is, `ledger_identity`, and that the record's `to` names; a nonce,
+    when given, must match) or the operator (the record's nonce AND `--operator-token-file` holding the operator token); `by` is the lead's ident or `operator`, VIA the
+    `--via-label` of an operator answer. Anyone else: by None and the reason."""
     nonce = rec.get("nonce") if isinstance(rec.get("nonce"), str) else ""
     nonce_ok = a.nonce is not None and bool(nonce) and hmac.compare_digest(a.nonce.encode(), nonce.encode())
     if a.operator_token_file is not None:
@@ -4007,14 +4153,14 @@ def answer_authority(rec, a, listed):
         return OPERATOR_LABEL, a.via_label or "", ""
     if a.nonce is not None and not nonce_ok:
         return None, "", "the nonce does not match"
-    me, _sp, ident, _h, _l, _u = sender_identity(listed)
-    if me.get("id") and ident and same_session(me, rec.get("to")):
+    me, _sp, ident, _h, _l, _u = ledger_identity(listed)
+    if me.get("id") and ident and ask_party_is(me, rec.get("to")):
         return ident, "", ""
-    return None, "", "only the addressed lead, or the operator (the question's nonce and --operator-token-file), answers a question"
+    return None, "", "only the addressed lead (a session relay can prove), or the operator (the question's nonce and --operator-token-file), answers a question"
 
 
 def expect_settle(eid, how):
-    """Close the open (or reserved) expectation EID as acked through HOW: the operator's answer is the answer the asker's expectation waited for."""
+    """Close the open (or reserved) expectation EID as acked through HOW: the answer is the answer the asker's expectation waited for."""
     with contextlib.suppress(Exception), _flock(defer_dir() / ".expect.lock"):
         old = expect_read(eid)
         if old and old.get("state") in ("open", "reserved"):
@@ -4022,8 +4168,9 @@ def expect_settle(eid, how):
 
 
 def send_answer_line(asker, line, operator):
-    """(rc, the whole text it printed, one line) of the ordinary relay run that sends LINE to the asker: as the lead (this process's own identity), or under the label
-    `operator` with no session behind it. The run is its own: its link, expectation and ack bookkeeping are done when it returns, and this run's CTX is put back."""
+    """(rc, the record id the send was queued under or "", all it printed on one line) of the ordinary relay run that sends LINE to the asker: as the lead (this process's
+    own identity), or under the label `operator` with no session behind it. It runs with `--json`, so queueing is read from the structured result, never from text
+    that can echo the answer's note. The run is its own: its link, expectation and ack bookkeeping are done when it returns, and this run's CTX is put back."""
     saved = dict(CTX)
     out, err = io.StringIO(), io.StringIO()
     try:
@@ -4032,18 +4179,27 @@ def send_answer_line(asker, line, operator):
                 stack.enter_context(as_caller(OPERATOR_LABEL, scrub=True, operator=True))
             stack.enter_context(contextlib.redirect_stdout(out))
             stack.enter_context(contextlib.redirect_stderr(err))
-            rc = main([asker, line, "--fyi"], sweep=False)
+            rc = main([asker, line, "--fyi", "--json"], sweep=False)
     finally:
         CTX.clear()
         CTX.update(saved)
-    return rc, " ".join((err.getvalue() + "\n" + out.getvalue()).split())
+    queued = ""
+    for ln in out.getvalue().splitlines():
+        if ln.startswith("{"):
+            with contextlib.suppress(ValueError):
+                info = json.loads(ln)
+                if isinstance(info, dict) and info.get("queued") and DEFER_ID.fullmatch(str(info.get("record") or "")):
+                    queued = info["record"]
+    return rc, queued, " ".join((err.getvalue() + "\n" + out.getvalue()).split())
 
 
 def answer_cmd(a):
     """`relay.py --answer q-ID N [--note TEXT] [--nonce X --operator-token-file PATH [--via-label L]] [--json]`. Exit 2: not allowed to answer (see answer_authority),
     an unknown id or an N outside 1..options (nothing written); 10: already answered (its answer is printed); 11: withdrawn or expired; else the delivery of the
-    asker's line `ack q-ID pick N: <option>[ -- note]` (sent through the normal send path, queued when the asker is working): 0 delivered, 1 queued or not proven.
-    `answered` is written first under the ledger lock: that is the commit point, and a second answer finds it."""
+    asker's line `ack q-ID pick N: <option>[ -- note]` (sent through the normal send path, queued when the asker is working): 0 delivered, 1 queued or failed.
+    `answered` is written first under the ledger lock: that is the commit point, and a second answer finds it. The delivery is merged into the FRESH record afterwards
+    (a `seen_by_asker` that `--inbox --mine` set meanwhile survives). The asker's expectation is settled when the line was delivered (or handed to a route that keeps it)
+    and by `--inbox --mine`, never left to page the operator for an answer that exists."""
     qid, pick_txt = a.answer, a.ident
     if a.text is not None or pick_txt is None or not re.fullmatch(r"\d{1,3}", pick_txt):
         return ask_refuse("usage: relay.py --answer q-ID N [--note TEXT] (N is the option number)")
@@ -4081,49 +4237,52 @@ def answer_cmd(a):
                    answer={"pick": n, "text": text_opt, "note": note, "by": by, **({"via": via} if via else {}), "at": now, "delivery": ""})
         ask_write(rec)
     ask_log(rec, "answered", f"pick {n} by {by}")
+    ask_release_nudge(rec)
     frm = rec.get("from") if isinstance(rec.get("from"), dict) else {}
     asker = frm.get("ident") or frm.get("paseo") or frm.get("fleet") or ""
     line = f"ack {qid} pick {n}: {text_opt}" + (f" \u2014 {note}" if note else "")
     operator = by == OPERATOR_LABEL
     if operator:
         expect_settle(qid, "ask-operator")    # the answer the asker's expectation waited for exists now, delivered or not
-    rc, said = send_answer_line(asker, line, operator)
-    m = re.search(r"queued: (\d{8}-\d{6}-[0-9a-f]{6})", said)
-    if m:
-        delivery, ok = m.group(1), False
+    rc, queued, said = send_answer_line(asker, line, operator)
+    if queued:
+        delivery, ok = queued, False
     elif rc == 0:
         delivery, ok = "delivered", True
     elif rc == 3:    # the route took it and could not prove it was read (a Paseo agent has no transcript to watch): handed over, never resent
         delivery, ok = "unverified: " + said[-200:], True
     else:
         delivery, ok = "failed: " + said[-200:], False
-    done = ask_transition(qid, ("answered",), answer={**(rec.get("answer") or {}), "delivery": delivery})
+    if ok:
+        expect_settle(qid, "ask-delivered")    # whatever the lead's delivery watch (RELAY_NO_ACK) did or could prove
+    done = ask_transition(qid, ("answered",), derive=lambda r: {"answer": {**(r.get("answer") if isinstance(r.get("answer"), dict) else {}), "delivery": delivery}})
     ask_log(done or rec, "delivery", delivery)
     if a.json:
         print(json.dumps({"id": qid, "state": "answered", "pick": n, "text": text_opt, "by": by, "delivery": delivery}, ensure_ascii=False))
     else:
         print(f"answered: {qid} pick {n}: {text_opt}; the asker's line was "
               + ("delivered" if delivery == "delivered" else f"handed to its route, not proven read: do not resend ({delivery})" if ok
-                 else f"not delivered yet ({delivery}); the answer stays in the record (relay.py --inbox --all)"))
+                 else f"not delivered yet ({delivery}); the answer stays in the record (the asker reads it with relay.py --inbox --mine; you: --inbox --all)"))
     return 0 if ok else 1
 
 
 def withdraw_cmd(a):
     """`relay.py --withdraw q-ID`: the asker takes its question back (open or seen -> withdrawn); the lead's next `--inbox` shows it once, so it is not put to the
-    operator. Exit 2 for anyone but the asker or an unknown id; 10 already answered; 11 already withdrawn or expired."""
+    operator. Only the PROVEN asker (`ledger_identity`, and a recorded session id still the same). Exit 2 for anyone else or an unknown id; 10 already answered;
+    11 already withdrawn or expired."""
     rec = ask_read(a.withdraw)
     if rec is None:
         return ask_refuse(f"no question {a.withdraw!r}")
-    me, _sp, ident, _h, _l, _u = sender_identity(fleet.sessions())
-    frm = rec.get("from") if isinstance(rec.get("from"), dict) else {}
-    if not (me.get("id") and ident and ident == frm.get("ident")):
-        return ask_refuse(f"not withdrawn: only the session that asked {a.withdraw} takes it back")
+    me, _sp, ident, _h, _l, _u = ledger_identity(fleet.sessions())
+    if not (me.get("id") and ident and ask_party_is(me, rec.get("from"))):
+        return ask_refuse(f"not withdrawn: only the session that asked {a.withdraw} (and that relay can prove it is) takes it back")
     done = ask_transition(a.withdraw, ASK_LIVE, state="withdrawn", finished=time.time(), withdrawn_seen=False)
     if done is None:
         st = (ask_read(a.withdraw) or {}).get("state")
         print(f"relay: {a.withdraw} is {st}", file=sys.stderr)
         return ASK_ANSWER_EXITS.get(st, 11)
     ask_log(done, "withdrawn")
+    ask_release_nudge(done)
     with contextlib.suppress(Exception), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
         retire_cmd(a.withdraw, "the question was withdrawn by its asker", by=ident)    # an OVERDUE page for a question nobody is waiting on would be noise
     print(f"withdrawn: {a.withdraw}")
@@ -5041,10 +5200,20 @@ def main(argv=None, sweep=True):
     return rc
 
 
-def read_message_file(a):
-    """Read `--message-file` into a.text (UTF-8, a BOM dropped, one trailing newline dropped): None on success, else the exit code after the refusal."""
+def read_message_file(a, strict=False):
+    """Read `--message-file` into a.text (UTF-8, a BOM dropped, one trailing newline dropped): None on success, else the exit code after the refusal. STRICT (`--ask`):
+    no symlink, only a regular file of this user (never a FIFO), at most ASK_FILE_MAX bytes read, from a file or from stdin."""
     try:
-        raw = sys.stdin.buffer.read() if a.message_file == "-" else Path(a.message_file).read_bytes()
+        if a.message_file == "-":
+            raw = sys.stdin.buffer.read(ASK_FILE_MAX + 1 if strict else -1)
+        elif strict:
+            with os.fdopen(ask_open(a.message_file), "rb") as fh:
+                raw = fh.read(ASK_FILE_MAX + 1)
+        else:
+            raw = Path(a.message_file).read_bytes()
+        if strict and len(raw) > ASK_FILE_MAX:
+            print(f"relay: --message-file {a.message_file} is over {ASK_FILE_MAX} bytes: a question is at most {ASK_QUESTION_MAX} characters", file=sys.stderr)
+            return 2
         a.text = raw.decode("utf-8-sig")    # a BOM from a Windows editor is not part of the message
     except (OSError, UnicodeDecodeError) as exc:
         print(f"relay: cannot read --message-file {a.message_file}: {exc}", file=sys.stderr)
@@ -5059,6 +5228,14 @@ def read_message_file(a):
 
 
 def ledger_dispatch(a, wait_given):
+    """`_ledger_dispatch`, with a ledger or token directory that cannot be trusted (a symlink, another user's: OSError) refused as a usage error, exit 2."""
+    try:
+        return _ledger_dispatch(a, wait_given)
+    except OSError as e:
+        return ask_refuse(f"the question ledger cannot be used: {e}")
+
+
+def _ledger_dispatch(a, wait_given):
     """The question-ledger commands (`--ask`, `--inbox`, `--answer`, `--withdraw`): their exit code, or None when A names none. They are exclusive with each
     other and with every other command, and their options mean nothing without one."""
     chosen = [n for n, on in (("--ask", a.ask is not None), ("--inbox", a.inbox), ("--answer", a.answer is not None), ("--withdraw", a.withdraw is not None)) if on]
@@ -5082,7 +5259,7 @@ def ledger_dispatch(a, wait_given):
         if a.message_file is not None:
             if a.text is not None or a.ident is not None:
                 return ask_refuse("give the question as the positional text or as --message-file, not both")
-            rc = read_message_file(a)
+            rc = read_message_file(a, strict=True)
             if rc is not None:
                 return rc
             return ask_cmd(a, a.text)
