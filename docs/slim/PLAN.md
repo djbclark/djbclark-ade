@@ -473,10 +473,16 @@ own marker; Codex findings are read as threads, never as a gate.
 
 ## J. Questions for the operator (answered ones kept for the record)
 
-J1. Did the three detached `acp-dispatch` slices (tendcf s5-design,
-fork-cmdb, q10-policy) exit? (`ls ~/.local/state/bigteam/*/jobs/*.done`, or
+J1. [answered 2026-11-06: yes, all three exited] Did the three detached
+`acp-dispatch` slices (tendcf s5-design, fork-cmdb, q10-policy) exit? (`ls ~/.local/state/bigteam/*/jobs/*.done`, or
 `acp-dispatch ls`.) Wave 2 cannot start while they run.
-J2. **Providers.** Which of these survive after the TUI retirement:
+J2. **Providers.** [answered 2026-11-06: **one Paseo provider per paid
+monthly plan**, Paseo-native where it exists; every TUI that only duplicates a
+plan retires (agy TUI, zcode, opencode, qwen-code, muse, and Pi/omp unless a
+plan is reachable only through them); the Google AI plan is reached through
+Paseo's `antigravity` provider (official `antigravity-acp`), not the agy TUI;
+the plan list is derived from aiuse's pools and confirmed by the operator]
+Which of these survive after the TUI retirement:
 Pi, omp, Codex CLI, Cursor, Antigravity, Grok, zcode, opencode, Hermes,
 Copilot (via Paseo), glm-acp-agent, qwen-code? `paseo provider ls` plus the
 retire list is enough. [answered] this work is Claude-only; the fleet is not.
