@@ -1,5 +1,5 @@
 """bin/watch: idempotent watcher launcher. Every external tool is a stub on a private directory
-(paseo, paseo-new-seat, fleet-watch, route_agent.py); nothing here touches the real daemon, relay files or quota."""
+(paseo, the launcher stub, fleet-watch, route_agent.py); nothing here touches the real daemon, relay files or quota."""
 import json
 import os
 import subprocess
@@ -290,10 +290,10 @@ def test_launch_passes_yolo_workspace_label_and_skill_prompt(env):
     argv = seat_calls(env)[0]
     assert argv[argv.index("--workspace") + 1] == "wks_watch"
     assert argv[argv.index("--title") + 1] == "watch alpha 1"
-    assert "name it \"watch alpha 1\"" in argv[argv.index("--prompt") + 1]
+    assert "name it \"watch alpha 1\"" in argv[-1]
     assert argv[argv.index("--label") + 1] == "watch=alpha"
     assert "--mode" not in argv, "omp's yolo is the auto_accept feature, not a mode"
-    assert argv[argv.index("--prompt") + 1].startswith("/alphawatch\n")
+    assert argv[-1].startswith("/alphawatch\n")
     # a second domain row-name run reuses the workspace rather than creating another
     watch(env, "up", "--force")
     ws = json.loads((Path(env["_tmp"]) / "paseo.json").read_text())["ws"]
