@@ -6,9 +6,17 @@ Targets (`--target`, required on every subcommand): `codexbar` (CodexBar.app and
 
     proc-cpu-watch sample --target T [-v]            one sample (launchd runs it every 300 s); no model, no pings
     proc-cpu-watch report --target T [-n N]          the last N samples (default 24), spikes marked
-    proc-cpu-watch install --target T [--ade DIR]    the launchd job com.djbclark.<T>-cpu-watch (template:
-                                                     launchd/com.djbclark.proc-cpu-watch.plist)
-    proc-cpu-watch uninstall --target T
+    proc-cpu-watch install --target T [--ade DIR] [--backend auto|launchd|systemd|cron] [--dry-run] [--allow-no-linger]
+                                                     the job com.djbclark.<T>-cpu-watch, written from
+                                                     launchd/com.djbclark.proc-cpu-watch.plist by bin/ade_sched.py
+                                                     (launchd on the Mac, a systemd user timer every 300 s on Linux;
+                                                     docs/scheduling.md)
+    proc-cpu-watch uninstall --target T [--backend ...] [--dry-run]
+
+install/uninstall exit codes: 0 done; 1 an activation command failed; 2 bad usage (linked worktree or cow pasture without
+--ade, bin/proc-cpu-watch missing from --ade, an unbuildable job); 69 no usable scheduler (none installed or forced off,
+systemd user manager unreachable, Linger=no without --allow-no-linger) or the target is macOS-only: `codexbar` (the
+CodexBar app) installs on darwin only, `opencode` installs on Linux too. (Before 2026-11-04 a missing launchctl was 2.)
 
 A sample takes two `ps` reads WINDOW_S apart over the target's process tree (every process whose argv[0], the
 first whitespace-free token of its command line, matches the target: `.../CodexBar.app/Contents/{MacOS,Helpers}/
@@ -44,7 +52,6 @@ import json
 import os
 import plistlib
 import re
-import shutil
 import subprocess
 import sys
 import time
@@ -64,6 +71,23 @@ TARGETS = {
     "codexbar": re.compile(r"^/[^\s]*?CodexBar\.app/Contents/(?:MacOS|Helpers)/CodexBar\w*(?:\s|$)"),
     "opencode": re.compile(r"^(?:\S*/)?opencode(?:\.exe)?\s+serve(?:\s|$)"),
 }
+# Targets that watch a macOS-only app: install refuses them off darwin (exit 69).
+DARWIN_ONLY = {"codexbar"}
+PLATFORM = sys.platform
+# Keyword overrides for ade_sched.install/uninstall (agents_dir=, unit_dir=, launchctl=, ...); tests set them.
+SCHED_OVERRIDES = {}
+ade_sched = None
+
+
+def import_sched():
+    global ade_sched
+    if ade_sched is None:
+        sys.path[:0] = [d for d in (os.path.dirname(os.path.realpath(__file__)),) if d not in sys.path]  # python3 -I
+        import ade_sched as mod
+        ade_sched = mod
+    return ade_sched
+
+
 # The target in use, set once by use_target() before anything samples, reports or installs.
 TARGET = ""
 ROOT_RE = None
@@ -314,62 +338,53 @@ def disposable_checkout(path):
     return (path / ".git").is_file() or path == cow or cow in path.parents
 
 
-def render_plist(ade):
-    """The LaunchAgent plist as bytes: the tracked template with @ADE@/@STATE@/@TARGET@ filled in on the PARSED values, so a path
-    with `&`, `<` or a quote stays valid XML, plus CBW_STATE_DIR in the job's environment so scheduled samples go
-    where `install` was told to put them (the template's comments are dropped)."""
-    tpl = plistlib.loads(PLIST.read_bytes())
-
-    def fill(v):
-        if isinstance(v, str):
-            return v.replace("@ADE@", str(ade)).replace("@STATE@", str(STATE_DIR)).replace("@TARGET@", TARGET)
-        if isinstance(v, list):
-            return [fill(x) for x in v]
-        if isinstance(v, dict):
-            return {k: fill(x) for k, x in v.items()}
-        return v
-    doc = fill(tpl)
-    doc.setdefault("EnvironmentVariables", {})["CBW_STATE_DIR"] = str(STATE_DIR)
-    data = plistlib.dumps(doc)
-    plistlib.loads(data)  # round-trip check before anything is replaced
-    return data
+def build_job(ade, ade_sched):
+    """The ade_sched Job for the active target: the tracked template with __ADE__/@STATE@/@TARGET@ filled in on the PARSED
+    values (a path with `&`, `<` or a quote stays valid), plus CBW_STATE_DIR in the job's environment so scheduled samples
+    go where `install` was told to put them (the template's comments are dropped)."""
+    tpl = plistlib.loads(re.sub(rb"<!--.*?-->", b"", PLIST.read_bytes(), flags=re.DOTALL))
+    tpl.setdefault("EnvironmentVariables", {})["CBW_STATE_DIR"] = str(STATE_DIR)
+    subst = dict(ade_sched.default_subst(ade), **{"@STATE@": str(STATE_DIR), "@TARGET@": TARGET})
+    return ade_sched.Job.from_dict(tpl, str(PLIST), subst, ade=ade, kill_mode=None)
 
 
 def cmd_install(a):
-    if shutil.which("launchctl") is None:
-        print("proc-cpu-watch: install/uninstall need launchd (macOS)", file=sys.stderr)
-        return 2
-    dest = HOME / "Library/LaunchAgents" / f"{LABEL}.plist"
-    dom = f"gui/{os.getuid()}"
-    if a.cmd == "uninstall":
-        subprocess.run(["launchctl", "bootout", f"{dom}/{LABEL}"], capture_output=True)
-        dest.unlink(missing_ok=True)
-        print(f"removed {dest}")
-        return 0
-    ade = Path(a.ade).expanduser().resolve() if a.ade else ADE
-    if not a.ade and disposable_checkout(ade):
-        print(f"proc-cpu-watch: {ade} is a linked worktree or cow pasture that will be removed; run install from "
-              "the primary checkout, or pass --ade DIR", file=sys.stderr)
-        return 2
-    if not (ade / "bin" / "proc-cpu-watch").is_file():
-        print(f"proc-cpu-watch: {ade}/bin/proc-cpu-watch not found", file=sys.stderr)
-        return 2
-    # Everything that can fail happens before the old job is unloaded: build and validate the plist (plistlib
-    # escapes paths), create the directories, write the temp file.
+    import_sched()
+    backend = getattr(a, "backend", None)
+    dry = bool(getattr(a, "dry_run", False))
+    if a.cmd == "install" and TARGET in DARWIN_ONLY and PLATFORM != "darwin":
+        print(f"proc-cpu-watch: the {TARGET} target watches a macOS app and is not installable on {PLATFORM}", file=sys.stderr)
+        return 69
     try:
-        data = render_plist(ade)
-        ensure_private_dir()
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        tmp = dest.with_suffix(".tmp")
-        tmp.write_bytes(data)
-    except (OSError, ValueError) as e:
-        print(f"proc-cpu-watch: cannot write the plist, nothing changed: {e}", file=sys.stderr)
-        return 2
-    subprocess.run(["launchctl", "bootout", f"{dom}/{LABEL}"], capture_output=True)
-    tmp.replace(dest)
-    r = subprocess.run(["launchctl", "bootstrap", dom, str(dest)], capture_output=True, text=True)
-    print(f"installed {dest} (script {ade / 'bin/proc-cpu-watch'}, target {TARGET})" if r.returncode == 0 else f"bootstrap failed: {r.stderr.strip()}")
-    return r.returncode
+        if a.cmd == "uninstall":
+            gone = ade_sched.uninstall(LABEL, backend, dry_run=dry, **SCHED_OVERRIDES)
+            if not dry:
+                print(f"removed {LABEL}" if gone else f"{LABEL} was not installed")
+            return 0
+        ade = Path(a.ade).expanduser().resolve() if a.ade else ADE
+        if not a.ade and disposable_checkout(ade):
+            print(f"proc-cpu-watch: {ade} is a linked worktree or cow pasture that will be removed; run install from "
+                  "the primary checkout, or pass --ade DIR", file=sys.stderr)
+            return 2
+        if not (ade / "bin" / "proc-cpu-watch").is_file():
+            print(f"proc-cpu-watch: {ade}/bin/proc-cpu-watch not found", file=sys.stderr)
+            return 2
+        # Everything that can fail happens before the old job is replaced: build and validate the job, create the directory.
+        try:
+            job = build_job(ade, ade_sched)
+            if not dry:
+                ensure_private_dir()
+        except (OSError, ValueError) as e:
+            print(f"proc-cpu-watch: cannot build the job, nothing changed: {e}", file=sys.stderr)
+            return 2
+        ade_sched.install(job, backend, dry_run=dry, allow_no_linger=bool(getattr(a, "allow_no_linger", False)),
+                          **SCHED_OVERRIDES)
+    except ade_sched.SchedError as e:
+        print(f"proc-cpu-watch {a.cmd}: {e}", file=sys.stderr)
+        return e.code
+    if not dry:
+        print(f"installed {LABEL} (script {ade / 'bin/proc-cpu-watch'}, target {TARGET})")
+    return 0
 
 
 def main():
@@ -382,9 +397,15 @@ def main():
         return p
     add("sample").add_argument("-v", "--verbose", action="store_true")
     add("report").add_argument("-n", type=int, default=24)
-    add("install").add_argument("--ade", help="checkout holding bin/proc-cpu-watch (default: the one this script is in; "
-                                "refused for a linked worktree or cow pasture)")
-    add("uninstall")
+    ip = add("install")
+    ip.add_argument("--ade", help="checkout holding bin/proc-cpu-watch (default: the one this script is in; "
+                    "refused for a linked worktree or cow pasture)")
+    up = add("uninstall")
+    for q in (ip, up):
+        q.add_argument("--backend", choices=["auto", "launchd", "systemd", "cron"], default="auto",
+                       help="scheduler (default auto: launchd on macOS, a systemd user timer on Linux, else cron)")
+        q.add_argument("--dry-run", action="store_true", help="print what would be written and run; change nothing")
+    ip.add_argument("--allow-no-linger", action="store_true", help="systemd: install although loginctl Linger=no")
     a = ap.parse_args()
     use_target(a.target)
     return {"sample": cmd_sample, "report": cmd_report, "install": cmd_install, "uninstall": cmd_install}[a.cmd](a)
