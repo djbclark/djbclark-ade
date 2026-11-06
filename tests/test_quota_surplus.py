@@ -291,58 +291,147 @@ def test_failed_ping_and_no_relay_leaves_episode_unnotified(qs):
     assert len(sent) == 1 and state["episodes"][alerts[0]["episode"]].get("notified_at")
 
 
-def test_relay_delivery_tracked_per_lead_and_retried(qs, tmp_path):
-    # local-review P2s on b2053c1 and 3fec121: a launched relay is not a delivery; each lead is tracked on its own and a
-    # failed relay is retried even after the operator ping succeeded
-    alerts, state = alerts_of(qs, argon_data())
-    ep = state["episodes"][alerts[0]["episode"]]
-    started = []
+def outcome(path, rc, j):
+    Path(path).write_text(json.dumps({"rc": rc, "json": j}))
 
-    def relay(argv, out):
-        started.append((argv[2], out))
+
+DELIVERED = {"result": "delivered"}
+QUEUED = {"state": "queued", "queued": True, "record": "20261102-003000-abcdef"}
+
+
+class Relays:
+    """Stub relay launcher and --status reader for notify()."""
+
+    def __init__(self):
+        self.started, self.states, self.polled = [], {}, []
+
+    def relay(self, argv, out):
+        self.started.append((argv[2], out))
         return True
 
-    def run(minutes, ping):
-        return qs.notify(alerts, state, NOW + timedelta(minutes=minutes), dry_run=False, rows=LEADS[:2], items=[],
-                         ping=ping, relay=relay)
+    def status(self, relay_py, rid):
+        self.polled.append(rid)
+        return self.states.get(rid, "queued")
 
-    run(0, lambda t: False)
-    assert not ep.get("notified_at") and len(started) == 2                   # both leads started, nothing delivered
+    def last_out(self, target):
+        return [o for t, o in self.started if t == target][-1]
+
+
+def run_notify(qs, alerts, state, minutes, r, rows, ping=lambda t: True):
+    return qs.notify(alerts, state, NOW + timedelta(minutes=minutes), dry_run=False, rows=rows, items=[], ping=ping,
+                     relay=r.relay, status=r.status)
+
+
+def test_relay_delivery_tracked_per_lead_and_never_sent_is_retried(qs):
+    # local-review P2s on b2053c1 and 3fec121: a launched relay is not a delivery; each lead is tracked on its own and a
+    # relay that never sent is retried even after the operator ping succeeded
+    alerts, state = alerts_of(qs, argon_data())
+    ep = state["episodes"][alerts[0]["episode"]]
+    r = Relays()
+    run_notify(qs, alerts, state, 0, r, LEADS[:2], ping=lambda t: False)
+    assert not ep.get("notified_at") and len(r.started) == 2                 # both leads started, nothing delivered
     sent = []
-    run(15, ok_ping(sent))                                                   # relays still running: not restarted
-    assert len(sent) == 1 and ep.get("notified_at") and len(started) == 2
-    outs = dict(started)
-    Path(outs["aaaa1111"]).write_text(json.dumps({"rc": 0}))
-    Path(outs["bbbb2222"]).write_text(json.dumps({"rc": 1}))
-    run(30, ok_ping(sent))                       # the refused lead is retried, the delivered one is not; no new page
-    assert [t for t, _ in started[2:]] == ["bbbb2222"] and len(sent) == 1
+    run_notify(qs, alerts, state, 15, r, LEADS[:2], ping=ok_ping(sent))      # still running: not restarted
+    assert len(sent) == 1 and ep.get("notified_at") and len(r.started) == 2
+    outcome(r.last_out("aaaa1111"), 0, DELIVERED)
+    outcome(r.last_out("bbbb2222"), 1, {"sent": False, "error": "no_sender"})   # refused before sending
+    run_notify(qs, alerts, state, 30, r, LEADS[:2], ping=ok_ping(sent))
+    assert [t for t, _ in r.started[2:]] == ["bbbb2222"] and len(sent) == 1
     assert ep["relays"]["aaaa1111"].get("delivered_at") and ep["relays"]["bbbb2222"]["attempts"] == 2
     for k in range(3, 6):                        # capped at MAX_RELAY_ATTEMPTS
-        Path(started[-1][1]).write_text(json.dumps({"rc": 1}))
-        run(15 * k + 30, ok_ping(sent))
+        outcome(r.last_out("bbbb2222"), 1, None)
+        run_notify(qs, alerts, state, 15 * k + 30, r, LEADS[:2])
     assert ep["relays"]["bbbb2222"]["attempts"] == qs.MAX_RELAY_ATTEMPTS
+    assert ep["relays"]["bbbb2222"]["final"] == "gave-up" and not ep["relays"]["bbbb2222"].get("delivered_at")
+
+
+def test_exit_zero_queued_is_not_delivered_until_status_says_so(qs):
+    # local-review P2 on 74c1aa3: relay exits 0 with `queued` for a busy lead; only `delivered` from --status counts
+    alerts, state = alerts_of(qs, argon_data())
+    r = Relays()
+    run_notify(qs, alerts, state, 0, r, [LEADS[1]])
+    outcome(r.last_out("bbbb2222"), 0, QUEUED)
+    run_notify(qs, alerts, state, 15, r, [LEADS[1]])
+    rec = state["episodes"][alerts[0]["episode"]]["relays"]["bbbb2222"]
+    assert rec["record"] == QUEUED["record"] and not rec.get("delivered_at")
+    r.states[QUEUED["record"]] = "delivered"
+    run_notify(qs, alerts, state, 30, r, [LEADS[1]])
+    assert rec.get("delivered_at") and len(r.started) == 1 and r.polled == [QUEUED["record"]]
+
+
+def test_still_queued_or_sending_never_resends(qs):
+    alerts, state = alerts_of(qs, argon_data())
+    r = Relays()
+    run_notify(qs, alerts, state, 0, r, [LEADS[1]])
+    outcome(r.last_out("bbbb2222"), 0, QUEUED)
+    for k, st in enumerate(["queued", "sending", "queued", None], start=1):     # None: --status unreadable
+        r.states[QUEUED["record"]] = st
+        run_notify(qs, alerts, state, 15 * k, r, [LEADS[1]])
+    rec = state["episodes"][alerts[0]["episode"]]["relays"]["bbbb2222"]
+    assert len(r.started) == 1 and not rec.get("delivered_at") and not rec.get("final")
+
+
+def test_queued_then_expired_allows_exactly_one_resend(qs):
+    alerts, state = alerts_of(qs, argon_data())
+    r = Relays()
+    run_notify(qs, alerts, state, 0, r, [LEADS[1]])
+    outcome(r.last_out("bbbb2222"), 0, QUEUED)
+    run_notify(qs, alerts, state, 15, r, [LEADS[1]])
+    r.states[QUEUED["record"]] = "expired"
+    acts = run_notify(qs, alerts, state, 30, r, [LEADS[1]])
+    assert len(r.started) == 2 and [a.get("resend") for a in acts if a["action"] == "relay"] == [True]
+    second = {**QUEUED, "record": "20261102-010000-fedcba"}
+    outcome(r.last_out("bbbb2222"), 0, second)
+    run_notify(qs, alerts, state, 45, r, [LEADS[1]])
+    r.states[second["record"]] = "failed"
+    run_notify(qs, alerts, state, 60, r, [LEADS[1]])
+    run_notify(qs, alerts, state, 75, r, [LEADS[1]])
+    rec = state["episodes"][alerts[0]["episode"]]["relays"]["bbbb2222"]
+    assert len(r.started) == 2 and rec["final"] == "failed" and not rec.get("delivered_at")
+
+
+def test_unverified_or_accepted_is_never_resent_nor_delivered(qs):
+    for result in ("unverified", "accepted", "queued"):
+        alerts, state = alerts_of(qs, argon_data())
+        r = Relays()
+        run_notify(qs, alerts, state, 0, r, [LEADS[1]])
+        outcome(r.last_out("bbbb2222"), 1 if result == "unverified" else 0, {"result": result})
+        for k in (1, 2, 3):
+            run_notify(qs, alerts, state, 15 * k, r, [LEADS[1]])
+        rec = state["episodes"][alerts[0]["episode"]]["relays"]["bbbb2222"]
+        assert len(r.started) == 1 and rec["final"] == "unconfirmed" and not rec.get("delivered_at"), result
 
 
 def test_abandoned_relay_runner_is_retried(qs):
     # local-review P2 on 4ef594c: a runner killed before writing its outcome must not read "running" forever
     alerts, state = alerts_of(qs, argon_data())
-    started = []
-    relay = lambda argv, out: started.append(out) or True     # noqa: E731
-    qs.notify(alerts, state, NOW, dry_run=False, rows=[LEADS[1]], items=[], ping=lambda t: True, relay=relay)
-    qs.notify(alerts, state, NOW + timedelta(minutes=30), dry_run=False, rows=[LEADS[1]], items=[],
-              ping=lambda t: True, relay=relay)
-    assert len(started) == 1                                  # within the runner's bound: still running
-    qs.notify(alerts, state, NOW + timedelta(seconds=qs.RELAY_RUN_TIMEOUT_S + 700), dry_run=False, rows=[LEADS[1]],
-              items=[], ping=lambda t: True, relay=relay)
+    r = Relays()
+    run_notify(qs, alerts, state, 0, r, [LEADS[1]])
+    run_notify(qs, alerts, state, 30, r, [LEADS[1]])
+    assert len(r.started) == 1                                  # within the runner's bound: still running
+    run_notify(qs, alerts, state, (qs.RELAY_RUN_TIMEOUT_S + 700) / 60, r, [LEADS[1]])
     rec = state["episodes"][alerts[0]["episode"]]["relays"]["bbbb2222"]
-    assert len(started) == 2 and rec["attempts"] == 2 and rec["last_rc"] == 124
+    assert len(r.started) == 2 and rec["attempts"] == 2 and rec["last_rc"] == 124
 
 
-def test_relay_runner_records_relay_exit_status(qs, tmp_path):
+def test_relay_runner_records_exit_status_and_json(qs, tmp_path):
     out = tmp_path / "o.json"
-    assert qs.main(["_relay-run", str(out), "--", sys.executable, "-c", "import sys; sys.exit(4)"]) == 0
-    assert qs.relay_outcome(str(out)) == 4
+    code = "import json, sys; print('noise'); print(json.dumps({'result': 'unverified'})); sys.exit(1)"
+    assert qs.main(["_relay-run", str(out), "--", sys.executable, "-c", code]) == 0
+    got = qs.relay_outcome(str(out))
+    assert got == {"rc": 1, "json": {"result": "unverified"}}
+    assert qs.classify_send(got) == ("unconfirmed", None)
     assert qs.relay_outcome(str(tmp_path / "missing.json")) is None
+
+
+def test_relay_status_reads_relay_json(qs, tmp_path):
+    fake = tmp_path / "relay.py"
+    fake.write_text("import json, sys\nrid = sys.argv[2]\n"
+                    "if rid == 'gone':\n    print(json.dumps({'id': rid, 'found': False})); sys.exit(1)\n"
+                    "print(json.dumps({'id': rid, 'found': True, 'state': 'expired', 'final': True}))\n")
+    assert qs.relay_status(str(fake), "20261102-003000-abcdef") == "expired"
+    assert qs.relay_status(str(fake), "gone") == "missing"
+    assert qs.relay_status(str(tmp_path / "nope.py"), "x") is None
 
 
 def test_dry_run_sends_and_marks_nothing(qs):
@@ -407,8 +496,8 @@ def test_relay_argv_idle_only_for_claude_paseo(qs):
     claude, omp = LEADS[0], LEADS[1]
     a = qs.relay_argv("/r/relay.py", claude, "hi")
     b = qs.relay_argv("/r/relay.py", omp, "hi")
-    assert a[1:] == ["/r/relay.py", "aaaa1111", "hi", "--fyi", "--idle", "1800"]
-    assert b[1:] == ["/r/relay.py", "bbbb2222", "hi", "--fyi"]
+    assert a[1:] == ["/r/relay.py", "aaaa1111", "hi", "--fyi", "--json", "--idle", "1800"]
+    assert b[1:] == ["/r/relay.py", "bbbb2222", "hi", "--fyi", "--json"]
     assert "--steer" not in a + b
 
 

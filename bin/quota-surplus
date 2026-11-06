@@ -37,10 +37,13 @@ one is the same episode); a new resets_at is a new episode. `notify` sends each 
 most once per renotify_h (24 h) across episodes: one hermes-ping, and one relay.py line (`--fyi`, never `--steer`;
 `--idle 1800` for a Claude Paseo target) to each live lead seat (a fleet.py row whose name or title starts with the word
 `LEAD` in capitals, plus any agent id in QUOTA_SURPLUS_LEADS, comma-separated, e.g. a `/helm lead` session). An episode
-counts as paged only when hermes-ping exited 0, and each lead as reached only when its relay.py run exited 0 (a started
-relay is not a delivery): relays run detached through `quota-surplus _relay-run OUT -- ARGV`, which records relay's exit
-status in ~/.local/state/quota-surplus/relays/, so an --idle wait never holds the timer; a failed ping or relay is
-retried on the next run, each lead on its own, up to 3 relay attempts (log: ~/.local/state/quota-surplus/relay.log).
+counts as paged only when hermes-ping exited 0. Each lead counts as reached only on relay's `delivered` (relay runs with
+--json, detached through `quota-surplus _relay-run OUT -- ARGV`, which records its exit status and JSON result in
+~/.local/state/quota-surplus/relays/, so an --idle wait never holds the timer). A `queued` send with a record id is
+followed on later runs with `relay.py --status ID --json`: `delivered` marks the lead; `failed` or `expired` allows ONE
+re-send per lead per episode; `queued`/`sending` is never re-sent (it would duplicate). `accepted`, `unverified` or
+`queued` without a record is final: not reached, never re-sent. A relay that never sent (refused, runner failed or
+abandoned) is retried, up to 3 attempts; a failed ping is retried each run (log: ~/.local/state/quota-surplus/relay.log).
 A corrupt state file is kept aside as state.json.corrupt and the run starts from empty state (at most one repeat page
 per open episode).
 `notify --dry-run` prints what it would send and sends nothing.
@@ -629,7 +632,9 @@ def lead_seats(fleet_rows: list[dict], extra_ids: list[str] | None = None) -> li
 
 
 def relay_argv(relay: str, row: dict, text: str) -> list[str]:
-    argv = [sys.executable, relay, str(row.get("id")), text, "--fyi"]
+    # --json: the outcome is read from relay's structured result, never from its exit status (exit 0 also means
+    # `queued`/`accepted`; `unverified` exits 1 although the text may have arrived)
+    argv = [sys.executable, relay, str(row.get("id")), text, "--fyi", "--json"]
     if row.get("host") == "paseo" and row.get("agent") == "claude":
         argv += ["--idle", "1800"]      # a Claude Paseo target is steered: wait for idle (helm lead.md section 0 item 5)
     return argv
@@ -691,14 +696,29 @@ def spawn_relay(argv: list[str], out: str) -> bool:
     return True
 
 
+def last_json(text: str) -> dict | None:
+    """The last line of TEXT that parses as a JSON object (relay --json prints one), or None."""
+    for line in reversed((text or "").splitlines()):
+        line = line.strip()
+        if line.startswith("{"):
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(d, dict):
+                return d
+    return None
+
+
 def relay_run(out: str, argv: list[str]) -> int:
-    """`_relay-run OUT -- ARGV`: run relay.py to its end and record its exit status in OUT (atomically)."""
+    """`_relay-run OUT -- ARGV`: run relay.py to its end and record its exit status and its --json result in OUT
+    (atomically)."""
     try:
         r = subprocess.run(argv, capture_output=True, text=True, timeout=RELAY_RUN_TIMEOUT_S, check=False,
                            stdin=subprocess.DEVNULL)
-        rec = {"rc": r.returncode, "tail": (r.stdout + r.stderr)[-500:]}
+        rec = {"rc": r.returncode, "json": last_json(r.stdout), "tail": r.stderr[-500:]}
     except (OSError, subprocess.SubprocessError) as e:
-        rec = {"rc": 127, "tail": str(e)[:500]}
+        rec = {"rc": 127, "json": None, "tail": str(e)[:500]}
     p = Path(out)
     tmp = p.with_name(p.name + ".tmp")
     tmp.write_text(json.dumps(rec))
@@ -706,13 +726,52 @@ def relay_run(out: str, argv: list[str]) -> int:
     return 0
 
 
-def relay_outcome(out: str | None) -> int | None:
-    """relay.py's exit status from its outcome file, or None while it runs (no file yet)."""
+def relay_outcome(out: str | None) -> dict | None:
+    """The runner's record {"rc", "json"} from its outcome file, or None while it runs (no file yet)."""
     try:
-        rc = json.loads(Path(out).read_text()).get("rc") if out else None
-    except (OSError, ValueError, AttributeError):
+        d = json.loads(Path(out).read_text()) if out else None
+    except (OSError, ValueError):
         return None
-    return rc if isinstance(rc, int) else 1
+    if not isinstance(d, dict):
+        return {"rc": 1, "json": None}
+    return {"rc": d.get("rc") if isinstance(d.get("rc"), int) else 1,
+            "json": d.get("json") if isinstance(d.get("json"), dict) else None}
+
+
+def classify_send(outcome: dict) -> tuple[str, str | None]:
+    """What one relay.py send did, from its --json result: ("delivered", None), ("deferred", record id),
+    ("unconfirmed", None) or ("not-sent", None). Only `delivered` is a delivery (AGENTS.md order 10).
+
+    `unconfirmed` (result accepted, queued or unverified, or a queued answer without a record id) may have reached the
+    lead and has nothing to follow up: it is never counted and never resent, since a resend could duplicate it.
+    `not-sent` (no JSON result: relay refused before sending, or the runner failed) is safe to retry."""
+    j = outcome.get("json") or {}
+    if j.get("queued") or j.get("state") == "queued":
+        rid = j.get("record")
+        return ("deferred", str(rid)) if rid else ("unconfirmed", None)
+    result = j.get("result")
+    if result == "delivered":
+        return "delivered", None
+    if result is not None or j.get("sent") is True:
+        return "unconfirmed", None
+    return "not-sent", None
+
+
+def relay_status(relay_py: str, rid: str) -> str | None:
+    """A deferred record's state from `relay.py --status RID --json` (queued, sending, delivered, failed, expired,
+    cancelled), "missing" when relay no longer has it, None when relay could not be read (try again next run)."""
+    try:
+        r = subprocess.run([sys.executable, relay_py, "--status", rid, "--json"], capture_output=True, text=True,
+                           timeout=60, check=False, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    j = last_json(r.stdout)
+    if j is None:
+        return None
+    if j.get("found") is False:
+        return "missing"
+    st = j.get("state")
+    return str(st) if r.returncode == 0 and st else None
 
 
 def in_cooldown(state: dict, pool: str, now: datetime, renotify_h: float, episode: str | None = None) -> bool:
@@ -723,14 +782,17 @@ def in_cooldown(state: dict, pool: str, now: datetime, renotify_h: float, episod
 
 
 def notify(alerts: list[dict], state: dict, now: datetime, *, dry_run: bool, rows: list[dict] | None = None,
-           items: list[dict] | None = None, ping=send_ping, relay=spawn_relay,
+           items: list[dict] | None = None, ping=send_ping, relay=spawn_relay, status=relay_status,
            renotify_h: float = RENOTIFY_H) -> list[dict]:
     """Page each new `act` episode once, a pool at most once per renotify_h. Returns the actions (sent or planned).
 
     The operator ping and each lead relay are tracked separately, and none counts until it is known to have succeeded:
-    the episode's `notified_at` (and the pool cooldown) only after hermes-ping exits 0; each lead in `relays[id]` only once
-    its relay.py run exited 0 (delivered or queued by relay itself). A relay still running is left alone; one that
-    failed is retried on the next run, up to MAX_RELAY_ATTEMPTS, whatever the ping did."""
+    the episode's `notified_at` (and the pool cooldown) only after hermes-ping exits 0; a lead's `delivered_at` only on a
+    `delivered` result. A relay that relay.py deferred (`queued`, with a record id) is followed on later runs through
+    `relay.py --status ID --json`: delivered marks it; failed or expired allows ONE re-send per lead per episode;
+    queued or sending is left alone (a re-send would duplicate it); cancelled or gone ends it. A result relay could not
+    confirm (accepted, queued without a record, unverified) is final: not delivered, never resent. A relay that never
+    sent (refused, runner failed or abandoned) is retried, up to MAX_RELAY_ATTEMPTS."""
     actions: list[dict] = []
     eps = state.setdefault("episodes", {})
     todo = [a for a in alerts if a.get("verdict") == "alert" and a.get("severity") == "act"]
@@ -765,25 +827,49 @@ def notify(alerts: list[dict], state: dict, now: datetime, *, dry_run: bool, row
                 continue
             target = str(row.get("id"))
             rec = relays.get(target) or {}
-            if rec.get("delivered_at"):
+            if rec.get("delivered_at") or rec.get("final"):
                 continue
-            if rec:
-                rc = relay_outcome(rec.get("out"))
-                if rc is None:
-                    started_at = parse_ts(rec.get("started_at"))
-                    # a runner killed (or a reboot) before it wrote its outcome would read "running" forever: past its
-                    # own bound plus slack it is abandoned and counts as a failed attempt (local-review P2 on 4ef594c)
-                    if started_at is None or (now - started_at).total_seconds() <= RELAY_RUN_TIMEOUT_S + 600:
-                        continue                               # still running (an --idle wait)
-                    rc = 124
-                if rc == 0:
+            resend = False
+            if rec.get("record"):
+                st = None if dry_run else status(relay_py, rec["record"])
+                rec["record_state"] = st or rec.get("record_state")
+                if st == "delivered":
                     rec["delivered_at"] = now.isoformat()
                     continue
-                rec["last_rc"] = rc
+                if st in ("failed", "expired") and not rec.get("resent"):
+                    resend = True                              # one re-send per lead per episode
+                elif st in ("failed", "expired", "cancelled", "missing"):
+                    rec["final"] = st                          # not delivered; nothing left to do this episode
+                    continue
+                else:
+                    continue                                   # queued, sending or unreadable: never re-send now
+            elif rec:
+                outcome = relay_outcome(rec.get("out"))
+                if outcome is None:
+                    started_at = parse_ts(rec.get("started_at"))
+                    # a runner killed (or a reboot) before it wrote its outcome would read "running" forever: past its
+                    # own bound plus slack it is abandoned and counts as never sent (local-review P2 on 4ef594c)
+                    if started_at is None or (now - started_at).total_seconds() <= RELAY_RUN_TIMEOUT_S + 600:
+                        continue                               # still running (an --idle wait)
+                    outcome = {"rc": 124, "json": None}
+                kind, rid = classify_send(outcome)
+                rec["last_rc"] = outcome["rc"]
+                rec["last_result"] = kind
+                if kind == "delivered":
+                    rec["delivered_at"] = now.isoformat()
+                    continue
+                if kind == "deferred":
+                    rec["record"] = rid                        # followed through --status from the next run on
+                    continue
+                if kind == "unconfirmed":
+                    rec["final"] = "unconfirmed"
+                    continue
                 if int(rec.get("attempts") or 0) >= MAX_RELAY_ATTEMPTS:
+                    rec["final"] = "gave-up"
                     continue
             argv = relay_argv(relay_py, row, relay_text(a, now, n_work))
-            actions.append({"episode": a.get("episode"), "action": "relay", "target": target, "argv": argv})
+            actions.append({"episode": a.get("episode"), "action": "relay", "target": target, "argv": argv,
+                            **({"resend": True} if resend else {})})
             if dry_run:
                 continue
             attempt = int(rec.get("attempts") or 0) + 1
@@ -794,7 +880,11 @@ def notify(alerts: list[dict], state: dict, now: datetime, *, dry_run: bool, row
             except FileNotFoundError:
                 pass
             if relay(argv, out):
-                relays[target] = {**rec, "attempts": attempt, "out": out, "started_at": now.isoformat()}
+                new = {k: v for k, v in rec.items() if k not in ("record", "record_state", "last_result")}
+                relays[target] = {**new, "attempts": attempt, "out": out, "started_at": now.isoformat(),
+                                  **({"resent": True} if resend or rec.get("resent") else {})}
+            elif rec:
+                relays[target] = rec
     return actions
 
 
