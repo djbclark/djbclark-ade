@@ -1,0 +1,6 @@
+{
+  "name": "origin-probe",
+  "private": true,
+  "version": "0.0.1",
+  "files": ["paseo-plugin.json", "index.server.ts"]
+}
