@@ -4,5 +4,3 @@
 docs/handoffs/*
 # Run on a fresh machine, before brew's GNU tools are installed
 docs/apply-toolchain-prompt.md
-# Shows the old find/grep habits it replaces
-skills/setup-modern-cli/*

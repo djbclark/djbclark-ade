@@ -26,7 +26,7 @@ What an attacker would want, in order of damage:
    others). Not in this repo. The boundary authorizes the operator identity: any process running as the
    operator that passes it can read every declared secret; client-family labels are correlation metadata,
    not principals (proposal 4.5 item 1). `get` and `export` print values to stdout
-   (`skills/sudo-secretspec/SKILL.md`, Pitfalls); `run` injects them into a child.
+   (`~/src/sudo-secretspec/skills/sudo-secretspec/SKILL.md`, Pitfalls; the skill lives in the sudo-secretspec repo, unlinked from this one 2026-11-06); `run` injects them into a child.
 2. **Code execution as the operator.** acp-run runs every agent yolo by default (all tool calls
    auto-approved, operator 2026-10-14); `--perm read-only` restricts an agent to non-mutating tools, or refuses
    an agent without a verified equivalent, and `--perm deny` gates every call except, for agy, the read-only

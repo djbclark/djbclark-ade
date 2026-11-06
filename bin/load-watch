@@ -19,7 +19,7 @@
     load-watch install|uninstall            the launchd job (launchd/com.djbclark.load-watch.plist)
 
 Why (2026-10-18): agents keep starting heavy builds and tests on this 8-core Mac (load 24-41 that
-morning; 180 on 2026-10-13, 300-400 on 2026-10-04). `bg`, `heavy-shim` and the Claude test hook throttle
+morning; 180 on 2026-10-13, 300-400 on 2026-10-04). `bg`, site-djbclark's `heavy-shim` and the Claude test hook throttle
 what goes through them; nothing noticed what did not, or told the agent that started it. Plektra and
 stayturgid-agent already build only on CI (free GitHub runners since 2026-10-18, `ci/base` + `ci/run/**`; `forgejo-ci` skill); this finds the next
 candidate.
@@ -534,8 +534,8 @@ Written {stamp()} by `~/src/djbclark-ade/bin/load-watch` (no model). Load was {l
 
 1. Finish the step you are on. Do not kill or restart running work to obey this (it is already paid for);
    just do not start another heavy local run of this kind.
-2. Next time, run this kind of build or test on CI: load the `forgejo-ci` skill
-   (`~/src/djbclark-ade/skills/forgejo-ci/SKILL.md`, section 6 item 6 is the recipe for a repo whose
+2. Next time, run this kind of build or test on CI: load the CI-offload skill from the
+   loopback-port-shim repo (`~/src/loopback-port-shim/skills/`; section 6 item 6 is the recipe for a repo whose
    source of truth is on GitHub: an orphan `ci/base` branch with a workflow and a `scripts/github-*`
    wrapper that pushes `ci/run/<slug>` to free GitHub runners; Forgejo/Hyades only for MIT/SIPB work).
 3. Pushing branches to a repo djbclark does not own, or creating a Forgejo repo, is outward-facing: ask

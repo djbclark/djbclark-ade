@@ -19,6 +19,12 @@ churn can no longer break skill loading):
   `~/src/djbclark-ade/skills/<name>`
 - private skills: `~/ops/site-private/skills/<name>/` (real directory; only
   `1password` today) — link target `~/ops/site-private/skills/<name>`
+- site skills (since 2026-11-06, the skills moved out of this repo by the
+  slim-down): `~/ops/site-public-djbclark/skills/<name>/`, the Mac's checkout of
+  the site-djbclark repo (default `${OPS_ROOT:-~/ops}/site-public-djbclark/skills`,
+  `SKILL_EVERYWHERE_SITE` overrides it) — link target
+  `~/ops/site-public-djbclark/skills/<name>`. A name in more than one root resolves
+  public, then private, then site.
 
 Editing the git copy updates every agent. Never copy: a
 copy drifts silently. `~/.agents/skills/handoff` is a symlink to the git
@@ -38,12 +44,15 @@ and can advertise the trash skill under the live name. Hide it with
 ~/src/djbclark-ade/bin/skill-everywhere --remove <name>... # undo
 ```
 
-`--all` (2026-10-25) discovers readable `*/SKILL.md` files directly under both
-shared roots, including linked directories. It deduplicates names with public
+`--all` (2026-10-25) discovers readable `*/SKILL.md` files directly under the
+three shared roots (the site root added 2026-11-06), including linked directories. It deduplicates names with public
 precedence and excludes hidden/helper directories. It cannot be combined with
 names or `--remove`. The all-mode check returns 1 for missing, chained, stale or
 conflicting installed targets; explicit-name check output/semantics remain
 compatible with `ade-update`. Preserve foreign files/links and report conflicts.
+`--check --all` prints one `warning: skill root <dir> does not exist` line per
+absent root (2026-11-06; it does not change the exit code): an absent root's
+skills are otherwise missing from the report without a word.
 
 If the skill has no directory yet, create it first: public skills in
 `~/src/djbclark-ade/skills/<name>/`, private ones (operator ruling required)
@@ -58,7 +67,7 @@ whose readlink differs is replaced with the direct link.
 it by name (Hermes `skill-slash` handlers, Claude/zcode command wrappers)
 before deleting its directory. `--remove` also works
 after the directory is gone: it removes only links whose target is exactly
-one of the two roots.
+`<root>/<name>` for one of the three roots.
 
 ## 2. Where each TUI looks (verified 2026-10-03)
 
@@ -79,7 +88,7 @@ one of the two roots.
 | zcode (`zcode`) | already reads `~/.agents/skills`; an extra link listed it twice. **Loaded ≠ slash-invocable:** zcode's typed `/` surface resolves only built-ins, plugins and `~/.zcode/commands/*.md`; a user skill needs a command wrapper there (`skills: <name>` frontmatter auto-mounts it). Wrappers for the universal set (baton, resume, handoff, loose, steps, helm, helm-all, session-finder, session-finder-all, skillopt-sleep, bigteam, autorename, hyades-docker) live in `~/src/djbclark-ade/zcode/commands/`, symlinked directly into `~/.zcode/commands/`; add one there when adding a slash-shaped skill. Until the TUI restarts it won't see new wrappers; in a running session the built-in `/skill <name>` reaches any loaded skill without one. |
 | Antigravity (`agy`) | `~/.gemini/antigravity-cli/skills` (agy CLI 1.2.16; links are followed). Verified with `/skills` in interactive agy. Headless `agy -p` answers never mention user skills, not even the installer's bailian ones, so check agy interactively. `~/.gemini/config/skills` and `~/.gemini/antigravity/skills` are not read by the CLI |
 | omp / oh-my-pi (`omp`) | `~/.omp/agent/skills` (native, highest skill priority; added 2026-10-13). omp also reads `~/.agents/skills`, but de-duplicates by `realpath`, so the second link does not list a skill twice. omp ignores `~/.claude/skills` unless `claude` is in its `enabledProviders`. Prove it with `omp -p --no-title "<step 3 prompt>"` from a scratch dir. |
-| Grok Bot (`grokbot`, no binary; present when `~/agent-data/workflows` exists) | **Copy, not link** (added 2026-10-23): Grok Bot runs on its own Linux box (`HOME=/home/box`) and reads `~/agent-data/workflows/<slug>/SKILL.md` as plain files, so no link into a Mac checkout could resolve. The script renders `ade-<name>/`: symlinks dereferenced (only a link to a regular file inside the skill; a skill holding any other link, one that leaves the skill, dangles or names a directory or special file, is refused: `--check` reports `unsafe source symlink`; link mode copies nothing, leaves any existing copy alone and exits 1; 2026-10-23),  a "managed copy" banner after the front matter (Mac-only paths, Grok Bot's approval rules win), and a `.skill-everywhere` marker. Only a dir with that marker is updated or removed; `--check` reports `copied`, `stale copy`, `missing` or `not ours`. `SKILL_EVERYWHERE_NO_COPY=1` skips this target (`ade-update` sets it for a non-canonical `--repo`, which is report-only and may be an untrusted PR branch), so a report-only run prints no `grokbot` row and renders nothing. On the box run it with `SKILL_EVERYWHERE_ONLY=grokbot`, or the box's own claude, agy, cline and hermes get links too. The box's nightly driver is `/home/box/agent-data/shared/skills-sync/sync.sh` (fetches `origin/master`, picks which skills suit Grok Bot, keeps a manifest, runs this script). |
+| Grok Bot (`grokbot`, no binary; present when `~/agent-data/workflows` exists) | **Copy, not link** (added 2026-10-23): Grok Bot runs on its own Linux box (`HOME=/home/box`) and reads `~/agent-data/workflows/<slug>/SKILL.md` as plain files, so no link into a Mac checkout could resolve. The script renders `ade-<name>/`: symlinks dereferenced (only a link to a regular file inside the skill; a skill holding any other link, one that leaves the skill, dangles or names a directory or special file, is refused: `--check` reports `unsafe source symlink`; link mode copies nothing, leaves any existing copy alone and exits 1; 2026-10-23),  a "managed copy" banner after the front matter (Mac-only paths, Grok Bot's approval rules win; its link and the marker's `source=` name the root the skill came from, djbclark-ade, site-djbclark or site-private, since 2026-11-06), and a `.skill-everywhere` marker. Only a dir with that marker is updated or removed; `--check` reports `copied`, `stale copy`, `missing` or `not ours`. `SKILL_EVERYWHERE_NO_COPY=1` skips this target (`ade-update` sets it for a non-canonical `--repo`, which is report-only and may be an untrusted PR branch), so a report-only run prints no `grokbot` row and renders nothing. On the box run it with `SKILL_EVERYWHERE_ONLY=grokbot`, or the box's own claude, agy, cline and hermes get links too. The box's nightly driver is `/home/box/agent-data/shared/skills-sync/sync.sh` (fetches `origin/master`, picks which skills suit Grok Bot, keeps a manifest, runs this script). |
 | `/btww` (side question, 2026-11-01) | Skill `btww` **names the TUI's native side-question command, or says it has none; it never answers the question** (a skill is an ordinary turn, so it cannot be non-interrupting or off-transcript). Native: Claude `/btw`, Codex `/side`, agy `/btw`, Cursor `/btw`, Grok `/btw`, omp `/btw`, Hermes `/btw`, Copilot `/btw` (alias `/ask`), opencode `/btw`, Qwen `/btw`, Muse `/side` (alias `/btw`); none in zcode, Cline, goose or Grok Bot; Devin not installed. All first-party: the third-party `copilot-btw` and `opencode-btw` plugins are not needed. Real aliases: omp `omp/commands/btww.md` (`side: true`, linked to `~/.omp/agent/commands/btww.md`), Hermes CLI `quick_commands.btww` alias to `btw` (`~/.hermes/config.yaml`, template `agents/hermes/config.yaml.tmpl`). zcode: `zcode/commands/btww.md`. Claude cannot alias a built-in. Details: `skills/btww/SKILL.md`. |
 
 `aiuse --json` providers with no TUI of their own (alibaba, deepseek,
