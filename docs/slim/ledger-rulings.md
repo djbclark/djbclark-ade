@@ -47,3 +47,9 @@ R2-23. `scripts/github-ci-run`: nothing in site-djbclark names it (grep of the c
 R2-24. adhoc `adversary-pr254f` record and its launchd label: operator batch line 10.
 R2-25. aiuse `opencode-go` exclusion: PR 260 first (C3), then drop only if opencode retires.
 R2-26. `bin/npm_metadata.py` and its test (0 refs): DELETE in E10.
+
+## Amendments during Wave 2/3 reviews (2026-11-06)
+
+- **Ruling 8 amended**: `.github/workflows/test.yml` is no longer a merger's file; each slice removes its own deleted tests from it (one line each), so CI stays green per slice. `agents/claude/settings.json.tmpl`, README rows and `docs/skills.md` rows stay the merger's.
+- **E4 review**: the `/compact` wording the E4 brief asked for was wrong (the repo's memory records that Claude cannot run built-in slash commands; that is why self-slash existed); the auto-compaction wording is restored. The non-Paseo successor note in `context_size_nudge.py` is restored (it never needed self-slash). Successor launches from inside an agent must use `env -u PASEO_AGENT_ID -u PASEO_AGENT_CWD paseo run …` (else the successor is parented to the dying session) and the predecessor is archived by the successor after it answers, never by itself mid-turn.
+- **Known flake added to the baseline**: `tests/test_relay_card_alert.py` fails intermittently at base fb3b9de under load (5 of 6 runs in a clean worktree, three different tests); the file is deleted by E3, so it is listed, not fixed.
