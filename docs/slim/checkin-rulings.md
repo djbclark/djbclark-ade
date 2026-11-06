@@ -30,13 +30,14 @@ branch cherry-picks the named files.
 - Why land rather than park: five new pieces (`instruction-lint`,
   secret-read-deny, `post-edit-check`, `/steps plan`, `ade-retro`) are policy
   layer, not harness glue; none depends on a deletion target. The slim-down
-  will later (E9, under H1 Claude-only) strip the Codex `apply_patch` paths
-  from the gate and `post-edit-check`, and (E5) decide whether `ade-retro`
-  runs as a Paseo schedule. `instruction-lint` is useful to the E11 docs sweep
+  will later strip the Codex `apply_patch` paths from the gate and
+  `post-edit-check` only if and when Codex is retired (J2; "Claude-only" is
+  this work, not the fleet), and (E5) decide whether `ade-retro` runs as a
+  Paseo schedule. `instruction-lint` is useful to the E11 docs sweep
   itself.
 - Dependency: `agents/claude/settings.json.tmpl` and
   `tests/test_secret_deny_repo.py` move together if `agents/` ever moves; the
-  plan keeps the Claude template (E6), so no conflict.
+  plan keeps the surviving providers' templates (E9), so no conflict.
 - Operator does: tell the session to fix the three findings and refresh the
   marker; rule on the `/retro` title-trust thread; merge #289 with
   `--match-head-commit`.
@@ -58,7 +59,7 @@ branch cherry-picks the named files.
 - **PR 292** (exit-69 guards in acp-dispatch, codium-ai, app-tamer-ab,
   paseo-set-model; coding-bot clipboard; skill-everywhere root): DISCARD.
   acp-dispatch (E6), codium-ai and app-tamer-ab (E1), paseo-set-model (E4),
-  coding-bot (H1) and skill-everywhere (E10) are all deletion or replacement
+  coding-bot (J2a) and skill-everywhere (E10) are all deletion or replacement
   targets; porting them to Linux is work the slim-down undoes. Nothing to
   cherry-pick.
 - Combined branch `claude/issue-279-linux-ports`: superseded; keep until
@@ -82,8 +83,8 @@ branch cherry-picks the named files.
   date.
 - If Wave 3 finds the gap is real (native resume plus the plugin cannot say
   "this turn was interrupted mid-write"), land #290 then, refreshed.
-- Operator does: mark #290 draft; this is also plan question H9 (section H
-  of PLAN.md), answer it if you disagree.
+- Operator does: mark #290 draft; this is also plan question J9 of PLAN.md,
+  answer it if you disagree.
 
 ## R5. HELM LEAD, Paseo agent 7c58015b (omp, Opus 5.5), PRs 261 / 270 / 294
 
@@ -93,10 +94,10 @@ branch cherry-picks the named files.
   provide (D2 row 2). Loss: three repair rounds of slice work, all on the
   branch.
 - **PR 270** (`bin/quota-surplus`, "use it or lose it" watchdog on
-  `route_agent.py` and `aiuse`): PARK until H1. Under Claude-only the whole
-  routing layer collapses (E7) and the surplus idea becomes "run the nightly
-  schedules before the weekly reset", a Paseo schedule, not a tool. Under
-  multi-vendor it lands as is (local-review clean).
+  `route_agent.py` and `aiuse`): PARK until J2 and D4. `route_agent.py` is
+  KEEP (E7), so the PR can land on the trimmed router if `session-guard` /
+  `usage-auto-resume` do not already cover "spend before reset"; if they do,
+  DISCARD. local-review was clean.
 - **PR 294** (`skills/helm/lead.md` stagger rule, 7 lines): DISCARD with
   helm (E4). If the operator wants the rule kept, it is one sentence in the
   rewritten `docs/orchestration-practices.md` (E11).
@@ -135,8 +136,8 @@ stopped.
 | 231 | `mds-client-probe` | load-watch mds probe | PARK with #293 (E5) |
 | 254 | `habits-gate-subshell` | `bash_habits_gate` parsing fix | LAND if small and green (a Claude hook, KEEP), else PARK to Wave 5 |
 | 256 | `open-clean-env` | `bin/open-clean`, launch apps without the agent env | PARK; a Mac-only utility, decide in E1/E2 audit (likely MOVE to site-djbclark) |
-| 260 | `route-repo-scope` | route_agent per-repo pools (opencode-go) | DISCARD under H1 Claude-only; PARK otherwise (E7) |
+| 260 | `route-repo-scope` | route_agent per-repo pools (opencode-go) | PARK: `route_agent.py` is KEEP (E7); land after the registry switch if opencode survives J2, else drop the opencode-go rules and land the rest |
 | 269 | `coding-bot-peer-link` | coding-bot over peer-link | TRANSFER, then close: the operator ruled (consolidated report E9j) that the wrapper is re-homed into frdminc/peer-link with one repair round there, `~/.local/bin/coding-bot` and home-agents.md item 40 repointed, and a short `tell-coding-bot` pointer skill kept here; the slim branch takes nothing from the PR but keeps the branch and worktree `~/src/djbclark-ade-cb-pl-wt` until the transfer lands (superseded the earlier DISCARD, 2026-11-06, Codex P2 on PR 295) |
-| 281 | `fix/opencode-bridge-econnrefused-guard` | opencode-plugin-guard | DISCARD under H1 (E9); PARK otherwise |
+| 281 | `fix/opencode-bridge-econnrefused-guard` | opencode-plugin-guard | PARK per the operator's E9c answer ("wait until after the split; its fate follows whether opencode support survives"), not DISCARD |
 
-Operator does: nothing yet; these wait for batch 2 and H1. If an owner reports, its ruling supersedes this row.
+Operator does: nothing yet; these wait for J2. If an owner reports, its ruling supersedes this row.
