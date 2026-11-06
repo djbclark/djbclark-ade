@@ -416,6 +416,25 @@ def test_routing_policy_marks_argon_frontier_and_scopes_opencode_go(qs):
     assert pol.for_row("opencode-go", None).allow_repos == ("techno-euphora",)
 
 
+def test_state_lock_serializes_check_and_notify(qs, tmp_path, monkeypatch, capsys):
+    # local-review P2 on 28bd211: an overlapping run must not replace the state another run is updating
+    import fcntl
+    monkeypatch.setenv("QUOTA_SURPLUS_NOW", NOW.isoformat())
+    monkeypatch.setenv("QUOTA_SURPLUS_LOCK_TIMEOUT", "0.3")
+    f = tmp_path / "aiuse.json"
+    f.write_text(json.dumps(argon_data()))
+    lock = tmp_path / "state" / "state.json.lock"
+    lock.parent.mkdir(parents=True)
+    with lock.open("a") as held:
+        fcntl.flock(held.fileno(), fcntl.LOCK_EX)
+        assert qs.main(["check", "--input", str(f)]) == 75
+        assert qs.main(["notify", "--input", str(f)]) == 75
+        assert not (tmp_path / "state" / "state.json").exists()
+        assert qs.main(["check", "--dry-run", "--input", str(f)]) == 0      # a dry run takes no lock
+    assert qs.main(["check", "--input", str(f)]) == 0
+    assert (tmp_path / "state" / "state.json").exists()
+
+
 def test_dispatch_line_survives_the_shell(qs):
     # local-review P2 on 911bf68: zai's model id holds a backslash the shell would eat unquoted
     import shlex
