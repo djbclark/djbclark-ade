@@ -1181,7 +1181,7 @@ drops the agent identity and its subagent children.
 
 **ade-side workaround (2026-10-23):** `bin/paseo-set-model` (`set <agent> <model>`, `list --json`) calls the daemon's
 `set_agent_model_request` through the bundled CLI's own client, run in Paseo's Electron node; it keeps the agent id and is
-what `bin/claude-fleet-governor` uses to move live agents between models.
+what the fleet governor (deleted 2026-11-07, slim-down E7) used to move live agents between models.
 
 ### Searched first
 

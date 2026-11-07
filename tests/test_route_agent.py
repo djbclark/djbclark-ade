@@ -2478,3 +2478,25 @@ class TestQuotaFromPaseoUsage(unittest.TestCase):
             again, _ = r.paseo_usage()
         self.assertEqual((len(rows), why), (1, "paseo usage ls --json"))
         self.assertEqual(again, rows)                     # memoised for PASEO_MEMO_TTL
+
+
+class TestArgonFrontierFallback(unittest.TestCase):
+    """Gemini 4 Argon, through Paseo's antigravity provider, is the frontier FALLBACK behind codex and claude (operator
+    2026-10-31; restored 2026-11-07 for tendcf/nix2cf's review route 3)."""
+
+    def test_the_argon_model_maps_to_its_own_pool_and_other_antigravity_models_to_none(self):
+        self.assertEqual(r.map_agent_to_provider("antigravity", "gemini-4-argon"), ("antigravity", "gemini_argon"))
+        self.assertEqual(r.dispatch_service_name("antigravity", "gemini-4-argon"), "antigravity-argon")
+        self.assertIsNone(r.map_agent_to_provider("antigravity", "gemini-3.8-flash"))
+        self.assertIn("gemini-4-argon", r.POLICY["dispatch"]["frontier_models"])
+        self.assertNotIn("antigravity", {s.name for s in r.discover(IDLE)})      # the provider's other pools stay unrouted
+
+    def test_argon_takes_frontier_only_while_codex_or_claude_is_short(self):
+        q = {**IDLE, "antigravity-argon": {"remaining": 90.0}}
+        self.assertNotEqual(r.route("frontier", quota=q).service.name, "antigravity-argon")
+        q.update(codex={"remaining": 0.0}, claude={"remaining": 0.0})
+        c = r.route("frontier", quota=q)
+        self.assertEqual((c.service.name, c.dispatch),
+                         ("antigravity-argon", "acp-dispatch antigravity --model gemini-4-argon --effort high --kind frontier"))
+        q.pop("antigravity-argon")
+        self.assertIsNone(r.route("frontier", quota=q))          # a fallback with no reading fails closed

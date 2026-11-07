@@ -2334,6 +2334,9 @@ def map_agent_to_provider(agent: str, model: str | None) -> tuple[str, str | Non
         if not model or model in ("default", "auto"):
             return "cursor", "auto"
         return "cursor", None
+    if agent == "antigravity":
+        # the Gemini 4 Argon window is its own aiuse pool family; the provider's other pools are not routed
+        return ("antigravity", "gemini_argon") if (model or "").lower().startswith("gemini-4-argon") else None
     if agent == "opencode":
         if model and model.startswith("opencode-go/"):
             return "opencode-go", None

@@ -24,8 +24,9 @@ deadline install [--ade DIR] [--dry-run] [--backend auto|launchd|systemd|cron] [
 
 `--on-expire`: `kill` (default: SIGTERM to the process group, SIGKILL after `--grace`, default 60 s; Hermes is pinged), `notify` (owner and Hermes
 only, nothing killed), `relay` (kill, then tell the owner through `relay.py` with the name, budget, overrun and checkpoint), `reroute:RECORD`
-(kill, then `acp-dispatch reroute RECORD --escalate --detach --no-wait`: route_agent climbs one rung of `[escalation]` in `config/routing.toml`;
-deadline never names a model; the reroute is waited on up to 120 s and never killed if slower).
+(kill, then `acp-dispatch reroute RECORD --escalate --detach --no-wait`; deadline never names a model; the reroute is waited on up to 120 s
+and never killed if slower. Since 2026-11-07 the acp-dispatch shim retires `reroute` (exit 2) and route_agent's `[escalation]` ladder is gone,
+so this mode kills and pings "reroute FAILED": re-dispatch the slice on the next rung by hand, `model-routing` D2).
 **A budget is enforced, never only announced.** The one named exception is the announce-only wait: a record with no `--pid`/`--pgid` has
 nothing to kill, so `start` refuses the default `kill` for it (exit 2) and it must say `--on-expire notify`, `relay` or `reroute:RECORD`
 explicitly; `--on-expire notify` with a pid is likewise the operator's explicit choice.

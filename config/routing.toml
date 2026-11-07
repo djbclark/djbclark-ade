@@ -16,13 +16,14 @@
 # 2026-10-19, API-only work first and then code/bulk slices, so the credits are spent
 # before they expire each month.
 # Surviving pools (J2 pool audit, docs/slim/log.md): claude, codex, cursor (cursor-auto, cursor,
-# cursor-cloud), opencode (opencode-go, opencode-zen-free), omp, hermes (never a target) and
-# antigravity (reached through acp-dispatch by name; no routed row since 2026-11-06).
+# cursor-cloud), opencode (opencode-go, opencode-zen-free), omp, antigravity (its Gemini 4 Argon
+# window only, as the frontier fallback, restored 2026-11-07 for tendcf/nix2cf's review route 3)
+# and hermes (never a target).
 # `models` is the acp-dispatch `--model [--effort L]` suggestion per kind, ids as
 # `paseo provider models <agent> --json` lists them (`route_agent.py services --check-models`);
 # `agent` is the Paseo provider when it differs from the pool name.
 
-# Google AI Pro (Paseo's antigravity provider; the router has no service for it since 2026-11-06) does NOT include API access:
+# Google AI Pro (Paseo's antigravity provider; the router's one row for it is `antigravity-argon`) does NOT include API access:
 # subscriptions are chat-interface only and a Gemini API key bills separately, so wiring Hermes or any agent to a
 # GEMINI_API_KEY would spend real money.
 
@@ -78,7 +79,8 @@ default_profile = { bulk = 60, mechanical = 60 }
 # hermes is the operator's own assistant (operator 2026-10-15). clinepass: reserved as the lifeline/substrate of BOTH
 # Hermes and Dann (operator 2026-10-23), never a slice target. Retired TUIs whose accounts aiuse still reports or
 # whose providers Paseo still lists (slim-down E9, 2026-11-06; grok 2026-11-07): no curated row drives them, so
-# discovery must not surface them as unprofiled, dispatchable services. grok-bot is the Cursor-billed Chief of
+# discovery must not surface them as unprofiled, dispatchable services (`antigravity` here is the provider's other
+# pools, Flash and Claude/GPT; its Argon window is the curated `antigravity-argon` row). grok-bot is the Cursor-billed Chief of
 # Staff's pool, never a slice target. Names the dispatch gate holds for approval ([dispatch].operator_gated) are
 # never discovered either.
 never_route = ["hermes", "clinepass", "antigravity", "zai", "alibaba", "devin", "copilot", "pi", "crush", "kiro",
@@ -113,8 +115,9 @@ operator_gated = ["hermes"]
 # ACP_OPERATOR_APPROVED=fable-xhigh. Fable at high is the frontier route_agent.py suggests.
 fable_gated_efforts = ["xhigh", "max"]
 # Substring match on --model (case-insensitive): these only run with --kind frontier
-# (operator 2026-10-18; route-override does not skip this).
-frontier_models = ["gpt-6-astra", "fable"]
+# (operator 2026-10-18; route-override does not skip this). gemini-4-argon (operator 2026-10-31): FALLBACK ONLY behind
+# gpt-6-astra and Fable, through Paseo's antigravity provider (the `antigravity-argon` service).
+frontier_models = ["gpt-6-astra", "fable", "gemini-4-argon"]
 # Optional hard cap per service (or agent name via ACP_DISPATCH_INFLIGHT). Empty on
 # purpose: the in-flight quota reservation replaced `codex = 1` (operator 2026-10-18).
 # ACP_DISPATCH_INFLIGHT=name=N still overrides per run (service or agent name).
@@ -338,6 +341,28 @@ note = "Cursor Cloud Agent: leaves the Mac, pushes a branch, lead opens the PR; 
 shares_pool = "cursor"
 max_parallel = 2
 models = { code = "claude-sonnet-5-5", bulk = "claude-haiku-5-5", mechanical = "claude-haiku-5-5" }
+
+# The Google AI Pro plan's Gemini 4 Argon window: frontier FALLBACK only (operator 2026-10-31, PR 224). Retired with the
+# agy TUI on 2026-11-06 and restored 2026-11-07 (slim-down E7) on Paseo's antigravity provider, because tendcf and nix2cf
+# review route 3 (`acp-dispatch antigravity --model gemini-4-argon --kind frontier`, their AGENTS.md) needs a frontier
+# row: without one the dispatch is refused as ineligible. aiuse reports the window as pool family `gemini_argon`
+# (antigravity/gemini_argon). Used only while codex OR claude is short of quota for `frontier` (`fallback_after`: route()
+# skips it otherwise); a fallback with no fresh reading is never used. The acp-dispatch shim (E6) does not apply the
+# fallback predicate itself: the lead dispatches Argon only when `route_agent.py plan` names it.
+[[service]]
+name = "antigravity-argon"
+cli = "antigravity (Gemini 4 Argon; frontier fallback behind gpt-6-astra and Fable)"
+good_at = { frontier = 5 }
+billing = "subscription"
+note = "Gemini 4 Argon on the Google AI Pro plan, 1M context; own weekly window; frontier fallback only (operator 2026-10-31)"
+judgment_tier = true
+pool = ["antigravity", "gemini_argon"]
+fallback_after = ["codex", "claude"]
+window = "Gemini 4 Argon weekly"
+max_parallel = 1
+access = "cli-only"
+agent = "antigravity"
+models = { frontier = "gemini-4-argon --effort high" }
 
 [[service]]
 name = "clinepass"
