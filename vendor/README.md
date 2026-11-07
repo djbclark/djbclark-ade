@@ -15,6 +15,8 @@ the whole system without leaving it.
 
 ## Pointers (own homes; not vendored)
 
+- **fleet-watch** — the launchd fleet change notices to Hermes and the paused upstream watchers' scheduler: site-djbclark
+  `bin/fleet-watch` (github.com/djbclark/site-djbclark; it was never in this repo's `bin/`, 2026-11-06).
 - **aiuse** — operator's cross-service usage tool: github.com/djbclark/aiuse
   (installed via pipx). `aiuse --json` contract:
   `docs/json-contract.md` in that repo, or `aiuse schema`.

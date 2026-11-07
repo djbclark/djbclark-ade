@@ -4,8 +4,8 @@ Snapshot **2026-10-11**, re-based on Paseo **2026-11-07** (slim-down E11). The r
 follows (`fan-out`, `research`, `dialogue`, `model-routing`). Each skill carries the short form of the rules it needs
 and links here for the reasons and sources.
 
-**Standing operator requirement:** every orchestration skill can dispatch to several providers. Since 2026-11-06 every
-agent is a Paseo agent: in process through the Agent tool or a Workflow, out of process through `paseo run` (directly,
+**Standing operator requirement:** every orchestration skill can dispatch to several providers. Since 2026-10-31 (Paseo is
+the only harness) every agent is a Paseo agent, and since 2026-11-06 `acp-dispatch` is a shim over `paseo run`: in process through the Agent tool or a Workflow, out of process through `paseo run` (directly,
 or through `bin/acp-dispatch`, a `paseo run` shim kept for one cycle with its report, `.done`, record and exit-code
 contract; Wave 6's follow-up PR removes it). The providers are claude, codex, cursor, antigravity, opencode, omp and
 hermes (`paseo provider ls --json`); `skills/fan-out` is the how-to.
@@ -178,7 +178,8 @@ the task, and the ambiguity is copied into every slice.² ³ Every brief has:
 ## 5b. Unattended issue → PR (from `docs/history/coding-factory.md`, 2026-09-21)
 
 The factory question was answered then: the trigger is a small GitHub Actions workflow on a label, the coder is a
-pool already paid for (Copilot cloud agent, Cursor Cloud through `bin/cursor-cloud`, or a local Paseo agent), and the
+pool already paid for (Cursor Cloud through `bin/cursor-cloud`, or a local Paseo agent; the Copilot cloud agent was
+an option until the 2026-11-06 pool audit found no Copilot plan), and the
 gate is repository configuration. The gate exists since 2026-11-06 (PR-only master, the required `adversary-marker`
 status, the Tests checks); the trigger is not built. A PR such a coder opens is outside input until the owner edits
 its body (AGENTS.md, Trust).

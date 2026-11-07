@@ -16,7 +16,7 @@ why, and how to re-enable. This table is otherwise the 2026-08-23 snapshot.
 |---|---|---|---|
 | `hermes` | stdio: `hermes mcp serve` | user | The **Hermes Agent** as an MCP server — see below |
 | `beeper` | HTTP: `http://127.0.0.1:23373/v0/mcp` | user | Beeper Desktop's local API — cross-network chat search/read/send. OAuth-gated; see below. Re-enabled in Claude Code 2026-10-16 (was blocked 2026-10-10) |
-| `graft` | stdio: `graft mcp` | **removed 2026-10-18** (was this repo's `.mcp.json`) | Repo context graph. Deregistered from every agent TUI on 2026-10-18 (95 MCP calls vs ~24,000 CLI uses in 14 days; a stdio process per session); use the `graft` CLI. Claude Code also lists `graft` and `token-savior` under `disabledMcpjsonServers` in `~/.claude/settings.local.json`, so a stray project `.mcp.json` cannot bring it back. graft 0.23.0's SessionStart reconcile re-added the user-scope entry after the 2026-10-16 upgrade; removed again 2026-10-20 (`claude mcp remove graft -s user`), and the Hermes watchdog `check-graft-wiring-invariants.sh` now fails when any TUI registers it (94e8d95) |
+| `graft` | stdio: `graft mcp` | **removed 2026-10-18** from every TUI (this repo's `.mcp.json` still lists it, neutralised by `disabledMcpjsonServers`) | Repo context graph. Deregistered from every agent TUI on 2026-10-18 (95 MCP calls vs ~24,000 CLI uses in 14 days; a stdio process per session); use the `graft` CLI. Claude Code also lists `graft` and `token-savior` under `disabledMcpjsonServers` in `~/.claude/settings.local.json`, so a stray project `.mcp.json` cannot bring it back. graft 0.23.0's SessionStart reconcile re-added the user-scope entry after the 2026-10-16 upgrade; removed again 2026-10-20 (`claude mcp remove graft -s user`), and the Hermes watchdog `check-graft-wiring-invariants.sh` now fails when any TUI registers it (94e8d95) |
 | `ghost-os` | stdio: `/opt/homebrew/bin/ghost mcp` | user | macOS UI automation via accessibility tree + vision. **Blocked in Claude Code since 2026-10-10** (`deniedMcpServers`) |
 | `hindsight` | stdio: `node ~/.hindsight/coding-agents/dist/mcp-server.js` | user | Per-repo Hindsight coding-agent memory (the 🧠 banner) |
 | `hindsight-shared` | HTTP: `http://127.0.0.1:8888/mcp/hermes-shared/` | user | Shared Hindsight bank (`hermes-shared` in the URL is the bank name) |
@@ -34,7 +34,8 @@ public-repositories-read-only token (`FIRECRAWL_GITHUB_PUBLIC_TOKEN`, set as a m
 from sudo-secretspec), GitHub traffic through the same two proxy legs as SearXNG (vps-primary and pastebin.xvm.mit.edu, both
 allowing `api.github.com`), a 10-minute cache and stale-if-error. Design, knobs, failure modes and operations:
 firecrawl-hyades `docs/developer-search.md`. The Mac router answered this route itself from 2026-10-24 (PRs 41, 43, 45)
-until this cutover and no longer holds a GitHub token. Considered and not built: Exa and Parallel as extra sources; Firecrawl's
+until this cutover; the router (`bin/firecrawl-router`) was deleted 2026-11-06 (slim-down Wave 3b), so no GitHub token
+remains on the Mac side. Considered and not built: Exa and Parallel as extra sources; Firecrawl's
 keyless hosted developer index (the commercial API, off by djbclark's ruling of 2026-10-18); free-tier hosts (Cloud Run, Fly,
 Koyeb) for the microVMs: only Playwright and devsearch fit them, and each needs cross-provider networking.
 
@@ -171,7 +172,7 @@ loops.
 
 ### Messaging: use Hermes (operator decision, 2026-08-23)
 
-**Default to `hermes` for all messaging.** Beeper Desktop is often not
+**Default to `hermes` for operator-facing platform messaging** (Discord, Signal, …; agent-to-agent messages go by `paseo send --json` or the relay shim with a named ack, standing order 10, never through this bridge). Beeper Desktop is often not
 running, and the operator uses it only occasionally — so it is not a
 dependable path for an agent. Reach for it only when the operator explicitly
 asks, or when you need cross-network *search* that Hermes cannot do and you
@@ -200,9 +201,8 @@ gmail-search skill, `~/ops/site-public-djbclark/skills/gmail-search/SKILL.md` (m
 The statusline segment (this repo's `.claude/settings.json` →
 `.claude/helpers/graft-statusline.cjs` → `@nanonets/graft` `dist/claude/`)
 renders "◤ graft · not built · run `graft build`" whenever the stats cache
-reports 0 nodes. This repo is docs/markdown-only, so `graft build` parses 0
-code files and legitimately produces a 0-node wiring graph — the statusline
-can't distinguish "built but empty" from "never built". Nothing to automate:
+reports 0 nodes. This repo's `graft/` cache is local and ignored, so a fresh checkout reads "not built" until `graft build`
+runs (the operator's step after the slim-down's final merge, 2026-11-07); after it, a 0-node reading is a real bug. Nothing to automate:
 in repos with a real graph, the `PostToolUse` hook already auto-syncs after
 every edit (detached `sync-run.js`, the "syncing…" state). The real fix is
 upstream (render empty ≠ missing); until then, ignore the segment here.

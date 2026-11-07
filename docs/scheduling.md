@@ -3,7 +3,7 @@
 The repo's unattended jobs (sweeps, watchers, collectors) are written as launchd plists in [`launchd/`](../launchd/) and
 [`config/launchd/`](../config/launchd/). Those plists stay the **source of truth**. [`bin/ade_sched.py`](../bin/ade_sched.py)
 (a library, issue #279 slice S0) and its CLI [`bin/ade-sched`](../bin/ade-sched) read a plist, fill its placeholders and
-install it on whatever this machine schedules with: (Python 3.10 or later for `ade-sched` itself; `pr-policy` and `context-budget-check` need 3.11+ for `tomllib`, so on Ubuntu 22.04, whose python3 is 3.10, install a newer Python first; 2026-11-04):
+install it on whatever this machine schedules with: (Python 3.10 or later for `ade-sched` itself; `pr-policy` needs 3.11+ for `tomllib` (`context-budget-check`, which also does, runs as a Paseo schedule since 2026-11-06, not through ade-sched), so on Ubuntu 22.04, whose python3 is 3.10, install a newer Python first; 2026-11-04):
 
 | backend | what it writes | how it activates |
 | --- | --- | --- |
@@ -92,8 +92,9 @@ has no such key, and ade-sched leaves it out of the launchd copy. The API takes 
 | `ADE_SCHED_UNIT_DIR` | `${XDG_CONFIG_HOME:-~/.config}/systemd/user` (a relative `XDG_*` counts as unset) | `unit_dir=` |
 | `ADE_SCHED_LOCK` | `${XDG_STATE_HOME:-~/.local/state}/ade/ade-sched.lock` | `lock_path=` |
 
-A keyword beats the env variable, so an installer keeps honouring its own older override (`ACP_DISPATCH_LAUNCHCTL`,
-`*_LAUNCH_AGENTS`) by passing it through. `tests/conftest.py` pins all seven variables (four binaries, two directories, the lock) to `/usr/bin/true` and a throwaway
+A keyword beats the env variable, so an installer could honour its own older override by passing it through; none does
+since 2026-11-06 (the installers with older overrides, acp-dispatch's reap, context-budget-check's and skillopt-night's,
+were deleted in slim-down E5, E6 and E10; `bin/deadline` and `bin/pr-policy` pass none). `tests/conftest.py` pins all seven variables (four binaries, two directories, the lock) to `/usr/bin/true` and a throwaway
 directory, unconditionally, so no test touches a real launchd, systemd or crontab.
 
 ## Linger

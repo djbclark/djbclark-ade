@@ -3,16 +3,14 @@
 Status: v1, the plan of record for the migration. v0 (2026-10-29, omp 086494f8) was refined by lead
 1e61c979 (chain `standalone-b457`) with two second opinions, codex astra (GPT-6) and Fable 5.1, two
 research passes, djbclark's answers in section F (2026-10-30), and the fixes for adversary
-round 1's findings on PR 154 (safety of probes, archive and drains; plugin scope and fail modes). Until phase D7 lands,
-`README.md`, `AGENTS.md` and `docs/orchestration-practices.md` still describe the multi-harness design;
-this plan wins where they disagree about the future, they win about today. Sources: section I.
+round 1's findings on PR 154 (safety of probes, archive and drains; plugin scope and fail modes). Since 2026-11-07 `README.md`, `AGENTS.md` and `docs/orchestration-practices.md` describe today on Paseo (slim-down E11; D7 is superseded by its Waves 2-5); this plan records its rulings and the open phases (D1, D3, D8). Sources: section I.
 
 **Update 2026-10-31 (djbclark):** herdr (except the `herdr4paseo` and `paseo4herdr` bridges), Orca and BB
 (get-bb/bb, npm `bb-app`; not `bigteam`) are retired **from djbclark-ade** by ruling (no skill or doc recommends them; a few live code paths still reach herdr or Orca until D4/D6, listed in AGENTS.md), and Paseo is the only
 harness. They stay installed and configured on djbclark's computer, untouched ("mostly removed from djbclark-ade, not from my
 computer"; "don't delete or modify the actual orca config"): **machine-side uninstall is NOT planned.** The docs now say so
-(`AGENTS.md`, `README.md`, `docs/apply-toolchain-prompt.md`, retired skill descriptions). The phases below are unchanged.
-Many files still describe herdr or Orca as live until phase D7's sweep.
+(`AGENTS.md`, `README.md`; the toolchain prompt and the retired skills are under `docs/history/` or deleted). The phases below are unchanged.
+Files that described herdr or Orca as live were removed or rewritten by the slim-down's sweep (E2, E11, 2026-11-06/07); `bin/herdr-server-run` and its plist remain.
 
 **D7 conflict resolved (2026-10-31):** `bin/herdr-server-run` and `config/launchd/dev.herdr.server.plist` STAY: the installed
 herdr server and the `herdr4paseo` / `paseo4herdr` bridges run on them, so D7's deletion of herdr tooling excludes both.
@@ -60,8 +58,7 @@ no longer describes today's tree. Where a phase below says what will be built, d
    `/paseo-handoff`, `/paseo-advisor`, `/paseo-committee` skills (Paseo's own; the `ade-` vendored copies were deleted 2026-11-06); not `/bigteam` until D5 rewrites it.
    Exception until D5: `acp-dispatch` stays the dispatcher for frontier consults and adversary reviews,
    because its quota gates are the only ones that exist today (H4). Until D1.3 and D2's gate have both
-   passed, fan-out uses `isolation: local` workspaces only, and task worktrees come from `git worktree add`
-   (order 9), whatever a skill such as `/paseo-handoff` offers (D0.3).
+   passed, fan-out used `isolation: local` workspaces only, with task worktrees from `git worktree add` (D0.3); the slim-down overtook this interim rule (2026-11-07): order 9 and `skills/fan-out` run each slice in a Paseo worktree (`paseo run --new-workspace worktree …`).
 7. **Fable and codex astra take part in the re-architecting** (djbclark, 2026-10-29); this overrides the
    routing-policy line that reserves them for `frontier` consults. Both consulted on v0 (section I).
 8. **Herdr bridges and attach clients stay, for edge cases** (djbclark, 2026-10-30): two projects, each
@@ -173,12 +170,9 @@ no longer describes today's tree. Where a phase below says what will be built, d
       agent job, so one budget never has two enforcers.
    2. **Registration.** The starter registers a budget, an owner, the process group and an on-expiry action
       before it starts, through the interim `bin/deadline` (`start` or `run -- CMD`; landing in PR 223, B9
-      absorbs its sweep in D1). Since 2026-11-02 `pr-wait`, `acp-dispatch-wait` and `load-watch admit --wait` register
-      themselves with defaults (`docs/deadline.md`, "Waiters register themselves"); still planned: `local-review`,
-      then `bg`, which lives in `~/ops/site-private-djbclark` and waits for djbclark's yes (order 11).
+      absorbs its sweep in D1). Since 2026-11-02 `acp-dispatch-wait` and `load-watch admit --wait` register themselves with defaults (`docs/deadline.md`, "Waiters register themselves"; `pr-wait` did too until E8 deleted it, 2026-11-07, and `local-review` went with it; `bin/review-launch` bounds its own run with `--timeout`, exit 124); still planned: `bg`, which lives in `~/ops/site-private-djbclark` and waits for djbclark's yes (order 11).
    3. **Per-class defaults and maxima**, so a declared budget is still bounded: an admission wait 15 min
-      (maximum 30 min, longer needs a reason); a test run 30 min; `local-review` 15 min; `pr-wait` and a review
-      wait 60 min; any other class 30 min. A registration above its class maximum needs a reason and is
+      (maximum 30 min, longer needs a reason); a test run 30 min; `review-pr`/`review-launch` 15 min; a CI or review wait 60 min; any other class 30 min. A registration above its class maximum needs a reason and is
       logged. A **soft notice** goes to the owner at 80 % of the budget (Celery's soft limit), the hard stop at
       100 %.
    4. **Clocks.** Compute budgets run on awake time (macOS `mach_absolute_time`, which `time.monotonic` uses;
@@ -192,8 +186,7 @@ no longer describes today's tree. Where a phase below says what will be built, d
       does not reuse a pid while a process group with that id exists). The descendant tree is recorded at
       registration, on **every sweep pass while the job runs**, and at expiry, and the record only grows: a pid
       seen once (with its start time) stays in it until it is gone. So a child that leaves the group (`setsid`,
-      daemonizers) and loses its parent between registration and expiry is still known if any pass saw it, the
-      way `local-review` records children while their parent runs. On Linux the job runs in its own cgroup
+      daemonizers) and loses its parent between registration and expiry is still known if any pass saw it, the way `local-review` did (deleted 2026-11-07, E8). On Linux the job runs in its own cgroup
       (`systemd-run --user --scope`), so no child can escape and the cgroup is the member list. macOS has no
       cgroups: the residual gap is a child that escapes AND loses its parent within one sweep interval; it is
       named here rather than hidden. Children are signalled by pid, start time checked, and every recorded pid
@@ -236,7 +229,7 @@ Counts are `rg -li` over the repo on 2026-10-29, excluding `graft/` and `docs/ha
 
 | Capability today | Footprint | Disposition | Replacement (section G for plugins) |
 |---|---|---|---|
-| `skills/session-finder/{relay.py,fleet.py,launch.py,where.py,prompt_line.py,nested_pty.py,adapters/}` | relay.py in 44 files | non-Paseo routes RETIRE in D4; relay.py and fleet.py in D6, once no watcher calls them | `send_agent_prompt` with B2's states; G3 for delivery and deferred send |
+| `skills/session-finder/{relay.py,fleet.py,launch.py,where.py,prompt_line.py,nested_pty.py,adapters/}` | relay.py in 44 files | non-Paseo routes RETIRE in D4; relay.py and fleet.py in D6, once no watcher calls them. Done 2026-11-06 (E3/E3b): `fleet.py`, `launch.py`, `where.py`, `prompt_line.py`, `nested_pty.py`, `adapters/` deleted; `relay.py` is a one-cycle shim over `paseo send --json` until 2026-11-20 | `send_agent_prompt` with B2's states; G3 for delivery and deferred send |
 | herdr as a harness (`bin/herdr-*`, herdr docs and skills, `-t/-p` naming, panes hosting agents, pane typing) | 139 files | RETIRE; **retired from djbclark-ade by ruling 2026-10-31** (docs now; the tool stays installed and untouched, no uninstall planned; `bin/herdr-server-run` and `config/launchd/dev.herdr.server.plist` stay) | Paseo workspaces; naming `-pw` only |
 | `herdr4paseo` (A8.1) | own project | KEEP, edge case | one A8 bridges doc and skill |
 | `paseo4herdr` (A8.2), plugin `herdr-harness` (installed, disabled) | own project | KEEP, edge case | same doc and skill |
@@ -249,9 +242,9 @@ Counts are `rg -li` over the repo on 2026-10-29, excluding `graft/` and `docs/ha
 | `acp-dispatch`, `acp-dispatch-wait`, records, launchd runners, reap sweep, `tell`, `resume`, `reroute`, exit-code contract (3 no report, 4 BLOCKED, 124 timeout, 76 only the waiter's own deadline stopped `acp-dispatch-wait`: the slice still runs) | 109 files | REPLACE in D5 | `paseo run`/`create_agent` + G1 jobs/deadline + G2 admission + `usage-auto-resume` (+ G5); report-file footer stays as a skill; `paseo run --output-schema` for typed results |
 | `acp-dispatch outcome` → `route_agent.py calibrate`, `agent_stats.py burn` | — | KEEP the data | G1 writes the same outcome records, so calibration keeps its source (Fable 2.1, 4.3) |
 | `/bigteam`, job records under `~/.local/state/bigteam` | 73 files | REWRITE in D5 | `paseo run` fan-out on G1 |
-| `self-slash`, `/new`-`/baton` lifecycle, successor launch, `paseo-new-seat`, `paseo-bypass-watch` | — | SIMPLIFY in D5 | successor created **top-level** from the CLI without `PASEO_AGENT_ID` until D1 proves archive-parent behaviour (an agent-scoped `create_agent` makes the successor a child of the retiring agent, Fable 2.4); keep `/baton` and Tier 1/Tier 2 |
-| `helm`, `/helm-all` | — | REPLACE | `paseo permit ls` / `respond_to_permission` for live seats; `paseo ls -a` and Tier 1 pointers for ended sessions |
-| `herdr-tidy`, `herdr-sleeper`, `agent-sleep`, `autorename` herdr half | — | RETIRE after the D0.2 drain (sleepers hold Claude session UUIDs per pane: `plugins/herdr-sleeper/herdr-sleeper list` (bin/herdr-sleeper was removed 2026-10-31) plus the legacy journal `~/.local/state/herdr-sleeper/sleeping.json` must be empty or each resumed as a Paseo agent) | `session-janitor` (disabled until D2, B4.3), `archive_agent`; Paseo titles |
+| `self-slash`, `/new`-`/baton` lifecycle, successor launch, `paseo-new-seat`, `paseo-bypass-watch` | — | SIMPLIFY in D5; done 2026-11-06 (E4): the three tools deleted, successors start top-level with `env -u PASEO_AGENT_ID -u PASEO_AGENT_CWD paseo run …` (`skills/handoff`) | successor created **top-level** from the CLI without `PASEO_AGENT_ID` until D1 proves archive-parent behaviour (an agent-scoped `create_agent` makes the successor a child of the retiring agent, Fable 2.4); keep `/baton` and Tier 1/Tier 2 |
+| `helm`, `/helm-all` | — | REPLACE; done 2026-11-06 (E4): both deleted, `docs/helm.md` in `docs/history/` | `paseo permit ls` / `respond_to_permission` for live seats; `paseo ls -a` and Tier 1 pointers for ended sessions |
+| `herdr-tidy`, `herdr-sleeper`, `agent-sleep`, `autorename` herdr half | — | RETIRE: drained and deleted 2026-11-06 (C7 drain gate, one pane waived; E2, E4), the operator's step `herdr plugin unlink djbclark.herdr-sleeper` remains. The drain rule was (sleepers hold Claude session UUIDs per pane: `plugins/herdr-sleeper/herdr-sleeper list` (bin/herdr-sleeper was removed 2026-10-31) plus the legacy journal `~/.local/state/herdr-sleeper/sleeping.json` must be empty or each resumed as a Paseo agent) | `session-janitor` (disabled until D2, B4.3), `archive_agent`; Paseo titles |
 | `watch` roles, `fleet-watch` (in `~/ops/site-private/bin`, not this repo), `paseowatch`/`cfenginewatch` (`fleet-watch upstream --relay-to` uses relay.py), `tell-chief-of-staff` | — | REWRITE in D6 | `paseo send` from the launchd script; schedules only where a run needs judgment (F2) |
 | `load-watch` (`session-load-watch` and `rumination-watch` deleted 2026-11-06, slim-down E5), `bg`, gates, `wait-file` | — | KEEP (launchd, F2); drop pane typing | deliver via `paseo send` |
 | the quota guard (deleted 2026-11-07, slim-down E7), `context-watch`, `context_size_nudge` (provider hooks) | — | KEEP | they run inside the provider; G2 enforces the same gates for launches that bypass the hook |

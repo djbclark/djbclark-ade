@@ -63,7 +63,7 @@ herdr (bar the `herdr4paseo`/`paseo4herdr` bridges and its server runner), Orca 
 records every merge and every behaviour lost on purpose) removed what Paseo or Claude Code now does natively, or what
 served a retired provider: session-finder's search and launch, helm, self-slash, autorename, bigteam (now `fan-out`),
 the watch family, the quota guard and fleet governor (Paseo's session-guard and usage-auto-resume plugins, installed at the final merge), pr-wait
-and the Codex local review (the Action and `review-pr`), SkillOpt-Sleep, the web ladder, and the agy, crush, pi,
+and the Codex local review (now the `adversary-marker` Action and `bin/review-pr`, review rule 11), SkillOpt-Sleep, the web ladder, and the agy, crush, pi,
 zcode, kiro, goose, qwen, devin, copilot CLI, cline, muse and grok CLI integrations; fifteen site skills and five
 tools moved to site-djbclark. Retired designs are in [`docs/history/`](docs/history/), the old README at tag
 `pre-slim-2026-11-06`, each retired TUI's lessons in [docs/tui-lessons-learned.md](docs/tui-lessons-learned.md).

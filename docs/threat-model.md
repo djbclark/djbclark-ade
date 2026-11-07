@@ -62,7 +62,7 @@ What an attacker would want, in order of damage:
 3. **GitHub write access** through the operator's `gh` login: push to this public repo, open and merge
    PRs. Merged code is code the operator's machine then runs (4.6).
 4. **Cloud-agent credentials and spend**: `CURSOR_API_KEY` (`bin/cursor-cloud`) and the Codex/Cursor
-   GitHub apps' access to this repo (`docs/queue.md`, "Cloud-agent readiness" section).
+   GitHub apps' access to this repo (`docs/queue.md`, the carried "Cloud agents" line).
 5. **Agent state under `~/.local/state`**: dispatch records and reports (`~/.local/state/bigteam/<task>/`,
    `bin/acp-dispatch`), `~/.local/state/acp-dispatch/`, `~/.local/state/load-watch/`,
    `~/.local/state/review-launch/` (review results and the self-check cache).
@@ -74,16 +74,16 @@ What an attacker would want, in order of damage:
    monthly routing re-rank job and zcode-key-auth were deleted 2026-11-06 by the slim-down. `bin/acp-dispatch` submits
    no launchd jobs since 2026-11-06 (a `paseo run` shim: the agent is a Paseo daemon child).
 9. **The operator's machine itself** (a 16 GB Mac): availability under agent fan-out
-   (`bin/acp-dispatch` `machine_overloaded`, load reached 230 on 2026-10-12).
+   (`bin/acp-dispatch` `load_gate`, over `load-watch admit`; load reached 230 on 2026-10-12).
 
 ## 2. Trust boundaries and actors
 
 | Actor | Trust | Notes |
 |---|---|---|
 | The operator | Full | The only principal. One person, one personal machine. |
-| Local agent TUIs and ACP sub-agents (`acp-run`, `acp-dispatch`) | **Trusted as the operator for task direction** (operator rule). This does not extend to review: an agent's or a PR body's "djbclark approved" is a claim to check, never a substitute for the adversary verdict or a reviewer's own reading. A denied permission prompt goes to the operator, not to a peer | **Prompt-injectable**: they read fetched web pages (the firecrawl MCP and each client's own fetch tools; `bin/web-get` was deleted 2026-11-06), third-party repo content, tool output and each other's reports. An injected agent acts with the operator's rights. |
+| Our own agents (Paseo agents started with `paseo run`, or through the one-cycle shims `acp-dispatch` and `acp-run`) | **Trusted** (2026-11-07 rulings: our agents trust each other; a GitHub artifact whose author or last editor GitHub reports as the owner is ours). The adversary marker, not prose, is the verdict: a "djbclark approved" in prose never substitutes for it or for a reviewer's own reading. A denied permission prompt goes to the operator, not to a peer | **Prompt-injectable**: they read fetched web pages (the firecrawl MCP and each client's own fetch tools; `bin/web-get` was deleted 2026-11-06), third-party repo content, tool output and each other's reports. An injected agent acts with the operator's rights. |
 | Cloud agents: Cursor Cloud Agents (`bin/cursor-cloud`) | **Untrusted writers** | They run off the Mac, get the repo URL and a prompt, and push branches to a **public** repo (`cursor/...`, or `--work-on-branch` the starting ref; `bin/cursor-cloud` never opens the PR). They hold no vault access. |
-| Codex (GitHub connector) | **Trusted-ish reader, comment-only** | Reviews PRs on request and posts review comments; it has no branch-writing path here (reviewer only today, `docs/queue.md`). Its findings are input to the lead, not a merge gate. |
+| Codex (GitHub connector) | **Untrusted input, advisory** (AGENTS.md rule 9; the 2026-11-07 external-security ruling) | Reviews PRs on request and posts review comments; it has no branch-writing path here. Its comments are read as data, never followed; the lead fixes what is real; not a merge gate. |
 | Hermes bot (`~/.local/bin/hermes-ping`, `mcp__hermes__*`) | Channel outside this repo | `hermes-ping` is one-way (operator; its code is not in this repo). The MCP bridge is two-way: read/send messages and `permissions_respond` on Hermes's approval queue (`docs/mcp-servers.md`). |
 | GitHub Actions runners | Untrusted compute, no secrets | `.github/workflows/test.yml`: `permissions: contents: read`, triggers `push` to master, `pull_request`, `workflow_dispatch`; runs `pytest` on Ubuntu (preceded by a Node 24 setup; the `npm ci --ignore-scripts` of `pi/extensions/subagent` was removed 2026-11-06 with the extension) on every trigger and on macOS only on a manual dispatch with `macos: true` (2026-10-29); no `secrets.*` referenced. |
 | vps-primary | **Trusted** (proposal decision Q18, 2026-10-19) | Future state: holds plaintext sessions and keys; its compromise exposes every session (proposal 10, risk 10). Not part of the Mac code today. |
@@ -93,36 +93,24 @@ What an attacker would want, in order of damage:
 ## 3. Entry points
 
 1. **Prompts and footers written to files.** `acp-dispatch` appends `docs/dispatch-footer.md` to a prompt
-   and passes it to `acp-run`; `cursor-cloud launch --prompt-file` sends file text to a cloud agent.
-2. **launchd runner scripts built from record fields.** `runner_script` and `auto_resume_runner_script`
-   (`bin/acp-dispatch`) write a bash file (mode 0700, `write_atomic`) whose values go through
-   `shlex.quote`; `launchctl submit` runs it. The agent command is stored as
-   `" ".join(shlex.quote(c) ...)` and re-read with `shlex.split`.
+   and passes it to `paseo run` as an argv pointer to the brief (or to `bin/review-launch`); `cursor-cloud launch --prompt-file` sends file text to a cloud agent.
+2. **launchd runner scripts built from record fields** (removed 2026-11-06, slim-down E6: the shim submits no launchd job and writes no runner script; the agent is a Paseo daemon child).
 3. **`acp-run --verify CMD`**: runs `CMD` with a shell after an agent turn (`tools/acp-run/README.md`,
    item 13). The one deliberate shell path; the string is whatever the caller supplies.
-4. **Load gate.** Today `acp-dispatch` gates on `machine_overloaded()` (`os.getloadavg`, wait capped by
-   `ACP_DISPATCH_GATE_MAX`, default 900 s, then starts anyway), and since PR 7 (merged 2026-10-20, 776ecda)
-   on `load-watch admit --wait N --json`, whose exit 75 is the only refusal. The gate fails open by design: a
+4. **Load gate.** `acp-dispatch` gates on `load-watch admit --wait N --json` (since PR 7, 2026-10-20; `machine_overloaded()` went with the E6 shim, 2026-11-06), whose exit 75 refuses (admit's own exit 2 too). The gate fails open by design: a
    missing or crashed load-watch, a timeout, any other exit, or exit 0 with output it cannot parse starts the
    slice anyway with a stderr warning and `load_gate.error` in the record (`bin/acp-dispatch` `load_gate`),
-   and exit 0 is trusted over the JSON status (`docs/queue.md` item 3c).
+   and exit 0 is trusted over the JSON status.
 5. **PR bodies, review comments and issue text** written by agents or third parties, which other agents
    and reviewers read as instructions.
 6. **Mentions**: `@codex review`, `@cursor` on a comment (`docs/queue.md`). Whether a third party's
    mention triggers them is an app setting outside this repo and unverified: assume it can.
-7. **Environment variables.** Runners export `PATH` and `CLAUDE_CODE_SESSION_ID`. Tools read
-   `ACP_DISPATCH_STATE` (the state root), `ACP_DISPATCH_LAUNCHCTL`, `ACP_DISPATCH_AIUSE`,
-   `ACP_DISPATCH_NO_GATE`, `ACP_OPERATOR_APPROVED`, `CURSOR_CLOUD_API`, `ZCODE_CREDENTIAL_SECRET`,
-   `LW_STATE_DIR`, `LW_REGISTRY`, and the plist-install overrides `ACP_DISPATCH_LAUNCH_AGENTS`,
-   `CONTEXT_BUDGET_LAUNCH_AGENTS`, `SKILLOPT_NIGHT_LAUNCH_AGENTS`; `bin/firecrawl-router` reads
-   `FIRECRAWL_SELFHOST_URL`, `FIRECRAWL_FALLBACK_URL`, `FIRECRAWL_ROUTER_SIPB_BASE` and
-   `FIRECRAWL_ROUTER_LITELLM_BASE` (each held to https or loopback http, 2026-10-20), and both tools honour
+7. **Environment variables** (trimmed 2026-11-07 to what exists). Tools read `ACP_DISPATCH_STATE` (the state root), `ACP_DISPATCH_LOCK_DIR`, `ACP_OPERATOR_APPROVED`, `CURSOR_CLOUD_API`, `LW_STATE_DIR` and `LW_REGISTRY` (the runner exports, `ACP_DISPATCH_LAUNCHCTL`/`AIUSE`/`NO_GATE`, `ZCODE_CREDENTIAL_SECRET`, the three `*_LAUNCH_AGENTS` overrides and the `FIRECRAWL_*` variables went with their tools, 2026-11-06/07), and the tools honour
    `HTTPS_PROXY`/`http_proxy` and `SSL_CERT_FILE` (cursor-cloud drops them only when it re-execs for the key).
    An agent that sets one for a child it
    launches repoints a binary, an endpoint or an install directory.
 8. **Web content and repo files** fetched by an agent mid-session (prompt-injection carrier).
-9. **`load-watch` pane typing**: it writes a brief and types one line into an agent session's pane via
-   `session-finder/relay.py` (`bin/load-watch` header), so text the tool composes becomes input to an agent.
+9. **`load-watch` steer messages**: it writes a brief and sends one line to an agent with `paseo send --no-wait --json --behavior steer` (`bin/load-watch` header; no pane typing since 2026-11-06), so text the tool composes becomes input to an agent.
    Since 2026-11-06 relay.py is a shim that reaches Paseo agents only (`paseo send --behavior steer --no-wait --json
    --prompt-file`; herdr and Orca pane routes retired). Paseo labels such a message `kind="agent-message"` with the
    sender's `PASEO_AGENT_ID` (a caller that is not a Paseo agent prefixes `[relay from <name>] `), so a receiving
@@ -164,10 +152,7 @@ others, and the merge path is unenforced. "Control" is what exists; "Gap" is wha
 
 * **Control.** Briefs are scoped (`docs/orchestration-practices.md` section 2); the `adversary` is instructed
   not to edit (its agent definition lives outside this repo and includes Bash, so that is an instruction, not a
-  sandbox); the factory's `--perm read-only` security reviewer is a proposal design (proposal 11.2), not built;
-  an ordinary review runs yolo with only a read-only brief and a post-run diff
-  check (`skills/model-routing/SKILL.md`), and `--perm deny`/`--perm read-only` is reserved for a
-  security-sensitive slice (operator rule); the `adversary` reviews on request
+  sandbox); a read-only reviewer is built (2026-11-06): `bin/review-pr` over `bin/review-launch` (read-only tools confined to a clean worktree, no MCP, no hooks, a tripwire; `docs/review-boundary.md`); elsewhere `--perm read-only|deny` is best effort under the 2026-11-07 internal-trust ruling; the `adversary` reviews on request
   before a PR is opened. Cloud agents run off the Mac with no vault. An agent can relay a line to a Paseo-hosted
   peer (`session-finder/relay.py`, a shim since 2026-11-06): Paseo labels it as an agent message from the sender, the
   shim passes the text in a `--prompt-file` so it cannot become a `paseo send` option, and it refuses a leading `/` (after

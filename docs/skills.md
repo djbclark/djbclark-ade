@@ -61,8 +61,8 @@ add getpaseo/paseo`, `docs/skill-everywhere.md` 3a); the Claude template keeps t
 **Where the others went (2026-10-31 to 2026-11-07; `slim/log.md` has each):** moved to site-djbclark
 (`~/ops/site-public-djbclark/skills`, 2026-11-06): aws-rules, barnowl, book-to-kb (as `tools/book-to-kb`), bottom-config,
 coderabbit-feeder, diskfree, firecrawl, gmail-search, greptile, ovhcloud-api, report, setup-modern-cli, teach,
-terminus-kira, todo. Linked from their own repositories instead of from here: sudo-secretspec, forgejo, forgejo-ci,
-hyades-docker, sipb-llm-bench. Deleted: herdr-tidy, reorg-orca (2026-10-31); siyuan and its three companions,
+terminus-kira, todo. Unlinked from here (2026-11-06, E1); the operator relinks them from their own repositories in the final-merge batch
+(`docs/slim/operator-batch.md`): sudo-secretspec, forgejo, forgejo-ci, hyades-docker, sipb-llm-bench. Deleted: herdr-tidy, reorg-orca (2026-10-31); siyuan and its three companions,
 `_shared`, cow-workspaces, ralph-tui-orchestration, skillopt-sleep-learned, jevlike (E1, E2); helm, autorename (E4);
 session-finder's skill and peer-relay (E3); loadwatch (E5); skills-everywhere, skillopt-sleep (E10); watch, paseowatch,
 cfenginewatch and the six vendored `ade-paseo*` copies (Wave 3b); bigteam (E6, now `fan-out`); effort-routing and

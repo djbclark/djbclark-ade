@@ -37,23 +37,27 @@ A long tool call is recorded as in flight; its heartbeat is liveness, not a comp
 | [Temporal activity documentation](https://docs.temporal.io/activity-definition) describes retries after a result is lost and destination-enforced idempotency keys. | Even durable orchestration cannot infer whether an external action happened before a crash. | Reconcile uncertain effects before retry; never claim exactly-once arbitrary shell execution. |
 
 B1. Keep Paseo as the execution authority and G1 (`ade-jobs`) as the durable job owner. Apply the
-plan's native → existing plugin → new plugin → ADE order. Do not introduce another harness or
+plan's native → existing plugin → new plugin → ADE order. Since the slim-down (2026-11-07; the Paseo plan's status
+table) nothing in G1 is built here: the operator installs Paseo's published session-recovery, usage-auto-resume and
+session-guard plugins (PLAN J6), and PR 290 `ade-recovery` is parked until native resume (0.15.0) is measured (J9, R4). Do not introduce another harness or
 workflow service for this feature. LangGraph/Temporal are useful design references; adopt a runtime
 only if a later measured need for durable multi-step workflows outweighs its operation and integration cost.
 The issue comment's hosted trace product is not selected: traces alone do not preserve artifacts.
 
-B2. Interim work may extend the existing dispatcher, but only as a thin writer/reader of the same
-versioned recovery contract, with a D5 migration fixture. Do not build a second scheduler or add an
+B2. Interim work does not extend `acp-dispatch` (since 2026-11-07 a one-cycle shim over `paseo run`, removed with
+`tools/acp-run` in Wave 6's follow-up PR; D5 is superseded); any interim writer or reader is a Paseo plugin or a
+`paseo run` wrapper sharing the same versioned recovery contract. Do not build a second scheduler or add an
 `acp-checkpoint` launcher. Capture is default-on for unattended and scheduled jobs after acceptance;
 automatic retry remains separately gated. Top-level sessions get passive capture without enrollment
 in G4 permission automation or automatic restart. A user stop must remain stopped.
 
 B3. Local source baseline at `3ae2694a` (not a live recovery test): `bin/acp-dispatch`'s
-`CHECKPOINT_TEXT` asks the agent to update its working report every ten minutes;
-`checkpoint_context` reads git status, diff statistics, recent tool titles and the begun report.
-`resume_record` checks the old run and uses ACP session state, with a special fresh-context path for
-an unsupported agy replay. These are useful pieces, not evidence of general crash recovery.
-The incident's root cause remains unknown; a checkpoint-enabled launch smoke test does not close it.
+`CHECKPOINT_TEXT` asked the agent to update its working report every ten minutes;
+`checkpoint_context` read git status, diff statistics, recent tool titles and the begun report;
+`resume_record` checked the old run and used ACP session state, with a fresh-context path for the
+retired agy TUI. Slim-down E6 deleted all three on 2026-11-07 (checkpoint mode, `--checkpoint` and the automatic
+resume went; `resume` exits 2 naming `paseo send`), so the evidence source is now Paseo's own persistence. These were
+useful pieces, not evidence of general crash recovery. The incident's root cause remains unknown.
 
 ## C. Contract and ownership
 
@@ -128,9 +132,9 @@ Retain recovery evidence until the report is read and work is preserved; publish
 | Phase / owner | Deliverable | Gate and consequence |
 |---|---|---|
 | D1 / provider probe owner | Matrix of installed version, native transcript persistence, session identity, load/resume, tool events and background-process visibility; worker, schedule and top-level cases. | Isolated crash probes prove each capability; missing coverage is explicit. No claim of universal recovery. |
-| D2 / G1 owner | Versioned record, durable artifact generations, passive top-level capture, reconciliation and bounded recovery. Interim dispatcher work uses this contract if needed before D5. | C1–C5 invariants and failure matrix below pass; otherwise retain manual recovery and alert-only behavior for that path. |
+| D2 / G1 owner | Versioned record, durable artifact generations, passive top-level capture, reconciliation and bounded recovery. Interim work is a Paseo plugin or `paseo run` wrapper on this contract (the dispatcher is a one-cycle shim since 2026-11-07). | C1–C5 invariants and failure matrix below pass; otherwise retain manual recovery and alert-only behavior for that path. |
 | D3 / canary owner | One interrupted workflow with verified artifacts and receipts, repeated on supported provider paths. | Report checkpoint age, recovered artifacts, repeated work, detection/recovery latency and uncertainty; validate the five-minute target before setting defaults. |
-| D5 / migration owner | Legacy record import with preserved task/session/attempt lineage and drained pending resumes. | Recover an interrupted legacy job through G1 and demonstrate no duplicate launch; keep the old reader/resumer until this passes. |
+| D5 / migration owner | Legacy record import with preserved task/session/attempt lineage and drained pending resumes. | Legacy records are read-only evidence (`acp-dispatch check`); no resumer remains (E6 retired `resume` on 2026-11-07 after the C7 drain found no unfinished record), and the shim leaves in Wave 6's follow-up PR. |
 | D7 / documentation owner | Retire legacy implementation references; retain this contract and its evidence in the current architecture. | No stale skill promises that handoff or transcript resume alone supplies crash recovery. |
 
 E1. Failure matrix: SIGKILL before first summary; kill after an edit but before report update;

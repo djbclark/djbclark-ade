@@ -9,8 +9,9 @@ Hermes, Antigravity, …).
 
 The agentic development environment (ADE) for this machine: one operator, many agents, **Paseo as the only
 harness**; since 2026-10-08 also the git home of the orchestration and session-hygiene skills and tools. Two
-altitudes, verified by real runs on 2026-08-23: the **micro graph** (Claude Code subagents and dynamic workflows,
-in-process fan-out) and the **macro graph** (a task DAG of Paseo agents, each in its own worktree; `skills/fan-out`).
+altitudes: the **micro graph** (Claude Code subagents and dynamic workflows, in-process fan-out) and the **macro graph**
+(a task DAG of agents, each in its own worktree), both verified by real runs on 2026-08-23, the macro graph then through
+Orca; since 2026-11-07 the macro graph is a DAG of Paseo agents (`skills/fan-out`).
 [README.md](README.md): the loop, the layout, the roster of every skill and tool.
 
 Retired: herdr (bar the `herdr4paseo`/`paseo4herdr` bridges and `bin/herdr-server-run`), Orca and BB left this repo on
@@ -46,7 +47,7 @@ Each doc carries its own summary.
 | [.claude/workflows/graph-audit.js](.claude/workflows/graph-audit.js) | runnable micro-graph example, `/graph-audit` |
 | [skills/handoff/](skills/handoff/SKILL.md) | tab lifecycle: the successor starts top-level (`env -u PASEO_AGENT_ID -u PASEO_AGENT_CWD paseo run …`), archives its predecessor once it answers, and tells every sibling the new id; Paseo's own `paseo-handoff` once installed |
 | [skills/paseo-screen/](skills/paseo-screen/SKILL.md) | THE screen-control tool (2026-10-31): the Paseo plugin `paseo-screen`; look before clicking, safety rules |
-| [vendor/README.md](vendor/README.md) | what this repo references that lives elsewhere (`fleet-watch`, the launchd fleet notices to Hermes, is site-djbclark's `bin/fleet-watch`) |
+| [vendor/README.md](vendor/README.md) | what this repo references that lives elsewhere (`fleet-watch`, the launchd fleet notices to Hermes, is site-djbclark's `bin/fleet-watch`; vendor/README.md lists it) |
 
 ## Trust (operator, 2026-11-07)
 

@@ -76,7 +76,8 @@ closed rules apply (one frontier slice per pool per wave, an Agent-tool Fable ca
 The October audit found real work plus expensive-model and large-context burn; Go is not free. Routing chooses MiniMax M3
 for bulk and GPT-6 Luna for mechanical work, never a code slice (djbclark 2026-10-30); DeepSeek V4.1 Flash stays only the
 main-loop substrate model (`route_agent.py substrate`). Kimi K3/K2.7 Code, GLM 5.3 and DeepSeek V4 Pro (and the Grok
-models Go offers) are bounded read-only advisors; the reviewed classification is `config/go-model-policy.json`. Raw
+models Go offers) are advisory only (`--perm read-only` requested, best effort since the 2026-11-07 internal-trust ruling: opencode has no
+read-only mode, so the slice runs in its default mode with a logged note); the reviewed classification is `config/go-model-policy.json`. Raw
 native model selection bypasses the dispatch gate, so this is a local orchestration policy, not a provider billing cap.
 Keep briefs short (OpenCode exposes no smaller context window); the Go plugin compacts early (`docs/context-hygiene.md`).
 

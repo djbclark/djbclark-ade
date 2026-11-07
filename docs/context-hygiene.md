@@ -50,7 +50,7 @@ found by searching every byte appended to the transcript since the previous prom
 As of 2026-10-29, `claude/hooks/context_size_nudge.py` supports both
 `UserPromptSubmit` (plain-text stdout) and `PostToolUse` (JSON
 `hookSpecificOutput.additionalContext`). `agents/claude/settings.json.tmpl` registers both
-(`PostToolUse`: matcher `*`, `hook-deadline 2`, timeout 5). Nothing applies the template
+(`PostToolUse`: matcher `*`, `hook-deadline 2`, timeout 20). Nothing applies the template
 (`agents/README.md`), so the live `~/.claude/settings.json` gets the same entry by hand,
 after this code is on the shared checkout the hook symlink points at (the sub-agent guard
 below must be live first); until then the live file runs the hook on prompt submit only.
@@ -114,16 +114,18 @@ Model/provider switches preserve session-level pending, cooldown and retry
 blocks; changing models cannot admit another summary charge.
 Acceptance is not completion; native compaction events confirm completion.
 An uncertain write is persisted and never blindly retried; a failed lookup is
-only a read failure, eligible for retry after the cooldown. `--dry-run` makes
-no API calls. If the plugin is unavailable, the helper refuses rather than
-falling back to an unguarded compact POST.
+only a read failure, eligible for retry after the cooldown. (The `self-slash`
+helper's `--dry-run` and its refusal when the plugin was unavailable went with
+`bin/self-slash`, slim-down E4, 2026-11-06.)
 
 Native compaction does not accept the Claude `/compact <focus>` syntax here.
 Save the focus in the checkpoint first. `/new`, `/clear` and `/reset` through
 the scoped native path fail closed: a native reset must have both a durable
 owned handoff and a supported, acknowledged successor/baton path. A successful
-compaction request alone is not that evidence. Existing supported host lifecycle
-paths remain available when their own identity and ownership checks pass.
+compaction request alone is not that evidence. The successor path is a
+top-level `env -u PASEO_AGENT_ID -u PASEO_AGENT_CWD paseo run …` that archives its
+predecessor once it answers (`skills/handoff` Step 9; `self-slash --finish --successor`
+went 2026-11-06).
 
 OpenCode V2 settings are `compaction.auto`, `compaction.keep.tokens` and
 `compaction.buffer`; `agents.compaction.model` chooses its summarizer. The

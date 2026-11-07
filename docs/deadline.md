@@ -93,7 +93,7 @@ never outlives its own `--timeout`/`--wait` by more than the margin plus the swe
    once) is `deadline run`'s own bounded stop. `bin/deadline_wait.py` is the Python waiter's code (the PR waiter that shared it was removed 2026-11-06, slim-down E8); `acp-dispatch-wait` does the
    same in bash. The price is one resident `deadline run` Python process per registered waiter (`acp-dispatch-wait` was bash-only by design on
    2026-10-18; `--no-deadline` restores that; whether this waiter should be opt-in is the operator's call).
-   Names carry the supervisor's pid (each run leaves one terminal record file until `prune` removes it after 7 days), so a second waiter for the same PR (another repo, a new head) or record (a re-arm) is never refused as "name already live".
+   Names carry the supervisor's pid (each run leaves one terminal record file until `prune` removes it after 7 days), so a second waiter for the same record (a re-arm) or a second admission wait is never refused as "name already live".
 2. **Opt out and nesting.** `--no-deadline` on each. A waiter started under `deadline run` (env `DEADLINE_NAME` set, even empty) does not register
    again and does not beat the caller's record; the inner copy of a supervised waiter sees the same variable, which is also what stops a loop. The inner
    copy removes `DEADLINE_WAIT_NAME/MARK/SUPERVISOR` from its environment on entry (it keeps its identity in process state), so what it starts
@@ -109,7 +109,7 @@ never outlives its own `--timeout`/`--wait` by more than the margin plus the swe
 4. **Tests** (`tests/test_deadline_wrappers.py`) run each waiter against a temp `DEADLINE_STATE_DIR`; `tests/conftest.py` exports an empty
    `DEADLINE_NAME` so no other test registers in the real state directory.
 
-## Known gaps (follow-ups, `docs/queue.md`)
+## Known gaps (follow-ups; the `review-pr` one is carried in `docs/queue.md`)
 
 `bin/review-pr` and `gh pr checks --watch` do not register a deadline of their own (2026-11-06): run them under `deadline run` (the example
 above); `bin/review-launch` bounds its own run with `--timeout` (default 900 s) and kills the run's process group at the end. `bg` registers since
@@ -117,7 +117,7 @@ above); `bin/review-launch` bounds its own run with `--timeout` (default 900 s) 
 
 ## `bg` records and the holder (2026-11-02)
 
-`bg` (`~/ops/site-private-djbclark/bin/bg`, alert-only) registers two `--on-expire notify` records, each with a `--holder`: `bg-wait-PID-T` for the load/slot
+`bg` (site-djbclark's `bin/bg`, `~/ops/site-public-djbclark/bin/bg`; the site-private path is a symlink to it; alert-only) registers two `--on-expire notify` records, each with a `--holder`: `bg-wait-PID-T` for the load/slot
 wait (holder: `bg` itself, which beats it) and `bg-run-PID-T` for the run (holder: the detached watcher, which beats it). The run record is registered
 only once the run has started: `bg` writes a private marker file just before it execs the command, and the watcher registers when it sees it; if `bg` is
 gone first, nothing is registered. Before the holder existed, a watcher killed with its process group (or a `bg` SIGKILLed, so its EXIT trap never ran)
@@ -170,8 +170,8 @@ hand: two schedulers are safe (every record is under its own flock) but they dou
 
 ## Delivery and ownership details (PR 223 review, 2026-11-01)
 
-1. The owner notice is tracked apart from the at-most-once kill and reroute: a relay that exits non-zero stays `notice.done = false` in the record and later
-   sweeps retry it (at most 5 times, 60 s x attempt apart; `deadline ls --json` shows it). Recovery is marked done when the kill and reroute ran, not
+1. The owner notice is tracked apart from the at-most-once kill (the reroute went 2026-11-07, E7; a pre-2026-11-07 reroute record is item 22's case): a relay that exits non-zero stays `notice.done = false` in the record and later
+   sweeps retry it (at most 5 times, 60 s x attempt apart; `deadline ls --json` shows it). Recovery is marked done when the kill ran, not
    when the owner was reached.
 2. `deadline run` reserves its name (a `starting` placeholder, left alone by the sweep for 60 s) BEFORE it starts the command, so a refused name never
    ran the command; and it only advances or finishes the record carrying its own `reg_id`, so an old `run` whose terminal name was registered again
@@ -187,7 +187,7 @@ hand: two schedulers are safe (every record is under its own flock) but they dou
    recovery itself before returning 124.
 6. Lock files are unlinked by `prune` only while it holds them; every acquirer re-checks that its locked inode is still the file on disk and retries
    otherwise, so two registrars never hold different inodes of "the same" lock. Terminal records are deleted under their lock after a fresh reload.
-7. Recovery I/O (hermes-ping, owner relay up to 90 s, reroute up to 120 s) runs in a detached `deadline _work NAME` process, never inside the 60 s
+7. Recovery I/O (hermes-ping, owner relay up to 90 s) runs in a detached `deadline _work NAME` process, never inside the 60 s
    enforcement pass: the record is saved with the recovery order (`recovery.claimed` makes it at-most-once, and the worker claims it under the record lock
    before any call) and later records and SIGKILL escalations stay on schedule. `DEADLINE_INLINE_WORKER=1` runs the worker inline (tests).
 8. `deadline run` starts its command behind a handshake: the command is exec'd only after its record (pid and start time) is persisted. If `run` dies or is

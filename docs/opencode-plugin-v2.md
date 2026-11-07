@@ -29,8 +29,9 @@ is greppable with `strings` on the `opencode` executable. The npm package
 user plugins actually get at runtime (`session`, `event`, `location`, and the
 tool hooks), so read a working plugin rather than the d.ts.
 
-Working local references (`~/.config/opencode/plugins/`):
-`orca-opencode-status.js` (object export with `id` + `server` + `setup`;
+Working references: this repo's `opencode-plugins/rtk.ts` and `opencode-plugins/go-context/index.js`; and, as of
+2026-10 (historical: Orca retired from this repo 2026-10-31, its Mac config untouched), the local
+`~/.config/opencode/plugins/` copies `orca-opencode-status.js` (object export with `id` + `server` + `setup`;
 `setup` uses `ctx.session.hook("prompt", …)` and
 `ctx.event.subscribe({ signal })` and returns an async disposer) and
 `moshi-hooks.ts`. The `server` field is the old v1 hook factory; OpenCode 2 does
