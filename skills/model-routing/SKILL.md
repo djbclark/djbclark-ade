@@ -176,6 +176,50 @@ passing an unsupported `--context`. Never use raw `opencode run` to bypass this
 guard, or switch a live main loop to a costly model. Native UI choices are not
 a server-side spending limit. `route-override` does not bypass the cost gate.
 
+**Repo scope (djbclark 2026-11-02): only the `techno-euphora` project and the Hermes seat may route to
+opencode-go.** `config/routing.toml` gives a `[[service]]` `allow_repos` / `allow_seats`; a service with
+either list is eligible only for a caller whose repo (`route_agent.repo_of`: the `origin` remote's name, so a
+worktree resolves to its repo; `--repo` overrides) or seat (`--seat`, else `$ROUTE_SEAT`) is on it, and is
+skipped as repo-scoped everywhere else: never a primary and never an alternative in `route`/`plan`, and
+`acp-dispatch` exits 2 (also for a Go advisory and a resume) even with `ACP_OPERATOR_APPROVED=route-override`,
+as with the cost gate. An unknown repo and no seat is out of scope. The Hermes seat sets `ROUTE_SEAT=hermes`;
+`acp-dispatch` keeps the seat in the job record, so an auto-resume or a reroute stays admitted, and a dispatch line
+that a seated caller (`--seat`) plans is printed as `ROUTE_SEAT=hermes acp-dispatch ...`.
+`route_agent.py policy --md` prints the scope. This narrows the rules above (no code on opencode-go still
+holds in the scoped repo); the same two keys scope any other service. Hermes's own provider chain (`hermes-chain`) and the
+substrate chain are seat constructs, not scoped by repo.
+
+**cline / clinepass (djbclark 2026-11-02): re-enabled, scoped and floored.** The `clinepass` service carries the same
+`allow_repos = ["techno-euphora"]` / `allow_seats = ["hermes"]` and a `lifeline_floor_percent = 40`: a cline slice is refused
+(`route`/`plan` skip it, `acp-dispatch` exits 2, `route-override` skips neither) while clinepass headroom is under 40%, and an
+unknown or unmeasured headroom counts as under it. It stays the Hermes and Dann lifeline (2026-10-23), which is why the floor
+exists. `cline` is out of `[discovery].never_route` / `operator_gated`, `[dispatch].operator_gated` and acp-run's own approval
+gate; a resume of an already admitted slice is not re-floored. aiuse must collect clinepass for a reading to exist.
+
+**Run-out-of-quota ruling (djbclark 2026-11-02): "It is fine if we run out of quota on agy omp codex zcode cursor grok, just not
+claude ocgo cline."** The protective floors of the agy (all three services), omp, codex, zcode (`zai`), cursor (all three
+services) and grok pools are gone: dispatch spends them down to empty, and a quota stop mid-slice is a resumable stop. A pool
+under 0.1% (`EMPTY_POOL_PERCENT`) is still empty and is not handed work. Unchanged: the claude pools and the subscription
+governor, `frontier1_min_left` (Fable is a claude pool), opencode-go (bulk and mechanical only, scoped), clinepass (scoped,
+40% floor), copilot's `reserve_floor`, the substrate chain's headroom, the per-wave frontier caps, `burn_first_*` and the quality
+band. Every knob changed:
+
+| knob | old | new |
+|---|---|---|
+| `[routing].plenty_min` (codex everyday kinds) | 50 | 0 (a missing or partly unmeasured reading still fails closed) |
+| `[dispatch.estimate_floor]` `"codex:frontier"` (astra) | 60 | 0 |
+| `[dispatch.estimate_floor]` `"codex:judgment"` | 25 | 0 |
+| `[dispatch.estimate_floor]` `codex` | 10 | 0 |
+| `[dispatch.estimate_floor]` `antigravity-claude` | 15 | 0 |
+| `[dispatch.repo_overrides.tendcf\|nix2cf.estimate_floor]` `"codex:frontier"` | 20 | removed (the base floor is 0; the mechanism stays) |
+| `config/gates.toml` `[frontier].frontier2_min_left` and `ade_gates.FRONTIER_DEFAULTS` (judged codex/other-pool frontier use) | 60 | 0 (floor bound 40 -> 0; no reading still fails closed) |
+| `[[service]] min_headroom` on `antigravity`, `antigravity-claude`, `antigravity-argon`, `omp`, `codex`, `zai`, `cursor`, `cursor-auto`, `cursor-cloud`, `grok` | the caller's default: 15 (route/plan `--min-headroom`), 10 (acp-dispatch `--min-headroom`) | 0.0 (an explicit `--min-headroom` other than the default still wins) |
+| `[[service]] lifeline_floor_percent` on `clinepass` | none (aiuse-disabled, never_route in discovery) | 40 |
+| `[[service]] allow_repos` / `allow_seats` on `clinepass` | none | `["techno-euphora"]` / `["hermes"]` |
+| `[discovery].never_route` | hermes, clinepass, kiro | hermes, kiro |
+| `[discovery].operator_gated` | cline | (none) |
+| `[dispatch].operator_gated` and acp-run `OPERATOR_GATED` | hermes, cline | hermes |
+
 Use the native V2 Go context plugin and `docs/context-hygiene.md` for early
 nudges, safe-point compaction, cooldowns and durable boundary handoffs. Automatic
 compaction is not permission to clear a parent or abandon running work. Do not
@@ -894,9 +938,9 @@ method that runs the waves.
    reviews, `kimi-k3` for diversity only. Avoid `auto` (its model, and so its price, is not chosen by you). Prices
    and scores change: re-read both pages before relying on these.
 7. **Never:** **hermes** as a delegation target (the operator's own assistant;
-   `acp-run` and `acp-dispatch` refuse it by an approval gate); **cline**,
-   uninstalled 2026-10-17 and gated the same way (Hermes's ClinePass pool is
-   separate and stays); the
+   `acp-run` and `acp-dispatch` refuse it by an approval gate); **cline** outside its scope (since 2026-11-02 only for the
+   `techno-euphora` repo and the `hermes` seat, and only while clinepass has `lifeline_floor_percent` left; Hermes's own
+   ClinePass pool is separate and stays); the
    prepaid pools (opencode-zen paid, openrouter, deepseek) without a fresh
    operator decision; a credits-backed model (Claude usage credits, Codex
    credits, OpenCode Go "Use balance"; **not** the Claude Max plan's monthly API

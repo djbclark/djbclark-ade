@@ -68,7 +68,7 @@ preferences, because they encode consequences a score cannot see:
   lots of codex quota and it is the best of available options we can use it for
   non-frontier"): a service's `plenty_kinds` are eligible only while its binding
   headroom (the tightest window, 5-hour and weekly alike) is at least
-  `PLENTY_MIN` ([routing].plenty_min, 50), and with no fresh reading they are
+  `PLENTY_MIN` ([routing].plenty_min, 50 until 2026-11-02, 0 now), and with no fresh reading they are
   not, so below it codex is frontier-only again; inside that gate it competes
   on the normal ranking, it is not forced first;
 - Fable is a sublimit (at most 50%) of the SAME Claude weekly window, not a
@@ -82,8 +82,8 @@ preferences, because they encode consequences a score cannot see:
   eligible pool) and otherwise for `code`/`bulk` slices, so they are spent
   before each monthly reset; `grant_days` gives it the burn-first bonus while the
   balance is far above an even spend over the month;
-- **never** route a slice to clinepass (NEVER_ROUTE) — it is the Hindsight/hermes
-  lifeline and stays only in `hermes_chain`;
+- route a slice to clinepass only for the techno-euphora repo or the hermes seat, and only while its headroom is at
+  least its `lifeline_floor_percent` (40; djbclark 2026-11-02) — it is the Hindsight/hermes lifeline (2026-10-23);
 - the prepaid tier (opencode-zen, openrouter, deepseek) is retired until an
   explicit operator top-up.
 
@@ -113,6 +113,7 @@ import subprocess
 import sys
 import time
 import tomllib
+from collections.abc import Iterable
 from dataclasses import dataclass, field, fields
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -229,6 +230,21 @@ class Service:
     fallback_after: tuple[str, ...] = ()
     # The aiuse window label that bounds this pool, named in a refusal when its reading is missing ("Gemini 4 Argon weekly").
     window: str = ""
+    # Per-service replacement of the caller's default minimum headroom (route/plan `--min-headroom` 15, acp-dispatch 10): None keeps
+    # the caller's. 0.0 on the agy, omp, codex, zcode, cursor and grok pools (djbclark 2026-11-02: "fine if we run out of quota on
+    # agy omp codex zcode cursor grok, just not claude ocgo cline"): the pool is spent down to empty. An explicitly passed
+    # `--min-headroom` other than the default still wins.
+    min_headroom: float | None = None
+    # A lifeline pool's floor (clinepass, 2026-10-23 lifeline of Hermes and Dann; re-enabled scoped, djbclark 2026-11-02): a slice is
+    # refused while the pool's headroom is under this percent, and an unknown or unmeasured headroom counts as under it. 0.0: none.
+    # route-override does not skip it.
+    lifeline_floor_percent: float = 0.0
+    # Per-repo / per-seat scope (djbclark 2026-11-02: opencode-go only for techno-euphora and Hermes). With either list set the
+    # service is eligible ONLY for a caller whose repo (`repo_of`, lower case) is in `allow_repos` or whose seat (`--seat` /
+    # ROUTE_SEAT, lower case) is in `allow_seats`; elsewhere `scope_block` names why and route(), plan() and acp-dispatch skip it,
+    # route-override does not. No list on either: unscoped. An unknown repo and no seat is out of scope (fail closed).
+    allow_repos: tuple[str, ...] = ()
+    allow_seats: tuple[str, ...] = ()
 
     @property
     def acp_agent(self) -> str:
@@ -254,6 +270,25 @@ class Service:
             remaining = plenty_remaining((quota or {}).get(self.name))
             return remaining is not None and remaining >= PLENTY_MIN
         return True
+
+    @property
+    def repo_scoped(self) -> bool:
+        return bool(self.allow_repos or self.allow_seats)
+
+    def scope_block(self, repo: str | None = None, seat: str | None = None) -> str | None:
+        """Why a caller in `repo` (name as `repo_of` gives it) at `seat` may not use this service: None when it may (no
+        allow-list, or the repo or the seat is on it)."""
+        if not self.repo_scoped:
+            return None
+        if repo and repo.lower() in self.allow_repos:
+            return None
+        if seat and seat.lower() in self.allow_seats:
+            return None
+        who = "; ".join(x for x in (
+            f"repos {', '.join(self.allow_repos)}" if self.allow_repos else "",
+            f"seats {', '.join(self.allow_seats)}" if self.allow_seats else "") if x)
+        return (f"{self.name} is repo-scoped (djbclark 2026-11-02, [[service]] allow_repos/allow_seats): only {who} may route to "
+                f"it; this caller is repo {repo or '(unknown)'}, seat {seat or '(none)'}. route-override does not skip this")
 
     def rank_for(self, kind: str) -> int:
         return self.good_at[kind]
@@ -363,6 +398,12 @@ def load_policy(path: Path | str) -> dict[str, Any]:
             raise ValueError(
                 f"routing policy {path}: [[service]] {label!r}: "
                 f"pool must be a 2-element string array, got {pool!r}")
+        for key in ("allow_repos", "allow_seats"):
+            allow = entry.get(key)
+            if allow is not None and not (isinstance(allow, list) and all(isinstance(x, str) and x for x in allow)):
+                raise ValueError(
+                    f"routing policy {path}: [[service]] {label!r}: "
+                    f"{key} must be an array of non-empty strings, got {allow!r}")
     for section in ("routing", "discovery", "dispatch", "hermes", "calibrate"):
         if section not in data or not isinstance(data[section], dict):
             raise ValueError(f"routing policy {path}: missing [{section}] table")
@@ -398,6 +439,11 @@ def _service_from_entry(entry: dict[str, Any]) -> Service:
     kwargs["good_at"] = {str(k): int(v) for k, v in kwargs["good_at"].items()}
     kwargs["plenty_kinds"] = tuple(str(k) for k in kwargs.get("plenty_kinds") or ())
     kwargs["fallback_after"] = tuple(str(k) for k in kwargs.get("fallback_after") or ())
+    kwargs["allow_repos"] = tuple(str(k).lower() for k in kwargs.get("allow_repos") or ())
+    kwargs["allow_seats"] = tuple(str(k).lower() for k in kwargs.get("allow_seats") or ())
+    if kwargs.get("min_headroom") is not None:
+        kwargs["min_headroom"] = float(kwargs["min_headroom"])
+    kwargs["lifeline_floor_percent"] = float(kwargs.get("lifeline_floor_percent") or 0.0)
     if "models" in kwargs and kwargs["models"] is not None:
         kwargs["models"] = {str(k): str(v) for k, v in kwargs["models"].items()}
     return Service(**kwargs)
@@ -488,6 +534,8 @@ def policy_public() -> dict[str, Any]:
             "grant_days": s.grant_days, "ready_probe": s.ready_probe,
             "shares_pool": s.shares_pool, "plenty_kinds": list(s.plenty_kinds),
             "fallback_after": list(s.fallback_after), "window": s.window,
+            "allow_repos": list(s.allow_repos), "allow_seats": list(s.allow_seats),
+            "min_headroom": s.min_headroom, "lifeline_floor_percent": s.lifeline_floor_percent,
         }
     return {
         "path": str(POLICY_PATH),
@@ -569,6 +617,14 @@ def policy_markdown() -> str:
     lines.append(f"| dispatch.estimate_floor | {floors} |")
     frontiers = ", ".join(d.get("frontier_models") or []) or "(none)"
     lines.append(f"| dispatch.frontier_models | {frontiers} |")
+    scoped = "; ".join(f"{s.name}: " + " ".join(x for x in (
+        f"repos {','.join(s.allow_repos)}" if s.allow_repos else "",
+        f"seats {','.join(s.allow_seats)}" if s.allow_seats else "") if x) for s in SERVICES if s.repo_scoped)
+    lines.append(f"| service.allow_repos / allow_seats (repo scope; route-override does not skip) | {scoped or '(none)'} |")
+    lines.append("| service.min_headroom (replaces the caller's default; 0 = spend to empty) | "
+                 + (", ".join(f"{s.name}={s.min_headroom:g}" for s in SERVICES if s.min_headroom is not None) or "(none)") + " |")
+    lines.append("| service.lifeline_floor_percent (refused below it; unmeasured counts as below; route-override does not skip) | "
+                 + (", ".join(f"{s.name}={s.lifeline_floor_percent:g}" for s in SERVICES if s.lifeline_floor_percent) or "(none)") + " |")
     fg = frontier_gate()
     lines.append(f"| gates.frontier1_per_wave / frontier2_per_wave | {fg['frontier1_per_wave']:g} / {fg['frontier2_per_wave']:g} |")
     lines.append(f"| routing.plenty_min | {PLENTY_MIN:g} |")
@@ -1365,6 +1421,10 @@ class Choice:
     alternatives: list[str] = field(default_factory=list)
     model: str = ""                 # "<model> [--effort L]" for acp-run
     kind: str = ""                  # required by acp-dispatch (2026-10-18)
+    # The caller's seat (lower case), when it has one: the printed dispatch line then starts with ROUTE_SEAT=<seat>, because
+    # acp-dispatch derives the repo from -C and has no other way to learn the seat (a repo-scoped pool admitted by the seat, and
+    # a later reroute or auto-resume of any slice that may land on one).
+    seat: str = ""
 
     @property
     def dispatch(self) -> str:
@@ -1372,13 +1432,14 @@ class Choice:
         agent = self.service.acp_agent
         extra = DISPATCH_EXTRA.get(agent, "")
         kind = f" --kind {self.kind}" if self.kind else ""
+        prefix = f"ROUTE_SEAT={shlex.quote(self.seat)} " if self.seat else ""
         if self.model:
             # Quote only the model id: suggest_model may append " --effort …".
             # zcode ids contain a backslash (builtin:zai-coding-plan\GLM-5.3).
             parts = self.model.split(None, 1)
             model = shlex.quote(parts[0]) + (f" {parts[1]}" if len(parts) > 1 else "")
-            return f"acp-dispatch {agent} --model {model}{extra}{kind}"
-        return f"acp-dispatch {agent} --model <id from: acp-run {agent} --info>{kind}"
+            return f"{prefix}acp-dispatch {agent} --model {model}{extra}{kind}"
+        return f"{prefix}acp-dispatch {agent} --model <id from: acp-run {agent} --info>{kind}"
 
 
 # DISPATCH_EXTRA comes from [dispatch].extra in config/routing.toml.
@@ -1413,13 +1474,14 @@ def quality_best(kind: str, services: list[Service],
 
 
 def unrouted_why(kind: str, quota: dict[str, Any] | None = None,
-                 exclude: frozenset[str] | set[str] = frozenset()) -> str:
+                 exclude: frozenset[str] | set[str] = frozenset(), repo: str | None = None,
+                 seat: str | None = None) -> str:
     """Why route() found nothing for `kind`, for plan's queued line."""
     gap = QUALITY_MAX_RANK_GAP.get(kind)
     hold = governor_hold() if kind in GOVERNOR_HOLD_KINDS else None
     if hold:
         exclude = frozenset(exclude) | {"claude"}
-    best = quality_best(kind, list(discover(quota or {})), exclude, quota)
+    best = quality_best(kind, in_scope(discover(quota or {}), repo, seat), exclude, quota)
     note = f" ({hold})" if hold else ""
     if gap is None or best is None:
         return "no pool has room: keep queued" + note
@@ -1643,6 +1705,45 @@ def repo_of(directory: str | os.PathLike[str] | None) -> str | None:
     return name
 
 
+DEFAULT_MIN_HEADROOM = 15.0     # route/plan's default; acp-dispatch's own default (10) is passed to `headroom_floor`
+EMPTY_POOL_PERCENT = 0.1       # a pool reading under this is empty: a `min_headroom = 0.0` pool is still not handed work at 0%
+
+
+def headroom_floor(svc: Service, requested: float, default: float = DEFAULT_MIN_HEADROOM) -> float:
+    """The minimum headroom for `svc`: its `min_headroom` override (never under EMPTY_POOL_PERCENT) while the caller left the
+    default, else what was asked."""
+    if svc.min_headroom is not None and requested == default:
+        return max(svc.min_headroom, EMPTY_POOL_PERCENT)
+    return requested
+
+
+def lifeline_block(svc: Service, info: dict[str, Any] | None) -> str | None:
+    """Why a lifeline pool (`lifeline_floor_percent`) may not take a slice: its headroom is under the floor or unmeasured (None for
+    a pool with no floor, or at or above it). `info` is the pool's reading in the quota map."""
+    floor = svc.lifeline_floor_percent
+    if floor <= 0:
+        return None
+    left = (info or {}).get("remaining")
+    if left is None:
+        return (f"{svc.name} is a lifeline pool (Hermes and Dann, 2026-10-23): no fresh headroom reading, which counts as under its "
+                f"{floor:g}% floor (lifeline_floor_percent); route-override does not skip this")
+    if left < floor:
+        return (f"{svc.name} is a lifeline pool (Hermes and Dann, 2026-10-23): {left:g}% left, under its {floor:g}% floor "
+                f"(lifeline_floor_percent); route-override does not skip this")
+    return None
+
+
+def current_seat() -> str | None:
+    """The calling seat, from ROUTE_SEAT (lower case; `--seat` overrides it in the CLI), None when unset. The seat names who is
+    routing (`hermes`), as the repo names where; a service's `allow_seats` admits it (djbclark 2026-11-02)."""
+    return (os.environ.get("ROUTE_SEAT") or "").strip().lower() or None
+
+
+def in_scope(services: Iterable[Service], repo: str | None, seat: str | None) -> list[Service]:
+    """`services` minus every repo-scoped one this caller's repo and seat are not on the allow-list of (`Service.scope_block`)."""
+    return [s for s in services if s.scope_block(repo, seat) is None]
+
+
 def repo_floors(repo: str | None) -> dict[str, float]:
     """The `[dispatch.repo_overrides.REPO.estimate_floor]` table of `repo` (operator 2026-11-01), {} for any other repo."""
     if not repo:
@@ -1679,7 +1780,7 @@ def pool_fits(svc: Service, kind: str, info: dict[str, Any], *, min_headroom: fl
     left = info.get("remaining")
     if left is None:
         return True
-    if left < max(min_headroom, svc.reserve_floor):
+    if left < max(headroom_floor(svc, min_headroom), svc.reserve_floor):
         return False
     floor, cap = estimate_floor(svc, kind, info, repo)
     rows = kind_rows(svc, kind, info)
@@ -1730,7 +1831,8 @@ def fallback_block(svc: Service, kind: str, quota: dict[str, Any], *, services: 
 
 def route(kind: str, *, quota: dict[str, Any] | None = None,
           min_headroom: float = 15.0,
-          exclude: frozenset[str] | set[str] = frozenset(), repo: str | None = None) -> Choice | None:
+          exclude: frozenset[str] | set[str] = frozenset(), repo: str | None = None,
+          seat: str | None = None) -> Choice | None:
     """Choose a service for `kind`, preferring idle paid capacity for bulk.
 
     Score = rank + (100 − remaining) × weight / 10, then pace/reset adjustments
@@ -1742,7 +1844,7 @@ def route(kind: str, *, quota: dict[str, Any] | None = None,
     if kind not in KINDS:
         raise ValueError(f"kind must be one of {KINDS}")
     quota = {} if quota is None else quota
-    services = list(discover(quota))
+    services = in_scope(discover(quota), repo, seat)   # a repo-scoped pool this caller is not on is neither a primary nor an alternative
     hold = governor_hold()
     held = hold is not None and (kind in GOVERNOR_HOLD_KINDS or kind == "judgment")
     if hold and kind == "judgment":
@@ -1766,6 +1868,8 @@ def route(kind: str, *, quota: dict[str, Any] | None = None,
             continue
         if kind != "api-only" and not service_ready(svc):
             continue                       # e.g. omp without a working Anthropic login
+        if lifeline_block(svc, quota.get(svc.name)) is not None:
+            continue                       # a lifeline pool under its floor, or unmeasured: never a primary or an alternative
         if fallback_block(svc, kind, quota, services=by_name, min_headroom=min_headroom,
                           held=hold is not None and (kind in GOVERNOR_HOLD_KINDS or kind == "judgment"), repo=repo) is not None:
             continue                       # a fallback: only while a pool it sits behind is short
@@ -1856,12 +1960,13 @@ def route(kind: str, *, quota: dict[str, Any] | None = None,
     return Choice(best, remaining, best_score, "; ".join(why),
                   [s.name for _, s, _, _ in scored[1:4]],
                   model=suggest_model(best, kind, quota.get(best.name) or {}),
-                  kind=kind)
+                  kind=kind,
+                  seat=(seat or "").lower())
 
 
 def plan(kinds: list[str], *, quota: dict[str, Any] | None = None,
          min_headroom: float = 15.0,
-         exclude: frozenset[str] | set[str] = frozenset(), repo: str | None = None
+         exclude: frozenset[str] | set[str] = frozenset(), repo: str | None = None, seat: str | None = None
          ) -> list[tuple[str, Choice | None]]:
     """Assign each slice kind to a service for ONE wave, right now.
 
@@ -1879,7 +1984,7 @@ def plan(kinds: list[str], *, quota: dict[str, Any] | None = None,
         if kind == "frontier":
             gate = frontier_gate()
             skip = full | {n for n, k in frontier.items() if k >= frontier_per_wave(n, gate, quota)}
-        choice = route(kind, quota=quota, min_headroom=min_headroom, exclude=skip, repo=repo)
+        choice = route(kind, quota=quota, min_headroom=min_headroom, exclude=skip, repo=repo, seat=seat)
         if choice is not None:
             name = choice.service.name
             load[name] = load.get(name, 0) + 1
@@ -2560,6 +2665,7 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--json", action="store_true")
     r.add_argument("--min-headroom", type=float, default=15.0)
     r.add_argument("--repo", help="repository the slice works in, for [dispatch.repo_overrides] (default: the cwd's origin remote)")
+    r.add_argument("--seat", help="the calling seat (default: $ROUTE_SEAT), for a service's allow_seats (a repo-scoped pool: opencode-go)")
     r.add_argument("--brief", help="the slice's brief file: its kind is also asked of Jev and "
                    "GLiDE in shadow (site agent-choice); never changes the route")
     pl = sub.add_parser("plan", help="assign a wave of slice kinds to services now")
@@ -2570,6 +2676,7 @@ def main(argv: list[str] | None = None) -> int:
                     "aiuse [disabled_services] are always skipped")
     pl.add_argument("--min-headroom", type=float, default=15.0)
     pl.add_argument("--repo", help="repository the slices work in, for [dispatch.repo_overrides] (default: the cwd's origin remote)")
+    pl.add_argument("--seat", help="the calling seat (default: $ROUTE_SEAT), for a service's allow_seats (a repo-scoped pool: opencode-go)")
     pl.add_argument("--json", action="store_true")
     pl.add_argument("--brief", action="append", default=[],
                     help="brief file per kind, in --kinds order (repeat; shadow-asks Jev and GLiDE)")
@@ -2621,8 +2728,9 @@ def main(argv: list[str] | None = None) -> int:
             parser.error(f"unknown kind(s) {bad}; choose from {KINDS}")
         skip = {x.strip() for arg in args.exclude for x in arg.split(",") if x.strip()}
         skip |= operator_disabled()
+        repo, seat = (args.repo or repo_of(os.getcwd())), (args.seat or current_seat())
         rows = plan(kinds, quota=quota, min_headroom=args.min_headroom, exclude=skip,
-                    repo=(args.repo or repo_of(os.getcwd())))
+                    repo=repo, seat=seat)
         if args.brief:
             if len(args.brief) != len(kinds):
                 parser.error("--brief must be given once per kind, in --kinds order")
@@ -2640,7 +2748,7 @@ def main(argv: list[str] | None = None) -> int:
                             "model": c.model if c else None,
                             "dispatch": c.dispatch if c else None,
                             "remaining": c.remaining if c else None,
-                            "why": c.why if c else unrouted_why(k, quota, skip)}
+                            "why": c.why if c else unrouted_why(k, quota, skip, repo, seat)}
                            for k, c in rows]}, indent=1))
         else:
             if QuotaSource.fallback_reason:
@@ -2658,7 +2766,7 @@ def main(argv: list[str] | None = None) -> int:
                       "is capability-only for unmeasured pools", file=sys.stderr)
             for i, (k, c) in enumerate(rows, 1):
                 if c is None:
-                    print(f"{i}. {k:10} -> (none: {unrouted_why(k, quota, skip)}; "
+                    print(f"{i}. {k:10} -> (none: {unrouted_why(k, quota, skip, repo, seat)}; "
                           "re-plan at the next boundary)")
                 else:
                     rem = "" if c.remaining is None else f" {c.remaining:.0f}% left"
@@ -2768,7 +2876,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     choice = route(args.kind, quota=quota, min_headroom=args.min_headroom, exclude=operator_disabled(),
-                   repo=(args.repo or repo_of(os.getcwd())))
+                   repo=(args.repo or repo_of(os.getcwd())), seat=(args.seat or current_seat()))
     if args.brief:
         shadow_kind(args.brief, args.kind, choice.service.name if choice else None)
     if choice is None:

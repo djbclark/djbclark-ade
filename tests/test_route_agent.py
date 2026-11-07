@@ -60,7 +60,7 @@ class TestStandingRules(unittest.TestCase):
         is the pool with headroom, using it is correct."""
         tight = {name: {"remaining": 0.0} for name in IDLE}
         tight["clinepass"] = {"remaining": 100.0}
-        choice = r.route("bulk", quota=tight)
+        choice = r.route("bulk", quota=tight, repo="techno-euphora")   # clinepass is scoped to that repo since 2026-11-02
         self.assertIsNotNone(choice)
         self.assertEqual(choice.service.name, "clinepass")
 
@@ -104,9 +104,10 @@ class TestOpencodeGoTakesNoCode(unittest.TestCase):
         for _, c in r.plan(["code", "code", "code", "code"], quota=self.ONLY_GO):
             self.assertTrue(c is None or c.service.name != "opencode-go")
 
-    def test_opencode_go_still_takes_bulk_and_mechanical(self):
+    def test_opencode_go_still_takes_bulk_and_mechanical_for_its_scoped_caller(self):
+        """Since 2026-11-02 only techno-euphora and the Hermes seat route to it (tests/test_route_repo_scope.py)."""
         for kind in ("bulk", "mechanical"):
-            c = r.route(kind, quota=self.ONLY_GO)
+            c = r.route(kind, quota=self.ONLY_GO, repo="techno-euphora")
             self.assertIsNotNone(c, kind)
             self.assertEqual(c.service.name, "opencode-go")
 
@@ -118,7 +119,7 @@ class TestWasteBurning(unittest.TestCase):
         self.assertGreater(c.remaining, 90)
 
     def test_mechanical_prefers_the_free_tier(self):
-        self.assertEqual(r.route("mechanical", quota=IDLE).service.name, "opencode-go")
+        self.assertEqual(r.route("mechanical", quota=IDLE, repo="techno-euphora").service.name, "opencode-go")
 
     def test_headroom_shifts_bulk_away_from_a_drained_pool(self):
         drained = dict(IDLE, antigravity={"remaining": 5.0})

@@ -23,6 +23,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
+import old_floors_policy
 from test_acp_dispatch import SCRIPT
 from test_acp_dispatch_routing import RoutingDispatch
 
@@ -39,6 +40,16 @@ _loader.exec_module(acpd)
 ARGON = "gemini-4-argon"
 FLASH = "gemini-3.8-flash"
 NO_GOVERNOR = {"CLAUDE_GOVERNOR_STATE": "/nonexistent/fleet-governor.json"}
+
+# The 2026-11-01 astra floors (60, and 20 in tendcf/nix2cf) are mechanisms this file pins; the live policy removed those values on
+# 2026-11-02 (djbclark: codex and the other non-claude pools may run out), so the whole module runs on the old-floors fixture.
+
+def setUpModule() -> None:
+    old_floors_policy.install()
+
+
+def tearDownModule() -> None:
+    old_floors_policy.uninstall()
 
 
 def iso(delta_hours: float) -> str:

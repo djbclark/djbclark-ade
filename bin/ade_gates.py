@@ -76,7 +76,7 @@ FRONTIER_DEFAULTS = {
     "frontier2_per_wave": 1.0,               # same on the codex pool
     "frontier1_agent_calls_per_day": 0.0,    # Agent-tool frontier-1 calls allowed without asking per New York day (0: always ask)
     "frontier1_min_left": 10.0,              # percent of the frontier-1 cap that must be left
-    "frontier2_min_left": 60.0,              # percent left on the codex binding window
+    "frontier2_min_left": 0.0,               # percent left on the codex binding window (60 until 2026-11-02; djbclark: non-claude pools may run out)
 }
 FRONTIER_REASON_MIN, FRONTIER_REASON_MAX = 10, 200
 GUARD_STATE_MAX_AGE_S = 30 * 60              # quota-guard.json older than this proves nothing about the level

@@ -190,7 +190,7 @@ guard checks, the daily cap's counter and log, and the hook's tamper checks stil
 | `frontier2_per_wave` | 1 | 1 | 1 | higher, 1 | the same on the codex pool |
 | `frontier1_agent_calls_per_day` | 0 | 4 | 4 | higher, 4 | Agent-tool frontier-1 calls allowed without asking per America/New_York day (0: always ask) |
 | `frontier1_min_left` | 10 | 10 | 10 | lower, 10 | percent of the Fable cap that must be left (moved from `routing.toml` `fable_min_left`); a profile may not lower it |
-| `frontier2_min_left` | 60 | 60 | 60 | lower, 40 | percent left on the codex binding window |
+| `frontier2_min_left` | 0 | 0 | 0 | lower, 0 | percent left on the codex binding window; 60 until 2026-11-02 (djbclark: codex and the other non-claude pools may run out); a missing reading still fails closed |
 
 `route_agent.py` reads `frontier1_per_wave` (pool `claude`) and `frontier2_per_wave` (every other pool) in `plan` (via
 `frontier_per_wave`), and `frontier1_min_left` in `suggest_model`; the keys are gone from `config/routing.toml`. A per-wave cap above the

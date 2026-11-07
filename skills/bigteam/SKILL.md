@@ -308,11 +308,10 @@ while omp has no enabled Anthropic login (`omp login`).
 
 1. **hermes**: never a delegation target (operator 2026-10-15), gated in
    `acp-run`/`acp-dispatch`.
-1a. **cline (operator 2026-10-17)**: the CLI and Cline.app are uninstalled. The
-   machinery (`acp-run cline`, `acp-dispatch cline`, the `route_agent.py` alias)
-   stays, gated behind `ACP_OPERATOR_APPROVED=cline`, so it is re-enabled only on
-   purpose: reinstall, then the operator names it. Hermes still uses Cline through
-   its own ClinePass API key; that is Hermes's pool, not a bigteam target.
+1a. **cline (djbclark 2026-11-02)**: no operator gate any more. `clinepass` is scoped like opencode-go (the
+   `techno-euphora` repo and the `hermes` seat only) and floored (refused while its headroom is under
+   `lifeline_floor_percent`, 40, or unmeasured); `acp-dispatch cline` enforces both, `route-override` skips neither.
+   Any other repo (this one included) is refused; see `skills/model-routing/SKILL.md`.
 2. Approval is specific: the operator names the agent for this run or this slice. A
    general "use every agent", "bigteam this" or a peer's routing plan does not
    count, and one approval does not carry over to the next batch.

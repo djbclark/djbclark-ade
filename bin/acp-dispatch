@@ -243,7 +243,8 @@ stored session id and no capability for it.
 
 --kind (2026-10-18): a fresh dispatch must name a route_agent kind; the agent×model is mapped to a
 routing service the same way pool headroom is, and an ineligible pair exits 2 naming who *is*
-eligible (ACP_OPERATOR_APPROVED=route-override skips eligibility only). Frontier models
+eligible (ACP_OPERATOR_APPROVED=route-override skips eligibility only; nor does it skip a repo-scoped pool's
+allow-list, `[[service]] allow_repos/allow_seats`: opencode-go only for techno-euphora or $ROUTE_SEAT=hermes). Frontier models
 (`[dispatch].frontier_models`, substring on --model) require `--kind frontier` and ignore
 route-override. Frontier defaults to `--role advise` (read-only brief section + tree hash; a tree
 change sets `advisor_edited` and check says ADVISOR EDITED THE TREE); `--role exec` needs
@@ -1094,7 +1095,7 @@ def refuse_kind(service: str | None, kind: str, quota: dict | None = None) -> No
     disabled = router.operator_disabled()
     if quota is None:
         quota, _ = router.load_snapshot()
-    eligible = sorted(s.name for s in router.discover(quota)
+    eligible = sorted(s.name for s in router.in_scope(router.discover(quota), REPO_NAME, router.current_seat())
                       if s.eligible(kind, quota) and s.name not in disabled)
     who = ", ".join(eligible) if eligible else "(none)"
     label = service or "(unknown service)"
@@ -1271,7 +1272,9 @@ def reroute_command(rec: dict, record_path: Path) -> str | None:
         return None
     exclude = {svc} if (svc := record_service(rec)) else set()
     try:
-        choice = route_module().route(str(kind), exclude=exclude, repo=route_module().repo_of(rec.get("dir")))
+        router = route_module()
+        choice = router.route(str(kind), exclude=exclude, repo=router.repo_of(rec.get("dir")),
+                              seat=rec.get("seat") or router.current_seat())
     except ValueError:
         return None
     if choice is None or not choice.model:
@@ -1350,6 +1353,7 @@ def unavailable_record(out: Path, a: argparse.Namespace, reason: str, cls: str,
            "detail": reason, "remaining_percent": remaining, "estimated_usage_pct": estimate,
            "kind": getattr(a, "kind", None), "service": getattr(a, "service", None),
            "role": getattr(a, "role", None),
+           "seat": getattr(a, "seat", None) or route_module().current_seat(),
            "prompt": prompt, "brief": str(Path(a.prompt_file).resolve()) if a.prompt_file else None,
            "perm": a.perm or "all", "effort": getattr(a, "effort", None),
            "context": getattr(a, "context", None), "timeout": a.timeout,
@@ -4605,7 +4609,7 @@ def resume_record(a: argparse.Namespace, quota_stop: bool = False) -> int:
         json=False, tee=False, no_model_check=True, no_preflight=True, min_headroom=10.0,
         est_pct=rec.get("estimated_usage_pct"), checkpoint=rec.get("checkpoint", False), acp_run=old_cmd[0],
         effort=rec.get("effort"), context=rec.get("context"), acp_arg=[*rec.get("acp_arg", []), *resume_arg],
-        kind=rec.get("kind"), role=rec.get("role"), from_record=True)
+        kind=rec.get("kind"), role=rec.get("role"), from_record=True, seat=rec.get("seat"))
     return dispatch(args, {**rec, "session_id": sid, "prompt": original})
 
 
@@ -4671,7 +4675,9 @@ def reroute_record(a: argparse.Namespace) -> int:
             die(f"--escalate: kind {old.get('kind')!r} has no rung above it (ladder: {ladder}); "
                 "at the top, re-plan by hand (route_agent.py plan)", 2)
         old_svc = old.get("service") or resolve_service(str(old.get("agent") or ""), old.get("model"))
-        choice = route_module().route(nxt, exclude={old_svc} if old_svc else set(), repo=route_module().repo_of(old.get("dir")))
+        router = route_module()
+        choice = router.route(nxt, exclude={old_svc} if old_svc else set(), repo=router.repo_of(old.get("dir")),
+                              seat=old.get("seat") or router.current_seat())
         if choice is None:
             die(f"--escalate: nothing eligible for --kind {nxt} excluding {old_svc or 'the failed'}"
                 f" pool; re-plan by hand (route_agent.py plan --kinds {nxt})", 2)
@@ -4704,6 +4710,7 @@ def reroute_record(a: argparse.Namespace) -> int:
         # (adversary bcdd223, A6)
         est = None
     ns = argparse.Namespace(
+        seat=old.get("seat"),
         agent=a.agent, model=a.model, name=f"{base}-{n}", dir=old["dir"], task=old.get("task"),
         out=old["out"], perm=perm, timeout=a.timeout if a.timeout is not None else old.get("timeout", DEFAULT_TIMEOUT),
         wrapup_grace=old.get("wrapup_grace", DEFAULT_WRAPUP_GRACE), lead=old.get("lead", DEFAULT_LEAD),
@@ -4793,6 +4800,31 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
         die(go_error)
     if go_advisory and kind not in go_model_policy.policy()["advisory_kinds"]:
         die("Go advisory use requires --kind judgment, research or frontier")
+    # Repo scope (djbclark 2026-11-02, [[service]] allow_repos/allow_seats): a scoped pool (opencode-go) only for the repos and
+    # seats on its list; route-override, a Go advisory and a resume do not skip it. The seat is ROUTE_SEAT, kept in the record so a
+    # launchd auto-resume and a reroute (no such env) stay admitted. The pool is the one the model draws on (`service`): an opencode
+    # model that maps to no pool is not opencode-go's, so the agent's alias never stands in for it.
+    seat = getattr(a, "seat", None) or route_module().current_seat()
+    scoped_svc = (route_module().BY_NAME.get(service) if service
+                  else None if a.agent == "opencode" else kind_service(a.agent, service))
+    if (scoped_svc is not None and scoped_svc.name == "opencode-go" and a.agent == "opencode" and a.model
+            and not a.model.startswith("opencode-go/")):
+        scoped_svc = None   # another opencode provider (the Zen catalogue): acp-dispatch's pool map defaults it to Go, but only opencode-go/* draws on the Go pool
+    if scoped_svc is not None:
+        scope_why = scoped_svc.scope_block(REPO_NAME, seat)
+        if scope_why:
+            die(scope_why)
+    # Per-service minimum headroom (djbclark 2026-11-02, [[service]] min_headroom): replaces the default 10 for the pools allowed to run
+    # out of quota, before any use of a.min_headroom below. An explicit --min-headroom still wins.
+    pool_svc = kind_service(a.agent, service)
+    if pool_svc is not None:
+        a.min_headroom = route_module().headroom_floor(pool_svc, a.min_headroom, 10.0)
+    # Lifeline floor (clinepass, 2026-10-23 lifeline; djbclark 2026-11-02): a fresh slice is refused while the pool's headroom is under
+    # [[service]] lifeline_floor_percent or unmeasured. route-override does not skip it; a resume (a slice already admitted) does.
+    if pool_svc is not None and pool_svc.lifeline_floor_percent and not is_resume:
+        life_why = route_module().lifeline_block(pool_svc, route_module().load_snapshot()[0].get(pool_svc.name))
+        if life_why:
+            die(life_why)
     if not is_resume and kind:
         if is_frontier_model(a.model) and kind != "frontier":
             die(f"model {a.model!r} is a frontier model; use --kind frontier "
@@ -5077,7 +5109,7 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
         "acp_arg": previous.get("acp_arg", []) if previous else a.acp_arg or [],
         "session_id": previous.get("session_id") if previous else None, "resume_count": resume_count,
         "prompt": previous["prompt"] if previous else prompt,
-        "kind": kind, "service": service, "role": role,
+        "kind": kind, "service": service, "role": role, "seat": seat,
         "frontier_reason": frontier_reason if not previous else previous.get("frontier_reason"),
         "frontier_judged": judged if not previous else previous.get("frontier_judged"),
         "frontier_judged_note": judged_note if not previous else previous.get("frontier_judged_note"),
@@ -5689,6 +5721,7 @@ def dispatch_cloud(a: argparse.Namespace, previous: dict | None, kind: str | Non
         "agent_report": str(report), "agent_done": str(done), "perm": a.perm, "effort": None, "context": None,
         "timeout": a.timeout, "wait_timeout": wait_timeout, "wrapup_grace": 0, "acp_arg": [],
         "session_id": None, "resume_count": 0, "prompt": prompt, "kind": kind, "service": service,
+        "seat": getattr(a, "seat", None) or route_module().current_seat(),
         "role": "exec", "estimated_usage_pct": 0.0, "estimated_usage_windows": {}, "estimate_source": "cloud",
         "snapshot_remaining_before": remaining, "snapshot_reading": reading, "checkpoint": False,
         "advisor_tree_before": None, "auto_resume": {"state": "off", "detail": "cloud slice"},
