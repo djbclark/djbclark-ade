@@ -159,8 +159,9 @@ After each group report what ran and its exit status; at the end, a checklist of
 On this Mac, run the slim-down's live checks, items C65-C73 of docs/slim/operator-batch.md on djbclark-ade master
 (`git -C ~/src/djbclark-ade show origin/master:docs/slim/operator-batch.md`), in order, each command exactly as written:
 review-launch --check (both modes), the first bin/review-pr on a real PR, route_agent.py services --check-models and show,
-one live acp-dispatch read-only run, the context-budget Paseo schedule (C69), the optional upstream schedule (C70, ask me
-first), closing PR 270 (ask first), and `graft build` (C73). Capture each exit status without a pipe. Report a table:
+one live acp-dispatch read-only run, the context-budget Paseo schedule (C69), the optional upstream schedule (C70, create it:
+no need to ask, operator choice 2026-11-07), closing PR 270 (C71, close it: no need to ask), a check that
+`http://127.0.0.1:18804/mcp` still answers (the kept firecrawl router), and `graft build` (C73). Capture each exit status without a pipe. Report a table:
 item, command, rc, PASS or what differed; for C65 paste the self-check table into a short note I can put in
 docs/slim/log.md through a PR.
 ```
