@@ -6,7 +6,9 @@ pieces a new djbclark-ade user needs (the `ade-merge-gate` App first); prompt-in
 on demand, with an ongoing check that the policy stays applied; and one config file for every djbclark-ade option. A sixth
 part was added: prompts and code that hand any browser-only step to Grok Bot. Later the same day: aiuse and
 sudo-secretspec are hard dependencies, every listed component is in the install and update system except commercial
-products, and Hermes is offered with a do-it-yourself or AI-assisted setup (S3, S3a). The sections below go in build order:
+products, and Hermes is offered with a do-it-yourself or AI-assisted setup (S3, S3a). Then: the commercial services (1Password,
+Grok Bot, GitHub Advanced Security, hosted firecrawl, Greptile, CodeRabbit) are optional components, and OVHcloud is
+the suggested host. The sections below go in build order:
 S1 and S2 come first because every later section reads the config and adds a recipe.
 The research behind S5 is dated 2026-11-07. Sources are listed at the end, and their facts must be re-probed when the work starts.
 
@@ -53,9 +55,9 @@ The research behind S5 is dated 2026-11-07. Sources are listed at the end, and t
    `git clone https://github.com/djbclark/djbclark-ade ~/src/djbclark-ade && cd ~/src/djbclark-ade && ./bin/ade-install`,
    which installs `just` if it is missing and then runs the recipe.
 2. **Every dependency is in one system** (operator, 2026-11-07: "All of the listed things should be part of our easy
-   install/update/keep-updated system", commercial things like 1password excepted). The list lives in `[install]`, one
-   entry per component, each with its install, update and probe command. `vendor/README.md` points at it. The
-   components are in three classes:
+   install/update/keep-updated system"; commercial services first left out, then made optional the same day). The list
+   lives in `[install]`, one entry per component, each with its install, update and probe command. `vendor/README.md`
+   points at it. The components fall into five classes:
    1. **Hard dependencies.** `just install` installs them, `just doctor` fails without them, and the daily job keeps
       them current:
       - **sudo-secretspec** (`frdminc/sudo-secretspec`; `brew install frdminc/sudo-secretspec/sudo-secretspec`, or its
@@ -96,25 +98,36 @@ The research behind S5 is dated 2026-11-07. Sources are listed at the end, and t
       - **The firecrawl router** (`bin/firecrawl-router`) pointed at a firecrawl endpoint: this operator's
         self-hosted one on Hyades, or none.
       - **The LiteLLM proxy** (the fork at `~/src/litellm`, site-djbclark's `roles/litellm`), Hermes' fallback.
-   3. **Optional, off by default:** the `herdr4paseo` and `paseo4herdr` bridges (`djbclark/paseo4herdr`) and
-      `bin/herdr-server-run`, the last herdr pieces, only for someone who still runs herdr.
-   4. **Never installed: commercial products** (operator, 2026-11-07). The free clients and TUIs of paid services
-      *are* installed (S3.2.1); what is left out:
-      - 1Password: the app, its `op` CLI, and site-private's `skills/1password`.
-      - The paid plans themselves; the user buys and logs in:
-        - Claude Max, which also carries omp's Claude API credits;
-        - the ChatGPT plan behind Codex;
-        - Cursor, which also bills Grok Bot;
-        - the Google AI plan behind the antigravity provider;
-        - opencode Go;
-        - the Z.ai coding plan;
-        - ClinePass.
-      - Grok Bot's cloud service (only its channel, peer-link, is installed).
-      - GitHub Advanced Security, which "code scanning for AI applications" needs (S5 only probes for it).
-      - The hosted firecrawl.dev service (the router points at a self-hosted firecrawl, or none).
-      - Greptile and CodeRabbit: their skills are in site-djbclark and get linked, but the services and their keys
-        are the user's own.
-      - Hosting: the Hetzner VPS (vps-primary) and the Hyades host are infrastructure, not components.
+   3. **Optional, off by default, offered one by one** (operator, 2026-11-07: commercial services are opt-in
+      components, not exclusions). Each has an install, a basic setup and a `doctor` probe. Each is a free client or
+      skill; the account behind it is the user's:
+      - **1Password:** the app, the `op` CLI and the `1password` skill. The skill is site-private's `skills/1password`.
+        It is linked from site-private when the user has access, as this operator does. For a new user, a public generic
+        copy without this operator's vault or item names is a decision for the operator (site-private's private-paths
+        list keeps the current copy private, and changing that needs the operator's yes, order 11).
+      - **Grok Bot:** setup of the cloud bot's side for a new user (an account through Cursor, the bot's webhook and its
+        `ask_claude` callback), on top of peer-link (S3.2.2).
+      - **GitHub Advanced Security:** turned on for the repositories that have it, so "code scanning for AI applications"
+        (S5) runs; the setup first probes whether the account can use it.
+      - **Hosted firecrawl** (firecrawl.dev): an API key in `sudo-secretspec` and the router's upstream set to it, as the
+        alternative to a self-hosted firecrawl.
+      - **Greptile and CodeRabbit:** their CLIs or apps, keys in `sudo-secretspec`, and their skills (from site-djbclark)
+        linked.
+      - **The herdr bridges:** `herdr4paseo` and `paseo4herdr` (`djbclark/paseo4herdr`) and `bin/herdr-server-run`, the
+        last herdr pieces, only for someone who still runs herdr.
+   4. **Suggested, not installed: hosting.** A user who wants an always-on agent host (what vps-primary is here) is
+      pointed at **OVHcloud** (operator, 2026-11-07: "suggest OVHcloud not Hetzner"). site-djbclark's `ovhcloud-api`
+      skill can drive it once the user has an account. This operator's current hosts (vps-primary on Hetzner, the Hyades
+      host) stay as they are; they are infrastructure, not components.
+   5. **Never installed:** the paid plans themselves. The user buys them and logs in; their free clients are installed
+      (S3.2.1):
+      - Claude Max, which also carries omp's Claude API credits;
+      - the ChatGPT plan behind Codex;
+      - Cursor, which also bills Grok Bot;
+      - the Google AI plan behind the antigravity provider;
+      - opencode Go;
+      - the Z.ai coding plan;
+      - ClinePass.
 
       Repositories that *use* djbclark-ade (tendcf, nix2cf, Plektra) are not components either. site-private is cloned
       only when the user already has access to it.
