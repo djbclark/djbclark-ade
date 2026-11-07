@@ -103,7 +103,7 @@ Update and relink
 
 Paseo skills and config
 - C35. Paseo skill selection switch: `npx skills add getpaseo/paseo`, or switch each Paseo home's `agents.skills.selection` in `~/.paseo/config.json` from `{"mode":"custom","skills":[]}` to `{"mode":"all"}`; if upstream's broad triggers steal `handoff`/`dialogue` requests, narrow to `paseo`, `paseo-help`, `paseo-plugin` (decision) (wave3b C; `docs/skill-everywhere.md` 3a; `paseo reload` rejects a top-level `"skills"` key).
-- C36. Rename to `paseo*` or drop the six `ade-paseo*` `skillOverrides` entries in `agents/claude/settings.json.tmpl` lines 89-94 if you install Paseo's bundle (decision) (wave3b, merger note).
+- C36. Done on the branch (2026-11-07, Wave 3b merge): the template's six overrides are renamed to Paseo's `paseo*` names, `user-invocable-only`; mirror that in the live `~/.claude/settings.json` when you install Paseo's bundle (C35).
 - C37. Paseo `additionalDirectories` step: add `~/.local/state/bigteam` to the Claude provider's `additionalDirectories` override in Paseo's config, only if the first live `acp-dispatch` run (C68) asks before reading the brief or writing the report (the slice reads BLOCKED, exit 4) (wave4-E6 J4).
 - C38. Remove glm-acp-agent's custom ACP provider entry from the Paseo home's `config.json` if one exists (wave3b G7).
 - C39. Optional: `opencode auth login` and choose the zai coding-plan provider (key `ZAI_CODING_PLAN_API_KEY` via `sudo-secretspec`), then `opencode models`; add a routing row only if wanted (decision) (wave3b G6).
