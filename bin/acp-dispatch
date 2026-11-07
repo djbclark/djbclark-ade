@@ -1094,7 +1094,18 @@ def launch_locked(record: Path, rec: dict) -> int | None:
     aid = data.get("agentId") if isinstance(data, dict) else None
     if not aid:
         return refuse_launch(record, f"paseo run did not create an agent: {why or data}", 2, "launch")
-    update_record(record, paseo_agent_id=str(aid), run_status=data.get("status"))
+    reported_cwd = data.get("cwd")
+    expected_cwd = rec.get("dir")
+    placement_warning = None
+    if not isinstance(reported_cwd, str) or not reported_cwd:
+        reported_cwd = None
+        placement_warning = "Paseo did not report a working directory; placement is unverified"
+    elif isinstance(expected_cwd, str) and os.path.realpath(reported_cwd) != os.path.realpath(expected_cwd):
+        placement_warning = f"misplaced agent: Paseo cwd {reported_cwd!r} differs from assigned {expected_cwd!r}"
+    update_record(record, paseo_agent_id=str(aid), run_status=data.get("status"),
+                  paseo_cwd=reported_cwd, placement_warning=placement_warning)
+    if placement_warning:
+        print(f"acp-dispatch: warning: {placement_warning}; agent left running", file=sys.stderr)
     end = time.monotonic() + COUNTABLE_S
     while time.monotonic() < end and str(aid) not in count_agents()[2]:
         time.sleep(0.5)

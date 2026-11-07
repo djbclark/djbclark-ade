@@ -17,7 +17,9 @@ counted exactly. Knobs (all optional):
   FAKE_PASEO_MODELS     JSON {provider: [model ids]} for `provider models P` (default: none listed, an empty array)
   FAKE_PASEO_USAGE      JSON list for `usage ls` (default []); FAKE_PASEO_USAGE_RC exits with that code instead
   FAKE_PASEO_RUN_FAIL   `run` prints a JSON error and exits 1
-FAKE_PASEO_PARENT_CWD Simulate parent workspace placement unless a workspace is explicit
+  FAKE_PASEO_PARENT_CWD Simulate parent workspace placement unless a workspace is explicit
+  FAKE_PASEO_FORCE_CWD  Simulate a daemon ignoring explicit placement
+  FAKE_PASEO_OMIT_CWD   Omit cwd from the native run result
 """
 import fcntl
 import json
@@ -132,14 +134,18 @@ def run(args):
         parent_cwd = os.environ.get("FAKE_PASEO_PARENT_CWD")
         if parent_cwd and not opt(flags, "--new-workspace") and not opt(flags, "--workspace"):
             cwd = parent_cwd
+        cwd = os.environ.get("FAKE_PASEO_FORCE_CWD") or cwd
         agent = {"id": f"agent-{len(agents) + 1:04d}", "provider": provider, "mode": (opt(flags, "--mode") or [""])[0],
                  "title": (opt(flags, "--title") or [""])[0], "cwd": cwd,
                  "labels": labels, "status": "running", "prompts": [prompt]}
         act(agent, prompt)
         agents.append(agent)
         save(agents)
-        out({"agentId": agent["id"], "status": "running", "provider": provider, "cwd": agent["cwd"],
-             "title": agent["title"]})
+        result = {"agentId": agent["id"], "status": "running", "provider": provider, "cwd": agent["cwd"],
+                  "title": agent["title"]}
+        if os.environ.get("FAKE_PASEO_OMIT_CWD"):
+            result.pop("cwd")
+        out(result)
     if verb == "ls":
         want = dict(x.split("=", 1) for x in opt(rest, "--label"))
         rows = [a for a in agents if all(a["labels"].get(k) == v for k, v in want.items())]
