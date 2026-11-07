@@ -17,4 +17,5 @@ Started 2026-11-07, when the Fable credits ran out mid-Wave 5 (the lead fell bac
 ## F3. Lead work done on Opus after the fallback
 
 - **F3a.** The W3 fixes (F1c, commit dd70d507).
-- **F3b.** Wave 6: the fragment numbering, the CHANGELOG fold, the final PR body and its merge-gate checklist (`docs/slim/operator-batch.md`).
+- **F3b.** Wave 6: the final PR ([djbclark/djbclark-ade#297](https://github.com/djbclark/djbclark-ade/pull/297)) body and its merge-gate checklist, the fragment numbering, and `docs/slim/operator-batch.md` (compiled by Sonnet, not reviewed by Fable: its order inside each phase and its unverified commands are worth a second read).
+- **F3c.** The `bin/review-pr` run on the final head that the PR's gate asks for will run on whatever model is available; a Fable run is the stronger cross-model review of an Opus-written branch.

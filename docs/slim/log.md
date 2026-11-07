@@ -71,6 +71,12 @@ J2 pool audit (lead's reading, ruling 10 / R2-12..15): Paseo providers that each
 
 Waivers given by the operator 2026-11-06 ("B waive both"): the sleeping pane w1:p1 and the four dirty worktrees. **C7 PASSED.** E2 may merge after E1; E3/E4/E6 are clear of this gate.
 
+## Wave 6: the final PR opened (2026-11-07)
+
+- **[djbclark/djbclark-ade#297](https://github.com/djbclark/djbclark-ade/pull/297)**, draft, base master fb3b9de, head the slim branch. Its body carries the merge-gate checklist (C7 and C1 re-run on the Mac, the J6 plugin day, the C3 per-file list, site-djbclark's intake merge, the `.claude/settings.json` decision, CI, `bin/review-pr` on the final head) and points at `docs/slim/operator-batch.md` and `docs/slim/fable-review-later.md`. The lead watches it (subscribed): CI results and review comments are answered there; the operator marks it ready and the lead merges with the head pinned once the gate is green.
+- The changelog fragment's `(#0)` placeholders now read `(#297)`. `CHANGELOG.md` is not folded on this branch: the fold is a separate lead PR after the merge (review rule 10: one writer, from master), so this PR stays clear of the shared file.
+- Not done on purpose: `graft build` (the cache is local and ignored; operator batch C73).
+
 ## Wave 5 merged (2026-11-07 ~12:30Z)
 
 - E11 merged (worktree branch `worktree-agent-afedd044bb91d3fd4`, head a597b3d, APPROVE after one repair round: the research skill's Antigravity route (refused by the shim) replaced by the Argon frontier route, two open queue residuals restored as a Carried line, `ade-roster` on `git ls-files`). README 147 lines with a generated roster (`bin/ade-roster --check`, run in CI's context-policy job); AGENTS.md 338 lines re-based on Paseo with a Trust paragraph for the 2026-11-07 rulings; `docs/queue.md` 2,114 → 138 lines (33 carried, 31 closed by the slim-down, 18 done before; the full text at tag `pre-slim-2026-11-06`); eleven docs to `docs/history/`; `orchestration-practices.md` rewritten; the handoff/baton/loose/steps/research/session-handoff prose no longer names a deleted tool. `.claude/settings.json` (R1) NOT changed: the writer's harness refused the write; the merged JSON is in `docs/slim/reports/wave5-E11.md` section E, awaiting the operator's word (apply on the branch, or paste on the Mac).
