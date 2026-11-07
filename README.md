@@ -96,7 +96,7 @@ Skills (19, from each `skills/*/SKILL.md`):
 | [`tell-chief-of-staff`](skills/tell-chief-of-staff/SKILL.md) | Pointer (2026-11-06) for messaging the operator's cloud Grok Bot "Chief of Staff" ("tell grok", "tell Chief of Staff", "hand this to grokbot") and for its ask_claude callback; the sender and its setup live outside this repository. |
 | [`tell-coding-bot`](skills/tell-coding-bot/SKILL.md) | Pointer (2026-11-06) for talking to the operator's cloud Grok Bot "Coding" ("tell the Coding bot", "ask Coding", "hand this to the Coding bot", a task that needs a real browser session); the coding-bot code now lives in the peer-link repository. |
 
-`bin/` (44, from each file's first docstring or comment):
+`bin/` (45, from each file's first docstring or comment):
 
 | Tool | What |
 |---|---|
@@ -125,6 +125,7 @@ Skills (19, from each `skills/*/SKILL.md`):
 | [`cursor-cloud`](bin/cursor-cloud) | Launch and inspect Cursor Cloud Agents from the terminal (2026-10-19). |
 | [`deadline`](bin/deadline) | Register a maximum run time before a long command or wait, and enforce it from outside. |
 | [`deadline_wait.py`](bin/deadline_wait.py) | How a long WAITER registers its own deadline (docs/deadline.md, "Waiters register themselves"). |
+| [`firecrawl-router`](bin/firecrawl-router) | Firecrawl REST API with a self-hosted primary and a commercial fallback. |
 | [`git-commit-own`](bin/git-commit-own) | Commit only your own paths, without pre-commit's whole-tree stash. |
 | [`gnu-tools-check`](bin/gnu-tools-check) | Find macOS shell code that calls a BSD tool where the GNU one is wanted. |
 | [`go_model_policy.py`](bin/go_model_policy.py) | Shared Go cost policy for routing and ACP entry points; no provider calls. |

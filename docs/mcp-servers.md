@@ -20,7 +20,7 @@ why, and how to re-enable. This table is otherwise the 2026-08-23 snapshot.
 | `ghost-os` | stdio: `/opt/homebrew/bin/ghost mcp` | user | macOS UI automation via accessibility tree + vision. **Blocked in Claude Code since 2026-10-10** (`deniedMcpServers`) |
 | `hindsight` | stdio: `node ~/.hindsight/coding-agents/dist/mcp-server.js` | user | Per-repo Hindsight coding-agent memory (the 🧠 banner) |
 | `hindsight-shared` | HTTP: `http://127.0.0.1:8888/mcp/hermes-shared/` | user | Shared Hindsight bank (`hermes-shared` in the URL is the bank name) |
-| `firecrawl` | HTTP: `http://127.0.0.1:18804/mcp` (LaunchAgent `com.djbclark.firecrawl-mcp`, machine-side) | Claude Code (the Codex and opencode templates dropped it 2026-11-07) | Scrape, search, crawl, map on self-hosted Firecrawl (SIPB Hyades). Its parent, `bin/firecrawl-router`, was deleted from this repo 2026-11-06 (Wave 3b): the operator re-points that LaunchAgent at the Hyades service or retires it before `ade update` reaches the Mac (`slim/reports/wave3b.md` G8). The firecrawl skill moved to `~/ops/site-public-djbclark/skills/firecrawl/`. `firecrawl_developer_search` is answered by the Hyades API itself (below) |
+| `firecrawl` | HTTP: `http://127.0.0.1:18804/mcp` (LaunchAgent `com.djbclark.firecrawl-mcp`, machine-side) | Claude Code, Codex, opencode | Scrape, search, crawl, map on self-hosted Firecrawl (SIPB Hyades), through this repo's `bin/firecrawl-router` (kept by the operator's ruling of 2026-11-07, after the slim-down first deleted it): it proxies the MCP to Hyades, answers `query`/`json` with SIPB LLMs then LiteLLM, answers developer search from GitHub, and serves Hermes' search backend on 18805. The `firecrawl` skill lives in site-djbclark. |
 | claude.ai Gmail / Google Calendar / Google Drive | HTTPS (Google-hosted) | claude.ai account | Remote connectors managed on claude.ai, not in local config |
 
 ## Firecrawl developer search (2026-10-24)
@@ -34,8 +34,7 @@ public-repositories-read-only token (`FIRECRAWL_GITHUB_PUBLIC_TOKEN`, set as a m
 from sudo-secretspec), GitHub traffic through the same two proxy legs as SearXNG (vps-primary and pastebin.xvm.mit.edu, both
 allowing `api.github.com`), a 10-minute cache and stale-if-error. Design, knobs, failure modes and operations:
 firecrawl-hyades `docs/developer-search.md`. The Mac router answered this route itself from 2026-10-24 (PRs 41, 43, 45)
-until this cutover; the router (`bin/firecrawl-router`) was deleted 2026-11-06 (slim-down Wave 3b), so no GitHub token
-remains on the Mac side. Considered and not built: Exa and Parallel as extra sources; Firecrawl's
+until this cutover and no longer holds a GitHub token. Considered and not built: Exa and Parallel as extra sources; Firecrawl's
 keyless hosted developer index (the commercial API, off by djbclark's ruling of 2026-10-18); free-tier hosts (Cloud Run, Fly,
 Koyeb) for the microVMs: only Playwright and devsearch fit them, and each needs cross-provider networking.
 

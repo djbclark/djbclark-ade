@@ -103,7 +103,7 @@ under **Carried**, newest first, one line each; an item leaves when it ships (in
 12. PR 31 `claude-fleet-governor` and the 2026-10-23 quota emergency: the governor is gone; Paseo's session-guard and usage-auto-resume plugins replace it (E7).
 13. Follow-ups from PRs 29 and 30 (quota guard, self-slash, the one-waiter-per-PR item): the guard, self-slash and pr-wait are gone (E7, E4, E8).
 14. `frontier_agent_gate._guard_state` keeps its own reader (2026-11-01): the hook calls `ade_gates.read_guard_state()` (E7).
-15. Follow-ups from the 2026-10-20 reviews: the firecrawl-router listener (Wave 3b), the dispatch load-gate and `cursor-cloud` place (E6; `bin/cursor-cloud` direct), the PR 12 routing notes (E7) and the relay Paseo channel (E3).
+15. Follow-ups from the 2026-10-20 reviews: the firecrawl-router listener (kept 2026-11-07), the dispatch load-gate and `cursor-cloud` place (E6; `bin/cursor-cloud` direct), the PR 12 routing notes (E7) and the relay Paseo channel (E3).
 16. pr-wait follow-ups (PR 58, MEDIUM and LOWs) and the deadline follow-up for `local-review`: both tools are gone (E8).
 17. ade-scan-state follow-ups 2 and 3, and the Phase 0 scanner: the tool is gone (E2); the skill-everywhere `unsafe_links` LOW (PR 37) was accepted.
 18. Heavier use of Hermes worktrees and cow pastures (2026-10-23): pastures are gone; Paseo worktrees and the claim registry (E2, E8; order 9).

@@ -89,22 +89,10 @@ docs/slim/operator-batch.md and section E of docs/slim/reports/wave4-E8.md from 
    (that is after PR 297 merges).
 ```
 
-## P6. Re-point the firecrawl MCP to Hyades (A12)
+## P6. Firecrawl (A12): nothing to run
 
-```
-On this Mac, re-point the shared firecrawl MCP away from djbclark-ade's deleted bin/firecrawl-router, before `ade update`
-runs. Read item A12 of docs/slim/operator-batch.md and section G8 of docs/slim/reports/wave3b.md from the slim branch
-(git -C ~/src/djbclark-ade fetch origin claude/determined-maxwell-uvddaz; then git show ...).
-1. Show me: `launchctl list | grep firecrawl`, the plist of com.djbclark.firecrawl-mcp (~/Library/LaunchAgents), what
-   ~/.local/bin/firecrawl-router points at, and Hermes' search backend setting (~/.hermes/config.yaml, the
-   search_backend / FIRECRAWL_API_URL lines only; never print keys).
-2. Find the Hyades firecrawl endpoint (site-djbclark roles/shared_mcp defaults, read-only) and propose the smallest change
-   that serves the MCP on 127.0.0.1:18804 and Hermes' backend on 18805 from Hyades without bin/firecrawl-router. The plist
-   comes from site-djbclark's ansible role (roles/shared_mcp): say whether the right fix is in that role (a site-djbclark
-   change: show the diff and wait for my yes) or a live config edit.
-3. Apply what I approve, reload the LaunchAgent, and prove it: an MCP list/tools call to 18804 and one Hermes search.
-4. Report what changed, where, and how to roll it back.
-```
+The operator kept `bin/firecrawl-router` in djbclark-ade (2026-11-07), so the shared MCP and Hermes' backend keep working through
+it. After the merge, P12 checks that `http://127.0.0.1:18804/mcp` still answers.
 
 ## P8. C7 drain and C1 live-process checks (A18-A25)
 

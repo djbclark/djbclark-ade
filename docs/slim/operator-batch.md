@@ -24,10 +24,10 @@ GitHub merge gate (App and environment; the order is wave4-E8 E4)
 - A11. Confirm the Tests check names the ruleset will pin (expect `pytest-linux 15368`, `context-policy 15368`): `gh api repos/djbclark/djbclark-ade/commits/$(git rev-parse origin/master)/check-runs --jq '.check_runs[] | [.name, .app.id] | @tsv'` (wave4-E8 E2).
 
 Web search stack (must precede `ade update`)
-- A12. Re-point (operator decision 3a, 2026-11-07): point `com.djbclark.firecrawl-mcp` (the shared `firecrawl` MCP on 18804) and Hermes' `search_backend: firecrawl` (18805, `agents/hermes/config.yaml.tmpl:132`) at the Hyades firecrawl service directly, before `ade update` runs (`~/.local/bin/firecrawl-router` is a symlink into this repo's `bin/` and breaks then); the LaunchAgent and Hermes' live config are outside this repo, so the edit is yours, or a site-djbclark change with your yes (wave3b G8).
+- A12. Nothing to do (operator ruling 2026-11-07, step 6: keep `bin/firecrawl-router` in djbclark-ade): `com.djbclark.firecrawl-mcp` keeps running the router through the `~/.local/bin/firecrawl-router` symlink, and Hermes keeps its 18805 backend; `ade update` leaves the router in place. Check after the merge that `curl -i http://127.0.0.1:18804/mcp` still answers (wave3b G8 superseded).
 
 site-djbclark edits (order 11: each needs your explicit yes)
-- A13. Edit the six consumers of `firecrawl-router`/`web-get`: `roles/shared_mcp/tasks/main.yml:18`, `defaults/main.yml:89-104`, `skills/firecrawl/SKILL.md`, `skills/firecrawl/scripts/live-suite/common.py:2`, `home-agents.md:24`, `cursor/home-agents.mdc:311` (wave3b G8) (decision).
+- A13. Edit the site-djbclark consumers of the retired `web-get` and the `fallback-chains` ladder only (the router stays): `skills/firecrawl/SKILL.md` (its `web-get` mentions), `home-agents.md:24`, `cursor/home-agents.mdc:311`; `roles/shared_mcp` and `skills/firecrawl/scripts/live-suite/common.py` need nothing (decision, order 11).
 - A14. Fix `fleet-watch:120`, which still says "Skill: /paseowatch." (a deleted skill) (wave3b B, G5).
 - A15. Decide whether the `paseo` profile gets a worker fallback (`UPR_FALLBACK=worker`), a site-djbclark change (wave3b B, G5) (decision).
 - A16. Decide whether to add the four moved tests (`tests/test_barnowl_skill.py`, `tests/test_bigteam_prune.py`, `tests/test_change_hermes_{auto,lock}.py`) to a site-djbclark workflow; none runs in CI there today (wave2-E1 E24) (decision).
@@ -80,7 +80,7 @@ Stop the jobs and remove state, before `ade update`
 - C14. The per-target CPU watchers (opencode-cpu-watch, codexbar-cpu-watch): `for l in $(launchctl list | awk '$3 ~ /^com\.djbclark\..*-cpu-watch$/ {print $3}'); do launchctl bootout gui/$UID/$l; rm -f ~/Library/LaunchAgents/$l.plist; done` (wave3-E5 G1; log Wave 2 batch 6).
 - C15. The `watch` job from Wave 3b: the log lists "watch (Wave 3b)" but no label or plist path; the form would be `launchctl bootout gui/$UID/com.djbclark.watch` (unverified); also archive `~/.local/state/watch/` (log Wave 2 batch 6; wave3b G5).
 - C16. Lander and feeder (J11, retire): `launchctl bootout gui/$UID/com.djbclark.ade-lander; launchctl bootout gui/$UID/com.djbclark.ade-feeder`, then remove both plists from `~/Library/LaunchAgents/` (path by the same convention, unverified); the scripts stay in `~/.local/state/bigteam/deepseek-review-2026-10-30/` as history (PLAN.md J11, F Wave 4 row).
-- C17. (Moot under decision 3a: the LaunchAgent is re-pointed, not retired.) `rm` the dangling `~/.local/bin/{web-get,web-digest,firecrawl-router}` once nothing points at them (wave3b G8).
+- C17. `rm` the dangling `~/.local/bin/{web-get,web-digest}` (the `firecrawl-router` link stays: the router is kept, 2026-11-07) (wave3b G8).
 - C18. `launchctl bootout gui/$(id -u)/com.djbclark.zcode-key-auth; rm ~/Library/LaunchAgents/com.djbclark.zcode-key-auth.plist; rm -r ~/.local/state/zcode-key-auth` (wave2-E9 D, zcode line).
 - C19. `acpdispatch.n2maskfix.reset` is a one-shot that already exited; confirm with `launchctl list | grep n2maskfix` and remove its plist if still present (log Wave 2 batch 6; plist path unverified).
 - C20. `sudo rm /etc/sudoers.d/acp-dispatch-pmset` (wave4-E6 J2).

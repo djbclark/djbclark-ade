@@ -9,7 +9,7 @@ Every claim names the file that shows it; a claim without a file is the operator
 **Re-based 2026-11-07 (slim-down E11; `slim/log.md` has every deletion).** Read this block first; the body below is
 the 2026-10-20 snapshot with dated notes, and a line that names a deleted tool describes the surface as it was.
 
-* **Deleted surfaces** (2026-11-06/07): `bin/firecrawl-router` (the only HTTP listener), `bin/zcode-key-auth`,
+* **Deleted surfaces** (2026-11-06/07): `bin/zcode-key-auth`,
   `bin/skillopt-night`, `bin/skillopt_sources.py`, `bin/failover.py`, `bin/skill-get`, `claude/hooks/prior_art_nudge.py`,
   `bin/web-get`, `bin/ade-scan-state`, `bin/pr-wait`, `bin/local-review`, the quota guard and fleet governor, the
   watch family, session-finder's launcher and fleet, the pi subagent extension, and every retired TUI's adapter.
@@ -30,7 +30,7 @@ the 2026-10-20 snapshot with dated notes, and a line that names a deleted tool d
   (AGENTS.md, Trust). The review boundary and the merge gate exist for that external case and stay strict.
 
 This repo is **personal tooling for one operator's machine, published as a public GitHub repo by choice**
-(`djbclark/djbclark-ade`). It runs no internet-facing service. `bin/firecrawl-router` was an HTTP listener (deleted 2026-11-06, slim-down R2-15; the paragraph describes the state before), on
+(`djbclark/djbclark-ade`). It runs no internet-facing service. `bin/firecrawl-router` is an HTTP listener (kept by the operator's ruling of 2026-11-07), on
 loopback by default (`--listen` defaults to `127.0.0.1:0`). With a child command it requires a random
 per-process bearer token. `--open` drops the token and refuses a non-loopback address, and since 2026-10-20 so
 does the serve-only form (no child, "for tests", no token): every tokenless run is loopback-only. While it runs, any process that
@@ -105,7 +105,7 @@ What an attacker would want, in order of damage:
    and reviewers read as instructions.
 6. **Mentions**: `@codex review`, `@cursor` on a comment (`docs/queue.md`). Whether a third party's
    mention triggers them is an app setting outside this repo and unverified: assume it can.
-7. **Environment variables** (trimmed 2026-11-07 to what exists). Tools read `ACP_DISPATCH_STATE` (the state root), `ACP_DISPATCH_LOCK_DIR`, `ACP_OPERATOR_APPROVED`, `CURSOR_CLOUD_API`, `LW_STATE_DIR` and `LW_REGISTRY` (the runner exports, `ACP_DISPATCH_LAUNCHCTL`/`AIUSE`/`NO_GATE`, `ZCODE_CREDENTIAL_SECRET`, the three `*_LAUNCH_AGENTS` overrides and the `FIRECRAWL_*` variables went with their tools, 2026-11-06/07), and the tools honour
+7. **Environment variables** (trimmed 2026-11-07 to what exists). Tools read `ACP_DISPATCH_STATE` (the state root), `ACP_DISPATCH_LOCK_DIR`, `ACP_OPERATOR_APPROVED`, `CURSOR_CLOUD_API`, `LW_STATE_DIR` and `LW_REGISTRY` (the runner exports, `ACP_DISPATCH_LAUNCHCTL`/`AIUSE`/`NO_GATE`, `ZCODE_CREDENTIAL_SECRET`, and the three `*_LAUNCH_AGENTS` overrides went with their tools, 2026-11-06/07); `bin/firecrawl-router` reads `FIRECRAWL_SELFHOST_URL`, `FIRECRAWL_FALLBACK_URL`, `FIRECRAWL_ROUTER_SIPB_BASE` and `FIRECRAWL_ROUTER_LITELLM_BASE` (each held to https or loopback http, 2026-10-20), and the tools honour
    `HTTPS_PROXY`/`http_proxy` and `SSL_CERT_FILE` (cursor-cloud drops them only when it re-execs for the key).
    An agent that sets one for a child it
    launches repoints a binary, an endpoint or an install directory.
@@ -119,7 +119,7 @@ What an attacker would want, in order of damage:
    permission or question and status idle, running or closed (a stored agent the send resumes; a running agent only on a
    provider that can steer); anything else is not
    sent. A sourceless send runs with `clearPendingPermissions`, so a send into a card would answer it with the message text.
-10. **`bin/firecrawl-router`** (deleted 2026-11-06, slim-down R2-15; kept as the record of the surface it was): an HTTP listener, loopback by default (see the intro); any process that can
+10. **`bin/firecrawl-router`** (kept 2026-11-07, operator ruling): an HTTP listener, loopback by default (see the intro); any process that can
     reach it can call it. From 2026-10-24 until the cutover (PRs 41, 43, 45) it also spent a GitHub token on
     `/v2/search/developer`; that code and token are gone from the Mac: developer search is answered on Hyades
     (firecrawl-hyades `docs/developer-search.md`). What it left behind there: the token (fine-grained,
