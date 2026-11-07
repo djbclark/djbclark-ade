@@ -108,7 +108,7 @@ Fresh session measured after the changes, including the /doctor cleanup: **22.9k
 3. 4.1, 4.2 and 4.4 are estimates. Decision-grade evidence would be paired tasks run twice (current setup vs trimmed preamble and a 300k ceiling), judged on cost per successful task, as arXiv 2607.12161 argues<sup>[6](#C6)</sup>.
 4. Server-side context editing (`clear_tool_uses`) invalidates the cache from the cleared point<sup>[7](#C7)</sup>, and Claude Code's own tool-result clearing has no setting. Neither is a lever we can pull.
 
-Scripts: `bin/claude-cost-mix` (the cost split) and `bin/claude-cost-whatif [DAYS]` (the TTL and compaction-threshold simulations in 4.3, 4.6 and 4.7; default 7 days).
+Scripts: `bin/claude-cost-mix` (the cost split) and a what-if simulator of the TTL and compaction thresholds (4.3, 4.6 and 4.7; default 7 days), deleted 2026-11-07 by the slim-down (git history has it).
 
 ## Citation footnotes
 

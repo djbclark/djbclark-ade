@@ -94,7 +94,7 @@ re-write the whole context after every 5-minute wait
 (code.claude.com/docs/en/prompt-caching, "Which TTL each request gets").
 `ENABLE_PROMPT_CACHING_1H=1` covers sub-agents and compaction too. **Do not
 move anything to the 5-minute TTL** (simulated on 7 days of transcripts,
-2026-10-18, `bin/claude-cost-whatif`): 5 minutes everywhere +30%, sub-agents
+2026-10-18, by the cost what-if script deleted 2026-11-07): 5 minutes everywhere +30%, sub-agents
 only (`CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL=5m`) +2.8%, because 3.2% of
 requests follow a 5-60 minute gap and would re-write their whole context.
 
@@ -169,7 +169,7 @@ in `~/.claude/settings.json` does hold, whatever re-links the folder:
    `skillopt-sleep`, `skillopt-sleep-learned`, `terminus-kira`, `reorg-orca`,
    `setup-modern-cli`, `teach`. None was invoked by the Skill tool in the 14
    days to 2026-10-18. Added after /doctor the same day, also unused by the
-   model: `dialogue`, `effort-routing`, `coderabbit-feeder`, `graft` (the
+   model: `dialogue`, the effort skill (folded into `model-routing` 2026-11-07), `coderabbit-feeder`, `graft` (the
    `graft` CLI and its hooks stay) and `herdr-tidy`.
    (2026-11-06: the four `siyuan*` were deleted from djbclark-ade and `terminus-kira`,
    `setup-modern-cli`, `teach` and `coderabbit-feeder` moved to site-djbclark's `skills/`;

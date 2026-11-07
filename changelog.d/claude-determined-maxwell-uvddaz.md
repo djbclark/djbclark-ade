@@ -41,3 +41,19 @@
 
 ### Added
 - Added the `fan-out` skill: one page on the lead's Agent/Workflow fan-out, `acp-dispatch` or `paseo run --no-wait` slices in their own worktrees, collecting with `acp-dispatch wait`/`check` and `paseo ls`, and the footer (slim-down E6) (#0).
+
+### Removed
+- Removed the Claude quota gates: `bin/claude-fleet-governor`, `bin/claude-quota-guard`, `bin/gate-profile` (gate profiles and the `away` profile), the `[governor]`, `[quota_guard]` and `[profiles]` tables of `config/gates.toml`, `route_agent.py`'s governor hold, and `bin/claude-cost-whatif`, with their tests; pausing at a quota limit and resuming after the reset is the session-guard and usage-auto-resume Paseo plugins' job (slim-down E7) (#0).
+- Removed the `effort-routing` and `fallback-chains` skills: their effort levels and model-chain sources are sections B and F of `model-routing`, and the chain check is `skills/model-routing/scripts/chains-check.py` (slim-down E7) (#0).
+- Removed the grok pool from `config/routing.toml` and `route_agent.py` (the SuperGrok subscription was cancelled; `grok` and `grok-bot` are `never_route`) and the unread `[escalation]` table and `auto_resume_max_wait_hours` (slim-down E7) (#0).
+
+### Changed
+- Changed `bin/route_agent.py`'s registry to `paseo provider ls --json` (enabled and available rows; `loading` rows retried twice over 6 s, then absent with a note) in place of `acp-run --list`, the headless TUIs and Orca; `services --check-models` checks every suggested model against `paseo provider models <provider>` (exit 1 missing, 2 unreadable); the `[discovery]` table folded into `[routing]` (`never_route`, `aliases`) (slim-down E7) (#0).
+- Changed `route_agent.py`'s quota to read `paseo usage ls --json` as a second source after aiuse: an `available` report gives windows and balances, anything else is unknown and never a pass; the two merge per pool by the tightest known reading, and `show` and `quota_source.pools` say which source each pool came from (slim-down E7) (#0).
+- Changed the frontier allowance's Claude check: `ade_gates.read_guard_state()` returns route_agent's merged Claude reading, which must be known, under 30 minutes old, at least `frontier1_window_min_left` (new, 30) on the tightest window and at least `frontier1_min_left` on the Fable cap; `bin/ade_gates.py` and `docs/gates.md` keep only the frontier half (slim-down E7) (#0).
+- Changed `skills/model-routing` into one page around the Claude tiers by role, effort, the surviving pools, routing, the frontier allowance, reading quota and fallback chains, with every number left to `route_agent.py policy --md`; `docs/model-routing.md` rewritten to match (slim-down E7) (#0).
+- Changed `config/routing.toml`: the `antigravity-argon` row (Gemini 4 Argon, the frontier fallback behind codex and claude) is back on Paseo's antigravity provider, so `acp-dispatch antigravity --model gemini-4-argon --kind frontier` (tendcf and nix2cf review route 3) is no longer refused as ineligible (slim-down E7) (#0).
+- Changed `claude/hooks/context_size_nudge.py`: only a Fable session gets the relaunch-on-Opus note (the quota-guard downshift went with the guard) (slim-down E7) (#0).
+- Changed `[lead]` in `config/routing.toml`: it gained the `fable_lead` switch (true since 2026-11-07: Fable leads allowed for now; false or absent restores never-a-Fable-lead): `route_agent.py policy --md` prints it and `claude/hooks/context_size_nudge.py` drops its relaunch-on-Opus note for a Fable session while it is true (slim-down E7) (#0).
+- Changed `bin/deadline`: `--on-expire reroute:RECORD` is refused with exit 2 pointing at `relay` (the acp-dispatch shim has no `reroute`); a record registered with it earlier is stopped and reported, never dispatched (slim-down E7) (#0).
+- Changed the frontier allowance's Fable floor `frontier1_min_left` from 10 to 15, the old quota guard's stop (slim-down E7) (#0).

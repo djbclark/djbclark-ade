@@ -389,11 +389,17 @@ class TestLoadGateAndCap(Base):
 
 
 class TestFrontierGuards(Base):
-    def gates_env(self, closed: bool = False, **guard: Any) -> dict[str, str]:
-        st = {"level": "ok", "reasons": [], "stale": False, "fable_left": 60.0,
-              "checked_at": _ts(datetime.now(UTC) - timedelta(minutes=5)), **guard}
-        (self.tmp / "guard.json").write_text(json.dumps(st))
-        env = {"GATE_PROFILE_STATE": str(self.tmp / "no-profile.json"), "CLAUDE_QUOTA_GUARD_STATE": str(self.tmp / "guard.json")}
+    def gates_env(self, closed: bool = False, weekly_left: float = 70.0, fable_left: float = 60.0) -> dict[str, str]:
+        """The Claude reading the allowance judges (route_agent's merged snapshot since 2026-11-07): one canned, fresh
+        `paseo usage ls --json` Claude report; aiuse and its snapshot file are pinned away."""
+        report = {"status": "available", "windows": [
+            {"id": "w", "label": "Weekly", "usedPct": 100 - weekly_left, "remainingPct": weekly_left, "resetsAt": None},
+            {"id": "f", "label": "Weekly (Fable)", "usedPct": 100 - fable_left, "remainingPct": fable_left, "resetsAt": None}]}
+        (self.tmp / "usage.json").write_text(json.dumps([{"id": "claude:default", "sourceId": "claude", "account": "a",
+                                                          "fetchedAt": _ts(datetime.now(UTC) - timedelta(minutes=5)),
+                                                          "report": report}]))
+        env = {"ROUTE_AGENT_PASEO_USAGE_JSON": str(self.tmp / "usage.json"), "ROUTE_AGENT_AIUSE": "off",
+               "AIUSE_SNAPSHOT": str(self.tmp / "no-snapshot.json")}
         if closed:
             sys.path.insert(0, str(ROOT / "tests"))
             from test_gates import close_frontier_baseline

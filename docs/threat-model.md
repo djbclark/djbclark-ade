@@ -49,7 +49,7 @@ What an attacker would want, in order of damage:
 7. **The Hermes/Telegram channel**: a message path to the operator's phone, and two-way tools
    (`mcp__hermes__*`, `docs/mcp-servers.md`).
 8. **launchd jobs** that persist across logins: `launchd/*.plist` (load-watch, skillopt-sleep; acp-dispatch's reap sweep,
-   context-budget, routing-recalibrate and zcode-key-auth were deleted 2026-11-06 by the slim-down). `bin/acp-dispatch` submits
+   context-budget, the monthly routing re-rank job and zcode-key-auth were deleted 2026-11-06 by the slim-down). `bin/acp-dispatch` submits
    no launchd jobs since 2026-11-06 (a `paseo run` shim: the agent is a Paseo daemon child).
 9. **The operator's machine itself** (a 16 GB Mac): availability under agent fan-out
    (`bin/acp-dispatch` `machine_overloaded`, load reached 230 on 2026-10-12).
@@ -262,11 +262,11 @@ others, and the merge path is unenforced. "Control" is what exists; "Gap" is wha
 * **Control.** Plists are installed by tools' own subcommands (`load-watch install` and `skillopt-night install`;
   acp-dispatch's reap sweep installer was removed 2026-11-06, the shim submits no jobs; `zcode-key-auth install` and `context-budget-check install` were removed 2026-11-06),
   copied from `launchd/` to `~/Library/LaunchAgents`. No installer was found (2026-10-20) for
-  `launchd/com.djbclark.routing-recalibrate.plist` (deleted 2026-11-06; a Paseo schedule replaces it if wanted). No per-slice jobs remain.
+  the monthly routing re-rank plist (deleted 2026-11-06; a Paseo schedule replaces it if wanted). No per-slice jobs remain.
 * **Gap.** A plist in a PR is code that runs as the operator at every login: review label,
   `ProgramArguments`, `WorkingDirectory`, `PATH` (fixed paths under `/Users/djbclark/...`). Every shipped
   plist runs its script from the live checkout, so a change to `bin/load-watch` (every 20 s),
-  `bin/acp-dispatch`, `bin/context-budget-check` (`zcode-key-auth` and `routing-recalibrate` were removed 2026-11-06) or
+  `bin/acp-dispatch`, `bin/context-budget-check` (`zcode-key-auth` and the routing re-rank job were removed 2026-11-06) or
   `bin/skillopt-night` runs within one schedule tick of being pulled or checked out there, without
   reinstalling anything. Review those scripts as you would a plist. Merging is deployment.
 

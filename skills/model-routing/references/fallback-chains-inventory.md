@@ -1,6 +1,6 @@
 # Fallback-chain snapshot
 
-Verified 2026-10-17 against the live sources in SKILL.md. Re-read those sources before using this file. If they differ, update this file in the same turn.
+Verified 2026-10-17 against the live sources in SKILL.md section F2. Re-read those sources before using this file. If they differ, update this file in the same turn.
 
 No hop has a separate version field. The model id is the version. Effort and thinking are listed only where a config or source field sets them. The only global effort knob is `agent.reasoning_effort: medium`.
 
@@ -70,11 +70,11 @@ Alias to model. Vendor is the model prefix or the API host. No secrets. Only `go
 
 `watchdogd-mock` is defined and is not in any chain. `gemini-free` and `gemini-free-lite` have no fallback entry.
 
-Each listed alias except those two falls back to the other real aliases, never to itself. The graph is still cyclic, because those lists point at each other. Consecutive hops often share a vendor. `scripts/check.py` exits non-zero on that. Those chains were not changed in the safe pass.
+Each listed alias except those two falls back to the other real aliases, never to itself. The graph is still cyclic, because those lists point at each other. Consecutive hops often share a vendor. `scripts/chains-check.py` exits non-zero on that. Those chains were not changed in the safe pass.
 
 ## f. Other agents
 
-f1. (Retired from djbclark-ade 2026-10-31: `bin/herdr-ai` is removed and `scripts/check.py` no longer reads it. As of 2026-10-10 it fell back only for its default model, `gemini-free-lite` → `gemini-free` → `gemini-free-lite`, a cycle.)
+f1. (Retired from djbclark-ade 2026-10-31: `bin/herdr-ai` is removed and `scripts/chains-check.py` no longer reads it. As of 2026-10-10 it fell back only for its default model, `gemini-free-lite` → `gemini-free` → `gemini-free-lite`, a cycle.)
 
 f2. `acp-run` has one transport fallback, not a model chain. A Claude ACP handshake failure retries as `claude -p`, keeping the requested model, or `sonnet` if none was requested. `--no-fallback` disables it. Every other agent has no CLI fallback.
 
@@ -86,6 +86,6 @@ g2. `route_agent.py` scores which agent to dispatch. It is not a failure chain, 
 
 ## h. Checker
 
-`python3 ~/src/djbclark-ade/skills/fallback-chains/scripts/check.py` prints the live layers and exits non-zero on a cycle, a same-vendor pair, a missing MoA preset while MoA is on, a `no_agent` job that still stores a model id, or `ai-model-switch` being able to write the chain.
+`python3 ~/src/djbclark-ade/skills/model-routing/scripts/chains-check.py` prints the live layers and exits non-zero on a cycle, a same-vendor pair, a missing MoA preset while MoA is on, a `no_agent` job that still stores a model id, or `ai-model-switch` being able to write the chain.
 
 On 2026-10-10, after the safe pass, it exits 1. The remaining failures are the chains that were not changed: the Hermes `cline2` pair, LiteLLM same-vendor runs and a cycle (the `herdr-ai` cycle it also reported was retired with `bin/herdr-ai` on 2026-10-31). MoA and the second writer are clean.

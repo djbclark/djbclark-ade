@@ -41,11 +41,19 @@ def _append(path, text):
         f.write(text)
 
 
+@pytest.fixture(autouse=True)
+def _no_fable_lead(monkeypatch, tmp_path_factory):
+    """The relaunch-on-Opus tests run under the 2026-10-23 rule (`[lead].fable_lead` false); the shipped
+    config/routing.toml allows a Fable lead (2026-11-07), tested on its own below."""
+    policy = tmp_path_factory.mktemp("routing") / "routing.toml"
+    policy.write_text("[lead]\nmodel = \"opus\"\nfable_lead = false\n")
+    monkeypatch.setenv("ROUTING_POLICY", str(policy))
+
+
 @pytest.fixture
 def hook(monkeypatch, tmp_path, capsys):
     """Run the hook once per call; returns (stdout, pings sent)."""
     monkeypatch.setattr(nudge, "STATE_PATH", tmp_path / "state.json")
-    monkeypatch.setattr(nudge, "QUOTA_GUARD_PATH", tmp_path / "quota-guard.json")  # absent unless a test writes it
     pings = []
     monkeypatch.setattr(
         subprocess, "Popen", lambda cmd, **kwargs: pings.append(cmd),
@@ -620,7 +628,7 @@ def test_reads_large_transcript_from_tail_only(hook, tmp_path):
     assert len(pings) == 1
 
 
-# --- successor form (2026-10-23): a Fable session, or a tight quota guard, hands off to Opus/Sonnet ---
+# --- successor form (2026-10-23): a Fable session hands off to Opus unless [lead].fable_lead (2026-11-07) ---
 _FABLE = "claude-fable-5-1"
 
 
@@ -636,10 +644,6 @@ def _model_transcript(tmp_path, model, *sizes, name="model-transcript.jsonl"):
     return path
 
 
-def _guard(tmp_path, level):
-    (tmp_path / "quota-guard.json").write_text(json.dumps({"level": level}))
-
-
 _OPUS_NOTE = "relaunch `claude --model claude-opus-5-5`"
 
 
@@ -653,28 +657,33 @@ def test_fable_session_gets_the_relaunch_note_in_both_messages(hook, tmp_path):
     assert "Context is large" in out and _OPUS_NOTE in out
 
 
+def test_fable_lead_true_means_no_relaunch_note(hook, tmp_path, monkeypatch):
+    """Operator 2026-11-07: `[lead].fable_lead = true` allows a Fable lead, so the Opus note goes; the shipped file says true."""
+    policy = tmp_path / "routing.toml"
+    policy.write_text("[routing]\nkinds = []\n\n[lead]  # the lead\nmodel = \"opus\"\nfable_lead = true  # flip to false\n")
+    monkeypatch.setenv("ROUTING_POLICY", str(policy))
+    assert nudge._fable_lead_allowed() is True
+    out, _ = hook("s-fable-lead", _model_transcript(tmp_path, _FABLE, 46_000, nudge.BOUNDARY_TOTAL))
+    assert "relaunch" not in out
+    monkeypatch.delenv("ROUTING_POLICY")
+    shipped = Path(nudge.__file__).resolve().parents[2] / "config" / "routing.toml"
+    assert nudge._routing_policy_path() == shipped and nudge._fable_lead_allowed() is True
+
+
+@pytest.mark.parametrize("text", ["[lead]\nmodel = \"opus\"\n", "[lead]\nfable_lead = false\n",
+                                  "[other]\nfable_lead = true\n", "not = [toml\n", None])
+def test_fable_lead_absent_false_or_unreadable_keeps_the_relaunch_note(hook, tmp_path, monkeypatch, text):
+    policy = tmp_path / "routing.toml"
+    if text is not None:
+        policy.write_text(text)
+    monkeypatch.setenv("ROUTING_POLICY", str(policy))
+    assert nudge._fable_lead_allowed() is False
+    out, _ = hook("s-fable-nolead", _model_transcript(tmp_path, _FABLE, 46_000, nudge.BOUNDARY_TOTAL))
+    assert _OPUS_NOTE in out
+
+
 def test_other_models_get_no_relaunch_note(hook, tmp_path):
     out, _ = hook("s-opus", _model_transcript(tmp_path, "claude-opus-5-5", 46_000, nudge.BOUNDARY_TOTAL))
-    assert "relaunch" not in out
-
-
-@pytest.mark.parametrize("level, model, spec", [
-    ("tight", "claude-opus-5-5", "claude-sonnet-5-5"),
-    ("tight", _FABLE, "claude-sonnet-5-5"),
-    ("critical", _FABLE, "claude-opus-5-5"),
-])
-def test_guard_level_picks_the_successor_even_on_a_non_fable_model(hook, tmp_path, level, model, spec):
-    _guard(tmp_path, level)
-    out, _ = hook("s-guard-" + level + model, _model_transcript(tmp_path, model, 46_000, nudge.BOUNDARY_TOTAL))
-    assert f"relaunch `claude --model {spec}`" in out
-    assert f"the quota guard says {level}" in out
-
-
-@pytest.mark.parametrize("content", [None, "not json", '{"level": 3}', '{"level": "ok"}', "[]"])
-def test_absent_or_unusable_guard_state_changes_nothing(hook, tmp_path, content):
-    if content is not None:
-        (tmp_path / "quota-guard.json").write_text(content)
-    out, _ = hook("s-noguard", _model_transcript(tmp_path, "claude-opus-5-5", 46_000, nudge.BOUNDARY_TOTAL))
     assert "relaunch" not in out
 
 
@@ -690,38 +699,29 @@ def test_sidechain_and_synthetic_records_do_not_decide_the_model(tmp_path):
     assert nudge._last_assistant_model(tmp_path / "missing.jsonl") is None
 
 
-@pytest.mark.parametrize("level, model", [
-    ("tight", "claude-sonnet-5-5"), ("tight", "claude-sonnet-5-5[1m]"),
-    ("critical", "claude-opus-5-5"), ("critical", "claude-opus-5-5[1m]"),
-    ("critical", "claude-sonnet-5-5"),
-])
-def test_a_session_already_on_the_target_gets_no_same_model_successor(hook, tmp_path, level, model):
-    _guard(tmp_path, level)
-    out, _ = hook("s-same-" + level + model, _model_transcript(tmp_path, model, 46_000, nudge.BOUNDARY_TOTAL))
-    assert "relaunch" not in out
-    assert nudge._successor_target(model, level) is None
-
-
 @pytest.mark.parametrize("model", ["claude-fable-5-1[1m]", "claude-fable-5-2", "claude-fable-6"])
 def test_l5_any_fable_id_with_or_without_a_suffix_is_detected(model):
-    assert nudge._successor_target(model, "") == (nudge.SUCCESSOR_OPUS, "this session runs on Fable")
-    assert nudge._successor_target("claude-opus-5-5[1m]", "") is None
+    assert nudge._successor_target(model) == (nudge.SUCCESSOR_OPUS, "this session runs on Fable")
+    assert nudge._successor_target("claude-opus-5-5[1m]") is None
 
 
-@pytest.mark.parametrize("level", ["tight", "critical"])
-@pytest.mark.parametrize("model", [None, "", "claude-haiku-4-5", "claude-haiku-4-5[1m]", "gpt-6"])
-def test_r2_l4_guard_never_moves_an_unknown_or_lower_model_up(level, model):
-    assert nudge._successor_target(model, level) is None
+@pytest.mark.parametrize("model", [None, "", "claude-haiku-4-5", "claude-haiku-4-5[1m]", "gpt-6", "claude-opus-5-5",
+                                   "claude-sonnet-5-5"])
+def test_r2_l4_no_successor_for_an_unknown_or_non_fable_model(model):
+    assert nudge._successor_target(model) is None
 
 
-def test_r2_l4_guard_moves_only_models_known_to_be_above_the_target():
-    assert nudge._successor_target("claude-opus-5-5", "tight") == (nudge.SUCCESSOR_SONNET, "the quota guard says tight")
-    assert nudge._successor_target("claude-fable-5-1[1m]", "tight")[0] == nudge.SUCCESSOR_SONNET
-    assert nudge._successor_target(_FABLE, "critical")[0] == nudge.SUCCESSOR_OPUS
-    assert nudge._successor_target("claude-opus-5-5", "critical") is None
-
-
-def test_r2_l4_unreadable_model_under_a_guard_gives_no_relaunch_note(hook, tmp_path):
-    _guard(tmp_path, "critical")
+def test_r2_l4_unreadable_model_gives_no_relaunch_note(hook, tmp_path):
     out, _ = hook("s-nomodel", _transcript(tmp_path, 46_000, nudge.BOUNDARY_TOTAL))  # no assistant model
     assert "relaunch" not in out
+
+
+@pytest.mark.parametrize("text, want", [("[lead]\nfable_lead = true  # on\n", True), ("[lead]\nfable_lead = false\n", False),
+                                        ("[other]\nfable_lead = true\n[lead]\nmodel = \"opus\"\n", False)])
+def test_fable_lead_line_scan_without_tomllib(monkeypatch, tmp_path, text, want):
+    """Under a Python older than 3.11 (no tomllib) the [lead] table is scanned by line, same answer."""
+    policy = tmp_path / "routing.toml"
+    policy.write_text(text)
+    monkeypatch.setenv("ROUTING_POLICY", str(policy))
+    monkeypatch.setitem(sys.modules, "tomllib", None)
+    assert nudge._fable_lead_allowed() is want

@@ -52,7 +52,7 @@ in Herdr. Concepts, with the ADE equivalent where one exists:
 
 | OpenRig concept | What it does | ADE today |
 |---|---|---|
-| rig / pod / seat addresses (`dev-build@starter`) | stable names for agents, used by every command | herdr pane ids; `acp-run --list` names |
+| rig / pod / seat addresses (`dev-build@starter`) | stable names for agents, used by every command | herdr pane ids; acp-run's agent-table names |
 | RigSpec / AgentSpec YAML | declarative team shape, agent per seat, model, prompt | `config/routing.toml` plus `route_agent.py plan` (per slice, not a standing team) |
 | `CULTURE.md` | one file of team norms every seat reads | `AGENTS.md`, `~/CLAUDE.md`, `skills/` |
 | `rig send/capture/broadcast/chatroom` | tmux-keystroke transport between seats | ACP (`acp-run`, `acp-dispatch`), `session-finder/relay.py` |

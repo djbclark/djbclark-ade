@@ -46,17 +46,13 @@ os.environ.setdefault("ROUTE_AGENT_CALIBRATED_FLOOR", "off")
 # check; adversary 2026-10-20). Any other value, "" included, would send the probe to the real login.
 if os.environ.get("ROUTE_AGENT_OMP_READY", "").strip().lower() not in ("0", "1"):
     os.environ["ROUTE_AGENT_OMP_READY"] = "0"
-# route_agent.governor_hold() reads the fleet governor's state (2026-10-23): a real tight/critical level on the host
-# would drop claude from every code/bulk/research/mechanical route and change the answer of unrelated tests.
-# Pinned to a missing file unconditionally; TestGovernorHold points it at a fixture per test.
-os.environ["CLAUDE_GOVERNOR_STATE"] = "/nonexistent/claude-governor-state.json"
-# the governor also reads the quota guard's state (bin/claude-quota-guard): a test never sees the real one
-os.environ["CLAUDE_QUOTA_GUARD_STATE"] = "/nonexistent/claude-quota-guard-state.json"
-# the gate profile (bin/ade_gates.py, bin/gate-profile, 2026-10-26) loosens both gates' numbers while it is active: a test never reads the
-# operator's real profile, writes the real audit log, pings, or recomputes the real governor and guard. Pinned to missing paths
-# unconditionally; tests/test_gates.py points them at fixtures per test.
-for _var in ("GATE_PROFILE_STATE", "GATE_PROFILE_LOG", "GATE_PROFILE_PING", "GATE_PROFILE_GOVERNOR", "GATE_PROFILE_GUARD"):
-    os.environ[_var] = f"/nonexistent/{_var.lower()}"
+# route_agent reads Paseo (`paseo provider ls --json`, the registry; `paseo usage ls --json`, the second quota source;
+# 2026-11-07, slim-down E7). Off in tests so the suite never depends on, or spawns, the host's real Paseo daemon;
+# test_route_agent.py turns it on per test against tests/fakes/paseo or a canned ROUTE_AGENT_PASEO_USAGE_JSON.
+os.environ.setdefault("ROUTE_AGENT_PASEO", "off")
+# claude/hooks/quota_nudge.py (left in place pending the operator's decision, 2026-11-07) still reads this path: a test never
+# sees the real one.
+os.environ["CLAUDE_QUOTA_GUARD_STATE"] = "/nonexistent/quota-guard-state"
 # fleet.LINKS_FILE (who has messaged whom, and who ever acked; the old relay.py wrote it, fleet.py list reads it, 2026-10-25): never the
 # operator's real ledger. Unconditional. (The old relay.py's RELAY_DEFER_DIR queue went with it, 2026-11-06, docs/slim E3; this goes with
 # fleet.py in E3b.)

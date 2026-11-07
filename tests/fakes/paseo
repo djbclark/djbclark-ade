@@ -12,6 +12,10 @@ counted exactly. Knobs (all optional):
   FAKE_PASEO_ACTIVE     force inspect's Mode
   FAKE_PASEO_SEND       `send`'s status (default queued)
   FAKE_PASEO_PROVIDERS  JSON list for `provider ls` (default: the eight dispatch providers, available)
+  FAKE_PASEO_LOADING    `provider ls` answers every row with status "loading" this many times first (counted in the state dir;
+                        route_agent's registry retry, slim-down E7)
+  FAKE_PASEO_MODELS     JSON {provider: [model ids]} for `provider models P` (default: none listed, an empty array)
+  FAKE_PASEO_USAGE      JSON list for `usage ls` (default []); FAKE_PASEO_USAGE_RC exits with that code instead
   FAKE_PASEO_RUN_FAIL   `run` prints a JSON error and exits 1
 """
 import fcntl
@@ -98,7 +102,22 @@ def run(args):
             {"provider": p, "label": p, "status": "available", "enabled": "Enabled",
              "defaultMode": {"claude": "auto", "codex": "auto"}.get(p, "default"), "modes": ""}
             for p in ("claude", "codex", "antigravity", "cursor", "opencode", "hermes", "omp")]
+        loading = int(os.environ.get("FAKE_PASEO_LOADING") or 0)
+        seen = STATE / "provider-ls-count"
+        n = int(seen.read_text()) if seen.exists() else 0
+        seen.write_text(str(n + 1))
+        if n < loading:
+            rows = [dict(r, status="loading") for r in rows]
         out(rows)
+    if verb == "provider" and rest[:1] == ["models"]:
+        models = json.loads(os.environ.get("FAKE_PASEO_MODELS") or "{}").get(rest[1] if len(rest) > 1 else "", [])
+        out([{"model": m, "id": m, "description": "", "thinkingOptionIds": [], "defaultThinkingOptionId": None}
+             for m in models])
+    if verb == "usage" and rest[:1] == ["ls"]:
+        if os.environ.get("FAKE_PASEO_USAGE_RC"):
+            print("fake paseo: usage failed", file=sys.stderr)
+            sys.exit(int(os.environ["FAKE_PASEO_USAGE_RC"]))
+        out(json.loads(os.environ.get("FAKE_PASEO_USAGE") or "[]"))
     if verb == "run":
         if os.environ.get("FAKE_PASEO_RUN_FAIL"):
             out({"error": {"code": "DAEMON_NOT_RUNNING", "message": "Cannot connect to daemon"}}, 1)

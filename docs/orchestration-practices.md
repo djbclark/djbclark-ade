@@ -1,7 +1,7 @@
 # Orchestration practices: decide cheaply, reason expensively, verify centrally
 
 Snapshot **2026-10-11**. The rules every orchestration skill here follows
-(`fan-out` (since 2026-11-06), `research`, `dialogue`, `model-routing`, `effort-routing`;
+(`fan-out` (since 2026-11-06), `research`, `dialogue`, `model-routing` (which absorbed the effort skill, 2026-11-07);
 `ralph-tui-orchestration` was removed 2026-11-06). Each skill carries the short form of the rules it
 needs and links here for the reasons and sources.
 

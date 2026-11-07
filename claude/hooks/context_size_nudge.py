@@ -103,13 +103,11 @@ if not LOG_PATH.is_absolute():
     LOG_PATH = Path.home() / ".claude" / "state" / "context-nudge-log.jsonl"
 LOG_MAX_BYTES = 2 * 1024 * 1024
 POST_TOOL_CHECK_SECONDS = 20
-# Written by the quota guard (another slice, 2026-10-23); may not exist.  Only `level` is read.
-QUOTA_GUARD_PATH = Path.home() / ".local" / "state" / "ade" / "quota-guard.json"
-# djbclark, 2026-10-23: lead sessions run on Opus 5.5 high (Sonnet 5.5 when quota is tight),
-# not Fable (a Fable lead burned ~30% of a week's Claude quota).
+# djbclark, 2026-10-23: lead sessions run on Opus 5.5 high, not Fable (a Fable lead burned ~30% of
+# a week's Claude quota); since 2026-11-07 `[lead].fable_lead = true` in config/routing.toml allows a Fable lead.  The quota guard's tight/critical downshift went with the guard (2026-11-07,
+# slim-down E7): pausing at a quota limit is the session-guard and usage-auto-resume plugins' job.
 FABLE_MODEL = "claude-fable-5-1"
 SUCCESSOR_OPUS = "claude/claude-opus-5-5"
-SUCCESSOR_SONNET = "claude/claude-sonnet-5-5"
 
 # Compaction is not free (see History, 2026-10-10): only compact once the
 # context has grown enough above the post-compaction floor to pay it back.
@@ -405,36 +403,52 @@ def _last_assistant_model(transcript_path):
     return None
 
 
-def _guard_level():
-    """`level` of the quota guard's state file ("" when absent or unreadable)."""
+def _routing_policy_path():
+    """config/routing.toml: ROUTING_POLICY (as bin/route_agent.py), else this checkout's, else ~/src/djbclark-ade's."""
+    env = os.environ.get("ROUTING_POLICY")
+    if env:
+        return Path(env)
+    for cand in (Path(__file__).resolve().parents[2] / "config" / "routing.toml",
+                 Path.home() / "src" / "djbclark-ade" / "config" / "routing.toml"):
+        if cand.is_file():
+            return cand
+    return None
+
+
+def _fable_lead_allowed():
+    """`[lead].fable_lead` of config/routing.toml (operator 2026-11-07), False when absent or unreadable: then the
+    2026-10-23 "never a Fable lead" rule holds.  tomllib where it exists, else a line scan of the [lead] table (the hook
+    may run under a Python older than 3.11)."""
     try:
-        data = json.loads(QUOTA_GUARD_PATH.read_text())
-        level = data.get("level") if isinstance(data, dict) else None
+        path = _routing_policy_path()
+        if path is None:
+            return False
+        text = path.read_text()
+        try:
+            import tomllib
+        except ImportError:
+            section = None
+            for line in text.splitlines():
+                stripped = line.split("#", 1)[0].strip()
+                if stripped.startswith("["):
+                    section = stripped
+                elif section == "[lead]" and re.fullmatch(r"fable_lead\s*=\s*true", stripped):
+                    return True
+            return False
+        return (tomllib.loads(text).get("lead") or {}).get("fable_lead", False) is True
     except Exception:
-        return ""
-    return level if isinstance(level, str) else ""
+        return False
 
 
-def _successor_target(model, guard_level):
+def _successor_target(model):
     """(provider/model spec, why) when this session should hand off to another model, else None.
 
-    Fable (any claude-fable-* id, a "[1m]" style suffix ignored) means Opus 5.5.  A quota guard
-    saying tight or critical moves a session only DOWN, and only from a model known to be above the
-    target: tight (Sonnet 5.5) from Fable or Opus, critical (Opus 5.5) from Fable.  An unknown model
-    (None: the transcript tail had no assistant record), Haiku, or a session already on the target
-    or below gets None, i.e. a plain /new, never a same-model or upward successor (adversary
-    2026-10-23, observation 8 and round 2 L4; the handoff skill's Step 9 uses the same rule)."""
+    Fable (any claude-fable-* id, a "[1m]" style suffix ignored) means Opus 5.5, unless `[lead].fable_lead` in
+    config/routing.toml is true (operator 2026-11-07: Fable leads allowed for now).  An unknown model (None: the
+    transcript tail had no assistant record) or any other model gets None, i.e. a plain /new, never a same-model or
+    upward successor (adversary 2026-10-23, observation 8 and round 2 L4)."""
     base = (model or "").split("[", 1)[0]
-    fable = base.startswith("claude-fable")
-    if guard_level == "tight":
-        if fable or base.startswith("claude-opus"):
-            return SUCCESSOR_SONNET, "the quota guard says tight"
-        return None
-    if guard_level == "critical":
-        if fable:
-            return SUCCESSOR_OPUS, "the quota guard says critical"
-        return None
-    if fable:
+    if base.startswith("claude-fable") and not _fable_lead_allowed():
         return SUCCESSOR_OPUS, "this session runs on Fable"
     return None
 
@@ -487,7 +501,7 @@ def _early_message(total, growth):
 
 
 def _successor_note(successor):
-    """The Fable-lead ruling (2026-10-23): a Fable session, or a tight quota guard, hands off to Opus/Sonnet."""
+    """The Fable-lead ruling (2026-10-23): a Fable session hands off to Opus."""
     if not successor:
         return ""
     spec, why = successor
@@ -554,7 +568,7 @@ def _ask_message(total, growth, repeat, successor=None):
 
 
 def _session_successor(transcript_path):
-    return _successor_target(_last_assistant_model(transcript_path), _guard_level())
+    return _successor_target(_last_assistant_model(transcript_path))
 
 
 def _load_state():
