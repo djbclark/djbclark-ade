@@ -203,7 +203,7 @@ gate is a triage signal, not a boundary.
 - Adaptive/encoding attacks (base64, unicode-tag payloads): only BIPIA's
   plain attack strings were tested; ARMO reports Prompt Guard 2 collapsing to
   0.02-0.10 detection on encodings — our Kev/Laya/Jev numbers here are for
-  unencoded payloads.
+  unencoded payloads — later narrowed for disclosure-style encodings by §8.
 - Laya `multilingual` variant (English-only corpus here).
 - Image/alt-text payloads (browsesafe-bench) — out of scope for these
   text-only judges.
