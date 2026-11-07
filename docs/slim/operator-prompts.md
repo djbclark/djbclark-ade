@@ -107,6 +107,31 @@ headed "C7/C1 re-run <date> on <host>" with the per-item result lines and, below
 Change nothing; if something needs a waiver or a drain, list it and ask me.
 ```
 
+## P10. Merge-gate tests and the ruleset (B6-B13), after PR 297 is on master
+
+```
+djbclark-ade PR 297 has merged, so the `adversary-marker` Action now runs from master. On this Mac, prove the merge gate and
+switch it on. Read items B6-B13 of docs/slim/operator-batch.md and section E3/E4 of docs/slim/reports/wave4-E8.md on master
+(git -C ~/src/djbclark-ade fetch origin master; git -C ~/src/djbclark-ade show origin/master:<path>). Work in throwaway
+worktrees (`git -C ~/src/djbclark-ade worktree add -b throwaway/<name> ~/src/djbclark-ade-<name>-wt origin/master`), never in
+~/src/djbclark-ade itself. Show me each test's plan once, then run without stopping unless something differs from the
+expected result.
+1. B6 T0: a draft PR whose body carries an APPROVE marker for its own head; wait for the Tests run, then read the
+   `adversary-marker` status (`gh api repos/djbclark/djbclark-ade/commits/<head>/statuses`): expect success from the App.
+2. B7: write the ruleset JSON exactly as B7 gives it (adversary-marker pinned to the App ID from step 5, pytest-linux and
+   context-policy pinned to 15368, no bypass actors), show it, and create it with `gh api -X POST .../rulesets`.
+3. B8: re-check T0 under the ruleset (`gh pr view <N> --json mergeStateStatus,statusCheckRollup`); if the status does not
+   satisfy the pin, apply the check-run fallback B8 describes (a one-line workflow change, landed as its own PR).
+4. B9 T1: a PR that edits adversary-marker.yml into an always-green job: expect BLOCKED and the merge refused.
+5. B10 T2: a PR adding .github/workflows/spoof.yml with `permissions: {statuses: write}`: expect BLOCKED.
+6. B11 T3: from the second GitHub test account (find its login with `gh auth status`; switch with `gh auth switch`, and
+   switch back to djbclark afterwards), fork djbclark-ade, push a branch at T0's head with an APPROVE marker in a PR body
+   written by that account: expect `failure` "marker not written by a trusted user", never success.
+7. B12: close every throwaway PR with `gh pr close <N> --delete-branch`, remove the worktrees, delete the fork's branch.
+8. B13: only if branch protection also lists required checks, remove them now that the ruleset holds (show first).
+Report a table: test, PR number, expected, observed, PASS/FAIL; the ruleset id; and anything that needed the fallback.
+```
+
 ## P11. Mac cleanup after the merge (C1-C64)
 
 ```
