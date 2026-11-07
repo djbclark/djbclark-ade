@@ -158,7 +158,7 @@ pages. On a host with `model-routing` / `effort-routing` skills, follow them.
    names what was searched; it is not "does not exist".
 7. One writer. Parallel writers produce disjoint reports. (On this machine,
    item 1b: four family drafts, but one merged `report.md` chosen by the
-   Grok lead, so the delivered report still has one voice.)
+   lead, so the delivered report still has one voice.)
 8. Budgets are caps. Stop at diminishing returns even with budget left.
 9. Workers do not spawn workers.
 10. No live web search, no research: a failed search or fetch path stops the
@@ -179,19 +179,16 @@ pages. On a host with `model-routing` / `effort-routing` skills, follow them.
    quota spreads across vendors, and the reviewer gets a genuinely different
    model family. A Claude Agent-tool sub-agent is the fallback
    for a small lookup or when no other agent has quota; its prompt then
-   carries the footer in item 2. Both routes are exercised: `grok-brain-loop`
-   (2026-10-09) used Agent-tool sub-agents; `ai-heaven` (2026-10-09) ran all
+   carries the footer in item 2. Both routes are exercised: an earlier
+   brain-loop run (2026-10-09) used Agent-tool sub-agents; `ai-heaven` (2026-10-09) ran all
    seven slices through `acp-dispatch` (codex, zcode, agy all delivered).
    1b. **Role-to-model map, operator ruling 2026-10-10** (research skill
    only; the `model-routing` skill is unchanged until a run has exercised
-   this): **lead and reviewer are the latest Grok**, reached through the
-   `grok` TUI (`acp-dispatch grok --model grok-4.7 --kind realtime-web`, or newer when `grok`
-   lists one; `realtime-web` is the only kind grok is eligible for, 2026-10-18,
-   and any other kind needs `ACP_OPERATOR_APPROVED=route-override`) or through `cursor-agent` with the same Grok model as Cursor
-   names it (check its model list before the first call; never guess the
-   id). When a Claude Code session is the one running `/research`, it still
+   this): **lead and reviewer are the latest xAI model**, reached through `cursor-agent`
+   (the grok model as Cursor names it: check its model list before the first call; never guess the
+   id; the standalone xAI CLI retired 2026-11-07, so there is no other route). When a Claude Code session is the one running `/research`, it still
    plans and dispatches, but the adjudication and the final refute-mode read
-   go to a Grok slice and its verdict is applied as given. **Every worker
+   go to a Cursor slice on that model and its verdict is applied as given. **Every worker
    role runs on all four families at once, not in rotation**: each slice,
    the refuter and the writer are dispatched in parallel to Astra
    (`acp-dispatch codex --model gpt-6-astra --kind frontier`; frontier slices
@@ -201,7 +198,7 @@ pages. On a host with `model-routing` / `effort-routing` skills, follow them.
    --info` lists it: on 2026-10-10 11:19 a dispatch with `claude-fable-5-1`
    failed with "acp-run: no model 'claude-fable-5-1'; have: default, opus,
    claude-fable-5-1[1m], sonnet, haiku, ..."; or an Agent-tool sub-agent),
-   Grok and agy
+   the Cursor grok model and agy
    (`acp-dispatch agy --model <m> --kind research`, only ever via ACP, never `agy -p`;
    `--model claude-opus-5-5 --effort high` (agy 1.4.1, 2026-10-18, dropped the effort-suffixed ids) draws its Claude/GPT pool, which `aiuse`
    lists as `antigravity claude_gpt`, burn-first while >= 40% left, see
@@ -215,7 +212,7 @@ pages. On a host with `model-routing` / `effort-routing` skills, follow them.
    use `--model gemini-3.8-flash --effort high` and note in `plan.md` that the Claude/GPT
    pool was unreachable). The lead merges
    the four evidence files for a slice (dedupe by source and quote, keep
-   every family's unique rows) and the Grok lead picks among the four
+   every family's unique rows) and the lead picks among the four
    writer drafts or merges them into one `report.md`; the counter files
    merge the same way. Codex may be used sparingly when its pools are tight
    (skip it for a slice rather than wait), the other three always run. A
@@ -224,8 +221,7 @@ pages. On a host with `model-routing` / `effort-routing` skills, follow them.
    as a narrow fetch or a search log. **No weekly quota floor**: dispatch to the most capable
    agent until `aiuse --available` drops its pool; an exhausted pool waits
    for its reset and the same step resumes (the slice writes incrementally,
-   per `feedback_quota_wait_dont_lose_work`). Grok's window is invisible to
-   `aiuse` and shared with GrokBot, so a Grok slice that stalls or returns
+   per `feedback_quota_wait_dont_lose_work`). A Cursor slice on the xAI model that stalls or returns
    a rate-limit line is re-run after the next hour, not re-routed.
    1a. **GPT reviewers go through `acp-dispatch codex --model gpt-6-astra
    --kind frontier`** (the `ocx-gpt-6-*` Agent-tool sub-agents and the

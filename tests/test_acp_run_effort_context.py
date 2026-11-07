@@ -2,7 +2,7 @@
 """acp-run --effort / --context, model-first ordering and the read-back (2026-10-15, audits R1-R3).
 
 `--effort LEVEL` and `--context SIZE` are normalized flags translated per agent (the agent's
-own option, a launch flag or env, grok's session/set_model, claude's 1M switch, ...), applied
+own option, a launch flag or env, claude's 1M switch, ...), applied
 after the model, read back, and refused with exit 2 (valid values named) when the agent or model
 cannot take them. A value the agent reports differently is failure class `config` (exit 1). The
 script is loaded in a `uv run --with` subprocess and driven against fake agents and connections:
@@ -236,7 +236,7 @@ PROBE = textwrap.dedent("""\
             "alias": mod.resolve_effort(Agent("m-b").options(), "xhigh", "x"),
             "plain": mod.resolve_effort(Agent("m-a").options(), "low", "x"),
             "default_missing": mod.resolve_effort(Agent("m-a").options(), "default", "x"),
-            "miss": exits(mod.resolve_effort, Agent("m-a").options(), "max", "grok m-a"),
+            "miss": exits(mod.resolve_effort, Agent("m-a").options(), "max", "cursor m-a"),
             "none": exits(mod.resolve_effort, Agent("m-c").options(), "low", "cursor m-c"),
             "ctx": mod.resolve_context_option(Agent("m-a").options(), 500000, "x"),
             "ctx_miss": exits(mod.resolve_context_option, Agent("m-a").options(), 300000, "cursor m-a"),
@@ -253,7 +253,6 @@ PROBE = textwrap.dedent("""\
             "codex_400": static("codex", context=400000),
             "codex_500": static("codex", context=500000),
             "codex_800": static("codex", context=800000),
-            "grok_any": static("grok", context=500000),
         }
         out["tweaks"] = {
             "claude_200": tweaks("claude", context=200000),
@@ -288,7 +287,6 @@ PROBE = textwrap.dedent("""\
         out["codex_cfg"]["not_json"] = exits(lambda: codex_env("model_context_window = 5", context=400000))
         out["codex_cfg"]["claude_untouched"] = tweaks("claude", context=200000)["env"]
 
-        out["grok"] = await apply("grok", args("grok", model="m-a", effort="low", context=500000))
         out["order"] = await apply("cursor", args("cursor", model="m-b", effort="xhigh"),
                                    sets={"mode": "plan"})
         out["effort_before_model"] = await apply("cursor", args("cursor", model="m-b", effort="low"),
@@ -332,7 +330,7 @@ PROBE = textwrap.dedent("""\
         obs = {"model": "m"}
         mod.post_turn(args("claude"), obs, {"size": 1000000})
         out["post"]["observed"] = [obs, mod.applied_line(obs)]
-        out["line"] = [mod.applied_line({"model": "grok-4.7", "effort": "low", "ctx": 500000}),
+        out["line"] = [mod.applied_line({"model": "m-a", "effort": "low", "ctx": 500000}),
                        mod.applied_line({"model": "x", "ctx": 200000, "unverified": ["ctx"]}),
                        mod.applied_line({})]
 
@@ -390,7 +388,7 @@ class TestEffortContext(unittest.TestCase):
         self.assertEqual(r["plain"], ["reasoning_effort", "low"])
         self.assertIsNone(r["default_missing"])
         self.assertEqual(r["miss"]["code"], 2)
-        self.assertIn("grok m-a has no effort 'max'; valid: reasoning_effort: low, medium, high, xhigh", r["miss"]["stderr"])
+        self.assertIn("cursor m-a has no effort 'max'; valid: reasoning_effort: low, medium, high, xhigh", r["miss"]["stderr"])
         self.assertEqual(r["none"]["code"], 2)
         self.assertIn("cursor m-c offers no reasoning-effort option", r["none"]["stderr"])
         self.assertIn("--set thinking=true|false", r["thinking_only"]["stderr"])
@@ -409,7 +407,7 @@ class TestEffortContext(unittest.TestCase):
                 self.assertEqual(s[name]["code"], 2, s[name])
         self.assertIn("hermes' ACP server has no reasoning option", s["hermes_effort"]["stderr"])
         self.assertIn("claude is 200k", s["claude_500"]["stderr"])
-        for name in ("default_ok", "claude_200", "codex_400", "codex_500", "codex_800", "grok_any"):
+        for name in ("default_ok", "claude_200", "codex_400", "codex_500", "codex_800"):
             with self.subTest(name=name):
                 self.assertEqual(s[name], {"ret": None})
 
@@ -421,15 +419,6 @@ class TestEffortContext(unittest.TestCase):
         p = self.r["pass_through"]
         self.assertEqual(p["cmd"], ["codex-acp", "--foo", "a b", "--bar"])
         self.assertEqual(p["env"], {"A": "1", "B": "x,y", "C": "3", "D": "4"})
-
-    def test_grok_context_goes_through_set_model_and_is_read_back(self):
-        g = self.r["grok"]
-        self.assertTrue(g["ok"], g)
-        self.assertEqual(g["calls"], [["model", "m-a"], ["reasoning_effort", "low"]])
-        self.assertEqual(g["raw"], [["session/set_model", {"sessionId": "s1", "modelId": "m-a",
-                                    "_meta": {"contextWindow": 500000, "reasoningEffort": "low"}}]])
-        self.assertEqual(g["line"], "model=m-a effort=low ctx=500k")
-        self.assertEqual(g["applied"]["ctx_source"], "x.ai/session/info")
 
     def test_model_is_set_before_effort_and_mode_for_every_agent(self):
         o = self.r["order"]
@@ -501,7 +490,7 @@ class TestEffortContext(unittest.TestCase):
         self.assertEqual(p["none_reported"][1]["ctx"], 200000)
         self.assertEqual(p["none_reported"][1]["unverified"], ["ctx"])
         self.assertEqual(p["observed"][1], "model=m ctx=1m")
-        self.assertEqual(self.r["line"], ["model=grok-4.7 effort=low ctx=500k", "model=x ctx=200k(unverified)", ""])
+        self.assertEqual(self.r["line"], ["model=m-a effort=low ctx=500k", "model=x ctx=200k(unverified)", ""])
 
     def test_run_prints_the_applied_line_and_records_it(self):
         ok = self.r["run_ok"]

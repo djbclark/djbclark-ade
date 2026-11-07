@@ -49,7 +49,7 @@ def test_the_policy_table_covers_every_acp_run_agent():
 
 
 def test_unreviewed_agents_keep_pass_through():
-    for agent in ("grok", "hermes", "opencode", "never-heard-of-it"):
+    for agent in ("cursor", "hermes", "opencode", "never-heard-of-it"):
         assert agent_guard.policy(agent).status == agent_guard.UNREVIEWED
         assert all(agent_guard.identity_override(agent, args) is None for args in REPLACEMENTS)
         assert agent_guard.record_refusal({"agent": agent, "model": "m", "acp_arg": ["--model=x"],

@@ -193,7 +193,7 @@ def _advice(level: str, resets_at: str | None, source: str = "available",
         # window is exhausted: the main critical case.
         items[1] = (f"Adversary rounds via {_ADVERSARY}, only while `aiuse --available --json` "
                     "still lists omp (it is rate-gated when every Claude weekly window is exhausted).")
-        # Only the Claude Code subscription pool is exhausted. Work does not stop: a codex, grok
+        # Only the Claude Code subscription pool is exhausted. Work does not stop: a codex
         # or opencode session never spends it, an omp one keeps working while aiuse lists omp, and a
         # Claude Code lead moves on (2026-10-29: idle omp sessions read "hand off, stop" as applying to
         # them). The successor is a Paseo agent (`paseo run`); outside Paseo the handoff is written and omp
@@ -201,11 +201,11 @@ def _advice(level: str, resets_at: str | None, source: str = "available",
         items[3] = ("A Claude Code lead (provider claude, subscription) hands off now and continues off the "
                     "subscription. While `aiuse --available --json` lists omp: on Paseo an omp successor, "
                     f"{_SELF_SLASH_OMP}; outside Paseo write the handoff, then start omp by hand in a new "
-                    "pane or tab. Without omp listed: a codex or "
-                    "grok successor the same way.")
+                    "pane or tab. Without omp listed: a codex "
+                    "successor the same way.")
         items.append("No new Claude Code subscription work (Agent-tool sub-agents of a Claude Code session "
                      f"included) until the reset at {resets_at or 'unknown'}. This is not a stop order: a "
-                     "session on codex, grok or opencode is unaffected and keeps working; one on "
+                     "session on codex or opencode is unaffected and keeps working; one on "
                      "omp keeps working only while `aiuse --available --json` still lists it (omp is off the "
                      "subscription's dollar pool but shares the Claude weekly rate window).")
     if source == "snapshot-only":

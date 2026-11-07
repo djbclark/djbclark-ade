@@ -47,22 +47,15 @@ The answer is always an offered allow_once or reject_once option, never an
 *_always one (those can be saved beyond this run) and never "cancelled" (that
 cancels the whole turn). An allow with no allow_once offered becomes a
 reject_once; with neither offered the agent gets a JSON-RPC error.
-Under --perm deny (without --interactive) opencode and grok start without
+Under --perm deny (without --interactive) opencode starts without
 the user's plugins, MCP servers and hooks, as claude does: a per-run temp
-config (opencode: OPENCODE_CONFIG_DIR holding only provider/model keys, project
-config off; grok: GROK_HOME without hooks/,
-skills/, plugins/, whose config.toml has no hooks, plugins or MCP servers and asks
-before every tool), removed afterwards and logged as a "user_config" record. Under
---perm deny grok also starts without --always-approve (it is the only way grok
-sends a permission request; before 2026-10-15 every grok deny run tripped, exit 77). --keep-user-config (env ACP_RUN_KEEP_USER_CONFIG=1)
-keeps them. (agy, crush and zcode had the same strip until they retired, 2026-11-06.)
-Under every other non-interactive --perm grok also starts on that stripped GROK_HOME (operator
-2026-10-15), but only hooks/, skills/, plugins/ and the config's hooks and plugins go: MCP servers and the
-permission mode stay. ACP_RUN_GROK_USER_HOOKS=1 (or --keep-user-config) keeps the user's ~/.grok.
-The "user_config" record names the "home" used.
+config (OPENCODE_CONFIG_DIR holding only provider/model keys, project
+config off), removed afterwards and logged as a "user_config" record. --keep-user-config
+(env ACP_RUN_KEEP_USER_CONFIG=1) keeps them. (agy, crush and zcode had the same strip until
+they retired, 2026-11-06; the xAI CLI adapter went 2026-11-07.)
 --strip-user-config (env ACP_RUN_STRIP_USER_CONFIG=1) applies the same strip of
 the user's plugins, MCP servers and hooks under ANY --perm (not --interactive),
-for opencode and grok; it is a startup-reliability switch, not a
+for opencode; it is a startup-reliability switch, not a
 permission control (operator 2026-10-13: the SkillOpt-Sleep night runs --perm all
 with it). Outside --perm deny nothing else changes: opencode gets no deny
 permission. Under
@@ -72,7 +65,7 @@ acp-run-<agent>-strip-<pid>-*; --keep-user-config still wins.
 --effort LEVEL (none, minimal, low, medium, high, xhigh, max, ultra, default; extra-high is
 xhigh) and --context SIZE (200k, 256k, 272k, 400k, 500k, 1m or a token count) are normalized
 across agents. Each is translated to the agent's own knob (an ACP option, a launch flag or
-env var, grok's session/set_model, claude's CLAUDE_CODE_DISABLE_1M_CONTEXT,
+env var, claude's CLAUDE_CODE_DISABLE_1M_CONTEXT,
 ...) and applied after the model and every other option, since a model switch resets
 them. One the agent or model cannot take (hermes effort; opencode/
 hermes context; a size the model does not list; a codex size above the model's
@@ -299,8 +292,6 @@ AGENTS = {
     # omp (oh-my-pi) native ACP server (`omp acp`, omp 18.12.2 verified 2026-10-19). Its Claude
     # API credits are a normal tier since 2026-10-19 (operator): no per-run approval.
     "omp": (["omp", "acp"], None),
-    # native ACP; xAI registry entry grok-build (a reserve pool: GrokBot)
-    "grok": (["grok", "agent", "--always-approve", "stdio"], None),
 }
 DEFAULT_SET = {}
 # Per-host defaults without an edit: ACP_RUN_DEFAULT_SET_<AGENT>="id=value,..."
@@ -318,7 +309,7 @@ for _k, _v in os.environ.items():
 # requests), and always overridable with --mode/--set. Values are the agent's
 # own mode ids from `acp-run <agent> --info`; agents missing here have no
 # auto-approve mode (opencode, cursor, hermes) and follow their own
-# settings, or take a flag instead (grok: --always-approve in AGENTS).
+# settings.
 YOLO_SET = {
     "claude": {"mode": "bypassPermissions"},
     "codex": {"mode": "agent-full-access"},
@@ -359,9 +350,6 @@ SCRUB_ENV = ("HERDR_PANE_ID", "HERDR_ENV", "HERDR_WORKSPACE_ID", "HERDR_TAB_ID",
 # (/new, /clear, /reset, /compact, /quit, --finish) when it sees it.  Not "ACP_RUN": that
 # name already holds the acp-run path for skills/session-finder/launch.py.
 AGENT_MARKER_ENV = "ACP_RUN_AGENT"
-# Agents that can still write under their per-run home while being stopped (grok: auth.json):
-# their temp dir is removed after the agent is stopped.
-AFTER_KILL_DROP = ("grok",)
 
 # Exit codes beyond 0/1/2/124. 5 matches acpx's "every permission denied".
 EXIT_ALL_DENIED = 5
@@ -608,7 +596,7 @@ def safe_sweep_stale_deny_dirs():
 # after the run; the user's files are only read. --keep-user-config or
 # ACP_RUN_KEEP_USER_CONFIG=1 keeps the old behaviour.
 # What was stripped is logged as a "user_config" record (names only, no values).
-STRIP_USER_CONFIG = ("opencode", "grok")  # grok: grok_strip_home, 2026-10-15
+STRIP_USER_CONFIG = ("opencode",)
 # Top-level opencode config keys a stripped run keeps: provider, model and auth
 # selection. Everything else (mcp, plugin/plugins, agent, command, instructions,
 # experimental hooks, permission, ...) is dropped; auth itself lives in opencode's
@@ -630,7 +618,7 @@ def keep_user_config(a):
 # from --perm deny. The startup failures it fixed were plugins and MCP servers, not
 # permissions, and the SkillOpt-Sleep night now runs --perm all (operator 2026-10-13).
 # Outside deny it applies to these agents; under deny it adds nothing (deny strips already).
-STRIP_ANY_PERM = ("opencode", "grok")
+STRIP_ANY_PERM = ("opencode",)
 
 
 def strip_requested(a):
@@ -824,147 +812,9 @@ def opencode_deny_config(env, tag="deny", guard=None):
     return d, info, extra_env
 
 
-# --perm deny for grok, made real (2026-10-15). Two causes made `acp-dispatch`'s preflight probe
-# ("Reply with exactly: OK" under --perm deny) exit 77 (tripwire) for grok: (1) acp-run launched
-# `grok agent --always-approve stdio` for every policy, so grok never sent a
-# session/request_permission; (2) the user's grok hooks ran on a trivial prompt: the Stop hook
-# ~/.grok/hooks/autorename.json (autorename_nudge.py) answers "the session still needs a title"
-# (grok's Stop hook may return additionalContext, so the turn goes on), and grok then ran its
-# read-only tool read_file on ~/.grok/skills/autorename/SKILL.md, which grok runs without ever asking.
-# So a deny run (a) drops --always-approve (run()) and (b) starts grok on a per-run GROK_HOME that
-# symlinks everything in the real one except hooks/, skills/, plugins/, installed-plugins/ and
-# config.toml, whose copy has no [[hooks.*]], [plugins] or [mcp_servers.*] tables and, under deny,
-# no ui.permission_mode / ui.yolo (the user's config says always-approve). The config copy is
-# checked with tomllib: it must equal the original minus exactly those parts, else grok keeps the
-# user's home and the run says so. A rotated token grok writes to the temp auth.json as a regular
-# file is copied back by grok_sync_auth. Skills the user keeps elsewhere (~/.agents/skills) stay.
-GROK_HOME_DROP = ("hooks", "skills", "plugins", "installed-plugins", "config.toml")
-GROK_DROP_TABLES = ("mcp_servers", "plugins", "hooks")
-GROK_DENY_UI_KEYS = ("permission_mode", "yolo")
-# Default for every non-interactive grok run (operator 2026-10-15): the same stripped home but
-# only hooks, skills and plugins go; MCP servers (tools the operator configured on purpose) and
-# the permission mode stay. Opt out: ACP_RUN_GROK_USER_HOOKS=1 (or --keep-user-config) keeps ~/.grok.
-GROK_HOOKS_ONLY_TABLES = ("plugins", "hooks")
-# Under deny the copy ends with this table, replacing the user's own [permission]: a bare `*` ask
-# rule makes grok send session/request_permission for every tool, file reads included (grok runs
-# its "read-only" tools, and writes under the user's allow rules, without asking otherwise;
-# severity is deny > ask > allow, so no allow rule from any source beats it).
-GROK_DENY_PERMISSION = '\n# acp-run --perm deny: ask before every tool (the answer is always no)\n[permission]\nask = ["*"]\n'
-
-
-def grok_real_home():
-    return Path(os.environ.get("GROK_HOME") or Path.home() / ".grok").expanduser()
-
-
-def grok_filter_config(text, deny=True, mcp=True):
-    """(filtered config.toml text, dropped names). Drops the tables in GROK_DROP_TABLES (and
-    their sub-tables; mcp=False keeps [mcp_servers.*]) and, with deny, ui.permission_mode /
-    ui.yolo. Line based; the caller checks the result with tomllib (grok_check_config)."""
-    out, dropped, skip, table = [], [], False, ""
-    drop = (GROK_DROP_TABLES if mcp else GROK_HOOKS_ONLY_TABLES) + (("permission",) if deny else ())
-    for line in text.splitlines(keepends=True):
-        m = re.match(r"\s*\[\[?\s*([^\[\]]+?)\s*\]\]?\s*(#.*)?$", line)
-        if m:
-            table = m.group(1).strip()
-            head = re.split(r"\s*\.\s*", table, maxsplit=1)[0].strip("\"'")
-            skip = head in drop
-            if skip and head not in dropped:
-                dropped.append(head)
-        if skip:
-            continue
-        if deny and table == "ui" and re.match(r"\s*(" + "|".join(GROK_DENY_UI_KEYS) + r")\s*=", line):
-            dropped.append("ui." + line.split("=", 1)[0].strip())
-            continue
-        out.append(line)
-    new = "".join(out)
-    if deny:
-        new += ("" if new.endswith("\n") or not new else "\n") + GROK_DENY_PERMISSION
-    return new, dropped
-
-
-def grok_check_config(old_text, new_text, deny=True, mcp=True):
-    """True when new_text parses and equals old_text minus the dropped parts."""
-    import tomllib
-    try:
-        old, new = tomllib.loads(old_text), tomllib.loads(new_text)
-    except (tomllib.TOMLDecodeError, ValueError):
-        return False
-    gone = GROK_DROP_TABLES if mcp else GROK_HOOKS_ONLY_TABLES
-    want = {k: v for k, v in old.items() if k not in gone}
-    if deny:
-        want.pop("permission", None)
-        want["permission"] = {"ask": ["*"]}
-        if isinstance(want.get("ui"), dict):
-            want["ui"] = {k: v for k, v in want["ui"].items() if k not in GROK_DENY_UI_KEYS}
-    return new == want
-
-
-def grok_user_hooks_requested():
-    """True when ACP_RUN_GROK_USER_HOOKS asks for the user's own grok home on headless runs."""
-    v = os.environ.get("ACP_RUN_GROK_USER_HOOKS", "").strip().lower()
-    return bool(v) and v not in ("0", "false", "no", "off")
-
-
-def grok_strip_home(tag="deny", deny=True, mcp=True):
-    """A per-run GROK_HOME without the user's hooks, skills, plugins and MCP servers (see the
-    note above). Returns (temp dir, log info); the caller removes the dir (rmtree unlinks
-    the symlinks and never follows them). Raises ValueError, before creating anything, when
-    the config copy is not exactly the original minus the dropped parts."""
-    src = grok_real_home()
-    cfg = src / "config.toml"
-    try:
-        text = cfg.read_text() if cfg.is_file() else ""
-    except (OSError, UnicodeDecodeError) as e:
-        raise ValueError(f"cannot read {cfg}: {e}") from None
-    new_text, dropped = grok_filter_config(text, deny, mcp)
-    if not grok_check_config(text, new_text, deny, mcp):
-        raise ValueError(f"cannot filter {cfg} safely")
-    try:
-        hooks = sorted(e.name for e in (src / "hooks").iterdir())
-    except OSError:
-        hooks = []
-    d = Path(tempfile.mkdtemp(prefix=f"{DENY_DIR_PREFIX}grok-{tag}-{os.getpid()}-"))
-    try:
-        try:
-            entries = sorted(src.iterdir())
-        except OSError:
-            entries = []
-        for f in entries:
-            if f.name not in GROK_HOME_DROP:
-                (d / f.name).symlink_to(f)
-        if text:
-            _private_write(d / "config.toml", new_text)
-    except BaseException:
-        shutil.rmtree(d, ignore_errors=True)
-        raise
-    return d, {"agent": "grok", "action": "stripped", "source": str(src), "home": str(d),
-               "hooks": hooks, "dropped": dropped, "skills": "~/.grok/skills off",
-               "mcp": "off" if mcp else "kept", "env": ["GROK_HOME"]}
-
-
-def grok_sync_auth(d, src=None):
-    """Copy a token grok rewrote as a regular file in the temp home back over the real
-    auth.json when it is newer and valid JSON (rename-over replaces the symlink, so the
-    write would otherwise be lost with the temp dir). True when copied."""
-    new, real = Path(d) / "auth.json", Path(src or grok_real_home()) / "auth.json"
-    try:
-        if new.is_symlink() or not new.is_file() or new.stat().st_mtime <= real.stat().st_mtime:
-            return False
-        json.loads(new.read_text())
-        target = real.resolve()
-        tmp = target.with_name(target.name + f".acp-run-{os.getpid()}")
-        shutil.copyfile(new, tmp)
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, target)
-        return True
-    except (OSError, ValueError):
-        return False
-
-
-
 def strip_user_config(a, env, deny_dir):
     """Apply STRIP_USER_CONFIG to env (in place) for a --perm deny or read-only, non-interactive run
-    of opencode or grok. Returns (deny_dir, log info or None): deny_dir is the temp dir
+    of opencode. Returns (deny_dir, log info or None): deny_dir is the temp dir
     the caller removes. Anything else (--perm all, --interactive, other
     agents) is untouched and logs nothing. If the temp config cannot be built the run
     keeps the user's config (deny still refuses every tool) and says so on stderr;
@@ -973,28 +823,19 @@ def strip_user_config(a, env, deny_dir):
     absolute, but a relative one added by another config layer would resolve against the temp dir.
 
     --strip-user-config (strips_outside_deny, 2026-10-13) applies the same strip under any
-    other non-interactive --perm for opencode and grok, with dirs named
+    other non-interactive --perm for opencode, with dirs named
     -strip- and nothing permission-related added: opencode gets no deny permission
     (DENY_ENV is applied by run() under deny only)."""
     outside = strips_outside_deny(a)
-    # grok, every non-interactive run not already stripped above (operator 2026-10-15): no
-    # user hooks, skills or plugins, MCP servers and permission mode kept (tag "hooks").
-    grok_hooks = (a.agent == "grok" and not outside and a.perm not in RESTRICTED_PERMS
-                  and not getattr(a, "interactive", False))
-    if not outside and not grok_hooks and (a.perm not in RESTRICTED_PERMS or getattr(a, "interactive", False)
+    if not outside and (a.perm not in RESTRICTED_PERMS or getattr(a, "interactive", False)
                                            or a.agent not in STRIP_USER_CONFIG):
         return deny_dir, None
     why = keep_user_config(a)
     if why:
         info = {"agent": a.agent, "action": "kept",
                 "why": "--keep-user-config" if why == "flag" else "ACP_RUN_KEEP_USER_CONFIG"}
-        if a.agent == "grok":
-            info["home"] = str(grok_real_home())
         return deny_dir, info
-    if grok_hooks and grok_user_hooks_requested():
-        return deny_dir, {"agent": "grok", "action": "kept", "why": "ACP_RUN_GROK_USER_HOOKS",
-                          "home": str(grok_real_home())}
-    tag = "hooks" if grok_hooks else "strip" if outside else "deny"
+    tag = "strip" if outside else "deny"
     try:
         if a.agent == "opencode":
             d, info, extra = opencode_deny_config(env, tag, go_guard_dir() if is_go_model(getattr(a, "model", None)) else None)
@@ -1004,9 +845,6 @@ def strip_user_config(a, env, deny_dir):
             env["OPENCODE_CONFIG_PROJECT_DISABLE"] = "1"
             env["OPENCODE_DISABLE_PROJECT_CONFIG"] = "1"
             env.pop("OPENCODE_CONFIG", None)  # an explicit file is loaded on top; its kept keys are in d
-        elif a.agent == "grok":
-            d, info = grok_strip_home(tag, deny=not (outside or grok_hooks), mcp=not grok_hooks)
-            env["GROK_HOME"] = str(d)
         else:
             return deny_dir, None
     except (OSError, ValueError) as e:
@@ -1016,8 +854,6 @@ def strip_user_config(a, env, deny_dir):
         print(f"acp-run: could not strip {a.agent}'s plugins and MCP servers; keeping them: {e}",
               file=sys.stderr)
         kept = {"agent": a.agent, "action": "kept", "why": f"error: {e}"[:300]}
-        if a.agent == "grok":
-            kept["home"] = str(grok_real_home())
         return deny_dir, kept
     return d, info
 
@@ -1595,7 +1431,7 @@ def order_sets(sets):
     """The --set/default options in the order they must be applied, for every agent: the
     provider (some agents' model list depends on it), then the model, then the rest. A model
     switch resets the agent's effort/context/fast to the new model's defaults and changes
-    which effort values exist (grok, codex, cursor, opencode; R1 headline 2),
+    which effort values exist (codex, cursor, opencode; R1 headline 2),
     so anything model-dependent comes after it."""
     return {k: sets[k] for k in ("provider", "model", *sets) if k in sets}
 
@@ -2070,15 +1906,6 @@ def launch_tweaks(a, cmd, env):
     return cmd
 
 
-def grok_windows(init, model_id):
-    """The context windows grok's initialize response lists for model_id ([] when unknown)."""
-    meta = (dump(init) or {}).get("_meta") or {}
-    for m in ((meta.get("modelState") or {}).get("availableModels") or []):
-        if m.get("modelId") == model_id:
-            return [w for w in ((m.get("_meta") or {}).get("contextWindows") or []) if isinstance(w, int)]
-    return []
-
-
 def models_extra(sess):
     """The legacy session/new `models` field (hermes) as a dict, or None. The SDK's
     NewSessionResponse allows extra fields since module load (see _acp_schema below)."""
@@ -2110,40 +1937,12 @@ async def set_model_fallback(a, conn, sess, client, want):
     return v["value"]
 
 
-async def grok_set_context(conn, sess, init, client, options, tokens, who):
-    """grok: session/set_model {_meta: {contextWindow, reasoningEffort}} (the method is not in the
-    pinned SDK) and the free read-back _x.ai/session/info context.total. reasoningEffort is
-    repeated so the call does not reset it to the model's default. Returns context.total."""
-    model_id = current_value(options, "model")
-    windows = grok_windows(init, model_id)
-    if windows and tokens not in windows:
-        usage_exit(f"{who} has no context {fmt_size(tokens)}; valid: {', '.join(fmt_size(w) for w in windows)}")
-    meta = {"contextWindow": tokens}
-    eff = current_value(options, "reasoning_effort")
-    if eff:
-        meta["reasoningEffort"] = eff
-    try:
-        await conn._conn.send_request("session/set_model", {"sessionId": sess.session_id, "modelId": model_id, "_meta": meta})
-    except RequestError as e:
-        if "context window" in str(e):
-            usage_exit(f"{who} refused context {fmt_size(tokens)}: {e}")
-        raise
-    client.rec("set_model", {"modelId": model_id, "_meta": meta})
-    info = await conn.ext_method("x.ai/session/info", {"sessionId": sess.session_id})
-    if isinstance(info, dict) and isinstance(info.get("result"), dict):
-        info = info["result"]  # the SDK hands back the JSON-RPC envelope's result under "result"
-    client.rec("session_info", {k: info[k] for k in ("model", "modelDisplayName", "context") if isinstance(info, dict) and k in info}
-               if isinstance(info, dict) else {"raw": str(info)[:200]})
-    total = ((info or {}).get("context") or {}).get("total") if isinstance(info, dict) else None
-    return total if isinstance(total, int) else None
-
-
 async def apply_config(a, conn, sess, init, client, sets, applied):
     """Apply the options in `sets` (order_sets: provider, model, the rest), then --effort and
     --context, to the new session; fill `applied` with what the agent reports back and raise
     ConfigError when it reports something else than was requested. Returns the final options.
     The agent's own response to each set carries the complete updated option list, which is
-    the read-back (grok adds _x.ai/session/info for the window)."""
+    the read-back ."""
     options = sess.config_options
     effort, ctx = getattr(a, "effort", None), getattr(a, "context", None)
     got = {}  # option id -> (value we set, True when the agent's response confirmed it)
@@ -2184,37 +1983,29 @@ async def apply_config(a, conn, sess, init, client, sets, applied):
             got[cid] = (val, bool(new))
             applied["effort_id"] = cid
     if ctx:
-        if a.agent == "grok":
-            total = await grok_set_context(conn, sess, init, client, options, ctx, who)
-            applied["ctx"], applied["ctx_source"] = total, "x.ai/session/info"
-            if total is None:
-                applied.setdefault("unverified", []).append("ctx")
-            elif total != ctx:
-                raise ConfigError(f"requested context {fmt_size(ctx)} but grok reports {fmt_size(total)}")
+        picked = resolve_context_option(options, ctx, who)
+        if picked:
+            cid, val = picked
+            resp = await conn.set_config_option(config_id=cid, session_id=sess.session_id, value=val)
+            new = getattr(resp, "config_options", None)
+            options = new or options
+            client.rec("set_config", {"id": cid, "value": val})
+            got[cid] = (val, bool(new))
+            applied["ctx_id"] = cid
+        elif a.agent == "codex":
+            # launch-time CODEX_CONFIG model_context_window (launch_tweaks); confirmed by
+            # usage_update.size == 95% of it after the turn
+            model = str(current_value(options, "model") or applied.get("model") or a.model or "")
+            limit = codex_max_window(model)
+            if limit and ctx > limit:
+                usage_exit(f"{who}: codex's window for this model is at most {fmt_size(limit)}"
+                           f" (max_context_window); not {fmt_size(ctx)}")
+            applied["ctx_expected"] = ctx
+            applied["ctx_requested"] = ctx
+        elif a.agent == "claude":
+            applied["ctx_expected"] = ctx  # launch-time switch; confirmed by usage_update.size
         else:
-            picked = resolve_context_option(options, ctx, who)
-            if picked:
-                cid, val = picked
-                resp = await conn.set_config_option(config_id=cid, session_id=sess.session_id, value=val)
-                new = getattr(resp, "config_options", None)
-                options = new or options
-                client.rec("set_config", {"id": cid, "value": val})
-                got[cid] = (val, bool(new))
-                applied["ctx_id"] = cid
-            elif a.agent == "codex":
-                # launch-time CODEX_CONFIG model_context_window (launch_tweaks); confirmed by
-                # usage_update.size == 95% of it after the turn
-                model = str(current_value(options, "model") or applied.get("model") or a.model or "")
-                limit = codex_max_window(model)
-                if limit and ctx > limit:
-                    usage_exit(f"{who}: codex's window for this model is at most {fmt_size(limit)}"
-                               f" (max_context_window); not {fmt_size(ctx)}")
-                applied["ctx_expected"] = ctx
-                applied["ctx_requested"] = ctx
-            elif a.agent == "claude":
-                applied["ctx_expected"] = ctx  # launch-time switch; confirmed by usage_update.size
-            else:
-                usage_exit(f"{who} offers no context option (valid: see --info)")
+            usage_exit(f"{who} offers no context option (valid: see --info)")
     read_back(a, options, got, applied)
     return options
 
@@ -2294,7 +2085,7 @@ def post_turn(a, applied, usage):
 
 
 def applied_line(applied):
-    """'model=grok-4.7 effort=low ctx=500k' with unverified values marked, '' when nothing is known."""
+    """'model=gpt-5.5 effort=low ctx=500k' with unverified values marked, '' when nothing is known."""
     unv = set(applied.get("unverified") or [])
     bits = []
     for k in ("model", "effort", "ctx"):
@@ -3625,10 +3416,6 @@ async def run(a, log, err, log_path):
     auth = a.auth or auth
     if a.perm == "all" and not a.mode and a.agent in YOLO_CMD:
         cmd = YOLO_CMD[a.agent]
-    if a.agent == "grok" and a.perm == "deny":
-        # --always-approve makes grok run every tool without a session/request_permission,
-        # so a deny run could neither refuse nor be told apart from a runaway (2026-10-15)
-        cmd = [x for x in cmd if x != "--always-approve"]
     root = Path(a.dir).resolve()
     env = dict(os.environ)
     try:
@@ -3672,8 +3459,6 @@ async def run(a, log, err, log_path):
     def drop_deny_dir():
         nonlocal deny_dir
         if deny_dir is not None:
-            if a.agent == "grok":
-                grok_sync_auth(deny_dir)
             remove_deny_dir(deny_dir)
             deny_dir = None
 
@@ -3691,7 +3476,7 @@ async def run(a, log, err, log_path):
                                   "data": stripped}) + "\n")
             log.flush()
             out["user_config"] = stripped["action"]
-        # Every run, not only --interactive (2026-10-15: a grok probe fired the user's
+        # Every run, not only --interactive (2026-10-15: an agent probe fired the user's
         # autorename hook, which renamed the CALLER's herdr tab through the inherited
         # HERDR_PANE_ID). Under --interactive acp-run also reports the pane to herdr
         # itself and the agent's own herdr hooks (Claude Code's report as herdr:claude)
@@ -3920,12 +3705,10 @@ async def run(a, log, err, log_path):
                     code = tcode
     except asyncio.CancelledError:
         if "sig" not in got:
-            if a.agent not in AFTER_KILL_DROP:
-                drop_deny_dir()
+            drop_deny_dir()
             raise
         main_task.uncancel()
-        if a.agent not in AFTER_KILL_DROP:
-            drop_deny_dir()  # before up to 20 s of cancel/kill waits a SIGKILL could cut short
+        drop_deny_dir()  # before up to 20 s of cancel/kill waits a SIGKILL could cut short
         if conn is not None and sess is not None and not a.info:
             try:
                 await asyncio.wait_for(conn.cancel(session_id=sess.session_id), 5)
@@ -3961,10 +3744,8 @@ async def run(a, log, err, log_path):
         # returned, so its turns are over)
         if client is not None:
             await close_session(a, conn, init, sess, client, proc)
-        # opencode: before _kill's waits, the run is over either way. grok (AFTER_KILL_DROP): after,
-        # since it can still write under its GROK_HOME (a rotated token) while being stopped.
-        if a.agent not in AFTER_KILL_DROP:
-            drop_deny_dir()
+        # opencode: before _kill's waits, the run is over either way.
+        drop_deny_dir()
         await _kill(proc)
         drop_deny_dir()
         if herdr is not None:
@@ -4139,7 +3920,7 @@ def main():
     ap.add_argument(
         "--strip-user-config",
         action="store_true",
-        help="strip opencode's and grok's plugins, MCP servers and hooks"
+        help="strip opencode's plugins, MCP servers and hooks"
         " under any --perm, not only deny (not a permission control; env"
         " ACP_RUN_STRIP_USER_CONFIG=1); --keep-user-config wins",
     )

@@ -187,7 +187,7 @@ display = "GPT-6 Luna"
 ```
 
 Only vendors whose models gates ration are tiered (claude, codex). Every other `routing.toml` row (minimax, glm,
-gemini, grok, the opencode-go open-weight models) is **untiered**: those models match no `family` pattern, and their
+gemini, the opencode-go open-weight models) is **untiered**: those models match no `family` pattern, and their
 rules stay as they are.
 
 ### B3. The loader and the role API (`bin/model_tiers.py`)

@@ -23,7 +23,7 @@ Retired with the shim (exit 2 naming the replacement): resume, reroute, auto-res
 (--install/--uninstall), cursor-cloud (bin/cursor-cloud stays: run it directly), --checkpoint, --no-preflight,
 --no-auto-resume, --acp-arg, --context, --wrapup-grace, --no-model-check, --acp-run.
 
-Agents are Paseo providers: claude, codex, antigravity, cursor, opencode, hermes, omp (same name; grok retired 2026-11-07);
+Agents are Paseo providers: claude, codex, antigravity, cursor, opencode, hermes, omp (same name);
 any other exits 2 with that list. `--model M` becomes `--provider P/M`. `--mode` is always passed (Claude's default is `auto`,
 so no mode would not be read-only):
     --perm all        the provider's `defaultMode` from `paseo provider ls --json` (enabled and available, else 2)
@@ -107,7 +107,7 @@ WAIT_GRACE = 300
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@\[\]+-]{0,127}$")
 CLAUDE_REFUSED_BASENAME = re.compile(r"^(REPORT|SUMMARY|FINDINGS|ANALYSIS).*\.md$", re.IGNORECASE)
-PROVIDERS = {a: a for a in ("claude", "codex", "antigravity", "cursor", "opencode", "hermes", "omp")}   # grok retired 2026-11-07
+PROVIDERS = {a: a for a in ("claude", "codex", "antigravity", "cursor", "opencode", "hermes", "omp")}
 REVIEW_MODES = {"read-only": "read-only", "deny": "review"}   # bin/review-launch --mode, claude only
 LIVE_STATUSES = ("running", "initializing")
 VIA_LABEL = "ade.via=acp-dispatch"

@@ -84,7 +84,7 @@ PROBE = textwrap.dedent("""\
         "claude_all": strip("claude", "all", flag=True),
         "hermes_all": strip("hermes", "all", flag=True),
         "re": {n: bool(mod.DENY_DIR_RE.fullmatch(n)) for n in (
-            "acp-run-opencode-strip-999999-abcd1234", "acp-run-grok-strip-12-x",
+            "acp-run-opencode-strip-999999-abcd1234", "acp-run-hermes-strip-12-x",
             "acp-run-opencode-yolo-5-y")},
     }))
     """)
@@ -256,7 +256,7 @@ class TestStripOutsideDenyConfig(unittest.TestCase):
 
     def test_strip_dirs_are_swept_like_deny_dirs(self):
         self.assertEqual(self.r["re"], {"acp-run-opencode-strip-999999-abcd1234": True,
-                                        "acp-run-grok-strip-12-x": True,
+                                        "acp-run-hermes-strip-12-x": True,
                                         "acp-run-opencode-yolo-5-y": False})
 
 

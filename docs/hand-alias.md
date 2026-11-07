@@ -16,7 +16,7 @@ One thin skill, [`skills/hand`](../skills/hand/SKILL.md), reads and follows `han
 | Claude Code | `/hand` | skill | none: official command reference, 121 commands, no `hand*` |
 | omp | `/hand` | `omp/commands/hand.md` linked to `~/.omp/agent/commands/` | none: only `handoff`, no aliases of it |
 | opencode | `/hand` | `opencode/commands/hand.md` linked to `~/.config/opencode/commands/` | none found in the binary |
-| Cursor, Grok | `/hand` | skill | none (official lists) |
+| Cursor | `/hand` | skill | none (official lists) |
 | Hermes | `/hand` | skill route (read in code, not run live) | exact lookup: no. It has built-in `/handoff` (`hermes_cli/commands.py:106`), so Tab may complete `/hand` to it; type the full word |
 | Codex | `$hand` | skill (`/prompts:hand` is deprecated, not installed) | none |
 | Grok Bot | UNVERIFIED | Grok Bot is not on this Mac | none found, lists incomplete |

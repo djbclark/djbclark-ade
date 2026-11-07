@@ -216,8 +216,6 @@ def build_stores(home):
               ("session-env", ".claude/session-env"), ("tasks", ".claude/tasks"), ("teams", ".claude/teams"),
               ("sessions", ".claude/sessions"), ("history.jsonl", ".claude/history.jsonl"),
               file_labels=["history.jsonl"]),
-        files("grok", ("sessions", ".grok/sessions"), ("memory-v2", ".grok/memory-v2"), ("memtrace", ".grok/memtrace")),
-        sqlite("grok-db", ".grok/worktrees.db"),
         files("gemini-cli", ("tmp", ".gemini/tmp")),
         files("omp", ("sessions", ".omp/agent/sessions")),
         sqlite("omp-db", ".omp/agent/history.db"),

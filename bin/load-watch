@@ -338,7 +338,7 @@ def agent_label(a):
 
 # Agent CLIs by binary name: a walk up from a busy process stops at the first of these (with the providers `paseo ls`
 # names), so work is never pinned on whatever daemon, multiplexer or shell above the agent shares a cwd with another one.
-AGENT_CLIS = frozenset({"claude", "codex", "opencode", "omp", "pi", "gemini", "copilot", "cursor-agent", "grok", "agy",
+AGENT_CLIS = frozenset({"claude", "codex", "opencode", "omp", "pi", "gemini", "copilot", "cursor-agent", "agy",
                         "crush", "kimi", "qwen", "goose", "aider", "amp", "droid", "kiro-cli", "acp-run"})
 
 

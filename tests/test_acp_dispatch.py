@@ -104,7 +104,7 @@ class TestSurface(Base):
         self.assertIn("--model is required", r.stderr)
 
     def test_an_unknown_agent_exits_2_with_the_provider_list(self):
-        for agent in ("agy", "grok"):                                         # grok CLI retired 2026-11-07
+        for agent in ("agy", "cline"):
             r = self.dispatch(agent, "m-1")
             self.assertEqual(r.returncode, 2)
             self.assertIn("one of claude, codex, antigravity, cursor, opencode, hermes, omp\n", r.stderr)

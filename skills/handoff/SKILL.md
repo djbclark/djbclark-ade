@@ -272,7 +272,7 @@ title derived from this session's work (not "handoff"):
 python3 ~/src/djbclark-ade/skills/autorename/autorename.py --auto "<title>"
 ```
 
-It keeps a title the operator set by hand. It works in Claude Code, zcode, Grok,
+It keeps a title the operator set by hand. It works in Claude Code, zcode,
 cursor-agent, OpenCode, Codex in a herdr pane (herdr retired from djbclark-ade 2026-10-31; that code path lives until D4/D6), and omp (once its bridge extension is
 installed and omp restarted), and exits 2 without harm where it finds no supported
 session; in that case skip it silently. Add its one-line result to the report.
@@ -336,20 +336,18 @@ or unreadable file means no), a Claude Code lead of any model, Sonnet and Opus i
 `self-slash "/new"` (that stays on the exhausted subscription) and never a Claude successor. On Paseo, while
 `aiuse --available --json` lists omp, run the guard advice's own command (the omp successor with
 `--thinking high`); on herdr or Orca (retired from djbclark-ade 2026-10-31; `self-slash` refuses an omp successor there) write the handoff, then
-start omp by hand in a new pane or tab. With omp not listed, a codex or grok successor the same way (agy is
+start omp by hand in a new pane or tab. With omp not listed, a codex successor the same way (agy is
 reached only by `acp-run agy` slices, home rule 29, never as a successor; `acp-run` sessions are never handoff
 hops). **At `critical` this paragraph replaces every Claude path in the rest of Step 9:** the Fable branch
 (a) below, the "verify the successor" by-hand fallback (a governor-steered session still runs that verify step,
 with these providers), the partial-handoff recipe's `paseo run --provider claude`, the `/clear` then
 `/baton` or `self-slash "/new"` retry after a refusal, and the Orca "relaunch `claude --model <m>`" line. A
-refusal retry or a by-hand start reruns the guard advice's command (omp, else codex or grok), never claude. The
+refusal retry or a by-hand start reruns the guard advice's command (omp, else codex), never claude. The
 partial-handoff recipe is the exception to "the guard advice's command": it keeps `paseo run` (the
 `--finish --successor` form archives the session it keeps) with `--provider omp --model
 anthropic/claude-sonnet-5-5 --thinking high` and no `--mode` (omp has its own default; a claude mode id means
 nothing to it), else codex with `--provider codex --model gpt-6.1-sol --mode full-access` and the first prompt
-`'$baton PATH'` (single-quoted: a Codex skill is `$baton`, `/baton` is Claude's spelling), or grok with
-`--provider grok --model grok-4.7`, no `--mode` (`paseo provider ls` lists none for grok) and the first prompt
-`Resume from the handoff at PATH: read it, then continue the work.` (no skill syntax is verified for grok). Only (c), an operator-asked model change, still
+`'$baton PATH'` (single-quoted: a Codex skill is `$baton`, `/baton` is Claude's spelling). Only (c), an operator-asked model change, still
 decides for itself at any level. The `[quota-guard critical]` line is printed once per session and compaction
 can drop it, so the state file, not the line, is what you test.
 
