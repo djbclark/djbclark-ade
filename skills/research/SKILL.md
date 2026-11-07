@@ -172,7 +172,7 @@ pages. On a host with `model-routing` / `effort-routing` skills, follow them.
    Claude sub-agents.** Dispatch each brief with `acp-dispatch <agent> --model M
    --kind <kind> --name N --task research-<slug> -C <run-folder-parent> -f <brief-file>`
    (`--kind research` on the everyday pools, `frontier` for astra and Fable;
-   codex, opencode, cursor, grok, omp as Paseo providers: `acp-dispatch` is a `paseo run` shim since
+   codex, opencode, cursor, omp as Paseo providers: `acp-dispatch` is a `paseo run` shim since
    2026-11-06, `--perm read-only` is Claude's review boundary or refused; the
    `model-routing` skill and the `aiuse` rules in `~/CLAUDE.md` give the
    mechanics). Reasons: the reads stay out of the lead's context, the

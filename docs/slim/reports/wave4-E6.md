@@ -17,8 +17,9 @@ A1. `bin/acp-dispatch`: 5,848 lines to 1,306 (the brief said about 600; the rest
 docstring that carries the whole contract, and the review-launch runner). Line 3 says it is a shim removed with
 `tools/acp-run` in the follow-up PR (PLAN E6, Wave 6).
 
-A2. Agent to provider: claude, codex, antigravity, cursor, opencode, hermes, omp, grok map to the Paseo provider of the
-same name; any other name (agy, cursor-cloud, ...) exits 2 with that list. `--model M` becomes `--provider P/M`;
+A2. Agent to provider: claude, codex, antigravity, cursor, opencode, hermes, omp map to the Paseo provider of the
+same name; any other name (agy, grok, cursor-cloud, ...) exits 2 with that list. `grok` was in the brief's map and was
+dropped by the operator's ruling of 2026-11-07 (the grok CLI is retired; grok-bot stays, through peer-link, not the shim). `--model M` becomes `--provider P/M`;
 `--effort E` becomes `--thinking E` (not passed to review-launch, whose interface has no effort flag).
 
 A3. The argv per `--perm` (from `launch_argv`; `--dry-run --json` prints it as `argv`):
@@ -214,10 +215,25 @@ review-launch` and a report ending DONE.
 
 K1. Targeted (the brief's set, `bin/pytest -q tests/test_acp_dispatch.py tests/test_agent_guard*.py tests/test_route_agent.py
 tests/test_load_watch_admit.py tests/test_acp_run_*.py`), plus `tests/test_dialogue_paseo.py`, `tests/test_go_model_policy.py`,
-`tests/test_omp_operator_gate.py`, `tests/test_acp_not_installed.py`: RESULT_TARGETED.
+`tests/test_omp_operator_gate.py`, `tests/test_acp_not_installed.py`, at 2547a64: **3 failed, 547 passed, 2 skipped**
+(4 min 24 s). The 3 are baseline rows: `tests/test_acp_run_git_identity.py::TestGitIdentityGuard::
+{test_foreign_local_identity_is_refused_even_with_no_verify, test_hook_path_with_an_apostrophe_still_runs,
+test_nested_launch_repairs_stripped_parameters}`. After the grok ruling (K4) the shim, dialogue, agent_guard, Go-policy and
+operator-gate files were run again: 79 passed.
 
-K2. Full suite in the detached worktree `/tmp/w4e6-verify` at 1967974 (the code head; the later commits are the changelog
-and this report), with the baseline's own command: RESULT_FULL.
+K2. Full suite in the detached worktree `/tmp/w4e6-verify` at 1967974 (the code head then; the later commits are the
+changelog, this report, the runner-log path, the fan-out example and the grok removal, each covered by K1's reruns), with
+the baseline's own command (`uv run --with pytest --with pytest-timeout --with pyyaml --with 'agent-client-protocol>=0.9,<1.0'
+python -m pytest tests/ -q --timeout=120`): **70 failed, 7,197 passed, 30 skipped, 1,409 subtests passed, 19 min 0 s**,
+rc 1. **No new failure**: every failing test id is a row of `docs/slim/baseline.md`'s full list. 65 baseline rows no
+longer fail: their files were deleted or rewritten here or in Waves 2-3 (`test_acp_dispatch.py` 6, `_quota_d2` 2, `_reap` 1,
+`test_bigteam_prune.py` 8, `test_self_slash*.py` 41, `test_session_relay.py` 2, `test_ade_scan_state.py` 2,
+`test_local_review.py` 2, `test_launch_turns.py` 1).
+
+K4. Operator ruling 2026-11-07 (relayed by the coordinator after K2): the grok CLI is retired, so `grok` left the
+provider map (it now exits 2 like any unknown agent), the shim's tests, the fake `paseo`'s provider list, this report and
+the changelog line; `tests/test_dialogue_paseo.py` probes through the `cursor` provider instead, and the research skill's
+provider list lost it.
 
 K3. Test files: `tests/test_acp_dispatch.py` rewritten (519 lines, 37 tests: surface and retired verbs, the provider map
 and argv, the perm boundaries, launch/wait/status map, the admit gate, knobs, reservation release and the 20-launch

@@ -104,9 +104,10 @@ class TestSurface(Base):
         self.assertIn("--model is required", r.stderr)
 
     def test_an_unknown_agent_exits_2_with_the_provider_list(self):
-        r = self.dispatch("agy", "gemini-pro")
-        self.assertEqual(r.returncode, 2)
-        self.assertIn("claude, codex, antigravity, cursor, opencode, hermes, omp, grok", r.stderr)
+        for agent in ("agy", "grok"):                                         # grok CLI retired 2026-11-07
+            r = self.dispatch(agent, "m-1")
+            self.assertEqual(r.returncode, 2)
+            self.assertIn("one of claude, codex, antigravity, cursor, opencode, hermes, omp\n", r.stderr)
         self.assertEqual(self.calls(), [])
 
     def test_retired_verbs_exit_2_naming_the_replacement(self):
@@ -152,7 +153,7 @@ class TestProviderMapAndArgv(Base):
         return json.loads(r.stdout)
 
     def test_every_agent_maps_to_its_provider_with_its_default_mode(self):
-        for agent in ("claude", "codex", "antigravity", "cursor", "opencode", "hermes", "omp", "grok"):
+        for agent in ("claude", "codex", "antigravity", "cursor", "opencode", "hermes", "omp"):
             with self.subTest(agent=agent):
                 extra = {"ACP_OPERATOR_APPROVED": "hermes,route-override"}
                 model = {"opencode": "opencode-go/minimax-m3", "claude": "sonnet"}.get(agent, "m-1")
@@ -193,7 +194,7 @@ class TestProviderMapAndArgv(Base):
         for bad in (ok[:4] + ["--provider", "claude/fable"] + ok[4:], ok[:2] + ["--provider", "claude/fable"] + ok[4:],
                     ok + ["--env", "ANTHROPIC_API_KEY=x"]):
             self.assertIn("agent_guard", mod.identity_refusal("claude", bad, "sonnet"))
-        self.assertIsNone(mod.identity_refusal("grok", ok[:2] + ["--provider", "grok/other"], "m"))   # unreviewed row
+        self.assertIsNone(mod.identity_refusal("cursor", ok[:2] + ["--provider", "cursor/other"], "m"))   # unreviewed row
         rl = ["review-launch", "--mode", "review", "-C", "/w", "--model", "sonnet", "--json"]
         self.assertIsNone(mod.identity_refusal("claude", rl, "sonnet"))
 
@@ -257,7 +258,7 @@ class TestPermBoundaries(Base):
         self.assertIn("active mode is 'auto'", r.stdout)
 
     def test_deny_and_unknown_read_only_modes_are_refused_for_other_providers(self):
-        for agent, perm in (("codex", "deny"), ("opencode", "read-only"), ("cursor", "deny"), ("grok", "read-only")):
+        for agent, perm in (("codex", "deny"), ("opencode", "read-only"), ("cursor", "deny"), ("antigravity", "read-only")):
             with self.subTest(agent=agent, perm=perm):
                 model = "opencode-go/minimax-m3" if agent == "opencode" else "m-1"
                 r = self.dispatch(agent, model, "--perm", perm, ACP_OPERATOR_APPROVED="route-override")

@@ -30,11 +30,11 @@ def world(tmp_path: Path, routes: list[dict], **env: str) -> tuple[subprocess.Co
 
 
 def test_an_acp_route_runs_on_paseo_and_reads_the_reply_file(tmp_path):
-    r, calls = world(tmp_path, [{"kind": "acp", "agent": "grok", "model": "grok-4.7", "set": ["reasoning_effort=high"]}])
+    r, calls = world(tmp_path, [{"kind": "acp", "agent": "cursor", "model": "grok-4.7", "set": ["reasoning_effort=high"]}])
     assert r.returncode == 0, r.stdout + r.stderr
     assert "ok" in r.stdout
     run = next(c for c in calls if c[0] == "run")
-    assert run[run.index("--provider") + 1] == "grok/grok-4.7"
+    assert run[run.index("--provider") + 1] == "cursor/grok-4.7"
     assert run[run.index("--mode") + 1] == "default"                     # the provider's defaultMode
     assert run[run.index("--thinking") + 1] == "high"
     assert "--no-wait" in run and "--json" in run and "--prompt-file" not in run

@@ -97,7 +97,7 @@ def run(args):
         rows = json.loads(os.environ.get("FAKE_PASEO_PROVIDERS") or "null") or [
             {"provider": p, "label": p, "status": "available", "enabled": "Enabled",
              "defaultMode": {"claude": "auto", "codex": "auto"}.get(p, "default"), "modes": ""}
-            for p in ("claude", "codex", "antigravity", "cursor", "opencode", "hermes", "omp", "grok")]
+            for p in ("claude", "codex", "antigravity", "cursor", "opencode", "hermes", "omp")]
         out(rows)
     if verb == "run":
         if os.environ.get("FAKE_PASEO_RUN_FAIL"):
