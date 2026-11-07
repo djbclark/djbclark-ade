@@ -9,7 +9,7 @@ repo's `.mcp.json`.
 
 Since 2026-10-10, 12 servers (ghost-os, cua-driver, paper-search and 9
 claude.ai connectors) are blocked in Claude Code through `deniedMcpServers` in
-`~/.claude/settings.json`; [disabled-skills.md](disabled-skills.md) lists them,
+`~/.claude/settings.json`; [history/disabled-skills.md](history/disabled-skills.md) lists them,
 why, and how to re-enable. This table is otherwise the 2026-08-23 snapshot.
 
 | Server | Transport / command | Scope | What it is |
@@ -20,7 +20,7 @@ why, and how to re-enable. This table is otherwise the 2026-08-23 snapshot.
 | `ghost-os` | stdio: `/opt/homebrew/bin/ghost mcp` | user | macOS UI automation via accessibility tree + vision. **Blocked in Claude Code since 2026-10-10** (`deniedMcpServers`) |
 | `hindsight` | stdio: `node ~/.hindsight/coding-agents/dist/mcp-server.js` | user | Per-repo Hindsight coding-agent memory (the 🧠 banner) |
 | `hindsight-shared` | HTTP: `http://127.0.0.1:8888/mcp/hermes-shared/` | user | Shared Hindsight bank (`hermes-shared` in the URL is the bank name) |
-| `firecrawl` | HTTP: `http://127.0.0.1:18804/mcp` (LaunchAgent `com.djbclark.firecrawl-mcp`) | all agent TUIs | Scrape, search, crawl, map on self-hosted Firecrawl (SIPB Hyades) through `firecrawl-router` (deleted from this repo 2026-11-06; whatever listens on that port now is machine-side, not this repo's); the firecrawl skill, `~/ops/site-public-djbclark/skills/firecrawl/SKILL.md` (moved 2026-11-06). `firecrawl_developer_search` is answered by the Hyades API itself (a `devsearch` sidecar over the GitHub search API, 2026-10-24), see below |
+| `firecrawl` | HTTP: `http://127.0.0.1:18804/mcp` (LaunchAgent `com.djbclark.firecrawl-mcp`, machine-side) | Claude Code (the Codex and opencode templates dropped it 2026-11-07) | Scrape, search, crawl, map on self-hosted Firecrawl (SIPB Hyades). Its parent, `bin/firecrawl-router`, was deleted from this repo 2026-11-06 (Wave 3b): the operator re-points that LaunchAgent at the Hyades service or retires it before `ade update` reaches the Mac (`slim/reports/wave3b.md` G8). The firecrawl skill moved to `~/ops/site-public-djbclark/skills/firecrawl/`. `firecrawl_developer_search` is answered by the Hyades API itself (below) |
 | claude.ai Gmail / Google Calendar / Google Drive | HTTPS (Google-hosted) | claude.ai account | Remote connectors managed on claude.ai, not in local config |
 
 ## Firecrawl developer search (2026-10-24)
@@ -42,7 +42,7 @@ Koyeb) for the microVMs: only Playwright and devsearch fit them, and each needs 
 
 `hermes` (`~/.local/bin/hermes`) is the **Hermes Agent** — Nous Research's
 agent CLI, git-installed at `~/.hermes/hermes-agent` (v0.20.5 at snapshot
-time; `hermes --version`). It is also one of the Orca fleet TUIs
+time; `hermes --version`). It is also a Paseo provider
 ([model-routing.md](model-routing.md)), and clinepass is its inference
 lifeline — the MCP surface below is separate from routing *to* hermes as a
 worker.

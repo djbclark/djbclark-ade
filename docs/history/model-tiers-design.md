@@ -1,3 +1,4 @@
+<!-- moved from docs/ on 2026-11-07 by the slim-down (E11) -->
 # Model tiers as data: design (2026-10-26, design only, nothing built)
 
 > Status (2026-10-31, djbclark): merged as a design; build queued after D1 of docs/paseo-only-rearchitecture.md, once the

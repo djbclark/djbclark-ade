@@ -117,13 +117,13 @@ does not collide with a core command (including `/steps`) is native skill
 slash: the gateway injects `SKILL.md` and the agent runs. Do not also
 register that name in `~/.hermes/plugins/skill-slash`. A plugin handler
 return is a user reply, so it dumps the skill markdown and the agent never
-calls `clarify`. Do not register `/helm` or `/baton` there either: native
-skill slash already owns them. The plugin still registers `/helm-all` and
-`/skill <name>` (those names are not native skill commands; `/session-finder`
-and `/session-finder-all` went with the skill, 2026-11-06, docs/slim E3). Enable `skill-slash`
+calls `clarify`. Do not register `/baton` there either: native
+skill slash already owns it. The plugin still registers `/skill <name>` (not a native skill command; `/helm-all`,
+`/session-finder` and `/session-finder-all` went with their skills, 2026-11-06, slim-down E3 and E4: the operator drops
+any stale registration from the plugin). Enable `skill-slash`
 in `plugins.enabled`. Since 2026-10-06 `skill-everywhere` auto-nudges the
-running gateway (`reload-plugins` control socket) so a plugin command like
-`/helm-all` dispatches immediately —
+running gateway (`reload-plugins` control socket) so a plugin command
+dispatches immediately —
 no manual gateway restart. The Telegram pull-up `/` menu is only republished
 at adapter (re)connect, so a just-added command may not autocomplete until the
 next restart, but typing it still works and `/commands` lists it. If you cannot
@@ -155,7 +155,7 @@ links were overwritten, getpaseo/paseo#7700, and the repo copies were renamed `a
 
 ## 4. When the table is wrong
 
-Fix [`skill-everywhere`](skill-everywhere) and the table above together, then re-run step 3
+Fix [`skill-everywhere`](../bin/skill-everywhere) and the table above together, then re-run step 3
 for the TUIs you changed. When a new TUI shows up in `aiuse --json` or under
 `~/.local/bin`, find its skills dir from its docs or its binary, add a row, and
 verify it.

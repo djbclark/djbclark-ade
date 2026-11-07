@@ -1,3 +1,4 @@
+<!-- moved from docs/ on 2026-11-07 by the slim-down (E11) -->
 # AI memory: the six levels, where we are, and the wider field
 
 Snapshot **2026-08-23**. The machine-local plan is not in this repo — it lives

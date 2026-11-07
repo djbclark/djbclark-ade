@@ -12,30 +12,25 @@ description: >-
 
 **Provider scope (2026-10-25).** A native OpenCode compaction continues its existing session; it does not start a new baton. Only resume a fresh session after the owned Tier 1 checkpoint is durable and the supported lifecycle controller has acknowledged that successor. Never clear a parent session to make a child resume. See [context hygiene](../../docs/context-hygiene.md).
 
-Since 2026-10-19 `bin/self-slash "/new"` (also `/clear`, `/reset`) queues
-`/baton` into the fresh session itself (`--then`, default `/baton`; `--no-then`
-turns it off), so after a handoff nobody types this; a `/baton` that arrives
-right after a `/clear` is that follow-up (`~/.local/state/self-slash.log`
-shows `then: /baton` and `sent /baton`), not a request for anything else.
+After a handoff the operator types `/clear` and then `/baton`, or a successor agent starts with `/baton PATH` as its
+first prompt (`handoff` Step 9; `self-slash`, which used to queue the `/baton` itself, was removed 2026-11-06).
 
 **Syntax is per client (2026-10-25).** In Claude Code the skill is typed `/baton`. In Codex a skill is invoked with
 `$` (`$baton`, `$baton PATH`) and `/` is reserved for Codex's built-ins (`/new`, `/compact`, `/quit`): a `/baton` typed
 into a Codex composer is just text and starts nothing (seen live 2026-10-25, three Enters later it still sat in the
-composer). `self-slash` picks the spelling from the provider herdr reports for the pane (only a herdr pane is ever treated as Codex: `bin/self-slash` sets `codex=1` for herdr alone, and its Paseo branch handles Claude only; herdr is retired from djbclark-ade 2026-10-31 and this branch lives until D6), so in a Codex pane the
-follow-up above is `$baton`, and a `--then "/baton PATH"` is rewritten once to `$baton PATH`. The same skill answers
-to either spelling; treat `$baton PATH` exactly like `/baton PATH`. Never write `$baton` for a Claude pane.
+composer). So a Codex successor's first prompt is `'$baton PATH'` (single-quoted for the shell). The same skill answers
+to either spelling; treat `$baton PATH` exactly like `/baton PATH`. Never write `$baton` for a Claude agent.
 
-`/baton` never clears, compacts or starts a new session itself: `/new` queues
-`/baton`, so a `/baton` that started a `/new` would recurse. If the pointer
+`/baton` never clears, compacts or starts a new session itself (a `/baton` that started a new session would
+recurse). If the pointer
 has nothing to resume (no open work, `latest_handoff` already finished), say
 so and offer the `loose` Rule 4 choices (handoff and continue, finish and
 archive, keep working); never write another handoff automatically.
 
-A `/baton` can arrive three ways: typed by the operator, queued by `self-slash "/new"` (the same agent, fresh
-context), or as the first prompt of a successor another session started (`self-slash --finish --successor` on
-Paseo or herdr (herdr retired from djbclark-ade 2026-10-31, live until D6); `launch.py start --baton` was deleted 2026-11-06). Treat all three alike. Since 2026-10-25 a successor the operator will
-talk to is a real TUI (an `acp-run` pane has no readable transcript); a session that does turn out to be an
-`acp-run` client (`ACP_RUN_AGENT=1`) cannot use `self-slash` (exit 9), so it ends with a document-only handoff.
+A `/baton` can arrive three ways: typed by the operator after `/clear` (the same agent, fresh context), as the first
+prompt of a successor another session started (`env -u PASEO_AGENT_ID -u PASEO_AGENT_CWD paseo run … "/baton PATH"`),
+or from a dispatched slice's brief. Treat all three alike. A successor's brief names its predecessor's id: once you have
+answered, archive the predecessor (`paseo agent archive PRED_ID`, never `--force`) and tell its siblings your new id.
 
 This is a thin entry point, not a separate protocol. Follow the
 `session-handoff` skill's **Reader protocol** section exactly (read
@@ -44,11 +39,11 @@ the staleness check against real `HEAD`, state a resume plan before
 touching anything, bootstrap a minimal log if none exists — never ask
 the operator for information the file already answers).
 
-**Which chain, before resolving by directory (2026-10-25).** A `/baton` queued by `self-slash "/new"`
-belongs to the chain that session just handed off, and the directory can name a different one: a fresh
-load watcher resumed the repo's `main` chain while its own was `load-spike-monitor-t`, and then queued
-its own archive. Read `~/.local/state/self-slash.log`: if the newest `then: /baton` line for this agent (`$PASEO_AGENT_ID`) follows a handoff
-naming a chain, resume THAT chain (`session-handoff` chain discovery, `--dir .../chains/<key>`). A
+**Which chain, before resolving by directory (2026-10-25).** A `/baton` after a handoff belongs to the chain that
+session just handed off, and the directory can name a different one: a fresh load watcher resumed the repo's `main`
+chain while its own was `load-spike-monitor-t`. A successor's first prompt names its chain's `SESSION_LOG.md`: resume
+THAT chain (`session-handoff` chain discovery, `--dir .../chains/<key>`); after a bare `/clear`, the newest handoff of
+this agent's own chain wins. A
 directory-resolved pointer whose owner is another live session is not yours: say so and look further.
 **Live owner: ask before the first write (2026-11-01).** After resolving any chain, run `session-handoff`'s
 **Owner check** (Reader protocol; the one wording: how to match `session_id` to a fleet row for claude,
@@ -58,7 +53,6 @@ or resume; a read-only `/baton` just reports the owner. Reconciled with the para
 directory-resolved pointer owned by another live session is not yours, look further; a chain that is yours
 by `/new` or the operator's naming but that a live other session also owns is asked about
 first. Incident: 2026-10-31, a `/baton` after `/clear` merged PR 173 ahead of PR 177.
-(The watch-holder guard of `self-slash --finish` went with `bin/watch` and `bin/self-slash`, 2026-11-06.)
 
 If the operator invoked this with no argument, resolve the current
 directory against the Tier 1 path convention in `session-handoff` (or,
@@ -72,8 +66,8 @@ protocol) instead of asking the operator to supply a path.
 
 Background work does not carry over on its own: a `run_in_background` task or
 waiter belongs to the session that started it. What survives is on disk, in
-bigteam's job records (`~/.local/state/bigteam/<task>/jobs/<name>.json`; format
-in the `bigteam` skill, Step 4). For each open job named under `## Detached
+the dispatch shim's job records (`~/.local/state/bigteam/<task>/jobs/<name>.json`, the shim's state directory;
+format in `bin/acp-dispatch`'s docstring). For each open job named under `## Detached
 jobs` in the handoff (or, with no handoff, each record without a `"closed"` key
 under the task directory the Tier 1 pointer names; never adopt a record whose
 `owner` session is still alive and is not the handoff's author):
@@ -121,9 +115,7 @@ Do not duplicate the reader protocol's steps here — if they ever change,
 they change in exactly one place (`session-handoff`'s SKILL.md), not two.
 
 OpenCode V2 Go sessions use the native `ade_compact` tool for manual compaction.
-The plugin never rewrites shell commands. A supported host controller may pass
-an explicit validated session and directory to `self-slash "/compact"`.
-These paths compact only the verified current session; they do not implement a
+The plugin never rewrites shell commands. It compacts only the verified current session; it does not implement a
 new-session/baton successor.
 See `docs/context-hygiene.md`. Write the checkpoint first and require the normal
 host identity/acknowledgment checks for a lifecycle cycle.

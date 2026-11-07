@@ -22,6 +22,21 @@ is incorporated as the [checkpoint and recovery contract](checkpoint.md). This i
 not a shipped guarantee. It extends D1/D2/D3/D5 and G1 to preserve interrupted workers, schedules
 and top-level sessions. Its evidence table evaluates the issue's recommendations independently.
 
+**Superseded in part by the slim-down (2026-11-06/07; [`slim/PLAN.md`](slim/PLAN.md), record in
+[`slim/log.md`](slim/log.md)).** This plan is kept as the record of its rulings (A, B, F) and of what is still open; it
+no longer describes today's tree. Where a phase below says what will be built, disabled or deleted, read this first:
+
+| Phase | Status on 2026-11-07 |
+|---|---|
+| D0 | done 2026-10-30 |
+| D1 contracts, D3 canary | open; the recovery probes are `checkpoint.md`'s, the canary is the final PR's live cycle (PLAN F, Wave 6) |
+| D2 plugins | replaced by PLAN J6: the operator installs Paseo's published plugins (tell-agent, asks / questions-please, baton, session-guard, usage-auto-resume, vitals, skills, pr-radar, session-janitor, session-recovery …) before the final merge; nothing is built here |
+| D4 seats and messages | superseded by slim-down E3 (`relay.py` is a one-cycle shim over `paseo send`; session-finder's search, launch and fleet halves deleted) and E4 (self-slash, autorename, helm, `paseo-new-seat`, `paseo-bypass-watch` deleted) |
+| D5 dispatch | superseded by E6 (`acp-dispatch` is a one-cycle `paseo run` shim; bigteam became `skills/fan-out`; `tools/acp-run` goes in Wave 6's follow-up PR) and E8 (`pr-wait` and the Codex local review replaced by `bin/review-pr`, `bin/review-launch` and the `adversary-marker` Action) |
+| D6 watchers | superseded by E5 (load-watch on `paseo ls`/`paseo send`; rumination-watch, proc-cpu-watch, session-load-watch, routing-recalibrate, loadwatch deleted), Wave 3b (the watch family, the vendored `ade-paseo*` skills, the web ladder) and E7 (quota guard and fleet governor deleted; routing on `paseo provider ls` and `paseo usage ls`) |
+| D7 deletion and docs | superseded by Waves 2-5 (E1, E2, E9, E9c, E10 deletions; E11 README, AGENTS.md, docs, queue) and Wave 6 (the shims' removal) |
+| D8 recovery overlay | stands (`checkpoint.md`) |
+
 ## A. The ruling (djbclark, 2026-10-29 and 2026-10-30)
 
 1. **Paseo only.** No herdr, no tuios, no other harness (Orca, Superset/Paradev, TUICommander, raw tmux
@@ -248,7 +263,7 @@ Counts are `rg -li` over the repo on 2026-10-29, excluding `graft/` and `docs/ha
 | `skills/model-routing`, `route_agent.py`, `docs/model-routing.md` | — | KEEP policy, strip the harness table | C2 map |
 | `opencode-plugins/`, OpenCode V2 Go sessions, `opencode-plugin-guard` | 128 files | F4: keep provider-side plugins, drop harness-like ones | Paseo provider `opencode` |
 | `cursor-cloud` | 14 files | KEEP as a tool (a cloud agent, not a harness) | — |
-| `README.md` "two altitudes", `docs/orchestration-practices.md`, `docs/coding-factory.md`, `docs/ade-everywhere-*` | — | REWRITE in D7; history into `docs/history/` | — |
+| `README.md` "two altitudes", `docs/orchestration-practices.md`, `docs/coding-factory.md`, `docs/ade-everywhere-*` | — | DONE 2026-11-06/07 (slim-down E2, E11): rewritten, or moved to `docs/history/` | — |
 | `~/AGENTS.md` items 4, 24-26, 30, 33; `djbclark-ade/AGENTS.md` orders 9-10 and Machine context | — | REWRITE per phase, as each behaviour changes (astra B1h), final pass in D7; Opus 5.5+ edits `home-agents.mdc` | — |
 
 ### C2. Provider map (`paseo provider ls`, Mac daemon 0.14.0, 2026-10-30)
@@ -259,6 +274,11 @@ Counts are `rg -li` over the repo on 2026-10-29, excluding `graft/` and `docs/ha
 | error | gemini, goose | fix or accept the loss before `acp-run` retires for them |
 | unavailable | pi, muse | not used today |
 | no provider | zcode (`zcode-acp`), crush/SIPB | custom ACP provider entries (Paseo custom-providers) or keep `acp-run` for these alone until then |
+
+**Kept after the pool audit (2026-11-06) and the rulings of 2026-11-07:** claude, codex, cursor, antigravity, opencode, omp
+and hermes, plus grok-bot through peer-link. Retired: copilot (CLI), cline, grok (the CLI; SuperGrok cancelled), glm-acp-agent,
+qwen-code, gemini, goose, pi, muse, zcode, crush (`slim/log.md`; lessons in `tui-lessons-learned.md`). The table is the
+2026-10-30 snapshot.
 
 Steering: antigravity has none and gets no Paseo tools (research 2a). For every other provider,
 steer-while-running behaviour is **unknown** until D1 measures it; Fable 7.3 warns that a send to a working
@@ -283,7 +303,7 @@ ops-promotion pilot passes.
       passed, Paseo workspaces created for work use `isolation: local`, task worktrees come from
       `git worktree add` (order 9), and `session-janitor` stays disabled (B4.3). The vendored `ade-paseo-handoff` skill carried a pointer to this rule;
       it was deleted 2026-11-06 and Paseo's own `paseo-handoff` replaces it.
-1. **Contracts and safety net.** Each probe is a repeatable script under `tests/paseo-acceptance/` with an
+1. **Contracts and safety net.** *[D1: see the slim-down status table at the top, 2026-11-07.]*  Each probe is a repeatable script under `tests/paseo-acceptance/` with an
    **expected outcome and a named consequence if it fails**; D2 starts only when every consequence is
    resolved. D1 probes native Paseo behaviour and the non-plugin pieces it builds (the B4 teardown, the B9
    watchdog, the dead-man check); anything that needs a G plugin is checked in D2's gate.
@@ -346,7 +366,7 @@ ops-promotion pilot passes.
       secrets mechanism. Expected: sleep (no page), daemon killed while awake (page), network cut while awake
       (page), wake hook failed and then a network cut while awake (page); from vps-primary an authenticated
       Paseo call to the Mac is impossible, and the key cannot run anything else.
-2. **Minimum plugins and adopted plugins** (section G): G2, G3, G1, G4; `usage-auto-resume` coverage for omp,
+2. **Minimum plugins and adopted plugins** *[D2: see the slim-down status table at the top, 2026-11-07.]*  (section G): G2, G3, G1, G4; `usage-auto-resume` coverage for omp,
    opencode, cline and grok (G5); the Telegram plugin's 0.14 test (F1). **Gate**, on the isolated daemon,
    asserting that the live daemon's state under `~/.local/state/ade/<serverId>/` is unchanged (or absent
    before and still absent, while the live daemon runs no G plugin): three concurrent launches against one
@@ -364,23 +384,23 @@ ops-promotion pilot passes.
    Telegram-created agent lack the B3 tools, including tools any running plugin attaches in
    `agent.open.before`; a `worktree` create in a repo without a committed `paseo.json` teardown is refused
    (B4, G2).
-3. **Canary.** One real workflow end to end on Paseo only: work → review → CI → report, including a forced
+3. **Canary.** *[D3: see the slim-down status table at the top, 2026-11-07.]*  One real workflow end to end on Paseo only: work → review → CI → report, including a forced
    quota stop that resumes and a daemon restart that loses nothing (isolated daemon, or a drained window
    with djbclark's yes), and the one-task pilot on vps-primary with its report retrieved on the Mac.
    **Gate:** no paid job or artifact depended on a retiring tool; outcome records written.
-4. **Seat and communication cutover.** Every launch is `paseo run`/`create_agent`; `relay.py` routes only
+4. **Seat and communication cutover.** *[D4: see the slim-down status table at the top, 2026-11-07.]*  Every launch is `paseo run`/`create_agent`; `relay.py` routes only
    `--via paseo` (strangler); a `paseo-peers` skill (B2 states, G3 as the sanctioned path, named acks per
    standing order 10) replaces `peer-relay`. After the drain gate: relay's non-Paseo routes, helm,
    herdr-tidy and herdr-sleeper are disabled. `relay.py` and `fleet.py` themselves stay enabled
    (`--via paseo` only) because D6's watchers still call them. **Gate:** `paseo ls -g` shows every live seat;
    G3 shows `delivered` for a cross-workspace send; the drain record is committed.
-5. **Dispatch, then lifecycle.** `acp-dispatch`/`acp-run` replaced by G1 on Paseo subagents (records kept
+5. **Dispatch, then lifecycle.** *[D5: see the slim-down status table at the top, 2026-11-07.]*  `acp-dispatch`/`acp-run` replaced by G1 on Paseo subagents (records kept
    readable until calibration reads G1's); `/bigteam` and the dispatch footer rewritten; after the drain gate,
    `acp-dispatch` is disabled; then `self-slash` successors (C1). `acp-run` retires only when zcode and crush
    have working custom Paseo providers, or djbclark rules to drop them. **Gate:** one `/bigteam` wave of three
    slices with deadline, report file and one forced quota stop; a successor survives its parent's archive with
    the chain pointer intact.
-6. **Watchers and notifiers.** `fleet-watch`, `load-watch` delivery, quota-guard steers and the watch roles
+6. **Watchers and notifiers.** *[D6: see the slim-down status table at the top, 2026-11-07.]*  `fleet-watch`, `load-watch` delivery, quota-guard steers and the watch roles
    on `paseo send`; Paseo schedules for judgment jobs only (F2). Then, after the drain gate and a search for
    callers of `relay.py` or `fleet.py` (the watchers above, `fleet-watch upstream --relay-to`, `paseowatch`,
    `cfenginewatch`, `tell-chief-of-staff`, the quota guard), `session-finder` is disabled. The search covers
@@ -399,7 +419,7 @@ ops-promotion pilot passes.
    gate. A hit in a live instruction file (AGENTS.md, `home-agents.mdc`, memory notes, other skills, docs)
    goes onto a triage list that D7's rewrite must empty. **Gate:** a load incident reaches its watcher as a
    Paseo prompt; no blocking hit remains; the triage list is committed.
-7. **Deletion and docs.** Delete what earlier phases disabled; README, both AGENTS.md, ops AGENTS.md, memory
+7. **Deletion and docs.** *[D7: see the slim-down status table at the top, 2026-11-07.]*  Delete what earlier phases disabled; README, both AGENTS.md, ops AGENTS.md, memory
    pointers, skills index, `apply-toolchain-prompt.md`, `mcp-servers.md`; write `docs/history/`. The
    end-state check is a **new** CI step in djbclark-ade (the `context-policy` job runs only pytest today)
    plus a local script over `~/AGENTS.md`, `home-agents.mdc`, the ops `AGENTS.md` files and

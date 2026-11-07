@@ -143,13 +143,13 @@ treat every owner as possibly live (step 4).
 
 1. **Read** the canonical log's frontmatter `session_id` (S) and `writer`. `session_id` is not uniform
    (checked 2026-11-01 over 146 real logs under `~/.local/state/handoffs/chains/*/SESSION_LOG.md`): a
-   claude transcript UUID, a Paseo agent UUID (any TUI: omp, codex, claude), a herdr pane id such as
-   `w36:p3`, or free text (`solo`, `omp-...-stage-d`). `writer` is a TUI name, never an id, and can name
+   claude transcript UUID, a Paseo agent UUID (any TUI: omp, codex, claude), an old herdr pane id such as
+   `w36:p3` (herdr was retired 2026-10-31), or free text (`solo`, `omp-...-stage-d`). `writer` is a TUI name, never an id, and can name
    the PREVIOUS provider after a cross-provider handoff: it matches nobody and excludes nobody.
 2. **Match S to a row of `paseo ls -a -g --json`** (trusted tools, see above). The row is the owner if S
    equals the row's `id` or `shortId`, or S (8+ chars) is a prefix of the row's `id`. A herdr pane id, a
    claude transcript UUID or free text matches no Paseo row (herdr panes were retired 2026-10-31): that is
-   step 4's no-match, never a match. Only a full-id match or your own `then: /baton` line (C1) makes the chain yours. It also needs the row's `provider` (`claude/<model>`, `codex/...`, `omp/...`)
+   step 4's no-match, never a match. Only a full-id match (A) or exemption B makes the chain yours. It also needs the row's `provider` (`claude/<model>`, `codex/...`, `omp/...`)
    to fit `writer` (`claude*` to claude, `omp*` to omp, `codex` to codex, otherwise any); a row of
    another agent is not the owner and is read as no match.
 3. **Live** means the row's `status` is not `closed` and `paseo agent inspect ID --json` does not read
@@ -167,7 +167,7 @@ treat every owner as possibly live (step 4).
    To make that question concrete, list live rows other than you whose `cwd` (compare by `realpath`: a
    symlinked cwd such as `~/s/...` names the same directory) equals, is under or contains a
    `workspaces[].dir` of the log, of ANY agent kind. Do not filter by `writer`: after a cross-provider
-   `--finish --successor` (claude to omp, real in `standalone-03ad`, `net-watch-ops`, `go-followups-20261025`)
+   successor (claude to omp, real in `standalone-03ad`, `net-watch-ops`, `go-followups-20261025`)
    the log still names the archived predecessor's provider until the successor's next checkpoint, so the
    live successor would be excluded. `writer` only orders the list (same provider first). Name them in the
    question. Never proceed on a silent "no owner found".
@@ -179,60 +179,34 @@ treat every owner as possibly live (step 4).
 **Exemptions (resume without asking; state which one in the resume plan):**
 
 - **A. S identifies you** (step 3: S matches YOUR caller row, resolved as step 3 says, or equals your own, non-inherited `$PASEO_AGENT_ID`): the chain is yours.
-- **B. You are the named successor**, even while the owner still reads live. Evidence, all read from
-  `~/.local/state/self-slash.log`, whose `successor: starting` line is written before the successor's
-  first prompt runs. B holds only when ALL of these are true:
-  1. **A `starting` line names you, and the owner's terminal line is in.** A line `<host> <owner id>:
-     successor: starting ...` newer than the log's `updated_at` (compare both in local time: the log's
-     stamps are naive local time, `updated_at` carries an offset). On herdr its `pane <pane>` is your own
-     pane (a unique token). On Paseo the line alone does NOT name you (its `cwd` is shared by every
-     session in that directory): you need a later line of that owner naming `<your id>` = your caller
-     row's Paseo id (step 3). The `is top-level` line is not enough, because the owner can still fail after
-     it (`agent open` failed, no Desktop process) and keep writing: wait for the owner's TERMINAL line,
-     Paseo `finish: archived <owner id> (successor <your id>)` (a `finish: archive refused` line is NOT a
-     terminal line: the owner was busy again and may be mid-turn, so it goes through the ask), herdr `successor: claude is up in <your pane>`. Real terminal lines
-     arrive 2-4 s after `is top-level` (about 25-30 s after `starting`); if it is absent, re-read for up
-     to 60 s from `starting`, then ask. Never admit on cwd alone.
-  2. **No failure line voids it.** Any later line of that owner containing `NOT archived` (every Paseo
-     `successor_fail` line ends with it, including `successor path aborted; NOT archived`) or `stays
-     usable` (every herdr `launch.py` failure line ends `the old pane is untouched and stays usable`), or any
-     `finish: archive refused` line of that owner, voids the `starting` line before it,
-     because the owner then believes the handover failed or is still working, and keeps writing.
-  3. **No third party.** The line must be tied to THIS chain. Either the line's owner id is S or the
-     `id` or `shortId` of the step 2 row (an older herdr line logs a pane id `wN:pM`, which no Paseo row carries); or step 2
-     found no row at all for S and step 4's candidate list
-     (live rows other than you and the line's owner, by realpath `cwd` within a `workspaces[].dir`,
-     of any agent kind) is empty. S is not required to equal the owner: it is often free text or
-     stale (`omp-2026-10-31-tendcf-stage-d`; a log still naming an archived `6225c4a1`), but a bare
-     `/baton` resolves its chain from the directory, so an unrelated live session's chain must never
-     ride in on another owner's handover. A live step 2 row, or a candidate, that is neither you nor the
-     line's owner still goes through the ask.
-  4. **The handoff exists.** The log's `latest_handoff` is not `none` and names an existing file under
-     any `workspaces[].dir` of the log (real handoffs are written to the workspace repo's
-     `docs/handoffs/`) or under `~/ops/site-private-djbclark/`. Compare directories by `realpath`.
+- **B. You are the named successor** (re-based 2026-11-07: the `self-slash` log that recorded each handover was
+  removed with `self-slash` on 2026-11-06, so nothing machine-written names a successor any more). B holds only when ALL
+  of these are true:
+  1. **The handoff names the handover.** The log's `latest_handoff` is not `none`, names an existing file under any
+     `workspaces[].dir` of the log (real handoffs go to the workspace repo's `docs/handoffs/`) or under
+     `~/ops/site-private-djbclark/` (compare directories by `realpath`), and that document says its Step 9 started a
+     successor and names the predecessor's id, which is S (or the `id`/`shortId` of the step 2 row).
+  2. **You were started for it.** Your agent is top-level (`paseo agent inspect "$PASEO_AGENT_ID" --json` reads
+     `ParentAgentId` null), was created after the handoff file was written, and your own first prompt (`paseo logs
+     "$PASEO_AGENT_ID"`) is `/baton` naming THIS chain's `SESSION_LOG.md`.
+  3. **The owner has stopped.** The owner's row reads `idle` (it ended its turn after starting you) or archived; a
+     `running` owner may still be writing and goes through the ask.
+  4. **No third party.** Step 4's candidate list (live rows other than you and the owner, by realpath `cwd` within a
+     `workspaces[].dir`, of any agent kind) is empty; a live candidate still goes through the ask.
 
-  The title is NOT evidence (`self-slash` truncates the default `<owner's name> → <model>` and `--title`
-  replaces it), and neither is the first prompt: an operator-typed or relayed `/baton PATH` naming the
-  chain proves only that the operator named it, and goes through the ask. `self-slash` starts and
-  verifies the successor first and archives the owner only afterwards (it first waits up to 900 s for
-  the owner to be idle, before `starting`; the archive itself is refused, exit 8, if the owner is busy
-  again), so the owner normally still reads live while its successor reads the chain: that is the
-  handover. A predecessor that ran `--finish --successor` stops writing once its successor is verified
-  and it is archived (or, on herdr, `is up`); when the archive is refused it may be mid-turn and is still
-  a writer, and on a failure line (`NOT archived`, "this session stays usable") it is still the writer.
-  A `launch.py start --baton`
-  start writes no such line, so it goes through the ask.
-- **C. Your own chain after `/clear` or `/new`, no live other owner:** one of: (1) the newest `then:
-  /baton` line for your id in `~/.local/state/self-slash.log` follows a handoff of this chain, which is affirmative evidence that the
-  chain is yours; or (2) the operator named the chain (`/baton PATH`, `--dir .../chains/<key>`) and its
-  `workspaces[].dir` includes your cwd, which is only naming. C waives the no-match question of step 4
-  (a claude's old transcript sid matches no row after `/clear`); it never overrides a step 2 match to a
-  live row that is not you, and (2) never applies while step 4 lists a live candidate other than you
-  (a stale or free-text S can hide a live owner working in the same workspace): that case asks.
+  The title is NOT evidence, and a first prompt alone is not either: an operator-typed or relayed `/baton PATH` naming
+  the chain proves only that the operator named it (exemption C). Once you have answered, archive the predecessor
+  (`paseo agent archive <S>`, never `--force`) and tell its siblings your id (`handoff` Step 9).
+- **C. Your own chain after `/clear`, no live other owner:** the operator named the chain (`/baton PATH`, `--dir
+  .../chains/<key>`) and its `workspaces[].dir` includes your cwd, which is only naming; or the same agent cleared its
+  own context (`/clear` keeps the Paseo id, so S matches your caller row and A applies). C waives the no-match question
+  of step 4 (a claude's old transcript sid matches no row after `/clear`); it never overrides a step 2 match to a live
+  row that is not you, and never applies while step 4 lists a live candidate other than you (a stale or free-text S can
+  hide a live owner working in the same workspace): that case asks.
 
 **Reconciling with `baton`'s "Which chain".** A pointer resolved only by directory whose owner is another
-live session is not yours: say so and look further, no question. A chain that is otherwise yours (queued by
-your `/new`, operator-named) but whose log a live other session also owns is asked about, per
+live session is not yours: say so and look further, no question. A chain that is otherwise yours (your own after
+`/clear`, operator-named) but whose log a live other session also owns is asked about, per
 steps 4 and 5 above, before the first write or resume.
 
 ### Chain discovery fallback (cwd doesn't resolve to a workspace)
@@ -303,7 +277,7 @@ Canonical log (`chains/<chain-key>/SESSION_LOG.md`):
     ---
     schema_version: 2
     updated_at: 2026-08-04T14:22:17-0400
-    session_id: <herdr pane id, or session uuid, or "solo">
+    session_id: <Paseo agent id, or session uuid, or "solo">
     writer: claude-code
     chain: [<bead/epic ids or standalone-hex>]
     latest_handoff: <site-private-relative path, or "none">

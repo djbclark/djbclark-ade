@@ -1,3 +1,4 @@
+<!-- moved from docs/ on 2026-11-07 by the slim-down (E11) -->
 # Raw response: acp-run claude --set model=opus --set effort=high (2026-10-19 15:00 EDT)
 
 Verified model (usage_update _meta): claude-opus-5-5; cost reported $0.1947342

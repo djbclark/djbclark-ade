@@ -1,3 +1,4 @@
+<!-- moved from docs/ on 2026-11-07 by the slim-down (E11) -->
 # Raw response: acp-run agy (default model) on full draft incl. section 9 worktrees (2026-10-19 ~15:03 EDT)
 
 Model applied per acp-run: gemini-3.8-flash (the agent self-reported a different model in its first line; acp-run applied value is authoritative). No cost/quota reported.

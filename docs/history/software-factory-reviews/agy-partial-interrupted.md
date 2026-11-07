@@ -1,3 +1,4 @@
+<!-- moved from docs/ on 2026-11-07 by the slim-down (E11) -->
 # Raw PARTIAL response: acp-run agy (interrupted by SIGTERM at 100 s when the run was stopped for a scope change; model gemini-3.8-flash)
 
 ---

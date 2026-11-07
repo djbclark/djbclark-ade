@@ -1,3 +1,4 @@
+<!-- moved from docs/ on 2026-11-07 by the slim-down (E11) -->
 # Moved: Firecrawl, commercial API vs self-hosted on SIPB Hyades (2026-10-14)
 
 This report moved on 2026-10-16, with its history, to the public repository that runs the

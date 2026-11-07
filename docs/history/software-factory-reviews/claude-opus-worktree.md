@@ -1,3 +1,4 @@
+<!-- moved from docs/ on 2026-11-07 by the slim-down (E11) -->
 # Raw response: acp-run claude opus/high, resumed session, section 9 worktrees (2026-10-19 ~15:03 EDT)
 
 Verified model: claude-opus-5-5; cost reported $0.29749760000000003

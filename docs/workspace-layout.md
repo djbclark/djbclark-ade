@@ -12,7 +12,7 @@ has it. Paseo is the only harness.
 4. **At most 5 tabs in a workspace** (operator, 2026-10-29); the next tab of that kind goes to `<name>-2`, then `<name>-3`.
 5. **Closing a top-level agent's tab archives the agent.** To end one on purpose, archive it (`paseo agent archive ID`).
 
-The name shortener (`bin/seat-name`) is deleted by E2; the 17-character limit stays a manual rule.
+The name shortener (`bin/seat-name`) was deleted 2026-11-06 (slim-down E2); the 17-character limit is a manual rule.
 
 ## Renaming
 

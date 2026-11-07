@@ -1,3 +1,4 @@
+<!-- moved from docs/ on 2026-11-07 by the slim-down (E11) -->
 
 # Software factory within ADE everywhere — independent Codex research
 

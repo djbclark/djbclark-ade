@@ -6,8 +6,28 @@ ADE-everywhere plan ([ade-everywhere-proposal.md](history/ade-everywhere-proposa
 Every claim names the file that shows it; a claim without a file is the operator's statement and is marked
 "operator". Re-read the code before relying on a line here: facts rot.
 
-**Update 2026-11-06 (slim-down E9):** `bin/zcode-key-auth` (and its launchd job and `~/.zcode` credential-store write) was removed with the zcode TUI; the lines below that name it are the 2026-10-20 snapshot.
-**Update 2026-11-06 (slim-down E10):** `bin/skillopt-night`, `bin/skillopt_sources.py`, `bin/failover.py`, `bin/skill-get` and `claude/hooks/prior_art_nudge.py` were deleted; entries below that name them (the skillopt-night threat, its install and update paths, failover's `secret_value`, the tripwire kinds) are the 2026-10-20 snapshot and no longer apply.
+**Re-based 2026-11-07 (slim-down E11; `slim/log.md` has every deletion).** Read this block first; the body below is
+the 2026-10-20 snapshot with dated notes, and a line that names a deleted tool describes the surface as it was.
+
+* **Deleted surfaces** (2026-11-06/07): `bin/firecrawl-router` (the only HTTP listener), `bin/zcode-key-auth`,
+  `bin/skillopt-night`, `bin/skillopt_sources.py`, `bin/failover.py`, `bin/skill-get`, `claude/hooks/prior_art_nudge.py`,
+  `bin/web-get`, `bin/ade-scan-state`, `bin/pr-wait`, `bin/local-review`, the quota guard and fleet governor, the
+  watch family, session-finder's launcher and fleet, the pi subagent extension, and every retired TUI's adapter.
+* **Entry points today**: (a) `bin/acp-dispatch`, a one-cycle shim that turns a brief into `paseo run` (or, for a
+  restricted Claude run, `bin/review-launch`), behind the load gate and the frontier allowance; `tools/acp-run` stays
+  beside it until Wave 6's follow-up PR; (b) `skills/session-finder/relay.py`, a one-cycle shim over `paseo send --json`
+  (Paseo agents only, no anonymous send, fails closed on `paseo agent inspect`); (c) `bin/review-launch` and
+  `bin/review-pr`, the only way a review model is launched: read-only tools confined to a clean worktree at the exact
+  head, no MCP, no hooks, secret paths denied, a tripwire (exit 77) on the first step outside
+  (`review-boundary.md`); (d) the `adversary-marker` Action (`.github/workflows/adversary-marker.yml`), which runs from
+  master on `workflow_run` and `workflow_dispatch`, never checks out or runs PR code, and posts the required status with
+  the `ade-merge-gate` App's token (4.3); (e) `bin/load-watch`, `bin/deadline` and `bin/pr-policy`, the remaining
+  launchd jobs (`launchd/com.djbclark.load-watch.plist`, `config/launchd/com.djbclark.deadline-sweep.plist`,
+  `config/launchd/com.djbclark.pr-policy.plist`, plus the herdr server's plist for the installed bridges).
+* **Trust (operator, 2026-11-07)**: our own agents on this machine trust each other (no sandbox between them is
+  demanded); **every GitHub artifact not authored by the owner is untrusted input** (diff, body, title, commits,
+  branch name, comments, bot and App comments, check output, CI logs); GitHub's own attribution is trusted
+  (AGENTS.md, Trust). The review boundary and the merge gate exist for that external case and stay strict.
 
 This repo is **personal tooling for one operator's machine, published as a public GitHub repo by choice**
 (`djbclark/djbclark-ade`). It runs no internet-facing service. `bin/firecrawl-router` was an HTTP listener (deleted 2026-11-06, slim-down R2-15; the paragraph describes the state before), on
@@ -30,7 +50,8 @@ What an attacker would want, in order of damage:
    operator that passes it can read every declared secret; client-family labels are correlation metadata,
    not principals (proposal 4.5 item 1). `get` and `export` print values to stdout
    (`~/src/sudo-secretspec/skills/sudo-secretspec/SKILL.md`, Pitfalls; the skill lives in the sudo-secretspec repo, unlinked from this one 2026-11-06); `run` injects them into a child.
-2. **Code execution as the operator.** acp-run runs every agent yolo by default (all tool calls
+2. **Code execution as the operator.** (2026-10-20 snapshot; since 2026-11-06 agents run as Paseo agents in their
+   provider's mode, `--perm` best effort outside `bin/review-launch`.) acp-run ran every agent yolo by default (all tool calls
    auto-approved, operator 2026-10-14); `--perm read-only` restricts an agent to non-mutating tools, or refuses
    an agent without a verified equivalent, and `--perm deny` gates every call except, for agy, the read-only
    `read` and `search` kinds that `bin/failover.py` passes as `--tripwire-exempt-kinds` (so an agy deny run
@@ -44,12 +65,13 @@ What an attacker would want, in order of damage:
    GitHub apps' access to this repo (`docs/queue.md`, "Cloud-agent readiness" section).
 5. **Agent state under `~/.local/state`**: dispatch records and reports (`~/.local/state/bigteam/<task>/`,
    `bin/acp-dispatch`), `~/.local/state/acp-dispatch/`, `~/.local/state/load-watch/`,
-   `~/.local/state/zcode-key-auth/`. Records name the commands launchd will run.
+   `~/.local/state/review-launch/` (review results and the self-check cache).
 6. **Transcripts**, which hold whatever agents printed, occasionally a secret (proposal 4.5 item 5).
 7. **The Hermes/Telegram channel**: a message path to the operator's phone, and two-way tools
    (`mcp__hermes__*`, `docs/mcp-servers.md`).
-8. **launchd jobs** that persist across logins: `launchd/*.plist` (load-watch, skillopt-sleep; acp-dispatch's reap sweep,
-   context-budget, the monthly routing re-rank job and zcode-key-auth were deleted 2026-11-06 by the slim-down). `bin/acp-dispatch` submits
+8. **launchd jobs** that persist across logins: `launchd/com.djbclark.load-watch.plist` and `config/launchd/*.plist`
+   (deadline-sweep, pr-policy, the herdr server); skillopt-sleep, acp-dispatch's reap sweep, context-budget, the
+   monthly routing re-rank job and zcode-key-auth were deleted 2026-11-06 by the slim-down. `bin/acp-dispatch` submits
    no launchd jobs since 2026-11-06 (a `paseo run` shim: the agent is a Paseo daemon child).
 9. **The operator's machine itself** (a 16 GB Mac): availability under agent fan-out
    (`bin/acp-dispatch` `machine_overloaded`, load reached 230 on 2026-10-12).
@@ -259,23 +281,22 @@ others, and the merge path is unenforced. "Control" is what exists; "Gap" is wha
 
 ### 4.6 launchd persistence
 
-* **Control.** Plists are installed by tools' own subcommands (`load-watch install` and `skillopt-night install`;
-  acp-dispatch's reap sweep installer was removed 2026-11-06, the shim submits no jobs; `zcode-key-auth install` and `context-budget-check install` were removed 2026-11-06),
+* **Control.** Plists are installed by tools' own subcommands (`load-watch install`, `deadline install`,
+  `pr-policy install`, or `bin/ade-sched`; `skillopt-night install`, acp-dispatch's reap sweep installer,
+  `zcode-key-auth install` and `context-budget-check install` were removed 2026-11-06),
   copied from `launchd/` to `~/Library/LaunchAgents`. No installer was found (2026-10-20) for
   the monthly routing re-rank plist (deleted 2026-11-06; a Paseo schedule replaces it if wanted). No per-slice jobs remain.
 * **Gap.** A plist in a PR is code that runs as the operator at every login: review label,
   `ProgramArguments`, `WorkingDirectory`, `PATH` (fixed paths under `/Users/djbclark/...`). Every shipped
   plist runs its script from the live checkout, so a change to `bin/load-watch` (every 20 s),
-  `bin/acp-dispatch`, `bin/context-budget-check` (`zcode-key-auth` and the routing re-rank job were removed 2026-11-06) or
-  `bin/skillopt-night` runs within one schedule tick of being pulled or checked out there, without
+  `bin/deadline` or `bin/pr-policy` runs within one schedule tick of being pulled or checked out there, without
   reinstalling anything. Review those scripts as you would a plist. Merging is deployment.
 
 ### 4.7 Supply chain
 
 * **Control.** CI installs with `uv run --with pytest --with 'agent-client-protocol>=0.9,<1.0'`
-  (`.github/workflows/test.yml`); `bin/web-get` pinned `pypdf==6.19.0` (deleted 2026-11-06). Actions are referenced by major tag.
-  skillopt is installed by `uv tool install` from upstream main and gated by a reviewed-commit receipt
-  check (`bin/skillopt-night`).
+  (`.github/workflows/test.yml`). Actions are referenced by major tag. (`bin/web-get`'s `pypdf` pin and the skillopt
+  receipt check went with those tools, 2026-11-06.)
   (Until 2026-11-06 the Linux job also ran `npm ci --ignore-scripts` in `pi/extensions/subagent` (devDependencies for the
   extension's offline tests): the committed `package-lock.json` pins every package to a registry.npmjs.org
   URL with an integrity hash (checked 2026-11-03: all 123 entries), and lifecycle scripts never ran; the step and the extension are deleted.)

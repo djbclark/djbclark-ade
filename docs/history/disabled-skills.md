@@ -1,3 +1,4 @@
+<!-- moved from docs/ on 2026-11-07 by the slim-down (E11) -->
 # Disabled skills, plugins and MCP servers
 
 What was switched off in Claude Code on 2026-10-10 to shrink the context every
