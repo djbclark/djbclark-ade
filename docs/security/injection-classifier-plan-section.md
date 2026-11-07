@@ -49,8 +49,8 @@ not been measured on our own traffic is a false sense of security, not a gate.
      on. On the one surface whose whole point is the hold — the fleet-watch
      upstream `--perm all` dispatch (F-CRIT-1) — **no verdict means no
      dispatch**: the notice is queued for the operator instead. The S6 drift
-     job alerts when the gate has been unavailable for more than 1 hour of
-     calls.
+     job alerts when gate unavailability has lasted more than 1 hour of wall
+     clock time.
    - Any error, timeout or malformed answer is the same as `escalate`, never
      `benign`.
    - The gate runs **before** the text enters an agent context, not inside it:

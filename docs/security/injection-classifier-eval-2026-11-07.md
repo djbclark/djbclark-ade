@@ -172,7 +172,7 @@ fail-closed signal on top**, never an approval. Verdict per surface:
 |---|---|---|
 | PR/issue bodies, titles, comments, bot comments (S1.1-S1.3) | **Tag, shadow-log; never block** | Best model (Jev) misses 2/3 of injections at the act bar; a block would be theater. A p >= 0.9 tag reorders review and marks the span untrusted-envelope eligible. |
 | Dependabot PR bodies (S1.5) | **Tag + operator ping at p >= 0.9** | Upstream release notes are the exact hidden-comment vector; Jev FP 1.3% makes the ping cheap. |
-| CI logs / check-run output (S1.4) | **Tag only** | No CI benign sample exceeded 0.5; logs also carry test strings that discuss injection (FP zone), and latency (Kev 4s) rules out inline use. |
+| CI logs / check-run output (S1.4) | **Tag only** | No CI benign sample exceeded 0.5, but logs routinely carry test strings that discuss injection (FP zone) — tagging the span is the useful action, blocking never. |
 | firecrawl / web-search results (S4.1) | **Tag only** | 1.3% FP on ordinary technical text is too high to block; spotlighting + untrusted-envelope stay the control. |
 | CFEngine Jira text (S3.1) | **Tag + escalate at p >= 0.9** | Outside-community authors; Jev at 0.9 catches 0.32 overall (0.60 on instruction-shaped strings, 0.17 on blended BIPIA text) at ~1% FP — worth an operator look, not a block. |
 | fleet-watch upstream notices (S1.7, F-CRIT-1) | **Escalate: hold the `--perm all` dispatch at p >= 0.9 or whenever the gate is down, tag otherwise** | This is the zero-click path; a confident verdict or an unavailable gate must cost a human glance — an outage here means no dispatch, not business as usual (fail-closed on this surface). |
