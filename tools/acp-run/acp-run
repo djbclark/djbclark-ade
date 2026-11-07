@@ -52,7 +52,7 @@ the user's plugins, MCP servers and hooks, as claude does: a per-run temp
 config (OPENCODE_CONFIG_DIR holding only provider/model keys, project
 config off), removed afterwards and logged as a "user_config" record. --keep-user-config
 (env ACP_RUN_KEEP_USER_CONFIG=1) keeps them. (agy, crush and zcode had the same strip until
-they retired, 2026-11-06; the grok adapter went with the grok CLI, 2026-11-07.)
+they retired, 2026-11-06; the xAI CLI adapter went 2026-11-07.)
 --strip-user-config (env ACP_RUN_STRIP_USER_CONFIG=1) applies the same strip of
 the user's plugins, MCP servers and hooks under ANY --perm (not --interactive),
 for opencode; it is a startup-reliability switch, not a
@@ -3476,7 +3476,7 @@ async def run(a, log, err, log_path):
                                   "data": stripped}) + "\n")
             log.flush()
             out["user_config"] = stripped["action"]
-        # Every run, not only --interactive (2026-10-15: a grok probe fired the user's
+        # Every run, not only --interactive (2026-10-15: an agent probe fired the user's
         # autorename hook, which renamed the CALLER's herdr tab through the inherited
         # HERDR_PANE_ID). Under --interactive acp-run also reports the pane to herdr
         # itself and the agent's own herdr hooks (Claude Code's report as herdr:claude)

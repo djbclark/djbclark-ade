@@ -4,7 +4,7 @@ Run one prompt through a coding agent over the
 [Agent Client Protocol](https://agentclientprotocol.com) (ACP), headless, and get
 the agent's final message on stdout. It is how one agent on this machine hands a
 self-contained task to another vendor's agent: Claude Code, Codex,
-opencode, Cursor, Hermes and OMP. (Grok, Copilot, Qwen Code, Devin, Cline,
+opencode, Cursor, Hermes and OMP. (the xAI CLI, Copilot, Qwen Code, Devin, Cline,
 Antigravity (`agy`), zcode, Pi, Crush, goose and kiro had adapters until the 2026-11-06/07 slim-down retired them; the
 lessons are in `docs/tui-lessons-learned.md`.) Vendor, model, effort and
 context for each agent are in the 2026-10-15 section below.
