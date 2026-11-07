@@ -1942,7 +1942,7 @@ async def apply_config(a, conn, sess, init, client, sets, applied):
     --context, to the new session; fill `applied` with what the agent reports back and raise
     ConfigError when it reports something else than was requested. Returns the final options.
     The agent's own response to each set carries the complete updated option list, which is
-    the read-back ."""
+    the read-back."""
     options = sess.config_options
     effort, ctx = getattr(a, "effort", None), getattr(a, "context", None)
     got = {}  # option id -> (value we set, True when the agent's response confirmed it)

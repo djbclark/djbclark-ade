@@ -461,7 +461,7 @@ env -u PASEO_AGENT_ID -u PASEO_AGENT_CWD paseo run --no-wait --title "<short tit
   "/baton ~/.local/state/handoffs/chains/<chain-key>/SESSION_LOG.md"
 ```
 
-The `wks_` id is `workspaceId` in `$PASEO_HOME/agents/*/<your agent id>.json` (`~/.paseo` when unset). Check the new agent's mode with `paseo agent inspect <new id> --json` (`paseo agent mode <new id> --list` shows the provider's modes) before calling it fine; omp, codex and grok use their own mode ids. Verify as above, and `paseo logs <new id>` shows the
+The `wks_` id is `workspaceId` in `$PASEO_HOME/agents/*/<your agent id>.json` (`~/.paseo` when unset). Check the new agent's mode with `paseo agent inspect <new id> --json` (`paseo agent mode <new id> --list` shows the provider's modes) before calling it fine; omp and codex use their own mode ids. Verify as above, and `paseo logs <new id>` shows the
 `/baton` was read. Skip Step 8's autorename for a partial handoff: it would rename the session the operator keeps using.
 
 **Document only:** skip this step when a skill that clears the session itself runs the handoff, when
