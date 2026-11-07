@@ -41,7 +41,7 @@ AGENT_GUARDS: dict[str, AgentGuard] = {
     "omp": AgentGuard(GUARDED, gates=("kind eligibility", "Claude API credits headroom"), pool="omp"),
     "codex": AgentGuard(GUARDED, gates=("frontier model", "plenty gate", "pool headroom"), pool="codex"),
     "claude": AgentGuard(GUARDED, gates=("frontier model", "fable-xhigh approval", "pool headroom"), pool="claude"),
-    **{name: _PENDING for name in ("opencode", "cursor", "hermes", "grok")},
+    **{name: _PENDING for name in ("opencode", "cursor", "hermes")},
 }
 
 

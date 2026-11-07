@@ -50,5 +50,5 @@ passed the substring test, a post-`acp` `--agent-arg=--model` swapped the model,
 | omp | guarded | `omp` pool; acp-run's own model guard too |
 | codex | guarded | frontier, plenty and pool gates judge `--model` |
 | claude | guarded | frontier and fable-xhigh gates judge `--model` |
-| opencode, cursor, hermes, grok | unreviewed | today's pass-through; flip when reviewed |
+| opencode, cursor, hermes | unreviewed | today's pass-through; flip when reviewed |
 | cursor-cloud | n/a | no acp-run |

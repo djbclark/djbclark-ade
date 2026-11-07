@@ -223,7 +223,7 @@ def test_a_running_agent_whose_provider_steers_gets_the_send(env: Env, provider:
     assert env.run(A1, "hello").returncode == 0 and env.sent()
 
 
-@pytest.mark.parametrize("provider", ["cline", "grok", "kiro", "copilot", ""])
+@pytest.mark.parametrize("provider", ["cline", "gemini", "kiro", "copilot", ""])
 def test_a_running_agent_that_cannot_steer_is_busy_not_sent(env: Env, provider: str) -> None:
     """agent-prompt.ts: a steer the provider cannot take replaces the running turn."""
     env.inspect(Status="running", Provider=provider)

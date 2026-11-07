@@ -62,7 +62,6 @@ codex|~/.agents/skills
 opencode|~/.config/opencode/skills
 hermes|~/.local/share/skill-everywhere/skills
 cursor-agent|via ~/.claude/skills
-grok|~/.grok/skills
 omp|~/.omp/agent/skills
 grokbot|copy ~/agent-data/workflows
 '
