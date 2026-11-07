@@ -1109,31 +1109,90 @@ def gql_doc(head: str = H1, body: str = "", state: str = "OPEN", author: str = "
     """The GraphQL second read (`_pr_state_trusted`): state, head, body, author, last editor, author association."""
     return {"json": {"repository": {"pullRequest": {
         "state": state, "headRefOid": head, "body": body, "authorAssociation": assoc, "author": {"login": author},
-        "lastEditedBy": {"login": editor} if editor else None}}}}
+        "editor": {"login": editor} if editor else None, "lastEditedAt": EDITED_AT if editor else None}}}}
 
 
-def comment(body: str, login: str = "djbclark", app: object = None, cid: int = 1) -> dict:
-    """One `GET issues/{n}/comments` entry, as the REST API returns it (`performed_via_github_app` is always present)."""
-    return {"id": cid, "user": {"login": login}, "performed_via_github_app": app, "body": body}
+EDITED_AT = "2026-11-07T12:00:00Z"
+
+
+def actor(login: str | None) -> dict | None:
+    """A GraphQL Actor: a `Bot` for an `[bot]` login, a `User` otherwise, None for a ghost."""
+    if not login:
+        return None
+    return {"__typename": "Bot" if login.endswith("[bot]") else "User", "login": login}
+
+
+def comment(body: str, login: str = "djbclark", app: object = None, cid: int = 1, editor: str | None = None,
+            edits: list | None = None, gql: dict | None = None) -> dict:
+    """One comment, as the REST API returns it (`performed_via_github_app` is always present), plus under `_gql` how
+    the GraphQL read sees it: never edited unless `editor` (the last editor) or `edits` (the `userContentEdits`
+    editors, the creation edit included; the last editor's edit is added when `edits` is not given); `gql` overrides
+    or, with a None value, removes node fields."""
+    node = {"fullDatabaseId": str(cid), "body": body, "author": actor(login), "editor": None, "lastEditedAt": None,
+            "includesCreatedEdit": False, "userContentEdits": {"totalCount": 0, "nodes": []}}
+    if editor or edits:
+        hist = edits if edits is not None else [login, editor]
+        node.update(editor=actor(editor), lastEditedAt=EDITED_AT, includesCreatedEdit=True,
+                    userContentEdits={"totalCount": len(hist), "nodes": [{"editor": actor(e)} for e in hist]})
+    for k, v in (gql or {}).items():
+        if v is None:
+            node.pop(k, None)
+        else:
+            node[k] = v
+    return {"id": cid, "user": {"login": login}, "performed_via_github_app": app, "body": body, "_gql": node}
+
+
+def rest(c: dict) -> dict:
+    return {k: v for k, v in c.items() if k != "_gql"}
 
 
 def comments_key(n: int, page: int = 1) -> str:
     return f"GET repos/{REPO_A}/issues/{n}/comments?per_page=100&page={page}"
 
 
+def gql_comments_key(n: int, page: int = 1) -> str:
+    return f"GRAPHQL {n} comments" + ("" if page == 1 else f" after c{page - 1}")
+
+
+def gql_comment_pages(n: int, comments: list, per_page: int = 100, total: int | None = None) -> dict:
+    """The GraphQL comments read of PR N in pages of PER_PAGE (cursor `c<page>`), from `comment()` entries."""
+    nodes = [c["_gql"] for c in comments]
+    chunks = [nodes[i:i + per_page] for i in range(0, len(nodes), per_page)] or [[]]
+    out = {}
+    for i, chunk in enumerate(chunks, 1):
+        more = i < len(chunks)
+        out[gql_comments_key(n, i)] = [{"json": {"repository": {"pullRequest": {"comments": {
+            "totalCount": len(nodes) if total is None else total, "nodes": chunk,
+            "pageInfo": {"hasNextPage": more, "endCursor": f"c{i}" if more else None}}}}}}]
+    return out
+
+
 def serve(n: int, body: str, head: str = H1, state: str = "open", second: dict | None = None,
           comments: list | None = None, **trust) -> dict:
     """Canned answers for PR N: the REST first read, the GraphQL second read (the same PR unless `second`) and its
-    issue comments (none unless `comments`)."""
+    issue comments (none unless `comments`), through GraphQL and REST alike."""
     return {f"GET repos/{REPO_A}/pulls/{n}": [pr_doc(head, body, state)],
             f"GRAPHQL {n}": [second or gql_doc(head, body, state.upper(), **trust)],
-            comments_key(n): [{"json": comments or []}]}
+            **rest_comment_pages(n, comments or []), **gql_comment_pages(n, comments or [])}
+
+
+def rest_comment_pages(n: int, comments: list) -> dict:
+    """The REST comments read of PR N in pages of 100 (a full last page is followed by an empty one)."""
+    entries = [rest(c) for c in comments]
+    return {comments_key(n, i // 100 + 1): [{"json": entries[i:i + 100]}] for i in range(0, len(entries) + 1, 100)}
+
+
+def commits_key(head: str, page: int = 1) -> str:
+    return f"GET repos/{REPO_A}/commits/{head}/pulls?per_page=100&page={page}"
+
+
+def pull_entry(n: int, head: str, state: str = "open", repo: str = REPO_A) -> dict:
+    return {"number": n, "state": state, "head": {"sha": head}, "base": {"repo": {"full_name": repo}}}
 
 
 def at_head(head: str, *nums: int) -> dict:
     """The `GET commits/{head}/pulls` answer listing open same-repo PRs NUMS at HEAD."""
-    return {f"GET repos/{REPO_A}/commits/{head}/pulls": [{"json": [
-        {"number": n, "state": "open", "head": {"sha": head}, "base": {"repo": {"full_name": REPO_A}}} for n in nums]}]}
+    return {commits_key(head): [{"json": [pull_entry(n, head) for n in nums]}]}
 
 
 def run_ev(event: dict, answers: dict, name: str = "workflow_run", **kw):
@@ -1183,14 +1242,14 @@ def test_the_pr_comes_from_the_event_when_it_names_one():
     rc, report, api = run_ev(wr_event(prs=(7,)), serve(7, marker("APPROVE", H1)))
     assert report["found_by"] == "workflow_run.pull_requests"
     # The commit lookup still runs once: other open PRs at this head share its status (2026-11-07).
-    assert api.calls[f"GET repos/{REPO_A}/commits/{H1}/pulls"] == 1
+    assert api.calls[commits_key(H1)] == 1
 
 
 def test_an_event_entry_for_another_repository_is_ignored_and_the_head_is_looked_up():
     ev = wr_event(prs=())
     ev["workflow_run"]["pull_requests"] = [{"number": 3, "head": {"sha": H1},
                                             "base": {"repo": {"url": "https://api.github.com/repos/someone/fork"}}}]
-    answers = {f"GET repos/{REPO_A}/commits/{H1}/pulls": [{"json": []}]}
+    answers = {commits_key(H1): [{"json": []}]}
     rc, report, api = run_ev(ev, answers)
     assert rc == 0 and report["prs"] == [] and api.posted == []
 
@@ -1200,7 +1259,7 @@ def test_with_no_pr_in_the_event_the_pr_is_found_by_head_sha():
              {"number": 8, "state": "closed", "head": {"sha": H1}, "base": {"repo": {"full_name": REPO_A}}},
              {"number": 6, "state": "open", "head": {"sha": H2}, "base": {"repo": {"full_name": REPO_A}}},
              {"number": 5, "state": "open", "head": {"sha": H1}, "base": {"repo": {"full_name": "other/repo"}}}]
-    answers = {f"GET repos/{REPO_A}/commits/{H1}/pulls": [{"json": pulls}],
+    answers = {commits_key(H1): [{"json": pulls}],
                **serve(9, marker("APPROVE", H1))}
     rc, report, api = run_ev(wr_event(prs=()), answers)
     assert rc == 0 and report["found_by"] == "commits/{sha}/pulls"
@@ -1209,15 +1268,15 @@ def test_with_no_pr_in_the_event_the_pr_is_found_by_head_sha():
 
 def test_a_fork_pr_is_found_by_its_head_branch_when_the_commit_lookup_is_empty():
     ev = wr_event(prs=(), head_branch="feature/x", head_repository={"owner": {"login": "contrib"}})
-    answers = {f"GET repos/{REPO_A}/commits/{H1}/pulls": [{"json": []}],
-               f"GET repos/{REPO_A}/pulls?state=open&head=contrib:feature/x": [{"json": [{"number": 11, "head": {"sha": H1}}]}],
+    answers = {commits_key(H1): [{"json": []}],
+               f"GET repos/{REPO_A}/pulls?state=open&head=contrib:feature/x&per_page=100&page=1": [{"json": [{"number": 11, "head": {"sha": H1}}]}],
                **serve(11, marker("BLOCK", H1))}
     rc, report, api = run_ev(ev, answers)
     assert rc == 0 and report["found_by"] == "pulls?head=" and api.posted[0]["state"] == "failure"
 
 
 def test_an_unknown_pr_posts_nothing_and_exits_0():
-    answers = {f"GET repos/{REPO_A}/commits/{H1}/pulls": [{"json": []}]}
+    answers = {commits_key(H1): [{"json": []}]}
     rc, report, api = run_ev(wr_event(prs=()), answers)
     assert rc == 0 and api.posted == [] and report["found_by"] == "no open PR has this head"
 
@@ -1255,7 +1314,7 @@ def test_an_api_failure_fails_the_job_and_posts_no_success(answers):
 
 
 def test_a_failed_commit_lookup_fails_the_job():
-    rc, report, api = run_ev(wr_event(prs=()), {f"GET repos/{REPO_A}/commits/{H1}/pulls": [{"error": "HTTP 500"}]})
+    rc, report, api = run_ev(wr_event(prs=()), {commits_key(H1): [{"error": "HTTP 500"}]})
     assert rc == 2 and api.posted == [] and "HTTP 500" in report["error"]
 
 
@@ -1519,26 +1578,41 @@ def test_an_owner_pr_body_still_approves_and_a_comment_cannot_stand_in_for_it():
 
 def test_comments_are_read_on_every_page():
     noise = [comment(f"thanks {i}", login="stranger", cid=i) for i in range(100)]
-    answers = {**serve(7, marker("APPROVE", H1)), comments_key(7, 1): [{"json": noise}],
-               comments_key(7, 2): [{"json": [comment(marker("BLOCK", H1), login="stranger", cid=101)]}]}
+    answers = serve(7, marker("APPROVE", H1), comments=[*noise, comment(marker("BLOCK", H1), login="stranger", cid=101)])
     rc, report, api = run_ev(wr_event(), answers)
     assert api.posted[0]["state"] == "failure" and report["prs"][0]["outcome"] == "block", report
     assert report["prs"][0]["comments"] == 101
+    assert api.calls[gql_comments_key(7, 2)] == 1 and api.calls[comments_key(7, 2)] == 1
 
 
-@pytest.mark.parametrize("page", [[{"error": "HTTP 502"}], [{"json": {"message": "nope"}}], [{"json": ["x"]}]],
-                         ids=["http-error", "not-a-list", "bad-entry"])
-def test_an_unreadable_comment_list_fails_closed_and_posts_nothing(page):
-    answers = {**serve(7, marker("APPROVE", H1)), comments_key(7): page}
+@pytest.mark.parametrize("key,page", [
+    ("rest", [{"error": "HTTP 502"}]), ("rest", [{"json": {"message": "nope"}}]), ("rest", [{"json": ["x"]}]),
+    ("gql", [{"error": "HTTP 502"}]),
+    ("gql", [{"json": {"repository": {"pullRequest": None}}}]),
+    ("gql", [{"json": {"repository": {"pullRequest": {"comments": {"totalCount": 0, "nodes": "x",
+                                                                   "pageInfo": {"hasNextPage": False}}}}}}]),
+    ("gql", [{"json": {"repository": {"pullRequest": {"comments": {"totalCount": 1, "nodes": ["x"],
+                                                                   "pageInfo": {"hasNextPage": False}}}}}}]),
+    ("gql", [{"json": {"repository": {"pullRequest": {"comments": {"totalCount": 0, "nodes": []}}}}}]),
+    ("gql", [{"json": {"repository": {"pullRequest": {"comments": {"totalCount": 2, "nodes": [],
+                                                                   "pageInfo": {"hasNextPage": False}}}}}}]),
+    ("gql", [{"json": {"repository": {"pullRequest": {"comments": {"totalCount": 2, "nodes": [],
+                                                                   "pageInfo": {"hasNextPage": True}}}}}}]),
+], ids=["rest-http-error", "rest-not-a-list", "rest-bad-entry", "gql-error", "gql-no-pr", "gql-nodes-not-a-list",
+        "gql-bad-entry", "gql-no-page-info", "gql-short-of-total", "gql-no-cursor"])
+def test_an_unreadable_comment_list_fails_closed_and_posts_nothing(key, page):
+    answers = {**serve(7, marker("APPROVE", H1)), (comments_key(7) if key == "rest" else gql_comments_key(7)): page}
     rc, report, api = run_ev(wr_event(), answers)
     assert rc == 2 and api.posted == [], report
     assert report["prs"][0]["result"] == "error" and "comments" in report["prs"][0]["detail"]
 
 
-def test_a_pr_with_more_comments_than_the_read_cap_fails_closed(monkeypatch):
+@pytest.mark.parametrize("count", [100, 101], ids=["rest-cap", "gql-cap"])
+def test_a_pr_with_more_comments_than_the_read_cap_fails_closed(monkeypatch, count):
+    # 100 comments fill one GraphQL page with no next page, but a full REST page asks for page 2; 101 need two of each.
     monkeypatch.setattr(adversary_marker, "COMMENT_PAGES_MAX", 1)
-    full = [comment("x", login="stranger", cid=i) for i in range(100)]
-    rc, report, api = run_ev(wr_event(), {**serve(7, marker("APPROVE", H1)), comments_key(7): [{"json": full}]})
+    full = [comment("x", login="stranger", cid=i) for i in range(count)]
+    rc, report, api = run_ev(wr_event(), serve(7, marker("APPROVE", H1), comments=full))
     assert rc == 2 and api.posted == [] and "not read in full" in report["prs"][0]["detail"]
 
 
@@ -1581,7 +1655,7 @@ def test_a_sibling_at_the_head_that_cannot_be_read_turns_the_shared_status_to_fa
 
 @pytest.mark.parametrize("answers", [
     {f"GET repos/{REPO_A}/pulls/10": [{"error": "HTTP 404"}]},
-    {**serve(10, marker("APPROVE", H1)), f"GET repos/{REPO_A}/commits/{H1}/pulls": [{"error": "HTTP 500"}]},
+    {**serve(10, marker("APPROVE", H1)), commits_key(H1): [{"error": "HTTP 500"}]},
 ], ids=["pr-read-fails", "head-lookup-fails"])
 def test_a_dispatch_whose_lookup_fails_posts_nothing(answers):
     rc, report, api = run_ev(dispatch(10), answers, name="workflow_dispatch")
@@ -1634,8 +1708,11 @@ def test_the_editor_and_the_body_come_from_the_same_read():
 
 def test_the_graphql_read_asks_for_the_trust_fields():
     q = adversary_marker.PR_QUERY
-    for field in ("headRefOid", "body", "authorAssociation", "author { login }", "lastEditedBy { login }", "state"):
+    for field in ("headRefOid", "body", "authorAssociation", "author { login }", "editor { login }", "lastEditedAt",
+                  "state"):
         assert field in q, field
+    # GitHub's schema has no `lastEditedBy` (2026-11-07): asking for it fails every read.
+    assert "lastEditedBy" not in q and "lastEditedBy" not in adversary_marker.COMMENTS_QUERY
 
 
 # ---- the resolve job and --prs ---------------------------------------------------------------------------
@@ -1645,7 +1722,7 @@ def test_resolve_gives_the_pr_numbers_and_the_concurrency_key():
     api = adversary_marker.CannedApi(at_head(H1, 11))
     assert adversary_marker.resolve("workflow_run", wr_event(prs=(9, 7)), REPO_A, api) == \
         (0, {"prs": "7,9,11", "key": H1, "found_by": "workflow_run.pull_requests"})
-    api = adversary_marker.CannedApi({f"GET repos/{REPO_A}/commits/{H1}/pulls": [{"json": []}]})
+    api = adversary_marker.CannedApi({commits_key(H1): [{"json": []}]})
     rc, out = adversary_marker.resolve("workflow_run", wr_event(prs=()), REPO_A, api)
     assert rc == 0 and out["key"] == "" and out["prs"] == ""
     assert adversary_marker.resolve("pull_request", wr_event(), REPO_A, api)[0] == 2
@@ -1683,3 +1760,160 @@ def test_the_marker_job_is_keyed_by_the_resolved_pr_and_requests_both_app_permis
     assert app["with"]["permission-statuses"] == "write" and app["with"]["permission-checks"] == "write"
     judge = jobs["marker"]["steps"][-1]
     assert '--prs "$PRS"' in judge["run"] and judge["env"]["PRS"] == "${{ needs.resolve.outputs.prs }}"
+
+
+# ---- B1 (Codex review, 2026-11-07): an owner comment approves only if nobody but the owner edited it ----------------
+# GitHub lets any repository writer edit someone else's comment while the author stays the owner, so the comments are
+# read through GraphQL (`editor`, `lastEditedAt`, `includesCreatedEdit`, `userContentEdits`; the schema has no
+# `lastEditedBy`). REST only supplies the App provenance and can only take trust away.
+
+EDITED = f"owner's APPROVE comment was edited by someone else at {H1[:12]}"
+EDIT_UNKNOWN = f"owner's APPROVE comment has an unknown edit history at {H1[:12]}"
+OWNER_COMMENT_OK = f"APPROVE in an owner comment at {H1[:12]}"
+
+
+@pytest.mark.parametrize("kw,word,desc", [
+    ({}, "approve", OWNER_COMMENT_OK),                                                   # never edited
+    ({"editor": "djbclark"}, "approve", OWNER_COMMENT_OK),                               # edited by the owner
+    ({"editor": "DJBClark"}, "approve", OWNER_COMMENT_OK),
+    ({"editor": "bob"}, "edited", EDITED),                                               # a collaborator's edit
+    ({"editor": "some-app[bot]"}, "edited", EDITED),                                     # an App's (bot's) edit
+    ({"editor": "djbclark", "edits": ["djbclark", "bob", "djbclark"]}, "edited", EDITED),  # owner ticked a box after bob
+    ({"edits": ["djbclark", None]}, "edit-unknown", EDIT_UNKNOWN),                       # edited by a deleted user
+    ({"gql": {"editor": None}}, "edit-unknown", EDIT_UNKNOWN),                           # attribution fields missing
+    ({"gql": {"lastEditedAt": None}}, "edit-unknown", EDIT_UNKNOWN),
+    ({"gql": {"userContentEdits": None}}, "edit-unknown", EDIT_UNKNOWN),
+    ({"gql": {"includesCreatedEdit": None}}, "edit-unknown", EDIT_UNKNOWN),
+    ({"gql": {"lastEditedAt": EDITED_AT}}, "edit-unknown", EDIT_UNKNOWN),               # edited, editor null
+    ({"editor": "djbclark", "gql": {"userContentEdits": {"totalCount": 150, "nodes": [{"editor": actor("djbclark")}]}}},
+     "edit-unknown", EDIT_UNKNOWN),                                                      # history not read in full
+    ({"editor": "djbclark", "gql": {"editor": {"login": "djbclark"}}}, "edit-unknown", EDIT_UNKNOWN),  # no __typename
+], ids=["never-edited", "owner-edit", "owner-edit-case", "collaborator-edit", "bot-edit", "collaborator-in-history",
+        "ghost-editor", "no-editor-field", "no-edited-at-field", "no-history-field", "no-created-edit-field",
+        "edited-without-editor", "history-truncated", "editor-without-type"])
+def test_b1_an_owner_comment_approves_only_when_nobody_else_edited_it(kw, word, desc):
+    c = comment(marker("APPROVE", H1), **kw)
+    rc, report, api = run_ev(wr_event(), serve(7, "", comments=[c], **OUTSIDE_PR))
+    assert rc == 0 and len(api.posted) == 1, report
+    assert report["prs"][0]["outcome"] == word
+    assert api.posted[0]["state"] == ("success" if word == "approve" else "failure")
+    assert api.posted[0]["description"] == desc
+
+
+def test_b1_a_collaborator_edit_cannot_be_laundered_by_a_second_trusted_comment_elsewhere():
+    # One trusted owner APPROVE is enough; a second, collaborator-edited one does not spoil it, and a collaborator's
+    # edit that ADDS a BLOCK to an owner comment still fails.
+    ok = comment(marker("APPROVE", H1), cid=1)
+    edited = comment(marker("APPROVE", H1), editor="bob", cid=2)
+    rc, report, api = run_ev(wr_event(), serve(7, "", comments=[edited, ok], **OUTSIDE_PR))
+    assert api.posted[0]["state"] == "success", report
+    blocked = comment(marker("BLOCK", H1), editor="bob", cid=3)
+    rc, report, api = run_ev(wr_event(), serve(7, "", comments=[ok, blocked], **OUTSIDE_PR))
+    assert api.posted[0]["state"] == "failure" and report["prs"][0]["outcome"] == "block"
+
+
+def test_b1_an_owner_comment_the_rest_read_does_not_confirm_is_not_trusted():
+    # Trust needs BOTH reads: GraphQL for the author and edits, REST for "no App". Missing from REST, or a REST body
+    # that differs (an edit between the reads), is not confirmed.
+    c = comment(marker("APPROVE", H1))
+    answers = {**serve(7, "", comments=[c], **OUTSIDE_PR), comments_key(7): [{"json": []}]}
+    rc, report, api = run_ev(wr_event(), answers)
+    assert api.posted[0]["state"] == "failure" and report["prs"][0]["outcome"] == "untrusted", report
+    answers = {**serve(7, "", comments=[c], **OUTSIDE_PR),
+               comments_key(7): [{"json": [{**rest(c), "body": marker("APPROVE", H1) + " "}]}]}
+    rc, report, api = run_ev(wr_event(), answers)
+    assert api.posted[0]["state"] == "failure" and report["prs"][0]["outcome"] == "untrusted", report
+
+
+def test_b1_a_block_only_the_rest_read_saw_still_fails():
+    c = comment(marker("APPROVE", H1))
+    answers = {**serve(7, "", comments=[c], **OUTSIDE_PR),
+               comments_key(7): [{"json": [rest(c), rest(comment(marker("BLOCK", H1), login="stranger", cid=9))]}]}
+    rc, report, api = run_ev(wr_event(), answers)
+    assert api.posted[0]["state"] == "failure" and report["prs"][0]["outcome"] == "block", report
+
+
+def test_b1_a_failing_graphql_comment_read_posts_nothing():
+    c = comment(marker("APPROVE", H1))
+    answers = {**serve(7, "", comments=[c], **OUTSIDE_PR), gql_comments_key(7): [{"error": "HTTP 502"}]}
+    rc, report, api = run_ev(wr_event(), answers)
+    assert rc == 2 and api.posted == [] and "comments" in report["prs"][0]["detail"], report
+
+
+def test_b1_the_comment_query_asks_for_the_attribution_fields():
+    q = adversary_marker.COMMENTS_QUERY
+    for field in ("fullDatabaseId", "body", "author { __typename login }", "editor { __typename login }",
+                  "lastEditedAt", "includesCreatedEdit", "userContentEdits(first: 100)", "totalCount",
+                  "pageInfo { hasNextPage endCursor }", "after: $cursor"):
+        assert field in q, field
+
+
+def test_b1_an_edited_pr_body_with_a_deleted_editor_is_not_the_owners():
+    second = {"json": {"repository": {"pullRequest": {
+        "state": "OPEN", "headRefOid": H1, "body": marker("APPROVE", H1), "authorAssociation": "OWNER",
+        "author": {"login": "djbclark"}, "editor": None, "lastEditedAt": EDITED_AT}}}}
+    rc, report, api = run_ev(wr_event(), serve(7, marker("APPROVE", H1), second=second))
+    assert api.posted[0]["state"] == "failure" and report["prs"][0]["outcome"] == "untrusted", report
+
+
+# ---- B2 (Codex review, 2026-11-07): both shared-head lookups read every page -----------------------------------------
+
+def _shared_head_answers(page2: list | dict | None, sibling: str = marker("BLOCK", H1)) -> dict:
+    """PR 1..30 open at H1 and approved, 70 merged/closed/other-repo/other-head noise filling page 1, and on page 2
+    PR 99 at H1 carrying SIBLING (absent when PAGE2 is given)."""
+    page1 = [pull_entry(n, H1) for n in range(1, 31)]
+    page1 += [pull_entry(100 + i, H1, state="closed") for i in range(60)]
+    page1 += [pull_entry(200 + i, H1, repo="someone/fork") for i in range(5)]
+    page1 += [pull_entry(300 + i, H2) for i in range(5)]
+    answers = {commits_key(H1, 1): [{"json": page1}],
+               commits_key(H1, 2): page2 if page2 is not None else [{"json": [pull_entry(99, H1),
+                                                                               pull_entry(98, H1, state="closed")]}]}
+    for n in [*range(1, 31), 99]:
+        answers.update(serve(n, marker("APPROVE", H1) if n != 99 else sibling))
+    return answers
+
+
+@pytest.mark.parametrize("name,event", [("workflow_dispatch", dispatch(1)), ("workflow_run", wr_event(prs=(1,)))])
+def test_b2_a_block_sibling_on_page_two_of_the_head_lookup_fails_the_status(name, event):
+    rc, report, api = run_ev(event, _shared_head_answers(None), name=name)
+    assert rc == 0, report
+    assert api.calls[commits_key(H1, 2)] == 1, "page 2 must be requested"
+    assert [r["pr"] for r in report["prs"]] == [*range(1, 31), 99], "noise is filtered, page 2's open PR is judged"
+    assert [p["state"] for p in api.posted] == ["failure"]
+    assert "not all approve" in api.posted[0]["description"]
+
+
+def test_b2_every_page_approved_posts_success():
+    rc, report, api = run_ev(dispatch(1), _shared_head_answers(None, marker("APPROVE", H1)), name="workflow_dispatch")
+    assert rc == 0 and [p["state"] for p in api.posted] == ["success"], report
+
+
+@pytest.mark.parametrize("page2", [[{"error": "HTTP 502"}], [{"json": {"message": "nope"}}], [{"json": ["x"]}],
+                                   [{"json": None}]], ids=["http-error", "not-a-list", "bad-entry", "null"])
+@pytest.mark.parametrize("name,event", [("workflow_dispatch", dispatch(1)), ("workflow_run", wr_event(prs=(1,)))])
+def test_b2_an_unreadable_page_of_the_head_lookup_fails_closed(page2, name, event):
+    rc, report, api = run_ev(event, _shared_head_answers(page2), name=name)
+    assert rc == 2 and api.posted == [], report
+    rc, out = adversary_marker.resolve(name, event, REPO_A, adversary_marker.CannedApi(_shared_head_answers(page2)))
+    assert rc == 2 and "error" in out
+
+
+def test_b2_the_head_lookup_page_cap_fails_closed(monkeypatch):
+    monkeypatch.setattr(adversary_marker, "PULL_PAGES_MAX", 1)
+    rc, report, api = run_ev(dispatch(1), _shared_head_answers(None), name="workflow_dispatch")
+    assert rc == 2 and api.posted == [] and "not read in full" in report["error"], report
+
+
+def test_b2_the_pulls_head_fallback_reads_every_page():
+    ev = wr_event(prs=(), head_branch="feature/x", head_repository={"owner": {"login": "contrib"}})
+    key = f"GET repos/{REPO_A}/pulls?state=open&head=contrib:feature/x&per_page=100&page="
+    answers = {commits_key(H1): [{"json": []}],
+               key + "1": [{"json": [{"number": 500 + i, "state": "open", "head": {"sha": H2}} for i in range(100)]}],
+               key + "2": [{"json": [{"number": 11, "state": "open", "head": {"sha": H1}}]}],
+               **serve(11, marker("BLOCK", H1))}
+    rc, report, api = run_ev(ev, answers)
+    assert rc == 0 and report["found_by"] == "pulls?head=" and api.calls[key + "2"] == 1, report
+    assert [r["pr"] for r in report["prs"]] == [11] and api.posted[0]["state"] == "failure"
+    answers[key + "2"] = [{"json": {"message": "nope"}}]
+    rc, report, api = run_ev(ev, answers)
+    assert rc == 2 and api.posted == [], report

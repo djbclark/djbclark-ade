@@ -12,7 +12,8 @@
       each PR's body and head through the API, decides, re-reads the head, body, author, last editor and the PR's
       issue comments, and posts ONE `adversary-marker` commit status per head: success only when every open PR at
       it is approved. An owner-authored PR is approved by a live APPROVE naming the head in its body, last edited by
-      the owner; any other PR only by such an APPROVE in an issue comment the owner posted (not via a GitHub App).
+      the owner; any other PR only by such an APPROVE in an issue comment the owner posted (not via a GitHub App)
+      and nobody but the owner ever edited (GraphQL `editor` and `userContentEdits`; unknown attribution fails).
       A BLOCK or malformed marker in the body or any comment fails it. MARKER_POST_AS=check-run posts a check run
       instead. `--api-answers` serves canned API answers from a JSON file and prints the status it would post
       instead of posting (the tests' entry)
@@ -39,7 +40,8 @@ Everything a PR carries is untrusted data (operator, 2026-11-07: "any GitHub art
 suspect"): its body, title, commits, branch name, comments and check output are read, never executed or
 interpolated. An APPROVE counts only (2026-11-07) in the body of a PR the repository owner wrote and edited last,
 or, for every other PR (MEMBER and COLLABORATOR authors included: the operator's agents act under the owner's
-login), in an issue comment by the owner that no GitHub App posted (`_pr_state_trusted`, `decide`). The owner's
+login), in an issue comment by the owner that no GitHub App posted and no one but the owner edited
+(`_pr_state_trusted`, `_pr_comments_trusted`, `decide`). The owner's
 edit of an outside body no longer makes it trusted: ticking a task-list box is an edit, and the author can hide an
 APPROVE in an HTML comment. A BLOCK naming the head counts in the body or any comment, whoever wrote it.
 
@@ -887,7 +889,7 @@ def gate(adversary: dict | None, adversary_required: bool = True) -> dict:
 
 # One word per outcome, and the exit code of `--body-file` mode. `approve` iff gate() passes it.
 EXIT_FOR = {"approve": 0, "block": 1, "other-head": 1, "missing": 1, "malformed": 2, "unreadable": 2, "untrusted": 1,
-            "outside": 1}
+            "outside": 1, "edited": 1, "edit-unknown": 1}
 
 
 def outcome(adversary: dict | None) -> str:
@@ -912,7 +914,9 @@ def describe(word: str, head: str, where: str = "") -> str:
     label = {"approve": "APPROVE", "block": "BLOCK", "other-head": "verdict names another head",
              "missing": "no adversary-verdict:v1 marker", "malformed": "malformed marker",
              "unreadable": "PR unreadable", "untrusted": "marker not written by a trusted user",
-             "outside": "outside PR: APPROVE only counts in an owner comment"}.get(word, word)
+             "outside": "outside PR: APPROVE only counts in an owner comment",
+             "edited": "owner's APPROVE comment was edited by someone else",
+             "edit-unknown": "owner's APPROVE comment has an unknown edit history"}.get(word, word)
     if where == "comment":
         label += " in a comment"
     elif where == "owner comment":
@@ -1008,8 +1012,12 @@ class CannedApi:
         return ans.get("json")
 
     def graphql(self, query: str, variables: dict):
-        """Served from "GRAPHQL <number>" like a GET: {"json": <the `data` object>} or {"error": ...}."""
+        """Served like a GET: {"json": <the `data` object>} or {"error": ...}, from "GRAPHQL <number>" for the PR read
+        and "GRAPHQL <number> comments" (the first page) or "GRAPHQL <number> comments after <cursor>" for the comments
+        read (`variables` carries `cursor`)."""
         key = f"GRAPHQL {variables.get('number')}"
+        if "cursor" in variables:
+            key += " comments" + (f" after {variables['cursor']}" if variables["cursor"] else "")
         seq = self.answers.get(key)
         if not seq:
             raise ApiError(f"graphql pr {variables.get('number')}: no canned answer")
@@ -1030,11 +1038,32 @@ def _same_repo(full_name: object, repo: str) -> bool:
     return isinstance(full_name, str) and full_name.lower() == repo.lower()
 
 
+PULLS_PER_PAGE = 100
+PULL_PAGES_MAX = 20        # 2,000 PRs at one head or branch; more is not read in full, which fails closed
+
+
+def _all_pages(api, path: str) -> list[dict]:
+    """Every entry of a paginated REST list (`path` already carries its query, or none): `per_page=100`, page 1, 2, ...
+    until a short or empty page. GitHub's default page is 30 and merged or closed PRs fill pages too, so one
+    unpaginated read could miss an open sibling (Codex review, 2026-11-07). Raises ApiError, or ValueError when a page
+    is not a list of objects or PULL_PAGES_MAX full pages were read: a PR that was not read could BLOCK this head."""
+    sep = "&" if "?" in path else "?"
+    out: list[dict] = []
+    for page in range(1, PULL_PAGES_MAX + 1):
+        doc = api.get(f"{path}{sep}per_page={PULLS_PER_PAGE}&page={page}")
+        if not isinstance(doc, list) or not all(isinstance(p, dict) for p in doc):
+            raise ValueError(f"{path} page {page}: not a list of objects")
+        out.extend(doc)
+        if len(doc) < PULLS_PER_PAGE:
+            return out
+    raise ValueError(f"{path}: more than {PULL_PAGES_MAX * PULLS_PER_PAGE} PRs, not read in full")
+
+
 def _open_prs_at(api, repo: str, head: str) -> list[int]:
-    """The open PRs of this repository whose head is `head` (`GET commits/{head}/pulls`). Raises ApiError."""
-    pulls = api.get(f"repos/{repo}/commits/{head}/pulls")
-    return [p["number"] for p in (pulls if isinstance(pulls, list) else [])
-            if isinstance(p, dict) and isinstance(p.get("number"), int) and p.get("state") == "open"
+    """The open PRs of this repository whose head is `head` (`GET commits/{head}/pulls`, every page). Raises ApiError,
+    or ValueError on a bad page or an incomplete read."""
+    return [p["number"] for p in _all_pages(api, f"repos/{repo}/commits/{head}/pulls")
+            if isinstance(p.get("number"), int) and p.get("state") == "open"
             and str(((p.get("head") or {}).get("sha")) or "").lower() == head
             and _same_repo(((p.get("base") or {}).get("repo") or {}).get("full_name"), repo)]
 
@@ -1081,9 +1110,8 @@ def find_prs(event_name: str, event: dict, repo: str, api) -> tuple[list[int], s
     owner = str(((wr.get("head_repository") or {}).get("owner") or {}).get("login") or "")
     branch = str(wr.get("head_branch") or "")
     if owner and branch and re.fullmatch(r"[A-Za-z0-9-]+", owner) and re.fullmatch(r"[\w./-]+", branch):
-        pulls = api.get(f"repos/{repo}/pulls?state=open&head={owner}:{branch}")
-        nums = [p["number"] for p in (pulls if isinstance(pulls, list) else [])
-                if isinstance(p, dict) and isinstance(p.get("number"), int)
+        nums = [p["number"] for p in _all_pages(api, f"repos/{repo}/pulls?state=open&head={owner}:{branch}")
+                if isinstance(p.get("number"), int) and p.get("state", "open") == "open"
                 and str(((p.get("head") or {}).get("sha")) or "").lower() == head_sha]
         if nums:
             return sorted(set(nums)), "pulls?head=", head_sha
@@ -1104,15 +1132,27 @@ def _pr_state(api, repo: str, n: int) -> tuple[str, str, str]:
 
 PR_QUERY = ("query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { "
             "pullRequest(number: $number) { state headRefOid body authorAssociation author { login } "
-            "lastEditedBy { login } } } }")
+            "editor { login } lastEditedAt } } }")
 COMMENTS_PER_PAGE = 100
 COMMENT_PAGES_MAX = 30     # 3,000 comments; a PR with more is not read in full, which fails closed
+EDITS_MAX = 100            # a comment's edit history read in full; a longer one is unknown attribution
+# GitHub's GraphQL schema has no `lastEditedBy` (checked against docs.github.com/public/fpt/schema.docs.graphql,
+# 2026-11-07): `IssueComment` and `PullRequest` carry `editor` ("the actor who edited"), `lastEditedAt` and
+# `includesCreatedEdit`, and `userContentEdits` lists every edit with its `editor`. The comments read takes all of them,
+# and the App provenance REST's `performed_via_github_app` gives (GraphQL has no field for it) comes from the REST read.
+COMMENTS_QUERY = (
+    "query($owner: String!, $name: String!, $number: Int!, $cursor: String) { repository(owner: $owner, name: $name) { "
+    f"pullRequest(number: $number) {{ comments(first: {COMMENTS_PER_PAGE}, after: $cursor) {{ totalCount "
+    "pageInfo { hasNextPage endCursor } nodes { fullDatabaseId body author { __typename login } "
+    "editor { __typename login } lastEditedAt includesCreatedEdit "
+    f"userContentEdits(first: {EDITS_MAX}) {{ totalCount nodes {{ editor {{ __typename login }} }} }} }} }} }} }} }}")
 
 
 def _pr_state_trusted(api, repo: str, n: int) -> dict:
     """{state, head, body, author, editor, association, owner_pr, body_trusted} of PR N from ONE GraphQL read, so the
-    body and the editor it is judged by belong together. The editor is `lastEditedBy`, or the author when the body
-    was never edited.
+    body and the editor it is judged by belong together. The editor is `editor` (GitHub's last editor), or the author
+    when the body was never edited (`lastEditedAt` null); an edit with no `editor` (a deleted user) is an unknown
+    editor, which no body trust survives.
 
     `owner_pr`: the author is the repository owner (logins compare case-insensitively). `body_trusted`: an owner PR
     whose body the owner edited last. Only such a body can approve (2026-11-07, the lead's ruling after a Gemini 4
@@ -1129,7 +1169,9 @@ def _pr_state_trusted(api, repo: str, n: int) -> dict:
     if not SHA40.match(head):
         raise ValueError(f"graphql pr {n}: head is not 40 hex: {head!r}")
     author = str(((pr.get("author") or {}).get("login")) or "")
-    editor = str(((pr.get("lastEditedBy") or {}).get("login")) or "") or author
+    editor = str(((pr.get("editor") or {}).get("login")) or "")
+    if not editor and "lastEditedAt" in pr and pr["lastEditedAt"] is None:
+        editor = author                       # never edited; a missing field is an unknown editor (fail closed)
     owner_pr = bool(author) and author.lower() == owner.lower()
     body = pr.get("body")
     return {"state": str(pr.get("state") or "").lower(), "head": head, "body": body if isinstance(body, str) else "",
@@ -1161,6 +1203,103 @@ def _pr_comments(api, repo: str, n: int) -> list[dict]:
                      "not read in full")
 
 
+def _actor(a: object, owner: str) -> tuple[str, str]:
+    """('owner' | 'other' | 'unknown', login) for a GraphQL Actor: the owner only as a `User` with the owner's login."""
+    if not isinstance(a, dict) or not isinstance(a.get("login"), str) or not a["login"]:
+        return "unknown", ""
+    login = a["login"]
+    if login.lower() != owner.lower():
+        return "other", login
+    if a.get("__typename") == "User":
+        return "owner", login
+    return ("unknown" if a.get("__typename") is None else "other"), login
+
+
+def _edit_attribution(node: dict, owner: str) -> tuple[str, str]:
+    """('never' | 'owner' | 'other' | 'unknown', a non-owner editor's login) for one GraphQL comment node.
+
+    GitHub lets any repository writer edit another user's comment while the author stays the same (Codex review,
+    2026-11-07), and an owner's later edit (a task-list tick) does not show what an earlier editor hid in it, so
+    `owner` means the last editor AND every edit in `userContentEdits` is the owner's. `never`: no `editor`, no
+    `lastEditedAt`, no created edit and an empty history. Anything else that names no non-owner (a missing field, a
+    deleted editor, a history longer than EDITS_MAX) is `unknown`, which no APPROVE survives."""
+    if not all(k in node for k in ("editor", "lastEditedAt", "includesCreatedEdit", "userContentEdits")):
+        return "unknown", ""
+    edits = node["userContentEdits"]
+    if (not isinstance(node["includesCreatedEdit"], bool) or not isinstance(edits, dict)
+            or not isinstance(edits.get("totalCount"), int) or not isinstance(edits.get("nodes"), list)):
+        return "unknown", ""
+    if (node["editor"] is None and node["lastEditedAt"] is None and not node["includesCreatedEdit"]
+            and edits["totalCount"] == 0 and not edits["nodes"]):
+        return "never", ""
+    actors = [node["editor"]] + [e.get("editor") if isinstance(e, dict) else None for e in edits["nodes"]]
+    kinds = [_actor(a, owner) for a in actors]
+    for kind, login in kinds:
+        if kind == "other":
+            return "other", login
+    if (any(kind != "owner" for kind, _l in kinds) or node["lastEditedAt"] is None
+            or edits["totalCount"] > len(edits["nodes"])):
+        return "unknown", ""
+    return "owner", ""
+
+
+def _pr_comments_trusted(api, repo: str, n: int) -> list[dict]:
+    """Every issue comment on PR N through GraphQL ({id, author, author_kind, body, edit, edited_by}), all pages, so
+    the body and the edit attribution it is judged by come from one answer (COMMENTS_QUERY).
+
+    Raises ApiError, or ValueError on a bad shape, more than COMMENT_PAGES_MAX pages, a cursor that does not advance
+    or a count that does not match `totalCount`: a comment that was not read could hold a BLOCK, so an incomplete
+    read fails closed like an unreadable body."""
+    owner, name = repo.split("/", 1)
+    out: list[dict] = []
+    cursor = None
+    for page in range(1, COMMENT_PAGES_MAX + 1):
+        data = api.graphql(COMMENTS_QUERY, {"owner": owner, "name": name, "number": n, "cursor": cursor})
+        pr = (((data or {}).get("repository") or {}).get("pullRequest")) if isinstance(data, dict) else None
+        conn = pr.get("comments") if isinstance(pr, dict) else None
+        info = conn.get("pageInfo") if isinstance(conn, dict) else None
+        if (not isinstance(conn, dict) or not isinstance(conn.get("nodes"), list)
+                or not isinstance(conn.get("totalCount"), int) or not isinstance(info, dict)
+                or not isinstance(info.get("hasNextPage"), bool)):
+            raise ValueError(f"graphql pr {n} comments page {page}: not a comment connection")
+        for c in conn["nodes"]:
+            if not isinstance(c, dict) or not isinstance(c.get("body"), str):
+                raise ValueError(f"graphql pr {n} comments page {page}: an entry is not a comment with a body")
+            kind, login = _actor(c.get("author"), owner)
+            edit, edited_by = _edit_attribution(c, owner)
+            cid = c.get("fullDatabaseId")
+            out.append({"id": str(cid) if isinstance(cid, (int, str)) and str(cid) else None, "author": login,
+                        "author_kind": kind, "body": c["body"], "edit": edit, "edited_by": edited_by})
+        if not info["hasNextPage"]:
+            if len(out) != conn["totalCount"]:
+                raise ValueError(f"graphql pr {n} comments: read {len(out)} of {conn['totalCount']}, not in full")
+            return out
+        nxt = info.get("endCursor")
+        if not isinstance(nxt, str) or not nxt or nxt == cursor:
+            raise ValueError(f"graphql pr {n} comments page {page}: no next cursor")
+        cursor = nxt
+    raise ValueError(f"graphql pr {n} comments: more than {COMMENT_PAGES_MAX * COMMENTS_PER_PAGE} comments, "
+                     "not read in full")
+
+
+def _merge_comments(trusted: list[dict], rest: list[dict]) -> list[dict]:
+    """The comments `decide` judges: each GraphQL comment, with `via_app` from the REST entry of the same id (no
+    matching entry, or one whose body differs, counts as an App: REST can only take trust away, never give it), and
+    every REST entry the GraphQL read does not hold with the same body, marked `scan_only` (judged for a BLOCK or a
+    malformed marker, never for an APPROVE)."""
+    by_id = {str(c["id"]): c for c in rest if c.get("id") is not None}
+    out = []
+    for c in trusted:
+        r = by_id.get(c["id"]) if c["id"] is not None else None
+        out.append({**c, "via_app": r is None or r["via_app"] or r["body"] != c["body"], "scan_only": False})
+    seen = {(c["id"], c["body"]) for c in trusted}
+    for r in rest:
+        if (str(r["id"]) if r.get("id") is not None else None, r["body"]) not in seen:
+            out.append({"id": r.get("id"), "author": r["author"], "author_kind": "unknown", "body": r["body"],
+                        "edit": "unknown", "edited_by": "", "via_app": r["via_app"], "scan_only": True})
+    return out
+
+
 def decide(head: str, owner: str, pr: dict, comments: list[dict]) -> tuple[str, str, str]:
     """(outcome word, where, detail) for one PR: its body and its issue comments, judged by the one parser.
 
@@ -1171,7 +1310,9 @@ def decide(head: str, owner: str, pr: dict, comments: list[dict]) -> tuple[str, 
        (`untrusted` otherwise). Comments cannot approve it.
     3. Any other PR (an outside, MEMBER or COLLABORATOR author): an APPROVE in the body never counts, whoever edited
        it last; only a live APPROVE for this head in a comment by the repository owner, not posted via a GitHub App,
-       approves (`outside` otherwise, `untrusted` when the only APPROVE is in someone else's comment)."""
+       and never edited by anyone but the owner (`_edit_attribution`), approves. Otherwise `edited` (another user
+       edited the owner's APPROVE comment), `edit-unknown` (its edit history is not known in full), `untrusted` (the
+       only APPROVE is in someone else's comment, or via an App) or `outside`."""
     body_adv = adversary_verdict(pr["body"], head)
     body_word = outcome(body_adv)
     judged = [(c, outcome(adversary_verdict(c["body"], head))) for c in comments]
@@ -1189,9 +1330,16 @@ def decide(head: str, owner: str, pr: dict, comments: list[dict]) -> tuple[str, 
         if body_word == "approve" and not pr["body_trusted"]:
             return "untrusted", "", f"owner PR body last edited by {pr['editor'] or '(ghost)'}"
         return body_word, "", body_adv.get("detail") or ""
-    for c, w in judged:
-        if w == "approve" and c["author"].lower() == owner.lower() and not c["via_app"]:
+    own = [c for c, w in judged if w == "approve" and not c.get("scan_only") and not c.get("via_app", True)
+           and c.get("author_kind") == "owner"]
+    for c in own:
+        if c.get("edit") in ("never", "owner"):
             return "approve", "owner comment", f"APPROVE for this head in owner comment {c['id']}"
+    for c in own:
+        if c.get("edit") == "other":
+            return "edited", "", f"owner comment {c['id']} holds an APPROVE but was edited by {c.get('edited_by')}"
+    if own:
+        return "edit-unknown", "", f"owner comment {own[0]['id']} holds an APPROVE but its edit history is unknown"
     if any(w == "approve" for _c, w in judged):
         return "untrusted", "comment", "the only APPROVE comments are not the owner's own (another author, or an App)"
     return "outside", "", (f"outside PR (author {pr['author'] or '(ghost)'}): the body's "
@@ -1225,12 +1373,13 @@ def judge_pr(api, repo: str, n: int, target_url: str = "") -> dict:
     if pr["state"] != "open":
         return {**rec, "result": "skipped", "detail": f"PR became {pr['state'] or 'unknown'} before posting"}
     try:
-        comments = _pr_comments(api, repo, n)
+        trusted = _pr_comments_trusted(api, repo, n)
+        comments = _merge_comments(trusted, _pr_comments(api, repo, n))
     except (ApiError, ValueError) as e:
         return {**rec, "result": "error", "detail": f"reading the comments failed: {e}"}
     word, where, detail = decide(head, repo.split("/", 1)[0], pr, comments)
     rec.update(last_editor=pr["editor"], trusted=pr["body_trusted"], author=pr["author"], owner_pr=pr["owner_pr"],
-               comments=len(comments))
+               comments=len(trusted))
     status = {"state": "success" if word == "approve" else "failure", "context": CONTEXT,
               "description": describe(word, head, where)}
     if target_url:
@@ -1261,6 +1410,13 @@ def parse_prs(text: str) -> list[int]:
             raise ValueError(f"--prs is not a list of PR numbers: {text!r}")
         out.append(int(part.strip()))
     return sorted(set(out))
+
+
+def _pr_list(rs: list[dict], most: int = 6) -> str:
+    """`#7, #8` for a status description, at most MOST numbers then `+N more`, so the 140-character cap never cuts off
+    the reason that follows (a shared head with 31 PRs lost "and not all approve", 2026-11-07)."""
+    shown = ", ".join(f"#{r['pr']}" for r in rs[:most])
+    return shown + (f" +{len(rs) - most} more" if len(rs) > most else "")
 
 
 def run_event(event_name: str, event: dict, repo: str, api, target_url: str = "",
@@ -1299,10 +1455,10 @@ def run_event(event_name: str, event: dict, repo: str, api, target_url: str = ""
             by_head.setdefault(r["head"], []).append(r)
     for head, rs in by_head.items():
         status = dict(rs[0]["status"])
-        nums = ", ".join(f"#{r['pr']}" for r in rs)
+        nums = _pr_list(rs)
         if unread:
             # The run's PRs were found at one head, so a PR that could not be read may share this status: fail closed.
-            bad = ", ".join(f"#{r['pr']}" for r in unread)
+            bad = _pr_list(unread)
             status.update(state="failure", description=f"PR {bad} at this head could not be read ({head[:12]})"[:140])
         elif len(rs) > 1 and any(r["outcome"] != "approve" for r in rs):
             status.update(state="failure", description=f"PRs {nums} share head {head[:12]} and not all approve"[:140])

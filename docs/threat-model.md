@@ -237,10 +237,10 @@ others, and the merge path is unenforced. "Control" is what exists; "Gap" is wha
   Copilot included), check-run output and CI logs. The PR body is written by its author, so a verdict
   **marker** is self-asserted: nothing fetches the adversary's report and compares. The parser checks the
   marker's shape and that its `head` equals the PR head, which catches a stale or typo'd verdict, and since
-  2026-11-07 the `adversary-marker` Action counts an APPROVE only in a body whose **last editor** is the
-  repository owner, or whose author is an OWNER, MEMBER or COLLABORATOR and edited it last (GraphQL
-  `lastEditedBy`, `authorAssociation`), so an outside fork author cannot approve their own PR; **the operator
-  approves an outside PR by editing its body**. A fabricated APPROVE written by a trusted account (one of our
+  2026-11-07 (PR 300) the `adversary-marker` Action counts an APPROVE only in two places. One is the body of a PR
+  the owner wrote, whose last editor is the owner (GraphQL `editor` and `lastEditedAt`). The other is an issue
+  comment the owner posted, not through an App, whose whole edit history (`userContentEdits`) is the owner's. The
+  operator approves any other PR by posting the marker as their own comment; editing its body approves nothing. A fabricated APPROVE written by a trusted account (one of our
   own agents with the operator's login) is still indistinguishable from a real one: treat it as a claim. The
   Action never executes, interpolates or checks out anything from a PR. Until the operator's ruleset requires
   the `adversary-marker` status pinned to the App (`docs/review-boundary.md`), nothing enforces any of this
