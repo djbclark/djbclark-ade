@@ -89,9 +89,9 @@ from its introduction citing another paper.
    regex query beats pasting the PDF into context.
 5. **Host research tools** (for example a research-paper search in the host's
    web connector) are fine for triage; the evidence row still needs the
-   opened text. On the operator's machine the general web ladder (Jina
-   `search_arxiv`/`extract_pdf`, `web-get fetch`, archives) and its pause
-   rule are in `fallback-chains/references/web-access.md`.
+   opened text. On the operator's machine the general web ladder is the client's own
+   search and fetch tools (Jina `search_arxiv`/`extract_pdf`, archives); `bin/web-get` and its
+   written ladder were deleted 2026-11-06, and the pause rule below still applies.
 6. **Institutional access.** If `RESEARCH_PROXY_URL` is set (an EZproxy-style
    prefix such as `https://proxy.example.edu/login?url=`), the `fetch`
    subcommand retries a page that looks paywalled through the proxy

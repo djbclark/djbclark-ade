@@ -15,11 +15,10 @@ One thin skill, [`skills/hand`](../skills/hand/SKILL.md), reads and follows `han
 |---|---|---|---|
 | Claude Code | `/hand` | skill | none: official command reference, 121 commands, no `hand*` |
 | omp | `/hand` | `omp/commands/hand.md` linked to `~/.omp/agent/commands/` | none: only `handoff`, no aliases of it |
-| zcode | `/hand` | `zcode/commands/hand.md` linked to `~/.zcode/commands/` | none found in the install |
 | opencode | `/hand` | `opencode/commands/hand.md` linked to `~/.config/opencode/commands/` | none found in the binary |
-| Cursor, Copilot, Grok, Qwen, Cline, Antigravity | `/hand` | skill | none (official lists) |
+| Cursor, Grok | `/hand` | skill | none (official lists) |
 | Hermes | `/hand` | skill route (read in code, not run live) | exact lookup: no. It has built-in `/handoff` (`hermes_cli/commands.py:106`), so Tab may complete `/hand` to it; type the full word |
 | Codex | `$hand` | skill (`/prompts:hand` is deprecated, not installed) | none |
-| Muse, goose, Grok Bot | UNVERIFIED | goose needs a `slash_commands` recipe entry in `~/.config/goose/config.yaml`; Muse's custom-command dir was not found; Grok Bot is not on this Mac | none found, lists incomplete |
+| Grok Bot | UNVERIFIED | Grok Bot is not on this Mac | none found, lists incomplete |
 
 `hand` with a focus or `paseo` behaves as `handoff` does, since the arguments pass through.

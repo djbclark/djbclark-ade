@@ -50,9 +50,7 @@ policy, including a read-back through the installed `codex app-server` (no model
 
 1. `{{ .field }}` is a value the companion provides (table below).
 2. `{{ secret "NAME" }}` is a secret read from `sudo-secretspec` at apply time. `NAME` is the entry name where it
-   is known (`JINA_API_KEY`, `EXA_API_KEY`:
-   [skills/fallback-chains/references/web-access.md](../skills/fallback-chains/references/web-access.md) 5.1,
-   5.6); a `TODO_` prefix means no entry is declared yet, so the name is a proposal.
+   is known (`JINA_API_KEY`, `EXA_API_KEY`); a `TODO_` prefix means no entry is declared yet, so the name is a proposal.
 3. `${NAME}` inside the Hermes template is Hermes's own reference to `~/.hermes/.env`; it is not a placeholder
    and stays as it is.
 4. No other `{{ }}` form is allowed. `bin/ade-template-check` enforces all of this.
@@ -94,8 +92,8 @@ parses to something else.
 
 | Secret | Used by | Why a secret |
 |---|---|---|
-| `JINA_API_KEY` | opencode `mcp.jina.headers.Authorization` | plaintext Bearer key in the live file (web-access.md 5.3.2) |
-| `EXA_API_KEY` | opencode `mcp.exa.headers.x-api-key` | plaintext key in the live file (web-access.md 5.3.2) |
+| `JINA_API_KEY` | opencode `mcp.jina.headers.Authorization` | plaintext Bearer key in the live file |
+| `EXA_API_KEY` | opencode `mcp.exa.headers.x-api-key` | plaintext key in the live file |
 | `TODO_BEZALEL_API_KEY` | codex `mcp_servers.bezalel.http_headers.Authorization` | plaintext Bearer token in the live file; Hermes's `.env` calls it `MCP_BEZALEL_API_KEY` |
 | `TODO_LITELLM_HERMES_KEY` | hermes `providers.litellm-local.api_key` | a `sk-` style key for the local LiteLLM proxy |
 | `TODO_HERMES_DASHBOARD_PASSWORD_HASH` | hermes `dashboard.basic_auth.password_hash` | a scrypt hash; offline-guessable, so treated as a secret |

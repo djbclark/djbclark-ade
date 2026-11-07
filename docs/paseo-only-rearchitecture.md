@@ -42,11 +42,11 @@ and top-level sessions. Its evidence table evaluates the issue's recommendations
    communication with ClinePass and OpenCode Go support as a hard requirement (TUICommander 87.4,
    Superset 56). Known weakness: one Node event loop per daemon (section B9, risk H2).
 6. **Fan-out during the migration:** Paseo-native subagents (`paseo run` / `create_agent`) and the
-   `/ade-paseo-handoff`, `/ade-paseo-advisor`, `/ade-paseo-committee` skills; not `/bigteam` until D5 rewrites it.
+   `/paseo-handoff`, `/paseo-advisor`, `/paseo-committee` skills (Paseo's own; the `ade-` vendored copies were deleted 2026-11-06); not `/bigteam` until D5 rewrites it.
    Exception until D5: `acp-dispatch` stays the dispatcher for frontier consults and adversary reviews,
    because its quota gates are the only ones that exist today (H4). Until D1.3 and D2's gate have both
    passed, fan-out uses `isolation: local` workspaces only, and task worktrees come from `git worktree add`
-   (order 9), whatever a skill such as `/ade-paseo-handoff` offers (D0.3).
+   (order 9), whatever a skill such as `/paseo-handoff` offers (D0.3).
 7. **Fable and codex astra take part in the re-architecting** (djbclark, 2026-10-29); this overrides the
    routing-policy line that reserves them for `frontier` consults. Both consulted on v0 (section I).
 8. **Herdr bridges and attach clients stay, for edge cases** (djbclark, 2026-10-30): two projects, each
@@ -240,7 +240,7 @@ Counts are `rg -li` over the repo on 2026-10-29, excluding `graft/` and `docs/ha
 | `watch` roles, `fleet-watch` (in `~/ops/site-private/bin`, not this repo), `paseowatch`/`cfenginewatch` (`fleet-watch upstream --relay-to` uses relay.py), `tell-chief-of-staff` | — | REWRITE in D6 | `paseo send` from the launchd script; schedules only where a run needs judgment (F2) |
 | `load-watch` (`session-load-watch` and `rumination-watch` deleted 2026-11-06, slim-down E5), `bg`, gates, `wait-file` | — | KEEP (launchd, F2); drop pane typing | deliver via `paseo send` |
 | `claude-quota-guard`, `context-watch`, `context_size_nudge` (provider hooks) | — | KEEP | they run inside the provider; G2 enforces the same gates for launches that bypass the hook |
-| `pr-wait`, `ade-git-guard`, `git-commit-own`, `local-review`, graft, `aiuse`, `web-get` (`failover.py` deleted 2026-11-06, slim-down E10: the model chain is `paseo run`'s); `ci-waiver` once parked PR 118 lands (not on master) | — | KEEP (harness-neutral) | n/a |
+| `pr-wait`, `ade-git-guard`, `git-commit-own`, `local-review`, graft, `aiuse`, `web-get` (deleted 2026-11-06, slim-down R2-15; `failover.py` deleted 2026-11-06, slim-down E10: the model chain is `paseo run`'s); `ci-waiver` once parked PR 118 lands (not on master) | — | KEEP (harness-neutral) | n/a |
 | Running Paseo plugins not covered elsewhere (`paseo plugin ls`, 2026-10-30): `better-paseo` (chat timeline and agent board; its approve/deny and archive buttons act only on the operator's click), `herald` (speaks when an agent waits; it denies tool requests only from its own summary helpers; it used to **hard-delete** (`paseo delete`) every agent labelled `herald.role=summarizer`, selected by that label, until djbclark set `cleanup.deleteHelpers:false` on 2026-10-30), `reopen-archived` (reopens archived workspaces with their agent), `skills` (skills browser), `forges` (no description; no permission, archive or prompt calls; it vendors an unused `agent.create` MCP-injection helper) | — | KEEP; herald's hard delete off and asserted (B4.3, G2.8) | none answers another agent's card or archives on its own. No running plugin attaches tools or MCP servers today (`better-paseo` and `usage-auto-resume` hook the legacy `agent.session_open` and return neither). This inventory is a snapshot: plugins track latest, so D2's catalog check (open-time tools and create-time `mcpServers`) reruns on every plugin install or upgrade |
 | `cow-workspaces` | — | RETIRE | Paseo worktree workspaces plus `fresh-worktrees` (running) and setup hooks; the claim stays (B4) |
 | `adversary` and other provider sub-agents | — | KEEP (provider-native) | or as a Paseo subagent in D5 |
@@ -281,8 +281,8 @@ ops-promotion pilot passes.
       cow pasture clean and pushed, or its owner named; bigteam inboxes drained.
    3. **No Paseo worktree fan-out before the preserve point exists**: until D1.3 and D2's gate have both
       passed, Paseo workspaces created for work use `isolation: local`, task worktrees come from
-      `git worktree add` (order 9), and `session-janitor` stays disabled (B4.3). `skills/ade-paseo-handoff`
-      carries a pointer to this rule.
+      `git worktree add` (order 9), and `session-janitor` stays disabled (B4.3). The vendored `ade-paseo-handoff` skill carried a pointer to this rule;
+      it was deleted 2026-11-06 and Paseo's own `paseo-handoff` replaces it.
 1. **Contracts and safety net.** Each probe is a repeatable script under `tests/paseo-acceptance/` with an
    **expected outcome and a named consequence if it fails**; D2 starts only when every consequence is
    resolved. D1 probes native Paseo behaviour and the non-plugin pieces it builds (the B4 teardown, the B9

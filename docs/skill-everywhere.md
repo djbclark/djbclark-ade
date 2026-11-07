@@ -83,7 +83,7 @@ after the directory is gone: it removes only links whose target is exactly
 | Grok (`grok`, including Grok Build) | `~/.grok/skills`. It also scans `~/.claude/skills` and `~/.agents/skills` and dedups by name. Verified 2026-10-04: a same-named `SKILL.md` under `~/.agents/skills/.trash` was the copy this session was offered, so `~/.grok/config.toml` ignores that trash dir and this script links the live skill here. |
 | omp / oh-my-pi (`omp`) | `~/.omp/agent/skills` (native, highest skill priority; added 2026-10-13). omp also reads `~/.agents/skills`, but de-duplicates by `realpath`, so the second link does not list a skill twice. omp ignores `~/.claude/skills` unless `claude` is in its `enabledProviders`. Prove it with `omp -p --no-title "<step 3 prompt>"` from a scratch dir. |
 | Grok Bot (`grokbot`, no binary; present when `~/agent-data/workflows` exists) | **Copy, not link** (added 2026-10-23): Grok Bot runs on its own Linux box (`HOME=/home/box`) and reads `~/agent-data/workflows/<slug>/SKILL.md` as plain files, so no link into a Mac checkout could resolve. The script renders `ade-<name>/`: symlinks dereferenced (only a link to a regular file inside the skill; a skill holding any other link, one that leaves the skill, dangles or names a directory or special file, is refused: `--check` reports `unsafe source symlink`; link mode copies nothing, leaves any existing copy alone and exits 1; 2026-10-23),  a "managed copy" banner after the front matter (Mac-only paths, Grok Bot's approval rules win; its link and the marker's `source=` name the root the skill came from, djbclark-ade, site-djbclark or site-private, since 2026-11-06), and a `.skill-everywhere` marker. Only a dir with that marker is updated or removed; `--check` reports `copied`, `stale copy`, `missing` or `not ours`. `SKILL_EVERYWHERE_NO_COPY=1` skips this target (`ade-update` sets it for a non-canonical `--repo`, which is report-only and may be an untrusted PR branch), so a report-only run prints no `grokbot` row and renders nothing. On the box run it with `SKILL_EVERYWHERE_ONLY=grokbot`, or the box's own claude, agy, cline and hermes get links too. The box's nightly driver is `/home/box/agent-data/shared/skills-sync/sync.sh` (fetches `origin/master`, picks which skills suit Grok Bot, keeps a manifest, runs this script). |
-| `/btww` (side question, 2026-11-01) | Skill `btww` **names the TUI's native side-question command, or says it has none; it never answers the question** (a skill is an ordinary turn, so it cannot be non-interrupting or off-transcript). Native: Claude `/btw`, Codex `/side`, agy `/btw`, Cursor `/btw`, Grok `/btw`, omp `/btw`, Hermes `/btw`, Copilot `/btw` (alias `/ask`), opencode `/btw`, Qwen `/btw`, Muse `/side` (alias `/btw`); none in zcode, Cline, goose or Grok Bot; Devin not installed. All first-party: the third-party `copilot-btw` and `opencode-btw` plugins are not needed. Real aliases: omp `omp/commands/btww.md` (`side: true`, linked to `~/.omp/agent/commands/btww.md`), Hermes CLI `quick_commands.btww` alias to `btw` (`~/.hermes/config.yaml`, template `agents/hermes/config.yaml.tmpl`). zcode: `zcode/commands/btww.md`. Claude cannot alias a built-in. Details: `skills/btww/SKILL.md`. |
+| `/btww` (side question, 2026-11-01) | Skill `btww` **names the TUI's native side-question command, or says it has none; it never answers the question** (a skill is an ordinary turn, so it cannot be non-interrupting or off-transcript). Native: Claude `/btw`, Codex `/side`, Cursor `/btw`, Grok `/btw`, omp `/btw`, Hermes `/btw`, opencode `/btw`; none in Grok Bot (the agy, Copilot, Qwen, Muse, zcode, Cline, goose and Devin rows were dropped 2026-11-06 with those TUIs). All first-party: the third-party `opencode-btw` plugin is not needed. Real aliases: omp `omp/commands/btww.md` (`side: true`, linked to `~/.omp/agent/commands/btww.md`), Hermes CLI `quick_commands.btww` alias to `btw` (`~/.hermes/config.yaml`, template `agents/hermes/config.yaml.tmpl`). Claude cannot alias a built-in. Details: `skills/btww/SKILL.md`. |
 
 `aiuse --json` providers with no TUI of their own (alibaba, deepseek,
 openrouter, litellm, opencode-zen, clinepass, grok; antigravity, copilot, zai and devin since 2026-11-06) are API pools behind the
@@ -136,32 +136,26 @@ to run `reload-plugins` the same way. Claude Code slash wrappers live in
 `~/src/djbclark-ade/claude/commands/` and are symlinked directly into
 `~/.claude/commands/`.
 
-## 3a. Paseo's skill sync and our vendored Paseo skills (2026-10-23, renamed 2026-11-02)
+## 3a. Paseo's skill sync and Paseo's own skills (2026-10-23, rewritten 2026-11-06)
 
-**Our six vendored Paseo skills carry an `ade-` prefix** (`ade-paseo`, `ade-paseo-advisor`, `ade-paseo-committee`,
-`ade-paseo-handoff`, `ade-paseo-help`, `ade-paseo-plugin`) **so Paseo never touches them.** Paseo owns skills by
-name: every name in its bundle (`paseo`, `paseo-advisor`, `paseo-committee`, `paseo-handoff`, `paseo-help`,
-`paseo-plugin`) is compared in `~/.agents/skills/<name>` and `~/.claude/skills/<name>` with its bundled copy, and a
-difference is "drift" that the daemon's startup sync and any skills install, update or save rewrite. Under the old
-unprefixed names those entries were directory links into this repo, so each rewrite landed here (2026-10-19, twice on
-2026-10-24 by the dev daemon, and 2026-11-01 21:33:38 with the installed 0.15.0-beta.1 bundle; manifests
-`.paseo-managed-files.json` beside each). A name Paseo does not ship is invisible to all of its code paths, in every
-build and every Paseo home.
+**The six vendored copies (`ade-paseo`, `ade-paseo-advisor`, `ade-paseo-committee`, `ade-paseo-handoff`,
+`ade-paseo-help`, `ade-paseo-plugin`) were deleted 2026-11-06** (slim-down R2-2, Wave 3b); Paseo's own shipped skills
+replace them: `paseo`, `paseo-advisor`, `paseo-committee`, `paseo-handoff`, `paseo-help`, `paseo-plugin`. Paseo owns
+those names: every name in its bundle is compared in `~/.agents/skills/<name>` and `~/.claude/skills/<name>` with its
+bundled copy, and the daemon's startup sync and any skills install, update or save rewrite a difference. That is
+harmless now that no entry of those names is a link into this repo (it was not before 2026-11-02: the unprefixed
+links were overwritten, getpaseo/paseo#7700, and the repo copies were renamed `ade-*` for that reason).
 
-1. **Keep every Paseo home's selection empty**: `agents.skills.selection = {"mode":"custom","skills":[]}` in
-   `~/.paseo/config.json` and in every dev or test home before its daemon starts (`~/src/paseo/.dev/paseo-home` has
-   it). With `{"mode":"all"}` (the default) Paseo installs its own unprefixed copies beside ours, and their broad
-   triggers ("handoff", "second opinion", "stuck") compete with the narrowed ones. The persisted path is
-   `agents.skills.selection`; a top-level `"skills"` key is rejected by `paseo reload`.
-2. With an empty selection Paseo's settings screen lists any leftover unprefixed copies as "to be removed"; after
-   the rename that removal is harmless (they are not ours).
-3. Re-vendoring a newer Paseo bundle is done by hand (`skills/ade-paseo/UPSTREAM.md`), keeping the prefix.
-4. Tried and dropped before the rename: the empty selection alone (it is per Paseo home, while every home writes the
-   one real `$HOME` skill dirs), and a real directory holding per-file symlinks (Paseo's sync throws before writing,
-   but Cursor's loader rejects a `SKILL.md` symlink that resolves outside its skills root, codex `gpt-6-astra` review
-   2026-10-23).
-5. Upstream: [getpaseo/paseo#7700](https://github.com/getpaseo/paseo/issues/7700), #7853, `docs/upstream-issues.md`
-   item 10.
+1. **Operator step (final-merge batch)**: install Paseo's bundle with `npx skills add getpaseo/paseo`, or switch each
+   Paseo home's `agents.skills.selection` in `~/.paseo/config.json` from `{"mode":"custom","skills":[]}` to the bundle
+   (`{"mode":"all"}` is the default; the persisted path is `agents.skills.selection`, a top-level `"skills"` key is
+   rejected by `paseo reload`). Remove any leftover `~/.agents/skills/ade-paseo*` and `~/.claude/skills/ade-paseo*`
+   links that now dangle.
+2. Their broad triggers ("handoff", "second opinion", "stuck") compete with this repo's `handoff` skill until D3
+   (native-resume trial) and E6 (`dialogue`) land; if they steal requests, narrow the selection to `paseo`,
+   `paseo-help` and `paseo-plugin` rather than editing a copy.
+3. No re-vendoring: the three local patches of the old `skills/ade-paseo/UPSTREAM.md` (narrowed triggers, an interim
+   worktree-isolation line, the `ade-` prefix) are gone with it (version control has it).
 
 ## 4. When the table is wrong
 

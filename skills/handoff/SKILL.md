@@ -48,13 +48,13 @@ commit flow:
 
 When the arguments begin with the word `paseo` (`/handoff paseo`, `$handoff paseo`, "handoff to paseo"), this skill still writes the
 owned Tier 2 document and Tier 1 pointer (Steps 1-7, below), then **does not run Step 9's same-session `/new`**: it continues with
-the **ade-paseo-handoff** skill's durable-transfer procedure (existing suitable workspace and a new real tab, live launch settings,
+the **paseo-handoff** skill's (Paseo's own shipped skill) durable-transfer procedure (existing suitable workspace and a new real tab, live launch settings,
 verified startup, explicit chain pointer, successor-owned peer notices with delivery proof, carried queued/blocked receipts). Plain
 `/handoff` keeps the behaviour below unchanged. In Plan Mode `/handoff paseo` mutates nothing: it says that mode is the blocker,
 keeps the destination, and resumes on the operator's "go" after Default mode returns, without asking again.
 
 The Tier 2 document of a `paseo` handoff carries the **durable peer list** (each peer's id, title, workspace, the relay record ID and
-status of every notice already sent, and the ack token each was asked for) so the successor can adopt it; see ade-paseo-handoff,
+status of every notice already sent, and the ack token each was asked for) so the successor can adopt it; see paseo-handoff,
 "Peer notices belong to the successor".
 
 ## Step 0 — Run the `loose` sweep silently first (operator rule, 2026-10-08)
@@ -455,7 +455,7 @@ session, and `/handoff paseo` when this session is the one being handed on. The 
 parenting the new agent to this one (run.ts parents it to the caller); verify `ParentAgentId` is null as in Step 9. This
 session is not archived by the recipe; where a successor replaces a session, the successor archives its predecessor by id
 (`paseo agent archive PRED_ID`) once it has answered, because a running agent cannot archive itself and `--force` cascades
-to its children (`skills/ade-paseo-handoff`):
+to its children (Paseo's `paseo-handoff` skill):
 
 ```bash
 env -u PASEO_AGENT_ID -u PASEO_AGENT_CWD paseo run --no-wait --title "<short title>" --provider claude --model claude-sonnet-5-5 --thinking medium \

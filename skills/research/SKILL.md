@@ -257,15 +257,14 @@ pages. On a host with `model-routing` / `effort-routing` skills, follow them.
    exit 0 means every probed route can search, exit 1 lists the ones that
    cannot. The lead's own probe uses its own tools and walks the full web
    ladder before declaring a route dead: the client's MCP rungs (Firecrawl,
-   `exa`, `parallel-search`, `jina`), built-in WebSearch/WebFetch, Composio,
-   then `~/src/djbclark-ade/bin/web-get search|fetch` (Crawl4AI and the
-   archives are its last rungs; `paper-search` for papers). The ladder per
-   client is `fallback-chains/references/web-access.md`.
+   `exa`, `parallel-search`, `jina`), built-in WebSearch/WebFetch, Composio
+   (`paper-search` for papers). `bin/web-get` and the written per-client ladder
+   were deleted 2026-11-06.
    Fix a harness failure at the root in `~/src/djbclark-ade` (code, not only
    docs); do not just route around it, then say what you changed.
 7. **Pause on missing sources (operator, 2026-10-11).** A page or search a
-   slice needs that fails on every rung (`web-get` exit 5), or comes back
-   only cut at a provider's cap (`web-get` exit 6, not fetched), is not a Gap to
+   slice needs that fails on every rung, or comes back
+   only cut at a provider's cap (not fetched), is not a Gap to
    write around: the slice stops with `BLOCKED: web access: <url or query>:
    <each rung's error>` (the `acp-dispatch` exit 4 convention) instead of
    writing findings without the source. The lead then stops dispatching
@@ -273,4 +272,4 @@ pages. On a host with `model-routing` / `effort-routing` skills, follow them.
    queries to the operator, and waits. **No synthesis, writer or gate step
    runs while a needed source is missing**; resume the same slice once the
    provider recovers. A page that a later rung did return is fine; note the
-   rung. Detail: `web-access.md` section 1.
+   rung. (The written ladder `web-access.md` was deleted 2026-11-06.)

@@ -1,8 +1,7 @@
 ---
 name: fallback-chains
 description: >-
-  Use when asked about fallback chains, including the web search and fetch
-  failover ladder and its pause rule. Update snapshot.
+  Use when asked about fallback chains. Update snapshot.
 ---
 
 # Fallback chains on this machine
@@ -23,8 +22,6 @@ Before answering a fallback question, or after changing any chain:
 2. If a live source differs from `references/inventory.md`, update that file in the same turn and set its date.
 3. If the change is a step toward the single-system goal, record it in `references/integration.md` (done, dropped, or still open). Do not start that work unless asked.
 4. After a chain change, run `python3 scripts/check.py` from this skill directory. It prints the live layers and exits non-zero on a cycle, a same-vendor pair, a missing MoA preset while MoA is on, or a second writer. A non-zero exit is the remaining traffic-chain debt until that pass is asked for.
-
-The web access chain has its own snapshot, `references/web-access.md`, with its own change list (its section 7). `scripts/check.py` does not cover it.
 
 A chain change means any of: Hermes `model`, `fallback_providers`, `auxiliary`, `cron`, or `moa`; a cron job pin; LiteLLM `router_settings.fallbacks`; `acp-run`'s transport fallback; enabling or disabling `ai-model-switch`.
 
@@ -55,15 +52,6 @@ Six live layers, not one system. The dated tables are in `references/inventory.m
 6. `acp-run` Claude transport fallback only.
 
 `route_agent.py` scores which agent to dispatch. It is not a failure chain.
-
-## Web access chain
-
-Snapshot: `references/web-access.md` (2026-10-11). Live check: `~/src/djbclark-ade/bin/web-get check`.
-
-1. Each client walks its own ladder of web search and fetch providers. **Search starts with the shared `firecrawl` MCP's `firecrawl_search`: self-hosted SearXNG on Hyades, free, no rate limit (2026-10-14)**; then Exa, Parallel, Jina, built-in tools, the Crawl4AI MCP for JavaScript pages, the low-credit Firecrawl connector, Composio. Then the shell ladder `web-get search|fetch` (on PATH; search firecrawl (the same SearXNG) → exa-api → exa-mcp → parallel → jina-mcp → jina-search → composio, fetch exa-api → exa-mcp → parallel → jina-reader → pdf → crawl4ai → firecrawl-mcp → wayback; exa-api is the keyed Exa REST API, `EXA_API_KEY`), then the Wayback Machine and archive.today. Hermes searches through `firecrawl-router` (SearXNG first).
-2. One rung failing is fine if a later rung answers. `web-get` exit 5 means every provider failed; exit 6 means a fetch came back only cut at a provider's cap, which is not fetched (item 4).
-3. **Pause rule (operator, 2026-10-11).** When the whole ladder fails for a page or search the task needs, pause the dependent work: stop scheduling dependent steps, checkpoint, report each failed URL or query with every rung's error, and wait for the operator or the provider. Never continue without the source, summarize from memory, or drop it. Detail: `references/web-access.md` section 1.
-4. **Every needed page is eventually fetched (operator, 2026-10-11).** "We need to eventually get all of the web pages you are interested in getting, don't accept errors meaning we never get something, we always want to fallback or fix or stop and notify me so we can work together to fix." A fetch error is never final: fall back (next rung, `web-get --only <provider>` per rung, other URL forms such as arXiv abs/PDF, raw GitHub, the PDF itself, mirrors, archives), fix the tool in `~/src/djbclark-ade`, or pause and `hermes-ping` the URLs and errors. A truncated body is not fetched (`web-get` walks on past a provider cap by itself and exits 6 if no fuller copy turns up; a `--max-bytes` cut is the caller's). Never record a source as "unverified" and move on; this applies retroactively too. Detail: `references/web-access.md` 1e.
 
 ## Integration goal
 
