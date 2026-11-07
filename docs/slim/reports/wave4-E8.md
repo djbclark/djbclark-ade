@@ -500,8 +500,9 @@ has already happened). L1 is the rule that follows from it; L10-L12 are the thre
 
 L1. **BLOCK 1, an outside author could approve their own PR** (`judge_pr`): the second read is now one GraphQL query
 (`_pr_state_trusted`: `state headRefOid body authorAssociation author { login } lastEditedBy { login }` — that field
-replaced by `userContentEdits(last: 1) { nodes { editor { login } } }` on 2026-11-07 after GitHub removed it; PR 302,
-with the job's read token), so the body and the editor it is judged by come from the same answer. The last editor is
+replaced by `userContentEdits(first: 1) { nodes { editor { login } } }` on 2026-11-07 after GitHub removed it; the
+connection is newest-first — a live probe on PR 302 showed its three edits dated newest to oldest — with the job's
+read token), so the body and the editor it is judged by come from the same answer. The last editor is
 the newest `userContentEdits` editor (was `lastEditedBy`), or
 the author when the body was never edited. Trusted: the repository owner's login (case-insensitive), or the author when
 the author edited it last and `authorAssociation` is OWNER, MEMBER or COLLABORATOR. An APPROVE in a body last edited by

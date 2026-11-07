@@ -1080,14 +1080,15 @@ def _pr_state(api, repo: str, n: int) -> tuple[str, str, str]:
 
 PR_QUERY = ("query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { "
             "pullRequest(number: $number) { state headRefOid body authorAssociation author { login } "
-            "userContentEdits(last: 1) { nodes { editor { login } } } } } }")
+            "userContentEdits(first: 1) { nodes { editor { login } } } } } }")
 TRUSTED_ASSOCIATIONS = ("OWNER", "MEMBER", "COLLABORATOR")
 
 
 def _pr_state_trusted(api, repo: str, n: int) -> tuple[str, str, str, str, bool]:
     """(state, head, body, last editor, trusted) of PR N from ONE GraphQL read, so the body and the editor it is
     judged by belong together. The last editor is the newest `userContentEdits` editor (GitHub removed the
-    `lastEditedBy` field; verified live 2026-11-07), or the author when the body was never edited.
+    `lastEditedBy` field; the connection is NEWEST-first — live probe 2026-11-07 on PR 302: three nodes dated
+    newest to oldest, and `first: 1` returned the newest), or the author when the body was never edited.
     Trusted: the repository owner's login, or the author when `authorAssociation` is OWNER, MEMBER or COLLABORATOR
     (the association describes the AUTHOR, so an editor who is neither the owner nor the author is untrusted:
     fail closed). Why (E8 review, 2026-11-07): the body is the author's to write, so without this an outside fork

@@ -1410,7 +1410,7 @@ def test_the_editor_and_the_body_come_from_the_same_read():
 
 def test_the_graphql_read_asks_for_the_trust_fields():
     q = adversary_marker.PR_QUERY
-    for field in ("headRefOid", "body", "authorAssociation", "author { login }", "userContentEdits(last: 1) { nodes { editor { login } } }", "state"):
+    for field in ("headRefOid", "body", "authorAssociation", "author { login }", "userContentEdits(first: 1) { nodes { editor { login } } }", "state"):
         assert field in q, field
 
 
