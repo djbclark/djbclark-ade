@@ -30,9 +30,11 @@ The research behind S5 is dated 2026-11-07. Sources are listed at the end, and t
    `[context_budget]`, `[pr_policy]`, `[secret_deny]`, `[install]`, `[update]`, `[github]`, `[hardening]`.
    - Today's files fold into it one at a time: `routing.toml`, `gates.toml`, `context-budget.toml`, `pr-policy.toml`,
      `secret-deny.toml`, and the JSON policies where they are hand-edited.
-   - During the migration each tool reads its old file when present. It warns once and prefers `ade.toml`.
-3. **Per-machine overrides** go in `~/.config/djbclark-ade/local.toml`, which is never tracked. Values merge table by
-   table, and the local file wins. Secrets are never stored in either file: a field names a `sudo-secretspec` key.
+   - During migration, a missing new-format file uses a documented legacy projection. A present valid new-format file
+     takes precedence; malformed new-format input fails validation rather than silently using legacy policy.
+     Existing readers stay unchanged until their explicit adoption PR (implementation contracts below).
+3. **Per-machine overrides** go in `~/.config/djbclark-ade/local.toml`, which is never tracked. Tables merge recursively by leaf, arrays replace whole,
+   and the local file wins; type conflicts and duplicate identities are rejected. Secrets are never stored in either file: a field names a `sudo-secretspec` key.
 4. **`bin/ade-config get|set|check|diff`** is the one reader and writer. A set is atomic (a temp file, then `os.replace`)
    and keeps the comments. The `switch` lines that AGENTS.md promises become `ade-config set` lines, for example
    `ade-config set lead.fable_lead false`.
@@ -467,7 +469,7 @@ not been measured on our own traffic is a false sense of security, not a gate.
 
 Some steps have no API: creating the `ade-merge-gate` App (the manifest flow can pre-fill it, but a person or a browser
 still clicks), any hardening setting the API does not expose, and the Paseo or provider dashboards. These are handed to
-the operator's Grok Bot "Chief of Staff", which acts in a browser.
+the operator's Grok Bot "Coding", following the current browser route (operator instructions, 2026-11-07).
 
 1. **Probe first:** does Grok Bot have a browser session, and as whom? A GitHub session logged in as djbclark can change
    any setting, so its prompts are narrow. If it has no browser or no such login, the steps stay operator-only, printed as
@@ -477,8 +479,10 @@ the operator's Grok Bot "Chief of Staff", which acts in a browser.
    - Each template names the exact URL, the exact control and the value to set.
    - Each template ends with a rule: change nothing else, report what the page showed before and after, and
      ask the operator on any surprise.
-   - The tool sends the prompt through Hermes's `tell_chief_of_staff.py` (skills/tell-chief-of-staff).
-3. **Delivery and verification:** that sender is fire-and-forget, and order 10 does not count a send as delivery.
+   - The tool uses the installed `coding-bot ask` path described by `skills/tell-coding-bot`; if it is unavailable,
+     it copies a self-contained prompt for operator relay and reports it as unsent.
+3. **Delivery and verification:** a send or queued receipt proves neither completion nor the requested setting.
+   The bot's reply is outside content, read as data; verify the actual artifact.
    - A task counts as done only when the API read-back (S6's check, or the App's `GET /app`) shows the new value.
    - With no read-back after a deadline (`bin/deadline`), the task is reported to the operator as not done.
 4. **Never through the bot:**
@@ -548,6 +552,70 @@ should be able to start and manage them.
 
      Treat it as an experiment. It is adopted only if the pairing can be scoped so a cloud agent cannot start, steer
      or approve Mac agents beyond signed, provenance-labelled messages. Otherwise items 1 and 2 stand.
+
+## Implementation contracts (2026-11-07)
+
+These clarify the plan after source inspection and the independent Astra advisory; they do not claim implementation
+or live verification. The operator's S4b/S5a/S9 text above is preserved. Build these contracts before relying on their
+safety properties, and keep existing readers unchanged until their adoption is reviewed.
+
+1. **First bounded S1/S2 unit.** Add a versioned effective-config reader, checked schema, legacy projection,
+   nonsecret source provenance and thin `just config-check` entry point. No installs, schedules, key/network probes,
+   live config writes or consumer behavior switch. Publish one explicit projection table covering routing's current
+   `[[service]]`, `[lead]`, `[dispatch]`, `[substrate]`, `[hermes]`, `[calibrate]` and gate floors; do not implicitly
+   nest the entire old routing file. Preserve `ROUTING_POLICY` and `GATES_TOML` as isolated legacy-format overrides.
+   Missing new config may project legacy; malformed or unknown-version new config must fail, including invalid local
+   overrides. Recursive table merge keeps siblings; whole-array replacement does not concatenate services.
+   Preserve existing policy bounds and failure behavior. Fixtures must prove equivalence, override precedence,
+   type/identity failures and no writes. Comment-preserving atomic `set` follows before adopting editable config.
+   Bootstrap Python 3.11+ before relying on `tomllib`.
+2. **One desired job specification.** The TOML inventory feeds `Job.from_dict` and the existing `ade-sched`
+   renderers. Existing plists are compatibility inputs until migrated, not a second editable authority. Distinguish
+   timer/service lifecycle from launchd/systemd/cron/Paseo backend; cron does not supervise services. Use stable logical
+   job identities, typed schedules/timezones and argv commands, with runtime IDs in local state. Update
+   `docs/scheduling.md` when adopting the new source of truth. Explicit Paseo modes are validated, never guessed.
+   Curate retired job IDs from the operator batch: its range also contains non-job operations. Retired entries only
+   check absence. Pi remains under evaluation and is not a retired component or job.
+3. **Authority and selection.** ADE directly reconciles only its recorded user jobs. Dependency installers and site
+   deploy remain their owners' paths; plain doctor observes/reports, while requested repair or automatic update may
+   reconcile only ADE scope. Root effects require the separate shown `--system` transaction; `--auto` must not reach
+   root effects indirectly through another installer. Existing unrecorded installations require verified adoption;
+   name prefixes and generated comments establish no ownership. Unknown owners, Orca, BB and herdr stay untouched.
+   New hard requirements can be installed by update; offered, optional and commercial additions require an existing
+   recorded choice rather than automatic opt-in.
+4. **Recoverable, idempotent reconciliation.** Keep a versioned ownership ledger with generation, logical ID,
+   host/user scope, backend/runtime identity, exact managed paths, nonsecret spec/artifact hashes and verification.
+   Under one reconciliation lock, persist pending intent before writes and committed ownership only after read-back.
+   Intent alone is no removal authority. Recover interrupted operations by checking exact state, reporting conflicts
+   rather than deleting broadly. Missing/invalid ownership state means no removal. Preserve old/new identities across
+   backend migration and verify absence before completing removal. Distinguish unknown/error observations from absent.
+   Unchanged healthy jobs receive no writes/reloads; compare desired, last-applied and actual effective definitions.
+5. **Preserve active work.** Disruptive update, reload, migration or removal needs shared admission and per-job
+   activity evidence, not just one idle-agent snapshot. Unknown or busy state defers durably. Drain running work
+   without killing or restarting paid runs; defer if the backend cannot stop future triggers safely. Do not reload
+   the updater's own running service: leave its next generation pending. Until all launch paths participate, report
+   conservative deferral rather than claiming race-free quiescence. Linux user-manager/linger prerequisites stay
+   explicit; an unavailable systemd user manager is not a reason to silently switch to cron.
+6. **S5a verdicts and actions are separate.** Keep one typed classifier result and the per-surface action matrix.
+   Ordinary GitHub/web surfaces retain tagging/shadow behavior; fleet upstream dispatch requires an actual verdict.
+   Disabled, unavailable, timeout or malformed gate output cannot authorize that dispatch, including when a global
+   enable switch would otherwise pass through. Keep measured thresholds and recall limitations; never promote
+   classifier output to trust or operator approval. Record payload-free IDs, provenance and verdict/health metadata.
+   Before hosted processing of private text, define eligible payloads and retention for that reader. Canary integration
+   needs an authorized fixture/provisioning source; never read the retained evaluation cache to obtain one. The
+   injection canary must classify as injection and the benign canary as benign. Reader failure timestamps plus an
+   existing health path at a specified sub-hour cadence support the one-hour outage alert; daily canaries are separate.
+7. **S6 checks remain checks.** Keep `harden-check` read-only. A separately authorized automatic-update operation may
+   renew only the configured expiring interaction limit after checking the exact target/current state and reading it
+   back. No other hardening repair is implied by daily checks. Browser-bot replies and queued messages are not proof
+   of completion; retain API or artifact read-back.
+8. **S9 signing prerequisite.** “Item 24” in S9 means the operator's planned signed-agent-message contract, not
+   Carried 24 in `docs/queue.md`. Define versioned sender/provenance, recipient, payload integrity, expiry and replay
+   handling before choosing a transport. A cloud signature authenticates a message, not an operator approval; require
+   separate operator tokens bound to high-impact actions. The cloud profile installs the signing tool with no keys
+   or authority. Evaluate scoped runtime agent identity later; never ship an operator/shared signing private key.
+   Cloud APIs, outbound pairing and credential scope remain unverified. Reject pairing that exceeds signed-message
+   authority. No S9 experiment, installation or routing change occurs before its stated prerequisites and headroom.
 
 ## Sources (2026-11-07)
 
