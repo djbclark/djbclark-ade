@@ -15,6 +15,20 @@ the whole system without leaving it.
 
 ## Pointers (own homes; not vendored)
 
+The complete component list, with each one's install, update and probe command, is planned as `config/ade.toml`
+`[install]` (`../docs/setup-plan.md` S3, 2026-11-07); until it exists, this list is the index.
+
+- **Paseo** — the only harness: github.com/getpaseo/paseo; its skill bundle
+  (`npx skills add getpaseo/paseo`) and the Paseo plugins of the J6 set, each in its author's repo
+  (`../docs/slim/operator-prompts.md` P2 lists them).
+- **sudo-secretspec** — the secret store every key goes through (AGENTS.md review rule 3):
+  github.com/frdminc/sudo-secretspec (`brew install frdminc/sudo-secretspec/sudo-secretspec`).
+- **peer-link** — Grok Bot's channel code: github.com/frdminc/peer-link; the sender is Hermes'
+  `tell_chief_of_staff.py` (`../skills/tell-chief-of-staff/SKILL.md`).
+- **herdr4paseo / paseo4herdr** — the last herdr bridges: github.com/djbclark/paseo4herdr.
+- **site-djbclark** — the moved skills, `bin/fleet-watch` and `home-agents.md`; its `skills/` is the third
+  `skill-everywhere` root: github.com/djbclark/site-djbclark.
+
 - **fleet-watch** — the launchd fleet change notices to Hermes and the paused upstream watchers' scheduler: site-djbclark
   `bin/fleet-watch` (github.com/djbclark/site-djbclark; it was never in this repo's `bin/`, 2026-11-06).
 - **aiuse** — operator's cross-service usage tool: github.com/djbclark/aiuse
@@ -28,8 +42,8 @@ the whole system without leaving it.
 - **graph-audit workflow** — canonical HERE at
   `../.claude/workflows/graph-audit.js`.
 - **Session hooks** (`context_size_nudge.py`, `precompact_handoff.py`) —
-  tracked in site-private `claude/hooks/` (released `ops-v1.4.5`), live
-  at `~/.claude/hooks/`. Part of the ops suite, not this repo.
+  tracked HERE in `../claude/hooks/` since 2026-11-01 (c2b66a82; this repo is their
+  git home; corrected 2026-11-07), live at `~/.claude/hooks/`.
 - **LiteLLM/ClinePass proxy** — fork at `~/src/litellm`; service config in
   site-djbclark `roles/litellm`; serves `localhost:4000`.
 - **codexbar config** (`~/.config/codexbar/config.json`) — holds real API

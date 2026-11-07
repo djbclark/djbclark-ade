@@ -4,7 +4,9 @@ Plan, 2026-11-07, not started. The operator asked for it the same day, in five p
 machine with every dependency and TUI; automatic updates of djbclark-ade and its dependencies; easy setup of the GitHub
 pieces a new djbclark-ade user needs (the `ade-merge-gate` App first); prompt-injection hardening of GitHub, both at setup and
 on demand, with an ongoing check that the policy stays applied; and one config file for every djbclark-ade option. A sixth
-part was added: prompts and code that hand any browser-only step to Grok Bot. The sections below go in build order:
+part was added: prompts and code that hand any browser-only step to Grok Bot. Later the same day: aiuse and
+sudo-secretspec are hard dependencies, every listed component is in the install and update system except commercial
+products, and Hermes is offered with a do-it-yourself or AI-assisted setup (S3, S3a). The sections below go in build order:
 S1 and S2 come first because every later section reads the config and adds a recipe.
 The research behind S5 is dated 2026-11-07. Sources are listed at the end, and their facts must be re-probed when the work starts.
 
@@ -50,32 +52,101 @@ The research behind S5 is dated 2026-11-07. Sources are listed at the end, and t
 1. **`just install`** (bootstrap: `curl … | sh` is not used). A new machine runs
    `git clone https://github.com/djbclark/djbclark-ade ~/src/djbclark-ade && cd ~/src/djbclark-ade && ./bin/ade-install`,
    which installs `just` if it is missing and then runs the recipe.
-2. **What it installs**, listed in `[install]` and probed, not assumed:
-   - Paseo and the CLI of every provider enabled in `[routing]` (Claude Code, Codex, opencode, omp, Cursor, the
-     antigravity provider's login).
-   - The modern-CLI tools (site-djbclark's `skills/setup-modern-cli` holds the list; it moves into `[install]` or stays
-     there by reference), `graft`, `aiuse`, `gh`, `uv`, `just`.
-   - Each skill linked into every TUI (`bin/skill-everywhere --all`).
-   - The launchd agents, systemd user timers or cron entries `bin/ade-sched` renders.
-   - The secret-deny and hook templates (`bin/ade-template-check`).
+2. **Every dependency is in one system** (operator, 2026-11-07: "All of the listed things should be part of our easy
+   install/update/keep-updated system", commercial things like 1password excepted). The list lives in `[install]`, one
+   entry per component, each with its install, update and probe command. `vendor/README.md` points at it. The
+   components are in three classes:
+   1. **Hard dependencies.** `just install` installs them, `just doctor` fails without them, and the daily job keeps
+      them current:
+      - **sudo-secretspec** (`frdminc/sudo-secretspec`; `brew install frdminc/sudo-secretspec/sudo-secretspec`, or its
+        Linux path). It is the only way a key reaches a tool (review rule 3). Hard dependency by operator ruling of
+        2026-11-07.
+      - **aiuse** (`djbclark/aiuse`; Homebrew or PyPI, per its README). It is the main quota reading for routing.
+        Hard dependency by operator ruling of 2026-11-07. Also **cswap** (`claude-swap`), which aiuse reads.
+      - **Paseo** (`getpaseo/paseo`), its skill bundle (`npx skills add getpaseo/paseo`, set user-invocable-only),
+        and the Paseo plugins of the J6 set, each with its settings from `[install.paseo_plugins]`: session-guard,
+        baton, asks, questions-please (`djbclark/paseo-plugin-questions-please`), tell-agent, vitals, skills,
+        pr-radar, claude-code-entrypoint-env, session-janitor, session-recovery. The ones not chosen are recorded too
+        (zerosub, usage-auto-resume, plan-auto), so `doctor` can tell "not chosen" from "missing".
+      - **`graft`** (`@nanonets/graft`), **`gh`**, **`uv`**, **`just`**, `git`, and the modern-CLI tools
+        (site-djbclark's `skills/setup-modern-cli` list moves into `[install]`).
+      - **The provider command-line tools** for each provider enabled in `[routing]`: Claude Code, Codex, opencode,
+        omp, the Cursor CLI, and Paseo's antigravity provider. The tools install freely; the subscriptions behind them
+        are the user's own, and logging in is the user's step (S3.5).
+      - **The skill roots:** this repo, a site repository (site-djbclark for this operator, `[install.site_repo]` for
+        another user), and `skills-lock.json`'s external skills (today `fastino-glide`), all linked by
+        `bin/skill-everywhere --all`.
+      - **Repo-local state:** the scheduled jobs `bin/ade-sched` renders (launchd, systemd user timers or cron), the
+        hook and secret-deny templates (`bin/ade-template-check`), and the `.claude/settings.json` mirror of the Paseo
+        skill overrides.
+   2. **Offered, on by default for this operator, asked for a new user.**
+      - **Hermes** (S3a).
+      - **peer-link** (`frdminc/peer-link`), the Grok Bot channel, with `tell_chief_of_staff.py` (needs Hermes).
+      - **The firecrawl router** (`bin/firecrawl-router`) pointed at a firecrawl endpoint: this operator's
+        self-hosted one on Hyades, or none.
+      - **The LiteLLM proxy** (the fork at `~/src/litellm`, site-djbclark's `roles/litellm`), Hermes' fallback.
+   3. **Optional, off by default:** the `herdr4paseo` and `paseo4herdr` bridges (`djbclark/paseo4herdr`) and
+      `bin/herdr-server-run`, the last herdr pieces, only for someone who still runs herdr.
+   4. **Never installed:** commercial products and their private material: 1password (site-private's `skills/1password`),
+      and any paid subscription itself. Repositories that *use* djbclark-ade (tendcf, nix2cf, Plektra, paseo-runner)
+      are not components either; site-private is cloned only when the user already has access to it.
 3. **How it installs:** Homebrew on the Mac, plus Homebrew or the distribution's package manager on Linux (decided per
-   tool, recorded in `[install]`). Each tool is installed by its normal path. Nothing is version-pinned (standing order 8).
-4. **Logins** are a checklist, not automated: each provider's own `login` command, and `sudo-secretspec` for API keys.
-   `just doctor` reports what is missing, never a secret's value.
-5. Starting point: the decided but unbuilt proposal `docs/history/ade-everywhere-proposal.md` (2026-10-20). Keep its
-   answered questions and re-base it on Paseo and the slim-down's tool list.
+   component, recorded in `[install]`). npm, uv/pipx or a git clone are used where that is a component's normal path.
+   Nothing is version-pinned (standing order 8).
+4. **`just doctor`** probes every component: hard dependencies fail, offered ones that were chosen fail, and optional
+   ones only report. A probe checks that the tool runs (`--version` or its own health check), not just that a file exists.
+5. **Logins** are a checklist, not automated: each provider's own `login` command, the GitHub login, and
+   `sudo-secretspec` for API keys. `just doctor` reports what is missing, never a secret's value.
+6. Starting point: the decided but unbuilt proposal `docs/history/ade-everywhere-proposal.md` (2026-10-20). Keep its
+   answered questions and re-base it on Paseo and this component list.
 
-## S4. Updates
+### S3a. Hermes: offered install and basic setup
 
-1. **`just update`** extends `bin/ade-update`, which today updates only the checkout:
-   - djbclark-ade itself, as now (fast-forward, relink, changelog delta).
-   - `brew upgrade` or the distribution's upgrade for the tools in `[install]`.
-   - `paseo` and its plugins.
-   - The provider CLIs.
-   - `npx skills` updates for installed skill bundles.
-2. **Automatic:** `bin/ade-sched` installs a daily `ade update --auto` job. It fast-forwards only (never merges or
-   rebases), skips while a Paseo agent is mid-turn on the machine, and pings the operator on failure. A tool whose upgrade
-   breaks `just doctor` gets one retry and is then reported, never rolled back silently.
+`just install` asks whether to install Hermes (operator, 2026-11-07: "offer to install and do basic setup of hermes, but
+allow for the user to do that setup either themselves or with interactive AI assistance"). The upstream project and its
+install path are confirmed when this is built; the live setup is the one under `~/.hermes/`. The user picks one of
+three paths:
+
+1. **Skip.** Hermes is recorded as not chosen, and `doctor` stays quiet about it.
+2. **Install, then set it up myself.** The tool is installed by its normal path, then a checklist is printed with the
+   exact files and commands for a basic setup and a link to Hermes' own docs:
+   - a model or provider (through the LiteLLM proxy or directly);
+   - the search backend (firecrawl, if chosen);
+   - the djbclark-ade skills root;
+   - the vendored `claude-collaboration` skill;
+   - the Claude MCP bridge;
+   - `tell_chief_of_staff`'s Keychain items (its `setup.sh`).
+
+   `just doctor hermes` checks each item.
+3. **Install, then set it up with AI help.** The tool is installed, then `just hermes-setup` opens a Claude Code session
+   with the checked-in prompt `prompts/setup/hermes.md`.
+   - The session walks the same checklist one step at a time, each as a card with the recommended option first.
+   - It runs what it can, stops for each secret (the user types it into `sudo-secretspec`, never into the chat) and
+     for each choice.
+   - It finishes with `just doctor hermes`.
+
+Either path can be re-run later (`just hermes-setup`, `just hermes-setup --self`), and `just update` keeps an installed
+Hermes current like every other component.
+
+## S4. Updates and keeping everything current
+
+1. **`just update`** updates every installed component in `[install]` with that component's own update command:
+   - djbclark-ade itself, as `bin/ade-update` does today (fast-forward, relink, changelog delta);
+   - the site repository and the external skills;
+   - Paseo, its skill bundle and each plugin;
+   - sudo-secretspec, aiuse, cswap, graft, gh and the modern-CLI tools;
+   - the provider CLIs;
+   - the chosen offered components: Hermes, peer-link, the LiteLLM fork through its upstream-tracking rule, standing
+     order 8.
+
+   It ends with `just doctor`.
+2. **Automatic:** `bin/ade-sched` installs a daily `just update --auto` job.
+   - It fast-forwards only (never merges or rebases).
+   - It skips while a Paseo agent is mid-turn on the machine.
+   - It pings the operator on failure.
+   - A component whose upgrade breaks `just doctor` gets one retry and is then reported, never rolled back silently.
+3. **New components:** a component added to `[install]` on master is installed on each machine by that machine's next
+   `just update`, so adding a dependency is one table entry and one PR.
 
 ## S5. GitHub hardening against prompt injection
 
