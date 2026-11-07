@@ -102,5 +102,5 @@ Test those on a throwaway target before depending on them, and say so in a repor
 
 ## Not this skill
 
-Terminal-only or headless-browser work needs no screen control: use the `ade-paseo` skill, a browser tool, or
+Terminal-only or headless-browser work needs no screen control: use Paseo's own `paseo` skill, a browser tool, or
 plain shell. Orca, `orca computer` and `computer-use` are retired.

@@ -432,3 +432,46 @@ def test_source_paseo_failure_prints_nothing_and_says_why_on_stderr(box):
     assert (r.returncode, r.stdout) == (0, "")
     assert "paseo ls exited 1" in r.stderr
     assert box.run("--source", "paseo", "--json").stdout == "[]\n"
+
+
+def _module():
+    import importlib.machinery
+    import importlib.util
+    loader = importlib.machinery.SourceFileLoader("context_watch_mod", str(TOOL))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+def test_clean_text_is_its_own_copy_and_strips_what_fleet_py_stripped():
+    """2026-11-06 (slim-down E5): clean_text and PASEO_ID live in context-watch itself, so it no longer loads
+    session-finder's fleet.py (which E3 deletes)."""
+    src = TOOL.read_text()
+    assert "fleet.py\"" not in src and "import fleet" not in src and "_fleet(" not in src
+    cw = _module()
+    t = cw.clean_text
+    assert t("a\x1b[31mred\x1b[0m b") == "ared b"                       # CSI
+    assert t("x\x1b]52;c;cHduZWQ=\x07y") == "xy"                      # OSC, BEL-terminated
+    assert t("x\x1b]0;title\x1b\\y") == "xy"                          # OSC, ST-terminated
+    assert t("a‮b⁦c​d⁩") == "abcd"               # bidi override and isolates, zero-width
+    assert t("a\x00b\x07c\x7fd\x85e") == "abcde"                      # C0, DEL, C1
+    assert t("aㅤb⠀c️d\U000e0100e") == "abcde"          # fillers, blank braille, variation selectors
+    assert t("  line one\nline\ttwo   ") == "line one\nline\ttwo"  # newline and tab kept; Zl dropped; stripped
+    assert cw._plain("a\nb\t c") == "a b c"
+    assert cw.PASEO_ID.fullmatch(ID_A) and not cw.PASEO_ID.fullmatch("../" + ID_A) and not cw.PASEO_ID.fullmatch(ID_A.upper())
+
+
+def test_clean_text_matches_fleet_py_while_it_exists():
+    fleet_py = TOOL.parent.parent / "skills" / "session-finder" / "fleet.py"
+    if not fleet_py.exists():
+        pytest.skip("fleet.py is gone (E3): the copy is the only one")
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("fleet_for_parity", fleet_py)
+    fleet = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fleet)
+    cw = _module()
+    samples = ["plain", "a\x1b[2Jb", "x\x1b]52;c;cHduZWQ=\x07\x1b[2J\nFAKE", "‮rtl⁩", "z​w️",
+               "\x00\x1f\x7f\x9f", "  \t pad \n", "\U000e01efᅟᅠ"]
+    assert [cw.clean_text(x) for x in samples] == [fleet.clean_text(x) for x in samples]
+    assert cw.PASEO_ID.pattern == fleet.PASEO_ID.pattern

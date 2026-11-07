@@ -1,0 +1,4 @@
+# .worktreeinclude: ignored files copied into a new Paseo worktree of this repo.
+# Deliberately empty (2026-11-06): the only ignored paths are regenerable caches
+# (/graft/, __pycache__/, .ruff_cache/, .zcode/) or local
+# state that must not follow a worktree; secrets come from sudo-secretspec.

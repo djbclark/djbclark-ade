@@ -33,10 +33,9 @@
   "models": {
     "grok": {
       "label": "Grok 4.7",
-      "pool_label": "Grok",
+      "pool_label": "Cursor",
       "routes": [
-        {"kind": "acp", "agent": "grok", "model": "grok-4.7", "set": ["reasoning_effort=high"]},
-        {"kind": "acp", "agent": "cursor", "model": "grok-4.7"}
+        {"kind": "acp", "agent": "cursor", "model": "grok-4.7", "set": ["reasoning_effort=high"]}
       ]
     },
     "fable": {

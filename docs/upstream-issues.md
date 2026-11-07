@@ -395,8 +395,7 @@ prompt "Reply with exactly: OK".
    sends a text chunk `✓ completed · cache 6/7 messages · 3.0k cache-read tokens`
    with `messageId: "turninfo_<uuid>"`. A client that concatenates agent text
    (every headless one) returns `OK✓ completed · …` as the answer. It belongs in
-   `_meta` / a usage notification, or behind an option. Our workaround: drop
-   chunks whose `messageId` starts with `turninfo_`.
+   `_meta` / a usage notification, or behind an option. Our workaround was to drop chunks whose `messageId` starts with `turninfo_` (gone with the zcode adapter, slim-down E9, 2026-11-06).
 
 Evidence: `~/.local/state/acp-run/20261009-000130-zcode-5906.jsonl` (before the
 workaround) and `20261009-000400-zcode-12981.jsonl` (after). Note the JSONL
@@ -425,8 +424,7 @@ Filed / found (2026-10-09):
    #312 closed by 0.67.0's opt-out (#313, 690172a): config
    `session.showCompletionStatus: false` or env
    `ZCODE_ACP_SHOW_COMPLETION_STATUS=0` omits the successful-turn status line.
-   0.67.0 is installed here; our two `acp-run` workarounds stay in place
-   (harmless) until someone switches `acp-run` to the opt-out.
+   zcode was retired 2026-11-06 (E9; its acp-run adapter, the turninfo filter and `zcode-denylist-shim.cjs` deleted) and acp-run itself goes in Wave 6, so nothing is left to switch.
 
 ## 8. ralph-orchestrator — a timed-out lifecycle hook is killed, its children keep running (draft, 2026-10-09)
 
@@ -533,8 +531,7 @@ API path; a thumbs-up does the same job unless the thread goes quiet):
 > through a multiplexer (herdr, tmux `paste-buffer -p`) hits the collapse
 > threshold, not just people pasting.
 
-**Our workaround:** `bin/self-slash` refuses arguments over 300 characters
-(`SELF_SLASH_MAX` overrides) and has `--dry-run` (commit `bfd7a83`). Keep the
+**Our workaround was** `bin/self-slash` refusing arguments over 300 characters (`SELF_SLASH_MAX`) with a `--dry-run` (commit `bfd7a83`); it was deleted 2026-11-06 (slim-down E4), and herdr was retired 2026-10-31, so this delivery path no longer exists here. Keep the
 focus text in a state file and reference it from a short command.
 
 **Evidence:** `~/.local/state/self-slash.log` lines at 03:50:37 and 03:51:12
@@ -544,9 +541,7 @@ and the helm-auto learnings note in the ClaudeHelm scratchpad
 
 ## 10. herdr — session refs from an ACP launcher: comment-sized addendum for herdrdev/herdr#3184 (draft, 2026-10-09)
 
-**Status: draft, not filed.** Post only after the acp-run change below has
-been tested on a live pane; until then the addendum's claim is from source,
-not from a run.
+**Status: moot, not filed** (2026-11-07): herdr was retired 2026-10-31 and acp-run is a one-cycle shim removed in Wave 6, so the live-pane test and the launcher-side fix below will not happen.
 
 **Repo:** [herdrdev/herdr](https://github.com/herdrdev/herdr). Collie
 ([AltanS/collie](https://github.com/AltanS/collie), 1.17.2) only shows the
@@ -860,8 +855,7 @@ its own timestamps, so one shared cursor cannot be right for all of them.
 
 Key `last_harvest` by `f"{project}::{source}"` (reading the bare project key as
 a fallback for existing state), or accept several `--source` values in one run.
-Workaround here: `bin/skillopt-night` swaps a per-source cursor into
-`state.json` before each run.
+Workaround here was `bin/skillopt-night` swapping a per-source cursor into `state.json` before each run (deleted 2026-11-07 with the nightly SkillOpt cycle, slim-down E10).
 
 ### Searched first
 
@@ -931,8 +925,7 @@ and source; found by the 2026-10-12 re-search on "since_iso"). Related single-so
 [#287](https://github.com/microsoft/SkillOpt/pull/287) (exclude Codex replay
 sessions), [#247](https://github.com/microsoft/SkillOpt/issues/247) /
 [#280](https://github.com/microsoft/SkillOpt/pull/280) (`revert`).
-Here: bin/skillopt_sources.py and bin/skillopt-night are the working
-adapters the PR would generalise. Operator approved filing; re-searched first
+Here: bin/skillopt_sources.py and bin/skillopt-night were the working adapters the PR would generalise (both deleted 2026-11-07, E10; they are at tag `pre-slim-2026-11-06`). Operator approved filing; re-searched first
 (adding "entry_points", "external harvester", "third-party source", "register
 source"; PR #153's "seam" is one more if-branch, not a registry). Filed with an
 offer to send the PR: https://github.com/microsoft/SkillOpt/issues/314.
@@ -1057,7 +1050,7 @@ session file). `/clear` behaves the same way and rebinds the agent to a fresh Cl
 **Expected:** `resolveSlashCommandInvocation` treats clear/compact/context/usage as root-only
 built-ins; a send from an agent should either run them out of band (PR #7072, merged as #7169 on
 2026-10-16, says it restores exactly that for agent-to-agent sends) or refuse, never hand them to the
-model as prose. A self-send is the case `bin/self-slash` needs, so it strips `PASEO_AGENT_ID` first.
+model as prose. A self-send was the case `bin/self-slash` needed, so it stripped `PASEO_AGENT_ID` first (deleted 2026-11-06, E4; successors now start with `env -u PASEO_AGENT_ID -u PASEO_AGENT_CWD paseo run …`, `skills/handoff`).
 
 **Evidence:** scratch Haiku agent fe96fd29, timeline and `~/.claude/projects/.../585afa3c-*.jsonl`
 (one `compact_boundary`); `bin/self-slash` Paseo backend, verified the same day.
@@ -1181,7 +1174,7 @@ drops the agent identity and its subagent children.
 
 **ade-side workaround (2026-10-23):** `bin/paseo-set-model` (`set <agent> <model>`, `list --json`) calls the daemon's
 `set_agent_model_request` through the bundled CLI's own client, run in Paseo's Electron node; it keeps the agent id and is
-what `bin/claude-fleet-governor` uses to move live agents between models.
+what the fleet governor (deleted 2026-11-07, slim-down E7) used to move live agents between models.
 
 ### Searched first
 
@@ -1204,8 +1197,7 @@ so `claude-opus-5-5` fails with a 400 version gate: relevant to anyone downshift
    open question is whether `setModel` on a *running* turn should be refused or queued (the UI picker's current
    behaviour decides it).
 2. **The ade-side workaround** (`bin/self-slash --finish --successor`, handoff Step 9, the context hook, 24 tests):
-   built in about 15 minutes of wall-clock agent time on 2026-10-23, research of the Paseo CLI source included. It exists only
-   because the CLI lacks this command, and it still cannot keep the agent id, labels or subagent links.
+   built in about 15 minutes of wall-clock agent time on 2026-10-23, research of the Paseo CLI source included. It existed only because the CLI lacks this command (deleted 2026-11-06, E4, with its tests and the self-slash code in `context_size_nudge.py`; the handoff skill's `paseo run` successor is what remains), and it still cannot keep the agent id, labels or subagent links.
 
 ## 10. Paseo — the start-up skill sync writes through a symlinked skill directory (filed 2026-10-23)
 
@@ -1216,9 +1208,7 @@ about duplicate Codex entries and non-default homes).
 `~/.claude/skills/<n>` and `~/.agents/skills/<n>`. `assertManagedPathsStayInsideSkill` lstat-checks every segment
 below the skill dir but never the skill dir itself, so a symlinked skill dir is written through into the user's own
 checkout; `syncDirectoryFiles` also updates without comparing the on-disk hash with the manifest (deletes do).
-Reproduced with the shipped 0.13.0-beta.1 `syncSkills` in a throwaway directory. Our workaround since 2026-11-02 is
-the `ade-` prefix on the vendored skills (docs/skill-everywhere.md section 3a); the empty skill selection alone did
-not hold.
+Reproduced with the shipped 0.13.0-beta.1 `syncSkills` in a throwaway directory. Our workaround from 2026-11-02 was the `ade-` prefix on the vendored skills; the six `skills/ade-paseo*` were deleted 2026-11-06 (Wave 3b, R2-2) and Paseo's own shipped skills replace them through the skill-selection switch (docs/skill-everywhere.md section 3a, operator batch); the empty skill selection alone did not hold.
 Addendum 2026-10-24: the setting is per daemon home, while every daemon syncs into the one real `~/.agents/skills`
 and `~/.claude/skills`. A second daemon with another home (Paseo's own `scripts/dev-daemon.sh`, home
 `.dev/paseo-home`, no selection) rewrote the symlinked skills at 09:26:49 and 10:05:46 EDT. Suggest to upstream: the

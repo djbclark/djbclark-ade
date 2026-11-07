@@ -1,0 +1,25 @@
+#!/usr/bin/env python3
+"""A fake `load-watch` for tests/test_acp_dispatch.py: `admit` answers per FAKE_LW_MODE (ok | hot | usage) and hands out
+a reservation; `release` and `renew` are logged. Every call is one JSON line in $FAKE_LW_LOG, with whether any LW_*
+variable reached it (`lw_vars`)."""
+import json
+import os
+import sys
+import time
+
+args = sys.argv[1:]
+log = os.environ.get("FAKE_LW_LOG")
+if log:
+    with open(log, "a") as fh:
+        fh.write(json.dumps({"argv": args, "lw_vars": sorted(k for k in os.environ if k.startswith("LW_"))}) + "\n")
+if args[:1] == ["admit"]:
+    mode = os.environ.get("FAKE_LW_MODE", "ok")
+    if mode == "usage":
+        print("load-watch admit: bad arguments", file=sys.stderr)
+        sys.exit(2)
+    if mode == "hot":
+        print(json.dumps({"load1": 99.0, "per_core": 12.4, "waited_s": 0, "refused": ["load"]}))
+        sys.exit(75)
+    print(json.dumps({"load1": 1.0, "per_core": 0.1, "waited_s": 0, "reservation": f"r-{os.getpid()}-{time.time_ns()}"}))
+    sys.exit(0)
+sys.exit(0)

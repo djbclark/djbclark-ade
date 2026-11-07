@@ -224,14 +224,12 @@ def test_unknown_only_name_is_usage_error(env):
     assert run_main(mod, "--dest", str(dest), "--only", "nope") == 2
 
 
-def test_pi_backup_covers_sessions_and_acp_mapping_but_not_auth(tmp_path):
+def test_retired_tui_credential_paths_stay_excluded():
+    """Named exception (slim-down E9h Q4): the stores of retired TUIs are gone, their credential exclusions stay."""
     mod = load()
-    home = tmp_path / "home"
-    store = next(store for store in mod.build_stores(home) if store["name"] == "pi")
-    assert store["roots"] == [("sessions", home / ".pi/agent/sessions"),
-                              ("acp-session-map.json", home / ".pi/pi-acp/session-map.json")]
-    assert store["file_labels"] == ["acp-session-map.json"]
-    assert ".pi/agent/auth.json" in mod.EXCLUDE_PATHS
+    for path in (".pi/agent/auth.json", ".zcode/v2/credentials.json", ".copilot/data.db", ".local/share/crush/crush.json",
+                 ".cline/data/settings/providers.json", ".gemini/antigravity-acp/acp_token.json"):
+        assert path in mod.EXCLUDE_PATHS
     assert mod.is_excluded_name("auth.json")
 
 
@@ -639,6 +637,30 @@ def real(tmp_path, monkeypatch):
     return load(), home, tmp_path
 
 
+def fixture_stores(mod, monkeypatch):
+    """Generic store shapes for engine tests that used to borrow a retired TUI's store (E10, 2026-11-06): a sqlite
+    store, a sqlite tree with `{stem}.meta` sidecars, a files store with a single-file root. Added to the real list."""
+    real_build = mod.build_stores
+
+    def stores(h):
+        extra = [
+            {"name": "crush-acp", "kind": "sqlite", "files": [h / ".local/share/crush-acp/crush.db"]},
+            {"name": "zcode-db", "kind": "sqlite", "files": [h / ".zcode/cli/db/db.sqlite", h / ".zcode/v2/tasks-index.sqlite"]},
+            {"name": "crush-files", "kind": "files", "roots": [("projects.json", h / ".local/share/crush/projects.json")],
+             "file_labels": ["projects.json"]},
+            {"name": "muse", "kind": "files", "roots": [("sessions", h / ".local/share/muse/sessions"),
+                                                        ("tui-history.jsonl", h / ".local/share/muse/tui-history.jsonl")],
+             "file_labels": ["tui-history.jsonl"]},
+            {"name": "cline-db", "kind": "sqlite-tree", "root": h / ".cline/data/db", "dbs": ["*.db"], "sidecars": [],
+             "required": []},
+            {"name": "antigravity-cli-db", "kind": "sqlite-tree", "root": h / ".gemini/antigravity-cli",
+             "dbs": ["conversations/*.db", "conversation_summaries.db"], "sidecars": ["{stem}.meta"], "required": []},
+        ]
+        return real_build(h) + extra
+
+    monkeypatch.setattr(mod, "build_stores", stores)
+
+
 def default_generation(home):
     gens = [p for p in (home / ".local/state/ade/backups").iterdir() if not p.name.endswith(".part")]
     assert len(gens) == 1
@@ -673,8 +695,9 @@ def test_strict_stores_exits_1_on_a_missing_store_and_still_writes_the_generatio
     assert mod.main(["--only", "handoffs", "--dry-run", "--dest", str(home / "o2")]) == 0
 
 
-def test_a_store_with_some_paths_missing_is_recorded_per_path(real):
+def test_a_store_with_some_paths_missing_is_recorded_per_path(real, monkeypatch):
     mod, home, _ = real
+    fixture_stores(mod, monkeypatch)
     con = make_wal_db(home / ".zcode/cli/db/db.sqlite", ["x"])
     con.close()  # .zcode/v2/tasks-index.sqlite is absent
     dest = home / "out" / "bk"
@@ -807,25 +830,7 @@ def test_check_schemas_counts_an_unopenable_database_apart_from_credential_names
     assert "0 unexplained credential-looking name(s), 0 symlink problem(s), 0 missing, 1 unopenable, 0 excluded" in out
 
 
-# --- Codex pass 2 on PR 24 (2026-10-20): grok memory roots, symlinked roots, dry-run sidecars ---
-
-def test_grok_memory_v2_and_memtrace_are_backed_up_and_counted_by_the_dry_run(real, capsys):
-    mod, home, _ = real
-    (home / ".grok/memory-v2").mkdir(parents=True)
-    (home / ".grok/memory-v2/x.json").write_text('{"m": 1}')
-    (home / ".grok/memtrace/t1").mkdir(parents=True)
-    (home / ".grok/memtrace/t1/trace.jsonl").write_text('{"t": 1}\n')
-    assert mod.main(["--only", "grok", "--dry-run", "--json", "--dest", str(home / "dry")]) == 0
-    plan = json.loads(capsys.readouterr().out)["stores"][0]
-    dest = home / "out" / "bk"
-    assert mod.main(["--only", "grok", "--dest", str(dest)]) == 0
-    assert (dest / "grok/memory-v2/x.json").read_text() == '{"m": 1}'
-    assert (dest / "grok/memtrace/t1/trace.jsonl").is_file()
-    entry = manifest_of(dest)["stores"][0]
-    assert plan["file_count"] == entry["file_count"] == 2 and plan["bytes"] >= entry["bytes"]  # plan counts the -wal too
-    # sessions is absent: recorded per path, the store stays ok because other roots exist
-    assert entry["status"] == "ok" and entry["missing"] == [str(home / ".grok/sessions")]
-
+# --- Codex pass 2 on PR 24 (2026-10-20): symlinked roots, dry-run sidecars ---
 
 def codex_layout(home):
     """This Mac's layout: ~/.codex/sessions and ~/.codex/session_index.jsonl are links into a runtime dir under HOME."""
@@ -844,7 +849,6 @@ def codex_layout(home):
 
 def contents(dest):
     return "".join(p.read_text(errors="replace") for p in dest.rglob("*") if p.is_file() and not p.is_symlink())
-
 
 def test_codex_root_links_into_home_are_followed_and_recorded(real, capsys):
     mod, home, _ = real
@@ -883,13 +887,13 @@ def test_a_chain_of_root_links_inside_home_is_followed_and_recorded_with_the_fin
     final.mkdir(parents=True)
     (final / "chat.jsonl").write_text("CHAIN-FILE")
     os.symlink(final, home / "data/hop")
-    (home / ".grok").mkdir()
-    os.symlink(home / "data/hop", home / ".grok/sessions")
+    (home / ".omp/agent").mkdir(parents=True)
+    os.symlink(home / "data/hop", home / ".omp/agent/sessions")
     dest = home / "out" / "bk"
-    assert mod.main(["--only", "grok", "--dest", str(dest)]) == 0
-    assert (dest / "grok/sessions/chat.jsonl").read_text() == "CHAIN-FILE"
+    assert mod.main(["--only", "omp", "--dest", str(dest)]) == 0
+    assert (dest / "omp/sessions/chat.jsonl").read_text() == "CHAIN-FILE"
     entry = manifest_of(dest)["stores"][0]
-    assert entry["root_symlinks"] == [{"root": "sessions", "link": str(home / ".grok/sessions"), "target": str(final)}]
+    assert entry["root_symlinks"] == [{"root": "sessions", "link": str(home / ".omp/agent/sessions"), "target": str(final)}]
 
 
 def test_a_symlinked_file_root_outside_home_is_an_error_not_copied(real, capsys):
@@ -916,28 +920,28 @@ def test_a_symlinked_directory_root_outside_home_is_an_error_not_walked(real, ca
     outside = tmp / "outside-dir"
     outside.mkdir()
     (outside / "chat.jsonl").write_text("SENTINEL-SYMLINK-DIR-TARGET")
-    (home / ".grok").mkdir()
-    link = home / ".grok/sessions"
+    (home / ".omp/agent").mkdir(parents=True)
+    link = home / ".omp/agent/sessions"
     os.symlink(outside, link)
-    assert mod.main(["--only", "grok", "--dry-run", "--json", "--dest", str(home / "dry")]) == 1
+    assert mod.main(["--only", "omp", "--dry-run", "--json", "--dest", str(home / "dry")]) == 1
     plan = json.loads(capsys.readouterr().out)["stores"][0]
     assert plan["file_count"] == 0 and "symlink target outside HOME" in plan["errors"][0]["error"]
     dest = home / "out" / "bk"
-    assert mod.main(["--only", "grok", "--dest", str(dest)]) == 1
-    assert "SENTINEL-SYMLINK-DIR-TARGET" not in contents(dest) and not (dest / "grok/sessions").exists()
+    assert mod.main(["--only", "omp", "--dest", str(dest)]) == 1
+    assert "SENTINEL-SYMLINK-DIR-TARGET" not in contents(dest) and not (dest / "omp/sessions").exists()
     entry = manifest_of(dest)["stores"][0]
     assert entry["status"] == "partial" and "symlink target outside HOME" in entry["errors"][0]["error"]
 
 
 def test_a_dangling_root_link_is_an_error_not_a_missing_store(real, capsys):
     mod, home, _ = real
-    (home / ".grok").mkdir()
-    link = home / ".grok/sessions"
+    (home / ".omp/agent").mkdir(parents=True)
+    link = home / ".omp/agent/sessions"
     os.symlink(home / "gone", link)
-    assert mod.main(["--only", "grok", "--dry-run", "--json", "--dest", str(home / "dry")]) == 1
+    assert mod.main(["--only", "omp", "--dry-run", "--json", "--dest", str(home / "dry")]) == 1
     assert "dangling symlink" in json.loads(capsys.readouterr().out)["stores"][0]["errors"][0]["error"]
     dest = home / "out" / "bk"
-    assert mod.main(["--only", "grok", "--dest", str(dest)]) == 1
+    assert mod.main(["--only", "omp", "--dest", str(dest)]) == 1
     entry = manifest_of(dest)["stores"][0]
     assert entry["status"] == "partial" and str(link) not in entry["missing"]
     assert entry["errors"][0]["source"] == str(link) and "dangling symlink" in entry["errors"][0]["error"]
@@ -1076,8 +1080,9 @@ def test_links_above_the_last_glob_component_are_one_skip_each_whatever_they_lea
     assert plan["file_count"] == 2 and plan["skipped_count"] == 3
 
 
-def test_antigravity_conversations_behind_a_linked_directory_are_skipped(real):
+def test_antigravity_conversations_behind_a_linked_directory_are_skipped(real, monkeypatch):
     mod, home, tmp = real
+    fixture_stores(mod, monkeypatch)
     outside = tmp / "convs"
     make_wal_db(outside / "c1.db", ["SECRET-LINKED-CONV-ROW"]).close()
     (outside / "c1.meta").write_text("{}")
@@ -1268,7 +1273,7 @@ def test_destination_inside_a_followed_tree_root_target_is_refused(real, capsys)
 PARENT_MARK = "SENTINEL-PARENT-LINK-ROW"
 PARENT_LAYOUTS = {  # store -> (the linked parent below HOME, what it holds)
     "cursor-chats": (".cursor", "chats/hashA/uuid1/store.db"),
-    "grok": (".grok", "sessions/s1/chat.jsonl"),
+    "omp": (".omp", "agent/sessions/s1/chat.jsonl"),
     "codex-db": (".codex", "state_5.sqlite"),
 }
 
@@ -1377,9 +1382,9 @@ def test_a_file_that_becomes_a_symlink_after_listing_is_refused_not_dereferenced
     mod, home, tmp = real
     marker = tmp / "marker.txt"
     marker.write_text("SENTINEL-SWAPPED-IN-TARGET")
-    (home / ".grok/sessions/p1").mkdir(parents=True)
-    (home / ".grok/sessions/p1/chat.jsonl").write_text("swapped\n")
-    (home / ".grok/sessions/p1/other.jsonl").write_text("kept\n")
+    (home / ".omp/agent/sessions/p1").mkdir(parents=True)
+    (home / ".omp/agent/sessions/p1/chat.jsonl").write_text("swapped\n")
+    (home / ".omp/agent/sessions/p1/other.jsonl").write_text("kept\n")
     real_skip = mod.skip_reason
 
     def swapping(directory, name, mode, excluder):
@@ -1392,13 +1397,13 @@ def test_a_file_that_becomes_a_symlink_after_listing_is_refused_not_dereferenced
 
     monkeypatch.setattr(mod, "skip_reason", swapping)
     dest = home / "out" / "bk"
-    assert mod.main(["--only", "grok", "--dest", str(dest)]) == 1
+    assert mod.main(["--only", "omp", "--dest", str(dest)]) == 1
     assert b"SENTINEL-SWAPPED-IN-TARGET" not in all_bytes(dest)
-    assert not (dest / "grok/sessions/p1/chat.jsonl").exists()
-    assert (dest / "grok/sessions/p1/other.jsonl").read_text() == "kept\n"
+    assert not (dest / "omp/sessions/p1/chat.jsonl").exists()
+    assert (dest / "omp/sessions/p1/other.jsonl").read_text() == "kept\n"
     entry = manifest_of(dest)["stores"][0]
     assert entry["status"] == "partial"
-    assert [e["source"] for e in entry["errors"]] == [str(home / ".grok/sessions/p1/chat.jsonl")]
+    assert [e["source"] for e in entry["errors"]] == [str(home / ".omp/agent/sessions/p1/chat.jsonl")]
     assert "became a symlink" in entry["errors"][0]["error"]
 
 
@@ -1491,8 +1496,9 @@ def test_copy_regular_refuses_a_fifo_without_blocking(real):
 
 # --- Codex pass 8 on PR 24 (2026-10-20): Muse tui-history.jsonl, dry-run exclusion parity, strict schema check ---
 
-def test_muse_backs_up_tui_history_and_records_it_missing_when_absent(real):
+def test_muse_backs_up_tui_history_and_records_it_missing_when_absent(real, monkeypatch):
     mod, home, _ = real
+    fixture_stores(mod, monkeypatch)
     muse = home / ".local/share/muse"
     (muse / "sessions").mkdir(parents=True)
     (muse / "sessions/s1.jsonl").write_text('{"m": 1}\n')
@@ -1511,8 +1517,9 @@ def test_muse_backs_up_tui_history_and_records_it_missing_when_absent(real):
     assert entry["missing"] == [str(muse / "tui-history.jsonl")]
 
 
-def test_dry_run_skips_an_excluded_sqlite_tree_db_like_the_real_copy(real, capsys):
+def test_dry_run_skips_an_excluded_sqlite_tree_db_like_the_real_copy(real, capsys, monkeypatch):
     mod, home, _ = real
+    fixture_stores(mod, monkeypatch)
     db_dir = home / ".cline/data/db"
     make_wal_db(db_dir / "ok.db", ["row"]).close()
     make_wal_db(db_dir / "data.db", ["SENTINEL-EXCLUDED-DB"]).close()  # data.db is an excluded credential name
@@ -1531,15 +1538,15 @@ def test_dry_run_skips_an_excluded_sqlite_tree_db_like_the_real_copy(real, capsy
 
 def test_check_schemas_counts_a_missing_database_and_fails_only_with_strict_stores(real, capsys):
     mod, home, _ = real
-    assert mod.main(["--check-schemas", "--only", "grok-db"]) == 0  # ~/.grok/worktrees.db does not exist
+    assert mod.main(["--check-schemas", "--only", "omp-db"]) == 0  # ~/.omp/agent/history.db does not exist
     out = capsys.readouterr().out
-    assert f"grok-db: {home / '.grok/worktrees.db'}: missing" in out
+    assert f"omp-db: {home / '.omp/agent/history.db'}: missing" in out
     assert "0 unexplained credential-looking name(s), 0 symlink problem(s), 1 missing" in out
-    assert mod.main(["--check-schemas", "--strict-stores", "--only", "grok-db"]) == 1
+    assert mod.main(["--check-schemas", "--strict-stores", "--only", "omp-db"]) == 1
     out = capsys.readouterr().out
     assert "0 symlink problem(s), 1 missing" in out
-    make_wal_db(home / ".grok/worktrees.db", ["x"]).close()
-    assert mod.main(["--check-schemas", "--strict-stores", "--only", "grok-db"]) == 0
+    make_wal_db(home / ".omp/agent/history.db", ["x"]).close()
+    assert mod.main(["--check-schemas", "--strict-stores", "--only", "omp-db"]) == 0
     assert "0 symlink problem(s), 0 missing" in capsys.readouterr().out
 
 
@@ -1588,6 +1595,7 @@ def test_a_sidecar_swapped_for_a_symlink_after_the_check_is_an_error_not_followe
 
 def test_a_single_file_root_is_copied_through_copy_regular_and_a_swapped_link_is_refused(real, monkeypatch):
     mod, home, tmp = real
+    fixture_stores(mod, monkeypatch)
     muse = home / ".local/share/muse"
     (muse / "sessions").mkdir(parents=True)
     history = muse / "tui-history.jsonl"
@@ -1615,8 +1623,9 @@ def test_a_single_file_root_is_copied_through_copy_regular_and_a_swapped_link_is
     assert entry["status"] == "partial" and "became a symlink" in entry["errors"][0]["error"]
 
 
-def test_a_followed_single_file_root_link_is_copied_from_its_target(real):
+def test_a_followed_single_file_root_link_is_copied_from_its_target(real, monkeypatch):
     mod, home, _ = real
+    fixture_stores(mod, monkeypatch)
     muse = home / ".local/share/muse"
     (muse / "sessions").mkdir(parents=True)
     (home / "data").mkdir()
@@ -1665,6 +1674,7 @@ def test_ro_connect_refuses_a_swap_between_the_nofollow_open_and_sqlite_opening_
 
 def test_a_linked_sqlite_source_is_refused_when_swapped_after_the_check_through_the_store_path(real, monkeypatch):
     mod, home, tmp = real
+    fixture_stores(mod, monkeypatch)
     outside = tmp / "outside2.db"
     make_wal_db(outside, ["SENTINEL-SWAPPED-STORE-ROW"]).close()
     db = home / ".local/share/crush-acp/crush.db"
@@ -1700,8 +1710,9 @@ def test_wal_size_ignores_a_symlinked_wal(real):
 
 # --- Codex pass 11 on PR 24 (2026-10-20): Crush files, a walk that never trusts a path string, optional sidecars ---
 
-def test_crush_json_is_never_backed_up_and_projects_json_is(real):
+def test_crush_json_is_never_backed_up_and_projects_json_is(real, monkeypatch):
     mod, home, _ = real
+    fixture_stores(mod, monkeypatch)
     crush = home / ".local/share/crush"
     crush.mkdir(parents=True)
     (crush / "crush.json").write_text('{"api_key": "SENTINEL-CRUSH-API-KEY", "refresh_token": "SENTINEL-CRUSH-REFRESH"}')
@@ -1729,7 +1740,7 @@ def test_crush_json_is_never_backed_up_and_projects_json_is(real):
 
 def test_dry_run_records_an_entry_whose_lstat_fails_as_an_error_like_the_copy(real, monkeypatch):
     mod, home, _ = real
-    root = home / ".grok/sessions"
+    root = home / ".omp/agent/sessions"
     root.mkdir(parents=True)
     (root / "a.jsonl").write_text("x")
     (root / "b.jsonl").write_text("y")
@@ -1741,13 +1752,14 @@ def test_dry_run_records_an_entry_whose_lstat_fails_as_an_error_like_the_copy(re
         return real_lstat(p, *a, **k)
 
     monkeypatch.setattr(mod.os, "lstat", flaky)
-    plan = mod.plan_store(next(s for s in mod.build_stores(home) if s["name"] == "grok"), mod.Excluder(home))
+    plan = mod.plan_store(next(s for s in mod.build_stores(home) if s["name"] == "omp"), mod.Excluder(home))
     assert plan["file_count"] == 1 and plan["skipped_count"] == 0
     assert len(plan["errors"]) == 1 and "a.jsonl" in plan["errors"][0]["source"]
 
 
 def test_check_schemas_never_opens_an_excluded_tree_database(real, capsys, monkeypatch):
     mod, home, _ = real
+    fixture_stores(mod, monkeypatch)
     db_dir = home / ".cline/data/db"
     make_wal_db(db_dir / "ok.db", ["row"]).close()
     make_wal_db(db_dir / "data.db", ["SENTINEL-EXCLUDED-DB"]).close()
@@ -1799,11 +1811,11 @@ def test_check_schemas_gates_a_file_store_root_link_like_the_copy(real, capsys):
     mod, home, tmp = real
     outside = tmp / "outside-dir"
     outside.mkdir()
-    (home / ".grok").mkdir()
-    os.symlink(outside, home / ".grok/sessions")
-    assert mod.main(["--check-schemas", "--only", "grok"]) == 1
+    (home / ".omp/agent").mkdir(parents=True)
+    os.symlink(outside, home / ".omp/agent/sessions")
+    assert mod.main(["--check-schemas", "--only", "omp"]) == 1
     out = capsys.readouterr().out
-    assert f"grok: {home / '.grok/sessions'}: symlink refused: symlink target outside HOME" in out
+    assert f"omp: {home / '.omp/agent/sessions'}: symlink refused: symlink target outside HOME" in out
 
 
 def test_a_subdirectory_swapped_for_a_symlink_after_listing_is_a_store_error_and_nothing_is_copied(real, monkeypatch):
@@ -1811,7 +1823,7 @@ def test_a_subdirectory_swapped_for_a_symlink_after_listing_is_a_store_error_and
     outside = tmp / "outside-dir"
     outside.mkdir()
     (outside / "secret.jsonl").write_text("SENTINEL-OUTSIDE-DIR")
-    sessions = home / ".grok/sessions"
+    sessions = home / ".omp/agent/sessions"
     (sessions / "p1").mkdir(parents=True)
     (sessions / "p1/chat.jsonl").write_text("inside\n")
     (sessions / "p2").mkdir()
@@ -1827,10 +1839,10 @@ def test_a_subdirectory_swapped_for_a_symlink_after_listing_is_a_store_error_and
 
     monkeypatch.setattr(mod, "open_dir_at", swapping)
     dest = home / "out" / "bk"
-    assert mod.main(["--only", "grok", "--dest", str(dest)]) == 1
+    assert mod.main(["--only", "omp", "--dest", str(dest)]) == 1
     assert b"SENTINEL-OUTSIDE-DIR" not in all_bytes(dest)
-    assert not (dest / "grok/sessions/p1/secret.jsonl").exists()
-    assert (dest / "grok/sessions/p2/ok.jsonl").read_text() == "kept\n"
+    assert not (dest / "omp/sessions/p1/secret.jsonl").exists()
+    assert (dest / "omp/sessions/p2/ok.jsonl").read_text() == "kept\n"
     entry = manifest_of(dest)["stores"][0]
     assert entry["status"] == "partial"
     assert [e["source"] for e in entry["errors"]] == [str(sessions / "p1")]
@@ -1893,8 +1905,9 @@ def test_ro_connect_refuses_a_parent_directory_swapped_for_a_symlink_and_reads_n
     con.close()
 
 
-def test_an_optional_sidecar_that_is_a_symlink_is_a_recorded_skip_and_the_store_stays_ok(real, capsys):
+def test_an_optional_sidecar_that_is_a_symlink_is_a_recorded_skip_and_the_store_stays_ok(real, capsys, monkeypatch):
     mod, home, _ = real
+    fixture_stores(mod, monkeypatch)
     conv = home / ".gemini/antigravity-cli/conversations"
     conv.mkdir(parents=True)
     make_wal_db(conv / "c1.db", ["row"]).close()
@@ -1935,6 +1948,7 @@ def swap_parent_after_gate(mod, monkeypatch, gated, parent, outside_parent, tmp)
 
 def test_a_standalone_sqlite_parent_swapped_for_a_symlink_after_the_gate_is_an_error_not_copied(real, monkeypatch):
     mod, home, tmp = real
+    fixture_stores(mod, monkeypatch)
     db = home / ".local/share/crush-acp/crush.db"
     make_wal_db(db, ["inside"]).close()
     outside = tmp / "outside-crush"
@@ -1967,6 +1981,7 @@ def test_a_file_store_directory_root_with_a_parent_swapped_after_the_gate_is_an_
 
 def test_a_file_store_single_file_root_with_a_parent_swapped_after_the_gate_is_an_error_not_copied(real, monkeypatch):
     mod, home, tmp = real
+    fixture_stores(mod, monkeypatch)
     history = home / ".local/share/muse/tui-history.jsonl"
     history.parent.mkdir(parents=True)
     history.write_text('{"h": 1}\n')
@@ -2331,15 +2346,15 @@ def unreadable(real):
         os.chmod(path, 0o700)
 
 
-@pytest.mark.parametrize("only, relative", [("cursor-chats", ".cursor/chats/hashA"), ("grok", ".grok/sessions/p1")])
+@pytest.mark.parametrize("only, relative", [("cursor-chats", ".cursor/chats/hashA"), ("omp", ".omp/agent/sessions/p1")])
 def test_an_unreadable_subdirectory_is_a_store_error_in_the_dry_run_like_the_copy(
         real, unreadable, capsys, only, relative):
     mod, home, _ = real
-    if only == "grok":
-        (home / ".grok/sessions/p1").mkdir(parents=True)
-        (home / ".grok/sessions/p1/chat.jsonl").write_text("hidden\n")
-        (home / ".grok/sessions/p2").mkdir()
-        (home / ".grok/sessions/p2/ok.jsonl").write_text("kept\n")
+    if only == "omp":
+        (home / ".omp/agent/sessions/p1").mkdir(parents=True)
+        (home / ".omp/agent/sessions/p1/chat.jsonl").write_text("hidden\n")
+        (home / ".omp/agent/sessions/p2").mkdir()
+        (home / ".omp/agent/sessions/p2/ok.jsonl").write_text("kept\n")
     else:
         make_cursor_session(home)
     locked = home / relative
@@ -2445,17 +2460,17 @@ def run_json(mod, capsys, *args):
 
 def test_json_check_schemas_names_the_missing_store_and_keeps_the_exit_code(real, capsys):
     mod, home, _ = real
-    assert mod.main(["--check-schemas", "--only", "grok-db"]) == 0
+    assert mod.main(["--check-schemas", "--only", "omp-db"]) == 0
     text = capsys.readouterr().out
-    code, doc, err = run_json(mod, capsys, "--only", "grok-db")
+    code, doc, err = run_json(mod, capsys, "--only", "omp-db")
     assert code == 0 and doc["ok"] is True and doc["exit_code"] == 0 and doc["reasons"] == []
     assert doc["totals"]["missing"] == 1 and doc["strict_stores"] is False
     (store,) = doc["stores"]
-    assert store["name"] == "grok-db" and store["state"] == "missing" and store["missing"] == 1
-    assert store["findings"] == [{"state": "missing", "path": str(home / ".grok/worktrees.db"),
-                                  "message": f"grok-db: {home / '.grok/worktrees.db'}: missing"}]
+    assert store["name"] == "omp-db" and store["state"] == "missing" and store["missing"] == 1
+    assert store["findings"] == [{"state": "missing", "path": str(home / ".omp/agent/history.db"),
+                                  "message": f"omp-db: {home / '.omp/agent/history.db'}: missing"}]
     assert err == text  # the human lines moved to stderr unchanged; stdout is only the document
-    code, doc, _ = run_json(mod, capsys, "--only", "grok-db", "--strict-stores")
+    code, doc, _ = run_json(mod, capsys, "--only", "omp-db", "--strict-stores")
     assert code == 1 and doc["ok"] is False and doc["exit_code"] == 1
     assert doc["reasons"] == ["missing stores or paths (--strict-stores)"]
 

@@ -26,7 +26,7 @@ Retired, folded, or not adopted (plan §D + rulings 2026-11-04):
    already has `alibaba` / `alibaba-cn`.
 7. **A7 `goose` / `goose-scout`** — retire again (D8): operator 2026-10-03 removal; Scout return
    ran nothing; Bedrock via opencode if needed.
-8. **A8 `muse`** — **pending H5** (the plan asks "is there a use for it?"); no removal without djbclark's explicit approval to retire muse: disabled in
+8. **A8 `muse`** — pending H5 on 2026-11-04 (the plan asked "is there a use for it?"); retired 2026-11-06 with djbclark's approval (H8, slim-down E9): disabled in
    aiuse since 2026-10-08; only non-ACP headless TUI; zero slices.
 9. **A9 `aider`** — retire (D10): no ACP, no Paseo, no slices; opencode covers the job.
 10. **A10 `kiro-cli`** — retire (D11): operator 2026-10-25 never-route; acp-run row already `--`.
@@ -34,21 +34,24 @@ Retired, folded, or not adopted (plan §D + rulings 2026-11-04):
 12. **A12 `pi`** — fold into omp (ruling 2026-11-04): OpenAI API pool moves to omp; port pi's
     fail-closed capacity gate and subagent model/thinking overrides (ruling 2026-11-04).
 13. **A13 `cline`** — retire (ruling 2026-11-04): ClinePass is allowed outside Cline; Dann's
-    substrate leg moves to omp + cline-pass; `paseo-new-seat`'s `--provider cline` default must
-    move.
+    substrate leg moves to omp + cline-pass; `paseo-new-seat`'s `--provider cline` default had to move (moot: `paseo-new-seat` deleted 2026-11-06, E4).
 
-Kept (rulings 2026-11-04): **`claude`** (only Max client, plan B1), **`codex`** (`local-review` +
-ChatGPT pool), **`agy`** (only Antigravity client, B3), **`cursor-agent`**, **`grok`**, **`omp`**
+Kept (rulings 2026-11-04): **`claude`** (only Max client, plan B1), **`codex`** (`local-review` until E8 replaced it with `bin/review-pr` over Claude, 2026-11-07; now the ChatGPT pool only), **`agy`** (only Antigravity client, B3), **`cursor-agent`**, **`grok`**, **`omp`**
 (multi-vendor API-credit harness: Anthropic and, after the pi fold, OpenAI), **`opencode`** (open
 multi-provider harness; keep both omp and opencode per ruling 2026-11-04), **`hermes`** (messaging
 gateway, never a coding target).
+
+**Superseded 2026-11-06/07 (slim-down, `slim/log.md`):** the agy TUI and the grok CLI retired too, and pi retired
+outright (omp kept: "We want to use omp and not pi", 2026-11-07). Kept providers: claude, codex, cursor, antigravity
+(the Paseo provider, not the agy TUI), opencode, omp, hermes, and grok-bot through peer-link. Section H has one dated
+row per retirement.
 
 ## B. Cross-cutting lessons
 
 1. **B1 A flag's name is not its behaviour.** `acp-run --perm deny` set no restrictive mode for
    several agents until 2026-10-12; a canary created a file with zero permission requests. Verify
    tool boundaries with a canary (`touch` in an empty `-C`), and put the verification in the brief,
-   not only the flag name. Evidence: crush findings in `docs/queue.md` (~1200–1216); session
+   not only the flag name. Evidence: crush findings in `git show pre-slim-2026-11-06:docs/queue.md` (~1200–1216); session
    2026-10-12 ACP permission audit.
 2. **B2 Third-party ACP adapters are supply-chain surface.** Registry id `antigravity-acp` is
    Google's proprietary binary, not the community Bun adapter of the same name; `zcode-acp-server`
@@ -68,15 +71,15 @@ gateway, never a coding target).
    vendor (e.g. zcode `1310` weekly limit with a Beijing-time reset; copilot premium text
    JSON-escaped in session-log events). Classify at the source (`fail=quota` + reset), preflight
    before launch, and decide from `remaining_percent`, never bare `used_percent`. Commits
-   `4a6e4d59`, `5b789b5f`; `skills/bigteam/SKILL.md` failure table.
+   `4a6e4d59`, `5b789b5f`; `git show pre-slim-2026-11-06:skills/bigteam/SKILL.md` failure table (bigteam became `skills/fan-out`, 2026-11-07).
 6. **B6 Model-id and catalog drift is normal.** Catalogs can be per-account; tool snapshots fail
    open after upgrades; effort lists differ between TUI UI and API. Read back every knob
    (`applied:` line, measured context) and fail as `config` on mismatch.
-   `tools/acp-run/README.md` (copilot / qwen / zcode sections).
+   `git show pre-slim-2026-11-06:tools/acp-run/README.md` (copilot / qwen / zcode sections; gone with the adapters, 2026-11-06).
 7. **B7 Burst limits are per-client and invisible to quota meters.** agy hit RESOURCE_EXHAUSTED
    across models while aiuse still showed headroom; in-process retries then `--print-timeout` exit
    0 with partial output. Stop, read the CLI's own log; do not loop probes.
-   `skills/bigteam/SKILL.md` failure table (kept TUI; same vetting round as zcode).
+   `git show pre-slim-2026-11-06:skills/bigteam/SKILL.md` failure table (agy, retired 2026-11-06; same vetting round as zcode).
 8. **B8 Headless: close stdin, redirect output, check content — exit 0 proves nothing.** Inherited
    stdin hung one client; another exited 0 with empty review (auto-denied permission); copilot
    exited 0 with the answer only in a footer / resume id. Treat empty capture as unverified.
@@ -86,15 +89,12 @@ gateway, never a coding target).
 10. **B10 Removal must be enforced — retirements have already regressed.** crush removed
     2026-10-08 came back 2026-10-11; goose removed 2026-10-03 came back as goose-scout ~2026-10-24
     (ruling 2026-11-04). Uninstall-by-omission fails when `brew-fast-upgrade` passes, shell wrappers,
-    Paseo providers, `skill-everywhere` targets, acp-run rows, `failover.py` rows, skillopt-night
-    allow lists, or `routing.toml` extras reinstall. Removal needs something that **stops drift
+    Paseo providers, `skill-everywhere` targets or `routing.toml` extras (`never_route`) reinstall (acp-run rows go in Wave 6; `failover.py` and skillopt-night are gone, E10). Removal needs something that **stops drift
     back** (enforcement flag / deny list), not only a one-shot delete (plan §G4).
 11. **B11 Never bridge a subscription into a client the vendor did not ship.** Anthropic
     (2026-04-04) and Google (Antigravity clause 6) suspend for it; Cursor ToS §1.5 forbids
     omp/opencode holding an active Cursor credential (staff note 2026-08-10). Same pattern covers
-    Venice web-session proxies (plan §F4). Ruling D3: add an acp-run guard refusing omp/opencode
-    runs while a Cursor login, an Antigravity OAuth login or an Anthropic subscription OAuth login is
-    active in them; ordinary vendor API keys (an Anthropic API key in omp) stay allowed.
+    Venice web-session proxies (plan §F4). Ruling D3 (not built; acp-run is a one-cycle shim removed in Wave 6, so it would now live in the Paseo provider launch or `bin/ade-backup-stores`' credential check): a guard refusing omp/opencode runs while a Cursor login, an Antigravity OAuth login or an Anthropic subscription OAuth login is active in them; ordinary vendor API keys (an Anthropic API key in omp) stay allowed.
 12. **B12 Attribute pools to TUIs only from the operator or the vendor's mapping.** crush was
     wrongly labelled ClinePass then zai before operator correction; model-routing keeps a per-pool
     "only client" column (plan §B). Billing is tracked by **vendor** (FOCUS `InvoiceIssuerName`),
@@ -137,9 +137,7 @@ gateway, never a coding target).
 7. **C7 Billing is tracked by vendor, not by TUI.** The company money goes to (FOCUS
    `InvoiceIssuerName`) owns the pool; one TUI may spend several vendors' credits (omp: Anthropic
    API + OpenAI API after the pi fold). Brands label clients; vendors label invoices (ruling 2026-11-04).
-8. **C8 Vendor-locked plans (plan §B).** Claude Max → `claude` only (B1). Google AI Pro → `agy`
-   only; never OAuth plugins in opencode (B3). Cursor → Cursor clients (B4). SuperGrok → `grok`
-   (B5). ChatGPT stays on `codex` here because `bin/local-review` needs it (B2). Z.ai GLM and
+8. **C8 Vendor-locked plans (plan §B).** Claude Max → `claude` only (B1). Google AI Pro → `agy` only; never OAuth plugins in opencode (B3). Cursor → Cursor clients (B4). SuperGrok → `grok` (B5). ChatGPT stays on `codex` here because `bin/local-review` needs it (B2). (That map is of 2026-11-04; since: agy retired 2026-11-06, Google AI Pro → Paseo's `antigravity` provider; the SuperGrok subscription cancelled and the grok CLI retired 2026-11-07, grok models via `cursor-agent`, grok-bot kept; `bin/local-review` went with E8, codex stays as the ChatGPT pool.) Z.ai GLM and
    Copilot Pro officially support OpenCode (B6, B7). Never install subscription-bridge plugins
    (F4). Keep both **omp** and **opencode** (ruling 2026-11-04).
 ## D. Per retired TUI
@@ -415,3 +413,19 @@ gateway, never a coding target).
    opencode) → re-point routing → machine removal after yes → plan decisions E1–E4. After drain,
    **this document** plus CHANGELOG/handoff history should be the only intentional mentions of
    the retired names (plan wave 4).
+
+## H. Retired by the slim-down (2026-11-06/07; one row each, `slim/log.md` and `slim/reports/` hold the detail)
+
+| TUI | Retired | Lost on purpose | Replaced by |
+|---|---|---|---|
+| H1 pi | 2026-11-06 (E9), extension 2026-11-07 (Wave 3b) | Pi's measured OpenAI-API pool (`api-only` rank 2) and its fail-closed admission gate; the `pi/extensions/subagent` per-call model/thinking override; `--perm deny` refusals | omp (its native `task` tool, `task`/`smol` roles and agent definitions under `~/.omp/agent/agents/`; ruling 2026-11-07); a per-call override, if wanted, is an upstream request on oh-my-pi |
+| H2 zcode | 2026-11-06 (E9, Wave 3b) | zai GLM-5.3 as a code pool; `--perm read-only`/`deny` enforcement; `zcode-key-auth`'s keep-alive; ten slash wrappers | opencode's built-in `zai-coding-plan` provider (an operator login); `never_route` keeps the account out of discovery |
+| H3 grok CLI | 2026-11-07 (E9c; SuperGrok cancelled in favour of Cursor) | the only `realtime-web` pool; the per-run `GROK_HOME` strip and the grok deny semantics | Cursor's grok model through `cursor-agent` (research, the dialogue Grok seat); grok-bot stays (peer-link, Cursor-billed) |
+| H4 agy (Antigravity TUI) | 2026-11-06 (E9) | `acp-run agy` and its `zed` client-name workaround for the Claude/GPT ids; the agy session adapter | Paseo's `antigravity` provider (the `antigravity-argon` frontier-fallback row was restored by E7) |
+| H5 crush (+ crush-acp) | 2026-11-06 (E9) | the SIPB light-bulk pool, `crush-context-check`, per-run config stripping | opencode's `sipb` provider |
+| H6 copilot CLI | 2026-11-06 (E9) | the 60%-floor Copilot reserve; the `github` kind's only pool; its backup stores | Paseo's copilot provider if ever wanted; no copilot plan survived the pool audit |
+| H7 cline | 2026-11-06 (E9) | the Cline client and its session adapter | ClinePass stays as a pool (Hermes's chain); omp for ClinePass-shaped work |
+| H8 goose, qwen-code, devin, muse, kiro | 2026-11-06 (E9) | their acp-run rows, adapters, routing services (alibaba, devin) and skill links | nothing (no slice ran on them); opencode covers the providers |
+| H9 venicecode, aider, dsh | 2026-11-06 (E9: nothing was in the tree) | nothing in the repo; machine-side removal is in the operator batch | opencode's `venice` provider; OpenCode Go for DeepSeek |
+| H10 glm-acp-agent | 2026-11-06 (Wave 3b: nothing was in the tree) | a Paseo custom provider entry, if one exists (operator) | opencode's zai provider |
+

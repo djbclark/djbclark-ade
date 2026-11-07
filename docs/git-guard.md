@@ -22,15 +22,16 @@ fully resolved ref name, and a non-zero exit aborts the transaction. So:
    verbs, rename/copy destinations), and **fails closed** on what it cannot read: under the old design a parser miss was a
    bypass, now it is a false refusal with a readable message.
 
-## Integration status (2026-10-25)
+## Integration status (2026-10-25; re-based 2026-11-07)
 
-The guard, the hooks and the claim library exist. Nothing calls them in a live session yet. Call sites to wire (not done
-in this PR): W2 `cow-pasture create` runs `ade-git-guard install <new pasture>` (a pasture's `clonefile` copy of `.git/hooks`
-inherits a stub anyway); W3 `acp-dispatch` exports `ADE_CLAIM_ID` and runs `ade-git-guard install` in the repository at
-claim time; W4 `acp-run` puts `libexec/agent-bin` first on the PATH of every agent it launches; the operator runs
-`ade-git-guard install <repo>` once over `~/src/*` and `~/orca/projects/*` (the dangerous case is agent B in primary P moving
-Z's branch: the hook must be in P; the shim also installs it the first time an agent runs a non-read git there). The
-operator's shell, Orca and IDEs never go through the shim.
+The guard, the hooks and the claim library exist; claims carry an owner and expire (`ade_claims.py new --ttl`, default
+72 h; `ade-git-guard claim ls`, slim-down E8). Nothing creates claims in a live session yet. The wiring still to build:
+W2, a Paseo `worktree.create.after` hook (a thin plugin) that runs `ade_claims.py new --ttl` and `ade-git-guard install`
+for each agent worktree (E8 F4; `cow-pasture`, the first planned home, was removed 2026-11-06); W3, the W2 hook (or `paseo run`'s
+environment) exporting `ADE_CLAIM_ID` (the dispatch shim never does, and leaves in Wave 6); W4, putting `libexec/agent-bin` first on each agent's PATH (acp-run's planned step goes with
+acp-run in Wave 6). The operator runs `ade-git-guard install <repo>` once over `~/src/*` (the dangerous case is agent B
+in primary P moving Z's branch: the hook must be in P; the shim also installs it the first time an agent runs a
+non-read command there). The operator's shell and IDEs never go through the shim.
 
 ## Commands
 
@@ -40,15 +41,26 @@ operator's shell, Orca and IDEs never go through the shim.
 | `ade-git-guard git-ARGS...` | The same, called by name. |
 | `ade-git-guard install [DIR]` | Write the chain-preserving hook stubs into `$(git rev-parse --git-common-dir)/hooks` of DIR's repository (one install covers every linked worktree). Idempotent. An existing hook of the same name is renamed `NAME.pre-ade` and runs after ours. Exit 0 ok, 2 not a repository, 78 `core.hooksPath` is set (git would never run the stubs; unset it or call the stubs from the directory it names), 73 `NAME.pre-ade` is already in the way. |
 | `ade-git-guard --real-git` | Print the git the guard would run. |
-| `ade_claims.py new --id ID --path DIR --branch B --base-sha S [...]` | Create a claim and its pointer; exit 3 id exists, 4 path held by another owner's active claim. |
-| `ade_claims.py show ID [--field F]`, `find [DIR]`, `list [--state S] [--json]`, `set-state ID active\|released\|merged` | Read and change claims; exit 1 when not found. |
+| `ade-git-guard claim ls [--state active\|released\|merged\|expired] [--json]` | List what the claim registry holds: id, state, branch, owner, path, `expires_at` (2026-11-06; until then the listing was only `ade_claims.py list`, PLAN C5). Exit 2 for any other `claim` verb. |
+| `ade_claims.py new --id ID --path DIR --branch B --base-sha S [--ttl HOURS] [...]` | Create a claim and its pointer; it expires after `--ttl` hours (default 72, 0 = never); exit 3 id exists, 4 path held by another owner's active claim. |
+| `ade_claims.py list [--state S] [--json]` | What `claim ls` runs. |
 | `ade_claims.py guard -- GIT_ARGS...` | What the shim runs. |
 | `ade_claims.py hook-ref STATE`, `hook-push REMOTE URL` | What the two hooks run (stdin is git's). |
 
 Exit codes: 77 = refused (`EX_NOPERM`); any other code of a shimmed call is the real git's (a call a hook refused ends
 with git's own 128 and `fatal: ... aborted by the reference-transaction hook`). Every `ade_claims.py` subcommand exits 0
-ok, 1 not found, 2 usage, 3 id exists, 4 path owned by another owner's active claim, 77 refused; `install` also 73 and 78
+ok, 2 usage, 3 id exists, 4 path owned by another owner's active claim, 77 refused; `install` also 73 and 78
 (78 also when git does not say whether `core.hooksPath` is set; an empty `core.hooksPath` is "set").
+
+## Claims: owner and expiry (trimmed 2026-11-06, slim-down E8, D9)
+
+A claim names its owner (`owner.record`, `owner.session`, `allow`) and, since 2026-11-06, when it stops guarding
+(`expires_at`, set by `new --ttl`, default 72 h). An active claim past its `expires_at` is **expired**: the shim and the hooks
+treat its workspace as unclaimed, `claim ls` shows it as `expired`, and another owner may claim the path. Expiry is read, not
+written, so an agent that died never leaves a workspace guarded for good; a record with no `expires_at` (all records before
+2026-11-06) never expires, and one that does not parse keeps the protection on. The CLI verbs `show`, `find` and
+`set-state` had no caller and were removed the same day (the library functions stay for the guard, the hooks and the tests);
+a claim is ended by its owner's tooling with `ade_claims.set_state(id, "released")`, or simply expires.
 
 ## Who is guarded
 
@@ -110,7 +122,7 @@ named `git` that sets a `pack-refs` argv and then runs the hook, or one that set
 `pack-refs`, is believed. If neither /proc nor sysctl answers, nothing is exempted (a maintenance run beside a claim is then
 refused; the operator reruns it). A real `branch -D` of the same packed ref is still refused (tested).
 
-**Chain.** The installed stub runs the ade checkout's hook by absolute path (one copy of the logic; a pasture's cloned `.git/hooks`
+**Chain.** The installed stub runs the ade checkout's hook by absolute path (one copy of the logic; a checkout cloned with its `.git` from a claimed one, such as the retired cow pastures still on the Mac, whose `.git/hooks`
 keeps working), then, if present, `NAME.pre-ade`. A refusal stops before the old hook runs. Install is atomic (temp file +
 `os.replace`) and the stubs are bash 3.2 (tested with `/bin/bash -n`).
 
@@ -194,8 +206,8 @@ analyser (and the Claude PreToolUse hook it was for, W5).
 7. Plumbing and maintenance stay the operator's call: `checkout-index`, `update-index`, `read-tree`, `fast-import`,
    `prune`/`repack`, `tag -f|-d` (claims name branches, not tags), `notes`, `replace`, `mv -f`, `add '*'`, and everything git
    itself spawns for the shim's rules (`bisect run`, `submodule foreach`, pagers, `!` aliases' children).
-8. **Config-based hooks (git 2.54+, `hook.<event>.command`)** may let `acp-run` inject the guard for repositories nobody
-   installed; whether they run alongside the hooks directory is unverified (`docs/queue.md`). The shim refuses `hook.*` keys
+8. **Config-based hooks (git 2.54+, `hook.<event>.command`)** may let the W2 Paseo `worktree.create.after` hook inject the guard for
+   repositories nobody installed; whether they run alongside the hooks directory is unverified (carried here). The shim refuses `hook.*` keys
    set on the command line or in the environment regardless; in a config FILE they are not judged (measured inert for the
    hooks directory, 2026-10-25).
 9. **A same-uid program impersonating the `pack-refs` parent** (see above).
@@ -211,7 +223,7 @@ analyser (and the Claude PreToolUse hook it was for, W5).
     clone (and copy `GIT_TEMPLATE_DIR` / `init.templateDir` into) new repositories; not refused (round 11, open question).
 12. **The claim's repository identity is the repository's own `remote.origin.url`:** an agent that runs `git remote set-url origin
     /x` (allowed; reproduced 2026-10-25 through the shim) and then `git branch -f cb main` is no longer matched to the claim of
-    `cb` in the hook, whatever the origin question reads. Matching the claim by something an agent cannot rewrite (its pasture's
+    `cb` in the hook, whatever the origin question reads. Matching the claim by something an agent cannot rewrite (its Paseo worktree's
     git dir or the common dir recorded in the claim) is a design call for the operator.
 13. **Same-uid forgery of the hook's own inputs:** `ADE_REAL_GIT`, `ADE_PYTHON`, `ADE_HOOK_GIT_PID` (see the fail-open and
     `pack-refs` paragraphs).

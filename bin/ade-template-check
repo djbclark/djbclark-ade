@@ -5,7 +5,7 @@
 
 With no TEMPLATE it checks every agents/*/*.tmpl under the repo (or --root). For each one:
 
-  1. scan: the credential patterns of the inventory adversary (docs/ade-everywhere-inventory-2026-10-20-stores.md
+  1. scan: the credential patterns of the inventory adversary (docs/history/ade-everywhere-inventory-2026-10-20-stores.md
      section 5 item 5) run over the template text with the `{{ ... }}` tags masked; any hit is a finding.
      Also flagged: an absolute home path (/Users/<name>, /home/<name>) that is not `{{ .home }}`, and a
      long numeric id (account, chat, Telegram or Discord id).

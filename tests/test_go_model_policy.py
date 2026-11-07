@@ -1,6 +1,7 @@
 """Cost policy rejects expensive execution before a provider process starts."""
 
 import importlib.util
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -80,7 +81,7 @@ def test_dispatch_cannot_bypass_cost_gate_with_route_override(tmp_path, extra):
     result = subprocess.run([sys.executable, str(ROOT / "bin/acp-dispatch"), "opencode",
                              "--model", "opencode-go/kimi-k3", "--name", "never-launch",
                              "--task", "cost-policy-test", "-p", "do not run", "--dry-run",
-                             "--no-model-check", *extra], capture_output=True, text=True,
+                             *extra], capture_output=True, text=True,
                             timeout=20, check=False,
                             env={**os.environ, "HOME": str(tmp_path), "ACP_DISPATCH_STATE": str(state),
                                  "ACP_OPERATOR_APPROVED": "route-override"})
@@ -89,18 +90,25 @@ def test_dispatch_cannot_bypass_cost_gate_with_route_override(tmp_path, extra):
     assert not list(state.glob("**/jobs/*.json"))
 
 
-def test_bounded_advisor_dry_run_is_allowed_without_inference(tmp_path):
+def test_bounded_advice_runs_best_effort_read_only(tmp_path):
+    # The acp-dispatch Paseo shim (slim-down E6) cannot restrict opencode's tools: under the operator's 2026-11-07 ruling
+    # a Go advisor with --perm read-only runs best effort (the provider's default mode, a brief note, `perm_note`).
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    (bindir / "paseo").symlink_to(ROOT / "tests" / "fakes" / "paseo")
     result = subprocess.run([sys.executable, str(ROOT / "bin/acp-dispatch"), "opencode",
                              "--model", "opencode-go/kimi-k3", "--name", "safe-advice",
-                             "--task", "cost-policy-test", "-p", "offline dry run", "--dry-run",
-                             "--no-model-check", "--kind", "judgment", "--role", "advise",
+                             "--task", "cost-policy-test", "-p", "offline dry run", "--dry-run", "--json",
+                             "--kind", "judgment", "--role", "advise",
                              "--perm", "read-only", "--timeout", "600",
-                             "--out", str(tmp_path / "jobs"),
-                             "--acp-run", str(ROOT / "tools/acp-run/acp-run")], capture_output=True, text=True,
+                             "--out", str(tmp_path / "jobs")], capture_output=True, text=True,
                             timeout=20, check=False,
-                            env={**os.environ, "HOME": str(tmp_path)})
+                            env={**os.environ, "HOME": str(tmp_path), "FAKE_PASEO_STATE": str(tmp_path / "st"),
+                                 "PATH": f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}"})
     assert result.returncode == 0, result.stderr
-    assert "--go-advisory" in result.stdout
+    rec = json.loads(result.stdout)
+    assert rec["go_advisory"] is True and "best effort for opencode" in rec["perm_note"]
+    assert not (tmp_path / "jobs").exists()
 
 
 def test_routine_router_refuses_a_costly_config_regression():

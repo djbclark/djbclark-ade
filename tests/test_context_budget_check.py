@@ -282,15 +282,18 @@ def test_a_missing_claude_is_unmeasurable_not_a_crash(tmp_path, capsys, monkeypa
     assert rc == 3
 
 
-def test_install_plan_changes_nothing(monkeypatch, capsys, tmp_path):
-    monkeypatch.setenv("CONTEXT_BUDGET_NO_INSTALL", "1")
-    monkeypatch.setenv("CONTEXT_BUDGET_LAUNCH_AGENTS", str(tmp_path))
-    rc, out = run(capsys, "install")
-    assert rc == 0 and "com.djbclark.context-budget.plist" in out and list(tmp_path.iterdir()) == []
-    rc, out = run(capsys, "uninstall")
-    assert rc == 0 and "bootout" in out
-    plist = (ROOT / "launchd" / "com.djbclark.context-budget.plist").read_text()
-    assert "<integer>3</integer>" in plist and "<integer>50</integer>" in plist
+def test_install_and_uninstall_are_gone_and_point_at_the_paseo_schedule(monkeypatch, capsys, tmp_path):
+    """J3 (2026-11-06): a Paseo schedule runs the check nightly; the launchd job and its subcommands were removed."""
+    calls = []
+    monkeypatch.setattr(cbc.subprocess, "run", lambda *a, **k: calls.append(a) or None)
+    for cmd in ("install", "uninstall"):
+        assert cbc.main([cmd]) == 2
+        err = capsys.readouterr().err
+        assert f"`{cmd}` was removed" in err and "Paseo schedule" in err
+    assert calls == []                                   # no launchctl, nothing copied
+    assert not (ROOT / "launchd" / "com.djbclark.context-budget.plist").exists()
+    assert "paseo schedule create --cron \"50 3 * * *\"" in cbc.__doc__ and "--instruction-lint" in cbc.__doc__
+    assert not hasattr(cbc, "cmd_install") and not hasattr(cbc, "PLIST_SRC")
 
 
 # ---------------------------------------------------------------- --instruction-lint (report-only)

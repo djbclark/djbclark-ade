@@ -218,12 +218,11 @@ def test_dry_run_changes_nothing(env):
     assert "would stop" in r.stdout and env.record("dry")["state"] == "running" and env.calls("RELAY") == []
 
 
-def test_reroute_action_runs_acp_dispatch_once(env):
-    assert start(env, "rr", "--budget", "5", "--on-expire", "reroute:/x/jobs/rec.json").returncode == 0
-    env.run("sweep", "--no-agents", now=T0 + 10)
-    env.run("sweep", "--no-agents", now=T0 + 20)
-    d = env.calls("DISPATCH")
-    assert len(d) == 1 and "reroute /x/jobs/rec.json --escalate --detach --no-wait" in d[0]
+def test_the_retired_reroute_action_is_refused_and_points_at_relay(env):
+    """2026-11-07 (slim-down E7): the acp-dispatch shim has no `reroute`, so `--on-expire reroute:RECORD` exits 2 naming relay."""
+    r = start(env, "rr", "--budget", "5", "--on-expire", "reroute:/x/jobs/rec.json")
+    assert r.returncode == 2 and "retired" in r.stderr and "relay" in r.stderr
+    assert not (env.state / "rr.json").exists() and env.calls("DISPATCH") == []
 
 
 def test_duplicate_live_name_refused_and_terminal_name_reusable(env):
@@ -526,7 +525,7 @@ def test_orphan_lock_files_are_pruned(env):
     assert not (env.state / ".tmp1.lock").exists()
 
 
-# ---------- PR 223 local-review round 1: group identity, notice delivery, name reservation, registration binding, background agents ----------
+# ---------- PR 223 local Codex review round 1: group identity, notice delivery, name reservation, registration binding, background agents ----------
 
 def test_leaderless_group_is_anchored_on_a_live_member_and_never_trusted_bare(env):
     c = subprocess.Popen(["sh", "-c", "sleep 60 & sleep 61 & exit 0"], start_new_session=True)
@@ -560,7 +559,7 @@ def test_failed_owner_notice_is_retried_until_delivered_not_marked_done(env):
 
 
 def test_notice_retries_are_bounded(env):
-    Path(env.base["DL_RELAY_FAIL"]).write_text("3")   # 3 = unverified under --ack: not delivery proof
+    Path(env.base["DL_RELAY_FAIL"]).write_text("2")   # 2 = not delivered (queued, timeout, permission, error): not delivery proof
     assert start(env, "never", "--budget", "5", "--on-expire", "relay").returncode == 0
     for i in range(20):
         env.run("sweep", "--no-agents", now=T0 + 10 + i * 1000)
@@ -599,7 +598,7 @@ def test_agent_scan_includes_background_workspaces(env):
     assert any(ln == "PASEO ls -g --background --json" for ln in env.calls("PASEO"))
 
 
-# ---------- PR 223 local-review round 2: survivors after the leader, unverifiable stops, relay sender + proof, lock inodes, prune race ----------
+# ---------- PR 223 local Codex review round 2: survivors after the leader, unverifiable stops, relay sender + proof, lock inodes, prune race ----------
 
 def test_run_keeps_enforcing_until_the_group_is_stopped_after_the_leader_exits(env):
     # the leader dies on SIGTERM; a grandchild ignores it and must still get its SIGKILL and the recovery from `run` itself
@@ -630,13 +629,15 @@ def test_an_empty_group_with_no_leader_start_is_gone_not_unverified(env, inproc)
     assert dl.target_status({"pid": None, "pgid": 987654, "pgid_start": None}) == "gone"
 
 
-def test_owner_relay_declares_a_sender_and_asks_for_delivery_proof(env):
+def test_owner_relay_declares_a_sender_and_uses_the_shims_flags(env):
+    """The relay shim (2026-11-06, docs/slim E3) reads delivery from `paseo send --json`; --wait would wait for the owner to go idle."""
     assert start(env, "proof", "--budget", "5", "--on-expire", "relay").returncode == 0
     env.run("sweep", "--no-agents", now=T0 + 10)
     log = env.log.read_text()
-    assert "RELAY owner-1 --message-file - --ack --wait 20" in log and "SENDER deadline" in log
+    assert "RELAY owner-1 --message-file -\n" in log and "SENDER deadline" in log
+    assert "--wait" not in log and "--ack" not in log
     p = __import__("plistlib").loads((ROOT / "config/launchd/com.djbclark.deadline-sweep.plist").read_text().replace("__HOME__", "/h").replace("__ADE__", "/a").encode())
-    assert p["EnvironmentVariables"]["RELAY_SENDER_NAME"] == "deadline-sweep", "a launchd job has no session: relay.py would refuse it with exit 4"
+    assert p["EnvironmentVariables"]["RELAY_SENDER_NAME"] == "deadline-sweep", "a launchd job has no Paseo id: the shim names it in its sender prefix"
 
 
 def test_waiting_registrar_never_holds_a_lock_on_an_unlinked_inode(env, inproc):
@@ -682,7 +683,7 @@ def test_prune_never_deletes_a_name_that_was_registered_again_meanwhile(env, inp
     assert not (env.state / "ancient.json").exists(), "a genuinely old terminal record is still pruned"
 
 
-# ---------- PR 223 local-review round 3: anchor left its group, ps failures, startup handshake, async recovery ----------
+# ---------- PR 223 local Codex review round 3: anchor left its group, ps failures, startup handshake, async recovery ----------
 
 def test_a_live_anchor_that_left_the_group_does_not_vouch_for_it(env, inproc):
     dl = inproc
@@ -738,7 +739,7 @@ def test_recovery_io_runs_off_the_enforcement_pass(env):
     assert rec["recovery"]["state"] == "done" and rec["notice"]["done"] is True and len(env.calls("RELAY")) == 1
 
 
-# ---------- PR 223 local-review round 4: async agent alerts, no inherited session id, member-anchor reuse, worker bound to reg_id, cancellation ----------
+# ---------- PR 223 local Codex review round 4: async agent alerts, no inherited session id, member-anchor reuse, worker bound to reg_id, cancellation ----------
 
 def test_agent_alerts_run_off_the_enforcement_pass(env):
     (env.tmp / "ls.json").write_text(json.dumps([{"id": "aaaaaaaa-0000", "shortId": "aaaaaaa", "name": "idle", "status": "running"}]))
@@ -814,7 +815,7 @@ def test_interrupting_run_starts_the_grace_and_ends_in_sigkill(env):
         p.wait()
 
 
-# ---------- PR 223 local-review round 5: cancel after a notify-only expiry, absolute reroute paths, agent scan off the pass ----------
+# ---------- PR 223 local Codex review round 5: cancel after a notify-only expiry, absolute reroute paths, agent scan off the pass ----------
 
 def test_interrupting_run_after_a_notify_only_expiry_still_stops_the_command(env):
     p = subprocess.Popen([sys.executable, str(SCRIPT), "run", "--budget", "1", "--grace", "1", "--name", "notifycancel", "--owner", "o",
@@ -835,12 +836,11 @@ def test_interrupting_run_after_a_notify_only_expiry_still_stops_the_command(env
         p.wait()
 
 
-def test_reroute_path_is_resolved_at_registration(env, inproc, monkeypatch, tmp_path):
-    dl = inproc
-    monkeypatch.chdir(tmp_path)
-    got = dl.check_action("reroute:jobs/task.json")
-    assert got == "reroute:" + str((tmp_path / "jobs/task.json").resolve())
-    assert dl.check_action("reroute:~/x.json").startswith("reroute:/")
+def test_reroute_is_refused_by_the_parser(env, inproc):
+    import argparse
+    for v in ("reroute:jobs/task.json", "reroute:~/x.json", "reroute"):
+        with pytest.raises(argparse.ArgumentTypeError, match="relay"):
+            inproc.check_action(v)
 
 
 def test_agent_scan_runs_off_the_enforcement_pass(env):
@@ -861,7 +861,7 @@ def test_agent_scan_runs_off_the_enforcement_pass(env):
     assert len(env.calls("PASEO")) == n
 
 
-# ---------- PR 223 local-review round 6: cancel survivors, cancel while stopping, pending notices vs name reuse, quarantine under lock ----------
+# ---------- PR 223 local Codex review round 6: cancel survivors, cancel while stopping, pending notices vs name reuse, quarantine under lock ----------
 
 def test_cancel_after_notify_only_expiry_kills_a_grandchild_that_outlives_the_leader(env):
     p = subprocess.Popen([sys.executable, str(SCRIPT), "run", "--budget", "1", "--grace", "1", "--name", "orphancancel", "--owner", "o",
@@ -937,7 +937,7 @@ def test_quarantine_rechecks_under_the_lock(env, inproc):
     held.__exit__()
 
 
-# ---------- PR 223 local-review round 7: zombie leaders keep their start time, heartbeat expiry blocks extend/beat ----------
+# ---------- PR 223 local Codex review round 7: zombie leaders keep their start time, heartbeat expiry blocks extend/beat ----------
 
 def test_a_recycled_pid_that_is_a_zombie_is_still_reused(env, inproc):
     dl = inproc
@@ -966,7 +966,7 @@ def test_extend_and_beat_are_refused_after_the_heartbeat_timeout(env):
     assert env.run("extend", "hbx", "--by", "10", "--reason", "ok", now=T0 + 60).returncode == 0
 
 
-# ---------- PR 223 local-review round 8: run with surviving group members, target vanishing during registration ----------
+# ---------- PR 223 local Codex review round 8: run with surviving group members, target vanishing during registration ----------
 
 def test_run_enforces_the_budget_on_group_members_that_outlive_the_leader(env):
     r = env.run("run", "--budget", "1", "--grace", "1", "--name", "bgkid", "--owner", "o", "--on-expire", "relay", "--",
@@ -1001,7 +1001,7 @@ def test_a_target_vanishing_between_the_two_start_time_reads_is_refused_not_a_cr
     assert rec is None and "vanished or changed" in err
 
 
-# ---------- PR 223 local-review round 9: leaderless group needs a verified member, cancel after persistence retires the registration ----------
+# ---------- PR 223 local Codex review round 9: leaderless group needs a verified member, cancel after persistence retires the registration ----------
 
 def test_a_group_whose_leader_is_gone_needs_a_verified_member_before_it_is_signalled(env, inproc):
     dl = inproc
@@ -1050,7 +1050,7 @@ def test_linux_identity_token_carries_the_boot_id(env, inproc, monkeypatch):
     assert dl.proc_info(os.getpid())[0] != a[0], "the same pid and start tick after a reboot must not match"
 
 
-# ---------- PR 223 local-review round 11: kill retries continue past a notice retry, install keeps the state dir ----------
+# ---------- PR 223 local Codex review round 11: kill retries continue past a notice retry, install keeps the state dir ----------
 
 def test_a_notice_retry_does_not_skip_the_sigkill_retry_of_a_kill_failed_record(env, inproc, monkeypatch):
     dl = inproc
@@ -1085,7 +1085,7 @@ def test_install_renders_the_configured_state_dir_into_env_and_log_paths(env, tm
     assert p["StandardOutPath"] == p["StandardErrorPath"] == f"{sd}/sweep.log" and "__" not in r.stdout
 
 
-# ---------- PR 223 local-review round 12: anchor captured at registration, exhausted notice retries escalate once ----------
+# ---------- PR 223 local Codex review round 12: anchor captured at registration, exhausted notice retries escalate once ----------
 
 def test_start_captures_a_member_anchor_so_a_reaped_leader_does_not_make_it_lost(env):
     c = subprocess.Popen(["sh", "-c", "sleep 60 & sleep 61 & wait"], start_new_session=True)
@@ -1114,7 +1114,7 @@ def test_exhausted_owner_notice_retries_escalate_to_the_operator_once(env):
     assert env.record("unreach")["notice"]["escalated"] is True
 
 
-# ---------- PR 223 local-review round 13: case-insensitive names, deleted records are not advanced from the sweep snapshot ----------
+# ---------- PR 223 local Codex review round 13: case-insensitive names, deleted records are not advanced from the sweep snapshot ----------
 
 def test_names_differing_only_in_case_are_one_name(env):
     assert start(env, "Job", "--budget", "10", "--on-expire", "notify").returncode == 0
@@ -1134,34 +1134,21 @@ def test_sweep_skips_a_record_deleted_after_its_snapshot(env, inproc, monkeypatc
     assert env.calls("RELAY") == []
 
 
-# ---------- PR 223 local-review round 14: a failed automatic reroute is reported, once-only dispatch preserved ----------
+# ---------- PR 223 local Codex review round 14: a failed automatic reroute is reported, once-only dispatch preserved ----------
 
-def test_a_failed_reroute_notifies_the_owner_and_the_operator_without_a_second_dispatch(env):
-    Path(env.base["DL_DISPATCH_FAIL"]).write_text("x")
-    assert start(env, "rrfail", "--budget", "5", "--on-expire", "reroute:/x/jobs/rec.json").returncode == 0
+def test_a_record_registered_with_reroute_before_the_retirement_stops_and_tells_without_a_dispatch(env):
+    """A record written before 2026-11-07 still carries reroute:RECORD: it is stopped, nothing is dispatched, and the owner and the
+    operator are told no replacement exists (the old failed-reroute path)."""
+    assert start(env, "rrold", "--budget", "5", "--on-expire", "relay").returncode == 0
+    path = env.state / "rrold.json"
+    rec = json.loads(path.read_text())
+    rec["on_expire"] = "reroute:/x/jobs/rec.json"       # as an older registration wrote it
+    path.write_text(json.dumps(rec))
     env.run("sweep", "--no-agents", now=T0 + 10)
-    rec = env.record("rrfail")
-    assert rec["recovery"]["state"] == "done" and "reroute rc=3" in rec["recovery"]["outcome"][-1]
-    assert len(env.calls("DISPATCH")) == 1
-    assert len(env.calls("RELAY")) == 1 and "reroute FAILED" in env.log.read_text(), "tracked owner notice"
-    assert [p for p in env.calls("PING") if "reroute FAILED" in p], "operator ping"
-    assert rec["notice"]["done"] is True
-    env.run("sweep", "--no-agents", now=T0 + 5000)
-    assert len(env.calls("DISPATCH")) == 1, "the dispatch is at-most-once"
-    ls = json.loads(env.run("ls", "--json").stdout)["records"][0]
-    assert "reroute rc=3" in ls["recovery"][-1] and ls["notice_done"] is True
-
-
-def test_a_slow_reroute_is_pending_not_a_failure(env):
-    Path(env.base["DL_DISPATCH_SLEEP"]).write_text("4")
-    assert start(env, "rrslow", "--budget", "5", "--on-expire", "reroute:/x/jobs/rec.json").returncode == 0
-    env.run("sweep", "--no-agents", now=T0 + 10, DEADLINE_REROUTE_WAIT="1")
-    rec = env.record("rrslow")
-    assert rec["recovery"]["state"] == "done" and "still running" in rec["recovery"]["outcome"][-1]
+    env.run("sweep", "--no-agents", now=T0 + 20)
+    assert env.calls("DISPATCH") == []
     log = env.log.read_text()
-    assert "OUTCOME IS UNKNOWN" in log and "reroute FAILED" not in log and "nothing replaced it" not in log
-    assert [p for p in env.calls("PING") if "UNKNOWN" in p] and len(env.calls("DISPATCH")) == 1
-    time.sleep(4)   # the dispatch was not killed: it finished on its own
+    assert "reroute FAILED" in log and "retired" in log
 
 
 # ---------- --holder: an abandoned record is retired silently, an overdue one still announces ----------
@@ -1230,7 +1217,7 @@ def test_holder_may_be_the_callers_ancestor_but_must_run_and_needs_an_announce_o
     dead.wait()
     r = start(env, "deadhold", "--budget", "10", "--on-expire", "notify", "--holder", str(dead.pid))
     assert r.returncode == 2 and "holder" in r.stderr and not (env.state / "deadhold.json").exists()
-    for action in ("kill", "reroute:/x/jobs/rec.json", "notify", "relay"):
+    for action in ("kill", "notify", "relay"):
         extra = ["--pid", str(env.child("sleep 60").pid)] if action in ("kill", "notify", "relay") else []   # a record that can signal never takes a holder
         r = start(env, "badact", "--budget", "10", "--on-expire", action, "--holder", str(os.getpid()), *extra)
         assert r.returncode == 2 and "--holder" in r.stderr, action

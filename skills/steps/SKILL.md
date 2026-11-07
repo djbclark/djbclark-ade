@@ -13,7 +13,7 @@ description: >-
 
 Canonical copy: `~/src/djbclark-ade/skills/steps/` (git: `~/src/djbclark-ade`, github.com/djbclark/djbclark-ade); every TUI reaches it via a direct skill-everywhere link `~/src/djbclark-ade/skills/steps`.
 Hermes Telegram `/steps` is native skill slash. It injects this skill; call `clarify` (section 2b) so Telegram shows one button per choice. Do not register a plugin command that returns this file — that dumps the markdown and never starts the walk.
-Claude Code: `~/src/djbclark-ade/claude/commands/steps.md` → `~/.claude/commands/steps.md` (symlink; `/steps` is also native skill slash).
+Claude Code: `/steps` is the skill's own slash command (the `claude/commands/` wrapper was removed 2026-11-06).
 Grok Bot: a rendered copy `ade-steps` in `/home/box/agent-data/workflows/` (skill-everywhere `grokbot`
 target, synced nightly by `/home/box/agent-data/shared/skills-sync/sync.sh`; 2026-10-23).
 
@@ -202,9 +202,9 @@ The card has no header chip, no per-option description, no `helpText` and no
    next question (section 3.1), but pushing, sending, posting and merging still
    need his explicit OK: an option he picks counts only if its label names that
    exact action (which commit to which branch, which message to whom).
-6. **Not on Grok Bot:** `/compact` and `self-slash` (section 3.5). Grok Bot has
-   no herdr, Orca or Paseo host and manages its own context; if he picks
-   `/compact`, say in one line that it does not apply there and go on.
+6. **Not on Grok Bot:** `/compact` (section 3.5). Grok Bot has no Paseo host
+   and manages its own context; if he picks `/compact`, say in one line that it
+   does not apply there and go on.
 
 ## 3. Act, then move on
 
@@ -218,12 +218,11 @@ The card has no header chip, no per-option description, no `helpText` and no
    answer has already settled.
 4. On `stop`, stop. Report what was decided and what is still open.
 5. **If he picks `/compact`** (or the context prompt's compact tier, +140k since
-   the start or last compaction or 217k total, fires mid-walk with nobody at the keyboard; he
-   pre-approved it standing, 2026-10-09; never compact earlier, it costs more
-   than it saves, 2026-10-10), a Paseo agent queues it itself (herdr and Orca hosts: retired from djbclark-ade 2026-10-31; `self-slash` still has those branches until D6, do not start them for new work): note the remaining queue, run
-   `~/src/djbclark-ade/bin/self-slash "/compact <focus: the open items>"`, and
-   end the turn at once. Outside Paseo (and the herdr/Orca hosts that live until D6), or if it refuses (a draft in
-   his input box), ask him to type it. Grok Bot: does not apply (2d.6).
+   the start or last compaction or 217k total, fires mid-walk; never compact earlier,
+   it costs more than it saves, 2026-10-10): an agent cannot run `/compact` on itself
+   (the `self-slash` that typed it was removed 2026-11-06), so note the remaining queue
+   and ask him to type `/compact <focus: the open items>`; with nobody at the keyboard,
+   auto-compaction takes it. Grok Bot: does not apply (2d.6).
 
 ## 4. Keep going until nothing is left
 

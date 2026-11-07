@@ -1,27 +1,31 @@
 #!/usr/bin/env python3
-"""One Claude session id for every identity read (2026-11-02, PR 248 scope addition 3; autorename got the same rule in PR 259).
+"""One Claude session id for every identity read (2026-11-02, PR 248 scope addition 3).
 
-A /baton successor inherits its predecessor's CLAUDE_CODE_SESSION_ID, and a non-Claude agent started from a Claude shell inherits CLAUDE_PID. With
-the session id now beating the pane match in fleet, a stale id would resolve a successor to its predecessor. The registry
-(`<config>/sessions/<CLAUDE_PID>.json`, accepted only for an ancestor whose pid and procStart match) decides; the env var is the fallback.
+A /baton successor inherits its predecessor's CLAUDE_CODE_SESSION_ID, and a non-Claude agent started from a Claude shell inherits CLAUDE_PID. The
+registry (`<config>/sessions/<CLAUDE_PID>.json`, accepted only for an ancestor whose pid and procStart match) decides; the env var is the fallback.
 Every pid, id and path here is fake; the process table and `ps` are replaced.
+
+2026-11-06 (docs/slim E3): bin/claude_identity.py (moved from skills/session-finder/, a forwarding stub stays there for one cycle). The relay.py
+and fleet.py halves of these tests went with relay.py's old routes (the harness was test_relay_fallback.py); the resolver, ade_claims, autorename,
+the script and the stub are tested here on their own harness.
 """
 from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
 from unittest import mock
 
-import test_relay_fallback as fb  # noqa: E402  # pyright: ignore[reportMissingImports]
-import test_relay_sender_header as sh  # noqa: E402  # pyright: ignore[reportMissingImports]
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "bin"))
+import claude_identity as cid  # noqa: E402  # the module ade_claims and autorename import by name: one object, so the patches below reach them
 
-relay, fleet = fb.relay, fb.fleet
-cid = fleet._cid
 STALE = "e236fcc3-287f-4c89-b6f4-435db7aef10c"    # the predecessor's id, inherited
 LIVE = "7c96a0ca-bb70-4584-a254-f33bb399de58"     # the successor's own
 CLAUDE_PID = 222
@@ -29,9 +33,15 @@ STAMP = "Mon Nov  2 09:00:00 2026"
 OTHER_STAMP = "Mon Nov  2 07:00:00 2026"
 
 
-class Base(fb.Harness):
+class Base(unittest.TestCase):
     def setUp(self) -> None:
-        super().setUp()
+        patcher = mock.patch.dict(os.environ)    # whatever session runs the tests is not under test
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        for k in ("PASEO_AGENT_ID", "ADE_CLAIM_ID", "CLAUDE_CODE_SESSION_ID", "CLAUDE_PID"):
+            os.environ.pop(k, None)
+        self.tmp = Path(tempfile.mkdtemp(prefix="claude-identity-"))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
         os.environ["CLAUDE_CONFIG_DIR"] = str(self.tmp / "claude")
         os.environ["CLAUDE_CODE_SESSION_ID"] = STALE
         os.environ["CLAUDE_PID"] = str(CLAUDE_PID)
@@ -43,9 +53,6 @@ class Base(fb.Harness):
         for p in patchers:
             p.start()
             self.addCleanup(p.stop)
-        relay.fleet.ancestors = lambda: set(self.ancestors)
-        fleet._OWN_SID[0] = None
-        self.addCleanup(fleet._OWN_SID.__setitem__, 0, None)
 
     def fake_ps(self, cmd: list[str], **kw: Any) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(cmd, 0, stdout=self.live_start + "\n", stderr="")
@@ -54,27 +61,15 @@ class Base(fb.Harness):
         d = Path(os.environ["CLAUDE_CONFIG_DIR"]) / "sessions"
         d.mkdir(parents=True, exist_ok=True)
         (d / f"{pid}.json").write_text(json.dumps({"pid": pid, "sessionId": sid, "procStart": proc_start}))
-        fleet._OWN_SID[0] = None
 
 
 class TestRegistryBeatsAStaleEnvironment(Base):
     def test_a_successor_with_its_predecessors_session_id_resolves_to_its_own_registry_id(self) -> None:
         self.register()
         self.assertEqual(cid.own_session_id(), LIVE)
-        self.assertEqual(fleet.own_claude_session_id(), LIVE)
-        label = relay.sender_name([])
-        self.assertTrue(label.startswith(f"claude {LIVE[:8]}"), label)    # never the predecessor's label
-        self.assertNotIn(STALE[:8], label)
-
-    def test_the_predecessors_row_is_not_the_successors_self_row(self) -> None:
-        self.register()
-        row = fleet._rec(id=STALE[:8], agent="claude", sid=STALE)
-        self.assertTrue(fleet.other_session(row))
-        self.assertFalse(fleet.other_session(fleet._rec(id=LIVE[:8], agent="claude", sid=LIVE)))
 
     def test_without_a_registry_entry_the_env_var_is_the_fallback(self) -> None:
         self.assertEqual(cid.own_session_id(), STALE)
-        self.assertEqual(fleet.own_claude_session_id(), STALE)
 
     def test_a_recycled_pid_with_another_proc_start_falls_back_to_the_env_var(self) -> None:
         self.register(proc_start=OTHER_STAMP)    # a crashed Claude left 222.json; pid 222 now belongs to a later process
@@ -101,24 +96,10 @@ class TestAnInheritedClaudePidThatIsNotAnAncestor(Base):
     def test_it_is_not_taken_for_that_claude(self) -> None:
         self.assertIsNone(cid.registered_session_id())
         self.assertIsNone(cid.own_session_id())    # the inherited env var is distrusted too: CLAUDE_PID is provably not above us
-        self.assertIsNone(fleet.own_claude_session_id())
-        self.assertNotIn(LIVE[:8], relay.sender_name([]))
-        self.assertNotIn(STALE[:8], relay.sender_name([]))
-
-    def test_its_own_pane_is_still_self_and_the_claude_rows_never_are(self) -> None:
-        omp = fleet._rec(id="w20:p3", agent="omp")
-        claude = fleet._rec(id=STALE[:8], agent="claude", sid=STALE)
-        self.assertFalse(fleet.other_session(omp))
-        self.assertFalse(fleet.other_session(claude))    # no id of its own to tell it apart: the pane decides, as before
 
     def test_an_unreadable_process_table_does_not_veto_the_env_var(self) -> None:
         self.ancestors = []
         self.assertEqual(cid.own_session_id(), STALE)
-
-    def test_a_notice_sender_hides_its_ancestry_and_has_no_session(self) -> None:
-        self.ancestors = [111, CLAUDE_PID]
-        with relay.as_caller("relay", scrub=True):
-            self.assertIsNone(fleet.own_claude_session_id())
 
 
 class TestAutorenameAndAdeClaimsShareIt(Base):
@@ -162,7 +143,7 @@ class TestAutorenameAndAdeClaimsShareIt(Base):
             self.assertEqual(mod.caller_ident(os.environ), LIVE)
 
     def test_a_successors_orphaned_job_keeps_the_successors_registry_id_while_its_claude_lives(self) -> None:
-        """local-review r2: the detached job's env carries the predecessor's stale id; the live Claude CLAUDE_PID names still proves the real one,
+        """PR 223's local Codex review, round 2: the detached job's env carries the predecessor's stale id; the live Claude CLAUDE_PID names still proves the real one,
         so `new` (registry id) and the job's guard agree. Once that Claude is gone, the env var stands."""
         mod = self.ade_claims()
         self.register()
@@ -187,47 +168,24 @@ class TestAutorenameAndAdeClaimsShareIt(Base):
         self.assertEqual(mod.caller_ident(os.environ), LIVE)
 
     def test_the_owner_helper_is_a_script_for_the_skills(self) -> None:
-        script = str(Path(__file__).resolve().parent.parent / "skills" / "session-finder" / "claude_identity.py")
-        env = {"PATH": os.environ["PATH"], "CLAUDE_CODE_SESSION_ID": STALE}
-        def run(env: dict[str, str]) -> tuple[int, str]:    # Popen: the Base patches subprocess.run itself (one shared module object)
-            proc = subprocess.Popen([sys.executable, script], stdout=subprocess.PIPE, text=True, env=env)
+        env = {"PATH": os.environ["PATH"], "CLAUDE_CODE_SESSION_ID": STALE, "CLAUDE_CONFIG_DIR": str(self.tmp / "claude")}
+        def run(script: Path, env: dict[str, str]) -> tuple[int, str]:    # Popen: the Base patches subprocess.run itself (one shared module object)
+            proc = subprocess.Popen([sys.executable, str(script)], stdout=subprocess.PIPE, text=True, env=env)
             out, _ = proc.communicate()
             return proc.returncode, out.strip()
-        self.assertEqual(run(env), (0, STALE))    # no CLAUDE_PID: the env var
-        self.assertEqual(run({"PATH": os.environ["PATH"]}), (1, ""))
+        for script in (ROOT / "bin" / "claude_identity.py", ROOT / "skills" / "session-finder" / "claude_identity.py"):    # the new path and the stub
+            with self.subTest(script=script):
+                self.assertEqual(run(script, env), (0, STALE))    # no CLAUDE_PID: the env var
+                self.assertEqual(run(script, {"PATH": os.environ["PATH"], "CLAUDE_CONFIG_DIR": env["CLAUDE_CONFIG_DIR"]}), (1, ""))
 
-    def test_autorename_uses_the_same_helper(self) -> None:
-        import importlib.util
-        spec = importlib.util.spec_from_file_location("autorename_t", Path(__file__).resolve().parent.parent / "skills/autorename/autorename.py")
-        assert spec and spec.loader
-        ar = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(ar)
-        self.register()
-        with mock.patch.object(ar, "ancestor_pids", lambda: list(self.ancestors)):
-            self.assertEqual(ar.registered_claude_session_id(), LIVE)
-        self.assertIs(ar.claude_identity.registered_session_id, cid.registered_session_id)
-
-
-class TestThePaneCaseStillHolds(sh.TestOwnSessionIdBeatsThePane):
-    """The e377e248 shape, unchanged, with the registry present: the child's own registry id keeps the pane's session from being self."""
-
-    def setUp(self) -> None:
-        super().setUp()
-        os.environ["CLAUDE_CONFIG_DIR"] = str(self.tmp / "claude")
-        os.environ["CLAUDE_PID"] = "222"
-        d = Path(os.environ["CLAUDE_CONFIG_DIR"]) / "sessions"
-        d.mkdir(parents=True)
-        (d / "222.json").write_text(json.dumps({"pid": 222, "sessionId": self.CHILD, "procStart": ""}))
-        patcher = mock.patch.object(cid, "ancestor_pids", lambda: [5, 6, 222])
-        patcher.start()
-        self.addCleanup(patcher.stop)
-        fleet.ancestors = lambda: {5, 6, 222}
-        fleet._OWN_SID[0] = None
-
-    def test_without_a_session_id_of_its_own_the_pane_match_still_holds(self) -> None:
-        (Path(os.environ["CLAUDE_CONFIG_DIR"]) / "sessions" / "222.json").unlink()    # no registry entry, no env id: nothing to tell it apart
-        del os.environ["CLAUDE_PID"]
-        super().test_without_a_session_id_of_its_own_the_pane_match_still_holds()
+    def test_the_old_path_stub_imports_the_moved_module(self) -> None:
+        """One cycle (removed at the latest 2026-11-20): an importer that still puts skills/session-finder on sys.path gets bin/'s module."""
+        code = ("import sys; sys.path.insert(0, sys.argv[1]); import claude_identity as c; "
+                "print(c.__file__); print(callable(c.owner_session_id))")
+        proc = subprocess.Popen([sys.executable, "-c", code, str(ROOT / "skills" / "session-finder")], stdout=subprocess.PIPE, text=True)
+        out, _ = proc.communicate()
+        self.assertEqual(proc.returncode, 0)
+        self.assertEqual(out.split(), [str((ROOT / "bin" / "claude_identity.py").resolve()), "True"])
 
 
 if __name__ == "__main__":

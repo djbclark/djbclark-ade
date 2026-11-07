@@ -1,6 +1,6 @@
 """Tests for bin/ade_sched.py and bin/ade-sched (issue #279, 2026-11-04): one plist, three schedulers.
 
-Every scheduler binary here is a fake shell script that logs its argv (the tests/test_acp_dispatch_reap.py pattern); the agent
+Every scheduler binary here is a fake shell script that logs its argv (the pattern of acp-dispatch's old reap tests); the agent
 and unit dirs are per-test temp dirs. conftest.py pins the real ones to /usr/bin/true and a throwaway dir as a safety net.
 """
 from __future__ import annotations
@@ -624,9 +624,25 @@ def test_cli_render_under_isolated_mode(fake):
 
 
 
+TEMPLATED_PLIST = """<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.example.@TARGET@-job</string>
+  <key>ProgramArguments</key>
+  <array><string>/usr/bin/true</string><string>@TARGET@</string></array>
+  <key>StartInterval</key><integer>60</integer>
+  <key>StandardOutPath</key><string>@STATE@/job.out</string>
+</dict>
+</plist>
+"""
+
+
 def test_cli_set_before_and_after_the_subcommand_both_count(fake):
     """argparse's subcommand append replaced the top-level --set list (Codex P2 on PR 291)."""
-    plist = str(REPO / "launchd/com.djbclark.proc-cpu-watch.plist")
+    # a templated plist of its own (the proc-cpu-watch plist that used to serve here was deleted, slim-down E5, 2026-11-06)
+    plist = fake.tmp / "com.example.target-job.plist"
+    plist.write_text(TEMPLATED_PLIST)
     p = cli("--set", "@STATE@=/st", "--backend", "systemd", "render", plist, "--set", "@TARGET@=opencode",
             "--ade", str(fake.tmp), env=fake.env)
     assert p.returncode == 0, p.stderr

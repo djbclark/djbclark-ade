@@ -1,0 +1,401 @@
+[
+ {
+  "file": "docs/paseo-only-rearchitecture.md",
+  "line": 255,
+  "quote": "`watch` roles, `fleet-watch` (in `~/ops/site-private/bin`, not this repo), `paseowatch`/`cfenginewatch` (`fleet-watch upstream --relay-to` uses relay.py), `tell-chief-of-staff` | \u2014 | REWRITE in D6",
+  "kind": "wrong-fact",
+  "fix": "`fleet-watch` is site-djbclark's `bin/fleet-watch` (site-public, verified 2026-11-06, log and `vendor/README.md`), now calling the relay shim; the watch family and `paseowatch`/`cfenginewatch` were deleted 2026-11-06/07 (Wave 3b) and `tell-chief-of-staff` is a pointer to peer-link (E6). Fix the path and add the dated outcome."
+ },
+ {
+  "file": "docs/paseo-only-rearchitecture.md",
+  "line": 258,
+  "quote": "`pr-wait`, `ade-git-guard`, `git-commit-own`, `local-review`, graft, `aiuse`, `web-get` (deleted 2026-11-06, slim-down R2-15; `failover.py` deleted 2026-11-06, slim-down E10: the model chain is `paseo run`'s); `ci-waiver` once parked PR 118 lands (not on master) | \u2014 | KEEP (harness-neutral)",
+  "kind": "stale-current-tense",
+  "fix": "`pr-wait` and `local-review` are not KEEP: both deleted 2026-11-07 (E8), replaced by `bin/review-pr`, `bin/review-launch` and the `adversary-marker` Action; and PR 118 was closed 2026-10-31 (not parked), so drop the `ci-waiver` clause."
+ },
+ {
+  "file": "docs/paseo-only-rearchitecture.md",
+  "line": 260,
+  "quote": "`cow-workspaces` | \u2014 | RETIRE | Paseo worktree workspaces plus `fresh-worktrees` (running) and setup hooks; the claim stays (B4)",
+  "kind": "missing-replacement",
+  "fix": "Mark done: `skills/cow-workspaces` and `bin/cow-pasture` deleted 2026-11-06 (E2); the claim registry (`ade-git-guard`) stays."
+ },
+ {
+  "file": "docs/paseo-only-rearchitecture.md",
+  "line": 267,
+  "quote": "`~/AGENTS.md` items 4, 24-26, 30, 33; `djbclark-ade/AGENTS.md` orders 9-10 and Machine context | \u2014 | REWRITE per phase, as each behaviour changes (astra B1h), final pass in D7; Opus 5.5+ edits `home-agents.mdc`",
+  "kind": "missing-replacement",
+  "fix": "`djbclark-ade/AGENTS.md` was re-based on Paseo by E11 (2026-11-07: orders 9-10, Machine context, Trust); only the `~/AGENTS.md`/`home-agents.mdc` pass remains open (site-djbclark, order 11). Say so in the row."
+ },
+ {
+  "file": "docs/paseo-only-rearchitecture.md",
+  "line": 296,
+  "quote": "a script under `tests/paseo-acceptance/drain/` records, for the tool being disabled, that it holds nothing: `plugins/herdr-sleeper/herdr-sleeper list` and the legacy journal `~/.local/state/herdr-sleeper/sleeping.json` empty (`fleet.py ended` `sleeping` items show both), or each sleeper resumed as a Paseo agent with its session UUID; no `acp-dispatch` record quota-stopped or resumable",
+  "kind": "stale-current-tense",
+  "fix": "The drain happened as the C7 gate (operator output 2026-11-06, PASSED with two waivers) and every tool named here is gone (herdr-sleeper E2, fleet.py E3b, `acp-dispatch resume`/auto-resume E6, `relay.py --pending` E3, cow pastures E2, bigteam E6); add one dated line \"done as C7, 2026-11-06 (`slim/log.md`)\" and stop presenting the commands as the procedure."
+ },
+ {
+  "file": "docs/paseo-only-rearchitecture.md",
+  "line": 369,
+  "quote": "`usage-auto-resume` coverage for omp, opencode, cline and grok (G5); the Telegram plugin's 0.14 test (F1).",
+  "kind": "wrong-fact",
+  "fix": "cline and the grok CLI are retired (pool audit 2026-11-06; grok ruling 2026-11-07, grok-bot kept via peer-link); coverage is for omp and opencode only. Same list at line 626."
+ },
+ {
+  "file": "docs/paseo-only-rearchitecture.md",
+  "line": 399,
+  "quote": "`acp-run` retires only when zcode and crush have working custom Paseo providers, or djbclark rules to drop them.",
+  "kind": "wrong-fact",
+  "fix": "Both were dropped by the 2026-11-06 pool-audit ruling (zcode folds into opencode's zai route, crush has no provider); `tools/acp-run` goes with the dispatch shim in Wave 6's follow-up PR. Close the condition with that date."
+ },
+ {
+  "file": "docs/paseo-only-rearchitecture.md",
+  "line": 411,
+  "quote": "import after a `sys.path` insert (today `bin/context-watch:74`, `bin/load-watch:116,232`, `skills/helm/helm.py:56-57`, `skills/herdr-tidy/tidy.py:35`).",
+  "kind": "stale-current-tense",
+  "fix": "None of these imports exist now: `context-watch` and `load-watch` read `paseo ls` since E5 (2026-11-06), `skills/helm` and `skills/herdr-tidy` are deleted (E4, E2). Change \"today\" to \"on 2026-10-30\"."
+ },
+ {
+  "file": "docs/paseo-only-rearchitecture.md",
+  "line": 424,
+  "quote": "The end-state check is a **new** CI step in djbclark-ade (the `context-policy` job runs only pytest today)",
+  "kind": "wrong-fact",
+  "fix": "The `context-policy` job also runs `bin/ade-roster --check` since 2026-11-07 (E11, `.github/workflows/test.yml:121`); date the claim or drop the parenthesis."
+ },
+ {
+  "file": "docs/paseo-only-rearchitecture.md",
+  "line": 446,
+  "quote": "PR 118 (CI waiver, docs-only class): parked at head `d55a8b4b` with adversary r9 BLOCK (\u2026 Harness-neutral; resume or close after the migration (`docs/queue.md`).",
+  "kind": "wrong-fact",
+  "fix": "PR 118 was closed 2026-10-31 (`gh api repos/djbclark/djbclark-ade/pulls/118`: state closed, not merged) and `docs/queue.md` no longer carries it; mark the carry-over closed."
+ },
+ {
+  "file": "docs/paseo-only-rearchitecture.md",
+  "line": 451,
+  "quote": "`docs/queue.md` entries unchanged.",
+  "kind": "wrong-fact",
+  "fix": "The queue was rewritten by E11 on 2026-11-07 (2,114 \u2192 138 lines: 33 carried, 31 closed by the slim-down, 18 done before; full text at tag `pre-slim-2026-11-06`); say so."
+ },
+ {
+  "file": "docs/paseo-only-rearchitecture.md",
+  "line": 456,
+  "quote": "`relay.py` sender identification (found by 495e0645, 2026-10-30; not in `docs/queue.md`): a Paseo-hosted agent that neither carries `PASEO_AGENT_ID` nor has an ancestor that does (`fleet.py:627-631,647`; seen with an Antigravity agent) resolves to a channel-less `pid*` row (`fleet.py:878`), so its `--expect-ack` is recorded with no proof path \u2026 `tests/test_relay_fallback.py:3009` pins that delivered format). It matters until D6 disables `session-finder`",
+  "kind": "dead-link",
+  "fix": "`fleet.py`, `tests/test_relay_fallback.py` and session-finder's routes were deleted 2026-11-06 (E3/E3b); the shim resolves targets by id only, refuses an anonymous sender (exit 4) and proves delivery by the peer's `ack <id>` (standing order 10), so this carry-over is closed: mark it \"closed by E3, 2026-11-06\" and drop the file:line pointers."
+ },
+ {
+  "file": "docs/paseo-only-rearchitecture.md",
+  "line": 509,
+  "quote": "omp Opus 5.5 high leads the judgment phases and Sonnet 5.5 the mechanical ones; Fable and astra consult. Every launch stays subject to the live quota gates: when omp is rate-gated (it shares the Claude weekly window), judgment work waits or goes to codex per the routing policy (Fable 1.7).",
+  "kind": "wrong-fact",
+  "fix": "Two rulings of 2026-11-06/07 override this: omp runs on Codex and Claude API credits, pools distinct from the Claude subscription and not tracked by aiuse (omp KEEP ruling), so it does not share the Claude weekly window; and Fable leads are allowed while `config/routing.toml [lead].fable_lead = true` (the slim-down's own lead is Fable). Add a dated amendment under F6."
+ },
+ {
+  "file": "docs/paseo-only-rearchitecture.md",
+  "line": 575,
+  "quote": "The override is an expiring entry written through the gate profile tool (`config/gates.toml`; deleted 2026-11-07), so a broken `aiuse` cannot stop recovery work for long.",
+  "kind": "wrong-fact",
+  "fix": "`config/gates.toml` is not deleted: its `[frontier]` half stays (`docs/gates.md`); what went on 2026-11-07 (E7) is `bin/gate-profile` and the Claude quota half. Reword: \"the gate profile tool (`bin/gate-profile`, deleted 2026-11-07 with the quota half of `config/gates.toml`)\"."
+ },
+ {
+  "file": "docs/paseo-only-rearchitecture.md",
+  "line": 626,
+  "quote": "**Adopted**: `usage-auto-resume` (running; covers Codex, Claude, Antigravity; extend it, or add a small turn-end hook (0.14 name per `plugins_hooks.md`), for omp, opencode, cline and grok)",
+  "kind": "wrong-fact",
+  "fix": "Drop cline and grok (both retired: pool audit 2026-11-06, grok CLI ruling 2026-11-07); the list is omp and opencode."
+ },
+ {
+  "file": "docs/paseo-only-rearchitecture.md",
+  "line": 641,
+  "quote": "**Quota and load gates vanish with acp-dispatch**, and `create_agent` bypasses provider-side hooks such as the Claude quota guard. G2 ships before `/bigteam` is rewritten.",
+  "kind": "stale-current-tense",
+  "fix": "The Claude quota guard was deleted 2026-11-07 (E7; the allowance is `bin/ade_gates.py` on `paseo usage ls --json` plus aiuse) and `/bigteam` already became `skills/fan-out` (E6) without G2; restate the risk against those: the shim's gates go with it in Wave 6 and nothing gates a native `create_agent`."
+ },
+ {
+  "file": "docs/threat-model.md",
+  "line": 182,
+  "quote": "Staged skill edits from `bin/skillopt-night` are instruction changes: review them as such.",
+  "kind": "stale-current-tense",
+  "fix": "skillopt-night is deleted (E10): drop the sentence or date it (\"until 2026-11-06 ...\")."
+ },
+ {
+  "file": "docs/threat-model.md",
+  "line": 187,
+  "quote": "Keys are read through `sudo-secretspec`: `run` (`bin/cursor-cloud` re-executes itself under it when `CURSOR_API_KEY` is absent; `bin/zcode-key-auth` does the same for `ZAI_CODING_PLAN_API_KEY` and prints only hashes via `fp()`) or `get` captured into memory, cached per process and never printed (`bin/failover.py` `secret_value`).",
+  "kind": "stale-current-tense",
+  "fix": "`bin/zcode-key-auth` and `bin/failover.py` are deleted (E9/E10): keep `bin/cursor-cloud` and cite `bin/pr-policy`'s `get` (AGENTS.md rule 3) as the in-memory example; date the two deleted names."
+ },
+ {
+  "file": "docs/threat-model.md",
+  "line": 201,
+  "quote": "* **Gap 2.** `bin/zcode-key-auth` writes the key into zcode's own store (`~/.zcode/v2/credentials.json`), AES-256-GCM with a key derived from `ZCODE_CREDENTIAL_SECRET` or a fallback built from platform, home and user name (file header). Anyone running as the operator can derive it. It is the one sanctioned place a key is written.",
+  "kind": "stale-current-tense",
+  "fix": "zcode and `bin/zcode-key-auth` are retired (E9, ruling: zcode folds into opencode's zai route): mark \"(closed 2026-11-06: tool and store retired; the sanctioned place is now a third-party tool's own credential store, AGENTS.md rule 3)\"."
+ },
+ {
+  "file": "docs/threat-model.md",
+  "line": 208,
+  "quote": "The same shape in `bin/firecrawl-router`: `FIRECRAWL_SELFHOST_URL`, `FIRECRAWL_FALLBACK_URL`, `FIRECRAWL_ROUTER_SIPB_BASE` and `FIRECRAWL_ROUTER_LITELLM_BASE` choose where `call()` and `Extractor._post()` send the matching bearer keys.",
+  "kind": "stale-current-tense",
+  "fix": "The router was deleted 2026-11-06 (3b): add the dated note here as entry 10 has, and in \"*Remains:*\" (line 215-216: \"the router accepts https to any host ... still receives\") say the router half is closed by deletion; only the `bin/cursor-cloud` residual remains."
+ },
+ {
+  "file": "docs/threat-model.md",
+  "line": 243,
+  "quote": "* **Gap 1 (verified 2026-10-20 01:05Z).** `master` has no branch protection (`gh api repos/djbclark/djbclark-ade/branches/master/protection` returns 404 \"Branch not protected\") and the repo has no rulesets. Nothing on GitHub requires a pull request",
+  "kind": "wrong-fact",
+  "fix": "Branch protection (PR only, enforced for admins) has refused direct pushes since 2026-10-31 (AGENTS.md Machine context; Gap 3 line 267 itself says \"branch protection's PR requirement\"): re-date the gap to \"a PR is required; the `adversary-marker` status and `--match-head-commit` are not yet required until the operator's ruleset lands (operator batch, E8)\"."
+ },
+ {
+  "file": "docs/threat-model.md",
+  "line": 263,
+  "quote": "A fabricated APPROVE written by a trusted account (one of our own agents with the operator's login) is still indistinguishable from a real one: treat it as a claim.",
+  "kind": "wrong-fact",
+  "fix": "Contradicts the 2026-11-07 \"trust boundary clarified\" ruling (an artifact whose author/last editor GitHub reports as the owner or the owner's agents is ours, no second proof): rewrite as \"is trusted by attribution; the residual is an injected own agent, accepted under internal trust\"."
+ },
+ {
+  "file": "docs/threat-model.md",
+  "line": 273,
+  "quote": "pushes to a `cursor/...` branch and the lead opens the PR after an adversary verdict. Codex is reviewer-only (`docs/queue.md`).",
+  "kind": "dead-link",
+  "fix": "docs/queue.md no longer carries the \"reviewer-only\" note: cite AGENTS.md rule 9 (Codex advisory, untrusted) instead."
+ },
+ {
+  "file": "docs/threat-model.md",
+  "line": 279,
+  "quote": "* **Control.** `hermes-ping` (operator) is one-way and used for notices (`bin/load-watch`, `bin/zcode-key-auth`).",
+  "kind": "stale-current-tense",
+  "fix": "`bin/zcode-key-auth` is deleted (E9): replace with `bin/deadline` or `bin/pr-policy` (the surviving hermes-ping callers) or just `bin/load-watch`."
+ },
+ {
+  "file": "docs/threat-model.md",
+  "line": 311,
+  "quote": "* **Control.** Every interpolated value in the launchd runner scripts, the printed resume and rearm hints and the wait helper goes through `shlex.quote` (`runner_script`, `auto_resume_runner_script`, `rearm_cmd` in `bin/acp-dispatch`).",
+  "kind": "stale-current-tense",
+  "fix": "Those functions and the runner scripts are gone with E6; the shim's argv lists and `bin/deadline`'s printed hints (`shlex.join`) are what remain: rewrite the Control around AGENTS.md rule 4 and date the runner-script sentence."
+ },
+ {
+  "file": "docs/threat-model.md",
+  "line": 322,
+  "quote": "* **Gap.** The record is the dispatcher's source of truth for what launchd runs, and it is unsigned. Any process running as the operator can edit a record or a runner script and have launchd run it later, so a local foothold is persistent through `acp-dispatch`.",
+  "kind": "stale-current-tense",
+  "fix": "acp-dispatch submits nothing to launchd since 2026-11-06 (asset 8): the record now feeds only `wait`/`tell`/`outcome`; rewrite as \"a tampered record misreports a slice's outcome\" and drop the persistence claim (launchd persistence is 4.6's three jobs)."
+ },
+ {
+  "file": "docs/threat-model.md",
+  "line": 331,
+  "quote": "* **Control.** `acp-dispatch` holds a slice before it spawns while `machine_overloaded()` is true, up to 900 s (`wait_for_capacity`); `load-watch` finds the session behind sustained load",
+  "kind": "stale-current-tense",
+  "fix": "`machine_overloaded`/`wait_for_capacity` are gone (E6): the control is `load-watch admit --wait S --max-agents` (exit 75) plus the shim's agent cap; also delete \"Auto-resume is capped at 3 attempts and gated on live pool headroom\" (line 333-334): auto-resume is retired, Paseo's `usage-auto-resume` plugin replaces it."
+ },
+ {
+  "file": "docs/threat-model.md",
+  "line": 335,
+  "quote": "* **Gap.** The overload gate starts the slice anyway after the cap. PR 7's `admit` (merged 2026-10-20) adds admission with stagger and pending-runner accounting before that gate; the overload hold itself is still outside the deferred deadline (`docs/queue.md` item 3d), and the `admit` gate fails open (entry point 4).",
+  "kind": "stale-current-tense",
+  "fix": "No overload gate or cap remains and queue.md has no item 3d: reduce the gap to \"the `admit` gate fails open on a missing or unreadable load-watch (entry point 4)\"."
+ },
+ {
+  "file": "docs/threat-model.md",
+  "line": 353,
+  "quote": "6. **`fleet-watch`** lives at `~/ops/site-private/bin/fleet-watch`, not in this repo's `bin/` (the `bin/fleet-watch` link in AGENTS.md is dead on 2026-10-20), so its code is outside this review's reach.",
+  "kind": "wrong-fact",
+  "fix": "The slim log settles it as site-public: `~/ops/site-public-djbclark/bin/fleet-watch` (site-djbclark `bin/fleet-watch`; AGENTS.md's vendor row now says so and is no longer dead): correct the path and drop the dead-link remark."
+ },
+ {
+  "file": "docs/tui-lessons-learned.md",
+  "line": 162,
+  "quote": "`docs/model-routing.md` (~428\u2013439).",
+  "kind": "wrong-fact",
+  "fix": "`docs/model-routing.md` was rewritten by E7/E11 and is 93 lines; cite the pre-slim tag or drop the range."
+ },
+ {
+  "file": "docs/tui-lessons-learned.md",
+  "line": 163,
+  "quote": "**D1c Replaced by.** `acp-run opencode --model zai-coding-plan/\u2026` after G2 proves the Coding\n   Plan window moves (not an API balance). Keep session-store harvest in `bin/skillopt_sources.py`\n   until history is done (G3).",
+  "kind": "stale-current-tense",
+  "fix": "`bin/skillopt_sources.py` was deleted by E10 (2026-11-06) and acp-run is a shim: say \"opencode's built-in `zai-coding-plan` provider through `paseo run` (H2); the session-store harvest is gone with skillopt (E10)\"."
+ },
+ {
+  "file": "docs/tui-lessons-learned.md",
+  "line": 183,
+  "quote": "`tools/acp-run/README.md` (~378\u2013382).",
+  "kind": "dead-link",
+  "fix": "The copilot section of the README went with the adapter 2026-11-06; cite `git show pre-slim-2026-11-06:tools/acp-run/README.md`."
+ },
+ {
+  "file": "docs/tui-lessons-learned.md",
+  "line": 184,
+  "quote": "**D2c Replaced by.** GitHub-side Copilot for review; opencode on explicit request after trial.",
+  "kind": "wrong-fact",
+  "fix": "Row H6 and `config/routing.toml` (2026-11-06): no copilot plan survived the pool audit and the replacement is Paseo's copilot provider if ever wanted, not opencode `github-copilot`; align D2c with H6."
+ },
+ {
+  "file": "docs/tui-lessons-learned.md",
+  "line": 197,
+  "quote": "`tools/acp-run/README.md` crush section; `docs/queue.md`\n   (~1200\u20131216).",
+  "kind": "dead-link",
+  "fix": "The README's crush section went 2026-11-06 (README line 593-594) and `docs/queue.md` is 142 lines (crush at line 117): cite the pre-slim tag."
+ },
+ {
+  "file": "docs/tui-lessons-learned.md",
+  "line": 199,
+  "quote": "**D3c Replaced by.** `acp-run opencode --model sipb/qwen3.6:35b-a3b-q4_K_M` (SIPB agent-task\n   pin, commit `b607dfb2`; `docs/model-routing.md` ~222).",
+  "kind": "missing-replacement",
+  "fix": "Name the current form (opencode's `sipb` provider through `paseo run`, row H5) and drop the `docs/model-routing.md` ~222 pointer (the file is 93 lines)."
+ },
+ {
+  "file": "docs/tui-lessons-learned.md",
+  "line": 237,
+  "quote": "`tools/acp-run/README.md` (~410\u2013420).",
+  "kind": "dead-link",
+  "fix": "The qwen section went with the adapter 2026-11-06; cite the pre-slim tag."
+ },
+ {
+  "file": "docs/tui-lessons-learned.md",
+  "line": 259,
+  "quote": "**pending H5** on 2026-11-04: registry, skill-target and machine removal wait for djbclark's answer.",
+  "kind": "stale-current-tense",
+  "fix": "Add \"retired 2026-11-06 (H8): rows, adapters and skill links removed by E9; machine removal is in the operator batch\"."
+ },
+ {
+  "file": "docs/tui-lessons-learned.md",
+  "line": 264,
+  "quote": "drop from skill-everywhere only after H5\n   (the plan: \"muse after H5\").",
+  "kind": "stale-current-tense",
+  "fix": "Done: E9 removed the muse `skill-everywhere` target row on 2026-11-06 (report wave2-E9); say so."
+ },
+ {
+  "file": "docs/tui-lessons-learned.md",
+  "line": 281,
+  "quote": "`tools/acp-run/README.md` (~482\u2013487).",
+  "kind": "dead-link",
+  "fix": "The kiro section went with the adapter 2026-11-06; cite the pre-slim tag."
+ },
+ {
+  "file": "docs/tui-lessons-learned.md",
+  "line": 303,
+  "quote": "omp\n   still fail-open \u2014 **port fail-closed for independent API pools** (ruling 2026-11-04; pi-support session 2026-11-03).",
+  "kind": "wrong-fact",
+  "fix": "Row H1 lists Pi's fail-closed admission gate as lost on purpose (pi retired outright, 2026-11-07 ruling \"omp and not pi\"); replace the instruction with \"not ported (H1); the frontier gate now reads `paseo usage ls --json` and fails closed for `frontier` (E7)\"."
+ },
+ {
+  "file": "docs/tui-lessons-learned.md",
+  "line": 309,
+  "quote": "**D12c Replaced by.** omp spending OpenAI API credits; keep history/fleet adapters until\n   harvested; remove pi from skill-everywhere / acp-run after ports land.",
+  "kind": "stale-current-tense",
+  "fix": "The fleet adapters went with `fleet.py` (E3b) and pi was removed from `skill-everywhere` and acp-run by E9 on 2026-11-06 without the ports (ruling 2026-11-07, row H1): reword as done."
+ },
+ {
+  "file": "docs/tui-lessons-learned.md",
+  "line": 335,
+  "quote": "`AGENT_GUARDS` / `docs/agent-guard-contract.md` and\n   `fleet.EXACT_EXECUTABLES` make later TUIs a row flip, not a rewrite (pi/omp PRs 273\u2013275;\n   `bin/agent_guard.py`, `skills/session-finder/fleet.py`). Applies to every kept ACP TUI still\n   marked `unreviewed`, and to the omp absorb of pi.",
+  "kind": "dead-link",
+  "fix": "`skills/session-finder/fleet.py` (and `EXACT_EXECUTABLES`) was deleted by E3b (2026-11-06); only `bin/agent_guard.py`'s `AGENT_GUARDS` survives, and it goes with the shim in Wave 6 (ledger ruling 4): trim the sentence to the guard table and drop \"the omp absorb of pi\"."
+ },
+ {
+  "file": "docs/tui-lessons-learned.md",
+  "line": 358,
+  "quote": "**E11 Digest-before-small-context.** `web-digest-mcp` / skill-get for SIPB-sized windows.\n    Applies to **opencode** SIPB routes.",
+  "kind": "stale-current-tense",
+  "fix": "`bin/web-digest`, `bin/web-digest-mcp`, `bin/web-get` (Wave 3b) and `bin/skill-get` (E10) were deleted 2026-11-06 with no replacement (ruling R2-15, no small-context provider survived): keep the pattern but say the tools are gone."
+ },
+ {
+  "file": "docs/tui-lessons-learned.md",
+  "line": 360,
+  "quote": "Applies to every kept\n    headless path (**codex**, **agy**, **opencode**, **omp**).",
+  "kind": "stale-current-tense",
+  "fix": "agy was retired 2026-11-06 (H4): write \"antigravity (the Paseo provider)\" in its place."
+ },
+ {
+  "file": "docs/tui-lessons-learned.md",
+  "line": 367,
+  "quote": "**E15 Fail-closed capacity for independent API pools.** Port from pi to omp (ruling 2026-11-04;\n    pi-support session 2026-11-03). Applies to **omp**.",
+  "kind": "wrong-fact",
+  "fix": "Contradicts row H1 and the 2026-11-07 pi ruling: the gate was lost on purpose, not ported; say \"not ported; E7's frontier gate on `paseo usage ls --json` is the fail-closed admission that remains\"."
+ },
+ {
+  "file": "docs/tui-lessons-learned.md",
+  "line": 378,
+  "quote": "**F5** Canary the permission story in an empty `-C` (deny must deny, including MCP) (B1).",
+  "kind": "wrong-fact",
+  "fix": "The 2026-11-07 internal-trust ruling makes `--perm read-only|deny` best effort between our own agents (E6); a hard \"deny must deny\" applies only to the external review boundary (`bin/review-launch`): qualify the item."
+ },
+ {
+  "file": "docs/tui-lessons-learned.md",
+  "line": 388,
+  "quote": "**F12** Budget upkeep across session-finder / helm / autorename / self-slash / failover /\n    skillopt (zcode \u2248 45 code files; plan A10).",
+  "kind": "stale-current-tense",
+  "fix": "All six were deleted by E3/E4/E10 (session-finder survives only as `relay.py`, itself gone 2026-11-20): name the surviving upkeep surfaces (Paseo provider registry, `route_agent.py`, `skill-everywhere`, `ade-backup-stores`) instead."
+ },
+ {
+  "file": "docs/tui-lessons-learned.md",
+  "line": 391,
+  "quote": "enforcement that stops drift back across upgrade passes,\n    wrappers, Paseo, skill-everywhere, acp-run, failover, skillopt, routing (crush/goose; B10).",
+  "kind": "stale-current-tense",
+  "fix": "failover and skillopt are gone (E10) and acp-run leaves in Wave 6: list \"upgrade passes, wrappers, Paseo providers, skill-everywhere, `routing.toml` `never_route`\"."
+ },
+ {
+  "file": "docs/tui-lessons-learned.md",
+  "line": 398,
+  "quote": "**G1 Pi \u2192 omp ports (ruling 2026-11-04; pi-support session 2026-11-03).** Land fail-closed capacity for independent API pools\n   on omp (pi-support session 2026-11-03); port subagent model/thinking overrides; then drain pi rows.",
+  "kind": "wrong-fact",
+  "fix": "Superseded by the 2026-11-07 ruling (\"We want to use omp and not pi\"): the `pi/extensions/subagent` override is not ported (omp's native `task` tool and agent definitions), the capacity gate was lost on purpose (H1), and the pi rows were drained by E9/Wave 3b; close G1 with that note."
+ },
+ {
+  "file": "docs/tui-lessons-learned.md",
+  "line": 400,
+  "quote": "`session-find --all` maps `LIVE?` \u2192 `ended` (`docs/queue.md` ~118); `ACP_RUN_OMP_ANY_MODEL=1`\n   agent-settable and `--agent-arg`-only scan (`tools/acp-run/acp-run` ~2602\u20132625); fix\n   `bin/agent_guard.py` header test name; flip remaining `unreviewed` `AGENT_GUARDS` /\n   `EXACT_EXECUTABLES` rows; scrub pi `failureDetail` stderr",
+  "kind": "stale-current-tense",
+  "fix": "session-find went with E3 (queue.md line 119 now records the deletion), `EXACT_EXECUTABLES` went with `fleet.py` (E3b), the acp-run omp check now sits at `tools/acp-run/acp-run` ~1867 and the shim leaves in Wave 6, and pi is gone: drop the hygiene list or mark each item gone."
+ },
+ {
+  "file": "docs/tui-lessons-learned.md",
+  "line": 404,
+  "quote": "**G2 Cline drain.** Move `paseo-new-seat` default off `--provider cline`; retarget\n   `DANN_SUBSTRATE` to omp + cline-pass; remove cline from skill-everywhere / acp-run without\n   cutting `clinepass` out of Hermes's chain",
+  "kind": "stale-current-tense",
+  "fix": "`paseo-new-seat` was deleted (E4) and cline left `skill-everywhere` and acp-run on 2026-11-06 (E9, row H7); the one open item is `DANN_SUBSTRATE` in `bin/route_agent.py`, which still names provider `cline` for clinepass \u2014 say so."
+ },
+ {
+  "file": "docs/tui-lessons-learned.md",
+  "line": 409,
+  "quote": "make `acp-dispatch` turn a credit-balance refusal into a bounded\n   `note-exhausted` (C3, C4); verify the measured reading against the Console after both land; add\n   the acp-run foreign-credential guard (B11, C5).",
+  "kind": "missing-replacement",
+  "fix": "`acp-dispatch` and acp-run are one-cycle shims over `paseo run` (Wave 6 removes them; `bin/acp-dispatch` has no credit-refusal path): re-target the item to `route_agent.py` / E7's `paseo usage ls` gate or mark it dropped."
+ },
+ {
+  "file": "docs/tui-lessons-learned.md",
+  "line": 416,
+  "quote": "Still open: H5 (muse, pending; no removal without djbclark's explicit approval to retire it); operational: H1 roster now eight keepers \u2014 confirm\n   in G1 docs PR; H2 dsh uninstall vs unrouted trial; H6 X Subscription wait",
+  "kind": "stale-current-tense",
+  "fix": "muse was retired 2026-11-06 (H8, PLAN A2), the roster is now claude, codex, cursor, antigravity, opencode, omp, hermes plus grok-bot (line 47), dsh's machine removal is in the operator batch (H9), and the SuperGrok/X subscription was cancelled 2026-11-07 (grok ruling): close these items with those dates."
+ },
+ {
+  "file": "docs/tui-lessons-learned.md",
+  "line": 419,
+  "quote": "Migration order unchanged in spirit: registry/docs \u2192 trials (GLM + SIPB via\n   opencode) \u2192 re-point routing \u2192 machine removal after yes \u2192 plan decisions E1\u2013E4.",
+  "kind": "stale-current-tense",
+  "fix": "The slim-down carried out the registry, routing and docs steps (Waves 2-5, 2026-11-06/07) and the machine removals are `docs/slim/operator-batch.md`: say the order was executed by the slim-down and only the operator batch remains."
+ },
+ {
+  "file": "docs/upstream-issues.md",
+  "line": 225,
+  "quote": "**Our sleeper became a plugin too (2026-10-04, `plugins/herdr-sleeper/` in this repo):**",
+  "kind": "dead-link",
+  "fix": "Drop \"in this repo\" or add \"(deleted 2026-11-06, slim-down E2; the reference implementation is the djbclark/herdr-sleeper repo named below)\"."
+ },
+ {
+  "file": "docs/upstream-issues.md",
+  "line": 1252,
+  "quote": "Our workaround: `tools/acp-run/zcode-denylist-shim.cjs`, a stdio shim started as `ZCODE_BIN` that adds both fields.",
+  "kind": "dead-link",
+  "fix": "Past tense; the shim was deleted 2026-11-06 with the zcode provider (E9) and the path no longer exists."
+ },
+ {
+  "file": "docs/upstream-issues.md",
+  "line": 1273,
+  "quote": "The ade autorename design (2026-10-24, `skills/autorename`, design section 3.7) names Paseo agent tabs `<name>-pt`, and terminal tabs only at creation.",
+  "kind": "dead-link",
+  "fix": "Point at `docs/workspace-layout.md` (the naming survives there; `skills/autorename` was deleted 2026-11-06, E4) and use \"named\" for the design-era claim."
+ }
+]

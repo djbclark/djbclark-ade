@@ -2,7 +2,8 @@
 """Pick which vendor should run a piece of work, from capability and headroom.
 
 Routing here has been manual, which means it defaults to whatever is familiar.
-Measured on 2026-08-23: antigravity, opencode-go, zai and devin were all at
+Measured on 2026-08-23: antigravity, opencode-go, zai and devin (all since retired from this
+router, 2026-11-06) were all at
 roughly 0% used while claude carried the entire session. That is paid capacity
 expiring unused every cycle, and it repeats.
 
@@ -10,7 +11,8 @@ Two inputs decide a route:
 
 1. **Capability** — what each service is actually good at, from
    `docs/model-routing.md`'s judgment section, made machine-readable below.
-2. **Headroom** — live quota from `aiuse`.
+2. **Headroom** — live quota from `aiuse`, and from `paseo usage ls --json` as a second source
+   (slim-down E7, 2026-11-07).
 
 The headroom half has a hard constraint: a full `aiuse --json` probe takes
 **~46 seconds** (measured). Nothing that slow can sit inside a routing
@@ -32,24 +34,29 @@ pins the file-only read, `ROUTE_AGENT_AIUSE_BIN` names the binary,
 `ROUTE_AGENT_AIUSE_TIMEOUT` is seconds in (0, 60] (default 20). The spawn is memoised for 30 s;
 `load_snapshot(bypass_memo=True)` skips the memo (acp-dispatch's post-wait plenty-gate looks).
 
-**Services are discovered, not hardcoded.** The roster changes — agents gain
-an ACP mode, providers appear in aiuse, plans lapse. So the service list is
-built at call time from what this machine can actually dispatch, in this order:
+**Paseo is the second quota source and the registry (2026-11-07, slim-down E7).** `paseo usage ls --json`
+(`usage_from_paseo`) gives one report per `sourceId`: a report whose `status` is `available` contributes its
+windows (`usedPct`/`remainingPct`/`resetsAt`) and `balances` (as percentages of `limit`); any other status is
+**unknown**, never a pass. Its pools are folded into the aiuse reading with the same `_merge_pool` rule (the
+tightest known reading wins; an unknown never loosens one), and `quota_source_info()["pools"]` says which source
+each pool came from. Env: `ROUTE_AGENT_PASEO=off` drops both Paseo reads (the test suite sets it),
+`ROUTE_AGENT_PASEO_BIN` names the binary, `ROUTE_AGENT_PASEO_TIMEOUT` is seconds in (0, 60] (default 15),
+`ROUTE_AGENT_PASEO_USAGE_JSON=<path>` feeds canned `usage ls` output (tests). The usage read is memoised for 30 s.
+The Claude reading of that merged snapshot (`claude_quota_state`) is what the frontier allowance judges
+(bin/ade_gates.py; it read the deleted quota guard's state file until 2026-11-07).
 
-1. `acp-run --list` — the agent table every launcher uses; only `ok` rows
-   (binary present) count.
-2. the non-ACP headless TUIs (`NON_ACP_HEADLESS`, from model-routing's
-   per-CLI headless table; since 2026-10-08 only muse, zcode now rides
-   `acp-run` through `zcode-acp-server`), each only if its binary is on PATH.
-3. Orca's enabled agent roster — **off by default** (`ROUTE_AGENT_INCLUDE_ORCA=1`
-   turns it on), and even then intersected with installed binaries. Orca's
-   roster is its stock TUI list: on 2026-10-08, 12 of its 28 enabled names
-   were not installed here at all, so it is no longer an authority.
-4. whatever providers the aiuse snapshot reports.
+**Services are discovered, not hardcoded.** The roster changes: providers appear in Paseo and in aiuse,
+plans lapse. So the service list is built at call time from the curated profiles in config/routing.toml plus:
 
-Every name passes through `ALIASES` before it becomes a service, and the
-curated capability profiles below are applied as an *overlay*. An agent nobody
-has profiled still routes (conservatively) instead of being invisible.
+1. `paseo provider ls --json` (`paseo_providers`): the rows whose `enabled` is `"Enabled"` and whose
+   `status` is `available`; a row still `loading` (right after the daemon starts) is re-read twice over 6 s
+   and then treated as absent, with a note on stderr. `paseo provider models <p> --json` gives a provider's
+   model ids (`provider_models`, cached per process) for `services --check-models`.
+2. whatever providers the quota snapshot reports.
+
+Every name passes through `ALIASES` before it becomes a service (Paseo's `opencode` provider is the
+`opencode-go` pool), and the curated capability profiles are applied as an *overlay*. A provider nobody has
+profiled still routes (conservatively) instead of being invisible, unless `never_route` names it.
 
 The operator's standing routing rules are encoded as hard constraints, not
 preferences, because they encode consequences a score cannot see:
@@ -59,7 +66,7 @@ preferences, because they encode consequences a score cannot see:
   at high only while every window has plenty_min left; the two frontier models, Claude
   Fable 5.1 and codex's gpt-6-astra, are reached ONLY through the explicit
   `frontier` kind, at most one slice per pool per wave (two on claude under the
-  standing allowance of 2026-10-27 while the quota guard passes: docs/gates.md), for work that really
+  standing allowance of 2026-10-27 while the Claude reading passes: docs/gates.md), for work that really
   needs them (operator 2026-10-18: a wave of four astra slices emptied
   codex's 5-hour window and every one stopped; Fable at xhigh should almost
   never run). Everyday work goes to the other pools, and ALSO to codex's
@@ -73,29 +80,31 @@ preferences, because they encode consequences a score cannot see:
   on the normal ranking, it is not forced first;
 - Fable is a sublimit (at most 50%) of the SAME Claude weekly window, not a
   separate allowance: a Fable run bills the shared window too;
-- copilot is the one reserve, with a hard floor (`reserve_floor`): GitHub-side
-  Copilot review runs on it; never deplete it (grok was a reserve until
-  2026-10-18, when GrokBot moved to its own Cursor pool);
+- there is no reserve pool now (copilot, the one reserve with a hard floor, retired from the router
+  2026-11-06: Paseo's Copilot provider replaces the CLI; the grok CLI's SuperGrok pool, a reserve until
+  2026-10-18, retired 2026-11-07; grok-bot is Cursor-billed and never a slice target);
 - hermes is never a delegation target (gated, never discovered as a routable
   service here); omp is an ordinary tier since 2026-10-19 (operator): its Claude
-  API credits are an expiring grant, first for `api-only` work (rank 1; pi's OpenAI API pool is the other
-  eligible pool) and otherwise for `code`/`bulk` slices, so they are spent
+  API credits are an expiring grant, first for `api-only` work (rank 1) and otherwise for `code`/`bulk` slices, so they are spent
   before each monthly reset; `grant_days` gives it the burn-first bonus while the
   balance is far above an even spend over the month;
 - **never** route a slice to clinepass (NEVER_ROUTE) — it is the Hindsight/hermes
   lifeline and stays only in `hermes_chain`;
-- the prepaid tier (opencode-zen, openrouter, deepseek) is retired until an
+- the prepaid tier (opencode-zen) is retired until an
   explicit operator top-up.
 
 Every route comes with a `--model [--effort]` suggestion and the
-`acp-dispatch` line to run; the context window is the caller's choice (the
-agent's default unless the slice reads a whole corpus or a long log).
+`acp-dispatch` line to run (the shim over `paseo run`; `cursor-cloud launch` for the Cursor Cloud row);
+the context window is the caller's choice (the agent's default unless the slice reads a whole corpus or a
+long log).
 
 Usage:
     route_agent.py route --kind bulk
     route_agent.py route --kind judgment --json
     aiuse --available --live --json # (not route_agent) force a fresh quota collect; this script only reads aiuse's snapshot
-    route_agent.py show             # cache age, headroom, pace, expected waste
+    route_agent.py show             # cache age, headroom, pace, expected waste, source per pool
+    route_agent.py services [--check-models]   # the roster; --check-models: every suggested model in its
+                                    # provider's `paseo provider models` list (exit 1 when one is not)
     route_agent.py calibrate [--since DAYS] [--json] [--min N]
 """
 from __future__ import annotations
@@ -123,20 +132,6 @@ import ade_gates  # noqa: E402  (the frontier gate: config/gates.toml [frontier]
 
 DEFAULT_SNAPSHOT = Path.home() / ".cache" / "aiuse" / "snapshots" / "latest.json"
 SNAPSHOT = Path(os.environ.get("AIUSE_SNAPSHOT") or DEFAULT_SNAPSHOT)
-ORCA_DATA = Path.home() / ("Library/Application Support/orca/profiles/"
-                           "local-default/orca-data.json")
-# The ACP client every launcher uses; its agent table is the primary source of
-# dispatchable agents. The sibling checkout copy wins over PATH so the table
-# and this script move together; ACP_RUN overrides both.
-ACP_RUN = (os.environ.get("ACP_RUN")
-           or next((str(c) for c in (Path(__file__).resolve().parent.parent
-                                      / "tools" / "acp-run" / "acp-run",)
-                    if c.is_file()), None)
-           or shutil.which("acp-run") or "acp-run")
-# TUIs with a verified headless form but no usable ACP route, so acp-run does
-# not list them: skills/model-routing/SKILL.md, "Per-CLI headless forms (no ACP
-# mode, or fallback)". Each counts only while its binary is on PATH.
-NON_ACP_HEADLESS = frozenset({"muse"})  # zcode joined acp-run 2026-10-08 (zcode-acp-server)
 STALE_HARD = 6 * 3600      # beyond this, treat headroom as unknown
 STALE_SOFT = 25 * 60       # aiuse's own `fresh` threshold; older = re-collect before a wave
 
@@ -149,7 +144,7 @@ class Service:
     name: str                       # aiuse provider key
     cli: str                        # how it is actually invoked
     # kind -> fitness rank, lower is better. Per-kind rather than one number
-    # because fitness is not a single axis: antigravity is the best home for
+    # because fitness is not a single axis: one pool is the best home for
     # bulk and the wrong home for careful coding, and a flat rank cannot say
     # both.
     good_at: dict[str, int]
@@ -184,7 +179,7 @@ class Service:
     # `pool_family`). Windows of that family are measured for this service
     # alone; the provider's other windows stay with the provider's own
     # service. Add a row with `pool=` to give any provider's second pool its
-    # own routing entry (copilot, cursor, ...) once aiuse reports it. Do NOT
+    # own routing entry (cursor, ...) once aiuse reports it. Do NOT
     # use it for a model sublimit of a shared pool (Claude's `fable`): that
     # one is bounded by the parent windows and must stay with them.
     pool: tuple[str, str] | None = None
@@ -192,18 +187,18 @@ class Service:
     # with a burst limit or a dependant get a low cap so `plan` spreads a wave
     # over several pools instead of drowning the best-ranked one.
     max_parallel: int = 4
-    # The acp-run agent name when it differs from the aiuse provider id
-    # (antigravity -> agy, zai -> zcode, opencode-go -> opencode, ...).
+    # The Paseo provider (the acp-dispatch agent name) when it differs from the pool name
+    # (opencode-go -> opencode, cursor-auto -> cursor, ...).
     agent: str = ""
-    # kind -> "<model> [--effort LEVEL]" to pass to acp-run/acp-dispatch.
-    # Ids as that agent's `--info` lists them (tools/acp-run/README.md).
+    # kind -> "<model> [--effort LEVEL]" to pass to acp-dispatch.
+    # Ids as `paseo provider models <agent> --json` lists them (`route_agent.py services --check-models`).
     models: dict[str, str] = field(default_factory=dict)
     # A reserve pool's hard floor: never route to it with less than this much
-    # of its binding window left, whatever `min_headroom` says (copilot:
-    # GitHub-side Copilot review draws on it; grok was one until 2026-10-18).
+    # of its binding window left, whatever `min_headroom` says (none now;
+    # copilot was one, grok was one until 2026-10-18).
     reserve_floor: float = 0.0
     # True when `reserve_floor` only makes the pool fail closed without a measured reading (pi,
-    # 2026-11-03): it is a normal pool, not a reserve, so route() omits the RESERVE advice.
+    # 2026-11-03, retired 2026-11-06): it is a normal pool, not a reserve, so route() omits the RESERVE advice.
     measured_only: bool = False
     # Days in the grant period when this pool is an expiring dollar grant rather than a
     # rolling window (omp's Claude API credits, 2026-10-19): aiuse reports an expiry
@@ -272,7 +267,7 @@ def plenty_remaining(info: dict[str, Any] | None) -> float | None:
 
 
 # Policy file: env ROUTING_POLICY, else <repo>/config/routing.toml (same
-# resolution style as ACP_RUN).
+# resolution style as GATES_TOML in bin/ade_gates.py).
 def resolve_policy_path() -> Path:
     return Path(os.environ.get("ROUTING_POLICY") or
                 (Path(__file__).resolve().parent.parent / "config" / "routing.toml"))
@@ -292,6 +287,11 @@ LEAD_PIPELINE_EFFORT_DEFAULT = "high"
 # wider list (none, minimal, ultra, default): no Claude surface takes those.
 CLAUDE_EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 LEAD_ALL_KEYS = LEAD_KEYS + ("pipeline_effort",)
+# `fable_lead` (operator 2026-11-07: "Fable leads are allowed for now, with an easy way to turn them off later"): the one
+# switch for a lead session on Fable. Optional and read with .get: absent means false, the 2026-10-23 "never a Fable lead"
+# rule, so an older policy file keeps it. LEAD_FABLE_ALLOWED is the loaded value; context_size_nudge.py reads the same key.
+LEAD_SWITCHES = ("fable_lead",)
+LEAD_FABLE_ALLOWED = False
 
 # Populated by apply_policy from the TOML; names and types match the former
 # module-level literals so every caller and test keeps working.
@@ -363,7 +363,7 @@ def load_policy(path: Path | str) -> dict[str, Any]:
             raise ValueError(
                 f"routing policy {path}: [[service]] {label!r}: "
                 f"pool must be a 2-element string array, got {pool!r}")
-    for section in ("routing", "discovery", "dispatch", "hermes", "calibrate"):
+    for section in ("routing", "dispatch", "hermes", "calibrate"):
         if section not in data or not isinstance(data[section], dict):
             raise ValueError(f"routing policy {path}: missing [{section}] table")
     substrate = data.get("substrate")
@@ -376,13 +376,16 @@ def load_policy(path: Path | str) -> dict[str, Any]:
     if lead is not None:
         if not isinstance(lead, dict):
             raise ValueError(f"routing policy {path}: [lead] must be a table")
-        unknown = set(lead) - set(LEAD_ALL_KEYS)
+        unknown = set(lead) - set(LEAD_ALL_KEYS) - set(LEAD_SWITCHES)
         if unknown:
             raise ValueError(f"routing policy {path}: [lead] unknown key(s) {sorted(unknown)}")
         if not all(isinstance(lead.get(k), str) and lead[k] for k in LEAD_KEYS):
             raise ValueError(f"routing policy {path}: [lead] must be a table with non-empty string keys "
                              + ", ".join(LEAD_KEYS))
         lead.setdefault("pipeline_effort", LEAD_PIPELINE_EFFORT_DEFAULT)
+        if not isinstance(lead.get("fable_lead", False), bool):
+            raise ValueError(f"routing policy {path}: [lead] fable_lead must be true or false, "
+                             f"got {lead.get('fable_lead')!r}")
         for key in ("effort", "pipeline_effort"):
             if lead[key] not in CLAUDE_EFFORT_LEVELS:
                 raise ValueError(f"routing policy {path}: [lead] {key} {lead[key]!r} must be one of "
@@ -416,11 +419,11 @@ def apply_policy(data: dict[str, Any]) -> None:
     global CALIBRATE_SUGGEST_WORSE_BELOW
     global CALIBRATE_SUGGEST_WORSE_DELTA, CALIBRATE_SUGGEST_BETTER_ABOVE
     global CALIBRATE_SUGGEST_BETTER_DELTA
+    global LEAD_FABLE_ALLOWED
 
     POLICY = data
     try:
         routing = data["routing"]
-        discovery = data["discovery"]
         dispatch = data["dispatch"]
         hermes = data["hermes"]
         calibrate = data["calibrate"]
@@ -437,9 +440,11 @@ def apply_policy(data: dict[str, Any]) -> None:
                                 (routing.get("quality_max_rank_gap") or {}).items()}
         DEFAULT_PROFILE = {str(k): int(v) for k, v in routing["default_profile"].items()}
 
-        NEVER_ROUTE = frozenset(discovery["never_route"])
-        OPERATOR_GATED = frozenset(discovery["operator_gated"])
-        ALIASES = {str(k): str(v) for k, v in discovery["aliases"].items()}
+        # [routing].never_route / aliases (the [discovery] table until 2026-11-07); a name the dispatch gate
+        # holds for operator approval is never discovered either.
+        NEVER_ROUTE = frozenset(str(x) for x in routing.get("never_route") or [])
+        OPERATOR_GATED = frozenset(str(x) for x in dispatch["operator_gated"])
+        ALIASES = {str(k): str(v) for k, v in (routing.get("aliases") or {}).items()}
 
         DISPATCH_EXTRA = {str(k): str(v) for k, v in (dispatch.get("extra") or {}).items()}
         HERMES_MODELS = {str(k): [str(m) for m in v]
@@ -462,6 +467,7 @@ def apply_policy(data: dict[str, Any]) -> None:
 
     SERVICES = tuple(_service_from_entry(e) for e in data["service"])
     BY_NAME = {s.name: s for s in SERVICES}
+    LEAD_FABLE_ALLOWED = (data.get("lead") or {}).get("fable_lead", False) is True
 
 
 def reload_policy(path: Path | str | None = None) -> dict[str, Any]:
@@ -502,6 +508,8 @@ def policy_public() -> dict[str, Any]:
             "pace_penalty_judgment_factor": PACE_PENALTY_JUDGMENT_FACTOR,
             "plenty_min": PLENTY_MIN,
             "default_profile": dict(DEFAULT_PROFILE),
+            "never_route": sorted(NEVER_ROUTE),
+            "aliases": dict(ALIASES),
         },
         "calibrate": {
             "min_outcomes": CALIBRATE_MIN_OUTCOMES,
@@ -510,11 +518,6 @@ def policy_public() -> dict[str, Any]:
             "suggest_worse_delta": CALIBRATE_SUGGEST_WORSE_DELTA,
             "suggest_better_above": CALIBRATE_SUGGEST_BETTER_ABOVE,
             "suggest_better_delta": CALIBRATE_SUGGEST_BETTER_DELTA,
-        },
-        "discovery": {
-            "never_route": sorted(NEVER_ROUTE),
-            "operator_gated": sorted(OPERATOR_GATED),
-            "aliases": dict(ALIASES),
         },
         "dispatch": {
             "operator_gated": list(POLICY["dispatch"]["operator_gated"]),
@@ -555,12 +558,17 @@ def policy_markdown() -> str:
                     cell += f" `{model}`"
                 cells.append(cell)
         lines.append(f"| {s.name} | " + " | ".join(cells) + " |")
+    lines += ["", "## Pools", "", "| service | Paseo provider (acp-dispatch agent) | billing | note |", "|---|---|---|---|"]
+    for s in SERVICES:
+        agent = "`cursor-cloud launch` (not a Paseo provider)" if s.acp_agent == "cursor-cloud" else (
+            "none (API pool)" if s.access == "api" else s.acp_agent)
+        state = " (retired)" if s.retired else ""
+        lines.append(f"| {s.name}{state} | {agent} | {s.billing} | {s.note.replace('|', '/')} |")
     lines += ["", "## Gates and caps", ""]
     lines.append("| key | value |")
     lines.append("|---|---|")
     d = POLICY["dispatch"]
-    lines.append(f"| discovery.never_route | {', '.join(sorted(NEVER_ROUTE))} |")
-    lines.append(f"| discovery.operator_gated | {', '.join(sorted(OPERATOR_GATED))} |")
+    lines.append(f"| routing.never_route | {', '.join(sorted(NEVER_ROUTE))} |")
     lines.append(f"| dispatch.operator_gated | {', '.join(d['operator_gated'])} |")
     lines.append(f"| dispatch.fable_gated_efforts | {', '.join(d['fable_gated_efforts'])} |")
     caps = ", ".join(f"{k}={v}" for k, v in (d.get("inflight_cap") or {}).items()) or "(none)"
@@ -573,6 +581,8 @@ def policy_markdown() -> str:
     lines.append(f"| gates.frontier1_per_wave / frontier2_per_wave | {fg['frontier1_per_wave']:g} / {fg['frontier2_per_wave']:g} |")
     lines.append(f"| routing.plenty_min | {PLENTY_MIN:g} |")
     lines.append(f"| gates.frontier1_min_left | {fg['frontier1_min_left']:g} |")
+    lines.append(f"| gates.frontier1_window_min_left | {fg['frontier1_window_min_left']:g} |")
+    lines.append(f"| gates.frontier2_min_left | {fg['frontier2_min_left']:g} |")
     lines.append(f"| routing.burn_first_min | {BURN_FIRST_MIN} |")
     lines.append(f"| routing.burn_first_waste_min | {BURN_FIRST_WASTE_MIN} |")
     lines.append(f"| routing.pace_penalty_above | {PACE_PENALTY_ABOVE} |")
@@ -581,10 +591,14 @@ def policy_markdown() -> str:
     lead = POLICY.get("lead")
     if lead:
         lines += ["", "## Lead / orchestrator session", "",
-                  "The session that dispatches slices runs on this, not on Fable "
-                  "(Fable only through the `fable-deep` sub-agent or a `frontier` slice).", "",
-                  "| key | value |", "|---|---|"]
+                  ("The session that dispatches slices runs on this; a Fable 5.1 lead is allowed "
+                   "(`[lead].fable_lead = true`, operator 2026-11-07; set it to false for the 2026-10-23 "
+                   "never-a-Fable-lead rule)." if LEAD_FABLE_ALLOWED else
+                   "The session that dispatches slices runs on this, not on Fable "
+                   "(Fable only through the `fable-deep` sub-agent or a `frontier` slice; `[lead].fable_lead` is false)."),
+                  "", "| key | value |", "|---|---|"]
         lines += [f"| lead.{k} | {lead[k]} |" for k in LEAD_ALL_KEYS]
+        lines.append(f"| lead.fable_lead | {'true' if LEAD_FABLE_ALLOWED else 'false'} |")
         lines += ["", f"pipeline lead: {lead['pipeline_model']} at {lead['pipeline_effort']}; "
                       "high for judgment turns (`/effort high`, or the Paseo `--thinking` setting; "
                       "back to the pipeline effort afterwards)."]
@@ -697,7 +711,7 @@ def _merge_pool(into: dict[str, Any], key: str, entry: dict[str, Any]) -> None:
     p_rem, e_rem = prior.get("remaining"), entry.get("remaining")
     take_new = e_rem is not None and (p_rem is None or e_rem < p_rem)
     merged = dict(entry if take_new else prior)
-    merged["windows"] = {**prior.get("windows", {}), **entry.get("windows", {})}
+    merged["windows"] = _merge_caps(prior.get("windows"), entry.get("windows"))   # per window, the tighter known reading
     merged["sublimits"] = _merge_caps(prior.get("sublimits"), entry.get("sublimits"))
     merged["remaining"] = e_rem if take_new else p_rem
     into[key] = merged
@@ -738,7 +752,7 @@ def _providers_from_available(rows: list[Any], age: float | None) -> dict[str, A
         else:
             top = None if head is None else round(head, 1)
         entry: dict[str, Any] = {
-            "remaining": top, "windows": {}, "sublimits": {},
+            "remaining": top, "windows": {}, "sublimits": {}, "age_s": row_age,
             "billing_kind": row.get("billing_kind"),
             "pace_ratio": None, "resets_at": row.get("available_at"), "window_minutes": None,
             "binding_window": row.get("binding_window"),
@@ -868,7 +882,7 @@ def _providers_from_accounts(accounts: list[Any], age: float | None) -> dict[str
                                                   "window_minutes")}
             providers[key] = {
                 "remaining": None if worst is None else round(float(worst), 1),
-                "windows": detail, "sublimits": sublimits,
+                "windows": detail, "sublimits": sublimits, "age_s": acct_age,
                 "billing_kind": acct.get("billing_kind"),
                 "pace_ratio": bind.get("pace_ratio"),
                 "resets_at": bind.get("resets_at"),
@@ -879,9 +893,11 @@ def _providers_from_accounts(accounts: list[Any], age: float | None) -> dict[str
 
 class QuotaSource:
     """Where the last load_snapshot() got its pool state (surfaced by plan/show/route)."""
-    kind = "snapshot"          # "aiuse" | "snapshot"
+    kind = "snapshot"          # "aiuse" | "canned" | "snapshot" | "paseo" (Paseo usage alone)
     detail = ""
     fallback_reason = ""
+    paseo = ""                 # "paseo usage ls --json" (or the canned path) when it was read, else why not
+    pools: dict[str, str] = {}  # service -> "aiuse" | "canned" | "snapshot" | "paseo" | "<aiuse source>+paseo"
 
 
 def _log(msg: str) -> None:
@@ -1009,7 +1025,246 @@ def _payload_age(payload: dict[str, Any]) -> float | None:
 def quota_source_info() -> dict[str, Any]:
     """Where the last load_snapshot() read pool state, for plan/show/route output."""
     return {"source": QuotaSource.kind, "detail": QuotaSource.detail,
-            "fallback_reason": QuotaSource.fallback_reason or None}
+            "fallback_reason": QuotaSource.fallback_reason or None,
+            "paseo": QuotaSource.paseo or None, "pools": dict(QuotaSource.pools)}
+
+
+# -- Paseo: the provider registry and `paseo usage ls` (slim-down E7, 2026-11-07) ------------------------
+
+PASEO_MEMO_TTL = 30.0          # seconds a `paseo usage ls` result is reused, like the aiuse spawn
+PASEO_LOADING_RETRIES = 2      # `provider ls` rows still `loading`: re-read this many times ...
+PASEO_LOADING_WAIT = 3.0       # ... this many seconds apart (6 s in all), then absent
+_PASEO_USAGE_MEMO: dict[tuple[Any, ...], tuple[float, tuple[list[Any] | None, str]]] = {}
+_PROVIDER_MODELS: dict[str, list[str] | None] = {}
+_PROVIDER_ROWS: list[list[dict[str, Any]]] = []       # one `provider ls` result per process (empty: not read yet)
+
+
+def _paseo_wanted() -> bool:
+    return os.environ.get("ROUTE_AGENT_PASEO", "").strip().lower() not in ("off", "0", "no", "false")
+
+
+def _paseo_timeout() -> float:
+    try:
+        t = float(os.environ.get("ROUTE_AGENT_PASEO_TIMEOUT") or 15)
+    except ValueError:
+        return 15.0
+    return t if math.isfinite(t) and 0 < t <= 60 else 15.0
+
+
+def _reset_paseo_cache() -> None:
+    """Forget memoised Paseo reads (tests; each process reads at most once per TTL otherwise)."""
+    _PASEO_USAGE_MEMO.clear()
+    _PROVIDER_MODELS.clear()
+    _PROVIDER_ROWS.clear()
+
+
+def _paseo_json(args: list[str]) -> tuple[Any, str]:
+    """`paseo ARGS --json` parsed, or (None, why). Never raises; bounded by ROUTE_AGENT_PASEO_TIMEOUT (default 15 s)."""
+    label = "paseo " + " ".join(args) + " --json"
+    if not _paseo_wanted():
+        return None, "ROUTE_AGENT_PASEO=off"
+    exe = os.environ.get("ROUTE_AGENT_PASEO_BIN") or shutil.which("paseo")
+    if not exe:
+        return None, "paseo not on PATH"
+    timeout = _paseo_timeout()
+    try:
+        proc = subprocess.run([exe, *args, "--json"], capture_output=True, timeout=timeout, check=False)
+    except subprocess.TimeoutExpired:
+        return None, f"{label} timed out after {timeout:g}s"
+    except OSError as exc:
+        return None, f"paseo could not start ({exc.__class__.__name__})"
+    if proc.returncode != 0:
+        return None, f"{label} exited {proc.returncode}"
+    try:
+        return json.loads(proc.stdout.decode("utf-8")), label
+    except ValueError:
+        return None, f"{label}: malformed JSON"
+
+
+def paseo_provider_rows() -> list[dict[str, Any]]:
+    """`paseo provider ls --json` rows ([] when Paseo cannot be read), read once per process (`_reset_paseo_cache` forgets
+    it). A row whose `status` is still `loading` (the daemon just started) is re-read PASEO_LOADING_RETRIES times,
+    PASEO_LOADING_WAIT seconds apart; a row loading after that is dropped with a note on stderr (absent, never available)."""
+    if not _PROVIDER_ROWS:
+        _PROVIDER_ROWS.append(_read_provider_rows())
+    return list(_PROVIDER_ROWS[0])
+
+
+def _read_provider_rows() -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for attempt in range(PASEO_LOADING_RETRIES + 1):
+        data, why = _paseo_json(["provider", "ls"])
+        if not isinstance(data, list):
+            if data is not None:
+                _log(f"{why}: not a JSON array; no Paseo providers")
+            return []
+        rows = [r for r in data if isinstance(r, dict) and isinstance(r.get("provider"), str) and r["provider"]]
+        if not any(r.get("status") == "loading" for r in rows) or attempt == PASEO_LOADING_RETRIES:
+            break
+        time.sleep(PASEO_LOADING_WAIT)
+    loading = sorted(r["provider"] for r in rows if r.get("status") == "loading")
+    if loading:
+        _log(f"paseo provider ls: still loading after {PASEO_LOADING_RETRIES * PASEO_LOADING_WAIT:g}s, "
+             f"treated as absent: {', '.join(loading)}")
+    return [r for r in rows if r.get("status") != "loading"]
+
+
+def paseo_providers() -> set[str]:
+    """The Paseo providers this machine can dispatch to now: enabled ("Enabled") and `available`."""
+    return {r["provider"] for r in paseo_provider_rows()
+            if r.get("enabled") == "Enabled" and r.get("status") == "available"}
+
+
+def provider_models(provider: str) -> list[str] | None:
+    """Model ids `paseo provider models <provider> --json` lists, or None when Paseo cannot say. Cached per process."""
+    if provider not in _PROVIDER_MODELS:
+        data, _ = _paseo_json(["provider", "models", provider])
+        ids = None
+        if isinstance(data, list):
+            ids = [str(m.get("id") or m.get("model")) for m in data
+                   if isinstance(m, dict) and (m.get("id") or m.get("model"))]
+        _PROVIDER_MODELS[provider] = ids
+    return _PROVIDER_MODELS[provider]
+
+
+def paseo_usage(bypass_memo: bool = False) -> tuple[list[Any] | None, str]:
+    """`paseo usage ls --json` as (rows, source label); (None, why) on any failure. ROUTE_AGENT_PASEO_USAGE_JSON=<path> reads
+    canned output instead (tests; it wins over ROUTE_AGENT_PASEO=off). Memoised for PASEO_MEMO_TTL; `bypass_memo` skips it."""
+    canned = os.environ.get("ROUTE_AGENT_PASEO_USAGE_JSON")
+    if canned:
+        try:
+            data = json.loads(Path(canned).read_text())
+        except (OSError, ValueError) as exc:
+            return None, f"ROUTE_AGENT_PASEO_USAGE_JSON unreadable ({exc.__class__.__name__})"
+        return (data, f"ROUTE_AGENT_PASEO_USAGE_JSON={canned}") if isinstance(data, list) else (
+            None, "ROUTE_AGENT_PASEO_USAGE_JSON: not a JSON array")
+    key = (os.environ.get("ROUTE_AGENT_PASEO_BIN") or shutil.which("paseo"), _paseo_timeout(), _paseo_wanted())
+    hit = None if bypass_memo else _PASEO_USAGE_MEMO.get(key)
+    if hit is not None and 0 <= time.monotonic() - hit[0] < PASEO_MEMO_TTL:
+        return hit[1]
+    data, why = _paseo_json(["usage", "ls"])
+    result: tuple[list[Any] | None, str] = (data, why) if isinstance(data, list) else (
+        None, why if data is None else f"{why}: not a JSON array")
+    _PASEO_USAGE_MEMO[key] = (time.monotonic(), result)
+    return result
+
+
+# Paseo usage `sourceId` -> routing service, where the two names differ (opencode's Paseo source is the Go pool).
+PASEO_USAGE_SERVICE = {"opencode": "opencode-go"}
+
+
+def _usage_service(source: str) -> str:
+    base = source.split(":", 1)[0]
+    return PASEO_USAGE_SERVICE.get(base) or ALIASES.get(base, base)
+
+
+def usage_from_paseo(rows: list[Any], now: datetime | None = None) -> dict[str, Any]:
+    """Fold `paseo usage ls --json` rows into per-service pools, keyed by each row's `sourceId`.
+
+    A report whose `status` is `available` gives `windows` ({label: percent left}, from `remainingPct`, else
+    100 - `usedPct`), `balances` (percent of `limit` left, labelled by unit), `remaining` (the tightest), and the
+    binding window's `resetsAt`; a window naming a SUBLIMIT_FAMILIES model (Claude's Fable) is a cap of that model, not
+    a window of the pool. A report older than STALE_SOFT (`fetchedAt`) keeps only an exhausted window. Any other status,
+    or a row without a report, is UNKNOWN: `remaining` None and `unknown` saying why, never a pass. `icon` (inline SVG)
+    and `loginErrors` are dropped."""
+    now = now or datetime.now(UTC)
+    out: dict[str, Any] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        source = row.get("sourceId") or row.get("id")
+        if not isinstance(source, str) or not source:
+            continue
+        key = _usage_service(source)
+        report = row.get("report") if isinstance(row.get("report"), dict) else {}
+        try:
+            fetched = datetime.fromisoformat(str(row.get("fetchedAt")).replace("Z", "+00:00"))
+            fetched = fetched if fetched.tzinfo else fetched.replace(tzinfo=UTC)
+            age = _clean_age((now - fetched).total_seconds())
+        except (ValueError, TypeError):
+            age = None
+        status = report.get("status")
+        entry: dict[str, Any] = {"remaining": None, "windows": {}, "sublimits": {}, "pace_ratio": None,
+                                 "resets_at": None, "window_minutes": None, "age_s": age, "source": "paseo",
+                                 "plan": report.get("planLabel")}
+        if status != "available":
+            problem = report.get("problem") if isinstance(report.get("problem"), dict) else {}
+            entry["unknown"] = (f"paseo usage {source}: report {status or 'missing'}"
+                                + (f" ({problem.get('kind')})" if problem.get("kind") else ""))
+            prior = out.get(key)
+            if prior is None:
+                out[key] = entry
+            continue
+        windows, balances = report.get("windows") or [], report.get("balances") or []
+        if not isinstance(windows, list) or not isinstance(balances, list):
+            # a malformed report measures nothing: this pool reads as Paseo "not read", never a pass
+            entry["unknown"] = f"paseo usage {source}: not read (windows or balances is not a list)"
+            if out.get(key) is None:
+                out[key] = entry
+            continue
+        stale = age is None or age > STALE_SOFT
+        worst: float | None = None
+        for i, w in enumerate(windows):
+            if not isinstance(w, dict):
+                continue
+            label = str(w.get("label") or w.get("id") or f"window {i + 1}")
+            rem = _pct(w.get("remainingPct"))
+            if rem is None and _pct(w.get("usedPct")) is not None:
+                rem = 100.0 - _pct(w.get("usedPct"))
+            if rem is not None and stale and rem > 0:
+                rem = None                          # a stale report measures nothing but an exhausted window
+            rem = None if rem is None else round(rem, 1)
+            family = next((f for f in SUBLIMIT_FAMILIES if f in label.lower()), None)
+            if family:
+                entry["sublimits"][family] = _tighter(entry["sublimits"].get(family), rem)
+                continue
+            entry["windows"][label] = rem
+            if rem is not None and (worst is None or rem < worst):
+                worst, entry["resets_at"] = rem, w.get("resetsAt")
+        for b in balances:
+            if not isinstance(b, dict):
+                continue
+            try:
+                left, limit = float(b.get("remaining")), float(b.get("limit"))
+            except (TypeError, ValueError):
+                continue
+            if not (math.isfinite(left) and math.isfinite(limit)) or limit <= 0:
+                continue
+            rem = _pct(100.0 * left / limit)
+            if rem is not None and stale and rem > 0:
+                rem = None
+            label = f"{b.get('unit') or 'balance'} balance"
+            entry["windows"][label] = None if rem is None else round(rem, 1)
+            if rem is not None and (worst is None or rem < worst):
+                worst, entry["resets_at"] = rem, b.get("resetsAt")
+        entry["remaining"] = None if worst is None else round(worst, 1)
+        prior = out.get(key)
+        if prior is not None and prior.get("unknown"):
+            out[key] = entry                        # one available report of a source beats an unknown one
+        else:
+            _merge_pool(out, key, entry)
+    return out
+
+
+def _fold_paseo(providers: dict[str, Any], paseo: dict[str, Any]) -> None:
+    """Merge Paseo's pools into the aiuse reading in place (`_merge_pool`: the tightest known reading wins). An unknown
+    Paseo report never loosens or replaces a reading: it is recorded as `paseo_unknown` beside it, or stands alone (as
+    unknown) for a pool aiuse does not know."""
+    for key, entry in paseo.items():
+        prior = providers.get(key)
+        if entry.get("remaining") is None and not entry.get("sublimits"):
+            if prior is None:
+                providers[key] = entry
+                QuotaSource.pools[key] = "paseo"
+            else:
+                prior["paseo_unknown"] = entry.get("unknown") or "paseo usage: no window reading"
+            continue
+        if prior is None or prior.get("unknown"):
+            providers[key] = {k: v for k, v in entry.items() if k != "unknown"}
+            QuotaSource.pools[key] = "paseo"
+            continue
+        _merge_pool(providers, key, entry)
+        QuotaSource.pools[key] = f"{QuotaSource.pools.get(key) or QuotaSource.kind}+paseo"
 
 
 def _apply_excluded(providers: dict[str, Any], excluded: Any) -> None:
@@ -1046,6 +1301,7 @@ def load_snapshot(bypass_memo: bool = False) -> tuple[dict[str, Any], float | No
     `source`) are tolerated when absent; the row's own `resets_at` and windows carry them.
     `bypass_memo=True` makes the aiuse read skip its 30 s memo (see aiuse_available)."""
     QuotaSource.kind, QuotaSource.detail, QuotaSource.fallback_reason = "snapshot", "", ""
+    QuotaSource.paseo, QuotaSource.pools = "", {}
     accounts, age = _read_snapshot_file()
     providers = _providers_from_accounts(accounts, age)
     canned = bool(os.environ.get("ROUTE_AGENT_AIUSE_JSON"))
@@ -1098,12 +1354,55 @@ def load_snapshot(bypass_memo: bool = False) -> tuple[dict[str, Any], float | No
             age = p_age if p_age is not None else age
     else:
         QuotaSource.detail = str(os.environ.get("AIUSE_SNAPSHOT") or SNAPSHOT)
+    if age is not None and age > STALE_HARD:
+        providers = {}                      # a dead collector: aiuse measures nothing (Paseo may still)
+    QuotaSource.pools = {k: QuotaSource.kind for k in providers}
+    rows, plabel = paseo_usage(bypass_memo)
+    if rows is None:
+        QuotaSource.paseo = f"not read: {plabel}"
+    else:
+        QuotaSource.paseo = plabel
+        try:
+            paseo = usage_from_paseo(rows)
+        except (TypeError, ValueError, AttributeError, OverflowError) as exc:   # belt and braces: the usage path never raises
+            QuotaSource.paseo, paseo = f"not read: {plabel}: unparseable ({exc.__class__.__name__})", {}
+        if paseo and not providers:
+            ages = [a for a in (e.get("age_s") for e in paseo.values() if e.get("remaining") is not None)
+                    if a is not None]
+            if ages:
+                QuotaSource.kind, age = "paseo", max(ages)
+        _fold_paseo(providers, paseo)
     for svc in SERVICES:
         if svc.shares_pool and svc.name not in providers and svc.shares_pool in providers:
             providers[svc.name] = dict(providers[svc.shares_pool])
-    if age is not None and age > STALE_HARD:
-        return {}, age
+            QuotaSource.pools[svc.name] = QuotaSource.pools.get(svc.shares_pool, QuotaSource.kind)
     return providers, age
+
+
+def claude_quota_state(now: datetime | None = None) -> dict[str, Any]:
+    """The Claude pool's reading for the frontier allowance (ade_gates.read_guard_state, judged_guard_block): the merged
+    snapshot's `claude` entry as {checked_at, source, remaining (the tightest window), fable_left (the Fable sublimit),
+    windows, unknown}. `checked_at` is now minus that pool's own reading age (else the snapshot's age); `unknown` says why
+    there is no reading (nothing reports claude, or only a Paseo report that is not `available`): the gate fails closed on
+    it, on a reading older than 30 minutes and on a missing window percentage."""
+    now = now or datetime.now(UTC)
+    saved = (QuotaSource.kind, QuotaSource.detail, QuotaSource.fallback_reason, QuotaSource.paseo, QuotaSource.pools)
+    try:
+        quota, age = load_snapshot()
+        source, fallback = QuotaSource.pools.get("claude"), QuotaSource.fallback_reason
+    finally:        # a caller's quota_source_info() describes its own load, not this one
+        (QuotaSource.kind, QuotaSource.detail, QuotaSource.fallback_reason, QuotaSource.paseo,
+         QuotaSource.pools) = saved
+    info = quota.get("claude")
+    if not isinstance(info, dict):
+        return {"checked_at": None, "source": None, "remaining": None, "fable_left": None, "windows": {},
+                "unknown": "no Claude reading from aiuse or paseo usage" + (f" ({fallback})" if fallback else "")}
+    pool_age = _clean_age(info.get("age_s"))
+    pool_age = pool_age if pool_age is not None else age
+    checked = None if pool_age is None else ade_gates.iso(now - timedelta(seconds=pool_age))
+    return {"checked_at": checked, "source": source, "remaining": info.get("remaining"),
+            "fable_left": (info.get("sublimits") or {}).get("fable"), "windows": dict(info.get("windows") or {}),
+            "unknown": info.get("unknown"), "paseo_unknown": info.get("paseo_unknown")}
 
 
 def hours_to_reset(resets_at: Any, *, now: datetime | None = None) -> float | None:
@@ -1205,60 +1504,8 @@ def service_ready(svc: Service) -> bool:
     return True if probe is None else bool(probe())
 
 
-def acp_list_output() -> str:
-    """`acp-run --list`, or "" when it cannot run. Never raises; never hangs."""
-    try:
-        proc = subprocess.run([ACP_RUN, "--list"], check=False, capture_output=True,
-                              text=True, timeout=15)
-    except (OSError, subprocess.SubprocessError):
-        return ""
-    return proc.stdout if proc.returncode == 0 else ""
-
-
-def acp_agents() -> set[str]:
-    """Agents acp-run can launch right now: the `ok <name> <cmd>` rows only.
-
-    `-- <name>` rows are in the table but their binary is absent."""
-    found = set()
-    for line in acp_list_output().splitlines():
-        parts = line.split()
-        if len(parts) >= 2 and parts[0] == "ok":
-            found.add(parts[1])
-    return found
-
-
-def headless_agents() -> set[str]:
-    """Non-ACP TUIs with a headless recipe, only while installed."""
-    return {name for name in NON_ACP_HEADLESS if shutil.which(name)}
-
-
-def orca_roster() -> set[str]:
-    """Orca's enabled TUI roster. Its stock list, not what is installed here —
-    so `installed_roster` only consults it when asked, and intersects it with
-    binaries on PATH."""
-    try:
-        data = json.loads(ORCA_DATA.read_text())
-    except (OSError, ValueError):
-        return set()
-    settings = data.get("settings", {}) or {}
-    agents = set((settings.get("agentDefaultArgs") or {}).keys())
-    return agents - set(settings.get("disabledTuiAgents") or [])
-
-
-def include_orca() -> bool:
-    return os.environ.get("ROUTE_AGENT_INCLUDE_ORCA", "").lower() in ("1", "true", "yes")
-
-
-def installed_roster() -> set[str]:
-    """Every agent this machine can dispatch to, in the module docstring's order."""
-    names = acp_agents() | headless_agents()
-    if include_orca():
-        names |= {name for name in orca_roster() if shutil.which(name)}
-    return names
-
-
-# DEFAULT_PROFILE, NEVER_ROUTE, OPERATOR_GATED and ALIASES
-# come from config/routing.toml via apply_policy.
+# DEFAULT_PROFILE, NEVER_ROUTE and ALIASES come from config/routing.toml [routing], OPERATOR_GATED from
+# [dispatch].operator_gated, via apply_policy.
 
 
 def discover(quota: dict[str, Any] | None = None) -> list[Service]:
@@ -1267,7 +1514,7 @@ def discover(quota: dict[str, Any] | None = None) -> list[Service]:
     services = {s.name: s for s in SERVICES}
     known_clis = {s.cli.split()[0] for s in SERVICES} | set(services)
 
-    for name in sorted(set(quota) | installed_roster()):
+    for name in sorted(set(quota) | paseo_providers()):
         canonical = ALIASES.get(name, name)
         if canonical in services or canonical in known_clis:
             continue                                # same account, already profiled
@@ -1283,13 +1530,9 @@ def discover(quota: dict[str, Any] | None = None) -> list[Service]:
 
 # -- routing --------------------------------------------------------------
 
-# The fleet governor (bin/claude-fleet-governor) writes `level` here every 5 minutes. While it says
-# tight or critical and is fresh, the Claude subscription is treated as an exhausted pool for the
-# kinds below (2026-10-23: `plan --kind code` printed `claude 30% left` with the 5-hour window
-# projected to run out before its reset).
 def frontier_gate() -> dict[str, float]:
     """The effective `frontier` gate (config/gates.toml [frontier]: the standing allowance since 2026-10-27, all-closed when the file is
-    unreadable; bin/ade_gates.py). Re-read per call: a profile can end or be cleared while a long process runs, and the file is tiny."""
+    unreadable; bin/ade_gates.py). Re-read per call: the file is tiny."""
     return ade_gates.load_frontier()[0]
 
 
@@ -1299,9 +1542,10 @@ def frontier_per_wave(pool: str, gate: dict[str, float] | None = None, quota: di
 
     A cap above the closed per-wave (ade_gates.FRONTIER_DEFAULTS, 1) is the standing allowance (gates.toml, docs/gates.md), and it holds only
     while that allowance's own checks pass (2026-10-27, adversary round 1 P1): the family's `*_judged` key at 1 or more, and
-    `ade_gates.judged_pool_block` (the one copy acp-dispatch's grant uses) empty: for claude a fresh quota guard state at ok or at watch for
-    the weekly window with the Fable cap above its floor, so a missing, stale, tight or critical guard falls back to the closed cap; for
-    any other pool its reading in `quota` at least frontier2_min_left. Otherwise the closed per-wave."""
+    `ade_gates.judged_pool_block` (the one copy acp-dispatch's grant uses) empty: for claude the merged snapshot's Claude reading
+    (`claude_quota_state`: aiuse and `paseo usage ls`) under 30 minutes old, its tightest window at least frontier1_window_min_left
+    and the Fable cap at least frontier1_min_left, so a missing, stale or unknown reading (a Paseo report that is not `available`)
+    falls back to the closed cap; for any other pool its reading in `quota` at least frontier2_min_left. Otherwise the closed per-wave."""
     gate = gate or frontier_gate()
     fam = 1 if pool == "claude" else 2
     cap = int(gate[f"frontier{fam}_per_wave"])
@@ -1310,50 +1554,9 @@ def frontier_per_wave(pool: str, gate: dict[str, float] | None = None, quota: di
         return cap
     if gate.get(f"frontier{fam}_judged", 0) < 1:
         return closed
-    block = ade_gates.judged_pool_block(fam, gate, now or datetime.now(UTC), ade_gates.read_guard_state() if fam == 1 else None,
+    block = ade_gates.judged_pool_block(fam, gate, now or datetime.now(UTC), claude_quota_state(now) if fam == 1 else None,
                                         ((quota or {}).get(pool) or {}).get("remaining"))
     return closed if block else cap
-
-
-GOVERNOR_STATE = Path.home() / ".local" / "state" / "ade" / "fleet-governor.json"   # CLAUDE_GOVERNOR_STATE overrides
-GOVERNOR_FRESH = 30 * 60
-GOVERNOR_HOLD_KINDS = frozenset({"code", "bulk", "research", "mechanical"})
-GOVERNOR_JUDGMENT_MODEL = "anthropic/claude-opus-5-5 --effort high"
-
-
-def governor_hold(now: datetime | None = None) -> str | None:
-    """Why the Claude subscription is off limits right now, or None.
-
-    Reads CLAUDE_GOVERNOR_STATE (re-read per call: a tiny file); tight/critical and `checked_at`
-    under 30 minutes old counts. Missing, unreadable, older or `ok`/`stale` state holds nothing."""
-    path = Path(os.environ.get("CLAUDE_GOVERNOR_STATE") or GOVERNOR_STATE)
-    try:
-        state = json.loads(path.read_text())
-        level = state.get("level")
-        checked = datetime.fromisoformat(str(state.get("checked_at")).replace("Z", "+00:00"))
-    except (OSError, ValueError, AttributeError, TypeError):
-        return None
-    if level not in ("tight", "critical"):
-        return None
-    if checked.tzinfo is None:
-        checked = checked.replace(tzinfo=UTC)
-    now = now or datetime.now(UTC)
-    if not 0 <= (now - checked).total_seconds() <= GOVERNOR_FRESH:
-        return None
-    windows = state.get("windows")
-    wins = [(k, w) for k, w in (windows.items() if isinstance(windows, dict) else ())
-            if isinstance(w, dict) and w.get("level") == level
-            and isinstance(w.get("projected_at_reset"), (int, float))]   # a corrupt state never stops routing (round 1 LOW 6)
-    top_kind, top = max(wins, key=lambda kw: kw[1]["projected_at_reset"], default=("", None))
-    detail = ""
-    if top:  # fixed names and numbers only: nothing free-form from the state file reaches an agent-facing text
-        name = {"five_hour": "5-hour", "weekly": "weekly", "fable_weekly": "weekly Fable"}.get(top_kind, "window")
-        used, proj = top.get("used"), top.get("projected_at_reset")
-        at = str(top.get("resets_at"))
-        at = at if re.fullmatch(r"[0-9T:.+Z-]{10,40}", at) else "?"
-        detail = (f" ({name} {used:.0f}% used, projected {proj:.0f}% at reset {at})"
-                  if isinstance(used, (int, float)) and isinstance(proj, (int, float)) else "")
-    return f"Claude subscription {level} per claude-fleet-governor{detail}"
 
 
 @dataclass
@@ -1363,22 +1566,25 @@ class Choice:
     score: float
     why: str = ""
     alternatives: list[str] = field(default_factory=list)
-    model: str = ""                 # "<model> [--effort L]" for acp-run
+    model: str = ""                 # "<model> [--effort L]" for acp-dispatch
     kind: str = ""                  # required by acp-dispatch (2026-10-18)
 
     @property
     def dispatch(self) -> str:
-        """The acp-dispatch line for this choice (add --name/--task/-C/-f)."""
+        """The acp-dispatch line for this choice (add --name/-C/-f); Cursor Cloud's `cursor-cloud launch` line (acp-dispatch
+        stopped launching it with the Paseo shim, 2026-11-07)."""
         agent = self.service.acp_agent
         extra = DISPATCH_EXTRA.get(agent, "")
         kind = f" --kind {self.kind}" if self.kind else ""
-        if self.model:
-            # Quote only the model id: suggest_model may append " --effort …".
-            # zcode ids contain a backslash (builtin:zai-coding-plan\GLM-5.3).
-            parts = self.model.split(None, 1)
-            model = shlex.quote(parts[0]) + (f" {parts[1]}" if len(parts) > 1 else "")
+        # Quote only the model id: suggest_model may append " --effort …".
+        parts = self.model.split(None, 1)
+        model = (shlex.quote(parts[0]) + (f" {parts[1]}" if len(parts) > 1 else "")) if parts else ""
+        if agent == "cursor-cloud":
+            return ("cursor-cloud launch --repo <url> --ref <branch> --prompt-file <brief>"
+                    + (f" --model {shlex.quote(parts[0])}" if parts else ""))
+        if model:
             return f"acp-dispatch {agent} --model {model}{extra}{kind}"
-        return f"acp-dispatch {agent} --model <id from: acp-run {agent} --info>{kind}"
+        return f"acp-dispatch {agent} --model <id from: paseo provider models {agent}>{kind}"
 
 
 # DISPATCH_EXTRA comes from [dispatch].extra in config/routing.toml.
@@ -1416,16 +1622,12 @@ def unrouted_why(kind: str, quota: dict[str, Any] | None = None,
                  exclude: frozenset[str] | set[str] = frozenset()) -> str:
     """Why route() found nothing for `kind`, for plan's queued line."""
     gap = QUALITY_MAX_RANK_GAP.get(kind)
-    hold = governor_hold() if kind in GOVERNOR_HOLD_KINDS else None
-    if hold:
-        exclude = frozenset(exclude) | {"claude"}
     best = quality_best(kind, list(discover(quota or {})), exclude, quota)
-    note = f" ({hold})" if hold else ""
     if gap is None or best is None:
-        return "no pool has room: keep queued" + note
+        return "no pool has room: keep queued"
     return (f"no pool within {gap} rank steps of the best for {kind} ({best.name} "
             f"r{best.rank_for(kind)}) has room; weaker pools are not used for {kind} "
-            f"([routing].quality_max_rank_gap): keep queued until a reset" + note)
+            f"([routing].quality_max_rank_gap): keep queued until a reset")
 
 
 def fable_short(info: dict[str, Any] | None) -> bool:
@@ -1692,13 +1894,13 @@ def pool_fits(svc: Service, kind: str, info: dict[str, Any], *, min_headroom: fl
     return left >= estimate_from_history(pcts, floor, cap=cap)
 
 
-def pool_usable(svc: Service, kind: str, quota: dict[str, Any], *, min_headroom: float = 15.0, held: bool = False,
+def pool_usable(svc: Service, kind: str, quota: dict[str, Any], *, min_headroom: float = 15.0,
                 repo: str | None = None) -> bool:
     """Could `svc` take `kind` now, by quota and readiness alone (not a wave cap or `exclude`)? Short means: ineligible,
-    not ready, claude held by the governor, claude's Fable sublimit under its floor (for `frontier`), or the pool's tightest
-    window not fitting the slice (`pool_fits`). A pool with no reading is usable unless it is a reserve or a fallback (fail closed)."""
+    not ready, claude's Fable sublimit under its floor (for `frontier`), or the pool's tightest window not fitting the slice
+    (`pool_fits`). A pool with no reading is usable unless it is a reserve or a fallback (fail closed)."""
     info = (quota or {}).get(svc.name) or {}
-    if not svc.eligible(kind, quota) or not service_ready(svc) or (svc.name == "claude" and held):
+    if not svc.eligible(kind, quota) or not service_ready(svc):
         return False
     if svc.name == "claude" and kind == "frontier" and fable_short(info):
         return False
@@ -1709,7 +1911,7 @@ def pool_usable(svc: Service, kind: str, quota: dict[str, Any], *, min_headroom:
 
 
 def fallback_block(svc: Service, kind: str, quota: dict[str, Any], *, services: dict[str, Service] | None = None,
-                   min_headroom: float = 15.0, held: bool | None = None, repo: str | None = None) -> str | None:
+                   min_headroom: float = 15.0, repo: str | None = None) -> str | None:
     """Why `svc`, a fallback (`fallback_after`), may not take `kind` now: every service it sits behind is usable. None when it
     may (some pool it sits behind is short, or it is no fallback). The one predicate of the planner (`route`) and of
     acp-dispatch's fallback-only enforcement. `services` maps names to the services that exist (default: the whole policy,
@@ -1717,10 +1919,8 @@ def fallback_block(svc: Service, kind: str, quota: dict[str, Any], *, services: 
     if not svc.fallback_after:
         return None
     known = BY_NAME if services is None else services
-    if held is None:
-        held = governor_hold() is not None and kind in GOVERNOR_HOLD_KINDS | {"judgment"}
     ok = [n for n in svc.fallback_after
-          if n in known and pool_usable(known[n], kind, quota, min_headroom=min_headroom, held=held, repo=repo)]
+          if n in known and pool_usable(known[n], kind, quota, min_headroom=min_headroom, repo=repo)]
     if len(ok) < len(svc.fallback_after):
         return None
     return (f"{svc.name} is a fallback behind {', '.join(svc.fallback_after)} (operator 2026-10-31) and "
@@ -1743,19 +1943,6 @@ def route(kind: str, *, quota: dict[str, Any] | None = None,
         raise ValueError(f"kind must be one of {KINDS}")
     quota = {} if quota is None else quota
     services = list(discover(quota))
-    hold = governor_hold()
-    held = hold is not None and (kind in GOVERNOR_HOLD_KINDS or kind == "judgment")
-    if hold and kind == "judgment":
-        omp = next((s for s in services if s.name == "omp"), None)
-        info = quota.get("omp") or {}
-        remaining = info.get("remaining")
-        if (omp is not None and "omp" not in exclude and omp.eligible(kind) and service_ready(omp)
-                and (remaining is None or remaining >= max(min_headroom, omp.reserve_floor))):
-            return Choice(omp, remaining, 0.0, f"judgment: {omp.cli}; Claude API credits, off the "
-                          f"subscription: {hold}", [], model=GOVERNOR_JUDGMENT_MODEL, kind=kind)
-        held = False                        # omp cannot take it: Opus judgment may still use claude
-    if held:
-        exclude = frozenset(exclude) | {"claude"}
     best = quality_best(kind, services, exclude, quota)
     gap = QUALITY_MAX_RANK_GAP.get(kind)
     by_name = {s.name: s for s in services}
@@ -1766,8 +1953,7 @@ def route(kind: str, *, quota: dict[str, Any] | None = None,
             continue
         if kind != "api-only" and not service_ready(svc):
             continue                       # e.g. omp without a working Anthropic login
-        if fallback_block(svc, kind, quota, services=by_name, min_headroom=min_headroom,
-                          held=hold is not None and (kind in GOVERNOR_HOLD_KINDS or kind == "judgment"), repo=repo) is not None:
+        if fallback_block(svc, kind, quota, services=by_name, min_headroom=min_headroom, repo=repo) is not None:
             continue                       # a fallback: only while a pool it sits behind is short
         if gap is not None and best is not None and svc.rank_for(kind) - best.rank_for(kind) > gap:
             continue                       # outside the quality band: quota never buys this pool in
@@ -1851,8 +2037,6 @@ def route(kind: str, *, quota: dict[str, Any] | None = None,
                    "check the window first")
     if best.note:
         why.append(best.note)
-    if held:
-        why.append(f"claude skipped: {hold}")
     return Choice(best, remaining, best_score, "; ".join(why),
                   [s.name for _, s, _, _ in scored[1:4]],
                   model=suggest_model(best, kind, quota.get(best.name) or {}),
@@ -2156,51 +2340,20 @@ def apply_substrate(agent: str, chain: list[dict[str, Any]]) -> tuple[int, str]:
             or f"set rc={proc.returncode} ({primary['model']})")
 
 
-JEV = Path(__file__).resolve().parent / "jev"
-
 # Dispatch state root (same default as acp-dispatch). Overridable for tests.
 ACP_DISPATCH_STATE = Path(os.environ.get("ACP_DISPATCH_STATE")
                           or (Path.home() / ".local" / "state" / "bigteam"))
 
 # Copied from bin/acp-dispatch (do not import: slice B edits that file). Agent
-# name → (aiuse provider, pool_family). agy/cursor/opencode are model-dependent.
+# name → (aiuse provider, pool_family). cursor/opencode are model-dependent.
 _AGENT_PROVIDER_MAP: dict[str, tuple[str, str | None]] = {
     "claude": ("claude", None),
     "codex": ("codex", None),
-    "copilot": ("copilot", None),
     "cursor": ("cursor", None),
     "cursor-cloud": ("cursor-cloud", None),
-    "cline": ("clinepass", None),
     "opencode": ("opencode-go", None),
-    "zcode": ("zai", None),
-    "grok": ("grok", None),
     "omp": ("omp", None),
 }
-
-
-def antigravity_family(model: str | None) -> str | None:
-    """aiuse pool_family an agy model draws on (schema 1.5): `gemini-4-argon*` -> `gemini_argon` (its own weekly window),
-    every other `gemini-*` -> `gemini` (Flash), `claude-*`/`gpt-*` -> `claude_gpt`; None for anything else. This is the
-    one code copy of the table `aiuse schema` publishes as prose under `semantics.model_pool_family` (a machine could
-    not read it): acp-dispatch's `map_agent_to_provider` calls this, and failover.py (which cannot import the router)
-    keeps a `pool_by_model` row that tests/test_argon_frontier.py checks against it."""
-    m = (model or "").lower()
-    if m.startswith(("claude-", "gpt-")):
-        return "claude_gpt"
-    if m.startswith("gemini-4-argon"):
-        return "gemini_argon"
-    return "gemini" if m.startswith("gemini-") else None
-
-
-# Only these explicitly supported Pi API model IDs share the measured `pi` pool.
-# Do not infer billing from arbitrary OpenAI-compatible providers, bare IDs, or
-# openai-codex (subscription) models. Keep additions deliberate and tested.
-PI_OPENAI_MODELS = frozenset({"openai/gpt-6.1-sol", "openai/gpt-5.4-mini", "openai/gpt-6-astra"})
-
-
-def pi_api_pool(model: str | None) -> tuple[str, str | None] | None:
-    """Independent Pi/OpenAI API capacity, never the Codex subscription."""
-    return ("pi", None) if model in PI_OPENAI_MODELS else None
 
 
 def map_agent_to_provider(agent: str, model: str | None) -> tuple[str, str | None] | None:
@@ -2209,15 +2362,13 @@ def map_agent_to_provider(agent: str, model: str | None) -> tuple[str, str | Non
     Kept in sync with acp-dispatch.map_agent_to_provider by hand (2026-10-18);
     calibrate must not import acp-dispatch while that file is mid-edit.
     """
-    if agent == "pi":
-        return pi_api_pool(model)
-    if agent == "agy":
-        family = antigravity_family(model)
-        return ("antigravity", family) if family else None
     if agent == "cursor":
         if not model or model in ("default", "auto"):
             return "cursor", "auto"
         return "cursor", None
+    if agent == "antigravity":
+        # the Gemini 4 Argon window is its own aiuse pool family; the provider's other pools are not routed
+        return ("antigravity", "gemini_argon") if (model or "").lower().startswith("gemini-4-argon") else None
     if agent == "opencode":
         if model and model.startswith("opencode-go/"):
             return "opencode-go", None
@@ -2531,27 +2682,6 @@ def format_calibrate_table(report: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def shadow_kind(brief_path: str, incumbent: str, service: str | None) -> None:
-    """Log what the deciders (Jev, GLiDE) say a brief's kind is, beside the caller's kind.
-
-    Site `agent-choice`; detached, so it never delays or changes the route. With the
-    jev mode off it exits at once. Any failure is swallowed.
-    """
-    try:
-        text = Path(brief_path).read_text(errors="replace")[:4000]
-        args = [str(JEV), "decide", "--site", "agent-choice",
-                "--question", "What kind of work is this delegated task?",
-                "--incumbent", incumbent, "--meta", f"service={service or ''}", "--timeout", "5"]
-        for kind in KINDS:
-            args += ["--option", kind]
-        child = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
-                                 stderr=subprocess.DEVNULL, text=True, start_new_session=True)
-        child.stdin.write(text)
-        child.stdin.close()
-    except Exception:
-        pass
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Route work to a vendor")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -2560,8 +2690,8 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--json", action="store_true")
     r.add_argument("--min-headroom", type=float, default=15.0)
     r.add_argument("--repo", help="repository the slice works in, for [dispatch.repo_overrides] (default: the cwd's origin remote)")
-    r.add_argument("--brief", help="the slice's brief file: its kind is also asked of Jev and "
-                   "GLiDE in shadow (site agent-choice); never changes the route")
+    r.add_argument("--brief", help="the slice's brief file (accepted and ignored since 2026-11-06, when the "
+                   "Jev shadow ask was removed)")
     pl = sub.add_parser("plan", help="assign a wave of slice kinds to services now")
     pl.add_argument("--kinds", required=True,
                     help="comma list, hardest first, e.g. code,code,research,bulk")
@@ -2572,9 +2702,12 @@ def main(argv: list[str] | None = None) -> int:
     pl.add_argument("--repo", help="repository the slices work in, for [dispatch.repo_overrides] (default: the cwd's origin remote)")
     pl.add_argument("--json", action="store_true")
     pl.add_argument("--brief", action="append", default=[],
-                    help="brief file per kind, in --kinds order (repeat; shadow-asks Jev and GLiDE)")
+                    help="brief file per kind, in --kinds order (repeat; accepted and ignored since 2026-11-06)")
     sub.add_parser("show", help="snapshot age, headroom, pace, expected waste")
-    sub.add_parser("services", help="every service discovered right now")
+    sv = sub.add_parser("services", help="every service discovered right now, with its Paseo provider's status")
+    sv.add_argument("--check-models", action="store_true",
+                    help="check every curated model suggestion against `paseo provider models <provider> --json`; "
+                    "exit 1 when one is not listed, 2 when Paseo cannot list a provider's models")
     hc = sub.add_parser("hermes-chain", help="generate Hermes's provider chain")
     hc.add_argument("--apply", action="store_true", help="write it to config.yaml")
     sb = sub.add_parser(
@@ -2626,14 +2759,11 @@ def main(argv: list[str] | None = None) -> int:
         if args.brief:
             if len(args.brief) != len(kinds):
                 parser.error("--brief must be given once per kind, in --kinds order")
-            for brief, (k, c) in zip(args.brief, rows):
-                shadow_kind(brief, k, c.service.name if c else None)
         stale = (not quota) or age is None or age > STALE_SOFT
         if args.json:
             print(json.dumps({
                 "snapshot_age_s": age, "stale": stale,
                 "quota_source": quota_source_info(),
-                "governor_hold": governor_hold(),
                 "slices": [{"kind": k, "service": c.service.name if c else None,
                             "cli": c.service.cli if c else None,
                             "agent": c.service.acp_agent if c else None,
@@ -2647,10 +2777,6 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"WARNING: {QuotaSource.fallback_reason}; quota below is from the "
                       "snapshot file and misses aiuse's credits override and Admin API "
                       "readings", file=sys.stderr)
-            hold = governor_hold()
-            if hold:
-                print(f"NOTE: {hold}: claude is not routed for code, bulk, research or mechanical "
-                      "slices; judgment prefers omp (Claude API credits)", file=sys.stderr)
             if stale:
                 print("WARNING: quota snapshot "
                       + ("empty" if not quota else f"{(age or 0) / 60:.0f} min old")
@@ -2671,6 +2797,7 @@ def main(argv: list[str] | None = None) -> int:
               + (f" (aiuse unavailable: {QuotaSource.fallback_reason})"
                  if QuotaSource.fallback_reason else ""))
         print(f"snapshot: {SNAPSHOT}")
+        print(f"paseo usage: {QuotaSource.paseo or 'not read'}")
         print(f"age: {'absent' if age is None else f'{age / 60:.1f} min'}"
               f"  (refreshed by launchd com.djbclark.aiuse every 15 min)")
         for name, info in sorted(quota.items(),
@@ -2696,6 +2823,11 @@ def main(argv: list[str] | None = None) -> int:
                 extra.append(f"reset in {hrs:.1f}h")
             if waste is not None:
                 extra.append(f"waste≈{waste:.0f}%")
+            src = QuotaSource.pools.get(name)
+            if src:
+                extra.append(f"from {src}")
+            if info.get("unknown") or info.get("paseo_unknown"):
+                extra.append(str(info.get("unknown") or info.get("paseo_unknown")))
             trail = ("  " + ", ".join(extra)) if extra else ""
             print(f"  {name:16} {rem!s:>6}% remaining{trail}{flag}")
         return 0
@@ -2757,20 +2889,40 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "services":
         found = discover(quota)
         curated = {s.name for s in SERVICES}
+        rows = {r["provider"]: r for r in paseo_provider_rows()}
         print(f"{len(found)} services discovered "
               f"({len(curated & {s.name for s in found})} curated, "
               f"{len(found) - len(curated & {s.name for s in found})} auto)")
         for svc in sorted(found, key=lambda s: s.name):
             kinds = ",".join(sorted(svc.good_at))
             mark = " " if svc.name in curated else "*"
-            print(f" {mark}{svc.name:22} {kinds[:44]:44} {svc.billing}")
-        print(" * = discovered without a curated profile")
-        return 0
+            row = rows.get(svc.acp_agent)
+            status = ("paseo: ?" if not rows else "paseo: not listed" if row is None
+                      else f"paseo: {row.get('status')}" + ("" if row.get("enabled") == "Enabled" else ", disabled"))
+            print(f" {mark}{svc.name:22} {kinds[:44]:44} {svc.billing:12} {status}")
+        print(" * = discovered without a curated profile; paseo: the provider's `paseo provider ls` status "
+              "(? = Paseo not readable)")
+        if not args.check_models:
+            return 0
+        missing = unreadable = False
+        for svc in sorted(SERVICES, key=lambda s: s.name):
+            if svc.retired or svc.access == "api" or svc.name == "cursor-cloud" or not svc.models:
+                continue                    # api pools and Cursor Cloud are not Paseo providers
+            listed = provider_models(svc.acp_agent)
+            for kind, spec in sorted(svc.models.items()):
+                model = spec.split()[0]
+                if listed is None:
+                    print(f"  ? {svc.name} {kind}: {model} (paseo provider models {svc.acp_agent} unreadable)")
+                    unreadable = True
+                elif model not in listed and f"{svc.acp_agent}/{model}" not in listed:
+                    print(f"  MISSING {svc.name} {kind}: {model} is not in `paseo provider models {svc.acp_agent}`")
+                    missing = True
+        if not (missing or unreadable):
+            print("  every suggested model is listed by its Paseo provider")
+        return 1 if missing else 2 if unreadable else 0
 
     choice = route(args.kind, quota=quota, min_headroom=args.min_headroom, exclude=operator_disabled(),
                    repo=(args.repo or repo_of(os.getcwd())))
-    if args.brief:
-        shadow_kind(args.brief, args.kind, choice.service.name if choice else None)
     if choice is None:
         print(json.dumps({"kind": args.kind, "service": None,
                           "reason": "no eligible service with headroom"}))
@@ -2782,7 +2934,6 @@ def main(argv: list[str] | None = None) -> int:
             "dispatch": choice.dispatch,
             "remaining_percent": choice.remaining, "why": choice.why,
             "alternatives": choice.alternatives,
-            "governor_hold": governor_hold(),
             "snapshot_age_seconds": None if age is None else round(age),
             "quota_source": quota_source_info(),
         }, indent=2))

@@ -105,7 +105,7 @@ from dataclasses import dataclass
 UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 ABS_API_LINK_RE = re.compile(r"^https?://[^/]+(/v\d+/.*)$")
 BOT_WALL_STATUSES = {202, 403, 405, 429, 503}
-# Keep in step with BLOCK_PATTERNS in bin/web-get. Matched only on a short page (a challenge
+# Kept in step with the BLOCK_PATTERNS of bin/web-get until it was retired (2026-11-06). Matched only on a short page (a challenge
 # interstitial), so an article that mentions "captcha" is not a bot wall.
 BOT_WALL_RE = re.compile("|".join([
     r"just a moment\.\.\.", r"attention required!? \| cloudflare", r"checking your browser",

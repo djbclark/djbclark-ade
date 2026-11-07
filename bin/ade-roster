@@ -1,0 +1,227 @@
+#!/usr/bin/env -S python3 -I
+"""ade-roster: print README's skills and bin/ roster, generated from the files themselves (2026-11-07, slim-down E11).
+
+  ade-roster [--root DIR]            print the roster block (markers included) on stdout
+  ade-roster --check [--root DIR]    exit 1 when README.md's block differs from what this prints
+  ade-roster --write [--root DIR]    replace README.md's block with what this prints
+
+The skills table has one row per tracked `skills/*/SKILL.md` (every one when ROOT is not a git checkout): the frontmatter `name` and the first sentence of its
+`description`. The bin table has one row per tracked file in `bin/`: the first sentence of the file's first docstring or
+comment paragraph (after the shebang), with a leading "<name> - " / "<name>: " dropped. The block sits in README.md
+between `<!-- roster:start -->` and `<!-- roster:end -->`; CI runs `--check`, so a new skill or tool changes the README
+in the same PR (AGENTS.md review rule 8).
+
+Exit: 0 printed / up to date / written; 1 `--check` found a difference; 2 usage, README.md or its markers missing.
+Stdlib only.
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+START = "<!-- roster:start -->"
+END = "<!-- roster:end -->"
+_SENTENCE = re.compile(r"(?<!\be\.g)(?<!\bi\.e)(?<!\bvs)[.?](?=\s|$)")
+
+
+def first_sentence(text: str) -> str:
+    """The text up to and including its first full stop that ends a sentence, whitespace collapsed."""
+    text = " ".join(text.split())
+    m = _SENTENCE.search(text)
+    return text[: m.end()] if m else text
+
+
+def _cell(text: str) -> str:
+    return text.replace("|", "\\|")
+
+
+def frontmatter(path: Path) -> dict[str, str]:
+    """`name` and `description` from a SKILL.md's leading `---` block (plain, quoted, `>`/`|` block scalars)."""
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    if not lines or lines[0].strip() != "---":
+        return {}
+    out: dict[str, str] = {}
+    i = 1
+    while i < len(lines) and lines[i].strip() != "---":
+        m = re.match(r"^([A-Za-z_][A-Za-z0-9_-]*):\s*(.*)$", lines[i])
+        if not m:
+            i += 1
+            continue
+        key, value = m.group(1), m.group(2).strip()
+        i += 1
+        cont: list[str] = []
+        while i < len(lines) and lines[i].strip() != "---" and (lines[i].startswith((" ", "\t")) or not lines[i].strip()):
+            cont.append(lines[i].strip())
+            i += 1
+        if value in (">", ">-", "|", "|-", ">+", "|+", ""):
+            value = " ".join(c for c in cont if c)
+        else:
+            value = " ".join([value] + [c for c in cont if c])
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                value = value[1:-1]
+        out[key] = value
+    return out
+
+
+def tracked(root: Path, top: str) -> set[str] | None:
+    """Repo-relative paths git tracks under TOP, or None when ROOT is not a git checkout (then the filesystem decides)."""
+    try:
+        out = subprocess.run(["git", "-C", str(root), "ls-files", "-z", "--", top], capture_output=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    return {p for p in out.stdout.decode("utf-8", "surrogateescape").split("\0") if p}
+
+
+def skill_rows(root: Path) -> list[tuple[str, str, str]]:
+    rows = []
+    known = tracked(root, "skills")
+    for path in sorted((root / "skills").glob("*/SKILL.md")):
+        if known is not None and path.relative_to(root).as_posix() not in known:
+            continue  # an untracked skill is not in the published roster
+        meta = frontmatter(path)
+        name = meta.get("name") or path.parent.name
+        rows.append((name, path.relative_to(root).as_posix(), first_sentence(meta.get("description", ""))))
+    return rows
+
+
+def _comment_text(line: str) -> str | None:
+    s = line.strip()
+    for lead in ("#", "//"):
+        if s.startswith(lead) and not s.startswith("#!"):
+            return s[len(lead):]
+    return None
+
+
+def bin_summary(path: Path) -> str:
+    """First sentence of the first docstring or comment paragraph, the tool's own name prefix dropped."""
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return ""
+    i = 1 if lines and lines[0].startswith("#!") else 0
+    while i < len(lines) and not lines[i].strip():
+        i += 1
+    para: list[str] = []
+    if i < len(lines) and lines[i].lstrip().startswith(('"""', "'''")):
+        quote = lines[i].lstrip()[:3]
+        rest = lines[i].lstrip()[3:]
+        chunk = [rest]
+        while quote not in chunk[-1] and i + 1 < len(lines):
+            i += 1
+            chunk.append(lines[i])
+        chunk[-1] = chunk[-1].split(quote)[0]
+        for line in chunk:
+            if not line.strip():
+                if para:
+                    break
+                continue
+            para.append(line.strip())
+    else:
+        while i < len(lines):
+            text = _comment_text(lines[i])
+            if text is None:
+                break
+            if not text.strip():
+                if para:
+                    break
+            elif para and re.match(r"^\s{3,}", text):
+                break  # an indented usage line ends the paragraph
+            else:
+                para.append(text.strip())
+            i += 1
+    summary = first_sentence(" ".join(para))
+    stem = re.escape(path.name)
+    stem_noext = re.escape(path.stem)
+    summary = re.sub(rf"^(?:bin/)?(?:{stem}|{stem_noext})\s*(?:—|–|-|:)\s*", "", summary)
+    return summary[:1].upper() + summary[1:] if summary else ""
+
+
+def bin_rows(root: Path) -> list[tuple[str, str]]:
+    rows = []
+    known = tracked(root, "bin")
+    for path in sorted((root / "bin").iterdir()):
+        if known is not None and f"bin/{path.name}" not in known:
+            continue  # untracked (a local scratch file) or a directory: not in the published roster
+        if path.is_file() and not path.name.startswith("."):
+            rows.append((path.name, bin_summary(path)))
+    return rows
+
+
+def render(root: Path) -> str:
+    skills = skill_rows(root)
+    tools = bin_rows(root)
+    out = [START, f"Skills ({len(skills)}, from each `skills/*/SKILL.md`):", "", "| Skill | What |", "|---|---|"]
+    out += [f"| [`{name}`]({rel}) | {_cell(desc)} |" for name, rel, desc in skills]
+    out += ["", f"`bin/` ({len(tools)}, from each file's first docstring or comment):", "", "| Tool | What |", "|---|---|"]
+    out += [f"| [`{name}`](bin/{name}) | {_cell(desc)} |" for name, desc in tools]
+    out += [END]
+    return "\n".join(out) + "\n"
+
+
+def split_readme(text: str) -> tuple[str, str, str] | None:
+    a = text.find(START)
+    b = text.find(END, a + 1 if a >= 0 else 0)
+    if a < 0 or b < 0:
+        return None
+    b += len(END)
+    if text[b:b + 1] == "\n":
+        b += 1
+    return text[:a], text[a:b], text[b:]
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(prog="ade-roster", description=__doc__.split("\n\n")[0])
+    ap.add_argument("--root", default=str(Path(__file__).resolve().parent.parent), help="repository root")
+    mode = ap.add_mutually_exclusive_group()
+    mode.add_argument("--check", action="store_true", help="exit 1 when README.md's roster block is stale")
+    mode.add_argument("--write", action="store_true", help="rewrite README.md's roster block")
+    args = ap.parse_args(argv)
+    root = Path(args.root)
+    if not (root / "skills").is_dir() or not (root / "bin").is_dir():
+        print(f"ade-roster: {root} has no skills/ or bin/", file=sys.stderr)
+        return 2
+    block = render(root)
+    if not (args.check or args.write):
+        sys.stdout.write(block)
+        return 0
+    readme = root / "README.md"
+    try:
+        text = readme.read_text(encoding="utf-8")
+    except OSError as exc:
+        print(f"ade-roster: cannot read {readme}: {exc}", file=sys.stderr)
+        return 2
+    parts = split_readme(text)
+    if parts is None:
+        print(f"ade-roster: {readme} has no {START} ... {END} block", file=sys.stderr)
+        return 2
+    head, current, tail = parts
+    if args.check:
+        if current == block:
+            return 0
+        print("ade-roster: README.md's roster is stale; run bin/ade-roster --write", file=sys.stderr)
+        return 1
+    if current != block:
+        fd, tmp = tempfile.mkstemp(dir=str(root), prefix=".README.md.")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(head + block + tail)
+            os.chmod(tmp, readme.stat().st_mode & 0o777)
+            os.replace(tmp, readme)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

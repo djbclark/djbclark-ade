@@ -10,7 +10,7 @@
 # 16 GB Mac. The cheap check runs every 10 s (the DONE marker exists, or `"finished":` holds a
 # number in the record JSON — null means still running); `acp-dispatch wait --once` runs every
 # 60 s and the moment the cheap check trips, so a dead slice is still reaped and the
-# stale-checkpoint and auto-resume notices still appear (once per distinct state). "Trips" means
+# stale-checkpoint and resume notices still appear (once per distinct state). "Trips" means
 # turns true: a quota-stopped record keeps `finished` set for the hours its in-place resume waits,
 # and re-running Python on every 10 s tick then would undo the saving (review 2026-10-18).
 # ACP_DISPATCH_WAIT_TICK / ACP_DISPATCH_WAIT_PASS (seconds) and ACP_DISPATCH_BIN are test seams.
@@ -20,7 +20,7 @@
 # `wait_timeout` read at arm time, at most 2 h = the longest a lead's tool can hold a waiter (acp-dispatch TOOL_TIMEOUT_MAX_S), 2 h when 0/unreadable,
 # plus 60 s; heartbeat every pass; owner $PASEO_AGENT_ID or none = Hermes is told). Past the budget the enforcer kills THIS waiter's own process
 # group and the waiter exits 76, NOT 124: 124 means the record's wait_timeout passed (the slice timed out), 76 means only the waiter's deadline
-# stopped it while THE SLICE KEEPS RUNNING (a longer wait_timeout, `acp-dispatch extend`, a quota auto-resume pending): re-arm with the same line,
+# stopped it while THE SLICE KEEPS RUNNING (a longer wait_timeout, a deadline extension, a pending quota resume): re-arm with the same line,
 # never re-task. The registered copy costs one resident `deadline run` Python process (the price of an enforced bound); a deadline problem (tool
 # missing, crashing) is one stderr warning and the wait goes on unregistered. Signals: the supervisor starts `deadline run` in its own process
 # group (set -m), so a signal to the whole caller group reaches it once, via the trap; a SIGKILLed supervisor leaves no orphan, the inner copy ends

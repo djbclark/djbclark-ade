@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # Make a shared skill visible to every agent TUI on this machine by
 # symlinking it into each TUI's user-level skills dir.
-#     skill-everywhere --all                sync every public/private shared skill
-#     skill-everywhere --check --all        verify every installed target; exit 1 for gaps
+#     skill-everywhere --all                sync every public/private/site shared skill
+#     skill-everywhere --check --all        verify every installed target; exit 1 for gaps; one warning per absent root
 #     skill-everywhere <name>...            link (idempotent, collapses chains)
 #     skill-everywhere --check <name>...    report per-TUI status, change nothing; ends with a "== end" line
 #     skill-everywhere --remove <name>...   remove links this script would make
 #     --dry-run (-n) with link or --remove: print the changes, make none
 #     SKILL_EVERYWHERE_ONLY=grokbot,claude limits the run to those targets
+#     After a new skill is linked, run `/reload-skills` in running Claude sessions (per-skill symlinks are the
+#     documented mechanism; a directory-level symlink is not, so none is used).
 #     SKILL_EVERYWHERE_NO_COPY=1 skips the copy target (grokbot): ade-update sets it for a non-canonical checkout, which
 #     is a report-only run, so such a run neither lists nor renders the Grok Bot copy
 #     The grokbot copy refuses a skill holding a symlink that is not a link to a regular file inside the skill (one that
@@ -16,11 +18,13 @@
 # Content lives in exactly one place (2026-10-14 chain collapse):
 #   ~/src/djbclark-ade/skills/<name>            public skills (default)
 #   ~/ops/site-private/skills/<name>            private skills (e.g. 1password)
+#   ~/ops/site-public-djbclark/skills/<name>    site skills (site-djbclark repo; moved out of this repo 2026-11-06)
 # and every TUI links DIRECTLY at that path — no hub layers, no chained
 # symlinks (the old TUI -> site-private/skills -> site-djbclark/skills ->
 # djbclark-ade chain is retired; ops-repo churn can no longer break skill
 # loading). Editing the skill in its git repo updates it everywhere; never
 # copy (copies drift, e.g. ~/.agents/skills/handoff).
+# A name found in more than one root resolves in that order: public, private, site.
 # In link mode, any existing link whose realpath equals the target but whose
 # readlink differs (a leftover chain) is atomically replaced with the direct
 # link.
@@ -30,9 +34,7 @@
 # A TUI whose binary is not installed is skipped. Being linked is not the same
 # as being loaded: re-verify with the per-TUI check in skill-everywhere.md
 # (the README next to this script).
-# This script makes no model calls. When re-verifying, probe agy at most ONCE (one
-# batched prompt, --print-timeout): looped agy -p probes helped lock out its CLI on
-# 2026-10-03 (see skills/model-routing, "agy has a burst limit").
+# This script makes no model calls.
 export PATH="/opt/homebrew/bin:$PATH"
 set -euo pipefail
 # GNU tools carry a g prefix on the Mac (Homebrew). On GNU/Linux, e.g. the
@@ -42,6 +44,7 @@ for t in sed readlink realpath grep head awk; do
 done
 ade_root="${SKILL_EVERYWHERE_ADE:-$HOME/src/djbclark-ade/skills}"
 priv_root="${SKILL_EVERYWHERE_PRIVATE:-${OPS_ROOT:-$HOME/ops}/site-private/skills}"
+site_root="${SKILL_EVERYWHERE_SITE:-${OPS_ROOT:-$HOME/ops}/site-public-djbclark/skills}"
 
 # binary|skills dir to link into, or "via <dir>" when the TUI already reads a
 # dir we fill (a second link there would list the skill twice), or "x <why>",
@@ -50,27 +53,15 @@ priv_root="${SKILL_EVERYWHERE_PRIVATE:-${OPS_ROOT:-$HOME/ops}/site-private/skill
 # omp (oh-my-pi) added 2026-10-13: it also reads ~/.agents/skills, but dedups
 # by realpath, so its native dir lists each skill once and keeps working if
 # its agents provider is turned off.
-# pi added 2026-11-03: it natively scans ~/.agents/skills. Use the shared
-# directory directly; a second link in ~/.pi/agent/skills causes name collisions.
-# goose added 2026-10-29: its global skill dir IS ~/.agents/skills (the same
-# one codex uses), so it links there directly rather than into a dir of its
-# own; the links are shared, not duplicated, when both TUIs are installed.
+# (goose, pi, agy, copilot, qwen, devin, cline, muse and zcode rows removed 2026-11-06, slim-down E9:
+# those TUIs retired; the links they held in ~/.agents/skills, ~/.gemini/antigravity-cli/skills,
+# ~/.copilot/skills, ~/.qwen/skills, ~/.config/devin/skills and ~/.cline/skills are the operator's to remove.)
 targets='
 claude|~/.claude/skills
 codex|~/.agents/skills
-goose|~/.agents/skills
-pi|~/.agents/skills
-agy|~/.gemini/antigravity-cli/skills
-copilot|~/.copilot/skills
 opencode|~/.config/opencode/skills
-qwen|~/.qwen/skills
-devin|~/.config/devin/skills
-cline|~/.cline/skills
 hermes|~/.local/share/skill-everywhere/skills
 cursor-agent|via ~/.claude/skills
-grok|~/.grok/skills
-muse|via ~/.claude/skills
-zcode|via ~/.agents/skills
 omp|~/.omp/agent/skills
 grokbot|copy ~/agent-data/workflows
 '
@@ -86,7 +77,12 @@ done
 if ((all)); then
   [[ $# == 0 && $mode != remove ]] || { echo 'error: --all accepts no names and cannot be used with --remove' >&2; exit 2; }
   names=()
-  for root in "$ade_root" "$priv_root"; do
+  for root in "$ade_root" "$priv_root" "$site_root"; do
+    if [[ ! -d $root ]]; then
+      # An absent root is skipped, but a check says so: its skills would otherwise vanish from the report unseen.
+      [[ $mode != check ]] || echo "warning: skill root $root does not exist; its skills are not checked" >&2
+      continue
+    fi
     for skill_file in "$root"/*/SKILL.md; do
       [[ -f $skill_file && -r $skill_file ]] || continue
       name=${skill_file%/SKILL.md}; name=${name##*/}
@@ -96,10 +92,10 @@ if ((all)); then
       [[ " ${names[*]:-} " == *" $name "* ]] || names+=("$name")
     done
   done
-  ((${#names[@]})) || { echo "error: no readable shared SKILL.md files under $ade_root or $priv_root" >&2; exit 2; }
+  ((${#names[@]})) || { echo "error: no readable shared SKILL.md files under $ade_root, $priv_root or $site_root" >&2; exit 2; }
   set -- "${names[@]}"
 fi
-[[ $# -gt 0 ]] || { gsed -n '2,15p' "$0" >&2; exit 2; }
+[[ $# -gt 0 ]] || { gsed -n '2,17p' "$0" >&2; exit 2; }
 only="${SKILL_EVERYWHERE_ONLY:-}"
 no_copy=0; [[ -z ${SKILL_EVERYWHERE_NO_COPY:-} ]] || no_copy=1
 wanted() { [[ -z $only || ",$only," == *",$1,"* ]]; }
@@ -136,9 +132,19 @@ render_copy() {  # render_copy <src> <out>; refuses (rc 1, nothing copied) a sou
   fi
   cp -rL "$1" "$2"
   rm -rf "$2/.git"; find "$2" -name __pycache__ -prune -exec rm -rf {} +
-  printf 'source=djbclark-ade/skills/%s\nmanaged-by=bin/skill-everywhere (grokbot target)\n' "$name" >"$2/.skill-everywhere"
+  # Provenance follows the root the skill came from (a public djbclark-ade copy renders exactly as before).
+  local repo from_md
+  case $1 in
+    "$site_root"/*) repo=site-djbclark
+      from_md="site-djbclark [\`skills/$name\`](https://github.com/djbclark/site-djbclark/tree/master/skills/$name)" ;;
+    "$priv_root"/*) repo=site-private
+      from_md="site-private \`skills/$name\` (a private repository)" ;;
+    *) repo=djbclark-ade
+      from_md="[\`skills/$name\`](https://github.com/djbclark/djbclark-ade/tree/master/skills/$name)" ;;
+  esac
+  printf 'source=%s/skills/%s\nmanaged-by=bin/skill-everywhere (grokbot target)\n' "$repo" "$name" >"$2/.skill-everywhere"
   BANNER="> **Managed copy, do not edit here.** Rendered by djbclark-ade \`bin/skill-everywhere\` from
-> [\`skills/$name\`](https://github.com/djbclark/djbclark-ade/tree/master/skills/$name); the next sync
+> ${from_md}; the next sync
 > overwrites local edits. Written for the agent TUIs on djbclark's Mac: \`~/src/<repo>\` is
 > \`/home/box/src/<repo>\` here when cloned, and Mac-only tools (launchd, herdr, Orca, Keychain,
 > \`hermes-ping\`) are absent. Grok Bot's own rules win: sending, posting, pushing or merging still
@@ -195,17 +201,20 @@ if [[ $mode == check ]] && wanted codex && [[ -L $codex_instructions && ! -e $co
   rc=1
 fi
 for name in "$@"; do
+  gone_srcs=()
   if [[ -f $ade_root/$name/SKILL.md ]]; then src="$ade_root/$name"
   elif [[ -f $priv_root/$name/SKILL.md ]]; then src="$priv_root/$name"
+  elif [[ -f $site_root/$name/SKILL.md ]]; then src="$site_root/$name"
   else
     if [[ $mode != remove ]]; then
-      echo "error: no SKILL.md under $ade_root/$name or $priv_root/$name" >&2; rc=1; continue
+      echo "error: no SKILL.md under $ade_root/$name, $priv_root/$name or $site_root/$name" >&2; rc=1; continue
     fi
     # --remove still works once the skill dir is gone: it only unlinks links
-    # whose target is one of the two roots, so retiring a skill can run in
-    # either order. Without a source there is nothing to compare realpaths
-    # against, so fall back to the public root's path for target matching.
-    src="$ade_root/$name"
+    # whose target is exactly <root>/<name> for one of the three roots, so
+    # retiring a skill can run in either order. Without a source there is
+    # nothing to compare realpaths against: each link is matched against the
+    # three root paths (gone_srcs) below, the public one by default.
+    src="$ade_root/$name"; gone_srcs=("$ade_root/$name" "$priv_root/$name" "$site_root/$name")
   fi
   echo "== $name"
   while IFS='|' read -r bin dir; do
@@ -218,6 +227,10 @@ for name in "$@"; do
     if ! command -v "$bin" >/dev/null; then printf '  %-13s not installed\n' "$bin"; continue; fi
     if [[ $dir == via* || $dir == x* ]]; then printf '  %-13s %s\n' "$bin" "${dir#x }"; continue; fi
     dir="${dir/#\~/$HOME}"; link="$dir/$name"
+    if [[ -n ${gone_srcs[*]:-} && -L $link ]]; then  # --remove of a gone skill: whichever root this link names
+      src="$ade_root/$name"
+      for c in "${gone_srcs[@]}"; do [[ "$(greadlink "$link")" != "$c" ]] || src=$c; done
+    fi
     if [[ -L $link && "$(greadlink "$link")" == "$src" ]]; then state=linked
     elif [[ -L $link && -e $src && "$(grealpath "$link" 2>/dev/null)" == "$(grealpath "$src")" ]]; then
       state="chained via $(greadlink "$link")"
@@ -243,7 +256,7 @@ for name in "$@"; do
           ((dry)) || printf '  %-13s relinked direct (was %s)\n' "$bin" "$state"
         elif [[ $state == dangling\ * ]]; then
           # Nobody owns a link whose target is gone (2026-10-15: 36 links in
-          # ~/.cline/skills still pointed at the pre-2026-10-09 site-private
+          # a TUI's skills dir still pointed at the pre-2026-10-09 site-private
           # path); replace it rather than preserve a dead pointer.
           act "relink $link" ln -sfn "$src" "$link"
           ((dry)) || printf '  %-13s relinked (was %s)\n' "$bin" "$state"

@@ -6,6 +6,10 @@ Result: **166 failed, 10,141 passed, 54 skipped, 2,106 subtests passed, 3,029 s 
 
 These failures predate every slim-down change. A slice that deletes a test file below removes its row; a slice must not be blamed for a failure listed here, and must not "fix" one by deletion unless the file is a DELETE target.
 
+## Known flakes (added 2026-11-06 by the lead)
+
+- `tests/test_relay_card_alert.py`: intermittent under load at base fb3b9de (5 of 6 runs in a clean worktree, three different tests: `TestBusyAlert::test_a_message_past_the_threshold_gets_one_notice_and_one_ping_however_many_looks` among them). Deleted by E3 (Wave 3). A failure here is not a regression.
+
 ## Failures by test file
 
 | Test file | Failed | First failing test |

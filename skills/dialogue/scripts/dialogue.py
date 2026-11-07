@@ -33,8 +33,13 @@ changed or added since `inventory.baseline` marked (operator ruling 2026-10-10).
 
 Per-seat env overrides (seat = a key of `models`, upper-cased, non-alphanumerics -> `_`):
 DIALOGUE_<SEAT>_MODEL replaces `model` on every route of that seat; DIALOGUE_<SEAT>_AGENT
-makes the first route `acp-run <agent>` (its `set` list is dropped); DIALOGUE_<SEAT>_SET
+makes the first route the Paseo provider <agent> (its `set` list is dropped); DIALOGUE_<SEAT>_SET
 (comma list of k=v, empty clears) and DIALOGUE_<SEAT>_POOL (aiuse pool label) go with it.
+
+Routes (slim-down E6, 2026-11-06): `paseo` (and `acp`, the old acp-run kind, now its alias) runs
+`paseo run --provider <agent>/<model> --mode <mode> --no-wait --json --cwd <cwd> -- <pointer>`, where the
+pointer names the turn's prompt file and a reply file, then `paseo wait ID --timeout S --json` and reads
+the reply file; a `set` value of an effort key becomes `--thinking`. `claude` and `cmd` are unchanged.
 """
 from __future__ import annotations
 
@@ -235,10 +240,10 @@ def apply_seat_overrides(models: dict[str, dict[str, Any]], env: Any) -> list[st
             first = routes[0] if routes else {}
             routes[:1] = [{"kind": "acp", "agent": agent, "model": first.get("model", ""),
                            "perm": first.get("perm", "all")}]
-            notes.append(f"{seat_env(seat, 'AGENT')}={agent}: first route is acp-run {agent}")
+            notes.append(f"{seat_env(seat, 'AGENT')}={agent}: first route is the Paseo provider {agent}")
         if model:
             for r in routes:
-                if r.get("kind", "acp") in ("acp", "claude"):
+                if r.get("kind", "acp") in ("acp", "paseo", "claude"):
                     r["model"] = model
             notes.append(f"{seat_env(seat, 'MODEL')}={model}")
         if sets is not None and routes:
@@ -747,14 +752,6 @@ def route_cmd(run: Run, route: dict[str, Any], prompt_file: Path, timeout: int) 
         if route.get("effort"):
             cmd += ["--effort", route["effort"]]
         return cmd, True  # prompt on stdin
-    if kind == "acp":
-        cmd = ["acp-run", route["agent"], "-C", str(run.cwd), "-f", str(prompt_file)]
-        if route.get("model"):
-            cmd += ["--model", route["model"]]
-        for kv in route.get("set", []):
-            cmd += ["--set", kv]
-        cmd += ["--perm", route.get("perm", "all"), "--timeout", str(timeout), "--json"]
-        return cmd, False
     if kind == "cmd":
         return [a.replace("{prompt}", str(prompt_file)).replace("{cwd}", str(run.cwd)) for a in route["argv"]], \
             bool(route.get("stdin"))
@@ -765,8 +762,72 @@ def route_name(route: dict[str, Any]) -> str:
     return " ".join(str(x) for x in (route.get("kind"), route.get("agent", ""), route.get("model", "")) if x)
 
 
+EFFORT_KEYS = ("reasoning_effort", "effort", "reasoning", "thought_level", "thinking_level")
+
+
+def paseo_call(args: list[str], timeout: float) -> tuple[dict[str, Any], str]:
+    """`paseo ARGS --json` (before a `--`) -> (the JSON object, '') or ({}, error). The status field is read, never $?."""
+    cut = args.index("--") if "--" in args else len(args)
+    try:
+        r = subprocess.run([os.environ.get("DIALOGUE_PASEO") or "paseo", *args[:cut], "--json", *args[cut:]],
+                           capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired, subprocess.SubprocessError) as e:
+        return {}, f"cannot run paseo {args[0]}: {e}"
+    try:
+        j = json.loads(r.stdout) if r.stdout.strip() else {}
+    except json.JSONDecodeError:
+        j = {}
+    if not isinstance(j, dict) or isinstance(j.get("error"), dict) or not j:
+        err = (j.get("error") or {}).get("message") if isinstance(j, dict) and isinstance(j.get("error"), dict) else ""
+        return {}, f"paseo {args[0]} failed: {err or (r.stderr or r.stdout).strip()[-500:]}"
+    return j, ""
+
+
+def run_paseo_route(run: Run, route: dict[str, Any], prompt_file: Path, timeout: int) -> tuple[str, str]:
+    """One turn as a Paseo agent: the prompt (too big for argv) stays in its file and the agent writes its reply to a
+    file beside it, which is the turn text; the agent's chat reply is never read."""
+    provider = route.get("provider") or route.get("agent")
+    if not provider:
+        return "", "paseo route without provider/agent"
+    reply_file = prompt_file.with_name(prompt_file.stem + ".reply.md")
+    reply_file.unlink(missing_ok=True)
+    pointer = (f"Read the turn prompt in {prompt_file} in full and follow it, then write your reply to {reply_file}, "
+               "with nothing else in that file, and end your turn. Write no other file.")
+    thinking = [kv.split("=", 1)[1] for kv in route.get("set", []) if kv.split("=", 1)[0] in EFFORT_KEYS and "=" in kv]
+    mode = route.get("mode")
+    if not mode:      # the provider's own default mode (Claude's is `auto`); a missing row is the route's error
+        try:
+            rows = json.loads(subprocess.run([os.environ.get("DIALOGUE_PASEO") or "paseo", "provider", "ls", "--json"],
+                                             capture_output=True, text=True, timeout=60).stdout or "[]")
+        except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
+            rows = []
+        row = next((x for x in rows if isinstance(x, dict) and x.get("provider") == provider), None) \
+            if isinstance(rows, list) else None
+        if not row or row.get("enabled") != "Enabled" or row.get("status") != "available":
+            return "", f"Paseo provider {provider} is not enabled and available ({row})"
+        mode = str(row.get("defaultMode") or "default")
+    argv = ["run", "--provider", f"{provider}/{route['model']}" if route.get("model") else provider,
+            "--mode", mode, "--no-wait", "--title", f"dialogue-{prompt_file.stem}",
+            "--cwd", str(run.cwd), *(["--thinking", route.get("effort") or thinking[-1]] if route.get("effort") or thinking else []),
+            "--", pointer]
+    started, err = paseo_call(argv, 120)
+    aid = started.get("agentId")
+    if not aid:
+        return "", err or "paseo run created no agent"
+    waited, err = paseo_call(["wait", str(aid), "--timeout", str(timeout)], timeout + 120)
+    status = waited.get("status")
+    if status != "idle":
+        # a timed-out, blocked or failed turn must not keep running beside the next route's agent
+        paseo_call(["agent", "stop", str(aid)], 60)
+        return "", f"paseo agent {aid}: {status or err} {waited.get('message', '')}".strip()
+    out = read(reply_file).strip()
+    return (out, "") if out else ("", f"paseo agent {aid} went idle without writing {reply_file}")
+
+
 def run_route(run: Run, route: dict[str, Any], prompt_file: Path, timeout: int) -> tuple[str, str]:
     """Return (reply_text, error). error == '' on success."""
+    if route.get("kind", "acp") in ("acp", "paseo"):
+        return run_paseo_route(run, route, prompt_file, timeout)
     env = os.environ.copy()
     for k in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"):
         env.pop(k, None)
@@ -783,15 +844,6 @@ def run_route(run: Run, route: dict[str, Any], prompt_file: Path, timeout: int) 
         return "", f"cannot run {cmd[0]}: {e}"
     out = r.stdout.decode("utf-8", "replace").strip()
     err = r.stderr.decode("utf-8", "replace")
-    if route.get("kind", "acp") == "acp":
-        try:
-            j = json.loads(out) if out else {}
-        except json.JSONDecodeError:
-            j = {}
-        j = j if isinstance(j, dict) else {}
-        if j.get("failure"):
-            return "", f"failure: {j['failure']}"
-        out = (j.get("text") or "").strip()
     if r.returncode != 0:
         return "", f"{cmd[0]} exit {r.returncode}: {err[-2000:]}"
     if not out:

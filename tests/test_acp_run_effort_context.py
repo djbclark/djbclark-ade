@@ -2,7 +2,7 @@
 """acp-run --effort / --context, model-first ordering and the read-back (2026-10-15, audits R1-R3).
 
 `--effort LEVEL` and `--context SIZE` are normalized flags translated per agent (the agent's
-own option, a launch flag or env, grok's session/set_model, claude's 1M switch, ...), applied
+own option, a launch flag or env, claude's 1M switch, ...), applied
 after the model, read back, and refused with exit 2 (valid values named) when the agent or model
 cannot take them. A value the agent reports differently is failure class `config` (exit 1). The
 script is loaded in a `uv run --with` subprocess and driven against fake agents and connections:
@@ -109,7 +109,7 @@ PROBE = textwrap.dedent("""\
         base.update(kw)
         return NS(**base)
 
-    async def apply(agent, a, ag=None, sets=None, ignore=(), init=None, models=None, per_run=False):
+    async def apply(agent, a, ag=None, sets=None, ignore=(), init=None, models=None):
         ag = ag or Agent()
         sess = NS(session_id="s1", config_options=ag.options(), modes=None, model_extra={"models": models} if models else {})
         rec, applied = Rec(), {}
@@ -123,7 +123,7 @@ PROBE = textwrap.dedent("""\
         try:
             err = io.StringIO()
             with contextlib.redirect_stderr(err):
-                await mod.apply_config(a, Conn(ag, ignore), sess, init, rec, mod.order_sets(s), applied, per_run)
+                await mod.apply_config(a, Conn(ag, ignore), sess, init, rec, mod.order_sets(s), applied)
             res["ok"] = True
         except mod.ConfigError as e:
             res["config_error"] = str(e)
@@ -190,8 +190,8 @@ PROBE = textwrap.dedent("""\
         async def fake_route(self, method, params, is_notification):
             seen.append(method)
         mod._acp_route = fake_route
-        for m, n in (("session/update", True), ("$/zcode/turnState", True), ("qwen/notify/session/model-update", True),
-                     ("_x.ai/hooks", True), ("session/request_permission", False), ("qwen/notify/x", False)):
+        for m, n in (("session/update", True), ("$/vendor/turnState", True), ("vendor/notify/session/model-update", True),
+                     ("_x.ai/hooks", True), ("session/request_permission", False), ("vendor/notify/x", False)):
             await mod._route_dollar_as_extension(None, m, {}, n)
         return seen
 
@@ -236,7 +236,7 @@ PROBE = textwrap.dedent("""\
             "alias": mod.resolve_effort(Agent("m-b").options(), "xhigh", "x"),
             "plain": mod.resolve_effort(Agent("m-a").options(), "low", "x"),
             "default_missing": mod.resolve_effort(Agent("m-a").options(), "default", "x"),
-            "miss": exits(mod.resolve_effort, Agent("m-a").options(), "max", "grok m-a"),
+            "miss": exits(mod.resolve_effort, Agent("m-a").options(), "max", "cursor m-a"),
             "none": exits(mod.resolve_effort, Agent("m-c").options(), "low", "cursor m-c"),
             "ctx": mod.resolve_context_option(Agent("m-a").options(), 500000, "x"),
             "ctx_miss": exits(mod.resolve_context_option, Agent("m-a").options(), 300000, "cursor m-a"),
@@ -246,31 +246,17 @@ PROBE = textwrap.dedent("""\
         out["resolve"]["thinking_only"] = exits(mod.resolve_effort, thinking_only, "high", "cursor opus-4.5")
         out["static"] = {
             "hermes_effort": static("hermes", effort="low"),
-            "crush_effort": static("crush", effort="low"),
-            "cline_xhigh": static("cline", effort="xhigh"),
-            "cline_max": static("cline", effort="max"),
-            "agy_max": static("agy", effort="max"),
-            "agy_high": static("agy", effort="high"),
             "default_ok": static("hermes", effort="default"),
-            "qwen_ctx": static("qwen", context=500000),
             "opencode_ctx": static("opencode", context=500000),
             "claude_500": static("claude", context=500000),
             "claude_200": static("claude", context=200000),
             "codex_400": static("codex", context=400000),
             "codex_500": static("codex", context=500000),
             "codex_800": static("codex", context=800000),
-            "copilot_400": static("copilot", context=400000),
-            "copilot_1m": static("copilot", context=1000000),
-            "grok_any": static("grok", context=500000),
         }
         out["tweaks"] = {
             "claude_200": tweaks("claude", context=200000),
             "claude_1m": tweaks("claude", context=1000000),
-            "zcode": tweaks("zcode", context=200000),
-            "copilot": tweaks("copilot", context=1000000, model="gpt-5.5"),
-            "copilot_default": tweaks("copilot", context=272000),
-            "cline": tweaks("cline", effort="high"),
-            "cline_default": tweaks("cline", effort="default"),
             "plain": tweaks("codex", effort="high"),
         }
         os.environ["ACP_RUN_ARGS_CODEX"] = "--foo 'a b'"
@@ -301,7 +287,6 @@ PROBE = textwrap.dedent("""\
         out["codex_cfg"]["not_json"] = exits(lambda: codex_env("model_context_window = 5", context=400000))
         out["codex_cfg"]["claude_untouched"] = tweaks("claude", context=200000)["env"]
 
-        out["grok"] = await apply("grok", args("grok", model="m-a", effort="low", context=500000))
         out["order"] = await apply("cursor", args("cursor", model="m-b", effort="xhigh"),
                                    sets={"mode": "plan"})
         out["effort_before_model"] = await apply("cursor", args("cursor", model="m-b", effort="low"),
@@ -310,7 +295,6 @@ PROBE = textwrap.dedent("""\
         out["mismatch"] = await apply("cursor", args("cursor", model="m-a", effort="low"), ignore=("reasoning_effort",))
         out["stale"] = await apply("opencode", args("opencode", model="m-b", effort="max"), ag=Agent("m-a", stale=True))
         out["no_effort_on_model"] = await apply("cursor", args("cursor", model="m-c", effort="low"))
-        out["agy"] = await apply("agy", args("agy", model="gem-high", effort="low"), ag=None) if False else None
         out["codex_ok"] = await apply("codex", args("codex", model="m-c", context=272000))
         out["codex_400"] = await apply("codex", args("codex", model="m-c", context=400000))
         os.environ["CODEX_HOME"] = home = tempfile.mkdtemp()
@@ -324,32 +308,12 @@ PROBE = textwrap.dedent("""\
         out["codex_max_lookup"].append(mod.codex_max_window("m-c"))
         del os.environ["CODEX_HOME"]
         out["claude_ctx"] = await apply("claude", args("claude", model="m-c", context=200000))
-        out["zcode_cap"] = await apply("zcode", args("zcode", model="m-c", context=200000))
-        out["cline_effort"] = await apply("cline", args("cline", model="m-c", effort="high"))
-        out["copilot_model"] = await apply("copilot", args("copilot", model="m-c", context=1000000), ag=Agent("m-c"))
-        out["copilot_wrong"] = await apply("copilot", args("copilot", model="m-b", context=1000000), ag=Agent("m-c"))
         models = {"currentModelId": "p:old", "availableModels": [
             {"modelId": "nous:anthropic/claude-sonnet-5.5", "name": "Sonnet"}, {"modelId": "p:old", "name": "Old"}]}
         class NoModelAgent(Agent):
             def options(self, model=None):
                 return []
         out["hermes_model"] = await apply("hermes", args("hermes", model="claude-sonnet-5.5"), ag=NoModelAgent("m-c"), models=models)
-        out["crush_guard"] = await apply("crush", args("crush", model="p:old"), ag=NoModelAgent("m-c"), models=models)
-        out["crush_private"] = await apply("crush", args("crush", model="p:old"), ag=NoModelAgent("m-c"), models=models, per_run=True)
-
-        # agy: the level is part of the model id
-        class AgyAgent(Agent):
-            def options(self, model=None):
-                vals = ["gem-high", "gem-low", "claude-x-high", "claude-x-medium", "claude-x-low", "oss-medium"]
-                return [opt("model", "model", vals, self.model), opt("mode", "mode", ["yolo", "default"])]
-        MODELS.update({v: (None, None, None, None) for v in ["gem-high", "gem-low", "claude-x-high", "claude-x-medium", "claude-x-low", "oss-medium"]})
-        out["agy_low"] = await apply("agy", args("agy", model="claude-x-high", effort="low"), ag=AgyAgent("gem-high"))
-        out["agy_default_model"] = await apply("agy", args("agy", effort="low"), ag=AgyAgent("gem-high"))
-        out["agy_missing"] = await apply("agy", args("agy", model="oss-medium", effort="high"), ag=AgyAgent("gem-high"))
-        # agy 1.4.1: bare model ids and a thinking_level option, set like any other effort
-        MODELS["claude-opus-5-5"] = ("thinking_level", ["low", "medium", "high"], "high", None)
-        out["agy_thinking_level"] = await apply("agy", args("agy", model="claude-opus-5-5", effort="low"),
-                                                ag=Agent("claude-opus-5-5"))
 
         out["post"] = {
             "claude_ok": mod.post_turn(args("claude", context=200000), {"ctx_expected": 200000}, {"size": 200000}),
@@ -359,10 +323,6 @@ PROBE = textwrap.dedent("""\
             "codex_round": mod.post_turn(args("codex", context=272001), {}, {"size": 258400}),
             "codex_clamped": mod.post_turn(args("codex", context=900000), {}, {"size": 828400}),
             "codex_old": mod.post_turn(args("codex", context=400000), {}, {"size": 258400}),
-            "copilot_long": mod.post_turn(args("copilot", context=1000000), {}, {"size": 922000}),
-            "copilot_default": mod.post_turn(args("copilot", context=200000), {}, {"size": 272000}),
-            "copilot_default_got_long": mod.post_turn(args("copilot", context=200000), {}, {"size": 922000}),
-            "copilot_long_got_default": mod.post_turn(args("copilot", context=1000000), {}, {"size": 272000}),
             "none_reported": None,
         }
         ap = {"ctx_expected": 200000}
@@ -370,7 +330,7 @@ PROBE = textwrap.dedent("""\
         obs = {"model": "m"}
         mod.post_turn(args("claude"), obs, {"size": 1000000})
         out["post"]["observed"] = [obs, mod.applied_line(obs)]
-        out["line"] = [mod.applied_line({"model": "grok-4.7", "effort": "low", "ctx": 500000}),
+        out["line"] = [mod.applied_line({"model": "m-a", "effort": "low", "ctx": 500000}),
                        mod.applied_line({"model": "x", "ctx": 200000, "unverified": ["ctx"]}),
                        mod.applied_line({})]
 
@@ -404,9 +364,9 @@ class TestEffortContext(unittest.TestCase):
         self.assertEqual(self.r["fmt"], ["500k", "1m", "258400", "2m"])
 
     def test_unprefixed_vendor_notifications_become_extension_notifications(self):
-        # qwen's "qwen/notify/..." used to log a traceback per notification
-        self.assertEqual(self.r["routing"], ["session/update", "_zcode/turnState", "_qwen/notify/session/model-update",
-                                             "_x.ai/hooks", "session/request_permission", "qwen/notify/x"])
+        # a vendor's "vendor/notify/..." used to log a traceback per notification
+        self.assertEqual(self.r["routing"], ["session/update", "_vendor/turnState", "_vendor/notify/session/model-update",
+                                             "_x.ai/hooks", "session/request_permission", "vendor/notify/x"])
 
     def test_the_claude_cli_fallback_gets_the_effort_and_the_window_switch(self):
         f = self.r["fallback"]
@@ -428,7 +388,7 @@ class TestEffortContext(unittest.TestCase):
         self.assertEqual(r["plain"], ["reasoning_effort", "low"])
         self.assertIsNone(r["default_missing"])
         self.assertEqual(r["miss"]["code"], 2)
-        self.assertIn("grok m-a has no effort 'max'; valid: reasoning_effort: low, medium, high, xhigh", r["miss"]["stderr"])
+        self.assertIn("cursor m-a has no effort 'max'; valid: reasoning_effort: low, medium, high, xhigh", r["miss"]["stderr"])
         self.assertEqual(r["none"]["code"], 2)
         self.assertIn("cursor m-c offers no reasoning-effort option", r["none"]["stderr"])
         self.assertIn("--set thinking=true|false", r["thinking_only"]["stderr"])
@@ -442,15 +402,12 @@ class TestEffortContext(unittest.TestCase):
 
     def test_unreachable_requests_exit_2_with_the_reason(self):
         s = self.r["static"]
-        for name in ("hermes_effort", "crush_effort", "cline_max", "agy_max", "qwen_ctx", "opencode_ctx",
-                     "claude_500", "copilot_400"):
+        for name in ("hermes_effort", "opencode_ctx", "claude_500"):
             with self.subTest(name=name):
                 self.assertEqual(s[name]["code"], 2, s[name])
         self.assertIn("hermes' ACP server has no reasoning option", s["hermes_effort"]["stderr"])
-        self.assertIn("xhigh and max are not reachable", s["agy_max"]["stderr"])
         self.assertIn("claude is 200k", s["claude_500"]["stderr"])
-        for name in ("cline_xhigh", "agy_high", "default_ok", "claude_200", "codex_400", "codex_500", "codex_800",
-                     "copilot_1m", "grok_any"):
+        for name in ("default_ok", "claude_200", "codex_400", "codex_500", "codex_800"):
             with self.subTest(name=name):
                 self.assertEqual(s[name], {"ret": None})
 
@@ -458,24 +415,10 @@ class TestEffortContext(unittest.TestCase):
         t = self.r["tweaks"]
         self.assertEqual(t["claude_200"]["env"], {"CLAUDE_CODE_DISABLE_1M_CONTEXT": "1"})
         self.assertEqual(t["claude_1m"]["env"], {})
-        self.assertEqual(t["zcode"]["env"], {"ZCODE_ACP_AUTO_COMPACT_THRESHOLD": "200000"})
-        self.assertEqual(t["copilot"]["cmd"], ["bin", "--acp", "--context", "long_context", "--model", "gpt-5.5"])
-        self.assertEqual(t["copilot_default"]["cmd"], ["bin", "--acp", "--context", "default"])
-        self.assertEqual(t["cline"]["cmd"], ["bin", "--acp", "--thinking", "high"])
-        self.assertEqual(t["cline_default"]["cmd"], ["bin", "--acp"])
         self.assertEqual(t["plain"], {"cmd": ["bin", "--acp"], "env": {}})
         p = self.r["pass_through"]
         self.assertEqual(p["cmd"], ["codex-acp", "--foo", "a b", "--bar"])
         self.assertEqual(p["env"], {"A": "1", "B": "x,y", "C": "3", "D": "4"})
-
-    def test_grok_context_goes_through_set_model_and_is_read_back(self):
-        g = self.r["grok"]
-        self.assertTrue(g["ok"], g)
-        self.assertEqual(g["calls"], [["model", "m-a"], ["reasoning_effort", "low"]])
-        self.assertEqual(g["raw"], [["session/set_model", {"sessionId": "s1", "modelId": "m-a",
-                                    "_meta": {"contextWindow": 500000, "reasoningEffort": "low"}}]])
-        self.assertEqual(g["line"], "model=m-a effort=low ctx=500k")
-        self.assertEqual(g["applied"]["ctx_source"], "x.ai/session/info")
 
     def test_model_is_set_before_effort_and_mode_for_every_agent(self):
         o = self.r["order"]
@@ -524,19 +467,8 @@ class TestEffortContext(unittest.TestCase):
         self.assertIn("CODEX_CONFIG to be a JSON object", c["not_json"]["stderr"])
         self.assertEqual(c["claude_untouched"], {"CLAUDE_CODE_DISABLE_1M_CONTEXT": "1"})
 
-    def test_claude_zcode_and_cline_are_launch_time_and_reported_as_such(self):
+    def test_claude_is_launch_time_and_reported_as_such(self):
         self.assertEqual(self.r["claude_ctx"]["applied"]["ctx_expected"], 200000)
-        z = self.r["zcode_cap"]["applied"]
-        self.assertEqual((z["ctx"], z["ctx_cap"], z["unverified"]), (200000, 200000, ["ctx"]))
-        self.assertEqual(self.r["zcode_cap"]["line"], "model=m-c ctx=200k(unverified)")
-        self.assertEqual(self.r["cline_effort"]["applied"]["effort"], "high")
-        self.assertEqual(self.r["cline_effort"]["applied"]["unverified"], ["effort"])
-        self.assertEqual(self.r["cline_effort"]["calls"], [["model", "m-c"]])
-
-    def test_copilot_keeps_the_launch_model_instead_of_setting_it(self):
-        self.assertTrue(self.r["copilot_model"]["ok"])
-        self.assertEqual(self.r["copilot_model"]["calls"], [])
-        self.assertIn("started on model 'm-c'", self.r["copilot_wrong"]["config_error"])
 
     def test_models_listed_only_in_session_new_are_set_with_session_set_model(self):
         h = self.r["hermes_model"]
@@ -544,22 +476,6 @@ class TestEffortContext(unittest.TestCase):
         self.assertEqual(h["raw"], [["session/set_model", {"sessionId": "s1", "modelId": "nous:anthropic/claude-sonnet-5.5"}]])
         self.assertEqual(h["applied"]["model"], "nous:anthropic/claude-sonnet-5.5")
         self.assertEqual(h["applied"]["unverified"], ["model"])
-        self.assertEqual(self.r["crush_guard"]["exit"], 2)  # crush persists it into the shared data dir
-        self.assertIn("ACP_RUN_CRUSH_DATA", self.r["crush_guard"]["stderr"])
-        self.assertTrue(self.r["crush_private"]["ok"])
-
-    def test_agy_effort_is_the_model_id_suffix(self):
-        self.assertEqual(self.r["agy_low"]["calls"], [["model", "claude-x-low"]])
-        self.assertEqual(self.r["agy_low"]["line"], "model=claude-x-low effort=low")
-        self.assertEqual(self.r["agy_default_model"]["calls"], [["model", "gem-low"]])
-        self.assertEqual(self.r["agy_missing"]["exit"], 2)
-        self.assertEqual(self.r["agy_missing"]["stderr"], "acp-run: agy oss is offered at effort: medium; not high")
-
-    def test_agy_1_4_1_effort_is_the_thinking_level_option(self):
-        r = self.r["agy_thinking_level"]
-        self.assertIn(["thinking_level", "low"], r["calls"])
-        self.assertNotIn(["model", "claude-opus-5-5-low"], r["calls"])
-        self.assertEqual(r["line"], "model=claude-opus-5-5 effort=low")
 
     def test_the_window_after_the_turn_is_checked_against_the_request(self):
         p = self.r["post"]
@@ -570,15 +486,11 @@ class TestEffortContext(unittest.TestCase):
         self.assertIsNone(p["codex_round"])       # 272001 x 95% = 258400.95, reported 258400
         self.assertIn("expected 855000", p["codex_clamped"])   # clamped by max_context_window
         self.assertIn("agent reports 258400", p["codex_old"])
-        self.assertIsNone(p["copilot_long"])      # 922k prompt budget of the 1m tier
-        self.assertIsNone(p["copilot_default"])   # the default tier reports 272k whatever 200k..272k was asked
-        self.assertIn("agent reports 922k", p["copilot_default_got_long"])
-        self.assertIn("agent reports 272k", p["copilot_long_got_default"])
         self.assertIsNone(p["none_reported"][0])
         self.assertEqual(p["none_reported"][1]["ctx"], 200000)
         self.assertEqual(p["none_reported"][1]["unverified"], ["ctx"])
         self.assertEqual(p["observed"][1], "model=m ctx=1m")
-        self.assertEqual(self.r["line"], ["model=grok-4.7 effort=low ctx=500k", "model=x ctx=200k(unverified)", ""])
+        self.assertEqual(self.r["line"], ["model=m-a effort=low ctx=500k", "model=x ctx=200k(unverified)", ""])
 
     def test_run_prints_the_applied_line_and_records_it(self):
         ok = self.r["run_ok"]

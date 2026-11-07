@@ -600,7 +600,7 @@ at the end. `graft build` last.
 | Wave | Content | Width | Gate |
 |---|---|---|---|
 | 0 | DONE: check-ins (37 + 5), rulings R1–R8, evidence and the consolidated report on the branch. OPEN: baseline suite (running in the cloud, `docs/slim/baseline.md` when it ends; batch-1 reports note tests that fail on master in containers); land PR 289 and PR 291 on master (pytest-linux pending on both); land `gitignore-aider` (one line) by PR and reset the shared checkout's master; tag `pre-slim-2026-11-06`; `git worktree prune` on the Mac; J1, J2, J2a, J2b, J2c, J11 and J3–J10 all answered 2026-11-06 | serial | all of the above |
-| 1 | Audits (a) `bin/`, (b) `skills/`, (c) `tests/` map, (d) `docs/` + queue, (e) outside dependents and links (C2, C3) ; lead writes `docs/slim/ledger.md`; **workflow** (section H, W1); operator approves the ledger once | 5 readers | ledger approved |
+| 1 | Audits (a) `bin/`, (b) `skills/`, (c) `tests/` map, (d) `docs/` + queue, (e) outside dependents and links (C2, C3) ; lead writes `docs/slim/ledger.md`; **workflow** (section H, W1); the ledger is posted and Wave 2's briefs start; the operator objects by reply (H ruling, 2026-11-06) | 5 readers | ledger posted |
 | 2 | E1 (unlink, uninstall-vendored, move to site-djbclark), E2 (dead), E9 (retired providers only) | 3–4 writers + reviewers | **C7 drain gate passed first**; suite green; refs zero outside AGENTS.md and README (**workflow** W2) |
 | 3 | E3 shim, E4, E5, E10; **order inside the wave**: E5's attribution rewrite merges before E3 deletes `fleet.py`; **operator steps first**: upgrade the Mac daemon to 0.15.x in a quiesced window per `docs/queue.md` (evidence F records 0.14.x; an unfinished turn is lost on restart until terminal persistence is verified), install the J6 plugins, evaluate `session-recovery` with native resume OFF, then the one bounded native-resume trial (J6), then verify for one day before the REPLACE deletions merge | 3 | same; **the E3 shim merges only after the in-repo relay callers are on it and the C3 relay consumers are migrated or waived per file** |
 | 4 | `bin/review-launch` and its boundary tests first (owned by E8, needed by E6's shim), then the E6 shim and bigteam, then E7 and the rest of E8; E6 and E7 as sibling cloud sessions; **operator steps before E8's ruleset switch**: create the `ade-merge-gate` GitHub App, install it on the repository, store its private key in the `merge-gate` environment restricted to `master` | 2–3 | same; the lander and feeder plists are unloaded and removed (J11, operator step); **`acp-run` is not deleted here**: C3's acp consumers are migrated or waived per file first (PRs opened and merged by the lead per J2b, asking when unsure) |
@@ -639,7 +639,9 @@ automatically when unchanged (2.1.305, 2.1.311 fixes); `claude --worktree`
 puts a local session in `.claude/worktrees/<name>`; Claude Code workflows
 resume with completed agents cached (2.1.318 fix).
 
-## H. Where a workflow is used (operator approves each, by size)
+## H. Where a workflow is used (count stated, then started; the operator interrupts to resize)
+
+**Ruling 2026-11-06 (operator, after Wave 0: "minimize the number of blocking things")**: a workflow is no longer held for a yes. The lead states its agent count and cap in the reply and starts it; the operator stops or resizes it by replying. The same holds for the ledger (Wave 1 gate): the lead posts it and continues into Wave 2's briefs; the operator objects by reply. Only steps that need the Mac (C7 output, installs, launchd, Paseo settings, tag and branch pushes) still wait, and they are batched into one numbered list per wave in `docs/slim/log.md`, never asked one at a time.
 
 H1. **W1, Wave 1 ledger**: `parallel` readers per area → dedup by path → a
 3-vote refute on every KEEP row ("try to refute that this must stay") → the
@@ -819,6 +821,10 @@ the Mac (installs, launchd, Paseo settings are my steps: give me the exact
 command). Append to docs/slim/log.md after every wave: what merged, what
 was lost on purpose, what the operator must do by hand.
 ```
+
+## K2. Wave 1 amendments (2026-11-06, lead; detail in `docs/slim/ledger-rulings.md`)
+
+The W1 ledger (`docs/slim/ledger.md`, 627 rows) amends this plan where the evidence contradicted it: E7's "KEEP the model-chain half of `failover.py`" is withdrawn (its only live importer is `skillopt-night`, DELETE; ruling 1); `codex-env-policy-apply` is struck from E9's retired-helper list (Codex is kept; ruling 9); `tests/test_acp_run_*` are SHIM with `acp-run`, not deleted in-slice (ruling 3); E11's docs keep-list gains "a doc whose tool is KEEP stays, trimmed" (ruling 7); `agents/claude/settings.json.tmpl` and `.github/workflows/test.yml` join the serial merger's shared files (ruling 8); the C2 hook list is four files, not two (`autorename_nudge.py` and `relay_prose_nudge.py` added); `fleet.py` is SHIM with the E5 gate; the five symlinked skills are UNLINK. Section D's D12 is corrected: `git filter-repo` needs a select line and a rename line per path (`docs/slim/research/wave2-2026-11-06.md`); E2 gains the precondition of a committed `.worktreeinclude`; D7's single `~/.claude/skills` symlink is unconfirmed (per-skill links are documented).
 
 ## L. Sources (read 2026-11-06)
 

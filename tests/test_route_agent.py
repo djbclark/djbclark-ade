@@ -65,7 +65,7 @@ class TestStandingRules(unittest.TestCase):
         self.assertEqual(choice.service.name, "clinepass")
 
     def test_prepaid_tier_is_retired(self):
-        for name in ("opencode-zen", "openrouter", "deepseek"):
+        for name in ("opencode-zen",):
             self.assertTrue(r.BY_NAME[name].retired)
             for kind in r.KINDS:
                 c = r.route(kind, quota=IDLE)
@@ -78,11 +78,11 @@ class TestStandingRules(unittest.TestCase):
         self.assertEqual(c.service.name, "claude")
 
     def test_judgment_reaches_codex_only_when_claude_is_tight_and_codex_is_plentiful(self):
-        # antigravity at 100% must not win judgment work. Since 2026-10-25 codex's judgment
+        # a bulk pool at 100% must not win judgment work. Since 2026-10-25 codex's judgment
         # row (rank 3, gpt-6.1-sol at high) is an eligible, lower-ranked pool while its quota is
         # plentiful: the router weighs pressure, burn and pace as well as rank, so it wins
         # when claude is short of room (it won at claude=15% too), never while claude has plenty.
-        q = dict(IDLE, antigravity={"remaining": 100.0}, claude={"remaining": 20.0})
+        q = dict(IDLE, **{"cursor-auto": {"remaining": 100.0}}, claude={"remaining": 20.0})
         self.assertEqual(r.route("judgment", quota=q).service.name, "claude")
         q = dict(IDLE, claude={"remaining": 5.0})
         c = r.route("judgment", quota=q)
@@ -114,43 +114,33 @@ class TestOpencodeGoTakesNoCode(unittest.TestCase):
 class TestWasteBurning(unittest.TestCase):
     def test_bulk_goes_to_idle_capacity(self):
         c = r.route("bulk", quota=IDLE)
-        self.assertIn(c.service.name, {"antigravity", "opencode-go"})
+        self.assertIn(c.service.name, {"cursor-auto", "opencode-go"})
         self.assertGreater(c.remaining, 90)
 
     def test_mechanical_prefers_the_free_tier(self):
         self.assertEqual(r.route("mechanical", quota=IDLE).service.name, "opencode-go")
 
     def test_headroom_shifts_bulk_away_from_a_drained_pool(self):
-        drained = dict(IDLE, antigravity={"remaining": 5.0})
-        self.assertNotEqual(r.route("bulk", quota=drained).service.name, "antigravity")
+        drained = dict(IDLE, **{"opencode-go": {"remaining": 5.0}})
+        self.assertNotEqual(r.route("bulk", quota=drained).service.name, "opencode-go")
 
     def test_min_headroom_excludes_tight_services(self):
-        q = dict(IDLE, antigravity={"remaining": 10.0})
+        q = dict(IDLE, **{"opencode-go": {"remaining": 10.0}})
         c = r.route("bulk", quota=q, min_headroom=15.0)
-        self.assertNotEqual(c.service.name, "antigravity")
-
-    def test_default_headroom_gate_excludes_below_fifteen(self):
-        q = dict(IDLE, antigravity={"remaining": 14.9})
-        self.assertNotEqual(r.route("bulk", quota=q).service.name, "antigravity")
+        self.assertNotEqual(c.service.name, "opencode-go")
 
     def test_default_headroom_excludes_note_exhausted_pool(self):
         q = dict(IDLE, codex={"remaining": 0.0, "windows": {"weekly": 0.0}})
         self.assertNotEqual(r.route("code", quota=q).service.name, "codex")
 
-    def test_github_work_routes_to_copilot(self):
-        self.assertEqual(r.route("github", quota=IDLE).service.name, "copilot")
-
-
 class TestDegradation(unittest.TestCase):
     def test_works_with_no_quota_at_all(self):
-        """A stale or missing cache must degrade to capability-only routing,
-        except for the reserve pool (copilot), which fails closed without a fresh
-        reading (review 2026-10-15): github stays queued. realtime-web routes
-        again since grok stopped being a reserve (2026-10-18)."""
+        """A stale or missing cache must degrade to capability-only routing, except the `github` and `realtime-web`
+        kinds, which no pool serves since copilot (2026-11-06) and the grok CLI (2026-11-07) retired."""
         for kind in r.KINDS:
             c = r.route(kind, quota={})
-            if kind == "github":
-                self.assertIsNone(c, f"{kind} is reserve-only and must not route unmeasured")
+            if kind in ("github", "realtime-web"):
+                self.assertIsNone(c, f"{kind} has no serving pool")
             else:
                 self.assertIsNotNone(c, f"{kind} should still route without quota")
 
@@ -160,6 +150,9 @@ class TestDegradation(unittest.TestCase):
 
     def test_every_kind_is_servable(self):
         for kind in r.KINDS:
+            if kind in ("github", "realtime-web"):      # copilot (2026-11-06) and the grok CLI (2026-11-07), their pools, retired
+                self.assertIsNone(r.route(kind, quota=IDLE), kind)
+                continue
             self.assertIsNotNone(r.route(kind, quota=IDLE), kind)
 
     def test_alternatives_exclude_the_winner(self):
@@ -176,7 +169,7 @@ class TestDiscovery(unittest.TestCase):
 
     def test_discovery_includes_curated_services(self):
         names = {s.name for s in r.discover(IDLE)}
-        for curated in ("claude", "codex", "antigravity", "copilot"):
+        for curated in ("claude", "codex", "cursor-auto", "omp"):
             self.assertIn(curated, names)
 
     def test_unknown_provider_becomes_routable_conservatively(self):
@@ -186,24 +179,24 @@ class TestDiscovery(unittest.TestCase):
         self.assertFalse(svc.judgment_tier, "unprofiled services must not take judgment")
 
     def test_aliases_do_not_become_second_services(self):
-        """`cline` is clinepass's TUI; a duplicate entry would dodge never-bulk."""
+        """`claude-agent-teams` is claude's; a duplicate entry would dodge its constraints."""
         names = {s.name for s in r.discover(IDLE)}
-        for alias in ("cline", "claude-agent-teams"):
+        for alias in ("claude-agent-teams", "openclaude"):
             self.assertNotIn(alias, names)
-        self.assertTrue(all(s.cli.startswith("zcode") and s.acp_agent == "zcode"
-                            for s in r.discover(IDLE) if s.name == "zai"))
-        self.assertEqual(r.ALIASES["cline"], "clinepass")
+        for retired in ("zai", "antigravity", "copilot", "devin", "alibaba", "crush"):
+            self.assertNotIn(retired, names, "a retired TUI's aiuse account is never a routable service")
+        self.assertEqual(r.ALIASES["openclaude"], "claude")
 
-    def test_alias_does_not_create_a_second_clinepass(self):
-        """`cline` is clinepass's TUI. It must fold onto the curated service
-        rather than appearing as an extra pool, or headroom gets double
-        counted and constraints are evaluated twice."""
-        quota = {name: {"remaining": 0.0} for name in IDLE}
-        quota["clinepass"] = {"remaining": 100.0}
-        quota["cline"] = {"remaining": 100.0}
+    def test_retired_tui_names_are_never_discovered(self):
+        """Adapted from the old clinepass-alias test: a `cline` (or other retired TUI) account in aiuse, or a
+        retired agent in acp-run's list, must not become a routable service."""
+        names_in = ("cline", "agy", "qwen", "goose", "zcode", "pi", "crush", "muse", "kiro", "devin", "copilot", "aider", "venicecode")
+        quota = {name: {"remaining": 100.0} for name in IDLE}
+        quota.update({n: {"remaining": 100.0} for n in names_in})
         names = {s.name for s in r.discover(quota)}
+        for n in names_in:
+            self.assertNotIn(n, names)
         self.assertIn("clinepass", names)
-        self.assertNotIn("cline", names)
 
     @mock.patch.dict(os.environ, {"ROUTE_AGENT_OMP_READY": "0"})   # omp-ready: TestOmpReadyRoster
     def test_measured_idle_capacity_beats_unmeasured(self):
@@ -234,143 +227,134 @@ class TestDiscovery(unittest.TestCase):
     def test_unmeasured_agents_remain_reachable_as_fallback(self):
         """All available agents should stay routable, just ranked last."""
         drained = {k: {"remaining": 0.0} for k in IDLE}
-        with sources(acp=ACP_LIST):                       # not whatever agents the host has installed
+        with sources(PASEO_ROWS):                         # not whatever providers the host's Paseo lists
             choice = r.route("bulk", quota=drained)
         self.assertIsNotNone(choice, "roster agents should still provide a fallback")
         self.assertNotEqual(choice.service.name, "clinepass")
 
 
-ACP_LIST = """ok claude    claude-agent-acp
-ok codex     codex-acp
-ok cline     cline --acp
-ok agy       /Users/x/.local/share/agy-acp-server/1.3.0/agy_acp_server.par
-ok fresh-acp-agent  fresh-acp-agent acp
--- devin     devin acp
--- phantom-acp  phantom-acp acp
-"""
+def prow(provider: str, status: str = "available", enabled: str = "Enabled") -> dict[str, str]:
+    return {"provider": provider, "label": provider, "status": status, "enabled": enabled, "defaultMode": "default", "modes": ""}
+
+
+PASEO_ROWS = [prow("claude"), prow("codex"), prow("opencode"), prow("fresh-provider"), prow("copilot"), prow("pi"),
+              prow("antigravity"), prow("off-provider", enabled="Disabled"), prow("broken", status="error"),
+              prow("gone", status="unavailable")]
+FAKES = Path(__file__).resolve().parent / "fakes"
 
 
 @contextlib.contextmanager
-def sources(acp: str = "", installed=(), orca=(), include_orca: bool = False):
-    """Pin every discovery source so a test sees only what it declares."""
-    env = dict(os.environ, ROUTE_AGENT_INCLUDE_ORCA="1" if include_orca else "")
-    which = lambda name, *a, **k: f"/fake/bin/{name}" if name in installed else None
-    with mock.patch.object(r, "acp_list_output", return_value=acp), \
-            mock.patch.object(r.shutil, "which", side_effect=which), \
-            mock.patch.object(r, "orca_roster", return_value=set(orca)), \
-            mock.patch.dict(os.environ, env, clear=True):
+def sources(rows=()):
+    """Pin the Paseo registry so a test sees only the provider rows it declares."""
+    with mock.patch.object(r, "paseo_provider_rows", return_value=list(rows)):
         yield
 
 
-class TestDiscoverySources(unittest.TestCase):
-    """Discovery reflects what this machine can dispatch, not Orca's stock list.
+@contextlib.contextmanager
+def fake_paseo(**env: str):
+    """route_agent's Paseo reads against tests/fakes/paseo, with its own state dir (no daemon, no network)."""
+    with tempfile.TemporaryDirectory(prefix="ra-paseo-") as state, mock.patch.dict(os.environ, {
+            "ROUTE_AGENT_PASEO": "on", "ROUTE_AGENT_PASEO_BIN": str(FAKES / "paseo"), "FAKE_PASEO_STATE": state, **env}), \
+            mock.patch.object(r, "PASEO_LOADING_WAIT", 0.01):
+        r._reset_paseo_cache()
+        try:
+            yield Path(state)
+        finally:
+            r._reset_paseo_cache()
 
-    Orca's roster is its stock TUI list: on 2026-10-08, 12 of 28 enabled names
-    were not installed here (amp, droid, kiro, ...). acp-run's table is what
-    every launcher uses, so it is the authority; the non-ACP headless TUIs
-    join only while installed; Orca is opt-in and intersected with PATH."""
+
+class TestDiscoverySources(unittest.TestCase):
+    """Discovery reflects what Paseo can dispatch now (`paseo provider ls --json`, 2026-11-07, slim-down E7): enabled and
+    available rows only, through ALIASES, never a `never_route` provider; a `loading` row is retried, then absent."""
 
     def names(self):
         return {s.name for s in r.discover(IDLE)}
 
-    def test_only_ok_rows_of_acp_run_are_routable(self):
-        with sources(acp=ACP_LIST):
+    def test_only_enabled_and_available_providers_are_routable(self):
+        with sources(PASEO_ROWS):
             names = self.names()
-        self.assertIn("fresh-acp-agent", names)
-        self.assertNotIn("phantom-acp", names, "`--` rows have no binary")
+        self.assertIn("fresh-provider", names)
+        for absent in ("off-provider", "broken", "gone"):
+            self.assertNotIn(absent, names)
 
-    def test_acp_rows_pass_through_aliases(self):
-        """`cline`/`agy` are TUIs of curated services; a second entry would
-        dodge the constraints that protect clinepass."""
-        with sources(acp=ACP_LIST):
+    def test_paseo_rows_pass_through_aliases_and_never_route(self):
+        """Paseo's `opencode` provider is the opencode-go pool, not a second entry; retired providers Paseo still lists
+        (copilot, pi, antigravity) are never discovered."""
+        with sources(PASEO_ROWS):
             names = self.names()
-        for alias in ("cline", "agy"):
-            self.assertNotIn(alias, names)
-        self.assertIn("clinepass", names)
-        self.assertIn("antigravity", names)
+        self.assertNotIn("opencode", names)
+        self.assertIn("opencode-go", names)
+        for retired in ("copilot", "pi", "antigravity"):
+            self.assertNotIn(retired, names)
 
-    def test_non_acp_headless_tuis_count_only_while_installed(self):
-        self.assertEqual(r.NON_ACP_HEADLESS, {"muse"})
-        with sources(installed=()):
-            self.assertNotIn("muse", self.names())
-        with sources(installed=("muse",)):
-            self.assertIn("muse", self.names())
+    def test_paseo_failure_degrades_to_no_providers(self):
+        r._reset_paseo_cache()
+        with mock.patch.object(r.subprocess, "run", side_effect=OSError("gone")), \
+                mock.patch.dict(os.environ, {"ROUTE_AGENT_PASEO": "on", "ROUTE_AGENT_PASEO_BIN": "/fake/paseo"}):
+            self.assertEqual(r.paseo_providers(), set())
+        r._reset_paseo_cache()
+        with mock.patch.object(r.subprocess, "run", side_effect=r.subprocess.TimeoutExpired("paseo", 15)), \
+                mock.patch.dict(os.environ, {"ROUTE_AGENT_PASEO": "on", "ROUTE_AGENT_PASEO_BIN": "/fake/paseo"}):
+            self.assertEqual(r.paseo_providers(), set())
+        with fake_paseo(FAKE_PASEO_PROVIDERS='{"not": "a list"}'):
+            self.assertEqual(r.paseo_providers(), set())
+        r._reset_paseo_cache()
+        with mock.patch.dict(os.environ, {"ROUTE_AGENT_PASEO": "off"}):
+            self.assertEqual(r.paseo_providers(), set())          # the suite's default: no spawn at all
+        r._reset_paseo_cache()
 
-    def test_headless_tuis_pass_through_aliases(self):
-        """zcode is zai's TUI: it folds onto zai, not a duplicate; muse has none."""
-        with sources(installed=("zcode", "muse")):
-            names = self.names()
-        self.assertNotIn("zcode", names)
-        self.assertIn("zai", names)
-        self.assertIn("muse", names)
+    def test_provider_ls_is_read_once_per_process(self):
+        with fake_paseo(FAKE_PASEO_PROVIDERS=json.dumps(PASEO_ROWS)) as state:
+            first = r.paseo_providers()
+            self.assertEqual(r.paseo_providers(), first)
+            self.assertEqual({s.name for s in r.discover(IDLE)} >= {"fresh-provider"}, True)
+            calls = [json.loads(x) for x in (state / "calls.jsonl").read_text().splitlines()]
+            self.assertEqual(calls.count(["provider", "ls", "--json"]), 1)
 
-    def test_phantom_orca_names_are_not_routable_by_default(self):
-        phantoms = {"amp", "ante", "autohand", "droid", "kiro", "trae"}
-        with sources(orca=phantoms | {"claude"}, installed=phantoms):
-            names = self.names()
-        self.assertFalse(phantoms & names, phantoms & names)
+    def test_the_fake_paseo_registry_is_read_and_filtered(self):
+        rows = json.dumps(PASEO_ROWS)
+        with fake_paseo(FAKE_PASEO_PROVIDERS=rows):
+            self.assertEqual(r.paseo_providers(), {"claude", "codex", "opencode", "fresh-provider", "copilot", "pi",
+                                                   "antigravity"})
 
-    def test_orca_source_when_enabled_is_intersected_with_installed(self):
-        with sources(orca={"aider", "amp"}, installed=("aider",), include_orca=True):
-            names = self.names()
-        self.assertIn("aider", names)
-        self.assertNotIn("amp", names, "enabled in Orca but not installed")
+    def test_loading_rows_are_retried_twice_then_absent_with_a_note(self):
+        with fake_paseo(FAKE_PASEO_LOADING="2") as state:
+            self.assertIn("claude", r.paseo_providers())           # loading, loading, available
+            self.assertEqual((state / "provider-ls-count").read_text(), "3")
+        err = io.StringIO()
+        with fake_paseo(FAKE_PASEO_LOADING="3") as state, contextlib.redirect_stderr(err):
+            self.assertEqual(r.paseo_providers(), set())           # still loading after the retries: absent
+            self.assertEqual((state / "provider-ls-count").read_text(), "3")
+        self.assertIn("still loading", err.getvalue())
 
-    def test_acp_run_failure_degrades_to_no_acp_agents(self):
-        with mock.patch.object(r.subprocess, "run", side_effect=OSError("gone")):
-            self.assertEqual(r.acp_agents(), set())
-        with mock.patch.object(r.subprocess, "run",
-                               side_effect=r.subprocess.TimeoutExpired("acp-run", 15)):
-            self.assertEqual(r.acp_agents(), set())
+    def test_provider_models_lists_ids_once_per_process(self):
+        with fake_paseo(FAKE_PASEO_MODELS=json.dumps({"codex": ["gpt-6.1-sol", "gpt-6-luna"]})) as state:
+            self.assertEqual(r.provider_models("codex"), ["gpt-6.1-sol", "gpt-6-luna"])
+            self.assertEqual(r.provider_models("codex"), ["gpt-6.1-sol", "gpt-6-luna"])
+            calls = [json.loads(x) for x in (state / "calls.jsonl").read_text().splitlines()]
+            self.assertEqual(calls.count(["provider", "models", "codex", "--json"]), 1)
+        with mock.patch.dict(os.environ, {"ROUTE_AGENT_PASEO": "off"}):
+            r._reset_paseo_cache()
+            self.assertIsNone(r.provider_models("codex"))
 
-    def test_acp_agents_parses_live_format(self):
-        with mock.patch.object(r, "acp_list_output", return_value=ACP_LIST):
-            self.assertEqual(r.acp_agents(),
-                             {"claude", "codex", "cline", "agy", "fresh-acp-agent"})
-
-
-class TestAgyClaudeGptPool(unittest.TestCase):
-    """agy's Claude/GPT window is its own service (operator, 2026-10-10)."""
-
-    def snapshot(self, tmp, claude_gpt_left, gemini_left=100.0):
-        path = Path(tmp) / "latest.json"
-        path.write_text(r.json.dumps({"snapshot": {"accounts": [{
-            "provider": "antigravity", "billing_kind": "subscription_window",
-            "windows": [
-                {"label": "Gemini 5-hour", "remaining_percent": gemini_left,
-                 "pool_family": "gemini"},
-                {"label": "Claude/GPT weekly", "remaining_percent": claude_gpt_left,
-                 "pool_family": "claude_gpt"},
-            ]}]}, "collected_at": r.datetime.now(r.UTC).isoformat()}))
-        return path
-
-    def load(self, **kw):
-        import tempfile
-        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(r, "SNAPSHOT", self.snapshot(tmp, **kw)):
-            return r.load_snapshot()[0]
-
-    def test_pools_are_split_so_neither_drags_the_other(self):
-        q = self.load(claude_gpt_left=3.0)
-        self.assertEqual(q["antigravity"]["remaining"], 100.0)
-        self.assertEqual(q["antigravity-claude"]["remaining"], 3.0)
-
-    def test_code_routes_to_the_claude_pool_while_it_has_headroom(self):
-        q = {**IDLE, "antigravity-claude": {"remaining": 49.0}}
-        self.assertEqual(r.route("code", quota=q).service.name, "antigravity-claude")
-
-    def test_drained_claude_pool_is_skipped_but_gemini_pool_is_not(self):
-        q = {**IDLE, "antigravity-claude": {"remaining": 5.0}}
-        self.assertNotEqual(r.route("code", quota=q).service.name, "antigravity-claude")
-        self.assertEqual(r.route("bulk", quota=q).service.name, "antigravity")
-
-    def test_never_judgment_tier(self):
-        q = {**IDLE, "antigravity-claude": {"remaining": 100.0}}
-        self.assertNotEqual(r.route("judgment", quota=q).service.name, "antigravity-claude")
-
-    def test_alias_agy_does_not_create_a_second_service(self):
-        names = [s.name for s in r.discover({**IDLE, "antigravity-claude": {"remaining": 90.0}})]
-        self.assertEqual(names.count("antigravity-claude"), 1)
-        self.assertNotIn("agy", names)
+    def test_services_check_models_flags_a_suggestion_paseo_does_not_list(self):
+        listed: dict[str, list[str]] = {}
+        for s in r.SERVICES:                      # cursor-auto and cursor share the cursor provider
+            listed[s.acp_agent] = sorted(set(listed.get(s.acp_agent, [])) | {m.split()[0] for m in s.models.values()})
+        out = io.StringIO()
+        with fake_paseo(FAKE_PASEO_MODELS=json.dumps(listed)), contextlib.redirect_stdout(out):
+            self.assertEqual(r.main(["services", "--check-models"]), 0, out.getvalue())
+        self.assertIn("every suggested model is listed", out.getvalue())
+        listed["codex"] = [m for m in listed["codex"] if m != "gpt-6-astra"]
+        out = io.StringIO()
+        with fake_paseo(FAKE_PASEO_MODELS=json.dumps(listed)), contextlib.redirect_stdout(out):
+            self.assertEqual(r.main(["services", "--check-models"]), 1)
+        self.assertIn("MISSING codex frontier: gpt-6-astra", out.getvalue())
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, {"ROUTE_AGENT_PASEO": "off"}), contextlib.redirect_stdout(out):
+            r._reset_paseo_cache()
+            self.assertEqual(r.main(["services", "--check-models"]), 2)
+        self.assertIn("paseo: ?", out.getvalue())
 
 
 class TestPoolSplitIsGeneral(unittest.TestCase):
@@ -391,29 +375,29 @@ class TestPoolSplitIsGeneral(unittest.TestCase):
 class TestPlanWave(unittest.TestCase):
     """`plan` spreads one wave over pools and re-plans from live headroom."""
 
-    Q: ClassVar[dict[str, Any]] = {**IDLE, "antigravity-claude": {"remaining": 90.0}}
+    Q: ClassVar[dict[str, Any]] = {**IDLE, "cursor-auto": {"remaining": 90.0}}
 
     def test_wave_respects_max_parallel_then_spills_to_the_next_pool(self):
         rows = r.plan(["code"] * 5, quota=self.Q)
         names = [c.service.name for _, c in rows]
-        cap = next(s for s in r.SERVICES if s.name == "antigravity-claude").max_parallel
-        self.assertEqual(names[:cap], ["antigravity-claude"] * cap)
-        self.assertNotEqual(names[cap], "antigravity-claude")
+        cap = next(s for s in r.SERVICES if s.name == "cursor-auto").max_parallel
+        self.assertEqual(names[:cap], ["cursor-auto"] * cap)
+        self.assertNotEqual(names[cap], "cursor-auto")
 
     def test_replan_follows_a_pool_that_just_drained(self):
         before = r.plan(["code"], quota=self.Q)[0][1].service.name
-        after = r.plan(["code"], quota={**self.Q, "antigravity-claude": {"remaining": 4.0}})[0][1].service.name
-        self.assertEqual(before, "antigravity-claude")
-        self.assertNotEqual(after, "antigravity-claude")
+        after = r.plan(["code"], quota={**self.Q, "cursor-auto": {"remaining": 4.0}})[0][1].service.name
+        self.assertEqual(before, "cursor-auto")
+        self.assertNotEqual(after, "cursor-auto")
 
     def test_exclude_skips_a_service_that_just_failed(self):
-        c = r.plan(["code"], quota=self.Q, exclude={"antigravity-claude"})[0][1]
-        self.assertNotEqual(c.service.name, "antigravity-claude")
+        c = r.plan(["code"], quota=self.Q, exclude={"cursor-auto"})[0][1]
+        self.assertNotEqual(c.service.name, "cursor-auto")
 
     def test_plan_applies_default_fifteen_percent_headroom(self):
-        q = {**self.Q, "antigravity-claude": {"remaining": 14.0}}
+        q = {**self.Q, "cursor-auto": {"remaining": 14.0}}
         c = r.plan(["code"], quota=q)[0][1]
-        self.assertNotEqual(c.service.name, "antigravity-claude")
+        self.assertNotEqual(c.service.name, "cursor-auto")
 
     def test_plan_skips_note_exhausted_pool(self):
         q = {**self.Q, "codex": {"remaining": 0.0}}
@@ -423,7 +407,7 @@ class TestPlanWave(unittest.TestCase):
 
     @mock.patch.dict(os.environ, {"ROUTE_AGENT_OMP_READY": "0"})   # omp-ready: TestOmpReadyRoster
     def test_no_room_comes_back_as_none_not_an_error(self):
-        drained = {k: {"remaining": 1.0} for k in {*IDLE, "antigravity-claude"}}
+        drained = {k: {"remaining": 1.0} for k in {*IDLE, "cursor-auto"}}
         rows = r.plan(["code"], quota=drained)
         self.assertIsNone(rows[0][1])
 
@@ -461,114 +445,90 @@ class TestExhaustedAndStaleReadings(unittest.TestCase):
     def test_exhausted_state_counts_as_zero_remaining(self):
         """A window with state == 'exhausted' counts as 0 remaining even if remaining_percent is positive."""
         accts = [{
-            "provider": "antigravity",
+            "provider": "cursor",
             "windows": [{
-                "label": "Claude/GPT weekly",
-                "pool_family": "claude_gpt",
+                "label": "Auto monthly",
+                "pool_family": "auto",
                 "remaining_percent": 47.6,
                 "state": "exhausted",
             }],
         }]
         q = self.load(accts)
-        self.assertEqual(q["antigravity-claude"]["remaining"], 0.0)
+        self.assertEqual(q["cursor-auto"]["remaining"], 0.0)
 
     def test_zero_headroom_percent_counts_as_zero_remaining(self):
         """A window with headroom_percent == 0 counts as 0 remaining."""
         accts = [{
-            "provider": "antigravity",
+            "provider": "cursor",
             "windows": [{
-                "label": "Claude/GPT weekly",
-                "pool_family": "claude_gpt",
+                "label": "Auto monthly",
+                "pool_family": "auto",
                 "remaining_percent": 50.0,
                 "headroom_percent": 0.0,
                 "state": "ok",
             }],
         }]
         q = self.load(accts)
-        self.assertEqual(q["antigravity-claude"]["remaining"], 0.0)
+        self.assertEqual(q["cursor-auto"]["remaining"], 0.0)
 
     def test_old_reading_by_age_seconds_treated_as_unmeasured_none(self):
         """An account older than STALE_SOFT (25 min) has its headroom treated as None."""
         accts = [{
-            "provider": "antigravity",
+            "provider": "cursor",
             "age_seconds": 1800.0,  # 30 min > STALE_SOFT (1500s)
             "windows": [{
-                "label": "Claude/GPT weekly",
-                "pool_family": "claude_gpt",
+                "label": "Auto monthly",
+                "pool_family": "auto",
                 "remaining_percent": 90.0,
                 "state": "ok",
             }],
         }]
         q = self.load(accts)
-        self.assertIsNone(q["antigravity-claude"]["remaining"])
+        self.assertIsNone(q["cursor-auto"]["remaining"])
 
     def test_old_reading_by_collected_at_treated_as_unmeasured_none(self):
         """An account whose collected_at is older than STALE_SOFT has headroom treated as None."""
         old_time = (datetime.now(UTC) - timedelta(minutes=35)).isoformat()
         accts = [{
-            "provider": "antigravity",
+            "provider": "cursor",
             "collected_at": old_time,
             "windows": [{
-                "label": "Claude/GPT weekly",
-                "pool_family": "claude_gpt",
+                "label": "Auto monthly",
+                "pool_family": "auto",
                 "remaining_percent": 90.0,
                 "state": "ok",
             }],
         }]
         q = self.load(accts)
-        self.assertIsNone(q["antigravity-claude"]["remaining"])
+        self.assertIsNone(q["cursor-auto"]["remaining"])
 
     def test_old_reading_does_not_get_burn_first_bonus(self):
         """When headroom is None (unmeasured), burn_first bonus is not applied."""
-        # claude has 30% headroom, antigravity-claude is unmeasured (None)
-        q = {**IDLE, "antigravity-claude": {"remaining": None}, "claude": {"remaining": 30.0}}
-        # Unmeasured: rank 11 + unmeasured pressure 5 and no bonus. Measured at
-        # 90%: rank 11 + 0.25 - BURN_FIRST_BONUS. The gap must show the bonus.
+        # claude has 30% headroom, cursor-auto is unmeasured (None)
+        q = {**IDLE, "cursor-auto": {"remaining": None}, "claude": {"remaining": 30.0}}
+        # Unmeasured: rank 14 + unmeasured pressure 5 and no bonus. Measured at
+        # 90%: rank 14 + 0.25 - BURN_FIRST_BONUS. The gap must show the bonus.
         unmeasured = r.route("code", quota=q)
-        measured = r.route("code", quota={**q, "antigravity-claude": {"remaining": 90.0}})
-        self.assertEqual(measured.service.name, "antigravity-claude")
-        if unmeasured.service.name == "antigravity-claude":
+        measured = r.route("code", quota={**q, "cursor-auto": {"remaining": 90.0}})
+        self.assertEqual(measured.service.name, "cursor-auto")
+        if unmeasured.service.name == "cursor-auto":
             self.assertGreaterEqual(unmeasured.score - measured.score, r.BURN_FIRST_BONUS)
 
     def test_exhausted_state_on_old_reading_still_counts_as_zero(self):
         """An override on an older account reading still registers as 0.0 remaining (exhausted)."""
         accts = [{
-            "provider": "antigravity",
+            "provider": "cursor",
             "age_seconds": 2400.0,  # 40 min
             "windows": [{
-                "label": "Claude/GPT weekly",
-                "pool_family": "claude_gpt",
+                "label": "Auto monthly",
+                "pool_family": "auto",
                 "remaining_percent": 47.6,
                 "state": "exhausted",
             }],
         }]
         q = self.load(accts)
-        self.assertEqual(q["antigravity-claude"]["remaining"], 0.0)
+        self.assertEqual(q["cursor-auto"]["remaining"], 0.0)
 
-
-
-class ShadowKindTests(unittest.TestCase):
-    """The agent-choice shadow ask never changes or delays a route."""
-
-    def test_brief_is_sent_on_stdin_with_incumbent_and_all_kinds(self):
-        import tempfile
-        with tempfile.NamedTemporaryFile("w", suffix=".md") as f:
-            f.write("Fix the flaky test in tests/test_x.py")
-            f.flush()
-            with mock.patch.object(r.subprocess, "Popen") as popen:
-                r.shadow_kind(f.name, "code", "claude")
-        args = popen.call_args.args[0]
-        self.assertEqual(args[1:3], ["decide", "--site"])
-        self.assertIn("agent-choice", args)
-        self.assertEqual(args[args.index("--incumbent") + 1], "code")
-        self.assertEqual([args[i + 1] for i, a in enumerate(args) if a == "--option"], list(r.KINDS))
-        popen.return_value.stdin.write.assert_called_once_with("Fix the flaky test in tests/test_x.py")
-        self.assertTrue(popen.call_args.kwargs["start_new_session"])
-
-    def test_failures_are_swallowed(self):
-        r.shadow_kind("/nonexistent/brief.md", "code", None)
-        with mock.patch.object(r.subprocess, "Popen", side_effect=OSError):
-            r.shadow_kind(__file__, "code", None)
 
 
 class TestRoutingPolicy2026_10_15(unittest.TestCase):
@@ -584,38 +544,19 @@ class TestRoutingPolicy2026_10_15(unittest.TestCase):
             c = r.route(kind, quota=q)
             self.assertNotEqual(c.service.name if c else None, "hermes")
 
-    def test_reserve_floor_blocks_copilot_below_sixty_percent(self):
-        q = {name: {"remaining": 0.0} for name in (*IDLE, "antigravity-claude")}
-        q["copilot"] = {"remaining": 59.0}
-        self.assertIsNone(r.route("github", quota=q))
-        # Generic kinds never reach the reserve, whatever its headroom.
-        q["copilot"] = {"remaining": 100.0}
-        for kind in ("research", "bulk", "code"):
+    def test_the_grok_cli_is_retired_and_grok_bot_is_never_a_target(self):
+        """2026-11-07: the SuperGrok subscription was cancelled; grok-bot (Cursor-billed) stays but takes no slices."""
+        self.assertNotIn("grok", r.BY_NAME)
+        self.assertIsNone(r.map_agent_to_provider("grok", "grok-4.7"))
+        q = {**{name: {"remaining": 0.0} for name in IDLE}, "grok": {"remaining": 100.0}, "grok-bot": {"remaining": 100.0}}
+        names = {s.name for s in r.discover(q)}
+        self.assertFalse({"grok", "grok-bot"} & names)
+        for kind in r.KINDS:
             c = r.route(kind, quota=q)
-            self.assertNotIn(c.service.name if c else None, {"copilot"}, kind)
-        q["copilot"] = {"remaining": 61.0}
-        self.assertEqual(r.route("github", quota=q).service.name, "copilot")
-        # A reserve with no reading at all fails closed.
-        q["copilot"] = {}
-        self.assertIsNone(r.route("github", quota=q))
-
-    def test_grok_is_an_ordinary_pool_since_grokbot_moved_off_it(self):
-        # 2026-10-18: GrokBot runs on its own Cursor pool, so grok has no floor.
-        svc = next(s for s in r.SERVICES if s.name == "grok")
-        self.assertEqual(svc.reserve_floor, 0.0)
-        self.assertGreater(svc.max_parallel, 1)
-        for kind in ("realtime-web", "research", "bulk"):
-            self.assertTrue(svc.eligible(kind), kind)
-        q = {name: {"remaining": 0.0} for name in (*IDLE, "antigravity-claude")}
-        q["grok"] = {"remaining": 20.0}
-        self.assertEqual(r.route("realtime-web", quota=q).service.name, "grok")
-        # Behind the burn-first pools: with antigravity open, research goes there.
-        q["antigravity"] = {"remaining": 90.0}
-        q["grok"] = {"remaining": 90.0}
-        self.assertEqual(r.route("research", quota=q).service.name, "antigravity")
+            self.assertNotIn(c.service.name if c else None, ("grok", "grok-bot"), kind)
 
     def test_everyday_code_avoids_the_frontier_pools_when_others_have_room(self):
-        q = {**IDLE, "antigravity-claude": {"remaining": 0.0}, "cursor-auto": {"remaining": 75.0}}
+        q = {**IDLE, "cursor-auto": {"remaining": 75.0}}
         c = r.route("code", quota=q)
         self.assertNotIn(c.service.name, {"claude", "codex"})
 
@@ -654,13 +595,13 @@ class TestFrontierConservative2026_10_18(unittest.TestCase):
                 self.assertNotEqual(c.service.name if c else None, "codex", kind)
 
     def test_a_closed_baseline_puts_at_most_one_frontier_slice_on_each_pool(self):
-        with mock.patch.dict(os.environ, self.gate_env(profile=False, closed=True)):
+        with mock.patch.dict(os.environ, self.gate_env(closed=True)):
             rows = r.plan(["frontier"] * 4, quota=IDLE)
         names = [c.service.name if c else None for _, c in rows]
         self.assertEqual(names, ["codex", "claude", None, None])
 
     def test_the_standing_baseline_puts_two_frontier_slices_on_claude_and_one_on_codex(self):
-        with mock.patch.dict(os.environ, self.gate_env(profile=False)):       # the shipped gates.toml copy, no profile
+        with mock.patch.dict(os.environ, self.gate_env()):       # the shipped gates.toml copy, a fresh Claude reading
             rows = r.plan(["frontier"] * 4, quota=IDLE)
         names = [c.service.name if c else None for _, c in rows]
         self.assertEqual(names, ["codex", "claude", "claude", None])
@@ -669,56 +610,87 @@ class TestFrontierConservative2026_10_18(unittest.TestCase):
         rows = r.plan(["frontier", "judgment", "judgment"], quota=IDLE)
         self.assertEqual([c.service.name for _, c in rows], ["codex", "claude", "claude"])
 
-    def gate_env(self, profile: bool, tighten_min_left: float | None = None, closed: bool = False,
-                 guard: str | None = "ok") -> dict[str, str]:
-        """Env pointing the frontier gate at a temp profile (the shipped `away`, active now) and a temp gates.toml copy; `closed` closes its
-        [frontier] baseline (the pre-2026-10-27 rule)."""
+    @staticmethod
+    def claude_usage(claude: str | None, path: Path) -> Path | None:
+        """A canned `paseo usage ls --json` with one Claude report: `fresh` (weekly 70% left, Fable 60%), `tight` (weekly 20%),
+        `stale` (fetched 40 min ago), `unknown` (report unavailable, rejected 403); None: no report at all."""
+        if claude is None:
+            return None
+        now = datetime.now(UTC)
+        stamp = lambda d: d.strftime("%Y-%m-%dT%H:%M:%SZ")  # noqa: E731
+        weekly = 20.0 if claude == "tight" else 70.0
+        fetched = now - (timedelta(minutes=40) if claude == "stale" else timedelta(seconds=30))
+        report: dict[str, Any] = ({"status": "unavailable", "problem": {"kind": "rejected", "status": 403}} if claude == "unknown"
+                                  else {"status": "available", "windows": [
+                                      {"id": "w", "label": "Weekly", "usedPct": 100 - weekly, "remainingPct": weekly,
+                                       "resetsAt": stamp(now + timedelta(days=3))},
+                                      {"id": "5h", "label": "5-hour", "usedPct": 10.0, "remainingPct": 90.0,
+                                       "resetsAt": stamp(now + timedelta(hours=2))},
+                                      {"id": "f", "label": "Weekly (Fable)", "usedPct": 40.0, "remainingPct": 60.0,
+                                       "resetsAt": stamp(now + timedelta(days=3))}]})
+        path.write_text(json.dumps([{"id": "claude:default", "sourceId": "claude", "sourceLabel": "Claude", "icon": "<svg/>",
+                                     "account": "a", "fetchedAt": stamp(fetched), "report": report, "loginErrors": []}]))
+        return path
+
+    def gate_env(self, tighten_min_left: float | None = None, closed: bool = False,
+                 claude: str | None = "fresh") -> dict[str, str]:
+        """Env pointing the frontier gate at a temp gates.toml copy (`closed` closes its [frontier] baseline, the pre-2026-10-27 rule)
+        and the Claude reading at a canned Paseo usage report (`claude_usage`); aiuse and its snapshot file are pinned away."""
         tmp = Path(tempfile.mkdtemp(prefix="ragate-"))
         toml = (Path(r.__file__).resolve().parent.parent / "config" / "gates.toml").read_text()
         if closed:
             toml = close_frontier_baseline(toml)
         if tighten_min_left is not None:
-            toml = toml.replace("frontier1_min_left = 10.0 ", f"frontier1_min_left = {tighten_min_left} ", 1)
+            toml = toml.replace("frontier1_min_left = 15.0 ", f"frontier1_min_left = {tighten_min_left} ", 1)
         (tmp / "gates.toml").write_text(toml)
-        now = datetime.now(UTC)
-        stamp = lambda d: d.strftime("%Y-%m-%dT%H:%M:%SZ")  # noqa: E731
-        (tmp / "profile.json").write_text(json.dumps({"schema": 1, "profile": "away", "since": stamp(now - timedelta(hours=1)),
-                                                      "until": stamp(now + timedelta(hours=24)), "reason": "t", "set_by": "t"}))
-        guard_file = tmp / "quota-guard.json"
-        if guard is not None:       # None: no state file (a missing guard state)
-            age = timedelta(minutes=60) if guard == "stale" else timedelta(seconds=30)
-            level = "ok" if guard == "stale" else guard
-            guard_file.write_text(json.dumps({"checked_at": stamp(now - age), "level": level, "stale": False, "reasons": [],
-                                              "fable_left": 97.0}))
-        return {"GATES_TOML": str(tmp / "gates.toml"),
-                "GATE_PROFILE_STATE": str(tmp / "profile.json" if profile else tmp / "none.json"),
-                "CLAUDE_QUOTA_GUARD_STATE": str(guard_file)}
+        usage = self.claude_usage(claude, tmp / "usage.json")
+        return {"GATES_TOML": str(tmp / "gates.toml"), "ROUTE_AGENT_AIUSE": "off", "AIUSE_SNAPSHOT": str(tmp / "no-snapshot.json"),
+                "ROUTE_AGENT_PASEO": "off", "ROUTE_AGENT_PASEO_USAGE_JSON": str(usage) if usage else ""}
 
     @staticmethod
     def claude_slices() -> int:
         rows = r.plan(["frontier"] * 3, quota=IDLE)
         return sum(1 for _, c in rows if c and c.service.name == "claude")
 
-    def test_a_guard_state_path_that_is_a_fifo_is_a_closed_guard_not_a_hang_in_the_planner(self):
-        """The shared guard-state reader opens O_NONBLOCK and checks fstat: a FIFO there means no state (fails closed, claude cap 1)."""
-        env = self.gate_env(profile=False, guard=None)
-        os.mkfifo(env["CLAUDE_QUOTA_GUARD_STATE"])
-        script = ("import sys; sys.path.insert(0, sys.argv[1]); import route_agent as r; "
-                  "rows = r.plan(['frontier'] * 3, quota=None); "
-                  "print(sum(1 for _, c in rows if c and c.service.name == 'claude'))")
-        res = subprocess.run([sys.executable, "-I", "-c", script, str(Path(r.__file__).resolve().parent)],
-                             env={**env, "PATH": os.environ["PATH"], "HOME": os.environ.get("HOME", "/")},
-                             capture_output=True, text=True, timeout=10)
-        self.assertEqual((res.returncode, res.stdout.strip()), (0, "1"), res.stderr)
-
-    def test_the_standing_per_wave_cap_needs_the_guard_to_pass_at_tight_critical_stale_and_missing(self):
-        """Operator ruling 2026-10-27: quota-guard tight/critical STOPS the allowance; a stale or missing state fails closed. The planner
-        is the only per-wave limit a lead sees, so its 2-per-wave claude cap falls back to the closed 1 (adversary round 1 P1)."""
-        for guard, want in (("ok", 2), ("tight", 1), ("critical", 1), ("stale", 1), (None, 1)):
-            with self.subTest(guard=guard), mock.patch.dict(os.environ, self.gate_env(profile=False, guard=guard)):
+    def test_the_standing_per_wave_cap_needs_a_fresh_known_claude_reading_above_its_floors(self):
+        """Operator ruling 2026-10-27: the stop signal STOPS the allowance; a stale or missing reading fails closed. Since 2026-11-07 the
+        reading is the merged snapshot's (aiuse plus `paseo usage ls`), so a Paseo report that is not `available` is unknown and fails
+        closed too. The planner is the only per-wave limit a lead sees, so its 2-per-wave claude cap falls back to the closed 1."""
+        for claude, want in (("fresh", 2), ("tight", 1), ("stale", 1), ("unknown", 1), (None, 1)):
+            with self.subTest(claude=claude), mock.patch.dict(os.environ, self.gate_env(claude=claude)):
                 self.assertEqual(self.claude_slices(), want)
                 codex = [c.service.name if c else None for _, c in r.plan(["frontier"] * 3, quota={**IDLE, "claude": {"remaining": 0.0}})]
-                self.assertEqual(codex.count("codex"), 1)           # codex's cap is 1 whatever the guard says
+                self.assertEqual(codex.count("codex"), 1)           # codex's cap is 1 whatever the Claude reading says
+
+    def test_frontier_per_wave_on_claude_with_a_fresh_a_stale_and_an_unknown_reading(self):
+        """The slice's three cases (brief E7 1c), on frontier_per_wave itself: fresh grants the standing 2, stale and an unknown
+        Paseo report give the closed 1; the reason is the one judged_pool_block names."""
+        import ade_gates
+        for claude, want, why in (("fresh", 2, None), ("stale", 1, "min old"), ("unknown", 1, "report unavailable")):
+            with self.subTest(claude=claude), mock.patch.dict(os.environ, self.gate_env(claude=claude)):
+                gate = r.frontier_gate()
+                self.assertEqual(r.frontier_per_wave("claude", gate, IDLE), want)
+                block = ade_gates.judged_pool_block(1, gate, datetime.now(UTC), r.claude_quota_state(), None)
+                self.assertTrue(block is None if why is None else why in block, block)
+
+    def test_a_fresh_aiuse_claude_reading_grants_and_an_unknown_paseo_report_does_not_take_it_away(self):
+        """aiuse stays the primary reading: a fresh aiuse claude row with the Fable cap grants; an unavailable Paseo report beside
+        it is recorded (`paseo_unknown`), never a loosening and never a block of a known reading."""
+        tmp = Path(tempfile.mkdtemp(prefix="ragate-aiuse-"))
+        (tmp / "aiuse.json").write_text(json.dumps({"fresh": True, "age_seconds": 60, "available": [
+            {"provider": "claude", "pool_family": None, "usable_now": True, "headroom_percent": 64.0, "age_seconds": 60,
+             "binding_window": "weekly"},
+            {"provider": "claude", "pool_family": "fable", "usable_now": True, "headroom_percent": 55.0, "age_seconds": 60}]}))
+        env = {**self.gate_env(claude="unknown"), "ROUTE_AGENT_AIUSE_JSON": str(tmp / "aiuse.json")}
+        with mock.patch.dict(os.environ, env):
+            state = r.claude_quota_state()
+            self.assertEqual((state["remaining"], state["fable_left"], state["unknown"]), (64.0, 55.0, None))
+            self.assertIn("report unavailable", state["paseo_unknown"])
+            self.assertEqual(r.frontier_per_wave("claude", r.frontier_gate(), IDLE), 2)
+        (tmp / "aiuse.json").write_text(json.dumps({"fresh": True, "age_seconds": 60, "available": [
+            {"provider": "claude", "pool_family": None, "usable_now": True, "headroom_percent": 64.0, "age_seconds": 2400}]}))
+        with mock.patch.dict(os.environ, env):
+            self.assertEqual(r.frontier_per_wave("claude", r.frontier_gate(), IDLE), 1)     # a 40-minute-old row is stale
 
     def test_the_standing_per_wave_cap_for_a_non_claude_pool_needs_its_reading_at_the_floor(self):
         gate = {"frontier2_per_wave": 3.0, "frontier2_judged": 1.0, "frontier2_min_left": 60.0}
@@ -728,55 +700,41 @@ class TestFrontierConservative2026_10_18(unittest.TestCase):
         self.assertEqual(r.frontier_per_wave("codex", gate, {"codex": {"remaining": 90.0}}), 3)
         self.assertEqual(r.frontier_per_wave("codex", {**gate, "frontier2_judged": 0.0}, {"codex": {"remaining": 90.0}}), 1)
 
-    def test_the_standing_baseline_lets_a_wave_put_two_frontier_slices_on_claude_but_still_one_on_codex_with_no_profile(self):
-        with mock.patch.dict(os.environ, self.gate_env(profile=False)):           # the shipped gates.toml [frontier] (2026-10-27)
+    def test_the_standing_baseline_lets_a_wave_put_two_frontier_slices_on_claude_but_still_one_on_codex(self):
+        with mock.patch.dict(os.environ, self.gate_env()):           # the shipped gates.toml [frontier] (2026-10-27)
             rows = r.plan(["frontier"] * 5, quota=IDLE)
         self.assertEqual([c.service.name if c else None for _, c in rows], ["codex", "claude", "claude", None, None])
-
-    def test_the_away_profile_over_a_closed_baseline_raises_a_wave_to_two_frontier_slices_on_claude(self):
-        with mock.patch.dict(os.environ, self.gate_env(profile=True, closed=True)):
-            rows = r.plan(["frontier"] * 5, quota=IDLE)
-        self.assertEqual([c.service.name if c else None for _, c in rows], ["codex", "claude", "claude", None, None])
-        with mock.patch.dict(os.environ, self.gate_env(profile=False, closed=True)):
+        with mock.patch.dict(os.environ, self.gate_env(closed=True)):
             rows = r.plan(["frontier"] * 5, quota=IDLE)
         self.assertEqual([c.service.name if c else None for _, c in rows], ["codex", "claude", None, None, None])
 
     def test_the_fable_floor_comes_from_the_frontier_gate(self):
         q = {**IDLE, "codex": {"remaining": 0.0}, "claude": {"remaining": 90.0, "sublimits": {"fable": 15.0}}}
-        with mock.patch.dict(os.environ, self.gate_env(profile=False)):
+        with mock.patch.dict(os.environ, self.gate_env()):
             self.assertEqual(r.route("frontier", quota=q).model, "fable --effort high")
-        with mock.patch.dict(os.environ, self.gate_env(profile=False, tighten_min_left=20.0)):      # a baseline may tighten
+        with mock.patch.dict(os.environ, self.gate_env(tighten_min_left=20.0)):      # a baseline may tighten
             self.assertEqual(r.route("frontier", quota=q).model, "opus --effort high")
-        with mock.patch.dict(os.environ, self.gate_env(profile=True)):                              # away leaves the floor at 10
-            self.assertEqual(r.route("frontier", quota=q).model, "fable --effort high")
 
     def test_the_policy_no_longer_carries_the_moved_keys(self):
         self.assertNotIn("frontier_per_wave", r.POLICY["routing"])
         self.assertNotIn("fable_min_left", r.POLICY["routing"])
-        with mock.patch.dict(os.environ, self.gate_env(profile=True)):
+        with mock.patch.dict(os.environ, self.gate_env()):
             gate = r.policy_public()["frontier_gate"]
-        self.assertEqual((gate["frontier1_per_wave"], gate["frontier2_per_wave"], gate["frontier1_min_left"]), (2.0, 1.0, 10.0))
+        self.assertEqual((gate["frontier1_per_wave"], gate["frontier2_per_wave"], gate["frontier1_min_left"]), (2.0, 1.0, 15.0))
 
     def test_per_wave_key_by_pool(self):
         """frontier1_per_wave is the claude pool's, frontier2_per_wave every other pool's (codex's max_parallel = 1 hides it in plan)."""
         gate = {"frontier1_per_wave": 2.0, "frontier2_per_wave": 1.0, "frontier1_judged": 1.0, "frontier2_judged": 1.0,
                 "frontier1_min_left": 10.0, "frontier2_min_left": 60.0}
-        with mock.patch.dict(os.environ, self.gate_env(profile=False)):
-            self.assertEqual([r.frontier_per_wave(p, gate, IDLE) for p in ("claude", "codex", "antigravity-claude", "unknown")], [2, 1, 1, 1])
+        with mock.patch.dict(os.environ, self.gate_env()):
+            self.assertEqual([r.frontier_per_wave(p, gate, IDLE) for p in ("claude", "codex", "cursor-auto", "unknown")], [2, 1, 1, 1])
             self.assertEqual(r.frontier_per_wave("codex", {**gate, "frontier1_per_wave": 1.0, "frontier2_per_wave": 3.0}, IDLE), 3)
 
     def test_dispatch_line_uses_the_acp_agent_name(self):
-        q = {**IDLE, "antigravity-claude": {"remaining": 90.0}}
-        c = r.route("code", quota=q)
-        self.assertEqual(c.service.name, "antigravity-claude")
-        self.assertTrue(c.dispatch.startswith("acp-dispatch agy --model claude-opus-5-5"))
-
-    def test_dispatch_quotes_zcode_model_with_backslash(self):
-        # F12: zcode ids contain a backslash; shlex.split must round-trip the model token.
-        svc = next(s for s in r.SERVICES if s.name == "zai")
-        choice = r.Choice(svc, 80.0, 1.0, model=r"builtin:zai-coding-plan\GLM-5.3", kind="code")
-        parts = shlex.split(choice.dispatch)
-        self.assertEqual(parts[parts.index("--model") + 1], r"builtin:zai-coding-plan\GLM-5.3")
+        svc = r.BY_NAME["cursor-auto"]            # the aiuse name is cursor-auto, the Paseo provider is cursor
+        c = r.Choice(svc, 90.0, 1.0, model="default", kind="code")
+        self.assertTrue(c.dispatch.startswith("acp-dispatch cursor --model default"))
+        self.assertEqual(shlex.split(r.Choice(svc, 90.0, 1.0, model=r"vendor\model", kind="code").dispatch)[3], r"vendor\model")
 
     def test_plan_json_carries_model_and_dispatch(self):
         rows = r.plan(["judgment", "bulk"], quota=IDLE)
@@ -851,16 +809,14 @@ class TestRoutingPolicyToml(unittest.TestCase):
                        "bulk": "gpt-6-luna --effort low", "mechanical": "gpt-6-luna --effort low"},
             "pool": None, "max_parallel": 1, "agent": "", "burn_first": False,
         },
-        "antigravity-claude": {
-            "cli": "agy (acp-run agy --model claude-opus-5-5 --effort high | claude-sonnet-5-5)",
-            "good_at": {"code": 11, "research": 3, "mechanical": 6},
+        "cursor-auto": {
+            "cli": "cursor (Auto pool)",
+            "good_at": {"code": 14, "mechanical": 4, "bulk": 6, "research": 12},
             "billing": "subscription",
             "judgment_tier": False,
-            "models": {"code": "claude-opus-5-5 --effort high",
-                       "research": "claude-sonnet-5-5 --effort high",
-                       "mechanical": "claude-sonnet-5-5 --effort low"},
-            "pool": ("antigravity", "claude_gpt"), "max_parallel": 3,
-            "agent": "agy", "burn_first": True,
+            "models": {"code": "default", "mechanical": "default", "bulk": "default", "research": "default"},
+            "pool": ("cursor", "auto"), "max_parallel": 2,
+            "agent": "cursor", "burn_first": True,
         },
     }
 
@@ -1131,13 +1087,51 @@ class TestRoutingPolicyToml(unittest.TestCase):
         self.assertIn("pipeline lead: sonnet at medium; high for judgment turns", md.getvalue())
         self.assertEqual(json.loads(js.getvalue())["lead"],
                          {"model": "opus", "effort": "high", "pipeline_model": "sonnet",
-                          "pipeline_effort": "medium"})
+                          "pipeline_effort": "medium", "fable_lead": True})
 
-    def _lead_policy_variant(self, replacement):
-        """Write routing.toml with the pipeline_effort line replaced; return the temp path."""
+    def test_the_shipped_policy_allows_a_fable_lead_and_policy_md_says_so(self):
+        """Operator 2026-11-07: `[lead].fable_lead = true` allows a Fable lead; `policy --md` prints the switch."""
+        import io
+        from contextlib import redirect_stdout
+        self.assertIs(r.LEAD_FABLE_ALLOWED, True)
+        md = io.StringIO()
+        with redirect_stdout(md):
+            self.assertEqual(r.main(["policy", "--md"]), 0)
+        self.assertIn("| lead.fable_lead | true |", md.getvalue())
+        self.assertIn("a Fable 5.1 lead is allowed", md.getvalue())
+
+    def test_a_lead_table_without_fable_lead_keeps_the_never_fable_rule(self):
+        """Absent (an older file) or false: the 2026-10-23 rule; a non-boolean is refused, naming the file."""
+        import io
+        from contextlib import redirect_stdout
+        for line in ("", "fable_lead = false\n"):
+            with self.subTest(line=line):
+                path = self._lead_policy_variant('pipeline_effort = "medium"\n', line)
+                try:
+                    r.reload_policy(path)
+                    self.assertIs(r.LEAD_FABLE_ALLOWED, False)
+                    md = io.StringIO()
+                    with redirect_stdout(md):
+                        r.main(["policy", "--md"])
+                    self.assertIn("| lead.fable_lead | false |", md.getvalue())
+                    self.assertIn("not on Fable", md.getvalue())
+                finally:
+                    r.reload_policy(Path(__file__).resolve().parent.parent / "config" / "routing.toml")
+        for value in ('"yes"', "1"):
+            path = self._lead_policy_variant('pipeline_effort = "medium"\n', f"fable_lead = {value}\n")
+            with self.assertRaises(ValueError) as ctx:
+                r.load_policy(path)
+            self.assertIn("fable_lead", str(ctx.exception))
+
+    def _lead_policy_variant(self, replacement, fable_line=None):
+        """Write routing.toml with the pipeline_effort line replaced (and, given `fable_line`, the fable_lead line too);
+        return the temp path."""
         import tempfile
         src = (Path(__file__).resolve().parent.parent / "config" / "routing.toml").read_text()
         bad = src.replace('pipeline_effort = "medium"\n', replacement)
+        if fable_line is not None:
+            self.assertIn("fable_lead = true\n", bad)
+            bad = bad.replace("fable_lead = true\n", fable_line, 1)
         self.assertNotEqual(src, bad)
         with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as f:
             f.write(bad)
@@ -1203,7 +1197,7 @@ class TestQualityBand(unittest.TestCase):
 
     # The live readings when `plan --kinds code` picked Gemini Flash (r40): every r11-r20 code
     # pool was under the 15% headroom floor, and Flash had 98% left.
-    CASE = {"antigravity-claude": {"remaining": 0.0}, "antigravity": {"remaining": 97.8},
+    CASE = {"antigravity": {"remaining": 97.8},
             "opencode-go": {"remaining": 2.5}, "zai": {"remaining": 12.2},
             "cursor-auto": {"remaining": 0.0}, "cursor": {"remaining": 11.2},
             # claude was not a code pool then (code added 2026-10-18 by the operator); drained
@@ -1212,9 +1206,6 @@ class TestQualityBand(unittest.TestCase):
             "opencode-zen-free": {"remaining": 100.0}, "clinepass": {"remaining": 100.0},
             "devin": {"remaining": 100.0}, "alibaba": {"remaining": 100.0},
             "crush": {"remaining": 100.0}}
-
-    def test_flash_is_not_a_code_pool(self):
-        self.assertFalse(r.BY_NAME["antigravity"].eligible("code"))
 
     @mock.patch.dict(os.environ, {"ROUTE_AGENT_OMP_READY": "0"})   # omp-ready: TestOmpReadyRoster
     def test_the_2026_10_18_case_queues_code_instead_of_routing_far_down(self):
@@ -1236,7 +1227,7 @@ class TestQualityBand(unittest.TestCase):
         far = [s.name for s in services
                if s.eligible("code") and s.rank_for("code") - best.rank_for("code") > gap]
         self.assertTrue(far, "fixture should include pools outside the band")
-        q = dict(self.CASE, zai={"remaining": 50.0})
+        q = dict(self.CASE, cursor={"remaining": 50.0})
         c = r.route("code", quota=q)
         self.assertIsNotNone(c)
         self.assertNotIn(c.service.name, far)
@@ -1353,10 +1344,10 @@ class TestCodexEverydayKinds(unittest.TestCase):
         for kind in ("bulk", "mechanical"):          # free and idle pools stay first
             c = r.route(kind, quota=q)
             self.assertNotEqual(c.service.name, "codex", kind)
-        better = self.drained(codex={"remaining": 100.0}, **{"antigravity-claude": {"remaining": 90.0}})
-        self.assertEqual(r.route("code", quota=better).service.name, "antigravity-claude")
-        only = self.drained(codex={"remaining": 100.0}, zai={"remaining": 90.0})
-        self.assertEqual(r.route("code", quota=only).service.name, "codex")   # r15 beats zai r16
+        better = self.drained(codex={"remaining": 100.0}, **{"cursor-auto": {"remaining": 90.0}})
+        self.assertEqual(r.route("code", quota=better).service.name, "cursor-auto")
+        only = self.drained(codex={"remaining": 100.0}, cursor={"remaining": 90.0})
+        self.assertEqual(r.route("code", quota=only).service.name, "codex")   # r15 beats cursor r20
 
     def test_a_wave_puts_one_slice_on_codex(self):
         q = self.drained(codex={"remaining": 100.0})
@@ -1398,7 +1389,7 @@ class TestOmpReadyRoster(unittest.TestCase):
         self.assertEqual(r.route("bulk", quota=q).service.name, "fresh-pool")
 
     def test_omp_is_the_room_when_every_other_code_pool_is_drained(self):
-        drained = {k: {"remaining": 1.0} for k in {*IDLE, "antigravity-claude"}}
+        drained = {k: {"remaining": 1.0} for k in IDLE}
         self.assertIsNone(r.plan(["code"], quota={**drained, "omp": {"remaining": 1.0}})[0][1])
         c = r.plan(["code"], quota={**drained, "omp": {"remaining": 100.0}})[0][1]
         self.assertIsNotNone(c)
@@ -1414,30 +1405,6 @@ class TestOmpReadyRoster(unittest.TestCase):
         self.assertIsNone(r.route("code", quota={**case, "omp": {"remaining": 1.0}}))
         self.assertIn("quality_max_rank_gap",
                       r.unrouted_why("code", {**case, "omp": {"remaining": 1.0}}))
-
-
-class TestPiApiTier(unittest.TestCase):
-    def test_pi_uses_independent_measured_api_capacity(self):
-        svc = r.BY_NAME["pi"]
-        self.assertEqual(svc.acp_agent, "pi")
-        self.assertEqual(svc.shares_pool, "")
-        self.assertGreater(svc.reserve_floor, 0)
-        self.assertTrue(svc.eligible("code"))
-        self.assertTrue(svc.eligible("api-only"))
-        self.assertIn("openai/", svc.models["code"])
-        self.assertIsNone(r.route("api-only", quota={"omp": {"remaining": 0.0}}))
-
-    def test_pi_api_capacity_does_not_depend_on_codex_subscription(self):
-        choice = r.route("api-only", quota={"omp": {"remaining": 0.0},
-                                           "pi": {"remaining": 80.0},
-                                           "codex": {"remaining": 0.0}})
-        self.assertIsNotNone(choice)
-        self.assertEqual(choice.service.name, "pi")
-
-    def test_empty_pi_api_pool_is_not_replaced_by_codex_capacity(self):
-        self.assertIsNone(r.route("api-only", quota={"omp": {"remaining": 0.0},
-                                                   "pi": {"remaining": 0.0},
-                                                   "codex": {"remaining": 100.0}}))
 
 
 class TestOmpCreditsTier(unittest.TestCase):
@@ -1465,7 +1432,6 @@ class TestOmpCreditsTier(unittest.TestCase):
         self.assertNotIn("omp", r.OPERATOR_GATED)
         self.assertNotIn("omp", r.POLICY["dispatch"]["operator_gated"])
         self.assertIn("hermes", r.POLICY["dispatch"]["operator_gated"])
-        self.assertIn("cline", r.OPERATOR_GATED)
 
     def test_omp_is_eligible_for_code_and_bulk_without_operator_approval(self):
         env = {k: v for k, v in os.environ.items() if k != "ACP_OPERATOR_APPROVED"}
@@ -1488,21 +1454,14 @@ class TestOmpCreditsTier(unittest.TestCase):
         self.assertNotIn("omp", {s.name for s in r.SERVICES if s.eligible("frontier")})
         self.assertEqual(r.route("judgment", quota=self.quota(omp={"remaining": 0.0})).service.name, "claude")
 
-    def test_api_only_is_a_kind_for_both_api_billing_pools(self):
+    def test_api_only_is_a_kind_for_the_api_billing_pool(self):
         self.assertIn("api-only", r.KINDS)
-        self.assertEqual([s.name for s in r.SERVICES if s.eligible("api-only")], ["omp", "pi"])
+        self.assertEqual([s.name for s in r.SERVICES if s.eligible("api-only")], ["omp"])
         c = r.route("api-only", quota=self.quota())
         self.assertIsNotNone(c)
         self.assertEqual(c.service.name, "omp")
         self.assertIn("claude", c.model)
         self.assertEqual(c.kind, "api-only")
-
-    def test_pi_floor_only_demands_a_measurement_and_is_not_advertised_as_a_reserve(self):
-        c = r.route("api-only", quota=self.quota(pi={"remaining": 80.0}), exclude={"omp"})
-        self.assertEqual(c.service.name, "pi")
-        self.assertTrue(c.service.reserve_floor)
-        self.assertNotIn("RESERVE", c.why)
-        self.assertIsNone(r.route("api-only", quota={**self.quota(), "pi": {"remaining": None}}, exclude={"omp"}))
 
     def test_api_only_ignores_the_acp_readiness_probe(self):
         """api-only is the caller's own API call, so a broken omp login does not block it."""
@@ -1539,7 +1498,6 @@ class TestOmpCreditsTier(unittest.TestCase):
         q = self.quota(**{"omp": {"remaining": 90.0, "resets_at": soon,
                                   "window_minutes": None, "pace_ratio": None}})
         q["claude"] = {"remaining": 60.0}
-        q["antigravity-claude"] = {"remaining": 0.0}
         c = r.route("code", quota=q)
         self.assertEqual(c.service.name, "omp")
         self.assertIn("burn before reset", c.why)
@@ -1749,14 +1707,15 @@ class TestQuotaFromAiuseAvailable(unittest.TestCase):
     def test_non_finite_percentages_never_read_as_headroom(self):
         for bad in ("NaN", "Infinity", "-Infinity"):
             with self.subTest(bad):
-                body = ('{"age_seconds": 5, "available": [{"provider": "copilot", "windows": '
+                body = ('{"age_seconds": 5, "available": [{"provider": "grok", "windows": '
                         f'[{{"label": "premium", "headroom_percent": {bad}}}]}}]}}')
                 path = self.write("nan.json", body)
                 quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
-                self.assertIsNone(quota["copilot"]["remaining"])
+                self.assertIsNone(quota["grok"]["remaining"])
                 for kind in r.KINDS:
                     choice = r.route(kind, quota={**IDLE, **quota})
-                    self.assertFalse(choice and choice.service.name == "copilot", kind)
+                    if choice and choice.service.name == "grok":
+                        self.assertIsNone(choice.remaining, kind)   # unmeasured, never NaN read as headroom
 
     def test_percentages_are_clamped(self):
         row = {"provider": "codex", "windows": [{"label": "w", "headroom_percent": 250}]}
@@ -1890,11 +1849,39 @@ class TestQuotaFromAiuseAvailable(unittest.TestCase):
          "headroom_percent": 20.0},
         {"provider": "claude", "pool_family": "fable", "usable_now": True,
          "headroom_percent": 2.5},
-        {"provider": "antigravity", "pool_family": "gemini", "usable_now": True,
+        {"provider": "cursor", "pool_family": "third_party", "usable_now": True,
          "headroom_percent": 16.0},
-        {"provider": "antigravity", "pool_family": "claude_gpt", "usable_now": False,
+        {"provider": "cursor", "pool_family": "auto", "usable_now": False,
          "headroom_percent": 0},
     ]
+
+    def test_foreign_family_windows_never_create_or_loosen_another_pool(self):
+        exhausted = {"state": "exhausted", "headroom_percent": 0.0}
+        self.accounts = [
+            {"provider": "cursor", "age_seconds": 30, "windows": [
+                {"label": "auto", "pool_family": "auto", **exhausted},
+                {"label": "tp", "pool_family": "third_party", "headroom_percent": 50.0}]},
+        ]
+        rows = [
+            {"provider": "cursor", "pool_family": "third_party", "usable_now": True,
+             "headroom_percent": 50.0, "windows": [
+                 {"label": "tp", "pool_family": "third_party", "headroom_percent": 50.0},
+                 {"label": "auto", "pool_family": "auto", "headroom_percent": 63.5}]},
+        ]
+        quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(self.rows_payload(rows))})
+        self.assertEqual(quota["cursor-auto"]["remaining"], 0.0)   # the auto window inside the third_party row does not loosen it
+        self.assertEqual(quota["cursor"]["remaining"], 50.0)
+
+    def test_foreign_window_may_tighten_an_existing_pool(self):
+        rows = [
+            {"provider": "cursor", "pool_family": "third_party", "usable_now": True,
+             "headroom_percent": 80.0, "windows": [
+                 {"label": "auto", "pool_family": "auto", "headroom_percent": 10.0}]},
+            {"provider": "cursor", "pool_family": "auto", "usable_now": True,
+             "headroom_percent": 60.0},
+        ]
+        quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(self.rows_payload(rows))})
+        self.assertEqual(quota["cursor-auto"]["remaining"], 10.0)
 
     def test_rows_without_windows_follow_the_contract_fields(self):
         # a payload with no age at all reads stale by design, so the fixture carries one
@@ -1903,8 +1890,8 @@ class TestQuotaFromAiuseAvailable(unittest.TestCase):
         self.assertEqual(quota["claude"]["remaining"], 20.0)
         self.assertEqual(quota["claude"]["sublimits"], {"fable": 2.5})
         self.assertEqual(quota["opencode-go"]["remaining"], 8.0)
-        self.assertEqual(quota["antigravity"]["remaining"], 16.0)
-        self.assertEqual(quota["antigravity-claude"]["remaining"], 0.0)
+        self.assertEqual(quota["cursor"]["remaining"], 16.0)
+        self.assertEqual(quota["cursor-auto"]["remaining"], 0.0)
 
     def test_plan_refuses_the_pools_under_min_headroom(self):
         path = self.rows_payload(self.FAILOVER_FIXTURE_ROWS)
@@ -1912,7 +1899,7 @@ class TestQuotaFromAiuseAvailable(unittest.TestCase):
         quota = {**{k: v for k, v in quota.items()}}
         for kind in ("code", "bulk"):
             choice = r.route(kind, quota=quota, min_headroom=25)
-            for refused in ("claude", "opencode-go", "antigravity", "antigravity-claude"):
+            for refused in ("claude", "opencode-go", "cursor", "cursor-auto"):
                 self.assertFalse(choice and choice.service.name == refused, (kind, refused))
 
     def test_row_with_windows_keeps_detail_and_the_tighter_remaining(self):
@@ -1973,41 +1960,6 @@ class TestQuotaFromAiuseAvailable(unittest.TestCase):
 
     # -- adversary round 4 ------------------------------------------------------------------
 
-    def test_foreign_family_windows_never_create_or_loosen_another_pool(self):
-        exhausted = {"state": "exhausted", "headroom_percent": 0.0}
-        self.accounts = [
-            {"provider": "cursor", "age_seconds": 30, "windows": [
-                {"label": "auto", "pool_family": "auto", **exhausted},
-                {"label": "tp", "pool_family": "third_party", "headroom_percent": 50.0}]},
-            {"provider": "antigravity", "age_seconds": 30, "windows": [
-                {"label": "g", "pool_family": "gemini", "headroom_percent": 80.0},
-                {"label": "cg", "pool_family": "claude_gpt", **exhausted}]},
-        ]
-        rows = [
-            {"provider": "cursor", "pool_family": "third_party", "usable_now": True,
-             "headroom_percent": 50.0, "windows": [
-                 {"label": "tp", "pool_family": "third_party", "headroom_percent": 50.0},
-                 {"label": "auto", "pool_family": "auto", "headroom_percent": 63.5}]},
-            {"provider": "antigravity", "pool_family": "gemini", "usable_now": True,
-             "headroom_percent": 80.0, "windows": [
-                 {"label": "g", "pool_family": "gemini", "headroom_percent": 80.0},
-                 {"label": "cg", "pool_family": "claude_gpt", "headroom_percent": 70.0}]},
-        ]
-        quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(self.rows_payload(rows))})
-        self.assertEqual(quota["cursor-auto"]["remaining"], 0.0)
-        self.assertEqual(quota["antigravity-claude"]["remaining"], 0.0)
-
-    def test_foreign_window_may_tighten_an_existing_pool(self):
-        rows = [
-            {"provider": "antigravity", "pool_family": "gemini", "usable_now": True,
-             "headroom_percent": 80.0, "windows": [
-                 {"label": "cg", "pool_family": "claude_gpt", "headroom_percent": 10.0}]},
-            {"provider": "antigravity", "pool_family": "claude_gpt", "usable_now": True,
-             "headroom_percent": 60.0},
-        ]
-        quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(self.rows_payload(rows))})
-        self.assertEqual(quota["antigravity-claude"]["remaining"], 10.0)
-
     def test_fable_cap_merges_to_the_tighter_in_either_order(self):
         fable = {"provider": "claude", "pool_family": "fable", "usable_now": True,
                  "headroom_percent": 2.0}
@@ -2040,13 +1992,13 @@ class TestQuotaFromAiuseAvailable(unittest.TestCase):
 
     def test_excluded_pool_without_a_snapshot_row_reads_zero_and_is_never_routed(self):
         path = self.rows_payload([self.GOOD_ROW], excluded=[
-            {"provider": "zai", "pool_family": None, "reason": "operator"}])
+            {"provider": "grok", "pool_family": None, "reason": "operator"}])
         quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
-        self.assertEqual(quota["zai"]["remaining"], 0.0)
-        self.assertTrue(quota["zai"]["excluded"])
+        self.assertEqual(quota["grok"]["remaining"], 0.0)
+        self.assertTrue(quota["grok"]["excluded"])
         for kind in r.KINDS:
             choice = r.route(kind, quota={**IDLE, **quota})
-            self.assertFalse(choice and choice.service.name == "zai", kind)
+            self.assertFalse(choice and choice.service.name == "grok", kind)
 
     def test_excluded_pool_with_a_snapshot_row_reads_zero(self):
         path = self.rows_payload([{"provider": "codex", "usable_now": True,
@@ -2066,22 +2018,22 @@ class TestQuotaFromAiuseAvailable(unittest.TestCase):
 
     def test_invalid_excluded_rows_are_ignored_not_a_fallback(self):
         path = self.rows_payload([self.GOOD_ROW], excluded=[
-            "junk", {"provider": 3}, {"provider": ""}, {"provider": "zai", "pool_family": 7}])
+            "junk", {"provider": 3}, {"provider": ""}, {"provider": "grok", "pool_family": 7}])
         quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
         self.assertEqual(r.QuotaSource.kind, "canned")
         self.assertEqual(quota["omp"]["remaining"], 70.0)
-        self.assertNotIn("zai", quota)
+        self.assertNotIn("grok", quota)
 
     def test_excluded_is_not_consulted_on_the_file_fallback(self):
-        path = self.rows_payload(["junk"], excluded=[{"provider": "zai"}])
+        path = self.rows_payload(["junk"], excluded=[{"provider": "grok"}])
         quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
         self.assertEqual(r.QuotaSource.kind, "snapshot")
-        self.assertNotIn("zai", quota)
+        self.assertNotIn("grok", quota)
 
     def test_excluded_is_not_applied_from_a_stale_payload(self):
-        path = self.rows_payload([], excluded=[{"provider": "zai"}], fresh=False)
+        path = self.rows_payload([], excluded=[{"provider": "grok"}], fresh=False)
         quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
-        self.assertNotIn("zai", quota)
+        self.assertNotIn("grok", quota)
 
     def test_windowless_headroom_is_rounded_like_the_windowed_form(self):
         row = {"provider": "codex", "usable_now": True, "headroom_percent": 5.345454545}
@@ -2146,123 +2098,6 @@ class TestQuotaFromAiuseAvailable(unittest.TestCase):
         path = self.write("huge.json", body)
         quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
         self.assertIsNone(quota["codex"]["remaining"])
-
-
-class TestGovernorHold(unittest.TestCase):
-    """2026-10-23: bin/claude-fleet-governor writes `level`; while it says tight or critical (and is under
-    30 min old) the Claude subscription is an exhausted pool for code/bulk/research/mechanical, and
-    judgment prefers omp's API credits. `plan --kind code` had printed `claude 30% left` while the
-    5-hour window was projected to run out before its reset."""
-
-    QUOTA: ClassVar[dict[str, Any]] = {**IDLE, "claude": {"remaining": 30.0}, "omp": {"remaining": 90.0}}
-
-    def setUp(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.path = Path(tmp.name) / "fleet-governor.json"
-        patcher = mock.patch.dict(os.environ, {"CLAUDE_GOVERNOR_STATE": str(self.path),
-                                               "ROUTE_AGENT_OMP_READY": "1"})
-        patcher.start()
-        self.addCleanup(patcher.stop)
-        # no `acp-run --list` subprocess per route(): the curated roster is enough here
-        patcher = mock.patch.object(r, "acp_list_output", return_value="")
-        patcher.start()
-        self.addCleanup(patcher.stop)
-
-    def state(self, level, age_min=5, **over):
-        body = {"level": level, "checked_at": (datetime.now(UTC) - timedelta(minutes=age_min)).isoformat(),
-                "windows": {"five_hour": {"label": "Claude Code 5-hour", "used": 70.0, "level": level,
-                                          "projected_at_reset": 116.0, "resets_at": "2026-10-23T14:59:59Z"}}}
-        body.update(over)
-        self.path.write_text(json.dumps(body))
-
-    def test_without_state_claude_is_still_chosen_for_code(self):
-        # a missing state file holds nothing: claude stays in the roster for judgment (omp, eligible since the quota
-        # guard's routing change, may rank first: claude is the choice or an alternative)
-        choice = r.route("judgment", quota=self.QUOTA)
-        self.assertIn("claude", {choice.service.name, *choice.alternatives})
-        self.assertIsNone(r.governor_hold())
-
-    def test_tight_and_critical_never_pick_claude_for_the_four_kinds(self):
-        for level in ("tight", "critical"):
-            self.state(level)
-            for kind in ("code", "bulk", "research", "mechanical"):
-                with self.subTest(level=level, kind=kind):
-                    choice = r.route(kind, quota=self.QUOTA)
-                    self.assertIsNotNone(choice)
-                    self.assertNotEqual(choice.service.name, "claude")
-                    self.assertNotIn("claude", choice.alternatives)
-                    self.assertIn(f"claude skipped: Claude subscription {level}", choice.why)
-                    self.assertIn("5-hour 70% used", choice.why)
-
-    def test_plan_never_dispatches_claude_while_held(self):
-        self.state("critical")
-        rows = r.plan(["code", "code", "research", "bulk", "mechanical"], quota=self.QUOTA)
-        self.assertTrue(all(c is not None and c.service.name != "claude" for _, c in rows))
-        self.assertFalse(any(c.dispatch.startswith("acp-dispatch claude") for _, c in rows))
-
-    def test_judgment_prefers_omp_opus_on_api_credits(self):
-        self.state("tight")
-        choice = r.route("judgment", quota=self.QUOTA)
-        self.assertEqual(choice.service.name, "omp")
-        self.assertEqual(choice.model, "anthropic/claude-opus-5-5 --effort high")
-        self.assertEqual(choice.dispatch, "acp-dispatch omp --model anthropic/claude-opus-5-5 --effort high --kind judgment")
-        self.assertIn("off the subscription", choice.why)
-
-    def test_judgment_falls_back_to_claude_when_omp_cannot_take_it(self):
-        self.state("tight")
-        for label, quota, env in (("omp not logged in", self.QUOTA, {"ROUTE_AGENT_OMP_READY": "0"}),
-                                  ("omp credits spent", {**self.QUOTA, "omp": {"remaining": 3.0}}, {})):
-            with self.subTest(label), mock.patch.dict(os.environ, env):
-                self.assertEqual(r.route("judgment", quota=quota).service.name, "claude")
-
-    def test_judgment_does_not_force_an_ineligible_omp(self):
-        """Codex pass 7 on PR 31, P2: a retired omp, or one without the judgment capability, is not preferred just
-        because the governor holds Claude."""
-        self.state("tight")
-        original = r.Service.eligible
-        with mock.patch.object(r.Service, "eligible",
-                               lambda self, kind, quota=None: self.name != "omp" and original(self, kind, quota)):
-            choice = r.route("judgment", quota=self.QUOTA)
-        self.assertNotEqual(choice.service.name, "omp")
-
-    def test_frontier_routes_as_before(self):
-        before = r.route("frontier", quota=self.QUOTA).service.name
-        self.state("critical")
-        self.assertEqual(r.route("frontier", quota=self.QUOTA).service.name, before)
-
-    def test_ok_stale_and_unreadable_state_hold_nothing(self):
-        self.state("ok")
-        self.assertIsNone(r.governor_hold())
-        self.state("critical", age_min=31)
-        self.assertIsNone(r.governor_hold())
-        self.state("stale")
-        self.assertIsNone(r.governor_hold())
-        self.path.write_text("{not json")
-        self.assertIsNone(r.governor_hold())
-        self.path.write_text(json.dumps({"level": "tight"}))           # no checked_at: not fresh
-        self.assertIsNone(r.governor_hold())
-
-    def test_the_leads_manual_state_file_holds_nothing(self):
-        self.path.write_text(json.dumps({"note": "manual", "window_resets_at": "2026-10-23T14:59:59Z",
-                                         "downshifted": {"955e2b2": "claude-opus-5-5"}}))
-        self.assertIsNone(r.governor_hold())
-
-    def test_unrouted_reason_names_the_hold(self):
-        self.state("critical")
-        everything_else_full = {name: {"remaining": 0.0} for name in IDLE}
-        self.assertIn("Claude subscription critical", r.unrouted_why("code", everything_else_full))
-
-    def test_cli_plan_prints_the_reason(self):
-        self.state("critical")
-        out = io.StringIO()
-        err = io.StringIO()
-        with (contextlib.redirect_stdout(out), contextlib.redirect_stderr(err),
-              mock.patch.object(r, "load_snapshot", return_value=(self.QUOTA, 60.0))):
-            self.assertEqual(r.main(["plan", "--kinds", "code,judgment"]), 0)
-        self.assertNotIn("acp-dispatch claude", out.getvalue())
-        self.assertIn("Claude subscription critical", err.getvalue())
-        self.assertIn("acp-dispatch omp --model anthropic/claude-opus-5-5", out.getvalue())
 
 
 class TestSubstrateChain(unittest.TestCase):
@@ -2586,3 +2421,157 @@ class TestApplySubstrate(unittest.TestCase):
         rc, _, calls = self._apply("ab1", chain=[])
         self.assertEqual(rc, r.SUBSTRATE_EXIT_NONE_USABLE)
         self.assertEqual(calls, [])
+
+
+class TestQuotaFromPaseoUsage(unittest.TestCase):
+    """`paseo usage ls --json` is the second quota source (2026-11-07, slim-down E7): an `available` report gives windows and
+    balances, anything else is unknown (never a pass); it merges with aiuse by the tightest-known rule, and the source of each
+    pool is reported."""
+
+    NOW = datetime(2026, 11, 7, 12, 0, tzinfo=UTC)
+
+    def row(self, source, status="available", windows=(), balances=(), age_min=1.0, **report):
+        rep = {"status": status, **report}
+        if status == "available":
+            rep["windows"] = list(windows)
+            rep["balances"] = list(balances)
+        return {"id": f"{source}:default", "sourceId": source, "sourceLabel": source, "icon": "<svg>x</svg>", "account": "a",
+                "fetchedAt": (self.NOW - timedelta(minutes=age_min)).strftime("%Y-%m-%dT%H:%M:%SZ"), "report": rep,
+                "loginErrors": [{"message": "x"}]}
+
+    @staticmethod
+    def win(label, used=None, left=None, resets="2026-11-10T00:00:00Z"):
+        return {"id": label, "label": label, "usedPct": used, "remainingPct": left, "resetsAt": resets}
+
+    def test_an_overlapping_window_keeps_the_tighter_reading_from_either_source(self):
+        # Codex P2 on PR 297 (2026-11-07): the merge overlaid the second source's windows, so aiuse 20% on 5-hour and
+        # Paseo 80% left windows['5-hour'] = 80 while remaining = 20, and window_fit admitted a 30% slice.
+        into = {"codex": {"remaining": 20.0, "windows": {"5-hour": 20.0, "Weekly": 60.0}}}
+        r._merge_pool(into, "codex", {"remaining": 80.0, "windows": {"5-hour": 80.0, "Weekly": 50.0, "Monthly": 90.0}})
+        self.assertEqual(into["codex"]["remaining"], 20.0)
+        self.assertEqual(into["codex"]["windows"], {"5-hour": 20.0, "Weekly": 50.0, "Monthly": 90.0})
+        self.assertIsNotNone(r.window_fit({"5-hour": 30.0}, into["codex"]["windows"])[0])
+
+    def test_an_available_report_gives_windows_balances_the_tightest_and_its_reset(self):
+        pools = r.usage_from_paseo([self.row("codex", windows=[self.win("5-hour", used=30.0, left=70.0),
+                                                                 self.win("Weekly", used=55.0, resets="2026-11-12T00:00:00Z")],
+                                             balances=[{"remaining": 5.0, "limit": 20.0, "unit": "USD"}])], now=self.NOW)
+        codex = pools["codex"]
+        self.assertEqual(codex["windows"], {"5-hour": 70.0, "Weekly": 45.0, "USD balance": 25.0})
+        self.assertEqual((codex["remaining"], codex["resets_at"], codex["source"]), (25.0, None, "paseo"))
+        self.assertNotIn("icon", codex)
+        self.assertEqual(codex["age_s"], 60.0)
+
+    def test_a_non_available_report_is_unknown_never_a_pass(self):
+        for status in ("unavailable", "error", None):
+            with self.subTest(status=status):
+                pools = r.usage_from_paseo([self.row("claude", status=status, problem={"kind": "rejected", "status": 403})],
+                                           now=self.NOW)
+                self.assertIsNone(pools["claude"]["remaining"])
+                self.assertIn(f"report {status or 'missing'}", pools["claude"]["unknown"])
+
+    def test_the_fable_window_is_a_sublimit_and_opencode_is_the_go_pool(self):
+        pools = r.usage_from_paseo([self.row("claude", windows=[self.win("Weekly", left=80.0), self.win("Weekly Fable", left=12.0)]),
+                                    self.row("opencode", windows=[self.win("Monthly", used=40.0)])], now=self.NOW)
+        self.assertEqual((pools["claude"]["remaining"], pools["claude"]["sublimits"]), (80.0, {"fable": 12.0}))
+        self.assertEqual(pools["opencode-go"]["remaining"], 60.0)
+
+    def test_a_report_whose_windows_or_balances_is_not_a_list_is_not_read_and_never_raises(self):
+        """Adversary 2026-11-07: `windows: 5` raised TypeError into load_snapshot; now the pool is Paseo "not read"."""
+        for over in ({"windows": 5}, {"windows": {"w": 1}}, {"balances": "x"}):
+            with self.subTest(over=over):
+                row = self.row("codex", windows=[self.win("w", left=50.0)])
+                row["report"].update(over)
+                pools = r.usage_from_paseo([row], now=self.NOW)
+                self.assertIsNone(pools["codex"]["remaining"])
+                self.assertIn("not read", pools["codex"]["unknown"])
+        aiuse = [{"provider": "codex", "pool_family": None, "usable_now": True, "headroom_percent": 40.0, "age_seconds": 20}]
+        row = self.row("codex", windows=[])
+        row["report"]["windows"] = 5
+        quota, _, info = self.load(aiuse, [row])
+        self.assertEqual(quota["codex"]["remaining"], 40.0)          # aiuse's reading stands
+        self.assertIn("not read", quota["codex"]["paseo_unknown"])
+
+    def test_a_stale_report_keeps_only_an_exhausted_window(self):
+        pools = r.usage_from_paseo([self.row("codex", windows=[self.win("5-hour", left=0.0), self.win("Weekly", left=90.0)],
+                                             age_min=40)], now=self.NOW)
+        self.assertEqual(pools["codex"]["windows"], {"5-hour": 0.0, "Weekly": None})
+        self.assertEqual(pools["codex"]["remaining"], 0.0)
+
+    def load(self, aiuse_rows, usage_rows, accounts=()):
+        tmp = Path(tempfile.mkdtemp(prefix="ra-usage-"))
+        (tmp / "aiuse.json").write_text(json.dumps({"fresh": True, "age_seconds": 20.0, "available": aiuse_rows}))
+        now = datetime.now(UTC)
+        for row in usage_rows:
+            row["fetchedAt"] = (now - timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        (tmp / "usage.json").write_text(json.dumps(usage_rows))
+        env = {"ROUTE_AGENT_AIUSE_JSON": str(tmp / "aiuse.json") if aiuse_rows is not None else "",
+               "ROUTE_AGENT_PASEO_USAGE_JSON": str(tmp / "usage.json"), "ROUTE_AGENT_OMP_READY": "0"}
+        r._reset_aiuse_cache()
+        with mock.patch.dict(os.environ, env), mock.patch.object(r, "_read_snapshot_file", return_value=(list(accounts), 60.0)), \
+                contextlib.redirect_stderr(io.StringIO()):
+            quota, age = r.load_snapshot()
+            info = r.quota_source_info()
+        r._reset_aiuse_cache()
+        return quota, age, info
+
+    def test_the_tighter_source_wins_per_pool_and_each_pool_names_its_source(self):
+        aiuse = [{"provider": "codex", "pool_family": None, "usable_now": True, "headroom_percent": 80.0, "age_seconds": 20},
+                 {"provider": "claude", "pool_family": None, "usable_now": True, "headroom_percent": 40.0, "age_seconds": 20}]
+        usage = [self.row("codex", windows=[self.win("5-hour", left=35.0)]), self.row("claude", windows=[self.win("Weekly", left=90.0)]),
+                 self.row("cursor", windows=[self.win("Monthly", left=66.0)])]
+        quota, _, info = self.load(aiuse, usage)
+        self.assertEqual((quota["codex"]["remaining"], quota["claude"]["remaining"], quota["cursor"]["remaining"]), (35.0, 40.0, 66.0))
+        self.assertEqual(info["pools"]["codex"], "canned+paseo")
+        self.assertEqual(info["pools"]["cursor"], "paseo")
+        self.assertTrue(info["paseo"].startswith("ROUTE_AGENT_PASEO_USAGE_JSON="))
+
+    def test_an_unknown_paseo_report_never_loosens_an_aiuse_reading_or_stands_in_for_one(self):
+        aiuse = [{"provider": "codex", "pool_family": None, "usable_now": True, "headroom_percent": 12.0, "age_seconds": 20}]
+        usage = [self.row("codex", status="unavailable"), self.row("claude", status="error")]
+        quota, _, _ = self.load(aiuse, usage)
+        self.assertEqual(quota["codex"]["remaining"], 12.0)
+        self.assertIn("report unavailable", quota["codex"]["paseo_unknown"])
+        self.assertIsNone(quota["claude"]["remaining"])
+        self.assertIn("report error", quota["claude"]["unknown"])
+        self.assertIsNone(r.route("judgment", quota={"claude": quota["claude"]}).remaining)   # unmeasured, not 100%
+
+    def test_paseo_alone_fills_the_snapshot_when_aiuse_is_absent(self):
+        quota, age, info = self.load(None, [self.row("claude", windows=[self.win("Weekly", left=77.0)])])
+        self.assertEqual(quota["claude"]["remaining"], 77.0)
+        self.assertEqual(info["pools"]["claude"], "paseo")
+        self.assertIsNotNone(age)
+
+    def test_paseo_usage_failures_leave_the_aiuse_reading(self):
+        with fake_paseo(FAKE_PASEO_USAGE_RC="1"), mock.patch.dict(os.environ, {"ROUTE_AGENT_PASEO_USAGE_JSON": ""}):
+            rows, why = r.paseo_usage()
+        self.assertIsNone(rows)
+        self.assertIn("exited 1", why)
+        with fake_paseo(FAKE_PASEO_USAGE=json.dumps([self.row("codex", windows=[self.win("w", left=50.0)])])), \
+                mock.patch.dict(os.environ, {"ROUTE_AGENT_PASEO_USAGE_JSON": ""}) as _:
+            rows, why = r.paseo_usage()
+            again, _ = r.paseo_usage()
+        self.assertEqual((len(rows), why), (1, "paseo usage ls --json"))
+        self.assertEqual(again, rows)                     # memoised for PASEO_MEMO_TTL
+
+
+class TestArgonFrontierFallback(unittest.TestCase):
+    """Gemini 4 Argon, through Paseo's antigravity provider, is the frontier FALLBACK behind codex and claude (operator
+    2026-10-31; restored 2026-11-07 for tendcf/nix2cf's review route 3)."""
+
+    def test_the_argon_model_maps_to_its_own_pool_and_other_antigravity_models_to_none(self):
+        self.assertEqual(r.map_agent_to_provider("antigravity", "gemini-4-argon"), ("antigravity", "gemini_argon"))
+        self.assertEqual(r.dispatch_service_name("antigravity", "gemini-4-argon"), "antigravity-argon")
+        self.assertIsNone(r.map_agent_to_provider("antigravity", "gemini-3.8-flash"))
+        self.assertIn("gemini-4-argon", r.POLICY["dispatch"]["frontier_models"])
+        self.assertNotIn("antigravity", {s.name for s in r.discover(IDLE)})      # the provider's other pools stay unrouted
+
+    def test_argon_takes_frontier_only_while_codex_or_claude_is_short(self):
+        q = {**IDLE, "antigravity-argon": {"remaining": 90.0}}
+        self.assertNotEqual(r.route("frontier", quota=q).service.name, "antigravity-argon")
+        q.update(codex={"remaining": 0.0}, claude={"remaining": 0.0})
+        c = r.route("frontier", quota=q)
+        self.assertEqual((c.service.name, c.dispatch),
+                         ("antigravity-argon", "acp-dispatch antigravity --model gemini-4-argon --effort high --kind frontier"))
+        q.pop("antigravity-argon")
+        self.assertIsNone(r.route("frontier", quota=q))          # a fallback with no reading fails closed

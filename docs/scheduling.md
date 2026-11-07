@@ -3,7 +3,7 @@
 The repo's unattended jobs (sweeps, watchers, collectors) are written as launchd plists in [`launchd/`](../launchd/) and
 [`config/launchd/`](../config/launchd/). Those plists stay the **source of truth**. [`bin/ade_sched.py`](../bin/ade_sched.py)
 (a library, issue #279 slice S0) and its CLI [`bin/ade-sched`](../bin/ade-sched) read a plist, fill its placeholders and
-install it on whatever this machine schedules with: (Python 3.10 or later for `ade-sched` itself; `pr-policy`, `context-budget-check` and `claude-quota-guard` need 3.11+ for `tomllib`, so on Ubuntu 22.04, whose python3 is 3.10, install a newer Python first; 2026-11-04):
+install it on whatever this machine schedules with: (Python 3.10 or later for `ade-sched` itself; `pr-policy` needs 3.11+ for `tomllib` (`context-budget-check`, which also does, runs as a Paseo schedule since 2026-11-06, not through ade-sched), so on Ubuntu 22.04, whose python3 is 3.10, install a newer Python first; 2026-11-04):
 
 | backend | what it writes | how it activates |
 | --- | --- | --- |
@@ -16,7 +16,7 @@ carries the same text as an XML comment). Edit the plist, then install again; ne
 
 **Which jobs belong here (Paseo directive F2, [paseo-only-rearchitecture.md](paseo-only-rearchitecture.md)).** System jobs
 (monitors, collectors, record reaping, watchdogs, sweeps) use launchd on the Mac and systemd on Linux, through this tool.
-Judgment jobs that run an agent (skillopt-night, triage, reports) use Paseo schedules (`paseo schedule create --cron ...`),
+Judgment jobs that run an agent (triage, reports) use Paseo schedules (`paseo schedule create --cron ...`),
 not ade-sched.
 
 ## Commands
@@ -60,12 +60,12 @@ Placeholders are filled into the **parsed** plist (strings inside values, never 
 stays a value). `__ADE__`/`@ADE@` (the checkout, realpath) and `__HOME__`/`@HOME@` are always filled; everything else
 comes from `--set` (or `subst=` in the API) and wins over the defaults. Each string is filled in one pass, so a filled
 value is never filled again. Any `__NAME__` or `@NAME@` left afterwards is **exit 2**. The plists in use on 2026-11-04 need:
-`config/launchd/com.djbclark.deadline-sweep.plist` and `com.djbclark.pr-policy.plist`: `__STATE__`; `launchd/com.djbclark.proc-cpu-watch.plist`: `@TARGET@`, `@STATE@`;
-`launchd/com.djbclark.session-history-update.plist`: `__REPO__`, `__INDEX_DIR__`. Several plists still hard-code
+`config/launchd/com.djbclark.deadline-sweep.plist` and `com.djbclark.pr-policy.plist`: `__STATE__` (the `@TARGET@`/`@STATE@` and
+`__REPO__`/`__INDEX_DIR__` plists, proc-cpu-watch and session-history-update, were deleted in the 2026-11-06 slim-down). Several plists still hard-code
 `/Users/djbclark`; they parse and render as they are (later #279 slices template them).
 
-XML comments are stripped before parsing: three plists (acp-dispatch-reap, rumination-watch, zcode-key-auth, 2026-11-04)
-have `--` inside a comment, which XML forbids and Python's parser rejects while launchd accepts it.
+XML comments are stripped before parsing: no plist here now (acp-dispatch-reap's, rumination-watch's and zcode-key-auth's had one; all three were deleted 2026-11-06)
+would have `--` inside a comment, which XML forbids and Python's parser rejects while launchd accepts it.
 
 **ade-sched's own plist key.** `KillMode` (`control-group`, `mixed`, `process`, `none`) sets systemd's KillMode; launchd
 has no such key, and ade-sched leaves it out of the launchd copy. The API takes `kill_mode=` too.
@@ -92,8 +92,9 @@ has no such key, and ade-sched leaves it out of the launchd copy. The API takes 
 | `ADE_SCHED_UNIT_DIR` | `${XDG_CONFIG_HOME:-~/.config}/systemd/user` (a relative `XDG_*` counts as unset) | `unit_dir=` |
 | `ADE_SCHED_LOCK` | `${XDG_STATE_HOME:-~/.local/state}/ade/ade-sched.lock` | `lock_path=` |
 
-A keyword beats the env variable, so an installer keeps honouring its own older override (`ACP_DISPATCH_LAUNCHCTL`,
-`*_LAUNCH_AGENTS`) by passing it through. `tests/conftest.py` pins all seven variables (four binaries, two directories, the lock) to `/usr/bin/true` and a throwaway
+A keyword beats the env variable, so an installer could honour its own older override by passing it through; none does
+since 2026-11-06 (the installers with older overrides, acp-dispatch's reap, context-budget-check's and skillopt-night's,
+were deleted in slim-down E5, E6 and E10; `bin/deadline` and `bin/pr-policy` pass none). `tests/conftest.py` pins all seven variables (four binaries, two directories, the lock) to `/usr/bin/true` and a throwaway
 directory, unconditionally, so no test touches a real launchd, systemd or crontab.
 
 ## Linger
@@ -119,7 +120,7 @@ prints the state.
 | `WorkingDirectory` | `WorkingDirectory=` | `cd DIR &&` |
 | `StandardOutPath` / `StandardErrorPath` | `StandardOutput=append:P` / `StandardError=append:P` (systemd 240+; 236-239 `file:`, which truncates; older: the journal, with a note); the parent dir is created | `>>P 2>&1`, or separate redirects; a missing one goes to `/dev/null` |
 | `Nice`, `LowPriorityIO`, `ProcessType=Background` | `Nice=` (Background without Nice: 10), `IOSchedulingClass=idle` | ignored, with a note |
-| (oneshot defaults) | `KillMode=process` (launchd leaves setsid-detached workers alive: bin/deadline's sweep and skillopt-night start them), `TimeoutStartSec=max(3 x StartInterval, 300 s)`; a calendar job: max(its shortest gap, capped at a day, 300 s) | — |
+| (oneshot defaults) | `KillMode=process` (launchd leaves setsid-detached workers alive: bin/deadline's sweep starts them), `TimeoutStartSec=max(3 x StartInterval, 300 s)`; a calendar job: max(its shortest gap, capped at a day, 300 s) | — |
 | any other key | kept in the launchd copy; a note on systemd and cron | |
 
 Refused with exit 2 on every backend: a newline, CR or NUL in any argument, environment value, working directory or log
@@ -147,7 +148,7 @@ dry-run and render are allowed.
 
 ## API (for installers)
 
-Callers run under `python3 -I`, so they put the script's directory on `sys.path` first, as `bin/claude-quota-guard` does:
+Callers run under `python3 -I`, so they put the script's directory on `sys.path` first, as `bin/acp-dispatch` does for `route_agent.py`:
 
 ```python
 sys.path[:0] = [d for d in (os.path.dirname(os.path.realpath(__file__)),) if d not in sys.path]

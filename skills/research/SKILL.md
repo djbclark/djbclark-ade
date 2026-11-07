@@ -140,7 +140,7 @@ refuter: a cheaper capable model at high effort, each in its own context.
 Reviewer: a different model family when the host can route one; otherwise
 run it in a fresh context and label the review "non-independent". Reserve
 the top effort setting for adjudicating a contested claim, not for reading
-pages. On a host with `model-routing` / `effort-routing` skills, follow them.
+pages. On a host with the `model-routing` skill (effort folded into it 2026-11-07), follow it.
 
 ## Rules that hold in every step
 
@@ -157,8 +157,8 @@ pages. On a host with `model-routing` / `effort-routing` skills, follow them.
 6. Record every query verbatim with its source and date. "Found nothing"
    names what was searched; it is not "does not exist".
 7. One writer. Parallel writers produce disjoint reports. (On this machine,
-   item 1b: four family drafts, but one merged `report.md` chosen by the
-   Grok lead, so the delivered report still has one voice.)
+   item 1b: three family drafts, but one merged `report.md` chosen by the
+   lead, so the delivered report still has one voice.)
 8. Budgets are caps. Stop at diminishing returns even with budget left.
 9. Workers do not spawn workers.
 10. No live web search, no research: a failed search or fetch path stops the
@@ -168,77 +168,64 @@ pages. On a host with `model-routing` / `effort-routing` skills, follow them.
 
 ## On this machine (skip elsewhere)
 
-1. **Workers, refuter, writer and reviewer are `/bigteam` slices, not only
+1. **Workers, refuter, writer and reviewer are `fan-out` slices, not only
    Claude sub-agents.** Dispatch each brief with `acp-dispatch <agent> --model M
    --kind <kind> --name N --task research-<slug> -C <run-folder-parent> -f <brief-file>`
    (`--kind research` on the everyday pools, `frontier` for astra and Fable;
-   codex, zcode, opencode, cursor-agent, copilot, agy via `acp-run`; the
+   codex, opencode, cursor, omp as Paseo providers: `acp-dispatch` is a `paseo run` shim since
+   2026-11-06, `--perm read-only` is Claude's review boundary, best effort for the others; the
    `model-routing` skill and the `aiuse` rules in `~/CLAUDE.md` give the
    mechanics). Reasons: the reads stay out of the lead's context, the
    quota spreads across vendors, and the reviewer gets a genuinely different
    model family. A Claude Agent-tool sub-agent is the fallback
    for a small lookup or when no other agent has quota; its prompt then
-   carries the footer in item 2. Both routes are exercised: `grok-brain-loop`
-   (2026-10-09) used Agent-tool sub-agents; `ai-heaven` (2026-10-09) ran all
+   carries the footer in item 2. Both routes are exercised: an earlier
+   brain-loop run (2026-10-09) used Agent-tool sub-agents; `ai-heaven` (2026-10-09) ran all
    seven slices through `acp-dispatch` (codex, zcode, agy all delivered).
    1b. **Role-to-model map, operator ruling 2026-10-10** (research skill
    only; the `model-routing` skill is unchanged until a run has exercised
-   this): **lead and reviewer are the latest Grok**, reached through the
-   `grok` TUI (`acp-dispatch grok --model grok-4.7 --kind realtime-web`, or newer when `grok`
-   lists one; `realtime-web` is the only kind grok is eligible for, 2026-10-18,
-   and any other kind needs `ACP_OPERATOR_APPROVED=route-override`) or through `cursor-agent` with the same Grok model as Cursor
-   names it (check its model list before the first call; never guess the
-   id). When a Claude Code session is the one running `/research`, it still
+   this): **lead and reviewer are the latest xAI model**, reached through `cursor-agent`
+   (the grok model as Cursor names it: check its model list before the first call; never guess the
+   id; the standalone xAI CLI retired 2026-11-07, so there is no other route). When a Claude Code session is the one running `/research`, it still
    plans and dispatches, but the adjudication and the final refute-mode read
-   go to a Grok slice and its verdict is applied as given. **Every worker
-   role runs on all four families at once, not in rotation**: each slice,
+   go to a Cursor slice on that model and its verdict is applied as given. **Every worker
+   role runs on all three families at once, not in rotation**: each slice,
    the refuter and the writer are dispatched in parallel to Astra
    (`acp-dispatch codex --model gpt-6-astra --kind frontier`; frontier slices
    run as read-only advisors by default and their report is the deliverable,
    2026-10-18), Fable (`acp-dispatch claude
-   --model 'claude-fable-5-1[1m]' --kind frontier`, quoted, the id exactly as `acp-run claude
-   --info` lists it: on 2026-10-10 11:19 a dispatch with `claude-fable-5-1`
-   failed with "acp-run: no model 'claude-fable-5-1'; have: default, opus,
-   claude-fable-5-1[1m], sonnet, haiku, ..."; or an Agent-tool sub-agent),
-   Grok and agy
-   (`acp-dispatch agy --model <m> --kind research`, only ever via ACP, never `agy -p`;
-   `--model claude-opus-5-5 --effort high` (agy 1.4.1, 2026-10-18, dropped the effort-suffixed ids) draws its Claude/GPT pool, which `aiuse`
-   lists as `antigravity claude_gpt`, burn-first while >= 40% left, see
-   bigteam. Over ACP the `claude-*`/`gpt-*` ids appear only because
-   acp-run identifies itself to agy as `zed`: agy_acp_server 1.3.0 hides
-   non-Gemini models from other clients (deliberate in Google's
-   `supports_third_party_models()`), which is why a dispatch on 2026-10-10
-   failed with "no model 'claude-opus-5-5-high'; have: gemini-...".
-   `acp-dispatch` checks `--model` against `acp-run agy --info` before it
-   starts. If no `claude-*` id is listed, the workaround has stopped working:
-   use `--model gemini-3.8-flash --effort high` and note in `plan.md` that the Claude/GPT
-   pool was unreachable). The lead merges
-   the four evidence files for a slice (dedupe by source and quote, keep
-   every family's unique rows) and the Grok lead picks among the four
+   --model <the Fable id> --kind frontier`, the id exactly as `paseo provider models claude --json` lists it,
+   never guessed (on 2026-10-10 a dispatch with an unlisted Fable id failed); or an Agent-tool sub-agent),
+   and the Cursor grok model. **Antigravity is no longer a research family** (2026-11-07): since the agy TUI
+   retired (2026-11-06) the router reaches Paseo's antigravity provider only through the `antigravity-argon` row,
+   frontier fallback only (`acp-dispatch antigravity --model gemini-4-argon --kind frontier`, used while codex or
+   claude is short of frontier quota); its Flash and Claude/GPT pools are `never_route`
+   (`config/routing.toml`), so a `--kind research` slice there is refused. The lead merges
+   the three evidence files for a slice (dedupe by source and quote, keep
+   every family's unique rows) and the lead picks among the three
    writer drafts or merges them into one `report.md`; the counter files
    merge the same way. Codex may be used sparingly when its pools are tight
-   (skip it for a slice rather than wait), the other three always run. A
-   cheaper model (Sonnet, `grok-4.7-build-fast`, zcode) may stand in for a
+   (skip it for a slice rather than wait), the other two always run. A
+   cheaper model (Sonnet, `grok-4.7-build-fast`, an opencode-go model) may stand in for a
    family on a slice where it would change research quality little, such
    as a narrow fetch or a search log. **No weekly quota floor**: dispatch to the most capable
    agent until `aiuse --available` drops its pool; an exhausted pool waits
    for its reset and the same step resumes (the slice writes incrementally,
-   per `feedback_quota_wait_dont_lose_work`). Grok's window is invisible to
-   `aiuse` and shared with GrokBot, so a Grok slice that stalls or returns
+   per `feedback_quota_wait_dont_lose_work`). A Cursor slice on the xAI model that stalls or returns
    a rate-limit line is re-run after the next hour, not re-routed.
    1a. **GPT reviewers go through `acp-dispatch codex --model gpt-6-astra
    --kind frontier`** (the `ocx-gpt-6-*` Agent-tool sub-agents and the
    opencodex proxy behind them were uninstalled 2026-10-19). If the Codex
    pool is out (`aiuse --available --live --json`), the next family with
-   quota (`acp-dispatch zcode --kind research`, no `--model`), labelling the
+   quota (`route_agent.py plan`), labelling the
    review non-independent for any slice that family worked on.
 2. Sub-agent prompts carry the delivery contract: `acp-dispatch` appends it
    itself; for an Agent-tool sub-agent paste the output of
    `acp-dispatch footer --report <scratchpad>/<name>-report.md`. Read the
    report file, never the final message. `acp-dispatch check <dir>` before
-   the gate lists no-report and `BLOCKED:` slices; a `resume-scheduled` one
-   (exit 1) is a quota stop being resumed in place automatically, so wait for
-   it rather than re-dispatching the brief (2026-10-18). Claude Code refuses a
+   the gate lists no-report and `BLOCKED:` slices; an exit 1 slice is unfinished or still running, so wait for
+   it rather than re-dispatching the brief (a quota stop is paused and resumed by Paseo's session-guard and
+   usage-auto-resume plugins since 2026-11-06, not by the shim). Claude Code refuses a
    sub-agent Write to a basename starting with `report`, `summary`,
    `findings` or `analysis`: a sub-agent writer writes `draft.md` in the run
    folder and the lead moves it to `report.md` (seen 2026-10-09).
@@ -257,15 +244,14 @@ pages. On a host with `model-routing` / `effort-routing` skills, follow them.
    exit 0 means every probed route can search, exit 1 lists the ones that
    cannot. The lead's own probe uses its own tools and walks the full web
    ladder before declaring a route dead: the client's MCP rungs (Firecrawl,
-   `exa`, `parallel-search`, `jina`), built-in WebSearch/WebFetch, Composio,
-   then `~/src/djbclark-ade/bin/web-get search|fetch` (Crawl4AI and the
-   archives are its last rungs; `paper-search` for papers). The ladder per
-   client is `fallback-chains/references/web-access.md`.
+   `exa`, `parallel-search`, `jina`), built-in WebSearch/WebFetch, Composio
+   (`paper-search` for papers). `bin/web-get` and the written per-client ladder
+   were deleted 2026-11-06.
    Fix a harness failure at the root in `~/src/djbclark-ade` (code, not only
    docs); do not just route around it, then say what you changed.
 7. **Pause on missing sources (operator, 2026-10-11).** A page or search a
-   slice needs that fails on every rung (`web-get` exit 5), or comes back
-   only cut at a provider's cap (`web-get` exit 6, not fetched), is not a Gap to
+   slice needs that fails on every rung, or comes back
+   only cut at a provider's cap (not fetched), is not a Gap to
    write around: the slice stops with `BLOCKED: web access: <url or query>:
    <each rung's error>` (the `acp-dispatch` exit 4 convention) instead of
    writing findings without the source. The lead then stops dispatching
@@ -273,4 +259,4 @@ pages. On a host with `model-routing` / `effort-routing` skills, follow them.
    queries to the operator, and waits. **No synthesis, writer or gate step
    runs while a needed source is missing**; resume the same slice once the
    provider recovers. A page that a later rung did return is fine; note the
-   rung. Detail: `web-access.md` section 1.
+   rung. (The written ladder `web-access.md` was deleted 2026-11-06.)

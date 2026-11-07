@@ -1,5 +1,5 @@
 """bin/load-watch sample: the compressor-churn watcher (2026-10-23). No vm_stat (LW_FAKE_COMPRESSOR supplies the
-cumulative counters), no launchd, no relay, no ps: a busy host cannot change the answer."""
+cumulative counters), no launchd, no paseo, no ps: a busy host cannot change the answer."""
 import importlib.machinery
 import importlib.util
 import json
@@ -36,7 +36,7 @@ def _sampler(tmp_path, monkeypatch, table=None, dry=False):
     monkeypatch.setattr(lw, "ps_table", lambda: rows)
     monkeypatch.setattr(lw, "guard", lambda *args: None)
     sent = []
-    monkeypatch.setattr(lw, "send_to", lambda w, text: sent.append(text) or True)
+    monkeypatch.setattr(lw, "paseo_send", lambda w, text: sent.append(text) or "sent")
     lw.save_watcher({"channel": "paseo", "target": "agent-a"})
 
     class A:
@@ -116,8 +116,9 @@ def test_churn_held_for_the_sustain_time_fires_once(tmp_path, monkeypatch):
     assert "compressor churn ~120k pages/s for 3+ min (alert line 50k, admit limit 20k)" in msg
     assert "top: cc1 -O2 2.5 cores, python3 -m 1.0 cores, sh 0.2 cores" in msg
     assert "Admit already holds new bg/acp-dispatch work; this is running or bypass work." in msg
-    assert "Do not kill or SIGSTOP without djbclark. Investigate per the loadwatch skill." in msg
-    assert "Investigate per the loadwatch skill; do not kill or SIGSTOP without djbclark." in at.pinged()[0]
+    assert "Do not kill or SIGSTOP without djbclark. As the load watcher: verify against the processes" in msg
+    assert "this is running or bypass work. Do not kill or SIGSTOP without djbclark." in at.pinged()[0]
+    assert "loadwatch" not in msg and "loadwatch" not in at.pinged()[0]  # the skill is gone (R2-11): the line carries the how-to
     assert "Standing exception" not in msg
     assert at.pinged()[0].startswith("djbclark-ade: load-watch: compressor churn ~120k pages/s")
     cd = at.state()["cooldown"]

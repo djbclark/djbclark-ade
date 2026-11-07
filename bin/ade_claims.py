@@ -2,7 +2,7 @@
 """ade_claims: the workspace claim library, the git-guard rules and the ref hooks (isolation slice W1, 2026-10-24; O2 redesign
 2026-10-25).
 
-One claim per workspace (a cow pasture or a linked worktree): who owns it, which branch, which base.
+One claim per workspace (a Paseo or linked worktree): who owns it, which branch, which base.
 Design: design-isolation-report.md 3.4 (schema), 3.5.4 (guard); frontier-pr59-design-report.md (O2). TWO ENFORCEMENT POINTS:
   1. git's own hooks guard REFS: `libexec/git-hooks/reference-transaction` and `pre-push` (installed per repository by
      `install`, run through `hook-ref` / `hook-push` below). git resolves every option, refspec, mapping and alias to the
@@ -10,8 +10,8 @@ Design: design-isolation-report.md 3.4 (schema), 3.5.4 (guard); frontier-pr59-de
   2. `bin/ade-git-guard`, the PATH shim, runs `ade_claims.py guard -- GIT_ARGS...` for what hooks cannot see (a foreign
      workspace, the shared checkout's destructive forms, worktree verbs, rename/copy destinations) and FAILS CLOSED on what it
      cannot read.
-Integration stage as of 2026-10-25: W1 (this file, the shim and the hooks) exists; W2 (cow-pasture installs the hooks into a new
-pasture), W3 (acp-dispatch exports ADE_CLAIM_ID) and W4 (acp-run puts the shim on agents' PATH) are NOT wired yet, so nothing
+Integration stage as of 2026-10-25: W1 (this file, the shim and the hooks) exists; W2 (the workspace launcher installs the hooks into a new
+workspace; cow-pasture, its first home, was removed 2026-11-06), W3 (acp-dispatch exports ADE_CLAIM_ID) and W4 (acp-run puts the shim on agents' PATH) are NOT wired yet, so nothing
 calls the guard in a live session. Repositories get the hooks from `ade-git-guard install` or lazily from the shim.
 
 THIS IS A SEATBELT, NOT A SANDBOX (design 5.7). It stops an agent's accidental or careless git; it does not
@@ -30,7 +30,15 @@ written atomically (temp file beside, then os.replace), every field read with .g
      "owner": {"record": str|None, "session": str|None, "agent": str, "model": str},
      "lead": str|None, "allow": [ids], "role": "lead"|"worker"|"builder", "purpose": str,
      "created_at": ISO-8601 UTC, "created_by": str, "state": "active"|"released"|"merged",
-     "released_at": ISO-8601 UTC|None, "inherited_dirt_patch": str|None}
+     "released_at": ISO-8601 UTC|None, "inherited_dirt_patch": str|None,
+     "expires_at": ISO-8601 UTC|None (2026-11-06)}
+
+EXPIRY (slim-down E8, D9, 2026-11-06). `new` stamps `expires_at` = now + --ttl (default 72 h; --ttl 0 = never). An ACTIVE
+claim past its `expires_at` is EXPIRED: it guards nothing (`claim_state_active` is false, `list_claims("active")` leaves it
+out, a new claim of its path is not refused) and `list` shows it as `expired`. Nothing is rewritten: expiry is read, not
+stored, so an orphaned claim (an agent that died, a worktree nobody released) stops guarding by itself. A record with no
+`expires_at` (every record written before 2026-11-06) never expires; an `expires_at` that does not parse keeps the claim
+active (an unreadable field keeps the protection on).
 
 `create_claim` (CLI `new`) is exclusive: it refuses an existing id (ClaimExists, exit 3) and a path that
 already has another owner's active claim (PathClaimed, exit 4). A re-claim of the path by the SAME owner
@@ -121,16 +129,16 @@ Operator override: ACP_OPERATOR_APPROVED containing `git-guard` allows the call 
 ADE_GIT_GUARD_BYPASS was not built; this is the convention bin/acp-dispatch already uses), in the shim and in the hooks.
 A shim crash fails OPEN (design 5.7, bin/ade-git-guard).
 
-CLI (also the bash-facing API; every subcommand exits 0 ok, 1 not found, 2 usage, 3 id exists, 4 path
-owned by another owner's active claim, 77 refused; `install` also 73 and 78, above):
-    ade_claims.py new --id ID --path DIR --branch B --base-sha S [--repo-origin U]
+CLI (also the bash-facing API; every subcommand exits 0 ok, 2 usage, 3 id exists, 4 path owned by another owner's
+active claim, 77 refused; `install` also 73 and 78, above). Trimmed 2026-11-06 (slim-down E8, D9): `show`, `find` and
+`set-state` had no caller and are gone (the library functions `read_claim`, `find_claim` and `set_state` stay, for the
+guard, the hooks and the tests):
+    ade_claims.py new --id ID --path DIR --branch B --base-sha S [--repo-origin U] [--ttl HOURS]
         [--owner-record R] [--owner-session S] [--owner-agent A] [--owner-model M] [--lead L]
         [--allow ID]... [--role lead|worker|builder] [--purpose T] [--created-by X]
         [--inherited-dirt-patch P] [--no-pointer]     writes the claim and the pointer; prints the claim file
-    ade_claims.py show ID [--field F]       print the claim JSON (or one field)
-    ade_claims.py find [DIR]                print the active claim of the workspace holding DIR (cwd)
-    ade_claims.py list [--state S] [--json] one line per claim (or a JSON array)
-    ade_claims.py set-state ID active|released|merged
+    ade_claims.py list [--state S] [--json] one line per claim (id, state, branch, owner, path, expires_at), or a
+                                            JSON array; what `ade-git-guard claim ls` runs
     ade_claims.py guard -- GIT_ARGS...      decide one git call (what ade-git-guard runs)
     ade_claims.py install [DIR]             install the ref hooks into DIR's repository
     ade_claims.py hook-ref STATE | hook-push REMOTE URL    what libexec/git-hooks/* run (stdin is git's)
@@ -156,6 +164,8 @@ EXIT_REFUSED = 77
 EXIT_EXISTS = 3
 EXIT_PATH_OWNED = 4
 STATES = ("active", "released", "merged")
+LIST_STATES = STATES + ("expired",)   # `expired` is read from expires_at, never stored
+DEFAULT_TTL_H = 72.0
 ROLES = ("lead", "worker", "builder")
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 IDENT_ENV = ("ADE_CLAIM_ID", "CLAUDE_CODE_SESSION_ID", "PASEO_AGENT_ID")
@@ -248,12 +258,14 @@ def make_claim(*, id: str, path: str | os.PathLike[str], branch: str, base_sha: 
                owner_record: Optional[str] = None, owner_session: Optional[str] = None,
                owner_agent: str = "", owner_model: str = "", lead: Optional[str] = None,
                allow: Iterable[str] = (), role: str = "worker", purpose: str = "", created_by: str = "",
-               inherited_dirt_patch: Optional[str] = None) -> dict[str, Any]:
-    """A complete, schema-v1 claim dict (state active). Does not write it."""
+               inherited_dirt_patch: Optional[str] = None, ttl_hours: Optional[float] = DEFAULT_TTL_H) -> dict[str, Any]:
+    """A complete, schema-v1 claim dict (state active). Does not write it. `ttl_hours` (None or 0: never) sets expires_at."""
     if not valid_id(id):
         raise ValueError(f"invalid claim id {id!r}")
     if role not in ROLES:
         raise ValueError(f"invalid role {role!r}; one of {', '.join(ROLES)}")
+    if ttl_hours is not None and (ttl_hours != ttl_hours or ttl_hours < 0 or ttl_hours > 24 * 366):
+        raise ValueError(f"invalid ttl {ttl_hours!r} hours (0 = never, at most a year)")
     allow_ids = [a for a in allow]
     for a in allow_ids:
         if not valid_id(a):
@@ -265,6 +277,7 @@ def make_claim(*, id: str, path: str | os.PathLike[str], branch: str, base_sha: 
         "lead": lead, "allow": allow_ids, "role": role, "purpose": purpose,
         "created_at": utc_now(), "created_by": created_by, "state": "active", "released_at": None,
         "inherited_dirt_patch": inherited_dirt_patch,
+        "expires_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + ttl_hours * 3600)) if ttl_hours else None,
     }
 
 
@@ -331,7 +344,27 @@ def _sanitize(data: dict[str, Any], claim_id: str) -> dict[str, Any]:
     for k in ("path", "branch", "repo_origin", "created_at"):
         c[k] = text(data.get(k))
     c["state"] = text(data.get("state"), "active")   # an unreadable state keeps the protection on
+    c["expires_at"] = data.get("expires_at") if isinstance(data.get("expires_at"), str) else None
     return c
+
+
+def is_expired(claim: Optional[dict[str, Any]], now: Optional[float] = None) -> bool:
+    """True when the claim's `expires_at` parses and has passed. A missing or unparseable value is never expired."""
+    raw = (claim or {}).get("expires_at")
+    if not isinstance(raw, str) or not raw:
+        return False
+    import calendar
+    try:
+        at = calendar.timegm(time.strptime(raw, "%Y-%m-%dT%H:%M:%SZ"))
+    except (ValueError, OverflowError):
+        return False
+    return (time.time() if now is None else now) >= at
+
+
+def shown_state(claim: dict[str, Any]) -> str:
+    """The state `list` reports: `expired` for an active claim past its expires_at, else the stored state."""
+    st = str(claim.get("state") or "active")
+    return "expired" if st == "active" and is_expired(claim) else st
 
 
 def read_claim(claim_id: str) -> Optional[dict[str, Any]]:
@@ -355,7 +388,7 @@ def list_claims(state: Optional[str] = None) -> list[dict[str, Any]]:
         return out
     for p in names:
         c = read_claim(p.stem)
-        if c is not None and (state is None or c.get("state") == state):
+        if c is not None and (state is None or shown_state(c) == state):
             out.append(c)
     return out
 
@@ -400,7 +433,7 @@ def set_state(claim_id: str, state: str) -> Optional[dict[str, Any]]:
 
 
 def claim_state_active(claim: Optional[dict[str, Any]]) -> bool:
-    return bool(claim) and (claim or {}).get("state", "active") == "active"
+    return bool(claim) and (claim or {}).get("state", "active") == "active" and not is_expired(claim)
 
 
 def owner_ids(claim: dict[str, Any]) -> set[str]:
@@ -424,11 +457,11 @@ def owner_label(claim: dict[str, Any]) -> str:
 
 
 def _own_claude_session_id() -> Optional[str]:
-    """This process's Claude Code session id from the shared resolver (skills/session-finder/claude_identity.py): the registry first, the env var only
+    """This process's Claude Code session id from the shared resolver (bin/claude_identity.py): the registry first, the env var only
     as the fallback. A /baton successor inherits its predecessor's CLAUDE_CODE_SESSION_ID, so the bare env var would name the wrong owner. A checkout
     without the helper (it is imported by path, not installed) keeps the env var."""
     try:
-        helper = str(Path(__file__).resolve().parent.parent / "skills" / "session-finder")
+        helper = str(Path(__file__).resolve().parent)    # bin/claude_identity.py (moved from skills/session-finder/, 2026-11-06)
         if helper not in sys.path:
             sys.path.insert(0, helper)
         import claude_identity  # type: ignore[import-not-found]
@@ -1269,7 +1302,7 @@ def shared_destructive(call: GitCall) -> Optional[Rule]:
 
 
 FOREIGN_ALT = ("only read-only git runs here (status, log, show, diff, rev-parse, ls-files, grep, `branch --list`, ...); to edit, "
-               "make your own workspace (`bin/cow-pasture create`, or `acp-dispatch --workspace auto`)")
+               "make your own workspace (a Paseo worktree, or `acp-dispatch --workspace auto`)")
 
 
 @dataclasses.dataclass
@@ -1477,7 +1510,7 @@ def _target_decision(call: GitCall, wss: list[Optional[Workspace]], ident: Optio
             c = claim_at(t)
             if c is not None and not is_mine(c, ident):
                 return _foreign(c, f"worktree {verb} of a claimed workspace",
-                                "ask the owner (session-finder/relay.py) to remove it; read-only `git worktree list` is fine")
+                                "ask the owner (a Paseo agent: `skills/session-finder/relay.py OWNER --message-file -`) to remove it; read-only `git worktree list` is fine")
             if verb == "remove" and force and c is None:
                 return Decision(False, "worktree remove --force",
                                 "`git worktree remove <path>` without --force (git then refuses a dirty tree), or claim it first",
@@ -1851,7 +1884,7 @@ def refusal_text(decision: Decision, call: GitCall) -> str:
             f"{_esc(decision.detail.get('cwd', call.cwd))}\n"
             + who +
             f"  Safe alternative: {_esc(decision.message)}.\n"
-            f"  Ask the owner through session-finder/relay.py; exit 77 is an answer, not an obstacle to route around. "
+            f"  Ask the owner (a Paseo agent) with `skills/session-finder/relay.py OWNER --message-file -`; exit 77 is an answer, not an obstacle to route around. "
             f"Logged in {_esc(guard_log_path())}.\n")
 
 
@@ -2022,7 +2055,7 @@ def _hook_refusal(rule: str, d: Decision, via: str, what: str, env: dict[str, st
                      + (f"  claim {_esc(d.claim_id)}: {_esc(d.owner)}; you are {me}.\n" if d.claim_id else
                         f"  {_esc(d.owner)}; you are {me}.\n")
                      + f"  Safe alternative: {_esc(d.message)}.\n"
-                     "  Ask the owner through session-finder/relay.py; exit 77 is an answer, not an obstacle to route "
+                     "  Ask the owner (a Paseo agent) with `skills/session-finder/relay.py OWNER --message-file -`; exit 77 is an answer, not an obstacle to route "
                      f"around. Logged in {_esc(guard_log_path())}.\n")
     return EXIT_REFUSED
 
@@ -2261,17 +2294,11 @@ def _cli(argv: Sequence[str]) -> int:
     n.add_argument("--created-by", default="")
     n.add_argument("--inherited-dirt-patch")
     n.add_argument("--no-pointer", action="store_true", help="write the registry file only")
-    s = sp.add_parser("show")
-    s.add_argument("id")
-    s.add_argument("--field")
-    f = sp.add_parser("find")
-    f.add_argument("dir", nargs="?", default=".")
-    ls = sp.add_parser("list")
-    ls.add_argument("--state", choices=STATES)
+    n.add_argument("--ttl", type=float, default=DEFAULT_TTL_H, metavar="HOURS",
+                   help=f"hours until the claim expires and stops guarding (default {DEFAULT_TTL_H:g}; 0 = never)")
+    ls = sp.add_parser("list", help="every claim the registry holds (what `ade-git-guard claim ls` runs)")
+    ls.add_argument("--state", choices=LIST_STATES)
     ls.add_argument("--json", action="store_true")
-    ss = sp.add_parser("set-state")
-    ss.add_argument("id")
-    ss.add_argument("state", choices=STATES)
     ins = sp.add_parser("install", help="install the ref hooks into the repository of DIR (exit 2 not a repository, "
                                          "78 core.hooksPath is set, 73 a .pre-ade file is in the way)")
     ins.add_argument("dir", nargs="?", default=".")
@@ -2281,38 +2308,19 @@ def _cli(argv: Sequence[str]) -> int:
             c = make_claim(id=a.id, path=a.path, branch=a.branch, base_sha=a.base_sha, repo_origin=a.repo_origin,
                            owner_record=a.owner_record, owner_session=_owner_session_arg(a.owner_session), owner_agent=a.owner_agent,
                            owner_model=a.owner_model, lead=a.lead, allow=a.allow, role=a.role, purpose=a.purpose,
-                           created_by=a.created_by, inherited_dirt_patch=a.inherited_dirt_patch)
+                           created_by=a.created_by, inherited_dirt_patch=a.inherited_dirt_patch, ttl_hours=a.ttl)
             if not a.no_pointer and find_workspace(a.path) is None:
                 raise ValueError(f"{a.path} is not inside a git workspace")
             target = create_claim(c, pointer_for=None if a.no_pointer else a.path)
             print(target)
-        elif a.cmd == "show":
-            c = read_claim(a.id)
-            if c is None:
-                print(f"ade_claims: no claim {a.id!r}", file=sys.stderr)
-                return 1
-            if a.field:
-                v = c.get(a.field)
-                print(v if isinstance(v, str) else json.dumps(v))
-            else:
-                print(json.dumps(c, indent=2, sort_keys=True))
-        elif a.cmd == "find":
-            ws = find_workspace(a.dir)
-            c = find_claim(ws) if ws else None
-            if c is None:
-                return 1
-            print(json.dumps(c, indent=2, sort_keys=True))
         elif a.cmd == "list":
             cs = list_claims(a.state)
             if a.json:
-                print(json.dumps(cs, indent=2, sort_keys=True))
+                print(json.dumps([{**c, "shown_state": shown_state(c)} for c in cs], indent=2, sort_keys=True))
             else:
                 for c in cs:
-                    print(f"{c.get('id')}\t{c.get('state')}\t{c.get('branch')}\t{owner_label(c)}\t{c.get('path')}")
-        elif a.cmd == "set-state":
-            if set_state(a.id, a.state) is None:
-                print(f"ade_claims: no claim {a.id!r}", file=sys.stderr)
-                return 1
+                    print(f"{c.get('id')}\t{shown_state(c)}\t{c.get('branch')}\t{owner_label(c)}\t{c.get('path')}\t"
+                          f"{c.get('expires_at') or 'never'}")
         elif a.cmd == "install":
             rc, notes = install_hooks(a.dir)
             for line in notes:

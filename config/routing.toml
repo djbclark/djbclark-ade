@@ -4,28 +4,39 @@
 # 2026-10-15 to the operator's routing policy and narrowed 2026-10-18: Claude
 # Fable 5.1 and codex's top frontier model (gpt-6-astra today) are reached
 # only through the `frontier` kind, one slice per pool per wave (two on claude under the standing
-# allowance of 2026-10-27 while the quota guard passes, docs/gates.md); judgment is
+# allowance of 2026-10-27 while the Claude reading passes, docs/gates.md); judgment is
 # Opus 5.5 at high first, omp Opus next, and codex gpt-6.1-sol at high as a lower-ranked,
 # eligible pool while its quota is plentiful (operator 2026-10-25); everyday work goes to the
 # OTHER pools, plus codex's everyday
 # models (never astra) while its quota is plentiful (`plenty_min`, operator 2026-10-25);
-# copilot is the one
-# reserve, with a hard floor (GitHub-side Copilot review runs on it; grok is an
-# ordinary pool since 2026-10-18, when GrokBot moved to its own Cursor pool);
+# the copilot reserve row was removed 2026-11-06 (slim-down E9: the copilot CLI retired; Paseo's
+# Copilot provider replaces it); the grok CLI's SuperGrok pool retired 2026-11-07 (subscription
+# cancelled in favour of Cursor; grok-bot is Cursor-billed and never a slice target);
 # hermes is never a target; omp (the Claude API credits) is an ordinary tier since
 # 2026-10-19, API-only work first and then code/bulk slices, so the credits are spent
-# before they expire each month; cline stays operator-gated.
-# `models` is the acp-run `--model [--effort L]` suggestion per kind; `agent`
-# is the acp-run agent name when it differs from the aiuse provider id.
+# before they expire each month.
+# Surviving pools (J2 pool audit, docs/slim/log.md): claude, codex, cursor (cursor-auto, cursor,
+# cursor-cloud), opencode (opencode-go, opencode-zen-free), omp, antigravity (its Gemini 4 Argon
+# window only, as the frontier fallback, restored 2026-11-07 for tendcf/nix2cf's review route 3)
+# and hermes (never a target).
+# `models` is the acp-dispatch `--model [--effort L]` suggestion per kind, ids as
+# `paseo provider models <agent> --json` lists them (`route_agent.py services --check-models`);
+# `agent` is the Paseo provider when it differs from the pool name.
+
+# Google AI Pro (Paseo's antigravity provider; the router's one row for it is `antigravity-argon`) does NOT include API access:
+# subscriptions are chat-interface only and a Gemini API key bills separately, so wiring Hermes or any agent to a
+# GEMINI_API_KEY would spend real money.
 
 [routing]
 # Kinds of work. Deliberately few — a taxonomy nobody can apply is worse than
 # a coarse one that gets used.
 # `api-only` (operator 2026-10-19): work that needs the Claude API and cannot run through a
-# TUI or ACP (SDK paths such as the Claude route in bin/failover.py, a verdict classifier,
-# a batch or API-only job). omp's Claude API credits and pi's OpenAI API pool are
-# eligible; select the provider appropriate for the SDK. The caller makes the API
+# TUI or ACP (SDK paths such as a Claude API call (a model chain is `paseo run`'s job), a verdict classifier,
+# a batch or API-only job). omp's Claude API credits are
+# eligible (pi's OpenAI API pool was retired 2026-11-06); select the provider appropriate for the SDK. The caller makes the API
 # call itself and `route_agent.py route --kind api-only` reports capacity.
+# `github` and `realtime-web` have no pool since copilot (2026-11-06) and the grok CLI (2026-11-07) retired: a route for
+# them finds nothing; they stay kinds so a lead's plan names them rather than failing on an unknown kind.
 kinds = ["judgment", "frontier", "code", "bulk", "research", "mechanical", "github", "realtime-web", "api-only"]
 # burn_first services (use-it-or-lose-it pools) win a tie-sized margin while
 # they hold at least this much headroom. Static `burn_first = true` on a
@@ -35,7 +46,7 @@ burn_first_min = 40.0
 burn_first_bonus = 4.0
 # Expected unused share of the binding window at reset (percent points). At or
 # above this, the pool gets burn_first_bonus even with burn_first = false
-# (2026-10-18: codex weekly at 82% left while burning 3.2×; agy Claude/GPT
+# (2026-10-18: codex weekly at 82% left while burning 3.2×; the retired agy Claude/GPT
 # weekly hit its cap minutes after a "41% left" reading).
 burn_first_waste_min = 30.0
 # When the binding window's pace_ratio is above this, add pace_penalty to the
@@ -54,16 +65,30 @@ pace_penalty_judgment_factor = 0.5
 quality_max_rank_gap = { code = 10, judgment = 10 }
 # Most `frontier` slices one wave puts on a single pool, and the Fable sublimit below which frontier on claude falls
 # back to Opus, are `frontier1_per_wave`/`frontier2_per_wave` and `frontier1_min_left` in config/gates.toml [frontier]
-# (2026-10-27: a profile may raise them within floors; docs/gates.md).
+# (docs/gates.md).
 # Pools with `plenty_kinds` (codex's everyday kinds, operator 2026-10-25: "if we have lots of codex
 # quota and it is the best of available options we can use it for non-frontier") are eligible for
 # those kinds only while the binding headroom (the tightest window of the pool, 5-hour and weekly
 # alike) is at least this many percent; below it, or with no fresh reading, codex is frontier-only
 # again, so a wave cannot empty the 5-hour window the way four astra slices did on 2026-10-18.
 plenty_min = 50.0
-# Curated profiles overlay discovery; anything discovered without one gets
-# default_profile so a newly-added agent is routable rather than invisible.
+# Curated profiles overlay discovery (`paseo provider ls --json` plus the quota snapshot's pools); anything
+# discovered without one gets default_profile so a newly-added provider is routable rather than invisible.
 default_profile = { bulk = 60, mechanical = 60 }
+# Never a routable service, whatever aiuse or Paseo lists (the [discovery] table until 2026-11-07, slim-down E7):
+# hermes is the operator's own assistant (operator 2026-10-15). clinepass: reserved as the lifeline/substrate of BOTH
+# Hermes and Dann (operator 2026-10-23), never a slice target. Retired TUIs whose accounts aiuse still reports or
+# whose providers Paseo still lists (slim-down E9, 2026-11-06; grok 2026-11-07): no curated row drives them, so
+# discovery must not surface them as unprofiled, dispatchable services (`antigravity` here is the provider's other
+# pools, Flash and Claude/GPT; its Argon window is the curated `antigravity-argon` row). grok-bot is the Cursor-billed Chief of
+# Staff's pool, never a slice target. Names the dispatch gate holds for approval ([dispatch].operator_gated) are
+# never discovered either.
+never_route = ["hermes", "clinepass", "antigravity", "zai", "alibaba", "devin", "copilot", "pi", "crush", "kiro",
+               "cline", "agy", "qwen", "goose", "zcode", "muse", "aider", "venicecode", "grok", "grok-bot"]
+# Discovery names the provider or TUI; aiuse names the account behind it. An alias folds a provider or fork name onto
+# the curated service that already covers it, so it never becomes a second entry (Paseo's `opencode` provider is the
+# Go pool). The retired TUIs have no alias: they are `never_route` above.
+aliases = { claude-agent-teams = "claude", openclaude = "claude", opencode = "opencode-go", kimi = "opencode-go" }
 
 # Calibrate report thresholds (route_agent.py calibrate; monthly AI re-rank).
 # Operator /steps 1.5, 2026-10-18: outcome field + AI re-ranking, not human.
@@ -80,56 +105,25 @@ suggest_worse_delta = 5
 suggest_better_above = 15.0
 suggest_better_delta = 3
 
-[discovery]
-# Never a routable service, whatever aiuse or acp-run lists (operator 2026-10-15):
-# hermes is the operator's own assistant. omp was gated behind a per-run operator approval
-# 2026-10-15..19; the gate is lifted (operator 2026-10-19, see the omp [[service]] below),
-# so omp is a curated service now and discovery never needs to guess its profile.
-# clinepass: reserved as the lifeline/substrate of BOTH Hermes and Dann (operator 2026-10-23) — never a slice target.
-# kiro (2026-10-25): acp-run knows it for explicit dispatch, but its billing and quality are
-# unprofiled, so discovery must not hand it slices.
-never_route = ["hermes", "clinepass", "kiro"]
-# cline (operator 2026-10-17): the TUI is uninstalled; gated so a reinstall does not put it back
-# into discovery by accident (ALIASES folds it into clinepass, which NEVER_ROUTE covers).
-operator_gated = ["cline"]
-# Discovery names the TUI; aiuse names the account behind it. Without this
-# map, discovery would surface `cline` as a brand-new service and hand it bulk
-# work — silently defeating the never-bulk rule that protects clinepass, which
-# is Hindsight's and hermes's inference lifeline. Any alias inherits the
-# curated service's constraints rather than becoming a second entry.
-aliases = { cline = "clinepass", agy = "antigravity", claude-agent-teams = "claude", openclaude = "claude", opencode = "opencode-go", kimi = "opencode-go", zcode = "zai", qwen = "alibaba" }
-
 [dispatch]
-# Never dispatched without the operator's specific, explicit approval for that run (operator 2026-10-15);
-# the same gate is in acp-run.
+# Never dispatched without the operator's specific, explicit approval for that run (operator 2026-10-15).
 # hermes (operator 2026-10-15: "hermes should never be used" as a delegation target) needs
-# ACP_OPERATOR_APPROVED=<agent>; acp-run applies the same gate. omp left this list on
-# 2026-10-19 (its Claude API credits are a normal tier).
-# cline (operator 2026-10-17): uninstalled, left in place for a deliberate re-enable; Hermes
-# keeps its own ClinePass API pool.
-# Distinct from [discovery].operator_gated (dispatch also gates hermes).
-operator_gated = ["hermes", "cline"]
+# ACP_OPERATOR_APPROVED=<agent>. omp left this list on 2026-10-19 (its Claude API credits are a
+# normal tier). route_agent never discovers a name listed here.
+operator_gated = ["hermes"]
 # Fable at xhigh/max should almost never run (operator 2026-10-18): the same approval gate, keyed
 # ACP_OPERATOR_APPROVED=fable-xhigh. Fable at high is the frontier route_agent.py suggests.
 fable_gated_efforts = ["xhigh", "max"]
 # Substring match on --model (case-insensitive): these only run with --kind frontier
-# (operator 2026-10-18; route-override does not skip this).
-# gemini-4-argon (operator 2026-10-31): reachable through agy, FALLBACK ONLY behind gpt-6-astra and
-# Fable. It has its own weekly window ("Gemini 4 Argon weekly"), see the `antigravity-argon` service.
+# (operator 2026-10-18; route-override does not skip this). gemini-4-argon (operator 2026-10-31): FALLBACK ONLY behind
+# gpt-6-astra and Fable, through Paseo's antigravity provider (the `antigravity-argon` service).
 frontier_models = ["gpt-6-astra", "fable", "gemini-4-argon"]
 # Optional hard cap per service (or agent name via ACP_DISPATCH_INFLIGHT). Empty on
 # purpose: the in-flight quota reservation replaced `codex = 1` (operator 2026-10-18).
 # ACP_DISPATCH_INFLIGHT=name=N still overrides per run (service or agent name).
 inflight_cap = {}
-# A quota reset further out than this many hours is not waited for (2026-10-18): no
-# launchd auto-resume sits around for days (agy's weekly cap resets ~148 h out; codex's
-# weekly ~5 days). finalize records a skipped auto-resume and `check` points at a
-# reroute instead. aiuse's 30-min back-off guess is never subject to this limit.
-auto_resume_max_wait_hours = 6
-# Flags a dispatch line needs for acp-run to accept the model at all. crush:
-# `--model` rewrites the shared data dir's crush.json, so acp-run exits 2 unless
-# the run strips the user config or gets ACP_RUN_CRUSH_DATA (review 2026-10-15).
-extra = { crush = " --acp-arg=--strip-user-config" }
+# Flags a dispatch line needs for the agent to accept the model at all (none since crush retired, 2026-11-06).
+extra = {}
 
 # When there is no measured history, floor the brief-size default (operator 2026-10-18:
 # gpt-6-astra median 65% of codex's 5-hour window across 4 measured slices).
@@ -148,11 +142,9 @@ extra = { crush = " --acp-arg=--strip-user-config" }
 "codex:judgment" = 25.0
 codex = 10.0
 claude = 8.0
-antigravity-claude = 15.0
 
 # Repo-scoped override of the floors above (operator djbclark, 2026-11-01: "For tendcf/nix2cf only, allow astra down to a
-# lower floor"): in these repositories astra counts as usable down to 20% of Codex quota left, so Argon (fallback behind
-# astra and Fable) stands in only below that. The repository is the last path part of the `origin` remote of acp-dispatch's -C directory
+# lower floor"): in these repositories astra counts as usable down to 20% of Codex quota left, so a fallback stands in only below that. The repository is the last path part of the `origin` remote of acp-dispatch's -C directory
 # (a worktree such as ~/src/tendcf-foo-wt has its repository's remote; with no remote, the directory's name), or `route_agent.py plan --repo NAME` / the cwd.
 # The override REPLACES the `SERVICE:frontier` floor and is also its CAP: a measured median (3+ comparable slices) still
 # wins over the default floor everywhere, but here the estimate never exceeds 20 (a median of 70 is read as 20, a median
@@ -170,22 +162,18 @@ antigravity-claude = 15.0
 # dispatched slices; this is the session that dispatches them. `model` at `effort` by default,
 # `pipeline_model` at `pipeline_effort` when the session only drives a pipeline (PR loops, waiters,
 # merges; djbclark 2026-10-23: Sonnet 5.5 at medium, high only for judgment turns; effort changes on
-# 5.5 keep the prompt cache). `pipeline_effort` is optional (default high). Never
-# Fable: that is the `fable-deep` sub-agent or a `frontier` slice. Printed by `route_agent.py policy`.
+# 5.5 keep the prompt cache). `pipeline_effort` is optional (default high). Printed by `route_agent.py policy`.
+# `fable_lead` (operator 2026-11-07: "Fable leads are allowed for now, with an easy way to turn them off later"): true
+# lets a lead session run on Fable 5.1 (no relaunch-on-Opus note from claude/hooks/context_size_nudge.py). Set it to
+# false, or delete the line, to restore the 2026-10-23 rule: never a Fable lead (Fable only through the `fable-deep`
+# sub-agent or a `frontier` slice).
 
 [lead]
 model = "opus"
 effort = "high"
 pipeline_model = "sonnet"
 pipeline_effort = "medium"
-
-[escalation]
-# Operator 2026-10-18: cheap first; a failed slice climbs one rung, never straight to frontier.
-ladder = ["mechanical", "bulk", "code", "judgment", "frontier"]
-
-# Kinds off the ladder land where the operator says, not where an index would put them.
-[escalation.next]
-research = "judgment"
+fable_lead = true
 
 [substrate]
 # Pools `route_agent.py substrate` may name although aiuse's [disabled_services] switches them
@@ -214,24 +202,24 @@ note = "orchestration pool; Fable is a sublimit of the SAME weekly window (at mo
 judgment_tier = true
 access = "cli-only"
 # Code on Sonnet 5.5 (operator 2026-10-18: "claude should be in a code pool, it's just fable
-# that shouldn't be"); rank 12 keeps the use-it-or-lose-it antigravity-claude pool (11) first.
+# that shouldn't be"); rank 12 keeps the use-it-or-lose-it pools first.
 # This replaces the 2026-10-15 "no code row" rule; Fable stays frontier-only. No research row;
 # Haiku lookups go through the Agent tool, not acp-dispatch. Fable at xhigh is never suggested:
 # acp-dispatch makes it an operator-approved run (2026-10-18).
 models = { judgment = "opus --effort high", frontier = "fable --effort high", code = "sonnet --effort high" }
 
 # The Claude Max plan's monthly API credits (an expiring dollar grant; aiuse labels the pool
-# "omp credits", provider `omp`), reached through the omp TUI (`acp-run omp`, `omp acp`) or
+# "omp credits", provider `omp`), reached through Paseo's omp provider (`acp-dispatch omp`) or
 # any ANTHROPIC_API_KEY path. Operator 2026-10-19 lifted the 2026-10-15 per-run gate: a normal
-# tier, used with discernment. First for `api-only` work (rank 1; pi's OpenAI API pool is also eligible),
+# tier, used with discernment. First for `api-only` work (rank 1),
 # otherwise `code` and `bulk` slices so the grant is fully spent before it expires; never left
-# unspent. Code ranks behind the use-it-or-lose-it agy pool (11) and claude (12) and ahead of
+# unspent. Code ranks behind claude (12) and ahead of
 # Cursor. `grant_days` makes the router treat the pool as an expiring grant: it earns the
 # burn-first bonus while it holds more than burn_first_waste_min points above an even spend
 # over the grant period (a pool far from exhausted late in the month), see route_agent.py.
 [[service]]
 name = "omp"
-cli = "omp (Claude API credits: acp-run omp --model anthropic/claude-sonnet-5-5)"
+cli = "omp (Claude API credits: acp-dispatch omp --model anthropic/claude-sonnet-5-5)"
 good_at = { api-only = 1, judgment = 2, code = 13, bulk = 35 }
 billing = "credits"
 # Adversary rounds and other judgment slices (operator 2026-10-23): Opus 5.5 at high on the API credits
@@ -248,21 +236,6 @@ ready_probe = "omp-anthropic"
 max_parallel = 2
 access = "cli-only"
 models = { api-only = "anthropic/claude-sonnet-5-5 --effort high", judgment = "anthropic/claude-opus-5-5 --effort high", code = "anthropic/claude-sonnet-5-5 --effort high", bulk = "anthropic/claude-haiku-5-5 --effort low" }
-
-# Pi spends the OpenAI API billing pool, NOT the Codex CLI subscription (2026-11-03).
-# A nonzero floor also makes the existing router fail closed without a measured
-# quota reading; credentials or a model catalog alone are not spending capacity.
-[[service]]
-name = "pi"
-cli = "pi (OpenAI API: acp-run pi --model openai/gpt-6.1-sol)"
-good_at = { api-only = 2, code = 15, bulk = 35, mechanical = 20 }
-billing = "credits"
-access = "api"
-reserve_floor = 1.0
-measured_only = true
-max_parallel = 2
-note = "OpenAI API billing (codex-api scope), independent of the Codex subscription; requires measured capacity"
-models = { api-only = "openai/gpt-6.1-sol --effort medium", code = "openai/gpt-6.1-sol --effort high", bulk = "openai/gpt-5.4-mini --effort low", mechanical = "openai/gpt-5.4-mini --effort low" }
 
 [[service]]
 name = "codex"
@@ -284,13 +257,13 @@ access = "cli-only"
 # available options we can use it for non-frontier"): `plenty_kinds` makes those kinds eligible
 # only while the pool's tightest window holds at least [routing].plenty_min percent; below it
 # (or with no fresh reading) codex is frontier-only again. They rank like any other pool
-# (code 15: behind agy's Claude pool, claude, omp and Cursor Auto, ahead of zai; opencode-go
+# (code 15: behind claude, omp and Cursor Auto; opencode-go
 # has no code rank since 2026-10-30; mechanical 12, bulk 20: behind the free pools). judgment too (operator 2026-10-25:
 # a Codex adversary round was refused; rank 3 behind claude 1 and omp 2, so it is eligible, not
 # preferred, on gpt-6.1-sol at high). astra stays frontier-only (`[dispatch].frontier_models`),
 # and no research/github row: conservative.
 # Models: code on gpt-6.1-sol, the "latest workhorse model for coding and everyday work"
-# (acp-run codex --info, 2026-10-25), at medium; bulk and mechanical on gpt-6-luna, "fast and
+# (the codex model list, 2026-10-25), at medium; bulk and mechanical on gpt-6-luna, "fast and
 # affordable ... for easier tasks", at low. No cheaper tier is adequate for code (luna is for
 # easier tasks) and nothing here measures the older gpt-6-sol as cheaper.
 # 2026-10-18's astra-wave incident: its 5-hour window holds about one hard slice. acp-dispatch
@@ -299,71 +272,6 @@ access = "cli-only"
 # and the in-flight rule await re-calibration from `route_agent.py calibrate`.
 plenty_kinds = ["judgment", "code", "bulk", "mechanical"]
 models = { frontier = "gpt-6-astra --effort high", judgment = "gpt-6.1-sol --effort high", code = "gpt-6.1-sol --effort medium", bulk = "gpt-6-luna --effort low", mechanical = "gpt-6-luna --effort low" }
-
-# agy's second pool: Claude Opus/Sonnet 5.5 and GPT via the same Google AI
-# Pro subscription, a separate 5h/weekly window from Gemini. Operator
-# 2026-10-10: it has a lot of headroom, so use it. Real Claude-class
-# coding and review capacity that is otherwise wasted at each reset.
-# Reach it ONLY through `acp-run agy --model claude-opus-5-5 --effort high`
-# (or claude-sonnet-5-5), never `agy -p`; see model-routing's agy rules.
-# Over ACP these ids exist only because acp-run sends clientInfo.name
-# "zed": agy_acp_server 1.3.0 gives non-Gemini models only to zed, xcode
-# and JetBrains.* clients (supports_third_party_models(), deliberate, so a
-# client-name workaround a later .par may close; antigravity-cli#1168).
-# acp-dispatch checks --model against `acp-run agy --info` before running.
-[[service]]
-name = "antigravity-claude"
-cli = "agy (acp-run agy --model claude-opus-5-5 --effort high | claude-sonnet-5-5)"
-good_at = { code = 11, research = 3, mechanical = 6 }
-billing = "subscription"
-note = "Claude/GPT pool on the Google AI Pro plan; use-it-or-lose-it, ACP client only"
-burn_first = true
-pool = ["antigravity", "claude_gpt"]
-max_parallel = 3
-access = "cli-only"
-agent = "agy"
-models = { code = "claude-opus-5-5 --effort high", research = "claude-sonnet-5-5 --effort high", mechanical = "claude-sonnet-5-5 --effort low" }
-
-[[service]]
-name = "antigravity"
-cli = "agy (gemini)"
-good_at = { bulk = 1, research = 1, mechanical = 2 }
-billing = "subscription"
-# Google AI Pro does NOT include API access — subscriptions are chat
-# -interface only, and a Gemini API key bills separately. Reaching
-# it via the agy CLI spends the subscription; wiring Hermes to a
-# GEMINI_API_KEY would spend real money.
-note = "big context, summarisation, multimodal; most-wasted pool"
-max_parallel = 2
-access = "cli-only"
-agent = "agy"
-# No `code` (2026-10-18, plektra lead with djbclark's approval): Flash is GLM-5.3 / Kimi K2.6
-# tier on hard agentic coding (Terminal-Bench 4.0 19.1% vs Sonnet 5.5's 70.6%, FrontierSWE v2
-# 19.6% vs 61.9%; benchlm.ai 2026-10-17) and strong only on saturated benchmarks.
-models = { bulk = "gemini-3.8-flash --effort medium", research = "gemini-3.8-flash --effort high", mechanical = "gemini-3.8-flash --effort low" }
-
-# agy's third pool: Gemini 4 Argon, frontier FALLBACK only (operator 2026-10-31). aiuse 1.5 reports its weekly window as
-# its own pool family `gemini_argon` (antigravity/gemini_argon, independent of the Flash `gemini` row), because a tiny
-# Argon call moved only that window; `pool` below is the ordinary mapping. The model -> family table is
-# route_agent.antigravity_family (`gemini-4-argon*` -> gemini_argon). Used only while codex OR claude is short of quota
-# for `frontier` (astra under its 60% estimate floor, or Fable's sublimit under frontier1_min_left, or either pool under
-# the router's 15%): `fallback_after` makes route() skip it otherwise and acp-dispatch refuse it (route-override
-# escapes), by the same predicate. A per-wave cap is not short. No fresh reading: never used. Rank 5 and no burn-first
-# bonus (route() gives a fallback none) keep it behind any pool it sits behind that is not short. Carbon (Google's staged rollout, 2026-10-28) is not reachable through agy yet; recheck weekly.
-[[service]]
-name = "antigravity-argon"
-cli = "agy (acp-run agy --model gemini-4-argon --effort high; frontier fallback behind gpt-6-astra and Fable)"
-good_at = { frontier = 5 }
-billing = "subscription"
-note = "Gemini 4 Argon on the Google AI Pro plan, 1M context; own weekly window; frontier fallback only (operator 2026-10-31)"
-judgment_tier = true
-pool = ["antigravity", "gemini_argon"]
-fallback_after = ["codex", "claude"]
-window = "Gemini 4 Argon weekly"
-max_parallel = 1
-access = "cli-only"
-agent = "agy"
-models = { frontier = "gemini-4-argon --effort high" }
 
 # opencode-zen-free is NOT a separate provider — it is the free subset of
 # opencode-zen's models. Kept as its own row because the free and paid
@@ -391,71 +299,10 @@ note = "Go Plus shares one monthly allowance; bulk and mechanical only, never co
 agent = "opencode"
 models = { bulk = "opencode-go/minimax-m3", mechanical = "opencode-go/gpt-6-luna --effort low" }
 
-[[service]]
-name = "zai"
-cli = "zcode (GLM-5.3)"
-good_at = { bulk = 3, mechanical = 3, code = 16, research = 12 }
-billing = "subscription"
-# zcode (Z.ai's own TUI, GLM-5.3 / GLM-5.3-Flash x low/high/max) is
-# the zai Coding Plan's TUI; acp-run zcode drives it.
-note = "coding plan; an everyday code and bulk pool"
-agent = "zcode"
-# zcode lists each model under two providers since 2026-10-18 (builtin:zai\ and
-# builtin:zai-coding-plan\), so a bare GLM-5.3 is ambiguous and acp-dispatch refuses it;
-# the coding-plan ids are the subscription's.
-models = { code = 'builtin:zai-coding-plan\GLM-5.3 --effort high', research = 'builtin:zai-coding-plan\GLM-5.3 --effort high', bulk = 'builtin:zai-coding-plan\GLM-5.3-Flash --effort low', mechanical = 'builtin:zai-coding-plan\GLM-5.3-Flash --effort low' }
-
-# Alibaba's coding plan through the qwen TUI. aiuse keeps `alibaba` under
-# [disabled_services] (operator 2026-10-08), so `plan` skips it until the
-# operator re-enables it there; the row exists so discovery does not
-# surface the bare `qwen` agent as an unprofiled, un-disable-able service.
-[[service]]
-name = "alibaba"
-cli = "qwen (Alibaba coding plan)"
-good_at = { bulk = 30, mechanical = 30, code = 30, research = 30 }
-billing = "subscription"
-note = "disabled in aiuse until the operator re-enables it"
-agent = "qwen"
-models = { code = "qwen3.8-max --effort medium", research = "qwen3.8-max --effort medium", bulk = "qwen3.8-max --effort low", mechanical = "qwen3.8-max --effort low" }
-
-# MIT SIPB-hosted models through the crush fork (ACP). Free, no quota
-# window in aiuse, 30B-class: light bulk and mechanical slices only.
-[[service]]
-name = "crush"
-cli = "crush (SIPB models, free)"
-good_at = { bulk = 8, mechanical = 8 }
-billing = "free"
-note = "MIT SIPB-hosted 30B-class models; light slices only"
-models = { bulk = "sipb-llms:qwen3.6:35b-a3b-q4_K_M", mechanical = "sipb-llms:qwen3.6:35b-a3b-q4_K_M" }
-
-[[service]]
-name = "devin"
-cli = "devin"
-good_at = { bulk = 20, code = 45 }
-billing = "subscription"
-note = "disabled in Orca's roster — dormant by choice"
-
-# RESERVE (operator 2026-10-15: "never deplete the grok and copilot
-# pools"; grok released 2026-10-18, copilot stays): GitHub-side Copilot code review of commits draws on this
-# allowance. Hard floor, one slice at a time, only for GitHub-shaped work.
-[[service]]
-name = "copilot"
-cli = "copilot"
-good_at = { github = 1 }
-billing = "subscription"
-# GitHub: the Copilot endpoint is for officially supported clients
-# only. Using it as a generic model provider violates the ToS and
-# risks account suspension. CLI only, never a Hermes provider.
-note = "RESERVE: PR review, repo Q&A (official client only)"
-access = "forbidden"
-reserve_floor = 60.0
-max_parallel = 1
-models = { github = "claude-sonnet-5.5 --effort medium" }
-
 # GrokBot (the cloud Chief of Staff) runs on its own separate Cursor pool since
-# 2026-10-18 (operator, after the $60 Cursor plan), not on the grok TUI's SuperGrok pool.
-# aiuse reports it as the separate provider `grok-bot` ("Grok Bot Weekly", no cli_binary):
-# it has no [[service]] here and is never a routing target. The two Cursor services below
+# 2026-10-18 (operator, after the $60 Cursor plan). aiuse reports it as the separate provider
+# `grok-bot` ("Grok Bot Weekly", no cli_binary): it has no [[service]] here and is never a
+# routing target ([routing].never_route). The two Cursor services below
 # are Cursor Auto and third-party routing, unchanged; do not route into the GrokBot pool.
 # Cursor reports two model sublimits of one monthly total: the Auto pool
 # (Cursor's own models) and the third-party pool. They drain at very
@@ -482,7 +329,8 @@ note = "Cursor third-party pool"
 agent = "cursor"
 models = { code = "claude-sonnet-5-5 --effort medium", mechanical = "claude-haiku-5-5 --effort low" }
 
-# Cursor Cloud Agents (bin/cursor-cloud, `acp-dispatch cursor-cloud`, 2026-10-20): the slice
+# Cursor Cloud Agents (bin/cursor-cloud, 2026-10-20; `cursor-cloud launch` directly since the acp-dispatch
+# Paseo shim, 2026-11-07, which `route_agent.py` prints as the dispatch line): the slice
 # runs in Cursor's cloud and pushes a cursor/... branch; the lead reviews and opens the PR
 # (never autoCreatePR). Billed at API price against the same Cursor pool as the third-party
 # row (aiuse reports one `cursor` provider; shares_pool copies that reading). Ranked behind
@@ -498,20 +346,31 @@ shares_pool = "cursor"
 max_parallel = 2
 models = { code = "claude-sonnet-5-5", bulk = "claude-haiku-5-5", mechanical = "claude-haiku-5-5" }
 
-# Ordinary subscription pool (SuperGrok). It was a reserve 2026-10-15..18 because GrokBot
-# drew on it; GrokBot moved to its own Cursor pool 2026-10-18 (operator), so the floor and
-# the one-slice cap are gone. Ranked behind the burn-first pools (antigravity, cursor-auto).
+# The Google AI Pro plan's Gemini 4 Argon window: frontier FALLBACK only (operator 2026-10-31, PR 224). Retired with the
+# agy TUI on 2026-11-06 and restored 2026-11-07 (slim-down E7) on Paseo's antigravity provider, because tendcf and nix2cf
+# review route 3 (`acp-dispatch antigravity --model gemini-4-argon --kind frontier`, their AGENTS.md) needs a frontier
+# row: without one the dispatch is refused as ineligible. aiuse reports the window as pool family `gemini_argon`
+# (antigravity/gemini_argon). Used only while codex OR claude is short of quota for `frontier` (`fallback_after`: route()
+# skips it otherwise); a fallback with no fresh reading is never used. The acp-dispatch shim (E6) does not apply the
+# fallback predicate itself: the lead dispatches Argon only when `route_agent.py plan` names it.
 [[service]]
-name = "grok"
-cli = "grok"
-good_at = { realtime-web = 1, research = 25, bulk = 30 }
+name = "antigravity-argon"
+cli = "antigravity (Gemini 4 Argon; frontier fallback behind gpt-6-astra and Fable)"
+good_at = { frontier = 5 }
 billing = "subscription"
-note = "SuperGrok subscription; realtime X/web angle first, research and bulk behind the burn-first pools"
-models = { realtime-web = "grok-4.7 --effort high", research = "grok-4.7 --effort high", bulk = "grok-4.7-build-fast --effort low" }
+note = "Gemini 4 Argon on the Google AI Pro plan, 1M context; own weekly window; frontier fallback only (operator 2026-10-31)"
+judgment_tier = true
+pool = ["antigravity", "gemini_argon"]
+fallback_after = ["codex", "claude"]
+window = "Gemini 4 Argon weekly"
+max_parallel = 1
+access = "cli-only"
+agent = "antigravity"
+models = { frontier = "gemini-4-argon --effort high" }
 
 [[service]]
 name = "clinepass"
-cli = "cline"
+cli = "cline-pass API (Hermes/Dann substrate; no TUI)"
 good_at = { bulk = 40, code = 40, mechanical = 40 }
 billing = "subscription"
 # An API-key bundle we hold, so Hermes may call it directly. The
@@ -520,7 +379,6 @@ billing = "subscription"
 # [disabled_services] keeps it out of `plan` since 2026-10-08.
 note = "Hermes-usable API pool; watch the burn alert"
 access = "api"
-agent = "cline"
 models = { bulk = "cline-pass/deepseek-v4.1-flash", mechanical = "cline-pass/deepseek-v4.1-flash", code = "cline-pass/glm-5.3" }
 
 # The paid half of the same provider. Retired with the prepaid tier, not
@@ -533,19 +391,3 @@ billing = "prepaid"
 note = "paid half of opencode-zen; prepaid tier retired 2026-08-23"
 retired = true
 agent = "opencode"
-
-[[service]]
-name = "openrouter"
-cli = "opencode-ralph-tui-openrouter"
-good_at = { code = 50, bulk = 50 }
-billing = "prepaid"
-note = "prepaid retired 2026-08-23"
-retired = true
-
-[[service]]
-name = "deepseek"
-cli = "opencode-ralph-tui-deepseek"
-good_at = { code = 50, bulk = 50 }
-billing = "prepaid"
-note = "prepaid retired 2026-08-23"
-retired = true

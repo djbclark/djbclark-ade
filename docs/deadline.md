@@ -1,18 +1,18 @@
 # deadline: a registered maximum run time, enforced from outside
 
-2026-11-01. Why a new doc and not a section in `skills/loadwatch/SKILL.md`: loadwatch is the load watcher's role card; a deadline is
-a rule every agent and script follows, whatever it runs, so it needs its own page that AGENTS-level text can link.
+2026-11-01. A deadline is a rule every agent and script follows, whatever it runs, so it has its own page that AGENTS-level
+text can link.
 
 ## The rule
 
 **Before any command or wait that may run longer than ~2 min, register a deadline, or use `deadline run`.**
-Hours were lost on 2026-11-01 to waits with no bound (`load-watch admit --wait` up to 2 h, a review wait of 2 h, `pr-wait` unbounded,
+Hours were lost on 2026-11-01 to waits with no bound (`load-watch admit --wait` up to 2 h, a review wait of 2 h, a PR waiter unbounded,
 a lead blocked in a wait). A deadline names the maximum, an owner who is told when it passes, and what happens then.
 
 ## Commands (`bin/deadline`; `deadline --help` is the reference)
 
 ```sh
-deadline run --budget 20m --heartbeat 5m --owner "$PASEO_AGENT_ID" -- bin/pr-wait 123      # register, run in its own group, deregister
+deadline run --budget 20m --heartbeat 5m --owner "$PASEO_AGENT_ID" -- gh pr checks 123 --watch --required   # register, run, deregister
 deadline start review-123 --budget 2h --owner "$PASEO_AGENT_ID" --on-expire relay          # a wait with no process to kill
 deadline beat review-123 --checkpoint /abs/path/state.json                                  # heartbeat + latest checkpoint
 deadline extend review-123 --by 30m --reason "reviewer still running"                       # BEFORE expiry only; capped (default cap = budget)
@@ -23,11 +23,12 @@ deadline install [--ade DIR] [--dry-run] [--backend auto|launchd|systemd|cron] [
 ```
 
 `--on-expire`: `kill` (default: SIGTERM to the process group, SIGKILL after `--grace`, default 60 s; Hermes is pinged), `notify` (owner and Hermes
-only, nothing killed), `relay` (kill, then tell the owner through `relay.py` with the name, budget, overrun and checkpoint), `reroute:RECORD`
-(kill, then `acp-dispatch reroute RECORD --escalate --detach --no-wait`: route_agent climbs one rung of `[escalation]` in `config/routing.toml`;
-deadline never names a model; the reroute is waited on up to 120 s and never killed if slower).
+only, nothing killed), `relay` (kill, then tell the owner through `relay.py` with the name, budget, overrun and checkpoint). `reroute:RECORD`
+was retired on 2026-11-07 (slim-down E7; the acp-dispatch shim has no `reroute`): `start` and `run` refuse it with exit 2 pointing at `relay`,
+whose owner re-dispatches the slice on the next rung (`model-routing` D2). A record registered with it before then is stopped, nothing is
+dispatched, and the owner and the operator are told "reroute FAILED ... nothing replaced it".
 **A budget is enforced, never only announced.** The one named exception is the announce-only wait: a record with no `--pid`/`--pgid` has
-nothing to kill, so `start` refuses the default `kill` for it (exit 2) and it must say `--on-expire notify`, `relay` or `reroute:RECORD`
+nothing to kill, so `start` refuses the default `kill` for it (exit 2) and it must say `--on-expire notify` or `relay`
 explicitly; `--on-expire notify` with a pid is likewise the operator's explicit choice.
 **`--holder PID` (2026-11-02; announce-only `notify`/`relay` records, so no `--pid`/`--pgid`: exit 2 otherwise, or for a pid that is not running).** An announce-only record has
 no process of its own, so nothing tells the sweep that the party meant to heartbeat it has died. `--holder` names that party: the process whose
@@ -69,17 +70,16 @@ exits between two `run` polls is not `lost`: while its `run` registrar is alive 
 
 ## Waiters register themselves (2026-11-02)
 
-`bin/pr-wait`, `bin/load-watch admit --wait S` (S > 0; a pure check waits for nothing) and `bin/acp-dispatch-wait` register a deadline for their own
+`bin/load-watch admit --wait S` (S > 0; a pure check waits for nothing) and `bin/acp-dispatch-wait` register a deadline for their own
 wait by default, through `deadline run` (B9 rule 2; budgets are the plan's B9 rule 3). A waiter holds no work, so on expiry the action is `kill` of
 **its own process group** and nothing else: nothing is lost, and the caller sees exit 124 (re-run it).
 Two exceptions. `acp-dispatch-wait` exits **76**, never 124: 124 already means "the record's `wait_timeout` passed" (the slice timed out), and a lead that
 read a deadline stop as that would re-task a slice that is still running; 76 means only the waiter was stopped, so re-arm with the same line. It tells the
-two apart by the record's state (`expired`) after `deadline run` returns 124. And `load-watch admit`: its callers (`acp-dispatch`, `local-review`, `bg`) fail OPEN on an exit they do not know, so a deadline stop is
+two apart by the record's state (`expired`) after `deadline run` returns 124. And `load-watch admit`: its callers (`acp-dispatch`, `bg`) fail OPEN on an exit they do not know, so a deadline stop is
 answered as **exit 75, "still too hot"** (with a stderr line), the answer the wait would have given had it run out.
 
 |waiter|name|budget|heartbeat|
 |---|---|---|---|
-|`pr-wait PR`|`pr-wait-<repo>-<PR>-<pid>`|min(`--timeout`, 60 min) + 60 s|before every `gh` call and per poll; timeout 5 min or 4 polls + 2 min if longer|
 |`load-watch admit --wait S`|`admit-wait-<pid>`|min(S, 30 min) + 60 s (the admission class maximum)|per poll; timeout 5 min|
 |`acp-dispatch-wait RECORD DONE`|`dispatch-wait-<record file name>-<pid>`|min(the record's `wait_timeout` read at arm time, 2 h) + 60 s (2 h when 0 or unreadable; 2 h is the longest a lead's tool holds a waiter, so a longer slice is covered by re-arming on 76)|per 60 s pass; timeout 10 min|
 
@@ -90,10 +90,10 @@ never outlives its own `--timeout`/`--wait` by more than the margin plus the swe
 1. **Why a supervisor.** `deadline start --pid` refuses the registrar's own parent (safety rule 3), so a process cannot register itself. The waiter
    runs *itself* under `deadline run --name N --budget B --heartbeat H --on-expire kill -- SELF ARGS` and returns its exit code; the inner copy
    waits. `bin/deadline` is unchanged, and `done` on every exit path (success, failure, signals: the supervisor forwards SIGTERM/SIGINT/SIGHUP
-   once) is `deadline run`'s own bounded stop. `bin/deadline_wait.py` is the shared code for the two Python waiters; `acp-dispatch-wait` does the
+   once) is `deadline run`'s own bounded stop. `bin/deadline_wait.py` is the Python waiter's code (the PR waiter that shared it was removed 2026-11-06, slim-down E8); `acp-dispatch-wait` does the
    same in bash. The price is one resident `deadline run` Python process per registered waiter (`acp-dispatch-wait` was bash-only by design on
    2026-10-18; `--no-deadline` restores that; whether this waiter should be opt-in is the operator's call).
-   Names carry the supervisor's pid (each run leaves one terminal record file until `prune` removes it after 7 days), so a second waiter for the same PR (another repo, a new head) or record (a re-arm) is never refused as "name already live".
+   Names carry the supervisor's pid (each run leaves one terminal record file until `prune` removes it after 7 days), so a second waiter for the same record (a re-arm) or a second admission wait is never refused as "name already live".
 2. **Opt out and nesting.** `--no-deadline` on each. A waiter started under `deadline run` (env `DEADLINE_NAME` set, even empty) does not register
    again and does not beat the caller's record; the inner copy of a supervised waiter sees the same variable, which is also what stops a loop. The inner
    copy removes `DEADLINE_WAIT_NAME/MARK/SUPERVISOR` from its environment on entry (it keeps its identity in process state), so what it starts
@@ -105,18 +105,19 @@ never outlives its own `--timeout`/`--wait` by more than the margin plus the swe
    **Signals.** SIGTERM/INT/HUP to the supervisor stop the wait with the bounded stop of `deadline run`; the bash supervisor starts `deadline run` in its
    own process group (`set -m`), so a signal sent to the whole caller group reaches it once, never twice (a second signal means SIGKILL without grace).
    `done` holds for every *catchable* exit; a SIGKILLed supervisor cannot stop its child, so the supervised copy checks the supervisor's pid on every
-   poll (beat; the bash waiter every 10 s tick) and ends itself with 143: no orphaned wait, no stale `pr-wait` duplicate-guard lock. The enforcer still bounds it.
+   poll (beat; the bash waiter every 10 s tick) and ends itself with 143: no orphaned wait. The enforcer still bounds it.
 4. **Tests** (`tests/test_deadline_wrappers.py`) run each waiter against a temp `DEADLINE_STATE_DIR`; `tests/conftest.py` exports an empty
    `DEADLINE_NAME` so no other test registers in the real state directory.
 
-## Known gaps (follow-ups, `docs/queue.md`)
+## Known gaps (follow-ups; the `review-pr` one is carried in `docs/queue.md`)
 
-`local-review` does not register its own deadline yet (B9 rule 1; `bg` does since 2026-11-01, below); `local-review` still bounds its load wait with
-`--load-wait` (default 1800 s) and, through `load-watch admit --wait`, now holds an `admit-wait-<pid>` deadline of its own for that gate.
+`bin/review-pr` and `gh pr checks --watch` do not register a deadline of their own (2026-11-06): run them under `deadline run` (the example
+above); `bin/review-launch` bounds its own run with `--timeout` (default 900 s) and kills the run's process group at the end. `bg` registers since
+2026-11-01 (below).
 
 ## `bg` records and the holder (2026-11-02)
 
-`bg` (`~/ops/site-private-djbclark/bin/bg`, alert-only) registers two `--on-expire notify` records, each with a `--holder`: `bg-wait-PID-T` for the load/slot
+`bg` (site-djbclark's `bin/bg`, `~/ops/site-public-djbclark/bin/bg`; the site-private path is a symlink to it; alert-only) registers two `--on-expire notify` records, each with a `--holder`: `bg-wait-PID-T` for the load/slot
 wait (holder: `bg` itself, which beats it) and `bg-run-PID-T` for the run (holder: the detached watcher, which beats it). The run record is registered
 only once the run has started: `bg` writes a private marker file just before it execs the command, and the watcher registers when it sees it; if `bg` is
 gone first, nothing is registered. Before the holder existed, a watcher killed with its process group (or a `bg` SIGKILLed, so its EXIT trap never ran)
@@ -169,22 +170,24 @@ hand: two schedulers are safe (every record is under its own flock) but they dou
 
 ## Delivery and ownership details (PR 223 review, 2026-11-01)
 
-1. The owner notice is tracked apart from the at-most-once kill and reroute: a relay that exits non-zero stays `notice.done = false` in the record and later
-   sweeps retry it (at most 5 times, 60 s x attempt apart; `deadline ls --json` shows it). Recovery is marked done when the kill and reroute ran, not
+1. The owner notice is tracked apart from the at-most-once kill (the reroute went 2026-11-07, E7; a pre-2026-11-07 reroute record is item 22's case): a relay that exits non-zero stays `notice.done = false` in the record and later
+   sweeps retry it (at most 5 times, 60 s x attempt apart; `deadline ls --json` shows it). Recovery is marked done when the kill ran, not
    when the owner was reached.
 2. `deadline run` reserves its name (a `starting` placeholder, left alone by the sweep for 60 s) BEFORE it starts the command, so a refused name never
    ran the command; and it only advances or finishes the record carrying its own `reg_id`, so an old `run` whose terminal name was registered again
    cannot mark the new registration done.
-3. The owner relay asks for delivery proof (`relay.py ... --ack --wait 20`: exit 0 only when delivered; 1 not delivered and 3 unverified stay pending and
-   are retried) and declares its sender (`RELAY_SENDER_NAME`, `deadline-sweep` in the launchd plist, `deadline` otherwise), since a launchd job has no
-   session identity and relay.py refuses an unidentified sender with exit 4.
+3. The owner relay reads delivery proof from the relay shim (2026-11-06, docs/slim E3: `relay.py OWNER --message-file -`, which reads `paseo send
+   --json`'s `.status`: exit 0 only for `sent` or `completed`, which a sourceless send such as deadline's gets; 2 not delivered (`queued`, `timeout`,
+   `permission`, `error`, or a target `paseo agent inspect` does not show idle or running with no card), 1 paseo failed, 3 not a Paseo agent and 4 no
+   sender stay pending and are retried) and declares its sender (`RELAY_SENDER_NAME`, `deadline-sweep` in the launchd plist, `deadline` otherwise),
+   which the shim names in a `[relay from NAME]` prefix, since a launchd job has no Paseo id.
 4. A stop is confirmed only when the target is `gone` (or its pid was recycled). `unverified` (a leaderless group whose anchor exited while other
    members may still run) is never a confirmed stop: the record goes to `kill-failed`, the owner is told, nothing is rerouted. An empty group is `gone`.
 5. `deadline run` keeps enforcing after its command's leader exits: while the process group has survivors it sends SIGKILL after the grace and runs the
    recovery itself before returning 124.
 6. Lock files are unlinked by `prune` only while it holds them; every acquirer re-checks that its locked inode is still the file on disk and retries
    otherwise, so two registrars never hold different inodes of "the same" lock. Terminal records are deleted under their lock after a fresh reload.
-7. Recovery I/O (hermes-ping, owner relay up to 90 s, reroute up to 120 s) runs in a detached `deadline _work NAME` process, never inside the 60 s
+7. Recovery I/O (hermes-ping, owner relay up to 90 s) runs in a detached `deadline _work NAME` process, never inside the 60 s
    enforcement pass: the record is saved with the recovery order (`recovery.claimed` makes it at-most-once, and the worker claims it under the record lock
    before any call) and later records and SIGKILL escalations stay on schedule. `DEADLINE_INLINE_WORKER=1` runs the worker inline (tests).
 8. `deadline run` starts its command behind a handshake: the command is exec'd only after its record (pid and start time) is persisted. If `run` dies or is
@@ -200,7 +203,7 @@ hand: two schedulers are safe (every record is under its own flock) but they dou
     SIGKILL after `--grace` (a second signal escalates to SIGKILL at once). Nothing is announced or rerouted; `run` exits 128+signal.
 13. The agent scan (`paseo ls` + `paseo inspect` per running agent) runs in a detached `deadline _agents` worker (throttled to one per 5 min, stamped at
     dispatch, one scan at a time by a lock), never inside the enforcement pass; `deadline ls --agents` still reads it synchronously.
-    `--on-expire reroute:PATH` stores PATH resolved against the registering shell's directory. Interrupting `deadline run` after a notify-only
+    (`--on-expire reroute:PATH` stored PATH resolved against the registering shell's directory; the mode was retired 2026-11-07.) Interrupting `deadline run` after a notify-only
     expiry still stops the command (SIGTERM, then SIGKILL after `--grace`).
 14. Cancelling `deadline run` keeps going until the whole process group is gone (also after the leader exited, bounded 10 s after SIGKILL), and
     a cancellation during an expiry stop is recorded (`cancelled`, grace clock kept) so no recovery or reroute runs. A terminal name whose owner notice
@@ -224,7 +227,7 @@ hand: two schedulers are safe (every record is under its own flock) but they dou
     sweep does not turn the registration into `lost`. When the owner stays unreachable through all 5 notice attempts, one Hermes ping says so (`notice.escalated`).
 21. Names are compared case-insensitively (reserved `agents`, and two names differing only in case are refused: one file on a case-insensitive volume). The sweep
     advances only the record it re-reads under the lock; one deleted since its snapshot is skipped, never resurrected from the stale copy.
-22. A failed automatic reroute (`acp-dispatch reroute` exits non-zero) is never silent: the worker queues a tracked owner notice (retried like any other) and
-    pings the operator once; the dispatch itself stays at-most-once. `deadline ls --json` shows the recovery outcome and whether the owner notice was delivered.
-23. A reroute still running when the worker's wait ends (`DEADLINE_REROUTE_WAIT`, default 900 s; the worker is detached) is reported as outcome UNKNOWN, never as a
-    failure: the owner notice and operator ping say so and tell the reader to check `acp-dispatch` before rerouting again. The dispatch is never killed.
+22. A record that still carries the retired reroute action is never silent: the worker queues a tracked owner notice (retried like any other) and
+    pings the operator once ("reroute FAILED ... nothing replaced it"); nothing is dispatched. `deadline ls --json` shows the recovery outcome and whether
+    the owner notice was delivered.
+23. (Retired 2026-11-07 with the reroute action: the "outcome UNKNOWN" report of a reroute still running after `DEADLINE_REROUTE_WAIT`.)

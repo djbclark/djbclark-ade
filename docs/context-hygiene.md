@@ -1,5 +1,11 @@
 # Context hygiene — 2026-10-25
 
+Trimmed 2026-11-07 (slim-down E11): the tools are `bin/context-watch` (how full each running Claude agent is,
+section 6), `bin/context-budget-check` (what a fresh session costs, section 7), the Claude nudge hook
+(`claude/hooks/context_size_nudge.py`, section 2) and OpenCode's native compaction plugin (section 3). `self-slash`,
+which typed `/new` and `/compact` into an agent's own input, was removed 2026-11-06 (E4): compaction is left to
+auto-compaction, and a clear is the operator's `/clear` (the `handoff` skill, Step 9).
+
 Context capacity is a correctness ceiling, not a cost budget. Cached input is
 billed again on every request, and Go models debit the same monthly allowance
 at different rates. Choose a suitable economical model before trying to save
@@ -14,9 +20,8 @@ Continuous protection against unplanned interruption is the separate, planned
 1. At a completed task, write a handoff before beginning unrelated work. Write the
    owned Tier 1 log and handoff with absolute paths, branch/head, dirty files,
    unresolved decisions, active job records, unread results and exact next steps.
-2. A top-level session on a supported host runs the `handoff` skill and lets its
-   Step 9 queue one new-session/baton cycle. A dispatched slice writes a
-   document-only handoff; it must never clear or archive its parent.
+2. A top-level session runs the `handoff` skill; its Step 9 leaves the operator `/clear` then `/baton`, or starts
+   a successor. A dispatched slice writes a document-only handoff; it must never clear or archive its parent.
 3. Never throw away an unsent draft, interrupt a running worker, or reset before
    the handoff is durable. Re-arm existing jobs instead of launching their
    work again. A failed lifecycle operation is reported, not retried in a loop.
@@ -45,7 +50,7 @@ found by searching every byte appended to the transcript since the previous prom
 As of 2026-10-29, `claude/hooks/context_size_nudge.py` supports both
 `UserPromptSubmit` (plain-text stdout) and `PostToolUse` (JSON
 `hookSpecificOutput.additionalContext`). `agents/claude/settings.json.tmpl` registers both
-(`PostToolUse`: matcher `*`, `hook-deadline 2`, timeout 5). Nothing applies the template
+(`PostToolUse`: matcher `*`, `hook-deadline 2`, timeout 20). Nothing applies the template
 (`agents/README.md`), so the live `~/.claude/settings.json` gets the same entry by hand,
 after this code is on the shared checkout the hook symlink points at (the sub-agent guard
 below must be live first); until then the live file runs the hook on prompt submit only.
@@ -100,10 +105,8 @@ lifetime token totals and output totals do not measure current context.
 
 The plugin adds the `ade_compact` tool, scoped by the native tool context. Use
 it for manual native compaction. The plugin never rewrites shell or JavaScript
-source before permission matching. A supported host controller may explicitly
-supply a validated `ADE_OPENCODE_SESSION_ID` and `ADE_OPENCODE_DIRECTORY` for
-`bin/self-slash "/compact"` to call the same guarded RPC in its exact location.
-The RPC and `ade_compact` use the **same** provider/session
+source before permission matching. (A host controller, `self-slash`, could call the same guarded RPC until
+2026-11-06.) `ade_compact` uses the **same** provider/session
 verification, durable pending state, cooldown and ineffective-baseline block as
 automatic compaction. No separate shell cooldown or direct compact endpoint is
 used. ACP launches scrub both inherited session ID and native directory.
@@ -111,16 +114,18 @@ Model/provider switches preserve session-level pending, cooldown and retry
 blocks; changing models cannot admit another summary charge.
 Acceptance is not completion; native compaction events confirm completion.
 An uncertain write is persisted and never blindly retried; a failed lookup is
-only a read failure, eligible for retry after the cooldown. `--dry-run` makes
-no API calls. If the plugin is unavailable, the helper refuses rather than
-falling back to an unguarded compact POST.
+only a read failure, eligible for retry after the cooldown. (The `self-slash`
+helper's `--dry-run` and its refusal when the plugin was unavailable went with
+`bin/self-slash`, slim-down E4, 2026-11-06.)
 
 Native compaction does not accept the Claude `/compact <focus>` syntax here.
 Save the focus in the checkpoint first. `/new`, `/clear` and `/reset` through
 the scoped native path fail closed: a native reset must have both a durable
 owned handoff and a supported, acknowledged successor/baton path. A successful
-compaction request alone is not that evidence. Existing supported host lifecycle
-paths remain available when their own identity and ownership checks pass.
+compaction request alone is not that evidence. The successor path is a
+top-level `env -u PASEO_AGENT_ID -u PASEO_AGENT_CWD paseo run …` that archives its
+predecessor once it answers (`skills/handoff` Step 9; `self-slash --finish --successor`
+went 2026-11-06).
 
 OpenCode V2 settings are `compaction.auto`, `compaction.keep.tokens` and
 `compaction.buffer`; `agents.compaction.model` chooses its summarizer. The
@@ -132,7 +137,7 @@ a cost optimization: an unused speculative summary still costs tokens.
 
 On 2026-10-25 the actual guard loaded on an isolated OpenCode 2.1.4 server and
 answered its read-only status RPC (`ready: true`, no probe session known).
-The native `self-slash` path also reached the guard and refused a nonexistent
+The native `self-slash` path (removed 2026-11-06) also reached the guard and refused a nonexistent
 session through the real RPC transport. Both probes used a temporary HOME and
 private server, with zero inference or compaction calls. This verifies setup
 and transport, not a paid production compaction or real event sequence.
@@ -140,8 +145,7 @@ A cold plugin listing did not initialize plugins; checking that proxy alone
 would have produced a false negative. Native RPC schemas also reject regex
 patterns by default, so the guard validates session IDs in code. Isolate shell
 startup too (`BASH_ENV=/dev/null`, no `ENV`) in native test wrappers; a user
-startup file can replace the test PATH. The native `self-slash` branch preserves
-the caller's CLI selection rather than forcing a Homebrew copy.
+startup file can replace the test PATH.
 
 
 Test offline with fake native APIs and separate temporary session state. Cover
@@ -153,12 +157,10 @@ Local focused tests use the full `bg` path. Record the explicit decision first:
 
 ```bash
 ~/src/djbclark-ade/bin/load-watch ci decide /absolute/worktree local "Small offline focused checks; full matrix on GitHub"
-~/ops/site-private/bin/bg bin/pytest tests/test_opencode_self_compact.py
+~/ops/site-private/bin/bg bin/pytest -q tests/test_go_context_plugin.py
 # Hook suites share a module basename: run separately to avoid import collisions.
-# The legacy suite simulates top-level self-slash hosts with --dry-run only;
-# remove an inherited ACP_RUN_AGENT for that test process.
-~/ops/site-private/bin/bg pytest -q tests/test_context_size_nudge.py
-~/ops/site-private/bin/bg env -u ACP_RUN_AGENT pytest -q claude/hooks/handoff-tools/tests/test_context_size_nudge.py
+~/ops/site-private/bin/bg bin/pytest -q tests/test_context_size_nudge.py
+~/ops/site-private/bin/bg bin/pytest -q claude/hooks/handoff-tools/tests/test_context_size_nudge.py
 ```
 
 ## 5. Primary sources
@@ -187,7 +189,7 @@ window and ignores `autoCompactWindow` (upstream getpaseo/paseo#4949, open 2026-
 `--json` (list of records for scripts), `--min-pct N` (hide emptier agents and unknown sizes; compared
 unrounded), `--source auto|paseo|recent`, `--recent-minutes M` (both numbers finite and not negative,
 else exit 2). Read-only, writes not even bytecode, exit 0 always (2 for bad usage). Titles and cwd go
-through `fleet.py`'s `clean_text` onto one line; ids must be uuids. It is
+through `context-watch`'s `clean_text` (copied from the removed `fleet.py`, 2026-11-06) onto one line; ids must be uuids. It is
 not wired into `fleet-watch` or `settings.json`.
 
 1. **Tokens.** The newest non-sidechain assistant usage block of the session transcript,
@@ -213,6 +215,15 @@ not wired into `fleet-watch` or `settings.json`.
    An agent with no state file prints `?`: the newest transcript of its cwd is not guessed because
    several agents share a cwd. If `paseo` is missing, fails or prints no JSON, the fallback lists
    top-level transcripts modified in the last 30 minutes (id = session id, title = cwd basename),
-   which also covers Claude Code in herdr, Orca or a bare terminal. `--source recent` forces it.
+   which also covers Claude Code outside Paseo (a bare terminal). `--source recent` forces it.
 4. **Tests.** `tests/test_context_watch.py` runs the script against a scratch HOME, `PASEO_HOME`
    and a fake `paseo` (`CONTEXT_WATCH_PASEO`).
+
+## 7. Fresh-session cost: `bin/context-budget-check` (2026-10-18; a Paseo schedule since 2026-11-06)
+
+Runs `claude -p "/context"` (no model request) in each directory of `config/context-budget.toml` (default this repo
+and `~`), compares the totals and the memory, skills and MCP rows with their budgets and with the previous night's
+`~/.local/state/context-budget/<date>.json`, and sends one `hermes-ping` line on a breach or a rise. `--instruction-lint`
+adds `bin/instruction-lint`'s counts, report-only. Exit 0 ok, 1 breach or rise, 3 a directory it could not measure. It
+runs nightly as a Paseo schedule (J3): the `paseo schedule create` line is in the script's module docstring; the launchd job and its
+`install`/`uninstall` subcommands were removed 2026-11-06 (E5). Tests: `tests/test_context_budget_check.py`.

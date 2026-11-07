@@ -9,18 +9,18 @@ repo's `.mcp.json`.
 
 Since 2026-10-10, 12 servers (ghost-os, cua-driver, paper-search and 9
 claude.ai connectors) are blocked in Claude Code through `deniedMcpServers` in
-`~/.claude/settings.json`; [disabled-skills.md](disabled-skills.md) lists them,
+`~/.claude/settings.json`; [history/disabled-skills.md](history/disabled-skills.md) lists them,
 why, and how to re-enable. This table is otherwise the 2026-08-23 snapshot.
 
 | Server | Transport / command | Scope | What it is |
 |---|---|---|---|
 | `hermes` | stdio: `hermes mcp serve` | user | The **Hermes Agent** as an MCP server — see below |
 | `beeper` | HTTP: `http://127.0.0.1:23373/v0/mcp` | user | Beeper Desktop's local API — cross-network chat search/read/send. OAuth-gated; see below. Re-enabled in Claude Code 2026-10-16 (was blocked 2026-10-10) |
-| `graft` | stdio: `graft mcp` | **removed 2026-10-18** (was this repo's `.mcp.json`) | Repo context graph. Deregistered from every agent TUI on 2026-10-18 (95 MCP calls vs ~24,000 CLI uses in 14 days; a stdio process per session); use the `graft` CLI. Claude Code also lists `graft` and `token-savior` under `disabledMcpjsonServers` in `~/.claude/settings.local.json`, so a stray project `.mcp.json` cannot bring it back. graft 0.23.0's SessionStart reconcile re-added the user-scope entry after the 2026-10-16 upgrade; removed again 2026-10-20 (`claude mcp remove graft -s user`), and the Hermes watchdog `check-graft-wiring-invariants.sh` now fails when any TUI registers it (94e8d95) |
+| `graft` | stdio: `graft mcp` | **removed 2026-10-18** from every TUI (this repo's `.mcp.json` still lists it, neutralised by `disabledMcpjsonServers`) | Repo context graph. Deregistered from every agent TUI on 2026-10-18 (95 MCP calls vs ~24,000 CLI uses in 14 days; a stdio process per session); use the `graft` CLI. Claude Code also lists `graft` and `token-savior` under `disabledMcpjsonServers` in `~/.claude/settings.local.json`, so a stray project `.mcp.json` cannot bring it back. graft 0.23.0's SessionStart reconcile re-added the user-scope entry after the 2026-10-16 upgrade; removed again 2026-10-20 (`claude mcp remove graft -s user`), and the Hermes watchdog `check-graft-wiring-invariants.sh` now fails when any TUI registers it (94e8d95) |
 | `ghost-os` | stdio: `/opt/homebrew/bin/ghost mcp` | user | macOS UI automation via accessibility tree + vision. **Blocked in Claude Code since 2026-10-10** (`deniedMcpServers`) |
 | `hindsight` | stdio: `node ~/.hindsight/coding-agents/dist/mcp-server.js` | user | Per-repo Hindsight coding-agent memory (the 🧠 banner) |
 | `hindsight-shared` | HTTP: `http://127.0.0.1:8888/mcp/hermes-shared/` | user | Shared Hindsight bank (`hermes-shared` in the URL is the bank name) |
-| `firecrawl` | HTTP: `http://127.0.0.1:18804/mcp` (LaunchAgent `com.djbclark.firecrawl-mcp`) | all agent TUIs | Scrape, search, crawl, map on self-hosted Firecrawl (SIPB Hyades) through `firecrawl-router`; `skills/firecrawl/SKILL.md`. `firecrawl_developer_search` is answered by the Hyades API itself (a `devsearch` sidecar over the GitHub search API, 2026-10-24), see below |
+| `firecrawl` | HTTP: `http://127.0.0.1:18804/mcp` (LaunchAgent `com.djbclark.firecrawl-mcp`, machine-side) | Claude Code, Codex, opencode | Scrape, search, crawl, map on self-hosted Firecrawl (SIPB Hyades), through this repo's `bin/firecrawl-router` (kept by the operator's ruling of 2026-11-07, after the slim-down first deleted it): it proxies the MCP to Hyades, answers `query`/`json` with SIPB LLMs then LiteLLM, answers developer search from GitHub, and serves Hermes' search backend on 18805. The `firecrawl` skill lives in site-djbclark. |
 | claude.ai Gmail / Google Calendar / Google Drive | HTTPS (Google-hosted) | claude.ai account | Remote connectors managed on claude.ai, not in local config |
 
 ## Firecrawl developer search (2026-10-24)
@@ -42,7 +42,7 @@ Koyeb) for the microVMs: only Playwright and devsearch fit them, and each needs 
 
 `hermes` (`~/.local/bin/hermes`) is the **Hermes Agent** — Nous Research's
 agent CLI, git-installed at `~/.hermes/hermes-agent` (v0.20.5 at snapshot
-time; `hermes --version`). It is also one of the Orca fleet TUIs
+time; `hermes --version`). It is also a Paseo provider
 ([model-routing.md](model-routing.md)), and clinepass is its inference
 lifeline — the MCP surface below is separate from routing *to* hermes as a
 worker.
@@ -171,7 +171,7 @@ loops.
 
 ### Messaging: use Hermes (operator decision, 2026-08-23)
 
-**Default to `hermes` for all messaging.** Beeper Desktop is often not
+**Default to `hermes` for operator-facing platform messaging** (Discord, Signal, …; agent-to-agent messages go by `paseo send --json` or the relay shim with a named ack, standing order 10, never through this bridge). Beeper Desktop is often not
 running, and the operator uses it only occasionally — so it is not a
 dependable path for an agent. Reach for it only when the operator explicitly
 asks, or when you need cross-network *search* that Hermes cannot do and you
@@ -192,7 +192,7 @@ Hermes also built a high-speed local Gmail search (FTS5 SQLite index of the
 complete mailbox at `~/.hermes/gmail_index_v2.db`, ~100ms queries, kept fresh
 by a Hermes cron job every 5m). It is **not** exposed through `hermes mcp
 serve` — access is the plain CLI, documented in the
-gmail-search skill, `~/src/djbclark-ade/skills/gmail-search/SKILL.md` (deployed at
+gmail-search skill, `~/ops/site-public-djbclark/skills/gmail-search/SKILL.md` (moved 2026-11-06; deployed at
 `~/.claude/skills/gmail-search/`).
 
 ## Graft statusline: "graft · not built" in this repo is cosmetic
@@ -200,9 +200,8 @@ gmail-search skill, `~/src/djbclark-ade/skills/gmail-search/SKILL.md` (deployed 
 The statusline segment (this repo's `.claude/settings.json` →
 `.claude/helpers/graft-statusline.cjs` → `@nanonets/graft` `dist/claude/`)
 renders "◤ graft · not built · run `graft build`" whenever the stats cache
-reports 0 nodes. This repo is docs/markdown-only, so `graft build` parses 0
-code files and legitimately produces a 0-node wiring graph — the statusline
-can't distinguish "built but empty" from "never built". Nothing to automate:
+reports 0 nodes. This repo's `graft/` cache is local and ignored, so a fresh checkout reads "not built" until `graft build`
+runs (the operator's step after the slim-down's final merge, 2026-11-07); after it, a 0-node reading is a real bug. Nothing to automate:
 in repos with a real graph, the `PostToolUse` hook already auto-syncs after
 every edit (detached `sync-run.js`, the "syncing…" state). The real fix is
 upstream (render empty ≠ missing); until then, ignore the segment here.

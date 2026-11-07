@@ -16,21 +16,12 @@ for _var in ("TMPDIR", "TEMP", "TMP"):
         del os.environ[_var]
 tempfile.tempdir = None
 
-# acp-dispatch holds a slice's start while the real machine is overloaded
-# (bin/acp-dispatch wait_for_capacity). Tests must not depend on the host's
-# load: with it on, a busy machine made dispatch tests wait and fail
-# (2026-10-12). test_acp_dispatch_gate.py exercises the gate directly.
-os.environ.setdefault("ACP_DISPATCH_NO_GATE", "1")
-# The same for the load gate (`load-watch admit`, 2026-10-19): it waits up to 30 min on a hot host and
-# refuses with 75. test_acp_dispatch_load_gate.py turns it on per test with a fake load-watch.
+# acp-dispatch's load gate (`load-watch admit`, 2026-10-19) waits up to 30 min on a hot host and refuses with 75.
+# Tests must not depend on the host's load: test_acp_dispatch.py turns it on per test with a fake load-watch.
 os.environ["ACP_DISPATCH_NO_LOAD_GATE"] = "1"  # unconditional: an outer "" or "0" must not turn the real 30-min gate on
-# A quota stop schedules an in-place resume with `launchctl submit` (2026-10-18). No test may
-# leave a real launchd job behind: test_acp_dispatch.py gives finalize a fake launchctl that
-# records its arguments; anything else gets a no-op.
-os.environ.setdefault("ACP_DISPATCH_LAUNCHCTL", "/usr/bin/true")
 # bin/ade_sched.py (bin/ade-sched, 2026-11-04) installs jobs on launchd, systemd or cron. No test may touch the real ones:
 # every scheduler binary is a no-op and the agent/unit dirs and the crontab lock live in a throwaway directory.
-# Unconditional, like RELAY_DEFER_DIR: an outer value must not point the suite at a real scheduler or ~/.config/systemd/user.
+# Unconditional: an outer value must not point the suite at a real scheduler or ~/.config/systemd/user.
 # tests/test_ade_sched.py passes fake binaries and dirs per test.
 for _var in ("ADE_SCHED_LAUNCHCTL", "ADE_SCHED_SYSTEMCTL", "ADE_SCHED_LOGINCTL", "ADE_SCHED_CRONTAB"):
     os.environ[_var] = "/usr/bin/true"
@@ -39,10 +30,6 @@ atexit.register(shutil.rmtree, _SCHED_ROOT, ignore_errors=True)
 os.environ["ADE_SCHED_LAUNCH_AGENTS"] = str(_SCHED_ROOT / "LaunchAgents")
 os.environ["ADE_SCHED_UNIT_DIR"] = str(_SCHED_ROOT / "systemd-user")
 os.environ["ADE_SCHED_LOCK"] = str(_SCHED_ROOT / "ade-sched.lock")
-# `reap` throttles dir sweeps younger than 60 s through a machine-wide stamp (2026-10-18).
-# Off in tests: dir sweeps must always run and must never touch the real machine's stamp;
-# test_acp_dispatch_waiter.py turns the throttle on explicitly per test.
-os.environ.setdefault("ACP_DISPATCH_REAP_MIN_INTERVAL", "0")
 # route_agent.load_snapshot() runs `aiuse --available --json` unless a snapshot is pinned (2026-10-20).
 # Off in tests so the suite never depends on, or spawns, the host's real aiuse;
 # test_route_agent.py's TestQuotaFromAiuseAvailable turns it on per test.
@@ -59,37 +46,20 @@ os.environ.setdefault("ROUTE_AGENT_CALIBRATED_FLOOR", "off")
 # check; adversary 2026-10-20). Any other value, "" included, would send the probe to the real login.
 if os.environ.get("ROUTE_AGENT_OMP_READY", "").strip().lower() not in ("0", "1"):
     os.environ["ROUTE_AGENT_OMP_READY"] = "0"
-# route_agent.governor_hold() reads the fleet governor's state (2026-10-23): a real tight/critical level on the host
-# would drop claude from every code/bulk/research/mechanical route and change the answer of unrelated tests.
-# Pinned to a missing file unconditionally; TestGovernorHold points it at a fixture per test.
-os.environ["CLAUDE_GOVERNOR_STATE"] = "/nonexistent/claude-governor-state.json"
-# the governor also reads the quota guard's state (bin/claude-quota-guard): a test never sees the real one
-os.environ["CLAUDE_QUOTA_GUARD_STATE"] = "/nonexistent/claude-quota-guard-state.json"
-# the gate profile (bin/ade_gates.py, bin/gate-profile, 2026-10-26) loosens both gates' numbers while it is active: a test never reads the
-# operator's real profile, writes the real audit log, pings, or recomputes the real governor and guard. Pinned to missing paths
-# unconditionally; tests/test_gates.py points them at fixtures per test.
-for _var in ("GATE_PROFILE_STATE", "GATE_PROFILE_LOG", "GATE_PROFILE_PING", "GATE_PROFILE_GOVERNOR", "GATE_PROFILE_GUARD"):
-    os.environ[_var] = f"/nonexistent/{_var.lower()}"
-# relay.py reads RELAY_DEFER_DIR once, at import: every test module that loads it (test_relay_*.py, test_session_relay.py)
-# gets a throwaway queue directory, so no test reads, sweeps, expires or prunes the operator's real deferred-send queue
-# ~/.local/state/relay/deferred (2026-10-24: test_session_relay.py ran relay.main(), whose opportunistic sweep expired and
-# pruned real records and started real deliverers). Unconditional: an outer value must not point the suite at a real queue.
-# tests/test_zz_relay_real_state_untouched.py proves a freshly loaded relay.py points at this directory, never the real one.
-REAL_RELAY_DIR = Path.home() / ".local/state/relay"
-_DEFER_ROOT = Path(tempfile.mkdtemp(prefix="relay-suite-defer-"))
+# route_agent reads Paseo (`paseo provider ls --json`, the registry; `paseo usage ls --json`, the second quota source;
+# 2026-11-07, slim-down E7). Off in tests so the suite never depends on, or spawns, the host's real Paseo daemon;
+# test_route_agent.py turns it on per test against tests/fakes/paseo or a canned ROUTE_AGENT_PASEO_USAGE_JSON.
+os.environ.setdefault("ROUTE_AGENT_PASEO", "off")
+# claude/hooks/quota_nudge.py (left in place pending the operator's decision, 2026-11-07) still reads this path: a test never
+# sees the real one.
+os.environ["CLAUDE_QUOTA_GUARD_STATE"] = "/nonexistent/quota-guard-state"
+# fleet.LINKS_FILE (who has messaged whom, and who ever acked; the old relay.py wrote it, fleet.py list reads it, 2026-10-25): never the
+# operator's real ledger. Unconditional. (The old relay.py's RELAY_DEFER_DIR queue went with it, 2026-11-06, docs/slim E3; this goes with
+# fleet.py in E3b.)
+_DEFER_ROOT = Path(tempfile.mkdtemp(prefix="relay-suite-links-"))
 atexit.register(shutil.rmtree, _DEFER_ROOT, ignore_errors=True)
-os.environ["RELAY_DEFER_DIR"] = str(_DEFER_ROOT / "relay" / "deferred")
-# fleet.LINKS_FILE (who has messaged whom, and who ever acked; relay.py writes it, fleet.py list reads it, 2026-10-25): never the
-# operator's real ledger. Unconditional, like RELAY_DEFER_DIR.
 os.environ["RELAY_LINKS_FILE"] = str(_DEFER_ROOT / "relay" / "links.json")
-# `rumination-watch` fast-forwards its OWN checkout at the top of every non-dry pass (issue #143), and
-# SELF_REPO defaults to the checkout these tests run in. Left on, `bg bin/pytest tests/` is a networked
-# actor that can fast-forward the working tree mid-run — in `~/src/djbclark-ade` it would move the
-# SHARED checkout, which standing order 9 keeps for a designated promoter (adversary round 2, B1).
-# test_rumination_watch_deploy.py is the only place that exercises the deploy, and it sets
-# DEPLOY_OFF=False against its own fixture repos.
-os.environ.setdefault("RW_NO_DEPLOY", "1")
-# pr-wait, `load-watch admit --wait` and acp-dispatch-wait register their own deadline unless DEADLINE_NAME is set (2026-11-02, bin/deadline_wait.py).
+# `load-watch admit --wait` and acp-dispatch-wait register their own deadline unless DEADLINE_NAME is set (2026-11-02, bin/deadline_wait.py).
 # An existing test that runs one of them must neither write the real ~/.local/state/deadlines nor see an extra supervising process: a SET (empty)
 # DEADLINE_NAME is the documented "already under a deadline" signal. test_deadline_wrappers.py unsets it per test, with its own state dir.
 os.environ["DEADLINE_NAME"] = ""

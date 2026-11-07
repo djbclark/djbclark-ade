@@ -2,7 +2,7 @@
 """deadline - register a maximum run time before a long command or wait, and enforce it from outside. No model.
 
     deadline start NAME --budget DUR --owner ID [--heartbeat DUR] [--grace DUR] [--pid PID] [--pgid PGID] [--holder PID]
-                        [--on-expire kill|notify|reroute:RECORD|relay] [--checkpoint PATH] [--max-extend DUR] [--json]
+                        [--on-expire kill|notify|relay] [--checkpoint PATH] [--max-extend DUR] [--json]
     deadline beat NAME [--checkpoint PATH] [--note TEXT]        heartbeat; records the latest checkpoint
     deadline extend NAME --by DUR --reason TEXT                 only before expiry; total capped by --max-extend (default = budget); else exit 2
     deadline done NAME [--rc N]                                 deregister
@@ -15,7 +15,7 @@
 DUR is seconds (90, 1.5) or units (90s, 5m, 2h, 1h30m). Exit: 0 ok; 1 failed or unknown name; 2 refused (bad input, extension
 refused, name already live, a reserved name, install from a linked worktree or a bad job, and the registration guards: the pid is not running or has
 no readable start time, is the caller's ancestor or in the caller's group/session, or is not in --pgid, and the default `kill` with no
---pid/--pgid: an announce-only wait must say --on-expire notify|relay|reroute:RECORD); `run` returns the command's rc (128+N for a
+--pid/--pgid: an announce-only wait must say --on-expire notify|relay; `reroute:RECORD`, retired 2026-11-07, is refused); `run` returns the command's rc (128+N for a
 signal death), or 124 when the enforcer stopped the command. `install`/`uninstall`: 69 = no usable scheduler
 (none found, systemd user manager unreachable, Linger=no without --allow-no-linger), 1 = an activation command failed. A stop that failed (the process is still alive) is state `kill-failed`
 (non-terminal), never `expired`; the owner is told whatever the action.
@@ -394,28 +394,12 @@ def tool(env_key: str, rel: str, which: str | None = None, fallback: str | None 
     return [exe] if os.access(exe, os.X_OK) else [sys.executable, exe]
 
 
-def sh_nokill(argv: list[str], wait: float) -> tuple[int, str]:
-    """Run argv and wait up to `wait` s, but NEVER kill it on timeout (acp-dispatch reroute may be mid-submit): it is left running."""
-    import tempfile
-    with tempfile.TemporaryFile("w+") as out:
-        try:
-            p = subprocess.Popen(argv, stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True)
-        except OSError as e:
-            return 127, str(e)
-        try:
-            rc = p.wait(timeout=wait)
-        except subprocess.TimeoutExpired:
-            return 124, f"still running after {wait:g}s; left alone, not killed"
-        out.seek(0)
-        return rc, out.read().strip()[-400:]
-
-
 SESSION_ENV = ("PASEO_AGENT_ID", "HERDR_PANE_ID", "CLAUDE_CODE_SESSION_ID", "HERMES_SESSION_ID")
 
 
 def clean_env() -> dict:
     """Environment for the relay and the workers: NO inherited session identity (a Paseo agent that registered a deadline would
-    otherwise make relay.py see the destination as itself: "that is this session"), and a declared sender label instead."""
+    otherwise send under the registrar's own Paseo id), and a declared sender label instead."""
     env = {k: v for k, v in os.environ.items() if k not in SESSION_ENV}
     env["RELAY_SENDER_NAME"] = os.environ.get("RELAY_SENDER_NAME") or "deadline"
     return env
@@ -449,11 +433,15 @@ def hermes_ping(msg: str) -> str:
 
 
 def relay_rc(owner: str, text: str) -> tuple[int, str]:
-    """Send to the owner with delivery proof requested (`--ack`: exit 0 only when delivered, 1 not delivered, 3 unverified). The
-    sender is declared (RELAY_SENDER_NAME) so a launchd job, which has no session identity, is not refused with exit 4."""
+    """Send to the owner through the relay shim (2026-11-06, docs/slim E3): exit 0 only when `paseo send --json` read sent or completed;
+    2 not delivered (queued, timeout, permission, error, or a target not idle/running with no card), 1 paseo failed, 3 not a Paseo agent,
+    4 no sender; anything but 0 stays pending and is retried. clean_env drops PASEO_AGENT_ID, so this send is sourceless and its `sent` is
+    delivery (an agent's send would only ever read `queued`, exit 5).
+    No `--wait`: the shim's --wait waits for the owner to go idle, which a busy owner never does in 20 s, and a retry would send the notice
+    again. The sender is declared (RELAY_SENDER_NAME): the shim names it in a `[relay from NAME]` prefix, a launchd job having no Paseo id."""
     if not owner or owner == "-":
         return 0, "relay skipped: no owner"
-    argv = tool("DEADLINE_RELAY", "skills/session-finder/relay.py") + [owner, "--message-file", "-", "--ack", "--wait", "20"]
+    argv = tool("DEADLINE_RELAY", "skills/session-finder/relay.py") + [owner, "--message-file", "-"]
     try:
         r = subprocess.run(argv, input=text, capture_output=True, text=True, timeout=90,
                            env=clean_env())
@@ -496,7 +484,7 @@ def retry_notice(rec: dict, dry: bool) -> str | None:
 
 
 def spawn_worker(rec: dict) -> None:
-    """Hand the slow I/O (hermes-ping, relay up to 90 s, reroute up to 120 s) to a detached `deadline _work NAME`, so the 60 s
+    """Hand the slow I/O (hermes-ping, relay up to 90 s) to a detached `deadline _work NAME`, so the 60 s
     enforcement pass never waits behind it: later records and SIGKILL escalations stay on schedule. The caller has saved `rec` and
     holds its lock, so the worker (which takes the lock) starts after the pass has finished with the record. DEADLINE_INLINE_WORKER=1
     runs it inline instead (tests)."""
@@ -538,19 +526,16 @@ def work(rec: dict, held: bool = False) -> None:
         if not job:
             return
         save(cur)
-    steps, notice_result, reroute_failed, reroute_pending = [], None, None, None
+    steps, notice_result, reroute_failed = [], None, None
     if "recovery" in job:
         ping, reroute = job["recovery"]
         if ping:
             steps.append(hermes_ping(ping))
         if reroute:
-            argv = tool("DEADLINE_ACP_DISPATCH", "bin/acp-dispatch") + ["reroute", reroute, "--escalate", "--detach", "--no-wait"]
-            rc, out = sh_nokill(argv, wait=float(os.environ.get("DEADLINE_REROUTE_WAIT") or 900))   # the worker is detached: it may wait long
-            steps.append(f"reroute rc={rc}: {out[-150:]}")
-            if rc == 124 and out.startswith("still running"):
-                reroute_pending = f"still running after the wait: {out[-100:]}"   # outcome UNKNOWN, not a failure
-            elif rc != 0:
-                reroute_failed = f"rc={rc}: {out[-150:]}"
+            # a record registered before 2026-11-07 (slim-down E7): the acp-dispatch shim has no `reroute`, so nothing is run; the
+            # owner and the operator are told the work stopped with no replacement, as for a failed reroute
+            steps.append("reroute retired 2026-11-07: not run")
+            reroute_failed = "the reroute:RECORD mode was retired 2026-11-07; re-dispatch the slice by hand"
     if "notice" in job:
         notice_result = relay_rc(*job["notice"])
     with locked():
@@ -561,13 +546,7 @@ def work(rec: dict, held: bool = False) -> None:
             cur["recovery"].update(state="done", at=now(), outcome=steps)
         escalate = None
         requeue = False
-        if reroute_pending:
-            # neither success nor failure is known: say exactly that, and do NOT claim nothing replaced the work (another reroute could race it)
-            if not isinstance(cur.get("notice"), dict) or cur["notice"].get("done"):
-                notify(cur, message(cur, f"stopped; its automatic reroute is still running and its OUTCOME IS UNKNOWN ({reroute_pending}); check `acp-dispatch` before rerouting again"))
-                requeue = True
-            escalate = f"deadline {cur.get('name')} ({cur.get('owner')}): reroute outcome UNKNOWN (still running); do not reroute again until checked"
-        elif reroute_failed:
+        if reroute_failed:
             # the work is stopped and no replacement exists: a TRACKED owner notice (retried until delivered) plus an operator ping;
             # the at-most-once reroute itself is never repeated (recovery is already claimed)
             if not isinstance(cur.get("notice"), dict) or cur["notice"].get("done"):
@@ -921,10 +900,10 @@ def dur_arg(v: str) -> float:
 def check_action(v: str) -> str:
     if v in ACTIONS_PLAIN:
         return v
-    if v.startswith("reroute:") and len(v) > 8:
-        # resolved NOW, against the registering shell's directory: the sweep runs from launchd with another working directory
-        return "reroute:" + str(Path(v[8:]).expanduser().resolve())
-    raise argparse.ArgumentTypeError("--on-expire is kill, notify, relay or reroute:RECORD")
+    if v.startswith("reroute"):
+        raise argparse.ArgumentTypeError("--on-expire reroute:RECORD was retired 2026-11-07 (the acp-dispatch shim has no reroute): "
+                                         "use --on-expire relay, which stops the work and tells the owner, who re-dispatches it")
+    raise argparse.ArgumentTypeError("--on-expire is kill, notify or relay")
 
 
 def make_record(a, pid=None, pgid=None, kind: str = "start", fresh_child: bool = False) -> tuple[dict | None, str | None]:
@@ -979,7 +958,7 @@ def make_record(a, pid=None, pgid=None, kind: str = "start", fresh_child: bool =
         return None, f"ps failed ({e}): cannot verify the target, refusing to register it"
     if not pid and not pgid and a.on_expire == "kill":
         return None, ("no --pid/--pgid: there is nothing to kill. A wait with no process is the named announce-only case: "
-                      "pass --on-expire notify or relay (or reroute:RECORD) explicitly")
+                      "pass --on-expire notify or relay explicitly")
     holder, holder_start = getattr(a, "holder", None), None
     if holder:
         if a.on_expire not in ("notify", "relay") or pid or pgid:

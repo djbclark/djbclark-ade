@@ -1,0 +1,379 @@
+# Setup, hardening and updates: plan (queue Carried 35)
+
+Plan, 2026-11-07, not started. The operator asked for it the same day, in five parts: an easy install on a new Mac or Linux
+machine with every dependency and TUI; automatic updates of djbclark-ade and its dependencies; easy setup of the GitHub
+pieces a new djbclark-ade user needs (the `ade-merge-gate` App first); prompt-injection hardening of GitHub, both at setup and
+on demand, with an ongoing check that the policy stays applied; and one config file for every djbclark-ade option. A sixth
+part was added: prompts and code that hand any browser-only step to Grok Bot. Later the same day: aiuse and
+sudo-secretspec are hard dependencies, every listed component is in the install and update system except commercial
+products, and Hermes is offered with a do-it-yourself or AI-assisted setup (S3, S3a). Then: the commercial services (1Password,
+Grok Bot, GitHub Advanced Security, hosted firecrawl, Greptile, CodeRabbit) are optional components, and OVHcloud is
+the suggested host. Then: API keys for every TUI and tool are checked, verified, collected in one batch and delivered
+(S3b). The sections below go in build order:
+S1 and S2 come first because every later section reads the config and adds a recipe.
+The research behind S5 is dated 2026-11-07. Sources are listed at the end, and their facts must be re-probed when the work starts.
+
+## S1. One config file
+
+1. **Format: TOML** (recommended). It is what `config/*.toml` already uses, Python reads it with the standard `tomllib`, it
+   allows comments, and the operator already edits it. Alternatives considered:
+   - YAML: indentation and type-coercion traps.
+   - JSON or JSON5: no comments, or a non-standard reader.
+   - Pkl, CUE or Nickel: typed and validating, but one more tool to install on every machine.
+
+   Typed validation comes from a checked-in JSON Schema instead, run by `bin/ade-config --check` in CI.
+2. **One file, `config/ade.toml`**, with a table per area: `[lead]`, `[routing]`, `[gates]`, `[dispatch]`,
+   `[context_budget]`, `[pr_policy]`, `[secret_deny]`, `[install]`, `[update]`, `[github]`, `[hardening]`.
+   - Today's files fold into it one at a time: `routing.toml`, `gates.toml`, `context-budget.toml`, `pr-policy.toml`,
+     `secret-deny.toml`, and the JSON policies where they are hand-edited.
+   - During the migration each tool reads its old file when present. It warns once and prefers `ade.toml`.
+3. **Per-machine overrides** go in `~/.config/djbclark-ade/local.toml`, which is never tracked. Values merge table by
+   table, and the local file wins. Secrets are never stored in either file: a field names a `sudo-secretspec` key.
+4. **`bin/ade-config get|set|check|diff`** is the one reader and writer. A set is atomic (a temp file, then `os.replace`)
+   and keeps the comments. The `switch` lines that AGENTS.md promises become `ade-config set` lines, for example
+   `ade-config set lead.fable_lead false`.
+
+## S2. One entry point: a justfile
+
+1. **`just`** (recommended). site-djbclark already uses it, its recipes list themselves (`just --list`), and Homebrew and
+   every Linux distribution package it. Alternatives considered:
+   - make: tab and quoting traps.
+   - mise tasks: ties the entry point to mise.
+   - a Python `bin/ade` dispatcher: fine, but it duplicates what just gives for free.
+
+   The recipes stay thin: each calls a `bin/` tool, so CI and agents can call the tool without just.
+2. Recipe groups:
+   - `install`, `update`, `doctor`
+   - `github-setup`, `harden`, `harden-check`
+   - `config-check`
+   - `browser-task` (S7)
+
+   Every recipe that changes something has a `--dry-run` that prints the change first.
+
+## S3. Install on a new machine (Mac and Linux)
+
+1. **`just install`** (bootstrap: `curl … | sh` is not used). A new machine runs
+   `git clone https://github.com/djbclark/djbclark-ade ~/src/djbclark-ade && cd ~/src/djbclark-ade && ./bin/ade-install`,
+   which installs `just` if it is missing and then runs the recipe.
+2. **Every dependency is in one system** (operator, 2026-11-07: "All of the listed things should be part of our easy
+   install/update/keep-updated system"; commercial services first left out, then made optional the same day). The list
+   lives in `[install]`, one entry per component, each with its install, update and probe command. `vendor/README.md`
+   points at it. The components fall into five classes:
+   1. **Hard dependencies.** `just install` installs them, `just doctor` fails without them, and the daily job keeps
+      them current:
+      - **sudo-secretspec** (`frdminc/sudo-secretspec`; `brew install frdminc/sudo-secretspec/sudo-secretspec`, or its
+        Linux path). It is the only way a key reaches a tool (review rule 3). Hard dependency by operator ruling of
+        2026-11-07.
+      - **aiuse** (`djbclark/aiuse`; Homebrew or PyPI, per its README). It is the main quota reading for routing.
+        Hard dependency by operator ruling of 2026-11-07. Also **cswap** (`claude-swap`), which aiuse reads.
+      - **Paseo** (`getpaseo/paseo`), its skill bundle (`npx skills add getpaseo/paseo`, set user-invocable-only),
+        and the Paseo plugins of the J6 set, each with its settings from `[install.paseo_plugins]`: session-guard,
+        baton, asks, questions-please (`djbclark/paseo-plugin-questions-please`), tell-agent, vitals, skills,
+        pr-radar, claude-code-entrypoint-env, session-janitor, session-recovery. The ones not chosen are recorded too
+        (zerosub, usage-auto-resume, plan-auto), so `doctor` can tell "not chosen" from "missing".
+      - **The operator's own Paseo plugins and forks**, each as a Paseo plugin component:
+        - **paseo-runner** (`djbclark/paseo-runner`): script packs as tabs of buttons on desktop, web and phone, stage 1
+          (server core, no UI yet, 2026-11-07). Its `scripts/sync-plugins.mjs` installs, disabled, every plugin one
+          daemon has onto the daemons that lack it, which is how `just update` keeps the Mac and vps-primary in step.
+          An earlier draft of this plan listed it as a consumer of djbclark-ade; that was wrong, corrected 2026-11-07.
+        - `djbclark/paseo-plugin-questions-please` (above) and `djbclark/paseo-plugin-dann-workspace-accent`.
+        - The forks `djbclark/paseo-baton`, `djbclark/paseo-plugins` and `djbclark/paseo-transcript-search`: install
+          the upstream unless the fork carries a change not yet upstreamed (standing order 8), and record which one in
+          `[install]`. The baton fork was pushed on 2026-11-07, while the J6 set names upstream baton (dennyferra):
+          decide which one at build time.
+        - The Paseo fork `djbclark/paseo` follows the same rule: upstream Paseo unless the fork is needed.
+      - **`graft`** (`@nanonets/graft`), **`gh`**, **`uv`**, **`just`**, `git`, and the modern-CLI tools
+        (site-djbclark's `skills/setup-modern-cli` list moves into `[install]`).
+      - **The provider command-line tools** for each provider enabled in `[routing]`: Claude Code, Codex, opencode,
+        omp, the Cursor CLI, and Paseo's antigravity provider. The tools install freely; the subscriptions behind them
+        are the user's own, and logging in is the user's step (S3.5).
+      - **The skill roots:** this repo, a site repository (site-djbclark for this operator, `[install.site_repo]` for
+        another user), and `skills-lock.json`'s external skills (today `fastino-glide`), all linked by
+        `bin/skill-everywhere --all`.
+      - **Repo-local state:** the scheduled jobs `bin/ade-sched` renders (launchd, systemd user timers or cron), the
+        hook and secret-deny templates (`bin/ade-template-check`), and the `.claude/settings.json` mirror of the Paseo
+        skill overrides.
+   2. **Offered, on by default for this operator, asked for a new user.**
+      - **Hermes** (S3a).
+      - **peer-link** (`frdminc/peer-link`), the Grok Bot channel, with `tell_chief_of_staff.py` (needs Hermes).
+      - **The firecrawl router** (`bin/firecrawl-router`) pointed at a firecrawl endpoint: this operator's
+        self-hosted one on Hyades, or none.
+      - **The LiteLLM proxy** (the fork at `~/src/litellm`, site-djbclark's `roles/litellm`), Hermes' fallback.
+   3. **Optional, off by default, offered one by one** (operator, 2026-11-07: commercial services are opt-in
+      components, not exclusions). Each has an install, a basic setup and a `doctor` probe. Each is a free client or
+      skill; the account behind it is the user's:
+      - **1Password:** the app, the `op` CLI and the `1password` skill. The skill is site-private's `skills/1password`.
+        It is linked from site-private when the user has access, as this operator does. For a new user, a public generic
+        copy without this operator's vault or item names is a decision for the operator (site-private's private-paths
+        list keeps the current copy private, and changing that needs the operator's yes, order 11).
+      - **Grok Bot:** setup of the cloud bot's side for a new user (an account through Cursor, the bot's webhook and its
+        `ask_claude` callback), on top of peer-link (S3.2.2).
+      - **GitHub Advanced Security:** turned on for the repositories that have it, so "code scanning for AI applications"
+        (S5) runs; the setup first probes whether the account can use it.
+      - **Hosted firecrawl** (firecrawl.dev): an API key in `sudo-secretspec` and the router's upstream set to it, as the
+        alternative to a self-hosted firecrawl.
+      - **Greptile and CodeRabbit:** their CLIs or apps, keys in `sudo-secretspec`, and their skills (from site-djbclark)
+        linked.
+      - **The herdr bridges:** `herdr4paseo` and `paseo4herdr` (`djbclark/paseo4herdr`) and `bin/herdr-server-run`, the
+        last herdr pieces, only for someone who still runs herdr.
+   4. **Suggested, not installed: hosting.** A user who wants an always-on agent host (what vps-primary is here) is
+      pointed at **OVHcloud** (operator, 2026-11-07: "suggest OVHcloud not Hetzner"). site-djbclark's `ovhcloud-api`
+      skill can drive it once the user has an account. This operator's current hosts (vps-primary on Hetzner, the Hyades
+      host) stay as they are; they are infrastructure, not components.
+   5. **Never installed:** the paid plans themselves. The user buys them and logs in; their free clients are installed
+      (S3.2.1):
+      - Claude Max, which also carries omp's Claude API credits;
+      - the ChatGPT plan behind Codex;
+      - Cursor, which also bills Grok Bot;
+      - the Google AI plan behind the antigravity provider;
+      - opencode Go;
+      - the Z.ai coding plan;
+      - ClinePass.
+
+      Repositories that *use* djbclark-ade (tendcf, nix2cf, Plektra) are not components either. site-private is cloned
+      only when the user already has access to it.
+3. **How it installs:** Homebrew on the Mac, plus Homebrew or the distribution's package manager on Linux (decided per
+   component, recorded in `[install]`). npm, uv/pipx or a git clone are used where that is a component's normal path.
+   Nothing is version-pinned (standing order 8).
+4. **`just doctor`** probes every component: hard dependencies fail, offered ones that were chosen fail, and optional
+   ones only report. A probe checks that the tool runs (`--version` or its own health check), not just that a file exists.
+5. **Logins** are a checklist, not automated: each provider's own `login` command, the GitHub login, and
+   `sudo-secretspec` for API keys. `just doctor` reports what is missing, never a secret's value.
+6. Starting point: the decided but unbuilt proposal `docs/history/ade-everywhere-proposal.md` (2026-10-20). Keep its
+   answered questions and re-base it on Paseo and this component list.
+
+### S3a. Hermes: offered install and basic setup
+
+`just install` asks whether to install Hermes (operator, 2026-11-07: "offer to install and do basic setup of hermes, but
+allow for the user to do that setup either themselves or with interactive AI assistance"). The upstream project and its
+install path are confirmed when this is built; the live setup is the one under `~/.hermes/`. The user picks one of
+three paths:
+
+1. **Skip.** Hermes is recorded as not chosen, and `doctor` stays quiet about it.
+2. **Install, then set it up myself.** The tool is installed by its normal path, then a checklist is printed with the
+   exact files and commands for a basic setup and a link to Hermes' own docs:
+   - a model or provider (through the LiteLLM proxy or directly);
+   - the search backend (firecrawl, if chosen);
+   - the djbclark-ade skills root;
+   - the vendored `claude-collaboration` skill;
+   - the Claude MCP bridge;
+   - `tell_chief_of_staff`'s Keychain items (its `setup.sh`).
+
+   `just doctor hermes` checks each item.
+3. **Install, then set it up with AI help.** The tool is installed, then `just hermes-setup` opens a Claude Code session
+   with the checked-in prompt `prompts/setup/hermes.md`.
+   - The session walks the same checklist one step at a time, each as a card with the recommended option first.
+   - It runs what it can, stops for each secret (the user types it into `sudo-secretspec`, never into the chat) and
+     for each choice.
+   - It finishes with `just doctor hermes`.
+
+Either path can be re-run later (`just hermes-setup`, `just hermes-setup --self`), and `just update` keeps an installed
+Hermes current like every other component.
+
+### S3b. API keys: check, verify, collect, deliver
+
+Operator, 2026-11-07: every TUI and tool that uses an API key gets one at install, and the keys are re-checked as part of
+keeping things current. The steps run in this order: check what `sudo-secretspec` already holds, verify that each held
+key actually works, then ask for the missing or failing ones one at a time, in a single batch, with the URL to get each.
+Keys are saved with `sudo-secretspec`, and also through Paseo if it has a secure store (S3b.5).
+
+1. **One registry of keys**, in `config/ade.toml` as `[keys.<NAME>]`. Each entry has:
+   - the components that use it;
+   - required or optional (it follows the component's class in S3.2, so a key for an unchosen component is never
+     asked for);
+   - the URL to create it;
+   - a verify probe;
+   - where else it must be delivered (Paseo, or the tool's own credential store);
+   - and, where the provider has one, its expiry.
+
+   The starting list is everything the templates and tools name today:
+   - `agents/*/*.tmpl` `{{ secret "…" }}`: `EXA_API_KEY`, `JINA_API_KEY`, the Hermes and LiteLLM entries;
+   - site-djbclark `human/API-KEYS-E4.md`: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`,
+     `OPENROUTER_API_KEY`, `DEEPSEEK_API_KEY`, `TELEGRAM_BOT_TOKEN`, which `sudo-secretspec run` itself requires;
+   - the tools: `ZAI_CODING_PLAN_API_KEY` (opencode), the opencode Go keys (`skills/oc-go-key`), `CURSOR_API_KEY`
+     (`bin/cursor-cloud`), `FIRECRAWL_GITHUB_PUBLIC_TOKEN` (the router; it expires), `GREPTILE_API_KEY`, CodeRabbit's,
+     hosted firecrawl's, and the merge-gate App's private key (S8; stored in GitHub, not locally).
+
+   TUIs that log in by account (Claude Code, Codex, the Cursor CLI, the antigravity provider) appear as login checks,
+   not keys, unless the user picks key-based auth.
+2. **The URLs** go in the registry and are re-probed when this is built. The starting list, each marked unverified
+   until probed:
+   - Anthropic: `console.anthropic.com/settings/keys`
+   - OpenAI: `platform.openai.com/api-keys`
+   - Google Gemini: `aistudio.google.com/apikey`
+   - OpenRouter: `openrouter.ai/keys`
+   - DeepSeek: `platform.deepseek.com/api_keys`
+   - Z.ai: its API-key page
+   - Cursor: its dashboard's API keys
+   - Exa: `dashboard.exa.ai`
+   - Jina: `jina.ai`
+   - GitHub fine-grained tokens: `github.com/settings/personal-access-tokens/new`, with the scopes the registry names
+   - Telegram: `@BotFather`
+   - Greptile, CodeRabbit and firecrawl.dev: their dashboards.
+3. **Check, then verify.**
+   - `just keys` (also run by `just install`) first asks `sudo-secretspec check` which keys are present. It never
+     reads or prints a value.
+   - For each present key it runs the verify probe under `sudo-secretspec run`. The probe is the provider's cheapest
+     read-only authenticated call (for example, listing models), with argv lists, the key in a header read from the
+     environment, and a short timeout. It records only the outcome:
+     - `ok`;
+     - `invalid` (HTTP 401 or 403);
+     - `no-quota`;
+     - `unreachable`;
+     - `expiring <date>`.
+
+     Outcomes go in `~/.local/state/djbclark-ade/keys.json`, written atomically, with no value and no hash of one.
+   - A probe never spends money, never posts, and is rate-limited to one per key per run.
+4. **Collect in one batch, one key at a time.** After the check, it prints one list of every key that is missing or
+   failing, with its purpose and URL, and asks once whether to enter them now.
+   - For each key in turn it shows the name, what uses it and the URL, then runs `sudo-secretspec set NAME`. That is
+     sudo-secretspec's own no-echo prompt at a real terminal, so the value never passes through djbclark-ade, an
+     agent or a chat.
+   - It verifies the key straight away and offers retry, skip or "skip all".
+   - It ends with a table: each key, ok, skipped or failed.
+   - It reuses sudo-secretspec's `secrets-collect` where that already does the batch (it exists upstream; check its
+     flags when building). It is not reimplemented.
+   - In the AI-assisted setup (S3a.3) the agent stops at each key and the user types it into the prompt themselves.
+5. **Deliver to Paseo and the tools, only through a secure store.**
+   - First probe whether Paseo has a secure credential store for provider keys (the Keychain on the Mac, a 0600 file
+     or the Secret Service on Linux), not one in a plaintext config, and how a key is written to it without echo.
+     The answer is recorded with its date.
+   - **If it does,** `just keys` writes each key the registry marks for Paseo from inside `sudo-secretspec run`, with
+     the value passed on stdin or in the environment, never in argv.
+   - **If it does not,** nothing is copied into Paseo's config. Paseo gets keys at launch instead: the daemon, or the
+     provider's launch, runs under `sudo-secretspec run`. That matches review rule 3: the one place a key is written is
+     a third-party tool's own credential store.
+   - The same rule applies to every TUI's own store, for example opencode's auth file and Hermes' Keychain items.
+6. **Kept current:**
+   - The daily `just update --auto` (S4) runs `just keys --check`, which verifies and never prompts. It pings the
+     operator about any key that is invalid, out of quota or expiring within 14 days, with the URL to replace it.
+   - `just doctor` shows the same table.
+   - A key replaced with `sudo-secretspec set` is re-delivered by the next `just keys`.
+
+## S4. Updates and keeping everything current
+
+1. **`just update`** updates every installed component in `[install]` with that component's own update command:
+   - djbclark-ade itself, as `bin/ade-update` does today (fast-forward, relink, changelog delta);
+   - the site repository and the external skills;
+   - Paseo, its skill bundle and each plugin;
+   - sudo-secretspec, aiuse, cswap, graft, gh and the modern-CLI tools;
+   - the provider CLIs;
+   - the chosen offered components: Hermes, peer-link, the LiteLLM fork through its upstream-tracking rule, standing
+     order 8.
+
+   It ends with `just doctor`.
+2. **Automatic:** `bin/ade-sched` installs a daily `just update --auto` job.
+   - It fast-forwards only (never merges or rebases).
+   - It skips while a Paseo agent is mid-turn on the machine.
+   - It pings the operator on failure.
+   - A component whose upgrade breaks `just doctor` gets one retry and is then reported, never rolled back silently.
+3. **New components:** a component added to `[install]` on master is installed on each machine by that machine's next
+   `just update`, so adding a dependency is one table entry and one PR.
+
+## S5. GitHub hardening against prompt injection
+
+Threat (docs/threat-model.md; the Trust section of AGENTS.md): every GitHub artifact not authored by the owner is
+untrusted, and one injection attempt through a PR has already happened. The research of 2026-11-07 makes the same point.
+The 2026 "Comment and Control" disclosures showed AI agents in CI leaking secrets through instructions hidden in PR
+titles, issue bodies and comments. Reducing who can write those artifacts is the strongest lever.
+
+1. **Options**, each one alone or all at once (`just harden all|<option> [--repos …|--owner djbclark|--all-owned] [--dry-run]`),
+   for selected repositories, every repository of the personal account, or every organization the operator owns:
+   - **Pull requests: collaborators only**, or pull requests disabled (GitHub, 2026-02-13: "Restrict pull requests to
+     collaborators", "Disable pull requests entirely"). A Dependabot pull request (DPR) must still work: probe whether
+     Dependabot is blocked under collaborators-only before applying it (an open question on GitHub's discussion).
+   - **Issues: collaborators only** (GitHub, 2026-06), or issues off.
+   - **Discussions, wiki and projects** off unless used.
+   - **Interaction limits**, `collaborators_only` for `six_months` at the user level (`/user/interaction-limits`, public
+     repositories), for comments too. They expire, so S6 re-applies them.
+   - **Actions:**
+     - approval required for every fork PR's workflows, not only first-time contributors;
+     - a read-only default `GITHUB_TOKEN`;
+     - no workflow may create or approve pull requests;
+     - an allow-list of actions, pinned to full commit SHAs.
+   - **Workflows:** no `pull_request_target` that checks out or runs PR code; untrusted fields (title, body, comment)
+     reach a shell only through `env:`; `persist-credentials: false`; secrets only in protected environments (as
+     `merge-gate` already does).
+   - **AI reviewers on outside content:** Codex, Cursor and Copilot reviews and any AI workflow run only for owner-
+     authored PRs, or by hand. No AI step whose input is outside content gets a write token or a secret.
+   - **Agent reads:** the GitHub MCP server's lockdown mode (`--lockdown-mode`, `GITHUB_LOCKDOWN_MODE`,
+     `X-MCP-Lockdown`), which filters content from users without push access. It is a best-effort filter, not a
+     boundary; the repo's "untrusted data" briefs stay.
+   - **Rulesets:** the merge-gate ruleset (adversary-marker plus CI, pinned App IDs, no bypass actors) on every
+     repository that takes agent PRs; push protection and secret scanning on.
+   - **Scanners:** `zizmor` in CI over `.github/` (template injection, broad permissions, mutable tags, risky
+     triggers). GitHub's "code scanning for AI applications" (public preview, 2026-10-28) needs Advanced Security:
+     probe whether it is available to this account before listing it.
+2. **Policy as data:** each option is a key in `[hardening]` (on, off or ignore, per owner and per repository). `just
+   harden` applies the diff between that table and what the GitHub API reports.
+3. **Personal account, not an org:** GitHub's `safe-settings` App enforces settings for an organization, but djbclark's
+   repositories are personal. So the applier is our own `bin/ade-harden` over `gh api`, with `safe-settings` as the
+   model. A setting with no API is a browser task (S7).
+
+## S6. Ongoing check that the policy holds
+
+1. **`just harden-check`** reads every setting in `[hardening]` back from the API and exits nonzero on drift, naming the
+   repository, the setting, the wanted value and the value found. It never applies anything by itself.
+2. **A daily scheduled run** (`bin/ade-sched`) and the same check in CI on this repository. On drift it pings the
+   operator with the exact `just harden <option> --repos <r>` line. It re-applies on its own only the expiring interaction
+   limits, a few days before they lapse.
+3. **New repositories:** the check lists repositories with no `[hardening]` entry, so a new repository is caught on its
+   first day.
+
+## S7. Browser-only steps through Grok Bot
+
+Some steps have no API: creating the `ade-merge-gate` App (the manifest flow can pre-fill it, but a person or a browser
+still clicks), any hardening setting the API does not expose, and the Paseo or provider dashboards. These are handed to
+the operator's Grok Bot "Chief of Staff", which acts in a browser.
+
+1. **Probe first:** does Grok Bot have a browser session, and as whom? A GitHub session logged in as djbclark can change
+   any setting, so its prompts are narrow. If it has no browser or no such login, the steps stay operator-only, printed as
+   a checklist.
+2. **`bin/ade-browser-task`** (recipe `browser-task`) renders a prompt from a checked-in template under
+   `prompts/browser/` (one per task: `github-app-create.md`, `pr-access.md`, `issue-access.md`, …).
+   - Each template names the exact URL, the exact control and the value to set.
+   - Each template ends with a rule: change nothing else, report what the page showed before and after, and
+     ask the operator on any surprise.
+   - The tool sends the prompt through Hermes's `tell_chief_of_staff.py` (skills/tell-chief-of-staff).
+3. **Delivery and verification:** that sender is fire-and-forget, and order 10 does not count a send as delivery.
+   - A task counts as done only when the API read-back (S6's check, or the App's `GET /app`) shows the new value.
+   - With no read-back after a deadline (`bin/deadline`), the task is reported to the operator as not done.
+4. **Never through the bot:**
+   - secrets: the App's private key is downloaded by the operator and stored with `gh secret set`;
+   - anything that widens access (adding a collaborator or a bypass actor);
+   - anything taken from a GitHub artifact not written by the owner.
+
+## S8. GitHub setup for a new djbclark-ade user
+
+1. **`just github-setup`** (owner and repository in `[github]`) does each step, or prints the browser task for it (S7):
+   - creates the `ade-merge-gate` App from a checked-in manifest (`.github/app-manifest.json`; the manifest flow fills
+     every permission, and only the confirm click is manual);
+   - installs it on the repositories;
+   - creates the `merge-gate` environment restricted to master;
+   - stores the private key (operator only);
+   - creates the merge-gate ruleset with the App ID pinned;
+   - applies `[hardening]`'s defaults (S5);
+   - runs `just harden-check`.
+2. Today these steps are `docs/slim/operator-batch.md` A8-A11 and B6-B13, run by hand through
+   `docs/slim/operator-prompts.md` P5 and P10. They become recipes, and their tests (T0-T3b) become `just github-setup
+   --verify`, which runs from a throwaway branch and from the second test account.
+
+## Sources (2026-11-07)
+
+- GitHub changelog, 2026-02-13, new repository settings for pull request access:
+  https://github.blog/changelog/2026-02-13-new-repository-settings-for-configuring-pull-request-access/
+- GitHub docs, disabling pull requests:
+  https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/enabling-features-for-your-repository/disabling-pull-requests
+- Visual Studio Magazine, 2026-06-30, issue creation limited to collaborators:
+  https://visualstudiomagazine.com/articles/2026/06/30/github-extends-contribution-controls-from-prs-to-issues.aspx
+- GitHub REST, repository interaction limits: https://docs.github.com/rest/interactions/repos
+- CSA research notes on "Comment and Control" and on prompt injection in AI GitHub Actions:
+  https://labs.cloudsecurityalliance.org/research/csa-research-note-comment-control-github-prompt-injection-20/ and
+  https://labs.cloudsecurityalliance.org/research/csa-research-note-ai-github-actions-security-20260503-csa-st/
+- GitHub MCP server lockdown mode: https://github.com/github/github-mcp-server/pull/1391 and
+  https://github.blog/changelog/2025-12-10-the-github-mcp-server-adds-support-for-tool-specific-configuration-and-more
+- GitHub `safe-settings` (policy as code, drift reverts): https://github.com/github/safe-settings
+- zizmor (Thoughtworks Radar): https://www.thoughtworks.com/radar/tools/zizmor; WordPress Actions standards:
+  https://developer.wordpress.org/coding-standards/wordpress-coding-standards/github-actions/
+- GitHub code scanning for AI applications (2026-10-28):
+  https://pondero.ai/news/2026-10-29-github-ai-code-scanning-prompt-injection/

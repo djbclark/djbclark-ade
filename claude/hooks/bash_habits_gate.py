@@ -72,7 +72,7 @@ XARGS_ARG = frozenset({"-E", "-I", "-J", "-L", "-n", "-P", "-R", "-S", "-s"})
 TREE_GREP = frozenset({"grep", "ggrep", "egrep", "fgrep", "gegrep", "gfgrep"})
 TREE_GREP_REASON = (
     "A recursive grep walks every file. Scope it, or use `rg -n -l PAT PATH` "
-    "(always a path; `~/src/djbclark-ade` skill setup-modern-cli). A filename uses "
+    "(always a path; site-djbclark skill setup-modern-cli). A filename uses "
     "`plocate -i NAME` when `/opt/homebrew/var/lib/plocate/plocate.db` is fresh enough "
     "(nightly 03:30; it does not search contents). `ggrep` is for one file that needs a "
     "GNU flag. On 2026-10-22 `grep -rl` over `~/src` and `~/ops` ran 38 min at one core."

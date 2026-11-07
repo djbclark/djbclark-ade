@@ -101,9 +101,6 @@ jobs:
         with:
           node-version: 24
 
-      - name: Install the Pi subagent extension test dependencies
-        run: npm ci --ignore-scripts --no-audit --no-fund --prefix pi/extensions/subagent
-
       - name: Run the test suite
         run: uv run --with pytest --with pyyaml --with 'agent-client-protocol>=0.9,<1.0' python -m pytest tests/ -q
 
@@ -117,8 +114,9 @@ jobs:
         run: >-
           uv run --with pytest --with pyyaml --with 'agent-client-protocol>=0.9,<1.0'
           python -m pytest tests/test_go_model_policy.py tests/test_go_context_plugin.py
-          tests/test_opencode_self_compact.py
           claude/hooks/handoff-tools/tests/test_context_size_nudge.py
           tests/test_instruction_lint.py -q
       - name: Instruction-file lint (errors block, warnings report)
         run: uv run python bin/instruction-lint --root .
+      - name: README roster matches skills/ and bin/ (bin/ade-roster, 2026-11-07)
+        run: python3 bin/ade-roster --check
