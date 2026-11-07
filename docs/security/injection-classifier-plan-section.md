@@ -17,9 +17,11 @@ reader that gets it (the order the operator set 2026-11-07): a gate that has
 not been measured on our own traffic is a false sense of security, not a gate.
 
 1. **What the gate is.** `bin/ade-injection-gate` — one shared tool every
-   outside-content reader calls (`fleet-watch`, `pr-policy`, `review-pr`,
-   `skills/loose`, the Jira and firecrawl readers, and any agent brief that
-   carries quoted outside text). It sends the text as `state` with one fixed
+   outside-content reader calls (`pr-policy`, `review-pr`, `skills/loose`,
+   the Jira and firecrawl readers, and any agent brief that carries quoted
+   outside text; plus `fleet-watch`, which lives in site-public-djbclark, so
+   its hold is an out-of-repo integration to wire and verify from there —
+   pending this repo's build). It sends the text as `state` with one fixed
    `choice` question (injection vs benign, the eval's prompt shape) and
    returns the probability distribution, the `decide` at the thresholds
    below, and the latency. The classifier is Jev (TypeSafe hosted,
