@@ -13,7 +13,7 @@ control; since 2026-10-08 also the git home of the orchestration and
 session-hygiene skills and tools. Two altitudes, verified by real runs on
 2026-08-23: the **micro graph** (Claude Code dynamic workflows, in-process
 fan-out) and the **macro graph** (a task DAG across agent CLIs in their
-own worktrees; it was run through Orca, which is now retired from djbclark-ade: run the same shape with Paseo workspaces and agents (Paseo's own `paseo` skill, `skills/bigteam`; plan: `docs/paseo-only-rearchitecture.md`). Its Orca command reference, `docs/orca-integration.md`, was removed 2026-10-31 (git history has it) and no Paseo DAG runbook is written yet).
+own worktrees; it was run through Orca, which is now retired from djbclark-ade: run the same shape with Paseo workspaces and agents (Paseo's own `paseo` skill, `skills/fan-out`; plan: `docs/paseo-only-rearchitecture.md`). Its Orca command reference, `docs/orca-integration.md`, was removed 2026-10-31 (git history has it) and no Paseo DAG runbook is written yet).
 [README.md](README.md): architecture, how they compose, every skill.
 
 > **Retired as of 2026-10-31 (operator ruling).** herdr (except the two edge-case bridges `herdr4paseo` and
