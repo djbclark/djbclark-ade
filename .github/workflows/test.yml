@@ -118,3 +118,5 @@ jobs:
           tests/test_instruction_lint.py -q
       - name: Instruction-file lint (errors block, warnings report)
         run: uv run python bin/instruction-lint --root .
+      - name: README roster matches skills/ and bin/ (bin/ade-roster, 2026-11-07)
+        run: python3 bin/ade-roster --check
