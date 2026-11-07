@@ -234,37 +234,24 @@ class TestPermBoundaries(Base):
                 self.assertEqual(r.returncode, code, r.stdout + r.stderr)
                 self.assertTrue((self.out / f"rl-{mode}-report.md.done").exists())
 
-    def test_codex_read_only_is_refused_when_the_mode_is_not_listed(self):
-        r = self.dispatch("codex", "gpt-6.1-sol", "--perm", "read-only")         # 0.15.3 lists auto, auto-review, full-access
-        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
-        self.assertIn("is not listed", r.stdout)
-        self.assertEqual(self.record()["status"], "refused")
-        verbs = self.verbs()
-        self.assertIn("stop", verbs)
-        self.assertNotIn("send", verbs)                                          # the brief never reached the agent
-        run = next(c for c in self.calls() if c[0] == "run")
-        self.assertEqual(run[run.index("--mode") + 1], "read-only")
-        self.assertTrue(run[-1].startswith("Reply with exactly: ready"))
-
-    def test_codex_read_only_runs_once_the_mode_is_listed_and_active(self):
-        modes = json.dumps({"codex": ["auto", "read-only"]})
-        r = self.dispatch("codex", "gpt-6.1-sol", "--perm", "read-only", FAKE_PASEO_MODES=modes)
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertEqual(self.record()["boundary"], "paseo-mode")
-        self.assertIn("send", self.verbs())
-        r = self.dispatch("codex", "gpt-6.1-sol", "--perm", "read-only", "--force", FAKE_PASEO_MODES=modes,
-                          FAKE_PASEO_ACTIVE="auto")
-        self.assertEqual(r.returncode, 2)
-        self.assertIn("active mode is 'auto'", r.stdout)
-
-    def test_deny_and_unknown_read_only_modes_are_refused_for_other_providers(self):
-        for agent, perm in (("codex", "deny"), ("opencode", "read-only"), ("cursor", "deny"), ("antigravity", "read-only")):
+    def test_other_providers_run_read_only_and_deny_best_effort_with_a_note(self):
+        # operator ruling 2026-11-07: internal agents trust each other; --perm is enforced only for Claude (review-launch)
+        for agent, perm in (("codex", "read-only"), ("codex", "deny"), ("opencode", "read-only"), ("cursor", "deny"),
+                            ("antigravity", "read-only")):
             with self.subTest(agent=agent, perm=perm):
                 model = "opencode-go/minimax-m3" if agent == "opencode" else "m-1"
-                r = self.dispatch(agent, model, "--perm", perm, ACP_OPERATOR_APPROVED="route-override")
-                self.assertEqual(r.returncode, 2, r.stderr)
-                self.assertIn("is refused", r.stderr)
-        self.assertNotIn("run", self.verbs())
+                name = f"be-{agent}-{perm}"
+                r = self.dispatch(agent, model, "--perm", perm, name=name, ACP_OPERATOR_APPROVED="route-override")
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                rec = self.record(name)
+                self.assertEqual(rec["boundary"], "paseo")
+                self.assertEqual(rec["mode"], "auto" if agent == "codex" else "default")
+                self.assertIn(f"--perm {perm} is best effort for {agent}", rec["perm_note"])
+                self.assertIn("best effort", r.stderr)
+                self.assertIn("was asked to be read-only", (self.out / f"{name}-brief.md").read_text())
+        self.assertNotIn("stop", self.verbs())
+        self.assertIsNone(self.record("be-codex-read-only").get("pending_permissions"))
+        self.assertNotIn("mode", self.verbs())                                   # no mode verification any more
 
 
 class TestLaunchAndWait(Base):
@@ -311,8 +298,22 @@ class TestLaunchAndWait(Base):
         w = self.run_cli(["wait", str(self.out / "jobs" / "s1.json")])
         self.assertEqual(w.returncode, 0, w.stdout + w.stderr)
         self.assertEqual(self.record()["status"], "done")
+        self.assertEqual(self.run_cli(["wait", "--once", str(self.out / "jobs" / "s1.json")]).returncode, 0)
         self.assertEqual(self.dispatch().returncode, 2)                          # a finished name is refused
         self.assertEqual(self.dispatch("claude", "sonnet", "--force").returncode, 0)
+
+    def test_wait_once_is_75_while_running_and_the_verdict_once_done(self):
+        self.assertEqual(self.dispatch("claude", "sonnet", "--detach", "--no-wait", name="run",
+                                       FAKE_PASEO_AGENT="running").returncode, 0)
+        rec = str(self.out / "jobs" / "run.json")
+        t0 = time.monotonic()
+        self.assertEqual(self.run_cli(["wait", "--once", rec]).returncode, 75)
+        self.assertLess(time.monotonic() - t0, 30)                              # non-blocking
+        self.assertNotIn("wait", self.verbs())                                  # it never calls a blocking paseo wait
+        self.assertEqual(self.dispatch("claude", "sonnet", "--detach", "--no-wait", name="blk",
+                                       FAKE_PASEO_AGENT="blocked").returncode, 0)
+        self.assertEqual(self.run_cli(["wait", "--once", str(self.out / "jobs" / "blk.json")]).returncode, 4)
+        self.assertEqual(self.record("blk")["status"], "blocked")
 
     def test_a_failed_paseo_run_is_a_refused_launch(self):
         r = self.dispatch(FAKE_PASEO_RUN_FAIL="1")
@@ -366,6 +367,18 @@ class TestLoadGateAndCap(Base):
         refused = [self.record(f"b{i:02d}") for i, c in enumerate(codes) if c == 75]
         self.assertTrue(all("refused=agents" in r["detail"] for r in refused))
         self.assertEqual(sum(c["argv"][0] == "release" for c in self.lw()), 20)  # every admission handed back
+
+    def test_a_burst_under_an_in_flight_cap_of_one_starts_exactly_one(self):
+        def one(i: int) -> int:
+            return self.gated("--detach", "--no-wait", name=f"i{i}", FAKE_PASEO_AGENT="running",
+                              ACP_DISPATCH_INFLIGHT="claude=1").returncode
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
+            codes = list(pool.map(one, range(6)))
+        self.assertEqual(sorted(codes), [0] + [5] * 5, codes)
+        self.assertEqual(self.verbs().count("run"), 1)
+        refused = [self.record(f"i{i}") for i, c in enumerate(codes) if c == 5]
+        self.assertTrue(all(r["status"] == "unavailable" and r["unavailable_class"] == "inflight" for r in refused))
 
     def test_the_cap_follows_lw_max_agents_and_zero_turns_it_off(self):
         self.assertEqual(self.gated("--detach", "--no-wait", name="c1", FAKE_PASEO_AGENT="running").returncode, 0)
@@ -495,6 +508,7 @@ class TestCheckOutcomeTell(Base):
         self.assertIn("## MSG 2 from lead", inbox)
         send = [c for c in self.calls() if c[0] == "send"][-1]
         self.assertTrue(any(x.startswith("--prompt=MSG 2 from lead") for x in send))
+        self.assertEqual(send[send.index("--behavior") + 1], "steer")          # a sourceless send would interrupt
         pending = json.dumps([{"id": "p", "tool": "Bash"}])
         r = self.run_cli(["tell", str(rec), "z"], FAKE_PASEO_PENDING=pending)
         self.assertEqual(r.returncode, 2)

@@ -771,7 +771,7 @@ def paseo_call(args: list[str], timeout: float) -> tuple[dict[str, Any], str]:
     try:
         r = subprocess.run([os.environ.get("DIALOGUE_PASEO") or "paseo", *args[:cut], "--json", *args[cut:]],
                            capture_output=True, text=True, timeout=timeout)
-    except (OSError, subprocess.SubprocessError) as e:
+    except (OSError, subprocess.TimeoutExpired, subprocess.SubprocessError) as e:
         return {}, f"cannot run paseo {args[0]}: {e}"
     try:
         j = json.loads(r.stdout) if r.stdout.strip() else {}
@@ -817,6 +817,8 @@ def run_paseo_route(run: Run, route: dict[str, Any], prompt_file: Path, timeout:
     waited, err = paseo_call(["wait", str(aid), "--timeout", str(timeout)], timeout + 120)
     status = waited.get("status")
     if status != "idle":
+        # a timed-out, blocked or failed turn must not keep running beside the next route's agent
+        paseo_call(["agent", "stop", str(aid)], 60)
         return "", f"paseo agent {aid}: {status or err} {waited.get('message', '')}".strip()
     out = read(reply_file).strip()
     return (out, "") if out else ("", f"paseo agent {aid} went idle without writing {reply_file}")

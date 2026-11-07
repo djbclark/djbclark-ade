@@ -36,19 +36,18 @@ A3. The argv per `--perm` (from `launch_argv`; `--dry-run --json` prints it as `
   field (the run can write nothing); the shim writes that string to the report and touches `.done`. review-launch's
   exits map: 0 report (classified), 77 tripwire, 2 refused, 3 no output, 124 timeout; unreadable stdout is 3. Not
   launched by this suite against a real `claude` (no login): the stub in `tests/fakes/review-launch` follows E8's 1a.
-- **`read-only`, codex** (`boundary: paseo-mode`): `paseo run ... --mode read-only ... -- "Reply with exactly: ready. Do
-  nothing else."`, then `paseo wait ID --timeout 60`, `paseo agent mode ID --list --json` (the mode must be listed) and
-  `paseo inspect ID --json` (`Mode` must equal it); only then `paseo send ID --no-wait --json --prompt=<PROMPT>`. On any
-  miss: `paseo stop ID`, record `refused`, exit 2. DECIDED (the brief created the agent with the real prompt and checked
-  after): a no-op first prompt, so no brief work starts before the mode is verified.
-- **`read-only`, any other provider; `deny`, any non-claude provider**: refused, exit 2, nothing launched.
+- **`read-only` or `deny`, every non-Claude provider** (`boundary: paseo`; revised after the E6 review, operator ruling
+  2026-11-07, "our agents all trust each other; internal security is not to be pedantic about"): BEST EFFORT. The same
+  `paseo run` as `all`, in the provider's default mode (codex `auto`), with a brief note asking the agent to change
+  nothing (`BEST_EFFORT_NOTE`) and `perm_note` in the record and on stderr ("--perm read-only is best effort for codex:
+  Paseo has no per-run tool restriction ..."). Nothing enforces it. Go advisory slices (opencode, `--perm read-only`)
+  run the same way. The first version's verified-provider-mode path (a no-op first prompt, `paseo agent mode --list`,
+  `paseo inspect`, stop and exit 2 on a miss) and its `MODE_NOTE` are gone: in 0.15.3 it could never succeed (A4).
 
-A4. **Finding: codex `--perm read-only` is refused in practice.** In 0.15.3 `CODEX_MODES` lists `auto`, `auto-review`,
-`full-access` (`codex-app-server-agent.ts:272-289`); `read-only` exists only as a sandbox preset (`MODE_PRESETS`,
-`:329`). So the verification fails and the launch is refused: today only Claude has a working `--perm read-only`. The
-tendcf/nix2cf frontier review route on codex read-only (ledger "C3 PRs") will exit 2 after the merge until either the
-lead accepts "active mode equals the preset, unlisted" as verified or the review moves to Claude through review-launch.
-Lead's call; the shim follows the brief (listed AND active).
+A4. Why the verified path went: in 0.15.3 `CODEX_MODES` lists `auto`, `auto-review`, `full-access`
+(`codex-app-server-agent.ts:272-289`); `read-only` exists only as a sandbox preset (`MODE_PRESETS`, `:329`), so the
+verification refused every codex read-only launch (review note 12). Under the ruling the tendcf/nix2cf codex review
+route runs again, best effort. Only Claude's `--perm read-only`/`deny` is an enforced boundary.
 
 A5. The status map of `paseo wait ID [--timeout S] --json` (the status field; `$?` is never read): `idle` → finalize:
 the report is classified (0 DONE, 1 unfinished, 4 BLOCKED; an empty report gets `NO-REPORT: idle without a report (agent,
@@ -62,7 +61,7 @@ agent, provider, model, mode, boundary, perm, kind, role, service, dir, task, ou
 lead, effort, timeout, wait_timeout (`--wait-timeout`, else timeout + 300, 0 none), detached, argv, cmd, prompt, owner,
 started, status, paseo_agent_id, pid (the detached review-launch runner), exit, finished, go_advisory, frontier_reason,
 frontier_judged, frontier_judged_note, estimated_usage_pct, estimated_usage_windows, estimate_source,
-snapshot_remaining_before, snapshot_reading, load_gate, min_headroom; finalize adds detail, report_source,
+snapshot_remaining_before, snapshot_reading, load_gate, min_headroom, perm_note (null unless best effort); finalize adds detail, report_source,
 measured_usage_pct / measured_usage_windows (the pool drop, which `route_agent.py calibrate` and the estimates read), and
 `outcome` is written by `acp-dispatch outcome` unchanged.
 
@@ -82,12 +81,23 @@ review-launch run is a `claude -p` that `paseo ls` cannot see, so it holds its a
 until it ends. The handoff test (20 parallel launches, a fake `paseo` that keeps every agent running, a fake
 `load-watch`) gets exactly 14 launches, 6 exits 75, and 20 releases.
 
+A8. The in-flight re-check (review BLOCK 1, repaired). The first version judged the in-flight cap, the reservation and
+the frontier per-wave count only before this dispatch wrote its record, outside any lock, so parallel dispatches did
+not see each other (the reviewer: 6 parallel launches under `ACP_DISPATCH_INFLIGHT=claude=1` gave 3 starts). Now
+`write_and_recheck`, under `~/.local/state/acp-dispatch/inflight.lock`, stamps `started`, writes the `running` record and
+runs `inflight_recheck`: it re-reads the in-flight records, keeps only those AHEAD of this one by `(started, path)`,
+and refuses with exit 5 (`unavailable`/`inflight`, marked inside the lock so no later dispatch counts it) when the cap
+is full or the reservation no longer fits; a frontier grant the per-wave cap no longer allows is withdrawn
+(`frontier_judged` null, the note says why) rather than refused, as the allowance never refuses. Both boundaries pass
+through it (the review-launch path too). The pre-write check stays as the fast path and for `--dry-run`. Test: 6
+parallel launches under `ACP_DISPATCH_INFLIGHT=claude=1` start exactly 1 and refuse 5.
+
 ## B. Dropped from acp-dispatch
 
 B1. Subcommands `resume`, `reroute`, `auto-resume`, `extend`, `finalize`, `execute`, `reap` (`--install`/`--uninstall`),
 `cursor-cloud`: each exits 2 with the replacement (`RETIRED` table). Flags `--checkpoint`, `--no-preflight`,
 `--no-auto-resume`, `--acp-arg`, `--context`, `--wrapup-grace`, `--no-model-check`, `--acp-run`, `--tee`,
-`--allow-unpushed`: argparse usage errors (exit 2). `wait --once` is gone too (B3).
+`--allow-unpushed`: argparse usage errors (exit 2).
 
 B2. Machinery gone with them: the launchd runner scripts and `launchctl submit`, `launchd/com.djbclark.acp-dispatch-reap.plist`,
 `config/sudoers.d/acp-dispatch-pmset` and the pmset wake, the quota-stop classification and the automatic resume, the
@@ -95,10 +105,14 @@ reroute/escalation hints, reap and restart attribution, the acp-run preflight an
 `--acp-arg` pass-through, final-message recovery, checkpoint mode, the advisor tree snapshot, the plenty and fallback
 gates, the old `wait_for_capacity` overload gate, the Claude live-session socket in `tell`. 4,542 lines.
 
-B3. `bin/acp-dispatch-wait` (the cheap rearm waiter) is NOT deleted: the brief does not name it and its ledger row is
-DELETE gated on the C7 drain. It calls `acp-dispatch wait --once`, which the shim does not have, so an old rearm line
-now exits 2. Only its two comments naming the retired verbs were reworded. It and its `dispatch` cases in
-`tests/test_deadline_wrappers.py` go in Wave 6.
+B3. `bin/acp-dispatch-wait` (the cheap rearm waiter) stays, and works with the shim (review BLOCK 2, repaired): the
+first version dropped `wait --once`, which it calls at `:119`. Restored as a non-blocking look: a finished record gives
+check's exit code; an unfinished Paseo slice is looked at with `paseo inspect` (no blocking `paseo wait`), and one that
+is no longer running or has a pending permission is finalized through a 1 s `paseo wait`; a review-launch record whose
+runner is gone is finalized `lost`; otherwise 75, or 124 once `wait_timeout` has passed. `bin/deadline_wait.py:3` only
+says acp-dispatch-wait registers its deadline in bash, which is still true: unchanged. Tests: `wait --once` is 75 on a
+running slice without calling `paseo wait`, 4 on a BLOCKED one, 0 on a done one. `tests/test_deadline_wrappers.py`'s
+two `dispatch` cases still fail on Linux for the baseline reason (`ggrep` is not installed).
 
 ## C. Frontier guards kept (ported, not dropped)
 
@@ -230,10 +244,23 @@ longer fail: their files were deleted or rewritten here or in Waves 2-3 (`test_a
 `test_bigteam_prune.py` 8, `test_self_slash*.py` 41, `test_session_relay.py` 2, `test_ade_scan_state.py` 2,
 `test_local_review.py` 2, `test_launch_turns.py` 1).
 
-K4. Operator ruling 2026-11-07 (relayed by the coordinator after K2): the grok CLI is retired, so `grok` left the
+K4. Operator rulings 2026-11-07 (relayed by the coordinator after K2). (a) The grok CLI is retired, so `grok` left the
 provider map (it now exits 2 like any unknown agent), the shim's tests, the fake `paseo`'s provider list, this report and
 the changelog line; `tests/test_dialogue_paseo.py` probes through the `cursor` provider instead, and the research skill's
-provider list lost it.
+provider list lost it. (b) `--perm` is best effort for non-Claude providers (A3, A4); the codex read-only tests were
+replaced by one best-effort test over five agent/perm pairs, and `tests/test_go_model_policy.py`'s Go advisor test now
+expects the advisor to run with a `perm_note`.
+
+K5. Review repairs (E6 review verdict BLOCK): the in-flight re-check (A8), `wait --once` (B3), and the notes: `tell` sends
+with `--behavior steer` (a sourceless `paseo send` would interrupt the running turn; tested), every `paseo` call goes
+through `paseo_json`, which catches `subprocess.TimeoutExpired` (named explicitly), `started_at` guards a junk
+`started` in a record, and dialogue stops (`paseo agent stop`) the agent of a timed-out, blocked or failed turn before
+the next route (tested). After the repairs: `bin/pytest -q tests/test_acp_dispatch.py tests/test_agent_guard.py
+tests/test_dialogue_paseo.py tests/test_deadline_wrappers.py tests/test_go_model_policy.py tests/test_omp_operator_gate.py`:
+**2 failed, 109 passed** (40 subtests), both failures the baseline rows
+`tests/test_deadline_wrappers.py::{test_wait_registers_beats_and_deregisters_on_a_normal_end,
+test_expiry_kills_the_waiters_own_group_with_its_own_exit_code}[dispatch]` (`ggrep` missing on Linux). The full suite
+was not re-run after the repairs.
 
 K3. Test files: `tests/test_acp_dispatch.py` rewritten (519 lines, 37 tests: surface and retired verbs, the provider map
 and argv, the perm boundaries, launch/wait/status map, the admit gate, knobs, reservation release and the 20-launch
@@ -254,8 +281,7 @@ nothing to remove there.
 Auto-resume after a quota stop (Paseo's `usage-auto-resume` plugin is the replacement); reroute and `--escalate`; the
 reap sweep and restart attribution; cursor-cloud through dispatch (`bin/cursor-cloud` direct); checkpoint mode;
 `extend`; resume in the same ACP session; the per-agent acp-run boundary for non-Claude providers (now provider-mode
-strength, and in 0.15.3 not even that for codex: A4); final-message recovery; the acp-run preflight and model/effort
+strength was planned; under the 2026-11-07 ruling it is best effort, enforced by nothing); final-message recovery; the acp-run preflight and model/effort
 probes; the advisor tree-change check; the plenty and fallback-pool gates (routing, E7); `tell`'s live Claude socket;
-the slice deadline (a Paseo agent is not stopped at `--timeout`; the waiter stops waiting); Go advisory slices
-(opencode has no verified read-only mode, so the Go advisor path refuses); `wait --once` and with it the cheap rearm
-waiter for new records.
+the slice deadline (a Paseo agent is not stopped at `--timeout`; the waiter stops waiting); the enforced read-only
+sandbox of Go advisory slices (they now run best effort).

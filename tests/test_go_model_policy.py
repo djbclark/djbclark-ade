@@ -1,6 +1,7 @@
 """Cost policy rejects expensive execution before a provider process starts."""
 
 import importlib.util
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -89,19 +90,24 @@ def test_dispatch_cannot_bypass_cost_gate_with_route_override(tmp_path, extra):
     assert not list(state.glob("**/jobs/*.json"))
 
 
-def test_bounded_advice_is_refused_without_a_verified_read_only_mode(tmp_path):
-    # Go advice needs --perm read-only, and the acp-dispatch Paseo shim (slim-down E6, 2026-11-06) has no verified
-    # read-only mode for opencode: the bounded advisor that acp-run's --go-advisory used to run is refused, not run.
+def test_bounded_advice_runs_best_effort_read_only(tmp_path):
+    # The acp-dispatch Paseo shim (slim-down E6) cannot restrict opencode's tools: under the operator's 2026-11-07 ruling
+    # a Go advisor with --perm read-only runs best effort (the provider's default mode, a brief note, `perm_note`).
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    (bindir / "paseo").symlink_to(ROOT / "tests" / "fakes" / "paseo")
     result = subprocess.run([sys.executable, str(ROOT / "bin/acp-dispatch"), "opencode",
                              "--model", "opencode-go/kimi-k3", "--name", "safe-advice",
-                             "--task", "cost-policy-test", "-p", "offline dry run", "--dry-run",
+                             "--task", "cost-policy-test", "-p", "offline dry run", "--dry-run", "--json",
                              "--kind", "judgment", "--role", "advise",
                              "--perm", "read-only", "--timeout", "600",
                              "--out", str(tmp_path / "jobs")], capture_output=True, text=True,
                             timeout=20, check=False,
-                            env={**os.environ, "HOME": str(tmp_path)})
-    assert result.returncode == 2, result.stderr
-    assert "Go advisory use needs --perm read-only" in result.stderr
+                            env={**os.environ, "HOME": str(tmp_path), "FAKE_PASEO_STATE": str(tmp_path / "st"),
+                                 "PATH": f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}"})
+    assert result.returncode == 0, result.stderr
+    rec = json.loads(result.stdout)
+    assert rec["go_advisory"] is True and "best effort for opencode" in rec["perm_note"]
     assert not (tmp_path / "jobs").exists()
 
 

@@ -40,14 +40,15 @@ A slice that edits code gets its own linked worktree (AGENTS.md order 9:
 `acp-dispatch` writes `~/.local/state/bigteam/TASK/NAME-brief.md` (your brief plus the footer), gates on
 `load-watch admit` and the agent cap (exit 75: retry later), and runs `paseo run --no-wait` with the
 labels `ade.via=acp-dispatch`, `ade.kind`, `ade.name`, `ade.lead`. `--perm read-only` for a review: Claude
-runs through `bin/review-launch` (the review boundary); codex only through a provider mode verified at
-launch; other agents are refused. A plain `paseo run --no-wait --provider P/M --mode M --cwd DIR "<prompt>"`
+runs through `bin/review-launch` (the enforced review boundary); every other agent runs best effort, in its
+default mode with a brief note to change nothing (`perm_note` in the record; operator ruling 2026-11-07). A plain `paseo run --no-wait --provider P/M --mode M --cwd DIR "<prompt>"`
 works too when you need none of that, but then you write the footer into the prompt yourself.
 
 ## 4. Collect
 
 - `acp-dispatch wait ~/.local/state/bigteam/TASK/jobs/NAME.json` blocks on `paseo wait` and exits with the
   contract: 0 DONE, 1 unfinished, 3 no report, 4 BLOCKED (or a pending permission), 124 timed out.
+  `--once` looks once without blocking (75 while unfinished); `bin/acp-dispatch-wait RECORD DONE` loops on it.
 - `acp-dispatch check ~/.local/state/bigteam/TASK` classifies every slice of the task at once.
 - `paseo ls -g --label ade.via=acp-dispatch` shows what runs; `paseo permit ls` the permission cards.
 - `acp-dispatch tell RECORD "message"` reaches a running slice (its inbox plus `paseo send`; `accepted`,

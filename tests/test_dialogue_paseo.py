@@ -44,9 +44,10 @@ def test_an_acp_route_runs_on_paseo_and_reads_the_reply_file(tmp_path):
 
 
 def test_a_non_idle_wait_or_a_missing_reply_fails_the_route(tmp_path):
-    r, _ = world(tmp_path, [{"kind": "paseo", "provider": "codex", "model": "gpt-6.1-sol", "mode": "auto"}],
-                 FAKE_PASEO_WAIT="permission")
+    r, calls = world(tmp_path, [{"kind": "paseo", "provider": "codex", "model": "gpt-6.1-sol", "mode": "auto"}],
+                     FAKE_PASEO_WAIT="permission")
     assert r.returncode == 1 and "FAIL" in r.stdout and "permission" in r.stdout
+    assert ["agent", "stop", "agent-0001", "--json"] in calls            # the failed turn's agent does not run on
     other = tmp_path / "again"
     other.mkdir()
     r, _ = world(other, [{"kind": "paseo", "provider": "codex", "model": "gpt-6.1-sol"}], FAKE_PASEO_AGENT="nothing")

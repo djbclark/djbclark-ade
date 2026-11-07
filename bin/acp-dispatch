@@ -14,6 +14,8 @@ through `bin/review-launch` (the E8 review boundary, which outlives this shim).
     acp-dispatch footer --report PATH [--lead NAME]   the shared footer, filled in, for an Agent-tool prompt
     acp-dispatch check (PATH)...                       classify reports, jobs/<name>.json records or out dirs
     acp-dispatch wait RECORD [--timeout S]             `paseo wait` on the slice, then classify (exit codes below)
+    acp-dispatch wait RECORD --once                    one non-blocking look (bin/acp-dispatch-wait's probe): 75 while
+                                                       unfinished, else the exit code below
     acp-dispatch tell RECORD MESSAGE [--from NAME]     inbox entry + `paseo send --no-wait --json` (MESSAGE - = stdin)
     acp-dispatch outcome RECORD [--ci pass|fail] [--review pass|fail] [--merged|--not-merged]
 
@@ -26,14 +28,12 @@ any other exits 2 with that list. `--model M` becomes `--provider P/M`. `--mode`
 so no mode would not be read-only):
     --perm all        the provider's `defaultMode` from `paseo provider ls --json` (enabled and available, else 2)
     --perm read-only  claude: `bin/review-launch --mode read-only` (Read, Grep, Glob, WebFetch, WebSearch; empty
-                      settings, MCP and hooks; bypass refused; tripwire 77). Other providers: a provider mode
-                      (codex `read-only`; any other provider is refused, exit 2) that is VERIFIED at launch: the
-                      agent is created with that mode and a no-op first prompt, `paseo agent mode ID --list` and
-                      `paseo inspect ID` must show it listed and active, else the agent is stopped and the launch
-                      refused (exit 2); only then is the brief sent. Provider-mode strength, WEAKER than review-launch:
-                      no tool allowlist, no MCP or settings stripping, no tripwire.
-    --perm deny       claude: `bin/review-launch --mode review` (Read, Grep, Glob, no network). Others: refused (2).
-The record says which (`boundary`: review-launch | paseo-mode | paseo).
+                      settings, MCP and hooks; bypass refused; tripwire 77).
+    --perm deny       claude: `bin/review-launch --mode review` (Read, Grep, Glob, no network).
+    Other providers, read-only or deny: BEST EFFORT (operator ruling 2026-11-07, "our agents all trust each other"):
+                      the provider's default mode, a brief note asking the agent to change nothing, and `perm_note` in
+                      the record and on stderr. Paseo has no per-run tool restriction; nothing enforces it.
+The record says which (`boundary`: review-launch | paseo).
 
 Launch: `load-watch admit --wait S --json --max-agents` first (exit 75 when too hot; --load-wait, else
 ACP_DISPATCH_LOAD_WAIT, else 1800; --no-load-gate or ACP_DISPATCH_NO_LOAD_GATE=1 skips it; LW_* is scrubbed from its
@@ -44,7 +44,9 @@ environment except the knobs passed as flags). Then, under this shim's launch lo
 ade.kind=KIND --label ade.name=NAME --label ade.lead=LEAD [--thinking EFFORT] -- PROMPT`, where PROMPT is one
 paragraph naming the brief copy (`<out>/<name>-brief.md`, never written into the repo), the report path, and the
 footer. The lock and the admit reservation are released once the new agent shows in that list (up to 10 s), so a
-burst of launches cannot pass the cap together. A review-launch run holds its admit reservation (renewed) until it
+burst of launches cannot pass the cap together. The in-flight cap, the reservation and the frontier per-wave count
+are judged twice: before anything is written, and again under a lock right after this dispatch's `running` record is
+written, counting only the records ahead of it by (started, path), so parallel dispatches see each other (exit 5). A review-launch run holds its admit reservation (renewed) until it
 ends: it is a `claude -p` process `paseo ls` cannot see.
 
 Wait: `paseo wait ID [--timeout S] --json`, read by its status field, never its exit status: idle -> the report is
@@ -106,7 +108,6 @@ NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@\[\]+-]{0,127}$")
 CLAUDE_REFUSED_BASENAME = re.compile(r"^(REPORT|SUMMARY|FINDINGS|ANALYSIS).*\.md$", re.IGNORECASE)
 PROVIDERS = {a: a for a in ("claude", "codex", "antigravity", "cursor", "opencode", "hermes", "omp")}   # grok retired 2026-11-07
-READ_ONLY_MODES = {"codex": "read-only"}            # candidates verified at launch; none known for the others
 REVIEW_MODES = {"read-only": "read-only", "deny": "review"}   # bin/review-launch --mode, claude only
 LIVE_STATUSES = ("running", "initializing")
 VIA_LABEL = "ade.via=acp-dispatch"
@@ -141,9 +142,10 @@ marker, so do not try: put the whole report, in the shape the delivery contract 
 or `BLOCKED:`, last line `DONE`), in the `report` field of your structured output; acp-dispatch writes the file and
 the marker for you. This overrides items 1, 2, 3 and 7 of the delivery contract.
 """
-MODE_NOTE = """
-**This run is read-only (`--perm read-only`, the provider's `{mode}` mode).** You cannot change files. Write
-nothing; put the whole report, in the shape the delivery contract describes, in your final message.
+BEST_EFFORT_NOTE = """
+**This run was asked to be read-only (`--perm {perm}`).** Change nothing: do not edit, create or delete files, commit,
+push or run commands that modify state. Read and report only; the report file and its `.done` marker are the only
+writes allowed.
 """
 BUDGET_TEXT = """
 ## Time budget (acp-dispatch)
@@ -215,7 +217,7 @@ def paseo_json(args: list[str], timeout: float | None = 60) -> tuple[Any, str]:
     cmd = [paseo_bin(), *[x for x in args[:cut] if x != "--json"], "--json", *args[cut:]]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)
-    except (OSError, subprocess.SubprocessError) as e:
+    except (OSError, subprocess.TimeoutExpired, subprocess.SubprocessError) as e:   # every paseo call goes through here
         return None, f"paseo {args[0]} failed ({e})"
     try:
         data = json.loads(r.stdout) if r.stdout.strip() else None
@@ -524,9 +526,73 @@ def inflight_records(service: str | None, agent: str, skip: Path, out: Path, liv
             continue
         aid = row.get("paseo_agent_id")
         if ((aid and (live is None or aid in live)) or (row.get("boundary") == "review-launch" and pid_alive(row.get("pid")))
-                or time.time() - float(row.get("started") or 0) < INFLIGHT_SPAWN_GRACE):
+                or time.time() - started_at(row) < INFLIGHT_SPAWN_GRACE):
             busy.append(path)
     return busy
+
+
+def started_at(row: dict) -> float:
+    try:
+        return float(row.get("started") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def inflight_recheck(record: Path, rec: dict) -> str | None:
+    """Why this dispatch may not start after all, judged on the records AHEAD of it by (started, path), or None. Runs
+    under the in-flight lock right after its `running` record is written (`write_and_recheck`), so two parallel
+    dispatches cannot both pass a cap of one: the later sees the earlier. A frontier grant the per-wave cap no longer
+    allows is withdrawn (the allowance is not a lock), the reservation and the cap refuse."""
+    key = (started_at(rec), str(record))
+    out = Path(rec["out"])
+    busy = []
+    for p in inflight_records(rec.get("service"), rec["agent"], record, out, count_agents()[1]):
+        try:
+            if (started_at(read_record(p)), str(p)) < key:
+                busy.append(p)
+        except (OSError, ValueError):
+            busy.append(p)         # unreadable: it counts (fail toward waiting)
+    judged = rec.get("frontier_judged")
+    if judged and frontier_inflight(busy) >= int(judged.get("per_wave") or 0):
+        update_record(record, frontier_judged=None, frontier_judged_note=(
+            f"frontier-reason recorded; frontier allowance withdrawn: {frontier_inflight(busy)} frontier slice(s) "
+            f"ahead in flight (cap {judged.get('per_wave')} per wave)"))
+    cap = inflight_cap(rec["agent"], rec.get("service"))
+    if cap is not None and len(busy) >= cap:
+        return (f"{len(busy)} {rec.get('service') or rec['agent']} slice(s) already in flight (cap {cap}): "
+                f"{', '.join(p.stem for p in busy[:3])}")
+    remaining = rec.get("snapshot_remaining_before")
+    windows = (rec.get("snapshot_reading") or {}).get("windows") or {}
+    per_window = rec.get("estimated_usage_windows") or {}
+    estimate = float(rec.get("estimated_usage_pct") or 0)
+    reserved, reserved_win = reserved_usage(busy, list(windows))
+    if per_window:
+        why, _ = route_module().window_fit(per_window, {k: float(v) - reserved_win.get(k, 0.0)
+                                                        for k, v in windows.items() if v is not None})
+    elif remaining is not None and estimate > float(remaining) - reserved:
+        why = f"estimated use {estimate:.1f}% > {float(remaining) - reserved:.1f}% left after reserving {reserved:.1f}%"
+    else:
+        why = None
+    return f"{why}; in-flight on {rec.get('service') or rec['agent']}: {', '.join(p.stem for p in busy[:5])}" \
+        if why and busy else None
+
+
+def write_and_recheck(record: Path, rec: dict) -> int | None:
+    """Write the `running` record and re-judge the in-flight cap and reservation, both under one lock. None = go."""
+    LOCK_DIR.mkdir(parents=True, exist_ok=True)
+    with (LOCK_DIR / "inflight.lock").open("a") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        rec["started"] = time.time()
+        write_record(record, rec)
+        why = inflight_recheck(record, rec)
+        if why:      # marked under the lock, so no later dispatch counts a slice that will not start
+            update_record(record, status="unavailable", unavailable_class="inflight", detail=why, finished=time.time(),
+                          exit=UNAVAILABLE_EXIT)
+    if not why:
+        return None
+    release_reservation()
+    print(f"unavailable\t{record.stem}\tclass=inflight {why}")
+    return UNAVAILABLE_EXIT
 
 
 def reserved_usage(busy: list[Path], labels: list[str]) -> tuple[float, dict[str, float]]:
@@ -815,19 +881,17 @@ def dispatch(a: argparse.Namespace) -> int:
             die(f"--frontier-reason: {problem}")
     elif a.frontier_reason not in (None, ""):
         die("--frontier-reason applies only to a --kind frontier dispatch")
-    provider = PROVIDERS[a.agent]
+    provider, perm_note = PROVIDERS[a.agent], None
     if a.perm == "all":
         boundary, mode = "paseo", str(provider_entry(provider).get("defaultMode") or "default")
     elif a.agent == "claude":
         boundary, mode = "review-launch", REVIEW_MODES[a.perm]
-    elif a.perm == "read-only" and provider in READ_ONLY_MODES:
-        provider_entry(provider)
-        boundary, mode = "paseo-mode", READ_ONLY_MODES[provider]
     else:
-        die(f"--perm {a.perm} is refused for {a.agent}: "
-            f"{'Go advisory use needs --perm read-only, and ' if getattr(a, 'go_advisory', False) else ''}Paseo has no verified "
-            f"{'no-tool' if a.perm == 'deny' else 'non-editing'} mode for it (only claude has the review-launch "
-            "boundary; codex has the read-only provider mode)")
+        boundary, mode = "paseo", str(provider_entry(provider).get("defaultMode") or "default")
+        perm_note = (f"--perm {a.perm} is best effort for {a.agent}: Paseo has no per-run tool restriction, so it runs in "
+                     f"the provider's default mode `{mode}` with a brief note asking it to change nothing (operator "
+                     "ruling 2026-11-07)")
+        print(f"acp-dispatch: {perm_note}", file=sys.stderr)
     REPO_FLOORS.update(router.repo_floors(router.repo_of(a.dir)))   # the -C repo's estimate-floor override
     out = Path(a.out).expanduser().resolve() if a.out else STATE_ROOT / (a.task or f"adhoc-{date.today().isoformat()}")
     report, record = out / f"{a.name}-report.md", out / "jobs" / f"{a.name}.json"
@@ -885,7 +949,7 @@ def dispatch(a: argparse.Namespace) -> int:
     footer = footer_text(report, a.lead, record.with_suffix(".inbox.md"), record.with_suffix(".replies.md"))
     note = {"review-launch": REVIEW_NOTE.format(perm=a.perm, mode=mode, report=report, tools=(
                 "Read, Grep, Glob, WebFetch, WebSearch" if mode == "read-only" else "Read, Grep, Glob")),
-            "paseo-mode": MODE_NOTE.format(mode=mode)}.get(boundary, "")
+            }.get(boundary, BEST_EFFORT_NOTE.format(perm=a.perm) if perm_note else "")
     budget = BUDGET_TEXT.format(minutes=f"{a.timeout / 60:g}") if a.timeout else ""
     advisor = ("\n" + ADVISOR_NOTE.strip() + "\n") if a.role == "advise" else ""
     brief_text = prompt.rstrip() + "\n" + advisor + "\n" + footer.rstrip() + "\n" + note + budget
@@ -908,7 +972,7 @@ def dispatch(a: argparse.Namespace) -> int:
            "frontier_reason": frontier_reason, "frontier_judged": judged, "frontier_judged_note": judged_note,
            "estimated_usage_pct": estimate, "estimated_usage_windows": per_window, "estimate_source": source,
            "snapshot_remaining_before": remaining, "snapshot_reading": reading, "load_gate": gate_info,
-           "min_headroom": a.min_headroom}
+           "min_headroom": a.min_headroom, "perm_note": perm_note}
     if a.dry_run:
         rec.update(status="dry-run", reserved_usage_pct=reserved, inflight=[p.stem for p in busy],
                    **({"would_refuse_class": refusal[0]} if refusal else {}))
@@ -920,7 +984,9 @@ def dispatch(a: argparse.Namespace) -> int:
     write_atomic(brief, brief_text)
     for p in (done, report, stderr):
         p.unlink(missing_ok=True)
-    write_record(record, rec)
+    code = write_and_recheck(record, rec)
+    if code is not None:
+        return code
     if boundary == "review-launch":
         if a.detach and a.no_wait:
             with (out / f"{a.name}-runner.log").open("a") as err:      # review-launch's own stderr goes to `stderr`
@@ -952,9 +1018,9 @@ def owner_session_id() -> str:
 
 def refuse_launch(record: Path, detail: str, code: int, cls: str) -> int:
     release_reservation()
-    update_record(record, status="unavailable" if code == LOAD_GATE_EXIT else "refused", unavailable_class=cls,
-                  detail=detail, finished=time.time(), exit=code)
-    print(f"{'unavailable' if code == LOAD_GATE_EXIT else 'refused'}\t{record.stem}\t{detail}")
+    status = "unavailable" if code in (LOAD_GATE_EXIT, UNAVAILABLE_EXIT) else "refused"
+    update_record(record, status=status, unavailable_class=cls, detail=detail, finished=time.time(), exit=code)
+    print(f"{status}\t{record.stem}\t{detail}")
     return code
 
 
@@ -972,7 +1038,7 @@ def load_wait(a: argparse.Namespace) -> int:
 
 
 def launch_paseo(record: Path, a: argparse.Namespace) -> int | None:
-    """The agent cap, then under the launch lock `paseo run`, (paseo-mode) the mode check, and the wait until the new
+    """The agent cap, then under the launch lock `paseo run` and the wait until the new
     agent is countable. The lock is not held while waiting for room. None = launched, else the exit code."""
     rec, cap = read_record(record), agent_cap()
     deadline = time.monotonic() + (load_wait(a) if gate_on(a) else 0)
@@ -993,44 +1059,15 @@ def launch_paseo(record: Path, a: argparse.Namespace) -> int | None:
 
 
 def launch_locked(record: Path, rec: dict) -> int | None:
-    argv = list(rec["argv"])
-    real_prompt = argv[-1]
-    if rec["boundary"] == "paseo-mode":
-        argv[-1] = "Reply with exactly: ready. Do nothing else."      # no work before the mode is verified
-    data, why = paseo_json(argv[1:], timeout=120)
+    data, why = paseo_json(list(rec["argv"])[1:], timeout=120)
     aid = data.get("agentId") if isinstance(data, dict) else None
     if not aid:
         return refuse_launch(record, f"paseo run did not create an agent: {why or data}", 2, "launch")
     update_record(record, paseo_agent_id=str(aid), run_status=data.get("status"))
-    if rec["boundary"] == "paseo-mode":
-        why = verify_mode(str(aid), rec["mode"])
-        if not why:
-            sent, swhy = paseo_json(["send", str(aid), "--no-wait", f"--prompt={real_prompt}"])
-            why = None if isinstance(sent, dict) and sent.get("status") in ("sent", "queued", "completed") \
-                else f"the brief was not sent ({swhy or sent})"
-        if why:
-            subprocess.run([paseo_bin(), "stop", str(aid)], capture_output=True, check=False, timeout=60)
-            return refuse_launch(record, f"--perm read-only refused: {why}; agent {aid} stopped", 2, "mode")
     end = time.monotonic() + COUNTABLE_S
     while time.monotonic() < end and str(aid) not in count_agents()[2]:
         time.sleep(0.5)
     return None
-
-
-def verify_mode(aid: str, mode: str) -> str | None:
-    """Why `mode` is not the verified active mode of agent `aid` (listed by `paseo agent mode --list`, active per
-    `paseo inspect`), else None. The no-op first prompt is waited out first so the brief is sent to an idle agent."""
-    paseo_json(["wait", aid, "--timeout", "60"], timeout=120)
-    listed, why = paseo_json(["agent", "mode", aid, "--list"])
-    if not isinstance(listed, list):
-        return f"the mode list is unreadable ({why})"
-    ids = [str(m.get("id")) for m in listed if isinstance(m, dict)]
-    if mode not in ids:
-        return f"mode {mode!r} is not listed for this agent (listed: {', '.join(ids) or 'none'})"
-    info, why = paseo_json(["inspect", aid])
-    active = info.get("Mode") if isinstance(info, dict) else None
-    return None if active == mode else f"the active mode is {active!r}, not {mode!r} ({why})" if why or active else \
-        f"the active mode is unreadable, not {mode!r}"
 
 
 def finalize(record: Path, st_hint: str | None = None, note: str | None = None, rc: int | None = None) -> tuple[str, str]:
@@ -1075,9 +1112,7 @@ def wait_paseo(record: Path, timeout: int | None) -> tuple[str, str]:
                            timeout=(timeout + 120) if timeout else None)
     status = data.get("status") if isinstance(data, dict) else None
     if status == "idle":
-        extra = (f" (a read-only provider mode writes no file: read its reply with `paseo logs {aid}`)"
-                 if rec.get("boundary") == "paseo-mode" else "")
-        return finalize(record, note=f"{NO_REPORT_PREFIX} idle without a report ({rec['agent']}, {rec['model']}){extra}")
+        return finalize(record, note=f"{NO_REPORT_PREFIX} idle without a report ({rec['agent']}, {rec['model']})")
     if status == "timeout":
         det = f"timed out waiting after {timeout}s; paseo agent {aid} may still run (`paseo wait {aid}`, `paseo stop {aid}`)"
         update_record(record, last_wait={"status": "timeout", "at": time.time()})
@@ -1138,11 +1173,31 @@ def finish_print(record: Path, result: tuple[str, str], as_json: bool) -> int:
     return STATUS_EXIT.get(st, 1)
 
 
-def wait_record(path: Path, timeout: int | None) -> int:
+def wait_once(path: Path, rec: dict) -> int:
+    """One non-blocking look for bin/acp-dispatch-wait: 75 while the slice is unfinished, 124 past its wait_timeout,
+    else (it finished, or just finished: a Paseo agent no longer running is finalized now) check's exit code."""
+    if not rec.get("finished"):
+        if rec.get("boundary") == "review-launch":
+            if not pid_alive(rec.get("pid")):
+                finalize(path, "no-report", f"{NO_REPORT_PREFIX} lost: the review-launch runner is gone")
+        elif rec.get("paseo_agent_id"):
+            info, _ = paseo_json(["inspect", str(rec["paseo_agent_id"])], timeout=30)
+            if isinstance(info, dict) and (info.get("Status") not in LIVE_STATUSES or info.get("PendingPermissions")):
+                wait_paseo(path, 1)
+        rec = read_record(path)
+    if rec.get("finished") or rec.get("status") == "permission":
+        return check_items([str(path)])
+    limit = float(rec.get("wait_timeout") or 0)
+    return TIMEOUT_EXIT if limit and time.time() - started_at(rec) > limit else 75
+
+
+def wait_record(path: Path, timeout: int | None, once: bool = False) -> int:
     try:
         rec = read_record(path)
     except (OSError, ValueError) as e:
         die(f"unreadable record {path}: {e}")
+    if once:
+        return wait_once(path, rec)
     if rec.get("finished"):
         return check_items([str(path)])
     t = rec.get("wait_timeout") if timeout is None else timeout
@@ -1197,7 +1252,7 @@ def tell_record(a: argparse.Namespace) -> int:
         return 2
     live = (f"MSG {n} from {a.sender} (also in {inbox}; answer it with `REPLY {n}: <one line>` appended to "
             f"{replies}):\n{message.strip()}")
-    sent, why = paseo_json(["send", str(aid), "--no-wait", f"--prompt={live}"])
+    sent, why = paseo_json(["send", str(aid), "--no-wait", "--behavior", "steer", f"--prompt={live}"])
     status = sent.get("status") if isinstance(sent, dict) else None
     if status in ("sent", "completed"):
         print(f"delivered: inbox + paseo send ({status})")
@@ -1255,6 +1310,7 @@ def main(argv: list[str] | None = None) -> int:
         sub.add_argument("record")
         if verb == "wait":
             sub.add_argument("--timeout", type=int, help="seconds (default the record's wait_timeout; 0 none)")
+            sub.add_argument("--once", action="store_true", help="one non-blocking look: 75 while unfinished")
         elif verb == "tell":
             sub.add_argument("message", help="the message (- reads stdin)")
             sub.add_argument("--from", dest="sender", default="lead", metavar="NAME")
@@ -1266,7 +1322,7 @@ def main(argv: list[str] | None = None) -> int:
             merged.add_argument("--not-merged", dest="merged", action="store_const", const=False)
         s = sub.parse_args(argv[1:])
         if verb == "wait":
-            return wait_record(Path(s.record).expanduser(), s.timeout)
+            return wait_record(Path(s.record).expanduser(), s.timeout, s.once)
         if verb == "tell":
             return tell_record(s)
         if verb == "outcome":
