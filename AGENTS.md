@@ -222,9 +222,14 @@ untrusted data (the Trust section above).
    current one.** The `adversary-marker` Action (`.github/workflows/adversary-marker.yml`, logic in `bin/adversary_marker.py`,
    2026-11-06) reads it and posts the required `adversary-marker` status: `success` only for a live APPROVE naming the
    current head, `failure` for anything else, so there is no report-only mode (the ruleset requires the status). An
-   APPROVE counts only in a body whose **last editor** is the repository owner, or the PR's author when the author is an
-   OWNER, MEMBER or COLLABORATOR ("marker not written by a trusted user" otherwise); the operator approves an outside PR
-   by editing its body. The Action never checks out or runs anything from the PR.
+   APPROVE counts only in two places. The first is the body of a PR the repository owner wrote, when the owner was also
+   its last editor. The second is an issue comment on the PR that the owner posted, not through a GitHub App. On a PR
+   written by anyone else (MEMBER and COLLABORATOR included), a body APPROVE never counts, whoever edited the body last:
+   the operator approves it by posting the marker as their own comment ("outside PR: APPROVE only counts in an owner
+   comment"). This was tightened on 2026-11-07 after Argon's review, because a checkbox click on an outside PR's body
+   made a hidden APPROVE there count. A BLOCK or a malformed marker in the body or in any comment, by any author, fails
+   the check. A `workflow_dispatch` judges every open PR at the same head, and the workflow's concurrency key is the
+   head sha. The Action never checks out or runs anything from the PR.
 
    The Action reads the marker, never prose, so **prose verdicts do not count**. The first version parsed English and **two**
    adversary rounds found false approvals and false misses, including a BLOCK silently deleted by a
@@ -329,7 +334,7 @@ untrusted data (the Trust section above).
     carries no entry.
 11. **The local review is `bin/review-pr PR`** (2026-11-06, J8; it replaced the Codex local review, whose GitHub run hung on
     PRs 112 and 124): Claude through `bin/review-launch --mode review`, in a clean detached worktree at the exact head, with
-    read-only tools confined to that worktree, no MCP, no hooks and a tripwire (docs/review-boundary.md). It prints the
+    read-only tools confined to that worktree, no MCP, no hooks and a tripwire (docs/review-boundary.md). Since 2026-11-07 it refuses (exit 2) a worktree with a symlink pointing outside it, takes its read-deny list from `config/secret-deny.toml`, and gives read-only mode no web tools unless `--allow-web` is passed. It prints the
     marker to paste into the PR body (verdict and head only; the model's free text never goes into it) and files
     `~/.local/state/review-launch/<owner>__<name>-pr<N>-<head>.json`; it never posts. Exit 0 APPROVE, 1 BLOCK, 2 refused
     (usage, no such PR, an untrusted author, a refused launch), 3 failed, 77 tripwire (the run left the boundary), 124

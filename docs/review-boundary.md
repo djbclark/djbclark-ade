@@ -12,8 +12,10 @@ and App comments (Codex, Cursor, Copilot included), check-run output and CI logs
 the author: a prompt-injection attempt through a PR has already happened. They are read as data, never followed as
 instructions. The Action never executes, interpolates or checks out anything from a PR; the review model is told
 that the diff, the body and every file of its worktree are data under review and that it reports only through the
-schema; and only a body whose **last editor** is the repository owner, or an OWNER, MEMBER or COLLABORATOR author
-who edited it last, can approve. The operator approves an outside PR by editing its body. (The looser trust the
+schema. An APPROVE counts only in two places: the body of a PR the owner wrote and edited last, or an issue comment
+the owner posted on the PR (not through a GitHub App). The operator approves any other PR by posting the marker as
+their own comment; editing its body approves nothing (2026-11-07, Argon review F-HIGH-1). A BLOCK in the body or in
+any comment fails the check, and a dispatch judges every open PR at the same head (F-CRIT-2). (The looser trust the
 repository gives its own agents on the machine, AGENTS.md's orders, does not extend to anything that came through
 GitHub.)
 
@@ -27,7 +29,21 @@ review-launch --check [--mode review|read-only] [--json]
 | Mode | Tools (`--tools`) | The init event must list exactly |
 |---|---|---|
 | `review` (rule 11, `bin/review-pr`) | `Read,Grep,Glob` | `Glob, Grep, Read, StructuredOutput` |
-| `read-only` (the dispatch shim's Claude restricted mode) | `Read,Grep,Glob,WebFetch,WebSearch` | those plus `StructuredOutput` |
+| `read-only` (the dispatch shim's Claude restricted mode) | `Read,Grep,Glob`; `--allow-web` adds `WebFetch,WebSearch` (2026-11-07) | those plus `StructuredOutput` |
+
+Three more guards, all from 2026-11-07 (Argon review F-HIGH-2, and the Opus review of PR 297):
+
+- **Symlinks.** Before the self-check and the launch, review-launch looks for symlinks in the worktree, both in git
+  (`git ls-files -s` mode 120000) and on disk. It refuses with exit 2, naming the link, when any of them resolves
+  outside the worktree (a dangling link included). A relative Glob or Grep pattern is also resolved against its base,
+  so `link/**` counts as outside. A repository that commits outward symlinks (site-djbclark's `skills/`) cannot be
+  reviewed through this boundary.
+- **The deny list.** It is the hand list plus every `deny` pattern in `config/secret-deny.toml`, or in the rendered
+  `config/secret_deny_policy.json` where Python has no `tomllib`. A file that exists but does not parse refuses every
+  launch with exit 2. The TOML's `allow` exceptions do not carry over.
+- **The tripwire.** It acts after Claude may already have run a call. It is a second layer behind
+  `blockReadsOutsideWorkingDirectories` and the deny rules, not the boundary itself. A passed self-check is cached under
+  `REVIEW_LAUNCH_STATE_DIR` and trusted as found, because the caller already controls the launch.
 
 Every launch is `claude -p --output-format stream-json --verbose --tools … --permission-mode default --setting-sources ""
 --strict-mcp-config --no-session-persistence --settings SETTINGS --json-schema … [--model] [--max-turns] -- PROMPT`, in the

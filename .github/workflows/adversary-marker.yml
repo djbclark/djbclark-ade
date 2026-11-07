@@ -1,8 +1,9 @@
 name: Adversary marker
 
 # The merge gate for AGENTS.md review rule 1 (slim-down E8, 2026-11-06; docs/review-boundary.md).
-# It reads the PR body's `<!-- adversary-verdict:v1 {...} -->` marker through the API and posts the
-# commit status `adversary-marker` on the PR head: success only for a live APPROVE naming that head.
+# It reads the `<!-- adversary-verdict:v1 {...} -->` marker from the PR body and the PR's issue comments through
+# the API and posts the commit status `adversary-marker` on the PR head: success only for a live APPROVE naming
+# that head, from a trusted place (below), on every open PR at that head.
 #
 # Why these triggers (Wave 4 research, 2026-11-06): `pull_request_target` is blocked by default in public
 # repositories from 2026-12-02, and a `pull_request` workflow is read from the PR's own merge ref, so a PR
@@ -14,9 +15,10 @@ name: Adversary marker
 # workflow gets no `adversary-marker` status at all, which fails closed (the check is required).
 #
 # Everything a PR carries (body, title, commits, branch name, comments, check output) is untrusted data
-# (operator, 2026-11-07): nothing from it is checked out, executed or interpolated, and an APPROVE counts
-# only in a body last edited by the repository owner or an OWNER/MEMBER/COLLABORATOR author. The operator
-# approves an outside PR by editing its body.
+# (operator, 2026-11-07): nothing from it is checked out, executed or interpolated. An APPROVE counts only
+# in the body of a PR the repository owner wrote and edited last; any other PR (MEMBER and COLLABORATOR
+# authors included) is approved only by the owner's own issue comment carrying the marker (not one posted via
+# a GitHub App). A BLOCK naming the head counts in the body or any comment, whoever wrote it.
 #
 # A body edit (writing the marker after the push) is not a Tests run: re-check with
 #   gh workflow run adversary-marker.yml -f pr=N
@@ -35,8 +37,9 @@ on:
 permissions: {}
 
 jobs:
-  # Job 1 finds the PR(s) the event is about, so job 2's concurrency group is the PR number itself (a sha can be
-  # shared by two PRs, a fork's included, and a run id would never cancel a stale run). No secret, no environment.
+  # Job 1 finds the PR(s) the event is about and every other open PR at the same head, and outputs that head as the
+  # key: PRs sharing a head share ONE commit status, so job 2's concurrency group is the head sha, and a dispatch and a
+  # workflow_run for one head serialize (a run id would never cancel a stale run). No secret, no environment.
   resolve:
     # Belt and braces beside the environment's branch policy: a dispatch from any other ref does nothing.
     if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
@@ -91,5 +94,6 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           STATUS_TOKEN: ${{ steps.app-token.outputs.token }}
           PRS: ${{ needs.resolve.outputs.prs }}
+          AT_HEAD: ${{ needs.resolve.outputs.key }}
           # MARKER_POST_AS: check-run   # the fallback if an App status does not satisfy the ruleset (docs/review-boundary.md)
-        run: python3 -I bin/adversary_marker.py --prs "$PRS" --event "$GITHUB_EVENT_PATH" --event-name "$GITHUB_EVENT_NAME" --repo "$GITHUB_REPOSITORY"
+        run: python3 -I bin/adversary_marker.py --prs "$PRS" --at-head "$AT_HEAD" --event "$GITHUB_EVENT_PATH" --event-name "$GITHUB_EVENT_NAME" --repo "$GITHUB_REPOSITORY"

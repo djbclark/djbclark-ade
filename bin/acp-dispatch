@@ -27,7 +27,7 @@ Agents are Paseo providers: claude, codex, antigravity, cursor, opencode, hermes
 any other exits 2 with that list. `--model M` becomes `--provider P/M`. `--mode` is always passed (Claude's default is `auto`,
 so no mode would not be read-only):
     --perm all        the provider's `defaultMode` from `paseo provider ls --json` (enabled and available, else 2)
-    --perm read-only  claude: `bin/review-launch --mode read-only` (Read, Grep, Glob, WebFetch, WebSearch; empty
+    --perm read-only  claude: `bin/review-launch --mode read-only` (Read, Grep, Glob; no web since 2026-11-07; empty
                       settings, MCP and hooks; bypass refused; tripwire 77).
     --perm deny       claude: `bin/review-launch --mode review` (Read, Grep, Glob, no network).
     Other providers, read-only or deny: BEST EFFORT (operator ruling 2026-11-07, "our agents all trust each other"):
@@ -948,7 +948,7 @@ def dispatch(a: argparse.Namespace) -> int:
         return unavailable(out, a, refusal[1], refusal[0])
     footer = footer_text(report, a.lead, record.with_suffix(".inbox.md"), record.with_suffix(".replies.md"))
     note = {"review-launch": REVIEW_NOTE.format(perm=a.perm, mode=mode, report=report, tools=(
-                "Read, Grep, Glob, WebFetch, WebSearch" if mode == "read-only" else "Read, Grep, Glob")),
+                "Read, Grep, Glob")),
             }.get(boundary, BEST_EFFORT_NOTE.format(perm=a.perm) if perm_note else "")
     budget = BUDGET_TEXT.format(minutes=f"{a.timeout / 60:g}") if a.timeout else ""
     advisor = ("\n" + ADVISOR_NOTE.strip() + "\n") if a.role == "advise" else ""
