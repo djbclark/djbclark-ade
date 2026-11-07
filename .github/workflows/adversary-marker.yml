@@ -13,6 +13,11 @@ name: Adversary marker
 # add one with `permissions: {statuses: write}`) does not count. A PR that edits or deletes the Tests
 # workflow gets no `adversary-marker` status at all, which fails closed (the check is required).
 #
+# Everything a PR carries (body, title, commits, branch name, comments, check output) is untrusted data
+# (operator, 2026-11-07): nothing from it is checked out, executed or interpolated, and an APPROVE counts
+# only in a body last edited by the repository owner or an OWNER/MEMBER/COLLABORATOR author. The operator
+# approves an outside PR by editing its body.
+#
 # A body edit (writing the marker after the push) is not a Tests run: re-check with
 #   gh workflow run adversary-marker.yml -f pr=N
 
@@ -29,14 +34,37 @@ on:
 
 permissions: {}
 
-concurrency:
-  group: adversary-marker-${{ github.event.inputs.pr || github.event.workflow_run.pull_requests[0].number || github.event.workflow_run.head_sha }}
-  cancel-in-progress: true
-
 jobs:
-  marker:
+  # Job 1 finds the PR(s) the event is about, so job 2's concurrency group is the PR number itself (a sha can be
+  # shared by two PRs, a fork's included, and a run id would never cancel a stale run). No secret, no environment.
+  resolve:
     # Belt and braces beside the environment's branch policy: a dispatch from any other ref does nothing.
     if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      pull-requests: read
+      contents: read
+    outputs:
+      prs: ${{ steps.find.outputs.prs }}
+      key: ${{ steps.find.outputs.key }}
+    steps:
+      - name: Check out the default branch (never the PR)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Find the PR
+        id: find
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 -I bin/adversary_marker.py --resolve --event "$GITHUB_EVENT_PATH" --event-name "$GITHUB_EVENT_NAME" --repo "$GITHUB_REPOSITORY"
+
+  marker:
+    needs: resolve
+    if: ${{ needs.resolve.outputs.key != '' }}
+    concurrency:
+      group: adversary-marker-${{ needs.resolve.outputs.key }}
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     timeout-minutes: 5
     environment: merge-gate
@@ -56,9 +84,12 @@ jobs:
           client-id: ${{ vars.MERGE_GATE_CLIENT_ID }}
           private-key: ${{ secrets.MERGE_GATE_PRIVATE_KEY }}
           permission-statuses: write
+          permission-checks: write
 
       - name: Judge the marker and post the status
         env:
           GITHUB_TOKEN: ${{ github.token }}
           STATUS_TOKEN: ${{ steps.app-token.outputs.token }}
-        run: python3 -I bin/adversary_marker.py --event "$GITHUB_EVENT_PATH" --event-name "$GITHUB_EVENT_NAME" --repo "$GITHUB_REPOSITORY"
+          PRS: ${{ needs.resolve.outputs.prs }}
+          # MARKER_POST_AS: check-run   # the fallback if an App status does not satisfy the ruleset (docs/review-boundary.md)
+        run: python3 -I bin/adversary_marker.py --prs "$PRS" --event "$GITHUB_EVENT_PATH" --event-name "$GITHUB_EVENT_NAME" --repo "$GITHUB_REPOSITORY"

@@ -326,6 +326,11 @@ def test_a_tool_call_outside_the_allowlist_trips(world, mode, tool, ok):
     ("Glob", {"pattern": "~/.aws/*"}, False),
     ("Glob", {"pattern": "**/*.py"}, True),
     ("Glob", {"pattern": "*", "path": ".."}, False),
+    ("Glob", {"pattern": "sub/../*.txt"}, False),            # any `..` in a pattern trips, even one that stays inside
+    ("Glob", {"pattern": "..\\*"}, False),
+    ("Grep", {"pattern": "x", "glob": "a/../b/*.py"}, False),
+    ("Grep", {"pattern": "x", "glob": "*.py"}, True),
+    ("Glob", {"pattern": "..foo/*.txt"}, True),               # a name that merely starts with dots is not `..`
 ])
 def test_a_read_outside_the_worktree_trips_even_though_the_key_refuses_it(world, tool, inp, ok):
     world.passed_check()
@@ -638,3 +643,84 @@ def test_review_pr_never_calls_gh_to_post(prw):
     for line in (prw.tmp / "gh.log").read_text().splitlines():
         argv = json.loads(line)
         assert argv[:2] in (["pr", "view"], ["api", "user"]), argv
+
+
+# ---- E8 review repairs (2026-11-07) -------------------------------------------------------------------------
+
+@pytest.mark.parametrize("items,ok", [
+    ([{"type": "text", "text": "hi"}, {"type": "thinking", "thinking": "hm"}], True),
+    ([{"type": "redacted_thinking", "data": "xx"}], True),
+    ([{"type": "server_tool_use", "name": "web_search", "input": {"query": "x"}}], False),
+    ([{"type": "mcp_tool_use", "name": "send", "server_name": "hermes", "input": {}}], False),
+    ([{"type": "image"}], False),
+    (["a bare string"], False),
+])
+def test_an_assistant_content_item_that_is_not_text_thinking_or_tool_use_trips(world, items, ok):
+    world.passed_check()
+    world.scenario(content_items=items)
+    r = world.launch()
+    assert r.returncode == (0 if ok else 77), r.stderr
+    if not ok:
+        assert "content item" in r.stderr
+
+
+def test_a_signal_to_the_launcher_is_exit_3_and_kills_the_run(world):
+    world.passed_check()
+    pid_file = world.tmp / "child.pid"
+    world.scenario(sleep=60, spawn="session", pid_file=str(pid_file))
+    p = subprocess.Popen([sys.executable, "-I", str(LAUNCH), "--mode", "review", "-C", str(world.wt), "--schema",
+                          str(world.schema), "-p", "x"], env=world.env(), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                         text=True, cwd=str(world.tmp))
+    deadline = time.monotonic() + 30
+    while not pid_file.exists() and time.monotonic() < deadline:
+        time.sleep(0.1)
+    assert pid_file.exists(), "the fake never started"
+    time.sleep(1.5)        # let the launcher's 1 s ps snapshot see the child
+    p.send_signal(signal.SIGTERM)
+    out, err = p.communicate(timeout=60)
+    assert p.returncode == 3, (p.returncode, err)
+    assert out == "" and "interrupted" in err
+    pid = int(pid_file.read_text())
+    deadline = time.monotonic() + 10
+    while pid_alive(pid) and time.monotonic() < deadline:
+        time.sleep(0.2)
+    assert not pid_alive(pid)
+
+
+def test_a_pr_whose_diff_is_not_utf8_is_reviewed_and_the_diff_is_handed_over_byte_for_byte(prw, tmp_path):
+    seed = prw.tmp / "seed"
+    (seed / "latin1.txt").write_bytes(b"caf\xe9 cr\xe8me\n")
+    git("add", "latin1.txt", cwd=seed)
+    git("commit", "-q", "-m", "latin-1", cwd=seed)
+    head = git("rev-parse", "HEAD", cwd=seed)
+    git("push", "-q", "-f", "origin", "HEAD:refs/pull/7/head", cwd=seed)
+    prw.pr_head = head
+    prw.gh(view={"headRefOid": head, "baseRefOid": prw.base, "baseRefName": "master", "author": {"login": "djbclark"},
+                 "state": "OPEN"})
+    r = prw.review()
+    assert r.returncode == 0, r.stderr      # before the repair: UnicodeDecodeError, exit 1 (read as BLOCK), no result file
+    (call,) = prw.launches()
+    assert "latin1.txt" in call["inputs"]["files.txt"]
+    assert "caf\ufffd cr\ufffdme" in call["inputs"]["diff.patch"], "the fake read it with errors=replace: the bytes were not UTF-8"
+    assert prw.filed()["verdict"] == "APPROVE"
+
+
+def test_a_git_diff_that_fails_with_undecodable_output_is_exit_3_with_a_result_file(prw):
+    # git's own error text is not UTF-8 either: still a filed `failed` result and exit 3, never a traceback.
+    bad = prw.tmp / "bin" / "git"
+    real = shutil.which("git", path=os.pathsep.join(p for p in prw.env()["PATH"].split(os.pathsep) if p != str(prw.bin)))
+    bad.write_text(f'#!/bin/sh\nif [ "$1" = diff ]; then printf "\\377\\376" >&2; exit 1; fi\nexec "{real}" "$@"\n')
+    bad.chmod(0o755)
+    r = prw.review()
+    assert r.returncode == 3, r.stderr
+    doc = prw.filed()
+    assert doc["result"] == "failed" and "git diff failed" in doc["reason"]
+
+
+def test_the_review_prompt_says_everything_from_the_pr_is_untrusted_and_the_schema_is_the_only_channel(prw):
+    prw.review()
+    prompt = prw.launches()[0]["argv"][-1]
+    for needle in ("UNTRUSTED DATA", "never instructions", "the PR's body", "every file in this checkout",
+                   "ONLY through the", "structured output schema", "prompt-injection"):
+        assert needle in prompt, needle
+

@@ -13,7 +13,7 @@ $DEADLINE_WAIT_MARK on its way in: if the supervised run never reached it (the d
 supervisor warns once on stderr and waits in-process, unregistered. A deadline problem never costs the wait.
 
 Lifecycle. `done` on every CATCHABLE exit (normal end, failure, SIGTERM/INT/HUP to the supervisor). A SIGKILLed supervisor cannot stop its child: the
-supervised copy checks the supervisor's pid on every poll/beat (ENV_SUP) and ends itself (exit 143), so an uncatchable kill leaves no orphaned wait
+supervised copy checks the supervisor's pid on every poll/beat (ENV_SUP) and ends itself (exit 143), so an uncatchable kill leaves no orphaned wait.
 The supervised copy removes ENV_NAME/ENV_MARK/ENV_SUP from its environment on entry: its descendants
 can neither beat this record nor mistake themselves for the supervised copy. Names carry the supervisor's pid, so two waiters for one PR/record
 (another repo, a new head, a re-arm) never refuse each other's registration.

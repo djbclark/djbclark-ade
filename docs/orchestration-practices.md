@@ -137,8 +137,8 @@ the task, and the ambiguity is copied into every slice.² ³ Every brief has:
    hand. Do other work; if there is none, end the turn with a status line (what
    runs, where its log is, what to check next) and let the result wake you.
 6. **Never wait on CI** (`gh pr checks --watch`, `gh run watch`). Report
-   "CI running" with the run URL and stop: `gh pr checks PR --watch --required` and the lead read CI,
-   and a merge-ready decision needs no agent parked on it.
+   "CI running" with the run URL and stop: the lead reads CI, and its wait command is
+   `gh pr checks PR --watch --required` (since 2026-11-06); a merge-ready decision needs no agent parked on it.
 7. **One progress line per round in a fix-and-review loop**: the head sha and
    the finding count (`round 3: head 1a2b3c4, 2 findings`). A long serial
    loop that prints nothing looks the same as a hang to a human reading the

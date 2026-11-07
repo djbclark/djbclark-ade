@@ -7,7 +7,8 @@ git HEAD). The stream's shapes are the ones Claude Code 2.1.319 produced on 2026
 the init event, StructuredOutput as a tool_use, `permission_denials` in the result).
 
 Scenario keys for a LAUNCH (a prompt without the self-check mark): init (merged into the init event), no_init,
-init_after_assistant, hook_event, tool_uses ([{name, input}]), output, no_structured, is_error, no_result,
+init_after_assistant, hook_event, content_items (one assistant message's content list), tool_uses
+([{name, input}]), output, no_structured, is_error, no_result,
 sleep (seconds before the output), spawn ("group" | "session": start a `sleep 300` child, its pid written to
 pid_file), exit, denials. For the SELF-CHECK: check = refuse (default) | leak | leak_quiet | readable_md |
 skip:<name> | control_fails | trip, check_init (merged into its init event). version / version_rc answer
@@ -124,6 +125,8 @@ if is_check:
         results.append({"name": name, "read_ok": readable})
     output = {"results": results}
 else:
+    if scen.get("content_items"):
+        emit({"type": "assistant", "message": {"content": scen["content_items"]}})
     for tu in scen.get("tool_uses", []):
         tool(tu["name"], tu.get("input", {}), tu.get("content", "ok"))
     if scen.get("init_after_assistant"):

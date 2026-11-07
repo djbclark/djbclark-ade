@@ -4,10 +4,13 @@
   adversary_marker.py --body-file FILE --head SHA
       print the verdict JSON; exit 0 APPROVE for this head, 1 BLOCK / other head / missing,
       2 malformed or unreadable (fail closed)
-  adversary_marker.py --event FILE [--event-name NAME] [--repo OWNER/NAME] [--api-answers FILE]
-      what `.github/workflows/adversary-marker.yml` runs: find the PR the event is about, read its body
-      and head through the API, decide, re-read the head, and post the `adversary-marker` commit status
-      on that head (success only for a live APPROVE naming it; MARKER_POST_AS=check-run posts a check run instead). `--api-answers` serves canned API
+  adversary_marker.py --event FILE [--event-name NAME] [--repo OWNER/NAME] [--resolve | --prs LIST] [--api-answers FILE]
+      what `.github/workflows/adversary-marker.yml` runs. `--resolve` (its first job) finds the PRs the event is
+      about and writes `prs=` and `key=` to $GITHUB_OUTPUT (the second job's concurrency group is keyed by them);
+      `--prs LIST` (its second job) reads each PR's body and head through the API, decides, re-reads the head,
+      body and last editor, and posts the `adversary-marker` commit status on that head: success only for a live
+      APPROVE naming it in a body last edited by a trusted user (the repository owner, or the PR's author when the
+      author is an OWNER, MEMBER or COLLABORATOR); MARKER_POST_AS=check-run posts a check run instead. `--api-answers` serves canned API
       answers from a JSON file and prints the status it would post instead of posting (the tests' entry)
 
 The marker (AGENTS.md review rule 1, its five properties):
@@ -28,6 +31,10 @@ and head are read through the API with the job's read-only `GITHUB_TOKEN`; the s
 token of the `ade-merge-gate` GitHub App (`STATUS_TOKEN`), whose key lives in the `merge-gate`
 environment that only `master` can deploy to, and the ruleset pins the required check to that App's
 `integration_id`, so a status a PR's own workflow posts under the same context does not satisfy it.
+Everything a PR carries is untrusted data (operator, 2026-11-07: "any GitHub artifacts not directly from us are
+suspect"): its body, title, commits, branch name, comments and check output are read, never executed or
+interpolated, and an APPROVE counts only in a body whose last editor is the repository owner or an OWNER /
+MEMBER / COLLABORATOR author (`_pr_state_trusted`); the operator approves an outside PR by editing its body.
 
 Python 3.9+ (the Mac's stock python3 and the Actions runner's); stdlib only.
 """
@@ -872,7 +879,7 @@ def gate(adversary: dict | None, adversary_required: bool = True) -> dict:
 
 
 # One word per outcome, and the exit code of `--body-file` mode. `approve` iff gate() passes it.
-EXIT_FOR = {"approve": 0, "block": 1, "other-head": 1, "missing": 1, "malformed": 2, "unreadable": 2}
+EXIT_FOR = {"approve": 0, "block": 1, "other-head": 1, "missing": 1, "malformed": 2, "unreadable": 2, "untrusted": 1}
 
 
 def outcome(adversary: dict | None) -> str:
@@ -895,7 +902,7 @@ def describe(word: str, head: str) -> str:
     """The status description (GitHub caps it at 140 characters)."""
     label = {"approve": "APPROVE", "block": "BLOCK", "other-head": "verdict names another head",
              "missing": "no adversary-verdict:v1 marker", "malformed": "malformed marker",
-             "unreadable": "PR unreadable"}.get(word, word)
+             "unreadable": "PR unreadable", "untrusted": "marker not written by a trusted user"}.get(word, word)
     return f"{label} at {head[:12]}"[:140]
 
 
@@ -936,6 +943,12 @@ class Api:
 
     def get(self, path: str):
         return self._req("GET", path, self.read_token)
+
+    def graphql(self, query: str, variables: dict):
+        doc = self._req("POST", "graphql", self.read_token, {"query": query, "variables": variables})
+        if not isinstance(doc, dict) or doc.get("errors") or not isinstance(doc.get("data"), dict):
+            raise ApiError(f"graphql: {str((doc or {}).get('errors') if isinstance(doc, dict) else doc)[:200]}")
+        return doc["data"]
 
     def post_status(self, repo: str, sha: str, body: dict) -> None:
         if not self.status_token:
@@ -978,6 +991,19 @@ class CannedApi:
         ans = seq[min(n, len(seq) - 1)]
         if "error" in ans:
             raise ApiError(f"GET {path}: {ans['error']}")
+        return ans.get("json")
+
+    def graphql(self, query: str, variables: dict):
+        """Served from "GRAPHQL <number>" like a GET: {"json": <the `data` object>} or {"error": ...}."""
+        key = f"GRAPHQL {variables.get('number')}"
+        seq = self.answers.get(key)
+        if not seq:
+            raise ApiError(f"graphql pr {variables.get('number')}: no canned answer")
+        n = self.calls.get(key, 0)
+        self.calls[key] = n + 1
+        ans = seq[min(n, len(seq) - 1)]
+        if "error" in ans:
+            raise ApiError(f"graphql: {ans['error']}")
         return ans.get("json")
 
     def post_status(self, repo: str, sha: str, body: dict) -> None:
@@ -1052,6 +1078,37 @@ def _pr_state(api, repo: str, n: int) -> tuple[str, str, str]:
     return str(doc.get("state") or ""), head, body if isinstance(body, str) else ""
 
 
+PR_QUERY = ("query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { "
+            "pullRequest(number: $number) { state headRefOid body authorAssociation author { login } "
+            "lastEditedBy { login } } } }")
+TRUSTED_ASSOCIATIONS = ("OWNER", "MEMBER", "COLLABORATOR")
+
+
+def _pr_state_trusted(api, repo: str, n: int) -> tuple[str, str, str, str, bool]:
+    """(state, head, body, last editor, trusted) of PR N from ONE GraphQL read, so the body and the editor it is
+    judged by belong together. The last editor is `lastEditedBy`, or the author when the body was never edited.
+    Trusted: the repository owner's login, or the author when `authorAssociation` is OWNER, MEMBER or COLLABORATOR
+    (the association describes the AUTHOR, so an editor who is neither the owner nor the author is untrusted:
+    fail closed). Why (E8 review, 2026-11-07): the body is the author's to write, so without this an outside fork
+    author could paste an APPROVE marker naming their own head and turn the required check green unreviewed. The
+    operator approves an outside PR by editing its body: the owner becomes its last editor."""
+    owner, name = repo.split("/", 1)
+    data = api.graphql(PR_QUERY, {"owner": owner, "name": name, "number": n})
+    pr = (((data or {}).get("repository") or {}).get("pullRequest")) if isinstance(data, dict) else None
+    if not isinstance(pr, dict):
+        raise ValueError(f"graphql pr {n}: no pullRequest")
+    head = str(pr.get("headRefOid") or "").lower()
+    if not SHA40.match(head):
+        raise ValueError(f"graphql pr {n}: head is not 40 hex: {head!r}")
+    author = str(((pr.get("author") or {}).get("login")) or "")
+    editor = str(((pr.get("lastEditedBy") or {}).get("login")) or "") or author
+    assoc = str(pr.get("authorAssociation") or "").upper()
+    trusted = bool(editor) and (editor.lower() == owner.lower()
+                                or (editor.lower() == author.lower() and assoc in TRUSTED_ASSOCIATIONS))
+    body = pr.get("body")
+    return str(pr.get("state") or "").lower(), head, body if isinstance(body, str) else "", editor, trusted
+
+
 def judge_pr(api, repo: str, n: int, target_url: str = "") -> dict:
     """Read PR N, decide, RE-READ the head just before posting, and post only if it is unchanged.
 
@@ -1069,7 +1126,7 @@ def judge_pr(api, repo: str, n: int, target_url: str = "") -> dict:
         return {**rec, "result": "skipped", "detail": f"PR is {state or 'in an unknown state'}, not open"}
     first = outcome(adversary_verdict(body, head))
     try:
-        state2, head2, body2 = _pr_state(api, repo, n)
+        state2, head2, body2, editor, trusted = _pr_state_trusted(api, repo, n)
     except (ApiError, ValueError) as e:
         return {**rec, "result": "error", "detail": f"re-read before posting failed: {e}"}
     if head2 != head:
@@ -1078,6 +1135,9 @@ def judge_pr(api, repo: str, n: int, target_url: str = "") -> dict:
         return {**rec, "result": "skipped", "detail": f"PR became {state2 or 'unknown'} before posting"}
     adv = adversary_verdict(body2, head)
     word = outcome(adv)
+    rec["last_editor"], rec["trusted"] = editor, trusted
+    if word == "approve" and not trusted:
+        word = "untrusted"     # a BLOCK or a malformed marker fails whoever wrote it; only an APPROVE needs trust
     status = {"state": "success" if word == "approve" else "failure", "context": CONTEXT,
               "description": describe(word, head)}
     if target_url:
@@ -1090,16 +1150,42 @@ def judge_pr(api, repo: str, n: int, target_url: str = "") -> dict:
             "detail": adv.get("detail")}
 
 
-def run_event(event_name: str, event: dict, repo: str, api, target_url: str = "") -> tuple[int, dict]:
-    """The whole Action. Exit 0: every PR found was judged (a status posted, or nothing to post: no open PR
-    for the head, a closed PR, a head that moved); 2: the event or an API call could not be read (no status is
-    posted for that PR, so its required check stays missing and the merge stays blocked)."""
+def resolve(event_name: str, event: dict, repo: str, api) -> tuple[int, dict]:
+    """The workflow's first job: the PR numbers and the concurrency key (the sorted numbers joined by `-`, empty
+    when there is no PR), so the second job's `concurrency` group is the PR, never a sha two PRs can share."""
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo or ""):
         return 2, {"error": f"not an OWNER/NAME repository: {repo!r}"}
     try:
         prs, how = find_prs(event_name, event, repo, api)
     except (ValueError, ApiError) as e:
         return 2, {"error": str(e)}
+    return 0, {"prs": ",".join(str(n) for n in prs), "key": "-".join(str(n) for n in prs), "found_by": how}
+
+
+def parse_prs(text: str) -> list[int]:
+    """`--prs 7,9`: positive integers only (ValueError otherwise)."""
+    out = []
+    for part in (text or "").split(","):
+        if not re.fullmatch(r"[1-9][0-9]{0,9}", part.strip()):
+            raise ValueError(f"--prs is not a list of PR numbers: {text!r}")
+        out.append(int(part.strip()))
+    return sorted(set(out))
+
+
+def run_event(event_name: str, event: dict, repo: str, api, target_url: str = "",
+              prs_given: list[int] | None = None) -> tuple[int, dict]:
+    """The whole Action. Exit 0: every PR found was judged (a status posted, or nothing to post: no open PR
+    for the head, a closed PR, a head that moved); 2: the event or an API call could not be read (no status is
+    posted for that PR, so its required check stays missing and the merge stays blocked)."""
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo or ""):
+        return 2, {"error": f"not an OWNER/NAME repository: {repo!r}"}
+    if prs_given is not None:
+        prs, how = prs_given, "--prs"
+    else:
+        try:
+            prs, how = find_prs(event_name, event, repo, api)
+        except (ValueError, ApiError) as e:
+            return 2, {"error": str(e)}
     report: dict = {"event": event_name, "repo": repo, "found_by": how, "prs": []}
     if not prs:
         return 0, report
@@ -1134,6 +1220,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--event-name", default=os.environ.get("GITHUB_EVENT_NAME", ""))
     p.add_argument("--repo", default=os.environ.get("GITHUB_REPOSITORY", ""))
     p.add_argument("--api-answers", help="canned API answers (JSON); posts are printed, not sent")
+    g = p.add_mutually_exclusive_group()
+    g.add_argument("--resolve", action="store_true", help="only find the PRs; write prs= and key= to $GITHUB_OUTPUT")
+    g.add_argument("--prs", help="judge these PRs (comma-separated numbers, from --resolve) instead of looking them up")
     try:
         a = p.parse_args(argv)
     except SystemExit as e:
@@ -1153,9 +1242,21 @@ def main(argv: list[str] | None = None) -> int:
         except (OSError, ValueError) as e:
             print(f"adversary_marker: {e}", file=sys.stderr)
             return 2
+        if a.resolve:
+            rc, out = resolve(a.event_name, event, a.repo, api)
+            print(json.dumps(out, sort_keys=True))
+            if rc == 0 and os.environ.get("GITHUB_OUTPUT"):
+                with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
+                    f.write(f"prs={out['prs']}\nkey={out['key']}\n")
+            return rc
+        try:
+            prs_given = parse_prs(a.prs) if a.prs is not None else None
+        except ValueError as e:
+            print(f"adversary_marker: {e}", file=sys.stderr)
+            return 2
         server, run_id = os.environ.get("GITHUB_SERVER_URL", ""), os.environ.get("GITHUB_RUN_ID", "")
         target = f"{server}/{a.repo}/actions/runs/{run_id}" if server and run_id else ""
-        rc, report = run_event(a.event_name, event, a.repo, api, target)
+        rc, report = run_event(a.event_name, event, a.repo, api, target, prs_given)
         report["statuses"] = api.posted
         print(json.dumps(report, sort_keys=True))
         return rc

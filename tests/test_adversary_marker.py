@@ -1104,6 +1104,20 @@ def pr_doc(head: str = H1, body: str = "", state: str = "open") -> dict:
     return {"json": {"number": 7, "state": state, "head": {"sha": head}, "body": body}}
 
 
+def gql_doc(head: str = H1, body: str = "", state: str = "OPEN", author: str = "djbclark", editor: str | None = None,
+            assoc: str = "OWNER") -> dict:
+    """The GraphQL second read (`_pr_state_trusted`): state, head, body, author, last editor, author association."""
+    return {"json": {"repository": {"pullRequest": {
+        "state": state, "headRefOid": head, "body": body, "authorAssociation": assoc, "author": {"login": author},
+        "lastEditedBy": {"login": editor} if editor else None}}}}
+
+
+def serve(n: int, body: str, head: str = H1, state: str = "open", second: dict | None = None, **trust) -> dict:
+    """Canned answers for PR N: the REST first read and the GraphQL second read (the same PR unless `second`)."""
+    return {f"GET repos/{REPO_A}/pulls/{n}": [pr_doc(head, body, state)],
+            f"GRAPHQL {n}": [second or gql_doc(head, body, state.upper(), **trust)]}
+
+
 def run_ev(event: dict, answers: dict, name: str = "workflow_run"):
     api = adversary_marker.CannedApi(answers)
     rc, report = adversary_marker.run_event(name, event, REPO_A, api, "https://x/run/1")
@@ -1119,7 +1133,7 @@ def wr_event(head: str = H1, prs=(7,), conclusion: str = "success", **extra) -> 
 
 @pytest.mark.parametrize("verdict,state,word", [("APPROVE", "success", "approve"), ("BLOCK", "failure", "block")])
 def test_a_verdict_for_this_head_posts_its_status_on_that_head(verdict, state, word):
-    rc, report, api = run_ev(wr_event(), {f"GET repos/{REPO_A}/pulls/7": [pr_doc(body=marker(verdict, H1))]})
+    rc, report, api = run_ev(wr_event(), serve(7, marker(verdict, H1)))
     assert rc == 0, report
     assert api.posted == [{"sha": H1, "state": state, "context": "adversary-marker",
                            "description": f"{verdict} at {H1[:12]}", "target_url": "https://x/run/1"}]
@@ -1133,19 +1147,19 @@ def test_a_verdict_for_this_head_posts_its_status_on_that_head(verdict, state, w
 ])
 def test_anything_but_a_live_approve_for_this_head_posts_failure(body, word):
     body = marker("APPROVE", H2) if body is None else body
-    rc, report, api = run_ev(wr_event(), {f"GET repos/{REPO_A}/pulls/7": [pr_doc(body=body)]})
+    rc, report, api = run_ev(wr_event(), serve(7, body))
     assert rc == 0 and [p["state"] for p in api.posted] == ["failure"], report
     assert report["prs"][0]["outcome"] == word
 
 
 def test_a_failed_tests_run_still_gets_its_marker_checked():
     # The Tests result is its own required check; this one judges only the marker.
-    rc, _, api = run_ev(wr_event(conclusion="failure"), {f"GET repos/{REPO_A}/pulls/7": [pr_doc(body=marker("APPROVE", H1))]})
+    rc, _, api = run_ev(wr_event(conclusion="failure"), serve(7, marker("APPROVE", H1)))
     assert rc == 0 and api.posted[0]["state"] == "success"
 
 
 def test_the_pr_comes_from_the_event_when_it_names_one():
-    rc, report, api = run_ev(wr_event(prs=(7,)), {f"GET repos/{REPO_A}/pulls/7": [pr_doc(body=marker("APPROVE", H1))]})
+    rc, report, api = run_ev(wr_event(prs=(7,)), serve(7, marker("APPROVE", H1)))
     assert report["found_by"] == "workflow_run.pull_requests"
     assert f"GET repos/{REPO_A}/commits/{H1}/pulls" not in api.calls
 
@@ -1165,7 +1179,7 @@ def test_with_no_pr_in_the_event_the_pr_is_found_by_head_sha():
              {"number": 6, "state": "open", "head": {"sha": H2}, "base": {"repo": {"full_name": REPO_A}}},
              {"number": 5, "state": "open", "head": {"sha": H1}, "base": {"repo": {"full_name": "other/repo"}}}]
     answers = {f"GET repos/{REPO_A}/commits/{H1}/pulls": [{"json": pulls}],
-               f"GET repos/{REPO_A}/pulls/9": [pr_doc(body=marker("APPROVE", H1))]}
+               **serve(9, marker("APPROVE", H1))}
     rc, report, api = run_ev(wr_event(prs=()), answers)
     assert rc == 0 and report["found_by"] == "commits/{sha}/pulls"
     assert [r["pr"] for r in report["prs"]] == [9] and api.posted[0]["state"] == "success"
@@ -1175,7 +1189,7 @@ def test_a_fork_pr_is_found_by_its_head_branch_when_the_commit_lookup_is_empty()
     ev = wr_event(prs=(), head_branch="feature/x", head_repository={"owner": {"login": "contrib"}})
     answers = {f"GET repos/{REPO_A}/commits/{H1}/pulls": [{"json": []}],
                f"GET repos/{REPO_A}/pulls?state=open&head=contrib:feature/x": [{"json": [{"number": 11, "head": {"sha": H1}}]}],
-               f"GET repos/{REPO_A}/pulls/11": [pr_doc(body=marker("BLOCK", H1))]}
+               **serve(11, marker("BLOCK", H1))}
     rc, report, api = run_ev(ev, answers)
     assert rc == 0 and report["found_by"] == "pulls?head=" and api.posted[0]["state"] == "failure"
 
@@ -1187,30 +1201,31 @@ def test_an_unknown_pr_posts_nothing_and_exits_0():
 
 
 def test_a_head_that_moved_between_the_read_and_the_post_posts_nothing():
-    answers = {f"GET repos/{REPO_A}/pulls/7": [pr_doc(H1, marker("APPROVE", H1)), pr_doc(H2, marker("APPROVE", H1))]}
+    answers = serve(7, marker("APPROVE", H1), second=gql_doc(H2, marker("APPROVE", H1)))
     rc, report, api = run_ev(wr_event(), answers)
     assert rc == 0 and api.posted == [], "a stale APPROVE must never land on any head"
     assert report["prs"][0]["result"] == "head-moved"
 
 
 def test_a_block_edit_between_the_two_reads_is_what_gets_posted():
-    answers = {f"GET repos/{REPO_A}/pulls/7": [pr_doc(H1, marker("APPROVE", H1)), pr_doc(H1, marker("BLOCK", H1))]}
+    answers = serve(7, marker("APPROVE", H1), second=gql_doc(H1, marker("BLOCK", H1)))
     rc, report, api = run_ev(wr_event(), answers)
     assert rc == 0 and api.posted[0]["state"] == "failure"
     assert report["prs"][0]["first_read"] == "approve" and report["prs"][0]["outcome"] == "block"
 
 
 def test_a_closed_pr_is_skipped():
-    rc, report, api = run_ev(wr_event(), {f"GET repos/{REPO_A}/pulls/7": [pr_doc(state="closed", body=marker("APPROVE", H1))]})
+    rc, report, api = run_ev(wr_event(), serve(7, marker("APPROVE", H1), state="closed"))
     assert rc == 0 and api.posted == [] and report["prs"][0]["result"] == "skipped"
 
 
 @pytest.mark.parametrize("answers", [
     {f"GET repos/{REPO_A}/pulls/7": [{"error": "HTTP 502"}]},
-    {f"GET repos/{REPO_A}/pulls/7": [pr_doc(body=marker("APPROVE", H1)), {"error": "HTTP 502"}]},
+    {**serve(7, marker("APPROVE", H1)), "GRAPHQL 7": [{"error": "HTTP 502"}]},
+    {**serve(7, marker("APPROVE", H1)), "GRAPHQL 7": [{"json": {"repository": {"pullRequest": None}}}]},
     {f"GET repos/{REPO_A}/pulls/7": [{"json": {"head": {"sha": "nothex"}, "state": "open"}}]},
-    {f"GET repos/{REPO_A}/pulls/7": [pr_doc(body=marker("APPROVE", H1))], "POST": {"error": "HTTP 403"}},
-], ids=["read-fails", "re-read-fails", "bad-head", "post-fails"])
+    {**serve(7, marker("APPROVE", H1)), "POST": {"error": "HTTP 403"}},
+], ids=["read-fails", "re-read-fails", "re-read-no-pr", "bad-head", "post-fails"])
 def test_an_api_failure_fails_the_job_and_posts_no_success(answers):
     rc, report, api = run_ev(wr_event(), answers)
     assert rc == 2, report
@@ -1223,8 +1238,7 @@ def test_a_failed_commit_lookup_fails_the_job():
 
 
 def test_two_open_prs_sharing_a_head_with_different_verdicts_end_on_failure():
-    answers = {f"GET repos/{REPO_A}/pulls/7": [pr_doc(body=marker("APPROVE", H1))],
-               f"GET repos/{REPO_A}/pulls/8": [pr_doc(body=marker("BLOCK", H1))]}
+    answers = {**serve(7, marker("APPROVE", H1)), **serve(8, marker("BLOCK", H1))}
     rc, _, api = run_ev(wr_event(prs=(7, 8)), answers)
     assert rc == 0 and api.posted[-1]["state"] == "failure" and "#7, #8" in api.posted[-1]["description"]
 
@@ -1233,14 +1247,14 @@ def test_two_open_prs_sharing_a_head_with_different_verdicts_end_on_failure():
                                    ("12; rm -rf /", False), ("-1", False), (None, False)])
 def test_a_dispatch_takes_only_a_pr_number(pr, ok):
     event = {"inputs": {"pr": pr}}
-    answers = {f"GET repos/{REPO_A}/pulls/12": [pr_doc(body=marker("APPROVE", H1))]}
+    answers = serve(12, marker("APPROVE", H1))
     rc, report, api = run_ev(event, answers, name="workflow_dispatch")
     assert (rc, bool(api.posted)) == ((0, True) if ok else (2, False)), report
 
 
 @pytest.mark.parametrize("name", ["pull_request", "pull_request_target", "push", ""])
 def test_any_other_event_is_refused(name):
-    rc, report, api = run_ev(wr_event(), {f"GET repos/{REPO_A}/pulls/7": [pr_doc(body=marker("APPROVE", H1))]}, name=name)
+    rc, report, api = run_ev(wr_event(), serve(7, marker("APPROVE", H1)), name=name)
     assert rc == 2 and api.posted == []
 
 
@@ -1256,7 +1270,7 @@ def cli(*args: str) -> subprocess.CompletedProcess:
 
 def test_the_cli_event_entry_serves_canned_answers_and_prints_the_status(tmp_path):
     (tmp_path / "ev.json").write_text(json.dumps(wr_event()))
-    (tmp_path / "api.json").write_text(json.dumps({f"GET repos/{REPO_A}/pulls/7": [pr_doc(body=marker("APPROVE", H1))]}))
+    (tmp_path / "api.json").write_text(json.dumps(serve(7, marker("APPROVE", H1))))
     r = cli("--event", str(tmp_path / "ev.json"), "--event-name", "workflow_run", "--repo", REPO_A,
             "--api-answers", str(tmp_path / "api.json"))
     assert r.returncode == 0, r.stderr
@@ -1327,18 +1341,18 @@ def test_the_tests_workflow_it_follows_exists_under_that_name():
 
 def test_the_job_has_read_permissions_only_and_the_merge_gate_environment():
     doc = workflow()
-    assert doc["permissions"] == {}
-    (job,) = doc["jobs"].values()
-    assert job["permissions"] == {"pull-requests": "read", "contents": "read"}
-    assert job["environment"] == "merge-gate"
-    assert "default_branch" in job["if"]
-    assert doc["concurrency"]["cancel-in-progress"] is True
-    assert doc["concurrency"]["group"].startswith("adversary-marker-")
+    assert doc["permissions"] == {} and "concurrency" not in doc
+    for job in doc["jobs"].values():
+        assert job["permissions"] == {"pull-requests": "read", "contents": "read"}
+    marker_job, resolve_job = doc["jobs"]["marker"], doc["jobs"]["resolve"]
+    assert marker_job["environment"] == "merge-gate"
+    assert "default_branch" in resolve_job["if"], "a dispatch from another ref does nothing"
+    assert marker_job["concurrency"]["cancel-in-progress"] is True
+    assert marker_job["concurrency"]["group"].startswith("adversary-marker-")
 
 
 def test_every_action_is_pinned_by_full_sha_and_the_app_token_uses_client_id():
-    (job,) = workflow()["jobs"].values()
-    uses = [s for s in job["steps"] if "uses" in s]
+    uses = [s for job in workflow()["jobs"].values() for s in job["steps"] if "uses" in s]
     assert uses, "no action steps"
     for s in uses:
         ref = s["uses"].split("@", 1)[1]
@@ -1346,11 +1360,101 @@ def test_every_action_is_pinned_by_full_sha_and_the_app_token_uses_client_id():
     app = [s for s in uses if s["uses"].startswith("actions/create-github-app-token@")]
     assert len(app) == 1 and "client-id" in app[0]["with"] and "app-id" not in app[0]["with"]
     checkout = [s for s in uses if s["uses"].startswith("actions/checkout@")]
-    assert len(checkout) == 1 and checkout[0]["with"]["persist-credentials"] is False
-    assert "ref" not in checkout[0]["with"], "the default branch only: never a PR ref"
+    assert len(checkout) == 2
+    for c in checkout:
+        assert c["with"]["persist-credentials"] is False
+        assert "ref" not in c["with"], "the default branch only: never a PR ref"
 
 
 def test_no_event_field_is_interpolated_into_a_shell_line():
-    (job,) = workflow()["jobs"].values()
-    for s in job["steps"]:
-        assert "${{" not in s.get("run", ""), s.get("run")
+    for job in workflow()["jobs"].values():
+        for s in job["steps"]:
+            assert "${{" not in s.get("run", ""), s.get("run")
+
+
+# ---- who may approve (E8 review BLOCK, 2026-11-07): the body's last editor must be trusted --------------
+
+@pytest.mark.parametrize("trust,ok", [
+    ({"author": "djbclark", "assoc": "OWNER"}, True),
+    ({"author": "alice", "assoc": "MEMBER"}, True),
+    ({"author": "bob", "assoc": "COLLABORATOR"}, True),
+    ({"author": "stranger", "assoc": "NONE"}, False),                        # an outside fork author's own APPROVE
+    ({"author": "stranger", "assoc": "CONTRIBUTOR"}, False),
+    ({"author": "stranger", "assoc": "FIRST_TIME_CONTRIBUTOR"}, False),
+    ({"author": "stranger", "assoc": "NONE", "editor": "djbclark"}, True),   # the owner approved it by editing the body
+    ({"author": "stranger", "assoc": "NONE", "editor": "DJBClark"}, True),   # logins are case-insensitive
+    ({"author": "alice", "assoc": "MEMBER", "editor": "stranger"}, False),   # a later edit by anyone else
+    ({"author": "stranger", "assoc": "NONE", "editor": "bob"}, False),       # an editor whose association we cannot read
+    ({"author": "", "assoc": "OWNER"}, False),                               # a deleted (ghost) author
+])
+def test_an_approve_counts_only_when_the_bodys_last_editor_is_trusted(trust, ok):
+    rc, report, api = run_ev(wr_event(), serve(7, marker("APPROVE", H1), **trust))
+    assert rc == 0 and len(api.posted) == 1, report
+    assert api.posted[0]["state"] == ("success" if ok else "failure")
+    if not ok:
+        assert report["prs"][0]["outcome"] == "untrusted"
+        assert api.posted[0]["description"] == f"marker not written by a trusted user at {H1[:12]}"
+
+
+def test_a_block_from_an_untrusted_author_still_fails_the_check():
+    rc, report, api = run_ev(wr_event(), serve(7, marker("BLOCK", H1), author="stranger", assoc="NONE"))
+    assert api.posted[0]["state"] == "failure" and report["prs"][0]["outcome"] == "block"
+
+
+def test_the_editor_and_the_body_come_from_the_same_read():
+    # The first (REST) read says APPROVE by the owner; the GraphQL read shows a stranger re-edited it since.
+    second = gql_doc(H1, marker("APPROVE", H1), author="djbclark", editor="stranger")
+    rc, report, api = run_ev(wr_event(), serve(7, marker("APPROVE", H1), second=second))
+    assert api.posted[0]["state"] == "failure" and report["prs"][0]["last_editor"] == "stranger"
+
+
+def test_the_graphql_read_asks_for_the_trust_fields():
+    q = adversary_marker.PR_QUERY
+    for field in ("headRefOid", "body", "authorAssociation", "author { login }", "lastEditedBy { login }", "state"):
+        assert field in q, field
+
+
+# ---- the resolve job and --prs ---------------------------------------------------------------------------
+
+def test_resolve_gives_the_pr_numbers_and_the_concurrency_key():
+    api = adversary_marker.CannedApi({})
+    assert adversary_marker.resolve("workflow_run", wr_event(prs=(9, 7)), REPO_A, api) == \
+        (0, {"prs": "7,9", "key": "7-9", "found_by": "workflow_run.pull_requests"})
+    api = adversary_marker.CannedApi({f"GET repos/{REPO_A}/commits/{H1}/pulls": [{"json": []}]})
+    rc, out = adversary_marker.resolve("workflow_run", wr_event(prs=()), REPO_A, api)
+    assert rc == 0 and out["key"] == "" and out["prs"] == ""
+    assert adversary_marker.resolve("pull_request", wr_event(), REPO_A, api)[0] == 2
+
+
+def test_the_cli_resolve_writes_github_output(tmp_path):
+    (tmp_path / "ev.json").write_text(json.dumps(wr_event(prs=(7,))))
+    (tmp_path / "api.json").write_text("{}")
+    out = tmp_path / "gh-output"
+    r = subprocess.run([sys.executable, "-I", str(MODULE), "--resolve", "--event", str(tmp_path / "ev.json"),
+                        "--event-name", "workflow_run", "--repo", REPO_A, "--api-answers", str(tmp_path / "api.json")],
+                       capture_output=True, text=True, timeout=60, env={"PATH": "/usr/bin:/bin", "GITHUB_OUTPUT": str(out)})
+    assert r.returncode == 0, r.stderr
+    assert out.read_text() == "prs=7\nkey=7\n"
+
+
+@pytest.mark.parametrize("prs,rc", [("7", 0), ("7,9", 0), ("", 2), ("7;rm", 2), ("0", 2), ("7,x", 2)])
+def test_prs_judges_exactly_the_resolved_list_and_refuses_anything_else(tmp_path, prs, rc):
+    (tmp_path / "ev.json").write_text(json.dumps(wr_event(prs=())))   # no lookup may happen with --prs
+    (tmp_path / "api.json").write_text(json.dumps({**serve(7, marker("APPROVE", H1)), **serve(9, marker("APPROVE", H1))}))
+    r = cli("--prs", prs, "--event", str(tmp_path / "ev.json"), "--event-name", "workflow_run", "--repo", REPO_A,
+            "--api-answers", str(tmp_path / "api.json"))
+    assert r.returncode == rc, r.stderr
+    if rc == 0:
+        assert sorted(x["pr"] for x in json.loads(r.stdout)["prs"]) == [int(x) for x in prs.split(",")]
+
+
+def test_the_marker_job_is_keyed_by_the_resolved_pr_and_requests_both_app_permissions():
+    jobs = workflow()["jobs"]
+    assert set(jobs) == {"resolve", "marker"}
+    assert "environment" not in jobs["resolve"] and jobs["marker"]["needs"] == "resolve"
+    assert jobs["marker"]["concurrency"] == {"group": "adversary-marker-${{ needs.resolve.outputs.key }}",
+                                             "cancel-in-progress": True}
+    app = [s for s in jobs["marker"]["steps"] if s.get("uses", "").startswith("actions/create-github-app-token@")][0]
+    assert app["with"]["permission-statuses"] == "write" and app["with"]["permission-checks"] == "write"
+    judge = jobs["marker"]["steps"][-1]
+    assert '--prs "$PRS"' in judge["run"] and judge["env"]["PRS"] == "${{ needs.resolve.outputs.prs }}"

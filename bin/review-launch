@@ -36,8 +36,9 @@ THE BOUNDARY IS PROVEN FROM THE RUN'S OWN STREAM, and the run is killed (exit 77
     asserted, not assumed), `cwd` the worktree, `additional_directories` empty. Skills, slash commands,
     agents and plugins are NOT asserted empty: Claude's built-ins appear there whatever the settings.
   * a hook event (`system` subtype hook_*) trips: managed settings load whatever --setting-sources says.
-  * every assistant `tool_use` must name an allowed tool, and a Read/Grep/Glob path outside the worktree
-    (after ~, `..` and symlinks) trips too, even though the key already refuses it; the refusals Claude
+  * an assistant content item must be text, thinking (or redacted_thinking) or tool_use; every `tool_use` must
+    name an allowed tool, and a Read/Grep/Glob path outside the worktree (after ~, `..` and symlinks) trips too,
+    even though the key already refuses it, as does any `..` component in a Glob pattern or a Grep glob; the refusals Claude
     reports in `result.permission_denials` are logged to stderr.
   `result.structured_output` is the output; `result.is_error`, no result event or no structured output is exit 3.
   At the end, at the timeout and on a tripwire the child's process group and every descendant seen while it
@@ -63,7 +64,8 @@ a failed or missing check refuses every launch (exit 2, with the reason) until `
 
 Exit: 0 output printed and the boundary held; 2 usage or a refused launch (a bypass flag or variable, a
 worktree that is missing, dirty or at another head, a schema that does not parse, no passing self-check);
-77 tripwire; 3 no structured output (is_error, no result, claude failed); 124 --timeout (default 900 s).
+77 tripwire; 3 no structured output (is_error, no result, claude failed, or the launcher was stopped by
+SIGTERM, SIGHUP or SIGINT: the run is killed and the exit is 3, never 128+N); 124 --timeout (default 900 s).
 `--check` exits 0 passed, 77 a read was not refused (or a tripwire), 3 inconclusive (a control read failed, a
 target was not attempted, the run produced no result), 124 timeout.
 stdout carries ONLY the structured output JSON (or, with --json, one JSON run record); notes go to stderr.
@@ -92,6 +94,9 @@ HERE = Path(__file__).resolve()
 EXIT_OK, EXIT_USAGE, EXIT_NO_OUTPUT, EXIT_TRIP, EXIT_TIMEOUT = 0, 2, 3, 77, 124
 MODES = {"review": ["Read", "Grep", "Glob"], "read-only": ["Read", "Grep", "Glob", "WebFetch", "WebSearch"]}
 PATH_TOOLS = {"Read": ("file_path",), "Grep": ("path",), "Glob": ("path",)}
+# What an assistant message may contain: anything else (a server tool use, an MCP call, an unknown future kind)
+# trips. redacted_thinking is thinking the API returns encrypted.
+CONTENT_TYPES = frozenset({"text", "thinking", "redacted_thinking", "tool_use"})
 EXPECTED_PERMISSION_MODE = "default"
 SECRET_ENV_RE = re.compile(r"(?i)(token|secret|passw|credential|api_?key)|^(GH|GITHUB)_")
 BYPASS_ENV_RE = re.compile(r"(?i)(permission_?mode|bypass_?permissions|skip_?permissions|dangerously)")
@@ -254,11 +259,15 @@ def path_outside(value: object, worktree: str) -> bool:
 
 
 def glob_outside(pattern: object, base: str, worktree: str) -> bool:
-    """A Glob/Grep pattern that is absolute, starts with ~ or climbs with `..` is judged by its fixed prefix."""
+    """A Glob `pattern` or Grep `glob` with ANY `..` component is outside, wherever it would resolve (E8 review,
+    2026-11-07: a glob's `..` is matched by the tool, not by realpath). One that is absolute or starts with ~ is
+    judged by its fixed prefix."""
     if not isinstance(pattern, str):
         return pattern is not None
+    if ".." in re.split(r"[/\\]", pattern):
+        return True
     p = os.path.expanduser(pattern)
-    if not (os.path.isabs(p) or ".." in Path(p).parts):
+    if not os.path.isabs(p):
         return False
     prefix = re.split(r"[*?\[{]", p, maxsplit=1)[0]
     prefix = prefix if prefix.endswith(os.sep) else os.path.dirname(prefix)
@@ -391,7 +400,11 @@ def run_claude(argv: list[str], worktree: str, mode: str, timeout: float, path_t
                     break
                 bad = None
                 for item in ((ev.get("message") or {}).get("content") or []):
-                    if not isinstance(item, dict) or item.get("type") != "tool_use":
+                    kind_item = item.get("type") if isinstance(item, dict) else None
+                    if kind_item not in CONTENT_TYPES:
+                        bad = f"an assistant content item of type {kind_item!r} (only {sorted(CONTENT_TYPES)} may appear)"
+                        break
+                    if kind_item != "tool_use":
                         continue
                     name, inp = item.get("name"), item.get("input")
                     run.tool_uses.append({"id": item.get("id"), "name": name, "input": inp})
@@ -416,7 +429,10 @@ def run_claude(argv: list[str], worktree: str, mode: str, timeout: float, path_t
                 run.result = ev
                 result_at = time.monotonic()
     except Interrupted as e:
-        run.exit, run.reason = EXIT_TRIP if run.exit == EXIT_TRIP else 143, f"interrupted ({e})"
+        # A signal (SIGTERM/SIGHUP/SIGINT to the launcher) ends the run without output: exit 3, never the signal's
+        # 128+N, so a caller's exit-code contract stays the documented one (E8 review, 2026-11-07). A tripwire
+        # that fired first keeps its 77.
+        run.exit, run.reason = (EXIT_TRIP if run.exit == EXIT_TRIP else EXIT_NO_OUTPUT), f"interrupted ({e})"
     finally:
         for s, h in old.items():
             signal.signal(s, h)
