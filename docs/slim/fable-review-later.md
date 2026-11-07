@@ -6,7 +6,7 @@ Started 2026-11-07, when the Fable credits ran out mid-Wave 5 (the lead fell bac
 
 - **F1a. W3 docs critic, completeness pass** (run `wf_37bef6f2-767`, 2026-11-07): the final critic over README.md and AGENTS.md failed on credits and never ran. Re-run the critic stage alone (`docs/slim/briefs/wave5-E11-docs.md` section 6; the script is the W3 workflow's last agent): what replacement is not named where a new agent would look, which standing order contradicts a ruling.
 - **F1b. W3 findings never verified** (57 of 161): the two skeptics per finding failed on credits for `docs/tui-lessons-learned.md` (25), `docs/paseo-only-rearchitecture.md` (16), `docs/threat-model.md` (13) and `docs/upstream-issues.md` (3). The list with each quote and proposed fix: `docs/slim/fable-review-later-w3-unverified.json`. Nothing was edited for these; a review decides which are real.
-- **F1c. The 87 confirmed W3 fixes** were applied by the lead on Opus 5.5 (2026-11-07, commit named in F3), not reviewed after the edit. A Fable read of the diff checks that no fix introduced a new false statement.
+- **F1c. The 87 confirmed W3 fixes** were applied by the lead on Opus 5.5 (2026-11-07, commit named in F3), not reviewed after the edit (commit dd70d507, 21 files). A Fable read of the diff checks that no fix introduced a new false statement.
 
 ## F2. Security-critical work reviewed only by Opus (a cross-model second opinion is worth it)
 
@@ -16,5 +16,5 @@ Started 2026-11-07, when the Fable credits ran out mid-Wave 5 (the lead fell bac
 
 ## F3. Lead work done on Opus after the fallback
 
-- **F3a.** The W3 fixes (F1c).
+- **F3a.** The W3 fixes (F1c, commit dd70d507).
 - **F3b.** Wave 6: the fragment numbering, the CHANGELOG fold, the final PR body and its merge-gate checklist (`docs/slim/operator-batch.md`).
