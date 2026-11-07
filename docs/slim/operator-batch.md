@@ -14,7 +14,7 @@ Paseo daemon, plugins, resume, quota pause
 - A3. Install asks and questions-please at least a day before the helm deletion lands; the one still used after a week stays, the other goes in the follow-up PR (D5) (wave3-E4 F4; PLAN.md J6).
 - A4. Keep Paseo's native "Resume agents after restart" OFF while evaluating `session-recovery` (PLAN.md J6, I4).
 - A5. Verify session-guard and usage-auto-resume live: a session that hits the Claude limit pauses and continues after the reset; the quota deletions (E7) depend on it (wave4-E7 H2; PLAN.md D4).
-- A6. One bounded native-resume trial: turn it on for one daemon restart in a quiet window, fleet idle, `load-watch admit` refusing launches; leave it ON if it behaves, turn it OFF after a mass wake; the write-up must say the trial cannot show the busy-fleet mass wake; the result decides parked PR 290 (decision) (PLAN.md J6, J9, I4).
+- A6. One bounded native-resume trial: turn it on for one daemon restart in a quiet window, fleet idle, `load-watch admit` refusing launches; leave it ON if it behaves, turn it OFF after a mass wake; the write-up must say the trial cannot show the busy-fleet mass wake; the result decides parked PR 290 (operator decision 4a, 2026-11-07: run it) (PLAN.md J6, J9, I4).
 - A7. Verify for one day before the REPLACE deletions merge (PLAN.md F Wave 3 row).
 
 GitHub merge gate (App and environment; the order is wave4-E8 E4)
@@ -24,7 +24,7 @@ GitHub merge gate (App and environment; the order is wave4-E8 E4)
 - A11. Confirm the Tests check names the ruleset will pin (expect `pytest-linux 15368`, `context-policy 15368`): `gh api repos/djbclark/djbclark-ade/commits/$(git rev-parse origin/master)/check-runs --jq '.check_runs[] | [.name, .app.id] | @tsv'` (wave4-E8 E2).
 
 Web search stack (must precede `ade update`)
-- A12. Re-point or retire `com.djbclark.firecrawl-mcp` (the shared `firecrawl` MCP on 18804) and Hermes' `search_backend: firecrawl` (18805, `agents/hermes/config.yaml.tmpl:132`): `~/.local/bin/firecrawl-router` is a symlink into this repo's `bin/` and breaks when `ade update` runs; either point the LaunchAgent at the Hyades service directly or stop it (wave3b G8; log "Operator batch gains").
+- A12. Re-point (operator decision 3a, 2026-11-07): point `com.djbclark.firecrawl-mcp` (the shared `firecrawl` MCP on 18804) and Hermes' `search_backend: firecrawl` (18805, `agents/hermes/config.yaml.tmpl:132`) at the Hyades firecrawl service directly, before `ade update` runs (`~/.local/bin/firecrawl-router` is a symlink into this repo's `bin/` and breaks then); the LaunchAgent and Hermes' live config are outside this repo, so the edit is yours, or a site-djbclark change with your yes (wave3b G8).
 
 site-djbclark edits (order 11: each needs your explicit yes)
 - A13. Edit the six consumers of `firecrawl-router`/`web-get`: `roles/shared_mcp/tasks/main.yml:18`, `defaults/main.yml:89-104`, `skills/firecrawl/SKILL.md`, `skills/firecrawl/scripts/live-suite/common.py:2`, `home-agents.md:24`, `cursor/home-agents.mdc:311` (wave3b G8) (decision).
@@ -80,7 +80,7 @@ Stop the jobs and remove state, before `ade update`
 - C14. The per-target CPU watchers (opencode-cpu-watch, codexbar-cpu-watch): `for l in $(launchctl list | awk '$3 ~ /^com\.djbclark\..*-cpu-watch$/ {print $3}'); do launchctl bootout gui/$UID/$l; rm -f ~/Library/LaunchAgents/$l.plist; done` (wave3-E5 G1; log Wave 2 batch 6).
 - C15. The `watch` job from Wave 3b: the log lists "watch (Wave 3b)" but no label or plist path; the form would be `launchctl bootout gui/$UID/com.djbclark.watch` (unverified); also archive `~/.local/state/watch/` (log Wave 2 batch 6; wave3b G5).
 - C16. Lander and feeder (J11, retire): `launchctl bootout gui/$UID/com.djbclark.ade-lander; launchctl bootout gui/$UID/com.djbclark.ade-feeder`, then remove both plists from `~/Library/LaunchAgents/` (path by the same convention, unverified); the scripts stay in `~/.local/state/bigteam/deepseek-review-2026-10-30/` as history (PLAN.md J11, F Wave 4 row).
-- C17. If A12 chose retire: `launchctl bootout gui/$UID/com.djbclark.firecrawl-mcp` and remove its plist (path by the same convention, unverified); then `rm` the dangling `~/.local/bin/{web-get,web-digest,firecrawl-router}` (wave3b G8).
+- C17. (Moot under decision 3a: the LaunchAgent is re-pointed, not retired.) `rm` the dangling `~/.local/bin/{web-get,web-digest,firecrawl-router}` once nothing points at them (wave3b G8).
 - C18. `launchctl bootout gui/$(id -u)/com.djbclark.zcode-key-auth; rm ~/Library/LaunchAgents/com.djbclark.zcode-key-auth.plist; rm -r ~/.local/state/zcode-key-auth` (wave2-E9 D, zcode line).
 - C19. `acpdispatch.n2maskfix.reset` is a one-shot that already exited; confirm with `launchctl list | grep n2maskfix` and remove its plist if still present (log Wave 2 batch 6; plist path unverified).
 - C20. `sudo rm /etc/sudoers.d/acp-dispatch-pmset` (wave4-E6 J2).
@@ -147,7 +147,7 @@ Verification on the live Mac
 - C71. Close PR 270 (`quota-surplus`, parked): `gh pr close 270` (command form not in the sources) (log "Operator batch gains"; PLAN.md D4).
 - C72. Open decisions: whether to narrow the claim guard to add/commit in a foreign workspace, a security call of about 2,000 lines (wave4-E8 F3); whether to build the thin Paseo `worktree.create.after` plugin hook for `ade_claims.py new --ttl` (wave4-E8 F4); PR 290 `ade-recovery` after the native-resume trial A6 (PLAN.md J9) (decision).
 - C73. After `ade update` and the relinks: `graft build` in `~/src/djbclark-ade` (the graph cache under `graft/` is ignored and local; the cloud lead cannot run it) so `graft ask`/`graft map` match the slimmed tree (PLAN.md E11, "`graft build` last").
-- C74. Apply the merged `.claude/settings.json` from `docs/slim/reports/wave5-E11.md` section E if the lead did not commit it on the branch (decision: the operator's unattended-permission rules plus the graft status line; the cloud writer's harness refused the write) (wave5-E11 E).
+- C74. Done on the branch (2026-11-07, operator decision 1a): the merged `.claude/settings.json` is committed; nothing to paste.
 
 ## D. Two weeks later (the follow-up PR, after one live cycle, or sooner when every C3 file is migrated or waived and the `relay.py`/`acp-dispatch` logs show no caller)
 
