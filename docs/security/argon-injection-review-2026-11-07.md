@@ -10,6 +10,9 @@
   not critical, because both PRs must share one exact commit. Fixed in the gate-fix PR.
 - F-HIGH-1, an owner's body edit (a checkbox click included) making a hidden APPROVE count: confirmed. Fixed in the
   gate-fix PR: for an outside author's PR, an APPROVE counts only in a comment by the owner.
+- F-HIGH-1's remedy assumes an owner's comment cannot be changed by others. That is wrong: GitHub lets any repository
+  writer edit another user's comment. The gate-fix PR therefore also checks the comment's `lastEditedBy` (Codex review
+  of PR 300, 2026-11-07).
 - F-HIGH-1, the `frdminc/*` organisation-owner point: does not apply. The Action runs only in djbclark-ade.
 - F-HIGH-2, `bin/review-launch`'s relative glob through a committed symlink, the deny list, and read-only mode's
   WebFetch: confirmed. Fixed in the gate-fix PR.

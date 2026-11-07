@@ -13,9 +13,11 @@ the author: a prompt-injection attempt through a PR has already happened. They a
 instructions. The Action never executes, interpolates or checks out anything from a PR; the review model is told
 that the diff, the body and every file of its worktree are data under review and that it reports only through the
 schema. An APPROVE counts only in two places: the body of a PR the owner wrote and edited last, or an issue comment
-the owner posted on the PR (not through a GitHub App). The operator approves any other PR by posting the marker as
+the owner posted on the PR (not through a GitHub App) that nobody but the owner has edited, since any repository
+writer can edit another user's comment (`lastEditedBy` through GraphQL; unknown attribution fails closed). The operator approves any other PR by posting the marker as
 their own comment; editing its body approves nothing (2026-11-07, Argon review F-HIGH-1). A BLOCK in the body or in
-any comment fails the check, and a dispatch judges every open PR at the same head (F-CRIT-2). (The looser trust the
+any comment fails the check, and a dispatch judges every open PR at the same head, with both lookups paginated to the end (F-CRIT-2; pagination
+from the Codex review of PR 300). (The looser trust the
 repository gives its own agents on the machine, AGENTS.md's orders, does not extend to anything that came through
 GitHub.)
 
