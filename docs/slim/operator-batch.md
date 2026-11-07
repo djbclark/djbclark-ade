@@ -9,7 +9,7 @@ Two placements differ from a literal reading of the request, both because a sour
 ## A. Before the final merge reaches the Mac
 
 Paseo daemon, plugins, resume, quota pause
-- A1. Upgrade the Mac's Paseo daemon to 0.15.x in a quiesced window per `docs/queue.md`; an unfinished turn is lost on restart until terminal persistence is verified (PLAN.md F Wave 3 row; evidence F recorded 0.14.x).
+- A1. (Done: the Mac is already on Paseo 0.15.x, operator 2026-11-07.) Upgrade the Mac's Paseo daemon to 0.15.x in a quiesced window per `docs/queue.md`; an unfinished turn is lost on restart until terminal persistence is verified (PLAN.md F Wave 3 row; evidence F recorded 0.14.x).
 - A2. Install the J6 plugins, each after reading the Sonnet source summary (trusted, unsandboxed daemon code): tell-agent, asks, questions-please, baton, session-guard, usage-auto-resume, vitals, skills, pr-radar, session-janitor, plan-auto, zerosub (only if you run several Claude subscriptions), `getpaseo/claude-code-entrypoint-env`, and `sm1ee/session-recovery` as the thirteenth (PLAN.md J6, I3; wave4-E7 H2).
 - A3. Install asks and questions-please at least a day before the helm deletion lands; the one still used after a week stays, the other goes in the follow-up PR (D5) (wave3-E4 F4; PLAN.md J6).
 - A4. Keep Paseo's native "Resume agents after restart" OFF while evaluating `session-recovery` (PLAN.md J6, I4).
@@ -27,11 +27,11 @@ Web search stack (must precede `ade update`)
 - A12. Nothing to do (operator ruling 2026-11-07, step 6: keep `bin/firecrawl-router` in djbclark-ade): `com.djbclark.firecrawl-mcp` keeps running the router through the `~/.local/bin/firecrawl-router` symlink, and Hermes keeps its 18805 backend; `ade update` leaves the router in place. Check after the merge that `curl -i http://127.0.0.1:18804/mcp` still answers (wave3b G8 superseded).
 
 site-djbclark edits (order 11: each needs your explicit yes)
-- A13. Edit the site-djbclark consumers of the retired `web-get` and the `fallback-chains` ladder only (the router stays): `skills/firecrawl/SKILL.md` (its `web-get` mentions), `home-agents.md:24`, `cursor/home-agents.mdc:311`; `roles/shared_mcp` and `skills/firecrawl/scripts/live-suite/common.py` need nothing (decision, order 11).
-- A14. Fix `fleet-watch:120`, which still says "Skill: /paseowatch." (a deleted skill) (wave3b B, G5).
-- A15. Decide whether the `paseo` profile gets a worker fallback (`UPR_FALLBACK=worker`), a site-djbclark change (wave3b B, G5) (decision).
-- A16. Decide whether to add the four moved tests (`tests/test_barnowl_skill.py`, `tests/test_bigteam_prune.py`, `tests/test_change_hermes_{auto,lock}.py`) to a site-djbclark workflow; none runs in CI there today (wave2-E1 E24) (decision).
-- A17. Optional: reword `home-agents.md:52`, `cursor/home-agents.mdc:41` and `roles/site_agents/README.md:21-26,59` (they describe the old relay router and sweep) (wave3-E3 F4e) (decision).
+- A13. Done on site-djbclark `slim-intake/2026-11` (9955e53, operator yes 2026-11-07): `home-agents.md` items 4, 7, 24-26, 30, the firecrawl skill without `web-get`; the Cursor copy in 5c16676.
+- A14. Done on the intake branch (9955e53): `fleet-watch:120` no longer names `/paseowatch`.
+- A15. Decided no (operator walk-through, 2026-11-07): Paseo upstream events keep the Hermes detection ping only.
+- A16. Done on the intake branch (5c16676): `.github/workflows/moved-tests.yml` runs the four moved tests (in this cloud container 8 `test_bigteam_prune` cases fail on its global `http.proxyauthmethod` git config; check the workflow's first run on GitHub).
+- A17. Done on the intake branch (9955e53, 5c16676): `home-agents.md`, `cursor/home-agents.mdc` and `roles/site_agents/README.md` describe the shims and `paseo send`/`paseo run`.
 
 Final PR merge gate: C7 and C1 re-run on the Mac, output pasted into the final PR (PLAN.md F Wave 6, I8; the commands are the Wave 2 batch's, in log.md)
 - A18. C7.1 sleeping herdr panes: `~/src/djbclark-ade/plugins/herdr-sleeper/herdr-sleeper list` and `... log | tail -20`; expect nothing sleeping or orphaned (log, Wave 2 batch 1).
