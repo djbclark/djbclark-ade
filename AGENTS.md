@@ -13,12 +13,12 @@ control; since 2026-10-08 also the git home of the orchestration and
 session-hygiene skills and tools. Two altitudes, verified by real runs on
 2026-08-23: the **micro graph** (Claude Code dynamic workflows, in-process
 fan-out) and the **macro graph** (a task DAG across agent CLIs in their
-own worktrees; it was run through Orca, which is now retired from djbclark-ade: run the same shape with Paseo workspaces and agents (`skills/ade-paseo`, `skills/bigteam`; plan: `docs/paseo-only-rearchitecture.md`). Its Orca command reference, `docs/orca-integration.md`, was removed 2026-10-31 (git history has it) and no Paseo DAG runbook is written yet).
+own worktrees; it was run through Orca, which is now retired from djbclark-ade: run the same shape with Paseo workspaces and agents (Paseo's own `paseo` skill, `skills/bigteam`; plan: `docs/paseo-only-rearchitecture.md`). Its Orca command reference, `docs/orca-integration.md`, was removed 2026-10-31 (git history has it) and no Paseo DAG runbook is written yet).
 [README.md](README.md): architecture, how they compose, every skill.
 
 > **Retired as of 2026-10-31 (operator ruling).** herdr (except the two edge-case bridges `herdr4paseo` and
 > `paseo4herdr`), Orca and BB (get-bb/bb, npm `bb-app`, the web agent workspace; not `bigteam`) are retired **from djbclark-ade**, and
-> **Paseo is the only harness**: new work goes through Paseo (`paseo run`, `bin/paseo-new-seat`, the `ade-paseo*` skills). They stay installed and configured on
+> **Paseo is the only harness**: new work goes through Paseo (`paseo run` and Paseo's own `paseo*` skills; the vendored `ade-paseo*` copies and `bin/paseo-new-seat` went with the slim-down, 2026-11-06/07). They stay installed and configured on
 > djbclark's computer, untouched ("mostly removed from djbclark-ade, not from my computer"); machine-side uninstall is NOT planned, and never touch their config.
 > **What is gone (2026-10-31):** `skills/herdr-tidy`, `skills/reorg-orca` and their `/herdr-tidy`, `/orca-tidy` wrappers, `bin/herdr-ai`, `bin/herdr-jump`,
 > `bin/herdr-sleeper` (the plugin copy `plugins/herdr-sleeper/herdr-sleeper` stays), `bin/orca-reorg-watch`, `docs/orca-integration.md`, `docs/herdr-tidy.md`, `docs/herdr-ai.md`, `docs/herdr-jump.md` and the vendored Orca guide (git history has them; the operator's machine symlink `~/.local/bin/herdr-sleeper` pointed into the removed `bin/herdr-sleeper` and may dangle: his to fix, order 11). **What is still live, on purpose,
@@ -51,7 +51,7 @@ Each doc carries its own summary.
 | [.claude/workflows/graph-audit.js](.claude/workflows/graph-audit.js) | runnable micro-graph example, `/graph-audit` |
 | [skills/](skills/), [docs/skills.md](docs/skills.md) | canonical copy of every hand-written skill: **edit and add skills here**, never via a TUI path; wrappers in [claude/commands/](claude/commands/) |
 | [skills/autorename/workspace-layout.md](skills/autorename/workspace-layout.md) | naming: -pw/-pt Paseo; tab use (the herdr -t/-p scheme is retired, 2026-10-31) |
-| [skills/ade-paseo-handoff/](skills/ade-paseo-handoff/SKILL.md) | tab lifecycle (2026-10-30): verify the successor's `ParentAgentId` is null, archive the predecessor, tell every sibling and child the new id |
+| [skills/handoff/](skills/handoff/SKILL.md) (the vendored `ade-paseo-handoff` went 2026-11-07; Paseo's own `paseo-handoff` once installed) | tab lifecycle (2026-10-30): verify the successor's `ParentAgentId` is null, archive the predecessor, tell every sibling and child the new id |
 | [skills/paseo-screen/](skills/paseo-screen/SKILL.md) | THE screen-control tool (2026-10-31): the Paseo plugin `paseo-screen`; look before clicking, safety rules |
 | [tools/acp-run/](tools/acp-run/README.md) | the ACP client every launcher uses (`~/.local/bin/acp-run`) |
 | [bin/fleet-watch](bin/fleet-watch) | launchd fleet change notices to Hermes |
