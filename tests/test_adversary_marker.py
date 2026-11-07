@@ -1109,7 +1109,7 @@ def gql_doc(head: str = H1, body: str = "", state: str = "OPEN", author: str = "
     """The GraphQL second read (`_pr_state_trusted`): state, head, body, author, last editor, author association."""
     return {"json": {"repository": {"pullRequest": {
         "state": state, "headRefOid": head, "body": body, "authorAssociation": assoc, "author": {"login": author},
-        "lastEditedBy": {"login": editor} if editor else None}}}}
+        "userContentEdits": {"nodes": [{"editor": {"login": editor}}] if editor else []}}}}}
 
 
 def serve(n: int, body: str, head: str = H1, state: str = "open", second: dict | None = None, **trust) -> dict:
@@ -1410,7 +1410,7 @@ def test_the_editor_and_the_body_come_from_the_same_read():
 
 def test_the_graphql_read_asks_for_the_trust_fields():
     q = adversary_marker.PR_QUERY
-    for field in ("headRefOid", "body", "authorAssociation", "author { login }", "lastEditedBy { login }", "state"):
+    for field in ("headRefOid", "body", "authorAssociation", "author { login }", "userContentEdits(first: 1) { nodes { editor { login } } }", "state"):
         assert field in q, field
 
 

@@ -142,7 +142,8 @@ C3. **Flow** (`run_event`): the PR from the dispatch input (digits only), else t
 base repository is this one), else `GET commits/{head_sha}/pulls` (open, head equal, base this repository), else `GET
 pulls?state=open&head=OWNER:BRANCH` (a fork's PR, whose `pull_requests[]` GitHub leaves empty); for each PR: read
 `pulls/N`, skip if not open, judge, **re-read** through one GraphQL query (`state headRefOid body authorAssociation author
-{login} lastEditedBy {login}`), post nothing if the head moved or the PR closed, judge the second read's body (so a BLOCK
+{login} lastEditedBy {login}` — replaced by `userContentEdits(last: 1) { nodes { editor { login } } }` on 2026-11-07
+after GitHub removed `lastEditedBy`; see PR 302), post nothing if the head moved or the PR closed, judge the second read's body (so a BLOCK
 edit between the reads is what lands), turn an APPROVE whose body's last editor is not trusted into `untrusted` (L1), post `POST statuses/{head}` with `context: adversary-marker`, `state:
 success` only for `approve`, else `failure`, description `APPROVE at <12 hex>`, `marker not written by a trusted user at
 <12 hex>` and the like, `target_url` the run. Two open
@@ -498,8 +499,11 @@ Operator ruling the same day: "any GitHub artifacts not directly from us are sus
 has already happened). L1 is the rule that follows from it; L10-L12 are the three additions it asked for.
 
 L1. **BLOCK 1, an outside author could approve their own PR** (`judge_pr`): the second read is now one GraphQL query
-(`_pr_state_trusted`: `state headRefOid body authorAssociation author { login } lastEditedBy { login }`, with the job's
-read token), so the body and the editor it is judged by come from the same answer. The last editor is `lastEditedBy`, or
+(`_pr_state_trusted`: `state headRefOid body authorAssociation author { login } lastEditedBy { login }` — that field
+replaced by `userContentEdits(first: 1) { nodes { editor { login } } }` on 2026-11-07 after GitHub removed it; the
+connection is newest-first — a live probe on PR 302 showed its three edits dated newest to oldest — with the job's
+read token), so the body and the editor it is judged by come from the same answer. The last editor is
+the newest `userContentEdits` editor (was `lastEditedBy`), or
 the author when the body was never edited. Trusted: the repository owner's login (case-insensitive), or the author when
 the author edited it last and `authorAssociation` is OWNER, MEMBER or COLLABORATOR. An APPROVE in a body last edited by
 anyone else posts `failure`, "marker not written by a trusted user at <12 hex>" (outcome `untrusted`); a BLOCK or a
