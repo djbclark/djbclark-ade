@@ -8,8 +8,9 @@ tools: Read, Grep, Glob, Bash
 <!-- 2026-10-23 (operator): adversary rounds go to the omp route first,
      `acp-dispatch omp --model anthropic/claude-opus-5-5 --kind judgment --effort high` (API
      credits). This agent stays `model: opus` for when omp is unavailable, and the caller passes
-     the Agent tool's `model: "sonnet"` override whenever ~/.local/state/ade/quota-guard.json says
-     `tight` or `critical` (bin/claude-quota-guard). The 2026-10-20 Claude weekly window ran out 2.6
+     the Agent tool's `model: "sonnet"` override whenever the Claude windows are short
+     (`route_agent.py show`: claude under 30% left on its tightest window; the quota guard that
+     said so was deleted 2026-11-07). The 2026-10-20 Claude weekly window ran out 2.6
      days early; Opus Agent-tool sub-agents were ~53% of that burn (the pool policy of the fan-out
      skill's predecessor, item 2; in git history since 2026-11-06). -->
 

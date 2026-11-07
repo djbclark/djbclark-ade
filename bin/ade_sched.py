@@ -1,7 +1,7 @@
 """ade_sched: install a launchd plist as a launchd agent, a systemd user unit or a crontab block (issue #279, 2026-11-04).
 
 Imported by bin/ade-sched and by the job installers (they run under `python3 -I`, so each puts this directory on sys.path
-first, the way bin/claude-quota-guard does for ade_gates.py). Not a program. Stdlib only. docs/scheduling.md is the manual.
+first, the way bin/acp-dispatch does for route_agent.py). Not a program. Stdlib only. docs/scheduling.md is the manual.
 
 The checked-in plists (launchd/, config/launchd/) stay the source of truth. A job is read from one of them, its placeholders
 (`__ADE__`, `__HOME__`, `__STATE__`, `@TARGET@`, ...) filled into the PARSED dict (never into the XML text), and then:

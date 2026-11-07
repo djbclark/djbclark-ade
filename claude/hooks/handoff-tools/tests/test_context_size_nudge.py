@@ -45,7 +45,6 @@ def _append(path, text):
 def hook(monkeypatch, tmp_path, capsys):
     """Run the hook once per call; returns (stdout, pings sent)."""
     monkeypatch.setattr(nudge, "STATE_PATH", tmp_path / "state.json")
-    monkeypatch.setattr(nudge, "QUOTA_GUARD_PATH", tmp_path / "quota-guard.json")  # absent unless a test writes it
     pings = []
     monkeypatch.setattr(
         subprocess, "Popen", lambda cmd, **kwargs: pings.append(cmd),
@@ -620,7 +619,7 @@ def test_reads_large_transcript_from_tail_only(hook, tmp_path):
     assert len(pings) == 1
 
 
-# --- successor form (2026-10-23): a Fable session, or a tight quota guard, hands off to Opus/Sonnet ---
+# --- successor form (2026-10-23): a Fable session hands off to Opus (the quota-guard downshift went 2026-11-07) ---
 _FABLE = "claude-fable-5-1"
 
 
@@ -634,10 +633,6 @@ def _model_transcript(tmp_path, model, *sizes, name="model-transcript.jsonl"):
         lines.append(json.dumps(record) + "\n")
     path.write_text("".join(lines))
     return path
-
-
-def _guard(tmp_path, level):
-    (tmp_path / "quota-guard.json").write_text(json.dumps({"level": level}))
 
 
 _OPUS_NOTE = "relaunch `claude --model claude-opus-5-5`"
@@ -658,26 +653,6 @@ def test_other_models_get_no_relaunch_note(hook, tmp_path):
     assert "relaunch" not in out
 
 
-@pytest.mark.parametrize("level, model, spec", [
-    ("tight", "claude-opus-5-5", "claude-sonnet-5-5"),
-    ("tight", _FABLE, "claude-sonnet-5-5"),
-    ("critical", _FABLE, "claude-opus-5-5"),
-])
-def test_guard_level_picks_the_successor_even_on_a_non_fable_model(hook, tmp_path, level, model, spec):
-    _guard(tmp_path, level)
-    out, _ = hook("s-guard-" + level + model, _model_transcript(tmp_path, model, 46_000, nudge.BOUNDARY_TOTAL))
-    assert f"relaunch `claude --model {spec}`" in out
-    assert f"the quota guard says {level}" in out
-
-
-@pytest.mark.parametrize("content", [None, "not json", '{"level": 3}', '{"level": "ok"}', "[]"])
-def test_absent_or_unusable_guard_state_changes_nothing(hook, tmp_path, content):
-    if content is not None:
-        (tmp_path / "quota-guard.json").write_text(content)
-    out, _ = hook("s-noguard", _model_transcript(tmp_path, "claude-opus-5-5", 46_000, nudge.BOUNDARY_TOTAL))
-    assert "relaunch" not in out
-
-
 def test_sidechain_and_synthetic_records_do_not_decide_the_model(tmp_path):
     path = tmp_path / "t.jsonl"
     rows = [
@@ -690,38 +665,18 @@ def test_sidechain_and_synthetic_records_do_not_decide_the_model(tmp_path):
     assert nudge._last_assistant_model(tmp_path / "missing.jsonl") is None
 
 
-@pytest.mark.parametrize("level, model", [
-    ("tight", "claude-sonnet-5-5"), ("tight", "claude-sonnet-5-5[1m]"),
-    ("critical", "claude-opus-5-5"), ("critical", "claude-opus-5-5[1m]"),
-    ("critical", "claude-sonnet-5-5"),
-])
-def test_a_session_already_on_the_target_gets_no_same_model_successor(hook, tmp_path, level, model):
-    _guard(tmp_path, level)
-    out, _ = hook("s-same-" + level + model, _model_transcript(tmp_path, model, 46_000, nudge.BOUNDARY_TOTAL))
-    assert "relaunch" not in out
-    assert nudge._successor_target(model, level) is None
-
-
 @pytest.mark.parametrize("model", ["claude-fable-5-1[1m]", "claude-fable-5-2", "claude-fable-6"])
 def test_l5_any_fable_id_with_or_without_a_suffix_is_detected(model):
-    assert nudge._successor_target(model, "") == (nudge.SUCCESSOR_OPUS, "this session runs on Fable")
-    assert nudge._successor_target("claude-opus-5-5[1m]", "") is None
+    assert nudge._successor_target(model) == (nudge.SUCCESSOR_OPUS, "this session runs on Fable")
+    assert nudge._successor_target("claude-opus-5-5[1m]") is None
 
 
-@pytest.mark.parametrize("level", ["tight", "critical"])
-@pytest.mark.parametrize("model", [None, "", "claude-haiku-4-5", "claude-haiku-4-5[1m]", "gpt-6"])
-def test_r2_l4_guard_never_moves_an_unknown_or_lower_model_up(level, model):
-    assert nudge._successor_target(model, level) is None
+@pytest.mark.parametrize("model", [None, "", "claude-haiku-4-5", "claude-haiku-4-5[1m]", "gpt-6", "claude-opus-5-5",
+                                   "claude-sonnet-5-5"])
+def test_r2_l4_no_successor_for_an_unknown_or_non_fable_model(model):
+    assert nudge._successor_target(model) is None
 
 
-def test_r2_l4_guard_moves_only_models_known_to_be_above_the_target():
-    assert nudge._successor_target("claude-opus-5-5", "tight") == (nudge.SUCCESSOR_SONNET, "the quota guard says tight")
-    assert nudge._successor_target("claude-fable-5-1[1m]", "tight")[0] == nudge.SUCCESSOR_SONNET
-    assert nudge._successor_target(_FABLE, "critical")[0] == nudge.SUCCESSOR_OPUS
-    assert nudge._successor_target("claude-opus-5-5", "critical") is None
-
-
-def test_r2_l4_unreadable_model_under_a_guard_gives_no_relaunch_note(hook, tmp_path):
-    _guard(tmp_path, "critical")
+def test_r2_l4_unreadable_model_gives_no_relaunch_note(hook, tmp_path):
     out, _ = hook("s-nomodel", _transcript(tmp_path, 46_000, nudge.BOUNDARY_TOTAL))  # no assistant model
     assert "relaunch" not in out

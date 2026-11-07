@@ -4,19 +4,23 @@
 # 2026-10-15 to the operator's routing policy and narrowed 2026-10-18: Claude
 # Fable 5.1 and codex's top frontier model (gpt-6-astra today) are reached
 # only through the `frontier` kind, one slice per pool per wave (two on claude under the standing
-# allowance of 2026-10-27 while the quota guard passes, docs/gates.md); judgment is
+# allowance of 2026-10-27 while the Claude reading passes, docs/gates.md); judgment is
 # Opus 5.5 at high first, omp Opus next, and codex gpt-6.1-sol at high as a lower-ranked,
 # eligible pool while its quota is plentiful (operator 2026-10-25); everyday work goes to the
 # OTHER pools, plus codex's everyday
 # models (never astra) while its quota is plentiful (`plenty_min`, operator 2026-10-25);
 # the copilot reserve row was removed 2026-11-06 (slim-down E9: the copilot CLI retired; Paseo's
-# Copilot provider replaces it); grok is an
-# ordinary pool since 2026-10-18, when GrokBot moved to its own Cursor pool;
+# Copilot provider replaces it); the grok CLI's SuperGrok pool retired 2026-11-07 (subscription
+# cancelled in favour of Cursor; grok-bot is Cursor-billed and never a slice target);
 # hermes is never a target; omp (the Claude API credits) is an ordinary tier since
 # 2026-10-19, API-only work first and then code/bulk slices, so the credits are spent
 # before they expire each month.
-# `models` is the acp-run `--model [--effort L]` suggestion per kind; `agent`
-# is the acp-run agent name when it differs from the aiuse provider id.
+# Surviving pools (J2 pool audit, docs/slim/log.md): claude, codex, cursor (cursor-auto, cursor,
+# cursor-cloud), opencode (opencode-go, opencode-zen-free), omp, hermes (never a target) and
+# antigravity (reached through acp-dispatch by name; no routed row since 2026-11-06).
+# `models` is the acp-dispatch `--model [--effort L]` suggestion per kind, ids as
+# `paseo provider models <agent> --json` lists them (`route_agent.py services --check-models`);
+# `agent` is the Paseo provider when it differs from the pool name.
 
 # Google AI Pro (Paseo's antigravity provider; the router has no service for it since 2026-11-06) does NOT include API access:
 # subscriptions are chat-interface only and a Gemini API key bills separately, so wiring Hermes or any agent to a
@@ -30,6 +34,8 @@
 # a batch or API-only job). omp's Claude API credits are
 # eligible (pi's OpenAI API pool was retired 2026-11-06); select the provider appropriate for the SDK. The caller makes the API
 # call itself and `route_agent.py route --kind api-only` reports capacity.
+# `github` and `realtime-web` have no pool since copilot (2026-11-06) and the grok CLI (2026-11-07) retired: a route for
+# them finds nothing; they stay kinds so a lead's plan names them rather than failing on an unknown kind.
 kinds = ["judgment", "frontier", "code", "bulk", "research", "mechanical", "github", "realtime-web", "api-only"]
 # burn_first services (use-it-or-lose-it pools) win a tie-sized margin while
 # they hold at least this much headroom. Static `burn_first = true` on a
@@ -58,16 +64,29 @@ pace_penalty_judgment_factor = 0.5
 quality_max_rank_gap = { code = 10, judgment = 10 }
 # Most `frontier` slices one wave puts on a single pool, and the Fable sublimit below which frontier on claude falls
 # back to Opus, are `frontier1_per_wave`/`frontier2_per_wave` and `frontier1_min_left` in config/gates.toml [frontier]
-# (2026-10-27: a profile may raise them within floors; docs/gates.md).
+# (docs/gates.md).
 # Pools with `plenty_kinds` (codex's everyday kinds, operator 2026-10-25: "if we have lots of codex
 # quota and it is the best of available options we can use it for non-frontier") are eligible for
 # those kinds only while the binding headroom (the tightest window of the pool, 5-hour and weekly
 # alike) is at least this many percent; below it, or with no fresh reading, codex is frontier-only
 # again, so a wave cannot empty the 5-hour window the way four astra slices did on 2026-10-18.
 plenty_min = 50.0
-# Curated profiles overlay discovery; anything discovered without one gets
-# default_profile so a newly-added agent is routable rather than invisible.
+# Curated profiles overlay discovery (`paseo provider ls --json` plus the quota snapshot's pools); anything
+# discovered without one gets default_profile so a newly-added provider is routable rather than invisible.
 default_profile = { bulk = 60, mechanical = 60 }
+# Never a routable service, whatever aiuse or Paseo lists (the [discovery] table until 2026-11-07, slim-down E7):
+# hermes is the operator's own assistant (operator 2026-10-15). clinepass: reserved as the lifeline/substrate of BOTH
+# Hermes and Dann (operator 2026-10-23), never a slice target. Retired TUIs whose accounts aiuse still reports or
+# whose providers Paseo still lists (slim-down E9, 2026-11-06; grok 2026-11-07): no curated row drives them, so
+# discovery must not surface them as unprofiled, dispatchable services. grok-bot is the Cursor-billed Chief of
+# Staff's pool, never a slice target. Names the dispatch gate holds for approval ([dispatch].operator_gated) are
+# never discovered either.
+never_route = ["hermes", "clinepass", "antigravity", "zai", "alibaba", "devin", "copilot", "pi", "crush", "kiro",
+               "cline", "agy", "qwen", "goose", "zcode", "muse", "aider", "venicecode", "grok", "grok-bot"]
+# Discovery names the provider or TUI; aiuse names the account behind it. An alias folds a provider or fork name onto
+# the curated service that already covers it, so it never becomes a second entry (Paseo's `opencode` provider is the
+# Go pool). The retired TUIs have no alias: they are `never_route` above.
+aliases = { claude-agent-teams = "claude", openclaude = "claude", opencode = "opencode-go", kimi = "opencode-go" }
 
 # Calibrate report thresholds (route_agent.py calibrate; monthly AI re-rank).
 # Operator /steps 1.5, 2026-10-18: outcome field + AI re-ranking, not human.
@@ -84,30 +103,11 @@ suggest_worse_delta = 5
 suggest_better_above = 15.0
 suggest_better_delta = 3
 
-[discovery]
-# Never a routable service, whatever aiuse or acp-run lists (operator 2026-10-15):
-# hermes is the operator's own assistant. omp was gated behind a per-run operator approval
-# 2026-10-15..19; the gate is lifted (operator 2026-10-19, see the omp [[service]] below),
-# so omp is a curated service now and discovery never needs to guess its profile.
-# clinepass: reserved as the lifeline/substrate of BOTH Hermes and Dann (operator 2026-10-23) — never a slice target.
-# Retired TUIs whose accounts aiuse still reports (slim-down E9, 2026-11-06): no acp-run agent drives them any
-# more (Google's plan is reached through Paseo's antigravity provider, Copilot through Paseo's Copilot provider), so
-# discovery must not surface the provider as an unprofiled, dispatchable service.
-never_route = ["hermes", "clinepass", "antigravity", "zai", "alibaba", "devin", "copilot", "pi", "crush", "kiro",
-               "cline", "agy", "qwen", "goose", "zcode", "muse", "aider", "venicecode"]
-operator_gated = []
-# Discovery names the TUI; aiuse names the account behind it. An alias folds a TUI or fork name onto the curated
-# service that already covers it, so it never becomes a second entry. The retired TUIs have no alias: they are
-# `never_route` above.
-aliases = { claude-agent-teams = "claude", openclaude = "claude", opencode = "opencode-go", kimi = "opencode-go" }
-
 [dispatch]
-# Never dispatched without the operator's specific, explicit approval for that run (operator 2026-10-15);
-# the same gate is in acp-run.
+# Never dispatched without the operator's specific, explicit approval for that run (operator 2026-10-15).
 # hermes (operator 2026-10-15: "hermes should never be used" as a delegation target) needs
-# ACP_OPERATOR_APPROVED=<agent>; acp-run applies the same gate. omp left this list on
-# 2026-10-19 (its Claude API credits are a normal tier).
-# Distinct from [discovery].operator_gated (dispatch also gates hermes).
+# ACP_OPERATOR_APPROVED=<agent>. omp left this list on 2026-10-19 (its Claude API credits are a
+# normal tier). route_agent never discovers a name listed here.
 operator_gated = ["hermes"]
 # Fable at xhigh/max should almost never run (operator 2026-10-18): the same approval gate, keyed
 # ACP_OPERATOR_APPROVED=fable-xhigh. Fable at high is the frontier route_agent.py suggests.
@@ -119,12 +119,7 @@ frontier_models = ["gpt-6-astra", "fable"]
 # purpose: the in-flight quota reservation replaced `codex = 1` (operator 2026-10-18).
 # ACP_DISPATCH_INFLIGHT=name=N still overrides per run (service or agent name).
 inflight_cap = {}
-# A quota reset further out than this many hours is not waited for (2026-10-18): no
-# launchd auto-resume sits around for days (a Google weekly cap reset ~148 h out; codex's
-# weekly ~5 days). finalize records a skipped auto-resume and `check` points at a
-# reroute instead. aiuse's 30-min back-off guess is never subject to this limit.
-auto_resume_max_wait_hours = 6
-# Flags a dispatch line needs for acp-run to accept the model at all (none since crush retired, 2026-11-06).
+# Flags a dispatch line needs for the agent to accept the model at all (none since crush retired, 2026-11-06).
 extra = {}
 
 # When there is no measured history, floor the brief-size default (operator 2026-10-18:
@@ -173,14 +168,6 @@ effort = "high"
 pipeline_model = "sonnet"
 pipeline_effort = "medium"
 
-[escalation]
-# Operator 2026-10-18: cheap first; a failed slice climbs one rung, never straight to frontier.
-ladder = ["mechanical", "bulk", "code", "judgment", "frontier"]
-
-# Kinds off the ladder land where the operator says, not where an index would put them.
-[escalation.next]
-research = "judgment"
-
 [substrate]
 # Pools `route_agent.py substrate` may name although aiuse's [disabled_services] switches them
 # off (aiuse does not collect a disabled pool, so it reads as unmeasured). clinepass only: the
@@ -215,7 +202,7 @@ access = "cli-only"
 models = { judgment = "opus --effort high", frontier = "fable --effort high", code = "sonnet --effort high" }
 
 # The Claude Max plan's monthly API credits (an expiring dollar grant; aiuse labels the pool
-# "omp credits", provider `omp`), reached through the omp TUI (`acp-run omp`, `omp acp`) or
+# "omp credits", provider `omp`), reached through Paseo's omp provider (`acp-dispatch omp`) or
 # any ANTHROPIC_API_KEY path. Operator 2026-10-19 lifted the 2026-10-15 per-run gate: a normal
 # tier, used with discernment. First for `api-only` work (rank 1),
 # otherwise `code` and `bulk` slices so the grant is fully spent before it expires; never left
@@ -225,7 +212,7 @@ models = { judgment = "opus --effort high", frontier = "fable --effort high", co
 # over the grant period (a pool far from exhausted late in the month), see route_agent.py.
 [[service]]
 name = "omp"
-cli = "omp (Claude API credits: acp-run omp --model anthropic/claude-sonnet-5-5)"
+cli = "omp (Claude API credits: acp-dispatch omp --model anthropic/claude-sonnet-5-5)"
 good_at = { api-only = 1, judgment = 2, code = 13, bulk = 35 }
 billing = "credits"
 # Adversary rounds and other judgment slices (operator 2026-10-23): Opus 5.5 at high on the API credits
@@ -269,7 +256,7 @@ access = "cli-only"
 # preferred, on gpt-6.1-sol at high). astra stays frontier-only (`[dispatch].frontier_models`),
 # and no research/github row: conservative.
 # Models: code on gpt-6.1-sol, the "latest workhorse model for coding and everyday work"
-# (acp-run codex --info, 2026-10-25), at medium; bulk and mechanical on gpt-6-luna, "fast and
+# (the codex model list, 2026-10-25), at medium; bulk and mechanical on gpt-6-luna, "fast and
 # affordable ... for easier tasks", at low. No cheaper tier is adequate for code (luna is for
 # easier tasks) and nothing here measures the older gpt-6-sol as cheaper.
 # 2026-10-18's astra-wave incident: its 5-hour window holds about one hard slice. acp-dispatch
@@ -306,9 +293,9 @@ agent = "opencode"
 models = { bulk = "opencode-go/minimax-m3", mechanical = "opencode-go/gpt-6-luna --effort low" }
 
 # GrokBot (the cloud Chief of Staff) runs on its own separate Cursor pool since
-# 2026-10-18 (operator, after the $60 Cursor plan), not on the grok TUI's SuperGrok pool.
-# aiuse reports it as the separate provider `grok-bot` ("Grok Bot Weekly", no cli_binary):
-# it has no [[service]] here and is never a routing target. The two Cursor services below
+# 2026-10-18 (operator, after the $60 Cursor plan). aiuse reports it as the separate provider
+# `grok-bot` ("Grok Bot Weekly", no cli_binary): it has no [[service]] here and is never a
+# routing target ([routing].never_route). The two Cursor services below
 # are Cursor Auto and third-party routing, unchanged; do not route into the GrokBot pool.
 # Cursor reports two model sublimits of one monthly total: the Auto pool
 # (Cursor's own models) and the third-party pool. They drain at very
@@ -335,7 +322,8 @@ note = "Cursor third-party pool"
 agent = "cursor"
 models = { code = "claude-sonnet-5-5 --effort medium", mechanical = "claude-haiku-5-5 --effort low" }
 
-# Cursor Cloud Agents (bin/cursor-cloud, `acp-dispatch cursor-cloud`, 2026-10-20): the slice
+# Cursor Cloud Agents (bin/cursor-cloud, 2026-10-20; `cursor-cloud launch` directly since the acp-dispatch
+# Paseo shim, 2026-11-07, which `route_agent.py` prints as the dispatch line): the slice
 # runs in Cursor's cloud and pushes a cursor/... branch; the lead reviews and opens the PR
 # (never autoCreatePR). Billed at API price against the same Cursor pool as the third-party
 # row (aiuse reports one `cursor` provider; shares_pool copies that reading). Ranked behind
@@ -350,17 +338,6 @@ note = "Cursor Cloud Agent: leaves the Mac, pushes a branch, lead opens the PR; 
 shares_pool = "cursor"
 max_parallel = 2
 models = { code = "claude-sonnet-5-5", bulk = "claude-haiku-5-5", mechanical = "claude-haiku-5-5" }
-
-# Ordinary subscription pool (SuperGrok). It was a reserve 2026-10-15..18 because GrokBot
-# drew on it; GrokBot moved to its own Cursor pool 2026-10-18 (operator), so the floor and
-# the one-slice cap are gone. Ranked behind the burn-first pools (cursor-auto).
-[[service]]
-name = "grok"
-cli = "grok"
-good_at = { realtime-web = 1, research = 25, bulk = 30 }
-billing = "subscription"
-note = "SuperGrok subscription; realtime X/web angle first, research and bulk behind the burn-first pools"
-models = { realtime-web = "grok-4.7 --effort high", research = "grok-4.7 --effort high", bulk = "grok-4.7-build-fast --effort low" }
 
 [[service]]
 name = "clinepass"
