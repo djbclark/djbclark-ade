@@ -1,0 +1,22 @@
+# Brief E9c: the grok CLI retired (grok-bot stays)
+
+Ruling of 2026-11-07 (`docs/slim/ledger-rulings.md`, "grok CLI retired, grok-bot kept"): the SuperGrok subscription is cancelled; the `grok` TUI retires; **grok-bot (peer-link, Cursor-billed) stays**, and so does `skill-everywhere`'s grokbot target (the `ade-` prefixed copy). Writer: one Claude agent in its own worktree of djbclark-ade on branch `claude/determined-maxwell-uvddaz`, started after the Wave 3b and E6 merges (`git merge --no-edit claude/determined-maxwell-uvddaz` first). Read first: `docs/slim/reports/wave2-E9.md` (how the earlier retirements were done), `docs/slim/reports/wave3b.md` section D (the hand/btww trims), AGENTS.md orders 2 and 9.
+
+## 1. DELETE / trim
+
+- `config/routing.toml`: the `[[service]] name = "grok"` block and the grok comments (:13, :309); `grok` joins `never_route` in `[discovery]` if that table still exists after E7 (else say so).
+- `bin/route_agent.py`: the `"grok": ("grok", None)` map row (:2169) and the docstring/comment mentions (:77, :202) reworded as history; `tests/test_route_agent*.py` rows that expect grok.
+- `bin/skill-everywhere`: the `grok|~/.grok/skills` target (:65); keep the grokbot target; `tests/test_skill_everywhere_all.py` and `docs/skill-everywhere.md` follow.
+- `bin/ade-backup-stores`: the `grok` and `grok-db` stores (:219-220); the `.grok/auth.json` exclusion (:118) stays as the named exception; `tests/test_ade_backup_stores.py` follows.
+- `tools/acp-run/acp-run` (SHIM: dead-adapter trim only): the `grok` adapter row (:303), `AFTER_KILL_DROP`, `STRIP_USER_CONFIG`/`STRIP_ANY_PERM` grok entries, `grok_strip_home` and the grok deny machinery (:827 onward), the docstring paragraphs (:50-65, :75, :96); DELETE `tests/test_acp_run_grok_deny.py`; trim grok cases from `tests/test_acp_run_effort_context.py`, `test_acp_run_read_only.py`, `test_acp_run_strip.py`, `test_acp_run_strip_perm_all.py`; `tools/acp-run/README.md`.
+- `bin/acp-dispatch` (the E6 shim by then): the `grok` entry of the provider map; `bin/agent_guard.py` and `docs/agent-guard-contract.md` grok rows; `tests/test_acp_dispatch_identity.py`, `test_acp_dispatch_pool_map.py` if they still exist.
+- `skills/hand`, `skills/btww`, `docs/hand-alias.md`: the grok rows; `skills/model-routing/SKILL.md`, `docs/model-routing.md`: the grok rows (E7 may have rewritten these: edit whatever is there); `skills/handoff/SKILL.md`, `skills/steps/SKILL.md`, `skills/research/SKILL.md`, `skills/dialogue` (its Grok seat is **grok-bot or Cursor's grok model**, not the CLI: reword, do not delete the Grok phase prompts), `skills/fallback-chains` model-chain references, `agents/hermes/config.yaml.tmpl` grok entry (template: merger's, report it), `bin/load-watch` and `bin/claude-quota-guard`/`bin/ade-update` mentions (reference-only), `docs/coding-factory.md`, `docs/software-factory-design.md`.
+- `bin/paseo-set-model.mjs` names grok: E4 decided that file; reword only if it still exists.
+
+## 2. Method, tests, report
+
+Zero references to the grok CLI afterwards (`grep -rn "grok" | grep -v "grok-bot\|grokbot\|Grok Bot\|grok-4\|grok model"`: xAI model names used through Cursor stay) outside the usual exemptions (AGENTS.md, README.md, docs/queue.md, docs/history/, docs/slim/, docs/checkins/, docs/handoffs/, changelog.d/, graft/, docs/tui-lessons-learned.md, docs/software-factory-reviews/); README rows, `docs/skills.md` rows and the templates are the merger's. Fragment line in `changelog.d/claude-determined-maxwell-uvddaz.md` under `### Removed`, ending `(#0)`. Targeted: `bin/pytest -q tests/test_route_agent.py tests/test_route_agent_disabled.py tests/test_skill_everywhere_all.py tests/test_ade_backup_stores.py tests/test_acp_run_*.py tests/test_acp_dispatch.py tests/test_agent_guard*.py`, then the full suite in a detached worktree of your branch against `docs/slim/baseline.md`. Report `docs/slim/reports/wave4-E9c.md`: A. deleted/trimmed (file:line), B. reference edits, C. merger's lines, D. operator steps (archive `~/.grok` after a backup, remove `~/.grok/skills` links, `npm`/`brew` uninstall of the grok CLI as installed, nothing for grok-bot), E. tests with the baseline diff, F. lost on purpose (the grok CLI as a realtime-web and research pool: Cursor's grok models and grok-bot remain).
+
+## 3. Do not
+
+Touch grok-bot, peer-link pointers, the grokbot skill-everywhere target; delete the dialogue Grok phase prompts; touch AGENTS.md, README.md, docs/skills.md, CHANGELOG.md, docs/queue.md, the templates; touch the Mac.

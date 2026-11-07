@@ -71,6 +71,11 @@ J2 pool audit (lead's reading, ruling 10 / R2-12..15): Paseo providers that each
 
 Waivers given by the operator 2026-11-06 ("B waive both"): the sleeping pane w1:p1 and the four dirty worktrees. **C7 PASSED.** E2 may merge after E1; E3/E4/E6 are clear of this gate.
 
+## Rulings of 2026-11-07 (operator, in chat)
+
+- **omp, not pi**: pi retired, omp kept; the pi subagent extension is not ported (omp's native `task` tool and agent definitions cover it). Ruling in `docs/slim/ledger-rulings.md`.
+- **grok CLI retired, grok-bot kept** (SuperGrok cancelled in favour of Cursor; grok-bot is Cursor-billed and stays through peer-link). New slice E9c (`docs/slim/briefs/wave4-E9c-grok.md`) after the Wave 3b and E6 merges; the E6 and E7 briefs amended to drop grok. Operator batch gains: back up and archive `~/.grok`, remove the grok skill links, uninstall the grok CLI.
+
 ## Wave 3 closed (2026-11-07 ~01:30Z)
 
 - E10 merged at 709f3f4 (worktree branch `worktree-agent-af8ef35d11b70fa1d`, head 31b1e9e, APPROVE after one repair round: the antigravity IDE and ACP backup stores restored (antigravity is a kept provider; only the agy CLI store goes), `skill-everywhere`'s usage print covers its whole block again, the two `.skillopt-sleep*` ignore lines stay until the operator removes the harvested directories). Conflicts: the context-budget plist (deleted by E5) and `bin/context-budget-check`'s docstring (E5's version kept). Merger's lines (README wrappers sentence, two rows, two docs-list items renumbered; two `docs/skills.md` rows and the wrapper sentence; two AGENTS.md doc-table rows; the template's `skillopt-sleep` override and three `prior_art_nudge` hook objects) and the fragment lines in the next commit. The copilot store is dropped (no copilot plan in the J2 audit).
