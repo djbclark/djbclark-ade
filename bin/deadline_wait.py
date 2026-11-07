@@ -1,6 +1,7 @@
 """deadline_wait: how a long WAITER registers its own deadline (docs/deadline.md, "Waiters register themselves").
 
-Used by `bin/pr-wait` and `bin/load-watch admit --wait`; `bin/acp-dispatch-wait` does the same in bash. A waiter holds no work (it only
+Used by `bin/load-watch admit --wait` (the PR waiter that also used it was removed 2026-11-06, slim-down E8);
+`bin/acp-dispatch-wait` does the same in bash. A waiter holds no work (it only
 polls), so the action on expiry is `kill` of its own process group: nothing is lost, and the caller just sees exit 124.
 
 Shape. `deadline start --pid` refuses the registrar's own parent (a top-level session must never register itself for a kill), so a process cannot
@@ -12,12 +13,12 @@ $DEADLINE_WAIT_MARK on its way in: if the supervised run never reached it (the d
 supervisor warns once on stderr and waits in-process, unregistered. A deadline problem never costs the wait.
 
 Lifecycle. `done` on every CATCHABLE exit (normal end, failure, SIGTERM/INT/HUP to the supervisor). A SIGKILLed supervisor cannot stop its child: the
-supervised copy checks the supervisor's pid on every poll/beat (ENV_SUP) and ends itself (exit 143), so an uncatchable kill leaves no orphaned wait
-(and no stale pr-wait duplicate-guard lock). The supervised copy removes ENV_NAME/ENV_MARK/ENV_SUP from its environment on entry: its descendants
+supervised copy checks the supervisor's pid on every poll/beat (ENV_SUP) and ends itself (exit 143), so an uncatchable kill leaves no orphaned wait.
+The supervised copy removes ENV_NAME/ENV_MARK/ENV_SUP from its environment on entry: its descendants
 can neither beat this record nor mistake themselves for the supervised copy. Names carry the supervisor's pid, so two waiters for one PR/record
 (another repo, a new head, a re-arm) never refuse each other's registration.
 
-Budget. The class budget of docs/paseo-only-rearchitecture.md B9 (pr-wait 60 min, admission wait at most 30 min) or the waiter's own timeout,
+Budget. The class budget of docs/paseo-only-rearchitecture.md B9 (admission wait at most 30 min) or the waiter's own timeout,
 whichever is shorter, plus MARGIN_S: the waiter's own timeout path (it writes its result files) must finish before the enforcer can fire.
 """
 from __future__ import annotations

@@ -1,6 +1,7 @@
-"""The long waiters register their own deadline (docs/deadline.md, "Waiters register themselves"): `bin/pr-wait`, `bin/load-watch admit --wait`
-and `bin/acp-dispatch-wait`. Every wait that a test must interrupt is LONG (120 s real time, the sweep's clock is faked), so a slow runner can never let it end by itself first (PR 257 adversary A1). Hermetic: every run gets its own DEADLINE_STATE_DIR (never ~/.local/state/deadlines), the real `bin/deadline`,
-stub relay / hermes-ping, a fake `gh` that always fails (pr-wait just keeps polling until its own timeout), a fake load (LW_FAKE_LOAD1) and a stub
+"""The long waiters register their own deadline (docs/deadline.md, "Waiters register themselves"): `bin/load-watch admit --wait`
+(the Python supervisor, bin/deadline_wait.py) and `bin/acp-dispatch-wait` (bash). The PR waiter that shared the Python supervisor was removed by
+slim-down E8 (2026-11-06); its cases here now run through `admit`, which exercises the same code. Every wait that a test must interrupt is LONG (120 s real time, the sweep's clock is faked), so a slow runner can never let it end by itself first (PR 257 adversary A1). Hermetic: every run gets its own DEADLINE_STATE_DIR (never ~/.local/state/deadlines), the real `bin/deadline`,
+stub relay / hermes-ping, a fake load (LW_FAKE_LOAD1) and a stub
 acp-dispatch. The expiry test advances the clock of an explicit `deadline sweep` (DEADLINE_NOW); nothing touches the installed launchd sweep."""
 from __future__ import annotations
 
@@ -17,12 +18,9 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 DEADLINE = ROOT / "bin" / "deadline"
 LW = ROOT / "bin" / "load-watch"
-PR_WAIT = ROOT / "bin" / "pr-wait"
 DWAIT = ROOT / "bin" / "acp-dispatch-wait"
 OWNER = "agent-test-1"
-PR = 4242
-KINDS = ["admit", "pr-wait", "dispatch"]
-SLUG = "djbclark__djbclark-ade"   # pr-wait's default repo, as it appears in the deadline name
+KINDS = ["admit", "dispatch"]
 QUICK, SEEN, LONG = 3, 8, 120     # a wait that ends by itself and is never inspected live / one a test inspects while it runs / one that must outlive the test
 # Wall time matters: pytest-linux's 30 min cap was crossed at PR 257 head 4aaee173 (the suite was at 29:53 before this file grew), so a natural end is 3 s.
 DROP = ("DEADLINE_NAME", "DEADLINE_WAIT_NAME", "DEADLINE_WAIT_MARK", "DEADLINE_BIN", "PASEO_AGENT_ID")
@@ -47,7 +45,6 @@ class World:
         self.procs: list[subprocess.Popen] = []
         envdump = 'env | grep "^DEADLINE_" | sort > "$STUB_DIR/$STUB_NAME-env"\n'
         for name, body in {"ping": "#!/bin/sh\nexit 0\n", "relay": "#!/bin/sh\ncat > /dev/null\nexit 0\n",
-                           "gh": "#!/bin/sh\nSTUB_NAME=gh\n" + envdump + "exit 1\n",
                            "broken-deadline": "#!/bin/sh\necho boom >&2\nexit 1\n",
                            "dispatch": ('#!/bin/sh\ncase "$1" in\n  wait) STUB_NAME=dispatch\n' + envdump +
                                         '    if [ -e "$STUB_DIR/ok" ]; then exit 0; fi; if [ -e "$STUB_DIR/timeout" ]; then exit 124; fi; exit 75 ;;\n'
@@ -62,21 +59,18 @@ class World:
             DEADLINE_INLINE_WORKER="1", DEADLINE_SETTLE_S="0.3", DEADLINE_RUN_POLL="0.1", DEADLINE_WAIT_BEAT_EVERY="0.2",
             PASEO_AGENT_ID=OWNER, PATH=f"{tmp}{os.pathsep}{os.environ['PATH']}", TMPDIR=str(self.tmpd),
             LW_STATE_DIR=str(tmp / "lw"), LW_REGISTRY=str(tmp / "ci-only.tsv"), LW_ADMIT_POLL_S="1", LW_ADMIT_STAGGER_S="0,0",
-            LW_BOOST_CALM_S="0", LW_RESERVE_S="0", LW_FAKE_LOAD1="1000", PR_WAIT_STATE_DIR=str(tmp / "prw"),
+            LW_BOOST_CALM_S="0", LW_RESERVE_S="0", LW_FAKE_LOAD1="1000",
             ACP_DISPATCH_BIN=str(tmp / "dispatch"), ACP_DISPATCH_WAIT_TICK="1", ACP_DISPATCH_WAIT_PASS="1", STUB_DIR=str(tmp))
 
-    def start(self, kind: str, *flags: str, secs: int = QUICK, head: str = "a" * 40, **env) -> tuple[subprocess.Popen, str]:
-        """(process, the deadline name it must register). admit and pr-wait end by their own `secs` timeout, the dispatch waiter when the
+    def start(self, kind: str, *flags: str, secs: int = QUICK, **env) -> tuple[subprocess.Popen, str]:
+        """(process, the deadline name it must register). admit ends by its own `secs` timeout, the dispatch waiter when the
         test creates STUB_DIR/ok (or `timeout`). `flags` are extra tool options."""
         argv = {"admit": [sys.executable, str(LW), "admit", "--wait", str(secs), "--json", *flags],
-                "pr-wait": [sys.executable, "-I", str(PR_WAIT), str(PR), "--head", head, "--timeout", str(secs), "--interval", "0.3",
-                            "--out", str(self.tmp / "out" / head[:6]), *flags],
                 "dispatch": [str(DWAIT), *flags, str(self.tmp / "record.json"), str(self.tmp / "marker")]}[kind]
         p = subprocess.Popen(argv, env={**self.env, **{k: str(v) for k, v in env.items()}}, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                              text=True, start_new_session=True)
         self.procs.append(p)
-        return p, {"admit": f"admit-wait-{p.pid}", "pr-wait": f"pr-wait-{SLUG}-{PR}-{p.pid}",
-                   "dispatch": f"dispatch-wait-record-{p.pid}"}[kind]
+        return p, {"admit": f"admit-wait-{p.pid}", "dispatch": f"dispatch-wait-record-{p.pid}"}[kind]
 
     def stub(self, name: str) -> None:
         (self.tmp / name).write_text("")
@@ -124,7 +118,7 @@ def world(tmp_path):
 
 
 def natural_rc(kind: str) -> int:
-    return {"admit": 75, "pr-wait": 6, "dispatch": 0}[kind]
+    return {"admit": 75, "dispatch": 0}[kind]
 
 
 def end_naturally(w: World, kind: str, p: subprocess.Popen) -> tuple[int, str, str]:
@@ -184,8 +178,8 @@ def test_expiry_kills_the_waiters_own_group_with_its_own_exit_code(world, kind):
             break
         time.sleep(0.25)
     out, err = p.communicate(timeout=90)
-    # admit answers 75 (its callers fail OPEN on an unknown exit); acp-dispatch-wait 76 (NOT 124, the slice timeout); pr-wait 124
-    assert p.returncode == {"admit": 75, "pr-wait": 124, "dispatch": 76}[kind], (out, err)
+    # admit answers 75 (its callers fail OPEN on an unknown exit); acp-dispatch-wait 76 (NOT 124, the slice timeout)
+    assert p.returncode == {"admit": 75, "dispatch": 76}[kind], (out, err)
     assert world.record(name)["state"] == "expired", "the DEADLINE stopped it, not the wait's own end"
     if kind == "admit":
         assert "deadline expired" in err
@@ -238,9 +232,9 @@ def test_a_failing_deadline_tool_only_warns_and_the_wait_goes_on(world, kind):
 
 
 def test_waiters_for_the_same_pr_or_record_never_refuse_each_other(world):
-    """Names carry the supervisor's pid (PR 257 adversary A6): another head of one PR, a re-arm of one record, or two repos' PR 4242 all register."""
-    p1, n1 = world.start("pr-wait", secs=LONG, head="a" * 40)
-    p2, n2 = world.start("pr-wait", secs=LONG, head="b" * 40)
+    """Names carry the supervisor's pid (PR 257 adversary A6): two admission waits, or a re-arm of one record, all register."""
+    p1, n1 = world.start("admit", secs=LONG)
+    p2, n2 = world.start("admit", secs=LONG)
     d1, m1 = world.start("dispatch", secs=LONG)
     d2, m2 = world.start("dispatch", secs=LONG)
     for n in (n1, n2, m1, m2):
@@ -261,8 +255,6 @@ def test_a_killed_supervisor_leaves_no_orphaned_wait(world, kind):
     wait_until(lambda: group_gone(rec["pgid"]), timeout=40)
     final = wait_until(lambda: world.record(name) if world.record(name)["state"] == "done" else None, timeout=20)
     assert final["rc"] == 143
-    if kind == "pr-wait":
-        assert not list((world.tmp / "prw").glob("lock-*")), "no stale duplicate-guard lock for a re-arm to trip over"
 
 
 def test_the_bash_supervisor_runs_deadline_run_in_its_own_group(world):
@@ -278,12 +270,12 @@ def test_the_bash_supervisor_runs_deadline_run_in_its_own_group(world):
     wait_until(lambda: group_gone(rec["pgid"]), timeout=15)
 
 
-@pytest.mark.parametrize("kind", ["pr-wait", "dispatch"])
+@pytest.mark.parametrize("kind", ["dispatch"])
 def test_what_a_waiter_starts_inherits_no_registration_variables(world, kind):
     """Only DEADLINE_NAME (so ITS waiters skip registering); never the pair that would let it beat this record (PR 257 adversary A5)."""
     p, name = world.start(kind, secs=SEEN)
     wait_until(lambda: world.live(name))
-    dump = world.tmp / {"pr-wait": "gh-env", "dispatch": "dispatch-env"}[kind]
+    dump = world.tmp / {"dispatch": "dispatch-env"}[kind]
     wait_until(dump.exists, timeout=30)
     lines = wait_until(lambda: dump.read_text().splitlines(), timeout=10)
     assert f"DEADLINE_NAME={name}" in lines
@@ -299,7 +291,7 @@ def test_no_owner_when_the_caller_has_no_paseo_agent_id(world):
     p.communicate(timeout=90)
 
 
-@pytest.mark.parametrize("kind", ["pr-wait", "dispatch"])
+@pytest.mark.parametrize("kind", ["admit", "dispatch"])
 def test_a_name_already_live_does_not_cost_the_wait(world, kind):
     """The real tool refuses a registration whose name is live (exit 2, the command never runs): the waiter warns once and waits unregistered.
     Names carry the pid, so the clash is made by a `deadline` wrapper that registers the name it is asked to run under first."""

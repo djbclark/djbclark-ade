@@ -143,7 +143,7 @@ class TestAutorenameAndAdeClaimsShareIt(Base):
             self.assertEqual(mod.caller_ident(os.environ), LIVE)
 
     def test_a_successors_orphaned_job_keeps_the_successors_registry_id_while_its_claude_lives(self) -> None:
-        """local-review r2: the detached job's env carries the predecessor's stale id; the live Claude CLAUDE_PID names still proves the real one,
+        """PR 223's local Codex review, round 2: the detached job's env carries the predecessor's stale id; the live Claude CLAUDE_PID names still proves the real one,
         so `new` (registry id) and the job's guard agree. Once that Claude is gone, the env var stands."""
         mod = self.ade_claims()
         self.register()
