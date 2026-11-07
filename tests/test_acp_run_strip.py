@@ -119,8 +119,8 @@ PROBE = textwrap.dedent("""\
         target = Path(tempfile.mkdtemp())
         (target / "keep.txt").write_text("x")
         names = {"dead_old": "acp-run-opencode-deny-999999-abcd1234",
-                 "nopid_old": "acp-run-grok-deny-odedcp3y",
-                 "dead_fresh": "acp-run-grok-deny-999998-abcd1234",
+                 "nopid_old": "acp-run-hermes-deny-odedcp3y",
+                 "dead_fresh": "acp-run-hermes-deny-999998-abcd1234",
                  "live_old": f"acp-run-opencode-deny-{os.getppid()}-abcd1234",
                  "other_old": "something-else-old"}
         for n in names.values():
@@ -129,11 +129,11 @@ PROBE = textwrap.dedent("""\
         link = base / "acp-run-opencode-deny-999997-linkxxxx"
         link.symlink_to(target)
         planted = ["acp-run-x-deny-99999999999-a", "acp-run-opencode-deny-99999999999-abc",
-                   "acp-run-grok-deny-999995-abc\\n"]
+                   "acp-run-hermes-deny-999995-abc\\n"]
         for n in planted:
             (base / n).mkdir()
             os.utime(base / n, (old, old))
-        afile = base / "acp-run-grok-deny-999996-filexxxx"
+        afile = base / "acp-run-hermes-deny-999996-filexxxx"
         afile.write_text("x")
         for k, n in names.items():
             if k != "dead_fresh":
@@ -438,7 +438,7 @@ class TestStripUserConfig(unittest.TestCase):
     def test_planted_huge_pid_names_never_break_the_sweep(self):
         w = self.r["sweep"]
         for n in ("acp-run-x-deny-99999999999-a", "acp-run-opencode-deny-99999999999-abc",
-                  "acp-run-grok-deny-999995-abc\n"):
+                  "acp-run-hermes-deny-999995-abc\n"):
             self.assertIn(n, w["left"], "not matched (bounded pid, fullmatch), so never swept")
         self.assertTrue(self.r["robust"]["pid_big"], "an unbounded pid counts as alive")
 
@@ -459,7 +459,7 @@ class TestStripUserConfig(unittest.TestCase):
         for k in ("dead_fresh", "live_old", "other_old"):
             self.assertIn(n[k], w["left"], k)
         self.assertIn("acp-run-opencode-deny-999997-linkxxxx", w["left"], "a symlink is never swept")
-        self.assertIn("acp-run-grok-deny-999996-filexxxx", w["left"], "a file is never swept")
+        self.assertIn("acp-run-hermes-deny-999996-filexxxx", w["left"], "a file is never swept")
         self.assertTrue(w["target_intact"])
 
     def test_jsonc_comments_outside_strings_only(self):

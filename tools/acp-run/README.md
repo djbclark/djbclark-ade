@@ -4,8 +4,8 @@ Run one prompt through a coding agent over the
 [Agent Client Protocol](https://agentclientprotocol.com) (ACP), headless, and get
 the agent's final message on stdout. It is how one agent on this machine hands a
 self-contained task to another vendor's agent: Claude Code, Codex,
-opencode, Cursor, Hermes, Grok and OMP. (Copilot, Qwen Code, Devin, Cline,
-Antigravity (`agy`), zcode, Pi, Crush, goose and kiro had adapters until the 2026-11-06 slim-down retired them; the
+opencode, Cursor, Hermes and OMP. (Grok, Copilot, Qwen Code, Devin, Cline,
+Antigravity (`agy`), zcode, Pi, Crush, goose and kiro had adapters until the 2026-11-06/07 slim-down retired them; the
 lessons are in `docs/tui-lessons-learned.md`.) Vendor, model, effort and
 context for each agent are in the 2026-10-15 section below.
 
@@ -55,8 +55,6 @@ acp-run codex -C ~/src/repo --interactive --inbox /tmp/codex-in   # a session yo
      bypass (`_meta.claudeCode.options`), then mode `default`;
      opencode gets `OPENCODE_CONFIG_CONTENT={"permission":"deny"}`. (zcode, agy and crush had their own
      deny machinery here until they retired, 2026-11-06.)
-     Grok under `--perm deny` drops `--always-approve` and runs on a per-run
-     `GROK_HOME` (Per-agent choices, item 6).
      A tripwire backs this up: any non-think tool call that starts or completes
      without a permission request cancels the turn and exits 77. The `claude -p`
      fallback runs with `--tools ""`, `--strict-mcp-config`, `--disallowedTools '*'`
@@ -92,7 +90,7 @@ acp-run codex -C ~/src/repo --interactive --inbox /tmp/codex-in   # a session yo
      stderr, naming the file. `--perm all` and `--interactive` runs are
      unchanged unless `--strip-user-config` is given.
      `--strip-user-config` (env `ACP_RUN_STRIP_USER_CONFIG=1`, 2026-10-13) applies
-     the same strip under any non-interactive `--perm` for opencode and grok. It is a startup-reliability switch, not a permission control: the
+     the same strip under any non-interactive `--perm` for opencode. It is a startup-reliability switch, not a permission control: the
      SkillOpt-Sleep night runs `--perm all --strip-user-config` (operator,
      2026-10-13). Outside deny nothing permission-related is added: opencode gets
      no `OPENCODE_CONFIG_CONTENT`.
@@ -109,8 +107,7 @@ acp-run codex -C ~/src/repo --interactive --inbox /tmp/codex-in   # a session yo
      starts (LSP servers, formatters, crash dumps). What it buys is that nothing
      secret is left on disk after a SIGKILL. The temp dir is built after the
      signal handlers are in place and removed before the cancel/kill waits
-     (opencode) or right after the agent has been stopped (grok, which can
-     still write a rotated token under its home while it shuts down), so
+     (opencode), so
      SIGTERM and early errors leave nothing behind. It is not removed right after `session/new`: opencode
      watches its config dir and reloads on change. Dirs are named `acp-run-<agent>-deny-<pid>-*`, and every deny run
      first sweeps this user's such dirs under the temp base that are older than
@@ -238,7 +235,7 @@ Landed 2026-10-15 (6528ccf, 77bd2bf, 0221561, faead67, ada7620). Value lists are
 3. A LEVEL or SIZE the agent or model cannot take exits 2 before any prompt and names the valid values.
 4. Read-back, stderr before the summary line: `acp-run: applied: model=... effort=... ctx=...`. Same fields on the JSONL `result` record (`applied`), a separate `applied` record, and `--json`. Unreadable values are marked `(unverified)` (`effort=high(unverified)`). A requested value the agent reports differently is failure class `config`, exit 1 (option response before the prompt, or `usage_update.size` after the turn). Under `--interactive` the line is still printed; a post-turn window mismatch does not change the exit code.
 5. `--meta JSON` deep-merges into `session/new` `_meta` over `systemPrompt` and the deny meta. `--agent-arg ARG` (repeatable) appends to the launch command. `--agent-env K=V` (repeatable; one argument may be `K=V,K2=V2`, split only before another `NAME=`) appends to the child environment. Per host, `~/.config/acp-run.env` or `$ACP_RUN_ENV_FILE`: `ACP_RUN_ARGS_<AGENT>` (shell-split), `ACP_RUN_ENV_<AGENT>="K=V,K=V"`.
-6. `HERDR_PANE_ID`, `HERDR_ENV`, `HERDR_WORKSPACE_ID` and `HERDR_TAB_ID` (the last two since 2026-10-25, when the Codex tool environment began to pass the herdr ids on), `PASEO_AGENT_ID`, `PASEO_AGENT_CWD` and `ORCA_TERMINAL_HANDLE` and `ADE_OPENCODE_SESSION_ID` and `ADE_OPENCODE_DIRECTORY` are removed on every run, and `ACP_RUN_AGENT=1` is set (2026-10-20: `bin/self-slash` refuses lifecycle actions when it sees the marker; a slice that kept `PASEO_AGENT_ID` could `/clear` or archive the caller's Paseo agent). (`ACP_RUN` itself is taken: it holds the acp-run path for `session-finder`.) Under `--perm deny`, grok starts without `--always-approve` on a per-run `GROK_HOME`: symlinks to `~/.grok` except `hooks/`, `skills/`, `plugins/`, `installed-plugins/` and `config.toml`. The copy drops `[[hooks.*]]`, `[plugins]`, `[mcp_servers.*]`, `ui.permission_mode`, `ui.yolo`, and ends with `[permission] ask = ["*"]` (deny > ask > allow). tomllib requires the copy to equal the original minus exactly those parts; otherwise grok keeps the user's home and the run says so. A token rewritten as a regular file in the temp home is copied back. `--strip-user-config` is the same strip without the permission table. Every other non-interactive grok run (`--perm all`, what `acp-dispatch` uses) also starts on a stripped `GROK_HOME` without the user's hooks, skills and plugins (2026-10-15), keeping MCP servers, the permission mode and auth (no `ask` rule); the `user_config` log record names the `home`. `ACP_RUN_GROK_USER_HOOKS=1` (or `--keep-user-config`) keeps `~/.grok`; `--interactive` always does.
+6. `HERDR_PANE_ID`, `HERDR_ENV`, `HERDR_WORKSPACE_ID` and `HERDR_TAB_ID` (the last two since 2026-10-25, when the Codex tool environment began to pass the herdr ids on), `PASEO_AGENT_ID`, `PASEO_AGENT_CWD` and `ORCA_TERMINAL_HANDLE` and `ADE_OPENCODE_SESSION_ID` and `ADE_OPENCODE_DIRECTORY` are removed on every run, and `ACP_RUN_AGENT=1` is set (2026-10-20: `bin/self-slash` refuses lifecycle actions when it sees the marker; a slice that kept `PASEO_AGENT_ID` could `/clear` or archive the caller's Paseo agent). (`ACP_RUN` itself is taken: it holds the acp-run path for `session-finder`.)
 7. acp-run's `--effort` and `--context` are first-class (`acp-run <agent> --info --model M --effort E --context C` checks them). acp-dispatch stopped passing them on 2026-11-06 (it launches through Paseo: `--effort` becomes `paseo run --thinking`).
 8. No `--fast`. Use `--set fast=on|off` (claude Opus only), `--set fast=true|false` (cursor), `--set fast-mode=on|off` (codex), or a model id (`grok-4.7-build-fast`, copilot `claude-opus-4.8-fast`). Thinking budget: `--agent-env MAX_THINKING_TOKENS=N` or `ACP_RUN_ENV_CLAUDE`. Not implemented (exit 2, or not a flag): hermes shadow home for effort/context, crush `/set_reasoning_effort`, opencode/qwen context caps (`OPENCODE_CONFIG_CONTENT` `limit.context` untested; a cap cannot raise a window), agy `--auth-method` (`AGY_ACP_DEFAULT_MODEL` via `ACP_RUN_ENV_AGY`), `ZCODE_ACP_QUOTA_AUTO_RESUME=0` (operator's choice). Claude `--context 1m` does not add `[1m]`.
 
@@ -328,18 +325,6 @@ naming `--model`, `--models`, `--smol`, `--slow`, `--plan`, `--prewalk-into`, `-
 the guard (2026-11-03). `--info` is exempt; `ACP_RUN_OMP_ANY_MODEL=1` overrides all of it.
 Needs an enabled Anthropic login in omp
 (`omp login`); with an expired one the run ends `No API key found for anthropic` (2026-10-19).
-
-
-
-### grok
-
-https://docs.x.ai/developers/grok-4-7 , https://docs.x.ai/developers/pricing — 1.0.52.
-
-`cli-chat-proxy.grok.com/v1` (grok.com, `XAI_API_KEY`, or `cached_token`). `[model_providers.X]` / `[model.Y]` in `~/.grok/config.toml`. `GROK_MODELS_BASE_URL`, `GROK_MODELS_LIST_URL`. Models: `grok-4.7` (default; server `grok-4.7-build`, fingerprint `fp_5719f1aec35dd73c`), `grok-4.7-build-fast` (same fingerprint, 2×, 1.5× on long context, not free), `grok-4.6`, `grok-4.5` (the `ocx-gpt-*` ids left with the opencodex proxy, 2026-10-19). No `--fast`.
-
-Effort `reasoning_effort`, also sent as `reasoningEffort` on the window's `session/set_model`. `low medium high` (default high) `xhigh` on 4.7, 4.7-build-fast, 4.6. 4.5 stops at `high`. Docs also list menu ids `none`, `minimal`.
-
-Context: `session/set_model` `_meta.contextWindow`. Must be in initialize `modelState.availableModels[]._meta.contextWindows`. Measured: four xAI ids 256000 (default) and 500000. `300k` on 4.7 exits 2 (`valid: 256k, 500k`). Config ids `context_window` / `context` / `contextWindow` return "Invalid params". Read-back: `_x.ai/session/info` `context.total`. Live `grok-4.7` low + 500k → `acp-run: applied: model=grok-4.7 effort=low ctx=500k`. TUI `/context-window`, `[model.X] context_window`, `context_windows=[256000,500000]`. Session-scoped; follows a model that lists it; smaller triggers auto-compact. Long-context price from a 200k prompt.
 
 
 
