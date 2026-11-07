@@ -4,14 +4,18 @@
   adversary_marker.py --body-file FILE --head SHA
       print the verdict JSON; exit 0 APPROVE for this head, 1 BLOCK / other head / missing,
       2 malformed or unreadable (fail closed)
-  adversary_marker.py --event FILE [--event-name NAME] [--repo OWNER/NAME] [--resolve | --prs LIST] [--api-answers FILE]
+  adversary_marker.py --event FILE [--event-name NAME] [--repo OWNER/NAME] [--resolve | --prs LIST [--at-head SHA]]
+                      [--api-answers FILE]
       what `.github/workflows/adversary-marker.yml` runs. `--resolve` (its first job) finds the PRs the event is
-      about and writes `prs=` and `key=` to $GITHUB_OUTPUT (the second job's concurrency group is keyed by them);
-      `--prs LIST` (its second job) reads each PR's body and head through the API, decides, re-reads the head,
-      body and last editor, and posts the `adversary-marker` commit status on that head: success only for a live
-      APPROVE naming it in a body last edited by a trusted user (the repository owner, or the PR's author when the
-      author is an OWNER, MEMBER or COLLABORATOR); MARKER_POST_AS=check-run posts a check run instead. `--api-answers` serves canned API
-      answers from a JSON file and prints the status it would post instead of posting (the tests' entry)
+      about, every open PR at the same head included, and writes `prs=` and `key=` (that head) to $GITHUB_OUTPUT
+      (the second job's concurrency group is keyed by the head); `--prs LIST --at-head SHA` (its second job) reads
+      each PR's body and head through the API, decides, re-reads the head, body, author, last editor and the PR's
+      issue comments, and posts ONE `adversary-marker` commit status per head: success only when every open PR at
+      it is approved. An owner-authored PR is approved by a live APPROVE naming the head in its body, last edited by
+      the owner; any other PR only by such an APPROVE in an issue comment the owner posted (not via a GitHub App).
+      A BLOCK or malformed marker in the body or any comment fails it. MARKER_POST_AS=check-run posts a check run
+      instead. `--api-answers` serves canned API answers from a JSON file and prints the status it would post
+      instead of posting (the tests' entry)
 
 The marker (AGENTS.md review rule 1, its five properties):
 
@@ -22,7 +26,7 @@ waiter's (its lines 263-1047), moved here UNCHANGED on 2026-11-06 (slim-down E8,
 three adversary rounds found false APPROVEs and a hidden BLOCK in earlier versions, so the port is judged
 by the waiter's marker tests, which moved with it to `tests/test_adversary_marker.py` and pass unchanged.
 `gate()` is the adversary branch of the waiter's `assess()`, also unchanged except that an unreadable document is named `adversary-unreadable`. The new
-code is the event handling at the end (`find_prs`, `judge_pr`, `run_event`).
+code is the event handling at the end (`find_prs`, `decide`, `judge_pr`, `run_event`).
 
 Trust model of the Action (PLAN E8, amended by the Wave 4 research, 2026-11-06): the workflow runs on
 `workflow_run` (completion of `Tests`) and `workflow_dispatch`, so the workflow file and this module come
@@ -33,8 +37,11 @@ environment that only `master` can deploy to, and the ruleset pins the required 
 `integration_id`, so a status a PR's own workflow posts under the same context does not satisfy it.
 Everything a PR carries is untrusted data (operator, 2026-11-07: "any GitHub artifacts not directly from us are
 suspect"): its body, title, commits, branch name, comments and check output are read, never executed or
-interpolated, and an APPROVE counts only in a body whose last editor is the repository owner or an OWNER /
-MEMBER / COLLABORATOR author (`_pr_state_trusted`); the operator approves an outside PR by editing its body.
+interpolated. An APPROVE counts only (2026-11-07) in the body of a PR the repository owner wrote and edited last,
+or, for every other PR (MEMBER and COLLABORATOR authors included: the operator's agents act under the owner's
+login), in an issue comment by the owner that no GitHub App posted (`_pr_state_trusted`, `decide`). The owner's
+edit of an outside body no longer makes it trusted: ticking a task-list box is an edit, and the author can hide an
+APPROVE in an HTML comment. A BLOCK naming the head counts in the body or any comment, whoever wrote it.
 
 Python 3.9+ (the Mac's stock python3 and the Actions runner's); stdlib only.
 """
@@ -1150,7 +1157,8 @@ def _pr_comments(api, repo: str, n: int) -> list[dict]:
                         "body": body if isinstance(body, str) else ""})
         if len(doc) < COMMENTS_PER_PAGE:
             return out
-    raise ValueError(f"issues/{n}/comments: more than {COMMENT_PAGES_MAX * COMMENTS_PER_PAGE} comments, not read in full")
+    raise ValueError(f"issues/{n}/comments: more than {COMMENT_PAGES_MAX * COMMENTS_PER_PAGE} comments, "
+                     "not read in full")
 
 
 def decide(head: str, owner: str, pr: dict, comments: list[dict]) -> tuple[str, str, str]:
@@ -1324,6 +1332,8 @@ def main(argv: list[str] | None = None) -> int:
     g = p.add_mutually_exclusive_group()
     g.add_argument("--resolve", action="store_true", help="only find the PRs; write prs= and key= to $GITHUB_OUTPUT")
     g.add_argument("--prs", help="judge these PRs (comma-separated numbers, from --resolve) instead of looking them up")
+    p.add_argument("--at-head", help="with --event: post only on this head (40 hex, the resolve job's key); a PR that "
+                                     "moved off it gets no status from this run")
     try:
         a = p.parse_args(argv)
     except SystemExit as e:
@@ -1352,12 +1362,15 @@ def main(argv: list[str] | None = None) -> int:
             return rc
         try:
             prs_given = parse_prs(a.prs) if a.prs is not None else None
+            at_head = None if a.at_head is None else a.at_head.strip().lower()
+            if at_head is not None and not SHA40.match(at_head):
+                raise ValueError(f"--at-head is not 40 hex: {a.at_head!r}")
         except ValueError as e:
             print(f"adversary_marker: {e}", file=sys.stderr)
             return 2
         server, run_id = os.environ.get("GITHUB_SERVER_URL", ""), os.environ.get("GITHUB_RUN_ID", "")
         target = f"{server}/{a.repo}/actions/runs/{run_id}" if server and run_id else ""
-        rc, report = run_event(a.event_name, event, a.repo, api, target, prs_given)
+        rc, report = run_event(a.event_name, event, a.repo, api, target, prs_given, at_head)
         report["statuses"] = api.posted
         print(json.dumps(report, sort_keys=True))
         return rc
