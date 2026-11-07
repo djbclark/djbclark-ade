@@ -40,10 +40,15 @@ not been measured on our own traffic is a false sense of security, not a gate.
    carry on. The gate never approves anything and never lowers a tag.
 
 3. **Fail-closed rules.**
-   - Classifier unreachable (the helper's exit 3, a restart window): the caller
-     treats the text as **untrusted with the gate unavailable** — never as
-     clean — and logs the miss; the S6 drift job alerts when the gate has been
-     unavailable for more than 1 hour of calls.
+   - Classifier unreachable (the helper's exit 3, a restart window) or any
+     error, timeout or malformed answer: the text is **never treated as
+     clean**. On ordinary surfaces the caller tags it untrusted with the gate
+     unavailable, logs the miss, and its existing untrusted-data rules carry
+     on. On the one surface whose whole point is the hold — the fleet-watch
+     upstream `--perm all` dispatch (F-CRIT-1) — **no verdict means no
+     dispatch**: the notice is queued for the operator instead. The S6 drift
+     job alerts when the gate has been unavailable for more than 1 hour of
+     calls.
    - Any error, timeout or malformed answer is the same as `escalate`, never
      `benign`.
    - The gate runs **before** the text enters an agent context, not inside it:
@@ -74,10 +79,10 @@ not been measured on our own traffic is a false sense of security, not a gate.
    ```toml
    [hardening.injection_gate]
    enabled = true            # false = pass-through with tag "unverified"
-   model = "kev"             # jevlike alias; "jev" for latency-critical callers
+   model = "jev"             # api.typesafe.ai alias; kev/laya measured unusable (eval 2026-11-07)
    act_high = 0.9            # p(injection) >= this -> injection verdict
    act_low = 0.1             # p(injection) <= this -> ordinary text (still untrusted)
-   model = "jev"             # jevlike-style alias for api.typesafe.ai; kev/laya measured unusable (eval 2026-11-07)
+   max_ms = 5000             # caller-side timeout; over = escalate (fail-closed)
    fail_closed = true        # never false in production; tested in CI
    shadow = true             # log verdicts beside the reader's outcome
    surfaces = ["pr", "issue", "comment", "ci-log", "dependabot", "web", "jira", "fleet-watch"]

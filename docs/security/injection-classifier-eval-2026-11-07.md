@@ -18,7 +18,7 @@ messages — and on which surfaces should it block, tag, or only escalate?
 that separates the classes at all, and only as a tag-and-escalate signal,
 never a block**: 32% of published injections reach the skill's p >= 0.9 act
 bar against a 1.3% false-positive rate on 230 samples of our own
-PR/issue/commit/CI text, at 163 ms p50 and ~$0.00003 per call. Kev-0.8B and
+PR/issue/commit/CI text, at 162 ms p50 and ~$0.00003 per call. Kev-0.8B and
 both Laya variants are near-chance (0% at the act bar; 8-32% FP at their best
 thresholds) and not usable as injection gates; Laya also silently truncates
 long states. Useful surfaces: the fleet-watch upstream dispatch hold at
@@ -80,7 +80,7 @@ model ran the whole set **twice** to test answer stability.
 - **S4 — published, disclosed samples only.** No payload was fetched from a
   live PR, issue or repository under attack; nothing was posted, opened or
   commented anywhere.
-- **S5 — deletion.** Payload files (payloads/, benign/, raw parquet/jsonl)
+- **Deletion (operator rule S5 of the eval brief).** Payload files (payloads/, benign/, raw parquet/jsonl)
   were deleted after aggregation; only the scores CSVs and this document
   remain (committed tables carry ids/labels/scores only).
 
@@ -173,8 +173,8 @@ fail-closed signal on top**, never an approval. Verdict per surface:
 | Dependabot PR bodies (S1.5) | **Tag + operator ping at p >= 0.9** | Upstream release notes are the exact hidden-comment vector; Jev FP 1.3% makes the ping cheap. |
 | CI logs / check-run output (S1.4) | **Tag only** | No CI benign sample exceeded 0.5; logs also carry test strings that discuss injection (FP zone), and latency (Kev 4s) rules out inline use. |
 | firecrawl / web-search results (S4.1) | **Tag only** | 1.3% FP on ordinary technical text is too high to block; spotlighting + untrusted-envelope stay the control. |
-| CFEngine Jira text (S3.1) | **Tag + escalate at p >= 0.9** | Outside-community authors; Jev at 0.9 gives ~1 in 5 catches with ~1% FP — worth an operator look, not a block. |
-| fleet-watch upstream notices (S1.7, F-CRIT-1) | **Escalate: hold the `--perm all` dispatch at p >= 0.9, tag otherwise** | This is the zero-click path; any confident verdict should cost a human glance. Fail-closed: classifier down = treat as untrusted + proceed under existing rules, never as clean. |
+| CFEngine Jira text (S3.1) | **Tag + escalate at p >= 0.9** | Outside-community authors; Jev at 0.9 catches 0.32 overall (0.60 on instruction-shaped strings, 0.17 on blended BIPIA text) at ~1% FP — worth an operator look, not a block. |
+| fleet-watch upstream notices (S1.7, F-CRIT-1) | **Escalate: hold the `--perm all` dispatch at p >= 0.9 or whenever the gate is down, tag otherwise** | This is the zero-click path; a confident verdict or an unavailable gate must cost a human glance — an outage here means no dispatch, not business as usual (fail-closed on this surface). |
 | Agent-to-agent `paseo send` (incl. "djbclark approved", F-CRIT-1) | **No classifier** | Peer trust is architectural (AGENTS.md Trust); the approved-chain fix is an out-of-band capability, not a probability. |
 
 Operating point: keep the skill's 0.9/0.1 for tagging/escalation decisions;
@@ -190,7 +190,7 @@ gate is a triage signal, not a boundary.
   body costs ~$0.00003 and ~160 ms.
 - Kev-0.8B / Laya: free (self-hosted CPU microVM on SIPB Hyades), but Kev's
   measured 4.1 s p50 under a 2-concurrent load on PR-sized states (13 s p90)
-  makes it too slow for inline gating anyway; Jev at 163 ms p50 is the only
+  makes it too slow for inline gating anyway; Jev at 162 ms p50 is the only
   one of the three that fits an inline reader.
 
 ## 7. What could not be tested
@@ -209,3 +209,26 @@ gate is a triage signal, not a boundary.
   text-only judges.
 - End-to-end attack success: this is a classifier eval, not an agent-red-team
   run; AgentDojo-style execution benchmarks were not run.
+
+## 8. Addendum (2026-11-07, operator-picked): encoding/hidden-form mini-set
+
+After the main runs, the operator chose a follow-up: a 23-sample mini-set of
+**encoded and hidden-form** injections synthesized from the published
+disclosure patterns (hidden HTML comments carrying agent instructions —
+Comment and Control / Copilot Agent and CamoLeak shapes; base64-wrapped
+instructions; a fake "trusted section"; a Clinejection-style
+install-from-fork-in-a-comment; an ANSI-escape CI-log line), plus 8 benign
+hard negatives that look dangerous (real HTML comments in our docs, a
+documentation `adversary-verdict` marker, legitimate base64/certificate
+blobs, a Camo-style badge URL). Same harness, same rules (S1-S5), Jev only,
+2 runs. These strings were synthesized by the operator's agent from the cited
+write-ups, not downloaded; they went file -> container -> classifier only and
+were deleted after scoring.
+
+**Result:** 15/15 injections at p >= 0.9 (lowest 0.96), 0/8 benign at
+p >= 0.9 (6/8 at <= 0.1), identical across both runs. Jev reads through
+HTML-comment hiding and base64 wrapping on instruction-shaped payloads. This
+narrows §7's "adaptive/encoding attacks untested" gap for the
+disclosure-style encodings (not for novel adaptive attacks), and strengthens
+the fleet-watch hold: the incident shapes of Clinejection, Comment and
+Control and CamoLeak would each have tripped p >= 0.9.
