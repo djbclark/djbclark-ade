@@ -140,7 +140,7 @@ refuter: a cheaper capable model at high effort, each in its own context.
 Reviewer: a different model family when the host can route one; otherwise
 run it in a fresh context and label the review "non-independent". Reserve
 the top effort setting for adjudicating a contested claim, not for reading
-pages. On a host with `model-routing` / `effort-routing` skills, follow them.
+pages. On a host with the `model-routing` skill (effort folded into it 2026-11-07), follow it.
 
 ## Rules that hold in every step
 
@@ -194,29 +194,20 @@ pages. On a host with `model-routing` / `effort-routing` skills, follow them.
    (`acp-dispatch codex --model gpt-6-astra --kind frontier`; frontier slices
    run as read-only advisors by default and their report is the deliverable,
    2026-10-18), Fable (`acp-dispatch claude
-   --model 'claude-fable-5-1[1m]' --kind frontier`, quoted, the id exactly as `acp-run claude
-   --info` lists it: on 2026-10-10 11:19 a dispatch with `claude-fable-5-1`
-   failed with "acp-run: no model 'claude-fable-5-1'; have: default, opus,
-   claude-fable-5-1[1m], sonnet, haiku, ..."; or an Agent-tool sub-agent),
-   the Cursor grok model and agy
-   (`acp-dispatch agy --model <m> --kind research`, only ever via ACP, never `agy -p`;
-   `--model claude-opus-5-5 --effort high` (agy 1.4.1, 2026-10-18, dropped the effort-suffixed ids) draws its Claude/GPT pool, which `aiuse`
-   lists as `antigravity claude_gpt`, burn-first while >= 40% left, see
-   the model-routing skill. Over ACP the `claude-*`/`gpt-*` ids appear only because
-   acp-run identifies itself to agy as `zed`: agy_acp_server 1.3.0 hides
-   non-Gemini models from other clients (deliberate in Google's
-   `supports_third_party_models()`), which is why a dispatch on 2026-10-10
-   failed with "no model 'claude-opus-5-5-high'; have: gemini-...".
-   `acp-dispatch` checks `--model` against `acp-run agy --info` before it
-   starts. If no `claude-*` id is listed, the workaround has stopped working:
-   use `--model gemini-3.8-flash --effort high` and note in `plan.md` that the Claude/GPT
-   pool was unreachable). The lead merges
+   --model <the Fable id> --kind frontier`, the id exactly as `paseo provider models claude --json` lists it,
+   never guessed (on 2026-10-10 a dispatch with an unlisted Fable id failed); or an Agent-tool sub-agent),
+   the Cursor grok model and Antigravity
+   (`acp-dispatch antigravity --model <m> --kind research`, the Paseo antigravity provider since the agy TUI
+   retired 2026-11-06; check `paseo provider models antigravity --json` for the Claude/GPT ids before the
+   first call: that pool is `antigravity claude_gpt` in `aiuse`, burn-first while >= 40% left, see the
+   model-routing skill; if no `claude-*` id is listed, use a Gemini model and note in `plan.md` that the
+   Claude/GPT pool was unreachable). The lead merges
    the four evidence files for a slice (dedupe by source and quote, keep
    every family's unique rows) and the lead picks among the four
    writer drafts or merges them into one `report.md`; the counter files
    merge the same way. Codex may be used sparingly when its pools are tight
    (skip it for a slice rather than wait), the other three always run. A
-   cheaper model (Sonnet, `grok-4.7-build-fast`, zcode) may stand in for a
+   cheaper model (Sonnet, `grok-4.7-build-fast`, an opencode-go model) may stand in for a
    family on a slice where it would change research quality little, such
    as a narrow fetch or a search log. **No weekly quota floor**: dispatch to the most capable
    agent until `aiuse --available` drops its pool; an exhausted pool waits
@@ -227,15 +218,15 @@ pages. On a host with `model-routing` / `effort-routing` skills, follow them.
    --kind frontier`** (the `ocx-gpt-6-*` Agent-tool sub-agents and the
    opencodex proxy behind them were uninstalled 2026-10-19). If the Codex
    pool is out (`aiuse --available --live --json`), the next family with
-   quota (`acp-dispatch zcode --kind research`, no `--model`), labelling the
+   quota (`route_agent.py plan`), labelling the
    review non-independent for any slice that family worked on.
 2. Sub-agent prompts carry the delivery contract: `acp-dispatch` appends it
    itself; for an Agent-tool sub-agent paste the output of
    `acp-dispatch footer --report <scratchpad>/<name>-report.md`. Read the
    report file, never the final message. `acp-dispatch check <dir>` before
-   the gate lists no-report and `BLOCKED:` slices; a `resume-scheduled` one
-   (exit 1) is a quota stop being resumed in place automatically, so wait for
-   it rather than re-dispatching the brief (2026-10-18). Claude Code refuses a
+   the gate lists no-report and `BLOCKED:` slices; an exit 1 slice is unfinished or still running, so wait for
+   it rather than re-dispatching the brief (a quota stop is paused and resumed by Paseo's session-guard and
+   usage-auto-resume plugins since 2026-11-06, not by the shim). Claude Code refuses a
    sub-agent Write to a basename starting with `report`, `summary`,
    `findings` or `analysis`: a sub-agent writer writes `draft.md` in the run
    folder and the lead moves it to `report.md` (seen 2026-10-09).
