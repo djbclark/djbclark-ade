@@ -82,3 +82,29 @@ R2-26. `bin/npm_metadata.py` and its test (0 refs): DELETE in E10.
     cross-checks Argon's gate findings.
   - (6) Paseo features and plugins that cut how often agents need the operator are to be researched, without
     weakening the stance on outside content.
+- **Pi-primary is under evaluation; omp stays (operator-approved coordination update, 2026-11-07, after the final
+  merge).** The tentative direction is upstream Pi as the primary multi-vendor coding client and OpenCode 2 as a
+  smaller second client, with passive monitoring kept in aiuse. It does **not** overwrite the "omp, not pi" ruling
+  above: omp stays the Pi-family Paseo seat until Pi passes an acceptance probe.
+  - **Claude-credit spending stays on omp** until a passive Pi source of 429s and retry-after keeps aiuse's
+    fail-closed rate latch working.
+  - **State on 2026-11-07:** P11 had already uninstalled Pi and `pi-acp` (C49, about 08:07) and archived `~/.pi` under
+    `~/.local/state/archive/slim-2026-11-07/tui-retire/.pi`. Restoring them is therefore a prerequisite for the probe,
+    not something that was prevented.
+  - **The acceptance checklist (C1-C9 of the lead's reply):**
+    - C1: Paseo integration, checked with `paseo provider ls` and `paseo provider models pi --json` and one read-only
+      `paseo run --provider pi` slice that writes its report. Provider discovery alone is not compatibility.
+    - C2: Pi's modes and its unattended mode, given that a schedule or child agent with no `--mode` gets the
+      unattended one.
+    - C3: subagents come from Paseo-level fan-out, not a restored `pi/extensions/subagent`.
+    - C4: one aiuse identity and one route_agent pool per vendor pool, with each subscription's entitlement checked
+      (Copilot and Zen may not be live).
+    - C5: the rate-latch source, as above.
+    - C6: no credential conversion; Anthropic and OpenAI identities stay separate; aiuse stays passive. Command-backed
+      keys are verified only on the registry API path.
+    - C7: resume, compaction and hook equivalents: the handoff and baton fallback, context hooks, the `hand` link,
+      and a `skill-everywhere` root.
+    - C8: report and `.done` delivery under `paseo run`, and acks as a peer (order 10).
+    - C9: what the slim-down removed that comes back differently: `never_route`, a `[service pi]` entry, the shim's
+      provider list, the identity guard, and the skill root.
+  - No routing, config, identity or credential change is made until the probe passes.
