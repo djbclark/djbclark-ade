@@ -1,19 +1,19 @@
 # Orchestration practices: decide cheaply, reason expensively, verify centrally
 
-Snapshot **2026-10-11**. The rules every orchestration skill here follows
-(`fan-out` (since 2026-11-06), `research`, `dialogue`, `model-routing` (which absorbed the effort skill, 2026-11-07);
-`ralph-tui-orchestration` was removed 2026-11-06). Each skill carries the short form of the rules it
-needs and links here for the reasons and sources.
+Snapshot **2026-10-11**, re-based on Paseo **2026-11-07** (slim-down E11). The rules every orchestration skill here
+follows (`fan-out`, `research`, `dialogue`, `model-routing`). Each skill carries the short form of the rules it needs
+and links here for the reasons and sources.
 
-**Standing operator requirement:** every orchestration skill must be able to
-dispatch to several TUIs, through ACP (`acp-dispatch` / `acp-run`) wherever the
-agent has an ACP mode, and the per-CLI headless forms only where it has none
-(muse) or as a fallback (`model-routing`, *Headless invocation*).
+**Standing operator requirement:** every orchestration skill can dispatch to several providers. Since 2026-11-06 every
+agent is a Paseo agent: in process through the Agent tool or a Workflow, out of process through `paseo run` (directly,
+or through `bin/acp-dispatch`, a `paseo run` shim kept for one cycle with its report, `.done`, record and exit-code
+contract; Wave 6's follow-up PR removes it). The providers are claude, codex, cursor, antigravity, opencode, omp and
+hermes (`paseo provider ls --json`); `skills/fan-out` is the how-to.
 
 ## 1. Two kinds of work in an agent loop
 
 1. **Reasoning** has an open-ended answer: plan, write code, debug, adjudicate.
-   It goes to the judgment tier (Claude, codex, agy's Claude/GPT pool).
+   It goes to the judgment tier (Claude, codex, antigravity's Claude/GPT pool).
 2. **Deciding** picks from a short list the harness already holds: which pool,
    which kind, retry or reassign or stop, which notes go in a brief, which
    tests run first. These are multiple-choice questions.
@@ -22,17 +22,15 @@ agent has an ACP mode, and the per-CLI headless forms only where it has none
 
 **Ladder for a decision, cheapest first:**
 
-1. **Code.** A rule or a table: `route_agent.py plan`, `acp-dispatch`'s exit
-   codes, `aiuse --available`'s exit 3, `git diff --name-only` to pick tests.
-   Deterministic, free, and auditable. The reaction to a quota stop is code
-   too (2026-10-18): `acp-dispatch` schedules the in-place resume of the same
-   session itself (exit 1 `resume-scheduled`, the waiter waits through it);
-   only a non-quota exit 3 is a re-task decision for the judgment tier.
+1. **Code.** A rule or a table: `route_agent.py plan`, the dispatch shim's exit
+   codes (section 5), `aiuse --available`'s exit 3, `git diff --name-only` to pick tests.
+   Deterministic, free, and auditable. The reaction to a quota stop is the
+   provider's: Paseo's session-guard pauses at exhaustion and usage-auto-resume
+   continues after the reset (the dispatcher's own auto-resume was retired 2026-11-06).
 2. **A typed decision model**, a call that returns a probability per option
-   and no text. TypeSafe's Jev is one (the `typesafe-ai` skill; needs a
-   TypeSafe API key, stored in `sudo-secretspec` as `TYPESAFE_API_KEY` since 2026-10-11, **in shadow mode only; `bin/jev` removed 2026-11-06**). Code reads
-   the probability and applies a threshold. Never ask a model how confident
-   it is; read the distribution.¹ ⁴
+   and no text (TypeSafe's Jev was one; it ran in shadow mode only and was
+   removed 2026-11-06). Code reads the probability and applies a threshold.
+   Never ask a model how confident it is; read the distribution.¹ ⁴
 3. **A cheap text model** at low effort (haiku, a free pool), with a closed
    option list and a parser that rejects anything off the list.
 4. **The judgment tier**, when the question is not really multiple choice,
@@ -87,6 +85,11 @@ the task, and the ambiguity is copied into every slice.² ³ Every brief has:
 5. **Output format:** the report shape, `CHANGED:` / `SKIPPED:` / `NOTES:`.
 6. **Acceptance check:** the command or observation that proves it.
 7. **Boundaries:** the concurrency contract, and what is out of scope.
+8. **Names with ids (2026-10-23, from the load watcher):** wherever a brief, message or report names a Paseo
+   workspace, give the name the GUI shows (`<topic>-pw`) and its id (`wks_…`); for an agent, its agent id too. A GUI
+   rename makes a name alone unreliable, and an id alone is unreadable.
+9. **The delivery footer** (`acp-dispatch footer --report PATH`, docs/dispatch-footer.md): where the report goes, the
+   `.done` marker, and the last line `DONE`, `BLOCKED: …` or `NO-REPORT: …`.
 
 ## 4. Size the run to the work
 
@@ -100,11 +103,18 @@ the task, and the ambiguity is copied into every slice.² ³ Every brief has:
    lands.
 3. **One level of delegation.** Workers launch no agents; only the
    orchestrator dispatches.⁵
-4. **Every dispatch passes the load gate before it starts** (`acp-dispatch` runs
-   `load-watch admit --wait N`, default 1800 s, exit 75 when the machine is still too hot; operator 2026-10-19),
-   before its quota and cap checks; `--detach --no-wait` returns at once and the detached runner waits instead
-   (a waiting runner counts as in flight and re-checks the cap after admission; only its quota snapshot can be stale).
-   The gate only decides whether to *start*: it never kills, throttles or slows running work.
+4. **Every dispatch passes the load gate before it starts** (the shim runs `load-watch admit --wait N`, default
+   1800 s, exit 75 when the machine is still too hot; operator 2026-10-19), then its frontier, in-flight and per-wave
+   checks, which parallel launches re-check under a lock after writing their record. The gate only decides whether to
+   *start*: it never kills, throttles or slows running work.
+5. **Plan with the load in mind** (load watcher, 2026-10-23, after load reached 42-62 on 8 cores with swap at 90%
+   from three concurrent local pytest runs plus three dispatches): check `load-watch admit --json` before a large
+   fan-out; builds and tests only through `bg` or CI, never `BG_LOAD_WAIT=0`; **one local test run at a time**; no new
+   local pytest or dispatch while load per core is 1.5 or more (`uptime`).
+6. **Stagger sends to a working Claude agent** (PR 294, from the retired `helm` lead guide, 2026-11-06): one message
+   at a time, each gated on the target going idle, sent in the background; Paseo replaces a Claude agent's current
+   turn when a steer is declined (for example during compaction), and the relay shim refuses a running agent whose
+   provider cannot steer. A send that timed out waiting sent nothing: retry next round.
 
 ## 5. Failure handling: kill criteria in code
 
@@ -112,7 +122,11 @@ the task, and the ambiguity is copied into every slice.² ³ Every brief has:
    rereading the whole log at frontier effort: quota or plan → the vendor's
    sibling pool, then re-route; tooling → another vendor; the work itself →
    the orchestrator looks; refused → another model or a reworded
-   authorization context (`acp-dispatch`/`acp-run` already classify these).
+   authorization context. The shim's exit codes (dispatch, `wait`, `check`): 0 report delivered and ending in
+   `DONE`; 1 report present but unfinished, or still running; 2 usage or a refused launch; 3 no report; 4 `BLOCKED`
+   (or a pending permission); 5 pool unavailable before launch, re-plan; 75 machine too hot, nothing launched;
+   77 review-launch's tripwire; 124 timed out waiting. Exit 0 is still not success: verify the diff, the tests and the
+   report's content.
 2. **Three attempts per slice, then stop and report.** The first run plus two
    re-routes. A slice stuck on the same error after that goes to the operator
    with the evidence, not to a fourth vendor.³
@@ -131,10 +145,8 @@ the task, and the ambiguity is copied into every slice.² ³ Every brief has:
    operator had to interrupt. **Why it is worse than idle: an agent inside a
    long blocking wait never goes idle, so it cannot receive any relayed
    message** (Paseo queues a text for a working target until it has been quiet
-   for 2 s, and the relay shim reports that as `queued`, not delivered,
-   2026-11-06): it is deaf as well as silent. On 2026-11-02 the lead's messages sat queued
-   for hours behind such waits and were read from relay's deferred folder by
-   hand. Do other work; if there is none, end the turn with a status line (what
+   for 2 s): it is deaf as well as silent. On 2026-11-02 the lead's messages sat queued
+   for hours behind such waits. Do other work; if there is none, end the turn with a status line (what
    runs, where its log is, what to check next) and let the result wake you.
 6. **Never wait on CI** (`gh pr checks --watch`, `gh run watch`). Report
    "CI running" with the run URL and stop: the lead reads CI, and its wait command is
@@ -144,12 +156,32 @@ the task, and the ambiguity is copied into every slice.² ³ Every brief has:
    loop that prints nothing looks the same as a hang to a human reading the
    pane.
 8. **A reply that cannot be delivered because its target waits on a question
-   or permission card is the operator's to unblock** (2026-11-02: a relay
-   waited 184 minutes behind a card, and the target's own reply to the lead
-   sat behind one too). The relay shim (2026-11-06) reports such a send as
-   `permission` or `queued` (exit 2, not delivered); its old card alert went with
-   the outbox. `paseo permit ls` shows the pending card. Report the message as
-   queued behind a card and move on; do not retry or poll it.
+   or permission card is the operator's to unblock** (2026-11-02: a message
+   waited 184 minutes behind a card). The relay shim refuses such a send
+   (exit 2, not delivered); `paseo permit ls` shows the pending card, and the
+   asks / questions-please plugins are the operator's inbox. Report the message as
+   held behind a card and move on; do not retry or poll it.
+
+## 5a. Messages between agents (AGENTS.md order 10, re-based 2026-11-06)
+
+1. Send with `paseo send --json` or the relay shim `skills/session-finder/relay.py TARGET "text"` (until 2026-11-20).
+   TARGET is an agent id or a unique shortId prefix, never a title.
+2. **What counts as delivered**: a sourceless send (deadline, load-watch: no `$PASEO_AGENT_ID`) is delivered when
+   `.status` reads `sent` or `completed` (shim exit 0). An agent's send is **accepted** (exit 5): Paseo queues every
+   agent-to-agent message and reports no later delivery, so only the peer's `ack <your id>` proves it. Exit 2 is not
+   delivered; `paseo send`'s own `$?` is never read as delivery (it exits 0 for every status).
+3. Ask for the named ack (`--ack <your id>`) whenever delivery matters and always on first contact; read your own
+   inbox for it; re-send when none arrives; report a peer you cannot reach to the operator.
+4. A reply written in your own turn reaches nobody: answer a peer by sending to it. A slice's channel back is its
+   report file, and `acp-dispatch tell RECORD MESSAGE` (an inbox entry plus a `paseo send`) reaches a running slice.
+
+## 5b. Unattended issue → PR (from `docs/history/coding-factory.md`, 2026-09-21)
+
+The factory question was answered then: the trigger is a small GitHub Actions workflow on a label, the coder is a
+pool already paid for (Copilot cloud agent, Cursor Cloud through `bin/cursor-cloud`, or a local Paseo agent), and the
+gate is repository configuration. The gate exists since 2026-11-06 (PR-only master, the required `adversary-marker`
+status, the Tests checks); the trigger is not built. A PR such a coder opens is outside input until the owner edits
+its body (AGENTS.md, Trust).
 
 ## 6. Checks: focused first, full suite before commit
 
@@ -171,8 +203,8 @@ the task, and the ambiguity is copied into every slice.² ³ Every brief has:
 
 ## 7. Measure, or the savings are a guess
 
-1. Log, per slice: kind, vendor, model, tokens or cost (acp-run's summary
-   line), attempts, and whether the diff passed review unchanged.
+1. Log, per slice: kind, vendor, model, tokens or cost (`acp-dispatch outcome`, the provider's usage), attempts, and
+   whether the diff passed review unchanged.
 2. Re-read that log before changing a capability profile in
    `route_agent.py`; a profile change without evidence is a guess.
 3. The cost math in source 1 is modelled, not measured; use your own before
