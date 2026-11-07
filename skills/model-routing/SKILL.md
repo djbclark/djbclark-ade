@@ -148,11 +148,12 @@ verified read-only route instead. `openai/gpt-6-astra` is an admitted Pi model
   under a flock. A lead that
   sees `[quota-guard tight]` hands off and continues on Sonnet 5.5; at `critical` it
   starts no new Claude Code subscription work until the reset (Agent-tool sub-agents of a Claude Code
-  session included) and hands off, to an omp successor on Paseo or an omp started by hand (on herdr and Orca too, retired from djbclark-ade 2026-10-31; `bin/claude-quota-guard` still prints that advice until D6), while
-  `aiuse --available --json` lists omp (omp is off the subscription's dollar pool but shares
-  the Claude weekly rate window, so every weekly window exhausted gates it: then a codex or grok successor).
-  `critical` never stops a session on codex, grok, agy, zai or opencode, nor one on omp while aiuse lists
-  it (2026-10-29: idle omp sessions had read the old "hand off, stop" line as applying to them).
+  session included) and hands off to an omp successor on Paseo or an omp started by hand.
+  As of 2026-11-07, the guard reads only omp's Anthropic credential metadata, read-only:
+  an enabled API key with no enabled OAuth credential means omp spends API credits and
+  works independently of Claude's weekly window, without an aiuse listing. With enabled
+  OAuth or missing/unreadable metadata, the existing aiuse-listing condition remains;
+  when omp is not listed, use a codex or grok successor. Other providers keep working.
 
 ## OpenCode Go cost guard (2026-10-25)
 

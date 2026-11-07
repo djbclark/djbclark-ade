@@ -81,6 +81,7 @@ import os
 import plistlib
 import re
 import shlex
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -124,10 +125,9 @@ class ConfigError(Exception):
 
 _SELF_SLASH = ("`~/src/djbclark-ade/bin/self-slash --finish --successor claude/claude-sonnet-5-5 "
                "--thinking high`")
-# At `critical` the Claude Code subscription is the exhausted pool. omp is off its dollar pool (API
-# credits: skills/model-routing/SKILL.md, claude-fleet-governor) but shares the Claude weekly rate
-# window, so aiuse gates it when every weekly window is exhausted (adversary r1 on PR 126, A1): omp
-# is a successor and keeps working only while `aiuse --available --json` still lists it.
+# 2026-11-07: omp with an enabled Anthropic API key and no enabled OAuth credential
+# spends API credits independently of Claude's weekly subscription window. OAuth or
+# missing/unreadable credential metadata keeps the existing aiuse-gated advice.
 _SELF_SLASH_OMP = ("`~/src/djbclark-ade/bin/self-slash --finish --successor omp/anthropic/claude-sonnet-5-5 "
                    "--thinking high`")
 _ADVERSARY = "`acp-dispatch omp --model anthropic/claude-opus-5-5 --kind judgment --effort high`"
@@ -156,6 +156,21 @@ def _frontier_advice(frontier: dict, reasons: list, resets_at: str | None, fable
             f"2. Adversary rounds via {_ADVERSARY}.\n3. Route code/bulk slices to other pools.")
 
 
+def _omp_uses_api_credits() -> bool:
+    """Read credential metadata only; never select the secret-bearing data column."""
+    path = HOME / ".omp/agent/agent.db"
+    try:
+        with contextlib.closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=1)) as db:
+            rows = db.execute(
+                "SELECT provider, credential_type, disabled_cause FROM auth_credentials "
+                "WHERE provider = ?", ("anthropic",)
+            ).fetchall()
+        enabled = {kind for _, kind, disabled in rows if not disabled}
+        return "api_key" in enabled and "oauth" not in enabled
+    except (OSError, ValueError, sqlite3.Error):
+        return False
+
+
 def _advice(level: str, resets_at: str | None, source: str = "available",
             stale_age: float | None = None, frontier: dict | None = None, reasons: list | None = None,
             fable_left=None, watch_frontier: float = 15.0) -> str:
@@ -164,6 +179,9 @@ def _advice(level: str, resets_at: str | None, source: str = "available",
     if frontier and level == "watch" and stale_age is None and source != "snapshot-only":
         text = _frontier_advice(frontier, reasons or [], resets_at, fable_left, watch_frontier)
         if text is not None:
+            if _omp_uses_api_credits():
+                text = text.replace(f"Adversary rounds via {_ADVERSARY}.",
+                                    f"Adversary rounds via {_ADVERSARY} (spending API credits; independent of Claude's weekly window).")
             return text
     items = [
         "Claude quota watch: no Fable or Opus Agent-tool sub-agents.",
@@ -198,6 +216,18 @@ def _advice(level: str, resets_at: str | None, source: str = "available",
                      "session on codex, grok, agy, zai or opencode is unaffected and keeps working; one on "
                      "omp keeps working only while `aiuse --available --json` still lists it (omp is off the "
                      "subscription's dollar pool but shares the Claude weekly rate window).")
+    if _omp_uses_api_credits():
+        items[1] = f"Adversary rounds via {_ADVERSARY} (spending API credits; independent of Claude's weekly window)."
+        if level == "critical":
+            items[3] = ("A Claude Code lead (provider claude, subscription) hands off now and continues off the "
+                        "subscription. omp is available spending API credits: on Paseo an omp successor, "
+                        f"{_SELF_SLASH_OMP}; on herdr or Orca write the handoff, then start omp by hand in a new "
+                        "pane or tab (self-slash refuses an omp successor there). A codex or grok successor "
+                        "is also available (agy is reached only by `acp-run agy` slices, never as a successor).")
+            items[-1] = (f"No new Claude Code subscription work (Agent-tool sub-agents of a Claude Code session "
+                         f"included) until the reset at {resets_at or 'unknown'}. This is not a stop order: a "
+                         "session on codex, grok, agy, zai or opencode is unaffected and keeps working; one on "
+                         "omp keeps working spending API credits, independently of Claude's weekly window.")
     if source == "snapshot-only":
         items.append("aiuse dropped Claude from --available: a live 429 or a note; "
                      "re-check `aiuse --available --json`.")

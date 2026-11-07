@@ -11,6 +11,7 @@ import json
 import os
 import plistlib
 import shlex
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -2080,3 +2081,41 @@ def test_aiuse_output_nested_too_deep_is_unreadable_at_exit_0_and_the_verdict_at
         mod.read_aiuse()
     rig.set_aiuse(JSON_TOO_DEEP, rc=3)
     assert mod.read_aiuse() == (3, {})
+
+
+@pytest.mark.parametrize("credentials,api", [
+    ([("anthropic", "api_key", None), ("anthropic", "oauth", "disabled by user")], True),
+    ([("anthropic", "api_key", None), ("anthropic", "oauth", None)], False),
+    ([("anthropic", "oauth", None)], False),
+    ([("other", "api_key", None)], False),
+    ([], False),
+    (None, False),
+])
+@pytest.mark.parametrize("weekly,code", [(35, 1), (25, 2), (5, 3)])
+def test_omp_credential_advice(rig, credentials, api, weekly, code):
+    path = rig.home / ".omp/agent/agent.db"
+    if credentials is not None:
+        path.parent.mkdir(parents=True)
+        with sqlite3.connect(path) as db:
+            # No data column: the guard must need only non-secret metadata.
+            db.execute("CREATE TABLE auth_credentials (provider, credential_type, disabled_cause)")
+            db.executemany("INSERT INTO auth_credentials VALUES (?, ?, ?)", credentials)
+    rig.set_aiuse(aiuse_fixture(weekly=weekly))
+    assert rig.guard().returncode == code
+    advice = rig.state_json()["advice"]
+    assert ("spending API credits" in advice) is api
+    if code == 3:
+        assert ("only while `aiuse --available --json`" in advice) is not api
+        assert ("While `aiuse --available --json` lists omp" in advice) is not api
+        assert "--successor omp/anthropic/claude-sonnet-5-5" in advice
+    if credentials is None:
+        assert not path.exists()  # mode=ro must never create a credential store
+
+
+def test_omp_unreadable_database_keeps_old_advice(rig):
+    path = rig.home / ".omp/agent/agent.db"
+    path.parent.mkdir(parents=True)
+    path.write_text("not sqlite")
+    rig.set_aiuse(aiuse_fixture(weekly=5))
+    assert rig.guard().returncode == 3
+    assert "only while `aiuse --available --json`" in rig.state_json()["advice"]

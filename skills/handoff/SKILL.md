@@ -335,10 +335,10 @@ run that command instead of this step, once; the rest of this section is for a s
 **Quota guard `critical` (2026-10-29): leave the subscription, whatever model you run.** When
 `~/.local/state/ade/quota-guard.json` exists and its `level` is `critical` (read it with `.get`; a missing
 or unreadable file means no), a Claude Code lead of any model, Sonnet and Opus included, never runs plain
-`self-slash "/new"` (that stays on the exhausted subscription) and never a Claude successor. On Paseo, while
-`aiuse --available --json` lists omp, run the guard advice's own command (the omp successor with
+`self-slash "/new"` (that stays on the exhausted subscription) and never a Claude successor. On Paseo, when the guard confirms API-key-only Anthropic auth (2026-11-07; spending API credits),
+or otherwise while `aiuse --available --json` lists omp, run the guard advice's own command (the omp successor with
 `--thinking high`); on herdr or Orca (retired from djbclark-ade 2026-10-31; `self-slash` refuses an omp successor there) write the handoff, then
-start omp by hand in a new pane or tab. With omp not listed, a codex or grok successor the same way (agy is
+start omp by hand in a new pane or tab. Without confirmed API-key-only auth and with omp not listed, a codex or grok successor the same way (agy is
 reached only by `acp-run agy` slices, home rule 29, never as a successor; `acp-run` sessions are never handoff
 hops). **At `critical` this paragraph replaces every Claude path in the rest of Step 9:** the Fable branch
 (a) below, the "verify the successor" by-hand fallback (a governor-steered session still runs that verify step,

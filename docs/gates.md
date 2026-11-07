@@ -257,3 +257,13 @@ over-counts, which is safe.
 `route_agent.py` constants (`plenty_min`, `SUBSTRATE_MIN_HEADROOM` in `config/routing.toml` and the script) and the routing
 policy text in `skills/model-routing/SKILL.md` are not profile-controlled. (`frontier_per_wave` and `fable_min_left` moved
 to the `[frontier]` gate on 2026-10-27, above.)
+
+### omp credential routing (2026-11-07)
+
+`claude-quota-guard` opens `~/.omp/agent/agent.db` with SQLite `mode=ro`
+and selects only `provider`, `credential_type`, and `disabled_cause` from
+`auth_credentials`. An enabled Anthropic `api_key` with no enabled `oauth`
+means successor/adversary omp routes spend API credits independently of the Claude
+weekly window; no `aiuse --available --json` omp listing is required. Enabled OAuth,
+a missing or unreadable database, or no enabled API key preserves the prior advice.
+No secret credential data is read. This changes advice, not quota thresholds.
