@@ -224,34 +224,27 @@ reason in the text message before it.
 Then act on the answer. For handoff and continue, invoke the `handoff` skill (its Step 9
 runs here). **Lifecycle actions run only in the top-level session** (2026-10-20): a
 sub-agent or a dispatched slice shares or inherits the parent's agent id, so it never runs
-Rule 4's `self-slash`, `--finish` or Step 9; it treats a handoff as document-only and
+Rule 4's finish or the handoff's Step 9; it treats a handoff as document-only and
 reports.
 
 **Never offer or run finish for a session that holds a standing watcher role** (the load, CFEngine and Paseo watchers
-are such sessions; 2026-10-25: a /baton-resumed load watcher queued its own archive). The `bin/watch` registry that
-named the holder and the exit-12 guard were deleted 2026-11-06, so check yourself. Offer handoff and continue, or
+are such sessions; 2026-10-25: a /baton-resumed load watcher queued its own archive). Nothing names the holder any
+more (the watcher registry was deleted 2026-11-06), so check yourself. Offer handoff and continue, or
 keep working; to end it, hand the role over first.
 
-A built-in like `/quit` is not a skill, but you can queue it yourself (operator,
-2026-10-09: "you should actually be able to run /quit yourself"): when he picks
-finish, write the final results as the last message so they stay readable, finish
-everything first (commits pushed, no pending reads), then run
-`~/src/djbclark-ade/bin/self-slash --finish` as the last action and end the turn
-at once. On herdr and Orca (retired from djbclark-ade 2026-10-31; `self-slash` keeps those hosts until D6) that is the old `/quit`; on Paseo `/quit` does nothing
-(it reaches Claude as plain text, seen twice 2026-10-20), so `--finish` waits for
-idle and archives this agent without `--force` (it stays under "Archived agents",
-and the operator can still read the final message). djbclark, 2026-10-20: "if there
-is nothing to continue to just clear context but in a way that the human can still
-read the final results". If the handoff was chosen and it was run document-only,
-offer the finish prompt again once it is written.
+**Finish** (operator, 2026-10-20: "if there is nothing to continue to just clear context but in a way that the human
+can still read the final results"): write the final results as the last message so they stay readable, finish
+everything first (commits pushed, no pending reads), then end the turn with one line for the operator: the session is
+done and can be archived (`paseo agent archive <this agent's id>` once it is idle; it stays under "Archived agents" and
+the final message stays readable). A running agent cannot archive itself, and `/quit` typed into a Paseo composer
+reaches Claude as plain text (seen twice 2026-10-20); the `self-slash --finish` that did both was removed 2026-11-06. If
+the handoff was chosen and it was run document-only, offer the finish prompt again once it is written.
 
-`/compact` works the same way, but only when the context prompt's compact tier
-fires (+140k since the start or last compaction, or 217k total) or he picked it, never just
-because context looks large: each compaction costs ~150k+ token-equivalents
-(`memory/feedback_self_compact.md` item 7). Then, if you are a Claude session on Paseo, or still in a herdr pane or Orca terminal (those two hosts retired from djbclark-ade 2026-10-31, live until D6) (his standing say-so since 2026-10-09, `memory/feedback_self_compact.md`), write down
-what the next turn needs, run `~/src/djbclark-ade/bin/self-slash "/compact <focus>"`
-and end the turn at once. `self-slash` refuses outside a Paseo agent (and the herdr and Orca hosts that live until D6), or when his
-input box holds a draft; then ask him to type it. Grok Bot: skip (G6).
+**Compaction** is left to Claude Code's auto-compaction: an agent cannot run `/compact` on itself (the `self-slash` that
+typed it was removed 2026-11-06). When the context prompt's compact tier fires (+140k since the start or last compaction,
+or 217k total) or the operator picks it, write down what the next turn needs and ask him to type `/compact <focus>`;
+never because context merely looks large: each compaction costs ~150k+ token-equivalents
+(`memory/feedback_self_compact.md` item 7). Grok Bot: skip (G6).
 
 ## Silent mode, before a handoff
 
@@ -263,7 +256,7 @@ prompts, no Rule 4 question in that case. Grok Bot has no `handoff` skill
 ## On Grok Bot (added 2026-10-23)
 
 Grok Bot runs the same audit on its own Linux box (`HOME=/home/box`). It has no
-herdr, Orca, Paseo, launchd, Keychain, `hermes-ping` or Mac process list.
+Paseo, launchd, Keychain, `hermes-ping` or Mac process list.
 
 - **G1 Repos.** `~/src/<repo>` is `/home/box/src/<repo>` (also check `/workspace`,
   the scratch dir, and any worktree you added: `git worktree list`). Remote
@@ -284,8 +277,8 @@ herdr, Orca, Paseo, launchd, Keychain, `hermes-ping` or Mac process list.
   GitHub connector, and Forgejo's API for forgejo.mit.edu. Filing the issue is
   posting: draft it and get his explicit OK first.
 - **G6 Rule 4 on Grok Bot.** Notifying him is a normal chat reply, so skip
-  every `hermes-ping`. There is no `handoff` skill, `/baton`, `self-slash`,
-  `/compact` or `--finish` here:
+  every `hermes-ping`. There is no `handoff` skill, `/baton`,
+  `/compact` or Paseo archive here:
   1. *Handoff and continue*: write the open items and what the next run needs
      somewhere durable (G4), say where, and keep working or stop as he says.
   2. *Finish*: the final results are the last message; nothing else to run.
