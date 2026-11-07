@@ -8,6 +8,7 @@ port (AGENTS.md review rule 1's five properties). The Action's tests are at the 
 """
 
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -1412,6 +1413,40 @@ def test_the_graphql_read_asks_for_the_trust_fields():
     q = adversary_marker.PR_QUERY
     for field in ("headRefOid", "body", "authorAssociation", "author { login }", "userContentEdits(first: 1) { nodes { editor { login } } }", "state"):
         assert field in q, field
+
+
+def test_a_null_usercontentedits_is_a_neveredited_body():
+    # Distinct from an EMPTY nodes list: the connection itself may be null.
+    second = {"json": {"repository": {"pullRequest": {
+        "state": "OPEN", "headRefOid": H1, "body": marker("APPROVE", H1), "authorAssociation": "NONE",
+        "author": {"login": "stranger"}, "userContentEdits": None}}}}
+    rc, report, api = run_ev(wr_event(), serve(7, marker("APPROVE", H1), second=second))
+    assert rc == 0 and api.posted[0]["state"] == "failure"
+    assert report["prs"][0]["last_editor"] == "stranger" and report["prs"][0]["outcome"] == "untrusted"
+
+
+def test_a_null_editor_in_the_newest_edit_falls_back_to_the_author():
+    # The newest edit node's editor is unreadable (e.g. a ghost account): the author is the last editor.
+    second = {"json": {"repository": {"pullRequest": {
+        "state": "OPEN", "headRefOid": H1, "body": marker("APPROVE", H1), "authorAssociation": "NONE",
+        "author": {"login": "stranger"}, "userContentEdits": {"nodes": [{"editor": None}]}}}}}
+    rc, report, api = run_ev(wr_event(), serve(7, marker("APPROVE", H1), second=second))
+    assert rc == 0 and api.posted[0]["state"] == "failure"
+    assert report["prs"][0]["last_editor"] == "stranger" and report["prs"][0]["outcome"] == "untrusted"
+
+
+def test_an_empty_newestnode_list_falls_back_to_the_author():
+    # author-owned PR, body never edited: editor = author, and the owner's trust makes the APPROVE count.
+    rc, report, api = run_ev(wr_event(), serve(7, marker("APPROVE", H1), author="djbclark", assoc="OWNER"))
+    assert rc == 0 and api.posted[0]["state"] == "success" and report["prs"][0]["last_editor"] == "djbclark"
+
+
+def test_the_connection_takes_first_not_last():
+    # The trust-holding node is the NEWEST edit; the connection is newest-first (live probe, PR 302 - 2026-11-07),
+    # so the direction is pinned by its exact argument, and no bare `last:` may ask the connection anywhere.
+    q = adversary_marker.PR_QUERY
+    assert re.search(r"userContentEdits\(first: 1\)", q), q
+    assert not re.search(r"userContentEdits\(last", q), q
 
 
 # ---- the resolve job and --prs ---------------------------------------------------------------------------
