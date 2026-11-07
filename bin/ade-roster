@@ -139,11 +139,11 @@ def bin_rows(root: Path) -> list[tuple[str, str]]:
 def render(root: Path) -> str:
     skills = skill_rows(root)
     tools = bin_rows(root)
-    out = [START, "", f"Skills ({len(skills)}, from each `skills/*/SKILL.md`):", "", "| Skill | What |", "|---|---|"]
+    out = [START, f"Skills ({len(skills)}, from each `skills/*/SKILL.md`):", "", "| Skill | What |", "|---|---|"]
     out += [f"| [`{name}`]({rel}) | {_cell(desc)} |" for name, rel, desc in skills]
     out += ["", f"`bin/` ({len(tools)}, from each file's first docstring or comment):", "", "| Tool | What |", "|---|---|"]
     out += [f"| [`{name}`](bin/{name}) | {_cell(desc)} |" for name, desc in tools]
-    out += ["", END]
+    out += [END]
     return "\n".join(out) + "\n"
 
 
