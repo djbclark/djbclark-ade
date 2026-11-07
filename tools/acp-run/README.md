@@ -56,7 +56,18 @@ independent `pi` billing pool (`codex-api` scope), not the Codex subscription.
    policies, `all`, `read-only` (2026-10-19) and `deny`. `read-only`: the agent
    may read and change nothing. Its read-only tools (ACP kinds `read`, `search`,
    `fetch`) run without a permission request and are answered yes if they ask;
-   any other tool trips the tripwire (exit 77) and any other request is refused.
+   any other tool trips the tripwire (exit 77) and any other request is refused,
+   except an `execute` request whose command line passes `readonly_command` (an
+   allow-list: cat, ls, rg, a plain `curl` GET, joined by `|` `&&` `;`; never `git`, `fd`, `file` or `graft`);
+   it runs outside codex's sandbox, so the list refuses `#`, unquoted globs, braces, `~` and backslashes, program
+   paths outside `/usr/bin` `/bin` `/opt/homebrew/bin`, long options that run a program (prefixes included, `--`
+   is no stop), `rg` without `--no-config` as its FIRST argument while RIPGREP_CONFIG_PATH is set and `curl`
+   without a leading `-q` while a curlrc exists (a `curl` GET can carry read data in its URL, as WebFetch can). The config variables, `HOME` and `PATH` are read from the AGENT's environment (`--agent-env`, `ACP_RUN_ENV_<AGENT>`, launch tweaks), and every request is refused while that `PATH` is set empty or has an empty, relative or in-tree entry, and `curl` needs `-q` whenever `HOME`, `CURL_HOME` or `XDG_CONFIG_HOME` is relative (a bare `cat` would resolve to the reviewed checkout's).
+   `git` is refused on purpose: a git read in codex's sandbox asks for nothing, so a request for git needs more
+   than the sandbox gives, and git then runs the repository's own config (diff.external, textconv, fsmonitor,
+   hooks, ssh/proxy/credential helpers, ext:: transports, submodule configs) as programs outside it; the agent
+   is told to go on without the call. When codex's
+   only refusal option is `cancel` (it ends the turn), acp-run continues the same session up to 3 times (the exit check judges the last turn's words, not an earlier turn's "I will look next"; the summary line says `refusal_end=1` when the final turn ended on a refusal).
    claude gets a session whose built-in tools are only Read, Grep, Glob, LS,
    WebFetch and WebSearch (`_meta.claudeCode.options.tools`; no user settings, no
    MCP servers, mode `default`); codex the `read-only` mode (its sandbox runs shell commands
