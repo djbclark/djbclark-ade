@@ -8,7 +8,8 @@ part was added: prompts and code that hand any browser-only step to Grok Bot. La
 sudo-secretspec are hard dependencies, every listed component is in the install and update system except commercial
 products, and Hermes is offered with a do-it-yourself or AI-assisted setup (S3, S3a). Then: the commercial services (1Password,
 Grok Bot, GitHub Advanced Security, hosted firecrawl, Greptile, CodeRabbit) are optional components, and OVHcloud is
-the suggested host. The sections below go in build order:
+the suggested host. Then: API keys for every TUI and tool are checked, verified, collected in one batch and delivered
+(S3b). The sections below go in build order:
 S1 and S2 come first because every later section reads the config and adds a recipe.
 The research behind S5 is dated 2026-11-07. Sources are listed at the end, and their facts must be re-probed when the work starts.
 
@@ -168,6 +169,86 @@ three paths:
 
 Either path can be re-run later (`just hermes-setup`, `just hermes-setup --self`), and `just update` keeps an installed
 Hermes current like every other component.
+
+### S3b. API keys: check, verify, collect, deliver
+
+Operator, 2026-11-07: every TUI and tool that uses an API key gets one at install, and the keys are re-checked as part of
+keeping things current. The steps run in this order: check what `sudo-secretspec` already holds, verify that each held
+key actually works, then ask for the missing or failing ones one at a time, in a single batch, with the URL to get each.
+Keys are saved with `sudo-secretspec`, and also through Paseo if it has a secure store (S3b.5).
+
+1. **One registry of keys**, in `config/ade.toml` as `[keys.<NAME>]`. Each entry has:
+   - the components that use it;
+   - required or optional (it follows the component's class in S3.2, so a key for an unchosen component is never
+     asked for);
+   - the URL to create it;
+   - a verify probe;
+   - where else it must be delivered (Paseo, or the tool's own credential store);
+   - and, where the provider has one, its expiry.
+
+   The starting list is everything the templates and tools name today:
+   - `agents/*/*.tmpl` `{{ secret "…" }}`: `EXA_API_KEY`, `JINA_API_KEY`, the Hermes and LiteLLM entries;
+   - site-djbclark `human/API-KEYS-E4.md`: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`,
+     `OPENROUTER_API_KEY`, `DEEPSEEK_API_KEY`, `TELEGRAM_BOT_TOKEN`, which `sudo-secretspec run` itself requires;
+   - the tools: `ZAI_CODING_PLAN_API_KEY` (opencode), the opencode Go keys (`skills/oc-go-key`), `CURSOR_API_KEY`
+     (`bin/cursor-cloud`), `FIRECRAWL_GITHUB_PUBLIC_TOKEN` (the router; it expires), `GREPTILE_API_KEY`, CodeRabbit's,
+     hosted firecrawl's, and the merge-gate App's private key (S8; stored in GitHub, not locally).
+
+   TUIs that log in by account (Claude Code, Codex, the Cursor CLI, the antigravity provider) appear as login checks,
+   not keys, unless the user picks key-based auth.
+2. **The URLs** go in the registry and are re-probed when this is built. The starting list, each marked unverified
+   until probed:
+   - Anthropic: `console.anthropic.com/settings/keys`
+   - OpenAI: `platform.openai.com/api-keys`
+   - Google Gemini: `aistudio.google.com/apikey`
+   - OpenRouter: `openrouter.ai/keys`
+   - DeepSeek: `platform.deepseek.com/api_keys`
+   - Z.ai: its API-key page
+   - Cursor: its dashboard's API keys
+   - Exa: `dashboard.exa.ai`
+   - Jina: `jina.ai`
+   - GitHub fine-grained tokens: `github.com/settings/personal-access-tokens/new`, with the scopes the registry names
+   - Telegram: `@BotFather`
+   - Greptile, CodeRabbit and firecrawl.dev: their dashboards.
+3. **Check, then verify.**
+   - `just keys` (also run by `just install`) first asks `sudo-secretspec check` which keys are present. It never
+     reads or prints a value.
+   - For each present key it runs the verify probe under `sudo-secretspec run`. The probe is the provider's cheapest
+     read-only authenticated call (for example, listing models), with argv lists, the key in a header read from the
+     environment, and a short timeout. It records only the outcome:
+     - `ok`;
+     - `invalid` (HTTP 401 or 403);
+     - `no-quota`;
+     - `unreachable`;
+     - `expiring <date>`.
+
+     Outcomes go in `~/.local/state/djbclark-ade/keys.json`, written atomically, with no value and no hash of one.
+   - A probe never spends money, never posts, and is rate-limited to one per key per run.
+4. **Collect in one batch, one key at a time.** After the check, it prints one list of every key that is missing or
+   failing, with its purpose and URL, and asks once whether to enter them now.
+   - For each key in turn it shows the name, what uses it and the URL, then runs `sudo-secretspec set NAME`. That is
+     sudo-secretspec's own no-echo prompt at a real terminal, so the value never passes through djbclark-ade, an
+     agent or a chat.
+   - It verifies the key straight away and offers retry, skip or "skip all".
+   - It ends with a table: each key, ok, skipped or failed.
+   - It reuses sudo-secretspec's `secrets-collect` where that already does the batch (it exists upstream; check its
+     flags when building). It is not reimplemented.
+   - In the AI-assisted setup (S3a.3) the agent stops at each key and the user types it into the prompt themselves.
+5. **Deliver to Paseo and the tools, only through a secure store.**
+   - First probe whether Paseo has a secure credential store for provider keys (the Keychain on the Mac, a 0600 file
+     or the Secret Service on Linux), not one in a plaintext config, and how a key is written to it without echo.
+     The answer is recorded with its date.
+   - **If it does,** `just keys` writes each key the registry marks for Paseo from inside `sudo-secretspec run`, with
+     the value passed on stdin or in the environment, never in argv.
+   - **If it does not,** nothing is copied into Paseo's config. Paseo gets keys at launch instead: the daemon, or the
+     provider's launch, runs under `sudo-secretspec run`. That matches review rule 3: the one place a key is written is
+     a third-party tool's own credential store.
+   - The same rule applies to every TUI's own store, for example opencode's auth file and Hermes' Keychain items.
+6. **Kept current:**
+   - The daily `just update --auto` (S4) runs `just keys --check`, which verifies and never prompts. It pings the
+     operator about any key that is invalid, out of quota or expiring within 14 days, with the URL to replace it.
+   - `just doctor` shows the same table.
+   - A key replaced with `sudo-secretspec set` is re-delivered by the next `just keys`.
 
 ## S4. Updates and keeping everything current
 
