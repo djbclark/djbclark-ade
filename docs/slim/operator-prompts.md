@@ -137,8 +137,9 @@ Report a table: test, PR number, expected, observed, PASS/FAIL; the ruleset id; 
 ```
 PR 297 (the djbclark-ade slim-down) has merged. On this Mac, do the post-merge cleanup in phase C of
 docs/slim/operator-batch.md (now on master: `git -C ~/src/djbclark-ade fetch origin master` then
-`git -C ~/src/djbclark-ade show origin/master:docs/slim/operator-batch.md`). Work in this order, showing me each group's
-exact commands and waiting for my yes before running it:
+`git -C ~/src/djbclark-ade show origin/master:docs/slim/operator-batch.md`). Work in this order, group by group, WITHOUT
+stopping for my yes (operator choice, 2026-11-07): print each group's commands before running them, keep going unless a
+command fails or something differs from the batch, and stop only then:
 1. C1-C5 hook lines in ~/.claude/settings.json (back it up first to ~/.claude/settings.json.pre-slim).
 2. C6-C21 stop the retired launchd jobs and remove their plists (launchctl list first; skip any not loaded; C16, C17 and
    C19 name unverified labels: check them).
@@ -148,6 +149,7 @@ exact commands and waiting for my yes before running it:
 5. C40-C47 hosts and services that name old paths (C40 and C41 change authorized_keys: show the exact line diff).
 6. C48 backup tarball FIRST (verify it opens), then C49-C64 uninstalls and archives. Never touch ~/.gemini/antigravity-acp
    or ~/.gemini/antigravity.
+Never skip the backups (settings.json before group 1, the tarball before group 6, and check that the tarball opens).
 After each group report what ran and its exit status; at the end, a checklist of C1-C64 with done / skipped (why) / failed.
 ```
 
