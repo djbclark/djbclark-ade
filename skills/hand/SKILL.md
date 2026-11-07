@@ -19,7 +19,7 @@ never reaches the `handoff` skill.
 3. Do not summarize or shortcut the skill because this file is short; this file
    adds no behavior of its own.
 
-Per-TUI spelling (2026-11-04): `/hand` in Claude Code, Cursor, Grok,
+Per-TUI spelling (2026-11-04): `/hand` in Claude Code, Cursor,
 Hermes (skill route), omp and opencode;
 `$hand` in Codex (its `/prompts:hand` form is deprecated and not installed).
 The operator wrappers live in `omp/commands/`

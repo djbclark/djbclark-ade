@@ -5,7 +5,7 @@ description: >-
   <repo>/.codex/hooks.json, inline [hooks] in config.toml): PascalCase events
   (PreToolUse, PermissionRequest, Stop, SessionStart ...), command or MCP hooks,
   trust review, deny/allow output. Use for "add a Codex hook", "write hooks.json
-  for Codex", "block a command in Codex". NOT for Cursor, Claude Code or Grok
+  for Codex", "block a command in Codex". NOT for Cursor or Claude Code
   hooks, and not for Codex's separate `notify` setting.
 ---
 

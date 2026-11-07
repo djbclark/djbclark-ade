@@ -162,11 +162,11 @@ Each turn runs a model for many minutes: in an interactive session start `round`
    turn text. A `set` entry with an effort key (`reasoning_effort=high`) becomes `--thinking high`; other
    `set` entries are ignored. Always give a `model`. `claude` (`claude -p --model <m> --effort <e>`, prompt on
    stdin, `CLAUDECODE` unset) and `cmd` (any argv with `{prompt}`/`{cwd}`) are unchanged.
-3. Defaults that worked on 2026-10-10 (through acp-run then; re-probe on Paseo): Grok `grok` / `grok-4.7` with
-   `reasoning_effort=high`; Fable `claude -p --model claude-fable-5-1 --effort high`; **Astra `codex` /
+3. Defaults that worked on 2026-10-10 (through acp-run then; re-probe on Paseo): the Grok seat is Cursor's grok model (`cursor` / `grok-4.7` with
+   `reasoning_effort=high`; the standalone xAI CLI retired 2026-11-07; grok-bot is the other possible occupant); Fable `claude -p --model claude-fable-5-1 --effort high`; **Astra `codex` /
    `gpt-6-astra` with `reasoning_effort=xhigh`**. Astra via copilot is reserved to the ai-heaven lead session
-   (operator ruling 2026-10-10); never configure it elsewhere. Second routes in the example (`cursor` for
-   Grok, the `claude` provider for Fable) are unprobed: run `probe` before relying on them.
+   (operator ruling 2026-10-10); never configure it elsewhere. The second route in the example (the `claude` provider
+   for Fable) is unprobed: run `probe` before relying on them.
 4. Routing never changes authority: the final-word model's rulings stand whichever route
    carried them.
 5. **Moving a seat off a spent pool: env overrides, no config edit.** For seat `<SEAT>` (the

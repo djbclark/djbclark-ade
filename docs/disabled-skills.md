@@ -202,7 +202,7 @@ binary, no app, no `~/.superset`), only their leftovers. Removed: the 14
 `~/.agents/skills/superset-*` skills, `~/.agents/commands/superset`,
 `~/.claude/skills/superset` and `~/.claude/skills-disabled/superset`; the notify
 hooks in the Claude, Codex, Cursor, Gemini, Factory and Mastracode configs, the
-Grok, Amp, omp and pi hook files; the `com.djbclark.superset-home-dir`
+xAI CLI, Amp, omp and pi hook files; the `com.djbclark.superset-home-dir`
 LaunchAgent and the `SUPERSET_HOME_DIR` blocks in `~/.bashrc`, `~/.zshrc` and
 site-djbclark's `shell/bashrc` and `shell/zshrc`; the ShipIt updater plist.
 Timestamps showed the skill and hook files re-written 2026-10-29 17:36 by an

@@ -35,7 +35,6 @@ question. It names the native command for the TUI you are running in.
 | Claude Code | `/btw <question>` | forked query, tools off |
 | Codex | `/side` | ephemeral side conversation in a temporary fork; needs a started thread; Ctrl+C returns to the main thread |
 | Cursor `cursor-agent` | `/btw <question>` | tools disabled |
-| Grok | `/btw <question>` | also works mid-message: `fix the loop. /btw what does WBC stand for?` |
 | omp | `/btw <question>` | bare `/btw` opens side-question history. In omp, `/btww <question>` already runs it (`~/.omp/agent/commands/btww.md`, `side: true`); you only see this text through `/skill:btww` |
 | Hermes | `/btw <question>` | CLI: `/btww <question>` is a `quick_commands` alias for it. Telegram and gateways: use `/btw` |
 | opencode | `/btw <question>` | one-shot answer from session context, not added to the conversation |
