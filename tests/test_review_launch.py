@@ -475,6 +475,18 @@ def test_the_two_modes_have_separate_checks(world):
     assert len(world.checks()) == 2
 
 
+def test_the_check_runs_on_the_launchs_model_and_each_model_has_its_own_check(world):
+    # 2026-11-07: with the default model out of credits, a check on the default model got a 'fallback' content item
+    # and tripped, refusing every launch on a model that would have worked; the check now proves the launch's model.
+    assert world.launch("--model", "opus").returncode == 0
+    check = world.checks()[0]["argv"]
+    assert argv_val(check, "--model") == "opus"
+    assert world.launch("--model", "sonnet").returncode == 0
+    assert len(world.checks()) == 2 and len(list(world.state.glob("check-*.json"))) == 2
+    assert world.launch("--model", "opus").returncode == 0
+    assert len(world.checks()) == 2, "the opus check is cached"
+
+
 def test_a_claude_whose_version_cannot_be_read_is_refused(world):
     world.scenario(version_rc=1)
     assert world.launch().returncode == 2 and world.calls() == []

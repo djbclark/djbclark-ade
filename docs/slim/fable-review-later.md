@@ -11,6 +11,7 @@ Started 2026-11-07, when the Fable credits ran out mid-Wave 5 (the lead fell bac
 ## F2. Security-critical work reviewed only by Opus (a cross-model second opinion is worth it)
 
 - **F2a. `bin/review-launch`, `bin/review-pr`, `.github/workflows/adversary-marker.yml`, `bin/adversary_marker.py`** (E8): written and reviewed by Opus 5.5 (one repair round; the reviewer found the outside-author APPROVE hole). The external boundary (the operator's 2026-11-07 ruling: be pedantic about GitHub input) is the one place a same-family blind spot costs most. Check: the trusted-editor rule, the two-job workflow and its concurrency key, the tripwire's content-type allowlist, the self-check's cache key.
+- **F2a1. The self-check model fix** (2026-11-07, lead on Opus): `bin/review-launch` now runs its self-check on the launch's `--model` and keys the cache by it, after a check on the out-of-credits default model tripped on a `fallback` content item. A Fable read checks that a per-model check cannot be satisfied by one model and reused by another (the key includes the model) and that `fallback` stays a tripwire inside a launch.
 - **F2b. `bin/acp-dispatch` shim's frontier guards** (E6): the burst re-check under a lock, the estimate floor and per-wave cap port. Opus wrote and reviewed it.
 - **F2c. `bin/route_agent.py` frontier gate on merged quota** (E7): the unknown-report rule ("an unknown Paseo report beside a fresh aiuse reading grants") is the lead's reading of the ruling; a Fable second opinion on whether it is right.
 

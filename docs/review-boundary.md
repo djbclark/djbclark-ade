@@ -57,8 +57,9 @@ canned prompt that reads a temp file outside its worktree, `~/.config/gh/hosts.y
 `~/.claude/projects/` and `~/.claude/CLAUDE.md`, plus a control file inside. Each outside read must be refused (judged from
 `permission_denials` and the stream, never from the model's own answer), the control must be read, and the outside file's
 random canary must appear nowhere. `~/.claude/CLAUDE.md` is Claude Code's documented exemption: if it is readable it is
-recorded under `accepted_exposures`, not failed. The result is cached in
-`~/.local/state/review-launch/check-<sha256>.json`; a failed or missing check refuses every launch until
+recorded under `accepted_exposures`, not failed. The check runs on the launch's own `--model` and the result is cached per model in
+`~/.local/state/review-launch/check-<sha256>.json` (the key hashes the Claude version, the settings, the fixed argv, the model
+and the launcher; 2026-11-07: a check on an unavailable default model tripped on its `fallback` notice); a failed or missing check refuses every launch until
 `review-launch --check` passes. `--bare` is not used: it would hide CLAUDE.md but never reads OAuth or the keychain, so the
 Mac's review would have no login.
 

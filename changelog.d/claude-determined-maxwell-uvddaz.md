@@ -57,3 +57,6 @@
 - Changed docs/queue.md: triaged from 2,114 lines into Carried, Closed by the slim-down and Done before, one line each (slim-down E11) (#297).
 - Changed the `handoff` skill's Steps 8 and 9, and `baton`, `loose`, `steps` and `session-handoff`: the agent is named with `paseo agent update --name`, a clear is the operator's `/clear` then `/baton`, a successor starts top-level with `paseo run` and archives its predecessor once it answers; nothing calls `self-slash` or `autorename` (slim-down E11) (#297).
 - Changed docs: eleven design and research records moved to `docs/history/`; `orchestration-practices.md` rewritten for Paseo agents and `fan-out`; `skills.md` regenerated; `threat-model.md`, `paseo-only-rearchitecture.md`, `tui-lessons-learned.md`, `context-hygiene.md`, `git-guard.md`, `mcp-servers.md` and `dispatch-footer.md` re-based (slim-down E11) (#297).
+
+### Fixed
+- `bin/review-launch` runs its boundary self-check on the launch's own `--model` and caches it per model, so an unavailable default model no longer refuses every launch (#297)
