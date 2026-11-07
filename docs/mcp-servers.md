@@ -9,7 +9,7 @@ repo's `.mcp.json`.
 
 Since 2026-10-10, 12 servers (ghost-os, cua-driver, paper-search and 9
 claude.ai connectors) are blocked in Claude Code through `deniedMcpServers` in
-`~/.claude/settings.json`; [disabled-skills.md](disabled-skills.md) lists them,
+`~/.claude/settings.json`; [history/disabled-skills.md](history/disabled-skills.md) lists them,
 why, and how to re-enable. This table is otherwise the 2026-08-23 snapshot.
 
 | Server | Transport / command | Scope | What it is |

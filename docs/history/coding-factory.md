@@ -1,3 +1,4 @@
+<!-- moved from docs/ on 2026-11-07 by the slim-down (E11) -->
 # Unattended coding factory — evaluation and the improved prompt (2026-09-21)
 
 > **Retired from djbclark-ade (2026-10-31):** Orca (the orchestration and worker-dispatch layer named in this 2026-09-21 evaluation) is retired from djbclark-ade;

@@ -1,3 +1,4 @@
+<!-- moved from docs/ on 2026-11-07 by the slim-down (E11) -->
 # Raw response: acp-run claude opus/high, resumed session, section 7 dashboard UX (2026-10-19 ~15:05 EDT)
 
 acp-run applied: {"model": "opus", "effort": "high", "ctx": 1000000, "ctx_source": "usage_update"}; verified model claude-opus-5-5; cost reported $0.4400216; exit 0

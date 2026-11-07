@@ -1,3 +1,4 @@
+<!-- moved from docs/ on 2026-11-07 by the slim-down (E11) -->
 # Paseo plugins and Paseo-specific tooling: a scan for the ADE (2026-10-19)
 
 Summary: Paseo 0.12.0 is installed here with plugins disabled and none installed. The official

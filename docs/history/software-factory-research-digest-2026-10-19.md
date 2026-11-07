@@ -1,3 +1,4 @@
+<!-- moved from docs/ on 2026-11-07 by the slim-down (E11) -->
 # Software factory research digest (2026-10-19)
 
 Summary: what two frontier reads, an OpenRig study and a landscape sweep say about adding the

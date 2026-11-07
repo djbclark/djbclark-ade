@@ -1,3 +1,4 @@
+<!-- moved from docs/ on 2026-11-07 by the slim-down (E11) -->
 # Cutting Claude Code's cache cost: what the data says (2026-10-18)
 
 Scope: item 3a of the graphify answer ("cache reads are most of the cost; shorter sessions and earlier delegation"). Written as research only (the changes that followed are in the Outcome section): nothing on the machine was changed except the new measuring tool, `bin/claude-cost-mix` (djbclark-ade `b117768`, `24bfc5d`).

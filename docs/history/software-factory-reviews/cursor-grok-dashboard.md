@@ -1,3 +1,4 @@
+<!-- moved from docs/ on 2026-11-07 by the slim-down (E11) -->
 # Raw response: acp-run cursor grok-4.7 (256k, fast=false, reasoning_effort=high), resumed session, section 7 dashboard UX (2026-10-19 ~15:09 EDT)
 
 acp-run applied: {"model": "grok-4.7", "effort": "high", "ctx": 256000, "ctx_source": "option context"}; exit 0; no cost reported

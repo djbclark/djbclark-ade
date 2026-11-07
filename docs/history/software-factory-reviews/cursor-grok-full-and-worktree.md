@@ -1,3 +1,4 @@
+<!-- moved from docs/ on 2026-11-07 by the slim-down (E11) -->
 # Raw response: acp-run cursor --model grok-4.7 context=256k fast=false reasoning_effort=high, auth cursor_login (OAuth), full draft incl. section 9 (2026-10-19 ~15:03 EDT)
 
 acp-run applied: {"model": "grok-4.7", "effort": "high", "ctx": 256000, "ctx_source": "option context"}; no cost reported; exit 0

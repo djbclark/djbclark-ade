@@ -1,3 +1,4 @@
+<!-- moved from docs/ on 2026-11-07 by the slim-down (E11) -->
 # Raw response: acp-run agy (default model), section 7 dashboard UX (2026-10-19 ~15:05 EDT)
 
 acp-run applied: {"model": "gemini-3.8-flash", "effort": "high", "ctx": 1048576, "ctx_source": "usage_update"}; no cost reported; exit 0
