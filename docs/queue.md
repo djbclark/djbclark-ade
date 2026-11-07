@@ -91,7 +91,9 @@ under **Carried**, newest first, one line each; an item leaves when it ships (in
     skills linked by `skill-everywhere`), and an automatic way to keep it and every dependency current (software tracks
     its latest release, order 8). Start from what exists: `bin/ade-update` (this checkout only), `bin/ade-sched` for the
     schedule, site-djbclark's `skills/setup-modern-cli`, and the decided but unbuilt proposal `docs/history/ade-everywhere-proposal.md`
-    (2026-10-20, pre-slim: re-base it on Paseo and the slim-down's tool list).
+    (2026-10-20, pre-slim: re-base it on Paseo and the slim-down's tool list). Widened the same day to GitHub setup for a new
+    user (the `ade-merge-gate` App), prompt-injection hardening on demand with a daily drift check, one config file
+    (`config/ade.toml`), a justfile entry point, and browser-only steps through Grok Bot: the plan is `docs/setup-plan.md`.
 
 ## Closed by the slim-down (2026-11-06/07; the slice that closed it)
 
