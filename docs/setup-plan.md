@@ -68,6 +68,17 @@ The research behind S5 is dated 2026-11-07. Sources are listed at the end, and t
         baton, asks, questions-please (`djbclark/paseo-plugin-questions-please`), tell-agent, vitals, skills,
         pr-radar, claude-code-entrypoint-env, session-janitor, session-recovery. The ones not chosen are recorded too
         (zerosub, usage-auto-resume, plan-auto), so `doctor` can tell "not chosen" from "missing".
+      - **The operator's own Paseo plugins and forks**, each as a Paseo plugin component:
+        - **paseo-runner** (`djbclark/paseo-runner`): script packs as tabs of buttons on desktop, web and phone, stage 1
+          (server core, no UI yet, 2026-11-07). Its `scripts/sync-plugins.mjs` installs, disabled, every plugin one
+          daemon has onto the daemons that lack it, which is how `just update` keeps the Mac and vps-primary in step.
+          An earlier draft of this plan listed it as a consumer of djbclark-ade; that was wrong, corrected 2026-11-07.
+        - `djbclark/paseo-plugin-questions-please` (above) and `djbclark/paseo-plugin-dann-workspace-accent`.
+        - The forks `djbclark/paseo-baton`, `djbclark/paseo-plugins` and `djbclark/paseo-transcript-search`: install
+          the upstream unless the fork carries a change not yet upstreamed (standing order 8), and record which one in
+          `[install]`. The baton fork was pushed on 2026-11-07, while the J6 set names upstream baton (dennyferra):
+          decide which one at build time.
+        - The Paseo fork `djbclark/paseo` follows the same rule: upstream Paseo unless the fork is needed.
       - **`graft`** (`@nanonets/graft`), **`gh`**, **`uv`**, **`just`**, `git`, and the modern-CLI tools
         (site-djbclark's `skills/setup-modern-cli` list moves into `[install]`).
       - **The provider command-line tools** for each provider enabled in `[routing]`: Claude Code, Codex, opencode,
@@ -87,9 +98,26 @@ The research behind S5 is dated 2026-11-07. Sources are listed at the end, and t
       - **The LiteLLM proxy** (the fork at `~/src/litellm`, site-djbclark's `roles/litellm`), Hermes' fallback.
    3. **Optional, off by default:** the `herdr4paseo` and `paseo4herdr` bridges (`djbclark/paseo4herdr`) and
       `bin/herdr-server-run`, the last herdr pieces, only for someone who still runs herdr.
-   4. **Never installed:** commercial products and their private material: 1password (site-private's `skills/1password`),
-      and any paid subscription itself. Repositories that *use* djbclark-ade (tendcf, nix2cf, Plektra, paseo-runner)
-      are not components either; site-private is cloned only when the user already has access to it.
+   4. **Never installed: commercial products** (operator, 2026-11-07). The free clients and TUIs of paid services
+      *are* installed (S3.2.1); what is left out:
+      - 1Password: the app, its `op` CLI, and site-private's `skills/1password`.
+      - The paid plans themselves; the user buys and logs in:
+        - Claude Max, which also carries omp's Claude API credits;
+        - the ChatGPT plan behind Codex;
+        - Cursor, which also bills Grok Bot;
+        - the Google AI plan behind the antigravity provider;
+        - opencode Go;
+        - the Z.ai coding plan;
+        - ClinePass.
+      - Grok Bot's cloud service (only its channel, peer-link, is installed).
+      - GitHub Advanced Security, which "code scanning for AI applications" needs (S5 only probes for it).
+      - The hosted firecrawl.dev service (the router points at a self-hosted firecrawl, or none).
+      - Greptile and CodeRabbit: their skills are in site-djbclark and get linked, but the services and their keys
+        are the user's own.
+      - Hosting: the Hetzner VPS (vps-primary) and the Hyades host are infrastructure, not components.
+
+      Repositories that *use* djbclark-ade (tendcf, nix2cf, Plektra) are not components either. site-private is cloned
+      only when the user already has access to it.
 3. **How it installs:** Homebrew on the Mac, plus Homebrew or the distribution's package manager on Linux (decided per
    component, recorded in `[install]`). npm, uv/pipx or a git clone are used where that is a component's normal path.
    Nothing is version-pinned (standing order 8).
