@@ -14,6 +14,8 @@ Wave 4 of `docs/slim/PLAN.md` (E7, D4). Writer: one Claude agent in its own work
 
 1e. **C3 per-file gate**: tendcf and nix2cf name the quota gates (`gate-profile`, `ade_gates`?): `grep -rn "gate-profile\|ade_gates\|claude-quota-guard\|claude-fleet-governor" /home/user/tendcf /home/user/nix2cf /home/user/site-djbclark 2>/dev/null` (clones may exist read-only): list every hit with its line in the report for the lead's J2b edits; do not edit those repos.
 
+1f. **E6 constraint**: the acp-dispatch shim imports names from `route_agent` and `ade_gates` (listed in `docs/slim/reports/wave4-E6.md` section I, `read_guard_state` among them). Keep every imported name importable with the same signature (a `read_guard_state` that returns the merged snapshot's claude reading is fine); run `tests/test_acp_dispatch.py` as part of your targeted set.
+
 ## 2. `skills/model-routing` rewritten; `docs/model-routing.md`
 
 One `SKILL.md` around the Claude tiers (PLAN section G: Fable 5.1 for leads/architects/adversaries; Opus 5.5 for rewrites and reviewers; Sonnet 5.5 for audits, deletions, inventories; Haiku 5.5 for mechanical work) plus one row per surviving pool with its kinds, from `route_agent.py policy --md` (the one copy; the skill embeds nothing that the policy prints). Fold in `skills/effort-routing` (effort levels) and the **model-chain half** of `skills/fallback-chains` (the web half went in 3b); delete both skill dirs. `docs/model-routing.md` rewritten to match, dated. `config/routing.toml` trimmed to the surviving `[[service]]` rows, the `[routing]`, `[calibrate]`, `[dispatch]`, `[lead]`, `[escalation]` tables that the kept code reads (delete `[discovery]`, `[substrate]`, `[hermes]` if nothing reads them: `grep -n` each key).
