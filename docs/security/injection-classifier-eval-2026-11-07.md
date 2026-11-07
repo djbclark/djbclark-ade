@@ -81,8 +81,9 @@ model ran the whole set **twice** to test answer stability.
   live PR, issue or repository under attack; nothing was posted, opened or
   commented anywhere.
 - **Deletion (operator rule S5 of the eval brief).** Payload files (payloads/, benign/, raw parquet/jsonl)
-  were deleted after aggregation; only the scores CSVs and this document
-  remain (committed tables carry ids/labels/scores only).
+  were deleted after aggregation; only the scores CSVs (kept in the eval
+  scratch directory, never in this repo) and this document remain
+  (committed tables carry ids/labels/scores only).
 
 ### 2.4 Metrics
 
@@ -212,23 +213,22 @@ gate is a triage signal, not a boundary.
 
 ## 8. Addendum (2026-11-07, operator-picked): encoding/hidden-form mini-set
 
-After the main runs, the operator chose a follow-up: a 23-sample mini-set of
-**encoded and hidden-form** injections synthesized from the published
-disclosure patterns (hidden HTML comments carrying agent instructions —
-Comment and Control / Copilot Agent and CamoLeak shapes; base64-wrapped
-instructions; a fake "trusted section"; a Clinejection-style
-install-from-fork-in-a-comment; an ANSI-escape CI-log line), plus 8 benign
-hard negatives that look dangerous (real HTML comments in our docs, a
-documentation `adversary-verdict` marker, legitimate base64/certificate
-blobs, a Camo-style badge URL). Same harness, same rules (S1-S5), Jev only,
-2 runs. These strings were synthesized by the operator's agent from the cited
-write-ups, not downloaded; they went file -> container -> classifier only and
-were deleted after scoring.
+After the main runs, the operator chose a follow-up: **15 encoded/hidden-form
+injections** synthesized from the published disclosure patterns (hidden HTML
+comments carrying agent instructions — Comment and Control / Copilot Agent
+and CamoLeak shapes; base64-wrapped instructions; a fake "trusted section";
+a Clinejection-style install-from-fork-in-a-comment; an ANSI-escape CI-log
+line), plus **8 benign hard negatives** that look dangerous (real HTML
+comments in our docs, a documentation `adversary-verdict` marker, legitimate
+base64/certificate blobs, a Camo-style badge URL) — 23 samples in all. Same
+harness, same rules (S1-S5), Jev only, 2 runs. These strings were synthesized
+by the operator's agent from the cited write-ups, not downloaded; they went
+file -> container -> classifier only and were deleted after scoring.
 
 **Result:** 15/15 injections at p >= 0.9 (lowest 0.96), 0/8 benign at
 p >= 0.9 (6/8 at <= 0.1), identical across both runs. Jev reads through
 HTML-comment hiding and base64 wrapping on instruction-shaped payloads. This
 narrows §7's "adaptive/encoding attacks untested" gap for the
-disclosure-style encodings (not for novel adaptive attacks), and strengthens
-the fleet-watch hold: the incident shapes of Clinejection, Comment and
-Control and CamoLeak would each have tripped p >= 0.9.
+disclosure-style encodings — not for novel adaptive attacks, and not proof
+that the exact historical incident texts would score the same: only their
+published shapes, re-synthesized, did.
