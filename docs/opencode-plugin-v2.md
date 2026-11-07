@@ -161,3 +161,24 @@ Adopting an upstream replacement remains a separate contract review.
    released contract before considering any replacement; do not switch merely
    because the subcommand exists.
 
+
+## Paseo bridge plugin: blank OpenCode model list (2026-11-04)
+
+Symptom: after a Paseo daemon restart the OpenCode model list in Paseo is empty;
+the Paseo daemon log has `OpenCodeLocationReadyTimeoutError` and
+`/api/rpc/paseo.bridge/bind failed (HTTP 500)`, and OpenCode's log repeats
+`rpc handler failed rpc=paseo.bridge method=bind defect="TypeError: ECONNREFUSED"`.
+Cause: the `paseo-managed-bridge` plugin keeps session bindings in memory across
+plugin reloads and ignores a refused connection to the old bridge only for
+`error.cause.code === "ECONNREFUSED"` or `error.code === "ConnectionRefused"`;
+OpenCode 2.2.5's Bun 1.4.4 sets `error.code === "ECONNREFUSED"`, so the stale
+binding is never dropped. Upstream: getpaseo/paseo#8780.
+
+Fix: `bin/opencode-plugin-guard` (no `--check`) applies a one-line exact-string
+patch to `~/.config/opencode/plugins/paseo-managed-bridge/server.js`. OpenCode's
+file watcher reloads the plugin without a restart (running sessions keep going);
+Paseo retries the bind every ~4 s, the patched handler clears the stale binding,
+and `paseo provider models opencode` lists models again (177 on 2026-11-04). The
+patch is transient: Paseo rewrote the file from its runtime copy about a minute
+later, which does not matter once the binding is cleared. `--check` only reports.
+The step goes away when Paseo ships the fix (the vulnerable line is then absent).
