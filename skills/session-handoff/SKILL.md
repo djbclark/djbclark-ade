@@ -149,13 +149,11 @@ treat every owner as possibly live (step 4).
 2. **Match S to a row of `paseo ls -a -g --json`** (trusted tools, see above). The row is the owner if S
    equals the row's `id` or `shortId`, or S (8+ chars) is a prefix of the row's `id`. A herdr pane id, a
    claude transcript UUID or free text matches no Paseo row (herdr panes were retired 2026-10-31): that is
-   step 4's no-match, never a match. Only a full-id match, your own `then: /baton` line (C1) or the watch
-   role (C2) makes the chain yours. It also needs the row's `provider` (`claude/<model>`, `codex/...`, `omp/...`)
+   step 4's no-match, never a match. Only a full-id match or your own `then: /baton` line (C1) makes the chain yours. It also needs the row's `provider` (`claude/<model>`, `codex/...`, `omp/...`)
    to fit `writer` (`claude*` to claude, `omp*` to omp, `codex` to codex, otherwise any); a row of
-   another agent is not the owner and is read as no match. (The old second source, `bin/watch status --json` holders, was deleted with `bin/watch` 2026-11-06; a closed Paseo
-   agent is still resumable by the next message, so read a `closed` fleet row as a possible live owner.)
+   another agent is not the owner and is read as no match.
 3. **Live** means the row's `status` is not `closed` and `paseo agent inspect ID --json` does not read
-   `Archived: true` (every other status is live), or the watch exception above applies. `finished` is only a transcript hint (the last prompt was `/handoff` or
+   `Archived: true` (every other status is live). `finished` is only a transcript hint (the last prompt was `/handoff` or
    a quit) and is NEVER evidence that the session stopped: a session executing `/handoff` still writes and
    commits, so a `working` row with `finished: /handoff` stays live (a stale hermes row with `finished:
    done` costs one question, the safe direction). **You** are the owner only when the row is YOUR caller row: the
@@ -225,16 +223,16 @@ treat every owner as possibly live (step 4).
   A `launch.py start --baton`
   start writes no such line, so it goes through the ask.
 - **C. Your own chain after `/clear` or `/new`, no live other owner:** one of: (1) the newest `then:
-  /baton` line for your id in `~/.local/state/self-slash.log` follows a handoff of this chain, (2) (retired 2026-11-06 with `bin/watch`: holding a watch role), both affirmative evidence that the
-  chain is yours; or (3) the operator named the chain (`/baton PATH`, `--dir .../chains/<key>`) and its
+  /baton` line for your id in `~/.local/state/self-slash.log` follows a handoff of this chain, which is affirmative evidence that the
+  chain is yours; or (2) the operator named the chain (`/baton PATH`, `--dir .../chains/<key>`) and its
   `workspaces[].dir` includes your cwd, which is only naming. C waives the no-match question of step 4
   (a claude's old transcript sid matches no row after `/clear`); it never overrides a step 2 match to a
-  live row that is not you, and (3) never applies while step 4 lists a live candidate other than you
+  live row that is not you, and (2) never applies while step 4 lists a live candidate other than you
   (a stale or free-text S can hide a live owner working in the same workspace): that case asks.
 
 **Reconciling with `baton`'s "Which chain".** A pointer resolved only by directory whose owner is another
 live session is not yours: say so and look further, no question. A chain that is otherwise yours (queued by
-your `/new`, watch role, operator-named) but whose log a live other session also owns is asked about, per
+your `/new`, operator-named) but whose log a live other session also owns is asked about, per
 steps 4 and 5 above, before the first write or resume.
 
 ### Chain discovery fallback (cwd doesn't resolve to a workspace)

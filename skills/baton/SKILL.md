@@ -47,7 +47,7 @@ the operator for information the file already answers).
 **Which chain, before resolving by directory (2026-10-25).** A `/baton` queued by `self-slash "/new"`
 belongs to the chain that session just handed off, and the directory can name a different one: a fresh
 load watcher resumed the repo's `main` chain while its own was `load-spike-monitor-t`, and then queued
-its own archive. Read `~/.local/state/self-slash.log`: if the newest `then: /baton` line for it follows a handoff
+its own archive. Read `~/.local/state/self-slash.log`: if the newest `then: /baton` line for this agent (`$PASEO_AGENT_ID`) follows a handoff
 naming a chain, resume THAT chain (`session-handoff` chain discovery, `--dir .../chains/<key>`). A
 directory-resolved pointer whose owner is another live session is not yours: say so and look further.
 **Live owner: ask before the first write (2026-11-01).** After resolving any chain, run `session-handoff`'s
@@ -56,7 +56,7 @@ omp, codex and Paseo logs, the fail-closed rule when nothing matches, the exempt
 the named successor and your own chain after `/clear` or `/new`). It applies only before the first write
 or resume; a read-only `/baton` just reports the owner. Reconciled with the paragraph above: a
 directory-resolved pointer owned by another live session is not yours, look further; a chain that is yours
-by `/new`, watch role or the operator's naming but that a live other session also owns is asked about
+by `/new` or the operator's naming but that a live other session also owns is asked about
 first. Incident: 2026-10-31, a `/baton` after `/clear` merged PR 173 ahead of PR 177.
 (The watch-holder guard of `self-slash --finish` went with `bin/watch` and `bin/self-slash`, 2026-11-06.)
 

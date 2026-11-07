@@ -92,8 +92,8 @@ parses to something else.
 
 | Secret | Used by | Why a secret |
 |---|---|---|
-| `JINA_API_KEY` | opencode `mcp.jina.headers.Authorization` | plaintext Bearer key in the live file (web-access.md 5.3.2) |
-| `EXA_API_KEY` | opencode `mcp.exa.headers.x-api-key` | plaintext key in the live file (web-access.md 5.3.2) |
+| `JINA_API_KEY` | opencode `mcp.jina.headers.Authorization` | plaintext Bearer key in the live file |
+| `EXA_API_KEY` | opencode `mcp.exa.headers.x-api-key` | plaintext key in the live file |
 | `TODO_BEZALEL_API_KEY` | codex `mcp_servers.bezalel.http_headers.Authorization` | plaintext Bearer token in the live file; Hermes's `.env` calls it `MCP_BEZALEL_API_KEY` |
 | `TODO_LITELLM_HERMES_KEY` | hermes `providers.litellm-local.api_key` | a `sk-` style key for the local LiteLLM proxy |
 | `TODO_HERMES_DASHBOARD_PASSWORD_HASH` | hermes `dashboard.basic_auth.password_hash` | a scrypt hash; offline-guessable, so treated as a secret |

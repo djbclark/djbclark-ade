@@ -272,4 +272,4 @@ pages. On a host with `model-routing` / `effort-routing` skills, follow them.
    queries to the operator, and waits. **No synthesis, writer or gate step
    runs while a needed source is missing**; resume the same slice once the
    provider recovers. A page that a later rung did return is fine; note the
-   rung. Detail: `web-access.md` section 1.
+   rung. (The written ladder `web-access.md` was deleted 2026-11-06.)

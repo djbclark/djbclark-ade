@@ -281,8 +281,8 @@ ops-promotion pilot passes.
       cow pasture clean and pushed, or its owner named; bigteam inboxes drained.
    3. **No Paseo worktree fan-out before the preserve point exists**: until D1.3 and D2's gate have both
       passed, Paseo workspaces created for work use `isolation: local`, task worktrees come from
-      `git worktree add` (order 9), and `session-janitor` stays disabled (B4.3). Paseo's `paseo-handoff` skill
-      (the vendored `ade-paseo-handoff` copy that carried a pointer to this rule was deleted 2026-11-06).
+      `git worktree add` (order 9), and `session-janitor` stays disabled (B4.3). The vendored `ade-paseo-handoff` skill carried a pointer to this rule;
+      it was deleted 2026-11-06 and Paseo's own `paseo-handoff` replaces it.
 1. **Contracts and safety net.** Each probe is a repeatable script under `tests/paseo-acceptance/` with an
    **expected outcome and a named consequence if it fails**; D2 starts only when every consequence is
    resolved. D1 probes native Paseo behaviour and the non-plugin pieces it builds (the B4 teardown, the B9
