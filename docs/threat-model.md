@@ -239,7 +239,8 @@ others, and the merge path is unenforced. "Control" is what exists; "Gap" is wha
   marker's shape and that its `head` equals the PR head, which catches a stale or typo'd verdict, and since
   2026-11-07 the `adversary-marker` Action counts an APPROVE only in a body whose **last editor** is the
   repository owner, or whose author is an OWNER, MEMBER or COLLABORATOR and edited it last (GraphQL
-  `lastEditedBy`, `authorAssociation`), so an outside fork author cannot approve their own PR; **the operator
+  `userContentEdits(last: 1)`'s editor since GitHub removed `lastEditedBy` on 2026-11-07, and
+  `authorAssociation`), so an outside fork author cannot approve their own PR; **the operator
   approves an outside PR by editing its body**. A fabricated APPROVE written by a trusted account (one of our
   own agents with the operator's login) is still indistinguishable from a real one: treat it as a claim. The
   Action never executes, interpolates or checks out anything from a PR. Until the operator's ruleset requires
