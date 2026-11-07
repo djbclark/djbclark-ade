@@ -176,6 +176,14 @@ class TestProviderMapAndArgv(Base):
                 self.assertEqual((rec["provider"], rec["boundary"]), (agent, "paseo"))
         self.assertFalse((self.out / "jobs").exists())                          # a dry run writes nothing
 
+    def test_child_dispatch_uses_requested_directory_instead_of_parent_workspace(self):
+        parent = self.tmp / "parent-workspace"
+        parent.mkdir()
+        r = self.dispatch(FAKE_PASEO_PARENT_CWD=str(parent))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        agents = json.loads((self.state / "agents.json").read_text())
+        self.assertEqual(Path(agents[0]["cwd"]).resolve(), self.repo.resolve())
+
     def test_effort_becomes_thinking(self):
         argv = self.dry("claude", "sonnet", "--effort", "high")["argv"]
         self.assertEqual(argv[argv.index("--thinking") + 1], "high")

@@ -17,6 +17,7 @@ counted exactly. Knobs (all optional):
   FAKE_PASEO_MODELS     JSON {provider: [model ids]} for `provider models P` (default: none listed, an empty array)
   FAKE_PASEO_USAGE      JSON list for `usage ls` (default []); FAKE_PASEO_USAGE_RC exits with that code instead
   FAKE_PASEO_RUN_FAIL   `run` prints a JSON error and exits 1
+FAKE_PASEO_PARENT_CWD Simulate parent workspace placement unless a workspace is explicit
 """
 import fcntl
 import json
@@ -125,8 +126,14 @@ def run(args):
         flags, prompt = rest[:cut], " ".join(rest[cut + 1:])
         provider = (opt(flags, "--provider") or [""])[0]
         labels = dict(x.split("=", 1) for x in opt(flags, "--label"))
+        cwd = (opt(flags, "--cwd") or [""])[0]
+        # Paseo caller placement inherits the parent's workspace unless the run
+        # explicitly selects/creates a workspace; --cwd alone does not override it.
+        parent_cwd = os.environ.get("FAKE_PASEO_PARENT_CWD")
+        if parent_cwd and not opt(flags, "--new-workspace") and not opt(flags, "--workspace"):
+            cwd = parent_cwd
         agent = {"id": f"agent-{len(agents) + 1:04d}", "provider": provider, "mode": (opt(flags, "--mode") or [""])[0],
-                 "title": (opt(flags, "--title") or [""])[0], "cwd": (opt(flags, "--cwd") or [""])[0],
+                 "title": (opt(flags, "--title") or [""])[0], "cwd": cwd,
                  "labels": labels, "status": "running", "prompts": [prompt]}
         act(agent, prompt)
         agents.append(agent)

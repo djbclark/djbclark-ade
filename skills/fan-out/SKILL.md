@@ -41,8 +41,12 @@ A slice that edits code gets its own linked worktree (AGENTS.md order 9:
 `load-watch admit` and the agent cap (exit 75: retry later), and runs `paseo run --no-wait` with the
 labels `ade.via=acp-dispatch`, `ade.kind`, `ade.name`, `ade.lead`. `--perm read-only` for a review: Claude
 runs through `bin/review-launch` (the enforced review boundary); every other agent runs best effort, in its
-default mode with a brief note to change nothing (`perm_note` in the record; operator ruling 2026-11-07). A plain `paseo run --no-wait --provider P/M --mode M --cwd DIR "<prompt>"`
+default mode with a brief note to change nothing (`perm_note` in the record; operator ruling 2026-11-07). A plain `paseo run --no-wait --provider P/M --mode M --new-workspace local --cwd DIR "<prompt>"`
 works too when you need none of that, but then you write the footer into the prompt yourself.
+As verified on 2026-11-07, agent-origin runs must explicitly select a workspace: `--cwd` alone inherits
+the parent agent's workspace and directory. The shim uses `--new-workspace local` to import the assigned
+directory while preserving the parent link. This imports the already claimed worktree; it creates no Git worktree.
+Verify the returned `cwd` against the assigned directory before treating a launch as correctly placed.
 
 ## 4. Collect
 
