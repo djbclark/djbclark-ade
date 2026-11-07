@@ -711,7 +711,7 @@ def _merge_pool(into: dict[str, Any], key: str, entry: dict[str, Any]) -> None:
     p_rem, e_rem = prior.get("remaining"), entry.get("remaining")
     take_new = e_rem is not None and (p_rem is None or e_rem < p_rem)
     merged = dict(entry if take_new else prior)
-    merged["windows"] = {**prior.get("windows", {}), **entry.get("windows", {})}
+    merged["windows"] = _merge_caps(prior.get("windows"), entry.get("windows"))   # per window, the tighter known reading
     merged["sublimits"] = _merge_caps(prior.get("sublimits"), entry.get("sublimits"))
     merged["remaining"] = e_rem if take_new else p_rem
     into[key] = merged

@@ -60,3 +60,6 @@
 
 ### Fixed
 - `bin/review-launch` runs its boundary self-check on the launch's own `--model` and caches it per model, so an unavailable default model no longer refuses every launch (#297)
+- `acp-dispatch` reads `review-launch --json`'s `structured_output` envelope, so a Claude read-only or deny slice's report is no longer lost as no-report (#297)
+- `acp-dispatch` keeps a slice's in-flight reservation while it waits for an agent slot and re-judges admission on a fresh quota reading before launching (#297)
+- `route_agent.py` keeps the tighter reading per quota window when aiuse and `paseo usage ls` both report it (#297)

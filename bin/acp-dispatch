@@ -526,7 +526,7 @@ def inflight_records(service: str | None, agent: str, skip: Path, out: Path, liv
             continue
         aid = row.get("paseo_agent_id")
         if ((aid and (live is None or aid in live)) or (row.get("boundary") == "review-launch" and pid_alive(row.get("pid")))
-                or time.time() - started_at(row) < INFLIGHT_SPAWN_GRACE):
+                or row.get("waiting_for_slot") or time.time() - started_at(row) < INFLIGHT_SPAWN_GRACE):
             busy.append(path)
     return busy
 
@@ -1019,7 +1019,8 @@ def owner_session_id() -> str:
 def refuse_launch(record: Path, detail: str, code: int, cls: str) -> int:
     release_reservation()
     status = "unavailable" if code in (LOAD_GATE_EXIT, UNAVAILABLE_EXIT) else "refused"
-    update_record(record, status=status, unavailable_class=cls, detail=detail, finished=time.time(), exit=code)
+    update_record(record, status=status, unavailable_class=cls, detail=detail, finished=time.time(), exit=code,
+                  waiting_for_slot=None)
     print(f"{status}\t{record.stem}\t{detail}")
     return code
 
@@ -1042,6 +1043,7 @@ def launch_paseo(record: Path, a: argparse.Namespace) -> int | None:
     agent is countable. The lock is not held while waiting for room. None = launched, else the exit code."""
     rec, cap = read_record(record), agent_cap()
     deadline = time.monotonic() + (load_wait(a) if gate_on(a) else 0)
+    waited = False
     while True:
         with launch_lock():
             n, _, _, why = count_agents() if cap else (0, None, set(), "")
@@ -1049,13 +1051,42 @@ def launch_paseo(record: Path, a: argparse.Namespace) -> int | None:
                 return refuse_launch(record, f"{LOAD_RETRY_TEXT}: the live agent count is unreadable ({why}) "
                                              "refused=agents_unreadable", LOAD_GATE_EXIT, "load")
             if not cap or n < cap:
+                if waited:
+                    code = recheck_after_wait(record, a)
+                    if code is not None:
+                        return code
+                    rec = read_record(record)
                 code = launch_locked(record, rec)
+                update_record(record, waiting_for_slot=None)
                 release_reservation()
                 return code
         if time.monotonic() >= deadline:
             return refuse_launch(record, f"{LOAD_RETRY_TEXT}: {n} acp-dispatch Paseo agents live (cap {cap}) "
                                          "refused=agents", LOAD_GATE_EXIT, "load")
+        if not waited:      # while it waits for room the record keeps its in-flight reservation (inflight_records)
+            update_record(record, waiting_for_slot=True)
+            waited = True
         time.sleep(min(CAP_POLL_S, max(0.1, deadline - time.monotonic())))
+
+
+def recheck_after_wait(record: Path, a: argparse.Namespace) -> int | None:
+    """After waiting for an agent slot: a fresh quota reading, then the in-flight cap and reservation re-judged under
+    the in-flight lock (as `write_and_recheck`), so a long wait cannot launch a slice the pool no longer fits."""
+    remaining, reading = pool_reading(a.agent, a.model, fresh=True)
+    update_record(record, snapshot_remaining_before=remaining, snapshot_reading=reading)
+    LOCK_DIR.mkdir(parents=True, exist_ok=True)
+    with (LOCK_DIR / "inflight.lock").open("a") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        rec = read_record(record)
+        why = inflight_recheck(record, rec)
+        if why:
+            update_record(record, status="unavailable", unavailable_class="inflight", detail=why, finished=time.time(),
+                          exit=UNAVAILABLE_EXIT, waiting_for_slot=None)
+    if not why:
+        return None
+    release_reservation()
+    print(f"unavailable\t{record.stem}\tclass=inflight {why} (after waiting for an agent slot)")
+    return UNAVAILABLE_EXIT
 
 
 def launch_locked(record: Path, rec: dict) -> int | None:
@@ -1151,7 +1182,11 @@ def run_review(record: Path) -> tuple[str, str]:
     tail = (err.strip().splitlines() or [""])[-1][:300]
     if rc == 0:
         try:
-            text = json.loads(out)["report"]
+            doc = json.loads(out)
+            # `review-launch --json` prints a run record with the schema object under `structured_output`
+            # (bin/review-launch main); a bare schema object is accepted too (review-launch without --json).
+            body = doc.get("structured_output") if isinstance(doc, dict) and "structured_output" in doc else doc
+            text = body["report"]
             if not isinstance(text, str):
                 raise TypeError("report is not a string")
             write_atomic(Path(rec["report"]), text.rstrip() + "\n")

@@ -380,6 +380,26 @@ class TestLoadGateAndCap(Base):
         refused = [self.record(f"i{i}") for i, c in enumerate(codes) if c == 5]
         self.assertTrue(all(r["status"] == "unavailable" and r["unavailable_class"] == "inflight" for r in refused))
 
+    def test_a_record_waiting_for_an_agent_slot_keeps_its_in_flight_reservation(self):
+        # Codex P2 on PR 297 (2026-11-07): a dispatch waiting for a slot fell out of the other dispatches' in-flight
+        # count after INFLIGHT_SPAWN_GRACE; it now counts while `waiting_for_slot` is set, however long it has waited.
+        mod = load_module()
+        out = self.out
+        (out / "jobs").mkdir(parents=True, exist_ok=True)
+        old = {"agent": "claude", "model": "sonnet", "status": "running", "finished": None, "paseo_agent_id": None,
+               "started": time.time() - 3 * mod.INFLIGHT_SPAWN_GRACE}
+        (out / "jobs" / "stale.json").write_text(json.dumps(old))
+        (out / "jobs" / "waiting.json").write_text(json.dumps({**old, "waiting_for_slot": True}))
+        busy = mod.inflight_records(None, "claude", out / "jobs" / "me.json", out, set())
+        self.assertEqual([p.stem for p in busy], ["waiting"])
+
+    def test_a_slot_wait_ends_by_rejudging_admission_on_a_fresh_reading(self):
+        self.assertEqual(self.gated("--detach", "--no-wait", name="w1", FAKE_PASEO_AGENT="running").returncode, 0)
+        r = self.gated("--detach", "--no-wait", "--load-wait", "2", name="w2", FAKE_PASEO_AGENT="running",
+                       LW_MAX_AGENTS="1")
+        self.assertEqual(r.returncode, 75, r.stdout + r.stderr)              # the slot never opened: still the load gate
+        self.assertFalse(self.record("w2").get("waiting_for_slot"))         # a refused record holds no reservation
+
     def test_the_cap_follows_lw_max_agents_and_zero_turns_it_off(self):
         self.assertEqual(self.gated("--detach", "--no-wait", name="c1", FAKE_PASEO_AGENT="running").returncode, 0)
         self.assertEqual(self.gated("--detach", "--no-wait", name="c2", FAKE_PASEO_AGENT="running",

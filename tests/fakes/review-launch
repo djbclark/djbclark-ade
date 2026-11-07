@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """A stub of E8's `bin/review-launch` (interface: docs/slim/briefs/wave4-E8-gate.md 1a) for tests/test_acp_dispatch.py.
-It logs its argv to $FAKE_RL_LOG and answers per FAKE_RL_MODE: ok (stdout `{"report": ...}` ending DONE) | blocked |
+It logs its argv to $FAKE_RL_LOG and answers per FAKE_RL_MODE: ok (stdout: the real --json envelope, `structured_output.report` ending DONE) | bare (a bare `{"report": ...}`) | blocked |
 tripwire (77) | refused (2) | noout (3) | timeout (124) | garbage (exit 0, not JSON)."""
 import json
 import os
@@ -11,10 +11,18 @@ if log:
     with open(log, "a") as fh:
         fh.write(json.dumps(sys.argv[1:]) + "\n")
 mode = os.environ.get("FAKE_RL_MODE", "ok")
+def envelope(report):
+    # the shape `review-launch --json` really prints (bin/review-launch main): the schema object under structured_output
+    return json.dumps({"exit": 0, "reason": "", "structured_output": {"report": report}, "init": None,
+                       "permission_denials": [], "num_turns": 1, "tool_uses": 0, "check": "", "accepted_exposures": []})
+
+
 if mode == "ok":
+    print(envelope("STATUS: reviewed\nno findings\nDONE"))
+elif mode == "bare":
     print(json.dumps({"report": "STATUS: reviewed\nno findings\nDONE"}))
 elif mode == "blocked":
-    print(json.dumps({"report": "BLOCKED: which base should I review against?"}))
+    print(envelope("BLOCKED: which base should I review against?"))
 elif mode == "garbage":
     print("not json")
 else:

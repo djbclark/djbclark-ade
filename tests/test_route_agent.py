@@ -2443,6 +2443,15 @@ class TestQuotaFromPaseoUsage(unittest.TestCase):
     def win(label, used=None, left=None, resets="2026-11-10T00:00:00Z"):
         return {"id": label, "label": label, "usedPct": used, "remainingPct": left, "resetsAt": resets}
 
+    def test_an_overlapping_window_keeps_the_tighter_reading_from_either_source(self):
+        # Codex P2 on PR 297 (2026-11-07): the merge overlaid the second source's windows, so aiuse 20% on 5-hour and
+        # Paseo 80% left windows['5-hour'] = 80 while remaining = 20, and window_fit admitted a 30% slice.
+        into = {"codex": {"remaining": 20.0, "windows": {"5-hour": 20.0, "Weekly": 60.0}}}
+        r._merge_pool(into, "codex", {"remaining": 80.0, "windows": {"5-hour": 80.0, "Weekly": 50.0, "Monthly": 90.0}})
+        self.assertEqual(into["codex"]["remaining"], 20.0)
+        self.assertEqual(into["codex"]["windows"], {"5-hour": 20.0, "Weekly": 50.0, "Monthly": 90.0})
+        self.assertIsNotNone(r.window_fit({"5-hour": 30.0}, into["codex"]["windows"])[0])
+
     def test_an_available_report_gives_windows_balances_the_tightest_and_its_reset(self):
         pools = r.usage_from_paseo([self.row("codex", windows=[self.win("5-hour", used=30.0, left=70.0),
                                                                  self.win("Weekly", used=55.0, resets="2026-11-12T00:00:00Z")],
