@@ -22,7 +22,7 @@ import ade_gates as g  # noqa: E402
 
 NOW = datetime(2026, 10, 26, 16, 0, 0, tzinfo=UTC)      # 12:00 PM EDT, a Monday
 STANDING = {"frontier1_judged": 1.0, "frontier2_judged": 1.0, "frontier1_per_wave": 2.0, "frontier2_per_wave": 1.0,
-            "frontier1_agent_calls_per_day": 4.0, "frontier1_min_left": 10.0, "frontier1_window_min_left": 30.0,
+            "frontier1_agent_calls_per_day": 4.0, "frontier1_min_left": 15.0, "frontier1_window_min_left": 30.0,
             "frontier2_min_left": 60.0}     # the 2026-10-27 ruling; the window floor since 2026-11-07
 
 
@@ -80,16 +80,16 @@ def test_the_shipped_baseline_loads_as_the_standing_allowance(fenv):
 def test_a_closed_frontier_baseline_is_the_code_default(fenv_closed):
     t, info = front()
     assert t == g.FRONTIER_DEFAULTS and info["profile"] is None
-    assert (t["frontier1_per_wave"], t["frontier2_per_wave"], t["frontier1_min_left"]) == (1, 1, 10)
+    assert (t["frontier1_per_wave"], t["frontier2_per_wave"], t["frontier1_min_left"]) == (1, 1, 15)
 
 
 def test_a_gates_toml_baseline_past_its_floor_bound_is_replaced_by_the_code_default(fenv):
     fenv.write_text(fenv.read_text().replace("frontier1_agent_calls_per_day = 4 ", "frontier1_agent_calls_per_day = 5 ", 1)
                     .replace("frontier1_per_wave = 2 ", "frontier1_per_wave = 3 ", 1)
-                    .replace("frontier1_min_left = 10.0 ", "frontier1_min_left = 1.0 ", 1)
+                    .replace("frontier1_min_left = 15.0 ", "frontier1_min_left = 1.0 ", 1)
                     .replace("frontier1_window_min_left = 30.0 ", "frontier1_window_min_left = 5.0 ", 1))
     t, info = front()
-    assert (t["frontier1_agent_calls_per_day"], t["frontier1_per_wave"], t["frontier1_min_left"]) == (0, 1, 10)
+    assert (t["frontier1_agent_calls_per_day"], t["frontier1_per_wave"], t["frontier1_min_left"]) == (0, 1, 15)
     assert t["frontier1_window_min_left"] == 30
     assert (t["frontier1_judged"], t["frontier2_judged"], t["frontier2_per_wave"]) == (1, 1, 1)
     assert set(info["baseline_guarded"]) == {"frontier1_agent_calls_per_day", "frontier1_per_wave", "frontier1_min_left",
@@ -169,7 +169,7 @@ def test_judged_guard_block_passes_a_fresh_reading_above_both_floors():
 @pytest.mark.parametrize("over, why", [
     ({"unknown": "paseo usage claude: report unavailable (rejected)"}, "unknown (paseo usage claude"),
     ({"remaining": 29.9}, "tightest window"), ({"remaining": None}, "no window percentage"), ({"remaining": True}, "no window"),
-    ({"fable_left": 9.99}, "frontier-1 cap has"), ({"fable_left": None}, "missing"),
+    ({"fable_left": 14.99}, "frontier-1 cap has"), ({"fable_left": None}, "missing"),
     ({"checked_at": None}, "no usable time"), ({"checked_at": "2026-10-26T11:59:00"}, "no usable time"),
 ])
 def test_judged_guard_block_refuses(over, why):
@@ -181,7 +181,7 @@ def test_judged_guard_block_age_and_floor_boundaries():
     assert g.judged_guard_block(at(1800), STANDING, NOW) is None and "min old" in g.judged_guard_block(at(1801), STANDING, NOW)
     assert g.judged_guard_block(at(-60), STANDING, NOW) is None and "min old" in g.judged_guard_block(at(-61), STANDING, NOW)
     assert g.judged_guard_block({**STATE_OK, "remaining": 30.0}, STANDING, NOW) is None
-    assert g.judged_guard_block({**STATE_OK, "fable_left": 10.0}, STANDING, NOW) is None
+    assert g.judged_guard_block({**STATE_OK, "fable_left": 15.0}, STANDING, NOW) is None
     assert g.judged_guard_block({**STATE_OK, "remaining": 40.0}, {**STANDING, "frontier1_window_min_left": 45.0}, NOW)
     for bad in (None, [], "ok", 7):
         assert "missing or unreadable" in g.judged_guard_block(bad, STANDING, NOW)

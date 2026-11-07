@@ -31,7 +31,7 @@ through) widen it unlogged: the internal-trust ruling of 2026-11-07 accepts that
 | `frontier1_per_wave` | 1 | 2 | 2 | frontier slices per wave on the claude pool |
 | `frontier2_per_wave` | 1 | 1 | 1 | the same on every other pool (codex, the Argon fallback) |
 | `frontier1_agent_calls_per_day` | 0 | 4 | 4 | Agent-tool Fable calls allowed without asking per America/New_York day |
-| `frontier1_min_left` | 10 | 10 | (code default) | percent of the Fable cap that must be left; below it a claude frontier slice is Opus |
+| `frontier1_min_left` | 15 | 15 | (code default) | percent of the Fable cap that must be left (15 since 2026-11-07: the old guard's `watch_fable` stop); below it a claude frontier slice is Opus |
 | `frontier1_window_min_left` | 30 | 30 | (code default) | percent left on the tightest Claude window (the old quota guard's tight level: the stop signal) |
 | `frontier2_min_left` | 60 | 60 | (code default) | percent left on the codex binding window |
 
@@ -46,7 +46,12 @@ B2. `ade_gates.judged_guard_block(state, t, now)` blocks, in order: a missing st
 `checked_at`; a reading older than 30 minutes (`GUARD_STATE_MAX_AGE_S`) or more than a minute in the future; no window
 percentage; a tightest window under `frontier1_window_min_left`; no Fable reading; a Fable cap under `frontier1_min_left`.
 Both sources already drop a non-exhausted window older than 25 minutes, so a reading between 25 and 30 minutes old
-blocks as "no window percentage". `judged_pool_block(family, …)` is the one copy for both families: claude through
+blocks as "no window percentage". An unknown Paseo report beside a fresh aiuse reading does not block: aiuse is the primary
+reading, and the fail-closed rule applies when no source reports Claude.
+B2a. **What changed from the quota guard (2026-11-07):** its `conserve` alerts (aiuse's pace projections, which could raise
+the level to tight) are gone, so a projected exhaustion no longer stops judged use on its own; the window floor is one
+number for the tightest window, so the 5-hour floor rose from the guard's 10 (critical) to 30, and the weekly floor stays
+at 30 (the guard's tight); the Fable floor stays at the guard's 15. `judged_pool_block(family, …)` is the one copy for both families: claude through
 `judged_guard_block`, every other pool by its reading at least `frontier2_min_left` (no reading: blocked).
 B3. The hook bounds its two quota reads to 5 s each (`ROUTE_AGENT_AIUSE_TIMEOUT`, `ROUTE_AGENT_PASEO_TIMEOUT` defaults it
 sets) so it stays inside its 15 s settings timeout.

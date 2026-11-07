@@ -149,9 +149,9 @@ class TestAwayAllowance(unittest.TestCase):
         self.assertIsNone(self.call(guard=self.guard(weekly_left=30.0)))
 
     def test_the_frontier1_cap_floor_boundary(self):
-        self.assertAsks(self.call(guard=self.guard(fable_left=9.9)), "frontier-1 cap has 9.9%")
+        self.assertAsks(self.call(guard=self.guard(fable_left=14.9)), "frontier-1 cap has 14.9%")
         self.assertAsks(self.call(guard=self.guard(fable_left=None)), "fable_left")
-        self.assertIsNone(self.call(guard=self.guard(fable_left=10.0)))
+        self.assertIsNone(self.call(guard=self.guard(fable_left=15.0)))
 
     def test_no_reason_asks_and_names_the_format(self):
         out = self.call(prompt=None)

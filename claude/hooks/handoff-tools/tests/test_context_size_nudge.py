@@ -41,6 +41,15 @@ def _append(path, text):
         f.write(text)
 
 
+@pytest.fixture(autouse=True)
+def _no_fable_lead(monkeypatch, tmp_path_factory):
+    """The relaunch-on-Opus tests run under the 2026-10-23 rule (`[lead].fable_lead` false); the shipped
+    config/routing.toml allows a Fable lead (2026-11-07), tested on its own below."""
+    policy = tmp_path_factory.mktemp("routing") / "routing.toml"
+    policy.write_text("[lead]\nmodel = \"opus\"\nfable_lead = false\n")
+    monkeypatch.setenv("ROUTING_POLICY", str(policy))
+
+
 @pytest.fixture
 def hook(monkeypatch, tmp_path, capsys):
     """Run the hook once per call; returns (stdout, pings sent)."""
@@ -619,7 +628,7 @@ def test_reads_large_transcript_from_tail_only(hook, tmp_path):
     assert len(pings) == 1
 
 
-# --- successor form (2026-10-23): a Fable session hands off to Opus (the quota-guard downshift went 2026-11-07) ---
+# --- successor form (2026-10-23): a Fable session hands off to Opus unless [lead].fable_lead (2026-11-07) ---
 _FABLE = "claude-fable-5-1"
 
 
@@ -646,6 +655,31 @@ def test_fable_session_gets_the_relaunch_note_in_both_messages(hook, tmp_path):
     _append(path, _model_transcript(tmp_path, _FABLE, 46_000 + nudge.ASK_GROWTH, name="x.jsonl").read_text())
     out, _ = hook("s-fable", path)
     assert "Context is large" in out and _OPUS_NOTE in out
+
+
+def test_fable_lead_true_means_no_relaunch_note(hook, tmp_path, monkeypatch):
+    """Operator 2026-11-07: `[lead].fable_lead = true` allows a Fable lead, so the Opus note goes; the shipped file says true."""
+    policy = tmp_path / "routing.toml"
+    policy.write_text("[routing]\nkinds = []\n\n[lead]  # the lead\nmodel = \"opus\"\nfable_lead = true  # flip to false\n")
+    monkeypatch.setenv("ROUTING_POLICY", str(policy))
+    assert nudge._fable_lead_allowed() is True
+    out, _ = hook("s-fable-lead", _model_transcript(tmp_path, _FABLE, 46_000, nudge.BOUNDARY_TOTAL))
+    assert "relaunch" not in out
+    monkeypatch.delenv("ROUTING_POLICY")
+    shipped = Path(nudge.__file__).resolve().parents[2] / "config" / "routing.toml"
+    assert nudge._routing_policy_path() == shipped and nudge._fable_lead_allowed() is True
+
+
+@pytest.mark.parametrize("text", ["[lead]\nmodel = \"opus\"\n", "[lead]\nfable_lead = false\n",
+                                  "[other]\nfable_lead = true\n", "not = [toml\n", None])
+def test_fable_lead_absent_false_or_unreadable_keeps_the_relaunch_note(hook, tmp_path, monkeypatch, text):
+    policy = tmp_path / "routing.toml"
+    if text is not None:
+        policy.write_text(text)
+    monkeypatch.setenv("ROUTING_POLICY", str(policy))
+    assert nudge._fable_lead_allowed() is False
+    out, _ = hook("s-fable-nolead", _model_transcript(tmp_path, _FABLE, 46_000, nudge.BOUNDARY_TOTAL))
+    assert _OPUS_NOTE in out
 
 
 def test_other_models_get_no_relaunch_note(hook, tmp_path):
@@ -680,3 +714,14 @@ def test_r2_l4_no_successor_for_an_unknown_or_non_fable_model(model):
 def test_r2_l4_unreadable_model_gives_no_relaunch_note(hook, tmp_path):
     out, _ = hook("s-nomodel", _transcript(tmp_path, 46_000, nudge.BOUNDARY_TOTAL))  # no assistant model
     assert "relaunch" not in out
+
+
+@pytest.mark.parametrize("text, want", [("[lead]\nfable_lead = true  # on\n", True), ("[lead]\nfable_lead = false\n", False),
+                                        ("[other]\nfable_lead = true\n[lead]\nmodel = \"opus\"\n", False)])
+def test_fable_lead_line_scan_without_tomllib(monkeypatch, tmp_path, text, want):
+    """Under a Python older than 3.11 (no tomllib) the [lead] table is scanned by line, same answer."""
+    policy = tmp_path / "routing.toml"
+    policy.write_text(text)
+    monkeypatch.setenv("ROUTING_POLICY", str(policy))
+    monkeypatch.setitem(sys.modules, "tomllib", None)
+    assert nudge._fable_lead_allowed() is want

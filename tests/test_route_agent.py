@@ -288,16 +288,28 @@ class TestDiscoverySources(unittest.TestCase):
             self.assertNotIn(retired, names)
 
     def test_paseo_failure_degrades_to_no_providers(self):
+        r._reset_paseo_cache()
         with mock.patch.object(r.subprocess, "run", side_effect=OSError("gone")), \
                 mock.patch.dict(os.environ, {"ROUTE_AGENT_PASEO": "on", "ROUTE_AGENT_PASEO_BIN": "/fake/paseo"}):
             self.assertEqual(r.paseo_providers(), set())
+        r._reset_paseo_cache()
         with mock.patch.object(r.subprocess, "run", side_effect=r.subprocess.TimeoutExpired("paseo", 15)), \
                 mock.patch.dict(os.environ, {"ROUTE_AGENT_PASEO": "on", "ROUTE_AGENT_PASEO_BIN": "/fake/paseo"}):
             self.assertEqual(r.paseo_providers(), set())
         with fake_paseo(FAKE_PASEO_PROVIDERS='{"not": "a list"}'):
             self.assertEqual(r.paseo_providers(), set())
+        r._reset_paseo_cache()
         with mock.patch.dict(os.environ, {"ROUTE_AGENT_PASEO": "off"}):
             self.assertEqual(r.paseo_providers(), set())          # the suite's default: no spawn at all
+        r._reset_paseo_cache()
+
+    def test_provider_ls_is_read_once_per_process(self):
+        with fake_paseo(FAKE_PASEO_PROVIDERS=json.dumps(PASEO_ROWS)) as state:
+            first = r.paseo_providers()
+            self.assertEqual(r.paseo_providers(), first)
+            self.assertEqual({s.name for s in r.discover(IDLE)} >= {"fresh-provider"}, True)
+            calls = [json.loads(x) for x in (state / "calls.jsonl").read_text().splitlines()]
+            self.assertEqual(calls.count(["provider", "ls", "--json"]), 1)
 
     def test_the_fake_paseo_registry_is_read_and_filtered(self):
         rows = json.dumps(PASEO_ROWS)
@@ -629,7 +641,7 @@ class TestFrontierConservative2026_10_18(unittest.TestCase):
         if closed:
             toml = close_frontier_baseline(toml)
         if tighten_min_left is not None:
-            toml = toml.replace("frontier1_min_left = 10.0 ", f"frontier1_min_left = {tighten_min_left} ", 1)
+            toml = toml.replace("frontier1_min_left = 15.0 ", f"frontier1_min_left = {tighten_min_left} ", 1)
         (tmp / "gates.toml").write_text(toml)
         usage = self.claude_usage(claude, tmp / "usage.json")
         return {"GATES_TOML": str(tmp / "gates.toml"), "ROUTE_AGENT_AIUSE": "off", "AIUSE_SNAPSHOT": str(tmp / "no-snapshot.json"),
@@ -708,7 +720,7 @@ class TestFrontierConservative2026_10_18(unittest.TestCase):
         self.assertNotIn("fable_min_left", r.POLICY["routing"])
         with mock.patch.dict(os.environ, self.gate_env()):
             gate = r.policy_public()["frontier_gate"]
-        self.assertEqual((gate["frontier1_per_wave"], gate["frontier2_per_wave"], gate["frontier1_min_left"]), (2.0, 1.0, 10.0))
+        self.assertEqual((gate["frontier1_per_wave"], gate["frontier2_per_wave"], gate["frontier1_min_left"]), (2.0, 1.0, 15.0))
 
     def test_per_wave_key_by_pool(self):
         """frontier1_per_wave is the claude pool's, frontier2_per_wave every other pool's (codex's max_parallel = 1 hides it in plan)."""
@@ -1075,13 +1087,51 @@ class TestRoutingPolicyToml(unittest.TestCase):
         self.assertIn("pipeline lead: sonnet at medium; high for judgment turns", md.getvalue())
         self.assertEqual(json.loads(js.getvalue())["lead"],
                          {"model": "opus", "effort": "high", "pipeline_model": "sonnet",
-                          "pipeline_effort": "medium"})
+                          "pipeline_effort": "medium", "fable_lead": True})
 
-    def _lead_policy_variant(self, replacement):
-        """Write routing.toml with the pipeline_effort line replaced; return the temp path."""
+    def test_the_shipped_policy_allows_a_fable_lead_and_policy_md_says_so(self):
+        """Operator 2026-11-07: `[lead].fable_lead = true` allows a Fable lead; `policy --md` prints the switch."""
+        import io
+        from contextlib import redirect_stdout
+        self.assertIs(r.LEAD_FABLE_ALLOWED, True)
+        md = io.StringIO()
+        with redirect_stdout(md):
+            self.assertEqual(r.main(["policy", "--md"]), 0)
+        self.assertIn("| lead.fable_lead | true |", md.getvalue())
+        self.assertIn("a Fable 5.1 lead is allowed", md.getvalue())
+
+    def test_a_lead_table_without_fable_lead_keeps_the_never_fable_rule(self):
+        """Absent (an older file) or false: the 2026-10-23 rule; a non-boolean is refused, naming the file."""
+        import io
+        from contextlib import redirect_stdout
+        for line in ("", "fable_lead = false\n"):
+            with self.subTest(line=line):
+                path = self._lead_policy_variant('pipeline_effort = "medium"\n', line)
+                try:
+                    r.reload_policy(path)
+                    self.assertIs(r.LEAD_FABLE_ALLOWED, False)
+                    md = io.StringIO()
+                    with redirect_stdout(md):
+                        r.main(["policy", "--md"])
+                    self.assertIn("| lead.fable_lead | false |", md.getvalue())
+                    self.assertIn("not on Fable", md.getvalue())
+                finally:
+                    r.reload_policy(Path(__file__).resolve().parent.parent / "config" / "routing.toml")
+        for value in ('"yes"', "1"):
+            path = self._lead_policy_variant('pipeline_effort = "medium"\n', f"fable_lead = {value}\n")
+            with self.assertRaises(ValueError) as ctx:
+                r.load_policy(path)
+            self.assertIn("fable_lead", str(ctx.exception))
+
+    def _lead_policy_variant(self, replacement, fable_line=None):
+        """Write routing.toml with the pipeline_effort line replaced (and, given `fable_line`, the fable_lead line too);
+        return the temp path."""
         import tempfile
         src = (Path(__file__).resolve().parent.parent / "config" / "routing.toml").read_text()
         bad = src.replace('pipeline_effort = "medium"\n', replacement)
+        if fable_line is not None:
+            self.assertIn("fable_lead = true\n", bad)
+            bad = bad.replace("fable_lead = true\n", fable_line, 1)
         self.assertNotEqual(src, bad)
         with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as f:
             f.write(bad)
@@ -2416,6 +2466,22 @@ class TestQuotaFromPaseoUsage(unittest.TestCase):
                                     self.row("opencode", windows=[self.win("Monthly", used=40.0)])], now=self.NOW)
         self.assertEqual((pools["claude"]["remaining"], pools["claude"]["sublimits"]), (80.0, {"fable": 12.0}))
         self.assertEqual(pools["opencode-go"]["remaining"], 60.0)
+
+    def test_a_report_whose_windows_or_balances_is_not_a_list_is_not_read_and_never_raises(self):
+        """Adversary 2026-11-07: `windows: 5` raised TypeError into load_snapshot; now the pool is Paseo "not read"."""
+        for over in ({"windows": 5}, {"windows": {"w": 1}}, {"balances": "x"}):
+            with self.subTest(over=over):
+                row = self.row("codex", windows=[self.win("w", left=50.0)])
+                row["report"].update(over)
+                pools = r.usage_from_paseo([row], now=self.NOW)
+                self.assertIsNone(pools["codex"]["remaining"])
+                self.assertIn("not read", pools["codex"]["unknown"])
+        aiuse = [{"provider": "codex", "pool_family": None, "usable_now": True, "headroom_percent": 40.0, "age_seconds": 20}]
+        row = self.row("codex", windows=[])
+        row["report"]["windows"] = 5
+        quota, _, info = self.load(aiuse, [row])
+        self.assertEqual(quota["codex"]["remaining"], 40.0)          # aiuse's reading stands
+        self.assertIn("not read", quota["codex"]["paseo_unknown"])
 
     def test_a_stale_report_keeps_only_an_exhausted_window(self):
         pools = r.usage_from_paseo([self.row("codex", windows=[self.win("5-hour", left=0.0), self.win("Weekly", left=90.0)],

@@ -214,4 +214,11 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except OSError as exc:      # a missing ~/.hermes/config.yaml, cron/jobs.json or ~/.litellm/config.yaml: a report, not a traceback
+        print(f"chains-check: cannot read {exc.filename or 'a chain source'}: {exc.strerror or exc}", file=sys.stderr)
+        sys.exit(1)
+    except (yaml.YAMLError, ValueError) as exc:
+        print(f"chains-check: a chain source does not parse ({exc.__class__.__name__}: {str(exc)[:160]})", file=sys.stderr)
+        sys.exit(1)

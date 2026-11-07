@@ -51,8 +51,9 @@ D1. `aiuse --available --json` stays the primary reading (it applies the operato
 readings and grant expiry at read time; 20 s timeout, memoised 30 s; the snapshot file is the fallback).
 D2. `paseo usage ls --json` is the second source: one report per `sourceId`. A report whose `report.status` is
 `available` gives its windows (`remainingPct`, else 100 − `usedPct`; `resetsAt`) and `balances` (`remaining`/`limit` as a
-percentage), a window naming Fable being the Claude Fable cap; any other status (`unavailable` with a `problem`, `error`)
-is **unknown, never a pass**. `icon` (inline SVG) and `loginErrors` are dropped. A report older than 25 minutes keeps only
+percentage), a window naming Fable being the Claude Fable cap; any other status (`unavailable` with a `problem`, `error`),
+or a report whose `windows` or `balances` is not a list, is **unknown, never a pass**. A `balances` entry with a positive
+`limit` counts as one more window of the pool, so a nearly spent balance can only make the pool read tighter (it errs safe). `icon` (inline SVG) and `loginErrors` are dropped. A report older than 25 minutes keeps only
 an exhausted window, as aiuse's own `fresh` rule does.
 D3. The two merge per pool by the same rule aiuse's own rows use (`_merge_pool`): the tightest known reading wins and an
 unknown never loosens or replaces a reading. `route_agent.py show` and the `quota_source.pools` field of
@@ -66,7 +67,8 @@ critical` and its state file) and gate profiles (the `away` profile) were delete
 E1. `ade_gates.read_guard_state()` returns `route_agent.claude_quota_state()`: the merged snapshot's `claude` entry (its
 tightest window, the Fable sublimit, the reading's own age, the source, and why it is unknown when it is). The allowance
 passes for claude only while that reading is under 30 minutes old, known, at least `frontier1_window_min_left` (30) on the
-tightest window (the old quota guard's tight level) and at least `frontier1_min_left` (10) on the Fable cap; otherwise the
+tightest window (the old quota guard's tight level) and at least `frontier1_min_left` (15, the old guard's Fable stop) on the
+Fable cap; otherwise the
 closed rules apply (one frontier slice per pool per wave, an Agent-tool Fable call asks). Details: `docs/gates.md`.
 
 ## F. OpenCode Go cost policy (2026-10-25)
@@ -84,7 +86,8 @@ G1. 2026-10-18: four astra slices at once emptied codex's 5-hour window, so the 
 `--kind frontier`, capped per wave, and in-flight slices reserve their estimated quota per service.
 G2. 2026-10-20: the Claude weekly window ran out 2.6 days before its reset; Opus sub-agents (~53%) and a Fable lead
 (~30%) were the burn. Hence `[lead]` (Opus judgment lead, Sonnet pipeline lead, never Fable: operator 2026-10-23) and
-adversary rounds on omp first; PLAN section G's Fable lead for the slim-down is a flagged deviation (the skill, A6).
+adversary rounds on omp first. Since 2026-11-07 (operator) Fable leads are allowed for now: the one line to flip back is
+`fable_lead = true` in `[lead]` of `config/routing.toml` (false or absent restores never-a-Fable-lead).
 G3. 2026-11-01: a cheap model as the daily coding driver was checked against Terminal-Bench 4.0 and this repo's own
 review of Flash-written code (four BLOCKs): code stays on tier-1 models (Sonnet 5.5, GPT-6.1 Sol); cheap models only for
 bulk and mechanical work a stronger model reviews.

@@ -7,7 +7,7 @@ kept" (the grok rows of my four files), "Internal trust".
 
 ## A. Registry and quota sources
 
-A1. **Registry** (`bin/route_agent.py` `paseo_provider_rows`, `paseo_providers`, `provider_models`, :1068-1106). `paseo provider ls
+A1. **Registry** (`bin/route_agent.py` `paseo_provider_rows`, `paseo_providers`, `provider_models`). `paseo provider ls
 --json` through `_paseo_json` (argv list, `ROUTE_AGENT_PASEO_TIMEOUT` default 15 s, in (0, 60]; never raises: a missing binary, a
 timeout, a non-zero exit or malformed JSON give no rows). The roster is the rows with `enabled == "Enabled"` and `status ==
 "available"`. **Retry:** while any row reads `loading` the call is repeated, at most twice, 3 s apart (6 s in all); a row still
@@ -22,7 +22,7 @@ A2. **`--model` validation:** `route_agent.py services --check-models` checks ev
 provider's `paseo provider models` list (exit 1 when one is missing, 2 when a provider's list is unreadable; API pools and
 Cursor Cloud are skipped). `services` also prints each service's provider status from `provider ls`. Not run against the Mac's
 daemon (no Paseo here): Cursor's `default` (Auto) is a likely false MISSING if Paseo names Auto differently.
-A3. **Second quota source** (`paseo_usage`, `usage_from_paseo`, `_fold_paseo`, :1108-1262). `paseo usage ls --json` (15 s, memoised
+A3. **Second quota source** (`paseo_usage`, `usage_from_paseo`, `_fold_paseo`; line numbers as of 265b5738). `paseo usage ls --json` (15 s, memoised
 30 s like the aiuse spawn; `ROUTE_AGENT_PASEO_USAGE_JSON=<path>` feeds canned rows for tests and wins over `ROUTE_AGENT_PASEO=off`).
 Rows are keyed by `sourceId` (`opencode` maps to the `opencode-go` pool, other names through ALIASES). `report.status ==
 "available"`: each window gives percent left from `remainingPct`, else 100 − `usedPct`, its `resetsAt` riding with the tightest;
@@ -57,6 +57,16 @@ than 30 min (`GUARD_STATE_MAX_AGE_S`) or over a minute in the future; no window 
 **`frontier1_window_min_left` (new key, 30: the quota guard's old tight level, code default and `gates.toml` value)**; no Fable
 reading; Fable under `frontier1_min_left`. Both sources drop a non-exhausted window older than 25 min, so in practice a reading
 blocks from 25 min ("no window percentage"), the 30-min check being the outer bound.
+B2a. **Repair round (adversary notes):** a Paseo report whose `windows` or `balances` is not a list is now that pool's "not read"
+(unknown) instead of a TypeError into `load_snapshot`, and `load_snapshot` also catches any parse error from `usage_from_paseo`
+(Paseo "not read: … unparseable"), so nothing in the usage path raises (test with `windows: 5`). `paseo provider ls` is read once
+per process (`_PROVIDER_ROWS`, cleared by `_reset_paseo_cache`), so a slice spawns it once. **The Fable floor stays at the old
+guard's 15:** `frontier1_min_left` is 15 in the code default and `gates.toml` (it was 10, the old `fable_min_left`; the guard
+stopped judged Fable use below 15). **What the port drops, recorded in `docs/gates.md` B2a:** the guard's `conserve` alerts (a
+pace projection could raise it to tight) are gone, and the one tightest-window floor of 30 means the 5-hour floor rose from the
+guard's 10 to 30 (weekly stays 30). **Confirmed:** an unknown Paseo report beside a fresh aiuse reading grants: aiuse is the
+primary reading, and the fail-closed rule applies when no source reports Claude (test
+`…a_fresh_aiuse_claude_reading_grants_and_an_unknown_paseo_report_does_not_take_it_away`).
 B3. **The three test cases** (`tests/test_route_agent.py`
 `TestFrontierConservative2026_10_18.test_frontier_per_wave_on_claude_with_a_fresh_a_stale_and_an_unknown_reading`): a canned
 `paseo usage ls` Claude report fetched 30 s ago (weekly 70%, Fable 60%) gives `frontier_per_wave("claude") == 2`; the same fetched
@@ -93,7 +103,9 @@ C4. The Claude-quota half of `bin/ade_gates.py`, of `config/gates.toml` (`[meta]
 C5. `bin/claude-cost-whatif` (100; it had no tests). `bin/claude-cost-mix`, `bin/go_model_policy.py`, `config/go-model-policy.json`
 stay.
 C6. `skills/effort-routing/`, `skills/fallback-chains/` (folded, E1). The chain checker and its dated references moved, by `git mv`,
-to `skills/model-routing/scripts/chains-check.py` and `references/fallback-chains-{inventory,integration}.md`.
+to `skills/model-routing/scripts/chains-check.py` and `references/fallback-chains-{inventory,integration}.md`. In the repair
+round the checker reports a missing or unparsable chain source (`~/.hermes/config.yaml` and the rest) as one stderr line and exit
+1, no traceback (run here: "cannot read /root/.hermes/config.yaml: No such file or directory", exit 1).
 C7. In `bin/route_agent.py`: the acp-run/headless/Orca discovery (A1), `governor_hold` (B4), the `grok` map row. In
 `config/routing.toml`: the `grok` `[[service]]`, the `[discovery]` table (its `never_route` and `aliases` moved into `[routing]`,
 `operator_gated` folded into `[dispatch].operator_gated`, which discovery now honours), `[escalation]`/`[escalation.next]` and
@@ -131,9 +143,16 @@ plugins', in-flight reservation); E. reading quota (aiuse then `paseo usage ls`,
 (the model-chain half: no automatic chain for a dispatched slice; Hermes/LiteLLM sources; the checker and references);
 G. multiple-choice decisions. `route_agent.py policy --md` gained a "Pools" table (service, Paseo provider, billing, note) and the
 `frontier1_window_min_left`/`frontier2_min_left` rows, so the skill copies nothing it prints.
-E2. **Flagged deviation (standing order 6):** PLAN G puts the lead on Fable 5.1; `[lead]` in `config/routing.toml` (operator
-2026-10-23, after a Fable lead burned ~30% of a week) says a judgment lead runs Opus 5.5 high and never Fable. I left `[lead]`
-unchanged and wrote both into the skill (A6: a lead outside a planned project follows `[lead]` until the operator rules).
+E2. **Fable leads (operator ruling 2026-11-07, repair round):** "allowed for now, with an easy way to turn them off later". One
+switch, `fable_lead = true` in `[lead]` of `config/routing.toml`, read with `.get` (absent means false, so an older file keeps the
+2026-10-23 never-a-Fable-lead rule; a non-boolean is refused naming the file). `route_agent.py` exposes it as
+`LEAD_FABLE_ALLOWED` and `policy --md` prints `lead.fable_lead` with a sentence that follows it; `claude/hooks/context_size_nudge.py`
+(the only code that enforced never-Fable) reads the same key (tomllib, or a line scan of `[lead]` under a Python without it; false
+when the file is unreadable) and gives a Fable session no relaunch-on-Opus note while it is true. The skill (A6) and
+`docs/model-routing.md` (G2) name the one line to flip. Tests each way: `test_the_shipped_policy_allows_a_fable_lead_and_policy_md_says_so`,
+`test_a_lead_table_without_fable_lead_keeps_the_never_fable_rule` (absent, false, non-boolean), and in the nudge suite
+`test_fable_lead_true_means_no_relaunch_note`, `test_fable_lead_absent_false_or_unreadable_keeps_the_relaunch_note`,
+`test_fable_lead_line_scan_without_tomllib`.
 E3. `docs/model-routing.md` (505 → 90 lines), dated 2026-11-07: where the numbers live, the pool table, the registry, the two quota
 sources and the merge, the frontier gate's Claude reading, the OpenCode Go cost policy, and three kept reasons.
 E4. `config/routing.toml` services after: `claude`, `omp`, `codex`, `opencode-zen-free`, `opencode-go`, `cursor-auto`, `cursor`,
@@ -177,9 +196,13 @@ downgrade"), `:330-331` (the "`claude-fleet-governor` steer names its own succes
 guard `critical`" paragraph reading `~/.local/state/ade/quota-guard.json`: no file is written any more, so it never fires; replace
 with one line: when `route_agent.py show` reads claude exhausted, hand off to an omp successor), `:360` ("(b) the state file's
 `level` is `tight`": delete); `skills/research/SKILL.md:143` ("`model-routing` / `effort-routing` skills": `model-routing` only).
-F5. Found, not mine to fix: `bin/deadline:551` still runs `acp-dispatch reroute RECORD --escalate` for `--on-expire reroute:RECORD`,
-which the E6 shim answers with exit 2; the mode now only kills and pings (docs updated, F2). A lead decision: drop the mode or
-point it at a re-dispatch.
+F5. `bin/deadline` (E5's file, done here at the lead's request in the repair round): `--on-expire reroute:RECORD` is refused by the
+parser with exit 2 pointing at `relay` (`check_action`); the `acp-dispatch reroute` call, its "outcome UNKNOWN" branch and the
+unused `sh_nokill` helper are gone; a record registered with `reroute:` before the change is stopped, nothing is dispatched, and
+the owner and the operator get the "reroute FAILED ... nothing replaced it" notice. Usage text (:5, :18, the parser, the
+no-pid refusal) and `docs/deadline.md` (:26-29, :31, :206, items 22-23) follow. `tests/test_deadline.py` 84 passed (the reroute
+tests rewritten: refused at `start`, refused by the parser, an older record); `tests/test_deadline_wrappers.py` has only its 2
+baseline failures.
 
 ## G. Merger's lines
 
@@ -207,8 +230,9 @@ Optional cleanup: `~/.local/state/ade/fleet-governor.json`, `quota-guard.json`, 
 H2. Install and verify session-guard and usage-auto-resume (PLAN D4, the J6 batch) before the final merge: a session that hits the
 Claude limit pauses and continues after the reset.
 H3. After `ade update`: `bin/route_agent.py services --check-models` against the live daemon (expect exit 0; a MISSING line is a
-model id to correct in `config/routing.toml`, Cursor's `default` included), and `bin/route_agent.py show` to see each pool's
-source (`aiuse`, `paseo`, `aiuse+paseo`).
+model id to correct in `config/routing.toml`). Expect false MISSING lines for Claude's curated aliases (`opus`, `fable`,
+`sonnet` in the claude row) until they are mapped to Paseo's full model ids, and for Cursor's `default` (Auto) if Paseo names it
+differently. Then `bin/route_agent.py show` to see each pool's source (`aiuse`, `paseo`, `aiuse+paseo`).
 H4. **The quota_nudge decision (R2-18, DECIDE):** `claude/hooks/quota_nudge.py` reads the deleted guard's state file and is silent
 without it, so it is inert from the moment the guard stops; its tests went with `tests/test_claude_quota_guard.py`. Live hook
 lines: `~/.claude/settings.json` UserPromptSubmit `"$HOME"/ops/site-private/bin/hook-deadline 2 "$HOME"/src/djbclark-ade/claude/hooks/quota_nudge.py`
@@ -223,6 +247,9 @@ tests/test_acp_dispatch.py tests/test_load_watch_admit.py tests/test_frontier_ag
 618 passed, 2 skipped; `test_context_size_nudge.py`: 128 passed.
 I2. After (HEAD 265b5738): the same set **431 passed, 2 skipped, 0 failed** (the old 1435-line `test_gates.py` and the deleted
 governor/guard classes account for the drop); `test_context_size_nudge.py` 63 passed (the guard-level cases went with the guard).
+I4. **Repair round (after the adversary's APPROVE at b812f13 with notes):** targeted set 435 passed, 2 skipped, 0 failed;
+`test_context_size_nudge.py` 72 passed; `tests/test_deadline.py` 84 passed, `tests/test_deadline_wrappers.py` 2 failed (both
+baseline rows, `[dispatch]` cases) of 23. No second full suite, per the lead.
 I3. Full suite in a detached worktree of 265b5738 (`/tmp/w4e7-verify`, the `docs/slim/baseline.md` command): **63 failed, 5,601
 passed, 27 skipped, 1,232 subtests passed in 574 s**. Every failure is a baseline row, by exact test id: `test_ade_git_hooks.py` 45,
 `test_ade_git_guard.py` 10, `test_wait_file.py` 3, `test_acp_run_git_identity.py` 3, `test_deadline_wrappers.py` 2 (the same

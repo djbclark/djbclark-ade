@@ -218,12 +218,11 @@ def test_dry_run_changes_nothing(env):
     assert "would stop" in r.stdout and env.record("dry")["state"] == "running" and env.calls("RELAY") == []
 
 
-def test_reroute_action_runs_acp_dispatch_once(env):
-    assert start(env, "rr", "--budget", "5", "--on-expire", "reroute:/x/jobs/rec.json").returncode == 0
-    env.run("sweep", "--no-agents", now=T0 + 10)
-    env.run("sweep", "--no-agents", now=T0 + 20)
-    d = env.calls("DISPATCH")
-    assert len(d) == 1 and "reroute /x/jobs/rec.json --escalate --detach --no-wait" in d[0]
+def test_the_retired_reroute_action_is_refused_and_points_at_relay(env):
+    """2026-11-07 (slim-down E7): the acp-dispatch shim has no `reroute`, so `--on-expire reroute:RECORD` exits 2 naming relay."""
+    r = start(env, "rr", "--budget", "5", "--on-expire", "reroute:/x/jobs/rec.json")
+    assert r.returncode == 2 and "retired" in r.stderr and "relay" in r.stderr
+    assert not (env.state / "rr.json").exists() and env.calls("DISPATCH") == []
 
 
 def test_duplicate_live_name_refused_and_terminal_name_reusable(env):
@@ -837,12 +836,11 @@ def test_interrupting_run_after_a_notify_only_expiry_still_stops_the_command(env
         p.wait()
 
 
-def test_reroute_path_is_resolved_at_registration(env, inproc, monkeypatch, tmp_path):
-    dl = inproc
-    monkeypatch.chdir(tmp_path)
-    got = dl.check_action("reroute:jobs/task.json")
-    assert got == "reroute:" + str((tmp_path / "jobs/task.json").resolve())
-    assert dl.check_action("reroute:~/x.json").startswith("reroute:/")
+def test_reroute_is_refused_by_the_parser(env, inproc):
+    import argparse
+    for v in ("reroute:jobs/task.json", "reroute:~/x.json", "reroute"):
+        with pytest.raises(argparse.ArgumentTypeError, match="relay"):
+            inproc.check_action(v)
 
 
 def test_agent_scan_runs_off_the_enforcement_pass(env):
@@ -1138,32 +1136,19 @@ def test_sweep_skips_a_record_deleted_after_its_snapshot(env, inproc, monkeypatc
 
 # ---------- PR 223 local Codex review round 14: a failed automatic reroute is reported, once-only dispatch preserved ----------
 
-def test_a_failed_reroute_notifies_the_owner_and_the_operator_without_a_second_dispatch(env):
-    Path(env.base["DL_DISPATCH_FAIL"]).write_text("x")
-    assert start(env, "rrfail", "--budget", "5", "--on-expire", "reroute:/x/jobs/rec.json").returncode == 0
+def test_a_record_registered_with_reroute_before_the_retirement_stops_and_tells_without_a_dispatch(env):
+    """A record written before 2026-11-07 still carries reroute:RECORD: it is stopped, nothing is dispatched, and the owner and the
+    operator are told no replacement exists (the old failed-reroute path)."""
+    assert start(env, "rrold", "--budget", "5", "--on-expire", "relay").returncode == 0
+    path = env.state / "rrold.json"
+    rec = json.loads(path.read_text())
+    rec["on_expire"] = "reroute:/x/jobs/rec.json"       # as an older registration wrote it
+    path.write_text(json.dumps(rec))
     env.run("sweep", "--no-agents", now=T0 + 10)
-    rec = env.record("rrfail")
-    assert rec["recovery"]["state"] == "done" and "reroute rc=3" in rec["recovery"]["outcome"][-1]
-    assert len(env.calls("DISPATCH")) == 1
-    assert len(env.calls("RELAY")) == 1 and "reroute FAILED" in env.log.read_text(), "tracked owner notice"
-    assert [p for p in env.calls("PING") if "reroute FAILED" in p], "operator ping"
-    assert rec["notice"]["done"] is True
-    env.run("sweep", "--no-agents", now=T0 + 5000)
-    assert len(env.calls("DISPATCH")) == 1, "the dispatch is at-most-once"
-    ls = json.loads(env.run("ls", "--json").stdout)["records"][0]
-    assert "reroute rc=3" in ls["recovery"][-1] and ls["notice_done"] is True
-
-
-def test_a_slow_reroute_is_pending_not_a_failure(env):
-    Path(env.base["DL_DISPATCH_SLEEP"]).write_text("4")
-    assert start(env, "rrslow", "--budget", "5", "--on-expire", "reroute:/x/jobs/rec.json").returncode == 0
-    env.run("sweep", "--no-agents", now=T0 + 10, DEADLINE_REROUTE_WAIT="1")
-    rec = env.record("rrslow")
-    assert rec["recovery"]["state"] == "done" and "still running" in rec["recovery"]["outcome"][-1]
+    env.run("sweep", "--no-agents", now=T0 + 20)
+    assert env.calls("DISPATCH") == []
     log = env.log.read_text()
-    assert "OUTCOME IS UNKNOWN" in log and "reroute FAILED" not in log and "nothing replaced it" not in log
-    assert [p for p in env.calls("PING") if "UNKNOWN" in p] and len(env.calls("DISPATCH")) == 1
-    time.sleep(4)   # the dispatch was not killed: it finished on its own
+    assert "reroute FAILED" in log and "retired" in log
 
 
 # ---------- --holder: an abandoned record is retired silently, an overdue one still announces ----------
@@ -1232,7 +1217,7 @@ def test_holder_may_be_the_callers_ancestor_but_must_run_and_needs_an_announce_o
     dead.wait()
     r = start(env, "deadhold", "--budget", "10", "--on-expire", "notify", "--holder", str(dead.pid))
     assert r.returncode == 2 and "holder" in r.stderr and not (env.state / "deadhold.json").exists()
-    for action in ("kill", "reroute:/x/jobs/rec.json", "notify", "relay"):
+    for action in ("kill", "notify", "relay"):
         extra = ["--pid", str(env.child("sleep 60").pid)] if action in ("kill", "notify", "relay") else []   # a record that can signal never takes a holder
         r = start(env, "badact", "--budget", "10", "--on-expire", action, "--holder", str(os.getpid()), *extra)
         assert r.returncode == 2 and "--holder" in r.stderr, action

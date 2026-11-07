@@ -34,10 +34,11 @@ A5. Fable is a frontier model: a dispatched Fable slice is `--kind frontier` (an
 use, section D), an advisor unless `ACP_OPERATOR_APPROVED=frontier-exec`, and Fable at `xhigh`/`max` through
 `acp-dispatch` needs `ACP_OPERATOR_APPROVED=fable-xhigh`. Fable is a **sublimit** (at most 50%) of the shared Claude
 weekly window, not a separate allowance: every Fable run bills the 5-hour and weekly windows too.
-A6. **Deviation flagged (2026-11-07):** `[lead]` in `config/routing.toml` still carries the operator's 2026-10-23 rule
-(a judgment lead on Opus 5.5 high, a pipeline lead on Sonnet 5.5 medium, never a Fable lead; `policy --md` prints it).
-PLAN section G runs this slim-down's lead on Fable. Until the operator rules which is general, a lead outside a planned
-project follows `[lead]`.
+A6. **Fable leads are allowed for now (operator 2026-11-07).** The one switch is `fable_lead = true` in the `[lead]` table
+of `config/routing.toml`; set it to `false` (or delete the line) to restore the 2026-10-23 rule, never a Fable lead (Fable
+only through the `fable-deep` sub-agent or a `frontier` slice). `policy --md` prints it, and `context_size_nudge.py` stops
+telling a Fable session to relaunch on Opus while it is true. `[lead]`'s `model`/`pipeline_model` (Opus 5.5 high, Sonnet 5.5
+medium for a pipeline-only lead) stay the defaults.
 A7. Agent-tool sub-agents: the model alias only (`haiku`, `sonnet`, `opus`, `fable`); `CLAUDE_CODE_SUBAGENT_MODEL=sonnet`
 makes an unpinned one Sonnet (`bin/claude-settings-env`); pass `model: "opus"` for a judgment sub-agent.
 

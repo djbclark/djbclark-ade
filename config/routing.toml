@@ -162,14 +162,18 @@ claude = 8.0
 # dispatched slices; this is the session that dispatches them. `model` at `effort` by default,
 # `pipeline_model` at `pipeline_effort` when the session only drives a pipeline (PR loops, waiters,
 # merges; djbclark 2026-10-23: Sonnet 5.5 at medium, high only for judgment turns; effort changes on
-# 5.5 keep the prompt cache). `pipeline_effort` is optional (default high). Never
-# Fable: that is the `fable-deep` sub-agent or a `frontier` slice. Printed by `route_agent.py policy`.
+# 5.5 keep the prompt cache). `pipeline_effort` is optional (default high). Printed by `route_agent.py policy`.
+# `fable_lead` (operator 2026-11-07: "Fable leads are allowed for now, with an easy way to turn them off later"): true
+# lets a lead session run on Fable 5.1 (no relaunch-on-Opus note from claude/hooks/context_size_nudge.py). Set it to
+# false, or delete the line, to restore the 2026-10-23 rule: never a Fable lead (Fable only through the `fable-deep`
+# sub-agent or a `frontier` slice).
 
 [lead]
 model = "opus"
 effort = "high"
 pipeline_model = "sonnet"
 pipeline_effort = "medium"
+fable_lead = true
 
 [substrate]
 # Pools `route_agent.py substrate` may name although aiuse's [disabled_services] switches them

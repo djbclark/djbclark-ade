@@ -40,7 +40,7 @@ FRONTIER_DEFAULTS = {
     "frontier1_per_wave": 1.0,               # frontier slices in flight per wave on the claude pool
     "frontier2_per_wave": 1.0,               # same on the codex pool
     "frontier1_agent_calls_per_day": 0.0,    # Agent-tool frontier-1 calls allowed without asking per New York day (0: always ask)
-    "frontier1_min_left": 10.0,              # percent of the frontier-1 (Fable) cap that must be left
+    "frontier1_min_left": 15.0,              # percent of the frontier-1 (Fable) cap that must be left (the old guard's watch_fable)
     "frontier1_window_min_left": 30.0,       # percent left on the tightest Claude window (was the quota guard's tight level)
     "frontier2_min_left": 60.0,              # percent left on the codex binding window
 }

@@ -23,12 +23,12 @@ deadline install [--ade DIR] [--dry-run] [--backend auto|launchd|systemd|cron] [
 ```
 
 `--on-expire`: `kill` (default: SIGTERM to the process group, SIGKILL after `--grace`, default 60 s; Hermes is pinged), `notify` (owner and Hermes
-only, nothing killed), `relay` (kill, then tell the owner through `relay.py` with the name, budget, overrun and checkpoint), `reroute:RECORD`
-(kill, then `acp-dispatch reroute RECORD --escalate --detach --no-wait`; deadline never names a model; the reroute is waited on up to 120 s
-and never killed if slower. Since 2026-11-07 the acp-dispatch shim retires `reroute` (exit 2) and route_agent's `[escalation]` ladder is gone,
-so this mode kills and pings "reroute FAILED": re-dispatch the slice on the next rung by hand, `model-routing` D2).
+only, nothing killed), `relay` (kill, then tell the owner through `relay.py` with the name, budget, overrun and checkpoint). `reroute:RECORD`
+was retired on 2026-11-07 (slim-down E7; the acp-dispatch shim has no `reroute`): `start` and `run` refuse it with exit 2 pointing at `relay`,
+whose owner re-dispatches the slice on the next rung (`model-routing` D2). A record registered with it before then is stopped, nothing is
+dispatched, and the owner and the operator are told "reroute FAILED ... nothing replaced it".
 **A budget is enforced, never only announced.** The one named exception is the announce-only wait: a record with no `--pid`/`--pgid` has
-nothing to kill, so `start` refuses the default `kill` for it (exit 2) and it must say `--on-expire notify`, `relay` or `reroute:RECORD`
+nothing to kill, so `start` refuses the default `kill` for it (exit 2) and it must say `--on-expire notify` or `relay`
 explicitly; `--on-expire notify` with a pid is likewise the operator's explicit choice.
 **`--holder PID` (2026-11-02; announce-only `notify`/`relay` records, so no `--pid`/`--pgid`: exit 2 otherwise, or for a pid that is not running).** An announce-only record has
 no process of its own, so nothing tells the sweep that the party meant to heartbeat it has died. `--holder` names that party: the process whose
@@ -203,7 +203,7 @@ hand: two schedulers are safe (every record is under its own flock) but they dou
     SIGKILL after `--grace` (a second signal escalates to SIGKILL at once). Nothing is announced or rerouted; `run` exits 128+signal.
 13. The agent scan (`paseo ls` + `paseo inspect` per running agent) runs in a detached `deadline _agents` worker (throttled to one per 5 min, stamped at
     dispatch, one scan at a time by a lock), never inside the enforcement pass; `deadline ls --agents` still reads it synchronously.
-    `--on-expire reroute:PATH` stores PATH resolved against the registering shell's directory. Interrupting `deadline run` after a notify-only
+    (`--on-expire reroute:PATH` stored PATH resolved against the registering shell's directory; the mode was retired 2026-11-07.) Interrupting `deadline run` after a notify-only
     expiry still stops the command (SIGTERM, then SIGKILL after `--grace`).
 14. Cancelling `deadline run` keeps going until the whole process group is gone (also after the leader exited, bounded 10 s after SIGKILL), and
     a cancellation during an expiry stop is recorded (`cancelled`, grace clock kept) so no recovery or reroute runs. A terminal name whose owner notice
@@ -227,7 +227,7 @@ hand: two schedulers are safe (every record is under its own flock) but they dou
     sweep does not turn the registration into `lost`. When the owner stays unreachable through all 5 notice attempts, one Hermes ping says so (`notice.escalated`).
 21. Names are compared case-insensitively (reserved `agents`, and two names differing only in case are refused: one file on a case-insensitive volume). The sweep
     advances only the record it re-reads under the lock; one deleted since its snapshot is skipped, never resurrected from the stale copy.
-22. A failed automatic reroute (`acp-dispatch reroute` exits non-zero) is never silent: the worker queues a tracked owner notice (retried like any other) and
-    pings the operator once; the dispatch itself stays at-most-once. `deadline ls --json` shows the recovery outcome and whether the owner notice was delivered.
-23. A reroute still running when the worker's wait ends (`DEADLINE_REROUTE_WAIT`, default 900 s; the worker is detached) is reported as outcome UNKNOWN, never as a
-    failure: the owner notice and operator ping say so and tell the reader to check `acp-dispatch` before rerouting again. The dispatch is never killed.
+22. A record that still carries the retired reroute action is never silent: the worker queues a tracked owner notice (retried like any other) and
+    pings the operator once ("reroute FAILED ... nothing replaced it"); nothing is dispatched. `deadline ls --json` shows the recovery outcome and whether
+    the owner notice was delivered.
+23. (Retired 2026-11-07 with the reroute action: the "outcome UNKNOWN" report of a reroute still running after `DEADLINE_REROUTE_WAIT`.)

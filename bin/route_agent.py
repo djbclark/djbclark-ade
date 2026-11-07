@@ -287,6 +287,11 @@ LEAD_PIPELINE_EFFORT_DEFAULT = "high"
 # wider list (none, minimal, ultra, default): no Claude surface takes those.
 CLAUDE_EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 LEAD_ALL_KEYS = LEAD_KEYS + ("pipeline_effort",)
+# `fable_lead` (operator 2026-11-07: "Fable leads are allowed for now, with an easy way to turn them off later"): the one
+# switch for a lead session on Fable. Optional and read with .get: absent means false, the 2026-10-23 "never a Fable lead"
+# rule, so an older policy file keeps it. LEAD_FABLE_ALLOWED is the loaded value; context_size_nudge.py reads the same key.
+LEAD_SWITCHES = ("fable_lead",)
+LEAD_FABLE_ALLOWED = False
 
 # Populated by apply_policy from the TOML; names and types match the former
 # module-level literals so every caller and test keeps working.
@@ -371,13 +376,16 @@ def load_policy(path: Path | str) -> dict[str, Any]:
     if lead is not None:
         if not isinstance(lead, dict):
             raise ValueError(f"routing policy {path}: [lead] must be a table")
-        unknown = set(lead) - set(LEAD_ALL_KEYS)
+        unknown = set(lead) - set(LEAD_ALL_KEYS) - set(LEAD_SWITCHES)
         if unknown:
             raise ValueError(f"routing policy {path}: [lead] unknown key(s) {sorted(unknown)}")
         if not all(isinstance(lead.get(k), str) and lead[k] for k in LEAD_KEYS):
             raise ValueError(f"routing policy {path}: [lead] must be a table with non-empty string keys "
                              + ", ".join(LEAD_KEYS))
         lead.setdefault("pipeline_effort", LEAD_PIPELINE_EFFORT_DEFAULT)
+        if not isinstance(lead.get("fable_lead", False), bool):
+            raise ValueError(f"routing policy {path}: [lead] fable_lead must be true or false, "
+                             f"got {lead.get('fable_lead')!r}")
         for key in ("effort", "pipeline_effort"):
             if lead[key] not in CLAUDE_EFFORT_LEVELS:
                 raise ValueError(f"routing policy {path}: [lead] {key} {lead[key]!r} must be one of "
@@ -411,6 +419,7 @@ def apply_policy(data: dict[str, Any]) -> None:
     global CALIBRATE_SUGGEST_WORSE_BELOW
     global CALIBRATE_SUGGEST_WORSE_DELTA, CALIBRATE_SUGGEST_BETTER_ABOVE
     global CALIBRATE_SUGGEST_BETTER_DELTA
+    global LEAD_FABLE_ALLOWED
 
     POLICY = data
     try:
@@ -458,6 +467,7 @@ def apply_policy(data: dict[str, Any]) -> None:
 
     SERVICES = tuple(_service_from_entry(e) for e in data["service"])
     BY_NAME = {s.name: s for s in SERVICES}
+    LEAD_FABLE_ALLOWED = (data.get("lead") or {}).get("fable_lead", False) is True
 
 
 def reload_policy(path: Path | str | None = None) -> dict[str, Any]:
@@ -581,10 +591,14 @@ def policy_markdown() -> str:
     lead = POLICY.get("lead")
     if lead:
         lines += ["", "## Lead / orchestrator session", "",
-                  "The session that dispatches slices runs on this, not on Fable "
-                  "(Fable only through the `fable-deep` sub-agent or a `frontier` slice).", "",
-                  "| key | value |", "|---|---|"]
+                  ("The session that dispatches slices runs on this; a Fable 5.1 lead is allowed "
+                   "(`[lead].fable_lead = true`, operator 2026-11-07; set it to false for the 2026-10-23 "
+                   "never-a-Fable-lead rule)." if LEAD_FABLE_ALLOWED else
+                   "The session that dispatches slices runs on this, not on Fable "
+                   "(Fable only through the `fable-deep` sub-agent or a `frontier` slice; `[lead].fable_lead` is false)."),
+                  "", "| key | value |", "|---|---|"]
         lines += [f"| lead.{k} | {lead[k]} |" for k in LEAD_ALL_KEYS]
+        lines.append(f"| lead.fable_lead | {'true' if LEAD_FABLE_ALLOWED else 'false'} |")
         lines += ["", f"pipeline lead: {lead['pipeline_model']} at {lead['pipeline_effort']}; "
                       "high for judgment turns (`/effort high`, or the Paseo `--thinking` setting; "
                       "back to the pipeline effort afterwards)."]
@@ -1022,6 +1036,7 @@ PASEO_LOADING_RETRIES = 2      # `provider ls` rows still `loading`: re-read thi
 PASEO_LOADING_WAIT = 3.0       # ... this many seconds apart (6 s in all), then absent
 _PASEO_USAGE_MEMO: dict[tuple[Any, ...], tuple[float, tuple[list[Any] | None, str]]] = {}
 _PROVIDER_MODELS: dict[str, list[str] | None] = {}
+_PROVIDER_ROWS: list[list[dict[str, Any]]] = []       # one `provider ls` result per process (empty: not read yet)
 
 
 def _paseo_wanted() -> bool:
@@ -1040,6 +1055,7 @@ def _reset_paseo_cache() -> None:
     """Forget memoised Paseo reads (tests; each process reads at most once per TTL otherwise)."""
     _PASEO_USAGE_MEMO.clear()
     _PROVIDER_MODELS.clear()
+    _PROVIDER_ROWS.clear()
 
 
 def _paseo_json(args: list[str]) -> tuple[Any, str]:
@@ -1066,9 +1082,15 @@ def _paseo_json(args: list[str]) -> tuple[Any, str]:
 
 
 def paseo_provider_rows() -> list[dict[str, Any]]:
-    """`paseo provider ls --json` rows ([] when Paseo cannot be read). A row whose `status` is still `loading` (the daemon
-    just started) is re-read PASEO_LOADING_RETRIES times, PASEO_LOADING_WAIT seconds apart; a row loading after that is
-    dropped with a note on stderr (absent, never available)."""
+    """`paseo provider ls --json` rows ([] when Paseo cannot be read), read once per process (`_reset_paseo_cache` forgets
+    it). A row whose `status` is still `loading` (the daemon just started) is re-read PASEO_LOADING_RETRIES times,
+    PASEO_LOADING_WAIT seconds apart; a row loading after that is dropped with a note on stderr (absent, never available)."""
+    if not _PROVIDER_ROWS:
+        _PROVIDER_ROWS.append(_read_provider_rows())
+    return list(_PROVIDER_ROWS[0])
+
+
+def _read_provider_rows() -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for attempt in range(PASEO_LOADING_RETRIES + 1):
         data, why = _paseo_json(["provider", "ls"])
@@ -1173,9 +1195,16 @@ def usage_from_paseo(rows: list[Any], now: datetime | None = None) -> dict[str, 
             if prior is None:
                 out[key] = entry
             continue
+        windows, balances = report.get("windows") or [], report.get("balances") or []
+        if not isinstance(windows, list) or not isinstance(balances, list):
+            # a malformed report measures nothing: this pool reads as Paseo "not read", never a pass
+            entry["unknown"] = f"paseo usage {source}: not read (windows or balances is not a list)"
+            if out.get(key) is None:
+                out[key] = entry
+            continue
         stale = age is None or age > STALE_SOFT
         worst: float | None = None
-        for i, w in enumerate(report.get("windows") or []):
+        for i, w in enumerate(windows):
             if not isinstance(w, dict):
                 continue
             label = str(w.get("label") or w.get("id") or f"window {i + 1}")
@@ -1192,7 +1221,7 @@ def usage_from_paseo(rows: list[Any], now: datetime | None = None) -> dict[str, 
             entry["windows"][label] = rem
             if rem is not None and (worst is None or rem < worst):
                 worst, entry["resets_at"] = rem, w.get("resetsAt")
-        for b in report.get("balances") or []:
+        for b in balances:
             if not isinstance(b, dict):
                 continue
             try:
@@ -1333,7 +1362,10 @@ def load_snapshot(bypass_memo: bool = False) -> tuple[dict[str, Any], float | No
         QuotaSource.paseo = f"not read: {plabel}"
     else:
         QuotaSource.paseo = plabel
-        paseo = usage_from_paseo(rows)
+        try:
+            paseo = usage_from_paseo(rows)
+        except (TypeError, ValueError, AttributeError, OverflowError) as exc:   # belt and braces: the usage path never raises
+            QuotaSource.paseo, paseo = f"not read: {plabel}: unparseable ({exc.__class__.__name__})", {}
         if paseo and not providers:
             ages = [a for a in (e.get("age_s") for e in paseo.values() if e.get("remaining") is not None)
                     if a is not None]
