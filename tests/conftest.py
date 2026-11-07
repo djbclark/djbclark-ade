@@ -16,18 +16,9 @@ for _var in ("TMPDIR", "TEMP", "TMP"):
         del os.environ[_var]
 tempfile.tempdir = None
 
-# acp-dispatch holds a slice's start while the real machine is overloaded
-# (bin/acp-dispatch wait_for_capacity). Tests must not depend on the host's
-# load: with it on, a busy machine made dispatch tests wait and fail
-# (2026-10-12). test_acp_dispatch_gate.py exercises the gate directly.
-os.environ.setdefault("ACP_DISPATCH_NO_GATE", "1")
-# The same for the load gate (`load-watch admit`, 2026-10-19): it waits up to 30 min on a hot host and
-# refuses with 75. test_acp_dispatch_load_gate.py turns it on per test with a fake load-watch.
+# acp-dispatch's load gate (`load-watch admit`, 2026-10-19) waits up to 30 min on a hot host and refuses with 75.
+# Tests must not depend on the host's load: test_acp_dispatch.py turns it on per test with a fake load-watch.
 os.environ["ACP_DISPATCH_NO_LOAD_GATE"] = "1"  # unconditional: an outer "" or "0" must not turn the real 30-min gate on
-# A quota stop schedules an in-place resume with `launchctl submit` (2026-10-18). No test may
-# leave a real launchd job behind: test_acp_dispatch.py gives finalize a fake launchctl that
-# records its arguments; anything else gets a no-op.
-os.environ.setdefault("ACP_DISPATCH_LAUNCHCTL", "/usr/bin/true")
 # bin/ade_sched.py (bin/ade-sched, 2026-11-04) installs jobs on launchd, systemd or cron. No test may touch the real ones:
 # every scheduler binary is a no-op and the agent/unit dirs and the crontab lock live in a throwaway directory.
 # Unconditional: an outer value must not point the suite at a real scheduler or ~/.config/systemd/user.
@@ -39,10 +30,6 @@ atexit.register(shutil.rmtree, _SCHED_ROOT, ignore_errors=True)
 os.environ["ADE_SCHED_LAUNCH_AGENTS"] = str(_SCHED_ROOT / "LaunchAgents")
 os.environ["ADE_SCHED_UNIT_DIR"] = str(_SCHED_ROOT / "systemd-user")
 os.environ["ADE_SCHED_LOCK"] = str(_SCHED_ROOT / "ade-sched.lock")
-# `reap` throttles dir sweeps younger than 60 s through a machine-wide stamp (2026-10-18).
-# Off in tests: dir sweeps must always run and must never touch the real machine's stamp;
-# test_acp_dispatch_waiter.py turns the throttle on explicitly per test.
-os.environ.setdefault("ACP_DISPATCH_REAP_MIN_INTERVAL", "0")
 # route_agent.load_snapshot() runs `aiuse --available --json` unless a snapshot is pinned (2026-10-20).
 # Off in tests so the suite never depends on, or spawns, the host's real aiuse;
 # test_route_agent.py's TestQuotaFromAiuseAvailable turns it on per test.

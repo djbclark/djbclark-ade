@@ -5,8 +5,8 @@ description: >-
   with a final-word model: fixed speaking rounds through pinned headless routes,
   a machine-read footer per turn, the transcript as the record. Use for "have
   the models chat about it", "three-model dialogue", "let Grok/Fable/Astra argue
-  it out and write X". Not for a quick second opinion (one `acp-run` call) or
-  fan-out without argument (use `bigteam`).
+  it out and write X". Not for a quick second opinion (one `paseo run` call) or
+  fan-out without argument (use `fan-out`).
 ---
 
 # dialogue — several models argue, one artifact, one final word
@@ -155,23 +155,26 @@ Each turn runs a model for many minutes: in an interactive session start `round`
 1. **Pin each model's routes in `dialogue.json`** for the whole run; never borrow the
    lead's own override (the ai-heaven turn 15 was empty because Astra ran on the lead's
    copilot override). Two routes per model at most; the second runs only on failure.
-2. Route kinds: `acp` (`acp-run <agent> -C <cwd> -f <prompt> --model <m> [--set k=v]
-   --perm all --json`; always a `--model`), `claude` (`claude -p --model <m> --effort <e>`,
-   prompt on stdin, `CLAUDECODE` unset), and `cmd` (any argv with `{prompt}`/`{cwd}`).
-3. Defaults that worked on 2026-10-10: Grok `acp-run grok --model grok-4.7 --set
-   reasoning_effort=high`; Fable `claude -p --model claude-fable-5-1 --effort high`;
-   **Astra `acp-run codex --model gpt-6-astra --set reasoning_effort=xhigh`**. Astra via
-   `acp-run copilot` is reserved to the ai-heaven lead session (operator ruling
-   2026-10-10); never configure it elsewhere. Second routes in the example (`cursor` for
-   Grok, `acp-run claude` for Fable) are unprobed: run `probe` before relying on them.
+2. Route kinds: `paseo` (since 2026-11-06; `acp`, the acp-run kind, is now its alias: `agent` is the Paseo
+   provider): `paseo run --provider <agent>/<model> --mode <mode, default the provider's defaultMode>
+   --no-wait --json --cwd <cwd> -- <pointer>`, the pointer naming the turn's prompt file and a reply file
+   beside it, then `paseo wait ID --timeout S --json` (its status field, never `$?`); the reply file is the
+   turn text. A `set` entry with an effort key (`reasoning_effort=high`) becomes `--thinking high`; other
+   `set` entries are ignored. Always give a `model`. `claude` (`claude -p --model <m> --effort <e>`, prompt on
+   stdin, `CLAUDECODE` unset) and `cmd` (any argv with `{prompt}`/`{cwd}`) are unchanged.
+3. Defaults that worked on 2026-10-10 (through acp-run then; re-probe on Paseo): Grok `grok` / `grok-4.7` with
+   `reasoning_effort=high`; Fable `claude -p --model claude-fable-5-1 --effort high`; **Astra `codex` /
+   `gpt-6-astra` with `reasoning_effort=xhigh`**. Astra via copilot is reserved to the ai-heaven lead session
+   (operator ruling 2026-10-10); never configure it elsewhere. Second routes in the example (`cursor` for
+   Grok, the `claude` provider for Fable) are unprobed: run `probe` before relying on them.
 4. Routing never changes authority: the final-word model's rulings stand whichever route
    carried them.
 5. **Moving a seat off a spent pool: env overrides, no config edit.** For seat `<SEAT>` (the
    `models` key upper-cased, non-alphanumerics to `_`: `fable` -> `FABLE`, `grok-x` -> `GROK_X`):
-   `DIALOGUE_<SEAT>_MODEL=<m>` replaces `model` on every `acp`/`claude` route of that seat;
-   `DIALOGUE_<SEAT>_AGENT=<a>` turns the seat's first route into `acp-run <a>` (keeping the
+   `DIALOGUE_<SEAT>_MODEL=<m>` replaces `model` on every `paseo`/`acp`/`claude` route of that seat;
+   `DIALOGUE_<SEAT>_AGENT=<a>` turns the seat's first route into the Paseo provider `<a>` (keeping the
    route's model unless `_MODEL` is set; its `set` list and `effort` are dropped);
-   `DIALOGUE_<SEAT>_SET=k=v,k2=v2` replaces the first route's `--set` list (empty clears);
+   `DIALOGUE_<SEAT>_SET=k=v,k2=v2` replaces the first route's `set` list (empty clears);
    `DIALOGUE_<SEAT>_POOL=<label>` changes the `aiuse` pool the quota wait reads. Examples:
    `DIALOGUE_FABLE_MODEL=claude-opus-5-5` (Fable weekly cap spent, 2026-10-10);
    `DIALOGUE_GROK_AGENT=opencode DIALOGUE_GROK_MODEL=opencode-go/grok-4.7 DIALOGUE_GROK_POOL=Go`.

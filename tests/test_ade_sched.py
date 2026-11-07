@@ -1,6 +1,6 @@
 """Tests for bin/ade_sched.py and bin/ade-sched (issue #279, 2026-11-04): one plist, three schedulers.
 
-Every scheduler binary here is a fake shell script that logs its argv (the tests/test_acp_dispatch_reap.py pattern); the agent
+Every scheduler binary here is a fake shell script that logs its argv (the pattern of acp-dispatch's old reap tests); the agent
 and unit dirs are per-test temp dirs. conftest.py pins the real ones to /usr/bin/true and a throwaway dir as a safety net.
 """
 from __future__ import annotations

@@ -16,8 +16,6 @@ import unittest
 from pathlib import Path
 from typing import ClassVar, override
 
-from test_acp_dispatch import Base, run
-
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = Path(os.environ.get("ACP_RUN_SCRIPT", str(ROOT / "tools" / "acp-run" / "acp-run")))
 # the real positive: claude fable under --perm deny, ade-v21-review-fable-final.txt
@@ -211,63 +209,6 @@ class TestReadOnlyPolicy(unittest.TestCase):
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 2, r.stderr)
         self.assertIn("--perm read-only: grok:", r.stderr)
-
-
-class TestDispatch(Base):
-    def test_advise_with_deny_is_refused(self):
-        r = self.dispatch_agent("claude", "fable", "--kind", "frontier", "--role", "advise", "--perm", "deny",
-                                "--no-model-check", "--no-preflight", "--dry-run")
-        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
-        self.assertIn("--perm read-only", r.stderr)
-        self.assertFalse((self.out / "jobs" / "s1.json").exists())
-
-    def test_default_frontier_role_with_deny_is_refused(self):
-        r = self.dispatch_agent("codex", "gpt-6-astra", "--kind", "frontier", "--perm", "deny",
-                                "--no-model-check", "--no-preflight", "--dry-run")
-        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
-        self.assertIn("--role advise with --perm deny is refused", r.stderr)
-
-    def test_exec_with_deny_still_runs(self):
-        r = self.dispatch_agent("claude", "opus", "--kind", "judgment", "--perm", "deny",
-                                "--no-model-check", "--no-preflight", "--min-headroom", "0", "--dry-run")
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-
-    def test_read_only_passes_through_and_is_stored(self):
-        r = self.dispatch_agent("claude", "fable", "--kind", "frontier", "--role", "advise", "--perm", "read-only",
-                                "--no-model-check", "--no-preflight", "--min-headroom", "0",
-                                mode="stdout")
-        rec = self.record()
-        self.assertEqual(rec["perm"], "read-only")
-        self.assertIn("--perm read-only", rec["cmd"])
-        self.assertEqual(rec["report_source"], "final-message", r.stdout + r.stderr)
-        brief = Path(rec["brief"]).read_text()
-        self.assertIn("This run is read-only (`--perm read-only`)", brief)
-
-    def test_codex_read_only_brief_names_its_shell_not_read_grep_glob(self):
-        r = self.dispatch_agent("codex", "gpt-6-astra", "--kind", "frontier", "--role", "advise", "--perm", "read-only",
-                                "--no-model-check", "--no-preflight", "--min-headroom", "0", mode="stdout")
-        brief = Path(self.record()["brief"]).read_text()
-        self.assertIn("This run is read-only (`--perm read-only`)", brief, r.stdout + r.stderr)
-        self.assertIn("Your only tool is a shell", brief)
-        self.assertNotIn("Read, Grep, Glob", brief)
-
-    def test_fake_tool_calls_is_never_recovered_as_a_report(self):
-        r = self.dispatch_agent("claude", "fable", "--kind", "frontier", "--perm", "all",
-                                "--no-model-check", "--no-preflight", "--min-headroom", "0",
-                                mode="fake_tool_calls")
-        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
-        rec = self.record()
-        self.assertEqual(rec["status"], "no-report")
-        self.assertEqual(rec["report_source"], "final-message-failed")
-        self.assertTrue(rec["failure"].startswith("NO-REPORT: fake-tool-calls (claude, fable)"), rec["failure"])
-        self.assertIn("--perm read-only", rec["failure"])
-        text = Path(rec["report"]).read_text()
-        self.assertNotIn("recovered by acp-dispatch", text)
-        self.assertNotIn("DONE", text.splitlines())
-        c = run(["check", str(self.out / "jobs" / "s1.json")])
-        self.assertEqual(c.returncode, 3, c.stdout)
-        self.assertTrue(c.stdout.startswith("no-report\t"), c.stdout)
-        self.assertIn("fake-tool-calls", c.stdout)
 
 
 if __name__ == "__main__":

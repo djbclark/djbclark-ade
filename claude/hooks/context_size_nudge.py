@@ -21,7 +21,7 @@ History:
 - 2026-10-05: fail-fast tail read + 2 s internal deadline (load 223 killed it).
 - 2026-10-08 (operator ruling, supersedes 2026-08-23): prompt earlier and
   harder, and DO recommend /compact, or /handoff then /new. The old single
-  150k nudge fired too late. Separable work goes to /bigteam by default so it
+  150k nudge fired too late. Separable work goes to /fan-out by default so it
   never lands in this context. memory/feedback_context_prompts_early.md.
 - 2026-10-10: stop the compaction loop. Measured over 85 compactions in two
   days: a /compact took context from ~187k to ~104k (not the ~33k Claude Code
@@ -477,7 +477,7 @@ def _early_message(total, growth):
     return (
         f"Context check: {total:,} tokens in context (+{growth:,} since this "
         "session started or last compacted). From now on, send discrete, "
-        "separable work through /bigteam (Agent sub-agents for small lookups) "
+        "separable work through /fan-out (Agent sub-agents for small lookups) "
         "so its tokens stay out of this session, and don't read large files or "
         "logs inline. Do not compact yet solely for this early warning. "
         "Cached input is billed on every request; its price and allowance debit "
@@ -543,7 +543,7 @@ def _ask_message(total, growth, repeat, successor=None):
         f"(autoCompactWindow {AUTO_COMPACT_WINDOW:,} in ~/.claude/settings.json "
         "less its buffer; the PreCompact hook writes the Tier 1 checkpoint "
         "first). Until then start no new heavy work inline: send it through "
-        "/bigteam or a minimum-spec sub-agent. When the current task is "
+        "/fan-out or a minimum-spec sub-agent. When the current task is "
         "finished, same topic or not, run the `handoff` skill (Tier 2 "
         "document) and tell the operator /new is ready (a fresh session "
         "re-writes ~46k); keep going in-context only when the work must "

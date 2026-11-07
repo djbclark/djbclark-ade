@@ -4,7 +4,7 @@
 `bin/failover.py` (2026-10-12) runs a task through an ordered chain of agent
 routes and stops at the first that works. `bin/skillopt-night` is its first
 consumer ([skillopt-sleep.md](skillopt-sleep.md) section 4). It is built so
-`acp-dispatch`, bigteam and other bin tools can import it later.
+`acp-dispatch`, the fan-out skill and other bin tools can import it later.
 
 ## Pieces
 

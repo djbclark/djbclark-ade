@@ -4,7 +4,7 @@
 `classify` matched `\\b429\\b` (quota) and `\\b5\\d\\d\\b` (transient) anywhere in the text, so a
 stderr tail or an ACP error that merely counted things was a provider failure: "tools=536" on the
 acp-run summary line became transient, and "processed 429 files" became quota, which sends the
-slice down the quota path (auto-resume, reroute). Only a status written as one (HTTP 429, Error
+slice down the quota path (acp-dispatch's old automatic resume and reroute, gone 2026-11-06). Only a status written as one (HTTP 429, Error
 503, "code": 500, 503 Service Unavailable) is a failure now. acp-run imports the ACP SDK, so the
 script is loaded in a `uv run --with` subprocess, as in test_acp_run_failure.py.
 """

@@ -1,0 +1,22 @@
+#!/usr/bin/env python3
+"""A stub of E8's `bin/review-launch` (interface: docs/slim/briefs/wave4-E8-gate.md 1a) for tests/test_acp_dispatch.py.
+It logs its argv to $FAKE_RL_LOG and answers per FAKE_RL_MODE: ok (stdout `{"report": ...}` ending DONE) | blocked |
+tripwire (77) | refused (2) | noout (3) | timeout (124) | garbage (exit 0, not JSON)."""
+import json
+import os
+import sys
+
+log = os.environ.get("FAKE_RL_LOG")
+if log:
+    with open(log, "a") as fh:
+        fh.write(json.dumps(sys.argv[1:]) + "\n")
+mode = os.environ.get("FAKE_RL_MODE", "ok")
+if mode == "ok":
+    print(json.dumps({"report": "STATUS: reviewed\nno findings\nDONE"}))
+elif mode == "blocked":
+    print(json.dumps({"report": "BLOCKED: which base should I review against?"}))
+elif mode == "garbage":
+    print("not json")
+else:
+    print(f"review-launch: {mode}", file=sys.stderr)
+    sys.exit({"tripwire": 77, "refused": 2, "noout": 3, "timeout": 124}[mode])

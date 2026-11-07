@@ -239,7 +239,7 @@ Landed 2026-10-15 (6528ccf, 77bd2bf, 0221561, faead67, ada7620). Value lists are
 4. Read-back, stderr before the summary line: `acp-run: applied: model=... effort=... ctx=...`. Same fields on the JSONL `result` record (`applied`), a separate `applied` record, and `--json`. Unreadable values are marked `(unverified)` (`effort=high(unverified)`). A requested value the agent reports differently is failure class `config`, exit 1 (option response before the prompt, or `usage_update.size` after the turn). Under `--interactive` the line is still printed; a post-turn window mismatch does not change the exit code.
 5. `--meta JSON` deep-merges into `session/new` `_meta` over `systemPrompt` and the deny meta. `--agent-arg ARG` (repeatable) appends to the launch command. `--agent-env K=V` (repeatable; one argument may be `K=V,K2=V2`, split only before another `NAME=`) appends to the child environment. Per host, `~/.config/acp-run.env` or `$ACP_RUN_ENV_FILE`: `ACP_RUN_ARGS_<AGENT>` (shell-split), `ACP_RUN_ENV_<AGENT>="K=V,K=V"`.
 6. `HERDR_PANE_ID`, `HERDR_ENV`, `HERDR_WORKSPACE_ID` and `HERDR_TAB_ID` (the last two since 2026-10-25, when the Codex tool environment began to pass the herdr ids on), `PASEO_AGENT_ID`, `PASEO_AGENT_CWD` and `ORCA_TERMINAL_HANDLE` and `ADE_OPENCODE_SESSION_ID` and `ADE_OPENCODE_DIRECTORY` are removed on every run, and `ACP_RUN_AGENT=1` is set (2026-10-20: `bin/self-slash` refuses lifecycle actions when it sees the marker; a slice that kept `PASEO_AGENT_ID` could `/clear` or archive the caller's Paseo agent). (`ACP_RUN` itself is taken: it holds the acp-run path for `session-finder`.) Under `--perm deny`, grok starts without `--always-approve` on a per-run `GROK_HOME`: symlinks to `~/.grok` except `hooks/`, `skills/`, `plugins/`, `installed-plugins/` and `config.toml`. The copy drops `[[hooks.*]]`, `[plugins]`, `[mcp_servers.*]`, `ui.permission_mode`, `ui.yolo`, and ends with `[permission] ask = ["*"]` (deny > ask > allow). tomllib requires the copy to equal the original minus exactly those parts; otherwise grok keeps the user's home and the run says so. A token rewritten as a regular file in the temp home is copied back. `--strip-user-config` is the same strip without the permission table. Every other non-interactive grok run (`--perm all`, what `acp-dispatch` uses) also starts on a stripped `GROK_HOME` without the user's hooks, skills and plugins (2026-10-15), keeping MCP servers, the permission mode and auth (no `ask` rule); the `user_config` log record names the `home`. `ACP_RUN_GROK_USER_HOOKS=1` (or `--keep-user-config`) keeps `~/.grok`; `--interactive` always does.
-7. `acp-dispatch --effort` and `--context` are first-class. Checked with the model before anything is written (`acp-run <agent> --info --model M --effort E --context C`), stored on the job record, kept by `resume`. `--acp-arg` still forwards other flags; a dash-leading value needs `--acp-arg=--meta`. zcode `--model` is accepted and still optional.
+7. acp-run's `--effort` and `--context` are first-class (`acp-run <agent> --info --model M --effort E --context C` checks them). acp-dispatch stopped passing them on 2026-11-06 (it launches through Paseo: `--effort` becomes `paseo run --thinking`).
 8. No `--fast`. Use `--set fast=on|off` (claude Opus only), `--set fast=true|false` (cursor), `--set fast-mode=on|off` (codex), or a model id (`grok-4.7-build-fast`, copilot `claude-opus-4.8-fast`). Thinking budget: `--agent-env MAX_THINKING_TOKENS=N` or `ACP_RUN_ENV_CLAUDE`. Not implemented (exit 2, or not a flag): hermes shadow home for effort/context, crush `/set_reasoning_effort`, opencode/qwen context caps (`OPENCODE_CONFIG_CONTENT` `limit.context` untested; a cap cannot raise a window), agy `--auth-method` (`AGY_ACP_DEFAULT_MODEL` via `ACP_RUN_ENV_AGY`), `ZCODE_ACP_QUOTA_AUTO_RESUME=0` (operator's choice). Claude `--context 1m` does not add `[1m]`.
 
 (The `ocx-*` grok ids, OpenAI models via the opencodex proxy on `127.0.0.1:10100`, went with the proxy on 2026-10-19.) Cursor `--set reasoning_effort=LEVEL` hits only option id `reasoning_effort`: `grok-4.7`, `claude-sonnet-5-5`, `claude-haiku-5-5`, `gemini-4-argon`, `gemini-3.8-flash`. Other cursor models use option `effort` or `reasoning`; use `--effort`.
@@ -343,91 +343,20 @@ Context: `session/set_model` `_meta.contextWindow`. Must be in initialize `model
 
 
 
-## Dispatch slice controls (2026-10-11)
+## Dispatch slice controls (2026-10-11; acp-dispatch left acp-run 2026-11-06)
 
-An advisory review that must *read* the repo runs with `--perm read-only`
-(claude, codex, opencode; elsewhere `--perm all` with a brief that says "do
-not edit" and a diff check). Under `--perm deny` claude gets a session with no
-built-in tools at all, so a reading review printed its tool calls as text and
-ended in seconds (2026-10-19, two frontier slices lost, then recovered as
-"done"). Since then (a) `acp-dispatch --role advise --perm deny` is refused with
-exit 2; (b) acp-run fails a turn that made no tool call and replied with pseudo
-tool-call markup (`<invoke name=`, `<function_calls>`, a fenced `tool_call` or
-`json` block holding a tool and its arguments, `print(default_api.`) as
-`FAILED fake-tool-calls`, exit 1, with a line naming `--perm read-only`; (c)
-acp-dispatch never recovers such a run's final message: the record is
-`no-report` with `NO-REPORT: fake-tool-calls` and no DONE. XML markup quoted in a
-code block, or in a run that made real tool calls, passes. `--perm deny` is for
-a run that must not touch anything and needs no tools.
-`acp-dispatch <agent> ... --timeout 0` starts a slice without a time limit.
-Its record-based rearm waiter and detached wait have no deadline, even with an
-explicit `--wait-timeout`. For finite slices, the existing default remains
-timeout + wrap-up grace + 300 seconds; `--wait-timeout 0` makes just the waiter
-unlimited. Already-running record-based waiters follow later extensions.
+`bin/acp-dispatch` no longer runs acp-run: since 2026-11-06 it is a `paseo run` shim (its docstring has the flags,
+the `--perm` boundaries and the exit codes; `--perm read-only`/`deny` for Claude go through `bin/review-launch`). Its
+resume, reroute and extend subcommands, the automatic quota resume with its pmset wake and sudoers rule, `--effort`/
+`--context` probing through `acp-run --info`, `--acp-arg` and the final-message recovery are gone. `tell` and `outcome`
+stay (inbox plus `paseo send`; the fields `route_agent.py calibrate` reads).
 
-`acp-dispatch --effort` and `--context` (2026-10-15) are first-class. They are
-checked with the model before anything is written
-(`acp-run <agent> --info --model M --effort E --context C`), stored on the job
-record, and kept by `resume`. `--acp-arg` still forwards other flags except model/credential changers (`--model`, `--meta`,
-`--agent-arg`, `--agent-env`, `--auth`, `--set` but effort keys: refused for omp, codex and claude (docs/agent-guard-contract.md)); a
-dash-leading value needs `--acp-arg=--tripwire-exempt-kinds`.
-
-`acp-dispatch extend <out>/jobs/<name>.json 3600` adds an hour to a running
-slice. Use `0` to remove its deadline. The command atomically writes the control
-file and records the requested total limit; acp-run's log confirms application.
-Pending positive extensions accumulate. Finished slices are refused, and so is
-every extension (`0` included) of a costly Go advisory slice, whose record carries
-`--go-advisory` (exit 2, nothing written).
-
-`acp-dispatch resume <out>/jobs/<name>.json --timeout 14400` continues a
-finished slice in its original ACP session. Optional `-p TEXT` or `-f FILE`
-replaces the continuation prompt; `--detach --no-wait` uses the normal runner
-and rearm contract. Without a new timeout it reuses the recorded limit. The
-record stores the session id as soon as it is observed, and legacy records
-recover it from the log's `new_session` event. Agents advertising neither
-load nor resume are refused with exit 2. The previous report is preserved as
-`<name>-r1-report.md`, then `-r2`, and so on; each revision also keeps its brief,
-log, final text and stderr. Normal output and `.done` paths remain stable.
-
-`acp-dispatch reroute <out>/jobs/<name>.json (--agent A --model M | --escalate)`
-continues a stopped slice from its checkpoint on another pool (2026-10-18).
-`--escalate` climbs exactly one rung of the cheap-first `[escalation]` ladder
-in `config/routing.toml` (operator decision 1.4) and takes `route_agent`'s top
-route for the next kind, excluding the pool that failed; every dispatch gate
-still runs and the top rung refuses with exit 2 — never straight to frontier.
-Long-reset rule (same day): a quota stop whose reset is more than
-`[dispatch].auto_resume_max_wait_hours` (6) away is not auto-resumed in place;
-`check` prints a ready-to-run reroute line instead, and the scheduled resume
-tries to wake the Mac first (`sudo -n pmset schedule wake`, recorded in
-`auto_resume.wake`; cancelled best-effort when the resume runs or the schedule
-is cancelled). That needs the NOPASSWD rule in
-`config/sudoers.d/acp-dispatch-pmset` (only `pmset schedule wake *` and
-`pmset schedule cancel wake *`; operator-approved and installed 2026-10-18):
-`visudo -cf` it, then `sudo install -m 0440 -o root -g wheel
-config/sudoers.d/acp-dispatch-pmset /etc/sudoers.d/`. Without it the wake
-records `unavailable: ...` and the resume runs at the Mac's next wake.
-
-`acp-dispatch tell <out>/jobs/<name>.json "stop after step 3"` sends a message
-into a running slice (2026-10-18). It appends a `## MSG N` entry to
-`<record>.inbox.md` next to the record, and for a `claude` slice also writes
-one JSON frame to the live session's messaging socket (found via
-`~/.claude/sessions/<pid>.json`; undocumented protocol, so a miss is never an
-error — the inbox is the source of truth). A bare report path works as RECORD
-when no `.json` exists (Agent-tool sub-agents): the inbox becomes
-`<report>.inbox.md`. A finished record is refused with exit 2 and the `resume`
-command to use instead. The footer has the slice answer each message with
-`REPLY N:` in `<record>.replies.md`; `check` shows `inbox: N sent, M answered`
-and `resume` carries unanswered messages into the prompt.
-
-`acp-dispatch outcome <record> --ci pass --review fail --merged` records what
-became of a finished slice's work (2026-10-18): `outcome.ci`/`outcome.review`
-("pass" | "fail") and `outcome.merged` (`--not-merged` writes false), merged
-into earlier calls, the fields `route_agent.py calibrate` re-ranks pools from.
-`--review fail` means the lead's review found a defect that had to be fixed
-before merge, even when the fixed work then merged.
-An unfinished record, or no flag at all, is refused with exit 2.
-
-(For agy, retired 2026-11-06, the footer named a report under the workspace's `.acp-dispatch/` and finalize moved it to the out folder; the record fields that hold both paths stay.) Records retain both pairs of paths.
+What stays here is acp-run's own side of the 2026-10-19 lesson. Under `--perm deny` claude gets a session with no
+built-in tools at all, so a reading review printed its tool calls as text and ended in seconds (two frontier slices
+lost). acp-run fails a turn that made no tool call and replied with pseudo tool-call markup (`<invoke name=`,
+`<function_calls>`, a fenced `tool_call` or `json` block holding a tool and its arguments, `print(default_api.`) as
+`FAILED fake-tool-calls`, exit 1, with a line naming `--perm read-only`. XML markup quoted in a code block, or in a run
+that made real tool calls, passes. `--perm deny` is for a run that must not touch anything and needs no tools.
 
 ## Interactive mode
 
