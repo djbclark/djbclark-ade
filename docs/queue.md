@@ -80,7 +80,8 @@ under **Carried**, newest first, one line each; an item leaves when it ships (in
     the code exempts a `tests/` directory at any depth (PR 32 round 6); no test pins that `xhigh` and `max` are accepted as
     `[lead]` effort values (PR 33 round 2).
 33. **From the slim-down, for the follow-up PR and after** (2026-11-07): remove the relay shim (by 2026-11-20) and the
-    dispatch shim with `tools/acp-run` after one live cycle (Wave 6), keeping `bin/review-launch`; aiuse's acp-run
+    dispatch shim with `tools/acp-run` after one live cycle (Wave 6), keeping `bin/review-launch`, and port `skills/loose`'s
+    upstream-issue reader off `acp-run --perm deny`; aiuse's acp-run
     readers (`src/aiuse/collectors/acp_usage.py`); the shim does not apply the Argon `fallback_block` at dispatch (E7 E5);
     the `quota_nudge.py`/`cswap_quota_context.sh` decision (R2-18); `routing-recalibrate` as a Paseo schedule if wanted
     (E5); upstream Paseo filings (a codex read-only mode, a quota-pause primitive, a workspace-claim primitive).

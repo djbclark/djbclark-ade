@@ -198,7 +198,7 @@ F3. **Left on purpose, with the reason:**
   (a 2026-10-09 run record).
 - The two shims and `tools/acp-run` are live until Wave 6, so `relay.py`, `acp-dispatch`, `acp-run` and the state
   directory `~/.local/state/bigteam/` stay named; `skills/loose`'s embedded upstream-issue reader still runs
-  `acp-run … --perm deny` (works while acp-run lives; the Wave 6 follow-up PR must port it: carried item 32).
+  `acp-run … --perm deny` (works while acp-run lives; the Wave 6 follow-up PR must port it: carried item 33).
 - `docs/threat-model.md`'s body: the new top block says it is the 2026-10-20 snapshot and names every deleted surface;
   rewriting each numbered threat is left for a review pass that has the code in front of it.
 - `docs/paseo-only-rearchitecture.md`: the plan of record, marked phase by phase.
@@ -273,7 +273,7 @@ footer slices receive (no test pins that text).
 J6. Skill prose was in scope (SKILL.md files are instructions, not code): the handoff/baton/loose/steps/session-handoff
 rewrite is the largest change and needs the W3 critic's eye; `session-handoff`'s exemption B is a new rule.
 J7. `GEMINI.md` (graft block only) and `CLAUDE.md` (the symlink) needed no change.
-J8. The queue's carried list gained the slim-down's own leftovers (item 32) so they are not only in the log.
+J8. The queue's carried list gained the slim-down's own leftovers (item 33) so they are not only in the log.
 J9. **A test outside the allowed set was edited**: `tests/test_bm_lint.py`'s README-row test (H2). The brief allows code
 edits only to `bin/ade-roster` and its test; leaving a new failure was worse, the edit is one test function, and the
 alternative (a hand-kept `bin/bm-lint` row beside the generated roster) would defeat the roster. The lead may prefer to
