@@ -86,6 +86,12 @@ under **Carried**, newest first, one line each; an item leaves when it ships (in
     the `quota_nudge.py`/`cswap_quota_context.sh` decision (R2-18); `routing-recalibrate` as a Paseo schedule if wanted
     (E5); upstream Paseo filings (a codex read-only mode, a quota-pause primitive, a workspace-claim primitive).
 34. **`bin/review-pr` and `gh pr checks --watch` register no deadline of their own** (2026-11-07, W3 docs critic): run them under `deadline run` until one of them registers itself (`docs/deadline.md` Known gaps).
+35. **One-step install and automatic updates on a new machine, Mac and Linux** (operator, 2026-11-07): an easy way to install
+    djbclark-ade with all its dependencies and TUIs (Paseo and its providers' CLIs, the modern-CLI tools, `graft`, `aiuse`,
+    skills linked by `skill-everywhere`), and an automatic way to keep it and every dependency current (software tracks
+    its latest release, order 8). Start from what exists: `bin/ade-update` (this checkout only), `bin/ade-sched` for the
+    schedule, site-djbclark's `skills/setup-modern-cli`, and the decided but unbuilt proposal `docs/history/ade-everywhere-proposal.md`
+    (2026-10-20, pre-slim: re-base it on Paseo and the slim-down's tool list).
 
 ## Closed by the slim-down (2026-11-06/07; the slice that closed it)
 
