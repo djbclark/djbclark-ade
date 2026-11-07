@@ -40,7 +40,7 @@ ACP_DISPATCH_LOAD_WAIT, else 1800; --no-load-gate or ACP_DISPATCH_NO_LOAD_GATE=1
 environment except the knobs passed as flags). Then, under this shim's launch lock, the live count: `paseo ls -g
 --background --label ade.via=acp-dispatch --json`, agents whose status is running or initializing; at LW_MAX_AGENTS
 (default 14, 0 off) or more it waits inside the --load-wait budget and then exits 75 (`refused=agents`). Then
-`paseo run --provider P/M --mode MODE --no-wait --json --title NAME --cwd DIR --label ade.via=acp-dispatch --label
+`paseo run --provider P/M --mode MODE --no-wait --json --title NAME --new-workspace local --cwd DIR --label ade.via=acp-dispatch --label
 ade.kind=KIND --label ade.name=NAME --label ade.lead=LEAD [--thinking EFFORT] -- PROMPT`, where PROMPT is one
 paragraph naming the brief copy (`<out>/<name>-brief.md`, never written into the repo), the report path, and the
 footer. The lock and the admit reservation are released once the new agent shows in that list (up to 10 s), so a
@@ -841,7 +841,7 @@ def launch_argv(a: argparse.Namespace, boundary: str, mode: str, brief: Path, re
                 "--model", a.model, *(["--timeout", str(a.timeout)] if a.timeout else []), "--json"]
     labels = [VIA_LABEL, f"ade.kind={a.kind}", f"ade.name={a.name}", f"ade.lead={a.lead}"]
     return [paseo_bin(), "run", "--provider", f"{PROVIDERS[a.agent]}/{a.model}", "--mode", mode, "--no-wait", "--json",
-            "--title", a.name, "--cwd", a.dir, *[x for lb in labels for x in ("--label", lb)],
+            "--title", a.name, "--new-workspace", "local", "--cwd", a.dir, *[x for lb in labels for x in ("--label", lb)],
             *(["--thinking", a.effort] if a.effort else []), "--", prompt]
 
 
@@ -1094,7 +1094,18 @@ def launch_locked(record: Path, rec: dict) -> int | None:
     aid = data.get("agentId") if isinstance(data, dict) else None
     if not aid:
         return refuse_launch(record, f"paseo run did not create an agent: {why or data}", 2, "launch")
-    update_record(record, paseo_agent_id=str(aid), run_status=data.get("status"))
+    reported_cwd = data.get("cwd")
+    expected_cwd = rec.get("dir")
+    placement_warning = None
+    if not isinstance(reported_cwd, str) or not reported_cwd:
+        reported_cwd = None
+        placement_warning = "Paseo did not report a working directory; placement is unverified"
+    elif isinstance(expected_cwd, str) and os.path.realpath(reported_cwd) != os.path.realpath(expected_cwd):
+        placement_warning = f"misplaced agent: Paseo cwd {reported_cwd!r} differs from assigned {expected_cwd!r}"
+    update_record(record, paseo_agent_id=str(aid), run_status=data.get("status"),
+                  paseo_cwd=reported_cwd, placement_warning=placement_warning)
+    if placement_warning:
+        print(f"acp-dispatch: warning: {placement_warning}; agent left running", file=sys.stderr)
     end = time.monotonic() + COUNTABLE_S
     while time.monotonic() < end and str(aid) not in count_agents()[2]:
         time.sleep(0.5)

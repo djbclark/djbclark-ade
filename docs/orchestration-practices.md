@@ -91,6 +91,14 @@ the task, and the ambiguity is copied into every slice.² ³ Every brief has:
 9. **The delivery footer** (`acp-dispatch footer --report PATH`, docs/dispatch-footer.md): where the report goes, the
    `.done` marker, and the last line `DONE`, `BLOCKED: …` or `NO-REPORT: …`.
 
+On 2026-11-07 a live child launch confirmed that `paseo run --cwd DIR` alone inherited the parent's workspace
+and ignored the requested directory. A top-level run with `PASEO_WORKSPACE_ID` set also inherits that workspace.
+For an already claimed worktree, use `--new-workspace local --cwd DIR`
+(or an explicit `--workspace` for that directory), and check the returned `cwd`. The shim imports the assigned
+worktree this way; parent links remain intact. Never fix placement by restarting a healthy paid slice.
+The launch record preserves `paseo_cwd`; missing or mismatched cwd produces `placement_warning` and a stderr warning,
+while the already launched agent continues.
+
 ## 4. Size the run to the work
 
 1. **Scale slice count with complexity.** Anthropic's research system uses one

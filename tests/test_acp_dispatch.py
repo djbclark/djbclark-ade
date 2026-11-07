@@ -164,6 +164,7 @@ class TestProviderMapAndArgv(Base):
                 self.assertEqual(argv[argv.index("--mode") + 1], {"claude": "auto", "codex": "auto"}.get(agent, "default"))
                 for flag in ("--no-wait", "--json", "--title", "--cwd"):
                     self.assertIn(flag, argv)
+                self.assertEqual(argv[argv.index("--new-workspace") + 1], "local")
                 for label in ("ade.via=acp-dispatch", f"ade.kind={'frontier' if agent == 'codex' else 'code'}",
                               "ade.name=s1", "ade.lead=main"):
                     self.assertIn(label, argv)
@@ -175,6 +176,14 @@ class TestProviderMapAndArgv(Base):
                 self.assertIn("## Delivery contract (shared footer", argv[-1])
                 self.assertEqual((rec["provider"], rec["boundary"]), (agent, "paseo"))
         self.assertFalse((self.out / "jobs").exists())                          # a dry run writes nothing
+
+    def test_child_dispatch_uses_requested_directory_instead_of_parent_workspace(self):
+        parent = self.tmp / "parent-workspace"
+        parent.mkdir()
+        r = self.dispatch(FAKE_PASEO_PARENT_CWD=str(parent))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        agents = json.loads((self.state / "agents.json").read_text())
+        self.assertEqual(Path(agents[0]["cwd"]).resolve(), self.repo.resolve())
 
     def test_effort_becomes_thinking(self):
         argv = self.dry("claude", "sonnet", "--effort", "high")["argv"]
@@ -263,11 +272,30 @@ class TestLaunchAndWait(Base):
         for key in ("paseo_agent_id", "provider", "mode", "boundary", "started", "wait_timeout"):
             self.assertIsNotNone(rec.get(key), key)
         self.assertEqual((rec["status"], rec["exit"], rec["wait_timeout"]), ("done", 0, 2400 + 300))
+        self.assertEqual(Path(rec["paseo_cwd"]).resolve(), self.repo.resolve())
+        self.assertIsNone(rec["placement_warning"])
         self.assertTrue((self.out / "s1-report.md.done").exists())
         self.assertIn("## Delivery contract", (self.out / "s1-brief.md").read_text())
         self.assertIn("## Time budget (acp-dispatch)", (self.out / "s1-brief.md").read_text())
         self.assertEqual(list(self.repo.iterdir()), [])
         self.assertEqual(self.verbs()[-1], "wait")
+
+    def test_unexpected_placement_is_recorded_without_stopping_or_restarting_agent(self):
+        for case in ("misplaced", "missing"):
+            with self.subTest(case=case):
+                self.state.mkdir(exist_ok=True)
+                wrong = self.tmp / "wrong-workspace"
+                extra = {"FAKE_PASEO_FORCE_CWD": str(wrong)} if case == "misplaced" else {"FAKE_PASEO_OMIT_CWD": "1"}
+                before = self.verbs().count("run")
+                r = self.dispatch(name=case, **extra)
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                rec = self.record(case)
+                self.assertEqual(rec["paseo_cwd"], str(wrong) if case == "misplaced" else None)
+                self.assertTrue(rec["placement_warning"])
+                self.assertIn("warning:", r.stderr)
+                self.assertEqual(rec["status"], "done")
+                self.assertEqual(self.verbs().count("run"), before + 1)
+                self.assertNotIn("stop", self.verbs())
 
     def test_report_shapes_map_to_exit_codes(self):
         for mode, code, status in (("blocked", 4, "blocked"), ("partial", 1, "partial"), ("nothing", 3, "no-report")):
