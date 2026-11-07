@@ -157,7 +157,7 @@ pages. On a host with the `model-routing` skill (effort folded into it 2026-11-0
 6. Record every query verbatim with its source and date. "Found nothing"
    names what was searched; it is not "does not exist".
 7. One writer. Parallel writers produce disjoint reports. (On this machine,
-   item 1b: four family drafts, but one merged `report.md` chosen by the
+   item 1b: three family drafts, but one merged `report.md` chosen by the
    lead, so the delivered report still has one voice.)
 8. Budgets are caps. Stop at diminishing returns even with budget left.
 9. Workers do not spawn workers.
@@ -189,24 +189,23 @@ pages. On a host with the `model-routing` skill (effort folded into it 2026-11-0
    id; the standalone xAI CLI retired 2026-11-07, so there is no other route). When a Claude Code session is the one running `/research`, it still
    plans and dispatches, but the adjudication and the final refute-mode read
    go to a Cursor slice on that model and its verdict is applied as given. **Every worker
-   role runs on all four families at once, not in rotation**: each slice,
+   role runs on all three families at once, not in rotation**: each slice,
    the refuter and the writer are dispatched in parallel to Astra
    (`acp-dispatch codex --model gpt-6-astra --kind frontier`; frontier slices
    run as read-only advisors by default and their report is the deliverable,
    2026-10-18), Fable (`acp-dispatch claude
    --model <the Fable id> --kind frontier`, the id exactly as `paseo provider models claude --json` lists it,
    never guessed (on 2026-10-10 a dispatch with an unlisted Fable id failed); or an Agent-tool sub-agent),
-   the Cursor grok model and Antigravity
-   (`acp-dispatch antigravity --model <m> --kind research`, the Paseo antigravity provider since the agy TUI
-   retired 2026-11-06; check `paseo provider models antigravity --json` for the Claude/GPT ids before the
-   first call: that pool is `antigravity claude_gpt` in `aiuse`, burn-first while >= 40% left, see the
-   model-routing skill; if no `claude-*` id is listed, use a Gemini model and note in `plan.md` that the
-   Claude/GPT pool was unreachable). The lead merges
-   the four evidence files for a slice (dedupe by source and quote, keep
-   every family's unique rows) and the lead picks among the four
+   and the Cursor grok model. **Antigravity is no longer a research family** (2026-11-07): since the agy TUI
+   retired (2026-11-06) the router reaches Paseo's antigravity provider only through the `antigravity-argon` row,
+   frontier fallback only (`acp-dispatch antigravity --model gemini-4-argon --kind frontier`, used while codex or
+   claude is short of frontier quota); its Flash and Claude/GPT pools are `never_route`
+   (`config/routing.toml`), so a `--kind research` slice there is refused. The lead merges
+   the three evidence files for a slice (dedupe by source and quote, keep
+   every family's unique rows) and the lead picks among the three
    writer drafts or merges them into one `report.md`; the counter files
    merge the same way. Codex may be used sparingly when its pools are tight
-   (skip it for a slice rather than wait), the other three always run. A
+   (skip it for a slice rather than wait), the other two always run. A
    cheaper model (Sonnet, `grok-4.7-build-fast`, an opencode-go model) may stand in for a
    family on a slice where it would change research quality little, such
    as a narrow fetch or a search log. **No weekly quota floor**: dispatch to the most capable

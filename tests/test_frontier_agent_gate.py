@@ -65,7 +65,7 @@ REASON = "frontier-reason: the cross-file invariant needs frontier-level adjudic
 
 
 class TestAwayAllowance(unittest.TestCase):
-    """C6 of docs/model-tiers-design.md: each step, the cap boundary and the spoofing cases (2026-10-27). Since 2026-11-07 the Claude
+    """C6 of docs/history/model-tiers-design.md: each step, the cap boundary and the spoofing cases (2026-10-27). Since 2026-11-07 the Claude
     reading is route_agent's merged snapshot, fed here with a canned `paseo usage ls --json` (aiuse and its snapshot pinned away)."""
 
     run_hook = TestFrontierAgentGate.run_hook

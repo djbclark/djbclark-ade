@@ -93,3 +93,19 @@ def test_missing_markers_or_readme_is_exit_2(tmp_path):
 def test_this_checkouts_readme_roster_is_current():
     r = run("--check", root=REPO)
     assert r.returncode == 0, r.stderr + " (run bin/ade-roster --write)"
+
+
+def test_untracked_files_are_left_out_in_a_git_checkout(tmp_path):
+    import shutil
+    if shutil.which("git") is None:
+        return
+    root = make_repo(tmp_path)
+    subprocess.run(["git", "-C", str(root), "init", "-q"], check=True)
+    subprocess.run(["git", "-C", str(root), "add", "skills", "bin", "README.md"], check=True)
+    assert run("--write", root=root).returncode == 0
+    (root / "bin" / "scratch-tool").write_text("#!/bin/sh\n# scratch: a local file nobody added\n")
+    (root / "skills" / "local").mkdir()
+    (root / "skills" / "local" / "SKILL.md").write_text("---\nname: local\ndescription: Local.\n---\n")
+    r = run("--check", root=root)
+    assert r.returncode == 0, r.stderr
+    assert "scratch-tool" not in run(root=root).stdout and "`local`" not in run(root=root).stdout

@@ -146,7 +146,7 @@ under the owner's login) is ours. The review boundary and the merge gate below a
 ## Machine context
 
 - **Paseo is the only harness (2026-10-31).** Every agent is a Paseo agent: `paseo ls -a -g --json` lists them, `paseo run`
-  starts one, `paseo permit ls` lists pending permission cards. herdr, Orca and BB are retired from this repo (see the top);
+  starts one, `paseo permit ls` lists pending permission cards (the asks / questions-please inbox plugins are installed at the final merge). herdr, Orca and BB are retired from this repo (see the top);
   for screen control use the `paseo-screen` skill.
 - **`paseo provider ls --json` is the agent registry** (2026-11-07): `bin/route_agent.py` discovers providers from it
   (`Enabled` and `available`), and `paseo provider models <p> --json` lists their models (docs/model-routing.md).

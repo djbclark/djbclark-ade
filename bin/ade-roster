@@ -5,8 +5,8 @@
   ade-roster --check [--root DIR]    exit 1 when README.md's block differs from what this prints
   ade-roster --write [--root DIR]    replace README.md's block with what this prints
 
-The skills table has one row per `skills/*/SKILL.md`: the frontmatter `name` and the first sentence of its
-`description`. The bin table has one row per file in `bin/`: the first sentence of the file's first docstring or
+The skills table has one row per tracked `skills/*/SKILL.md` (every one when ROOT is not a git checkout): the frontmatter `name` and the first sentence of its
+`description`. The bin table has one row per tracked file in `bin/`: the first sentence of the file's first docstring or
 comment paragraph (after the shebang), with a leading "<name> - " / "<name>: " dropped. The block sits in README.md
 between `<!-- roster:start -->` and `<!-- roster:end -->`; CI runs `--check`, so a new skill or tool changes the README
 in the same PR (AGENTS.md review rule 8).
@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -67,9 +68,23 @@ def frontmatter(path: Path) -> dict[str, str]:
     return out
 
 
+def tracked(root: Path, top: str) -> set[str] | None:
+    """Repo-relative paths git tracks under TOP, or None when ROOT is not a git checkout (then the filesystem decides)."""
+    try:
+        out = subprocess.run(["git", "-C", str(root), "ls-files", "-z", "--", top], capture_output=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    return {p for p in out.stdout.decode("utf-8", "surrogateescape").split("\0") if p}
+
+
 def skill_rows(root: Path) -> list[tuple[str, str, str]]:
     rows = []
+    known = tracked(root, "skills")
     for path in sorted((root / "skills").glob("*/SKILL.md")):
+        if known is not None and path.relative_to(root).as_posix() not in known:
+            continue  # an untracked skill is not in the published roster
         meta = frontmatter(path)
         name = meta.get("name") or path.parent.name
         rows.append((name, path.relative_to(root).as_posix(), first_sentence(meta.get("description", ""))))
@@ -130,7 +145,10 @@ def bin_summary(path: Path) -> str:
 
 def bin_rows(root: Path) -> list[tuple[str, str]]:
     rows = []
+    known = tracked(root, "bin")
     for path in sorted((root / "bin").iterdir()):
+        if known is not None and f"bin/{path.name}" not in known:
+            continue  # untracked (a local scratch file) or a directory: not in the published roster
         if path.is_file() and not path.name.startswith("."):
             rows.append((path.name, bin_summary(path)))
     return rows
@@ -191,10 +209,17 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     if current != block:
         fd, tmp = tempfile.mkstemp(dir=str(root), prefix=".README.md.")
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(head + block + tail)
-        os.chmod(tmp, readme.stat().st_mode & 0o777)
-        os.replace(tmp, readme)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(head + block + tail)
+            os.chmod(tmp, readme.stat().st_mode & 0o777)
+            os.replace(tmp, readme)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
     return 0
 
 

@@ -48,7 +48,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 LEVELS = ("ok", "watch", "tight", "critical")
-FRONTIER1, JUDGMENT = "Fable 5.1", "Opus 5.5"   # the literal names S3 replaces with role lookups (docs/model-tiers-design.md)
+FRONTIER1, JUDGMENT = "Fable 5.1", "Opus 5.5"   # the literal names S3 replaces with role lookups (docs/history/model-tiers-design.md)
 MAX_AGE_SECONDS = 2 * 3600
 GUARD_STATE_MAX_AGE_S = 30 * 60   # the frontier hook's and acp-dispatch's limit (ade_gates.GUARD_STATE_MAX_AGE_S); a test pins them equal
 MAX_SESSIONS = 200

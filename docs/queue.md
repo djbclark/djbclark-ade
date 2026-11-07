@@ -76,7 +76,10 @@ under **Carried**, newest first, one line each; an item leaves when it ships (in
 30. **Keep the instruction files lean** (2026-08-24 cost review): Claude's docs advise under 200 lines; AGENTS.md is
     338 lines after the E11 rewrite (2026-11-07), the review rules being most of it.
 31. **`bg` registers its own deadline** (2026-11-01): site-public-djbclark `bin/bg`, waits for the operator's yes (order 11).
-32. **From the slim-down, for the follow-up PR and after** (2026-11-07): remove the relay shim (by 2026-11-20) and the
+32. **Two test LOWs from the 2026-10-23 rework-2 PRs**: `tests/test_bin_modes.py`'s docstring says "outside tests/" while
+    the code exempts a `tests/` directory at any depth (PR 32 round 6); no test pins that `xhigh` and `max` are accepted as
+    `[lead]` effort values (PR 33 round 2).
+33. **From the slim-down, for the follow-up PR and after** (2026-11-07): remove the relay shim (by 2026-11-20) and the
     dispatch shim with `tools/acp-run` after one live cycle (Wave 6), keeping `bin/review-launch`; aiuse's acp-run
     readers (`src/aiuse/collectors/acp_usage.py`); the shim does not apply the Argon `fallback_block` at dispatch (E7 E5);
     the `quota_nudge.py`/`cswap_quota_context.sh` decision (R2-18); `routing-recalibrate` as a Paseo schedule if wanted

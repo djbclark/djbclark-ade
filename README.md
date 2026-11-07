@@ -12,8 +12,8 @@ read [AGENTS.md](AGENTS.md) (`CLAUDE.md` links to it) first; this page is the ma
    what one is doing. Continue a topic by messaging its agent, by `/baton` from its handoff, or start fresh.
 2. **Start**: `paseo run --provider P/M --title T [--thinking E] [--mode M] "<prompt>"`, in its own worktree with
    `--new-workspace worktree`. Which provider, model and effort: `bin/route_agent.py plan`, [`model-routing`](skills/model-routing/SKILL.md).
-3. **Answer**: `paseo permit ls` lists pending permission cards; the asks / questions-please plugins are the operator's
-   inbox. Agents message each other with `paseo send --json` or the one-cycle shim `skills/session-finder/relay.py`.
+3. **Answer**: `paseo permit ls` lists pending permission cards; the asks / questions-please plugins (installed at the final merge) are the
+   operator's inbox. Agents message each other with `paseo send --json` or the one-cycle shim `skills/session-finder/relay.py`.
 4. **Carry**: [`handoff`](skills/handoff/SKILL.md) (Tier 2 document), [`session-handoff`](skills/session-handoff/SKILL.md)
    (Tier 1 pointer), [`baton`](skills/baton/SKILL.md) (`/resume`); [`loose`](skills/loose/SKILL.md) and [`steps`](skills/steps/SKILL.md) walk what is open.
 5. **Fan out**: [`fan-out`](skills/fan-out/SKILL.md): the Agent tool or a Workflow in process; `bin/acp-dispatch` (a
@@ -26,7 +26,7 @@ read [AGENTS.md](AGENTS.md) (`CLAUDE.md` links to it) first; this page is the ma
 |---|---|
 | `skills/` | the canonical copy of every hand-written skill (edit here, never through a TUI's path); roster below |
 | `bin/` | the tools; roster below. `libexec/git-hooks/` and `libexec/agent-bin/git` are the git guard's hooks and shim |
-| `claude/` | Claude Code `agents/` (the `adversary` reviewer), `hooks/`, `commands/` (only `resume.md`), linked from `~/.claude/` |
+| `claude/` | Claude Code `agents/` (`adversary`, `backend`, `fable-deep`, `ux`), `hooks/`, `commands/` (only `resume.md`), linked from `~/.claude/` |
 | `agents/<tui>/*.tmpl` | the live Claude, Codex, opencode and Hermes config files as templates, secrets as `{{ secret "NAME" }}`; `bin/ade-template-check` is their gate ([agents/README.md](agents/README.md)) |
 | `config/` | `routing.toml` (pools, `[lead].fable_lead`), `gates.toml` (frontier allowance), `secret-deny.toml`, `pr-policy.toml`, schemas |
 | `tools/acp-run/`, `opencode-plugins/`, `omp/` | the ACP client (kept for the dispatch shim, removed with it in Wave 6's follow-up PR); OpenCode plugins; omp's commands |
@@ -62,7 +62,7 @@ herdr (bar the `herdr4paseo`/`paseo4herdr` bridges and its server runner), Orca 
 (still installed on the Mac, untouched). The slim-down of 2026-11-06/07 ([`docs/slim/log.md`](docs/slim/log.md)
 records every merge and every behaviour lost on purpose) removed what Paseo or Claude Code now does natively, or what
 served a retired provider: session-finder's search and launch, helm, self-slash, autorename, bigteam (now `fan-out`),
-the watch family, the quota guard and fleet governor (Paseo's session-guard and usage-auto-resume plugins), pr-wait
+the watch family, the quota guard and fleet governor (Paseo's session-guard and usage-auto-resume plugins, installed at the final merge), pr-wait
 and the Codex local review (the Action and `review-pr`), SkillOpt-Sleep, the web ladder, and the agy, crush, pi,
 zcode, kiro, goose, qwen, devin, copilot CLI, cline, muse and grok CLI integrations; fifteen site skills and five
 tools moved to site-djbclark. Retired designs are in [`docs/history/`](docs/history/), the old README at tag

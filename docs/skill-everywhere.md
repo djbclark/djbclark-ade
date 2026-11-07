@@ -155,7 +155,7 @@ links were overwritten, getpaseo/paseo#7700, and the repo copies were renamed `a
 
 ## 4. When the table is wrong
 
-Fix [`skill-everywhere`](skill-everywhere) and the table above together, then re-run step 3
+Fix [`skill-everywhere`](../bin/skill-everywhere) and the table above together, then re-run step 3
 for the TUIs you changed. When a new TUI shows up in `aiuse --json` or under
 `~/.local/bin`, find its skills dir from its docs or its binary, add a row, and
 verify it.

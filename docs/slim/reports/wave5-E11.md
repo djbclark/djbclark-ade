@@ -78,8 +78,8 @@ dates, and "the quota guard" in the past tense.
 
 ## D. docs/queue.md (2,114 → 138 lines)
 
-**32 carried, 31 closed by the slim-down, 18 done before**, one line each; the top says the full text is in git history
-(`git show pre-slim-2026-11-06:docs/queue.md`). Carried 32 is new: the slim-down's own leftovers for the follow-up PR
+**33 carried, 31 closed by the slim-down, 18 done before**, one line each; the top says the full text is in git history
+(`git show pre-slim-2026-11-06:docs/queue.md`). Carried 33 is new: the slim-down's own leftovers for the follow-up PR
 (shim removals, aiuse's acp-run readers, the Argon `fallback_block` gap at dispatch, the `quota_nudge.py` decision,
 `routing-recalibrate` as a schedule, the upstream Paseo filings). Carried 30 flags that AGENTS.md (338 lines) is over the
 200 lines Claude's docs advise. Two load-watcher rules (name a workspace by name and id; the load-planning rules) were
@@ -95,6 +95,70 @@ allows, plus 0cbeb70's `$schema`, `permissions.defaultMode: "acceptEdits"`, its 
 `mcp__github__` tools, the three `mcp__Firecrawl__` tools) after the graft allows, and its deny list
 (`Bash(git push --force:*)`, `Bash(git push -f:*)`, `Bash(rm -rf /*)`, `mcp__github__merge_pull_request`,
 `mcp__github__delete_file`, `mcp__github__create_repository`). The lead or the operator applies it (operator step G1).
+The literal file to paste (`python3 -m json.tool` accepts it):
+
+```json
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "statusLine": {
+    "type": "command",
+    "command": "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/helpers/graft-statusline.cjs\""
+  },
+  "subagentStatusLine": {
+    "type": "command",
+    "command": "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/helpers/graft-statusline.cjs\""
+  },
+  "footerLinksRegexes": [
+    "graft/[\\w./-]+\\.md"
+  ],
+  "permissions": {
+    "defaultMode": "acceptEdits",
+    "allow": [
+      "Bash(trail:*)",
+      "Bash(graft:*)",
+      "Bash(npx graft:*)",
+      "Bash(graft-dev:*)",
+      "Bash(node dist/cli.js:*)",
+      "Bash",
+      "Edit",
+      "Write",
+      "Read",
+      "Glob",
+      "Grep",
+      "WebFetch",
+      "WebSearch",
+      "mcp__claude-code-remote__add_repo",
+      "mcp__claude-code-remote__list_repos",
+      "mcp__github__list_pull_requests",
+      "mcp__github__list_issues",
+      "mcp__github__issue_read",
+      "mcp__github__pull_request_read",
+      "mcp__github__list_commits",
+      "mcp__github__get_commit",
+      "mcp__github__list_branches",
+      "mcp__github__list_tags",
+      "mcp__github__list_releases",
+      "mcp__github__get_file_contents",
+      "mcp__github__get_me",
+      "mcp__github__actions_get",
+      "mcp__github__actions_list",
+      "mcp__github__get_job_logs",
+      "mcp__github__get_check_run",
+      "mcp__Firecrawl__firecrawl_scrape",
+      "mcp__Firecrawl__firecrawl_search",
+      "mcp__Firecrawl__firecrawl_developer_search"
+    ],
+    "deny": [
+      "Bash(git push --force:*)",
+      "Bash(git push -f:*)",
+      "Bash(rm -rf /*)",
+      "mcp__github__merge_pull_request",
+      "mcp__github__delete_file",
+      "mcp__github__create_repository"
+    ]
+  }
+}
+```
 
 ## F. The reference sweep
 
@@ -223,5 +287,29 @@ move bm-lint's flags into a `docs/` page instead.
   this repo is"), the log's `bin/fleet-watch` row fix: all in B.
 - [ ] README describes no deleted tool as current (section F's list; `bin/ade-roster --check` passes).
 - [ ] Every doc in AGENTS.md's table exists (`ls`), and no moved doc is linked at its old path outside history.
-- [ ] queue.md: 32 + 31 + 18 entries, each one line.
+- [ ] queue.md: 33 + 31 + 18 entries, each one line.
 - [ ] The skill rewrites (F2) give an agent a working command for every step.
+
+## L. Repair round 1 (2026-11-07, after the E11 review's BLOCK)
+
+L1. BLOCK 1, `skills/research/SKILL.md` item 1b: the Antigravity research route I wrote (`--kind research`) is refused by
+the shim (`antigravity` is `never_route`; the only row is `antigravity-argon`, frontier fallback). Antigravity is dropped
+as a research family, with the reason and the one route that works (`acp-dispatch antigravity --model gemini-4-argon
+--kind frontier`, Argon fallback only); "four families" became three throughout the item and in rule 7.
+L2. BLOCK 2, `docs/queue.md`: Closed item 13 had swallowed two open residuals of the old item 9 (the
+`tests/test_bin_modes.py` docstring's "outside tests/" and no test pinning `xhigh`/`max` as `[lead]` efforts): new
+Carried line 32; the slim-down leftovers are 33. Counts now 33 / 31 / 18.
+L3. Section E carries the literal merged `.claude/settings.json`.
+L4. `tests/test_bm_lint.py`: the tautological `flags` assertion is gone.
+L5. `bin/ade-roster`: both tables are built from `git ls-files` (skills and `bin/`), falling back to the filesystem when
+ROOT is not a git checkout, so an untracked scratch file does not fail `--check`; `--write` unlinks its temp file if
+anything raises. New test `test_untracked_files_are_left_out_in_a_git_checkout`.
+L6. README and AGENTS.md say the Paseo plugins are installed at the final merge; README's `claude/` row names the four
+agents (`adversary`, `backend`, `fable-deep`, `ux`).
+L7. `docs/context-hygiene.md` §7: the `paseo schedule create` line is in the script's module docstring.
+L8. `docs/skill-everywhere.md`: the link to `../bin/skill-everywhere` is fixed.
+L9. The two code comments now name `docs/history/model-tiers-design.md` (`claude/hooks/quota_nudge.py:51`,
+`tests/test_frontier_agent_gate.py:68`); J4 is resolved.
+L10. Tests: `bin/pytest -q tests/test_ade_roster.py tests/test_bm_lint.py tests/test_instruction_lint.py
+tests/test_frontier_agent_gate.py`: 124 passed, 6 skipped, rc 0; `bin/ade-roster --check` 0; `bin/instruction-lint`:
+0 errors. No second full suite (per the lead).
