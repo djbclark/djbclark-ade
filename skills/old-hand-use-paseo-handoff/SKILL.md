@@ -10,7 +10,7 @@ The operator types `hand` in every TUI because `/handoff` collides with omp's
 built-in command of that name, which only compacts the context in place and
 never reaches the `handoff` skill.
 
-1. Read the `handoff` skill (`~/src/djbclark-ade/skills/handoff/SKILL.md`) and
+1. Read the `old-handoff-use-paseo-handoff` skill (`~/src/djbclark-ade/skills/old-handoff-use-paseo-handoff/SKILL.md`) and
    follow it exactly from its first step, as if the operator had invoked it.
 2. Pass the arguments through unchanged: `hand paseo` is `handoff paseo`; any
    other text is the focus.
