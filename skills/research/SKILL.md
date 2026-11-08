@@ -172,8 +172,9 @@ pages. On a host with the `model-routing` skill (effort folded into it 2026-11-0
    Claude sub-agents.** Dispatch each brief with `acp-dispatch <agent> --model M
    --kind <kind> --name N --task research-<slug> -C <run-folder-parent> -f <brief-file>`
    (`--kind research` on the everyday pools, `frontier` for astra and Fable;
-   codex, opencode, cursor, omp as Paseo providers: `acp-dispatch` is a `paseo run` shim since
-   2026-11-06, `--perm read-only` is Claude's review boundary, best effort for the others; the
+   use live, accepted Paseo providers rather than archived omp/OpenCode clients; `acp-dispatch` is only a
+   compatibility shim. Pi has no selectable modes, so never invent a read-only Pi mode; Claude's
+   explicit review boundary remains `review-launch`. The
    `model-routing` skill and the `aiuse` rules in `~/CLAUDE.md` give the
    mechanics). Reasons: the reads stay out of the lead's context, the
    quota spreads across vendors, and the reviewer gets a genuinely different
