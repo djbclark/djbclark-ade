@@ -1,10 +1,12 @@
 # Model and effort routing
 
-Snapshot **2026-11-07** (rewritten by slim-down E7; the 2026-08-23 service matrix, the per-service effort tables and the
+Snapshot **2026-11-08** (rewritten by slim-down E7; the 2026-08-23 service matrix, the per-service effort tables and the
 dated policy updates that were here are in git history). Goal: know which models are reachable through which pool on
 this machine, which budget each spends, and route every slice by vendor × model × effort × context window. The method
 is the `model-routing` skill (`skills/model-routing/SKILL.md`); this page is the record of what feeds it and why.
 Percentages drift constantly: re-probe, never trust a page for balances.
+
+Current operator decision: Pi is the sole general-purpose third-party TUI; vendor monthly-plan clients and Hermes remain. The legacy omp/OpenCode transport rows below are marked `retired = true` in policy, so they cannot win automatic dispatch. Their pool metadata is preserved for a validated Pi migration. Pi catalog discovery remains disabled in the generic router to avoid merging independent vendor pools. See [migration evidence and acceptance](tui-security-and-pi-migration.md); API checks and vendor subscription allowances stay distinct.
 
 ## A. Where the numbers live
 
@@ -20,11 +22,11 @@ A2. `bin/route_agent.py plan --kinds …` applies them to the live quota and pri
 | Pool (router service) | Paseo provider | Billing | Notes |
 |---|---|---|---|
 | B1. `claude` | claude | subscription (5-hour and weekly windows; Fable a <=50% sublimit of the weekly) | the lead's own pool; Opus judgment, Sonnet code, Fable frontier |
-| B2. `omp` | omp | the Claude Max plan's monthly API credits (an expiring grant) | `api-only` first, then judgment (adversary rounds), code, bulk; skipped while omp has no enabled Anthropic login |
+| B2. `omp` (retired transport) | omp, disabled | the Claude Max plan's monthly API credits (an expiring grant) | `api-only` first, then judgment (adversary rounds), code, bulk; skipped while omp has no enabled Anthropic login |
 | B3. `codex` | codex | subscription ($100 plan, aiuse `prolite`) | astra for frontier only; everyday models while every window has `plenty_min` left |
 | B4. `cursor-auto`, `cursor` | cursor | subscription (Auto and third-party sublimits) | Auto is burn-first; GrokBot's separate Cursor pool (`grok-bot`) is never a target |
 | B5. `cursor-cloud` | none (`bin/cursor-cloud launch`) | API price on the Cursor pool | leaves the Mac, pushes a branch; acp-dispatch stopped launching it with the Paseo shim |
-| B6. `opencode-go`, `opencode-zen-free` | opencode | Go Plus subscription (one shared monthly allowance); the free zen models | bulk and mechanical, never code (djbclark 2026-10-30); section F |
+| B6. `opencode-go`, `opencode-zen-free` (retired transport) | opencode, disabled | Go Plus subscription (one shared monthly allowance); the free zen models | bulk and mechanical, never code (djbclark 2026-10-30); section F |
 | B7. `antigravity-argon` | antigravity | Google AI Pro subscription (Gemini 4 Argon weekly window) | frontier FALLBACK only, behind codex and claude (operator 2026-10-31); restored 2026-11-07 for tendcf/nix2cf's review route 3 |
 | B8. `clinepass`, `hermes` | none; hermes | Cline-pass API; the operator's assistant | never a delegation target; ClinePass is the Hermes/Dann lifeline (`substrate`, `hermes-chain`) |
 | B9. `opencode-zen` (paid) | opencode | prepaid | retired until an operator top-up |
@@ -72,6 +74,8 @@ Fable cap; otherwise the
 closed rules apply (one frontier slice per pool per wave, an Agent-tool Fable call asks). Details: `docs/gates.md`.
 
 ## F. OpenCode Go cost policy (2026-10-25)
+
+This records the retired OpenCode transport policy, not a Pi enforcement guarantee. The bounded Pi Go smoke is not automatic-routing or continuation acceptance; preserve cost/context policy while evaluating the replacement. Hermes direct API/substrate configuration is unchanged.
 
 The October audit found real work plus expensive-model and large-context burn; Go is not free. Routing chooses MiniMax M3
 for bulk and GPT-6 Luna for mechanical work, never a code slice (djbclark 2026-10-30); DeepSeek V4.1 Flash stays only the
