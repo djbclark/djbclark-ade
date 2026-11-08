@@ -35,6 +35,12 @@ credential commands. Exit 0 means a choice, 1 no qualified route, 2 invalid or
 unavailable input. JSON includes the pool, provider, physical model, thinking
 level, reason and quota age; no credentials or provider error text.
 
+A5. Ordinary router plans print native `paseo run --provider pi/PROVIDER/MODEL`
+commands for Pi choices, translating explicit effort to `--thinking` and using
+`--no-wait`. Append the task text, `--title`, an existing `--workspace` and the
+matching session `--cwd`; put each assigned execution worktree in its brief.
+The transitional `acp-dispatch` shim does not launch Pi.
+
 ## B. Model policy and reassessment
 
 B1. Concrete profiles and fitness ranks remain in `config/routing.toml`. The

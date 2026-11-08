@@ -1602,14 +1602,24 @@ class Choice:
 
     @property
     def dispatch(self) -> str:
-        """The acp-dispatch line for this choice (add --name/-C/-f); Cursor Cloud's `cursor-cloud launch` line (acp-dispatch
-        stopped launching it with the Paseo shim, 2026-11-07)."""
+        """Launch template: Pi uses native Paseo; legacy agents use acp-dispatch;
+        Cursor Cloud uses cursor-cloud launch. Add the task and transport-specific placement flags."""
         agent = self.service.acp_agent
         extra = DISPATCH_EXTRA.get(agent, "")
         kind = f" --kind {self.kind}" if self.kind else ""
         # Quote only the model id: suggest_model may append " --effort …".
         parts = self.model.split(None, 1)
         model = (shlex.quote(parts[0]) + (f" {parts[1]}" if len(parts) > 1 else "")) if parts else ""
+        if agent == "pi":
+            # Pi is native Paseo only; the transitional acp-dispatch shim has no Pi provider.
+            # Keep provider and full physical namespace together, translating only explicit effort.
+            spec = shlex.split(self.model)
+            if not spec or len(spec) not in (1, 3) or (len(spec) == 3 and spec[1] != "--effort"):
+                raise ValueError("invalid Pi dispatch profile")
+            argv = ["paseo", "run", "--provider", f"pi/{spec[0]}"]
+            if len(spec) == 3:
+                argv += ["--thinking", spec[2]]
+            return shlex.join(argv + ["--no-wait"])
         if agent == "cursor-cloud":
             return ("cursor-cloud launch --repo <url> --ref <branch> --prompt-file <brief>"
                     + (f" --model {shlex.quote(parts[0])}" if parts else ""))

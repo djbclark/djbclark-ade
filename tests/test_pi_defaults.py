@@ -152,3 +152,16 @@ def test_invalid_model_input_has_fixed_nonsecret_diagnostic(monkeypatch, capsys)
 
 def test_new_profile_does_not_change_hermes_models():
     assert not any(x["provider"] == "zai" for x in router.hermes_chain({"zai": reading(95)}))
+
+@pytest.mark.parametrize("service,model,thinking", [
+    ("zai", "zai/glm-5.3-flash --effort high", "high"),
+    ("cursor", "cursor/composer-2.5", None),
+])
+def test_pi_dispatch_is_a_native_paseo_launch(service, model, thinking):
+    import shlex
+    choice = router.Choice(router.BY_NAME[service], 80, 1, model=model, kind="code")
+    expected = ["paseo", "run", "--provider", "pi/" + model.split()[0]]
+    if thinking:
+        expected += ["--thinking", thinking]
+    expected += ["--no-wait"]
+    assert shlex.split(choice.dispatch) == expected
