@@ -214,11 +214,17 @@ class TestDiscovery(unittest.TestCase):
 
     def test_aliases_do_not_become_second_services(self):
         """`claude-agent-teams` is claude's; a duplicate entry would dodge its constraints."""
-        names = {s.name for s in r.discover(IDLE)}
+        found = list(r.discover(IDLE))
+        names = {s.name for s in found}
         for alias in ("claude-agent-teams", "openclaude"):
             self.assertNotIn(alias, names)
-        for retired in ("zai", "antigravity", "copilot", "devin", "alibaba", "crush"):
+        for retired in ("antigravity", "copilot", "devin", "alibaba", "crush"):
             self.assertNotIn(retired, names, "a retired TUI's aiuse account is never a routable service")
+        # Z.ai is an explicit measured Pi subscription profile, not its retired standalone client.
+        zai = [s for s in found if s.name == "zai"]
+        self.assertEqual(len(zai), 1)
+        self.assertEqual(zai[0].acp_agent, "pi")
+        self.assertTrue(zai[0].measured_only)
         self.assertEqual(r.ALIASES["openclaude"], "claude")
 
     def test_retired_tui_names_are_never_discovered(self):
@@ -1252,7 +1258,8 @@ class TestQualityBand(unittest.TestCase):
         self.assertIn(f"{best.name} r{best.rank_for('code')}", why)
         self.assertIn("quality_max_rank_gap", why)
 
-    def test_a_far_lower_ranked_pool_never_wins_on_headroom(self):
+    @mock.patch.object(r, "paseo_providers", return_value={"pi"})
+    def test_a_far_lower_ranked_pool_never_wins_on_headroom(self, _providers):
         """Even with every pool idle, nothing outside the band is chosen for code; and the
         moment an in-band pool has room again, it gets the slice."""
         gap = r.QUALITY_MAX_RANK_GAP["code"]
@@ -1262,7 +1269,7 @@ class TestQualityBand(unittest.TestCase):
         far = [s.name for s in services
                if s.eligible("code") and s.rank_for("code") - best.rank_for("code") > gap]
         self.assertTrue(far, "fixture should include pools outside the band")
-        q = dict(self.CASE, cursor={"remaining": 50.0})
+        q = dict(self.CASE, cursor={"remaining": 50.0, "age_s": 0})
         c = r.route("code", quota=q)
         self.assertIsNotNone(c)
         self.assertNotIn(c.service.name, far)

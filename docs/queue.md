@@ -98,10 +98,11 @@ under **Carried**, newest first, one line each; an item leaves when it ships (in
     S5a builds the measured Jev injection gate with this setup work; S9 plans cloud-agent communication last, after
     signing and the earlier sections, and builds only with headroom. Overall and local coordination now share the local lead.
 
-36. **Pi-primary evaluation** (operator, 2026-11-07, tentative): upstream Pi as the primary multi-vendor client, with
-    omp kept until it passes. First restore Pi, `pi-acp` and `~/.pi` (P11 removed them, C49), then run the acceptance
-    probe C1-C9 (`docs/slim/ledger-rulings.md`, "Pi-primary is under evaluation"). Claude credits stay on omp until
-    Pi has a passive 429 and retry-after source.
+36. **Pi-only third-party client** (operator, 2026-11-08): migration and archive-only history search shipped;
+    omp/OpenCode/Crush are archived, never fallbacks. Dynamic defaults use explicit per-pool acceptance and
+    task boundaries (`docs/pi-defaults.md`). Other Pi pools still need continuation/quota/identity acceptance;
+    Claude API credits remain billing-blocked, separate from the vendor subscription. Security implementation
+    and SIPB reliability work are deferred; prior evidence remains in `docs/tui-security-and-pi-migration.md`.
 
 ## Closed by the slim-down (2026-11-06/07; the slice that closed it)
 

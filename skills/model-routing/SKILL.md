@@ -67,16 +67,20 @@ or a long log. Bigger windows bill more per token on some services (Cursor 2× a
 Pools and clients are distinct. `route_agent.py policy --md` names the eligible
 automatic subset. Pi is the sole general-purpose third-party TUI; required
 monthly-plan vendor clients and Hermes remain. A basic Pi service check does
-not add a pool to automatic routing: legacy omp/OpenCode service IDs stay
-retired until explicit per-pool Pi mappings and acceptance exist. Omit a Pi
-mode flag; its native provider exposes no selectable modes.
+not add every pool to automatic routing. The explicit Z.ai and retained Cursor
+profiles now feed the dynamic `ade/auto` task default; other Pi pools remain
+held until separately accepted. Legacy omp/OpenCode service IDs stay retired.
+Omit a Pi mode flag; its native provider exposes no selectable modes.
+See [dynamic Pi defaults](../../docs/pi-defaults.md): `/ade-task [kind]`
+establishes a boundary; physical selections are pinned. The same router ranks
+startup and dispatched tasks; known quota/billing latches require explicit recovery.
 
 | Pool | Paseo provider | Use it for | Never |
 |---|---|---|---|
 | C1. `claude` | claude | judgment (Opus), code (Sonnet), frontier (Fable, section D); the lead's own pool | Fable for everyday work |
 | C2. Anthropic API credits (historical service `omp`) | Pi after funded API/pool acceptance; old service retired | keep this pool separate from Claude subscription windows; the 2026-11-08 API check was rejected for insufficient credit | archived omp fallback; inferring API entitlement from subscription quota |
 | C3. `codex` | codex | frontier (astra, one per wave); its everyday models for judgment, code, bulk and mechanical only while every codex window has `plenty_min` left | astra for an everyday kind |
-| C4. `cursor-auto`, `cursor` | cursor | Cursor's Auto pool (burn-first, monthly) and its third-party pool, separately metered | the GrokBot pool (`grok-bot`, Cursor-billed): never a slice target |
+| C4. `cursor-auto`, `cursor` | cursor for Auto; Pi for retained Cursor Composer | Cursor's Auto pool (burn-first, monthly) and its third-party pool, separately metered | the GrokBot pool (`grok-bot`, Cursor-billed): never a slice target |
 | C5. `cursor-cloud` | none: `cursor-cloud launch` | a slice that leaves the Mac and pushes a branch the lead reviews | `autoCreatePR` |
 | C6. Go and Zen free (historical OpenCode service IDs) | Pi for separately accepted routes; old services retired | Go basic route passed (not automatic-routing acceptance); retain `config/go-model-policy.json` cost/task constraints; Zen free hit its quota and is not accepted | archived OpenCode fallback; Go "Use balance"; treating Go and Zen balances as interchangeable |
 | C7. `antigravity-argon` (Google AI Pro) | antigravity | Gemini 4 Argon as the frontier FALLBACK, only while codex or claude is short (`plan` names it then; tendcf/nix2cf review route 3) | the provider's other pools (not routed); an API key path (bills separately) |
@@ -85,13 +89,19 @@ mode flag; its native provider exposes no selectable modes.
 C9. Prepaid opencode-zen stays retired until an operator top-up; credits-backed models (Claude usage credits, Codex
 credits, Go "Use balance") are never reached for by re-enabling a toggle; there is no all-vendor fan-out.
 C9a. OpenAI API credits through Pi and the Codex monthly subscription through Codex are separate pools. A fresh subscription reading does not clear an API organization spend limit.
+C9b. Z.ai's explicit Pi profile uses GLM 5.3 Flash: high for code/research/bulk,
+low for mechanical work. Cursor Composer 2.5 is eligible when its vendor-owned
+inner tools are suitable; `--native-tools` excludes it. Both require fresh named-pool
+quota. They are not newly qualified judgment/frontier routes; keep the vendor gates.
+
 C10. `github` and `realtime-web` are kinds with no pool since copilot (2026-11-06) and the grok CLI (2026-11-07)
 retired: `plan` leaves them queued.
 
 ## D. Routing, the frontier allowance and quota
 
 D1. **Plan a wave with the router, re-plan at every slice boundary:** `bin/route_agent.py plan --kinds code,code,bulk
-[--repo NAME]` prints one `acp-dispatch <agent> --model M --kind K` line per slice (or `cursor-cloud launch …`), spreads
+[--repo NAME]` prints native `paseo run --provider pi/…` for Pi, legacy `acp-dispatch <agent> --model M --kind K`
+for other agents (or `cursor-cloud launch …`), spreads
 the wave over pools by `max_parallel`, and keeps a slice queued rather than buy a much weaker pool into code or judgment
 (`quality_max_rank_gap`). `route --kind K [--json]` picks one; `show` prints each pool's headroom, pace, expected waste
 and source; `services [--check-models]` lists the roster with each provider's `paseo provider ls` status and checks
