@@ -5,27 +5,26 @@
 # Fable 5.1 and codex's top frontier model (gpt-6-astra today) are reached
 # only through the `frontier` kind, one slice per pool per wave (two on claude under the standing
 # allowance of 2026-10-27 while the Claude reading passes, docs/gates.md); judgment is
-# Opus 5.5 at high first, omp Opus next, and codex gpt-6.1-sol at high as a lower-ranked,
+# Opus 5.5 at high first, and codex gpt-6.1-sol at high as a lower-ranked,
 # eligible pool while its quota is plentiful (operator 2026-10-25); everyday work goes to the
 # OTHER pools, plus codex's everyday
 # models (never astra) while its quota is plentiful (`plenty_min`, operator 2026-10-25);
 # the copilot reserve row was removed 2026-11-06 (slim-down E9: the copilot CLI retired; Paseo's
 # Copilot provider replaces it); the grok CLI's SuperGrok pool retired 2026-11-07 (subscription
 # cancelled in favour of Cursor; grok-bot is Cursor-billed and never a slice target);
-# hermes is never a target; omp (the Claude API credits) is an ordinary tier since
-# 2026-10-19, API-only work first and then code/bulk slices, so the credits are spent
-# before they expire each month.
-# Surviving pools (J2 pool audit, docs/slim/log.md): claude, codex, cursor (cursor-auto, cursor,
-# cursor-cloud), opencode (opencode-go, opencode-zen-free), omp, antigravity (its Gemini 4 Argon
-# window only, as the frontier fallback, restored 2026-11-07 for tendcf/nix2cf's review route 3)
-# and hermes (never a target).
+# 2026-11-08: Hermes is never a target. Legacy omp/OpenCode transports are archived;
+# Pi uses separately accepted Z.ai and retained Cursor profiles. API credit billing
+# blocks are not subscription exhaustion, and never authorize an archived fallback.
+# Current automatic pools: Claude, Codex, Cursor (vendor Auto, Pi Composer and cloud),
+# Z.ai through Pi, and the gated native Antigravity Argon frontier fallback.
+# Other named rows preserve historical policy or reserved substrate metadata.
 # `models` is the acp-dispatch `--model [--effort L]` suggestion per kind, ids as
 # `paseo provider models <agent> --json` lists them (`route_agent.py services --check-models`);
 # `agent` is the Paseo provider when it differs from the pool name.
 
-# Google AI Pro (Paseo's antigravity provider; the router's one row for it is `antigravity-argon`) does NOT include API access:
-# subscriptions are chat-interface only and a Gemini API key bills separately, so wiring Hermes or any agent to a
-# GEMINI_API_KEY would spend real money.
+# Google AI Pro and the separately billed Gemini API are distinct. The native
+# antigravity-argon row is a gated fallback; the Pi community OAuth integration
+# must establish its own account entitlement and fresh shared-pool quota.
 
 [routing]
 # Kinds of work. Deliberately few — a taxonomy nobody can apply is worse than
@@ -83,7 +82,7 @@ default_profile = { bulk = 60, mechanical = 60 }
 # pools, Flash and Claude/GPT; its Argon window is the curated `antigravity-argon` row). grok-bot is the Cursor-billed Chief of
 # Staff's pool, never a slice target. Names the dispatch gate holds for approval ([dispatch].operator_gated) are
 # never discovered either.
-never_route = ["hermes", "clinepass", "antigravity", "zai", "alibaba", "devin", "copilot", "pi", "crush", "kiro",
+never_route = ["hermes", "clinepass", "antigravity", "alibaba", "devin", "copilot", "pi", "crush", "kiro",
                "cline", "agy", "qwen", "goose", "zcode", "muse", "aider", "venicecode", "grok", "grok-bot"]
 # Discovery names the provider or TUI; aiuse names the account behind it. An alias folds a provider or fork name onto
 # the curated service that already covers it, so it never becomes a second entry (Paseo's `opencode` provider is the
@@ -325,12 +324,31 @@ models = { code = "default", mechanical = "default", bulk = "default", research 
 
 [[service]]
 name = "cursor"
-cli = "cursor (third-party models)"
-good_at = { code = 20, mechanical = 10 }
+cli = "pi (retained Cursor subscription CLI bridge)"
+ready_probe = "pi"
+good_at = { code = 20, mechanical = 10, bulk = 18, research = 18 }
 billing = "subscription"
-note = "Cursor third-party pool"
-agent = "cursor"
-models = { code = "claude-sonnet-5-5 --effort medium", mechanical = "claude-haiku-5-5 --effort low" }
+note = "Composer 2.5 through the retained vendor CLI; Cursor owns inner tools, so direct Pi-hook tasks exclude this route"
+agent = "pi"
+measured_only = true
+burn_first = true
+models = { code = "cursor/composer-2.5", mechanical = "cursor/composer-2.5", bulk = "cursor/composer-2.5", research = "cursor/composer-2.5" }
+
+# Pi direct-model profile, 2026-11-08. Ranks are conservative fitness priors, not benchmark scores.
+# Flash receives 3x the Coding Plan quota of GLM-5.3; use high for substantive work rather than
+# the former blanket low setting. No judgment/frontier claim follows from a basic smoke.
+[[service]]
+name = "zai"
+cli = "pi (Z.ai Coding Plan)"
+ready_probe = "pi"
+agent = "pi"
+good_at = { code = 22, mechanical = 9, bulk = 8, research = 18 }
+billing = "subscription"
+access = "api"
+measured_only = true
+max_parallel = 2
+note = "Direct Pi tool loop; fresh named Z.ai quota required; no API/subscription or other-account inference"
+models = { code = "zai/glm-5.3-flash --effort high", mechanical = "zai/glm-5.3-flash --effort low", bulk = "zai/glm-5.3-flash --effort high", research = "zai/glm-5.3-flash --effort high" }
 
 # Cursor Cloud Agents (bin/cursor-cloud, 2026-10-20; `cursor-cloud launch` directly since the acp-dispatch
 # Paseo shim, 2026-11-07, which `route_agent.py` prints as the dispatch line): the slice

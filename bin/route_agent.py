@@ -239,6 +239,12 @@ class Service:
         for questions about the profile alone (calibrate's history)."""
         if self.retired or self.hermes_only:
             return False
+        if self.measured_only and not any_headroom:
+            info = (quota or {}).get(self.name) or {}
+            left, age = plenty_remaining(info), _clean_age(info.get("age_s"))
+            if (isinstance(left, bool) or _pct(left) is None or age is None
+                    or age > STALE_SOFT or info.get("requires_operator_approval") is True):
+                return False
         if kind in ("bulk", "mechanical") and self.never_bulk:
             return False
         if kind in ("judgment", "frontier") and not self.judgment_tier:
@@ -621,6 +627,29 @@ def pool_service(provider: str, family: str | None) -> str:
 AIUSE_CONFIG = Path(os.environ.get("AIUSE_CONFIG", "~/.config/aiuse/config.toml")).expanduser()
 
 
+def pi_block_state_path() -> Path:
+    """Operational failure latches; no credentials or provider error text."""
+    return Path(os.environ.get("ADE_PI_DEFAULTS_BLOCKS") or
+                "~/.local/state/ade/pi-defaults/blocks.json").expanduser()
+
+
+def pi_blocked_services() -> set[str]:
+    pi_services = {s.name for s in SERVICES if s.acp_agent == "pi"}
+    try:
+        data = json.loads(pi_block_state_path().read_text())
+    except FileNotFoundError:
+        return set()
+    except (OSError, ValueError):
+        return pi_services
+    if (not isinstance(data, dict) or data.get("schema_version") != 1
+            or not isinstance(data.get("blocked"), dict)
+            or any(not isinstance(k, str) or not isinstance(v, dict)
+                   or v.get("reason") not in ("quota", "billing")
+                   for k, v in data["blocked"].items())):
+        return pi_services
+    return set(data["blocked"])
+
+
 def operator_disabled(path: Path | None = None) -> set[str]:
     """Services the operator switched off in aiuse's `[disabled_services]`.
 
@@ -634,7 +663,8 @@ def operator_disabled(path: Path | None = None) -> set[str]:
         with (path or AIUSE_CONFIG).open("rb") as fh:
             off = set((tomllib.load(fh).get("disabled_services") or {}).keys())
     except (OSError, tomllib.TOMLDecodeError):
-        return set()
+        off = set()
+    off |= pi_blocked_services()
     # a service that draws on a disabled provider's pool is off with it (cursor-cloud on cursor)
     return off | {s.name for s in SERVICES if s.shares_pool and s.shares_pool in off}
 
@@ -1495,7 +1525,8 @@ def omp_anthropic_ready() -> bool:
         return False
 
 
-READY_PROBES = {"omp-anthropic": omp_anthropic_ready}
+READY_PROBES = {"omp-anthropic": omp_anthropic_ready,
+                "pi": lambda: "pi" in paseo_providers()}
 
 
 def service_ready(svc: Service) -> bool:
@@ -2362,6 +2393,18 @@ def map_agent_to_provider(agent: str, model: str | None) -> tuple[str, str | Non
     Kept in sync with acp-dispatch.map_agent_to_provider by hand (2026-10-18);
     calibrate must not import acp-dispatch while that file is mid-edit.
     """
+    if agent == "pi":
+        # Pi is a transport, not a billing pool. Never map every Pi model to OpenAI credits.
+        provider = (model or "").split("/", 1)[0]
+        if provider in ("zai", "cursor", "deepseek", "google", "openrouter"):
+            return provider, None
+        if provider == "openai":
+            return "pi", "codex_api"
+        if provider == "anthropic":
+            return "omp", None
+        if provider == "opencode-go":
+            return "opencode-go", None
+        return None
     if agent == "cursor":
         if not model or model in ("default", "auto"):
             return "cursor", "auto"
