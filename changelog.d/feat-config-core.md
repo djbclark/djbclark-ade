@@ -9,3 +9,5 @@
 - Rejected malformed new/local config before normalization, preserved legacy routing
   validation/defaults and unusable-input errors, and merged raw gate/floor overlays
   before clamping in all read-only config commands.
+- Rejected raw service duplicates before routing isolation, preserved explicit CLI
+  root/home targets in every option position, and disabled local loading for diff baselines.

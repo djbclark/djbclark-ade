@@ -38,6 +38,8 @@ B3. **Present invalid / unknown-version** new or local config → error; never s
 B4. **Local override** `~/.config/djbclark-ade/local.toml` (untracked): maps merge
     recursively per leaf; **arrays replace whole** (service lists never concatenate);
     type conflicts and duplicate `[[service]].name` identities are rejected.
+    Raw new/local service identities are checked before domain isolation, even
+    when `ROUTING_POLICY` selects a different service array.
     Raw gate requests and floor maps merge before a single final clamp, so a
     floor-only overlay evaluates the unchanged requested value against the new floor.
 B5. **`ROUTING_POLICY`**: isolated legacy-format override for the routing domain
@@ -61,6 +63,15 @@ ade-config get PATH [--root DIR] [--home DIR] [--json]
 ade-config diff [--root DIR] [--home DIR] [--json]
 just config-check
 ```
+
+`--root` and `--home` may appear before or after any subcommand, or one on
+either side. If repeated, the last **explicit** value wins; an omitted option
+never replaces an earlier explicit target. For example:
+`ade-config --root DIR --home HOME check --json`.
+
+`diff` compares against a baseline with local loading explicitly disabled;
+no alternate supposedly absent filename is probed or loaded. The pure loader's
+`include_local=False` option disables even local path resolution/presence checks.
 
 Python **3.11+** is required for standard-library `tomllib`; bootstrap is a later unit.
 

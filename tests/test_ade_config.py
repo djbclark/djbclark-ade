@@ -45,7 +45,7 @@ def _run_cli(*args: str, home: Path, env: dict | None = None) -> subprocess.Comp
     if env:
         e.update(env)
     return subprocess.run(
-        [sys.executable, "-I", str(BIN / "ade-config"), *args],
+        [sys.executable, "-I", "-B", str(BIN / "ade-config"), *args],
         capture_output=True,
         text=True,
         env=e,
@@ -425,3 +425,128 @@ def test_selected_legacy_gate_fallback_parity(home, synthetic_root, tmp_path, mo
     assert new.data['gates']['frontier'] == old
     assert new.provenance['gates_info']['source'] == old_info['source']
     assert bool(new.provenance['gates_info']['toml_error']) == bool(old_info['toml_error'])
+
+
+@pytest.mark.parametrize("location", ["new", "local"])
+def test_r3_raw_duplicates_reject_before_routing_isolation(home, synthetic_root, location):
+    duplicate = '[[service]]\nname="same"\n[[service]]\nname="same"\n'
+    if location == "new":
+        (synthetic_root / 'config/ade.toml').write_text('schema_version=1\n' + duplicate)
+    else:
+        _local_write(home, duplicate)
+    env = {'ROUTING_POLICY': str(synthetic_root / 'config/routing.toml')}
+    with pytest.raises(ac.ConfigError, match='duplicate service identity'):
+        ac.load_effective(root=synthetic_root, home=home, environ=env)
+    errors, eff = ac.check(root=synthetic_root, home=home, environ=env)
+    assert eff is None and 'duplicate service identity' in errors[0]
+    with pytest.raises(ac.ConfigError, match='duplicate service identity'):
+        ac.local_diff(root=synthetic_root, home=home, environ=env)
+    for command in [('check',), ('get', 'schema_version'), ('diff',)]:
+        result = _run_cli(*command, '--root', str(synthetic_root), '--home', str(home),
+                          home=home, env=env)
+        assert result.returncode == 1, (result.stdout, result.stderr)
+        assert 'duplicate service identity' in result.stdout + result.stderr
+
+
+def _r3_cli_targets(command, root, home, placement):
+    # All paths are explicit and synthetic, including deliberate decoy targets.
+    root_flags = ['--root', str(root)]
+    home_flags = ['--home', str(home)]
+    tail = ['get', 'lead.model'] if command == 'get' else [command]
+    if placement == 'before':
+        return root_flags + home_flags + tail
+    if placement == 'after':
+        return tail + root_flags + home_flags
+    if placement == 'mixed_root':
+        return root_flags + tail + home_flags
+    if placement == 'mixed_home':
+        return home_flags + tail + root_flags
+    if placement == 'repeated':
+        return ['--root', str(root / 'decoy'), '--home', str(home / 'decoy')] + tail + root_flags + home_flags
+    raise AssertionError(placement)
+
+
+@pytest.mark.parametrize('command', ['check', 'get', 'diff'])
+@pytest.mark.parametrize('placement', ['before', 'after', 'mixed_root', 'mixed_home', 'repeated'])
+def test_r3_main_preserves_explicit_targets(home, synthetic_root, command, placement):
+    import argparse
+    import ast
+    node = next(n for n in ast.parse((BIN / 'ade-config').read_text()).body
+                if isinstance(n, ast.FunctionDef) and n.name == 'main')
+    seen = {}
+    def handler(args):
+        seen.update(root=args.root, home=args.home)
+        return 0
+    namespace = {'argparse': argparse, 'cmd_check': handler, 'cmd_get': handler, 'cmd_diff': handler}
+    exec(compile(ast.Module(body=[node], type_ignores=[]), 'actual ade-config.main', 'exec'), namespace)
+    assert namespace['main'](_r3_cli_targets(command, synthetic_root, home, placement)) == 0
+    assert seen == {'root': str(synthetic_root), 'home': str(home)}
+    # Defaults remain compatible; stub handlers guarantee no default-home read.
+    assert namespace['main'](['get', 'schema_version'] if command == 'get' else [command]) == 0
+    assert seen == {'root': None, 'home': None}
+
+
+@pytest.mark.parametrize('command', ['check', 'get', 'diff'])
+@pytest.mark.parametrize('placement', ['before', 'after', 'mixed_root', 'mixed_home', 'repeated'])
+def test_r3_cli_targets_hermetic(home, synthetic_root, command, placement):
+    (synthetic_root / 'config/ade.toml').write_text('schema_version=1\n[lead]\nmodel="repo-target"\n')
+    local = _local_write(home, '[lead]\nmodel="local-target"\n')
+    # A missing --home must hit this synthetic decoy rather than the operator HOME.
+    decoy_home = home / 'environment-home'
+    decoy_home.mkdir()
+    _local_write(decoy_home, 'invalid = [')
+    args = _r3_cli_targets(command, synthetic_root, home, placement)
+    proc = _run_cli(*args, '--json', home=decoy_home)
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    payload = json.loads(proc.stdout)
+    if command == 'check':
+        assert payload['ok'] is True
+        assert payload['provenance']['root'] == str(synthetic_root.resolve())
+        assert payload['provenance']['local_config'] == str(local)
+    elif command == 'get':
+        assert payload['value'] == 'local-target'
+    else:
+        assert {'path': 'lead.model', 'before': 'repo-target', 'after': 'local-target'} in payload['changes']
+
+
+@pytest.mark.parametrize('stray', ['[lead]\nfable_lead=false\n', 'not valid TOML ['])
+def test_r3_diff_ignores_existing_supposedly_missing_baseline(home, synthetic_root, stray):
+    new = synthetic_root / 'config/ade.toml'
+    new.write_text('schema_version=1\n[lead]\nfable_lead=true\n')
+    local = _local_write(home, '[lead]\nfable_lead=false\n')
+    extra = local.with_name('local-missing-for-diff.toml')
+    extra.write_text(stray)
+    paths = (new, local, extra)
+    before = {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in paths}
+    baseline = ac.load_without_local(root=synthetic_root, home=home, environ={})
+    assert baseline.data['lead']['fable_lead'] is True
+    assert baseline.provenance['local_config'] is None
+    assert ac.Change('lead.fable_lead', True, False) in ac.local_diff(root=synthetic_root, home=home, environ={})
+    result = _run_cli('diff', '--root', str(synthetic_root), '--home', str(home), '--json', home=home)
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert {'path': 'lead.fable_lead', 'before': True, 'after': False} in json.loads(result.stdout)['changes']
+    assert before == {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in paths}
+
+
+def test_r3_disabled_local_never_resolves_probes_or_reads_local_paths(home, synthetic_root, monkeypatch):
+    (synthetic_root / 'config/ade.toml').write_text('schema_version=1\n')
+    # Includes an explicit existing unusable override, which must not be probed.
+    explicit_local = home / 'directory-override'
+    explicit_local.mkdir()
+    original_present, original_read = ac.input_present, ac.read_toml
+    def no_resolution(*args, **kwargs):
+        raise AssertionError('local path resolution attempted')
+    def guarded_present(path):
+        assert path != home and home not in path.parents, 'local path probed'
+        return original_present(path)
+    def guarded_read(path):
+        assert path != home and home not in path.parents, 'local path read'
+        return original_read(path)
+    monkeypatch.setattr(ac, 'default_local_path', no_resolution)
+    monkeypatch.setattr(ac, 'input_present', guarded_present)
+    monkeypatch.setattr(ac, 'read_toml', guarded_read)
+    baseline = ac.load_without_local(root=synthetic_root, home=home, environ={})
+    disabled = ac.load_effective(root=synthetic_root, home=home, local_config=explicit_local,
+                                 include_local=False, environ={})
+    assert baseline.data == disabled.data
+    assert disabled.provenance['local_config'] is None

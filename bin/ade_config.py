@@ -412,18 +412,25 @@ def load_effective(
     home: Path | None = None,
     new_config: Path | None = None,
     local_config: Path | None = None,
+    include_local: bool = True,
     environ: dict[str, str] | None = None,
 ) -> EffectiveConfig:
-    """Load the effective schema_version=1 tree. Never writes."""
+    """Load the effective schema_version=1 tree. Never writes.
+
+    include_local=False disables local path resolution, presence checks and reads;
+    diff uses it for a baseline with no secondary local-file authority.
+    """
     root = (root or repo_root_from_here()).resolve()
     home_path = home if home is not None else Path.home()
     env = environ if environ is not None else dict(os.environ)
     new_path = new_config if new_config is not None else default_new_config_path(root)
-    local_path = local_config if local_config is not None else default_local_path(home_path)
+    local_path = (
+        local_config if local_config is not None else default_local_path(home_path)
+    ) if include_local else None
 
     schema = read_schema(default_schema_path(root))
     using_new = input_present(new_path)
-    using_local = input_present(local_path)
+    using_local = local_path is not None and input_present(local_path)
 
     routing_env = env.get("ROUTING_POLICY") or None
     gates_env = env.get("GATES_TOML") or None
@@ -450,6 +457,7 @@ def load_effective(
         raw = read_toml(new_path)
         require_schema_version(raw, new_path, required=True)
         validate_tree(raw, schema, label=str(new_path))
+        reject_duplicate_services(raw.get("service"), label=str(new_path))
         data = copy.deepcopy(raw)
         data["schema_version"] = SCHEMA_VERSION
         provenance["new_config"] = str(new_path)
@@ -463,8 +471,7 @@ def load_effective(
         data.update(projected)
         provenance["routing_source"] = str(rpath)
     elif using_new:
-        # Keep new-file routing domain; validate services if present.
-        reject_duplicate_services(data.get("service"), label=str(new_path))
+        # Raw new-file identities were validated before domain isolation.
         provenance["routing_source"] = str(new_path)
     else:
         rpath = default_routing_path(root)
@@ -491,6 +498,7 @@ def load_effective(
         local = read_toml(local_path)
         require_schema_version(local, local_path, required=False)
         validate_tree(local, schema, label=str(local_path), partial=True)
+        reject_duplicate_services(local.get("service"), label=str(local_path))
         merge_src = copy.deepcopy(local)
         merge_src.pop("schema_version", None)
         if routing_env:
@@ -581,13 +589,12 @@ def load_without_local(
     new_config: Path | None = None,
     environ: dict[str, str] | None = None,
 ) -> EffectiveConfig:
-    """Effective tree ignoring local.toml (synthetic missing local)."""
-    missing = home / ".config" / "djbclark-ade" / "local-missing-for-diff.toml"
+    """Effective tree with local resolution/loading explicitly disabled."""
     return load_effective(
         root=root,
         home=home,
         new_config=new_config,
-        local_config=missing,
+        include_local=False,
         environ=environ,
     )
 

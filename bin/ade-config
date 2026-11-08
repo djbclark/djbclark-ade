@@ -104,10 +104,13 @@ def cmd_diff(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     shared = argparse.ArgumentParser(add_help=False)
-    shared.add_argument("--root", help="repository root (default: parent of bin/)")
+    # A subparser parses into its own namespace. Implicit defaults must not
+    # overwrite explicit targets already parsed before the subcommand.
+    shared.add_argument("--root", default=argparse.SUPPRESS,
+                        help="repository root; before/after command, last explicit wins")
     shared.add_argument(
-        "--home",
-        help="HOME for local.toml resolution (default: real home; tests pass a temp dir)",
+        "--home", default=argparse.SUPPRESS,
+        help="HOME for local.toml; before/after command, last explicit wins (default: real home)",
     )
     parser = argparse.ArgumentParser(
         prog="ade-config",
@@ -142,6 +145,8 @@ def main(argv: list[str] | None = None) -> int:
     p_diff.set_defaults(func=cmd_diff)
 
     args = parser.parse_args(argv)
+    args.root = getattr(args, "root", None)
+    args.home = getattr(args, "home", None)
     # Isolate CLI from the operator's real local.toml when --home is omitted in
     # accidental interactive use under a dirty HOME: still default to real home,
     # as documented. Tests always pass --home.
