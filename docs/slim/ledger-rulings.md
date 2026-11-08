@@ -67,3 +67,44 @@ R2-26. `bin/npm_metadata.py` and its test (0 refs): DELETE in E10.
 - **`.claude/settings.json` risk accepted (operator, 2026-11-07)**: the Opus `bin/review-pr` of PR 297 at 634f3b1 returned BLOCK: the committed project settings give every Claude session in this public repo `defaultMode: acceptEdits` and bare `Bash`, `Edit`, `Write`, `WebFetch`, `WebSearch`, including sessions that read untrusted PR content, and the three deny rules are prefix-only. The operator chose to keep the file and accept the risk ("Keep it, I accept the risk"). Recorded limits: the review boundary is unaffected (`bin/review-launch` runs with `--setting-sources ""`); Claude Code ignores a project's allow entries until its workspace trust dialog is accepted; the deny rules are a convenience, not a guard. PR 297 merges on the operator's explicit override of that BLOCK, never on the lead's word.
 - **`bin/firecrawl-router` kept (operator, 2026-11-07, walk-through step 6: "Why are we getting rid of this? … We need to maintain some way of doing [firecrawl on Hyades]"; then "Keep it in djbclark-ade")**: R2-15 is narrowed. `bin/web-get`, `bin/web-digest` and the web half of `fallback-chains` stay retired; `bin/firecrawl-router` and `tests/test_firecrawl_router.py` are restored from master fb3b9de, because the router is how every agent reaches the self-hosted Firecrawl on SIPB Hyades: it proxies the shared MCP (18804), serves Hermes' search backend (18805), answers `query`/`json` with SIPB LLMs then LiteLLM, and answers developer search from GitHub. The Codex and opencode templates' `firecrawl` MCP entries are restored; operator batch A12 and P6 become nothing to do.
 - **Final-merge walk-through (operator, 2026-11-07)**: step 9: the lead merges PR 297 on the checklist without a further word (P8's C7/C1 block pasted in the PR, CI green on the head, the plugin day ticked), overriding the local review's BLOCK on the accepted settings risk, then merges site-djbclark's intake branch, tags `slim-2026-11-07` and deletes the slim branches after MERGED; step 10: prompt P10 runs B6-B13 on the Mac, T3 from the operator's second GitHub test account (its gh login on the Mac, used without the operator's intervention).
+- **After the final merge (operator, 2026-11-07, cards after PR 297 merged as 63beae7):**
+  - (1) Gemini 4 Argon's review (`docs/security/argon-injection-review-2026-11-07.md`) found holes in the merge gate
+    and the review boundary. The order is: merge PR 297, then a gate-fix PR, then P10 (the ruleset). The Mac runner
+    stops before P10 until the gate-fix PR merges.
+  - (2) site-djbclark `bin/fleet-watch`: the operator said yes to a fix (fence the outside PR title and branch, run
+    the worker through `bin/review-launch` with no tools, replace automatic steering of live sessions with an inbox
+    file). The upstream dispatch stays disabled until the fix lands.
+  - (3) site-djbclark `home-agents.md` item 24 ("djbclark approved"): the operator asked for a secure pattern rather
+    than an exception. The draft is signed agent messages plus operator-only approval tokens for a short list of
+    high-impact actions. The Codex (astra) consultation waits until the end of this work.
+  - (4) `1password`: a public generic copy goes in djbclark-ade. The private copy stays in site-private.
+  - (5) The Fable 5.1 review of `docs/slim/fable-review-later.md` runs now, through omp on the Mac. Its Group 1
+    cross-checks Argon's gate findings.
+  - (6) Paseo features and plugins that cut how often agents need the operator are to be researched, without
+    weakening the stance on outside content.
+- **Pi-primary is under evaluation; omp stays (operator-approved coordination update, 2026-11-07, after the final
+  merge).** The tentative direction is upstream Pi as the primary multi-vendor coding client and OpenCode 2 as a
+  smaller second client, with passive monitoring kept in aiuse. It does **not** overwrite the "omp, not pi" ruling
+  above: omp stays the Pi-family Paseo seat until Pi passes an acceptance probe.
+  - **Claude-credit spending stays on omp** until a passive Pi source of 429s and retry-after keeps aiuse's
+    fail-closed rate latch working.
+  - **State on 2026-11-07:** P11 had already uninstalled Pi and `pi-acp` (C49, about 08:07) and archived `~/.pi` under
+    `~/.local/state/archive/slim-2026-11-07/tui-retire/.pi`. Restoring them is therefore a prerequisite for the probe,
+    not something that was prevented.
+  - **The acceptance checklist (C1-C9 of the lead's reply):**
+    - C1: Paseo integration, checked with `paseo provider ls` and `paseo provider models pi --json` and one read-only
+      `paseo run --provider pi` slice that writes its report. Provider discovery alone is not compatibility.
+    - C2: Pi's modes and its unattended mode, given that a schedule or child agent with no `--mode` gets the
+      unattended one.
+    - C3: subagents come from Paseo-level fan-out, not a restored `pi/extensions/subagent`.
+    - C4: one aiuse identity and one route_agent pool per vendor pool, with each subscription's entitlement checked
+      (Copilot and Zen may not be live).
+    - C5: the rate-latch source, as above.
+    - C6: no credential conversion; Anthropic and OpenAI identities stay separate; aiuse stays passive. Command-backed
+      keys are verified only on the registry API path.
+    - C7: resume, compaction and hook equivalents: the handoff and baton fallback, context hooks, the `hand` link,
+      and a `skill-everywhere` root.
+    - C8: report and `.done` delivery under `paseo run`, and acks as a peer (order 10).
+    - C9: what the slim-down removed that comes back differently: `never_route`, a `[service pi]` entry, the shim's
+      provider list, the identity guard, and the skill root.
+  - No routing, config, identity or credential change is made until the probe passes.

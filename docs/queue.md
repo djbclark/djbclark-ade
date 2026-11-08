@@ -98,6 +98,11 @@ under **Carried**, newest first, one line each; an item leaves when it ships (in
     S5a builds the measured Jev injection gate with this setup work; S9 plans cloud-agent communication last, after
     signing and the earlier sections, and builds only with headroom. Overall and local coordination now share the local lead.
 
+36. **Pi-primary evaluation** (operator, 2026-11-07, tentative): upstream Pi as the primary multi-vendor client, with
+    omp kept until it passes. First restore Pi, `pi-acp` and `~/.pi` (P11 removed them, C49), then run the acceptance
+    probe C1-C9 (`docs/slim/ledger-rulings.md`, "Pi-primary is under evaluation"). Claude credits stay on omp until
+    Pi has a passive 429 and retry-after source.
+
 ## Closed by the slim-down (2026-11-06/07; the slice that closed it)
 
 1. relay: card-blocked records fail fast (2026-10-31): the outbox is gone; the shim fails closed on a target with a pending permission (E3).

@@ -64,3 +64,9 @@
 - `acp-dispatch` reads `review-launch --json`'s `structured_output` envelope, so a Claude read-only or deny slice's report is no longer lost as no-report (#297)
 - `acp-dispatch` keeps a slice's in-flight reservation while it waits for an agent slot and re-judges admission on a fresh quota reading before launching (#297)
 - `route_agent.py` keeps the tighter reading per quota window when aiuse and `paseo usage ls` both report it (#297)
+- `adversary-marker` now judges every open PR at the head on `workflow_dispatch` too, keys its concurrency on the head sha, and counts an APPROVE only in an owner-written PR's body or in an owner's own issue comment; a body APPROVE on any other PR never counts, an owner comment counts only if every edit in its history is the owner's (GraphQL `editor`/`userContentEdits`), the body's last editor is read from `editor`/`lastEditedAt` (the earlier `lastEditedBy` is not a GitHub GraphQL field, so that query errored), both shared-head lookups are paginated to the end, and a BLOCK in any comment fails (Argon review and the Codex review of PR 300, 2026-11-07) (#300)
+- `bin/review-launch` refuses a worktree with an outward symlink (exit 2), resolves relative globs, adds `config/secret-deny.toml`'s patterns to its read-deny list, gives read-only mode no web tools unless the new `--allow-web`, and no longer reads the prompt in its bypass-flag scan (#300)
+- `agents/codex/config.toml.tmpl` no longer pre-trusts `~/Downloads`; `docs/scheduling.md` requires an explicit `--mode` on every `paseo schedule create` (#300)
+
+### Fixed
+- Rejected missing or malformed PR body editor attribution instead of inheriting owner trust when the edit timestamp was null (#300).

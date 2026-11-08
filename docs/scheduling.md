@@ -17,7 +17,11 @@ carries the same text as an XML comment). Edit the plist, then install again; ne
 **Which jobs belong here (Paseo directive F2, [paseo-only-rearchitecture.md](paseo-only-rearchitecture.md)).** System jobs
 (monitors, collectors, record reaping, watchdogs, sweeps) use launchd on the Mac and systemd on Linux, through this tool.
 Judgment jobs that run an agent (triage, reports) use Paseo schedules (`paseo schedule create --cron ...`),
-not ade-sched.
+not ade-sched. **Every `paseo schedule create` passes an explicit `--mode`**: `auto` for Claude, `auto-review` for
+Codex. A schedule run is created unattended, and with no `--mode` Paseo gives it the provider's unattended mode
+(Claude `bypassPermissions`, Codex `full-access`), so a job that reads outside text would run with no guard. This
+comes from Paseo 0.15.3's source, `packages/server/src/server/schedule/service.ts` and `create-agent-mode.ts`, read on
+2026-11-07.
 
 ## Commands
 

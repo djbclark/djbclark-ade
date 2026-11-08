@@ -2,8 +2,8 @@
 """review-launch: run ONE `claude -p` inside a review boundary and print its structured output.
 
   review-launch --mode review|read-only -C WORKTREE --schema FILE (-p TEXT | -f FILE)
-                [--head SHA] [--model M] [--max-turns N] [--timeout S] [--json]
-  review-launch --check [--mode review|read-only] [--json]
+                [--allow-web] [--head SHA] [--model M] [--max-turns N] [--timeout S] [--json]
+  review-launch --check [--mode review|read-only] [--allow-web] [--json]
 
 The permanent review boundary of the slim-down (PLAN E8, 2026-11-06; docs/review-boundary.md). AGENTS.md
 review rule 11's local review (`bin/review-pr`) and the dispatch shim's Claude restricted modes launch Claude
@@ -14,7 +14,10 @@ THE MODES
   review     tools Read, Grep, Glob; the init event must list exactly {Glob, Grep, Read, StructuredOutput}
              (`--json-schema` adds StructuredOutput). No network tool: an injected diff could otherwise send
              what the model read somewhere.
-  read-only  tools Read, Grep, Glob, WebFetch, WebSearch; init exactly those plus StructuredOutput.
+  read-only  the same tools as review by default (2026-11-07: WebFetch and WebSearch are an exfiltration channel
+             when the input is untrusted). `--allow-web` adds WebFetch and WebSearch, in read-only mode only
+             (with review mode it is refused, exit 2); init is then exactly those five plus StructuredOutput,
+             and the self-check is a separate one.
 
 THE LAUNCH (every flag is fixed; nothing is passed through):
   claude -p --output-format stream-json --verbose --tools <mode's tools> --permission-mode default
@@ -24,10 +27,22 @@ THE LAUNCH (every flag is fixed; nothing is passed through):
   {"disableAllHooks": true, "hooks": {}, "permissions": {"blockReadsOutsideWorkingDirectories": true,
   "disableBypassPermissionsMode": "disable", "deny": [Read(~/.ssh/**) and the other secret paths]}}: the key
   confines Read/Grep/Glob to the worktree in every mode, bypass included (Claude Code >= 2.1.257); the deny
-  rules are a second layer, never the first. The environment drops every variable whose name says token,
+  rules are a second layer, never the first. They are the union of this file's own list (DENY_PATHS) and every
+  `deny` pattern of config/secret-deny.toml (found from this file's realpath, <repo>/bin/ -> <repo>/config/; read
+  with tomllib, or, on a Python without it (3.9), from the rendered config/secret_deny_policy.json that
+  `bin/render-secret-deny --check` keeps in step), each as Read(...) in Claude's form (a bare name `**/NAME`, an
+  absolute `//PATH`). The policy's `allow` exceptions are not carried over (Claude has no exception syntax), so
+  e.g. `.env.example` is refused here too. A missing secret-deny.toml leaves the own list alone; one that exists
+  but does not parse (or whose rendered JSON, without tomllib, is missing or bad) refuses every launch and
+  check (exit 2). The environment drops every variable whose name says token,
   secret, password, credential or api key, and every GH_* and GITHUB_* one (the removed Codex local review's SECRET_ENV_RE);
   HOME, PATH and CLAUDE_CONFIG_DIR stay (OAuth needs HOME). The prompt is argv (after `--`), never a file in
   the worktree.
+
+THE WORKTREE MAY HOLD NO SYMLINK THAT LEAVES IT (2026-11-07): before the self-check and the launch, every symlink in
+  the worktree (an os.walk that follows no link, plus every mode-120000 entry of `git ls-files -s`) is resolved,
+  and one whose realpath is outside the worktree's realpath (a dangling one included) refuses the launch (exit 2,
+  naming the link): a PR can commit `evil -> ~/.ssh`, and Read/Grep/Glob of `evil/...` would follow it.
 
 THE BOUNDARY IS PROVEN FROM THE RUN'S OWN STREAM, and the run is killed (exit 77, the TRIPWIRE) on the first miss:
   * the init event (`type: system, subtype: init`, wherever it falls; it is not the first line) must exist
@@ -38,8 +53,12 @@ THE BOUNDARY IS PROVEN FROM THE RUN'S OWN STREAM, and the run is killed (exit 77
   * a hook event (`system` subtype hook_*) trips: managed settings load whatever --setting-sources says.
   * an assistant content item must be text, thinking (or redacted_thinking) or tool_use; every `tool_use` must
     name an allowed tool, and a Read/Grep/Glob path outside the worktree (after ~, `..` and symlinks) trips too,
-    even though the key already refuses it, as does any `..` component in a Glob pattern or a Grep glob; the refusals Claude
-    reports in `result.permission_denials` are logged to stderr.
+    even though the key already refuses it, as does any `..` component in a Glob pattern or a Grep glob, and a
+    pattern or glob whose fixed prefix (up to its first wildcard; a relative one joined to the tool's path or the
+    worktree) resolves outside; the refusals Claude reports in `result.permission_denials` are logged to stderr.
+  This path tripwire acts on the stream, so it fires AFTER Claude may already have run the call: it is a second
+  layer behind blockReadsOutsideWorkingDirectories (and the symlink refusal above), and it ends the run and
+  withholds the output, but it is not itself the boundary.
   `result.structured_output` is the output; `result.is_error`, no result event or no structured output is exit 3.
   At the end, at the timeout and on a tripwire the child's process group and every descendant seen while it
   ran are SIGKILLed (the child runs in a session of its own, so the caller's group is never touched).
@@ -58,18 +77,23 @@ $REVIEW_LAUNCH_STATE_DIR (default ~/.local/state/review-launch)/check-<sha256 of
 runs on the launch's own `--model` (2026-11-07: a check on an unavailable default model got a `fallback` content item
 and tripped), so each model has its own check; a new Claude version, model or launcher re-runs it, and
 a failed or missing check refuses every launch (exit 2, with the reason) until `review-launch --check` passes.
+The cached file is trusted as found: whoever can write $REVIEW_LAUNCH_STATE_DIR already controls the launch (its
+environment, PATH and `claude`), so a forged "passed" record gives them nothing they did not have.
 
 --head SHA (the review path; `bin/review-pr` passes it): the worktree's HEAD must be SHA and
 `git status --porcelain --untracked-files=all` must show nothing but untracked files under `.review-launch/`
 (where review-pr puts the diff), else exit 2. A worktree that is `/`, $HOME or an ancestor of $HOME is refused.
 
 Exit: 0 output printed and the boundary held; 2 usage or a refused launch (a bypass flag or variable, a
-worktree that is missing, dirty or at another head, a schema that does not parse, no passing self-check);
+worktree that is missing, dirty or at another head or holds a symlink that leaves it, a schema that does not parse,
+a secret-deny.toml that does not parse, --allow-web outside read-only mode, no passing self-check);
 77 tripwire; 3 no structured output (is_error, no result, claude failed, or the launcher was stopped by
 SIGTERM, SIGHUP or SIGINT: the run is killed and the exit is 3, never 128+N); 124 --timeout (default 900 s).
 `--check` exits 0 passed, 77 a read was not refused (or a tripwire), 3 inconclusive (a control read failed, a
 target was not attempted, the run produced no result), 124 timeout.
 stdout carries ONLY the structured output JSON (or, with --json, one JSON run record); notes go to stderr.
+The bypass-flag refusal looks only at option positions of the launcher's own argv: the value after -p, -f, -C,
+--schema or any other option that takes one is never read as a flag (a prompt may start with `--settings`).
 
 Python 3.9+ (the Mac's stock python3), macOS and Linux.
 """
@@ -91,9 +115,20 @@ import threading
 import time
 from pathlib import Path
 
+try:
+    import tomllib
+except ImportError:     # Python < 3.11 (the Mac's stock 3.9): the rendered policy JSON stands in
+    tomllib = None
+
 HERE = Path(__file__).resolve()
+REPO = HERE.parent.parent
+POLICY_TOML = REPO / "config" / "secret-deny.toml"
+POLICY_JSON = REPO / "config" / "secret_deny_policy.json"   # bin/render-secret-deny writes it from POLICY_TOML
 EXIT_OK, EXIT_USAGE, EXIT_NO_OUTPUT, EXIT_TRIP, EXIT_TIMEOUT = 0, 2, 3, 77, 124
-MODES = {"review": ["Read", "Grep", "Glob"], "read-only": ["Read", "Grep", "Glob", "WebFetch", "WebSearch"]}
+MODES = {"review": ["Read", "Grep", "Glob"], "read-only": ["Read", "Grep", "Glob"]}
+WEB_TOOLS = ["WebFetch", "WebSearch"]
+WEB_PROFILE = "read-only+web"   # --mode read-only --allow-web; an internal key, never a --mode value
+TOOLS = {**MODES, WEB_PROFILE: MODES["read-only"] + WEB_TOOLS}
 PATH_TOOLS = {"Read": ("file_path",), "Grep": ("path",), "Glob": ("path",)}
 # What an assistant message may contain: anything else (a server tool use, an MCP call, an unknown future kind)
 # trips. redacted_thinking is thinking the API returns encrypted.
@@ -112,9 +147,67 @@ DENY_PATHS = ("~/.config/gh/**", "~/.ssh/**", "~/.claude.json", "~/.claude/proje
               "~/.config/gcloud/**", "~/.npmrc", "~/.pypirc", "~/Library/Keychains/**")
 # Not ~/.local/state/**: bin/review-pr's review worktrees live under ~/.local/state/review-launch/wt/, and a
 # deny rule there would refuse reads inside the very worktree under review.
+
+
+class PolicyError(Exception):
+    """config/secret-deny.toml exists but cannot be read: every launch and check is refused (exit 2)."""
+
+
+def claude_form(p: str) -> str:
+    """A secret-deny pattern in Claude's rule syntax (bin/render-secret-deny's claude_form)."""
+    if p.startswith("/"):
+        return "/" + p          # Claude: `//abs` is absolute, `/x` is relative to the settings file
+    if "/" not in p:
+        return "**/" + p        # explicit any-depth (Claude reads a bare name the same way)
+    return p
+
+
+def _patterns(lst: object, where: str) -> list[str]:
+    if not isinstance(lst, list) or not lst or not all(isinstance(x, str) and x and "(" not in x and ")" not in x
+                                                       for x in lst):
+        raise PolicyError(f"{where}: `deny` is not a non-empty list of patterns")
+    return lst
+
+
+def policy_deny(toml_path: Path = POLICY_TOML, json_path: Path = POLICY_JSON) -> list[str]:
+    """Every `deny` pattern of config/secret-deny.toml; [] when the file is missing (DENY_PATHS alone then)."""
+    if not toml_path.exists():
+        return []
+    if tomllib is None:
+        try:
+            data = json.loads(json_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, ValueError) as e:
+            raise PolicyError(f"{toml_path} exists, this Python has no tomllib, and {json_path} cannot be read: {e}") from e
+        where = str(json_path)
+    else:
+        try:
+            data = tomllib.loads(toml_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
+            raise PolicyError(f"{toml_path} does not parse: {e}") from e
+        where = str(toml_path)
+    if not isinstance(data, dict) or data.get("version") != 1:
+        raise PolicyError(f"{where}: version must be 1")
+    return _patterns(data.get("deny"), where)
+
+
+def deny_rules(extra: list[str]) -> list[str]:
+    """DENY_PATHS, then each policy pattern not already among them, as Read(...) rules."""
+    out = [f"Read({p})" for p in DENY_PATHS]
+    for p in extra:
+        rule = f"Read({claude_form(p)})"
+        if rule not in out:
+            out.append(rule)
+    return out
+
+
+POLICY_ERROR = None   # set when secret-deny.toml exists but cannot be read; main() then refuses (exit 2)
+try:
+    _POLICY = policy_deny()
+except PolicyError as _e:
+    POLICY_ERROR, _POLICY = str(_e), []
 SETTINGS = {"disableAllHooks": True, "hooks": {},
             "permissions": {"blockReadsOutsideWorkingDirectories": True, "disableBypassPermissionsMode": "disable",
-                            "deny": [f"Read({p})" for p in DENY_PATHS]}}
+                            "deny": deny_rules(_POLICY)}}
 SETTINGS_JSON = json.dumps(SETTINGS, sort_keys=True, separators=(",", ":"))
 CHECK_SCHEMA = {"type": "object", "properties": {"results": {"type": "array", "items": {
     "type": "object", "properties": {"name": {"type": "string"}, "read_ok": {"type": "boolean"}},
@@ -138,7 +231,7 @@ def claude_bin() -> str | None:
 
 def fixed_argv(mode: str) -> list[str]:
     """The boundary flags, identical for a launch and its self-check (the cache key hashes them)."""
-    return ["-p", "--output-format", "stream-json", "--verbose", "--tools", ",".join(MODES[mode]),
+    return ["-p", "--output-format", "stream-json", "--verbose", "--tools", ",".join(TOOLS[mode]),
             "--permission-mode", EXPECTED_PERMISSION_MODE, "--setting-sources", "", "--strict-mcp-config",
             "--no-session-persistence", "--settings", SETTINGS_JSON]
 
@@ -261,18 +354,49 @@ def path_outside(value: object, worktree: str) -> bool:
 
 def glob_outside(pattern: object, base: str, worktree: str) -> bool:
     """A Glob `pattern` or Grep `glob` with ANY `..` component is outside, wherever it would resolve (E8 review,
-    2026-11-07: a glob's `..` is matched by the tool, not by realpath). One that is absolute or starts with ~ is
-    judged by its fixed prefix."""
+    2026-11-07: a glob's `..` is matched by the tool, not by realpath). Any other is judged by its fixed prefix (up
+    to its first wildcard, cut back to a whole directory): an absolute or ~ one as it stands, a relative one joined
+    to BASE (the tool's path, or the worktree), each through realpath, so `link/**` with `link -> ~/.ssh` is outside
+    (2026-11-07). A wildcard inside a component (`lin?/x`) is not resolved here: the symlink refusal before the
+    launch covers that."""
     if not isinstance(pattern, str):
         return pattern is not None
     if ".." in re.split(r"[/\\]", pattern):
         return True
     p = os.path.expanduser(pattern)
-    if not os.path.isabs(p):
-        return False
     prefix = re.split(r"[*?\[{]", p, maxsplit=1)[0]
     prefix = prefix if prefix.endswith(os.sep) else os.path.dirname(prefix)
     return path_outside(os.path.join(base, prefix) if not os.path.isabs(prefix) else prefix, worktree)
+
+
+def escaping_links(worktree: str) -> list[tuple[str, str]]:
+    """(link, its realpath) for every symlink in WORKTREE whose target resolves outside it, a dangling one included:
+    every link an os.walk finds (following none) and every mode-120000 entry `git ls-files -s` lists that is a link
+    on disk (a PR can commit `evil -> ~/.ssh`; 2026-11-07). A directory os.walk cannot list is skipped: the model
+    cannot list it either."""
+    names: set[str] = set()
+    try:
+        ls = subprocess.run(["git", "-C", worktree, "ls-files", "-s", "-z"], capture_output=True, timeout=120)
+    except (OSError, subprocess.SubprocessError):
+        ls = None
+    if ls is not None and ls.returncode == 0:      # not a git worktree: the walk alone
+        for rec in ls.stdout.split(b"\0"):
+            meta, _, name = rec.partition(b"\t")
+            if name and meta.split(b" ", 1)[0] == b"120000":
+                names.add(os.fsdecode(name))
+    for root, dirs, files in os.walk(worktree, followlinks=False):
+        for n in dirs + files:
+            full = os.path.join(root, n)
+            if os.path.islink(full):
+                names.add(os.path.relpath(full, worktree))
+    out = []
+    for rel in sorted(names):
+        full = os.path.join(worktree, rel)
+        if os.path.islink(full):
+            target = os.path.realpath(full)
+            if not _inside(target, worktree):
+                out.append((rel, target))
+    return out
 
 
 def tool_use_outside(name: str, inp: object, worktree: str) -> str | None:
@@ -292,7 +416,7 @@ def tool_use_outside(name: str, inp: object, worktree: str) -> str | None:
 
 
 def init_problems(init: dict, mode: str, worktree: str) -> list[str]:
-    want = set(MODES[mode]) | {"StructuredOutput"}
+    want = set(TOOLS[mode]) | {"StructuredOutput"}
     tools = init.get("tools")
     out = []
     if not isinstance(tools, list) or set(tools) != want or len(tools) != len(want):
@@ -326,7 +450,7 @@ class Run:
 def run_claude(argv: list[str], worktree: str, mode: str, timeout: float, path_trip: bool = True,
                keep_raw: bool = False) -> Run:
     run = Run()
-    allowed = set(MODES[mode]) | {"StructuredOutput"}
+    allowed = set(TOOLS[mode]) | {"StructuredOutput"}
     err = tempfile.TemporaryFile()
     try:
         proc = subprocess.Popen(argv, cwd=worktree, env=child_env(), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
@@ -640,6 +764,8 @@ class Parser(argparse.ArgumentParser):
 def parser() -> Parser:
     p = Parser(prog="review-launch", description=__doc__.split("\n\n")[0])
     p.add_argument("--mode", choices=sorted(MODES), default=None)
+    p.add_argument("--allow-web", action="store_true",
+                   help="read-only mode only: add WebFetch and WebSearch (refused with review mode)")
     p.add_argument("-C", dest="worktree", help="the worktree the run is confined to (its cwd)")
     p.add_argument("--schema", help="JSON Schema file for the structured output")
     g = p.add_mutually_exclusive_group()
@@ -678,15 +804,47 @@ def worktree_problem(wt: str, head: str | None) -> str | None:
     return None
 
 
+def bypass_flag(argv: list[str], p: argparse.ArgumentParser) -> str | None:
+    """The first BYPASS_FLAGS name in an OPTION position of ARGV, or None. The value that follows an option taking
+    one (-p, -f, -C, --schema, ..., by its full name or an abbreviation argparse would accept) is skipped, so a prompt
+    starting with `--settings` is not a bypass request (2026-11-07). An unknown option is taken to take no value,
+    so what follows it is still scanned (fail closed). After `--` nothing is an option (argparse refuses it)."""
+    takes = {o for act in p._actions if act.option_strings and act.nargs != 0 for o in act.option_strings}
+    longs = [o for act in p._actions for o in act.option_strings if o.startswith("--")]
+    skip = False
+    for tok in argv:
+        if skip:
+            skip = False
+            continue
+        if tok == "--":
+            return None
+        if not tok.startswith("-") or tok == "-":
+            continue
+        name, eq, _ = tok.partition("=")
+        if name in BYPASS_FLAGS:
+            return name
+        if eq:
+            continue                    # --opt=VALUE / -p=VALUE: the value is attached
+        if tok.startswith("--"):
+            hits = [o for o in longs if o.startswith(name)]
+            skip = name in takes or (len(hits) == 1 and hits[0] in takes)
+        else:
+            skip = tok[:2] in takes and len(tok) == 2   # `-pVALUE` carries its value
+    return None
+
+
 def main(argv: list[str]) -> int:
-    for a in argv:
-        if a.split("=", 1)[0] in BYPASS_FLAGS:
-            note(f"refused: {a.split('=', 1)[0]} would widen or bypass the review boundary (it is never passed through)")
-            return EXIT_USAGE
+    flag = bypass_flag(argv, parser())
+    if flag:
+        note(f"refused: {flag} would widen or bypass the review boundary (it is never passed through)")
+        return EXIT_USAGE
     try:
         a = parser().parse_args(argv)
     except SystemExit as e:
         return EXIT_USAGE if e.code else EXIT_OK
+    if POLICY_ERROR:
+        note(f"refused: the secret-deny policy cannot be read, so the deny rules are unknown: {POLICY_ERROR}")
+        return EXIT_USAGE
     bad_env = bypass_env()
     if bad_env:
         note(f"refused: {', '.join(bad_env)} is set; a permission-mode or bypass variable is never honoured here")
@@ -696,18 +854,22 @@ def main(argv: list[str]) -> int:
         note("no `claude` on PATH")
         return EXIT_USAGE
     mode = a.mode or "review"
+    if a.allow_web and mode != "read-only":
+        note(f"refused: --allow-web is for --mode read-only only, not {mode}")
+        return EXIT_USAGE
+    profile = WEB_PROFILE if a.allow_web else mode     # the tool set: TOOLS[profile]
     if a.check:
-        key, version = check_key(binary, mode, a.model)
+        key, version = check_key(binary, profile, a.model)
         if key is None:
             note(version)
             return EXIT_USAGE
-        doc = run_check(binary, mode, key, version, a.model)
+        doc = run_check(binary, profile, key, version, a.model)
         if a.json:
             print(json.dumps(doc, sort_keys=True))
         else:
             for name, row in doc["targets"].items():
                 print(f"{name:16} {row['outcome']:14} {row['path']}")
-            print(f"self-check {doc['status']} for {version} ({mode}); "
+            print(f"self-check {doc['status']} for {version} ({profile}); "
                   f"accepted exposures: {', '.join(doc['accepted_exposures']) or 'none'}")
             for why in doc["failures"] + doc["inconclusive"]:
                 note(why)
@@ -725,6 +887,12 @@ def main(argv: list[str]) -> int:
     why = worktree_problem(wt, a.head)
     if why:
         note(f"refused: {why}")
+        return EXIT_USAGE
+    links = escaping_links(wt)
+    if links:
+        more = f" (and {len(links) - 1} more)" if len(links) > 1 else ""
+        note(f"refused: the worktree holds a symlink that leaves it: {links[0][0]} -> {links[0][1]}{more}; "
+             "Read/Grep/Glob through it would read outside the worktree")
         return EXIT_USAGE
     try:
         schema = json.loads(Path(a.schema).read_text())
@@ -744,16 +912,17 @@ def main(argv: list[str]) -> int:
     if a.max_turns is not None and a.max_turns < 1:
         note("--max-turns must be at least 1")
         return EXIT_USAGE
-    ok, where, check = ensure_check(binary, mode, a.model)
+    ok, where, check = ensure_check(binary, profile, a.model)
     if not ok:
         note(f"refused: {where}")
         return EXIT_USAGE
-    run = run_claude(build_argv(binary, mode, schema, prompt, a.model, a.max_turns), wt, mode, a.timeout)
+    run = run_claude(build_argv(binary, profile, schema, prompt, a.model, a.max_turns), wt, profile, a.timeout)
     if run.reason:
         note(run.reason)
     if a.json:
         init = run.init or {}
-        rec = {"exit": run.exit, "reason": run.reason, "mode": mode, "worktree": wt, "head": a.head,
+        rec = {"exit": run.exit, "reason": run.reason, "mode": mode, "allow_web": bool(a.allow_web), "worktree": wt,
+               "head": a.head,
                "structured_output": (run.result or {}).get("structured_output") if run.exit == EXIT_OK else None,
                "init": {k: init.get(k) for k in ("tools", "mcp_servers", "permissionMode", "cwd", "model",
                                                  "claude_code_version", "apiKeySource")} if init else None,
