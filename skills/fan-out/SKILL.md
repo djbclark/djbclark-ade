@@ -41,13 +41,16 @@ A slice that edits code gets its own linked worktree (AGENTS.md order 9:
 `load-watch admit` and the agent cap (exit 75: retry later), and runs `paseo run --no-wait` with the
 labels `ade.via=acp-dispatch`, `ade.kind`, `ade.name`, `ade.lead`. `--perm read-only` for a review: Claude
 runs through `bin/review-launch` (the enforced review boundary); every other agent runs best effort, in its
-default mode with a brief note to change nothing (`perm_note` in the record; operator ruling 2026-11-07). A plain `paseo run --no-wait --provider P/M --mode M --new-workspace local --cwd DIR "<prompt>"`
-works too when you need none of that, but then you write the footer into the prompt yourself.
-As verified on 2026-11-07, agent-origin runs, or runs with `PASEO_WORKSPACE_ID` set, must explicitly select a workspace: `--cwd` alone inherits
-the parent agent's workspace and directory. The shim uses `--new-workspace local` to import the assigned
-directory while preserving the parent link. This imports the already claimed worktree; it creates no Git worktree.
-Verify the returned `cwd` against the assigned directory before treating a launch as correctly placed. The shim stores it as
-`paseo_cwd` and emits a `placement_warning` if missing or different; it leaves the paid agent running.
+default mode with a brief note to change nothing (`perm_note` in the record; operator ruling 2026-11-07). A plain
+`paseo run --no-wait --provider P/M --mode M --workspace wks_… --cwd DIR "<prompt>"` works when you need none of that,
+but then you write the footer into the prompt yourself. Create a workspace only with native `paseo workspace create` or
+`paseo run --new-workspace …` when deliberate — `acp-dispatch` never mints workspaces.
+As verified on 2026-11-07, agent-origin runs, or runs with `PASEO_WORKSPACE_ID` set, must explicitly select a workspace:
+`--cwd` alone inherits the parent agent's workspace and directory. `acp-dispatch` passes `--workspace` (validated against
+`paseo workspace ls --json` and `-C`) and never emits `--new-workspace` on an ordinary launch.
+Verify returned `cwd` and `workspaceId` against the assignment before treating a launch as correctly placed. The shim stores
+`paseo_cwd`, `selected_workspace_id`, and `returned_workspace_id`, and emits a `placement_warning` if any are missing or
+different; it leaves the paid agent running.
 
 ## 4. Collect
 

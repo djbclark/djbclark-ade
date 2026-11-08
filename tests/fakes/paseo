@@ -20,6 +20,9 @@ counted exactly. Knobs (all optional):
   FAKE_PASEO_PARENT_CWD Simulate parent workspace placement unless a workspace is explicit
   FAKE_PASEO_FORCE_CWD  Simulate a daemon ignoring explicit placement
   FAKE_PASEO_OMIT_CWD   Omit cwd from the native run result
+  FAKE_PASEO_WORKSPACES JSON list for `workspace ls` (default: [], or persisted workspaces.json after creates)
+  FAKE_PASEO_INSPECT    JSON {agentId: inspect payload} for caller verification
+  FAKE_PASEO_RETURN_WS  workspaceId returned from `run` (default: the selected one)
 """
 import fcntl
 import json
@@ -47,6 +50,26 @@ def save(agents):
     tmp = STATE / "agents.json.tmp"
     tmp.write_text(json.dumps(agents))
     os.replace(tmp, STATE / "agents.json")
+
+
+def load_workspaces():
+    raw = os.environ.get("FAKE_PASEO_WORKSPACES")
+    if raw:
+        return json.loads(raw)
+    p = STATE / "workspaces.json"
+    return json.loads(p.read_text()) if p.exists() else []
+
+
+def save_workspaces(rows):
+    tmp = STATE / "workspaces.json.tmp"
+    tmp.write_text(json.dumps(rows))
+    os.replace(tmp, STATE / "workspaces.json")
+
+
+def persist_workspaces_from_env():
+    raw = os.environ.get("FAKE_PASEO_WORKSPACES")
+    if raw and not (STATE / "workspaces.json").exists():
+        save_workspaces(json.loads(raw))
 
 
 def act(agent, prompt):
@@ -116,6 +139,9 @@ def run(args):
         models = json.loads(os.environ.get("FAKE_PASEO_MODELS") or "{}").get(rest[1] if len(rest) > 1 else "", [])
         out([{"model": m, "id": m, "description": "", "thinkingOptionIds": [], "defaultThinkingOptionId": None}
              for m in models])
+    if verb == "workspace" and rest and rest[0] == "ls":
+        persist_workspaces_from_env()
+        out(load_workspaces())
     if verb == "usage" and rest[:1] == ["ls"]:
         if os.environ.get("FAKE_PASEO_USAGE_RC"):
             print("fake paseo: usage failed", file=sys.stderr)
@@ -129,22 +155,37 @@ def run(args):
         provider = (opt(flags, "--provider") or [""])[0]
         labels = dict(x.split("=", 1) for x in opt(flags, "--label"))
         cwd = (opt(flags, "--cwd") or [""])[0]
-        # Paseo caller placement inherits the parent's workspace unless the run
-        # explicitly selects/creates a workspace; --cwd alone does not override it.
         parent_cwd = os.environ.get("FAKE_PASEO_PARENT_CWD")
         if parent_cwd and not opt(flags, "--new-workspace") and not opt(flags, "--workspace"):
             cwd = parent_cwd
         cwd = os.environ.get("FAKE_PASEO_FORCE_CWD") or cwd
+        workspace_id = None
+        new_ws = opt(flags, "--new-workspace")
+        explicit_ws = opt(flags, "--workspace")
+        persist_workspaces_from_env()
+        rows = load_workspaces()
+        if new_ws:
+            workspace_id = f"wks_fake_{len(rows) + 1:04d}"
+            rows.append({"workspaceId": workspace_id, "project": "fake", "name": workspace_id,
+                         "isolation": new_ws[0], "cwd": cwd, "background": False})
+            save_workspaces(rows)
+        elif explicit_ws:
+            workspace_id = explicit_ws[0]
+            if not any(r.get("workspaceId") == workspace_id for r in rows):
+                out({"error": {"code": "WORKSPACE_NOT_FOUND", "message": f"Workspace not found: {workspace_id}"}}, 1)
         agent = {"id": f"agent-{len(agents) + 1:04d}", "provider": provider, "mode": (opt(flags, "--mode") or [""])[0],
-                 "title": (opt(flags, "--title") or [""])[0], "cwd": cwd,
+                 "title": (opt(flags, "--title") or [""])[0], "cwd": cwd, "workspaceId": workspace_id,
                  "labels": labels, "status": "running", "prompts": [prompt]}
         act(agent, prompt)
         agents.append(agent)
         save(agents)
+        ret_ws = os.environ.get("FAKE_PASEO_RETURN_WS") or workspace_id
         result = {"agentId": agent["id"], "status": "running", "provider": provider, "cwd": agent["cwd"],
-                  "title": agent["title"]}
+                  "title": agent["title"], "workspaceId": ret_ws}
         if os.environ.get("FAKE_PASEO_OMIT_CWD"):
             result.pop("cwd")
+        if os.environ.get("FAKE_PASEO_OMIT_WORKSPACE"):
+            result.pop("workspaceId")
         out(result)
     if verb == "ls":
         want = dict(x.split("=", 1) for x in opt(rest, "--label"))
@@ -153,14 +194,24 @@ def run(args):
               "status": a["status"], "cwd": a["cwd"]} for a in rows])
     aid = rest[0] if rest else ""
     agent = by_id.get(aid)
+    if verb == "inspect" and agent is None:
+        env_inspect = os.environ.get("FAKE_PASEO_INSPECT")
+        if env_inspect and aid in json.loads(env_inspect):
+            out(json.loads(env_inspect)[aid])
     if agent is None and verb in ("wait", "inspect", "mode", "send", "stop"):
         out({"error": {"code": "AGENT_NOT_FOUND", "message": f"No agent found matching: {aid}"}}, 1)
     if verb == "wait":
         status = os.environ.get("FAKE_PASEO_WAIT") or ("idle" if agent["status"] != "running" else "timeout")
         out({"agentId": aid, "status": status, "message": {"error": "provider crashed"}.get(status, "ok")})
     if verb == "inspect":
+        payload = None
+        env_inspect = os.environ.get("FAKE_PASEO_INSPECT")
+        if env_inspect:
+            payload = json.loads(env_inspect).get(aid)
+        if payload is not None:
+            out(payload)
         out({"Id": aid, "Status": agent["status"], "Archived": False, "Provider": agent["provider"],
-             "Mode": os.environ.get("FAKE_PASEO_ACTIVE") or agent["mode"],
+             "Mode": os.environ.get("FAKE_PASEO_ACTIVE") or agent["mode"], "Cwd": agent.get("cwd", ""),
              "PendingPermissions": json.loads(os.environ.get("FAKE_PASEO_PENDING") or "[]")})
     if verb == "mode":
         modes = json.loads(os.environ.get("FAKE_PASEO_MODES") or "null") or DEFAULT_MODES
