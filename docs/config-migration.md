@@ -88,9 +88,10 @@ no alternate supposedly absent filename is probed or loaded. The pure loader's
 | `--dry-run` | Plan and verify the edit; do not replace the file. |
 
 Mechanics: flock on `<file>.lock`, read-modify-validate, temp file beside the real
-target, fsync, `os.replace`, mode preservation. A no-op (type-aware equality, so
-bool is never int) leaves mtime untouched. After the text edit, `tomllib` reparses
-and must equal the expected tree with exactly that scalar changed. Symlinks,
+target, fsync, `os.replace`, mode preservation. A no-op (type-aware equality: bool
+is never int, int is never float) leaves mtime untouched. After the text edit,
+`tomllib` reparses and must equal the expected tree with exactly that scalar changed.
+Symlinks,
 arrays, inline tables, multiline strings, `[[service]]` paths and other unsupported
 assignment forms are refused clearly. Unrelated complex TOML (including
 `[[service]]` arrays) is preserved byte-for-byte outside the value span.
