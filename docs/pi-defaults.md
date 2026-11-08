@@ -69,7 +69,8 @@ and existing gates. No judgment qualification is inferred for the two Pi rows.
 Go awaits account scoping. Grok subscription and Antigravity OAuth paths passed
 basic native tool checks on 2026-11-08; their continuation, quota and routing
 acceptance remain separate work ([service status](pi-services.md)). Neither is
-added to this automatic shortlist by those checks. OpenAI API and Anthropic API billing blocks remain separate from
+added to this automatic shortlist by those checks. OpenAI API and Anthropic API
+billing blocks remain separate from
 Codex and Claude subscriptions. SIPB is parked. Disabled/reserved pools and
 archived TUIs are never automatic fallbacks. Hermes's chain is unchanged.
 
@@ -116,6 +117,7 @@ Cursor Composer 2.5 across two requests, selected Z.ai Flash low at an explicit
 mechanical task with `--native-tools`, and retained that choice after reopening
 the persisted session. This validates the extension through Pi's public SDK;
 it does not claim the global default is installed or a Paseo resume is tested.
+
 D4. 2026-11-08 activation: the reference checkout was fast-forwarded to merged
 [PR 315](https://github.com/djbclark/djbclark-ade/pull/315), preserving its unrelated
 Graft edits byte-for-byte under the operator's explicit approval. The public

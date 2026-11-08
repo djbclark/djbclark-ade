@@ -103,7 +103,8 @@ under **Carried**, newest first, one line each; an item leaves when it ships (in
 36. **Pi-only third-party client** (operator, 2026-11-08): migration and archive-only history search shipped;
     omp/OpenCode/Crush are archived, never fallbacks. Dynamic defaults use explicit per-pool acceptance and
     task boundaries (`docs/pi-defaults.md`); normal startup and an unpinned live request passed after activation.
-    Grok subscription (Pi and vendor ACP) and Antigravity Pi passed basic tool checks (`docs/pi-services.md`).
+    Restored Grok subscription access (Pi and vendor ACP) and Antigravity Pi passed basic tool checks
+    (`docs/pi-services.md`); Grok uses the cancelled plan's remaining allowance and stays manual-only.
     These and other manual Pi paths still need continuation/quota/identity acceptance for automatic routing;
     Claude API credits remain billing-blocked, separate from the vendor subscription. Security implementation
     and SIPB reliability work are deferred; prior evidence remains in `docs/tui-security-and-pi-migration.md`.

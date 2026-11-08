@@ -25,9 +25,13 @@ Normal `cursor-agent` must be on PATH; no binary or version path is pinned.
 operations. Pi used `xai-oauth/grok-4.7-build-fast`; the official Grok Build ACP
 client used `grok-4.7-build-fast`. Pi's `pi-grok` OAuth extension explicitly
 uses Grok's subscription gateway, `cli-chat-proxy.grok.com`, rather than the
-xAI API-key endpoint. Grok Build is a retained vendor-plan client; its
-[official announcement](https://x.ai/news/grok-build-cli) documents subscription
-access and ACP support. The two clients consume the same subscription pool;
+xAI API-key endpoint. The operator restored Grok Build as a manual vendor-plan
+path on 2026-11-08 to use the remaining allowance of the cancelled SuperGrok
+subscription. Its [official announcement](https://x.ai/news/grok-build-cli)
+documents subscription access and ACP support. The `grok` entry remains in
+`never_route` ([routing policy](model-routing.md), B10); restoring access does
+not renew the cancelled plan or authorize automatic dispatch. The two clients
+consume the same subscription pool;
 they are not two allowances. An API key or separate API credits are a different
 pool. Successful requests do not measure the exact debit or qualify every model.
 
@@ -46,7 +50,12 @@ load before installation; the later tool checks establish runtime use separately
 2026-11-08: `pi-antigravity` was installed normally, Google OAuth completed, and
 `antigravity/gemini-3.8-flash` completed a bounded native Pi read/write task.
 The provider uses its own normal Google sign-in; this does not convert the
-Google subscription into Gemini API-key credits. The check does not establish
+Google subscription into Gemini API-key credits. Do not count the Pi client as
+a second Google AI Pro allowance. Treat its use as sharing subscription capacity
+with the native `antigravity-argon` gated frontier fallback until account and
+model-window quota mapping establish otherwise; manual Pi work can consume
+headroom needed by that fallback. The basic check did not verify separate
+Flash/Argon windows. The check does not establish
 continuation/resume reliability, comparative coding quality, every model's
 entitlement, or a measured subscription debit.
 
