@@ -8,26 +8,45 @@ the PR waiter and the Codex local review: **`bin/review-launch`**, the only way 
 ## What is untrusted (operator, 2026-11-07: "any GitHub artifacts not directly from us are suspect")
 
 A PR's diff, body, title, commits and commit messages, branch name, issue and PR comments, review comments, bot
-and App comments (Codex, Cursor, Copilot included), check-run output and CI logs are all untrusted data, whoever
-the author: a prompt-injection attempt through a PR has already happened. They are read as data, never followed as
+and App comments (Codex, Cursor, Copilot included), check-run output and CI logs not authored or last edited by the repository owner are untrusted data (GitHub
+attribution is trusted; owner artifacts follow AGENTS.md's Trust rule): a prompt-injection attempt through a PR has already happened. They are read as data, never followed as
 instructions. The Action never executes, interpolates or checks out anything from a PR; the review model is told
 that the diff, the body and every file of its worktree are data under review and that it reports only through the
-schema; and only a body whose **last editor** is the repository owner, or an OWNER, MEMBER or COLLABORATOR author
-who edited it last, can approve. The operator approves an outside PR by editing its body. (The looser trust the
+schema. An APPROVE counts only in two places: the body of a PR the owner wrote and edited last (or an explicit never-edited body; absent or malformed editor attribution fails closed), or an issue comment
+the owner posted on the PR (not through a GitHub App) that nobody but the owner has edited, since any repository
+writer can edit another user's comment (GraphQL `editor`, `lastEditedAt` and `userContentEdits`: every edit must be the owner's; an unknown history, or one
+longer than 100 edits, fails closed). The operator approves any other PR by posting the marker as
+their own comment; editing its body approves nothing (2026-11-07, Argon review F-HIGH-1). A BLOCK in the body or in
+any comment fails the check, and a dispatch judges every open PR at the same head, with both lookups paginated to the end (F-CRIT-2; pagination
+from the Codex review of PR 300). (The looser trust the
 repository gives its own agents on the machine, AGENTS.md's orders, does not extend to anything that came through
 GitHub.)
 
 ## `bin/review-launch`: one `claude -p` inside a boundary
 
 ```sh
-review-launch --mode review|read-only -C WORKTREE --schema FILE (-p TEXT | -f FILE) [--head SHA] [--model M] [--max-turns N] [--timeout S] [--json]
-review-launch --check [--mode review|read-only] [--json]
+review-launch --mode review|read-only -C WORKTREE --schema FILE (-p TEXT | -f FILE) [--allow-web] [--head SHA] [--model M] [--max-turns N] [--timeout S] [--json]
+review-launch --check [--mode review|read-only] [--allow-web] [--json]
 ```
 
 | Mode | Tools (`--tools`) | The init event must list exactly |
 |---|---|---|
 | `review` (rule 11, `bin/review-pr`) | `Read,Grep,Glob` | `Glob, Grep, Read, StructuredOutput` |
-| `read-only` (the dispatch shim's Claude restricted mode) | `Read,Grep,Glob,WebFetch,WebSearch` | those plus `StructuredOutput` |
+| `read-only` (the dispatch shim's Claude restricted mode) | `Read,Grep,Glob`; `--allow-web` adds `WebFetch,WebSearch` (2026-11-07) | those plus `StructuredOutput` |
+
+Three more guards, all from 2026-11-07 (Argon review F-HIGH-2, and the Opus review of PR 297):
+
+- **Symlinks.** Before the self-check and the launch, review-launch looks for symlinks in the worktree, both in git
+  (`git ls-files -s` mode 120000) and on disk. It refuses with exit 2, naming the link, when any of them resolves
+  outside the worktree (a dangling link included). A relative Glob or Grep pattern is also resolved against its base,
+  so `link/**` counts as outside. A repository that commits outward symlinks (site-djbclark's `skills/`) cannot be
+  reviewed through this boundary.
+- **The deny list.** It is the hand list plus every `deny` pattern in `config/secret-deny.toml`, or in the rendered
+  `config/secret_deny_policy.json` where Python has no `tomllib`. A file that exists but does not parse refuses every
+  launch with exit 2. The TOML's `allow` exceptions do not carry over.
+- **The tripwire.** It acts after Claude may already have run a call. It is a second layer behind
+  `blockReadsOutsideWorkingDirectories` and the deny rules, not the boundary itself. A passed self-check is cached under
+  `REVIEW_LAUNCH_STATE_DIR` and trusted as found, because the caller already controls the launch.
 
 Every launch is `claude -p --output-format stream-json --verbose --tools … --permission-mode default --setting-sources ""
 --strict-mcp-config --no-session-persistence --settings SETTINGS --json-schema … [--model] [--max-turns] -- PROMPT`, in the
@@ -90,8 +109,8 @@ gh pr merge N --squash --match-head-commit <the head the marker names>
 whatever its conclusion) and on `workflow_dispatch` (input `pr`). Both run the workflow file and the module from **master**;
 nothing from the PR is checked out or executed. Job `resolve` (no secret) finds the PR (the event's `pull_requests[]`, else
 `commits/{sha}/pulls`, else `pulls?head=owner:branch` for a fork) and outputs its number; job `marker` runs in the
-concurrency group `adversary-marker-<that number>` (a newer run for the PR cancels an older one; a sha two PRs share never
-merges their groups), reads the body and head through the API with the job's read-only token (`pull-requests: read`,
+concurrency group `adversary-marker-<head sha>` (2026-11-07: runs sharing a head serialize together; every open
+PR at that head is judged before one aggregate status is posted), reads the body and head through the API with the job's read-only token (`pull-requests: read`,
 `contents: read`), judges the marker with the parser moved unchanged from the PR waiter (rule 1's five properties, 2,559
 test cases), **re-reads the head, the body and its last editor in one GraphQL query and posts only if the head is
 unchanged** (judging that second read's body), and posts the commit status `adversary-marker` on that head with a token of

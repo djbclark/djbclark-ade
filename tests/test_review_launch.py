@@ -7,6 +7,8 @@ at the timeout. The live self-check against a real Claude is an operator step (d
 """
 from __future__ import annotations
 
+import importlib.machinery
+import importlib.util
 import json
 import os
 import shutil
@@ -102,8 +104,8 @@ class World:
     def checks(self) -> list[dict]:
         return [c for c in self.calls() if c["check"]]
 
-    def passed_check(self, mode: str = "review") -> None:
-        r = self.run("--check", "--mode", mode)
+    def passed_check(self, mode: str = "review", *extra: str) -> None:
+        r = self.run("--check", "--mode", mode, *extra)
         assert r.returncode == 0, r.stdout + r.stderr
 
 
@@ -114,6 +116,24 @@ def world(tmp_path: Path) -> World:
 
 def argv_val(argv: list[str], flag: str) -> str:
     return argv[argv.index(flag) + 1]
+
+
+def load_launcher(path: Path = LAUNCH):
+    """bin/review-launch as a module (it has no .py suffix)."""
+    loader = importlib.machinery.SourceFileLoader(f"review_launch_{abs(hash(str(path)))}", str(path))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+def secret_deny_toml() -> dict:
+    tomllib = pytest.importorskip("tomllib")
+    return tomllib.loads((ROOT / "config" / "secret-deny.toml").read_text())
+
+
+def claude_form(p: str) -> str:
+    return "/" + p if p.startswith("/") else ("**/" + p if "/" not in p else p)
 
 
 # ---- the launch: argv, settings, environment --------------------------------------------------------------
@@ -136,9 +156,28 @@ def test_the_launch_passes_exactly_the_boundary_flags_and_the_prompt_after_a_dou
     assert os.path.realpath(call["cwd"]) == os.path.realpath(world.wt)
 
 
-def test_read_only_mode_adds_the_two_web_tools_and_nothing_else(world):
+def test_read_only_mode_has_no_web_tool_by_default(world):
+    # 2026-11-07: WebFetch/WebSearch are an exfiltration channel when the input is untrusted.
     assert world.launch(mode="read-only").returncode == 0
+    assert argv_val(world.launches()[0]["argv"], "--tools") == "Read,Grep,Glob"
+
+
+def test_allow_web_adds_the_two_web_tools_in_read_only_mode_and_nothing_else(world):
+    r = world.launch("--allow-web", "--json", mode="read-only")
+    assert r.returncode == 0, r.stderr
     assert argv_val(world.launches()[0]["argv"], "--tools") == "Read,Grep,Glob,WebFetch,WebSearch"
+    rec = json.loads(r.stdout)
+    assert rec["mode"] == "read-only" and rec["allow_web"] is True
+    assert rec["init"]["tools"] == ["Glob", "Grep", "Read", "StructuredOutput", "WebFetch", "WebSearch"]
+
+
+@pytest.mark.parametrize("args", [["--mode", "review"], []])
+def test_allow_web_outside_read_only_mode_is_refused(world, args):
+    r = world.run(*args, "-C", str(world.wt), "--schema", str(world.schema), "-p", "x", "--allow-web")
+    assert r.returncode == 2 and "--allow-web" in r.stderr
+    r = world.run("--check", *args, "--allow-web")
+    assert r.returncode == 2 and "--allow-web" in r.stderr
+    assert world.calls() == []
 
 
 def test_the_settings_block_reads_outside_disable_hooks_and_bypass_and_deny_the_secret_paths(world):
@@ -151,6 +190,9 @@ def test_the_settings_block_reads_outside_disable_hooks_and_bypass_and_deny_the_
                  "~/.config/sudo-secretspec/**"):
         assert f"Read({path})" in p["deny"], path
     assert not any("local/state" in d for d in p["deny"]), "review-pr's worktrees live under ~/.local/state"
+    for pat in secret_deny_toml()["deny"]:      # config/secret-deny.toml is the repo's one list (2026-11-07)
+        assert f"Read({claude_form(pat)})" in p["deny"], pat
+    assert len(p["deny"]) == len(set(p["deny"]))
 
 
 def test_the_environment_has_no_token_secret_password_or_gh_variable_but_keeps_home_and_path(world):
@@ -194,11 +236,35 @@ def test_json_prints_one_run_record_with_the_init_facts(world):
 
 @pytest.mark.parametrize("flag", [["--dangerously-skip-permissions"], ["--permission-mode", "bypassPermissions"],
                                   ["--permission-mode=bypassPermissions"], ["--add-dir", "/"], ["--settings", "{}"],
-                                  ["--mcp-config", "x.json"], ["--tools", "Bash"], ["--allowedTools", "Bash"]])
+                                  ["--mcp-config", "x.json"], ["--tools", "Bash"], ["--allowedTools", "Bash"],
+                                  ["--json", "--settings", "{}"], ["--unknown", "--add-dir", "/"]])
 def test_a_bypass_or_widening_flag_is_refused_and_claude_never_runs(world, flag):
     r = world.launch(*flag)
     assert r.returncode == 2 and "refused" in r.stderr
     assert world.calls() == []
+
+
+@pytest.mark.parametrize("prompt", ["--settings {} is what this PR changes; review it",
+                                    "--add-dir=/ is the flag under review here",
+                                    "--dangerously-skip-permissions appears in the diff"])
+def test_a_prompt_that_starts_with_a_bypass_flag_name_is_a_value_not_a_flag(world, prompt):
+    # 2026-11-07: the scan read every argv token, so a prompt (the value after -p) starting with `--settings` was refused.
+    r = world.launch(prompt=prompt)
+    assert r.returncode == 0, r.stderr
+    assert world.launches()[0]["argv"][-2:] == ["--", prompt]
+
+
+def test_the_bypass_scan_skips_values_by_option_name_and_abbreviation_only():
+    rl = load_launcher()
+    p = rl.parser()
+    assert rl.bypass_flag(["-p", "--settings x"], p) is None
+    assert rl.bypass_flag(["-p=--settings"], p) is None
+    assert rl.bypass_flag(["--schema", "--add-dir", "-C", "--tools"], p) is None
+    assert rl.bypass_flag(["--sch", "--add-dir"], p) is None             # argparse's unique abbreviation of --schema
+    assert rl.bypass_flag(["--json", "--add-dir", "/"], p) == "--add-dir"  # --json takes no value
+    assert rl.bypass_flag(["-pX", "--settings", "{}"], p) == "--settings"  # -pX carried its value
+    assert rl.bypass_flag(["--mo", "--settings"], p) == "--settings"       # ambiguous (--mode/--model): fail closed
+    assert rl.bypass_flag(["-p", "x", "--settings=y"], p) == "--settings"
 
 
 @pytest.mark.parametrize("var", ["CLAUDE_PERMISSION_MODE", "CLAUDE_CODE_PERMISSION_MODE", "BYPASS_PERMISSIONS",
@@ -303,11 +369,15 @@ def test_a_hook_event_trips(world):
 
 @pytest.mark.parametrize("mode,tool,ok", [("review", "Bash", False), ("review", "WebFetch", False), ("review", "WebSearch", False),
                                           ("review", "Write", False), ("review", "mcp__hermes__send", False), ("review", "Task", False),
-                                          ("read-only", "WebFetch", True), ("read-only", "Bash", False), ("review", "Grep", True)])
+                                          ("read-only", "WebFetch", False), ("read-only", "WebSearch", False),
+                                          ("read-only+web", "WebFetch", True), ("read-only+web", "WebSearch", True),
+                                          ("read-only+web", "Bash", False), ("read-only", "Bash", False), ("review", "Grep", True)])
 def test_a_tool_call_outside_the_allowlist_trips(world, mode, tool, ok):
-    world.passed_check(mode)
+    extra = ("--allow-web",) if mode == "read-only+web" else ()
+    mode = "read-only" if extra else mode
+    world.passed_check(mode, *extra)
     world.scenario(tool_uses=[{"name": tool, "input": {"pattern": "x"} if tool == "Grep" else {"url": "https://x"}}])
-    r = world.launch(mode=mode)
+    r = world.launch(*extra, mode=mode)
     assert r.returncode == (0 if ok else 77), r.stderr
 
 
@@ -317,7 +387,6 @@ def test_a_tool_call_outside_the_allowlist_trips(world, mode, tool, ok):
     ("Read", {"file_path": "/etc/hostname"}, False),
     ("Read", {"file_path": "../outside.txt"}, False),
     ("Read", {"file_path": "~/.ssh/id_rsa"}, False),
-    ("Read", {"file_path": "link/secret"}, False),          # a symlink inside the worktree that points outside
     ("Read", {"file_path": 7}, False),
     ("Grep", {"pattern": "x", "path": "/etc"}, False),
     ("Grep", {"pattern": "x", "glob": "../../*"}, False),
@@ -333,13 +402,146 @@ def test_a_tool_call_outside_the_allowlist_trips(world, mode, tool, ok):
     ("Glob", {"pattern": "..foo/*.txt"}, True),               # a name that merely starts with dots is not `..`
 ])
 def test_a_read_outside_the_worktree_trips_even_though_the_key_refuses_it(world, tool, inp, ok):
+    # A symlink that leaves the worktree now refuses the launch before it (the tests below); the tripwire's own
+    # symlink handling is unit-tested on path_outside/glob_outside.
     world.passed_check()
-    (world.tmp / "outside").mkdir()
-    (world.wt / "link").symlink_to(world.tmp / "outside")
     inp = {k: (v.replace("{wt}", str(world.wt)) if isinstance(v, str) else v) for k, v in inp.items()}
     world.scenario(tool_uses=[{"name": tool, "input": inp}])
     r = world.launch()
     assert r.returncode == (0 if ok else 77), r.stderr
+
+
+# ---- a symlink that leaves the worktree (refused before the launch, exit 2) ----------------------------------
+
+def commit_link(world, name: str, target: Path | str) -> None:
+    (world.wt / name).symlink_to(target)
+    git("add", name, cwd=world.wt)
+    git("commit", "-q", "-m", f"link {name}", cwd=world.wt)
+    world.head = git("rev-parse", "HEAD", cwd=world.wt)
+
+
+def test_a_committed_symlink_to_a_directory_outside_is_refused_before_the_launch(world):
+    (world.tmp / "outside").mkdir()
+    commit_link(world, "evil", world.tmp / "outside")
+    r = world.launch("--head", world.head)
+    assert r.returncode == 2 and "symlink" in r.stderr and "evil ->" in r.stderr, r.stderr
+    assert world.calls() == [], "neither the self-check nor the launch ran"
+
+
+@pytest.mark.parametrize("shape", ["untracked-dir", "nested-file", "dangling", "home"])
+def test_any_symlink_whose_target_leaves_the_worktree_is_refused(world, shape):
+    (world.tmp / "outside").mkdir()
+    (world.tmp / "outside" / "f").write_text("x\n")
+    if shape == "untracked-dir":
+        (world.wt / "link").symlink_to(world.tmp / "outside")
+    elif shape == "nested-file":
+        (world.wt / "sub" / "deeper").mkdir(parents=True)
+        (world.wt / "sub" / "deeper" / "f").symlink_to("../../../outside/f")
+    elif shape == "dangling":
+        (world.wt / "gone").symlink_to(world.tmp / "nothing-here")
+    else:
+        (world.wt / "dotssh").symlink_to(world.home / ".ssh")
+    r = world.launch()
+    assert r.returncode == 2 and "symlink" in r.stderr, r.stderr
+    assert world.calls() == []
+
+
+def test_a_symlink_that_stays_inside_the_worktree_is_allowed(world):
+    (world.wt / "sub").mkdir()
+    (world.wt / "sub" / "b.txt").write_text("b\n")
+    git("add", "sub/b.txt", cwd=world.wt)
+    commit_link(world, "alias", "a.txt")
+    commit_link(world, "subdir", "sub")
+    assert world.launch("--head", world.head).returncode == 0
+
+
+def test_escaping_links_reads_both_git_and_the_disk(tmp_path):
+    rl = load_launcher()
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    git("init", "-q", "-b", "main", cwd=wt)
+    (tmp_path / "out").mkdir()
+    (wt / "tracked").symlink_to(tmp_path / "out")
+    git("add", "tracked", cwd=wt)
+    git("commit", "-q", "-m", "t", cwd=wt)
+    (wt / "untracked").symlink_to("/")
+    (wt / "fine").symlink_to("tracked/../untracked")       # resolves through `tracked` to outside too
+    found = dict(rl.escaping_links(os.path.realpath(wt)))
+    assert set(found) == {"tracked", "untracked", "fine"}
+    assert found["untracked"] == "/"
+
+
+def test_glob_outside_resolves_a_relative_patterns_prefix_through_symlinks(tmp_path):
+    rl = load_launcher()
+    wt = tmp_path / "wt"
+    (wt / "real").mkdir(parents=True)
+    (tmp_path / "outside").mkdir()
+    (wt / "link").symlink_to(tmp_path / "outside")
+    (wt / "inlink").symlink_to(wt / "real")
+    w = os.path.realpath(wt)
+    for pat, out in [("link/**", True), ("link/*.txt", True), ("link/sub/**/x", True), ("link", False),
+                     ("inlink/**", False), ("real/**", False), ("**/*.py", False), ("*.py", False),
+                     ("..foo/*", False), ("/etc/*", True), ("sub/../*", True)]:
+        assert rl.glob_outside(pat, w, w) is out, pat
+    # a Grep glob is matched under its path: judged against that base
+    assert rl.glob_outside("*.txt", os.path.join(w, "link"), w) is True
+    assert rl.path_outside("link/secret", w) is True
+
+
+# ---- the secret-deny policy (config/secret-deny.toml) -------------------------------------------------------
+
+def test_the_deny_rules_carry_every_secret_deny_toml_pattern_plus_the_own_list():
+    rl = load_launcher()
+    assert rl.POLICY_ERROR is None
+    deny = rl.SETTINGS["permissions"]["deny"]
+    for pat in secret_deny_toml()["deny"]:
+        assert f"Read({claude_form(pat)})" in deny, pat
+    for pat in rl.DENY_PATHS:
+        assert f"Read({pat})" in deny, pat
+
+
+def test_without_tomllib_the_rendered_policy_json_is_read(tmp_path, monkeypatch):
+    rl = load_launcher()
+    monkeypatch.setattr(rl, "tomllib", None)
+    toml = tmp_path / "secret-deny.toml"
+    toml.write_text("not toml at all [[[")
+    js = tmp_path / "policy.json"
+    js.write_text(json.dumps({"version": 1, "deny": ["~/.x/**", "*.key"]}))
+    assert rl.policy_deny(toml, js) == ["~/.x/**", "*.key"]
+    js.write_text("{broken")
+    with pytest.raises(rl.PolicyError):
+        rl.policy_deny(toml, js)
+    js.unlink()
+    with pytest.raises(rl.PolicyError):
+        rl.policy_deny(toml, js)
+    toml.unlink()
+    assert rl.policy_deny(toml, js) == []
+
+
+@pytest.mark.parametrize("body", ["deny = [", "version = 2\ndeny = ['x']", "version = 1\ndeny = []",
+                                  "version = 1\ndeny = [3]", "version = 1"])
+def test_a_secret_deny_toml_that_does_not_parse_refuses_every_launch_and_check(world, body):
+    pytest.importorskip("tomllib")
+    repo = world.tmp / "repo"
+    (repo / "bin").mkdir(parents=True)
+    (repo / "config").mkdir()
+    shutil.copy2(LAUNCH, repo / "bin" / "review-launch")
+    (repo / "config" / "secret-deny.toml").write_text(body + "\n")
+    launcher = repo / "bin" / "review-launch"
+    for args in (["--check"], ["--mode", "review", "-C", str(world.wt), "--schema", str(world.schema), "-p", "x"]):
+        r = subprocess.run([sys.executable, "-I", str(launcher), *args], capture_output=True, text=True,
+                           env=world.env(), timeout=120)
+        assert r.returncode == 2 and "secret-deny" in r.stderr, r.stderr
+    assert world.calls() == []
+
+
+def test_a_missing_secret_deny_toml_leaves_the_own_list(world):
+    repo = world.tmp / "repo"
+    (repo / "bin").mkdir(parents=True)
+    shutil.copy2(LAUNCH, repo / "bin" / "review-launch")
+    rl = load_launcher(repo / "bin" / "review-launch")
+    assert rl.POLICY_ERROR is None
+    assert rl.SETTINGS["permissions"]["deny"] == [f"Read({p})" for p in rl.DENY_PATHS]
 
 
 def test_claudes_own_refusals_are_logged(world):
@@ -469,10 +671,15 @@ def test_a_new_claude_version_reruns_the_check(world):
     assert len(world.checks()) == 2 and len(list(world.state.glob("check-*.json"))) == 2
 
 
-def test_the_two_modes_have_separate_checks(world):
+def test_the_web_tool_set_has_its_own_check(world):
+    # review and read-only launch with the same fixed flags (2026-11-07), so one check proves both; --allow-web's
+    # tool set is a different launch and has its own.
     world.passed_check("review")
     assert world.launch(mode="read-only").returncode == 0
+    assert len(world.checks()) == 1
+    assert world.launch("--allow-web", mode="read-only").returncode == 0
     assert len(world.checks()) == 2
+    assert argv_val(world.checks()[1]["argv"], "--tools") == "Read,Grep,Glob,WebFetch,WebSearch"
 
 
 def test_the_check_runs_on_the_launchs_model_and_each_model_has_its_own_check(world):
@@ -648,6 +855,22 @@ def test_review_pr_refuses_another_repository_and_a_missing_pr(prw):
 def test_review_pr_refuses_a_pr_whose_base_or_head_is_not_a_sha(prw):
     prw.gh(view={"headRefOid": "main", "baseRefOid": prw.base, "baseRefName": "master", "author": {"login": "djbclark"}})
     assert prw.review().returncode == 2 and prw.calls() == []
+
+
+def test_review_pr_of_a_pr_that_commits_a_symlink_outside_is_refused_and_the_worktree_removed(prw):
+    seed = prw.tmp / "seed"
+    (seed / "evil").symlink_to(prw.home / ".ssh")
+    git("add", "evil", cwd=seed)
+    git("commit", "-q", "-m", "evil", cwd=seed)
+    head = git("rev-parse", "HEAD", cwd=seed)
+    git("push", "-q", "-f", "origin", "HEAD:refs/pull/7/head", cwd=seed)
+    prw.pr_head = head
+    prw.gh(view={"headRefOid": head, "baseRefOid": prw.base, "baseRefName": "master",
+                 "author": {"login": "djbclark"}, "state": "OPEN"})
+    r = prw.review()
+    assert r.returncode == 2 and "symlink" in r.stderr and "evil" in r.stderr, r.stderr
+    assert prw.calls() == [] and prw.filed()["result"] == "failed"
+    assert len(git("worktree", "list", cwd=prw.clone).splitlines()) == 1, "the review worktree is removed"
 
 
 def test_review_pr_never_calls_gh_to_post(prw):

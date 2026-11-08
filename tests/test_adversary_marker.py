@@ -1110,18 +1110,98 @@ def gql_doc(head: str = H1, body: str = "", state: str = "OPEN", author: str = "
     """The GraphQL second read (`_pr_state_trusted`): state, head, body, author, last editor, author association."""
     return {"json": {"repository": {"pullRequest": {
         "state": state, "headRefOid": head, "body": body, "authorAssociation": assoc, "author": {"login": author},
-        "userContentEdits": {"nodes": [{"editor": {"login": editor}}] if editor else []}}}}}
+        "editor": {"login": editor} if editor else None, "lastEditedAt": EDITED_AT if editor else None}}}}
 
 
-def serve(n: int, body: str, head: str = H1, state: str = "open", second: dict | None = None, **trust) -> dict:
-    """Canned answers for PR N: the REST first read and the GraphQL second read (the same PR unless `second`)."""
+EDITED_AT = "2026-11-07T12:00:00Z"
+
+
+def actor(login: str | None) -> dict | None:
+    """A GraphQL Actor: a `Bot` for an `[bot]` login, a `User` otherwise, None for a ghost."""
+    if not login:
+        return None
+    return {"__typename": "Bot" if login.endswith("[bot]") else "User", "login": login}
+
+
+def comment(body: str, login: str = "djbclark", app: object = None, cid: int = 1, editor: str | None = None,
+            edits: list | None = None, gql: dict | None = None) -> dict:
+    """One comment, as the REST API returns it (`performed_via_github_app` is always present), plus under `_gql` how
+    the GraphQL read sees it: never edited unless `editor` (the last editor) or `edits` (the `userContentEdits`
+    editors, the creation edit included; the last editor's edit is added when `edits` is not given); `gql` overrides
+    or, with a None value, removes node fields."""
+    node = {"fullDatabaseId": str(cid), "body": body, "author": actor(login), "editor": None, "lastEditedAt": None,
+            "includesCreatedEdit": False, "userContentEdits": {"totalCount": 0, "nodes": []}}
+    if editor or edits:
+        hist = edits if edits is not None else [login, editor]
+        node.update(editor=actor(editor), lastEditedAt=EDITED_AT, includesCreatedEdit=True,
+                    userContentEdits={"totalCount": len(hist), "nodes": [{"editor": actor(e)} for e in hist]})
+    for k, v in (gql or {}).items():
+        if v is None:
+            node.pop(k, None)
+        else:
+            node[k] = v
+    return {"id": cid, "user": {"login": login}, "performed_via_github_app": app, "body": body, "_gql": node}
+
+
+def rest(c: dict) -> dict:
+    return {k: v for k, v in c.items() if k != "_gql"}
+
+
+def comments_key(n: int, page: int = 1) -> str:
+    return f"GET repos/{REPO_A}/issues/{n}/comments?per_page=100&page={page}"
+
+
+def gql_comments_key(n: int, page: int = 1) -> str:
+    return f"GRAPHQL {n} comments" + ("" if page == 1 else f" after c{page - 1}")
+
+
+def gql_comment_pages(n: int, comments: list, per_page: int = 100, total: int | None = None) -> dict:
+    """The GraphQL comments read of PR N in pages of PER_PAGE (cursor `c<page>`), from `comment()` entries."""
+    nodes = [c["_gql"] for c in comments]
+    chunks = [nodes[i:i + per_page] for i in range(0, len(nodes), per_page)] or [[]]
+    out = {}
+    for i, chunk in enumerate(chunks, 1):
+        more = i < len(chunks)
+        out[gql_comments_key(n, i)] = [{"json": {"repository": {"pullRequest": {"comments": {
+            "totalCount": len(nodes) if total is None else total, "nodes": chunk,
+            "pageInfo": {"hasNextPage": more, "endCursor": f"c{i}" if more else None}}}}}}]
+    return out
+
+
+def serve(n: int, body: str, head: str = H1, state: str = "open", second: dict | None = None,
+          comments: list | None = None, **trust) -> dict:
+    """Canned answers for PR N: the REST first read, the GraphQL second read (the same PR unless `second`) and its
+    issue comments (none unless `comments`), through GraphQL and REST alike."""
     return {f"GET repos/{REPO_A}/pulls/{n}": [pr_doc(head, body, state)],
-            f"GRAPHQL {n}": [second or gql_doc(head, body, state.upper(), **trust)]}
+            f"GRAPHQL {n}": [second or gql_doc(head, body, state.upper(), **trust)],
+            **rest_comment_pages(n, comments or []), **gql_comment_pages(n, comments or [])}
 
 
-def run_ev(event: dict, answers: dict, name: str = "workflow_run"):
+def rest_comment_pages(n: int, comments: list) -> dict:
+    """The REST comments read of PR N in pages of 100 (a full last page is followed by an empty one)."""
+    entries = [rest(c) for c in comments]
+    return {comments_key(n, i // 100 + 1): [{"json": entries[i:i + 100]}] for i in range(0, len(entries) + 1, 100)}
+
+
+def commits_key(head: str, page: int = 1) -> str:
+    return f"GET repos/{REPO_A}/commits/{head}/pulls?per_page=100&page={page}"
+
+
+def pull_entry(n: int, head: str, state: str = "open", repo: str = REPO_A) -> dict:
+    return {"number": n, "state": state, "head": {"sha": head}, "base": {"repo": {"full_name": repo}}}
+
+
+def at_head(head: str, *nums: int) -> dict:
+    """The `GET commits/{head}/pulls` answer listing open same-repo PRs NUMS at HEAD."""
+    return {commits_key(head): [{"json": [pull_entry(n, head) for n in nums]}]}
+
+
+def run_ev(event: dict, answers: dict, name: str = "workflow_run", **kw):
+    # Every lookup also asks `commits/{head}/pulls` for the other open PRs at the head; unless a test says otherwise
+    # there are none.
+    answers = {**at_head(H1), **at_head(H2), **answers}
     api = adversary_marker.CannedApi(answers)
-    rc, report = adversary_marker.run_event(name, event, REPO_A, api, "https://x/run/1")
+    rc, report = adversary_marker.run_event(name, event, REPO_A, api, "https://x/run/1", **kw)
     return rc, report, api
 
 
@@ -1162,14 +1242,15 @@ def test_a_failed_tests_run_still_gets_its_marker_checked():
 def test_the_pr_comes_from_the_event_when_it_names_one():
     rc, report, api = run_ev(wr_event(prs=(7,)), serve(7, marker("APPROVE", H1)))
     assert report["found_by"] == "workflow_run.pull_requests"
-    assert f"GET repos/{REPO_A}/commits/{H1}/pulls" not in api.calls
+    # The commit lookup still runs once: other open PRs at this head share its status (2026-11-07).
+    assert api.calls[commits_key(H1)] == 1
 
 
 def test_an_event_entry_for_another_repository_is_ignored_and_the_head_is_looked_up():
     ev = wr_event(prs=())
     ev["workflow_run"]["pull_requests"] = [{"number": 3, "head": {"sha": H1},
                                             "base": {"repo": {"url": "https://api.github.com/repos/someone/fork"}}}]
-    answers = {f"GET repos/{REPO_A}/commits/{H1}/pulls": [{"json": []}]}
+    answers = {commits_key(H1): [{"json": []}]}
     rc, report, api = run_ev(ev, answers)
     assert rc == 0 and report["prs"] == [] and api.posted == []
 
@@ -1179,7 +1260,7 @@ def test_with_no_pr_in_the_event_the_pr_is_found_by_head_sha():
              {"number": 8, "state": "closed", "head": {"sha": H1}, "base": {"repo": {"full_name": REPO_A}}},
              {"number": 6, "state": "open", "head": {"sha": H2}, "base": {"repo": {"full_name": REPO_A}}},
              {"number": 5, "state": "open", "head": {"sha": H1}, "base": {"repo": {"full_name": "other/repo"}}}]
-    answers = {f"GET repos/{REPO_A}/commits/{H1}/pulls": [{"json": pulls}],
+    answers = {commits_key(H1): [{"json": pulls}],
                **serve(9, marker("APPROVE", H1))}
     rc, report, api = run_ev(wr_event(prs=()), answers)
     assert rc == 0 and report["found_by"] == "commits/{sha}/pulls"
@@ -1188,15 +1269,15 @@ def test_with_no_pr_in_the_event_the_pr_is_found_by_head_sha():
 
 def test_a_fork_pr_is_found_by_its_head_branch_when_the_commit_lookup_is_empty():
     ev = wr_event(prs=(), head_branch="feature/x", head_repository={"owner": {"login": "contrib"}})
-    answers = {f"GET repos/{REPO_A}/commits/{H1}/pulls": [{"json": []}],
-               f"GET repos/{REPO_A}/pulls?state=open&head=contrib:feature/x": [{"json": [{"number": 11, "head": {"sha": H1}}]}],
+    answers = {commits_key(H1): [{"json": []}],
+               f"GET repos/{REPO_A}/pulls?state=open&head=contrib:feature/x&per_page=100&page=1": [{"json": [{"number": 11, "head": {"sha": H1}}]}],
                **serve(11, marker("BLOCK", H1))}
     rc, report, api = run_ev(ev, answers)
     assert rc == 0 and report["found_by"] == "pulls?head=" and api.posted[0]["state"] == "failure"
 
 
 def test_an_unknown_pr_posts_nothing_and_exits_0():
-    answers = {f"GET repos/{REPO_A}/commits/{H1}/pulls": [{"json": []}]}
+    answers = {commits_key(H1): [{"json": []}]}
     rc, report, api = run_ev(wr_event(prs=()), answers)
     assert rc == 0 and api.posted == [] and report["found_by"] == "no open PR has this head"
 
@@ -1234,7 +1315,7 @@ def test_an_api_failure_fails_the_job_and_posts_no_success(answers):
 
 
 def test_a_failed_commit_lookup_fails_the_job():
-    rc, report, api = run_ev(wr_event(prs=()), {f"GET repos/{REPO_A}/commits/{H1}/pulls": [{"error": "HTTP 500"}]})
+    rc, report, api = run_ev(wr_event(prs=()), {commits_key(H1): [{"error": "HTTP 500"}]})
     assert rc == 2 and api.posted == [] and "HTTP 500" in report["error"]
 
 
@@ -1271,7 +1352,7 @@ def cli(*args: str) -> subprocess.CompletedProcess:
 
 def test_the_cli_event_entry_serves_canned_answers_and_prints_the_status(tmp_path):
     (tmp_path / "ev.json").write_text(json.dumps(wr_event()))
-    (tmp_path / "api.json").write_text(json.dumps(serve(7, marker("APPROVE", H1))))
+    (tmp_path / "api.json").write_text(json.dumps({**serve(7, marker("APPROVE", H1)), **at_head(H1)}))
     r = cli("--event", str(tmp_path / "ev.json"), "--event-name", "workflow_run", "--repo", REPO_A,
             "--api-answers", str(tmp_path / "api.json"))
     assert r.returncode == 0, r.stderr
@@ -1373,28 +1454,245 @@ def test_no_event_field_is_interpolated_into_a_shell_line():
             assert "${{" not in s.get("run", ""), s.get("run")
 
 
-# ---- who may approve (E8 review BLOCK, 2026-11-07): the body's last editor must be trusted --------------
+# ---- who may approve (E8 review BLOCK, 2026-11-07; tightened 2026-11-07 after the Argon and Opus reviews) ---------
+#
+# A body APPROVE counts only on an OWNER-AUTHORED PR whose body the owner edited last. Every other PR (an outside
+# author, and MEMBER or COLLABORATOR authors too: the operator's agents act under the owner's login) is approved only
+# by an issue comment the owner posted, not via a GitHub App. Before, the owner's last edit made any body trusted, so
+# ticking a task-list box on an outside PR turned the author's hidden APPROVE into a trusted one.
 
-@pytest.mark.parametrize("trust,ok", [
-    ({"author": "djbclark", "assoc": "OWNER"}, True),
-    ({"author": "alice", "assoc": "MEMBER"}, True),
-    ({"author": "bob", "assoc": "COLLABORATOR"}, True),
-    ({"author": "stranger", "assoc": "NONE"}, False),                        # an outside fork author's own APPROVE
-    ({"author": "stranger", "assoc": "CONTRIBUTOR"}, False),
-    ({"author": "stranger", "assoc": "FIRST_TIME_CONTRIBUTOR"}, False),
-    ({"author": "stranger", "assoc": "NONE", "editor": "djbclark"}, True),   # the owner approved it by editing the body
-    ({"author": "stranger", "assoc": "NONE", "editor": "DJBClark"}, True),   # logins are case-insensitive
-    ({"author": "alice", "assoc": "MEMBER", "editor": "stranger"}, False),   # a later edit by anyone else
-    ({"author": "stranger", "assoc": "NONE", "editor": "bob"}, False),       # an editor whose association we cannot read
-    ({"author": "", "assoc": "OWNER"}, False),                               # a deleted (ghost) author
+OUTSIDE = f"outside PR: APPROVE only counts in an owner comment at {H1[:12]}"
+UNTRUSTED = f"marker not written by a trusted user at {H1[:12]}"
+
+
+@pytest.mark.parametrize("trust,word", [
+    ({"author": "djbclark", "assoc": "OWNER"}, "approve"),
+    ({"author": "DJBClark", "assoc": "OWNER"}, "approve"),                      # logins are case-insensitive
+    ({"author": "djbclark", "assoc": "OWNER", "editor": "DJBCLARK"}, "approve"),
+    ({"author": "djbclark", "assoc": "OWNER", "editor": "stranger"}, "untrusted"),   # a later edit by anyone else
+    ({"author": "alice", "assoc": "MEMBER"}, "outside"),
+    ({"author": "bob", "assoc": "COLLABORATOR"}, "outside"),
+    ({"author": "stranger", "assoc": "NONE"}, "outside"),                       # an outside fork author's own APPROVE
+    ({"author": "stranger", "assoc": "CONTRIBUTOR"}, "outside"),
+    ({"author": "stranger", "assoc": "FIRST_TIME_CONTRIBUTOR"}, "outside"),
+    ({"author": "stranger", "assoc": "NONE", "editor": "djbclark"}, "outside"),  # hole 2: the owner's edit is no approval
+    ({"author": "stranger", "assoc": "NONE", "editor": "DJBClark"}, "outside"),
+    ({"author": "alice", "assoc": "MEMBER", "editor": "stranger"}, "outside"),
+    ({"author": "stranger", "assoc": "NONE", "editor": "bob"}, "outside"),
+    ({"author": "", "assoc": "OWNER"}, "outside"),                              # a deleted (ghost) author
 ])
-def test_an_approve_counts_only_when_the_bodys_last_editor_is_trusted(trust, ok):
+def test_a_body_approve_counts_only_on_an_owner_pr_the_owner_edited_last(trust, word):
     rc, report, api = run_ev(wr_event(), serve(7, marker("APPROVE", H1), **trust))
     assert rc == 0 and len(api.posted) == 1, report
-    assert api.posted[0]["state"] == ("success" if ok else "failure")
-    if not ok:
-        assert report["prs"][0]["outcome"] == "untrusted"
-        assert api.posted[0]["description"] == f"marker not written by a trusted user at {H1[:12]}"
+    assert report["prs"][0]["outcome"] == word
+    assert api.posted[0]["state"] == ("success" if word == "approve" else "failure")
+    assert api.posted[0]["description"] == {"approve": f"APPROVE at {H1[:12]}", "untrusted": UNTRUSTED,
+                                            "outside": OUTSIDE}[word]
+
+
+OUTSIDE_PR = {"author": "stranger", "assoc": "NONE"}
+GHAPP = {"id": 1, "slug": "some-app", "owner": {"login": "djbclark"}}
+
+
+def test_hole2_an_owner_edit_of_an_outside_body_never_approves_its_hidden_marker():
+    # The author hid the APPROVE in an HTML comment (invisible when rendered); the owner then ticked a task-list box,
+    # which made the owner the body's last editor.
+    body = "- [x] docs updated\n\n" + marker("APPROVE", H1)
+    rc, report, api = run_ev(wr_event(), serve(7, body, author="stranger", assoc="NONE", editor="djbclark"))
+    assert rc == 0 and [p["state"] for p in api.posted] == ["failure"], report
+    assert report["prs"][0]["outcome"] == "outside" and api.posted[0]["description"] == OUTSIDE
+
+
+@pytest.mark.parametrize("trust", [OUTSIDE_PR, {"author": "alice", "assoc": "MEMBER"},
+                                   {"author": "bob", "assoc": "COLLABORATOR"}])
+@pytest.mark.parametrize("login", ["djbclark", "DJBClark"])
+def test_an_owner_comment_with_a_live_approve_for_this_head_approves_a_non_owner_pr(trust, login):
+    rc, report, api = run_ev(wr_event(), serve(7, "", comments=[comment(marker("APPROVE", H1), login=login)], **trust))
+    assert rc == 0 and len(api.posted) == 1, report
+    assert api.posted[0]["state"] == "success" and report["prs"][0]["outcome"] == "approve"
+    assert api.posted[0]["description"] == f"APPROVE in an owner comment at {H1[:12]}"
+
+
+@pytest.mark.parametrize("c", [
+    comment(marker("APPROVE", H1), app=GHAPP),                                       # the owner's login, via an App
+    {k: v for k, v in comment(marker("APPROVE", H1)).items() if k != "performed_via_github_app"},  # field missing
+    comment(marker("APPROVE", H1), login="stranger"),                                # another author
+    comment(marker("APPROVE", H1), login="chatgpt-codex-connector[bot]"),
+    comment(marker("APPROVE", H1), login=""),                                        # a ghost
+], ids=["via-app", "app-field-missing", "stranger", "bot", "ghost"])
+def test_an_approve_comment_not_posted_by_the_owner_himself_does_not_approve(c):
+    rc, report, api = run_ev(wr_event(), serve(7, marker("APPROVE", H1), comments=[c], **OUTSIDE_PR))
+    assert rc == 0 and [p["state"] for p in api.posted] == ["failure"], report
+    assert report["prs"][0]["outcome"] == "untrusted"
+    assert api.posted[0]["description"] == f"marker not written by a trusted user in a comment at {H1[:12]}"
+
+
+@pytest.mark.parametrize("text,word", [
+    ("```\n" + marker("APPROVE", H1) + "\n```", "outside"),           # fenced: documentation
+    ("the format is `" + marker("APPROVE", H1) + "`", "outside"),     # inline span: documentation
+    (marker("APPROVE", H2), "outside"),                               # another head: an earlier push's approval
+    ("APPROVE " + H1, "outside"),                                     # prose is never a verdict
+    (marker("APPROVE", H1[:12]), "malformed"),                        # an APPROVE needs the full sha
+    ('<!-- adversary-verdict:v1 {"verdict":"approve","head":"' + H1 + '"} -->', "malformed"),
+    (marker("APPROVE", H1) + "\n" + marker("BLOCK", H1), "block"),    # both: the BLOCK wins
+])
+def test_owner_comment_markers_follow_the_body_rules(text, word):
+    rc, report, api = run_ev(wr_event(), serve(7, "", comments=[comment(text)], **OUTSIDE_PR))
+    assert rc == 0 and [p["state"] for p in api.posted] == ["failure"], report
+    assert report["prs"][0]["outcome"] == word
+
+
+def test_an_old_owner_approval_for_another_head_does_not_fail_the_new_one():
+    cs = [comment(marker("APPROVE", H2), cid=1), comment(marker("APPROVE", H1), cid=2)]
+    rc, report, api = run_ev(wr_event(), serve(7, "", comments=cs, **OUTSIDE_PR))
+    assert api.posted[0]["state"] == "success", report
+
+
+@pytest.mark.parametrize("trust,body,owner_ok", [
+    ({}, marker("APPROVE", H1), True),                                # an owner PR whose body approves
+    (OUTSIDE_PR, "", False),                                          # an outside PR
+])
+@pytest.mark.parametrize("block", [marker("BLOCK", H1), marker("BLOCK", H1[:9] + "…"), marker("BLOCK", H1[:7])])
+@pytest.mark.parametrize("login,app", [("stranger", None), ("djbclark", None), ("djbclark", GHAPP),
+                                       ("chatgpt-codex-connector[bot]", GHAPP)])
+def test_a_block_for_this_head_in_any_comment_fails_the_check(trust, body, owner_ok, block, login, app):
+    cs = [comment(marker("APPROVE", H1), cid=1), comment("looks wrong\n" + block, login=login, app=app, cid=2)]
+    rc, report, api = run_ev(wr_event(), serve(7, body, comments=cs, **trust))
+    assert rc == 0 and [p["state"] for p in api.posted] == ["failure"], report
+    assert report["prs"][0]["outcome"] == "block"
+    assert api.posted[0]["description"] == f"BLOCK in a comment at {H1[:12]}"
+
+
+def test_a_malformed_marker_in_any_comment_fails_the_check():
+    cs = [comment('<!-- adversary-verdict:v1 {"verdict":"BLOCK","head": -->', login="stranger")]
+    rc, report, api = run_ev(wr_event(), serve(7, marker("APPROVE", H1), comments=cs))
+    assert api.posted[0]["state"] == "failure" and report["prs"][0]["outcome"] == "malformed"
+    assert api.posted[0]["description"] == f"malformed marker in a comment at {H1[:12]}"
+
+
+def test_an_owner_pr_body_still_approves_and_a_comment_cannot_stand_in_for_it():
+    rc, report, api = run_ev(wr_event(), serve(7, marker("APPROVE", H1)))
+    assert api.posted[0]["state"] == "success" and api.posted[0]["description"] == f"APPROVE at {H1[:12]}"
+    rc, report, api = run_ev(wr_event(), serve(7, "", comments=[comment(marker("APPROVE", H1))]))
+    assert api.posted[0]["state"] == "failure" and report["prs"][0]["outcome"] == "missing"
+
+
+def test_comments_are_read_on_every_page():
+    noise = [comment(f"thanks {i}", login="stranger", cid=i) for i in range(100)]
+    answers = serve(7, marker("APPROVE", H1), comments=[*noise, comment(marker("BLOCK", H1), login="stranger", cid=101)])
+    rc, report, api = run_ev(wr_event(), answers)
+    assert api.posted[0]["state"] == "failure" and report["prs"][0]["outcome"] == "block", report
+    assert report["prs"][0]["comments"] == 101
+    assert api.calls[gql_comments_key(7, 2)] == 1 and api.calls[comments_key(7, 2)] == 1
+
+
+@pytest.mark.parametrize("key,page", [
+    ("rest", [{"error": "HTTP 502"}]), ("rest", [{"json": {"message": "nope"}}]), ("rest", [{"json": ["x"]}]),
+    ("gql", [{"error": "HTTP 502"}]),
+    ("gql", [{"json": {"repository": {"pullRequest": None}}}]),
+    ("gql", [{"json": {"repository": {"pullRequest": {"comments": {"totalCount": 0, "nodes": "x",
+                                                                   "pageInfo": {"hasNextPage": False}}}}}}]),
+    ("gql", [{"json": {"repository": {"pullRequest": {"comments": {"totalCount": 1, "nodes": ["x"],
+                                                                   "pageInfo": {"hasNextPage": False}}}}}}]),
+    ("gql", [{"json": {"repository": {"pullRequest": {"comments": {"totalCount": 0, "nodes": []}}}}}]),
+    ("gql", [{"json": {"repository": {"pullRequest": {"comments": {"totalCount": 2, "nodes": [],
+                                                                   "pageInfo": {"hasNextPage": False}}}}}}]),
+    ("gql", [{"json": {"repository": {"pullRequest": {"comments": {"totalCount": 2, "nodes": [],
+                                                                   "pageInfo": {"hasNextPage": True}}}}}}]),
+], ids=["rest-http-error", "rest-not-a-list", "rest-bad-entry", "gql-error", "gql-no-pr", "gql-nodes-not-a-list",
+        "gql-bad-entry", "gql-no-page-info", "gql-short-of-total", "gql-no-cursor"])
+def test_an_unreadable_comment_list_fails_closed_and_posts_nothing(key, page):
+    answers = {**serve(7, marker("APPROVE", H1)), (comments_key(7) if key == "rest" else gql_comments_key(7)): page}
+    rc, report, api = run_ev(wr_event(), answers)
+    assert rc == 2 and api.posted == [], report
+    assert report["prs"][0]["result"] == "error" and "comments" in report["prs"][0]["detail"]
+
+
+@pytest.mark.parametrize("count", [100, 101], ids=["rest-cap", "gql-cap"])
+def test_a_pr_with_more_comments_than_the_read_cap_fails_closed(monkeypatch, count):
+    # 100 comments fill one GraphQL page with no next page, but a full REST page asks for page 2; 101 need two of each.
+    monkeypatch.setattr(adversary_marker, "COMMENT_PAGES_MAX", 1)
+    full = [comment("x", login="stranger", cid=i) for i in range(count)]
+    rc, report, api = run_ev(wr_event(), serve(7, marker("APPROVE", H1), comments=full))
+    assert rc == 2 and api.posted == [] and "not read in full" in report["prs"][0]["detail"]
+
+
+# ---- hole 1 (2026-11-07): a dispatch judges every open PR at the head, and one status is posted per head ----------
+
+def dispatch(n: int) -> dict:
+    return {"inputs": {"pr": str(n)}}
+
+
+@pytest.mark.parametrize("sibling", [marker("BLOCK", H1), "", marker("APPROVE", H2)], ids=["block", "none", "other-head"])
+def test_hole1_a_dispatch_for_an_approved_pr_fails_when_another_open_pr_at_its_head_does_not_approve(sibling):
+    answers = {**serve(10, marker("APPROVE", H1)), **serve(11, sibling), **at_head(H1, 10, 11)}
+    rc, report, api = run_ev(dispatch(10), answers, name="workflow_dispatch")
+    assert rc == 0, report
+    assert [r["pr"] for r in report["prs"]] == [10, 11]
+    assert api.posted == [{"sha": H1, "state": "failure", "context": "adversary-marker", "target_url": "https://x/run/1",
+                           "description": f"PRs #10, #11 share head {H1[:12]} and not all approve"}], \
+        "one post per head, and never a transient success before the shared-head failure"
+
+
+def test_a_dispatch_where_every_pr_at_the_head_approves_posts_one_success():
+    answers = {**serve(10, marker("APPROVE", H1)), **serve(11, marker("APPROVE", H1)), **at_head(H1, 10, 11)}
+    rc, report, api = run_ev(dispatch(10), answers, name="workflow_dispatch")
+    assert rc == 0 and [p["state"] for p in api.posted] == ["success"], report
+
+
+def test_a_workflow_run_naming_one_pr_still_judges_the_other_open_pr_at_its_head():
+    answers = {**serve(10, marker("APPROVE", H1)), **serve(11, marker("BLOCK", H1)), **at_head(H1, 11)}
+    rc, report, api = run_ev(wr_event(prs=(10,)), answers)
+    assert rc == 0 and [p["state"] for p in api.posted] == ["failure"], report
+
+
+def test_a_sibling_at_the_head_that_cannot_be_read_turns_the_shared_status_to_failure():
+    answers = {**serve(10, marker("APPROVE", H1)), **at_head(H1, 10, 11), "GRAPHQL 11": [{"error": "HTTP 502"}],
+               f"GET repos/{REPO_A}/pulls/11": [pr_doc(H1, marker("APPROVE", H1))]}
+    rc, report, api = run_ev(dispatch(10), answers, name="workflow_dispatch")
+    assert rc == 2 and [p["state"] for p in api.posted] == ["failure"], report
+    assert "#11" in api.posted[0]["description"]
+
+
+@pytest.mark.parametrize("answers", [
+    {f"GET repos/{REPO_A}/pulls/10": [{"error": "HTTP 404"}]},
+    {**serve(10, marker("APPROVE", H1)), commits_key(H1): [{"error": "HTTP 500"}]},
+], ids=["pr-read-fails", "head-lookup-fails"])
+def test_a_dispatch_whose_lookup_fails_posts_nothing(answers):
+    rc, report, api = run_ev(dispatch(10), answers, name="workflow_dispatch")
+    assert rc == 2 and api.posted == [], report
+
+
+def test_resolve_for_a_dispatch_keys_by_the_head_like_a_workflow_run():
+    answers = {**serve(10, marker("APPROVE", H1)), **at_head(H1, 10, 11)}
+    rc, out = adversary_marker.resolve("workflow_dispatch", dispatch(10), REPO_A, adversary_marker.CannedApi(answers))
+    rc2, out2 = adversary_marker.resolve("workflow_run", wr_event(prs=(11,)), REPO_A, adversary_marker.CannedApi(answers))
+    assert (rc, rc2) == (0, 0) and out["prs"] == out2["prs"] == "10,11" and out["key"] == out2["key"] == H1
+
+
+def test_at_head_posts_only_on_the_runs_own_head():
+    # #11 moved to H2 after the resolve job keyed this run by H1: it gets nothing from this run (its push has its own).
+    answers = {**serve(10, marker("APPROVE", H1)), **serve(11, marker("APPROVE", H2), head=H2)}
+    rc, report, api = run_ev(wr_event(prs=()), answers, prs_given=[10, 11], at_head=H1)
+    assert rc == 0 and [(p["sha"], p["state"]) for p in api.posted] == [(H1, "success")], report
+    assert report["prs"][1]["result"] == "head-moved"
+
+
+@pytest.mark.parametrize("head,rc", [(H1, 0), (H1.upper(), 0), ("abc", 2), ("", 2)])
+def test_the_cli_at_head_takes_only_a_full_sha(tmp_path, head, rc):
+    (tmp_path / "ev.json").write_text(json.dumps(wr_event(prs=())))
+    (tmp_path / "api.json").write_text(json.dumps(serve(7, marker("APPROVE", H1))))
+    r = cli("--prs", "7", "--at-head", head, "--event", str(tmp_path / "ev.json"), "--event-name", "workflow_run",
+            "--repo", REPO_A, "--api-answers", str(tmp_path / "api.json"))
+    assert r.returncode == rc, r.stderr
+    if rc == 0:
+        assert json.loads(r.stdout)["statuses"][0]["state"] == "success"
+
+
+def test_the_marker_job_passes_the_resolved_head_as_at_head():
+    judge = workflow()["jobs"]["marker"]["steps"][-1]
+    assert judge["env"]["AT_HEAD"] == "${{ needs.resolve.outputs.key }}"
+    assert '--at-head "$AT_HEAD"' in judge["run"]
 
 
 def test_a_block_from_an_untrusted_author_still_fails_the_check():
@@ -1411,51 +1709,58 @@ def test_the_editor_and_the_body_come_from_the_same_read():
 
 def test_the_graphql_read_asks_for_the_trust_fields():
     q = adversary_marker.PR_QUERY
-    for field in ("headRefOid", "body", "authorAssociation", "author { login }", "userContentEdits(first: 1) { nodes { editor { login } } }", "state"):
+    for field in ("headRefOid", "body", "authorAssociation", "author { login }", "editor { login }", "lastEditedAt",
+                  "state"):
         assert field in q, field
+    # GitHub's schema has no `lastEditedBy` (2026-11-07): asking for it fails every read.
+    assert "lastEditedBy" not in q and "lastEditedBy" not in adversary_marker.COMMENTS_QUERY
 
 
-def test_a_null_usercontentedits_is_a_neveredited_body():
-    # Distinct from an EMPTY nodes list: the connection itself may be null.
+def test_a_legacy_null_history_without_current_attribution_cannot_approve():
+    # A legacy null connection cannot substitute for current editor/lastEditedAt attribution.
     second = {"json": {"repository": {"pullRequest": {
         "state": "OPEN", "headRefOid": H1, "body": marker("APPROVE", H1), "authorAssociation": "NONE",
         "author": {"login": "stranger"}, "userContentEdits": None}}}}
     rc, report, api = run_ev(wr_event(), serve(7, marker("APPROVE", H1), second=second))
     assert rc == 0 and api.posted[0]["state"] == "failure"
-    assert report["prs"][0]["last_editor"] == "stranger" and report["prs"][0]["outcome"] == "untrusted"
+    assert report["prs"][0]["last_editor"] == "" and report["prs"][0]["outcome"] == "outside"
 
 
-def test_a_null_editor_in_the_newest_edit_falls_back_to_the_author():
-    # The newest edit node's editor is unreadable (e.g. a ghost account): the author is the last editor.
+def test_a_null_editor_in_a_legacy_edit_response_does_not_inherit_the_author():
+    # A legacy response without current editor attribution cannot confer author trust.
     second = {"json": {"repository": {"pullRequest": {
         "state": "OPEN", "headRefOid": H1, "body": marker("APPROVE", H1), "authorAssociation": "NONE",
         "author": {"login": "stranger"}, "userContentEdits": {"nodes": [{"editor": None}]}}}}}
     rc, report, api = run_ev(wr_event(), serve(7, marker("APPROVE", H1), second=second))
     assert rc == 0 and api.posted[0]["state"] == "failure"
-    assert report["prs"][0]["last_editor"] == "stranger" and report["prs"][0]["outcome"] == "untrusted"
+    assert report["prs"][0]["last_editor"] == "" and report["prs"][0]["outcome"] == "outside"
 
 
-def test_an_empty_newestnode_list_falls_back_to_the_author():
-    # author-owned PR, body never edited: editor = author, and the owner's trust makes the APPROVE count.
+def test_a_never_edited_body_uses_explicit_current_attribution():
+    # Explicit editor/lastEditedAt null preserves an owner's legitimate never-edited approval.
     rc, report, api = run_ev(wr_event(), serve(7, marker("APPROVE", H1), author="djbclark", assoc="OWNER"))
     assert rc == 0 and api.posted[0]["state"] == "success" and report["prs"][0]["last_editor"] == "djbclark"
 
 
-def test_the_connection_takes_first_not_last():
-    # The trust-holding node is the NEWEST edit; the connection is newest-first (live probe, PR 302 - 2026-11-07),
-    # so the direction is pinned by its exact argument, and no bare `last:` may ask the connection anywhere.
+def test_body_uses_current_editor_and_comment_history_is_bounded_newest_first():
+    # PR300 supersedes PR303's first:1 body query with valid current attribution;
+    # comments must still request the bounded whole edit history, never last:1.
     q = adversary_marker.PR_QUERY
-    assert re.search(r"userContentEdits\(first: 1\)", q), q
+    assert "editor { login } lastEditedAt" in q
+    assert "userContentEdits" not in q
+    q = adversary_marker.COMMENTS_QUERY
+    assert re.search(r"userContentEdits\(first: 100\)", q), q
     assert not re.search(r"userContentEdits\(last", q), q
 
 
 # ---- the resolve job and --prs ---------------------------------------------------------------------------
 
 def test_resolve_gives_the_pr_numbers_and_the_concurrency_key():
-    api = adversary_marker.CannedApi({})
+    # The key is the HEAD the PRs were found at (2026-11-07): one status per sha, so one concurrency group per sha.
+    api = adversary_marker.CannedApi(at_head(H1, 11))
     assert adversary_marker.resolve("workflow_run", wr_event(prs=(9, 7)), REPO_A, api) == \
-        (0, {"prs": "7,9", "key": "7-9", "found_by": "workflow_run.pull_requests"})
-    api = adversary_marker.CannedApi({f"GET repos/{REPO_A}/commits/{H1}/pulls": [{"json": []}]})
+        (0, {"prs": "7,9,11", "key": H1, "found_by": "workflow_run.pull_requests"})
+    api = adversary_marker.CannedApi({commits_key(H1): [{"json": []}]})
     rc, out = adversary_marker.resolve("workflow_run", wr_event(prs=()), REPO_A, api)
     assert rc == 0 and out["key"] == "" and out["prs"] == ""
     assert adversary_marker.resolve("pull_request", wr_event(), REPO_A, api)[0] == 2
@@ -1463,13 +1768,13 @@ def test_resolve_gives_the_pr_numbers_and_the_concurrency_key():
 
 def test_the_cli_resolve_writes_github_output(tmp_path):
     (tmp_path / "ev.json").write_text(json.dumps(wr_event(prs=(7,))))
-    (tmp_path / "api.json").write_text("{}")
+    (tmp_path / "api.json").write_text(json.dumps(at_head(H1)))
     out = tmp_path / "gh-output"
     r = subprocess.run([sys.executable, "-I", str(MODULE), "--resolve", "--event", str(tmp_path / "ev.json"),
                         "--event-name", "workflow_run", "--repo", REPO_A, "--api-answers", str(tmp_path / "api.json")],
                        capture_output=True, text=True, timeout=60, env={"PATH": "/usr/bin:/bin", "GITHUB_OUTPUT": str(out)})
     assert r.returncode == 0, r.stderr
-    assert out.read_text() == "prs=7\nkey=7\n"
+    assert out.read_text() == f"prs=7\nkey={H1}\n"
 
 
 @pytest.mark.parametrize("prs,rc", [("7", 0), ("7,9", 0), ("", 2), ("7;rm", 2), ("0", 2), ("7,x", 2)])
@@ -1493,3 +1798,181 @@ def test_the_marker_job_is_keyed_by_the_resolved_pr_and_requests_both_app_permis
     assert app["with"]["permission-statuses"] == "write" and app["with"]["permission-checks"] == "write"
     judge = jobs["marker"]["steps"][-1]
     assert '--prs "$PRS"' in judge["run"] and judge["env"]["PRS"] == "${{ needs.resolve.outputs.prs }}"
+
+
+# ---- B1 (Codex review, 2026-11-07): an owner comment approves only if nobody but the owner edited it ----------------
+# GitHub lets any repository writer edit someone else's comment while the author stays the owner, so the comments are
+# read through GraphQL (`editor`, `lastEditedAt`, `includesCreatedEdit`, `userContentEdits`; the schema has no
+# `lastEditedBy`). REST only supplies the App provenance and can only take trust away.
+
+EDITED = f"owner's APPROVE comment was edited by someone else at {H1[:12]}"
+EDIT_UNKNOWN = f"owner's APPROVE comment has an unknown edit history at {H1[:12]}"
+OWNER_COMMENT_OK = f"APPROVE in an owner comment at {H1[:12]}"
+
+
+@pytest.mark.parametrize("kw,word,desc", [
+    ({}, "approve", OWNER_COMMENT_OK),                                                   # never edited
+    ({"editor": "djbclark"}, "approve", OWNER_COMMENT_OK),                               # edited by the owner
+    ({"editor": "DJBClark"}, "approve", OWNER_COMMENT_OK),
+    ({"editor": "bob"}, "edited", EDITED),                                               # a collaborator's edit
+    ({"editor": "some-app[bot]"}, "edited", EDITED),                                     # an App's (bot's) edit
+    ({"editor": "djbclark", "edits": ["djbclark", "bob", "djbclark"]}, "edited", EDITED),  # owner ticked a box after bob
+    ({"edits": ["djbclark", None]}, "edit-unknown", EDIT_UNKNOWN),                       # edited by a deleted user
+    ({"gql": {"editor": None}}, "edit-unknown", EDIT_UNKNOWN),                           # attribution fields missing
+    ({"gql": {"lastEditedAt": None}}, "edit-unknown", EDIT_UNKNOWN),
+    ({"gql": {"userContentEdits": None}}, "edit-unknown", EDIT_UNKNOWN),
+    ({"gql": {"includesCreatedEdit": None}}, "edit-unknown", EDIT_UNKNOWN),
+    ({"gql": {"lastEditedAt": EDITED_AT}}, "edit-unknown", EDIT_UNKNOWN),               # edited, editor null
+    ({"editor": "djbclark", "gql": {"userContentEdits": {"totalCount": 150, "nodes": [{"editor": actor("djbclark")}]}}},
+     "edit-unknown", EDIT_UNKNOWN),                                                      # history not read in full
+    ({"editor": "djbclark", "gql": {"editor": {"login": "djbclark"}}}, "edit-unknown", EDIT_UNKNOWN),  # no __typename
+], ids=["never-edited", "owner-edit", "owner-edit-case", "collaborator-edit", "bot-edit", "collaborator-in-history",
+        "ghost-editor", "no-editor-field", "no-edited-at-field", "no-history-field", "no-created-edit-field",
+        "edited-without-editor", "history-truncated", "editor-without-type"])
+def test_b1_an_owner_comment_approves_only_when_nobody_else_edited_it(kw, word, desc):
+    c = comment(marker("APPROVE", H1), **kw)
+    rc, report, api = run_ev(wr_event(), serve(7, "", comments=[c], **OUTSIDE_PR))
+    assert rc == 0 and len(api.posted) == 1, report
+    assert report["prs"][0]["outcome"] == word
+    assert api.posted[0]["state"] == ("success" if word == "approve" else "failure")
+    assert api.posted[0]["description"] == desc
+
+
+def test_b1_a_collaborator_edit_cannot_be_laundered_by_a_second_trusted_comment_elsewhere():
+    # One trusted owner APPROVE is enough; a second, collaborator-edited one does not spoil it, and a collaborator's
+    # edit that ADDS a BLOCK to an owner comment still fails.
+    ok = comment(marker("APPROVE", H1), cid=1)
+    edited = comment(marker("APPROVE", H1), editor="bob", cid=2)
+    rc, report, api = run_ev(wr_event(), serve(7, "", comments=[edited, ok], **OUTSIDE_PR))
+    assert api.posted[0]["state"] == "success", report
+    blocked = comment(marker("BLOCK", H1), editor="bob", cid=3)
+    rc, report, api = run_ev(wr_event(), serve(7, "", comments=[ok, blocked], **OUTSIDE_PR))
+    assert api.posted[0]["state"] == "failure" and report["prs"][0]["outcome"] == "block"
+
+
+def test_b1_an_owner_comment_the_rest_read_does_not_confirm_is_not_trusted():
+    # Trust needs BOTH reads: GraphQL for the author and edits, REST for "no App". Missing from REST, or a REST body
+    # that differs (an edit between the reads), is not confirmed.
+    c = comment(marker("APPROVE", H1))
+    answers = {**serve(7, "", comments=[c], **OUTSIDE_PR), comments_key(7): [{"json": []}]}
+    rc, report, api = run_ev(wr_event(), answers)
+    assert api.posted[0]["state"] == "failure" and report["prs"][0]["outcome"] == "untrusted", report
+    answers = {**serve(7, "", comments=[c], **OUTSIDE_PR),
+               comments_key(7): [{"json": [{**rest(c), "body": marker("APPROVE", H1) + " "}]}]}
+    rc, report, api = run_ev(wr_event(), answers)
+    assert api.posted[0]["state"] == "failure" and report["prs"][0]["outcome"] == "untrusted", report
+
+
+def test_b1_a_block_only_the_rest_read_saw_still_fails():
+    c = comment(marker("APPROVE", H1))
+    answers = {**serve(7, "", comments=[c], **OUTSIDE_PR),
+               comments_key(7): [{"json": [rest(c), rest(comment(marker("BLOCK", H1), login="stranger", cid=9))]}]}
+    rc, report, api = run_ev(wr_event(), answers)
+    assert api.posted[0]["state"] == "failure" and report["prs"][0]["outcome"] == "block", report
+
+
+def test_b1_a_failing_graphql_comment_read_posts_nothing():
+    c = comment(marker("APPROVE", H1))
+    answers = {**serve(7, "", comments=[c], **OUTSIDE_PR), gql_comments_key(7): [{"error": "HTTP 502"}]}
+    rc, report, api = run_ev(wr_event(), answers)
+    assert rc == 2 and api.posted == [] and "comments" in report["prs"][0]["detail"], report
+
+
+def test_b1_the_comment_query_asks_for_the_attribution_fields():
+    q = adversary_marker.COMMENTS_QUERY
+    for field in ("fullDatabaseId", "body", "author { __typename login }", "editor { __typename login }",
+                  "lastEditedAt", "includesCreatedEdit", "userContentEdits(first: 100)", "totalCount",
+                  "pageInfo { hasNextPage endCursor }", "after: $cursor"):
+        assert field in q, field
+
+
+def test_b1_an_edited_pr_body_with_a_deleted_editor_is_not_the_owners():
+    second = {"json": {"repository": {"pullRequest": {
+        "state": "OPEN", "headRefOid": H1, "body": marker("APPROVE", H1), "authorAssociation": "OWNER",
+        "author": {"login": "djbclark"}, "editor": None, "lastEditedAt": EDITED_AT}}}}
+    rc, report, api = run_ev(wr_event(), serve(7, marker("APPROVE", H1), second=second))
+    assert api.posted[0]["state"] == "failure" and report["prs"][0]["outcome"] == "untrusted", report
+
+
+@pytest.mark.parametrize("editor_shape", ["missing", {}, {"login": None}, {"login": ""}])
+def test_b1_unknown_body_editor_cannot_inherit_owner_when_timestamp_is_null(editor_shape):
+    second = gql_doc(body=marker("APPROVE", H1))
+    pr = second["json"]["repository"]["pullRequest"]
+    if editor_shape == "missing":
+        del pr["editor"]
+    else:
+        pr["editor"] = editor_shape
+    rc, report, api = run_ev(wr_event(), serve(7, marker("APPROVE", H1), second=second))
+    assert rc == 0, report
+    assert api.posted[0]["state"] == "failure", report
+    assert report["prs"][0]["outcome"] == "untrusted", report
+
+
+def test_b1_explicit_never_edited_owner_body_still_approves():
+    rc, report, api = run_ev(wr_event(), serve(7, marker("APPROVE", H1),
+                                             second=gql_doc(body=marker("APPROVE", H1))))
+    assert rc == 0, report
+    assert api.posted[0]["state"] == "success", report
+
+
+# ---- B2 (Codex review, 2026-11-07): both shared-head lookups read every page -----------------------------------------
+
+def _shared_head_answers(page2: list | dict | None, sibling: str = marker("BLOCK", H1)) -> dict:
+    """PR 1..30 open at H1 and approved, 70 merged/closed/other-repo/other-head noise filling page 1, and on page 2
+    PR 99 at H1 carrying SIBLING (absent when PAGE2 is given)."""
+    page1 = [pull_entry(n, H1) for n in range(1, 31)]
+    page1 += [pull_entry(100 + i, H1, state="closed") for i in range(60)]
+    page1 += [pull_entry(200 + i, H1, repo="someone/fork") for i in range(5)]
+    page1 += [pull_entry(300 + i, H2) for i in range(5)]
+    answers = {commits_key(H1, 1): [{"json": page1}],
+               commits_key(H1, 2): page2 if page2 is not None else [{"json": [pull_entry(99, H1),
+                                                                               pull_entry(98, H1, state="closed")]}]}
+    for n in [*range(1, 31), 99]:
+        answers.update(serve(n, marker("APPROVE", H1) if n != 99 else sibling))
+    return answers
+
+
+@pytest.mark.parametrize("name,event", [("workflow_dispatch", dispatch(1)), ("workflow_run", wr_event(prs=(1,)))])
+def test_b2_a_block_sibling_on_page_two_of_the_head_lookup_fails_the_status(name, event):
+    rc, report, api = run_ev(event, _shared_head_answers(None), name=name)
+    assert rc == 0, report
+    assert api.calls[commits_key(H1, 2)] == 1, "page 2 must be requested"
+    assert [r["pr"] for r in report["prs"]] == [*range(1, 31), 99], "noise is filtered, page 2's open PR is judged"
+    assert [p["state"] for p in api.posted] == ["failure"]
+    assert "not all approve" in api.posted[0]["description"]
+
+
+def test_b2_every_page_approved_posts_success():
+    rc, report, api = run_ev(dispatch(1), _shared_head_answers(None, marker("APPROVE", H1)), name="workflow_dispatch")
+    assert rc == 0 and [p["state"] for p in api.posted] == ["success"], report
+
+
+@pytest.mark.parametrize("page2", [[{"error": "HTTP 502"}], [{"json": {"message": "nope"}}], [{"json": ["x"]}],
+                                   [{"json": None}]], ids=["http-error", "not-a-list", "bad-entry", "null"])
+@pytest.mark.parametrize("name,event", [("workflow_dispatch", dispatch(1)), ("workflow_run", wr_event(prs=(1,)))])
+def test_b2_an_unreadable_page_of_the_head_lookup_fails_closed(page2, name, event):
+    rc, report, api = run_ev(event, _shared_head_answers(page2), name=name)
+    assert rc == 2 and api.posted == [], report
+    rc, out = adversary_marker.resolve(name, event, REPO_A, adversary_marker.CannedApi(_shared_head_answers(page2)))
+    assert rc == 2 and "error" in out
+
+
+def test_b2_the_head_lookup_page_cap_fails_closed(monkeypatch):
+    monkeypatch.setattr(adversary_marker, "PULL_PAGES_MAX", 1)
+    rc, report, api = run_ev(dispatch(1), _shared_head_answers(None), name="workflow_dispatch")
+    assert rc == 2 and api.posted == [] and "not read in full" in report["error"], report
+
+
+def test_b2_the_pulls_head_fallback_reads_every_page():
+    ev = wr_event(prs=(), head_branch="feature/x", head_repository={"owner": {"login": "contrib"}})
+    key = f"GET repos/{REPO_A}/pulls?state=open&head=contrib:feature/x&per_page=100&page="
+    answers = {commits_key(H1): [{"json": []}],
+               key + "1": [{"json": [{"number": 500 + i, "state": "open", "head": {"sha": H2}} for i in range(100)]}],
+               key + "2": [{"json": [{"number": 11, "state": "open", "head": {"sha": H1}}]}],
+               **serve(11, marker("BLOCK", H1))}
+    rc, report, api = run_ev(ev, answers)
+    assert rc == 0 and report["found_by"] == "pulls?head=" and api.calls[key + "2"] == 1, report
+    assert [r["pr"] for r in report["prs"]] == [11] and api.posted[0]["state"] == "failure"
+    answers[key + "2"] = [{"json": {"message": "nope"}}]
+    rc, report, api = run_ev(ev, answers)
+    assert rc == 2 and api.posted == [], report
