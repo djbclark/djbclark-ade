@@ -67,7 +67,7 @@ function harness(responses = [], entries = [], routingOptions = {}) {
     registerCommand: (name, value) => commands.set(name, value),
     appendEntry: (customType, data) => entries.push({ type: "custom", customType, data }),
   };
-  const install = () => createDynamicDefaults({ stateEntryType: STATE, helperCommand: ["fake-helper"],
+  const install = () => createDynamicDefaults({ stateEntryType: "ade.route", helperCommand: ["fake-helper"],
     spawnImpl: process.spawnImpl, epoch: () => `task-${++nextEpoch}`,
     isServiceBlocked: async () => false, ...routingOptions })(pi);
   install();
@@ -155,14 +155,14 @@ test("restored branch state survives extension reload/resume and fork", async ()
 });
 
 test("explicit task epoch switches once without changing ordinary task text", async () => {
-  const h = harness([{ json: answer() }, { json: answer(second, "zai", "review") }]);
+  const h = harness([{ json: answer() }, { json: answer(second, "zai", "research") }]);
   await h.route();
-  await h.task("review --native-tools");
+  await h.task("research --native-tools");
   assert.equal(h.calls.length, 1);
   const messages = [{ role: "user", content: "the unchanged task" }];
   const result = await h.route({ messages });
   assert.equal(result.model, second);
-  assert.equal(result.state.kind, "review");
+  assert.equal(result.state.kind, "research");
   assert.equal(result.state.epoch, "task-1");
   assert.ok(h.calls[1].args.includes("--native-tools"));
   assert.deepEqual(messages, [{ role: "user", content: "the unchanged task" }]);
@@ -197,9 +197,9 @@ test("invalid command arguments do not create a boundary", async () => {
 });
 
 test("direct summary reads stored physical choice without consuming pending epoch", async () => {
-  const h = harness([{ json: answer() }, { json: answer(second, "zai", "review") }]);
+  const h = harness([{ json: answer() }, { json: answer(second, "zai", "research") }]);
   const initial = await h.route();
-  await h.task("review");
+  await h.task("research");
   const before = h.entries.length;
   const summary = await h.route({ reason: "direct", state: undefined });
   assert.equal(summary.model, first);
@@ -211,14 +211,14 @@ test("direct summary reads stored physical choice without consuming pending epoc
 });
 
 test("direct summary with no choice resolves conservative default without persisting or consuming boundary", async () => {
-  const h = harness([{ json: answer() }, { json: answer(second, "zai", "review") }]);
-  await h.task("review --native-tools");
+  const h = harness([{ json: answer() }, { json: answer(second, "zai", "research") }]);
+  await h.task("research --native-tools");
   const summary = await h.route({ reason: "direct", state: undefined });
   assert.equal(summary.state, undefined);
   assert.equal(h.currentState(), undefined);
   assert.ok(h.calls[0].args.includes("code"));
   assert.ok(!h.calls[0].args.includes("--native-tools"));
-  assert.equal((await h.route()).state.kind, "review");
+  assert.equal((await h.route()).state.kind, "research");
 });
 
 test("no eligible result fails closed without exposing helper diagnostics", async () => {

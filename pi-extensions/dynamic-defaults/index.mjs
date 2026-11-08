@@ -5,6 +5,8 @@ import { fileURLToPath } from "node:url";
 const PROVIDER = "ade";
 const MODEL = "auto";
 const TASK_ENTRY = "ade.task";
+const ROUTE_ENTRY = "ade.route";
+const KINDS = new Set(["code", "mechanical", "bulk", "research", "judgment", "frontier"]);
 const INITIAL = Object.freeze({ epoch: "initial", kind: "code", nativeTools: false });
 const FIXED_ERROR = "ADE Auto could not select an available model.";
 const safeName = (value) => typeof value === "string" && /^[a-z][a-z0-9_-]{0,63}$/.test(value);
@@ -72,7 +74,7 @@ function choiceValid(choice) {
 
 /** Injectable factory exercises the registered route without loading Pi or credentials in tests. */
 export function createDynamicDefaults({
-  stateEntryType,
+  stateEntryType = ROUTE_ENTRY,
   helperCommand = [fileURLToPath(new URL("../../bin/pi-default", import.meta.url))],
   spawnImpl = spawn,
   timeoutMs = 70_000,
@@ -145,7 +147,11 @@ export function createDynamicDefaults({
         const model = lookup(ctx, choice);
         if (!model) throw new Error(FIXED_ERROR);
         const result = { model, thinkingLevel: choice.thinking };
-        if (!direct) result.state = choice;
+        if (!direct) {
+          // Own public custom entry avoids depending on an internal Pi state-tag or SDK package resolution.
+          if (choice !== request.state) pi.appendEntry(stateEntryType, { provider: PROVIDER, modelId: MODEL, state: choice });
+          result.state = choice;
+        }
         return result;
       },
     });
@@ -158,7 +164,7 @@ export function createDynamicDefaults({
         const words = args.trim() ? args.trim().split(/\s+/) : [];
         const nativeTools = words.includes("--native-tools");
         const kinds = words.filter((word) => word !== "--native-tools");
-        if (kinds.length > 1 || words.filter((word) => word === "--native-tools").length > 1 || (kinds[0] && !safeName(kinds[0]))) {
+        if (kinds.length > 1 || words.filter((word) => word === "--native-tools").length > 1 || (kinds[0] && !KINDS.has(kinds[0]))) {
           notify("Use /ade-task [kind] [--native-tools]."); return;
         }
         pi.appendEntry(TASK_ENTRY, { epoch: epoch(), kind: kinds[0] ?? "code", nativeTools });
@@ -168,7 +174,4 @@ export function createDynamicDefaults({
   };
 }
 
-export default async function dynamicDefaults(pi) {
-  const { VIRTUAL_MODEL_STATE_ENTRY } = await import("@earendil-works/pi-coding-agent");
-  createDynamicDefaults({ stateEntryType: VIRTUAL_MODEL_STATE_ENTRY })(pi);
-}
+export default createDynamicDefaults();

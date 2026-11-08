@@ -4,7 +4,8 @@
 for a task**, using the existing ADE routing policy and fresh named-pool quota.
 It does not rewrite the global default on every request or interrupt a running
 response. The virtual selection remains `ADE Auto`; the task's physical route
-is stored in Pi's branch state, including across compaction and resume.
+is stored in Pi's branch state, including across compaction and resume. An ADE-owned
+custom entry supplies direct summaries without depending on Pi's internal state-entry tag.
 
 ## A. Operator interface
 
