@@ -101,13 +101,9 @@ def encode_toml_scalar(value: Any) -> str:
 
 
 def values_equal(left: Any, right: Any) -> bool:
-    """Type-aware equality: bool is never equal to int/float."""
+    """Type-aware equality: bool is never int/float; int is never float."""
     if isinstance(left, bool) or isinstance(right, bool):
         return isinstance(left, bool) and isinstance(right, bool) and left == right
-    if isinstance(left, (int, float)) and isinstance(right, (int, float)):
-        if isinstance(left, bool) or isinstance(right, bool):
-            return False
-        return left == right
     if type(left) is not type(right):
         return False
     if isinstance(left, dict):

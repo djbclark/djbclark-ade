@@ -72,8 +72,20 @@ def test_bool_versus_int_equality():
     assert ace.values_equal(True, True)
     assert not ace.values_equal(True, 1)
     assert not ace.values_equal(0, False)
-    assert ace.values_equal(1, 1.0)  # numeric equality for ints/floats
+    assert not ace.values_equal(1, 1.0)  # int and float stay distinct
     assert not ace.values_equal({"a": True}, {"a": 1})
+
+
+def test_int_to_float_is_a_real_change(home):
+    path = _local(home)
+    path.parent.mkdir(parents=True)
+    path.write_text("[gates]\n[gates.frontier]\nfrontier1_judged = 1\n")
+    # schema allows gates.frontier numbers; local partial tree OK
+    result = ace.set_scalar(
+        "gates.frontier.frontier1_judged", 1.0, target="local", root=REPO, home=home
+    )
+    assert result.changed is True
+    assert isinstance(ac.read_toml(path)["gates"]["frontier"]["frontier1_judged"], float)
 
 
 def test_local_set_creates_file_preserves_comments_and_quotes(home, tmp_path):
