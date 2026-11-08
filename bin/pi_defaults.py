@@ -28,7 +28,7 @@ def choose(kind: str, models: list[str], *, native_tools: bool = False,
     for svc in router.discover(quota):
         spec = shlex.split(svc.models.get(kind, ""))
         if (svc.acp_agent != "pi" or not spec or spec[0] not in available
-                or (native_tools and svc.access != "api")):
+                or (native_tools and spec[0].startswith("cursor/"))):
             skip.add(svc.name)
     picked = router.route(kind, quota=quota, exclude=skip, repo=repo)
     if picked is None:

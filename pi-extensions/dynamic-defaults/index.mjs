@@ -6,6 +6,7 @@ const PROVIDER = "ade";
 const MODEL = "auto";
 const TASK_ENTRY = "ade.task";
 const ROUTE_ENTRY = "ade.route";
+const FAILURE_ENTRY = "ade.failure";
 const KINDS = new Set(["code", "mechanical", "bulk", "research", "judgment", "frontier"]);
 const INITIAL = Object.freeze({ epoch: "initial", kind: "code", nativeTools: false });
 const FIXED_ERROR = "ADE Auto could not select an available model.";
@@ -130,14 +131,27 @@ export function createDynamicDefaults({
         if (choice !== undefined && !choiceValid(choice)) throw new Error(FIXED_ERROR);
         const task = direct ? (choice ? { epoch: choice.epoch, kind: choice.kind, nativeTools: false } : INITIAL) : latestTask(ctx);
         const excluded = new Set();
-        // Record a known failure before discarding an old epoch; a new task cannot erase it.
-        if (choice && request.failed?.model?.provider === choice.provider && request.failed.model.id === choice.id) {
-          const reason = confirmedFailure(request.failed.message?.errorMessage);
-          if (reason) {
-            await invoke(["--block-service", choice.service, "--reason", reason], undefined, request.signal);
-            excluded.add(choice.service);
-            choice = undefined;
+        // Terminal quota/billing errors are NOT retried by Pi. Inspect the persisted physical
+        // assistant response before an epoch change can discard its route. Never scan user/tool text.
+        const lastAssistant = branch(ctx).findLast((entry) => entry.type === "message" && entry.message?.role === "assistant");
+        const terminal = choice && lastAssistant?.message.stopReason === "error"
+          && lastAssistant.message.provider === choice.provider && lastAssistant.message.model === choice.id
+          && !branch(ctx).some((entry) => entry.type === "custom" && entry.customType === FAILURE_ENTRY
+            && entry.data?.entryId === lastAssistant.id && entry.data?.service === choice.service)
+          ? lastAssistant : undefined;
+        const retried = request.reason === "retry" && request.failed?.model?.provider === choice?.provider
+          && request.failed?.model?.id === choice?.id ? request.failed.message : undefined;
+        const reason = confirmedFailure(terminal?.message.errorMessage ?? retried?.errorMessage);
+        if (choice && reason) {
+          await invoke(["--block-service", choice.service, "--reason", reason], undefined, request.signal);
+          // A receipt permits explicit operator recovery without re-latching an old terminal response.
+          // If writing the block fails, no receipt, state change or replacement dispatch can occur.
+          if (terminal) {
+            if (typeof terminal.id !== "string" || !terminal.id) throw new Error(FIXED_ERROR);
+            pi.appendEntry(FAILURE_ENTRY, { entryId: terminal.id, service: choice.service, reason });
           }
+          excluded.add(choice.service);
+          choice = undefined;
         }
         if (choice && await blocked(choice.service, request.signal)) { excluded.add(choice.service); choice = undefined; }
         // A direct summary keeps the prior task even when a next-task marker is pending.

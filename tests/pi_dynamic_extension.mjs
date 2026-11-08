@@ -94,7 +94,8 @@ test("a confirmed failure is latched even when a new task epoch is pending", asy
   const h = harness([{ json: answer() }, { json: { blocked: true } }, { json: answer(second) }]);
   await h.route();
   await h.task("code");
-  const result = await h.route({ failed: { model: first, message: { errorMessage: "insufficient_quota" } } });
+  h.entries.push({type: "message", id: "quota-newtask", message: {role: "assistant", provider: first.provider, model: first.id, stopReason: "error", errorMessage: "insufficient_quota"}});
+  const result = await h.route();
   assert.equal(result.model, second);
   assert.deepEqual(h.calls[1].args, ["--block-service", "cursor", "--reason", "quota"]);
 });
@@ -231,7 +232,8 @@ test("no eligible result fails closed without exposing helper diagnostics", asyn
 test("confirmed matched quota failure blocks service before excluding it and selecting replacement", async () => {
   const h = harness([{ json: answer() }, { json: { blocked: true } }, { json: answer(second) }]);
   await h.route();
-  const result = await h.route({ reason: "retry", failed: { model: first, message: { errorMessage: "quota exceeded" } } });
+  h.entries.push({type: "message", id: "quota", message: {role: "assistant", provider: first.provider, model: first.id, stopReason: "error", errorMessage: "quota exceeded"}});
+  const result = await h.route();
   assert.equal(result.model, second);
   assert.deepEqual(h.calls[1].args, ["--block-service", "cursor", "--reason", "quota"]);
   assert.equal(h.calls[1].input, "");
@@ -243,14 +245,16 @@ test("confirmed matched quota failure blocks service before excluding it and sel
 test("confirmed billing failure uses fixed billing reason without forwarding runtime text", async () => {
   const h = harness([{ json: answer() }, { json: {} }, { json: answer(second) }]);
   await h.route();
-  await h.route({ reason: "retry", failed: { model: first, message: { errorMessage: "Insufficient credits: sensitive account detail" } } });
+  h.entries.push({type: "message", id: "billing", message: {role: "assistant", provider: first.provider, model: first.id, stopReason: "error", errorMessage: "Insufficient credits: sensitive account detail"}});
+  await h.route();
   assert.deepEqual(h.calls[1].args, ["--block-service", "cursor", "--reason", "billing"]);
 });
 
 test("failed block write fails closed and never spends another pool", async () => {
   const h = harness([{ json: answer() }, { code: 2 }]);
   await h.route();
-  await assert.rejects(h.route({ reason: "retry", failed: { model: first, message: { errorMessage: "quota exhausted" } } }));
+  h.entries.push({type: "message", id: "writefail", message: {role: "assistant", provider: first.provider, model: first.id, stopReason: "error", errorMessage: "quota exhausted"}});
+  await assert.rejects(h.route());
   assert.equal(h.calls.length, 2);
 });
 
@@ -296,4 +300,50 @@ test("aborted subprocess and excessive output fail closed with bounded child cle
   const large = fakeProcess([{ raw: "x".repeat(20_000) }]);
   await assert.rejects(runHelper(["fake"], [], [], { spawnImpl: large.spawnImpl }));
   assert.equal(large.calls[0].killed, "SIGTERM");
+});
+
+// Pi does not retry these terminal errors: the next real request is user with no failed field.
+test("terminal quota on the branch blocks before the next user request", async () => {
+  const h = harness([{ json: answer() }, { json: {} }, { json: answer(second) }]);
+  await h.route();
+  h.entries.push({type: "message", id: "terminal-quota", message: {role: "assistant", provider: first.provider,
+    model: first.id, stopReason: "error", errorMessage: "insufficient_quota"}});
+  h.entries.push({type: "message", id: "followup", message: {role: "user", content: "Continue"}});
+  await h.task("code");
+  assert.equal((await h.route()).model, second);
+  assert.deepEqual(h.calls[1].args, ["--block-service", "cursor", "--reason", "quota"]);
+});
+
+test("terminal billing block write failure stops a user followup before any new spend", async () => {
+  const h = harness([{ json: answer() }, { code: 2 }]);
+  await h.route();
+  h.entries.push({type: "message", id: "terminal-billing", message: {role: "assistant", provider: first.provider,
+    model: first.id, stopReason: "error", errorMessage: "Insufficient credits"}});
+  await assert.rejects(h.route());
+  assert.equal(h.calls.length, 2);
+});
+
+test("operator recovery does not relatch the same terminal response on the branch", async () => {
+  const h = harness([{json: answer()}, {json: {}}, {code: 1}, {json: answer()}]);
+  await h.route();
+  h.entries.push({type: "message", id: "handled-quota", message: {role: "assistant", provider: first.provider,
+    model: first.id, stopReason: "error", errorMessage: "quota exceeded"}});
+  await assert.rejects(h.route()); // no replacement available; original Pi state survives
+  assert.equal(h.entries.filter(e=>e.customType==="ade.failure").length, 1);
+  assert.equal((await h.route()).model, first); // simulated explicit recovery; block reader returns false
+  assert.equal(h.calls.filter(c=>c.args[0]==="--block-service").length, 1);
+});
+
+test("only the latest matching assistant terminal error can latch a pool", async () => {
+  const h = harness([{json: answer()}]);await h.route();
+  for (const message of [
+    {role:"assistant",provider:first.provider,model:first.id,stopReason:"stop",content:"quota exceeded"},
+    {role:"assistant",provider:second.provider,model:second.id,stopReason:"error",errorMessage:"quota exceeded"},
+    {role:"assistant",provider:first.provider,model:first.id,stopReason:"error",errorMessage:"429 too many requests"},
+    {role:"toolResult",content:"insufficient credits"},
+    {role:"user",content:"insufficient_quota"}]) {
+    h.entries.push({type:"message",id:`ignored-${h.entries.length}`,message});
+    assert.equal((await h.route()).model,first);
+  }
+  assert.equal(h.calls.length,1);
 });

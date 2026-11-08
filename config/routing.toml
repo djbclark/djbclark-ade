@@ -344,7 +344,7 @@ ready_probe = "pi"
 agent = "pi"
 good_at = { code = 22, mechanical = 9, bulk = 8, research = 18 }
 billing = "subscription"
-access = "api"
+access = "cli-only"
 measured_only = true
 max_parallel = 2
 note = "Direct Pi tool loop; fresh named Z.ai quota required; no API/subscription or other-account inference"

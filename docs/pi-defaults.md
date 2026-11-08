@@ -73,8 +73,10 @@ An explicit model pin remains explicit; this is automatic routing policy,
 not a restriction on the operator's manual model selection.
 
 C2. A confirmed quota or billing failure for the task's actual physical route
-first latches that pool off, then permits selection of another qualified pool
-at the next request boundary. Generic transport failures, a bare 429, or quota
+is observed from the persisted physical assistant error at the next request
+boundary, even when Pi does not retry it. That request first latches the pool
+off, then may select another qualified pool. A branch receipt prevents an old
+error from re-latching a pool after explicit operator recovery. Generic transport failures, a bare 429, or quota
 words in prompts/tool output do not justify spending a different pool.
 
 C3. `bin/pi-default --block-service zai --reason quota` records the same latch
