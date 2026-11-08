@@ -19,6 +19,58 @@ Do not inject `CURSOR_API_KEY` into this bridge: its upstream catalog code
 puts that environment value in command arguments. Use the retained CLI login.
 Normal `cursor-agent` must be on PATH; no binary or version path is pinned.
 
+## Grok subscription through Pi and the vendor ACP client
+
+2026-11-08: both paths completed a bounded request with actual file read/write
+operations. Pi used `xai-oauth/grok-4.7-build-fast`; the official Grok Build ACP
+client used `grok-4.7-build-fast`. Pi's `pi-grok` OAuth extension explicitly
+uses Grok's subscription gateway, `cli-chat-proxy.grok.com`, rather than the
+xAI API-key endpoint. The operator restored Grok Build as a manual vendor-plan
+path on 2026-11-08 to use the remaining allowance of the cancelled SuperGrok
+subscription. Its [official announcement](https://x.ai/news/grok-build-cli)
+documents subscription access and ACP support. The `grok` entry remains in
+`never_route` ([routing policy](model-routing.md), B10); restoring access does
+not renew the cancelled plan or authorize automatic dispatch. The two clients
+consume the same subscription pool;
+they are not two allowances. An API key or separate API credits are a different
+pool. Successful requests do not measure the exact debit or qualify every model.
+
+The Pi SDK streamer-discovery repair is
+[upstream PR 13](https://github.com/stnly/pi-grok/pull/13). Until upstream includes
+it, the normal Pi package installation uses
+`git:github.com/djbclark/pi-grok@fix/pi15-compat-loader`. This is a temporary fork
+branch, not a version pin. Once upstream includes the fix, return to its normal
+source through Pi's package manager, retaining the existing `xai-oauth` OAuth
+credential and session history. Do not enable both copies of the extension.
+The fix passed source review, full fork tests/typecheck, and an actual Pi SDK
+load before installation; the later tool checks establish runtime use separately.
+
+## Antigravity through Pi
+
+2026-11-08: `pi-antigravity` was installed normally, Google OAuth completed, and
+`antigravity/gemini-3.8-flash` completed a bounded native Pi read/write task.
+The provider uses its own normal Google sign-in; this does not convert the
+Google subscription into Gemini API-key credits. Do not count the Pi client as
+a second Google AI Pro allowance. Treat its use as sharing subscription capacity
+with the native `antigravity-argon` gated frontier fallback until account and
+model-window quota mapping establish otherwise; manual Pi work can consume
+headroom needed by that fallback. The basic check did not verify separate
+Flash/Argon windows. The check does not establish
+continuation/resume reliability, comparative coding quality, every model's
+entitlement, or a measured subscription debit.
+
+The installed package reports a TypeBox dependency warning under Pi 1.5.
+The issue is tracked upstream in
+[issue 116](https://github.com/Rahularya01/pi-antigravity/issues/116) and
+[issue 119](https://github.com/Rahularya01/pi-antigravity/issues/119).
+The provider loaded and the task succeeded despite the warning; it was neither
+suppressed nor fixed by editing the installed package. Keep optional search and
+image resources disabled unless separately chosen.
+
+Grok and Antigravity remain manual service paths. Their successful basic checks
+do not add them to `ade/auto`; named-pool freshness, identity, failure handling
+and continuation acceptance must precede a routing-policy change.
+
 ## SIPB's 32k context
 
 Install `pi-extensions/service-context/index.mjs` as a Pi extension through
