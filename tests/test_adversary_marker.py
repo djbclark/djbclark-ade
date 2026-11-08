@@ -8,6 +8,7 @@ port (AGENTS.md review rule 1's five properties). The Action's tests are at the 
 """
 
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -1715,6 +1716,43 @@ def test_the_graphql_read_asks_for_the_trust_fields():
     assert "lastEditedBy" not in q and "lastEditedBy" not in adversary_marker.COMMENTS_QUERY
 
 
+def test_a_legacy_null_history_without_current_attribution_cannot_approve():
+    # A legacy null connection cannot substitute for current editor/lastEditedAt attribution.
+    second = {"json": {"repository": {"pullRequest": {
+        "state": "OPEN", "headRefOid": H1, "body": marker("APPROVE", H1), "authorAssociation": "NONE",
+        "author": {"login": "stranger"}, "userContentEdits": None}}}}
+    rc, report, api = run_ev(wr_event(), serve(7, marker("APPROVE", H1), second=second))
+    assert rc == 0 and api.posted[0]["state"] == "failure"
+    assert report["prs"][0]["last_editor"] == "" and report["prs"][0]["outcome"] == "outside"
+
+
+def test_a_null_editor_in_a_legacy_edit_response_does_not_inherit_the_author():
+    # A legacy response without current editor attribution cannot confer author trust.
+    second = {"json": {"repository": {"pullRequest": {
+        "state": "OPEN", "headRefOid": H1, "body": marker("APPROVE", H1), "authorAssociation": "NONE",
+        "author": {"login": "stranger"}, "userContentEdits": {"nodes": [{"editor": None}]}}}}}
+    rc, report, api = run_ev(wr_event(), serve(7, marker("APPROVE", H1), second=second))
+    assert rc == 0 and api.posted[0]["state"] == "failure"
+    assert report["prs"][0]["last_editor"] == "" and report["prs"][0]["outcome"] == "outside"
+
+
+def test_a_never_edited_body_uses_explicit_current_attribution():
+    # Explicit editor/lastEditedAt null preserves an owner's legitimate never-edited approval.
+    rc, report, api = run_ev(wr_event(), serve(7, marker("APPROVE", H1), author="djbclark", assoc="OWNER"))
+    assert rc == 0 and api.posted[0]["state"] == "success" and report["prs"][0]["last_editor"] == "djbclark"
+
+
+def test_body_uses_current_editor_and_comment_history_is_bounded_newest_first():
+    # PR300 supersedes PR303's first:1 body query with valid current attribution;
+    # comments must still request the bounded whole edit history, never last:1.
+    q = adversary_marker.PR_QUERY
+    assert "editor { login } lastEditedAt" in q
+    assert "userContentEdits" not in q
+    q = adversary_marker.COMMENTS_QUERY
+    assert re.search(r"userContentEdits\(first: 100\)", q), q
+    assert not re.search(r"userContentEdits\(last", q), q
+
+
 # ---- the resolve job and --prs ---------------------------------------------------------------------------
 
 def test_resolve_gives_the_pr_numbers_and_the_concurrency_key():
@@ -1854,6 +1892,27 @@ def test_b1_an_edited_pr_body_with_a_deleted_editor_is_not_the_owners():
         "author": {"login": "djbclark"}, "editor": None, "lastEditedAt": EDITED_AT}}}}
     rc, report, api = run_ev(wr_event(), serve(7, marker("APPROVE", H1), second=second))
     assert api.posted[0]["state"] == "failure" and report["prs"][0]["outcome"] == "untrusted", report
+
+
+@pytest.mark.parametrize("editor_shape", ["missing", {}, {"login": None}, {"login": ""}])
+def test_b1_unknown_body_editor_cannot_inherit_owner_when_timestamp_is_null(editor_shape):
+    second = gql_doc(body=marker("APPROVE", H1))
+    pr = second["json"]["repository"]["pullRequest"]
+    if editor_shape == "missing":
+        del pr["editor"]
+    else:
+        pr["editor"] = editor_shape
+    rc, report, api = run_ev(wr_event(), serve(7, marker("APPROVE", H1), second=second))
+    assert rc == 0, report
+    assert api.posted[0]["state"] == "failure", report
+    assert report["prs"][0]["outcome"] == "untrusted", report
+
+
+def test_b1_explicit_never_edited_owner_body_still_approves():
+    rc, report, api = run_ev(wr_event(), serve(7, marker("APPROVE", H1),
+                                             second=gql_doc(body=marker("APPROVE", H1))))
+    assert rc == 0, report
+    assert api.posted[0]["state"] == "success", report
 
 
 # ---- B2 (Codex review, 2026-11-07): both shared-head lookups read every page -----------------------------------------

@@ -8,11 +8,11 @@ the PR waiter and the Codex local review: **`bin/review-launch`**, the only way 
 ## What is untrusted (operator, 2026-11-07: "any GitHub artifacts not directly from us are suspect")
 
 A PR's diff, body, title, commits and commit messages, branch name, issue and PR comments, review comments, bot
-and App comments (Codex, Cursor, Copilot included), check-run output and CI logs are all untrusted data, whoever
-the author: a prompt-injection attempt through a PR has already happened. They are read as data, never followed as
+and App comments (Codex, Cursor, Copilot included), check-run output and CI logs not authored or last edited by the repository owner are untrusted data (GitHub
+attribution is trusted; owner artifacts follow AGENTS.md's Trust rule): a prompt-injection attempt through a PR has already happened. They are read as data, never followed as
 instructions. The Action never executes, interpolates or checks out anything from a PR; the review model is told
 that the diff, the body and every file of its worktree are data under review and that it reports only through the
-schema. An APPROVE counts only in two places: the body of a PR the owner wrote and edited last, or an issue comment
+schema. An APPROVE counts only in two places: the body of a PR the owner wrote and edited last (or an explicit never-edited body; absent or malformed editor attribution fails closed), or an issue comment
 the owner posted on the PR (not through a GitHub App) that nobody but the owner has edited, since any repository
 writer can edit another user's comment (GraphQL `editor`, `lastEditedAt` and `userContentEdits`: every edit must be the owner's; an unknown history, or one
 longer than 100 edits, fails closed). The operator approves any other PR by posting the marker as
@@ -25,8 +25,8 @@ GitHub.)
 ## `bin/review-launch`: one `claude -p` inside a boundary
 
 ```sh
-review-launch --mode review|read-only -C WORKTREE --schema FILE (-p TEXT | -f FILE) [--head SHA] [--model M] [--max-turns N] [--timeout S] [--json]
-review-launch --check [--mode review|read-only] [--json]
+review-launch --mode review|read-only -C WORKTREE --schema FILE (-p TEXT | -f FILE) [--allow-web] [--head SHA] [--model M] [--max-turns N] [--timeout S] [--json]
+review-launch --check [--mode review|read-only] [--allow-web] [--json]
 ```
 
 | Mode | Tools (`--tools`) | The init event must list exactly |
@@ -109,8 +109,8 @@ gh pr merge N --squash --match-head-commit <the head the marker names>
 whatever its conclusion) and on `workflow_dispatch` (input `pr`). Both run the workflow file and the module from **master**;
 nothing from the PR is checked out or executed. Job `resolve` (no secret) finds the PR (the event's `pull_requests[]`, else
 `commits/{sha}/pulls`, else `pulls?head=owner:branch` for a fork) and outputs its number; job `marker` runs in the
-concurrency group `adversary-marker-<that number>` (a newer run for the PR cancels an older one; a sha two PRs share never
-merges their groups), reads the body and head through the API with the job's read-only token (`pull-requests: read`,
+concurrency group `adversary-marker-<head sha>` (2026-11-07: runs sharing a head serialize together; every open
+PR at that head is judged before one aggregate status is posted), reads the body and head through the API with the job's read-only token (`pull-requests: read`,
 `contents: read`), judges the marker with the parser moved unchanged from the PR waiter (rule 1's five properties, 2,559
 test cases), **re-reads the head, the body and its last editor in one GraphQL query and posts only if the head is
 unchanged** (judging that second read's body), and posts the commit status `adversary-marker` on that head with a token of

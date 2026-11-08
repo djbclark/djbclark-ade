@@ -1170,8 +1170,8 @@ def _pr_state_trusted(api, repo: str, n: int) -> dict:
         raise ValueError(f"graphql pr {n}: head is not 40 hex: {head!r}")
     author = str(((pr.get("author") or {}).get("login")) or "")
     editor = str(((pr.get("editor") or {}).get("login")) or "")
-    if not editor and "lastEditedAt" in pr and pr["lastEditedAt"] is None:
-        editor = author                       # never edited; a missing field is an unknown editor (fail closed)
+    if "editor" in pr and pr["editor"] is None and "lastEditedAt" in pr and pr["lastEditedAt"] is None:
+        editor = author                       # explicit never-edited shape only; absent/malformed editor is unknown
     owner_pr = bool(author) and author.lower() == owner.lower()
     body = pr.get("body")
     return {"state": str(pr.get("state") or "").lower(), "head": head, "body": body if isinstance(body, str) else "",
