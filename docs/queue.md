@@ -94,6 +94,9 @@ under **Carried**, newest first, one line each; an item leaves when it ships (in
     (2026-10-20, pre-slim: re-base it on Paseo and the slim-down's tool list). Widened the same day to GitHub setup for a new
     user (the `ade-merge-gate` App), prompt-injection hardening on demand with a daily drift check, one config file
     (`config/ade.toml`), a justfile entry point, and browser-only steps through Grok Bot: the plan is `docs/setup-plan.md`.
+    Later operator additions (2026-11-07): S4b manages ADE-owned jobs and checks other owners without taking them over;
+    S5a builds the measured Jev injection gate with this setup work; S9 plans cloud-agent communication last, after
+    signing and the earlier sections, and builds only with headroom. Overall and local coordination now share the local lead.
 
 36. **Pi-primary evaluation** (operator, 2026-11-07, tentative): upstream Pi as the primary multi-vendor client, with
     omp kept until it passes. First restore Pi, `pi-acp` and `~/.pi` (P11 removed them, C49), then run the acceptance

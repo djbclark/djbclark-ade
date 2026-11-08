@@ -1,7 +1,9 @@
 # Setup, hardening and updates: plan (queue Carried 35)
 
-Plan, 2026-11-07, not started. The operator asked for it the same day, in five parts: an easy install on a new Mac or Linux
-machine with every dependency and TUI; automatic updates of djbclark-ade and its dependencies; easy setup of the GitHub
+Plan, 2026-11-07, not started. Overall and local coordination now belongs to the operator-appointed local
+workhorse lead, with higher-tier judgment delegated through the router. This transfers coordination from the Claude
+cloud lead; it does not change provider defaults or the historical slim-down rulings. The operator asked for the plan
+the same day, in five parts: an easy install on a new Mac or Linux machine with every dependency and TUI; automatic updates of djbclark-ade and its dependencies; easy setup of the GitHub
 pieces a new djbclark-ade user needs (the `ade-merge-gate` App first); prompt-injection hardening of GitHub, both at setup and
 on demand, with an ongoing check that the policy stays applied; and one config file for every djbclark-ade option. A sixth
 part was added: prompts and code that hand any browser-only step to Grok Bot. Later the same day: aiuse and
@@ -9,8 +11,10 @@ sudo-secretspec are hard dependencies, every listed component is in the install 
 products, and Hermes is offered with a do-it-yourself or AI-assisted setup (S3, S3a). Then: the commercial services (1Password,
 Grok Bot, GitHub Advanced Security, hosted firecrawl, Greptile, CodeRabbit) are optional components, and OVHcloud is
 the suggested host. Then: API keys for every TUI and tool are checked, verified, collected in one batch and delivered
-(S3b). The sections below go in build order:
-S1 and S2 come first because every later section reads the config and adds a recipe.
+(S3b). The operator added managed jobs/services (S4b), the measured injection-gate build (S5a), and cloud-agent
+coordination (S9). The sections below go in build order: S1 and S2 come first because every later section reads
+the config and adds a recipe. S5a precedes final review of each adopting reader. S9 stays last, after S1-S8,
+item-24 message signing and S5a, and is built only with headroom.
 The research behind S5 is dated 2026-11-07. Sources are listed at the end, and their facts must be re-probed when the work starts.
 
 ## S1. One config file
@@ -26,9 +30,11 @@ The research behind S5 is dated 2026-11-07. Sources are listed at the end, and t
    `[context_budget]`, `[pr_policy]`, `[secret_deny]`, `[install]`, `[update]`, `[github]`, `[hardening]`.
    - Today's files fold into it one at a time: `routing.toml`, `gates.toml`, `context-budget.toml`, `pr-policy.toml`,
      `secret-deny.toml`, and the JSON policies where they are hand-edited.
-   - During the migration each tool reads its old file when present. It warns once and prefers `ade.toml`.
-3. **Per-machine overrides** go in `~/.config/djbclark-ade/local.toml`, which is never tracked. Values merge table by
-   table, and the local file wins. Secrets are never stored in either file: a field names a `sudo-secretspec` key.
+   - During migration, a missing new-format file uses a documented legacy projection. A present valid new-format file
+     takes precedence; malformed new-format input fails validation rather than silently using legacy policy.
+     Existing readers stay unchanged until their explicit adoption PR (implementation contracts below).
+3. **Per-machine overrides** go in `~/.config/djbclark-ade/local.toml`, which is never tracked. Tables merge recursively by leaf, arrays replace whole,
+   and the local file wins; type conflicts and duplicate identities are rejected. Secrets are never stored in either file: a field names a `sudo-secretspec` key.
 4. **`bin/ade-config get|set|check|diff`** is the one reader and writer. A set is atomic (a temp file, then `os.replace`)
    and keeps the comments. The `switch` lines that AGENTS.md promises become `ade-config set` lines, for example
    `ade-config set lead.fable_lead false`.
@@ -270,6 +276,49 @@ Keys are saved with `sudo-secretspec`, and also through Paseo if it has a secure
 3. **New components:** a component added to `[install]` on master is installed on each machine by that machine's next
    `just update`, so adding a dependency is one table entry and one PR.
 
+### S4b. Scheduled jobs and services
+
+Operator, 2026-11-07: install and update manage every scheduled job and service that is reasonable to manage. On the
+card the operator chose "ours, plus checks": djbclark-ade manages its own jobs and checks the rest.
+
+1. **One inventory**, `config/ade.toml [install.jobs]`. Each entry has:
+   - name;
+   - kind: launchd agent, systemd user timer, cron (only where neither of those exists), Paseo schedule, or service;
+   - owner: `djbclark-ade`, the site repo, or a dependency;
+   - schedule and command;
+   - for a Paseo schedule, its explicit `--mode` (`auto` / `auto-review`; never left out, `docs/scheduling.md`);
+   - its class from S3.2 (hard, offered, optional).
+2. **djbclark-ade's own jobs** are rendered and installed by `bin/ade-sched`: launchd on the Mac, systemd user timers
+   on Linux, cron otherwise.
+   - Today's list: `load-watch sample`, `deadline-sweep`, `pr-policy`, the daily `just update --auto` (S4), the daily
+     `just harden-check` (S6) and `just keys --check` (S3b).
+   - Paseo schedules (the context-budget check C69, the upstream check C70) are created, updated or deleted by name
+     with `paseo schedule create|update|delete`, then read back with `paseo schedule ls --json`.
+   - Re-running is idempotent: an unchanged job is left alone, a changed one is reloaded.
+3. **Dependencies' services** are installed by each dependency's own installer, never re-implemented here: the Paseo
+   daemon, aiuse's sampler, and Hermes' gateway and dashboard where Hermes was chosen. `just doctor` checks that each
+   one runs.
+4. **The site repo's jobs** (site-djbclark's fleet-watch, net-watch, watchdogd, the firecrawl MCP and the LiteLLM
+   proxy roles) stay with that repo's own deploy. `just install` runs `just deploy-mac` (or the Linux equivalent) in
+   the site repo as one step, named in `[install.site_repo].deploy`, and does not reimplement it.
+5. **Root-level items** (LaunchDaemons, `/etc/sudoers.d`, `/etc/resolver`) go through a separate
+   `just install --system`. It shows each change, needs sudo, and never runs from the daily automatic job.
+6. **Removal.** A job dropped from the inventory is unloaded, and its file removed, by the next `just update`. Only
+   jobs recorded in `~/.local/state/djbclark-ade/jobs.json` (written atomically) as installed by djbclark-ade are
+   ever removed. Anything else is reported, not touched.
+7. **Drift.** `just doctor` and the daily job compare the loaded state with the inventory for every owner:
+   - `launchctl print gui/$UID/<label>`;
+   - `systemctl --user list-timers`;
+   - `crontab -l`;
+   - `paseo schedule ls --json`.
+
+   They fix only djbclark-ade's own jobs and report the rest.
+8. **Retired jobs.** The slim-down's retired launchd jobs (`docs/slim/operator-batch.md` C6-C21: skillopt-sleep, the
+   watch family, acp-dispatch-reap and the rest) become `[install.retired_jobs]`. `doctor` checks that each is absent
+   and reports one that comes back. Pi is NOT on this list: Pi is under evaluation (Carried 36).
+9. **Never touched:** Orca, BB and herdr configuration (AGENTS.md), and any job whose owner is unknown. Those are
+   reported, so the operator decides.
+
 ## S5. GitHub hardening against prompt injection
 
 Threat (docs/threat-model.md; the Trust section of AGENTS.md): every GitHub artifact not authored by the owner is
@@ -310,6 +359,102 @@ titles, issue bodies and comments. Reducing who can write those artifacts is the
    repositories are personal. So the applier is our own `bin/ade-harden` over `gh api`, with `safe-settings` as the
    model. A setting with no API is a browser task (S7).
 
+## S5a. A typed classifier as an extra injection gate
+
+The hardening in S5 reduces who can write outside content; this section adds a
+cheap probabilistic reader-side gate for the content that still reaches agents.
+It is built and measured **before** the final code and security reviews of any
+reader that gets it (the order the operator set 2026-11-07): a gate that has
+not been measured on our own traffic is a false sense of security, not a gate.
+
+1. **What the gate is.** `bin/ade-injection-gate` — one shared tool every
+   outside-content reader calls (`pr-policy`, `review-pr`, `skills/loose`,
+   the Jira and firecrawl readers, and any agent brief that carries quoted
+   outside text; plus `fleet-watch`, which lives in site-public-djbclark, so
+   its hold is an out-of-repo integration to wire and verify from there —
+   pending this repo's build). It sends the text as `state` with one fixed
+   `choice` question (injection vs benign, the eval's prompt shape) and
+   returns the probability distribution, the `decide` at the thresholds
+   below, and the latency. The classifier is Jev (TypeSafe hosted,
+   `jev-latest`) — the only
+   one of the three measured models that separates injection from benign text
+   (2026-11-07 eval: 32% recall at the 0.9 bar, 1.3% FP, 163 ms p50, ~$0.00003
+   per call). Kev-0.8B and Laya were measured near-chance on this task and are
+   NOT used for the gate (they stay in their existing judgment roles). The
+   classifier is probability-only, no tools, no text generation, so the
+   payload can steer nothing (S3 of the eval: no tool-using model ever sees a
+   payload).
+
+2. **Thresholds (the skill's own).** Act only at `p(injection) >= 0.9`
+   (treat as injected: strip, quarantine or refuse) or `p(injection) <= 0.1`
+   (treat as ordinary text, still tagged untrusted — a low score is NOT trust).
+   Between 0.1 and 0.9 the gate returns `escalate`: tag the text untrusted,
+   add it to the shadow log, and let the reader's existing untrusted-data rules
+   carry on. The gate never approves anything and never lowers a tag.
+
+3. **Fail-closed rules.**
+   - Classifier unreachable (the helper's exit 3, a restart window) or any
+     error, timeout or malformed answer: the text is **never treated as
+     clean**. On ordinary surfaces the caller tags it untrusted with the gate
+     unavailable, logs the miss, and its existing untrusted-data rules carry
+     on. On the one surface whose whole point is the hold — the fleet-watch
+     upstream `--perm all` dispatch (F-CRIT-1) — **no verdict means no
+     dispatch**: the notice is queued for the operator instead. The S6 drift
+     job alerts when gate unavailability has lasted more than 1 hour of wall
+     clock time.
+   - Any error, timeout or malformed answer is the same as `escalate`, never
+     `benign`.
+   - The gate runs **before** the text enters an agent context, not inside it:
+     the reader calls `ade-injection-gate` on the fetched artifact and passes
+     on text + verdict + provenance, so even a wrong `benign` leaves the
+     Trust-section rules (data, never instructions) intact.
+
+4. **What it does per surface** (from the eval's per-surface results; the
+   eval doc is authoritative for why):
+   - **PR/issue bodies, titles and comments (own repos, S1.1-S1.3):** tag +
+     shadow-log, not block — recall below the 0.9 bar means a block would
+     create false confidence; provenance (`author_association`) stays the
+     primary control.
+   - **Dependabot PR bodies and CI logs (S1.4-S1.5):** tag; the gate's value
+     here is triage ordering, not blocking.
+   - **firecrawl / web-search results (S4.1):** tag; too high FP risk on
+     ordinary technical text to block.
+   - **CFEngine Jira text (S3.1):** tag + escalate-to-operator on
+     `p >= 0.9`.
+   - **fleet-watch notices (S1.7 upstream):** escalate on `p >= 0.9` — this
+     is the zero-click dispatch path of Argon F-CRIT-1, so any confident
+     injection verdict holds the dispatch for the operator.
+   - **Agent-to-agent `paseo send` messages:** the gate does not mediate peer
+     messages (trust model, AGENTS.md Trust); the `"djbclark approved"`
+     chain is fixed out-of-band (F-CRIT-1), not by a classifier.
+
+5. **Config (`config/ade.toml`).**
+   ```toml
+   [hardening.injection_gate]
+   enabled = true            # false = pass-through with tag "unverified"
+   model = "jev"             # api.typesafe.ai alias; kev/laya measured unusable (eval 2026-11-07)
+   act_high = 0.9            # p(injection) >= this -> injection verdict
+   act_low = 0.1             # p(injection) <= this -> ordinary text (still untrusted)
+   max_ms = 5000             # caller-side timeout; over = escalate (fail-closed)
+   fail_closed = true        # never false in production; tested in CI
+   shadow = true             # log verdicts beside the reader's outcome
+   surfaces = ["pr", "issue", "comment", "ci-log", "dependabot", "web", "jira", "fleet-watch"]
+   ```
+
+6. **S6 drift check for the gate.** `just harden-check` (S6) gains a
+   `gate-health` probe: one benign canary text and one disclosed-payload
+   canary (from the eval's corpus, ids recorded, payload text never committed)
+   through `ade-injection-gate`; the check fails if the canary answers `benign`
+   at `p <= 0.1`, if the benign canary answers `injection` at `p >= 0.9`, if
+   latency exceeds `max_ms`, or if the gate is unreachable — so a silently
+   degraded or switched-off gate is caught daily, not discovered during an
+   incident.
+
+7. **Order of work.** The gate is built and measured (the eval doc's method,
+   rerun monthly on fresh benign traffic) **before** the final code and
+   security review of each reader that adopts it; new readers adopt it at
+   review time, not after.
+
 ## S6. Ongoing check that the policy holds
 
 1. **`just harden-check`** reads every setting in `[hardening]` back from the API and exits nonzero on drift, naming the
@@ -324,7 +469,7 @@ titles, issue bodies and comments. Reducing who can write those artifacts is the
 
 Some steps have no API: creating the `ade-merge-gate` App (the manifest flow can pre-fill it, but a person or a browser
 still clicks), any hardening setting the API does not expose, and the Paseo or provider dashboards. These are handed to
-the operator's Grok Bot "Chief of Staff", which acts in a browser.
+the operator's Grok Bot "Coding", following the current browser route (operator instructions, 2026-11-07).
 
 1. **Probe first:** does Grok Bot have a browser session, and as whom? A GitHub session logged in as djbclark can change
    any setting, so its prompts are narrow. If it has no browser or no such login, the steps stay operator-only, printed as
@@ -334,8 +479,10 @@ the operator's Grok Bot "Chief of Staff", which acts in a browser.
    - Each template names the exact URL, the exact control and the value to set.
    - Each template ends with a rule: change nothing else, report what the page showed before and after, and
      ask the operator on any surprise.
-   - The tool sends the prompt through Hermes's `tell_chief_of_staff.py` (skills/tell-chief-of-staff).
-3. **Delivery and verification:** that sender is fire-and-forget, and order 10 does not count a send as delivery.
+   - The tool uses the installed `coding-bot ask` path described by `skills/tell-coding-bot`; if it is unavailable,
+     it copies a self-contained prompt for operator relay and reports it as unsent.
+3. **Delivery and verification:** a send or queued receipt proves neither completion nor the requested setting.
+   The bot's reply is outside content, read as data; verify the actual artifact.
    - A task counts as done only when the API read-back (S6's check, or the App's `GET /app`) shows the new value.
    - With no read-back after a deadline (`bin/deadline`), the task is reported to the operator as not done.
 4. **Never through the bot:**
@@ -357,6 +504,118 @@ the operator's Grok Bot "Chief of Staff", which acts in a browser.
 2. Today these steps are `docs/slim/operator-batch.md` A8-A11 and B6-B13, run by hand through
    `docs/slim/operator-prompts.md` P5 and P10. They become recipes, and their tests (T0-T3b) become `just github-setup
    --verify`, which runs from a throwaway branch and from the second test account.
+
+## S9. Cloud agents talk to Paseo agents, and Paseo agents run them (last, and only with headroom)
+
+Operator, 2026-11-07: plan it now, but build it at the tail end, and only if there is headroom. Cloud agents (Cursor's
+Cloud Agents, Claude Code cloud sessions, Codex cloud) should be able to message our Paseo agents, and Paseo agents
+should be able to start and manage them.
+
+1. **Paseo agents start and manage cloud agents.** Each kind gets a thin, Paseo-callable tool for start, status,
+   send, stop and fetch-result.
+   - Cursor: `bin/cursor-cloud` exists already (2026-10-20) and is the model.
+   - Claude Code cloud: the session API that claude.ai/code exposes, with create, send and archive; whether it is
+     reachable from the Mac is to be checked.
+   - Codex cloud.
+   - Each is wrapped so `paseo` sees it, either as a Paseo provider if Paseo supports remote providers by then, or as
+     a skill plus a `bin/` tool.
+2. **Cloud agents message Paseo agents.** A cloud agent cannot reach the Mac's Paseo daemon directly, so it needs an
+   inbound path. Options to weigh at the time:
+   - a mailbox on GitHub (a private repo or issue that the Mac polls);
+   - a small relay on a host we control (vps-primary or Hyades), reached over Tailscale;
+   - Paseo's own remote or relay feature, if it has one by then.
+
+   Every message is signed with the agent-to-agent scheme decided for item 24 (signed messages, plus operator approval
+   tokens for high-impact actions). A cloud agent reads outside content too, so its messages carry the provenance
+   label and never count as operator approval.
+3. **Order:** after S1-S8, the item-24 signing, and the injection-classifier gate (S5a). Built only if the plan's
+   headroom allows; otherwise it stays here as a plan.
+4. **Also weigh: djbclark-ade, and maybe a Paseo daemon, inside each cloud instance** (operator, 2026-11-07).
+   - (a) **A stripped-down "cloud" install profile:** `just install --profile cloud`, which installs:
+     - AGENTS.md and the skills;
+     - the tools that need no Mac (route_agent's policy reader, `adversary_marker.py`, review-launch, the
+       message-signing tool from item 24);
+     - the trust rules.
+
+     It runs from each platform's own setup hook: a Claude Code cloud environment's setup script, Cursor's
+     environment and install step, Codex cloud's setup script. Expect it to be cheap and useful: every cloud agent
+     follows the same rules and tools as the local ones. It installs no secrets, holds no operator keys, and runs no
+     scheduled jobs.
+   - (b) **A Paseo daemon in each cloud instance,** paired with the Mac's Paseo as a remote host. Paseo already knows
+     saved hosts; paseo-runner's `sync-plugins.mjs` walks them. If pairing works, the Mac could start, message and
+     manage cloud agents with plain `paseo` commands, and cloud agents could message back through the same link.
+     Open questions:
+     - can a cloud daemon pair through an outbound-only connection (cloud containers take no inbound connections and
+       sit behind an egress proxy)?
+     - does a short-lived container's daemon survive its session?
+     - what does the pairing credential let a cloud agent do on the Mac's daemon?
+
+     Treat it as an experiment. It is adopted only if the pairing can be scoped so a cloud agent cannot start, steer
+     or approve Mac agents beyond signed, provenance-labelled messages. Otherwise items 1 and 2 stand.
+
+## Implementation contracts (2026-11-07)
+
+These clarify the plan after source inspection and the independent Astra advisory; they do not claim implementation
+or live verification. The operator's S4b/S5a/S9 text above is preserved. Build these contracts before relying on their
+safety properties, and keep existing readers unchanged until their adoption is reviewed.
+
+1. **First bounded S1/S2 unit.** Add a versioned effective-config reader, checked schema, legacy projection,
+   nonsecret source provenance and thin `just config-check` entry point. No installs, schedules, key/network probes,
+   live config writes or consumer behavior switch. Publish one explicit projection table covering routing's current
+   `[[service]]`, `[lead]`, `[dispatch]`, `[substrate]`, `[hermes]`, `[calibrate]` and gate floors; do not implicitly
+   nest the entire old routing file. Preserve `ROUTING_POLICY` and `GATES_TOML` as isolated legacy-format overrides.
+   Missing new config may project legacy; malformed or unknown-version new config must fail, including invalid local
+   overrides. Recursive table merge keeps siblings; whole-array replacement does not concatenate services.
+   Preserve existing policy bounds and failure behavior. Fixtures must prove equivalence, override precedence,
+   type/identity failures and no writes. Comment-preserving atomic `set` follows before adopting editable config.
+   Bootstrap Python 3.11+ before relying on `tomllib`.
+2. **One desired job specification.** The TOML inventory feeds `Job.from_dict` and the existing `ade-sched`
+   renderers. Existing plists are compatibility inputs until migrated, not a second editable authority. Distinguish
+   timer/service lifecycle from launchd/systemd/cron/Paseo backend; cron does not supervise services. Use stable logical
+   job identities, typed schedules/timezones and argv commands, with runtime IDs in local state. Update
+   `docs/scheduling.md` when adopting the new source of truth. Explicit Paseo modes are validated, never guessed.
+   Curate retired job IDs from the operator batch: its range also contains non-job operations. Retired entries only
+   check absence. Pi remains under evaluation and is not a retired component or job.
+3. **Authority and selection.** ADE directly reconciles only its recorded user jobs. Dependency installers and site
+   deploy remain their owners' paths; plain doctor observes/reports, while requested repair or automatic update may
+   reconcile only ADE scope. Root effects require the separate shown `--system` transaction; `--auto` must not reach
+   root effects indirectly through another installer. Existing unrecorded installations require verified adoption;
+   name prefixes and generated comments establish no ownership. Unknown owners, Orca, BB and herdr stay untouched.
+   New hard requirements can be installed by update; offered, optional and commercial additions require an existing
+   recorded choice rather than automatic opt-in.
+4. **Recoverable, idempotent reconciliation.** Keep a versioned ownership ledger with generation, logical ID,
+   host/user scope, backend/runtime identity, exact managed paths, nonsecret spec/artifact hashes and verification.
+   Under one reconciliation lock, persist pending intent before writes and committed ownership only after read-back.
+   Intent alone is no removal authority. Recover interrupted operations by checking exact state, reporting conflicts
+   rather than deleting broadly. Missing/invalid ownership state means no removal. Preserve old/new identities across
+   backend migration and verify absence before completing removal. Distinguish unknown/error observations from absent.
+   Unchanged healthy jobs receive no writes/reloads; compare desired, last-applied and actual effective definitions.
+5. **Preserve active work.** Disruptive update, reload, migration or removal needs shared admission and per-job
+   activity evidence, not just one idle-agent snapshot. Unknown or busy state defers durably. Drain running work
+   without killing or restarting paid runs; defer if the backend cannot stop future triggers safely. Do not reload
+   the updater's own running service: leave its next generation pending. Until all launch paths participate, report
+   conservative deferral rather than claiming race-free quiescence. Linux user-manager/linger prerequisites stay
+   explicit; an unavailable systemd user manager is not a reason to silently switch to cron.
+6. **S5a verdicts and actions are separate.** Keep one typed classifier result and the per-surface action matrix.
+   Ordinary GitHub/web surfaces retain tagging/shadow behavior; fleet upstream dispatch requires an actual verdict.
+   Disabled, unavailable, timeout or malformed gate output cannot authorize that dispatch, including when a global
+   enable switch would otherwise pass through. Keep measured thresholds and recall limitations; never promote
+   classifier output to trust or operator approval. Record payload-free IDs, provenance and verdict/health metadata.
+   Before hosted processing of private text, define eligible payloads and retention for that reader. Canary integration
+   needs an authorized fixture/provisioning source; never read the retained evaluation cache to obtain one. The
+   injection canary must classify as injection and the benign canary as benign. Reader failure timestamps plus an
+   existing health path at a specified sub-hour cadence support the one-hour outage alert; daily canaries are separate.
+7. **S6 checks remain checks.** Keep `harden-check` read-only. A separately authorized automatic-update operation may
+   renew only the configured expiring interaction limit after checking the exact target/current state and reading it
+   back. No other hardening repair is implied by daily checks. Browser-bot replies and queued messages are not proof
+   of completion; retain API or artifact read-back.
+8. **S9 signing prerequisite.** “Item 24” in S9 means the operator's planned signed-agent-message contract, not
+   Carried 24 in `docs/queue.md`. Define versioned sender/provenance, recipient, payload integrity, expiry and replay
+   handling before choosing a transport. A cloud signature authenticates a message, not an operator approval; require
+   separate operator tokens bound to high-impact actions. The cloud profile installs the signing tool with no keys
+   or authority. Evaluate scoped runtime agent identity later; never ship an operator/shared signing private key.
+   Cloud APIs, outbound pairing and credential scope remain unverified. Reject pairing that exceeds signed-message
+   authority. No S9 experiment, installation or routing change occurs before its stated prerequisites and headroom.
 
 ## Sources (2026-11-07)
 
