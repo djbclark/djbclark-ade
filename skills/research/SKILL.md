@@ -207,7 +207,7 @@ pages. On a host with the `model-routing` skill (effort folded into it 2026-11-0
    writer drafts or merges them into one `report.md`; the counter files
    merge the same way. Codex may be used sparingly when its pools are tight
    (skip it for a slice rather than wait), the other two always run. A
-   cheaper model (Sonnet, `grok-4.7-build-fast`, an opencode-go model) may stand in for a
+   cheaper model (Sonnet or another currently eligible model selected by the router) may stand in for a
    family on a slice where it would change research quality little, such
    as a narrow fetch or a search log. **No weekly quota floor**: dispatch to the most capable
    agent until `aiuse --available` drops its pool; an exhausted pool waits

@@ -108,7 +108,8 @@ an Agent-tool Fable call asks).
 D4. **Quota limits are the session-guard and usage-auto-resume plugins' job** (D4, 2026-11-07): they pause a session at
 a quota limit and continue it after the reset. The fleet governor and the quota guard were deleted. When the Claude
 windows are short (`route_agent.py show`), select a fresh eligible pool through the router. Do not fall back to
-an archived TUI or infer that a manual Pi smoke test authorizes automatic routing. Claude code slices use Sonnet.
+an archived TUI or infer that a manual Pi smoke test authorizes automatic routing. When those windows are short,
+Agent-tool sub-agents run with `model: "sonnet"`; Claude code slices use Sonnet.
 D5. **In-flight slices reserve quota per service** (`[dispatch.estimate_floor]`, the repo overrides for tendcf and
 nix2cf): `acp-dispatch` refuses a slice that does not fit (exit 5, class `inflight`).
 
