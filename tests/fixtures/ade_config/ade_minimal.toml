@@ -1,0 +1,58 @@
+
+schema_version = 1
+
+[routing]
+kinds = ["code"]
+plenty_min = 60.0
+burn_first_min = 0.0
+burn_first_bonus = 0.0
+burn_first_waste_min = 0.0
+pace_penalty_above = 1.0
+pace_penalty = 0.0
+pace_penalty_judgment_factor = 1.0
+default_profile = { code = 1 }
+never_route = []
+
+[calibrate]
+min_outcomes = 1
+min_peers = 1
+suggest_worse_below = 0.0
+suggest_worse_delta = 0
+suggest_better_above = 1.0
+suggest_better_delta = 0
+
+[dispatch]
+operator_gated = []
+frontier_models = []
+
+[hermes]
+models = {}
+provider_name = {}
+
+[lead]
+model = "opus"
+effort = "high"
+fable_lead = true
+
+[gates.frontier]
+frontier1_judged = 1
+frontier2_judged = 1
+frontier1_per_wave = 2
+frontier2_per_wave = 1
+frontier1_agent_calls_per_day = 4
+frontier1_min_left = 15.0
+frontier1_window_min_left = 30.0
+frontier2_min_left = 60.0
+
+[gates.floors.frontier]
+frontier1_judged = { loosen = "higher", bound = 1 }
+frontier2_judged = { loosen = "higher", bound = 1 }
+frontier1_per_wave = { loosen = "higher", bound = 2 }
+frontier2_per_wave = { loosen = "higher", bound = 1 }
+frontier1_agent_calls_per_day = { loosen = "higher", bound = 4 }
+
+[[service]]
+name = "claude"
+cli = "claude"
+good_at = { code = 1 }
+billing = "subscription"

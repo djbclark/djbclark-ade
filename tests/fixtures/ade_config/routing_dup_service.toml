@@ -1,0 +1,37 @@
+
+[routing]
+kinds = ["code"]
+plenty_min = 60.0
+burn_first_min = 0.0
+burn_first_bonus = 0.0
+burn_first_waste_min = 0.0
+pace_penalty_above = 1.0
+pace_penalty = 0.0
+pace_penalty_judgment_factor = 1.0
+default_profile = { code = 1 }
+
+[calibrate]
+min_outcomes = 1
+min_peers = 1
+suggest_worse_below = 0.0
+suggest_worse_delta = 0
+suggest_better_above = 1.0
+suggest_better_delta = 0
+
+[dispatch]
+operator_gated = []
+
+[hermes]
+models = {}
+
+[[service]]
+name = "claude"
+cli = "a"
+good_at = { code = 1 }
+billing = "subscription"
+
+[[service]]
+name = "claude"
+cli = "b"
+good_at = { code = 2 }
+billing = "subscription"
