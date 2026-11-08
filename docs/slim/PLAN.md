@@ -1,6 +1,9 @@
 # djbclark-ade slim-down: plan of record, v2 (2026-11-06)
 
-Lead: a Claude cloud session (Fable 5.1, effort high). Operator: djbclark.
+Original lead: a Claude cloud session (Fable 5.1, effort high). Operator: djbclark.
+Current coordination (operator, 2026-11-07): the local workhorse lead now owns both overall and local work,
+with Astra or Claude Opus 5.5 judgment delegated through the router when useful. The Claude-only ruling
+below records the original slim-down, not the later setup-plan work. See [the setup plan](../setup-plan.md).
 Status: v2, for Codex review on the PR that carries it, then one more round
 to final. v1 (same day, same file in git history) was written before the
 check-ins and the research briefs; section A says what changed. Every number
