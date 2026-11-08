@@ -130,7 +130,8 @@ under the owner's login) is ours. The review boundary and the merge gate below a
    is accepted (exit 5: Paseo queues every agent-to-agent message and reports no later delivery) and proven only by the
    peer's `ack <your agent id>`; exit 2 is not delivered; `paseo send`'s `$?` is never read as delivery. Writing an answer
    in your own turn does not reach a peer: a message from a peer is answered by sending to that peer, not in prose. Every
-   message that needs to be known delivered asks for the named ack (`--ack <your id>` appends the request); the first
+   message that needs to be known delivered asks for the named ack (relay.py's `--ack <your id>` appends the request; `paseo send` has no `--ack`, so write
+   `Please reply: ack <your id>` into the text and pass `--no-wait`, since a send to a busy peer can block for minutes); the first
    message to a new peer always asks for one, to prove the return path; check your own inbox for it, re-send when none
    arrives, and report a peer you cannot reach to the operator, never assume it read.
 
