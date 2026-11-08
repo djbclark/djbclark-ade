@@ -48,8 +48,9 @@ under **Carried**, newest first, one line each; an item leaves when it ships (in
     final slim-down PR is a natural point); a daily `ade-update --check` timer through `bin/ade-sched`.
 16. **Codex Cloud environment** (2026-10-19): blocked upstream (openai/codex#50182, #51585); re-probe after each
     codex-cli release.
-17. **Claude API credits through omp** (2026-10-19): confirm a slice's cost lands on the credits row in aiuse; the
-    "burn before reset" view. Lives in `~/src/aiuse`, `skills/model-routing` C.
+17. **Claude API credits through Pi** (2026-11-08): the API check was billing-blocked; re-check only after funding
+    and explicit pool acceptance, then verify its aiuse attribution. Claude subscription quota is separate; archived
+    omp is never a fallback. Lives in `~/src/aiuse`, `skills/model-routing` C.
 18. **Paseo Telegram plugin as the phone surface** (SF-Q16, 2026-10-19): blocked on a release compatible with the
     current daemon; then re-point `hermes-ping` and the approval buttons, Hermes's relay as the rollback. The 2fado
     Telegram fallback (2026-10-25) waits for this.
@@ -95,12 +96,15 @@ under **Carried**, newest first, one line each; an item leaves when it ships (in
     user (the `ade-merge-gate` App), prompt-injection hardening on demand with a daily drift check, one config file
     (`config/ade.toml`), a justfile entry point, and browser-only steps through Grok Bot: the plan is `docs/setup-plan.md`.
     Later operator additions (2026-11-07): S4b manages ADE-owned jobs and checks other owners without taking them over;
-    S5a builds the measured Jev injection gate with this setup work; S9 plans cloud-agent communication last, after
-    signing and the earlier sections, and builds only with headroom. Overall and local coordination now share the local lead.
+    S5a originally accompanied setup, but security implementation is deferred by the 2026-11-08 operator ruling;
+    S9 plans cloud-agent communication last, after signing and the earlier sections, and builds only with headroom.
+    Overall and local coordination now share the local lead.
 
 36. **Pi-only third-party client** (operator, 2026-11-08): migration and archive-only history search shipped;
     omp/OpenCode/Crush are archived, never fallbacks. Dynamic defaults use explicit per-pool acceptance and
-    task boundaries (`docs/pi-defaults.md`). Other Pi pools still need continuation/quota/identity acceptance;
+    task boundaries (`docs/pi-defaults.md`); normal startup and an unpinned live request passed after activation.
+    Grok subscription (Pi and vendor ACP) and Antigravity Pi passed basic tool checks (`docs/pi-services.md`).
+    These and other manual Pi paths still need continuation/quota/identity acceptance for automatic routing;
     Claude API credits remain billing-blocked, separate from the vendor subscription. Security implementation
     and SIPB reliability work are deferred; prior evidence remains in `docs/tui-security-and-pi-migration.md`.
 

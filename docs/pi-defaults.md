@@ -66,8 +66,10 @@ exact Pi/Paseo integration, and public token prices are not subscription costs.
 
 B3. Judgment and frontier keep the stronger, separately metered vendor routes
 and existing gates. No judgment qualification is inferred for the two Pi rows.
-Go awaits account scoping; Antigravity awaits normal OAuth and fresh pool
-acceptance. OpenAI API and Anthropic API billing blocks remain separate from
+Go awaits account scoping. Grok subscription and Antigravity OAuth paths passed
+basic native tool checks on 2026-11-08; their continuation, quota and routing
+acceptance remain separate work ([service status](pi-services.md)). Neither is
+added to this automatic shortlist by those checks. OpenAI API and Anthropic API billing blocks remain separate from
 Codex and Claude subscriptions. SIPB is parked. Disabled/reserved pools and
 archived TUIs are never automatic fallbacks. Hermes's chain is unchanged.
 
@@ -114,3 +116,12 @@ Cursor Composer 2.5 across two requests, selected Z.ai Flash low at an explicit
 mechanical task with `--native-tools`, and retained that choice after reopening
 the persisted session. This validates the extension through Pi's public SDK;
 it does not claim the global default is installed or a Paseo resume is tested.
+D4. 2026-11-08 activation: the reference checkout was fast-forwarded to merged
+[PR 315](https://github.com/djbclark/djbclark-ade/pull/315), preserving its unrelated
+Graft edits byte-for-byte under the operator's explicit approval. The public
+settings API registered the extension and made `ade/auto` the new-session
+default while preserving unrelated settings. Fresh normal Pi RPC startup
+reported `ade/auto`; one ordinary CLI request without an explicit model selected
+Cursor Composer 2.5 and completed successfully. This establishes the normal
+startup path in addition to D3's SDK checks. Existing sessions were not restarted;
+no native Paseo resume validation or additional pool qualification is claimed.
