@@ -5,4 +5,4 @@
 - Retired automatic routing through uninstalled omp and OpenCode clients while preserving their pool metadata for the Pi migration. (#310)
 
 ### Fixed
-- Preserved indexed history when a client, adapter or source log was unavailable, instead of pruning a retired client's sessions. (#310)
+- Preserved indexed history when a client, adapter or source log was unavailable or a JSONL transcript was damaged, instead of pruning sessions or replacing complete history with partial parsing. (#310)

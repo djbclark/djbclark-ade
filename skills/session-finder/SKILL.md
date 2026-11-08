@@ -26,6 +26,8 @@ does not launch, resume, restore, message or install a retired client.
    support omp, OpenCode, Crush and Pi. They parse retained JSONL/SQLite stores
    without calling any TUI executable. A refresh preserves all other clients'
    rows, missing-source rows and successfully indexed history after a load error.
+   Malformed JSON, non-object records and invalid UTF-8 reject the entire JSONL
+   load so an incomplete parse cannot replace a previously indexed transcript.
    Crush refresh also follows per-project database paths already recorded in
    the index when its old project registries are absent.
    Legacy and path-based keys can both match one session; these retained

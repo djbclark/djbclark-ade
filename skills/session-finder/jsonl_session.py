@@ -26,15 +26,15 @@ def open_regular(path):
 
 
 def records(path):
-    """The JSON objects of a session file, one per line; lines that are not objects (`7`, `[1,2]`, garbage) are skipped."""
+    """Read complete JSON-object records; reject damaged input, never return a partial transcript."""
     with open_regular(path) as raw:
         for line in raw:
-            try:
-                entry = json.loads(line.decode("utf-8", errors="replace"))
-            except (ValueError, RecursionError):
+            if not line.strip():
                 continue
-            if isinstance(entry, dict):
-                yield entry
+            entry = json.loads(line.decode("utf-8"))
+            if not isinstance(entry, dict):
+                raise ValueError("session record is not a JSON object")
+            yield entry
 
 
 def header_id(path, lines=1):

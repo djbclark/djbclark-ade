@@ -186,3 +186,40 @@ def test_status_reports_historical_global_refresh_separately(database):
     result = history.status(db)
     assert result["legacy_refresh"] == 123
     assert result["refresh"] == {}
+
+
+@pytest.mark.parametrize("agent", ["omp", "pi"])
+@pytest.mark.parametrize("damage", [b'{"unfinished":\n', b'7\n',
+    b'{"type":"message","message":{"role":"user","content":"broken\xfftext"}}\n'])
+def test_damaged_jsonl_never_replaces_previous_complete_transcript(tmp_path, monkeypatch, agent, damage):
+    reader = history.load_reader(agent)
+    root = tmp_path / "sessions"
+    bucket = root / "project"
+    bucket.mkdir(parents=True)
+    monkeypatch.setattr(reader, "ROOT", root)
+    if agent == "omp":
+        monkeypatch.setattr(reader, "CONFIG", tmp_path / "no-profiles")
+    else:
+        for name in reader.ROOT_ENV:
+            monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("PATH", "")
+    sid = "11111111-1111-4111-8111-111111111111"
+    log = bucket / ("2026-11-08T00-00-00Z_" + sid + ".jsonl")
+    def line(record):
+        return (json.dumps(record) + "\n").encode()
+    def message(text):
+        return line({"type": "message", "message": {"role": "user", "content": text}})
+    header = line({"type": "session", "id": sid, "cwd": "/retained"})
+    anchor, canary, tail = (message(t) for t in ("healthy anchor", "previously indexed canary", "healthy tail"))
+    log.write_bytes(header + anchor + canary + tail)
+    db = sqlite3.connect(":memory:")
+    db.executescript(history.SCHEMA)
+    assert history.refresh(db, [reader])[agent]["updated"] == 1
+    before = db.execute("SELECT key,fp FROM files").fetchall()
+    log.write_bytes(header + anchor + damage + tail)
+    stats = history.refresh(db, [reader])[agent]
+    assert stats["updated"] == 0 and stats["skipped"] == 1
+    assert db.execute("SELECT key,fp FROM files").fetchall() == before
+    assert history.search(db, ["canary"], [agent], 1)
+    assert db.execute("SELECT count(*) FROM msgs").fetchone()[0] == 3
+    db.close()
