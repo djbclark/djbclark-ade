@@ -1,6 +1,7 @@
 # Setup, hardening and updates: plan (queue Carried 35)
 
-Plan, 2026-11-07, not started. Overall and local coordination now belongs to the operator-appointed local
+Plan, 2026-11-07. The first bounded config-core unit shipped on 2026-11-08 ([PR 308](https://github.com/djbclark/djbclark-ade/pull/308)); later phases remain planned.
+Overall and local coordination now belongs to the operator-appointed local
 workhorse lead, with higher-tier judgment delegated through the router. This transfers coordination from the Claude
 cloud lead; it does not change provider defaults or the historical slim-down rulings. The operator asked for the plan
 the same day, in five parts: an easy install on a new Mac or Linux machine with every dependency and TUI; automatic updates of djbclark-ade and its dependencies; easy setup of the GitHub
@@ -13,9 +14,25 @@ Grok Bot, GitHub Advanced Security, hosted firecrawl, Greptile, CodeRabbit) are 
 the suggested host. Then: API keys for every TUI and tool are checked, verified, collected in one batch and delivered
 (S3b). The operator added managed jobs/services (S4b), the measured injection-gate build (S5a), and cloud-agent
 coordination (S9). The sections below go in build order: S1 and S2 come first because every later section reads
-the config and adds a recipe. S5a precedes final review of each adopting reader. S9 stays last, after S1-S8,
+the config and adds a recipe. S5a precedes final review of each adopting reader in the original design (security work deferred 2026-11-08). S9 stays last, after S1-S8,
 item-24 message signing and S5a, and is built only with headroom.
 The research behind S5 is dated 2026-11-07. Sources are listed at the end, and their facts must be re-probed when the work starts.
+
+## Current operator policy — 2026-11-08
+
+Pi is the sole general-purpose third-party TUI. Retain vendor clients required
+for monthly plans and the unchanged Hermes exception. Archive other clients
+reversibly; do not reinstall omp, OpenCode or the other retired clients from
+an older component list. Their history and restoration state remain preserved.
+
+New prompt-injection security implementation is deferred. The security sections
+below remain design notes, not work to start automatically. Prioritize Pi
+service acceptance and preserve separate API, subscription and gateway pools.
+Basic inference is not automatic-routing, continuation or quota acceptance.
+The current decision and evidence are in
+[tui-security-and-pi-migration.md](tui-security-and-pi-migration.md) and
+[pi-services.md](pi-services.md). These rulings supersede conflicting client
+and security sequencing in the older plan; other unfinished planning stays intact.
 
 ## S1. One config file
 
@@ -90,9 +107,10 @@ The research behind S5 is dated 2026-11-07. Sources are listed at the end, and t
         - The Paseo fork `djbclark/paseo` follows the same rule: upstream Paseo unless the fork is needed.
       - **`graft`** (`@nanonets/graft`), **`gh`**, **`uv`**, **`just`**, `git`, and the modern-CLI tools
         (site-djbclark's `skills/setup-modern-cli` list moves into `[install]`).
-      - **The provider command-line tools** for each provider enabled in `[routing]`: Claude Code, Codex, opencode,
-        omp, the Cursor CLI, and Paseo's antigravity provider. The tools install freely; the subscriptions behind them
-        are the user's own, and logging in is the user's step (S3.5).
+      - **The provider clients:** Pi, plus vendor clients required for monthly plans (Claude Code, Codex,
+        the Cursor CLI, and Paseo's antigravity provider). Retired third-party clients are restoration
+        options, not hard dependencies. The subscriptions remain the user's own; logging in is the
+        user's step (S3.5), and installing a client establishes no entitlement.
       - **The skill roots:** this repo, a site repository (site-djbclark for this operator, `[install.site_repo]` for
         another user), and `skills-lock.json`'s external skills (today `fastino-glide`), all linked by
         `bin/skill-everywhere --all`.
@@ -128,7 +146,7 @@ The research behind S5 is dated 2026-11-07. Sources are listed at the end, and t
       host) stay as they are; they are infrastructure, not components.
    5. **Never installed:** the paid plans themselves. The user buys them and logs in; their free clients are installed
       (S3.2.1):
-      - Claude Max, which also carries omp's Claude API credits;
+      - Claude Max; Anthropic API credits are accounted separately and use Pi only after service acceptance;
       - the ChatGPT plan behind Codex;
       - Cursor, which also bills Grok Bot;
       - the Google AI plan behind the antigravity provider;
@@ -196,7 +214,7 @@ Keys are saved with `sudo-secretspec`, and also through Paseo if it has a secure
    - `agents/*/*.tmpl` `{{ secret "…" }}`: `EXA_API_KEY`, `JINA_API_KEY`, the Hermes and LiteLLM entries;
    - site-djbclark `human/API-KEYS-E4.md`: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`,
      `OPENROUTER_API_KEY`, `DEEPSEEK_API_KEY`, `TELEGRAM_BOT_TOKEN`, which `sudo-secretspec run` itself requires;
-   - the tools: `ZAI_CODING_PLAN_API_KEY` (opencode), the opencode Go keys (`skills/oc-go-key`), `CURSOR_API_KEY`
+   - the tools: `ZAI_CODING_PLAN_API_KEY` (Pi), the OpenCode Go service keys (`skills/oc-go-key`), `CURSOR_API_KEY`
      (`bin/cursor-cloud`), `FIRECRAWL_GITHUB_PUBLIC_TOKEN` (the router; it expires), `GREPTILE_API_KEY`, CodeRabbit's,
      hosted firecrawl's, and the merge-gate App's private key (S8; stored in GitHub, not locally).
 
@@ -249,7 +267,7 @@ Keys are saved with `sudo-secretspec`, and also through Paseo if it has a secure
    - **If it does not,** nothing is copied into Paseo's config. Paseo gets keys at launch instead: the daemon, or the
      provider's launch, runs under `sudo-secretspec run`. That matches review rule 3: the one place a key is written is
      a third-party tool's own credential store.
-   - The same rule applies to every TUI's own store, for example opencode's auth file and Hermes' Keychain items.
+   - The same rule applies to every TUI's own store, for example Pi's own provider credential store and Hermes' Keychain items. A retired client's store is not copied into Pi.
 6. **Kept current:**
    - The daily `just update --auto` (S4) runs `just keys --check`, which verifies and never prompts. It pings the
      operator about any key that is invalid, out of quota or expiring within 14 days, with the URL to replace it.
@@ -315,7 +333,7 @@ card the operator chose "ours, plus checks": djbclark-ade manages its own jobs a
    They fix only djbclark-ade's own jobs and report the rest.
 8. **Retired jobs.** The slim-down's retired launchd jobs (`docs/slim/operator-batch.md` C6-C21: skillopt-sleep, the
    watch family, acp-dispatch-reap and the rest) become `[install.retired_jobs]`. `doctor` checks that each is absent
-   and reports one that comes back. Pi is NOT on this list: Pi is under evaluation (Carried 36).
+   and reports one that comes back. Pi is not on this list: it is the adopted third-party client (2026-11-08); automatic routing still awaits per-pool acceptance.
 9. **Never touched:** Orca, BB and herdr configuration (AGENTS.md), and any job whose owner is unknown. Those are
    reported, so the operator decides.
 
@@ -575,7 +593,7 @@ safety properties, and keep existing readers unchanged until their adoption is r
    job identities, typed schedules/timezones and argv commands, with runtime IDs in local state. Update
    `docs/scheduling.md` when adopting the new source of truth. Explicit Paseo modes are validated, never guessed.
    Curate retired job IDs from the operator batch: its range also contains non-job operations. Retired entries only
-   check absence. Pi remains under evaluation and is not a retired component or job.
+   check absence. Pi is the adopted third-party client (2026-11-08), not a retired component or job; per-pool routing remains subject to acceptance.
 3. **Authority and selection.** ADE directly reconciles only its recorded user jobs. Dependency installers and site
    deploy remain their owners' paths; plain doctor observes/reports, while requested repair or automatic update may
    reconcile only ADE scope. Root effects require the separate shown `--system` transaction; `--auto` must not reach
