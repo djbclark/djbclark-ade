@@ -1,27 +1,16 @@
 ---
 name: hand
-description: >-
-  Operator alias: `hand` runs the `handoff` skill with the same arguments. Use
-  only when the operator types /hand, $hand or /skill:hand (omp's built-in
-  /handoff is a different command that only compacts context).
+description: "OLD WAY compatibility alias: prefer paseo-handoff for a fresh agent. Preserves existing ADE recovery flows and explicit hand requests; descriptive name: old-hand-use-paseo-handoff."
 ---
 
-# hand: alias for `handoff`
+# hand: old way; prefer paseo-handoff
 
-The operator types `hand` in every TUI because `/handoff` collides with omp's
-built-in command of that name, which only compacts the context in place and
-never reaches the `handoff` skill.
+This is a compatibility entry point for the existing ADE recovery protocol.
+Read [the legacy skill](../old-hand-use-paseo-handoff/SKILL.md), pass all arguments unchanged, and follow it
+from its first step. Existing operator invocations and automatic ADE recovery callbacks keep
+their behavior. References elsewhere to `hand` steps mean the numbered steps in that linked
+canonical protocol, including handoff Step 9. This entry point adds no extra actions or questions.
 
-1. Read the `handoff` skill (`~/src/djbclark-ade/skills/handoff/SKILL.md`) and
-   follow it exactly from its first step, as if the operator had invoked it.
-2. Pass the arguments through unchanged: `hand paseo` is `handoff paseo`; any
-   other text is the focus.
-3. Do not summarize or shortcut the skill because this file is short; this file
-   adds no behavior of its own.
-
-Per-TUI spelling (2026-11-04): `/hand` in Claude Code, Cursor,
-Hermes (skill route), omp and opencode;
-`$hand` in Codex (its `/prompts:hand` form is deprecated and not installed).
-The operator wrappers live in `omp/commands/`
-and `opencode/commands/` because those TUIs do not turn a plain skill into a
-bare `/name` command (the pi and zcode wrappers were deleted 2026-11-06 with those TUIs).
+For a new task briefing, the preferred skill is Paseo's `paseo-handoff`.
+Before moving work between computers, read [old way versus new way](../../docs/old-way-new-way.md).
+A local handoff path is not a transferred artifact.
