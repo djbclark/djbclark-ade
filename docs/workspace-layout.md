@@ -20,8 +20,18 @@ order 9).
 
 The name shortener (`bin/seat-name`) was deleted 2026-11-06 (slim-down E2); keep names readable without an automatic cap.
 
+## Temporary shared-tab arrangement
+
+Operator ruling, 2026-11-07: newly dispatched agents currently use the lead's **existing** Paseo workspace as tabs.
+Select its opaque workspace id explicitly. The session cwd must match that workspace; each writer still executes
+all repository operations in its separately claimed absolute worktree path from the brief. `-C`/`--dir` retains
+its session-directory meaning and is not silently changed to mean execution worktree. Tools that infer a target
+from cwd must receive an explicit supported target or not be used. Reports and scratch folders are artifact
+locations, never reasons to create a project or workspace. Return to the normal worktree-workspace layout only
+when the operator changes this temporary arrangement.
+
 ## Renaming
 
-- Workspace title: `paseo workspace rename "$PASEO_WORKSPACE_ID" "<topic>-pw"`.
+- Workspace title: `paseo workspace rename "$PASEO_WORKSPACE_ID" "<task worktree>"`.
 - Agent title: `paseo agent update "$PASEO_AGENT_ID" --name "<name>"` (read in the Paseo 0.15.3 source,
   `packages/cli/src/commands/agent/index.ts`, 2026-11-06; not run against a daemon), or set it at launch with `paseo run --title T`.

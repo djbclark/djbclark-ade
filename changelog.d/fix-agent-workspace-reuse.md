@@ -1,6 +1,7 @@
 ### Changed
 
 - Reused an existing Paseo workspace on ordinary `acp-dispatch` launches via `--workspace`, verified caller inspect, or `PASEO_WORKSPACE_ID`, validated against `paseo workspace ls --json` and `-C`.
+- Required explicit workspace selection when caller inspection omitted workspace identity or failed, instead of silently falling back to an ambient workspace.
 
 ### Fixed
 

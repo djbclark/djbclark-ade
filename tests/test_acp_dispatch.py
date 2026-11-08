@@ -319,6 +319,14 @@ class TestWorkspacePlacement(Base):
         self.assertEqual(r.returncode, 2)
         self.assertIn("wks_missing", r.stderr)
 
+    def test_empty_explicit_workspace_does_not_select_ambient(self):
+        for value in ("", "   "):
+            with self.subTest(value=value):
+                result = self.dispatch("claude", "sonnet", "--workspace", value)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn("nonempty existing workspace id", result.stderr)
+                self.assertNotIn("run", self.verbs())
+
     def test_background_workspace_is_allowed(self):
         row = {**self.workspace_row("wks_bg"), "background": True}
         r = self.dispatch(**self.workspaces_env(row, ws_id="wks_bg"), name="bg")
@@ -334,7 +342,8 @@ class TestWorkspacePlacement(Base):
         self.assertEqual(r.returncode, 2)
         self.assertIn("does not match", r.stderr)
 
-    def test_caller_inherits_workspace_id_from_inspect_when_set(self):
+    def test_caller_uses_authoritative_workspace_metadata_when_available(self):
+        # A possible newer CLI response, not the installed 0.15.3 inspect shape.
         caller = "caller-0001"
         row = self.workspace_row("wks_from_inspect")
         r = self.dispatch(PASEO_WORKSPACE_ID="", FAKE_PASEO_WORKSPACES=json.dumps([row]), PASEO_AGENT_ID=caller,
@@ -343,6 +352,36 @@ class TestWorkspacePlacement(Base):
         self.assertEqual(r.returncode, 0, r.stderr)
         run = next(c for c in self.calls() if c[0] == "run")
         self.assertEqual(run[run.index("--workspace") + 1], "wks_from_inspect")
+
+    def test_native_inspect_without_workspace_requires_explicit_selection(self):
+        caller = "caller-0001"
+        # Match the relevant fields of the observed native inspect JSON: no workspace id.
+        snapshot = {"Id": caller, "Archived": False, "Cwd": str(self.repo)}
+        inspect_env = {"PASEO_AGENT_ID": caller,
+                       "FAKE_PASEO_INSPECT": json.dumps({caller: snapshot})}
+        refused = self.dispatch(**inspect_env)
+        self.assertEqual(refused.returncode, 2, refused.stderr)
+        self.assertIn("inspect did not report a workspace id", refused.stderr)
+        self.assertNotIn("run", self.verbs())
+
+        selected = self.dispatch("claude", "sonnet", "--workspace", "wks_test_default",
+                                 name="explicit-caller", **inspect_env)
+        self.assertEqual(selected.returncode, 0, selected.stderr)
+        run = next(c for c in self.calls() if c[0] == "run")
+        self.assertEqual(run[run.index("--workspace") + 1], "wks_test_default")
+
+    def test_unverified_caller_never_falls_back_to_ambient_workspace(self):
+        caller = "caller-0001"
+        for snapshot in (None, {"Id": "other", "Archived": False},
+                         {"Id": caller, "Archived": True}, {"Id": caller}):
+            with self.subTest(snapshot=snapshot):
+                before = len([c for c in self.calls() if c[0] == "run"])
+                response = {} if snapshot is None else {caller: snapshot}
+                result = self.dispatch(PASEO_AGENT_ID=caller,
+                                       FAKE_PASEO_INSPECT=json.dumps(response))
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn("cannot verify Paseo caller", result.stderr)
+                self.assertEqual(len([c for c in self.calls() if c[0] == "run"]), before)
 
 
 class TestLaunchAndWait(Base):

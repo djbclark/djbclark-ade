@@ -44,7 +44,8 @@ environment except the knobs passed as flags). Then, under this shim's launch lo
 ade.kind=KIND --label ade.name=NAME --label ade.lead=LEAD [--thinking EFFORT] -- PROMPT`, where PROMPT is one
 paragraph naming the brief copy (`<out>/<name>-brief.md`, never written into the repo), the report path, and the
 footer. An existing workspace is selected from `--workspace`, the caller's verified `PASEO_AGENT_ID` snapshot
-(workspace id when exposed, else `PASEO_WORKSPACE_ID`), or an ambient `PASEO_WORKSPACE_ID` when there is no caller;
+when native inspect exposes a workspace id, or an ambient `PASEO_WORKSPACE_ID` only when there is no caller;
+an unreadable caller or an inspect response without workspace metadata requires explicit `--workspace`.
 the id and `paseo workspace ls --json` cwd must match `-C` or the launch is refused (exit 2) before `paseo run`.
 This shim never creates a workspace; mint one with native `paseo workspace create` first. The lock and the admit
 reservation are released once the new agent shows in that
@@ -238,18 +239,6 @@ def lookup_workspace(ws_id: str, rows: list[dict]) -> dict | None:
     return next((r for r in rows if workspace_row_id(r) == ws_id), None)
 
 
-def verified_caller_agent_id() -> str | None:
-    caller = os.environ.get("PASEO_AGENT_ID", "").strip()
-    if not caller:
-        return None
-    data, _ = paseo_json(["inspect", caller], timeout=30)
-    if not isinstance(data, dict) or data.get("Archived") is True:
-        return None
-    if str(data.get("Id") or "") != caller:
-        return None
-    return caller
-
-
 def caller_workspace_from_inspect(inspect: dict) -> str | None:
     for key in ("WorkspaceId", "workspaceId", "workspace_id"):
         val = inspect.get(key)
@@ -260,13 +249,24 @@ def caller_workspace_from_inspect(inspect: dict) -> str | None:
 
 def resolve_paseo_workspace(a: argparse.Namespace) -> str:
     """Existing workspace id for this launch; refuses before paseo run when unresolved."""
-    ws_id = (getattr(a, "workspace", None) or "").strip() or None
-    if not ws_id and verified_caller_agent_id():
-        data, _ = paseo_json(["inspect", os.environ["PASEO_AGENT_ID"].strip()], timeout=30)
-        if isinstance(data, dict):
-            ws_id = caller_workspace_from_inspect(data)
+    requested_workspace = getattr(a, "workspace", None)
+    if requested_workspace is not None and not requested_workspace.strip():
+        die("--workspace requires a nonempty existing workspace id")
+    ws_id = requested_workspace.strip() if requested_workspace is not None else None
     if not ws_id:
-        ws_id = os.environ.get("PASEO_WORKSPACE_ID", "").strip() or None
+        caller = os.environ.get("PASEO_AGENT_ID", "").strip()
+        if caller:
+            data, why = paseo_json(["inspect", caller], timeout=30)
+            if (not isinstance(data, dict) or data.get("Id") != caller
+                    or data.get("Archived") is not False):
+                detail = f" ({why})" if why else ""
+                die(f"cannot verify Paseo caller {caller!r}{detail}; pass an explicit --workspace ID")
+            ws_id = caller_workspace_from_inspect(data)
+            if not ws_id:
+                die("Paseo inspect did not report a workspace id for the caller; pass --workspace ID "
+                    "(the installed native CLI may omit workspace metadata)")
+        else:
+            ws_id = os.environ.get("PASEO_WORKSPACE_ID", "").strip() or None
     if not ws_id:
         die("no Paseo workspace for this dispatch: pass --workspace ID or set PASEO_WORKSPACE_ID "
             "(create a workspace with native Paseo first; this shim never mints one)")

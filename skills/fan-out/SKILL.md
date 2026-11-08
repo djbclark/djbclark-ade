@@ -35,7 +35,7 @@ A slice that edits code gets its own linked worktree (AGENTS.md order 9:
 `git worktree add -b NAME ~/src/<repo>-NAME-wt origin/master`) and runs as a Paseo agent there:
 
     ~/src/djbclark-ade/bin/acp-dispatch claude --model sonnet --kind code --name NAME \
-        -f brief.md -C ~/src/<repo>-NAME-wt --task TASK --detach --no-wait
+        -f brief.md --workspace <existing-workspace-id> -C ~/src/<repo>-NAME-wt --task TASK --detach --no-wait
 
 `acp-dispatch` writes `~/.local/state/bigteam/TASK/NAME-brief.md` (your brief plus the footer), gates on
 `load-watch admit` and the agent cap (exit 75: retry later), and runs `paseo run --no-wait` with the
@@ -48,9 +48,16 @@ but then you write the footer into the prompt yourself. Create a workspace only 
 As verified on 2026-11-07, agent-origin runs, or runs with `PASEO_WORKSPACE_ID` set, must explicitly select a workspace:
 `--cwd` alone inherits the parent agent's workspace and directory. `acp-dispatch` passes `--workspace` (validated against
 `paseo workspace ls --json` and `-C`) and never emits `--new-workspace` on an ordinary launch.
+With a caller, unreadable or missing workspace metadata refuses instead of using the ambient workspace.
+Paseo 0.15.3 native inspect omitted workspace ids when checked on 2026-11-08; pass `--workspace` explicitly.
+Only a launch without `PASEO_AGENT_ID` may use `PASEO_WORKSPACE_ID` as its fallback.
 Verify returned `cwd` and `workspaceId` against the assignment before treating a launch as correctly placed. The shim stores
 `paseo_cwd`, `selected_workspace_id`, and `returned_workspace_id`, and emits a `placement_warning` if any are missing or
 different; it leaves the paid agent running.
+
+The operator's temporary all-tabs-with-the-lead arrangement is described in `docs/workspace-layout.md`.
+Use the lead's existing workspace/session cwd for placement, while every writer's brief names a separate claimed
+execution worktree and every repository tool call targets it explicitly. Never turn a report folder into a workspace.
 
 ## 4. Collect
 
@@ -70,9 +77,9 @@ Three independent fixes in one repository, one review:
 
 1. Lead writes `a.md`, `b.md`, `c.md` (one owner per file set, the check each slice runs) and three
    worktrees `~/src/r-a-wt`, `~/src/r-b-wt`, `~/src/r-c-wt`.
-2. `acp-dispatch claude --model sonnet --kind code --name a -f a.md -C ~/src/r-a-wt --task fixes --detach --no-wait`,
-   the same for `b` and `c` (the agent and model from `route_agent.py plan --kinds code`).
+2. `acp-dispatch claude --model sonnet --kind code --name a -f a.md --workspace <workspace-a> -C ~/src/r-a-wt --task fixes --detach --no-wait`,
+   with the separately selected existing workspace for `b` and `c` too (the agent and model from `route_agent.py plan --kinds code`).
 3. While they run, the lead does its own part (standing order 3), then `acp-dispatch wait` on each record.
 4. A BLOCKED report: answer with `acp-dispatch tell`, or re-brief under a new `--name`.
 5. Each DONE slice: review its diff, push its branch, open the PR; one read-only review per PR with
-   `acp-dispatch claude --model sonnet --kind judgment --perm read-only --name rev-a -f review.md -C ~/src/r-a-wt`.
+   `acp-dispatch claude --model sonnet --kind judgment --perm read-only --name rev-a -f review.md --workspace <workspace-a> -C ~/src/r-a-wt`.

@@ -21,7 +21,8 @@ counted exactly. Knobs (all optional):
   FAKE_PASEO_FORCE_CWD  Simulate a daemon ignoring explicit placement
   FAKE_PASEO_OMIT_CWD   Omit cwd from the native run result
   FAKE_PASEO_WORKSPACES JSON list for `workspace ls` (default: [], or persisted workspaces.json after creates)
-  FAKE_PASEO_INSPECT    JSON {agentId: inspect payload} for caller verification
+  FAKE_PASEO_INSPECT    JSON {agentId: inspect payload}; workspace fields are synthetic optional capabilities,
+                       not fields returned by installed Paseo 0.15.3's default inspect payload
   FAKE_PASEO_RETURN_WS  workspaceId returned from `run` (default: the selected one)
 """
 import fcntl
