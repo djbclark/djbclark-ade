@@ -30,22 +30,10 @@ export async function recordRequestMetadata(payload, directory) {
 }
 
 export default function serviceContext(pi) {
-  let currentTask;
   pi.on("before_agent_start", (event, ctx) => {
-    if (ctx.model?.provider !== "sipb") { currentTask = undefined; return; }
-    currentTask = event.messageType === "user" && typeof event.prompt === "string" ? event.prompt : undefined;
+    if (ctx.model?.provider !== "sipb") return;
     event.systemPromptOptions.skills = [];
   });
-  pi.on("context", (event, ctx) => {
-    if (ctx.model?.provider !== "sipb" || process.env.ADE_PI_SIPB_TASK_REMINDER !== "1" || !currentTask) return;
-    if (event.messages.at(-1)?.role !== "toolResult") return;
-    return { messages: [...event.messages, {
-      role: "user",
-      content: [{ type: "text", text: "Task-continuity reminder of the original request, not a new task. Do not repeat completed operations. Use the preceding tool result to decide what remains; if finished, give the requested final response.\n\n" + currentTask }],
-      timestamp: Date.now(),
-    }] };
-  });
-  pi.on("agent_end", () => { currentTask = undefined; });
   pi.on("before_provider_request", async (event, ctx) => {
     const directory = process.env.ADE_PI_REQUEST_METADATA_DIR;
     if (ctx.model?.provider !== "sipb" || !directory) return;

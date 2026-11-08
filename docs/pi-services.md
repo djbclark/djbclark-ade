@@ -55,22 +55,16 @@ or billing guarantees. Runtime profiles require their own smoke checks.
 Set `ADE_PI_REQUEST_METADATA_DIR` in the Pi process environment to an owned
 private directory to record one atomic, mode0600 JSON file per SIPB request.
 The hook observes the final provider payload and does not change it. It saves
-only model ID, stream flag, serialized byte count, per-role content lengths,
+only model ID, stream flag, serialized byte count, per-role serialized content lengths,
 tool names, max-token fields, backend context and reasoning effort. It saves
 no prompt text, tool arguments, headers or credentials. Other providers and
 sessions with the variable unset write nothing. A diagnostic write failure
 prints a fixed warning and leaves the request intact. These measurements do
 not prove how the remote server applies a requested context window.
 
-## Experimental SIPB task continuity
-
-Set `ADE_PI_SIPB_TASK_REMINDER=1` to repeat the current run's original user
-request after a tool result in the next model context. The added user message
-says completed operations must not be repeated and asks the model to use the
-preceding tool result to decide what remains. It copies the original request,
-never a tool output. Existing messages, project instructions and tool results
-remain intact; the reminder is not written into session history. It is off
-by default, affects only SIPB, and clears on run completion, a custom-triggered
-run or a switch to another provider. This is an experimental aid for models
-that lose the task after tools, not an exactly-once execution guarantee or a
-security boundary. Validate actual artifacts before accepting a task.
+Snapshot2026-11-08: SIPB responses and primitive tool execution worked, but
+bounded task completion under the full ADE instructions did not pass on the
+tested Qwen and Gemma profiles. Requesting a32k backend context did not
+establish a task-level repair. Keep this route out of automatic work routing.
+An experimental post-tool task reminder was rejected after it repeated
+completed work and review found stale-request behavior; it is not shipped.
