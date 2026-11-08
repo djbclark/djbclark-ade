@@ -1,16 +1,23 @@
 ---
 name: fan-out
 description: >-
-  Fan separable work out and collect it: the lead's own Agent-tool or Workflow fan-out for in-process work,
-  `acp-dispatch` (the Paseo shim) or `paseo run --no-wait` for a slice in its own worktree, `paseo ls` and
-  `acp-dispatch wait` to collect, the shared delivery footer on every brief. Use for "fan this out",
-  "parallelize this", "use the other agents too", or when the context-size hook says to delegate. Replaces
-  the bigteam skill (slim-down E6, 2026-11-06).
+  Slice parallel work, assign owners and verify reports. Prefer native Paseo agent/workspace
+  operations; acp-dispatch is a transitional compatibility shim. Use for "fan this out",
+  "parallelize this", or an explicit delegation request. Select the destination host for remote work.
 ---
 
 # fan-out: slice the work, hand it out, collect the reports
 
 Canonical copy: `~/src/djbclark-ade/skills/fan-out/` (edit it there, never through a TUI path).
+
+## Preferred transport (2026-11-07)
+
+Use native Paseo `create_agent` / `paseo run` for new slices, preserving the routing, claimed
+workspaces, report and review requirements below. The dispatch examples below are compatibility
+recipes while the shim remains installed. For another computer, select its host explicitly and
+transfer any needed files before launch; a local brief/report path is not shared storage.
+See [old way versus new way](../../docs/old-way-new-way.md), including plugin advice and the
+cross-host acceptance checks. Keep `{serverId, agentId}` together and prove receipt with an ack.
 
 ## 1. Slice first
 

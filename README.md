@@ -81,10 +81,10 @@ Skills (19, from each `skills/*/SKILL.md`):
 | [`btww`](skills/btww/SKILL.md) | Remind the user which native side-question command this TUI has (Claude Code /btw, Codex /side, and so on), or say that it has none. |
 | [`create-hook`](skills/create-hook/SKILL.md) | Create, edit, review or remove native OpenAI Codex CLI hooks (~/.codex/hooks.json, <repo>/.codex/hooks.json, inline [hooks] in config.toml): PascalCase events (PreToolUse, PermissionRequest, Stop, SessionStart ...), command or MCP hooks, trust review, deny/allow output. |
 | [`dialogue`](skills/dialogue/SKILL.md) | Run a multi-model dialogue that produces one artifact (spec, report, design) with a final-word model: fixed speaking rounds through pinned headless routes, a machine-read footer per turn, the transcript as the record. |
-| [`fan-out`](skills/fan-out/SKILL.md) | Fan separable work out and collect it: the lead's own Agent-tool or Workflow fan-out for in-process work, `acp-dispatch` (the Paseo shim) or `paseo run --no-wait` for a slice in its own worktree, `paseo ls` and `acp-dispatch wait` to collect, the shared delivery footer on every brief. |
+| [`fan-out`](skills/fan-out/SKILL.md) | Slice parallel work, assign owners and verify reports. |
 | [`graft`](skills/graft/SKILL.md) | This repo is indexed by graft/. |
-| [`hand`](skills/hand/SKILL.md) | Operator alias: `hand` runs the `handoff` skill with the same arguments. |
-| [`handoff`](skills/handoff/SKILL.md) | Create a deep Tier 2 handoff document, chain-tagged, DAG-linked, mined from the full conversation. |
+| [`hand`](skills/hand/SKILL.md) | OLD WAY compatibility alias: prefer paseo-handoff. |
+| [`handoff`](skills/handoff/SKILL.md) | OLD WAY compatibility alias: prefer paseo-handoff. |
 | [`loose`](skills/loose/SKILL.md) | Audit the current session for loose ends (unfinished work, unverified claims, leftover test artifacts, unreported upstream bugs), step the operator through each with /steps, then ask whether to hand off and continue, finish and archive, or keep working. |
 | [`model-routing`](skills/model-routing/SKILL.md) | Route AI work by vendor × model × effort × context window on this machine: the Claude tier for a role, the effort level, which pool takes a slice (`route_agent.py plan`), how to read quota (aiuse, `paseo usage ls`), the frontier allowance, and what runs when a chosen model fails (fallback chains). |
 | [`oc-go-key`](skills/oc-go-key/SKILL.md) | Recover a session that stopped with "Go usage limit exceeded" or "Insufficient account funds": read which OpenCode Go account is serving this Mac, swap the live credential with `oc-go-key use <label>`, and resume the aborted turn so the entity is not dark with a working key. |
@@ -146,3 +146,8 @@ Skills (19, from each `skills/*/SKILL.md`):
 | [`skill-everywhere`](bin/skill-everywhere) | Make a shared skill visible to every agent TUI on this machine by symlinking it into each TUI's user-level skills dir. |
 | [`wait-file`](bin/wait-file) | Block until a file the waited-on command writes is ready, with a hard timeout. |
 <!-- roster:end -->
+
+## Workflow migration
+
+[Old way versus new way](docs/old-way-new-way.md) compares legacy skills with native Paseo,
+records plugin advice, and defines the Linux/macOS cross-host handoff acceptance checks.
