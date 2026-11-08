@@ -83,8 +83,8 @@ Skills (21, from each `skills/*/SKILL.md`):
 | [`dialogue`](skills/dialogue/SKILL.md) | Run a multi-model dialogue that produces one artifact (spec, report, design) with a final-word model: fixed speaking rounds through pinned headless routes, a machine-read footer per turn, the transcript as the record. |
 | [`fan-out`](skills/fan-out/SKILL.md) | Slice parallel work, assign owners and verify reports. |
 | [`graft`](skills/graft/SKILL.md) | This repo is indexed by graft/. |
-| [`hand`](skills/hand/SKILL.md) | OLD WAY compatibility alias: prefer paseo-handoff. |
-| [`handoff`](skills/handoff/SKILL.md) | OLD WAY compatibility alias: prefer paseo-handoff. |
+| [`hand`](skills/hand/SKILL.md) | OLD WAY compatibility alias: prefer paseo-handoff for a fresh agent. |
+| [`handoff`](skills/handoff/SKILL.md) | OLD WAY compatibility alias: prefer paseo-handoff for a fresh agent. |
 | [`loose`](skills/loose/SKILL.md) | Audit the current session for loose ends (unfinished work, unverified claims, leftover test artifacts, unreported upstream bugs), step the operator through each with /steps, then ask whether to hand off and continue, finish and archive, or keep working. |
 | [`model-routing`](skills/model-routing/SKILL.md) | Route AI work by vendor × model × effort × context window on this machine: the Claude tier for a role, the effort level, which pool takes a slice (`route_agent.py plan`), how to read quota (aiuse, `paseo usage ls`), the frontier allowance, and what runs when a chosen model fails (fallback chains). |
 | [`oc-go-key`](skills/oc-go-key/SKILL.md) | Recover a session that stopped with "Go usage limit exceeded" or "Insufficient account funds": read which OpenCode Go account is serving this Mac, swap the live credential with `oc-go-key use <label>`, and resume the aborted turn so the entity is not dark with a working key. |

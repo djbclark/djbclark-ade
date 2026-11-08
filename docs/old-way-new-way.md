@@ -23,7 +23,8 @@ The descriptive old-way names are `old-hand-use-paseo-handoff` and
 `old-handoff-use-paseo-handoff`. Their descriptions say what to use instead.
 `hand` and `handoff` remain compatibility entry points so existing prompts, command wrappers,
 and links continue to work. They retain the requested legacy behavior and point to the new way.
-The long legacy skills are user-invoked; compatibility descriptions trigger only explicit use.
+The legacy skills remain model-accessible because existing automatic ADE recovery callbacks
+need them; the compatibility entry points forward numbered-step references to the canonical protocol.
 
 Use `paseo-handoff` for a new agent with a task briefing. Keep `session-handoff` and `baton`
 for reading/writing existing ADE recovery chains. Keep `fan-out`: slicing, ownership and review

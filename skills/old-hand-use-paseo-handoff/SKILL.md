@@ -1,7 +1,6 @@
 ---
 name: old-hand-use-paseo-handoff
 description: "OLD WAY: short alias for the ADE recovery handoff. Prefer paseo-handoff for a fresh agent."
-disable-model-invocation: true
 ---
 
 # Old hand — use paseo-handoff for a fresh agent

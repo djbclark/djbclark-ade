@@ -1,7 +1,6 @@
 ---
 name: old-handoff-use-paseo-handoff
 description: "OLD WAY: deep ADE recovery handoff. Prefer paseo-handoff for a fresh agent; retain this for explicitly requested Tier 1 and Tier 2 recovery records."
-disable-model-invocation: true
 ---
 
 # Old handoff — use paseo-handoff for a fresh agent
