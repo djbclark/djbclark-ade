@@ -108,3 +108,9 @@ D2. To roll back, restore the previous new-session default and remove only this
 extension path from the current extension list. Keep later settings, physical
 credentials, session history, failure latches and other extensions. The
 recorded previous default for this rollout is Z.ai GLM 5.3 Flash, low.
+
+D3. 2026-11-08 pre-install validation: a real installed-SDK canary retained
+Cursor Composer 2.5 across two requests, selected Z.ai Flash low at an explicit
+mechanical task with `--native-tools`, and retained that choice after reopening
+the persisted session. This validates the extension through Pi's public SDK;
+it does not claim the global default is installed or a Paseo resume is tested.
