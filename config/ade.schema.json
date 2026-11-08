@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/djbclark/djbclark-ade/config/ade.schema.json",
+  "title": "djbclark-ade effective config",
+  "description": "schema_version=1 effective ADE config (config/ade.toml shape). Checked by bin/ade-config check. Secrets are reference names only.",
+  "type": "object",
+  "required": ["schema_version"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1,
+      "description": "Supported version is exactly 1; unknown versions fail closed."
+    },
+    "routing": {
+      "type": "object",
+      "description": "Projected from legacy config/routing.toml [routing] (identity)."
+    },
+    "lead": {
+      "type": "object",
+      "description": "Projected from legacy config/routing.toml [lead]."
+    },
+    "dispatch": {
+      "type": "object",
+      "description": "Projected from legacy config/routing.toml [dispatch]."
+    },
+    "substrate": {
+      "type": "object",
+      "description": "Projected from legacy config/routing.toml [substrate]."
+    },
+    "hermes": {
+      "type": "object",
+      "description": "Projected from legacy config/routing.toml [hermes]."
+    },
+    "calibrate": {
+      "type": "object",
+      "description": "Projected from legacy config/routing.toml [calibrate]."
+    },
+    "service": {
+      "type": "array",
+      "description": "Projected from legacy [[service]]; arrays replace whole on merge; duplicate name identities are rejected.",
+      "items": {
+        "type": "object",
+        "required": ["name"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1 }
+        },
+        "additionalProperties": true
+      }
+    },
+    "gates": {
+      "type": "object",
+      "description": "Legacy gates.toml [frontier] and [floors.frontier] project under gates.frontier and gates.floors.frontier.",
+      "additionalProperties": false,
+      "properties": {
+        "frontier": {
+          "type": "object",
+          "description": "Effective frontier thresholds after the same floor/default clamping as bin/ade_gates.py.",
+          "additionalProperties": { "type": "number" }
+        },
+        "floors": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "frontier": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "object",
+                "properties": {
+                  "loosen": { "type": "string" },
+                  "bound": { "type": "number" }
+                },
+                "additionalProperties": true
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

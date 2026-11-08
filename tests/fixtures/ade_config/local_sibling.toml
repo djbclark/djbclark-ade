@@ -1,0 +1,3 @@
+# local override: change one lead leaf, keep siblings
+[lead]
+fable_lead = false
