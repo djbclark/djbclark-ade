@@ -179,7 +179,9 @@ while the already launched agent continues.
    `.status` reads `sent` or `completed` (shim exit 0). An agent's send is **accepted** (exit 5): Paseo queues every
    agent-to-agent message and reports no later delivery, so only the peer's `ack <your id>` proves it. Exit 2 is not
    delivered; `paseo send`'s own `$?` is never read as delivery (it exits 0 for every status).
-3. Ask for the named ack (`--ack <your id>`) whenever delivery matters and always on first contact; read your own
+3. Ask for the named ack whenever delivery matters (relay.py: `--ack <your id>`; `paseo send` has no `--ack`, so put
+   `Please reply: ack <your id>` in the text and pass `--no-wait`: without it a send to a busy peer blocked over nine
+   minutes, 2026-11-08) and always on first contact; read your own
    inbox for it; re-send when none arrives; report a peer you cannot reach to the operator.
 4. A reply written in your own turn reaches nobody: answer a peer by sending to it. A slice's channel back is its
    report file, and `acp-dispatch tell RECORD MESSAGE` (an inbox entry plus a `paseo send`) reaches a running slice.
