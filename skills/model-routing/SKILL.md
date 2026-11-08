@@ -100,7 +100,8 @@ retired: `plan` leaves them queued.
 ## D. Routing, the frontier allowance and quota
 
 D1. **Plan a wave with the router, re-plan at every slice boundary:** `bin/route_agent.py plan --kinds code,code,bulk
-[--repo NAME]` prints one `acp-dispatch <agent> --model M --kind K` line per slice (or `cursor-cloud launch …`), spreads
+[--repo NAME]` prints native `paseo run --provider pi/…` for Pi, legacy `acp-dispatch <agent> --model M --kind K`
+for other agents (or `cursor-cloud launch …`), spreads
 the wave over pools by `max_parallel`, and keeps a slice queued rather than buy a much weaker pool into code or judgment
 (`quality_max_rank_gap`). `route --kind K [--json]` picks one; `show` prints each pool's headroom, pace, expected waste
 and source; `services [--check-models]` lists the roster with each provider's `paseo provider ls` status and checks
