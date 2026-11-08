@@ -4,3 +4,8 @@
   check|get|diff`, checked-in `config/ade.schema.json`, thin `just config-check`, and
   `docs/config-migration.md` for schema_version=1 legacy routing/gates projection (no
   reader adoption, no live config writes).
+### Fixed
+
+- Rejected malformed new/local config before normalization, preserved legacy routing
+  validation/defaults and unusable-input errors, and merged raw gate/floor overlays
+  before clamping in all read-only config commands.

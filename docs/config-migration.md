@@ -30,15 +30,22 @@ Routing's current public tables stay at the effective root (not nested under a s
 B1. **Missing** `config/ade.toml` → project legacy files via the table above.
 B2. **Present valid** `config/ade.toml` → that file is the repo base (still schema 1).
 B3. **Present invalid / unknown-version** new or local config → error; never silently
-    fall back to a permissive legacy policy.
+    fall back to a permissive legacy policy. Present directories, dangling links,
+    nonregular files and unreadable inputs are errors too. Raw new/local trees
+    are schema-validated before domain isolation: ignored domain values must still
+    be structurally valid. Invalid selected legacy gates keep their separate closed
+    fallback; malformed legacy floor leaves are ignored as in `ade_gates`.
 B4. **Local override** `~/.config/djbclark-ade/local.toml` (untracked): maps merge
     recursively per leaf; **arrays replace whole** (service lists never concatenate);
     type conflicts and duplicate `[[service]].name` identities are rejected.
+    Raw gate requests and floor maps merge before a single final clamp, so a
+    floor-only overlay evaluates the unchanged requested value against the new floor.
 B5. **`ROUTING_POLICY`**: isolated legacy-format override for the routing domain
     (`routing`, `lead`, `dispatch`, `substrate`, `hermes`, `calibrate`, `service`).
     When set, that domain comes only from the chosen file; new/local routing keys for
-    that domain are ignored. A missing/malformed selected path errors (same spirit as
-    `route_agent.load_policy`).
+    that domain are ignored. A missing/malformed selected path errors. Validation and optional
+    `pipeline_effort` default match the pure `route_agent.load_policy` contract;
+    live routing initialization is never imported.
 B6. **`GATES_TOML`**: isolated legacy-format override for `[gates]`. Missing/unreadable
     or bad `[frontier]` uses the **closed** code defaults (same as `ade_gates.load_frontier`),
     never a wider policy. Floor clamping matches `ade_gates` (higher-is-looser keys capped
@@ -54,6 +61,17 @@ ade-config get PATH [--root DIR] [--home DIR] [--json]
 ade-config diff [--root DIR] [--home DIR] [--json]
 just config-check
 ```
+
+Python **3.11+** is required for standard-library `tomllib`; bootstrap is a later unit.
+
+All three commands validate raw new/local inputs and the effective tree against
+`config/ade.schema.json`. The dependency-free evaluator supports that schema's
+`type`, `const`, `required`, `properties`, `additionalProperties`, `items` and
+`minLength` assertions; unsupported schema keywords fail closed. Gate and floor
+names/specs are closed maps, with finite numeric gate values (booleans rejected).
+Routing tables retain the declared open object shape; this is not consumer adoption
+or new validation of every routing leaf. Selected legacy routing retains its own
+reader's required keys, pool/lead/substrate validation and defaults.
 
 All pure: no config writes, no secret resolution, no network/auth/scheduling probes.
 `--home` points local.toml resolution at a temp tree in tests.

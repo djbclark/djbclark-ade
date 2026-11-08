@@ -4,7 +4,9 @@
   "title": "djbclark-ade effective config",
   "description": "schema_version=1 effective ADE config (config/ade.toml shape). Checked by bin/ade-config check. Secrets are reference names only.",
   "type": "object",
-  "required": ["schema_version"],
+  "required": [
+    "schema_version"
+  ],
   "additionalProperties": false,
   "properties": {
     "schema_version": {
@@ -41,9 +43,14 @@
       "description": "Projected from legacy [[service]]; arrays replace whole on merge; duplicate name identities are rejected.",
       "items": {
         "type": "object",
-        "required": ["name"],
+        "required": [
+          "name"
+        ],
         "properties": {
-          "name": { "type": "string", "minLength": 1 }
+          "name": {
+            "type": "string",
+            "minLength": 1
+          }
         },
         "additionalProperties": true
       }
@@ -56,7 +63,33 @@
         "frontier": {
           "type": "object",
           "description": "Effective frontier thresholds after the same floor/default clamping as bin/ade_gates.py.",
-          "additionalProperties": { "type": "number" }
+          "additionalProperties": false,
+          "properties": {
+            "frontier1_judged": {
+              "type": "number"
+            },
+            "frontier2_judged": {
+              "type": "number"
+            },
+            "frontier1_per_wave": {
+              "type": "number"
+            },
+            "frontier2_per_wave": {
+              "type": "number"
+            },
+            "frontier1_agent_calls_per_day": {
+              "type": "number"
+            },
+            "frontier1_min_left": {
+              "type": "number"
+            },
+            "frontier1_window_min_left": {
+              "type": "number"
+            },
+            "frontier2_min_left": {
+              "type": "number"
+            }
+          }
         },
         "floors": {
           "type": "object",
@@ -64,13 +97,104 @@
           "properties": {
             "frontier": {
               "type": "object",
-              "additionalProperties": {
-                "type": "object",
-                "properties": {
-                  "loosen": { "type": "string" },
-                  "bound": { "type": "number" }
+              "additionalProperties": false,
+              "properties": {
+                "frontier1_judged": {
+                  "type": "object",
+                  "properties": {
+                    "loosen": {
+                      "type": "string"
+                    },
+                    "bound": {
+                      "type": "number"
+                    }
+                  },
+                  "additionalProperties": false
                 },
-                "additionalProperties": true
+                "frontier2_judged": {
+                  "type": "object",
+                  "properties": {
+                    "loosen": {
+                      "type": "string"
+                    },
+                    "bound": {
+                      "type": "number"
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "frontier1_per_wave": {
+                  "type": "object",
+                  "properties": {
+                    "loosen": {
+                      "type": "string"
+                    },
+                    "bound": {
+                      "type": "number"
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "frontier2_per_wave": {
+                  "type": "object",
+                  "properties": {
+                    "loosen": {
+                      "type": "string"
+                    },
+                    "bound": {
+                      "type": "number"
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "frontier1_agent_calls_per_day": {
+                  "type": "object",
+                  "properties": {
+                    "loosen": {
+                      "type": "string"
+                    },
+                    "bound": {
+                      "type": "number"
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "frontier1_min_left": {
+                  "type": "object",
+                  "properties": {
+                    "loosen": {
+                      "type": "string"
+                    },
+                    "bound": {
+                      "type": "number"
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "frontier1_window_min_left": {
+                  "type": "object",
+                  "properties": {
+                    "loosen": {
+                      "type": "string"
+                    },
+                    "bound": {
+                      "type": "number"
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "frontier2_min_left": {
+                  "type": "object",
+                  "properties": {
+                    "loosen": {
+                      "type": "string"
+                    },
+                    "bound": {
+                      "type": "number"
+                    }
+                  },
+                  "additionalProperties": false
+                }
               }
             }
           }

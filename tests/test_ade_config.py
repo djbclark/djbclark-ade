@@ -229,3 +229,199 @@ def test_mapping_table_covers_routing_and_gates():
     assert "[[service]]" in targets
     assert "[gates.frontier]" in targets
     assert "[gates.floors.frontier]" in targets
+
+
+@pytest.fixture
+def synthetic_root(tmp_path):
+    """Only public tracked schema/legacy policy copied; no machine-local input."""
+    root = tmp_path / "repo"
+    (root / "config").mkdir(parents=True)
+    for name in ("ade.schema.json", "routing.toml", "gates.toml"):
+        (root / "config" / name).write_bytes((REPO / "config" / name).read_bytes())
+    return root
+
+
+@pytest.mark.parametrize("text", [
+    'routing = 1', 'lead = "bad"', 'dispatch = []', 'substrate = 1',
+    'hermes = false', 'calibrate = 2', 'service = [1]',
+    '[[service]]\nname = 1',
+    '[gates]\nunknown = 1', '[gates]\nfrontier = 1',
+    '[gates.frontier]\nfrontier1_per_wave = "oops"',
+    '[gates.frontier]\nmisspelled = 1',
+    '[gates.frontier]\nfrontier1_per_wave = true',
+    '[gates.frontier]\nfrontier1_per_wave = inf',
+    '[gates.floors.frontier]\nfrontier1_per_wave = 2',
+    '[gates.floors.frontier.frontier1_per_wave]\nbound = "oops"',
+    '[gates.floors.frontier.frontier1_per_wave]\nmisspelled = 1',
+])
+@pytest.mark.parametrize("location", ["new", "local"])
+def test_raw_schema_failures_all_commands(home, synthetic_root, text, location):
+    if location == "new":
+        (synthetic_root / "config/ade.toml").write_text('schema_version = 1\n' + text)
+    else:
+        _local_write(home, text)
+    errors, effective = ac.check(root=synthetic_root, home=home, environ={})
+    assert errors and effective is None
+    for command in (("check",), ("get", "schema_version"), ("diff",)):
+        result = _run_cli(*command, "--root", str(synthetic_root), "--home", str(home), home=home)
+        assert result.returncode == 1, (command, result.stdout, result.stderr)
+
+
+@pytest.mark.parametrize("domain", ["routing", "gates"])
+@pytest.mark.parametrize("location", ["new", "local"])
+def test_invalid_raw_input_rejected_even_in_env_isolated_domain(home, synthetic_root, domain, location):
+    text = 'routing = 1' if domain == "routing" else '[gates.frontier]\nmisspelled = "oops"'
+    if location == "new":
+        (synthetic_root / "config/ade.toml").write_text('schema_version = 1\n' + text)
+    else:
+        _local_write(home, text)
+    env = {"ROUTING_POLICY" if domain == "routing" else "GATES_TOML":
+           str(synthetic_root / "config" / ("routing.toml" if domain == "routing" else "gates.toml"))}
+    with pytest.raises(ac.ConfigError):
+        ac.load_effective(root=synthetic_root, home=home, environ=env)
+
+
+@pytest.mark.parametrize("location", ["new", "local"])
+@pytest.mark.parametrize("shape", ["directory", "dangling", "fifo", "unreadable"])
+def test_present_unusable_input_never_falls_back(home, synthetic_root, monkeypatch, location, shape):
+    path = synthetic_root / "config/ade.toml" if location == "new" else ac.default_local_path(home)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if shape == "directory":
+        path.mkdir()
+    elif shape == "dangling":
+        path.symlink_to(path.parent / "absent.toml")
+    elif shape == "fifo":
+        os.mkfifo(path)
+    else:
+        path.write_text('schema_version = 1\n')
+        original_open = ac.os.open
+        def denied(target, *args, **kwargs):
+            if Path(target) == path:
+                raise PermissionError(13, "Permission denied", str(path))
+            return original_open(target, *args, **kwargs)
+        monkeypatch.setattr(ac.os, "open", denied)
+    errors, effective = ac.check(root=synthetic_root, home=home, environ={})
+    assert errors and effective is None
+    with pytest.raises(ac.ConfigError):
+        ac.local_diff(root=synthetic_root, home=home, environ={})
+
+
+def _pure_legacy_reader():
+    """Compile only load_policy and its literal constants; no routing initialization."""
+    import ast
+    import tomllib
+    tree = ast.parse((BIN / "route_agent.py").read_text())
+    service = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "Service")
+    fields = {n.target.id for n in service.body if isinstance(n, ast.AnnAssign)}
+    names = {"_SERVICE_REQUIRED", "LEAD_KEYS", "LEAD_ALL_KEYS", "LEAD_SWITCHES",
+             "LEAD_PIPELINE_EFFORT_DEFAULT", "CLAUDE_EFFORT_LEVELS"}
+    nodes = [n for n in tree.body if (
+        isinstance(n, ast.FunctionDef) and n.name == "load_policy"
+    ) or (isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id in names for t in n.targets))]
+    namespace = {"Path": Path, "tomllib": tomllib, "Any": object, "SERVICE_KEYS": fields}
+    exec(compile(ast.Module(body=nodes, type_ignores=[]), "pure_load_policy", "exec"), namespace)
+    return namespace["load_policy"]
+
+
+_LEGACY_BASE = '[routing]\n[dispatch]\n[hermes]\n[calibrate]\n'
+_LEGACY_SERVICE = '[[service]]\nname="x"\ncli="x"\ngood_at={}\nbilling="free"\n'
+
+
+@pytest.mark.parametrize("tail", [
+    '[[service]]\nname="x"\n',
+    _LEGACY_SERVICE + 'unknown = 1\n',
+    _LEGACY_SERVICE + 'pool = ["one"]\n',
+    _LEGACY_SERVICE + 'pool = ["one", 2]\n',
+    _LEGACY_SERVICE + '[substrate]\nlifeline = 1\n',
+    _LEGACY_SERVICE + '[lead]\nmodel = "opus"\n',
+    _LEGACY_SERVICE + '[lead]\nmodel="opus"\neffort="ultra"\npipeline_model="sonnet"\n',
+    _LEGACY_SERVICE + '[lead]\nmodel="opus"\neffort="high"\npipeline_model="sonnet"\nfable_lead=1\n',
+    _LEGACY_SERVICE + '[lead]\nmodel="opus"\neffort="high"\npipeline_model="sonnet"\nunknown=1\n',
+    'substrate = 1\n' + _LEGACY_SERVICE,
+    'lead = 1\n' + _LEGACY_SERVICE,
+])
+def test_selected_legacy_failure_parity(home, synthetic_root, tmp_path, tail):
+    # Root scalars must precede sections, rather than becoming calibrate leaves.
+    prefix = ''
+    if tail.startswith(('lead =', 'substrate =')):
+        prefix, tail = tail.split('\n', 1)
+        prefix += '\n'
+    path = tmp_path / "routing-bad.toml"
+    path.write_text(prefix + _LEGACY_BASE + tail)
+    with pytest.raises(ValueError) as old:
+        _pure_legacy_reader()(path)
+    with pytest.raises(ac.ConfigError) as new:
+        ac.load_effective(root=synthetic_root, home=home, environ={"ROUTING_POLICY": str(path)})
+    assert str(new.value) == str(old.value)
+
+
+@pytest.mark.parametrize("lead", ['', '[lead]\nmodel="opus"\neffort="high"\npipeline_model="sonnet"\n'])
+def test_selected_legacy_defaults_parity(home, synthetic_root, tmp_path, lead):
+    path = tmp_path / "routing-valid.toml"
+    path.write_text(_LEGACY_BASE + _LEGACY_SERVICE + lead)
+    old = _pure_legacy_reader()(path)
+    eff = ac.load_effective(root=synthetic_root, home=home, environ={"ROUTING_POLICY": str(path)})
+    for key in ac.ROUTING_DOMAIN_KEYS:
+        assert eff.data.get(key) == old.get(key)
+    if lead:
+        assert eff.data['lead']['pipeline_effort'] == 'high'
+        assert 'fable_lead' not in eff.data['lead']
+
+
+@pytest.mark.parametrize("mode", ["new", "legacy", "isolated"])
+def test_floor_only_local_merges_raw_request_before_clamp(home, synthetic_root, mode):
+    frontier = {'frontier1_per_wave': 2}
+    gates = {'frontier': frontier, 'floors': {'frontier': {'frontier1_per_wave': {'bound': 1}}}}
+    overlay = {'floors': {'frontier': {'frontier1_per_wave': {'bound': 2}}}}
+    local = '[gates.floors.frontier.frontier1_per_wave]\nbound = 2\n'
+    _local_write(home, local)
+    prefix = 'gates.' if mode == "new" else ''
+    text = (f'[{prefix}frontier]\nfrontier1_per_wave=2\n'
+            f'[{prefix}floors.frontier.frontier1_per_wave]\nbound=1\n')
+    env = {}
+    if mode == "new":
+        (synthetic_root / 'config/ade.toml').write_text('schema_version=1\n' + text)
+    else:
+        path = synthetic_root / 'config/gates.toml'
+        path.write_text(text)
+        if mode == "isolated":
+            env['GATES_TOML'] = str(path)
+    raw = gates if mode == "isolated" else ac.merge_maps(gates, overlay, path='gates')
+    expected, _ = ac.clamp_frontier(raw['frontier'], raw['floors']['frontier'], source_label='test')
+    eff = ac.load_effective(root=synthetic_root, home=home, environ=env)
+    assert eff.data['gates']['frontier'] == expected
+    assert expected['frontier1_per_wave'] == (1 if mode == "isolated" else 2)
+
+
+def test_schema_changes_are_enforced_and_unknown_assertions_fail(home, synthetic_root):
+    path = synthetic_root / 'config/ade.schema.json'
+    schema = json.loads(path.read_text())
+    schema['properties']['routing']['additionalProperties'] = False
+    path.write_text(json.dumps(schema))
+    errors, _ = ac.check(root=synthetic_root, home=home, environ={})
+    assert errors and 'unknown key' in errors[0]
+    schema['properties']['routing']['additionalProperties'] = True
+    schema['properties']['routing']['minProperties'] = 1
+    path.write_text(json.dumps(schema))
+    with pytest.raises(ac.ConfigError, match='unsupported schema keywords'):
+        ac.load_effective(root=synthetic_root, home=home, environ={})
+
+
+@pytest.mark.parametrize("text", [
+    None, '', '[frontier]\nfrontier1_per_wave="oops"',
+    '[frontier]\nfrontier1_per_wave=inf',
+    '[frontier]\nunknown=1',
+    '[frontier]\nfrontier1_per_wave=2\n[floors.frontier]\nfrontier1_per_wave="bad"',
+    '[frontier]\nfrontier1_per_wave=2\n[floors.frontier.frontier1_per_wave]\nbound="bad"',
+    '[frontier]\nfrontier1_per_wave=2\n[floors.frontier.frontier1_per_wave]\nbound=2',
+])
+def test_selected_legacy_gate_fallback_parity(home, synthetic_root, tmp_path, monkeypatch, text):
+    path = tmp_path / 'legacy-gates.toml'
+    if text is not None:
+        path.write_text(text)
+    monkeypatch.setenv('GATES_TOML', str(path))
+    old, old_info = ag.load_frontier()
+    new = ac.load_effective(root=synthetic_root, home=home, environ={'GATES_TOML': str(path)})
+    assert new.data['gates']['frontier'] == old
+    assert new.provenance['gates_info']['source'] == old_info['source']
+    assert bool(new.provenance['gates_info']['toml_error']) == bool(old_info['toml_error'])

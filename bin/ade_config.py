@@ -17,6 +17,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import stat
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -117,7 +118,10 @@ def read_toml(path: Path) -> dict[str, Any]:
     try:
         if not path.is_file():
             raise ConfigError(f"{path}: not a regular file")
-        with path.open("rb") as fh:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+        with os.fdopen(fd, "rb") as fh:
+            if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+                raise ConfigError(f"{path}: not a regular file")
             data = tomllib.load(fh)
     except ConfigError:
         raise
@@ -128,6 +132,17 @@ def read_toml(path: Path) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ConfigError(f"{path}: root must be a table")
     return data
+
+
+def input_present(path: Path) -> bool:
+    """Only true absence permits fallback; dangling links and access errors do not."""
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError as e:
+        raise ConfigError(f"{path}: {e.strerror or e}") from e
+    return True
 
 
 def try_read_toml(path: Path) -> tuple[dict[str, Any] | None, str | None]:
@@ -198,21 +213,77 @@ def project_routing_domain(legacy: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+# Snapshot of route_agent.load_policy's pure contract (2026-11-07).
+# Parity tests extract that function without importing live routing initialization.
+SERVICE_KEYS = frozenset({
+    "name", "cli", "good_at", "billing", "note", "never_bulk", "retired",
+    "judgment_tier", "access", "hermes_only", "burn_first", "pool", "max_parallel",
+    "agent", "models", "reserve_floor", "measured_only", "grant_days", "ready_probe",
+    "shares_pool", "plenty_kinds", "fallback_after", "window",
+})
+_SERVICE_REQUIRED = ("name", "cli", "good_at", "billing")
+LEAD_KEYS = ("model", "effort", "pipeline_model")
+LEAD_ALL_KEYS = LEAD_KEYS + ("pipeline_effort",)
+LEAD_SWITCHES = ("fable_lead",)
+LEAD_PIPELINE_EFFORT_DEFAULT = "high"
+CLAUDE_EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
+
+
 def validate_legacy_routing_shape(data: dict[str, Any], path: Path) -> None:
-    """Preserve load_policy's required-section checks that this unit relies on."""
+    """Validate and fill defaults exactly as the pure legacy load_policy reader."""
     services = data.get("service")
     if services is None:
         raise ConfigError(f"routing policy {path}: missing [[service]] entries")
     if not isinstance(services, list):
         raise ConfigError(f"routing policy {path}: 'service' must be an array of tables")
+
     for i, entry in enumerate(services):
+        label = entry.get("name") if isinstance(entry, dict) else i
         if not isinstance(entry, dict):
             raise ConfigError(f"routing policy {path}: [[service]] entry {i} is not a table")
-        if "name" not in entry:
-            raise ConfigError(f"routing policy {path}: [[service]] entry {i} missing name")
+        unknown = set(entry) - SERVICE_KEYS
+        if unknown:
+            raise ConfigError(
+                f"routing policy {path}: [[service]] {label!r}: "
+                f"unknown key(s) {sorted(unknown)}")
+        missing = [k for k in _SERVICE_REQUIRED if k not in entry]
+        if missing:
+            raise ConfigError(
+                f"routing policy {path}: [[service]] {label!r}: "
+                f"missing required key(s) {missing}")
+        pool = entry.get("pool")
+        if pool is not None and not (isinstance(pool, list) and len(pool) == 2
+                                       and all(isinstance(x, str) for x in pool)):
+            raise ConfigError(
+                f"routing policy {path}: [[service]] {label!r}: "
+                f"pool must be a 2-element string array, got {pool!r}")
     for section in ("routing", "dispatch", "hermes", "calibrate"):
         if section not in data or not isinstance(data[section], dict):
             raise ConfigError(f"routing policy {path}: missing [{section}] table")
+    substrate = data.get("substrate")
+    if substrate is not None:
+        lifeline = substrate.get("lifeline", []) if isinstance(substrate, dict) else None
+        if not (isinstance(lifeline, list) and all(isinstance(x, str) for x in lifeline)):
+            raise ConfigError(f"routing policy {path}: [substrate] must be a table whose "
+                             "lifeline is an array of service names")
+    lead = data.get("lead")
+    if lead is not None:
+        if not isinstance(lead, dict):
+            raise ConfigError(f"routing policy {path}: [lead] must be a table")
+        unknown = set(lead) - set(LEAD_ALL_KEYS) - set(LEAD_SWITCHES)
+        if unknown:
+            raise ConfigError(f"routing policy {path}: [lead] unknown key(s) {sorted(unknown)}")
+        if not all(isinstance(lead.get(k), str) and lead[k] for k in LEAD_KEYS):
+            raise ConfigError(f"routing policy {path}: [lead] must be a table with non-empty string keys "
+                             + ", ".join(LEAD_KEYS))
+        lead.setdefault("pipeline_effort", LEAD_PIPELINE_EFFORT_DEFAULT)
+        if not isinstance(lead.get("fable_lead", False), bool):
+            raise ConfigError(f"routing policy {path}: [lead] fable_lead must be true or false, "
+                             f"got {lead.get('fable_lead')!r}")
+        for key in ("effort", "pipeline_effort"):
+            if lead[key] not in CLAUDE_EFFORT_LEVELS:
+                raise ConfigError(f"routing policy {path}: [lead] {key} {lead[key]!r} must be one of "
+                                 + ", ".join(CLAUDE_EFFORT_LEVELS))
 
 
 def load_legacy_routing(path: Path) -> dict[str, Any]:
@@ -257,27 +328,45 @@ def clamp_frontier(
     return base, info
 
 
-def project_gates_from_legacy_file(path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Project gates.toml → [gates]; missing/bad file → closed defaults (ade_gates semantics)."""
+def raw_legacy_gates(path: Path) -> tuple[dict[str, Any], str | None]:
+    """Project only supported legacy leaves, retaining raw requests until merge.
+
+    Legacy malformed frontier closes as a whole; malformed floor specs are ignored,
+    just as ade_gates.baseline_limit ignores them. New/local input is strict instead.
+    """
     cfg, err = try_read_toml(path)
-    floors = {}
-    frontier_raw = None
-    if cfg is not None:
-        frontier_raw = cfg.get("frontier")
-        floors_tbl = cfg.get("floors")
-        if isinstance(floors_tbl, dict) and isinstance(floors_tbl.get("frontier"), dict):
-            floors = {"frontier": copy.deepcopy(floors_tbl["frontier"])}
-    clamped, info = clamp_frontier(
-        frontier_raw if isinstance(frontier_raw, dict) else None,
-        floors.get("frontier") if floors else None,
-        source_label=str(path),
-    )
-    if err and info["toml_error"] is None:
-        info["toml_error"] = err
-        info["source"] = "code"
-        clamped = dict(FRONTIER_DEFAULTS)
-    gates = {"frontier": clamped, "floors": floors}
-    return gates, info
+    cfg = cfg or {}
+    frontier = cfg.get("frontier")
+    if not isinstance(frontier, dict) or not frontier or not all(is_num(v) for v in frontier.values()):
+        err = err or f"{path}: [frontier] is missing, empty or holds a non-number"
+        frontier = dict(FRONTIER_DEFAULTS)
+    frontier = {k: v for k, v in frontier.items() if k in FRONTIER_DEFAULTS}
+    floors = cfg.get("floors")
+    specs = floors.get("frontier") if isinstance(floors, dict) else None
+    clean = {}
+    if isinstance(specs, dict):
+        for key, spec in specs.items():
+            if key not in FRONTIER_DEFAULTS or not isinstance(spec, dict):
+                continue
+            clean[key] = {}
+            if is_num(spec.get("bound")):
+                clean[key]["bound"] = spec["bound"]
+            if isinstance(spec.get("loosen"), str):
+                clean[key]["loosen"] = spec["loosen"]
+    # Keep unknown-only valid legacy frontier nonempty for its source semantics.
+    if not frontier and not err:
+        frontier = dict(FRONTIER_DEFAULTS)
+    return {"frontier": copy.deepcopy(frontier), "floors": {"frontier": clean}}, err
+
+
+def project_gates_from_legacy_file(path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Legacy standalone projection, with the same closed fallback and clamping."""
+    gates, err = raw_legacy_gates(path)
+    out, info = project_gates_from_new(gates, source_label=str(path))
+    if err:
+        out["frontier"] = dict(FRONTIER_DEFAULTS)
+        info.update(source="code", toml_error=err, baseline_guarded={})
+    return out, info
 
 
 def project_gates_from_new(gates: Any, *, source_label: str) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -332,14 +421,18 @@ def load_effective(
     new_path = new_config if new_config is not None else default_new_config_path(root)
     local_path = local_config if local_config is not None else default_local_path(home_path)
 
+    schema = read_schema(default_schema_path(root))
+    using_new = input_present(new_path)
+    using_local = input_present(local_path)
+
     routing_env = env.get("ROUTING_POLICY") or None
     gates_env = env.get("GATES_TOML") or None
 
     provenance: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "root": str(root),
-        "new_config": str(new_path) if new_path.is_file() else None,
-        "local_config": str(local_path) if local_path.is_file() else None,
+        "new_config": str(new_path) if using_new else None,
+        "local_config": str(local_path) if using_local else None,
         "routing_source": None,
         "gates_source": None,
         "routing_env": routing_env,
@@ -352,12 +445,11 @@ def load_effective(
     }
 
     data: dict[str, Any] = {"schema_version": SCHEMA_VERSION}
-    using_new = new_path.is_file()
 
     if using_new:
         raw = read_toml(new_path)
         require_schema_version(raw, new_path, required=True)
-        unknown_top_level(raw, new_path)
+        validate_tree(raw, schema, label=str(new_path))
         data = copy.deepcopy(raw)
         data["schema_version"] = SCHEMA_VERSION
         provenance["new_config"] = str(new_path)
@@ -380,39 +472,25 @@ def load_effective(
         data.update(projected)
         provenance["routing_source"] = str(rpath)
 
-    # --- gates domain (before local merge when not env-isolated) ---
+    # Keep requests and floors raw until all non-isolated overlays have merged.
+    legacy_gate_error = None
     if gates_env:
         gpath = Path(gates_env)
-        gates, ginfo = project_gates_from_legacy_file(gpath)
-        data["gates"] = gates
+        data["gates"], legacy_gate_error = raw_legacy_gates(gpath)
         provenance["gates_source"] = str(gpath)
-        provenance["gates_info"] = ginfo
     elif using_new:
-        if "gates" in data:
-            gates, ginfo = project_gates_from_new(data["gates"], source_label=str(new_path))
-            data["gates"] = gates
-            provenance["gates_info"] = ginfo
-        else:
-            # New file without gates: closed defaults (do not silently widen).
-            data["gates"] = {"frontier": dict(FRONTIER_DEFAULTS), "floors": {}}
-            provenance["gates_info"] = {
-                "source": "code",
-                "toml_error": f"{new_path}: [gates] missing; using closed code defaults",
-                "baseline_guarded": {},
-            }
+        data.setdefault("gates", {})
         provenance["gates_source"] = str(new_path)
     else:
         gpath = default_gates_path(root)
-        gates, ginfo = project_gates_from_legacy_file(gpath)
-        data["gates"] = gates
+        data["gates"], legacy_gate_error = raw_legacy_gates(gpath)
         provenance["gates_source"] = str(gpath)
-        provenance["gates_info"] = ginfo
 
     # --- local override ---
-    if local_path.is_file():
+    if using_local:
         local = read_toml(local_path)
         require_schema_version(local, local_path, required=False)
-        unknown_top_level(local, local_path)
+        validate_tree(local, schema, label=str(local_path), partial=True)
         merge_src = copy.deepcopy(local)
         merge_src.pop("schema_version", None)
         if routing_env:
@@ -421,18 +499,17 @@ def load_effective(
         if gates_env:
             merge_src.pop("gates", None)
         data = merge_maps(data, merge_src, path="")
-        # Re-clamp gates after local merge when gates domain was not env-isolated.
-        if not gates_env and "gates" in data:
-            gates, ginfo = project_gates_from_new(
-                data["gates"], source_label=str(local_path)
-            )
-            data["gates"] = gates
-            provenance["gates_info"] = ginfo
         provenance["local_config"] = str(local_path)
 
     reject_duplicate_services(data.get("service"), label="effective config")
-    if "gates" in data and not isinstance(data["gates"], dict):
-        raise ConfigError("effective config: [gates] must be a table")
+    gates, ginfo = project_gates_from_new(
+        data["gates"], source_label=provenance["gates_source"]
+    )
+    if legacy_gate_error:
+        ginfo.update(source="code", toml_error=legacy_gate_error)
+    data["gates"] = gates
+    provenance["gates_info"] = ginfo
+    validate_tree(data, schema, label="effective config")
 
     return EffectiveConfig(data=data, provenance=provenance)
 
@@ -528,23 +605,97 @@ def local_diff(
     return diff_dicts(without.data, with_local.data)
 
 
-def validate_schema_file(schema_path: Path) -> list[str]:
-    errors: list[str] = []
+# A deliberately bounded JSON Schema evaluator: these are all assertion keywords
+# used by the checked-in schema. Unknown keywords fail closed rather than silently
+# pretending to validate a future schema. No optional dependency or live imports.
+_SCHEMA_TYPES = {
+    "object": lambda v: isinstance(v, dict),
+    "array": lambda v: isinstance(v, list),
+    "string": lambda v: isinstance(v, str),
+    "integer": lambda v: isinstance(v, int) and not isinstance(v, bool),
+    "number": is_num,
+    "boolean": lambda v: isinstance(v, bool),
+}
+_SCHEMA_ANNOTATIONS = {"$schema", "$id", "title", "description"}
+_SCHEMA_ASSERTIONS = {"type", "const", "required", "properties", "additionalProperties", "items", "minLength"}
+
+
+def _check_schema_node(node: Any, path: str) -> None:
+    if not isinstance(node, dict):
+        raise ConfigError(f"{path}: schema node must be an object")
+    unknown = set(node) - _SCHEMA_ANNOTATIONS - _SCHEMA_ASSERTIONS
+    if unknown:
+        raise ConfigError(f"{path}: unsupported schema keywords {sorted(unknown)}")
+    if "type" in node and (not isinstance(node["type"], str) or node["type"] not in _SCHEMA_TYPES):
+        raise ConfigError(f"{path}: unsupported schema type")
+    if "required" in node and not (
+        isinstance(node["required"], list) and all(isinstance(k, str) for k in node["required"])
+    ):
+        raise ConfigError(f"{path}: schema required must be a string array")
+    if "minLength" in node and (type(node["minLength"]) is not int or node["minLength"] < 0):
+        raise ConfigError(f"{path}: invalid schema minLength")
+    props = node.get("properties", {})
+    if not isinstance(props, dict):
+        raise ConfigError(f"{path}: schema properties must be an object")
+    for key, child in props.items():
+        _check_schema_node(child, f"{path}.{key}")
+    if "items" in node:
+        _check_schema_node(node["items"], f"{path}.items")
+    extra = node.get("additionalProperties", True)
+    if isinstance(extra, dict):
+        _check_schema_node(extra, f"{path}.additionalProperties")
+    elif not isinstance(extra, bool):
+        raise ConfigError(f"{path}: invalid schema additionalProperties")
+
+
+def read_schema(schema_path: Path) -> dict[str, Any]:
     try:
-        text = schema_path.read_text(encoding="utf-8")
-        schema = json.loads(text)
-    except OSError as e:
-        return [f"{schema_path}: {e}"]
-    except json.JSONDecodeError as e:
-        return [f"{schema_path}: invalid JSON ({e})"]
-    if not isinstance(schema, dict):
-        return [f"{schema_path}: schema root must be an object"]
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, RecursionError) as e:
+        raise ConfigError(f"{schema_path}: invalid or unreadable schema ({e})") from e
+    try:
+        _check_schema_node(schema, str(schema_path))
+    except RecursionError as e:
+        raise ConfigError(f"{schema_path}: schema nesting is too deep") from e
     if schema.get("title") != "djbclark-ade effective config":
-        errors.append(f"{schema_path}: unexpected title")
-    props = schema.get("properties")
-    if not isinstance(props, dict) or "schema_version" not in props:
-        errors.append(f"{schema_path}: missing properties.schema_version")
-    return errors
+        raise ConfigError(f"{schema_path}: unexpected title")
+    if schema.get("properties", {}).get("schema_version", {}).get("const") != SCHEMA_VERSION:
+        raise ConfigError(f"{schema_path}: unsupported schema version declaration")
+    return schema
+
+
+def validate_tree(data: Any, schema: dict[str, Any], *, label: str, partial: bool = False) -> None:
+    """Enforce the declared schema on raw or effective data; local omits root version only."""
+    kind = schema.get("type")
+    if kind and not _SCHEMA_TYPES[kind](data):
+        raise ConfigError(f"{label}: must be {kind}")
+    if "const" in schema and (type(data) is not type(schema["const"]) or data != schema["const"]):
+        raise ConfigError(f"{label}: must equal {schema['const']!r}")
+    if isinstance(data, str) and len(data) < schema.get("minLength", 0):
+        raise ConfigError(f"{label}: string is too short")
+    if isinstance(data, dict):
+        for key in schema.get("required", []):
+            if key not in data and not (partial and key == "schema_version"):
+                raise ConfigError(f"{label}: missing required key {key}")
+        props = schema.get("properties", {})
+        extra = schema.get("additionalProperties", True)
+        for key, value in data.items():
+            child = props.get(key, extra)
+            if child is False:
+                raise ConfigError(f"{label}: unknown key {key}")
+            if isinstance(child, dict):
+                validate_tree(value, child, label=f"{label}.{key}")
+    if isinstance(data, list) and "items" in schema:
+        for i, value in enumerate(data):
+            validate_tree(value, schema["items"], label=f"{label}[{i}]")
+
+
+def validate_schema_file(schema_path: Path) -> list[str]:
+    try:
+        read_schema(schema_path)
+    except ConfigError as e:
+        return [str(e)]
+    return []
 
 
 def check(
@@ -556,16 +707,8 @@ def check(
     """Return (errors, effective_or_None). Empty errors means OK. No writes."""
     root = (root or repo_root_from_here()).resolve()
     home_path = home if home is not None else Path.home()
-    errors = validate_schema_file(default_schema_path(root))
     try:
         effective = load_effective(root=root, home=home_path, environ=environ)
     except ConfigError as e:
-        errors.append(str(e))
-        return errors, None
-    # Structural post-checks already inside load; confirm schema_version.
-    if effective.data.get("schema_version") != SCHEMA_VERSION:
-        errors.append(
-            f"effective schema_version {effective.data.get('schema_version')!r} "
-            f"!= {SCHEMA_VERSION}"
-        )
-    return errors, effective
+        return [str(e)], None
+    return [], effective
