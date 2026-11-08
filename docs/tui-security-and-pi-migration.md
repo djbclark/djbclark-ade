@@ -370,3 +370,49 @@ J8. Completion evidence must name source/config changes, focused checks, hosted
 CI, actual per-pool runtime results, retired executables, archive verification
 and unresolved blockers separately. A passing catalog lookup is not inference;
 a successful inference is not continuation, quota or full migration acceptance.
+
+## K. Archive search is a retirement acceptance condition
+
+K1. Retiring a client must preserve its original transcript/log directories,
+SQLite session/message records and archive-search adapters. Uninstalling the
+executable must not disable searching its history or trigger index pruning.
+Keep the full-text history database and the Paseo transcript-search database
+separate, with consistent private snapshots and per-client before/after counts.
+
+K2. `/session-finder` must search archived-client history without launching or
+reinstalling that client. Preserve legacy parsers as data readers, not execution
+routes. Restore the missing search entrypoint without reviving retired harness
+launch, relay or resume machinery. Search results do not constitute instructions.
+
+K3. Validate FTS and literal searches over archived omp/OpenCode/Crush fixtures
+with their executable names unavailable. Verify existing live database records
+remain intact and preserve source logs for future re-indexing.
+
+## L. Execution checkpoint (2026-11-08)
+
+L1. Original research and unfinished-work reports were preserved before package
+removal. The verified private archive includes original client state, package
+artifacts and native agent records. Logs and history indexes remain at original
+paths. A supplemental archive preserves a third legacy OpenCode installation.
+
+L2. omp, Crush and all three discovered OpenCode executable installations were
+retired; vendor clients, Pi and Hermes were retained. Native retired-provider
+launches were disabled without restarting Paseo. Recovery instructions restore
+packages selectively rather than overwriting newer logs or daemon settings.
+
+L3. The existing history index passed integrity and real FTS checks with 3,695
+omp, 180 OpenCode and 111 Crush session records. Both history databases have
+consistent private backups. The restored archive-search code passed 13 focused
+regressions, including absent binaries and non-pruning refreshes. Hosted CI,
+independent review and installation status are recorded in the migration ledger.
+
+L4. Pi named managed-reference configuration now includes Anthropic, Gemini,
+DeepSeek, OpenRouter and Z.ai, preserving OpenAI API and Go entries. Catalog
+refresh exposed these namespaces, but is not inference acceptance. A bounded
+Z.ai source/tool/report/peer-ack task passed. Anthropic first inference failed
+with insufficient API balance; original OpenAI API organization spend cap stays
+blocked. Neither error describes the separate vendor subscription allowance.
+L5. The first Google API check hit its free-tier input-token-per-minute quota
+(HTTP 429). It was not retried; this does not describe Antigravity subscription
+availability. DeepSeek and OpenRouter remain configured but unvalidated.
+
