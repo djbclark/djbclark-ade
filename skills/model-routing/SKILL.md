@@ -62,23 +62,29 @@ send verbose work (test runs, logs, fetches) to a sub-agent that returns a summa
 B5. The context window is a choice next to model and effort: the agent's default unless the slice reads a whole corpus
 or a long log. Bigger windows bill more per token on some services (Cursor 2× above 256k) and can be slower.
 
-## C. Pools (J2 pool audit, 2026-11-06; grok retired 2026-11-07)
+## C. Pools (J2 audit 2026-11-06; Pi migration update 2026-11-08)
 
-One row per surviving pool; its kinds, ranks and models are in `route_agent.py policy --md`.
+Pools and clients are distinct. `route_agent.py policy --md` names the eligible
+automatic subset. Pi is the sole general-purpose third-party TUI; required
+monthly-plan vendor clients and Hermes remain. A basic Pi service check does
+not add a pool to automatic routing: legacy omp/OpenCode service IDs stay
+retired until explicit per-pool Pi mappings and acceptance exist. Omit a Pi
+mode flag; its native provider exposes no selectable modes.
 
 | Pool | Paseo provider | Use it for | Never |
 |---|---|---|---|
 | C1. `claude` | claude | judgment (Opus), code (Sonnet), frontier (Fable, section D); the lead's own pool | Fable for everyday work |
-| C2. `omp` (Claude API credits) | omp | `api-only` first, adversary rounds and judgment (Opus), then code and bulk, so the monthly grant is spent before it expires | omp's own default model (it bills Copilot): always `--model anthropic/claude-...` |
+| C2. Anthropic API credits (historical service `omp`) | Pi after funded API/pool acceptance; old service retired | keep this pool separate from Claude subscription windows; the current API check was rejected for insufficient credit | archived omp fallback; inferring API entitlement from subscription quota |
 | C3. `codex` | codex | frontier (astra, one per wave); its everyday models for judgment, code, bulk and mechanical only while every codex window has `plenty_min` left | astra for an everyday kind |
 | C4. `cursor-auto`, `cursor` | cursor | Cursor's Auto pool (burn-first, monthly) and its third-party pool, separately metered | the GrokBot pool (`grok-bot`, Cursor-billed): never a slice target |
 | C5. `cursor-cloud` | none: `cursor-cloud launch` | a slice that leaves the Mac and pushes a branch the lead reviews | `autoCreatePR` |
-| C6. `opencode-go`, `opencode-zen-free` | opencode | bulk and mechanical on routine Go models (`config/go-model-policy.json`); costly Go models as bounded read-only advisors only | code on opencode-go; Go "Use balance" |
+| C6. Go and Zen free (historical OpenCode service IDs) | Pi for separately accepted routes; old services retired | Go basic route passed; retain `config/go-model-policy.json` cost/task constraints; Zen free hit its quota and is not accepted | archived OpenCode fallback; Go "Use balance"; treating Go and Zen balances as interchangeable |
 | C7. `antigravity-argon` (Google AI Pro) | antigravity | Gemini 4 Argon as the frontier FALLBACK, only while codex or claude is short (`plan` names it then; tendcf/nix2cf review route 3) | the provider's other pools (not routed); an API key path (bills separately) |
 | C8. `hermes`, `clinepass` | hermes; none | Hermes is the operator's assistant; ClinePass is the Hermes/Dann lifeline (`route_agent.py substrate`, `hermes-chain`) | a delegation target, ever |
 
 C9. Prepaid opencode-zen stays retired until an operator top-up; credits-backed models (Claude usage credits, Codex
 credits, Go "Use balance") are never reached for by re-enabling a toggle; there is no all-vendor fan-out.
+C9a. OpenAI API credits through Pi and the Codex monthly subscription through Codex are separate pools. A fresh subscription reading does not clear an API organization spend limit.
 C10. `github` and `realtime-web` are kinds with no pool since copilot (2026-11-06) and the grok CLI (2026-11-07)
 retired: `plan` leaves them queued.
 
@@ -101,8 +107,8 @@ the Fable cap above their floors; stale, unknown or short means the closed rules
 an Agent-tool Fable call asks).
 D4. **Quota limits are the session-guard and usage-auto-resume plugins' job** (D4, 2026-11-07): they pause a session at
 a quota limit and continue it after the reset. The fleet governor and the quota guard were deleted. When the Claude
-windows are short (`route_agent.py show`), a lead hands judgment to omp and Agent-tool sub-agents run with
-`model: "sonnet"`.
+windows are short (`route_agent.py show`), select a fresh eligible pool through the router. Do not fall back to
+an archived TUI or infer that a manual Pi smoke test authorizes automatic routing. Claude code slices use Sonnet.
 D5. **In-flight slices reserve quota per service** (`[dispatch.estimate_floor]`, the repo overrides for tendcf and
 nix2cf): `acp-dispatch` refuses a slice that does not fit (exit 5, class `inflight`).
 
