@@ -127,3 +127,13 @@ reported `ade/auto`; one ordinary CLI request without an explicit model selected
 Cursor Composer 2.5 and completed successfully. This establishes the normal
 startup path in addition to D3's SDK checks. Existing sessions were not restarted;
 no native Paseo resume validation or additional pool qualification is claimed.
+
+D5. 2026-11-08 native Paseo validation: a new Pi agent selected `ade/auto`,
+completed a bounded file task through Cursor Composer 2.5, and ended idle.
+Reloading its underlying Pi process retained the same agent, native session
+file and virtual selection. A follow-up returned the test nonce from the
+conversation; the saved task epoch, physical Cursor route and recorded effort
+remained unchanged, with no Pi-native tool calls recorded in that continuation.
+This establishes one native reload/resume path. Cursor owns its inner tool loop,
+so this observation is not an independent audit of those tools or an acceptance
+result for other providers. No additional pool or automatic route was enabled.
