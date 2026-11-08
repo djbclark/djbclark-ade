@@ -1,0 +1,6 @@
+
+[[service]]
+name = "only-local"
+cli = "x"
+good_at = { code = 1 }
+billing = "subscription"
