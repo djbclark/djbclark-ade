@@ -75,13 +75,16 @@ ownership transfer. Unsupported provider history needs a deliberate briefing fal
 ## D. Plugin advice
 
 The local `paseo plugin ls --json` snapshot showed all 21 installed plugins enabled/running.
-No live plugin setting was changed for this document. Recommendations below are distinct from
+The remote daemon's separate read-only inventory listed 14 plugins, all disabled, including
+`cross-daemon`, `skills`, `session-janitor` and `usage-auto-resume`; Transfer was absent there too.
+Preserve those disabled states until their purpose and dependencies are established. Native remote
+workspace discovery succeeded without enabling them. No live plugin setting was changed for this document. Recommendations below are distinct from
 installation and from an end-to-end migration proof.
 
 | Plugin/capability | Advice | Reason and limits |
 |---|---|---|
 | Native Paseo tools and connected hosts | Keep enabled; configure on each intended daemon | Remote operations are built in. A read-only remote workspace-list call succeeded in this session; no transfer or round-trip peer ack was tested. |
-| Transfer (`paseo-transfer`), absent locally | Evaluate installation on both hosts | Current README supports Linux/macOS/WSL and requires Node 22+, Git, destination provider CLIs and credentials. Copy/Move previews, Claude/Codex histories and verification fit this requirement. Provider support does not cover every planned Pi/OMP workflow. |
+| Transfer (`paseo-transfer`), absent on both inspected hosts | Evaluate installation on both hosts | Current README supports Linux/macOS/WSL and requires Node 22+, Git, destination provider CLIs and credentials. Copy/Move previews, Claude/Codex histories and verification fit this requirement. Provider support does not cover every planned Pi/OMP workflow. |
 | Transfer settings/use | Begin with Copy and the preview; retain source | Ignored files, credentials, MCP and launch settings stay behind. Move refuses ignored files. Agent tools only list destinations/read status; initiating transfer uses the UI preview. App/plugin reload loses preview/status, requiring inspection before retry. |
 | Baton | Keep for convenient same-host recovery | `.paseo/handoffs` or a configured directory stays on the daemon. Select a cheap eligible writer profile, keep `waitForSubagents` on, and choose durable retention deliberately. Consider `deleteStaleHandoffs` and `cleanupOldHandoffs` off for records relied on across a transfer until explicitly retained elsewhere; this trades disk retention for recoverability. These are recommendations, not verified current values. |
 | Tell Agent | Keep as a local UI convenience | Its installed overview explicitly says same-host only. Use native host-targeted messaging across computers. |
