@@ -49,3 +49,15 @@ shared free models did not establish a reliable task loop. Venice spending
 is deliberately disabled; ClinePass remains reserved for Hermes/Hindsight.
 These observations are dated acceptance results, not universal entitlement
 or billing guarantees. Runtime profiles require their own smoke checks.
+
+## Optional SIPB request-shape diagnostics
+
+Set `ADE_PI_REQUEST_METADATA_DIR` in the Pi process environment to an owned
+private directory to record one atomic, mode0600 JSON file per SIPB request.
+The hook observes the final provider payload and does not change it. It saves
+only model ID, stream flag, serialized byte count, per-role content lengths,
+tool names, max-token fields, backend context and reasoning effort. It saves
+no prompt text, tool arguments, headers or credentials. Other providers and
+sessions with the variable unset write nothing. A diagnostic write failure
+prints a fixed warning and leaves the request intact. These measurements do
+not prove how the remote server applies a requested context window.
