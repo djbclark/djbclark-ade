@@ -402,7 +402,7 @@ packages selectively rather than overwriting newer logs or daemon settings.
 
 L3. The existing history index passed integrity and real FTS checks with 3,695
 omp, 180 OpenCode and 111 Crush session records. Both history databases have
-consistent private backups. The restored archive-search code passed 13 focused
+consistent private backups. The restored archive-search code passed 17 focused
 regressions, including absent binaries and non-pruning refreshes. Hosted CI,
 independent review and installation status are recorded in the migration ledger.
 
@@ -412,7 +412,14 @@ refresh exposed these namespaces, but is not inference acceptance. A bounded
 Z.ai source/tool/report/peer-ack task passed. Anthropic first inference failed
 with insufficient API balance; original OpenAI API organization spend cap stays
 blocked. Neither error describes the separate vendor subscription allowance.
+
 L5. The first Google API check hit its free-tier input-token-per-minute quota
 (HTTP 429). It was not retried; this does not describe Antigravity subscription
-availability. DeepSeek and OpenRouter remain configured but unvalidated.
+availability. DeepSeek completed a bounded tool/report/peer task. OpenRouter
+produced a report, but its free-model completion/ack behavior remains unaccepted.
+
+L6. The legacy omp/OpenCode automatic-routing rows were marked retired while
+preserving pool metadata and leaving Hermes/vendor subscription configuration
+unchanged. Pi-specific automatic routing remains pending continuity and quota
+acceptance; catalog breadth is not a shared billing pool.
 

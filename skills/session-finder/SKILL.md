@@ -28,6 +28,9 @@ does not launch, resume, restore, message or install a retired client.
    rows, missing-source rows and successfully indexed history after a load error.
    Crush refresh also follows per-project database paths already recorded in
    the index when its old project registries are absent.
+   Legacy and path-based keys can both match one session; these retained
+   duplicates can consume more than one result slot. `--status` separates the
+   old global `legacy_refresh` timestamp from per-client refresh attempts.
 5. The default index is `~/.local/state/session-index/history.v2.sqlite`;
    `SESSION_INDEX_DIR` selects another index directory for isolated verification.
    Keep the database and all search output private. Do not paste transcript

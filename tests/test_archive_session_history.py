@@ -58,10 +58,12 @@ def test_empty_refresh_retains_all_seventeen_client_types(database):
     assert db.execute("SELECT count(DISTINCT agent) FROM files").fetchone()[0] == 17
 
 
-@pytest.mark.parametrize("empty", [False, True])
+@pytest.mark.parametrize("empty", [False, True, "attribute"])
 def test_failed_or_empty_source_does_not_erase_indexed_text(database, empty):
     _, db = database
     def load():
+        if empty == "attribute":
+            return [].get("text")
         if not empty:
             raise ValueError("malformed retained source")
         return "", "", []
@@ -155,3 +157,32 @@ def test_crush_refresh_uses_retained_project_path_without_registry(database, tmp
     assert history.refresh(db, [reader])["crush"]["updated"] == 1
     assert history.search(db, ["canary"], ["crush"], 1)[0]["key"] == key
     assert source.read_bytes() == before
+
+
+@pytest.mark.parametrize("during_iteration", [False, True])
+def test_reader_enumeration_failure_preserves_history_and_continues(database, during_iteration):
+    _, db = database
+    before = db.execute("SELECT * FROM files ORDER BY key").fetchall()
+    def eager_failure():
+        raise TypeError("invalid source timestamp")
+    def late_failure():
+        yield dict(key="omp:one", fp="old")
+        raise TypeError("invalid source timestamp")
+    broken = SimpleNamespace(AGENT="omp", sessions=late_failure if during_iteration else eager_failure)
+    valid = SimpleNamespace(AGENT="pi", sessions=lambda: iter([
+        dict(key="pi:new", sid="new", fp="new", mtime=3,
+             load=lambda: ("/project", "new", [("user", "later reader canary")]))]))
+    stats = history.refresh(db, [broken, valid])
+    assert stats["omp"]["skipped"] == 1
+    assert stats["pi"]["updated"] == 1
+    assert history.search(db, ["canary"], ["pi"], 1)
+    assert [row for row in db.execute("SELECT * FROM files ORDER BY key")
+            if row[0] != "pi:new"] == before
+
+
+def test_status_reports_historical_global_refresh_separately(database):
+    _, db = database
+    db.execute("INSERT INTO meta VALUES('updated',123)")
+    result = history.status(db)
+    assert result["legacy_refresh"] == 123
+    assert result["refresh"] == {}

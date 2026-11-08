@@ -219,6 +219,7 @@ models = { judgment = "opus --effort high", frontier = "fable --effort high", co
 # over the grant period (a pool far from exhausted late in the month), see route_agent.py.
 [[service]]
 name = "omp"
+retired = true # 2026-11-08: executable retired; Pi Anthropic API acceptance is blocked, not a subscription failure.
 cli = "omp (Claude API credits: acp-dispatch omp --model anthropic/claude-sonnet-5-5)"
 good_at = { api-only = 1, judgment = 2, code = 13, bulk = 35 }
 billing = "credits"
@@ -280,6 +281,7 @@ models = { frontier = "gpt-6-astra --effort high", judgment = "gpt-6.1-sol --eff
 # the `opencode` TUI; Hermes reaches the free half as an API provider.
 [[service]]
 name = "opencode-zen-free"
+retired = true # 2026-11-08: old OpenCode transport retired; Pi Zen credential/route acceptance pending.
 cli = "opencode (zen free models)"
 good_at = { bulk = 5, mechanical = 5, code = 45 }
 billing = "free"
@@ -289,6 +291,7 @@ agent = "opencode"
 
 [[service]]
 name = "opencode-go"
+retired = true # 2026-11-08: old OpenCode transport retired; Pi passed a bounded smoke, automatic routing still pending.
 cli = "opencode (go tier)"
 # No `code` rank or model (djbclark 2026-10-30): no code slice ever goes to opencode-go, so
 # `route`/`plan` never name it for code. DeepSeek V4.1 Flash stays only the main-loop

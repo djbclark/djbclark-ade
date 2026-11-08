@@ -39,6 +39,7 @@ def status(db: sqlite3.Connection) -> dict:
         "sessions": dict(db.execute("SELECT agent,count(*) FROM files GROUP BY agent ORDER BY agent")),
         "messages": db.execute("SELECT count(*) FROM msgs").fetchone()[0],
         "refresh": dict(db.execute("SELECT k,v FROM meta WHERE k LIKE 'updated:%'")),
+        "legacy_refresh": next(iter(db.execute("SELECT v FROM meta WHERE k='updated'")), (None,))[0],
     }
 
 
@@ -103,10 +104,24 @@ def refresh(db: sqlite3.Connection, readers) -> dict:
             for key, cwd in db.execute("SELECT key,cwd FROM files WHERE agent='crush'"):
                 if key.startswith("crush:/") and ".db#" in key:
                     retained.append((cwd, Path(key[len("crush:"):].rsplit("#", 1)[0])))
-            entries = reader.sessions(retained_databases=retained)
+            enumerate_entries = lambda: reader.sessions(retained_databases=retained)
         else:
-            entries = reader.sessions()
-        for entry in entries:
+            enumerate_entries = reader.sessions
+        try:
+            entries = iter(enumerate_entries())
+        except Exception:
+            stats[reader.AGENT] = dict(seen=0, updated=0, skipped=1)
+            continue
+        while True:
+            try:
+                entry = next(entries)
+            except StopIteration:
+                break
+            except Exception:
+                # A malformed source can end a reader's generator. Keep every
+                # existing record and continue with the other client readers.
+                skipped += 1
+                break
             seen += 1
             old = db.execute("SELECT fp FROM files WHERE key=?", (entry["key"],)).fetchone()
             if old and old[0] == entry["fp"]:
@@ -116,7 +131,7 @@ def refresh(db: sqlite3.Connection, readers) -> dict:
                 messages = [(role, text[:4000 if role == "user" else 2000])
                             for role, text in messages
                             if role in ("user", "assistant") and isinstance(text, str) and len(text) > 3]
-            except (OSError, ValueError, TypeError, sqlite3.Error):
+            except Exception:
                 skipped += 1
                 continue
             if not messages:
