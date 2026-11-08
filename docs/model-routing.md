@@ -91,7 +91,7 @@ G1. 2026-10-18: four astra slices at once emptied codex's 5-hour window, so the 
 `--kind frontier`, capped per wave, and in-flight slices reserve their estimated quota per service.
 G2. 2026-10-20: the Claude weekly window ran out 2.6 days before its reset; Opus sub-agents (~53%) and a Fable lead
 (~30%) were the burn. Hence `[lead]` (Opus judgment lead, Sonnet pipeline lead, never Fable: operator 2026-10-23) and
-adversary rounds on omp first. Since 2026-11-07 (operator) Fable leads are allowed for now: the one line to flip back is
+adversary rounds on omp first at that time (that client was archived 2026-11-08 and is no longer a fallback). Since 2026-11-07 (operator) Fable leads are allowed for now: the one line to flip back is
 `fable_lead = true` in `[lead]` of `config/routing.toml` (false or absent restores never-a-Fable-lead).
 G3. 2026-11-01: a cheap model as the daily coding driver was checked against Terminal-Bench 4.0 and this repo's own
 review of Flash-written code (four BLOCKs): code stays on tier-1 models (Sonnet 5.5, GPT-6.1 Sol); cheap models only for

@@ -7,8 +7,9 @@ and links here for the reasons and sources.
 **Standing operator requirement:** every orchestration skill can dispatch to several providers. Since 2026-10-31 (Paseo is
 the only harness) every agent is a Paseo agent, and since 2026-11-06 `acp-dispatch` is a shim over `paseo run`: in process through the Agent tool or a Workflow, out of process through `paseo run` (directly,
 or through `bin/acp-dispatch`, a `paseo run` shim kept for one cycle with its report, `.done`, record and exit-code
-contract; Wave 6's follow-up PR removes it). The providers are claude, codex, cursor, antigravity, opencode, omp and
-hermes (`paseo provider ls --json`); `skills/fan-out` is the how-to.
+contract; Wave 6's follow-up PR removes it). Query `paseo provider ls --json` for the live registry. Since
+2026-11-08 Pi is the sole general-purpose third-party TUI; required monthly-plan vendor clients and the Hermes
+exception remain. Archived omp/OpenCode clients are not dispatch targets or fallbacks. `skills/fan-out` is the how-to.
 
 ## 1. Two kinds of work in an agent loop
 

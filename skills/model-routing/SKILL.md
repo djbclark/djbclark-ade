@@ -74,11 +74,11 @@ mode flag; its native provider exposes no selectable modes.
 | Pool | Paseo provider | Use it for | Never |
 |---|---|---|---|
 | C1. `claude` | claude | judgment (Opus), code (Sonnet), frontier (Fable, section D); the lead's own pool | Fable for everyday work |
-| C2. Anthropic API credits (historical service `omp`) | Pi after funded API/pool acceptance; old service retired | keep this pool separate from Claude subscription windows; the current API check was rejected for insufficient credit | archived omp fallback; inferring API entitlement from subscription quota |
+| C2. Anthropic API credits (historical service `omp`) | Pi after funded API/pool acceptance; old service retired | keep this pool separate from Claude subscription windows; the 2026-11-08 API check was rejected for insufficient credit | archived omp fallback; inferring API entitlement from subscription quota |
 | C3. `codex` | codex | frontier (astra, one per wave); its everyday models for judgment, code, bulk and mechanical only while every codex window has `plenty_min` left | astra for an everyday kind |
 | C4. `cursor-auto`, `cursor` | cursor | Cursor's Auto pool (burn-first, monthly) and its third-party pool, separately metered | the GrokBot pool (`grok-bot`, Cursor-billed): never a slice target |
 | C5. `cursor-cloud` | none: `cursor-cloud launch` | a slice that leaves the Mac and pushes a branch the lead reviews | `autoCreatePR` |
-| C6. Go and Zen free (historical OpenCode service IDs) | Pi for separately accepted routes; old services retired | Go basic route passed; retain `config/go-model-policy.json` cost/task constraints; Zen free hit its quota and is not accepted | archived OpenCode fallback; Go "Use balance"; treating Go and Zen balances as interchangeable |
+| C6. Go and Zen free (historical OpenCode service IDs) | Pi for separately accepted routes; old services retired | Go basic route passed (not automatic-routing acceptance); retain `config/go-model-policy.json` cost/task constraints; Zen free hit its quota and is not accepted | archived OpenCode fallback; Go "Use balance"; treating Go and Zen balances as interchangeable |
 | C7. `antigravity-argon` (Google AI Pro) | antigravity | Gemini 4 Argon as the frontier FALLBACK, only while codex or claude is short (`plan` names it then; tendcf/nix2cf review route 3) | the provider's other pools (not routed); an API key path (bills separately) |
 | C8. `hermes`, `clinepass` | hermes; none | Hermes is the operator's assistant; ClinePass is the Hermes/Dann lifeline (`route_agent.py substrate`, `hermes-chain`) | a delegation target, ever |
 
