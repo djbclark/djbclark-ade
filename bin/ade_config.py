@@ -8,8 +8,8 @@ or switch existing readers (``route_agent`` / ``ade_gates`` stay on their paths)
 Public:
   load_effective(...) -> EffectiveConfig
   get_path(data, dotted) -> value
-  diff_local(...) -> list[Change]
-  check(...) -> list[str]   # empty means OK
+  local_diff(...) -> list[Change]
+  check(...) -> tuple[list[str], EffectiveConfig | None]   # empty errors means OK
   FRONTIER_DEFAULTS / mapping table constants for docs and tests
 """
 from __future__ import annotations
