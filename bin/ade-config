@@ -1,21 +1,24 @@
 #!/usr/bin/env -S python3 -I
-"""ade-config: pure check/get/diff for the versioned effective ADE config (schema_version=1).
+"""ade-config: check/get/diff/set for the versioned effective ADE config (schema_version=1).
 
   ade-config check [--root DIR] [--home DIR] [--json]
   ade-config get PATH [--root DIR] [--home DIR] [--json]
   ade-config diff [--root DIR] [--home DIR] [--json]
+  ade-config set PATH VALUE [--target local|repo] [--string] [--dry-run]
+                 [--root DIR] [--home DIR] [--json]
 
-Read-only: never writes config, never resolves secrets, never probes network/auth.
+check/get/diff stay read-only: no writes, no secret resolution, no network/auth.
+set performs a comment-preserving atomic scalar write (default --target local).
 Missing config/ade.toml projects legacy routing.toml + gates.toml. Present invalid
 or unknown-version config fails. Local override: ~/.config/djbclark-ade/local.toml.
-ROUTING_POLICY / GATES_TOML remain isolated legacy-format overrides for their domains.
-See docs/config-migration.md.
+ROUTING_POLICY / GATES_TOML remain isolated legacy-format overrides and are never
+set targets. Local/repo set records choices; route_agent / ade_gates have not adopted
+the effective-config reader yet (adoption=recorded-only). See docs/config-migration.md.
 """
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -24,6 +27,7 @@ if str(BIN) not in sys.path:
     sys.path.insert(0, str(BIN))
 
 import ade_config as ac  # noqa: E402
+import ade_config_edit as ace  # noqa: E402
 
 
 def _print_json(obj: object) -> None:
@@ -102,6 +106,48 @@ def cmd_diff(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_set(args: argparse.Namespace) -> int:
+    try:
+        value = ace.parse_cli_value(args.value, as_string=args.string)
+        result = ace.set_scalar(
+            args.path,
+            value,
+            target=args.target,
+            root=Path(args.root) if args.root else None,
+            home=Path(args.home) if args.home else None,
+            dry_run=args.dry_run,
+        )
+    except ac.ConfigError as e:
+        print(str(e), file=sys.stderr)
+        return 1
+    payload = {
+        "path": args.path,
+        "before": result.before,
+        "after": result.after,
+        "changed": result.changed,
+        "dry_run": result.dry_run,
+        "target": result.target.target,
+        "kind": result.target.kind,
+        "file": str(result.target.path),
+        "file_path": ".".join(result.target.file_parts),
+        "adoption": result.adoption,
+        "adoption_note": result.adoption_note,
+    }
+    if args.json:
+        _print_json(payload)
+    else:
+        action = "would set" if result.dry_run else ("set" if result.changed else "unchanged")
+        print(
+            f"ade-config set: {action} {args.path} = {result.after!r} "
+            f"(target={result.target.target}, kind={result.target.kind})"
+        )
+        print(f"  file={result.target.path}")
+        print(f"  before={result.before!r}")
+        print(f"  adoption={result.adoption}")
+        print(f"  note={result.adoption_note}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     shared = argparse.ArgumentParser(add_help=False)
     # A subparser parses into its own namespace. Implicit defaults must not
@@ -114,7 +160,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser = argparse.ArgumentParser(
         prog="ade-config",
-        description="Pure check/get/diff for versioned effective ADE config.",
+        description="check/get/diff/set for versioned effective ADE config.",
         parents=[shared],
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -144,15 +190,38 @@ def main(argv: list[str] | None = None) -> int:
     p_diff.add_argument("--json", action="store_true")
     p_diff.set_defaults(func=cmd_diff)
 
+    p_set = sub.add_parser(
+        "set",
+        parents=[shared],
+        help="atomically set one scalar (default --target local; preserves comments)",
+    )
+    p_set.add_argument("path", help="dotted path, e.g. lead.fable_lead")
+    p_set.add_argument("value", help="TOML scalar, or any text with --string")
+    p_set.add_argument(
+        "--target",
+        choices=("local", "repo"),
+        default="local",
+        help="local (default): ~/.config/djbclark-ade/local.toml; "
+             "repo: config/ade.toml if present, else the legacy file for that domain",
+    )
+    p_set.add_argument(
+        "--string",
+        action="store_true",
+        help="treat VALUE as a string even when it looks like a TOML literal",
+    )
+    p_set.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="show the planned write without touching the file",
+    )
+    p_set.add_argument("--json", action="store_true")
+    p_set.set_defaults(func=cmd_set)
+
     args = parser.parse_args(argv)
     args.root = getattr(args, "root", None)
     args.home = getattr(args, "home", None)
-    # Isolate CLI from the operator's real local.toml when --home is omitted in
-    # accidental interactive use under a dirty HOME: still default to real home,
-    # as documented. Tests always pass --home.
     return int(args.func(args))
 
 
 if __name__ == "__main__":
-    # Never inherit a caller cwd write; this process only reads.
     sys.exit(main())
