@@ -17,6 +17,7 @@ import sys
 import tempfile
 import unittest
 from datetime import UTC, datetime, timedelta
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, ClassVar
 from unittest import mock
@@ -91,7 +92,40 @@ class TestStandingRules(unittest.TestCase):
         self.assertIsNone(r.route("judgment", quota=q))
 
 
-class TestOpencodeGoTakesNoCode(unittest.TestCase):
+@contextlib.contextmanager
+def restorable_transport_policy():
+    """Exercise retained ranking mechanics with explicitly restored transports.
+
+    These synthetic fixtures do not describe the current operator policy;
+    TestPiConsolidationPolicy checks the actual retirement decision separately.
+    """
+    legacy = {"omp", "opencode-go", "opencode-zen-free"}
+    services = tuple(replace(s, retired=False) if s.name in legacy else s for s in r.SERVICES)
+    with mock.patch.object(r, "SERVICES", services), mock.patch.object(
+            r, "BY_NAME", {s.name: s for s in services}):
+        yield
+
+
+class RestorableTransportPolicyCase(unittest.TestCase):
+    def setUp(self):
+        self.enterContext(restorable_transport_policy())
+
+
+class TestPiConsolidationPolicy(unittest.TestCase):
+    def test_removed_transports_cannot_win_even_with_full_pools(self):
+        for name in ("omp", "opencode-go", "opencode-zen-free", "opencode-zen"):
+            service = r.BY_NAME[name]
+            self.assertTrue(service.retired, name)
+            for kind in r.KINDS:
+                self.assertFalse(service.eligible(kind, any_headroom=True), (name, kind))
+        for kind in r.KINDS:
+            choice = r.route(kind, quota=IDLE)
+            if choice:
+                self.assertNotIn(choice.service.acp_agent, ("omp", "opencode"))
+        self.assertIsNone(r.route("api-only", quota=IDLE))
+
+
+class TestOpencodeGoTakesNoCode(RestorableTransportPolicyCase):
     """djbclark 2026-10-30: no code slice goes to opencode-go, however idle it is."""
 
     ONLY_GO = {name: {"remaining": 0.0} for name in IDLE} | {"opencode-go": {"remaining": 100.0}}
@@ -111,7 +145,7 @@ class TestOpencodeGoTakesNoCode(unittest.TestCase):
             self.assertEqual(c.service.name, "opencode-go")
 
 
-class TestWasteBurning(unittest.TestCase):
+class TestWasteBurning(RestorableTransportPolicyCase):
     def test_bulk_goes_to_idle_capacity(self):
         c = r.route("bulk", quota=IDLE)
         self.assertIn(c.service.name, {"cursor-auto", "opencode-go"})
@@ -133,7 +167,7 @@ class TestWasteBurning(unittest.TestCase):
         q = dict(IDLE, codex={"remaining": 0.0, "windows": {"weekly": 0.0}})
         self.assertNotEqual(r.route("code", quota=q).service.name, "codex")
 
-class TestDegradation(unittest.TestCase):
+class TestDegradation(RestorableTransportPolicyCase):
     def test_works_with_no_quota_at_all(self):
         """A stale or missing cache must degrade to capability-only routing, except the `github` and `realtime-web`
         kinds, which no pool serves since copilot (2026-11-06) and the grok CLI (2026-11-07) retired."""
@@ -218,11 +252,12 @@ class TestDiscovery(unittest.TestCase):
                           "", access="api", hermes_only=True)
         self.assertFalse(ghost.eligible("bulk"))
 
-    def test_opencode_zen_free_is_claude_routable(self):
+    def test_retired_opencode_zen_free_is_not_routable(self):
         """It is the free half of opencode-zen, not a Hermes-only provider."""
         svc = r.BY_NAME["opencode-zen-free"]
         self.assertFalse(svc.hermes_only)
-        self.assertTrue(svc.eligible("bulk"))
+        self.assertTrue(svc.retired)
+        self.assertFalse(svc.eligible("bulk"))
 
     def test_unmeasured_agents_remain_reachable_as_fallback(self):
         """All available agents should stay routable, just ranked last."""
@@ -1366,7 +1401,7 @@ class TestCodexEverydayKinds(unittest.TestCase):
 
 
 
-class TestOmpReadyRoster(unittest.TestCase):
+class TestOmpReadyRoster(RestorableTransportPolicyCase):
     """With a working omp login (ROUTE_AGENT_OMP_READY=1) omp is a code/bulk pool. conftest pins the
     probe off so the suite does not depend on the host; these are the omp-ready counterparts of
     test_measured_idle_capacity_beats_unmeasured, test_no_room_comes_back_as_none_not_an_error and
@@ -1376,6 +1411,7 @@ class TestOmpReadyRoster(unittest.TestCase):
     not behaviour to pin (adversary, 2026-10-20)."""
 
     def setUp(self):
+        super().setUp()
         patcher = mock.patch.dict(os.environ, {"ROUTE_AGENT_OMP_READY": "1"})
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -1407,7 +1443,7 @@ class TestOmpReadyRoster(unittest.TestCase):
                       r.unrouted_why("code", {**case, "omp": {"remaining": 1.0}}))
 
 
-class TestOmpCreditsTier(unittest.TestCase):
+class TestOmpCreditsTier(RestorableTransportPolicyCase):
     """Operator 2026-10-19: omp (the Claude Max plan's monthly API credits) is a normal tier, no
     per-run approval: `api-only` work first, code/bulk so the grant is spent before it expires."""
 
@@ -1424,6 +1460,7 @@ class TestOmpCreditsTier(unittest.TestCase):
         return q
 
     def setUp(self):
+        super().setUp()
         patcher = mock.patch.dict(os.environ, {"ROUTE_AGENT_OMP_READY": "1"})
         patcher.start()
         self.addCleanup(patcher.stop)

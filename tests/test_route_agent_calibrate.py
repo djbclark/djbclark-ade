@@ -12,6 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "bin"))
 
 import route_agent as r
+from test_route_agent import restorable_transport_policy
 
 
 def _write_job(root: Path, task: str, name: str, body: dict) -> None:
@@ -160,7 +161,8 @@ class TestCalibrate(unittest.TestCase):
             status="done",
         ))
 
-        report = r.calibrate_report(state_dir=self.root, now=self.now, min_n=5)
+        with restorable_transport_policy():
+            report = r.calibrate_report(state_dir=self.root, now=self.now, min_n=5)
         sug = {(s["service"], s["suggest_rank_delta"]) for s in report["suggestions"]}
         self.assertIn(("omp", r.CALIBRATE_SUGGEST_WORSE_DELTA), sug)
         self.assertIn(("cursor-auto", -r.CALIBRATE_SUGGEST_BETTER_DELTA), sug)
@@ -205,7 +207,8 @@ class TestCalibrate(unittest.TestCase):
                 status="done" if i < 3 else "no-report",
                 failure="NO-REPORT: exit 1",
             ))
-        report = r.calibrate_report(state_dir=self.root, now=self.now, min_n=5)
+        with restorable_transport_policy():
+            report = r.calibrate_report(state_dir=self.root, now=self.now, min_n=5)
         omp = next(g for g in report["groups"] if g["service"] == "omp")
         self.assertEqual(omp["n"], 12)
         self.assertEqual(omp["done"], 6)
