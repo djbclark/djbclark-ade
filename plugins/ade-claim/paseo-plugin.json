@@ -1,0 +1,7 @@
+{
+  "id": "djbclark/ade-claim",
+  "name": "ADE workspace claim",
+  "description": "Creates an ade_claims registry entry when Paseo adds a git worktree (worktree.create.after).",
+  "version": "0.1.0",
+  "paseoVersion": ">=0.14.0"
+}

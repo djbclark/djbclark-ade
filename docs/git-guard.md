@@ -22,16 +22,18 @@ fully resolved ref name, and a non-zero exit aborts the transaction. So:
    verbs, rename/copy destinations), and **fails closed** on what it cannot read: under the old design a parser miss was a
    bypass, now it is a false refusal with a readable message.
 
-## Integration status (2026-10-25; re-based 2026-11-07)
+## Integration status (2026-10-25; re-based 2026-11-07; plugin scaffold 2026-11-09)
 
 The guard, the hooks and the claim library exist; claims carry an owner and expire (`ade_claims.py new --ttl`, default
-72 h; `ade-git-guard claim ls`, slim-down E8). Nothing creates claims in a live session yet. The wiring still to build:
-W2, a Paseo `worktree.create.after` hook (a thin plugin) that runs `ade_claims.py new --ttl` and `ade-git-guard install`
-for each agent worktree (E8 F4; `cow-pasture`, the first planned home, was removed 2026-11-06); W3, the W2 hook (or `paseo run`'s
-environment) exporting `ADE_CLAIM_ID` (the dispatch shim never does, and leaves in Wave 6); W4, putting `libexec/agent-bin` first on each agent's PATH (acp-run's planned step goes with
-acp-run in Wave 6). The operator runs `ade-git-guard install <repo>` once over `~/src/*` (the dangerous case is agent B
-in primary P moving Z's branch: the hook must be in P; the shim also installs it the first time an agent runs a
-non-read command there). The operator's shell and IDEs never go through the shim.
+72 h; `ade-git-guard claim ls`, slim-down E8). **A thin Paseo plugin scaffold lives at
+[`plugins/ade-claim/`](../plugins/ade-claim/)** (W2 / E8 F4): it registers `worktree.create.after` and runs
+`ade_claims.py new` with argv built from `{ worktree.path, worktree.branch, worktree.sourceCheckout }` plus
+`git rev-parse HEAD` and optional `remote.origin.url`. It is **not installed or enabled on the operator Mac yet**; nothing
+creates claims in a live session until `paseo plugin install` wires it. Still to build: W2 follow-up (`ade-git-guard install`
+per new worktree if needed), W3 exporting `ADE_CLAIM_ID` (or binding owner on `agent.create.after`), W4 putting
+`libexec/agent-bin` first on each agent's PATH. The operator runs `ade-git-guard install <repo>` once over `~/src/*` (the
+dangerous case is agent B in primary P moving Z's branch: the hook must be in P; the shim also installs it the first time
+an agent runs a non-read command there). The operator's shell and IDEs never go through the shim.
 
 ## Commands
 
