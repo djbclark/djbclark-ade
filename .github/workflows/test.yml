@@ -55,10 +55,53 @@ jobs:
     timeout-minutes: 45
 
     steps:
+      # fetch-depth 0 so we can diff against the PR base / push before SHA for the
+      # docs/changelog short-circuit (2026-11-09: suite itself is ~10–11 min; setup ~5 s).
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      # Keep the job name pytest-linux always green on docs/changelog-only changes so
+      # required checks stay satisfied without a ruleset edit. context-policy still runs.
+      # Allowlist: CHANGELOG.md, changelog.d/**, docs/** — see docs/ci-notes.md.
+      - name: Decide whether the full suite is required
+        id: suite
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BEFORE_SHA: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -eu
+          chmod +x .github/scripts/pytest-suite-needed.sh
+          base=""
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            base="$PR_BASE_SHA"
+          elif [ "$EVENT_NAME" = "push" ] && [ -n "${BEFORE_SHA:-}" ] && [ "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ]; then
+            base="$BEFORE_SHA"
+          fi
+          if [ -z "$base" ]; then
+            echo "suite=needed reason=no-base" | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "needed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          set +e
+          out=$(.github/scripts/pytest-suite-needed.sh --base "$base" --head "$HEAD_SHA")
+          rc=$?
+          set -e
+          echo "$out" | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ "$rc" -eq 1 ]; then
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+          elif [ "$rc" -eq 0 ]; then
+            echo "needed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "pytest-suite-needed.sh failed rc=$rc" >&2
+            exit "$rc"
+          fi
 
       - name: Set up uv
+        if: steps.suite.outputs.needed == 'true'
         uses: astral-sh/setup-uv@v10.3.2
 
       # On Linux the tools exist under their plain names (GNU sed, grep, find and gawk; on
@@ -68,6 +111,7 @@ jobs:
       # not a symlink: ubuntu-26.04's coreutils are Rust uutils multicall binaries that refuse
       # to run under another name ("Requested utility `gtr` does not match executable name").
       - name: Create the g-prefixed GNU tool wrappers
+        if: steps.suite.outputs.needed == 'true'
         run: |
           set -eu
           # Ubuntu's default awk is mawk; the scripts want real GNU awk.
@@ -98,11 +142,18 @@ jobs:
           echo "$bindir" >> "$GITHUB_PATH"
 
       - uses: actions/setup-node@v6
+        if: steps.suite.outputs.needed == 'true'
         with:
           node-version: 24
 
       - name: Run the test suite
+        if: steps.suite.outputs.needed == 'true'
         run: uv run --with pytest --with pyyaml --with 'agent-client-protocol>=0.9,<1.0' python -m pytest tests/ -q
+
+      - name: Skipped full suite (docs/changelog-only)
+        if: steps.suite.outputs.needed != 'true'
+        run: |
+          echo "pytest-linux short-circuit: docs/changelog-only diff; context-policy still ran."
 
   context-policy:
     runs-on: ubuntu-latest
