@@ -34,7 +34,8 @@ bin/ade-sched [options] status [LABEL...]     installed / active / next run; no 
 
 Checked-in ADE jobs under `config/launchd/` include `com.djbclark.deadline-sweep`,
 `com.djbclark.pr-policy`, and (2026-11-09) `com.djbclark.ade-update-check` (daily
-`ade-update --check` only; not installed until an operator runs `ade-sched install`).
+`ade-update --check` only; not installed until an operator runs
+`ade-sched install … --set __STATE__=$HOME/.local/state/ade`).
 ```
 
 | option | meaning |
@@ -69,7 +70,9 @@ stays a value). `__ADE__`/`@ADE@` (the checkout, realpath) and `__HOME__`/`@HOME
 comes from `--set` (or `subst=` in the API) and wins over the defaults. Each string is filled in one pass, so a filled
 value is never filled again. Any `__NAME__` or `@NAME@` left afterwards is **exit 2**. The plists in use on 2026-11-04 need:
 `config/launchd/com.djbclark.deadline-sweep.plist` and `com.djbclark.pr-policy.plist`: `__STATE__` (the `@TARGET@`/`@STATE@` and
-`__REPO__`/`__INDEX_DIR__` plists, proc-cpu-watch and session-history-update, were deleted in the 2026-11-06 slim-down). Several plists still hard-code
+`__REPO__`/`__INDEX_DIR__` plists, proc-cpu-watch and session-history-update, were deleted in the 2026-11-06 slim-down).
+`com.djbclark.ade-update-check.plist` (2026-11-09) also needs `__STATE__` for its log paths (e.g.
+`--set __STATE__=$HOME/.local/state/ade`). Several plists still hard-code
 `/Users/djbclark`; they parse and render as they are (later #279 slices template them).
 
 XML comments are stripped before parsing: no plist here now (acp-dispatch-reap's, rumination-watch's and zcode-key-auth's had one; all three were deleted 2026-11-06)
