@@ -630,7 +630,7 @@ def test_an_empty_group_with_no_leader_start_is_gone_not_unverified(env, inproc)
 
 
 def test_owner_relay_declares_a_sender_and_uses_the_shims_flags(env):
-    """The relay shim (2026-11-06, docs/slim E3) reads delivery from `paseo send --json`; --wait would wait for the owner to go idle."""
+    """DEADLINE_RELAY (tests / transitional) still uses the shim's ID --message-file - shape; --wait would stall on a busy owner."""
     assert start(env, "proof", "--budget", "5", "--on-expire", "relay").returncode == 0
     env.run("sweep", "--no-agents", now=T0 + 10)
     log = env.log.read_text()
@@ -638,6 +638,31 @@ def test_owner_relay_declares_a_sender_and_uses_the_shims_flags(env):
     assert "--wait" not in log and "--ack" not in log
     p = __import__("plistlib").loads((ROOT / "config/launchd/com.djbclark.deadline-sweep.plist").read_text().replace("__HOME__", "/h").replace("__ADE__", "/a").encode())
     assert p["EnvironmentVariables"]["RELAY_SENDER_NAME"] == "deadline-sweep", "a launchd job has no Paseo id: the shim names it in its sender prefix"
+
+
+def test_owner_notice_uses_native_paseo_send_when_deadline_relay_unset(env, monkeypatch):
+    """Production path (Wave 6): no DEADLINE_RELAY → paseo send --json --no-wait ID --prompt-file -."""
+    for k, v in env.base.items():
+        if k == "DEADLINE_RELAY":
+            continue
+        monkeypatch.setenv(k, v)
+    monkeypatch.delenv("DEADLINE_RELAY", raising=False)
+    monkeypatch.setenv("DEADLINE_PASEO", str(env.tmp / "paseo"))
+    monkeypatch.setenv("DL_LOG", str(env.log))
+    (env.tmp / "paseo").write_text(
+        f'#!{sys.executable}\nimport os, sys\n'
+        'open(os.environ["DL_LOG"], "a").write("PASEO " + " ".join(sys.argv[1:]) + "\\n")\n'
+        'a = sys.argv[1:]\n'
+        'if a and a[0] == "send":\n'
+        '    sys.stdout.write(\'{"status":"sent"}\\n\'); sys.exit(0)\n'
+        'sys.exit(2)\n'
+    )
+    (env.tmp / "paseo").chmod(0o755)
+    dl = load_module()
+    rc, msg = dl.relay_rc("owner-native", "budget blown")
+    assert rc == 0, msg
+    log = env.log.read_text()
+    assert "PASEO send --json --no-wait owner-native --prompt-file -" in log
 
 
 def test_waiting_registrar_never_holds_a_lock_on_an_unlinked_inode(env, inproc):

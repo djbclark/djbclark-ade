@@ -23,7 +23,7 @@ deadline install [--ade DIR] [--dry-run] [--backend auto|launchd|systemd|cron] [
 ```
 
 `--on-expire`: `kill` (default: SIGTERM to the process group, SIGKILL after `--grace`, default 60 s; Hermes is pinged), `notify` (owner and Hermes
-only, nothing killed), `relay` (kill, then tell the owner through `relay.py` with the name, budget, overrun and checkpoint). `reroute:RECORD`
+only, nothing killed), `relay` (kill, then tell the owner through native `paseo send --json` — or `DEADLINE_RELAY` / the Wave 6 shim while it remains — with the name, budget, overrun and checkpoint). `reroute:RECORD`
 was retired on 2026-11-07 (slim-down E7; the acp-dispatch shim has no `reroute`): `start` and `run` refuse it with exit 2 pointing at `relay`,
 whose owner re-dispatches the slice on the next rung (`model-routing` D2). A record registered with it before then is stopped, nothing is
 dispatched, and the owner and the operator are told "reroute FAILED ... nothing replaced it".
@@ -176,11 +176,10 @@ hand: two schedulers are safe (every record is under its own flock) but they dou
 2. `deadline run` reserves its name (a `starting` placeholder, left alone by the sweep for 60 s) BEFORE it starts the command, so a refused name never
    ran the command; and it only advances or finishes the record carrying its own `reg_id`, so an old `run` whose terminal name was registered again
    cannot mark the new registration done.
-3. The owner relay reads delivery proof from the relay shim (2026-11-06, docs/slim E3: `relay.py OWNER --message-file -`, which reads `paseo send
-   --json`'s `.status`: exit 0 only for `sent` or `completed`, which a sourceless send such as deadline's gets; 2 not delivered (`queued`, `timeout`,
-   `permission`, `error`, or a target `paseo agent inspect` does not show idle or running with no card), 1 paseo failed, 3 not a Paseo agent and 4 no
-   sender stay pending and are retried) and declares its sender (`RELAY_SENDER_NAME`, `deadline-sweep` in the launchd plist, `deadline` otherwise),
-   which the shim names in a `[relay from NAME]` prefix, since a launchd job has no Paseo id.
+3. The owner notice defaults to native `paseo send --json --no-wait OWNER --prompt-file -` (2026-11-09, Wave 6). Exit 0 only for
+   `sent`/`completed` on a sourceless send; other statuses stay pending and are retried. `DEADLINE_RELAY` still selects the transitional
+   shim (`relay.py OWNER --message-file -`) for tests until Wave 6 deletes it. `RELAY_SENDER_NAME` (`deadline-sweep` in the launchd
+   plist, `deadline` otherwise) remains set so a shim path can label the sender when a launchd job has no Paseo id.
 4. A stop is confirmed only when the target is `gone` (or its pid was recycled). `unverified` (a leaderless group whose anchor exited while other
    members may still run) is never a confirmed stop: the record goes to `kill-failed`, the owner is told, nothing is rerouted. An empty group is `gone`.
 5. `deadline run` keeps enforcing after its command's leader exits: while the process group has survivors it sends SIGKILL after the grace and runs the

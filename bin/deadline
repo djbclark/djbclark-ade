@@ -433,15 +433,25 @@ def hermes_ping(msg: str) -> str:
 
 
 def relay_rc(owner: str, text: str) -> tuple[int, str]:
-    """Send to the owner through the relay shim (2026-11-06, docs/slim E3): exit 0 only when `paseo send --json` read sent or completed;
-    2 not delivered (queued, timeout, permission, error, or a target not idle/running with no card), 1 paseo failed, 3 not a Paseo agent,
-    4 no sender; anything but 0 stays pending and is retried. clean_env drops PASEO_AGENT_ID, so this send is sourceless and its `sent` is
-    delivery (an agent's send would only ever read `queued`, exit 5).
-    No `--wait`: the shim's --wait waits for the owner to go idle, which a busy owner never does in 20 s, and a retry would send the notice
-    again. The sender is declared (RELAY_SENDER_NAME): the shim names it in a `[relay from NAME]` prefix, a launchd job having no Paseo id."""
+    """Send to the owner. Default (2026-11-09, Wave 6): native `paseo send --json --no-wait ID --prompt-file -`.
+    Exit 0 only when status is sent/completed; anything else stays pending and is retried. clean_env drops
+    PASEO_AGENT_ID, so this send is sourceless and its `sent` is delivery (an agent's send would only ever
+    read `queued`, exit 5). No `--wait`: waiting for a busy owner to go idle would stall, and a retry would
+    send the notice again.
+
+    `DEADLINE_RELAY` (tests / transitional) still invokes the Wave 6 shim with `ID --message-file -` until
+    that shim is deleted (docs/slim/wave6-follow-up.md). Prefer unset in production so new installs never
+    depend on relay.py."""
     if not owner or owner == "-":
         return 0, "relay skipped: no owner"
-    argv = tool("DEADLINE_RELAY", "skills/session-finder/relay.py") + [owner, "--message-file", "-"]
+    if os.environ.get("DEADLINE_RELAY"):
+        argv = tool("DEADLINE_RELAY", "skills/session-finder/relay.py") + [owner, "--message-file", "-"]
+    else:
+        paseo = os.environ.get("DEADLINE_PASEO") or shutil.which("paseo")
+        if not paseo:
+            return 127, "paseo not found (set DEADLINE_PASEO or PATH)"
+        head = [paseo] if os.access(paseo, os.X_OK) else [sys.executable, paseo]
+        argv = head + ["send", "--json", "--no-wait", owner, "--prompt-file", "-"]
     try:
         r = subprocess.run(argv, input=text, capture_output=True, text=True, timeout=90,
                            env=clean_env())
