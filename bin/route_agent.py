@@ -93,8 +93,9 @@ preferences, because they encode consequences a score cannot see:
 - the prepaid tier (opencode-zen) is retired until an
   explicit operator top-up.
 
-Every route comes with a `--model [--effort]` suggestion and the
-`acp-dispatch` line to run (the shim over `paseo run`; `cursor-cloud launch` for the Cursor Cloud row);
+Every route comes with a `--model [--effort]` suggestion and the native
+`paseo run --provider …` launch line (`cursor-cloud launch` for the Cursor Cloud row;
+the Wave 6 `acp-dispatch` shim is transitional only);
 the context window is the caller's choice (the agent's default unless the slice reads a whole corpus or a
 long log).
 
