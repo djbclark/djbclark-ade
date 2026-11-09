@@ -61,8 +61,13 @@ just install-apply-dry
 - `plan` is print-only: `would-install` (has `install_argv`) / `needs-system` /
   `blocked` / `skip`.
 - `doctor` prefers `probe_argv` (runs the tool; argv list, short timeout) and
-  falls back to PATH `presence`. Missing or failed expected components fail
-  the command; `unknown` is neither healthy nor absent. Doctor does not repair.
+  falls back to PATH `presence`. When `agents/claude/settings.json.tmpl` is
+  present under `--root`, it also checks that live `~/.claude/settings.json`
+  registers `context_size_nudge.py` under every hook event the template does
+  (queue Carried #10, 2026-11-09); a miss prints a hand-apply hint and fails.
+  Doctor never mutates live settings (order 11). Missing or failed expected
+  components fail the command; `unknown` is neither healthy nor absent.
+  Doctor does not repair.
 - `apply` defaults to **dry-run**. `--yes` executes user `install_argv` for
   expected missing components (or `--force`). Writes an atomic ledger under
   `~/.local/state/djbclark-ade/install/ledger.json` (or `ADE_INSTALL_STATE_DIR`).

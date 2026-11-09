@@ -2,7 +2,10 @@
 
 Transitional source: ``config/install.toml`` when ``config/ade.toml`` is absent.
 Key entries are names and metadata only. Doctor runs ``probe_argv`` when
-recorded (else PATH presence) and never repairs. Apply is user-scoped only:
+recorded (else PATH presence), checks live Claude ``context_size_nudge`` hook
+registration against ``agents/claude/settings.json.tmpl`` when that template
+is present under ``--root``, and never repairs or mutates
+``~/.claude/settings.json`` (order 11). Apply is user-scoped only:
 ``--dry-run`` by default, ``--yes`` to execute recorded ``install_argv``
 (argv lists, never shell=True). Root / ``--system`` effects are refused until
 a later unit. Secrets are never read.
@@ -13,6 +16,7 @@ import copy
 import json
 import os
 import platform
+import re
 import shlex
 import shutil
 import subprocess
@@ -38,6 +42,11 @@ CHOICE_CLASSES = frozenset({"offered", "optional", "suggested"})
 
 # Placeholders expanded in install_argv / update_argv / probe_argv before exec.
 ARGV_TOKENS = ("{bin}", "{root}", "{home}", "{prefix}")
+
+# Live Claude settings vs agents/claude/settings.json.tmpl (queue Carried #10).
+CONTEXT_SIZE_NUDGE = "context_size_nudge.py"
+CLAUDE_SETTINGS_TMPL = Path("agents") / "claude" / "settings.json.tmpl"
+_TMPL_TAG = re.compile(r"\{\{.*?\}\}", re.DOTALL)
 
 Runner = Callable[[list[str], Path], "subprocess.CompletedProcess[str]"]
 
@@ -68,7 +77,7 @@ class Catalog:
 
 @dataclass(frozen=True)
 class Observation:
-    kind: str  # component | key | login | catalog
+    kind: str  # component | key | login | catalog | settings
     id: str
     status: str  # ok | missing | unknown | error | unchosen | never
     detail: str
@@ -356,13 +365,136 @@ def observe_login(row: dict[str, Any]) -> Observation:
     return Observation("login", lid, "unknown", f"login check recorded as {cmd!r}; not executed")
 
 
+def default_claude_settings_path() -> Path:
+    return Path.home() / ".claude" / "settings.json"
+
+
+def _hook_events_registering(settings: dict[str, Any], needle: str) -> set[str]:
+    """Hook event names whose command strings mention ``needle``."""
+    hooks = settings.get("hooks")
+    if not isinstance(hooks, dict):
+        return set()
+    found: set[str] = set()
+    for event, entries in hooks.items():
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            for hook in entry.get("hooks") or []:
+                if not isinstance(hook, dict):
+                    continue
+                cmd = hook.get("command") or ""
+                if isinstance(cmd, str) and needle in cmd:
+                    found.add(str(event))
+                    break
+    return found
+
+
+def load_claude_settings_json(path: Path, *, template: bool = False) -> dict[str, Any]:
+    """Parse Claude settings JSON; mask ``{{ … }}`` tags when reading a template."""
+    text = path.read_text(encoding="utf-8")
+    if template:
+        text = _TMPL_TAG.sub("/placeholder", text)
+    data = json.loads(text)
+    if not isinstance(data, dict):
+        raise json.JSONDecodeError("settings root must be an object", text, 0)
+    return data
+
+
+def context_size_nudge_fix_hint(
+    live: Path,
+    expected: set[str],
+    actual: set[str],
+) -> str:
+    """Human-readable missing-registration detail with a hand-apply hint (order 11)."""
+    missing = sorted(expected - actual)
+    have = ", ".join(sorted(actual)) if actual else "(none)"
+    want = ", ".join(sorted(expected))
+    miss = ", ".join(missing) if missing else want
+    return (
+        f"{CONTEXT_SIZE_NUDGE} missing under hooks.{{{miss}}} in {live} "
+        f"(have {have}; template expects {want}). "
+        f"Apply by hand (order 11): copy the matching hook-deadline entries from "
+        f"agents/claude/settings.json.tmpl into {live}; "
+        f"`ade-install doctor` / `just install-doctor` never mutates live settings."
+    )
+
+
+def observe_context_size_nudge(
+    *,
+    root: Path,
+    settings_path: Path | None = None,
+    template_path: Path | None = None,
+) -> Observation | None:
+    """Compare live Claude settings hook registration to the repo template.
+
+    Returns None when the template is absent under ``root`` (fixture catalogs).
+    Observe-only: never writes ``~/.claude/settings.json`` (order 11; queue #10).
+    """
+    tmpl = template_path if template_path is not None else root / CLAUDE_SETTINGS_TMPL
+    if not tmpl.is_file():
+        return None
+    live = settings_path if settings_path is not None else default_claude_settings_path()
+    try:
+        expected = _hook_events_registering(
+            load_claude_settings_json(tmpl, template=True),
+            CONTEXT_SIZE_NUDGE,
+        )
+    except OSError as e:
+        return Observation(
+            "settings", "context_size_nudge", "error",
+            f"template unreadable ({tmpl}): {e}",
+        )
+    except json.JSONDecodeError as e:
+        return Observation(
+            "settings", "context_size_nudge", "error",
+            f"template JSON invalid ({tmpl}): {e}",
+        )
+    if not expected:
+        return Observation(
+            "settings", "context_size_nudge", "error",
+            f"template {tmpl} has no {CONTEXT_SIZE_NUDGE} hook registration",
+        )
+    if not live.is_file():
+        return Observation(
+            "settings", "context_size_nudge", "missing",
+            context_size_nudge_fix_hint(live, expected, set()),
+        )
+    try:
+        actual = _hook_events_registering(
+            load_claude_settings_json(live),
+            CONTEXT_SIZE_NUDGE,
+        )
+    except OSError as e:
+        return Observation(
+            "settings", "context_size_nudge", "error",
+            f"live settings unreadable ({live}): {e}",
+        )
+    except json.JSONDecodeError as e:
+        return Observation(
+            "settings", "context_size_nudge", "error",
+            f"live settings JSON invalid ({live}): {e}",
+        )
+    if expected - actual:
+        return Observation(
+            "settings", "context_size_nudge", "missing",
+            context_size_nudge_fix_hint(live, expected, actual),
+        )
+    return Observation(
+        "settings", "context_size_nudge", "ok",
+        f"{CONTEXT_SIZE_NUDGE} registered under {', '.join(sorted(actual))} in {live}",
+    )
+
+
 def doctor(
     catalog: Catalog,
     *,
     runner: Runner | None = None,
     probe_timeout_s: float = 15.0,
+    settings_path: Path | None = None,
 ) -> tuple[list[Observation], int]:
-    """Observe-only doctor. Exit 1 if any expected component is missing/error; never repairs."""
+    """Observe-only doctor. Exit 1 if any expected component or settings check is missing/error; never repairs."""
     obs: list[Observation] = [
         Observation("catalog", str(catalog.path), "ok", "catalog validated"),
     ]
@@ -381,6 +513,11 @@ def doctor(
         obs.append(observe_key(row))
     for row in catalog.logins:
         obs.append(observe_login(row))
+    nudge = observe_context_size_nudge(root=catalog.root, settings_path=settings_path)
+    if nudge is not None:
+        obs.append(nudge)
+        if nudge.status in ("missing", "error"):
+            hard_missing += 1
     return obs, (1 if hard_missing else 0)
 
 

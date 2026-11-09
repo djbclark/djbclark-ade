@@ -12,7 +12,7 @@ config-check:
 install-check:
     "{{ root }}/bin/ade-install" check --root "{{ root }}"
 
-# Observe-only install doctor (no repair, no secret reads).
+# Observe-only install doctor (no repair, no secret reads; includes Claude context_size_nudge registration).
 install-doctor:
     "{{ root }}/bin/ade-install" doctor --root "{{ root }}"
 
