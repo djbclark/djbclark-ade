@@ -137,7 +137,7 @@ under **Carried**, newest first, one line each; an item leaves when it ships (in
 3. Verified peer messaging and its round 2 (2026-10-25): order 10 re-based on `paseo send` and the named ack; the expectation ledger and first-contact footer are gone (E3).
 4. Research: relay and self-slash blocking on picklists (2026-10-28): self-slash is gone (E4); the shim refuses a busy target that cannot steer (E3).
 5. Follow-ups after PRs 73 and 74, relay deferred send (PR 57), the pane route lows, Paseo agents in fleet.py and relay.py, the `hermes` route: relay.py's routes and fleet.py are gone (E3).
-6. Orchestration rules from the load watcher (2026-10-23): name a workspace by name and id, and the load-planning rules, are in `docs/orchestration-practices.md` (E11); finding a peer is `paseo ls` (E3); push on completion is carried (item 5).
+6. Orchestration rules from the load watcher (2026-10-23): name a workspace by name and id, and the load-planning rules, are in `docs/orchestration-practices.md` (E11); finding a peer is `paseo ls` (E3); push on completion shipped 2026-11-09 (Done before: footer rule 22, `bin/completion-notice`, fan-out Collect).
 7. `paseo-bypass-watch` launchd install (2026-10-29): the tool is gone; `paseo agent mode ID bypass` by hand (E4).
 8. Paseo tabs, `-pt` naming, autorename for tabs, rename history (2026-10-23): naming in `docs/workspace-layout.md`; autorename is gone, renames are `paseo agent update --name` (E4).
 9. Paseo workspace names after a handoff (2026-10-20): a successor starts with `paseo run --title` (E4).
@@ -166,21 +166,24 @@ under **Carried**, newest first, one line each; an item leaves when it ships (in
 
 ## Done before (one line each; detail in git history)
 
-1. Port the Linux suite to uutils (2026-10-28): `pytest-linux` makes g-prefixed wrapper scripts, on `ubuntu-latest`.
-2. Keep every machine current, and a changelog (2026-10-20): `bin/ade-update`, `CHANGELOG.md`, fragments since 2026-10-31.
-3. Phase 0 backups (PR 24) and the templates (PR 23), 2026-10-20.
-4. ade-git-guard O2 redesign adopted and built (PR 59, 2026-10-25).
-5. An absolute "all work in a worktree" commandment (2026-10-25): adopted as order 9.
-6. Deadline waiters register themselves (2026-11-02); the sweep installs on Linux too (`deadline install --backend`).
-7. Queued lows branch, adversary BLOCK, repair and round 2 APPROVE (2026-10-24).
-8. Cloud agents: the Cursor API key and `bin/cursor-cloud` (2026-10-19/20).
-9. Claude API credits: the omp login and the aiuse credits row (2026-10-19), the Admin API collector (aiuse 3.8.0, 2026-10-20).
-10. Quota-aware cross-vendor routing (queued 2026-08-23): `route_agent.py plan|route|show` (2026-10).
-11. Implement cow (2026-08-23; removed with `cow-pasture` 2026-11-06).
-12. Completed 2026-08-23: `~/src/ops-worktrees/` retired with every branch preserved.
-13. Token-cost hygiene review of 2026-08-24 (its one open point is Carried 30).
-14. Monthly plans that work with Hermes (research of 2026-08-24; ClinePass).
-15. Why the `sed` edit failed twice (2026-10-14): `~/CLAUDE.md` item 33.
-16. Flaky MockWebServer tests on the SIPB runner (2026-10-14).
-17. Watch Orca upstream for structural-reorg verbs; Orca's short PostCompact hook; the herdr-only capability and Orca parity list: dropped 2026-10-31 with Orca and herdr.
-18. Restart the `hindsight` MCP server in sessions older than 2026-08-23 20:00: moot (no such session survives).
+1. **Push on completion** (load-watch 96a17744, 2026-10-23; shipped 2026-11-09): a delegated slice tells its requester
+   `done: <title>, <PR URL>` (or status/report) via `paseo send --json --no-wait` with named ack, never relay; dispatch
+   footer rule 22, `bin/completion-notice`, `skills/fan-out` Collect, `docs/orchestration-practices.md` §5a.
+2. Port the Linux suite to uutils (2026-10-28): `pytest-linux` makes g-prefixed wrapper scripts, on `ubuntu-latest`.
+3. Keep every machine current, and a changelog (2026-10-20): `bin/ade-update`, `CHANGELOG.md`, fragments since 2026-10-31.
+4. Phase 0 backups (PR 24) and the templates (PR 23), 2026-10-20.
+5. ade-git-guard O2 redesign adopted and built (PR 59, 2026-10-25).
+6. An absolute "all work in a worktree" commandment (2026-10-25): adopted as order 9.
+7. Deadline waiters register themselves (2026-11-02); the sweep installs on Linux too (`deadline install --backend`).
+8. Queued lows branch, adversary BLOCK, repair and round 2 APPROVE (2026-10-24).
+9. Cloud agents: the Cursor API key and `bin/cursor-cloud` (2026-10-19/20).
+10. Claude API credits: the omp login and the aiuse credits row (2026-10-19), the Admin API collector (aiuse 3.8.0, 2026-10-20).
+11. Quota-aware cross-vendor routing (queued 2026-08-23): `route_agent.py plan|route|show` (2026-10).
+12. Implement cow (2026-08-23; removed with `cow-pasture` 2026-11-06).
+13. Completed 2026-08-23: `~/src/ops-worktrees/` retired with every branch preserved.
+14. Token-cost hygiene review of 2026-08-24 (its one open point is Carried 29).
+15. Monthly plans that work with Hermes (research of 2026-08-24; ClinePass).
+16. Why the `sed` edit failed twice (2026-10-14): `~/CLAUDE.md` item 33.
+17. Flaky MockWebServer tests on the SIPB runner (2026-10-14).
+18. Watch Orca upstream for structural-reorg verbs; Orca's short PostCompact hook; the herdr-only capability and Orca parity list: dropped 2026-10-31 with Orca and herdr.
+19. Restart the `hindsight` MCP server in sessions older than 2026-08-23 20:00: moot (no such session survives).

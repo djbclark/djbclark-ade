@@ -75,6 +75,12 @@ execution worktree and every repository tool call targets it explicitly. Never t
 - `paseo ls -g --label ade.via=acp-dispatch` shows what runs; `paseo permit ls` the permission cards.
 - `acp-dispatch tell RECORD "message"` reaches a running slice (its inbox plus `paseo send`; `accepted`,
   exit 5, is not proof of delivery: ask for an ack).
+- **Push on completion:** each brief's footer (rule 22) requires the slice, after `DONE` and `{done}`, to
+  `paseo send --json --no-wait` its requester `done: <title>, <PR URL>` (or `done: <title>, <status>[, <report>]`)
+  plus `Please reply: ack <slice id>` — never relay. Prefer
+  `~/src/djbclark-ade/bin/completion-notice --send --requester <lead-id> --title TITLE --pr URL`
+  (or `--status DONE --report PATH`). The lead treats that notice (and the named ack) as the wake-up; do not
+  invent an APPROVE. Prefer the notice over polling `wait` when the slice can reach you.
 - Verify each result against the artifact (the diff, the tests), then
   `acp-dispatch outcome RECORD --ci pass --review pass --merged` for `route_agent.py calibrate`.
 
