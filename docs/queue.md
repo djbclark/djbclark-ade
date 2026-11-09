@@ -10,8 +10,9 @@ under **Carried**, newest first, one line each; an item leaves when it ships (in
 1. **Issue 284 follow-ups** (2026-11-04): the goal / verify-until-pass loop (evaluate the Paseo plugin `37chengshan/goal-mode`
    first), Codex and opencode wiring of `secret_read_gate.py` and `post-edit-check --hook`, a Claude `filesystem.denyRead`
    trial, a Codex deny-read profile (openai/codex#22179), whether `hook-deadline` passes exit 2 through, applying the
-   template's new hook and deny entries live (operator's yes, order 11), the gate's slow-glob budget LOW, and
-   `bin/instruction-lint` over `~/AGENTS.md` and `home-agents.mdc`. Lives in `docs/secret-deny.md`, `docs/post-edit-check.md`.
+   template's new hook and deny entries live (operator's yes, order 11), and `bin/instruction-lint` over `~/AGENTS.md`
+   and `home-agents.mdc`. Slow-glob budget LOW closed 2026-11-09 (first-pass cap + set-aside cache; fail closed). Lives
+   in `docs/secret-deny.md`, `docs/post-edit-check.md`.
 2. **Interruption recovery** (issue 278, 2026-11-04): D1 provider and capture probes, G1 persistence and failure-injection
    gates, a canary, legacy record recovery; PR 290 (`ade-recovery`) parked until Paseo's native resume is measured (PLAN J6,
    J9). Lives in `docs/checkpoint.md`.

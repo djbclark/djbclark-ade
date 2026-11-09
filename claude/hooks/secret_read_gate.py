@@ -26,9 +26,11 @@ pattern and no allow pattern, under two rules that keep code and regexes from tr
 wildcard never consumes a leading `.`) and pinning (the token's wildcards may not stand in for a deny pattern's literal
 text; a cheap test on the token's literals, `**/` read as "" or `/`, skips the rules it cannot spell). So every word gets
 at least that check, `cat ~/.ssh/id_*` and `find . -name '*.key'` block, while `echo *`, `grep 'a.*'` and `ls
-/*/*/*/*/*/*/*/x*` pass. A glob word gets WORD_S on its first try; one that runs longer is retried after every other word,
-so one slow word cannot use up the time a later `cat ~/.ssh/id_*` needs (about eight crafted slow words still can:
-docs/secret-deny.md C7; literal paths are checked first and are not exposed).
+/*/*/*/*/*/*/*/x*` pass. A glob word gets WORD_S on its first try within a shared FIRST_PASS_S cap; one that runs longer is set aside
+(cached) and retried after every other word with a pattern-only check (no second filesystem walk). Eight crafted
+slow words used to spend 8×WORD_S and fail the call open before a later `cat ~/.ssh/id_*` (docs/secret-deny.md C7,
+2026-11-04); the first-pass cap and set-aside cache close that: a word that times out twice, or an OutOfTime while
+glob words remain unchecked, fails closed (blocks) instead of allowing.
 
 Grep (2026-11-04): Claude's Grep runs ripgrep with `--hidden`, so it reads dotfiles and descends into `~/.ssh`. Its root
 (`path`, else the cwd) is walked breadth-first (bounded: depth, entries, time shared by every root; VCS dirs and
@@ -82,9 +84,10 @@ MAX_GLOB_SCAN = 20000     # directory entries the Bash glob walk may read in one
 GLOB_S = 2.0              # Bash glob walk time in one call (inside BUDGET_S); past it every glob word gets the pattern check
 GLOB_MARGIN_S = 3.0       # BUDGET_S time the glob walk always leaves for the checks that follow it
 WORD_S = 1.0              # one Bash glob word's first try; past it the word waits until every other word is checked
+FIRST_PASS_S = 2.0        # shared first-pass WORD_S budget across all Bash glob words (inside BUDGET_S)
 MAX_BRACE = 64
 MAX_STATES = 200000     # product-automaton budget; exhausting it counts as an overlap (blocks)
-BUDGET_S = 8.0          # whole-call analysis budget; past it the hook fails open (the settings timeout is 15 s)
+BUDGET_S = 8.0          # whole-call analysis budget; past it the hook fails open (except Bash glob: fail closed)
 WALK_S = 4.0            # Grep root walk budget (inside BUDGET_S); past it the walk counts as truncated
 MAX_WALK_DEPTH = 6      # directory levels below a Grep root
 MAX_WALK_ENTRIES = 20000
@@ -107,6 +110,17 @@ class OutOfTime(Exception):
 class WordOutOfTime(Exception):
     """One Bash glob word's own budget (WORD_S) ran out: the word is set aside and retried after every other word."""
 
+
+class GlobBudgetExceeded(Exception):
+    """Bash glob analysis could not finish within budget: fail closed (an unchecked word may name a secret)."""
+
+    def __init__(self, word: str = ""):
+        self.word = word
+        Exception.__init__(self, "glob analysis budget exceeded%s" % ((" on %s" % word) if word else ""))
+
+
+# Sentinel in Checker._words: word was set aside after WordOutOfTime; deferred retry clears it.
+_SET_ASIDE = object()
 
 _DEADLINE = [float("inf")]
 _WORD_DEADLINE = [float("inf")]
@@ -576,6 +590,7 @@ class Checker:
         self.cwds = [cwd] if real == cwd else [cwd, real]
         self._words = {}
         self.deferred = []       # glob words whose WORD_S ran out, retried after every other word
+        self._aside_count = {}   # times a glob word was set aside; a second time fails closed
         self._scanned = 0        # directory entries the glob walk has read in this call
         self._glob_until = None  # the glob walk's deadline, set on its first use
 
@@ -716,11 +731,47 @@ class Checker:
                 return hit, raw
         return None
 
-    def word(self, raw: str, word_s=None):
+    def set_aside(self, raw: str):
+        """Mark a glob word as deferred without spending WORD_S (first-pass cap exhausted, or a timed-out check).
+        A second set-aside of the same word (deferred retry also timed out) fails closed."""
+        if self._words.get(raw) is _SET_ASIDE:
+            return   # already deferred this round (duplicate token or re-entry)
+        n = self._aside_count.get(raw, 0) + 1
+        self._aside_count[raw] = n
+        if n > 1:
+            raise GlobBudgetExceeded(raw)
+        self._words[raw] = _SET_ASIDE
+        if raw not in self.deferred:
+            self.deferred.append(raw)
+
+    def glob_pattern_only(self, raw: str):
+        """Pattern check only (no filesystem walk): used when a set-aside word is retried after its walk timed out."""
+        if not raw or len(raw) > MAX_TOKEN or "\x00" in raw:
+            return None
+        for pat in expand_braces(expand_home(raw)):
+            if os.path.isabs(pat):
+                hit = self.policy.pattern_verdict(pat)
+                if hit:
+                    return hit, raw
+                continue
+            for base in self.cwds:
+                hit = self.policy.pattern_verdict(pat, base.rstrip("/") + "/")
+                if hit:
+                    return hit, raw
+        return None
+
+    def word(self, raw: str, word_s=None, pattern_only: bool = False):
         """A word's (rule, shown) or None. With `word_s`, a glob word whose check runs longer than that is set aside in
-        self.deferred (answering None for now), so one slow word cannot use up the time the words after it need."""
+        self.deferred (answering None for now), so one slow word cannot use up the time the words after it need.
+        A set-aside is cached (`_SET_ASIDE`); a deferred retry clears it and, with `pattern_only`, skips the walk.
+        A second set-aside of the same word fails closed (`GlobBudgetExceeded`)."""
         if raw in self._words:
-            return self._words[raw]
+            cached = self._words[raw]
+            if cached is not _SET_ASIDE:
+                return cached
+            if word_s is not None and not pattern_only:
+                return None   # still first pass; already deferred
+            del self._words[raw]
         tick()
         if not is_glob(raw):
             self._words[raw] = self.path(raw)
@@ -728,9 +779,9 @@ class Checker:
         if word_s is not None:
             _WORD_DEADLINE[0] = time.monotonic() + word_s
         try:
-            res = self.glob(raw)
+            res = self.glob_pattern_only(raw) if pattern_only else self.glob(raw)
         except WordOutOfTime:
-            self.deferred.append(raw)
+            self.set_aside(raw)
             return None
         finally:
             _WORD_DEADLINE[0] = float("inf")
@@ -1107,8 +1158,9 @@ def strings(obj):
 
 def check_command(ck: Checker, cmd: str, shell_tool: bool = True):
     """Patch headers, then every literal word (cheap), then the glob words without `**` (a bounded walk, then their
-    pattern), then those with `**` (the costly ones), each glob word within WORD_S; last, with the rest of the call's
-    budget, the words that ran past WORD_S (and when that budget ends, OutOfTime fails the call open as before).
+    pattern), then those with `**` (the costly ones), each glob word within WORD_S under a shared FIRST_PASS_S cap;
+    last, set-aside words are retried with a pattern-only check (WORD_S each). A second timeout on one word, or an
+    OutOfTime while glob words remain, fails closed (`GlobBudgetExceeded`) instead of allowing.
 
     For a shell tool (`shell_tool`, the default) every word of the text is analyzed, `*** Begin Patch` regions included:
     the shell runs them (2026-11-06, Cursor review on PR 289: `*** Begin Patch\\ncat ~/.ssh/id_rsa\\n*** End Patch`
@@ -1134,14 +1186,24 @@ def check_command(ck: Checker, cmd: str, shell_tool: bool = True):
         if found:
             return found
     globs.sort(key=lambda w: "**" in w)   # stable: cheap glob words first, in command order
-    for w in globs:
-        found = ck.word(w, WORD_S)
-        if found:
-            return found
-    while ck.deferred:
-        found = ck.word(ck.deferred.pop(0))
-        if found:
-            return found
+    first_until = time.monotonic() + FIRST_PASS_S
+    try:
+        for w in globs:
+            rem = first_until - time.monotonic()
+            if rem <= 0:
+                ck.set_aside(w)
+                continue
+            found = ck.word(w, min(WORD_S, rem))
+            if found:
+                return found
+        while ck.deferred:
+            w = ck.deferred.pop(0)
+            found = ck.word(w, WORD_S, pattern_only=True)
+            if found:
+                return found
+    except OutOfTime:
+        # Overall budget ended with Bash glob words still unresolved: fail closed (secret paths may remain).
+        raise GlobBudgetExceeded(ck.deferred[0] if ck.deferred else (globs[-1] if globs else ""))
     return None
 
 
@@ -1222,6 +1284,13 @@ def main() -> int:
     _DEADLINE[0] = time.monotonic() + BUDGET_S
     try:
         hit = check(payload, policy)
+    except GlobBudgetExceeded as e:
+        tool = payload.get("tool_name") or "Bash"
+        shown = e.word if len(e.word) <= 200 else e.word[:200] + "..."
+        sys.stderr.write(
+            "secret-read-gate: blocked %s on %s: glob analysis budget exceeded (fail closed); see %s\n"
+            % (tool, shown.replace("\n", " ") or "(glob)", DOC))
+        return 2
     except Exception as e:
         notice("internal error (%s: %s)" % (type(e).__name__, str(e)[:120]))
         return 0
