@@ -187,10 +187,16 @@ def validate_catalog_semantics(data: dict[str, Any], *, path: Path) -> None:
         _validate_argv_field(row, field="install_argv", path=path, index=i)
         _validate_argv_field(row, field="update_argv", path=path, index=i)
         _validate_argv_field(row, field="probe_argv", path=path, index=i)
+        _validate_argv_field(row, field="system_argv", path=path, index=i)
         ns = row.get("needs_system")
         if ns is not None and not isinstance(ns, bool):
             raise InstallError(
                 f"{path}: component[{i}] id={row.get('id')!r}: needs_system must be a boolean"
+            )
+        if row.get("system_argv") and not ns:
+            raise InstallError(
+                f"{path}: component[{i}] id={row.get('id')!r}: "
+                "system_argv requires needs_system=true"
             )
     keys = data.get("key") or []
     if keys:
@@ -417,23 +423,28 @@ def plan(catalog: Catalog) -> list[dict[str, Any]]:
             })
             continue
         if row.get("needs_system"):
-            argv = row.get("install_argv")
+            sys_argv = row.get("system_argv")
             reason = (
-                "needs_system=true; bounded apply refuses until a later --system unit"
+                "needs_system=true; ade-install apply --system --dry-run shows system_argv; "
+                "execution of system_argv remains refused"
             )
-            if isinstance(argv, list) and argv:
+            resolved = None
+            if isinstance(sys_argv, list) and sys_argv:
                 try:
-                    resolved = expand_argv(argv, root=catalog.root)
-                    reason = reason + "; recorded argv=" + " ".join(
+                    resolved = expand_argv(sys_argv, root=catalog.root)
+                    reason = reason + "; argv=" + " ".join(
                         shlex.quote(a) for a in resolved
                     )
                 except InstallError as e:
-                    reason = f"{reason}; install_argv invalid: {e}"
+                    reason = f"{reason}; system_argv invalid: {e}"
+            elif row.get("install_argv"):
+                reason = reason + "; system_argv missing (install_argv is user-scoped only)"
             steps.append({
                 "id": cid,
                 "action": "needs-system",
                 "reason": reason,
                 "needs_system": True,
+                **({"argv": resolved} if resolved else {}),
             })
             continue
         argv = row.get("install_argv")
@@ -571,22 +582,34 @@ def build_apply_steps(
         if not expected_installed(row):
             steps.append(ApplyStep(cid, "skip", None, f"class={row['class']} chosen={row.get('chosen')}"))
             continue
-        if row.get("needs_system") and not allow_system:
-            steps.append(ApplyStep(
-                cid, "refuse-system", None,
-                "needs_system=true; pass --system when that unit exists (refused in this bound)",
-            ))
-            continue
-        if allow_system and row.get("needs_system"):
-            # Explicitly refuse until the system unit lands; do not pretend.
-            steps.append(ApplyStep(
-                cid, "refuse-system", None,
-                "--system requested but system install path is not implemented yet",
-            ))
-            continue
-        obs = observe_component(row)
+        obs = observe_component(row, root=catalog.root)
         if obs.status == "ok" and not force:
             steps.append(ApplyStep(cid, "skip", None, f"already present ({obs.detail})"))
+            continue
+        if row.get("needs_system"):
+            if not allow_system:
+                steps.append(ApplyStep(
+                    cid, "refuse-system", None,
+                    "needs_system=true; pass --system --dry-run to preview system_argv",
+                ))
+                continue
+            sys_raw = row.get("system_argv")
+            if not isinstance(sys_raw, list) or not sys_raw:
+                steps.append(ApplyStep(
+                    cid, "blocked", None,
+                    "needs_system but system_argv missing",
+                ))
+                continue
+            try:
+                argv = expand_argv(list(sys_raw), root=catalog.root, prefix=prefix)
+            except InstallError as e:
+                steps.append(ApplyStep(cid, "blocked", None, str(e)))
+                continue
+            steps.append(ApplyStep(
+                cid, "would-system-install", argv,
+                "system dry-run only; execution of system_argv is refused",
+                detail=shlex.join(argv),
+            ))
             continue
         argv_raw = row.get("install_argv")
         if not isinstance(argv_raw, list) or not argv_raw:
@@ -636,26 +659,22 @@ def apply(
     runner: Runner | None = None,
     timeout_s: float = 300.0,
 ) -> tuple[list[dict[str, Any]], int]:
-    """Bounded apply. Default dry-run. ``--yes`` path executes install_argv only.
+    """Bounded apply. Default dry-run. ``--yes`` executes user ``install_argv`` only.
 
-    Exit 0 when every selected step is skip/would-install(dry)/install ok;
-    1 when any blocked/failed; 2 when --system is requested (unimplemented).
+    ``--system`` unlocks dry-run preview of ``system_argv`` (``would-system-install``).
+    Executing ``system_argv`` is always refused (exit 2) — root effects need a later unit.
+
+    Exit 0 when every selected step is skip/would-install(dry)/install ok /
+    would-system-install(dry); 1 when any blocked/failed/refuse-system; 2 when a
+    system_argv step would have been executed.
     """
-    if allow_system:
-        # Hard refuse: this unit never runs root effects, even when flagged.
-        return ([{
-            "id": "*",
-            "action": "refuse-system",
-            "reason": "--system is not implemented; no root or package-manager apply in this unit",
-            "ok": False,
-        }], 2)
-
     steps = build_apply_steps(
-        catalog, ids=ids, force=force, allow_system=False, prefix=prefix,
+        catalog, ids=ids, force=force, allow_system=allow_system, prefix=prefix,
     )
     state_dir = state_dir or default_state_dir()
     results: list[dict[str, Any]] = []
     failed = 0
+    system_exec_refused = 0
 
     ledger = load_ledger(state_dir) if not dry_run else None
 
@@ -669,12 +688,21 @@ def apply(
             "id": step.id,
             "action": step.action,
             "reason": step.reason,
-            "ok": step.action in ("skip", "would-install"),
+            "ok": step.action in ("skip", "would-install", "would-system-install"),
         }
         if step.argv is not None:
             row["argv"] = list(step.argv)
             row["detail"] = step.detail
-        if step.action == "would-install" and not dry_run:
+        if step.action == "would-system-install" and not dry_run:
+            # Never execute package-manager / root argv in this unit.
+            system_exec_refused += 1
+            row["action"] = "refuse-system-exec"
+            row["ok"] = False
+            row["reason"] = (
+                "system_argv execution refused; use --system --dry-run to preview only "
+                "(live system apply is a later unit)"
+            )
+        elif step.action == "would-install" and not dry_run:
             assert step.argv is not None
             # Persist pending intent before the write (setup-plan S3 ownership note).
             assert ledger is not None
@@ -741,14 +769,19 @@ def apply(
                     "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 }
                 save_ledger(state_dir, ledger)
-        elif step.action in ("blocked", "refuse-system"):
+        elif step.action in ("blocked", "refuse-system", "refuse-system-exec"):
             failed += 1
             row["ok"] = False
         results.append(row)
 
-    # dry-run with only skips/would-install → 0; any blocked → 1
+    if system_exec_refused:
+        return results, 2
+    # dry-run with only skips/would-install/would-system-install → 0; any blocked → 1
     if dry_run:
-        rc = 1 if any(r["action"] in ("blocked", "refuse-system") for r in results) else 0
+        rc = 1 if any(
+            r["action"] in ("blocked", "refuse-system", "refuse-system-exec")
+            for r in results
+        ) else 0
     else:
         rc = 1 if failed else 0
     return results, rc

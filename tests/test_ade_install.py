@@ -46,6 +46,8 @@ def test_repo_install_toml_checks_clean():
     assert by_id["just"].get("install_argv")
     assert by_id["uv"].get("install_argv")
     assert by_id["git"].get("needs_system") is True
+    assert by_id["git"].get("system_argv")
+    assert by_id["aiuse"].get("install_argv")
     proc = _run("check", "--json", root=REPO)
     assert proc.returncode == 0, proc.stderr
     payload = json.loads(proc.stdout)
@@ -191,7 +193,7 @@ def test_expand_argv_tokens(tmp_path):
         ai.expand_argv(["{unknown}/x"], root=root)
 
 
-def test_apply_dry_run_default_and_system_refuse(tmp_path):
+def test_apply_dry_run_default_and_system_preview(tmp_path):
     root = _fixture_root(tmp_path)
     catalog = ai.load_catalog(root=root)
     results, rc = ai.apply(catalog, dry_run=True, ids={"tool-c"})
@@ -203,9 +205,14 @@ def test_apply_dry_run_default_and_system_refuse(tmp_path):
     assert results[0]["action"] == "refuse-system"
     assert rc == 1
 
-    results, rc = ai.apply(catalog, dry_run=False, allow_system=True)
+    results, rc = ai.apply(catalog, dry_run=True, ids={"tool-d"}, allow_system=True)
+    assert rc == 0
+    assert results[0]["action"] == "would-system-install"
+    assert results[0]["argv"] == ["apt-get", "install", "-y", "tool-d"]
+
+    results, rc = ai.apply(catalog, dry_run=False, ids={"tool-d"}, allow_system=True)
     assert rc == 2
-    assert results[0]["action"] == "refuse-system"
+    assert results[0]["action"] == "refuse-system-exec"
 
 
 def test_apply_yes_runs_argv_and_writes_ledger(tmp_path):
@@ -254,12 +261,15 @@ def test_cli_apply_dry_run_json(tmp_path):
     assert payload["results"][0]["action"] == "would-install"
 
 
-def test_cli_apply_system_refused(tmp_path):
+def test_cli_apply_system_dry_run_and_yes_refused(tmp_path):
     root = _fixture_root(tmp_path)
-    proc = _run("apply", "--yes", "--system", "--json", root=root)
-    assert proc.returncode == 2
-    payload = json.loads(proc.stdout)
-    assert payload["ok"] is False
+    dry = _run("apply", "--dry-run", "--system", "--json", "--id", "tool-d", root=root)
+    assert dry.returncode == 0, dry.stderr
+    payload = json.loads(dry.stdout)
+    assert payload["results"][0]["action"] == "would-system-install"
+    yes = _run("apply", "--yes", "--system", "--json", "--id", "tool-d", root=root)
+    assert yes.returncode == 2
+    assert json.loads(yes.stdout)["results"][0]["action"] == "refuse-system-exec"
 
 
 def test_user_install_link_dry_run(tmp_path):

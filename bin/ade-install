@@ -8,8 +8,9 @@
   ade-install apply [--root DIR] [--json] [--dry-run|--yes] [--id ID ...] [--force]
 
 Doctor runs recorded probe_argv when present (else PATH presence); never
-repairs. Apply defaults to --dry-run; --yes runs install_argv (user-scoped).
---system is refused. Secrets are never read.
+repairs. Apply defaults to --dry-run; --yes runs user install_argv.
+--system --dry-run previews system_argv; executing system_argv is refused.
+Secrets are never read.
 Uses config/install.toml only while config/ade.toml is absent.
 See docs/install-catalog.md.
 """
@@ -195,7 +196,7 @@ def main(argv: list[str] | None = None) -> int:
     ap = sub.add_parser(
         "apply",
         parents=[shared],
-        help="bounded apply: --dry-run (default) or --yes; user-scoped install_argv only",
+        help="bounded apply: --dry-run (default) or --yes; --system dry-runs system_argv only",
     )
     ap.add_argument("--json", action="store_true")
     mode = ap.add_mutually_exclusive_group()
@@ -224,7 +225,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--system",
         action="store_true",
-        help="request root/package-manager effects (refused until a later unit)",
+        help="preview system_argv (with --dry-run); executing system_argv is always refused",
     )
     ap.add_argument(
         "--state-dir",

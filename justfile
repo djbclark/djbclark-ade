@@ -23,3 +23,7 @@ install-plan:
 # Bounded apply dry-run (default mode; no writes beyond nothing).
 install-apply-dry:
     "{{ root }}/bin/ade-install" apply --dry-run --root "{{ root }}"
+
+# Preview system_argv without executing (Linux apt paths today).
+install-apply-system-dry:
+    "{{ root }}/bin/ade-install" apply --system --dry-run --root "{{ root }}"

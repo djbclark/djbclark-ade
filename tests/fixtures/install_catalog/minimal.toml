@@ -34,8 +34,9 @@ platforms = ["linux"]
 id = "tool-d"
 class = "hard"
 summary = "needs system package manager"
-install = "apt install tool-d"
+install = "apt-get install -y tool-d"
 needs_system = true
+system_argv = ["apt-get", "install", "-y", "tool-d"]
 presence = "definitely-not-on-path-sys"
 platforms = ["linux"]
 

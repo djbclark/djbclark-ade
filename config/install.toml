@@ -27,27 +27,30 @@ platforms = ["mac", "linux"]
 id = "git"
 class = "hard"
 summary = "Source control"
-install = "distribution package manager (apt/dnf/brew); needs --system"
+install = "apt-get install -y git (Linux); brew install git (Mac, later)"
 needs_system = true
+system_argv = ["apt-get", "install", "-y", "git"]
 update = "package manager"
 probe = "git --version"
 probe_argv = ["git", "--version"]
 presence = "git"
 platforms = ["mac", "linux"]
-notes = "Almost always preinstalled; apply refuses without --system unit"
+notes = "system_argv is the Linux apt path; Mac brew argv is a later addition. Preview with apply --system --dry-run."
 
 [[component]]
 id = "gh"
 class = "hard"
 summary = "GitHub CLI"
 source = "https://cli.github.com"
-install = "distribution package or brew; needs --system"
+install = "apt-get install -y gh (Linux); brew install gh (Mac, later)"
 needs_system = true
+system_argv = ["apt-get", "install", "-y", "gh"]
 update = "package manager"
 probe = "gh --version"
 probe_argv = ["gh", "--version"]
 presence = "gh"
 platforms = ["mac", "linux"]
+notes = "system_argv is the Linux apt path; Mac brew argv is a later addition."
 
 [[component]]
 id = "uv"
@@ -80,12 +83,15 @@ id = "aiuse"
 class = "hard"
 summary = "Quota reading for routing"
 source = "https://github.com/djbclark/aiuse"
-install = "UNKNOWN"
-update = "UNKNOWN"
-probe = "UNKNOWN"
+install = "uv tool install git+https://github.com/djbclark/aiuse"
+install_argv = ["uv", "tool", "install", "git+https://github.com/djbclark/aiuse"]
+update = "uv tool upgrade aiuse"
+update_argv = ["uv", "tool", "upgrade", "aiuse"]
+probe = "aiuse --help"
+probe_argv = ["aiuse", "--help"]
 presence = "aiuse"
 platforms = ["mac", "linux"]
-notes = "Hard by operator ruling 2026-11-07"
+notes = "Hard by operator ruling 2026-11-07; user-scoped via uv tool"
 
 [[component]]
 id = "cswap"
