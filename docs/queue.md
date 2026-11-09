@@ -169,7 +169,7 @@ under **Carried**, newest first, one line each; an item leaves when it ships (in
 1. **Push on completion** (load-watch 96a17744, 2026-10-23; shipped 2026-11-09): a delegated slice tells its requester
    `done: <title>, <PR URL>` (or status/report) via `paseo send --json --no-wait` with named ack, never relay; dispatch
    footer rule 22, `bin/completion-notice`, `skills/fan-out` Collect, `docs/orchestration-practices.md` §5a.
-2. **Model tiers as data** (2026-10-31 → 2026-11-09, PR #NNN): `config/model-tiers.toml`, `bin/ade-model-tiers promote|set`,
+2. **Model tiers as data** (2026-10-31 → 2026-11-09, PR #401): `config/model-tiers.toml`, `bin/ade-model-tiers promote|set`,
    `route_agent` / `load_effective` readers; design remains `docs/history/model-tiers-design.md`.
 3. Port the Linux suite to uutils (2026-10-28): `pytest-linux` makes g-prefixed wrapper scripts, on `ubuntu-latest`.
 4. Keep every machine current, and a changelog (2026-10-20): `bin/ade-update`, `CHANGELOG.md`, fragments since 2026-10-31.
