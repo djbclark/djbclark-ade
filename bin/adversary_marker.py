@@ -11,8 +11,9 @@
       (the second job's concurrency group is keyed by the head); `--prs LIST --at-head SHA` (its second job) reads
       each PR's body and head through the API, decides, re-reads the head, body, author, last editor and the PR's
       issue comments, and posts ONE `adversary-marker` commit status per head: success only when every open PR at
-      it is approved. An owner-authored PR is approved by a live APPROVE naming the head in its body, last edited by
-      the owner; any other PR only by such an APPROVE in an issue comment the owner posted (not via a GitHub App)
+      it is approved. An owner-authored PR is approved by a live APPROVE naming the head in its body whose last
+      editor is the owner or a login in BODY_TRUSTED_EDITOR_LOGINS (Cursor cloud body rewrites, 2026-11-09);
+      any other PR only by such an APPROVE in an issue comment the owner posted (not via a GitHub App)
       and nobody but the owner ever edited (GraphQL `editor` and `userContentEdits`; unknown attribution fails).
       A BLOCK or malformed marker in the body or any comment fails it. MARKER_POST_AS=check-run posts a check run
       instead. `--api-answers` serves canned API answers from a JSON file and prints the status it would post
@@ -38,12 +39,16 @@ environment that only `master` can deploy to, and the ruleset pins the required 
 `integration_id`, so a status a PR's own workflow posts under the same context does not satisfy it.
 Everything a PR carries is untrusted data (operator, 2026-11-07: "any GitHub artifacts not directly from us are
 suspect"): its body, title, commits, branch name, comments and check output are read, never executed or
-interpolated. An APPROVE counts only (2026-11-07) in the body of a PR the repository owner wrote and edited last,
-or, for every other PR (MEMBER and COLLABORATOR authors included: the operator's agents act under the owner's
-login), in an issue comment by the owner that no GitHub App posted and no one but the owner edited
-(`_pr_state_trusted`, `_pr_comments_trusted`, `decide`). The owner's
-edit of an outside body no longer makes it trusted: ticking a task-list box is an edit, and the author can hide an
-APPROVE in an HTML comment. A BLOCK naming the head counts in the body or any comment, whoever wrote it.
+interpolated. An APPROVE counts only (2026-11-07; trusted-editor allowlist 2026-11-09) in the body of a PR the
+repository owner wrote whose last editor is the owner or a login in BODY_TRUSTED_EDITOR_LOGINS, or, for every
+other PR (MEMBER and COLLABORATOR authors included: the operator's agents act under the owner's login), in an
+issue comment by the owner that no GitHub App posted and no one but the owner edited
+(`_pr_state_trusted`, `_pr_comments_trusted`, `decide`). The allowlist does not help an outside PR: Cursor (or
+any other listed editor) last-editing a non-owner body still cannot approve it. The owner's edit of an outside
+body no longer makes it trusted: ticking a task-list box is an edit, and the author can hide an APPROVE in an
+HTML comment. Agents must not write a live APPROVE marker (fenced examples only); the allowlist only keeps an
+owner-authored body's APPROVE valid after a cloud agent rewrites the PR text. A BLOCK naming the head counts
+in the body or any comment, whoever wrote it.
 
 Python 3.9+ (the Mac's stock python3 and the Actions runner's); stdlib only.
 """
@@ -58,6 +63,14 @@ import urllib.error
 import urllib.request
 
 CONTEXT = "adversary-marker"
+
+# Owner-PR body last editors that may leave a live APPROVE trusted (2026-11-09). Compared
+# case-insensitively to GraphQL `editor.login`. Does NOT approve outside/MEMBER/COLLABORATOR
+# PRs. Keep this list short: each entry is a residual "our App was steered into writing APPROVE"
+# surface, mitigated by the process rule that agents never write a live marker.
+BODY_TRUSTED_EDITOR_LOGINS = frozenset({
+    "cursor",  # Cursor GitHub App / Cloud Agent body edits (PR 318, 2026-11-08)
+})
 SHA40 = re.compile(r"^[0-9a-f]{40}$")
 
 
@@ -1148,6 +1161,20 @@ COMMENTS_QUERY = (
     f"userContentEdits(first: {EDITS_MAX}) {{ totalCount nodes {{ editor {{ __typename login }} }} }} }} }} }} }} }}")
 
 
+def body_editor_trusted(editor: str, owner: str) -> bool:
+    """True when ``editor`` may leave an owner-PR body's live APPROVE trusted.
+
+    The owner always qualifies. Logins in BODY_TRUSTED_EDITOR_LOGINS also qualify
+    (Cursor cloud rewrites of owner-authored PR bodies). Empty or unknown editors
+    never qualify. Outside PRs never consult this for a body APPROVE.
+    """
+    e = (editor or "").lower()
+    o = (owner or "").lower()
+    if not e or not o:
+        return False
+    return e == o or e in {login.lower() for login in BODY_TRUSTED_EDITOR_LOGINS}
+
+
 def _pr_state_trusted(api, repo: str, n: int) -> dict:
     """{state, head, body, author, editor, association, owner_pr, body_trusted} of PR N from ONE GraphQL read, so the
     body and the editor it is judged by belong together. The editor is `editor` (GitHub's last editor), or the author
@@ -1155,11 +1182,14 @@ def _pr_state_trusted(api, repo: str, n: int) -> dict:
     editor, which no body trust survives.
 
     `owner_pr`: the author is the repository owner (logins compare case-insensitively). `body_trusted`: an owner PR
-    whose body the owner edited last. Only such a body can approve (2026-11-07, the lead's ruling after a Gemini 4
-    Argon and an Opus review): before, the owner's last edit made ANY body trusted, so an owner who ticked a task-list
-    box on an outside PR turned an APPROVE the author had hidden in an HTML comment into a trusted one; and a MEMBER
-    or COLLABORATOR author is treated like an outside one, because the operator's agents act under the owner's
-    login. An outside PR is approved only by an owner comment (`_pr_comments`, `decide`)."""
+    whose body last editor is the owner or a BODY_TRUSTED_EDITOR_LOGINS login (2026-11-09). Only such a body can
+    approve (2026-11-07 owner-author rule after a Gemini 4 Argon and an Opus review; allowlist added so a Cursor
+    Cloud rewrite of an owner PR body does not void a live APPROVE). Before 2026-11-07, the owner's last edit made
+    ANY body trusted, so an owner who ticked a task-list box on an outside PR turned an APPROVE the author had
+    hidden in an HTML comment into a trusted one; MEMBER or COLLABORATOR authors stay outside-like, because the
+    operator's agents act under the owner's login. An outside PR is approved only by an owner comment
+    (`_pr_comments`, `decide`); a listed App editing that body still cannot approve it.
+    """
     owner, name = repo.split("/", 1)
     data = api.graphql(PR_QUERY, {"owner": owner, "name": name, "number": n})
     pr = (((data or {}).get("repository") or {}).get("pullRequest")) if isinstance(data, dict) else None
@@ -1176,7 +1206,7 @@ def _pr_state_trusted(api, repo: str, n: int) -> dict:
     body = pr.get("body")
     return {"state": str(pr.get("state") or "").lower(), "head": head, "body": body if isinstance(body, str) else "",
             "author": author, "editor": editor, "association": str(pr.get("authorAssociation") or "").upper(),
-            "owner_pr": owner_pr, "body_trusted": owner_pr and editor.lower() == owner.lower()}
+            "owner_pr": owner_pr, "body_trusted": owner_pr and body_editor_trusted(editor, owner)}
 
 
 def _pr_comments(api, repo: str, n: int) -> list[dict]:
@@ -1306,13 +1336,13 @@ def decide(head: str, owner: str, pr: dict, comments: list[dict]) -> tuple[str, 
     1. A BLOCK for this head anywhere (the body, or ANY comment, whoever wrote it) blocks, then a malformed marker
        anywhere: the same asymmetry as the body's (rule 1, property 1). A comment marker naming another head is
        history (an approval of an earlier push), not a failure.
-    2. An owner PR: the body decides as before, and its APPROVE needs the owner as the body's last editor
-       (`untrusted` otherwise). Comments cannot approve it.
+    2. An owner PR: the body decides as before, and its APPROVE needs a trusted body editor (the owner or a
+       BODY_TRUSTED_EDITOR_LOGINS login; `untrusted` otherwise). Comments cannot approve it.
     3. Any other PR (an outside, MEMBER or COLLABORATOR author): an APPROVE in the body never counts, whoever edited
-       it last; only a live APPROVE for this head in a comment by the repository owner, not posted via a GitHub App,
-       and never edited by anyone but the owner (`_edit_attribution`), approves. Otherwise `edited` (another user
-       edited the owner's APPROVE comment), `edit-unknown` (its edit history is not known in full), `untrusted` (the
-       only APPROVE is in someone else's comment, or via an App) or `outside`."""
+       it last (a listed App included); only a live APPROVE for this head in a comment by the repository owner, not
+       posted via a GitHub App, and never edited by anyone but the owner (`_edit_attribution`), approves. Otherwise
+       `edited` (another user edited the owner's APPROVE comment), `edit-unknown` (its edit history is not known in
+       full), `untrusted` (the only APPROVE is in someone else's comment, or via an App) or `outside`."""
     body_adv = adversary_verdict(pr["body"], head)
     body_word = outcome(body_adv)
     judged = [(c, outcome(adversary_verdict(c["body"], head))) for c in comments]

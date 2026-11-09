@@ -238,11 +238,14 @@ others, and the merge path is unenforced. "Control" is what exists; "Gap" is wha
   **marker** is self-asserted: nothing fetches the adversary's report and compares. The parser checks the
   marker's shape and that its `head` equals the PR head, which catches a stale or typo'd verdict, and since
   2026-11-07 (PR 300) the `adversary-marker` Action counts an APPROVE only in two places. One is the body of a PR
-  the owner wrote, whose last editor is the owner (GraphQL `editor` and `lastEditedAt`). The other is an issue
-  comment the owner posted, not through an App, whose whole edit history (`userContentEdits`) is the owner's. The
-  operator approves any other PR by posting the marker as their own comment; editing its body approves nothing. A fabricated APPROVE written by a trusted account (one of our
-  own agents with the operator's login) is still indistinguishable from a real one: treat it as a claim. The
-  Action never executes, interpolates or checks out anything from a PR. Until the operator's ruleset requires
+  the owner wrote, whose last editor is the owner or a login in `BODY_TRUSTED_EDITOR_LOGINS` (GraphQL `editor` /
+  `lastEditedAt`; `cursor` added 2026-11-09 so a Cloud Agent rewrite of an owner PR body does not void a live
+  APPROVE; the allowlist does not help outside authors). The other is an issue comment the owner posted, not through
+  an App, whose whole edit history (`userContentEdits`) is the owner's. The operator approves any other PR by
+  posting the marker as their own comment; editing its body approves nothing. A fabricated APPROVE written by a
+  trusted account (one of our own agents with the operator's login, or a listed App steered into writing a live
+  marker) is still indistinguishable from a real one: treat it as a claim; agents must not write a live APPROVE.
+  The Action never executes, interpolates or checks out anything from a PR. Until the operator's ruleset requires
   the `adversary-marker` status pinned to the App (`docs/review-boundary.md`), nothing enforces any of this
   beyond branch protection's PR requirement.
 
