@@ -119,7 +119,13 @@ check/get/diff stay pure: no config writes, no secret resolution, no
 network/auth/scheduling probes. `--home` points local.toml resolution at a temp
 tree in tests; tests must not write the real HOME config or flip live lead flags.
 
-## D. Provenance
+## D. Install catalog (transitional, 2026-11-09)
+
+Separate from the routing/gates effective tree: `config/install.toml` + `ade-install`
+(`docs/install-catalog.md`). Refused when `config/ade.toml` is present so install/keys
+are not a second permanent authority beside a unified file.
+
+## E. Provenance
 
 `load_effective(...).provenance` names non-secret paths and domain sources
 (`routing_source`, `gates_source`, `local_config`, `gates_info.source`) without

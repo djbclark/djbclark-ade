@@ -1,0 +1,151 @@
+#!/usr/bin/env -S python3 -I
+"""ade-install: read-only catalog / plan / doctor for the transitional install registry.
+
+  ade-install check [--root DIR] [--json]
+  ade-install catalog [--root DIR] [--json]
+  ade-install plan [--root DIR] [--json]
+  ade-install doctor [--root DIR] [--json]
+
+No installs, updates, repairs, secret reads, or network/auth probes.
+Uses config/install.toml only while config/ade.toml is absent.
+See docs/install-catalog.md.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+BIN = Path(__file__).resolve().parent
+if str(BIN) not in sys.path:
+    sys.path.insert(0, str(BIN))
+
+import ade_install as ai  # noqa: E402
+
+
+def _print_json(obj: object) -> None:
+    json.dump(obj, sys.stdout, indent=2, sort_keys=True, default=str)
+    sys.stdout.write("\n")
+
+
+def cmd_check(args: argparse.Namespace) -> int:
+    try:
+        catalog = ai.load_catalog(root=Path(args.root) if args.root else None)
+    except ai.InstallError as e:
+        if args.json:
+            _print_json({"ok": False, "errors": [str(e)]})
+        else:
+            print(str(e), file=sys.stderr)
+            print("ade-install check: FAIL", file=sys.stderr)
+        return 1
+    if args.json:
+        _print_json({"ok": True, "summary": ai.catalog_summary(catalog)})
+    else:
+        s = ai.catalog_summary(catalog)
+        print("ade-install check: OK")
+        print(f"  path={s['path']}")
+        print(f"  components={s['components']} keys={s['keys']} logins={s['logins']}")
+        print(f"  by_class={s['by_class']}")
+    return 0
+
+
+def cmd_catalog(args: argparse.Namespace) -> int:
+    try:
+        catalog = ai.load_catalog(root=Path(args.root) if args.root else None)
+    except ai.InstallError as e:
+        print(str(e), file=sys.stderr)
+        return 1
+    if args.json:
+        _print_json({
+            "summary": ai.catalog_summary(catalog),
+            "component": catalog.components,
+            "key": catalog.keys,
+            "login": catalog.logins,
+        })
+    else:
+        s = ai.catalog_summary(catalog)
+        print(f"ade-install catalog: {s['components']} components, {s['keys']} keys, {s['logins']} logins")
+        for row in catalog.components:
+            chosen = row.get("chosen")
+            ch = "" if chosen is None else f" chosen={chosen}"
+            print(f"  [{row['class']}] {row['id']}{ch}")
+        print("keys:")
+        for row in catalog.keys:
+            print(f"  {row['name']} (reference only)")
+        print("logins:")
+        for row in catalog.logins:
+            print(f"  {row['id']}")
+    return 0
+
+
+def cmd_plan(args: argparse.Namespace) -> int:
+    try:
+        catalog = ai.load_catalog(root=Path(args.root) if args.root else None)
+        steps = ai.plan(catalog)
+    except ai.InstallError as e:
+        print(str(e), file=sys.stderr)
+        return 1
+    if args.json:
+        _print_json({"steps": steps, "note": "print-only; apply/reconciliation is a later unit"})
+    else:
+        print(f"ade-install plan: {len(steps)} step(s) (print-only; does not install)")
+        for step in steps:
+            print(f"  {step['action']}: {step['id']} — {step['reason']}")
+    return 0
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    try:
+        catalog = ai.load_catalog(root=Path(args.root) if args.root else None)
+        observations, rc = ai.doctor(catalog)
+    except ai.InstallError as e:
+        if args.json:
+            _print_json({"ok": False, "errors": [str(e)]})
+        else:
+            print(str(e), file=sys.stderr)
+            print("ade-install doctor: FAIL", file=sys.stderr)
+        return 1
+    if args.json:
+        _print_json({
+            "ok": rc == 0,
+            "observations": [
+                {"kind": o.kind, "id": o.id, "status": o.status, "detail": o.detail}
+                for o in observations
+            ],
+        })
+    else:
+        print("ade-install doctor: " + ("OK" if rc == 0 else "FAIL") + " (observe-only; no repair)")
+        for o in observations:
+            print(f"  {o.status:9} {o.kind}/{o.id}: {o.detail}")
+    return rc
+
+
+def main(argv: list[str] | None = None) -> int:
+    shared = argparse.ArgumentParser(add_help=False)
+    shared.add_argument("--root", default=argparse.SUPPRESS,
+                        help="repository root; before/after command, last explicit wins")
+    parser = argparse.ArgumentParser(
+        prog="ade-install",
+        description="Read-only install catalog, plan, and observe-only doctor.",
+        parents=[shared],
+    )
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    for name, func, help_text in (
+        ("check", cmd_check, "validate config/install.toml"),
+        ("catalog", cmd_catalog, "list components, key references, and login checks"),
+        ("plan", cmd_plan, "print-only install plan (no writes)"),
+        ("doctor", cmd_doctor, "observe presence; never repairs or reads secrets"),
+    ):
+        p = sub.add_parser(name, parents=[shared], help=help_text)
+        p.add_argument("--json", action="store_true")
+        p.set_defaults(func=func)
+
+    args = parser.parse_args(argv)
+    args.root = getattr(args, "root", None)
+    return int(args.func(args))
+
+
+if __name__ == "__main__":
+    sys.exit(main())
