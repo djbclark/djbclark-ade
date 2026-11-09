@@ -12,6 +12,7 @@ import shlex
 import sys
 import tempfile
 
+import ade_pi_pools
 import route_agent as router
 
 
@@ -24,7 +25,8 @@ def choose(kind: str, models: list[str], *, native_tools: bool = False,
     if quota is None:
         quota, age = router.load_snapshot(bypass_memo=True)
     available = set(models)
-    skip = set(excluded or ()) | router.operator_disabled()
+    unaccepted = ade_pi_pools.unaccepted_auto_services()
+    skip = set(excluded or ()) | router.operator_disabled() | unaccepted
     for svc in router.discover(quota):
         spec = shlex.split(svc.models.get(kind, ""))
         if (svc.acp_agent != "pi" or not spec or spec[0] not in available
@@ -32,8 +34,12 @@ def choose(kind: str, models: list[str], *, native_tools: bool = False,
             skip.add(svc.name)
     picked = router.route(kind, quota=quota, exclude=skip, repo=repo)
     if picked is None:
-        return {"schema_version": 1, "kind": kind, "service": None,
-                "reason": "No qualified Pi route with fresh quota and the required tools/model"}
+        reason = "No qualified Pi route with fresh quota and the required tools/model"
+        if unaccepted:
+            reason += ("; auto-routing refuses unaccepted pool(s): "
+                       + ", ".join(sorted(unaccepted))
+                       + " (flip accepted=true in config/pi-pool-acceptance.toml)")
+        return {"schema_version": 1, "kind": kind, "service": None, "reason": reason}
     parts = shlex.split(picked.model)
     if len(parts) not in (1, 3) or (len(parts) == 3 and parts[1] != "--effort"):
         raise ValueError("invalid configured model profile")

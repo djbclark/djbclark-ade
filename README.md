@@ -117,6 +117,7 @@ Skills (23, from each `skills/*/SKILL.md`):
 | [`ade-github-setup`](bin/ade-github-setup) | Observe / plan / dry-run for the merge-gate App (setup-plan S8). |
 | [`ade-install`](bin/ade-install) | Transitional install catalog, plan, doctor, keys, and bounded apply. |
 | [`ade-merge-ready`](bin/ade-merge-ready) | Classify open ADE PRs against the merge gate (2026-11-09). |
+| [`ade-pi-pools`](bin/ade-pi-pools) | Report and enforce Pi pool acceptance before automatic routing (ade/auto). |
 | [`ade-retro`](bin/ade-retro) | A read-only raw report for a retrospective over a date window (2026-11-04). |
 | [`ade-roster`](bin/ade-roster) | Print README's skills and bin/ roster, generated from the files themselves (2026-11-07, slim-down E11). |
 | [`ade-sched`](bin/ade-sched) | Install a checked-in launchd plist on this machine's scheduler (launchd, systemd user units or cron). |
@@ -129,6 +130,7 @@ Skills (23, from each `skills/*/SKILL.md`):
 | [`ade_gates.py`](bin/ade_gates.py) | The frontier-model allowance, from code defaults and config/gates.toml [frontier] (docs/gates.md). |
 | [`ade_github_setup.py`](bin/ade_github_setup.py) | Observe / plan / dry-run for setup-plan S8 (merge-gate App). |
 | [`ade_install.py`](bin/ade_install.py) | Install catalog, plan, observe-only doctor/keys, bounded apply. |
+| [`ade_pi_pools.py`](bin/ade_pi_pools.py) | Pi pool acceptance for automatic routing (ade/auto / bin/pi-default). |
 | [`ade_sched.py`](bin/ade_sched.py) | Install a launchd plist as a launchd agent, a systemd user unit or a crontab block (issue #279, 2026-11-04). |
 | [`ade_user_install.py`](bin/ade_user_install.py) | User-scoped tool bootstrap (no shell=True, no root). |
 | [`adversary_marker.py`](bin/adversary_marker.py) | Read the adversary's verdict marker from a PR body and judge it against the PR head. |
