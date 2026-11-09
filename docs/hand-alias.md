@@ -13,6 +13,8 @@ the ADE compatibility alias ([old way versus new way](old-way-new-way.md)).
 
 One thin skill, [`skills/hand`](../skills/hand/SKILL.md), reads and follows `handoff`. Installed on every current local
 TUI by `bin/skill-everywhere hand` (Claude Code, Codex, Pi, Cursor, Hermes; see [skill-everywhere.md](skill-everywhere.md)).
+Pi shares `~/.agents/skills` with Codex: the installer links that dir when `pi` (or `codex`) is on `PATH`
+(PR restoring the Pi target). omp/OpenCode are no longer skill-everywhere targets.
 Where a TUI does not make a skill a bare `/name`, a wrapper file named `hand` calls it.
 
 | TUI | You type | How | Built-in `hand`? |
