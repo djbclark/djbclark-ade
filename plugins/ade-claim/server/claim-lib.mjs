@@ -1,7 +1,13 @@
 /**
  * Pure helpers for the ade-claim Paseo plugin (unit-tested without a daemon).
  *
+ * W2: worktree.create.after → ade_claims.py new
+ * W3: agent.open.before exports ADE_CLAIM_ID; agent.create.after binds owner
+ *     (Paseo's agent.create.after is a notification and cannot change env).
+ *
  * @typedef {{ path: string, branch: string, sourceCheckout: string }} WorktreeHookPayload
+ * @typedef {{ agentId: string, cwd: string, env: Record<string, string> }} AgentOpenBeforePayload
+ * @typedef {{ id: string, cwd: string }} AgentCreateAfterPayload
  */
 
 import { randomBytes } from "node:crypto";
@@ -22,6 +28,157 @@ export function parseWorktreePayload(worktree) {
     }
   }
   return /** @type {WorktreeHookPayload} */ ({ path, branch, sourceCheckout });
+}
+
+/**
+ * agent.open.before request (Paseo ≥0.14): cwd + agentId + launch env overrides.
+ * @param {unknown} request
+ */
+export function parseAgentOpenBeforeRequest(request) {
+  if (!request || typeof request !== "object" || Array.isArray(request)) {
+    throw new Error("agent.open.before: expected { request } object");
+  }
+  const { agentId, cwd, env } = /** @type {Record<string, unknown>} */ (request);
+  if (typeof agentId !== "string" || !agentId.trim()) {
+    throw new Error("agent.open.before: request.agentId must be a non-empty string");
+  }
+  if (typeof cwd !== "string" || !cwd.trim()) {
+    throw new Error("agent.open.before: request.cwd must be a non-empty string");
+  }
+  /** @type {Record<string, string>} */
+  const envMap = {};
+  if (env != null) {
+    if (typeof env !== "object" || Array.isArray(env)) {
+      throw new Error("agent.open.before: request.env must be an object when present");
+    }
+    for (const [k, v] of Object.entries(/** @type {Record<string, unknown>} */ (env))) {
+      if (typeof v === "string") envMap[k] = v;
+    }
+  }
+  return /** @type {AgentOpenBeforePayload} */ ({ agentId, cwd, env: envMap });
+}
+
+/**
+ * agent.create.after payload: { agent: { id, cwd, … } }.
+ * @param {unknown} agent
+ */
+export function parseAgentCreateAfterAgent(agent) {
+  if (!agent || typeof agent !== "object" || Array.isArray(agent)) {
+    throw new Error("agent.create.after: expected { agent } object");
+  }
+  const { id, cwd } = /** @type {Record<string, unknown>} */ (agent);
+  if (typeof id !== "string" || !id.trim()) {
+    throw new Error("agent.create.after: agent.id must be a non-empty string");
+  }
+  if (typeof cwd !== "string" || !cwd.trim()) {
+    throw new Error("agent.create.after: agent.cwd must be a non-empty string");
+  }
+  return /** @type {AgentCreateAfterPayload} */ ({ id, cwd });
+}
+
+/** @param {string} path */
+function normalizePath(path) {
+  return path.replace(/\/+$/, "") || "/";
+}
+
+/**
+ * Pick the active claim whose path matches cwd (string equality after trailing-slash trim).
+ * Live hooks may also resolve via the worktree pointer; this is the list --json path.
+ *
+ * @param {unknown} claims
+ * @param {string} cwd
+ * @returns {{ id: string, path: string, owner?: Record<string, unknown> } | null}
+ */
+export function activeClaimForPath(claims, cwd) {
+  if (!Array.isArray(claims)) {
+    throw new Error("activeClaimForPath: claims must be an array");
+  }
+  if (typeof cwd !== "string" || !cwd.trim()) {
+    throw new Error("activeClaimForPath: cwd must be a non-empty string");
+  }
+  const want = normalizePath(cwd);
+  for (const raw of claims) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+    const c = /** @type {Record<string, unknown>} */ (raw);
+    const shown = typeof c.shown_state === "string" ? c.shown_state
+      : (typeof c.state === "string" ? c.state : "");
+    if (shown !== "active") continue;
+    if (typeof c.path !== "string" || typeof c.id !== "string") continue;
+    if (normalizePath(c.path) !== want) continue;
+    if (!ID_RE.test(c.id)) continue;
+    return {
+      id: c.id,
+      path: c.path,
+      owner: c.owner && typeof c.owner === "object" && !Array.isArray(c.owner)
+        ? /** @type {Record<string, unknown>} */ (c.owner)
+        : undefined,
+    };
+  }
+  return null;
+}
+
+/**
+ * Contents of `<git-dir>/ade-claim` (claim id), or null when empty/missing text.
+ * @param {unknown} text
+ */
+export function parseClaimPointer(text) {
+  if (text == null) return null;
+  if (typeof text !== "string") {
+    throw new Error("ade-claim pointer must be a string");
+  }
+  const id = text.trim();
+  if (!id) return null;
+  if (!ID_RE.test(id)) {
+    throw new Error(`ade-claim pointer is not a valid claim id: ${id}`);
+  }
+  return id;
+}
+
+/**
+ * Merge ADE_CLAIM_ID into a launch env override map.
+ * Returns undefined when there is nothing to change (caller should leave the request alone).
+ *
+ * @param {Record<string, string> | null | undefined} env
+ * @param {string | null | undefined} claimId
+ * @returns {Record<string, string> | undefined}
+ */
+export function mergeAdeClaimIdEnv(env, claimId) {
+  if (!claimId) return undefined;
+  if (typeof claimId !== "string" || !ID_RE.test(claimId)) {
+    throw new Error(`ADE_CLAIM_ID must be a valid claim id, got ${JSON.stringify(claimId)}`);
+  }
+  const base = env && typeof env === "object" ? { ...env } : {};
+  if (base.ADE_CLAIM_ID === claimId) return undefined;
+  return { ...base, ADE_CLAIM_ID: claimId };
+}
+
+/**
+ * @param {{
+ *   adeClaimsScript: string,
+ *   claimId: string,
+ *   ownerAgent: string,
+ *   ownerRecord?: string,
+ * }} opts
+ */
+export function buildAdeClaimsBindOwnerArgv(opts) {
+  const { adeClaimsScript, claimId, ownerAgent, ownerRecord } = opts;
+  if (typeof adeClaimsScript !== "string" || !adeClaimsScript) {
+    throw new Error("adeClaimsScript is required");
+  }
+  if (typeof claimId !== "string" || !ID_RE.test(claimId)) {
+    throw new Error(`claimId must be a valid claim id, got ${JSON.stringify(claimId)}`);
+  }
+  if (typeof ownerAgent !== "string" || !ownerAgent.trim()) {
+    throw new Error("ownerAgent must be a non-empty string");
+  }
+  const argv = ["bind-owner", "--id", claimId, "--owner-agent", ownerAgent];
+  if (ownerRecord) {
+    if (typeof ownerRecord !== "string" || !ownerRecord.trim()) {
+      throw new Error("ownerRecord must be a non-empty string when set");
+    }
+    argv.push("--owner-record", ownerRecord);
+  }
+  return { python: "python3", script: adeClaimsScript, argv };
 }
 
 /**
@@ -90,18 +247,16 @@ function readable(path) {
 }
 
 /**
- * Locate a trusted bin/ade_claims.py.
+ * Locate a trusted bin/ade_claims.py (no checkout path consulted).
  *
- * Never uses worktree.sourceCheckout: an untrusted repo could plant a hostile
- * bin/ade_claims.py that the daemon would exec. Prefer ADE_CLAIMS_PY, else walk
- * parents of the plugin install path (reviewed code) for bin/ade_claims.py.
+ * Prefer ADE_CLAIMS_PY, else walk parents of the plugin install path (reviewed
+ * code) for bin/ade_claims.py. Never uses a worktree or sourceCheckout path:
+ * an untrusted repo could plant a hostile helper the daemon would exec.
  *
- * @param {WorktreeHookPayload} worktree
  * @param {NodeJS.ProcessEnv} [env]
  * @param {{ pluginRoot?: string }} [opts]
  */
-export function resolveAdeClaimsScript(worktree, env = process.env, opts = {}) {
-  parseWorktreePayload(worktree);
+export function resolveTrustedAdeClaimsScript(env = process.env, opts = {}) {
   if (env.ADE_CLAIMS_PY) {
     if (!readable(env.ADE_CLAIMS_PY)) {
       throw new Error(`ADE_CLAIMS_PY is not readable: ${env.ADE_CLAIMS_PY}`);
@@ -125,4 +280,16 @@ export function resolveAdeClaimsScript(worktree, env = process.env, opts = {}) {
   throw new Error(
     "ade_claims.py not found beside the plugin install; set ADE_CLAIMS_PY to a trusted absolute path",
   );
+}
+
+/**
+ * W2 helper: validate the worktree payload, then resolve a trusted script.
+ *
+ * @param {WorktreeHookPayload} worktree
+ * @param {NodeJS.ProcessEnv} [env]
+ * @param {{ pluginRoot?: string }} [opts]
+ */
+export function resolveAdeClaimsScript(worktree, env = process.env, opts = {}) {
+  parseWorktreePayload(worktree);
+  return resolveTrustedAdeClaimsScript(env, opts);
 }
