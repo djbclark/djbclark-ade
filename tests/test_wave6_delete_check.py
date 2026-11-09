@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import os
 import stat
 import subprocess
 import sys
@@ -37,6 +36,27 @@ CALLER_BINS = (
     "bin/ade_claims.py",
 )
 
+C3_KEYS = (
+    "tendcf",
+    "nix2cf",
+    "cfengine",
+    "paseo_upstream",
+    "plektra",
+    "paseo4herdr",
+    "pi",
+    "sudo_secretspec",
+    "aiuse",
+    "paseo_runner",
+    "site_public_home_agents",
+    "aiuse_config_opencode_go",
+)
+MAC_FLAGS = (
+    "relay_idle",
+    "acp_dispatch_idle",
+    "acp_run_idle",
+    "paseo_smoke_ok",
+)
+
 
 def _write_clean_tree(tmp: Path) -> Path:
     for rel in CALLER_SKILLS:
@@ -53,8 +73,29 @@ def _write_clean_tree(tmp: Path) -> Path:
     return tmp
 
 
+def _write_proofs(bundle: Path) -> tuple[dict[str, str], dict[str, str]]:
+    """Create non-empty proof files beside evidence.json; return relative maps."""
+    proofs_dir = bundle / "proofs"
+    proofs_dir.mkdir(parents=True, exist_ok=True)
+    c3_proofs: dict[str, str] = {}
+    for key in C3_KEYS:
+        rel = f"proofs/c3-{key}.txt"
+        (bundle / rel).write_text(f"probe for {key}: no live shim names\n", encoding="utf-8")
+        c3_proofs[key] = rel
+    mac_proofs: dict[str, str] = {}
+    for flag in MAC_FLAGS:
+        rel = f"proofs/mac-{flag}.txt"
+        (bundle / rel).write_text(f"mac capture for {flag}: idle/ok\n", encoding="utf-8")
+        mac_proofs[flag] = rel
+    return c3_proofs, mac_proofs
+
+
 def _good_evidence(tmp: Path) -> Path:
-    path = tmp / "evidence.json"
+    """Evidence bundle with status ticks AND non-empty proof files (fail-closed)."""
+    bundle = tmp / "evidence-bundle"
+    bundle.mkdir(parents=True, exist_ok=True)
+    c3_proofs, mac_proofs = _write_proofs(bundle)
+    path = bundle / "evidence.json"
     path.write_text(
         json.dumps(
             {
@@ -73,12 +114,14 @@ def _good_evidence(tmp: Path) -> Path:
                     "site_public_home_agents": "waived",
                     "aiuse_config_opencode_go": "waived",
                 },
+                "c3_proofs": c3_proofs,
                 "mac": {
                     "relay_idle": True,
                     "acp_dispatch_idle": True,
                     "acp_run_idle": True,
                     "paseo_smoke_ok": True,
                 },
+                "mac_proofs": mac_proofs,
             }
         ),
         encoding="utf-8",
@@ -143,14 +186,64 @@ def test_refuses_when_loose_still_names_acp_run(tmp_path: Path) -> None:
 
 def test_refuses_incomplete_c3(tmp_path: Path) -> None:
     tree = _write_clean_tree(tmp_path)
-    path = tmp_path / "bad-c3.json"
-    good = json.loads(_good_evidence(tmp_path).read_text(encoding="utf-8"))
-    good["c3"]["tendcf"] = "todo"
-    path.write_text(json.dumps(good), encoding="utf-8")
+    ev = _good_evidence(tmp_path / "incomplete")
+    data = json.loads(ev.read_text(encoding="utf-8"))
+    data["c3"]["tendcf"] = "todo"
+    ev.write_text(json.dumps(data), encoding="utf-8")
+    r = run("--json", "--evidence", str(ev), "--allow-early", root=tree)
+    assert r.returncode == 1, r.stderr
+    out = json.loads(r.stdout)
+    assert any(x.startswith("c3_tendcf:") for x in out["reasons"])
+
+
+def test_refuses_missing_c3_proof_file(tmp_path: Path) -> None:
+    """Status ticks without proof files FAILCLOSED (do not invent captures)."""
+    tree = _write_clean_tree(tmp_path)
+    ev = _good_evidence(tmp_path)
+    data = json.loads(ev.read_text(encoding="utf-8"))
+    # Drop the proof path and delete the file for tendcf.
+    proof_rel = data["c3_proofs"]["tendcf"]
+    (ev.parent / proof_rel).unlink()
+    del data["c3_proofs"]["tendcf"]
+    ev.write_text(json.dumps(data), encoding="utf-8")
+    r = run("--json", "--evidence", str(ev), "--allow-early", root=tree)
+    assert r.returncode == 1, r.stderr
+    out = json.loads(r.stdout)
+    assert any(x.startswith("c3_tendcf_proof_missing:") for x in out["reasons"])
+
+
+def test_refuses_empty_mac_proof_file(tmp_path: Path) -> None:
+    tree = _write_clean_tree(tmp_path)
+    ev = _good_evidence(tmp_path)
+    data = json.loads(ev.read_text(encoding="utf-8"))
+    proof_rel = data["mac_proofs"]["relay_idle"]
+    (ev.parent / proof_rel).write_text("", encoding="utf-8")
+    r = run("--json", "--evidence", str(ev), "--allow-early", root=tree)
+    assert r.returncode == 1, r.stderr
+    out = json.loads(r.stdout)
+    assert any(x.startswith("mac_relay_idle_proof_missing:") for x in out["reasons"])
+
+
+def test_refuses_evidence_without_proof_maps(tmp_path: Path) -> None:
+    """Legacy status-only evidence (no c3_proofs/mac_proofs) is not ready."""
+    tree = _write_clean_tree(tmp_path)
+    path = tmp_path / "legacy.json"
+    path.write_text(
+        json.dumps(
+            {
+                "recorded": "2026-11-20",
+                "c3": {k: "migrated" for k in C3_KEYS},
+                "mac": {f: True for f in MAC_FLAGS},
+            }
+        ),
+        encoding="utf-8",
+    )
     r = run("--json", "--evidence", str(path), "--allow-early", root=tree)
     assert r.returncode == 1, r.stderr
-    data = json.loads(r.stdout)
-    assert any(x.startswith("c3_tendcf:") for x in data["reasons"])
+    out = json.loads(r.stdout)
+    joined = "\n".join(out["reasons"])
+    assert "evidence_invalid: missing c3_proofs object" in joined
+    assert "evidence_invalid: missing mac_proofs object" in joined
 
 
 def test_ready_with_evidence_and_allow_early(tmp_path: Path) -> None:
