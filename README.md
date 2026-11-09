@@ -99,7 +99,7 @@ Skills (22, from each `skills/*/SKILL.md`):
 | [`tell-chief-of-staff`](skills/tell-chief-of-staff/SKILL.md) | Pointer (2026-11-06) for messaging the operator's cloud Grok Bot "Chief of Staff" ("tell grok", "tell Chief of Staff", "hand this to grokbot") and for its ask_claude callback; the sender and its setup live outside this repository. |
 | [`tell-coding-bot`](skills/tell-coding-bot/SKILL.md) | Pointer (2026-11-06) for talking to the operator's cloud Grok Bot "Coding" ("tell the Coding bot", "ask Coding", "hand this to the Coding bot", a task that needs a real browser session); the coding-bot code now lives in the peer-link repository. |
 
-`bin/` (55, from each file's first docstring or comment):
+`bin/` (56, from each file's first docstring or comment):
 
 | Tool | What |
 |---|---|
@@ -109,6 +109,7 @@ Skills (22, from each `skills/*/SKILL.md`):
 | [`ade-config`](bin/ade-config) | Check/get/diff/set for the versioned effective ADE config (schema_version=1). |
 | [`ade-git-guard`](bin/ade-git-guard) | A `git` front door for what git's own hooks cannot see in a workspace another agent owns. |
 | [`ade-install`](bin/ade-install) | Transitional install catalog, plan, doctor, and bounded apply. |
+| [`ade-merge-ready`](bin/ade-merge-ready) | Classify open ADE PRs against the merge gate (2026-11-09). |
 | [`ade-retro`](bin/ade-retro) | A read-only raw report for a retrospective over a date window (2026-11-04). |
 | [`ade-roster`](bin/ade-roster) | Print README's skills and bin/ roster, generated from the files themselves (2026-11-07, slim-down E11). |
 | [`ade-sched`](bin/ade-sched) | Install a checked-in launchd plist on this machine's scheduler (launchd, systemd user units or cron). |
