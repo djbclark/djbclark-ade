@@ -675,6 +675,86 @@ def test_a_repo_config_autostash_is_read_too(tmp_path, state):
     assert untouched(repo)
 
 
+# --- O2 residual: stash show --output / format-patch -o outside the caller's claim ---------
+
+@pytest.mark.parametrize("argv", [
+    ["stash", "show", "--output=f"],
+    ["stash", "show", "-p", "--output=f"],
+    ["stash", "show", "--output", "f"],
+    ["stash", "show", "--out=f"],
+    ["stash", "show", "--output=f", "stash@{0}"],
+    ["format-patch", "-1"],
+    ["format-patch", "-1", "-o", "."],
+    ["format-patch", "-1", "-o", "./"],
+    ["format-patch", "-1", "--output-directory=."],
+    ["format-patch", "-1", "--output-directory", "."],
+    ["format-patch", "-1", "--output-dir=."],
+    ["format-patch", "-1", "-o."],
+], ids=lambda c: " ".join(c))
+def test_output_file_flags_are_refused_outside_the_callers_claim(tmp_path, state, argv):
+    """Unclaimed checkout: stash show --output* and format-patch file writes must not replace a peer's file (O2 residual)."""
+    repo = mk_repo(tmp_path, state)
+    dirty(repo)
+    before = (repo / "f").read_text()
+    r = run(state, argv, repo, who="B")
+    assert refused77(r) and "output-file" in r.stderr, (argv, r.returncode, r.stderr)
+    assert (repo / "f").read_text() == before
+    assert not (repo / "0001-init.patch").exists()
+
+
+@pytest.mark.parametrize("argv", [
+    ["stash", "show"],
+    ["stash", "show", "-p"],
+    ["stash", "list"],
+    ["format-patch", "-1", "--stdout"],
+], ids=lambda c: " ".join(c))
+def test_stash_show_stdout_and_format_patch_stdout_stay_allowed_unclaimed(tmp_path, state, argv):
+    """No worktree file write: stash show without --output, and format-patch --stdout, stay allowed in a shared checkout."""
+    repo = mk_repo(tmp_path, state)
+    (repo / "g").write_text("other\nstashed\n")
+    plain(state, ["stash", "push", "-m", "wip", "--", "g"], repo)  # a stash so show has something
+    dirty(repo)
+    before = (repo / "f").read_text()
+    r = run(state, argv, repo, who="B")
+    assert r.returncode != 77 and "output-file" not in r.stderr, (argv, r.returncode, r.stderr)
+    assert (repo / "f").read_text() == before
+
+
+def test_output_file_flags_are_allowed_inside_the_callers_claim(tmp_path, state):
+    repo = mk_repo(tmp_path, state)
+    claim(repo, "B", branch="main")
+    (repo / "g").write_text("other\nstashed\n")
+    plain(state, ["stash", "push", "-m", "wip", "--", "g"], repo)
+    r = run(state, ["stash", "show", "--output=stash.out"], repo, who="B")
+    assert r.returncode == 0 and (repo / "stash.out").exists(), r.stderr
+    r = run(state, ["format-patch", "-1", "-o", str(repo / "patches")], repo, who="B")
+    assert r.returncode == 0 and list((repo / "patches").glob("*.patch")), r.stderr
+
+
+def test_output_file_into_a_foreign_claim_is_refused_even_from_own_workspace(tmp_path, state):
+    a, b = two_claimed(tmp_path, state)
+    before = (a / "f").read_text()
+    r = run(state, ["format-patch", "-1", "-o", str(a)], b, who="B")
+    assert refused77(r) and "output-file" in r.stderr, r.stderr
+    assert (a / "f").read_text() == before
+    assert not list(a.glob("*.patch"))
+    r = run(state, ["stash", "show", f"--output={a / 'stolen'}"], b, who="B")
+    # may also be refused before stash exists; the rule name must still be output-file
+    assert refused77(r) and "output-file" in r.stderr, r.stderr
+    assert not (a / "stolen").exists()
+
+
+def test_format_patch_into_an_unclaimed_tree_from_own_claim_is_refused(tmp_path, state):
+    mine = mk_repo(tmp_path, state, "mine")
+    other = mk_repo(tmp_path, state, "other")
+    claim(mine, "B")
+    dirty(other)
+    before = (other / "f").read_text()
+    r = run(state, ["format-patch", "-1", "-o", str(other)], mine, who="B")
+    assert refused77(r) and "output-file" in r.stderr, r.stderr
+    assert (other / "f").read_text() == before
+
+
 # --- BLOCK-2: abbreviated long options ----------------------------------------------------
 
 @pytest.mark.parametrize("cmd", [

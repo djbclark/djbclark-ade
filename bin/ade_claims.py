@@ -118,11 +118,15 @@ GIT_CONFIG_* plus the repository's, relative --git-dir/--work-tree/GIT_DIR/GIT_W
      destination, and a copy not at all (measured on git 2.56, 2026-10-25). The git dir and work tree the call lands on are
      asked of git itself (`rev-parse --absolute-git-dir --show-toplevel` under the call's own -C, -c, --git-dir, --work-tree and
      environment); when git cannot answer at all (timeout), the typed values are used and a call that is not read-only is
-     refused while another agent holds a claim (rule workspace-unresolved).
+     refused while another agent holds a claim (rule workspace-unresolved). Also (O2 residual, 2026-11-09): `stash show
+     --output*` / `--out*` and `format-patch` `-o` / `--output*` / `--output-directory` (and plain `format-patch`, which
+     writes into cwd) when the output target is not inside the caller's active claimed workspace (`output-file`);
+     `format-patch --stdout` stays allowed (no worktree file write).
   5. In my own claimed workspace everything else is allowed.
 Removed in O2 (the hooks replace them): the fetch/pull/remote-update and push dry-run preflights, the `update-ref`, `branch -d|-D|-f`,
-`checkout -B`, `switch -C` and `worktree add -B` target rules, the output-file rules (`--output`, `bundle create`, `format-patch -o`,
-`config --file`, `bugreport -o`), and the shell-string `check` analyser with its Claude hook.
+`checkout -B`, `switch -C` and `worktree add -B` target rules, the broader output-file rules (`bundle create`, `config --file`,
+`bugreport -o`, `--export-marks`; `stash show --output` / `format-patch -o` into a non-claim tree returned as the O2 residual
+and are refused again under rule 4), and the shell-string `check` analyser with its Claude hook.
 Refusal = exit 77 (EX_NOPERM), a message naming the owner and the safe alternative (control characters escaped),
 one JSON line in `<state>/guard.log` (flag NAMES from an allowlist only; an option's value is never logged). A refused
 hook shows git's `fatal: ... aborted by the reference-transaction hook` (exit 128) after the same message.
@@ -557,6 +561,23 @@ def _same_path(a: Any, b: Any) -> bool:
         return os.path.normcase(os.path.realpath(a)) == os.path.normcase(os.path.realpath(b))
     except OSError:
         return False
+
+
+def _path_inside(root: Any, path: Any) -> bool:
+    """True when `path` is `root` or a file under it (realpath, case-normalised). A missing path still compares by
+    realpath of its parent chain so a not-yet-created `--output` file under a claim counts as inside it."""
+    if not isinstance(root, (str, os.PathLike)) or not isinstance(path, (str, os.PathLike)) or not str(root) or not str(path):
+        return False
+    try:
+        r = os.path.normcase(os.path.realpath(root))
+        p = os.path.normcase(os.path.realpath(path))
+    except OSError:
+        return False
+    if r == p:
+        return True
+    sep = os.sep
+    prefix = r if r.endswith(sep) else r + sep
+    return p.startswith(prefix)
 
 
 def _slurp(path: str | os.PathLike[str]) -> str:
@@ -1499,9 +1520,112 @@ def _worktree_targets(call: GitCall, ws0: Optional[Workspace], token: str) -> li
     return hits or [Path(p)]
 
 
+OUTPUT_FILE_ALT = ("write the patch with a shell redirect in your own claimed workspace "
+                   "(`ade_claims.py new` / a Paseo worktree), or `git format-patch --stdout`; "
+                   "never redirect git's `--output` / `-o` into a tree you do not claim")
+
+
+def _resolve_out_path(cwd: str, value: str) -> str:
+    """Absolute path for an `--output` / `-o` value relative to the call's cwd (empty means cwd itself)."""
+    raw = value if value else "."
+    return raw if os.path.isabs(raw) else os.path.join(cwd, raw)
+
+
+def _output_file_targets(call: GitCall) -> Optional[list[str]]:
+    """Absolute paths `stash show --output*` / `format-patch -o|--output*` would write; None when the call is not
+    those forms (or `format-patch --stdout`, which writes no worktree file). Plain `format-patch` defaults to cwd."""
+    sub, args, cwd = call.sub, call.args, call.cwd
+    if sub == "stash":
+        if not args or args[0] != "show":
+            return None
+        i, n = 1, len(args)
+        while i < n:
+            a = args[i]
+            if a == "--":
+                break
+            if a.startswith("--"):
+                name, eq, val = a[2:].partition("=")
+                # any unique prefix of `output` (git's inclusive parse; matches foreign-workspace `_writes_a_file`)
+                if name and "output".startswith(name):
+                    if eq:
+                        return [_resolve_out_path(cwd, val)]
+                    if i + 1 < n:
+                        return [_resolve_out_path(cwd, args[i + 1])]
+                    return [_resolve_out_path(cwd, "")]
+            i += 1
+        return None
+    if sub == "format-patch":
+        out_dir: Optional[str] = None
+        stdout = False
+        i, n = 0, len(args)
+        while i < n:
+            a = args[i]
+            if a == "--":
+                break
+            if a.startswith("--"):
+                name, eq, val = a[2:].partition("=")
+                names = expand_long(name, danger=("output-directory", "output"),
+                                    table=_with_negations({"stdout"}))
+                if names & {"stdout"} and "no-stdout" not in names:
+                    stdout = True
+                if names & {"no-stdout"}:
+                    stdout = False
+                if names & {"output-directory", "output"}:
+                    if eq:
+                        out_dir = val
+                    elif i + 1 < n:
+                        out_dir = args[i + 1]
+                        i += 1
+                    else:
+                        out_dir = ""
+            elif a.startswith("-") and len(a) > 1:
+                cl = a[1:]
+                j = 0
+                while j < len(cl):
+                    ch = cl[j]
+                    if ch == "o":
+                        if j + 1 < len(cl):
+                            out_dir = cl[j + 1:]
+                        elif i + 1 < n:
+                            out_dir = args[i + 1]
+                            i += 1
+                        else:
+                            out_dir = ""
+                        break
+                    j += 1
+            i += 1
+        if stdout and out_dir is None:
+            return None
+        return [_resolve_out_path(cwd, "." if out_dir is None else out_dir)]
+    return None
+
+
+def _output_file_decision(call: GitCall, ident: Optional[str]) -> Optional[Decision]:
+    """O2 residual (2026-11-09): refuse stash show / format-patch output files whose target is not inside the
+    caller's active claimed workspace. A foreign claim covering the target is named; otherwise the refusal says
+    the target is outside your claim (unclaimed checkout or a path under no claim of yours)."""
+    targets = _output_file_targets(call)
+    if targets is None:
+        return None
+    active = list_claims("active")
+    mine = [c for c in active if is_mine(c, ident)]
+    for t in targets:
+        if any(_path_inside(c.get("path"), t) for c in mine):
+            continue
+        foreign = next((c for c in active if not is_mine(c, ident) and _path_inside(c.get("path"), t)), None)
+        if foreign is not None:
+            return _foreign(foreign, "output-file", OUTPUT_FILE_ALT)
+        return Decision(False, "output-file", OUTPUT_FILE_ALT, "",
+                        "nobody; the output target is outside your claimed workspace")
+    return None
+
+
 def _target_decision(call: GitCall, wss: list[Optional[Workspace]], ident: Optional[str]) -> Optional[Decision]:
     """Rule 5: the claim of what the call HITS, not of where it runs."""
     sub, args = call.sub, call.args
+    deny = _output_file_decision(call, ident)
+    if deny is not None:
+        return deny
     ws0 = next((w for w in wss if w is not None), None)
     if sub == "worktree" and args and args[0] in ("remove", "move", "prune"):
         verb = args[0]
