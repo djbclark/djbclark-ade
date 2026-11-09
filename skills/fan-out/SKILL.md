@@ -30,7 +30,7 @@ Cut the work into slices that touch disjoint files, each with one owner and a ch
 (a test, a diff, a report section). Shared files (a changelog, an index) stay with the lead. Pick each slice's
 agent and model with `~/src/djbclark-ade/bin/route_agent.py plan --kinds KIND` (kinds and pools:
 `skills/model-routing/SKILL.md`). Print the launch line with
-`~/src/djbclark-ade/bin/route_agent.py show` (Pi already emits native `paseo run --provider pi/… --no-wait`).
+`~/src/djbclark-ade/bin/route_agent.py plan --kinds KIND` (or `route --kind K`); use each choice's `dispatch` field (Pi emits native `paseo run --provider pi/… --no-wait`). `show` is quota headroom only.
 Every brief ends with the shared delivery contract, `docs/dispatch-footer.md`: a report file whose last
 line is `DONE`, a `.done` marker touched last, and `BLOCKED: <question>` as the first line instead of a
 question at the end of a turn. Fill `{report}`, `{lead}`, `{done}`, `{inbox}` and `{replies}` yourself
@@ -50,7 +50,7 @@ A slice that edits code gets its own linked worktree (AGENTS.md order 9:
 Claim the worktree (`ade_claims.py new --ttl`, docs/git-guard.md) before anyone writes.
 
 Gate capacity first: `load-watch admit` (exit 75: retry later). Then launch with the line from
-`route_agent.py show`, adding placement and the brief. Minimal native shape:
+`route_agent.py plan` / `route` (`Choice.dispatch`), adding placement and the brief. Minimal native shape:
 
 ```bash
 # after: route_agent.py plan / show → e.g. paseo run --provider pi/<model> --no-wait
@@ -93,7 +93,7 @@ Three independent fixes in one repository, one review:
 
 1. Lead writes `a.md`, `b.md`, `c.md` (one owner per file set, the check each slice runs) and three
    worktrees `~/src/r-a-wt`, `~/src/r-b-wt`, `~/src/r-c-wt`, each claimed.
-2. For each slice: `route_agent.py plan --kinds code` → `show` → `paseo run … --new-workspace local
+2. For each slice: `route_agent.py plan --kinds code` → take each choice's `dispatch` → `paseo run … --new-workspace local
    --cwd ~/src/r-a-wt …` with the brief+footer (same for `b` and `c`).
 3. While they run, the lead does its own part (standing order 3), then `paseo wait` / report checks
    on each id.
