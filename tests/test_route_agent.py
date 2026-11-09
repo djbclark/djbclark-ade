@@ -618,7 +618,8 @@ class TestRoutingPolicy2026_10_15(unittest.TestCase):
         c = r.route("frontier", quota=IDLE)
         self.assertEqual(c.service.name, "codex")
         self.assertEqual(c.dispatch,
-                         "acp-dispatch codex --model gpt-6-astra --effort high --kind frontier")
+                         "paseo run --provider codex/gpt-6-astra --thinking high "
+                         "--label ade.kind=frontier --no-wait")
 
 
 class TestFrontierConservative2026_10_18(unittest.TestCase):
@@ -774,14 +775,16 @@ class TestFrontierConservative2026_10_18(unittest.TestCase):
     def test_dispatch_line_uses_the_acp_agent_name(self):
         svc = r.BY_NAME["cursor-auto"]            # the aiuse name is cursor-auto, the Paseo provider is cursor
         c = r.Choice(svc, 90.0, 1.0, model="default", kind="code")
-        self.assertTrue(c.dispatch.startswith("acp-dispatch cursor --model default"))
-        self.assertEqual(shlex.split(r.Choice(svc, 90.0, 1.0, model=r"vendor\model", kind="code").dispatch)[3], r"vendor\model")
+        self.assertEqual(c.dispatch,
+                         "paseo run --provider cursor/default --label ade.kind=code --no-wait")
+        argv = shlex.split(r.Choice(svc, 90.0, 1.0, model=r"vendor\model", kind="code").dispatch)
+        self.assertEqual(argv[3], r"cursor/vendor\model")
 
     def test_plan_json_carries_model_and_dispatch(self):
         rows = r.plan(["judgment", "bulk"], quota=IDLE)
         for _, c in rows:
             self.assertIsNotNone(c)
-            self.assertTrue(c.dispatch.startswith("acp-dispatch "))
+            self.assertTrue(c.dispatch.startswith("paseo run --provider "))
 
 
 class TestFableSublimitAndCursorSplit(unittest.TestCase):
@@ -822,7 +825,8 @@ class TestFableSublimitAndCursorSplit(unittest.TestCase):
         self.assertEqual(q["cursor"]["remaining"], 11.2)
         c = r.route("code", quota=q)
         self.assertEqual(c.service.name, "cursor-auto")
-        self.assertEqual(c.dispatch, "acp-dispatch cursor --model default --kind code")
+        self.assertEqual(c.dispatch,
+                         "paseo run --provider cursor/default --label ade.kind=code --no-wait")
 
 
 class TestRoutingPolicyToml(unittest.TestCase):
@@ -2615,7 +2619,11 @@ class TestArgonFrontierFallback(unittest.TestCase):
         self.assertNotEqual(r.route("frontier", quota=q).service.name, "antigravity-argon")
         q.update(codex={"remaining": 0.0}, claude={"remaining": 0.0})
         c = r.route("frontier", quota=q)
-        self.assertEqual((c.service.name, c.dispatch),
-                         ("antigravity-argon", "acp-dispatch antigravity --model gemini-4-argon --effort high --kind frontier"))
+        self.assertEqual(
+            (c.service.name, c.dispatch),
+            ("antigravity-argon",
+             "paseo run --provider antigravity/gemini-4-argon --thinking high "
+             "--label ade.kind=frontier --no-wait"),
+        )
         q.pop("antigravity-argon")
         self.assertIsNone(r.route("frontier", quota=q))          # a fallback with no reading fails closed
