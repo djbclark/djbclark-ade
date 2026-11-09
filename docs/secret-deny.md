@@ -1,16 +1,17 @@
-# Secret-file read-deny: one policy, a hook and static Claude rules (2026-11-04)
+# Secret-file read-deny: one policy, a hook and static Claude rules (2026-11-04; Codex template 2026-11-09)
 
 Issue #284 item 2. Agents should not read `.env` files, private keys or cloud credentials into a transcript. One
-policy file says which paths are secret; a renderer turns it into what each TUI enforces. As of 2026-11-04 only Claude
-Code is wired; Codex and opencode are queued (the hook already accepts a Codex `PreToolUse` payload, so wiring Codex is a
-config change).
+policy file says which paths are secret; a renderer turns it into what each TUI enforces. Claude Code is wired in
+`agents/claude/settings.json.tmpl`; Codex is wired in `agents/codex/config.toml.tmpl` as of 2026-11-09 (the hook already
+accepted a Codex `PreToolUse` payload). OpenCode is skipped (archived/retired transport; no plugin). Applying the Codex
+template into live `~/.codex/config.toml` still needs the operator's yes (order 11).
 
 | piece | what |
 | --- | --- |
 | [`config/secret-deny.toml`](../config/secret-deny.toml) | the policy, the one copy: `deny`, `allow`, and `[claude] static` |
 | [`bin/render-secret-deny`](../bin/render-secret-deny) | renders the policy; `--check` reports drift |
 | [`config/secret_deny_policy.json`](../config/secret_deny_policy.json) | generated, committed: the deny and allow lists the hook reads (it runs under Python 3.9, which has no TOML reader) |
-| [`claude/hooks/secret_read_gate.py`](../claude/hooks/secret_read_gate.py) | the `PreToolUse` hook |
+| [`claude/hooks/secret_read_gate.py`](../claude/hooks/secret_read_gate.py) | the `PreToolUse` hook (Claude and Codex) |
 | `agents/claude/settings.json.tmpl`, `permissions.deny` | the generated `Read(...)` and `Edit(...)` entries |
 | `agents/claude/settings.json.tmpl`, `sandbox.filesystem.denyRead` | the same `[claude] static` paths in sandbox form (2026-11-09); render owns the array; does not set `sandbox.enabled` |
 
@@ -30,7 +31,7 @@ config change).
 
 ## B. What is enforced where
 
-- **B1. The hook (Claude now; Codex-ready).** `claude/hooks/secret_read_gate.py` checks:
+- **B1. The hook (Claude and Codex templates).** `claude/hooks/secret_read_gate.py` checks:
   - **B1a.** `Read`, `Edit`, `MultiEdit`, `Write`, `NotebookEdit`: `file_path` / `notebook_path`.
   - **B1b.** `Grep` (corrected 2026-11-04): Claude's Grep runs ripgrep with `--hidden`, which excludes only VCS
     directories, so it reads `.env` and descends into `~/.ssh`. The hook blocks a Grep whose root (`path`, else the

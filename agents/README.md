@@ -117,6 +117,15 @@ parses to something else.
    its upgrade.
 6. Public GitHub marketplace and plugin sources, and the `[projects.*]` trust list under `{{ .home }}`.
 
+## Codex hooks (2026-11-09)
+
+`agents/codex/config.toml.tmpl` carries inline `[[hooks.PreToolUse]]` / `[[hooks.PostToolUse]]` for
+`secret_read_gate.py` (matcher `Bash|Edit|Write|apply_patch`) and `bin/post-edit-check --hook` (matcher
+`Edit|Write|apply_patch`). Prefer this form over a second `~/.codex/hooks.json` at the user layer (Codex merges both and
+warns). `[features] hooks = true` is already on. Live apply of the template into `~/.codex/config.toml` waits for the
+operator (order 11); after apply, trust the new handlers in `/hooks`. Docs: `docs/secret-deny.md`,
+`docs/post-edit-check.md`.
+
 ## Left out of the Codex template
 
 `[hooks.state.*]` (Codex-written trust hashes of the hook files; Codex recomputes them), the two `[projects.*]`

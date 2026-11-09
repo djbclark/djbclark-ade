@@ -1,7 +1,7 @@
 # post-edit-check
 
-Status as of 2026-11-04 (issue #284 item 3). `bin/post-edit-check` is a PostToolUse check: after an agent edits a file, it runs one
-fast, narrow syntax check on that file and says nothing unless something is broken.
+Status as of 2026-11-09 (issue #284 item 3; Codex template wired). `bin/post-edit-check` is a PostToolUse check: after an
+agent edits a file, it runs one fast, narrow syntax check on that file and says nothing unless something is broken.
 
 ## What it checks
 
@@ -40,5 +40,9 @@ with `timeout` 20. Claude reads stderr when a hook exits 2 and shows it to the m
 Open question (2026-11-04): whether `hook-deadline` (outside this repo) passes the child's exit 2 through. If it turns a 2 into a 0 the
 check is silent in practice; verify on the Mac with a deliberately broken `.py` edit.
 
-Codex and opencode wiring is queued, not done: there is no Codex config and no opencode plugin yet. The Codex patch-header parsing is
-already in the script so that wiring needs no code change here.
+Codex (`agents/codex/config.toml.tmpl`, 2026-11-09): `PostToolUse` matcher `Edit|Write|apply_patch` runs
+`{{ .home }}/src/djbclark-ade/bin/post-edit-check --hook` with `timeout` 20 (no `hook-deadline` wrapper: Codex's own
+timeout bounds the hook, and the exit-2 passthrough question above stays Claude-only until verified). Codex shows
+stderr on exit 2. Applying that template into live `~/.codex/config.toml` needs the operator's yes (order 11); after
+apply, trust the new handlers in `/hooks`. OpenCode wiring is skipped (archived/retired transport). The Codex
+patch-header parsing was already in the script, so this was a config change only.
