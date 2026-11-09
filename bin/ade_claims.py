@@ -11,11 +11,11 @@ Design: design-isolation-report.md 3.4 (schema), 3.5.4 (guard); frontier-pr59-de
      workspace, the shared checkout's destructive forms, worktree verbs, rename/copy destinations) and FAILS CLOSED on what it
      cannot read.
 Integration stage as of 2026-10-25 (re-based 2026-11-09): W1 (this file, the shim and the hooks) exists; W2 is the
-`plugins/ade-claim` `worktree.create.after` scaffold (not Mac-installed yet); W3 draft binds owner via `bind-owner` /
-exports `ADE_CLAIM_ID` from that plugin's `agent.open.before` + `agent.create.after` (replacing the retired
-acp-dispatch export plan); W4 (shim first on agents' PATH) is NOT wired yet. Nothing calls the guard in a live
-session until the plugin is installed and W4 lands. Repositories get the hooks from `ade-git-guard install` or lazily
-from the shim.
+`plugins/ade-claim` `worktree.create.after` hook (`new` + trusted `ade-git-guard install`) and W2 follow-up
+`workspace.archive.after` → `release` (not Mac-installed yet); W3 binds owner via `bind-owner` / exports
+`ADE_CLAIM_ID` from that plugin's `agent.open.before` + `agent.create.after`; W4 prepends trusted
+`libexec/agent-bin` on `agent.open.before`. Nothing calls the guard in a live session until the plugin is
+installed. Repositories get the hooks from `ade-git-guard install` (also from the create hook) or lazily from the shim.
 
 THIS IS A SEATBELT, NOT A SANDBOX (design 5.7). It stops an agent's accidental or careless git; it does not
 stop one that works at it. Out of reach by design: an absolute path to the real git (the hooks still run), unsetting
@@ -145,8 +145,8 @@ A shim crash fails OPEN (design 5.7, bin/ade-git-guard).
 
 CLI (also the bash-facing API; every subcommand exits 0 ok, 2 usage, 3 id exists, 4 path owned by another owner's
 active claim, 77 refused; `install` also 73 and 78, above). Trimmed 2026-11-06 (slim-down E8, D9): `show`, `find` and
-`set-state` had no caller and are gone (the library functions `read_claim`, `find_claim` and `set_state` stay, for the
-guard, the hooks and the tests):
+generic `set-state` had no caller and are gone (the library functions `read_claim`, `find_claim` and `set_state` stay);
+`release` returned 2026-11-09 for the ade-claim archive hook (E8 F4):
     ade_claims.py new --id ID --path DIR --branch B --base-sha S [--repo-origin U] [--ttl HOURS]
         [--owner-record R] [--owner-session S] [--owner-agent A] [--owner-model M] [--lead L]
         [--allow ID]... [--role lead|worker|builder] [--purpose T] [--created-by X]
@@ -156,6 +156,8 @@ guard, the hooks and the tests):
     ade_claims.py bind-owner --id ID --owner-agent A [--owner-record R] [--owner-session S]
                                             merge owner fields on an active claim (W3 / ade-claim plugin);
                                             exit 2 when missing, inactive or usage error
+    ade_claims.py release --id ID           mark a claim released (W2 follow-up / workspace.archive.after);
+                                            idempotent when already released/merged; exit 2 when missing
     ade_claims.py guard -- GIT_ARGS...      decide one git call (what ade-git-guard runs)
     ade_claims.py install [DIR]             install the ref hooks into DIR's repository
     ade_claims.py hook-ref STATE | hook-push REMOTE URL    what libexec/git-hooks/* run (stdin is git's)
@@ -2700,6 +2702,8 @@ def _cli(argv: Sequence[str]) -> int:
     bo.add_argument("--owner-agent", required=True)
     bo.add_argument("--owner-record")
     bo.add_argument("--owner-session")
+    rel = sp.add_parser("release", help="mark a claim released (W2 follow-up / ade-claim workspace.archive.after)")
+    rel.add_argument("--id", required=True)
     ins = sp.add_parser("install", help="install the ref hooks into the repository of DIR (exit 2 not a repository, "
                                          "78 core.hooksPath is set, 73 a .pre-ade file is in the way)")
     ins.add_argument("dir", nargs="?", default=".")
@@ -2725,6 +2729,11 @@ def _cli(argv: Sequence[str]) -> int:
         elif a.cmd == "bind-owner":
             c = bind_owner(a.id, owner_agent=a.owner_agent, owner_record=a.owner_record,
                            owner_session=a.owner_session)
+            print(c.get("id"))
+        elif a.cmd == "release":
+            c = set_state(a.id, "released")
+            if c is None:
+                raise ValueError(f"no claim {a.id!r}")
             print(c.get("id"))
         elif a.cmd == "install":
             rc, notes = install_hooks(a.dir)

@@ -4,6 +4,8 @@ import {
   activeClaimForPath,
   buildAdeClaimsBindOwnerArgv,
   buildAdeClaimsNewArgv,
+  buildAdeClaimsReleaseArgv,
+  buildAdeGitGuardInstallArgv,
   claimAllowsAgent,
   deriveClaimId,
   mergeAdeClaimIdEnv,
@@ -12,10 +14,12 @@ import {
   parseAgentCreateAfterAgent,
   parseAgentOpenBeforeRequest,
   parseClaimPointer,
+  parseWorkspaceArchivePayload,
   parseWorktreePayload,
   resolveAdeClaimsScript,
   resolveClaimForCwd,
   resolveTrustedAdeClaimsScript,
+  resolveTrustedAdeGitGuard,
   resolveTrustedAgentBinDir,
 } from "./claim-lib.mjs";
 
@@ -126,6 +130,20 @@ test("parseAgentCreateAfterAgent accepts agent id and cwd", () => {
   );
 });
 
+test("parseWorkspaceArchivePayload accepts Paseo docs shape", () => {
+  assert.deepEqual(
+    parseWorkspaceArchivePayload({ id: "ws-1", cwd: FIXTURE.path, name: "feature" }),
+    { id: "ws-1", cwd: FIXTURE.path },
+  );
+});
+
+test("parseWorkspaceArchivePayload rejects missing cwd", () => {
+  assert.throws(
+    () => parseWorkspaceArchivePayload({ id: "ws-1" }),
+    /workspace\.cwd/,
+  );
+});
+
 test("activeClaimForPath matches active claim by trimmed path", () => {
   const claims = [
     { id: "other", path: "/elsewhere", shown_state: "active" },
@@ -168,6 +186,33 @@ test("buildAdeClaimsBindOwnerArgv maps owner bind fields", () => {
       "--owner-record", "agent-123",
     ],
   });
+});
+
+test("buildAdeClaimsReleaseArgv maps release id", () => {
+  assert.deepEqual(
+    buildAdeClaimsReleaseArgv({
+      adeClaimsScript: "/opt/ade/bin/ade_claims.py",
+      claimId: "wt-claim-1",
+    }),
+    {
+      python: "python3",
+      script: "/opt/ade/bin/ade_claims.py",
+      argv: ["release", "--id", "wt-claim-1"],
+    },
+  );
+});
+
+test("buildAdeGitGuardInstallArgv maps install path", () => {
+  assert.deepEqual(
+    buildAdeGitGuardInstallArgv({
+      adeGitGuard: "/opt/ade/bin/ade-git-guard",
+      worktreePath: FIXTURE.path,
+    }),
+    {
+      guard: "/opt/ade/bin/ade-git-guard",
+      argv: ["install", FIXTURE.path],
+    },
+  );
 });
 
 test("resolveClaimForCwd validates pointer against registry", () => {
@@ -232,4 +277,10 @@ test("resolveTrustedAgentBinDir walks pluginRoot for libexec/agent-bin", () => {
   const pluginRoot = new URL("..", import.meta.url).pathname;
   const dir = resolveTrustedAgentBinDir({}, { pluginRoot });
   assert.match(dir, /\/libexec\/agent-bin$/);
+});
+
+test("resolveTrustedAdeGitGuard walks pluginRoot for bin/ade-git-guard", () => {
+  const pluginRoot = new URL("..", import.meta.url).pathname;
+  const guard = resolveTrustedAdeGitGuard({}, { pluginRoot });
+  assert.match(guard, /\/bin\/ade-git-guard$/);
 });

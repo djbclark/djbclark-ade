@@ -5,20 +5,27 @@ import { fileURLToPath } from "node:url";
 import {
   buildAdeClaimsBindOwnerArgv,
   buildAdeClaimsNewArgv,
+  buildAdeClaimsReleaseArgv,
+  buildAdeGitGuardInstallArgv,
   claimAllowsAgent,
   mergeOpenBeforeEnv,
   parseAgentCreateAfterAgent,
   parseAgentOpenBeforeRequest,
   parseClaimPointer,
+  parseWorkspaceArchivePayload,
   parseWorktreePayload,
   resolveAdeClaimsScript,
   resolveClaimForCwd,
   resolveTrustedAdeClaimsScript,
+  resolveTrustedAdeGitGuard,
   resolveTrustedAgentBinDir,
 } from "./claim-lib.mjs";
 
 /** Reviewed plugin directory (never the agent's worktree). */
 const PLUGIN_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+
+/** Install soft-fail codes (do not abort worktree.create.after). */
+const INSTALL_SOFT_FAIL = new Set([73, 78]);
 
 /** @param {string} cwd */
 export function gitRevParseHead(cwd) {
@@ -84,6 +91,32 @@ export function lookupClaimForCwd(cwd, script) {
 }
 
 /**
+ * Run trusted ade-git-guard install on a new worktree. Soft-fails (logs) on
+ * missing binary, 73/78, or other non-zero so a claim create is never rolled back.
+ *
+ * @param {string} worktreePath
+ */
+export function runTrustedAdeGitGuardInstall(worktreePath) {
+  let guard;
+  try {
+    guard = resolveTrustedAdeGitGuard(process.env, { pluginRoot: PLUGIN_ROOT });
+  } catch (err) {
+    console.error(`ade-claim: skipping ade-git-guard install: ${err}`);
+    return;
+  }
+  const { argv } = buildAdeGitGuardInstallArgv({ adeGitGuard: guard, worktreePath });
+  const run = spawnSync(guard, argv, { encoding: "utf8" });
+  if (run.status === 0) return;
+  const detail = (run.stderr || run.stdout || "").trim();
+  const soft = INSTALL_SOFT_FAIL.has(run.status ?? -1);
+  console.error(
+    `ade-claim: ade-git-guard install failed (exit ${run.status})${soft ? " (soft)" : ""}${detail ? `: ${detail}` : ""}`,
+  );
+}
+
+/**
+ * W2: claim the worktree, then install ref hooks via trusted ade-git-guard.
+ *
  * @param {{ addHook: (name: string, handler: Function) => () => void }} server
  */
 export function registerWorktreeClaimHook(server) {
@@ -101,6 +134,51 @@ export function registerWorktreeClaimHook(server) {
     if (run.status !== 0) {
       const detail = (run.stderr || run.stdout || "").trim();
       throw new Error(`ade_claims.py new failed (exit ${run.status})${detail ? `: ${detail}` : ""}`);
+    }
+    runTrustedAdeGitGuardInstall(wt.path);
+  });
+}
+
+/**
+ * W2 follow-up: mark the workspace claim released on archive (teardown follows).
+ * Notification hook: never throw.
+ *
+ * @param {{ addHook: (name: string, handler: Function) => () => void }} server
+ */
+export function registerWorkspaceArchiveReleaseHook(server) {
+  return server.addHook("workspace.archive.after", async ({ workspace }) => {
+    let parsed;
+    try {
+      parsed = parseWorkspaceArchivePayload(workspace);
+    } catch (err) {
+      console.error(`ade-claim: workspace.archive.after payload: ${err}`);
+      return;
+    }
+    let script;
+    try {
+      script = resolveTrustedAdeClaimsScript(process.env, { pluginRoot: PLUGIN_ROOT });
+    } catch (err) {
+      console.error(`ade-claim: skipping release: ${err}`);
+      return;
+    }
+    let claim;
+    try {
+      claim = lookupClaimForCwd(parsed.cwd, script);
+    } catch (err) {
+      console.error(`ade-claim: claim lookup on archive failed: ${err}`);
+      return;
+    }
+    if (!claim) return;
+    const { python, argv } = buildAdeClaimsReleaseArgv({
+      adeClaimsScript: script,
+      claimId: claim.id,
+    });
+    const run = spawnSync(python, [script, ...argv], { encoding: "utf8" });
+    if (run.status !== 0) {
+      const detail = (run.stderr || run.stdout || "").trim();
+      console.error(
+        `ade-claim: ade_claims.py release failed (exit ${run.status})${detail ? `: ${detail}` : ""}`,
+      );
     }
   });
 }
@@ -186,16 +264,18 @@ export function registerAgentClaimOwnerHook(server) {
 }
 
 /**
- * Register W2 + W3 hooks; returns a disposer that removes all of them.
+ * Register W2 + W2-follow-up + W3 + W4 hooks; returns a disposer that removes all of them.
  *
  * @param {{ addHook: (name: string, handler: Function) => () => void }} server
  */
 export function registerAdeClaimHooks(server) {
   const removeWt = registerWorktreeClaimHook(server);
+  const removeArchive = registerWorkspaceArchiveReleaseHook(server);
   const removeEnv = registerAgentClaimEnvHook(server);
   const removeOwner = registerAgentClaimOwnerHook(server);
   return () => {
     removeWt();
+    removeArchive();
     removeEnv();
     removeOwner();
   };
