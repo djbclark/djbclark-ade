@@ -34,7 +34,9 @@ ade-github-setup apply [--root DIR] [--json] [--dry-run|--yes]
 ```
 
 - **check** — validate TOML + manifest permissions / inactive webhook.
-- **observe** — local always; with network, `gh` probes installation,
+- **observe** — local always; with network, `gh` probes installation via
+  `GET /user/installations` (+ that installation's repositories; operator
+  credentials — not the App-JWT `repos/.../installation` endpoint),
   `merge-gate` environment + branch policy, secret/variable *name* presence,
   and ruleset name. Never reads secret values. `--local` skips `gh`.
 - **plan** — print-only S8 steps (browser App create, environment, stdin
@@ -49,8 +51,9 @@ Just recipes: `just github-setup-check`, `github-setup-observe`,
 
 Review rule 3: a private key never appears in argv, a log, or a tracked file.
 `ade-github-setup` refuses argv that looks like PEM material or secret flags
-(`--private-key`, `--pem`, `--client-secret`, …). Store the key with a stdin
-redirect:
+(`--private-key`, `--pem`, `--client-secret`, `--token=…`, …). Refuse
+messages name only the normalized flag (never an equals-form value). Store
+the key with a stdin redirect:
 
 ```sh
 gh secret set MERGE_GATE_PRIVATE_KEY --env merge-gate --repo OWNER/REPO \
