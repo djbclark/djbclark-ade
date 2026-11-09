@@ -78,6 +78,7 @@ def test_repo_install_toml_checks_clean():
         "npm",
         "install",
         "-g",
+        "--ignore-scripts",
         "grok-bot-setup",
     ]
     assert by_id["grok-bot-setup"].get("probe_argv") == ["adapters", "help"]
