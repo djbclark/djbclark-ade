@@ -778,6 +778,39 @@ def test_format_patch_into_an_unclaimed_tree_from_own_claim_is_refused(tmp_path,
     assert (other / "f").read_text() == before
 
 
+def test_format_patch_c_output_directory_into_foreign_claim_is_refused(tmp_path, state):
+    """HIGH: without -o, git honors format.outputDirectory from -c; treating the target as cwd would bypass the rule."""
+    a, b = two_claimed(tmp_path, state)
+    before = (a / "f").read_text()
+    r = run(state, ["-c", f"format.outputDirectory={a}", "format-patch", "-1"], b, who="B")
+    assert refused77(r) and "output-file" in r.stderr, r.stderr
+    assert (a / "f").read_text() == before
+    assert not list(a.glob("*.patch"))
+    assert not list(b.glob("*.patch"))
+
+
+def test_format_patch_stdout_allowed_even_with_c_output_directory(tmp_path, state):
+    """--stdout writes no worktree file, even when format.outputDirectory points at a foreign claim."""
+    a, b = two_claimed(tmp_path, state)
+    before = (a / "f").read_text()
+    r = run(state, ["-c", f"format.outputDirectory={a}", "format-patch", "-1", "--stdout"], b, who="B")
+    assert r.returncode != 77 and "output-file" not in r.stderr, (r.returncode, r.stderr)
+    assert r.returncode == 0 and "From " in r.stdout, r.stderr
+    assert (a / "f").read_text() == before
+    assert not list(a.glob("*.patch"))
+
+
+def test_format_patch_repo_format_output_directory_into_foreign_claim_is_refused(tmp_path, state):
+    """Repo-local format.outputDirectory is the same bypass as -c when no -o is given."""
+    a, b = two_claimed(tmp_path, state)
+    plain(state, ["config", "format.outputDirectory", str(a)], b)
+    before = (a / "f").read_text()
+    r = run(state, ["format-patch", "-1"], b, who="B")
+    assert refused77(r) and "output-file" in r.stderr, r.stderr
+    assert (a / "f").read_text() == before
+    assert not list(a.glob("*.patch"))
+
+
 # --- BLOCK-2: abbreviated long options ----------------------------------------------------
 
 @pytest.mark.parametrize("cmd", [

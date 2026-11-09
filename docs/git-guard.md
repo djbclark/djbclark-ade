@@ -186,13 +186,15 @@ Evaluated in order; the module docstring has every form.
 3. **Shared checkout (no claim):** `stash` (except `list`/`show` without `--output`), `reset --hard|--merge|--keep`,
    `checkout -f|-p|<path>`, `restore` of the work tree, `switch -f`, `clean`, `rm -f`, `commit -a`, `add -A|-u|.`,
    autostash, `rebase -x`, `!` aliases; also `stash show --output*` and `format-patch` file writes (rule `output-file`:
-   no claim covers the target). An abbreviated long option counts as the dangerous option it may stand for.
+   no claim covers the target; plain `format-patch` uses `format.outputDirectory` when set). An abbreviated long option
+   counts as the dangerous option it may stand for.
 4. **Linked worktree, even its owner's:** `stash`, `rebase -x`, `!` aliases.
 5. **Targets no hook sees:** `worktree remove|move|prune` of a claimed worktree; the destination of `branch -m|-M|-c|-C` (the
    files backend reports a rename's source deletion to the hook, never its destination, and a copy not at all: measured
    2026-10-25; queued upstream, below); `stash show --output*` / `format-patch` `-o` / `--output*` / `--output-directory`
-   (and plain `format-patch`) when the output target is not inside the caller's active claimed workspace (`output-file`,
-   2026-11-09; `format-patch --stdout` allowed).
+   (and plain `format-patch`, whose default is `format.outputDirectory` when set via `-c` / `GIT_CONFIG_*` / repo config,
+   else cwd) when the output target is not inside the caller's active claimed workspace (`output-file`, 2026-11-09;
+   `format-patch --stdout` allowed; unresolved `format.outputDirectory` fails closed).
 
 **Removed in O2 (replaced by the hooks):** the fetch/pull/remote-update dry-run preflight, the push dry-run preflight, the
 `update-ref`, `branch -d|-D|-f`, `checkout -B`, `switch -C` and `worktree add -B` target rules, the broader output-file
@@ -247,13 +249,17 @@ shell-string `--check` analyser (and the Claude PreToolUse hook it was for, W5).
     (also `--output-directory=.`, `-o ./`, and a plain `format-patch -1`, which writes into the current directory) used to
     succeed through the shim and replace a file of that name in an unclaimed checkout that holds a peer's uncommitted work
     (observed: rc 0, the file now holds the stash diff or the patch). In a CLAIMED foreign workspace the same calls were
-    already refused (`[foreign-claim]`, rc 77). The durable rule now runs in the shim (`ade_claims.py` rule `output-file`,
-    exit 77): refuse `--output*` / `--out*` on `stash show`, and `-o` / `--output*` / `--output-directory` on
-    `format-patch` (plain `format-patch` too: default target is cwd), when the output target is not inside the caller's
-    active claimed workspace. `format-patch --stdout` stays allowed (no worktree file write). Targets under another
-    agent's claim name that owner; otherwise the refusal says the target is outside your claim. Still out of reach by
-    design: a shell redirect (`git stash show -p > f`), `bundle create`, `config --file`, `bugreport -o`, `--export-marks`,
-    and the bash fast path for allowlisted reads (a stray `--output` file there remains a nuisance, not lost work).
+    already refused (`[foreign-claim]`, rc 77). A HIGH residual (2026-11-09): without `-o`, git also honors
+    `format.outputDirectory` from `-c` / `GIT_CONFIG_*` / repo config, so `git -c format.outputDirectory=<peer>
+    format-patch -1` from a claimed workspace wrote into another claim while the shim still treated the destination as
+    cwd. The durable rule now runs in the shim (`ade_claims.py` rule `output-file`, exit 77): refuse `--output*` /
+    `--out*` on `stash show`, and `-o` / `--output*` / `--output-directory` on `format-patch` (plain `format-patch` too:
+    default target is `format.outputDirectory` when set, else cwd; unresolved config fails closed), when the output
+    target is not inside the caller's active claimed workspace. `format-patch --stdout` stays allowed (no worktree file
+    write), including when `format.outputDirectory` is set. Targets under another agent's claim name that owner;
+    otherwise the refusal says the target is outside your claim. Still out of reach by design: a shell redirect
+    (`git stash show -p > f`), `bundle create`, `config --file`, `bugreport -o`, `--export-marks`, and the bash fast
+    path for allowlisted reads (a stray `--output` file there remains a nuisance, not lost work).
 
 ## Refusal, log and override (Wave 6 native-Paseo wording 2026-11-09)
 

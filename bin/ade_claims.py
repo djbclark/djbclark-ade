@@ -119,8 +119,9 @@ GIT_CONFIG_* plus the repository's, relative --git-dir/--work-tree/GIT_DIR/GIT_W
      asked of git itself (`rev-parse --absolute-git-dir --show-toplevel` under the call's own -C, -c, --git-dir, --work-tree and
      environment); when git cannot answer at all (timeout), the typed values are used and a call that is not read-only is
      refused while another agent holds a claim (rule workspace-unresolved). Also (O2 residual, 2026-11-09): `stash show
-     --output*` / `--out*` and `format-patch` `-o` / `--output*` / `--output-directory` (and plain `format-patch`, which
-     writes into cwd) when the output target is not inside the caller's active claimed workspace (`output-file`);
+     --output*` / `--out*` and `format-patch` `-o` / `--output*` / `--output-directory` (and plain `format-patch`, whose
+     default directory is `format.outputDirectory` when set via `-c` / `GIT_CONFIG_*` / repo config, else cwd; unresolved
+     config fails closed) when the output target is not inside the caller's active claimed workspace (`output-file`);
      `format-patch --stdout` stays allowed (no worktree file write).
   5. In my own claimed workspace everything else is allowed.
 Removed in O2 (the hooks replace them): the fetch/pull/remote-update and push dry-run preflights, the `update-ref`, `branch -d|-D|-f`,
@@ -1531,9 +1532,33 @@ def _resolve_out_path(cwd: str, value: str) -> str:
     return raw if os.path.isabs(raw) else os.path.join(cwd, raw)
 
 
+def _format_patch_default_outdir(call: GitCall) -> Optional[str]:
+    """Absolute directory plain `format-patch` writes into: `format.outputDirectory` as git would read it for this
+    argv (`-c` / `--config-env` / `GIT_CONFIG_*`, then repository / global / system / includes), else cwd.
+    None when the effective value cannot be resolved safely (fail closed). Measured 2026-11-09: without `-o`,
+    `git -c format.outputDirectory=<dir> format-patch -1` writes into `<dir>`, not cwd."""
+    rc, out = _call_git(call, "config", "--get", "format.outputDirectory")
+    if rc == 0:
+        val = out[:-1] if out.endswith("\n") else out
+        return _resolve_out_path(call.cwd, val if val else ".")
+    if rc == 1:
+        # Unset in every scope git searched. Prefer a value already on this argv / GIT_CONFIG_* if our parser
+        # saw one (belt: `_globals` should have passed those `-c` flags to the helper above).
+        cfg = call.cfg("format.outputDirectory")
+        return _resolve_out_path(call.cwd, cfg if cfg is not None else ".")
+    # git unknown (timeout, cannot start, broken config): still honor a parsed `-c` / GIT_CONFIG_* value;
+    # otherwise refuse rather than assume cwd (that assumption is the bypass).
+    cfg = call.cfg("format.outputDirectory")
+    if cfg is not None:
+        return _resolve_out_path(call.cwd, cfg)
+    return None
+
+
 def _output_file_targets(call: GitCall) -> Optional[list[str]]:
     """Absolute paths `stash show --output*` / `format-patch -o|--output*` would write; None when the call is not
-    those forms (or `format-patch --stdout`, which writes no worktree file). Plain `format-patch` defaults to cwd.
+    those forms (or `format-patch --stdout`, which writes no worktree file). Plain `format-patch` defaults to
+    `format.outputDirectory` when set, else cwd. An empty list means the default directory could not be resolved
+    safely (fail closed in `_output_file_decision`).
 
     Collect *every* destination (Codex P1 on #400): git may open/truncate each `--output` / `-o` even when
     later options replace the effective destination or the combination fails, so validating only the last
@@ -1610,8 +1635,9 @@ def _output_file_targets(call: GitCall) -> Optional[list[str]]:
         if stdout and not saw_file_or_dir:
             return None
         if not targets:
-            # Plain format-patch defaults to writing into cwd.
-            return [_resolve_out_path(cwd, ".")]
+            # Prefer explicit -o flags (above); else format.outputDirectory as git would, else cwd.
+            outdir = _format_patch_default_outdir(call)
+            return [outdir] if outdir is not None else []
         return targets
     return None
 
@@ -1623,6 +1649,10 @@ def _output_file_decision(call: GitCall, ident: Optional[str]) -> Optional[Decis
     targets = _output_file_targets(call)
     if targets is None:
         return None
+    if not targets:
+        return _closed("output-file",
+                       "git did not say what format.outputDirectory is (it timed out, could not run, or a config it "
+                       f"could not read); {OUTPUT_FILE_ALT}")
     active = list_claims("active")
     mine = [c for c in active if is_mine(c, ident)]
     for t in targets:
