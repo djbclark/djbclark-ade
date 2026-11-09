@@ -15,3 +15,11 @@ install-check:
 # Observe-only install doctor (no repair, no secret reads).
 install-doctor:
     "{{ root }}/bin/ade-install" doctor --root "{{ root }}"
+
+# Print-only install plan.
+install-plan:
+    "{{ root }}/bin/ade-install" plan --root "{{ root }}"
+
+# Bounded apply dry-run (default mode; no writes beyond nothing).
+install-apply-dry:
+    "{{ root }}/bin/ade-install" apply --dry-run --root "{{ root }}"

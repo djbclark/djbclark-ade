@@ -43,14 +43,31 @@
           "install": {
             "type": "string"
           },
+          "install_argv": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
           "update": {
             "type": "string"
+          },
+          "update_argv": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
           },
           "probe": {
             "type": "string"
           },
           "presence": {
             "type": "string"
+          },
+          "needs_system": {
+            "type": "boolean"
           },
           "platforms": {
             "type": "array",

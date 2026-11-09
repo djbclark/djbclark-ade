@@ -99,7 +99,7 @@ Skills (22, from each `skills/*/SKILL.md`):
 | [`tell-chief-of-staff`](skills/tell-chief-of-staff/SKILL.md) | Pointer (2026-11-06) for messaging the operator's cloud Grok Bot "Chief of Staff" ("tell grok", "tell Chief of Staff", "hand this to grokbot") and for its ask_claude callback; the sender and its setup live outside this repository. |
 | [`tell-coding-bot`](skills/tell-coding-bot/SKILL.md) | Pointer (2026-11-06) for talking to the operator's cloud Grok Bot "Coding" ("tell the Coding bot", "ask Coding", "hand this to the Coding bot", a task that needs a real browser session); the coding-bot code now lives in the peer-link repository. |
 
-`bin/` (53, from each file's first docstring or comment):
+`bin/` (55, from each file's first docstring or comment):
 
 | Tool | What |
 |---|---|
@@ -108,18 +108,20 @@ Skills (22, from each `skills/*/SKILL.md`):
 | [`ade-backup-stores`](bin/ade-backup-stores) | One consistent copy of every agent session store, plus the Hermes JSONL export. |
 | [`ade-config`](bin/ade-config) | Check/get/diff/set for the versioned effective ADE config (schema_version=1). |
 | [`ade-git-guard`](bin/ade-git-guard) | A `git` front door for what git's own hooks cannot see in a workspace another agent owns. |
-| [`ade-install`](bin/ade-install) | Read-only catalog / plan / doctor for the transitional install registry. |
+| [`ade-install`](bin/ade-install) | Transitional install catalog, plan, doctor, and bounded apply. |
 | [`ade-retro`](bin/ade-retro) | A read-only raw report for a retrospective over a date window (2026-11-04). |
 | [`ade-roster`](bin/ade-roster) | Print README's skills and bin/ roster, generated from the files themselves (2026-11-07, slim-down E11). |
 | [`ade-sched`](bin/ade-sched) | Install a checked-in launchd plist on this machine's scheduler (launchd, systemd user units or cron). |
 | [`ade-template-check`](bin/ade-template-check) | Check the agents/ config templates (Phase 0 item 4.4, 2026-10-20). |
 | [`ade-update`](bin/ade-update) | Keep this machine's djbclark-ade checkout current: pull, relink, say what changed. |
+| [`ade-user-install`](bin/ade-user-install) | User-scoped uv/just GitHub-release fetch or repo bin/ symlink into ~/.local/bin. |
 | [`ade_claims.py`](bin/ade_claims.py) | The workspace claim library, the git-guard rules and the ref hooks (isolation slice W1, 2026-10-24; O2 redesign 2026-10-25). |
 | [`ade_config.py`](bin/ade_config.py) | Versioned read-only effective ADE config (schema_version=1). |
 | [`ade_config_edit.py`](bin/ade_config_edit.py) | Comment-preserving atomic scalar set for ADE config TOML. |
 | [`ade_gates.py`](bin/ade_gates.py) | The frontier-model allowance, from code defaults and config/gates.toml [frontier] (docs/gates.md). |
-| [`ade_install.py`](bin/ade_install.py) | Read-only install catalog, plan, and observe-only doctor. |
+| [`ade_install.py`](bin/ade_install.py) | Install catalog, plan, observe-only doctor, bounded apply. |
 | [`ade_sched.py`](bin/ade_sched.py) | Install a launchd plist as a launchd agent, a systemd user unit or a crontab block (issue #279, 2026-11-04). |
+| [`ade_user_install.py`](bin/ade_user_install.py) | User-scoped tool bootstrap (no shell=True, no root). |
 | [`adversary_marker.py`](bin/adversary_marker.py) | Read the adversary's verdict marker from a PR body and judge it against the PR head. |
 | [`agent_guard.py`](bin/agent_guard.py) | Per-agent guard policy for pass-through acp-run arguments (2026-11-03 omp audit); no provider calls. |
 | [`bm-lint`](bin/bm-lint) | Read-only hygiene lint for a Basic Memory store (design-basicmemory W3 / R6, 2026-10-24). |

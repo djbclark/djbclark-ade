@@ -1,0 +1,15 @@
+#!/usr/bin/env -S python3 -I
+"""ade-user-install: user-scoped uv/just GitHub-release fetch or repo bin/ symlink into ~/.local/bin."""
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+BIN = Path(__file__).resolve().parent
+if str(BIN) not in sys.path:
+    sys.path.insert(0, str(BIN))
+
+import ade_user_install as aui  # noqa: E402
+
+if __name__ == "__main__":
+    sys.exit(aui.main())

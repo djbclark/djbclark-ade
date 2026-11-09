@@ -25,7 +25,17 @@ class = "optional"
 chosen = true
 summary = "chosen optional missing"
 install = "echo install-c"
+install_argv = ["true"]
 presence = "definitely-not-on-path-abc"
+platforms = ["linux"]
+
+[[component]]
+id = "tool-d"
+class = "hard"
+summary = "needs system package manager"
+install = "apt install tool-d"
+needs_system = true
+presence = "definitely-not-on-path-sys"
 platforms = ["linux"]
 
 [[key]]

@@ -1,12 +1,14 @@
 #!/usr/bin/env -S python3 -I
-"""ade-install: read-only catalog / plan / doctor for the transitional install registry.
+"""ade-install: transitional install catalog, plan, doctor, and bounded apply.
 
   ade-install check [--root DIR] [--json]
   ade-install catalog [--root DIR] [--json]
   ade-install plan [--root DIR] [--json]
   ade-install doctor [--root DIR] [--json]
+  ade-install apply [--root DIR] [--json] [--dry-run|--yes] [--id ID ...] [--force]
 
-No installs, updates, repairs, secret reads, or network/auth probes.
+Doctor never repairs. Apply defaults to --dry-run; --yes runs recorded
+install_argv (user-scoped only). --system is refused. Secrets are never read.
 Uses config/install.toml only while config/ade.toml is absent.
 See docs/install-catalog.md.
 """
@@ -69,7 +71,9 @@ def cmd_catalog(args: argparse.Namespace) -> int:
         for row in catalog.components:
             chosen = row.get("chosen")
             ch = "" if chosen is None else f" chosen={chosen}"
-            print(f"  [{row['class']}] {row['id']}{ch}")
+            argv = " argv" if row.get("install_argv") else ""
+            sys_flag = " needs_system" if row.get("needs_system") else ""
+            print(f"  [{row['class']}] {row['id']}{ch}{argv}{sys_flag}")
         print("keys:")
         for row in catalog.keys:
             print(f"  {row['name']} (reference only)")
@@ -87,7 +91,10 @@ def cmd_plan(args: argparse.Namespace) -> int:
         print(str(e), file=sys.stderr)
         return 1
     if args.json:
-        _print_json({"steps": steps, "note": "print-only; apply/reconciliation is a later unit"})
+        _print_json({
+            "steps": steps,
+            "note": "print-only; ade-install apply --dry-run|--yes executes install_argv",
+        })
     else:
         print(f"ade-install plan: {len(steps)} step(s) (print-only; does not install)")
         for step in steps:
@@ -121,13 +128,55 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     return rc
 
 
+def cmd_apply(args: argparse.Namespace) -> int:
+    if args.yes and args.dry_run_flag:
+        print("ade-install apply: refuse both --yes and --dry-run", file=sys.stderr)
+        return 2
+    dry_run = not args.yes  # default dry-run; --yes executes
+    try:
+        catalog = ai.load_catalog(root=Path(args.root) if args.root else None)
+        ids = set(args.id) if args.id else None
+        results, rc = ai.apply(
+            catalog,
+            dry_run=dry_run,
+            ids=ids,
+            force=args.force,
+            allow_system=args.system,
+            state_dir=Path(args.state_dir) if args.state_dir else None,
+            prefix=Path(args.prefix) if args.prefix else None,
+        )
+    except ai.InstallError as e:
+        if args.json:
+            _print_json({"ok": False, "errors": [str(e)]})
+        else:
+            print(str(e), file=sys.stderr)
+            print("ade-install apply: FAIL", file=sys.stderr)
+        return 2
+    mode = "dry-run" if dry_run else "yes"
+    if args.json:
+        _print_json({
+            "ok": rc == 0,
+            "mode": mode,
+            "results": results,
+        })
+    else:
+        label = "OK" if rc == 0 else ("REFUSED" if rc == 2 else "FAIL")
+        print(f"ade-install apply ({mode}): {label}")
+        for row in results:
+            extra = ""
+            if row.get("argv"):
+                extra = " argv=" + " ".join(row["argv"])
+            print(f"  {row['action']:14} {row['id']}: {row['reason']}{extra}")
+    return rc
+
+
 def main(argv: list[str] | None = None) -> int:
     shared = argparse.ArgumentParser(add_help=False)
     shared.add_argument("--root", default=argparse.SUPPRESS,
                         help="repository root; before/after command, last explicit wins")
     parser = argparse.ArgumentParser(
         prog="ade-install",
-        description="Read-only install catalog, plan, and observe-only doctor.",
+        description="Install catalog, plan, observe-only doctor, and bounded user-scoped apply.",
         parents=[shared],
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -141,6 +190,52 @@ def main(argv: list[str] | None = None) -> int:
         p = sub.add_parser(name, parents=[shared], help=help_text)
         p.add_argument("--json", action="store_true")
         p.set_defaults(func=func)
+
+    ap = sub.add_parser(
+        "apply",
+        parents=[shared],
+        help="bounded apply: --dry-run (default) or --yes; user-scoped install_argv only",
+    )
+    ap.add_argument("--json", action="store_true")
+    mode = ap.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--dry-run",
+        dest="dry_run_flag",
+        action="store_true",
+        help="print planned install_argv; change nothing (default when --yes is absent)",
+    )
+    mode.add_argument(
+        "--yes",
+        action="store_true",
+        help="execute recorded install_argv for missing expected components",
+    )
+    ap.add_argument(
+        "--id",
+        action="append",
+        default=[],
+        help="limit to this component id (repeatable)",
+    )
+    ap.add_argument(
+        "--force",
+        action="store_true",
+        help="re-run install_argv even when presence probe is ok",
+    )
+    ap.add_argument(
+        "--system",
+        action="store_true",
+        help="request root/package-manager effects (refused until a later unit)",
+    )
+    ap.add_argument(
+        "--state-dir",
+        default=None,
+        help="ledger directory (default: ~/.local/state/djbclark-ade/install or ADE_INSTALL_STATE_DIR)",
+    )
+    ap.add_argument(
+        "--prefix",
+        default=None,
+        help="user install prefix for {prefix} token (default: ~/.local/bin)",
+    )
+    ap.set_defaults(func=cmd_apply, dry_run_flag=False, yes=False)
 
     args = parser.parse_args(argv)
     args.root = getattr(args, "root", None)
