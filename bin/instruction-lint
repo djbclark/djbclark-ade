@@ -8,10 +8,14 @@ prompt) short and non-stale. It NEVER writes anything: every file is opened read
 
 Files: with no FILE, `AGENTS.md`, `CLAUDE.md`, `GEMINI.md` and `.cursor/rules/*.mdc` under
 --root (default `.`) that exist; a missing default is silently absent. With FILE arguments,
-exactly those files (a missing or unreadable one is exit 2). Files are deduplicated by realpath, so
-the `CLAUDE.md -> AGENTS.md` symlink is read once (the second name is listed under `skipped`).
---skills-dir DIR (repeatable; default `<root>/skills`) names the folders whose subfolders
-holding a SKILL.md are the skill names for the heading-skill check.
+exactly those files after `~` expansion (a missing or unreadable one is exit 2). Home
+instruction files outside this repo are in scope: `instruction-lint --root ~` (or
+`instruction-lint ~/AGENTS.md ~/.cursor/rules/home-agents.mdc`) covers `~/AGENTS.md` and
+`home-agents.mdc`; `context-budget-check --instruction-lint` already runs the same lint over
+each `dirs` entry in `config/context-budget.toml` (this repo and `~`). Files are deduplicated
+by realpath, so the `CLAUDE.md -> AGENTS.md` symlink is read once (the second name is listed
+under `skipped`). --skills-dir DIR (repeatable; default `<root>/skills`) names the folders
+whose subfolders holding a SKILL.md are the skill names for the heading-skill check.
 
 The graft block, every line from `<!-- graft:start -->` to `<!-- graft:end -->` (each marker
 alone on its line; an unclosed start runs to the end of the file), is machine-generated and is
@@ -248,7 +252,9 @@ def collect(args, root):
     """The files to read as [(display path, abs path)], plus skipped notes. ValueError = usage."""
     skipped = []
     if args.files:
-        cands = [os.path.abspath(f) for f in args.files]
+        # Expand ~ the same way --root does, so quoted ~/AGENTS.md (and home-agents.mdc)
+        # work when the shell did not expand them (issue 284 D7 home follow-up).
+        cands = [os.path.abspath(os.path.expanduser(f)) for f in args.files]
         explicit = True
     else:
         cands = [os.path.join(root, n) for n in DEFAULT_FILES]
