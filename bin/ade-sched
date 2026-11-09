@@ -3,6 +3,7 @@
 
 usage:
   ade-sched [options] backend               the backend auto-detection picks, its unit/agent dir, the linger state
+  ade-sched [options] linger                observe-only: print linger state (systemd); exit 69 when Linger=no
   ade-sched [options] render PLIST          print what install would write (one `# <path>` header per artifact)
   ade-sched [options] install PLIST         write and activate the job
   ade-sched [options] uninstall LABEL       remove it (not installed: exit 0)
@@ -17,6 +18,7 @@ options (before or after the subcommand):
   --no-activate         install/uninstall: write or remove the files, print the activation commands instead of running them
   --allow-no-linger     systemd install: proceed when loginctl says Linger=no (default: exit 69 before writing, because
                         user timers stop at logout); never runs sudo, prints `sudo loginctl enable-linger USER`
+                        (linger check never enables linger and ignores this flag)
 
 Auto-detection: darwin with launchctl -> launchd; a booted systemd whose `systemctl --user is-system-running` answers
 running/degraded/starting/initializing -> systemd; booted systemd with no reachable user manager -> exit 69 (never a
@@ -33,8 +35,8 @@ ${XDG_STATE_HOME:-~/.local/state}/ade/ade-sched.lock).
 
 exit: 0 ok; 1 an activation command failed (its stderr is quoted); 2 bad job or usage; 3 status: a LABEL is not
 installed; 69 no usable scheduler (none forced, none found, systemd user manager unreachable, Linger=no on a systemd
-install without --allow-no-linger, KeepAlive or a StartInterval under 60 s on cron). A `crontab -l` failure other than
-"no crontab" is exit 1 and the crontab is left untouched.
+install without --allow-no-linger or on `linger` when Linger=no, KeepAlive or a StartInterval under 60 s on cron).
+A `crontab -l` failure other than "no crontab" is exit 1 and the crontab is left untouched.
 
 Notes and warnings (unmapped plist keys, cron rounding) go to stderr and do not change the exit status.
 docs/scheduling.md is the manual.
@@ -74,7 +76,8 @@ def parse(argv: list[str]) -> argparse.Namespace:
                  formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
     _common(ap, top=True)
     sub = ap.add_subparsers(dest="cmd", required=True, parser_class=_Parser)
-    for name, arg, nargs in (("backend", None, None), ("render", "plist", None), ("install", "plist", None),
+    for name, arg, nargs in (("backend", None, None), ("linger", None, None),
+                             ("render", "plist", None), ("install", "plist", None),
                              ("uninstall", "label", None), ("status", "labels", "*")):
         sp = sub.add_parser(name)
         _common(sp, top=False)
@@ -112,6 +115,20 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"linger: {ade_sched.linger(b.env) or 'unknown'}")
             else:
                 print(f"crontab: {ade_sched.tool('crontab', b.env)}")
+            return 0
+        if a.cmd == "linger":
+            # Observe-only Linux prerequisite for user timers (never enables linger; never runs sudo).
+            b = ade_sched.detect(backend)
+            if b.name != "systemd":
+                print(f"linger: n/a (backend={b.name})")
+                return 0
+            state = ade_sched.linger(b.env)
+            print(f"linger: {state or 'unknown'}")
+            if state == "no":
+                raise ade_sched.SchedError(
+                    ade_sched.EX_UNAVAILABLE,
+                    ade_sched.linger_off_message(b.env),
+                )
             return 0
         if a.cmd in ("render", "install"):
             job = ade_sched.Job.from_plist(a.plist, _subst(a), ade=a.ade)

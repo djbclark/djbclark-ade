@@ -25,6 +25,7 @@ every child's environment):
   status(label, backend=None, *, env=None, **overrides) -> Status(backend, label, installed, active, next_run, paths)
   installed_labels(backend=None, *, env=None, **overrides) -> list[str]
   linger(env=None, **overrides) -> "yes" | "no" | None
+  linger_off_message(env=None, **overrides) -> str   # operator text for Linger=no (ade-sched linger)
   systemd_version(env=None, **overrides) -> int | None
 
   overrides (keyword): agents_dir, unit_dir, launchctl, systemctl, loginctl, crontab, lock_path. A caller passes its own
@@ -856,6 +857,11 @@ def linger(env: Mapping[str, str] | None = None, **overrides: Any) -> str | None
 def _linger_msg(c: _Ctx, label: str) -> str:
     return (f"linger is off for {c.user}: user timers stop at logout, so {label} would run only while {c.user} has a "
             f"session; for boot-time runs: sudo loginctl enable-linger {c.user}")
+
+
+def linger_off_message(env: Mapping[str, str] | None = None, **overrides: Any) -> str:
+    """Operator-facing Linger=no text for `ade-sched linger` (never enables linger; never runs sudo)."""
+    return _linger_msg(_ctx("systemd", env, overrides), "user timers")
 
 
 def _log_dirs(job: Job) -> None:

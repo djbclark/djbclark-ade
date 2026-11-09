@@ -39,8 +39,14 @@ install *args:
 update *args:
     "{{ root }}/bin/ade-update" --repo "{{ root }}" {{ args }}
 
+# Observe-only systemd linger (Linux user timers). Exit 69 when Linger=no; never runs sudo.
+# n/a (exit 0) on launchd/cron. Operator enables once: sudo loginctl enable-linger $USER
+linger:
+    "{{ root }}/bin/ade-sched" --backend auto linger
+
 # Install the daily ade-update --check job (Linux: systemd; Mac: launchd via --backend auto).
 # Requires --set __STATE__; never auto-applies updates (check only).
+# On Linux: run `just linger` first (Linger=no → install exits 69).
 # Omit --ade so ade-sched's linked-worktree guard applies (install from the
 # canonical checkout; docs show --ade ~/src/djbclark-ade when that path is used).
 update-check-install:

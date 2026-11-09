@@ -36,12 +36,22 @@ read [AGENTS.md](AGENTS.md) (`CLAUDE.md` links to it) first; this page is the ma
 ## Install and update (this machine)
 
 ```sh
+cd ~/src/djbclark-ade
+just doctor                                            # observe-only catalog probes
+just install                                           # dry-run apply; just install -- --yes for live user-scoped
+just update -- --check                                 # ade-update --check for this checkout
+just update                                            # fast-forward, relink skills, print changelog delta
+# Linux daily behind-check (systemd user timer; linger first):
+just linger                                            # exit 69 when Linger=no; never runs sudo
+# sudo loginctl enable-linger $USER                    # operator, once, when linger printed no
+just update-check-install                              # ade-sched installs ade-update --check only
 ~/src/djbclark-ade/bin/skill-everywhere <name>          # link one skill into every TUI's skills dir
 ~/src/djbclark-ade/bin/skill-everywhere --all           # every public, private and site skill
-~/src/djbclark-ade/bin/ade-update --check               # report only; exit 10 when behind
-~/src/djbclark-ade/bin/ade-update                       # fast-forward, relink skills, check links, print the changelog delta
+~/src/djbclark-ade/bin/ade-update --check               # same as just update -- --check
+~/src/djbclark-ade/bin/ade-update                       # same as just update
 ```
 
+Details: [docs/install-catalog.md](docs/install-catalog.md), [docs/scheduling.md](docs/scheduling.md) (Linux linger).
 Targets: `~/.claude/skills` (cursor-agent reads it too), `~/.agents/skills` (Codex), `~/.config/opencode/skills`,
 Hermes' external dir, `~/.omp/agent/skills`, a copy for Grok Bot; roots: this repo, `~/ops/site-private/skills`,
 `~/ops/site-public-djbclark/skills`. Then `/reload-skills` in running Claude sessions. Paseo's `paseo*` skills come

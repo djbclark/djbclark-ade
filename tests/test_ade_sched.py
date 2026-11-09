@@ -679,6 +679,22 @@ def test_cli_exit_codes(fake):
     assert (fake.units / "com.djbclark.deadline-sweep.timer").exists()
 
 
+def test_cli_linger_observe_only(fake):
+    """Linux one-step gate: linger exits 69 when Linger=no; n/a on cron; never enables linger."""
+    p = cli("linger", "--backend", "systemd", env=fake.env)
+    assert p.returncode == 0, p.stderr
+    assert p.stdout.strip() == "linger: yes"
+    p = cli("linger", "--backend", "systemd", env={**fake.env, "FAKE_LINGER": "no"})
+    assert p.returncode == 69
+    assert "linger: no" in p.stdout
+    assert "sudo loginctl enable-linger tester" in p.stderr
+    assert not any(c.startswith("sudo") for c in fake.calls())
+    p = cli("linger", "--backend", "cron", env=fake.env)
+    assert p.returncode == 0 and "linger: n/a (backend=cron)" in p.stdout
+    msg = S.linger_off_message(fake.env)
+    assert "enable-linger tester" in msg and "user timers" in msg
+
+
 def test_imports_on_python_3_10():
     """bin/deadline imports ade_sched at load, and a Linux host's python3 may be 3.10 (Ubuntu 22.04): no 3.11+ typing
     names, and the source parses as 3.10 (adversary A1, 2026-11-04: `typing.Self` broke every deadline subcommand)."""

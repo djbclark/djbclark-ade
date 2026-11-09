@@ -57,6 +57,8 @@ just install-apply-dry
 just doctor                 # alias of install-doctor (setup-plan S2 name)
 just install [-- --yes]    # ade-install apply (dry-run by default; --yes for live)
 just update [-- --check]   # bin/ade-update for this checkout
+just linger                 # Linux: observe-only systemd linger (exit 69 when Linger=no)
+just update-check-install   # daily ade-update --check via ade-sched (auto backend)
 ```
 
 Daily behind-check (not auto-apply): install
@@ -65,19 +67,23 @@ Daily behind-check (not auto-apply): install
 **macOS launchd** and **Linux systemd** (ade-sched's backends):
 
 ```
-# Linux (systemd user timer; linger required, else exit 69)
+# Linux one-step (systemd user timer): linger first, then the check job
+just linger                                    # exit 69 when Linger=no; never runs sudo
+# sudo loginctl enable-linger $USER            # operator, once, when linger printed no
+just update-check-install                      # from the canonical checkout (no --ade)
+# or with an explicit durable checkout:
 bin/ade-sched --backend systemd install config/launchd/com.djbclark.ade-update-check.plist \
   --set __STATE__=$HOME/.local/state/ade --ade ~/src/djbclark-ade
-# or from the canonical checkout: just update-check-install
-# (omits --ade so a linked worktree cannot install a job that vanishes after merge)
 
 # macOS (launchd; auto backend also picks this when launchctl is present)
 bin/ade-sched --backend launchd install config/launchd/com.djbclark.ade-update-check.plist \
   --set __STATE__=$HOME/.local/state/ade --ade ~/src/djbclark-ade
+# or from the canonical checkout: just update-check-install
 ```
 
 `__ADE__` / `__HOME__` are filled automatically; `__STATE__` is not and exits 2 if left blank.
 Pass `--ade` only with a durable checkout (`~/src/djbclark-ade`); never with a linked worktree path.
+`just update-check-install` omits `--ade` so a linked worktree cannot install a job that vanishes after merge.
 
 - `plan` is print-only: `would-install` (has `install_argv`) / `needs-system` /
   `blocked` / `skip`.

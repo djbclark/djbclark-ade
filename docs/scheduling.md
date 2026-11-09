@@ -27,6 +27,7 @@ comes from Paseo 0.15.3's source, `packages/server/src/server/schedule/service.t
 
 ```
 bin/ade-sched [options] backend               the backend auto-detection picks, its unit/agent dir, the linger state
+bin/ade-sched [options] linger                observe-only linger (systemd: exit 69 when Linger=no; else n/a)
 bin/ade-sched [options] render PLIST          print what install would write (one `# <path>` header per artifact)
 bin/ade-sched [options] install PLIST         write and activate the job
 bin/ade-sched [options] uninstall LABEL       remove it (not installed: exit 0)
@@ -53,16 +54,19 @@ The options go before or after the subcommand.
 
 ```
 bin/ade-sched backend                     # expect: backend: systemd (systemd user manager running), linger: yes
+bin/ade-sched linger                      # observe-only; exit 69 when Linger=no (just linger)
+# sudo loginctl enable-linger $USER       # operator, once, when linger printed no
 bin/ade-sched render config/launchd/com.djbclark.deadline-sweep.plist --set __STATE__=$HOME/.local/state/deadlines
 bin/ade-sched install config/launchd/com.djbclark.deadline-sweep.plist --set __STATE__=$HOME/.local/state/deadlines \
     --ade ~/src/djbclark-ade
 bin/ade-sched status com.djbclark.deadline-sweep
 systemctl --user list-timers               # the timer, its next run
 
-# Daily ade-update --check (same plist as Mac; Linux one-step install path, 2026-11-09)
+# Daily ade-update --check (same plist as Mac; Linux one-step: linger then install, 2026-11-09)
+just linger && just update-check-install   # from the canonical checkout (no --ade; worktree guard stays on)
+# or:
 bin/ade-sched --backend systemd install config/launchd/com.djbclark.ade-update-check.plist \
     --set __STATE__=$HOME/.local/state/ade --ade ~/src/djbclark-ade
-# or from the canonical checkout: just update-check-install (no --ade; worktree guard stays on)
 ```
 
 Install from the canonical checkout (`--ade ~/src/djbclark-ade`): a job installed from a linked worktree would point into a
@@ -120,7 +124,8 @@ would run only while someone is logged in (the "deadlines never enforced" failur
 systemd install reads `loginctl show-user USER -p Linger --value`; `no` is **exit 69** with
 `sudo loginctl enable-linger USER` in the message, unless `--allow-no-linger` (`allow_no_linger=True`), which installs and
 prints the same warning. ade-sched never runs sudo. An unreadable value is a note, not a refusal. `ade-sched backend`
-prints the state.
+prints the state; `ade-sched linger` / `just linger` is the observe-only gate (exit 69 when `Linger=no`, `n/a` on
+launchd/cron) so a Linux one-step update path can check before `just update-check-install`.
 
 ## Mapping
 
