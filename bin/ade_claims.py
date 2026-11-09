@@ -428,7 +428,11 @@ def update_claim(claim_id: str, **fields: Any) -> Optional[dict[str, Any]]:
 def bind_owner(claim_id: str, *, owner_agent: Optional[str] = None,
                owner_record: Optional[str] = None,
                owner_session: Optional[str] = None) -> dict[str, Any]:
-    """Merge owner.* fields on an active claim (W3). Raises ValueError when missing or inactive."""
+    """Merge owner.* fields on an active claim (W3). Raises ValueError when missing or inactive.
+
+    Refuses to overwrite a different non-empty ``owner.agent`` (second agent must not
+    steal the claim; handover is explicit, not silent).
+    """
     with _claims_lock():
         c = read_claim(claim_id)
         if c is None:
@@ -436,6 +440,12 @@ def bind_owner(claim_id: str, *, owner_agent: Optional[str] = None,
         if not claim_state_active(c):
             raise ValueError(f"claim {claim_id!r} is not active ({shown_state(c)})")
         owner = dict(c.get("owner") if isinstance(c.get("owner"), dict) else {})
+        existing_agent = owner.get("agent") if isinstance(owner.get("agent"), str) else ""
+        if owner_agent is not None and existing_agent and existing_agent != owner_agent:
+            raise ValueError(
+                f"claim {claim_id!r} already owned by {existing_agent!r}; "
+                f"refusing bind to {owner_agent!r}"
+            )
         if owner_agent is not None:
             owner["agent"] = owner_agent
         if owner_record is not None:

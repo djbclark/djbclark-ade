@@ -26,10 +26,10 @@ So W3 exports `ADE_CLAIM_ID` from `agent.open.before`, and uses `agent.create.af
 ## Hook payloads (Paseo ≥0.14)
 
 - **worktree.create.after**: `{ worktree: { path, branch, sourceCheckout } }`. No workspace or agent id yet; `base_sha` and `remote.origin.url` are read with `git -C <path>`. Claim ids append an 8-hex suffix per creation so a recreate/released claim cannot exit 3 and abort the worktree.
-- **agent.open.before**: `{ request: { agentId, cwd, env, … } }` — return `{ …request, env: { …env, ADE_CLAIM_ID } }` or `undefined`.
-- **agent.create.after**: `{ agent: { id, cwd, … } }` — side effect only (`bind-owner`); failures are logged, never thrown (creation already finished).
+- **agent.open.before**: `{ request: { agentId, cwd, env, … } }` — return `{ …request, env: { …env, ADE_CLAIM_ID } }` or `undefined`. Only when the claim is unbound or already owned by `agentId` (never export a foreign claim id: `caller_ident` trusts `ADE_CLAIM_ID`).
+- **agent.create.after**: `{ agent: { id, cwd, … } }` — side effect only (`bind-owner`); skips when another agent already owns the claim; failures are logged, never thrown (creation already finished).
 
-Claim lookup: prefer `<git-dir>/ade-claim` (pointer from W2), else `ade_claims.py list --json --state active` filtered by path.
+Claim lookup: read `ade_claims.py list --json --state active`, prefer `<git-dir>/ade-claim` only when that id is **active on this cwd**, else path match.
 
 ## Environment
 

@@ -82,6 +82,28 @@ function normalizePath(path) {
 }
 
 /**
+ * Normalize a list --json claim into the shape hooks use, or null if unusable.
+ * @param {unknown} raw
+ * @returns {{ id: string, path: string, shown: string, owner?: Record<string, unknown> } | null}
+ */
+export function normalizeClaimRecord(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const c = /** @type {Record<string, unknown>} */ (raw);
+  if (typeof c.id !== "string" || !ID_RE.test(c.id)) return null;
+  if (typeof c.path !== "string" || !c.path.trim()) return null;
+  const shown = typeof c.shown_state === "string" ? c.shown_state
+    : (typeof c.state === "string" ? c.state : "");
+  return {
+    id: c.id,
+    path: c.path,
+    shown,
+    owner: c.owner && typeof c.owner === "object" && !Array.isArray(c.owner)
+      ? /** @type {Record<string, unknown>} */ (c.owner)
+      : undefined,
+  };
+}
+
+/**
  * Pick the active claim whose path matches cwd (string equality after trailing-slash trim).
  * Live hooks may also resolve via the worktree pointer; this is the list --json path.
  *
@@ -98,23 +120,63 @@ export function activeClaimForPath(claims, cwd) {
   }
   const want = normalizePath(cwd);
   for (const raw of claims) {
-    if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
-    const c = /** @type {Record<string, unknown>} */ (raw);
-    const shown = typeof c.shown_state === "string" ? c.shown_state
-      : (typeof c.state === "string" ? c.state : "");
-    if (shown !== "active") continue;
-    if (typeof c.path !== "string" || typeof c.id !== "string") continue;
+    const c = normalizeClaimRecord(raw);
+    if (!c || c.shown !== "active") continue;
     if (normalizePath(c.path) !== want) continue;
-    if (!ID_RE.test(c.id)) continue;
-    return {
-      id: c.id,
-      path: c.path,
-      owner: c.owner && typeof c.owner === "object" && !Array.isArray(c.owner)
-        ? /** @type {Record<string, unknown>} */ (c.owner)
-        : undefined,
-    };
+    return { id: c.id, path: c.path, owner: c.owner };
   }
   return null;
+}
+
+/**
+ * Prefer a pointer id only when the registry shows that claim active on cwd;
+ * otherwise fall back to activeClaimForPath.
+ *
+ * @param {unknown} claims
+ * @param {string} cwd
+ * @param {string | null | undefined} pointerId
+ * @returns {{ id: string, path: string, owner?: Record<string, unknown> } | null}
+ */
+export function resolveClaimForCwd(claims, cwd, pointerId) {
+  if (!Array.isArray(claims)) {
+    throw new Error("resolveClaimForCwd: claims must be an array");
+  }
+  if (typeof cwd !== "string" || !cwd.trim()) {
+    throw new Error("resolveClaimForCwd: cwd must be a non-empty string");
+  }
+  const want = normalizePath(cwd);
+  if (typeof pointerId === "string" && pointerId) {
+    for (const raw of claims) {
+      const c = normalizeClaimRecord(raw);
+      if (!c || c.id !== pointerId) continue;
+      if (c.shown === "active" && normalizePath(c.path) === want) {
+        return { id: c.id, path: c.path, owner: c.owner };
+      }
+      break;
+    }
+  }
+  return activeClaimForPath(claims, cwd);
+}
+
+/**
+ * Whether this agent may receive ADE_CLAIM_ID / bind as owner for the claim.
+ * Unowned claims (no agent/record/session) are open to the first binder.
+ * A claim already owned by another agent must not be exported or overwritten.
+ *
+ * @param {{ owner?: Record<string, unknown> } | null | undefined} claim
+ * @param {string} agentId
+ */
+export function claimAllowsAgent(claim, agentId) {
+  if (!claim) return false;
+  if (typeof agentId !== "string" || !agentId.trim()) {
+    throw new Error("claimAllowsAgent: agentId must be a non-empty string");
+  }
+  const owner = claim.owner && typeof claim.owner === "object" ? claim.owner : {};
+  const agent = typeof owner.agent === "string" ? owner.agent : "";
+  const record = typeof owner.record === "string" ? owner.record : "";
+  const session = typeof owner.session === "string" ? owner.session : "";
+  if (!agent && !record && !session) return true;
+  return agent === agentId || record === agentId || session === agentId;
 }
 
 /**
