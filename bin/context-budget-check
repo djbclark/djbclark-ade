@@ -4,9 +4,10 @@
     context-budget-check [--from-file PATH [--dir LABEL]] [--dry-run] [--config PATH]
                          [--state-dir DIR] [--date YYYY-MM-DD] [--json] [--instruction-lint]
 
-Runs `claude -p "/context"` in each directory of config/context-budget.toml (default
-~/src/djbclark-ade and ~; a /context call makes no model request), parses the category table plus
-the Memory files, MCP tools, Skills and Custom agents sub-tables, writes
+Runs `claude -p "/context"` in each directory of the effective `context_budget` domain
+(legacy `config/context-budget.toml` via `ade_config.load_effective` when `ade.toml` is
+absent; default ~/src/djbclark-ade and ~; a /context call makes no model request), parses
+the category table plus the Memory files, MCP tools, Skills and Custom agents sub-tables, writes
 ~/.local/state/context-budget/<YYYY-MM-DD>.json, and compares each directory with
 
 1. its budget (total, memory, skills, mcp_tools, mcp_instructions, in tokens), and
@@ -51,12 +52,15 @@ import re
 import shutil
 import subprocess
 import sys
-import tomllib
 from datetime import date as _date
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 CONFIG = REPO / "config" / "context-budget.toml"
+_BIN = str(Path(__file__).resolve().parent)
+if _BIN not in sys.path:
+    sys.path.insert(0, _BIN)
+import ade_config  # noqa: E402
 CLAUDE_TIMEOUT_S = 180
 PING_PREFIX = "djbclark-ade"
 LINT = REPO / "bin" / "instruction-lint"
@@ -193,9 +197,34 @@ def measure(label: str) -> dict:
 
 # ---------------------------------------------------------------- config and state
 
-def load_config(path: Path) -> dict:
-    cfg = tomllib.loads(path.read_text()) if path.exists() else {}
-    return {"dirs": cfg.get("dirs") or ["~/src/djbclark-ade", "~"], "budget": cfg.get("budget") or {}}
+def load_config(
+    path: Path | None = None,
+    *,
+    root: Path | None = None,
+    home: Path | None = None,
+    environ: dict[str, str] | None = None,
+) -> dict:
+    """Effective ``context_budget`` domain via ``ade_config.load_effective``.
+
+    Explicit ``path`` (``--config``) reads that legacy-format file only (tests /
+    operator override). Otherwise the domain comes from the effective tree
+    (legacy ``config/context-budget.toml`` / ``CONTEXT_BUDGET_TOML`` when
+    ``ade.toml`` is absent).
+    """
+    if path is not None:
+        return ade_config.load_legacy_context_budget(Path(path), required=path.exists())
+    eff = ade_config.load_effective(
+        root=root or REPO,
+        home=home,
+        environ=environ,
+    )
+    cb = eff.data.get("context_budget") if isinstance(eff.data, dict) else None
+    if not isinstance(cb, dict):
+        return {"dirs": list(ade_config.DEFAULT_CONTEXT_BUDGET_DIRS), "budget": {}}
+    return {
+        "dirs": list(cb.get("dirs") or ade_config.DEFAULT_CONTEXT_BUDGET_DIRS),
+        "budget": dict(cb["budget"]) if isinstance(cb.get("budget"), dict) else {},
+    }
 
 
 def budget_for(cfg: dict, label: str) -> dict:
@@ -380,7 +409,7 @@ def send_ping(text: str) -> int:
 # ---------------------------------------------------------------- commands
 
 def cmd_run(a: argparse.Namespace) -> int:
-    cfg = load_config(Path(a.config) if a.config else CONFIG)
+    cfg = load_config(Path(a.config) if a.config else None)
     today = a.date or _date.today().isoformat()
     sdir = state_dir(a.state_dir)
     pdate, pstate = previous(sdir, today)
@@ -441,7 +470,9 @@ def main(argv: list[str]) -> int:
     p.add_argument("--from-file", help="parse this saved /context output instead of running claude")
     p.add_argument("--dir", help="config directory label the --from-file output stands for")
     p.add_argument("--dry-run", action="store_true", help="print the ping, send nothing, write no state")
-    p.add_argument("--config", help=f"budget file (default {CONFIG})")
+    p.add_argument("--config",
+                   help=f"legacy-format budget file (default: effective context_budget via "
+                        f"ade_config.load_effective; shipped legacy path {CONFIG})")
     p.add_argument("--state-dir", help="where <date>.json files live (default ~/.local/state/context-budget)")
     p.add_argument("--date", help="today's date, YYYY-MM-DD (tests)")
     p.add_argument("--json", action="store_true", help="also print the parsed entries and alerts as JSON")

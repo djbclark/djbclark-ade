@@ -46,7 +46,7 @@ class SetTarget:
 
     path: Path
     file_parts: tuple[str, ...]  # dotted path parts inside the file
-    kind: str  # "local" | "unified" | "legacy_routing" | "legacy_gates"
+    kind: str  # "local" | "unified" | "legacy_routing" | "legacy_gates" | "legacy_context_budget"
     target: str  # "local" | "repo"
     created: bool
 
@@ -163,7 +163,7 @@ def resolve_set_target(
     root: Path,
     home: Path,
 ) -> SetTarget:
-    """Choose the real file to edit. Never writes ROUTING_POLICY / GATES_TOML paths."""
+    """Choose the real file to edit. Never writes ROUTING_POLICY / GATES_TOML / CONTEXT_BUDGET_TOML paths."""
     if target not in ("local", "repo"):
         raise EditError(f"unknown --target {target!r} (want local or repo)")
     parts = split_dotted_path(dotted)
@@ -191,7 +191,8 @@ def resolve_set_target(
             created=False,
         )
 
-    # Legacy projection: route domain keys live in routing.toml; gates.* in gates.toml.
+    # Legacy projection: route domain keys live in routing.toml; gates.* in gates.toml;
+    # context_budget.* in context-budget.toml.
     if parts[0] == "gates":
         if len(parts) < 2:
             raise EditError("PATH gates alone is a table; scalar set needs a leaf under gates.*")
@@ -201,6 +202,19 @@ def resolve_set_target(
             kind="legacy_gates",
             target="repo",
             created=not ac.input_present(ac.default_gates_path(root)),
+        )
+    if parts[0] == "context_budget":
+        if len(parts) < 2:
+            raise EditError(
+                "PATH context_budget alone is a table; "
+                "scalar set needs a leaf under context_budget.*"
+            )
+        return SetTarget(
+            path=ac.default_context_budget_path(root),
+            file_parts=parts[1:],  # strip effective "context_budget." prefix
+            kind="legacy_context_budget",
+            target="repo",
+            created=not ac.input_present(ac.default_context_budget_path(root)),
         )
     if parts[0] in ac.ROUTING_DOMAIN_KEYS:
         return SetTarget(
@@ -212,7 +226,7 @@ def resolve_set_target(
         )
     raise EditError(
         f"PATH {dotted!r}: with legacy projection (no config/ade.toml), "
-        f"repo set only supports routing-domain keys or gates.*"
+        f"repo set only supports routing-domain keys, gates.*, or context_budget.*"
     )
 
 
@@ -710,6 +724,12 @@ def validate_target_tree(data: dict[str, Any], target: SetTarget, *, root: Path)
         floors = data.get("floors")
         if floors is not None and not isinstance(floors, dict):
             raise EditError(f"{target.path}: [floors] must be a table")
+        return
+    if target.kind == "legacy_context_budget":
+        try:
+            ac.project_context_budget_domain(data, label=str(target.path))
+        except ac.ConfigError as e:
+            raise EditError(str(e)) from e
         return
     raise EditError(f"unknown target kind {target.kind!r}")
 

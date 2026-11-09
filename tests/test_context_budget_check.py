@@ -153,6 +153,32 @@ def test_real_config_parses_and_overrides_home():
     assert home["total"] == base["total"]
 
 
+def test_default_load_config_uses_load_effective(tmp_path, monkeypatch):
+    """S1: no --config path → effective context_budget (legacy file when ade.toml absent)."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    via_path = cbc.load_config(cbc.CONFIG)
+    via_eff = cbc.load_config(root=ROOT, home=home, environ={})
+    assert via_eff == via_path
+    assert via_eff["dirs"] == [DIR, "~"]
+    assert via_eff["budget"]["total"] == 30000
+
+
+def test_context_budget_toml_env_reaches_load_config(tmp_path, monkeypatch):
+    import os
+
+    home = tmp_path / "home"
+    home.mkdir()
+    selected = tmp_path / "override.toml"
+    selected.write_text('dirs = ["~/override"]\n[budget]\ntotal = 12345\n')
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CONTEXT_BUDGET_TOML", str(selected))
+    cfg = cbc.load_config(root=ROOT, home=home, environ=dict(os.environ))
+    assert cfg["dirs"] == ["~/override"]
+    assert cfg["budget"]["total"] == 12345
+
+
 # ---------------------------------------------------------------- growth
 
 BIG = {"total": 99000, "memory": 99000, "skills": 99000, "mcp_tools": 99000,
