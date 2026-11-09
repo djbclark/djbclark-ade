@@ -1,10 +1,17 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  activeClaimForPath,
+  buildAdeClaimsBindOwnerArgv,
   buildAdeClaimsNewArgv,
   deriveClaimId,
+  mergeAdeClaimIdEnv,
+  parseAgentCreateAfterAgent,
+  parseAgentOpenBeforeRequest,
+  parseClaimPointer,
   parseWorktreePayload,
   resolveAdeClaimsScript,
+  resolveTrustedAdeClaimsScript,
 } from "./claim-lib.mjs";
 
 const FIXTURE = {
@@ -77,4 +84,83 @@ test("resolveAdeClaimsScript walks pluginRoot for bin/ade_claims.py", () => {
   const pluginRoot = new URL("..", import.meta.url).pathname;
   const script = resolveAdeClaimsScript(FIXTURE, {}, { pluginRoot });
   assert.match(script, /\/bin\/ade_claims\.py$/);
+});
+
+test("resolveTrustedAdeClaimsScript does not need a worktree payload", () => {
+  const pluginRoot = new URL("..", import.meta.url).pathname;
+  const script = resolveTrustedAdeClaimsScript({}, { pluginRoot });
+  assert.match(script, /\/bin\/ade_claims\.py$/);
+});
+
+test("parseAgentOpenBeforeRequest accepts Paseo docs shape", () => {
+  assert.deepEqual(
+    parseAgentOpenBeforeRequest({
+      agentId: "agent-123",
+      cwd: FIXTURE.path,
+      env: { COMPANY_ENV: "development" },
+    }),
+    {
+      agentId: "agent-123",
+      cwd: FIXTURE.path,
+      env: { COMPANY_ENV: "development" },
+    },
+  );
+});
+
+test("parseAgentOpenBeforeRequest rejects missing cwd", () => {
+  assert.throws(
+    () => parseAgentOpenBeforeRequest({ agentId: "a" }),
+    /request\.cwd/,
+  );
+});
+
+test("parseAgentCreateAfterAgent accepts agent id and cwd", () => {
+  assert.deepEqual(
+    parseAgentCreateAfterAgent({ id: "agent-9", cwd: FIXTURE.path, title: null }),
+    { id: "agent-9", cwd: FIXTURE.path },
+  );
+});
+
+test("activeClaimForPath matches active claim by trimmed path", () => {
+  const claims = [
+    { id: "other", path: "/elsewhere", shown_state: "active" },
+    { id: "wt-claim-1", path: `${FIXTURE.path}/`, shown_state: "active" },
+    { id: "released", path: FIXTURE.path, shown_state: "released" },
+  ];
+  assert.equal(activeClaimForPath(claims, FIXTURE.path)?.id, "wt-claim-1");
+  assert.equal(activeClaimForPath(claims, "/no/such"), null);
+});
+
+test("parseClaimPointer trims and validates", () => {
+  assert.equal(parseClaimPointer("  wt-claim-1\n"), "wt-claim-1");
+  assert.equal(parseClaimPointer("   "), null);
+  assert.throws(() => parseClaimPointer("bad id!"), /valid claim id/);
+});
+
+test("mergeAdeClaimIdEnv adds ADE_CLAIM_ID or no-ops when already set", () => {
+  assert.deepEqual(
+    mergeAdeClaimIdEnv({ FOO: "1" }, "wt-claim-1"),
+    { FOO: "1", ADE_CLAIM_ID: "wt-claim-1" },
+  );
+  assert.equal(mergeAdeClaimIdEnv({ ADE_CLAIM_ID: "wt-claim-1" }, "wt-claim-1"), undefined);
+  assert.equal(mergeAdeClaimIdEnv({}, null), undefined);
+});
+
+test("buildAdeClaimsBindOwnerArgv maps owner bind fields", () => {
+  const built = buildAdeClaimsBindOwnerArgv({
+    adeClaimsScript: "/opt/ade/bin/ade_claims.py",
+    claimId: "wt-claim-1",
+    ownerAgent: "agent-123",
+    ownerRecord: "agent-123",
+  });
+  assert.deepEqual(built, {
+    python: "python3",
+    script: "/opt/ade/bin/ade_claims.py",
+    argv: [
+      "bind-owner",
+      "--id", "wt-claim-1",
+      "--owner-agent", "agent-123",
+      "--owner-record", "agent-123",
+    ],
+  });
 });

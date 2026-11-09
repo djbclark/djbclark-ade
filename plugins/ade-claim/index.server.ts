@@ -1,7 +1,11 @@
 import type { PluginServerContext } from "@getpaseo/plugin/server";
-import { registerWorktreeClaimHook } from "./server/hook.mjs";
+import { registerAdeClaimHooks } from "./server/hook.mjs";
 
-/** Paseo server entry: claim the worktree when git worktree add completes. */
+/**
+ * Paseo server entry:
+ * - W2: claim the worktree when git worktree add completes
+ * - W3: export ADE_CLAIM_ID on agent.open.before; bind owner on agent.create.after
+ */
 export default function contribute(server: PluginServerContext) {
-  return registerWorktreeClaimHook(server);
+  return registerAdeClaimHooks(server);
 }

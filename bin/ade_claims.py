@@ -10,9 +10,12 @@ Design: design-isolation-report.md 3.4 (schema), 3.5.4 (guard); frontier-pr59-de
   2. `bin/ade-git-guard`, the PATH shim, runs `ade_claims.py guard -- GIT_ARGS...` for what hooks cannot see (a foreign
      workspace, the shared checkout's destructive forms, worktree verbs, rename/copy destinations) and FAILS CLOSED on what it
      cannot read.
-Integration stage as of 2026-10-25: W1 (this file, the shim and the hooks) exists; W2 (the workspace launcher installs the hooks into a new
-workspace; cow-pasture, its first home, was removed 2026-11-06), W3 (acp-dispatch exports ADE_CLAIM_ID) and W4 (acp-run puts the shim on agents' PATH) are NOT wired yet, so nothing
-calls the guard in a live session. Repositories get the hooks from `ade-git-guard install` or lazily from the shim.
+Integration stage as of 2026-10-25 (re-based 2026-11-09): W1 (this file, the shim and the hooks) exists; W2 is the
+`plugins/ade-claim` `worktree.create.after` scaffold (not Mac-installed yet); W3 draft binds owner via `bind-owner` /
+exports `ADE_CLAIM_ID` from that plugin's `agent.open.before` + `agent.create.after` (replacing the retired
+acp-dispatch export plan); W4 (shim first on agents' PATH) is NOT wired yet. Nothing calls the guard in a live
+session until the plugin is installed and W4 lands. Repositories get the hooks from `ade-git-guard install` or lazily
+from the shim.
 
 THIS IS A SEATBELT, NOT A SANDBOX (design 5.7). It stops an agent's accidental or careless git; it does not
 stop one that works at it. Out of reach by design: an absolute path to the real git (the hooks still run), unsetting
@@ -139,6 +142,9 @@ guard, the hooks and the tests):
         [--inherited-dirt-patch P] [--no-pointer]     writes the claim and the pointer; prints the claim file
     ade_claims.py list [--state S] [--json] one line per claim (id, state, branch, owner, path, expires_at), or a
                                             JSON array; what `ade-git-guard claim ls` runs
+    ade_claims.py bind-owner --id ID --owner-agent A [--owner-record R] [--owner-session S]
+                                            merge owner fields on an active claim (W3 / ade-claim plugin);
+                                            exit 2 when missing, inactive or usage error
     ade_claims.py guard -- GIT_ARGS...      decide one git call (what ade-git-guard runs)
     ade_claims.py install [DIR]             install the ref hooks into DIR's repository
     ade_claims.py hook-ref STATE | hook-push REMOTE URL    what libexec/git-hooks/* run (stdin is git's)
@@ -406,6 +412,28 @@ def update_claim(claim_id: str, **fields: Any) -> Optional[dict[str, Any]]:
     """Read-modify-write under the registry lock. None when the claim does not exist."""
     with _claims_lock():
         return _update_unlocked(claim_id, **fields)
+
+
+def bind_owner(claim_id: str, *, owner_agent: Optional[str] = None,
+               owner_record: Optional[str] = None,
+               owner_session: Optional[str] = None) -> dict[str, Any]:
+    """Merge owner.* fields on an active claim (W3). Raises ValueError when missing or inactive."""
+    with _claims_lock():
+        c = read_claim(claim_id)
+        if c is None:
+            raise ValueError(f"no claim {claim_id!r}")
+        if not claim_state_active(c):
+            raise ValueError(f"claim {claim_id!r} is not active ({shown_state(c)})")
+        owner = dict(c.get("owner") if isinstance(c.get("owner"), dict) else {})
+        if owner_agent is not None:
+            owner["agent"] = owner_agent
+        if owner_record is not None:
+            owner["record"] = owner_record
+        if owner_session is not None:
+            owner["session"] = _owner_session_arg(owner_session)
+        updated = _update_unlocked(claim_id, owner=owner)
+        assert updated is not None
+        return updated
 
 
 def set_state(claim_id: str, state: str) -> Optional[dict[str, Any]]:
@@ -2299,6 +2327,11 @@ def _cli(argv: Sequence[str]) -> int:
     ls = sp.add_parser("list", help="every claim the registry holds (what `ade-git-guard claim ls` runs)")
     ls.add_argument("--state", choices=LIST_STATES)
     ls.add_argument("--json", action="store_true")
+    bo = sp.add_parser("bind-owner", help="merge owner fields on an active claim (W3 / ade-claim plugin)")
+    bo.add_argument("--id", required=True)
+    bo.add_argument("--owner-agent", required=True)
+    bo.add_argument("--owner-record")
+    bo.add_argument("--owner-session")
     ins = sp.add_parser("install", help="install the ref hooks into the repository of DIR (exit 2 not a repository, "
                                          "78 core.hooksPath is set, 73 a .pre-ade file is in the way)")
     ins.add_argument("dir", nargs="?", default=".")
@@ -2321,6 +2354,10 @@ def _cli(argv: Sequence[str]) -> int:
                 for c in cs:
                     print(f"{c.get('id')}\t{shown_state(c)}\t{c.get('branch')}\t{owner_label(c)}\t{c.get('path')}\t"
                           f"{c.get('expires_at') or 'never'}")
+        elif a.cmd == "bind-owner":
+            c = bind_owner(a.id, owner_agent=a.owner_agent, owner_record=a.owner_record,
+                           owner_session=a.owner_session)
+            print(c.get("id"))
         elif a.cmd == "install":
             rc, notes = install_hooks(a.dir)
             for line in notes:

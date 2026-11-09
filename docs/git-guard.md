@@ -22,17 +22,23 @@ fully resolved ref name, and a non-zero exit aborts the transaction. So:
    verbs, rename/copy destinations), and **fails closed** on what it cannot read: under the old design a parser miss was a
    bypass, now it is a false refusal with a readable message.
 
-## Integration status (2026-10-25; re-based 2026-11-07; plugin scaffold 2026-11-09)
+## Integration status (2026-10-25; re-based 2026-11-07; plugin scaffold 2026-11-09; W3 draft 2026-11-09)
 
 The guard, the hooks and the claim library exist; claims carry an owner and expire (`ade_claims.py new --ttl`, default
-72 h; `ade-git-guard claim ls`, slim-down E8). **A thin Paseo plugin scaffold lives at
-[`plugins/ade-claim/`](../plugins/ade-claim/)** (W2 / E8 F4): it registers `worktree.create.after` and runs
-`ade_claims.py new` with argv built from `{ worktree.path, worktree.branch }` plus
-`git rev-parse HEAD` and optional `remote.origin.url`. The helper path is **not** taken from the new
-worktree's checkout (untrusted): only `ADE_CLAIMS_PY` or `bin/ade_claims.py` beside the plugin install.
-It is **not installed or enabled on the operator Mac yet**; nothing creates claims in a live session until
-`paseo plugin install` wires it. Still to build: W2 follow-up (`ade-git-guard install` per new worktree if
-needed), W3 exporting `ADE_CLAIM_ID` (or binding owner on `agent.create.after`), W4 putting
+72 h; `ade-git-guard claim ls`, slim-down E8). **A thin Paseo plugin lives at
+[`plugins/ade-claim/`](../plugins/ade-claim/)** (W2 / E8 F4 + W3 draft):
+
+| Wave | Hook | What |
+|---|---|---|
+| W2 | `worktree.create.after` (waiting) | `ade_claims.py new` from `{ worktree.path, worktree.branch }` plus `git rev-parse HEAD` and optional `remote.origin.url`. |
+| W3 | `agent.open.before` (waiting) | If an active claim exists for `request.cwd`, merge `ADE_CLAIM_ID=<claim id>` into the launch env override map (covers the create-time first open and every resume; create.before env is not saved). |
+| W3 | `agent.create.after` (notification) | If a claim exists for `agent.cwd`, run `ade_claims.py bind-owner --id … --owner-agent <agent.id> --owner-record <agent.id>`. Cannot set env: Paseo's after-hook is fire-and-forget. |
+
+The helper path is **not** taken from the agent's worktree (untrusted): only `ADE_CLAIMS_PY` or
+`bin/ade_claims.py` beside the plugin install. Claim lookup prefers `<git-dir>/ade-claim`, then
+`ade_claims.py list --json --state active` filtered by path. It is **not installed or enabled on the
+operator Mac yet**; nothing creates or binds claims in a live session until `paseo plugin install` wires it.
+Still to build: W2 follow-up (`ade-git-guard install` per new worktree if needed), W4 putting
 `libexec/agent-bin` first on each agent's PATH. The operator runs `ade-git-guard install <repo>` once over `~/src/*` (the
 dangerous case is agent B in primary P moving Z's branch: the hook must be in P; the shim also installs it the first time
 an agent runs a non-read command there). The operator's shell and IDEs never go through the shim.
@@ -48,6 +54,7 @@ an agent runs a non-read command there). The operator's shell and IDEs never go 
 | `ade-git-guard claim ls [--state active\|released\|merged\|expired] [--json]` | List what the claim registry holds: id, state, branch, owner, path, `expires_at` (2026-11-06; until then the listing was only `ade_claims.py list`, PLAN C5). Exit 2 for any other `claim` verb. |
 | `ade_claims.py new --id ID --path DIR --branch B --base-sha S [--ttl HOURS] [...]` | Create a claim and its pointer; it expires after `--ttl` hours (default 72, 0 = never); exit 3 id exists, 4 path held by another owner's active claim. |
 | `ade_claims.py list [--state S] [--json]` | What `claim ls` runs. |
+| `ade_claims.py bind-owner --id ID --owner-agent A [--owner-record R] [--owner-session S]` | W3: merge `owner.*` on an active claim (what `plugins/ade-claim` runs from `agent.create.after`); exit 2 missing/inactive/usage. |
 | `ade_claims.py guard -- GIT_ARGS...` | What the shim runs. |
 | `ade_claims.py hook-ref STATE`, `hook-push REMOTE URL` | What the two hooks run (stdin is git's). |
 
