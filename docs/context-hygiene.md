@@ -237,6 +237,8 @@ not wired into `fleet-watch` or `settings.json`.
 Runs `claude -p "/context"` (no model request) in each directory of `config/context-budget.toml` (default this repo
 and `~`), compares the totals and the memory, skills and MCP rows with their budgets and with the previous night's
 `~/.local/state/context-budget/<date>.json`, and sends one `hermes-ping` line on a breach or a rise. `--instruction-lint`
-adds `bin/instruction-lint`'s counts, report-only. Exit 0 ok, 1 breach or rise, 3 a directory it could not measure. It
+adds `bin/instruction-lint`'s counts, report-only (over each measured directory, so `~` covers `~/AGENTS.md` and
+`~/.cursor/rules/home-agents.mdc`; or run `bin/instruction-lint --root ~` / pass those paths as FILE args — `~` in a
+FILE expands). Exit 0 ok, 1 breach or rise, 3 a directory it could not measure. It
 runs nightly as a Paseo schedule (J3): the `paseo schedule create` line is in the script's module docstring; the launchd job and its
 `install`/`uninstall` subcommands were removed 2026-11-06 (E5). Tests: `tests/test_context_budget_check.py`.
