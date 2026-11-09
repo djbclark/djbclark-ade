@@ -91,40 +91,31 @@ login wins and the key is not substituted.
 ## Resume — the step that is usually skipped
 
 The turn that hit the wall **already failed**. A new key alone leaves the tab idle and silent: the
-entity is dark, now with a working credential. Re-prompt it:
+entity is dark, now with a working credential. Re-prompt it with native `paseo send` (Wave 6:
+do **not** call `relay.py` / `acp-dispatch` / `acp-run`):
 
 ```sh
-~/src/djbclark-ade/skills/session-finder/relay.py <session-id> \
+YOUR_ID=$(paseo ls -a -g --json | …)   # this agent's id; never invent one
+paseo send --json --no-wait --agent <session-id> --text \
   "Quota wall: the Go account was exhausted and the credential is now '<label>'. Your last turn was
-   cut off mid-work. Check your own last state and continue it; do not restart from the beginning."
+   cut off mid-work. Check your own last state and continue it; do not restart from the beginning.
+   Please reply: ack ${YOUR_ID}"
 ```
 
-Find the id from `paseo ls -a -g --json` (session-finder's `fleet.py` was removed 2026-11-06), the registry row, or the tab the
-session is in — give `relay.py` an **id**, never a name. This applies to your own seat too: after
+Find `<session-id>` from `paseo ls -a -g --json` (session-finder's `fleet.py` was removed
+2026-11-06), the registry row, or the tab — give `paseo send` an **id**, never a name. After
 rotating for yourself, continue in place rather than opening a new tab.
 
-**Read the exit, do not assume the send.** A session stopped on an error is *usually* idle, but
-"it is idle, so it went in" is the assumption that leaves the entity dark with a working credential
-— which is the whole failure this skill exists to end. From an agent session relay's delivery watch
-is on by default and its exit code is the verdict:
+**Read the exit, do not assume the send.** Standing order 10: `paseo send`'s `$?` is never
+delivery; an agent-to-agent send is accepted (exit 5: queued) and proven only by the peer's
+`ack <your id>`. Exit 2 is not delivered. Check your own inbox for the ack; re-send when none
+arrives; report a peer you cannot reach rather than assuming it read. Say so through
+`hermes-ping` rather than moving on, and tell djbclark which account was exhausted and which
+credential now serves it.
 
-| exit | word | what it means for the resume |
-| --- | --- | --- |
-| 0 | `delivered` | the text is in the target's transcript (or its Paseo timeline): the turn was re-prompted |
-| 1 | not delivered | nothing arrived (bad id, an ended session, a refusal): fix the id and retry |
-| 3 | `unverified` | sent or still queued with no proof yet — **do not resend**; open the tab and look |
-| 2 / 4 | usage / no sender | the send never happened; nothing is pending, nothing to wait for |
-
-`accepted` and `queued` are settlements, not proof: relay keeps watching, but you must not report a
-resume you have not seen. When the send ends `unverified`, read the seat before believing it —
-`relay.py <id> --why` names what it is doing right now (`idle`, `working`, `silent`,
-`card:<kind>`), and a `silent` or `card:` answer means the resume did not land and a human is
-needed. Say so through `hermes-ping` rather than moving on, and tell djbclark which account was
-exhausted and which credential now serves it.
-
-First contact with a stopped session is where a **named ack** earns its place: put the ask in the
-text and pass `--expect-ack <label>`, so the resume is closed by the session's own words and
-`--pending` pages you if it never answers.
+First contact with a stopped session always asks for the named ack (put
+`Please reply: ack <your id>` in the text and pass `--no-wait`, since a send to a busy peer can
+block for minutes).
 
 ## When no account has headroom
 
