@@ -24,8 +24,12 @@ test("parseWorktreePayload rejects missing branch", () => {
   );
 });
 
-test("deriveClaimId sanitizes branch and path basename", () => {
-  assert.equal(deriveClaimId(FIXTURE), "wt-cursor-feature-x-djbclark-ade.cursor-feature-wt");
+test("deriveClaimId sanitizes branch and path basename and appends unique suffix", () => {
+  const id = deriveClaimId(FIXTURE, { randomHex: () => "a1b2c3d4" });
+  assert.equal(id, "wt-cursor-feature-x-djbclark-ade.cursor-feature-wt-a1b2c3d4");
+  const a = deriveClaimId(FIXTURE);
+  const b = deriveClaimId(FIXTURE);
+  assert.notEqual(a, b);
 });
 
 test("buildAdeClaimsNewArgv maps hook fields to ade_claims.py new", () => {
@@ -38,9 +42,10 @@ test("buildAdeClaimsNewArgv maps hook fields to ade_claims.py new", () => {
   });
   assert.equal(built.python, "python3");
   assert.equal(built.script, "/opt/ade/bin/ade_claims.py");
-  assert.deepEqual(built.argv, [
-    "new",
-    "--id", "wt-cursor-feature-x-djbclark-ade.cursor-feature-wt",
+  assert.equal(built.argv[0], "new");
+  assert.equal(built.argv[1], "--id");
+  assert.match(built.argv[2], /^wt-cursor-feature-x-djbclark-ade\.cursor-feature-wt-[0-9a-f]{8}$/);
+  assert.deepEqual(built.argv.slice(3), [
     "--path", FIXTURE.path,
     "--branch", FIXTURE.branch,
     "--base-sha", "deadbeef",

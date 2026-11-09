@@ -4,9 +4,11 @@ Thin daemon plugin for [wave4-E8 F4](https://github.com/djbclark/djbclark-ade/bl
 
 **Not installed on the operator Mac yet** (2026-11-09): scaffold only; install with `paseo plugin install /absolute/path/to/plugins/ade-claim` after review.
 
+Manifest: `id` is `ade-claim` (lowercase/hyphen only); `requirements.paseo` is `>=0.14.0` (not a top-level `paseoVersion`).
+
 ## Hook payload (Paseo ≥0.14)
 
-From [paseo.sh/docs/plugins/hooks](https://paseo.sh/docs/plugins/hooks#worktreecreateafter): `{ worktree: { path, branch, sourceCheckout } }`. There is no workspace or agent id yet; `base_sha` and `remote.origin.url` are read with `git -C <path>` in the hook handler. Owner binding (`--owner-agent`, `ADE_CLAIM_ID`) is left for a later `agent.create.after` / W3 slice.
+From [paseo.sh/docs/plugins/hooks](https://paseo.sh/docs/plugins/hooks#worktreecreateafter): `{ worktree: { path, branch, sourceCheckout } }`. There is no workspace or agent id yet; `base_sha` and `remote.origin.url` are read with `git -C <path>` in the hook handler. Claim ids append an 8-hex suffix per creation so a recreates/released claim cannot exit 3 and abort the worktree. Owner binding (`--owner-agent`, `ADE_CLAIM_ID`) is left for a later `agent.create.after` / W3 slice.
 
 ## Environment
 

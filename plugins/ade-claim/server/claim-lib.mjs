@@ -4,6 +4,7 @@
  * @typedef {{ path: string, branch: string, sourceCheckout: string }} WorktreeHookPayload
  */
 
+import { randomBytes } from "node:crypto";
 import { accessSync, constants } from "node:fs";
 import { dirname, join } from "node:path";
 
@@ -23,12 +24,20 @@ export function parseWorktreePayload(worktree) {
   return /** @type {WorktreeHookPayload} */ ({ path, branch, sourceCheckout });
 }
 
-/** @param {WorktreeHookPayload} worktree */
-export function deriveClaimId(worktree) {
+/**
+ * Per-creation claim id (branch + path basename + random suffix).
+ * Must be unique: ade_claims.py new rejects any existing id (exit 3), even if
+ * released/expired, and a throw on worktree.create.after removes the worktree.
+ *
+ * @param {WorktreeHookPayload} worktree
+ * @param {{ randomHex?: () => string }} [opts]
+ */
+export function deriveClaimId(worktree, opts = {}) {
   const base = worktree.path.split("/").pop() || "worktree";
   const branchPart = worktree.branch.replace(/\//g, "-").replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
   const pathPart = base.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
-  const raw = `wt-${branchPart || "branch"}-${pathPart || "dir"}`;
+  const suffix = (opts.randomHex || (() => randomBytes(4).toString("hex")))();
+  const raw = `wt-${branchPart || "branch"}-${pathPart || "dir"}-${suffix}`;
   const id = raw.length <= 128 ? raw : `wt-${raw.slice(0, 120)}`;
   if (!ID_RE.test(id)) {
     throw new Error(`derived claim id is invalid: ${id}`);
