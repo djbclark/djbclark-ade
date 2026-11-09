@@ -7,6 +7,8 @@ import {
   claimAllowsAgent,
   deriveClaimId,
   mergeAdeClaimIdEnv,
+  mergeAgentBinPath,
+  mergeOpenBeforeEnv,
   parseAgentCreateAfterAgent,
   parseAgentOpenBeforeRequest,
   parseClaimPointer,
@@ -14,6 +16,7 @@ import {
   resolveAdeClaimsScript,
   resolveClaimForCwd,
   resolveTrustedAdeClaimsScript,
+  resolveTrustedAgentBinDir,
 } from "./claim-lib.mjs";
 
 const FIXTURE = {
@@ -183,4 +186,50 @@ test("claimAllowsAgent only for unbound or matching owner", () => {
   assert.equal(claimAllowsAgent({ owner: { agent: "agent-a" } }, "agent-a"), true);
   assert.equal(claimAllowsAgent({ owner: { agent: "agent-a" } }, "agent-b"), false);
   assert.equal(claimAllowsAgent({ owner: { record: "agent-b" } }, "agent-b"), true);
+});
+
+test("mergeAgentBinPath prepends and dedupes", () => {
+  assert.deepEqual(
+    mergeAgentBinPath({ PATH: "/usr/bin:/opt/ade/libexec/agent-bin" }, "/opt/ade/libexec/agent-bin"),
+    { PATH: "/opt/ade/libexec/agent-bin:/usr/bin" },
+  );
+  assert.equal(
+    mergeAgentBinPath({ PATH: "/opt/ade/libexec/agent-bin:/usr/bin" }, "/opt/ade/libexec/agent-bin"),
+    undefined,
+  );
+  assert.deepEqual(
+    mergeAgentBinPath({}, "/opt/ade/libexec/agent-bin", { fallbackPath: "/usr/bin" }),
+    { PATH: "/opt/ade/libexec/agent-bin:/usr/bin" },
+  );
+});
+
+test("mergeOpenBeforeEnv combines claim id and agent-bin PATH", () => {
+  assert.deepEqual(
+    mergeOpenBeforeEnv({ FOO: "1" }, {
+      claimId: "wt-claim-1",
+      agentBinDir: "/opt/ade/libexec/agent-bin",
+      fallbackPath: "/usr/bin",
+    }),
+    {
+      FOO: "1",
+      ADE_CLAIM_ID: "wt-claim-1",
+      PATH: "/opt/ade/libexec/agent-bin:/usr/bin",
+    },
+  );
+  assert.equal(
+    mergeOpenBeforeEnv({
+      ADE_CLAIM_ID: "wt-claim-1",
+      PATH: "/opt/ade/libexec/agent-bin:/usr/bin",
+    }, {
+      claimId: "wt-claim-1",
+      agentBinDir: "/opt/ade/libexec/agent-bin",
+    }),
+    undefined,
+  );
+});
+
+test("resolveTrustedAgentBinDir walks pluginRoot for libexec/agent-bin", () => {
+  const pluginRoot = new URL("..", import.meta.url).pathname;
+  const dir = resolveTrustedAgentBinDir({}, { pluginRoot });
+  assert.match(dir, /\/libexec\/agent-bin$/);
 });
