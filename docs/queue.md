@@ -45,8 +45,10 @@ under **Carried**, newest first, one line each; an item leaves when it ships (in
 15. **`ade-backup-stores` LOWs and schedule** (PR 24 rounds 4-22): a launchd schedule, a generation retention,
     `O_NOFOLLOW` walks, the unscrubbed `.part`; and scrub or delete the first generation (it predates the credential
     scrub). Lives in `bin/ade-backup-stores`.
-16. **First release tag and `ade-update` LOWs** (2026-10-20): tag once CI, rule 10 and `ade-update` are settled (the
-    final slim-down PR is a natural point); a daily `ade-update --check` timer through `bin/ade-sched`.
+16. **First release tag and `ade-update` LOWs** (2026-10-20; plist scaffold 2026-11-09): tag once CI, rule 10 and
+    `ade-update` are settled (the final slim-down PR is a natural point). Daily `--check` plist is
+    `config/launchd/com.djbclark.ade-update-check.plist` (operator still runs `ade-sched install`); `just update` /
+    `just doctor` / `just install` aliases exist on the transitional catalog.
 17. **Codex Cloud environment** (2026-10-19): blocked upstream (openai/codex#50182, #51585); re-probe after each
     codex-cli release.
 18. **Claude API credits through Pi** (2026-11-08): the API check was billing-blocked; re-check only after funding

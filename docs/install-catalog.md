@@ -56,7 +56,14 @@ just install-check
 just install-doctor
 just install-plan
 just install-apply-dry
+just doctor                 # alias of install-doctor (setup-plan S2 name)
+just install [-- --yes]    # ade-install apply (dry-run by default; --yes for live)
+just update [-- --check]   # bin/ade-update for this checkout
 ```
+
+Daily behind-check (not auto-apply): install
+`config/launchd/com.djbclark.ade-update-check.plist` with `bin/ade-sched install`
+(operator step; queue Carried #15).
 
 - `plan` is print-only: `would-install` (has `install_argv`) / `needs-system` /
   `blocked` / `skip`.
