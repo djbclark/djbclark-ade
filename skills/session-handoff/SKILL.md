@@ -145,14 +145,14 @@ planted scripts would run as the operator. If Paseo is missing, say so and treat
 
 1. **Read** the canonical log's frontmatter `session_id` (S) and `writer`. `session_id` is not uniform
    (checked 2026-11-01 over 146 real logs under `~/.local/state/handoffs/chains/*/SESSION_LOG.md`): a
-   claude transcript UUID, a Paseo agent UUID (any TUI: omp, codex, claude), an old herdr pane id such as
+   claude transcript UUID, a Paseo agent UUID (any current TUI: pi, codex, claude, hermes; historical omp ids still appear), an old herdr pane id such as
    `w36:p3` (herdr was retired 2026-10-31), or free text (`solo`, `omp-...-stage-d`). `writer` is a TUI name, never an id, and can name
    the PREVIOUS provider after a cross-provider handoff: it matches nobody and excludes nobody.
 2. **Match S to a row of `paseo ls -a -g --json`** (trusted tools, see above). The row is the owner if S
    equals the row's `id` or `shortId`, or S (8+ chars) is a prefix of the row's `id`. A herdr pane id, a
    claude transcript UUID or free text matches no Paseo row (herdr panes were retired 2026-10-31): that is
-   step 4's no-match, never a match. Only a full-id match (A) or exemption B makes the chain yours. It also needs the row's `provider` (`claude/<model>`, `codex/...`, `omp/...`)
-   to fit `writer` (`claude*` to claude, `omp*` to omp, `codex` to codex, otherwise any); a row of
+   step 4's no-match, never a match. Only a full-id match (A) or exemption B makes the chain yours. It also needs the row's `provider` (`claude/<model>`, `codex/...`, `pi/...`; historical `omp/...`)
+   to fit `writer` (`claude*` to claude, `pi*` to pi, `codex` to codex, historical `omp*` to omp, otherwise any); a row of
    another agent is not the owner and is read as no match.
 3. **Live** means the row's `status` is not `closed` and `paseo agent inspect ID --json` does not read
    `Archived: true` (every other status is live). `finished` is only a transcript hint (the last prompt was `/handoff` or
@@ -169,7 +169,7 @@ planted scripts would run as the operator. If Paseo is missing, say so and treat
    To make that question concrete, list live rows other than you whose `cwd` (compare by `realpath`: a
    symlinked cwd such as `~/s/...` names the same directory) equals, is under or contains a
    `workspaces[].dir` of the log, of ANY agent kind. Do not filter by `writer`: after a cross-provider
-   successor (claude to omp, real in `standalone-03ad`, `net-watch-ops`, `go-followups-20261025`)
+   successor (claude to pi today; historically claude to omp in `standalone-03ad`, `net-watch-ops`, `go-followups-20261025`)
    the log still names the archived predecessor's provider until the successor's next checkpoint, so the
    live successor would be excluded. `writer` only orders the list (same provider first). Name them in the
    question. Never proceed on a silent "no owner found".
