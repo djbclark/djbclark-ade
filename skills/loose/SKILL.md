@@ -137,10 +137,14 @@ Work the list; each line is a command, not a memory.
            fail("reader failed")   # Wave 6: only the Claude CLI text-only path; no acp-run
        try:
            with open(prompt, "rb") as pin, open(reply, "wb") as o, open(err, "wb") as e:
-               # Claude -p with no tools (same flags acp-run's deny fallback used). Never acp-run.
+               # Zero-tool reader: empty setting-sources + disableAllHooks (not project
+               # settings — those load hooks; --tools "" does not disable hooks).
+               # Never acp-run. Pattern: bin/review-launch / argon dual-model note.
+               settings = json.dumps({"disableAllHooks": True, "hooks": {}})
                rc = subprocess.run(
                    ["claude", "-p", "--model", model, "--tools", "", "--strict-mcp-config",
-                    "--disallowedTools", "*", "--setting-sources", "project"],
+                    "--disallowedTools", "*", "--setting-sources", "",
+                    "--settings", settings, "--no-session-persistence"],
                    stdin=pin, stdout=o, stderr=e, timeout=300,
                ).returncode
        except (OSError, subprocess.SubprocessError): fail("reader failed")
@@ -154,17 +158,20 @@ Work the list; each line is a command, not a memory.
                and num(obj["max_body_chars"]) and type(obj["requires_repro"]) is bool):
            fail("reader reply rejected: STOP, operator review")      # payload never shown
        if obj["status"] != "ok": fail("operator_review_required: STOP drafting and submitting")
-       print("reader: claude -p --model %s --tools '' (no-tools)" % model)   # caller-chosen facts only
+       print("reader: claude -p --model %s --tools '' (no-tools, no hooks)" % model)   # caller-chosen facts only
        print("category:", obj["category"], "| max_body_chars:", obj["max_body_chars"], "| requires_repro:", obj["requires_repro"])
        print("sections:", [SECTIONS[i] for i in obj["sections"]])     # text comes from OUR maps
        print("questions:", [ENV[i] for i in obj["environment"]])
    ```
 
-   Pass `AGENT=claude`. The reader is **Claude CLI `-p` with no tools**
-   (`--tools ""`, `--strict-mcp-config`, `--disallowedTools '*'`, project settings
-   only) — the same text-only posture `acp-run --perm deny` used for Claude, without
-   the Wave 6 shim (`docs/slim/wave6-follow-up.md`). `--perm read-only` is NOT
-   equivalent (it still reads files). Do not call `acp-run`.
+   Pass `AGENT=claude`. The reader is **Claude CLI `-p` with no tools and no
+   project/user settings** (`--tools ""`, `--strict-mcp-config`,
+   `--disallowedTools '*'`, `--setting-sources ""`,
+   `--settings '{"disableAllHooks":true,"hooks":{}}'`, `--no-session-persistence`)
+   — hardened vs the old `acp-run` CLI fallback that used `--setting-sources project`
+   (hooks survive empty `--tools`). Without the Wave 6 shim
+   (`docs/slim/wave6-follow-up.md`). `--perm read-only` is NOT equivalent (it still
+   reads files). Do not call `acp-run`.
    No `eval`, no shell substitution, no `cat`/`read`
    of `raw`, `lst`, `prompt`, `err`, `log` or `reply`, and never print raw
    stderr or the reader's log (they can echo upstream text). The validation
