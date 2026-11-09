@@ -523,6 +523,17 @@ the operator's Grok Bot "Coding", following the current browser route (operator 
    `docs/slim/operator-prompts.md` P5 and P10. They become recipes, and their tests (T0-T3b) become `just github-setup
    --verify`, which runs from a throwaway branch and from the second test account.
 
+3. **Shipped 2026-11-09 (observe / plan / dry-run first):** transitional `config/github.toml` +
+   `config/github.schema.json`, checked-in `.github/app-manifest.json`, `bin/ade-github-setup` /
+   `bin/ade_github_setup.py`, and just recipes `github-setup-check`, `github-setup-observe`,
+   `github-setup-observe-local`, `github-setup-plan`, `github-setup` / `github-setup-dry`.
+   - `check` validates config + manifest (webhook inactive; statuses/checks write; PRs read).
+   - `observe` is read-only (`--local` skips `gh`; network probes never read secret *values*).
+   - `plan` and `apply --dry-run` (default) print steps and payloads; `apply --yes` is refused until
+     a follow-up lands live App/environment/ruleset mutations.
+   - Secrets refuse argv (PEM / `--private-key` / client-secret patterns); stdin redirect only
+     (`docs/github-setup.md`). S5 harden recipes and S5a stay deferred.
+
 ## S9. Cloud agents talk to Paseo agents, and Paseo agents run them (last, and only with headroom)
 
 Operator, 2026-11-07: plan it now, but build it at the tail end, and only if there is headroom. Cloud agents (Cursor's

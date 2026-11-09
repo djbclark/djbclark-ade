@@ -1,0 +1,17 @@
+{
+  "name": "ade-merge-gate",
+  "url": "https://github.com/djbclark/djbclark-ade",
+  "description": "Posts the adversary-marker commit status for djbclark-ade's merge gate. Webhook inactive; statuses and checks write; pull requests read-only; install on selected repositories only.",
+  "public": false,
+  "hook_attributes": {
+    "url": "https://example.com/ade-merge-gate-webhook-inactive",
+    "active": false
+  },
+  "default_permissions": {
+    "statuses": "write",
+    "checks": "write",
+    "pull_requests": "read",
+    "metadata": "read"
+  },
+  "default_events": []
+}
