@@ -96,7 +96,7 @@ do **not** call `relay.py` / `acp-dispatch` / `acp-run`):
 
 ```sh
 YOUR_ID=$(paseo ls -a -g --json | …)   # this agent's id; never invent one
-paseo send --json --no-wait --agent <session-id> --text \
+paseo send --json --no-wait <session-id> --prompt \
   "Quota wall: the Go account was exhausted and the credential is now '<label>'. Your last turn was
    cut off mid-work. Check your own last state and continue it; do not restart from the beginning.
    Please reply: ack ${YOUR_ID}"
