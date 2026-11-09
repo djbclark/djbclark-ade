@@ -404,9 +404,20 @@ def test_hermes_and_cursor_dry_run(monkeypatch, tmp_path):
     assert result["action"] == "would-fetch"
     assert "2026.11.05-86047df" in result["url"]
     assert result["dest"] == str(prefix / "agent")
+    assert result["trust"] == aui.VENDOR_TRUST_ENV
     assert not prefix.exists()
 
     h = aui.install_hermes(dry_run=True)
     assert h["action"] == "would-run-script"
     assert h["url"] == aui.HERMES_INSTALL_SCRIPT
     assert h["argv"][-1] == "--non-interactive"
+    assert h["trust"] == aui.VENDOR_TRUST_ENV
+
+
+def test_vendor_install_refuses_without_trust_env(monkeypatch, tmp_path):
+    monkeypatch.delenv(aui.VENDOR_TRUST_ENV, raising=False)
+    monkeypatch.setattr(aui, "_resolve_cursor_version", lambda: "2026.11.05-86047df")
+    with pytest.raises(aui.UserInstallError, match=aui.VENDOR_TRUST_ENV):
+        aui.install_cursor_cli(prefix=tmp_path / "bin", share=tmp_path / "share", dry_run=False)
+    with pytest.raises(aui.UserInstallError, match=aui.VENDOR_TRUST_ENV):
+        aui.install_hermes(dry_run=False)

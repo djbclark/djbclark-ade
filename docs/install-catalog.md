@@ -74,6 +74,8 @@ just install-apply-dry
   No `shell=True`, no root. Cursor reads the version pin from
   `https://cursor.com/install` then downloads the lab tarball; Hermes
   urllib-fetches `install.sh` and runs `bash <temp>/install.sh --non-interactive`.
+  Non-dry-run Cursor/Hermes installs require `ADE_USER_INSTALL_TRUST_VENDOR=1`
+  (TLS to the publisher CDN; no forever digest pin — standing order 8).
 
 ## E. Recorded recipes (2026-11-09)
 

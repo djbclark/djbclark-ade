@@ -39,6 +39,23 @@ CURSOR_VERSION_RE = re.compile(
 )
 HERMES_INSTALL_SCRIPT = "https://hermes-agent.nousresearch.com/install.sh"
 
+# Vendor HTTPS fetch + run/extract has the same trust model as the official
+# curl|bash installers this replaces (TLS to the publisher CDN; no forever pin —
+# standing order 8). Non-dry-run Cursor/Hermes installs refuse unless the
+# operator sets ADE_USER_INSTALL_TRUST_VENDOR=1 so apply --yes cannot silently
+# execute an unverified script/tarball.
+VENDOR_TRUST_ENV = "ADE_USER_INSTALL_TRUST_VENDOR"
+
+
+def _require_vendor_trust(tool: str) -> None:
+    if os.environ.get(VENDOR_TRUST_ENV, "").strip() in ("1", "true", "yes"):
+        return
+    raise UserInstallError(
+        f"{tool}: refusing unverified vendor download/exec without "
+        f"{VENDOR_TRUST_ENV}=1 (TLS-to-publisher only; same trust as curl|bash; "
+        "no forever digest pin — order 8). Dry-run needs no trust env."
+    )
+
 
 class UserInstallError(ValueError):
     """Refused or failed user-scoped install."""
@@ -294,7 +311,9 @@ def install_cursor_cli(
             "dest": str(dest_agent),
             "version": version,
             "share": str(final_dir),
+            "trust": VENDOR_TRUST_ENV,
         }
+    _require_vendor_trust("cursor-cli")
     blob = _urlopen(url, timeout=120.0)
     versions_dir = final_dir.parent
     versions_dir.mkdir(parents=True, exist_ok=True)
@@ -333,7 +352,9 @@ def install_hermes(*, dry_run: bool = False) -> dict[str, Any]:
             "action": "would-run-script",
             "url": HERMES_INSTALL_SCRIPT,
             "argv": ["bash", "<temp>/install.sh", "--non-interactive"],
+            "trust": VENDOR_TRUST_ENV,
         }
+    _require_vendor_trust("hermes")
     blob = _urlopen(HERMES_INSTALL_SCRIPT, timeout=60.0, accept="text/plain,*/*")
     with tempfile.TemporaryDirectory(prefix="ade-hermes-install-") as tmp:
         script = Path(tmp) / "install.sh"
