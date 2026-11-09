@@ -5,13 +5,17 @@
   ade-merge-ready --help
 
 Read-only. Uses `gh` to list open PRs (number >= --min, default 327), their
-pytest-linux / adversary-marker checks, and any live `adversary-verdict:v1`
-APPROVE whose head is the current tip. Never posts, never merges, never invents
-an APPROVE. Prints a table (or JSON) so an operator can paste a real marker.
+pytest-linux / adversary-marker checks. A live APPROVE is taken only from the
+`adversary-marker` check (the Action runs `bin/adversary_marker.py`'s
+attribution-aware `decide`: owner body editor / owner comment history). Raw
+markers in the body or comments are never enough on their own — that would
+count an outside author's or bot's same-head APPROVE. Never posts, never
+merges, never invents an APPROVE. Prints a table (or JSON) plus paste-ready
+templates so an operator can post a real marker.
 
 Classes:
-  merge_now       pytest-linux pass + adversary-marker success + live APPROVE
-  needs_approve   pytest-linux pass, no live APPROVE (typical Wave 6 tip)
+  merge_now       pytest-linux pass + adversary-marker success (attributed APPROVE)
+  needs_approve   pytest-linux pass, no attributed APPROVE (typical Wave 6 tip)
   tests_pending   pytest-linux pending / missing
   tests_fail      pytest-linux fail
   conflicting     GitHub mergeable == CONFLICTING
@@ -134,17 +138,10 @@ def collect(gh: str, repo: str, min_n: int) -> list[dict[str, Any]]:
         tests = check_status(check_text, "pytest-linux")
         adv = check_status(check_text, "adversary-marker")
 
-        view = run_gh(
-            gh,
-            ["pr", "view", str(n), "--repo", repo, "--json", "body,comments"],
-        )
-        if view.returncode != 0:
-            raise RuntimeError(f"gh pr view {n}: {(view.stderr or '')[:200]}")
-        data = json.loads(view.stdout or "{}")
-        heads = parse_approves(data.get("body") or "")
-        for c in data.get("comments") or []:
-            heads.extend(parse_approves(c.get("body") or ""))
-        live = head in heads
+        # Attribution lives in adversary-marker (bin/adversary_marker.py decide),
+        # not in an unfiltered body/comment scan. A raw same-head APPROVE from an
+        # outside author or bot must not flip live_approve / merge_now.
+        live = adv in ("pass", "success")
 
         klass = classify(
             mergeable=p.get("mergeable"),
