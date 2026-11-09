@@ -1,0 +1,520 @@
+#!/usr/bin/env python3
+"""ade-claim-pilot: record the S4 six-case claim-enforcement pilot metrics (no hard refuse).
+
+    ade-claim-pilot cases [--json]
+    ade-claim-pilot record CASE --result pass|fail|skip
+        [--setup-delay-s N] [--disk-delta-bytes N]
+        [--path-binding-failures N] [--false-refusals N]
+        [--false-refusal-reason TEXT]... [--note TEXT] [--when ISO8601] [--json]
+    ade-claim-pilot status [--json]
+    ade-claim-pilot show CASE [--json]
+    ade-claim-pilot clear [CASE] [--yes]
+    ade-claim-pilot gate [--json]
+
+Records live under `$ADE_STATE_DIR/s4-pilot.json` (default `~/.local/state/ade/s4-pilot.json`),
+written atomically; every field is read with `.get` so older records still load.
+
+This is the runnable recorder for queue item 6 / `docs/git-guard.md` S4: the six cases are
+fixed here so a live Mac pilot can be written down before any PATH hard refusal is enabled.
+Hard refusal stays off: this tool only records and reports; it never installs PATH shims,
+never sets `~/.local/bin/git`, and never flips any refuse path. `gate` exits 0 only when every
+case has a recorded `pass` (and reports that refusal is still off); it never enables refusal.
+
+Exit codes: 0 ok (or gate ready); 1 gate not ready; 2 usage / bad input / refused clear without
+`--yes`; 3 record IO failed.
+"""
+from __future__ import annotations
+
+import argparse
+import contextlib
+import json
+import os
+import sys
+import tempfile
+import time
+from pathlib import Path
+from typing import Any
+
+TOOL = "ade-claim-pilot"
+RECORD_VERSION = 1
+EXIT_OK, EXIT_NOT_READY, EXIT_USAGE, EXIT_IO = 0, 1, 2, 3
+RESULTS = ("pass", "fail", "skip")
+
+# Fixed catalogue matching docs/git-guard.md "S4 six-case enforcement pilot".
+CASES: dict[str, dict[str, str]] = {
+    "1": {
+        "name": "ADE code task",
+        "what": (
+            "One code change in a linked worktree of djbclark-ade with an active claim; "
+            "stage, commit, push the branch."
+        ),
+    },
+    "2": {
+        "name": "One-line queue task",
+        "what": (
+            "One-line edit to docs/queue.md (or a stand-in docs line) in its own claimed "
+            "worktree, PR-only to master."
+        ),
+    },
+    "3": {
+        "name": "Ops promotion",
+        "what": (
+            "Designated promoter: clean git merge --ff-only of a primary / ~/ops master to a "
+            "published revision (order 9 exception b); no commit made there."
+        ),
+    },
+    "4": {
+        "name": "Submodule task",
+        "what": (
+            "One task that updates or builds through a submodule / nested checkout from a "
+            "claimed parent worktree."
+        ),
+    },
+    "5": {
+        "name": "Fixed-cwd agent",
+        "what": (
+            "An agent whose tool cwd is fixed (cannot cd to a worktree) but whose git writes "
+            "must still target a claimed workspace (-C / explicit worktree path)."
+        ),
+    },
+    "6": {
+        "name": "Long-lived server",
+        "what": (
+            "A long-running process (dev server, watcher) started from a claimed workspace and "
+            "left up across other agents' turns."
+        ),
+    },
+}
+
+
+def state_dir() -> Path:
+    return Path(os.environ.get("ADE_STATE_DIR") or (Path.home() / ".local/state" / "ade"))
+
+
+def record_path() -> Path:
+    return state_dir() / "s4-pilot.json"
+
+
+def utc_now() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def atomic_write(path: Path, text: str) -> None:
+    """Temp file beside the target, fsync, os.replace: a reader sees the old or the new file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
+def empty_record() -> dict[str, Any]:
+    return {
+        "v": RECORD_VERSION,
+        "tool": TOOL,
+        "hard_refuse": False,  # never flipped by this tool
+        "cases": {},
+        "updated_at": None,
+    }
+
+
+def load_record() -> dict[str, Any]:
+    path = record_path()
+    if not path.is_file():
+        return empty_record()
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"{TOOL}: cannot read {path}: {exc.__class__.__name__}") from None
+    if not isinstance(raw, dict):
+        raise SystemExit(f"{TOOL}: {path}: root must be a JSON object")
+    cases = raw.get("cases")
+    if cases is None:
+        cases = {}
+    if not isinstance(cases, dict):
+        raise SystemExit(f"{TOOL}: {path}: cases must be an object")
+    out = empty_record()
+    out["v"] = raw.get("v", RECORD_VERSION)
+    out["tool"] = raw.get("tool", TOOL)
+    # Hard refuse is always false here: older files cannot turn it on through this tool.
+    out["hard_refuse"] = False
+    out["cases"] = cases
+    out["updated_at"] = raw.get("updated_at")
+    return out
+
+
+def save_record(rec: dict[str, Any]) -> None:
+    rec = dict(rec)
+    rec["v"] = RECORD_VERSION
+    rec["tool"] = TOOL
+    rec["hard_refuse"] = False
+    rec["updated_at"] = utc_now()
+    try:
+        atomic_write(record_path(), json.dumps(rec, indent=2, sort_keys=True) + "\n")
+    except OSError as exc:
+        print(f"{TOOL}: cannot write {record_path()}: {exc}", file=sys.stderr)
+        raise SystemExit(EXIT_IO) from None
+
+
+def normalize_case(value: str) -> str:
+    text = value.strip()
+    if text in CASES:
+        return text
+    # Allow "case-1" / "CASE 1" / names
+    lowered = text.casefold().replace("_", " ").replace("-", " ").strip()
+    if lowered.startswith("case "):
+        lowered = lowered[5:].strip()
+    if lowered in CASES:
+        return lowered
+    for cid, meta in CASES.items():
+        if meta["name"].casefold() == text.casefold():
+            return cid
+    raise SystemExit(
+        f"{TOOL}: unknown case {value!r}: use 1..6 or a case name "
+        f"({', '.join(CASES[c]['name'] for c in CASES)})"
+    )
+
+
+def parse_nonneg_float(text: str) -> float:
+    try:
+        value = float(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"not a number: {text!r}") from exc
+    if value != value or value < 0 or value == float("inf"):  # noqa: PLR0124 — NaN/inf check
+        raise argparse.ArgumentTypeError(f"must be finite and not negative: {text!r}")
+    return value
+
+
+def parse_nonneg_int(text: str) -> int:
+    try:
+        value = int(text, 10)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"not an integer: {text!r}") from exc
+    if value < 0:
+        raise argparse.ArgumentTypeError(f"must not be negative: {text!r}")
+    return value
+
+
+def case_summary(rec: dict[str, Any]) -> list[dict[str, Any]]:
+    rows = []
+    for cid, meta in CASES.items():
+        entry = rec.get("cases", {}).get(cid)
+        if not isinstance(entry, dict):
+            entry = None
+        rows.append({
+            "id": cid,
+            "name": meta["name"],
+            "what": meta["what"],
+            "recorded": entry is not None,
+            "result": None if entry is None else entry.get("result"),
+            "record": entry,
+        })
+    return rows
+
+
+def gate_state(rec: dict[str, Any]) -> dict[str, Any]:
+    rows = case_summary(rec)
+    missing = [r["id"] for r in rows if not r["recorded"]]
+    failed = [r["id"] for r in rows if r["recorded"] and r["result"] != "pass"]
+    ready = not missing and not failed
+    return {
+        "ready": ready,
+        "hard_refuse": False,
+        "hard_refuse_note": (
+            "hard refusal stays off; this tool never enables PATH refusal or "
+            "~/.local/bin/git even when ready is true"
+        ),
+        "missing": missing,
+        "not_pass": failed,
+        "passed": [r["id"] for r in rows if r["result"] == "pass"],
+        "cases": rows,
+        "record_path": str(record_path()),
+        "updated_at": rec.get("updated_at"),
+    }
+
+
+def emit(obj: Any, as_json: bool, plain: str) -> None:
+    if as_json:
+        print(json.dumps(obj, indent=2, sort_keys=True))
+    else:
+        sys.stdout.write(plain)
+        if not plain.endswith("\n"):
+            sys.stdout.write("\n")
+
+
+def cmd_cases(args: argparse.Namespace) -> int:
+    rows = [{"id": cid, **meta} for cid, meta in CASES.items()]
+    if args.json:
+        emit({"tool": TOOL, "cases": rows, "hard_refuse": False}, True, "")
+        return EXIT_OK
+    lines = [f"{TOOL}: six S4 cases (hard refuse off; record only)", ""]
+    for row in rows:
+        lines.append(f"{row['id']}. {row['name']}")
+        lines.append(f"   {row['what']}")
+    emit(None, False, "\n".join(lines))
+    return EXIT_OK
+
+
+def cmd_record(args: argparse.Namespace) -> int:
+    cid = normalize_case(args.case)
+    if args.result not in RESULTS:
+        print(f"{TOOL}: --result must be one of {', '.join(RESULTS)}", file=sys.stderr)
+        return EXIT_USAGE
+    reasons = list(args.false_refusal_reason or [])
+    entry: dict[str, Any] = {
+        "result": args.result,
+        "setup_delay_s": args.setup_delay_s,
+        "disk_delta_bytes": args.disk_delta_bytes,
+        "path_binding_failures": args.path_binding_failures,
+        "false_refusals": args.false_refusals,
+        "false_refusal_reasons": reasons,
+        "note": args.note,
+        "recorded_at": args.when or utc_now(),
+        "case_name": CASES[cid]["name"],
+    }
+    # Drop Nones so older readers and diffs stay small; .get on read covers missing fields.
+    entry = {k: v for k, v in entry.items() if v is not None}
+    rec = load_record()
+    cases = dict(rec.get("cases") or {})
+    cases[cid] = entry
+    rec["cases"] = cases
+    save_record(rec)
+    payload = {
+        "tool": TOOL,
+        "case": cid,
+        "name": CASES[cid]["name"],
+        "record": entry,
+        "hard_refuse": False,
+        "path": str(record_path()),
+    }
+    plain = (
+        f"{TOOL}: recorded case {cid} ({CASES[cid]['name']}) result={args.result} "
+        f"at {entry['recorded_at']} (hard refuse still off; {record_path()})"
+    )
+    emit(payload, args.json, plain)
+    return EXIT_OK
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    rec = load_record()
+    gate = gate_state(rec)
+    if args.json:
+        emit({"tool": TOOL, **gate}, True, "")
+        return EXIT_OK
+    lines = [
+        f"{TOOL}: S4 pilot status (hard refuse off)",
+        f"record: {gate['record_path']}",
+        f"updated_at: {gate['updated_at'] or '(none)'}",
+        f"ready_for_operator_signoff: {'yes' if gate['ready'] else 'no'}",
+        f"hard_refuse: off ({gate['hard_refuse_note']})",
+        "",
+    ]
+    for row in gate["cases"]:
+        if not row["recorded"]:
+            mark = "unrun"
+        else:
+            mark = str(row["result"])
+        lines.append(f"{row['id']}. {row['name']}: {mark}")
+        entry = row["record"] or {}
+        if row["recorded"]:
+            delay = entry.get("setup_delay_s")
+            disk = entry.get("disk_delta_bytes")
+            pbf = entry.get("path_binding_failures")
+            fr = entry.get("false_refusals")
+            bits = []
+            if delay is not None:
+                bits.append(f"setup_delay_s={delay}")
+            if disk is not None:
+                bits.append(f"disk_delta_bytes={disk}")
+            if pbf is not None:
+                bits.append(f"path_binding_failures={pbf}")
+            if fr is not None:
+                bits.append(f"false_refusals={fr}")
+            if bits:
+                lines.append("   " + " ".join(bits))
+            reasons = entry.get("false_refusal_reasons") or []
+            for reason in reasons:
+                lines.append(f"   false_refusal: {reason}")
+            note = entry.get("note")
+            if note:
+                lines.append(f"   note: {note}")
+    emit(None, False, "\n".join(lines))
+    return EXIT_OK
+
+
+def cmd_show(args: argparse.Namespace) -> int:
+    cid = normalize_case(args.case)
+    rec = load_record()
+    entry = rec.get("cases", {}).get(cid)
+    payload = {
+        "tool": TOOL,
+        "case": cid,
+        "name": CASES[cid]["name"],
+        "what": CASES[cid]["what"],
+        "recorded": isinstance(entry, dict),
+        "record": entry if isinstance(entry, dict) else None,
+        "hard_refuse": False,
+    }
+    if args.json:
+        emit(payload, True, "")
+        return EXIT_OK
+    if not payload["recorded"]:
+        emit(None, False, f"{TOOL}: case {cid} ({CASES[cid]['name']}): unrun")
+        return EXIT_OK
+    assert isinstance(entry, dict)
+    lines = [
+        f"{TOOL}: case {cid} ({CASES[cid]['name']})",
+        f"result: {entry.get('result')}",
+        f"recorded_at: {entry.get('recorded_at')}",
+        f"setup_delay_s: {entry.get('setup_delay_s')}",
+        f"disk_delta_bytes: {entry.get('disk_delta_bytes')}",
+        f"path_binding_failures: {entry.get('path_binding_failures')}",
+        f"false_refusals: {entry.get('false_refusals')}",
+    ]
+    for reason in entry.get("false_refusal_reasons") or []:
+        lines.append(f"false_refusal: {reason}")
+    if entry.get("note"):
+        lines.append(f"note: {entry.get('note')}")
+    lines.append("hard_refuse: off")
+    emit(None, False, "\n".join(lines))
+    return EXIT_OK
+
+
+def cmd_clear(args: argparse.Namespace) -> int:
+    if not args.yes:
+        print(f"{TOOL}: refusing to clear without --yes", file=sys.stderr)
+        return EXIT_USAGE
+    rec = load_record()
+    if args.case is None:
+        save_record(empty_record())
+        plain = f"{TOOL}: cleared all S4 records ({record_path()}; hard refuse still off)"
+        emit({"tool": TOOL, "cleared": "all", "hard_refuse": False, "path": str(record_path())},
+             args.json, plain)
+        return EXIT_OK
+    cid = normalize_case(args.case)
+    cases = dict(rec.get("cases") or {})
+    cases.pop(cid, None)
+    rec["cases"] = cases
+    save_record(rec)
+    plain = f"{TOOL}: cleared case {cid} ({record_path()}; hard refuse still off)"
+    emit({"tool": TOOL, "cleared": cid, "hard_refuse": False, "path": str(record_path())},
+         args.json, plain)
+    return EXIT_OK
+
+
+def cmd_gate(args: argparse.Namespace) -> int:
+    rec = load_record()
+    gate = gate_state(rec)
+    payload = {"tool": TOOL, **gate}
+    if args.json:
+        emit(payload, True, "")
+    else:
+        if gate["ready"]:
+            plain = (
+                f"{TOOL}: gate ready (all six cases pass); hard refusal still off — "
+                "operator sign-off required before any separate enablement change"
+            )
+        else:
+            bits = []
+            if gate["missing"]:
+                bits.append("unrun=" + ",".join(gate["missing"]))
+            if gate["not_pass"]:
+                bits.append("not_pass=" + ",".join(gate["not_pass"]))
+            plain = (
+                f"{TOOL}: gate not ready ({'; '.join(bits)}); hard refusal stays off"
+            )
+        emit(None, False, plain)
+    return EXIT_OK if gate["ready"] else EXIT_NOT_READY
+
+
+def build_parser() -> argparse.ArgumentParser:
+    ap = argparse.ArgumentParser(
+        prog=TOOL,
+        description=__doc__.split("\n\n")[0],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Hard refusal stays off. Records: $ADE_STATE_DIR/s4-pilot.json. "
+            "Cases and pass/fail criteria: docs/git-guard.md (S4)."
+        ),
+    )
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    p = sub.add_parser("cases", help="list the six fixed S4 cases")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_cases)
+
+    p = sub.add_parser("record", help="record metrics for one case (does not refuse)")
+    p.add_argument("case", help="case id 1..6 or case name")
+    p.add_argument("--result", required=True, choices=RESULTS)
+    p.add_argument("--setup-delay-s", type=parse_nonneg_float, default=None)
+    p.add_argument("--disk-delta-bytes", type=parse_nonneg_int, default=None)
+    p.add_argument("--path-binding-failures", type=parse_nonneg_int, default=None)
+    p.add_argument("--false-refusals", type=parse_nonneg_int, default=None)
+    p.add_argument(
+        "--false-refusal-reason",
+        action="append",
+        default=None,
+        metavar="TEXT",
+        help="stderr / reason text for a false refusal (repeatable)",
+    )
+    p.add_argument("--note", default=None)
+    p.add_argument("--when", default=None, help="ISO-8601 stamp (default: now UTC)")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_record)
+
+    p = sub.add_parser("status", help="show recorded results and gate readiness")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_status)
+
+    p = sub.add_parser("show", help="show one case record")
+    p.add_argument("case")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_show)
+
+    p = sub.add_parser("clear", help="clear one case or all records (requires --yes)")
+    p.add_argument("case", nargs="?", default=None)
+    p.add_argument("--yes", action="store_true", help="required; refuses without it")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_clear)
+
+    p = sub.add_parser(
+        "gate",
+        help="exit 0 iff all six cases are recorded pass; never enables hard refuse",
+    )
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_gate)
+
+    return ap
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = build_parser()
+    try:
+        args = ap.parse_args(argv)
+    except SystemExit as exc:
+        code = exc.code
+        if code is None:
+            return EXIT_OK
+        return int(code) if isinstance(code, int) else EXIT_USAGE
+    try:
+        return int(args.func(args))
+    except SystemExit as exc:
+        code = exc.code
+        if code is None:
+            return EXIT_OK
+        if isinstance(code, int):
+            return code
+        print(str(code), file=sys.stderr)
+        return EXIT_USAGE
+
+
+if __name__ == "__main__":
+    sys.exit(main())
