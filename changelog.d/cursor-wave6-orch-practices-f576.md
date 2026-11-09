@@ -1,3 +1,5 @@
 ### Changed
 
-- `docs/orchestration-practices.md` teaches native `paseo run` / `paseo send` / `paseo wait` as the live ops path; `acp-dispatch` / `relay.py` / `acp-run` are Wave 6 transitional shims only (#349).
+- `docs/orchestration-practices.md` taught native `paseo run` / `paseo send` /
+  `paseo wait` as the live ops path; `acp-dispatch` / `relay.py` / `acp-run`
+  stayed named only as Wave 6 transitional shims (#349).
