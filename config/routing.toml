@@ -203,23 +203,24 @@ access = "cli-only"
 # Code on Sonnet 5.5 (operator 2026-10-18: "claude should be in a code pool, it's just fable
 # that shouldn't be"); rank 12 keeps the use-it-or-lose-it pools first.
 # This replaces the 2026-10-15 "no code row" rule; Fable stays frontier-only. No research row;
-# Haiku lookups go through the Agent tool, not acp-dispatch. Fable at xhigh is never suggested:
-# acp-dispatch makes it an operator-approved run (2026-10-18).
+# Haiku lookups go through the Agent tool, not a dispatched slice. Fable at xhigh is never
+# suggested: it remains an operator-approved run (2026-10-18).
 models = { judgment = "opus --effort high", frontier = "fable --effort high", code = "sonnet --effort high" }
 
 # The Claude Max plan's monthly API credits (an expiring dollar grant; aiuse labels the pool
-# "omp credits", provider `omp`), reached through Paseo's omp provider (`acp-dispatch omp`) or
-# any ANTHROPIC_API_KEY path. Operator 2026-10-19 lifted the 2026-10-15 per-run gate: a normal
-# tier, used with discernment. First for `api-only` work (rank 1),
-# otherwise `code` and `bulk` slices so the grant is fully spent before it expires; never left
-# unspent. Code ranks behind claude (12) and ahead of
-# Cursor. `grant_days` makes the router treat the pool as an expiring grant: it earns the
-# burn-first bonus while it holds more than burn_first_waste_min points above an even spend
-# over the grant period (a pool far from exhausted late in the month), see route_agent.py.
+# "omp credits", provider `omp`). The omp executable is retired (2026-11-08); the intended
+# successor is Pi on Anthropic API (`paseo run --provider pi …` once pool acceptance lands),
+# or any ANTHROPIC_API_KEY path. Operator 2026-10-19 lifted the 2026-10-15 per-run gate: a
+# normal tier, used with discernment. First for `api-only` work (rank 1), otherwise `code`
+# and `bulk` slices so the grant is fully spent before it expires; never left unspent. Code
+# ranks behind claude (12) and ahead of Cursor. `grant_days` makes the router treat the pool
+# as an expiring grant: it earns the burn-first bonus while it holds more than
+# burn_first_waste_min points above an even spend over the grant period (a pool far from
+# exhausted late in the month), see route_agent.py.
 [[service]]
 name = "omp"
 retired = true # 2026-11-08: executable retired; Pi Anthropic API acceptance is blocked, not a subscription failure.
-cli = "omp (Claude API credits: acp-dispatch omp --model anthropic/claude-sonnet-5-5)"
+cli = "retired omp (Claude API credits → Pi Anthropic API once accepted; was anthropic/claude-sonnet-5-5)"
 good_at = { api-only = 1, judgment = 2, code = 13, bulk = 35 }
 billing = "credits"
 # Adversary rounds and other judgment slices (operator 2026-10-23): Opus 5.5 at high on the API credits
@@ -228,10 +229,10 @@ billing = "credits"
 # the burn-first bonus; the bigteam adversary names it explicitly. judgment_tier makes it eligible for
 # judgment (frontier stays claude/codex: omp has no frontier row).
 judgment_tier = true
-note = "Claude Max monthly API credits (expiring grant); API-only work first, then judgment (adversary rounds), else code/bulk so the credits are spent before the reset"
+note = "Claude Max monthly API credits (expiring grant); API-only work first, then judgment (adversary rounds), else code/bulk so the credits are spent before the reset. Row stays retired until Pi Anthropic acceptance."
 grant_days = 30
-# Skipped for acp-dispatch kinds while omp has no enabled Anthropic login (route_agent.py
-# omp_anthropic_ready: 2026-10-19 the OAuth refresh token had expired, `omp login` needed).
+# ready_probe kept for the historical omp Anthropic login check (route_agent.py
+# omp_anthropic_ready); the executable is retired, so the probe cannot clear automatic routing.
 ready_probe = "omp-anthropic"
 max_parallel = 2
 access = "cli-only"
@@ -266,8 +267,9 @@ access = "cli-only"
 # (the codex model list, 2026-10-25), at medium; bulk and mechanical on gpt-6-luna, "fast and
 # affordable ... for easier tasks", at low. No cheaper tier is adequate for code (luna is for
 # easier tasks) and nothing here measures the older gpt-6-sol as cheaper.
-# 2026-10-18's astra-wave incident: its 5-hour window holds about one hard slice. acp-dispatch
-# also reserves in-flight estimates per service. max_parallel = 1 keeps one codex slice per wave.
+# 2026-10-18's astra-wave incident: its 5-hour window holds about one hard slice. The
+# dispatcher (now native `paseo run`; Wave 6 shims transitional) also reserves in-flight
+# estimates per service. max_parallel = 1 keeps one codex slice per wave.
 # 2026-10-19: the plan changed to the $100 plan (aiuse "prolite"); max_parallel = 1
 # and the in-flight rule await re-calibration from `route_agent.py calibrate`.
 plenty_kinds = ["judgment", "code", "bulk", "mechanical"]
