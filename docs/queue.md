@@ -7,87 +7,87 @@ under **Carried**, newest first, one line each; an item leaves when it ships (in
 
 ## Carried
 
-1. **Issue 284 follow-ups** (2026-11-04): the goal / verify-until-pass loop (evaluate the Paseo plugin `37chengshan/goal-mode`
+1. **Wave 6 shim deletion** (2026-11-09): remove `relay.py`, `acp-dispatch` and `acp-run` after one live cycle (soft deadline 2026-11-20); C3 outside files migrated or waived; keep `review-launch`. Checklist: `docs/slim/wave6-follow-up.md`. Blocked on Mac live-cycle evidence and order-11 C3 ticks. (Absorbs the deletion half of former Carried 33.)
+2. **Issue 284 follow-ups** (2026-11-04): the goal / verify-until-pass loop (evaluate the Paseo plugin `37chengshan/goal-mode`
    first), Codex and opencode wiring of `secret_read_gate.py` and `post-edit-check --hook`, a Claude `filesystem.denyRead`
    trial, a Codex deny-read profile (openai/codex#22179), whether `hook-deadline` passes exit 2 through, applying the
    template's new hook and deny entries live (operator's yes, order 11), the gate's slow-glob budget LOW, and
    `bin/instruction-lint` over `~/AGENTS.md` and `home-agents.mdc`. Lives in `docs/secret-deny.md`, `docs/post-edit-check.md`.
-2. **Interruption recovery** (issue 278, 2026-11-04): D1 provider and capture probes, G1 persistence and failure-injection
+3. **Interruption recovery** (issue 278, 2026-11-04): D1 provider and capture probes, G1 persistence and failure-injection
    gates, a canary, legacy record recovery; PR 290 (`ade-recovery`) parked until Paseo's native resume is measured (PLAN J6,
    J9). Lives in `docs/checkpoint.md`.
-3. **Context visibility in Paseo** (2026-10-27): Paseo Desktop's meter divides by the 1M manifest window and ignores
+4. **Context visibility in Paseo** (2026-10-27): Paseo Desktop's meter divides by the 1M manifest window and ignores
    `autoCompactWindow` (getpaseo/paseo#4949); examine the nudge state, search prior art, then offer the operator a live
    per-agent readout or tighter nudge tiers. The self-slash half closed with self-slash (E4). Lives in
    `docs/context-hygiene.md`, `bin/context-watch`.
-4. **Model tiers as data** (2026-10-31): one `config/model-tiers.toml` and a `promote` command so a new top model is one
+5. **Model tiers as data** (2026-10-31): one `config/model-tiers.toml` and a `promote` command so a new top model is one
    data change; re-check the design's inventory against E7's `route_agent.py` and `config/routing.toml [lead]` first.
    Design: `docs/history/model-tiers-design.md`.
-5. **Push on completion** (load-watch agent 96a17744, 2026-10-23): a delegated slice tells its requester "done: title,
+6. **Push on completion** (load-watch agent 96a17744, 2026-10-23): a delegated slice tells its requester "done: title,
    status, report" when its turn ends, instead of waiters polling; candidates are Paseo's `tell-agent` plugin (J6) or the
    dispatch footer. Lives in `docs/orchestration-practices.md`.
-6. **ade-git-guard's open items** (2026-10-25 onward): nothing creates claims yet (wire `ade_claims.py new --ttl` to a
+7. **ade-git-guard's open items** (2026-10-25 onward): nothing creates claims yet (wire `ade_claims.py new --ttl` to a
    Paseo `worktree.create.after` hook; E8 F4), the O2 redesign's residual (writes outside the caller's claimed workspace,
    with failing tests and an adversary round), the six-case enforcement pilot (S4) before any hard refusal, and the
    optional narrowing E8 declined (F3: a security decision for the operator). Lives in `docs/git-guard.md`.
-7. **Drop the brew Paseo for our fork** (2026-10-24): disruptive, **ask the operator first**; after the connected-hosts work.
-8. **Paseo connected hosts** (2026-10-24): connect vps-primary (user `djbclark`) after a quiesced Paseo upgrade.
-9. **Paseo in-place model change upstream** (2026-10-23): `docs/upstream-issues.md` entry 17 (`paseo agent model <id>
+8. **Drop the brew Paseo for our fork** (2026-10-24): disruptive, **ask the operator first**; after the connected-hosts work.
+9. **Paseo connected hosts** (2026-10-24): connect vps-primary (user `djbclark`) after a quiesced Paseo upgrade.
+10. **Paseo in-place model change upstream** (2026-10-23): `docs/upstream-issues.md` entry 17 (`paseo agent model <id>
    <model>`), so `bin/paseo-set-model` (used by `route_agent.py substrate --apply`) can go.
-10. **Live `~/.claude/settings.json` lacks the `context_size_nudge.py` registration** the template has (2026-10-23):
+11. **Live `~/.claude/settings.json` lacks the `context_size_nudge.py` registration** the template has (2026-10-23):
     the operator's edit (C2 batch, `docs/slim/log.md`).
-11. **Codex threads left unresolved on merged PRs** (2026-10-23): read each against its PR and fix what is real (review
+12. **Codex threads left unresolved on merged PRs** (2026-10-23): read each against its PR and fix what is real (review
     rule 9 is advisory since J8).
-12. **Templates, Phase 1** (2026-10-20): declare the `TODO_*` secret names, give each template field a home, make the
+13. **Templates, Phase 1** (2026-10-20): declare the `TODO_*` secret names, give each template field a home, make the
     Codex and Claude templates merges, and the `ade-template-check` scanner LOWs (adversary round 3 on PR 23). Lives in
     `agents/README.md`.
-13. **Delete the credential vault after 2026-11-19** (owner djbclark): `~/.local/state/ade/credential-bak/`, nothing reads it.
-14. **`ade-backup-stores` LOWs and schedule** (PR 24 rounds 4-22): a launchd schedule, a generation retention,
+14. **Delete the credential vault after 2026-11-19** (owner djbclark): `~/.local/state/ade/credential-bak/`, nothing reads it.
+15. **`ade-backup-stores` LOWs and schedule** (PR 24 rounds 4-22): a launchd schedule, a generation retention,
     `O_NOFOLLOW` walks, the unscrubbed `.part`; and scrub or delete the first generation (it predates the credential
     scrub). Lives in `bin/ade-backup-stores`.
-15. **First release tag and `ade-update` LOWs** (2026-10-20): tag once CI, rule 10 and `ade-update` are settled (the
+16. **First release tag and `ade-update` LOWs** (2026-10-20): tag once CI, rule 10 and `ade-update` are settled (the
     final slim-down PR is a natural point); a daily `ade-update --check` timer through `bin/ade-sched`.
-16. **Codex Cloud environment** (2026-10-19): blocked upstream (openai/codex#50182, #51585); re-probe after each
+17. **Codex Cloud environment** (2026-10-19): blocked upstream (openai/codex#50182, #51585); re-probe after each
     codex-cli release.
-17. **Claude API credits through Pi** (2026-11-08): the API check was billing-blocked; re-check only after funding
+18. **Claude API credits through Pi** (2026-11-08): the API check was billing-blocked; re-check only after funding
     and explicit pool acceptance, then verify its aiuse attribution. Claude subscription quota is separate; archived
     omp is never a fallback. Lives in `~/src/aiuse`, `skills/model-routing` C.
-18. **Paseo Telegram plugin as the phone surface** (SF-Q16, 2026-10-19): blocked on a release compatible with the
+19. **Paseo Telegram plugin as the phone surface** (SF-Q16, 2026-10-19): blocked on a release compatible with the
     current daemon; then re-point `hermes-ping` and the approval buttons, Hermes's relay as the rollback. The 2fado
     Telegram fallback (2026-10-25) waits for this.
-19. **Basic Memory** (2026-10-23): seven of the eight accepted recommendations (Q1 is done); `bin/bm-lint`'s two LOWs
+20. **Basic Memory** (2026-10-23): seven of the eight accepted recommendations (Q1 is done); `bin/bm-lint`'s two LOWs
     (PR 55) and its weekly hook-up in site-djbclark `fleet-watch` (offer the parked patch to the operator).
-20. **The podman, kev, laya and hyades-docker microVMs** (2026-10-23): inventory first, into a new `docs/microvms.md`.
-21. **Phase 0 data decisions** (2026-10-20): where the 41 unreferenced bigteam report sets go, host or bundle
+21. **The podman, kev, laya and hyades-docker microVMs** (2026-10-23): inventory first, into a new `docs/microvms.md`.
+22. **Phase 0 data decisions** (2026-10-20): where the 41 unreferenced bigteam report sets go, host or bundle
     `~/src/one-offs`, push or bundle branches on no origin. The scanner is gone (E2); its findings are in
     `docs/history/ade-everywhere-phase0-scan-2026-10-20.md`.
-22. **Research checker: namespace-aware citations across runs** (2026-10-10): a bare evidence id from another run passes
+23. **Research checker: namespace-aware citations across runs** (2026-10-10): a bare evidence id from another run passes
     `research_check.py claims`. Lives in `skills/research`.
-23. **Ingest web-interface AI conversations** (Gemini, Grok web; 2026-08-23) into the memory system: not started.
-24. **Dynamic model and effort adjustment by token efficiency** (2026-08-23): not started; the Jev effort nudge that
+24. **Ingest web-interface AI conversations** (Gemini, Grok web; 2026-08-23) into the memory system: not started.
+25. **Dynamic model and effort adjustment by token efficiency** (2026-08-23): not started; the Jev effort nudge that
     approached it was deleted (E2). Lives in `skills/model-routing` B.
-25. **S1 Phase B adapters** (hindsight, 2026-08-23): the Claude tail and checkpoint adapter onward; site-djbclark's
+26. **S1 Phase B adapters** (hindsight, 2026-08-23): the Claude tail and checkpoint adapter onward; site-djbclark's
     `bin/hindsight_s1.py`.
-26. **jj (Jujutsu)** (2026-08-23): a larger, separate bet than the retired cow pastures; not started.
-27. **Loopback shim by default on forgejo.mit.edu, then ask SIPB** (2026-10-14): steps 1, 4, 5, 6 done; the ticket is
+27. **jj (Jujutsu)** (2026-08-23): a larger, separate bet than the retired cow pastures; not started.
+28. **Loopback shim by default on forgejo.mit.edu, then ask SIPB** (2026-10-14): steps 1, 4, 5, 6 done; the ticket is
     left. Lives in `~/src/loopback-port-shim`.
-28. **Leftovers from 2026-08-23**: confirm-then-delete the hindsight banks `hermes-telegram` and `herdr-shared`; site-djbclark's
+29. **Leftovers from 2026-08-23**: confirm-then-delete the hindsight banks `hermes-telegram` and `herdr-shared`; site-djbclark's
     failing `just ops-memory-sync`; file the upstream drafts in `docs/upstream-issues.md` (operator decision).
-29. **Re-check Context7 use** (due 2026-10-24): count its calls in the transcripts; if still about zero, ask whether to
+30. **Re-check Context7 use** (due 2026-10-24): count its calls in the transcripts; if still about zero, ask whether to
     block it (the 2026-10-10 numbers: `docs/history/disabled-skills.md`).
-30. **Keep the instruction files lean** (2026-08-24 cost review): Claude's docs advise under 200 lines; AGENTS.md is
+31. **Keep the instruction files lean** (2026-08-24 cost review): Claude's docs advise under 200 lines; AGENTS.md is
     338 lines after the E11 rewrite (2026-11-07), the review rules being most of it.
-31. **`bg` registers its own deadline** (2026-11-01): site-public-djbclark `bin/bg`, waits for the operator's yes (order 11).
-32. **Two test LOWs from the 2026-10-23 rework-2 PRs**: `tests/test_bin_modes.py`'s docstring says "outside tests/" while
+32. **`bg` registers its own deadline** (2026-11-01): site-public-djbclark `bin/bg`, waits for the operator's yes (order 11).
+33. **Two test LOWs from the 2026-10-23 rework-2 PRs**: `tests/test_bin_modes.py`'s docstring says "outside tests/" while
     the code exempts a `tests/` directory at any depth (PR 32 round 6); no test pins that `xhigh` and `max` are accepted as
     `[lead]` effort values (PR 33 round 2).
-33. **From the slim-down, for the follow-up PR and after** (2026-11-07): remove the relay shim (by 2026-11-20) and the
-    dispatch shim with `tools/acp-run` after one live cycle (Wave 6), keeping `bin/review-launch`, and port `skills/loose`'s
+34. **Slim-down leftovers after Wave 6 deletion** (2026-11-07; deletion itself is Carried 1 / `docs/slim/wave6-follow-up.md`): port `skills/loose`'s
     upstream-issue reader off `acp-run --perm deny`; aiuse's acp-run
     readers (`src/aiuse/collectors/acp_usage.py`); the shim does not apply the Argon `fallback_block` at dispatch (E7 E5);
     the `quota_nudge.py`/`cswap_quota_context.sh` decision (R2-18); `routing-recalibrate` as a Paseo schedule if wanted
     (E5); upstream Paseo filings (a codex read-only mode, a quota-pause primitive, a workspace-claim primitive).
-34. **`bin/review-pr` and `gh pr checks --watch` register no deadline of their own** (2026-11-07, W3 docs critic): run them under `deadline run` until one of them registers itself (`docs/deadline.md` Known gaps).
-35. **One-step install and automatic updates on a new machine, Mac and Linux** (operator, 2026-11-07): an easy way to install
+35. **`bin/review-pr` and `gh pr checks --watch` register no deadline of their own** (2026-11-07, W3 docs critic): run them under `deadline run` until one of them registers itself (`docs/deadline.md` Known gaps).
+36. **One-step install and automatic updates on a new machine, Mac and Linux** (operator, 2026-11-07): an easy way to install
     djbclark-ade with all its dependencies and TUIs (Paseo and its providers' CLIs, the modern-CLI tools, `graft`, `aiuse`,
     skills linked by `skill-everywhere`), and an automatic way to keep it and every dependency current (software tracks
     its latest release, order 8). Start from what exists: `bin/ade-update` (this checkout only), `bin/ade-sched` for the
@@ -100,7 +100,7 @@ under **Carried**, newest first, one line each; an item leaves when it ships (in
     S9 plans cloud-agent communication last, after signing and the earlier sections, and builds only with headroom.
     Overall and local coordination now share the local lead.
 
-36. **Pi-only third-party client** (operator, 2026-11-08): migration and archive-only history search shipped;
+37. **Pi-only third-party client** (operator, 2026-11-08): migration and archive-only history search shipped;
     omp/OpenCode/Crush are archived, never fallbacks. Dynamic defaults use explicit per-pool acceptance and
     task boundaries (`docs/pi-defaults.md`); normal startup and an unpinned live request passed after activation.
     Restored Grok subscription access (Pi and vendor ACP) and Antigravity Pi passed basic tool checks

@@ -27,7 +27,7 @@ Each doc carries its own summary.
 |---|---|
 | [docs/model-routing.md](docs/model-routing.md) | which provider, model and effort for what work; numbers are dated, re-probe (`route_agent.py show`) |
 | [docs/orchestration-practices.md](docs/orchestration-practices.md) | rules every fan-out follows: briefs, the shim's exit codes, messaging, the stagger rule |
-| [docs/slim/PLAN.md](docs/slim/PLAN.md), [docs/slim/log.md](docs/slim/log.md) | the slim-down (2026-11-06/07): the plan, its rulings and the per-wave record of what was lost on purpose |
+| [docs/slim/PLAN.md](docs/slim/PLAN.md), [docs/slim/log.md](docs/slim/log.md), [docs/slim/wave6-follow-up.md](docs/slim/wave6-follow-up.md) | the slim-down (2026-11-06/07): the plan, its rulings and the per-wave record of what was lost on purpose; Wave 6 follow-up deletion checklist for `relay.py` / `acp-dispatch` / `acp-run` (soft deadline 2026-11-20) |
 | [docs/paseo-only-rearchitecture.md](docs/paseo-only-rearchitecture.md) | the Paseo-only plan of 2026-10-30; the phases the slim-down superseded are marked |
 | [docs/queue.md](docs/queue.md) | carried work and blockers, one line each: check it before proposing new work |
 | [docs/threat-model.md](docs/threat-model.md) | threat model (2026-10-20, re-based 2026-11-07): assets, actors, entry points, ranked threats |
