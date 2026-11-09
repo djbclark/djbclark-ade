@@ -841,3 +841,30 @@ def test_config_with_a_nul_path_or_deep_nesting_does_not_crash(tmp_path):
     # what matters is that the run does not crash and the empty-project check says so.
     assert proc.returncode != 2
     assert any("no readable config" in s or "no `projects` object" in s for s in out["skipped"])
+
+
+def test_config_project_path_with_a_lone_surrogate_is_skipped_not_aborted(tmp_path):
+    # Queue Carried #19 / PR 55 LOW: os.walk on "/tmp/x\ud800y" used to abort the whole
+    # run with internal error: UnicodeEncodeError (a ValueError).
+    write_note(tmp_path / "store", "a.md", "see [[a2]]\n")
+    write_note(tmp_path / "store", "a2.md", "see [[a]]\n")
+    cfg = tmp_path / "surr.json"
+    cfg.write_text('{"projects": {"p": {"path": "/tmp/x\\ud800y"}}}', encoding="utf-8")
+    proc, out = jrun(tmp_path / "store", "--config", str(cfg))
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    assert "internal error" not in proc.stderr
+    assert any("project p not fully readable" in s for s in out["skipped"])
+
+
+def test_ok_headline_names_the_skipped_count(tmp_path):
+    # Queue Carried #19 / PR 55 LOW: a partial read used to print plain "ok, no findings"
+    # with no skipped count in the headline (skips only listed below).
+    write_note(tmp_path, "a.md", "see [[b]]\n")
+    write_note(tmp_path, "b.md", "see [[a]]\n")
+    os.symlink(tmp_path / "unmounted", tmp_path / "gone.md")
+    proc = run(tmp_path)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    head = proc.stdout.splitlines()[0]
+    assert "ok, no findings" in head
+    assert "skipped" in head  # e.g. ", 2 skipped," (symlink + missing config)
+    assert "notes: symlink: gone.md" in proc.stdout

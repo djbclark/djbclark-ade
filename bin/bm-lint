@@ -44,6 +44,8 @@ the run. A symlinked directory (`sub -> /elsewhere`, or `y.md -> /dir`) is liste
 and a directory that cannot be listed are named under `skipped` (path only, never errno text
 or content); a note that vanishes mid-lint is ignored. A store root that cannot be listed, or
 a run that read no note at all while some were skipped, is exit 2, never "ok, no findings".
+A clean run that skipped some notes (or the empty-project config) still exits 0 and names
+the skipped count in the headline.
 
 Checks (finding `check` ids):
   missing-type        filename-prefix note (reference_/feedback_/project_/user_) with no
@@ -416,17 +418,21 @@ class Linter:
             if not isinstance(ppath, str) or not ppath:
                 continue
             ppath = os.path.expanduser(ppath)
-            if "\0" in ppath:  # os.walk raises ValueError on it; not a path to look at
-                self.skipped.append("empty-project: project %s not fully readable" % name)
-                continue
             count = 0
             unreadable = []
             linked = False
-            for dirpath, dirnames, filenames in os.walk(ppath, onerror=unreadable.append):
-                linked = linked or any(os.path.islink(os.path.join(dirpath, d)) for d in dirnames)
-                count += sum(1 for fn in filenames if fn.endswith(".md"))
-                if count:
-                    break
+            try:
+                # A path with a NUL or a lone surrogate makes os.walk raise ValueError
+                # (UnicodeEncodeError is a ValueError): list the project, never abort.
+                for dirpath, dirnames, filenames in os.walk(ppath, onerror=unreadable.append):
+                    linked = linked or any(
+                        os.path.islink(os.path.join(dirpath, d)) for d in dirnames)
+                    count += sum(1 for fn in filenames if fn.endswith(".md"))
+                    if count:
+                        break
+            except ValueError:
+                self.skipped.append("empty-project: project %s not fully readable" % name)
+                continue
             if not count and (linked or any(not isinstance(e, FileNotFoundError) for e in unreadable)):
                 # an unlistable directory, or a symlinked one we never follow, is not proof of
                 # an empty project
@@ -710,11 +716,14 @@ def run_lint(argv):
         return 1 if findings else 0
 
     stamp = datetime.datetime.now().astimezone().strftime("%Y-%m-%d %H:%M %Z")
+    n_skipped = len(linter.skipped)
+    skip_bit = (", %d skipped" % n_skipped) if n_skipped else ""
     if not findings:
-        print("bm-lint: ok, no findings (store: %s, %d notes, %s)" % (root, len(store.notes), stamp))
+        print("bm-lint: ok, no findings (store: %s, %d notes%s, %s)" % (
+            root, len(store.notes), skip_bit, stamp))
     else:
-        print("bm-lint: %d finding(s) across %d check(s) (store: %s, %d notes, %s)" % (
-            len(findings), len(summary), root, len(store.notes), stamp))
+        print("bm-lint: %d finding(s) across %d check(s) (store: %s, %d notes%s, %s)" % (
+            len(findings), len(summary), root, len(store.notes), skip_bit, stamp))
     for s in linter.skipped:
         print("  skipped: %s" % s)
     for f in findings:
