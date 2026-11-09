@@ -187,23 +187,35 @@ Local focused tests use the full `bg` path. Record the explicit decision first:
    when touching the archived `opencode-plugins/` tree; similar V1 names do not
    establish a V2 hook contract.
 
-## 6. Live readout: `bin/context-watch` (2026-10-28)
+## 6. Live readout: `bin/context-watch` (2026-10-28; nudge bands 2026-11-09)
 
 `bin/context-watch` prints, for each running Claude Code agent, its context size against the
-compaction ceiling that actually triggers, fullest first:
+compaction ceiling that actually triggers, fullest first. Do **not** trust Paseo Desktop's own
+context meter for headroom: it divides by the model-manifest window (often 1M) and ignores
+`autoCompactWindow` (upstream [getpaseo/paseo#4949](https://github.com/getpaseo/paseo/issues/4949),
+open 2026-10-28). The meter fix belongs upstream; this tool is the in-repo live readout that
+scores against the real autoCompact wall and labels the nudge tier the Claude hook would use.
 
 ```
-d3df4a46 sudo-secretspec secrets-collect low findings 241k/267k (90%) wall in 26k
-c7fbc11d ade-ops-pt 153k/267k (57%) wall in 114k
+d3df4a46 sudo-secretspec secrets-collect low findings 241k/267k (90%) hard · wall in 26k · paseo~24%
+c7fbc11d ade-ops-pt 153k/267k (57%) boundary · wall in 114k · paseo~15%
 ```
 
-It exists because `paseo inspect` carries no context fields and Paseo's own bar divides by a 1M
-window and ignores `autoCompactWindow` (upstream getpaseo/paseo#4949, open 2026-10-28). Flags:
-`--json` (list of records for scripts), `--min-pct N` (hide emptier agents and unknown sizes; compared
-unrounded), `--source auto|paseo|recent`, `--recent-minutes M` (both numbers finite and not negative,
-else exit 2). Read-only, writes not even bytecode, exit 0 always (2 for bad usage). Titles and cwd go
-through `context-watch`'s `clean_text` (copied from the removed `fleet.py`, 2026-11-06) onto one line; ids must be uuids. It is
-not wired into `fleet-watch` or `settings.json`.
+The band is `ok` / `early` / `boundary` / `hard` / `wall` (same ladder as
+`claude/hooks/context_size_nudge.py`): `wall` at or past the autoCompact ceiling; `hard` within
+`ASK_HEADROOM` (50k) of that ceiling, at the hook's `ASK_TOTAL`, or past `ASK_GROWTH` when a
+baseline is known; `boundary` from `BOUNDARY_TOTAL` (120k); `early` only when
+`~/.claude/state/context-nudges.json` has a baseline and growth past `EARLY_GROWTH` (32k).
+`paseo~N%` is what the wrong Desktop meter would show (tokens / manifest window: 200k for Haiku,
+1M otherwise), so a line that reads 90% real / `paseo~24%` is #4949 in one glance. Flags:
+`--json` (list of records for scripts; adds `nudge_band`, `nudge_level`, `nudge_growth`,
+`paseo_window`, `paseo_pct`), `--min-pct N` (hide emptier agents and unknown sizes; compared
+unrounded), `--min-band BAND` (hide agents below `ok|early|boundary|hard|wall` and every
+unknown size), `--source auto|paseo|recent`, `--recent-minutes M` (both numbers finite and not
+negative, else exit 2). Read-only, writes not even bytecode, exit 0 always (2 for bad usage).
+Titles and cwd go through `context-watch`'s `clean_text` (copied from the removed `fleet.py`,
+2026-11-06) onto one line; ids must be uuids. It is not wired into `fleet-watch` or
+`settings.json`.
 
 1. **Tokens.** The newest non-sidechain assistant usage block of the session transcript,
    `input + cache_read + cache_creation`: `_last_context_tokens` of
@@ -240,3 +252,8 @@ and `~`), compares the totals and the memory, skills and MCP rows with their bud
 adds `bin/instruction-lint`'s counts, report-only. Exit 0 ok, 1 breach or rise, 3 a directory it could not measure. It
 runs nightly as a Paseo schedule (J3): the `paseo schedule create` line is in the script's module docstring; the launchd job and its
 `install`/`uninstall` subcommands were removed 2026-11-06 (E5). Tests: `tests/test_context_budget_check.py`.
+
+This is the *baseline* half of context visibility (what a fresh session already costs before any
+turn). For *live* fullness of running agents against the real autoCompact wall — and for the
+Paseo Desktop meter mismatch tracked in getpaseo/paseo#4949 — use section 6's `context-watch`,
+not the Desktop bar and not this nightly check.

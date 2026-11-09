@@ -94,8 +94,8 @@ def test_lines_sorted_fullest_first_with_wall_distance(box):
     r = box.run()
     assert r.returncode == 0, r.stderr
     assert r.stdout.splitlines() == [
-        "bbbbbbbb big one 214k/267k (80%) wall in 53k",
-        "aaaaaaaa small one 94k/267k (35%) wall in 173k",
+        "bbbbbbbb big one 214k/267k (80%) boundary · wall in 53k · paseo~21%",
+        "aaaaaaaa small one 94k/267k (35%) ok · wall in 173k · paseo~9%",
     ]
 
 
@@ -109,13 +109,15 @@ def test_json_is_a_list_of_records_sorted_the_same_way(box):
     assert (top["short_id"], top["title"], top["tokens"], top["ceiling"], top["headroom"], top["pct"]) == (
         "bbbbbbbb", "big one", 214000, 267000, 53000, 80.1)
     assert top["status"] == "ok" and top["session"] == SESS_B and top["source"] == "paseo"
+    assert (top["nudge_band"], top["paseo_window"], top["paseo_pct"]) == ("boundary", 1_000_000, 21.4)
+    assert top["nudge_level"] is None and top["nudge_growth"] is None
 
 
 def test_ceiling_follows_autocompactwindow_minus_33k(box):
     box.settings(autoCompactWindow=100000)
     box.agent(ID_A, "x", SESS_A)
     box.transcript(SESS_A, [assistant(1000, 50000, 0)])
-    assert box.run().stdout.splitlines() == ["aaaaaaaa x 51k/67k (76%) wall in 16k"]
+    assert box.run().stdout.splitlines() == ["aaaaaaaa x 51k/67k (76%) hard · wall in 16k · paseo~5%"]
 
 
 def test_without_settings_falls_back_to_the_model_window(box):
@@ -131,7 +133,8 @@ def test_past_the_wall_reads_as_such(box):
     box.settings(autoCompactWindow=300000)
     box.agent(ID_A, "x", SESS_A)
     box.transcript(SESS_A, [assistant(1, 270000, 0)])
-    assert box.run().stdout.splitlines() == ["aaaaaaaa x 270k/267k (101%) wall passed by 3k"]
+    assert box.run().stdout.splitlines() == [
+        "aaaaaaaa x 270k/267k (101%) wall · wall passed by 3k · paseo~27%"]
 
 
 def test_min_pct_hides_the_emptier_agents_and_unknown_ones(box):
@@ -139,7 +142,8 @@ def test_min_pct_hides_the_emptier_agents_and_unknown_ones(box):
     box.agent(ID_C, "gone", "no-such-session")
     r = box.run("--min-pct", "50")
     assert r.returncode == 0
-    assert r.stdout.splitlines() == ["bbbbbbbb big one 214k/267k (80%) wall in 53k"]
+    assert r.stdout.splitlines() == [
+        "bbbbbbbb big one 214k/267k (80%) boundary · wall in 53k · paseo~21%"]
 
 
 def test_unreadable_transcript_prints_question_mark_and_exits_0(box):
@@ -150,8 +154,10 @@ def test_unreadable_transcript_prints_question_mark_and_exits_0(box):
     r = box.run()
     assert r.returncode == 0
     lines = r.stdout.splitlines()
-    assert lines[:2] == ["bbbbbbbb big one 214k/267k (80%) wall in 53k",
-                         "aaaaaaaa small one 94k/267k (35%) wall in 173k"]
+    assert lines[:2] == [
+        "bbbbbbbb big one 214k/267k (80%) boundary · wall in 53k · paseo~21%",
+        "aaaaaaaa small one 94k/267k (35%) ok · wall in 173k · paseo~9%",
+    ]
     assert sorted(lines[2:]) == ["cccccccc gone ?", "dddddddd garbled ?"]
     rows = {x["id"]: x for x in json.loads(box.run("--json").stdout)}
     assert rows[ID_C]["status"] == "no-transcript" and rows[ID_C]["tokens"] is None
@@ -186,7 +192,8 @@ def test_paseo_down_falls_back_to_transcripts_modified_in_the_last_30_minutes(bo
     box.transcript(SESS_B, [assistant(1, 200000, 0)], age=31 * 60)  # too old
     r = box.run()
     assert r.returncode == 0, r.stderr
-    assert r.stdout.splitlines() == ["5e5a0000 proj 100k/267k (37%) wall in 167k"]
+    assert r.stdout.splitlines() == [
+        "5e5a0000 proj 100k/267k (37%) ok · wall in 167k · paseo~10%"]
     row = json.loads(box.run("--json").stdout)[0]
     assert row["source"] == "recent" and row["id"] == SESS_A
     assert [x["id"] for x in json.loads(box.run("--json", "--recent-minutes", "60").stdout)] == [SESS_B, SESS_A]
@@ -214,7 +221,8 @@ def test_agent_title_with_escapes_and_a_newline_prints_as_one_clean_line(box):
     box.agent(ID_A, EVIL, SESS_A)
     box.transcript(SESS_A, [assistant(1, 100000, 0)])
     out = box.run().stdout
-    assert out == "aaaaaaaa x FAKE 0k/267k (0%) wall in 267k 100k/267k (37%) wall in 167k\n"
+    assert out == ("aaaaaaaa x FAKE 0k/267k (0%) wall in 267k "
+                   "100k/267k (37%) ok · wall in 167k · paseo~10%\n")
     assert not any(ord(c) < 32 for c in out[:-1])
 
 
@@ -223,7 +231,7 @@ def test_recent_mode_cwd_with_escapes_prints_clean(box):
     box.ls_fails = True
     box.transcript(SESS_A, [json.dumps({"cwd": "/tmp/\x1b]0;pwned\x07dir\nFAKE"}), assistant(1, 100000, 0)], age=10)
     out = box.run().stdout
-    assert out == "5e5a0000 dir FAKE 100k/267k (37%) wall in 167k\n"
+    assert out == "5e5a0000 dir FAKE 100k/267k (37%) ok · wall in 167k · paseo~10%\n"
     assert not any(ord(c) < 32 for c in out[:-1])
 
 
@@ -327,9 +335,11 @@ def test_a_huge_configured_window_is_ignored_not_a_traceback(box):
     box.agent(ID_A, "x", SESS_A)
     box.transcript(SESS_A, [assistant(1, 50000, 0)])
     r = box.run()
-    assert (r.returncode, r.stdout) == (0, "aaaaaaaa x 50k/167k (30%) wall in 117k\n"), r.stderr
+    assert (r.returncode, r.stdout) == (
+        0, "aaaaaaaa x 50k/167k (30%) ok · wall in 117k · paseo~5%\n"), r.stderr
     r = box.run(env={"CLAUDE_CODE_AUTO_COMPACT_WINDOW": "9" * 400})
-    assert (r.returncode, r.stdout) == (0, "aaaaaaaa x 50k/167k (30%) wall in 117k\n"), r.stderr
+    assert (r.returncode, r.stdout) == (
+        0, "aaaaaaaa x 50k/167k (30%) ok · wall in 117k · paseo~5%\n"), r.stderr
 
 
 def test_a_window_just_over_the_cap_is_ignored_and_one_at_the_cap_is_kept(box):
@@ -350,7 +360,7 @@ def test_a_non_string_paseo_name_prints_as_clean_text(box):
     box.settings(autoCompactWindow=300000)
     box.agent(ID_A, ["a\x1b[2J"], SESS_A)
     box.transcript(SESS_A, [assistant(1, 100000, 0)])
-    assert box.run().stdout == "aaaaaaaa 100k/267k (37%) wall in 167k\n"
+    assert box.run().stdout == "aaaaaaaa 100k/267k (37%) ok · wall in 167k · paseo~10%\n"
 
 
 def test_paseo_ls_includes_background_agents_and_stdin_is_closed(box):
@@ -387,7 +397,7 @@ def test_home_with_glob_magic_still_works(box, tmp_path):
     box.settings(autoCompactWindow=300000)
     box.agent(ID_A, "x", SESS_A)
     box.transcript(SESS_A, [assistant(1, 100000, 0)])
-    assert box.run().stdout == "aaaaaaaa x 100k/267k (37%) wall in 167k\n"
+    assert box.run().stdout == "aaaaaaaa x 100k/267k (37%) ok · wall in 167k · paseo~10%\n"
 
 
 def test_the_same_agent_under_two_workspaces_resolves_deterministically(box):
@@ -411,9 +421,10 @@ def test_headroom_under_1k_is_not_shown_as_0k(box):
     box.settings(autoCompactWindow=300000)
     box.agent(ID_A, "x", SESS_A)
     box.transcript(SESS_A, [assistant(1, 266799, 0)])
-    assert box.run().stdout == "aaaaaaaa x 267k/267k (100%) wall in <1k\n"
+    assert box.run().stdout == "aaaaaaaa x 267k/267k (100%) hard · wall in <1k · paseo~27%\n"
     box.transcript(SESS_A, [assistant(1, 267300, 0)])
-    assert box.run().stdout == "aaaaaaaa x 267k/267k (100%) wall passed by <1k\n"
+    assert box.run().stdout == (
+        "aaaaaaaa x 267k/267k (100%) wall · wall passed by <1k · paseo~27%\n")
 
 
 def test_min_pct_compares_the_unrounded_percentage(box):
@@ -475,3 +486,61 @@ def test_clean_text_matches_fleet_py_while_it_exists():
                "\x00\x1f\x7f\x9f", "  \t pad \n", "\U000e01efᅟᅠ"]
     assert [cw.clean_text(x) for x in samples] == [fleet.clean_text(x) for x in samples]
     assert cw.PASEO_ID.pattern == fleet.PASEO_ID.pattern
+
+
+# --- context visibility (queue Carried #3 / getpaseo/paseo#4949, 2026-11-09) ---
+
+
+def test_nudge_band_ladder_matches_the_hook_against_the_real_ceiling():
+    cw = _module()
+    assert cw.nudge_band(50_000, 267_000) == "ok"
+    assert cw.nudge_band(50_000, 267_000, growth=40_000) == "early"
+    assert cw.nudge_band(130_000, 267_000) == "boundary"
+    assert cw.nudge_band(220_000, 267_000) == "hard"
+    assert cw.nudge_band(200_000, 267_000, growth=140_000) == "hard"
+    assert cw.nudge_band(270_000, 267_000) == "wall"
+    assert cw.nudge_band(20_000, 67_000) == "hard"  # within ASK_HEADROOM of a small wall
+
+
+def test_paseo_meter_window_is_the_manifest_not_autocompact():
+    cw = _module()
+    assert cw.paseo_meter_window("claude-haiku-5-5") == 200_000
+    assert cw.paseo_meter_window("claude-sonnet-5-5") == 1_000_000
+    assert cw.paseo_meter_window("claude-opus-5-5[1m]") == 1_000_000
+
+
+def test_nudge_state_baseline_yields_early_and_growth(box):
+    box.settings(autoCompactWindow=300000)
+    box.agent(ID_A, "x", SESS_A)
+    box.transcript(SESS_A, [assistant(0, 80000, 0)])  # 80k total
+    state = box.home / ".claude" / "state"
+    state.mkdir(parents=True)
+    (state / "context-nudges.json").write_text(json.dumps({
+        SESS_A: {"baseline": 40_000, "level": 1, "last": 80_000}}))
+    row = json.loads(box.run("--json").stdout)[0]
+    assert (row["nudge_band"], row["nudge_growth"], row["nudge_level"]) == ("early", 40_000, 1)
+    assert box.run().stdout.splitlines() == [
+        "aaaaaaaa x 80k/267k (30%) early · wall in 187k · paseo~8%"]
+
+
+def test_min_band_hides_quieter_agents_and_unknown_sizes(box):
+    two_agents(box)
+    box.agent(ID_C, "gone", "no-such-session")
+    r = box.run("--min-band", "boundary")
+    assert r.returncode == 0
+    assert r.stdout.splitlines() == [
+        "bbbbbbbb big one 214k/267k (80%) boundary · wall in 53k · paseo~21%"]
+    assert box.run("--min-band", "hard").stdout == ""
+    bad = box.run("--min-band", "loud")
+    assert bad.returncode == 2 and bad.stdout == ""
+
+
+def test_haiku_paseo_meter_uses_200k_not_1m(box):
+    box.settings(autoCompactWindow=300000)
+    box.agent(ID_A, "x", SESS_A, provider="claude/claude-haiku-5-5")
+    box.transcript(SESS_A, [assistant(1, 100000, 0)])
+    row = json.loads(box.run("--json").stdout)[0]
+    assert (row["ceiling"], row["paseo_window"], row["paseo_pct"], row["nudge_band"]) == (
+        167000, 200_000, 50.0, "ok")
+    assert box.run().stdout.splitlines() == [
+        "aaaaaaaa x 100k/167k (60%) ok · wall in 67k · paseo~50%"]
