@@ -164,7 +164,10 @@ def test_a_queued_send_is_logged_not_delivered_and_offers_the_fixer(tmp_path, mo
     log = (tmp_path / "state" / "sample.log").read_text()
     assert "delivery=queued, not delivered" in log
     assert "queued it, not delivered" in m.pinged()
-    assert "paseo run --provider cursor/default" in m.pinged() and "acp-dispatch" not in m.pinged()
+    ping = m.pinged()
+    assert "paseo run --provider cursor/default" in ping and "acp-dispatch" not in ping
+    assert "--prompt-file" not in ping
+    assert "Read and act on the load-watch brief at" in ping
 
 
 def test_without_paseo_the_spike_reaches_the_operator_and_nothing_raises(tmp_path, monkeypatch):

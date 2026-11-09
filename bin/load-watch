@@ -702,8 +702,10 @@ def notify(inc, g, top, path, load1, ncpu, dry):
             f"({cmd}); {told}; brief {path}")
     if status not in (*DELIVERED, "dry"):  # the code-slice pick (route_agent.py plan; Wave 6: native paseo run)
         cwd = top or s.get("cwd") or str(HOME)
+        # paseo run: prompt is positional and required; no --prompt-file (send has that).
         ping += (f"; to hand it to a fixer: paseo run --provider cursor/default --label ade.kind=code "
-                 f"--title load-watch-{Path(path).stem} --cwd {cwd} --prompt-file {path} --no-wait")
+                 f"--title load-watch-{Path(path).stem} --cwd {cwd} --no-wait "
+                 f"'Read and act on the load-watch brief at {path}'")
     if not dry and HERMES_PING.exists():
         try:
             subprocess.run([str(HERMES_PING), ping], capture_output=True, timeout=60)
