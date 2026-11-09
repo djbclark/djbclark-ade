@@ -1,0 +1,247 @@
+#!/usr/bin/env -S python3 -I
+"""wave6-delete-check: refuse Wave 6 shim deletion until gates pass (2026-11-09).
+
+  wave6-delete-check [--root DIR] [--evidence PATH] [--json] [--allow-early]
+
+Read-only. Exit 0 only when every gate is green (safe to open the deletion PR
+that removes relay.py / acp-dispatch / acp-run). Exit 1 with named reasons
+otherwise. Exit 2 usage / unreadable root or evidence. Never deletes, never
+posts, never merges. Docs: docs/slim/wave6-follow-up.md (queue Carried 33).
+
+Gates:
+  callers_skills   listed skills still teach/invoke the shims as live commands
+  callers_loose    skills/loose still uses acp-run --perm deny (must port first)
+  evidence_missing --evidence not passed (Mac live-cycle + C3 ticks required)
+  evidence_invalid evidence JSON missing keys or bad values
+  c3_<key>         that C3 row is not migrated|waived
+  mac_<flag>       that Mac idle/smoke flag is not true
+  soft_deadline    today < 2026-11-20 and --allow-early was not passed
+                   (even with evidence; early delete needs the flag explicitly)
+
+Stdlib only.
+"""
+from __future__ import annotations
+
+import argparse
+import datetime
+import json
+import re
+import sys
+from pathlib import Path
+from typing import Any
+
+TOOL = "wave6-delete-check"
+SOFT_DEADLINE = datetime.date(2026, 11, 20)
+
+# Paths that must not teach the shims as live commands before deletion.
+CALLER_SKILLS = (
+    "skills/fan-out/SKILL.md",
+    "skills/model-routing/SKILL.md",
+    "skills/session-handoff/SKILL.md",
+    "skills/old-handoff-use-paseo-handoff/SKILL.md",
+    "skills/oc-go-key/SKILL.md",
+    "skills/baton/SKILL.md",
+    "skills/research/SKILL.md",
+    "skills/dialogue/SKILL.md",
+)
+LOOSE_SKILL = "skills/loose/SKILL.md"
+
+# Live invocation / path forms (not every historical prose mention).
+LIVE_RE = re.compile(
+    r"(?:"
+    r"bin/acp-dispatch(?:-wait)?"
+    r"|skills/session-finder/relay\.py"
+    r"|~/src/djbclark-ade/skills/session-finder/relay\.py"
+    r"|\[\"acp-run\""
+    r"|`acp-run`"
+    r"|acp-run\s+--perm"
+    r"|acp-dispatch\s+(?:claude|codex|antigravity|cursor|omp|hermes|footer|check|wait|tell|resume|reap|outcome|ls)"
+    r"|relay\.py\s+<"
+    r")"
+)
+
+C3_KEYS = (
+    "tendcf",
+    "nix2cf",
+    "cfengine",
+    "paseo_upstream",
+    "plektra",
+    "paseo4herdr",
+    "pi",
+    "sudo_secretspec",
+    "aiuse",
+    "paseo_runner",
+    "site_public_home_agents",
+    "aiuse_config_opencode_go",
+)
+MAC_FLAGS = (
+    "relay_idle",
+    "acp_dispatch_idle",
+    "acp_run_idle",
+    "paseo_smoke_ok",
+)
+C3_OK = frozenset({"migrated", "waived"})
+
+
+def die(msg: str, code: int = 2) -> int:
+    print(f"{TOOL}: {msg}", file=sys.stderr)
+    return code
+
+
+def scan_file(path: Path) -> list[str]:
+    """Return matching line snippets for LIVE_RE (empty if missing/unreadable)."""
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return [f"unreadable:{path}"]
+    hits: list[str] = []
+    for i, line in enumerate(text.splitlines(), 1):
+        if LIVE_RE.search(line):
+            hits.append(f"{path.as_posix()}:{i}")
+    return hits
+
+
+def check_callers(root: Path) -> list[str]:
+    reasons: list[str] = []
+    skill_hits: list[str] = []
+    for rel in CALLER_SKILLS:
+        skill_hits.extend(scan_file(root / rel))
+    if skill_hits:
+        sample = ", ".join(skill_hits[:8])
+        more = "" if len(skill_hits) <= 8 else f" (+{len(skill_hits) - 8} more)"
+        reasons.append(f"callers_skills: {sample}{more}")
+
+    loose = root / LOOSE_SKILL
+    loose_hits = scan_file(loose)
+    # Port gate: any acp-run --perm (or quoted acp-run argv) in loose.
+    if loose_hits or (
+        loose.is_file()
+        and re.search(r"acp-run", loose.read_text(encoding="utf-8", errors="replace"))
+    ):
+        # Narrow: only fail loose when acp-run still appears (item 33 port).
+        try:
+            text = loose.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            text = ""
+        if "acp-run" in text:
+            reasons.append(
+                "callers_loose: skills/loose/SKILL.md still names acp-run "
+                "(port off --perm deny before delete)"
+            )
+    return reasons
+
+
+def check_evidence(path: Path | None, *, allow_early: bool) -> list[str]:
+    reasons: list[str] = []
+    if path is None:
+        reasons.append(
+            "evidence_missing: pass --evidence PATH with Mac live-cycle + C3 ticks "
+            "(docs/slim/wave6-follow-up.md B/C)"
+        )
+        return reasons
+    try:
+        raw = path.read_text(encoding="utf-8")
+        data: Any = json.loads(raw)
+    except OSError as exc:
+        return [f"evidence_invalid: cannot read {path}: {exc.__class__.__name__}"]
+    except json.JSONDecodeError:
+        return [f"evidence_invalid: {path} is not JSON"]
+
+    if not isinstance(data, dict):
+        return ["evidence_invalid: root must be a JSON object"]
+
+    c3 = data.get("c3")
+    if not isinstance(c3, dict):
+        reasons.append("evidence_invalid: missing c3 object")
+        c3 = {}
+    for key in C3_KEYS:
+        val = c3.get(key)
+        if val not in C3_OK:
+            reasons.append(f"c3_{key}: want migrated|waived, got {val!r}")
+
+    mac = data.get("mac")
+    if not isinstance(mac, dict):
+        reasons.append("evidence_invalid: missing mac object")
+        mac = {}
+    for flag in MAC_FLAGS:
+        if mac.get(flag) is not True:
+            reasons.append(f"mac_{flag}: want true, got {mac.get(flag)!r}")
+
+    today = datetime.date.today()
+    if today < SOFT_DEADLINE and not allow_early:
+        reasons.append(
+            f"soft_deadline: today {today.isoformat()} < {SOFT_DEADLINE.isoformat()}; "
+            "pass --allow-early only when C3+Mac evidence is complete"
+        )
+    return reasons
+
+
+def evaluate(
+    root: Path,
+    *,
+    evidence: Path | None,
+    allow_early: bool,
+) -> dict[str, Any]:
+    reasons = check_callers(root)
+    reasons.extend(check_evidence(evidence, allow_early=allow_early))
+    return {
+        "tool": TOOL,
+        "root": str(root),
+        "soft_deadline": SOFT_DEADLINE.isoformat(),
+        "allow_early": allow_early,
+        "evidence": str(evidence) if evidence else None,
+        "ready": not reasons,
+        "reasons": reasons,
+    }
+
+
+def main(argv: list[str] | None = None) -> int:
+    p = argparse.ArgumentParser(
+        prog=TOOL,
+        description=__doc__.split("\n\n")[0],
+    )
+    p.add_argument(
+        "--root",
+        type=Path,
+        default=None,
+        help="repository root (default: parent of bin/)",
+    )
+    p.add_argument(
+        "--evidence",
+        type=Path,
+        default=None,
+        help="Mac live-cycle + C3 evidence JSON (wave6-follow-up.md B)",
+    )
+    p.add_argument(
+        "--allow-early",
+        action="store_true",
+        help="permit delete before 2026-11-20 when evidence gates are green",
+    )
+    p.add_argument("--json", action="store_true", help="print the full result as JSON")
+    args = p.parse_args(argv)
+
+    root = args.root
+    if root is None:
+        root = Path(__file__).resolve().parent.parent
+    try:
+        root = root.resolve()
+    except OSError as exc:
+        return die(f"unreadable root: {exc.__class__.__name__}")
+    if not root.is_dir():
+        return die(f"root is not a directory: {root}")
+
+    result = evaluate(root, evidence=args.evidence, allow_early=args.allow_early)
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    elif result["ready"]:
+        print(f"{TOOL}: ready (all gates green)")
+    else:
+        print(f"{TOOL}: not ready ({len(result['reasons'])} reason(s))", file=sys.stderr)
+        for r in result["reasons"]:
+            print(f"  - {r}", file=sys.stderr)
+
+    return 0 if result["ready"] else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
