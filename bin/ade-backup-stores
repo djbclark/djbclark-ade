@@ -6,7 +6,8 @@ docs/history/ade-everywhere-inventory-2026-10-20-stores.md. Nothing in any sourc
 SQLite sources are opened `mode=ro` (which can still create zero-length `-wal`/`-shm` files beside a quiet
 database; no data changes), and the live Hermes `state.db` is never handed to `hermes` (see item 4).
 
-  ade-backup-stores [--dest DIR] [--dry-run] [--only NAME[,NAME]] [--json] [--check-schemas] [--strict-stores]
+  ade-backup-stores [--dest DIR] [--dry-run] [--only NAME[,NAME]] [--json] [--check-schemas]
+                    [--strict-stores] [--keep N] [--clean-parts]
 
   1. single live SQLite files: the SQLite online backup API (`Connection.backup`), never a `cp` of a
      WAL database;
@@ -27,11 +28,14 @@ database; no data changes), and the live Hermes `state.db` is never handed to `h
      ADE_BACKUP_HERMES names the `hermes` binary to run (default: `hermes` on PATH).
 
 What the tool guarantees about credentials: files and directories with a credential name or path (the
-exclusions in MANIFEST.json) are not copied; credential tables are scrubbed from the SQLite copies
+exclusions in MANIFEST.json, including `~/.ssh`, `.netrc` and AWS credential paths) are not copied;
+credential tables are scrubbed from the SQLite copies
 (manifest `scrubbed`: OpenCode's `credential`, `account`, `control_account`, `account_state` tables and
 `session_share.secret`; rows deleted, then `VACUUM` with `secure_delete`); and a schema guard turns any
-other table or column named like credential/account/auth/oauth/secret/token (counters such as
-`input_tokens` aside) into an error and drops that copy, so a tool update that adds one fails the run.
+other table or column named like credential/account/auth/authorization/oauth/secret/token/cookie/jwt
+(column counters such as `input_tokens` aside; a table named `tokens` is not exempt) into an error and
+drops that copy, so a tool update that adds one fails the run. Triggers on the copy are dropped before
+scrubbing so a DELETE cannot re-copy values into another table.
 `--check-schemas` runs the guard read-only on the live databases and prints table and column names only; a missing
 database is printed and counted, and fails the check (exit 1) only with `--strict-stores`; a database that cannot be
 opened is counted apart (`J unopenable`) and fails the check; a database with a credential name or path is never
@@ -67,16 +71,25 @@ file opened relative to its parent's descriptor with O_NOFOLLOW (a SQLite source
 from its store root), never through a path string that could be re-pointed. An optional sidecar that is
 present but a symlink, an excluded path or not a regular file is skipped and listed under `skipped`. The dry run's bytes
 for a SQLite file are the main file plus its `-wal` file, an upper bound on the snapshot the online backup
-writes. `--check-schemas` counts an absent tree root or database as `missing`, and applies the copy's sidecar rules to each checked tree database: an absent required sidecar is `sidecar_missing` (a failure only under `--strict-stores`), a linked or non-regular one a `sidecar_problems` error in both modes. `--json --check-schemas` prints one JSON
+writes. The dry run never opens a database, so it cannot predict a schema-guard failure (an unexplained
+credential-looking column gives dry-run exit 0 while the real run is exit 1): run `--check-schemas` for that.
+`--check-schemas` counts an absent tree root or database as `missing`, and applies the copy's sidecar rules to each checked tree database: an absent required sidecar is `sidecar_missing` (a failure only under `--strict-stores`), a linked or non-regular one a `sidecar_problems` error in both modes. `--json --check-schemas` prints one JSON
 document on stdout (`ok`, `exit_code`, `reasons`, `totals` and, per store, its `state` (`ok`, `missing`, `problem`),
 counts and `findings` of state, path and the line text) and the human lines on stderr; the exit status is unchanged.
 
 Default dest: ~/.local/state/ade/backups/<UTC timestamp>/ (0700, files 0600). The generation is built in
 <dest>.part/ and renamed to <dest>/ at the end: a <dest>.part/ directory, or a generation without
-MANIFEST.json, is an interrupted run and incomplete. Refuses (exit 2) a dest that exists, that sits
-inside a source store or holds one (a configured store's path counts whether or not it exists), or that is
-inside a git repo. Exit: 0 clean, 1 at least one error, 2 refused or bad usage. Cursor `acp-sessions` and
-the handoffs `chains/` are pruned by something else, so those stores come first.
+MANIFEST.json, is an interrupted run and incomplete (it may hold unscrubbed credential rows; leftover
+`*.part` dirs under the backups parent are reported on stderr, and `--clean-parts` removes them before
+the run). `--keep N` (N>0) after a successful rename keeps only the newest N complete generations
+(those with MANIFEST.json) under the dest's parent and deletes older ones; N=0 (the default) keeps all.
+A scheduled run (config/launchd/com.djbclark.ade-backup-stores.plist via `bin/ade-sched`) passes
+`--strict-stores --keep 3 --clean-parts` and relies on PATH preferring a modern python3 (Homebrew /
+`~/.local/bin` before `/usr/bin`): under Apple's /usr/bin/python3 a quiet WAL-mode source with no `-shm`
+can fail `ro_connect`. Refuses (exit 2) a dest that exists, that sits inside a source store or holds one
+(a configured store's path counts whether or not it exists), or that is inside a git repo.
+Exit: 0 clean, 1 at least one error (or a missing store under `--strict-stores`), 2 refused or bad usage.
+Cursor `acp-sessions` and the handoffs `chains/` are pruned by something else, so those stores come first.
 """
 import argparse
 import concurrent.futures
@@ -111,6 +124,9 @@ EXCLUDE_NAMES = [
     ".env", ".env.*", "jira-sites.json", "jira-tokens", "Cookies", "agent.db", "data.db",
     "mcp_config.json", "mcp.json", "opencode.json", "opencode.bak", "crushrc*",
     "credential-bak", "mcp-auth.json",
+    # SSH / netrc / cloud keys (PR 24 carried LOW: a future file store under ~ must not copy these)
+    "id_rsa", "id_rsa.*", "id_ed25519", "id_ed25519.*", "id_ecdsa", "id_ecdsa.*", "id_dsa", "id_dsa.*",
+    ".netrc", "credentials", "credentials.db",
 ]
 # The same list as home-relative paths (the files the inventory names, checked on the resolved path too).
 EXCLUDE_PATHS = [
@@ -122,6 +138,7 @@ EXCLUDE_PATHS = [
     ".orca/jira-tokens",
     ".orca/jira-sites.json", ".config/opencode/opencode.json", ".cursor/mcp.json",
     ".gemini/config/mcp_config.json", ".config/crush/crushrc*", ".local/state/ade/credential-bak",
+    ".ssh", ".ssh/*", ".netrc", ".aws/credentials", ".aws/config",
 ]
 OTHER_SKIPS = ["symlinks", "sockets and other non-regular files", "antigravity brain/*/.system_generated/worktrees"]
 
@@ -133,9 +150,12 @@ SCRUB = {
                  "null": [("session_share", "secret")]},
 }
 # Schema guard: a table or column name matching this is a possible credential store ...
-CRED_RE = re.compile(r"credential|account|auth(?!or)|oauth|secret|token|password|passwd|api_?key|private_?key|bearer",
-                     re.I)
-# ... unless it is a token counter (`input_tokens`, `tokens_used`, `tokens`) ...
+CRED_RE = re.compile(
+    r"credential|account|authorization|auth(?!or)|oauth|secret|token|password|passwd|pwd|"
+    r"api[_-]?key|private_?key|bearer|cookie|jwt|refresh|session_key",
+    re.I)
+# ... unless it is a token-counter COLUMN (`input_tokens`, `tokens_used`, `tokens`); a TABLE named
+# `tokens` is not exempt (PR 24 round-2 LOW: apply the counter exemption to numeric columns only) ...
 COUNTER_RE = re.compile(
     r"^(?:(?:input|output|cache|cached|creation|read|write|reasoning|total|prompt|completion|max|context|used|est|estimated)_?)*"
     r"tokens(?:_?(?:input|output|cache|cached|creation|read|write|reasoning|total|prompt|completion|max|used|count|limit|in|out))*$",
@@ -266,10 +286,21 @@ def utcnow():
 
 
 def sha256_of(path):
+    """SHA-256 of a regular file opened O_NOFOLLOW (a symlink race must not hash the target)."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        return sha256_of_fd(fd)
+    finally:
+        os.close(fd)
+
+
+def sha256_of_fd(fd):
     h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
+    while True:
+        chunk = os.read(fd, 1 << 20)
+        if not chunk:
+            break
+        h.update(chunk)
     return h.hexdigest()
 
 
@@ -331,10 +362,11 @@ def ro_connect(path, base=None):
 
 
 def schema_hits(con):
-    """(table, column) pairs whose names look like credentials; column None = the table's own name."""
+    """(table, column) pairs whose names look like credentials; column None = the table's own name.
+    COUNTER_RE exempts credential-looking column names that are token counters only, never a table name."""
     hits = []
     for table, kind in con.execute("SELECT name, type FROM sqlite_master WHERE type IN ('table', 'view')").fetchall():
-        if CRED_RE.search(table) and not COUNTER_RE.match(table):
+        if CRED_RE.search(table):
             hits.append((table, None))
         for col in con.execute(f'PRAGMA table_info("{table}")'):
             if CRED_RE.search(col[1]) and not COUNTER_RE.match(col[1]):
@@ -355,12 +387,16 @@ def explained(store_name, table, column):
 
 
 def scrub_copy(path, spec):
-    """Delete the credential rows from the copy at path and VACUUM it; returns what was scrubbed."""
+    """Delete the credential rows from the copy at path and VACUUM it; returns what was scrubbed.
+    Every trigger on the copy is dropped first so a DELETE cannot fire a trigger that copies values
+    into another table (PR 24 round-2 LOW)."""
     con = sqlite3.connect(str(path), isolation_level=None)
     done = []
     try:
         con.execute("PRAGMA journal_mode=DELETE")
         con.execute("PRAGMA secure_delete=ON")
+        for (name,) in con.execute("SELECT name FROM sqlite_master WHERE type='trigger'").fetchall():
+            con.execute(f'DROP TRIGGER IF EXISTS "{name}"')
         tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         for table in spec.get("delete", []):
             if table in tables:
@@ -371,6 +407,12 @@ def scrub_copy(path, spec):
                 con.execute(f'UPDATE "{table}" SET "{col}" = NULL')
                 done.append(f"{table}.{col}")
         con.execute("VACUUM")
+        for table in spec.get("delete", []):
+            if table in tables:
+                left = con.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
+                if left:
+                    raise SchemaGuardError(
+                        f"scrub left {left} row(s) in {table} after DELETE+VACUUM")
     finally:
         con.close()
     return done
@@ -1027,7 +1069,8 @@ def copy_tree_session(store, run, excluder, root, anchored, base, rfd, eparts, l
 
 def seal_and_hash(run):
     """Drop symlinks a race let into the copy, set 0700/0600 on everything produced and hash each file;
-    returns (entries, bytes)."""
+    returns (entries, bytes). Files are opened O_NOFOLLOW and sealed via fchmod/fstat so a swap to a
+    symlink after listing cannot make the hash follow the target (PR 24 round-2 LOW)."""
     entries = []
     total = 0
     if not run.out.exists():
@@ -1035,7 +1078,12 @@ def seal_and_hash(run):
     for dirpath, dirnames, filenames in os.walk(run.out):
         for name in list(dirnames) + list(filenames):
             link = Path(dirpath) / name
-            if link.is_symlink():
+            try:
+                st = os.lstat(link)
+            except OSError as exc:
+                run.error(link, exc)
+                continue
+            if stat.S_ISLNK(st.st_mode):
                 link.unlink()
                 run.skip(link, "symlink (appeared after the check)")
                 if name in dirnames:
@@ -1046,9 +1094,28 @@ def seal_and_hash(run):
         for fn in sorted(filenames):
             p = Path(dirpath) / fn
             try:
-                os.chmod(p, 0o600)
-                size = p.stat().st_size
-                entry = {"path": str(p.relative_to(run.out.parent)), "bytes": size, "sha256": sha256_of(p)}
+                fd = os.open(p, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            except OSError as exc:
+                if getattr(exc, "errno", None) in (errno.ELOOP, getattr(errno, "EFTYPE", -1)):
+                    try:
+                        if p.is_symlink():
+                            p.unlink()
+                            run.skip(p, "symlink (appeared after the check)")
+                            continue
+                    except OSError:
+                        pass
+                run.error(p, exc)
+                continue
+            try:
+                st = os.fstat(fd)
+                if not stat.S_ISREG(st.st_mode):
+                    run.error(p, OSError("not a regular file"))
+                    continue
+                os.fchmod(fd, 0o600)
+                os.lseek(fd, 0, os.SEEK_SET)
+                digest = sha256_of_fd(fd)
+                size = st.st_size
+                entry = {"path": str(p.relative_to(run.out.parent)), "bytes": size, "sha256": digest}
                 if p in run.source_of:
                     entry["source"] = run.source_of[p]
                 if run.scrubbed_of.get(p):
@@ -1057,6 +1124,8 @@ def seal_and_hash(run):
                 total += size
             except OSError as exc:
                 run.error(p, exc)
+            finally:
+                os.close(fd)
     return entries, total
 
 
@@ -1208,6 +1277,79 @@ def part_dir(dest):
     return dest.with_name(dest.name + ".part")
 
 
+def list_part_dirs(parent):
+    """Incomplete generation directories (`*.part`) under parent, sorted by name."""
+    try:
+        names = os.listdir(parent)
+    except FileNotFoundError:
+        return []
+    out = []
+    for name in names:
+        if not name.endswith(".part"):
+            continue
+        p = parent / name
+        try:
+            if p.is_dir():
+                out.append(p)
+        except OSError:
+            continue
+    return sorted(out, key=lambda p: p.name)
+
+
+def list_complete_generations(parent):
+    """Complete generations under parent (directories with MANIFEST.json), newest-last by name."""
+    try:
+        names = os.listdir(parent)
+    except FileNotFoundError:
+        return []
+    out = []
+    for name in names:
+        if name.endswith(".part"):
+            continue
+        p = parent / name
+        try:
+            if p.is_dir() and (p / "MANIFEST.json").is_file():
+                out.append(p)
+        except OSError:
+            continue
+    return sorted(out, key=lambda p: p.name)
+
+
+def report_leftover_parts(parent):
+    """Warn on stderr about every leftover incomplete generation; returns the list."""
+    parts = list_part_dirs(parent)
+    for p in parts:
+        print(f"ade-backup-stores: leftover incomplete generation: {p} "
+              f"(may hold unscrubbed credentials; use --clean-parts to remove)", file=sys.stderr)
+    return parts
+
+
+def clean_leftover_parts(parent):
+    """Remove every leftover `*.part` directory under parent; returns the removed paths."""
+    removed = []
+    for p in list_part_dirs(parent):
+        shutil.rmtree(p)
+        print(f"ade-backup-stores: removed leftover incomplete generation {p}", file=sys.stderr)
+        removed.append(p)
+    return removed
+
+
+def prune_generations(parent, keep):
+    """Keep the newest `keep` complete generations under parent; remove older ones. keep<=0: no prune.
+    Returns the removed paths. Only directories with MANIFEST.json count as complete."""
+    if keep <= 0:
+        return []
+    gens = list_complete_generations(parent)
+    if len(gens) <= keep:
+        return []
+    removed = []
+    for old in gens[:-keep]:
+        shutil.rmtree(old)
+        print(f"ade-backup-stores: pruned old generation {old}", file=sys.stderr)
+        removed.append(old)
+    return removed
+
+
 HERMES_CONFIG_CAP = 64 * 1024
 HERMES_DEFAULT_LIMIT = 20000
 
@@ -1278,9 +1420,36 @@ def hermes_session_counts(db_path):
 
 
 def hermes_run(hermes, args, cwd, env):
-    proc = subprocess.run([hermes, "sessions", "export", *args], capture_output=True, text=True, errors="replace",
-                          timeout=HERMES_TIMEOUT, cwd=cwd, env=env)
+    proc = subprocess.run(
+        [hermes, "sessions", "export", *args], capture_output=True, text=True, errors="replace",
+        timeout=HERMES_TIMEOUT, cwd=cwd, env=env, stdin=subprocess.DEVNULL)
     return proc.returncode, (proc.stdout + proc.stderr).strip()
+
+
+def resolve_hermes_binary():
+    """Absolute path of an executable `hermes`, or None. A nonempty ADE_BACKUP_HERMES must resolve to an
+    executable file (absolute path, relative path with a separator, or a bare name found on PATH); a
+    nonempty override that does not resolve is rejected the same way as a missing binary, so dry-run and
+    the real run agree (PR 24 Codex pass 21 P2)."""
+    override = os.environ.get("ADE_BACKUP_HERMES")
+    if override:
+        if os.path.isabs(override) or os.path.sep in override or (
+                os.path.altsep and os.path.altsep in override):
+            candidate = override
+        else:
+            candidate = shutil.which(override) or ""
+        if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+        return None
+    return shutil.which("hermes")
+
+
+def hermes_missing_error():
+    """FileNotFoundError text matching whether ADE_BACKUP_HERMES was set."""
+    if os.environ.get("ADE_BACKUP_HERMES"):
+        return FileNotFoundError(
+            "ADE_BACKUP_HERMES does not resolve to an executable (set a real path or unset it)")
+    return FileNotFoundError("no hermes on PATH (set ADE_BACKUP_HERMES)")
 
 
 def exported_count(text):
@@ -1347,13 +1516,13 @@ def export_hermes(home, work, final, state_backup, excluder):
     run.sources.append(str(home / ".hermes/state.db"))
     info = {"mode": None, "limit": hermes_limit(home, excluder), "truncated": False, "oversize": [], "failed": [],
             "sessions_total": None, "sessions_exported": 0, "snapshot": "scratch HERMES_HOME holding a copy of hermes-state"}
-    hermes = os.environ.get("ADE_BACKUP_HERMES") or shutil.which("hermes")
+    hermes = resolve_hermes_binary()
     out.mkdir(parents=True, exist_ok=True)
     scratch = work / ".hermes-scratch"
     if hermes_db_absent(home / ".hermes/state.db"):
         run.absent(home / ".hermes/state.db")
     elif not hermes:
-        run.error("hermes", FileNotFoundError("no hermes on PATH (set ADE_BACKUP_HERMES)"))
+        run.error("hermes", hermes_missing_error())
     else:
         try:
             make_hermes_scratch(home, scratch, state_backup, info["limit"], excluder)
@@ -1742,7 +1911,17 @@ def run_main(argv):
     ap.add_argument("--strict-stores", action="store_true",
                     help="exit 1 when any configured store or store path is missing, or a required sidecar does not "
                          "exist (default: recorded as \"missing\" / `sidecar_missing` in the manifest and on stderr, exit 0)")
+    ap.add_argument("--keep", type=int, default=0, metavar="N",
+                    help="after a successful run, keep only the newest N complete generations under the dest's "
+                         "parent (those with MANIFEST.json) and delete older ones; 0 (default) keeps all. "
+                         "The scheduled plist uses --keep 3")
+    ap.add_argument("--clean-parts", action="store_true",
+                    help="remove leftover <stamp>.part directories under the dest's parent before the run "
+                         "(incomplete generations may hold unscrubbed credentials; the scheduled plist passes this)")
     args = ap.parse_args(argv)
+    if args.keep < 0:
+        print("ade-backup-stores: --keep must be >= 0", file=sys.stderr)
+        return 2
 
     home = Path(os.path.expanduser("~"))
     stores = build_stores(home)
@@ -1759,6 +1938,11 @@ def run_main(argv):
             selected += [s for s in stores if s["name"] == "hermes-state"]
         return check_schemas(selected, Excluder(home), args.strict_stores, args.json)
     dest = resolve_dest(args.dest)
+    parent = dest.parent
+    if args.clean_parts and not args.dry_run:
+        clean_leftover_parts(parent)
+    else:
+        report_leftover_parts(parent)
     reason = refuse_reason(dest, stores)
     if reason:
         print(f"ade-backup-stores: refusing: {reason}", file=sys.stderr)
@@ -1775,9 +1959,9 @@ def run_main(argv):
         hermes_errors = []
         if "hermes-export" in wanted and not hermes_missing:
             run = StoreRun({"name": "hermes-export", "kind": "hermes-export"}, Path("/nonexistent"))
-            if not (os.environ.get("ADE_BACKUP_HERMES") or shutil.which("hermes")):
-                # the check export_hermes makes before it builds the scratch copy: same source, wording and entry
-                run.error("hermes", FileNotFoundError("no hermes on PATH (set ADE_BACKUP_HERMES)"))
+            if not resolve_hermes_binary():
+                # same resolve and wording as export_hermes (PR 24 Codex pass 21 P2)
+                run.error("hermes", hermes_missing_error())
             else:
                 try:  # the gate the real export applies before it opens state.db: a refusal is an error, not "would run"
                     hermes_state_gate(home, excluder)
@@ -1804,7 +1988,7 @@ def run_main(argv):
     t0 = time.monotonic()
     work = part_dir(dest)
     try:
-        dest.parent.mkdir(parents=True, exist_ok=True)
+        parent.mkdir(parents=True, exist_ok=True)
         work.mkdir(mode=0o700)
     except FileExistsError:
         print(f"ade-backup-stores: refusing: {work} already exists", file=sys.stderr)
@@ -1835,7 +2019,7 @@ def run_main(argv):
         "exclusions": {"names": EXCLUDE_NAMES, "paths": [f"~/{p}" for p in EXCLUDE_PATHS], "other": OTHER_SKIPS,
                        "scrubbed_tables": {k: v["delete"] + [f"{t}.{c}" for t, c in v["null"]]
                                            for k, v in SCRUB.items()}},
-        "errors": errors, "stores": entries,
+        "errors": errors, "stores": entries, "keep": args.keep,
     }
     write_manifest(work, manifest)
     try:
@@ -1844,10 +2028,13 @@ def run_main(argv):
         print(f"ade-backup-stores: could not rename {work} to {dest}: {exc}; the generation stays in {work}",
               file=sys.stderr)
         return 1
+    pruned = prune_generations(parent, args.keep)
     path = dest / "MANIFEST.json"
-    say(f"total: {total} bytes in {sum(e['file_count'] for e in entries)} files, {len(errors)} error(s), manifest {path}")
+    say(f"total: {total} bytes in {sum(e['file_count'] for e in entries)} files, {len(errors)} error(s), "
+        f"manifest {path}" + (f", pruned {len(pruned)} old generation(s)" if pruned else ""))
     if args.json:
         print(json.dumps({"dest": str(dest), "manifest": str(path), "total_bytes": total, "errors": errors,
+                          "pruned": [str(p) for p in pruned],
                           "stores": [{k: e[k] for k in ("store", "status", "missing", "file_count", "bytes", "seconds")}
                                      for e in entries]},
                          indent=1))

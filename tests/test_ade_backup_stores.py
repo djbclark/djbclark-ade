@@ -4,6 +4,7 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import plistlib
 import re
 import shutil
 import sqlite3
@@ -622,7 +623,8 @@ def test_a_link_that_slips_past_the_check_is_dropped_not_followed(env, monkeypat
 def test_help_documents_exit_codes_exclusions_and_the_hermes_override():
     proc = subprocess.run([sys.executable, str(SCRIPT), "--help"], capture_output=True, text=True)
     assert proc.returncode == 0
-    for needle in ("ADE_BACKUP_HERMES", "Exit: 0 clean", "MANIFEST.json", "scrubbed", "--check-schemas", ".part"):
+    for needle in ("ADE_BACKUP_HERMES", "Exit: 0 clean", "MANIFEST.json", "scrubbed", "--check-schemas", ".part",
+                   "--keep", "--clean-parts", "--strict-stores", "cannot predict a schema-guard", ".ssh"):
         assert needle in proc.stdout, needle
 
 
@@ -2588,3 +2590,112 @@ def test_copy_regular_leaves_no_descriptor_open_on_a_directory_source(real, tmp_
         with pytest.raises(OSError, match="not a regular file"):
             mod.copy_regular(home / "adir", tmp_path / "dst")
     assert open_fd_count() == before
+
+
+# --- PR 24 carried LOWs: retention, leftover .part, hermes resolve, exclusions, CRED_RE (2026-11-09) ---
+
+def test_leftover_part_dirs_are_reported_and_clean_parts_removes_them(env, capsys):
+    mod, home, dest, tmp = env
+    populate(home)
+    parent = dest.parent
+    leftover = parent / "old.part"
+    leftover.mkdir()
+    (leftover / "unscrubbed.db").write_bytes(b"secret-bytes")
+    assert mod.main(["--dest", str(dest), "--only", "walstore", "--dry-run"]) == 0
+    err = capsys.readouterr().err
+    assert "leftover incomplete generation" in err and str(leftover) in err
+    assert leftover.is_dir()
+    assert mod.main(["--dest", str(dest), "--only", "walstore", "--clean-parts"]) == 0
+    assert not leftover.exists()
+    assert (dest / "MANIFEST.json").is_file()
+    assert "removed leftover incomplete generation" in capsys.readouterr().err
+
+
+def test_keep_prunes_older_complete_generations(env, capsys):
+    mod, home, dest, tmp = env
+    populate(home)
+    parent = dest.parent
+    for stamp in ("20260101T000000Z", "20260102T000000Z", "20260103T000000Z"):
+        g = parent / stamp
+        g.mkdir()
+        (g / "MANIFEST.json").write_text("{}")
+    (parent / "orphan-no-manifest").mkdir()
+    (parent / "half.part").mkdir()
+    new_dest = parent / "20260104T000000Z"
+    assert mod.main(["--dest", str(new_dest), "--only", "walstore", "--keep", "2"]) == 0
+    remaining = sorted(p.name for p in parent.iterdir() if p.is_dir())
+    assert remaining == ["20260103T000000Z", "20260104T000000Z", "half.part", "orphan-no-manifest"]
+    assert "pruned old generation" in capsys.readouterr().err
+
+
+def test_dry_run_rejects_an_unresolvable_ade_backup_hermes_like_the_real_run(real, monkeypatch, capsys):
+    mod, home, tmp = real
+    make_hermes_db(home, (("a", 2),))
+    monkeypatch.setenv("ADE_BACKUP_HERMES", str(tmp / "no-such-hermes-binary"))
+    assert mod.main(["--only", "hermes-export", "--dry-run", "--json", "--dest", str(home / "dry")]) == 1
+    dry = json.loads(capsys.readouterr().out)
+    dest = home / "out" / "bk"
+    assert mod.main(["--only", "hermes-export", "--dest", str(dest)]) == 1
+    real_errors = manifest_of(dest)["stores"][0]["errors"]
+    assert dry["errors"] == real_errors
+    assert "ADE_BACKUP_HERMES does not resolve" in real_errors[0]["error"]
+
+
+def test_ssh_netrc_and_aws_credential_paths_are_excluded(real):
+    mod, home, _ = real
+    ex = mod.Excluder(home)
+    assert ex.path(home / ".ssh/id_ed25519")
+    assert ex.path(home / ".ssh")
+    assert ex.path(home / ".netrc")
+    assert ex.path(home / ".aws/credentials")
+    assert mod.is_excluded_name("id_rsa")
+    assert mod.is_excluded_name("id_ed25519")
+    assert mod.is_excluded_name("id_ed25519.pub")  # id_ed25519.*
+
+
+def test_cred_re_hits_authorization_cookie_jwt_and_a_tokens_table(real):
+    mod, _, _ = real
+    assert mod.CRED_RE.search("authorization")
+    assert mod.CRED_RE.search("cookie")
+    assert mod.CRED_RE.search("jwt_token") or mod.CRED_RE.search("jwt")
+    assert mod.CRED_RE.search("session_key")
+    hits = []
+    con = sqlite3.connect(":memory:")
+    con.execute("CREATE TABLE tokens (v TEXT)")
+    con.execute("CREATE TABLE t (input_tokens INT, api_key TEXT)")
+    hits = mod.schema_hits(con)
+    con.close()
+    assert ("tokens", None) in hits  # table named tokens is not counter-exempt
+    assert ("t", "api_key") in hits
+    assert ("t", "input_tokens") not in hits  # column counter still exempt
+
+
+def test_scrub_drops_triggers_before_deleting_credential_rows(real, tmp_path):
+    mod, _, _ = real
+    db = tmp_path / "oc.db"
+    con = sqlite3.connect(str(db))
+    con.executescript(
+        "CREATE TABLE credential (k TEXT); CREATE TABLE mirror (k TEXT);"
+        "CREATE TRIGGER copy_cred AFTER DELETE ON credential BEGIN "
+        "INSERT INTO mirror VALUES (old.k); END;"
+        "INSERT INTO credential VALUES ('live-key');"
+    )
+    con.close()
+    scrubbed = mod.scrub_copy(db, mod.SCRUB["opencode"])
+    assert "credential" in scrubbed
+    con = sqlite3.connect(str(db))
+    assert con.execute("SELECT COUNT(*) FROM credential").fetchone()[0] == 0
+    assert con.execute("SELECT COUNT(*) FROM mirror").fetchone()[0] == 0
+    assert con.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='trigger'").fetchone()[0] == 0
+    con.close()
+
+
+def test_schedule_plist_is_checked_in_with_strict_keep_and_clean_parts():
+    plist = ROOT / "config/launchd/com.djbclark.ade-backup-stores.plist"
+    assert plist.is_file()
+    data = plistlib.loads(plist.read_bytes())
+    argv = data["ProgramArguments"]
+    assert argv[0].endswith("bin/ade-backup-stores")
+    assert "--strict-stores" in argv and "--clean-parts" in argv
+    assert argv[argv.index("--keep") + 1] == "3"
+    assert "StartCalendarInterval" in data
