@@ -108,7 +108,8 @@ def test_bounded_advice_runs_best_effort_read_only(tmp_path):
                             env={**os.environ, "HOME": str(tmp_path), "FAKE_PASEO_STATE": str(tmp_path / "st"),
                                  "FAKE_PASEO_WORKSPACES": json.dumps([
                                      {"id": "wks_cost_policy", "cwd": str(ROOT)}]),
-                                 "PATH": f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}"})
+                                 "PATH": f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}",
+                                 "ROUTE_SEAT": "hermes"})  # opencode-go is repo-scoped (2026-11-02)
     assert result.returncode == 0, result.stderr
     rec = json.loads(result.stdout)
     assert rec["go_advisory"] is True and "best effort for opencode" in rec["perm_note"]

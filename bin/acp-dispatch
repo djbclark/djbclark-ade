@@ -71,7 +71,8 @@ Contract (the same for these slices and for Claude Code Agent-tool sub-agents, w
 --kind frontier keeps its admission (bin/agent_guard.py's identity policy, the estimate floor, the in-flight
 reservation and the per-wave cap of the frontier allowance, docs/gates.md): a frontier model needs --kind frontier,
 --role exec needs ACP_OPERATOR_APPROVED=frontier-exec, fable at --effort xhigh/max needs fable-xhigh, hermes needs
-ACP_OPERATOR_APPROVED=hermes. Every kind is checked against route_agent's eligibility (route-override skips it).
+ACP_OPERATOR_APPROVED=hermes. Every kind is checked against route_agent's eligibility (route-override skips it; it does not
+skip a repo-scoped pool's allow_repos/allow_seats).
 
 Exit codes (dispatch, wait and check):
     0    report delivered and ends in DONE        1    report present but unfinished; still running
@@ -870,13 +871,14 @@ def unavailable(out: Path, a: argparse.Namespace, reason: str, cls: str, code: i
     write_record(record, {"name": a.name, "agent": a.agent, "model": a.model, "kind": a.kind, "task": a.task,
                           "out": str(out), "record": str(record), "report": str(out / f"{a.name}-report.md"),
                           "status": "unavailable", "unavailable_class": cls, "detail": reason, "perm": a.perm,
+                          "seat": getattr(a, "seat", None) or route_module().current_seat(),
                           "started": time.time(), "finished": time.time(), "exit": code, **extra})
     print(f"unavailable\t{a.name}\tclass={cls} agent={a.agent} model={a.model} {reason}")
     return code
 
 
 def gate_policy(a: argparse.Namespace, service: str | None, approved: set[str]) -> None:
-    """The refusals that need no reading: the fable gate, Go cost policy, frontier kind and role, eligibility."""
+    """The refusals that need no reading: the fable gate, Go cost policy, repo scope, frontier kind and role, eligibility."""
     if "fable" in a.model.lower() and (a.effort or "").lower() in FABLE_GATED_EFFORTS and "fable-xhigh" not in approved:
         die(f"fable at --effort {a.effort} needs explicit operator approval for this run; use --effort high, or ask "
             "first, then set ACP_OPERATOR_APPROVED=fable-xhigh")
@@ -888,6 +890,20 @@ def gate_policy(a: argparse.Namespace, service: str | None, approved: set[str]) 
             die(why)
         if a.go_advisory and a.kind not in go_model_policy.policy()["advisory_kinds"]:
             die("Go advisory use requires --kind judgment, research or frontier")
+    # Repo scope (djbclark 2026-11-02, [[service]] allow_repos/allow_seats): a scoped pool (opencode-go) only for the repos and
+    # seats on its list; route-override and a Go advisory do not skip it. The pool is the one the model draws on (`service`).
+    # Only opencode-go/* models draw on the Go pool (another opencode provider is not scoped as Go).
+    router_scope = route_module()
+    seat = getattr(a, "seat", None) or router_scope.current_seat()
+    a.seat = seat
+    scoped_svc = router_scope.BY_NAME.get(service) if service else None
+    if (scoped_svc is not None and scoped_svc.name == "opencode-go" and a.agent == "opencode" and a.model
+            and not str(a.model).startswith("opencode-go/")):
+        scoped_svc = None
+    if scoped_svc is not None:
+        scope_why = scoped_svc.scope_block(router_scope.repo_of(getattr(a, "dir", None)), seat)
+        if scope_why:
+            die(scope_why)
     if is_frontier_model(a.model) and a.kind != "frontier":
         die(f"model {a.model!r} is a frontier model; use --kind frontier (route-override does not skip this)")
     if a.kind == "frontier" or getattr(a, "go_advisory", False):
@@ -1050,6 +1066,7 @@ def dispatch(a: argparse.Namespace) -> int:
            "estimated_usage_pct": estimate, "estimated_usage_windows": per_window, "estimate_source": source,
            "snapshot_remaining_before": remaining, "snapshot_reading": reading, "load_gate": gate_info,
            "min_headroom": a.min_headroom, "perm_note": perm_note,
+           "seat": getattr(a, "seat", None) or route_module().current_seat(),
            "selected_workspace_id": workspace_id}
     if a.dry_run:
         rec.update(status="dry-run", reserved_usage_pct=reserved, inflight=[p.stem for p in busy],

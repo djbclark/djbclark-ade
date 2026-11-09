@@ -85,6 +85,13 @@ read-only mode, so the slice runs in its default mode with a logged note); the r
 native model selection bypasses the dispatch gate, so this is a local orchestration policy, not a provider billing cap.
 Keep briefs short (OpenCode exposes no smaller context window); the Go plugin compacts early (`docs/context-hygiene.md`).
 
+**Repo scope (djbclark 2026-11-02).** `opencode-go` carries `allow_repos = ["techno-euphora"]` and
+`allow_seats = ["hermes"]` in `config/routing.toml`: it routes only when the caller's repo (the `origin`
+remote's name of the `-C` directory or cwd; `--repo` overrides) or seat (`--seat`, else `$ROUTE_SEAT`) is on
+the list. Elsewhere `route`/`plan` skip it as repo-scoped (no primary, no alternative) and `acp-dispatch`
+exits 2, `route-override` included. The transport is retired (2026-11-08); the allow-lists stay so a restore
+keeps the same scope. Any `[[service]]` can take the same two keys. `route_agent.py policy --md` shows the scope.
+
 ## G. Reasons kept from the earlier matrix
 
 G1. 2026-10-18: four astra slices at once emptied codex's 5-hour window, so the frontier models are reached only through

@@ -300,6 +300,11 @@ billing = "subscription"
 note = "Go Plus shares one monthly allowance; bulk and mechanical only, never code; costly models require bounded read-only advice (config/go-model-policy.json)"
 agent = "opencode"
 models = { bulk = "opencode-go/minimax-m3", mechanical = "opencode-go/gpt-6-luna --effort low" }
+# Repo scope (djbclark 2026-11-02): only the techno-euphora project and the Hermes seat may route to this pool. Elsewhere the
+# pool is skipped as repo-scoped (no primary, no alternative); acp-dispatch exits 2, route-override included. The transport is
+# retired (2026-11-08); the allow-lists stay so a restore keeps the same scope.
+allow_repos = ["techno-euphora"]
+allow_seats = ["hermes"]
 
 # GrokBot (the cloud Chief of Staff) runs on its own separate Cursor pool since
 # 2026-10-18 (operator, after the $60 Cursor plan). aiuse reports it as the separate provider
