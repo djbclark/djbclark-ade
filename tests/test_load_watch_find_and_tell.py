@@ -163,7 +163,8 @@ def test_a_queued_send_is_logged_not_delivered_and_offers_the_fixer(tmp_path, mo
     assert r["delivery"] == "queued" and r["relayed"] is False
     log = (tmp_path / "state" / "sample.log").read_text()
     assert "delivery=queued, not delivered" in log
-    assert "queued it, not delivered" in m.pinged() and "acp-dispatch cursor" in m.pinged()
+    assert "queued it, not delivered" in m.pinged()
+    assert "paseo run --provider cursor/default" in m.pinged() and "acp-dispatch" not in m.pinged()
 
 
 def test_without_paseo_the_spike_reaches_the_operator_and_nothing_raises(tmp_path, monkeypatch):
@@ -277,7 +278,7 @@ def test_completed_counts_as_delivered_in_notify_too(tmp_path, monkeypatch):
     m.spike()
     r = m.incidents()[0]
     assert (r["delivery"], r["relayed"]) == ("completed", True)
-    assert "told it" in m.pinged() and "acp-dispatch cursor" not in m.pinged()
+    assert "told it" in m.pinged() and "paseo run --provider cursor/default" not in m.pinged()
 
 
 def test_one_bad_cwd_row_does_not_sink_the_listing(tmp_path, monkeypatch):

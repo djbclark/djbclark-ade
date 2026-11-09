@@ -372,11 +372,11 @@ which outlives the shim; its review mode is the stricter four-read-tool,
 no-network one, its read-only mode this six-tool one). The shim
 **refuses the launch** when the provider cannot be configured that way, because these modes protect
 prompt-injection-sensitive reviews), **the live-agent count**
-(`count_agents()` counts `acp-run` processes and releases the `load-watch
-admit --max-agents` reservation only once one is countable; a `paseo run
---no-wait` child never is, so the count is ported to `paseo ls -a -g --json`
-before the shim ships, with a handoff test that a burst of shim launches
-still hits the 14-agent cap), and the brief footer. `acp-run` stays as the **launch interface** tendcf, nix2cf,
+(`count_agents()` was a `ps` count of `acp-run` processes; Wave 6 caller rewrite
+2026-11-09 ports it to `paseo ls -g --background --json` live statuses
+`running`|`initializing`, so a `paseo run --no-wait` child is countable and
+retired `acp-run`/`acp-dispatch` names are not; reservation release still waits
+until the live count can see the new agent), and the brief footer. `acp-run` stays as the **launch interface** tendcf, nix2cf,
 Plektra and paseo4herdr call (C3) until each of those files is migrated to
 `paseo run` or the operator accepts the break per file; E7's registry switch
 to `paseo provider ls` does not by itself allow its deletion. `acp-run` and
