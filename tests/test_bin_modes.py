@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Every tracked file with a shebang outside tests/ is executable (100755) (2026-10-23).
+"""Every tracked file with a shebang, except under a `tests/` path at any depth, is executable (100755) (2026-10-23).
 
 PR 32 replaced bin/claude-settings-env with a 100644 copy. Its tests ran it through sys.executable and passed, four
 review rounds missed it, and Codex caught it. The same check found claude/hooks/context_size_nudge.py at 100644

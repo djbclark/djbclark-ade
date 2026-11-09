@@ -1212,6 +1212,20 @@ class TestRoutingPolicyToml(unittest.TestCase):
         self.assertIn(f.name, str(ctx.exception))
         self.assertIn("effort", str(ctx.exception))
 
+    def test_a_lead_effort_xhigh_and_max_load(self):
+        """Paseo's top Claude levels are valid [lead] effort and pipeline_effort (PR 33 round 2)."""
+        import tempfile
+        src = (Path(__file__).resolve().parent.parent / "config" / "routing.toml").read_text()
+        for value in ("xhigh", "max"):
+            for key, needle in (("effort", 'effort = "high"\n'), ("pipeline_effort", 'pipeline_effort = "medium"\n')):
+                with self.subTest(key=key, value=value):
+                    bad = src.replace(needle, f'{key} = "{value}"\n', 1)
+                    with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as f:
+                        f.write(bad)
+                    self.addCleanup(Path(f.name).unlink, missing_ok=True)
+                    data = r.load_policy(f.name)
+                    self.assertEqual(data["lead"][key], value)
+
     def test_a_misspelt_lead_key_is_rejected_not_silently_defaulted(self):
         """`pipline_effort = "medium"` must not load as the default high."""
         path = self._lead_policy_variant('pipline_effort = "medium"\n')

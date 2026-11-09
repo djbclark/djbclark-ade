@@ -1,7 +1,7 @@
 #!/usr/bin/env -S python3 -I
 """review-pr: the local Claude review of a PR's exact head (AGENTS.md review rule 11), through bin/review-launch.
 
-  review-pr PR [--repo OWNER/NAME] [--allow-untrusted] [--model M] [--timeout S] [--json]
+  review-pr PR [--repo OWNER/NAME] [--allow-untrusted] [--model M] [--timeout S] [--no-deadline] [--json]
 
 Run it from a checkout of the repository, after the push has landed. It
   1. reads the PR with `gh pr view PR --repo R --json headRefOid,baseRefOid,baseRefName,author,state`;
@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import shutil
@@ -132,8 +133,30 @@ def parser() -> argparse.ArgumentParser:
                    help="review a PR whose author is neither the repository owner nor the authenticated gh user")
     p.add_argument("--model")
     p.add_argument("--timeout", type=float, default=1500.0, help="seconds for the review run (default 1500)")
+    p.add_argument("--no-deadline", action="store_true", help="do not register deadline run around review-launch")
     p.add_argument("--json", action="store_true", help="print the result document as one JSON line")
     return p
+
+
+def _deadline_name(pr: int, head: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]", "-", f"review-pr-{pr}-{head[:7]}-{os.getpid()}")[:100]
+
+
+def _run_review_launch(launch: list[str], pr: int, head: str, timeout: float, no_deadline: bool) -> subprocess.CompletedProcess:
+    """Run review-launch, under `deadline run` when bin/deadline is usable (docs/deadline.md Known gaps)."""
+    if no_deadline or "DEADLINE_NAME" in os.environ:
+        return subprocess.run(launch, capture_output=True, text=True, errors="replace", stdin=subprocess.DEVNULL,
+                              timeout=timeout + 600)
+    tool = HERE / "deadline"
+    if not os.access(tool, os.X_OK):
+        return subprocess.run(launch, capture_output=True, text=True, errors="replace", stdin=subprocess.DEVNULL,
+                              timeout=timeout + 600)
+    budget = max(1, math.ceil(timeout + 600 + 60))
+    owner = os.environ.get("PASEO_AGENT_ID") or "-"
+    argv = [str(tool), "run", "--name", _deadline_name(pr, head), "--budget", str(budget), "--heartbeat", "300",
+            "--owner", owner, "--", *launch]
+    return subprocess.run(argv, capture_output=True, text=True, errors="replace", stdin=subprocess.DEVNULL,
+                          timeout=budget + 120)
 
 
 def main(argv: list[str]) -> int:
@@ -221,8 +244,7 @@ def main(argv: list[str]) -> int:
                   "--schema", str(SCHEMA), "-p", prompt, "--timeout", str(a.timeout), "--json"]
         if a.model:
             launch += ["--model", a.model]
-        proc = subprocess.run(launch, capture_output=True, text=True, errors="replace", stdin=subprocess.DEVNULL,
-                              timeout=a.timeout + 600)
+        proc = _run_review_launch(launch, a.pr, head, a.timeout, a.no_deadline)
         sys.stderr.write(proc.stderr)
         try:
             rec = json.loads(proc.stdout.strip().splitlines()[-1]) if proc.stdout.strip() else {}

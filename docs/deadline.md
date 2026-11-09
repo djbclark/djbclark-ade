@@ -105,11 +105,16 @@ never outlives its own `--timeout`/`--wait` by more than the margin plus the swe
 4. **Tests** (`tests/test_deadline_wrappers.py`) run the live waiter against a temp `DEADLINE_STATE_DIR` (and still cover the DELETE shim waiter until Wave 6 removes it); `tests/conftest.py` exports an empty
    `DEADLINE_NAME` so no other test registers in the real state directory.
 
-## Known gaps (follow-ups; the `review-pr` one is carried in `docs/queue.md`)
+## Known gaps (follow-ups)
 
-`bin/review-pr` and `gh pr checks --watch` do not register a deadline of their own (2026-11-06): run them under `deadline run` (the example
-above); `bin/review-launch` bounds its own run with `--timeout` (default 900 s) and kills the run's process group at the end. `bg` registers since
-2026-11-01 (below).
+1. **`gh pr checks --watch`** still registers no deadline of its own (2026-11-09): run it under `deadline run` (the example above).
+2. **`bin/review-pr`** (2026-11-09): the Claude review step runs under `deadline run` by default (`review-pr-<pr>-<head7>-<pid>`,
+   budget `ceil(--timeout) + 600 + 60` s for the review-launch subprocess cushion and margin, heartbeat 5 min, owner `PASEO_AGENT_ID` or
+   `-`); fetch and worktree setup stay outside that record. `--no-deadline` opts out; with `DEADLINE_NAME` set (already under a caller's
+   `deadline run`) it does not register twice. `review-launch` still enforces its own `--timeout` (review-pr's default 1500 s).
+3. **Sweep owner delivery still names "relay"** (2026-11-09, after slim-down E8 and Wave 6 #340): `--on-expire relay` and expiry notices use
+   `skills/session-finder/relay.py` (shim over `paseo send --json`; removal tracked in `docs/queue.md` item 33, 2026-11-20). `bin/deadline_wait.py`
+   never called relay; only `load-watch admit --wait` and `acp-dispatch-wait` self-register after the shared PR waiter was removed (E8).
 
 ## `bg` records and the holder (2026-11-02)
 
