@@ -101,11 +101,15 @@ Pass `--ade` only with a durable checkout (`~/src/djbclark-ade`); never with a l
 | `skill-everywhere`, `firecrawl-router` | `ade-user-install link` into `{prefix}` |
 | `graft` | `npm install -g @nanonets/graft` (user npm prefix) |
 | `git`, `gh` | `needs_system` + Linux `system_argv` (`apt-get`) + `system_argv_darwin` (`brew`); dry-run only |
+| `node`, `npm` | `needs_system` + Linux `system_argv` (`apt-get install -y nodejs npm`) + `system_argv_darwin` (`brew install node`); dry-run only |
+| `sudo-secretspec` | Mac: `system_argv_darwin` brew tap; Linux: release tarball recipe in `install` prose — no single `system_argv` (versioned asset + extract + declarations path) |
 | `aiuse` | `uv tool install git+https://github.com/djbclark/aiuse` |
 | others | still `UNKNOWN` / no `install_argv` |
 
 ## F. Next units
 
-Live system apply (root/`apt`/`brew` execution with ownership ledger), more
-owner installers (paseo, sudo-secretspec, vendor clients), managed key verify
-probes. S4 jobs stay explicit later work.
+Live system apply (root/`apt`/`brew` execution with ownership ledger), an
+`ade-user-install` (or similar) helper that resolves the sudo-secretspec Linux
+tarball without a pinned URL, remaining owner installers (paseo desktop/daemon
+and skill bundle, vendor clients), managed key verify probes. S4 jobs stay
+explicit later work.

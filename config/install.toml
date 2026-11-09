@@ -73,15 +73,15 @@ id = "sudo-secretspec"
 class = "hard"
 summary = "Only way a key reaches a tool (review rule 3)"
 source = "https://github.com/frdminc/sudo-secretspec"
-install = "brew install frdminc/sudo-secretspec/sudo-secretspec (Mac); Linux: release tarball installer (packaging/README)"
+install = "Mac: brew install frdminc/sudo-secretspec/sudo-secretspec. Linux x86_64: download sudo-secretspec-<version>-x86_64-unknown-linux-gnu.tar.gz (+ .sha256) from https://github.com/frdminc/sudo-secretspec/releases/latest, verify, extract, then sudo ./libexec/sudo-secretspec install --declarations /path/secretspec.toml (packaging/README; Debian 12/13, Ubuntu 24.04+)"
 needs_system = true
 system_argv_darwin = ["brew", "install", "frdminc/sudo-secretspec/sudo-secretspec"]
-update = "brew upgrade (Mac) then interactive sudo-secretspec install; Linux tarball UNKNOWN for argv"
+update = "Mac: brew upgrade then interactive sudo-secretspec install from the new stage. Linux: re-fetch the release tarball and re-run install from the new media (not from the installed client)"
 probe = "sudo-secretspec doctor"
 probe_argv = ["sudo-secretspec", "doctor"]
 presence = "sudo-secretspec"
 platforms = ["mac", "linux"]
-notes = "Hard by operator ruling 2026-11-07. Package install ≠ privilege boundary: interactive `sudo-secretspec install` is a later unit. Linux system_argv still UNKNOWN (tarball). Preview Mac brew with apply --system --dry-run."
+notes = "Hard by operator ruling 2026-11-07. Package install ≠ privilege boundary: interactive `sudo-secretspec install` is a later unit. Linux system_argv still UNKNOWN (2026-11-09): the release ships a multi-step tarball (versioned asset name, sha256, extract, declarations path) — no single apt/brew argv; do not invent a pinned download URL. Runtime apt deps only: sudo libsqlite3-0. Preview Mac brew with apply --system --dry-run."
 [[component]]
 id = "aiuse"
 class = "hard"
@@ -193,6 +193,38 @@ probe_argv = ["bash", "-n", "{bin}/skill-everywhere"]
 presence = "skill-everywhere"
 platforms = ["mac", "linux"]
 notes = "Apply links the CLI; a follow-up --all sync is update_argv / later reconcile. Doctor syntax-checks the script (not --check --all)."
+
+[[component]]
+id = "node"
+class = "hard"
+summary = "Node.js runtime (paired with hard npm; brew install node supplies both on Mac)"
+source = "https://nodejs.org/"
+install = "Mac: brew install node; Linux (Debian/Ubuntu apt): apt-get install -y nodejs npm"
+needs_system = true
+system_argv = ["apt-get", "install", "-y", "nodejs", "npm"]
+system_argv_darwin = ["brew", "install", "node"]
+update = "Mac: brew upgrade node; Linux: package manager"
+probe = "node --version"
+probe_argv = ["node", "--version"]
+presence = "node"
+platforms = ["mac", "linux"]
+notes = "Hard prerequisite for every npm install_argv row. Linux system_argv = Debian/Ubuntu apt (2026-11-09); NodeSource and other distros stay out of scope for this argv. Preview with apply --system --dry-run."
+
+[[component]]
+id = "npm"
+class = "hard"
+summary = "npm CLI (ships with Node; required so npm install_argv recipes are not skipped when node alone is present)"
+source = "https://nodejs.org/"
+install = "Mac: brew install node (includes npm); Linux (Debian/Ubuntu apt): apt-get install -y nodejs npm"
+needs_system = true
+system_argv = ["apt-get", "install", "-y", "nodejs", "npm"]
+system_argv_darwin = ["brew", "install", "node"]
+update = "with node (package manager)"
+probe = "npm --version"
+probe_argv = ["npm", "--version"]
+presence = "npm"
+platforms = ["mac", "linux"]
+notes = "Separate hard row so doctor/apply cannot treat node-without-npm as healthy. Linux system_argv matches node (apt nodejs+npm, 2026-11-09)."
 
 [[component]]
 id = "firecrawl-router"
