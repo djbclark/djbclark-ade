@@ -150,6 +150,17 @@ class TestSurface(Base):
         self.assertEqual(self.run_cli(["footer", "--report", "rel-report.md"]).returncode, 2)
         self.assertIn("refuses", self.run_cli(["footer", "--report", "/tmp/a/REPORT.md"]).stderr)
 
+    def test_footer_uses_paseo_agent_id_when_lead_omitted(self):
+        # Codex P1 on #397: omitting --lead must not leave the literal "main" when the
+        # caller is a Paseo agent (PASEO_AGENT_ID is set).
+        r = self.run_cli(
+            ["footer", "--report", "/abs/x-report.md"],
+            PASEO_AGENT_ID="agt_requester_1",
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("agt_requester_1", r.stdout)
+        self.assertNotIn("SendMessage that same line to `main`", r.stdout)
+
     def test_a_footed_brief_is_redispatched_with_one_contract(self):          # from _brief_footer
         brief = self.tmp / "src.md"
         brief.write_text("Do the thing.\n")

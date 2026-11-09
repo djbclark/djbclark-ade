@@ -109,6 +109,22 @@ STATE_ROOT = Path(os.environ.get("ACP_DISPATCH_STATE", str(Path.home() / ".local
 LOCK_DIR = Path(os.environ.get("ACP_DISPATCH_LOCK_DIR", str(Path.home() / ".local/state/acp-dispatch")))
 DEFAULT_LEAD = "main"
 DEFAULT_TIMEOUT = 2400
+
+
+def resolve_lead(explicit: str | None) -> str:
+    """Requester id for the delivery footer / ade.lead (push-on-completion rule 22).
+
+    Prefer an explicit ``--lead``, then the caller's ``PASEO_AGENT_ID`` (so documented
+    launches that omit ``--lead`` still target the requester, not the literal ``main``
+    placeholder). Fall back to ``DEFAULT_LEAD`` only when neither is set (non-Paseo shells).
+    """
+    if explicit is not None and str(explicit).strip():
+        return str(explicit).strip()
+    env = (os.environ.get("PASEO_AGENT_ID") or "").strip()
+    if env:
+        return env
+    return DEFAULT_LEAD
+
 WAIT_GRACE = 300
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@\[\]+-]{0,127}$")
@@ -1428,14 +1444,19 @@ def main(argv: list[str] | None = None) -> int:
         sub = argparse.ArgumentParser(prog=f"acp-dispatch {verb}")
         if verb == "footer":
             sub.add_argument("--report", required=True)
-            sub.add_argument("--lead", default=DEFAULT_LEAD)
+            sub.add_argument(
+                "--lead",
+                default=None,
+                help="requester Paseo agent id (default: $PASEO_AGENT_ID, else main)",
+            )
             s = sub.parse_args(argv[1:])
             report = Path(s.report).expanduser()
             if not report.is_absolute():
                 die("--report must be an absolute path (the sub-agent has no idea what your cwd is)")
             check_report_name(report)
-            sys.stdout.write(footer_text(report, s.lead))
+            sys.stdout.write(footer_text(report, resolve_lead(s.lead)))
             return 0
+
         if verb == "check":
             sub.add_argument("items", nargs="+", metavar="PATH")
             return check_items(sub.parse_args(argv[1:]).items)
@@ -1478,7 +1499,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--effort", metavar="LEVEL", help="paseo run --thinking LEVEL (not passed to review-launch)")
     ap.add_argument("--perm", choices=("all", "read-only", "deny"), default="all")
     ap.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT, help="the slice's budget in seconds (0 none)")
-    ap.add_argument("--lead", default=DEFAULT_LEAD, help="SendMessage address in the footer; label ade.lead")
+    ap.add_argument(
+        "--lead",
+        default=None,
+        help="requester Paseo agent id in the footer / ade.lead (default: $PASEO_AGENT_ID, else main)",
+    )
     ap.add_argument("--detach", action="store_true", help="with --no-wait: return once the agent is launched")
     ap.add_argument("--no-wait", action="store_true")
     ap.add_argument("--wait-timeout", type=int, help="seconds the dispatch or wait waits (default --timeout + 300)")
@@ -1489,7 +1514,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-load-gate", action="store_true")
     ap.add_argument("--min-headroom", type=float, default=10.0)
     ap.add_argument("--est-pct", type=float, help="estimated percent of the binding quota window this slice uses")
-    return dispatch(ap.parse_args(argv))
+    ns = ap.parse_args(argv)
+    ns.lead = resolve_lead(ns.lead)
+    return dispatch(ns)
 
 
 if __name__ == "__main__":
