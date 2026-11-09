@@ -157,6 +157,41 @@ def test_explicit_files_replace_defaults(tmp_path):
     assert d["files"] == ["other.md"] and d["findings"] == []
 
 
+def test_tilde_file_args_expand(tmp_path, monkeypatch):
+    """Quoted ~/AGENTS.md must expand (issue 284 D7: home instruction files)."""
+    home = tmp_path / "home"
+    write(home, "AGENTS.md", "Short home instructions.
+")
+    monkeypatch.setenv("HOME", str(home))
+    # --root is an unrelated scratch dir so the FILE path is the only hit.
+    other = tmp_path / "other"
+    other.mkdir()
+    rc, d = lint(other, "~/AGENTS.md")
+    assert rc == 0 and d["findings"] == []
+    assert d["files"] == [str(home / "AGENTS.md")]
+
+
+def test_home_root_discovers_agents_and_home_agents_mdc(tmp_path):
+    """--root ~ (here a fixture home) picks up AGENTS.md and .cursor/rules/home-agents.mdc."""
+    write(tmp_path, "AGENTS.md", "Home AGENTS body.
+")
+    write(tmp_path, ".cursor/rules/home-agents.mdc",
+          "---
+alwaysApply: true
+---
+Home cursor rule.
+")
+    write(tmp_path, ".cursor/rules/other.mdc", "ignored sibling still listed
+")
+    rc, d = lint(tmp_path)
+    assert rc == 0 and d["findings"] == []
+    assert d["files"] == [
+        "AGENTS.md",
+        ".cursor/rules/home-agents.mdc",
+        ".cursor/rules/other.mdc",
+    ]
+
+
 def test_output_is_byte_stable(tmp_path):
     write(tmp_path, "AGENTS.md", "tmux\n\n|-- a\n|-- b\n\n%s\n" % LONG)
     write(tmp_path, "GEMINI.md", "%s\n" % LONG)
