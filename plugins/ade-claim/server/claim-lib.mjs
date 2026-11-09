@@ -90,17 +90,32 @@ function readable(path) {
 }
 
 /**
- * Locate bin/ade_claims.py: ADE_CLAIMS_PY, then sourceCheckout/bin, then walk parents of sourceCheckout.
+ * Locate a trusted bin/ade_claims.py.
+ *
+ * Never uses worktree.sourceCheckout: an untrusted repo could plant a hostile
+ * bin/ade_claims.py that the daemon would exec. Prefer ADE_CLAIMS_PY, else walk
+ * parents of the plugin install path (reviewed code) for bin/ade_claims.py.
+ *
  * @param {WorktreeHookPayload} worktree
  * @param {NodeJS.ProcessEnv} [env]
+ * @param {{ pluginRoot?: string }} [opts]
  */
-export function resolveAdeClaimsScript(worktree, env = process.env) {
+export function resolveAdeClaimsScript(worktree, env = process.env, opts = {}) {
   parseWorktreePayload(worktree);
-  if (env.ADE_CLAIMS_PY) return env.ADE_CLAIMS_PY;
-  const beside = join(worktree.sourceCheckout, "bin", "ade_claims.py");
-  if (readable(beside)) return beside;
-  let dir = worktree.sourceCheckout;
-  for (let i = 0; i < 8 && dir && dir !== "/"; i++) {
+  if (env.ADE_CLAIMS_PY) {
+    if (!readable(env.ADE_CLAIMS_PY)) {
+      throw new Error(`ADE_CLAIMS_PY is not readable: ${env.ADE_CLAIMS_PY}`);
+    }
+    return env.ADE_CLAIMS_PY;
+  }
+  const start = opts.pluginRoot;
+  if (typeof start !== "string" || !start.trim()) {
+    throw new Error(
+      "ade_claims.py not found: set ADE_CLAIMS_PY to a trusted absolute path (checkout-local helpers are refused)",
+    );
+  }
+  let dir = start;
+  for (let i = 0; i < 10 && dir && dir !== "/"; i++) {
     const candidate = join(dir, "bin", "ade_claims.py");
     if (readable(candidate)) return candidate;
     const parent = dirname(dir);
@@ -108,6 +123,6 @@ export function resolveAdeClaimsScript(worktree, env = process.env) {
     dir = parent;
   }
   throw new Error(
-    "ade_claims.py not found (set ADE_CLAIMS_PY or create worktrees from a checkout that contains bin/ade_claims.py)",
+    "ade_claims.py not found beside the plugin install; set ADE_CLAIMS_PY to a trusted absolute path",
   );
 }

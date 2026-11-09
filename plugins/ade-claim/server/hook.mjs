@@ -1,9 +1,14 @@
 import { spawnSync } from "node:child_process";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   buildAdeClaimsNewArgv,
   parseWorktreePayload,
   resolveAdeClaimsScript,
 } from "./claim-lib.mjs";
+
+/** Reviewed plugin directory (never the agent's worktree). */
+const PLUGIN_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 /** @param {string} cwd */
 export function gitRevParseHead(cwd) {
@@ -31,7 +36,7 @@ export function gitRemoteOriginUrl(cwd) {
 export function registerWorktreeClaimHook(server) {
   return server.addHook("worktree.create.after", async ({ worktree }) => {
     const wt = parseWorktreePayload(worktree);
-    const script = resolveAdeClaimsScript(wt);
+    const script = resolveAdeClaimsScript(wt, process.env, { pluginRoot: PLUGIN_ROOT });
     const baseSha = gitRevParseHead(wt.path);
     const repoOrigin = gitRemoteOriginUrl(wt.path);
     const { python, argv } = buildAdeClaimsNewArgv(wt, {

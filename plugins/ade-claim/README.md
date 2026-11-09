@@ -14,7 +14,9 @@ From [paseo.sh/docs/plugins/hooks](https://paseo.sh/docs/plugins/hooks#worktreec
 
 | Variable | Purpose |
 |---|---|
-| `ADE_CLAIMS_PY` | Absolute path to `ade_claims.py` when it is not under `sourceCheckout/bin` |
+| `ADE_CLAIMS_PY` | Absolute path to a **trusted** `ade_claims.py` (required when the plugin is not installed from a checkout that also contains `bin/ade_claims.py`) |
+
+The hook never runs `sourceCheckout/bin/ade_claims.py`: an untrusted worktree must not supply the helper the daemon execs. Resolution order: `ADE_CLAIMS_PY`, then walk parents of the plugin install directory for `bin/ade_claims.py`.
 
 ## Tests
 

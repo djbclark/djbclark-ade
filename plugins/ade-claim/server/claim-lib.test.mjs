@@ -56,9 +56,25 @@ test("buildAdeClaimsNewArgv maps hook fields to ade_claims.py new", () => {
   ]);
 });
 
-test("resolveAdeClaimsScript prefers ADE_CLAIMS_PY", () => {
+test("resolveAdeClaimsScript prefers ADE_CLAIMS_PY when readable", () => {
+  // ADE_CLAIMS_PY must point at an existing readable path in this environment.
+  const self = new URL(import.meta.url).pathname;
   assert.equal(
-    resolveAdeClaimsScript(FIXTURE, { ADE_CLAIMS_PY: "/custom/ade_claims.py" }),
-    "/custom/ade_claims.py",
+    resolveAdeClaimsScript(FIXTURE, { ADE_CLAIMS_PY: self }),
+    self,
   );
+});
+
+test("resolveAdeClaimsScript refuses checkout-local helpers", () => {
+  assert.throws(
+    () => resolveAdeClaimsScript(FIXTURE, {}, {}),
+    /ADE_CLAIMS_PY|checkout-local/,
+  );
+});
+
+test("resolveAdeClaimsScript walks pluginRoot for bin/ade_claims.py", () => {
+  // This repo layout: plugins/ade-claim/server → … → bin/ade_claims.py
+  const pluginRoot = new URL("..", import.meta.url).pathname;
+  const script = resolveAdeClaimsScript(FIXTURE, {}, { pluginRoot });
+  assert.match(script, /\/bin\/ade_claims\.py$/);
 });
