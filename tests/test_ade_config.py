@@ -140,6 +140,18 @@ def test_fold_write_check_cli(home, tmp_path):
     written = _run_cli("fold", "--write", "--root", str(root), home=home)
     assert written.returncode == 0, written.stderr
     assert (root / "config" / "ade.toml").is_file()
+    folded_text = (root / "config" / "ade.toml").read_text()
+    # Nested section tables (not inline) so ade-config set can edit scalar leaves.
+    assert "[gates.frontier]" in folded_text
+    assert "frontier = {" not in folded_text
+    assert "[pr_policy.github]" in folded_text
+    assert "github = {" not in folded_text
+    assert "[context_budget.budget]" in folded_text
+    assert 'budget = {' not in folded_text
+    assert '"~" = {' in folded_text  # quoted-key override stays inline (set_scalar)
+    assert "[secret_deny.claude]" in folded_text
+    assert "[gates.floors.frontier]" in folded_text
+    assert "frontier1_judged = { bound = 1" in folded_text  # floor records stay inline
     ok = _run_cli("fold", "--check", "--json", "--root", str(root), home=home)
     assert ok.returncode == 0, ok.stderr
     assert json.loads(ok.stdout)["ok"] is True

@@ -1076,14 +1076,23 @@ def _emit_table_body(
     data: dict[str, Any],
     *,
     prefer_inline_nested: bool,
+    inline_flat_tables: bool = False,
 ) -> tuple[list[str], list[tuple[str, dict[str, Any]]], list[tuple[str, list[dict[str, Any]]]]]:
-    """Split a table into scalar lines, nested tables, and arrays-of-tables."""
+    """Split a table into scalar lines, nested tables, and arrays-of-tables.
+
+    When prefer_inline_nested is false (gates/pr_policy/context_budget/secret_deny),
+    nested dicts become section tables so ``ade-config set`` can edit scalar leaves.
+    ``inline_flat_tables`` (deep nests only) keeps legacy-style flat record objects
+    inline, e.g. ``gates.floors.frontier.frontier1_judged = { bound = 1, ... }``.
+    """
     lines: list[str] = []
     nested: list[tuple[str, dict[str, Any]]] = []
     aot: list[tuple[str, list[dict[str, Any]]]] = []
     for key, value in data.items():
         if isinstance(value, dict):
-            if prefer_inline_nested or _dict_all_scalar_leaves(value):
+            if prefer_inline_nested or (
+                inline_flat_tables and _dict_flat_scalar_values(value)
+            ):
                 lines.append(f"{_toml_key(key)} = {_encode_inline_table(value)}")
             else:
                 nested.append((key, value))
@@ -1096,13 +1105,12 @@ def _emit_table_body(
     return lines, nested, aot
 
 
-def _dict_all_scalar_leaves(data: dict[str, Any]) -> bool:
-    """True when every leaf is a scalar or list of scalars (safe inline table)."""
+def _dict_flat_scalar_values(data: dict[str, Any]) -> bool:
+    """True when every value is a scalar or list of scalars (no nested table)."""
     for value in data.values():
         if isinstance(value, dict):
-            if not _dict_all_scalar_leaves(value):
-                return False
-        elif isinstance(value, list):
+            return False
+        if isinstance(value, list):
             if any(isinstance(x, (dict, list)) for x in value):
                 return False
         elif not isinstance(value, (bool, int, float, str)):
@@ -1116,8 +1124,17 @@ def _emit_section(
     data: dict[str, Any],
     *,
     prefer_inline_nested: bool,
+    depth: int = 0,
 ) -> None:
-    body, nested, aot = _emit_table_body(data, prefer_inline_nested=prefer_inline_nested)
+    # Depth 0 stays nested headers (prior split TOML shape: [gates.frontier],
+    # [pr_policy.github], [context_budget.budget], …). Depth >= 1 may inline flat
+    # record objects (floors.frontier.* and budget."~") so set_scalar never hits a
+    # quoted-key header it refuses, while still matching legacy leaf inlines.
+    body, nested, aot = _emit_table_body(
+        data,
+        prefer_inline_nested=prefer_inline_nested,
+        inline_flat_tables=depth >= 1,
+    )
     lines.append(header)
     lines.extend(body)
     if body or not nested:
@@ -1127,7 +1144,13 @@ def _emit_section(
             child_header = f"[{header[1:-1]}.{_toml_key(key)}]"
         else:
             child_header = f"[{_toml_key(key)}]"
-        _emit_section(lines, child_header, child, prefer_inline_nested=prefer_inline_nested)
+        _emit_section(
+            lines,
+            child_header,
+            child,
+            prefer_inline_nested=prefer_inline_nested,
+            depth=depth + 1,
+        )
     for key, rows in aot:
         base = header[1:-1] if header.startswith("[") and not header.startswith("[[") else ""
         for row in rows:
@@ -1165,7 +1188,8 @@ def encode_toml_document(data: dict[str, Any], *, header: str = ADE_TOML_HEADER)
     for key in ordered_keys:
         value = data[key]
         if isinstance(value, dict):
-            # Prefer inline nested leaves inside routing-domain tables for compactness.
+            # Routing-domain tables: compact inline nests. Policy domains (gates, …):
+            # nested section tables so ade-config set can edit scalar leaves.
             prefer_inline = key in ROUTING_DOMAIN_KEYS and key != "service"
             _emit_section(
                 lines,

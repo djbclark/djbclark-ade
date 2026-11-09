@@ -97,8 +97,12 @@ B10. **Tracked `config/ade.toml`** (2026-11-09): committed by `ade-config fold -
     from the legacy domain files. `ade-config fold --check` asserts the file still matches
     that fold while both the unified file and the legacy mirrors are kept. Prefer
     `ade-config set --target repo` for scalar edits (writes `ade.toml` when present).
-    Legacy files stay for fallthrough when `ade.toml` is absent; a later PR may drop them
-    once fallthrough is unused.
+    The fold emitter writes nested section tables for gates/pr_policy/context_budget/
+    secret_deny (e.g. `[gates.frontier]`, `[pr_policy.github]`), matching the prior split
+    TOML shape, so scalar set can edit those leaves; routing-domain tables may still use
+    compact inline nests, and flat floor / `budget."~"` records stay inline. Legacy files
+    stay for fallthrough when `ade.toml` is absent; a later PR may drop them once
+    fallthrough is unused.
 
 ## C. CLI
 
