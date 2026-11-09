@@ -6,10 +6,11 @@ recorded (else PATH presence), checks live Claude ``context_size_nudge`` hook
 registration against ``agents/claude/settings.json.tmpl`` when that template
 is present under ``--root``, and never repairs or mutates
 ``~/.claude/settings.json`` (order 11). ``keys`` runs ``sudo-secretspec
-check`` for bulk presence only (no get/export/set/verify). Apply is
-user-scoped only: ``--dry-run`` by default, ``--yes`` to execute recorded
-``install_argv`` (argv lists, never shell=True). Root / ``--system`` effects
-are refused until a later unit. Secrets are never read.
+check`` for bulk presence only (no get/export/set/verify). Apply defaults to
+dry-run; ``--yes`` executes user ``install_argv`` (argv lists, never
+shell=True). ``--system --dry-run`` / ``--print-system-argv`` preview
+``system_argv``. Live ``system_argv`` needs ``--yes --system --apply-system``
+(opt-in; default refuse). Secrets are never read.
 """
 from __future__ import annotations
 
@@ -669,8 +670,9 @@ def plan(catalog: Catalog) -> list[dict[str, Any]]:
         if row.get("needs_system"):
             sys_argv = pick_system_argv(row)
             reason = (
-                "needs_system=true; ade-install apply --system --dry-run shows system_argv; "
-                "execution of system_argv remains refused"
+                "needs_system=true; ade-install apply --system --dry-run / "
+                "--print-system-argv shows system_argv; live needs "
+                "--yes --system --apply-system"
             )
             resolved = None
             if sys_argv:
@@ -804,12 +806,72 @@ def save_ledger(state_dir: Path, ledger: dict[str, Any]) -> Path:
     return path
 
 
+def collect_system_argv(
+    catalog: Catalog,
+    *,
+    ids: set[str] | None = None,
+    prefix: Path | None = None,
+) -> list[dict[str, Any]]:
+    """Print-only: platform ``system_argv`` for selected (or all) ``needs_system`` rows."""
+    known = {row["id"] for row in catalog.components}
+    if ids:
+        unknown = sorted(ids - known)
+        if unknown:
+            raise InstallError(f"unknown component id(s): {', '.join(unknown)}")
+    out: list[dict[str, Any]] = []
+    for row in catalog.components:
+        cid = str(row["id"])
+        if ids is not None and cid not in ids:
+            continue
+        if not row.get("needs_system"):
+            if ids is not None:
+                out.append({
+                    "id": cid,
+                    "ok": False,
+                    "action": "skip",
+                    "reason": "not needs_system",
+                    "argv": None,
+                })
+            continue
+        sys_raw = pick_system_argv(row)
+        if not sys_raw:
+            out.append({
+                "id": cid,
+                "ok": False,
+                "action": "missing",
+                "reason": "needs_system but no system_argv for this platform",
+                "argv": None,
+            })
+            continue
+        try:
+            argv = expand_argv(list(sys_raw), root=catalog.root, prefix=prefix)
+        except InstallError as e:
+            out.append({
+                "id": cid,
+                "ok": False,
+                "action": "blocked",
+                "reason": str(e),
+                "argv": None,
+            })
+            continue
+        out.append({
+            "id": cid,
+            "ok": True,
+            "action": "print-system-argv",
+            "reason": "print-only; not executed",
+            "argv": argv,
+            "detail": shlex.join(argv),
+        })
+    return out
+
+
 def build_apply_steps(
     catalog: Catalog,
     *,
     ids: set[str] | None = None,
     force: bool = False,
     allow_system: bool = False,
+    apply_system: bool = False,
     prefix: Path | None = None,
 ) -> list[ApplyStep]:
     """Decide per-component apply actions without executing."""
@@ -834,7 +896,8 @@ def build_apply_steps(
             if not allow_system:
                 steps.append(ApplyStep(
                     cid, "refuse-system", None,
-                    "needs_system=true; pass --system --dry-run to preview system_argv",
+                    "needs_system=true; pass --system --dry-run to preview system_argv "
+                    "(live: --yes --system --apply-system)",
                 ))
                 continue
             sys_raw = pick_system_argv(row)
@@ -849,9 +912,16 @@ def build_apply_steps(
             except InstallError as e:
                 steps.append(ApplyStep(cid, "blocked", None, str(e)))
                 continue
+            if apply_system:
+                reason = "ready for --apply-system (operator opt-in)"
+            else:
+                reason = (
+                    "system dry-run / preview only; live needs "
+                    "--yes --system --apply-system"
+                )
             steps.append(ApplyStep(
                 cid, "would-system-install", argv,
-                "system dry-run only; execution of system_argv is refused",
+                reason,
                 detail=shlex.join(argv),
             ))
             continue
@@ -891,6 +961,87 @@ def _default_runner(
     )
 
 
+def _run_install_argv(
+    *,
+    step: ApplyStep,
+    row: dict[str, Any],
+    ledger: dict[str, Any],
+    state_dir: Path,
+    cwd: Path,
+    run: Callable[[list[str], Path], subprocess.CompletedProcess[str]],
+    timeout_s: float,
+    kind: str,
+    completed_reason: str,
+) -> bool:
+    """Execute one argv list; update ``row`` and ledger. Return True if failed."""
+    assert step.argv is not None
+    entries = ledger.setdefault("entries", {})
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    entries[step.id] = {
+        "status": "pending",
+        "kind": kind,
+        "argv": list(step.argv),
+        "at": stamp,
+    }
+    save_ledger(state_dir, ledger)
+    try:
+        proc = run(list(step.argv), cwd)
+    except subprocess.TimeoutExpired:
+        row["action"] = "failed"
+        row["ok"] = False
+        row["reason"] = f"timed out after {timeout_s}s"
+        entries[step.id] = {
+            "status": "failed",
+            "kind": kind,
+            "argv": list(step.argv),
+            "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "detail": row["reason"],
+        }
+        save_ledger(state_dir, ledger)
+        return True
+    except OSError as e:
+        row["action"] = "failed"
+        row["ok"] = False
+        row["reason"] = f"exec error: {e}"
+        entries[step.id] = {
+            "status": "failed",
+            "kind": kind,
+            "argv": list(step.argv),
+            "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "detail": str(e),
+        }
+        save_ledger(state_dir, ledger)
+        return True
+    if proc.returncode != 0:
+        row["action"] = "failed"
+        row["ok"] = False
+        row["returncode"] = proc.returncode
+        err = (proc.stderr or proc.stdout or "").strip()
+        row["reason"] = err[:500] or f"exit {proc.returncode}"
+        entries[step.id] = {
+            "status": "failed",
+            "kind": kind,
+            "argv": list(step.argv),
+            "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "returncode": proc.returncode,
+            "detail": row["reason"],
+        }
+        save_ledger(state_dir, ledger)
+        return True
+    row["action"] = "installed"
+    row["ok"] = True
+    row["returncode"] = 0
+    row["reason"] = completed_reason
+    entries[step.id] = {
+        "status": "installed",
+        "kind": kind,
+        "argv": list(step.argv),
+        "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    save_ledger(state_dir, ledger)
+    return False
+
+
 def apply(
     catalog: Catalog,
     *,
@@ -898,22 +1049,33 @@ def apply(
     ids: set[str] | None = None,
     force: bool = False,
     allow_system: bool = False,
+    apply_system: bool = False,
     state_dir: Path | None = None,
     prefix: Path | None = None,
     runner: Runner | None = None,
     timeout_s: float = 300.0,
 ) -> tuple[list[dict[str, Any]], int]:
-    """Bounded apply. Default dry-run. ``--yes`` executes user ``install_argv`` only.
+    """Bounded apply. Default dry-run. ``--yes`` executes user ``install_argv``.
 
     ``--system`` unlocks dry-run preview of ``system_argv`` (``would-system-install``).
-    Executing ``system_argv`` is always refused (exit 2) — root effects need a later unit.
+    Live ``system_argv`` requires ``apply_system=True`` (CLI: ``--apply-system`` with
+    ``--yes --system``). Without that opt-in, system exec is refused (exit 2).
 
     Exit 0 when every selected step is skip/would-install(dry)/install ok /
-    would-system-install(dry); 1 when any blocked/failed/refuse-system; 2 when a
-    system_argv step would have been executed.
+    would-system-install(dry) / system installed; 1 when any blocked/failed/
+    refuse-system; 2 when a system_argv step was refused without ``--apply-system``.
     """
+    if apply_system and not allow_system:
+        raise InstallError("--apply-system requires --system")
+    if apply_system and dry_run:
+        raise InstallError("--apply-system requires --yes (refused with dry-run)")
     steps = build_apply_steps(
-        catalog, ids=ids, force=force, allow_system=allow_system, prefix=prefix,
+        catalog,
+        ids=ids,
+        force=force,
+        allow_system=allow_system,
+        apply_system=apply_system,
+        prefix=prefix,
     )
     state_dir = state_dir or default_state_dir()
     results: list[dict[str, Any]] = []
@@ -938,81 +1100,44 @@ def apply(
             row["argv"] = list(step.argv)
             row["detail"] = step.detail
         if step.action == "would-system-install" and not dry_run:
-            # Never execute package-manager / root argv in this unit.
-            system_exec_refused += 1
-            row["action"] = "refuse-system-exec"
-            row["ok"] = False
-            row["reason"] = (
-                "system_argv execution refused; use --system --dry-run to preview only "
-                "(live system apply is a later unit)"
-            )
+            if not apply_system:
+                # Default refuse: --yes --system alone never roots the machine.
+                system_exec_refused += 1
+                row["action"] = "refuse-system-exec"
+                row["ok"] = False
+                row["reason"] = (
+                    "system_argv execution refused; preview with --system --dry-run "
+                    "or --print-system-argv; live needs --yes --system --apply-system"
+                )
+            else:
+                assert ledger is not None
+                if _run_install_argv(
+                    step=step,
+                    row=row,
+                    ledger=ledger,
+                    state_dir=state_dir,
+                    cwd=catalog.root,
+                    run=_run,
+                    timeout_s=timeout_s,
+                    kind="system_argv",
+                    completed_reason="system_argv completed",
+                ):
+                    failed += 1
         elif step.action == "would-install" and not dry_run:
             assert step.argv is not None
-            # Persist pending intent before the write (setup-plan S3 ownership note).
             assert ledger is not None
-            entries = ledger.setdefault("entries", {})
-            entries[step.id] = {
-                "status": "pending",
-                "argv": list(step.argv),
-                "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            }
-            save_ledger(state_dir, ledger)
-            try:
-                proc = _run(list(step.argv), catalog.root)
-            except subprocess.TimeoutExpired as e:
+            if _run_install_argv(
+                step=step,
+                row=row,
+                ledger=ledger,
+                state_dir=state_dir,
+                cwd=catalog.root,
+                run=_run,
+                timeout_s=timeout_s,
+                kind="install_argv",
+                completed_reason="install_argv completed",
+            ):
                 failed += 1
-                row["action"] = "failed"
-                row["ok"] = False
-                row["reason"] = f"timed out after {timeout_s}s"
-                entries[step.id] = {
-                    "status": "failed",
-                    "argv": list(step.argv),
-                    "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                    "detail": row["reason"],
-                }
-                save_ledger(state_dir, ledger)
-                results.append(row)
-                continue
-            except OSError as e:
-                failed += 1
-                row["action"] = "failed"
-                row["ok"] = False
-                row["reason"] = f"exec error: {e}"
-                entries[step.id] = {
-                    "status": "failed",
-                    "argv": list(step.argv),
-                    "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                    "detail": str(e),
-                }
-                save_ledger(state_dir, ledger)
-                results.append(row)
-                continue
-            if proc.returncode != 0:
-                failed += 1
-                row["action"] = "failed"
-                row["ok"] = False
-                row["returncode"] = proc.returncode
-                err = (proc.stderr or proc.stdout or "").strip()
-                row["reason"] = err[:500] or f"exit {proc.returncode}"
-                entries[step.id] = {
-                    "status": "failed",
-                    "argv": list(step.argv),
-                    "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                    "returncode": proc.returncode,
-                    "detail": row["reason"],
-                }
-                save_ledger(state_dir, ledger)
-            else:
-                row["action"] = "installed"
-                row["ok"] = True
-                row["returncode"] = 0
-                row["reason"] = "install_argv completed"
-                entries[step.id] = {
-                    "status": "installed",
-                    "argv": list(step.argv),
-                    "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                }
-                save_ledger(state_dir, ledger)
         elif step.action in ("blocked", "refuse-system", "refuse-system-exec"):
             failed += 1
             row["ok"] = False

@@ -36,7 +36,7 @@ probe = "git --version"
 probe_argv = ["git", "--version"]
 presence = "git"
 platforms = ["mac", "linux"]
-notes = "system_argv = Linux apt; system_argv_darwin = Homebrew. Preview with apply --system --dry-run."
+notes = "system_argv = Linux apt; system_argv_darwin = Homebrew. Preview with apply --system --dry-run or --print-system-argv; live needs --yes --system --apply-system."
 
 [[component]]
 id = "gh"

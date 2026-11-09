@@ -307,6 +307,114 @@ def test_cli_apply_system_dry_run_and_yes_refused(tmp_path):
     assert json.loads(yes.stdout)["results"][0]["action"] == "refuse-system-exec"
 
 
+def test_collect_and_cli_print_system_argv(tmp_path):
+    root = _fixture_root(tmp_path)
+    catalog = ai.load_catalog(root=root)
+    rows = ai.collect_system_argv(catalog, ids={"tool-d"})
+    assert len(rows) == 1
+    assert rows[0]["ok"] is True
+    assert rows[0]["action"] == "print-system-argv"
+    assert rows[0]["argv"] == ["apt-get", "install", "-y", "tool-d"]
+
+    missing = ai.collect_system_argv(catalog, ids={"tool-c"})
+    assert missing[0]["ok"] is False
+    assert missing[0]["action"] == "skip"
+
+    proc = _run("apply", "--print-system-argv", "--json", "--id", "tool-d", root=root)
+    assert proc.returncode == 0, proc.stderr
+    payload = json.loads(proc.stdout)
+    assert payload["mode"] == "print-system-argv"
+    assert payload["results"][0]["argv"] == ["apt-get", "install", "-y", "tool-d"]
+
+    bad = _run(
+        "apply", "--print-system-argv", "--yes", "--json", "--id", "tool-d", root=root,
+    )
+    assert bad.returncode == 2
+
+
+def test_apply_system_opt_in_runs_with_mock_runner(tmp_path):
+    """Live system_argv only with apply_system; runner is injected — never real apt."""
+    root = _fixture_root(tmp_path)
+    catalog = ai.load_catalog(root=root)
+    state = tmp_path / "state"
+    calls: list[list[str]] = []
+
+    def runner(argv: list[str], cwd: Path):
+        calls.append(list(argv))
+        # Refuse accidental real package managers in tests.
+        assert argv[0] not in ("apt-get", "brew", "sudo")
+        return subprocess.CompletedProcess(argv, 0, stdout="ok\n", stderr="")
+
+    # Without apply_system: still refuse (and never call runner).
+    results, rc = ai.apply(
+        catalog,
+        dry_run=False,
+        ids={"tool-d"},
+        allow_system=True,
+        apply_system=False,
+        state_dir=state,
+        runner=runner,
+    )
+    assert rc == 2
+    assert results[0]["action"] == "refuse-system-exec"
+    assert calls == []
+
+    # apply_system without allow_system refused at API.
+    with pytest.raises(ai.InstallError, match="requires --system"):
+        ai.apply(
+            catalog,
+            dry_run=False,
+            ids={"tool-d"},
+            allow_system=False,
+            apply_system=True,
+            state_dir=state,
+            runner=runner,
+        )
+
+    # Opt-in path: rewrite fixture argv through expand is apt-get — use a custom
+    # catalog row by monkeypatching pick via a runner that accepts the argv list
+    # but we assert argv is a list and shell is never used (runner contract).
+    def system_runner(argv: list[str], cwd: Path):
+        calls.append(list(argv))
+        assert isinstance(argv, list) and all(isinstance(x, str) for x in argv)
+        assert cwd == catalog.root
+        return subprocess.CompletedProcess(argv, 0, stdout="ok\n", stderr="")
+
+    calls.clear()
+    results, rc = ai.apply(
+        catalog,
+        dry_run=False,
+        ids={"tool-d"},
+        allow_system=True,
+        apply_system=True,
+        state_dir=state,
+        runner=system_runner,
+    )
+    assert rc == 0, results
+    assert results[0]["action"] == "installed"
+    assert results[0]["reason"] == "system_argv completed"
+    assert calls == [["apt-get", "install", "-y", "tool-d"]]
+    ledger = json.loads((state / "ledger.json").read_text())
+    assert ledger["entries"]["tool-d"]["status"] == "installed"
+    assert ledger["entries"]["tool-d"]["kind"] == "system_argv"
+
+
+def test_cli_apply_system_requires_yes_and_opt_in(tmp_path):
+    root = _fixture_root(tmp_path)
+    no_yes = _run(
+        "apply", "--apply-system", "--system", "--json", "--id", "tool-d", root=root,
+    )
+    assert no_yes.returncode == 2
+    assert "--apply-system requires --yes" in no_yes.stderr
+
+    # --yes --system without --apply-system still refused (no mock needed: no exec).
+    refused = _run(
+        "apply", "--yes", "--system", "--json", "--id", "tool-d", root=root,
+    )
+    assert refused.returncode == 2
+    assert json.loads(refused.stdout)["results"][0]["action"] == "refuse-system-exec"
+
+
 def test_user_install_link_dry_run(tmp_path):
     root = tmp_path / "repo"
     (root / "bin").mkdir(parents=True)
