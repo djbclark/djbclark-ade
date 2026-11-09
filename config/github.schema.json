@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/djbclark/djbclark-ade/config/github.schema.json",
+  "title": "djbclark-ade github setup",
+  "description": "Transitional [github] setup config (schema_version=1) for setup-plan S8. Used while config/ade.toml lacks [github]. Secret fields are names only.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "github"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "github": {
+      "type": "object",
+      "required": [
+        "owner",
+        "repository",
+        "app_name",
+        "app_slug",
+        "manifest",
+        "environment",
+        "environment_branch",
+        "private_key_secret",
+        "client_id_variable",
+        "ruleset_name",
+        "github_actions_app_id",
+        "required_check"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "owner": {
+          "type": "string",
+          "minLength": 1
+        },
+        "repository": {
+          "type": "string",
+          "minLength": 1
+        },
+        "app_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "app_slug": {
+          "type": "string",
+          "minLength": 1
+        },
+        "manifest": {
+          "type": "string",
+          "minLength": 1
+        },
+        "environment": {
+          "type": "string",
+          "minLength": 1
+        },
+        "environment_branch": {
+          "type": "string",
+          "minLength": 1
+        },
+        "private_key_secret": {
+          "type": "string",
+          "minLength": 1,
+          "description": "GitHub Actions environment secret name (value never stored here)"
+        },
+        "client_id_variable": {
+          "type": "string",
+          "minLength": 1,
+          "description": "GitHub Actions environment variable name for the App client id"
+        },
+        "ruleset_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "github_actions_app_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "app_id": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Optional recorded App ID after create; observe prefers live API"
+        },
+        "required_check": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": [
+              "context",
+              "source"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "context": {
+                "type": "string",
+                "minLength": 1
+              },
+              "source": {
+                "type": "string",
+                "enum": [
+                  "app",
+                  "github_actions"
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
