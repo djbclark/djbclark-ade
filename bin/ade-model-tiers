@@ -1,0 +1,255 @@
+#!/usr/bin/env -S python3 -I
+"""ade-model-tiers: show/resolve/classify/validate/promote/set for config/model-tiers.toml.
+
+  ade-model-tiers show [--json] [--root DIR]
+  ade-model-tiers resolve VENDOR ROLE [--route ROUTE] [--json] [--root DIR]
+  ade-model-tiers classify MODEL [--json] [--root DIR]
+  ade-model-tiers validate [--root DIR]
+  ade-model-tiers promote --vendor V --new ID --reason TEXT
+                 [--alias A] [--display D] [--cascade N] [--dry-run] [--root DIR]
+  ade-model-tiers set --vendor V --role ROLE --id ID --reason TEXT
+                 [--alias A] [--display D] [--dry-run] [--root DIR]
+
+Exit codes: 0 ok, 2 usage, 3 validation failed, 4 dry-run would change under
+`--check`-style validate drift. No secrets, no network, no credential reads.
+MODEL_TIERS_TOML redirects the file (tests). See docs/model-routing.md §G and
+docs/history/model-tiers-design.md.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+
+BIN = Path(__file__).resolve().parent
+if str(BIN) not in sys.path:
+    sys.path.insert(0, str(BIN))
+
+import model_tiers as mt  # noqa: E402
+
+
+def _print_json(obj: object) -> None:
+    json.dump(obj, sys.stdout, indent=2, sort_keys=True, default=str)
+    sys.stdout.write("\n")
+
+
+def _root_path(args: argparse.Namespace) -> Path | None:
+    return Path(args.root) if getattr(args, "root", None) else None
+
+
+def _tiers_path(args: argparse.Namespace) -> Path:
+    # MODEL_TIERS_TOML wins (tests); else --root/config/…; else the checkout default.
+    env = os.environ.get("MODEL_TIERS_TOML")
+    if env:
+        return Path(env)
+    root = _root_path(args)
+    if root is not None:
+        return root / "config" / "model-tiers.toml"
+    return mt.default_path()
+
+
+def cmd_show(args: argparse.Namespace) -> int:
+    tiers = mt.load(_tiers_path(args), use_cache=False)
+    pub = mt.public_dict(tiers)
+    if args.json:
+        _print_json(pub)
+        return 0
+    print(f"source={tiers.source} path={tiers.path}")
+    if tiers.error:
+        print(f"error={tiers.error}", file=sys.stderr)
+    order = (pub.get("rank") or {}).get("order") or []
+    print(f"rank: {', '.join(order)}")
+    for vname in order:
+        vbody = (pub.get("vendor") or {}).get(vname) or {}
+        roles = vbody.get("roles") or {}
+        print(f"[{vname}]")
+        for role in mt.ROLES:
+            mid = roles.get(role, "?")
+            disp = mt.display(vname, role, tiers=tiers) if mid != "?" else "?"
+            print(f"  {role:9} {mid}  ({disp})")
+    print("frontier_tokens: " + ", ".join(pub.get("frontier_tokens") or []))
+    print("sublimit_families: " + ", ".join(pub.get("sublimit_families") or []))
+    return 0
+
+
+def cmd_resolve(args: argparse.Namespace) -> int:
+    tiers = mt.load(_tiers_path(args), use_cache=False)
+    try:
+        value = mt.resolve(args.vendor, args.role, args.route, tiers=tiers)
+    except mt.TiersError as e:
+        print(str(e), file=sys.stderr)
+        return 2
+    if args.json:
+        _print_json({"vendor": args.vendor, "role": args.role, "route": args.route, "value": value})
+    else:
+        print(value)
+    return 0
+
+
+def cmd_classify(args: argparse.Namespace) -> int:
+    tiers = mt.load(_tiers_path(args), use_cache=False)
+    vendor, role, status = mt.classify(args.model, tiers=tiers)
+    if args.json:
+        _print_json({"model": args.model, "vendor": vendor, "role": role, "status": status})
+    else:
+        print(f"vendor={vendor} role={role} status={status}")
+    return 0
+
+
+def cmd_validate(args: argparse.Namespace) -> int:
+    path = _tiers_path(args)
+    raw, err = mt._read_toml(path)
+    if err or raw is None:
+        print(f"validate: FAIL {err}", file=sys.stderr)
+        return 3
+    try:
+        mt._validate(raw, label=str(path))
+    except mt.TiersError as e:
+        print(f"validate: FAIL {e}", file=sys.stderr)
+        return 3
+    drift = mt.defaults_match_file(path)
+    if drift:
+        for msg in drift:
+            print(f"drift: {msg}", file=sys.stderr)
+        print("validate: FAIL DEFAULTS drift", file=sys.stderr)
+        return 4
+    print(f"validate: OK {path}")
+    return 0
+
+
+def cmd_promote(args: argparse.Namespace) -> int:
+    try:
+        result = mt.promote(
+            vendor=args.vendor,
+            new_id=args.new,
+            reason=args.reason,
+            alias=args.alias,
+            display_name=args.display,
+            cascade=args.cascade,
+            path=_tiers_path(args),
+            dry_run=args.dry_run,
+        )
+    except mt.TiersError as e:
+        print(str(e), file=sys.stderr)
+        return 3
+    if args.json:
+        _print_json({
+            "dry_run": result.dry_run,
+            "changed": result.changed,
+            "path": str(result.path),
+            "notes": result.notes,
+            "before_roles": (result.before.get("vendor") or {}).get(args.vendor, {}).get("roles"),
+            "after_roles": (result.after.get("vendor") or {}).get(args.vendor, {}).get("roles"),
+        })
+    else:
+        before = (result.before.get("vendor") or {}).get(args.vendor, {}).get("roles") or {}
+        after = (result.after.get("vendor") or {}).get(args.vendor, {}).get("roles") or {}
+        print(f"path={result.path} dry_run={result.dry_run} changed={result.changed}")
+        for role in mt.ROLES:
+            b, a = before.get(role), after.get(role)
+            mark = "->" if b != a else "  "
+            print(f"  {role:9} {b} {mark} {a}")
+        for note in result.notes:
+            print(f"  note: {note}")
+        if result.dry_run and result.changed:
+            print("--- dry-run TOML ---")
+            print(result.text, end="" if result.text.endswith("\n") else "\n")
+    return 0
+
+
+def cmd_set(args: argparse.Namespace) -> int:
+    try:
+        result = mt.set_role(
+            vendor=args.vendor,
+            role=args.role,
+            new_id=args.id,
+            reason=args.reason,
+            alias=args.alias,
+            display_name=args.display,
+            path=_tiers_path(args),
+            dry_run=args.dry_run,
+        )
+    except mt.TiersError as e:
+        print(str(e), file=sys.stderr)
+        return 3
+    if args.json:
+        _print_json({
+            "dry_run": result.dry_run,
+            "changed": result.changed,
+            "path": str(result.path),
+            "notes": result.notes,
+            "before_roles": (result.before.get("vendor") or {}).get(args.vendor, {}).get("roles"),
+            "after_roles": (result.after.get("vendor") or {}).get(args.vendor, {}).get("roles"),
+        })
+    else:
+        print(f"path={result.path} dry_run={result.dry_run} changed={result.changed}")
+        for note in result.notes:
+            print(f"  note: {note}")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="ade-model-tiers",
+        description="Model tier roles as data (config/model-tiers.toml).",
+    )
+    p.add_argument("--root", help="repo root (default: this checkout)")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    show = sub.add_parser("show", help="print the effective tier table")
+    show.add_argument("--json", action="store_true")
+    show.set_defaults(func=cmd_show)
+
+    resolve = sub.add_parser("resolve", help="resolve vendor/role[/route] to a model spelling")
+    resolve.add_argument("vendor")
+    resolve.add_argument("role", choices=list(mt.ROLES))
+    resolve.add_argument("--route", default=None)
+    resolve.add_argument("--json", action="store_true")
+    resolve.set_defaults(func=cmd_resolve)
+
+    classify = sub.add_parser("classify", help="classify a model string into vendor/role/status")
+    classify.add_argument("model")
+    classify.add_argument("--json", action="store_true")
+    classify.set_defaults(func=cmd_classify)
+
+    validate = sub.add_parser("validate", help="validate the file and DEFAULTS drift")
+    validate.set_defaults(func=cmd_validate)
+
+    promote = sub.add_parser(
+        "promote",
+        help="promote a new id to frontier (cascade shift); writes the file unless --dry-run",
+    )
+    promote.add_argument("--vendor", required=True)
+    promote.add_argument("--new", required=True, help="new frontier model id")
+    promote.add_argument("--reason", required=True)
+    promote.add_argument("--alias", default=None)
+    promote.add_argument("--display", default=None)
+    promote.add_argument("--cascade", type=int, default=None)
+    promote.add_argument("--dry-run", action="store_true")
+    promote.add_argument("--json", action="store_true")
+    promote.set_defaults(func=cmd_promote)
+
+    set_p = sub.add_parser("set", help="set one role id without shifting the ladder")
+    set_p.add_argument("--vendor", required=True)
+    set_p.add_argument("--role", required=True, choices=list(mt.ROLES))
+    set_p.add_argument("--id", required=True)
+    set_p.add_argument("--reason", required=True)
+    set_p.add_argument("--alias", default=None)
+    set_p.add_argument("--display", default=None)
+    set_p.add_argument("--dry-run", action="store_true")
+    set_p.add_argument("--json", action="store_true")
+    set_p.set_defaults(func=cmd_set)
+
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    return int(args.func(args))
+
+
+if __name__ == "__main__":
+    sys.exit(main())

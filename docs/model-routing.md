@@ -1,10 +1,10 @@
 # Model and effort routing
 
-Snapshot **2026-11-08** (rewritten by slim-down E7; the 2026-08-23 service matrix, the per-service effort tables and the
-dated policy updates that were here are in git history). Goal: know which models are reachable through which pool on
-this machine, which budget each spends, and route every slice by vendor × model × effort × context window. The method
-is the `model-routing` skill (`skills/model-routing/SKILL.md`); this page is the record of what feeds it and why.
-Percentages drift constantly: re-probe, never trust a page for balances.
+Snapshot **2026-11-09** (model tiers as data; rewritten by slim-down E7 on 2026-11-08; the 2026-08-23 service matrix, the
+per-service effort tables and the dated policy updates that were here are in git history). Goal: know which models are
+reachable through which pool on this machine, which budget each spends, and route every slice by vendor × model ×
+effort × context window. The method is the `model-routing` skill (`skills/model-routing/SKILL.md`); this page is the
+record of what feeds it and why. Percentages drift constantly: re-probe, never trust a page for balances.
 
 Current operator decision: Pi is the sole general-purpose third-party TUI; vendor monthly-plan clients and Hermes remain. The legacy omp/OpenCode transport rows below are marked `retired = true` in policy, so they cannot win automatic dispatch. Their pool metadata is preserved for a validated Pi migration. Pi catalog discovery remains disabled in the generic router to avoid merging independent vendor pools. See [migration evidence and acceptance](tui-security-and-pi-migration.md); API checks and vendor subscription allowances stay distinct.
 
@@ -89,14 +89,34 @@ read-only mode, so the slice runs in its default mode with a logged note); the r
 native model selection bypasses the dispatch gate, so this is a local orchestration policy, not a provider billing cap.
 Keep briefs short (OpenCode exposes no smaller context window); the Go plugin compacts early (`docs/context-hygiene.md`).
 
-## G. Reasons kept from the earlier matrix
+## G. Model tiers as data (2026-11-09)
 
-G1. 2026-10-18: four astra slices at once emptied codex's 5-hour window, so the frontier models are reached only through
+G1. Design: `docs/history/model-tiers-design.md`. This slice ships the file, the loader (`bin/model_tiers.py`), the CLI
+(`bin/ade-model-tiers`) and the first readers (`route_agent`, `load_effective`). Full consumer migration (routing.toml
+`@role` placeholders, render, literal scan) stays later.
+G2. Today's table (re-check with `bin/ade-model-tiers show`):
+
+| role | claude (rank 1) | codex (rank 2) |
+| --- | --- | --- |
+| frontier | `claude-fable-5-1` (`fable`) | `gpt-6-astra` |
+| judgment | `claude-opus-5-5` (`opus`) | `gpt-6.1-sol` |
+| everyday | `claude-sonnet-5-5` (`sonnet`) | `gpt-6.1-sol` |
+| bulk | `claude-haiku-5-5` (`haiku`) | `gpt-6-luna` |
+
+G3. Succession: `ade-model-tiers promote --vendor V --new ID --reason TEXT [--cascade N] [--dry-run]` shifts the ladder
+(default cascade 2: new → frontier, old frontier → judgment; the displaced judgment goes to `[former]`). `set` changes
+one role without shifting. No secrets, no network. Edit in a claimed worktree; the merge is the atomic apply.
+G4. Untiered models (e.g. `gemini-4-argon`) stay as literals in `[dispatch].frontier_models`; frontier matching is the
+union of that list and every spelling/alias of each tiered vendor's frontier role.
+
+## H. Reasons kept from the earlier matrix
+
+H1. 2026-10-18: four astra slices at once emptied codex's 5-hour window, so the frontier models are reached only through
 `--kind frontier`, capped per wave, and in-flight slices reserve their estimated quota per service.
-G2. 2026-10-20: the Claude weekly window ran out 2.6 days before its reset; Opus sub-agents (~53%) and a Fable lead
+H2. 2026-10-20: the Claude weekly window ran out 2.6 days before its reset; Opus sub-agents (~53%) and a Fable lead
 (~30%) were the burn. Hence `[lead]` (Opus judgment lead, Sonnet pipeline lead, never Fable: operator 2026-10-23) and
 adversary rounds on omp first at that time (that client was archived 2026-11-08 and is no longer a fallback). Since 2026-11-07 (operator) Fable leads are allowed for now: the one line to flip back is
 `fable_lead = true` in `[lead]` of `config/routing.toml` (false or absent restores never-a-Fable-lead).
-G3. 2026-11-01: a cheap model as the daily coding driver was checked against Terminal-Bench 4.0 and this repo's own
+H3. 2026-11-01: a cheap model as the daily coding driver was checked against Terminal-Bench 4.0 and this repo's own
 review of Flash-written code (four BLOCKs): code stays on tier-1 models (Sonnet 5.5, GPT-6.1 Sol); cheap models only for
 bulk and mechanical work a stronger model reviews.

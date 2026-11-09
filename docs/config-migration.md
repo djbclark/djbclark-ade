@@ -21,10 +21,12 @@ yet (`ade-install` refuses while it is present).
 | `config/routing.toml` | `[[service]]` | `[[service]]` |
 | `config/gates.toml` | `[frontier]` | `[gates.frontier]` |
 | `config/gates.toml` | `[floors.frontier]` | `[gates.floors.frontier]` |
+| `config/model-tiers.toml` | `[meta]` / `[rank]` / `[vendor.*]` / `[model.*]` / `[former]` | `[model_tiers]` |
 
 Routing's current public tables stay at the effective root (not nested under a single
 `[routing]` umbrella that would drop `[lead]` / `[[service]]`). Gates nest under
-`[gates]` so the frontier allowance does not collide with routing keys.
+`[gates]` so the frontier allowance does not collide with routing keys. Model tiers project
+under `[model_tiers]` (2026-11-09); `bin/ade-model-tiers` is the writer.
 
 `schema_version` is exactly `1`. Unsupported versions fail closed.
 
@@ -57,6 +59,9 @@ B6. **`GATES_TOML`**: isolated legacy-format override for `[gates]`. Missing/unr
     at `[floors.frontier].*.bound`; `*_min_left` never looser than the code default).
 B7. This unit does **not** ship an automatically adopted `config/ade.toml`. An example
     may live under tests/fixtures only.
+B8. **`MODEL_TIERS_TOML`** (2026-11-09): isolated override for `[model_tiers]`. Missing or
+    unreadable files fall back to `model_tiers.DEFAULTS` (today's table), same fail-safe as
+    `ade_gates`. `bin/ade-model-tiers` is the writer; `ade-config set` does not edit tiers.
 
 ## C. CLI
 

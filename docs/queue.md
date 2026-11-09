@@ -169,21 +169,23 @@ under **Carried**, newest first, one line each; an item leaves when it ships (in
 1. **Push on completion** (load-watch 96a17744, 2026-10-23; shipped 2026-11-09): a delegated slice tells its requester
    `done: <title>, <PR URL>` (or status/report) via `paseo send --json --no-wait` with named ack, never relay; dispatch
    footer rule 22, `bin/completion-notice`, `skills/fan-out` Collect, `docs/orchestration-practices.md` §5a.
-2. Port the Linux suite to uutils (2026-10-28): `pytest-linux` makes g-prefixed wrapper scripts, on `ubuntu-latest`.
-3. Keep every machine current, and a changelog (2026-10-20): `bin/ade-update`, `CHANGELOG.md`, fragments since 2026-10-31.
-4. Phase 0 backups (PR 24) and the templates (PR 23), 2026-10-20.
-5. ade-git-guard O2 redesign adopted and built (PR 59, 2026-10-25).
-6. An absolute "all work in a worktree" commandment (2026-10-25): adopted as order 9.
-7. Deadline waiters register themselves (2026-11-02); the sweep installs on Linux too (`deadline install --backend`).
-8. Queued lows branch, adversary BLOCK, repair and round 2 APPROVE (2026-10-24).
-9. Cloud agents: the Cursor API key and `bin/cursor-cloud` (2026-10-19/20).
-10. Claude API credits: the omp login and the aiuse credits row (2026-10-19), the Admin API collector (aiuse 3.8.0, 2026-10-20).
-11. Quota-aware cross-vendor routing (queued 2026-08-23): `route_agent.py plan|route|show` (2026-10).
-12. Implement cow (2026-08-23; removed with `cow-pasture` 2026-11-06).
-13. Completed 2026-08-23: `~/src/ops-worktrees/` retired with every branch preserved.
-14. Token-cost hygiene review of 2026-08-24 (its one open point is Carried 29).
-15. Monthly plans that work with Hermes (research of 2026-08-24; ClinePass).
-16. Why the `sed` edit failed twice (2026-10-14): `~/CLAUDE.md` item 33.
-17. Flaky MockWebServer tests on the SIPB runner (2026-10-14).
-18. Watch Orca upstream for structural-reorg verbs; Orca's short PostCompact hook; the herdr-only capability and Orca parity list: dropped 2026-10-31 with Orca and herdr.
-19. Restart the `hindsight` MCP server in sessions older than 2026-08-23 20:00: moot (no such session survives).
+2. **Model tiers as data** (2026-10-31 → 2026-11-09, PR #NNN): `config/model-tiers.toml`, `bin/ade-model-tiers promote|set`,
+   `route_agent` / `load_effective` readers; design remains `docs/history/model-tiers-design.md`.
+3. Port the Linux suite to uutils (2026-10-28): `pytest-linux` makes g-prefixed wrapper scripts, on `ubuntu-latest`.
+4. Keep every machine current, and a changelog (2026-10-20): `bin/ade-update`, `CHANGELOG.md`, fragments since 2026-10-31.
+5. Phase 0 backups (PR 24) and the templates (PR 23), 2026-10-20.
+6. ade-git-guard O2 redesign adopted and built (PR 59, 2026-10-25).
+7. An absolute "all work in a worktree" commandment (2026-10-25): adopted as order 9.
+8. Deadline waiters register themselves (2026-11-02); the sweep installs on Linux too (`deadline install --backend`).
+9. Queued lows branch, adversary BLOCK, repair and round 2 APPROVE (2026-10-24).
+10. Cloud agents: the Cursor API key and `bin/cursor-cloud` (2026-10-19/20).
+11. Claude API credits: the omp login and the aiuse credits row (2026-10-19), the Admin API collector (aiuse 3.8.0, 2026-10-20).
+12. Quota-aware cross-vendor routing (queued 2026-08-23): `route_agent.py plan|route|show` (2026-10).
+13. Implement cow (2026-08-23; removed with `cow-pasture` 2026-11-06).
+14. Completed 2026-08-23: `~/src/ops-worktrees/` retired with every branch preserved.
+15. Token-cost hygiene review of 2026-08-24 (its one open point is Carried 29).
+16. Monthly plans that work with Hermes (research of 2026-08-24; ClinePass).
+17. Why the `sed` edit failed twice (2026-10-14): `~/CLAUDE.md` item 33.
+18. Flaky MockWebServer tests on the SIPB runner (2026-10-14).
+19. Watch Orca upstream for structural-reorg verbs; Orca's short PostCompact hook; the herdr-only capability and Orca parity list: dropped 2026-10-31 with Orca and herdr.
+20. Restart the `hindsight` MCP server in sessions older than 2026-08-23 20:00: moot (no such session survives).

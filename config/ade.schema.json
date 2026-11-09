@@ -55,6 +55,11 @@
         "additionalProperties": true
       }
     },
+    "model_tiers": {
+      "type": "object",
+      "description": "Projected from config/model-tiers.toml (roles → concrete model ids per vendor). Written by bin/ade-model-tiers promote|set.",
+      "additionalProperties": true
+    },
     "gates": {
       "type": "object",
       "description": "Legacy gates.toml [frontier] and [floors.frontier] project under gates.frontier and gates.floors.frontier.",
