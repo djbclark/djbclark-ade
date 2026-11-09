@@ -118,6 +118,111 @@ def strip_literals(c: str) -> str:
     return re.sub(r"\d*>&\d*-?|&>>?|<&\d*", " ", s)
 
 
+def command_views(plain: str) -> list[str]:
+    """The command line as separate commands: the outer one with each `$(...)`, `<(...)` and
+    `>(...)` replaced by a placeholder word, then the body of every substitution (nested ones
+    included, each replaced in its parent the same way).
+
+    `gh api x $(echo $r | cut -d/ -f1):master --jq .y` must not give `cut` the text after the `)`
+    (2026-11-02: that made the gate deny `cut --jq`), and `cut -d$(printf , | cut -c1) --complement`
+    must still give the outer `cut` its `--complement`, so each command is checked on its own
+    text. A bare `(` group, a regex group (`=~ ^(awk|sed)$`) and an extended glob (`@(awk|sed)`)
+    stay inline: they are argument text, not a command. An arithmetic expansion `$((...))` runs
+    no command, so its expression is dropped (`echo $((sed + 1))`, `$((1<(sed)))`), except for
+    the backtick and `$(` substitutions inside it, which do run. `$((a); b)` is a substitution
+    around a subshell, not arithmetic: bash reads `$((` as arithmetic only when its closing `)`
+    is directly followed by another `)`. A backslash-escaped character is filename or argument
+    content (`find . -name foo\\)`, `\\$(`), never a delimiter. An unclosed substitution is
+    still checked, as its own view."""
+    views: list[str] = []
+    # open groups: (kind, text collected so far); kind is "sub" (`$(`, `<(`, `>(`), "arith"
+    # (`$((`) or "group" (a bare `(`); the bottom entry is the outer command
+    stack: list[tuple[str, list[str]]] = [("group", [])]
+    i = 0
+    while i < len(plain):
+        ch = plain[i]
+        if ch == "\\":
+            stack[-1][1].append(plain[i:i + 2])
+            i += 2
+        elif plain.startswith("$((", i):
+            stack.append(("arith", []))
+            i += 3
+        elif ch == "$" and plain[i + 1:i + 2] == "(":
+            stack.append(("sub", []))
+            i += 2
+        elif ch in "<>" and plain[i + 1:i + 2] == "(" and not any(k == "arith" for k, _ in stack):
+            stack.append(("sub", []))  # a process substitution; inside arithmetic `<(` compares
+            i += 2
+        elif ch == "(":
+            stack.append(("group", []))
+            i += 1
+        elif ch == ")" and len(stack) > 1:
+            kind, body = stack.pop()
+            text = "".join(body)
+            if kind == "sub":
+                views.append(text)
+                stack[-1][1].append("X")
+            elif kind == "arith" and plain[i + 1:i + 2] != ")":
+                # `$((a); b)`: a subshell inside a substitution; the `(` was a group all along
+                stack.append(("sub", ["(" + text + ")"]))
+            elif kind == "arith":
+                views.extend(_backtick_bodies(text))
+                stack[-1][1].append("X")
+                i += 1  # the closing `))`
+            else:
+                stack[-1][1].append("(" + text + ")")
+            i += 1
+        else:
+            stack[-1][1].append(ch)
+            i += 1
+    while len(stack) > 1:  # unclosed: a substitution is its own command, a bare `(` stays inline
+        kind, body = stack.pop()
+        text = "".join(body)
+        if kind == "sub":
+            views.append(text)
+        elif kind == "arith":
+            views.extend(_backtick_bodies(text))
+        else:
+            stack[-1][1].append("(" + text)
+    return ["".join(stack[0][1])] + views
+
+
+def _backtick_bodies(text: str) -> list[str]:
+    """Backtick command bodies, including escaped nested substitutions inside arithmetic.
+
+    A backslash protects a backtick from closing the current pair. Bash removes
+    that escape when executing its body, where the nested pair becomes active.
+    Use a worklist rather than recursion for arbitrarily nested input.
+    """
+    bodies: list[str] = []
+    pending = [text]
+    while pending:
+        source = pending.pop()
+        body: list[str] | None = None
+        i = 0
+        while i < len(source):
+            ch = source[i]
+            if ch == "\\" and i + 1 < len(source):
+                nxt = source[i + 1]
+                if body is not None:
+                    # Backtick substitution removes escapes only for these chars.
+                    body.append(nxt if nxt in "\\$`" else ch + nxt)
+                i += 2
+                continue
+            if ch == "`":
+                if body is None:
+                    body = []
+                else:
+                    command = "".join(body)
+                    bodies.append(command)
+                    pending.append(command)
+                    body = None
+            elif body is not None:
+                body.append(ch)
+            i += 1
+    return bodies
+
+
 def words(stage: str) -> list[str]:
     """A stage's words; `$(`, backticks and `(`/`{` start a command, so they split too."""
     return [w for w in re.split(r"\s+|\$\(|`|\(|\{", stage) if w]
@@ -283,40 +388,46 @@ def check(cmd: str) -> tuple[str | None, str | None]:
     if hd:
         return hd, None
     plain = strip_literals(cmd)
+    warn = None
+    for view in command_views(plain):
+        # control operators split pipelines; the pipe splits stages
+        for pipeline in re.split(r"&&|\|\||;|\n|&", view):
+            for stage in re.split(r"\|&?", pipeline):
+                if command_word(stage)[0] == "sed":
+                    return ("Use `gsed`, not bare `sed`: this Mac's `sed` is BSD sed and GNU flags "
+                            "differ (2026-10-15: a BSD `sed -i` broke an edit). To read lines use "
+                            "the Read tool or `gsed -n A,Bp`; a deliberate BSD call writes "
+                            "`/usr/bin/sed`."), None
+                tool, args = command_word(stage)
+                if tree_grep(tool, args):
+                    return TREE_GREP_REASON, None
+                flag = gnu_only(tool, args)
+                if flag:
+                    return gnu_reason(tool, flag, bool(re.search(r"\bxargs\b", stage))
+                                      and tool != "xargs"), None
+                xa = xargs_args(stage)
+                flag = gnu_only("xargs", xa) if xa else None
+                if flag:
+                    return gnu_reason("xargs", flag), None
+                w = words(stage)
+                if w and w[0] == "sudo":
+                    flags = "".join(x.lstrip("-") for x in w[1:] if x.startswith("-") and not x.startswith("--"))
+                    if "n" in flags and "k" not in flags:
+                        warn = ("`sudo -n` succeeds for any command while a sudo ticket is cached "
+                                "(this Mac's timestamp is global), so it proves nothing about a "
+                                "NOPASSWD rule. To test or rely on a rule, use `sudo -k -n CMD`: "
+                                "it ignores the cache without clearing it.")
+    # the pipe-status check reads the whole command, substitutions and all, as it always did
+    # (2026-11-02, Codex review of PR 254: no exemption and no trimming here)
     # control operators split pipelines; keep each operator to know what reads the status
     parts = re.split(r"(&&|\|\||;|\n|&)", plain)
     pipelines = [(parts[i], parts[i + 1] if i + 1 < len(parts) else "")
                  for i in range(0, len(parts), 2)]
-    guarded = bool(re.search(r"pipefail|PIPESTATUS", plain))
-    warn = None
+    if re.search(r"pipefail|PIPESTATUS", plain):
+        return None, warn
     for n, (pipeline, op) in enumerate(pipelines):
         stages = re.split(r"\|&?", pipeline)
-        for stage in stages:
-            if command_word(stage)[0] == "sed":
-                return ("Use `gsed`, not bare `sed`: this Mac's `sed` is BSD sed and GNU flags "
-                        "differ (2026-10-15: a BSD `sed -i` broke an edit). To read lines use "
-                        "the Read tool or `gsed -n A,Bp`; a deliberate BSD call writes "
-                        "`/usr/bin/sed`."), None
-            tool, args = command_word(stage)
-            if tree_grep(tool, args):
-                return TREE_GREP_REASON, None
-            flag = gnu_only(tool, args)
-            if flag:
-                return gnu_reason(tool, flag, bool(re.search(r"\bxargs\b", stage))
-                                  and tool != "xargs"), None
-            xa = xargs_args(stage)
-            flag = gnu_only("xargs", xa) if xa else None
-            if flag:
-                return gnu_reason("xargs", flag), None
-            w = words(stage)
-            if w and w[0] == "sudo":
-                flags = "".join(x.lstrip("-") for x in w[1:] if x.startswith("-") and not x.startswith("--"))
-                if "n" in flags and "k" not in flags:
-                    warn = ("`sudo -n` succeeds for any command while a sudo ticket is cached "
-                            "(this Mac's timestamp is global), so it proves nothing about a "
-                            "NOPASSWD rule. To test or rely on a rule, use `sudo -k -n CMD`: "
-                            "it ignores the cache without clearing it.")
-        if len(stages) < 2 or guarded:
+        if len(stages) < 2:
             continue
         last, _ = command_word(stages[-1])
         if last not in FILTERS:

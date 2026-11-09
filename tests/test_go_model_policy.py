@@ -96,18 +96,23 @@ def test_bounded_advice_runs_best_effort_read_only(tmp_path):
     bindir = tmp_path / "bin"
     bindir.mkdir()
     (bindir / "paseo").symlink_to(ROOT / "tests" / "fakes" / "paseo")
+    # Dry-run validates existing placement too; provide a hermetic selected catalog row.
     result = subprocess.run([sys.executable, str(ROOT / "bin/acp-dispatch"), "opencode",
                              "--model", "opencode-go/kimi-k3", "--name", "safe-advice",
                              "--task", "cost-policy-test", "-p", "offline dry run", "--dry-run", "--json",
+                             "--workspace", "wks_cost_policy", "-C", str(ROOT),
                              "--kind", "judgment", "--role", "advise",
                              "--perm", "read-only", "--timeout", "600",
                              "--out", str(tmp_path / "jobs")], capture_output=True, text=True,
                             timeout=20, check=False,
                             env={**os.environ, "HOME": str(tmp_path), "FAKE_PASEO_STATE": str(tmp_path / "st"),
+                                 "FAKE_PASEO_WORKSPACES": json.dumps([
+                                     {"id": "wks_cost_policy", "cwd": str(ROOT)}]),
                                  "PATH": f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}"})
     assert result.returncode == 0, result.stderr
     rec = json.loads(result.stdout)
     assert rec["go_advisory"] is True and "best effort for opencode" in rec["perm_note"]
+    assert rec["selected_workspace_id"] == "wks_cost_policy"
     assert not (tmp_path / "jobs").exists()
 
 

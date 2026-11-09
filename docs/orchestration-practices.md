@@ -101,18 +101,26 @@ the task, and the ambiguity is copied into every slice.² ³ Every brief has:
 
 On 2026-11-07 a live child launch confirmed that `paseo run --cwd DIR` alone inherited the parent's workspace
 and ignored the requested directory. A top-level run with `PASEO_WORKSPACE_ID` set also inherits that workspace.
-For an already claimed worktree, use `--new-workspace local --cwd DIR`
-(or an explicit `--workspace` for that directory), and check the returned `cwd`. Parent links remain intact.
-Never fix placement by restarting a healthy paid slice. A missing or mismatched cwd is a placement warning on
-stderr while the already launched agent continues — treat placement as unverified until `cwd` matches.
+Ordinary dispatch must **reuse an existing workspace**: `paseo run --workspace wks_… --cwd DIR`, with
+`paseo workspace ls --json` validating the id and that workspace `cwd` realpath-matches `--cwd` before any paid
+run. With a caller, its verified inspect snapshot must expose a workspace id; missing metadata or an unreadable
+caller requires explicit `--workspace`. Only a run without `PASEO_AGENT_ID` may fall back to `PASEO_WORKSPACE_ID`.
+Native Paseo 0.15.3 `inspect --json` omitted workspace identity when checked on 2026-11-08, so agent-origin
+launches on that CLI need `--workspace`. Mint a workspace only with native `paseo workspace create` or
+`paseo run --new-workspace` (never via the transitional `acp-dispatch` shim). For an already claimed worktree
+without a reusable `wks_…`, use `--new-workspace local --cwd DIR` and check the returned `cwd`. Parent links
+remain intact. Never fix placement by restarting a healthy paid slice. Missing or mismatched metadata produces
+a placement warning on stderr while the already launched agent continues — treat placement as unverified until
+`cwd` / workspace id match.
 
 Minimal out-of-process launch shape (after `route_agent.py plan` / `route` and `load-watch admit`):
 
 ```bash
 paseo run --provider PROVIDER/MODEL --no-wait \
-  --new-workspace local --cwd ~/src/<repo>-NAME-wt \
+  --workspace wks_… --cwd ~/src/<repo>-NAME-wt \
   --label ade.kind=KIND --label ade.name=NAME --label ade.lead=LEAD \
   "$(cat brief-with-footer.md)"
+# or, minting for a claimed worktree: --new-workspace local --cwd ~/src/<repo>-NAME-wt …
 ```
 
 ## 4. Size the run to the work

@@ -104,6 +104,8 @@ def test_sudo_k_n_and_plain_sudo_are_quiet(command):
     "ls -la --human-readable",
     "date -d yesterday +%F",
     "x=$(date --date='2 days ago' +%F)",
+    "x=$(echo a,b | cut --delimiter=, -f1) && echo $x",     # inside the group still denied
+    "gh api x $(echo a | cut --delimiter=, -f1):y --jq .z",
     "date -ud @0",
     "stat -c %a f",
     "stat --format=%a f",
@@ -196,9 +198,63 @@ def test_gnu_deny_reason_names_the_g_tool():
     "git log --format=%H --reverse; git diff --stat",
     "cp a b --force",                                        # past the operands BSD reads no options
     "rm -rf -- --weird",
+    # text after the `)` of a $(... | tool ...) group belongs to the outer command (2026-11-02)
+    "gh api repos/o/r/compare/m...$(echo $r|cut -d/ -f1):master --jq .x",
+    "git log $(git rev-parse HEAD | cut -c1-7)..HEAD --format=%H",
+    "echo $(echo a | tr -d a) --version-sort",
+    # a filter that ends a substitution is not the status `&&` reads (Codex review of PR 254)
+    "echo $(printf x | cat) && echo done",
+    "cat <(printf x | cat) && echo done",
+    # a regex or extended-glob group is not a substitution: nothing after its `)` is trimmed (Codex review of PR 254, round 3)
+    "[[ $tool =~ ^(awk|sed)$ ]] && echo recognized",
+    "ls @(awk|sed)",
+    # the substitution opens in one pipeline and closes in another
+    "gh api x $(echo $r && echo a | cut -d/ -f1):master --jq .y",
+    # an escaped `$` is not a substitution opener (Codex review of PR 254, round 4)
+    "[[ $tool =~ \\$(awk|sed) ]] && echo recognized",
+    # nested substitutions: each body is its own command, the outer keeps the text after the `)`
+    "gh api x $(echo $(echo a | cut -d/ -f1) | cut -d/ -f1):master --jq .y",
+    # an arithmetic expansion runs no command (Codex review of PR 254, round 5)
+    "sed=2; echo $((sed + 1))",
+    "echo $((stat -c))",
+    "echo $(( (1 + 2) * 3 )) | cut -d/ -f1",
+    "sed=2; echo $((1<(sed)))",
+    # Escaped inner backticks execute only portable commands.
+    r"x=$((`echo \`printf 1 | gsed -n 1p\`` + 1))",
+    r"x=$((`echo \`printf 1\`` + 1))",
 ])
 def test_gnu_flags_that_work_or_do_not_apply_pass(command):
     assert not denied(command)
+
+
+@pytest.mark.parametrize("command", [
+    # an escaped paren is argument content, not a subshell close, so the GNU option after it counts
+    "echo x | cut -d\\) --complement -f1",
+    "find . -name foo\\) -printf '%p\\n'",
+    # a plain `(a | tail)` group still hands tail's status to `&&`
+    "(git merge --ff-only x | tail -2) && git push",
+    # the status check reads the whole outer pipeline, trimmed or not (Codex review of PR 254)
+    "git merge --ff-only topic | tee $(printf /tmp/merge.log | cat -) && git push",
+    "(x=$(false | tail -2)) && printf PUSHED",
+    # an escaped paren after a regex group, and a plain pipe after a closed substitution, stay checked
+    "echo x | grep -E '^(a|b)' | cut -d\\) --complement -f1",
+    "x=$(echo a | cut -d, -f1) && ls | cut --complement -f1",
+    # the outer command keeps its own options when a substitution sits among its arguments (Codex review of PR 254, round 4)
+    "cut -d$(printf , | cut -c1) --complement -f1 f",
+    "diff <(sort a | head -1) <(ls) --brief --ignore-matching-lines=x; stat --format=%a $(ls | head -1) f",
+    # a GNU option inside any substitution body is denied, lone or nested
+    "git log --since=$(date -d yesterday +%F)",
+    "echo $(echo $(echo a | cut --complement -f1) | cut -d/ -f1)",
+    "echo $(( $(date -d x +%s) + 1 ))",
+    "x=$((`date -d yesterday +%s` + 1))",
+    "x=$((sed -n 1p f); printf x)",
+    # Escaped backticks belong to a nested command, not to the outer pair.
+    r"x=$((`echo \`printf 1 | sed -n 1p\`` + 1))",
+    r"x=$((`echo \`printf 1 | cut --complement -f1\`` + 1))",
+    r"x=$((`echo \`date -d yesterday +%s\`` + 1))",
+])
+def test_escaped_parens_and_subshell_groups_stay_checked(command):
+    assert denied(command)
 
 
 def test_other_tools_and_the_off_switch_pass():

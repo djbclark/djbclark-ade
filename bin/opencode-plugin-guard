@@ -11,6 +11,9 @@
 #   opencode-plugin-guard --check   report only, change nothing
 #   opencode-plugin-guard           restore what is missing (default)
 #
+# Also: `opencode-plugin-guard` patches Paseo's paseo-managed-bridge stale-binding check
+# (on demand, when the OpenCode model list in Paseo is blank; see handle_paseo_bridge).
+#
 # Idempotent and non-destructive: a live file that already has the v2 shape and
 # differs from the canonical copy is left alone. Unknown RTK copies are flagged
 # for review; a v2 export alone does not prove permission safety. See djbclark-ade/docs/opencode-plugin-v2.md.
@@ -130,11 +133,68 @@ handle() {
   rc=1
 }
 
+# handle_paseo_bridge — Paseo's `paseo-managed-bridge` plugin never drops a stale
+# session binding when OpenCode's Bun runtime (1.4.4) reports a refused connection
+# as `error.code === "ECONNREFUSED"` (no `cause`): every later bind answers HTTP 500
+# and Paseo's OpenCode model list stays blank (2026-11-04; upstream getpaseo/paseo#8780).
+# One exact-string patch of the live file; it goes away once Paseo ships the fix
+# (the vulnerable line disappears and this reports "not present"). OpenCode's file
+# watcher reloads the plugin without a restart; the in-memory bindings are kept
+# across reloads, and the patched handler then clears the stale one on the next
+# bind (Paseo retries every ~4 s). THE PATCH IS TRANSIENT: Paseo rewrote the file
+# from its runtime copy within a minute (2026-11-04 06:37), which is fine, since
+# the patched handler only has to run until one bind has cleared the stale binding.
+# Run this when the OpenCode model list is blank, then check
+# `paseo provider models opencode`; it is no standing guard.
+handle_paseo_bridge() {
+  local file="$LIVE_DIR/paseo-managed-bridge/server.js" st=0
+  if [ ! -f "$file" ]; then
+    log "  paseo-bridge: $file absent; nothing to patch"
+    return
+  fi
+  python3 - "$file" "$CHECK" <<'PYBRIDGE' || st=$?
+import os, sys
+path, check = sys.argv[1], sys.argv[2] == "1"
+OLD = 'error?.cause?.code !== "ECONNREFUSED" && error?.code !== "ConnectionRefused")'
+NEW = 'error?.cause?.code !== "ECONNREFUSED" && error?.code !== "ECONNREFUSED" && error?.code !== "ConnectionRefused")'
+real = os.path.realpath(path)
+with open(real, encoding="utf-8") as f:
+    text = f.read()
+if NEW in text:
+    sys.exit(0)
+if text.count(OLD) != 1:
+    sys.exit(11)
+if check:
+    sys.exit(10)
+tmp = real + ".new.%d" % os.getpid()
+with open(tmp, "w", encoding="utf-8") as f:
+    f.write(text.replace(OLD, NEW))
+os.chmod(tmp, os.stat(real).st_mode & 0o7777)
+os.replace(tmp, real)
+sys.exit(10)
+PYBRIDGE
+  case "$st" in
+    0) log "  paseo-bridge: ECONNREFUSED patch present" ;;
+    10)
+      if [ "$CHECK" = 1 ]; then
+        # Not an error: Paseo restores the original shortly after any patch.
+        log "  paseo-bridge: ECONNREFUSED patch not applied; run without --check only if the OpenCode model list is blank"
+      else
+        log "  paseo-bridge: patched $file; OpenCode reloads it. Paseo may restore the original within a minute, so check \`paseo provider models opencode\` now"
+        rc=1
+      fi
+      ;;
+    11) log "  paseo-bridge: vulnerable line not present exactly once in $file; Paseo may have fixed it (getpaseo/paseo#8780); not touching" ;;
+    *) log "  paseo-bridge: could not read or patch $file (python exit $st); no write"; rc=1 ;;
+  esac
+}
+
 log "opencode-plugin-guard $( [ "$CHECK" = 1 ] && echo '(check)' || echo '(enforce)') — $(gdate -u +%Y-%m-%dT%H:%M:%SZ)"
 
 # An old obsolescence sentinel is not evidence of permission safety. Always
 # inspect the managed files; never execute `rtk hook opencode` as a probe.
 handle rtk "$LIVE_DIR/rtk.ts" "$CANONICAL_DIR/rtk.ts"
+handle_paseo_bridge
 
 # Retirement requires an explicit review of the upstream permission contract,
 # not a default export, a stale drift marker or a successful subcommand.

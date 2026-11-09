@@ -7,8 +7,8 @@ the load gate and the frontier admission) and launches through `paseo run`, or, 
 through `bin/review-launch` (the E8 review boundary, which outlives this shim).
 
     acp-dispatch <agent> --model M --kind KIND --name NAME (-p PROMPT | -f BRIEF) [-C DIR]
-                 [--role advise|exec] [--frontier-reason TEXT] [--effort LEVEL]
-                 [--task TASK | --out DIR] [--perm all|read-only|deny] [--timeout S] [--lead NAME]
+                 [--workspace WKS] [--role advise|exec] [--frontier-reason TEXT]
+                 [--effort LEVEL] [--task TASK | --out DIR] [--perm all|read-only|deny] [--timeout S] [--lead NAME]
                  [--detach [--no-wait] [--wait-timeout S]] [--dry-run] [--json] [--force]
                  [--min-headroom PCT] [--est-pct PCT] [--load-wait SECONDS | --no-load-gate]
     acp-dispatch footer --report PATH [--lead NAME]   the shared footer, filled in, for an Agent-tool prompt
@@ -40,13 +40,19 @@ ACP_DISPATCH_LOAD_WAIT, else 1800; --no-load-gate or ACP_DISPATCH_NO_LOAD_GATE=1
 environment except the knobs passed as flags). Then, under this shim's launch lock, the live count: `paseo ls -g
 --background --label ade.via=acp-dispatch --json`, agents whose status is running or initializing; at LW_MAX_AGENTS
 (default 14, 0 off) or more it waits inside the --load-wait budget and then exits 75 (`refused=agents`). Then
-`paseo run --provider P/M --mode MODE --no-wait --json --title NAME --new-workspace local --cwd DIR --label ade.via=acp-dispatch --label
+`paseo run --provider P/M --mode MODE --no-wait --json --title NAME --workspace WKS --cwd DIR --label ade.via=acp-dispatch --label
 ade.kind=KIND --label ade.name=NAME --label ade.lead=LEAD [--thinking EFFORT] -- PROMPT`, where PROMPT is one
 paragraph naming the brief copy (`<out>/<name>-brief.md`, never written into the repo), the report path, and the
-footer. The lock and the admit reservation are released once the new agent shows in that list (up to 10 s), so a
-burst of launches cannot pass the cap together. The in-flight cap, the reservation and the frontier per-wave count
-are judged twice: before anything is written, and again under a lock right after this dispatch's `running` record is
-written, counting only the records ahead of it by (started, path), so parallel dispatches see each other (exit 5). A review-launch run holds its admit reservation (renewed) until it
+footer. An existing workspace is selected from `--workspace`, the caller's verified `PASEO_AGENT_ID` snapshot
+when native inspect exposes a workspace id, or an ambient `PASEO_WORKSPACE_ID` only when there is no caller;
+an unreadable caller or an inspect response without workspace metadata requires explicit `--workspace`.
+the id and `paseo workspace ls --json` cwd must match `-C` or the launch is refused (exit 2) before `paseo run`.
+This shim never creates a workspace; mint one with native `paseo workspace create` first. The lock and the admit
+reservation are released once the new agent shows in that
+list (up to 10 s), so a burst of launches cannot pass the cap together. The in-flight cap, the reservation and the
+frontier per-wave count are judged twice: before anything is written, and again under a lock right after this
+dispatch's `running` record is written, counting only the records ahead of it by (started, path), so parallel
+dispatches see each other (exit 5). A review-launch run holds its admit reservation (renewed) until it
 ends: it is a `claude -p` process `paseo ls` cannot see.
 
 Wait: `paseo wait ID [--timeout S] --json`, read by its status field, never its exit status: idle -> the report is
@@ -208,6 +214,73 @@ def paseo_bin() -> str:
     if not found:
         die("paseo is not on PATH (this shim launches through Paseo)")
     return found
+
+
+def paths_equivalent(a: str, b: str) -> bool:
+    try:
+        return os.path.realpath(a) == os.path.realpath(b)
+    except OSError:
+        return False
+
+
+def workspace_catalog() -> tuple[list[dict], str]:
+    data, why = paseo_json(["workspace", "ls", "--background"], timeout=30)
+    if not isinstance(data, list):
+        return [], why or "paseo workspace ls returned no list"
+    return [x for x in data if isinstance(x, dict)], ""
+
+
+def workspace_row_id(row: dict) -> str | None:
+    wid = row.get("workspaceId") or row.get("id")
+    return str(wid) if wid else None
+
+
+def lookup_workspace(ws_id: str, rows: list[dict]) -> dict | None:
+    return next((r for r in rows if workspace_row_id(r) == ws_id), None)
+
+
+def caller_workspace_from_inspect(inspect: dict) -> str | None:
+    for key in ("WorkspaceId", "workspaceId", "workspace_id"):
+        val = inspect.get(key)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+    return None
+
+
+def resolve_paseo_workspace(a: argparse.Namespace) -> str:
+    """Existing workspace id for this launch; refuses before paseo run when unresolved."""
+    requested_workspace = getattr(a, "workspace", None)
+    if requested_workspace is not None and not requested_workspace.strip():
+        die("--workspace requires a nonempty existing workspace id")
+    ws_id = requested_workspace.strip() if requested_workspace is not None else None
+    if not ws_id:
+        caller = os.environ.get("PASEO_AGENT_ID", "").strip()
+        if caller:
+            data, why = paseo_json(["inspect", caller], timeout=30)
+            if (not isinstance(data, dict) or data.get("Id") != caller
+                    or data.get("Archived") is not False):
+                detail = f" ({why})" if why else ""
+                die(f"cannot verify Paseo caller {caller!r}{detail}; pass an explicit --workspace ID")
+            ws_id = caller_workspace_from_inspect(data)
+            if not ws_id:
+                die("Paseo inspect did not report a workspace id for the caller; pass --workspace ID "
+                    "(the installed native CLI may omit workspace metadata)")
+        else:
+            ws_id = os.environ.get("PASEO_WORKSPACE_ID", "").strip() or None
+    if not ws_id:
+        die("no Paseo workspace for this dispatch: pass --workspace ID or set PASEO_WORKSPACE_ID "
+            "(create a workspace with native Paseo first; this shim never mints one)")
+    rows, why = workspace_catalog()
+    row = lookup_workspace(ws_id, rows)
+    if row is None:
+        tail = f" ({why})" if why else ""
+        die(f"Paseo workspace {ws_id!r} is missing, unreadable, or not active{tail}")
+    ws_cwd = row.get("cwd")
+    if not isinstance(ws_cwd, str) or not ws_cwd.strip():
+        die(f"Paseo workspace {ws_id!r} has no cwd in workspace ls")
+    if not paths_equivalent(ws_cwd, a.dir):
+        die(f"Paseo workspace {ws_id!r} cwd {ws_cwd!r} does not match -C {a.dir!r}")
+    return ws_id
 
 
 def paseo_json(args: list[str], timeout: float | None = 60) -> tuple[Any, str]:
@@ -835,13 +908,15 @@ def gate_policy(a: argparse.Namespace, service: str | None, approved: set[str]) 
 
 
 def launch_argv(a: argparse.Namespace, boundary: str, mode: str, brief: Path, report: Path, prompt: str,
-                schema: Path) -> list[str]:
+                schema: Path, *, workspace_id: str | None = None) -> list[str]:
     if boundary == "review-launch":
         return [review_launch_bin(), "--mode", mode, "-C", a.dir, "--schema", str(schema), "-f", str(brief),
                 "--model", a.model, *(["--timeout", str(a.timeout)] if a.timeout else []), "--json"]
+    if not workspace_id:
+        die("internal: paseo launch without a resolved workspace id")
     labels = [VIA_LABEL, f"ade.kind={a.kind}", f"ade.name={a.name}", f"ade.lead={a.lead}"]
     return [paseo_bin(), "run", "--provider", f"{PROVIDERS[a.agent]}/{a.model}", "--mode", mode, "--no-wait", "--json",
-            "--title", a.name, "--new-workspace", "local", "--cwd", a.dir, *[x for lb in labels for x in ("--label", lb)],
+            "--title", a.name, "--workspace", workspace_id, "--cwd", a.dir, *[x for lb in labels for x in ("--label", lb)],
             *(["--thinking", a.effort] if a.effort else []), "--", prompt]
 
 
@@ -892,6 +967,7 @@ def dispatch(a: argparse.Namespace) -> int:
                      f"the provider's default mode `{mode}` with a brief note asking it to change nothing (operator "
                      "ruling 2026-11-07)")
         print(f"acp-dispatch: {perm_note}", file=sys.stderr)
+    workspace_id = resolve_paseo_workspace(a) if boundary == "paseo" else None
     REPO_FLOORS.update(router.repo_floors(router.repo_of(a.dir)))   # the -C repo's estimate-floor override
     out = Path(a.out).expanduser().resolve() if a.out else STATE_ROOT / (a.task or f"adhoc-{date.today().isoformat()}")
     report, record = out / f"{a.name}-report.md", out / "jobs" / f"{a.name}.json"
@@ -957,7 +1033,8 @@ def dispatch(a: argparse.Namespace) -> int:
                f"brief file {brief}: read all of it before doing anything and follow it. Deliver by writing the report "
                f"to {report} and then touching {done}, as the delivery contract below (also at the end of the brief) "
                f"says; your final message is only `written: {report}`.\n\n{footer.rstrip()}\n{note}")
-    argv = launch_argv(a, boundary, mode, brief, report, pointer, REPORT_SCHEMA)
+    argv = launch_argv(a, boundary, mode, brief, report, pointer, REPORT_SCHEMA,
+                       workspace_id=workspace_id if boundary == "paseo" else None)
     bad = identity_refusal(a.agent, argv, a.model)
     if bad:
         die(bad)
@@ -972,7 +1049,8 @@ def dispatch(a: argparse.Namespace) -> int:
            "frontier_reason": frontier_reason, "frontier_judged": judged, "frontier_judged_note": judged_note,
            "estimated_usage_pct": estimate, "estimated_usage_windows": per_window, "estimate_source": source,
            "snapshot_remaining_before": remaining, "snapshot_reading": reading, "load_gate": gate_info,
-           "min_headroom": a.min_headroom, "perm_note": perm_note}
+           "min_headroom": a.min_headroom, "perm_note": perm_note,
+           "selected_workspace_id": workspace_id}
     if a.dry_run:
         rec.update(status="dry-run", reserved_usage_pct=reserved, inflight=[p.stem for p in busy],
                    **({"would_refuse_class": refusal[0]} if refusal else {}))
@@ -1096,14 +1174,22 @@ def launch_locked(record: Path, rec: dict) -> int | None:
         return refuse_launch(record, f"paseo run did not create an agent: {why or data}", 2, "launch")
     reported_cwd = data.get("cwd")
     expected_cwd = rec.get("dir")
+    reported_ws = data.get("workspaceId") if isinstance(data.get("workspaceId"), str) else None
+    expected_ws = rec.get("selected_workspace_id")
     placement_warning = None
     if not isinstance(reported_cwd, str) or not reported_cwd:
         reported_cwd = None
         placement_warning = "Paseo did not report a working directory; placement is unverified"
     elif isinstance(expected_cwd, str) and os.path.realpath(reported_cwd) != os.path.realpath(expected_cwd):
         placement_warning = f"misplaced agent: Paseo cwd {reported_cwd!r} differs from assigned {expected_cwd!r}"
+    if expected_ws and reported_ws and reported_ws != expected_ws:
+        ws_note = f"workspace {reported_ws!r} differs from selected {expected_ws!r}"
+        placement_warning = f"{placement_warning}; {ws_note}" if placement_warning else ws_note
+    if expected_ws and not reported_ws:
+        ws_note = "Paseo did not report a workspace id; placement is unverified"
+        placement_warning = f"{placement_warning}; {ws_note}" if placement_warning else ws_note
     update_record(record, paseo_agent_id=str(aid), run_status=data.get("status"),
-                  paseo_cwd=reported_cwd, placement_warning=placement_warning)
+                  paseo_cwd=reported_cwd, returned_workspace_id=reported_ws, placement_warning=placement_warning)
     if placement_warning:
         print(f"acp-dispatch: warning: {placement_warning}; agent left running", file=sys.stderr)
     end = time.monotonic() + COUNTABLE_S
@@ -1385,6 +1471,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("-p", "--prompt")
     ap.add_argument("-f", "--prompt-file", help="the brief (a file); a copy with the footer goes to the out dir")
     ap.add_argument("-C", "--dir", default=".", help="the directory the agent works in (default: cwd)")
+    ap.add_argument("--workspace", metavar="ID",
+                    help="existing Paseo workspace id (default: caller inspect or PASEO_WORKSPACE_ID)")
     ap.add_argument("--task", help="out dir is ~/.local/state/bigteam/<task>/ (default adhoc-<date>)")
     ap.add_argument("--out", help="explicit out dir instead of --task (which is then only recorded)")
     ap.add_argument("--effort", metavar="LEVEL", help="paseo run --thinking LEVEL (not passed to review-launch)")

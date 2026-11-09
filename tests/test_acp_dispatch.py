@@ -57,16 +57,34 @@ class Base(unittest.TestCase):
         self.no_quota = self.tmp / "no-quota.json"
         self.no_quota.write_text(json.dumps({"collected_at": "2099-01-01T00:00:00+00:00", "snapshot": {"accounts": []}}))
 
+    def workspace_row(self, ws_id: str = "wks_test_default", cwd: Path | None = None) -> dict[str, Any]:
+        here = (cwd or self.repo).resolve()
+        return {"workspaceId": ws_id, "project": "test", "name": "test-ws", "isolation": "local",
+                "cwd": str(here), "background": False}
+
+    def workspaces_env(self, *rows: dict[str, Any], ws_id: str | None = None) -> dict[str, str]:
+        catalog = list(rows) if rows else [self.workspace_row()]
+        pick = ws_id or catalog[0]["workspaceId"]
+        return {"PASEO_WORKSPACE_ID": pick, "FAKE_PASEO_WORKSPACES": json.dumps(catalog)}
+
     def env(self, **extra: str) -> dict[str, str]:
-        e = {k: v for k, v in os.environ.items() if not k.startswith(("LW_", "FAKE_", "ACP_DISPATCH_", "ACP_OPERATOR"))}
+        e = {k: v for k, v in os.environ.items() if not k.startswith(("LW_", "FAKE_", "ACP_DISPATCH_", "ACP_OPERATOR",
+                                                                       "PASEO_"))}
         e.update({"PATH": f"{self.bin}{os.pathsep}{e.get('PATH', '')}", "FAKE_PASEO_STATE": str(self.state),
                   "FAKE_LW_LOG": str(self.tmp / "lw.log"), "FAKE_RL_LOG": str(self.tmp / "rl.log"),
                   "ACP_DISPATCH_STATE": str(self.tmp / "state"), "ACP_DISPATCH_LOCK_DIR": str(self.tmp / "lock"),
                   "ACP_DISPATCH_LOAD_WATCH": str(self.bin / "load-watch"),
                   "ACP_DISPATCH_REVIEW_LAUNCH": str(self.bin / "review-launch"),
                   "AIUSE_SNAPSHOT": str(self.no_quota), "ROUTE_AGENT_AIUSE": "off", "ACP_DISPATCH_NO_LOAD_GATE": "1"})
+        e.update(self.workspaces_env())
         e.update(extra)
         return e
+
+    def workspace_count(self) -> int:
+        p = self.state / "workspaces.json"
+        if p.exists():
+            return len(json.loads(p.read_text()))
+        return len(json.loads(self.workspaces_env()["FAKE_PASEO_WORKSPACES"]))
 
     def run_cli(self, args: list[str], **env: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run([sys.executable, str(SCRIPT), *args], capture_output=True, text=True, check=False,
@@ -164,7 +182,8 @@ class TestProviderMapAndArgv(Base):
                 self.assertEqual(argv[argv.index("--mode") + 1], {"claude": "auto", "codex": "auto"}.get(agent, "default"))
                 for flag in ("--no-wait", "--json", "--title", "--cwd"):
                     self.assertIn(flag, argv)
-                self.assertEqual(argv[argv.index("--new-workspace") + 1], "local")
+                self.assertEqual(argv[argv.index("--workspace") + 1], "wks_test_default")
+                self.assertNotIn("--new-workspace", argv)
                 for label in ("ade.via=acp-dispatch", f"ade.kind={'frontier' if agent == 'codex' else 'code'}",
                               "ade.name=s1", "ade.lead=main"):
                     self.assertIn(label, argv)
@@ -180,10 +199,14 @@ class TestProviderMapAndArgv(Base):
     def test_child_dispatch_uses_requested_directory_instead_of_parent_workspace(self):
         parent = self.tmp / "parent-workspace"
         parent.mkdir()
-        r = self.dispatch(FAKE_PASEO_PARENT_CWD=str(parent))
+        child_id = "wks_child_target"
+        env = self.workspaces_env(self.workspace_row("wks_parent", parent), self.workspace_row(child_id))
+        r = self.dispatch("claude", "sonnet", "--workspace", child_id, FAKE_PASEO_PARENT_CWD=str(parent), **env)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         agents = json.loads((self.state / "agents.json").read_text())
         self.assertEqual(Path(agents[0]["cwd"]).resolve(), self.repo.resolve())
+        run = next(c for c in self.calls() if c[0] == "run")
+        self.assertEqual(run[run.index("--workspace") + 1], child_id)
 
     def test_effort_becomes_thinking(self):
         argv = self.dry("claude", "sonnet", "--effort", "high")["argv"]
@@ -263,6 +286,104 @@ class TestPermBoundaries(Base):
         self.assertNotIn("mode", self.verbs())                                   # no mode verification any more
 
 
+class TestWorkspacePlacement(Base):
+    def test_two_launches_into_the_same_workspace_add_agents_not_records(self):
+        n0 = self.workspace_count()
+        self.assertEqual(self.dispatch(name="ws-a").returncode, 0)
+        self.assertEqual(self.dispatch("claude", "sonnet", "--force", name="ws-b").returncode, 0)
+        agents = json.loads((self.state / "agents.json").read_text())
+        self.assertEqual(len(agents), 2)
+        self.assertEqual(self.workspace_count(), n0)
+        runs = [c for c in self.calls() if c[0] == "run"]
+        for call in runs:
+            self.assertEqual(call[call.index("--workspace") + 1], "wks_test_default")
+            self.assertNotIn("--new-workspace", call)
+
+    def test_implicit_new_workspace_is_refused(self):
+        r = self.dispatch(PASEO_WORKSPACE_ID="", FAKE_PASEO_WORKSPACES="[]")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("no Paseo workspace", r.stderr)
+        self.assertNotIn("run", self.verbs())
+
+    def test_shim_never_emits_new_workspace(self):
+        r = self.dispatch(name="no-mint")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        for call in self.calls():
+            if call and call[0] == "run":
+                self.assertNotIn("--new-workspace", call)
+
+    def test_missing_workspace_fails_before_run(self):
+        bad = {"PASEO_WORKSPACE_ID": "wks_missing",
+               "FAKE_PASEO_WORKSPACES": json.dumps([self.workspace_row("wks_other")])}
+        r = self.dispatch(**bad)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("wks_missing", r.stderr)
+
+    def test_empty_explicit_workspace_does_not_select_ambient(self):
+        for value in ("", "   "):
+            with self.subTest(value=value):
+                result = self.dispatch("claude", "sonnet", "--workspace", value)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn("nonempty existing workspace id", result.stderr)
+                self.assertNotIn("run", self.verbs())
+
+    def test_background_workspace_is_allowed(self):
+        row = {**self.workspace_row("wks_bg"), "background": True}
+        r = self.dispatch(**self.workspaces_env(row, ws_id="wks_bg"), name="bg")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        ws_calls = [c for c in self.calls() if len(c) >= 2 and c[0] == "workspace" and c[1] == "ls"]
+        self.assertTrue(any("--background" in c for c in ws_calls), ws_calls)
+
+    def test_workspace_cwd_must_match_assigned_dir(self):
+        other = self.tmp / "else"
+        other.mkdir()
+        row = self.workspace_row("wks_mismatch", other)
+        r = self.dispatch(**self.workspaces_env(row, ws_id="wks_mismatch"))
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("does not match", r.stderr)
+
+    def test_caller_uses_authoritative_workspace_metadata_when_available(self):
+        # A possible newer CLI response, not the installed 0.15.3 inspect shape.
+        caller = "caller-0001"
+        row = self.workspace_row("wks_from_inspect")
+        r = self.dispatch(PASEO_WORKSPACE_ID="", FAKE_PASEO_WORKSPACES=json.dumps([row]), PASEO_AGENT_ID=caller,
+                          FAKE_PASEO_INSPECT=json.dumps({caller: {"Id": caller, "Archived": False,
+                                                                  "workspaceId": "wks_from_inspect"}}), name="callerws")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        run = next(c for c in self.calls() if c[0] == "run")
+        self.assertEqual(run[run.index("--workspace") + 1], "wks_from_inspect")
+
+    def test_native_inspect_without_workspace_requires_explicit_selection(self):
+        caller = "caller-0001"
+        # Match the relevant fields of the observed native inspect JSON: no workspace id.
+        snapshot = {"Id": caller, "Archived": False, "Cwd": str(self.repo)}
+        inspect_env = {"PASEO_AGENT_ID": caller,
+                       "FAKE_PASEO_INSPECT": json.dumps({caller: snapshot})}
+        refused = self.dispatch(**inspect_env)
+        self.assertEqual(refused.returncode, 2, refused.stderr)
+        self.assertIn("inspect did not report a workspace id", refused.stderr)
+        self.assertNotIn("run", self.verbs())
+
+        selected = self.dispatch("claude", "sonnet", "--workspace", "wks_test_default",
+                                 name="explicit-caller", **inspect_env)
+        self.assertEqual(selected.returncode, 0, selected.stderr)
+        run = next(c for c in self.calls() if c[0] == "run")
+        self.assertEqual(run[run.index("--workspace") + 1], "wks_test_default")
+
+    def test_unverified_caller_never_falls_back_to_ambient_workspace(self):
+        caller = "caller-0001"
+        for snapshot in (None, {"Id": "other", "Archived": False},
+                         {"Id": caller, "Archived": True}, {"Id": caller}):
+            with self.subTest(snapshot=snapshot):
+                before = len([c for c in self.calls() if c[0] == "run"])
+                response = {} if snapshot is None else {caller: snapshot}
+                result = self.dispatch(PASEO_AGENT_ID=caller,
+                                       FAKE_PASEO_INSPECT=json.dumps(response))
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn("cannot verify Paseo caller", result.stderr)
+                self.assertEqual(len([c for c in self.calls() if c[0] == "run"]), before)
+
+
 class TestLaunchAndWait(Base):
     def test_happy_path_writes_brief_record_and_done_and_exits_0(self):
         r = self.dispatch()
@@ -274,6 +395,8 @@ class TestLaunchAndWait(Base):
         self.assertEqual((rec["status"], rec["exit"], rec["wait_timeout"]), ("done", 0, 2400 + 300))
         self.assertEqual(Path(rec["paseo_cwd"]).resolve(), self.repo.resolve())
         self.assertIsNone(rec["placement_warning"])
+        self.assertEqual(rec.get("selected_workspace_id"), "wks_test_default")
+        self.assertEqual(rec.get("returned_workspace_id"), "wks_test_default")
         self.assertTrue((self.out / "s1-report.md.done").exists())
         self.assertIn("## Delivery contract", (self.out / "s1-brief.md").read_text())
         self.assertIn("## Time budget (acp-dispatch)", (self.out / "s1-brief.md").read_text())
