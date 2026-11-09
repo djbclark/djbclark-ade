@@ -37,8 +37,12 @@ Claude Code (`PostToolUse`, matcher `Write|Edit|MultiEdit`):
 
 with `timeout` 20. Claude reads stderr when a hook exits 2 and shows it to the model.
 
-Open question (2026-11-04): whether `hook-deadline` (outside this repo) passes the child's exit 2 through. If it turns a 2 into a 0 the
-check is silent in practice; verify on the Mac with a deliberately broken `.py` edit.
+**`hook-deadline` exit 2 (verified 2026-11-09; queue Carried #1 residual):** the wrapper lives outside this repo
+(canonical source: site-djbclark `bin/hook-deadline`; the Claude template still points at
+`$HOME/ops/site-private/bin/hook-deadline`). Its contract and a live run of that script both confirm: when the child
+finishes before the deadline, stdout and the child's exit code are forwarded unchanged (so exit 2 reaches Claude and
+surfaces stderr); only a deadline hit kills the process group and exits 0 with no output. The 2026-11-04 open question
+is closed — a broken `.py` edit behind this wrapper is not silent.
 
 Codex (`agents/codex/config.toml.tmpl`, 2026-11-09): `PostToolUse` matcher `Edit|Write|apply_patch` runs
 `{{ .home }}/src/djbclark-ade/bin/post-edit-check --hook` with `timeout` 20 (no `hook-deadline` wrapper: Codex's own
