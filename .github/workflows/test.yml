@@ -152,7 +152,8 @@ jobs:
 
       - name: Skipped full suite (docs/changelog-only)
         if: steps.suite.outputs.needed != 'true'
-        run: echo "pytest-linux short-circuit: docs/changelog-only diff; context-policy still ran."
+        run: |
+          echo "pytest-linux short-circuit: docs/changelog-only diff; context-policy still ran."
 
   context-policy:
     runs-on: ubuntu-latest
