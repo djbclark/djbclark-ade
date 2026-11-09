@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Which Claude Code session is this process in? ONE shared answer for ade_claims.py and acp-dispatch (in bin/ since 2026-11-06, docs/slim E3; fleet.py and autorename, its other callers, were removed the same day).
+"""Which Claude Code session is this process in? ONE shared answer for ade_claims.py and native `paseo run` / Pi launches (in bin/ since 2026-11-06, docs/slim E3; fleet.py and autorename, its other callers, were removed the same day). The Wave 6 `acp-dispatch` shim still imports it while transitional (~2026-11-20).
 
 `CLAUDE_CODE_SESSION_ID` in a tool shell is not reliable (2026-11-02, PR 259; upstream issue 81304): a session started from another session's
 environment (a /baton or /handoff successor, a Paseo agent launched from a shell inside the predecessor, `--fork-session`) keeps the PREDECESSOR's
@@ -135,7 +135,7 @@ def owner_session_id(ancestors: Callable[[], Iterable[int]] | None = None) -> st
 
     Known limit (PR 223's local Codex review, round 3, A4/A5): once that Claude has exited, a successor's detached job can only read the stale id its environment carries, and a
     registry whose sessionId changes in place (a /clear) moves a living orphan to the new id; a failing `ps` lets a reused pid pass the procStart check. A
-    job that must outlive its Claude under the successor's id gets it from `claude_identity.py` at launch (acp-dispatch records it)."""
+    job that must outlive its Claude under the successor's id gets it from `claude_identity.py` at launch (native `paseo run` records it; the transitional `acp-dispatch` shim does the same until ~2026-11-20)."""
     return (registered_session_id(ancestors, require_ancestor=False) or (os.environ.get("CLAUDE_CODE_SESSION_ID") or "").strip())
 
 
