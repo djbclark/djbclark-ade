@@ -68,6 +68,20 @@ def test_resolve_spellings():
     assert mt.resolve("codex", "frontier", "codex", tiers) == "gpt-6-astra"
 
 
+def test_id_dotted_preserves_name_prefix():
+    """Copilot {id_dotted}: only the numeric version suffix becomes dotted."""
+    assert mt._id_dotted("claude-opus-5-5") == "claude-opus-5.5"
+    assert mt._id_dotted("claude-fable-5-1") == "claude-fable-5.1"
+    assert mt._id_dotted("claude-haiku-5-5") == "claude-haiku-5.5"
+    assert mt._id_dotted("claude-fable-6") == "claude-fable-6"
+    assert mt._id_dotted("gpt-6-astra") == "gpt-6-astra"
+    tiers = mt.load(REPO / "config" / "model-tiers.toml", use_cache=False)
+    # No per-model override → generated spelling, not claude.opus.5-5.
+    assert mt.resolve("claude", "judgment", "copilot", tiers) == "claude-opus-5.5"
+    assert mt.resolve("claude", "frontier", "copilot", tiers) == "claude-fable-5.1"
+    assert mt.resolve("claude", "bulk", "copilot", tiers) == "claude-haiku-5.5"
+
+
 def test_frontier_tokens_and_sublimit_families():
     tiers = mt.load(REPO / "config" / "model-tiers.toml", use_cache=False)
     toks = {t.lower() for t in mt.frontier_tokens(tiers)}
@@ -101,6 +115,12 @@ def test_promote_cascade_2_claude(tmp_path):
     assert reloaded.source == "file"
     assert reloaded.role_id("claude", "frontier") == "claude-fable-6"
     assert mt.classify("claude-opus-5-5", reloaded)[2] == "former"
+    # Shared alias "fable": frontier keeps it; displaced judgment uses canonical id
+    # so suggest_model judgment fallback does not re-select the new frontier.
+    assert mt.resolve("claude", "frontier", "claude", reloaded) == "fable"
+    assert mt.resolve("claude", "judgment", "claude", reloaded) == "claude-fable-5-1"
+    assert mt.resolve("claude", "judgment", "claude-code", reloaded) == "claude-fable-5-1"
+    assert mt.resolve("claude", "judgment", "omp", reloaded) == "anthropic/claude-fable-5-1"
 
 
 def test_promote_dry_run_does_not_write(tmp_path):
@@ -181,6 +201,30 @@ def test_route_agent_reads_tiers():
     svc = next(s for s in ra.SERVICES if s.name == "claude")
     out = ra.suggest_model(svc, "frontier", {"sublimits": {"fable": 0.0}})
     assert out.startswith("opus")
+
+
+def test_suggest_model_after_promote_shared_alias(tmp_path, monkeypatch):
+    """Judgment fallback must not return the new frontier alias after promote."""
+    path = tmp_path / "model-tiers.toml"
+    path.write_text((REPO / "config" / "model-tiers.toml").read_text())
+    mt.promote(
+        vendor="claude",
+        new_id="claude-fable-6",
+        reason="shared alias fallback",
+        alias="fable",
+        path=path,
+        today="2026-11-09",
+    )
+    monkeypatch.setenv("MODEL_TIERS_TOML", str(path))
+    mt.clear_cache()
+    sys.path.insert(0, str(BIN))
+    import importlib
+    import route_agent as ra  # noqa: E402
+    importlib.reload(ra)
+    svc = next(s for s in ra.SERVICES if s.name == "claude")
+    out = ra.suggest_model(svc, "frontier", {"sublimits": {"fable": 0.0}})
+    assert out.startswith("claude-fable-5-1"), out
+    assert not out.startswith("fable"), out
 
 
 def test_load_effective_projects_model_tiers(tmp_path, monkeypatch):

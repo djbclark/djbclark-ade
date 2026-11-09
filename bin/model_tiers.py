@@ -505,6 +505,53 @@ def _bare_id(model: str) -> str:
     return s
 
 
+# Trailing hyphenated numeric version: claude-opus-5-5 → prefix claude-opus, ver 5-5.
+_ID_VERSION_SUFFIX_RE = re.compile(r"^(?P<prefix>.+?)-(?P<ver>\d+(?:-\d+)*)$")
+
+
+def _id_dotted(mid: str) -> str:
+    """Preserve the model-name prefix; convert only the numeric version suffix to dots.
+
+    ``claude-opus-5-5`` → ``claude-opus-5.5`` (Sonnet's ``claude-sonnet-5.5``
+    convention). Must not rewrite name separators (``claude.opus.5-5``).
+    """
+    m = _ID_VERSION_SUFFIX_RE.fullmatch(mid)
+    if not m:
+        return mid
+    return f"{m.group('prefix')}-{m.group('ver').replace('-', '.')}"
+
+
+def _alias_owned_by_higher_role(
+    t: Tiers, vendor: str, role: str, mid: str, alias: str
+) -> bool:
+    """True when another current ladder model holds the same alias at a higher role.
+
+    After ``promote`` reuses an alias (e.g. ``fable``), the displaced same-family
+    model still lists that alias under ``[model.*]``. Returning the alias for the
+    lower role makes judgment fallback keep selecting the new frontier; use the
+    canonical id instead. The higher role (earlier in ``ROLES``) keeps the alias.
+    """
+    alias_l = alias.lower()
+    try:
+        my_idx = ROLES.index(role)
+    except ValueError:
+        my_idx = len(ROLES)
+    vbody = (t.data.get("vendor") or {}).get(vendor)
+    if not isinstance(vbody, dict):
+        return False
+    roles = vbody.get("roles") or {}
+    for i, r in enumerate(ROLES):
+        if i >= my_idx:
+            break
+        other = roles.get(r)
+        if not isinstance(other, str) or other == mid:
+            continue
+        other_alias = ((t.data.get("model") or {}).get(other) or {}).get("alias")
+        if isinstance(other_alias, str) and other_alias.lower() == alias_l:
+            return True
+    return False
+
+
 def classify(
     model: str, tiers: Tiers | None = None
 ) -> tuple[str | None, str | None, str]:
@@ -552,7 +599,13 @@ def resolve(
     mid = t.role_id(vendor, role)
     mmeta = (t.data.get("model") or {}).get(mid) or {}
     alias = mmeta.get("alias") if isinstance(mmeta.get("alias"), str) else None
-    id_dotted = mid.replace("-", ".", 2) if mid.count("-") >= 2 else mid.replace("-", ".")
+    # Shared alias with a higher current role → canonical id for this role.
+    if (
+        isinstance(alias, str)
+        and _alias_owned_by_higher_role(t, vendor, role, mid, alias)
+    ):
+        alias = None
+    id_dotted = _id_dotted(mid)
     # Prefer per-model spelling override.
     if route and isinstance(mmeta.get("spellings"), dict):
         override = mmeta["spellings"].get(route)
