@@ -640,8 +640,27 @@ def test_owner_relay_declares_a_sender_and_uses_the_shims_flags(env):
     assert p["EnvironmentVariables"]["RELAY_SENDER_NAME"] == "deadline-sweep", "a launchd job has no Paseo id: the shim names it in its sender prefix"
 
 
+def _write_native_paseo(env, *, send_status="sent", pending=None, status="idle", provider="claude/sonnet"):
+    """Fake paseo for the native owner-notice path: inspect + steer send."""
+    pending_json = "[]" if pending is None else json.dumps(pending)
+    (env.tmp / "paseo").write_text(
+        f'#!{sys.executable}\nimport json, os, sys\n'
+        'open(os.environ["DL_LOG"], "a").write("PASEO " + " ".join(sys.argv[1:]) + "\\n")\n'
+        'a = sys.argv[1:]\n'
+        'if a[:2] == ["agent", "inspect"]:\n'
+        f'    aid = a[2]\n'
+        f'    sys.stdout.write(json.dumps({{"Id": aid, "Archived": False, '
+        f'"PendingPermissions": {pending_json}, "Status": {status!r}, '
+        f'"Provider": {provider!r}}}) + "\\n"); sys.exit(0)\n'
+        'if a and a[0] == "send":\n'
+        f'    sys.stdout.write(json.dumps({{"status": {send_status!r}}}) + "\\n"); sys.exit(0)\n'
+        'sys.exit(2)\n'
+    )
+    (env.tmp / "paseo").chmod(0o755)
+
+
 def test_owner_notice_uses_native_paseo_send_when_deadline_relay_unset(env, monkeypatch):
-    """Production path (Wave 6): no DEADLINE_RELAY → paseo send --json --no-wait ID --prompt-file -."""
+    """Production path (Wave 6): inspect + steer + JSON status (not exit code) for delivery."""
     for k, v in env.base.items():
         if k == "DEADLINE_RELAY":
             continue
@@ -649,20 +668,33 @@ def test_owner_notice_uses_native_paseo_send_when_deadline_relay_unset(env, monk
     monkeypatch.delenv("DEADLINE_RELAY", raising=False)
     monkeypatch.setenv("DEADLINE_PASEO", str(env.tmp / "paseo"))
     monkeypatch.setenv("DL_LOG", str(env.log))
-    (env.tmp / "paseo").write_text(
-        f'#!{sys.executable}\nimport os, sys\n'
-        'open(os.environ["DL_LOG"], "a").write("PASEO " + " ".join(sys.argv[1:]) + "\\n")\n'
-        'a = sys.argv[1:]\n'
-        'if a and a[0] == "send":\n'
-        '    sys.stdout.write(\'{"status":"sent"}\\n\'); sys.exit(0)\n'
-        'sys.exit(2)\n'
-    )
-    (env.tmp / "paseo").chmod(0o755)
+    _write_native_paseo(env)
     dl = load_module()
     rc, msg = dl.relay_rc("owner-native", "budget blown")
     assert rc == 0, msg
     log = env.log.read_text()
-    assert "PASEO send --json --no-wait owner-native --prompt-file -" in log
+    assert "PASEO agent inspect owner-native --json" in log
+    assert "--behavior steer" in log and "--no-wait" in log and "--json" in log
+    assert "PASEO send owner-native --prompt-file" in log
+
+
+def test_native_owner_notice_refuses_pending_card_and_queued_status(env, monkeypatch):
+    for k, v in env.base.items():
+        if k == "DEADLINE_RELAY":
+            continue
+        monkeypatch.setenv(k, v)
+    monkeypatch.delenv("DEADLINE_RELAY", raising=False)
+    monkeypatch.setenv("DEADLINE_PASEO", str(env.tmp / "paseo"))
+    monkeypatch.setenv("DL_LOG", str(env.log))
+    _write_native_paseo(env, pending=[{"id": "card-1"}])
+    dl = load_module()
+    rc, msg = dl.relay_rc("owner-card", "budget blown")
+    assert rc == 2 and "permission or question card" in msg
+    assert "PASEO send" not in env.log.read_text()
+    env.log.write_text("")
+    _write_native_paseo(env, send_status="queued")
+    rc, msg = dl.relay_rc("owner-queued", "budget blown")
+    assert rc == 2 and "queued" in msg
 
 
 def test_waiting_registrar_never_holds_a_lock_on_an_unlinked_inode(env, inproc):
