@@ -1,0 +1,10 @@
+# Per-host field homes for agents/ template placeholders (Phase 1, 2026-11-09).
+# Copy into the private companion as machines/<hostname>.toml; fill real values there.
+# Keys match agents/README.md Fields. brew_prefix is reserved for a Linux apply (not yet substituted in templates).
+
+chatgpt_app = "/Applications/ChatGPT.app"
+codex_browser_client_sha256s = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef,fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+brew_prefix = "/opt/homebrew"
+
+[signal]
+account = "+15555550100"

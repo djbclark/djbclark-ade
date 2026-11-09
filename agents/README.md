@@ -6,6 +6,13 @@ item 4.4 (2026-10-20) tracks them here as **templates**: the live file's structu
 every secret, account id, host name and home path replaced by a placeholder. This is the section 4.2 layout
 (`agents/<tui>/<file>.tmpl`); nothing here is applied yet. The proposal's chezmoi apply (section 4.4) will render
 these with the companion's data, as a `modify_` merge and never a symlink, because each app also writes its own file.
+Chezmoi `modify_` merges for Claude and Codex remain deferred (queue item 12); Phase 1 (2026-11-09) declares secret
+names and field homes without rewriting the apply path.
+
+**Current TUIs (Pi sole-TUI policy, 2026-11-09):** Claude Code, Codex, Hermes, and Pi as the sole general-purpose
+third-party client. Pi has **no** `agents/pi/` template here yet (it shares `~/.agents/skills` with Codex via
+`skill-everywhere`; its own runtime config stays outside this tree until templated). omp/OpenCode are retired live
+targets; the OpenCode template row below is **history only**.
 
 **Current TUIs (Pi sole-TUI policy, 2026-11-09):** Claude Code, Codex, Hermes, and Pi as the sole general-purpose
 third-party client. Pi has **no** `agents/pi/` template here yet (it shares `~/.agents/skills` with Codex via
@@ -55,9 +62,9 @@ read-back through the installed `codex app-server` (no model call).
 
 ## Placeholder syntax
 
-1. `{{ .field }}` is a value the companion provides (table below).
-2. `{{ secret "NAME" }}` is a secret read from `sudo-secretspec` at apply time. `NAME` is the entry name where it
-   is known (`JINA_API_KEY`, `EXA_API_KEY`); a `TODO_` prefix means no entry is declared yet, so the name is a proposal.
+1. `{{ .field }}` is a value the companion provides (table below; example homes in [`companion/`](../companion/)).
+2. `{{ secret "NAME" }}` is a secret read from `sudo-secretspec` at apply time. `NAME` must be declared in
+   [`secrets/secretspec.toml`](../secrets/secretspec.toml) and listed in the Secrets table below.
 3. `${NAME}` inside the Hermes template is Hermes's own reference to `~/.hermes/.env`; it is not a placeholder
    and stays as it is.
 4. No other `{{ }}` form is allowed. `bin/ade-template-check` enforces all of this.
@@ -82,20 +89,27 @@ parses to something else.
 
 ## Fields
 
+Each field has a home in the private companion. Public examples (keys only, no operator data) live under
+[`companion/`](../companion/).
+
 | Field | Meaning | Example shape | Companion provides it from |
 |---|---|---|---|
-| `home` | the operator's home directory; every absolute home path is `{{ .home }}/...` | `/Users/alex` or `/home/alex` | the chezmoi built-in home dir, `operator.toml` `home` |
-| `home_escaped` | `home` with each `/` written `\/` (Codex's `notify` carries a JSON string inside TOML) | `\/Users\/alex` | derived from `home` |
-| `chatgpt_app` | where `ChatGPT.app` lives (Codex's node_repl, CLI path and notify helper point inside it) | `/Applications/ChatGPT.app` | `machines/<host>.toml` `chatgpt_app` |
-| `codex_browser_client_sha256s` | comma-separated SHA-256 digests of the browser clients Codex trusts (app-bundle specific) | two 64-hex digests joined by a comma | `machines/<host>.toml`, copied from a working install |
-| `discord_home_channel_id` | Hermes's Discord home channel id; also the free-response channel | 19-digit string | `operator.toml` `[discord]` |
-| `discord_home_channel_name` | display name of that channel, inside single quotes (see Quoting) | `Example server / #general` | `operator.toml` `[discord]` |
-| `discord_user_id` | the operator's Discord user id | 19-digit string | `operator.toml` `[discord]` |
-| `hermes_dashboard_user` | Hermes dashboard basic-auth user name | `alex` | `operator.toml` `[hermes]` |
-| `signal_account` | the phone number Hermes's Signal gateway runs as, also its home channel | `+15555550100` | `machines/<host>.toml` `[signal]` |
-| `sipb_llm_upstream_host` | host name of the SIPB LLM server behind the local proxy (a comment) | `llms.example.edu` | `operator.toml` `[sipb]` |
+| `home` | the operator's home directory; every absolute home path is `{{ .home }}/...` | `/Users/alex` or `/home/alex` | chezmoi built-in home dir, or `operator.toml` `home` ([example](../companion/operator.toml.example)) |
+| `home_escaped` | `home` with each `/` written `\/` (Codex's `notify` carries a JSON string inside TOML) | `\/Users\/alex` | derived from `home` at render time |
+| `chatgpt_app` | where `ChatGPT.app` lives (Codex's node_repl, CLI path and notify helper point inside it) | `/Applications/ChatGPT.app` | `machines/<host>.toml` `chatgpt_app` ([example](../companion/machines/host.toml.example)) |
+| `codex_browser_client_sha256s` | comma-separated SHA-256 digests of the browser clients Codex trusts (app-bundle specific) | two 64-hex digests joined by a comma | `machines/<host>.toml` `codex_browser_client_sha256s` |
+| `discord_home_channel_id` | Hermes's Discord home channel id; also the free-response channel | 19-digit string | `operator.toml` `[discord].home_channel_id` |
+| `discord_home_channel_name` | display name of that channel, inside single quotes (see Quoting) | `Example server / #general` | `operator.toml` `[discord].home_channel_name` |
+| `discord_user_id` | the operator's Discord user id | 19-digit string | `operator.toml` `[discord].user_id` |
+| `hermes_dashboard_user` | Hermes dashboard basic-auth user name | `alex` | `operator.toml` `[hermes].dashboard_user` |
+| `signal_account` | the phone number Hermes's Signal gateway runs as, also its home channel | `+15555550100` | `machines/<host>.toml` `[signal].account` |
+| `sipb_llm_upstream_host` | host name of the SIPB LLM server behind the local proxy (a comment) | `llms.example.edu` | `operator.toml` `[sipb].llm_upstream_host` |
+| `brew_prefix` | Homebrew prefix for tool paths on Linux apply (not yet substituted in templates) | `/home/linuxbrew/.linuxbrew` | `machines/<host>.toml` `brew_prefix` |
 
 ## Secrets
+
+Declared in [`secrets/secretspec.toml`](../secrets/secretspec.toml) (Phase 1, 2026-11-09). Values stay in
+`sudo-secretspec`.
 
 | Secret | Used by | Why a secret |
 |---|---|---|
@@ -110,8 +124,8 @@ parses to something else.
 1. Model lists and provider catalogs (SIPB, Cline, LiteLLM; retired OpenCode `provider.sipb.models` stays in the archive template).
 2. Loopback ports of the shared MCP servers and proxies: 8890 (sipb-llms-proxy), 4000 (LiteLLM), 18765 (Signal
    bridge), 18790, 18796, 18798, 18800, 18802, 18804, 23373, 6806.
-3. Homebrew-prefixed tool paths (`/opt/homebrew/...`, Apple silicon); a Linux apply needs a `brew_prefix` field
-   or a per-OS branch (Phase 1).
+3. Homebrew-prefixed tool paths (`/opt/homebrew/...`, Apple silicon); a Linux apply substitutes `brew_prefix` from
+   `machines/<host>.toml` (field home declared above; templates still hard-code the Mac prefix until that apply).
 4. `timezone: America/New_York` in the Hermes template and `/Applications/ExtraBar.app` in the Codex one.
 5. Codex's plugin cache path and `BROWSER_USE_CODEX_APP_VERSION` (`26.915.31945`): Codex-managed, they change on
    its upgrade.
@@ -131,5 +145,6 @@ bin/ade-template-check --diff     # also: key paths that differ from the live fi
 ```
 
 Exit 0 clean, 1 findings. It needs no live file (CI runs it through `tests/test_ade_template_check.py`); YAML needs
-PyYAML (`uv run --with pyyaml`). A new template goes in `agents/<tui>/`, its live path in `LIVE` in the tool, and
-every new placeholder in the tables above.
+PyYAML (`uv run --with pyyaml`). A new template goes in `agents/<tui>/`, its live path in `LIVE` in the tool, every
+new field in the Fields table and `companion/*.example`, and every new secret in the Secrets table and
+`secrets/secretspec.toml`.

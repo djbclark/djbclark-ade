@@ -1,0 +1,16 @@
+# Field homes for agents/ template placeholders (Phase 1, 2026-11-09).
+# Copy into the private companion as operator.toml; fill real values there, never here.
+# Keys match agents/README.md Fields. home may also come from the chezmoi built-in.
+
+home = "/home/alex"
+
+[discord]
+home_channel_id = "0000000000000000000"
+home_channel_name = "Example server / #general"
+user_id = "0000000000000000000"
+
+[hermes]
+dashboard_user = "alex"
+
+[sipb]
+llm_upstream_host = "llms.example.edu"

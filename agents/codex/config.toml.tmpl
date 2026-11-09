@@ -339,7 +339,7 @@ tool_timeout_sec = 180
 url = "https://mcp.bezalel.sh/mcp"
 
 [mcp_servers.bezalel.http_headers]
-Authorization = "Bearer {{ secret "TODO_BEZALEL_API_KEY" }}"
+Authorization = "Bearer {{ secret "MCP_BEZALEL_API_KEY" }}"
 
 [mcp_servers.cua-driver]
 command = "{{ .home }}/.local/bin/cua-driver"
