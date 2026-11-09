@@ -1,6 +1,8 @@
 # Transitional install catalog (schema_version=1), 2026-11-09.
 # Used when config/ade.toml is absent. Values are references and recipes, never secret values.
 # install/update/probe = "UNKNOWN" means not yet recorded. presence = PATH basename for observe-only doctor.
+# install_argv = argv list for ade-install apply (tokens: {bin} {root} {home} {prefix}).
+# needs_system = true means package-manager/root; bounded apply refuses without a later --system unit.
 # chosen is required for offered/optional; hard components are always expected.
 
 schema_version = 1
@@ -12,8 +14,10 @@ id = "just"
 class = "hard"
 summary = "Recipe runner; bootstrap installs it if missing"
 source = "https://github.com/casey/just"
-install = "UNKNOWN"
-update = "UNKNOWN"
+install = "ade-user-install just (GitHub release → ~/.local/bin)"
+install_argv = ["{bin}/ade-user-install", "just", "--prefix", "{prefix}"]
+update = "ade-user-install just (re-fetch latest release)"
+update_argv = ["{bin}/ade-user-install", "just", "--prefix", "{prefix}"]
 probe = "just --version"
 presence = "just"
 platforms = ["mac", "linux"]
@@ -22,19 +26,22 @@ platforms = ["mac", "linux"]
 id = "git"
 class = "hard"
 summary = "Source control"
-install = "UNKNOWN"
-update = "UNKNOWN"
+install = "distribution package manager (apt/dnf/brew); needs --system"
+needs_system = true
+update = "package manager"
 probe = "git --version"
 presence = "git"
 platforms = ["mac", "linux"]
+notes = "Almost always preinstalled; apply refuses without --system unit"
 
 [[component]]
 id = "gh"
 class = "hard"
 summary = "GitHub CLI"
 source = "https://cli.github.com"
-install = "UNKNOWN"
-update = "UNKNOWN"
+install = "distribution package or brew; needs --system"
+needs_system = true
+update = "package manager"
 probe = "gh --version"
 presence = "gh"
 platforms = ["mac", "linux"]
@@ -44,8 +51,10 @@ id = "uv"
 class = "hard"
 summary = "Python tool runner used by bin/pytest and install paths"
 source = "https://github.com/astral-sh/uv"
-install = "UNKNOWN"
-update = "UNKNOWN"
+install = "ade-user-install uv (GitHub release → ~/.local/bin)"
+install_argv = ["{bin}/ade-user-install", "uv", "--prefix", "{prefix}"]
+update = "ade-user-install uv (re-fetch latest release)"
+update_argv = ["{bin}/ade-user-install", "uv", "--prefix", "{prefix}"]
 probe = "uv --version"
 presence = "uv"
 platforms = ["mac", "linux"]
@@ -60,7 +69,7 @@ update = "UNKNOWN"
 probe = "UNKNOWN"
 presence = "sudo-secretspec"
 platforms = ["mac", "linux"]
-notes = "Hard by operator ruling 2026-11-07"
+notes = "Hard by operator ruling 2026-11-07; brew/Linux path still UNKNOWN for apply"
 
 [[component]]
 id = "aiuse"
@@ -100,11 +109,14 @@ id = "graft"
 class = "hard"
 summary = "Repo context graph CLI"
 source = "https://www.npmjs.com/package/@nanonets/graft"
-install = "UNKNOWN"
-update = "UNKNOWN"
+install = "npm install -g @nanonets/graft (user npm prefix → ~/.local)"
+install_argv = ["npm", "install", "-g", "@nanonets/graft"]
+update = "npm update -g @nanonets/graft"
+update_argv = ["npm", "update", "-g", "@nanonets/graft"]
 probe = "graft --version"
 presence = "graft"
 platforms = ["mac", "linux"]
+notes = "Requires a writable npm prefix (e.g. ~/.local); not a root package-manager path"
 
 [[component]]
 id = "pi"
@@ -152,10 +164,26 @@ id = "skill-everywhere"
 class = "hard"
 summary = "Link skills into every TUI from this repo"
 source = "bin/skill-everywhere"
-install = "UNKNOWN"
-update = "UNKNOWN"
-probe = "UNKNOWN"
+install = "symlink bin/skill-everywhere into ~/.local/bin, then skill-everywhere --all"
+install_argv = ["{bin}/ade-user-install", "link", "skill-everywhere", "--root", "{root}", "--prefix", "{prefix}"]
+update = "skill-everywhere --all"
+update_argv = ["{prefix}/skill-everywhere", "--all"]
+probe = "skill-everywhere --check --all"
 presence = "skill-everywhere"
+platforms = ["mac", "linux"]
+notes = "Apply links the CLI; a follow-up --all sync is update_argv / later reconcile"
+
+[[component]]
+id = "firecrawl-router"
+class = "offered"
+chosen = true
+summary = "bin/firecrawl-router toward a firecrawl endpoint"
+source = "bin/firecrawl-router"
+install = "symlink bin/firecrawl-router into ~/.local/bin"
+install_argv = ["{bin}/ade-user-install", "link", "firecrawl-router", "--root", "{root}", "--prefix", "{prefix}"]
+update = "repo pull (symlink target)"
+probe = "firecrawl-router --help"
+presence = "firecrawl-router"
 platforms = ["mac", "linux"]
 
 # --- offered (chosen recorded for this operator; new users are asked) ---
@@ -177,17 +205,6 @@ class = "offered"
 chosen = true
 summary = "Grok Bot channel (frdminc/peer-link)"
 source = "https://github.com/frdminc/peer-link"
-install = "UNKNOWN"
-update = "UNKNOWN"
-probe = "UNKNOWN"
-platforms = ["mac", "linux"]
-
-[[component]]
-id = "firecrawl-router"
-class = "offered"
-chosen = true
-summary = "bin/firecrawl-router toward a firecrawl endpoint"
-source = "bin/firecrawl-router"
 install = "UNKNOWN"
 update = "UNKNOWN"
 probe = "UNKNOWN"

@@ -1,20 +1,25 @@
-"""ade_install: read-only install catalog, plan, and observe-only doctor.
+"""ade_install: install catalog, plan, observe-only doctor, bounded apply.
 
 Transitional source: ``config/install.toml`` when ``config/ade.toml`` is absent.
-Does not install, update, repair, or read secret values. Key entries are names
-and metadata only; verify probes are recorded as UNKNOWN until a later managed
-probe phase. Plain doctor never repairs.
+Key entries are names and metadata only. Plain doctor never repairs. Apply is
+user-scoped only: ``--dry-run`` by default, ``--yes`` to execute recorded
+``install_argv`` (argv lists, never shell=True). Root / ``--system`` effects
+are refused until a later unit. Secrets are never read.
 """
 from __future__ import annotations
 
 import copy
 import json
 import os
+import shlex
 import shutil
+import subprocess
 import sys
+import tempfile
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 BIN = Path(__file__).resolve().parent
 if str(BIN) not in sys.path:
@@ -23,10 +28,14 @@ if str(BIN) not in sys.path:
 import ade_config as ac  # noqa: E402
 
 SCHEMA_VERSION = 1
+LEDGER_SCHEMA_VERSION = 1
 UNKNOWN = "UNKNOWN"
 COMPONENT_CLASSES = frozenset({"hard", "offered", "optional", "suggested", "never"})
 # Classes that require an explicit chosen bool in the catalog.
 CHOICE_CLASSES = frozenset({"offered", "optional", "suggested"})
+
+# Placeholders expanded in install_argv / update_argv before exec.
+ARGV_TOKENS = ("{bin}", "{root}", "{home}", "{prefix}")
 
 
 class InstallError(ac.ConfigError):
@@ -38,6 +47,7 @@ class Catalog:
     data: dict[str, Any]
     path: Path
     provenance: dict[str, Any] = field(default_factory=dict)
+    root: Path = field(default_factory=Path)
 
     @property
     def components(self) -> list[dict[str, Any]]:
@@ -60,6 +70,15 @@ class Observation:
     detail: str
 
 
+@dataclass(frozen=True)
+class ApplyStep:
+    id: str
+    action: str  # would-install | install | skip | blocked | refuse-system
+    argv: list[str] | None
+    reason: str
+    detail: str = ""
+
+
 def repo_root_from_here() -> Path:
     return Path(__file__).resolve().parent.parent
 
@@ -74,6 +93,20 @@ def default_install_schema_path(root: Path) -> Path:
 
 def default_new_config_path(root: Path) -> Path:
     return ac.default_new_config_path(root)
+
+
+def default_state_dir() -> Path:
+    env = os.environ.get("ADE_INSTALL_STATE_DIR")
+    if env:
+        return Path(env).expanduser()
+    return Path.home() / ".local" / "state" / "djbclark-ade" / "install"
+
+
+def default_prefix() -> Path:
+    env = os.environ.get("ADE_INSTALL_PREFIX")
+    if env:
+        return Path(env).expanduser()
+    return Path.home() / ".local" / "bin"
 
 
 def read_install_schema(root: Path) -> dict[str, Any]:
@@ -103,6 +136,26 @@ def _reject_duplicate_ids(rows: list[dict[str, Any]], *, key: str, label: str) -
         seen[name] = i
 
 
+def _validate_argv_field(row: dict[str, Any], *, field: str, path: Path, index: int) -> None:
+    val = row.get(field)
+    if val is None:
+        return
+    if not isinstance(val, list) or not val:
+        raise InstallError(
+            f"{path}: component[{index}] id={row.get('id')!r}: "
+            f"{field} must be a non-empty array of strings"
+        )
+    for j, part in enumerate(val):
+        if not isinstance(part, str) or not part:
+            raise InstallError(
+                f"{path}: component[{index}].{field}[{j}] must be a non-empty string"
+            )
+        if any(ch in part for ch in ("\0", "\n", "\r")):
+            raise InstallError(
+                f"{path}: component[{index}].{field}[{j}]: control characters refused"
+            )
+
+
 def validate_catalog_semantics(data: dict[str, Any], *, path: Path) -> None:
     components = data.get("component") or []
     if not isinstance(components, list) or not components:
@@ -128,6 +181,13 @@ def validate_catalog_semantics(data: dict[str, Any], *, path: Path) -> None:
             val = row.get(field)
             if val is not None and not isinstance(val, str):
                 raise InstallError(f"{path}: component[{i}].{field} must be a string")
+        _validate_argv_field(row, field="install_argv", path=path, index=i)
+        _validate_argv_field(row, field="update_argv", path=path, index=i)
+        ns = row.get("needs_system")
+        if ns is not None and not isinstance(ns, bool):
+            raise InstallError(
+                f"{path}: component[{i}] id={row.get('id')!r}: needs_system must be a boolean"
+            )
     keys = data.get("key") or []
     if keys:
         if not isinstance(keys, list):
@@ -175,7 +235,7 @@ def load_catalog(
     schema = read_install_schema(root)
     ac.validate_tree(raw, schema, label=str(path))
     validate_catalog_semantics(raw, path=path)
-    return Catalog(data=copy.deepcopy(raw), path=path, provenance=provenance)
+    return Catalog(data=copy.deepcopy(raw), path=path, provenance=provenance, root=root)
 
 
 def expected_installed(row: dict[str, Any]) -> bool:
@@ -247,6 +307,34 @@ def doctor(catalog: Catalog) -> tuple[list[Observation], int]:
     return obs, (1 if hard_missing else 0)
 
 
+def expand_argv(
+    argv: list[str],
+    *,
+    root: Path,
+    prefix: Path | None = None,
+) -> list[str]:
+    """Expand {bin}/{root}/{home}/{prefix} tokens; refuse unknown braces."""
+    root = root.resolve()
+    prefix = (prefix or default_prefix()).expanduser().resolve()
+    mapping = {
+        "{bin}": str(root / "bin"),
+        "{root}": str(root),
+        "{home}": str(Path.home()),
+        "{prefix}": str(prefix),
+    }
+    out: list[str] = []
+    for part in argv:
+        expanded = part
+        for token, value in mapping.items():
+            expanded = expanded.replace(token, value)
+        if "{" in expanded or "}" in expanded:
+            raise InstallError(
+                f"install_argv part {part!r} still contains braces after known token expansion"
+            )
+        out.append(expanded)
+    return out
+
+
 def plan(catalog: Catalog) -> list[dict[str, Any]]:
     """Print-only reconciliation plan: what would be required next; does not install."""
     steps: list[dict[str, Any]] = []
@@ -259,19 +347,61 @@ def plan(catalog: Catalog) -> list[dict[str, Any]]:
                 "reason": f"class={row['class']} chosen={row.get('chosen')}",
             })
             continue
+        if row.get("needs_system"):
+            argv = row.get("install_argv")
+            reason = (
+                "needs_system=true; bounded apply refuses until a later --system unit"
+            )
+            if isinstance(argv, list) and argv:
+                try:
+                    resolved = expand_argv(argv, root=catalog.root)
+                    reason = reason + "; recorded argv=" + " ".join(
+                        shlex.quote(a) for a in resolved
+                    )
+                except InstallError as e:
+                    reason = f"{reason}; install_argv invalid: {e}"
+            steps.append({
+                "id": cid,
+                "action": "needs-system",
+                "reason": reason,
+                "needs_system": True,
+            })
+            continue
+        argv = row.get("install_argv")
+        if isinstance(argv, list) and argv:
+            try:
+                resolved = expand_argv(argv, root=catalog.root)
+            except InstallError as e:
+                steps.append({
+                    "id": cid,
+                    "action": "blocked",
+                    "reason": str(e),
+                })
+                continue
+            steps.append({
+                "id": cid,
+                "action": "would-install",
+                "reason": " ".join(shlex.quote(a) for a in resolved),
+                "argv": resolved,
+                "needs_system": False,
+                "note": "ade-install apply --yes runs install_argv; default is --dry-run",
+            })
+            continue
         install = row.get("install") or UNKNOWN
         if install == UNKNOWN:
             steps.append({
                 "id": cid,
                 "action": "blocked",
-                "reason": "install recipe UNKNOWN; record a real owner installer before apply",
+                "reason": "install_argv missing and install UNKNOWN; record argv before apply",
             })
         else:
             steps.append({
                 "id": cid,
-                "action": "would-install",
-                "reason": install,
-                "note": "apply/reconciliation is a later unit; plan is print-only",
+                "action": "blocked",
+                "reason": (
+                    f"install text recorded ({install!r}) but install_argv missing; "
+                    "apply only executes argv lists"
+                ),
             })
     for row in catalog.keys:
         steps.append({
@@ -295,3 +425,264 @@ def catalog_summary(catalog: Catalog) -> dict[str, Any]:
         "by_class": by_class,
         "provenance": catalog.provenance,
     }
+
+
+def _atomic_write_json(path: Path, data: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = json.dumps(data, indent=2, sort_keys=True) + "\n"
+    fd, tmp_name = tempfile.mkstemp(prefix=path.name + ".", dir=str(path.parent))
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        if tmp.exists():
+            tmp.unlink(missing_ok=True)
+        raise
+
+
+def load_ledger(state_dir: Path) -> dict[str, Any]:
+    path = state_dir / "ledger.json"
+    if not path.is_file():
+        return {
+            "schema_version": LEDGER_SCHEMA_VERSION,
+            "entries": {},
+        }
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, RecursionError) as e:
+        raise InstallError(f"{path}: unreadable ledger ({e})") from e
+    if not isinstance(raw, dict):
+        raise InstallError(f"{path}: ledger root must be an object")
+    entries = raw.get("entries")
+    if entries is None:
+        entries = {}
+    if not isinstance(entries, dict):
+        raise InstallError(f"{path}: entries must be an object")
+    return {
+        "schema_version": int(raw.get("schema_version") or LEDGER_SCHEMA_VERSION),
+        "entries": entries,
+        "updated_at": raw.get("updated_at"),
+    }
+
+
+def save_ledger(state_dir: Path, ledger: dict[str, Any]) -> Path:
+    path = state_dir / "ledger.json"
+    out = {
+        "schema_version": LEDGER_SCHEMA_VERSION,
+        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "entries": ledger.get("entries") or {},
+    }
+    _atomic_write_json(path, out)
+    return path
+
+
+def build_apply_steps(
+    catalog: Catalog,
+    *,
+    ids: set[str] | None = None,
+    force: bool = False,
+    allow_system: bool = False,
+    prefix: Path | None = None,
+) -> list[ApplyStep]:
+    """Decide per-component apply actions without executing."""
+    steps: list[ApplyStep] = []
+    known = {row["id"] for row in catalog.components}
+    if ids:
+        unknown = sorted(ids - known)
+        if unknown:
+            raise InstallError(f"unknown component id(s): {', '.join(unknown)}")
+    for row in catalog.components:
+        cid = str(row["id"])
+        if ids is not None and cid not in ids:
+            continue
+        if not expected_installed(row):
+            steps.append(ApplyStep(cid, "skip", None, f"class={row['class']} chosen={row.get('chosen')}"))
+            continue
+        if row.get("needs_system") and not allow_system:
+            steps.append(ApplyStep(
+                cid, "refuse-system", None,
+                "needs_system=true; pass --system when that unit exists (refused in this bound)",
+            ))
+            continue
+        if allow_system and row.get("needs_system"):
+            # Explicitly refuse until the system unit lands; do not pretend.
+            steps.append(ApplyStep(
+                cid, "refuse-system", None,
+                "--system requested but system install path is not implemented yet",
+            ))
+            continue
+        obs = observe_component(row)
+        if obs.status == "ok" and not force:
+            steps.append(ApplyStep(cid, "skip", None, f"already present ({obs.detail})"))
+            continue
+        argv_raw = row.get("install_argv")
+        if not isinstance(argv_raw, list) or not argv_raw:
+            steps.append(ApplyStep(
+                cid, "blocked", None,
+                "no install_argv recorded (UNKNOWN or prose-only install)",
+            ))
+            continue
+        try:
+            argv = expand_argv(list(argv_raw), root=catalog.root, prefix=prefix)
+        except InstallError as e:
+            steps.append(ApplyStep(cid, "blocked", None, str(e)))
+            continue
+        steps.append(ApplyStep(
+            cid, "would-install", argv,
+            "ready", detail=shlex.join(argv),
+        ))
+    return steps
+
+
+Runner = Callable[[list[str], Path], subprocess.CompletedProcess[str]]
+
+
+def _default_runner(
+    argv: list[str],
+    cwd: Path,
+    *,
+    timeout_s: float = 300.0,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(  # noqa: S603 — argv list only, never shell
+        argv,
+        cwd=str(cwd),
+        capture_output=True,
+        text=True,
+        check=False,
+        shell=False,
+        timeout=timeout_s,
+    )
+
+
+def apply(
+    catalog: Catalog,
+    *,
+    dry_run: bool = True,
+    ids: set[str] | None = None,
+    force: bool = False,
+    allow_system: bool = False,
+    state_dir: Path | None = None,
+    prefix: Path | None = None,
+    runner: Runner | None = None,
+    timeout_s: float = 300.0,
+) -> tuple[list[dict[str, Any]], int]:
+    """Bounded apply. Default dry-run. ``--yes`` path executes install_argv only.
+
+    Exit 0 when every selected step is skip/would-install(dry)/install ok;
+    1 when any blocked/failed; 2 when --system is requested (unimplemented).
+    """
+    if allow_system:
+        # Hard refuse: this unit never runs root effects, even when flagged.
+        return ([{
+            "id": "*",
+            "action": "refuse-system",
+            "reason": "--system is not implemented; no root or package-manager apply in this unit",
+            "ok": False,
+        }], 2)
+
+    steps = build_apply_steps(
+        catalog, ids=ids, force=force, allow_system=False, prefix=prefix,
+    )
+    state_dir = state_dir or default_state_dir()
+    results: list[dict[str, Any]] = []
+    failed = 0
+
+    ledger = load_ledger(state_dir) if not dry_run else None
+
+    def _run(argv: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+        if runner is not None:
+            return runner(argv, cwd)
+        return _default_runner(argv, cwd, timeout_s=timeout_s)
+
+    for step in steps:
+        row: dict[str, Any] = {
+            "id": step.id,
+            "action": step.action,
+            "reason": step.reason,
+            "ok": step.action in ("skip", "would-install"),
+        }
+        if step.argv is not None:
+            row["argv"] = list(step.argv)
+            row["detail"] = step.detail
+        if step.action == "would-install" and not dry_run:
+            assert step.argv is not None
+            # Persist pending intent before the write (setup-plan S3 ownership note).
+            assert ledger is not None
+            entries = ledger.setdefault("entries", {})
+            entries[step.id] = {
+                "status": "pending",
+                "argv": list(step.argv),
+                "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            }
+            save_ledger(state_dir, ledger)
+            try:
+                proc = _run(list(step.argv), catalog.root)
+            except subprocess.TimeoutExpired as e:
+                failed += 1
+                row["action"] = "failed"
+                row["ok"] = False
+                row["reason"] = f"timed out after {timeout_s}s"
+                entries[step.id] = {
+                    "status": "failed",
+                    "argv": list(step.argv),
+                    "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "detail": row["reason"],
+                }
+                save_ledger(state_dir, ledger)
+                results.append(row)
+                continue
+            except OSError as e:
+                failed += 1
+                row["action"] = "failed"
+                row["ok"] = False
+                row["reason"] = f"exec error: {e}"
+                entries[step.id] = {
+                    "status": "failed",
+                    "argv": list(step.argv),
+                    "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "detail": str(e),
+                }
+                save_ledger(state_dir, ledger)
+                results.append(row)
+                continue
+            if proc.returncode != 0:
+                failed += 1
+                row["action"] = "failed"
+                row["ok"] = False
+                row["returncode"] = proc.returncode
+                err = (proc.stderr or proc.stdout or "").strip()
+                row["reason"] = err[:500] or f"exit {proc.returncode}"
+                entries[step.id] = {
+                    "status": "failed",
+                    "argv": list(step.argv),
+                    "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "returncode": proc.returncode,
+                    "detail": row["reason"],
+                }
+                save_ledger(state_dir, ledger)
+            else:
+                row["action"] = "installed"
+                row["ok"] = True
+                row["returncode"] = 0
+                row["reason"] = "install_argv completed"
+                entries[step.id] = {
+                    "status": "installed",
+                    "argv": list(step.argv),
+                    "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                }
+                save_ledger(state_dir, ledger)
+        elif step.action in ("blocked", "refuse-system"):
+            failed += 1
+            row["ok"] = False
+        results.append(row)
+
+    # dry-run with only skips/would-install → 0; any blocked → 1
+    if dry_run:
+        rc = 1 if any(r["action"] in ("blocked", "refuse-system") for r in results) else 0
+    else:
+        rc = 1 if failed else 0
+    return results, rc
