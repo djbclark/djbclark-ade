@@ -47,6 +47,7 @@ def test_repo_install_toml_checks_clean():
     assert by_id["uv"].get("install_argv")
     assert by_id["git"].get("needs_system") is True
     assert by_id["git"].get("system_argv")
+    assert by_id["git"].get("system_argv_darwin") == ["brew", "install", "git"]
     assert by_id["aiuse"].get("install_argv")
     proc = _run("check", "--json", root=REPO)
     assert proc.returncode == 0, proc.stderr
@@ -191,6 +192,17 @@ def test_expand_argv_tokens(tmp_path):
     assert out[-1] == str(prefix.resolve())
     with pytest.raises(ai.InstallError, match="braces"):
         ai.expand_argv(["{unknown}/x"], root=root)
+
+
+def test_pick_system_argv_darwin_vs_linux():
+    row = {
+        "system_argv": ["apt-get", "install", "-y", "git"],
+        "system_argv_darwin": ["brew", "install", "git"],
+    }
+    assert ai.pick_system_argv(row, system="Linux") == ["apt-get", "install", "-y", "git"]
+    assert ai.pick_system_argv(row, system="Darwin") == ["brew", "install", "git"]
+    assert ai.pick_system_argv({"system_argv": ["apt-get", "x"]}, system="Darwin") == ["apt-get", "x"]
+    assert ai.pick_system_argv({}, system="Linux") is None
 
 
 def test_apply_dry_run_default_and_system_preview(tmp_path):

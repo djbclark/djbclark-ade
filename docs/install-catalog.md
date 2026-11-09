@@ -31,7 +31,8 @@ unified file with reviewed consumer adoption.
   Tokens: `{bin}`, `{root}`, `{home}`, `{prefix}` (default `~/.local/bin` or
   `ADE_INSTALL_PREFIX`).
 - `needs_system = true` marks package-manager / root paths; pair with
-  `system_argv`. `--system --dry-run` previews; live system exec is refused.
+  `system_argv` (Linux) and optional `system_argv_darwin` (Homebrew).
+  `--system --dry-run` previews the platform pick; live system exec is refused.
 - `presence` is a PATH basename fallback when `probe_argv` is absent.
 
 ## C. Keys and logins
@@ -76,12 +77,12 @@ just install-apply-dry
 | `just`, `uv` | `ade-user-install` release fetch → `{prefix}` |
 | `skill-everywhere`, `firecrawl-router` | `ade-user-install link` into `{prefix}` |
 | `graft` | `npm install -g @nanonets/graft` (user npm prefix) |
-| `git`, `gh` | `needs_system` + Linux `system_argv` (`apt-get`); `--system --dry-run` only |
+| `git`, `gh` | `needs_system` + Linux `system_argv` (`apt-get`) + `system_argv_darwin` (`brew`); dry-run only |
 | `aiuse` | `uv tool install git+https://github.com/djbclark/aiuse` |
 | others | still `UNKNOWN` / no `install_argv` |
 
 ## F. Next units
 
-Live system apply (root/`apt`/`brew` execution with ownership ledger), Mac
-`system_argv`, more owner installers (paseo, sudo-secretspec, vendor clients),
-managed key verify probes. S4 jobs stay explicit later work.
+Live system apply (root/`apt`/`brew` execution with ownership ledger), more
+owner installers (paseo, sudo-secretspec, vendor clients), managed key verify
+probes. S4 jobs stay explicit later work.

@@ -12,6 +12,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import platform
 import shlex
 import shutil
 import subprocess
@@ -188,15 +189,16 @@ def validate_catalog_semantics(data: dict[str, Any], *, path: Path) -> None:
         _validate_argv_field(row, field="update_argv", path=path, index=i)
         _validate_argv_field(row, field="probe_argv", path=path, index=i)
         _validate_argv_field(row, field="system_argv", path=path, index=i)
+        _validate_argv_field(row, field="system_argv_darwin", path=path, index=i)
         ns = row.get("needs_system")
         if ns is not None and not isinstance(ns, bool):
             raise InstallError(
                 f"{path}: component[{i}] id={row.get('id')!r}: needs_system must be a boolean"
             )
-        if row.get("system_argv") and not ns:
+        if (row.get("system_argv") or row.get("system_argv_darwin")) and not ns:
             raise InstallError(
                 f"{path}: component[{i}] id={row.get('id')!r}: "
-                "system_argv requires needs_system=true"
+                "system_argv / system_argv_darwin require needs_system=true"
             )
     keys = data.get("key") or []
     if keys:
@@ -410,6 +412,23 @@ def expand_argv(
     return out
 
 
+def pick_system_argv(
+    row: dict[str, Any],
+    *,
+    system: str | None = None,
+) -> list[str] | None:
+    """Choose platform system recipe: Darwin prefers ``system_argv_darwin``, else ``system_argv``."""
+    sysname = (system or platform.system()).lower()
+    if sysname == "darwin":
+        darwin = row.get("system_argv_darwin")
+        if isinstance(darwin, list) and darwin:
+            return list(darwin)
+    generic = row.get("system_argv")
+    if isinstance(generic, list) and generic:
+        return list(generic)
+    return None
+
+
 def plan(catalog: Catalog) -> list[dict[str, Any]]:
     """Print-only reconciliation plan: what would be required next; does not install."""
     steps: list[dict[str, Any]] = []
@@ -423,13 +442,13 @@ def plan(catalog: Catalog) -> list[dict[str, Any]]:
             })
             continue
         if row.get("needs_system"):
-            sys_argv = row.get("system_argv")
+            sys_argv = pick_system_argv(row)
             reason = (
                 "needs_system=true; ade-install apply --system --dry-run shows system_argv; "
                 "execution of system_argv remains refused"
             )
             resolved = None
-            if isinstance(sys_argv, list) and sys_argv:
+            if sys_argv:
                 try:
                     resolved = expand_argv(sys_argv, root=catalog.root)
                     reason = reason + "; argv=" + " ".join(
@@ -593,11 +612,11 @@ def build_apply_steps(
                     "needs_system=true; pass --system --dry-run to preview system_argv",
                 ))
                 continue
-            sys_raw = row.get("system_argv")
-            if not isinstance(sys_raw, list) or not sys_raw:
+            sys_raw = pick_system_argv(row)
+            if not sys_raw:
                 steps.append(ApplyStep(
                     cid, "blocked", None,
-                    "needs_system but system_argv missing",
+                    "needs_system but no system_argv for this platform",
                 ))
                 continue
             try:
