@@ -213,13 +213,14 @@ def project_routing_domain(legacy: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-# Snapshot of route_agent.load_policy's pure contract (2026-11-07).
+# Snapshot of route_agent.load_policy's pure contract (2026-11-09: allow_repos/allow_seats).
 # Parity tests extract that function without importing live routing initialization.
 SERVICE_KEYS = frozenset({
     "name", "cli", "good_at", "billing", "note", "never_bulk", "retired",
     "judgment_tier", "access", "hermes_only", "burn_first", "pool", "max_parallel",
     "agent", "models", "reserve_floor", "measured_only", "grant_days", "ready_probe",
     "shares_pool", "plenty_kinds", "fallback_after", "window",
+    "allow_repos", "allow_seats",
 })
 _SERVICE_REQUIRED = ("name", "cli", "good_at", "billing")
 LEAD_KEYS = ("model", "effort", "pipeline_model")
@@ -257,6 +258,12 @@ def validate_legacy_routing_shape(data: dict[str, Any], path: Path) -> None:
             raise ConfigError(
                 f"routing policy {path}: [[service]] {label!r}: "
                 f"pool must be a 2-element string array, got {pool!r}")
+        for key in ("allow_repos", "allow_seats"):
+            allow = entry.get(key)
+            if allow is not None and not (isinstance(allow, list) and all(isinstance(x, str) and x for x in allow)):
+                raise ConfigError(
+                    f"routing policy {path}: [[service]] {label!r}: "
+                    f"{key} must be an array of non-empty strings, got {allow!r}")
     for section in ("routing", "dispatch", "hermes", "calibrate"):
         if section not in data or not isinstance(data[section], dict):
             raise ConfigError(f"routing policy {path}: missing [{section}] table")

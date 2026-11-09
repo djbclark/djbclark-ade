@@ -332,6 +332,12 @@ _LEGACY_SERVICE = '[[service]]\nname="x"\ncli="x"\ngood_at={}\nbilling="free"\n'
     _LEGACY_SERVICE + 'unknown = 1\n',
     _LEGACY_SERVICE + 'pool = ["one"]\n',
     _LEGACY_SERVICE + 'pool = ["one", 2]\n',
+    _LEGACY_SERVICE + 'allow_repos = "techno-euphora"\n',
+    _LEGACY_SERVICE + 'allow_repos = [1]\n',
+    _LEGACY_SERVICE + 'allow_repos = [""]\n',
+    _LEGACY_SERVICE + 'allow_seats = "hermes"\n',
+    _LEGACY_SERVICE + 'allow_seats = [1]\n',
+    _LEGACY_SERVICE + 'allow_seats = [""]\n',
     _LEGACY_SERVICE + '[substrate]\nlifeline = 1\n',
     _LEGACY_SERVICE + '[lead]\nmodel = "opus"\n',
     _LEGACY_SERVICE + '[lead]\nmodel="opus"\neffort="ultra"\npipeline_model="sonnet"\n',
@@ -366,6 +372,24 @@ def test_selected_legacy_defaults_parity(home, synthetic_root, tmp_path, lead):
     if lead:
         assert eff.data['lead']['pipeline_effort'] == 'high'
         assert 'fable_lead' not in eff.data['lead']
+
+
+def test_service_allow_repos_and_seats_are_accepted(home, synthetic_root, tmp_path):
+    """[[service]] allow_repos / allow_seats (route_agent scope) are known keys (#260)."""
+    assert {"allow_repos", "allow_seats"} <= ac.SERVICE_KEYS
+    path = tmp_path / "routing-scoped.toml"
+    path.write_text(
+        _LEGACY_BASE + _LEGACY_SERVICE
+        + 'allow_repos = ["techno-euphora"]\n'
+        + 'allow_seats = ["hermes"]\n'
+    )
+    old = _pure_legacy_reader()(path)
+    eff = ac.load_effective(root=synthetic_root, home=home, environ={"ROUTING_POLICY": str(path)})
+    for key in ac.ROUTING_DOMAIN_KEYS:
+        assert eff.data.get(key) == old.get(key)
+    row = next(s for s in eff.data["service"] if s["name"] == "x")
+    assert row["allow_repos"] == ["techno-euphora"]
+    assert row["allow_seats"] == ["hermes"]
 
 
 @pytest.mark.parametrize("mode", ["new", "legacy", "isolated"])
