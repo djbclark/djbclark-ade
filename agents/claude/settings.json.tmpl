@@ -156,22 +156,12 @@
       {
         "matcher": "permission_prompt",
         "hooks": [
-          {
-            "type": "command",
-            "command": "'/opt/homebrew/bin/moshi-hook' claude-hook",
-            "async": true
-          }
         ]
       }
     ],
     "PermissionRequest": [
       {
         "hooks": [
-          {
-            "type": "command",
-            "command": "'/opt/homebrew/bin/moshi-hook' claude-hook",
-            "async": false
-          }
         ]
       },
       {
@@ -210,21 +200,11 @@
       {
         "matcher": "AskUserQuestion",
         "hooks": [
-          {
-            "type": "command",
-            "command": "'/opt/homebrew/bin/moshi-hook' claude-hook",
-            "async": true
-          }
         ]
       },
       {
         "matcher": "ExitPlanMode",
         "hooks": [
-          {
-            "type": "command",
-            "command": "'/opt/homebrew/bin/moshi-hook' claude-hook",
-            "async": true
-          }
         ]
       },
       {
@@ -337,21 +317,11 @@
       {
         "matcher": "AskUserQuestion",
         "hooks": [
-          {
-            "type": "command",
-            "command": "'/opt/homebrew/bin/moshi-hook' claude-hook",
-            "async": true
-          }
         ]
       },
       {
         "matcher": "ExitPlanMode",
         "hooks": [
-          {
-            "type": "command",
-            "command": "'/opt/homebrew/bin/moshi-hook' claude-hook",
-            "async": true
-          }
         ]
       },
       {
@@ -383,11 +353,6 @@
     "SessionEnd": [
       {
         "hooks": [
-          {
-            "type": "command",
-            "command": "'/opt/homebrew/bin/moshi-hook' claude-hook",
-            "async": true
-          },
           {
             "type": "command",
             "command": "{{ .home }}/ops/site-djbclark/macos/graft-hook-timeout-fix/graft-hook-guard.sh node \"{{ .home }}/.claude/helpers/graft-hooks.cjs\" session-end",
@@ -431,11 +396,6 @@
         "hooks": [
           {
             "type": "command",
-            "command": "'/opt/homebrew/bin/moshi-hook' claude-hook",
-            "async": true
-          },
-          {
-            "type": "command",
             "command": "{{ .home }}/ops/site-djbclark/macos/graft-hook-timeout-fix/graft-hook-guard.sh node \"{{ .home }}/.claude/helpers/graft-hooks.cjs\" session-start",
             "timeout": 12
           }
@@ -454,11 +414,6 @@
     "Stop": [
       {
         "hooks": [
-          {
-            "type": "command",
-            "command": "'/opt/homebrew/bin/moshi-hook' claude-hook",
-            "async": true
-          },
           {
             "type": "command",
             "command": "{{ .home }}/ops/site-djbclark/macos/graft-hook-timeout-fix/graft-hook-guard.sh node \"{{ .home }}/.claude/helpers/graft-hooks.cjs\" stop",
@@ -542,11 +497,6 @@
       },
       {
         "hooks": [
-          {
-            "type": "command",
-            "command": "'/opt/homebrew/bin/moshi-hook' claude-hook",
-            "async": true
-          }
         ]
       },
       {
