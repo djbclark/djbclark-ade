@@ -585,7 +585,8 @@ safety properties, and keep existing readers unchanged until their adoption is r
    Missing new config may project legacy; malformed or unknown-version new config must fail, including invalid local
    overrides. Recursive table merge keeps siblings; whole-array replacement does not concatenate services.
    Preserve existing policy bounds and failure behavior. Fixtures must prove equivalence, override precedence,
-   type/identity failures and no writes. Comment-preserving atomic `set` follows before adopting editable config.
+   type/identity failures and no writes. Comment-preserving atomic `set` (`ade-config set`, 2026-11-08) lands
+   before adopting editable config as a live consumer switch; see `docs/config-migration.md` C2.
    Bootstrap Python 3.11+ before relying on `tomllib`.
 2. **One desired job specification.** The TOML inventory feeds `Job.from_dict` and the existing `ade-sched`
    renderers. Existing plists are compatibility inputs until migrated, not a second editable authority. Distinguish

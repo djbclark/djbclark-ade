@@ -477,7 +477,13 @@ def test_r3_main_preserves_explicit_targets(home, synthetic_root, command, place
     def handler(args):
         seen.update(root=args.root, home=args.home)
         return 0
-    namespace = {'argparse': argparse, 'cmd_check': handler, 'cmd_get': handler, 'cmd_diff': handler}
+    namespace = {
+        'argparse': argparse,
+        'cmd_check': handler,
+        'cmd_get': handler,
+        'cmd_diff': handler,
+        'cmd_set': handler,
+    }
     exec(compile(ast.Module(body=[node], type_ignores=[]), 'actual ade-config.main', 'exec'), namespace)
     assert namespace['main'](_r3_cli_targets(command, synthetic_root, home, placement)) == 0
     assert seen == {'root': str(synthetic_root), 'home': str(home)}

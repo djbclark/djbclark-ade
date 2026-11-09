@@ -1,9 +1,10 @@
-# Config migration: schema_version=1 effective tree (2026-11-07)
+# Config migration: schema_version=1 effective tree (2026-11-07; set 2026-11-08)
 
-First bounded S1/S2 unit: a **read-only** effective config loader (`bin/ade_config.py`),
-CLI (`bin/ade-config check|get|diff`), checked-in JSON Schema (`config/ade.schema.json`),
+First bounded S1/S2 unit: effective config loader (`bin/ade_config.py`),
+CLI (`bin/ade-config check|get|diff|set`), checked-in JSON Schema (`config/ade.schema.json`),
 and thin `just config-check`. Existing readers (`bin/route_agent.py`, `bin/ade_gates.py`)
-are unchanged. Comment-preserving `set` and reader adoption are later units.
+are still unchanged. Comment-preserving atomic `set` landed 2026-11-08; consumer adoption
+of the effective-config reader remains a later unit.
 
 ## A. Mapping table (one explicit projection)
 
@@ -61,6 +62,8 @@ B7. This unit does **not** ship an automatically adopted `config/ade.toml`. An e
 ade-config check [--root DIR] [--home DIR] [--json]
 ade-config get PATH [--root DIR] [--home DIR] [--json]
 ade-config diff [--root DIR] [--home DIR] [--json]
+ade-config set PATH VALUE [--target local|repo] [--string] [--dry-run]
+               [--root DIR] [--home DIR] [--json]
 just config-check
 ```
 
@@ -73,19 +76,48 @@ never replaces an earlier explicit target. For example:
 no alternate supposedly absent filename is probed or loaded. The pure loader's
 `include_local=False` option disables even local path resolution/presence checks.
 
+### C2. `set` (2026-11-08)
+
+`ade-config set` is the comment-preserving atomic scalar writer (`bin/ade_config_edit.py`).
+
+| Flag | Behaviour |
+| --- | --- |
+| `--target local` (default) | Write `~/.config/djbclark-ade/local.toml` (create the file if absent). |
+| `--target repo` | Write the **current source of that domain**: `config/ade.toml` when present; otherwise the legacy file (`config/routing.toml` for routing-domain keys, `config/gates.toml` for `gates.*` with the `gates.` prefix stripped inside the file). Never creates `config/ade.toml` (a tiny new file would suppress legacy projection). Never writes `ROUTING_POLICY` / `GATES_TOML` paths. |
+| `--string` | Treat VALUE as a string even when it looks like a TOML literal. |
+| `--dry-run` | Plan and verify the edit; do not replace the file. |
+
+Mechanics: flock on `<file>.lock`, read-modify-validate, temp file beside the real
+target, fsync, `os.replace`, mode preservation. A no-op (type-aware equality: bool
+is never int, int is never float) leaves mtime untouched. After the text edit,
+`tomllib` reparses and must equal the expected tree with exactly that scalar changed.
+Symlinks,
+arrays, inline tables, multiline strings, `[[service]]` paths and other unsupported
+assignment forms are refused clearly. Unrelated complex TOML (including
+`[[service]]` arrays) is preserved byte-for-byte outside the value span.
+
+**Recording vs adoption.** Every successful `set` reports `adoption=recorded-only`:
+the choice is stored in TOML, but `route_agent` / `ade_gates` still read their
+legacy paths directly and have not adopted the effective-config reader. A local
+set is therefore not yet a live routing switch for those consumers. check/get/diff
+keep their no-write / no-auth / no-network contract.
+
 Python **3.11+** is required for standard-library `tomllib`; bootstrap is a later unit.
 
-All three commands validate raw new/local inputs and the effective tree against
+check/get/diff validate raw new/local inputs and the effective tree against
 `config/ade.schema.json`. The dependency-free evaluator supports that schema's
 `type`, `const`, `required`, `properties`, `additionalProperties`, `items` and
 `minLength` assertions; unsupported schema keywords fail closed. Gate and floor
 names/specs are closed maps, with finite numeric gate values (booleans rejected).
 Routing tables retain the declared open object shape; this is not consumer adoption
 or new validation of every routing leaf. Selected legacy routing retains its own
-reader's required keys, pool/lead/substrate validation and defaults.
+reader's required keys, pool/lead/substrate validation and defaults. `set` applies
+the same schema (local/unified) or the legacy routing/gates source constraints to
+the file it edits.
 
-All pure: no config writes, no secret resolution, no network/auth/scheduling probes.
-`--home` points local.toml resolution at a temp tree in tests.
+check/get/diff stay pure: no config writes, no secret resolution, no
+network/auth/scheduling probes. `--home` points local.toml resolution at a temp
+tree in tests; tests must not write the real HOME config or flip live lead flags.
 
 ## D. Provenance
 
