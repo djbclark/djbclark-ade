@@ -1,5 +1,5 @@
 #!/usr/bin/env -S python3 -I
-"""ade-user-install: user-scoped uv/just GitHub-release fetch or repo bin/ symlink into ~/.local/bin."""
+"""ade-user-install: uv/just fetch, bin/ symlink, or Linux sudo-secretspec media staging."""
 from __future__ import annotations
 
 import sys
