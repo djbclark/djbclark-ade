@@ -34,7 +34,8 @@ under **Carried**, newest first, one line each; an item leaves when it ships (in
 9. **Paseo in-place model change upstream** (2026-10-23): `docs/upstream-issues.md` entry 17 (`paseo agent model <id>
    <model>`), so `bin/paseo-set-model` (used by `route_agent.py substrate --apply`) can go.
 10. **Live `~/.claude/settings.json` lacks the `context_size_nudge.py` registration** the template has (2026-10-23):
-    the operator's edit (C2 batch, `docs/slim/log.md`).
+    the operator's edit (C2 batch, `docs/slim/log.md`). Detector: `ade-install doctor` /
+    `just install-doctor` (2026-11-09); apply remains hand-edit of the live file (order 11).
 11. **Codex threads left unresolved on merged PRs** (2026-10-23): read each against its PR and fix what is real (review
     rule 9 is advisory since J8).
 12. **Templates, Phase 1** (2026-10-20): declare the `TODO_*` secret names, give each template field a home, make the

@@ -313,3 +313,86 @@ def test_user_install_uv_url_linux_x86():
     assert url.endswith("uv-x86_64-unknown-linux-gnu.tar.gz")
     jurl = aui.just_download_url("linux", "x86_64", "1.40.0")
     assert "just-1.40.0-x86_64-unknown-linux-musl.tar.gz" in jurl
+
+
+def _nudge_settings(*, events: dict[str, str]) -> dict:
+    """Minimal Claude settings with context_size_nudge under the named events."""
+    hooks: dict = {}
+    for event, cmd in events.items():
+        hooks[event] = [{"matcher": "*", "hooks": [{"type": "command", "command": cmd}]}]
+    return {"hooks": hooks}
+
+
+def test_observe_context_size_nudge_skips_without_template(tmp_path):
+    assert ai.observe_context_size_nudge(root=tmp_path) is None
+
+
+def test_observe_context_size_nudge_ok_and_missing(tmp_path):
+    root = tmp_path / "repo"
+    tmpl = root / ai.CLAUDE_SETTINGS_TMPL
+    tmpl.parent.mkdir(parents=True)
+    # Real template has PostToolUse + UserPromptSubmit; copy it so expectations match.
+    real = REPO / ai.CLAUDE_SETTINGS_TMPL
+    tmpl.write_text(real.read_text())
+    live = tmp_path / "settings.json"
+
+    missing = ai.observe_context_size_nudge(root=root, settings_path=live)
+    assert missing is not None
+    assert missing.kind == "settings"
+    assert missing.id == "context_size_nudge"
+    assert missing.status == "missing"
+    assert "PostToolUse" in missing.detail
+    assert "UserPromptSubmit" in missing.detail
+    assert "Apply by hand" in missing.detail
+    assert "never mutates" in missing.detail
+
+    live.write_text(json.dumps(_nudge_settings(events={
+        "PostToolUse": f'hook-deadline 2 "$HOME"/.claude/hooks/{ai.CONTEXT_SIZE_NUDGE}',
+    })))
+    partial = ai.observe_context_size_nudge(root=root, settings_path=live)
+    assert partial is not None and partial.status == "missing"
+    assert "UserPromptSubmit" in partial.detail
+    assert "PostToolUse" in partial.detail  # expected set still named
+
+    live.write_text(json.dumps(_nudge_settings(events={
+        "PostToolUse": f'hook-deadline 2 "$HOME"/.claude/hooks/{ai.CONTEXT_SIZE_NUDGE}',
+        "UserPromptSubmit": f'hook-deadline 4 "$HOME"/.claude/hooks/{ai.CONTEXT_SIZE_NUDGE}',
+    })))
+    ok = ai.observe_context_size_nudge(root=root, settings_path=live)
+    assert ok is not None and ok.status == "ok"
+    assert "PostToolUse" in ok.detail and "UserPromptSubmit" in ok.detail
+
+
+def test_doctor_includes_context_size_nudge_check(tmp_path):
+    root = _fixture_root(tmp_path)
+    # No template beside the fixture catalog → nudge skipped; doctor still fails on tool-c.
+    obs, rc = ai.doctor(catalog=ai.load_catalog(root=root), settings_path=tmp_path / "absent.json")
+    assert not any(o.kind == "settings" for o in obs)
+    assert rc == 1
+
+    tmpl = root / ai.CLAUDE_SETTINGS_TMPL
+    tmpl.parent.mkdir(parents=True)
+    tmpl.write_text((REPO / ai.CLAUDE_SETTINGS_TMPL).read_text())
+    live = tmp_path / "live-settings.json"
+    live.write_text("{}")
+    obs, rc = ai.doctor(catalog=ai.load_catalog(root=root), settings_path=live)
+    nudge = [o for o in obs if o.kind == "settings" and o.id == "context_size_nudge"]
+    assert len(nudge) == 1 and nudge[0].status == "missing"
+    assert rc == 1
+
+    live.write_text(json.dumps(_nudge_settings(events={
+        "PostToolUse": f".../{ai.CONTEXT_SIZE_NUDGE}",
+        "UserPromptSubmit": f".../{ai.CONTEXT_SIZE_NUDGE}",
+    })))
+    # Force components healthy so only the settings check could fail; tool-c is still missing.
+    # Assert the nudge itself is ok when both events are registered.
+    nudge_only = ai.observe_context_size_nudge(root=root, settings_path=live)
+    assert nudge_only is not None and nudge_only.status == "ok"
+
+
+def test_repo_template_registers_context_size_nudge_events():
+    events = ai._hook_events_registering(
+        ai.load_claude_settings_json(REPO / ai.CLAUDE_SETTINGS_TMPL, template=True),
+        ai.CONTEXT_SIZE_NUDGE,
+    )
+    assert events == {"PostToolUse", "UserPromptSubmit"}

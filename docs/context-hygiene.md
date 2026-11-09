@@ -50,14 +50,16 @@ found by searching every byte appended to the transcript since the previous prom
 As of 2026-10-29, `claude/hooks/context_size_nudge.py` supports both
 `UserPromptSubmit` (plain-text stdout) and `PostToolUse` (JSON
 `hookSpecificOutput.additionalContext`). `agents/claude/settings.json.tmpl` registers both
-(`PostToolUse`: matcher `*`, `hook-deadline 2`, timeout 20). Nothing applies the template
-(`agents/README.md`), so the live `~/.claude/settings.json` gets the same entry by hand,
-after this code is on the shared checkout the hook symlink points at (the sub-agent guard
-below must be live first); until then the live file runs the hook on prompt submit only.
-Owner of that live edit: the lead session that merges the PR (it makes the edit in the
-merge step and records it in the PR; a fast-forward without it leaves the hard-tier text
-claiming a cadence the live file does not run). As of 2026-11-01 the live file has the
-`PostToolUse` entry.
+(`PostToolUse`: matcher `*`, `hook-deadline 2`, timeout 20; `UserPromptSubmit`:
+`hook-deadline 4`). Nothing applies the template (`agents/README.md`), so the live
+`~/.claude/settings.json` gets the same entries by hand (order 11), after this code is
+on the shared checkout the hook symlink points at (the sub-agent guard below must be
+live first); until then the live file may run the hook on prompt submit only.
+`ade-install doctor` / `just install-doctor` (2026-11-09) detects a missing registration
+versus the template and prints that hand-apply hint; it never writes the live file
+(queue Carried #10). Owner of the live edit: the operator (or a lead with an explicit
+yes). As of 2026-11-01 one machine's live file had the `PostToolUse` entry; re-check with
+doctor after any settings rewrite.
 PostToolUse checks read the transcript at most once every `POST_TOOL_CHECK_SECONDS`
 seconds per session; a wall-clock rollback permits a fresh check. A PostToolUse call
 that carries an `agent_id` (a sub-agent's or an in-process agent-team teammate's tool
