@@ -3,8 +3,9 @@
 `config/gates.toml` holds one gate since 2026-11-07 (slim-down E7): the frontier-model allowance. Since
 2026-11-09, `ade_gates.load_frontier` reads it through `ade_config.load_effective` (legacy projection when
 `config/ade.toml` is absent; `GATES_TOML` still isolates the gates domain for tests). Consumed by
-`bin/route_agent.py` (the planner's per-wave cap and the Fable floor), `bin/acp-dispatch` (the `--frontier-reason`
-grant) and `claude/hooks/frontier_agent_gate.py` (Agent-tool Fable calls). The Claude quota gates that shared the file
+`bin/route_agent.py` (the planner's per-wave cap and the Fable floor; Wave 6 `Choice.dispatch` emit is native
+`paseo run`), `bin/ade_gates.py` / the transitional `bin/acp-dispatch` shim (the `--frontier-reason` grant until
+the shim delete), and `claude/hooks/frontier_agent_gate.py` (Agent-tool Fable calls). The Claude quota gates that shared the file
 (the fleet governor's `[governor]` and the quota guard's `[quota_guard]` thresholds, the temporary gate profiles with
 their floors, the `away` profile and the `conserve` alert rule) were deleted with their scripts; pausing at a quota limit
 and resuming after the reset is the session-guard and usage-auto-resume Paseo plugins' job (PLAN D4). The 2026-10-26
@@ -63,24 +64,24 @@ sets) so it stays inside its 15 s settings timeout.
 While the effective gate allows it (the standing baseline), an agent MAY use a frontier model where it judges it
 significantly better than Opus 5.5, if it states why in one line. The checks, in order:
 
-| step | `claude/hooks/frontier_agent_gate.py` (Agent tool, Fable) | `bin/acp-dispatch --kind frontier --frontier-reason TEXT` |
+| step | `claude/hooks/frontier_agent_gate.py` (Agent tool, Fable) | Out-of-process frontier slice (`route_agent.py plan --kinds frontier` → `Choice.dispatch` / transitional `acp-dispatch --kind frontier --frontier-reason TEXT`) |
 | --- | --- | --- |
 | gate | `frontier1_judged` and `frontier1_agent_calls_per_day` at least 1, else ask | the family's `*_judged` at least 1 (claude pool: 1, codex pool: 2) |
 | reading | `judged_guard_block` (B2) passes, else ask | claude: the same; codex: the pool reading at least `frontier2_min_left` |
-| reason | a `frontier-reason: TEXT` line in the prompt, 10-200 characters, one line, no control or format character; else ask | `--frontier-reason`, same bounds; empty or missing: no allowance claimed; out of bounds or multi-line: exit 2 |
+| reason | a `frontier-reason: TEXT` line in the prompt, 10-200 characters, one line, no control or format character; else ask | `--frontier-reason` on the shim (same bounds); empty or missing: no allowance claimed; out of bounds or multi-line: exit 2. Native `paseo run` from `Choice.dispatch` records the planner's kind label; do not invent a second reason flag |
 | cap | allowed-judged calls today (NY) below `frontier1_agent_calls_per_day`, counted from the log AND `agent-calls-day.json` (the larger) | fewer than `*_per_wave` frontier slices in flight on the pool |
-| record | log row `decision: allowed-judged` and the reason | `frontier_reason`, `frontier_judged` (family, cap, in flight), `frontier_judged_note` (why not) in the dispatch record |
+| record | log row `decision: allowed-judged` and the reason | shim: `frontier_reason`, `frontier_judged` (family, cap, in flight), `frontier_judged_note` (why not) in the dispatch record; native path: planner + Paseo labels |
 
 C1. `route_agent.py plan` puts at most `frontier1_per_wave` frontier slices on claude and `frontier2_per_wave` on any other
 pool in a wave, and the cap above the closed 1 holds only while `judged_pool_block` passes (B2); otherwise the closed 1.
 C2. Unchanged by the allowance: advise-only (`--role exec` needs `ACP_OPERATOR_APPROVED=frontier-exec`), the `fable-xhigh`
 approval for Fable at `xhigh`/`max`, and the stop signal (a short, stale or unknown Claude reading keeps the closed rules).
-`acp-dispatch` never refuses a dispatch the closed gate allows: omitting the reason is the pre-allowance behaviour; only the
-Agent-tool hook asks.
+The transitional shim never refuses a dispatch the closed gate allows: omitting the reason is the pre-allowance behaviour; only the
+Agent-tool hook asks. New launches prefer `route_agent.py` → `Choice.dispatch` (native `paseo run`).
 C3. **Gemini 4 Argon** (`antigravity-argon`, the frontier fallback behind codex and claude, restored 2026-11-07) has no
-allowance of its own: it is a `frontier` model (`--kind frontier` only), counts as family 2 in the planner's per-wave cap,
+allowance of its own: it is a `frontier` model (planner `--kinds frontier` / shim `--kind frontier` only), counts as family 2 in the planner's per-wave cap,
 and the `--frontier-reason` grant covers the claude and codex pools only (for Argon the reason is recorded, nothing is
-refused). The fallback-only rule is the planner's (`fallback_after`); the acp-dispatch shim does not re-check it.
+refused). The fallback-only rule is the planner's (`fallback_after`); the transitional shim does not re-check it.
 C4. The hook, once a call is identified as a frontier call, asks on any error in its own state (state directory, lock,
 log append, counter); the lock is polled for 5 s. The log, lock and counter are opened `O_NOFOLLOW|O_NONBLOCK` and checked
 with `fstat` on the opened fd; the counter is written before the log row. Its settings entry carries `"timeout": 15` and
