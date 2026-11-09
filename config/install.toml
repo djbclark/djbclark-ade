@@ -190,17 +190,32 @@ notes = "npm bin is codex. Monthly-plan login is a separate [[login]] check; dis
 [[component]]
 id = "node"
 class = "hard"
-summary = "Node.js + npm (runtime for paseo/graft/pi/claude-code/codex npm packages)"
+summary = "Node.js runtime (paired with hard npm; brew install node supplies both on Mac)"
 source = "https://nodejs.org/"
 install = "Mac: brew install node; Linux: distro nodejs/npm or nodesource (system_argv still UNKNOWN)"
 update = "Mac: brew upgrade node; Linux: package manager"
-probe = "node --version && npm --version"
+probe = "node --version"
 probe_argv = ["node", "--version"]
 presence = "node"
 needs_system = true
 system_argv_darwin = ["brew", "install", "node"]
 platforms = ["mac", "linux"]
 notes = "Hard prerequisite for every npm install_argv row. Linux system_argv still UNKNOWN (distro vs nodesource). Preview Mac with apply --system --dry-run."
+
+[[component]]
+id = "npm"
+class = "hard"
+summary = "npm CLI (ships with Node; required so npm install_argv recipes are not skipped when node alone is present)"
+source = "https://nodejs.org/"
+install = "Mac: brew install node (includes npm); Linux: distro npm package or nodesource"
+update = "with node (package manager)"
+probe = "npm --version"
+probe_argv = ["npm", "--version"]
+presence = "npm"
+needs_system = true
+system_argv_darwin = ["brew", "install", "node"]
+platforms = ["mac", "linux"]
+notes = "Separate hard row so doctor/apply cannot treat node-without-npm as healthy. Linux system_argv still UNKNOWN."
 
 [[component]]
 id = "cursor-cli"

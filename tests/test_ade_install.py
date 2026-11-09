@@ -68,6 +68,10 @@ def test_repo_install_toml_checks_clean():
     assert by_id["node"].get("system_argv_darwin") == ["brew", "install", "node"]
     assert by_id["node"].get("system_argv") is None  # Linux still UNKNOWN
     assert by_id["node"].get("probe_argv") == ["node", "--version"]
+    assert by_id["npm"].get("needs_system") is True
+    assert by_id["npm"].get("system_argv_darwin") == ["brew", "install", "node"]
+    assert by_id["npm"].get("probe_argv") == ["npm", "--version"]
+    assert by_id["npm"].get("presence") == "npm"
     assert by_id["cursor-cli"].get("presence") == "agent"
     assert by_id["cursor-cli"].get("probe_argv") == ["agent", "--version"]
     assert by_id["cursor-cli"].get("update_argv") == ["agent", "update"]

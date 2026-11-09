@@ -343,7 +343,14 @@ def install_hermes(*, dry_run: bool = False) -> dict[str, Any]:
             ["bash", str(script), "--non-interactive"],
             check=False,
             shell=False,
+            capture_output=True,
+            text=True,
         )
+        # Keep vendor progress off our stdout so `ade-user-install hermes --json` stays parseable.
+        if proc.stdout:
+            sys.stderr.write(proc.stdout)
+        if proc.stderr:
+            sys.stderr.write(proc.stderr)
         if proc.returncode != 0:
             raise UserInstallError(
                 f"hermes install.sh exited {proc.returncode} (url={HERMES_INSTALL_SCRIPT})"

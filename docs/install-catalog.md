@@ -82,6 +82,7 @@ just install-apply-dry
 | `just`, `uv` | `ade-user-install` release fetch → `{prefix}` |
 | `skill-everywhere`, `firecrawl-router` | `ade-user-install link` into `{prefix}` |
 | `node` | Mac `system_argv_darwin` `brew install node`; Linux system recipe still UNKNOWN; `node --version` probe |
+| `npm` | separate hard row (`npm --version`); Mac same brew recipe as node so node-without-npm cannot look healthy |
 | `graft` | `npm install -g @nanonets/graft` (user npm prefix) |
 | `git`, `gh` | `needs_system` + Linux `system_argv` (`apt-get`) + `system_argv_darwin` (`brew`); dry-run only |
 | `aiuse` | `uv tool install git+https://github.com/djbclark/aiuse` |
