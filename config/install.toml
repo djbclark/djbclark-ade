@@ -73,13 +73,15 @@ id = "sudo-secretspec"
 class = "hard"
 summary = "Only way a key reaches a tool (review rule 3)"
 source = "https://github.com/frdminc/sudo-secretspec"
-install = "UNKNOWN"
-update = "UNKNOWN"
-probe = "UNKNOWN"
+install = "brew install frdminc/sudo-secretspec/sudo-secretspec (Mac); Linux: release tarball installer (packaging/README)"
+needs_system = true
+system_argv_darwin = ["brew", "install", "frdminc/sudo-secretspec/sudo-secretspec"]
+update = "brew upgrade (Mac) then interactive sudo-secretspec install; Linux tarball UNKNOWN for argv"
+probe = "sudo-secretspec doctor"
+probe_argv = ["sudo-secretspec", "doctor"]
 presence = "sudo-secretspec"
 platforms = ["mac", "linux"]
-notes = "Hard by operator ruling 2026-11-07; brew/Linux path still UNKNOWN for apply"
-
+notes = "Hard by operator ruling 2026-11-07. Package install ≠ privilege boundary: interactive `sudo-secretspec install` is a later unit. Linux system_argv still UNKNOWN (tarball). Preview Mac brew with apply --system --dry-run."
 [[component]]
 id = "aiuse"
 class = "hard"

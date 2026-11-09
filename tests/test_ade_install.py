@@ -49,6 +49,14 @@ def test_repo_install_toml_checks_clean():
     assert by_id["git"].get("system_argv")
     assert by_id["git"].get("system_argv_darwin") == ["brew", "install", "git"]
     assert by_id["aiuse"].get("install_argv")
+    assert by_id["sudo-secretspec"].get("needs_system") is True
+    assert by_id["sudo-secretspec"].get("system_argv_darwin") == [
+        "brew",
+        "install",
+        "frdminc/sudo-secretspec/sudo-secretspec",
+    ]
+    assert by_id["sudo-secretspec"].get("probe_argv") == ["sudo-secretspec", "doctor"]
+    assert by_id["sudo-secretspec"].get("system_argv") is None  # Linux tarball still UNKNOWN
     proc = _run("check", "--json", root=REPO)
     assert proc.returncode == 0, proc.stderr
     payload = json.loads(proc.stdout)
