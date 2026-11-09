@@ -31,6 +31,10 @@ bin/ade-sched [options] render PLIST          print what install would write (on
 bin/ade-sched [options] install PLIST         write and activate the job
 bin/ade-sched [options] uninstall LABEL       remove it (not installed: exit 0)
 bin/ade-sched [options] status [LABEL...]     installed / active / next run; no LABEL: every job ade-sched generated
+
+Checked-in ADE jobs under `config/launchd/` include `com.djbclark.deadline-sweep`,
+`com.djbclark.pr-policy`, and (2026-11-09) `com.djbclark.ade-update-check` (daily
+`ade-update --check` only; not installed until an operator runs `ade-sched install`).
 ```
 
 | option | meaning |
