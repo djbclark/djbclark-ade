@@ -1533,11 +1533,17 @@ def _resolve_out_path(cwd: str, value: str) -> str:
 
 def _output_file_targets(call: GitCall) -> Optional[list[str]]:
     """Absolute paths `stash show --output*` / `format-patch -o|--output*` would write; None when the call is not
-    those forms (or `format-patch --stdout`, which writes no worktree file). Plain `format-patch` defaults to cwd."""
+    those forms (or `format-patch --stdout`, which writes no worktree file). Plain `format-patch` defaults to cwd.
+
+    Collect *every* destination (Codex P1 on #400): git may open/truncate each `--output` / `-o` even when
+    later options replace the effective destination or the combination fails, so validating only the last
+    (or first) path would miss a foreign write.
+    """
     sub, args, cwd = call.sub, call.args, call.cwd
     if sub == "stash":
         if not args or args[0] != "show":
             return None
+        targets: list[str] = []
         i, n = 1, len(args)
         while i < n:
             a = args[i]
@@ -1548,14 +1554,17 @@ def _output_file_targets(call: GitCall) -> Optional[list[str]]:
                 # any unique prefix of `output` (git's inclusive parse; matches foreign-workspace `_writes_a_file`)
                 if name and "output".startswith(name):
                     if eq:
-                        return [_resolve_out_path(cwd, val)]
-                    if i + 1 < n:
-                        return [_resolve_out_path(cwd, args[i + 1])]
-                    return [_resolve_out_path(cwd, "")]
+                        targets.append(_resolve_out_path(cwd, val))
+                    elif i + 1 < n:
+                        targets.append(_resolve_out_path(cwd, args[i + 1]))
+                        i += 1
+                    else:
+                        targets.append(_resolve_out_path(cwd, ""))
             i += 1
-        return None
+        return targets or None
     if sub == "format-patch":
-        out_dir: Optional[str] = None
+        targets = []
+        saw_file_or_dir = False
         stdout = False
         i, n = 0, len(args)
         while i < n:
@@ -1570,33 +1579,40 @@ def _output_file_targets(call: GitCall) -> Optional[list[str]]:
                     stdout = True
                 if names & {"no-stdout"}:
                     stdout = False
+                # Track --output (file) and --output-directory (dir) independently: git opens both
+                # before complaining they cannot combine (Codex P1 on #400).
                 if names & {"output-directory", "output"}:
+                    saw_file_or_dir = True
                     if eq:
-                        out_dir = val
+                        targets.append(_resolve_out_path(cwd, val))
                     elif i + 1 < n:
-                        out_dir = args[i + 1]
+                        targets.append(_resolve_out_path(cwd, args[i + 1]))
                         i += 1
                     else:
-                        out_dir = ""
+                        targets.append(_resolve_out_path(cwd, ""))
             elif a.startswith("-") and len(a) > 1:
                 cl = a[1:]
                 j = 0
                 while j < len(cl):
                     ch = cl[j]
                     if ch == "o":
+                        saw_file_or_dir = True
                         if j + 1 < len(cl):
-                            out_dir = cl[j + 1:]
+                            targets.append(_resolve_out_path(cwd, cl[j + 1:]))
                         elif i + 1 < n:
-                            out_dir = args[i + 1]
+                            targets.append(_resolve_out_path(cwd, args[i + 1]))
                             i += 1
                         else:
-                            out_dir = ""
+                            targets.append(_resolve_out_path(cwd, ""))
                         break
                     j += 1
             i += 1
-        if stdout and out_dir is None:
+        if stdout and not saw_file_or_dir:
             return None
-        return [_resolve_out_path(cwd, "." if out_dir is None else out_dir)]
+        if not targets:
+            # Plain format-patch defaults to writing into cwd.
+            return [_resolve_out_path(cwd, ".")]
+        return targets
     return None
 
 

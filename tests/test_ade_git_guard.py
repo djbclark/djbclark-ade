@@ -731,6 +731,29 @@ def test_output_file_flags_are_allowed_inside_the_callers_claim(tmp_path, state)
     assert r.returncode == 0 and list((repo / "patches").glob("*.patch")), r.stderr
 
 
+def test_stash_show_validates_every_output_flag(tmp_path, state):
+    """Codex P1: later --output must not hide an earlier foreign --output (git opens both)."""
+    a, b = two_claimed(tmp_path, state)
+    r = run(state, ["stash", "show", "-p", f"--output={a / 'stolen'}", "--output=safe"], b, who="B")
+    assert refused77(r) and "output-file" in r.stderr, r.stderr
+    r = run(state, ["stash", "show", "-p", "--output=safe", f"--output={a / 'stolen'}"], b, who="B")
+    assert refused77(r) and "output-file" in r.stderr, r.stderr
+    assert not (a / "stolen").exists()
+
+
+def test_format_patch_tracks_output_file_and_output_dir_independently(tmp_path, state):
+    """Codex P1: --output=<file> then -o <dir> must still refuse a foreign file (git truncates it)."""
+    a, b = two_claimed(tmp_path, state)
+    r = run(
+        state,
+        ["format-patch", "-1", f"--output={a / 'stolen'}", "-o", str(b / "patches")],
+        b,
+        who="B",
+    )
+    assert refused77(r) and "output-file" in r.stderr, r.stderr
+    assert not (a / "stolen").exists()
+
+
 def test_output_file_into_a_foreign_claim_is_refused_even_from_own_workspace(tmp_path, state):
     a, b = two_claimed(tmp_path, state)
     before = (a / "f").read_text()
