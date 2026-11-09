@@ -65,47 +65,52 @@ protocol) instead of asking the operator to supply a path.
 ## Re-arm detached jobs (after the resume plan, before other work)
 
 Background work does not carry over on its own: a `run_in_background` task or
-waiter belongs to the session that started it. What survives is on disk, in
-the dispatch shim's job records (`~/.local/state/bigteam/<task>/jobs/<name>.json`, the shim's state directory;
-format in `bin/acp-dispatch`'s docstring). For each open job named under `## Detached
-jobs` in the handoff (or, with no handoff, each record without a `"closed"` key
-under the task directory the Tier 1 pointer names; never adopt a record whose
-`owner` session is still alive and is not the handoff's author):
+waiter belongs to the session that started it. What survives is on disk: the
+report path and `.done` marker named under `## Detached jobs` in the handoff,
+plus any legacy bigteam job record
+(`~/.local/state/bigteam/<task>/jobs/<name>.json`) a handoff still lists.
+**Do not run `acp-dispatch check`, `resume` or `reap`** — those subcommands are
+retired (E6 / Wave 6 follow-up); Paseo-native wait and artifact checks replace
+them.
 
-1. If its `done` path already exists, skip the wait: read the report (step 3).
-2. Otherwise start the record's `rearm` command as **its own
-   `run_in_background` Bash call**, one per job, then carry on with the
-   resume plan. A job that was launched detached (launchd) is still running;
-   only the waiter is new.
-3. Point the record at this session so the next handoff lists it: set
+For each open job named under `## Detached jobs` in the handoff (or, with no
+handoff, each legacy record without a `"closed"` key under the task directory
+the Tier 1 pointer names; never adopt a record whose `owner` session is still
+alive and is not the handoff's author):
+
+1. If its `done` path already exists, skip the wait: read the report (step 4).
+2. If a Paseo agent id is known, wait with `paseo wait <id> --json` (or
+   `paseo ls -a -g --json` filtered on your `ade.*` labels) until the agent is
+   idle, then classify by the report / `.done` artifacts — the same meanings
+   `skills/fan-out` Collect uses: last line `DONE` = delivered; report present
+   but unfinished / still running = wait again; missing report or a last line
+   `NO-REPORT: …` = no-report; first line `BLOCKED:` = blocked. Quota pauses
+   continue in place via Paseo's session-guard and usage-auto-resume plugins
+   (2026-11-06); there is no resume CLI to invent.
+3. If the work is unfinished and the agent id still exists, steer it with
+   `paseo send <id> --prompt "…" --behavior steer --json --no-wait` (ask for
+   `ack <your id>` when delivery matters). If the agent is gone, re-launch with
+   `paseo run` under a **new** `ade.name` / brief, never a shim `resume`.
+   Otherwise start any handoff-supplied waiter command as **its own
+   `run_in_background` Bash call**, one per job, then carry on with the resume
+   plan — only the waiter is new when the underlying work is already running.
+4. Point a legacy record at this session so the next handoff lists it: set
    `owner` to this session's id, from the shared resolver (a successor inherits its predecessor's
    `$CLAUDE_CODE_SESSION_ID`, which is stale):
    `o=$(python3 ~/src/djbclark-ade/bin/claude_identity.py) && jq --arg o "$o" '.owner=$o' f > f.tmp && mv -f f.tmp f || echo "no session id: owner left unchanged" >&2`
    (no `|| echo $CLAUDE_CODE_SESSION_ID` fallback: that is the predecessor's stale id).
-4. When the waiter returns, read the report, act on it, then **close the
+5. When the waiter returns, read the report, act on it, then **close the
    record** by appending `"closed": <epoch seconds>` with the same
    temp-file-and-`mv -f` form (`.closed=(now|floor)`). Records are closed, never
-   deleted. A rearm written by `acp-dispatch` since 2026-10-10 ends in
-   `acp-dispatch check <record>`: exit 1 means partial, 3 means no-report (a
-   last line `NO-REPORT: ...` says why), and 4 means BLOCKED. A quota stop is
-   resumed in place automatically (2026-10-18): the waiter keeps waiting
-   through the scheduled resume, and `check` on such a record prints
-   `resume-scheduled` with exit 1 (still running; re-arm the waiter). Exit 3
-   with `NO-REPORT: quota` means no automatic resume is pending; the line ends
-   with the exact `acp-dispatch resume <record> --detach --no-wait` to run
-   after the retry time, never a fresh dispatch. An older rearm exits 0 on any
-   `.done`, so run `acp-dispatch check` on its record yourself.
+   deleted.
 
-If a waiter times out (it is bounded) with no `.done`, run `acp-dispatch reap
-<record>` (or `acp-dispatch check <record>`, which applies the same rule): a
-slice whose process is gone (a reboot, SIGKILL, power loss) is finalized on the
-spot with its exit from the runner's exit file or launchd, else 255 `lost`, and
-`check` then gives the real verdict; a live slice is left alone, so re-arm the
-waiter. Never judge liveness by hand from `launchctl list` or `ps`: pids are
-reused after a reboot (2026-10-17: trackpad-settings read as running for
-hours), and `wait` returns only once a record is finalized or reaped, never on
-the agent's own `.done` touch (2026-10-18). A launchd sweep
-(`acp-dispatch reap --install`) does the same at login and every 30 min.
+If a waiter times out (it is bounded) with no `.done`, look again with
+`paseo ls -a -g --json` / `paseo agent inspect <id> --json`: a live agent is
+left alone (re-arm the waiter); a gone agent with no report is a no-report /
+lost slice — re-launch under a new name if the work still matters. Never judge
+liveness by hand from `launchctl list` or `ps`: pids are reused after a reboot
+(2026-10-17: trackpad-settings read as running for hours). There is no
+`reap --install` replacement; `paseo ls -g` shows what runs.
 
 `/resume` is the same thing under its older name (the `resume` skill was
 folded in here on 2026-10-08; Claude Code keeps a `/resume` command wrapper

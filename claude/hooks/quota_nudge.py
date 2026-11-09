@@ -50,7 +50,7 @@ from pathlib import Path
 LEVELS = ("ok", "watch", "tight", "critical")
 FRONTIER1, JUDGMENT = "Fable 5.1", "Opus 5.5"   # the literal names S3 replaces with role lookups (docs/history/model-tiers-design.md)
 MAX_AGE_SECONDS = 2 * 3600
-GUARD_STATE_MAX_AGE_S = 30 * 60   # the frontier hook's and acp-dispatch's limit (ade_gates.GUARD_STATE_MAX_AGE_S); a test pins them equal
+GUARD_STATE_MAX_AGE_S = 30 * 60   # the frontier hook's and ade_gates launch path's limit (ade_gates.GUARD_STATE_MAX_AGE_S); a test pins them equal
 MAX_SESSIONS = 200
 LOCK_RETRIES = 10
 LOCK_WAIT_S = 0.02
@@ -173,15 +173,16 @@ def _frontier_text(st):
     is within GUARD_STATE_MAX_AGE_S (30 min, not this hook's 2 h): the same freshness the gate itself demands."""
     checked = _parse(st.get("checked_at"))
     if checked is None or not -60 <= (_now() - checked).total_seconds() <= GUARD_STATE_MAX_AGE_S:
-        return None        # the hook and acp-dispatch ask on a state this old, so this line must not say "allowed" (adversary 2026-10-27 P3c)
+        return None        # the hook and the frontier gate ask on a state this old, so this line must not say "allowed" (adversary 2026-10-27 P3c)
     allow = st.get("frontier_allowance")
     calls = allow.get("agent_calls_per_day") if isinstance(allow, dict) else None
     if not (isinstance(allow, dict) and allow.get("judged") is True and isinstance(calls, int) and not isinstance(calls, bool)):
         return None
     cap = f"at most {calls} Agent-tool calls today" if calls > 0 else "no Agent-tool call without asking"
     return (f"{FRONTIER1} (frontier) is allowed where you judge it significantly "
-            f"better than {JUDGMENT}; give the reason in one line (acp-dispatch --kind frontier --frontier-reason \"...\"; Agent tool: "
-            f"a \"frontier-reason: ...\" prompt line), {cap}")
+            f"better than {JUDGMENT}; give the reason in one line "
+            f"(Agent tool or paseo run brief: a \"frontier-reason: ...\" prompt line; "
+            f"the frontier PreToolUse gate enforces it), {cap}")
 
 
 def _profile_nudge(st, session_id, nudges):
