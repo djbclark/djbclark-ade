@@ -1,15 +1,19 @@
 # Orchestration practices: decide cheaply, reason expensively, verify centrally
 
-Snapshot **2026-10-11**, re-based on Paseo **2026-11-07** (slim-down E11). The rules every orchestration skill here
-follows (`fan-out`, `research`, `dialogue`, `model-routing`). Each skill carries the short form of the rules it needs
-and links here for the reasons and sources.
+Snapshot **2026-10-11**, re-based on native Paseo **2026-11-09** (Wave 6 caller rewrite; slim-down E11). The rules every
+orchestration skill here follows (`fan-out`, `research`, `dialogue`, `model-routing`). Each skill carries the short form
+of the rules it needs and links here for the reasons and sources.
 
 **Standing operator requirement:** every orchestration skill can dispatch to several providers. Since 2026-10-31 (Paseo is
-the only harness) every agent is a Paseo agent, and since 2026-11-06 `acp-dispatch` is a shim over `paseo run`: in process through the Agent tool or a Workflow, out of process through `paseo run` (directly,
-or through `bin/acp-dispatch`, a `paseo run` shim kept for one cycle with its report, `.done`, record and exit-code
-contract; Wave 6's follow-up PR removes it). Query `paseo provider ls --json` for the live registry. Since
-2026-11-08 Pi is the sole general-purpose third-party TUI; required monthly-plan vendor clients and the Hermes
-exception remain. Archived omp/OpenCode clients are not dispatch targets or fallbacks. `skills/fan-out` is the how-to.
+the only harness) every agent is a Paseo agent. Live ops launch with native `paseo run` (in process through the Agent tool
+or a Workflow; out of process with `paseo run --no-wait` in a claimed worktree), collect with `paseo wait`, and message
+with `paseo send --json`. Query `paseo provider ls --json` for the live registry. Since 2026-11-08 Pi is the sole
+general-purpose third-party TUI; required monthly-plan vendor clients and the Hermes exception remain. Archived
+omp/OpenCode clients are not dispatch targets or fallbacks. `skills/fan-out` is the how-to.
+
+`bin/acp-dispatch`, `skills/session-finder/relay.py` and `tools/acp-run` are transitional Wave 6 shims over those native
+commands (soft deletion deadline 2026-11-20; [docs/slim/wave6-follow-up.md](slim/wave6-follow-up.md)). Do not start new
+call sites on them; do not invent shim flags.
 
 ## 1. Two kinds of work in an agent loop
 
@@ -23,8 +27,8 @@ exception remain. Archived omp/OpenCode clients are not dispatch targets or fall
 
 **Ladder for a decision, cheapest first:**
 
-1. **Code.** A rule or a table: `route_agent.py plan`, the dispatch shim's exit
-   codes (section 5), `aiuse --available`'s exit 3, `git diff --name-only` to pick tests.
+1. **Code.** A rule or a table: `route_agent.py plan`, the report / wait
+   classification codes (section 5), `aiuse --available`'s exit 3, `git diff --name-only` to pick tests.
    Deterministic, free, and auditable. The reaction to a quota stop is the
    provider's: Paseo's session-guard pauses at exhaustion and usage-auto-resume
    continues after the reset (the dispatcher's own auto-resume was retired 2026-11-06).
@@ -89,16 +93,27 @@ the task, and the ambiguity is copied into every slice.² ³ Every brief has:
 8. **Names with ids (2026-10-23, from the load watcher):** wherever a brief, message or report names a Paseo
    workspace, give the name the GUI shows (`<topic>-pw`) and its id (`wks_…`); for an agent, its agent id too. A GUI
    rename makes a name alone unreliable, and an id alone is unreadable.
-9. **The delivery footer** (`acp-dispatch footer --report PATH`, docs/dispatch-footer.md): where the report goes, the
-   `.done` marker, and the last line `DONE`, `BLOCKED: …` or `NO-REPORT: …`.
+9. **The delivery footer** ([docs/dispatch-footer.md](dispatch-footer.md)): where the report goes, the `.done`
+   marker, and the last line `DONE`, `BLOCKED: …` or `NO-REPORT: …`. Paste the filled contract into every Agent-tool
+   or `paseo run` brief (`{report}`, `{lead}`, `{done}`, `{inbox}`, `{replies}`). While `acp-dispatch` still exists,
+   `acp-dispatch footer --report PATH` can print a filled copy for prompts only — it is not a launch path and goes with
+   the Wave 6 shim deletion.
 
 On 2026-11-07 a live child launch confirmed that `paseo run --cwd DIR` alone inherited the parent's workspace
 and ignored the requested directory. A top-level run with `PASEO_WORKSPACE_ID` set also inherits that workspace.
 For an already claimed worktree, use `--new-workspace local --cwd DIR`
-(or an explicit `--workspace` for that directory), and check the returned `cwd`. The shim imports the assigned
-worktree this way; parent links remain intact. Never fix placement by restarting a healthy paid slice.
-The launch record preserves `paseo_cwd`; missing or mismatched cwd produces `placement_warning` and a stderr warning,
-while the already launched agent continues.
+(or an explicit `--workspace` for that directory), and check the returned `cwd`. Parent links remain intact.
+Never fix placement by restarting a healthy paid slice. A missing or mismatched cwd is a placement warning on
+stderr while the already launched agent continues — treat placement as unverified until `cwd` matches.
+
+Minimal out-of-process launch shape (after `route_agent.py plan` / `route` and `load-watch admit`):
+
+```bash
+paseo run --provider PROVIDER/MODEL --no-wait \
+  --new-workspace local --cwd ~/src/<repo>-NAME-wt \
+  --label ade.kind=KIND --label ade.name=NAME --label ade.lead=LEAD \
+  "$(cat brief-with-footer.md)"
+```
 
 ## 4. Size the run to the work
 
@@ -112,7 +127,7 @@ while the already launched agent continues.
    lands.
 3. **One level of delegation.** Workers launch no agents; only the
    orchestrator dispatches.⁵
-4. **Every dispatch passes the load gate before it starts** (the shim runs `load-watch admit --wait N`, default
+4. **Every dispatch passes the load gate before it starts** (`load-watch admit --wait N`, default
    1800 s, exit 75 when the machine is still too hot; operator 2026-10-19), then its frontier, in-flight and per-wave
    checks, which parallel launches re-check under a lock after writing their record. The gate only decides whether to
    *start*: it never kills, throttles or slows running work.
@@ -121,21 +136,24 @@ while the already launched agent continues.
    fan-out; builds and tests only through `bg` or CI, never `BG_LOAD_WAIT=0`; **one local test run at a time**; no new
    local pytest or dispatch while load per core is 1.5 or more (`uptime`).
 6. **Stagger sends to a working Claude agent** (PR 294, from the retired `helm` lead guide, 2026-11-06): one message
-   at a time, each gated on the target going idle, sent in the background; Paseo replaces a Claude agent's current
-   turn when a steer is declined (for example during compaction), and the relay shim refuses a running agent whose
-   provider cannot steer. A send that timed out waiting sent nothing: retry next round.
+   at a time, each gated on the target going idle (`paseo wait ID --json` reads `idle`, or `paseo agent inspect`),
+   sent in the background. Paseo replaces a Claude agent's current turn when a steer is declined (for example during
+   compaction). Use `--behavior steer` for notices that must interrupt a steerable running turn; a provider that cannot
+   steer must wait for idle — otherwise the running turn is replaced. A send that timed out waiting sent nothing: retry
+   next round.
 
 ## 5. Failure handling: kill criteria in code
 
-1. **Classify the failure first**, from the exit code and stderr, not by
+1. **Classify the failure first**, from the exit code / JSON status and stderr, not by
    rereading the whole log at frontier effort: quota or plan → the vendor's
    sibling pool, then re-route; tooling → another vendor; the work itself →
    the orchestrator looks; refused → another model or a reworded
-   authorization context. The shim's exit codes (dispatch, `wait`, `check`): 0 report delivered and ending in
-   `DONE`; 1 report present but unfinished, or still running; 2 usage or a refused launch; 3 no report; 4 `BLOCKED`
-   (or a pending permission); 5 pool unavailable before launch, re-plan; 75 machine too hot, nothing launched;
-   77 review-launch's tripwire; 124 timed out waiting. Exit 0 is still not success: verify the diff, the tests and the
-   report's content.
+   authorization context. After `paseo wait` (and when reading the report / `.done` yourself), keep these
+   classification codes: 0 report delivered and ending in `DONE`; 1 report present but unfinished, or still running;
+   2 usage or a refused launch; 3 no report; 4 `BLOCKED` (or a pending permission); 5 pool unavailable before launch,
+   re-plan; 75 machine too hot (`load-watch admit`), nothing launched; 77 review-launch's tripwire; 124 timed out
+   waiting. Exit 0 is still not success: verify the diff, the tests and the report's content. Do not assume a shim
+   exit code — implement the classification by reading the artifacts.
 2. **Three attempts per slice, then stop and report.** The first run plus two
    re-routes. A slice stuck on the same error after that goes to the operator
    with the evidence, not to a fourth vendor.³
@@ -152,7 +170,7 @@ while the already launched agent continues.
    depends on its result (2026-11-02).** An agent sat 10+ minutes in a blocking
    `wait` on `gh pr checks --watch` with nothing depending on it, and the
    operator had to interrupt. **Why it is worse than idle: an agent inside a
-   long blocking wait never goes idle, so it cannot receive any relayed
+   long blocking wait never goes idle, so it cannot receive any peer
    message** (Paseo queues a text for a working target until it has been quiet
    for 2 s): it is deaf as well as silent. On 2026-11-02 the lead's messages sat queued
    for hours behind such waits. Do other work; if there is none, end the turn with a status line (what
@@ -166,25 +184,31 @@ while the already launched agent continues.
    pane.
 8. **A reply that cannot be delivered because its target waits on a question
    or permission card is the operator's to unblock** (2026-11-02: a message
-   waited 184 minutes behind a card). The relay shim refuses such a send
-   (exit 2, not delivered); `paseo permit ls` shows the pending card, and the
-   asks / questions-please plugins are the operator's inbox. Report the message as
+   waited 184 minutes behind a card). Check `paseo agent inspect` / `paseo permit ls`
+   before sending; do not treat a busy non-steerable target or a pending card as delivered.
+   The asks / questions-please plugins are the operator's inbox. Report the message as
    held behind a card and move on; do not retry or poll it.
 
-## 5a. Messages between agents (AGENTS.md order 10, re-based 2026-11-06)
+## 5a. Messages between agents (AGENTS.md order 10, re-based 2026-11-09)
 
-1. Send with `paseo send --json` or the relay shim `skills/session-finder/relay.py TARGET "text"` (until 2026-11-20).
-   TARGET is an agent id or a unique shortId prefix, never a title.
+1. Send with native `paseo send --json`. Shape: positional agent id (or unique shortId prefix — never a title)
+   plus `--prompt '…'` or `--prompt-file PATH` (not `--agent` / `--text`). Examples:
+   `paseo send --json --no-wait <id> --prompt '…'`, or a trailing message string where the installed CLI accepts it.
+   For owner / deadline / load-watch notices that must interrupt a steerable turn, add `--behavior steer`.
 2. **What counts as delivered**: a sourceless send (deadline, load-watch: no `$PASEO_AGENT_ID`) is delivered when
-   `.status` reads `sent` or `completed` (shim exit 0). An agent's send is **accepted** (exit 5): Paseo queues every
-   agent-to-agent message and reports no later delivery, so only the peer's `ack <your id>` proves it. Exit 2 is not
-   delivered; `paseo send`'s own `$?` is never read as delivery (it exits 0 for every status).
-3. Ask for the named ack whenever delivery matters (relay.py: `--ack <your id>`; `paseo send` has no `--ack`, so put
-   `Please reply: ack <your id>` in the text and pass `--no-wait`: without it a send to a busy peer blocked over nine
-   minutes, 2026-11-08) and always on first contact; read your own
-   inbox for it; re-send when none arrives; report a peer you cannot reach to the operator.
+   JSON `.status` is `sent` or `completed` only. An agent's send is **accepted** when Paseo queues it: agent-to-agent
+   messages report no later delivery, so only the peer's `ack <your id>` proves it. Treat any other `.status` (and a
+   pending card / non-steerable busy target from `paseo agent inspect`) as not delivered. `paseo send`'s own `$?` is
+   never read as delivery (it exits 0 for every status).
+3. Ask for the named ack whenever delivery matters: put `Please reply: ack <your id>` in the text and pass
+   `--no-wait` (without it a send to a busy peer blocked over nine minutes, 2026-11-08). Always ask on first contact;
+   read your own inbox for it; re-send when none arrives; report a peer you cannot reach to the operator.
 4. A reply written in your own turn reaches nobody: answer a peer by sending to it. A slice's channel back is its
-   report file, and `acp-dispatch tell RECORD MESSAGE` (an inbox entry plus a `paseo send`) reaches a running slice.
+   report file; a mid-run nudge is `paseo send --json --no-wait <id> --prompt '…'` (plus the ack ask), not a shim
+   `tell` subcommand.
+
+The transitional `skills/session-finder/relay.py` shim remains until Wave 6 deletion (soft deadline 2026-11-20) —
+do not add new call sites.
 
 ## 5b. Unattended issue → PR (from `docs/history/coding-factory.md`, 2026-09-21)
 
@@ -215,8 +239,9 @@ its body (AGENTS.md, Trust).
 
 ## 7. Measure, or the savings are a guess
 
-1. Log, per slice: kind, vendor, model, tokens or cost (`acp-dispatch outcome`, the provider's usage), attempts, and
-   whether the diff passed review unchanged.
+1. Log, per slice: kind, vendor, model, tokens or cost (`paseo usage ls --json`, the provider's usage), attempts, and
+   whether the diff passed review unchanged. Write the calibrate row yourself (or keep reading bigteam `outcome`
+   records while the transitional shim's `outcome` subcommand still exists).
 2. Re-read that log before changing a capability profile in
    `route_agent.py`; a profile change without evidence is a guess.
 3. The cost math in source 1 is modelled, not measured; use your own before
