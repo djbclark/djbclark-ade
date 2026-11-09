@@ -3,15 +3,16 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  activeClaimForPath,
   buildAdeClaimsBindOwnerArgv,
   buildAdeClaimsNewArgv,
+  claimAllowsAgent,
   mergeAdeClaimIdEnv,
   parseAgentCreateAfterAgent,
   parseAgentOpenBeforeRequest,
   parseClaimPointer,
   parseWorktreePayload,
   resolveAdeClaimsScript,
+  resolveClaimForCwd,
   resolveTrustedAdeClaimsScript,
 } from "./claim-lib.mjs";
 
@@ -49,21 +50,21 @@ export function gitRevParseGitDir(cwd) {
 }
 
 /**
- * Resolve the active claim id for a workspace cwd.
- * Prefer the per-worktree pointer written by `ade_claims.py new`; fall back to
- * `list --json --state active` filtered by path.
+ * Resolve the active claim for a workspace cwd.
+ * Prefer the per-worktree pointer only when the registry confirms it is active
+ * on this path; otherwise fall back to path match. Always reads the registry.
  *
  * @param {string} cwd
  * @param {string} script
- * @returns {string | null}
+ * @returns {{ id: string, path: string, owner?: Record<string, unknown> } | null}
  */
-export function lookupClaimIdForCwd(cwd, script) {
+export function lookupClaimForCwd(cwd, script) {
+  let pointer = null;
   try {
     const gitDir = gitRevParseGitDir(cwd);
-    const pointer = parseClaimPointer(readFileSync(join(gitDir, "ade-claim"), "utf8"));
-    if (pointer) return pointer;
+    pointer = parseClaimPointer(readFileSync(join(gitDir, "ade-claim"), "utf8"));
   } catch {
-    // Missing git dir / pointer / unreadable: fall through to registry list.
+    // Missing git dir / pointer / unreadable: registry-only.
   }
   const run = spawnSync("python3", [script, "list", "--json", "--state", "active"], {
     encoding: "utf8",
@@ -78,8 +79,7 @@ export function lookupClaimIdForCwd(cwd, script) {
   } catch (err) {
     throw new Error(`ade_claims.py list --json was not JSON: ${err}`);
   }
-  const hit = activeClaimForPath(claims, cwd);
-  return hit ? hit.id : null;
+  return resolveClaimForCwd(claims, cwd, pointer);
 }
 
 /**
@@ -119,14 +119,18 @@ export function registerAgentClaimEnvHook(server) {
     } catch {
       return undefined;
     }
-    let claimId;
+    let claim;
     try {
-      claimId = lookupClaimIdForCwd(parsed.cwd, script);
+      claim = lookupClaimForCwd(parsed.cwd, script);
     } catch {
       // No claim / unreadable registry: leave the launch alone.
       return undefined;
     }
-    const env = mergeAdeClaimIdEnv(parsed.env, claimId);
+    if (!claim || !claimAllowsAgent(claim, parsed.agentId)) {
+      // Missing claim or foreign owner: never export ADE_CLAIM_ID (is_mine trusts it).
+      return undefined;
+    }
+    const env = mergeAdeClaimIdEnv(parsed.env, claim.id);
     if (!env) return undefined;
     return { ...request, env };
   });
@@ -146,16 +150,19 @@ export function registerAgentClaimOwnerHook(server) {
     } catch {
       return;
     }
-    let claimId;
+    let claim;
     try {
-      claimId = lookupClaimIdForCwd(parsed.cwd, script);
+      claim = lookupClaimForCwd(parsed.cwd, script);
     } catch {
       return;
     }
-    if (!claimId) return;
+    if (!claim || !claimAllowsAgent(claim, parsed.id)) {
+      // No claim, or another agent already owns it: do not overwrite.
+      return;
+    }
     const { python, argv } = buildAdeClaimsBindOwnerArgv({
       adeClaimsScript: script,
-      claimId,
+      claimId: claim.id,
       ownerAgent: parsed.id,
       ownerRecord: parsed.id,
     });

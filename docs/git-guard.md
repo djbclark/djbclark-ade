@@ -31,8 +31,8 @@ The guard, the hooks and the claim library exist; claims carry an owner and expi
 | Wave | Hook | What |
 |---|---|---|
 | W2 | `worktree.create.after` (waiting) | `ade_claims.py new` from `{ worktree.path, worktree.branch }` plus `git rev-parse HEAD` and optional `remote.origin.url`. |
-| W3 | `agent.open.before` (waiting) | If an active claim exists for `request.cwd`, merge `ADE_CLAIM_ID=<claim id>` into the launch env override map (covers the create-time first open and every resume; create.before env is not saved). |
-| W3 | `agent.create.after` (notification) | If a claim exists for `agent.cwd`, run `ade_claims.py bind-owner --id … --owner-agent <agent.id> --owner-record <agent.id>`. Cannot set env: Paseo's after-hook is fire-and-forget. |
+| W3 | `agent.open.before` (waiting) | If an active claim exists for `request.cwd` **and** is unbound or owned by `request.agentId`, merge `ADE_CLAIM_ID=<claim id>` into the launch env (covers create's first open and resumes; never exports a foreign claim id). |
+| W3 | `agent.create.after` (notification) | If a claim for `agent.cwd` is unbound or already this agent, run `ade_claims.py bind-owner` (refuses overwriting another `owner.agent`). Cannot set env: Paseo's after-hook is fire-and-forget. |
 
 The helper path is **not** taken from the agent's worktree (untrusted): only `ADE_CLAIMS_PY` or
 `bin/ade_claims.py` beside the plugin install. Claim lookup prefers `<git-dir>/ade-claim`, then

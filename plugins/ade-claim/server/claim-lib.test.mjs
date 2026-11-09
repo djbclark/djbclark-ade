@@ -4,6 +4,7 @@ import {
   activeClaimForPath,
   buildAdeClaimsBindOwnerArgv,
   buildAdeClaimsNewArgv,
+  claimAllowsAgent,
   deriveClaimId,
   mergeAdeClaimIdEnv,
   parseAgentCreateAfterAgent,
@@ -11,6 +12,7 @@ import {
   parseClaimPointer,
   parseWorktreePayload,
   resolveAdeClaimsScript,
+  resolveClaimForCwd,
   resolveTrustedAdeClaimsScript,
 } from "./claim-lib.mjs";
 
@@ -163,4 +165,22 @@ test("buildAdeClaimsBindOwnerArgv maps owner bind fields", () => {
       "--owner-record", "agent-123",
     ],
   });
+});
+
+test("resolveClaimForCwd validates pointer against registry", () => {
+  const claims = [
+    { id: "stale", path: FIXTURE.path, shown_state: "released" },
+    { id: "wt-claim-1", path: FIXTURE.path, shown_state: "active" },
+    { id: "other-ws", path: "/elsewhere", shown_state: "active" },
+  ];
+  assert.equal(resolveClaimForCwd(claims, FIXTURE.path, "stale")?.id, "wt-claim-1");
+  assert.equal(resolveClaimForCwd(claims, FIXTURE.path, "other-ws")?.id, "wt-claim-1");
+  assert.equal(resolveClaimForCwd(claims, FIXTURE.path, "wt-claim-1")?.id, "wt-claim-1");
+});
+
+test("claimAllowsAgent only for unbound or matching owner", () => {
+  assert.equal(claimAllowsAgent({ owner: {} }, "agent-a"), true);
+  assert.equal(claimAllowsAgent({ owner: { agent: "agent-a" } }, "agent-a"), true);
+  assert.equal(claimAllowsAgent({ owner: { agent: "agent-a" } }, "agent-b"), false);
+  assert.equal(claimAllowsAgent({ owner: { record: "agent-b" } }, "agent-b"), true);
 });

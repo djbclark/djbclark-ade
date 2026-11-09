@@ -48,6 +48,21 @@ def test_bind_owner_refuses_missing_and_released(tmp_path, state):
         ade_claims.bind_owner("wt-rel", owner_agent="a")
 
 
+def test_bind_owner_refuses_foreign_overwrite(tmp_path, state):
+    path = tmp_path / "wt-foreign"
+    path.mkdir()
+    c = ade_claims.make_claim(
+        id="wt-own", path=path, branch="b", base_sha="abcd", owner_agent="agent-a",
+    )
+    ade_claims.create_claim(c)
+    with pytest.raises(ValueError, match="already owned"):
+        ade_claims.bind_owner("wt-own", owner_agent="agent-b")
+    # Same owner may re-bind (idempotent).
+    out = ade_claims.bind_owner("wt-own", owner_agent="agent-a", owner_record="agent-a")
+    assert out["owner"]["agent"] == "agent-a"
+    assert out["owner"]["record"] == "agent-a"
+
+
 def test_bind_owner_cli(tmp_path, state):
     path = tmp_path / "wt3"
     path.mkdir()
