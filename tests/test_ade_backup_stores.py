@@ -2626,6 +2626,116 @@ def test_keep_prunes_older_complete_generations(env, capsys):
     remaining = sorted(p.name for p in parent.iterdir() if p.is_dir())
     assert remaining == ["20260103T000000Z", "20260104T000000Z", "half.part", "orphan-no-manifest"]
     assert "pruned old generation" in capsys.readouterr().err
+    assert json.loads((new_dest / "MANIFEST.json").read_text())["ok"] is True
+
+
+def test_failed_runs_do_not_prune_or_consume_successful_keep_slots(env, monkeypatch, capsys):
+    """N failed runs must not replace usable --keep N backups (Codex P1 on PR 402)."""
+    mod, home, dest, tmp = env
+    populate(home)
+    parent = dest.parent
+    for stamp in ("20260101T000000Z", "20260102T000000Z"):
+        g = parent / stamp
+        g.mkdir()
+        (g / "MANIFEST.json").write_text(json.dumps({"ok": True, "errors": []}))
+    failed = parent / "20260103T000000Z-failed"
+    failed.mkdir()
+    (failed / "MANIFEST.json").write_text(json.dumps({
+        "ok": False, "errors": [{"store": "walstore", "error": "boom"}],
+    }))
+    # A real failed run (schema guard): rename succeeds, exit 1, must not prune the two good gens.
+    con = sqlite3.connect(str(home / ".fake/state.db"))
+    con.execute("CREATE TABLE accounts (secret_blob TEXT)")
+    con.execute("INSERT INTO accounts VALUES ('x')")
+    con.close()
+    bad_dest = parent / "20260104T000000Z"
+    assert mod.main(["--dest", str(bad_dest), "--only", "walstore", "--keep", "2"]) == 1
+    remaining = sorted(p.name for p in parent.iterdir() if p.is_dir())
+    assert remaining == [
+        "20260101T000000Z", "20260102T000000Z", "20260103T000000Z-failed", "20260104T000000Z",
+    ]
+    assert json.loads((bad_dest / "MANIFEST.json").read_text())["ok"] is False
+    assert "pruned old generation" not in capsys.readouterr().err
+    # A later successful run with --keep 2 prunes only successful gens; failed ones stay and do not
+    # occupy the retention count (keep the newest 2 successful: 20260102 and the new one).
+    for name in ("state.db", "state.db-wal", "state.db-shm"):
+        (home / ".fake" / name).unlink(missing_ok=True)
+    wal = make_wal_db(home / ".fake/state.db", ["one", "two"])
+    wal.execute("INSERT INTO t VALUES ('wal-only-row')")
+    wal.close()
+    good_dest = parent / "20260105T000000Z"
+    assert mod.main(["--dest", str(good_dest), "--only", "walstore", "--keep", "2"]) == 0
+    remaining = sorted(p.name for p in parent.iterdir() if p.is_dir())
+    assert remaining == [
+        "20260102T000000Z", "20260103T000000Z-failed", "20260104T000000Z", "20260105T000000Z",
+    ]
+    assert not (parent / "20260101T000000Z").exists()
+    assert "pruned old generation" in capsys.readouterr().err
+
+
+def test_failed_rename_does_not_prune_prior_successful_generations(env, monkeypatch, capsys):
+    mod, home, dest, tmp = env
+    populate(home)
+    parent = dest.parent
+    for stamp in ("20260101T000000Z", "20260102T000000Z"):
+        g = parent / stamp
+        g.mkdir()
+        (g / "MANIFEST.json").write_text(json.dumps({"ok": True, "errors": []}))
+    real_rename = os.rename
+
+    def boom(src, dst):
+        raise OSError(16, "device busy")
+
+    monkeypatch.setattr(os, "rename", boom)
+    new_dest = parent / "20260103T000000Z"
+    assert mod.main(["--dest", str(new_dest), "--only", "walstore", "--keep", "1"]) == 1
+    monkeypatch.setattr(os, "rename", real_rename)
+    remaining = sorted(p.name for p in parent.iterdir() if p.is_dir())
+    assert "20260101T000000Z" in remaining and "20260102T000000Z" in remaining
+    assert not new_dest.exists()
+    assert (parent / "20260103T000000Z.part").is_dir()
+    assert "pruned old generation" not in capsys.readouterr().err
+
+
+def test_clean_parts_refuses_before_delete_when_dest_is_inside_a_store(env, capsys):
+    """Invalid --dest must not delete sibling *.part under a live store (Codex P1 on PR 402)."""
+    mod, home, _, tmp = env
+    populate(home)
+    store_root = home / ".fake"
+    leftover = store_root / "live.part"
+    leftover.mkdir()
+    (leftover / "unscrubbed.db").write_bytes(b"secret-bytes")
+    bad_dest = store_root / "20260101T000000Z"
+    assert mod.main(["--dest", str(bad_dest), "--only", "walstore", "--clean-parts"]) == 2
+    err = capsys.readouterr().err
+    assert "refusing" in err and "inside the" in err
+    assert leftover.is_dir() and (leftover / "unscrubbed.db").read_bytes() == b"secret-bytes"
+    assert not bad_dest.exists()
+
+
+def test_clean_parts_refuses_when_parent_holds_a_source_store(env, monkeypatch, capsys):
+    mod, home, _, tmp = env
+    populate(home)
+    parent = tmp / "mixed"
+    parent.mkdir()
+    # Sibling of the proposed dest is a configured store root; cleanup must not touch its *.part.
+    store_root = parent / "wal-root"
+    store_root.mkdir()
+    leftover = parent / "sibling.part"
+    leftover.mkdir()
+    (leftover / "x").write_text("keep")
+    stores = [
+        {"name": "walstore", "kind": "sqlite", "files": [store_root / "state.db"]},
+        {"name": "tree", "kind": "sqlite-tree", "root": home / ".fake/chats", "dbs": ["*/*/store.db"],
+         "sidecars": ["meta.json"]},
+        {"name": "filestore", "kind": "files", "roots": [("sessions", home / ".fake/sessions")]},
+    ]
+    monkeypatch.setattr(mod, "build_stores", lambda h: stores)
+    bad_dest = parent / "20260101T000000Z"
+    assert mod.main(["--dest", str(bad_dest), "--only", "walstore", "--clean-parts"]) == 2
+    err = capsys.readouterr().err
+    assert "refusing" in err and "holds the" in err
+    assert leftover.is_dir() and (leftover / "x").read_text() == "keep"
 
 
 def test_dry_run_rejects_an_unresolvable_ade_backup_hermes_like_the_real_run(real, monkeypatch, capsys):

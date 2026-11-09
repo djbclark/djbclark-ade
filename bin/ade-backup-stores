@@ -43,7 +43,8 @@ opened (`skipped`, counted `E excluded`), and a file store's configured paths ar
 Transcripts and other session content are copied as they are and can hold secrets pasted into them:
 treat a generation as secret-bearing.
 
-<dest>/MANIFEST.json records, per store, a `status` (`ok`; `missing`: no configured path of the store exists,
+<dest>/MANIFEST.json records a top-level `ok` (true only when the run would exit 0) used by `--keep`
+retention, plus per store a `status` (`ok`; `missing`: no configured path of the store exists,
 listed under `missing`; `partial`: the store has errors), the source, destination, bytes, sha256 of each file
 produced, start and end time, the exclusions applied, the scrubbed tables and the errors. A configured store
 that does not exist is not an error (a partially provisioned machine still gets a generation): it is
@@ -81,13 +82,18 @@ Default dest: ~/.local/state/ade/backups/<UTC timestamp>/ (0700, files 0600). Th
 <dest>.part/ and renamed to <dest>/ at the end: a <dest>.part/ directory, or a generation without
 MANIFEST.json, is an interrupted run and incomplete (it may hold unscrubbed credential rows; leftover
 `*.part` dirs under the backups parent are reported on stderr, and `--clean-parts` removes them before
-the run). `--keep N` (N>0) after a successful rename keeps only the newest N complete generations
-(those with MANIFEST.json) under the dest's parent and deletes older ones; N=0 (the default) keeps all.
-A scheduled run (config/launchd/com.djbclark.ade-backup-stores.plist via `bin/ade-sched`) passes
+the run — only after `refuse_reason` accepts `--dest`, and only when the parent that cleanup would
+modify is also outside every source store and git repo). `--keep N` (N>0) after a successful run
+(exit 0) keeps only the newest N successful generations under the dest's parent and deletes older
+successful ones; failed or incomplete generations (non-empty `errors`, `ok: false`, missing or
+unreadable MANIFEST.json, or a leftover `*.part`) do not count toward N and are never pruned by
+`--keep`, so N failed runs cannot replace usable backups. N=0 (the default) keeps all. A scheduled
+run (config/launchd/com.djbclark.ade-backup-stores.plist via `bin/ade-sched`) passes
 `--strict-stores --keep 3 --clean-parts` and relies on PATH preferring a modern python3 (Homebrew /
 `~/.local/bin` before `/usr/bin`): under Apple's /usr/bin/python3 a quiet WAL-mode source with no `-shm`
 can fail `ro_connect`. Refuses (exit 2) a dest that exists, that sits inside a source store or holds one
-(a configured store's path counts whether or not it exists), or that is inside a git repo.
+(a configured store's path counts whether or not it exists), or that is inside a git repo; `--clean-parts`
+also refuses when the dest's parent is inside or holds a source store or is inside a git repo.
 Exit: 0 clean, 1 at least one error (or a missing store under `--strict-stores`), 2 refused or bad usage.
 Cursor `acp-sessions` and the handoffs `chains/` are pruned by something else, so those stores come first.
 """
@@ -1272,6 +1278,29 @@ def refuse_reason(dest, stores):
     return None
 
 
+def refuse_cleanup_parent(parent, stores):
+    """Why --clean-parts must not delete under parent, or None.
+
+    Parent is the directory whose sibling `*.part` entries cleanup would remove; it must not be a
+    source store, sit inside one, hold one, or sit inside a git repository.
+    """
+    try:
+        parent = parent.resolve()
+    except OSError:
+        parent = Path(os.path.abspath(str(parent)))
+    for store in stores:
+        for root in store_roots(store):
+            r = root.resolve()
+            if parent == r or r in parent.parents:
+                return f"cleanup parent {parent} is inside the {store['name']} source store {r}"
+            if parent in r.parents:
+                return f"cleanup parent {parent} holds the {store['name']} source store {r}"
+    for p in [parent, *parent.parents]:
+        if (p / ".git").exists():
+            return f"cleanup parent {parent} is inside the git repository {p}"
+    return None
+
+
 def part_dir(dest):
     """Where the generation is built until it is complete."""
     return dest.with_name(dest.name + ".part")
@@ -1296,8 +1325,28 @@ def list_part_dirs(parent):
     return sorted(out, key=lambda p: p.name)
 
 
+def generation_is_successful(gen):
+    """True when gen's MANIFEST.json records a successful run.
+
+    Prefers the durable `ok` field written since this fix; falls back to an empty/absent `errors`
+    list for older manifests. Unreadable or non-object manifests are not successful.
+    """
+    path = gen / "MANIFEST.json"
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    if "ok" in data:
+        return data["ok"] is True
+    errors = data.get("errors") or []
+    return isinstance(errors, list) and len(errors) == 0
+
+
 def list_complete_generations(parent):
-    """Complete generations under parent (directories with MANIFEST.json), newest-last by name."""
+    """Generations under parent with a MANIFEST.json (any outcome), newest-last by name."""
     try:
         names = os.listdir(parent)
     except FileNotFoundError:
@@ -1313,6 +1362,11 @@ def list_complete_generations(parent):
         except OSError:
             continue
     return sorted(out, key=lambda p: p.name)
+
+
+def list_successful_generations(parent):
+    """Successful generations under parent (MANIFEST.json with ok/empty errors), newest-last by name."""
+    return [p for p in list_complete_generations(parent) if generation_is_successful(p)]
 
 
 def report_leftover_parts(parent):
@@ -1335,11 +1389,14 @@ def clean_leftover_parts(parent):
 
 
 def prune_generations(parent, keep):
-    """Keep the newest `keep` complete generations under parent; remove older ones. keep<=0: no prune.
-    Returns the removed paths. Only directories with MANIFEST.json count as complete."""
+    """Keep the newest `keep` successful generations under parent; remove older successful ones.
+
+    keep<=0: no prune. Failed or incomplete generations are excluded from the count and never
+    removed by this function. Returns the removed paths.
+    """
     if keep <= 0:
         return []
-    gens = list_complete_generations(parent)
+    gens = list_successful_generations(parent)
     if len(gens) <= keep:
         return []
     removed = []
@@ -1912,12 +1969,13 @@ def run_main(argv):
                     help="exit 1 when any configured store or store path is missing, or a required sidecar does not "
                          "exist (default: recorded as \"missing\" / `sidecar_missing` in the manifest and on stderr, exit 0)")
     ap.add_argument("--keep", type=int, default=0, metavar="N",
-                    help="after a successful run, keep only the newest N complete generations under the dest's "
-                         "parent (those with MANIFEST.json) and delete older ones; 0 (default) keeps all. "
-                         "The scheduled plist uses --keep 3")
+                    help="after a successful run (exit 0), keep only the newest N successful generations under "
+                         "the dest's parent and delete older successful ones; failed generations do not count "
+                         "toward N and are not pruned; 0 (default) keeps all. The scheduled plist uses --keep 3")
     ap.add_argument("--clean-parts", action="store_true",
                     help="remove leftover <stamp>.part directories under the dest's parent before the run "
-                         "(incomplete generations may hold unscrubbed credentials; the scheduled plist passes this)")
+                         "(after dest and parent pass safety checks; incomplete generations may hold "
+                         "unscrubbed credentials; the scheduled plist passes this)")
     args = ap.parse_args(argv)
     if args.keep < 0:
         print("ade-backup-stores: --keep must be >= 0", file=sys.stderr)
@@ -1939,14 +1997,20 @@ def run_main(argv):
         return check_schemas(selected, Excluder(home), args.strict_stores, args.json)
     dest = resolve_dest(args.dest)
     parent = dest.parent
-    if args.clean_parts and not args.dry_run:
-        clean_leftover_parts(parent)
-    else:
-        report_leftover_parts(parent)
+    # Dest safety before any destructive cleanup: an invalid --dest must not delete sibling *.part
+    # under a live store (or anything else refuse_reason would reject).
     reason = refuse_reason(dest, stores)
     if reason:
         print(f"ade-backup-stores: refusing: {reason}", file=sys.stderr)
         return 2
+    if args.clean_parts and not args.dry_run:
+        parent_reason = refuse_cleanup_parent(parent, stores)
+        if parent_reason:
+            print(f"ade-backup-stores: refusing: {parent_reason}", file=sys.stderr)
+            return 2
+        clean_leftover_parts(parent)
+    else:
+        report_leftover_parts(parent)
     excluder = Excluder(home)
     say = (lambda *a: None) if args.json else print
 
@@ -2013,13 +2077,14 @@ def run_main(argv):
     report_sidecars(entries)
     n_missing = report_missing(entries)
     total = sum(e["bytes"] for e in entries)
+    ok = not (errors or (args.strict_stores and n_missing))
     manifest = {
         "version": VERSION, "tool": "bin/ade-backup-stores", "host": socket.gethostname(), "dest": str(dest),
         "started": started, "ended": utcnow(), "seconds": round(time.monotonic() - t0, 1), "total_bytes": total,
         "exclusions": {"names": EXCLUDE_NAMES, "paths": [f"~/{p}" for p in EXCLUDE_PATHS], "other": OTHER_SKIPS,
                        "scrubbed_tables": {k: v["delete"] + [f"{t}.{c}" for t, c in v["null"]]
                                            for k, v in SCRUB.items()}},
-        "errors": errors, "stores": entries, "keep": args.keep,
+        "ok": ok, "errors": errors, "stores": entries, "keep": args.keep,
     }
     write_manifest(work, manifest)
     try:
@@ -2027,18 +2092,20 @@ def run_main(argv):
     except OSError as exc:
         print(f"ade-backup-stores: could not rename {work} to {dest}: {exc}; the generation stays in {work}",
               file=sys.stderr)
+        # Failed rename: leave prior successful generations untouched (no --keep prune).
         return 1
-    pruned = prune_generations(parent, args.keep)
+    # Only prune after a successful run; failed gens stay and do not consume the --keep budget.
+    pruned = prune_generations(parent, args.keep) if ok else []
     path = dest / "MANIFEST.json"
     say(f"total: {total} bytes in {sum(e['file_count'] for e in entries)} files, {len(errors)} error(s), "
         f"manifest {path}" + (f", pruned {len(pruned)} old generation(s)" if pruned else ""))
     if args.json:
         print(json.dumps({"dest": str(dest), "manifest": str(path), "total_bytes": total, "errors": errors,
-                          "pruned": [str(p) for p in pruned],
+                          "ok": ok, "pruned": [str(p) for p in pruned],
                           "stores": [{k: e[k] for k in ("store", "status", "missing", "file_count", "bytes", "seconds")}
                                      for e in entries]},
                          indent=1))
-    return 1 if errors or (args.strict_stores and n_missing) else 0
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":
