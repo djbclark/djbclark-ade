@@ -5,9 +5,10 @@ description: "OLD WAY: short alias for the ADE recovery handoff. Prefer paseo-ha
 
 # Old hand — use paseo-handoff for a fresh agent
 
-The operator types `hand` in every TUI because `/handoff` collides with omp's
-built-in command of that name, which only compacts the context in place and
-never reaches the `handoff` skill.
+The operator types `hand` in every TUI because `/handoff` historically collided
+with omp's built-in command of that name (omp is archive-only under the
+2026-11-08 Pi-only ruling; queue item 36), which only compacted the context in
+place and never reached the `handoff` skill. The short name stayed.
 
 1. Read the `old-handoff-use-paseo-handoff` skill (`~/src/djbclark-ade/skills/old-handoff-use-paseo-handoff/SKILL.md`) and
    follow it exactly from its first step, as if the operator had invoked it.
@@ -16,9 +17,9 @@ never reaches the `handoff` skill.
 3. Do not summarize or shortcut the skill because this file is short; this file
    adds no behavior of its own.
 
-Per-TUI spelling (2026-11-04): `/hand` in Claude Code, Cursor,
-Hermes (skill route), omp and opencode;
+Per-TUI spelling (2026-11-09; Pi sole third-party TUI): `/hand` in Claude Code,
+Cursor, Hermes (skill route), and Pi (via `~/.agents/skills`, shared with Codex);
 `$hand` in Codex (its `/prompts:hand` form is deprecated and not installed).
-The operator wrappers live in `omp/commands/`
-and `opencode/commands/` because those TUIs do not turn a plain skill into a
-bare `/name` command (the pi and zcode wrappers were deleted 2026-11-06 with those TUIs).
+Archived wrappers for retired clients remain in-repo only
+(`omp/commands/hand.md`, `opencode/commands/hand.md`) — never install targets.
+Prefer Paseo's `paseo-handoff` for a fresh agent.
