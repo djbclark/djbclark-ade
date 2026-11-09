@@ -138,25 +138,26 @@ class TestOpencodeGoTakesNoCode(RestorableTransportPolicyCase):
         for _, c in r.plan(["code", "code", "code", "code"], quota=self.ONLY_GO):
             self.assertTrue(c is None or c.service.name != "opencode-go")
 
-    def test_opencode_go_still_takes_bulk_and_mechanical(self):
+    def test_opencode_go_still_takes_bulk_and_mechanical_for_its_scoped_caller(self):
+        """Since 2026-11-02 only techno-euphora and the Hermes seat route to it (tests/test_route_repo_scope.py)."""
         for kind in ("bulk", "mechanical"):
-            c = r.route(kind, quota=self.ONLY_GO)
+            c = r.route(kind, quota=self.ONLY_GO, repo="techno-euphora")
             self.assertIsNotNone(c, kind)
             self.assertEqual(c.service.name, "opencode-go")
 
 
 class TestWasteBurning(RestorableTransportPolicyCase):
     def test_bulk_goes_to_idle_capacity(self):
-        c = r.route("bulk", quota=IDLE)
+        c = r.route("bulk", quota=IDLE, repo="techno-euphora")
         self.assertIn(c.service.name, {"cursor-auto", "opencode-go"})
         self.assertGreater(c.remaining, 90)
 
     def test_mechanical_prefers_the_free_tier(self):
-        self.assertEqual(r.route("mechanical", quota=IDLE).service.name, "opencode-go")
+        self.assertEqual(r.route("mechanical", quota=IDLE, repo="techno-euphora").service.name, "opencode-go")
 
     def test_headroom_shifts_bulk_away_from_a_drained_pool(self):
         drained = dict(IDLE, **{"opencode-go": {"remaining": 5.0}})
-        self.assertNotEqual(r.route("bulk", quota=drained).service.name, "opencode-go")
+        self.assertNotEqual(r.route("bulk", quota=drained, repo="techno-euphora").service.name, "opencode-go")
 
     def test_min_headroom_excludes_tight_services(self):
         q = dict(IDLE, **{"opencode-go": {"remaining": 10.0}})

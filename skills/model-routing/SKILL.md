@@ -88,6 +88,9 @@ startup and dispatched tasks; known quota/billing latches require explicit recov
 
 C9. Prepaid opencode-zen stays retired until an operator top-up; credits-backed models (Claude usage credits, Codex
 credits, Go "Use balance") are never reached for by re-enabling a toggle; there is no all-vendor fan-out.
+C10. Repo scope (djbclark 2026-11-02): `[[service]] allow_repos` / `allow_seats` — `opencode-go` only for `techno-euphora`
+and the `hermes` seat (`--seat` / `$ROUTE_SEAT`). Elsewhere `route`/`plan` skip it and `acp-dispatch` exits 2 even with
+`route-override`. The transport is retired (2026-11-08); the allow-lists stay. `policy --md` shows the scope.
 C9a. OpenAI API credits through Pi and the Codex monthly subscription through Codex are separate pools. A fresh subscription reading does not clear an API organization spend limit.
 C9b. Z.ai's explicit Pi profile uses GLM 5.3 Flash: high for code/research/bulk,
 low for mechanical work. Cursor Composer 2.5 is eligible when its vendor-owned

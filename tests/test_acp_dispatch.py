@@ -186,6 +186,8 @@ class TestProviderMapAndArgv(Base):
             with self.subTest(agent=agent):
                 extra = {"ACP_OPERATOR_APPROVED": "hermes,route-override"}
                 model = {"opencode": "opencode-go/minimax-m3", "claude": "sonnet"}.get(agent, "m-1")
+                if agent == "opencode":
+                    extra["ROUTE_SEAT"] = "hermes"  # opencode-go is repo-scoped (2026-11-02)
                 rec = self.dry(agent, model, **extra)
                 argv = rec["argv"]
                 self.assertEqual(argv[1], "run")
@@ -284,7 +286,10 @@ class TestPermBoundaries(Base):
             with self.subTest(agent=agent, perm=perm):
                 model = "opencode-go/minimax-m3" if agent == "opencode" else "m-1"
                 name = f"be-{agent}-{perm}"
-                r = self.dispatch(agent, model, "--perm", perm, name=name, ACP_OPERATOR_APPROVED="route-override")
+                extra = {"ACP_OPERATOR_APPROVED": "route-override"}
+                if agent == "opencode":
+                    extra["ROUTE_SEAT"] = "hermes"  # opencode-go is repo-scoped (2026-11-02)
+                r = self.dispatch(agent, model, "--perm", perm, name=name, **extra)
                 self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
                 rec = self.record(name)
                 self.assertEqual(rec["boundary"], "paseo")
