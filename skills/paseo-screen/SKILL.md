@@ -78,6 +78,10 @@ Test those on a throwaway target before depending on them, and say so in a repor
 
 ## Safety rules (they bind every agent)
 
+0. **Before the first `screen.*` RPC in a stretch, including a frame request**, give the operator about 30 seconds
+   notice; no approval question is needed. After the last RPC, explicitly say **done using the screen**. This notice
+   applies to the current session's verified Paseo UI too (operator, 2026-11-07); permission to operate that UI does
+   not waive the notification.
 1. **Never click or type into a live window you have not looked at.** Take a frame, read it, then act; take
    another frame to confirm. The pointer and keyboard are the human's real ones.
 2. **Check the human is not mid-typing** (recent activity, a focused field with a half-written message)

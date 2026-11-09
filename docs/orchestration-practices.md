@@ -93,12 +93,17 @@ the task, and the ambiguity is copied into every slice.² ³ Every brief has:
    `.done` marker, and the last line `DONE`, `BLOCKED: …` or `NO-REPORT: …`.
 
 On 2026-11-07 a live child launch confirmed that `paseo run --cwd DIR` alone inherited the parent's workspace
-and ignored the requested directory. A top-level run with `PASEO_WORKSPACE_ID` set also inherits that workspace.
-For an already claimed worktree, use `--new-workspace local --cwd DIR`
-(or an explicit `--workspace` for that directory), and check the returned `cwd`. The shim imports the assigned
-worktree this way; parent links remain intact. Never fix placement by restarting a healthy paid slice.
-The launch record preserves `paseo_cwd`; missing or mismatched cwd produces `placement_warning` and a stderr warning,
-while the already launched agent continues.
+and ignored the requested directory. Ordinary dispatch must **reuse an existing workspace**: `paseo run --workspace wks_… --cwd DIR`
+or `acp-dispatch … --workspace wks_… -C DIR`, with `paseo workspace ls --json` validating the id and that workspace `cwd`
+realpath-matches `-C` before any paid run. With a caller, its verified inspect snapshot must expose a workspace id;
+missing metadata or an unreadable caller requires explicit `--workspace`. Only a run without `PASEO_AGENT_ID` may
+fall back to `PASEO_WORKSPACE_ID`. Native Paseo 0.15.3 `inspect --json` omitted workspace identity when checked on
+2026-11-08, so agent-origin shim launches on that CLI need `--workspace`. The fake's optional injected workspace
+field models a possible newer response, not a guarantee of the installed CLI.
+Mint a workspace only with native `paseo workspace create` or `paseo run --new-workspace` (never via `acp-dispatch`).
+Parent links remain intact. Never fix placement by restarting a healthy paid slice.
+The launch record preserves `selected_workspace_id`, `returned_workspace_id`, and `paseo_cwd`; missing or mismatched metadata
+produces `placement_warning` and a stderr warning, while the already launched agent continues.
 
 ## 4. Size the run to the work
 
