@@ -1,7 +1,7 @@
 # Config migration: schema_version=1 effective tree (2026-11-07; set 2026-11-08)
 
 First bounded S1/S2 unit: effective config loader (`bin/ade_config.py`),
-CLI (`bin/ade-config check|get|diff|set`), checked-in JSON Schema (`config/ade.schema.json`),
+CLI (`bin/ade-config check|get|diff|set|fold`), checked-in JSON Schema (`config/ade.schema.json`),
 and thin `just config-check`. Comment-preserving atomic `set` landed 2026-11-08.
 **2026-11-09:** `bin/ade_gates.load_frontier` adopts `ade_config.load_effective` (legacy
 `gates.toml` / `GATES_TOML` when `ade.toml` is absent). **Same day:** `bin/route_agent.py`
@@ -18,7 +18,11 @@ and `bin/review-launch` read the `secret_deny` domain, and `bin/pr-policy` reads
 `pr_policy` domain, through `ade_config.load_effective` (legacy `secret-deny.toml` /
 `SECRET_DENY_TOML` and `pr-policy.toml` / `PR_POLICY_TOML` when `ade.toml` is absent;
 `--policy` / `--config` / `PR_POLICY_CONFIG` still accept an explicit legacy-format file).
-Do not ship tracked `config/ade.toml` yet (`ade-install` refuses while it is present).
+**Same day (stacked, scout gap A1):** tracked `config/ade.toml` is committed via
+`ade-config fold --write` (projects every policy domain above). When present it is the
+repo base; legacy split TOMLs remain for fallthrough when it is absent.
+`ade-install` still reads transitional `config/install.toml` until install/keys are folded
+(refuses only when `ade.toml` already carries an install catalog).
 
 ## A. Mapping table (one explicit projection)
 
@@ -89,8 +93,12 @@ B9. **`PR_POLICY_TOML`**: isolated legacy-format override for `[pr_policy]`.
     missing projects `{meta.schema=1}` with no forge tables. Consumer
     `--config` / `PR_POLICY_CONFIG` remain an explicit legacy-format path (not this
     isolation env).
-B10. This unit does **not** ship an automatically adopted `config/ade.toml`. An example
-    may live under tests/fixtures only.
+B10. **Tracked `config/ade.toml`** (2026-11-09): committed by `ade-config fold --write`
+    from the legacy domain files. `ade-config fold --check` asserts the file still matches
+    that fold while both the unified file and the legacy mirrors are kept. Prefer
+    `ade-config set --target repo` for scalar edits (writes `ade.toml` when present).
+    Legacy files stay for fallthrough when `ade.toml` is absent; a later PR may drop them
+    once fallthrough is unused.
 
 ## C. CLI
 
@@ -100,6 +108,7 @@ ade-config get PATH [--root DIR] [--home DIR] [--json]
 ade-config diff [--root DIR] [--home DIR] [--json]
 ade-config set PATH VALUE [--target local|repo] [--string] [--dry-run]
                [--root DIR] [--home DIR] [--json]
+ade-config fold [--root DIR] [--write|--check] [--json]
 just config-check
 ```
 
@@ -161,9 +170,11 @@ tree in tests; tests must not write the real HOME config or flip live lead flags
 
 ## D. Install catalog (transitional, 2026-11-09)
 
-Separate from the routing/gates effective tree: `config/install.toml` + `ade-install`
-(`docs/install-catalog.md`). Refused when `config/ade.toml` is present so install/keys
-are not a second permanent authority beside a unified file.
+Separate from the policy-domain effective tree: `config/install.toml` + `ade-install`
+(`docs/install-catalog.md`). Still the install/keys source while `config/ade.toml` holds
+only policy domains. Refused when `ade.toml` already carries an install catalog
+(`[install]` / folded component|key|login tables) so those are not a second permanent
+authority beside a unified file.
 
 ## E. Provenance
 

@@ -1,19 +1,22 @@
 #!/usr/bin/env -S python3 -I
-"""ade-config: check/get/diff/set for the versioned effective ADE config (schema_version=1).
+"""ade-config: check/get/diff/set/fold for the versioned effective ADE config (schema_version=1).
 
   ade-config check [--root DIR] [--home DIR] [--json]
   ade-config get PATH [--root DIR] [--home DIR] [--json]
   ade-config diff [--root DIR] [--home DIR] [--json]
   ade-config set PATH VALUE [--target local|repo] [--string] [--dry-run]
                  [--root DIR] [--home DIR] [--json]
+  ade-config fold [--root DIR] [--write|--check] [--json]
 
 check/get/diff stay read-only: no writes, no secret resolution, no network/auth.
 set performs a comment-preserving atomic scalar write (default --target local).
-Missing config/ade.toml projects legacy routing.toml + gates.toml. Present invalid
-or unknown-version config fails. Local override: ~/.config/djbclark-ade/local.toml.
-ROUTING_POLICY / GATES_TOML remain isolated legacy-format overrides and are never
-set targets. Local/repo set records choices; route_agent / ade_gates have not adopted
-the effective-config reader yet (adoption=recorded-only). See docs/config-migration.md.
+fold projects legacy domain TOMLs into the schema_version=1 tree (print, --write
+config/ade.toml, or --check that a present ade.toml matches the fold).
+Missing config/ade.toml projects legacy split files. Present valid ade.toml is the
+repo base. Present invalid or unknown-version config fails. Local override:
+~/.config/djbclark-ade/local.toml. ROUTING_POLICY / GATES_TOML / CONTEXT_BUDGET_TOML /
+SECRET_DENY_TOML / PR_POLICY_TOML remain isolated legacy-format overrides and are
+never set targets. See docs/config-migration.md.
 """
 from __future__ import annotations
 
@@ -148,6 +151,75 @@ def cmd_set(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_fold(args: argparse.Namespace) -> int:
+    root = Path(args.root) if args.root else ac.repo_root_from_here()
+    try:
+        folded = ac.fold_legacy_domains(root=root)
+        text = ac.encode_toml_document(folded)
+    except ac.ConfigError as e:
+        print(str(e), file=sys.stderr)
+        return 1
+    path = ac.default_new_config_path(root)
+    if args.check:
+        if not ac.input_present(path):
+            msg = f"{path}: missing (ade-config fold --write to create)"
+            if args.json:
+                _print_json({"ok": False, "path": str(path), "error": msg})
+            else:
+                print(msg, file=sys.stderr)
+            return 1
+        try:
+            on_disk = ac.read_toml(path)
+        except ac.ConfigError as e:
+            print(str(e), file=sys.stderr)
+            return 1
+        # Compare domain trees (ignore emit-only header / key order).
+        if on_disk != folded:
+            # Diff paths for a readable failure.
+            changes = ac.diff_dicts(folded, on_disk)
+            payload = {
+                "ok": False,
+                "path": str(path),
+                "error": "config/ade.toml drifts from fold_legacy_domains",
+                "changes": [
+                    {"path": c.path, "folded": c.before, "on_disk": c.after}
+                    for c in changes
+                ],
+            }
+            if args.json:
+                _print_json(payload)
+            else:
+                print(payload["error"], file=sys.stderr)
+                for item in payload["changes"][:20]:
+                    print(
+                        f"  {item['path']}: folded={item['folded']!r} "
+                        f"on_disk={item['on_disk']!r}",
+                        file=sys.stderr,
+                    )
+            return 1
+        if args.json:
+            _print_json({"ok": True, "path": str(path), "schema_version": folded["schema_version"]})
+        else:
+            print(f"ade-config fold --check: OK ({path})")
+        return 0
+    if args.write:
+        try:
+            written = ac.write_ade_toml(text, root=root, path=path)
+        except ac.ConfigError as e:
+            print(str(e), file=sys.stderr)
+            return 1
+        if args.json:
+            _print_json({"ok": True, "path": str(written), "schema_version": folded["schema_version"]})
+        else:
+            print(f"ade-config fold --write: wrote {written}")
+        return 0
+    if args.json:
+        _print_json({"schema_version": folded["schema_version"], "data": folded})
+    else:
+        sys.stdout.write(text)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     shared = argparse.ArgumentParser(add_help=False)
     # A subparser parses into its own namespace. Implicit defaults must not
@@ -216,6 +288,25 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_set.add_argument("--json", action="store_true")
     p_set.set_defaults(func=cmd_set)
+
+    p_fold = sub.add_parser(
+        "fold",
+        parents=[shared],
+        help="project legacy domain TOMLs into schema_version=1 ade.toml shape",
+    )
+    fold_mode = p_fold.add_mutually_exclusive_group()
+    fold_mode.add_argument(
+        "--write",
+        action="store_true",
+        help="atomically write config/ade.toml from the legacy fold",
+    )
+    fold_mode.add_argument(
+        "--check",
+        action="store_true",
+        help="require config/ade.toml and assert it matches fold_legacy_domains",
+    )
+    p_fold.add_argument("--json", action="store_true")
+    p_fold.set_defaults(func=cmd_fold)
 
     args = parser.parse_args(argv)
     args.root = getattr(args, "root", None)
