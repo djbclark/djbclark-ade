@@ -105,6 +105,32 @@ gh pr checks N --watch --required                 # wait for Tests and the marke
 gh pr merge N --squash --match-head-commit <the head the marker names>
 ```
 
+## Operator merge order (`bin/ade-merge-ready`, 2026-11-09)
+
+When many stacked ADE PRs wait on the merge gate (0 adversary SUCCESS), use the
+read-only helper — it never posts, merges, or invents an APPROVE:
+
+```sh
+bin/ade-merge-ready                  # classify open tips vs pytest-linux + adversary-marker
+bin/ade-merge-ready stacks           # bottom-up APPROVE order + full tip SHAs for markers
+bin/ade-merge-ready stacks --group install
+bin/ade-merge-ready stacks --group claims
+bin/ade-merge-ready stacks --group s1
+bin/ade-merge-ready stacks --group wave6          # full wave6 chains
+bin/ade-merge-ready stacks --bottoms-only         # bottoms only in each selected group
+```
+
+`stacks` derives order from each open PR's `baseRefName` → `headRefName` edge
+(live `gh pr list`), not from a hardcoded number list. Named groups cover the
+operator stacks: **install** (`ade-install` / update-check), **claims** (W2–W4
+`ade-claim` chain), **s1** (`cursor/s1-*` / load_effective), and **wave6**. The
+default all-groups view prints **wave6 bottoms** only (wave6 PRs whose open
+parent is outside the wave6 set, typically `master` — a non-wave6 base such as
+an S1 tip is not itself listed as a wave6 bottom); pass `--group wave6` for
+full chains. Each row prints the current 40-hex head and a paste-ready
+`adversary-verdict:v1` template for the operator to use after a real review of
+that head.
+
 ## The `adversary-marker` Action
 
 `.github/workflows/adversary-marker.yml` runs `bin/adversary_marker.py` on `workflow_run` (the `Tests` workflow completed,

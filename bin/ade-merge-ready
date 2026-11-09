@@ -2,6 +2,7 @@
 """ade-merge-ready: classify open ADE PRs against the merge gate (2026-11-09).
 
   ade-merge-ready [--repo OWNER/NAME] [--min N] [--json]
+  ade-merge-ready stacks [--group NAME] [--bottoms-only] [--repo …] [--min N] [--json]
   ade-merge-ready --help
 
 Read-only. Uses `gh` to list open PRs (number >= --min, default 327), their
@@ -12,6 +13,11 @@ markers in the body or comments are never enough on their own — that would
 count an outside author's or bot's same-head APPROVE. Never posts, never
 merges, never invents an APPROVE. Prints a table (or JSON) plus paste-ready
 templates so an operator can post a real marker.
+
+`stacks` walks open PR base→head refs and prints bottom-up APPROVE order for
+named groups (install, claims, s1, wave6) with full tip SHAs for marker paste.
+In the default all-groups view, wave6 prints stack bottoms only (docs on
+master); pass `--group wave6` for the full wave6 bottom-up chains.
 
 Classes:
   merge_now       pytest-linux pass + adversary-marker success (attributed APPROVE)
@@ -32,13 +38,39 @@ import os
 import re
 import subprocess
 import sys
-from typing import Any
+from collections import defaultdict
+from typing import Any, Callable
 
 MARKER_RE = re.compile(
     r"<!--\s*adversary-verdict:v1\s*(\{.*?\})\s*-->",
     re.DOTALL,
 )
 SHA40 = re.compile(r"^[0-9a-f]{40}$")
+
+# Named operator stacks (2026-11-09). Matching is by live open branch/title;
+# order is always derived from each PR's baseRefName → headRefName edge, never
+# from a hardcoded PR number sequence (numbers drift as tips land).
+STACK_GROUPS: dict[str, Callable[[dict[str, Any]], bool]] = {
+    "install": lambda r: bool(
+        re.search(r"ade-install|ade-update-check", r.get("branch") or "")
+        or re.search(r"\bade-install\b|\binstall:", (r.get("title") or ""), re.I)
+    ),
+    # claims W2–W4: plugin → W3 → W4 → W2-release (+ queue note PR).
+    "claims": lambda r: bool(
+        re.search(r"ade-claim|queue-claims-w2w4", r.get("branch") or "")
+        or re.search(r"\bade-claim\b", (r.get("title") or ""), re.I)
+    ),
+    # S1 load_effective chain (gates → route → more → context → secret/pr).
+    "s1": lambda r: bool(
+        (r.get("branch") or "").startswith("cursor/s1-")
+        or re.search(r"\bS1\b|load_effective", (r.get("title") or ""))
+    ),
+    "wave6": lambda r: bool(
+        re.search(r"wave6", r.get("branch") or "", re.I)
+        or re.search(r"\bwave\s*6\b|\bwave6\b", (r.get("title") or ""), re.I)
+    ),
+}
+STACK_GROUP_NAMES = tuple(STACK_GROUPS.keys())
 
 
 def die(msg: str, code: int = 2) -> int:
@@ -172,6 +204,118 @@ def collect(gh: str, repo: str, min_n: int) -> list[dict[str, Any]]:
     return rows
 
 
+def link_parents(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Attach parent_number from open-PR baseRefName → headRefName edges."""
+    by_branch = {r["branch"]: r for r in rows if r.get("branch")}
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        parent = by_branch.get(r.get("base") or "")
+        linked = dict(r)
+        linked["parent_number"] = parent["number"] if parent else None
+        out.append(linked)
+    return out
+
+
+def expand_with_ancestors(
+    selected: list[dict[str, Any]], all_rows: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Keep stack integrity: if a tip matches a group, include its open ancestors."""
+    by_num = {r["number"]: r for r in all_rows}
+    keep: set[int] = {r["number"] for r in selected}
+    for r in selected:
+        cur = r
+        while cur.get("parent_number") is not None:
+            parent = by_num.get(cur["parent_number"])
+            if parent is None or parent["number"] in keep:
+                break
+            keep.add(parent["number"])
+            cur = parent
+    return [by_num[n] for n in sorted(keep)]
+
+
+def bottom_up_order(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Topological order: stack bottoms (no open parent in set) first, then children.
+
+    Sibling branches at the same depth stay in PR-number order. Cycles (should not
+    happen for GitHub base refs) fall back to number order for the remainder.
+    """
+    by_num = {r["number"]: r for r in rows}
+    nums = set(by_num)
+    children: dict[int | None, list[int]] = defaultdict(list)
+    indeg: dict[int, int] = {n: 0 for n in nums}
+    for r in rows:
+        p = r.get("parent_number")
+        if p in nums:
+            children[p].append(r["number"])
+            indeg[r["number"]] += 1
+
+    for k in children:
+        children[k].sort()
+
+    ordered: list[dict[str, Any]] = []
+    queue = sorted(n for n, d in indeg.items() if d == 0)
+    seen: set[int] = set()
+    while queue:
+        n = queue.pop(0)
+        if n in seen:
+            continue
+        seen.add(n)
+        ordered.append(by_num[n])
+        for c in children.get(n, []):
+            indeg[c] -= 1
+            if indeg[c] == 0:
+                queue.append(c)
+                queue.sort()
+    if len(ordered) < len(rows):
+        for n in sorted(nums - seen):
+            ordered.append(by_num[n])
+    return ordered
+
+
+def stack_bottoms(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """PRs whose open parent is outside this set (typically base=master)."""
+    nums = {r["number"] for r in rows}
+    bottoms = [
+        r for r in rows if r.get("parent_number") is None or r["parent_number"] not in nums
+    ]
+    return sorted(bottoms, key=lambda r: r["number"])
+
+
+def build_named_stacks(
+    rows: list[dict[str, Any]],
+    *,
+    groups: list[str] | None = None,
+    bottoms_only: bool = False,
+) -> list[dict[str, Any]]:
+    linked = link_parents(rows)
+    explicit = groups is not None
+    names = list(groups) if explicit else list(STACK_GROUP_NAMES)
+    stacks: list[dict[str, Any]] = []
+    for name in names:
+        matcher = STACK_GROUPS[name]
+        matched = [r for r in linked if matcher(r)]
+        if not matched:
+            stacks.append({"group": name, "bottoms_only": False, "order": []})
+            continue
+        # Default all-groups view: wave6 shows docs bottoms only. Explicit
+        # `--group wave6` prints the full bottom-up chains unless --bottoms-only.
+        # Bottoms use the matched set only so a non-group open base (e.g. S1
+        # #332 under wave6-gates-doc) is not itself listed as a wave6 bottom.
+        want_bottoms = bottoms_only or (not explicit and name == "wave6")
+        if want_bottoms:
+            order = stack_bottoms(matched)
+        else:
+            order = bottom_up_order(expand_with_ancestors(matched, linked))
+        stacks.append(
+            {
+                "group": name,
+                "bottoms_only": want_bottoms,
+                "order": order,
+            }
+        )
+    return stacks
+
+
 def print_table(rows: list[dict[str, Any]]) -> None:
     print(
         f"{'N':<5} {'class':<14} {'tests':<10} {'adv':<10} {'approve':<7} {'head':<10} title"
@@ -182,7 +326,11 @@ def print_table(rows: list[dict[str, Any]]) -> None:
             f"{r['adversary_marker']:<10} {str(r['live_approve']):<7} "
             f"{(r['head'] or '')[:7]:<10} {(r['title'] or '')[:48]}"
         )
-    needs = [r for r in rows if r["class"] == "needs_approve" and r["pytest_linux"] in ("pass", "success")]
+    needs = [
+        r
+        for r in rows
+        if r["class"] == "needs_approve" and r["pytest_linux"] in ("pass", "success")
+    ]
     if needs:
         print()
         print("# Paste-ready APPROVE templates (operator only; after a real review of that head):")
@@ -191,10 +339,49 @@ def print_table(rows: list[dict[str, Any]]) -> None:
             print(r["marker_template"])
 
 
+def print_stacks(stacks: list[dict[str, Any]]) -> None:
+    print(
+        "# Bottom-up APPROVE order from open PR base→head refs "
+        "(operator only; after a real review of each head)."
+    )
+    print("# Never posts or invents a verdict; templates are for paste after review.")
+    print()
+    for stack in stacks:
+        name = stack["group"]
+        order: list[dict[str, Any]] = stack["order"]
+        label = f"{name} bottoms" if stack.get("bottoms_only") else name
+        print(f"## {label}")
+        if not order:
+            print("  (no open PRs matched)")
+            print()
+            continue
+        for i, r in enumerate(order, 1):
+            parent = r.get("parent_number")
+            parent_s = f"←#{parent}" if parent else f"←{r.get('base') or '?'}"
+            print(
+                f"  {i}. #{r['number']} {r.get('branch') or ''} {parent_s}  "
+                f"class={r.get('class')}  head={r.get('head') or ''}"
+            )
+            print(f"     {(r.get('title') or '')[:72]}")
+            if r.get("marker_template"):
+                print(f"     {r['marker_template']}")
+        print()
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         prog="ade-merge-ready",
-        description="Classify open ADE PRs against pytest-linux + adversary-marker + live APPROVE (read-only).",
+        description=(
+            "Classify open ADE PRs against pytest-linux + adversary-marker + live "
+            "APPROVE, or print bottom-up stack APPROVE order (read-only)."
+        ),
+    )
+    ap.add_argument(
+        "cmd",
+        nargs="?",
+        default="classify",
+        choices=("classify", "stacks"),
+        help="classify (default) or stacks (bottom-up APPROVE order)",
     )
     ap.add_argument(
         "--repo",
@@ -208,17 +395,46 @@ def main(argv: list[str] | None = None) -> int:
         metavar="N",
         help="only PRs with number >= N (default 327)",
     )
-    ap.add_argument("--json", action="store_true", help="print JSON array")
+    ap.add_argument("--json", action="store_true", help="print JSON")
     ap.add_argument(
         "--gh",
         default=os.environ.get("ADE_GH", "gh"),
         help="gh binary (or ADE_GH); tests inject a fake",
+    )
+    ap.add_argument(
+        "--group",
+        action="append",
+        choices=list(STACK_GROUP_NAMES),
+        metavar="NAME",
+        help=(
+            "stacks only: limit to named stack(s): install, claims, s1, wave6 "
+            "(repeatable; default: all four)"
+        ),
+    )
+    ap.add_argument(
+        "--bottoms-only",
+        action="store_true",
+        help="stacks only: print only stack bottoms within each selected group",
     )
     a = ap.parse_args(argv)
     try:
         rows = collect(a.gh, a.repo, a.min)
     except (RuntimeError, subprocess.TimeoutExpired, OSError) as e:
         return die(str(e))
+
+    if a.cmd == "stacks":
+        stacks = build_named_stacks(
+            rows,
+            groups=a.group,
+            bottoms_only=a.bottoms_only,
+        )
+        if a.json:
+            json.dump(stacks, sys.stdout, indent=2, sort_keys=True)
+            sys.stdout.write("\n")
+        else:
+            print_stacks(stacks)
+        return 0
+
     if a.json:
         json.dump(rows, sys.stdout, indent=2, sort_keys=True)
         sys.stdout.write("\n")
