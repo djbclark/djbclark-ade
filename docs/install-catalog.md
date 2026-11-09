@@ -63,10 +63,17 @@ just update [-- --check]   # bin/ade-update for this checkout
 
 Daily behind-check (not auto-apply): install
 `config/launchd/com.djbclark.ade-update-check.plist` with an explicit log dir
-(operator step; queue Carried #15):
+(operator step; queue Carried #15). The same plist is the source of truth for
+**macOS launchd** and **Linux systemd** (ade-sched's backends):
 
 ```
-bin/ade-sched install config/launchd/com.djbclark.ade-update-check.plist \
+# Linux (systemd user timer; linger required, else exit 69)
+bin/ade-sched --backend systemd install config/launchd/com.djbclark.ade-update-check.plist \
+  --set __STATE__=$HOME/.local/state/ade --ade ~/src/djbclark-ade
+# or: just update-check-install
+
+# macOS (launchd; auto backend also picks this when launchctl is present)
+bin/ade-sched --backend launchd install config/launchd/com.djbclark.ade-update-check.plist \
   --set __STATE__=$HOME/.local/state/ade --ade ~/src/djbclark-ade
 ```
 

@@ -58,6 +58,11 @@ bin/ade-sched install config/launchd/com.djbclark.deadline-sweep.plist --set __S
     --ade ~/src/djbclark-ade
 bin/ade-sched status com.djbclark.deadline-sweep
 systemctl --user list-timers               # the timer, its next run
+
+# Daily ade-update --check (same plist as Mac; Linux one-step install path, 2026-11-09)
+bin/ade-sched --backend systemd install config/launchd/com.djbclark.ade-update-check.plist \
+    --set __STATE__=$HOME/.local/state/ade --ade ~/src/djbclark-ade
+# or: just update-check-install
 ```
 
 Install from the canonical checkout (`--ade ~/src/djbclark-ade`): a job installed from a linked worktree would point into a
