@@ -33,7 +33,9 @@ Without that list the command requests the normal native Pi catalog; catalog
 inclusion is not entitlement proof and startup discovery can resolve configured
 credential commands. Exit 0 means a choice, 1 no qualified route, 2 invalid or
 unavailable input. JSON includes the pool, provider, physical model, thinking
-level, reason and quota age; no credentials or provider error text.
+level, reason and quota age; no credentials or provider error text. Pools the
+operator has not accepted in `config/pi-pool-acceptance.toml` never win (B4);
+`bin/ade-pi-pools check` reports that gate without inference.
 
 A5. Ordinary router plans print native `paseo run --provider pi/PROVIDER/MODEL`
 commands for Pi choices, translating explicit effort to `--thinking` and using
@@ -73,6 +75,17 @@ added to this automatic shortlist by those checks. OpenAI API and Anthropic API
 billing blocks remain separate from
 Codex and Claude subscriptions. SIPB is parked. Disabled/reserved pools and
 archived TUIs are never automatic fallbacks. Hermes's chain is unchanged.
+
+B4. **Per-pool operator acceptance (2026-11-09).** Automatic routing (`ade/auto`,
+`bin/pi-default`) refuses any Pi `[[service]]` whose row in
+`config/pi-pool-acceptance.toml` is missing or has `accepted = false`. Manual
+model pins are unchanged. The operator flips `accepted = true` per pool only
+after continuation, quota freshness, identity and failure-handling acceptance
+for that pool. `bin/ade-pi-pools check` exits 0 when every routing Pi service is
+accepted, and exits 2 with the blocking names otherwise; `ls` lists checklist
+rows (Grok, Antigravity, SIPB, Go, …) that stay out of auto until both accepted
+here and added to the routing shortlist. Cursor and Z.ai are accepted as of the
+2026-11-08 live path (D3–D5); other pools remain false by default.
 
 ## C. Failure and recovery
 
