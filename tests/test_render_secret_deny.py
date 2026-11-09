@@ -227,3 +227,45 @@ def test_rendered_template_passes_ade_template_check(fx):
 def test_executable_with_env_shebang():
     assert RENDER.read_text().startswith("#!/usr/bin/env python3\n")
     assert RENDER.stat().st_mode & 0o100
+
+
+def _load_render():
+    import importlib.machinery
+    import importlib.util
+
+    loader = importlib.machinery.SourceFileLoader("render_secret_deny", str(RENDER))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    mod = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_default_load_policy_uses_load_effective(tmp_path, monkeypatch):
+    """S1: no --policy path → effective secret_deny (legacy file when ade.toml absent)."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    mod = _load_render()
+    via_path, src_path = mod.load_policy(TOML)
+    via_eff, src_eff = mod.load_policy(root=ROOT, home=home, environ={})
+    assert via_eff == via_path
+    assert via_eff["deny"]
+    assert "secret-deny.toml" in src_eff or "secret-deny.toml" in src_path
+
+
+def test_secret_deny_toml_env_reaches_load_policy(tmp_path, monkeypatch):
+    import os
+
+    home = tmp_path / "home"
+    home.mkdir()
+    selected = tmp_path / "override.toml"
+    selected.write_text(
+        'version = 1\ndeny = [".only"]\nallow = []\n[claude]\nstatic = [".only"]\n'
+    )
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("SECRET_DENY_TOML", str(selected))
+    mod = _load_render()
+    pol, _ = mod.load_policy(root=ROOT, home=home, environ=dict(os.environ))
+    assert pol["deny"] == [".only"]
+    assert pol["static"] == [".only"]

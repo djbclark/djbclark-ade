@@ -7,8 +7,8 @@ config change).
 
 | piece | what |
 | --- | --- |
-| [`config/secret-deny.toml`](../config/secret-deny.toml) | the policy, the one copy: `deny`, `allow`, and `[claude] static` |
-| [`bin/render-secret-deny`](../bin/render-secret-deny) | renders the policy; `--check` reports drift |
+| [`config/secret-deny.toml`](../config/secret-deny.toml) | the policy, the one copy: `deny`, `allow`, and `[claude] static` (projects under `[secret_deny]` via `ade_config.load_effective`; see `docs/config-migration.md`) |
+| [`bin/render-secret-deny`](../bin/render-secret-deny) | reads the effective `secret_deny` domain and renders it; `--check` reports drift; `--policy` still takes an explicit legacy file |
 | [`config/secret_deny_policy.json`](../config/secret_deny_policy.json) | generated, committed: the deny and allow lists the hook reads (it runs under Python 3.9, which has no TOML reader) |
 | [`claude/hooks/secret_read_gate.py`](../claude/hooks/secret_read_gate.py) | the `PreToolUse` hook |
 | `agents/claude/settings.json.tmpl`, `permissions.deny` | the generated `Read(...)` and `Edit(...)` entries |

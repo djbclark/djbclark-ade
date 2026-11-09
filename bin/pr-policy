@@ -6,7 +6,10 @@ GitHub: every live repository of the configured owners gets pull_request_creatio
 setting, so there, and on GitHub for a pull request opened before the setting, an open pull request whose author is
 not trusted is kept a draft: GitHub convertPullRequestToDraft, Forgejo a "WIP: " title prefix. Merging needs djbclark
 either way. The scheduled job com.djbclark.pr-policy re-applies all of it every 10 min, which is what covers a
-repository created later. Config: config/pr-policy.toml. Doc: docs/pr-policy.md.
+repository created later. Config: effective ``pr_policy`` domain via ``ade_config.load_effective`` (legacy
+``config/pr-policy.toml`` / ``PR_POLICY_TOML`` when ``ade.toml`` is absent;
+``--config`` / ``PR_POLICY_CONFIG`` still accept an explicit legacy-format file).
+Doc: docs/pr-policy.md.
 
   pr-policy plan [--json] [--only github|forgejo]       what apply would change; read-only (exit 0, 1 on an API error)
   pr-policy apply [--yes] [--notify] [--quiet] [--only F]   without --yes it is plan; --yes makes the changes
@@ -39,13 +42,13 @@ import shutil
 import subprocess
 import sys
 import time
-import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
 
 sys.path[:0] = [d for d in (os.path.dirname(os.path.realpath(__file__)),) if d not in sys.path]   # python3 -I has no script dir
+import ade_config  # noqa: E402
 import ade_sched  # noqa: E402
 
 ADE = Path(__file__).resolve().parent.parent
@@ -301,13 +304,40 @@ def apply_one(gh: Api | None, fj: Api | None, act: dict) -> bool:
     return True
 
 
-def load_config(path: Path) -> dict:
+def load_config(
+    path: Path | None = None,
+    *,
+    root: Path | None = None,
+    home: Path | None = None,
+    environ: dict[str, str] | None = None,
+) -> dict:
+    """Effective ``pr_policy`` domain via ``ade_config.load_effective``.
+
+    Explicit ``path`` (``--config`` / ``PR_POLICY_CONFIG``) reads that
+    legacy-format file only.
+    """
+    if path is not None:
+        try:
+            cfg = ade_config.load_legacy_pr_policy(Path(path), required=True)
+        except ade_config.ConfigError as e:
+            raise SystemExit(die(str(e), 2)) from None
+        if (cfg.get("meta") or {}).get("schema") != 1:
+            raise SystemExit(die(f"{path}: [meta] schema must be 1", 2))
+        return cfg
     try:
-        cfg = tomllib.loads(path.read_text())
-    except (OSError, tomllib.TOMLDecodeError) as e:
-        raise SystemExit(die(f"{path}: {e}", 2)) from None
+        eff = ade_config.load_effective(
+            root=root or ADE,
+            home=home,
+            environ=environ,
+        )
+    except ade_config.ConfigError as e:
+        raise SystemExit(die(str(e), 2)) from None
+    cfg = eff.data.get("pr_policy") if isinstance(eff.data, dict) else None
+    if not isinstance(cfg, dict):
+        raise SystemExit(die("effective config: [pr_policy] missing", 2))
     if (cfg.get("meta") or {}).get("schema") != 1:
-        raise SystemExit(die(f"{path}: [meta] schema must be 1", 2))
+        where = eff.provenance.get("pr_policy_source") or "effective config"
+        raise SystemExit(die(f"{where}: [meta] schema must be 1", 2))
     return cfg
 
 
@@ -377,7 +407,8 @@ def notify(text: str) -> bool:
 
 
 def cmd_run(a, write: bool) -> int:
-    cfg = load_config(Path(a.config or os.environ.get("PR_POLICY_CONFIG") or ADE / "config/pr-policy.toml"))
+    explicit = a.config or os.environ.get("PR_POLICY_CONFIG")
+    cfg = load_config(Path(explicit) if explicit else None)
     stats = {"github_repos": 0, "github_open_prs": 0, "forgejo_open_prs": 0}
     gh, gh_login, fj, fj_login, errs = connect(cfg, a.only)
     acts: list[dict] = []

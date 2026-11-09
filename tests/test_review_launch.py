@@ -500,6 +500,16 @@ def test_the_deny_rules_carry_every_secret_deny_toml_pattern_plus_the_own_list()
         assert f"Read({pat})" in deny, pat
 
 
+def test_default_policy_deny_uses_load_effective(tmp_path, monkeypatch):
+    """S1: default policy_deny() matches the effective secret_deny domain."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    rl = load_launcher()
+    via_eff = rl.policy_deny(root=ROOT, home=home, environ={})
+    assert via_eff == secret_deny_toml()["deny"]
+
+
 def test_without_tomllib_the_rendered_policy_json_is_read(tmp_path, monkeypatch):
     rl = load_launcher()
     monkeypatch.setattr(rl, "tomllib", None)

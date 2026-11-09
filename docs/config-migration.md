@@ -13,8 +13,12 @@ absent); `load_policy(path)` remains for tests that feed a temp file. **Same day
 load errors). **Same day (stacked):** `bin/context-budget-check` reads the
 `context_budget` domain through `ade_config.load_effective` (legacy
 `context-budget.toml` / `CONTEXT_BUDGET_TOML` when `ade.toml` is absent; `--config` still
-reads an explicit legacy-format file). Do not ship tracked `config/ade.toml` yet
-(`ade-install` refuses while it is present).
+reads an explicit legacy-format file). **Same day (stacked):** `bin/render-secret-deny`
+and `bin/review-launch` read the `secret_deny` domain, and `bin/pr-policy` reads the
+`pr_policy` domain, through `ade_config.load_effective` (legacy `secret-deny.toml` /
+`SECRET_DENY_TOML` and `pr-policy.toml` / `PR_POLICY_TOML` when `ade.toml` is absent;
+`--policy` / `--config` / `PR_POLICY_CONFIG` still accept an explicit legacy-format file).
+Do not ship tracked `config/ade.toml` yet (`ade-install` refuses while it is present).
 
 ## A. Mapping table (one explicit projection)
 
@@ -31,11 +35,14 @@ reads an explicit legacy-format file). Do not ship tracked `config/ade.toml` yet
 | `config/gates.toml` | `[floors.frontier]` | `[gates.floors.frontier]` |
 | `config/context-budget.toml` | `dirs` | `[context_budget].dirs` |
 | `config/context-budget.toml` | `[budget]` | `[context_budget].budget` |
+| `config/secret-deny.toml` | `version` / `deny` / `allow` / `[claude]` | `[secret_deny].*` |
+| `config/pr-policy.toml` | `[meta]` / `[github]` / `[forgejo]` | `[pr_policy].*` |
 
 Routing's current public tables stay at the effective root (not nested under a single
 `[routing]` umbrella that would drop `[lead]` / `[[service]]`). Gates nest under
-`[gates]` so the frontier allowance does not collide with routing keys. Context-budget
-nests under `[context_budget]` the same way.
+`[gates]` so the frontier allowance does not collide with routing keys. Context-budget,
+secret-deny and pr-policy nest under `[context_budget]`, `[secret_deny]` and
+`[pr_policy]` the same way.
 
 `schema_version` is exactly `1`. Unsupported versions fail closed.
 
@@ -71,7 +78,18 @@ B7. **`CONTEXT_BUDGET_TOML`**: isolated legacy-format override for `[context_bud
     are ignored. A missing/malformed selected path errors. The default legacy path
     (`config/context-budget.toml`) missing projects the same dirs/budget defaults
     `context-budget-check` used before adoption.
-B8. This unit does **not** ship an automatically adopted `config/ade.toml`. An example
+B8. **`SECRET_DENY_TOML`**: isolated legacy-format override for `[secret_deny]`.
+    When set, that domain comes only from the chosen file; new/local `secret_deny` keys
+    are ignored. A missing/malformed selected path errors. The default legacy path
+    missing projects an empty deny/allow/static list (review-launch then uses its own
+    `DENY_PATHS` alone); a present file still requires a non-empty `deny`.
+B9. **`PR_POLICY_TOML`**: isolated legacy-format override for `[pr_policy]`.
+    When set, that domain comes only from the chosen file; new/local `pr_policy` keys
+    are ignored. A missing/malformed selected path errors. The default legacy path
+    missing projects `{meta.schema=1}` with no forge tables. Consumer
+    `--config` / `PR_POLICY_CONFIG` remain an explicit legacy-format path (not this
+    isolation env).
+B10. This unit does **not** ship an automatically adopted `config/ade.toml`. An example
     may live under tests/fixtures only.
 
 ## C. CLI
@@ -101,7 +119,7 @@ no alternate supposedly absent filename is probed or loaded. The pure loader's
 | Flag | Behaviour |
 | --- | --- |
 | `--target local` (default) | Write `~/.config/djbclark-ade/local.toml` (create the file if absent). |
-| `--target repo` | Write the **current source of that domain**: `config/ade.toml` when present; otherwise the legacy file (`config/routing.toml` for routing-domain keys, `config/gates.toml` for `gates.*` with the `gates.` prefix stripped inside the file, `config/context-budget.toml` for `context_budget.*` with the `context_budget.` prefix stripped). Never creates `config/ade.toml` (a tiny new file would suppress legacy projection). Never writes `ROUTING_POLICY` / `GATES_TOML` / `CONTEXT_BUDGET_TOML` paths. |
+| `--target repo` | Write the **current source of that domain**: `config/ade.toml` when present; otherwise the legacy file (`config/routing.toml` for routing-domain keys, `config/gates.toml` for `gates.*` with the `gates.` prefix stripped inside the file, `config/context-budget.toml` for `context_budget.*`, `config/secret-deny.toml` for `secret_deny.*`, `config/pr-policy.toml` for `pr_policy.*`, each with the domain prefix stripped). Never creates `config/ade.toml` (a tiny new file would suppress legacy projection). Never writes `ROUTING_POLICY` / `GATES_TOML` / `CONTEXT_BUDGET_TOML` / `SECRET_DENY_TOML` / `PR_POLICY_TOML` paths. |
 | `--string` | Treat VALUE as a string even when it looks like a TOML literal. |
 | `--dry-run` | Plan and verify the edit; do not replace the file. |
 
@@ -116,10 +134,12 @@ assignment forms are refused clearly. Unrelated complex TOML (including
 
 **Recording vs adoption.** Every successful `set` reports `adoption=recorded-only`
 in the CLI payload (the writer does not re-init live modules). As of 2026-11-09,
-`ade_gates.load_frontier`, `route_agent.reload_policy()` (no path) / module init, and
-`context-budget-check` (default config path) do read through `ade_config.load_effective`,
-so a local override is live on the next frontier load, `reload_policy()` call, or
-budget-check run (not mid-process without a reload).
+`ade_gates.load_frontier`, `route_agent.reload_policy()` (no path) / module init,
+`context-budget-check` (default config path), `render-secret-deny` / `review-launch`
+(default secret-deny path), and `pr-policy` (default config path) do read through
+`ade_config.load_effective`, so a local override is live on the next frontier load,
+`reload_policy()` call, budget-check, secret-deny render/launch, or pr-policy run
+(not mid-process without a reload).
 check/get/diff keep their no-write / no-auth / no-network contract.
 
 Python **3.11+** is required for standard-library `tomllib`; bootstrap is a later unit.
@@ -148,5 +168,6 @@ are not a second permanent authority beside a unified file.
 ## E. Provenance
 
 `load_effective(...).provenance` names non-secret paths and domain sources
-(`routing_source`, `gates_source`, `context_budget_source`, `local_config`,
-`gates_info.source`) without dumping credential-bearing files.
+(`routing_source`, `gates_source`, `context_budget_source`, `secret_deny_source`,
+`pr_policy_source`, `local_config`, `gates_info.source`) without dumping
+credential-bearing files.

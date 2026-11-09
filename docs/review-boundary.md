@@ -43,7 +43,8 @@ Three more guards, all from 2026-11-07 (Argon review F-HIGH-2, and the Opus revi
   outside the worktree (a dangling link included). A relative Glob or Grep pattern is also resolved against its base,
   so `link/**` counts as outside. A repository that commits outward symlinks (site-djbclark's `skills/`) cannot be
   reviewed through this boundary.
-- **The deny list.** It is the hand list plus every `deny` pattern in `config/secret-deny.toml`, or in the rendered
+- **The deny list.** It is the hand list plus every `deny` pattern of the effective `secret_deny` domain
+  (legacy `config/secret-deny.toml` via `ade_config.load_effective` when `ade.toml` is absent), or in the rendered
   `config/secret_deny_policy.json` where Python has no `tomllib`. A file that exists but does not parse refuses every
   launch with exit 2. The TOML's `allow` exceptions do not carry over.
 - **The tripwire.** It acts after Claude may already have run a call. It is a second layer behind
