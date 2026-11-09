@@ -675,9 +675,53 @@ def test_slow_glob_word_is_retried_after_the_others(monkeypatch, tmp_path):
     assert found and found[0] == "~/.ssh/**"
     assert time.monotonic() - t0 < 1.0
     hook._DEADLINE[0] = time.monotonic() + 0.5
-    with pytest.raises(hook.OutOfTime):                                     # alone, it still ends in fail open
+    with pytest.raises(hook.GlobBudgetExceeded):                            # alone: second timeout fails closed
         hook.check_command(hook.Checker(ck.policy, str(tmp_path)), "ls zzslowzz*")
     assert hook._WORD_DEADLINE[0] == float("inf")
+
+
+def test_eight_slow_glob_words_no_longer_fail_open(monkeypatch, tmp_path):
+    """Adversary C7 (2026-11-04): eight crafted slow globs spent 8×WORD_S and failed open before id_*.
+    First-pass cap + set-aside cache: the call fails closed (or still finds ~/.ssh/**) instead of allowing."""
+    hook = load_hook()
+    ck = checker(hook, tmp_path)
+    real_pv = ck.policy.pattern_verdict
+
+    def slow_pv(glob_str, prefix="", dotfile=True):
+        if "zzslow" in glob_str:
+            while True:
+                hook.tick()
+        return real_pv(glob_str, prefix, dotfile)
+    monkeypatch.setattr(ck.policy, "pattern_verdict", slow_pv)
+    monkeypatch.setattr(hook, "WORD_S", 0.15)
+    monkeypatch.setattr(hook, "FIRST_PASS_S", 0.35)   # ~2 first-pass slots; the rest are set aside free
+    hook._DEADLINE[0] = time.monotonic() + 2.0
+    slow = " ".join("zzslow%d*" % i for i in range(8))
+    cmd = "ls %s %s/.ssh/id_*" % (slow, tmp_path)
+    t0 = time.monotonic()
+    try:
+        found = hook.check_command(ck, cmd)
+        assert found and found[0] == "~/.ssh/**", found
+    except hook.GlobBudgetExceeded:
+        pass   # fail closed is the safe outcome when the secret word was not reached
+    assert time.monotonic() - t0 < 2.5
+
+
+def test_glob_budget_exceeded_fails_closed_through_main(monkeypatch, tmp_path, capsys):
+    hook = load_hook()
+
+    def raise_budget(payload, policy):
+        raise hook.GlobBudgetExceeded("zzslowzz*")
+
+    monkeypatch.setattr(hook, "check", raise_budget)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(
+        {"tool_name": "Bash", "tool_input": {"command": "ls zzslowzz*"}, "cwd": str(tmp_path)})))
+    monkeypatch.delenv("SECRET_DENY_OFF", raising=False)
+    monkeypatch.delenv("SECRET_DENY_POLICY", raising=False)
+    assert hook.main() == 2
+    err = capsys.readouterr().err
+    assert "fail closed" in err and "zzslowzz*" in err
+    assert "fail open" not in err
 
 
 # ---- Codex payloads ---------------------------------------------------------------------------------------------------
