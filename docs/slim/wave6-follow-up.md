@@ -53,8 +53,18 @@ JSON for `wave6-delete-check --evidence`):
 # B1. No live shim argv (agents / launchd / leftover waiters)
 pgrep -lf 'relay\.py|acp-dispatch|acp-run' || true
 launchctl list 2>/dev/null | grep -E 'acp-dispatch|acp-run' || true
-# B2. No resumable dispatch records / scheduled auto-resume (C7 leftover)
-test -x "$(command -v acp-dispatch)" && acp-dispatch ls || true
+# B2. No outstanding dispatch records (C7). `acp-dispatch ls` does not exist —
+# use `check` on the state root and Paseo's label listing. Failures are real;
+# an empty/drained result is exit 0 / empty JSON.
+STATE="${ACP_DISPATCH_STATE:-$HOME/.local/state/bigteam}"
+if ! command -v acp-dispatch >/dev/null 2>&1; then
+  echo "B2: acp-dispatch not on PATH (record as drained only after uninstall + empty paseo ls)"
+elif [ ! -d "$STATE" ]; then
+  echo "B2: no state dir at $STATE (empty)"
+else
+  acp-dispatch check "$STATE"
+fi
+paseo ls -g --label ade.via=acp-dispatch --json
 # B3. Standing order 10 smoke without the shim (named ack path)
 paseo send --help >/dev/null
 paseo run --help >/dev/null
