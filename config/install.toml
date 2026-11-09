@@ -237,11 +237,15 @@ id = "hermes"
 class = "offered"
 chosen = true
 summary = "Offered Hermes install and basic setup (S3a)"
-install = "UNKNOWN"
-update = "UNKNOWN"
-probe = "UNKNOWN"
+source = "https://github.com/NousResearch/hermes-agent"
+install = "curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash (→ ~/.hermes + hermes on PATH)"
+update = "hermes update"
+update_argv = ["hermes", "update"]
+probe = "hermes doctor"
+probe_argv = ["hermes", "doctor"]
 presence = "hermes"
 platforms = ["mac", "linux"]
+notes = "Official installer is curl|bash (no install_argv yet; do not shell=True). S3a checklist / hermes-setup remain later. peer-link and LiteLLM fork stay separate components."
 
 [[component]]
 id = "peer-link"

@@ -85,6 +85,7 @@ just install-apply-dry
 | `claude-code` | `npm install -g @anthropic-ai/claude-code` (presence `claude`) |
 | `codex` | `npm install -g @openai/codex` |
 | `cursor-cli` | probe/update only (`agent --version` / `agent update`); install is official curl\|bash (no `install_argv` yet) |
+| `hermes` (offered) | probe/update only (`hermes doctor` / `hermes update`); install is official curl\|bash (no `install_argv` yet) |
 | others | still `UNKNOWN` / no `install_argv` |
 
 ## F. Next units
