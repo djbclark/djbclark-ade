@@ -181,8 +181,10 @@ def _frontier_text(st):
     cap = f"at most {calls} Agent-tool calls today" if calls > 0 else "no Agent-tool call without asking"
     return (f"{FRONTIER1} (frontier) is allowed where you judge it significantly "
             f"better than {JUDGMENT}; give the reason in one line "
-            f"(Agent tool or paseo run brief: a \"frontier-reason: ...\" prompt line; "
-            f"the frontier PreToolUse gate enforces it), {cap}")
+            f"(Agent/Task tool: a \"frontier-reason: ...\" prompt line — the "
+            f"frontier PreToolUse gate enforces that path only; a Bash/`paseo run` "
+            f"frontier slice is admitted by ade_gates / config/gates.toml instead, "
+            f"not by PreToolUse), {cap}")
 
 
 def _profile_nudge(st, session_id, nudges):

@@ -171,16 +171,19 @@ pages. On a host with the `model-routing` skill (effort folded into it 2026-11-0
 1. **Workers, refuter, writer and reviewer are `fan-out` slices, not only
    Claude sub-agents.** Dispatch each brief with native Paseo: take
    `~/src/djbclark-ade/bin/route_agent.py plan --kinds KIND` (or `route --kind K`)
-   and use each choice's `dispatch` field (`paseo run --provider PROVIDER/MODEL
-   [--thinking LEVEL] --label ade.kind=KIND --no-wait`), then add placement and
-   the brief. Everyday research pools use `--kinds research`; astra and Fable use
+   and run each choice's `dispatch` field **as-is** (Wave 6 emit: native
+   `paseo run --provider … [--thinking …] [--label ade.kind=…] --no-wait` for
+   every pool, including Claude and Codex — do not translate an old
+   `acp-dispatch` line or invent a second command). Then append only placement
+   flags and the **positional** brief (paseo run has no `--prompt-file`).
+   Everyday research pools use `--kinds research`; astra and Fable use
    `--kinds frontier`. Minimal shape (see `skills/fan-out`):
 
    ```bash
    # after: route_agent.py plan --kinds research|frontier → Choice.dispatch
-   paseo run --provider PROVIDER/MODEL --no-wait \
-     --new-workspace local --cwd <run-folder-parent> \
-     --label ade.kind=KIND --label ade.name=N --label ade.lead=LEAD \
+   # DISPATCH is Choice.dispatch verbatim; then placement + positional brief:
+   $DISPATCH --new-workspace local --cwd <run-folder-parent> \
+     --label ade.name=N --label ade.lead=LEAD \
      --label ade.task=research-<slug> \
      "$(cat brief-with-footer.md)"
    ```
@@ -242,11 +245,13 @@ pages. On a host with the `model-routing` skill (effort folded into it 2026-11-0
    the filled footer into every brief (Agent-tool prompts too). Read the report
    file, never the final message. Before the gate, classify each slice by its
    artifacts — `paseo wait <id> --json` for turn end, then the report and
-   `.done` marker (same meanings `skills/fan-out` Collect uses: last line
-   `DONE` = delivered; report present but unfinished / agent still running =
-   wait, do not re-dispatch; missing report = no-report; first line `BLOCKED:`
-   = blocked). A quota stop is paused and resumed by Paseo's session-guard and
-   usage-auto-resume plugins since 2026-11-06. Reach a running slice with
+   `.done` marker (same meanings `skills/fan-out` Collect / the retired
+   `report_finished` contract use: last non-blank line `DONE`, **or** `DONE`
+   followed by one `AC_DONE:` verdict line = delivered; report present but
+   unfinished / agent still running = wait, do not re-dispatch; missing report
+   = no-report; first line `BLOCKED:` = blocked). A quota stop is paused and
+   resumed by Paseo's session-guard and usage-auto-resume plugins since
+   2026-11-06. Reach a running slice with
    `paseo send <id> --prompt "…" --behavior steer --json --no-wait` and ask for
    `ack <your id>` (standing order 10). Claude Code refuses a
    sub-agent Write to a basename starting with `report`, `summary`,

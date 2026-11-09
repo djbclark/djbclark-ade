@@ -82,11 +82,13 @@ alive and is not the handoff's author):
 2. If a Paseo agent id is known, wait with `paseo wait <id> --json` (or
    `paseo ls -a -g --json` filtered on your `ade.*` labels) until the agent is
    idle, then classify by the report / `.done` artifacts — the same meanings
-   `skills/fan-out` Collect uses: last line `DONE` = delivered; report present
-   but unfinished / still running = wait again; missing report or a last line
-   `NO-REPORT: …` = no-report; first line `BLOCKED:` = blocked. Quota pauses
-   continue in place via Paseo's session-guard and usage-auto-resume plugins
-   (2026-11-06); there is no resume CLI to invent.
+   `skills/fan-out` Collect / the retired `report_finished` contract use: last
+   non-blank line `DONE`, **or** `DONE` followed by one `AC_DONE:` verdict line
+   = delivered; report present but unfinished / still running = wait again;
+   missing report or a last line `NO-REPORT: …` = no-report; first line
+   `BLOCKED:` = blocked. Quota pauses continue in place via Paseo's
+   session-guard and usage-auto-resume plugins (2026-11-06); there is no
+   resume CLI to invent.
 3. If the work is unfinished and the agent id still exists, steer it with
    `paseo send <id> --prompt "…" --behavior steer --json --no-wait` (ask for
    `ack <your id>` when delivery matters). If the agent is gone, re-launch with
