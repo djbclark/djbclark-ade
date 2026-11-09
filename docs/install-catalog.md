@@ -70,7 +70,8 @@ Daily behind-check (not auto-apply): install
 # Linux (systemd user timer; linger required, else exit 69)
 bin/ade-sched --backend systemd install config/launchd/com.djbclark.ade-update-check.plist \
   --set __STATE__=$HOME/.local/state/ade --ade ~/src/djbclark-ade
-# or: just update-check-install
+# or from the canonical checkout: just update-check-install
+# (omits --ade so a linked worktree cannot install a job that vanishes after merge)
 
 # macOS (launchd; auto backend also picks this when launchctl is present)
 bin/ade-sched --backend launchd install config/launchd/com.djbclark.ade-update-check.plist \
@@ -78,6 +79,7 @@ bin/ade-sched --backend launchd install config/launchd/com.djbclark.ade-update-c
 ```
 
 `__ADE__` / `__HOME__` are filled automatically; `__STATE__` is not and exits 2 if left blank.
+Pass `--ade` only with a durable checkout (`~/src/djbclark-ade`); never with a linked worktree path.
 
 - `plan` is print-only: `would-install` (has `install_argv`) / `needs-system` /
   `blocked` / `skip`.
