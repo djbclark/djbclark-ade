@@ -14,10 +14,12 @@ count an outside author's or bot's same-head APPROVE. Never posts, never
 merges, never invents an APPROVE. Prints a table (or JSON) plus paste-ready
 templates so an operator can post a real marker.
 
-`stacks` walks open PR base→head refs and prints bottom-up APPROVE order for
-named groups (install, claims, s1, wave6) with full tip SHAs for marker paste.
-In the default all-groups view, wave6 prints stack bottoms only (docs on
-master); pass `--group wave6` for the full wave6 bottom-up chains.
+`stacks` walks open PR base→same-repo head refs and prints bottom-up APPROVE
+order for named groups (install, claims, s1, wave6) with full tip SHAs for
+marker paste. Parent edges are qualified by head repository (not branch name
+alone); ambiguous same-name heads yield no parent (fail-safe). In the default
+all-groups view, wave6 prints stack bottoms only (docs on master); pass
+`--group wave6` for the full wave6 bottom-up chains.
 
 Classes:
   merge_now       pytest-linux pass + adversary-marker success (attributed APPROVE)
@@ -48,8 +50,9 @@ MARKER_RE = re.compile(
 SHA40 = re.compile(r"^[0-9a-f]{40}$")
 
 # Named operator stacks (2026-11-09). Matching is by live open branch/title;
-# order is always derived from each PR's baseRefName → headRefName edge, never
-# from a hardcoded PR number sequence (numbers drift as tips land).
+# order is always derived from each PR's baseRefName → same-repo headRefName
+# edge (see link_parents), never from a hardcoded PR number sequence (numbers
+# drift as tips land).
 STACK_GROUPS: dict[str, Callable[[dict[str, Any]], bool]] = {
     "install": lambda r: bool(
         re.search(r"ade-install|ade-update-check", r.get("branch") or "")
@@ -135,6 +138,29 @@ def classify(
     return "needs_approve"
 
 
+def head_repository_nwo(pr: dict[str, Any], listing_repo: str) -> str:
+    """OWNER/NAME of the PR head, from gh JSON; empty when cross-repo and unknown.
+
+    Prefers headRepository.nameWithOwner, then headRepositoryOwner.login +
+    headRepository.name. Same-repo heads with no identity fields default to
+    listing_repo. A cross-repo head without identity returns "" so it can never
+    be chosen as a stack parent (fail closed on incomplete fork metadata).
+    """
+    hr = pr.get("headRepository")
+    if isinstance(hr, dict):
+        nwo = hr.get("nameWithOwner")
+        if isinstance(nwo, str) and "/" in nwo:
+            return nwo
+        name = hr.get("name")
+        owner_obj = pr.get("headRepositoryOwner")
+        login = owner_obj.get("login") if isinstance(owner_obj, dict) else None
+        if isinstance(login, str) and login and isinstance(name, str) and name:
+            return f"{login}/{name}"
+    if pr.get("isCrossRepository") is True:
+        return ""
+    return listing_repo
+
+
 def collect(gh: str, repo: str, min_n: int) -> list[dict[str, Any]]:
     listing = run_gh(
         gh,
@@ -148,7 +174,8 @@ def collect(gh: str, repo: str, min_n: int) -> list[dict[str, Any]]:
             "--limit",
             "100",
             "--json",
-            "number,title,headRefOid,baseRefName,mergeable,headRefName",
+            "number,title,headRefOid,baseRefName,mergeable,headRefName,"
+            "headRepository,headRepositoryOwner,isCrossRepository",
         ],
     )
     if listing.returncode != 0:
@@ -188,6 +215,8 @@ def collect(gh: str, repo: str, min_n: int) -> list[dict[str, Any]]:
                 "head": head,
                 "base": p.get("baseRefName") or "",
                 "branch": p.get("headRefName") or "",
+                "head_repo": head_repository_nwo(p, repo),
+                "listing_repo": repo,
                 "mergeable": p.get("mergeable"),
                 "pytest_linux": tests,
                 "adversary_marker": adv,
@@ -204,14 +233,51 @@ def collect(gh: str, repo: str, min_n: int) -> list[dict[str, Any]]:
     return rows
 
 
-def link_parents(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Attach parent_number from open-PR baseRefName → headRefName edges."""
-    by_branch = {r["branch"]: r for r in rows if r.get("branch")}
+def link_parents(
+    rows: list[dict[str, Any]], listing_repo: str | None = None
+) -> list[dict[str, Any]]:
+    """Attach parent_number from open-PR baseRefName → same-repo headRefName.
+
+    Parent lookup is qualified by head repository (prefer
+    ``headRepository.nameWithOwner`` / owner+name from gh JSON), not by branch
+    name alone. A fork PR whose head branch is ``master`` must not become the
+    parent of every PR targeting the listing repo's ``master``.
+
+    Only heads whose ``head_repo`` equals the listing repo are candidates. If
+    two open same-repo PRs share a ``headRefName``, ``parent_number`` stays
+    ``None`` (fail-safe: never guess which one is the stack parent).
+    """
+    repo = listing_repo or ""
+    if not repo:
+        for r in rows:
+            lr = r.get("listing_repo")
+            if isinstance(lr, str) and lr:
+                repo = lr
+                break
+    by_branch: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for r in rows:
+        branch = r.get("branch") or ""
+        if not branch:
+            continue
+        head_repo = r.get("head_repo") or ""
+        if not repo:
+            # No listing identity: still require a unique headRefName among all
+            # rows, never last-wins overwrite.
+            by_branch[branch].append(r)
+            continue
+        if head_repo != repo:
+            continue
+        by_branch[branch].append(r)
+
     out: list[dict[str, Any]] = []
     for r in rows:
-        parent = by_branch.get(r.get("base") or "")
+        base = r.get("base") or ""
+        candidates = by_branch.get(base, [])
         linked = dict(r)
-        linked["parent_number"] = parent["number"] if parent else None
+        # Fail-safe: unique exact headRefName match only; 0 or 2+ → no parent.
+        linked["parent_number"] = (
+            candidates[0]["number"] if len(candidates) == 1 else None
+        )
         out.append(linked)
     return out
 
@@ -286,8 +352,9 @@ def build_named_stacks(
     *,
     groups: list[str] | None = None,
     bottoms_only: bool = False,
+    listing_repo: str | None = None,
 ) -> list[dict[str, Any]]:
-    linked = link_parents(rows)
+    linked = link_parents(rows, listing_repo=listing_repo)
     explicit = groups is not None
     names = list(groups) if explicit else list(STACK_GROUP_NAMES)
     stacks: list[dict[str, Any]] = []
@@ -427,6 +494,7 @@ def main(argv: list[str] | None = None) -> int:
             rows,
             groups=a.group,
             bottoms_only=a.bottoms_only,
+            listing_repo=a.repo,
         )
         if a.json:
             json.dump(stacks, sys.stdout, indent=2, sort_keys=True)

@@ -155,6 +155,10 @@ def test_parse_approves_ignores_non_forty_hex() -> None:
     assert mod["parse_approves"](ok) == [full]
 
 
+LISTING_REPO = "djbclark/djbclark-ade"
+FORK_REPO = "outsider/djbclark-ade"
+
+
 def _row(
     number: int,
     *,
@@ -162,6 +166,7 @@ def _row(
     base: str,
     title: str,
     head: str | None = None,
+    head_repo: str = LISTING_REPO,
 ) -> dict:
     h = head or (f"{number:040x}")
     return {
@@ -170,6 +175,8 @@ def _row(
         "head": h,
         "base": base,
         "branch": branch,
+        "head_repo": head_repo,
+        "listing_repo": LISTING_REPO,
         "mergeable": "MERGEABLE",
         "pytest_linux": "pass",
         "adversary_marker": "fail",
@@ -179,6 +186,88 @@ def _row(
             f'<!-- adversary-verdict:v1 {{"verdict":"APPROVE","head":"{h}"}} -->'
         ),
     }
+
+
+def test_link_parents_ignores_fork_master_head() -> None:
+    """A fork PR headed at master must not parent every PR targeting master."""
+    import runpy
+
+    mod = runpy.run_path(str(SCRIPT), run_name="ade_merge_ready")
+    rows = [
+        _row(
+            99,
+            branch="master",
+            base="master",
+            title="fork: master → master",
+            head_repo=FORK_REPO,
+        ),
+        _row(336, branch="cursor/ade-claim-plugin-f576", base="master", title="same-repo tip"),
+        _row(
+            355,
+            branch="cursor/ade-claim-w3-owner-f576",
+            base="cursor/ade-claim-plugin-f576",
+            title="stacked child",
+        ),
+    ]
+    linked = mod["link_parents"](rows, listing_repo=LISTING_REPO)
+    by_n = {r["number"]: r for r in linked}
+    assert by_n[336]["parent_number"] is None
+    assert by_n[99]["parent_number"] is None
+    assert by_n[355]["parent_number"] == 336
+
+
+def test_link_parents_ambiguous_same_repo_head_is_fail_safe() -> None:
+    """Two open same-repo PRs sharing a headRefName → no guessed parent."""
+    import runpy
+
+    mod = runpy.run_path(str(SCRIPT), run_name="ade_merge_ready")
+    rows = [
+        _row(10, branch="cursor/shared-f576", base="master", title="dup A"),
+        _row(11, branch="cursor/shared-f576", base="master", title="dup B"),
+        _row(
+            12,
+            branch="cursor/child-f576",
+            base="cursor/shared-f576",
+            title="child of ambiguous",
+        ),
+    ]
+    linked = mod["link_parents"](rows, listing_repo=LISTING_REPO)
+    by_n = {r["number"]: r for r in linked}
+    assert by_n[12]["parent_number"] is None
+    assert by_n[10]["parent_number"] is None
+    assert by_n[11]["parent_number"] is None
+
+
+def test_head_repository_nwo_prefers_name_with_owner() -> None:
+    import runpy
+
+    mod = runpy.run_path(str(SCRIPT), run_name="ade_merge_ready")
+    nwo = mod["head_repository_nwo"]
+    assert (
+        nwo(
+            {
+                "headRepository": {"nameWithOwner": "djbclark/djbclark-ade", "name": "x"},
+                "headRepositoryOwner": {"login": "other"},
+            },
+            LISTING_REPO,
+        )
+        == LISTING_REPO
+    )
+    assert (
+        nwo(
+            {
+                "headRepository": {"name": "djbclark-ade"},
+                "headRepositoryOwner": {"login": "outsider"},
+                "isCrossRepository": True,
+            },
+            LISTING_REPO,
+        )
+        == FORK_REPO
+    )
+    assert (
+        nwo({"isCrossRepository": True}, LISTING_REPO) == ""
+    )
+    assert nwo({}, LISTING_REPO) == LISTING_REPO
 
 
 def test_bottom_up_order_claims_and_s1_chains() -> None:
@@ -239,7 +328,7 @@ def test_bottom_up_order_claims_and_s1_chains() -> None:
             title="ade-install optionals",
         ),
     ]
-    stacks = mod["build_named_stacks"](rows)
+    stacks = mod["build_named_stacks"](rows, listing_repo=LISTING_REPO)
     by_group = {s["group"]: s for s in stacks}
 
     claims = [r["number"] for r in by_group["claims"]["order"]]
@@ -271,6 +360,9 @@ def test_stacks_cli_json_group_claims(tmp_path: Path) -> None:
                 "baseRefName": "master",
                 "mergeable": "MERGEABLE",
                 "headRefName": "cursor/ade-claim-plugin-f576",
+                "headRepository": {"nameWithOwner": LISTING_REPO, "name": "djbclark-ade"},
+                "headRepositoryOwner": {"login": "djbclark"},
+                "isCrossRepository": False,
             },
             {
                 "number": 355,
@@ -279,6 +371,9 @@ def test_stacks_cli_json_group_claims(tmp_path: Path) -> None:
                 "baseRefName": "cursor/ade-claim-plugin-f576",
                 "mergeable": "MERGEABLE",
                 "headRefName": "cursor/ade-claim-w3-owner-f576",
+                "headRepository": {"nameWithOwner": LISTING_REPO, "name": "djbclark-ade"},
+                "headRepositoryOwner": {"login": "djbclark"},
+                "isCrossRepository": False,
             },
         ]
     )
@@ -305,3 +400,57 @@ def test_stacks_cli_json_group_claims(tmp_path: Path) -> None:
     assert nums == [336, 355]
     assert stacks[0]["order"][0]["head"] == head_a
     assert head_a in stacks[0]["order"][0]["marker_template"]
+    assert stacks[0]["order"][1]["parent_number"] == 336
+
+
+def test_stacks_cli_fork_master_does_not_parent_listing_tips(tmp_path: Path) -> None:
+    head_fork = "f" * 40
+    head_tip = "a" * 40
+    listing = json.dumps(
+        [
+            {
+                "number": 50,
+                "title": "outsider fork onto master",
+                "headRefOid": head_fork,
+                "baseRefName": "master",
+                "mergeable": "MERGEABLE",
+                "headRefName": "master",
+                "headRepository": {"nameWithOwner": FORK_REPO, "name": "djbclark-ade"},
+                "headRepositoryOwner": {"login": "outsider"},
+                "isCrossRepository": True,
+            },
+            {
+                "number": 336,
+                "title": "ade-claim plugin",
+                "headRefOid": head_tip,
+                "baseRefName": "master",
+                "mergeable": "MERGEABLE",
+                "headRefName": "cursor/ade-claim-plugin-f576",
+                "headRepository": {"nameWithOwner": LISTING_REPO, "name": "djbclark-ade"},
+                "headRepositoryOwner": {"login": "djbclark"},
+                "isCrossRepository": False,
+            },
+        ]
+    )
+    checks = "pytest-linux\tpass\t0\tx\nadversary-marker\tfail\t0\tx\n"
+    gh = write_fake_gh(
+        tmp_path,
+        textwrap.dedent(
+            f"""
+            set -e
+            case "$*" in
+              *"pr list"*) echo '{listing}' ;;
+              *"pr checks"*) printf '%s' '{checks}' ; exit 1 ;;
+              *) echo "unexpected: $*" >&2; exit 99 ;;
+            esac
+            """
+        ),
+    )
+    r = run(gh, "stacks", "--group", "claims", "--json", "--min", "1")
+    assert r.returncode == 0, r.stderr
+    stacks = json.loads(r.stdout)
+    assert len(stacks) == 1
+    order = stacks[0]["order"]
+    assert [row["number"] for row in order] == [336]
+    assert order[0]["parent_number"] is None
+    assert order[0]["head_repo"] == LISTING_REPO

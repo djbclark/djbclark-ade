@@ -120,14 +120,19 @@ bin/ade-merge-ready stacks --group wave6          # full wave6 chains
 bin/ade-merge-ready stacks --bottoms-only         # bottoms only in each selected group
 ```
 
-`stacks` derives order from each open PR's `baseRefName` → `headRefName` edge
-(live `gh pr list`), not from a hardcoded number list. Named groups cover the
-operator stacks: **install** (`ade-install` / update-check), **claims** (W2–W4
-`ade-claim` chain), **s1** (`cursor/s1-*` / load_effective), and **wave6**. The
-default all-groups view prints **wave6 bottoms** only (wave6 PRs whose open
-parent is outside the wave6 set, typically `master` — a non-wave6 base such as
-an S1 tip is not itself listed as a wave6 bottom); pass `--group wave6` for
-full chains. Each row prints the current 40-hex head and a paste-ready
+`stacks` derives order from each open PR's `baseRefName` → same-repo
+`headRefName` edge (live `gh pr list`, qualified by
+`headRepository.nameWithOwner` / owner+name — never branch name alone), not
+from a hardcoded number list. A fork PR whose head branch is `master` is not
+treated as the parent of PRs targeting the listing repo's `master`. If two
+open same-repo PRs share a head branch name, that edge is left unlinked
+(fail-safe: no guessed parent). Named groups cover the operator stacks:
+**install** (`ade-install` / update-check), **claims** (W2–W4 `ade-claim`
+chain), **s1** (`cursor/s1-*` / load_effective), and **wave6**. The default
+all-groups view prints **wave6 bottoms** only (wave6 PRs whose open parent is
+outside the wave6 set, typically `master` — a non-wave6 base such as an S1 tip
+is not itself listed as a wave6 bottom); pass `--group wave6` for full chains.
+Each row prints the current 40-hex head and a paste-ready
 `adversary-verdict:v1` template for the operator to use after a real review of
 that head.
 
