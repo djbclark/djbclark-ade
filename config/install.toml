@@ -459,17 +459,20 @@ expiry = "unknown"
 [[login]]
 id = "claude-code"
 summary = "Claude Code account login for monthly plan"
-command = "UNKNOWN"
+command = "claude auth login"
+notes = "Also: claude auth status / logout. Account login, not ANTHROPIC_API_KEY."
 
 [[login]]
 id = "codex"
 summary = "Codex vendor login for monthly plan"
-command = "UNKNOWN"
+command = "codex login"
+notes = "Monthly-plan login; distinct from OPENAI_API_KEY. Confirm subcommand if Codex CLI renames it."
 
 [[login]]
 id = "cursor"
-summary = "Cursor account login"
-command = "UNKNOWN"
+summary = "Cursor Agent CLI account login"
+command = "agent login"
+notes = "Official binary is agent; confirm subcommand if Cursor CLI renames it."
 
 [[login]]
 id = "antigravity"

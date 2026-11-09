@@ -39,7 +39,9 @@ unified file with reviewed consumer adoption.
 
 `[[key]]` entries are **names and metadata only** (create URL, verify=UNKNOWN,
 expiry=unknown|…). Doctor never reads `sudo-secretspec` values. Login checks are
-separate from keys; consent is not key validation.
+separate from keys; consent is not key validation. Recorded login commands
+(2026-11-09): `claude auth login`, `codex login`, `agent login` — doctor does
+not execute them.
 
 ## D. CLI
 
