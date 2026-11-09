@@ -24,7 +24,10 @@ cross-host acceptance checks. Keep `{serverId, agentId}` together and prove rece
 Cut the work into slices that touch disjoint files, each with one owner and a check you can run on its result
 (a test, a diff, a report section). Shared files (a changelog, an index) stay with the lead. Pick each slice's
 agent and model with `~/src/djbclark-ade/bin/route_agent.py plan --kinds KIND` (kinds and pools:
-`skills/model-routing/SKILL.md`). Every brief ends with the shared delivery contract,
+`skills/model-routing/SKILL.md`). Before running a plan's `paseo run` line — especially Argon /
+`antigravity-argon` — re-admit on a fresh snapshot:
+`~/src/djbclark-ade/bin/route_agent.py admit --provider PROVIDER/MODEL --kind KIND` (exit 2 → re-plan;
+`ACP_OPERATOR_APPROVED=route-override` skips the fallback eligibility gate only). Every brief ends with the shared delivery contract,
 `docs/dispatch-footer.md`: a report file whose last line is `DONE`, a `.done` marker touched last, and
 `BLOCKED: <question>` as the first line instead of a question at the end of a turn.
 
@@ -74,8 +77,8 @@ Three independent fixes in one repository, one review:
 
 1. Lead writes `a.md`, `b.md`, `c.md` (one owner per file set, the check each slice runs) and three
    worktrees `~/src/r-a-wt`, `~/src/r-b-wt`, `~/src/r-c-wt`.
-2. `acp-dispatch claude --model sonnet --kind code --name a -f a.md -C ~/src/r-a-wt --task fixes --detach --no-wait`,
-   the same for `b` and `c` (the agent and model from `route_agent.py plan --kinds code`).
+2. `route_agent.py plan --kinds code` → `admit --provider … --kind code` → run each choice's dispatch line
+   (native `paseo run …`), the same for `b` and `c`.
 3. While they run, the lead does its own part (standing order 3), then `acp-dispatch wait` on each record.
 4. A BLOCKED report: answer with `acp-dispatch tell`, or re-brief under a new `--name`.
 5. Each DONE slice: review its diff, push its branch, open the PR; one read-only review per PR with
