@@ -101,23 +101,31 @@ notes = "Hard by operator ruling 2026-11-07; user-scoped via uv tool"
 id = "cswap"
 class = "hard"
 summary = "claude-swap; aiuse reads it"
-install = "UNKNOWN"
-update = "UNKNOWN"
-probe = "UNKNOWN"
+source = "https://pypi.org/project/claude-swap/"
+install = "uv tool install claude-swap (→ ~/.local/bin/cswap)"
+install_argv = ["uv", "tool", "install", "claude-swap"]
+update = "uv tool upgrade claude-swap"
+update_argv = ["uv", "tool", "upgrade", "claude-swap"]
+probe = "cswap --help"
+probe_argv = ["cswap", "--help"]
 presence = "cswap"
 platforms = ["mac", "linux"]
+notes = "Hard dependency; vendor/README.md. PyPI package name is claude-swap; presence binary is cswap."
 
 [[component]]
 id = "paseo"
 class = "hard"
 summary = "Sole harness"
 source = "https://github.com/getpaseo/paseo"
-install = "UNKNOWN"
-update = "UNKNOWN"
+install = "npm install -g @getpaseo/cli (user npm prefix → ~/.local)"
+install_argv = ["npm", "install", "-g", "@getpaseo/cli"]
+update = "npm update -g @getpaseo/cli"
+update_argv = ["npm", "update", "-g", "@getpaseo/cli"]
 probe = "paseo --version"
 probe_argv = ["paseo", "--version"]
 presence = "paseo"
 platforms = ["mac", "linux"]
+notes = "CLI package @getpaseo/cli (npm bin paseo). Desktop/daemon and skill bundle (npx skills add getpaseo/paseo) are separate later units."
 
 [[component]]
 id = "graft"
@@ -138,13 +146,16 @@ notes = "Requires a writable npm prefix (e.g. ~/.local); not a root package-mana
 id = "pi"
 class = "hard"
 summary = "Sole general-purpose third-party TUI"
-install = "UNKNOWN"
-update = "UNKNOWN"
+source = "https://www.npmjs.com/package/@mariozechner/pi-coding-agent"
+install = "npm install -g @mariozechner/pi-coding-agent (user npm prefix → ~/.local)"
+install_argv = ["npm", "install", "-g", "@mariozechner/pi-coding-agent"]
+update = "npm update -g @mariozechner/pi-coding-agent"
+update_argv = ["npm", "update", "-g", "@mariozechner/pi-coding-agent"]
 probe = "pi --version"
 probe_argv = ["pi", "--version"]
 presence = "pi"
 platforms = ["mac", "linux"]
-notes = "Pi policy 2026-11-08; archived omp/OpenCode/Crush are never reinstall targets"
+notes = "Pi policy 2026-11-08; archived omp/OpenCode/Crush are never reinstall targets. Provider packs via `pi install` are separate."
 
 [[component]]
 id = "claude-code"
