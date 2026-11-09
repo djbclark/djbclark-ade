@@ -30,8 +30,8 @@ unified file with reviewed consumer adoption.
 - `install_argv` / `update_argv` / `probe_argv` are argv lists.
   Tokens: `{bin}`, `{root}`, `{home}`, `{prefix}` (default `~/.local/bin` or
   `ADE_INSTALL_PREFIX`).
-- `needs_system = true` marks package-manager / root paths; bounded apply
-  refuses them until a later `--system` unit.
+- `needs_system = true` marks package-manager / root paths; pair with
+  `system_argv`. `--system --dry-run` previews; live system exec is refused.
 - `presence` is a PATH basename fallback when `probe_argv` is absent.
 
 ## C. Keys and logins
@@ -60,11 +60,12 @@ just install-apply-dry
 - `doctor` prefers `probe_argv` (runs the tool; argv list, short timeout) and
   falls back to PATH `presence`. Missing or failed expected components fail
   the command; `unknown` is neither healthy nor absent. Doctor does not repair.
-- `apply` defaults to **dry-run**. `--yes` executes `install_argv` for expected
-  components that are missing (or all selected with `--force`). Writes an
-  atomic ledger under `~/.local/state/djbclark-ade/install/ledger.json` (or
-  `ADE_INSTALL_STATE_DIR`). Exit 0 ok, 1 blocked/failed, 2 refused (`--system`
-  or usage). `--system` is always refused in this unit.
+- `apply` defaults to **dry-run**. `--yes` executes user `install_argv` for
+  expected missing components (or `--force`). Writes an atomic ledger under
+  `~/.local/state/djbclark-ade/install/ledger.json` (or `ADE_INSTALL_STATE_DIR`).
+  `--system --dry-run` previews `system_argv` as `would-system-install`.
+  Executing `system_argv` is always refused (exit 2). Exit 0 ok, 1
+  blocked/failed, 2 system-exec refused / usage.
 - `ade-user-install uv|just|link <name>` fetches GitHub release binaries or
   symlinks a repo `bin/` tool into the prefix. No `shell=True`, no root.
 
@@ -75,11 +76,12 @@ just install-apply-dry
 | `just`, `uv` | `ade-user-install` release fetch → `{prefix}` |
 | `skill-everywhere`, `firecrawl-router` | `ade-user-install link` into `{prefix}` |
 | `graft` | `npm install -g @nanonets/graft` (user npm prefix) |
-| `git`, `gh` | `needs_system`; blocked until `--system` unit |
+| `git`, `gh` | `needs_system` + Linux `system_argv` (`apt-get`); `--system --dry-run` only |
+| `aiuse` | `uv tool install git+https://github.com/djbclark/aiuse` |
 | others | still `UNKNOWN` / no `install_argv` |
 
 ## F. Next units
 
-More owner installers (paseo, sudo-secretspec, aiuse, vendor clients' install
-paths), managed key verify probes, ownership-aware reconcile with `--system`
-for root effects. S4 jobs stay explicit later work.
+Live system apply (root/`apt`/`brew` execution with ownership ledger), Mac
+`system_argv`, more owner installers (paseo, sudo-secretspec, vendor clients),
+managed key verify probes. S4 jobs stay explicit later work.

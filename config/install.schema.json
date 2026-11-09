@@ -76,6 +76,13 @@
           "needs_system": {
             "type": "boolean"
           },
+          "system_argv": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
           "platforms": {
             "type": "array",
             "items": {
