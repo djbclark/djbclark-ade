@@ -27,10 +27,12 @@ fully resolved ref name, and a non-zero exit aborts the transaction. So:
 The guard, the hooks and the claim library exist; claims carry an owner and expire (`ade_claims.py new --ttl`, default
 72 h; `ade-git-guard claim ls`, slim-down E8). **A thin Paseo plugin scaffold lives at
 [`plugins/ade-claim/`](../plugins/ade-claim/)** (W2 / E8 F4): it registers `worktree.create.after` and runs
-`ade_claims.py new` with argv built from `{ worktree.path, worktree.branch, worktree.sourceCheckout }` plus
-`git rev-parse HEAD` and optional `remote.origin.url`. It is **not installed or enabled on the operator Mac yet**; nothing
-creates claims in a live session until `paseo plugin install` wires it. Still to build: W2 follow-up (`ade-git-guard install`
-per new worktree if needed), W3 exporting `ADE_CLAIM_ID` (or binding owner on `agent.create.after`), W4 putting
+`ade_claims.py new` with argv built from `{ worktree.path, worktree.branch }` plus
+`git rev-parse HEAD` and optional `remote.origin.url`. The helper path is **not** taken from the new
+worktree's checkout (untrusted): only `ADE_CLAIMS_PY` or `bin/ade_claims.py` beside the plugin install.
+It is **not installed or enabled on the operator Mac yet**; nothing creates claims in a live session until
+`paseo plugin install` wires it. Still to build: W2 follow-up (`ade-git-guard install` per new worktree if
+needed), W3 exporting `ADE_CLAIM_ID` (or binding owner on `agent.create.after`), W4 putting
 `libexec/agent-bin` first on each agent's PATH. The operator runs `ade-git-guard install <repo>` once over `~/src/*` (the
 dangerous case is agent B in primary P moving Z's branch: the hook must be in P; the shim also installs it the first time
 an agent runs a non-read command there). The operator's shell and IDEs never go through the shim.
