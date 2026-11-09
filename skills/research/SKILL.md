@@ -207,17 +207,19 @@ pages. On a host with the `model-routing` skill (effort folded into it 2026-11-0
    plans and dispatches, but the adjudication and the final refute-mode read
    go to a Cursor slice on that model and its verdict is applied as given. **Every worker
    role runs on all three families at once, not in rotation**: each slice,
-   the refuter and the writer are dispatched in parallel to Astra
-   (`paseo run --provider codex/gpt-6-astra --label ade.kind=frontier --no-wait …`;
-   frontier slices run as read-only advisors by default and their report is the
-   deliverable, 2026-10-18), Fable (`paseo run --provider claude/<the Fable id>
-   --label ade.kind=frontier --no-wait …`, the id exactly as
-   `paseo provider models claude --json` lists it, never guessed (on 2026-10-10
-   a dispatch with an unlisted Fable id failed); or an Agent-tool sub-agent),
+   the refuter and the writer are dispatched in parallel after
+   `route_agent.py plan --kinds frontier` (or `research`) → each family's
+   `Choice.dispatch` line **as-is** (Wave 6: that emit is already a guarded
+   `paseo run --provider … [--label ade.kind=…] --no-wait` template — never
+   hand-roll a raw `paseo run` that skips the planner's load/frontier/eligibility
+   checks). Typical families the planner returns when quota allows: Astra on
+   codex (frontier slices run as read-only advisors by default and their report
+   is the deliverable, 2026-10-18), Fable on claude (the Fable id exactly as
+   `paseo provider models claude --json` lists it, never guessed — on 2026-10-10
+   a dispatch with an unlisted Fable id failed; or an Agent-tool sub-agent),
    and the Cursor grok model. **Antigravity is no longer a research family** (2026-11-07): since the agy TUI
    retired (2026-11-06) the router reaches Paseo's antigravity provider only through the `antigravity-argon` row,
-   frontier fallback only (`paseo run --provider antigravity/gemini-4-argon
-   --label ade.kind=frontier --no-wait …`, used while codex or claude is short of
+   frontier fallback only (planner emits that Choice when codex or claude is short of
    frontier quota); its Flash and Claude/GPT pools are `never_route`
    (`config/routing.toml`), so a research-kind slice there is refused. The lead merges
    the three evidence files for a slice (dedupe by source and quote, keep
@@ -232,12 +234,12 @@ pages. On a host with the `model-routing` skill (effort folded into it 2026-11-0
    for its reset and the same step resumes (the slice writes incrementally,
    per `feedback_quota_wait_dont_lose_work`). A Cursor slice on the xAI model that stalls or returns
    a rate-limit line is re-run after the next hour, not re-routed.
-   1a. **GPT reviewers go through
-   `paseo run --provider codex/gpt-6-astra --label ade.kind=frontier --no-wait …`**
-   (the `ocx-gpt-6-*` Agent-tool sub-agents and the opencodex proxy behind them
+   1a. **GPT reviewers also go through `route_agent.py plan --kinds frontier`
+   → that Choice's `dispatch` field as-is** (never a hand-rolled `paseo run`;
+   the `ocx-gpt-6-*` Agent-tool sub-agents and the opencodex proxy behind them
    were uninstalled 2026-10-19). If the Codex pool is out
-   (`aiuse --available --live --json`), the next family with quota
-   (`route_agent.py plan`), labelling the review non-independent for any slice
+   (`aiuse --available --live --json`), take the next family with quota from
+   the same plan, labelling the review non-independent for any slice
    that family worked on.
 2. Sub-agent prompts carry the delivery contract from
    `docs/dispatch-footer.md` (orchestration-practices §3 item 9): fill
@@ -264,12 +266,14 @@ pages. On a host with the `model-routing` skill (effort folded into it 2026-11-0
 5. Lists in the reply are numbered.
 6. **Preflight mechanics.** Print the probe brief with `python3 -I
    scripts/research_check.py probe --brief`, save it to `<run>/.probe.md`
-   and dispatch it to each planned route in parallel, e.g.
-   `paseo run --provider PROVIDER/MODEL --no-wait --new-workspace local
-   --cwd <run parent> --label ade.kind=KIND --label ade.name=probe-<agent>
-   --label ade.task=research-<slug> "$(cat <run>/.probe.md-with-footer)"`
-   (same agents, models and quoting as item 1b; an Agent-tool sub-agent gets
-   the brief plus the item 2 footer).
+   and dispatch it to each planned route in parallel the same way as item 1:
+   `route_agent.py plan --kinds KIND` → `$DISPATCH` (Choice.dispatch verbatim)
+   plus placement flags and the positional brief, e.g.
+   `$DISPATCH --new-workspace local --cwd <run parent> \
+     --label ade.name=probe-<agent> --label ade.task=research-<slug> \
+     "$(cat <run>/.probe.md-with-footer)"`
+   (same agents/models the planner admitted; an Agent-tool sub-agent gets
+   the brief plus the item 2 footer). Do not invent a second raw `paseo run`.
    Then `python3 -I scripts/research_check.py probe <each report file>`:
    exit 0 means every probed route can search, exit 1 lists the ones that
    cannot. The lead's own probe uses its own tools and walks the full web
