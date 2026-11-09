@@ -72,6 +72,24 @@ def test_repo_install_toml_checks_clean():
     assert by_id["hermes"].get("probe_argv") == ["hermes", "doctor"]
     assert by_id["hermes"].get("update_argv") == ["hermes", "update"]
     assert by_id["hermes"].get("install_argv") is None  # curl|bash; no argv-list yet
+    assert by_id["peer-link"].get("install_argv") is None  # private; prose only
+    assert by_id["litellm"].get("install_argv") is None  # fork/role; prose only
+    assert by_id["grok-bot-setup"].get("install_argv") == [
+        "npm",
+        "install",
+        "-g",
+        "grok-bot-setup",
+    ]
+    assert by_id["grok-bot-setup"].get("probe_argv") == ["adapters", "help"]
+    assert by_id["1password"].get("needs_system") is True
+    assert by_id["1password"].get("system_argv_darwin") == [
+        "brew",
+        "install",
+        "--cask",
+        "1password",
+        "1password-cli",
+    ]
+    assert by_id["1password"].get("probe_argv") == ["op", "--version"]
     proc = _run("check", "--json", root=REPO)
     assert proc.returncode == 0, proc.stderr
     payload = json.loads(proc.stdout)

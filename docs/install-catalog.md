@@ -88,6 +88,10 @@ just install-apply-dry
 | `codex` | `npm install -g @openai/codex` |
 | `cursor-cli` | probe/update only (`agent --version` / `agent update`); install is official curl\|bash (no `install_argv` yet) |
 | `hermes` (offered) | probe/update only (`hermes doctor` / `hermes update`); install is official curl\|bash (no `install_argv` yet) |
+| `peer-link` (offered) | prose only — private `frdminc/peer-link` clone (`~/src/peer-link`); no `install_argv` until operator grants access |
+| `litellm` (offered) | prose only — operator fork at `~/src/litellm` / site-djbclark `roles/litellm`; no stock auto-apply |
+| `grok-bot-setup` (optional) | `npm install -g grok-bot-setup` (`adapters help` probe) |
+| `1password` (optional) | Mac `system_argv_darwin` brew casks + `op --version` probe; Linux system recipe still UNKNOWN |
 | others | still `UNKNOWN` / no `install_argv` |
 
 ## F. Next units
