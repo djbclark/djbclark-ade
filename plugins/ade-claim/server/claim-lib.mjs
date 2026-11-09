@@ -1,7 +1,8 @@
 /**
  * Pure helpers for the ade-claim Paseo plugin (unit-tested without a daemon).
  *
- * W2: worktree.create.after → ade_claims.py new
+ * W2: worktree.create.after → ade_claims.py new + trusted ade-git-guard install
+ * W2 follow-up: workspace.archive.after → ade_claims.py release
  * W3: agent.open.before exports ADE_CLAIM_ID; agent.create.after binds owner
  *     (Paseo's agent.create.after is a notification and cannot change env).
  * W4: agent.open.before prepends trusted libexec/agent-bin to PATH.
@@ -9,6 +10,7 @@
  * @typedef {{ path: string, branch: string, sourceCheckout: string }} WorktreeHookPayload
  * @typedef {{ agentId: string, cwd: string, env: Record<string, string> }} AgentOpenBeforePayload
  * @typedef {{ id: string, cwd: string }} AgentCreateAfterPayload
+ * @typedef {{ id: string, cwd: string }} WorkspaceArchivePayload
  */
 
 import { randomBytes } from "node:crypto";
@@ -75,6 +77,25 @@ export function parseAgentCreateAfterAgent(agent) {
     throw new Error("agent.create.after: agent.cwd must be a non-empty string");
   }
   return /** @type {AgentCreateAfterPayload} */ ({ id, cwd });
+}
+
+/**
+ * workspace.archive.after payload: { workspace: { id, cwd, … } }.
+ * Worktree cleanup can still be pending; release by cwd while the path exists.
+ * @param {unknown} workspace
+ */
+export function parseWorkspaceArchivePayload(workspace) {
+  if (!workspace || typeof workspace !== "object" || Array.isArray(workspace)) {
+    throw new Error("workspace.archive.after: expected { workspace } object");
+  }
+  const { id, cwd } = /** @type {Record<string, unknown>} */ (workspace);
+  if (typeof id !== "string" || !id.trim()) {
+    throw new Error("workspace.archive.after: workspace.id must be a non-empty string");
+  }
+  if (typeof cwd !== "string" || !cwd.trim()) {
+    throw new Error("workspace.archive.after: workspace.cwd must be a non-empty string");
+  }
+  return /** @type {WorkspaceArchivePayload} */ ({ id, cwd });
 }
 
 /** @param {string} path */
@@ -304,6 +325,38 @@ export function buildAdeClaimsBindOwnerArgv(opts) {
 }
 
 /**
+ * @param {{ adeClaimsScript: string, claimId: string }} opts
+ */
+export function buildAdeClaimsReleaseArgv(opts) {
+  const { adeClaimsScript, claimId } = opts;
+  if (typeof adeClaimsScript !== "string" || !adeClaimsScript) {
+    throw new Error("adeClaimsScript is required");
+  }
+  if (typeof claimId !== "string" || !ID_RE.test(claimId)) {
+    throw new Error(`claimId must be a valid claim id, got ${JSON.stringify(claimId)}`);
+  }
+  return {
+    python: "python3",
+    script: adeClaimsScript,
+    argv: ["release", "--id", claimId],
+  };
+}
+
+/**
+ * @param {{ adeGitGuard: string, worktreePath: string }} opts
+ */
+export function buildAdeGitGuardInstallArgv(opts) {
+  const { adeGitGuard, worktreePath } = opts;
+  if (typeof adeGitGuard !== "string" || !adeGitGuard) {
+    throw new Error("adeGitGuard is required");
+  }
+  if (typeof worktreePath !== "string" || !worktreePath.trim()) {
+    throw new Error("worktreePath must be a non-empty string");
+  }
+  return { guard: adeGitGuard, argv: ["install", worktreePath] };
+}
+
+/**
  * Per-creation claim id (branch + path basename + random suffix).
  * Must be unique: ade_claims.py new rejects any existing id (exit 3), even if
  * released/expired, and a throw on worktree.create.after removes the worktree.
@@ -362,6 +415,15 @@ export function buildAdeClaimsNewArgv(worktree, opts) {
 function readable(path) {
   try {
     accessSync(path, constants.R_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function executable(path) {
+  try {
+    accessSync(path, constants.X_OK);
     return true;
   } catch {
     return false;
@@ -447,6 +509,41 @@ export function resolveTrustedAgentBinDir(env = process.env, opts = {}) {
   }
   throw new Error(
     "libexec/agent-bin not found beside the plugin install; set ADE_AGENT_BIN to a trusted absolute path",
+  );
+}
+
+/**
+ * Locate a trusted bin/ade-git-guard (W2 follow-up install on create).
+ *
+ * Prefer ADE_GIT_GUARD, else walk parents of the plugin install for
+ * bin/ade-git-guard. Never uses a worktree path.
+ *
+ * @param {NodeJS.ProcessEnv} [env]
+ * @param {{ pluginRoot?: string }} [opts]
+ */
+export function resolveTrustedAdeGitGuard(env = process.env, opts = {}) {
+  if (env.ADE_GIT_GUARD) {
+    if (!executable(env.ADE_GIT_GUARD) && !readable(env.ADE_GIT_GUARD)) {
+      throw new Error(`ADE_GIT_GUARD is not usable: ${env.ADE_GIT_GUARD}`);
+    }
+    return env.ADE_GIT_GUARD;
+  }
+  const start = opts.pluginRoot;
+  if (typeof start !== "string" || !start.trim()) {
+    throw new Error(
+      "ade-git-guard not found: set ADE_GIT_GUARD to a trusted absolute path (checkout-local helpers are refused)",
+    );
+  }
+  let dir = start;
+  for (let i = 0; i < 10 && dir && dir !== "/"; i++) {
+    const candidate = join(dir, "bin", "ade-git-guard");
+    if (executable(candidate) || readable(candidate)) return candidate;
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  throw new Error(
+    "ade-git-guard not found beside the plugin install; set ADE_GIT_GUARD to a trusted absolute path",
   );
 }
 
