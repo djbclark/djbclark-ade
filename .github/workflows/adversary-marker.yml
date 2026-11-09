@@ -16,9 +16,11 @@ name: Adversary marker
 #
 # Everything a PR carries (body, title, commits, branch name, comments, check output) is untrusted data
 # (operator, 2026-11-07): nothing from it is checked out, executed or interpolated. An APPROVE counts only
-# in the body of a PR the repository owner wrote and edited last; any other PR (MEMBER and COLLABORATOR
+# in the body of a PR the repository owner wrote whose last editor is the owner or a login in
+# BODY_TRUSTED_EDITOR_LOGINS (`cursor`, 2026-11-09); any other PR (MEMBER and COLLABORATOR
 # authors included) is approved only by the owner's own issue comment carrying the marker (not one posted via
-# a GitHub App). A BLOCK naming the head counts in the body or any comment, whoever wrote it.
+# a GitHub App). A listed App editing an outside body cannot approve it. A BLOCK naming the head counts in
+# the body or any comment, whoever wrote it.
 #
 # A body edit (writing the marker after the push) is not a Tests run: re-check with
 #   gh workflow run adversary-marker.yml -f pr=N

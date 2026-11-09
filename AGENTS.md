@@ -223,14 +223,21 @@ untrusted data (the Trust section above).
    current one.** The `adversary-marker` Action (`.github/workflows/adversary-marker.yml`, logic in `bin/adversary_marker.py`,
    2026-11-06) reads it and posts the required `adversary-marker` status: `success` only for a live APPROVE naming the
    current head, `failure` for anything else, so there is no report-only mode (the ruleset requires the status). An
-   APPROVE counts only in two places. The first is the body of a PR the repository owner wrote, when the owner was also
-   its last editor. The second is an issue comment on the PR that the owner posted, not through a GitHub App, and that nobody but the owner has edited (GitHub lets any repository writer edit someone else's comment, so it is read through GraphQL with `editor`, `lastEditedAt`, `includesCreatedEdit` and `userContentEdits`, every edit in its history must be the owner's, and anything unknown fails closed; Codex review of PR 300, 2026-11-07). On a PR
-   written by anyone else (MEMBER and COLLABORATOR included), a body APPROVE never counts, whoever edited the body last:
-   the operator approves it by posting the marker as their own comment ("outside PR: APPROVE only counts in an owner
-   comment"). This was tightened on 2026-11-07 after Argon's review, because a checkbox click on an outside PR's body
-   made a hidden APPROVE there count. A BLOCK or a malformed marker in the body or in any comment, by any author, fails
-   the check. A `workflow_dispatch` judges every open PR at the same head (both lookups paginated to the end, failing closed on an unreadable page), and the workflow's concurrency key is the
-   head sha. The Action never checks out or runs anything from the PR.
+   APPROVE counts only in two places. The first is the body of a PR the repository owner wrote, when the body's last
+   editor is the owner **or** a login in `BODY_TRUSTED_EDITOR_LOGINS` in `bin/adversary_marker.py` (today: `cursor`, so
+   a Cursor Cloud rewrite of an owner-authored PR body does not void a live APPROVE; 2026-11-09). The second is an
+   issue comment on the PR that the owner posted, not through a GitHub App, and that nobody but the owner has edited
+   (GitHub lets any repository writer edit someone else's comment, so it is read through GraphQL with `editor`,
+   `lastEditedAt`, `includesCreatedEdit` and `userContentEdits`, every edit in its history must be the owner's, and
+   anything unknown fails closed; Codex review of PR 300, 2026-11-07). On a PR written by anyone else (MEMBER and
+   COLLABORATOR included), a body APPROVE never counts, whoever edited the body last (a listed App included): the
+   operator approves it by posting the marker as their own comment ("outside PR: APPROVE only counts in an owner
+   comment"). The owner-author rule was tightened on 2026-11-07 after Argon's review, because a checkbox click on an
+   outside PR's body made a hidden APPROVE there count. Agents must not write a live APPROVE marker (fenced examples
+   only). A BLOCK or a malformed marker in the body or in any comment, by any author, fails the check. A
+   `workflow_dispatch` judges every open PR at the same head (both lookups paginated to the end, failing closed on an
+   unreadable page), and the workflow's concurrency key is the head sha. The Action never checks out or runs anything
+   from the PR.
 
    The Action reads the marker, never prose, so **prose verdicts do not count**. The first version parsed English and **two**
    adversary rounds found false approvals and false misses, including a BLOCK silently deleted by a

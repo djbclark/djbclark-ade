@@ -1454,12 +1454,15 @@ def test_no_event_field_is_interpolated_into_a_shell_line():
             assert "${{" not in s.get("run", ""), s.get("run")
 
 
-# ---- who may approve (E8 review BLOCK, 2026-11-07; tightened 2026-11-07 after the Argon and Opus reviews) ---------
+# ---- who may approve (E8 review BLOCK, 2026-11-07; tightened 2026-11-07 after the Argon and Opus reviews;
+# trusted-editor allowlist for owner PRs 2026-11-09) -------------------------------------------------------------
 #
-# A body APPROVE counts only on an OWNER-AUTHORED PR whose body the owner edited last. Every other PR (an outside
-# author, and MEMBER or COLLABORATOR authors too: the operator's agents act under the owner's login) is approved only
-# by an issue comment the owner posted, not via a GitHub App. Before, the owner's last edit made any body trusted, so
-# ticking a task-list box on an outside PR turned the author's hidden APPROVE into a trusted one.
+# A body APPROVE counts only on an OWNER-AUTHORED PR whose body last editor is the owner or a login in
+# BODY_TRUSTED_EDITOR_LOGINS (today: `cursor`, so a Cloud Agent rewrite of an owner PR body does not void a live
+# APPROVE). Every other PR (an outside author, and MEMBER or COLLABORATOR authors too: the operator's agents act
+# under the owner's login) is approved only by an issue comment the owner posted, not via a GitHub App. A listed
+# App editing an outside body still cannot approve it. Before 2026-11-07, the owner's last edit made any body
+# trusted, so ticking a task-list box on an outside PR turned the author's hidden APPROVE into a trusted one.
 
 OUTSIDE = f"outside PR: APPROVE only counts in an owner comment at {H1[:12]}"
 UNTRUSTED = f"marker not written by a trusted user at {H1[:12]}"
@@ -1469,6 +1472,8 @@ UNTRUSTED = f"marker not written by a trusted user at {H1[:12]}"
     ({"author": "djbclark", "assoc": "OWNER"}, "approve"),
     ({"author": "DJBClark", "assoc": "OWNER"}, "approve"),                      # logins are case-insensitive
     ({"author": "djbclark", "assoc": "OWNER", "editor": "DJBCLARK"}, "approve"),
+    ({"author": "djbclark", "assoc": "OWNER", "editor": "cursor"}, "approve"),   # Cloud Agent body rewrite
+    ({"author": "djbclark", "assoc": "OWNER", "editor": "Cursor"}, "approve"),
     ({"author": "djbclark", "assoc": "OWNER", "editor": "stranger"}, "untrusted"),   # a later edit by anyone else
     ({"author": "alice", "assoc": "MEMBER"}, "outside"),
     ({"author": "bob", "assoc": "COLLABORATOR"}, "outside"),
@@ -1477,11 +1482,13 @@ UNTRUSTED = f"marker not written by a trusted user at {H1[:12]}"
     ({"author": "stranger", "assoc": "FIRST_TIME_CONTRIBUTOR"}, "outside"),
     ({"author": "stranger", "assoc": "NONE", "editor": "djbclark"}, "outside"),  # hole 2: the owner's edit is no approval
     ({"author": "stranger", "assoc": "NONE", "editor": "DJBClark"}, "outside"),
+    ({"author": "stranger", "assoc": "NONE", "editor": "cursor"}, "outside"),    # allowlist does not help outsiders
+    ({"author": "alice", "assoc": "MEMBER", "editor": "cursor"}, "outside"),
     ({"author": "alice", "assoc": "MEMBER", "editor": "stranger"}, "outside"),
     ({"author": "stranger", "assoc": "NONE", "editor": "bob"}, "outside"),
     ({"author": "", "assoc": "OWNER"}, "outside"),                              # a deleted (ghost) author
 ])
-def test_a_body_approve_counts_only_on_an_owner_pr_the_owner_edited_last(trust, word):
+def test_a_body_approve_counts_only_on_an_owner_pr_with_a_trusted_body_editor(trust, word):
     rc, report, api = run_ev(wr_event(), serve(7, marker("APPROVE", H1), **trust))
     assert rc == 0 and len(api.posted) == 1, report
     assert report["prs"][0]["outcome"] == word
@@ -1501,6 +1508,16 @@ def test_hole2_an_owner_edit_of_an_outside_body_never_approves_its_hidden_marker
     rc, report, api = run_ev(wr_event(), serve(7, body, author="stranger", assoc="NONE", editor="djbclark"))
     assert rc == 0 and [p["state"] for p in api.posted] == ["failure"], report
     assert report["prs"][0]["outcome"] == "outside" and api.posted[0]["description"] == OUTSIDE
+
+
+def test_body_editor_trusted_helper_is_owner_or_allowlist_only():
+    import adversary_marker as am
+    assert am.body_editor_trusted("djbclark", "djbclark")
+    assert am.body_editor_trusted("CURSOR", "djbclark")
+    assert not am.body_editor_trusted("stranger", "djbclark")
+    assert not am.body_editor_trusted("", "djbclark")
+    assert not am.body_editor_trusted("cursor", "")
+    assert "cursor" in {x.lower() for x in am.BODY_TRUSTED_EDITOR_LOGINS}
 
 
 @pytest.mark.parametrize("trust", [OUTSIDE_PR, {"author": "alice", "assoc": "MEMBER"},
