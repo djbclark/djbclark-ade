@@ -246,8 +246,6 @@ plugins:
       allow_tool_override: false
     herdr-agent-state:
       allow_tool_override: false
-    moshi-hooks:
-      allow_tool_override: false
 hooks:
   pre_llm_call:
     - command: '{{ .home }}/.hermes/agent-hooks/graft-nudge.py'
