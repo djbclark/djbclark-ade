@@ -153,7 +153,9 @@ def _run_review_launch(launch: list[str], pr: int, head: str, timeout: float, no
                               timeout=timeout + 600)
     budget = max(1, math.ceil(timeout + 600 + 60))
     owner = os.environ.get("PASEO_AGENT_ID") or "-"
-    argv = [str(tool), "run", "--name", _deadline_name(pr, head), "--budget", str(budget), "--heartbeat", "300",
+    # Budget-only: review-launch does not emit deadline beats, so --heartbeat would
+    # expire a healthy review after that interval (Codex #361 P1, 2026-11-09).
+    argv = [str(tool), "run", "--name", _deadline_name(pr, head), "--budget", str(budget),
             "--owner", owner, "--", *launch]
     return subprocess.run(argv, capture_output=True, text=True, errors="replace", stdin=subprocess.DEVNULL,
                           timeout=budget + 120)
