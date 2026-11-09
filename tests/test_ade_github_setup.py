@@ -147,17 +147,49 @@ def test_refuse_secret_argv_pem_and_flags():
     assert "refuse" in proc.stderr.lower()
 
 
+def test_refuse_secret_argv_equals_form_redacts_value():
+    secret = "super-leaky-token-value-9f3a"
+    with pytest.raises(ags.GithubSetupError) as ei:
+        ags.refuse_secret_argv([f"--token={secret}"])
+    msg = str(ei.value)
+    assert "--token" in msg
+    assert secret not in msg
+    assert f"--token={secret}" not in msg
+
+    with pytest.raises(ags.GithubSetupError) as ei2:
+        ags.refuse_secret_argv([f"--client-secret={secret}"])
+    assert "--client-secret" in str(ei2.value)
+    assert secret not in str(ei2.value)
+
+    proc = _run("check", f"--token={secret}")
+    assert proc.returncode == 2
+    assert "refuse" in proc.stderr.lower()
+    assert "--token" in proc.stderr
+    assert secret not in proc.stderr
+    assert secret not in proc.stdout
+
+
 def test_observe_network_with_fake_runner(tmp_path):
     root = _fixture_root(tmp_path)
     cfg = ags.load_config(root=root)
 
     def runner(argv: list[str]) -> subprocess.CompletedProcess:
         joined = " ".join(argv)
-        if "installation" in joined:
+        if "user/installations/" in joined and "repositories" in joined:
             return subprocess.CompletedProcess(
                 argv,
                 0,
-                stdout='{"app_slug":"ade-merge-gate","app_id":4242}\n',
+                stdout=f'["{cfg.full_name}"]\n',
+                stderr="",
+            )
+        if "user/installations" in joined:
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout=(
+                    '[{"id":77,"app_id":4242,"app_slug":"ade-merge-gate",'
+                    f'"account":"{cfg.owner}"}}]\n'
+                ),
                 stderr="",
             )
         if f"environments/{cfg.github['environment']}" in joined and "deployment-branch" not in joined:
@@ -194,6 +226,7 @@ def test_observe_network_with_fake_runner(tmp_path):
     by_id = {o.id: o for o in obs}
     assert by_id["app-install"].status == "ok"
     assert "4242" in by_id["app-install"].detail
+    assert "user/installations" in by_id["app-install"].detail
     assert by_id["environment"].status == "ok"
     assert by_id["environment-branch"].status == "ok"
     assert by_id["private-key-secret"].status == "ok"
@@ -208,6 +241,9 @@ def test_observe_missing_installation(tmp_path):
     cfg = ags.load_config(root=root)
 
     def runner(argv: list[str]) -> subprocess.CompletedProcess:
+        joined = " ".join(argv)
+        if "user/installations" in joined:
+            return subprocess.CompletedProcess(argv, 0, stdout="[]\n", stderr="")
         return subprocess.CompletedProcess(
             argv, 1, stdout="", stderr="gh: Not Found (HTTP 404)\n"
         )
@@ -216,6 +252,36 @@ def test_observe_missing_installation(tmp_path):
     assert rc == 1
     by_id = {o.id: o for o in obs}
     assert by_id["app-install"].status == "missing"
+    assert "user/installations" in by_id["app-install"].detail
+
+
+def test_observe_installation_unknown_when_list_fails(tmp_path):
+    root = _fixture_root(tmp_path)
+    cfg = ags.load_config(root=root)
+
+    def runner(argv: list[str]) -> subprocess.CompletedProcess:
+        joined = " ".join(argv)
+        if "user/installations/" in joined and "repositories" in joined:
+            return subprocess.CompletedProcess(
+                argv, 1, stdout="", stderr="HTTP 403: Forbidden\n"
+            )
+        if "user/installations" in joined:
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout=(
+                    '[{"id":77,"app_id":4242,"app_slug":"ade-merge-gate",'
+                    f'"account":"{cfg.owner}"}}]\n'
+                ),
+                stderr="",
+            )
+        return subprocess.CompletedProcess(argv, 1, stdout="", stderr="unexpected\n")
+
+    obs, rc = ags.observe(cfg, network=True, runner=runner)
+    by_id = {o.id: o for o in obs}
+    assert by_id["app-install"].status == "unknown"
+    # unknown install alone does not force exit 1; other probes may
+    assert by_id["app-install"].status != "missing"
 
 
 def test_ruleset_preview_placeholder_without_app_id(tmp_path):

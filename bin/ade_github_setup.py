@@ -131,8 +131,10 @@ def refuse_secret_argv(argv: list[str] | None) -> None:
             "-token",
             "-password",
         }:
+            # Report only the normalized flag name — never equals-form values
+            # (`--token=<secret>`), which main() prints to stderr on refuse.
             raise GithubSetupError(
-                f"refuse secret flag {arg!r} on argv; "
+                f"refuse secret flag {low!r} on argv; "
                 "store the key with `gh secret set MERGE_GATE_PRIVATE_KEY "
                 "--env merge-gate < file.pem` (stdin redirect, never argv)"
             )
@@ -458,6 +460,102 @@ def _gh_json(
         return None, f"gh JSON: {e}"
 
 
+def _observe_app_install(cfg: GithubConfig, run: Runner) -> Observation:
+    """Probe App installation with operator ``gh`` credentials.
+
+    ``GET /repos/{owner}/{repo}/installation`` requires an App JWT and always
+    fails (or mis-reports) under ambient user ``gh`` auth. Use
+    ``GET /user/installations`` plus that installation's repositories list
+    instead — both work with the operator's token.
+    """
+    want = cfg.github["app_slug"]
+    data, detail = _gh_json(
+        run,
+        [
+            "api",
+            "user/installations?per_page=100",
+            "--jq",
+            "[.installations[] | {id, app_id, app_slug, account: .account.login}]",
+        ],
+    )
+    if data is None:
+        return Observation(id="app-install", status="unknown", detail=detail)
+    if not isinstance(data, list):
+        return Observation(
+            id="app-install",
+            status="unknown",
+            detail="unexpected user/installations payload",
+        )
+
+    matches = [
+        row
+        for row in data
+        if isinstance(row, dict) and row.get("app_slug") == want
+    ]
+    if not matches:
+        return Observation(
+            id="app-install",
+            status="missing",
+            detail=(
+                f"no user-visible installation of app_slug={want!r} "
+                "(GET /user/installations; not App JWT)"
+            ),
+        )
+
+    # Prefer an installation whose account matches the configured owner.
+    ordered = sorted(
+        matches, key=lambda row: 0 if row.get("account") == cfg.owner else 1
+    )
+    listed_ok = False
+    last_list_detail = ""
+    for row in ordered:
+        iid = row.get("id")
+        if iid is None:
+            continue
+        repos, repo_detail = _gh_json(
+            run,
+            [
+                "api",
+                f"user/installations/{iid}/repositories?per_page=100",
+                "--jq",
+                "[.repositories[].full_name]",
+            ],
+        )
+        if repos is None:
+            last_list_detail = repo_detail
+            continue
+        listed_ok = True
+        if isinstance(repos, list) and cfg.full_name in repos:
+            return Observation(
+                id="app-install",
+                status="ok",
+                detail=(
+                    f"installed app_slug={want} app_id={row.get('app_id')} "
+                    f"installation_id={iid} (user/installations)"
+                ),
+            )
+
+    if not listed_ok:
+        return Observation(
+            id="app-install",
+            status="unknown",
+            detail=(
+                f"app_slug={want!r} visible to user but repository list "
+                f"unreadable: {last_list_detail or 'no installation id'}"
+            ),
+        )
+    ids = [row.get("id") for row in matches]
+    return Observation(
+        id="app-install",
+        status="missing",
+        detail=(
+            f"app_slug={want!r} installed (installation_id={ids}) but "
+            f"{cfg.full_name} not in user-visible repositories for those "
+            "installations (first page only)"
+        ),
+    )
+
+
 def observe(
     cfg: GithubConfig,
     *,
@@ -468,7 +566,8 @@ def observe(
 
     Never reads secret values — only presence of secret *names*. Exit 0 when
     every local check is ok and (if network) no probe reported error; missing
-    remote pieces are status=missing with exit 1.
+    remote pieces are status=missing with exit 1. App installation is probed
+    via ``GET /user/installations`` (operator creds), not the App-JWT endpoint.
     """
     run = runner or _default_runner
     obs: list[Observation] = []
@@ -513,52 +612,10 @@ def observe(
         )
         return obs, 0
 
-    # Installation
-    data, detail = _gh_json(
-        run,
-        [
-            "api",
-            f"repos/{cfg.full_name}/installation",
-            "--jq",
-            "{app_slug:.app_slug,app_id:.app_id}",
-        ],
-    )
-    if data is None:
-        low = detail.lower()
-        if "404" in low or "not found" in low or "no installation" in low:
-            obs.append(
-                Observation(
-                    id="app-install",
-                    status="missing",
-                    detail=f"no App installation on {cfg.full_name}: {detail}",
-                )
-            )
-            rc = 1
-        elif "gh not on PATH" in detail:
-            obs.append(Observation(id="app-install", status="unknown", detail=detail))
-        else:
-            obs.append(Observation(id="app-install", status="unknown", detail=detail))
-    else:
-        slug = data.get("app_slug") if isinstance(data, dict) else None
-        app_id = data.get("app_id") if isinstance(data, dict) else None
-        want = cfg.github["app_slug"]
-        if slug == want:
-            obs.append(
-                Observation(
-                    id="app-install",
-                    status="ok",
-                    detail=f"installed app_slug={slug} app_id={app_id}",
-                )
-            )
-        else:
-            obs.append(
-                Observation(
-                    id="app-install",
-                    status="error",
-                    detail=f"unexpected app_slug={slug!r} (want {want!r})",
-                )
-            )
-            rc = 1
+    install_obs = _observe_app_install(cfg, run)
+    obs.append(install_obs)
+    if install_obs.status in {"missing", "error"}:
+        rc = 1
 
     # Environment + branch policy (names only)
     env = cfg.github["environment"]
