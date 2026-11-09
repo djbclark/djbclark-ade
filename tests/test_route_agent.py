@@ -865,6 +865,19 @@ class TestRoutingPolicyToml(unittest.TestCase):
         # Restore the repo policy after any test that reloads a temp file.
         r.reload_policy(Path(__file__).resolve().parent.parent / "config" / "routing.toml")
 
+    def test_load_routing_effective_matches_load_policy_on_repo_file(self):
+        """S1: default reload path projects the same routing domain as direct load_policy."""
+        path = Path(__file__).resolve().parent.parent / "config" / "routing.toml"
+        via_direct = r.load_policy(path)
+        via_eff, src = r.load_routing_effective()
+        self.assertEqual(Path(src).resolve(), path.resolve())
+        self.assertEqual(via_eff["routing"]["kinds"], via_direct["routing"]["kinds"])
+        self.assertEqual(len(via_eff["service"]), len(via_direct["service"]))
+        self.assertEqual(
+            (via_eff.get("lead") or {}).get("pipeline_effort"),
+            (via_direct.get("lead") or {}).get("pipeline_effort"),
+        )
+
     def test_loaded_services_match_frozen_expectation(self):
         for name, expect in self.EXPECTED.items():
             svc = r.BY_NAME[name]
