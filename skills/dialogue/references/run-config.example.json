@@ -35,7 +35,7 @@
       "label": "Grok 4.7",
       "pool_label": "Cursor",
       "routes": [
-        {"kind": "acp", "agent": "cursor", "model": "grok-4.7", "set": ["reasoning_effort=high"]}
+        {"kind": "paseo", "agent": "cursor", "model": "grok-4.7", "set": ["reasoning_effort=high"]}
       ]
     },
     "fable": {
@@ -43,14 +43,14 @@
       "pool_label": "Claude Code 5-hour",
       "routes": [
         {"kind": "claude", "model": "claude-fable-5-1", "effort": "high"},
-        {"kind": "acp", "agent": "claude", "model": "claude-fable-5-1"}
+        {"kind": "paseo", "agent": "claude", "model": "claude-fable-5-1"}
       ]
     },
     "astra": {
       "label": "GPT-6 Astra",
       "pool_label": "Codex 5-hour",
       "routes": [
-        {"kind": "acp", "agent": "codex", "model": "gpt-6-astra", "set": ["reasoning_effort=xhigh"]}
+        {"kind": "paseo", "agent": "codex", "model": "gpt-6-astra", "set": ["reasoning_effort=xhigh"]}
       ]
     }
   },

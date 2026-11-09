@@ -36,7 +36,8 @@ DIALOGUE_<SEAT>_MODEL replaces `model` on every route of that seat; DIALOGUE_<SE
 makes the first route the Paseo provider <agent> (its `set` list is dropped); DIALOGUE_<SEAT>_SET
 (comma list of k=v, empty clears) and DIALOGUE_<SEAT>_POOL (aiuse pool label) go with it.
 
-Routes (slim-down E6, 2026-11-06): `paseo` (and `acp`, the old acp-run kind, now its alias) runs
+Routes (Wave 6 wording 2026-11-09): prefer `paseo`. `acp` remains a one-cycle alias for the same
+native path (old acp-run configs). Either kind runs
 `paseo run --provider <agent>/<model> --mode <mode> --no-wait --json --cwd <cwd> -- <pointer>`, where the
 pointer names the turn's prompt file and a reply file, then `paseo wait ID --timeout S --json` and reads
 the reply file; a `set` value of an effort key becomes `--thinking`. `claude` and `cmd` are unchanged.
@@ -238,12 +239,12 @@ def apply_seat_overrides(models: dict[str, dict[str, Any]], env: Any) -> list[st
         sets, pool = env.get(seat_env(seat, "SET")), env.get(seat_env(seat, "POOL"))
         if agent:
             first = routes[0] if routes else {}
-            routes[:1] = [{"kind": "acp", "agent": agent, "model": first.get("model", ""),
+            routes[:1] = [{"kind": "paseo", "agent": agent, "model": first.get("model", ""),
                            "perm": first.get("perm", "all")}]
             notes.append(f"{seat_env(seat, 'AGENT')}={agent}: first route is the Paseo provider {agent}")
         if model:
             for r in routes:
-                if r.get("kind", "acp") in ("acp", "paseo", "claude"):
+                if r.get("kind", "paseo") in ("acp", "paseo", "claude"):
                     r["model"] = model
             notes.append(f"{seat_env(seat, 'MODEL')}={model}")
         if sets is not None and routes:
@@ -745,7 +746,7 @@ def final_gate(run: Run, allow_legacy: bool) -> list[str]:
 # ---------------------------------------------------------------------------
 
 def route_cmd(run: Run, route: dict[str, Any], prompt_file: Path, timeout: int) -> tuple[list[str], bool]:
-    kind = route.get("kind", "acp")
+    kind = route.get("kind", "paseo")
     if kind == "claude":
         cmd = ["claude", "-p", "--model", route["model"], "--output-format", "text",
                "--dangerously-skip-permissions"]
@@ -826,7 +827,7 @@ def run_paseo_route(run: Run, route: dict[str, Any], prompt_file: Path, timeout:
 
 def run_route(run: Run, route: dict[str, Any], prompt_file: Path, timeout: int) -> tuple[str, str]:
     """Return (reply_text, error). error == '' on success."""
-    if route.get("kind", "acp") in ("acp", "paseo"):
+    if route.get("kind", "paseo") in ("acp", "paseo"):
         return run_paseo_route(run, route, prompt_file, timeout)
     env = os.environ.copy()
     for k in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"):
