@@ -60,8 +60,15 @@ just update [-- --check]   # bin/ade-update for this checkout
 ```
 
 Daily behind-check (not auto-apply): install
-`config/launchd/com.djbclark.ade-update-check.plist` with `bin/ade-sched install`
-(operator step; queue Carried #15).
+`config/launchd/com.djbclark.ade-update-check.plist` with an explicit log dir
+(operator step; queue Carried #15):
+
+```
+bin/ade-sched install config/launchd/com.djbclark.ade-update-check.plist \
+  --set __STATE__=$HOME/.local/state/ade --ade ~/src/djbclark-ade
+```
+
+`__ADE__` / `__HOME__` are filled automatically; `__STATE__` is not and exits 2 if left blank.
 
 - `plan` is print-only: `would-install` (has `install_argv`) / `needs-system` /
   `blocked` / `skip`.

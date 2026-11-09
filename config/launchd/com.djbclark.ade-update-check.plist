@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- Template: `ade-sched install` replaces __ADE__ (checkout), __HOME__, __STATE__ (log dir).
+<!-- Template: `ade-sched install` replaces __ADE__ (checkout), __HOME__; __STATE__ (log dir) needs --set.
      Daily `ade-update --check` only (exit 10 = behind); never auto-applies. Operator installs via
-     `bin/ade-sched install config/launchd/com.djbclark.ade-update-check.plist`. -->
+     `bin/ade-sched install config/launchd/com.djbclark.ade-update-check.plist --set __STATE__=$HOME/.local/state/ade`. -->
 <plist version="1.0">
 <dict>
   <key>Label</key><string>com.djbclark.ade-update-check</string>
