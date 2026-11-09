@@ -1,8 +1,8 @@
-"""bin/agent_guard.py, the per-agent identity policy (2026-11-03 omp audit, A1/A3); kept with the acp-dispatch shim.
+"""bin/agent_guard.py identity policy (2026-11-03 omp audit; Wave 6: Pi / paseo-run-centric).
 
-Moved out of tests/test_acp_dispatch_identity.py (slim-down E6, 2026-11-06): the pure policy checks stay; the old
-dispatch-through-acp-run cases went with `--acp-arg`, and the shim's own use of the policy (its launch argv pins
-exactly the admitted model) is tested in tests/test_acp_dispatch.py."""
+Transitional acp-run agent rows stay until ~2026-11-20 Wave 6 delete; live Pi launches via `paseo run` /
+`Choice.dispatch` have no `AGENT_GUARDS` row. Pure policy checks here; the shim's launch-argv check is
+tests/test_acp_dispatch.py (`identity_refusal`)."""
 from __future__ import annotations
 
 import ast
@@ -29,6 +29,8 @@ def test_guard_boundaries_for_every_guarded_agent():
         for args in REPLACEMENTS:
             why = agent_guard.identity_override(agent, args)
             assert why and "pass-through" in why and why.startswith(f"{agent}:"), (agent, args)
+            assert "paseo run" in why and "Choice.dispatch" in why, (agent, args, why)
+            assert "acp-run directly" not in why and "acp-dispatch accepts" not in why, why
         for args in ([], None, ["--tripwire-exempt-kinds=read,search"], ["--perm", "all"], ["--mode", "x"],
                      ["--resume", "abc"], ["--set", "effort=high"], ["--set=reasoning_effort=low"], ["-m"]):
             assert agent_guard.identity_override(agent, args) is None, (agent, args)
@@ -36,20 +38,24 @@ def test_guard_boundaries_for_every_guarded_agent():
     assert agent_guard.identity_override("omp", ["--model", "a", "--model", "b"], True) is not None
 
 
-def test_the_policy_table_covers_every_acp_run_agent():
+def test_transitional_acp_run_agents_still_have_guard_rows():
+    """Until Wave 6 deletes tools/acp-run, every AGENTS key still needs a compiling AGENT_GUARDS row."""
     tree = ast.parse(ACP_RUN.read_text())
     table = next(n.value for n in tree.body if isinstance(n, ast.Assign)
                  and any(isinstance(t, ast.Name) and t.id == "AGENTS" for t in n.targets))
     names = {k.value for k in table.keys}
-    assert names == set(agent_guard.AGENT_GUARDS), "a new acp-run agent needs a row in bin/agent_guard.py"
+    assert names == set(agent_guard.AGENT_GUARDS), (
+        "a transitional acp-run agent needs a row in bin/agent_guard.py until Wave 6 delete")
+    assert "pi" not in agent_guard.AGENT_GUARDS  # native paseo run / Choice.dispatch only
     assert {a for a, row in agent_guard.AGENT_GUARDS.items() if row.status == agent_guard.GUARDED} == set(GUARDED)
     for agent in GUARDED:
         row = agent_guard.policy(agent)
         assert row.gates and row.identity and row.pool == agent
+    assert agent_guard.policy("pi").status == agent_guard.UNREVIEWED
 
 
 def test_unreviewed_agents_keep_pass_through():
-    for agent in ("cursor", "hermes", "opencode", "never-heard-of-it"):
+    for agent in ("cursor", "hermes", "opencode", "never-heard-of-it", "pi"):
         assert agent_guard.policy(agent).status == agent_guard.UNREVIEWED
         assert all(agent_guard.identity_override(agent, args) is None for args in REPLACEMENTS)
         assert agent_guard.record_refusal({"agent": agent, "model": "m", "acp_arg": ["--model=x"],

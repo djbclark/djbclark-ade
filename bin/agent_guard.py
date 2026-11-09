@@ -1,12 +1,12 @@
-"""Per-agent guard policy for pass-through runner arguments (2026-11-03 omp audit; Wave 6: acp-run leaves ~2026-11-20); no provider calls.
+"""Per-agent identity guard for launch argv (2026-11-03 omp audit; Wave 6: Pi / native `paseo run` first).
 
-`route_agent` / Choice.dispatch admit a slice on model: the frontier, fable-xhigh, plenty, fallback and pool gates all
-judge it. A pass-through arg that replaces the model, or the agent's credentials, after admission made those gates
-advisory (historical: omp, codex and claude via the acp-run shim). ONE function judges the arguments for `dispatch()`
-(the fresh dispatch and a resume's inherited `acp_arg`) and for the runner's `spawn_refusal` (the stored command line
-and `acp_arg` of a normal, deferred, resumed or legacy record), driven by the AGENT_GUARDS table. Rolling the guard out
-to another TUI is flipping its row from `unreviewed` to `guarded` (and filling `gates`/`pool`);
-docs/agent-guard-contract.md has the checklist. After the shim delete, the same table gates native `paseo run` argv.
+Live ops: `route_agent.Choice.dispatch` → `paseo run --provider pi/<model>` (Pi is the sole general-purpose
+third-party TUI, 2026-11-08). Messaging is `paseo send --json`. Admission gates judge the model; a pass-through
+that replaces it or credentials after admission made those gates advisory (historical: omp/codex/claude via
+acp-run). AGENT_GUARDS drives the transitional shim's `identity_refusal` on `paseo run` argv and the pre-shim
+`identity_override` / `record_refusal` helpers kept for tests until ~2026-11-20 Wave 6 delete of acp-run /
+acp-dispatch. Flip a row `unreviewed`→`guarded` (fill `gates`/`pool`) to roll out; docs/agent-guard-contract.md.
+Pi has no row (native path only). No provider calls.
 """
 from __future__ import annotations
 
@@ -15,14 +15,14 @@ from dataclasses import dataclass
 
 GUARDED, UNREVIEWED = "guarded", "unreviewed"
 
-# acp-run options that can change which model/provider/credentials a slice really uses: --model replaces the billed
+# Transitional acp-run identity option families (kept until ~2026-11-20 Wave 6 delete): --model replaces the billed
 # model; --meta merges into session/new _meta (claude's _meta.claudeCode.options carries model and env); --set sets any
 # ACP config option (`model=`, `provider=`); --agent-arg and --agent-env reach the agent process (binary, API key,
-# endpoint, config dir, the agent's own --model/--provider/--profile); --auth picks the auth method. The rest of
-# acp-run's options (-C, --add-dir, -p/-f, --perm, --keep/--strip-user-config, --tripwire-exempt-kinds, --mode,
-# --effort, --context, --timeout, --wrapup*, --verify*, --log, --session-id, --resume, load/handshake/retry knobs)
-# touch neither. Operator-side ACP_RUN_ENV_<AGENT> / ACP_RUN_ARGS_<AGENT> / ~/.config/acp-run.env are not dispatch
-# inputs and are not covered. acp-run sets allow_abbrev=False, but a prefix is refused too.
+# endpoint, config dir, the agent's own --model/--provider/--profile); --auth picks the auth method. Native
+# `paseo run` / Choice.dispatch pin identity with `--provider P/M` (or review-launch `--model`) instead; the shim's
+# `identity_refusal` checks that argv shape. Operator-side ACP_RUN_ENV_<AGENT> / ACP_RUN_ARGS_<AGENT> /
+# ~/.config/acp-run.env are not dispatch inputs and are not covered. acp-run sets allow_abbrev=False, but a prefix
+# is refused too.
 IDENTITY_OPTIONS = ("--model", "--set", "--meta", "--agent-arg", "--agent-env", "--auth")
 # `--set KEY=VALUE` alone passes for the reasoning-effort options: they pick no model, provider or credential.
 SET_SAFE_KEYS = frozenset({"reasoning_effort", "effort", "reasoning", "thought", "thought_level", "thinking_level"})
@@ -37,8 +37,11 @@ class AgentGuard:
 
 
 _PENDING = AgentGuard(UNREVIEWED)
-# One row per acp-run agent (test_agent_guard pins that none is missing). `cursor-cloud` never reaches acp-run.
+# Transitional rows for agents still named by tools/acp-run (kept compiling until Wave 6 ~2026-11-20 delete).
+# Live Pi launches via Choice.dispatch → `paseo run --provider pi/…` and have no row. `cursor-cloud` uses
+# `cursor-cloud launch`. test_agent_guard pins every remaining acp-run AGENTS key still has a row here.
 AGENT_GUARDS: dict[str, AgentGuard] = {
+    # retired transport under the 2026-11-08 Pi sole-TUI policy; row + acp-run omp guard remain until Wave 6 delete
     "omp": AgentGuard(GUARDED, gates=("kind eligibility", "Claude API credits headroom"), pool="omp"),
     "codex": AgentGuard(GUARDED, gates=("frontier model", "plenty gate", "pool headroom"), pool="codex"),
     "claude": AgentGuard(GUARDED, gates=("frontier model", "fable-xhigh approval", "pool headroom"), pool="claude"),
@@ -47,16 +50,19 @@ AGENT_GUARDS: dict[str, AgentGuard] = {
 
 
 def policy(agent: str | None) -> AgentGuard:
-    """The agent's row; an agent with none is `unreviewed`."""
+    """The agent's row; an agent with none is `unreviewed` (including Pi: native `paseo run` only)."""
     return AGENT_GUARDS.get(agent or "", _PENDING)
 
 
 def identity_override(agent: str, args: list[str] | None, skip_primary_model: bool = False) -> str | None:
-    """Why pass-through acp-run arguments may change this slice's billing identity, else None (also for an `unreviewed` agent).
+    """Why pass-through runner arguments may change this slice's billing identity, else None (also for an `unreviewed` agent).
 
-    Every token is judged (the `--opt=value` form, a prefix of an option such as `--mod`, and a token that packs
-    `--model x` into one word). With `skip_primary_model` the first `--model VALUE` pair is the dispatcher's own
-    (a stored command line); any further form is a replacement. `--set KEY=VALUE` passes for a SET_SAFE_KEYS key."""
+    Kept for the pre-shim acp-run shape and its tests until Wave 6 delete. Every token is judged (the `--opt=value`
+    form, a prefix of an option such as `--mod`, and a token that packs `--model x` into one word). With
+    `skip_primary_model` the first `--model VALUE` pair is the dispatcher's own (a stored command line); any further
+    form is a replacement. `--set KEY=VALUE` passes for a SET_SAFE_KEYS key. Live ops pin identity with
+    `paseo run --provider P/M` (or Choice.dispatch / review-launch `--model`); the shim's `identity_refusal` checks
+    that argv."""
     row = policy(agent)
     if row.status != GUARDED:
         return None
@@ -79,18 +85,22 @@ def identity_override(agent: str, args: list[str] | None, skip_primary_model: bo
                     i += used
                     continue
             return (f"{agent}: pass-through argument {name!r} could replace the admitted billing model or "
-                    "credentials; acp-dispatch accepts no --model/--set/--meta/--agent-arg/--agent-env/--auth "
-                    "override through --acp-arg (only --set with a reasoning-effort key passes; use --effort/"
-                    "--context, or acp-run directly with the operator's approval)")
+                    "credentials; pin the admitted model with paseo run --provider P/M (or Choice.dispatch / "
+                    "review-launch --model); the transitional shim accepts no --model/--set/--meta/--agent-arg/"
+                    "--agent-env/--auth override (only --set with a reasoning-effort key passes; use --thinking/"
+                    "--effort, or an operator-approved direct launch)")
         i += 1
     return None
 
 
 def record_refusal(rec: dict) -> str | None:
-    """Why the stored record's command line may no longer run as admitted, else None: the stored command (its first
-    `--model` is the dispatcher's own and must be the admitted `model`; a guarded agent's command without one would run
-    the agent's own default) and `acp_arg` are what executes, whatever route the record took (normal, deferred, resumed,
-    legacy)."""
+    """Why the stored record's command line may no longer run as admitted, else None.
+
+    Pre-shim helper kept for tests until Wave 6 delete: the stored command (its first `--model` is the
+    dispatcher's own and must be the admitted `model`; a guarded agent's command without one would run the
+    agent's own default) and `acp_arg` are what executes, whatever route the record took (normal, deferred,
+    resumed, legacy). Live Pi / `paseo run` records are not judged here (`agent == "pi"` only keeps the old
+    skip_primary_model edge for historical fixtures)."""
     agent = rec.get("agent") or ""
     if policy(agent).status != GUARDED:
         return None
