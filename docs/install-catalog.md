@@ -82,10 +82,14 @@ just install-apply-dry
 | `cswap` | `uv tool install claude-swap` (presence `cswap`) |
 | `paseo` | `npm install -g @getpaseo/cli` (CLI only; desktop/daemon later) |
 | `pi` | `npm install -g @mariozechner/pi-coding-agent` |
+| `claude-code` | `npm install -g @anthropic-ai/claude-code` (presence `claude`) |
+| `codex` | `npm install -g @openai/codex` |
+| `cursor-cli` | probe/update only (`agent --version` / `agent update`); install is official curl\|bash (no `install_argv` yet) |
 | others | still `UNKNOWN` / no `install_argv` |
 
 ## F. Next units
 
 Live system apply (root/`apt`/`brew` execution with ownership ledger), remaining
-owner installers (sudo-secretspec Linux tarball, vendor clients, Paseo desktop/daemon
-and skill bundle), managed key verify probes. S4 jobs stay explicit later work.
+owner installers (sudo-secretspec Linux tarball, curl-free Cursor CLI fetch, Hermes
+offered path, Paseo desktop/daemon and skill bundle), managed key verify probes.
+S4 jobs stay explicit later work.

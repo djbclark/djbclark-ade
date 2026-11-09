@@ -161,34 +161,45 @@ notes = "Pi policy 2026-11-08; archived omp/OpenCode/Crush are never reinstall t
 id = "claude-code"
 class = "hard"
 summary = "Vendor client for Claude monthly plan"
-install = "UNKNOWN"
-update = "UNKNOWN"
+source = "https://www.npmjs.com/package/@anthropic-ai/claude-code"
+install = "npm install -g @anthropic-ai/claude-code (user npm prefix → ~/.local)"
+install_argv = ["npm", "install", "-g", "@anthropic-ai/claude-code"]
+update = "npm update -g @anthropic-ai/claude-code"
+update_argv = ["npm", "update", "-g", "@anthropic-ai/claude-code"]
 probe = "claude --version"
 probe_argv = ["claude", "--version"]
 presence = "claude"
 platforms = ["mac", "linux"]
+notes = "npm bin is claude. Account login is a separate [[login]] check, not an API key."
 
 [[component]]
 id = "codex"
 class = "hard"
 summary = "Vendor client for Codex monthly plan (not OpenAI API credits)"
-install = "UNKNOWN"
-update = "UNKNOWN"
+source = "https://www.npmjs.com/package/@openai/codex"
+install = "npm install -g @openai/codex (user npm prefix → ~/.local)"
+install_argv = ["npm", "install", "-g", "@openai/codex"]
+update = "npm update -g @openai/codex"
+update_argv = ["npm", "update", "-g", "@openai/codex"]
 probe = "codex --version"
 probe_argv = ["codex", "--version"]
 presence = "codex"
 platforms = ["mac", "linux"]
+notes = "npm bin is codex. Monthly-plan login is a separate [[login]] check; distinct from OPENAI_API_KEY."
 
 [[component]]
 id = "cursor-cli"
 class = "hard"
-summary = "Cursor CLI / vendor client"
-install = "UNKNOWN"
-update = "UNKNOWN"
-probe = "cursor --version"
-probe_argv = ["cursor", "--version"]
-presence = "cursor"
+summary = "Cursor CLI / vendor client (agent binary)"
+source = "https://cursor.com/docs/cli/installation"
+install = "curl https://cursor.com/install -fsS | bash (official installer → ~/.local/bin/agent)"
+update = "agent update"
+update_argv = ["agent", "update"]
+probe = "agent --version"
+probe_argv = ["agent", "--version"]
+presence = "agent"
 platforms = ["mac", "linux"]
+notes = "Official binary is agent (not cursor). install_argv left UNKNOWN: the published installer is a curl|bash pipe (no argv-list path yet; do not shell=True). Recorded update/probe only. Login is a separate [[login]] check."
 
 [[component]]
 id = "skill-everywhere"
