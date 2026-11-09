@@ -1,5 +1,9 @@
 # OpenCode plugins: the v2 module contract, and the two shimmed plugins
 
+> **Archive (2026-11-09).** OpenCode is not a current TUI under the Pi-only
+> ruling (2026-11-08; `docs/queue.md` item 36). Keep this doc for the
+> `opencode-plugins/` tree and Wave 6 cleanup; do not treat it as live teaching.
+
 Dated facts: verified 2026-10-11 against opencode **v2.0.26** (the binary at
 `~/.local/lib/node_modules/@opencode/cli/node_modules/@opencode/cli-darwin-arm64/bin/opencode`).
 
