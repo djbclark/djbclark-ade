@@ -30,11 +30,23 @@ def run(*args: str, root: Path | None = None) -> subprocess.CompletedProcess[str
     return subprocess.run(cmd, capture_output=True, text=True, timeout=30)
 
 
+CALLER_BINS = (
+    "bin/deadline",
+    "bin/load-watch",
+    "bin/instruction-lint",
+    "bin/ade_claims.py",
+)
+
+
 def _write_clean_tree(tmp: Path) -> Path:
     for rel in CALLER_SKILLS:
         path = tmp / rel
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("# clean\nUse paseo run and paseo send.\n", encoding="utf-8")
+    for rel in CALLER_BINS:
+        path = tmp / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("#!/usr/bin/env python3\n# clean: paseo send only\n", encoding="utf-8")
     loose = tmp / "skills/loose/SKILL.md"
     loose.parent.mkdir(parents=True, exist_ok=True)
     loose.write_text("# loose\nRead upstream issues via Paseo read-only.\n", encoding="utf-8")
@@ -100,6 +112,20 @@ def test_refuses_when_fan_out_still_names_acp_dispatch(tmp_path: Path) -> None:
     assert r.returncode == 1, r.stderr
     data = json.loads(r.stdout)
     assert any(x.startswith("callers_skills:") for x in data["reasons"])
+
+
+def test_refuses_when_deadline_still_invokes_relay(tmp_path: Path) -> None:
+    # Codex P2: executable callers (bin/deadline) must block ready, not only skills.
+    tree = _write_clean_tree(tmp_path)
+    (tree / "bin/deadline").write_text(
+        'argv = tool("DEADLINE_RELAY", "skills/session-finder/relay.py") + [owner]\n',
+        encoding="utf-8",
+    )
+    ev = _good_evidence(tmp_path)
+    r = run("--json", "--evidence", str(ev), "--allow-early", root=tree)
+    assert r.returncode == 1, r.stderr
+    data = json.loads(r.stdout)
+    assert any(x.startswith("callers_bins:") for x in data["reasons"])
 
 
 def test_refuses_when_loose_still_names_acp_run(tmp_path: Path) -> None:

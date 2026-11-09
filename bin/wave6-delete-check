@@ -10,6 +10,7 @@ posts, never merges. Docs: docs/slim/wave6-follow-up.md (queue Carried 1).
 
 Gates:
   callers_skills   listed skills still teach/invoke the shims as live commands
+  callers_bins     listed bin/ callers still invoke the shims at runtime
   callers_loose    skills/loose still uses acp-run --perm deny (must port first)
   evidence_missing --evidence not passed (Mac live-cycle + C3 ticks required)
   evidence_invalid evidence JSON missing keys or bad values
@@ -45,6 +46,15 @@ CALLER_SKILLS = (
     "skills/dialogue/SKILL.md",
 )
 LOOSE_SKILL = "skills/loose/SKILL.md"
+
+# Executable / library callers that still invoke the shims at runtime (Codex P2 on #398:
+# skill prose alone must not green the gate while bin/deadline still shells relay.py).
+CALLER_BINS = (
+    "bin/deadline",
+    "bin/load-watch",
+    "bin/instruction-lint",
+    "bin/ade_claims.py",
+)
 
 # Live invocation / path forms (not every historical prose mention).
 LIVE_RE = re.compile(
@@ -110,6 +120,14 @@ def check_callers(root: Path) -> list[str]:
         sample = ", ".join(skill_hits[:8])
         more = "" if len(skill_hits) <= 8 else f" (+{len(skill_hits) - 8} more)"
         reasons.append(f"callers_skills: {sample}{more}")
+
+    bin_hits: list[str] = []
+    for rel in CALLER_BINS:
+        bin_hits.extend(scan_file(root / rel))
+    if bin_hits:
+        sample = ", ".join(bin_hits[:8])
+        more = "" if len(bin_hits) <= 8 else f" (+{len(bin_hits) - 8} more)"
+        reasons.append(f"callers_bins: {sample}{more}")
 
     loose = root / LOOSE_SKILL
     loose_hits = scan_file(loose)
