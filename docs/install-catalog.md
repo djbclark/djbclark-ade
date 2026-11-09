@@ -1,9 +1,10 @@
 # Install catalog (transitional, 2026-11-09)
 
 Typed component / key-reference catalog with print-only `plan`, observe-only
-`doctor`, and **bounded user-scoped `apply`**. Doctor does **not** repair or
-read secret values. Full ownership-aware reconciliation and `--system` root
-effects remain later work (`docs/setup-plan.md` S3).
+`doctor` (runs `probe_argv` when recorded), and **bounded user-scoped `apply`**.
+Doctor does **not** repair or read secret values. Full ownership-aware
+reconciliation and `--system` root effects remain later work
+(`docs/setup-plan.md` S3).
 
 ## A. Source
 
@@ -26,12 +27,12 @@ unified file with reviewed consumer adoption.
 - `offered` / `optional` / `suggested` require an explicit `chosen` boolean.
 - `hard` is always expected; `chosen=false` is rejected.
 - `install` / `update` / `probe` may be prose or the sentinel `UNKNOWN`.
-- `install_argv` / `update_argv` are the only executable recipes (argv lists).
+- `install_argv` / `update_argv` / `probe_argv` are argv lists.
   Tokens: `{bin}`, `{root}`, `{home}`, `{prefix}` (default `~/.local/bin` or
   `ADE_INSTALL_PREFIX`).
 - `needs_system = true` marks package-manager / root paths; bounded apply
   refuses them until a later `--system` unit.
-- `presence` is an optional PATH basename for observe-only doctor.
+- `presence` is a PATH basename fallback when `probe_argv` is absent.
 
 ## C. Keys and logins
 
@@ -56,9 +57,9 @@ just install-apply-dry
 
 - `plan` is print-only: `would-install` (has `install_argv`) / `needs-system` /
   `blocked` / `skip`.
-- `doctor` observes PATH presence for recorded basenames. Missing expected
-  components fail the command; `unknown` is neither healthy nor absent.
-  Doctor does not repair.
+- `doctor` prefers `probe_argv` (runs the tool; argv list, short timeout) and
+  falls back to PATH `presence`. Missing or failed expected components fail
+  the command; `unknown` is neither healthy nor absent. Doctor does not repair.
 - `apply` defaults to **dry-run**. `--yes` executes `install_argv` for expected
   components that are missing (or all selected with `--force`). Writes an
   atomic ledger under `~/.local/state/djbclark-ade/install/ledger.json` (or
@@ -79,6 +80,6 @@ just install-apply-dry
 
 ## F. Next units
 
-More owner installers (paseo, sudo-secretspec, aiuse, vendor clients), managed
-key verify probes, ownership-aware reconcile with `--system` for root effects.
-S4 jobs stay explicit later work.
+More owner installers (paseo, sudo-secretspec, aiuse, vendor clients' install
+paths), managed key verify probes, ownership-aware reconcile with `--system`
+for root effects. S4 jobs stay explicit later work.

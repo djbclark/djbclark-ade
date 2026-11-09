@@ -1,7 +1,7 @@
 # Transitional install catalog (schema_version=1), 2026-11-09.
 # Used when config/ade.toml is absent. Values are references and recipes, never secret values.
-# install/update/probe = "UNKNOWN" means not yet recorded. presence = PATH basename for observe-only doctor.
-# install_argv = argv list for ade-install apply (tokens: {bin} {root} {home} {prefix}).
+# install/update/probe = "UNKNOWN" means not yet recorded. presence = PATH basename fallback for doctor.
+# install_argv / probe_argv = argv lists (tokens: {bin} {root} {home} {prefix}); doctor prefers probe_argv.
 # needs_system = true means package-manager/root; bounded apply refuses without a later --system unit.
 # chosen is required for offered/optional; hard components are always expected.
 
@@ -19,6 +19,7 @@ install_argv = ["{bin}/ade-user-install", "just", "--prefix", "{prefix}"]
 update = "ade-user-install just (re-fetch latest release)"
 update_argv = ["{bin}/ade-user-install", "just", "--prefix", "{prefix}"]
 probe = "just --version"
+probe_argv = ["just", "--version"]
 presence = "just"
 platforms = ["mac", "linux"]
 
@@ -30,6 +31,7 @@ install = "distribution package manager (apt/dnf/brew); needs --system"
 needs_system = true
 update = "package manager"
 probe = "git --version"
+probe_argv = ["git", "--version"]
 presence = "git"
 platforms = ["mac", "linux"]
 notes = "Almost always preinstalled; apply refuses without --system unit"
@@ -43,6 +45,7 @@ install = "distribution package or brew; needs --system"
 needs_system = true
 update = "package manager"
 probe = "gh --version"
+probe_argv = ["gh", "--version"]
 presence = "gh"
 platforms = ["mac", "linux"]
 
@@ -56,6 +59,7 @@ install_argv = ["{bin}/ade-user-install", "uv", "--prefix", "{prefix}"]
 update = "ade-user-install uv (re-fetch latest release)"
 update_argv = ["{bin}/ade-user-install", "uv", "--prefix", "{prefix}"]
 probe = "uv --version"
+probe_argv = ["uv", "--version"]
 presence = "uv"
 platforms = ["mac", "linux"]
 
@@ -101,6 +105,7 @@ source = "https://github.com/getpaseo/paseo"
 install = "UNKNOWN"
 update = "UNKNOWN"
 probe = "paseo --version"
+probe_argv = ["paseo", "--version"]
 presence = "paseo"
 platforms = ["mac", "linux"]
 
@@ -114,6 +119,7 @@ install_argv = ["npm", "install", "-g", "@nanonets/graft"]
 update = "npm update -g @nanonets/graft"
 update_argv = ["npm", "update", "-g", "@nanonets/graft"]
 probe = "graft --version"
+probe_argv = ["graft", "--version"]
 presence = "graft"
 platforms = ["mac", "linux"]
 notes = "Requires a writable npm prefix (e.g. ~/.local); not a root package-manager path"
@@ -124,7 +130,8 @@ class = "hard"
 summary = "Sole general-purpose third-party TUI"
 install = "UNKNOWN"
 update = "UNKNOWN"
-probe = "UNKNOWN"
+probe = "pi --version"
+probe_argv = ["pi", "--version"]
 presence = "pi"
 platforms = ["mac", "linux"]
 notes = "Pi policy 2026-11-08; archived omp/OpenCode/Crush are never reinstall targets"
@@ -135,7 +142,8 @@ class = "hard"
 summary = "Vendor client for Claude monthly plan"
 install = "UNKNOWN"
 update = "UNKNOWN"
-probe = "UNKNOWN"
+probe = "claude --version"
+probe_argv = ["claude", "--version"]
 presence = "claude"
 platforms = ["mac", "linux"]
 
@@ -145,7 +153,8 @@ class = "hard"
 summary = "Vendor client for Codex monthly plan (not OpenAI API credits)"
 install = "UNKNOWN"
 update = "UNKNOWN"
-probe = "UNKNOWN"
+probe = "codex --version"
+probe_argv = ["codex", "--version"]
 presence = "codex"
 platforms = ["mac", "linux"]
 
@@ -155,7 +164,8 @@ class = "hard"
 summary = "Cursor CLI / vendor client"
 install = "UNKNOWN"
 update = "UNKNOWN"
-probe = "UNKNOWN"
+probe = "cursor --version"
+probe_argv = ["cursor", "--version"]
 presence = "cursor"
 platforms = ["mac", "linux"]
 
@@ -168,10 +178,11 @@ install = "symlink bin/skill-everywhere into ~/.local/bin, then skill-everywhere
 install_argv = ["{bin}/ade-user-install", "link", "skill-everywhere", "--root", "{root}", "--prefix", "{prefix}"]
 update = "skill-everywhere --all"
 update_argv = ["{prefix}/skill-everywhere", "--all"]
-probe = "skill-everywhere --check --all"
+probe = "bash -n bin/skill-everywhere"
+probe_argv = ["bash", "-n", "{bin}/skill-everywhere"]
 presence = "skill-everywhere"
 platforms = ["mac", "linux"]
-notes = "Apply links the CLI; a follow-up --all sync is update_argv / later reconcile"
+notes = "Apply links the CLI; a follow-up --all sync is update_argv / later reconcile. Doctor syntax-checks the script (not --check --all)."
 
 [[component]]
 id = "firecrawl-router"
@@ -183,6 +194,7 @@ install = "symlink bin/firecrawl-router into ~/.local/bin"
 install_argv = ["{bin}/ade-user-install", "link", "firecrawl-router", "--root", "{root}", "--prefix", "{prefix}"]
 update = "repo pull (symlink target)"
 probe = "firecrawl-router --help"
+probe_argv = ["{bin}/firecrawl-router", "--help"]
 presence = "firecrawl-router"
 platforms = ["mac", "linux"]
 

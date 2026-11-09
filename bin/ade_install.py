@@ -1,10 +1,11 @@
 """ade_install: install catalog, plan, observe-only doctor, bounded apply.
 
 Transitional source: ``config/install.toml`` when ``config/ade.toml`` is absent.
-Key entries are names and metadata only. Plain doctor never repairs. Apply is
-user-scoped only: ``--dry-run`` by default, ``--yes`` to execute recorded
-``install_argv`` (argv lists, never shell=True). Root / ``--system`` effects
-are refused until a later unit. Secrets are never read.
+Key entries are names and metadata only. Doctor runs ``probe_argv`` when
+recorded (else PATH presence) and never repairs. Apply is user-scoped only:
+``--dry-run`` by default, ``--yes`` to execute recorded ``install_argv``
+(argv lists, never shell=True). Root / ``--system`` effects are refused until
+a later unit. Secrets are never read.
 """
 from __future__ import annotations
 
@@ -34,8 +35,10 @@ COMPONENT_CLASSES = frozenset({"hard", "offered", "optional", "suggested", "neve
 # Classes that require an explicit chosen bool in the catalog.
 CHOICE_CLASSES = frozenset({"offered", "optional", "suggested"})
 
-# Placeholders expanded in install_argv / update_argv before exec.
+# Placeholders expanded in install_argv / update_argv / probe_argv before exec.
 ARGV_TOKENS = ("{bin}", "{root}", "{home}", "{prefix}")
+
+Runner = Callable[[list[str], Path], "subprocess.CompletedProcess[str]"]
 
 
 class InstallError(ac.ConfigError):
@@ -183,6 +186,7 @@ def validate_catalog_semantics(data: dict[str, Any], *, path: Path) -> None:
                 raise InstallError(f"{path}: component[{i}].{field} must be a string")
         _validate_argv_field(row, field="install_argv", path=path, index=i)
         _validate_argv_field(row, field="update_argv", path=path, index=i)
+        _validate_argv_field(row, field="probe_argv", path=path, index=i)
         ns = row.get("needs_system")
         if ns is not None and not isinstance(ns, bool):
             raise InstallError(
@@ -248,7 +252,25 @@ def expected_installed(row: dict[str, Any]) -> bool:
     return False  # suggested / never
 
 
-def observe_component(row: dict[str, Any]) -> Observation:
+def _probe_executable_missing(argv0: str) -> bool:
+    """True when argv0 is neither an existing path nor findable on PATH."""
+    p = Path(argv0)
+    if p.is_file():
+        return False
+    return shutil.which(argv0) is None
+
+
+def observe_component(
+    row: dict[str, Any],
+    *,
+    root: Path | None = None,
+    runner: Runner | None = None,
+    probe_timeout_s: float = 15.0,
+) -> Observation:
+    """Observe one component. Never repairs.
+
+    Prefer ``probe_argv`` (run the tool) when recorded; otherwise PATH ``presence``.
+    """
     cid = str(row["id"])
     cls = str(row["class"])
     if cls == "never":
@@ -259,11 +281,50 @@ def observe_component(row: dict[str, Any]) -> Observation:
         return Observation("component", cid, "unchosen", f"{cls} component not chosen")
     if not expected_installed(row):
         return Observation("component", cid, "unchosen", "not expected on this machine")
+
+    probe_argv = row.get("probe_argv")
+    if isinstance(probe_argv, list) and probe_argv:
+        root = (root or repo_root_from_here()).resolve()
+        try:
+            argv = expand_argv(list(probe_argv), root=root)
+        except InstallError as e:
+            return Observation("component", cid, "error", str(e))
+        if _probe_executable_missing(argv[0]):
+            return Observation(
+                "component", cid, "missing",
+                f"probe binary not found: {argv[0]}",
+            )
+        run = runner or (
+            lambda a, cwd: _default_runner(a, cwd, timeout_s=probe_timeout_s)
+        )
+        try:
+            proc = run(argv, root)
+        except subprocess.TimeoutExpired:
+            return Observation(
+                "component", cid, "error",
+                f"probe timed out after {probe_timeout_s}s: {shlex.join(argv)}",
+            )
+        except OSError as e:
+            return Observation("component", cid, "error", f"probe exec error: {e}")
+        if proc.returncode == 0:
+            out = (proc.stdout or proc.stderr or "").strip().splitlines()
+            snippet = out[0][:120] if out else "exit 0"
+            return Observation(
+                "component", cid, "ok",
+                f"probe ok ({shlex.join(argv)}): {snippet}",
+            )
+        err = (proc.stderr or proc.stdout or "").strip().splitlines()
+        detail = err[0][:200] if err else f"exit {proc.returncode}"
+        return Observation(
+            "component", cid, "error",
+            f"probe failed ({shlex.join(argv)}): {detail}",
+        )
+
     presence = row.get("presence")
     if not presence or presence == UNKNOWN:
         return Observation(
             "component", cid, "unknown",
-            "no presence basename recorded (UNKNOWN); not treated as healthy or absent",
+            "no probe_argv or presence basename recorded; not treated as healthy or absent",
         )
     found = shutil.which(str(presence))
     if found:
@@ -287,18 +348,26 @@ def observe_login(row: dict[str, Any]) -> Observation:
     return Observation("login", lid, "unknown", f"login check recorded as {cmd!r}; not executed")
 
 
-def doctor(catalog: Catalog) -> tuple[list[Observation], int]:
-    """Observe-only doctor. Exit 1 if any expected component is missing; never repairs."""
+def doctor(
+    catalog: Catalog,
+    *,
+    runner: Runner | None = None,
+    probe_timeout_s: float = 15.0,
+) -> tuple[list[Observation], int]:
+    """Observe-only doctor. Exit 1 if any expected component is missing/error; never repairs."""
     obs: list[Observation] = [
         Observation("catalog", str(catalog.path), "ok", "catalog validated"),
     ]
     hard_missing = 0
     for row in catalog.components:
-        o = observe_component(row)
+        o = observe_component(
+            row,
+            root=catalog.root,
+            runner=runner,
+            probe_timeout_s=probe_timeout_s,
+        )
         obs.append(o)
-        if expected_installed(row) and o.status == "missing":
-            hard_missing += 1
-        if expected_installed(row) and o.status == "error":
+        if expected_installed(row) and o.status in ("missing", "error"):
             hard_missing += 1
     for row in catalog.keys:
         obs.append(observe_key(row))
@@ -536,9 +605,6 @@ def build_apply_steps(
             "ready", detail=shlex.join(argv),
         ))
     return steps
-
-
-Runner = Callable[[list[str], Path], subprocess.CompletedProcess[str]]
 
 
 def _default_runner(
