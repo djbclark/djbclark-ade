@@ -2,8 +2,9 @@
 
 One operator, one Mac, many coding agents run as one environment: the skills every agent loads, the few tools
 that start, steer and review them, and the docs that record what was verified. **Paseo is the only harness**
-(2026-10-31). Providers kept (pool audit 2026-11-06, rulings 2026-11-07): **claude, codex, cursor, antigravity,
-opencode, omp, hermes**, each on its own paid pool, and **grok-bot** (Cursor-billed, through peer-link). Agents
+(2026-10-31). Providers kept (pool audit 2026-11-06, rulings 2026-11-07; Pi sole-TUI 2026-11-08/09): **claude, codex,
+cursor, antigravity, pi, hermes**, each on its own paid pool, and **grok-bot** (Cursor-billed, through peer-link).
+omp/OpenCode are retired as live TUIs (routing `retired = true`; packaging may remain until Wave 6 cleanup). Agents
 read [AGENTS.md](AGENTS.md) (`CLAUDE.md` links to it) first; this page is the map.
 
 ## The loop
@@ -27,9 +28,9 @@ read [AGENTS.md](AGENTS.md) (`CLAUDE.md` links to it) first; this page is the ma
 | `skills/` | the canonical copy of every hand-written skill (edit here, never through a TUI's path); roster below |
 | `bin/` | the tools; roster below. `libexec/git-hooks/` and `libexec/agent-bin/git` are the git guard's hooks and shim |
 | `claude/` | Claude Code `agents/` (`adversary`, `backend`, `fable-deep`, `ux`), `hooks/`, `commands/` (only `resume.md`), linked from `~/.claude/` |
-| `agents/<tui>/*.tmpl` | the live Claude, Codex, opencode and Hermes config files as templates, secrets as `{{ secret "NAME" }}`; `bin/ade-template-check` is their gate ([agents/README.md](agents/README.md)) |
+| `agents/<tui>/*.tmpl` | live Claude, Codex and Hermes config templates (opencode tmpl is residual packaging); secrets as `{{ secret "NAME" }}`; `bin/ade-template-check` is their gate ([agents/README.md](agents/README.md)) |
 | `config/` | `routing.toml` (pools, `[lead].fable_lead`), `gates.toml` (frontier allowance), `secret-deny.toml`, `pr-policy.toml`, schemas |
-| `tools/acp-run/`, `opencode-plugins/`, `omp/` | the ACP client (kept for the dispatch shim, removed with it in Wave 6's follow-up PR); OpenCode plugins; omp's commands |
+| `tools/acp-run/`, `opencode-plugins/`, `omp/` | transitional ACP client + residual omp/OpenCode packaging (Wave 6 deletion / Pi sole-TUI cleanup) |
 | `docs/` | AGENTS.md lists the live docs; `docs/history/` holds retired designs and records, `docs/slim/` the slim-down's plan and log |
 | `changelog.d/`, `graft/` | one changelog fragment per PR (review rule 10); the generated context graph (`graft build`) |
 
@@ -42,8 +43,8 @@ read [AGENTS.md](AGENTS.md) (`CLAUDE.md` links to it) first; this page is the ma
 ~/src/djbclark-ade/bin/ade-update                       # fast-forward, relink skills, check links, print the changelog delta
 ```
 
-Targets: `~/.claude/skills` (cursor-agent reads it too), `~/.agents/skills` (Codex), `~/.config/opencode/skills`,
-Hermes' external dir, `~/.omp/agent/skills`, a copy for Grok Bot; roots: this repo, `~/ops/site-private/skills`,
+Targets: `~/.claude/skills` (cursor-agent reads it too), `~/.agents/skills` (Codex + Pi),
+Hermes' external dir, a copy for Grok Bot; roots: this repo, `~/ops/site-private/skills`,
 `~/ops/site-public-djbclark/skills`. Then `/reload-skills` in running Claude sessions. Paseo's `paseo*` skills come
 from Paseo (`npx skills add getpaseo/paseo`). Details: [docs/skill-everywhere.md](docs/skill-everywhere.md).
 
