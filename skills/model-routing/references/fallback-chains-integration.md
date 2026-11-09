@@ -17,7 +17,7 @@ These are separate chains today. A unified query or edit has to know which layer
 3. Hermes side routes: compression, MoA, `delegate_task`.
 4. LiteLLM `router_settings.fallbacks`.
 5. (`herdr-ai` default-model fallback: retired from djbclark-ade 2026-10-31.)
-6. `acp-run` Claude transport fallback (not a model chain).
+6. `acp-run` Claude transport fallback (not a model chain; transitional Wave 6 shim, leaves ~2026-11-20 with `tools/acp-run`).
 
 ## Observed gaps
 
