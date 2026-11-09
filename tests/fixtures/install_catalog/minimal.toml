@@ -1,0 +1,41 @@
+schema_version = 1
+
+[[component]]
+id = "tool-a"
+class = "hard"
+summary = "fixture hard tool"
+install = "UNKNOWN"
+update = "UNKNOWN"
+probe = "UNKNOWN"
+presence = "python3"
+platforms = ["linux"]
+
+[[component]]
+id = "tool-b"
+class = "offered"
+chosen = false
+summary = "unchosen offered"
+install = "UNKNOWN"
+presence = "definitely-not-on-path-xyz"
+platforms = ["linux"]
+
+[[component]]
+id = "tool-c"
+class = "optional"
+chosen = true
+summary = "chosen optional missing"
+install = "echo install-c"
+presence = "definitely-not-on-path-abc"
+platforms = ["linux"]
+
+[[key]]
+name = "EXAMPLE_API_KEY"
+components = ["tool-a"]
+create_url = "UNKNOWN"
+verify = "UNKNOWN"
+expiry = "unknown"
+
+[[login]]
+id = "example-login"
+summary = "fixture login"
+command = "UNKNOWN"

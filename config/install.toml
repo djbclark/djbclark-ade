@@ -1,0 +1,422 @@
+# Transitional install catalog (schema_version=1), 2026-11-09.
+# Used when config/ade.toml is absent. Values are references and recipes, never secret values.
+# install/update/probe = "UNKNOWN" means not yet recorded. presence = PATH basename for observe-only doctor.
+# chosen is required for offered/optional; hard components are always expected.
+
+schema_version = 1
+
+# --- hard ---
+
+[[component]]
+id = "just"
+class = "hard"
+summary = "Recipe runner; bootstrap installs it if missing"
+source = "https://github.com/casey/just"
+install = "UNKNOWN"
+update = "UNKNOWN"
+probe = "just --version"
+presence = "just"
+platforms = ["mac", "linux"]
+
+[[component]]
+id = "git"
+class = "hard"
+summary = "Source control"
+install = "UNKNOWN"
+update = "UNKNOWN"
+probe = "git --version"
+presence = "git"
+platforms = ["mac", "linux"]
+
+[[component]]
+id = "gh"
+class = "hard"
+summary = "GitHub CLI"
+source = "https://cli.github.com"
+install = "UNKNOWN"
+update = "UNKNOWN"
+probe = "gh --version"
+presence = "gh"
+platforms = ["mac", "linux"]
+
+[[component]]
+id = "uv"
+class = "hard"
+summary = "Python tool runner used by bin/pytest and install paths"
+source = "https://github.com/astral-sh/uv"
+install = "UNKNOWN"
+update = "UNKNOWN"
+probe = "uv --version"
+presence = "uv"
+platforms = ["mac", "linux"]
+
+[[component]]
+id = "sudo-secretspec"
+class = "hard"
+summary = "Only way a key reaches a tool (review rule 3)"
+source = "https://github.com/frdminc/sudo-secretspec"
+install = "UNKNOWN"
+update = "UNKNOWN"
+probe = "UNKNOWN"
+presence = "sudo-secretspec"
+platforms = ["mac", "linux"]
+notes = "Hard by operator ruling 2026-11-07"
+
+[[component]]
+id = "aiuse"
+class = "hard"
+summary = "Quota reading for routing"
+source = "https://github.com/djbclark/aiuse"
+install = "UNKNOWN"
+update = "UNKNOWN"
+probe = "UNKNOWN"
+presence = "aiuse"
+platforms = ["mac", "linux"]
+notes = "Hard by operator ruling 2026-11-07"
+
+[[component]]
+id = "cswap"
+class = "hard"
+summary = "claude-swap; aiuse reads it"
+install = "UNKNOWN"
+update = "UNKNOWN"
+probe = "UNKNOWN"
+presence = "cswap"
+platforms = ["mac", "linux"]
+
+[[component]]
+id = "paseo"
+class = "hard"
+summary = "Sole harness"
+source = "https://github.com/getpaseo/paseo"
+install = "UNKNOWN"
+update = "UNKNOWN"
+probe = "paseo --version"
+presence = "paseo"
+platforms = ["mac", "linux"]
+
+[[component]]
+id = "graft"
+class = "hard"
+summary = "Repo context graph CLI"
+source = "https://www.npmjs.com/package/@nanonets/graft"
+install = "UNKNOWN"
+update = "UNKNOWN"
+probe = "graft --version"
+presence = "graft"
+platforms = ["mac", "linux"]
+
+[[component]]
+id = "pi"
+class = "hard"
+summary = "Sole general-purpose third-party TUI"
+install = "UNKNOWN"
+update = "UNKNOWN"
+probe = "UNKNOWN"
+presence = "pi"
+platforms = ["mac", "linux"]
+notes = "Pi policy 2026-11-08; archived omp/OpenCode/Crush are never reinstall targets"
+
+[[component]]
+id = "claude-code"
+class = "hard"
+summary = "Vendor client for Claude monthly plan"
+install = "UNKNOWN"
+update = "UNKNOWN"
+probe = "UNKNOWN"
+presence = "claude"
+platforms = ["mac", "linux"]
+
+[[component]]
+id = "codex"
+class = "hard"
+summary = "Vendor client for Codex monthly plan (not OpenAI API credits)"
+install = "UNKNOWN"
+update = "UNKNOWN"
+probe = "UNKNOWN"
+presence = "codex"
+platforms = ["mac", "linux"]
+
+[[component]]
+id = "cursor-cli"
+class = "hard"
+summary = "Cursor CLI / vendor client"
+install = "UNKNOWN"
+update = "UNKNOWN"
+probe = "UNKNOWN"
+presence = "cursor"
+platforms = ["mac", "linux"]
+
+[[component]]
+id = "skill-everywhere"
+class = "hard"
+summary = "Link skills into every TUI from this repo"
+source = "bin/skill-everywhere"
+install = "UNKNOWN"
+update = "UNKNOWN"
+probe = "UNKNOWN"
+presence = "skill-everywhere"
+platforms = ["mac", "linux"]
+
+# --- offered (chosen recorded for this operator; new users are asked) ---
+
+[[component]]
+id = "hermes"
+class = "offered"
+chosen = true
+summary = "Offered Hermes install and basic setup (S3a)"
+install = "UNKNOWN"
+update = "UNKNOWN"
+probe = "UNKNOWN"
+presence = "hermes"
+platforms = ["mac", "linux"]
+
+[[component]]
+id = "peer-link"
+class = "offered"
+chosen = true
+summary = "Grok Bot channel (frdminc/peer-link)"
+source = "https://github.com/frdminc/peer-link"
+install = "UNKNOWN"
+update = "UNKNOWN"
+probe = "UNKNOWN"
+platforms = ["mac", "linux"]
+
+[[component]]
+id = "firecrawl-router"
+class = "offered"
+chosen = true
+summary = "bin/firecrawl-router toward a firecrawl endpoint"
+source = "bin/firecrawl-router"
+install = "UNKNOWN"
+update = "UNKNOWN"
+probe = "UNKNOWN"
+platforms = ["mac", "linux"]
+
+[[component]]
+id = "litellm"
+class = "offered"
+chosen = true
+summary = "LiteLLM proxy fork; Hermes fallback"
+install = "UNKNOWN"
+update = "UNKNOWN"
+probe = "UNKNOWN"
+platforms = ["mac", "linux"]
+
+# --- optional (off by default unless chosen) ---
+
+[[component]]
+id = "1password"
+class = "optional"
+chosen = false
+summary = "1Password app, op CLI, and skill"
+install = "UNKNOWN"
+update = "UNKNOWN"
+probe = "UNKNOWN"
+presence = "op"
+platforms = ["mac", "linux"]
+
+[[component]]
+id = "grok-bot-setup"
+class = "optional"
+chosen = false
+summary = "Cloud Grok Bot side setup (Cursor-billed; not SuperGrok)"
+install = "UNKNOWN"
+update = "UNKNOWN"
+probe = "UNKNOWN"
+platforms = ["mac", "linux"]
+notes = "Distinct from cancelled SuperGrok / Pi xai-oauth allowance"
+
+[[component]]
+id = "github-advanced-security"
+class = "optional"
+chosen = false
+summary = "Enable GHAS where the account allows"
+install = "UNKNOWN"
+update = "UNKNOWN"
+probe = "UNKNOWN"
+platforms = ["mac", "linux"]
+
+[[component]]
+id = "hosted-firecrawl"
+class = "optional"
+chosen = false
+summary = "firecrawl.dev API upstream for the router"
+install = "UNKNOWN"
+update = "UNKNOWN"
+probe = "UNKNOWN"
+platforms = ["mac", "linux"]
+
+[[component]]
+id = "greptile"
+class = "optional"
+chosen = false
+summary = "Greptile CLI/app and skill"
+install = "UNKNOWN"
+update = "UNKNOWN"
+probe = "UNKNOWN"
+platforms = ["mac", "linux"]
+
+[[component]]
+id = "coderabbit"
+class = "optional"
+chosen = false
+summary = "CodeRabbit CLI/app and skill"
+install = "UNKNOWN"
+update = "UNKNOWN"
+probe = "UNKNOWN"
+platforms = ["mac", "linux"]
+
+[[component]]
+id = "herdr-bridges"
+class = "optional"
+chosen = false
+summary = "herdr4paseo / paseo4herdr and herdr-server-run only if herdr still runs"
+install = "UNKNOWN"
+update = "UNKNOWN"
+probe = "UNKNOWN"
+platforms = ["mac", "linux"]
+notes = "Archives preserved; do not auto-reinstall herdr"
+
+# --- suggested / never (recorded, not installed by default) ---
+
+[[component]]
+id = "ovhcloud-hosting"
+class = "suggested"
+chosen = false
+summary = "Suggested always-on host vendor; not installed automatically"
+install = "UNKNOWN"
+update = "UNKNOWN"
+probe = "UNKNOWN"
+platforms = ["mac", "linux"]
+
+[[component]]
+id = "paid-plans"
+class = "never"
+chosen = false
+summary = "Paid plans themselves are never installed; users buy and log in"
+install = "UNKNOWN"
+update = "UNKNOWN"
+probe = "UNKNOWN"
+platforms = ["mac", "linux"]
+
+# --- key references (names only; never values) ---
+
+[[key]]
+name = "ANTHROPIC_API_KEY"
+components = ["pi"]
+create_url = "https://console.anthropic.com/settings/keys"
+verify = "UNKNOWN"
+expiry = "unknown"
+
+[[key]]
+name = "OPENAI_API_KEY"
+components = ["pi"]
+create_url = "https://platform.openai.com/api-keys"
+verify = "UNKNOWN"
+expiry = "unknown"
+notes = "API credits through Pi; distinct from Codex monthly"
+
+[[key]]
+name = "GEMINI_API_KEY"
+components = ["pi"]
+create_url = "https://aistudio.google.com/apikey"
+verify = "UNKNOWN"
+expiry = "unknown"
+
+[[key]]
+name = "OPENROUTER_API_KEY"
+components = ["pi"]
+create_url = "https://openrouter.ai/keys"
+verify = "UNKNOWN"
+expiry = "unknown"
+
+[[key]]
+name = "DEEPSEEK_API_KEY"
+components = ["pi"]
+create_url = "https://platform.deepseek.com/api_keys"
+verify = "UNKNOWN"
+expiry = "unknown"
+
+[[key]]
+name = "ZAI_CODING_PLAN_API_KEY"
+components = ["pi"]
+create_url = "UNKNOWN"
+verify = "UNKNOWN"
+expiry = "unknown"
+
+[[key]]
+name = "CURSOR_API_KEY"
+components = ["cursor-cli"]
+create_url = "UNKNOWN"
+verify = "UNKNOWN"
+expiry = "unknown"
+
+[[key]]
+name = "EXA_API_KEY"
+components = []
+create_url = "https://dashboard.exa.ai"
+verify = "UNKNOWN"
+expiry = "unknown"
+
+[[key]]
+name = "JINA_API_KEY"
+components = []
+create_url = "https://jina.ai"
+verify = "UNKNOWN"
+expiry = "unknown"
+
+[[key]]
+name = "TELEGRAM_BOT_TOKEN"
+components = ["hermes"]
+create_url = "UNKNOWN"
+verify = "UNKNOWN"
+expiry = "unknown"
+notes = "Via BotFather; login/consent distinct from key validation"
+
+[[key]]
+name = "FIRECRAWL_GITHUB_PUBLIC_TOKEN"
+components = ["firecrawl-router"]
+create_url = "https://github.com/settings/personal-access-tokens/new"
+verify = "UNKNOWN"
+expiry = "unknown"
+notes = "Known to expire; expiry probe is a later managed phase"
+
+[[key]]
+name = "GREPTILE_API_KEY"
+components = ["greptile"]
+create_url = "UNKNOWN"
+verify = "UNKNOWN"
+expiry = "unknown"
+
+# --- login checks (not keys) ---
+
+[[login]]
+id = "claude-code"
+summary = "Claude Code account login for monthly plan"
+command = "UNKNOWN"
+
+[[login]]
+id = "codex"
+summary = "Codex vendor login for monthly plan"
+command = "UNKNOWN"
+
+[[login]]
+id = "cursor"
+summary = "Cursor account login"
+command = "UNKNOWN"
+
+[[login]]
+id = "antigravity"
+summary = "Paseo antigravity / Google AI plan login"
+command = "UNKNOWN"
+
+[[login]]
+id = "github"
+summary = "gh auth login"
+command = "gh auth login"
+
+[[login]]
+id = "sudo-secretspec"
+summary = "sudo-secretspec configured for this machine"
+command = "UNKNOWN"
