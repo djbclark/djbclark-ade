@@ -188,18 +188,34 @@ platforms = ["mac", "linux"]
 notes = "npm bin is codex. Monthly-plan login is a separate [[login]] check; distinct from OPENAI_API_KEY."
 
 [[component]]
+id = "node"
+class = "hard"
+summary = "Node.js + npm (runtime for paseo/graft/pi/claude-code/codex npm packages)"
+source = "https://nodejs.org/"
+install = "Mac: brew install node; Linux: distro nodejs/npm or nodesource (system_argv still UNKNOWN)"
+update = "Mac: brew upgrade node; Linux: package manager"
+probe = "node --version && npm --version"
+probe_argv = ["node", "--version"]
+presence = "node"
+needs_system = true
+system_argv_darwin = ["brew", "install", "node"]
+platforms = ["mac", "linux"]
+notes = "Hard prerequisite for every npm install_argv row. Linux system_argv still UNKNOWN (distro vs nodesource). Preview Mac with apply --system --dry-run."
+
+[[component]]
 id = "cursor-cli"
 class = "hard"
 summary = "Cursor CLI / vendor client (agent binary)"
 source = "https://cursor.com/docs/cli/installation"
-install = "curl https://cursor.com/install -fsS | bash (official installer → ~/.local/bin/agent)"
+install = "ade-user-install cursor-cli (fetches lab tarball → ~/.local/share/cursor-agent + ~/.local/bin/agent)"
+install_argv = ["{bin}/ade-user-install", "cursor-cli", "--prefix", "{prefix}"]
 update = "agent update"
 update_argv = ["agent", "update"]
 probe = "agent --version"
 probe_argv = ["agent", "--version"]
 presence = "agent"
 platforms = ["mac", "linux"]
-notes = "Official binary is agent (not cursor). install_argv left UNKNOWN: the published installer is a curl|bash pipe (no argv-list path yet; do not shell=True). Recorded update/probe only. Login is a separate [[login]] check."
+notes = "Official binary is agent (not cursor). Version pin is read from https://cursor.com/install; tarball fetched with urllib (no curl|bash, no shell=True). Login is a separate [[login]] check."
 
 [[component]]
 id = "skill-everywhere"
@@ -238,14 +254,15 @@ class = "offered"
 chosen = true
 summary = "Offered Hermes install and basic setup (S3a)"
 source = "https://github.com/NousResearch/hermes-agent"
-install = "curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash (→ ~/.hermes + hermes on PATH)"
+install = "ade-user-install hermes (downloads install.sh, runs bash install.sh --non-interactive)"
+install_argv = ["{bin}/ade-user-install", "hermes"]
 update = "hermes update"
 update_argv = ["hermes", "update"]
 probe = "hermes doctor"
 probe_argv = ["hermes", "doctor"]
 presence = "hermes"
 platforms = ["mac", "linux"]
-notes = "Official installer is curl|bash (no install_argv yet; do not shell=True). S3a checklist / hermes-setup remain later. peer-link and LiteLLM fork stay separate components."
+notes = "Avoids curl|bash by urllib-fetching install.sh then argv `bash <temp>/install.sh --non-interactive` (shell=False). S3a checklist / hermes-setup remain later. peer-link and LiteLLM fork stay separate components."
 
 [[component]]
 id = "peer-link"

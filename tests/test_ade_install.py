@@ -64,14 +64,23 @@ def test_repo_install_toml_checks_clean():
         "@anthropic-ai/claude-code",
     ]
     assert by_id["codex"].get("install_argv") == ["npm", "install", "-g", "@openai/codex"]
+    assert by_id["node"].get("needs_system") is True
+    assert by_id["node"].get("system_argv_darwin") == ["brew", "install", "node"]
+    assert by_id["node"].get("system_argv") is None  # Linux still UNKNOWN
+    assert by_id["node"].get("probe_argv") == ["node", "--version"]
     assert by_id["cursor-cli"].get("presence") == "agent"
     assert by_id["cursor-cli"].get("probe_argv") == ["agent", "--version"]
     assert by_id["cursor-cli"].get("update_argv") == ["agent", "update"]
-    assert by_id["cursor-cli"].get("install_argv") is None  # curl|bash; no argv-list yet
+    assert by_id["cursor-cli"].get("install_argv") == [
+        "{bin}/ade-user-install",
+        "cursor-cli",
+        "--prefix",
+        "{prefix}",
+    ]
     assert by_id["hermes"].get("chosen") is True
     assert by_id["hermes"].get("probe_argv") == ["hermes", "doctor"]
     assert by_id["hermes"].get("update_argv") == ["hermes", "update"]
-    assert by_id["hermes"].get("install_argv") is None  # curl|bash; no argv-list yet
+    assert by_id["hermes"].get("install_argv") == ["{bin}/ade-user-install", "hermes"]
     assert by_id["peer-link"].get("install_argv") is None  # private; prose only
     assert by_id["litellm"].get("install_argv") is None  # fork/role; prose only
     assert by_id["grok-bot-setup"].get("install_argv") == [
@@ -347,3 +356,53 @@ def test_user_install_uv_url_linux_x86():
     assert url.endswith("uv-x86_64-unknown-linux-gnu.tar.gz")
     jurl = aui.just_download_url("linux", "x86_64", "1.40.0")
     assert "just-1.40.0-x86_64-unknown-linux-musl.tar.gz" in jurl
+
+
+def test_cursor_version_re_and_safe_extract(tmp_path):
+    import io
+    import tarfile
+
+    sample = (
+        'DOWNLOAD_URL="https://downloads.cursor.com/lab/'
+        '2026.11.05-86047df/${OS}/${ARCH}/agent-cli-package.tar.gz"\n'
+    )
+    assert aui.CURSOR_VERSION_RE.search(sample).group(1) == "2026.11.05-86047df"
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        info = tarfile.TarInfo(name="dist-package/cursor-agent")
+        payload = b"#!/bin/sh\necho agent\n"
+        info.size = len(payload)
+        info.mode = 0o755
+        tar.addfile(info, io.BytesIO(payload))
+    dest = tmp_path / "extract"
+    aui._safe_extract_tar_gz(buf.getvalue(), dest)
+    assert (dest / "cursor-agent").read_bytes().startswith(b"#!")
+
+    bad = io.BytesIO()
+    with tarfile.open(fileobj=bad, mode="w:gz") as tar:
+        info = tarfile.TarInfo(name="dist-package/foo/../../../etc/passwd")
+        payload = b"x"
+        info.size = 1
+        tar.addfile(info, io.BytesIO(payload))
+    with pytest.raises(aui.UserInstallError, match="unsafe|escapes"):
+        aui._safe_extract_tar_gz(bad.getvalue(), tmp_path / "bad")
+
+
+def test_hermes_and_cursor_dry_run(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        aui,
+        "_resolve_cursor_version",
+        lambda: "2026.11.05-86047df",
+    )
+    prefix = tmp_path / "bin"
+    result = aui.install_cursor_cli(prefix=prefix, share=tmp_path / "share", dry_run=True)
+    assert result["action"] == "would-fetch"
+    assert "2026.11.05-86047df" in result["url"]
+    assert result["dest"] == str(prefix / "agent")
+    assert not prefix.exists()
+
+    h = aui.install_hermes(dry_run=True)
+    assert h["action"] == "would-run-script"
+    assert h["url"] == aui.HERMES_INSTALL_SCRIPT
+    assert h["argv"][-1] == "--non-interactive"

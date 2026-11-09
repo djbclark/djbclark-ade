@@ -69,8 +69,11 @@ just install-apply-dry
   `--system --dry-run` previews `system_argv` as `would-system-install`.
   Executing `system_argv` is always refused (exit 2). Exit 0 ok, 1
   blocked/failed, 2 system-exec refused / usage.
-- `ade-user-install uv|just|link <name>` fetches GitHub release binaries or
-  symlinks a repo `bin/` tool into the prefix. No `shell=True`, no root.
+- `ade-user-install uv|just|cursor-cli|hermes|link <name>` fetches release
+  binaries / vendor packages or symlinks a repo `bin/` tool into the prefix.
+  No `shell=True`, no root. Cursor reads the version pin from
+  `https://cursor.com/install` then downloads the lab tarball; Hermes
+  urllib-fetches `install.sh` and runs `bash <temp>/install.sh --non-interactive`.
 
 ## E. Recorded recipes (2026-11-09)
 
@@ -78,6 +81,7 @@ just install-apply-dry
 | --- | --- |
 | `just`, `uv` | `ade-user-install` release fetch → `{prefix}` |
 | `skill-everywhere`, `firecrawl-router` | `ade-user-install link` into `{prefix}` |
+| `node` | Mac `system_argv_darwin` `brew install node`; Linux system recipe still UNKNOWN; `node --version` probe |
 | `graft` | `npm install -g @nanonets/graft` (user npm prefix) |
 | `git`, `gh` | `needs_system` + Linux `system_argv` (`apt-get`) + `system_argv_darwin` (`brew`); dry-run only |
 | `aiuse` | `uv tool install git+https://github.com/djbclark/aiuse` |
@@ -86,8 +90,8 @@ just install-apply-dry
 | `pi` | `npm install -g @mariozechner/pi-coding-agent` |
 | `claude-code` | `npm install -g @anthropic-ai/claude-code` (presence `claude`) |
 | `codex` | `npm install -g @openai/codex` |
-| `cursor-cli` | probe/update only (`agent --version` / `agent update`); install is official curl\|bash (no `install_argv` yet) |
-| `hermes` (offered) | probe/update only (`hermes doctor` / `hermes update`); install is official curl\|bash (no `install_argv` yet) |
+| `cursor-cli` | `ade-user-install cursor-cli` (lab tarball → `~/.local/share/cursor-agent` + `{prefix}/agent`); update `agent update` |
+| `hermes` (offered) | `ade-user-install hermes` (script fetch + `bash … --non-interactive`); update `hermes update` |
 | `peer-link` (offered) | prose only — private `frdminc/peer-link` clone (`~/src/peer-link`); no `install_argv` until operator grants access |
 | `litellm` (offered) | prose only — operator fork at `~/src/litellm` / site-djbclark `roles/litellm`; no stock auto-apply |
 | `grok-bot-setup` (optional) | `npm install -g grok-bot-setup` (`adapters help` probe) |
@@ -97,6 +101,6 @@ just install-apply-dry
 ## F. Next units
 
 Live system apply (root/`apt`/`brew` execution with ownership ledger), remaining
-owner installers (sudo-secretspec Linux tarball, curl-free Cursor CLI fetch, Hermes
-offered path, Paseo desktop/daemon and skill bundle), managed key verify probes.
-S4 jobs stay explicit later work.
+owner installers (sudo-secretspec Linux tarball, Linux node/`npm` system_argv,
+Paseo desktop/daemon and skill bundle), managed key verify probes. S4 jobs stay
+explicit later work.
