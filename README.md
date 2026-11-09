@@ -162,6 +162,7 @@ Skills (22, from each `skills/*/SKILL.md`):
 | [`route_agent.py`](bin/route_agent.py) | Pick which vendor should run a piece of work, from capability and headroom. |
 | [`skill-everywhere`](bin/skill-everywhere) | Make a shared skill visible to every agent TUI on this machine by symlinking it into each TUI's user-level skills dir. |
 | [`wait-file`](bin/wait-file) | Block until a file the waited-on command writes is ready, with a hard timeout. |
+| [`wave6-delete-check`](bin/wave6-delete-check) | Refuse Wave 6 shim deletion until gates pass (2026-11-09). |
 <!-- roster:end -->
 
 ## Workflow migration
