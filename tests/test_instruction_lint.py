@@ -160,8 +160,7 @@ def test_explicit_files_replace_defaults(tmp_path):
 def test_tilde_file_args_expand(tmp_path, monkeypatch):
     """Quoted ~/AGENTS.md must expand (issue 284 D7: home instruction files)."""
     home = tmp_path / "home"
-    write(home, "AGENTS.md", "Short home instructions.
-")
+    write(home, "AGENTS.md", "Short home instructions.\n")
     monkeypatch.setenv("HOME", str(home))
     # --root is an unrelated scratch dir so the FILE path is the only hit.
     other = tmp_path / "other"
@@ -173,16 +172,10 @@ def test_tilde_file_args_expand(tmp_path, monkeypatch):
 
 def test_home_root_discovers_agents_and_home_agents_mdc(tmp_path):
     """--root ~ (here a fixture home) picks up AGENTS.md and .cursor/rules/home-agents.mdc."""
-    write(tmp_path, "AGENTS.md", "Home AGENTS body.
-")
+    write(tmp_path, "AGENTS.md", "Home AGENTS body.\n")
     write(tmp_path, ".cursor/rules/home-agents.mdc",
-          "---
-alwaysApply: true
----
-Home cursor rule.
-")
-    write(tmp_path, ".cursor/rules/other.mdc", "ignored sibling still listed
-")
+          "---\nalwaysApply: true\n---\nHome cursor rule.\n")
+    write(tmp_path, ".cursor/rules/other.mdc", "ignored sibling still listed\n")
     rc, d = lint(tmp_path)
     assert rc == 0 and d["findings"] == []
     assert d["files"] == [
