@@ -43,9 +43,11 @@ Three more guards, all from 2026-11-07 (Argon review F-HIGH-2, and the Opus revi
   outside the worktree (a dangling link included). A relative Glob or Grep pattern is also resolved against its base,
   so `link/**` counts as outside. A repository that commits outward symlinks (site-djbclark's `skills/`) cannot be
   reviewed through this boundary.
-- **The deny list.** It is the hand list plus every `deny` pattern in `config/secret-deny.toml`, or in the rendered
-  `config/secret_deny_policy.json` where Python has no `tomllib`. A file that exists but does not parse refuses every
-  launch with exit 2. The TOML's `allow` exceptions do not carry over.
+- **The deny list.** It is the hand list plus every `deny` pattern of the effective `secret_deny` domain
+  (`ade_config.load_effective`; legacy `config/secret-deny.toml` / `SECRET_DENY_TOML` when `ade.toml` is absent), or
+  the rendered `config/secret_deny_policy.json` where Python has no `tomllib` or the checkout has no `ade_config.py`.
+  A file that exists but does not parse refuses every launch with exit 2. The policy's `allow` exceptions do not
+  carry over.
 - **The tripwire.** It acts after Claude may already have run a call. It is a second layer behind
   `blockReadsOutsideWorkingDirectories` and the deny rules, not the boundary itself. A passed self-check is cached under
   `REVIEW_LAUNCH_STATE_DIR` and trusted as found, because the caller already controls the launch.

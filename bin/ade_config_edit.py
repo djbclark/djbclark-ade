@@ -5,10 +5,10 @@ in place (or inserts a simple ``key = value`` under an existing/new table header
 then reparses with ``tomllib`` and checks the resulting tree equals the expected
 type-aware tree with exactly that path changed.
 
-Does not write unmanaged environment-override sources (ROUTING_POLICY / GATES_TOML).
+Does not write unmanaged environment-override sources
+(ROUTING_POLICY / GATES_TOML / CONTEXT_BUDGET_TOML / SECRET_DENY_TOML).
 Does not create ``config/ade.toml`` when absent (that would suppress legacy projection).
-Local sets record per-machine choices; production ``route_agent`` / ``ade_gates``
-readers have not adopted the effective-config loader yet (adoption=recorded-only).
+Successful sets report adoption=recorded-only (the writer does not re-init live modules).
 """
 from __future__ import annotations
 
@@ -28,8 +28,8 @@ import ade_config as ac
 
 ADOPTION_RECORDED_ONLY = "recorded-only"
 ADOPTION_NOTE = (
-    "local/repo set records the choice in TOML; route_agent and ade_gates still "
-    "read their legacy paths directly and have not adopted the effective-config reader"
+    "local/repo set records the choice in TOML; live modules that already call "
+    "ade_config.load_effective pick it up on their next load (not mid-process)"
 )
 
 # Paths under these roots are refused by the scalar editor (arrays / AoT / selectors).
@@ -46,7 +46,7 @@ class SetTarget:
 
     path: Path
     file_parts: tuple[str, ...]  # dotted path parts inside the file
-    kind: str  # "local" | "unified" | "legacy_routing" | "legacy_gates" | "legacy_context_budget"
+    kind: str  # "local" | "unified" | "legacy_routing" | "legacy_gates" | "legacy_context_budget" | "legacy_secret_deny"
     target: str  # "local" | "repo"
     created: bool
 
@@ -163,7 +163,8 @@ def resolve_set_target(
     root: Path,
     home: Path,
 ) -> SetTarget:
-    """Choose the real file to edit. Never writes ROUTING_POLICY / GATES_TOML / CONTEXT_BUDGET_TOML paths."""
+    """Choose the real file to edit. Never writes ROUTING_POLICY / GATES_TOML /
+    CONTEXT_BUDGET_TOML / SECRET_DENY_TOML paths."""
     if target not in ("local", "repo"):
         raise EditError(f"unknown --target {target!r} (want local or repo)")
     parts = split_dotted_path(dotted)
@@ -192,7 +193,7 @@ def resolve_set_target(
         )
 
     # Legacy projection: route domain keys live in routing.toml; gates.* in gates.toml;
-    # context_budget.* in context-budget.toml.
+    # context_budget.* in context-budget.toml; secret_deny.* in secret-deny.toml.
     if parts[0] == "gates":
         if len(parts) < 2:
             raise EditError("PATH gates alone is a table; scalar set needs a leaf under gates.*")
@@ -216,6 +217,19 @@ def resolve_set_target(
             target="repo",
             created=not ac.input_present(ac.default_context_budget_path(root)),
         )
+    if parts[0] == "secret_deny":
+        if len(parts) < 2:
+            raise EditError(
+                "PATH secret_deny alone is a table; "
+                "scalar set needs a leaf under secret_deny.*"
+            )
+        return SetTarget(
+            path=ac.default_secret_deny_path(root),
+            file_parts=parts[1:],  # strip effective "secret_deny." prefix
+            kind="legacy_secret_deny",
+            target="repo",
+            created=not ac.input_present(ac.default_secret_deny_path(root)),
+        )
     if parts[0] in ac.ROUTING_DOMAIN_KEYS:
         return SetTarget(
             path=ac.default_routing_path(root),
@@ -226,7 +240,8 @@ def resolve_set_target(
         )
     raise EditError(
         f"PATH {dotted!r}: with legacy projection (no config/ade.toml), "
-        f"repo set only supports routing-domain keys, gates.*, or context_budget.*"
+        f"repo set only supports routing-domain keys, gates.*, "
+        f"context_budget.*, or secret_deny.*"
     )
 
 
@@ -728,6 +743,12 @@ def validate_target_tree(data: dict[str, Any], target: SetTarget, *, root: Path)
     if target.kind == "legacy_context_budget":
         try:
             ac.project_context_budget_domain(data, label=str(target.path))
+        except ac.ConfigError as e:
+            raise EditError(str(e)) from e
+        return
+    if target.kind == "legacy_secret_deny":
+        try:
+            ac.project_secret_deny_domain(data, label=str(target.path))
         except ac.ConfigError as e:
             raise EditError(str(e)) from e
         return

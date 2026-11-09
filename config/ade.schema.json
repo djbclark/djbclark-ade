@@ -218,6 +218,46 @@
           "description": "Ceilings and per-directory overrides (legacy [budget] / [budget.\"~\"])."
         }
       }
+    },
+    "secret_deny": {
+      "type": "object",
+      "description": "Legacy secret-deny.toml version/deny/allow/[claude] project under secret_deny.* (docs/secret-deny.md).",
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "type": "integer",
+          "const": 1,
+          "description": "Policy format version; must be 1."
+        },
+        "deny": {
+          "type": "array",
+          "description": "Paths and globs the hook blocks (legacy top-level deny).",
+          "items": {
+            "type": "string"
+          }
+        },
+        "allow": {
+          "type": "array",
+          "description": "Exceptions that win over deny for the same path (legacy top-level allow).",
+          "items": {
+            "type": "string"
+          }
+        },
+        "claude": {
+          "type": "object",
+          "description": "Claude static permissions.deny patterns (legacy [claude]).",
+          "additionalProperties": false,
+          "properties": {
+            "static": {
+              "type": "array",
+              "description": "Patterns rendered as Read(...)/Edit(...) in the Claude settings template.",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
     }
   }
 }

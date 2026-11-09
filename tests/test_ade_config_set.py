@@ -248,6 +248,23 @@ def test_repo_context_budget_scalar_strips_prefix(home, tmp_path):
     assert data["budget"]["total"] == 31000
 
 
+def test_repo_secret_deny_scalar_strips_prefix(home, tmp_path):
+    root = tmp_path / "repo"
+    (root / "config").mkdir(parents=True)
+    shutil.copy(REPO / "config" / "ade.schema.json", root / "config" / "ade.schema.json")
+    sd = root / "config" / "secret-deny.toml"
+    sd.write_text('version = 1\ndeny = [".env"]\nallow = []\n[claude]\nstatic = [".env"]\n')
+    result = ace.set_scalar(
+        "secret_deny.version", 1, target="repo", root=root, home=home
+    )
+    assert result.target.kind == "legacy_secret_deny"
+    assert result.target.path == sd
+    assert result.changed is False  # no-op: already 1
+    data = ac.read_toml(sd)
+    assert data["version"] == 1
+    assert data["deny"] == [".env"]
+
+
 def test_unified_ade_toml_is_repo_source_when_present(home, tmp_path):
     root = tmp_path / "repo"
     (root / "config").mkdir(parents=True)

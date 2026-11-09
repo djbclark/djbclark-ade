@@ -136,6 +136,27 @@ def test_committed_policy_json_equals_a_fresh_render(fx):
     assert (fx / "policy.json").read_text() == POLICY_JSON.read_text()
 
 
+def test_default_path_uses_load_effective(fx, tmp_path, monkeypatch):
+    """S1: no --policy → effective secret_deny (legacy file when ade.toml absent)."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    out = fx / "from-effective.json"
+    tmpl = fx / "from-effective.tmpl"
+    shutil.copy(TMPL, tmpl)
+    r = subprocess.run(
+        [
+            sys.executable, str(RENDER),
+            "--policy-json", str(out),
+            "--claude-template", str(tmpl),
+        ],
+        capture_output=True, text=True, timeout=60, cwd=str(ROOT),
+        env={**dict(**{k: v for k, v in __import__("os").environ.items()}), "HOME": str(home)},
+    )
+    assert r.returncode == 0, r.stderr
+    assert out.read_text() == POLICY_JSON.read_text()
+
+
 def test_policy_json_shape(fx):
     render(fx)
     data = json.loads((fx / "policy.json").read_text())

@@ -7,8 +7,8 @@ config change).
 
 | piece | what |
 | --- | --- |
-| [`config/secret-deny.toml`](../config/secret-deny.toml) | the policy, the one copy: `deny`, `allow`, and `[claude] static` |
-| [`bin/render-secret-deny`](../bin/render-secret-deny) | renders the policy; `--check` reports drift |
+| [`config/secret-deny.toml`](../config/secret-deny.toml) | the policy, the one copy: `deny`, `allow`, and `[claude] static` (projects under `[secret_deny]` via `ade_config.load_effective`; see [config-migration.md](config-migration.md)) |
+| [`bin/render-secret-deny`](../bin/render-secret-deny) | renders the effective `secret_deny` domain (default) or an explicit `--policy` legacy file; `--check` reports drift |
 | [`config/secret_deny_policy.json`](../config/secret_deny_policy.json) | generated, committed: the deny and allow lists the hook reads (it runs under Python 3.9, which has no TOML reader) |
 | [`claude/hooks/secret_read_gate.py`](../claude/hooks/secret_read_gate.py) | the `PreToolUse` hook |
 | `agents/claude/settings.json.tmpl`, `permissions.deny` | the generated `Read(...)` and `Edit(...)` entries |
@@ -182,17 +182,20 @@ config change).
 
 ## D. Changing the policy
 
-- **D1.** Edit `config/secret-deny.toml`.
-- **D2.** Run `bin/render-secret-deny` (Python 3.11 or later). It rewrites `config/secret_deny_policy.json` and the
+- **D1.** Edit `config/secret-deny.toml` (or a local/unified `[secret_deny]` overlay once `ade.toml` is adopted).
+- **D2.** Run `bin/render-secret-deny` (Python 3.11 or later). With no `--policy` it loads the effective
+  `secret_deny` domain through `ade_config.load_effective` (legacy `config/secret-deny.toml` /
+  `SECRET_DENY_TOML` when `ade.toml` is absent). It rewrites `config/secret_deny_policy.json` and the
   `Read(...)`/`Edit(...)` entries of `permissions.deny` in `agents/claude/settings.json.tmpl`, by a text splice that keeps
   every other line and every `{{ ... }}` tag, then checks that the template still parses with the tags masked and differs
   only in that list.
 - **D3.** Commit the TOML, the JSON and the template together. `bin/render-secret-deny --check` exits 1 with a diff when
   either output is stale, 0 when clean, 2 on a usage error, an invalid policy or a template whose `permissions.deny`
-  list cannot be found. Options: `--policy`, `--policy-json`, `--claude-template`.
+  list cannot be found. Options: `--policy` (explicit legacy-format file), `--policy-json`, `--claude-template`.
 - **D4.** The live settings come from the template through the normal install path; the hook reaches
   `~/.claude/hooks/secret_read_gate.py` as a symlink into this checkout (`bin/ade-update` reports a missing link), and
-  finds the policy JSON from its own realpath (`../../config/`; `SECRET_DENY_POLICY` overrides it).
+  finds the policy JSON from its own realpath (`../../config/`; `SECRET_DENY_POLICY` overrides it). The hook itself
+  keeps reading that JSON (Python 3.9); it does not call `load_effective`.
 - **D5.** Tests: `tests/test_secret_read_gate.py` (the matrix, symlinks, Grep's walk, a Grep root `link/..`, glob
   readings, how `glob` and `type` combine, the `type` map and its live union against the installed `rg --type-list` and
   a fake `rg` on PATH (widening, a narrower list, a failing and a hanging one), Bash, the lines of a patch block under
