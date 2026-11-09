@@ -23,8 +23,11 @@ Gates:
 
 Evidence JSON must name a non-empty proof file per C3 key and Mac flag
 (`c3_proofs` / `mac_proofs`; paths relative to the evidence file's directory).
-The gate FAILCLOSEs when a proof path is absent — it never invents Mac
-stdout or outside-repo migration proofs. Stdlib only.
+The gate FAILCLOSEs when a proof path is absent, empty, or unreadable — it
+never invents Mac stdout or outside-repo migration proofs. Mac B1 idle
+captures must still be non-empty: record cmd + `verified: no match` (see
+docs/slim/wave6-follow-up.md); a bare empty `pgrep` redirect is not evidence.
+Stdlib only.
 """
 from __future__ import annotations
 
@@ -184,7 +187,9 @@ def _check_proof_file(
     try:
         if not path.is_file():
             return f"{reason_prefix}_proof_missing: not a file: {path}"
-        # Fail closed on empty captures (a claimed tick with no paste).
+        # Fail closed on empty captures (claimed tick with no paste). Idle Mac
+        # B1 probes that find no process must still write cmd + verified line —
+        # see docs/slim/wave6-follow-up.md capture recipe (Codex P2 on #417).
         if path.stat().st_size == 0:
             return f"{reason_prefix}_proof_missing: empty file: {path}"
         # Touch-read so an unreadable path cannot green the gate.

@@ -1,6 +1,7 @@
 # Wave 6 follow-up — shim and `acp-run` deletion readiness
 
-Snapshot: 2026-11-09 (C3 proof-file gate added same day). Queue Carried **item 33**. The slim-down's Wave 6
+Snapshot: 2026-11-09 (C3 proof-file gate; Mac B1 idle capture writes
+`verified: no match` so idle proofs stay non-empty). Queue Carried **item 33**. The slim-down's Wave 6
 **shipped the shims** (`docs/slim/PLAN.md` F). This doc is the **deletion
 readiness** checklist for the follow-up PR that removes
 `skills/session-finder/relay.py`, `bin/acp-dispatch`, and `tools/acp-run`
@@ -51,12 +52,17 @@ non-empty `mac_proofs` files named by the evidence JSON for
 `wave6-delete-check --evidence` (see shape below):
 
 ```bash
-# B1. No live shim argv (agents / launchd / leftover waiters)
-pgrep -lf 'relay\.py|acp-dispatch|acp-run' || true
-launchctl list 2>/dev/null | grep -E 'acp-dispatch|acp-run' || true
+# B1. No live shim argv (agents / launchd / leftover waiters).
+# Idle (no match) is the desired state — always record cmd + exit / verified line
+# so the capture is non-empty (wave6-delete-check FAILCLOSEs on empty proof files).
+echo "cmd: pgrep -lf 'relay\\.py|acp-dispatch|acp-run'"
+pgrep -lf 'relay\.py|acp-dispatch|acp-run' || echo "verified: no match (exit $?)"
+echo "cmd: launchctl list | grep -E 'acp-dispatch|acp-run'"
+launchctl list 2>/dev/null | grep -E 'acp-dispatch|acp-run' \
+  || echo "verified: no match (exit $?)"
 # B2. No outstanding dispatch records (C7). `acp-dispatch ls` does not exist —
 # use `check` on the state root and Paseo's label listing. Failures are real;
-# an empty/drained result is exit 0 / empty JSON.
+# an empty/drained result is exit 0 / empty JSON — still echo a verified line.
 STATE="${ACP_DISPATCH_STATE:-$HOME/.local/state/bigteam}"
 if ! command -v acp-dispatch >/dev/null 2>&1; then
   echo "B2: acp-dispatch not on PATH (record as drained only after uninstall + empty paseo ls)"
@@ -69,6 +75,7 @@ paseo ls -g --label ade.via=acp-dispatch --json
 # B3. Standing order 10 smoke without the shim (named ack path)
 paseo send --help >/dev/null
 paseo run --help >/dev/null
+echo "verified: paseo send/run --help ok"
 # optional: two-agent ack round with `paseo send --json --no-wait` and
 # `Please reply: ack <your id>` — see AGENTS.md order 10
 ```
@@ -78,7 +85,10 @@ alone are not enough: every C3 key and Mac flag needs a **non-empty proof
 file** named under `c3_proofs` / `mac_proofs` (paths relative to the evidence
 JSON's directory). The gate FAILCLOSEs (`c3_<key>_proof_missing` /
 `mac_<flag>_proof_missing`, exit 1) when a path is absent, empty or
-unreadable — it never invents Mac stdout or outside-repo captures:
+unreadable — it never invents Mac stdout or outside-repo captures. A
+successful Mac B1 idle probe (no matching process) must still leave a
+non-empty file (`cmd:` + `verified: no match`); an empty redirect is treated
+as a missing paste, not as idle proof:
 
 ```json
 {
@@ -132,15 +142,26 @@ it) must sit in the matching `c3_proofs` file. Mac proof files are
 operator-captured on the Mac from section B (paste B1/B2/B3 stdout); this
 readiness PR does **not** ship invented Mac proofs.
 
-Suggested capture (Mac; paths match the sample `mac_proofs` above):
+Suggested capture (Mac; paths match the sample `mac_proofs` above).
+**Do not** redirect bare `pgrep … || true` alone: when idle, that writes an
+empty file and `wave6-delete-check` reports `mac_*_proof_missing` even though
+idle is the desired state. Always record the command and an explicit
+`verified: no match` (or match listing) plus exit status:
 
 ```bash
 EVID=./wave6-evidence   # directory that will hold evidence.json + proofs/
 mkdir -p "$EVID/proofs"
 # B1 → relay_idle + acp_run_idle (split or share; both files must be non-empty)
-{ pgrep -lf 'relay\.py' || true; } > "$EVID/proofs/mac-b1-relay.txt"
-{ pgrep -lf 'acp-run' || true; launchctl list 2>/dev/null | grep -E 'acp-run' || true; } \
-  > "$EVID/proofs/mac-b1-acp-run.txt"
+{
+  echo "cmd: pgrep -lf 'relay\\.py'"
+  pgrep -lf 'relay\.py' || echo "verified: no match (exit $?)"
+} > "$EVID/proofs/mac-b1-relay.txt"
+{
+  echo "cmd: pgrep -lf 'acp-run'; launchctl list | grep -E 'acp-run'"
+  pgrep -lf 'acp-run' || echo "verified: no match pgrep (exit $?)"
+  launchctl list 2>/dev/null | grep -E 'acp-run' \
+    || echo "verified: no match launchctl (exit $?)"
+} > "$EVID/proofs/mac-b1-acp-run.txt"
 # B2 → acp_dispatch_idle
 {
   STATE="${ACP_DISPATCH_STATE:-$HOME/.local/state/bigteam}"
@@ -151,11 +172,23 @@ mkdir -p "$EVID/proofs"
   else
     acp-dispatch check "$STATE"
   fi
-  paseo ls -g --label ade.via=acp-dispatch --json
+  echo "cmd: paseo ls -g --label ade.via=acp-dispatch --json"
+  out=$(paseo ls -g --label ade.via=acp-dispatch --json 2>&1) || true
+  if [ -n "$out" ]; then
+    printf '%s\n' "$out"
+  else
+    echo "verified: no match (empty paseo ls)"
+  fi
 } > "$EVID/proofs/mac-b2-acp-dispatch.txt"
 # B3 → paseo_smoke_ok
-{ paseo send --help >/dev/null && paseo run --help >/dev/null && echo OK; } \
-  > "$EVID/proofs/mac-b3-paseo-smoke.txt"
+{
+  echo "cmd: paseo send --help; paseo run --help"
+  if paseo send --help >/dev/null && paseo run --help >/dev/null; then
+    echo "verified: paseo send/run --help ok (exit 0)"
+  else
+    echo "verified: FAILED (exit $?)"
+  fi
+} > "$EVID/proofs/mac-b3-paseo-smoke.txt"
 ```
 
 ## C. C3 gates (outside files; order 11)
