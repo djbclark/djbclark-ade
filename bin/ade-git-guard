@@ -15,10 +15,11 @@
 # exec-path first on its children's PATH, so they reach the real git, not this shim. (The hooks still run for those.)
 #
 # Installed as libexec/agent-bin/git (a relative symlink to ../../bin/ade-git-guard). Integration stage as of
-# 2026-10-25: only this guard, the hooks and bin/ade_claims.py exist (slice W1). Slices W3 (acp-dispatch exports
-# ADE_CLAIM_ID), W4 (acp-run puts libexec/agent-bin first on the PATH of every agent it launches) and W2 (the workspace launcher
-# installs the hooks into a new Paseo worktree; cow-pasture was removed 2026-11-06) are NOT wired yet, so nothing reaches git through here until they land; the
-# operator's shell, Orca and IDEs never will.
+# 2026-10-25: only this guard, the hooks and bin/ade_claims.py exist (slice W1). W3 (Paseo / claim plugin export
+# ADE_CLAIM_ID; open as PR stacks on the ade-claim plugin), W4 (libexec/agent-bin first on agent PATH; same stack)
+# and W2 (worktree.create.after installs hooks into a new Paseo worktree; cow-pasture removed 2026-11-06) land via
+# those PRs — not via the Wave 6 transitional acp-dispatch/acp-run shims (those leave ~2026-11-20). The
+# operator's shell and IDEs never go through this shim.
 # Design: design-isolation-report.md 3.4-3.5 (2026-10-24); O2 design: frontier-pr59-design-report.md (2026-10-25).
 #
 #   git ARGS...                           (the shim) run the real git, or refuse with exit 77
@@ -44,8 +45,8 @@
 # A broken guard (no python3, a crash) fails OPEN with a warning on stderr: a guard bug must not stop all git.
 #
 # Exit codes: 77 refused (EX_NOPERM); every other code is the real git's.
-# Environment: ADE_CLAIM_ID (the caller's claim id, exported by acp-dispatch), ACP_RUN_AGENT, PASEO_AGENT_ID (native
-# paseo run), ADE_STATE_DIR
+# Environment: ADE_CLAIM_ID (the caller's claim id, exported by the claim/plugin path or native
+# paseo run), ACP_RUN_AGENT (legacy agent marker), PASEO_AGENT_ID (native paseo run), ADE_STATE_DIR
 # (default ~/.local/state/ade; claims/ and guard.log live there), ADE_REAL_GIT (skip the PATH search),
 # ADE_PYTHON (default python3), ACP_OPERATOR_APPROVED=git-guard (allow and log one call).
 set -u
