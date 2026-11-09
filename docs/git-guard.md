@@ -22,7 +22,7 @@ fully resolved ref name, and a non-zero exit aborts the transaction. So:
    verbs, rename/copy destinations), and **fails closed** on what it cannot read: under the old design a parser miss was a
    bypass, now it is a false refusal with a readable message.
 
-## Integration status (2026-10-25; re-based 2026-11-07; plugin scaffold 2026-11-09; W3 draft 2026-11-09)
+## Integration status (2026-10-25; re-based 2026-11-07; plugin scaffold 2026-11-09; W3+W4 draft 2026-11-09)
 
 The guard, the hooks and the claim library exist; claims carry an owner and expire (`ade_claims.py new --ttl`, default
 72 h; `ade-git-guard claim ls`, slim-down E8). **A thin Paseo plugin lives at
@@ -33,13 +33,14 @@ The guard, the hooks and the claim library exist; claims carry an owner and expi
 | W2 | `worktree.create.after` (waiting) | `ade_claims.py new` from `{ worktree.path, worktree.branch }` plus `git rev-parse HEAD` and optional `remote.origin.url`. |
 | W3 | `agent.open.before` (waiting) | If an active claim exists for `request.cwd` **and** is unbound or owned by `request.agentId`, merge `ADE_CLAIM_ID=<claim id>` into the launch env (covers create's first open and resumes; never exports a foreign claim id). |
 | W3 | `agent.create.after` (notification) | If a claim for `agent.cwd` is unbound or already this agent, run `ade_claims.py bind-owner` (refuses overwriting another `owner.agent`). Cannot set env: Paseo's after-hook is fire-and-forget. |
+| W4 | `agent.open.before` (waiting) | Prepend trusted `libexec/agent-bin` to `PATH` so `git` resolves to the `ade-git-guard` shim (`ADE_AGENT_BIN` or `libexec/agent-bin` beside the plugin install). |
 
-The helper path is **not** taken from the agent's worktree (untrusted): only `ADE_CLAIMS_PY` or
-`bin/ade_claims.py` beside the plugin install. Claim lookup prefers `<git-dir>/ade-claim`, then
-`ade_claims.py list --json --state active` filtered by path. It is **not installed or enabled on the
-operator Mac yet**; nothing creates or binds claims in a live session until `paseo plugin install` wires it.
-Still to build: W2 follow-up (`ade-git-guard install` per new worktree if needed), W4 putting
-`libexec/agent-bin` first on each agent's PATH. The operator runs `ade-git-guard install <repo>` once over `~/src/*` (the
+The helper path is **not** taken from the agent's worktree (untrusted): only `ADE_CLAIMS_PY` /
+`ADE_AGENT_BIN` or `bin/ade_claims.py` / `libexec/agent-bin` beside the plugin install. Claim lookup
+prefers `<git-dir>/ade-claim`, then `ade_claims.py list --json --state active` filtered by path. It is
+**not installed or enabled on the operator Mac yet**; nothing creates or binds claims in a live session
+until `paseo plugin install` wires it. Still to build: W2 follow-up (`ade-git-guard install` per new
+worktree if needed). The operator runs `ade-git-guard install <repo>` once over `~/src/*` (the
 dangerous case is agent B in primary P moving Z's branch: the hook must be in P; the shim also installs it the first time
 an agent runs a non-read command there). The operator's shell and IDEs never go through the shim.
 

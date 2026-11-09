@@ -6,7 +6,7 @@ import {
   buildAdeClaimsBindOwnerArgv,
   buildAdeClaimsNewArgv,
   claimAllowsAgent,
-  mergeAdeClaimIdEnv,
+  mergeOpenBeforeEnv,
   parseAgentCreateAfterAgent,
   parseAgentOpenBeforeRequest,
   parseClaimPointer,
@@ -14,6 +14,7 @@ import {
   resolveAdeClaimsScript,
   resolveClaimForCwd,
   resolveTrustedAdeClaimsScript,
+  resolveTrustedAgentBinDir,
 } from "./claim-lib.mjs";
 
 /** Reviewed plugin directory (never the agent's worktree). */
@@ -105,7 +106,9 @@ export function registerWorktreeClaimHook(server) {
 }
 
 /**
- * W3: export ADE_CLAIM_ID on every open (create's first launch and resumes).
+ * W3+W4: on every open (create's first launch and resumes):
+ * - export ADE_CLAIM_ID when a claim exists for cwd
+ * - put trusted libexec/agent-bin first on PATH (git → ade-git-guard)
  * agent.create.after cannot change env (Paseo notification); open.before can.
  *
  * @param {{ addHook: (name: string, handler: Function) => () => void }} server
@@ -113,24 +116,28 @@ export function registerWorktreeClaimHook(server) {
 export function registerAgentClaimEnvHook(server) {
   return server.addHook("agent.open.before", async ({ request }) => {
     const parsed = parseAgentOpenBeforeRequest(request);
-    let script;
+    let agentBinDir = null;
     try {
-      script = resolveTrustedAdeClaimsScript(process.env, { pluginRoot: PLUGIN_ROOT });
+      agentBinDir = resolveTrustedAgentBinDir(process.env, { pluginRoot: PLUGIN_ROOT });
     } catch {
-      return undefined;
+      // PATH shim optional when ADE_AGENT_BIN unset and plugin is not beside a checkout.
     }
-    let claim;
+    let claimId = null;
     try {
-      claim = lookupClaimForCwd(parsed.cwd, script);
+      const script = resolveTrustedAdeClaimsScript(process.env, { pluginRoot: PLUGIN_ROOT });
+      const claim = lookupClaimForCwd(parsed.cwd, script);
+      if (claim && claimAllowsAgent(claim, parsed.agentId)) {
+        claimId = claim.id;
+      }
+      // Foreign/missing claim: still may prepend PATH; never export ADE_CLAIM_ID.
     } catch {
-      // No claim / unreadable registry: leave the launch alone.
-      return undefined;
+      // No claim / unreadable registry: still may prepend PATH.
     }
-    if (!claim || !claimAllowsAgent(claim, parsed.agentId)) {
-      // Missing claim or foreign owner: never export ADE_CLAIM_ID (is_mine trusts it).
-      return undefined;
-    }
-    const env = mergeAdeClaimIdEnv(parsed.env, claim.id);
+    const env = mergeOpenBeforeEnv(parsed.env, {
+      claimId,
+      agentBinDir,
+      fallbackPath: process.env.PATH,
+    });
     if (!env) return undefined;
     return { ...request, env };
   });
