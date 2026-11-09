@@ -202,8 +202,14 @@ copy_target() {  # copy_target <dir>; uses $bin $name $src $mode $dry
       "$name" "$src" "${bad//$'\n'/ }" >&2
   elif [[ $state == render && $mode == remove ]]; then state=copied
   elif [[ $state == render ]]; then
-    tmp=$(mktemp -d); render_copy "$src" "$tmp/x"
-    if diff -r "$tmp/x" "$dest" >/dev/null 2>&1; then state=copied; else state="stale copy"; fi
+    # Always rm the mktemp dir, including when render_copy fails under set -e (PR 20 LOW e).
+    tmp=$(mktemp -d)
+    if render_copy "$src" "$tmp/x"; then
+      if diff -r "$tmp/x" "$dest" >/dev/null 2>&1; then state=copied; else state="stale copy"; fi
+    else
+      state="stale copy"
+      printf 'warning: %s: render for %s failed; treating as stale copy\n' "$name" "$dest" >&2
+    fi
     rm -rf "$tmp"
   fi
   case $mode in
@@ -215,9 +221,24 @@ copy_target() {  # copy_target <dir>; uses $bin $name $src $mode $dry
     link)
       if [[ $state == copied ]]; then printf '  %-13s already copied\n' "$bin"
       elif [[ $state == missing || $state == "stale copy" ]]; then
-        # Render beside the target under a dot name, then swap it in.
-        act "copy to $dest ($state)" eval 'rm -rf "$dir/.ade-$name.new" && render_copy "$src" "$dir/.ade-$name.new" && rm -rf "$dest" && mv "$dir/.ade-$name.new" "$dest"'
-        ((dry)) || printf '  %-13s copied (was %s)\n' "$bin" "$state"
+        # Render beside the target under a dot name, then swap it in. A function (not eval+&&) so set -e
+        # sees render_copy's failure and the partial `.ade-*.new` is removed (PR 20 LOW e).
+        _copy_swap() {
+          local d=$1 n=$2 s=$3 dest=$4
+          rm -rf "$d/.ade-$n.new"
+          if ! render_copy "$s" "$d/.ade-$n.new"; then
+            rm -rf "$d/.ade-$n.new"
+            return 1
+          fi
+          rm -rf "$dest"
+          mv "$d/.ade-$n.new" "$dest"
+        }
+        if act "copy to $dest ($state)" _copy_swap "$dir" "$name" "$src" "$dest"; then
+          ((dry)) || printf '  %-13s copied (was %s)\n' "$bin" "$state"
+        else
+          printf '  %-13s copy failed; left alone\n' "$bin"
+          rc=1
+        fi
       else printf '  %-13s %s; left alone\n' "$bin" "$state"; rc=1; fi ;;
   esac
 }

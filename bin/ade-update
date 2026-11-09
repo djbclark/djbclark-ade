@@ -111,10 +111,12 @@ class Stop(Exception):
 
 
 def run(argv, cwd=None, env=None, timeout=LOCAL_TIMEOUT):
-    """argv list, never a shell. A timeout or a missing binary returns rc 124 / 127, never raises."""
+    """argv list, never a shell. A timeout or a missing binary returns rc 124 / 127, never raises.
+    stdout/stderr decode as UTF-8 with replacement (PR 20 LOW d): a non-UTF-8 upstream path must not
+    crash the process with an uncaught UnicodeDecodeError (rc 1, outside the documented exit set)."""
     try:
-        p = subprocess.run(argv, cwd=cwd, env=env, capture_output=True, text=True, timeout=timeout,
-                           stdin=subprocess.DEVNULL)
+        p = subprocess.run(argv, cwd=cwd, env=env, capture_output=True, timeout=timeout,
+                           stdin=subprocess.DEVNULL, encoding="utf-8", errors="replace")
         return p.returncode, p.stdout, p.stderr
     except subprocess.TimeoutExpired:
         return 124, "", f"timed out after {timeout}s: {shlex.join(argv)}"
@@ -543,22 +545,43 @@ def pull_failure_code(text):
     return EXIT_NON_FF if any(m in low for m in NON_FF_MARKERS) else EXIT_ERROR
 
 
-def collides(changed, dirty):
+def collides(changed, dirty, ignorecase=False):
     """The changed paths a pull cannot apply over the working tree, as {changed path: the colliding local path}: the
     same path, a local file or ignored directory above it (upstream adds foo/bar, `foo` is a local file; an ignored
-    `build/` and upstream's build/x), or a local path below it (upstream adds file foo, local foo/x exists)."""
-    local = {p.rstrip("/") for p in dirty}
+    `build/` and upstream's build/x), or a local path below it (upstream adds file foo, local foo/x exists).
+    When ignorecase (git `core.ignorecase`), paths compare case-insensitively so `--check` matches apply (PR 20 LOW a:
+    a case-only collision that git would refuse on a case-insensitive volume)."""
+    def key(p):
+        p = p.rstrip("/")
+        return p.casefold() if ignorecase else p
+
+    local = {}  # folded key -> one original local path (rstrip /)
+    for p in dirty:
+        local.setdefault(key(p), p.rstrip("/"))
     above = {}  # every ancestor directory of a local path -> one local path under it
-    for p in sorted(local):
-        parts = p.split("/")
+    for orig in sorted(local.values()):
+        parts = orig.split("/")
         for n in range(1, len(parts)):
-            above.setdefault("/".join(parts[:n]), p)
+            above.setdefault(key("/".join(parts[:n])), orig)
     hits = {}
     for c in changed:
         parts = c.split("/")
-        mine = next(("/".join(parts[:n]) for n in range(1, len(parts) + 1) if "/".join(parts[:n]) in local), None)
-        hits[c] = mine or above.get(c)
+        mine = next((local[key("/".join(parts[:n]))]
+                     for n in range(1, len(parts) + 1) if key("/".join(parts[:n])) in local), None)
+        hits[c] = mine or above.get(key(c))
     return {c: p for c, p in sorted(hits.items()) if p}
+
+
+def git_ignorecase(repo):
+    """True when this checkout's `core.ignorecase` is true (git's casefolding for collisions)."""
+    rc, out, _ = git(repo, "config", "--bool", "--get", "core.ignorecase")
+    return rc == 0 and out.strip() == "true"
+
+
+def show_path(path):
+    """A path safe for the text report: control characters and unpaired surrogates become `?` (PR 20 LOW d;
+    JSON keeps the decoded string with U+FFFD from `run`)."""
+    return "".join("?" if (ord(ch) < 32 or ord(ch) == 127) else ch for ch in path)
 
 
 def short(sha):
@@ -607,19 +630,24 @@ def update(rep, args, repo):
     if behind:
         d["repo_state"] = "behind"
         changed = set(git_z(repo, "diff", "--name-only", "-z", "--no-renames", "HEAD", up))
-        # tracked modifications, untracked files and ignored files (`!!`; a pull overwrites those silently)
-        parts = git_z(repo, "--no-optional-locks", "status", "--porcelain", "-z", "--untracked-files=all", "--ignored")
+        # tracked modifications, untracked files and ignored paths (`!!`; a pull overwrites those silently).
+        # `--ignored=matching` (PR 20 LOW b): an ignored directory is one `!! dir/` row, not every file under it
+        # (`--ignored` alone is traditional and listed 5k+ entries under a large node_modules).
+        parts = git_z(repo, "--no-optional-locks", "status", "--porcelain", "-z", "--untracked-files=all",
+                      "--ignored=matching")
         dirty = set()
         i = 0
         while i < len(parts):
             code, path = parts[i][:2], parts[i][3:]
             dirty.add(path)
             i += 2 if "R" in code or "C" in code else 1  # a rename carries its old path as the next field
-        hits = collides(changed, dirty)
+        ignorecase = git_ignorecase(repo)
+        hits = collides(changed, dirty, ignorecase=ignorecase)
         blocked = sorted(hits)
         d["blocked_by"] = blocked
+        d["ignorecase"] = ignorecase
         rep.say(f"repo: behind {upstream} by {behind} commit{'s' if behind != 1 else ''} ({short(head)} -> {short(up)})")
-        shown_hits = [p if hits[p] == p else f"{p} (local {hits[p]})" for p in blocked]
+        shown_hits = [show_path(p) if hits[p] == p else f"{show_path(p)} (local {show_path(hits[p])})" for p in blocked]
         if blocked and not check:
             shown = "\n".join(f"  {p}" for p in shown_hits)
             raise Stop(EXIT_DIRTY, "the update would change or create paths with local modifications or untracked/"
