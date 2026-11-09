@@ -99,11 +99,13 @@ just install-apply-dry
 | `litellm` (offered) | prose only — operator fork at `~/src/litellm` / site-djbclark `roles/litellm`; no stock auto-apply |
 | `grok-bot-setup` (optional) | `npm install -g grok-bot-setup` (`adapters help` probe) |
 | `1password` (optional) | Mac `system_argv_darwin` brew casks + `op --version` probe; Linux system recipe still UNKNOWN |
+| `omp`, `opencode`, `crush` | `class = "never"` — Pi sole-TUI; doctor records never-installed (no apply) |
+| `paseo-plugin-*` (J6) | offered rows for session-guard, baton, asks, questions-please, tell-agent, vitals, skills, pr-radar, claude-code-entrypoint-env, session-janitor, session-recovery (`chosen=true`); zerosub / usage-auto-resume / plan-auto (`chosen=false`). Install/probe still `UNKNOWN` until Mac `paseo plugin` live |
 | others | still `UNKNOWN` / no `install_argv` |
 
 ## F. Next units
 
 Live system apply (root/`apt`/`brew` execution with ownership ledger), remaining
 owner installers (sudo-secretspec Linux tarball, Linux node/`npm` system_argv,
-Paseo desktop/daemon and skill bundle), managed key verify probes. S4 jobs stay
-explicit later work.
+Paseo desktop/daemon and skill bundle), managed key verify probes, and live
+`paseo plugin install` argv for the J6 rows. S4 jobs stay explicit later work.

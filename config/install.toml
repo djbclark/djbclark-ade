@@ -155,7 +155,7 @@ probe = "pi --version"
 probe_argv = ["pi", "--version"]
 presence = "pi"
 platforms = ["mac", "linux"]
-notes = "Pi policy 2026-11-08; archived omp/OpenCode/Crush are never reinstall targets. Provider packs via `pi install` are separate."
+notes = "Pi policy 2026-11-08; archived omp/OpenCode/Crush are class=never rows below (never reinstall). Provider packs via `pi install` are separate."
 
 [[component]]
 id = "claude-code"
@@ -404,6 +404,197 @@ id = "paid-plans"
 class = "never"
 chosen = false
 summary = "Paid plans themselves are never installed; users buy and log in"
+install = "UNKNOWN"
+update = "UNKNOWN"
+probe = "UNKNOWN"
+platforms = ["mac", "linux"]
+
+[[component]]
+id = "omp"
+class = "never"
+chosen = false
+summary = "Archived omp TUI; never reinstall (Pi sole-TUI 2026-11-08/09)"
+install = "UNKNOWN"
+update = "UNKNOWN"
+probe = "UNKNOWN"
+platforms = ["mac", "linux"]
+notes = "History under omp/; not a skill-everywhere or Choice.dispatch target"
+
+[[component]]
+id = "opencode"
+class = "never"
+chosen = false
+summary = "Archived OpenCode TUI; never reinstall (Pi sole-TUI 2026-11-08/09)"
+install = "UNKNOWN"
+update = "UNKNOWN"
+probe = "UNKNOWN"
+platforms = ["mac", "linux"]
+notes = "History under opencode/; oc-go-key is archive-only"
+
+[[component]]
+id = "crush"
+class = "never"
+chosen = false
+summary = "Archived Crush TUI; never reinstall"
+install = "UNKNOWN"
+update = "UNKNOWN"
+probe = "UNKNOWN"
+platforms = ["mac", "linux"]
+
+# --- J6 Paseo plugins (setup-plan S3.2 / PLAN J6; probe via paseo plugin ls) ---
+
+[[component]]
+id = "paseo-plugin-session-guard"
+class = "offered"
+chosen = true
+summary = "J6: pause at quota / continue after reset (tomgrin10/session-guard)"
+source = "https://paseo.sh/plugins"
+install = "paseo plugin install session-guard (exact package id UNKNOWN until Mac live)"
+update = "paseo plugin update (UNKNOWN)"
+probe = "paseo plugin ls --json | jq (UNKNOWN argv until daemon available in CI)"
+platforms = ["mac", "linux"]
+notes = "Doctor treats missing as unchosen/missing only when chosen; live install is operator Mac (order 11)"
+
+[[component]]
+id = "paseo-plugin-baton"
+class = "offered"
+chosen = true
+summary = "J6: baton resume (prefer upstream dennyferra/baton unless fork needed)"
+source = "https://paseo.sh/plugins"
+install = "paseo plugin install baton (UNKNOWN exact id)"
+update = "UNKNOWN"
+probe = "UNKNOWN"
+platforms = ["mac", "linux"]
+notes = "Fork djbclark/paseo-baton only while it carries unmerged changes (order 8)"
+
+[[component]]
+id = "paseo-plugin-asks"
+class = "offered"
+chosen = true
+summary = "J6: operator ask cards (fullstackhouse/asks)"
+source = "https://paseo.sh/plugins"
+install = "UNKNOWN"
+update = "UNKNOWN"
+probe = "UNKNOWN"
+platforms = ["mac", "linux"]
+
+[[component]]
+id = "paseo-plugin-questions-please"
+class = "offered"
+chosen = true
+summary = "J6: djbclark/paseo-plugin-questions-please"
+source = "https://github.com/djbclark/paseo-plugin-questions-please"
+install = "UNKNOWN"
+update = "UNKNOWN"
+probe = "UNKNOWN"
+platforms = ["mac", "linux"]
+
+[[component]]
+id = "paseo-plugin-tell-agent"
+class = "offered"
+chosen = true
+summary = "J6: /tell via omercnet/tell-agent"
+source = "https://paseo.sh/plugins"
+install = "UNKNOWN"
+update = "UNKNOWN"
+probe = "UNKNOWN"
+platforms = ["mac", "linux"]
+
+[[component]]
+id = "paseo-plugin-vitals"
+class = "offered"
+chosen = true
+summary = "J6: host vitals display (tomgrin10/vitals); load-watch admit stays ADE-owned"
+source = "https://paseo.sh/plugins"
+install = "UNKNOWN"
+update = "UNKNOWN"
+probe = "UNKNOWN"
+platforms = ["mac", "linux"]
+
+[[component]]
+id = "paseo-plugin-skills"
+class = "offered"
+chosen = true
+summary = "J6: Paseo skills plugin surface"
+source = "https://paseo.sh/plugins"
+install = "UNKNOWN"
+update = "UNKNOWN"
+probe = "UNKNOWN"
+platforms = ["mac", "linux"]
+
+[[component]]
+id = "paseo-plugin-pr-radar"
+class = "offered"
+chosen = true
+summary = "J6: PR radar"
+source = "https://paseo.sh/plugins"
+install = "UNKNOWN"
+update = "UNKNOWN"
+probe = "UNKNOWN"
+platforms = ["mac", "linux"]
+
+[[component]]
+id = "paseo-plugin-claude-code-entrypoint-env"
+class = "offered"
+chosen = true
+summary = "J6: Claude Code entrypoint env helper"
+source = "https://paseo.sh/plugins"
+install = "UNKNOWN"
+update = "UNKNOWN"
+probe = "UNKNOWN"
+platforms = ["mac", "linux"]
+
+[[component]]
+id = "paseo-plugin-session-janitor"
+class = "offered"
+chosen = true
+summary = "J6: idle session cleanup (sm1ee/session-janitor)"
+source = "https://paseo.sh/plugins"
+install = "UNKNOWN"
+update = "UNKNOWN"
+probe = "UNKNOWN"
+platforms = ["mac", "linux"]
+
+[[component]]
+id = "paseo-plugin-session-recovery"
+class = "offered"
+chosen = true
+summary = "J6 thirteenth: sm1ee/session-recovery (evaluate with native resume OFF first)"
+source = "https://paseo.sh/plugins"
+install = "UNKNOWN"
+update = "UNKNOWN"
+probe = "UNKNOWN"
+platforms = ["mac", "linux"]
+notes = "PLAN J6: trial in a quiet window before leaving native resume on"
+
+[[component]]
+id = "paseo-plugin-zerosub"
+class = "offered"
+chosen = false
+summary = "J6 optional: zerosub (not chosen by default; recorded so doctor can tell unchosen from missing)"
+source = "https://paseo.sh/plugins"
+install = "UNKNOWN"
+update = "UNKNOWN"
+probe = "UNKNOWN"
+platforms = ["mac", "linux"]
+
+[[component]]
+id = "paseo-plugin-usage-auto-resume"
+class = "offered"
+chosen = false
+summary = "J6 optional: usage-auto-resume (not chosen by default)"
+source = "https://paseo.sh/plugins"
+install = "UNKNOWN"
+update = "UNKNOWN"
+probe = "UNKNOWN"
+platforms = ["mac", "linux"]
+
+[[component]]
+id = "paseo-plugin-plan-auto"
+class = "offered"
+chosen = false
+summary = "J6 optional: plan-auto (not chosen by default)"
+source = "https://paseo.sh/plugins"
 install = "UNKNOWN"
 update = "UNKNOWN"
 probe = "UNKNOWN"

@@ -43,6 +43,13 @@ def test_repo_install_toml_checks_clean():
     assert len(ids) == len(set(ids))
     assert "pi" in ids and "sudo-secretspec" in ids
     by_id = {c["id"]: c for c in catalog.components}
+    for never_id in ("omp", "opencode", "crush", "paid-plans"):
+        assert by_id[never_id]["class"] == "never"
+    assert by_id["paseo-plugin-session-guard"]["chosen"] is True
+    assert by_id["paseo-plugin-session-recovery"]["chosen"] is True
+    assert by_id["paseo-plugin-zerosub"]["chosen"] is False
+    assert by_id["paseo-plugin-usage-auto-resume"]["chosen"] is False
+    assert by_id["paseo-plugin-plan-auto"]["chosen"] is False
     assert by_id["just"].get("install_argv")
     assert by_id["uv"].get("install_argv")
     assert by_id["git"].get("needs_system") is True
