@@ -213,6 +213,7 @@ def test_refuses_missing_c3_proof_file(tmp_path: Path) -> None:
 
 
 def test_refuses_empty_mac_proof_file(tmp_path: Path) -> None:
+    """Bare idle pgrep redirects must not green the gate (Codex P2 on #417)."""
     tree = _write_clean_tree(tmp_path)
     ev = _good_evidence(tmp_path)
     data = json.loads(ev.read_text(encoding="utf-8"))
@@ -222,6 +223,33 @@ def test_refuses_empty_mac_proof_file(tmp_path: Path) -> None:
     assert r.returncode == 1, r.stderr
     out = json.loads(r.stdout)
     assert any(x.startswith("mac_relay_idle_proof_missing:") for x in out["reasons"])
+
+
+def test_accepts_idle_mac_proof_with_verified_no_match(tmp_path: Path) -> None:
+    """Successful idle capture: cmd + verified: no match is non-empty evidence."""
+    tree = _write_clean_tree(tmp_path)
+    ev = _good_evidence(tmp_path)
+    data = json.loads(ev.read_text(encoding="utf-8"))
+    for flag in ("relay_idle", "acp_run_idle"):
+        proof_rel = data["mac_proofs"][flag]
+        (ev.parent / proof_rel).write_text(
+            f"cmd: pgrep -lf '{flag}'\nverified: no match (exit 1)\n",
+            encoding="utf-8",
+        )
+    r = run("--json", "--evidence", str(ev), "--allow-early", root=tree)
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)
+    assert out["ready"] is True
+    assert out["reasons"] == []
+
+
+def test_follow_up_doc_idle_capture_is_non_empty() -> None:
+    """Docs must not teach `{ pgrep … || true; } > proof` (empty when idle)."""
+    doc = (ROOT / "docs/slim/wave6-follow-up.md").read_text(encoding="utf-8")
+    assert "verified: no match" in doc
+    # The broken one-liner shape that produced empty idle proofs.
+    assert "{ pgrep -lf 'relay\\.py' || true; }" not in doc
+    assert "pgrep -lf 'relay\\.py' || true; }" not in doc
 
 
 def test_refuses_evidence_without_proof_maps(tmp_path: Path) -> None:
