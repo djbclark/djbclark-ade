@@ -587,9 +587,10 @@ safety properties, and keep existing readers unchanged until their adoption is r
    Preserve existing policy bounds and failure behavior. Fixtures must prove equivalence, override precedence,
    type/identity failures and no writes. Comment-preserving atomic `set` (`ade-config set`, 2026-11-08) lands
    before adopting editable config as a live consumer switch; see `docs/config-migration.md` C2.
-   Bootstrap Python 3.11+ before relying on `tomllib`. The typed install catalog, observe-only doctor, and
-   bounded user-scoped `ade-install apply` (`config/install.toml`, `bin/ade-install`, `bin/ade-user-install`,
-   2026-11-09) follow; see `docs/install-catalog.md`. Ownership-aware reconcile and `--system` remain later.
+   Bootstrap Python 3.11+ before relying on `tomllib`. The typed install catalog, observe-only doctor
+   (`probe_argv` when recorded), and bounded user-scoped `ade-install apply` (`config/install.toml`,
+   `bin/ade-install`, `bin/ade-user-install`, 2026-11-09) follow; see `docs/install-catalog.md`.
+   Ownership-aware reconcile and `--system` remain later.
 
 2. **One desired job specification.** The TOML inventory feeds `Job.from_dict` and the existing `ade-sched`
    renderers. Existing plists are compatibility inputs until migrated, not a second editable authority. Distinguish

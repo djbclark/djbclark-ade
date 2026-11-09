@@ -6,7 +6,8 @@ class = "hard"
 summary = "fixture hard tool"
 install = "UNKNOWN"
 update = "UNKNOWN"
-probe = "UNKNOWN"
+probe = "python3 --version"
+probe_argv = ["python3", "--version"]
 presence = "python3"
 platforms = ["linux"]
 

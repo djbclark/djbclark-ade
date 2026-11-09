@@ -7,8 +7,9 @@
   ade-install doctor [--root DIR] [--json]
   ade-install apply [--root DIR] [--json] [--dry-run|--yes] [--id ID ...] [--force]
 
-Doctor never repairs. Apply defaults to --dry-run; --yes runs recorded
-install_argv (user-scoped only). --system is refused. Secrets are never read.
+Doctor runs recorded probe_argv when present (else PATH presence); never
+repairs. Apply defaults to --dry-run; --yes runs install_argv (user-scoped).
+--system is refused. Secrets are never read.
 Uses config/install.toml only while config/ade.toml is absent.
 See docs/install-catalog.md.
 """
@@ -185,7 +186,7 @@ def main(argv: list[str] | None = None) -> int:
         ("check", cmd_check, "validate config/install.toml"),
         ("catalog", cmd_catalog, "list components, key references, and login checks"),
         ("plan", cmd_plan, "print-only install plan (no writes)"),
-        ("doctor", cmd_doctor, "observe presence; never repairs or reads secrets"),
+        ("doctor", cmd_doctor, "run probe_argv or observe PATH; never repairs or reads secrets"),
     ):
         p = sub.add_parser(name, parents=[shared], help=help_text)
         p.add_argument("--json", action="store_true")

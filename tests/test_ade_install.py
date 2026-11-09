@@ -58,11 +58,48 @@ def test_fixture_doctor_missing_vs_unchosen(tmp_path):
     obs, rc = ai.doctor(catalog)
     by_id = {o.id: o for o in obs if o.kind == "component"}
     assert by_id["tool-a"].status == "ok"
+    assert "probe ok" in by_id["tool-a"].detail
     assert by_id["tool-b"].status == "unchosen"
     assert by_id["tool-c"].status == "missing"
     assert rc == 1  # chosen optional missing counts
     key_obs = [o for o in obs if o.kind == "key"]
     assert key_obs and key_obs[0].status == "unknown"
+
+
+def test_doctor_probe_argv_fail_is_error(tmp_path):
+    root = _fixture_root(tmp_path)
+    catalog = ai.load_catalog(root=root)
+    # Force tool-a probe to fail via injected runner.
+    def runner(argv, cwd):
+        return subprocess.CompletedProcess(argv, 7, stdout="", stderr="boom\n")
+
+    # Replace tool-a's observation path by applying runner to all probes.
+    # tool-c has no probe_argv → still missing via presence.
+    obs, rc = ai.doctor(catalog, runner=runner)
+    by_id = {o.id: o for o in obs if o.kind == "component"}
+    assert by_id["tool-a"].status == "error"
+    assert "boom" in by_id["tool-a"].detail
+    assert rc == 1
+
+
+def test_doctor_probe_binary_missing(tmp_path):
+    root = tmp_path / "repo"
+    (root / "config").mkdir(parents=True)
+    (root / "config" / "install.schema.json").write_text(
+        (REPO / "config" / "install.schema.json").read_text()
+    )
+    (root / "config" / "install.toml").write_text(
+        "schema_version = 1\n"
+        "[[component]]\n"
+        'id = "gone"\n'
+        'class = "hard"\n'
+        'probe_argv = ["definitely-not-a-real-bin-xyz", "--version"]\n'
+        'presence = "definitely-not-a-real-bin-xyz"\n'
+    )
+    catalog = ai.load_catalog(root=root)
+    o = ai.observe_component(catalog.components[0], root=catalog.root)
+    assert o.status == "missing"
+    assert "probe binary not found" in o.detail
 
 
 def test_plan_blocks_unknown_install(tmp_path):
