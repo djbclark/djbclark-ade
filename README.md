@@ -127,7 +127,7 @@ Skills (22, from each `skills/*/SKILL.md`):
 | [`ade_sched.py`](bin/ade_sched.py) | Install a launchd plist as a launchd agent, a systemd user unit or a crontab block (issue #279, 2026-11-04). |
 | [`ade_user_install.py`](bin/ade_user_install.py) | User-scoped tool bootstrap (no shell=True, no root). |
 | [`adversary_marker.py`](bin/adversary_marker.py) | Read the adversary's verdict marker from a PR body and judge it against the PR head. |
-| [`agent_guard.py`](bin/agent_guard.py) | Per-agent guard policy for pass-through runner arguments (2026-11-03 omp audit; Wave 6: acp-run leaves ~2026-11-20); no provider calls. |
+| [`agent_guard.py`](bin/agent_guard.py) | Per-agent identity guard for launch argv (2026-11-03 omp audit; Wave 6: Pi / native `paseo run` first). |
 | [`bm-lint`](bin/bm-lint) | Read-only hygiene lint for a Basic Memory store (design-basicmemory W3 / R6, 2026-10-24). |
 | [`changelog-fold`](bin/changelog-fold) | Fold changelog.d/*.md fragments into CHANGELOG.md's `## Unreleased` (2026-10-31). |
 | [`claude-cost-mix`](bin/claude-cost-mix) | Where Claude Code spend goes, from local transcripts. |
