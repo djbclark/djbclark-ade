@@ -223,6 +223,38 @@ def test_inline_empty_deny_list(fx):
     assert render(fx, "--check", tmpl=t).returncode == 0
 
 
+def test_inline_empty_sandbox_object(fx):
+    """`"sandbox": {}` on one line must expand before insert (Codex P2 on fb2918d2)."""
+    t = fx / "inline-sandbox.json.tmpl"
+    t.write_text(
+        '{\n  "env": {"H": "{{ .home }}"},\n  "permissions": {\n    "allow": [],\n    "deny": [],\n'
+        '    "defaultMode": "x"\n  },\n  "sandbox": {}\n}\n'
+    )
+    r = render(fx, tmpl=t)
+    assert r.returncode == 0, r.stderr
+    data = masked(t)
+    assert data["sandbox"]["filesystem"]["denyRead"] == EXPECTED_SANDBOX_DENY_READ
+    assert "enabled" not in data["sandbox"]
+    assert data["env"] == {"H": "x"} and data["permissions"]["defaultMode"] == "x"
+    assert render(fx, "--check", tmpl=t).returncode == 0
+
+
+def test_inline_empty_filesystem_object(fx):
+    """`"filesystem": {}` on one line inside sandbox must expand before insert (Codex P2 on fb2918d2)."""
+    t = fx / "inline-filesystem.json.tmpl"
+    t.write_text(
+        '{\n  "env": {"H": "{{ .home }}"},\n  "permissions": {\n    "allow": [],\n    "deny": [],\n'
+        '    "defaultMode": "x"\n  },\n  "sandbox": {\n    "filesystem": {}\n  }\n}\n'
+    )
+    r = render(fx, tmpl=t)
+    assert r.returncode == 0, r.stderr
+    data = masked(t)
+    assert data["sandbox"]["filesystem"]["denyRead"] == EXPECTED_SANDBOX_DENY_READ
+    assert "enabled" not in data["sandbox"]
+    assert data["env"] == {"H": "x"} and data["permissions"]["defaultMode"] == "x"
+    assert render(fx, "--check", tmpl=t).returncode == 0
+
+
 def test_committed_policy_json_equals_a_fresh_render(fx):
     r = render(fx, policy=TOML)
     assert r.returncode == 0, r.stderr
