@@ -133,12 +133,18 @@ Work the list; each line is a command, not a memory.
        if not any([api(p, raw) == 0 for p in paths]): fail("fetch failed")
        with open(prompt, "wb") as p, open(raw, "rb") as r:
            p.write(TRUSTED + b"\n--- UNTRUSTED DATA ---\n" + r.read())
+       if agent != "claude":
+           fail("reader failed")   # Wave 6: only the Claude CLI text-only path; no acp-run
        try:
-           with open(reply, "wb") as o, open(err, "wb") as e:
-               rc = subprocess.run(["acp-run", agent, "--perm", "deny", "--log", log, "-f", prompt, "--model", model], stdout=o, stderr=e, timeout=300).returncode
+           with open(prompt, "rb") as pin, open(reply, "wb") as o, open(err, "wb") as e:
+               # Claude -p with no tools (same flags acp-run's deny fallback used). Never acp-run.
+               rc = subprocess.run(
+                   ["claude", "-p", "--model", model, "--tools", "", "--strict-mcp-config",
+                    "--disallowedTools", "*", "--setting-sources", "project"],
+                   stdin=pin, stdout=o, stderr=e, timeout=300,
+               ).returncode
        except (OSError, subprocess.SubprocessError): fail("reader failed")
        if rc != 0: fail("reader failed")
-       with open(err, errors="replace") as e: applied = any(l.startswith("acp-run: applied:") for l in e)   # boolean only
        with open(reply, "rb") as f: data = f.read()
        try: obj = json.loads(data) if len(data) <= 4096 else None
        except (ValueError, RecursionError): obj = None
@@ -148,16 +154,17 @@ Work the list; each line is a command, not a memory.
                and num(obj["max_body_chars"]) and type(obj["requires_repro"]) is bool):
            fail("reader reply rejected: STOP, operator review")      # payload never shown
        if obj["status"] != "ok": fail("operator_review_required: STOP drafting and submitting")
-       print("reader: %s --model %s --perm deny, applied-line %s" % (agent, model, "seen" if applied else "MISSING"))   # caller-chosen facts only
+       print("reader: claude -p --model %s --tools '' (no-tools)" % model)   # caller-chosen facts only
        print("category:", obj["category"], "| max_body_chars:", obj["max_body_chars"], "| requires_repro:", obj["requires_repro"])
        print("sections:", [SECTIONS[i] for i in obj["sections"]])     # text comes from OUR maps
        print("questions:", [ENV[i] for i in obj["environment"]])
    ```
 
-   `--perm deny` is the no-tools mode and inherits no privileged tools;
-   `--perm read-only` is NOT equivalent (it still reads files). `--log` points
-   inside the temp dir so acp-run's log artifacts stay private
-   and are removed with it; vendor-native session retention is separate.
+   Pass `AGENT=claude`. The reader is **Claude CLI `-p` with no tools**
+   (`--tools ""`, `--strict-mcp-config`, `--disallowedTools '*'`, project settings
+   only) — the same text-only posture `acp-run --perm deny` used for Claude, without
+   the Wave 6 shim (`docs/slim/wave6-follow-up.md`). `--perm read-only` is NOT
+   equivalent (it still reads files). Do not call `acp-run`.
    No `eval`, no shell substitution, no `cat`/`read`
    of `raw`, `lst`, `prompt`, `err`, `log` or `reply`, and never print raw
    stderr or the reader's log (they can echo upstream text). The validation
