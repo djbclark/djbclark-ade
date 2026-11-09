@@ -1,37 +1,40 @@
 #!/usr/bin/env python3
-"""PreToolUse (Agent): give an Agent-tool sub-agent the acp-dispatch delivery footer when its prompt lacks it.
+"""PreToolUse (Agent): give an Agent-tool sub-agent the delivery footer when its prompt lacks it.
 
-~/CLAUDE.md rule 25: every Agent-tool sub-agent gets `acp-dispatch footer --report <scratchpad>/<name>-report.md`
-pasted into its prompt, because the harness cuts a sub-agent's final message at 4,000 characters and the
-footer is what makes it write a report file, a `.done` marker and `BLOCKED:` instead of a question. On
-2026-10-18 a lead launched a research sub-agent without it and had to SendMessage the contract afterwards.
-The footer's own heading is the check. A prompt without it is no longer denied (2026-10-18, djbclark: the
-deny cost a relaunch for a step the hook can do itself): the hook appends the footer through `updatedInput`.
-The report path is the one the prompt labels ("Report path: /abs/x-report.md") or the only absolute
-`*-report.md` path it names, never one whose `.done` exists, else
-`~/.local/state/agent-reports/<session>/<name>-report.md`; the sub-agent's `written: <path>` final line and
-the hook's `additionalContext` both name it. If the footer cannot be built, the old deny stands. Exempt:
-claude-code-guide and statusline-setup (short answers by design). AGENT_FOOTER_GATE_OFF=1 disables it.
-Fails open on any other error.
+~/CLAUDE.md rule 25: every Agent-tool sub-agent gets the filled `docs/dispatch-footer.md` pasted into
+its prompt, because the harness cuts a sub-agent's final message at 4,000 characters and the footer is
+what makes it write a report file, a `.done` marker and `BLOCKED:` instead of a question. On 2026-10-18
+a lead launched a research sub-agent without it and had to SendMessage the contract afterwards. The
+footer's own heading is the check. A prompt without it is no longer denied (2026-10-18, djbclark: the
+deny cost a relaunch for a step the hook can do itself): the hook appends the footer through
+`updatedInput`. The report path is the one the prompt labels ("Report path: /abs/x-report.md") or the
+only absolute `*-report.md` path it names, never one whose `.done` exists, else
+`~/.local/state/agent-reports/<session>/<name>-report.md`; the sub-agent's `written: <path>` final line
+and the hook's `additionalContext` both name it. If the footer cannot be built, the old deny stands.
+Exempt: claude-code-guide and statusline-setup (short answers by design). AGENT_FOOTER_GATE_OFF=1
+disables it. Fills `docs/dispatch-footer.md` inline (2026-11-09: no longer shells out to
+`acp-dispatch footer`, which Wave 6 deletes). Fails open on any other error.
 """
 
 import json
 import os
 import re
-import subprocess
 import sys
 from pathlib import Path
 
 MARK = "Delivery contract"
 EXEMPT = {"claude-code-guide", "statusline-setup"}
-ACP_DISPATCH = os.environ.get("AGENT_FOOTER_ACP_DISPATCH") or str(Path.home() / "src/djbclark-ade/bin/acp-dispatch")
+DEFAULT_LEAD = "main"
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_DEFAULT_FOOTER = _REPO_ROOT / "docs" / "dispatch-footer.md"
+_HOME_FOOTER = Path.home() / "src/djbclark-ade/docs/dispatch-footer.md"
 REPORT_IN_PROMPT = re.compile(r"(/[\w.@~+/-]+-report\.md)\b")
 REPORT_LABELLED = re.compile(r"(?i)report(?: path| file)?\s*(?:is|:|=)\s*`?(/[\w.@~+/-]+-report\.md)\b")
 DENY_REASON = (
-    "This sub-agent prompt has no delivery footer (~/CLAUDE.md rule 25) and the hook could not build one. Run "
-    "`~/src/djbclark-ade/bin/acp-dispatch footer --report <scratchpad>/<name>-report.md`, paste its "
-    "output (it starts with '## Delivery contract') at the end of the prompt, and launch again; then "
-    "read that report file, not the final message.")
+    "This sub-agent prompt has no delivery footer (~/CLAUDE.md rule 25) and the hook could not build one. "
+    "Paste the filled delivery contract from docs/dispatch-footer.md (it starts with '## Delivery "
+    "contract') at the end of the prompt with {report} set to <scratchpad>/<name>-report.md, and launch "
+    "again; then read that report file, not the final message.")
 
 
 def slug(text):
@@ -61,10 +64,31 @@ def report_path(data, tool_input):
     return str(d / f"{name}-report.md")
 
 
+def footer_file():
+    override = os.environ.get("AGENT_FOOTER_FILE")
+    if override:
+        return Path(override)
+    if _DEFAULT_FOOTER.is_file():
+        return _DEFAULT_FOOTER
+    return _HOME_FOOTER
+
+
 def footer(report):
-    r = subprocess.run([ACP_DISPATCH, "footer", "--report", report], capture_output=True, text=True, timeout=15)
-    out = r.stdout.strip()
-    return out if r.returncode == 0 and MARK in out else None
+    """Fill docs/dispatch-footer.md placeholders; same substitutions as acp-dispatch footer once did."""
+    path = footer_file()
+    try:
+        text = path.read_text()
+    except OSError:
+        return None
+    lead = os.environ.get("AGENT_FOOTER_LEAD") or DEFAULT_LEAD
+    report_p = Path(report)
+    done = str(report_p.with_name(report_p.name + ".done"))
+    inbox = str(report_p.with_name(report_p.name + ".inbox.md"))
+    replies = str(report_p.with_name(report_p.name + ".replies.md"))
+    out = (text.replace("{report}", report).replace("{done}", done)
+           .replace("{inbox}", inbox).replace("{replies}", replies)
+           .replace("{lead}", lead)).strip()
+    return out if MARK in out else None
 
 
 try:
@@ -78,7 +102,7 @@ try:
     try:
         report = report_path(data, tool_input)
         text = footer(report)
-    except (OSError, subprocess.SubprocessError):
+    except OSError:
         text = None
     if text is None:
         print(json.dumps({"hookSpecificOutput": {

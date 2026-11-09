@@ -1,6 +1,7 @@
-## Delivery contract (shared footer; leads paste it into Agent-tool / `paseo run` briefs)
+## Delivery contract (shared footer; leads paste it into Agent-tool / `paseo run` briefs; `agent_footer_gate` fills it inline)
 
-While `bin/acp-dispatch` still exists it can print a filled copy via `acp-dispatch footer --report PATH`; that helper goes with the Wave 6 shim deletion ([docs/slim/wave6-follow-up.md](slim/wave6-follow-up.md)). New briefs fill `{report}`, `{lead}`, `{done}`, `{inbox}` and `{replies}` themselves.
+While `bin/acp-dispatch` still exists it can print a filled copy via `acp-dispatch footer --report PATH`; that helper goes with the Wave 6 shim deletion ([docs/slim/wave6-follow-up.md](slim/wave6-follow-up.md)). `agent_footer_gate` fills `{report}`, `{lead}`, `{done}`, `{inbox}` and `{replies}` inline for Agent-tool prompts; new `paseo run` briefs fill them themselves.
+
 
 1. Write the full deliverable to `{report}`. Create it early with `STATUS: working` as its first line and update it as you go; finish it **before** any optional verification. Nothing else counts as delivered.
 2. Your final message is only `written: {report}` plus one sentence. The harness cuts a sub-agent's final message at 4,000 characters and the parent never sees the rest, so never put the deliverable there.
