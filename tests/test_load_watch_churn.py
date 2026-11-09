@@ -115,7 +115,7 @@ def test_churn_held_for_the_sustain_time_fires_once(tmp_path, monkeypatch):
     msg = at.sent[0]
     assert "compressor churn ~120k pages/s for 3+ min (alert line 50k, admit limit 20k)" in msg
     assert "top: cc1 -O2 2.5 cores, python3 -m 1.0 cores, sh 0.2 cores" in msg
-    assert "Admit already holds new bg/acp-dispatch work; this is running or bypass work." in msg
+    assert "Admit already holds new bg / agent-start work; this is running or bypass work." in msg
     assert "Do not kill or SIGSTOP without djbclark. As the load watcher: verify against the processes" in msg
     assert "this is running or bypass work. Do not kill or SIGSTOP without djbclark." in at.pinged()[0]
     assert "loadwatch" not in msg and "loadwatch" not in at.pinged()[0]  # the skill is gone (R2-11): the line carries the how-to
