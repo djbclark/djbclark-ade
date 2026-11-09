@@ -1,11 +1,12 @@
-"""Per-agent guard policy for pass-through acp-run arguments (2026-11-03 omp audit); no provider calls.
+"""Per-agent guard policy for pass-through runner arguments (2026-11-03 omp audit; Wave 6: acp-run leaves ~2026-11-20); no provider calls.
 
-acp-dispatch admits a slice on `--model`: the frontier, fable-xhigh, plenty, fallback and pool gates all judge it. An
-`--acp-arg` that replaces the model, or the agent's credentials, after admission made those gates advisory (omp, codex
-and claude ran past them). ONE function judges the arguments for `dispatch()` (the fresh dispatch and a resume's
-inherited `acp_arg`) and for the runner's `spawn_refusal` (the stored command line and `acp_arg` of a normal, deferred,
-resumed or legacy record), driven by the AGENT_GUARDS table. Rolling the guard out to another TUI is flipping its row
-from `unreviewed` to `guarded` (and filling `gates`/`pool`); docs/agent-guard-contract.md has the checklist.
+`route_agent` / Choice.dispatch admit a slice on model: the frontier, fable-xhigh, plenty, fallback and pool gates all
+judge it. A pass-through arg that replaces the model, or the agent's credentials, after admission made those gates
+advisory (historical: omp, codex and claude via the acp-run shim). ONE function judges the arguments for `dispatch()`
+(the fresh dispatch and a resume's inherited `acp_arg`) and for the runner's `spawn_refusal` (the stored command line
+and `acp_arg` of a normal, deferred, resumed or legacy record), driven by the AGENT_GUARDS table. Rolling the guard out
+to another TUI is flipping its row from `unreviewed` to `guarded` (and filling `gates`/`pool`);
+docs/agent-guard-contract.md has the checklist. After the shim delete, the same table gates native `paseo run` argv.
 """
 from __future__ import annotations
 
