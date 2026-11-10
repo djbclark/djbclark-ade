@@ -64,11 +64,11 @@ a claim is ended by its owner's tooling with `ade_claims.set_state(id, "released
 
 ## Who is guarded
 
-The shim: agents only (`ACP_RUN_AGENT=1`, a nonempty `PASEO_AGENT_ID` from native `paseo run` (Wave 6, 2026-11-10), or
-`ADE_CLAIM_ID` set). A human shell, git's own hooks (`GIT_INDEX_FILE`) and
-pre-commit (`PRE_COMMIT`) are never refused. The hooks: those, and also a caller with `CLAUDECODE`, `OMPCODE` or `CODEX_*`
-set and no claim identity, who is an agent that may write nothing claimed. A shim crash, a missing `python3` or an
-unexpected exit **fails open** (a warning on stderr, the real git runs).
+The shim and the ref hooks (`reference-transaction`, `pre-push`): agents only (`ACP_RUN_AGENT=1`, a nonempty
+`PASEO_AGENT_ID` from native `paseo run` (Wave 6, 2026-11-10), or `ADE_CLAIM_ID` set). A human shell, git's own hooks
+(`GIT_INDEX_FILE`) and pre-commit (`PRE_COMMIT`) are never refused. The hooks also treat a caller with `CLAUDECODE`,
+`OMPCODE` or `CODEX_*` set and no claim identity as an agent that may write nothing claimed. A shim crash, a missing
+`python3` or an unexpected exit **fails open** (a warning on stderr, the real git runs).
 
 ## The hooks (refs)
 

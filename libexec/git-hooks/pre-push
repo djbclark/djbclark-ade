@@ -10,13 +10,17 @@
 set -u
 
 agent=0
-if [ -n "${ADE_CLAIM_ID:-}" ] || { [ -n "${ACP_RUN_AGENT:-}" ] && [ "${ACP_RUN_AGENT}" != 0 ]; } \
-  || [ -n "${CLAUDECODE:-}" ] || [ -n "${OMPCODE:-}" ]; then
-  agent=1
-else
-  for v in $(compgen -A export); do
-    case "$v" in CODEX_*) agent=1; break ;; esac
-  done
+# Wave 6 / native paseo: PASEO_AGENT_ID is an agent marker (alongside ACP_RUN_AGENT / ADE_CLAIM_ID).
+case "${PASEO_AGENT_ID:-}" in *[![:space:]]*) agent=1 ;; esac
+if [ "$agent" = 0 ]; then
+  if [ -n "${ADE_CLAIM_ID:-}" ] || { [ -n "${ACP_RUN_AGENT:-}" ] && [ "${ACP_RUN_AGENT}" != 0 ]; } \
+    || [ -n "${CLAUDECODE:-}" ] || [ -n "${OMPCODE:-}" ]; then
+    agent=1
+  else
+    for v in $(compgen -A export); do
+      case "$v" in CODEX_*) agent=1; break ;; esac
+    done
+  fi
 fi
 [ "$agent" = 1 ] || exit 0
 [ -z "${GIT_INDEX_FILE:-}" ] && [ -z "${PRE_COMMIT:-}" ] || exit 0

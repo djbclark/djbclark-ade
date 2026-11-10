@@ -257,6 +257,18 @@ def test_acp_run_agent_zero_is_not_an_agent(world):
     ok(world.state, ["branch", "-f", "cb", "main"], world.repo, ACP_RUN_AGENT="0")
 
 
+def test_paseo_agent_id_alone_is_an_agent_for_hooks(world):
+    """Wave 6: native paseo sets PASEO_AGENT_ID; hooks must treat it as an agent.
+
+    Unlike CLAUDECODE/OMPCODE (agent, no claim identity → "no claim id"), a
+    nonempty PASEO_AGENT_ID is also a caller identity, so a foreign claimed
+    branch is refused as ref-claimed-branch.
+    """
+    r = git(world.state, ["branch", "-f", "cb", "main"], world.repo, PASEO_AGENT_ID="paseo-agent-1")
+    assert r.returncode != 0 and "ref-claimed-branch" in r.stderr, r.stderr
+    ok(world.state, ["branch", "-f", "free", "main"], world.repo, PASEO_AGENT_ID="paseo-agent-1")
+
+
 def test_operator_override_allows_and_logs(world):
     r = git(world.state, ["branch", "-f", "cb", "main"], world.repo, who="B", ACP_OPERATOR_APPROVED="git-guard")
     assert r.returncode == 0, r.stderr
