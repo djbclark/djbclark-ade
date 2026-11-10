@@ -126,7 +126,10 @@ def split_dotted_path(dotted: str) -> tuple[str, ...]:
     if not dotted or dotted.strip() != dotted:
         raise EditError("PATH must be a non-empty dotted path without surrounding whitespace")
     if dotted.startswith(("context_budget.", "keys.")):
-        parts = _decode_table_header("[" + dotted + "]")[1]
+        try:
+            parts = ac.metadata_path_parts(dotted)
+        except ac.ConfigError as error:
+            raise EditError(str(error)) from error
     else:
         parts = tuple(dotted.split("."))
     if any(not p or p.strip() != p for p in parts):
@@ -324,23 +327,10 @@ def _parse_header(line: str) -> tuple[str, tuple[str, ...]] | None:
 
 
 def _decode_table_header(line: str) -> tuple[str, tuple[str, ...]]:
-    """Decode exactly one table/AoT key chain with the stdlib TOML parser."""
-    if any(c in line for c in ("\n", "\r", "\0")):
-        raise EditError("table paths must be a single line")
     try:
-        node = tomllib.loads(line + "\n")
-    except tomllib.TOMLDecodeError as error:
-        raise EditError(f"unsupported table/path form: {line!r} ({error})") from error
-    parts = []
-    while isinstance(node, dict) and len(node) == 1:
-        part, node = next(iter(node.items()))
-        if not part or any(c in part for c in ("\n", "\r", "\0")):
-            raise EditError("table path parts must be nonempty single-line names")
-        parts.append(part)
-    kind = "aot" if line.startswith("[[") else "table"
-    if not parts or (node != {} if kind == "table" else node != [{}]):
-        raise EditError("only a single table key chain is supported")
-    return kind, tuple(parts)
+        return ac.decode_table_key_chain(line)
+    except ac.ConfigError as error:
+        raise EditError(str(error)) from error
 
 
 def _encode_key(part: str) -> str:

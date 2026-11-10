@@ -239,8 +239,8 @@ unsupported assignment forms still refuse. Every edit must reparse to exactly
 the expected type-aware whole tree, preserving unrelated text. Atomic replacement,
 mode preservation, locks, dry runs and unchanged-file mtime on a no-op retain
 the existing scalar writer contract. A set remains `recorded-only`; running
-consumers adopt it only on their own next load. General quoted `get` path syntax
-is separate: `set` reports its result directly, without a `get` round trip.
+consumers adopt it only on their own next load. Metadata `get` and `set` share the same bounded quoted path syntax; existing
+service selectors keep their separate behavior. `set` reports its result directly.
 
 ## D. Install catalog (transitional, 2026-11-09)
 

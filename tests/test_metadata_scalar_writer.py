@@ -263,15 +263,37 @@ def test_atomic_failure_leaves_source_unchanged(tree, monkeypatch):
     assert not [p for p in path.parent.glob(path.name + ".*") if p.name != path.name + ".lock"]
 
 
-def test_cli_quoted_set_reports_result_without_dotted_get_roundtrip(tree):
+def test_cli_quoted_set_get_round_trip_for_real_dotted_directory(tree):
     root, home = tree
+    path = 'context_budget.budget."~/.claude".memory'
     result = subprocess.run([sys.executable, "-I", "-B", str(REPO / "bin/ade-config"), "set",
-                             'context_budget.budget."~".memory', "21000", "--root", str(root),
+                             path, "21000", "--root", str(root),
                              "--home", str(home), "--json"], capture_output=True, text=True,
                             env={**os.environ, "HOME": str(home)})
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout)["after"] == 21000
-    assert effective_context(tree)["budget"]["~"]["memory"] == 21000
+    # Generic get loads all legacy domains, so provide the unrelated fixture inputs.
+    for name in ("routing.toml", "gates.toml", "model-tiers.toml"):
+        shutil.copy2(REPO / "config" / name, root / "config" / name)
+    result = subprocess.run([sys.executable, "-I", "-B", str(REPO / "bin/ade-config"), "get",
+                             path, "--root", str(root), "--home", str(home), "--json"],
+                            capture_output=True, text=True,
+                            env={k: v for k, v in {**os.environ, "HOME": str(home)}.items()
+                                 if k not in {"ROUTING_POLICY", "GATES_TOML", "MODEL_TIERS_TOML"}})
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["value"] == 21000
+    assert effective_context(tree)["budget"]["~/.claude"]["memory"] == 21000
+
+
+def test_get_and_set_share_quoted_key_identity_and_preserve_service_selector(tree):
+    root, home = tree
+    path = root / "config/install.toml"
+    path.write_text(path.read_text().replace('"EXAMPLE_API_KEY"', '"EXAMPLE.KEY"'))
+    set_value(tree, 'keys."EXAMPLE.KEY".notes', "literal dotted identity")
+    effective = ac.load_effective(root=root, home=home, domains=ac.CATALOG_DOMAINS)
+    assert ac.get_path(effective.data, 'keys."EXAMPLE.KEY".notes') == "literal dotted identity"
+    assert ac.get_path({"service": [{"name": "claude", "cli": "fixture"}]},
+                       "service[name=claude].cli") == "fixture"
 
 
 def test_candidate_cannot_skip_raw_ignored_domain_validation(tree):

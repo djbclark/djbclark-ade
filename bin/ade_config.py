@@ -763,12 +763,42 @@ def load_effective(
     return EffectiveConfig(data=data, provenance=provenance)
 
 
+def decode_table_key_chain(line: str) -> tuple[str, tuple[str, ...]]:
+    """Decode exactly one table/AoT key chain with the stdlib TOML parser."""
+    if any(c in line for c in ("\n", "\r", "\0")):
+        raise ConfigError("table paths must be a single line")
+    try:
+        node = tomllib.loads(line + "\n")
+    except tomllib.TOMLDecodeError as error:
+        raise ConfigError(f"unsupported table/path form: {line!r} ({error})") from error
+    parts = []
+    while isinstance(node, dict) and len(node) == 1:
+        part, node = next(iter(node.items()))
+        if not part or any(c in part for c in ("\n", "\r", "\0")):
+            raise ConfigError("table path parts must be nonempty single-line names")
+        parts.append(part)
+    kind = "aot" if line.startswith("[[") else "table"
+    if not parts or (node != {} if kind == "table" else node != [{}]):
+        raise ConfigError("only a single table key chain is supported")
+    return kind, tuple(parts)
+
+
+def metadata_path_parts(dotted: str) -> tuple[str, ...]:
+    """Parse only a single TOML metadata key chain, never array selectors."""
+    if not dotted or dotted.strip() != dotted or any(c in dotted for c in "[]\n\r\0"):
+        raise ConfigError("metadata paths require a single key chain without array selectors")
+    kind, parts = decode_table_key_chain("[" + dotted + "]")
+    if kind != "table" or parts[0] not in {"keys", "context_budget"}:
+        raise ConfigError("quoted metadata paths must start with keys or context_budget")
+    return parts
+
 def get_path(data: dict[str, Any], dotted: str) -> Any:
     """Resolve a dotted path; ``service[name=claude]`` selects a service by name."""
     if not dotted:
         raise ConfigError("get path is empty")
     cur: Any = data
-    for part in dotted.split("."):
+    parts = metadata_path_parts(dotted) if dotted.startswith(("context_budget.", "keys.")) else dotted.split(".")
+    for part in parts:
         if part.startswith("service[name=") and part.endswith("]"):
             name = part[len("service[name="):-1]
             services = cur.get("service") if isinstance(cur, dict) else None
