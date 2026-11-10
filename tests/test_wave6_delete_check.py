@@ -354,6 +354,19 @@ def test_inventory_lists_every_gated_hit_and_proves_gate_exits() -> None:
     assert "callers_skills:" in joined or "callers_bins:" in joined or "callers_loose:" in joined
 
 
+def test_inventory_human_success_prints_refs_and_gate_exits() -> None:
+    """Non-JSON --inventory success still lists refs + gate_exits (not JSON-only)."""
+    r = run("--inventory", root=ROOT)
+    assert r.returncode == 0, r.stderr
+    out = r.stdout
+    assert "inventory OK" in out
+    assert "gate_exits:" in out
+    assert "callers=" in out
+    assert "ref:" in out
+    # At least one gated path fragment appears.
+    assert any(p in out for p in ("skills/", "bin/", "loose"))
+
+
 def test_inventory_with_dry_run_keeps_fixture_exit_and_never_ready() -> None:
     """--inventory --dry-run reports dry_run_fixture exit 0 without greening ready."""
     r = run("--json", "--inventory", "--dry-run", root=ROOT)

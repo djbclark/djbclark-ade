@@ -754,6 +754,9 @@ def main(argv: list[str] | None = None) -> int:
             f"{TOOL}: inventory OK ({n} gated caller hit(s); "
             "NOT live Mac; NOT deletion-ready)"
         )
+        # Success still lists every gated hit + gate_exits (help text promise;
+        # operators must not need --json to see remaining callers).
+        _print_inventory_details(result, stream=sys.stdout)
     elif args.dry_run and ok:
         print(
             f"{TOOL}: dry-run FIXTURE shape OK "
@@ -775,15 +778,29 @@ def main(argv: list[str] | None = None) -> int:
         for r in result["reasons"]:
             print(f"  - {r}", file=sys.stderr)
         if args.inventory and not args.json:
-            # Always surface the untruncated gated list on stderr for humans.
-            for hit in result.get("references") or []:
-                print(
-                    f"  ref: {hit.get('kind')} {hit.get('path')}:{hit.get('line')} "
-                    f"{hit.get('snippet')}",
-                    file=sys.stderr,
-                )
+            _print_inventory_details(result, stream=sys.stderr)
 
     return 0 if ok else 1
+
+
+def _print_inventory_details(
+    result: dict[str, Any], *, stream: Any
+) -> None:
+    """Emit gated references and gate_exits for human --inventory output."""
+    exits = result.get("gate_exits") or {}
+    print(
+        "  gate_exits: "
+        f"callers={exits.get('callers')}; "
+        f"evaluate_no_evidence={exits.get('evaluate_no_evidence')}; "
+        f"dry_run_fixture={exits.get('dry_run_fixture')}",
+        file=stream,
+    )
+    for hit in result.get("references") or []:
+        print(
+            f"  ref: {hit.get('kind')} {hit.get('path')}:{hit.get('line')} "
+            f"{hit.get('snippet')}",
+            file=stream,
+        )
 
 
 if __name__ == "__main__":
