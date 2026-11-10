@@ -31,7 +31,7 @@ deltas from recent dispatch outcomes. The optional Paseo schedule `routing-recal
 | B4. `cursor-auto`, `cursor` | cursor | subscription (Auto and third-party sublimits) | Auto is burn-first; GrokBot's separate Cursor pool (`grok-bot`) is never a target |
 | B5. `cursor-cloud` | none (`bin/cursor-cloud launch`) | API price on the Cursor pool | leaves the Mac, pushes a branch; acp-dispatch stopped launching it with the Paseo shim |
 | B6. `opencode-go`, `opencode-zen-free` (retired transport) | opencode, disabled | Go Plus subscription (one shared monthly allowance); the free zen models | bulk and mechanical, never code (djbclark 2026-10-30); section F |
-| B7. `antigravity-argon` | antigravity | Google AI Pro subscription (Gemini 4 Argon weekly window) | frontier FALLBACK only, behind codex and claude (operator 2026-10-31); restored 2026-11-07 for tendcf/nix2cf's review route 3 |
+| B7. `antigravity-argon` | antigravity | Google AI Pro subscription (Gemini 4 Argon weekly window) | frontier FALLBACK only, behind codex and claude (operator 2026-10-31); restored 2026-11-07 for tendcf/nix2cf's review route 3; needs the `agy` CLI on PATH (`ade-install` component `antigravity-cli`) and dispatches `gemini-4-argon-high` (the provider folds effort into the id) |
 | B8. `clinepass`, `hermes` | none; hermes | Cline-pass API; the operator's assistant | never a delegation target; ClinePass is the Hermes/Dann lifeline (`substrate`, `hermes-chain`) |
 | B9. `opencode-zen` (paid) | opencode | prepaid | retired until an operator top-up |
 

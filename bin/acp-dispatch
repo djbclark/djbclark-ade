@@ -933,9 +933,27 @@ def launch_argv(a: argparse.Namespace, boundary: str, mode: str, brief: Path, re
     if not workspace_id:
         die("internal: paseo launch without a resolved workspace id")
     labels = [VIA_LABEL, f"ade.kind={a.kind}", f"ade.name={a.name}", f"ade.lead={a.lead}"]
-    return [paseo_bin(), "run", "--provider", f"{PROVIDERS[a.agent]}/{a.model}", "--mode", mode, "--no-wait", "--json",
+    model, thinking = paseo_model(a.agent, a.model, a.effort)
+    return [paseo_bin(), "run", "--provider", f"{PROVIDERS[a.agent]}/{model}", "--mode", mode, "--no-wait", "--json",
             "--title", a.name, "--workspace", workspace_id, "--cwd", a.dir, *[x for lb in labels for x in ("--label", lb)],
-            *(["--thinking", a.effort] if a.effort else []), "--", prompt]
+            *(["--thinking", thinking] if thinking else []), "--", prompt]
+
+
+ANTIGRAVITY_EFFORT_SUFFIXES = ("low", "medium", "high")
+
+
+def paseo_model(agent: str, model: str, effort: str | None) -> tuple[str, str | None]:
+    """(model id, `--thinking` level) as `paseo run --provider` needs them. Paseo's antigravity provider (`agy`) folds the
+    effort into the model id (`gemini-4-argon-high`, `paseo provider models antigravity`) and has no thinking options:
+    `antigravity/gemini-4-argon --thinking high` fails with "Unknown Antigravity model: gemini-4-argon" (2026-11-10).
+    So a bare antigravity id gets `-<effort>` (high without one: the antigravity-argon row's effort) and no `--thinking`;
+    an id already ending -low/-medium/-high is kept. Other providers pass through unchanged."""
+    if agent != "antigravity":
+        return model, effort
+    if model.rsplit("-", 1)[-1] in ANTIGRAVITY_EFFORT_SUFFIXES:
+        return model, None
+    level = (effort or "high").lower()
+    return (f"{model}-{level}", None) if level in ANTIGRAVITY_EFFORT_SUFFIXES else (model, effort)
 
 
 def dispatch(a: argparse.Namespace) -> int:

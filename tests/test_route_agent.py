@@ -295,7 +295,8 @@ def sources(rows=()):
 def fake_paseo(**env: str):
     """route_agent's Paseo reads against tests/fakes/paseo, with its own state dir (no daemon, no network)."""
     with tempfile.TemporaryDirectory(prefix="ra-paseo-") as state, mock.patch.dict(os.environ, {
-            "ROUTE_AGENT_PASEO": "on", "ROUTE_AGENT_PASEO_BIN": str(FAKES / "paseo"), "FAKE_PASEO_STATE": state, **env}), \
+            "ROUTE_AGENT_PASEO": "on", "ROUTE_AGENT_PASEO_BIN": str(FAKES / "paseo"), "FAKE_PASEO_STATE": state,
+            "ROUTE_AGENT_PI_BIN": str(FAKES / "pi"), "PI_CODING_AGENT_DIR": state, **env}), \
             mock.patch.object(r, "PASEO_LOADING_WAIT", 0.01):
         r._reset_paseo_cache()
         try:
@@ -377,6 +378,38 @@ class TestDiscoverySources(unittest.TestCase):
         with mock.patch.dict(os.environ, {"ROUTE_AGENT_PASEO": "off"}):
             r._reset_paseo_cache()
             self.assertIsNone(r.provider_models("codex"))
+
+    PI_TABLE = ("provider     model              context  max-out  thinking  images\n"
+                "antigravity  gemini-3.8-flash   1.0M     65.5K    yes       yes\n"
+                "antigravity  gemini-4-argon     1.0M     65.5K    yes       yes\n"
+                "cursor       composer-1         200K     64K      yes       no\n")
+
+    def pi_paseo_list(self):
+        return json.dumps({"pi": ["antigravity/gemini-3.8-flash", "antigravity/gemini-3.1-pro", "cursor/composer-2.5"]})
+
+    def test_pi_models_follow_pis_own_catalog_where_pi_keeps_one(self):
+        # 2026-11-10: Paseo's Pi list kept a model Pi dropped (gemini-3.1-pro) and omitted one Pi runs (gemini-4-argon).
+        with fake_paseo(FAKE_PASEO_MODELS=self.pi_paseo_list(), FAKE_PI_LIST=self.PI_TABLE) as state:
+            (state / "models-store.json").write_text(json.dumps({"antigravity": {"models": []}}))
+            r._reset_paseo_cache()
+            self.assertEqual(r.provider_models("pi"), [
+                "cursor/composer-2.5",                       # live extension namespace: Paseo's list stands
+                "antigravity/gemini-3.8-flash", "antigravity/gemini-4-argon"])
+
+    def test_pi_models_are_paseos_when_pi_cannot_list_or_has_no_store(self):
+        with fake_paseo(FAKE_PASEO_MODELS=self.pi_paseo_list()):          # fake pi exits 1
+            self.assertEqual(r.provider_models("pi"), json.loads(self.pi_paseo_list())["pi"])
+        with fake_paseo(FAKE_PASEO_MODELS=self.pi_paseo_list(), FAKE_PI_LIST=self.PI_TABLE):   # no models-store.json
+            self.assertEqual(r.provider_models("pi"), json.loads(self.pi_paseo_list())["pi"])
+
+    def test_pi_models_are_pis_when_paseo_cannot_say(self):
+        with fake_paseo(FAKE_PI_LIST=self.PI_TABLE, ROUTE_AGENT_PASEO_BIN="/nonexistent/paseo"):
+            self.assertEqual(r.provider_models("pi"), ["antigravity/gemini-3.8-flash", "antigravity/gemini-4-argon",
+                                                       "cursor/composer-1"])
+
+    def test_pi_models_do_not_touch_other_providers(self):
+        with fake_paseo(FAKE_PASEO_MODELS=json.dumps({"codex": ["gpt-6-luna"]}), FAKE_PI_LIST=self.PI_TABLE):
+            self.assertEqual(r.provider_models("codex"), ["gpt-6-luna"])
 
     def test_services_check_models_flags_a_suggestion_paseo_does_not_list(self):
         listed: dict[str, list[str]] = {}
@@ -2636,7 +2669,7 @@ class TestArgonFrontierFallback(unittest.TestCase):
         self.assertEqual(
             (c.service.name, c.dispatch),
             ("antigravity-argon",
-             "paseo run --provider antigravity/gemini-4-argon --thinking high "
+             "paseo run --provider antigravity/gemini-4-argon-high "
              "--label ade.kind=frontier --no-wait"),
         )
         q.pop("antigravity-argon")

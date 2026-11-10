@@ -237,6 +237,21 @@ platforms = ["mac", "linux"]
 notes = "Official binary is agent (not cursor). Version pin is read from https://cursor.com/install; tarball fetched with urllib (no curl|bash, no shell=True). Non-dry-run needs ADE_USER_INSTALL_TRUST_VENDOR=1 (TLS-to-publisher; no forever digest — order 8). Login is a separate [[login]] check."
 
 [[component]]
+id = "antigravity-cli"
+class = "hard"
+summary = "Antigravity CLI (agy): the binary Paseo's built-in antigravity provider launches"
+source = "https://antigravity.google/product/antigravity-cli"
+install = "Mac: brew install --cask antigravity-cli (binary agy); Linux UNKNOWN (record later)"
+needs_system = true
+system_argv_darwin = ["brew", "install", "--cask", "antigravity-cli"]
+update = "brew upgrade --cask antigravity-cli (the cask also self-updates)"
+probe = "agy --version"
+probe_argv = ["agy", "--version"]
+presence = "agy"
+platforms = ["mac"]
+notes = "2026-11-10: slim-down C53 uninstalled agy, then E7 restored Paseo's antigravity provider (the antigravity-argon frontier fallback) without it: the provider (Paseo.app builtin-plugins/antigravity-provider) runs `agy` from PATH (not the old agy_acp_server.par, not ~/.local/bin/agy-acp-bb), so `paseo provider ls` read `error`. Login is the separate antigravity [[login]] check (run `agy`, sign in with the Google AI Pro account)."
+
+[[component]]
 id = "skill-everywhere"
 class = "hard"
 summary = "Link skills into every TUI from this repo"
@@ -754,7 +769,8 @@ notes = "Official binary is agent; confirm subcommand if Cursor CLI renames it."
 [[login]]
 id = "antigravity"
 summary = "Paseo antigravity / Google AI plan login"
-command = "UNKNOWN"
+command = "agy"
+notes = "Interactive: run `agy` once and sign in (Paseo's diagnostic says the same). Binary comes from the antigravity-cli component."
 
 [[login]]
 id = "github"
