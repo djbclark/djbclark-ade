@@ -1591,10 +1591,32 @@ def test_local_non_executable_ade_stubs_hooks_path_refuses_push(tmp_path, state)
 
 
 def test_relative_local_non_ade_hooks_path_refuses_push(tmp_path, state):
-    """hooksPath relative to the common dir that is not the stubs is refused the same as an absolute one."""
+    """Relative hooksPath resolves from the work-tree root (git's hook cwd), not the common dir."""
     repo = mk_repo(tmp_path, state)
     plain(state, ["config", "core.hooksPath", "custom-hooks"], repo)
-    (repo / ".git" / "custom-hooks").mkdir()
+    (repo / "custom-hooks").mkdir()
+    r = run(state, ["branch", "-f", "x", "main"], repo, who="B")
+    assert refused77(r) and "hooks-path" in r.stderr, r.stderr
+
+
+def test_relative_dot_git_hooks_path_allows_when_stubs_installed(tmp_path, state):
+    """core.hooksPath=.git/hooks must resolve to <work-tree>/.git/hooks, not <common>/.git/hooks."""
+    repo = mk_repo(tmp_path, state)
+    bare = tmp_path / "o.git"
+    plain(state, ["init", "-q", "--bare", "-b", "main", str(bare)], tmp_path)
+    plain(state, ["remote", "add", "origin", str(bare)], repo)
+    _write_ade_stubs(repo / ".git" / "hooks")
+    plain(state, ["config", "core.hooksPath", ".git/hooks"], repo)
+    r = run(state, ["push", "origin", "main"], repo, who="B")
+    assert r.returncode == 0 and "hooks-path" not in r.stderr, r.stderr
+    assert "main" in plain(state, ["--git-dir", str(bare), "branch", "--list"], tmp_path)
+
+
+def test_relative_hooks_path_named_hooks_refuses_when_only_dot_git_hooks_has_stubs(tmp_path, state):
+    """core.hooksPath=hooks looks in <work-tree>/hooks; stubs only under .git/hooks must still refuse."""
+    repo = mk_repo(tmp_path, state)
+    _write_ade_stubs(repo / ".git" / "hooks")
+    plain(state, ["config", "core.hooksPath", "hooks"], repo)
     r = run(state, ["branch", "-f", "x", "main"], repo, who="B")
     assert refused77(r) and "hooks-path" in r.stderr, r.stderr
 

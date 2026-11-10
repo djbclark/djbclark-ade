@@ -1759,17 +1759,20 @@ def _is_ref_write_or_push(call: GitCall) -> bool:
 
 
 def _resolve_hooks_path(call: GitCall, value: str) -> Optional[Path]:
-    """Resolve `core.hooksPath` as git does: absolute as-is, else relative to the common directory. None when the
-    common dir cannot be read (caller fails closed). An empty value is Path('')."""
+    """Resolve `core.hooksPath` as git does: absolute as-is, else relative to the directory where hooks run
+    (work-tree root for a non-bare repository; the git dir for a bare one — git-config `core.hooksPath` /
+    githooks). None when git cannot name that directory (caller fails closed). An empty value is Path('')."""
     if value == "":
         return Path("")
     p = Path(value)
     if p.is_absolute():
         return p
-    rc, out = _call_git(call, "rev-parse", "--path-format=absolute", "--git-common-dir")
-    if rc != 0 or not out.strip():
-        return None
-    return Path(out.strip()) / p
+    status, gd, top = _git_says(call)
+    if status == "ok" and top:
+        return Path(top) / p
+    if status == "bare" and gd:
+        return Path(gd) / p
+    return None
 
 
 def _stubs_in_dir(hooks_dir: Path) -> bool:
@@ -1791,7 +1794,8 @@ def _stubs_in_dir(hooks_dir: Path) -> bool:
 def _local_hooks_path_decision(call: GitCall, env: dict[str, str]) -> Optional[Decision]:
     """§10 residual (2026-11-10): a repository whose local/worktree `core.hooksPath` is set and is not the ade stubs
     directory never runs the claim hooks. Refuse `push` and ref-writing subcommands (`hooks-path`, exit 77). An
-    ade-stub hooksPath (the directory holds the installed stubs, each executable) stays allowed; unset local hooksPath is unchanged."""
+    ade-stub hooksPath (directory holds the installed, executable stubs; relative values from the hook cwd) stays
+    allowed; unset local hooksPath is unchanged."""
     if not _is_ref_write_or_push(call):
         return None
     state, scoped = _config_scopes(call, env)

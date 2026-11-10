@@ -158,7 +158,8 @@ Evaluated in order; the module docstring has every form.
    1 = unset) (`hook-config`). A repository's own (local or worktree) `hooksPath` is not refused for ordinary calls: the
    repository chose it (husky, pre-commit), the hooks do not run there, and `install` reports it (78). **When that local /
    worktree `hooksPath` is set and is not the ade-git-guard stubs directory** (the directory holds the installed stubs,
-   each executable; `/dev/null`, empty, husky, non-executable copies, and any other path count as non-ade), **`push` and
+   each executable; a relative value is resolved from the work-tree root where Git runs hooks, bare: the git dir;
+   `/dev/null`, empty, husky, non-executable copies, and any other path count as non-ade), **`push` and
    ref-writing subcommands are refused** (`hooks-path`, exit 77; §10 residual, 2026-11-10): without the stubs the claim
    hooks never run. An ade-stub `hooksPath` stays allowed. If git answers neither 0 nor 1 (timeout, a
    config file it cannot parse) the call is refused with that reason (`hook-config-unknown`): **the shim fails closed, the
@@ -236,8 +237,10 @@ analyser (and the Claude PreToolUse hook it was for, W5).
     `core.hooksPath` is set and is not the ade-git-guard stubs directory (`/dev/null`, empty, husky, non-executable
     stub copies, any other path), refuse `push` and ref-writing subcommands (`update-ref`, non-read `branch`/
     `checkout`/`switch`/`commit`/`merge`/`rebase`/`reset`/`stash`/`pull`/`symbolic-ref`/`worktree`, …). An ade-stub
-    `hooksPath` (the directory holds the installed stubs, each executable) stays allowed; ordinary non-ref-writing
-    calls with a non-ade local `hooksPath` stay allowed.
+    `hooksPath` (the directory holds the installed stubs, each executable) stays allowed; a relative value is
+    resolved from the work-tree root where Git runs hooks (bare: the git dir), matching `core.hooksPath` /
+    githooks, not from the common Git directory. Ordinary non-ref-writing calls with a non-ade local `hooksPath`
+    stay allowed.
     Still out of reach by design: an absolute path to the real git (the hooks still would not run, and this shim never
     sees the call), and a human shell.
 11. **Template sources the shim only reads for `clone`, `init`:** `submodule add|update` and `fetch|pull --recurse-submodules` also
