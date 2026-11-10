@@ -104,6 +104,8 @@ owner issue comment (not the body), then:
 
 ```sh
 gh workflow run adversary-marker.yml -f pr=N      # a body/comment edit is not a Tests run: re-check
+# Push of bin/adversary_marker.py (or this workflow) to master also rejudges every open PR
+# (2026-11-10: after owner-trust, that flips owner tips without per-PR dispatch).
 gh pr checks N --watch --required                 # wait for Tests and the marker
 gh pr merge N --squash --match-head-commit <the reviewed head>
 ```
@@ -111,11 +113,13 @@ gh pr merge N --squash --match-head-commit <the reviewed head>
 ## The `adversary-marker` Action
 
 `.github/workflows/adversary-marker.yml` runs `bin/adversary_marker.py` on `workflow_run` (the `Tests` workflow completed,
-whatever its conclusion) and on `workflow_dispatch` (input `pr`). Both run the workflow file and the module from **master**;
-nothing from the PR is checked out or executed. Job `resolve` (no secret) finds the PR (the event's `pull_requests[]`, else
-`commits/{sha}/pulls`, else `pulls?head=owner:branch` for a fork) and outputs its number; job `marker` runs in the
-concurrency group `adversary-marker-<head sha>` (2026-11-07: runs sharing a head serialize together; every open
-PR at that head is judged before one aggregate status is posted), reads the body and head through the API with the job's read-only token (`pull-requests: read`,
+whatever its conclusion), on `workflow_dispatch` (input `pr`), and on `push` of `bin/adversary_marker.py` or this workflow
+to the default branch (rejudges every open PR; 2026-11-10). Those runs use the workflow file and the module from **master**;
+nothing from the PR is checked out or executed. Job `resolve` (no secret) finds the PR(s) (the event's `pull_requests[]`,
+else `commits/{sha}/pulls`, else `pulls?head=owner:branch` for a fork; or every open PR on push) and outputs them; job
+`marker` runs in the concurrency group `adversary-marker-<head sha>` (or `adversary-marker-push-rejudge-all-open` for a
+push sweep; 2026-11-07: runs sharing a head serialize together; every open PR at that head is judged before one aggregate
+status is posted), reads the body and head through the API with the job's read-only token (`pull-requests: read`,
 `contents: read`), judges the marker with the parser moved unchanged from the PR waiter (rule 1's five properties, 2,559
 test cases), **re-reads the head, the body and its last editor in one GraphQL query and posts only if the head is
 unchanged** (judging that second read's body), and posts the commit status `adversary-marker` on that head with a token of
@@ -123,7 +127,7 @@ the `ade-merge-gate` App: `success` for an owner-authored PR with no BLOCK/malfo
 or for a live APPROVE naming the head in a trusted owner-PR body editor or owner issue comment (above); `failure` for a
 BLOCK, a malformed marker, an outside PR with no owner-comment APPROVE, or "marker not written by a trusted user". It
 fails closed: an API error posts nothing and fails the job (the required check stays missing); a PR whose `Tests` workflow
-was edited away gets no status; a dispatch from any branch but master cannot reach the `merge-gate` environment's key.
+was edited away gets no status; a dispatch or push from any branch but master cannot reach the `merge-gate` environment's key.
 `MARKER_POST_AS: check-run` on the step posts the same verdict as a check run (the fallback below); the token step asks
 for both `statuses: write` and `checks: write`, so the App must have both.
 

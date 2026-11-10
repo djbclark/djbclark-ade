@@ -1099,6 +1099,10 @@ def _open_prs_at(api, repo: str, head: str) -> list[int]:
             and _same_repo(((p.get("base") or {}).get("repo") or {}).get("full_name"), repo)]
 
 
+# Concurrency key for a default-branch push that rejudges every open PR (not a 40-hex head).
+PUSH_REJUDGE_KEY = "push-rejudge-all-open"
+
+
 def find_prs(event_name: str, event: dict, repo: str, api) -> tuple[list[int], str, str]:
     """The PR numbers this event is about, how they were found, and the head they were found at.
 
@@ -1108,9 +1112,20 @@ def find_prs(event_name: str, event: dict, repo: str, api) -> tuple[list[int], s
 
     workflow_dispatch: the `pr` input (digits only); its head is read from `GET pulls/{pr}`. workflow_run: the event's
     `pull_requests[]` (same-repo PRs only; GitHub leaves it empty for a fork PR) and the commit lookup, else
-    `GET pulls?head=OWNER:BRANCH` from the run's head repository and branch. Raises ValueError for an event it cannot
-    read, ApiError when a lookup fails.
+    `GET pulls?head=OWNER:BRANCH` from the run's head repository and branch. push: every open PR of this repository
+    (paths-filtered in the workflow; never invents APPROVE — only re-posts statuses). Raises ValueError for an event
+    it cannot read, ApiError when a lookup fails.
     """
+    if event_name == "push":
+        # Paths filter in the workflow limits this to marker module / workflow edits on the default branch.
+        nums = [
+            p["number"]
+            for p in _all_pages(api, f"repos/{repo}/pulls?state=open")
+            if isinstance(p.get("number"), int)
+            and p.get("state", "open") == "open"
+            and _same_repo(((p.get("base") or {}).get("repo") or {}).get("full_name"), repo)
+        ]
+        return sorted(set(nums)), "push all-open", ""
     if event_name == "workflow_dispatch":
         pr = str(((event.get("inputs") or {}).get("pr")) or "").strip()
         if not re.fullmatch(r"[1-9][0-9]{0,9}", pr):
@@ -1118,7 +1133,10 @@ def find_prs(event_name: str, event: dict, repo: str, api) -> tuple[list[int], s
         _state, head, _body = _pr_state(api, repo, int(pr))
         return sorted({int(pr), *_open_prs_at(api, repo, head)}), "dispatch input", head
     if event_name != "workflow_run":
-        raise ValueError(f"unsupported event {event_name!r} (only workflow_run and workflow_dispatch)")
+        raise ValueError(
+            f"unsupported event {event_name!r} "
+            "(only workflow_run, workflow_dispatch, and push)"
+        )
     wr = event.get("workflow_run") or {}
     head_sha = str(wr.get("head_sha") or "").lower()
     if not SHA40.match(head_sha):
@@ -1445,17 +1463,35 @@ def judge_pr(api, repo: str, n: int, target_url: str = "") -> dict:
 
 
 def resolve(event_name: str, event: dict, repo: str, api) -> tuple[int, dict]:
-    """The workflow's first job: the PR numbers and the concurrency key. The key is the HEAD SHA the PRs were found at
-    (empty when there is no PR): PRs sharing a head share one commit status, so every run that could post on that
-    sha, a dispatch and a `workflow_run` alike, is in one concurrency group and they never race (2026-11-07; the
-    key was the PR numbers, so a dispatch for #10 and a run for #10 and #11 at the same head could post in parallel)."""
+    """The workflow's first job: the PR numbers, the concurrency key, and the optional single-head filter.
+
+    For ``workflow_run`` / ``workflow_dispatch`` the key is the HEAD SHA the PRs were found at (empty when there is
+    no PR): PRs sharing a head share one commit status, so every run that could post on that sha, a dispatch and a
+    ``workflow_run`` alike, is in one concurrency group and they never race (2026-11-07; the key was the PR numbers,
+    so a dispatch for #10 and a run for #10 and #11 at the same head could post in parallel). ``at_head`` matches the
+    key so the marker job posts only on that sha.
+
+    For ``push`` (marker module / workflow landed on the default branch) the key is ``PUSH_REJUDGE_KEY`` and
+    ``at_head`` is empty: the marker job rejudges every open PR across heads without inventing APPROVE.
+    """
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo or ""):
         return 2, {"error": f"not an OWNER/NAME repository: {repo!r}"}
     try:
         prs, how, head = find_prs(event_name, event, repo, api)
     except (ValueError, ApiError) as e:
         return 2, {"error": str(e)}
-    return 0, {"prs": ",".join(str(n) for n in prs), "key": head if prs else "", "found_by": how}
+    if event_name == "push":
+        key = PUSH_REJUDGE_KEY if prs else ""
+        at_head = ""
+    else:
+        key = head if prs else ""
+        at_head = key
+    return 0, {
+        "prs": ",".join(str(n) for n in prs),
+        "key": key,
+        "at_head": at_head,
+        "found_by": how,
+    }
 
 
 def parse_prs(text: str) -> list[int]:
@@ -1570,11 +1606,17 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(out, sort_keys=True))
             if rc == 0 and os.environ.get("GITHUB_OUTPUT"):
                 with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
-                    f.write(f"prs={out['prs']}\nkey={out['key']}\n")
+                    f.write(
+                        f"prs={out['prs']}\n"
+                        f"key={out['key']}\n"
+                        f"at_head={out.get('at_head', out['key'])}\n"
+                    )
             return rc
         try:
             prs_given = parse_prs(a.prs) if a.prs is not None else None
-            at_head = None if a.at_head is None else a.at_head.strip().lower()
+            # Empty --at-head (push all-open rejudge) means no single-head filter.
+            raw_at = None if a.at_head is None else a.at_head.strip().lower()
+            at_head = None if not raw_at else raw_at
             if at_head is not None and not SHA40.match(at_head):
                 raise ValueError(f"--at-head is not 40 hex: {a.at_head!r}")
         except ValueError as e:
