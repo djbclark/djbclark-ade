@@ -66,8 +66,12 @@ def test_legacy_effective_matches_routing_toml_and_clamped_gates(home):
     assert eff.data["gates"]["frontier"] == frontier
     assert eff.provenance["routing_source"].endswith("config/routing.toml")
     assert eff.provenance["gates_source"].endswith("config/gates.toml")
+    assert eff.provenance["context_budget_source"].endswith("config/context-budget.toml")
     assert eff.provenance["local_config"] is None
     assert info["source"] == "gates.toml"
+    cb_shipped = tomllib.loads((REPO / "config" / "context-budget.toml").read_text())
+    assert eff.data["context_budget"]["dirs"] == cb_shipped["dirs"]
+    assert eff.data["context_budget"]["budget"] == cb_shipped["budget"]
 
 
 def test_local_override_preserves_sibling_lead_leaves(home):
@@ -144,6 +148,30 @@ def test_gates_toml_isolates_and_bad_frontier_is_closed(home, monkeypatch):
     assert eff.data["gates"]["frontier"] == ac.FRONTIER_DEFAULTS
     assert eff.provenance["gates_info"]["source"] == "code"
     assert eff.provenance["gates_env"] == str(FIX / "gates_bad_frontier.toml")
+
+
+def test_context_budget_toml_isolates_domain_from_local(home, tmp_path, monkeypatch):
+    selected = tmp_path / "cb.toml"
+    selected.write_text(
+        'dirs = ["~/only-selected"]\n[budget]\ntotal = 11111\nmemory = 2222\n'
+    )
+    monkeypatch.setenv("CONTEXT_BUDGET_TOML", str(selected))
+    _local_write(
+        home,
+        '[context_budget]\ndirs = ["~/from-local"]\n'
+        "[context_budget.budget]\ntotal = 99999\n",
+    )
+    eff = ac.load_effective(root=REPO, home=home, environ=dict(os.environ))
+    assert eff.data["context_budget"]["dirs"] == ["~/only-selected"]
+    assert eff.data["context_budget"]["budget"]["total"] == 11111
+    assert eff.provenance["context_budget_env"] == str(selected)
+
+
+def test_missing_selected_context_budget_toml_errors(home, monkeypatch):
+    missing = home / "no-such-context-budget.toml"
+    monkeypatch.setenv("CONTEXT_BUDGET_TOML", str(missing))
+    with pytest.raises(ac.ConfigError, match="not a regular file"):
+        ac.load_effective(root=REPO, home=home, environ=dict(os.environ))
 
 
 def test_gate_loosen_clamped_to_code_defaults(home):
@@ -223,12 +251,14 @@ def test_new_minimal_ade_toml_loads(home):
     assert eff.data["gates"]["frontier"]["frontier1_per_wave"] == 2.0
 
 
-def test_mapping_table_covers_routing_and_gates():
+def test_mapping_table_covers_routing_gates_and_context_budget():
     targets = {row[2] for row in ac.LEGACY_PROJECTION}
     assert "[routing]" in targets
     assert "[[service]]" in targets
     assert "[gates.frontier]" in targets
     assert "[gates.floors.frontier]" in targets
+    assert "[context_budget].dirs" in targets
+    assert "[context_budget].budget" in targets
 
 
 @pytest.fixture
@@ -253,6 +283,9 @@ def synthetic_root(tmp_path):
     '[gates.floors.frontier]\nfrontier1_per_wave = 2',
     '[gates.floors.frontier.frontier1_per_wave]\nbound = "oops"',
     '[gates.floors.frontier.frontier1_per_wave]\nmisspelled = 1',
+    '[context_budget]\nunknown = 1',
+    '[context_budget]\ndirs = 1',
+    '[context_budget]\nbudget = 1',
 ])
 @pytest.mark.parametrize("location", ["new", "local"])
 def test_raw_schema_failures_all_commands(home, synthetic_root, text, location):

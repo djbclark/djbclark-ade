@@ -200,6 +200,24 @@
           }
         }
       }
+    },
+    "context_budget": {
+      "type": "object",
+      "description": "Legacy context-budget.toml dirs and [budget] project under context_budget.dirs and context_budget.budget.",
+      "additionalProperties": false,
+      "properties": {
+        "dirs": {
+          "type": "array",
+          "description": "Directories to measure, in order (legacy top-level dirs).",
+          "items": {
+            "type": "string"
+          }
+        },
+        "budget": {
+          "type": "object",
+          "description": "Ceilings and per-directory overrides (legacy [budget] / [budget.\"~\"])."
+        }
+      }
     }
   }
 }

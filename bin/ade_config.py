@@ -1,9 +1,10 @@
 """ade_config: versioned read-only effective ADE config (schema_version=1).
 
 Builds one effective tree from optional ``config/ade.toml``, legacy
-``config/routing.toml`` + ``config/gates.toml``, and optional
-``~/.config/djbclark-ade/local.toml``. Does not write files, resolve secrets,
-or switch existing readers (``route_agent`` / ``ade_gates`` stay on their paths).
+``config/routing.toml`` + ``config/gates.toml`` + ``config/context-budget.toml``,
+and optional ``~/.config/djbclark-ade/local.toml``. Does not write files or
+resolve secrets. Consumers adopt via ``load_effective`` (``route_agent``,
+``ade_gates.load_frontier``, ``context-budget-check``, …).
 
 Public:
   load_effective(...) -> EffectiveConfig
@@ -49,16 +50,22 @@ LEGACY_PROJECTION: tuple[tuple[str, str, str], ...] = (
     ("config/routing.toml", "[[service]]", "[[service]]"),
     ("config/gates.toml", "[frontier]", "[gates.frontier]"),
     ("config/gates.toml", "[floors.frontier]", "[gates.floors.frontier]"),
+    ("config/context-budget.toml", "dirs", "[context_budget].dirs"),
+    ("config/context-budget.toml", "[budget]", "[context_budget].budget"),
 )
 
 ROUTING_DOMAIN_KEYS: frozenset[str] = frozenset({
     "routing", "lead", "dispatch", "substrate", "hermes", "calibrate", "service",
 })
 
+# Defaults match bin/context-budget-check when the legacy file is absent.
+DEFAULT_CONTEXT_BUDGET_DIRS: list[str] = ["~/src/djbclark-ade", "~"]
+
 KNOWN_TOP_LEVEL: frozenset[str] = frozenset({
     "schema_version",
     *ROUTING_DOMAIN_KEYS,
     "gates",
+    "context_budget",
 })
 
 
@@ -95,6 +102,10 @@ def default_routing_path(root: Path) -> Path:
 
 def default_gates_path(root: Path) -> Path:
     return root / "config" / "gates.toml"
+
+
+def default_context_budget_path(root: Path) -> Path:
+    return root / "config" / "context-budget.toml"
 
 
 def default_local_path(home: Path | None = None) -> Path:
@@ -386,6 +397,48 @@ def project_gates_from_new(gates: Any, *, source_label: str) -> tuple[dict[str, 
     return out, info
 
 
+def project_context_budget_domain(legacy: dict[str, Any], *, label: str) -> dict[str, Any]:
+    """Nest legacy context-budget.toml ``dirs`` / ``[budget]`` under ``[context_budget]``."""
+    if not isinstance(legacy, dict):
+        raise ConfigError(f"{label}: root must be a table")
+    dirs = legacy.get("dirs")
+    if dirs is None:
+        dirs_out: list[str] = list(DEFAULT_CONTEXT_BUDGET_DIRS)
+    else:
+        if not isinstance(dirs, list) or not all(isinstance(d, str) for d in dirs):
+            raise ConfigError(f"{label}: dirs must be an array of strings")
+        dirs_out = list(dirs)
+    budget = legacy.get("budget")
+    if budget is None:
+        budget_out: dict[str, Any] = {}
+    else:
+        if not isinstance(budget, dict):
+            raise ConfigError(f"{label}: [budget] must be a table")
+        budget_out = copy.deepcopy(budget)
+    return {"dirs": dirs_out, "budget": budget_out}
+
+
+def load_legacy_context_budget(path: Path, *, required: bool = False) -> dict[str, Any]:
+    """Project a legacy context-budget.toml. Missing → defaults unless ``required``."""
+    if not input_present(path):
+        if required:
+            raise ConfigError(f"{path}: not a regular file")
+        return {"dirs": list(DEFAULT_CONTEXT_BUDGET_DIRS), "budget": {}}
+    return project_context_budget_domain(read_toml(path), label=str(path))
+
+
+def normalize_context_budget(raw: Any, *, label: str) -> dict[str, Any]:
+    """Ensure ``context_budget`` is a table with dirs/budget for consumers."""
+    if raw is None:
+        return {"dirs": list(DEFAULT_CONTEXT_BUDGET_DIRS), "budget": {}}
+    if not isinstance(raw, dict):
+        raise ConfigError(f"{label}: [context_budget] must be a table")
+    return project_context_budget_domain(
+        {"dirs": raw.get("dirs"), "budget": raw.get("budget")},
+        label=label,
+    )
+
+
 def reject_duplicate_services(services: Any, *, label: str) -> None:
     if services is None:
         return
@@ -434,6 +487,7 @@ def load_effective(
 
     routing_env = env.get("ROUTING_POLICY") or None
     gates_env = env.get("GATES_TOML") or None
+    context_budget_env = env.get("CONTEXT_BUDGET_TOML") or None
 
     provenance: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
@@ -442,8 +496,10 @@ def load_effective(
         "local_config": str(local_path) if using_local else None,
         "routing_source": None,
         "gates_source": None,
+        "context_budget_source": None,
         "routing_env": routing_env,
         "gates_env": gates_env,
+        "context_budget_env": context_budget_env,
         "gates_info": None,
         "mapping": [
             {"legacy_file": a, "legacy": b, "effective": c}
@@ -493,6 +549,21 @@ def load_effective(
         data["gates"], legacy_gate_error = raw_legacy_gates(gpath)
         provenance["gates_source"] = str(gpath)
 
+    # --- context_budget domain ---
+    if context_budget_env:
+        cb_path = Path(context_budget_env)
+        data["context_budget"] = load_legacy_context_budget(cb_path, required=True)
+        provenance["context_budget_source"] = str(cb_path)
+    elif using_new:
+        data["context_budget"] = normalize_context_budget(
+            data.get("context_budget"), label=str(new_path)
+        )
+        provenance["context_budget_source"] = str(new_path)
+    else:
+        cb_path = default_context_budget_path(root)
+        data["context_budget"] = load_legacy_context_budget(cb_path, required=False)
+        provenance["context_budget_source"] = str(cb_path)
+
     # --- local override ---
     if using_local:
         local = read_toml(local_path)
@@ -506,6 +577,8 @@ def load_effective(
                 merge_src.pop(key, None)
         if gates_env:
             merge_src.pop("gates", None)
+        if context_budget_env:
+            merge_src.pop("context_budget", None)
         data = merge_maps(data, merge_src, path="")
         provenance["local_config"] = str(local_path)
 
@@ -516,6 +589,9 @@ def load_effective(
     if legacy_gate_error:
         ginfo.update(source="code", toml_error=legacy_gate_error)
     data["gates"] = gates
+    data["context_budget"] = normalize_context_budget(
+        data.get("context_budget"), label="effective config"
+    )
     provenance["gates_info"] = ginfo
     validate_tree(data, schema, label="effective config")
 

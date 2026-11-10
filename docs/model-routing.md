@@ -13,10 +13,10 @@ Current operator decision: Pi is the sole general-purpose third-party TUI; vendo
 A1. `config/routing.toml` (kinds, each pool's ranks per kind and suggested `--model [--effort]`, the quality band, the
 plenty gate, burn-first and pace knobs, the never-route list and aliases, dispatch gates and estimate floors, the lead's
 model) and `config/gates.toml [frontier]` (the frontier allowance, `docs/gates.md`). Readers go through
-`ade_config.load_effective` (`route_agent` via `load_routing_effective`, `ade_gates.load_frontier`, and the
-context-size nudge's `[lead].fable_lead` check; legacy files / `ROUTING_POLICY` / `GATES_TOML` when
-`config/ade.toml` is absent). Print both with `bin/route_agent.py policy --md` (or `policy` for JSON); no other
-file restates them.
+`ade_config.load_effective` (`route_agent` via `load_routing_effective`, `ade_gates.load_frontier`, the
+context-size nudge's `[lead].fable_lead` check, and `context-budget-check`'s `context_budget` domain;
+legacy files / `ROUTING_POLICY` / `GATES_TOML` / `CONTEXT_BUDGET_TOML` when `config/ade.toml` is absent).
+Print both with `bin/route_agent.py policy --md` (or `policy` for JSON); no other file restates them.
 A2. `bin/route_agent.py plan --kinds …` applies them to the live quota and prints one `acp-dispatch` line per slice;
 `route`, `show`, `services [--check-models]`, `calibrate`, `substrate` and `hermes-chain` are its other commands.
 

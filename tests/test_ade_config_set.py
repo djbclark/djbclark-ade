@@ -230,6 +230,24 @@ def test_repo_gates_scalar_and_refuse_inline_table_leaf(home, tmp_path):
         )
 
 
+def test_repo_context_budget_scalar_strips_prefix(home, tmp_path):
+    root = tmp_path / "repo"
+    (root / "config").mkdir(parents=True)
+    shutil.copy(REPO / "config" / "ade.schema.json", root / "config" / "ade.schema.json")
+    cb = root / "config" / "context-budget.toml"
+    cb.write_text('dirs = ["~/src/djbclark-ade"]\n[budget]\ntotal = 30000\n')
+    result = ace.set_scalar(
+        "context_budget.budget.total", 31000, target="repo", root=root, home=home
+    )
+    assert result.target.kind == "legacy_context_budget"
+    assert result.target.path == cb
+    text = cb.read_text()
+    assert "total = 31000" in text
+    assert "dirs = " in text
+    data = ac.read_toml(cb)
+    assert data["budget"]["total"] == 31000
+
+
 def test_unified_ade_toml_is_repo_source_when_present(home, tmp_path):
     root = tmp_path / "repo"
     (root / "config").mkdir(parents=True)
