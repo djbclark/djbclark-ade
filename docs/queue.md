@@ -155,8 +155,8 @@ under **Carried**, newest first, one line each; an item leaves when it ships (in
 10. Quota-aware cross-vendor routing (queued 2026-08-23): `route_agent.py plan|route|show` (2026-10).
 11. Implement cow (2026-08-23; removed with `cow-pasture` 2026-11-06).
 12. Completed 2026-08-23: `~/src/ops-worktrees/` retired with every branch preserved.
-13. Token-cost hygiene review of 2026-08-24; Carried 30 shipped 2026-11-10: AGENTS.md Code review →
-    `docs/code-review.md`, AGENTS.md ≤200 lines.
+13. Token-cost hygiene review of 2026-08-24; Carried 30 shipped 2026-11-10 (PR #440): AGENTS.md Code
+    review → `docs/code-review.md`, AGENTS.md ≤200 lines.
 14. Monthly plans that work with Hermes (research of 2026-08-24; ClinePass).
 15. Why the `sed` edit failed twice (2026-10-14): `~/CLAUDE.md` item 33.
 16. Flaky MockWebServer tests on the SIPB runner (2026-10-14).
