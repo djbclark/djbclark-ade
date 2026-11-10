@@ -1436,3 +1436,72 @@ def test_vendor_install_refuses_without_trust_env(monkeypatch, tmp_path):
     with pytest.raises(aui.UserInstallError, match=aui.VENDOR_TRUST_ENV):
         aui.install_hermes(dry_run=False)
 
+
+def test_labeled_ade_sched_job_names_from_repo():
+    catalog = ai.load_catalog(root=REPO)
+    names = ai.labeled_ade_sched_job_names(catalog)
+    assert "keys-check" in names
+    assert "harden-check" in names
+    assert "ade-update-check" in names
+    assert "deadline-sweep" in names
+    assert "update-auto" not in names  # no plist yet
+
+
+def test_apply_skips_reconcile_when_id_filter(monkeypatch, tmp_path):
+    called: list[int] = []
+
+    def boom(*_a, **_k):
+        called.append(1)
+        return [], 0
+
+    monkeypatch.setattr(ai, "apply_sched_reconcile", boom)
+    root = _fixture_root(tmp_path)
+    catalog = ai.load_catalog(root=root)
+    results, rc = ai.apply(catalog, dry_run=True, ids={"tool-c"})
+    assert rc == 0
+    assert called == []
+    assert not any(r.get("category") == "sched" for r in results)
+
+
+def test_apply_full_runs_reconcile_sched(monkeypatch, tmp_path):
+    called: list[bool] = []
+
+    def fake(_catalog, *, dry_run=True, **_k):
+        called.append(dry_run)
+        return ([{
+            "id": "keys-check",
+            "action": "would-install",
+            "reason": "plan",
+            "ok": True,
+            "category": "sched",
+        }], 0)
+
+    monkeypatch.setattr(ai, "apply_sched_reconcile", fake)
+    root = _fixture_root(tmp_path)
+    catalog = ai.load_catalog(root=root)
+    # Force reconcile even with --id (default would skip when ids is set).
+    results, rc = ai.apply(catalog, dry_run=True, ids={"tool-c"}, reconcile_sched=True)
+    assert rc == 0, results
+    assert called == [True]
+    assert any(r.get("category") == "sched" and r["id"] == "keys-check" for r in results)
+
+
+def test_apply_sched_reconcile_skips_non_write_backend(monkeypatch, tmp_path):
+    import ade_sched as sched
+
+    class B:
+        name = "launchd"
+
+    monkeypatch.setattr(sched, "detect", lambda *_a, **_k: B())
+    root = _fixture_root(tmp_path)
+    # Point catalog jobs at a labeled ADE row.
+    (root / "config" / "install.toml").write_text(
+        (REPO / "config" / "install.toml").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    catalog = ai.load_catalog(root=root)
+    rows, rc = ai.apply_sched_reconcile(catalog, dry_run=False, names={"keys-check"})
+    assert rc == 0
+    assert rows and rows[0]["action"] == "skip-reconcile-backend"
+    assert rows[0]["ok"] is True
+

@@ -14,7 +14,7 @@ values). Apply defaults to dry-run; ``--yes`` executes user ``install_argv``
 (argv lists, never shell=True); ``paseo_plugin`` rows are always skipped/blocked.
 ``--system --dry-run`` / ``--print-system-argv`` preview ``system_argv``. Live
 ``system_argv`` needs ``--yes --system --apply-system`` (opt-in; default refuse).
-Secrets are never read.
+Secrets are never read. A full apply (no ``--id``) also runs ``ade-sched reconcile`` for ADE-owned labeled jobs unless ``--no-reconcile-sched``.
 """
 from __future__ import annotations
 
@@ -1808,6 +1808,97 @@ def _run_install_argv(
     return False
 
 
+def labeled_ade_sched_job_names(catalog: Catalog) -> list[str]:
+    """ADE-owned ``kind=ade-sched`` jobs that already have ``label`` + ``plist`` (reconcile-ready)."""
+    names: list[str] = []
+    for row in catalog.jobs:
+        if row.get("owner") != OWNER_ADE:
+            continue
+        if row.get("kind") != "ade-sched":
+            continue
+        label, plist = row.get("label"), row.get("plist")
+        if not isinstance(label, str) or not label or not isinstance(plist, str) or not plist:
+            continue
+        names.append(str(row["name"]))
+    return names
+
+
+def apply_sched_reconcile(
+    catalog: Catalog,
+    *,
+    dry_run: bool = True,
+    names: set[str] | None = None,
+    env: Mapping[str, str] | None = None,
+    state_dir: Path | None = None,
+    allow_no_linger: bool = False,
+) -> tuple[list[dict[str, Any]], int]:
+    """Run ``ade-sched reconcile`` for labeled ADE jobs (Linux one-step demanual).
+
+    Live writes only when the host backend is the current reconcile write backend
+    (systemd on master). Other backends get report rows (exit 0) so Mac install
+    recipes stay on ``just *-install`` until launchd write lands.
+    """
+    import ade_sched as sched  # noqa: WPS433 — optional at catalog-check time
+
+    env = os.environ if env is None else env
+    want = names if names is not None else set(labeled_ade_sched_job_names(catalog))
+    if not want:
+        return [], 0
+    try:
+        backend = sched.detect(None, env=env)
+    except sched.SchedError as e:
+        return ([{
+            "id": "sched-reconcile",
+            "action": "blocked",
+            "reason": f"scheduler detect failed: {e}",
+            "ok": False,
+            "category": "sched",
+        }], 1)
+
+    write_backend = getattr(sched, "RECONCILE_WRITE_BACKEND", "systemd")
+    write_backends = getattr(sched, "RECONCILE_WRITE_BACKENDS", None)
+    if isinstance(write_backends, (set, frozenset)):
+        can_write = backend.name in write_backends
+    else:
+        can_write = backend.name == write_backend
+    if not dry_run and not can_write:
+        return ([{
+            "id": name,
+            "action": "skip-reconcile-backend",
+            "reason": (
+                f"reconcile write backend is {write_backend!r}; host={backend.name!r}; "
+                f"use just update-check-install / harden-check-install / keys-check-install "
+                f"or ade-sched install on this host"
+            ),
+            "ok": True,
+            "category": "sched",
+        } for name in sorted(want)], 0)
+
+    results, rc = sched.reconcile(
+        catalog.jobs,
+        catalog.retired_jobs,
+        dry_run=dry_run,
+        backend=backend,
+        root=catalog.root,
+        ade=catalog.root,
+        env=env,
+        state_dir=state_dir or sched.jobs_state_dir(env),
+        names=want,
+        allow_no_linger=allow_no_linger,
+    )
+    mapped: list[dict[str, Any]] = []
+    for row in results:
+        mapped.append({
+            "id": str(row.get("name") or "sched"),
+            "action": str(row.get("action") or "?"),
+            "reason": str(row.get("detail") or row.get("reason") or ""),
+            "ok": bool(row.get("ok", True)),
+            "category": "sched",
+            "label": row.get("label"),
+        })
+    return mapped, rc
+
+
 def apply(
     catalog: Catalog,
     *,
@@ -1820,12 +1911,20 @@ def apply(
     prefix: Path | None = None,
     runner: Runner | None = None,
     timeout_s: float = 300.0,
+    reconcile_sched: bool | None = None,
+    env: Mapping[str, str] | None = None,
+    allow_no_linger: bool = False,
 ) -> tuple[list[dict[str, Any]], int]:
     """Bounded apply. Default dry-run. ``--yes`` executes user ``install_argv``.
 
     ``--system`` unlocks dry-run preview of ``system_argv`` (``would-system-install``).
     Live ``system_argv`` requires ``apply_system=True`` (CLI: ``--apply-system`` with
     ``--yes --system``). Without that opt-in, system exec is refused (exit 2).
+
+    After component steps, when ``reconcile_sched`` is true (default: true for a full
+    apply with no ``--id`` filter), also plans/runs ``ade-sched reconcile`` for
+    ADE-owned labeled jobs (Linux one-step: folds the three ``just *-install``
+    check recipes into ``ade-install apply``).
 
     Exit 0 when every selected step is skip/would-install(dry)/install ok /
     would-system-install(dry) / system installed; 1 when any blocked/failed/
@@ -1835,6 +1934,8 @@ def apply(
         raise InstallError("--apply-system requires --system")
     if apply_system and dry_run:
         raise InstallError("--apply-system requires --yes (refused with dry-run)")
+    if reconcile_sched is None:
+        reconcile_sched = ids is None
     steps = build_apply_steps(
         catalog,
         ids=ids,
@@ -1911,10 +2012,23 @@ def apply(
 
     if system_exec_refused:
         return results, 2
+
+    if reconcile_sched:
+        sched_rows, sched_rc = apply_sched_reconcile(
+            catalog,
+            dry_run=dry_run,
+            env=env,
+            allow_no_linger=allow_no_linger,
+        )
+        results.extend(sched_rows)
+        if sched_rc != 0:
+            failed += 1
+
     # dry-run with only skips/would-install/would-system-install → 0; any blocked → 1
     if dry_run:
         rc = 1 if any(
             r["action"] in ("blocked", "refuse-system", "refuse-system-exec")
+            or (r.get("category") == "sched" and not r.get("ok", True))
             for r in results
         ) else 0
     else:

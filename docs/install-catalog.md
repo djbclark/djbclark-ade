@@ -214,8 +214,13 @@ not pass `--apply-system` in automated jobs.
 S4b jobs: `ade-sched list` / `diff` / `just doctor` stay report-only (never
 unload). `ade-sched reconcile` / `just sched-reconcile` is the first ADE write
 path (systemd user units + `jobs.json` ownership ledger; dry-run default;
-`--yes` writes; never unloads foreign/unknown or root/`--system`). See
-`docs/scheduling.md`.
+`--yes` writes; never unloads foreign/unknown or root/`--system`). A full
+`ade-install apply` (no `--id`) also plans/runs that reconcile for ADE-owned
+labeled jobs (`--no-reconcile-sched` to skip; `--reconcile-sched` to force when
+`--id` is set). Convenience: `just sched-reconcile-checks` (pass `-- --yes`).
+On a non-write host backend (launchd today on master), apply reports
+`skip-reconcile-backend` and the hand `just *-install` recipes still apply.
+See `docs/scheduling.md`.
 
 ## G. J6 Paseo plugins (catalog only, 2026-11-10)
 
