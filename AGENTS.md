@@ -41,7 +41,7 @@ Each doc carries its own summary.
 | [docs/checkpoint.md](docs/checkpoint.md) | checkpoint and interruption recovery (2026-11-04, planned) |
 | [docs/ingest-web-ai.md](docs/ingest-web-ai.md) | Carried #23 design/spike (2026-11-10): Gemini/Grok web chats → ADE memory (sources, S1 sink, trust, gates); offline stub only |
 | [docs/context-hygiene.md](docs/context-hygiene.md) | `bin/context-watch` and `bin/context-budget-check`: how full a session is, and what a fresh one costs |
-| [docs/secret-deny.md](docs/secret-deny.md), [docs/pr-policy.md](docs/pr-policy.md) | the secret-read deny list and its renderer; who may open PRs on djbclark's repositories |
+| [docs/secret-deny.md](docs/secret-deny.md), [docs/claude-denyread-trial.md](docs/claude-denyread-trial.md), [docs/pr-policy.md](docs/pr-policy.md) | the secret-read deny list and its renderer; Claude `sandbox.filesystem.denyRead` operator trial (no live `~/.claude` apply); who may open PRs on djbclark's repositories |
 | [docs/dispatch-footer.md](docs/dispatch-footer.md), [docs/agent-guard-contract.md](docs/agent-guard-contract.md) | the delivery footer every brief carries; the dispatch shim's per-agent argument guard (both go with the shim in Wave 6) |
 | [docs/skill-everywhere.md](docs/skill-everywhere.md), [docs/skills.md](docs/skills.md) | how skills are linked into every TUI; the skill inventory. [skills/](skills/) is the canonical copy: **edit and add skills here**, never via a TUI path |
 | [docs/mcp-servers.md](docs/mcp-servers.md), [docs/hand-alias.md](docs/hand-alias.md), [docs/post-edit-check.md](docs/post-edit-check.md), [docs/opencode-plugin-v2.md](docs/opencode-plugin-v2.md) | the MCP roster; the `/hand` alias per TUI; the post-edit syntax hook; OpenCode 2's plugin contract |
