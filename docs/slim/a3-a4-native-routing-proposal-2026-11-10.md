@@ -1,8 +1,9 @@
 # A3/A4 native-routing proposal — 2026-11-10
 
-Status: **authorized 2026-11-10; implemented in tendcf#44/nix2cf#7**.
-Available-agent substantive review is pending under the operator's 2026-11-10 environment exception; see
-[the resume record](wave6-cloud-resume-2026-11-10.md#d-a3a4-authorized-and-implemented-in-prs).
+Status: **authorized 2026-11-10; merged in tendcf#44/nix2cf#7**.
+Available-agent substantive review completed with no findings under the
+operator's 2026-11-10 environment exception; current merge/CI status is in
+[the resume record](wave6-cloud-resume-2026-11-10.md#d-dependency-checkpoint).
 Scope: only the active frontier-review instructions in each `AGENTS.md`,
 in separate claimed worktrees and PRs. Preserve historical handoffs.
 

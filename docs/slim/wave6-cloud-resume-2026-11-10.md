@@ -78,12 +78,12 @@ Grok/Antigravity/SIPB/Go `accepted=false`.
 
 | ADE blocker | Artifact | Head / result |
 |---|---|---|
-| A3 tendcf | [#44](https://github.com/frdminc/tendcf/pull/44) | `71fe7d6b8acfb8d8b162b6f198ca8f2b7c3789ec`; review clean, CI pending |
+| A3 tendcf | [#44](https://github.com/frdminc/tendcf/pull/44) | **merged** `3f93d28d36363fb9b0c63d2281e12dd0e82cd294`; reviewed head `71fe7d6b8acfb8d8b162b6f198ca8f2b7c3789ec`; Check + all Linux jobs passed |
 | A4 nix2cf | [#7](https://github.com/frdminc/nix2cf/pull/7) | **merged** `572b0b705278bf54e53769820a91b8c20413e144`; reviewed head `f3965768d90b1ef2d022e9198dcc41c55b542d2b`; exact-head Check passed |
 | A5 cfengine-all | [#1](https://github.com/djbclark/cfengine-all/pull/1) | **merged** `134c9afb3aea11a00b72750562a935934101406a`; reviewed head `8ba9ce32a11802c04e390ece7dd83e0e8f129cda`; active instructions only |
 | A6 aiuse | [#54](https://github.com/djbclark/aiuse/pull/54) | draft `a69d2e80b0f743a65b7c54ec8421c2b9cc9ef32d`; local review clean, CI pending |
 | A7 home instructions | [#250](https://github.com/djbclark/site-djbclark/pull/250) | draft `05998b34c4c0e86655a131b854a0398f4ef23676`; review clean, CI pending |
-| X1 fleet-watch | branch `djbclark/site-djbclark:wave6-fleet-native-send` | repair in progress; record final head and review before resuming |
+| X1 fleet-watch | [#251](https://github.com/djbclark/site-djbclark/pull/251) | draft `8aecdd371bc7d5b921de0a6ac2537655b3986c31`; repaired/re-reviewed, CI and live proof pending |
 
 ### D1. Review and validation
 
@@ -117,6 +117,22 @@ memory/wiki pointers retained; retired names absent; whitespace clean. Size:
 live home file was installed. PR #250 is mergeable; an initial false result
 while GitHub calculated mergeability was transient, not a confirmed conflict.
 
+X1: GPT-6.1 Sol medium authored the native sender migration. A separate
+fresh-context GPT-6.1 Sol medium reviewer found two P2 duplicate-send hazards:
+unknown timeouts and accepted agent messages were treated as retryable failures.
+Repaired at the table's exact head: persist pending/unknown receipt state before
+sending; do not replay or dispatch a fallback for ambiguous/accepted outcomes;
+retain phantom write-ahead state; request a named ack for agent-origin sends.
+Bounded re-review: **no findings**. Pending states require manual receipt/ack
+reconciliation; no automatic ack ingestion is implemented.
+
+Focused X1 validation via `just test`: **34 passed, 2 skipped, 24 subtests
+passed**, 1,321 deselected; shell syntax and diff checks passed. Initial broader
+fleet selection had 29 failures associated with absent GNU-prefixed tools;
+the changed upstream fixture supplies aliases, and the focused migration suite
+passed. Unrelated S1 harness failures were left untouched. Full live Mac send
+behavior remains unverified. Draft #251 preserves the tested source.
+
 ### D2. Evidence limits
 
 Merged source is not proof of installed Mac state. No C3 evidence JSON has
@@ -141,11 +157,33 @@ new continuation request. ADE is the focus; outside work is permitted only
 for specific ADE dependencies. A3+A4 authorization was granted. Required
 unavailable agents may be replaced by capable available agents; record the
 actual reviewer model/effort and preserve all other gates.
-Check the current exact heads and CI on the PRs in section D. Nix2cf#7 and
-cfengine-all#1 are merged. Tendcf#44, aiuse#54, site#250 and X1 require their
-recorded remaining checks. Preserve historical/passive accounting; no extra
+Check the current exact heads and CI on the PRs in section D. Tendcf#44, nix2cf#7 and
+cfengine-all#1 are merged. Aiuse#54 and site#250/#251 are draft checkpoints
+with their recorded remaining checks. Fleet pending receipts need manual
+reconciliation; never replay unknown/accepted sends automatically. Preserve historical/passive accounting; no extra
 C3 waive is granted. Do not equate source merge with Mac deployment evidence.
 No Mac archive/paseo/aiuse/quota snapshot exists on this fresh cloud host.
 Keep shims/review-launch, held Pi pools false, no --allow-early. Deletion
 requires actual evidence gate exit 0 plus explicit operator confirmation.
 ```
+
+## F. Local checkpoint layout
+
+All task work is committed and pushed; clean task worktrees are retained for
+resumption. Agents are quiescent at closeout; GitHub CI may continue independently.
+No watcher or automation was created to resume this chat.
+
+| Worktree | Remote branch |
+|---|---|
+| `/workspace/wave6-cloud-resume-wt` | ADE `wave6-cloud-resume-20261110` (#538) |
+| `/workspace/tendcf-wave6-wt` | tendcf `wave6-native-routing` (merged) |
+| `/workspace/nix2cf-wave6-wt` | nix2cf `wave6-native-routing` (merged) |
+| `/workspace/cfengine-all-wave6-wt` | cfengine-all `wave6-native-instructions` (merged) |
+| `/workspace/aiuse-wave6-wt` | aiuse `wave6-native-guidance` (#54) |
+| `/workspace/site-djbclark-wave6-home-wt` | site `wave6-home-native-instructions` (#250) |
+| `/workspace/site-djbclark-wave6-fleet-wt` | site `wave6-fleet-native-send` (#251) |
+
+Claims have 72-hour TTLs; inspect/reclaim appropriately on resume. No account
+quota API was available: actual token/quota consumption is unknown, not zero.
+One preparation/review agent, one substantive-review/aiuse agent, and two site
+writers were used with bounded briefs; no additional frontier orchestrator.
