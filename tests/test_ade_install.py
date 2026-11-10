@@ -114,6 +114,10 @@ def test_repo_install_toml_checks_clean():
     assert by_id["omp"]["class"] == "never"
     assert by_id["opencode"]["class"] == "never"
     assert by_id["crush"]["class"] == "never"
+    assert by_id["paseo-plugin-session-guard"]["class"] == "offered"
+    assert by_id["paseo-plugin-session-guard"]["chosen"] is True
+    assert by_id["paseo-plugin-tell-agent"]["chosen"] is True
+
     assert by_id["graft"]["class"] == "hard"
     assert by_id["graft"].get("probe_argv") == ["graft", "--version"]
     assert by_id["ade-claim"].get("paseo_plugin") == "ade-claim"
