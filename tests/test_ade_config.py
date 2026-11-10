@@ -371,7 +371,7 @@ def test_selected_legacy_defaults_parity(home, synthetic_root, tmp_path, lead):
 
 @pytest.mark.parametrize("effort", ["xhigh", "max"])
 def test_lead_effort_accepts_xhigh_and_max(home, synthetic_root, tmp_path, effort):
-    """Queue item 32: pin that [lead] effort accepts Paseo CLAUDE_EFFORT_LEVELS xhigh/max."""
+    """Queue item 33 / #391: pin that [lead] effort accepts Paseo CLAUDE_EFFORT_LEVELS xhigh/max."""
     path = tmp_path / f"routing-lead-{effort}.toml"
     path.write_text(
         _LEGACY_BASE + _LEGACY_SERVICE
