@@ -1150,15 +1150,65 @@ def paseo_providers() -> set[str]:
             if r.get("enabled") == "Enabled" and r.get("status") == "available"}
 
 
+def _pi_agent_dir() -> Path:
+    return Path(os.environ.get("PI_CODING_AGENT_DIR") or Path.home() / ".pi" / "agent")
+
+
+def pi_refreshed_namespaces() -> set[str]:
+    """Provider namespaces Pi keeps a refreshed catalog for: the top-level keys of Pi's `models-store.json`
+    (`pi update models` and Pi's print-mode start refresh it). Empty when the file cannot be read."""
+    try:
+        data = json.loads((_pi_agent_dir() / "models-store.json").read_text())
+    except (OSError, ValueError):
+        return set()
+    return {str(k) for k, v in data.items() if isinstance(v, dict)} if isinstance(data, dict) else set()
+
+
+def pi_catalog_models() -> list[str] | None:
+    """`provider/id` of every model `pi --list-models` shows (Pi's own current catalog, authenticated providers only),
+    or None when Pi cannot say. ROUTE_AGENT_PASEO=off disables it with the Paseo reads; ROUTE_AGENT_PI_BIN names the binary."""
+    if not _paseo_wanted():
+        return None
+    exe = os.environ.get("ROUTE_AGENT_PI_BIN") or shutil.which("pi")
+    if not exe:
+        return None
+    try:
+        proc = subprocess.run([exe, "--list-models"], capture_output=True, text=True, timeout=_paseo_timeout(),
+                              stdin=subprocess.DEVNULL, check=False)
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    rows = [ln.split() for ln in proc.stdout.splitlines()]
+    if proc.returncode != 0 or not rows or rows[0][:2] != ["provider", "model"]:
+        return None
+    return [f"{r[0]}/{r[1]}" for r in rows[1:] if len(r) >= 2]
+
+
+def _pi_models(paseo_ids: list[str] | None) -> list[str] | None:
+    """Paseo's Pi model list corrected by Pi's own catalog (2026-11-10: Paseo kept listing antigravity/gemini-3.1-pro, gone
+    from Pi's catalog, and omitted antigravity/gemini-4-argon, which Pi runs). Where Pi keeps a refreshed catalog for a
+    namespace (a `models-store.json` key: antigravity, openai, ...), `pi --list-models` replaces Paseo's entries for it; a
+    namespace the extensions supply live (cursor: Paseo lists ~260 while Pi's static list has 15) stays as Paseo lists it.
+    Pi unreadable: Paseo's list unchanged. Paseo unreadable: Pi's own list."""
+    pi_ids = pi_catalog_models()
+    if pi_ids is None:
+        return paseo_ids
+    if paseo_ids is None:
+        return pi_ids                       # Paseo cannot say: Pi's static list (no live cursor models) beats nothing
+    refreshed = pi_refreshed_namespaces()
+    return ([m for m in paseo_ids if m.partition("/")[0] not in refreshed]
+            + [m for m in pi_ids if m.partition("/")[0] in refreshed])
+
+
 def provider_models(provider: str) -> list[str] | None:
-    """Model ids `paseo provider models <provider> --json` lists, or None when Paseo cannot say. Cached per process."""
+    """Model ids `paseo provider models <provider> --json` lists, or None when Paseo cannot say. Cached per process.
+    The Pi provider's list is corrected by Pi's own catalog (`_pi_models`): Paseo's copy goes stale."""
     if provider not in _PROVIDER_MODELS:
         data, _ = _paseo_json(["provider", "models", provider])
         ids = None
         if isinstance(data, list):
             ids = [str(m.get("id") or m.get("model")) for m in data
                    if isinstance(m, dict) and (m.get("id") or m.get("model"))]
-        _PROVIDER_MODELS[provider] = ids
+        _PROVIDER_MODELS[provider] = _pi_models(ids) if provider == "pi" else ids
     return _PROVIDER_MODELS[provider]
 
 

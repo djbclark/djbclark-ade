@@ -408,6 +408,18 @@ class TestWorkspacePlacement(Base):
 
 
 class TestLaunchAndWait(Base):
+    def test_paseo_model_folds_antigravity_effort_into_the_id(self):
+        # 2026-11-10: `antigravity/gemini-4-argon --thinking high` fails "Unknown Antigravity model"; Paseo lists
+        # gemini-4-argon-high and gives it no thinking options.
+        m = load_module().paseo_model
+        self.assertEqual(m("antigravity", "gemini-4-argon", "high"), ("gemini-4-argon-high", None))
+        self.assertEqual(m("antigravity", "gemini-4-argon", "LOW"), ("gemini-4-argon-low", None))
+        self.assertEqual(m("antigravity", "gemini-4-argon", None), ("gemini-4-argon-high", None))
+        self.assertEqual(m("antigravity", "gemini-4-argon-medium", "high"), ("gemini-4-argon-medium", None))
+        self.assertEqual(m("antigravity", "gemini-4-argon", "xhigh"), ("gemini-4-argon", "xhigh"))   # Paseo refuses it
+        self.assertEqual(m("codex", "gpt-6.1-sol", "high"), ("gpt-6.1-sol", "high"))
+        self.assertEqual(m("claude", "sonnet", None), ("sonnet", None))
+
     def test_happy_path_writes_brief_record_and_done_and_exits_0(self):
         r = self.dispatch()
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)

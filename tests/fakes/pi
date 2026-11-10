@@ -1,0 +1,13 @@
+#!/usr/bin/env python3
+"""A fake `pi` for tests/test_route_agent.py: only `--list-models`. FAKE_PI_LIST is the table it prints on stdout
+(default: exit 1, as when Pi cannot list); the real Pi prints extension warnings on stderr, so this one does too."""
+import os
+import sys
+
+if sys.argv[1:] != ["--list-models"]:
+    sys.exit(2)
+sys.stderr.write("Warning: Extension package fake: peerDependencies\n")
+table = os.environ.get("FAKE_PI_LIST")
+if table is None:
+    sys.exit(1)
+sys.stdout.write(table)

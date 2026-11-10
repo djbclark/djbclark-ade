@@ -389,7 +389,9 @@ window = "Gemini 4 Argon weekly"
 max_parallel = 1
 access = "cli-only"
 agent = "antigravity"
-models = { frontier = "gemini-4-argon --effort high" }
+# Paseo's antigravity provider folds the effort into the model id (`paseo provider models antigravity`: gemini-4-argon-high);
+# the bare id is "Unknown Antigravity model" (2026-11-10), so the row names the full id and acp-dispatch maps a bare one.
+models = { frontier = "gemini-4-argon-high" }
 
 [[service]]
 name = "clinepass"
