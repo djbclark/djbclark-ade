@@ -9,7 +9,7 @@
   ade-install bootstrap [--root DIR] [--prefix DIR] [--dry-run|--yes] [--json]
   ade-install doctor [--root DIR] [--id ID ...] [--json]
   ade-install keys [--root DIR] [--json] [--keys-state PATH]
-  ade-install verify-key openai|openrouter  # exit-code-only probe under sudo-secretspec run
+  ade-install verify-key PROVIDER  # fixed metadata probe under sudo-secretspec run; see --help
   ade-install apply [--root DIR] [--json] [--dry-run|--yes] [--id ID ...] [--force]
                     [--system] [--print-system-argv] [--apply-system]
 
@@ -415,7 +415,7 @@ def main(argv: list[str] | None = None) -> int:
         p.set_defaults(func=func)
 
     vp = sub.add_parser("verify-key", help="fixed metadata-authentication probe; reads injected environment only and emits no output")
-    vp.add_argument("provider", choices=("openai", "openrouter"))
+    vp.add_argument("provider", choices=("openai", "openrouter", "anthropic", "gemini", "deepseek"))
     vp.set_defaults(func=cmd_verify_key)
 
     bp = sub.add_parser("bootstrap", parents=[shared], help="explicit Just bootstrap followed only by installation preview")
