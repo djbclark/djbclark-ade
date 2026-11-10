@@ -724,6 +724,66 @@ def test_glob_budget_exceeded_fails_closed_through_main(monkeypatch, tmp_path, c
     assert "fail open" not in err
 
 
+def test_setaside_after_first_pass_burn_blocks_cwd_id_star(monkeypatch, tmp_path):
+    """Security HIGH residual (PR 413): FIRST_PASS_S burned by *completing* (not timed-out) slow globs left
+    `id_*` set aside and pattern-only-retried, which cannot see cwd `id_rsa` and used to ALLOW. Deferred retry
+    must walk (or refuse), never allow a walk-dependent secret glob after set-aside."""
+    hook = load_hook()
+    (tmp_path / "id_rsa").write_text("PRIVATE\n")
+    (tmp_path / "zzslow0.txt").write_text("x\n")   # completing first-pass match for zzslow0*
+    ck = hook.Checker(
+        hook.Policy(["id_rsa", "*.key"], ["*.pub"], homes=[str(tmp_path)], fold=False),
+        str(tmp_path),
+    )
+    # Prove the residual: pattern-only alone does not catch cwd id_rsa under id_*.
+    assert ck.glob_pattern_only("id_*") is None
+    # Cap already spent (completing zzslow0* would burn it); rem<=0 set-asides every later word.
+    monkeypatch.setattr(hook, "FIRST_PASS_S", 0.0)
+    hook._DEADLINE[0] = time.monotonic() + 5.0
+    found = hook.check_command(ck, "cat zzslow0* id_*")
+    assert found and found[0] == "id_rsa", found
+
+
+def test_setaside_after_first_pass_burn_blocks_cwd_star(monkeypatch, tmp_path):
+    """Same residual for `cat *` beside server.key: pattern-only cannot decide; must walk or fail closed."""
+    hook = load_hook()
+    (tmp_path / "server.key").write_text("K\n")
+    (tmp_path / "zzslow0.txt").write_text("x\n")
+    ck = hook.Checker(
+        hook.Policy(["id_rsa", "*.key"], ["*.pub"], homes=[str(tmp_path)], fold=False),
+        str(tmp_path),
+    )
+    assert ck.glob_pattern_only("*") is None
+    monkeypatch.setattr(hook, "FIRST_PASS_S", 0.0)
+    hook._DEADLINE[0] = time.monotonic() + 5.0
+    found = hook.check_command(ck, "cat zzslow0* *")
+    assert found and found[0] == "*.key", found
+
+
+def test_setaside_walk_retry_fails_closed_when_no_budget(monkeypatch, tmp_path):
+    """When pattern-only is inconclusive and the overall deadline has no time left for a walk, refuse."""
+    hook = load_hook()
+    (tmp_path / "id_rsa").write_text("PRIVATE\n")
+    ck = hook.Checker(
+        hook.Policy(["id_rsa", "*.key"], ["*.pub"], homes=[str(tmp_path)], fold=False),
+        str(tmp_path),
+    )
+    monkeypatch.setattr(hook, "FIRST_PASS_S", 0.0)
+    hook._DEADLINE[0] = time.monotonic() + 5.0
+
+    real_word = ck.word
+
+    def word_exhaust_on_pattern_only(raw, word_s=None, pattern_only=False):
+        found = real_word(raw, word_s, pattern_only)
+        if pattern_only and raw == "id_*":
+            hook._DEADLINE[0] = time.monotonic() - 1.0   # no budget left for the walk retry
+        return found
+
+    monkeypatch.setattr(ck, "word", word_exhaust_on_pattern_only)
+    with pytest.raises(hook.GlobBudgetExceeded):
+        hook.check_command(ck, "cat id_*")
+
+
 # ---- Codex payloads ---------------------------------------------------------------------------------------------------
 def patch(*headers, body="+x\n"):
     return "*** Begin Patch\n" + "".join("%s\n%s" % (h, body) for h in headers) + "*** End Patch\n"
