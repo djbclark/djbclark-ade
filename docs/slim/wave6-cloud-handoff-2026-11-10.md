@@ -1,8 +1,10 @@
 # Wave 6 cloud handoff — 2026-11-10
 
-Snapshot: **2026-11-10** (America/New_York). Orderly paste-back from the
-bigmac Mac agent into cloud, verified on Linux, ready for a successor agent.
-**No deletion PR. No invented `waived` / APPROVE / Pi `accepted=true`.**
+Snapshot: **2026-11-10** (America/New_York; refreshed same day after
+[`#534`](https://github.com/djbclark/djbclark-ade/pull/534) landed). Orderly
+paste-back from the bigmac Mac agent into cloud, verified on Linux, ready for a
+successor agent. **No deletion PR. No invented `waived` / APPROVE / Pi
+`accepted=true`.**
 
 Companion evidence notes: [`mac-live-2026-11-10.md`](mac-live-2026-11-10.md),
 [`wave6-follow-up.md`](wave6-follow-up.md),
@@ -11,13 +13,31 @@ Companion evidence notes: [`mac-live-2026-11-10.md`](mac-live-2026-11-10.md),
 ## A. Verified on this cloud host
 
 1. Reconstructed archive under `~/tmp/wave6-mac-from-bigmac-20261110/`.
-2. SHA256 matched:
+2. SHA256 matched (re-checked 2026-11-10 after `#534` merge):
    `18eab71cc7227a3f7eaa1a5a096e6dd2049a06ef33971d042995c844ce236155`.
 3. Every `MANIFEST.json` member hash matched (47 entries); refuse-overwrite
    layout intact. Initial capture **and** `recapture/` both present.
 4. Read `evidence.json`, `gate-final.json`,
    `outside-migration-proposals.md`, pool proofs, C3 proofs, fleet-watch
    proof. Linux host did **not** re-run Darwin probes.
+5. Handoff docs landed on `master` via
+   [`#534`](https://github.com/djbclark/djbclark-ade/pull/534)
+   (`48eaaefa`, merged 2026-11-10 09:13 America/New_York). This file's resume
+   block is the post-merge refresh.
+
+## A2. `/loose` audit (verified 2026-11-10, cloud)
+
+Commands, not memory:
+
+| Item | Result |
+|---|---|
+| Agent-side handoff CI / merge | `#534` `MERGED`; merge commit on `origin/master`; classify `--min 510` empty |
+| Message queue / subscriptions | empty (`hasQueuedMessages=false`; no active timers) |
+| This session's worktrees | `/tmp/wave6-cloud-handoff-wt` and `/tmp/update-multi-wt` gone; branch deleted after merge |
+| Shared checkout dirt | only untracked `.gemini/` (not ours); `audit-linux-install-d382` behind master — not ours to reset |
+| Archive re-hash | SHA + 47/47 MANIFEST members OK |
+| Open waits **deferred by operator** (not oversights) | **C1+C2** historical waives; Mac **B2** label drain; date gate / deletion confirm; Pi pool decisions |
+| Invented waives / deletion PR | **none** (correct) |
 
 ## B. Gate (artifact) — still blocked
 
@@ -103,27 +123,33 @@ Manual Antigravity inference is **not** automatic-routing acceptance.
 
 ## F. Resume prompt (copy for a successor agent)
 
-Paste the fenced block below into a new agent session:
+Paste the fenced block below into a new agent session (refreshed after `#534`
+landed; agent-side handoff complete; operator C1+C2 still open):
 
 ```
 RESUME — Wave 6 / Pi Mac evidence handoff (2026-11-10 bigmac → cloud).
 
 Read first (in order):
-- docs/slim/wave6-cloud-handoff-2026-11-10.md  (this handoff)
+- docs/slim/wave6-cloud-handoff-2026-11-10.md  (this handoff; post-#534 refresh)
 - docs/slim/mac-live-2026-11-10.md
 - docs/slim/outside-migration-proposals-2026-11-10.md
 - docs/slim/wave6-follow-up.md
 - docs/queue.md Carried item 1
+- https://github.com/djbclark/djbclark-ade/pull/534 (MERGED — initial handoff docs)
 Verified archive (optional local): ~/tmp/wave6-mac-from-bigmac-20261110/
   SHA256 18eab71cc7227a3f7eaa1a5a096e6dd2049a06ef33971d042995c844ce236155
-  (initial + recapture/ preserved; MANIFEST verified on cloud Linux)
+  (initial + recapture/ preserved; MANIFEST re-verified on cloud Linux after #534)
 
-State:
-- §A callers green (callers_remaining=0).
-- Mac live captured; wave6-delete-check --evidence still exit 1.
-- C3: 5 migrated / 7 open. Open: tendcf, nix2cf, cfengine, paseo4herdr,
-  sudo_secretspec, aiuse, site_public_home_agents.
-- Extra: fleet-watch still calls relay.py.
+Agent-side done (do not re-do):
+- Archive reconstructed + verified; #534 merged to master (48eaaefa).
+- No open merge_now ≥510; no deletion PR started.
+- /loose audit: only remaining opens are operator/Mac deferred items below.
+
+State still blocked:
+- wave6-delete-check --evidence exit 1.
+- C3: 5 migrated / 7 open (tendcf, nix2cf, cfengine, paseo4herdr,
+  sudo_secretspec, aiuse, site_public_home_agents).
+- Extra: ~/ops/site-private-djbclark/bin/fleet-watch still calls relay.py.
 - B2 not drained: live lead 0cc34651-d6e5-4d88-b4cd-8166038da11e has
   inherited ade.via=acp-dispatch (do not stop/relabel from cloud).
 - Soft deadline 2026-11-20; no --allow-early granted.
@@ -131,7 +157,7 @@ State:
 
 Next (operator-gated; one card at a time):
 1. Ask C1+C2 historical waives (paseo4herdr, sudo_secretspec) — proposed
-   lines are in the handoff doc / outside-migration-proposals. NOT granted.
+   lines in this handoff / outside-migration-proposals. NOT granted.
 2. After yes: record waive lines in docs/slim/log.md + c3_proofs files;
    never invent waives.
 3. Then seek order-11 yes for A3–A7 + fleet-watch migrations (outside repos).
