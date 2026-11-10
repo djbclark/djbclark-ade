@@ -71,8 +71,10 @@ under **Carried**, newest first, one line each; an item leaves when it ships (in
 24. **Ingest web-interface AI conversations** (Gemini, Grok web; 2026-08-23) into the memory system: not started.
 25. **Dynamic model and effort adjustment by token efficiency** (2026-08-23): not started; the Jev effort nudge that
     approached it was deleted (E2). Lives in `skills/model-routing` B.
-26. **S1 Phase B adapters** (hindsight, 2026-08-23): the Claude tail and checkpoint adapter onward; site-djbclark's
-    `bin/hindsight_s1.py`.
+26. **S1 Phase B adapters** (hindsight, 2026-08-23; status 2026-11-10): the Claude tail and checkpoint
+    adapter onward; site-djbclark's `bin/hindsight_s1.py` (order 11). Docs/status open as #478
+    (`docs/history/s1-phaseb-status-2026-11-10.md`). Drop or grant after an operator Phase-B decision under
+    the Pi-only ruling.
 27. **jj (Jujutsu)** (2026-08-23): a larger, separate bet than the retired cow pastures; not started.
 28. **Loopback shim by default on forgejo.mit.edu, then ask SIPB** (2026-10-14): steps 1, 4, 5, 6 done; the ticket is
     left. Lives in `~/src/loopback-port-shim`.
