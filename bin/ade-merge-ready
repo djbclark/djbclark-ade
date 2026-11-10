@@ -2,16 +2,42 @@
 """ade-merge-ready: classify open ADE PRs against the merge gate (2026-11-09).
 
   ade-merge-ready [--repo OWNER/NAME] [--min N] [--json]
+  ade-merge-ready stacks [--group NAME] [--bottoms-only] [--repo …] [--min N] [--json]
+  ade-merge-ready approve-paste [--base master] [--bottoms-only] [--repo …] [--min N]
+  ade-merge-ready approve-post --i-reviewed --yes [--bottoms-only] [--trigger-marker] …
+  ade-merge-ready merge-now --prs N[,N…] [--yes]   # refuses unless adversary-marker success
   ade-merge-ready --help
 
-Read-only. Uses `gh` to list open PRs (number >= --min, default 327), their
-pytest-linux / adversary-marker checks. A live APPROVE is taken only from the
+Uses `gh` to list open PRs (number >= --min, default 327; list limit 500 so
+stack bottoms are not dropped when >100 PRs are open), their pytest-linux /
+adversary-marker checks. A live APPROVE is taken only from the
 `adversary-marker` check (the Action runs `bin/adversary_marker.py`'s
 attribution-aware `decide`: owner body editor / owner comment history). Raw
 markers in the body or comments are never enough on their own — that would
-count an outside author's or bot's same-head APPROVE. Never posts, never
-merges, never invents an APPROVE. Prints a table (or JSON) plus paste-ready
-templates so an operator can post a real marker.
+count an outside author's or bot's same-head APPROVE. Classify / stacks /
+approve-paste never invent an APPROVE. `approve-paste` prints templates only
+(and warns: never paste them through herdr — herdr mangles `<!-- … -->`).
+`approve-post` posts those templates via the GitHub API (not herdr) **only**
+when the authenticated `gh` user is the repository owner and both
+`--i-reviewed` and `--yes` are set (dry-run otherwise). Default `--via auto`:
+owner-authored tips get a **body** append (today's gate counts body APPROVE
+on owner PRs; comments do not); outside tips get an issue **comment**.
+`--via body` / `--via comment` force one path. Never invents a head — each
+marker names the tip `headRefOid` just collected. `merge-now` is the only
+merge path here: it refuses unless classify is `merge_now` (pytest-linux pass
+**and** adversary-marker success on the tip head); dry-run unless `--yes`.
+It squash-merges at the tip head via `gh pr merge --match-head-commit`, and
+falls back to GitHub's `merge-async` API when the tip is in a native stack
+(2026-11-10: GraphQL merge refuses stacked PRs). Do not raw `gh pr merge`
+when adversary-marker is missing or failing (2026-11-10: #481 was merged
+that way by mistake).
+
+`stacks` walks open PR base→same-repo head refs and prints bottom-up APPROVE
+order for named groups (install, claims, s1, wave6) with full tip SHAs for
+marker paste. Parent edges are qualified by head repository (not branch name
+alone); ambiguous same-name heads yield no parent (fail-safe). In the default
+all-groups view, wave6 prints stack bottoms only (docs on master); pass
+`--group wave6` for the full wave6 bottom-up chains.
 
 Classes:
   merge_now       pytest-linux pass + adversary-marker success (attributed APPROVE)
@@ -32,7 +58,9 @@ import os
 import re
 import subprocess
 import sys
-from typing import Any
+import time
+from collections import defaultdict
+from typing import Any, Callable
 
 MARKER_RE = re.compile(
     r"<!--\s*adversary-verdict:v1\s*(\{.*?\})\s*-->",
@@ -40,15 +68,47 @@ MARKER_RE = re.compile(
 )
 SHA40 = re.compile(r"^[0-9a-f]{40}$")
 
+# Named operator stacks (2026-11-09). Matching is by live open branch/title;
+# order is always derived from each PR's baseRefName → same-repo headRefName
+# edge (see link_parents), never from a hardcoded PR number sequence (numbers
+# drift as tips land).
+STACK_GROUPS: dict[str, Callable[[dict[str, Any]], bool]] = {
+    "install": lambda r: bool(
+        re.search(r"ade-install|ade-update-check", r.get("branch") or "")
+        or re.search(r"\bade-install\b|\binstall:", (r.get("title") or ""), re.I)
+    ),
+    # claims W2–W4: plugin → W3 → W4 → W2-release (+ queue note PR).
+    "claims": lambda r: bool(
+        re.search(r"ade-claim|queue-claims-w2w4", r.get("branch") or "")
+        or re.search(r"\bade-claim\b", (r.get("title") or ""), re.I)
+    ),
+    # S1 load_effective chain (gates → route → more → context → secret/pr).
+    "s1": lambda r: bool(
+        (r.get("branch") or "").startswith("cursor/s1-")
+        or re.search(r"\bS1\b|load_effective", (r.get("title") or ""))
+    ),
+    "wave6": lambda r: bool(
+        re.search(r"wave6", r.get("branch") or "", re.I)
+        or re.search(r"\bwave\s*6\b|\bwave6\b", (r.get("title") or ""), re.I)
+    ),
+}
+STACK_GROUP_NAMES = tuple(STACK_GROUPS.keys())
+
 
 def die(msg: str, code: int = 2) -> int:
     print(f"ade-merge-ready: {msg}", file=sys.stderr)
     return code
 
 
-def run_gh(gh: str, args: list[str], timeout: float = 120) -> subprocess.CompletedProcess[str]:
+def run_gh(
+    gh: str,
+    args: list[str],
+    timeout: float = 120,
+    input_text: str | None = None,
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [gh, *args],
+        input=input_text,
         capture_output=True,
         text=True,
         errors="replace",
@@ -103,7 +163,38 @@ def classify(
     return "needs_approve"
 
 
+def head_repository_nwo(pr: dict[str, Any], listing_repo: str) -> str:
+    """OWNER/NAME of the PR head, from gh JSON; empty when cross-repo and unknown.
+
+    Prefers headRepository.nameWithOwner, then headRepositoryOwner.login +
+    headRepository.name. Same-repo heads with no identity fields default to
+    listing_repo. A cross-repo head without identity returns "" so it can never
+    be chosen as a stack parent (fail closed on incomplete fork metadata).
+    """
+    hr = pr.get("headRepository")
+    if isinstance(hr, dict):
+        nwo = hr.get("nameWithOwner")
+        if isinstance(nwo, str) and "/" in nwo:
+            return nwo
+        name = hr.get("name")
+        owner_obj = pr.get("headRepositoryOwner")
+        login = owner_obj.get("login") if isinstance(owner_obj, dict) else None
+        if isinstance(login, str) and login and isinstance(name, str) and name:
+            return f"{login}/{name}"
+    if pr.get("isCrossRepository") is True:
+        return ""
+    return listing_repo
+
+
 def collect(gh: str, repo: str, min_n: int) -> list[dict[str, Any]]:
+    # Open count can exceed 100 (2026-11-10: 151); a hard 100 dropped stack
+    # bottoms (#334–#368) from classify/stacks paste output. Cap high enough
+    # for this repo; still fail closed if gh truncates silently (we cannot
+    # see a next page without GraphQL).
+    try:
+        owner = repo_owner_login(gh, repo)
+    except RuntimeError:
+        owner = ""
     listing = run_gh(
         gh,
         [
@@ -114,9 +205,10 @@ def collect(gh: str, repo: str, min_n: int) -> list[dict[str, Any]]:
             "--state",
             "open",
             "--limit",
-            "100",
+            "500",
             "--json",
-            "number,title,headRefOid,baseRefName,mergeable,headRefName",
+            "number,title,headRefOid,baseRefName,mergeable,headRefName,"
+            "headRepository,headRepositoryOwner,isCrossRepository,author",
         ],
     )
     if listing.returncode != 0:
@@ -125,6 +217,11 @@ def collect(gh: str, repo: str, min_n: int) -> list[dict[str, Any]]:
         prs = json.loads(listing.stdout or "[]")
     except json.JSONDecodeError as e:
         raise RuntimeError(f"gh pr list JSON: {e}") from e
+    if len(prs) >= 500:
+        raise RuntimeError(
+            "gh pr list returned 500 open PRs (tool limit); "
+            "raise --limit / paginate before trusting classify/stacks"
+        )
 
     rows: list[dict[str, Any]] = []
     for p in prs:
@@ -132,6 +229,13 @@ def collect(gh: str, repo: str, min_n: int) -> list[dict[str, Any]]:
         if n < min_n:
             continue
         head = p.get("headRefOid") or ""
+        author = ""
+        auth = p.get("author")
+        if isinstance(auth, dict):
+            author = (auth.get("login") or "").strip()
+        elif isinstance(auth, str):
+            author = auth.strip()
+        owner_pr = bool(author) and bool(owner) and author.lower() == owner.lower()
         checks = run_gh(gh, ["pr", "checks", str(n), "--repo", repo])
         # gh pr checks exits 1 when any check failed; stdout still usable
         check_text = checks.stdout or ""
@@ -156,6 +260,10 @@ def collect(gh: str, repo: str, min_n: int) -> list[dict[str, Any]]:
                 "head": head,
                 "base": p.get("baseRefName") or "",
                 "branch": p.get("headRefName") or "",
+                "author": author,
+                "owner_pr": owner_pr,
+                "head_repo": head_repository_nwo(p, repo),
+                "listing_repo": repo,
                 "mergeable": p.get("mergeable"),
                 "pytest_linux": tests,
                 "adversary_marker": adv,
@@ -172,6 +280,156 @@ def collect(gh: str, repo: str, min_n: int) -> list[dict[str, Any]]:
     return rows
 
 
+def link_parents(
+    rows: list[dict[str, Any]], listing_repo: str | None = None
+) -> list[dict[str, Any]]:
+    """Attach parent_number from open-PR baseRefName → same-repo headRefName.
+
+    Parent lookup is qualified by head repository (prefer
+    ``headRepository.nameWithOwner`` / owner+name from gh JSON), not by branch
+    name alone. A fork PR whose head branch is ``master`` must not become the
+    parent of every PR targeting the listing repo's ``master``.
+
+    Only heads whose ``head_repo`` equals the listing repo are candidates. If
+    two open same-repo PRs share a ``headRefName``, ``parent_number`` stays
+    ``None`` (fail-safe: never guess which one is the stack parent).
+    """
+    repo = listing_repo or ""
+    if not repo:
+        for r in rows:
+            lr = r.get("listing_repo")
+            if isinstance(lr, str) and lr:
+                repo = lr
+                break
+    by_branch: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for r in rows:
+        branch = r.get("branch") or ""
+        if not branch:
+            continue
+        head_repo = r.get("head_repo") or ""
+        if not repo:
+            # No listing identity: still require a unique headRefName among all
+            # rows, never last-wins overwrite.
+            by_branch[branch].append(r)
+            continue
+        if head_repo != repo:
+            continue
+        by_branch[branch].append(r)
+
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        base = r.get("base") or ""
+        candidates = by_branch.get(base, [])
+        linked = dict(r)
+        # Fail-safe: unique exact headRefName match only; 0 or 2+ → no parent.
+        linked["parent_number"] = (
+            candidates[0]["number"] if len(candidates) == 1 else None
+        )
+        out.append(linked)
+    return out
+
+
+def expand_with_ancestors(
+    selected: list[dict[str, Any]], all_rows: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Keep stack integrity: if a tip matches a group, include its open ancestors."""
+    by_num = {r["number"]: r for r in all_rows}
+    keep: set[int] = {r["number"] for r in selected}
+    for r in selected:
+        cur = r
+        while cur.get("parent_number") is not None:
+            parent = by_num.get(cur["parent_number"])
+            if parent is None or parent["number"] in keep:
+                break
+            keep.add(parent["number"])
+            cur = parent
+    return [by_num[n] for n in sorted(keep)]
+
+
+def bottom_up_order(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Topological order: stack bottoms (no open parent in set) first, then children.
+
+    Sibling branches at the same depth stay in PR-number order. Cycles (should not
+    happen for GitHub base refs) fall back to number order for the remainder.
+    """
+    by_num = {r["number"]: r for r in rows}
+    nums = set(by_num)
+    children: dict[int | None, list[int]] = defaultdict(list)
+    indeg: dict[int, int] = {n: 0 for n in nums}
+    for r in rows:
+        p = r.get("parent_number")
+        if p in nums:
+            children[p].append(r["number"])
+            indeg[r["number"]] += 1
+
+    for k in children:
+        children[k].sort()
+
+    ordered: list[dict[str, Any]] = []
+    queue = sorted(n for n, d in indeg.items() if d == 0)
+    seen: set[int] = set()
+    while queue:
+        n = queue.pop(0)
+        if n in seen:
+            continue
+        seen.add(n)
+        ordered.append(by_num[n])
+        for c in children.get(n, []):
+            indeg[c] -= 1
+            if indeg[c] == 0:
+                queue.append(c)
+                queue.sort()
+    if len(ordered) < len(rows):
+        for n in sorted(nums - seen):
+            ordered.append(by_num[n])
+    return ordered
+
+
+def stack_bottoms(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """PRs whose open parent is outside this set (typically base=master)."""
+    nums = {r["number"] for r in rows}
+    bottoms = [
+        r for r in rows if r.get("parent_number") is None or r["parent_number"] not in nums
+    ]
+    return sorted(bottoms, key=lambda r: r["number"])
+
+
+def build_named_stacks(
+    rows: list[dict[str, Any]],
+    *,
+    groups: list[str] | None = None,
+    bottoms_only: bool = False,
+    listing_repo: str | None = None,
+) -> list[dict[str, Any]]:
+    linked = link_parents(rows, listing_repo=listing_repo)
+    explicit = groups is not None
+    names = list(groups) if explicit else list(STACK_GROUP_NAMES)
+    stacks: list[dict[str, Any]] = []
+    for name in names:
+        matcher = STACK_GROUPS[name]
+        matched = [r for r in linked if matcher(r)]
+        if not matched:
+            stacks.append({"group": name, "bottoms_only": False, "order": []})
+            continue
+        # Default all-groups view: wave6 shows docs bottoms only. Explicit
+        # `--group wave6` prints the full bottom-up chains unless --bottoms-only.
+        # Bottoms use the matched set only so a non-group open base (e.g. S1
+        # #332 under wave6-gates-doc) is not itself listed as a wave6 bottom.
+        want_bottoms = bottoms_only or (not explicit and name == "wave6")
+        if want_bottoms:
+            order = stack_bottoms(matched)
+        else:
+            order = bottom_up_order(expand_with_ancestors(matched, linked))
+        stacks.append(
+            {
+                "group": name,
+                "bottoms_only": want_bottoms,
+                "order": order,
+            }
+        )
+    return stacks
+
+
 def print_table(rows: list[dict[str, Any]]) -> None:
     print(
         f"{'N':<5} {'class':<14} {'tests':<10} {'adv':<10} {'approve':<7} {'head':<10} title"
@@ -182,19 +440,463 @@ def print_table(rows: list[dict[str, Any]]) -> None:
             f"{r['adversary_marker']:<10} {str(r['live_approve']):<7} "
             f"{(r['head'] or '')[:7]:<10} {(r['title'] or '')[:48]}"
         )
-    needs = [r for r in rows if r["class"] == "needs_approve" and r["pytest_linux"] in ("pass", "success")]
+    needs = [
+        r
+        for r in rows
+        if r["class"] == "needs_approve" and r["pytest_linux"] in ("pass", "success")
+    ]
     if needs:
         print()
-        print("# Paste-ready APPROVE templates (operator only; after a real review of that head):")
-        for r in needs[:12]:
-            print(f"# PR {r['number']} ({r['head'][:7]})")
-            print(r["marker_template"])
+        print_approve_paste(needs)
+
+
+def print_approve_paste(rows: list[dict[str, Any]]) -> None:
+    """Emit every paste-ready marker (no truncation); operator posts after review."""
+    print(
+        "# Paste-ready APPROVE templates "
+        "(operator only; after a real review of that head):"
+    )
+    print(
+        "# WARNING: do not paste through herdr — it rewrites "
+        "`<!-- adversary-verdict:v1 … -->` into "
+        "`<-- env … herdr --session adversary-verdict:v1 … -->`, "
+        "so the gate never sees a live marker."
+    )
+    print(
+        "# Prefer: bin/ade-merge-ready approve-post --via auto "
+        "(GitHub API, not herdr; body for owner tips, comment for outside)."
+    )
+    print(
+        "# Until #484: owner tips need a body APPROVE — approve-post --via auto "
+        "does that; do not paste comments for owner PRs."
+    )
+    for r in rows:
+        head = r.get("head") or ""
+        tmpl = r.get("marker_template") or ""
+        if not tmpl:
+            continue
+        print(f"# PR {r['number']} ({head[:7]}) base={r.get('base') or '?'}")
+        print(tmpl)
+
+
+def select_approve_rows(
+    rows: list[dict[str, Any]],
+    *,
+    base: str,
+    bottoms_only: bool,
+    groups: list[str] | None,
+    listing_repo: str,
+    pr_numbers: set[int] | None = None,
+) -> list[dict[str, Any]]:
+    """needs_approve + green pytest-linux rows, optionally filtered like approve-paste."""
+    paste_rows = [
+        r
+        for r in rows
+        if r["class"] == "needs_approve"
+        and r["pytest_linux"] in ("pass", "success")
+        and r.get("marker_template")
+        and SHA40.match(r.get("head") or "")
+    ]
+    if base:
+        paste_rows = [r for r in paste_rows if r.get("base") == base]
+    if bottoms_only or groups:
+        stacks = build_named_stacks(
+            rows,
+            groups=groups,
+            bottoms_only=True,
+            listing_repo=listing_repo,
+        )
+        bottom_nums = {r["number"] for s in stacks for r in (s.get("order") or [])}
+        paste_rows = [r for r in paste_rows if r["number"] in bottom_nums]
+    if pr_numbers is not None:
+        paste_rows = [r for r in paste_rows if r["number"] in pr_numbers]
+    paste_rows.sort(key=lambda r: r["number"])
+    return paste_rows
+
+
+def gh_login(gh: str) -> str:
+    p = run_gh(gh, ["api", "user", "-q", ".login"], timeout=30)
+    if p.returncode != 0:
+        raise RuntimeError(f"gh api user failed: {(p.stderr or p.stdout).strip()}")
+    login = (p.stdout or "").strip()
+    if not login:
+        raise RuntimeError("gh api user returned empty login")
+    return login
+
+
+def repo_owner_login(gh: str, repo: str) -> str:
+    p = run_gh(
+        gh,
+        ["repo", "view", repo, "--json", "owner", "-q", ".owner.login"],
+        timeout=30,
+    )
+    if p.returncode != 0:
+        raise RuntimeError(f"gh repo view {repo} failed: {(p.stderr or p.stdout).strip()}")
+    owner = (p.stdout or "").strip()
+    if not owner:
+        raise RuntimeError(f"gh repo view {repo} returned empty owner")
+    return owner
+
+
+def _approve_marker(head: str) -> str:
+    return f'<!-- adversary-verdict:v1 {{"verdict":"APPROVE","head":"{head}"}} -->'
+
+
+def _trigger_adversary_marker(
+    gh: str, repo: str, number: int, *, progress=None
+) -> None:
+    out = progress if progress is not None else sys.stdout
+    t = run_gh(
+        gh,
+        [
+            "workflow",
+            "run",
+            "adversary-marker.yml",
+            "--repo",
+            repo,
+            "-f",
+            f"pr={number}",
+        ],
+        timeout=60,
+    )
+    if t.returncode != 0:
+        raise RuntimeError(
+            f"workflow run adversary-marker pr={number} failed: "
+            f"{(t.stderr or t.stdout).strip()}"
+        )
+    print(f"triggered adversary-marker.yml pr={number}", file=out)
+
+
+def resolve_approve_via(via: str, owner_pr: bool) -> str:
+    """Return 'body' or 'comment' for one tip under --via auto|body|comment."""
+    v = (via or "auto").strip().lower()
+    if v == "auto":
+        return "body" if owner_pr else "comment"
+    if v in ("body", "comment"):
+        return v
+    raise RuntimeError(f"unknown --via {via!r} (want auto|body|comment)")
+
+
+def parse_expect_heads(items: list[str]) -> dict[int, str]:
+    """Parse --expect-head N=40hex / N:40hex into {pr: sha}."""
+    out: dict[int, str] = {}
+    for raw in items or []:
+        s = (raw or "").strip()
+        if not s:
+            continue
+        if "=" in s:
+            left, right = s.split("=", 1)
+        elif ":" in s:
+            left, right = s.split(":", 1)
+        else:
+            raise RuntimeError(
+                f"bad --expect-head {raw!r} (want N=40hex or N:40hex)"
+            )
+        try:
+            n = int(left.strip())
+        except ValueError as e:
+            raise RuntimeError(
+                f"bad --expect-head {raw!r}: PR number must be int"
+            ) from e
+        sha = right.strip().lower()
+        if not SHA40.fullmatch(sha):
+            raise RuntimeError(
+                f"bad --expect-head {raw!r}: head must be a 40-hex sha"
+            )
+        out[n] = sha
+    return out
+
+
+def require_expect_heads(
+    paste_rows: list[dict[str, Any]], expect: dict[int, str]
+) -> None:
+    """Refuse --yes when a tip's live head is missing from or differs from expect."""
+    if not expect:
+        raise RuntimeError(
+            "approve-post --yes requires --expect-head N=40hex for each tip "
+            "(pin the SHA you reviewed; dry-run prints them)"
+        )
+    for r in paste_rows:
+        n = int(r["number"])
+        live = (r.get("head") or "").lower()
+        want = expect.get(n)
+        if want is None:
+            raise RuntimeError(
+                f"approve-post --yes missing --expect-head {n}={live or '…'}"
+            )
+        if want != live:
+            raise RuntimeError(
+                f"#{n} live head {live} != --expect-head {want} "
+                "(tip moved after review; re-review and pin the new sha)"
+            )
+
+
+def post_approve_comment(
+    gh: str,
+    repo: str,
+    number: int,
+    head: str,
+    *,
+    dry_run: bool,
+    trigger_marker: bool,
+    progress=None,
+) -> None:
+    """Post one owner APPROVE comment naming *head*; optionally re-run the marker Action."""
+    out = progress if progress is not None else sys.stdout
+    marker = _approve_marker(head)
+    if dry_run:
+        print(f"would comment #{number} head={head}", file=out)
+        print(marker, file=out)
+        if trigger_marker:
+            print(f"would trigger adversary-marker.yml pr={number}", file=out)
+        return
+    p = run_gh(
+        gh,
+        ["pr", "comment", str(number), "--repo", repo, "--body", marker],
+        timeout=60,
+    )
+    if p.returncode != 0:
+        raise RuntimeError(
+            f"gh pr comment #{number} failed: {(p.stderr or p.stdout).strip()}"
+        )
+    print(f"commented #{number} head={head}", file=out)
+    if trigger_marker:
+        _trigger_adversary_marker(gh, repo, number, progress=out)
+
+
+def post_approve_body(
+    gh: str,
+    repo: str,
+    number: int,
+    head: str,
+    *,
+    dry_run: bool,
+    trigger_marker: bool,
+    progress=None,
+) -> None:
+    """Append one APPROVE marker to the PR body (owner tips; not herdr)."""
+    out = progress if progress is not None else sys.stdout
+    marker = _approve_marker(head)
+    if dry_run:
+        print(f"would body-edit #{number} head={head}", file=out)
+        print(marker, file=out)
+        if trigger_marker:
+            print(f"would trigger adversary-marker.yml pr={number}", file=out)
+        return
+    view = run_gh(
+        gh,
+        ["pr", "view", str(number), "--repo", repo, "--json", "body"],
+        timeout=60,
+    )
+    if view.returncode != 0:
+        raise RuntimeError(
+            f"gh pr view #{number} failed: {(view.stderr or view.stdout).strip()}"
+        )
+    try:
+        cur = json.loads(view.stdout or "{}")
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"gh pr view #{number} JSON: {e}") from e
+    old = cur.get("body") or ""
+    if marker in old:
+        print(f"body already has marker #{number} head={head}", file=out)
+    else:
+        new_body = old.rstrip() + "\n\n" + marker + "\n"
+        # Prefer REST JSON body to avoid shell metacharacters in markers.
+        patch = run_gh(
+            gh,
+            [
+                "api",
+                "--method",
+                "PATCH",
+                f"repos/{repo}/pulls/{number}",
+                "--input",
+                "-",
+            ],
+            timeout=60,
+            input_text=json.dumps({"body": new_body}),
+        )
+        if patch.returncode != 0:
+            raise RuntimeError(
+                f"gh api PATCH pulls/{number} failed: "
+                f"{(patch.stderr or patch.stdout).strip()}"
+            )
+        print(f"body-edited #{number} head={head}", file=out)
+    if trigger_marker:
+        _trigger_adversary_marker(gh, repo, number, progress=out)
+
+
+def _merge_async_squash(gh: str, repo: str, number: int, head: str) -> None:
+    """Squash-merge via PUT …/merge-async (required for GitHub native stacks)."""
+    body = json.dumps(
+        {
+            "merge_method": "squash",
+            "merge_action": "direct_merge",
+            "sha": head,
+        }
+    )
+    p = run_gh(
+        gh,
+        [
+            "api",
+            "-X",
+            "PUT",
+            f"repos/{repo}/pulls/{number}/merge-async",
+            "--input",
+            "-",
+        ],
+        timeout=60,
+        input_text=body,
+    )
+    if p.returncode != 0:
+        raise RuntimeError(
+            f"merge-async #{number} failed: {(p.stderr or p.stdout).strip()}"
+        )
+    try:
+        doc = json.loads(p.stdout)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"merge-async #{number}: bad JSON: {e}") from e
+    status = doc.get("status")
+    details = doc.get("details") if isinstance(doc.get("details"), dict) else {}
+    if status == "merged":
+        return
+    if status == "failed":
+        raise RuntimeError(
+            f"merge-async #{number} failed: {details.get('message') or doc}"
+        )
+    uuid = details.get("uuid")
+    if status != "pending" or not isinstance(uuid, str) or not uuid:
+        raise RuntimeError(f"merge-async #{number}: unexpected response {doc}")
+    for _ in range(40):
+        time.sleep(3)
+        q = run_gh(
+            gh,
+            ["api", f"repos/{repo}/pulls/{number}/merge-async/{uuid}"],
+            timeout=60,
+        )
+        if q.returncode != 0:
+            raise RuntimeError(
+                f"merge-async #{number} poll failed: {(q.stderr or q.stdout).strip()}"
+            )
+        try:
+            qd = json.loads(q.stdout)
+        except json.JSONDecodeError as e:
+            raise RuntimeError(f"merge-async #{number} poll: bad JSON: {e}") from e
+        st = qd.get("status")
+        qdet = qd.get("details") if isinstance(qd.get("details"), dict) else {}
+        if st == "merged":
+            return
+        if st == "enqueued":
+            return
+        if st == "failed":
+            raise RuntimeError(
+                f"merge-async #{number} failed: {qdet.get('message') or qd}"
+            )
+    raise RuntimeError(f"merge-async #{number} timed out uuid={uuid}")
+
+
+def merge_now_prs(
+    gh: str,
+    repo: str,
+    rows: list[dict[str, Any]],
+    pr_numbers: set[int],
+    *,
+    dry_run: bool,
+) -> list[int]:
+    """Squash-merge only tips classified merge_now; refuse otherwise (no gate bypass)."""
+    by_n = {int(r["number"]): r for r in rows}
+    merged: list[int] = []
+    for n in sorted(pr_numbers):
+        r = by_n.get(n)
+        if r is None:
+            raise RuntimeError(
+                f"#{n} not in open listing for this --repo/--min — refuse merge"
+            )
+        if r.get("class") != "merge_now":
+            raise RuntimeError(
+                f"#{n} class={r.get('class')} adversary_marker={r.get('adversary_marker')} "
+                f"pytest_linux={r.get('pytest_linux')} — refuse merge "
+                "(need class=merge_now: pytest-linux pass + adversary-marker success)"
+            )
+        head = r.get("head") or ""
+        if not SHA40.fullmatch(head):
+            raise RuntimeError(f"#{n} missing 40-hex head — refuse merge")
+        if dry_run:
+            print(f"would merge #{n} --squash --match-head-commit {head}")
+            merged.append(n)
+            continue
+        p = run_gh(
+            gh,
+            [
+                "pr",
+                "merge",
+                str(n),
+                "--repo",
+                repo,
+                "--squash",
+                "--match-head-commit",
+                head,
+            ],
+            timeout=180,
+        )
+        if p.returncode != 0:
+            err = (p.stderr or p.stdout).strip()
+            # Native GitHub stacks refuse GraphQL merge; use merge-async instead.
+            if "asynchronous merge" in err or "merge-async" in err:
+                _merge_async_squash(gh, repo, n, head)
+            else:
+                raise RuntimeError(f"gh pr merge #{n} failed: {err}")
+        print(f"merged #{n} squash head={head}")
+        merged.append(n)
+    return merged
+
+
+def print_stacks(stacks: list[dict[str, Any]]) -> None:
+    print(
+        "# Bottom-up APPROVE order from open PR base→head refs "
+        "(operator only; after a real review of each head)."
+    )
+    print("# Never posts or invents a verdict; templates are for paste after review.")
+    print()
+    for stack in stacks:
+        name = stack["group"]
+        order: list[dict[str, Any]] = stack["order"]
+        label = f"{name} bottoms" if stack.get("bottoms_only") else name
+        print(f"## {label}")
+        if not order:
+            print("  (no open PRs matched)")
+            print()
+            continue
+        for i, r in enumerate(order, 1):
+            parent = r.get("parent_number")
+            parent_s = f"←#{parent}" if parent else f"←{r.get('base') or '?'}"
+            print(
+                f"  {i}. #{r['number']} {r.get('branch') or ''} {parent_s}  "
+                f"class={r.get('class')}  head={r.get('head') or ''}"
+            )
+            print(f"     {(r.get('title') or '')[:72]}")
+            if r.get("marker_template"):
+                print(f"     {r['marker_template']}")
+        print()
 
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         prog="ade-merge-ready",
-        description="Classify open ADE PRs against pytest-linux + adversary-marker + live APPROVE (read-only).",
+        description=(
+            "Classify open ADE PRs against pytest-linux + adversary-marker + live "
+            "APPROVE, print bottom-up stack order, print paste templates, or "
+            "(owner only) post APPROVE comments after review."
+        ),
+    )
+    ap.add_argument(
+        "cmd",
+        nargs="?",
+        default="classify",
+        choices=("classify", "stacks", "approve-paste", "approve-post", "merge-now"),
+        help=(
+            "classify (default), stacks, approve-paste, approve-post, or "
+            "merge-now (squash only when adversary-marker is success)"
+        ),
     )
     ap.add_argument(
         "--repo",
@@ -208,17 +910,231 @@ def main(argv: list[str] | None = None) -> int:
         metavar="N",
         help="only PRs with number >= N (default 327)",
     )
-    ap.add_argument("--json", action="store_true", help="print JSON array")
+    ap.add_argument("--json", action="store_true", help="print JSON")
     ap.add_argument(
         "--gh",
         default=os.environ.get("ADE_GH", "gh"),
         help="gh binary (or ADE_GH); tests inject a fake",
+    )
+    ap.add_argument(
+        "--group",
+        action="append",
+        choices=list(STACK_GROUP_NAMES),
+        metavar="NAME",
+        help=(
+            "stacks / approve-*: limit to named stack(s): install, claims, s1, "
+            "wave6 (repeatable; default: all four)"
+        ),
+    )
+    ap.add_argument(
+        "--bottoms-only",
+        action="store_true",
+        help=(
+            "stacks / approve-paste / approve-post: only stack bottoms within "
+            "each selected group (approve-* uses named stacks when set)"
+        ),
+    )
+    ap.add_argument(
+        "--base",
+        default="",
+        metavar="REF",
+        help="approve-paste / approve-post: restrict to PRs whose baseRefName equals REF",
+    )
+    ap.add_argument(
+        "--prs",
+        default="",
+        metavar="N,N,…",
+        help=(
+            "approve-paste / approve-post / merge-now: only these PR numbers "
+            "(comma-separated; required for merge-now)"
+        ),
+    )
+    ap.add_argument(
+        "--i-reviewed",
+        action="store_true",
+        help="approve-post: affirm a real review of each selected tip head",
+    )
+    ap.add_argument(
+        "--yes",
+        action="store_true",
+        help="approve-post / merge-now: actually write (default is dry-run)",
+    )
+    ap.add_argument(
+        "--trigger-marker",
+        action="store_true",
+        help="approve-post: after each post, gh workflow run adversary-marker.yml -f pr=N",
+    )
+    ap.add_argument(
+        "--via",
+        default="auto",
+        choices=("auto", "body", "comment"),
+        help=(
+            "approve-post: auto=body for owner-authored tips else comment; "
+            "or force body / comment (default auto)"
+        ),
+    )
+    ap.add_argument(
+        "--expect-head",
+        action="append",
+        default=[],
+        metavar="N=40HEX",
+        help=(
+            "approve-post: reviewed tip SHA for PR N (repeatable; N=sha or N:sha). "
+            "Required with --yes; refuse if live headRefOid differs"
+        ),
     )
     a = ap.parse_args(argv)
     try:
         rows = collect(a.gh, a.repo, a.min)
     except (RuntimeError, subprocess.TimeoutExpired, OSError) as e:
         return die(str(e))
+
+    pr_numbers: set[int] | None = None
+    if a.prs.strip():
+        try:
+            pr_numbers = {int(x.strip()) for x in a.prs.split(",") if x.strip()}
+        except ValueError:
+            return die("--prs must be comma-separated integers")
+        if not pr_numbers:
+            return die("--prs is empty")
+
+    if a.cmd == "stacks":
+        stacks = build_named_stacks(
+            rows,
+            groups=a.group,
+            bottoms_only=a.bottoms_only,
+            listing_repo=a.repo,
+        )
+        if a.json:
+            json.dump(stacks, sys.stdout, indent=2, sort_keys=True)
+            sys.stdout.write("\n")
+        else:
+            print_stacks(stacks)
+        return 0
+
+    if a.cmd == "merge-now":
+        if pr_numbers is None:
+            return die("merge-now requires --prs N[,N…]")
+        dry_run = not a.yes
+        try:
+            merged = merge_now_prs(
+                a.gh, a.repo, rows, pr_numbers, dry_run=dry_run
+            )
+        except (RuntimeError, subprocess.TimeoutExpired, OSError) as e:
+            return die(str(e))
+        if a.json:
+            json.dump(
+                {"dry_run": dry_run, "merged": merged},
+                sys.stdout,
+                indent=2,
+                sort_keys=True,
+            )
+            sys.stdout.write("\n")
+        return 0
+
+    if a.cmd in ("approve-paste", "approve-post"):
+        paste_rows = select_approve_rows(
+            rows,
+            base=a.base,
+            bottoms_only=a.bottoms_only,
+            groups=a.group,
+            listing_repo=a.repo,
+            pr_numbers=pr_numbers,
+        )
+        if a.cmd == "approve-paste":
+            if a.json:
+                json.dump(paste_rows, sys.stdout, indent=2, sort_keys=True)
+                sys.stdout.write("\n")
+            else:
+                print_approve_paste(paste_rows)
+            return 0
+
+        dry_run = not a.yes
+        if a.yes and not a.i_reviewed:
+            return die(
+                "approve-post --yes requires --i-reviewed (affirm real tip review)"
+            )
+        try:
+            expect_heads = parse_expect_heads(a.expect_head)
+            login = gh_login(a.gh)
+            owner = repo_owner_login(a.gh, a.repo)
+        except (RuntimeError, subprocess.TimeoutExpired, OSError) as e:
+            return die(str(e))
+        if login != owner:
+            return die(
+                f"approve-post refuses: gh user {login!r} is not repo owner "
+                f"{owner!r} (only the owner's comment counts for APPROVE)"
+            )
+        if not paste_rows:
+            print(
+                "ade-merge-ready: no needs_approve rows matched filters",
+                file=sys.stderr,
+            )
+            return 0
+        if a.yes:
+            try:
+                require_expect_heads(paste_rows, expect_heads)
+            except RuntimeError as e:
+                return die(str(e))
+        out = sys.stderr if a.json else sys.stdout
+        if dry_run:
+            print(
+                f"# dry-run as owner {login} ({len(paste_rows)} tips, via={a.via}); "
+                "pass --i-reviewed --yes --expect-head N=sha… to post",
+                file=out,
+            )
+            for r in paste_rows:
+                print(
+                    f"# pin: --expect-head {r['number']}={r.get('head') or ''}",
+                    file=out,
+                )
+        posted = 0
+        vias: list[str] = []
+        for r in paste_rows:
+            try:
+                via = resolve_approve_via(a.via, bool(r.get("owner_pr")))
+                vias.append(via)
+                if via == "body":
+                    post_approve_body(
+                        a.gh,
+                        a.repo,
+                        int(r["number"]),
+                        r["head"],
+                        dry_run=dry_run,
+                        trigger_marker=a.trigger_marker,
+                        progress=out,
+                    )
+                else:
+                    post_approve_comment(
+                        a.gh,
+                        a.repo,
+                        int(r["number"]),
+                        r["head"],
+                        dry_run=dry_run,
+                        trigger_marker=a.trigger_marker,
+                        progress=out,
+                    )
+            except (RuntimeError, subprocess.TimeoutExpired, OSError) as e:
+                return die(str(e))
+            posted += 1
+        if a.json:
+            json.dump(
+                {
+                    "dry_run": dry_run,
+                    "owner": owner,
+                    "via": a.via,
+                    "posted": posted,
+                    "numbers": [r["number"] for r in paste_rows],
+                    "heads": {str(r["number"]): r.get("head") for r in paste_rows},
+                    "vias": vias,
+                },
+                sys.stdout,
+                indent=2,
+                sort_keys=True,
+            )
+            sys.stdout.write("\n")
+        return 0
+
     if a.json:
         json.dump(rows, sys.stdout, indent=2, sort_keys=True)
         sys.stdout.write("\n")
