@@ -108,7 +108,8 @@ def snapshot(root):
 
 
 @pytest.mark.parametrize("before_command", [False, True])
-def test_cold_cli_has_no_state_cache_or_command_effects(catalog, tmp_path, before_command):
+@pytest.mark.parametrize("root_option", ["--root", "--root=", "--roo", "--roo="])
+def test_cold_cli_has_no_state_cache_or_command_effects(catalog, tmp_path, before_command, root_option):
     bindir = catalog.root / "bin"
     bindir.mkdir()
     for name in ("ade-install", "ade_install.py", "ade_config.py", "model_tiers.py"):
@@ -120,8 +121,9 @@ def test_cold_cli_has_no_state_cache_or_command_effects(catalog, tmp_path, befor
     home = tmp_path / "home"
     home.mkdir()
     before = snapshot(tmp_path)
-    argv = (["--root", str(catalog.root), "update-plan"] if before_command else
-            ["update-plan", "--root", str(catalog.root)])
+    root_args = ([root_option + str(catalog.root)] if root_option.endswith("=")
+                 else [root_option, str(catalog.root)])
+    argv = [*root_args, "update-plan"] if before_command else ["update-plan", *root_args]
     # No -B: a cold real executable must suppress its own repository cache writes.
     result = subprocess.run([str(executable), *argv, "--json"], cwd=tmp_path,
                             env={**os.environ, "HOME": str(home)}, capture_output=True,

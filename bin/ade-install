@@ -33,19 +33,9 @@ BIN = Path(__file__).resolve().parent
 if str(BIN) not in sys.path:
     sys.path.insert(0, str(BIN))
 
-def _is_update_plan(argv: list[str]) -> bool:
-    """Identify the command after optional shared --root, without parsing twice."""
-    args = iter(argv)
-    for arg in args:
-        if arg == "--root":
-            next(args, None)
-        elif not arg.startswith("--root="):
-            return arg == "update-plan"
-    return False
-
-
-if __name__ == "__main__" and _is_update_plan(sys.argv[1:]):
-    # A real cold planning run must not create repository __pycache__ files.
+if __name__ == "__main__" and "update-plan" in sys.argv[1:]:
+    # Cover argparse's accepted option abbreviations without duplicating its
+    # grammar. Suppressing bytecode if an argument value matches is harmless.
     sys.dont_write_bytecode = True
 
 import ade_install as ai  # noqa: E402
