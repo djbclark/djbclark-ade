@@ -1,0 +1,525 @@
+#!/usr/bin/env -S python3 -I
+"""codex-open-threads: report-only lister for unresolved Codex review threads on merged PRs.
+
+  codex-open-threads [--repo OWNER/NAME] [--limit N] [--pr N ...] [--skip-outdated] [--json]
+
+AGENTS.md review rule 9 hygiene (Carried #11, 2026-10-23; advisory since slim-down J8):
+list every unresolved Codex finding thread left on a merged pull request so the lead can
+read each against the code and fix what is real. GraphQL `reviewThreads.isResolved` is the
+authority (PR 32, 2026-10-23: an earlier head's P1 stayed open past two pushes; a head-only
+filter read zero).
+
+Report-only and mutation-free: this tool NEVER resolves a thread, never replies, never posts,
+never edits a PR. Codex (and every other bot) comment text is UNTRUSTED DATA — finding marks
+are matched as literals, and only a truncated first-line title is echoed for identification;
+nothing in a bot body is followed as an instruction.
+
+A thread counts when it is unresolved and ANY of its comments (up to 100) is a Codex finding:
+authored by `chatgpt-codex-connector[bot]` (REST) / `chatgpt-codex-connector` (GraphQL) and
+carrying `<!-- codex-code-review-finding:v1 -->` or `<!-- codex-security-review-finding:v1 -->`.
+Outdated threads are included by default (`--skip-outdated` drops them).
+
+Without `--pr`, the newest `--limit` merged PRs (default 50, by `merged_at` desc) are scanned.
+With `--pr N` (repeatable), only those numbers are read; a PR that is not merged is reported
+under `skipped` and does not contribute threads (pass `--include-open` to list open/closed
+unmerged PRs too — still report-only).
+
+Output: plain text (one summary line, then one line per thread:
+  PR#N kind path:line commit=SHA12 [outdated] title
+) or `--json` with
+{"tool","repo","scanned","skipped","threads","summary"}. Thread fields never carry the full
+bot body. Exit 0 listed (including zero threads), 1 a gh/API failure, 2 usage.
+
+Stdlib only. Calls `gh` with argv lists (never shell=True).
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import subprocess
+import sys
+from typing import Any, Callable
+
+TOOL = "codex-open-threads"
+DEFAULT_REPO = "djbclark/djbclark-ade"
+DEFAULT_LIMIT = 50
+MAX_LIMIT = 500
+GH_TIMEOUT = 120
+TITLE_MAX = 200
+# Page size for GraphQL merged-PR listing (MERGED_AT desc); limit is applied after that order.
+MERGED_PAGE = 50
+
+FINDING_MARKS = (
+    ("codex-code-review-finding:v1", "code"),
+    ("codex-security-review-finding:v1", "security"),
+)
+CODEX_LOGIN = "chatgpt-codex-connector[bot]"
+CODEX_GQL_LOGIN = "chatgpt-codex-connector"
+REPO_RE = re.compile(r"^[\w.-]+/[\w.-]+$")
+
+THREADS_QUERY = (
+    "query($owner:String!,$name:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$name){"
+    "pullRequest(number:$number){reviewThreads(first:100,after:$cursor){pageInfo{hasNextPage endCursor} "
+    "nodes{isResolved isOutdated comments(first:100){nodes{databaseId author{login} path "
+    "originalCommit{oid}}}}}}}}"
+)
+
+# Repository.pullRequests ordered by MERGED_AT so --limit truncates the newest merges, not
+# updated-time order (REST pulls?sort=updated would let an old PR's new comment displace a
+# recent merge before the limit was applied).
+MERGED_PRS_QUERY = (
+    "query($owner:String!,$name:String!,$first:Int!,$cursor:String){repository(owner:$owner,name:$name){"
+    "pullRequests(states:MERGED,orderBy:{field:MERGED_AT,direction:DESC},first:$first,after:$cursor){"
+    "pageInfo{hasNextPage endCursor} nodes{number title mergedAt url}}}}"
+)
+
+# GraphQL mutation field names that must never appear in a query this tool builds.
+_FORBIDDEN_GQL_FIELDS = frozenset({
+    "resolveReviewThread", "unresolveReviewThread", "addPullRequestReviewThreadReply",
+    "addComment", "addPullRequestReview", "submitPullRequestReview", "deletePullRequestReview",
+    "mergePullRequest", "closePullRequest", "reopenPullRequest", "updatePullRequest",
+})
+_MUTATING_HTTP = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
+EXIT_OK, EXIT_GH, EXIT_USAGE = 0, 1, 2
+
+GhRunner = Callable[..., str]
+
+
+class GhError(Exception):
+    pass
+
+
+def assert_read_only_gh_argv(args: tuple[str, ...] | list[str]) -> None:
+    """Refuse argv that could mutate GitHub (defence in depth for this report-only tool)."""
+    for i, a in enumerate(args):
+        if a in ("-X", "--method") and i + 1 < len(args):
+            method = args[i + 1].upper()
+            if method in _MUTATING_HTTP:
+                raise GhError(f"refusing mutating HTTP method in gh argv: {method}")
+        if isinstance(a, str) and a.startswith("query="):
+            q = a[6:].lstrip()
+            if q.lower().startswith("mutation"):
+                raise GhError("refusing GraphQL mutation in gh argv")
+            for field in _FORBIDDEN_GQL_FIELDS:
+                if re.search(rf"\b{re.escape(field)}\b", a):
+                    raise GhError(f"refusing GraphQL field {field} in gh argv")
+        if isinstance(a, str) and a.startswith("-f") is False and "mutation" in a.lower():
+            # Bare `mutation { ... }` passed as its own argv token.
+            if re.search(r"(?i)\bmutation\b", a) and "query=" not in a:
+                # Only when this token looks like a GraphQL document, not e.g. a path.
+                if "{" in a or a.lower().strip().startswith("mutation"):
+                    raise GhError("refusing GraphQL mutation in gh argv")
+
+
+def finding_kind(body: str) -> str | None:
+    """Return 'code' or 'security' when BODY carries a Codex finding mark; else None.
+
+    BODY is treated as opaque data: only literal mark presence is checked.
+    Scan the full body — Codex puts the mark at the end, and a long finding can
+    exceed any head truncation (title truncation is separate, in title_of).
+    """
+    text = body or ""
+    for mark, kind in FINDING_MARKS:
+        if mark in text:
+            return kind
+    return None
+
+
+def is_codex_user(comment: dict) -> bool:
+    """REST pull-comment author is the Codex bot account (type Bot)."""
+    u = comment.get("user")
+    return isinstance(u, dict) and u.get("login") == CODEX_LOGIN and u.get("type") == "Bot"
+
+
+def title_of(body: str) -> str:
+    """First non-empty line of BODY, truncated; never the full bot text."""
+    for line in (body or "").splitlines():
+        s = line.strip()
+        if s:
+            return s[:TITLE_MAX]
+    return ""
+
+
+def parse_pages(text: str) -> list:
+    """`gh api --paginate` prints one JSON document per page, concatenated."""
+    dec = json.JSONDecoder()
+    docs, i, n = [], 0, len(text)
+    while True:
+        while i < n and text[i].isspace():
+            i += 1
+        if i >= n:
+            return docs
+        try:
+            doc, i = dec.raw_decode(text, i)
+        except ValueError as e:
+            raise GhError(f"unparsable gh output at byte {i}: {e}") from e
+        docs.append(doc)
+
+
+def default_gh(*args: str) -> str:
+    """Run `gh` with an argv list; any failure is a GhError."""
+    assert_read_only_gh_argv(args)
+    try:
+        p = subprocess.run(
+            ["gh", *args], check=False, capture_output=True, text=True,
+            timeout=GH_TIMEOUT, stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise GhError(f"gh {args[0] if args else ''}: {type(e).__name__}") from e
+    if p.returncode != 0:
+        err = (p.stderr or p.stdout).strip().replace("\n", " ")[:300]
+        raise GhError(f"gh {' '.join(args[:3])}: rc={p.returncode} {err}")
+    return p.stdout
+
+
+def api_items(gh: GhRunner, endpoint: str, key: str | None = None) -> list:
+    items: list = []
+    docs = parse_pages(gh("api", "--paginate", endpoint))
+    if not docs:
+        raise GhError(f"{endpoint}: empty gh output")
+    for doc in docs:
+        part = doc.get(key) if key is not None and isinstance(doc, dict) else doc
+        if isinstance(part, list):
+            items.extend(part)
+        else:
+            raise GhError(f"{endpoint}: unexpected page shape {type(doc).__name__}")
+    return items
+
+
+def fetch_finding_comments(gh: GhRunner, repo: str, pr: int) -> dict[int, dict]:
+    """databaseId -> {kind, path, line, original_commit_id, title} for Codex finding comments."""
+    out: dict[int, dict] = {}
+    for c in api_items(gh, f"repos/{repo}/pulls/{pr}/comments?per_page=100"):
+        if not isinstance(c, dict):
+            continue
+        kind = finding_kind(c.get("body") or "")
+        if not kind or not is_codex_user(c):
+            continue
+        cid = c.get("id")
+        if not isinstance(cid, int):
+            continue
+        out[cid] = {
+            "kind": kind,
+            "path": c.get("path"),
+            "line": c.get("line") or c.get("original_line"),
+            "original_commit_id": c.get("original_commit_id"),
+            "title": title_of(c.get("body") or ""),
+        }
+    return out
+
+
+def fetch_threads(gh: GhRunner, repo: str, pr: int) -> list[dict]:
+    """Every review thread: comments (databaseId, author, path, original commit) + resolved/outdated."""
+    owner, name = repo.split("/", 1)
+    threads: list[dict] = []
+    cursor: str | None = None
+    seen: set[str] = set()
+    while True:
+        args = [
+            "api", "graphql",
+            "-f", f"owner={owner}", "-f", f"name={name}",
+            "-F", f"number={pr}", "-f", f"query={THREADS_QUERY}",
+        ]
+        if cursor is not None:
+            args += ["-f", f"cursor={cursor}"]
+        try:
+            doc = json.loads(gh(*args))
+            rt = doc["data"]["repository"]["pullRequest"]["reviewThreads"]
+            nodes, info = rt["nodes"], rt["pageInfo"]
+        except (ValueError, KeyError, TypeError) as e:
+            raise GhError(f"graphql reviewThreads PR#{pr}: unusable answer: {e}") from e
+        if doc.get("errors"):
+            raise GhError(f"graphql reviewThreads PR#{pr}: errors: {str(doc['errors'])[:200]}")
+        for n in nodes or []:
+            if not isinstance(n, dict):
+                continue
+            comments = []
+            for c in ((n.get("comments") or {}).get("nodes") or []):
+                if not isinstance(c, dict):
+                    continue
+                comments.append({
+                    "databaseId": c.get("databaseId"),
+                    "author": (c.get("author") or {}).get("login"),
+                    "path": c.get("path"),
+                    "original_commit_id": (c.get("originalCommit") or {}).get("oid"),
+                })
+            threads.append({
+                "comments": comments,
+                "isResolved": bool(n.get("isResolved")),
+                "isOutdated": bool(n.get("isOutdated")),
+            })
+        if not info.get("hasNextPage"):
+            return threads
+        cursor = info.get("endCursor")
+        if not cursor or cursor in seen:
+            raise GhError(f"graphql reviewThreads PR#{pr}: hasNextPage without a new endCursor")
+        seen.add(cursor)
+
+
+def open_threads_for_pr(
+    gh: GhRunner, repo: str, pr: int, *, skip_outdated: bool = False,
+) -> list[dict]:
+    """Unresolved Codex finding threads on PR, newest-finding metadata attached."""
+    findings = fetch_finding_comments(gh, repo, pr)
+    if not findings:
+        return []
+    open_list: list[dict] = []
+    for t in fetch_threads(gh, repo, pr):
+        if t["isResolved"]:
+            continue
+        if skip_outdated and t["isOutdated"]:
+            continue
+        hit = next(
+            (x for x in t["comments"]
+             if x.get("author") == CODEX_GQL_LOGIN and x.get("databaseId") in findings),
+            None,
+        )
+        if hit is None:
+            continue
+        meta = findings[hit["databaseId"]]
+        sha = hit.get("original_commit_id") or meta.get("original_commit_id") or ""
+        open_list.append({
+            "pr": pr,
+            "id": hit["databaseId"],
+            "kind": meta["kind"],
+            "path": hit.get("path") or meta.get("path"),
+            "line": meta.get("line"),
+            "original_commit_id": sha,
+            "isOutdated": t["isOutdated"],
+            "title": meta["title"],
+            "url": f"https://github.com/{repo}/pull/{pr}#discussion_r{hit['databaseId']}",
+        })
+    return open_list
+
+
+def list_merged_prs(gh: GhRunner, repo: str, limit: int) -> list[dict]:
+    """Newest merged PRs (by merged_at desc), up to limit.
+
+    Uses GraphQL pullRequests(states:MERGED, orderBy:MERGED_AT) so selection is by
+    merge time before --limit is applied. REST closed+sort=updated would stop early
+    on recently-touched old merges and hide newer ones.
+    """
+    owner, name = repo.split("/", 1)
+    picked: list[dict] = []
+    cursor: str | None = None
+    seen: set[str] = set()
+    # Cap pages: enough for `limit`, plus a small slack for empty/partial pages.
+    max_pages = max(1, (limit + MERGED_PAGE - 1) // MERGED_PAGE) + 2
+    page = 0
+    while len(picked) < limit and page < max_pages:
+        page += 1
+        first = min(MERGED_PAGE, limit - len(picked))
+        args = [
+            "api", "graphql",
+            "-f", f"owner={owner}", "-f", f"name={name}",
+            "-F", f"first={first}", "-f", f"query={MERGED_PRS_QUERY}",
+        ]
+        if cursor is not None:
+            args += ["-f", f"cursor={cursor}"]
+        try:
+            doc = json.loads(gh(*args))
+            conn = doc["data"]["repository"]["pullRequests"]
+            nodes, info = conn["nodes"], conn["pageInfo"]
+        except (ValueError, KeyError, TypeError) as e:
+            raise GhError(f"graphql merged PRs page {page}: unusable answer: {e}") from e
+        if doc.get("errors"):
+            raise GhError(f"graphql merged PRs page {page}: errors: {str(doc['errors'])[:200]}")
+        for n in nodes or []:
+            if not isinstance(n, dict) or not n.get("mergedAt"):
+                continue
+            picked.append({
+                "number": n.get("number"),
+                "title": (n.get("title") or "")[:TITLE_MAX],
+                "merged_at": n.get("mergedAt"),
+                "url": n.get("url") or f"https://github.com/{repo}/pull/{n.get('number')}",
+            })
+            if len(picked) >= limit:
+                break
+        if len(picked) >= limit or not info.get("hasNextPage"):
+            break
+        cursor = info.get("endCursor")
+        if not cursor or cursor in seen:
+            raise GhError(f"graphql merged PRs page {page}: hasNextPage without a new endCursor")
+        seen.add(cursor)
+    # Already MERGED_AT desc from GraphQL; keep an explicit sort before the limit slice
+    # so a mis-ordered page (or a future REST fallback) cannot invert the contract.
+    picked.sort(key=lambda x: x.get("merged_at") or "", reverse=True)
+    return picked[:limit]
+
+
+def pr_meta(gh: GhRunner, repo: str, pr: int) -> dict:
+    try:
+        doc = json.loads(gh("api", f"repos/{repo}/pulls/{pr}"))
+    except (ValueError, TypeError) as e:
+        raise GhError(f"pulls/{pr}: {e}") from e
+    if not isinstance(doc, dict):
+        raise GhError(f"pulls/{pr}: unexpected shape")
+    return {
+        "number": doc.get("number", pr),
+        "title": (doc.get("title") or "")[:TITLE_MAX],
+        "merged_at": doc.get("merged_at"),
+        "state": doc.get("state"),
+        "url": doc.get("html_url") or f"https://github.com/{repo}/pull/{pr}",
+    }
+
+
+def scan(
+    gh: GhRunner,
+    repo: str,
+    *,
+    limit: int = DEFAULT_LIMIT,
+    prs: list[int] | None = None,
+    skip_outdated: bool = False,
+    include_open: bool = False,
+) -> dict[str, Any]:
+    """Scan merged (or named) PRs; return the report document. Never mutates GitHub."""
+    skipped: list[dict] = []
+    scanned: list[dict] = []
+    threads: list[dict] = []
+
+    if prs:
+        targets = []
+        for n in prs:
+            meta = pr_meta(gh, repo, n)
+            if meta.get("merged_at") or include_open:
+                targets.append(meta)
+            else:
+                skipped.append({
+                    "pr": n,
+                    "reason": "not-merged",
+                    "state": meta.get("state"),
+                    "url": meta.get("url"),
+                })
+    else:
+        targets = list_merged_prs(gh, repo, limit)
+
+    for meta in targets:
+        n = meta.get("number")
+        if not isinstance(n, int) or n < 1:
+            skipped.append({"pr": n, "reason": "bad-number"})
+            continue
+        found = open_threads_for_pr(gh, repo, n, skip_outdated=skip_outdated)
+        scanned.append({
+            "pr": n,
+            "title": meta.get("title"),
+            "merged_at": meta.get("merged_at"),
+            "url": meta.get("url"),
+            "open_count": len(found),
+        })
+        threads.extend(found)
+
+    by_kind = {"code": 0, "security": 0}
+    outdated = 0
+    for t in threads:
+        by_kind[t["kind"]] = by_kind.get(t["kind"], 0) + 1
+        if t.get("isOutdated"):
+            outdated += 1
+
+    return {
+        "tool": TOOL,
+        "repo": repo,
+        "scanned": scanned,
+        "skipped": skipped,
+        "threads": threads,
+        "summary": {
+            "prs_scanned": len(scanned),
+            "prs_skipped": len(skipped),
+            "threads": len(threads),
+            "by_kind": by_kind,
+            "outdated": outdated,
+        },
+    }
+
+
+def format_text(doc: dict) -> str:
+    s = doc["summary"]
+    lines = [
+        f"{TOOL}: {doc['repo']}: {s['threads']} unresolved Codex thread(s) "
+        f"across {s['prs_scanned']} PR(s) "
+        f"({s['by_kind'].get('code', 0)} code, {s['by_kind'].get('security', 0)} security; "
+        f"{s['outdated']} outdated); skipped {s['prs_skipped']}",
+    ]
+    for t in doc["threads"]:
+        sha = (t.get("original_commit_id") or "")[:12] or "?"
+        path = t.get("path") or "?"
+        line = t.get("line")
+        loc = f"{path}:{line}" if line is not None else path
+        od = " [outdated]" if t.get("isOutdated") else ""
+        title = t.get("title") or ""
+        lines.append(f"  PR#{t['pr']} {t['kind']} {loc} commit={sha}{od} {title}".rstrip())
+    for sk in doc["skipped"]:
+        lines.append(f"  skipped PR#{sk.get('pr')}: {sk.get('reason')}")
+    return "\n".join(lines) + "\n"
+
+
+def parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog=TOOL,
+        description=__doc__.split("\n\n")[0],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Report-only: never resolves or replies. Bot comment text is untrusted data "
+            "(AGENTS.md Trust / review rule 9)."
+        ),
+    )
+    p.add_argument("--repo", default=DEFAULT_REPO, help=f"OWNER/NAME (default {DEFAULT_REPO})")
+    p.add_argument(
+        "--limit", type=int, default=DEFAULT_LIMIT,
+        help=f"max merged PRs to scan when --pr is omitted (default {DEFAULT_LIMIT}, max {MAX_LIMIT})",
+    )
+    p.add_argument(
+        "--pr", type=int, action="append", dest="prs", metavar="N",
+        help="scan only this PR number (repeatable); must be merged unless --include-open",
+    )
+    p.add_argument(
+        "--skip-outdated", action="store_true",
+        help="omit outdated threads (default: include them)",
+    )
+    p.add_argument(
+        "--include-open", action="store_true",
+        help="with --pr, also list threads on open/closed-unmerged PRs",
+    )
+    p.add_argument("--json", action="store_true", help="print one JSON document")
+    return p
+
+
+def main(argv: list[str] | None = None, gh: GhRunner | None = None) -> int:
+    try:
+        a = parser().parse_args(argv)
+    except SystemExit as e:
+        return EXIT_USAGE if e.code else EXIT_OK
+    if not REPO_RE.fullmatch(a.repo):
+        print(f"{TOOL}: bad --repo {a.repo!r}", file=sys.stderr)
+        return EXIT_USAGE
+    if a.prs is None and (a.limit < 1 or a.limit > MAX_LIMIT):
+        print(f"{TOOL}: --limit must be 1..{MAX_LIMIT}", file=sys.stderr)
+        return EXIT_USAGE
+    if a.prs is not None and any(n < 1 for n in a.prs):
+        print(f"{TOOL}: --pr must be >= 1", file=sys.stderr)
+        return EXIT_USAGE
+    if a.include_open and not a.prs:
+        print(f"{TOOL}: --include-open only applies with --pr", file=sys.stderr)
+        return EXIT_USAGE
+    run_gh = gh or default_gh
+    try:
+        doc = scan(
+            run_gh, a.repo.lower(),
+            limit=a.limit,
+            prs=a.prs,
+            skip_outdated=a.skip_outdated,
+            include_open=a.include_open,
+        )
+    except GhError as e:
+        print(f"{TOOL}: {e}", file=sys.stderr)
+        return EXIT_GH
+    if a.json:
+        sys.stdout.write(json.dumps(doc, separators=(",", ":"), sort_keys=True) + "\n")
+    else:
+        sys.stdout.write(format_text(doc))
+    return EXIT_OK
+
+
+if __name__ == "__main__":
+    sys.exit(main())

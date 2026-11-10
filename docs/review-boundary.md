@@ -210,3 +210,20 @@ for both `statuses: write` and `checks: write`, so the App must have both.
    with `ruleset.json` as in the E8 report (section E): `adversary-marker` pinned to the App's ID, the Tests jobs
    `pytest-linux` and `context-policy` pinned to GitHub Actions (`integration_id` 15368). Branch protection (PR only,
    admins included) stays as it is.
+
+## `bin/codex-open-threads`: rule 9 hygiene on merged PRs (2026-11-10)
+
+Report-only lister for unresolved Codex review threads left on **merged** PRs (Carried #11; review rule 9 is advisory
+since J8 — unresolved threads do not gate the merge). GraphQL `reviewThreads.isResolved` is the authority; a thread
+counts when any of its comments is a Codex finding (`chatgpt-codex-connector[bot]` plus a
+`codex-code-review-finding:v1` or `codex-security-review-finding:v1` mark). Outdated threads are included by default.
+
+```sh
+codex-open-threads [--repo OWNER/NAME] [--limit N]          # newest N merged PRs (default 50)
+codex-open-threads --pr 32 --pr 59 [--include-open] [--json]
+codex-open-threads --skip-outdated --json
+```
+
+It never resolves, replies, posts or edits. Bot comment text is untrusted data: only a truncated first-line title is
+echoed. Exit 0 listed (including zero), 1 a `gh`/API failure, 2 usage. The lead still reads each thread against the
+code and fixes what is real; this tool only surfaces them.
