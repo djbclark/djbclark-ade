@@ -105,7 +105,7 @@ Skills (23, from each `skills/*/SKILL.md`):
 | [`tell-chief-of-staff`](skills/tell-chief-of-staff/SKILL.md) | Pointer (2026-11-06) for messaging the operator's cloud Grok Bot "Chief of Staff" ("tell grok", "tell Chief of Staff", "hand this to grokbot") and for its ask_claude callback; the sender and its setup live outside this repository. |
 | [`tell-coding-bot`](skills/tell-coding-bot/SKILL.md) | Pointer (2026-11-06) for talking to the operator's cloud Grok Bot "Coding" ("tell the Coding bot", "ask Coding", "hand this to the Coding bot", a task that needs a real browser session); the coding-bot code now lives in the peer-link repository. |
 
-`bin/` (77, from each file's first docstring or comment):
+`bin/` (78, from each file's first docstring or comment):
 
 | Tool | What |
 |---|---|
@@ -129,7 +129,7 @@ Skills (23, from each `skills/*/SKILL.md`):
 | [`ade-sched`](bin/ade-sched) | Install a checked-in launchd plist on this machine's scheduler (launchd, systemd user units or cron). |
 | [`ade-template-check`](bin/ade-template-check) | Check the agents/ config templates (Phase 0 item 4.4, 2026-10-20). |
 | [`ade-update`](bin/ade-update) | Keep this machine's djbclark-ade checkout current: pull, relink, say what changed. |
-| [`ade-update-auto`](bin/ade-update-auto) | S4 CLI stub: accept ``update --auto`` without inventing scheduled apply. |
+| [`ade-update-auto`](bin/ade-update-auto) | S4 ``update --auto``: observe-only by default; optional this-checkout apply. |
 | [`ade-user-install`](bin/ade-user-install) | Uv/just fetch, bin/ symlink, or Linux sudo-secretspec media staging. |
 | [`ade_browser_task.py`](bin/ade_browser_task.py) | Render / relay browser-only prompts (setup-plan S7). |
 | [`ade_claims.py`](bin/ade_claims.py) | The workspace claim library, the git-guard rules and the ref hooks (isolation slice W1, 2026-10-24; O2 redesign 2026-10-25). |

@@ -321,9 +321,10 @@ foreign/unknown owners or root/`--system` units. Host write backends (launchd/sy
 and ADE-owned paseo schedule reconcile are in the S4b stack. Plists for scheduled
 `update --auto` apply remain later under the contracts below;
 `harden-check` and `keys-check` have daily plists (`just harden-check-install` /
-`just keys-check-install`, 2026-11-10). `ade-update --auto` is a CLI stub
-(observe-only then exit 5) until an operator-chosen auto-apply policy lands
-(PR 359 check-only gate stands).
+`just keys-check-install`, 2026-11-10). `ade-update --auto` observe-only exits 5
+by default; `--apply-checkout` / `ADE_UPDATE_AUTO_APPLY=1` applies this checkout only
+(option 1, 2026-11-10). Scheduled apply plist / mid-turn skip / failure ping
+(options 2–3) still wait on operator policy (PR 359 check-only gate stands).
 
 1. **One inventory**, `config/ade.toml [install.jobs]` (transitional: `config/install.toml [[install.jobs]]`). Each entry has:
    - name;

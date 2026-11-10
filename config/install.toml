@@ -818,7 +818,7 @@ class = "hard"
 schedule = "daily (plist pending)"
 command = "just update --auto"
 platforms = ["mac", "linux"]
-notes = "S4: CLI stub landed (ade-update --auto / ade-update-auto observe-only then exit 5 not-implemented); scheduled apply plist still pending (PR 359 check-only gate stands)."
+notes = "S4: observe-only exit 5 by default; --apply-checkout / ADE_UPDATE_AUTO_APPLY=1 ff-only updates this checkout (option 1); scheduled apply plist / mid-turn skip / failure ping still pending (PR 359 check-only gate stands)."
 
 [[install.jobs]]
 name = "harden-check"

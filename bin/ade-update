@@ -852,8 +852,12 @@ def main(argv=None):
     ap.add_argument("--repo", default=DEFAULT_REPO, help=f"the checkout (default {DEFAULT_REPO})")
     ap.add_argument("--check", action="store_true", help="report only; change nothing, exit 10 when behind or links missing")
     ap.add_argument("--auto", action="store_true",
-                    help="S4 stub: observe-only (--check + keys) then exit 5 not-implemented for full auto-apply "
-                         "(see bin/ade-update-auto; daily check remains --check / update-check-install)")
+                    help="S4: observe-only (--check + keys) then exit 5 unless --apply-checkout "
+                         "(or ADE_UPDATE_AUTO_APPLY=1) ff-only updates this checkout; "
+                         "scheduled auto-apply plist still pending (see bin/ade-update-auto)")
+    ap.add_argument("--apply-checkout", action="store_true",
+                    help="with --auto: when behind, run bare ade-update for this checkout only "
+                         "(also ADE_UPDATE_AUTO_APPLY=1); ignored without --auto")
     ap.add_argument("--json", action="store_true", help="print the report as JSON")
     ap.add_argument("--state", default=None, help=f"applied-revision record (default {DEFAULT_STATE}; a non-canonical "
                     "--repo defaults to its own record beside it)")
@@ -861,12 +865,17 @@ def main(argv=None):
     if args.auto and args.check:
         print("ade-update: --auto and --check are mutually exclusive", file=sys.stderr)
         return 2
+    if args.apply_checkout and not args.auto:
+        print("ade-update: --apply-checkout requires --auto", file=sys.stderr)
+        return 2
     if args.auto:
         # Dispatch to the sibling auto runner (keeps mid-turn skip + keys out of the apply path).
         auto = Path(__file__).resolve().parent / "ade-update-auto"
         argv_auto = [sys.executable, str(auto), "--repo", args.repo]
         if args.json:
             argv_auto.append("--json")
+        if args.apply_checkout:
+            argv_auto.append("--apply-checkout")
         return subprocess.call(argv_auto)  # noqa: S603 — argv list only
     repo = Path(os.path.expanduser(args.repo)).resolve()
     if args.state is None:

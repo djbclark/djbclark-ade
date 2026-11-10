@@ -110,8 +110,10 @@ Checked-in ADE jobs under `config/launchd/` include `com.djbclark.deadline-sweep
 - Plists for `harden-check` and `keys-check` landed 2026-11-10
   (`com.djbclark.harden-check.plist` / `just harden-check-install`;
   `com.djbclark.keys-check.plist` / `just keys-check-install`).
-  `update --auto` has a **CLI stub** only (`ade-update --auto` / `ade-update-auto`:
-  observe-only then exit 5); no apply plist yet (PR 359 check-only gate).
+  `update --auto` observe-only exits 5 by default (`ade-update --auto` /
+  `ade-update-auto`); `--apply-checkout` / `ADE_UPDATE_AUTO_APPLY=1` ff-only updates
+  **this checkout** when behind (option 1). No apply plist / mid-turn skip /
+  failure ping yet (PR 359 check-only gate; options 2–3 still pending).
 
 ## Paseo schedules (reconcile + operator, 2026-11-10)
 
