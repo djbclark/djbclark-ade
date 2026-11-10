@@ -57,7 +57,7 @@ For the migration choices, compatibility names and Linux/macOS handoffs, read
 | `paseo-screen` | The one screen-control tool (2026-10-31): looks at and drives the Mac's GUI through the Paseo plugin `paseo-screen`; safety rules inside (look before clicking). | `/paseo-screen`; "take a screenshot of the screen". |
 | `ingest-web-ai` | Design + offline normalizer for Gemini/Grok (and similar) web chats into ADE memory (Carried #23). No live scrape, no credentials, no S1 writes. | `/ingest-web-ai`; "normalize a Gemini export". Doc: `docs/ingest-web-ai.md`. |
 | `tell-chief-of-staff` | Pointer (2026-11-06): messaging the Grok Bot "Chief of Staff" lives in the peer-link repository. | "tell grok", "tell Chief of Staff". |
-| `tell-coding-bot` | Pointer (2026-11-06): the Grok Bot "Coding" sender lives in the peer-link repository. | "tell the Coding bot". |
+| `tell-coding-bot` | Pointer (2026-11-06): the Grok Bot "Coding" sender lives in the peer-link repository (do not restore `bin/coding-bot` here; retired ade PR #269 demanual: `docs/history/coding-bot-peer-link-2026-11-10.md`). | "tell the Coding bot". |
 
 `skills/session-finder/` was restored 2026-11-08 for Pi-first transcript history search (`session-history.py`;
 data only — it does not launch retired clients). The one-cycle relay shim `relay.py` over `paseo send` remains until
