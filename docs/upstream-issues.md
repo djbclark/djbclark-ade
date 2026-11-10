@@ -1134,6 +1134,10 @@ getpaseo/paseo (#7145 and #6257 are open but about other packages' type imports)
 > **Request:** a release declaring Paseo 0.12.x support, or a note on whether 0.12 is expected to work.
 
 **Status:** filed 2026-10-19: https://github.com/Daaaaave/paseo-telegram/issues/1
+(**Re-probe 2026-11-10:** npm `paseo-telegram` **0.2.3** sets `requirements.paseo` to `*` — the install-time
+version gate that blocked 0.2.0 is gone in the published package. Issue #1 remains OPEN with no comments.
+`@getpaseo/client` is still pinned at 0.11.2 in the package; live install / `hermes-ping` re-point wait for
+operator yes. See `docs/history/paseo-telegram-reprobe-2026-11-10.md`.)
 
 ## 17. Paseo — CLI: change an existing agent's model (`paseo agent model <id> <provider/model>`) (filed 2026-11-09)
 
