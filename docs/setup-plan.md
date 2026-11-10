@@ -1,5 +1,8 @@
 # Setup, hardening and updates: plan (queue Carried 35)
 
+Implementation snapshot: [S1–S9 progress and remaining work, 2026-11-10](setup-plan-progress-2026-11-10.md).
+The plan is not complete; cloud implementation gaps remain alongside live and policy gates.
+
 Plan, 2026-11-07. The first bounded config-core unit shipped on 2026-11-08 ([PR 308](https://github.com/djbclark/djbclark-ade/pull/308)); later phases remain planned.
 Overall and local coordination now belongs to the operator-appointed local
 workhorse lead, with higher-tier judgment delegated through the router. This transfers coordination from the Claude
