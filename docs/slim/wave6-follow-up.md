@@ -365,24 +365,41 @@ probe stdout (or a PR/merge citation) pasted into `c3_proofs.<key>`; or
 are operator/lead work; this gate only checks the captured files.
 
 **rg alternation (2026-11-10 Mac live):** use real ERE `|` inside the
-pattern (e.g. `rg -n -- 'acp-dispatch|acp-run|relay\.py' AGENTS.md`).
-Backslash-pipe `\|` under-matches and falsely reports clean. The Mac
-archive retained both the old specified probes and the intended ERE.
+pattern. Backslash-pipe `\|` under-matches and falsely reports clean.
+Copy probes from the fenced block below (not from a table cell — markdown
+`\|` escapes are not shell ERE). Empty match list = migrated; paste stdout
+into `c3_proofs.<key>`.
 
-| Key | Outside | Names to clear | Operator probe (paste into `c3_proofs.<key>`) |
-|---|---|---|---|
-| `tendcf` | tendcf `AGENTS.md` | `acp-dispatch --kind frontier`, `acp-run`, `relay.py`, … | In tendcf: `rg -n -- 'acp-dispatch\|acp-run\|relay\.py' AGENTS.md` with **literal** `\|` → `|` (empty = migrated) |
-| `nix2cf` | nix2cf `AGENTS.md` | same | In nix2cf: same intended-ERE `rg` on `AGENTS.md` |
-| `cfengine` | CFEngine (+ `cfengine-all` if present) | `cfenginewatch`, `watch`, `fleet-watch` | `rg -n -- 'cfenginewatch\|\bfleet-watch\b\|bin/watch' .` (ERE `|`) |
-| `paseo_upstream` | Paseo upstream | `paseowatch` | `rg -n -- 'paseowatch' .` |
-| `plektra` | Plektra | `acp-dispatch`, `relay.py`, `autorename`, `self-slash` | `rg -n -- 'acp-dispatch\|relay\.py\|autorename\|self-slash' .` (ERE `|`) |
-| `paseo4herdr` | paseo4herdr | `acp-dispatch`, `relay.py`, `self-slash` | `rg -n -- 'acp-dispatch\|relay\.py\|self-slash' .` (ERE `|`) |
-| `pi` | Pi (`pi/extensions/…`, hand links, `agent_guard.py`) | I4f | `rg -n -- 'acp-dispatch\|relay\.py\|agent_guard\|subagent' pi extensions hand 2>/dev/null` (ERE `|`) |
-| `sudo_secretspec` | sudo-secretspec | `relay.py`, `acp-dispatch`/`acp-run` as clients | `rg -n -- 'relay\.py\|acp-dispatch\|acp-run' .` (ERE `|`) |
-| `aiuse` | **aiuse** (incl. `src/aiuse/collectors/acp_usage.py`) | item 33 | `rg -n -- 'acp-run\|acp-dispatch\|relay\.py\|acp_usage' .` (ERE `|`) |
-| `paseo_runner` | paseo-runner | same clients | `rg -n -- 'relay\.py\|acp-dispatch\|acp-run' .` (ERE `|`) |
-| `site_public_home_agents` | `~/ops/site-public-djbclark/home-agents.md` item 40 | `coding-bot` | `rg -n -- 'coding-bot\|acp-run\|acp-dispatch' home-agents.md` (ERE `|`) |
-| `aiuse_config_opencode_go` | `~/.config/aiuse/config.toml` | `opencode-go` exclusion (after PR 260) | `rg -n -- 'opencode-go' ~/.config/aiuse/config.toml` (gone or waived after PR 260) |
+| Key | Outside | Names to clear |
+|---|---|---|
+| `tendcf` | tendcf `AGENTS.md` | `acp-dispatch --kind frontier`, `acp-run`, `relay.py`, … |
+| `nix2cf` | nix2cf `AGENTS.md` | same |
+| `cfengine` | CFEngine (+ `cfengine-all` if present) | `cfenginewatch`, `watch`, `fleet-watch` |
+| `paseo_upstream` | Paseo upstream | `paseowatch` |
+| `plektra` | Plektra | `acp-dispatch`, `relay.py`, `autorename`, `self-slash` |
+| `paseo4herdr` | paseo4herdr | `acp-dispatch`, `relay.py`, `self-slash` |
+| `pi` | Pi (`pi/extensions/…`, hand links, `agent_guard.py`) | I4f |
+| `sudo_secretspec` | sudo-secretspec | `relay.py`, `acp-dispatch`/`acp-run` as clients |
+| `aiuse` | **aiuse** (incl. `src/aiuse/collectors/acp_usage.py`) | item 33 |
+| `paseo_runner` | paseo-runner | same clients |
+| `site_public_home_agents` | `~/ops/site-public-djbclark/home-agents.md` item 40 | `coding-bot` |
+| `aiuse_config_opencode_go` | `~/.config/aiuse/config.toml` | `opencode-go` exclusion (after PR 260) |
+
+```bash
+# Intended ERE probes (paste into c3_proofs.<key>); empty = migrated
+(cd ~/src/tendcf && rg -n -- 'acp-dispatch|acp-run|relay\.py' AGENTS.md)
+(cd ~/src/nix2cf && rg -n -- 'acp-dispatch|acp-run|relay\.py' AGENTS.md)
+(cd ~/src/cfengine-all && rg -n -- 'cfenginewatch|\bfleet-watch\b|bin/watch' .)   # also probe cfengine-core
+(cd ~/src/paseo && rg -n -- 'paseowatch' .)
+(cd ~/src/plektra-djbclark && rg -n -- 'acp-dispatch|relay\.py|autorename|self-slash' .)
+(cd ~/src/paseo4herdr && rg -n -- 'acp-dispatch|relay\.py|self-slash' .)
+(cd ~/.pi/agent && rg -n -- 'acp-dispatch|relay\.py|agent_guard|subagent' . 2>/dev/null)
+(cd ~/src/sudo-secretspec && rg -n -- 'relay\.py|acp-dispatch|acp-run' .)
+(cd ~/src/aiuse && rg -n -- 'acp-run|acp-dispatch|relay\.py|acp_usage' .)
+(cd ~/src/paseo-runner && rg -n -- 'relay\.py|acp-dispatch|acp-run' .)
+(cd ~/ops/site-public-djbclark && rg -n -- 'coding-bot|acp-run|acp-dispatch' home-agents.md)
+rg -n -- 'opencode-go' ~/.config/aiuse/config.toml
+```
 
 ## D. Exact files to remove (deletion PR only)
 
