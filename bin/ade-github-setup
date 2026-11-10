@@ -1,15 +1,17 @@
 #!/usr/bin/env -S python3 -I
-"""ade-github-setup: observe / plan / dry-run for the merge-gate App (setup-plan S8).
+"""ade-github-setup: observe / plan / apply / verify for the merge-gate App (S8).
 
   ade-github-setup check [--root DIR] [--json]
   ade-github-setup observe [--root DIR] [--json] [--local]
   ade-github-setup plan [--root DIR] [--json]
-  ade-github-setup apply [--root DIR] [--json] [--dry-run|--yes]
+  ade-github-setup apply [--root DIR] [--json] [--dry-run|--yes|--verify]
 
 Check validates config/github.toml and .github/app-manifest.json. Observe is
 read-only (optional gh probes; --local skips network). Plan and apply
---dry-run (default) print steps; apply --yes is refused until a follow-up.
-Secrets never appear on argv (PEM / --private-key / client-secret refused).
+--dry-run (default) print steps. apply --yes mutates environment + ruleset via
+the GitHub API only; browser App confirm is refused (S7). apply --verify is
+API-only read-back of manifest / environment / ruleset. Secrets never appear
+on argv (PEM / --private-key / client-secret refused); never print PEM.
 Uses config/github.toml only while config/ade.toml is absent.
 See docs/github-setup.md.
 """
@@ -111,7 +113,11 @@ def cmd_plan(args: argparse.Namespace) -> int:
                     }
                     for s in steps
                 ],
-                "note": "print-only; ade-github-setup apply --dry-run previews payloads",
+                "note": (
+                    "print-only; ade-github-setup apply --dry-run previews "
+                    "payloads; --yes applies env/ruleset (API); --verify "
+                    "read-back"
+                ),
             }
         )
     else:
@@ -127,33 +133,57 @@ def cmd_plan(args: argparse.Namespace) -> int:
     return 0
 
 
+def _print_apply_rows(results: list[dict]) -> None:
+    for row in results:
+        action = str(row.get("action", ""))
+        print(f"  {action:22} {row.get('id')}: {row.get('reason')}")
+
+
 def cmd_apply(args: argparse.Namespace) -> int:
-    if args.yes and args.dry_run_flag:
+    modes = [bool(args.yes), bool(args.dry_run_flag), bool(args.verify)]
+    if sum(modes) > 1:
         print(
-            "ade-github-setup apply: refuse both --yes and --dry-run",
+            "ade-github-setup apply: refuse combining --yes / --dry-run / --verify",
             file=sys.stderr,
         )
         return 2
-    dry_run = not args.yes
+    if args.verify:
+        mode = "verify"
+    elif args.yes:
+        mode = "yes"
+    else:
+        mode = "dry-run"
     try:
-        if not dry_run:
-            raise ags.apply_yes_refused()
         cfg = ags.load_config(root=Path(args.root) if args.root else None)
-        results = ags.apply_dry_run(cfg)
+        if mode == "verify":
+            results, rc = ags.verify(cfg)
+        elif mode == "yes":
+            results, rc = ags.apply_yes(cfg)
+        else:
+            results = ags.apply_dry_run(cfg)
+            rc = 0
     except ags.GithubSetupError as e:
         if args.json:
             _print_json({"ok": False, "errors": [str(e)]})
         else:
             print(str(e), file=sys.stderr)
-            print("ade-github-setup apply: REFUSED", file=sys.stderr)
+            print("ade-github-setup apply: FAIL", file=sys.stderr)
         return 2
     if args.json:
-        _print_json({"ok": True, "mode": "dry-run", "results": results})
+        _print_json({"ok": rc == 0, "mode": mode, "results": results})
     else:
-        print("ade-github-setup apply (dry-run): OK")
-        for row in results:
-            print(f"  {row['action']:18} {row['id']}: {row['reason']}")
-    return 0
+        label = {
+            "dry-run": "apply (dry-run)",
+            "yes": "apply --yes",
+            "verify": "apply --verify",
+        }[mode]
+        print(
+            f"ade-github-setup {label}: "
+            + ("OK" if rc == 0 else "FAIL")
+            + (" (API-only; no PEM printed)" if mode != "dry-run" else "")
+        )
+        _print_apply_rows(results)
+    return int(rc)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -173,8 +203,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="ade-github-setup",
         description=(
-            "GitHub merge-gate setup: check, observe, plan, and dry-run "
-            "(setup-plan S8). Live apply deferred."
+            "GitHub merge-gate setup: check, observe, plan, apply "
+            "(dry-run / --yes API env+ruleset / --verify) (setup-plan S8). "
+            "Browser App confirm stays S7."
         ),
         parents=[shared],
     )
@@ -202,7 +233,10 @@ def main(argv: list[str] | None = None) -> int:
     ap = sub.add_parser(
         "apply",
         parents=[shared],
-        help="dry-run (default) prints payloads; --yes refused until follow-up",
+        help=(
+            "dry-run (default) prints payloads; --yes applies env+ruleset via "
+            "API (refuses browser App confirm); --verify API read-back"
+        ),
     )
     ap.add_argument("--json", action="store_true")
     mode = ap.add_mutually_exclusive_group()
@@ -215,9 +249,20 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument(
         "--yes",
         action="store_true",
-        help="refused in this unit (observe/plan/dry-run first)",
+        help=(
+            "apply environment + ruleset via GitHub API; refuse browser App "
+            "confirm (S7); never print PEM"
+        ),
     )
-    ap.set_defaults(func=cmd_apply, dry_run_flag=False, yes=False)
+    mode.add_argument(
+        "--verify",
+        action="store_true",
+        help=(
+            "API-only verify of local manifest + environment + ruleset "
+            "(no throwaway T0-T3b PRs)"
+        ),
+    )
+    ap.set_defaults(func=cmd_apply, dry_run_flag=False, yes=False, verify=False)
 
     args = parser.parse_args(raw)
     args.root = getattr(args, "root", None)
