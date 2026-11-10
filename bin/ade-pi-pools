@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Report and enforce Pi pool acceptance before automatic routing (ade/auto)."""
+"""Report Pi pool acceptance and observe-only continuation/quota/identity probes."""
 from ade_pi_pools import main
 
 raise SystemExit(main())
