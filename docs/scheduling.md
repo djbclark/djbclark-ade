@@ -78,8 +78,10 @@ Checked-in ADE jobs under `config/launchd/` include `com.djbclark.deadline-sweep
 `ade-sched reconcile` / `just sched-reconcile` is the ADE job write path on top of the inventory:
 
 - **Backend:** systemd user units **and** user crontab (CI-testable with fakes; 2026-11-10 cron
-  write path). `--yes` on launchd still refuses (exit 2). No Mac live proof is required for this
-  unit. Root / `--system` units are never touched. Paseo schedule write remains later.
+  write path). `--yes` on launchd still refuses host writes (exit 2) unless only paseo touches
+  remain. No Mac live proof is required for this unit. Root / `--system` units are never touched.
+  **Paseo schedule create/delete** landed 2026-11-10 (S4b): orthogonal to host backends (not in
+  `RECONCILE_WRITE_BACKENDS`); ledger rows use `backend="paseo"`.
 - **Default dry-run**; `--yes` executes. Pending intent is written to the ownership ledger before any
   host write; committed ownership is recorded only after install/uninstall read-back.
 - **Ledger:** `~/.local/state/djbclark-ade/jobs.json` (or `ADE_JOBS_STATE_DIR`), schema_version 1, with
@@ -97,18 +99,34 @@ Checked-in ADE jobs under `config/launchd/` include `com.djbclark.deadline-sweep
   (`committed` / `pending-remove` / legacy `installed`). Intent-only `pending` is **not** removal
   authority. Retired or dropped-from-inventory labels that are live but **not** in the ledger are
   reported only — never unloaded. Foreign/unknown owners are never unloaded.
-- Paseo schedules and dependency/site services stay report-only here (later slices).
+- **Paseo** (`kind=paseo`, ADE-owned, expected): reconcile plans create when the label is absent,
+  adopts the ledger when live without ownership, skips when live+ledger match, and deletes only
+  ledger-owned retired/dropped rows. Missing `--mode` or create fields (schedule, provider, cwd,
+  prompt; timezone from inventory or `ADE_TIMEZONE`) blocks. Foreign/unknown paseo schedules are
+  never unloaded without ledger authority. Injectable `paseo_run` (same pattern as
+  `paseo_schedule_names`).
+- Dependency/site services stay report-only. Launchd host writes remain later.
 - Plist for `harden-check` landed 2026-11-10 (`config/launchd/com.djbclark.harden-check.plist`;
   `just harden-check-install`). `update --auto` / `keys --check` remain planned until those plists land.
 
-## Paseo schedules (operator create, 2026-11-10)
+## Paseo schedules (reconcile + operator, 2026-11-10)
 
 Judgment jobs live in `paseo schedule`, not ade-sched. Inventory rows (`kind = "paseo"`) record the
-intended name, cron, and `--mode`; the operator creates each one once (S4b reconcile may automate
-this later). Always pass an explicit `--mode` (`auto` for Claude, `auto-review` for Codex). Model id
-is the operator's pick; timezone is the Mac's IANA zone (`readlink /etc/localtime | sed 's|.*/zoneinfo/||'`).
+intended name, cron, `--mode`, and (for hard `context-budget`) provider/cwd/prompt for reconcile.
+`ade-sched reconcile --yes` creates/deletes ADE-owned expected rows via:
 
-**context-budget** (C69, hard; nightly):
+```
+paseo schedule create --cron SCHED --timezone TZ --name LABEL --mode MODE \
+  --provider PROVIDER --cwd CWD "PROMPT"
+paseo schedule delete --name NAME
+```
+
+(`delete --name` matches create's `--name`; shape fixed here when the live CLI was unavailable.)
+Always pass an explicit `--mode` (`auto` for Claude, `auto-review` for Codex). Model id is the
+operator's pick (`provider` in inventory); timezone is inventory `timezone=` or `ADE_TIMEZONE`
+(Mac IANA: `readlink /etc/localtime | sed 's|.*/zoneinfo/||'`). Unchosen optionals stay quiet.
+
+**context-budget** (C69, hard; nightly) — inventory-driven; equivalent manual create:
 
 ```
 paseo schedule create --cron "50 3 * * *" --timezone <IANA> --name context-budget \
