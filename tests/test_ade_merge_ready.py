@@ -496,6 +496,9 @@ def test_approve_paste_master_base_only(tmp_path: Path) -> None:
     )
     r = run(gh, "approve-paste", "--base", "master", "--min", "1")
     assert r.returncode == 0, r.stderr
+    assert "do not paste through herdr" in r.stdout
+    assert "approve-post" in r.stdout
+    assert "Until #484" in r.stdout
     assert "# PR 334" in r.stdout
     assert head_m in r.stdout
     assert "# PR 469" not in r.stdout

@@ -14,11 +14,13 @@ adversary-marker checks. A live APPROVE is taken only from the
 attribution-aware `decide`: owner body editor / owner comment history). Raw
 markers in the body or comments are never enough on their own — that would
 count an outside author's or bot's same-head APPROVE. Classify / stacks /
-approve-paste never invent an APPROVE. `approve-paste` prints templates only.
-`approve-post` posts those templates as issue comments **only** when the
-authenticated `gh` user is the repository owner and both `--i-reviewed` and
-`--yes` are set (dry-run otherwise); it still never merges and never invents
-a head — each marker names the tip `headRefOid` just collected.
+approve-paste never invent an APPROVE. `approve-paste` prints templates only
+(and warns: never paste them through herdr — herdr mangles `<!-- … -->`).
+`approve-post` posts those templates as issue comments via `gh pr comment`
+(GitHub API, not herdr) **only** when the authenticated `gh` user is the
+repository owner and both `--i-reviewed` and `--yes` are set (dry-run
+otherwise); it still never merges and never invents a head — each marker
+names the tip `headRefOid` just collected.
 
 `stacks` walks open PR base→same-repo head refs and prints bottom-up APPROVE
 order for named groups (install, claims, s1, wave6) with full tip SHAs for
@@ -423,6 +425,20 @@ def print_approve_paste(rows: list[dict[str, Any]]) -> None:
     print(
         "# Paste-ready APPROVE templates "
         "(operator only; after a real review of that head):"
+    )
+    print(
+        "# WARNING: do not paste through herdr — it rewrites "
+        "`<!-- adversary-verdict:v1 … -->` into "
+        "`<-- env … herdr --session adversary-verdict:v1 … -->`, "
+        "so the gate never sees a live marker."
+    )
+    print(
+        "# Prefer: bin/ade-merge-ready approve-post "
+        "(posts via gh / GitHub API, not herdr)."
+    )
+    print(
+        "# Until #484: owner PRs need a PR-body edit outside herdr "
+        "(owner-PR comments do not count yet)."
     )
     for r in rows:
         head = r.get("head") or ""
