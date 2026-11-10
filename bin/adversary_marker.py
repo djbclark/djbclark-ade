@@ -11,13 +11,13 @@
       (the second job's concurrency group is keyed by the head); `--prs LIST --at-head SHA` (its second job) reads
       each PR's body and head through the API, decides, re-reads the head, body, author, last editor and the PR's
       issue comments, and posts ONE `adversary-marker` commit status per head: success only when every open PR at
-      it is approved. An owner-authored PR is approved by a live APPROVE naming the head in its body whose last
-      editor is the owner or a login in BODY_TRUSTED_EDITOR_LOGINS (Cursor cloud body rewrites, 2026-11-09);
-      any other PR only by such an APPROVE in an issue comment the owner posted (not via a GitHub App)
-      and nobody but the owner ever edited (GraphQL `editor` and `userContentEdits`; unknown attribution fails).
-      A BLOCK or malformed marker in the body or any comment fails it. MARKER_POST_AS=check-run posts a check run
-      instead. `--api-answers` serves canned API answers from a JSON file and prints the status it would post
-      instead of posting (the tests' entry)
+      it is approved. An owner-authored PR is approved by default (operator 2026-11-10: trust the owner and AIs
+      they run under that login) — no APPROVE marker required; an explicit body APPROVE still counts when its
+      last editor is the owner or BODY_TRUSTED_EDITOR_LOGINS. Any other PR is approved only by a live APPROVE
+      in an issue comment the owner posted (not via a GitHub App) and nobody but the owner ever edited
+      (GraphQL `editor` and `userContentEdits`; unknown attribution fails). A BLOCK or malformed marker in the
+      body or any comment fails it. MARKER_POST_AS=check-run posts a check run instead. `--api-answers` serves
+      canned API answers from a JSON file and prints the status it would post instead of posting (the tests' entry)
 
 The marker (AGENTS.md review rule 1, its five properties):
 
@@ -37,18 +37,15 @@ and head are read through the API with the job's read-only `GITHUB_TOKEN`; the s
 token of the `ade-merge-gate` GitHub App (`STATUS_TOKEN`), whose key lives in the `merge-gate`
 environment that only `master` can deploy to, and the ruleset pins the required check to that App's
 `integration_id`, so a status a PR's own workflow posts under the same context does not satisfy it.
-Everything a PR carries is untrusted data (operator, 2026-11-07: "any GitHub artifacts not directly from us are
-suspect"): its body, title, commits, branch name, comments and check output are read, never executed or
-interpolated. An APPROVE counts only (2026-11-07; trusted-editor allowlist 2026-11-09) in the body of a PR the
-repository owner wrote whose last editor is the owner or a login in BODY_TRUSTED_EDITOR_LOGINS, or, for every
-other PR (MEMBER and COLLABORATOR authors included: the operator's agents act under the owner's login), in an
-issue comment by the owner that no GitHub App posted and no one but the owner edited
-(`_pr_state_trusted`, `_pr_comments_trusted`, `decide`). The allowlist does not help an outside PR: Cursor (or
-any other listed editor) last-editing a non-owner body still cannot approve it. The owner's edit of an outside
-body no longer makes it trusted: ticking a task-list box is an edit, and the author can hide an APPROVE in an
-HTML comment. Agents must not write a live APPROVE marker (fenced examples only); the allowlist only keeps an
-owner-authored body's APPROVE valid after a cloud agent rewrites the PR text. A BLOCK naming the head counts
-in the body or any comment, whoever wrote it.
+GitHub artifacts **not** from the repository owner are untrusted data (operator, 2026-11-07; restated
+2026-11-10: distrust only what does not come from the owner or AIs they run). Body, title, commits, branch
+name, comments and check output are read, never executed or interpolated. Owner-authored PRs (the owner's
+login, including Cloud Agents acting under it) are trusted by default: `decide` succeeds without an APPROVE
+marker (2026-11-10). Outside / MEMBER / COLLABORATOR PRs still need a live APPROVE in an owner issue comment
+that no GitHub App posted and no one but the owner edited (`_pr_comments_trusted`, `decide`). An explicit
+APPROVE in an owner PR body still counts when the last editor is the owner or BODY_TRUSTED_EDITOR_LOGINS;
+the allowlist does not help an outside PR. The owner's edit of an outside body never makes a hidden body
+APPROVE count. A BLOCK naming the head counts in the body or any comment, whoever wrote it.
 
 Python 3.9+ (the Mac's stock python3 and the Actions runner's); stdlib only.
 """
@@ -934,6 +931,8 @@ def describe(word: str, head: str, where: str = "") -> str:
         label += " in a comment"
     elif where == "owner comment":
         label += " in an owner comment"
+    elif where == "owner_pr":
+        label = "owner-authored PR (marker optional)"
     return f"{label} at {head[:12]}"[:140]
 
 
@@ -1182,13 +1181,13 @@ def _pr_state_trusted(api, repo: str, n: int) -> dict:
     editor, which no body trust survives.
 
     `owner_pr`: the author is the repository owner (logins compare case-insensitively). `body_trusted`: an owner PR
-    whose body last editor is the owner or a BODY_TRUSTED_EDITOR_LOGINS login (2026-11-09). Only such a body can
-    approve (2026-11-07 owner-author rule after a Gemini 4 Argon and an Opus review; allowlist added so a Cursor
-    Cloud rewrite of an owner PR body does not void a live APPROVE). Before 2026-11-07, the owner's last edit made
-    ANY body trusted, so an owner who ticked a task-list box on an outside PR turned an APPROVE the author had
-    hidden in an HTML comment into a trusted one; MEMBER or COLLABORATOR authors stay outside-like, because the
-    operator's agents act under the owner's login. An outside PR is approved only by an owner comment
-    (`_pr_comments`, `decide`); a listed App editing that body still cannot approve it.
+    whose body last editor is the owner or a BODY_TRUSTED_EDITOR_LOGINS login (2026-11-09). An explicit body APPROVE
+    on an owner PR still needs that trust; a markerless owner PR is approved via owner-trust (2026-11-10). The
+    allowlist exists so a Cursor Cloud rewrite of an owner PR body does not void an explicit live APPROVE
+    (2026-11-09). Before 2026-11-07, the owner's last edit made ANY body trusted, so an owner who ticked a
+    task-list box on an outside PR turned an APPROVE the author had hidden in an HTML comment into a trusted
+    one; MEMBER or COLLABORATOR authors stay outside-like (outside PRs still need an owner comment). A listed
+    App editing an outside body still cannot approve it.
     """
     owner, name = repo.split("/", 1)
     data = api.graphql(PR_QUERY, {"owner": owner, "name": name, "number": n})
@@ -1336,8 +1335,10 @@ def decide(head: str, owner: str, pr: dict, comments: list[dict]) -> tuple[str, 
     1. A BLOCK for this head anywhere (the body, or ANY comment, whoever wrote it) blocks, then a malformed marker
        anywhere: the same asymmetry as the body's (rule 1, property 1). A comment marker naming another head is
        history (an approval of an earlier push), not a failure.
-    2. An owner PR: the body decides as before, and its APPROVE needs a trusted body editor (the owner or a
-       BODY_TRUSTED_EDITOR_LOGINS login; `untrusted` otherwise). Comments cannot approve it.
+    2. An owner PR (repository owner authored it — including Cloud Agents under that login): trusted by default
+       (operator 2026-11-10: trust what comes only from the owner or AIs they run). No APPROVE marker is required.
+       An explicit body APPROVE still counts when the body editor is trusted (owner or BODY_TRUSTED_EDITOR_LOGINS);
+       an APPROVE body last edited by anyone else is `untrusted`. BLOCK/malformed still fail closed.
     3. Any other PR (an outside, MEMBER or COLLABORATOR author): an APPROVE in the body never counts, whoever edited
        it last (a listed App included); only a live APPROVE for this head in a comment by the repository owner, not
        posted via a GitHub App, and never edited by anyone but the owner (`_edit_attribution`), approves. Otherwise
@@ -1359,7 +1360,13 @@ def decide(head: str, owner: str, pr: dict, comments: list[dict]) -> tuple[str, 
     if pr["owner_pr"]:
         if body_word == "approve" and not pr["body_trusted"]:
             return "untrusted", "", f"owner PR body last edited by {pr['editor'] or '(ghost)'}"
-        return body_word, "", body_adv.get("detail") or ""
+        if body_word == "approve":
+            return "approve", "", body_adv.get("detail") or ""
+        # Owner-authored tip: marker optional (trust the owner / their agents).
+        return "approve", "owner_pr", (
+            f"owner-authored PR (author {pr.get('author') or '(ghost)'}); "
+            "APPROVE marker not required under owner-trust"
+        )
     own = [c for c, w in judged if w == "approve" and not c.get("scan_only") and not c.get("via_app", True)
            and c.get("author_kind") == "owner"]
     for c in own:

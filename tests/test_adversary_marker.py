@@ -1098,6 +1098,8 @@ def test_documentation_approve_matrix_respects_documented_c1_limits(context, hea
 
 REPO_A = "djbclark/djbclark-ade"
 H1 = "1" * 40
+OUTSIDE_PR = {"author": "stranger", "assoc": "NONE"}
+GHAPP = {"id": 1, "slug": "some-app", "owner": {"login": "djbclark"}}
 H2 = "2" * 40
 
 
@@ -1221,14 +1223,15 @@ def test_a_verdict_for_this_head_posts_its_status_on_that_head(verdict, state, w
     assert report["prs"][0]["outcome"] == word
 
 
-@pytest.mark.parametrize("body,word", [
-    ("no marker, only prose: APPROVE " + H1, "missing"),
-    ('<!-- adversary-verdict:v1 {broken -->', "malformed"),
-    (None, "other-head"),
+@pytest.mark.parametrize("body,word,trust", [
+    # Outside PRs still need an owner comment; markerless / wrong-head body does not approve them.
+    ("no marker, only prose: APPROVE " + H1, "outside", OUTSIDE_PR),
+    ('<!-- adversary-verdict:v1 {broken -->', "malformed", {}),
+    (None, "outside", OUTSIDE_PR),
 ])
-def test_anything_but_a_live_approve_for_this_head_posts_failure(body, word):
+def test_anything_but_a_live_approve_for_this_head_posts_failure(body, word, trust):
     body = marker("APPROVE", H2) if body is None else body
-    rc, report, api = run_ev(wr_event(), serve(7, body))
+    rc, report, api = run_ev(wr_event(), serve(7, body, **trust))
     assert rc == 0 and [p["state"] for p in api.posted] == ["failure"], report
     assert report["prs"][0]["outcome"] == word
 
@@ -1497,10 +1500,6 @@ def test_a_body_approve_counts_only_on_an_owner_pr_with_a_trusted_body_editor(tr
                                             "outside": OUTSIDE}[word]
 
 
-OUTSIDE_PR = {"author": "stranger", "assoc": "NONE"}
-GHAPP = {"id": 1, "slug": "some-app", "owner": {"login": "djbclark"}}
-
-
 def test_hole2_an_owner_edit_of_an_outside_body_never_approves_its_hidden_marker():
     # The author hid the APPROVE in an HTML comment (invisible when rendered); the owner then ticked a task-list box,
     # which made the owner the body's last editor.
@@ -1587,11 +1586,20 @@ def test_a_malformed_marker_in_any_comment_fails_the_check():
     assert api.posted[0]["description"] == f"malformed marker in a comment at {H1[:12]}"
 
 
-def test_an_owner_pr_body_still_approves_and_a_comment_cannot_stand_in_for_it():
+def test_an_owner_pr_body_still_approves_and_markerless_owner_pr_also_approves():
+    """Owner PRs: explicit body APPROVE still works; no marker is also success (owner-trust, 2026-11-10)."""
     rc, report, api = run_ev(wr_event(), serve(7, marker("APPROVE", H1)))
     assert api.posted[0]["state"] == "success" and api.posted[0]["description"] == f"APPROVE at {H1[:12]}"
     rc, report, api = run_ev(wr_event(), serve(7, "", comments=[comment(marker("APPROVE", H1))]))
-    assert api.posted[0]["state"] == "failure" and report["prs"][0]["outcome"] == "missing"
+    assert api.posted[0]["state"] == "success" and report["prs"][0]["outcome"] == "approve"
+    assert report["prs"][0]["where"] == "owner_pr"
+    assert "marker optional" in api.posted[0]["description"]
+
+
+def test_an_owner_pr_with_no_marker_at_all_approves_under_owner_trust():
+    rc, report, api = run_ev(wr_event(), serve(7, "just a description, no marker"))
+    assert rc == 0 and api.posted[0]["state"] == "success"
+    assert report["prs"][0]["outcome"] == "approve" and report["prs"][0]["where"] == "owner_pr"
 
 
 def test_comments_are_read_on_every_page():
@@ -1642,7 +1650,12 @@ def dispatch(n: int) -> dict:
 
 @pytest.mark.parametrize("sibling", [marker("BLOCK", H1), "", marker("APPROVE", H2)], ids=["block", "none", "other-head"])
 def test_hole1_a_dispatch_for_an_approved_pr_fails_when_another_open_pr_at_its_head_does_not_approve(sibling):
-    answers = {**serve(10, marker("APPROVE", H1)), **serve(11, sibling), **at_head(H1, 10, 11)}
+    # Sibling is an outside PR so markerless / other-head does not ride owner-trust (2026-11-10).
+    answers = {
+        **serve(10, marker("APPROVE", H1)),
+        **serve(11, sibling, **OUTSIDE_PR),
+        **at_head(H1, 10, 11),
+    }
     rc, report, api = run_ev(dispatch(10), answers, name="workflow_dispatch")
     assert rc == 0, report
     assert [r["pr"] for r in report["prs"]] == [10, 11]
