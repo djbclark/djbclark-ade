@@ -92,10 +92,12 @@ GIT_CONFIG_* plus the repository's, relative --git-dir/--work-tree/GIT_DIR/GIT_W
      never by a cap), a `git config` that writes such a key (or `--edit`), and `core.hooksPath` set (any value, an empty one
      too) in the command, global or system scope, as `git config --null --show-scope --get-all core.hooksPath` says under the
      call's own options and the CALLER's environment (HOME, XDG_CONFIG_HOME, GIT_CONFIG_*, includes) -> `hook-config`; a
-     repository's own (local/worktree) hooksPath is not refused (husky and the like; the hooks do not run there, see
-     docs/git-guard.md). When git answers neither 0 (set) nor 1 (unset): timeout, cannot start, a config it cannot read ->
-     `hook-config-unknown`, refused with that reason. `push --no-verify` (any `--no-v` prefix) and `send-pack`/`http-push`,
-     which skip the pre-push hook -> `push-no-verify`/`push-plumbing`.
+     repository's own (local/worktree) hooksPath is not refused for ordinary calls (husky and the like; the hooks do not
+     run there, see docs/git-guard.md), but when it is set and is not the ade-git-guard stubs directory, `push` and
+     ref-writing subcommands are refused (`hooks-path`, §10 residual, 2026-11-10). When git answers neither 0 (set) nor 1
+     (unset): timeout, cannot start, a config it cannot read -> `hook-config-unknown`, refused with that reason.
+     `push --no-verify` (any `--no-v` prefix) and `send-pack`/`http-push`, which skip the pre-push hook ->
+     `push-no-verify`/`push-plumbing`.
   1. A workspace with an ACTIVE claim that is not mine (the cwd, or ANY -C, --git-dir, --work-tree, GIT_DIR or GIT_WORK_TREE
      value the call types, even one a later option moves git away from): only the read allowlist runs (FOREIGN_READ: status,
      log, show, diff, rev-parse, ls-files, ls-tree, cat-file, blame, describe, rev-list, for-each-ref, grep, shortlog,
@@ -1692,8 +1694,9 @@ def _redirect_decision(call: GitCall, env: dict[str, str]) -> Optional[Decision]
     """Rule (ii): the call, its environment or a `git config` write would disable, move or extend the hooks. git answers
     for `core.hooksPath` (any value, empty included) in the scopes a call or its environment controls: command (-c,
     GIT_CONFIG_COUNT/PARAMETERS), global, system (HOME, XDG_CONFIG_HOME, GIT_CONFIG_GLOBAL/SYSTEM, includes). A
-    repository's own (local/worktree) hooksPath is a choice of the repository, not of the call: not refused (the hooks do not
-    run there; `install` says so, exit 78). When git cannot answer, the call is refused with that reason (fail closed)."""
+    repository's own (local/worktree) hooksPath is a choice of the repository, not of the call: not refused here (the hooks
+    do not run there; `install` says so, exit 78). Push and ref-writes against a non-ade local hooksPath are refused by
+    `_local_hooks_path_decision` instead (§10). When git cannot answer, the call is refused with that reason (fail closed)."""
     alt = "the ref guard lives in git hooks; nothing may redirect or switch them off. Ask the operator"
     for k, _ in _unexempted_config(call, env):
         if _hook_key(k):
@@ -1735,10 +1738,80 @@ def _push_decision(call: GitCall) -> Optional[Decision]:
     return None
 
 
+# Builtins that update refs/heads/*, HEAD or refs/stash (reference-transaction), or that push (pre-push). Read-only
+# forms are filtered in `_is_ref_write_or_push`. §10 residual (2026-11-10).
+_HOOK_GUARDED_SUBS = frozenset("""push send-pack http-push update-ref commit merge rebase cherry-pick revert am reset
+pull stash branch checkout switch symbolic-ref worktree""".split())
+
+
+def _is_ref_write_or_push(call: GitCall) -> bool:
+    """Push family, or a non-read form of a builtin that updates the refs the claim hooks guard."""
+    sub = call.sub
+    if sub not in _HOOK_GUARDED_SUBS:
+        return False
+    if sub in ("push", "send-pack", "http-push", "update-ref"):
+        return True
+    if sub == "stash":
+        return not (call.args and call.args[0] in ("list", "show"))
+    if sub == "worktree":
+        return bool(call.args) and call.args[0] != "list"
+    return not is_readonly(call)
+
+
+def _resolve_hooks_path(call: GitCall, value: str) -> Optional[Path]:
+    """Resolve `core.hooksPath` as git does: absolute as-is, else relative to the common directory. None when the
+    common dir cannot be read (caller fails closed). An empty value is Path('')."""
+    if value == "":
+        return Path("")
+    p = Path(value)
+    if p.is_absolute():
+        return p
+    rc, out = _call_git(call, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    if rc != 0 or not out.strip():
+        return None
+    return Path(out.strip()) / p
+
+
+def _stubs_in_dir(hooks_dir: Path) -> bool:
+    """True when `hooks_dir` holds every ade-git-guard stub (`STUB_MARK` in the first 400 bytes of each)."""
+    for name in HOOK_NAMES:
+        try:
+            with open(hooks_dir / name, "r", encoding="utf-8", errors="replace") as f:
+                if STUB_MARK not in f.read(400):
+                    return False
+        except OSError:
+            return False
+    return True
+
+
+def _local_hooks_path_decision(call: GitCall, env: dict[str, str]) -> Optional[Decision]:
+    """§10 residual (2026-11-10): a repository whose local/worktree `core.hooksPath` is set and is not the ade stubs
+    directory never runs the claim hooks. Refuse `push` and ref-writing subcommands (`hooks-path`, exit 77). An
+    ade-stub hooksPath (the directory holds the installed stubs) stays allowed; unset local hooksPath is unchanged."""
+    if not _is_ref_write_or_push(call):
+        return None
+    state, scoped = _config_scopes(call, env)
+    if state != "set":
+        return None
+    local = [(s, v) for s, v in scoped if s in ("local", "worktree")]
+    if not local:
+        return None
+    scope, value = local[-1]          # worktree overrides local when both appear
+    resolved = _resolve_hooks_path(call, value)
+    if resolved is not None and value != "" and _stubs_in_dir(resolved):
+        return None
+    shown = _esc(value) if value != "" else "(empty)"
+    alt = ("unset core.hooksPath, point it at the ade-git-guard stubs directory, or ask the operator; without the "
+           "stubs, push and ref writes skip the claim guard")
+    return _closed("hooks-path",
+                   f"core.hooksPath is set ({scope} config, value `{shown}`) and is not the ade-git-guard stubs: {alt}")
+
+
 def evaluate(call: GitCall, env: Optional[dict[str, str]] = None, *, _depth: int = 0) -> Decision:
     """Decide one git call. Reads claims; asks real git (with the call's own config) for an alias or a branch's origin.
     Order: the fail-closed rules first (an option or subcommand the guard cannot read, hook-redirecting config, a push that
-    skips its hook), then the workspace rules, then the targets the hooks cannot see."""
+    skips its hook, a local/worktree hooksPath that is not the ade stubs on push/ref-write), then the workspace rules,
+    then the targets the hooks cannot see."""
     env = os.environ if env is None else env
     if not is_agent_env(env):
         return ALLOW
@@ -1754,7 +1827,8 @@ def evaluate(call: GitCall, env: Optional[dict[str, str]] = None, *, _depth: int
                                           "call with the plain global options (-C, -c, --git-dir, --work-tree ...)")
     unknown: Optional[Decision] = None
     if deny is None:
-        deny = _redirect_decision(call, env) or _push_decision(call)
+        deny = (_redirect_decision(call, env) or _push_decision(call)
+                or _local_hooks_path_decision(call, env))
         if deny is not None and deny.rule == "hook-config-unknown":
             # git could not answer a config question (a `-C` into a place that does not exist, a broken file): the call is
             # still refused, but a foreign claim its path names comes first, so the refusal names the owner (round 11)
@@ -2181,14 +2255,7 @@ def _stub_text(name: str) -> str:
 
 
 def _stubs_present(common: Path) -> bool:
-    for name in HOOK_NAMES:
-        try:
-            with open(common / "hooks" / name, "r", encoding="utf-8", errors="replace") as f:
-                if STUB_MARK not in f.read(400):
-                    return False
-        except OSError:
-            return False
-    return True
+    return _stubs_in_dir(common / "hooks")
 
 
 def _install_common(common: Path) -> tuple[int, list[str]]:

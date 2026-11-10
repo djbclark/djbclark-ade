@@ -155,8 +155,12 @@ Evaluated in order; the module docstring has every form.
    and **`core.hooksPath` set, to any value, an empty one included, in the command, global or system scope as git itself says**
    (`git config --null --show-scope --get-all core.hooksPath`, run through the real git with the call's own options and the
    caller's environment, 5 s timeout: `HOME`, `XDG_CONFIG_HOME`, `GIT_CONFIG_GLOBAL/SYSTEM`, `[include]`d files; exit 0 = set,
-   1 = unset) (`hook-config`). A repository's own (local or worktree) `hooksPath` is not refused: the repository chose it
-   (husky, pre-commit), the hooks do not run there, and `install` reports it (78). If git answers neither 0 nor 1 (timeout, a
+   1 = unset) (`hook-config`). A repository's own (local or worktree) `hooksPath` is not refused for ordinary calls: the
+   repository chose it (husky, pre-commit), the hooks do not run there, and `install` reports it (78). **When that local /
+   worktree `hooksPath` is set and is not the ade-git-guard stubs directory** (the directory holds the installed stubs;
+   `/dev/null`, empty, husky, and any other path count as non-ade), **`push` and ref-writing subcommands are refused**
+   (`hooks-path`, exit 77; §10 residual, 2026-11-10): without the stubs the claim hooks never run. An ade-stub
+   `hooksPath` stays allowed. If git answers neither 0 nor 1 (timeout, a
    config file it cannot parse) the call is refused with that reason (`hook-config-unknown`): **the shim fails closed, the
    hooks fail open**. **acp-run's own config pairs (2026-10-30; transitional until Wave 6 deletes `tools/acp-run`):** while
    `acp-run` still launches agents it puts two `GIT_CONFIG_PARAMETERS` entries in every agent's environment,
@@ -212,7 +216,8 @@ analyser (and the Claude PreToolUse hook it was for, W5).
 6. **Writes that never open a ref transaction (listed 2026-10-25, round 10):** editing `.git/packed-refs` or a loose ref file
    directly (no hook runs; the shim cannot see a file edit), `git replace` and `git notes` (they write `refs/replace/*` and
    `refs/notes/*`, which no claim names; `replace` changes what a commit LOOKS like without moving the branch; **left out on
-   purpose**, a claim protects a branch's tip, not the view of it), and a repository's own `core.hooksPath` (above).
+   purpose**, a claim protects a branch's tip, not the view of it). A repository's own non-ade `core.hooksPath` no longer
+   lets agents `push` or write refs through the shim (§10, closed 2026-11-10); other calls there stay allowed.
 7. Plumbing and maintenance stay the operator's call: `checkout-index`, `update-index`, `read-tree`, `fast-import`,
    `prune`/`repack`, `tag -f|-d` (claims name branches, not tags), `notes`, `replace`, `mv -f`, `add '*'`, and everything git
    itself spawns for the shim's rules (`bisect run`, `submodule foreach`, pagers, `!` aliases' children).
@@ -221,14 +226,19 @@ analyser (and the Claude PreToolUse hook it was for, W5).
    set on the command line or in the environment regardless; in a config FILE they are not judged (measured inert for the
    hooks directory, 2026-10-25).
 9. **A same-uid program impersonating the `pack-refs` parent** (see above).
-10. **A template directory or `core.hooksPath` that arrives by a route the shim does not see (round 11, 2026-10-25):** a human
-    sets `init.templateDir` in the repository's own config (or points a template at a repository the agent did not create);
-    an agent edits `.git/config` of its own repository by hand, or runs the real git by absolute path. The shim refuses the
-    agent's own `clone`/`init` template sources and `clone -c core.hooksPath=...` (above), but a repository whose LOCAL
-    `core.hooksPath` is set and not the ade stubs is still deliberately allowed, so `git push -f origin main:cb` there
-    passes both hooks. Reproduced before round 11 (d9b0583, 3fb69ba): shim `clone -q --config core.hooksPath=/dev/null <up> c2`,
-    then `push -f origin main:cb` in c2 moved the upstream branch. The durable rule, left to the operator: "an agent's call
-    lands in a repository whose local hooksPath is set and not the ade stubs: refuse `push` and ref-writing subcommands".
+10. **A template directory or `core.hooksPath` that arrives by a route the shim does not see (round 11, 2026-10-25;
+    local-hooksPath half closed 2026-11-10):** a human sets `init.templateDir` in the repository's own config (or points a
+    template at a repository the agent did not create); an agent edits `.git/config` of its own repository by hand, or runs
+    the real git by absolute path. The shim refuses the agent's own `clone`/`init` template sources and
+    `clone -c core.hooksPath=...` (above). Reproduced before round 11 (d9b0583, 3fb69ba): shim
+    `clone -q --config core.hooksPath=/dev/null <up> c2`, then `push -f origin main:cb` in c2 moved the upstream branch.
+    The durable rule now runs in the shim (`ade_claims.py` rule `hooks-path`, exit 77): when local/worktree
+    `core.hooksPath` is set and is not the ade-git-guard stubs directory (`/dev/null`, empty, husky, any other path),
+    refuse `push` and ref-writing subcommands (`update-ref`, non-read `branch`/`checkout`/`switch`/`commit`/`merge`/
+    `rebase`/`reset`/`stash`/`pull`/`symbolic-ref`/`worktree`, …). An ade-stub `hooksPath` (the directory holds the
+    installed stubs) stays allowed; ordinary non-ref-writing calls with a non-ade local `hooksPath` stay allowed.
+    Still out of reach by design: an absolute path to the real git (the hooks still would not run, and this shim never
+    sees the call), and a human shell.
 11. **Template sources the shim only reads for `clone`, `init`:** `submodule add|update` and `fetch|pull --recurse-submodules` also
     clone (and copy `GIT_TEMPLATE_DIR` / `init.templateDir` into) new repositories; not refused (round 11, open question).
 12. **The claim's repository identity is the repository's own `remote.origin.url`:** an agent that runs `git remote set-url origin

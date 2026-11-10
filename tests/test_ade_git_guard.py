@@ -1523,6 +1523,76 @@ def test_push_no_verify_and_every_no_v_prefix_is_refused_and_a_plain_push_is_not
     assert run(state, ["push", "--no-verify", "origin", "main"], repo).returncode == 0     # a human
 
 
+def _write_ade_stubs(hooks_dir: Path) -> Path:
+    """Install the ade-git-guard stubs into an arbitrary hooksPath directory (§10 allowed case)."""
+    hooks_dir.mkdir(parents=True, exist_ok=True)
+    for name in ade_claims.HOOK_NAMES:
+        dest = hooks_dir / name
+        dest.write_text(ade_claims._stub_text(name))
+        dest.chmod(0o755)
+    return hooks_dir
+
+
+@pytest.mark.parametrize("hooks_path", ["/dev/null", "/tmp/not-ade-hooks", ""], ids=["dev-null", "foreign-dir", "empty"])
+def test_local_non_ade_hooks_path_refuses_push_and_ref_writes(tmp_path, state, hooks_path):
+    """§10 residual: local core.hooksPath=/dev/null (or any non-ade path) lets push/ref-writes skip the claim hooks."""
+    repo = mk_repo(tmp_path, state)
+    bare = tmp_path / "o.git"
+    plain(state, ["init", "-q", "--bare", "-b", "main", str(bare)], tmp_path)
+    plain(state, ["remote", "add", "origin", str(bare)], repo)
+    if hooks_path == "":
+        plain(state, ["config", "core.hooksPath", ""], repo)   # empty value: git looks nowhere
+    else:
+        plain(state, ["config", "core.hooksPath", hooks_path], repo)
+    for argv in (["push", "origin", "main"], ["push", "-f", "origin", "main"],
+                 ["branch", "-f", "other", "main"], ["update-ref", "refs/heads/other", "HEAD"],
+                 ["commit", "--allow-empty", "-m", "x"], ["checkout", "-B", "nb"]):
+        r = run(state, argv, repo, who="B")
+        assert refused77(r) and "hooks-path" in r.stderr, (argv, r.returncode, r.stderr)
+    assert "main" not in plain(state, ["--git-dir", str(bare), "branch", "--list"], tmp_path)
+    # Ordinary non-ref-writing calls stay allowed (husky / pre-commit repos still work for status/add).
+    assert run(state, ["status", "--short"], repo, who="B").returncode == 0
+    assert run(state, ["add", "f"], repo, who="B").returncode == 0
+    assert run(state, ["branch", "--list"], repo, who="B").returncode == 0
+    assert run(state, ["stash", "list"], repo, who="B").returncode == 0
+    # A human shell is untouched.
+    assert run(state, ["push", "origin", "main"], repo).returncode == 0
+
+
+def test_local_ade_stub_hooks_path_allows_push_and_ref_writes(tmp_path, state):
+    """§10: when local hooksPath points at the ade stubs directory, the claim hooks still run — do not refuse."""
+    repo = mk_repo(tmp_path, state)
+    bare = tmp_path / "o.git"
+    plain(state, ["init", "-q", "--bare", "-b", "main", str(bare)], tmp_path)
+    plain(state, ["remote", "add", "origin", str(bare)], repo)
+    stubs = _write_ade_stubs(tmp_path / "ade-stubs")
+    plain(state, ["config", "core.hooksPath", str(stubs)], repo)
+    r = run(state, ["push", "origin", "main"], repo, who="B")
+    assert r.returncode == 0 and "hooks-path" not in r.stderr, r.stderr
+    assert "main" in plain(state, ["--git-dir", str(bare), "branch", "--list"], tmp_path)
+    r = run(state, ["branch", "extra"], repo, who="B")
+    assert r.returncode == 0 and "hooks-path" not in r.stderr, r.stderr
+    r = run(state, ["commit", "--allow-empty", "-m", "ok"], repo, who="B")
+    assert r.returncode == 0 and "hooks-path" not in r.stderr, r.stderr
+
+
+def test_relative_local_non_ade_hooks_path_refuses_push(tmp_path, state):
+    """hooksPath relative to the common dir that is not the stubs is refused the same as an absolute one."""
+    repo = mk_repo(tmp_path, state)
+    plain(state, ["config", "core.hooksPath", "custom-hooks"], repo)
+    (repo / ".git" / "custom-hooks").mkdir()
+    r = run(state, ["branch", "-f", "x", "main"], repo, who="B")
+    assert refused77(r) and "hooks-path" in r.stderr, r.stderr
+
+
+def test_operator_override_allows_hooks_path_refusal(tmp_path, state):
+    repo = mk_repo(tmp_path, state)
+    plain(state, ["config", "core.hooksPath", "/dev/null"], repo)
+    r = run(state, ["branch", "-f", "x", "main"], repo, who="B", ACP_OPERATOR_APPROVED="git-guard")
+    assert r.returncode == 0 and "ACP_OPERATOR_APPROVED=git-guard" in r.stderr
+    assert guard_log(state)[-1]["outcome"] == "override" and guard_log(state)[-1]["rule"] == "hooks-path"
+
+
 def test_the_operator_override_allows_a_fail_closed_refusal_and_logs_it(tmp_path, state):
     repo = mk_repo(tmp_path, state)
     r = run(state, ["frobnicate"], repo, who="B", ACP_OPERATOR_APPROVED="git-guard")
