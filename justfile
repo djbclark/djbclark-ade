@@ -17,8 +17,12 @@ install-doctor:
     "{{ root }}/bin/ade-install" doctor --root "{{ root }}"
 
 # Observe-only key presence via sudo-secretspec check (no values, no verify).
-keys:
-    "{{ root }}/bin/ade-install" keys --root "{{ root }}"
+keys *args:
+    "{{ root }}/bin/ade-install" keys --root "{{ root }}" {{ args }}
+
+# Alias for setup-plan S3b wording (`just keys --check`); keys is already observe-only.
+keys-check *args:
+    "{{ root }}/bin/ade-install" keys --root "{{ root }}" {{ args }}
 
 # Print-only install plan.
 install-plan:
@@ -60,6 +64,12 @@ update-check-install:
 # Never mutates GitHub settings (ade-harden observe only).
 harden-check-install:
     "{{ root }}/bin/ade-sched" --backend auto install "{{ root }}/config/launchd/com.djbclark.harden-check.plist" \
+        --set "__STATE__={{ env_var_or_default('HOME', '/tmp') }}/.local/state/ade"
+
+# Install the daily S3b keys-check job (Linux: systemd; Mac: launchd).
+# Observe-only: never prompts; never prints secret values.
+keys-check-install:
+    "{{ root }}/bin/ade-sched" --backend auto install "{{ root }}/config/launchd/com.djbclark.keys-check.plist" \
         --set "__STATE__={{ env_var_or_default('HOME', '/tmp') }}/.local/state/ade"
 
 # S4b: ADE-owned jobs inventory and live drift (report only; never unload).
