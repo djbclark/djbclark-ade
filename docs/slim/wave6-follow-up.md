@@ -67,34 +67,27 @@ shims.** Soft deadline for relay / dispatch / `acp-run` removal:
 - [#498](https://github.com/djbclark/djbclark-ade/pull/498) — scrub remaining LIVE_RE callers to zero (keep shims); inventory `callers_remaining=0`
 - LIVE_RE teaching refs outside the §A gate stay until the deletion PR; Mac still blocked
 
-## A. Remaining in-repo callers (must be gone or archived before delete)
+## A. In-repo callers (scrubbed on `#498`, 2026-11-10)
 
-Skills and tools that still teach or invoke the shims as **live** commands
-(grep on 2026-11-09; `docs/history/`, `docs/slim/reports/`, `docs/slim/briefs/`,
-`docs/handoffs/`, `docs/checkins/` are exempt from live refs).
-`wave6-delete-check` scans the paths in column 1:
+Gated §A LIVE_RE callers are **cleared**: `bin/wave6-delete-check --inventory`
+→ `callers_remaining=0` / `gate_exits.callers=0` on master after `#498`. The
+paths below are what the gate still scans; teaching refs outside this set
+(README, orchestration docs, slim history) stay until the deletion PR.
 
-| Path | Replace with / action |
+| Path | Status after `#498` |
 |---|---|
-| `skills/fan-out/SKILL.md` | native `paseo run` / `paseo wait` / `paseo send` (footer from orchestration-practices, not `acp-dispatch footer`) |
-| `skills/model-routing/SKILL.md` | drop legacy `acp-dispatch <agent> --model …` examples; `route_agent.py show` / `paseo run --provider …` only |
-| `skills/session-handoff/SKILL.md` | Paseo's `paseo-handoff` / `paseo send`; no absolute `relay.py` |
-| `skills/old-handoff-use-paseo-handoff/SKILL.md` | same; drop `acp-dispatch check` / slice wording |
-| `skills/oc-go-key/SKILL.md` | `paseo send`; drop `relay.py` absolute-path examples |
-| `skills/loose/SKILL.md` | **port** the upstream-issue reader off `acp-run --perm deny` (item 33); Paseo read-only / deny path |
-| `skills/baton/SKILL.md` | drop `acp-dispatch check` / `resume` / `reap` rearm instructions |
-| `skills/research/SKILL.md` | dispatch via `paseo run`; drop `acp-dispatch` examples |
-| `skills/dialogue/SKILL.md` | drop live `acp-run` kind alias as current; archive wording only |
-| `AGENTS.md` standing order 10 + "Two shims" machine-context bullet | remove the "until 2026-11-20" shim sentence when the files are gone |
-| `bin/load-watch`, `bin/deadline`, `bin/instruction-lint`, `bin/ade_claims.py` | argv / process matching must not treat `acp-run` or `acp-dispatch` as a live agent class; keep negative tests that prove retired names are **not** counted |
+| `skills/fan-out/SKILL.md` | native `paseo` teaching; completion-notice kept |
+| `skills/model-routing/SKILL.md` | `route_agent.py` / `paseo run` only |
+| `skills/session-handoff/SKILL.md` | `paseo-handoff` / `paseo send` |
+| `skills/old-handoff-use-paseo-handoff/SKILL.md` | no live `acp-dispatch` / `relay.py` |
+| `skills/oc-go-key/SKILL.md` | `paseo send` |
+| `skills/loose/SKILL.md` | Claude CLI `-p` reader (no `acp-run --perm deny`) |
+| `skills/baton/SKILL.md` | no live `acp-dispatch check/resume/reap` |
+| `skills/research/SKILL.md` | `paseo run` dispatch teaching |
+| `skills/dialogue/SKILL.md` | archive wording only for `acp-run` |
+| `bin/deadline`, `bin/load-watch`, `bin/instruction-lint`, `bin/ade_claims.py` | not counted as live agent class; negative tests keep retired names out |
 
-Fixture strings in `tests/test_load_watch_*.py` that **name** `acp-run` as a
-negative example may stay when the assertion is "do not treat this as a live
-agent".
-
-Open Wave 6 caller-rewrite PRs (base `master` or stacked tips) cover parts of
-this table; the deletion PR waits until `wave6-delete-check` reports
-`callers_skills` and `callers_loose` green.
+Deletion still waits on Mac live + C3 evidence (§B/§C), not on this table.
 
 ## B. Mac live-cycle proof commands (paste into the deletion PR)
 
