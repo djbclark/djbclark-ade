@@ -1,0 +1,536 @@
+#!/usr/bin/env python3
+"""verifycmd — ADE-native verify-until-pass: register an argv acceptance command and run it under deadline.
+
+    verifycmd register --agent-id ID --workspace DIR [--cwd DIR] [--owner ID]
+                       [--budget DUR] [--max-attempts N] -- ARGV...
+    verifycmd status [--agent-id ID] [--json]
+    verifycmd clear [--agent-id ID]
+    verifycmd rearm [--agent-id ID]          # armed again after passed/failed (attempt kept)
+    verifycmd run-once [--agent-id ID]       # one attempt under deadline (+ optional bg)
+    verifycmd run-until-pass [--agent-id ID] # up to max_attempts (nudge stubbed between fails)
+    verifycmd handoff --from ID --to ID      # stub: re-key record (attempt preserved)
+    verifycmd handoff --from ID --clear      # stub: drop predecessor's record
+
+State: ~/.local/state/ade/verifycmd/<agent_id>.json (VERIFYCMD_STATE_DIR overrides). Atomic rewrite
+(temp beside, os.replace); fields read with .get. argv is an argv list, never a shell string.
+
+Exit (docs/ade-verifycmd.md §C): 0 passed; 1 failed attempt, attempts remain; 2 refused (no
+record, bad argv, cwd outside workspace, terminal state without re-arm); 4 exhausted; 75 machine
+too hot (bg / load-watch; attempt not consumed); 124 deadline killed the verify process (attempt
+consumed). status/clear/register/rearm/handoff: 0 ok, 2 refused/usage.
+
+Design 2026-11-10 (PR tip of #455). MVP: no goal-mode, no live Stop hook, handoff re-key/clear only.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+DEFAULT_BUDGET = "20m"
+DEFAULT_MAX_ATTEMPTS = 3
+MAX_ATTEMPTS_CEILING = 3
+BUDGET_CEILING_S = 60 * 60  # 1h harness clamp
+NEST_BUDGET_S = 120  # under DEADLINE_NAME, skip a second deadline when budget < ~2 min
+STATES_TERMINAL = frozenset({"passed", "failed"})
+SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._@:-]{0,199}$")
+
+
+# ---------- duration (same shape as bin/deadline) ----------
+
+def parse_dur(text: str | float | int) -> float:
+    s = str(text).strip().lower()
+    if re.fullmatch(r"\d+(\.\d+)?", s):
+        return float(s)
+    parts = re.findall(r"(\d+(?:\.\d+)?)([smhd])", s)
+    if not parts or "".join(a + b for a, b in parts) != s.replace(" ", ""):
+        raise ValueError(f"bad duration {text!r} (use 90, 90s, 5m, 2h, 1h30m)")
+    return sum(float(a) * {"s": 1, "m": 60, "h": 3600, "d": 86400}[u] for a, u in parts)
+
+
+def clamp_budget(text: str) -> str:
+    """Keep the operator string when under the ceiling; otherwise rewrite as seconds."""
+    secs = parse_dur(text)
+    if secs <= 0:
+        raise ValueError("budget must be positive")
+    if secs > BUDGET_CEILING_S:
+        return f"{int(BUDGET_CEILING_S)}s"
+    return str(text).strip()
+
+
+# ---------- state ----------
+
+def state_dir() -> Path:
+    raw = os.environ.get("VERIFYCMD_STATE_DIR")
+    if raw:
+        return Path(raw).expanduser()
+    return Path.home() / ".local" / "state" / "ade" / "verifycmd"
+
+
+def record_path(agent_id: str) -> Path:
+    return state_dir() / f"{agent_id}.json"
+
+
+def atomic_write_json(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = json.dumps(data, indent=2, sort_keys=True) + "\n"
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def load_record(agent_id: str) -> dict | None:
+    path = record_path(agent_id)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def save_record(rec: dict) -> None:
+    agent_id = str(rec.get("agent_id") or "")
+    if not agent_id or not SAFE_ID_RE.match(agent_id):
+        raise ValueError(f"bad agent_id {agent_id!r}")
+    atomic_write_json(record_path(agent_id), rec)
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def die(msg: str, rc: int = 2) -> int:
+    print(f"verifycmd: {msg}", file=sys.stderr)
+    return rc
+
+
+def require_agent_id(raw: str | None) -> str | None:
+    agent_id = (raw or os.environ.get("PASEO_AGENT_ID") or "").strip()
+    if not agent_id:
+        return None
+    if not SAFE_ID_RE.match(agent_id):
+        return None
+    return agent_id
+
+
+def resolve_under(workspace: Path, cwd: Path) -> Path | None:
+    """Resolve cwd; None when it escapes workspace (symlink-aware via resolve)."""
+    try:
+        ws = workspace.resolve()
+        cur = cwd.resolve()
+    except OSError:
+        return None
+    try:
+        cur.relative_to(ws)
+    except ValueError:
+        return None
+    return cur
+
+
+# ---------- runners ----------
+
+def deadline_bin() -> str | None:
+    path = os.environ.get("DEADLINE_BIN") or str(HERE / "deadline")
+    return path if os.access(path, os.X_OK) or Path(path).is_file() else None
+
+
+def bg_bin() -> str | None:
+    """Optional site-djbclark `bg`. VERIFYCMD_BG overrides; VERIFYCMD_NO_BG=1 disables."""
+    if os.environ.get("VERIFYCMD_NO_BG") in ("1", "true", "yes"):
+        return None
+    override = os.environ.get("VERIFYCMD_BG")
+    if override:
+        return override if os.access(override, os.X_OK) or Path(override).is_file() else None
+    found = shutil.which("bg")
+    if not found:
+        return None
+    # refuse the shell builtin path illusions: need a real executable file
+    try:
+        if not Path(found).is_file():
+            return None
+    except OSError:
+        return None
+    return found
+
+
+def log_path_for(agent_id: str, attempt: int) -> Path:
+    return state_dir() / "logs" / f"{agent_id}-{attempt}.log"
+
+
+def run_argv(argv: list[str], cwd: Path, budget: str, owner: str, agent_id: str, attempt: int) -> tuple[int, Path]:
+    """Run argv under deadline (+ bg when available). Returns (rc, log_path)."""
+    log = log_path_for(agent_id, attempt)
+    log.parent.mkdir(parents=True, exist_ok=True)
+    inner = list(argv)
+    bg = bg_bin()
+    if bg:
+        inner = [bg, *inner]
+
+    env = {**os.environ}
+    # Drop empty DEADLINE_NAME so a nested verify can still register when needed.
+    if env.get("DEADLINE_NAME") == "":
+        env.pop("DEADLINE_NAME", None)
+
+    budget_s = parse_dur(budget)
+    nested = "DEADLINE_NAME" in env
+    use_own_deadline = (not nested) or (budget_s >= NEST_BUDGET_S)
+    dbin = deadline_bin()
+
+    if use_own_deadline and dbin:
+        name = f"verifycmd-{agent_id}-{attempt}"
+        name = re.sub(r"[^A-Za-z0-9._-]", "-", name)[:100]
+        cmd = [dbin, "run", "--budget", budget, "--owner", owner or "-", "--name", name,
+               "--on-expire", "kill", "--", *inner]
+        if nested:
+            # Long nested verify gets its own record; drop the outer name so deadline run accepts it.
+            env = {k: v for k, v in env.items() if k != "DEADLINE_NAME"}
+    else:
+        cmd = inner
+        if nested and dbin:
+            # Short verify under an outer deadline: beat the outer record, then run argv.
+            try:
+                subprocess.run([dbin, "beat", env["DEADLINE_NAME"]], check=False,
+                               capture_output=True, text=True, env=env, timeout=15)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+
+    with log.open("w", encoding="utf-8") as fh:
+        fh.write(f"# verifycmd attempt={attempt} cwd={cwd}\n# cmd={shlex.join(cmd)}\n")
+        fh.flush()
+        try:
+            proc = subprocess.run(cmd, cwd=str(cwd), env=env, stdout=fh, stderr=subprocess.STDOUT)
+            rc = proc.returncode
+        except OSError as e:
+            fh.write(f"\n# spawn failed: {e}\n")
+            rc = 127
+    if rc < 0:
+        rc = 128 - rc
+    return rc, log
+
+
+def apply_result(rec: dict, rc: int, log: Path) -> tuple[dict, int]:
+    """Update record from a finished verify process. Returns (rec, runner_exit)."""
+    rec = dict(rec)
+    rec["last_rc"] = rc
+    rec["last_log"] = str(log)
+    rec["updated_at"] = utc_now()
+
+    if rc == 75:
+        # load hot: attempt not consumed
+        save_record(rec)
+        return rec, 75
+
+    attempt = int(rec.get("attempt") or 0) + 1
+    max_attempts = int(rec.get("max_attempts") or DEFAULT_MAX_ATTEMPTS)
+    rec["attempt"] = attempt
+
+    if rc == 0:
+        rec["state"] = "passed"
+        save_record(rec)
+        return rec, 0
+
+    if attempt >= max_attempts:
+        rec["state"] = "failed"
+        save_record(rec)
+        return rec, 4
+
+    rec["state"] = "armed"
+    save_record(rec)
+    if rc == 124:
+        return rec, 124
+    return rec, 1
+
+
+# ---------- commands ----------
+
+def cmd_register(a: argparse.Namespace) -> int:
+    agent_id = require_agent_id(a.agent_id)
+    if not agent_id:
+        return die("register needs --agent-id or $PASEO_AGENT_ID (safe id chars only)")
+    argv = list(a.argv or [])
+    if argv[:1] == ["--"]:
+        argv = argv[1:]
+    if not argv:
+        return die("register needs a non-empty argv after --")
+    if any(not isinstance(x, str) or x == "" for x in argv):
+        return die("argv entries must be non-empty strings")
+
+    try:
+        workspace = Path(a.workspace).expanduser()
+        if not workspace.is_absolute():
+            return die("workspace must be an absolute path")
+        workspace = workspace.resolve()
+    except OSError as e:
+        return die(f"workspace: {e}")
+    if not workspace.is_dir():
+        return die(f"workspace is not a directory: {workspace}")
+
+    cwd_raw = a.cwd or str(workspace)
+    try:
+        cwd = Path(cwd_raw).expanduser()
+        if not cwd.is_absolute():
+            return die("cwd must be an absolute path")
+    except OSError as e:
+        return die(f"cwd: {e}")
+    cwd_res = resolve_under(workspace, cwd)
+    if cwd_res is None:
+        return die(f"cwd {cwd} is outside workspace {workspace} (or unresolvable)")
+    if not cwd_res.is_dir():
+        return die(f"cwd is not a directory: {cwd_res}")
+
+    try:
+        budget = clamp_budget(a.budget or DEFAULT_BUDGET)
+    except ValueError as e:
+        return die(str(e))
+
+    max_attempts = a.max_attempts if a.max_attempts is not None else DEFAULT_MAX_ATTEMPTS
+    if max_attempts < 1:
+        return die("max_attempts must be >= 1")
+    if max_attempts > MAX_ATTEMPTS_CEILING:
+        max_attempts = MAX_ATTEMPTS_CEILING
+
+    owner = (a.owner or agent_id).strip()
+    if not SAFE_ID_RE.match(owner):
+        return die("owner has unsafe characters")
+
+    prev = load_record(agent_id) or {}
+    rec = {
+        "version": 1,
+        "agent_id": agent_id,
+        "workspace": str(workspace),
+        "argv": argv,
+        "cwd": str(cwd_res),
+        "max_attempts": max_attempts,
+        "attempt": 0,
+        "budget": budget,
+        "owner": owner,
+        "created_at": prev.get("created_at") or utc_now(),
+        "updated_at": utc_now(),
+        "last_rc": None,
+        "last_log": None,
+        "state": "armed",
+    }
+    save_record(rec)
+    print(json.dumps({"ok": True, "agent_id": agent_id, "state": "armed", "argv": argv,
+                      "cwd": str(cwd_res), "max_attempts": max_attempts, "budget": budget}))
+    return 0
+
+
+def cmd_status(a: argparse.Namespace) -> int:
+    agent_id = require_agent_id(a.agent_id)
+    if not agent_id:
+        return die("status needs --agent-id or $PASEO_AGENT_ID")
+    rec = load_record(agent_id)
+    if not rec:
+        return die(f"no verifycmd record for {agent_id}")
+    if a.json:
+        print(json.dumps(rec, indent=2, sort_keys=True))
+    else:
+        print(f"agent_id={rec.get('agent_id')} state={rec.get('state')} "
+              f"attempt={rec.get('attempt')}/{rec.get('max_attempts')} "
+              f"last_rc={rec.get('last_rc')} argv={shlex.join(rec.get('argv') or [])}")
+    return 0
+
+
+def cmd_clear(a: argparse.Namespace) -> int:
+    agent_id = require_agent_id(a.agent_id)
+    if not agent_id:
+        return die("clear needs --agent-id or $PASEO_AGENT_ID")
+    path = record_path(agent_id)
+    if not path.exists():
+        return die(f"no verifycmd record for {agent_id}")
+    path.unlink()
+    print(json.dumps({"ok": True, "cleared": agent_id}))
+    return 0
+
+
+def cmd_rearm(a: argparse.Namespace) -> int:
+    agent_id = require_agent_id(a.agent_id)
+    if not agent_id:
+        return die("rearm needs --agent-id or $PASEO_AGENT_ID")
+    rec = load_record(agent_id)
+    if not rec:
+        return die(f"no verifycmd record for {agent_id}")
+    if not rec.get("argv"):
+        return die("record has empty argv; register again")
+    rec = dict(rec)
+    rec["state"] = "armed"
+    if a.reset_attempts:
+        rec["attempt"] = 0
+    rec["updated_at"] = utc_now()
+    save_record(rec)
+    print(json.dumps({"ok": True, "agent_id": agent_id, "state": "armed",
+                      "attempt": rec.get("attempt")}))
+    return 0
+
+
+def cmd_run_once(a: argparse.Namespace) -> int:
+    agent_id = require_agent_id(a.agent_id)
+    if not agent_id:
+        return die("run-once needs --agent-id or $PASEO_AGENT_ID")
+    rec = load_record(agent_id)
+    if not rec:
+        return die(f"no verifycmd record for {agent_id}")
+    state = rec.get("state") or "armed"
+    if state in STATES_TERMINAL:
+        return die(f"record is {state}; rearm or clear first")
+    if state != "armed":
+        return die(f"record state {state!r} is not runnable")
+
+    argv = rec.get("argv")
+    if not isinstance(argv, list) or not argv or any(not isinstance(x, str) or not x for x in argv):
+        return die("record argv is missing or invalid")
+    workspace = Path(str(rec.get("workspace") or ""))
+    cwd = Path(str(rec.get("cwd") or ""))
+    if not workspace.is_absolute() or not cwd.is_absolute():
+        return die("record workspace/cwd must be absolute")
+    cwd_res = resolve_under(workspace, cwd)
+    if cwd_res is None:
+        return die(f"cwd {cwd} is outside workspace {workspace}")
+    try:
+        budget = clamp_budget(str(rec.get("budget") or DEFAULT_BUDGET))
+    except ValueError as e:
+        return die(str(e))
+    owner = str(rec.get("owner") or agent_id)
+    next_attempt = int(rec.get("attempt") or 0) + 1  # log name uses the attempt about to run
+
+    rc, log = run_argv(argv, cwd_res, budget, owner, agent_id, next_attempt)
+    rec, out = apply_result(rec, rc, log)
+    print(json.dumps({
+        "agent_id": agent_id,
+        "state": rec.get("state"),
+        "attempt": rec.get("attempt"),
+        "max_attempts": rec.get("max_attempts"),
+        "cmd_rc": rc,
+        "runner_rc": out,
+        "log": str(log),
+    }))
+    return out
+
+
+def cmd_run_until_pass(a: argparse.Namespace) -> int:
+    agent_id = require_agent_id(a.agent_id)
+    if not agent_id:
+        return die("run-until-pass needs --agent-id or $PASEO_AGENT_ID")
+    # Loop run-once; nudge is stubbed (print only). Stop on 0/2/4/75.
+    while True:
+        rc = cmd_run_once(a)
+        if rc in (0, 2, 4, 75):
+            return rc
+        # 1 or 124: attempts remain — stub nudge, then retry
+        print(f"verifycmd: nudge stub (agent {agent_id}): verifyCmd failed rc={rc}; "
+              f"fix and end the turn (auto-nudge not installed in MVP)", file=sys.stderr)
+        if a.once_per_fail:
+            return rc
+
+
+def cmd_handoff(a: argparse.Namespace) -> int:
+    """Stub of docs/ade-verifycmd.md §D2: re-key or clear. No Stop-hook / workspace-only lookup."""
+    src = require_agent_id(a.from_id)
+    if not src:
+        return die("handoff needs --from <agent_id>")
+    rec = load_record(src)
+    if a.clear:
+        if not rec:
+            return die(f"no verifycmd record for {src}")
+        record_path(src).unlink(missing_ok=True)
+        print(json.dumps({"ok": True, "cleared": src, "handoff": "clear"}))
+        return 0
+    dst = require_agent_id(a.to_id)
+    if not dst:
+        return die("handoff needs --to <agent_id> (or --clear)")
+    if not rec:
+        return die(f"no verifycmd record for {src}")
+    if dst == src:
+        return die("handoff --to must differ from --from")
+    if load_record(dst) is not None and not a.force:
+        return die(f"successor {dst} already has a record; pass --force to replace")
+    new = dict(rec)
+    new["agent_id"] = dst
+    new["owner"] = dst if rec.get("owner") == src else rec.get("owner")
+    new["updated_at"] = utc_now()
+    new["handoff_from"] = src
+    save_record(new)
+    record_path(src).unlink(missing_ok=True)
+    print(json.dumps({"ok": True, "from": src, "to": dst, "attempt": new.get("attempt"),
+                      "state": new.get("state"), "handoff": "rekey"}))
+    return 0
+
+
+# ---------- CLI ----------
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="verifycmd", description=__doc__.split("\n\n")[0])
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    r = sub.add_parser("register", help="arm an argv acceptance command for an agent")
+    r.add_argument("--agent-id")
+    r.add_argument("--workspace", required=True)
+    r.add_argument("--cwd")
+    r.add_argument("--owner")
+    r.add_argument("--budget", default=DEFAULT_BUDGET)
+    r.add_argument("--max-attempts", type=int, default=DEFAULT_MAX_ATTEMPTS)
+    r.add_argument("argv", nargs=argparse.REMAINDER)
+    r.set_defaults(func=cmd_register)
+
+    s = sub.add_parser("status", help="show the record")
+    s.add_argument("--agent-id")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_status)
+
+    c = sub.add_parser("clear", help="delete the record")
+    c.add_argument("--agent-id")
+    c.set_defaults(func=cmd_clear)
+
+    ra = sub.add_parser("rearm", help="set state=armed after passed/failed")
+    ra.add_argument("--agent-id")
+    ra.add_argument("--reset-attempts", action="store_true")
+    ra.set_defaults(func=cmd_rearm)
+
+    o = sub.add_parser("run-once", aliases=["run"], help="one verify attempt under deadline")
+    o.add_argument("--agent-id")
+    o.set_defaults(func=cmd_run_once)
+
+    u = sub.add_parser("run-until-pass", help="retry until pass/exhausted (nudge stubbed)")
+    u.add_argument("--agent-id")
+    u.add_argument("--once-per-fail", action="store_true",
+                   help="return after the first failed attempt (tests / interactive Wait)")
+    u.set_defaults(func=cmd_run_until_pass)
+
+    h = sub.add_parser("handoff", help="stub: re-key or clear a predecessor's record")
+    h.add_argument("--from", dest="from_id", required=True)
+    h.add_argument("--to", dest="to_id")
+    h.add_argument("--clear", action="store_true")
+    h.add_argument("--force", action="store_true")
+    h.set_defaults(func=cmd_handoff)
+
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    p = build_parser()
+    a = p.parse_args(argv)
+    return int(a.func(a))
+
+
+if __name__ == "__main__":
+    sys.exit(main())

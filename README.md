@@ -170,6 +170,7 @@ Skills (23, from each `skills/*/SKILL.md`):
 | [`review-pr`](bin/review-pr) | The local Claude review of a PR's exact head (docs/code-review.md rule 11), through bin/review-launch. |
 | [`route_agent.py`](bin/route_agent.py) | Pick which vendor should run a piece of work, from capability and headroom. |
 | [`skill-everywhere`](bin/skill-everywhere) | Make a shared skill visible to every agent TUI on this machine by symlinking it into each TUI's user-level skills dir. |
+| [`verifycmd`](bin/verifycmd) | ADE-native verify-until-pass: register an argv acceptance command and run it under deadline. |
 | [`wait-file`](bin/wait-file) | Block until a file the waited-on command writes is ready, with a hard timeout. |
 | [`wave6-delete-check`](bin/wave6-delete-check) | Refuse Wave 6 shim deletion until gates pass; `--dry-run` / `--inventory` never invent Mac live (2026-11-10). |
 | [`wave6-mac-proof-capture`](bin/wave6-mac-proof-capture) | Mac --live / Linux-safe proof harness for wave6-delete-check (never invents Mac live; 2026-11-10). |
