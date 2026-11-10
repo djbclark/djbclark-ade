@@ -482,6 +482,22 @@
           }
         }
       }
+    },
+    "context_budget": {
+      "type": "object",
+      "description": "Legacy context-budget.toml dirs/budget; numeric leaves and directory overrides are additionally validated by ade_config.",
+      "properties": {
+        "dirs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "budget": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": false
     }
   }
 }
