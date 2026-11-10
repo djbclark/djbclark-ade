@@ -51,29 +51,40 @@ Execute the three read-only probes:
 ~/src/djbclark-ade/bin/load-watch incidents -n 3
 ```
 
-### Step 2: Evaluate whether load or churn is abnormal
+### Step 2: Evaluate whether load, memory, or churn is abnormal
 
 Investigate further (Step 3) **only** if one of these is true:
-1. The 1-minute load per core is $> 2.5$ (`admit` reports `hot`) **and** the 5- or 15-minute average agrees.
-2. `status` reports a sustained hot streak (`hot for N/300 s`).
-3. Compressor churn is sustained above the alert line ($50\text{k}$ pages/s, from `admit --json`).
-4. An incident is listed in `incidents -n 3` without an `ack`.
+1. `admit --json` reports `"status": "hot"` or lists any `refused` gates (e.g. `load`, `compressor`, `free_mem`, `pageins`, or `memory_unreadable`).
+2. The 1-minute load per core is $> 2.5$ **and** the 5- or 15-minute average agrees.
+3. `status` reports a sustained hot streak (`hot for N/300 s`).
+4. Compressor churn is sustained above the alert line ($50\text{k}$ pages/s, from `admit --json`).
+5. An incident is listed in `incidents -n 3` without an `ack`.
 
 **If none of the above are true:**
 Report a concise 1-line status summary and stop immediately:
-> "System is calm: load is normal (<per-core> per core), compressor churn is <churn> pages/s, and no unacknowledged incidents are open."
+> "System is calm: admission gate passed, load is normal (<per-core> per core), compressor churn is <churn> pages/s, and no unacknowledged incidents are open."
 
 ### Step 3: Deep inspection (only if abnormal)
 
-If load or churn is genuinely abnormal:
+If load, memory, or churn is genuinely abnormal:
 1. Inspect top CPU consumers:
-   ```sh
-   /bin/ps -axo pid,ppid,%cpu,state,etime,command -r | head -15
-   ```
+   - On macOS:
+     ```sh
+     /bin/ps -axo pid,ppid,%cpu,state,etime,command -r | head -15
+     ```
+   - On Linux:
+     ```sh
+     ps -eo pid,ppid,%cpu,stat,etime,args --sort=-%cpu | head -15
+     ```
 2. Inspect top memory consumers:
-   ```sh
-   /bin/ps -axo pid,rss,command -m | head -10
-   ```
+   - On macOS:
+     ```sh
+     /bin/ps -axo pid,rss,command -m | head -10
+     ```
+   - On Linux:
+     ```sh
+     ps -eo pid,rss,args --sort=-rss | head -10
+     ```
 3. Map heavy processes to their Paseo agents or background jobs by working directory:
    ```sh
    paseo ls -g --background --json
