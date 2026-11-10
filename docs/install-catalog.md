@@ -210,7 +210,11 @@ path (systemd user units + `jobs.json` ownership ledger; dry-run default;
 `--yes` writes; never unloads foreign/unknown or root/`--system`). See
 `docs/scheduling.md`.
 
-## G. Next units
+## G. J6 Paseo plugins (catalog only, 2026-11-10)
+
+Offered `paseo-plugin-*` rows re-landed from stranded #354 (session-guard, baton, asks, questions-please, tell-agent, vitals, skills, and siblings). Install/probe argv stay UNKNOWN until Mac live `paseo plugin ls` (order 11). Doctor observes presence only.
+
+## H. Next units
 
 Ownership-aware reconcile beyond the install ledger (setup-plan S3), remaining
 owner installers (curl-free Cursor CLI fetch, Hermes offered path — basic setup
