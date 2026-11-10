@@ -1,6 +1,6 @@
 # CI notes (Tests workflow)
 
-Snapshot **2026-11-09** (measured on `pytest-linux` for PR #324 / run 42653623753 and the follow-up green run 42654543342).
+Snapshot **2026-11-10** (pytest-linux timing still from PR #324 / runs 42653623753 and 42654543342; fold `--check` added to `context-policy`).
 
 ## A. What runs
 
@@ -8,7 +8,7 @@ Snapshot **2026-11-09** (measured on `pytest-linux` for PR #324 / run 4265362375
 |---|---|---|
 | `pytest-linux` | Every PR/push unless `workflow_dispatch` sets `context_only` | Full `pytest tests/ -q` on `ubuntu-latest` (required for merges) |
 | `pytest` (macOS) | Manual `workflow_dispatch` with `macos: true` only | Same suite on `macos-latest` |
-| `context-policy` | Every PR/push | Focused Go/context/instruction-lint + `ade-roster --check` (~15 s) |
+| `context-policy` | Every PR/push | Focused Go/context/instruction-lint + `ade-roster --check` + `ade-config fold --check` (~15 s) |
 | `adversary-marker` | Separate workflow | Required merge gate; do not weaken |
 
 ## B. Why `pytest-linux` is ~11 minutes

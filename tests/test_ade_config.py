@@ -174,6 +174,22 @@ def test_fold_write_check_cli(home, tmp_path):
     assert drifted.returncode == 1
 
 
+def test_this_checkouts_ade_toml_passes_fold_check(home):
+    """Same check CI's context-policy job runs (secret_deny/pr_policy/install drift)."""
+    r = _run_cli("fold", "--check", "--root", str(REPO), home=home)
+    assert r.returncode == 0, r.stderr + " (run ade-config fold --write)"
+
+
+def test_ci_context_policy_runs_ade_config_fold_check():
+    """Scout B3: Tests workflow must keep fold --check in context-policy."""
+    wf = (REPO / ".github" / "workflows" / "test.yml").read_text()
+    assert "context-policy:" in wf
+    # Keep it on the fast always-on job, not only behind the full-suite gate.
+    ctx = wf[wf.index("context-policy:") :]
+    assert "ade-config fold --check" in ctx
+    assert "ade-roster --check" in ctx
+
+
 def test_local_override_preserves_sibling_lead_leaves(home):
     import tomllib
 

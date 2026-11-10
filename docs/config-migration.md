@@ -25,6 +25,10 @@ repo base; legacy split TOMLs remain for fallthrough when it is absent.
 `config/install.toml` under `[install]` (component/key/login). `ade-install`
 prefers the folded catalog and falls through to transitional `install.toml` when
 `ade.toml` is absent or lacks `[install]`.
+**2026-11-10 (stacked, scout B3):** CI's `context-policy` job runs
+`ade-config fold --check` so a PR that edits a legacy mirror
+(`secret-deny.toml` / `pr-policy.toml` / `install.toml`, or any other folded
+domain) without regenerating `config/ade.toml` fails before merge.
 
 ## A. Mapping table (one explicit projection)
 
@@ -102,9 +106,10 @@ B9. **`PR_POLICY_TOML`**: isolated legacy-format override for `[pr_policy]`.
 B10. **Tracked `config/ade.toml`** (2026-11-09; install 2026-11-10): committed by
     `ade-config fold --write` from the legacy domain files (including
     `config/install.toml` → `[install]`). `ade-config fold --check` asserts the file
-    still matches that fold while both the unified file and the legacy mirrors are kept.
-    Prefer `ade-config set --target repo` for scalar edits (writes `ade.toml` when
-    present). The fold emitter writes nested section tables for
+    still matches that fold while both the unified file and the legacy mirrors are kept
+    (CI: `.github/workflows/test.yml` `context-policy`, 2026-11-10). Prefer
+    `ade-config set --target repo` for scalar edits (writes `ade.toml` when present).
+    The fold emitter writes nested section tables for
     gates/pr_policy/context_budget/secret_deny (e.g. `[gates.frontier]`,
     `[pr_policy.github]`), matching the prior split TOML shape, so scalar set can edit
     those leaves; routing-domain tables may still use compact inline nests, and flat
@@ -185,8 +190,9 @@ tree in tests; tests must not write the real HOME config or flip live lead flags
 `ade-config fold` projects `config/install.toml` under `[install]`. `ade-install`
 (`docs/install-catalog.md`) prefers that folded catalog when present and falls through
 to transitional `config/install.toml` when `ade.toml` is absent or lacks `[install]`.
-`fold --check` keeps the mirror aligned while both files are kept; there is no second
-permanent editable authority once the unified file carries install/keys.
+`fold --check` keeps the mirror aligned while both files are kept (and CI runs it on
+every PR); there is no second permanent editable authority once the unified file
+carries install/keys.
 
 ## E. Provenance
 
