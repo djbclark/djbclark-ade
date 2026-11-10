@@ -1874,13 +1874,29 @@ def apply_sched_reconcile(
             "category": "sched",
         } for name in sorted(want)], 0)
 
+    # Implicit checkout (ade=None): Job.from_* refuses linked worktrees. Passing
+    # ade=catalog.root would opt out of that guard (CLI --ade semantics) and let a
+    # full apply from a task worktree pin persistent timers at a path deleted after merge.
+    if not dry_run and sched.is_linked_worktree(catalog.root):
+        return ([{
+            "id": name,
+            "action": "blocked",
+            "reason": (
+                f"catalog root {catalog.root} is a linked git worktree; refuse scheduling "
+                f"persistent jobs from an ephemeral checkout (use the primary ADE checkout "
+                f"or ade-sched install --ade <persistent-path>)"
+            ),
+            "ok": False,
+            "category": "sched",
+        } for name in sorted(want)], 1)
+
     results, rc = sched.reconcile(
         catalog.jobs,
         catalog.retired_jobs,
         dry_run=dry_run,
         backend=backend,
         root=catalog.root,
-        ade=catalog.root,
+        ade=None,
         env=env,
         state_dir=state_dir or sched.jobs_state_dir(env),
         names=want,

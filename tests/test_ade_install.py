@@ -1505,3 +1505,65 @@ def test_apply_sched_reconcile_skips_non_write_backend(monkeypatch, tmp_path):
     assert rows and rows[0]["action"] == "skip-reconcile-backend"
     assert rows[0]["ok"] is True
 
+
+def test_apply_sched_reconcile_refuses_linked_worktree_root(monkeypatch, tmp_path):
+    """Full apply must not pin timers at an ephemeral linked worktree (Codex P1 on #516)."""
+    import ade_sched as sched
+
+    class B:
+        name = "systemd"
+
+    monkeypatch.setattr(sched, "detect", lambda *_a, **_k: B())
+    monkeypatch.setattr(sched, "RECONCILE_WRITE_BACKEND", "systemd", raising=False)
+    monkeypatch.setattr(sched, "RECONCILE_WRITE_BACKENDS", frozenset({"systemd"}), raising=False)
+    monkeypatch.setattr(sched, "is_linked_worktree", lambda _p: True)
+    called: list[dict] = []
+
+    def fake_reconcile(*_a, **kwargs):
+        called.append(kwargs)
+        return [], 0
+
+    monkeypatch.setattr(sched, "reconcile", fake_reconcile)
+    root = _fixture_root(tmp_path)
+    (root / "config" / "install.toml").write_text(
+        (REPO / "config" / "install.toml").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    catalog = ai.load_catalog(root=root)
+    rows, rc = ai.apply_sched_reconcile(catalog, dry_run=False, names={"keys-check"})
+    assert rc == 1
+    assert not called
+    assert rows and rows[0]["action"] == "blocked"
+    assert "worktree" in rows[0]["reason"]
+    assert rows[0]["ok"] is False
+
+
+def test_apply_sched_reconcile_passes_implicit_ade(monkeypatch, tmp_path):
+    """ade=None keeps Job.from_* worktree refuse; ade=root would bypass it."""
+    import ade_sched as sched
+
+    class B:
+        name = "systemd"
+
+    monkeypatch.setattr(sched, "detect", lambda *_a, **_k: B())
+    monkeypatch.setattr(sched, "RECONCILE_WRITE_BACKEND", "systemd", raising=False)
+    monkeypatch.setattr(sched, "RECONCILE_WRITE_BACKENDS", frozenset({"systemd"}), raising=False)
+    monkeypatch.setattr(sched, "is_linked_worktree", lambda _p: False)
+    seen: list[object] = []
+
+    def fake_reconcile(*_a, **kwargs):
+        seen.append(kwargs.get("ade"))
+        return [{"name": "keys-check", "action": "unchanged", "ok": True}], 0
+
+    monkeypatch.setattr(sched, "reconcile", fake_reconcile)
+    root = _fixture_root(tmp_path)
+    (root / "config" / "install.toml").write_text(
+        (REPO / "config" / "install.toml").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    catalog = ai.load_catalog(root=root)
+    rows, rc = ai.apply_sched_reconcile(catalog, dry_run=False, names={"keys-check"})
+    assert rc == 0
+    assert seen == [None]
+    assert rows and rows[0]["id"] == "keys-check"
+
