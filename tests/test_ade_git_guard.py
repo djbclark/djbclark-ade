@@ -834,6 +834,8 @@ def test_format_patch_value_long_does_not_fake_dash_o(tmp_path, state):
     Attack (measured 2026-11-10): from a claimed workspace,
     `git -c format.outputDirectory=<peer> format-patch -1 --reroll-count -o .` is allowed by a parser
     that only skips the next token for `--output` / `--output-directory`, then writes into the peer.
+    Same for git 2.56 `--commit-list-format` / `--range-diff-notes` (OPT_STRING / required-value
+    callback in builtin/log.c): omitting them from `_FORMAT_PATCH_VALUE_LONG` reopens the bypass.
     """
     a, b = two_claimed(tmp_path, state)
     before = (a / "f").read_text()
@@ -841,6 +843,7 @@ def test_format_patch_value_long_does_not_fake_dash_o(tmp_path, state):
         "--reroll-count", "--suffix", "--subject-prefix", "--to", "--cc",
         "--add-header", "--signature", "--in-reply-to", "--description-file",
         "--range-diff",
+        "--commit-list-format", "--range-diff-notes",
     ):
         r = run(
             state,
@@ -856,6 +859,11 @@ def test_format_patch_value_long_does_not_fake_dash_o(tmp_path, state):
     r = run(state, ["format-patch", "-1", "--reroll-count=1", "-o", str(a)], b, who="B")
     assert refused77(r) and "output-file" in r.stderr, r.stderr
     assert not list(a.glob("*.patch"))
+    # Equals form for the 2.56 longs: following `-o` is a real output directory too.
+    for opt in ("--commit-list-format=modern", "--range-diff-notes=refs/notes/commits"):
+        r = run(state, ["format-patch", "-1", opt, "-o", str(a)], b, who="B")
+        assert refused77(r) and "output-file" in r.stderr, (opt, r.stderr)
+        assert not list(a.glob("*.patch")), opt
 
 
 def test_format_patch_git_config_env_does_not_hide_repo_output_directory(tmp_path, state):

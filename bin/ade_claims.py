@@ -1556,6 +1556,11 @@ _FORMAT_PATCH_VALUE_LONG = frozenset({
     "cover-from-description", "description-file", "subject-prefix",
     "add-header", "to", "cc", "in-reply-to", "signature", "base",
     "signature-file", "interdiff", "range-diff", "creation-factor",
+    # git 2.56 / current builtin/log.c (measured 2026-11-10 residual): OPT_STRING /
+    # required-value callback; omitting them lets `--commit-list-format -o .` (and
+    # `--range-diff-notes -o .`) fake an in-claim `-o` while git still writes into
+    # format.outputDirectory.
+    "commit-list-format", "range-diff-notes",
     # inherited diff options whose long form always takes a value (kin of -I/-O and kin)
     "ignore-matching-lines", "order-file", "src-prefix", "dst-prefix",
     "inter-hunk-context", "find-object", "diff-filter",
