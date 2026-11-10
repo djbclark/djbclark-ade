@@ -60,7 +60,7 @@ hint (`just harden <option> --repos …`) — the hint does **not** run apply.
 | Default token / PR approve block | `…/actions/permissions/workflow` |
 | Merge-gate ruleset (when enabled) | `GET …/rulesets` by name; enforcement / bypass when present |
 | Interaction limits | `GET /user/interaction-limits` (limit + expiry floor); **never PUT** |
-| Inventory | owner repos without `[[hardening.repo]]`; forks noted as covered by `[hardening.forks]` |
+| Inventory | authenticated `GET /user/repos?affiliation=owner` (login owner) or `GET /orgs/{owner}/repos?type=all` (includes private); uncovered non-forks lack `[[hardening.repo]]`; forks noted as covered by `[hardening.forks]` |
 
 Deferred in this unit: Forgejo, S5a gate canary, issue `collaborators_only`
 REST read-back (no field yet — S7), deep probe of every unlisted fork,

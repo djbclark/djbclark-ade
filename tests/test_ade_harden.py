@@ -159,6 +159,11 @@ def _ok_repo_payload(**overrides: object) -> dict:
     return base
 
 
+def _is_gh_user_login(argv: list[str]) -> bool:
+    """True for ``gh api … user`` (authenticated login), not user/repos."""
+    return len(argv) >= 2 and argv[-1] == "user"
+
+
 def test_observe_network_clean_with_fake_runner(tmp_path):
     root = _fixture_root(tmp_path)
     cfg = ah.load_config(root=root)
@@ -207,7 +212,11 @@ def test_observe_network_clean_with_fake_runner(tmp_path):
                 + "\n",
                 stderr="",
             )
-        if "users/djbclark/repos" in joined:
+        if _is_gh_user_login(argv):
+            return subprocess.CompletedProcess(
+                argv, 0, stdout='{"login":"djbclark"}\n', stderr=""
+            )
+        if "user/repos" in joined and "affiliation=owner" in joined:
             # Only the configured repo → no uncovered.
             return subprocess.CompletedProcess(
                 argv,
@@ -275,7 +284,11 @@ def test_observe_reports_pr_policy_drift(tmp_path):
             )
         if "interaction-limits" in joined:
             return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
-        if "users/djbclark/repos" in joined:
+        if _is_gh_user_login(argv):
+            return subprocess.CompletedProcess(
+                argv, 0, stdout='{"login":"djbclark"}\n', stderr=""
+            )
+        if "user/repos" in joined and "affiliation=owner" in joined:
             return subprocess.CompletedProcess(argv, 0, stdout="\n", stderr="")
         return subprocess.CompletedProcess(argv, 1, stdout="", stderr="unexpected\n")
 
@@ -345,7 +358,11 @@ def test_observe_interaction_limit_expiry_drift_no_reapply(tmp_path):
                 stdout='[{"id":1,"name":"merge-gate","enforcement":"active","bypass_actors":[]}]\n',
                 stderr="",
             )
-        if "users/djbclark/repos" in joined:
+        if _is_gh_user_login(argv):
+            return subprocess.CompletedProcess(
+                argv, 0, stdout='{"login":"djbclark"}\n', stderr=""
+            )
+        if "user/repos" in joined and "affiliation=owner" in joined:
             return subprocess.CompletedProcess(
                 argv,
                 0,
@@ -375,7 +392,11 @@ def test_observe_uncovered_non_fork_inventory(tmp_path):
 
     def runner(argv: list[str]) -> subprocess.CompletedProcess:
         joined = " ".join(argv)
-        if "users/djbclark/repos" in joined:
+        if _is_gh_user_login(argv):
+            return subprocess.CompletedProcess(
+                argv, 0, stdout='{"login":"djbclark"}\n', stderr=""
+            )
+        if "user/repos" in joined and "affiliation=owner" in joined:
             return subprocess.CompletedProcess(
                 argv,
                 0,
@@ -447,3 +468,95 @@ def test_ade_toml_dual_source_refused(tmp_path):
     (root / "config" / "ade.toml").write_text("schema_version = 1\n")
     with pytest.raises(ah.HardenError, match="ade.toml"):
         ah.load_config(root=root)
+
+
+def test_gh_json_prefers_complete_pretty_json_over_ndjson():
+    """Pretty-printed multiline JSON must parse as one document (Codex P1)."""
+    payload = {"limit": "collaborators_only", "expires_at": "2099-01-01T00:00:00Z"}
+
+    def runner(argv: list[str]) -> subprocess.CompletedProcess:
+        assert argv[0] == "gh"
+        return subprocess.CompletedProcess(
+            argv, 0, stdout=json.dumps(payload, indent=2) + "\n", stderr=""
+        )
+
+    data, detail = ah._gh_json(
+        runner, ["api", "user/interaction-limits"], api_version="2026-03-10"
+    )
+    assert detail == "ok"
+    assert data == payload
+
+
+def test_gh_json_ndjson_fallback_after_complete_fails():
+    lines = (
+        '{"full_name":"djbclark/a","fork":false,"name":"a","owner":"djbclark"}\n'
+        '{"full_name":"djbclark/b","fork":true,"name":"b","owner":"djbclark"}\n'
+    )
+
+    def runner(argv: list[str]) -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess(argv, 0, stdout=lines, stderr="")
+
+    data, detail = ah._gh_json(
+        runner,
+        ["api", "--paginate", "user/repos?affiliation=owner&per_page=100"],
+        api_version="2026-03-10",
+    )
+    assert detail == "ok"
+    assert isinstance(data, list)
+    assert len(data) == 2
+    assert data[0]["full_name"] == "djbclark/a"
+
+
+def test_inventory_repos_path_user_vs_org():
+    assert (
+        ah._inventory_repos_path("djbclark", "djbclark")
+        == "user/repos?affiliation=owner&per_page=100"
+    )
+    assert (
+        ah._inventory_repos_path("FRDminc", "djbclark")
+        == "orgs/FRDminc/repos?type=all&per_page=100"
+    )
+
+
+def test_observe_inventory_uses_org_endpoint_for_non_login_owner(tmp_path):
+    root = _fixture_root(
+        tmp_path,
+        toml="""
+schema_version = 1
+[hardening]
+owners = ["frdminc"]
+check_user_interaction_limits = false
+[hardening.defaults]
+pr_creation_policy = "collaborators_only"
+[hardening.forks]
+pr_creation_policy = "disabled"
+""",
+    )
+    cfg = ah.load_config(root=root)
+    seen: list[str] = []
+
+    def runner(argv: list[str]) -> subprocess.CompletedProcess:
+        joined = " ".join(argv)
+        seen.append(joined)
+        if _is_gh_user_login(argv):
+            return subprocess.CompletedProcess(
+                argv, 0, stdout='{"login":"djbclark"}\n', stderr=""
+            )
+        if "orgs/frdminc/repos" in joined and "type=all" in joined:
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout=(
+                    '{"full_name":"frdminc/secret","fork":false,'
+                    '"name":"secret","owner":"frdminc"}\n'
+                ),
+                stderr="",
+            )
+        return subprocess.CompletedProcess(argv, 1, stdout="", stderr="unexpected\n")
+
+    findings = ah.observe_inventory(cfg, runner=runner)
+    assert any("orgs/frdminc/repos" in s for s in seen)
+    assert not any("users/frdminc/repos" in s for s in seen)
+    unc = next(f for f in findings if f.setting == "inventory.uncovered")
+    assert unc.status == "uncovered"
+    assert "frdminc/secret" in unc.found

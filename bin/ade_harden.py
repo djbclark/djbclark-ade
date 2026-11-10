@@ -11,6 +11,7 @@ import json
 import re
 import shutil
 import subprocess
+import urllib.parse
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -334,8 +335,13 @@ def _gh_json(
     text = (proc.stdout or "").strip()
     if not text:
         return None, "empty gh stdout"
-    # NDJSON from `gh api --paginate --jq` (one JSON value per line).
-    if "\n" in text and not text.lstrip().startswith("["):
+    # Prefer a complete JSON document (array/object, including pretty-printed
+    # multiline). Fall back to NDJSON from `gh api --paginate --jq`.
+    try:
+        return json.loads(text), "ok"
+    except json.JSONDecodeError as complete_err:
+        if "\n" not in text:
+            return None, f"gh JSON: {complete_err}"
         rows: list[Any] = []
         for line in text.splitlines():
             line = line.strip()
@@ -345,11 +351,9 @@ def _gh_json(
                 rows.append(json.loads(line))
             except json.JSONDecodeError as e:
                 return None, f"gh NDJSON: {e}"
+        if not rows:
+            return None, f"gh JSON: {complete_err}"
         return rows, "ok"
-    try:
-        return json.loads(text), "ok"
-    except json.JSONDecodeError as e:
-        return None, f"gh JSON: {e}"
 
 
 def _cmp(
@@ -939,6 +943,35 @@ def observe_interaction_limits(
     return findings
 
 
+def _gh_login(runner: Runner, *, api_version: str) -> tuple[str | None, str]:
+    """Authenticated GitHub login (for private-inclusive inventory paths)."""
+    data, detail = _gh_json(
+        runner,
+        ["api", "user"],
+        api_version=api_version,
+    )
+    if data is None:
+        return None, detail
+    if isinstance(data, dict):
+        login = str(data.get("login") or "").strip()
+        if login:
+            return login, "ok"
+        return None, "gh user: missing login"
+    return None, "gh user: expected object"
+
+
+def _inventory_repos_path(owner: str, login: str) -> str:
+    """Authenticated inventory path (private repos included), matching pr-policy.
+
+    Personal owner → ``/user/repos?affiliation=owner`` (not public-only
+    ``/users/{owner}/repos``). Other owners → ``/orgs/{owner}/repos?type=all``.
+    """
+    if owner.lower() == login.lower():
+        return "user/repos?affiliation=owner&per_page=100"
+    quoted = urllib.parse.quote(owner, safe="")
+    return f"orgs/{quoted}/repos?type=all&per_page=100"
+
+
 def observe_inventory(
     cfg: HardenConfig,
     *,
@@ -948,7 +981,8 @@ def observe_inventory(
 
     Forks without a row are covered by [hardening.forks] (status ok/covered note).
     Non-forks without a row are uncovered (drift). Does not deep-probe unlisted
-    repos in this unit.
+    repos in this unit. Uses authenticated user/org endpoints so private repos
+    appear in the inventory (Argon E1.1 / pr-policy).
     """
     if not cfg.owners:
         return [
@@ -963,13 +997,26 @@ def observe_inventory(
         ]
     listed = {f"{r['owner']}/{r['name']}" for r in cfg.repos}
     findings: list[DriftFinding] = []
+    login, login_detail = _gh_login(runner, api_version=cfg.api_version)
+    if login is None:
+        return [
+            DriftFinding(
+                target="inventory",
+                setting="owners",
+                wanted="authenticated login",
+                found=None,
+                status="unknown",
+                detail=login_detail,
+            )
+        ]
     for owner in cfg.owners:
+        path = _inventory_repos_path(owner, login)
         data, detail = _gh_json(
             runner,
             [
                 "api",
                 "--paginate",
-                f"users/{owner}/repos?type=owner&per_page=100",
+                path,
                 "--jq",
                 ".[] | select(.archived|not) | {full_name,fork,name,owner:.owner.login}",
             ],
@@ -990,11 +1037,18 @@ def observe_inventory(
         rows = data if isinstance(data, list) else [data]
         uncovered: list[str] = []
         fork_covered: list[str] = []
+        owner_l = owner.lower()
         for row in rows:
             if not isinstance(row, dict):
                 continue
+            row_owner = str(row.get("owner") or "").lower()
+            if row_owner and row_owner != owner_l:
+                continue
             full = str(row.get("full_name") or "")
             if not full or full in listed:
+                continue
+            # full_name owner segment must match too (defense in depth).
+            if "/" in full and full.split("/", 1)[0].lower() != owner_l:
                 continue
             if row.get("fork"):
                 fork_covered.append(full)
