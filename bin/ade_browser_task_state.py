@@ -73,6 +73,10 @@ def _digest(rendered: tasks.Rendered) -> str:
     return hashlib.sha256(((rendered.url or "") + "\n" + rendered.text).encode()).hexdigest()
 
 
+def _finite_time(value: Any) -> bool:
+    return not isinstance(value, bool) and isinstance(value, (int, float)) and math.isfinite(value)
+
+
 def _read(path: Path, name: str) -> dict[str, Any]:
     try:
         record = json.loads(path.read_text(encoding="utf-8"))
@@ -89,7 +93,7 @@ def _read(path: Path, name: str) -> dict[str, Any]:
         tasks.validate_owner_repo(value, kind=key)
     for key in ("created_at", "deadline_at"):
         value = record.get(key)
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        if not _finite_time(value):
             raise tasks.BrowserTaskError("invalid task timestamps")
     if record["deadline_at"] <= record["created_at"]:
         raise tasks.BrowserTaskError("invalid task deadline")
@@ -146,6 +150,8 @@ def track(
         if path.exists():
             raise tasks.BrowserTaskError("task name already exists; choose a new name (records are never retargeted)")
         now = clock()
+        if not _finite_time(now) or not _finite_time(now + seconds) or now + seconds <= now:
+            raise tasks.BrowserTaskError("clock anomaly: creation time is not finite")
         record = {"schema_version": 1, "name": name, "task_id": task_id,
                   "owner": owner, "repo": repo, "root": str(root),
                   "template_sha256": _digest(rendered), "created_at": now,
@@ -201,7 +207,10 @@ def verify(
         record = _read(path, name)
         if record["state"] == "completed":
             return {**record, "status": "completed", "completed": True}, 0
-        if record["state"] == "expired" or clock() >= record["deadline_at"]:
+        checked_at = clock()
+        if not _finite_time(checked_at) or checked_at < record["created_at"]:
+            raise tasks.BrowserTaskError("clock anomaly: verification time is invalid or before creation")
+        if record["state"] == "expired" or checked_at >= record["deadline_at"]:
             record["state"] = "expired"
             _write(path, record)
             return {**record, "status": "expired", "completed": False}, 1
@@ -236,11 +245,15 @@ def verify(
             else:
                 observation["reason"] = "api-unreadable"
         observed_at = clock()
-        observation["observed_at"] = observed_at
+        valid_clock = _finite_time(observed_at) and observed_at >= checked_at
+        if valid_clock:
+            observation["observed_at"] = observed_at
+        else:
+            observation.update(status="unknown", reason="clock-anomaly")
         record["observation"] = observation
-        if observed_at >= record["deadline_at"]:
+        if valid_clock and observed_at >= record["deadline_at"]:
             record["state"] = "expired"
-        elif matches and observed_at >= record["created_at"]:
+        elif matches and valid_clock:
             record["state"] = "completed"
             record["completed_at"] = observed_at
             record["deadline_cleanup"] = "not-attempted-unconfirmed-registration"

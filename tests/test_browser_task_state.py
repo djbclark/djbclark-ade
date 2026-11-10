@@ -167,6 +167,17 @@ def test_expired_record_does_not_execute_api(layout):
     assert rc == 1 and payload["status"] == "expired"
 
 
+@pytest.mark.parametrize("observed_at", [999, 1019, float("nan"), float("inf"), True])
+def test_invalid_or_backwards_clock_never_writes_unreadable_completion(layout, observed_at):
+    tracked(layout)
+    clock = iter([1020, observed_at])
+    runner = Mock(side_effect=[result(proof())])
+    payload, rc = state.verify("restrict-prs", directory=layout[1], runner=runner, clock=lambda: next(clock))
+    assert rc == 1 and not payload["completed"] and payload["state"] == "pending"
+    assert payload["observation"]["reason"] == "clock-anomaly" and runner.call_count == 1
+    assert state.status("restrict-prs", directory=layout[1], clock=lambda: 1020)["state"] == "pending"
+
+
 def test_changed_template_or_config_does_not_retarget_record(layout):
     tracked(layout)
     root, directory = layout
