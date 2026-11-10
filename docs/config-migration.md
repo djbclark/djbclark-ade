@@ -4,9 +4,12 @@ First bounded S1/S2 unit: effective config loader (`bin/ade_config.py`),
 CLI (`bin/ade-config check|get|diff|set`), checked-in JSON Schema (`config/ade.schema.json`),
 and thin `just config-check`. Comment-preserving atomic `set` landed 2026-11-08.
 **2026-11-09:** `bin/ade_gates.load_frontier` adopts `ade_config.load_effective` (legacy
-`gates.toml` / `GATES_TOML` when `ade.toml` is absent). `bin/route_agent.py` still reads
-`routing.toml` directly; its adoption is a later unit. Do not ship tracked `config/ade.toml`
-yet (`ade-install` refuses while it is present).
+`gates.toml` / `GATES_TOML` when `ade.toml` is absent). **2026-11-10:** runtime
+initialization and default reload in `bin/route_agent.py` also adopt `load_effective`.
+The final overlaid routing domain passes the legacy reader's shape/default checks
+before becoming routing constants. No new routes or policy values ship with this
+adoption. Do not ship tracked `config/ade.toml` yet (`ade-install` refuses while it
+is present).
 
 ## A. Mapping table (one explicit projection)
 
@@ -62,6 +65,17 @@ B7. This unit does **not** ship an automatically adopted `config/ade.toml`. An e
 B8. **`MODEL_TIERS_TOML`** (2026-11-09): isolated override for `[model_tiers]`. Missing or
     unreadable files fall back to `model_tiers.DEFAULTS` (today's table), same fail-safe as
     `ade_gates`. `bin/ade-model-tiers` is the writer; `ade-config set` does not edit tiers.
+B9. **Runtime routing adoption (2026-11-10).** `route_agent.load_effective_policy`
+    selects only the routing domain from the effective tree and validates it after
+    all overlays, including required tables/service fields, service key names,
+    pool shape, substrate lifeline and lead keys/efforts. Default module initialization
+    and `reload_policy()` use it. `load_policy(path)` and `reload_policy(path)` retain
+    their isolated legacy-format behavior and do not read unified/local config.
+    `policy` JSON adds `provenance` with the routing base and optional unified/local
+    paths; Markdown names a loaded local override too. Model-tier resolution remains
+    on the existing `model_tiers` reader; this unit does not adopt effective
+    model-tier overlays. Frontier gate clamping, quota/acceptance checks and
+    estimate floors/caps are unchanged.
 
 ## C. CLI
 
@@ -103,11 +117,14 @@ arrays, inline tables, multiline strings, `[[service]]` paths and other unsuppor
 assignment forms are refused clearly. Unrelated complex TOML (including
 `[[service]]` arrays) is preserved byte-for-byte outside the value span.
 
-**Recording vs adoption.** Every successful `set` reports `adoption=recorded-only`:
-the choice is stored in TOML, but `route_agent` / `ade_gates` still read their
-legacy paths directly and have not adopted the effective-config reader. A local
-set is therefore not yet a live routing switch for those consumers. check/get/diff
-keep their no-write / no-auth / no-network contract.
+**Recording vs adoption (2026-11-10).** Every successful `set` still reports
+`adoption=recorded-only`: this is the writer's conservative status, not proof that
+a running consumer reloaded. `route_agent` adopts the routing domain on its next
+initialization or default `reload_policy()`; `ade_gates.load_frontier` already
+reads the effective gates domain. Existing processes do not hot-reload routing
+constants on a `set`. Other consumers, including model-tier resolution, retain
+their own paths until separately adopted. check/get/diff keep their no-write /
+no-auth / no-network contract.
 
 Python **3.11+** is required for standard-library `tomllib`; bootstrap is a later unit.
 
@@ -116,8 +133,10 @@ check/get/diff validate raw new/local inputs and the effective tree against
 `type`, `const`, `required`, `properties`, `additionalProperties`, `items` and
 `minLength` assertions; unsupported schema keywords fail closed. Gate and floor
 names/specs are closed maps, with finite numeric gate values (booleans rejected).
-Routing tables retain the declared open object shape; this is not consumer adoption
-or new validation of every routing leaf. Selected legacy routing retains its own
+Routing tables retain the declared open object shape; config check/get/diff do not
+replace consumer validation of every routing leaf. The runtime router applies
+the pure legacy shape/default contract to the final overlaid routing domain.
+Selected legacy routing retains its own
 reader's required keys, pool/lead/substrate validation and defaults. `set` applies
 the same schema (local/unified) or the legacy routing/gates source constraints to
 the file it edits.

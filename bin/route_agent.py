@@ -130,6 +130,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import ade_gates  # noqa: E402  (the frontier gate: config/gates.toml [frontier], docs/gates.md)
+import ade_config  # noqa: E402  (versioned config and isolated legacy routing override)
 import model_tiers as _model_tiers  # noqa: E402  (config/model-tiers.toml roles → ids)
 
 DEFAULT_SNAPSHOT = Path.home() / ".cache" / "aiuse" / "snapshots" / "latest.json"
@@ -138,7 +139,7 @@ STALE_HARD = 6 * 3600      # beyond this, treat headroom as unknown
 STALE_SOFT = 25 * 60       # aiuse's own `fresh` threshold; older = re-collect before a wave
 
 # KINDS, BURN_FIRST_* and the curated SERVICES rows are
-# loaded from config/routing.toml (see load_policy / apply_policy below).
+# loaded from effective config (see load_policy / load_effective_policy / apply_policy below).
 
 
 @dataclass(frozen=True)
@@ -274,8 +275,7 @@ def plenty_remaining(info: dict[str, Any] | None) -> float | None:
     return remaining
 
 
-# Policy file: env ROUTING_POLICY, else <repo>/config/routing.toml (same
-# resolution style as GATES_TOML in bin/ade_gates.py).
+# Legacy policy path for explicit reads. Runtime initialization uses load_effective_policy.
 def resolve_policy_path() -> Path:
     return Path(os.environ.get("ROUTING_POLICY") or
                 (Path(__file__).resolve().parent.parent / "config" / "routing.toml"))
@@ -283,6 +283,7 @@ def resolve_policy_path() -> Path:
 
 POLICY_PATH = resolve_policy_path()
 POLICY: dict[str, Any] = {}
+POLICY_PROVENANCE: dict[str, Any] = {}
 SERVICE_KEYS = {f.name for f in fields(Service)}
 _SERVICE_REQUIRED = ("name", "cli", "good_at", "billing")
 # The orchestrating session's own model, [lead] in the policy file (2026-10-23).  LEAD_KEYS are
@@ -478,11 +479,36 @@ def apply_policy(data: dict[str, Any]) -> None:
     LEAD_FABLE_ALLOWED = (data.get("lead") or {}).get("fable_lead", False) is True
 
 
+def load_effective_policy(
+    *, root: Path | None = None, home: Path | None = None,
+    environ: dict[str, str] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Read the runtime routing domain, validating the final overlaid policy.
+
+    The effective schema deliberately leaves routing leaves open. Apply the
+    pure legacy reader's shape/default contract after all overlays as well;
+    importing this reader never imports live routing back through ade_config.
+    Explicit load_policy(path) remains an isolated legacy-format file read.
+    """
+    effective = ade_config.load_effective(root=root, home=home, environ=environ)
+    data = ade_config.project_routing_domain(effective.data)
+    source = Path(effective.provenance["routing_source"])
+    ade_config.validate_legacy_routing_shape(data, source)
+    provenance = {key: effective.provenance[key]
+                  for key in ("routing_source", "new_config", "local_config")}
+    return data, provenance
+
+
 def reload_policy(path: Path | str | None = None) -> dict[str, Any]:
-    """Re-read ROUTING_POLICY (or `path`) and re-apply. Used by tests."""
-    global POLICY_PATH
-    POLICY_PATH = Path(path) if path is not None else resolve_policy_path()
-    data = load_policy(POLICY_PATH)
+    """Reload effective runtime config, or only the explicit legacy `path`."""
+    global POLICY_PATH, POLICY_PROVENANCE
+    if path is None:
+        data, provenance = load_effective_policy()
+    else:
+        data = load_policy(path)
+        provenance = {"routing_source": str(path), "new_config": None, "local_config": None}
+    POLICY_PATH = Path(provenance["routing_source"])
+    POLICY_PROVENANCE = provenance
     apply_policy(data)
     return data
 
@@ -505,6 +531,7 @@ def policy_public() -> dict[str, Any]:
         }
     return {
         "path": str(POLICY_PATH),
+        "provenance": dict(POLICY_PROVENANCE),
         "frontier_gate": frontier_gate(),
         "routing": {
             "kinds": list(KINDS),
@@ -551,8 +578,10 @@ def policy_public() -> dict[str, Any]:
 
 def policy_markdown() -> str:
     """Markdown tables: services × kinds (rank, model), gates, caps."""
-    lines = ["# Routing policy", "", f"Source: `{POLICY_PATH}`", "",
-             "## Services × kinds", ""]
+    lines = ["# Routing policy", "", f"Source: `{POLICY_PATH}`", ""]
+    if POLICY_PROVENANCE.get("local_config"):
+        lines += [f"Local override: `{POLICY_PROVENANCE['local_config']}`", ""]
+    lines += ["## Services × kinds", ""]
     header = "| service | " + " | ".join(KINDS) + " |"
     sep = "|---|" + "|".join("---" for _ in KINDS) + "|"
     lines += [header, sep]
@@ -615,7 +644,7 @@ def policy_markdown() -> str:
     return "\n".join(lines) + "\n"
 
 
-apply_policy(load_policy(POLICY_PATH))
+reload_policy()
 
 
 # -- quota snapshot + service discovery ----------------------------------

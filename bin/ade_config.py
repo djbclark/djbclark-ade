@@ -3,9 +3,9 @@
 Builds one effective tree from optional ``config/ade.toml``, legacy
 ``config/routing.toml`` + ``config/gates.toml`` + ``config/model-tiers.toml``,
 and optional ``~/.config/djbclark-ade/local.toml``. Does not write files,
-resolve secrets, or switch existing readers (``route_agent`` / ``ade_gates``
-stay on their paths for routing/gates; ``model_tiers`` is also read directly
-by ``route_agent``).
+resolve secrets, or initialize live routing. ``route_agent`` and ``ade_gates``
+consume this tree for routing/gates; ``model_tiers`` is still read directly by
+``route_agent`` for model resolution.
 
 Public:
   load_effective(...) -> EffectiveConfig
