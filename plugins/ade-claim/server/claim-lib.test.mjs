@@ -210,6 +210,20 @@ test("mergeAdeClaimIdEnv adds ADE_CLAIM_ID or no-ops when already set", () => {
   assert.equal(mergeAdeClaimIdEnv({}, null), undefined);
 });
 
+test("mergeAdeClaimIdEnv clears foreign ADE_CLAIM_ID when claimId is null", () => {
+  assert.deepEqual(
+    mergeAdeClaimIdEnv({ FOO: "1", ADE_CLAIM_ID: "foreign-claim" }, null),
+    { FOO: "1" },
+  );
+  assert.deepEqual(
+    mergeOpenBeforeEnv({ ADE_CLAIM_ID: "foreign-claim", PATH: "/usr/bin" }, {
+      claimId: null,
+      agentBinDir: "/opt/ade/libexec/agent-bin",
+    }),
+    { PATH: "/opt/ade/libexec/agent-bin:/usr/bin" },
+  );
+});
+
 test("buildAdeClaimsBindOwnerArgv maps owner bind fields", () => {
   const built = buildAdeClaimsBindOwnerArgv({
     adeClaimsScript: "/opt/ade/bin/ade_claims.py",

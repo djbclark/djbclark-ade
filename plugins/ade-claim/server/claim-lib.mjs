@@ -15,8 +15,8 @@
  */
 
 import { randomBytes } from "node:crypto";
-import { accessSync, constants } from "node:fs";
-import { dirname, join } from "node:path";
+import { accessSync, constants, realpathSync } from "node:fs";
+import { dirname, join, resolve as pathResolve } from "node:path";
 
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
@@ -177,9 +177,18 @@ export function parseWorkspaceArchivePayload(workspace) {
   return /** @type {WorkspaceArchivePayload} */ ({ id, cwd });
 }
 
-/** @param {string} path */
+/**
+ * Canonicalize for registry comparisons. ade_claims.py stores Path(...).resolve();
+ * trailing-slash trim alone misses macOS /var → /private/var and other symlinks.
+ * @param {string} path
+ */
 function normalizePath(path) {
-  return path.replace(/\/+$/, "") || "/";
+  const trimmed = path.replace(/\/+$/, "") || "/";
+  try {
+    return realpathSync(trimmed).replace(/\/+$/, "") || "/";
+  } catch {
+    return pathResolve(trimmed).replace(/\/+$/, "") || "/";
+  }
 }
 
 /**
@@ -205,7 +214,7 @@ export function normalizeClaimRecord(raw) {
 }
 
 /**
- * Pick the active claim whose path matches cwd (string equality after trailing-slash trim).
+ * Pick the active claim whose path matches cwd (canonical path equality after resolve).
  * Live hooks may also resolve via the worktree pointer; this is the list --json path.
  *
  * @param {unknown} claims
@@ -306,11 +315,17 @@ export function parseClaimPointer(text) {
  * @returns {Record<string, string> | undefined}
  */
 export function mergeAdeClaimIdEnv(env, claimId) {
-  if (!claimId) return undefined;
+  const base = env && typeof env === "object" ? { ...env } : {};
+  if (!claimId) {
+    // P1: foreign/unverified ADE_CLAIM_ID must not survive open.before when lookup
+    // or ownership validation leaves claimId null (null must mean clear, not no-op).
+    if (!Object.prototype.hasOwnProperty.call(base, "ADE_CLAIM_ID")) return undefined;
+    delete base.ADE_CLAIM_ID;
+    return base;
+  }
   if (typeof claimId !== "string" || !ID_RE.test(claimId)) {
     throw new Error(`ADE_CLAIM_ID must be a valid claim id, got ${JSON.stringify(claimId)}`);
   }
-  const base = env && typeof env === "object" ? { ...env } : {};
   if (base.ADE_CLAIM_ID === claimId) return undefined;
   return { ...base, ADE_CLAIM_ID: claimId };
 }
