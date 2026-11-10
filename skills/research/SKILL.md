@@ -37,6 +37,7 @@ Run folder `research/<slug>/` under the current directory:
 | `report.md`, `review.md` | the deliverable and the reviewer's flags |
 
 Checker: `python3 -I scripts/research_check.py <sub> research/<slug>`
+(2026-11-09) `claims` is namespace-aware across sibling runs under the same parent: bare `[E####]` resolves when that id is unique in a sibling's `evidence.jsonl`; prefer `[slug/E####]` / `[slug:E####]`.
 (stdlib only; `fetch`, `quotes`, `numbers`, `refs`, `gate`, `claims`, `all`).
 
 ## Tiers (hard caps; no recursive spawning)

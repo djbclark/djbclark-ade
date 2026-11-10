@@ -6,12 +6,12 @@
                                                        (EZproxy-style prefix) a paywalled page is retried via the proxy;
                                                        prints the HTTP status and final URL of every hop
     research_check.py quotes <run> [--no-update]        every quote occurs in its saved source
-    research_check.py numbers <run>                     every number in report.md occurs in some quote
+    research_check.py numbers <run>                     every number in report.md occurs in a local or cited-sibling quote
     research_check.py refs   <run>                      DOI / arXiv / PMID resolve; titles match
     research_check.py gate   <run> [--min-rows N] [--min-families M]
                                                        excerpt rows (kind "excerpt", or a source whose header says
                                                        "search-result excerpt") are leads and do not count
-    research_check.py claims <run>                      every [E####] in report.md exists; ids unique; cited excerpt rows noted
+    research_check.py claims <run>                      every [E####] in report.md exists in this run or a sibling under the parent; ids unique per run; cited excerpt rows noted; cross-run bare ids resolve via sibling evidence; prefer [slug/E####]
     research_check.py all    <run> [--offline]          quotes, numbers, claims, gate, refs
     research_check.py probe  --brief                    print the search-preflight brief to dispatch to a route
     research_check.py probe  <report-file>...           each route's reply proves a live web search and page open
@@ -41,7 +41,9 @@ from pathlib import Path
 from typing import Any, NoReturn
 
 USER_AGENT = "research-skill-check/1.0 (+https://github.com/djbclark/site-djbclark)"
-ID_RE = re.compile(r"(?:\[\^?|\(#)(E\d{4,})[\]\)]")  # [E0001] inline, [^E0001] footnote, or (#E0001) anchor link
+ID_RE = re.compile(
+    r"(?:\[\^?|\(#)((?:[A-Za-z0-9._-]+[/:])?E\d{4,})[\]\)]"
+)  # [E0001], [^E0001], (#E0001), or namespaced [slug/E0001] / [slug:E0001]
 SUP_RE = re.compile(r"<sup>.*?</sup>")  # numbered citation superscripts carry no figures
 NUM_RE = re.compile(r"(?<![\w.])[-+]?\d[\d,]*(?:\.\d+)?%?")
 MIN_ROWS_DEFAULT = 6
@@ -336,11 +338,27 @@ def cmd_numbers(run: Path) -> int:
     report_path = run / "report.md"
     if not report_path.is_file():
         die(f"{report_path} not found")
-    rows = load_evidence(run)
-    quoted = " ".join(normalise(str(r.get("quote", ""))) for r in rows)
+    report = report_path.read_text(encoding="utf-8")
+    cited = set(ID_RE.findall(report))
+    rows, _known, bare_origin, _dupes, rows_by_slug = _namespace_evidence(run)
+    # Local quotes always count; plus quotes from uniquely resolved cited sibling rows.
+    quote_rows = list(rows) + [
+        r for r in _rows_for_cites(run, cited, bare_origin, rows_by_slug)
+        if r not in rows
+    ]
+    # Dedup by (id, quote) when the same local row appears via cite resolution.
+    seen_q: set[tuple[str, str]] = set()
+    quotes: list[str] = []
+    for r in quote_rows:
+        key = (str(r.get("id", "")), str(r.get("quote", "")))
+        if key in seen_q:
+            continue
+        seen_q.add(key)
+        quotes.append(str(r.get("quote", "")))
+    quoted = " ".join(normalise(q) for q in quotes)
     quoted_nums = {n.replace(",", "").rstrip("%").lstrip("+") for n in NUM_RE.findall(quoted)}
     unmatched: dict[str, str] = {}
-    for line in report_body_lines(report_path.read_text(encoding="utf-8")):
+    for line in report_body_lines(report):
         for tok in NUM_RE.findall(line):
             key = tok.replace(",", "").rstrip("%").lstrip("+")
             if key.lstrip("-") == "" or key in quoted_nums:
@@ -478,32 +496,151 @@ def cmd_gate(run: Path, min_rows: int, min_families: int) -> int:
 
 # ---------- claims ----------
 
+def _sibling_runs(run: Path) -> list[Path]:
+    """Other run folders beside ``run`` that carry evidence.jsonl (same parent)."""
+    parent = run.resolve().parent
+    if not parent.is_dir():
+        return []
+    out: list[Path] = []
+    for child in sorted(parent.iterdir()):
+        if not child.is_dir() or child.resolve() == run.resolve():
+            continue
+        if (child / "evidence.jsonl").is_file():
+            out.append(child)
+    return out
+
+
+def _namespace_evidence(
+    run: Path,
+) -> tuple[list[dict[str, Any]], set[str], dict[str, str], set[str], dict[str, list[dict[str, Any]]]]:
+    """Local rows plus known citation keys from this run and siblings.
+
+    Known keys: bare ``E####`` from this run; bare ``E####`` from a sibling when
+    that id is unique across the parent namespace and unique within that sibling;
+    ``slug/E####`` / ``slug:E####`` only when that sibling's evidence has exactly
+    one row with that id (internal duplicates are excluded and tracked).
+    Returns (local_rows, known, bare_origin, sibling_dupes, rows_by_slug) where
+    bare_origin maps a bare id resolved from a sibling to that sibling's name,
+    sibling_dupes holds ``slug/E####`` keys that were duplicate inside a sibling,
+    and rows_by_slug maps each run name (including this run) to its evidence rows.
+    """
+    rows = load_evidence(run)
+    local_ids = [str(r["id"]) for r in rows]
+    known: set[str] = set(local_ids)
+    bare_origin: dict[str, str] = {}
+    sibling_dupes: set[str] = set()
+    rows_by_slug: dict[str, list[dict[str, Any]]] = {run.name: rows}
+    # Index bare id -> list of run names that own a unique (non-dupe) row for it
+    owners: dict[str, list[str]] = {}
+    for eid in local_ids:
+        if local_ids.count(eid) == 1:
+            owners.setdefault(eid, []).append(run.name)
+            known.add(f"{run.name}/{eid}")
+            known.add(f"{run.name}:{eid}")
+        else:
+            sibling_dupes.add(f"{run.name}/{eid}")
+    for sib in _sibling_runs(run):
+        try:
+            sib_rows = load_evidence(sib)
+        except SystemExit:
+            continue
+        rows_by_slug[sib.name] = sib_rows
+        sib_ids = [str(r["id"]) for r in sib_rows]
+        for eid in set(sib_ids):
+            if sib_ids.count(eid) > 1:
+                sibling_dupes.add(f"{sib.name}/{eid}")
+                continue
+            owners.setdefault(eid, []).append(sib.name)
+            known.add(f"{sib.name}/{eid}")
+            known.add(f"{sib.name}:{eid}")
+    for eid, names in owners.items():
+        uniq = sorted(set(names))
+        if run.name in uniq:
+            continue  # bare already covered by local known
+        if len(uniq) == 1:
+            known.add(eid)
+            bare_origin[eid] = uniq[0]
+    return rows, known, bare_origin, sibling_dupes, rows_by_slug
+
+
+def _cite_parts(cite: str) -> tuple[str | None, str]:
+    if "/" in cite or ":" in cite:
+        sep = "/" if "/" in cite else ":"
+        slug, eid = cite.split(sep, 1)
+        return slug, eid
+    return None, cite
+
+
+def _rows_for_cites(
+    run: Path,
+    cited: set[str],
+    bare_origin: dict[str, str],
+    rows_by_slug: dict[str, list[dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    """Evidence rows that cited markers resolve to (local + unique sibling)."""
+    out: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for cite in cited:
+        slug, eid = _cite_parts(cite)
+        if slug is None:
+            slug = bare_origin.get(eid, run.name)
+        rows = rows_by_slug.get(slug) or []
+        matches = [r for r in rows if str(r["id"]) == eid]
+        if len(matches) != 1:
+            continue
+        key = (slug, eid)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(matches[0])
+    return out
+
+
 def cmd_claims(run: Path) -> int:
     report_path = run / "report.md"
     if not report_path.is_file():
         die(f"{report_path} not found")
-    rows = load_evidence(run)
+    rows, known, bare_origin, sibling_dupes, rows_by_slug = _namespace_evidence(run)
     ids = [str(r["id"]) for r in rows]
     dupes = sorted({i for i in ids if ids.count(i) > 1})
-    known = set(ids)
     cited = set(ID_RE.findall(report_path.read_text(encoding="utf-8")))
     missing = sorted(cited - known)
-    uncited = sorted(known - cited)
+    uncited = sorted(set(ids) - {c for c in cited if "/" not in c and ":" not in c})
+    # namespaced cites of local ids also count as cited
+    for c in cited:
+        slug, eid = _cite_parts(c)
+        if slug == run.name and eid in ids and eid in uncited:
+            uncited.remove(eid)
+    uncited = sorted(uncited)
     problems = 0
     for d in dupes:
         print(f"DUPLICATE-ID {d}")
         problems += 1
-    for m in missing:
-        print(f"UNKNOWN-ID {m}: cited in report.md but not in evidence.jsonl")
+    cited_sibling_dupes = sorted(
+        {f"{slug}/{eid}" for c in cited for slug, eid in [_cite_parts(c)]
+         if slug is not None and f"{slug}/{eid}" in sibling_dupes}
+        | {f"{bare_origin[eid]}/{eid}" for eid in cited if eid in bare_origin
+           and f"{bare_origin[eid]}/{eid}" in sibling_dupes}
+    )
+    for d in cited_sibling_dupes:
+        print(f"DUPLICATE-ID {d}: cited but not unique in that sibling's evidence.jsonl")
         problems += 1
+    for m in missing:
+        print(f"UNKNOWN-ID {m}: cited in report.md but not in this run or a unique sibling evidence.jsonl")
+        problems += 1
+    for eid, sib in sorted(bare_origin.items()):
+        if eid in cited:
+            print(f"note: {eid} resolved from sibling run {sib} (prefer [{sib}/{eid}])")
     for u in uncited:
         print(f"note: {u} in evidence.jsonl is not cited (drop it from the evidence table)")
     cache: dict[str, bool] = {}
-    excerpt_cited = sorted(str(r["id"]) for r in rows if str(r["id"]) in cited and is_excerpt(run, r, cache))
+    local_cited = {c if ("/" not in c and ":" not in c) else c.split("/" if "/" in c else ":", 1)[-1]
+                   for c in cited}
+    excerpt_cited = sorted(str(r["id"]) for r in rows if str(r["id"]) in local_cited and is_excerpt(run, r, cache))
     for e in excerpt_cited:
         print(f"note: {e} is an excerpt row (search-result text, page not opened): cite it only as a lead")
     print(f"claims: {len(cited)} ids cited, {len(missing)} unknown, {len(dupes)} duplicate, {len(uncited)} uncited, "
-          f"{len(excerpt_cited)} excerpt rows cited")
+          f"{len(excerpt_cited)} excerpt rows cited, {len(bare_origin)} cross-run bare ids in namespace")
     return 0 if problems == 0 else 1
 
 
