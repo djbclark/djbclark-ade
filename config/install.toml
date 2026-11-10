@@ -101,23 +101,31 @@ notes = "Hard by operator ruling 2026-11-07; user-scoped via uv tool"
 id = "cswap"
 class = "hard"
 summary = "claude-swap; aiuse reads it"
-install = "UNKNOWN"
-update = "UNKNOWN"
-probe = "UNKNOWN"
+source = "https://pypi.org/project/claude-swap/"
+install = "uv tool install claude-swap (→ ~/.local/bin/cswap)"
+install_argv = ["uv", "tool", "install", "claude-swap"]
+update = "uv tool upgrade claude-swap"
+update_argv = ["uv", "tool", "upgrade", "claude-swap"]
+probe = "cswap --help"
+probe_argv = ["cswap", "--help"]
 presence = "cswap"
 platforms = ["mac", "linux"]
+notes = "Hard dependency; vendor/README.md. PyPI package name is claude-swap; presence binary is cswap."
 
 [[component]]
 id = "paseo"
 class = "hard"
 summary = "Sole harness"
 source = "https://github.com/getpaseo/paseo"
-install = "UNKNOWN"
-update = "UNKNOWN"
+install = "npm install -g @getpaseo/cli (user npm prefix → ~/.local)"
+install_argv = ["npm", "install", "-g", "@getpaseo/cli"]
+update = "npm update -g @getpaseo/cli"
+update_argv = ["npm", "update", "-g", "@getpaseo/cli"]
 probe = "paseo --version"
 probe_argv = ["paseo", "--version"]
 presence = "paseo"
 platforms = ["mac", "linux"]
+notes = "CLI package @getpaseo/cli (npm bin paseo). Desktop/daemon and skill bundle (npx skills add getpaseo/paseo) are separate later units."
 
 [[component]]
 id = "graft"
@@ -138,46 +146,60 @@ notes = "Requires a writable npm prefix (e.g. ~/.local); not a root package-mana
 id = "pi"
 class = "hard"
 summary = "Sole general-purpose third-party TUI"
-install = "UNKNOWN"
-update = "UNKNOWN"
+source = "https://www.npmjs.com/package/@mariozechner/pi-coding-agent"
+install = "npm install -g @mariozechner/pi-coding-agent (user npm prefix → ~/.local)"
+install_argv = ["npm", "install", "-g", "@mariozechner/pi-coding-agent"]
+update = "npm update -g @mariozechner/pi-coding-agent"
+update_argv = ["npm", "update", "-g", "@mariozechner/pi-coding-agent"]
 probe = "pi --version"
 probe_argv = ["pi", "--version"]
 presence = "pi"
 platforms = ["mac", "linux"]
-notes = "Pi policy 2026-11-08; archived omp/OpenCode/Crush are never reinstall targets"
+notes = "Pi policy 2026-11-08; archived omp/OpenCode/Crush are never reinstall targets. Provider packs via `pi install` are separate."
 
 [[component]]
 id = "claude-code"
 class = "hard"
 summary = "Vendor client for Claude monthly plan"
-install = "UNKNOWN"
-update = "UNKNOWN"
+source = "https://www.npmjs.com/package/@anthropic-ai/claude-code"
+install = "npm install -g @anthropic-ai/claude-code (user npm prefix → ~/.local)"
+install_argv = ["npm", "install", "-g", "@anthropic-ai/claude-code"]
+update = "npm update -g @anthropic-ai/claude-code"
+update_argv = ["npm", "update", "-g", "@anthropic-ai/claude-code"]
 probe = "claude --version"
 probe_argv = ["claude", "--version"]
 presence = "claude"
 platforms = ["mac", "linux"]
+notes = "npm bin is claude. Account login is a separate [[login]] check, not an API key."
 
 [[component]]
 id = "codex"
 class = "hard"
 summary = "Vendor client for Codex monthly plan (not OpenAI API credits)"
-install = "UNKNOWN"
-update = "UNKNOWN"
+source = "https://www.npmjs.com/package/@openai/codex"
+install = "npm install -g @openai/codex (user npm prefix → ~/.local)"
+install_argv = ["npm", "install", "-g", "@openai/codex"]
+update = "npm update -g @openai/codex"
+update_argv = ["npm", "update", "-g", "@openai/codex"]
 probe = "codex --version"
 probe_argv = ["codex", "--version"]
 presence = "codex"
 platforms = ["mac", "linux"]
+notes = "npm bin is codex. Monthly-plan login is a separate [[login]] check; distinct from OPENAI_API_KEY."
 
 [[component]]
 id = "cursor-cli"
 class = "hard"
-summary = "Cursor CLI / vendor client"
-install = "UNKNOWN"
-update = "UNKNOWN"
-probe = "cursor --version"
-probe_argv = ["cursor", "--version"]
-presence = "cursor"
+summary = "Cursor CLI / vendor client (agent binary)"
+source = "https://cursor.com/docs/cli/installation"
+install = "curl https://cursor.com/install -fsS | bash (official installer → ~/.local/bin/agent)"
+update = "agent update"
+update_argv = ["agent", "update"]
+probe = "agent --version"
+probe_argv = ["agent", "--version"]
+presence = "agent"
 platforms = ["mac", "linux"]
+notes = "Official binary is agent (not cursor). install_argv left UNKNOWN: the published installer is a curl|bash pipe (no argv-list path yet; do not shell=True). Recorded update/probe only. Login is a separate [[login]] check."
 
 [[component]]
 id = "skill-everywhere"
@@ -215,11 +237,15 @@ id = "hermes"
 class = "offered"
 chosen = true
 summary = "Offered Hermes install and basic setup (S3a)"
-install = "UNKNOWN"
-update = "UNKNOWN"
-probe = "UNKNOWN"
+source = "https://github.com/NousResearch/hermes-agent"
+install = "curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash (→ ~/.hermes + hermes on PATH)"
+update = "hermes update"
+update_argv = ["hermes", "update"]
+probe = "hermes doctor"
+probe_argv = ["hermes", "doctor"]
 presence = "hermes"
 platforms = ["mac", "linux"]
+notes = "Official installer is curl|bash (no install_argv yet; do not shell=True). S3a checklist / hermes-setup remain later. peer-link and LiteLLM fork stay separate components."
 
 [[component]]
 id = "peer-link"
@@ -433,17 +459,20 @@ expiry = "unknown"
 [[login]]
 id = "claude-code"
 summary = "Claude Code account login for monthly plan"
-command = "UNKNOWN"
+command = "claude auth login"
+notes = "Also: claude auth status / logout. Account login, not ANTHROPIC_API_KEY."
 
 [[login]]
 id = "codex"
 summary = "Codex vendor login for monthly plan"
-command = "UNKNOWN"
+command = "codex login"
+notes = "Monthly-plan login; distinct from OPENAI_API_KEY. Confirm subcommand if Codex CLI renames it."
 
 [[login]]
 id = "cursor"
-summary = "Cursor account login"
-command = "UNKNOWN"
+summary = "Cursor Agent CLI account login"
+command = "agent login"
+notes = "Official binary is agent; confirm subcommand if Cursor CLI renames it."
 
 [[login]]
 id = "antigravity"

@@ -39,7 +39,9 @@ unified file with reviewed consumer adoption.
 
 `[[key]]` entries are **names and metadata only** (create URL, verify=UNKNOWN,
 expiry=unknown|…). Doctor never reads `sudo-secretspec` values. Login checks are
-separate from keys; consent is not key validation.
+separate from keys; consent is not key validation. Recorded login commands
+(2026-11-09): `claude auth login`, `codex login`, `agent login` — doctor does
+not execute them.
 
 ## D. CLI
 
@@ -79,10 +81,18 @@ just install-apply-dry
 | `graft` | `npm install -g @nanonets/graft` (user npm prefix) |
 | `git`, `gh` | `needs_system` + Linux `system_argv` (`apt-get`) + `system_argv_darwin` (`brew`); dry-run only |
 | `aiuse` | `uv tool install git+https://github.com/djbclark/aiuse` |
+| `cswap` | `uv tool install claude-swap` (presence `cswap`) |
+| `paseo` | `npm install -g @getpaseo/cli` (CLI only; desktop/daemon later) |
+| `pi` | `npm install -g @mariozechner/pi-coding-agent` |
+| `claude-code` | `npm install -g @anthropic-ai/claude-code` (presence `claude`) |
+| `codex` | `npm install -g @openai/codex` |
+| `cursor-cli` | probe/update only (`agent --version` / `agent update`); install is official curl\|bash (no `install_argv` yet) |
+| `hermes` (offered) | probe/update only (`hermes doctor` / `hermes update`); install is official curl\|bash (no `install_argv` yet) |
 | others | still `UNKNOWN` / no `install_argv` |
 
 ## F. Next units
 
-Live system apply (root/`apt`/`brew` execution with ownership ledger), more
-owner installers (paseo, sudo-secretspec, vendor clients), managed key verify
-probes. S4 jobs stay explicit later work.
+Live system apply (root/`apt`/`brew` execution with ownership ledger), remaining
+owner installers (sudo-secretspec Linux tarball, curl-free Cursor CLI fetch, Hermes
+offered path, Paseo desktop/daemon and skill bundle), managed key verify probes.
+S4 jobs stay explicit later work.

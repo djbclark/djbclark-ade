@@ -57,6 +57,21 @@ def test_repo_install_toml_checks_clean():
     ]
     assert by_id["sudo-secretspec"].get("probe_argv") == ["sudo-secretspec", "doctor"]
     assert by_id["sudo-secretspec"].get("system_argv") is None  # Linux tarball still UNKNOWN
+    assert by_id["claude-code"].get("install_argv") == [
+        "npm",
+        "install",
+        "-g",
+        "@anthropic-ai/claude-code",
+    ]
+    assert by_id["codex"].get("install_argv") == ["npm", "install", "-g", "@openai/codex"]
+    assert by_id["cursor-cli"].get("presence") == "agent"
+    assert by_id["cursor-cli"].get("probe_argv") == ["agent", "--version"]
+    assert by_id["cursor-cli"].get("update_argv") == ["agent", "update"]
+    assert by_id["cursor-cli"].get("install_argv") is None  # curl|bash; no argv-list yet
+    assert by_id["hermes"].get("chosen") is True
+    assert by_id["hermes"].get("probe_argv") == ["hermes", "doctor"]
+    assert by_id["hermes"].get("update_argv") == ["hermes", "update"]
+    assert by_id["hermes"].get("install_argv") is None  # curl|bash; no argv-list yet
     proc = _run("check", "--json", root=REPO)
     assert proc.returncode == 0, proc.stderr
     payload = json.loads(proc.stdout)
