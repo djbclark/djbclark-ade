@@ -140,7 +140,7 @@ Refusal = exit 77 (EX_NOPERM), a message naming the owner and the safe alternati
 one JSON line in `<state>/guard.log` (flag NAMES from an allowlist only; an option's value is never logged). A refused
 hook shows git's `fatal: ... aborted by the reference-transaction hook` (exit 128) after the same message.
 Operator override: ACP_OPERATOR_APPROVED containing `git-guard` allows the call and logs it (design 5.6's
-ADE_GIT_GUARD_BYPASS was not built; this is the convention bin/acp-dispatch already uses), in the shim and in the hooks.
+ADE_GIT_GUARD_BYPASS was not built; this is the convention the Wave 6 dispatch shim already uses), in the shim and in the hooks.
 A shim crash fails OPEN (design 5.7, bin/ade-git-guard).
 
 CLI (also the bash-facing API; every subcommand exits 0 ok, 2 usage, 3 id exists, 4 path owned by another owner's
@@ -188,7 +188,7 @@ DEFAULT_TTL_H = 72.0
 ROLES = ("lead", "worker", "builder")
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 IDENT_ENV = ("ADE_CLAIM_ID", "CLAUDE_CODE_SESSION_ID", "PASEO_AGENT_ID")
-OVERRIDE = "git-guard"  # ACP_OPERATOR_APPROVED value, the convention of bin/acp-dispatch
+OVERRIDE = "git-guard"  # ACP_OPERATOR_APPROVED value, the convention of the Wave 6 dispatch shim
 
 
 # --------------------------------------------------------------------------------------------

@@ -72,9 +72,9 @@ waiter belongs to the session that started it. What survives is on disk: the
 report path and `.done` marker named under `## Detached jobs` in the handoff,
 plus any legacy bigteam job record
 (`~/.local/state/bigteam/<task>/jobs/<name>.json`) a handoff still lists.
-**Do not run `acp-dispatch check`, `resume` or `reap`** — those subcommands are
-retired (E6 / Wave 6 follow-up); Paseo-native wait and artifact checks replace
-them.
+**Do not run retired Wave 6 dispatch-shim check / resume / reap subcommands** —
+those are gone for live teaching (E6 / Wave 6 follow-up); Paseo-native wait and
+artifact checks replace them.
 
 For each open job named under `## Detached jobs` in the handoff (or, with no
 handoff, each legacy record without a `"closed"` key under the task directory

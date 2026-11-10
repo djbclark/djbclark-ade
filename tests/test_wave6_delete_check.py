@@ -375,7 +375,7 @@ def test_inventory_help_documents_caller_list_not_live() -> None:
 
 
 def test_inventory_lists_every_gated_hit_and_proves_gate_exits() -> None:
-    """--inventory lists untruncated §A hits; gate_exits prove they are gated."""
+    """--inventory lists untruncated §A hits; gate_exits prove coverage (0 callers OK after scrub)."""
     r = run("--json", "--inventory", root=ROOT)
     assert r.returncode == 0, r.stderr
     data = json.loads(r.stdout)
@@ -387,7 +387,7 @@ def test_inventory_lists_every_gated_hit_and_proves_gate_exits() -> None:
     assert data["ungated_references"] == []
     refs = data["references"]
     assert data["callers_remaining"] == len(refs)
-    assert data["callers_remaining"] >= 1
+    assert data["callers_remaining"] >= 0
     # Untruncated: every hit carries path/line/kind/snippet.
     for hit in refs:
         assert hit["gated"] is True
@@ -396,25 +396,34 @@ def test_inventory_lists_every_gated_hit_and_proves_gate_exits() -> None:
         assert isinstance(hit["line"], int) and hit["line"] >= 1
         assert isinstance(hit["snippet"], str) and hit["snippet"]
     exits = data["gate_exits"]
-    assert exits["callers"] == 1
+    # callers gate is 1 while hits remain, 0 after a full LIVE_RE scrub (Mac still blocked).
+    assert exits["callers"] in (0, 1)
+    assert exits["callers"] == (1 if refs else 0)
     assert exits["evaluate_no_evidence"] == 1
     assert exits["dry_run_fixture"] is None
-    # Gate reasons still name callers_* while hits remain.
     joined = "\n".join(data["gate_reasons"])
-    assert "callers_skills:" in joined or "callers_bins:" in joined or "callers_loose:" in joined
+    if refs:
+        assert "callers_skills:" in joined or "callers_bins:" in joined or "callers_loose:" in joined
+    else:
+        assert data["gate_reasons"] == []
 
 
 def test_inventory_human_success_prints_refs_and_gate_exits() -> None:
-    """Non-JSON --inventory success still lists refs + gate_exits (not JSON-only)."""
+    """Non-JSON --inventory success still lists gate_exits (refs only while hits remain)."""
     r = run("--inventory", root=ROOT)
     assert r.returncode == 0, r.stderr
     out = r.stdout
     assert "inventory OK" in out
     assert "gate_exits:" in out
     assert "callers=" in out
-    assert "ref:" in out
-    # At least one gated path fragment appears.
-    assert any(p in out for p in ("skills/", "bin/", "loose"))
+    # When callers_remaining > 0, every hit is printed; a clean scrub prints none.
+    inv = run("--json", "--inventory", root=ROOT)
+    n = json.loads(inv.stdout)["callers_remaining"]
+    if n:
+        assert "ref:" in out
+        assert any(p in out for p in ("skills/", "bin/", "loose"))
+    else:
+        assert "ref:" not in out
 
 
 def test_inventory_with_dry_run_keeps_fixture_exit_and_never_ready() -> None:
@@ -425,7 +434,8 @@ def test_inventory_with_dry_run_keeps_fixture_exit_and_never_ready() -> None:
     assert data["dry_run"] is True
     assert data["fixture_shape_ok"] is True
     assert data["gate_exits"]["dry_run_fixture"] == 0
-    assert data["gate_exits"]["callers"] == 1
+    assert data["gate_exits"]["callers"] in (0, 1)
+    assert data["gate_exits"]["callers"] == (1 if data["callers_remaining"] else 0)
     assert data["ready"] is False
     assert data["mac_live_blocked"] is True
 
