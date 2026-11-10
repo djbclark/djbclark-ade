@@ -13,7 +13,7 @@ reconciliation and `--system` root effects remain later work
 | `config/install.toml` | Transitional editable catalog (`schema_version = 1`) |
 | `config/install.schema.json` | Structural schema (checked by `ade-install check`) |
 | `bin/ade_install.py` / `bin/ade-install` | Loader, plan, doctor, apply |
-| `bin/ade_user_install.py` / `bin/ade-user-install` | User-scoped uv/just fetch and `bin/` symlinks |
+| `bin/ade_user_install.py` / `bin/ade-user-install` | User-scoped uv/just fetch, `bin/` symlinks, Linux sudo-secretspec media |
 
 Loaded **only while `config/ade.toml` is absent**. If a unified `ade.toml` is
 present, `ade-install` refuses the transitional file so there is no permanent
@@ -92,6 +92,12 @@ Pass `--ade` only with a durable checkout (`~/src/djbclark-ade`); never with a l
   blocked/failed, 2 system-exec refused / usage.
 - `ade-user-install uv|just|link <name>` fetches GitHub release binaries or
   symlinks a repo `bin/` tool into the prefix. No `shell=True`, no root.
+- `ade-user-install sudo-secretspec` (Linux x86_64): resolve
+  `frdminc/sudo-secretspec` `releases/latest`, fetch the versioned
+  `.tar.gz` + `.sha256`, verify, extract under
+  `{prefix.parent}/lib/sudo-secretspec/<version>/`, report
+  `libexec` install argv. Opt-in privilege step:
+  `--declarations PATH --run-install` (never puts secret values on argv).
 
 ## E. Recorded recipes (2026-11-09)
 
@@ -102,14 +108,14 @@ Pass `--ade` only with a durable checkout (`~/src/djbclark-ade`); never with a l
 | `graft` | `npm install -g @nanonets/graft` (user npm prefix) |
 | `git`, `gh` | `needs_system` + Linux `system_argv` (`apt-get`) + `system_argv_darwin` (`brew`); dry-run only |
 | `node`, `npm` | `needs_system` + Linux `system_argv` (`apt-get install -y nodejs npm`) + `system_argv_darwin` (`brew install node`); dry-run only |
-| `sudo-secretspec` | Mac: `system_argv_darwin` brew tap; Linux: release tarball recipe in `install` prose — no single `system_argv` (versioned asset + extract + declarations path) |
+| `sudo-secretspec` | Mac: `system_argv_darwin` brew tap (`--system --dry-run`). Linux: no `system_argv`; `install_argv` → `ade-user-install sudo-secretspec` (latest → versioned asset → sha256 → extract; libexec install opt-in) |
 | `aiuse` | `uv tool install git+https://github.com/djbclark/aiuse` |
 | others | still `UNKNOWN` / no `install_argv` |
 
 ## F. Next units
 
-Live system apply (root/`apt`/`brew` execution with ownership ledger), an
-`ade-user-install` (or similar) helper that resolves the sudo-secretspec Linux
-tarball without a pinned URL, remaining owner installers (paseo desktop/daemon
-and skill bundle, vendor clients), managed key verify probes. S4 jobs stay
-explicit later work.
+Live system apply (root/`apt`/`brew` execution with ownership ledger),
+opt-in privilege-boundary `sudo-secretspec install --declarations` as a
+managed apply step (media staging is done), remaining owner installers
+(paseo desktop/daemon and skill bundle, vendor clients), managed key
+verify probes. S4 jobs stay explicit later work.
