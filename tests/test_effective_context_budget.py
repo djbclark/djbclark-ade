@@ -245,6 +245,63 @@ def test_other_scalar_edits_cannot_publish_invalid_context_metadata(tree, kind):
     assert snapshot(root.parent) == before
 
 
+@pytest.mark.parametrize("label,budget", [("fixture", "fixture=1"), ("total", "total=99000")])
+@pytest.mark.parametrize("selected_by", ["configured", "cli"])
+def test_scalar_directory_collision_refuses_before_effects(tree, monkeypatch, capsys, label, budget, selected_by):
+    root, home, cli = tree
+    configured = label if selected_by == "configured" else "other"
+    (root / "config/ade.toml").write_text(f'schema_version=1\n[context_budget]\ndirs=["{configured}"]\n'
+                                        f'[context_budget.budget]\n{budget}\n')
+    forbidden = Mock(side_effect=AssertionError("directory collision reached effects"))
+    for name in ("measure", "parse_context", "previous", "send_ping", "write_state"):
+        monkeypatch.setattr(cli, name, forbidden)
+    args = [] if selected_by == "configured" else ["--from-file", "unused", "--dir", label]
+    before = snapshot(root.parent)
+    assert cli.main(args) == 2
+    assert "directory override table" in capsys.readouterr().err
+    assert snapshot(root.parent) == before
+    forbidden.assert_not_called()
+
+
+@pytest.mark.parametrize("dirs", [None, "[]"])
+def test_default_directory_collision_refuses_after_empty_or_missing_dirs(tree, monkeypatch, capsys, dirs):
+    root, home, cli = tree
+    text = 'schema_version=1\n[context_budget]\n' + (f'dirs={dirs}\n' if dirs is not None else "")
+    (root / "config/ade.toml").write_text(text + '[context_budget.budget]\n"~"=1\n')
+    forbidden = Mock(side_effect=AssertionError("default collision reached effects"))
+    for name in ("measure", "previous", "send_ping", "write_state"):
+        monkeypatch.setattr(cli, name, forbidden)
+    before = snapshot(root.parent)
+    assert cli.main([]) == 2
+    assert "directory override table" in capsys.readouterr().err
+    assert snapshot(root.parent) == before
+    forbidden.assert_not_called()
+
+
+def test_explicit_legacy_scalar_collision_retains_original_type_failure(tree):
+    root, home, cli = tree
+    path = root / "explicit.toml"
+    path.write_text('dirs=["fixture"]\n[budget]\nfixture=1\n')
+    cfg = cli.load_config(path)
+    assert cfg["budget"]["fixture"] == 1
+    with pytest.raises(TypeError):
+        cli.budget_for(cfg, "fixture")
+
+
+def test_empty_cli_directory_uses_same_validated_fallback_label(tree, monkeypatch, capsys):
+    root, home, cli = tree
+    (root / "config/ade.toml").write_text('schema_version=1\n[context_budget]\ndirs=[]\n'
+                                        '[context_budget.budget]\n"~/src/djbclark-ade"=1\n')
+    forbidden = Mock(side_effect=AssertionError("empty --dir collision reached effects"))
+    for name in ("measure", "parse_context", "previous", "send_ping", "write_state"):
+        monkeypatch.setattr(cli, name, forbidden)
+    before = snapshot(root.parent)
+    assert cli.main(["--from-file", "unused", "--dir", ""]) == 2
+    assert "directory override table" in capsys.readouterr().err
+    assert snapshot(root.parent) == before
+    forbidden.assert_not_called()
+
+
 def test_generic_config_cli_exposes_context_and_diff_without_effects(tree):
     root, home, cli = tree
     for name in ("routing.toml", "gates.toml", "model-tiers.toml"):

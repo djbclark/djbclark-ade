@@ -213,7 +213,7 @@ def load_config(path: Path) -> dict:
 
 
 def load_effective_config(*, root: Path | None = None, home: Path | None = None,
-                          environ: dict | None = None) -> dict:
+                          environ: dict | None = None, directory_label: str | None = None) -> dict:
     """Default read adopts only validated context metadata, without effects."""
     bindir = str(REPO / "bin")
     if bindir not in sys.path:
@@ -223,10 +223,16 @@ def load_effective_config(*, root: Path | None = None, home: Path | None = None,
     try:
         effective = ac.load_effective(root=root or REPO, home=home, environ=environ,
                                       domains=ac.CONTEXT_BUDGET_DOMAINS)
+        raw = effective.data.get("context_budget", {})
+        cfg = {"dirs": raw.get("dirs") or ["~/src/djbclark-ade", "~"], "budget": raw.get("budget") or {}}
+        # Validate the directories actually used, including defaults for dirs=[]
+        # and --from-file --dir. Scalar row names cannot double as override maps.
+        selected = [directory_label] if directory_label else cfg["dirs"]
+        ac.validate_context_budget({"context_budget": {**cfg, "dirs": selected}},
+                                   path=Path("effective context budgets"))
     except ac.ConfigError as error:
         raise ConfigError(str(error)) from error
-    cfg = effective.data.get("context_budget", {})
-    return {"dirs": cfg.get("dirs") or ["~/src/djbclark-ade", "~"], "budget": cfg.get("budget") or {}}
+    return cfg
 
 
 def budget_for(cfg: dict, label: str) -> dict:
@@ -412,7 +418,8 @@ def send_ping(text: str) -> int:
 
 def cmd_run(a: argparse.Namespace) -> int:
     try:
-        cfg = load_config(Path(a.config)) if a.config else load_effective_config()
+        cfg = (load_config(Path(a.config)) if a.config else
+               load_effective_config(directory_label=a.dir if a.from_file else None))
     except ConfigError as error:
         print(f"context-budget-check: config: {error}", file=sys.stderr)
         return 2

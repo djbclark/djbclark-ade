@@ -455,6 +455,12 @@ def validate_context_budget(data: dict[str, Any], *, path: Path) -> None:
     budget = cfg.get("budget", {})
     if not isinstance(budget, dict):
         raise ConfigError(f"{path}: context_budget.budget must be a table")
+    for label in dirs:
+        if label in budget and not isinstance(budget[label], dict):
+            raise ConfigError(
+                f"{path}: context_budget.budget.{label} must be a directory override table "
+                f"for selected directory {label!r}"
+            )
     for key, value in budget.items():
         if key in {"total", "memory", "skills", "mcp_tools", "mcp_instructions", "grow_alert"} and not is_num(value):
             raise ConfigError(f"{path}: context_budget.budget.{key} must be a finite number")

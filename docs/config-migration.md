@@ -127,7 +127,10 @@ B12. **Context-budget reader adoption (2026-11-10).** Default
     numeric leaves before measurement/state/ping; booleans, nonfinite values and
     nested override maps refuse (CLI exit 2). The six consumed default budget
     entries must be numeric, not maps. Existing numeric row names, directory map
-    names and numeric values are otherwise retained; this unit adds no budget
+    names and numeric values are otherwise retained. A configured/selected
+    directory label must not also name a scalar budget row: ambiguous lookups
+    refuse before effects, including `--dir` and normalized default directories.
+    Explicit legacy reads keep their old type behavior. This unit adds no budget
     limits or schedule changes. `ade-config check/get/diff` includes the domain;
     `set context_budget.*` refuses until a separate writer adoption.
 
