@@ -802,10 +802,13 @@ name = "update-auto"
 kind = "ade-sched"
 owner = "djbclark-ade"
 class = "hard"
-schedule = "daily (plist pending)"
-command = "just update --auto"
+label = "com.djbclark.update-auto"
+plist = "config/launchd/com.djbclark.update-auto.plist"
+schedule = "StartInterval 86400"
+command = "bin/ade-update-auto"
+set = ["__STATE__={home}/.local/state/ade"]
 platforms = ["mac", "linux"]
-notes = "S4 daily auto-update; plist/install path not yet recorded (planned)."
+notes = "S4 first slice: this checkout ff-only + keys observe; skip mid-turn; never --system (multi-component later)."
 
 [[install.jobs]]
 name = "harden-check"

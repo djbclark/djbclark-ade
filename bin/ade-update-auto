@@ -1,0 +1,192 @@
+#!/usr/bin/env python3
+"""S4 first slice: daily auto-update for THIS checkout only + keys observe.
+
+    ade-update-auto [--repo PATH] [--json]
+    ade-update --auto …          # thin dispatch from ade-update
+
+Steps:
+
+1. If any live Paseo agent is mid-turn (`paseo ls -g --background --json`,
+   status ``running`` or ``initializing``), skip durably (exit 0, report
+   ``deferred``). Missing ``paseo`` is not busy: proceed.
+2. Run sibling ``ade-update`` (apply: fast-forward only; never merge/rebase).
+3. Run sibling ``ade-install keys`` (S3b observe; never prompts / never prints
+   secret values).
+
+Multi-component updates (Paseo, Hermes, providers, site repo) are **not** in
+this slice — inventory still lists them under setup-plan S4. Never runs
+``--system`` / root install paths.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+LIVE_AGENT_STATUSES = frozenset({"running", "initializing"})
+EXIT_OK = 0
+EXIT_USAGE = 2
+EXIT_ERROR = 4
+DEFAULT_REPO = os.path.expanduser("~/src/djbclark-ade")
+
+
+def _here() -> Path:
+    return Path(__file__).resolve().parent
+
+
+def _run(argv: list[str], *, timeout: int = 600) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(  # noqa: S603 — argv list only
+        argv, capture_output=True, text=True, check=False, timeout=timeout,
+    )
+
+
+def live_agent_count(
+    *,
+    which: Any = shutil.which,
+    run: Any = _run,
+) -> tuple[int | None, str | None]:
+    """Return (count, None) or (None, reason). Missing paseo → (0, None)."""
+    cli = which("paseo")
+    if cli is None:
+        return 0, None
+    try:
+        proc = run([cli, "ls", "-g", "--background", "--json"], timeout=30)
+    except subprocess.TimeoutExpired:
+        return None, "paseo ls timed out"
+    except OSError as e:
+        return None, f"paseo ls launch failed: {e}"
+    if proc.returncode != 0:
+        return None, f"paseo ls exited {proc.returncode}"
+    try:
+        rows = json.loads(proc.stdout or "")
+    except ValueError:
+        return None, "paseo ls printed no JSON"
+    if not isinstance(rows, list):
+        return None, "paseo ls printed no list of agents"
+    n = 0
+    for row in rows:
+        if isinstance(row, dict) and row.get("status") in LIVE_AGENT_STATUSES:
+            n += 1
+    return n, None
+
+
+def run_auto(
+    *,
+    repo: Path,
+    as_json: bool = False,
+    which: Any = shutil.which,
+    run: Any = _run,
+    update_bin: Path | None = None,
+    install_bin: Path | None = None,
+) -> int:
+    report: dict[str, Any] = {
+        "repo": str(repo),
+        "status": "ok",
+        "deferred": False,
+        "live_agents": 0,
+        "ade_update_rc": None,
+        "keys_rc": None,
+        "notes": [],
+    }
+    n, why = live_agent_count(which=which, run=run)
+    if why is not None:
+        # Unknown busy state: defer durably (setup-plan S4 skip / unknown).
+        report["status"] = "deferred"
+        report["deferred"] = True
+        report["notes"].append(why)
+        return _emit(report, as_json, EXIT_OK)
+    report["live_agents"] = n or 0
+    if n and n > 0:
+        report["status"] = "deferred"
+        report["deferred"] = True
+        report["notes"].append(f"skipped: {n} live Paseo agent(s) mid-turn")
+        return _emit(report, as_json, EXIT_OK)
+
+    update = update_bin or (_here() / "ade-update")
+    install = install_bin or (_here() / "ade-install")
+    if not update.is_file():
+        report["status"] = "error"
+        report["notes"].append(f"ade-update not found: {update}")
+        return _emit(report, as_json, EXIT_ERROR)
+    if not install.is_file():
+        report["status"] = "error"
+        report["notes"].append(f"ade-install not found: {install}")
+        return _emit(report, as_json, EXIT_ERROR)
+
+    try:
+        up = run([str(update), "--repo", str(repo)], timeout=900)
+    except subprocess.TimeoutExpired:
+        report["status"] = "error"
+        report["notes"].append("ade-update timed out")
+        return _emit(report, as_json, EXIT_ERROR)
+    report["ade_update_rc"] = up.returncode
+    if up.stdout:
+        report["notes"].append(up.stdout.strip()[-500:])
+    if up.returncode not in (0, 10):
+        # 10 = behind/unresolved links after apply path is rare; treat as failure for auto.
+        report["status"] = "error"
+        report["notes"].append(f"ade-update failed (rc={up.returncode})")
+        if up.stderr:
+            report["notes"].append(up.stderr.strip()[-300:])
+        return _emit(report, as_json, up.returncode if up.returncode else EXIT_ERROR)
+
+    try:
+        keys = run([str(install), "keys", "--root", str(repo)], timeout=300)
+    except subprocess.TimeoutExpired:
+        report["status"] = "error"
+        report["notes"].append("ade-install keys timed out")
+        return _emit(report, as_json, EXIT_ERROR)
+    report["keys_rc"] = keys.returncode
+    if keys.returncode != 0:
+        report["status"] = "error"
+        report["notes"].append(f"ade-install keys failed (rc={keys.returncode})")
+        return _emit(report, as_json, keys.returncode if keys.returncode else EXIT_ERROR)
+
+    report["status"] = "ok"
+    report["notes"].append(
+        "S4 first slice: this checkout + keys only; other [install] components later"
+    )
+    return _emit(report, as_json, EXIT_OK)
+
+
+def _emit(report: dict[str, Any], as_json: bool, rc: int) -> int:
+    if as_json:
+        json.dump(report, sys.stdout, indent=2, sort_keys=True)
+        sys.stdout.write("\n")
+    else:
+        status = report.get("status")
+        print(f"ade-update-auto: {status} repo={report.get('repo')}")
+        if report.get("deferred"):
+            print(f"  deferred live_agents={report.get('live_agents')}")
+        for note in report.get("notes") or []:
+            for line in str(note).splitlines() or [""]:
+                print(f"  {line}")
+        if report.get("ade_update_rc") is not None:
+            print(f"  ade_update_rc={report['ade_update_rc']}")
+        if report.get("keys_rc") is not None:
+            print(f"  keys_rc={report['keys_rc']}")
+    return rc
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(
+        prog="ade-update-auto",
+        description="S4 first-slice daily auto-update (this checkout + keys; skip when busy).",
+    )
+    ap.add_argument("--repo", default=DEFAULT_REPO, help=f"checkout (default {DEFAULT_REPO})")
+    ap.add_argument("--json", action="store_true", help="print one JSON object")
+    args = ap.parse_args(argv)
+    repo = Path(args.repo).expanduser()
+    if not repo.is_dir():
+        print(f"ade-update-auto: not a directory: {repo}", file=sys.stderr)
+        return EXIT_USAGE
+    return run_auto(repo=repo, as_json=args.json)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

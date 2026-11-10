@@ -115,6 +115,7 @@ def test_repo_jobs_inventory_loads():
     assert "ade-update-check" in names
     assert "harden-check" in names
     assert "keys-check" in names
+    assert "update-auto" in names
     assert "context-budget" in names
     assert "routing-recalibrate" in names
     retired = {r["name"]: r["label"] for r in catalog.retired_jobs}
@@ -129,6 +130,9 @@ def test_repo_jobs_inventory_loads():
     assert by_name["keys-check"]["label"] == "com.djbclark.keys-check"
     assert by_name["keys-check"]["plist"].endswith("com.djbclark.keys-check.plist")
     assert by_name["keys-check"]["command"] == "bin/ade-install keys"
+    assert by_name["update-auto"]["label"] == "com.djbclark.update-auto"
+    assert by_name["update-auto"]["plist"].endswith("com.djbclark.update-auto.plist")
+    assert by_name["update-auto"]["command"] == "bin/ade-update-auto"
     assert by_name["context-budget"]["mode"] == "auto"
     assert by_name["paseo-upstream-pending"]["chosen"] is False
     assert by_name["routing-recalibrate"]["kind"] == "paseo"

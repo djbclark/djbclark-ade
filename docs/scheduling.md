@@ -98,10 +98,12 @@ Checked-in ADE jobs under `config/launchd/` include `com.djbclark.deadline-sweep
   authority. Retired or dropped-from-inventory labels that are live but **not** in the ledger are
   reported only — never unloaded. Foreign/unknown owners are never unloaded.
 - Paseo schedules and dependency/site services stay report-only here (later slices).
-- Plists for `harden-check` and `keys-check` landed 2026-11-10
-  (`config/launchd/com.djbclark.harden-check.plist` / `just harden-check-install`;
-  `config/launchd/com.djbclark.keys-check.plist` / `just keys-check-install`).
-  `update --auto` remains planned until that plist lands.
+- Plists for `harden-check`, `keys-check`, and `update-auto` landed 2026-11-10
+  (`com.djbclark.harden-check.plist` / `just harden-check-install`;
+  `com.djbclark.keys-check.plist` / `just keys-check-install`;
+  `com.djbclark.update-auto.plist` / `just update-auto-install`).
+  `update-auto` is the S4 **first slice** (this checkout ff-only + keys; skip mid-turn;
+  multi-component later).
 
 ## Paseo schedules (operator create, 2026-11-10)
 
@@ -159,6 +161,11 @@ bin/ade-sched --backend systemd install config/launchd/com.djbclark.harden-check
 bin/ade-sched --backend systemd install config/launchd/com.djbclark.keys-check.plist \
     --set __STATE__=$HOME/.local/state/ade --ade ~/src/djbclark-ade
 # or: just keys-check-install
+
+# Daily S4 update-auto first slice (this checkout + keys; skip mid-turn; never --system)
+bin/ade-sched --backend systemd install config/launchd/com.djbclark.update-auto.plist \
+    --set __STATE__=$HOME/.local/state/ade --ade ~/src/djbclark-ade
+# or: just update-auto-install
 ```
 
 Install from the canonical checkout (`--ade ~/src/djbclark-ade`): a job installed from a linked worktree would point into a

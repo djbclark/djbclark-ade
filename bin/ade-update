@@ -851,10 +851,23 @@ def main(argv=None):
                                         "skill-everywhere (not found, failed or incomplete) or state-file error.")
     ap.add_argument("--repo", default=DEFAULT_REPO, help=f"the checkout (default {DEFAULT_REPO})")
     ap.add_argument("--check", action="store_true", help="report only; change nothing, exit 10 when behind or links missing")
+    ap.add_argument("--auto", action="store_true",
+                    help="S4 first slice: skip when a Paseo agent is mid-turn, then apply this checkout + ade-install keys "
+                         "(multi-component updates later; see bin/ade-update-auto)")
     ap.add_argument("--json", action="store_true", help="print the report as JSON")
     ap.add_argument("--state", default=None, help=f"applied-revision record (default {DEFAULT_STATE}; a non-canonical "
                     "--repo defaults to its own record beside it)")
     args = ap.parse_args(argv)
+    if args.auto and args.check:
+        print("ade-update: --auto and --check are mutually exclusive", file=sys.stderr)
+        return 2
+    if args.auto:
+        # Dispatch to the sibling auto runner (keeps mid-turn skip + keys out of the apply path).
+        auto = Path(__file__).resolve().parent / "ade-update-auto"
+        argv_auto = [sys.executable, str(auto), "--repo", args.repo]
+        if args.json:
+            argv_auto.append("--json")
+        return subprocess.call(argv_auto)  # noqa: S603 — argv list only
     repo = Path(os.path.expanduser(args.repo)).resolve()
     if args.state is None:
         args.state = default_state(repo)

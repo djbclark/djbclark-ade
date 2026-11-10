@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Template: `ade-sched install` replaces __ADE__ (checkout), __HOME__; __STATE__ (log dir) needs --set.
+     Daily S4 first-slice `ade-update-auto`: skip when a Paseo agent is mid-turn, then ff-only this
+     checkout + ade-install keys. Never --system. Multi-component updates later.
+     Operator installs via
+     `bin/ade-sched install config/launchd/com.djbclark.update-auto.plist --set __STATE__=$HOME/.local/state/ade`. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.djbclark.update-auto</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__ADE__/bin/ade-update-auto</string>
+    <string>--repo</string>
+    <string>__ADE__</string>
+  </array>
+  <key>StartInterval</key><integer>86400</integer>
+  <key>RunAtLoad</key><false/>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>__HOME__/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>StandardOutPath</key><string>__STATE__/update-auto.log</string>
+  <key>StandardErrorPath</key><string>__STATE__/update-auto.log</string>
+</dict>
+</plist>

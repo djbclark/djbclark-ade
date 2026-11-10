@@ -52,12 +52,22 @@ install *args:
 update *args:
     "{{ root }}/bin/ade-update" --repo "{{ root }}" {{ args }}
 
+# S4 first-slice daily auto (this checkout + keys; skip when a Paseo agent is mid-turn).
+update-auto *args:
+    "{{ root }}/bin/ade-update-auto" --repo "{{ root }}" {{ args }}
+
 # Install the daily ade-update --check job (Linux: systemd; Mac: launchd via --backend auto).
 # Requires --set __STATE__; never auto-applies updates (check only).
 # Omit --ade so ade-sched's linked-worktree guard applies (install from the
 # canonical checkout; docs show --ade ~/src/djbclark-ade when that path is used).
 update-check-install:
     "{{ root }}/bin/ade-sched" --backend auto install "{{ root }}/config/launchd/com.djbclark.ade-update-check.plist" \
+        --set "__STATE__={{ env_var_or_default('HOME', '/tmp') }}/.local/state/ade"
+
+# Install the daily S4 update-auto job (Linux: systemd; Mac: launchd).
+# First slice only: ff-only this checkout + keys observe; never --system.
+update-auto-install:
+    "{{ root }}/bin/ade-sched" --backend auto install "{{ root }}/config/launchd/com.djbclark.update-auto.plist" \
         --set "__STATE__={{ env_var_or_default('HOME', '/tmp') }}/.local/state/ade"
 
 # Install the daily read-only harden-check job (Linux: systemd; Mac: launchd).
