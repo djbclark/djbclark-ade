@@ -227,8 +227,9 @@ trusted by the gate without a manual APPROVE marker.
    edited the body last (Argon review, 2026-11-07: a checkbox click on an outside body made a hidden APPROVE count).
    Agents must not write a live APPROVE marker (fenced examples only). A BLOCK or malformed marker in the body or in
    any comment, by any author, fails the check. A `workflow_dispatch` judges every open PR at the same head (both
-   lookups paginated to the end, failing closed on an unreadable page), and the workflow's concurrency key is the
-   head sha. The Action never checks out or runs anything from the PR.
+   lookups paginated to the end, failing closed on an unreadable page). The workflow's concurrency key is always
+   the head sha (push sweeps emit one matrix cell per head so they serialize with dispatch / `workflow_run` for
+   that sha). The Action never checks out or runs anything from the PR.
 
    The optional marker shape (still required for outside PRs, and still parsed with the five properties below):
 
@@ -288,13 +289,16 @@ trusted by the gate without a manual APPROVE marker.
       backticks inside a JSON string are content; a backtick outside a string makes the JSON invalid,
       hence **malformed**. Masking never repairs JSON.
 
-   After a body or comment edit that changes a marker (a body edit is not a Tests run) re-run the gate with
-   `gh workflow run adversary-marker.yml -f pr=N`; wait with `gh pr checks N --watch --required`. Owner-authored
-   PRs need no paste once this head is on master (owner-trust); outside PRs still need the owner comment.
-   Whoever merges uses `gh pr merge --squash --match-head-commit <reviewed sha>`, so the head reviewed is the
-   head merged. Remove the worktree and delete the branch only after `gh pr view N --json state` reads `MERGED`,
-   never chained after the merge with `;`: a refused merge (a conflict, a moved head) followed by deleting the
-   head branch closes the PR (PR 172, 2026-10-31).
+   Owner-authored PRs need no marker paste once this head is on master (owner-trust, 2026-11-10): Tests completion
+   posts the status, and a push of `bin/adversary_marker.py` / its workflow to master rejudges every open tip
+   (one `marker` job per head, same `adversary-marker-<head>` concurrency group as dispatch). After a body or
+   comment edit that changes a marker on an **outside** PR (a body edit is not a Tests run) re-run the gate with
+   `gh workflow run adversary-marker.yml -f pr=N`; wait with `gh pr checks N --watch --required`. Outside PRs
+   still need the owner issue comment. Whoever merges uses
+   `gh pr merge --squash --match-head-commit <reviewed sha>`, so the head reviewed is the head merged. Remove
+   the worktree and delete the branch only after `gh pr view N --json state` reads `MERGED`, never chained after
+   the merge with `;`: a refused merge (a conflict, a moved head) followed by deleting the head branch closes the
+   PR (PR 172, 2026-10-31).
 2. **No exit status or result through a pipe**: `cmd > out.log 2>&1; echo
    "rc=$?" > out.rc`, never `cmd | x; $?`. Local test runs go through the
    operator's `bg` wrapper (site-public-djbclark `bin/bg`) and `bin/pytest`

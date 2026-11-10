@@ -25,6 +25,12 @@ longer than 100 edits, fails closed). A body APPROVE on those PRs never counts; 
 comment fails the check, and a dispatch judges every open PR at the same head, with both lookups paginated to the end
 (F-CRIT-2; pagination from the Codex review of PR 300).
 
+**What the operator no longer does by hand (2026-11-10):** once this module is on `master`, owner-authored tips need
+no body paste of `adversary-verdict`, no herdr paste of an HTML comment, and no per-PR
+`gh workflow run adversary-marker.yml -f pr=N` after landing the marker code — a `push` of
+`bin/adversary_marker.py` / this workflow rejudges every open PR (one `marker` job per head). Outside tips still
+need an owner issue-comment APPROVE and a dispatch (or the next Tests completion) to re-read it.
+
 ## `bin/review-launch`: one `claude -p` inside a boundary
 
 ```sh
@@ -99,31 +105,36 @@ its `.review-launch/`, runs `review-launch --mode review --head HEAD` with `conf
 `<!-- adversary-verdict:v1 {"verdict":"…","head":"<the full head>"} -->` (checked against the gate's own parser), files
 `~/.local/state/review-launch/<owner>__<name>-pr<N>-<head>.json` and removes the worktree. Exit 0 APPROVE, 1 BLOCK, 2 refused,
 3 failed, 77 tripwire, 124 timeout. It never posts. On an **owner-authored** PR the gate already succeeds without pasting
-(owner-trust, 2026-11-10); keep the printed marker for the local record. On an **outside** PR, paste the marker into an
-owner issue comment (not the body), then:
+(owner-trust, 2026-11-10); keep the printed marker for the local record — do not paste it into the PR body just to
+satisfy the gate. On an **outside** PR, paste the marker into an owner issue comment (not the body; never through
+herdr, which mangles `<!-- … -->`), then:
 
 ```sh
-gh workflow run adversary-marker.yml -f pr=N      # a body/comment edit is not a Tests run: re-check
-# Push of bin/adversary_marker.py (or this workflow) to master also rejudges every open PR
-# (2026-11-10: after owner-trust, that flips owner tips without per-PR dispatch).
+gh workflow run adversary-marker.yml -f pr=N      # outside tip: a comment edit is not a Tests run
 gh pr checks N --watch --required                 # wait for Tests and the marker
 gh pr merge N --squash --match-head-commit <the reviewed head>
 ```
 
+Owner tips after owner-trust is on `master`: wait for Tests (or the push rejudge when the marker module lands), then
+merge — no paste, no per-PR dispatch.
+
 ## The `adversary-marker` Action
 
 `.github/workflows/adversary-marker.yml` runs `bin/adversary_marker.py` on `workflow_run` (the `Tests` workflow completed,
-whatever its conclusion), on `workflow_dispatch` (input `pr`), and on `push` of `bin/adversary_marker.py` or this workflow
-to the default branch (rejudges every open PR; 2026-11-10). Those runs use the workflow file and the module from **master**;
-nothing from the PR is checked out or executed. Job `resolve` (no secret) finds the PR(s) (the event's `pull_requests[]`,
-else `commits/{sha}/pulls`, else `pulls?head=owner:branch` for a fork; or every open PR on push) and outputs them; job
-`marker` runs in the concurrency group `adversary-marker-<head sha>` (or `adversary-marker-push-rejudge-all-open` for a
-push sweep; 2026-11-07: runs sharing a head serialize together; every open PR at that head is judged before one aggregate
-status is posted), reads the body and head through the API with the job's read-only token (`pull-requests: read`,
-`contents: read`), judges the marker with the parser moved unchanged from the PR waiter (rule 1's five properties, 2,559
-test cases), **re-reads the head, the body and its last editor in one GraphQL query and posts only if the head is
-unchanged** (judging that second read's body), and posts the commit status `adversary-marker` on that head with a token of
-the `ade-merge-gate` App: `success` for an owner-authored PR with no BLOCK/malformed marker (owner-trust, 2026-11-10),
+whatever its conclusion), on `workflow_dispatch` (input `pr`, still needed after an outside-PR comment edit), and on
+`push` of `bin/adversary_marker.py` or this workflow to the default branch (rejudges every open PR; 2026-11-10). Those
+runs use the workflow file and the module from **master**; nothing from the PR is checked out or executed. Job
+`resolve` (no secret) finds the PR(s) (the event's `pull_requests[]`, else `commits/{sha}/pulls`, else
+`pulls?head=owner:branch` for a fork; or every open same-repo PR on push) and writes a `strategy.matrix` with **one
+cell per head** (`prs` + `head`). Job `marker` is that matrix: each cell runs in concurrency group
+`adversary-marker-<head sha>` (2026-11-07 / 2026-11-10: a push sweep, a dispatch and a Tests completion that could post
+on the same sha serialize together; the retired single key `push-rejudge-all-open` raced those jobs). Every open PR at
+that head is judged before one aggregate status is posted; an unreadable PR only fails the status for **its** head
+(Codex on #490). It reads the body and head through the API with the job's read-only token (`pull-requests: read`,
+`contents: read`), judges the marker with the parser moved unchanged from the PR waiter (rule 1's five properties),
+**re-reads the head, the body and its last editor in one GraphQL query and posts only if the head is unchanged**
+(judging that second read's body), and posts the commit status `adversary-marker` on that head with a token of the
+`ade-merge-gate` App: `success` for an owner-authored PR with no BLOCK/malformed marker (owner-trust, 2026-11-10),
 or for a live APPROVE naming the head in a trusted owner-PR body editor or owner issue comment (above); `failure` for a
 BLOCK, a malformed marker, an outside PR with no owner-comment APPROVE, or "marker not written by a trusted user". It
 fails closed: an API error posts nothing and fails the job (the required check stays missing); a PR whose `Tests` workflow

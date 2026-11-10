@@ -1744,11 +1744,9 @@ def test_the_cli_at_head_takes_only_a_full_sha(tmp_path, head, rc):
 
 def test_the_marker_job_passes_the_resolved_head_as_at_head():
     judge = workflow()["jobs"]["marker"]["steps"][-1]
-    assert judge["env"]["AT_HEAD"] == "${{ needs.resolve.outputs.at_head }}"
+    assert judge["env"]["AT_HEAD"] == "${{ matrix.head }}"
     assert '--at-head "$AT_HEAD"' in judge["run"]
-    assert workflow()["jobs"]["resolve"]["outputs"]["at_head"] == (
-        "${{ steps.find.outputs.at_head }}"
-    )
+    assert "at_head" not in workflow()["jobs"]["resolve"]["outputs"]
 
 
 def test_a_block_from_an_untrusted_author_still_fails_the_check():
@@ -1812,18 +1810,23 @@ def test_body_uses_current_editor_and_comment_history_is_bounded_newest_first():
 # ---- the resolve job and --prs ---------------------------------------------------------------------------
 
 def test_resolve_gives_the_pr_numbers_and_the_concurrency_key():
-    # The key is the HEAD the PRs were found at (2026-11-07): one status per sha, so one concurrency group per sha.
+    # The key / matrix cell is the HEAD the PRs were found at (2026-11-07): one status per sha.
     api = adversary_marker.CannedApi(at_head(H1, 11))
-    assert adversary_marker.resolve("workflow_run", wr_event(prs=(9, 7)), REPO_A, api) == \
-        (0, {"prs": "7,9,11", "key": H1, "at_head": H1, "found_by": "workflow_run.pull_requests"})
+    rc, out = adversary_marker.resolve("workflow_run", wr_event(prs=(9, 7)), REPO_A, api)
+    assert rc == 0
+    assert out["prs"] == "7,9,11" and out["key"] == H1 and out["at_head"] == H1
+    assert out["found_by"] == "workflow_run.pull_requests"
+    assert out["has_work"] == "true"
+    assert json.loads(out["matrix"]) == {"include": [{"head": H1, "prs": "7,9,11"}]}
     api = adversary_marker.CannedApi({commits_key(H1): [{"json": []}]})
     rc, out = adversary_marker.resolve("workflow_run", wr_event(prs=()), REPO_A, api)
     assert rc == 0 and out["key"] == "" and out["prs"] == "" and out["at_head"] == ""
+    assert out["has_work"] == "false" and json.loads(out["matrix"]) == {"include": []}
     assert adversary_marker.resolve("pull_request", wr_event(), REPO_A, api)[0] == 2
 
 
-def test_resolve_push_rejudges_every_open_pr_without_a_head_filter():
-    """Landing owner-trust on master must flip open tips without per-PR dispatch."""
+def test_resolve_push_emits_one_matrix_cell_per_head():
+    """Landing owner-trust on master flips open tips without per-PR dispatch; one job per head."""
     open_key = f"GET repos/{REPO_A}/pulls?state=open&per_page=100&page=1"
     answers = {
         open_key: [{
@@ -1841,9 +1844,28 @@ def test_resolve_push_rejudges_every_open_pr_without_a_head_filter():
     )
     assert rc == 0
     assert out["prs"] == "7,8"
-    assert out["key"] == adversary_marker.PUSH_REJUDGE_KEY
-    assert out["at_head"] == ""
+    assert out["key"] == "" and out["at_head"] == ""
     assert out["found_by"] == "push all-open"
+    assert out["has_work"] == "true"
+    assert json.loads(out["matrix"]) == {
+        "include": [
+            {"head": H1, "prs": "7"},
+            {"head": H2, "prs": "8"},
+        ],
+    }
+
+
+def test_unread_failure_on_one_head_does_not_poison_another():
+    # Push-style multi-head batch: #10 at H1 approves; #11 at H2 is unreadable → only H1 is posted.
+    answers = {
+        **serve(10, marker("APPROVE", H1)),
+        **serve(11, marker("APPROVE", H2), head=H2),
+        "GRAPHQL 11": [{"error": "HTTP 502"}],
+    }
+    rc, report, api = run_ev(
+        wr_event(prs=()), answers, prs_given=[10, 11], at_head=None,
+    )
+    assert rc == 2 and [(p["sha"], p["state"]) for p in api.posted] == [(H1, "success")], report
 
 
 def test_the_cli_resolve_writes_github_output(tmp_path):
@@ -1854,7 +1876,10 @@ def test_the_cli_resolve_writes_github_output(tmp_path):
                         "--event-name", "workflow_run", "--repo", REPO_A, "--api-answers", str(tmp_path / "api.json")],
                        capture_output=True, text=True, timeout=60, env={"PATH": "/usr/bin:/bin", "GITHUB_OUTPUT": str(out)})
     assert r.returncode == 0, r.stderr
-    assert out.read_text() == f"prs=7\nkey={H1}\nat_head={H1}\n"
+    text = out.read_text()
+    assert f"prs=7\nkey={H1}\nat_head={H1}\n" in text
+    assert "has_work=true\n" in text
+    assert f'matrix={{"include":[{{"head":"{H1}","prs":"7"}}]}}\n' in text
 
 
 @pytest.mark.parametrize("prs,rc", [("7", 0), ("7,9", 0), ("", 2), ("7;rm", 2), ("0", 2), ("7,x", 2)])
@@ -1872,12 +1897,25 @@ def test_the_marker_job_is_keyed_by_the_resolved_pr_and_requests_both_app_permis
     jobs = workflow()["jobs"]
     assert set(jobs) == {"resolve", "marker"}
     assert "environment" not in jobs["resolve"] and jobs["marker"]["needs"] == "resolve"
-    assert jobs["marker"]["concurrency"] == {"group": "adversary-marker-${{ needs.resolve.outputs.key }}",
-                                             "cancel-in-progress": True}
+    assert jobs["resolve"]["outputs"] == {
+        "matrix": "${{ steps.find.outputs.matrix }}",
+        "has_work": "${{ steps.find.outputs.has_work }}",
+    }
+    assert jobs["marker"]["if"] == "${{ needs.resolve.outputs.has_work == 'true' }}"
+    assert jobs["marker"]["strategy"] == {
+        "fail-fast": False,
+        "matrix": "${{ fromJson(needs.resolve.outputs.matrix) }}",
+    }
+    assert jobs["marker"]["concurrency"] == {
+        "group": "adversary-marker-${{ matrix.head }}",
+        "cancel-in-progress": True,
+    }
     app = [s for s in jobs["marker"]["steps"] if s.get("uses", "").startswith("actions/create-github-app-token@")][0]
     assert app["with"]["permission-statuses"] == "write" and app["with"]["permission-checks"] == "write"
     judge = jobs["marker"]["steps"][-1]
-    assert '--prs "$PRS"' in judge["run"] and judge["env"]["PRS"] == "${{ needs.resolve.outputs.prs }}"
+    assert '--prs "$PRS"' in judge["run"]
+    assert judge["env"]["PRS"] == "${{ matrix.prs }}"
+    assert judge["env"]["AT_HEAD"] == "${{ matrix.head }}"
 
 
 # ---- B1 (Codex review, 2026-11-07): an owner comment approves only if nobody but the owner edited it ----------------

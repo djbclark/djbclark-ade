@@ -7,8 +7,9 @@
   adversary_marker.py --event FILE [--event-name NAME] [--repo OWNER/NAME] [--resolve | --prs LIST [--at-head SHA]]
                       [--api-answers FILE]
       what `.github/workflows/adversary-marker.yml` runs. `--resolve` (its first job) finds the PRs the event is
-      about, every open PR at the same head included, and writes `prs=` and `key=` (that head) to $GITHUB_OUTPUT
-      (the second job's concurrency group is keyed by the head); `--prs LIST --at-head SHA` (its second job) reads
+      about, every open PR at the same head included, and writes `matrix=` / `has_work=` to $GITHUB_OUTPUT (one
+      cell per head; the second job's concurrency group is `adversary-marker-<head>`); `--prs LIST --at-head SHA`
+      (each matrix cell) reads
       each PR's body and head through the API, decides, re-reads the head, body, author, last editor and the PR's
       issue comments, and posts ONE `adversary-marker` commit status per head: success only when every open PR at
       it is approved. An owner-authored PR is approved by default (operator 2026-11-10: trust the owner and AIs
@@ -1099,8 +1100,27 @@ def _open_prs_at(api, repo: str, head: str) -> list[int]:
             and _same_repo(((p.get("base") or {}).get("repo") or {}).get("full_name"), repo)]
 
 
-# Concurrency key for a default-branch push that rejudges every open PR (not a 40-hex head).
-PUSH_REJUDGE_KEY = "push-rejudge-all-open"
+def _open_prs_by_head(api, repo: str) -> dict[str, list[int]]:
+    """Open same-repo PRs grouped by full head sha (push all-open rejudge).
+
+    Used by ``resolve`` to emit one matrix cell per head so each ``marker`` job shares the
+    ``adversary-marker-<head>`` concurrency group with dispatch / ``workflow_run`` for that sha
+    (Codex P1 on #490, 2026-11-10: a single ``push-rejudge-all-open`` key raced those jobs).
+    Raises ValueError when an open PR's head is not 40 hex; ApiError on a failed page.
+    """
+    by: dict[str, list[int]] = {}
+    for p in _all_pages(api, f"repos/{repo}/pulls?state=open"):
+        if not isinstance(p.get("number"), int):
+            continue
+        if p.get("state", "open") != "open":
+            continue
+        if not _same_repo(((p.get("base") or {}).get("repo") or {}).get("full_name"), repo):
+            continue
+        head = str(((p.get("head") or {}).get("sha")) or "").lower()
+        if not SHA40.match(head):
+            raise ValueError(f"open PR #{p['number']} has a non-40-hex head: {head!r}")
+        by.setdefault(head, []).append(p["number"])
+    return {h: sorted(set(ns)) for h, ns in by.items()}
 
 
 def find_prs(event_name: str, event: dict, repo: str, api) -> tuple[list[int], str, str]:
@@ -1112,20 +1132,15 @@ def find_prs(event_name: str, event: dict, repo: str, api) -> tuple[list[int], s
 
     workflow_dispatch: the `pr` input (digits only); its head is read from `GET pulls/{pr}`. workflow_run: the event's
     `pull_requests[]` (same-repo PRs only; GitHub leaves it empty for a fork PR) and the commit lookup, else
-    `GET pulls?head=OWNER:BRANCH` from the run's head repository and branch. push: every open PR of this repository
-    (paths-filtered in the workflow; never invents APPROVE — only re-posts statuses). Raises ValueError for an event
-    it cannot read, ApiError when a lookup fails.
+    `GET pulls?head=OWNER:BRANCH` from the run's head repository and branch. push: every open same-repo PR, with
+    head ``""`` — ``resolve`` expands them into a per-head matrix so each marker job uses the head-keyed
+    concurrency group (never invents APPROVE). Raises ValueError for an event it cannot read, ApiError when a
+    lookup fails.
     """
     if event_name == "push":
         # Paths filter in the workflow limits this to marker module / workflow edits on the default branch.
-        nums = [
-            p["number"]
-            for p in _all_pages(api, f"repos/{repo}/pulls?state=open")
-            if isinstance(p.get("number"), int)
-            and p.get("state", "open") == "open"
-            and _same_repo(((p.get("base") or {}).get("repo") or {}).get("full_name"), repo)
-        ]
-        return sorted(set(nums)), "push all-open", ""
+        by = _open_prs_by_head(api, repo)
+        return sorted({n for ns in by.values() for n in ns}), "push all-open", ""
     if event_name == "workflow_dispatch":
         pr = str(((event.get("inputs") or {}).get("pr")) or "").strip()
         if not re.fullmatch(r"[1-9][0-9]{0,9}", pr):
@@ -1462,35 +1477,54 @@ def judge_pr(api, repo: str, n: int, target_url: str = "") -> dict:
             "detail": detail}
 
 
+def _matrix_payload(include: list[dict]) -> dict:
+    """``matrix`` / ``has_work`` for the workflow's ``strategy.matrix: ${{ fromJson(...) }}``."""
+    return {
+        "matrix": json.dumps({"include": include}, separators=(",", ":")),
+        "has_work": "true" if include else "false",
+    }
+
+
 def resolve(event_name: str, event: dict, repo: str, api) -> tuple[int, dict]:
-    """The workflow's first job: the PR numbers, the concurrency key, and the optional single-head filter.
+    """The workflow's first job: a per-head matrix for ``marker``, plus legacy ``prs`` / ``key`` / ``at_head``.
 
-    For ``workflow_run`` / ``workflow_dispatch`` the key is the HEAD SHA the PRs were found at (empty when there is
-    no PR): PRs sharing a head share one commit status, so every run that could post on that sha, a dispatch and a
-    ``workflow_run`` alike, is in one concurrency group and they never race (2026-11-07; the key was the PR numbers,
-    so a dispatch for #10 and a run for #10 and #11 at the same head could post in parallel). ``at_head`` matches the
-    key so the marker job posts only on that sha.
-
-    For ``push`` (marker module / workflow landed on the default branch) the key is ``PUSH_REJUDGE_KEY`` and
-    ``at_head`` is empty: the marker job rejudges every open PR across heads without inventing APPROVE.
+    Every ``marker`` cell uses concurrency group ``adversary-marker-<head>`` and ``--at-head`` for that sha, so a
+    push sweep, a dispatch and a ``workflow_run`` that could post on the same commit serialize together
+    (2026-11-07; push used a single ``push-rejudge-all-open`` key until 2026-11-10 and raced those jobs — Codex P1
+    on #490). ``workflow_run`` / ``workflow_dispatch`` emit one cell; ``push`` emits one cell per distinct open
+    head (paths-filtered landing of the marker module / workflow; never invents APPROVE).
     """
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo or ""):
         return 2, {"error": f"not an OWNER/NAME repository: {repo!r}"}
+    if event_name == "push":
+        try:
+            by = _open_prs_by_head(api, repo)
+        except (ValueError, ApiError) as e:
+            return 2, {"error": str(e)}
+        include = [
+            {"head": h, "prs": ",".join(str(n) for n in nums)}
+            for h, nums in sorted(by.items())
+        ]
+        prs_csv = ",".join(str(n) for n in sorted({n for ns in by.values() for n in ns}))
+        return 0, {
+            "prs": prs_csv,
+            "key": "",
+            "at_head": "",
+            "found_by": "push all-open",
+            **_matrix_payload(include),
+        }
     try:
         prs, how, head = find_prs(event_name, event, repo, api)
     except (ValueError, ApiError) as e:
         return 2, {"error": str(e)}
-    if event_name == "push":
-        key = PUSH_REJUDGE_KEY if prs else ""
-        at_head = ""
-    else:
-        key = head if prs else ""
-        at_head = key
+    key = head if prs else ""
+    include = [{"head": head, "prs": ",".join(str(n) for n in prs)}] if prs else []
     return 0, {
         "prs": ",".join(str(n) for n in prs),
         "key": key,
-        "at_head": at_head,
+        "at_head": key,
         "found_by": how,
+        **_matrix_payload(include),
     }
 
 
@@ -1548,9 +1582,14 @@ def run_event(event_name: str, event: dict, repo: str, api, target_url: str = ""
     for head, rs in by_head.items():
         status = dict(rs[0]["status"])
         nums = _pr_list(rs)
-        if unread:
-            # The run's PRs were found at one head, so a PR that could not be read may share this status: fail closed.
-            bad = _pr_list(unread)
+        # Scope unread failures to this head only (Codex P2 on #490, 2026-11-10): a push sweep used to
+        # poison every head when any PR in the batch was unreadable. A single-head cell (`at_head`) also
+        # fails closed on a PR that never yielded a head (still this concurrency group's status).
+        unread_here = [r for r in unread if r.get("head") == head]
+        if at_head and head == at_head:
+            unread_here = unread_here + [r for r in unread if not r.get("head")]
+        if unread_here:
+            bad = _pr_list(unread_here)
             status.update(state="failure", description=f"PR {bad} at this head could not be read ({head[:12]})"[:140])
         elif len(rs) > 1 and any(r["outcome"] != "approve" for r in rs):
             status.update(state="failure", description=f"PRs {nums} share head {head[:12]} and not all approve"[:140])
@@ -1610,6 +1649,8 @@ def main(argv: list[str] | None = None) -> int:
                         f"prs={out['prs']}\n"
                         f"key={out['key']}\n"
                         f"at_head={out.get('at_head', out['key'])}\n"
+                        f"matrix={out['matrix']}\n"
+                        f"has_work={out['has_work']}\n"
                     )
             return rc
         try:
