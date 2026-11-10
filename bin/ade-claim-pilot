@@ -1,0 +1,278 @@
+#!/usr/bin/env python3
+"""ade-claim-pilot — run (or dry-run) the S4 six-case claims enforcement pilot.
+
+    ade-claim-pilot --fixture [--json] [--cases 1,2]
+    ade-claim-pilot --list
+
+Fixture mode exercises cases 1–2 in throwaway git worktrees under a private
+``ADE_STATE_DIR`` (no PATH shim, no hard refuse). Cases 3–6 need a live Mac /
+ops checkout and are reported ``skipped_fixture``. Soft-delete of hard refuse
+stays off until the operator signs the live pilot (docs/git-guard.md S4).
+
+Exit: 0 all selected runnable cases passed (skips ok); 1 a runnable case failed;
+2 usage.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+from typing import Any
+
+HERE = Path(__file__).resolve().parent
+ADE_CLAIMS = HERE / "ade_claims.py"
+
+CASES = {
+    1: {
+        "id": "ade-code-task",
+        "title": "ADE code task in a claimed linked worktree",
+        "fixture": True,
+    },
+    2: {
+        "id": "one-line-queue",
+        "title": "One-line docs edit in its own claimed worktree",
+        "fixture": True,
+    },
+    3: {
+        "id": "ops-promotion",
+        "title": "Designated promoter ff-only on integration checkout",
+        "fixture": False,
+        "skip": "needs live ~/ops or primary integration checkout (order 9 exception b)",
+    },
+    4: {
+        "id": "submodule-task",
+        "title": "Submodule / nested checkout from claimed parent",
+        "fixture": False,
+        "skip": "needs a real nested checkout; not invented in CI",
+    },
+    5: {
+        "id": "fixed-cwd-agent",
+        "title": "Fixed-cwd agent writes via -C into a claim",
+        "fixture": False,
+        "skip": "needs a live agent with fixed cwd",
+    },
+    6: {
+        "id": "long-lived-server",
+        "title": "Long-running writer holds claim across peers",
+        "fixture": False,
+        "skip": "needs a live long-running process + second writer",
+    },
+}
+
+
+def _run(argv: list[str], *, cwd: Path | None = None, env: dict[str, str] | None = None,
+         timeout: float = 60) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        argv, cwd=str(cwd) if cwd else None, env=env, text=True,
+        capture_output=True, timeout=timeout, check=False,
+    )
+
+
+def _git(cwd: Path, *args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    return _run(["git", *args], cwd=cwd, env=env)
+
+
+def _init_repo(path: Path) -> str:
+    path.mkdir(parents=True)
+    env = {**os.environ, "GIT_AUTHOR_NAME": "ade-claim-pilot", "GIT_AUTHOR_EMAIL": "pilot@example",
+           "GIT_COMMITTER_NAME": "ade-claim-pilot", "GIT_COMMITTER_EMAIL": "pilot@example"}
+    _git(path, "init", "-b", "master", env=env)
+    _git(path, "config", "user.name", "ade-claim-pilot", env=env)
+    _git(path, "config", "user.email", "pilot@example", env=env)
+    (path / "README.md").write_text("pilot\n", encoding="utf-8")
+    _git(path, "add", "README.md", env=env)
+    _git(path, "commit", "-m", "init", env=env)
+    sha = _git(path, "rev-parse", "HEAD", env=env).stdout.strip()
+    return sha
+
+
+def _claims_env(state: Path) -> dict[str, str]:
+    env = os.environ.copy()
+    env["ADE_STATE_DIR"] = str(state)
+    return env
+
+
+def _new_claim(env: dict[str, str], *, claim_id: str, path: Path, branch: str, base_sha: str) -> subprocess.CompletedProcess[str]:
+    return _run(
+        [sys.executable, str(ADE_CLAIMS), "new",
+         "--id", claim_id, "--path", str(path), "--branch", branch,
+         "--base-sha", base_sha, "--created-by", "ade-claim-pilot", "--ttl", "1",
+         "--owner-agent", "pilot-agent"],
+        env=env,
+    )
+
+
+def run_case_1(root: Path, state: Path) -> dict[str, Any]:
+    """Claimed worktree: edit, commit on a branch (no push — no remote)."""
+    t0 = time.monotonic()
+    primary = root / "ade-primary"
+    base_sha = _init_repo(primary)
+    wt = root / "ade-feature-wt"
+    env = _claims_env(state)
+    git_env = {**env, "GIT_AUTHOR_NAME": "ade-claim-pilot", "GIT_AUTHOR_EMAIL": "pilot@example",
+               "GIT_COMMITTER_NAME": "ade-claim-pilot", "GIT_COMMITTER_EMAIL": "pilot@example"}
+    r = _git(primary, "worktree", "add", "-b", "cursor/pilot-1", str(wt), env=git_env)
+    if r.returncode != 0:
+        return {"case": 1, "status": "fail", "error": r.stderr.strip() or r.stdout.strip(),
+                "setup_s": round(time.monotonic() - t0, 3)}
+    disk0 = _du(root)
+    cr = _new_claim(env, claim_id="pilot-case-1", path=wt, branch="cursor/pilot-1", base_sha=base_sha)
+    if cr.returncode != 0:
+        return {"case": 1, "status": "fail", "error": cr.stderr.strip() or cr.stdout.strip(),
+                "setup_s": round(time.monotonic() - t0, 3)}
+    (wt / "feature.txt").write_text("ok\n", encoding="utf-8")
+    _git(wt, "add", "feature.txt", env=git_env)
+    c = _git(wt, "commit", "-m", "pilot case 1", env=git_env)
+    # Foreign write into primary (shared checkout) must not be the claim path.
+    shared_write = (primary / "leak.txt")
+    shared_write.write_text("should not be claim path\n", encoding="utf-8")
+    ls = _run([sys.executable, str(ADE_CLAIMS), "list", "--json", "--state", "active"], env=env)
+    claims = json.loads(ls.stdout or "[]") if ls.returncode == 0 else []
+    claimed_paths = {str(Path(c.get("path", "")).resolve()) for c in claims if isinstance(c, dict)}
+    ok = (
+        c.returncode == 0
+        and str(wt.resolve()) in claimed_paths
+        and str(primary.resolve()) not in claimed_paths
+        and (wt / "feature.txt").is_file()
+    )
+    return {
+        "case": 1,
+        "status": "pass" if ok else "fail",
+        "setup_s": round(time.monotonic() - t0, 3),
+        "disk_delta_bytes": _du(root) - disk0,
+        "path_binding_failures": 0 if ok else 1,
+        "false_refusals": 0,
+        "error": None if ok else "claim/path binding failed",
+        "claims_active": len(claims),
+    }
+
+
+def run_case_2(root: Path, state: Path) -> dict[str, Any]:
+    """One-line docs edit in its own claimed worktree."""
+    t0 = time.monotonic()
+    primary = root / "docs-primary"
+    base_sha = _init_repo(primary)
+    (primary / "docs").mkdir()
+    (primary / "docs" / "queue.md").write_text("# Queue\n\n1. old\n", encoding="utf-8")
+    env_git = {**os.environ, "GIT_AUTHOR_NAME": "ade-claim-pilot", "GIT_AUTHOR_EMAIL": "pilot@example",
+               "GIT_COMMITTER_NAME": "ade-claim-pilot", "GIT_COMMITTER_EMAIL": "pilot@example"}
+    _git(primary, "add", "docs/queue.md", env=env_git)
+    _git(primary, "commit", "-m", "queue", env=env_git)
+    base_sha = _git(primary, "rev-parse", "HEAD", env=env_git).stdout.strip()
+    wt = root / "docs-queue-wt"
+    env = _claims_env(state)
+    git_env = {**env, **{k: env_git[k] for k in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL",
+                                                  "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL")}}
+    r = _git(primary, "worktree", "add", "-b", "cursor/pilot-2", str(wt), env=git_env)
+    if r.returncode != 0:
+        return {"case": 2, "status": "fail", "error": r.stderr.strip() or r.stdout.strip(),
+                "setup_s": round(time.monotonic() - t0, 3)}
+    disk0 = _du(root)
+    cr = _new_claim(env, claim_id="pilot-case-2", path=wt, branch="cursor/pilot-2", base_sha=base_sha)
+    if cr.returncode != 0:
+        return {"case": 2, "status": "fail", "error": cr.stderr.strip() or cr.stdout.strip(),
+                "setup_s": round(time.monotonic() - t0, 3)}
+    q = wt / "docs" / "queue.md"
+    q.write_text(q.read_text(encoding="utf-8") + "2. pilot\n", encoding="utf-8")
+    _git(wt, "add", "docs/queue.md", env=git_env)
+    c = _git(wt, "commit", "-m", "pilot case 2", env=git_env)
+    ok = c.returncode == 0 and "2. pilot" in q.read_text(encoding="utf-8")
+    return {
+        "case": 2,
+        "status": "pass" if ok else "fail",
+        "setup_s": round(time.monotonic() - t0, 3),
+        "disk_delta_bytes": _du(root) - disk0,
+        "path_binding_failures": 0 if ok else 1,
+        "false_refusals": 0,
+        "error": None if ok else (c.stderr.strip() or "commit failed"),
+    }
+
+
+def _du(path: Path) -> int:
+    total = 0
+    for p in path.rglob("*"):
+        try:
+            if p.is_file() and not p.is_symlink():
+                total += p.stat().st_size
+        except OSError:
+            pass
+    return total
+
+
+def run_fixture(cases: list[int]) -> dict[str, Any]:
+    results: list[dict[str, Any]] = []
+    with tempfile.TemporaryDirectory(prefix="ade-claim-pilot-") as tmp:
+        root = Path(tmp)
+        state = root / "state"
+        state.mkdir()
+        for n in cases:
+            meta = CASES[n]
+            if not meta.get("fixture"):
+                results.append({
+                    "case": n, "id": meta["id"], "status": "skipped_fixture",
+                    "skip": meta.get("skip"), "title": meta["title"],
+                })
+                continue
+            fn = {1: run_case_1, 2: run_case_2}[n]
+            row = fn(root, state)
+            row["id"] = meta["id"]
+            row["title"] = meta["title"]
+            results.append(row)
+    failed = [r for r in results if r.get("status") == "fail"]
+    return {
+        "mode": "fixture",
+        "hard_refuse": False,
+        "path_shim": False,
+        "results": results,
+        "ok": not failed,
+        "failed": [r["case"] for r in failed],
+    }
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(prog="ade-claim-pilot", description=__doc__.split("\n\n")[0])
+    ap.add_argument("--fixture", action="store_true",
+                    help="run CI-safe fixture cases (1–2); skip 3–6 with reasons")
+    ap.add_argument("--list", action="store_true", help="print the six cases and exit")
+    ap.add_argument("--cases", default="1,2,3,4,5,6",
+                    help="comma-separated case numbers (default all; fixture runs 1–2 only)")
+    ap.add_argument("--json", action="store_true")
+    a = ap.parse_args(argv)
+    if a.list:
+        for n, meta in CASES.items():
+            kind = "fixture" if meta.get("fixture") else "live-only"
+            print(f"{n}. [{kind}] {meta['id']}: {meta['title']}")
+        return 0
+    if not a.fixture:
+        print("ade-claim-pilot: pass --fixture (live pilot is operator-run; see docs/git-guard.md S4)",
+              file=sys.stderr)
+        return 2
+    try:
+        cases = [int(x) for x in a.cases.split(",") if x.strip()]
+    except ValueError:
+        print("ade-claim-pilot: --cases must be integers", file=sys.stderr)
+        return 2
+    for n in cases:
+        if n not in CASES:
+            print(f"ade-claim-pilot: unknown case {n}", file=sys.stderr)
+            return 2
+    report = run_fixture(cases)
+    if a.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        for r in report["results"]:
+            st = r["status"]
+            extra = r.get("skip") or r.get("error") or ""
+            print(f"case {r['case']} {r.get('id')}: {st}" + (f" ({extra})" if extra else ""))
+        print("ok" if report["ok"] else f"FAIL cases={report['failed']}")
+    return 0 if report["ok"] else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
