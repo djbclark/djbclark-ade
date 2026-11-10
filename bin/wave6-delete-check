@@ -97,6 +97,8 @@ CALLER_BINS = (
 )
 
 # Live invocation / path forms (not every historical prose mention).
+# Also catches backticked `acp-dispatch` and `acp-dispatch <agent>` placeholders
+# that rewrite tips can leave while named-agent argv forms are gone (2026-11-10).
 LIVE_RE = re.compile(
     r"(?:"
     r"bin/acp-dispatch(?:-wait)?"
@@ -105,6 +107,8 @@ LIVE_RE = re.compile(
     r"|\[\"acp-run\""
     r"|`acp-run`"
     r"|acp-run\s+--perm"
+    r"|`acp-dispatch`"
+    r"|acp-dispatch\s+<"
     r"|acp-dispatch\s+(?:claude|codex|antigravity|cursor|omp|hermes|footer|check|wait|tell|resume|reap|outcome|ls)"
     r"|relay\.py\s+<"
     r")"

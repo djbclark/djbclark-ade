@@ -159,7 +159,7 @@ Skills (22, from each `skills/*/SKILL.md`):
 | [`skill-everywhere`](bin/skill-everywhere) | Make a shared skill visible to every agent TUI on this machine by symlinking it into each TUI's user-level skills dir. |
 | [`wait-file`](bin/wait-file) | Block until a file the waited-on command writes is ready, with a hard timeout. |
 | [`wave6-delete-check`](bin/wave6-delete-check) | Refuse Wave 6 shim deletion until gates pass; `--dry-run` / `--inventory` never invent Mac live (2026-11-10). |
-| [`wave6-mac-proof-capture`](bin/wave6-mac-proof-capture) | Mac live-cycle proof harness for wave6-delete-check (2026-11-10). |
+| [`wave6-mac-proof-capture`](bin/wave6-mac-proof-capture) | Mac --live / Linux-safe proof harness for wave6-delete-check (never invents Mac live; 2026-11-10). |
 <!-- roster:end -->
 
 ## Workflow migration
