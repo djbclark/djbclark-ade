@@ -213,7 +213,8 @@ next `/baton` re-arms from these entries.
 - [ ] Failed approaches + why
 - [ ] Blockers / open questions, including every sub-agent report whose
       first line is `BLOCKED: <question>` and every dispatched slice with no
-      report (`acp-dispatch check <out dir | report paths>`): an unanswered
+      report (scan report dirs / `.done` markers; `acp-dispatch check` only while
+      that shim still exists): an unanswered
       sub-agent question does not survive a compaction unless it is written here
 - [ ] ONE explicit next action at the top of Where We're Going
 - [ ] Every open job record of this session is listed under Detached jobs
@@ -329,7 +330,7 @@ top-level agent with the successor command above (Sonnet 5.5 with `--thinking me
 leave this one running: no archive. Skip Step 8 for a partial handoff: it would rename the session the operator keeps
 using. This is not `/handoff paseo` (the durable transfer of the whole session).
 
-**Top-level session only.** A sub-agent (Agent tool, a `fan-out` slice, an `acp-dispatch` slice) shares or inherits
+**Top-level session only.** A sub-agent (Agent tool, a `fan-out` slice, or any `paseo run` child) shares or inherits
 the parent's agent id, so a successor or rename from it would act on the PARENT. A sub-agent or dispatched slice
 always treats the handoff as document-only and never runs Steps 8 and 9.
 
