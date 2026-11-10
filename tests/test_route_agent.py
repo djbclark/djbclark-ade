@@ -866,11 +866,18 @@ class TestRoutingPolicyToml(unittest.TestCase):
         r.reload_policy(Path(__file__).resolve().parent.parent / "config" / "routing.toml")
 
     def test_load_routing_effective_matches_load_policy_on_repo_file(self):
-        """S1: default reload path projects the same routing domain as direct load_policy."""
-        path = Path(__file__).resolve().parent.parent / "config" / "routing.toml"
-        via_direct = r.load_policy(path)
+        """S1: default reload path projects the same routing domain as direct load_policy.
+
+        Provenance prefers ``config/ade.toml`` when present (folded repo base); content
+        still matches ``load_policy(config/routing.toml)`` for fold equivalence.
+        """
+        root = Path(__file__).resolve().parent.parent
+        legacy = root / "config" / "routing.toml"
+        preferred = root / "config" / "ade.toml"
+        expected_src = preferred if preferred.is_file() else legacy
+        via_direct = r.load_policy(legacy)
         via_eff, src = r.load_routing_effective()
-        self.assertEqual(Path(src).resolve(), path.resolve())
+        self.assertEqual(Path(src).resolve(), expected_src.resolve())
         self.assertEqual(via_eff["routing"]["kinds"], via_direct["routing"]["kinds"])
         self.assertEqual(len(via_eff["service"]), len(via_direct["service"]))
         self.assertEqual(
