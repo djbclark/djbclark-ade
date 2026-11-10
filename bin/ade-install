@@ -7,8 +7,11 @@
   ade-install doctor [--root DIR] [--json]
   ade-install apply [--root DIR] [--json] [--dry-run|--yes] [--id ID ...] [--force]
 
-Doctor runs recorded probe_argv when present (else PATH presence); never
-repairs. Apply defaults to --dry-run; --yes runs user install_argv.
+Doctor runs recorded probe_argv when present (else PATH presence); hard
+deps (including graft --version) fail when missing. When
+config/pi-pool-acceptance.toml is under --root, also warns on UNACCEPTED
+Pi pools (exit 0; never writes accepted=true). Never repairs.
+Apply defaults to --dry-run; --yes runs user install_argv.
 --system --dry-run previews system_argv; executing system_argv is refused.
 Secrets are never read.
 Uses config/install.toml only while config/ade.toml is absent.
@@ -187,7 +190,8 @@ def main(argv: list[str] | None = None) -> int:
         ("check", cmd_check, "validate config/install.toml"),
         ("catalog", cmd_catalog, "list components, key references, and login checks"),
         ("plan", cmd_plan, "print-only install plan (no writes)"),
-        ("doctor", cmd_doctor, "run probe_argv or observe PATH; never repairs or reads secrets"),
+        ("doctor", cmd_doctor,
+         "run probe_argv / PATH; advisory UNACCEPTED Pi pools; never repairs or writes acceptance"),
     ):
         p = sub.add_parser(name, parents=[shared], help=help_text)
         p.add_argument("--json", action="store_true")

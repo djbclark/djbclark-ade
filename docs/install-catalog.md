@@ -59,8 +59,14 @@ just install-apply-dry
 - `plan` is print-only: `would-install` (has `install_argv`) / `needs-system` /
   `blocked` / `skip`.
 - `doctor` prefers `probe_argv` (runs the tool; argv list, short timeout) and
-  falls back to PATH `presence`. Missing or failed expected components fail
-  the command; `unknown` is neither healthy nor absent. Doctor does not repair.
+  falls back to PATH `presence`. Missing or failed **hard** / chosen expected
+  components fail the command (including hard-dep `graft` when
+  `graft --version` is missing or errors); `unknown` is neither healthy nor
+  absent. When `config/pi-pool-acceptance.toml` is present under `--root`,
+  doctor also runs an **advisory** `ade-pi-pools` check: `warn` names every
+  still-UNACCEPTED pool and keeps exit 0; accepted pools (Cursor / Z.ai on the
+  shipped file) stay quiet; doctor never writes `accepted=true` (operator flips
+  the file; docs/pi-defaults.md B4). Doctor does not repair.
 - `apply` defaults to **dry-run**. `--yes` executes user `install_argv` for
   expected missing components (or `--force`). Writes an atomic ledger under
   `~/.local/state/djbclark-ade/install/ledger.json` (or `ADE_INSTALL_STATE_DIR`).
@@ -76,7 +82,7 @@ just install-apply-dry
 | --- | --- |
 | `just`, `uv` | `ade-user-install` release fetch → `{prefix}` |
 | `skill-everywhere`, `firecrawl-router` | `ade-user-install link` into `{prefix}` |
-| `graft` | `npm install -g @nanonets/graft` (user npm prefix) |
+| `graft` | `npm install -g @nanonets/graft` (user npm prefix); hard dep — `probe_argv = ["graft", "--version"]` fails doctor when missing |
 | `git`, `gh` | `needs_system` + Linux `system_argv` (`apt-get`) + `system_argv_darwin` (`brew`); dry-run only |
 | `aiuse` | `uv tool install git+https://github.com/djbclark/aiuse` |
 | others | still `UNKNOWN` / no `install_argv` |

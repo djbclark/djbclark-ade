@@ -2,10 +2,12 @@
 
 Transitional source: ``config/install.toml`` when ``config/ade.toml`` is absent.
 Key entries are names and metadata only. Doctor runs ``probe_argv`` when
-recorded (else PATH presence) and never repairs. Apply is user-scoped only:
-``--dry-run`` by default, ``--yes`` to execute recorded ``install_argv``
-(argv lists, never shell=True). Root / ``--system`` effects are refused until
-a later unit. Secrets are never read.
+recorded (else PATH presence), warns on UNACCEPTED Pi pools without writing
+acceptance, and never repairs. Hard-dep probes (including ``graft --version``)
+fail doctor when missing. Apply is user-scoped only: ``--dry-run`` by default,
+``--yes`` to execute recorded ``install_argv`` (argv lists, never shell=True).
+Root / ``--system`` effects are refused until a later unit. Secrets are never
+read.
 """
 from __future__ import annotations
 
@@ -68,9 +70,9 @@ class Catalog:
 
 @dataclass(frozen=True)
 class Observation:
-    kind: str  # component | key | login | catalog
+    kind: str  # component | key | login | catalog | pools
     id: str
-    status: str  # ok | missing | unknown | error | unchosen | never
+    status: str  # ok | missing | unknown | error | unchosen | never | warn
     detail: str
 
 
@@ -356,13 +358,66 @@ def observe_login(row: dict[str, Any]) -> Observation:
     return Observation("login", lid, "unknown", f"login check recorded as {cmd!r}; not executed")
 
 
+def default_pi_pool_acceptance_path(root: Path) -> Path:
+    return root / "config" / "pi-pool-acceptance.toml"
+
+
+def observe_pi_pools(
+    *,
+    root: Path,
+    acceptance_path: Path | None = None,
+) -> Observation | None:
+    """Advisory Pi pool acceptance check via ``ade-pi-pools`` (queue Carried #36).
+
+    When ``config/pi-pool-acceptance.toml`` is under ``root``, report ``warn`` for
+    every pool still ``accepted = false`` (or missing for a routing Pi service).
+    Accepted pools (Cursor / Z.ai on the shipped file) stay quiet: they are not
+    named in a warn detail. A fully-accepted file is ``ok``.
+
+    Observe-only: never writes ``accepted=true`` and never mutates the file.
+    Advisory: a ``warn`` does not fail doctor (exit stays 0 from this check).
+    Returns None when the acceptance file is absent (fixture catalogs).
+    """
+    path = acceptance_path if acceptance_path is not None else default_pi_pool_acceptance_path(root)
+    if not path.is_file():
+        return None
+    # Lazy import: route_agent is heavy; skip when the file is absent.
+    import ade_pi_pools as pools  # noqa: PLC0415
+
+    try:
+        rows = pools.status_rows(path)
+    except (OSError, ValueError, UnicodeDecodeError) as e:  # TOMLDecodeError ⊂ ValueError
+        return Observation(
+            "pools", "ade-pi-pools", "error",
+            f"pi-pool-acceptance unreadable ({path}): {e}",
+        )
+    unaccepted = [r["pool"] for r in rows if not r["accepted"]]
+    if unaccepted:
+        return Observation(
+            "pools", "ade-pi-pools", "warn",
+            "UNACCEPTED pool(s): " + ", ".join(unaccepted)
+            + f" (flip accepted=true in {path} after operator acceptance; "
+            "docs/pi-defaults.md B4; doctor never writes accepted=true)",
+        )
+    return Observation(
+        "pools", "ade-pi-pools", "ok",
+        f"every listed Pi pool is accepted ({path})",
+    )
+
+
 def doctor(
     catalog: Catalog,
     *,
     runner: Runner | None = None,
     probe_timeout_s: float = 15.0,
+    pi_pool_acceptance_path: Path | None = None,
 ) -> tuple[list[Observation], int]:
-    """Observe-only doctor. Exit 1 if any expected component is missing/error; never repairs."""
+    """Observe-only doctor. Exit 1 if any expected component is missing/error; never repairs.
+
+    Hard deps (including ``graft`` via ``graft --version``) fail the command when
+    missing/error. The Pi pool advisory (``ade-pi-pools``) may ``warn`` on
+    UNACCEPTED pools without changing the exit code; it never writes acceptance.
+    """
     obs: list[Observation] = [
         Observation("catalog", str(catalog.path), "ok", "catalog validated"),
     ]
@@ -381,6 +436,15 @@ def doctor(
         obs.append(observe_key(row))
     for row in catalog.logins:
         obs.append(observe_login(row))
+    pools_obs = observe_pi_pools(
+        root=catalog.root,
+        acceptance_path=pi_pool_acceptance_path,
+    )
+    if pools_obs is not None:
+        obs.append(pools_obs)
+        # Advisory warn stays exit 0; only a broken acceptance file fails doctor.
+        if pools_obs.status == "error":
+            hard_missing += 1
     return obs, (1 if hard_missing else 0)
 
 
