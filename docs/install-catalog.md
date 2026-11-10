@@ -176,12 +176,18 @@ ade-install apply --yes --system --apply-system --id git
 applied at a time. CI must keep using dry-run / print / mocked runners — do
 not pass `--apply-system` in automated jobs.
 
+S4b jobs: `ade-sched list` / `diff` / `just doctor` stay report-only (never
+unload). `ade-sched reconcile` / `just sched-reconcile` is the first ADE write
+path (systemd user units + `jobs.json` ownership ledger; dry-run default;
+`--yes` writes; never unloads foreign/unknown or root/`--system`). See
+`docs/scheduling.md`.
+
 ## G. Next units
 
 Ownership-aware reconcile beyond the install ledger (setup-plan S3), remaining
 owner installers (sudo-secretspec Linux tarball, curl-free Cursor CLI fetch, Hermes
 offered path — basic setup via `just hermes-setup`, Paseo desktop/daemon and skill bundle), recorded provider
-`verify_argv` recipes in the catalog, collect/set batch. S4 jobs stay explicit
-later work.
+`verify_argv` recipes in the catalog, collect/set batch. S4b launchd/cron/
+`paseo schedule` reconcile write paths remain later work.
 Follow-up: tighten `--apply-system` with an ownership generation / read-back
 lock if multi-agent installs share a machine.

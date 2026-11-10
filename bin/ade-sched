@@ -9,18 +9,22 @@ usage:
   ade-sched [options] status [LABEL...]     installed / active / next run; no LABEL: every job ade-sched generated
   ade-sched [options] list                  print install.jobs / install.retired_jobs from the install catalog
   ade-sched [options] diff                  compare the catalog to live launchd/systemd/cron/paseo (report only)
+  ade-sched [options] reconcile             ADE-owned systemd reconcile + ownership ledger (S4b; default dry-run)
 
 options (before or after the subcommand):
   --backend auto|launchd|systemd|cron   default auto (env ADE_SCHED_BACKEND; `none` there turns scheduling off, exit 69)
   --ade DIR             the checkout that fills __ADE__ / @ADE@ (default: the one this script is in; install refuses
                         that default with exit 2 when it is a linked git worktree, which is deleted after its merge)
-  --root DIR            catalog root for list/diff (default: checkout containing this script)
+  --root DIR            catalog root for list/diff/reconcile (default: checkout containing this script)
   --set KEY=VALUE       fill a placeholder, literally as written in the plist (__STATE__=..., @TARGET@=...); repeatable
-  --dry-run             install/uninstall: print the artifacts and commands, change nothing
-  --no-activate         install/uninstall: write or remove the files, print the activation commands instead of running them
-  --allow-no-linger     systemd install: proceed when loginctl says Linger=no (default: exit 69 before writing, because
+  --dry-run             install/uninstall: print the artifacts and commands, change nothing;
+                        reconcile: plan only (default for reconcile when --yes is absent)
+  --yes                 reconcile: execute ADE-scoped systemd installs/removes and write jobs.json
+  --name NAME           reconcile: limit to these logical job names (repeatable)
+  --no-activate         install/uninstall/reconcile: write or remove the files, print the activation commands instead of running them
+  --allow-no-linger     systemd install/reconcile: proceed when loginctl says Linger=no (default: exit 69 before writing, because
                         user timers stop at logout); never runs sudo, prints `sudo loginctl enable-linger USER`
-  --json                list/diff: machine-readable output
+  --json                list/diff/reconcile: machine-readable output
 
 Auto-detection: darwin with launchctl -> launchd; a booted systemd whose `systemctl --user is-system-running` answers
 running/degraded/starting/initializing -> systemd; booted systemd with no reachable user manager -> exit 69 (never a
@@ -30,17 +34,22 @@ __NAME__ or @NAME@ left unfilled is exit 2, and so is an EnvironmentVariables na
 launchd; plist key KillMode overrides), TimeoutStartSec=max(3 x StartInterval, 300s) and AccuracySec=1s. On systemd and
 cron, ~/.local/bin:/usr/local/bin:/usr/bin:/bin go first in PATH (plist PATHs are Mac paths).
 
-list/diff read config/install.toml [install.jobs] / [install.retired_jobs] (S4b) and load the install catalog
+list/diff/reconcile read config/install.toml [install.jobs] / [install.retired_jobs] (S4b) and load the install catalog
 only then (so backend/install/status stay usable on Python 3.10 without tomllib). diff never unloads any job,
-including foreign owners (Orca/BB/herdr and unknown labels are reported only). A Paseo probe timeout/launch
-error or a failed host-backend scan is reported as unknown, never as an empty job list.
+including foreign owners (Orca/BB/herdr and unknown labels are reported only). reconcile's first write path is
+systemd user units only: it installs/reloads ADE-owned ade-sched jobs, removes only labels recorded in the
+ownership ledger (~/.local/state/djbclark-ade/jobs.json or ADE_JOBS_STATE_DIR), and never unloads foreign/unknown
+owners or root/--system units. A Paseo probe timeout/launch error or a failed host-backend scan is reported as
+unknown, never as an empty job list.
 
 Overrides (env): ADE_SCHED_LAUNCHCTL, ADE_SCHED_SYSTEMCTL, ADE_SCHED_LOGINCTL, ADE_SCHED_CRONTAB (binaries);
 ADE_SCHED_LAUNCH_AGENTS (default ~/Library/LaunchAgents), ADE_SCHED_UNIT_DIR (default
 ${XDG_CONFIG_HOME:-~/.config}/systemd/user), ADE_SCHED_LOCK (the crontab edit lock, default
-${XDG_STATE_HOME:-~/.local/state}/ade/ade-sched.lock).
+${XDG_STATE_HOME:-~/.local/state}/ade/ade-sched.lock); ADE_JOBS_STATE_DIR (ownership ledger dir, default
+~/.local/state/djbclark-ade).
 
-exit: 0 ok; 1 an activation command failed (its stderr is quoted) or diff found ADE drift; 2 bad job or usage; 3 status:
+exit: 0 ok; 1 an activation command failed (its stderr is quoted) or diff found ADE drift or reconcile had a
+blocked/failed step; 2 bad job or usage (also: reconcile --yes on a non-systemd backend); 3 status:
 a LABEL is not installed; 69 no usable scheduler (none forced, none found, systemd user manager unreachable, Linger=no
 on a systemd install without --allow-no-linger, KeepAlive or a StartInterval under 60 s on cron). A `crontab -l`
 failure other than "no crontab" is exit 1 and the crontab is left untouched.
@@ -59,7 +68,7 @@ from pathlib import Path
 sys.path[:0] = [d for d in (os.path.dirname(os.path.realpath(__file__)),) if d not in sys.path]   # python3 -I has no script dir
 import ade_sched
 
-# ade_install (and its tomllib via ade_config) is imported only inside list/diff. Other
+# ade_install (and its tomllib via ade_config) is imported only inside list/diff/reconcile. Other
 # subcommands must stay usable on Python 3.10 hosts (Ubuntu 22.04) that lack tomllib.
 
 
@@ -79,7 +88,9 @@ def _common(p: argparse.ArgumentParser, top: bool) -> None:
     p.add_argument("--root", metavar="DIR", **dflt(None))
     # its own dest on a subcommand: an append there would REPLACE the top-level list, dropping earlier --set values
     p.add_argument("--set", action="append", metavar="KEY=VALUE", dest="subst" if top else "sub_subst", **dflt([]))
-    p.add_argument("--dry-run", action="store_true", **dflt(False))
+    p.add_argument("--dry-run", action="store_true", dest="dry_run" if top else "sub_dry_run", **dflt(False))
+    p.add_argument("--yes", action="store_true", dest="yes" if top else "sub_yes", **dflt(False))
+    p.add_argument("--name", action="append", metavar="NAME", dest="names" if top else "sub_names", **dflt([]))
     p.add_argument("--no-activate", action="store_true", **dflt(False))
     p.add_argument("--allow-no-linger", action="store_true", **dflt(False))
     p.add_argument("--json", action="store_true", **dflt(False))
@@ -92,13 +103,18 @@ def parse(argv: list[str]) -> argparse.Namespace:
     sub = ap.add_subparsers(dest="cmd", required=True, parser_class=_Parser)
     for name, arg, nargs in (("backend", None, None), ("render", "plist", None), ("install", "plist", None),
                              ("uninstall", "label", None), ("status", "labels", "*"),
-                             ("list", None, None), ("diff", None, None)):
+                             ("list", None, None), ("diff", None, None), ("reconcile", None, None)):
         sp = sub.add_parser(name)
         _common(sp, top=False)
         if arg:
             sp.add_argument(arg, nargs=nargs) if nargs else sp.add_argument(arg)
     a = ap.parse_args(argv)
     a.subst = [*a.subst, *getattr(a, "sub_subst", [])]   # --set before and after the subcommand both count
+    a.names = [*a.names, *getattr(a, "sub_names", [])]
+    if getattr(a, "sub_dry_run", False):
+        a.dry_run = True
+    if getattr(a, "sub_yes", False):
+        a.yes = True
     return a
 
 
@@ -121,7 +137,7 @@ def _catalog_root(a: argparse.Namespace) -> Path:
 
 
 def _cmd_list(a: argparse.Namespace) -> int:
-    import ade_install as ai  # deferred: tomllib/3.11 only needed for catalog list/diff
+    import ade_install as ai  # deferred: tomllib/3.11 only needed for catalog list/diff/reconcile
 
     try:
         catalog = ai.load_catalog(root=_catalog_root(a))
@@ -145,7 +161,7 @@ def _cmd_list(a: argparse.Namespace) -> int:
 
 
 def _cmd_diff(a: argparse.Namespace) -> int:
-    import ade_install as ai  # deferred: tomllib/3.11 only needed for catalog list/diff
+    import ade_install as ai  # deferred: tomllib/3.11 only needed for catalog list/diff/reconcile
 
     try:
         catalog = ai.load_catalog(root=_catalog_root(a))
@@ -153,11 +169,7 @@ def _cmd_diff(a: argparse.Namespace) -> int:
         print(f"ade-sched: {e}", file=sys.stderr)
         return ade_sched.EX_USAGE
     backend = None if a.backend == "auto" else a.backend
-    try:
-        live = ade_sched.scan_live(backend)
-    except ade_sched.SchedError as e:
-        print(f"ade-sched: {e}", file=sys.stderr)
-        return e.code
+    live = ade_sched.scan_live(backend)
     rows = ade_sched.diff_jobs(catalog.jobs, catalog.retired_jobs, live, unload=False)
     failed = sum(1 for r in rows if r.fail)
     if a.json:
@@ -197,6 +209,62 @@ def _cmd_diff(a: argparse.Namespace) -> int:
     return 1 if failed else 0
 
 
+def _cmd_reconcile(a: argparse.Namespace) -> int:
+    import ade_install as ai  # deferred: tomllib/3.11 only needed for catalog list/diff/reconcile
+
+    if a.yes and a.dry_run:
+        print("ade-sched reconcile: refuse both --yes and --dry-run", file=sys.stderr)
+        return ade_sched.EX_USAGE
+    dry_run = not a.yes  # default dry-run; --yes executes
+    try:
+        catalog = ai.load_catalog(root=_catalog_root(a))
+    except ai.InstallError as e:
+        print(f"ade-sched: {e}", file=sys.stderr)
+        return ade_sched.EX_USAGE
+    backend = None if a.backend == "auto" else a.backend
+    names = set(a.names) if a.names else None
+    results, rc = ade_sched.reconcile(
+        catalog.jobs,
+        catalog.retired_jobs,
+        dry_run=dry_run,
+        backend=backend,
+        root=_catalog_root(a),
+        ade=a.ade,
+        names=names,
+        allow_no_linger=a.allow_no_linger,
+        activate=not a.no_activate,
+        extra_subst=_subst(a),
+    )
+    mode = "dry-run" if dry_run else "yes"
+    ledger_path = str(ade_sched.jobs_ledger_path())
+    if a.json:
+        json.dump(
+            {
+                "ok": rc == 0,
+                "mode": mode,
+                "ledger": ledger_path,
+                "write_backend": ade_sched.RECONCILE_WRITE_BACKEND,
+                "results": results,
+            },
+            sys.stdout,
+            indent=2,
+            sort_keys=True,
+        )
+        sys.stdout.write("\n")
+    else:
+        label = "OK" if rc == 0 else "FAIL"
+        print(
+            f"ade-sched reconcile ({mode}): {label} "
+            f"(systemd user write path; never unload foreign; ledger={ledger_path})"
+        )
+        for row in results:
+            print(
+                f"  {row.get('action', '?'):16} {row.get('category', 'job')}/{row.get('name')} "
+                f"owner={row.get('owner')}: {row.get('detail')}"
+            )
+    return rc
+
+
 def main(argv: list[str] | None = None) -> int:
     a = parse(sys.argv[1:] if argv is None else argv)
     if a.ade and not os.path.isdir(a.ade):
@@ -211,6 +279,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_list(a)
         if a.cmd == "diff":
             return _cmd_diff(a)
+        if a.cmd == "reconcile":
+            return _cmd_reconcile(a)
         if a.cmd == "backend":
             b = ade_sched.detect(backend)
             print(f"backend: {b.name} ({b.reason})")

@@ -63,6 +63,10 @@ sched-list:
 sched-diff:
     "{{ root }}/bin/ade-sched" diff --root "{{ root }}"
 
+# S4b: ADE-owned systemd reconcile + ownership ledger (default dry-run; pass -- --yes to write).
+sched-reconcile *args:
+    "{{ root }}/bin/ade-sched" reconcile --root "{{ root }}" {{ args }}
+
 # Opt-in Hermes basic setup (setup-plan S3a). Does not install or force Hermes.
 # Default: open Claude Code on prompts/setup/hermes.md.
 # `just hermes-setup --self`: print the DIY checklist only (no agent, no peer-link).
@@ -76,7 +80,8 @@ hermes-setup *args:
     root="{{ root }}"
     prompt="${root}/prompts/setup/hermes.md"
     if [[ ! -f "${prompt}" ]]; then
-      printf '%s\n' "missing prompt: ${prompt}" >&2
+      printf '%s
+' "missing prompt: ${prompt}" >&2
       exit 2
     fi
     mode=ai
@@ -84,14 +89,16 @@ hermes-setup *args:
       case "${a}" in
         --self|self) mode=self ;;
         -h|--help|help)
-          printf '%s\n' \
+          printf '%s
+' \
             "Usage: just hermes-setup [--self]" \
             "  (default) open Claude Code on prompts/setup/hermes.md" \
             "  --self    print the DIY checklist only (no agent)"
           exit 0
           ;;
         *)
-          printf '%s\n' "unknown argument: ${a} (try --self or --help)" >&2
+          printf '%s
+' "unknown argument: ${a} (try --self or --help)" >&2
           exit 2
           ;;
       esac
@@ -105,7 +112,8 @@ hermes-setup *args:
       exit 0
     fi
     if ! command -v claude >/dev/null 2>&1; then
-      printf '%s\n' "claude not on PATH. Install Claude Code, or run: just hermes-setup --self" >&2
+      printf '%s
+' "claude not on PATH. Install Claude Code, or run: just hermes-setup --self" >&2
       exit 2
     fi
     exec claude -- "Read and follow the checked-in prompt at ${prompt} for Hermes basic setup (setup-plan S3a). Opt-in only: do not install Hermes if the user skipped it; do not configure peer-link live. Walk the checklist one card at a time with the recommended option first; stop for each secret (user types into sudo-secretspec themselves, never into chat); finish with just install-doctor and hermes doctor when available."
