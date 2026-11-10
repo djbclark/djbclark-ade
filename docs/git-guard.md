@@ -376,12 +376,23 @@ was meant to keep out of.
 | 5 | Fixed-cwd agent | An agent whose tool cwd is fixed (cannot `cd` to a worktree) but whose git writes must still target a claimed workspace (`-C` / explicit worktree path). | Writes land only in the claimed path; reads of foreign trees stay on the read allowlist. | Agent writes the shared primary because cwd was fixed; or a legitimate `-C` owner write is refused. |
 | 6 | Long-lived server | A long-running process (dev server, watcher) started from a claimed workspace and left up across other agents' turns. | Process keeps its claim's cwd/paths; no second writer mutates the same workspace until it exits (order 9 one-writer rule). | Second writer edits the same workspace while the server is still a writer; or stopping the server leaves a permanent claim (TTL/expiry should free it). |
 
-### Test-plan scaffold (optional; not enabled)
+### Fixture harness (CI-safe; not hard refuse)
+
+`bin/ade-claim-pilot --fixture` runs cases **1–2** in throwaway worktrees under a private
+`ADE_STATE_DIR` (no PATH shim). Cases **3–6** are reported `skipped_fixture` with reasons until a
+live Mac / ops run. Example:
+
+```bash
+bin/ade-claim-pilot --fixture --json
+bin/ade-claim-pilot --list
+```
+
+### Test-plan scaffold (live; optional; not enabled)
 
 Checklist for a later live run (copy into the pilot PR or a run log; do not flip refusal while working the list):
 
 1. [ ] Preconditions: hooks installed on the repos under test (`ade-git-guard install`); claims created with `ade_claims.py new --ttl` (manual or W2 plugin once available); **PATH shim not forced** for the fleet.
-2. [ ] Run cases 1–6 once each; for each, record setup delay, disk delta, path-binding failures (count), false refusals (count + stderr reason).
+2. [ ] Run `bin/ade-claim-pilot --fixture` (cases 1–2) in CI or locally; then run cases 3–6 once each live; for each, record setup delay, disk delta, path-binding failures (count), false refusals (count + stderr reason).
 3. [ ] Confirm exit 77 only where a foreign/destructive rule should fire in observe mode; owner and human shells stay exit 0.
 4. [ ] Confirm expired claims free the path (`claim ls` shows `expired`; another owner may claim).
 5. [ ] Operator sign-off that S4 passed → only then schedule hard-refusal enablement (separate change; not this scaffold).

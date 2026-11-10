@@ -32,8 +32,9 @@ under **Carried**, newest first, one line each; an item leaves when it ships (in
    missing/disabled/ok and **never** install or enable. Still open: live Mac `paseo plugin install` of `ade-claim`
    and `ade-yolo` (or dry-run first) + observe/`new --ttl` hook path (E8 F4), the O2 redesign's residual (writes
    outside the caller's claimed workspace, with failing tests and an adversary round), the six-case enforcement
-   pilot (S4) before any hard refusal, and the optional narrowing E8 declined (F3: a security decision for the
-   operator). Lives in `docs/git-guard.md`; YOLO plugin: `plugins/ade-yolo/` (#526).
+   pilot (S4) before any hard refusal (`bin/ade-claim-pilot --fixture` covers cases 1–2 in CI; 3–6 need live),
+   and the optional narrowing E8 declined (F3: a security decision for the operator). Lives in
+   `docs/git-guard.md`; YOLO plugin: `plugins/ade-yolo/` (#526).
 6. **Drop the brew Paseo for our fork** (2026-10-24): disruptive, **ask the operator first**; after the connected-hosts work.
 7. **Paseo connected hosts** (2026-10-24): connect vps-primary (user `djbclark`) after a quiesced Paseo upgrade.
 8. **Paseo in-place model change upstream** (2026-10-23): `docs/upstream-issues.md` entry 17 (`paseo agent model <id>
