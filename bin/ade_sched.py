@@ -26,8 +26,8 @@ every child's environment):
   installed_labels(backend=None, *, env=None, **overrides) -> list[str]
   scan_live(backend=None, *, env=None, paseo_run=None, **overrides) -> LiveScan
   diff_jobs(jobs, retired, live, *, unload=False) -> list[DriftRow]   # unload always ignored/false: never unload
-  reconcile(jobs, retired, *, dry_run=True, backend=None, ...) -> (results, rc)
-      # S4b first write path: systemd user units only; ownership ledger under jobs.json
+  reconcile(jobs, retired, *, dry_run=True, backend=None, paseo_run=None, ...) -> (results, rc)
+      # S4b: systemd/cron host writes + paseo schedule create/delete (ledger backend=paseo)
   load_jobs_ledger / save_jobs_ledger / jobs_state_dir
   linger(env=None, **overrides) -> "yes" | "no" | None
   systemd_version(env=None, **overrides) -> int | None
@@ -69,8 +69,11 @@ EX_ACTIVATE, EX_USAGE, EX_NOT_INSTALLED, EX_UNAVAILABLE = 1, 2, 3, 69
 OWNER_ADE = "djbclark-ade"
 JOBS_LEDGER_SCHEMA_VERSION = 1
 JOBS_LEDGER_NAME = "jobs.json"
-# First reconcile slice writes only the systemd user path (CI-testable; Mac live not required).
-RECONCILE_WRITE_BACKEND = "systemd"
+# Host write backends for ade-sched jobs (CI-testable with fakes). Paseo is a job kind, not a
+# host backend: reconcile plans/executes paseo schedule create/delete with ledger
+# backend="paseo" without adding "paseo" here.
+RECONCILE_WRITE_BACKENDS = frozenset({"systemd", "cron", "launchd"})
+RECONCILE_WRITE_BACKEND = "systemd"  # legacy JSON/single-name field; prefer RECONCILE_WRITE_BACKENDS
 # Labels matching these prefixes are considered in-scope for foreign drift reports.
 FOREIGN_PREFIXES = ("com.djbclark.", "acpdispatch.")
 SYSTEMD_UP = ("running", "degraded", "starting", "initializing")
@@ -963,7 +966,16 @@ def uninstall(label: str, backend: str | Backend | None = None, *, dry_run: bool
             print(f"# run: {shlex.join(cmd)}", file=out)
             return path.exists()
         if activate:
+            # bootout of a missing job fails: ignore that, but refuse to drop the plist
+            # while launchctl still reports the job loaded (Codex P2 on #514).
             _activate(c, cmd, ignore=True)
+            rc, _, err_txt = _run([c.launchctl, "print", f"gui/{c.uid}/{label}"], c.env)
+            if rc == 0:
+                raise SchedError(
+                    EX_ACTIVATE,
+                    f"launchd {label} still loaded after bootout"
+                    + (f": {err_txt.strip()}" if err_txt and err_txt.strip() else ""),
+                )
         else:
             print(shlex.join(cmd), file=out)
         found = path.exists()
@@ -1204,6 +1216,93 @@ def paseo_schedule_names(
         if isinstance(name, str) and name:
             out.append(LiveJob(name, "paseo", "paseo", True))
     return out, tuple(notes)
+
+
+def paseo_schedule_create_argv(
+    row: Mapping[str, Any],
+    *,
+    ade: str | os.PathLike[str] | None = None,
+    env: Mapping[str, str] | None = None,
+) -> list[str]:
+    """Build ``paseo schedule create`` argv from an inventory row (docs/scheduling.md).
+
+    Requires schedule, mode, provider, cwd, prompt; timezone from the row or ``ADE_TIMEZONE``.
+    Fills ``__ADE__`` / ``__HOME__`` (and @ forms) in cwd and prompt. Relative cwd resolves
+    against the ADE checkout.
+    """
+    env = os.environ if env is None else env
+    label = row.get("label")
+    if not isinstance(label, str) or not label:
+        raise SchedError(EX_USAGE, "paseo schedule create requires label/--name")
+    mode = row.get("mode")
+    if not isinstance(mode, str) or not mode:
+        raise SchedError(EX_USAGE, "paseo schedule create requires --mode")
+    schedule = row.get("schedule")
+    if not isinstance(schedule, str) or not schedule:
+        raise SchedError(EX_USAGE, "paseo schedule create requires schedule/--cron")
+    tz = row.get("timezone")
+    if not isinstance(tz, str) or not tz.strip():
+        tz = (env.get("ADE_TIMEZONE") or "").strip()
+    if not tz:
+        raise SchedError(
+            EX_USAGE,
+            "paseo schedule create requires timezone (inventory timezone= or ADE_TIMEZONE)",
+        )
+    provider = row.get("provider")
+    if not isinstance(provider, str) or not provider:
+        raise SchedError(EX_USAGE, "paseo schedule create requires provider")
+    cwd_raw = row.get("cwd")
+    if not isinstance(cwd_raw, str) or not cwd_raw:
+        raise SchedError(EX_USAGE, "paseo schedule create requires cwd")
+    prompt_raw = row.get("prompt")
+    if not isinstance(prompt_raw, str) or not prompt_raw:
+        raise SchedError(EX_USAGE, "paseo schedule create requires prompt")
+    subst = default_subst(ade=ade, env=env)
+    cwd = cwd_raw
+    prompt = prompt_raw
+    for key, val in sorted(subst.items(), key=lambda kv: -len(kv[0])):
+        cwd = cwd.replace(key, val)
+        prompt = prompt.replace(key, val)
+    cwd_path = Path(cwd).expanduser()
+    if not cwd_path.is_absolute():
+        root = Path(os.path.realpath(ade) if ade else str(REPO))
+        cwd_path = (root / cwd_path).resolve()
+    else:
+        cwd_path = cwd_path.resolve()
+    return [
+        "paseo", "schedule", "create",
+        "--cron", schedule,
+        "--timezone", tz,
+        "--name", label,
+        "--mode", mode,
+        "--provider", provider,
+        "--cwd", str(cwd_path),
+        prompt,
+    ]
+
+
+def paseo_schedule_delete_argv(name: str) -> list[str]:
+    """Build ``paseo schedule delete --name NAME`` (matches create's ``--name``; CLI shape documented in docs/scheduling.md)."""
+    if not isinstance(name, str) or not name:
+        raise SchedError(EX_USAGE, "paseo schedule delete requires --name")
+    return ["paseo", "schedule", "delete", "--name", name]
+
+
+def paseo_artifact_hash(
+    row: Mapping[str, Any],
+    *,
+    ade: str | os.PathLike[str] | None = None,
+    env: Mapping[str, str] | None = None,
+) -> str:
+    """Stable hash of the create argv identity for ledger artifact_hash."""
+    argv = paseo_schedule_create_argv(row, ade=ade, env=env)
+    return hashlib.sha256("\0".join(argv).encode()).hexdigest()
+
+
+def _default_paseo_run(argv: list[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(  # noqa: S603 — argv list only
+        argv, capture_output=True, text=True, check=False, timeout=60,
+    )
 
 
 def scan_live(
@@ -1649,6 +1748,57 @@ def artifact_hash(files: Mapping[Path, str]) -> str:
     return h.hexdigest()
 
 
+def extract_cron_block(text: str, label: str) -> str | None:
+    """Return the ade-sched crontab block for ``label`` (BEGIN..END inclusive), or None."""
+    begin, end = cron_begin(label), cron_end(label)
+    lines = text.splitlines(keepends=True)
+    start = None
+    for i, line in enumerate(lines):
+        if line.rstrip("\n") == begin:
+            start = i
+            break
+    if start is None:
+        return None
+    for j in range(start + 1, len(lines)):
+        if lines[j].rstrip("\n") == end:
+            block = "".join(lines[start : j + 1])
+            if not block.endswith("\n"):
+                block += "\n"
+            return block
+    return None
+
+
+def _on_disk_files_match(
+    rendered: Rendered,
+    *,
+    backend_name: str,
+    label: str,
+    env: Mapping[str, str],
+    overrides: Mapping[str, Any],
+) -> bool:
+    """True when installed artifacts match the ADE render (systemd unit files or cron block)."""
+    try:
+        if backend_name == "cron":
+            want = rendered.files.get(Path("crontab"))
+            if want is None and rendered.cron_block:
+                want = rendered.cron_block
+            if want is None:
+                return False
+            c = _ctx(backend_name, env, dict(overrides))
+            text = _crontab_read(c)
+            have = extract_cron_block(text, label)
+            if have is None:
+                return False
+            return artifact_hash({Path("crontab"): have}) == artifact_hash({Path("crontab"): want})
+        current: dict[Path, str] = {}
+        for path in rendered.files:
+            if path.is_file():
+                current[path] = path.read_text(encoding="utf-8")
+        return set(current) == set(rendered.files) and artifact_hash(current) == artifact_hash(rendered.files)
+    except (OSError, SchedError):
+        return False
+
+
 def _ledger_owns(entry: Mapping[str, Any] | None, *, label: str) -> bool:
     """Removal authority: only a readable ADE ledger row for this label (intent alone is not enough)."""
     if not isinstance(entry, dict):
@@ -1667,8 +1817,20 @@ def _expects_timer(rendered: Rendered) -> bool:
     return any(isinstance(p, Path) and p.name.endswith(".timer") for p in rendered.files)
 
 
-def _unit_active_ok(st: Status, *, expects_timer: bool) -> bool:
-    """Matching artifacts are healthy only when the timer is active; completed oneshots may be inactive."""
+def _unit_active_ok(
+    st: Status,
+    *,
+    expects_timer: bool,
+    backend_name: str | None = None,
+) -> bool:
+    """Matching artifacts are healthy only when the manager has them loaded when required.
+
+    Systemd: require active when a ``.timer`` is expected; oneshots without a timer may
+    stay inactive. Launchd: always require ``launchctl print`` success (loaded), even
+    though plists never produce a ``.timer`` (Codex P2 on #514).
+    """
+    if backend_name == "launchd":
+        return bool(st.active)
     if expects_timer:
         return bool(st.active)
     return True
@@ -1759,14 +1921,17 @@ def plan_reconcile(
     extra_subst: Mapping[str, str] | None = None,
     **overrides: Any,
 ) -> list[ReconcileStep]:
-    """Plan ADE-scoped systemd reconcile actions. Never plans unload of foreign/unknown owners."""
+    """Plan ADE-scoped systemd/cron/paseo reconcile actions. Never plans unload of foreign/unknown owners."""
     env = os.environ if env is None else env
     live = live or LiveScan(backend_name, ())
     entries = ledger.get("entries") if isinstance(ledger.get("entries"), dict) else {}
     assert isinstance(entries, dict)
     steps: list[ReconcileStep] = []
     expected_labels: dict[str, str] = {}  # label -> logical name
-    write_ok = backend_name == RECONCILE_WRITE_BACKEND
+    write_ok = backend_name in RECONCILE_WRITE_BACKENDS
+    live_ids = live.ids
+    # Host + Paseo share LiveScan; Paseo presence must not treat a same-label host job as live.
+    paseo_live_ids = {j.id for j in live.jobs if j.backend == "paseo"}
 
     for n in live.notes:
         steps.append(ReconcileStep("live-scan", "report", OWNER_ADE, n, touch=False, category="job"))
@@ -1796,9 +1961,64 @@ def plan_reconcile(
             ))
             continue
         if kind == "paseo":
+            if owner != OWNER_ADE:
+                steps.append(ReconcileStep(
+                    name, "report", owner,
+                    "non-ADE owner; report only (never unload)",
+                ))
+                continue
+            label = row.get("label")
+            if not isinstance(label, str) or not label:
+                steps.append(ReconcileStep(
+                    name, "blocked", owner,
+                    "paseo schedule missing label/--name",
+                ))
+                continue
+            mode = row.get("mode")
+            if not isinstance(mode, str) or not mode:
+                steps.append(ReconcileStep(
+                    name, "blocked", owner,
+                    "paseo schedule requires --mode (refused)",
+                    label=label,
+                ))
+                continue
+            expected_labels[label] = name
+            entry = entries.get(name) if isinstance(entries.get(name), dict) else None
+            if label in paseo_live_ids:
+                ledger_match = (
+                    isinstance(entry, dict)
+                    and entry.get("status") in ("committed", "installed")
+                    and entry.get("label") == label
+                    and entry.get("backend") == "paseo"
+                )
+                if ledger_match:
+                    steps.append(ReconcileStep(
+                        name, "skip", owner,
+                        f"paseo schedule {label} present (ledger ok)",
+                        label=label,
+                    ))
+                else:
+                    steps.append(ReconcileStep(
+                        name, "adopt-ledger", owner,
+                        f"paseo schedule {label} live; write ownership ledger (no create)",
+                        label=label,
+                        touch=True,
+                    ))
+                continue
+            try:
+                paseo_schedule_create_argv(row, ade=ade if ade is not None else root, env=env)
+            except SchedError as e:
+                steps.append(ReconcileStep(
+                    name, "blocked", owner,
+                    f"paseo create blocked: {e}",
+                    label=label,
+                ))
+                continue
             steps.append(ReconcileStep(
-                name, "report", owner,
-                f"paseo schedule {row.get('label')!r} reconcile is a later slice (mode={row.get('mode')})",
+                name, "install", owner,
+                f"paseo schedule create {label}",
+                label=label,
+                touch=True,
             ))
             continue
         if kind != "ade-sched":
@@ -1822,7 +2042,7 @@ def plan_reconcile(
         if not write_ok:
             steps.append(ReconcileStep(
                 name, "refuse-backend", owner,
-                f"first reconcile write path is {RECONCILE_WRITE_BACKEND} only; backend={backend_name}",
+                f"reconcile write backends are {sorted(RECONCILE_WRITE_BACKENDS)}; backend={backend_name}",
                 label=label,
             ))
             continue
@@ -1849,19 +2069,16 @@ def plan_reconcile(
         want_hash = artifact_hash(rendered.files)
         entry = entries.get(name) if isinstance(entries.get(name), dict) else None
         st = status(label, backend_name, env=env, **overrides)
-        on_disk_match = False
-        if st.installed:
-            try:
-                current: dict[Path, str] = {}
-                for path in rendered.files:
-                    if path.is_file():
-                        current[path] = path.read_text(encoding="utf-8")
-                on_disk_match = (
-                    set(current) == set(rendered.files)
-                    and artifact_hash(current) == want_hash
-                )
-            except OSError:
-                on_disk_match = False
+        on_disk_match = bool(
+            st.installed
+            and _on_disk_files_match(
+                rendered,
+                backend_name=backend_name,
+                label=label,
+                env=env,
+                overrides=overrides,
+            )
+        )
         ledger_match = (
             isinstance(entry, dict)
             and entry.get("status") in ("committed", "installed")
@@ -1870,7 +2087,9 @@ def plan_reconcile(
             and entry.get("backend") == backend_name
         )
         expects_timer = _expects_timer(rendered)
-        active_ok = _unit_active_ok(st, expects_timer=expects_timer)
+        active_ok = _unit_active_ok(
+            st, expects_timer=expects_timer, backend_name=backend_name,
+        )
         if on_disk_match and ledger_match and active_ok:
             steps.append(ReconcileStep(
                 name, "skip", owner,
@@ -1888,11 +2107,14 @@ def plan_reconcile(
             ))
             continue
         if on_disk_match and not active_ok:
-            detail = (
-                f"activate inactive timer {label} (units match; hash ok)"
-                if st.installed else
-                f"install missing label {label} from {plist}"
-            )
+            if backend_name == "launchd":
+                detail = f"load inactive LaunchAgent {label} (plist match; hash ok)"
+            else:
+                detail = (
+                    f"activate inactive timer {label} (units match; hash ok)"
+                    if st.installed else
+                    f"install missing label {label} from {plist}"
+                )
         else:
             detail = (
                 f"install/reload label {label} from {plist}"
@@ -1914,7 +2136,6 @@ def plan_reconcile(
 
     # Removals: only labels ADE recorded in the ledger, and only when retired or dropped.
     # Also remove a preserved prior_identity when the logical name's label changed.
-    live_ids = live.ids
 
     def _plan_remove(logical_id: str, entry: Mapping[str, Any], *, label: str) -> None:
         owner = str(entry.get("owner") or "?")
@@ -1922,6 +2143,23 @@ def plan_reconcile(
             steps.append(ReconcileStep(
                 logical_id, "report", owner,
                 f"ledger entry owner={owner}; never unload",
+                label=label,
+                category="ledger",
+            ))
+            return
+        entry_backend = entry.get("backend")
+        paseo_entry = entry_backend == "paseo"
+        # Paseo ledger rows are orthogonal to the host backend; systemd/cron rows must match.
+        if (
+            not paseo_entry
+            and isinstance(entry_backend, str)
+            and entry_backend
+            and entry_backend != backend_name
+        ):
+            steps.append(ReconcileStep(
+                logical_id, "report", owner,
+                f"ledger backend={entry_backend!r}; refuse remove on {backend_name} "
+                f"(reconcile with that backend to unload {label})",
                 label=label,
                 category="ledger",
             ))
@@ -1937,18 +2175,23 @@ def plan_reconcile(
                 category="ledger",
             ))
             return
-        if not write_ok:
+        if not paseo_entry and not write_ok:
             steps.append(ReconcileStep(
                 logical_id, "refuse-backend", owner,
-                f"would remove ledger-owned {label} but write path is {RECONCILE_WRITE_BACKEND} only",
+                f"would remove ledger-owned {label} but write backends are {sorted(RECONCILE_WRITE_BACKENDS)}; backend={backend_name}",
                 label=label,
                 category="ledger",
             ))
             return
         why = "retired" if is_retired else ("dropped from inventory" if dropped else "orphan")
+        detail = (
+            f"paseo schedule delete {label} ({why})"
+            if paseo_entry else
+            f"unload ledger-owned label {label} ({why})"
+        )
         steps.append(ReconcileStep(
             logical_id, "remove", owner,
-            f"unload ledger-owned label {label} ({why})",
+            detail,
             label=label,
             touch=True,
             category="retired" if is_retired else "ledger",
@@ -2059,24 +2302,39 @@ def reconcile(
     activate: bool = True,
     platform_name: str | None = None,
     extra_subst: Mapping[str, str] | None = None,
+    paseo_run: Callable[[list[str]], subprocess.CompletedProcess[str]] | None = None,
     out: TextIO | None = None,
     err: TextIO | None = None,
     **overrides: Any,
 ) -> tuple[list[dict[str, Any]], int]:
-    """Reconcile ADE-owned ade-sched jobs on systemd and write the ownership ledger.
+    """Reconcile ADE-owned ade-sched and paseo jobs; write the ownership ledger.
 
     Default is dry-run (plan only). ``dry_run=False`` executes installs/removes for
     ADE ledger scope only. Never unloads foreign/unknown owners. Never touches root
-    / ``--system`` units. First write path is systemd user timers only.
+    / ``--system`` units. Host write backends: systemd user timers, user crontab, and
+    launchd LaunchAgents (``RECONCILE_WRITE_BACKENDS``). Paseo schedule create/delete
+    is orthogonal (ledger ``backend="paseo"``) and does not require a host write
+    backend.
 
     Exit 0 when the plan is clean (dry-run) or every touch succeeded; 1 on a failed
-    mutation or blocked step; 2 when ``--yes`` is asked on a non-systemd backend.
+    mutation or blocked step; 2 when ``--yes`` refuses host writes on a non-write
+    backend (planned ``refuse-backend`` counted even alongside paseo work).
     """
     out = out or sys.stdout
     err = err or sys.stderr
     env = os.environ if env is None else env
     root = Path(root or REPO)
     state_dir = state_dir or jobs_state_dir(env)
+    ade_eff = ade if ade is not None else root
+    run_paseo = paseo_run or _default_paseo_run
+
+    def _step_targets_paseo(step: ReconcileStep) -> bool:
+        if step.action == "remove":
+            snap = step.ledger_snapshot
+            return isinstance(snap, dict) and snap.get("backend") == "paseo"
+        job_row = next((j for j in jobs if j.get("name") == step.name), None)
+        return isinstance(job_row, dict) and job_row.get("kind") == "paseo"
+
     try:
         b = detect(backend, env=env) if not isinstance(backend, Backend) else backend
     except SchedError as e:
@@ -2091,7 +2349,7 @@ def reconcile(
 
     if live is None:
         try:
-            live = scan_live(b, env=env, skip_paseo=True, **overrides)
+            live = scan_live(b, env=env, skip_paseo=False, paseo_run=paseo_run, **overrides)
         except SchedError as e:
             live = LiveScan(b.name, (), (f"backend scan: {e}",))
 
@@ -2129,22 +2387,14 @@ def reconcile(
         rc = 1 if any(r["action"] == "blocked" for r in results) else 0
         return results, rc
 
-    # --yes path
-    if b.name != RECONCILE_WRITE_BACKEND:
-        for step in steps:
-            results.append({
-                "name": step.name,
-                "action": "refuse-backend",
-                "owner": step.owner,
-                "label": step.label,
-                "detail": step.detail,
-                "category": step.category,
-                "touch": False,
-                "ok": False,
-            })
-        return results, EX_USAGE
+    # --yes path. Host writes are refused per planned refuse-backend / touch steps when the
+    # host backend is not in RECONCILE_WRITE_BACKENDS; paseo touches remain orthogonal.
+    # Do not blanket-refuse when the plan is already clean (skip/report only): that made
+    # idempotent paseo --yes on launchd exit 2 (Codex P2 on #513).
+    write_ok = b.name in RECONCILE_WRITE_BACKENDS
 
     failed = 0
+    refused_host = 0
     mutated = False
     with _ReconcileLock(reconcile_lock_path(state_dir, env=env)):
         # Reload under the lock so a concurrent writer cannot race removal authority.
@@ -2187,14 +2437,63 @@ def reconcile(
                 if step.action == "blocked":
                     row["ok"] = False
                     failed += 1
+                elif step.action == "refuse-backend":
+                    # Planned host refuse (touch=False): still exit 2 when mixed with paseo
+                    # work (Codex P2 on #513).
+                    row["ok"] = False
+                    refused_host += 1
                 results.append(row)
                 continue
 
             label = step.label
             assert isinstance(label, str)
+            is_paseo = _step_targets_paseo(step)
+            if not is_paseo and not write_ok:
+                row["action"] = "refuse-backend"
+                row["ok"] = False
+                row["touch"] = False
+                row["detail"] = step.detail or (
+                    f"reconcile write backends are {sorted(RECONCILE_WRITE_BACKENDS)}; "
+                    f"backend={b.name}"
+                )
+                refused_host += 1
+                results.append(row)
+                continue
+
             if step.action == "adopt-ledger":
-                # Find matching job row for hash/paths.
                 job_row = next((j for j in jobs if j.get("name") == step.name), None)
+                if is_paseo:
+                    if not isinstance(job_row, dict):
+                        row["ok"] = False
+                        row["action"] = "failed"
+                        row["detail"] = "adopt-ledger missing paseo catalog row"
+                        failed += 1
+                        results.append(row)
+                        continue
+                    try:
+                        ah = paseo_artifact_hash(job_row, ade=ade_eff, env=env)
+                    except SchedError:
+                        # Live schedule may predate create-field inventory; still adopt ownership.
+                        ah = hashlib.sha256(f"paseo:{label}".encode()).hexdigest()
+                    prev = entries.get(step.name) if isinstance(entries.get(step.name), dict) else None
+                    entries[step.name] = _with_prior_identity(
+                        _entry_for_install(
+                            name=step.name,
+                            label=label,
+                            backend="paseo",
+                            paths=[f"paseo-schedule:{label}"],
+                            artifact=ah,
+                            generation=generation,
+                            status="committed",
+                            detail="adopted existing paseo schedule",
+                        ),
+                        prev if isinstance(prev, dict) else None,
+                        new_label=label,
+                    )
+                    mutated = True
+                    row["action"] = "adopted"
+                    results.append(row)
+                    continue
                 if not isinstance(job_row, dict) or not isinstance(job_row.get("plist"), str):
                     row["ok"] = False
                     row["action"] = "failed"
@@ -2236,6 +2535,124 @@ def reconcile(
 
             if step.action == "install":
                 job_row = next((j for j in jobs if j.get("name") == step.name), None)
+                if is_paseo:
+                    if not isinstance(job_row, dict):
+                        row["ok"] = False
+                        row["action"] = "failed"
+                        row["detail"] = "install missing paseo catalog row"
+                        failed += 1
+                        results.append(row)
+                        continue
+                    try:
+                        argv = paseo_schedule_create_argv(job_row, ade=ade_eff, env=env)
+                        ah = paseo_artifact_hash(job_row, ade=ade_eff, env=env)
+                    except SchedError as e:
+                        row["ok"] = False
+                        row["action"] = "failed"
+                        row["detail"] = str(e)
+                        failed += 1
+                        results.append(row)
+                        continue
+                    prev = entries.get(step.name) if isinstance(entries.get(step.name), dict) else None
+                    entries[step.name] = _with_prior_identity(
+                        _entry_for_install(
+                            name=step.name,
+                            label=label,
+                            backend="paseo",
+                            paths=[f"paseo-schedule:{label}"],
+                            artifact=ah,
+                            generation=generation,
+                            status="pending",
+                        ),
+                        prev if isinstance(prev, dict) else None,
+                        new_label=label,
+                    )
+                    ledger["entries"] = entries
+                    ledger["generation"] = generation
+                    save_jobs_ledger(ledger, state_dir, env=env)
+                    try:
+                        proc = run_paseo(argv)
+                        if proc.returncode != 0:
+                            detail = (proc.stderr or proc.stdout or "").strip() or f"rc={proc.returncode}"
+                            raise SchedError(EX_ACTIVATE, f"paseo schedule create failed: {detail}")
+                        live_jobs, ls_notes = paseo_schedule_names(run=run_paseo)
+                        if ls_notes:
+                            raise SchedError(
+                                EX_ACTIVATE,
+                                f"read-back: paseo schedule ls failed after create: {ls_notes[0]}",
+                            )
+                        if label not in {lj.id for lj in live_jobs}:
+                            raise SchedError(EX_ACTIVATE, f"read-back: paseo schedule {label} not listed after create")
+                    except SchedError as e:
+                        entries[step.name] = _with_prior_identity(
+                            _entry_for_install(
+                                name=step.name,
+                                label=label,
+                                backend="paseo",
+                                paths=[f"paseo-schedule:{label}"],
+                                artifact=ah,
+                                generation=generation,
+                                status="failed",
+                                detail=str(e),
+                            ),
+                            prev if isinstance(prev, dict) else None,
+                            new_label=label,
+                        )
+                        ledger["entries"] = entries
+                        save_jobs_ledger(ledger, state_dir, env=env)
+                        row["ok"] = False
+                        row["action"] = "failed"
+                        row["detail"] = str(e)
+                        failed += 1
+                        results.append(row)
+                        continue
+                    except (OSError, subprocess.TimeoutExpired) as e:
+                        entries[step.name] = _with_prior_identity(
+                            _entry_for_install(
+                                name=step.name,
+                                label=label,
+                                backend="paseo",
+                                paths=[f"paseo-schedule:{label}"],
+                                artifact=ah,
+                                generation=generation,
+                                status="failed",
+                                detail=str(e),
+                            ),
+                            prev if isinstance(prev, dict) else None,
+                            new_label=label,
+                        )
+                        ledger["entries"] = entries
+                        save_jobs_ledger(ledger, state_dir, env=env)
+                        row["ok"] = False
+                        row["action"] = "failed"
+                        row["detail"] = str(e)
+                        failed += 1
+                        results.append(row)
+                        continue
+                    committed = _entry_for_install(
+                        name=step.name,
+                        label=label,
+                        backend="paseo",
+                        paths=[f"paseo-schedule:{label}"],
+                        artifact=ah,
+                        generation=generation,
+                        status="committed",
+                    )
+                    cur = entries.get(step.name)
+                    if isinstance(cur, dict) and _prior_identity(cur) is not None:
+                        committed = {**committed, "prior_identity": cur["prior_identity"]}
+                    else:
+                        committed = _with_prior_identity(
+                            committed, prev if isinstance(prev, dict) else None, new_label=label,
+                        )
+                    entries[step.name] = committed
+                    ledger["entries"] = entries
+                    save_jobs_ledger(ledger, state_dir, env=env)
+                    mutated = True
+                    row["action"] = "installed"
+                    results.append(row)
+                    continue
+
                 if not isinstance(job_row, dict) or not isinstance(job_row.get("plist"), str):
                     row["ok"] = False
                     row["action"] = "failed"
@@ -2344,46 +2761,85 @@ def reconcile(
                     # Not a hard failure of the run: safety refusal.
                     results.append(row)
                     continue
-                live = entries.get(step.name)
-                if isinstance(live, dict) and live.get("label") == label:
+                entry_backend = entry.get("backend")
+                paseo_entry = entry_backend == "paseo"
+                if (
+                    not paseo_entry
+                    and isinstance(entry_backend, str)
+                    and entry_backend
+                    and entry_backend != b.name
+                ):
+                    row["ok"] = False
+                    row["action"] = "report"
+                    row["detail"] = (
+                        f"refusing remove of {label}: ledger backend={entry_backend!r}; "
+                        f"reconcile backend={b.name}"
+                    )
+                    row["touch"] = False
+                    results.append(row)
+                    continue
+                live_entry = entries.get(step.name)
+                if isinstance(live_entry, dict) and live_entry.get("label") == label:
                     entries[step.name] = {
-                        **live,
+                        **live_entry,
                         "status": "pending-remove",
                         "updated_at": _utc_now(),
                         "generation": generation,
                     }
-                elif isinstance(live, dict) and _prior_identity(live) is not None:
+                elif isinstance(live_entry, dict) and _prior_identity(live_entry) is not None:
                     # New label already claimed this logical_id; mark only the preserved identity.
-                    prior = dict(live["prior_identity"])
+                    prior = dict(live_entry["prior_identity"])
                     prior["status"] = "pending-remove"
                     prior["updated_at"] = _utc_now()
                     prior["generation"] = generation
-                    entries[step.name] = {**live, "prior_identity": prior}
+                    entries[step.name] = {**live_entry, "prior_identity": prior}
                 ledger["entries"] = entries
                 ledger["generation"] = generation
                 save_jobs_ledger(ledger, state_dir, env=env)
                 try:
-                    uninstall(label, b, dry_run=False, activate=activate, env=env, out=out, err=err, **overrides)
-                    st = status(label, b, env=env, **overrides)
-                    if st.installed:
-                        raise SchedError(EX_ACTIVATE, f"read-back: {label} still installed after uninstall")
-                except SchedError as e:
-                    live = entries.get(step.name)
-                    if isinstance(live, dict) and live.get("label") == label:
+                    if paseo_entry:
+                        argv = paseo_schedule_delete_argv(label)
+                        proc = run_paseo(argv)
+                        if proc.returncode != 0:
+                            detail = (proc.stderr or proc.stdout or "").strip() or f"rc={proc.returncode}"
+                            raise SchedError(EX_ACTIVATE, f"paseo schedule delete failed: {detail}")
+                        live_jobs, ls_notes = paseo_schedule_names(run=run_paseo)
+                        if ls_notes:
+                            raise SchedError(
+                                EX_ACTIVATE,
+                                f"read-back: paseo schedule ls failed after delete: {ls_notes[0]}",
+                            )
+                        if label in {lj.id for lj in live_jobs}:
+                            raise SchedError(EX_ACTIVATE, f"read-back: paseo schedule {label} still listed after delete")
+                    else:
+                        uninstall(label, b, dry_run=False, activate=activate, env=env, out=out, err=err, **overrides)
+                        st = status(label, b, env=env, **overrides)
+                        if st.installed:
+                            raise SchedError(EX_ACTIVATE, f"read-back: {label} still installed after uninstall")
+                        if b.name == "launchd" and activate and st.active:
+                            raise SchedError(
+                                EX_ACTIVATE,
+                                f"read-back: launchd {label} still loaded after uninstall",
+                            )
+                except (SchedError, OSError, subprocess.TimeoutExpired) as e:
+                    # Keep pending-remove so the next reconcile retries; "failed" alone
+                    # would drop _ledger_owns and leave a surviving schedule forever.
+                    live_entry = entries.get(step.name)
+                    if isinstance(live_entry, dict) and live_entry.get("label") == label:
                         entries[step.name] = {
                             **entry,
-                            "status": "failed",
+                            "status": "pending-remove",
                             "detail": str(e),
                             "updated_at": _utc_now(),
                             "generation": generation,
                         }
-                    elif isinstance(live, dict) and _prior_identity(live) is not None:
+                    elif isinstance(live_entry, dict) and _prior_identity(live_entry) is not None:
                         prior = dict(entry)
-                        prior["status"] = "failed"
+                        prior["status"] = "pending-remove"
                         prior["detail"] = str(e)
                         prior["updated_at"] = _utc_now()
                         prior["generation"] = generation
-                        entries[step.name] = {**live, "prior_identity": prior}
+                        entries[step.name] = {**live_entry, "prior_identity": prior}
                     ledger["entries"] = entries
                     save_jobs_ledger(ledger, state_dir, env=env)
                     row["ok"] = False
@@ -2392,11 +2848,11 @@ def reconcile(
                     failed += 1
                     results.append(row)
                     continue
-                live = entries.get(step.name)
-                if isinstance(live, dict) and live.get("label") == label:
+                live_entry = entries.get(step.name)
+                if isinstance(live_entry, dict) and live_entry.get("label") == label:
                     entries.pop(step.name, None)
-                elif isinstance(live, dict) and _prior_identity(live) is not None:
-                    cleared = dict(live)
+                elif isinstance(live_entry, dict) and _prior_identity(live_entry) is not None:
+                    cleared = dict(live_entry)
                     cleared.pop("prior_identity", None)
                     entries[step.name] = cleared
                 ledger["entries"] = entries
@@ -2413,4 +2869,6 @@ def reconcile(
             ledger["entries"] = entries
             save_jobs_ledger(ledger, state_dir, env=env)
 
+    if refused_host and not failed:
+        return results, EX_USAGE
     return results, (1 if failed else 0)

@@ -83,7 +83,7 @@ sched-list:
 sched-diff:
     "{{ root }}/bin/ade-sched" diff --root "{{ root }}"
 
-# S4b: ADE-owned systemd reconcile + ownership ledger (default dry-run; pass -- --yes to write).
+# S4b: ADE-owned systemd/cron reconcile + ownership ledger (default dry-run; pass -- --yes to write).
 sched-reconcile *args:
     "{{ root }}/bin/ade-sched" reconcile --root "{{ root }}" {{ args }}
 

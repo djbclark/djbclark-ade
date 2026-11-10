@@ -44,9 +44,20 @@ def fake(tmp_path):
     b.mkdir()
     log = tmp_path / "calls.log"
     ct = tmp_path / "crontab.txt"
+    loaded = tmp_path / "launchd-loaded"
+    loaded.mkdir()
     _script(b / "launchctl", f'echo "launchctl $*" >> "{log}"\n'
-            'if [ "$1" = bootstrap ] && [ -n "$FAKE_BOOTSTRAP_FAIL" ]; then echo "Bootstrap failed: 5: Input/output error" >&2; exit 5; fi\n'
-            'if [ "$1" = print ]; then exit "${FAKE_PRINT_RC:-0}"; fi\nexit 0\n')
+            f'LOADED="{loaded}"\n'
+            'if [ "$1" = bootstrap ]; then\n'
+            '  if [ -n "$FAKE_BOOTSTRAP_FAIL" ]; then echo "Bootstrap failed: 5: Input/output error" >&2; exit 5; fi\n'
+            '  base=$(basename "$3" .plist); touch "$LOADED/$base"; exit 0\n'
+            'fi\n'
+            'if [ "$1" = bootout ]; then lab="${2##*/}"; rm -f "$LOADED/$lab"; exit 0; fi\n'
+            'if [ "$1" = print ]; then\n'
+            '  if [ -n "$FAKE_PRINT_RC" ]; then exit "$FAKE_PRINT_RC"; fi\n'
+            '  lab="${2##*/}"; if [ -f "$LOADED/$lab" ]; then exit 0; fi; exit 1\n'
+            'fi\n'
+            'exit 0\n')
     _script(b / "systemctl", f'echo "systemctl $*" >> "{log}"\n'
             'case "$*" in\n'
             '  --version) echo "systemd ${FAKE_SD_VERSION:-255} (255.4)"; echo "+PAM";;\n'
@@ -511,6 +522,14 @@ def test_drop_cron_block():
     out, found = S.drop_cron_block(text, "x")
     assert found and out == "a\nb\n# BEGIN ade-sched:xy\n2\n# END ade-sched:xy\n"
     assert S.drop_cron_block("a", "x") == ("a\n", False)
+
+
+def test_extract_cron_block():
+    block = "# BEGIN ade-sched:x\n1\n# END ade-sched:x\n"
+    text = "a\n" + block + "b\n# BEGIN ade-sched:xy\n2\n# END ade-sched:xy\n"
+    assert S.extract_cron_block(text, "x") == block
+    assert S.extract_cron_block("nope\n", "x") is None
+    assert S.extract_cron_block("# BEGIN ade-sched:x\nno end\n", "x") is None
 
 
 def test_drop_cron_block_refuses_an_unterminated_block():

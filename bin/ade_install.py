@@ -371,6 +371,15 @@ def _validate_install_jobs(data: dict[str, Any], *, path: Path) -> None:
                 raise InstallError(
                     f"{path}: install.jobs[{i}] name={name!r}: paseo jobs require label"
                 )
+            for key in ("timezone", "provider", "cwd", "prompt"):
+                val = row.get(key)
+                if val is None:
+                    continue
+                if not isinstance(val, str) or not val.strip():
+                    raise InstallError(
+                        f"{path}: install.jobs[{i}] name={name!r}: "
+                        f"paseo {key} must be a non-empty string when set"
+                    )
         if kind == "ade-sched" and row.get("plist"):
             plist = row["plist"]
             if not isinstance(plist, str) or plist.startswith("/") or ".." in Path(plist).parts:
