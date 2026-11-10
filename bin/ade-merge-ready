@@ -1,0 +1,231 @@
+#!/usr/bin/env -S python3 -I
+"""ade-merge-ready: classify open ADE PRs against the merge gate (2026-11-09).
+
+  ade-merge-ready [--repo OWNER/NAME] [--min N] [--json]
+  ade-merge-ready --help
+
+Read-only. Uses `gh` to list open PRs (number >= --min, default 327), their
+pytest-linux / adversary-marker checks. A live APPROVE is taken only from the
+`adversary-marker` check (the Action runs `bin/adversary_marker.py`'s
+attribution-aware `decide`: owner body editor / owner comment history). Raw
+markers in the body or comments are never enough on their own — that would
+count an outside author's or bot's same-head APPROVE. Never posts, never
+merges, never invents an APPROVE. Prints a table (or JSON) plus paste-ready
+templates so an operator can post a real marker.
+
+Classes:
+  merge_now       pytest-linux pass + adversary-marker success (attributed APPROVE)
+  needs_approve   pytest-linux pass, no attributed APPROVE (typical Wave 6 tip)
+  tests_pending   pytest-linux pending / missing
+  tests_fail      pytest-linux fail
+  conflicting     GitHub mergeable == CONFLICTING
+  other           anything else
+
+Exit: 0 always when listing succeeds; 2 usage / gh failure.
+Stdlib only.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+from typing import Any
+
+MARKER_RE = re.compile(
+    r"<!--\s*adversary-verdict:v1\s*(\{.*?\})\s*-->",
+    re.DOTALL,
+)
+SHA40 = re.compile(r"^[0-9a-f]{40}$")
+
+
+def die(msg: str, code: int = 2) -> int:
+    print(f"ade-merge-ready: {msg}", file=sys.stderr)
+    return code
+
+
+def run_gh(gh: str, args: list[str], timeout: float = 120) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [gh, *args],
+        capture_output=True,
+        text=True,
+        errors="replace",
+        timeout=timeout,
+    )
+
+
+def parse_approves(text: str) -> list[str]:
+    """Full 40-hex APPROVE heads found as live markers (caller blanks fences if needed)."""
+    out: list[str] = []
+    for m in MARKER_RE.finditer(text or ""):
+        try:
+            obj = json.loads(m.group(1))
+        except json.JSONDecodeError:
+            continue
+        if obj.get("verdict") != "APPROVE":
+            continue
+        head = obj.get("head")
+        if isinstance(head, str) and SHA40.fullmatch(head):
+            out.append(head)
+    return out
+
+
+def check_status(lines: str, name: str) -> str:
+    """Best-effort status from `gh pr checks` TSV (name\\tstatus\\t...)."""
+    for line in (lines or "").splitlines():
+        parts = line.split("\t")
+        if len(parts) < 2:
+            continue
+        if parts[0] == name:
+            return parts[1].lower()
+    return "missing"
+
+
+def classify(
+    *,
+    mergeable: str | None,
+    tests: str,
+    adv: str,
+    live_approve: bool,
+) -> str:
+    if (mergeable or "").upper() == "CONFLICTING":
+        return "conflicting"
+    if tests in ("fail", "failure", "cancelled", "canceled"):
+        return "tests_fail"
+    if tests not in ("pass", "success"):
+        return "tests_pending"
+    if live_approve and adv in ("pass", "success"):
+        return "merge_now"
+    if live_approve:
+        return "needs_approve"  # rare: APPROVE present but marker Action not green
+    return "needs_approve"
+
+
+def collect(gh: str, repo: str, min_n: int) -> list[dict[str, Any]]:
+    listing = run_gh(
+        gh,
+        [
+            "pr",
+            "list",
+            "--repo",
+            repo,
+            "--state",
+            "open",
+            "--limit",
+            "100",
+            "--json",
+            "number,title,headRefOid,baseRefName,mergeable,headRefName",
+        ],
+    )
+    if listing.returncode != 0:
+        raise RuntimeError(listing.stderr.strip()[:300] or "gh pr list failed")
+    try:
+        prs = json.loads(listing.stdout or "[]")
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"gh pr list JSON: {e}") from e
+
+    rows: list[dict[str, Any]] = []
+    for p in prs:
+        n = int(p["number"])
+        if n < min_n:
+            continue
+        head = p.get("headRefOid") or ""
+        checks = run_gh(gh, ["pr", "checks", str(n), "--repo", repo])
+        # gh pr checks exits 1 when any check failed; stdout still usable
+        check_text = checks.stdout or ""
+        tests = check_status(check_text, "pytest-linux")
+        adv = check_status(check_text, "adversary-marker")
+
+        # Attribution lives in adversary-marker (bin/adversary_marker.py decide),
+        # not in an unfiltered body/comment scan. A raw same-head APPROVE from an
+        # outside author or bot must not flip live_approve / merge_now.
+        live = adv in ("pass", "success")
+
+        klass = classify(
+            mergeable=p.get("mergeable"),
+            tests=tests,
+            adv=adv,
+            live_approve=live,
+        )
+        rows.append(
+            {
+                "number": n,
+                "title": p.get("title") or "",
+                "head": head,
+                "base": p.get("baseRefName") or "",
+                "branch": p.get("headRefName") or "",
+                "mergeable": p.get("mergeable"),
+                "pytest_linux": tests,
+                "adversary_marker": adv,
+                "live_approve": live,
+                "class": klass,
+                "marker_template": (
+                    f'<!-- adversary-verdict:v1 {{"verdict":"APPROVE","head":"{head}"}} -->'
+                    if head and SHA40.fullmatch(head)
+                    else ""
+                ),
+            }
+        )
+    rows.sort(key=lambda r: r["number"])
+    return rows
+
+
+def print_table(rows: list[dict[str, Any]]) -> None:
+    print(
+        f"{'N':<5} {'class':<14} {'tests':<10} {'adv':<10} {'approve':<7} {'head':<10} title"
+    )
+    for r in rows:
+        print(
+            f"{r['number']:<5} {r['class']:<14} {r['pytest_linux']:<10} "
+            f"{r['adversary_marker']:<10} {str(r['live_approve']):<7} "
+            f"{(r['head'] or '')[:7]:<10} {(r['title'] or '')[:48]}"
+        )
+    needs = [r for r in rows if r["class"] == "needs_approve" and r["pytest_linux"] in ("pass", "success")]
+    if needs:
+        print()
+        print("# Paste-ready APPROVE templates (operator only; after a real review of that head):")
+        for r in needs[:12]:
+            print(f"# PR {r['number']} ({r['head'][:7]})")
+            print(r["marker_template"])
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(
+        prog="ade-merge-ready",
+        description="Classify open ADE PRs against pytest-linux + adversary-marker + live APPROVE (read-only).",
+    )
+    ap.add_argument(
+        "--repo",
+        default=os.environ.get("ADE_MERGE_READY_REPO", "djbclark/djbclark-ade"),
+        help="OWNER/NAME (default djbclark/djbclark-ade)",
+    )
+    ap.add_argument(
+        "--min",
+        type=int,
+        default=327,
+        metavar="N",
+        help="only PRs with number >= N (default 327)",
+    )
+    ap.add_argument("--json", action="store_true", help="print JSON array")
+    ap.add_argument(
+        "--gh",
+        default=os.environ.get("ADE_GH", "gh"),
+        help="gh binary (or ADE_GH); tests inject a fake",
+    )
+    a = ap.parse_args(argv)
+    try:
+        rows = collect(a.gh, a.repo, a.min)
+    except (RuntimeError, subprocess.TimeoutExpired, OSError) as e:
+        return die(str(e))
+    if a.json:
+        json.dump(rows, sys.stdout, indent=2, sort_keys=True)
+        sys.stdout.write("\n")
+    else:
+        print_table(rows)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
