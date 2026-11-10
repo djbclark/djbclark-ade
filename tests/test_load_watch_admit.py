@@ -313,7 +313,7 @@ def test_agent_cap_refuses_at_the_cap_and_zero_turns_it_off(tmp_path):
     assert "refused=agents" in admit(tmp_path, "--wait", "0", "--max-agents", load1=0.1, LW_FAKE_AGENTS="31").stdout
     assert admit(tmp_path, "--wait", "0", "--max-agents", "20", load1=0.1, LW_FAKE_AGENTS="19").returncode == 0
     assert admit(tmp_path, "--wait", "0", "--max-agents", "20", load1=0.1, LW_FAKE_AGENTS="20").returncode == 75
-    # bare --max-agents takes LW_MAX_AGENTS (the number acp-dispatch also passes explicitly)
+    # bare --max-agents takes LW_MAX_AGENTS (the number a dispatcher that starts agents also passes explicitly)
     assert admit(tmp_path, "--wait", "0", "--max-agents", load1=0.1, LW_FAKE_AGENTS="20", LW_MAX_AGENTS="20").returncode == 75
     assert admit(tmp_path, "--wait", "0", "--max-agents", load1=0.1, LW_FAKE_AGENTS="99", LW_MAX_AGENTS="0").returncode == 0
     assert admit(tmp_path, "--wait", "0", "--max-agents=0", load1=0.1, LW_FAKE_AGENTS="99").returncode == 0
@@ -420,37 +420,65 @@ def test_sampler_feeds_the_calm_clock(tmp_path, monkeypatch):
     assert (tmp_path / "calm.json").read_text() == before
 
 
-PS_OUT = """\
-  101 /Users/x/.cache/uv/environments-v2/acp-run-80e1/bin/python3.14 /Users/x/.local/bin/acp-run omp -C /w --model m
-  102 uv run --quiet --script /Users/x/.local/bin/acp-run omp -C /w --model m
-  103 /Users/x/.local/bin/acp-run copilot -C /w
-  104 python3 -u /Users/x/src/djbclark-ade/tools/acp-run/acp-run claude -C /w
-  105 python3 /Users/x/src/djbclark-ade/bin/acp-dispatch --name acp-run-slice -C /w
-  106 vim /Users/x/notes/acp-run.md
-  107 grep -n acp-run /tmp/x
-  108 /bin/zsh -c acp-run omp -C /w
-  109 python3 /Users/x/bin/not-acp-run omp
-  110 /Users/x/.cache/uv/environments-v2/acp-run-80e1/bin/python /Users/x/.local/bin/acp-run agy -C /w
-"""
+# Wave 6: count_agents reads `paseo ls -g --background --json` (live = running|initializing).
+# Fixture strings that *name* acp-run / acp-dispatch stay as negative examples: they must never inflate the count.
+PASEO_LS_LIVE = [
+    {"id": "aaaaaaaa-1111", "shortId": "aaaaaaa", "name": "ade-build", "provider": "claude/opus",
+     "status": "running", "cwd": "/w/a"},
+    {"id": "bbbbbbbb-2222", "shortId": "bbbbbbb", "name": "idle-one", "provider": "codex/gpt",
+     "status": "idle", "cwd": "/w/b"},  # not live: not counted
+    {"id": "cccccccc-3333", "shortId": "ccccccc", "name": "init-one", "provider": "claude/opus",
+     "status": "initializing", "cwd": "/w/c"},
+    {"id": "dddddddd-4444", "shortId": "ddddddd", "name": "done-one", "provider": "omp/x",
+     "status": "completed", "cwd": "/w/d"},  # not live
+    {"id": "", "status": "running"},  # no id: skipped
+    "not a row",
+]
 
 
-def test_agent_count_counts_only_acp_run_processes(monkeypatch):
+def test_count_agents_counts_paseo_live_statuses_only(monkeypatch):
     lw = load_module()
     calls = []
 
     def run(argv, **kw):
         calls.append(argv)
-        return subprocess.CompletedProcess(argv, 0, stdout=PS_OUT, stderr="")
+        return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(PASEO_LS_LIVE), stderr="")
 
     monkeypatch.setattr(lw.subprocess, "run", run)
-    monkeypatch.setattr(lw.os, "getpid", lambda: 106)  # the table must contain this process (here the vim row)
-    assert lw.count_agents() == 4  # 101, 103, 104, 110: not the uv wrapper, not a mention, not a lookalike
-    assert calls == [["ps", "-axo", "pid=,args="]]
+    assert lw.count_agents() == 2  # running + initializing; idle/completed/junk skipped
+    assert calls and calls[0][1:] == list(lw.PASEO_LS)
+    assert "ps" not in calls[0][0] and calls[0][-1] == "--json"
 
 
-def test_ps_that_exists_but_fails_raises_and_an_absent_ps_does_not(monkeypatch):
+def test_retired_acp_run_and_acp_dispatch_names_are_not_counted_as_agents(monkeypatch):
+    """Wave 6 checklist B6: retired shim process names are never a live agent class."""
     lw = load_module()
-    for kw in ({"returncode": 1}, {"exc": subprocess.TimeoutExpired("ps", 10)}, {"exc": PermissionError("no")}):
+    assert "acp-run" not in lw.AGENT_CLIS and "acp-dispatch" not in lw.AGENT_CLIS
+    assert lw.RETIRED_AGENT_NAMES == frozenset({"acp-run", "acp-dispatch"})
+    assert "paseo" in lw.AGENT_CLIS
+    # Even a paseo ls row that *names* a retired shim in metadata does not get a special positive match;
+    # only status running|initializing with an id counts. An empty list (no Paseo agents) is 0 even when
+    # a caller might still have leftover acp-run processes on the machine.
+    calls = []
+
+    def run(argv, **kw):
+        calls.append(argv)
+        # Named like the old positive matcher fixtures; paseo lists nobody live.
+        body = [
+            {"id": "legacy-1", "name": "acp-run-slice", "provider": "acp-run/omp", "status": "idle", "cwd": "/w"},
+            {"id": "legacy-2", "name": "acp-dispatch", "provider": "cursor/default", "status": "completed", "cwd": "/w"},
+        ]
+        return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(body), stderr="")
+
+    monkeypatch.setattr(lw.subprocess, "run", run)
+    assert lw.count_agents() == 0
+    assert calls[0][1:4] == ["ls", "-g", "--background"]
+    assert not hasattr(lw, "is_acp_run")  # the ps argv matcher is gone
+
+
+def test_paseo_that_exists_but_fails_raises_and_an_absent_paseo_does_not(monkeypatch):
+    lw = load_module()
+    for kw in ({"returncode": 1}, {"exc": subprocess.TimeoutExpired("paseo", 30)}, {"exc": PermissionError("no")}):
         fake_run(monkeypatch, lw, **kw)
         try:
             lw.count_agents()
@@ -458,10 +486,10 @@ def test_ps_that_exists_but_fails_raises_and_an_absent_ps_does_not(monkeypatch):
             pass
         else:
             raise AssertionError(kw)
-    fake_run(monkeypatch, lw, exc=FileNotFoundError("ps"))
+    fake_run(monkeypatch, lw, exc=FileNotFoundError("paseo"))
     assert lw.count_agents() is None
-    # ps "succeeds" but prints nothing or garbage, or a table without this process: no count was taken (Codex P2, PR 210)
-    for out in ("", "ps: kvm error\n", "  1 /sbin/launchd\n  2 /usr/bin/python3 /x/acp-run omp\n", "garbage line\n"):
+    # paseo "succeeds" but prints nothing usable: no count was taken
+    for out in ("", "not json\n", "{}", "null"):
         fake_run(monkeypatch, lw, stdout=out)
         try:
             lw.count_agents()
@@ -469,22 +497,10 @@ def test_ps_that_exists_but_fails_raises_and_an_absent_ps_does_not(monkeypatch):
             pass
         else:
             raise AssertionError(out)
-    fake_run(monkeypatch, lw, stdout=f"  {os.getpid()} python3 -m pytest\n")
+    fake_run(monkeypatch, lw, stdout='[{"status": "running"}]')  # no id → not an agent
     assert lw.count_agents() == 0
-
-
-def test_is_acp_run_forms():
-    lw = load_module()
-    yes = ["/Users/x/.local/bin/acp-run omp -C /w",
-           "/Users/x/.cache/uv/environments-v2/acp-run-1/bin/python /Users/x/.local/bin/acp-run omp",
-           "/opt/homebrew/Cellar/python@3.14/3.14.0/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python /x/acp-run omp",
-           "python3 -X utf8 /x/acp-run omp", "python3 -W ignore -u /x/acp-run omp", "python3.14 -u -B /x/acp-run omp"]
-    no = ["uv run --quiet --script /x/acp-run omp", "python3 -c acp-run", "python3 -m acp-run", "python3 -X utf8",
-          "python3 /x/acp-dispatch --name acp-run-x", "python3 /x/not-acp-run", "vim acp-run", ""]
-    for ln in yes:
-        assert lw.is_acp_run(ln.split()), ln
-    for ln in no:
-        assert not lw.is_acp_run(ln.split()), ln
+    fake_run(monkeypatch, lw, stdout="[]")
+    assert lw.count_agents() == 0
 
 
 VM_STAT = """\
@@ -608,7 +624,7 @@ def test_linux_proc_equivalents(monkeypatch):
 
 def real_admit(lw, monkeypatch, capsys, snaps, agents, tmp_path, cap=14):
     """cmd_admit on the real (non-faked) path: vm_snapshot returns (or, for an Exception item, raises) `snaps` in order,
-    ps says `agents` (an Exception instance is raised). `cap` is the --max-agents the caller passed (0: not passed)."""
+    count_agents says `agents` (an Exception instance is raised). `cap` is the --max-agents the caller passed (0: not passed)."""
     for k in ("LW_FAKE_LOAD1", "LW_FAKE_CHURN", "LW_FAKE_FREE_MB", "LW_FAKE_PAGEINS", "LW_FAKE_AGENTS"):
         monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("LW_STATE_DIR", str(tmp_path))
@@ -652,7 +668,7 @@ def test_real_path_computes_rates_over_the_two_second_sample(tmp_path, monkeypat
     assert rc == 75 and rec["refused"] == ["compressor", "free_mem", "pageins", "agents"]
 
 
-def test_the_agent_cap_is_off_unless_the_caller_passes_it_and_ps_is_not_even_run(tmp_path, monkeypatch, capsys):
+def test_the_agent_cap_is_off_unless_the_caller_passes_it_and_count_is_not_even_run(tmp_path, monkeypatch, capsys):
     """A1 of PR 210: `bg` test runs call admit without --max-agents; at the cap they must still be admitted, or the
     sessions the cap counts could never finish their tests."""
     lw = load_module()

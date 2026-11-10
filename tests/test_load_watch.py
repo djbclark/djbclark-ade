@@ -615,7 +615,11 @@ def test_notify_reads_queued_as_not_delivered_and_offers_the_fixer(monkeypatch):
     g = {"session": {"id": "abcd1234-0000", "agent": "claude/opus", "name": "n", "cwd": "/r/a"},
          "procs": [{"cmd": "cargo build", "cores": 3.0}], "cores": 3.0}
     status, ping = lw.notify("inc1", g, "/tmp/top", "/tmp/brief.md", 12.0, 8, False)
-    assert status == "queued" and "queued it, not delivered" in ping and "acp-dispatch cursor" in ping
+    assert status == "queued" and "queued it, not delivered" in ping
+    assert "paseo run --provider cursor/default" in ping and "ade.kind=code" in ping
+    assert "--prompt-file" not in ping
+    assert "Read and act on the load-watch brief at" in ping
+    assert "acp-dispatch" not in ping and "acp-run" not in ping
     send = argvs[0]
     assert send[1:5] == ["send", "--no-wait", "--json", "--behavior"] and send[-2] == "abcd1234-0000"
     assert "relay.py" not in " ".join(send)

@@ -38,7 +38,7 @@ goes to the operator with its process line, even when another agent was told in 
 the sampler. For each agent above LW_MIN_CORES (1.5) cores it writes a brief,
 sends the agent one line naming it (`paseo send --no-wait --json --behavior steer`, its `.status` read, never the exit
 code: `sent` is delivered, `queued` is logged "queued, not delivered"), and sends one hermes-ping (with a ready
-`acp-dispatch cursor` line for a fixer unless the line was `sent`). An agent or repo is not told again
+`paseo run --provider cursor/default …` line for a fixer unless the line was `sent`). An agent or repo is not told again
 for LW_COOLDOWN_H (6) hours (by agent, and by the repos its processes worked in). The brief names the
 work's own repo, not the agent's cwd (2026-10-18, `work_repos`): each top process's cwd, else its nearest
 ancestor's (brew and cargo children run in temp dirs), mapped to a git top-level, with that repo's `ci` decision,
@@ -66,7 +66,7 @@ failure gets one attempt); the watcher is skipped for an incident only when it i
 Unexplained sustained load reaches the watcher at most hourly (WATCHER_NOCPU_S), Hermes every LW_COOLDOWN_H.
 
 Compressor churn (2026-10-23, djbclark's memory-thrash follow-up): `admit` only refuses to START work while the
-compressor thrashes; running work and anything that skips `bg`/`acp-dispatch` stayed invisible. Each sample
+compressor thrashes; running work and anything that skips `bg` / the agent dispatcher stayed invisible. Each sample
 therefore reads macOS `vm_stat` Compressions + Decompressions once, takes the delta against the previous
 sample's counter (kept in state.json as churn_prev / churn_prev_t; no extra sleep, so the first sample, a
 counter that went backwards, a gap over MAX_GAP_S and a missing `vm_stat` give no reading) and keeps
@@ -87,8 +87,8 @@ through `load-watch ci check`. CI-first (djbclark, 2026-10-18): every repo `bg` 
 No row: `bg` refuses (exit 3) until the agent investigates offloading (GitHub runners: `forgejo-ci` skill section 6 item 6) and decides.
 A git worktree or cow pasture with no row of its own takes its main repo's row; a key ending in `/*`
 covers every repo under that directory. Older 3-column rows (repo, CI command, date) read as `ci`.
-Admission (operator, 2026-10-19): `admit` is the dispatcher-facing predicate acp-dispatch calls before it
-launches a slice (`--load-wait`, `--no-load-gate`). It reads os.getloadavg()[0] / os.cpu_count() and says
+Admission (operator, 2026-10-19): `admit` is the dispatcher-facing predicate a launcher calls before it
+starts an agent (`--load-wait`, `--no-load-gate` on the transitional acp-dispatch shim). It reads os.getloadavg()[0] / os.cpu_count() and says
 `admit ok load1=X per_core=Y cores=N` (exit 0) when the per-core load is at most --max-per-core (default
 1.5; `bg`'s own base is 2.5 since 2026-11-01 and it passes that; the 4.0 boost below usually decides, and LW_LOAD_PER_CORE is only this watcher's blame step), else
 `admit hot ...` (exit 75, EX_TEMPFAIL). When state.json is fresh the line also carries the watcher's
@@ -108,15 +108,16 @@ exceeds --max-mem-churn (default 20000, env LW_MAX_COMPRESSOR_S; 60000 until 202
 LW_CHURN_THRASH_PER_CORE (1.5) per core or pageins over their limit, or churn above LW_MAX_COMPRESSOR_HARD_S (60000) on its own
 (djbclark 2026-11-02: standing churn with idle CPU had refused nearly every launch for hours); pageins exceed --max-pageins per
 second (default 1000, env LW_MAX_PAGEINS_S: macOS `Pageins` also counts file-backed reads, so read-heavy work can trip it
-with memory to spare; that errs toward waiting); or, ONLY when the caller passes --max-agents (acp-dispatch does; `bg` never
-does: a test run starts no agent, and gating it would starve the very sessions the cap counts), the live `acp-run` slices
-machine-wide (one `ps`, exact argv match of the process running the script named acp-run, never pgrep/pkill -f) number
-N or more (bare --max-agents = 14, env LW_MAX_AGENTS, 0 = no cap: THE knob to tune how many acp-run slices may START);
-an admission under the cap is recorded as a reservation (agent-reservations.json, flock) counted with the live ones for
-until `load-watch release ID` (acp-dispatch does it at spawn) or LW_RESERVE_S (1200), so concurrent dispatchers cannot all
-pass at 13 of 14 (--no-reserve: records none but still counts the held ones; LW_RESERVE_S=0: off). A
-vm_stat or ps that exists but fails, times out or prints nonsense refuses too (`memory_unreadable`, `agents_unreadable`):
-that is likeliest when the machine is starving. Only an absent tool (Linux without vm_stat, no /proc) leaves its gate open,
+with memory to spare; that errs toward waiting); or, ONLY when the caller passes --max-agents (a dispatcher that STARTS
+agents does; `bg` never does: a test run starts no agent, and gating it would starve the very sessions the cap counts),
+the live Paseo agents machine-wide (`paseo ls -g --background --json`, status `running` or `initializing`; retired
+`acp-run` / `acp-dispatch` process names are never counted) number N or more (bare --max-agents = 14, env LW_MAX_AGENTS,
+0 = no cap: THE knob to tune how many agent slices may START); an admission under the cap is recorded as a reservation
+(agent-reservations.json, flock) counted with the live ones until `load-watch release ID` (the dispatcher does it at
+spawn) or LW_RESERVE_S (1200), so concurrent dispatchers cannot all pass at 13 of 14 (--no-reserve: records none but
+still counts the held ones; LW_RESERVE_S=0: off). A vm_stat or `paseo ls` that exists but fails, times out or prints
+nonsense refuses too (`memory_unreadable`, `agents_unreadable`): that is likeliest when the machine is starving. Only an
+absent tool (Linux without vm_stat, no /proc, no `paseo`) leaves its gate open,
 listed in `unreadable`. Why, measured 2026-11-01 (load watcher d8891c91):
 load 35-70 on this 8-core, 16 GB Mac was memory starvation, not CPU: ~64 MB free, ~12k compressions+decompressions/s,
 ~1760 pageins/s, kernel_task 57% and sys 25-39% of CPU, 31+ live agent processes (omp 20, copilot 11, claude 8, agy 3); the
@@ -138,7 +139,7 @@ limit in force. Swap is not the signal (86-92% in calm hours too). The result an
 record carry `mem_churn_pages_s`, `free_mb`, `pageins_s`, `agents` and `refused` (the names of the gates that said no: load,
 compressor, free_mem, pageins, agents); a reading that cannot be taken is listed in `unreadable` and its gate stays open
 (Linux reads /proc/meminfo MemAvailable and /proc/vmstat pswpin+pswpout and pgmajfault as the equivalents). Test hooks
-(acp-dispatch scrubs them from the environment it gives admit): LW_FAKE_LOAD1 (a load, or a comma list read one per poll
+(a dispatcher that starts agents should scrub them from the environment it gives admit): LW_FAKE_LOAD1 (a load, or a comma list read one per poll
 with the last value repeating), LW_FAKE_CHURN, LW_FAKE_FREE_MB, LW_FAKE_PAGEINS, LW_FAKE_AGENTS (the same for each reading;
 a faked load leaves the readings it does not fake healthy: churn 0, 8192 MB free, 0 pageins, 0 agents),
 LW_ADMIT_POLL_S (15, floored at 1), LW_ADMIT_STAGGER_S ("5,30" min,max; 0 <= min <= max <= 60). A state.json
@@ -338,8 +339,10 @@ def agent_label(a):
 
 # Agent CLIs by binary name: a walk up from a busy process stops at the first of these (with the providers `paseo ls`
 # names), so work is never pinned on whatever daemon, multiplexer or shell above the agent shares a cwd with another one.
+# Wave 6 (2026-11-09): `paseo` is the harness; retired `acp-run` / `acp-dispatch` names are never agent CLIs.
 AGENT_CLIS = frozenset({"claude", "codex", "opencode", "omp", "pi", "gemini", "copilot", "cursor-agent", "agy",
-                        "crush", "kimi", "qwen", "goose", "aider", "amp", "droid", "kiro-cli", "acp-run"})
+                        "crush", "kimi", "qwen", "goose", "aider", "amp", "droid", "kiro-cli", "paseo"})
+RETIRED_AGENT_NAMES = frozenset({"acp-run", "acp-dispatch"})  # negative matchers / tests; never live agent classes
 
 
 def cli_heads(cmd):
@@ -697,10 +700,12 @@ def notify(inc, g, top, path, load1, ncpu, dry):
             {"queued": "paseo send queued it, not delivered", "dry": "dry run"}.get(status, f"could not reach it (paseo send: {status})"))
     ping = (f"djbclark-ade: load-watch {inc}: {who} used ~{g['cores']:.1f} cores at load {load1:.0f} "
             f"({cmd}); {told}; brief {path}")
-    if status not in (*DELIVERED, "dry"):  # the code-slice pick (route_agent.py plan, 2026-10-18); he runs it after a yes to a CI copy
-        ping += (f"; to hand it to a fixer: ~/src/djbclark-ade/bin/acp-dispatch cursor --model default --kind code "
-                 f"--name load-watch-{Path(path).stem} --task load-watch "
-                 f"-C {top or s.get('cwd') or HOME} -f {path} --detach --no-wait")
+    if status not in (*DELIVERED, "dry"):  # the code-slice pick (route_agent.py plan; Wave 6: native paseo run)
+        cwd = top or s.get("cwd") or str(HOME)
+        # paseo run: prompt is positional and required; no --prompt-file (send has that).
+        ping += (f"; to hand it to a fixer: paseo run --provider cursor/default --label ade.kind=code "
+                 f"--title load-watch-{Path(path).stem} --cwd {cwd} --no-wait "
+                 f"'Read and act on the load-watch brief at {path}'")
     if not dry and HERMES_PING.exists():
         try:
             subprocess.run([str(HERMES_PING), ping], capture_output=True, timeout=60)
@@ -1271,7 +1276,7 @@ def churn_alert(st, t, table, dry):
     body = (f"compressor churn ~{st.get('churn_pages_s', 0) / 1000:.0f}k pages/s for {CHURN_SUSTAIN_S / 60:g}+ min "
             f"(alert line {CHURN_ALERT_PAGES_S / 1000:g}k, admit limit {ADMIT_CHURN_PAGES_S / 1000:g}k); top: "
             + (", ".join(f"{label} {cores:.1f} cores" for label, cores, _ in top) or "none") + ". "
-            "Admit already holds new bg/acp-dispatch work; this is running or bypass work.")
+            "Admit already holds new bg / agent-start work; this is running or bypass work.")
     tail = "do not kill or SIGSTOP without djbclark."
     if any(exc for _l, _c, exc in top):  # advice shape only: the alert is never suppressed
         tail += (" Standing exception: Grok Bot/Chrome renderers routinely use 0.3-0.7 cores each, so do not ask "
@@ -1661,7 +1666,7 @@ def _env_float(name, default, lo=0.0):
 # 25-39% of the CPU, 31+ live agent processes (omp 20, copilot 11, claude 8, agy 3). The 4.0 calm boost let a slice
 # start in every brief dip and each start pushed memory back over: an oscillation. So admit now fails toward
 # WAITING: a free-memory floor, a lower compressor limit (12k/s was already starving, 20000 is the line), a pageins
-# limit and a cap on live `acp-run` sessions, all env-tunable; a reading that cannot be taken is said so, never guessed.
+# limit and a cap on live Paseo agents, all env-tunable; a reading that cannot be taken is said so, never guessed.
 ADMIT_CHURN_PAGES_S = _env_float("LW_MAX_COMPRESSOR_S", 20000.0, 1.0)
 # Churn over ADMIT_CHURN_PAGES_S refuses only with corroboration (djbclark 2026-11-02, after standing 30-65k churn with idle CPU
 # refused nearly every launch for hours): load per core above ADMIT_CHURN_THRASH_PER_CORE or pageins over their limit; churn above
@@ -1688,10 +1693,10 @@ ADMIT_BOOST_CHURN_PAGES_S = ADMIT_CHURN_PAGES_S
 ADMIT_BOOST_CALM_S = _env_float("LW_BOOST_CALM_S", 600.0)
 # Agent reservations (Codex review of PR 210, 2026-11-01): two dispatchers that both read 13 of 14 live agents and
 # spend 2 s sampling memory would both be admitted before either launches. An admission under the cap is therefore
-# recorded (agent-reservations.json under an flock, `{"r": [{"id", "until"}]}`) and counted with the live acp-run
-# processes until it is released or expires. acp-dispatch releases it (`load-watch release ID`) the moment its agent
+# recorded (agent-reservations.json under an flock, `{"r": [{"id", "until"}]}`) and counted with the live Paseo
+# agents until it is released or expires. The dispatcher releases it (`load-watch release ID`) the moment its agent
 # is spawned (the live count takes over; the entry then lives RELEASE_GRACE_S more, covering the seconds before
-# acp-run shows in ps) or the launch is refused; the expiry, LW_RESERVE_S (default 1200: it must outlast the
+# `paseo ls` shows the new agent) or the launch is refused; the expiry, LW_RESERVE_S (default 1200: it must outlast the
 # dispatcher's own pre-spawn capacity wait of up to 900 s), is only the backstop for a dispatcher that died.
 # LW_RESERVE_S=0 turns reservations off; `--no-reserve` makes one call a pure check.
 ADMIT_RESERVE_S = _env_float("LW_RESERVE_S", 1200.0)
@@ -1803,47 +1808,37 @@ def _compressor_pages():
     return s["compress"] if s else None
 
 
-def is_acp_run(argv):
-    """True for the process that IS an acp-run session: argv[0] or the script right after a python interpreter
-    (any case: a framework `Python`; `-X opt` and `-W opt` skipped) is named exactly `acp-run`. `uv run --script
-    .../acp-run` (argv[0] `uv`, whose python child is the session), `python -c`/`-m` and anything that merely
-    mentions acp-run in an argument do not match, so each session counts once."""
-    if not argv:
-        return False
-    if os.path.basename(argv[0]) == "acp-run":
-        return True
-    if not re.fullmatch(r"python[\d.]*", os.path.basename(argv[0]), re.I):
-        return False
-    args, i = argv[1:], 0
-    while i < len(args):
-        x = args[i]
-        if x in ("-X", "-W"):
-            i += 2
-        elif x in ("-c", "-m"):
-            return False
-        elif x.startswith("-"):
-            i += 1
-        else:
-            return os.path.basename(x) == "acp-run"
-    return False
+LIVE_AGENT_STATUSES = frozenset({"running", "initializing"})  # admit --max-agents: same live set as the E6 shim
 
 
 def count_agents():
-    """Live acp-run sessions machine-wide, from one `ps` (exact argv match, never pgrep/pkill -f). None when there
-    is no `ps` binary; ReadFailed when ps times out, exits non-zero or prints a table without this process in it."""
+    """Live Paseo agents machine-wide (`paseo ls -g --background --json`, status running or initializing).
+    Retired `acp-run` / `acp-dispatch` process names are never counted (Wave 6). None when there is no `paseo`
+    binary; ReadFailed when paseo fails, times out or prints something that is not a list of agents."""
+    cli = paseo_cli()
     try:
-        r = subprocess.run(["ps", "-axo", "pid=,args="], capture_output=True, text=True, timeout=10)
+        r = subprocess.run([cli, *PASEO_LS], capture_output=True, text=True, timeout=30, env=paseo_env())
     except FileNotFoundError:
         return None
     except (OSError, subprocess.TimeoutExpired) as e:
-        raise ReadFailed(f"ps: {e!r}") from e
+        raise ReadFailed(f"paseo ls: {e!r}") from e
     if r.returncode != 0:
-        raise ReadFailed(f"ps exited {r.returncode}")
-    rows = [ln.split(None, 1) for ln in r.stdout.splitlines()]
-    rows = [p for p in rows if len(p) == 2 and p[0].isdigit()]
-    if str(os.getpid()) not in {p[0] for p in rows}:   # an empty or malformed table (this very process must be in it)
-        raise ReadFailed("ps printed no usable process table")
-    return sum(1 for p in rows if is_acp_run(p[1].split()))
+        raise ReadFailed(f"paseo ls exited {r.returncode}")
+    try:
+        rows = json.loads(r.stdout)
+    except (TypeError, ValueError) as e:
+        raise ReadFailed("paseo ls printed no JSON") from e
+    if not isinstance(rows, list):
+        raise ReadFailed("paseo ls printed no list of agents")
+    n = 0
+    for row in rows:
+        if not isinstance(row, dict) or not isinstance(row.get("id"), str) or not row["id"]:
+            continue
+        # A row whose provider/name looks like a retired shim is still a Paseo agent if paseo listed it;
+        # process argv named acp-run/acp-dispatch never reaches this path.
+        if row.get("status") in LIVE_AGENT_STATUSES:
+            n += 1
+    return n
 
 
 def admit_memory(fake_load, fake_churn, fake_mem, polls, max_agents=0):
@@ -1858,7 +1853,7 @@ def admit_memory(fake_load, fake_churn, fake_mem, polls, max_agents=0):
         return {"churn": pick(fake_churn, 0.0), "free_mb": pick(fake_mem["free_mb"], 8192.0),
                 "pageins_s": pick(fake_mem["pageins_s"], 0.0), "agents": int(pick(fake_mem["agents"], 0)), "failed": set()}
     m = {"churn": None, "free_mb": None, "pageins_s": None, "agents": None, "failed": set()}
-    if max_agents:  # the cap gates only callers that START agents (acp-dispatch); everyone else skips the ps
+    if max_agents:  # the cap gates only callers that START agents; everyone else skips the paseo ls
         try:
             m["agents"] = count_agents()
         except ReadFailed:
@@ -1986,10 +1981,10 @@ def _res_write(rows):
 
 
 def agent_reserve(cap, live, ttl):
-    """Atomically admit one more agent: under an flock, count the live acp-run processes (`live`: a number, or a
+    """Atomically admit one more agent: under an flock, count the live Paseo agents (`live`: a number, or a
     callable re-read inside the lock) plus the unexpired reservations; at or above `cap` it refuses, else it records
-    a reservation. Returns (None, id) when reserved, else (refusal name, None): `agents`, `agents_unreadable` when ps
-    fails, `agents_reserve_failed` when the state cannot be written or locked (fail toward waiting)."""
+    a reservation. Returns (None, id) when reserved, else (refusal name, None): `agents`, `agents_unreadable` when
+    `paseo ls` fails, `agents_reserve_failed` when the state cannot be written or locked (fail toward waiting)."""
     def work():
         try:
             n = live() if callable(live) else live
@@ -2012,7 +2007,7 @@ def agent_reserve(cap, live, ttl):
 
 def release_reservation(rid):
     """Shorten reservation `rid` to RELEASE_GRACE_S from now (its agent is spawned, or the launch was refused): the live
-    count takes over, and the grace covers the seconds before acp-run shows in ps. True when it was found."""
+    count takes over, and the grace covers the seconds before `paseo ls` shows the new agent. True when it was found."""
     def work():
         t = now()
         rows, hit = [], False
@@ -2363,8 +2358,9 @@ def main(supervise=False):
     p.add_argument("--max-pageins", type=float, default=ADMIT_PAGEINS_S, metavar="N",
                    help=f"and pageins per second are at most N (default {ADMIT_PAGEINS_S:g}, env LW_MAX_PAGEINS_S)")
     p.add_argument("--max-agents", type=int, nargs="?", const=ADMIT_MAX_AGENTS, default=0, metavar="N",
-                   help=f"and fewer than N `acp-run` agent sessions are alive machine-wide. OFF unless given (0 = off), because "
-                        f"only a caller that STARTS agents (acp-dispatch) may be gated by it; `bg` test runs must never be. "
+                   help=f"and fewer than N live Paseo agents (`paseo ls -g --background --json`, status running or "
+                        f"initializing) are alive machine-wide. OFF unless given (0 = off), because only a caller that "
+                        f"STARTS agents may be gated by it; `bg` test runs must never be. "
                         f"Bare `--max-agents` means {ADMIT_MAX_AGENTS} (env LW_MAX_AGENTS; 0 there = off)")
     p.add_argument("--no-reserve", action="store_true",
                    help=f"with --max-agents, do not record a reservation for an admission (a pure check); otherwise an "
