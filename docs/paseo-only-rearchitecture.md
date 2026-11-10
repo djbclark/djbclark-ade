@@ -56,8 +56,11 @@ no longer describes today's tree. Where a phase below says what will be built, d
    Superset 56). Known weakness: one Node event loop per daemon (section B9, risk H2).
 6. **Fan-out during the migration:** Paseo-native subagents (`paseo run` / `create_agent`) and the
    `/paseo-handoff`, `/paseo-advisor`, `/paseo-committee` skills (Paseo's own; the `ade-` vendored copies were deleted 2026-11-06); not `/bigteam` until D5 rewrites it.
-   Exception until D5: `acp-dispatch` stays the dispatcher for frontier consults and adversary reviews,
-   because its quota gates are the only ones that exist today (H4). Until D1.3 and D2's gate have both
+   ~~Exception until D5: `acp-dispatch` stays the dispatcher for frontier consults and adversary reviews,
+   because its quota gates are the only ones that exist today (H4).~~ **Superseded 2026-11-07** by the
+   slim-down / Wave 6: Paseo is the only harness; `skills/fan-out` and `bin/route_agent.py` dispatch via
+   `paseo run`; `acp-dispatch` / `relay.py` / `acp-run` are one-cycle shims pending the delete follow-up
+   (Carried #33), not the live dispatcher. Until D1.3 and D2's gate had both
    passed, fan-out used `isolation: local` workspaces only, with task worktrees from `git worktree add` (D0.3); the slim-down overtook this interim rule (2026-11-07): order 9 and `skills/fan-out` run each slice in a Paseo worktree (`paseo run --new-workspace worktree …`).
 7. **Fable and codex astra take part in the re-architecting** (djbclark, 2026-10-29); this overrides the
    routing-policy line that reserves them for `frontier` consults. Both consulted on v0 (section I).
