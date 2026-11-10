@@ -44,7 +44,11 @@ def _append(path, text):
 @pytest.fixture(autouse=True)
 def _no_fable_lead(monkeypatch, tmp_path_factory):
     """The relaunch-on-Opus tests run under the 2026-10-23 rule (`[lead].fable_lead` false); the shipped
-    config/routing.toml allows a Fable lead (2026-11-07), tested on its own below."""
+    config/routing.toml allows a Fable lead (2026-11-07), tested on its own below.
+
+    An incomplete ROUTING_POLICY fails closed through ade_config.load_effective (ConfigError → False),
+    which is enough to force the Opus relaunch note without rewriting a full policy file.
+    """
     policy = tmp_path_factory.mktemp("routing") / "routing.toml"
     policy.write_text("[lead]\nmodel = \"opus\"\nfable_lead = false\n")
     monkeypatch.setenv("ROUTING_POLICY", str(policy))
@@ -659,20 +663,27 @@ def test_fable_session_gets_the_relaunch_note_in_both_messages(hook, tmp_path):
 
 def test_fable_lead_true_means_no_relaunch_note(hook, tmp_path, monkeypatch):
     """Operator 2026-11-07: `[lead].fable_lead = true` allows a Fable lead, so the Opus note goes; the shipped file says true."""
+    import shutil
+
+    shipped = Path(nudge.__file__).resolve().parents[2] / "config" / "routing.toml"
     policy = tmp_path / "routing.toml"
-    policy.write_text("[routing]\nkinds = []\n\n[lead]  # the lead\nmodel = \"opus\"\nfable_lead = true  # flip to false\n")
+    shutil.copy(shipped, policy)
+    text = policy.read_text()
+    # Keep a complete valid ROUTING_POLICY (ade_config validates the full shape) with fable_lead true.
+    if "fable_lead = false" in text:
+        policy.write_text(text.replace("fable_lead = false", "fable_lead = true", 1))
     monkeypatch.setenv("ROUTING_POLICY", str(policy))
     assert nudge._fable_lead_allowed() is True
     out, _ = hook("s-fable-lead", _model_transcript(tmp_path, _FABLE, 46_000, nudge.BOUNDARY_TOTAL))
     assert "relaunch" not in out
     monkeypatch.delenv("ROUTING_POLICY")
-    shipped = Path(nudge.__file__).resolve().parents[2] / "config" / "routing.toml"
-    assert nudge._routing_policy_path() == shipped and nudge._fable_lead_allowed() is True
+    assert nudge._routing_policy_path() == shipped.resolve() and nudge._fable_lead_allowed() is True
 
 
 @pytest.mark.parametrize("text", ["[lead]\nmodel = \"opus\"\n", "[lead]\nfable_lead = false\n",
                                   "[other]\nfable_lead = true\n", "not = [toml\n", None])
 def test_fable_lead_absent_false_or_unreadable_keeps_the_relaunch_note(hook, tmp_path, monkeypatch, text):
+    """Malformed or incomplete ROUTING_POLICY fails closed through load_effective → no Fable lead."""
     policy = tmp_path / "routing.toml"
     if text is not None:
         policy.write_text(text)
@@ -716,12 +727,16 @@ def test_r2_l4_unreadable_model_gives_no_relaunch_note(hook, tmp_path):
     assert "relaunch" not in out
 
 
-@pytest.mark.parametrize("text, want", [("[lead]\nfable_lead = true  # on\n", True), ("[lead]\nfable_lead = false\n", False),
-                                        ("[other]\nfable_lead = true\n[lead]\nmodel = \"opus\"\n", False)])
-def test_fable_lead_line_scan_without_tomllib(monkeypatch, tmp_path, text, want):
-    """Under a Python older than 3.11 (no tomllib) the [lead] table is scanned by line, same answer."""
+def test_fable_lead_without_tomllib_is_fail_closed(monkeypatch, tmp_path):
+    """ade_config needs tomllib; without it the hook fails closed (never a Fable lead)."""
+    import shutil
+
+    shipped = Path(nudge.__file__).resolve().parents[2] / "config" / "routing.toml"
     policy = tmp_path / "routing.toml"
-    policy.write_text(text)
+    shutil.copy(shipped, policy)
     monkeypatch.setenv("ROUTING_POLICY", str(policy))
     monkeypatch.setitem(sys.modules, "tomllib", None)
-    assert nudge._fable_lead_allowed() is want
+    for name in list(sys.modules):
+        if name == "ade_config" or name.startswith("ade_config."):
+            del sys.modules[name]
+    assert nudge._fable_lead_allowed() is False

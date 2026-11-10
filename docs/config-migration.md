@@ -7,8 +7,11 @@ and thin `just config-check`. Comment-preserving atomic `set` landed 2026-11-08.
 `gates.toml` / `GATES_TOML` when `ade.toml` is absent). **Same day:** `bin/route_agent.py`
 module init and `reload_policy()` (no explicit path) adopt `load_routing_effective` →
 `ade_config.load_effective` (legacy `routing.toml` / `ROUTING_POLICY` when `ade.toml` is
-absent); `load_policy(path)` remains for tests that feed a temp file. Do not ship tracked
-`config/ade.toml` yet (`ade-install` refuses while it is present).
+absent); `load_policy(path)` remains for tests that feed a temp file. **Same day (stacked):**
+`claude/hooks/context_size_nudge.py` reads `[lead].fable_lead` through
+`ade_config.load_effective` (same `ROUTING_POLICY` isolation; fail-closed when the effective
+load errors). Do not ship tracked `config/ade.toml` yet (`ade-install` refuses while it is
+present).
 
 ## A. Mapping table (one explicit projection)
 

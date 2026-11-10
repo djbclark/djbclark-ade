@@ -403,39 +403,42 @@ def _last_assistant_model(transcript_path):
     return None
 
 
+def _ade_config():
+    """ade_config from this checkout's bin/ (the hook is a symlink or copy of claude/hooks/ in the repo)."""
+    for cand in (Path(__file__).resolve().parents[2], Path.home() / "src" / "djbclark-ade"):
+        bin_dir = cand / "bin"
+        if (bin_dir / "ade_config.py").is_file():
+            path = str(bin_dir)
+            if path not in sys.path:
+                sys.path.insert(0, path)
+            import ade_config
+            return ade_config, cand.resolve()
+    raise ImportError("ade_config.py not found")
+
+
 def _routing_policy_path():
-    """config/routing.toml: ROUTING_POLICY (as bin/route_agent.py), else this checkout's, else ~/src/djbclark-ade's."""
-    env = os.environ.get("ROUTING_POLICY")
-    if env:
-        return Path(env)
-    for cand in (Path(__file__).resolve().parents[2] / "config" / "routing.toml",
-                 Path.home() / "src" / "djbclark-ade" / "config" / "routing.toml"):
-        if cand.is_file():
-            return cand
-    return None
+    """Effective routing source path via ade_config.load_effective (ROUTING_POLICY or projected legacy file)."""
+    try:
+        ade_config, root = _ade_config()
+        eff = ade_config.load_effective(root=root)
+        src = eff.provenance.get("routing_source")
+        return Path(src) if isinstance(src, str) and src else None
+    except Exception:
+        return None
 
 
 def _fable_lead_allowed():
-    """`[lead].fable_lead` of config/routing.toml (operator 2026-11-07), False when absent or unreadable: then the
-    2026-10-23 "never a Fable lead" rule holds.  tomllib where it exists, else a line scan of the [lead] table (the hook
-    may run under a Python older than 3.11)."""
+    """`[lead].fable_lead` via ade_config.load_effective (operator 2026-11-07).
+
+    False when absent, unreadable, or the effective load fails: then the 2026-10-23
+    "never a Fable lead" rule holds. ROUTING_POLICY isolates the routing domain the
+    same way as bin/route_agent and ade-config.
+    """
     try:
-        path = _routing_policy_path()
-        if path is None:
-            return False
-        text = path.read_text()
-        try:
-            import tomllib
-        except ImportError:
-            section = None
-            for line in text.splitlines():
-                stripped = line.split("#", 1)[0].strip()
-                if stripped.startswith("["):
-                    section = stripped
-                elif section == "[lead]" and re.fullmatch(r"fable_lead\s*=\s*true", stripped):
-                    return True
-            return False
-        return (tomllib.loads(text).get("lead") or {}).get("fable_lead", False) is True
+        ade_config, root = _ade_config()
+        eff = ade_config.load_effective(root=root)
+        lead = eff.data.get("lead") if isinstance(eff.data, dict) else None
+        return isinstance(lead, dict) and lead.get("fable_lead", False) is True
     except Exception:
         return False
 
@@ -443,10 +446,10 @@ def _fable_lead_allowed():
 def _successor_target(model):
     """(provider/model spec, why) when this session should hand off to another model, else None.
 
-    Fable (any claude-fable-* id, a "[1m]" style suffix ignored) means Opus 5.5, unless `[lead].fable_lead` in
-    config/routing.toml is true (operator 2026-11-07: Fable leads allowed for now).  An unknown model (None: the
-    transcript tail had no assistant record) or any other model gets None, i.e. a plain /new, never a same-model or
-    upward successor (adversary 2026-10-23, observation 8 and round 2 L4)."""
+    Fable (any claude-fable-* id, a "[1m]" style suffix ignored) means Opus 5.5, unless `[lead].fable_lead`
+    (via ade_config.load_effective) is true (operator 2026-11-07: Fable leads allowed for now).  An unknown
+    model (None: the transcript tail had no assistant record) or any other model gets None, i.e. a plain
+    /new, never a same-model or upward successor (adversary 2026-10-23, observation 8 and round 2 L4)."""
     base = (model or "").split("[", 1)[0]
     if base.startswith("claude-fable") and not _fable_lead_allowed():
         return SUCCESSOR_OPUS, "this session runs on Fable"
