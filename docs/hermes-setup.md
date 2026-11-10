@@ -15,6 +15,10 @@ This unit does **not** install Hermes, does **not** flip `chosen`, and does
 | `just hermes-setup` | Opens Claude Code with a pointer to that prompt |
 | `just hermes-setup --self` | Prints the DIY checklist section only (no agent) |
 
+The `hermes-setup` recipe carries Just's `[positional-arguments]` so `--self` /
+`--help` reach the shebang body's `$@` (without it, `*args` stays empty and the
+recipe always takes the AI path).
+
 ## Paths (from setup-plan S3a)
 
 1. **Skip** — Hermes not chosen; doctor stays quiet.
