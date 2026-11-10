@@ -97,40 +97,43 @@ author,state`), refuses an author who is neither the repository owner nor the au
 its `.review-launch/`, runs `review-launch --mode review --head HEAD` with `config/review-schema.json`, prints
 `<!-- adversary-verdict:v1 {"verdict":"…","head":"<the full head>"} -->` (checked against the gate's own parser), files
 `~/.local/state/review-launch/<owner>__<name>-pr<N>-<head>.json` and removes the worktree. Exit 0 APPROVE, 1 BLOCK, 2 refused,
-3 failed, 77 tripwire, 124 timeout. It never posts. Paste the marker into the PR body, then:
+3 failed, 77 tripwire, 124 timeout. It never posts. On an **owner-authored** PR (after #484 on master)
+the gate succeeds without pasting — keep the printed marker for the local record only. On an
+**outside** PR, put the marker in an owner issue comment (not the body; never through herdr), then:
 
 ```sh
-gh workflow run adversary-marker.yml -f pr=N      # a body edit is not a Tests run: re-check the marker
+gh workflow run adversary-marker.yml -f pr=N      # outside tip: a comment edit is not a Tests run
 gh pr checks N --watch --required                 # wait for Tests and the marker
-gh pr merge N --squash --match-head-commit <the head the marker names>
+bin/ade-merge-ready merge-now --prs N --yes       # preferred; refuses unless adversary-marker success
+# (or) gh pr merge N --squash --match-head-commit <the head the marker names>
 ```
 
 ## Operator merge order (`bin/ade-merge-ready`, 2026-11-09; `approve-paste` / `approve-post` 2026-11-10; `retrigger-marker` 2026-11-10)
 
-When many stacked ADE PRs wait on the merge gate (0 adversary SUCCESS), use the
-helper. Classify / stacks / approve-paste / retrigger-marker never invent an
-APPROVE; open-PR listing uses `--limit 500` (fail closed if that cap is hit) so
-stack bottoms are not dropped when more than 100 PRs are open. Until #484 lands,
-the gate still requires a **live owner** marker — bots and cloud agents cannot
-satisfy it. After #484, owner-authored tips pass without APPROVE once
-`adversary-marker` is re-dispatched (`retrigger-marker`); outside tips still need
-an owner comment.
+When many stacked ADE PRs wait on the merge gate, use the helper. Classify /
+stacks / approve-paste / retrigger-marker / merge-now never invent an APPROVE;
+open-PR listing uses `--limit 500` (fail closed if that cap is hit) so stack
+bottoms are not dropped when more than 100 PRs are open.
+
+**After #484 on master (owner-trust + push rejudge):** owner-authored tips need
+no marker paste and no herdr HTML-comment paste. Landing the marker module on
+master rejudges every open tip (one job per head). Use `retrigger-marker` only
+when a tip still shows a stale/missing status before the next Tests run; use
+`approve-post` only for **outside** tips (owner issue comment). Prefer
+`merge-now` over raw `gh pr merge` so a red/missing `adversary-marker` cannot
+slip through.
 
 ```sh
 bin/ade-merge-ready                  # classify open tips vs pytest-linux + adversary-marker
-bin/ade-merge-ready stacks           # bottom-up APPROVE order + full tip SHAs for markers
+bin/ade-merge-ready stacks           # bottom-up merge order + full tip SHAs
 bin/ade-merge-ready stacks --group install
 bin/ade-merge-ready stacks --group claims
 bin/ade-merge-ready stacks --group s1
 bin/ade-merge-ready stacks --group wave6          # full wave6 chains
 bin/ade-merge-ready stacks --bottoms-only         # bottoms only in each selected group
-bin/ade-merge-ready approve-paste                 # templates only (all needs_approve)
-bin/ade-merge-ready approve-paste --base master   # templates for master-base tips only
-bin/ade-merge-ready approve-paste --bottoms-only  # templates for named-stack bottoms only
-bin/ade-merge-ready approve-paste --group install --bottoms-only
-# Owner-only (gh auth as repo owner). Dry-run by default; posts only with both flags:
-bin/ade-merge-ready approve-post --bottoms-only   # dry-run; prints --expect-head N=sha pins
-bin/ade-merge-ready approve-post --prs 484 --i-reviewed --yes --expect-head 484=<40hex> --trigger-marker
+# Outside tips only (owner gh). Dry-run by default; posts only with both flags:
+bin/ade-merge-ready approve-post --prs N --i-reviewed --yes --expect-head N=<40hex> --trigger-marker
+bin/ade-merge-ready approve-paste --bottoms-only  # templates only (legacy / outside); prefer approve-post
 bin/ade-merge-ready retrigger-marker --class needs_approve
 bin/ade-merge-ready retrigger-marker --bottoms-only --class needs_approve
 bin/ade-merge-ready retrigger-marker --prs 327,332,359 --yes
@@ -139,31 +142,31 @@ bin/ade-merge-ready merge-now --prs 484 --yes      # squash --match-head-commit 
 ```
 
 `approve-paste` prints only paste-ready `adversary-verdict:v1` APPROVE lines
-(no classify table). With `--base REF` it keeps PRs whose `baseRefName` equals
-`REF`. With `--bottoms-only` (and optional `--group`), it keeps only PRs that
-are bottoms of the named stacks (install / claims / s1 / wave6) — the same
-bottom set `stacks --bottoms-only` uses — so the operator can paste markers for
-merge-order bottoms without the full table.
+(no classify table). Prefer `approve-post` (API) over pasting. With `--base REF`
+it keeps PRs whose `baseRefName` equals `REF`. With `--bottoms-only` (and
+optional `--group`), it keeps only PRs that are bottoms of the named stacks.
 
 **herdr paste warning (2026-11-10):** Do not paste an `adversary-verdict:v1`
 marker through herdr (body or comment). herdr rewrites `<!-- … -->` into
 `<-- env … herdr --session … -->`, and the gate never sees a live marker.
 Prefer `bin/ade-merge-ready approve-post` (owner `gh`; GitHub API, not herdr).
-Default `--via auto`: **body** append for owner-authored tips (required until
-#484; comments do not count on owner PRs yet), **comment** for outside tips.
-`--via body` / `--via comment` force one path.
+Default `--via auto`: **comment** for outside tips (required path after #484);
+**body** only when forcing an explicit owner-PR APPROVE. `--via body` /
+`--via comment` force one path.
 
 `approve-post` writes those templates **only** when
 `gh api user` matches the repository owner and both `--i-reviewed` and `--yes`
 are set (otherwise dry-run). It never merges and never invents a head — each
 marker names the tip `headRefOid` just collected. `--trigger-marker` runs
 `adversary-marker.yml -f pr=N` after each successful post. Non-owner `gh`
-auth is refused (exit 2).
+auth is refused (exit 2). After #484, skip `approve-post` for owner-authored
+tips — the gate trusts them without a marker.
 
 `retrigger-marker` only re-dispatches `adversary-marker.yml -f pr=N` for
 selected open tips (`--prs`, `--bottoms-only`, and/or `--class`; dry-run unless
 `--yes`). It never posts markers, never merges, and refuses a bare invoke with
-no selector so it cannot fire the Action on every open PR.
+no selector so it cannot fire the Action on every open PR. After #484 lands,
+the push sweep usually makes batch retrigger unnecessary for owner tips.
 
 `stacks` derives order from each open PR's `baseRefName` → same-repo
 `headRefName` edge (live `gh pr list`, qualified by
