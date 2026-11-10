@@ -118,7 +118,7 @@ Skills (23, from each `skills/*/SKILL.md`):
 | [`ade-github-setup`](bin/ade-github-setup) | Observe / plan / apply / verify for the merge-gate App (S8). |
 | [`ade-harden`](bin/ade-harden) | Observe-only GitHub hardening drift check (setup-plan S6). |
 | [`ade-install`](bin/ade-install) | Transitional install catalog, plan, doctor, keys, and bounded apply. |
-| [`ade-merge-ready`](bin/ade-merge-ready) | Classify open ADE PRs against the merge gate (2026-11-09). |
+| [`ade-merge-ready`](bin/ade-merge-ready) | Classify / stacks / approve / merge-now / stack-rebase for the ADE merge gate (2026-11-10). |
 | [`ade-model-tiers`](bin/ade-model-tiers) | Show/resolve/classify/validate/promote/set for config/model-tiers.toml. |
 | [`ade-pi-pools`](bin/ade-pi-pools) | Report and enforce Pi pool acceptance before automatic routing (ade/auto). |
 | [`ade-recovery-d1`](bin/ade-recovery-d1) | Observe-only D1 / native-resume preflight (Carried #2, 2026-11-10). |

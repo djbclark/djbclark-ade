@@ -1,5 +1,5 @@
 #!/usr/bin/env -S python3 -I
-"""ade-merge-ready: classify open ADE PRs against the merge gate (2026-11-09).
+"""ade-merge-ready: classify / stacks / approve / merge-now / stack-rebase for the ADE merge gate (2026-11-10).
 
   ade-merge-ready [--repo OWNER/NAME] [--min N] [--json]
   ade-merge-ready stacks [--group NAME] [--bottoms-only] [--repo …] [--min N] [--json]
@@ -7,6 +7,7 @@
   ade-merge-ready approve-post --i-reviewed --yes [--bottoms-only] [--trigger-marker] …
   ade-merge-ready retrigger-marker (--prs … | --bottoms-only | --class NAME) [--yes]
   ade-merge-ready merge-now --prs N[,N…] [--yes]   # refuses unless adversary-marker success
+  ade-merge-ready stack-rebase --prs N[,N…] [--onto master] [--yes --repo-dir PATH]
   ade-merge-ready --help
 
 Uses `gh` to list open PRs (number >= --min, default 327; list limit 500 so
@@ -35,6 +36,14 @@ head); dry-run unless `--yes`. Do not raw `gh pr merge` when
 adversary-marker is missing or failing (2026-11-10: #481 was merged that
 way by mistake).
 
+`stack-rebase` restacks selected open children after a bottom lands (or when
+the recorded base drifted): dry-run by default; `--yes` needs `--repo-dir`
+(a local clone), rebases onto the open parent's head branch when that parent
+is still listed, else onto `--onto` (default `master`), retargets
+`gh pr edit --base` when needed, `git push --force-with-lease`, and refuses
+(leaves the tip alone) on rebase conflicts. Never invents an APPROVE and
+never merges.
+
 `stacks` walks open PR base→same-repo head refs and prints bottom-up APPROVE
 order for named groups (install, claims, s1, wave6) with full tip SHAs for
 marker paste. Parent edges are qualified by head repository (not branch name
@@ -59,8 +68,10 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from collections import defaultdict
 from typing import Any, Callable
@@ -868,6 +879,247 @@ def _merge_async_squash(gh: str, repo: str, number: int, head: str) -> None:
     raise RuntimeError(f"merge-async #{number} timed out uuid={uuid}")
 
 
+def plan_stack_rebase(
+    rows: list[dict[str, Any]],
+    pr_numbers: set[int],
+    *,
+    onto: str = "master",
+    listing_repo: str | None = None,
+) -> list[dict[str, Any]]:
+    """Bottom-up rebase plan for selected open tips (no git yet).
+
+    Open parent → onto that parent's headRefName. Else → ``onto`` (usually
+    master after the parent merged). ``need_base_edit`` when GitHub's
+    baseRefName differs from the chosen onto.
+    """
+    onto = (onto or "master").strip()
+    if not onto or ".." in onto or onto.startswith("-") or "\n" in onto or " " in onto:
+        raise RuntimeError(f"invalid --onto {onto!r}")
+    linked = link_parents(rows, listing_repo=listing_repo)
+    by_n = {int(r["number"]): r for r in linked}
+    missing = sorted(n for n in pr_numbers if n not in by_n)
+    if missing:
+        raise RuntimeError(
+            f"#{missing[0]} not in open listing for this --repo/--min — refuse stack-rebase"
+        )
+    selected = [by_n[n] for n in sorted(pr_numbers)]
+    ordered = bottom_up_order(selected)
+    plans: list[dict[str, Any]] = []
+    for r in ordered:
+        parent_n = r.get("parent_number")
+        base = str(r.get("base") or "")
+        branch = str(r.get("branch") or "")
+        head = str(r.get("head") or "")
+        if not branch:
+            plans.append(
+                {
+                    "number": int(r["number"]),
+                    "branch": branch,
+                    "head": head,
+                    "base": base,
+                    "onto": onto,
+                    "need_base_edit": False,
+                    "reason": "missing_head_ref",
+                    "action": "refuse",
+                    "parent_number": parent_n,
+                    "class": r.get("class"),
+                    "detail": "missing headRefName",
+                }
+            )
+            continue
+        if isinstance(parent_n, int) and parent_n in by_n:
+            parent = by_n[parent_n]
+            target = str(parent.get("branch") or "")
+            if not target:
+                plans.append(
+                    {
+                        "number": int(r["number"]),
+                        "branch": branch,
+                        "head": head,
+                        "base": base,
+                        "onto": onto,
+                        "need_base_edit": False,
+                        "reason": "parent_missing_head_ref",
+                        "action": "refuse",
+                        "parent_number": parent_n,
+                        "class": r.get("class"),
+                        "detail": f"open parent #{parent_n} has no headRefName",
+                    }
+                )
+                continue
+            reason = "open_parent"
+        else:
+            target = onto
+            reason = "parent_gone" if base != onto else "align_onto"
+        plans.append(
+            {
+                "number": int(r["number"]),
+                "branch": branch,
+                "head": head,
+                "base": base,
+                "onto": target,
+                "need_base_edit": base != target,
+                "reason": reason,
+                "action": "rebase",
+                "parent_number": parent_n,
+                "class": r.get("class"),
+                "detail": "",
+            }
+        )
+    return plans
+
+
+def _run_git(
+    git: str,
+    args: list[str],
+    *,
+    cwd: str | None = None,
+    timeout: int = 300,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [git, *args],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+
+
+def stack_rebase_prs(
+    gh: str,
+    repo: str,
+    rows: list[dict[str, Any]],
+    pr_numbers: set[int],
+    *,
+    dry_run: bool,
+    onto: str = "master",
+    repo_dir: str | None = None,
+    git: str = "git",
+    remote: str = "origin",
+    progress: Any = None,
+) -> list[dict[str, Any]]:
+    """Rebase selected stack children; dry-run prints the plan only."""
+    out = progress if progress is not None else sys.stdout
+    plans = plan_stack_rebase(
+        rows, pr_numbers, onto=onto, listing_repo=repo
+    )
+    results: list[dict[str, Any]] = []
+    if dry_run:
+        for plan in plans:
+            n = plan["number"]
+            if plan["action"] == "refuse":
+                print(
+                    f"would refuse #{n}: {plan.get('detail') or plan.get('reason')}",
+                    file=out,
+                )
+                results.append({**plan, "status": "would-refuse"})
+                continue
+            base_note = (
+                f"base {plan['base']}→{plan['onto']}"
+                if plan["need_base_edit"]
+                else f"base={plan['base']}"
+            )
+            print(
+                f"would rebase #{n} {plan['branch']} onto {plan['onto']} "
+                f"({base_note}; {plan['reason']})",
+                file=out,
+            )
+            results.append({**plan, "status": "would-rebase"})
+        return results
+
+    if not repo_dir:
+        raise RuntimeError("stack-rebase --yes requires --repo-dir PATH")
+    repo_path = os.path.abspath(repo_dir)
+    if not os.path.isdir(repo_path):
+        raise RuntimeError(f"--repo-dir {repo_path} is not a directory")
+    if not os.path.isdir(os.path.join(repo_path, ".git")) and not os.path.isfile(
+        os.path.join(repo_path, ".git")
+    ):
+        raise RuntimeError(f"--repo-dir {repo_path} is not a git checkout")
+
+    fetch = _run_git(git, ["fetch", "--prune", remote], cwd=repo_path)
+    if fetch.returncode != 0:
+        raise RuntimeError(
+            f"git fetch failed: {(fetch.stderr or fetch.stdout).strip()}"
+        )
+
+    for plan in plans:
+        n = int(plan["number"])
+        row = {**plan, "status": "pending"}
+        if plan["action"] == "refuse":
+            print(f"refused #{n}: {plan.get('detail') or plan.get('reason')}", file=out)
+            row["status"] = "refused"
+            results.append(row)
+            continue
+        branch = plan["branch"]
+        target = plan["onto"]
+        wt = tempfile.mkdtemp(prefix=f"ade-stack-rebase-{n}-")
+        try:
+            add = _run_git(
+                git,
+                ["worktree", "add", "--force", wt, f"{remote}/{branch}"],
+                cwd=repo_path,
+            )
+            if add.returncode != 0:
+                # Fallback: local branch name if remote-tracking missing.
+                add = _run_git(
+                    git,
+                    ["worktree", "add", "--force", wt, branch],
+                    cwd=repo_path,
+                )
+            if add.returncode != 0:
+                raise RuntimeError(
+                    f"#{n} worktree add failed: {(add.stderr or add.stdout).strip()}"
+                )
+            onto_ref = f"{remote}/{target}"
+            rb = _run_git(git, ["rebase", onto_ref], cwd=wt)
+            if rb.returncode != 0:
+                _run_git(git, ["rebase", "--abort"], cwd=wt)
+                detail = (rb.stderr or rb.stdout).strip()
+                print(
+                    f"refused #{n}: rebase conflict onto {onto_ref}; tip left alone "
+                    f"({detail[:200]})",
+                    file=out,
+                )
+                row["status"] = "conflict"
+                row["detail"] = detail[:500]
+                results.append(row)
+                continue
+            push = _run_git(
+                git,
+                ["push", "--force-with-lease", remote, f"HEAD:{branch}"],
+                cwd=wt,
+            )
+            if push.returncode != 0:
+                raise RuntimeError(
+                    f"#{n} push --force-with-lease failed: "
+                    f"{(push.stderr or push.stdout).strip()}"
+                )
+            if plan["need_base_edit"]:
+                edit = run_gh(
+                    gh,
+                    ["pr", "edit", str(n), "--repo", repo, "--base", target],
+                    timeout=120,
+                )
+                if edit.returncode != 0:
+                    raise RuntimeError(
+                        f"#{n} gh pr edit --base {target} failed: "
+                        f"{(edit.stderr or edit.stdout).strip()}"
+                    )
+            print(
+                f"rebased #{n} {branch} onto {target}"
+                + (" (base retargeted)" if plan["need_base_edit"] else ""),
+                file=out,
+            )
+            row["status"] = "rebased"
+            results.append(row)
+        finally:
+            _run_git(git, ["worktree", "remove", "--force", wt], cwd=repo_path)
+            if os.path.isdir(wt):
+                shutil.rmtree(wt, ignore_errors=True)
+    return results
+
+
 def merge_now_prs(
     gh: str,
     repo: str,
@@ -974,11 +1226,12 @@ def main(argv: list[str] | None = None) -> int:
             "approve-post",
             "retrigger-marker",
             "merge-now",
+            "stack-rebase",
         ),
         help=(
             "classify (default), stacks, approve-paste, approve-post, "
-            "retrigger-marker, or merge-now (squash only when "
-            "adversary-marker is success)"
+            "retrigger-marker, merge-now (squash only when "
+            "adversary-marker is success), or stack-rebase"
         ),
     )
     ap.add_argument(
@@ -1030,9 +1283,27 @@ def main(argv: list[str] | None = None) -> int:
         default="",
         metavar="N,N,…",
         help=(
-            "approve-paste / approve-post / retrigger-marker / merge-now: only "
-            "these PR numbers (comma-separated; required for merge-now)"
+            "approve-paste / approve-post / retrigger-marker / merge-now / "
+            "stack-rebase: only these PR numbers (comma-separated; required "
+            "for merge-now and stack-rebase)"
         ),
+    )
+    ap.add_argument(
+        "--onto",
+        default="master",
+        metavar="REF",
+        help="stack-rebase: default base when no open parent (default master)",
+    )
+    ap.add_argument(
+        "--repo-dir",
+        default=os.environ.get("ADE_MERGE_READY_REPO_DIR", ""),
+        metavar="PATH",
+        help="stack-rebase --yes: local clone for worktree rebase (or ADE_MERGE_READY_REPO_DIR)",
+    )
+    ap.add_argument(
+        "--git",
+        default=os.environ.get("ADE_GIT", "git"),
+        help="git binary for stack-rebase (or ADE_GIT); tests inject a fake",
     )
     ap.add_argument(
         "--class",
@@ -1053,8 +1324,8 @@ def main(argv: list[str] | None = None) -> int:
         "--yes",
         action="store_true",
         help=(
-            "approve-post / retrigger-marker / merge-now: actually write "
-            "(default is dry-run)"
+            "approve-post / retrigger-marker / merge-now / stack-rebase: "
+            "actually write (default is dry-run)"
         ),
     )
     ap.add_argument(
@@ -1178,6 +1449,47 @@ def main(argv: list[str] | None = None) -> int:
                 sort_keys=True,
             )
             sys.stdout.write("\n")
+        return 0
+
+    if a.cmd == "stack-rebase":
+        if pr_numbers is None:
+            return die("stack-rebase requires --prs N[,N…]")
+        dry_run = not a.yes
+        out = sys.stderr if a.json else sys.stdout
+        if dry_run:
+            print(
+                f"# dry-run stack-rebase ({len(pr_numbers)} tips); "
+                "pass --yes --repo-dir PATH to rebase + force-with-lease",
+                file=out,
+            )
+        try:
+            results = stack_rebase_prs(
+                a.gh,
+                a.repo,
+                rows,
+                pr_numbers,
+                dry_run=dry_run,
+                onto=a.onto,
+                repo_dir=(a.repo_dir or None),
+                git=a.git,
+                progress=out,
+            )
+        except (RuntimeError, subprocess.TimeoutExpired, OSError) as e:
+            return die(str(e))
+        if a.json:
+            json.dump(
+                {
+                    "dry_run": dry_run,
+                    "onto": a.onto,
+                    "results": results,
+                },
+                sys.stdout,
+                indent=2,
+                sort_keys=True,
+            )
+            sys.stdout.write("\n")
+        if any(r.get("status") == "conflict" for r in results):
+            return 1
         return 0
 
     if a.cmd in ("approve-paste", "approve-post"):
