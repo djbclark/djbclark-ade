@@ -1,6 +1,6 @@
 {
   "recorded": "FIXTURE-not-live-Mac",
-  "note": "FIXTURE bundle for CI shape only \u2014 NOT Mac live-cycle evidence (Carried #33 residual). Replace mac_proofs via bin/wave6-mac-proof-capture --live before the deletion PR.",
+  "note": "FIXTURE bundle for CI shape only \u2014 NOT Mac live-cycle evidence (Carried #33 residual). Mac+C3 FIXTURE labels + Linux-safe cmd/verified shape. Replace mac_proofs via bin/wave6-mac-proof-capture --live (Darwin) before the deletion PR; --linux-safe / this bundle both trip mac_not_live under --evidence.",
   "c3": {
     "tendcf": "migrated",
     "nix2cf": "migrated",

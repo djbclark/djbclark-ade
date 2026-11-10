@@ -1,5 +1,9 @@
 FIXTURE — NOT live outside-repo probe (tests/fixtures/wave6-mac-proofs; Carried #33 residual)
 kind: fixture
 c3_key: cfengine
-note: shape-only stand-in for wave6-delete-check FAILCLOSED tests; not a migrated/waived outside capture
-replace_with: operator probe paste per docs/slim/wave6-follow-up.md §C (order 11)
+outside: CFEngine checkout
+status_stand_in: waived
+cmd: rg -n 'cfenginewatch|\bfleet-watch\b|bin/watch' .
+waive: FIXTURE stand-in: CFEngine watch registration lives in site-djbclark fleet-watch only (docs/slim/log.md C3 scan 2026-11-06)
+verified: FIXTURE stand-in (Linux-safe rg shape only; replace with operator outside-checkout paste per docs/slim/wave6-follow-up.md §C, order 11)
+replace_with: operator probe paste (or waive one-liner from docs/slim/log.md)

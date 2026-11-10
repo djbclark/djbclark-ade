@@ -1,11 +1,13 @@
-# FIXTURE — Wave 6 Mac proof shape (NOT live Mac stdout)
+# FIXTURE — Wave 6 Mac + C3 proof shape (NOT live Mac stdout)
 
 Snapshot: 2026-11-10. Queue Carried **item 33** residual (no live Mac cycle yet).
 
-These files exist so CI can prove the `mac_proofs` FAILCLOSED contract and the
-capture **shape** (`cmd:` + `verified: no match` when idle) without inventing a
-Mac live-cycle paste. Every proof file's first line is `FIXTURE — NOT live Mac
-stdout`.
+These files exist so CI can prove the `mac_proofs` / `c3_proofs` FAILCLOSED
+contract and the capture **shape** (`cmd:` + `verified:` when idle / probe
+stand-in) without inventing a Mac live-cycle paste or an outside-repo
+migration. Mac proof files start with `FIXTURE — NOT live Mac stdout`. C3
+proof files start with `FIXTURE — NOT live outside-repo probe` and carry the
+Linux-safe `rg` `cmd:` (or `waive:`) from `docs/slim/wave6-follow-up.md` §C.
 
 ## Shape regression: `--dry-run`
 
@@ -13,17 +15,29 @@ stdout`.
 bin/wave6-delete-check --dry-run --json
 ```
 
-Exit 0 means labeled FIXTURE proofs are non-empty (FAILCLOSED shape OK).
-`ready` stays false — never deletion-ready. Unlabeled / invented “live”
-content under this directory fails closed (`fixture_invalid`).
+Exit 0 means labeled FIXTURE Mac+C3 proofs have FAILCLOSED shape.
+`ready` stays false and `mac_live_blocked` stays true — never deletion-ready.
+Unlabeled / invented “live” content under this directory fails closed
+(`fixture_invalid`). Pointing `--evidence` at this bundle fails closed
+(`mac_not_live`).
+
+## Linux-safe partial Mac probes (still blocked for deletion)
+
+```bash
+bin/wave6-mac-proof-capture --linux-safe --out DIR --json
+```
+
+Runs pgrep (+ optional paseo smoke); skips launchctl with
+`verified: SKIPPED`. Files are labeled `LINUX-SAFE — NOT Mac live-cycle`.
+`wave6-delete-check --evidence` reports `mac_not_live` for them.
 
 ## Do not use as deletion evidence
 
 `bin/wave6-delete-check --evidence` for the **deletion PR** must point at
 operator-captured Mac files from `bin/wave6-mac-proof-capture --live --out DIR`
 (or the equivalent paste in `docs/slim/wave6-follow-up.md` §B). Pointing the
-gate at this fixture bundle (or greening `--dry-run`) does not satisfy Carried
-item 33's Mac live cycle.
+gate at this fixture bundle, `--linux-safe` output, or greening `--dry-run`
+does not satisfy Carried item 33's Mac live cycle.
 
 ## Replace after the Mac live cycle
 

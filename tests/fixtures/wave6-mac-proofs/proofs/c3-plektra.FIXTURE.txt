@@ -1,5 +1,8 @@
 FIXTURE — NOT live outside-repo probe (tests/fixtures/wave6-mac-proofs; Carried #33 residual)
 kind: fixture
 c3_key: plektra
-note: shape-only stand-in for wave6-delete-check FAILCLOSED tests; not a migrated/waived outside capture
-replace_with: operator probe paste per docs/slim/wave6-follow-up.md §C (order 11)
+outside: Plektra
+status_stand_in: migrated
+cmd: rg -n 'acp-dispatch|relay\.py|autorename|self-slash' .
+verified: FIXTURE stand-in (Linux-safe rg shape only; replace with operator outside-checkout paste per docs/slim/wave6-follow-up.md §C, order 11)
+replace_with: operator probe paste (or waive one-liner from docs/slim/log.md)
