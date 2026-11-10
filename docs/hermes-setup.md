@@ -14,6 +14,7 @@ This unit does **not** install Hermes, does **not** flip `chosen`, and does
 | `prompts/setup/hermes.md` | AI-assisted walkthrough (cards, secrets stop, doctor finish) |
 | `just hermes-setup` | Opens Claude Code with a pointer to that prompt |
 | `just hermes-setup --self` | Prints the DIY checklist section only (no agent) |
+| `just doctor hermes` | Checks the chosen Hermes catalog component only; never installs or changes its choice |
 
 The `hermes-setup` recipe carries Just's `[positional-arguments]` so `--self` /
 `--help` reach the shebang body's `$@` (without it, `*args` stays empty and the
@@ -44,6 +45,12 @@ an installed Hermes current like other components.
 Secrets: user types into `sudo-secretspec` (or Hermes' own Keychain
 `setup.sh`); never into chat or argv. Finish with `just install-doctor` and
 `hermes doctor`.
+
+`just doctor hermes` (or `bin/ade-install doctor --id hermes --json`) reuses
+the catalog's `hermes doctor` probe. Unchosen Hermes reports `unchosen` without
+executing it. The result covers only that component, not the full installation
+or separate configuration checklist items. Plain `just doctor` retains all
+installation-wide checks. Richer Hermes configuration checks remain future work.
 
 ## Related
 

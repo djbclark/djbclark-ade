@@ -80,7 +80,7 @@ unit.
 ade-install check [--root DIR] [--json]
 ade-install catalog [--root DIR] [--json]
 ade-install plan [--root DIR] [--json]
-ade-install doctor [--root DIR] [--json]
+ade-install doctor [--root DIR] [--id ID ...] [--json]
 ade-install keys [--root DIR] [--json] [--keys-state PATH]
 ade-install apply [--root DIR] [--json] [--dry-run|--yes] [--id ID ...] [--force]
                   [--system] [--print-system-argv] [--apply-system]
@@ -93,6 +93,7 @@ just install-plan
 just install-apply-dry
 just install-print-system-argv
 just doctor                 # alias of install-doctor (setup-plan S2 name)
+just doctor hermes          # selected component only (setup-plan S3a)
 just install [-- --yes]    # ade-install apply (dry-run by default; --yes for live)
 just update [-- --check|--auto|--auto --apply-checkout]
 just update-auto [-- --apply-checkout]  # default observe-only exit 5; opt-in checkout apply; plist pending
@@ -145,6 +146,13 @@ Pass `--ade` only with a durable checkout (`~/src/djbclark-ade`); never with a l
   pools (Cursor / Z.ai on the shipped file) stay quiet; doctor never writes
   `accepted=true` (operator flips the file; docs/pi-defaults.md B4). Doctor does
   not repair, install, or enable.
+- `doctor --id ID` (repeatable) validates every selected component id before
+  probing, then checks only those components. Unknown ids fail. Unchosen
+  components never execute a probe in this mode, including unchosen plugins.
+  Installation-wide keys/logins, settings, jobs, credential vault and pool
+  advisories are skipped. JSON `scope` is `{"kind":"components","component_ids":[...]}`;
+  `ok` applies to that scope only. Plain doctor retains all existing behavior
+  and reports `scope: {"kind":"all"}`. Text output also identifies partial checks.
 - `keys` is observe-only: bulk presence via `sudo-secretspec check`, then
   per-key `verify_argv` under `sudo-secretspec run` when recorded; no secret
   values.

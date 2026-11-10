@@ -4,7 +4,7 @@
   ade-install check [--root DIR] [--json]
   ade-install catalog [--root DIR] [--json]
   ade-install plan [--root DIR] [--json]
-  ade-install doctor [--root DIR] [--json]
+  ade-install doctor [--root DIR] [--id ID ...] [--json]
   ade-install keys [--root DIR] [--json] [--keys-state PATH]
   ade-install apply [--root DIR] [--json] [--dry-run|--yes] [--id ID ...] [--force]
                     [--system] [--print-system-argv] [--apply-system]
@@ -115,12 +115,17 @@ def cmd_plan(args: argparse.Namespace) -> int:
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
+    ids = list(dict.fromkeys(args.ids)) if args.ids is not None else None
+    scope = (
+        {"kind": "components", "component_ids": ids}
+        if ids is not None else {"kind": "all"}
+    )
     try:
         catalog = ai.load_catalog(root=Path(args.root) if args.root else None)
-        observations, rc = ai.doctor(catalog)
+        observations, rc = ai.doctor(catalog, component_ids=ids)
     except ai.InstallError as e:
         if args.json:
-            _print_json({"ok": False, "errors": [str(e)]})
+            _print_json({"ok": False, "scope": scope, "errors": [str(e)]})
         else:
             print(str(e), file=sys.stderr)
             print("ade-install doctor: FAIL", file=sys.stderr)
@@ -128,13 +133,17 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     if args.json:
         _print_json({
             "ok": rc == 0,
+            "scope": scope,
             "observations": [
                 {"kind": o.kind, "id": o.id, "status": o.status, "detail": o.detail}
                 for o in observations
             ],
         })
     else:
-        print("ade-install doctor: " + ("OK" if rc == 0 else "FAIL") + " (observe-only; no repair)")
+        note = "observe-only; no repair"
+        if ids is not None:
+            note += "; components: " + ", ".join(ids) + "; not whole-installation health"
+        print("ade-install doctor: " + ("OK" if rc == 0 else "FAIL") + " (" + note + ")")
         for o in observations:
             print(f"  {o.status:9} {o.kind}/{o.id}: {o.detail}")
     return rc
@@ -288,6 +297,11 @@ def main(argv: list[str] | None = None) -> int:
     ):
         p = sub.add_parser(name, parents=[shared], help=help_text)
         p.add_argument("--json", action="store_true")
+        if name == "doctor":
+            p.add_argument(
+                "--id", dest="ids", action="append",
+                help="check only this component (repeatable); skips installation-wide checks",
+            )
         if name == "keys":
             p.add_argument(
                 "--keys-state",
