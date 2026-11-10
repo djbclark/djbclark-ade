@@ -933,3 +933,205 @@ def test_merge_now_dry_run_when_green(tmp_path: Path) -> None:
     r = run(gh, "merge-now", "--prs", "484", "--min", "1")
     assert r.returncode == 0, r.stderr
     assert f"would merge #484 --squash --match-head-commit {head}" in r.stdout
+
+
+def test_retrigger_marker_refuses_bare_invoke(tmp_path: Path) -> None:
+    head = "a" * 40
+    listing = json.dumps(
+        [
+            {
+                "number": 327,
+                "title": "tip",
+                "headRefOid": head,
+                "baseRefName": "master",
+                "mergeable": "MERGEABLE",
+                "headRefName": "cursor/tip-f576",
+                "author": {"login": "djbclark"},
+            }
+        ]
+    )
+    checks = "pytest-linux\tpass\t0\tx\nadversary-marker\tfail\t0\tx\n"
+    gh = write_fake_gh(
+        tmp_path,
+        textwrap.dedent(
+            f"""
+            set -e
+            case "$*" in
+              *"pr list"*) echo '{listing}' ;;
+              *"pr checks"*) printf '%s' '{checks}' ; exit 1 ;;
+              *"repo view"*) echo djbclark ;;
+              *"workflow run"*) echo "unexpected fire: $*" >&2; exit 99 ;;
+              *) echo "unexpected: $*" >&2; exit 99 ;;
+            esac
+            """
+        ),
+    )
+    r = run(gh, "retrigger-marker", "--min", "1")
+    assert r.returncode == 2
+    assert "--prs" in r.stderr
+    assert "--class" in r.stderr
+
+
+def test_retrigger_marker_dry_run_class_needs_approve(tmp_path: Path) -> None:
+    """Dry-run lists workflow runs; never invents APPROVE; never merges."""
+    head_a = "a" * 40
+    head_b = "b" * 40
+    listing = json.dumps(
+        [
+            {
+                "number": 327,
+                "title": "needs approve tip",
+                "headRefOid": head_a,
+                "baseRefName": "master",
+                "mergeable": "MERGEABLE",
+                "headRefName": "cursor/needs-f576",
+                "author": {"login": "djbclark"},
+            },
+            {
+                "number": 328,
+                "title": "already green",
+                "headRefOid": head_b,
+                "baseRefName": "master",
+                "mergeable": "MERGEABLE",
+                "headRefName": "cursor/green-f576",
+                "author": {"login": "djbclark"},
+            },
+        ]
+    )
+    gh = write_fake_gh(
+        tmp_path,
+        textwrap.dedent(
+            f"""
+            set -e
+            case "$*" in
+              *"pr list"*) echo '{listing}' ;;
+              *"pr checks 328"*) printf '%s' 'pytest-linux\tpass\t0\tx\nadversary-marker\tpass\t0\tx\n' ;;
+              *"pr checks"*) printf '%s' 'pytest-linux\tpass\t0\tx\nadversary-marker\tfail\t0\tx\n' ; exit 1 ;;
+              *"repo view"*) echo djbclark ;;
+              *"workflow run"*) echo "unexpected fire: $*" >&2; exit 99 ;;
+              *"pr merge"*) echo "unexpected merge: $*" >&2; exit 99 ;;
+              *"pr comment"*) echo "unexpected comment: $*" >&2; exit 99 ;;
+              *) echo "unexpected: $*" >&2; exit 99 ;;
+            esac
+            """
+        ),
+    )
+    r = run(
+        gh,
+        "retrigger-marker",
+        "--class",
+        "needs_approve",
+        "--min",
+        "1",
+        "--json",
+    )
+    assert r.returncode == 0, r.stderr
+    assert "would trigger adversary-marker.yml pr=327" in r.stderr
+    assert "pr=328" not in r.stderr
+    assert "APPROVE" not in r.stdout
+    assert "APPROVE" not in r.stderr
+    payload = json.loads(r.stdout)
+    assert payload["dry_run"] is True
+    assert payload["triggered"] == [327]
+    assert payload["class"] == "needs_approve"
+
+
+def test_retrigger_marker_yes_fires_workflow(tmp_path: Path) -> None:
+    head = "c" * 40
+    listing = json.dumps(
+        [
+            {
+                "number": 359,
+                "title": "bottom tip",
+                "headRefOid": head,
+                "baseRefName": "master",
+                "mergeable": "MERGEABLE",
+                "headRefName": "cursor/bottom-f576",
+                "author": {"login": "djbclark"},
+            }
+        ]
+    )
+    checks = "pytest-linux\tpass\t0\tx\nadversary-marker\tfail\t0\tx\n"
+    log = tmp_path / "workflow.log"
+    gh = write_fake_gh(
+        tmp_path,
+        textwrap.dedent(
+            f"""
+            set -e
+            case "$*" in
+              *"pr list"*) echo '{listing}' ;;
+              *"pr checks"*) printf '%s' '{checks}' ; exit 1 ;;
+              *"repo view"*) echo djbclark ;;
+              *"workflow run"*adversary-marker.yml*"-f"*"pr=359"*)
+                echo "$*" >> '{log}'
+                ;;
+              *"pr merge"*) echo "unexpected merge: $*" >&2; exit 99 ;;
+              *"pr comment"*) echo "unexpected comment: $*" >&2; exit 99 ;;
+              *) echo "unexpected: $*" >&2; exit 99 ;;
+            esac
+            """
+        ),
+    )
+    r = run(gh, "retrigger-marker", "--prs", "359", "--yes", "--min", "1")
+    assert r.returncode == 0, r.stderr
+    assert "triggered adversary-marker.yml pr=359" in r.stdout
+    assert "APPROVE" not in r.stdout
+    assert log.exists()
+    assert "adversary-marker.yml" in log.read_text()
+    assert "pr=359" in log.read_text()
+
+
+def test_retrigger_marker_bottoms_only(tmp_path: Path) -> None:
+    """--bottoms-only keeps stack bottoms; child tips are skipped."""
+    head_p = "d" * 40
+    head_c = "e" * 40
+    listing = json.dumps(
+        [
+            {
+                "number": 400,
+                "title": "parent bottom",
+                "headRefOid": head_p,
+                "baseRefName": "master",
+                "mergeable": "MERGEABLE",
+                "headRefName": "cursor/parent-f576",
+                "author": {"login": "djbclark"},
+            },
+            {
+                "number": 401,
+                "title": "child tip",
+                "headRefOid": head_c,
+                "baseRefName": "cursor/parent-f576",
+                "mergeable": "MERGEABLE",
+                "headRefName": "cursor/child-f576",
+                "author": {"login": "djbclark"},
+            },
+        ]
+    )
+    checks = "pytest-linux\tpass\t0\tx\nadversary-marker\tfail\t0\tx\n"
+    gh = write_fake_gh(
+        tmp_path,
+        textwrap.dedent(
+            f"""
+            set -e
+            case "$*" in
+              *"pr list"*) echo '{listing}' ;;
+              *"pr checks"*) printf '%s' '{checks}' ; exit 1 ;;
+              *"repo view"*) echo djbclark ;;
+              *"workflow run"*) echo "unexpected fire: $*" >&2; exit 99 ;;
+              *) echo "unexpected: $*" >&2; exit 99 ;;
+            esac
+            """
+        ),
+    )
+    r = run(
+        gh,
+        "retrigger-marker",
+        "--bottoms-only",
+        "--class",
+        "needs_approve",
+        "--min",
+        "1",
+    )
+    assert r.returncode == 0, r.stderr
+    assert "would trigger adversary-marker.yml pr=400" in r.stdout
+    assert "pr=401" not in r.stdout

@@ -109,7 +109,7 @@ Skills (22, from each `skills/*/SKILL.md`):
 | [`ade-config`](bin/ade-config) | Check/get/diff/set for the versioned effective ADE config (schema_version=1). |
 | [`ade-git-guard`](bin/ade-git-guard) | A `git` front door for what git's own hooks cannot see in a workspace another agent owns. |
 | [`ade-install`](bin/ade-install) | Transitional install catalog, plan, doctor, and bounded apply. |
-| [`ade-merge-ready`](bin/ade-merge-ready) | Classify open ADE PRs against the merge gate (2026-11-09). |
+| [`ade-merge-ready`](bin/ade-merge-ready) | Classify / stacks / approve-paste / approve-post / retrigger-marker / merge-now against the merge gate (2026-11-10). |
 | [`ade-retro`](bin/ade-retro) | A read-only raw report for a retrospective over a date window (2026-11-04). |
 | [`ade-roster`](bin/ade-roster) | Print README's skills and bin/ roster, generated from the files themselves (2026-11-07, slim-down E11). |
 | [`ade-sched`](bin/ade-sched) | Install a checked-in launchd plist on this machine's scheduler (launchd, systemd user units or cron). |

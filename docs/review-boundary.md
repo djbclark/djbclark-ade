@@ -105,13 +105,16 @@ gh pr checks N --watch --required                 # wait for Tests and the marke
 gh pr merge N --squash --match-head-commit <the head the marker names>
 ```
 
-## Operator merge order (`bin/ade-merge-ready`, 2026-11-09; `approve-paste` 2026-11-10; `approve-post` 2026-11-10)
+## Operator merge order (`bin/ade-merge-ready`, 2026-11-09; `approve-paste` / `approve-post` 2026-11-10; `retrigger-marker` 2026-11-10)
 
 When many stacked ADE PRs wait on the merge gate (0 adversary SUCCESS), use the
-helper. Classify / stacks / approve-paste never invent an APPROVE; open-PR
-listing uses `--limit 500` (fail closed if that cap is hit) so stack bottoms are
-not dropped when more than 100 PRs are open. The gate still requires a **live
-owner** marker — bots and cloud agents cannot satisfy it.
+helper. Classify / stacks / approve-paste / retrigger-marker never invent an
+APPROVE; open-PR listing uses `--limit 500` (fail closed if that cap is hit) so
+stack bottoms are not dropped when more than 100 PRs are open. Until #484 lands,
+the gate still requires a **live owner** marker — bots and cloud agents cannot
+satisfy it. After #484, owner-authored tips pass without APPROVE once
+`adversary-marker` is re-dispatched (`retrigger-marker`); outside tips still need
+an owner comment.
 
 ```sh
 bin/ade-merge-ready                  # classify open tips vs pytest-linux + adversary-marker
@@ -128,6 +131,9 @@ bin/ade-merge-ready approve-paste --group install --bottoms-only
 # Owner-only (gh auth as repo owner). Dry-run by default; posts only with both flags:
 bin/ade-merge-ready approve-post --bottoms-only   # dry-run; prints --expect-head N=sha pins
 bin/ade-merge-ready approve-post --prs 484 --i-reviewed --yes --expect-head 484=<40hex> --trigger-marker
+bin/ade-merge-ready retrigger-marker --class needs_approve
+bin/ade-merge-ready retrigger-marker --bottoms-only --class needs_approve
+bin/ade-merge-ready retrigger-marker --prs 327,332,359 --yes
 bin/ade-merge-ready merge-now --prs 484            # dry-run; refuses unless adversary-marker success
 bin/ade-merge-ready merge-now --prs 484 --yes      # squash --match-head-commit only if merge_now
 ```
@@ -153,6 +159,11 @@ are set (otherwise dry-run). It never merges and never invents a head — each
 marker names the tip `headRefOid` just collected. `--trigger-marker` runs
 `adversary-marker.yml -f pr=N` after each successful post. Non-owner `gh`
 auth is refused (exit 2).
+
+`retrigger-marker` only re-dispatches `adversary-marker.yml -f pr=N` for
+selected open tips (`--prs`, `--bottoms-only`, and/or `--class`; dry-run unless
+`--yes`). It never posts markers, never merges, and refuses a bare invoke with
+no selector so it cannot fire the Action on every open PR.
 
 `stacks` derives order from each open PR's `baseRefName` → same-repo
 `headRefName` edge (live `gh pr list`, qualified by
