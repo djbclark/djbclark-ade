@@ -310,14 +310,14 @@ Keys are saved with `sudo-secretspec`, and also through Paseo if it has a secure
 Operator, 2026-11-07: install and update manage every scheduled job and service that is reasonable to manage. On the
 card the operator chose "ours, plus checks": djbclark-ade manages its own jobs and checks the rest.
 
-**Status (2026-11-10, residual inventory + first systemd reconcile):** transitional
+**Status (2026-11-10, residual inventory + systemd/cron reconcile):** transitional
 `config/install.toml [[install.jobs]]` / `[[install.retired_jobs]]` (folds into `config/ade.toml [install.jobs]`
 later), `ade-sched list`/`diff`, and `just doctor` / `just sched-diff` observe launchd/systemd/cron/paseo
 without unloading anyone. `ade-sched reconcile` (default dry-run; `--yes` writes) installs/reloads
-ADE-owned `ade-sched` jobs on **systemd user** units and records ownership in
+ADE-owned `ade-sched` jobs on **systemd user** units **and** the user **crontab**, and records ownership in
 `~/.local/state/djbclark-ade/jobs.json`; it removes only ledger-owned labels and never unloads
-foreign/unknown owners or root/`--system` units. Launchd/cron/`paseo schedule` write paths, and plists
-for `update --auto` / `harden-check` / `keys --check`, remain later work under the contracts below.
+foreign/unknown owners or root/`--system` units. Launchd / `paseo schedule` write paths, and plists
+for `update --auto` / `keys --check`, remain later work under the contracts below; `harden-check` has a daily plist (`just harden-check-install`, 2026-11-10).
 
 1. **One inventory**, `config/ade.toml [install.jobs]` (transitional: `config/install.toml [[install.jobs]]`). Each entry has:
    - name;

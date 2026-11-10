@@ -74,3 +74,7 @@ daily `ade-sched` / CI wiring, hermes-ping on drift.
 - Plan: [setup-plan.md](setup-plan.md) S5 / S6 (contract §7).
 - Argon Section E check table: [security/argon-injection-review-2026-11-07.md](security/argon-injection-review-2026-11-07.md).
 - Merge-gate setup (S8): [github-setup.md](github-setup.md).
+
+## Scheduled check (2026-11-10)
+
+Install the daily read-only job with `just harden-check-install` (or `bin/ade-sched install config/launchd/com.djbclark.harden-check.plist --set __STATE__=$HOME/.local/state/ade`). It runs `ade-harden observe` only — never apply/reapply.

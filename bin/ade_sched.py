@@ -70,7 +70,10 @@ OWNER_ADE = "djbclark-ade"
 JOBS_LEDGER_SCHEMA_VERSION = 1
 JOBS_LEDGER_NAME = "jobs.json"
 # First reconcile slice writes only the systemd user path (CI-testable; Mac live not required).
-RECONCILE_WRITE_BACKEND = "systemd"
+# First write path was systemd only (#461). Cron landed next (2026-11-10): both may
+# mutate ADE-owned jobs + jobs.json. Launchd / paseo remain report-only until later.
+RECONCILE_WRITE_BACKENDS = frozenset({"systemd", "cron"})
+RECONCILE_WRITE_BACKEND = "systemd"  # legacy JSON/single-name field; prefer RECONCILE_WRITE_BACKENDS
 # Labels matching these prefixes are considered in-scope for foreign drift reports.
 FOREIGN_PREFIXES = ("com.djbclark.", "acpdispatch.")
 SYSTEMD_UP = ("running", "degraded", "starting", "initializing")
@@ -1649,6 +1652,57 @@ def artifact_hash(files: Mapping[Path, str]) -> str:
     return h.hexdigest()
 
 
+def extract_cron_block(text: str, label: str) -> str | None:
+    """Return the ade-sched crontab block for ``label`` (BEGIN..END inclusive), or None."""
+    begin, end = cron_begin(label), cron_end(label)
+    lines = text.splitlines(keepends=True)
+    start = None
+    for i, line in enumerate(lines):
+        if line.rstrip("\n") == begin:
+            start = i
+            break
+    if start is None:
+        return None
+    for j in range(start + 1, len(lines)):
+        if lines[j].rstrip("\n") == end:
+            block = "".join(lines[start : j + 1])
+            if not block.endswith("\n"):
+                block += "\n"
+            return block
+    return None
+
+
+def _on_disk_files_match(
+    rendered: Rendered,
+    *,
+    backend_name: str,
+    label: str,
+    env: Mapping[str, str],
+    overrides: Mapping[str, Any],
+) -> bool:
+    """True when installed artifacts match the ADE render (systemd unit files or cron block)."""
+    try:
+        if backend_name == "cron":
+            want = rendered.files.get(Path("crontab"))
+            if want is None and rendered.cron_block:
+                want = rendered.cron_block
+            if want is None:
+                return False
+            c = _ctx(backend_name, env, dict(overrides))
+            text = _crontab_read(c)
+            have = extract_cron_block(text, label)
+            if have is None:
+                return False
+            return artifact_hash({Path("crontab"): have}) == artifact_hash({Path("crontab"): want})
+        current: dict[Path, str] = {}
+        for path in rendered.files:
+            if path.is_file():
+                current[path] = path.read_text(encoding="utf-8")
+        return set(current) == set(rendered.files) and artifact_hash(current) == artifact_hash(rendered.files)
+    except (OSError, SchedError):
+        return False
+
+
 def _ledger_owns(entry: Mapping[str, Any] | None, *, label: str) -> bool:
     """Removal authority: only a readable ADE ledger row for this label (intent alone is not enough)."""
     if not isinstance(entry, dict):
@@ -1759,14 +1813,14 @@ def plan_reconcile(
     extra_subst: Mapping[str, str] | None = None,
     **overrides: Any,
 ) -> list[ReconcileStep]:
-    """Plan ADE-scoped systemd reconcile actions. Never plans unload of foreign/unknown owners."""
+    """Plan ADE-scoped systemd/cron reconcile actions. Never plans unload of foreign/unknown owners."""
     env = os.environ if env is None else env
     live = live or LiveScan(backend_name, ())
     entries = ledger.get("entries") if isinstance(ledger.get("entries"), dict) else {}
     assert isinstance(entries, dict)
     steps: list[ReconcileStep] = []
     expected_labels: dict[str, str] = {}  # label -> logical name
-    write_ok = backend_name == RECONCILE_WRITE_BACKEND
+    write_ok = backend_name in RECONCILE_WRITE_BACKENDS
 
     for n in live.notes:
         steps.append(ReconcileStep("live-scan", "report", OWNER_ADE, n, touch=False, category="job"))
@@ -1822,7 +1876,7 @@ def plan_reconcile(
         if not write_ok:
             steps.append(ReconcileStep(
                 name, "refuse-backend", owner,
-                f"first reconcile write path is {RECONCILE_WRITE_BACKEND} only; backend={backend_name}",
+                f"reconcile write backends are {sorted(RECONCILE_WRITE_BACKENDS)}; backend={backend_name}",
                 label=label,
             ))
             continue
@@ -1849,19 +1903,16 @@ def plan_reconcile(
         want_hash = artifact_hash(rendered.files)
         entry = entries.get(name) if isinstance(entries.get(name), dict) else None
         st = status(label, backend_name, env=env, **overrides)
-        on_disk_match = False
-        if st.installed:
-            try:
-                current: dict[Path, str] = {}
-                for path in rendered.files:
-                    if path.is_file():
-                        current[path] = path.read_text(encoding="utf-8")
-                on_disk_match = (
-                    set(current) == set(rendered.files)
-                    and artifact_hash(current) == want_hash
-                )
-            except OSError:
-                on_disk_match = False
+        on_disk_match = bool(
+            st.installed
+            and _on_disk_files_match(
+                rendered,
+                backend_name=backend_name,
+                label=label,
+                env=env,
+                overrides=overrides,
+            )
+        )
         ledger_match = (
             isinstance(entry, dict)
             and entry.get("status") in ("committed", "installed")
@@ -1926,6 +1977,16 @@ def plan_reconcile(
                 category="ledger",
             ))
             return
+        entry_backend = entry.get("backend")
+        if isinstance(entry_backend, str) and entry_backend and entry_backend != backend_name:
+            steps.append(ReconcileStep(
+                logical_id, "report", owner,
+                f"ledger backend={entry_backend!r}; refuse remove on {backend_name} "
+                f"(reconcile with that backend to unload {label})",
+                label=label,
+                category="ledger",
+            ))
+            return
         is_retired = any(_label_matches(pat, label) for _, _, pat in retired_patterns if pat)
         dropped = not is_retired
         if not _ledger_owns(entry, label=label):
@@ -1940,7 +2001,7 @@ def plan_reconcile(
         if not write_ok:
             steps.append(ReconcileStep(
                 logical_id, "refuse-backend", owner,
-                f"would remove ledger-owned {label} but write path is {RECONCILE_WRITE_BACKEND} only",
+                f"would remove ledger-owned {label} but write backends are {sorted(RECONCILE_WRITE_BACKENDS)}; backend={backend_name}",
                 label=label,
                 category="ledger",
             ))
@@ -2063,14 +2124,16 @@ def reconcile(
     err: TextIO | None = None,
     **overrides: Any,
 ) -> tuple[list[dict[str, Any]], int]:
-    """Reconcile ADE-owned ade-sched jobs on systemd and write the ownership ledger.
+    """Reconcile ADE-owned ade-sched jobs on systemd/cron and write the ownership ledger.
 
     Default is dry-run (plan only). ``dry_run=False`` executes installs/removes for
     ADE ledger scope only. Never unloads foreign/unknown owners. Never touches root
-    / ``--system`` units. First write path is systemd user timers only.
+    / ``--system`` units. Write backends: systemd user timers and user crontab
+    (``RECONCILE_WRITE_BACKENDS``); launchd/paseo remain later.
 
     Exit 0 when the plan is clean (dry-run) or every touch succeeded; 1 on a failed
-    mutation or blocked step; 2 when ``--yes`` is asked on a non-systemd backend.
+    mutation or blocked step; 2 when ``--yes`` is asked on a non-write backend
+    (launchd today).
     """
     out = out or sys.stdout
     err = err or sys.stderr
@@ -2130,14 +2193,17 @@ def reconcile(
         return results, rc
 
     # --yes path
-    if b.name != RECONCILE_WRITE_BACKEND:
+    if b.name not in RECONCILE_WRITE_BACKENDS:
         for step in steps:
             results.append({
                 "name": step.name,
                 "action": "refuse-backend",
                 "owner": step.owner,
                 "label": step.label,
-                "detail": step.detail,
+                "detail": step.detail or (
+                    f"reconcile write backends are {sorted(RECONCILE_WRITE_BACKENDS)}; "
+                    f"backend={b.name}"
+                ),
                 "category": step.category,
                 "touch": False,
                 "ok": False,
@@ -2342,6 +2408,17 @@ def reconcile(
                     )
                     row["touch"] = False
                     # Not a hard failure of the run: safety refusal.
+                    results.append(row)
+                    continue
+                entry_backend = entry.get("backend")
+                if isinstance(entry_backend, str) and entry_backend and entry_backend != b.name:
+                    row["ok"] = False
+                    row["action"] = "report"
+                    row["detail"] = (
+                        f"refusing remove of {label}: ledger backend={entry_backend!r}; "
+                        f"reconcile backend={b.name}"
+                    )
+                    row["touch"] = False
                     results.append(row)
                     continue
                 live = entries.get(step.name)

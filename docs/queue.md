@@ -11,7 +11,7 @@ under **Carried**, newest first, one line each; an item leaves when it ships (in
 
 ## Carried
 
-1. **Wave 6 shim deletion** (2026-11-09; status 2026-11-10): remove `relay.py`, `acp-dispatch` and `acp-run` after one live cycle (soft deadline 2026-11-20); C3 outside files migrated or waived; keep `review-launch`. Checklist: `docs/slim/wave6-follow-up.md`. C3 `--dry-run` FIXTURE path ready/tightened; `--inventory` lists gated shim callers with `gate_exits`; Mac live cycle still blocked (`mac_not_live` on FIXTURE/LINUX-SAFE). Tools: `bin/wave6-delete-check` (`--dry-run` = FIXTURE shape; `--inventory` = §A caller list) + `bin/wave6-mac-proof-capture` (`--live` Darwin / `--linux-safe` partial; labeled FIXTURE proofs under `tests/fixtures/wave6-mac-proofs/` until replaced). Operator must supply live Mac proofs + C3 migrate/waive pastes. (Absorbs the deletion half of former Carried 33.)
+1. **Wave 6 shim deletion** (2026-11-09; status 2026-11-10): remove `relay.py`, `acp-dispatch` and `acp-run` after one live cycle (soft deadline 2026-11-20); C3 outside files migrated or waived; keep `review-launch`. Checklist: `docs/slim/wave6-follow-up.md`. In-repo §A LIVE_RE callers cleared on tip `#498` (`wave6-delete-check --inventory` → `callers_remaining=0`); C3 `--dry-run` FIXTURE path ready/tightened; Mac live cycle still blocked (`mac_not_live` on FIXTURE/LINUX-SAFE). Tools: `bin/wave6-delete-check` + `bin/wave6-mac-proof-capture`. Operator must supply live Mac proofs + C3 migrate/waive pastes before deletion. (Absorbs the deletion half of former Carried 33.)
 2. **Issue 284 follow-ups** (2026-11-04): the goal / verify-until-pass loop (evaluate the Paseo plugin `37chengshan/goal-mode`
    first), Codex and opencode wiring of `secret_read_gate.py` and `post-edit-check --hook`, a Claude `filesystem.denyRead`
    live trial (template/render landed 2026-11-09 in `agents/claude/settings.json.tmpl` via `bin/render-secret-deny`;
@@ -96,16 +96,12 @@ under **Carried**, newest first, one line each; an item leaves when it ships (in
 31. **Keep the instruction files lean** (2026-08-24 cost review): Claude's docs advise under 200 lines; AGENTS.md is
     338 lines after the E11 rewrite (2026-11-07), the review rules being most of it.
 32. **`bg` registers its own deadline** (2026-11-01): site-public-djbclark `bin/bg`, waits for the operator's yes (order 11).
-33. **Two test LOWs from the 2026-10-23 rework-2 PRs**: `tests/test_bin_modes.py`'s docstring says "outside tests/" while
-    the code exempts a `tests/` directory at any depth (PR 32 round 6); no test pins that `xhigh` and `max` are accepted as
-    `[lead]` effort values (PR 33 round 2).
-34. **Slim-down leftovers after Wave 6 deletion** (2026-11-07; deletion itself is Carried 1 / `docs/slim/wave6-follow-up.md`): port `skills/loose`'s
-    upstream-issue reader off `acp-run --perm deny`; aiuse's acp-run
-    readers (`src/aiuse/collectors/acp_usage.py`); the shim does not apply the Argon `fallback_block` at dispatch (E7 E5);
+33. **Slim-down leftovers after Wave 6 deletion** (2026-11-07; deletion itself is Carried 1 / `docs/slim/wave6-follow-up.md`): `skills/loose` upstream-issue reader already uses Claude CLI `-p` (no `acp-run --perm deny`; scrubbed on tip `#498`); remaining: aiuse's acp-run
+    readers (`src/aiuse/collectors/acp_usage.py`, order 11); the shim does not apply the Argon `fallback_block` at dispatch (E7 E5);
     `routing-recalibrate` as a Paseo schedule if wanted
     (E5); upstream Paseo filings (a codex read-only mode, a quota-pause primitive, a workspace-claim primitive).
-35. **`bin/review-pr` and `gh pr checks --watch` register no deadline of their own** (2026-11-07, W3 docs critic): run them under `deadline run` until one of them registers itself (`docs/deadline.md` Known gaps).
-36. **One-step install and automatic updates on a new machine, Mac and Linux** (operator, 2026-11-07): an easy way to install
+34. **`bin/review-pr` and `gh pr checks --watch` register no deadline of their own** (2026-11-07, W3 docs critic): run them under `deadline run` until one of them registers itself (`docs/deadline.md` Known gaps).
+35. **One-step install and automatic updates on a new machine, Mac and Linux** (operator, 2026-11-07): an easy way to install
     djbclark-ade with all its dependencies and TUIs (Paseo and its providers' CLIs, the modern-CLI tools, `graft`, `aiuse`,
     skills linked by `skill-everywhere`), and an automatic way to keep it and every dependency current (software tracks
     its latest release, order 8). Start from what exists: `bin/ade-update` (this checkout only), `bin/ade-sched` for the
@@ -115,13 +111,13 @@ under **Carried**, newest first, one line each; an item leaves when it ships (in
     (`config/ade.toml`), a justfile entry point, and browser-only steps through Grok Bot: the plan is `docs/setup-plan.md`.
     Later operator additions (2026-11-07): S4b manages ADE-owned jobs and checks other owners without taking them over;
     residual (2026-11-10): inventory + `ade-sched list`/`diff` + doctor drift landed (never unload foreign);
-    first systemd reconcile + `jobs.json` ownership ledger write path landed; launchd/cron/paseo write paths still open;
+    systemd + cron reconcile + `jobs.json` ownership ledger write path landed; launchd/paseo write paths still open;
     S5a originally accompanied setup, but security implementation is deferred by the 2026-11-08 operator ruling;
     S9 plans cloud-agent communication last, after signing and the earlier sections, and builds only with headroom
     (design slice: `docs/s9-cloud-paseo.md`, 2026-11-10 — prerequisites, non-goals, paper phases; no live wiring).
     Overall and local coordination now share the local lead.
 
-37. **Pi-only third-party client** (operator, 2026-11-08): migration and archive-only history search shipped;
+36. **Pi-only third-party client** (operator, 2026-11-08): migration and archive-only history search shipped;
     omp/OpenCode/Crush are archived, never fallbacks. Dynamic defaults use explicit per-pool acceptance and
     task boundaries (`docs/pi-defaults.md`); normal startup and an unpinned live request passed after activation.
     Restored Grok subscription access (Pi and vendor ACP) and Antigravity Pi passed basic tool checks
@@ -168,26 +164,27 @@ under **Carried**, newest first, one line each; an item leaves when it ships (in
 
 ## Done before (one line each; detail in git history)
 
-1. **Push on completion** (load-watch 96a17744, 2026-10-23; shipped 2026-11-09): a delegated slice tells its requester
+1. **Two test LOWs from rework-2 PRs 32/33** (docstring nested `tests/` + `[lead]` `xhigh`/`max`): fixed in #391 (2026-11-10); queue row closed 2026-11-10.
+2. **Push on completion** (load-watch 96a17744, 2026-10-23; shipped 2026-11-09): a delegated slice tells its requester
    `done: <title>, <PR URL>` (or status/report) via `paseo send --json --no-wait` with named ack, never relay; dispatch
    footer rule 22, `bin/completion-notice`, `skills/fan-out` Collect, `docs/orchestration-practices.md` §5a.
-2. **Model tiers as data** (2026-10-31 → 2026-11-09, PR #401): `config/model-tiers.toml`, `bin/ade-model-tiers promote|set`,
+3. **Model tiers as data** (2026-10-31 → 2026-11-09, PR #401): `config/model-tiers.toml`, `bin/ade-model-tiers promote|set`,
    `route_agent` / `load_effective` readers; design remains `docs/history/model-tiers-design.md`.
-3. Port the Linux suite to uutils (2026-10-28): `pytest-linux` makes g-prefixed wrapper scripts, on `ubuntu-latest`.
-4. Keep every machine current, and a changelog (2026-10-20): `bin/ade-update`, `CHANGELOG.md`, fragments since 2026-10-31.
-5. Phase 0 backups (PR 24) and the templates (PR 23), 2026-10-20.
-6. ade-git-guard O2 redesign adopted and built (PR 59, 2026-10-25).
-7. An absolute "all work in a worktree" commandment (2026-10-25): adopted as order 9.
-8. Deadline waiters register themselves (2026-11-02); the sweep installs on Linux too (`deadline install --backend`).
-9. Queued lows branch, adversary BLOCK, repair and round 2 APPROVE (2026-10-24).
-10. Cloud agents: the Cursor API key and `bin/cursor-cloud` (2026-10-19/20).
-11. Claude API credits: the omp login and the aiuse credits row (2026-10-19), the Admin API collector (aiuse 3.8.0, 2026-10-20).
-12. Quota-aware cross-vendor routing (queued 2026-08-23): `route_agent.py plan|route|show` (2026-10).
-13. Implement cow (2026-08-23; removed with `cow-pasture` 2026-11-06).
-14. Completed 2026-08-23: `~/src/ops-worktrees/` retired with every branch preserved.
-15. Token-cost hygiene review of 2026-08-24 (its one open point is Carried 29).
-16. Monthly plans that work with Hermes (research of 2026-08-24; ClinePass).
-17. Why the `sed` edit failed twice (2026-10-14): `~/CLAUDE.md` item 33.
-18. Flaky MockWebServer tests on the SIPB runner (2026-10-14).
-19. Watch Orca upstream for structural-reorg verbs; Orca's short PostCompact hook; the herdr-only capability and Orca parity list: dropped 2026-10-31 with Orca and herdr.
-20. Restart the `hindsight` MCP server in sessions older than 2026-08-23 20:00: moot (no such session survives).
+4. Port the Linux suite to uutils (2026-10-28): `pytest-linux` makes g-prefixed wrapper scripts, on `ubuntu-latest`.
+5. Keep every machine current, and a changelog (2026-10-20): `bin/ade-update`, `CHANGELOG.md`, fragments since 2026-10-31.
+6. Phase 0 backups (PR 24) and the templates (PR 23), 2026-10-20.
+7. ade-git-guard O2 redesign adopted and built (PR 59, 2026-10-25).
+8. An absolute "all work in a worktree" commandment (2026-10-25): adopted as order 9.
+9. Deadline waiters register themselves (2026-11-02); the sweep installs on Linux too (`deadline install --backend`).
+10. Queued lows branch, adversary BLOCK, repair and round 2 APPROVE (2026-10-24).
+11. Cloud agents: the Cursor API key and `bin/cursor-cloud` (2026-10-19/20).
+12. Claude API credits: the omp login and the aiuse credits row (2026-10-19), the Admin API collector (aiuse 3.8.0, 2026-10-20).
+13. Quota-aware cross-vendor routing (queued 2026-08-23): `route_agent.py plan|route|show` (2026-10).
+14. Implement cow (2026-08-23; removed with `cow-pasture` 2026-11-06).
+15. Completed 2026-08-23: `~/src/ops-worktrees/` retired with every branch preserved.
+16. Token-cost hygiene review of 2026-08-24 (its one open point is Carried 29).
+17. Monthly plans that work with Hermes (research of 2026-08-24; ClinePass).
+18. Why the `sed` edit failed twice (2026-10-14): `~/CLAUDE.md` item 33.
+19. Flaky MockWebServer tests on the SIPB runner (2026-10-14).
+20. Watch Orca upstream for structural-reorg verbs; Orca's short PostCompact hook; the herdr-only capability and Orca parity list: dropped 2026-10-31 with Orca and herdr.
+21. Restart the `hindsight` MCP server in sessions older than 2026-08-23 20:00: moot (no such session survives).

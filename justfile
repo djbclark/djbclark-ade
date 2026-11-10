@@ -56,6 +56,12 @@ update-check-install:
     "{{ root }}/bin/ade-sched" --backend auto install "{{ root }}/config/launchd/com.djbclark.ade-update-check.plist" \
         --set "__STATE__={{ env_var_or_default('HOME', '/tmp') }}/.local/state/ade"
 
+# Install the daily read-only harden-check job (Linux: systemd; Mac: launchd).
+# Never mutates GitHub settings (ade-harden observe only).
+harden-check-install:
+    "{{ root }}/bin/ade-sched" --backend auto install "{{ root }}/config/launchd/com.djbclark.harden-check.plist" \
+        --set "__STATE__={{ env_var_or_default('HOME', '/tmp') }}/.local/state/ade"
+
 # S4b: ADE-owned jobs inventory and live drift (report only; never unload).
 sched-list:
     "{{ root }}/bin/ade-sched" list --root "{{ root }}"
@@ -63,7 +69,7 @@ sched-list:
 sched-diff:
     "{{ root }}/bin/ade-sched" diff --root "{{ root }}"
 
-# S4b: ADE-owned systemd reconcile + ownership ledger (default dry-run; pass -- --yes to write).
+# S4b: ADE-owned systemd/cron reconcile + ownership ledger (default dry-run; pass -- --yes to write).
 sched-reconcile *args:
     "{{ root }}/bin/ade-sched" reconcile --root "{{ root }}" {{ args }}
 

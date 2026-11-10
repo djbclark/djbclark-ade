@@ -244,6 +244,7 @@ def _cmd_reconcile(a: argparse.Namespace) -> int:
                 "mode": mode,
                 "ledger": ledger_path,
                 "write_backend": ade_sched.RECONCILE_WRITE_BACKEND,
+                "write_backends": sorted(ade_sched.RECONCILE_WRITE_BACKENDS),
                 "results": results,
             },
             sys.stdout,
@@ -253,9 +254,10 @@ def _cmd_reconcile(a: argparse.Namespace) -> int:
         sys.stdout.write("\n")
     else:
         label = "OK" if rc == 0 else "FAIL"
+        backends = "/".join(sorted(ade_sched.RECONCILE_WRITE_BACKENDS))
         print(
             f"ade-sched reconcile ({mode}): {label} "
-            f"(systemd user write path; never unload foreign; ledger={ledger_path})"
+            f"({backends} write path; never unload foreign; ledger={ledger_path})"
         )
         for row in results:
             print(

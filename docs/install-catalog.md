@@ -149,8 +149,14 @@ Pass `--ade` only with a durable checkout (`~/src/djbclark-ade`); never with a l
   requires `--yes --system --apply-system` (argv list via subprocess, never
   `shell=True`); `--yes --system` alone still exits 2 (`refuse-system-exec`).
   Exit 0 ok, 1 blocked/failed, 2 system-exec refused / usage.
-- `ade-user-install uv|just|link <name>` fetches GitHub release binaries or
-  symlinks a repo `bin/` tool into the prefix. No `shell=True`, no root.
+- `ade-user-install uv|just|cursor-cli|hermes|link <name>|sudo-secretspec` fetches
+  release binaries / vendor packages, symlinks a repo `bin/` tool, or stages
+  Linux sudo-secretspec media into the prefix. No `shell=True`, no root. Cursor
+  reads the version pin from `https://cursor.com/install` then downloads the lab
+  tarball; Hermes urllib-fetches `install.sh` and runs
+  `bash <temp>/install.sh --non-interactive`. Non-dry-run Cursor/Hermes installs
+  require `ADE_USER_INSTALL_TRUST_VENDOR=1` (TLS to the publisher CDN; no forever
+  digest pin — standing order 8).
 - `ade-user-install sudo-secretspec` (Linux x86_64): resolve
   `frdminc/sudo-secretspec` `releases/latest`, fetch the versioned
   `.tar.gz` + `.sha256`, verify, extract under
@@ -164,6 +170,8 @@ Pass `--ade` only with a durable checkout (`~/src/djbclark-ade`); never with a l
 | --- | --- |
 | `just`, `uv` | `ade-user-install` release fetch → `{prefix}` |
 | `skill-everywhere`, `firecrawl-router` | `ade-user-install link` into `{prefix}` |
+| `node` | Mac `brew install node`; Linux `system_argv` `apt-get install -y nodejs npm`; `node --version` probe |
+| `npm` | separate hard row (`npm --version`); same Mac brew / Linux apt argv as node |
 | `graft` | `npm install -g @nanonets/graft` (user npm prefix) |
 | `git`, `gh` | `needs_system` + Linux `system_argv` (`apt-get`) + `system_argv_darwin` (`brew`); preview or `--apply-system` |
 | `sudo-secretspec` | Mac: `system_argv_darwin` brew tap (`--system` / `--apply-system`). Linux: no `system_argv`; `install_argv` → `ade-user-install sudo-secretspec` (latest → versioned asset → sha256 → extract; libexec install opt-in) |
@@ -173,8 +181,8 @@ Pass `--ade` only with a durable checkout (`~/src/djbclark-ade`); never with a l
 | `pi` | `npm install -g @mariozechner/pi-coding-agent` |
 | `claude-code` | `npm install -g @anthropic-ai/claude-code` (presence `claude`) |
 | `codex` | `npm install -g @openai/codex` |
-| `cursor-cli` | probe/update only (`agent --version` / `agent update`); install is official curl\|bash (no `install_argv` yet) |
-| `hermes` (offered) | probe/update only (`hermes doctor` / `hermes update`); install is official curl\|bash (no `install_argv` yet); opt-in basic setup `just hermes-setup` / `--self` (`prompts/setup/hermes.md`, `docs/hermes-setup.md`) |
+| `cursor-cli` | `ade-user-install cursor-cli` (lab tarball → `~/.local/share/cursor-agent` + `{prefix}/agent`); update `agent update` |
+| `hermes` (offered) | `ade-user-install hermes` (script fetch + `bash … --non-interactive`); update `hermes update` |
 | `ade-claim` | observe-only `paseo_plugin`; no `install_argv` (operator `paseo plugin install`) |
 | others | still `UNKNOWN` / no `install_argv` |
 
@@ -202,14 +210,18 @@ path (systemd user units + `jobs.json` ownership ledger; dry-run default;
 `--yes` writes; never unloads foreign/unknown or root/`--system`). See
 `docs/scheduling.md`.
 
-## G. Next units
+## G. J6 Paseo plugins (catalog only, 2026-11-10)
+
+Offered `paseo-plugin-*` rows re-landed from stranded #354 (session-guard, baton, asks, questions-please, tell-agent, vitals, skills, and siblings). Install/probe argv stay UNKNOWN until Mac live `paseo plugin ls` (order 11). Doctor observes presence only.
+
+## H. Next units
 
 Ownership-aware reconcile beyond the install ledger (setup-plan S3), remaining
 owner installers (curl-free Cursor CLI fetch, Hermes offered path — basic setup
 via `just hermes-setup`, Paseo desktop/daemon and skill bundle), opt-in
 privilege-boundary `sudo-secretspec install --declarations` as a managed apply
 step (Linux media staging is recorded), recorded provider `verify_argv` recipes
-in the catalog, collect/set batch. S4b launchd/cron/`paseo schedule` reconcile
-write paths remain later work.
+in the catalog, collect/set batch. S4b cron reconcile write path landed with
+systemd (2026-11-10); launchd/`paseo schedule` reconcile write paths remain later work.
 Follow-up: tighten `--apply-system` with an ownership generation / read-back
 lock if multi-agent installs share a machine.

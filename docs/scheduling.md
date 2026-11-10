@@ -33,7 +33,7 @@ bin/ade-sched [options] uninstall LABEL       remove it (not installed: exit 0)
 bin/ade-sched [options] status [LABEL...]     installed / active / next run; no LABEL: every job ade-sched generated
 bin/ade-sched [options] list                  print config/install.toml [install.jobs] / [install.retired_jobs]
 bin/ade-sched [options] diff                  compare the inventory to live launchd/systemd/cron/paseo (report only)
-bin/ade-sched [options] reconcile             ADE-owned systemd reconcile + ownership ledger (default dry-run; --yes writes)
+bin/ade-sched [options] reconcile             ADE-owned systemd/cron reconcile + ownership ledger (default dry-run; --yes writes)
 
 Checked-in ADE jobs under `config/launchd/` include `com.djbclark.deadline-sweep`,
 `com.djbclark.pr-policy`, and (2026-11-09) `com.djbclark.ade-update-check` (daily
@@ -75,11 +75,11 @@ Checked-in ADE jobs under `config/launchd/` include `com.djbclark.deadline-sweep
 
 ## Reconcile and ownership ledger (S4b first write path, 2026-11-10)
 
-`ade-sched reconcile` / `just sched-reconcile` is the first ADE job write path on top of the inventory:
+`ade-sched reconcile` / `just sched-reconcile` is the ADE job write path on top of the inventory:
 
-- **Backend:** systemd user units only in this slice (CI-testable with fakes). `--yes` on launchd/cron
-  refuses (exit 2). No Mac live proof is required for this unit. Root / `--system` units are never
-  touched.
+- **Backend:** systemd user units **and** user crontab (CI-testable with fakes; 2026-11-10 cron
+  write path). `--yes` on launchd still refuses (exit 2). No Mac live proof is required for this
+  unit. Root / `--system` units are never touched. Paseo schedule write remains later.
 - **Default dry-run**; `--yes` executes. Pending intent is written to the ownership ledger before any
   host write; committed ownership is recorded only after install/uninstall read-back.
 - **Ledger:** `~/.local/state/djbclark-ade/jobs.json` (or `ADE_JOBS_STATE_DIR`), schema_version 1, with
@@ -98,8 +98,8 @@ Checked-in ADE jobs under `config/launchd/` include `com.djbclark.deadline-sweep
   authority. Retired or dropped-from-inventory labels that are live but **not** in the ledger are
   reported only — never unloaded. Foreign/unknown owners are never unloaded.
 - Paseo schedules and dependency/site services stay report-only here (later slices).
-- Plists for `update --auto` / `harden-check` / `keys --check` remain planned inventory rows until
-  those plists land.
+- Plist for `harden-check` landed 2026-11-10 (`config/launchd/com.djbclark.harden-check.plist`;
+  `just harden-check-install`). `update --auto` / `keys --check` remain planned until those plists land.
 
 ## Paseo schedules (operator create, 2026-11-10)
 
@@ -147,6 +147,11 @@ systemctl --user list-timers               # the timer, its next run
 bin/ade-sched --backend systemd install config/launchd/com.djbclark.ade-update-check.plist \
     --set __STATE__=$HOME/.local/state/ade --ade ~/src/djbclark-ade
 # or from the canonical checkout: just update-check-install (no --ade; worktree guard stays on)
+
+# Daily read-only harden-check (S6; never mutates GitHub settings)
+bin/ade-sched --backend systemd install config/launchd/com.djbclark.harden-check.plist \
+    --set __STATE__=$HOME/.local/state/ade --ade ~/src/djbclark-ade
+# or: just harden-check-install
 ```
 
 Install from the canonical checkout (`--ade ~/src/djbclark-ade`): a job installed from a linked worktree would point into a

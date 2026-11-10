@@ -1,8 +1,9 @@
 # Wave 6 follow-up — shim and `acp-run` deletion readiness
 
-Snapshot: 2026-11-10 (status: C3 `--dry-run` FIXTURE path tightened;
-`--inventory` lists every gated §A caller hit with `gate_exits` proof; Mac
-live cycle still blocked; soft delete ~2026-11-20). Queue Carried **item 33**.
+Snapshot: 2026-11-10 (status: in-repo §A LIVE_RE callers cleared on tip
+`#498` — `wave6-delete-check --inventory` → `callers_remaining=0`; C3
+`--dry-run` FIXTURE path tightened; Mac live cycle still blocked; soft
+delete ~2026-11-20). Queue Carried **item 1**.
 The slim-down's Wave 6 **shipped the shims** (`docs/slim/PLAN.md` F). This doc
 is the **deletion readiness** checklist for the follow-up PR that removes
 `skills/session-finder/relay.py`, `bin/acp-dispatch`, and `tools/acp-run`
@@ -33,9 +34,10 @@ New code already calls Paseo directly (`paseo send`, `paseo run`).
 
 ## Status (2026-11-10) — current open work
 
-Queue Carried **[item 33](../queue.md)** residual. **Nothing here deletes the
+Queue Carried **[item 1](../queue.md)** residual. **Nothing here deletes the
 shims.** Soft deadline for relay / dispatch / `acp-run` removal:
-**~2026-11-20** (sooner only when every gate below is green).
+**~2026-11-20** (sooner only when every gate below is green, plus Mac live
++ C3 evidence; `--allow-early` only with operator yes).
 
 | Gate | State | Where / why |
 |---|---|---|
@@ -43,7 +45,7 @@ shims.** Soft deadline for relay / dispatch / `acp-run` removal:
 | Caller inventory (§A list) | **ready (inventory)** | `bin/wave6-delete-check --inventory` lists every gated §A hit + `gate_exits` proving coverage; ungated `skills/*/SKILL.md` FAILCLOSED; never Mac-live / never `ready` |
 | Linux-safe Mac partial probes | **ready** | `bin/wave6-mac-proof-capture --linux-safe` (pgrep + optional paseo; launchctl SKIPPED). `wave6-delete-check` reports `mac_not_live` if used as `--evidence` |
 | Mac live cycle | **blocked** | No Darwin host on this cloud/CI path; `--live` refuses non-Darwin; FIXTURE / LINUX-SAFE never count. Needs an operator Mac run of `bin/wave6-mac-proof-capture --live` (§B / §B0) |
-| In-repo callers (§A) | **open** | Wave 6 rewrite PRs still in flight; full `wave6-delete-check` (no `--dry-run`/`--inventory`) still fails `callers_*` until they land and merge; `--inventory` tracks remaining hits meanwhile |
+| In-repo callers (§A) | **green (tip `#498`)** | `wave6-delete-check --inventory` → `callers_remaining=0` / `gate_exits.callers=0` on `cursor/wave6-live-re-scrub-f576`; gated skills + bins + `skills/loose` scrubbed. Full check still fails `evidence_missing` (Mac + C3), not `callers_*` |
 | C3 outside migrations (§C) | **open / operator** | Order 11: probes on outside checkouts + migrate/waive proof files; FIXTURE `cmd:` rows document the Linux-safe `rg` shape only — not inventable from CI |
 | Soft delete deadline | **~2026-11-20** | `test_the_shim_is_removed_by_2026_11_20`; deletion PR waits on green evidence |
 
@@ -51,10 +53,10 @@ shims.** Soft deadline for relay / dispatch / `acp-run` removal:
 
 1. **Mac live-cycle proofs** (Darwin only): `bin/wave6-mac-proof-capture --live --out DIR --json`, then merge printed `mac_proofs` into a real `evidence.json` (not the FIXTURE / LINUX-SAFE bundle) and paste B1–B3 stdout into the deletion PR.
 2. **C3 row evidence** for each outside path in §C: either a migrated probe paste in `c3_proofs.<key>`, or a one-line waive in `docs/slim/log.md` copied into that proof file (FIXTURE `cmd:` lines are the Linux-safe shape stand-in only).
-3. **Land the readiness stack** before the deletion PR: #398 (checklist + gate) → #417 (FAILCLOSED proof files) → #441 (Mac harness + FIXTURE `--dry-run`) → #453 (C3 status) → #470 (FIXTURE tighten) → caller `--inventory`; merge remaining §A caller-rewrite PRs until `callers_skills` / `callers_loose` are green.
+3. **Land the readiness stack** before the deletion PR: #398 → #417 → #441 → #453 → #470 → #472 (all MERGED) + tip `#498` (LIVE_RE scrub to zero callers). Confirm `callers_remaining=0` on master after `#498` merges.
 4. **Deletion PR last**: `bin/wave6-delete-check --evidence <json>` must exit 0 (**never** treat `--dry-run`, `--inventory`, FIXTURE, or `--linux-safe` as deletion-ready); keep `bin/review-launch`.
 
-### Readiness stack (open, do not merge as delete)
+### Readiness stack (merged; do not treat as delete)
 
 - [#398](https://github.com/djbclark/djbclark-ade/pull/398) — delete-readiness checklist + `bin/wave6-delete-check`
 - [#417](https://github.com/djbclark/djbclark-ade/pull/417) — C3/Mac proof-file FAILCLOSED evidence
@@ -62,36 +64,30 @@ shims.** Soft deadline for relay / dispatch / `acp-run` removal:
 - [#453](https://github.com/djbclark/djbclark-ade/pull/453) — C3 status (FIXTURE ready, Mac blocked)
 - [#470](https://github.com/djbclark/djbclark-ade/pull/470) — C3 FIXTURE tighten + `--linux-safe` Mac probes (`mac_not_live`)
 - [#472](https://github.com/djbclark/djbclark-ade/pull/472) — caller `--inventory`: untruncated §A reference list + `gate_exits` proof while Mac blocked
-- LIVE_RE tighten (stacked on #472): backticked `` `acp-dispatch` `` + `acp-dispatch <agent>` placeholders stay gated so rewrite tips cannot green `callers_skills` while those live teachings remain; Mac still blocked
+- [#498](https://github.com/djbclark/djbclark-ade/pull/498) — scrub remaining LIVE_RE callers to zero (keep shims); inventory `callers_remaining=0`
+- LIVE_RE teaching refs outside the §A gate stay until the deletion PR; Mac still blocked
 
-## A. Remaining in-repo callers (must be gone or archived before delete)
+## A. In-repo callers (scrubbed on `#498`, 2026-11-10)
 
-Skills and tools that still teach or invoke the shims as **live** commands
-(grep on 2026-11-09; `docs/history/`, `docs/slim/reports/`, `docs/slim/briefs/`,
-`docs/handoffs/`, `docs/checkins/` are exempt from live refs).
-`wave6-delete-check` scans the paths in column 1:
+Gated §A LIVE_RE callers are **cleared**: `bin/wave6-delete-check --inventory`
+→ `callers_remaining=0` / `gate_exits.callers=0` on master after `#498`. The
+paths below are what the gate still scans; teaching refs outside this set
+(README, orchestration docs, slim history) stay until the deletion PR.
 
-| Path | Replace with / action |
+| Path | Status after `#498` |
 |---|---|
-| `skills/fan-out/SKILL.md` | native `paseo run` / `paseo wait` / `paseo send` (footer from orchestration-practices, not `acp-dispatch footer`) |
-| `skills/model-routing/SKILL.md` | drop legacy `acp-dispatch <agent> --model …` examples; `route_agent.py show` / `paseo run --provider …` only |
-| `skills/session-handoff/SKILL.md` | Paseo's `paseo-handoff` / `paseo send`; no absolute `relay.py` |
-| `skills/old-handoff-use-paseo-handoff/SKILL.md` | same; drop `acp-dispatch check` / slice wording |
-| `skills/oc-go-key/SKILL.md` | `paseo send`; drop `relay.py` absolute-path examples |
-| `skills/loose/SKILL.md` | **port** the upstream-issue reader off `acp-run --perm deny` (item 33); Paseo read-only / deny path |
-| `skills/baton/SKILL.md` | drop `acp-dispatch check` / `resume` / `reap` rearm instructions |
-| `skills/research/SKILL.md` | dispatch via `paseo run`; drop `acp-dispatch` examples |
-| `skills/dialogue/SKILL.md` | drop live `acp-run` kind alias as current; archive wording only |
-| `AGENTS.md` standing order 10 + "Two shims" machine-context bullet | remove the "until 2026-11-20" shim sentence when the files are gone |
-| `bin/load-watch`, `bin/deadline`, `bin/instruction-lint`, `bin/ade_claims.py` | argv / process matching must not treat `acp-run` or `acp-dispatch` as a live agent class; keep negative tests that prove retired names are **not** counted |
+| `skills/fan-out/SKILL.md` | native `paseo` teaching; completion-notice kept |
+| `skills/model-routing/SKILL.md` | `route_agent.py` / `paseo run` only |
+| `skills/session-handoff/SKILL.md` | `paseo-handoff` / `paseo send` |
+| `skills/old-handoff-use-paseo-handoff/SKILL.md` | no live `acp-dispatch` / `relay.py` |
+| `skills/oc-go-key/SKILL.md` | `paseo send` |
+| `skills/loose/SKILL.md` | Claude CLI `-p` reader (no `acp-run --perm deny`) |
+| `skills/baton/SKILL.md` | no live `acp-dispatch check/resume/reap` |
+| `skills/research/SKILL.md` | `paseo run` dispatch teaching |
+| `skills/dialogue/SKILL.md` | archive wording only for `acp-run` |
+| `bin/deadline`, `bin/load-watch`, `bin/instruction-lint`, `bin/ade_claims.py` | not counted as live agent class; negative tests keep retired names out |
 
-Fixture strings in `tests/test_load_watch_*.py` that **name** `acp-run` as a
-negative example may stay when the assertion is "do not treat this as a live
-agent".
-
-Open Wave 6 caller-rewrite PRs (base `master` or stacked tips) cover parts of
-this table; the deletion PR waits until `wave6-delete-check` reports
-`callers_skills` and `callers_loose` green.
+Deletion still waits on Mac live + C3 evidence (§B/§C), not on this table.
 
 ## B. Mac live-cycle proof commands (paste into the deletion PR)
 
@@ -392,30 +388,39 @@ are operator/lead work; this gate only checks the captured files.
 | `tools/acp-run/` | whole tree |
 | `tests/test_acp_dispatch.py` and shim-only siblings | go with the shim |
 | `tests/test_acp_run_*` | ~4.5k named in PLAN E6 |
-| `bin/go_model_policy.py`, `config/go-model-policy.json`, `tests/test_go_model_policy.py` | SHIM with `acp-run` once opencode retirement / PR 260 allows (ledger ruling 5) |
+| `bin/go_model_policy.py`, `config/go-model_policy.json`, `tests/test_go_model_policy.py` | **DECIDE** (ledger ruling 5): `route_agent.py` still loads the JSON. **Recommended default:** keep the trio in the shim-deletion PR; delete only acp-run's install path/tests. Rewrite `route_agent` off the policy, or waive opencode (PR 260 / J2) first, only with an explicit operator pick. |
 | `docs/dispatch-footer.md`, `docs/agent-guard-contract.md` | fold still-true facts into orchestration-practices / review-boundary, then remove or `docs/history/` |
 
 **Keep (explicit):** `bin/review-launch`, `bin/adversary_marker.py`,
-review-boundary docs and tests. `bin/agent_guard.py` until the deletion PR
-decides whether `review-launch` or a surviving Pi path still needs it
-(ledger A4).
+review-boundary docs and `tests/test_review_launch.py`. `bin/agent_guard.py` (+
+`tests/test_agent_guard.py` / `tests/test_omp_operator_gate.py`): prefer
+**delete** in the shim PR unless a live Pi path still imports it (ledger A4;
+`review-launch` does not). Confirm with `rg agent_guard` on the deletion tip.
 
 After the bins go: `bin/ade-roster --write`.
 
 ## E. Test and doc updates required with the deletion PR
 
-1. Drop or rewrite every test that imports only the shims (section D).
-2. Port boundary coverage already owned by `bin/review-launch` (do **not**
-   delete `tests` that review-launch still needs — ledger ruling 3:
-   `test_acp_run_deny.py` / `test_acp_run_read_only.py` were the source; confirm
-   review-launch's own tests cover the boundary before deleting).
-3. AGENTS.md: standing order 10 and machine-context "Two shims" bullet.
-4. README roster regeneration; `docs/skills.md` / orchestration docs that still
-   present the shims as current.
+1. Drop or rewrite every test that imports only the shims (section D), including
+   all `tests/test_acp_run_*.py` and `tests/test_acp_dispatch.py`.
+2. Boundary coverage: `tests/test_review_launch.py` already owns deny/read-only
+   allowlists, secret-deny, symlink refuse, and tripwire (2026-11-10 prep map).
+   **Safe to drop** `tests/test_acp_run_deny.py` and
+   `tests/test_acp_run_read_only.py` with `tools/acp-run/` — do **not** delete
+   `tests/test_review_launch.py`. Drop `.github/workflows/test.yml` explicit
+   acp / go_model path entries only when those files go.
+3. AGENTS.md: standing order 10 (native `paseo send` + named ack only) and
+   delete the machine-context "Two shims" bullet; review rule 4 loses the
+   `tools/acp-run --verify` `shell=True` exception once acp-run is gone.
+4. README roster regeneration (`bin/ade-roster --write`); `docs/skills.md` /
+   `docs/orchestration-practices.md` / `docs/review-boundary.md` that still
+   present the shims as current; fold or archive `docs/dispatch-footer.md` and
+   `docs/agent-guard-contract.md`.
 5. Changelog fragment under `### Removed` (one line per user-visible deletion),
-   citing queue item 33.
+   citing queue Carried **item 1** (Wave 6 shim deletion).
 6. Remove or archive this readiness doc's "must rewrite" table rows that are
-   done; keep a short "deleted on YYYY-MM-DD" note in `docs/slim/log.md`.
+   done; keep a short "deleted on YYYY-MM-DD" note in `docs/slim/log.md`; close
+   or reword queue Carried item 1 after the deletion merges.
 
 ## F. Suggested PR shape
 

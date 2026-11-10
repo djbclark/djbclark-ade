@@ -113,6 +113,7 @@ def test_repo_jobs_inventory_loads():
     assert "deadline-sweep" in names
     assert "load-watch" in names
     assert "ade-update-check" in names
+    assert "harden-check" in names
     assert "context-budget" in names
     assert "routing-recalibrate" in names
     retired = {r["name"]: r["label"] for r in catalog.retired_jobs}
@@ -121,6 +122,9 @@ def test_repo_jobs_inventory_loads():
     assert retired["routing-recalibrate-launchd"] == "com.djbclark.routing-recalibrate"
     assert "routing-recalibrate" not in retired
     by_name = {j["name"]: j for j in catalog.jobs}
+    assert by_name["harden-check"]["label"] == "com.djbclark.harden-check"
+    assert by_name["harden-check"]["plist"].endswith("com.djbclark.harden-check.plist")
+    assert by_name["harden-check"]["command"] == "bin/ade-harden observe"
     assert by_name["context-budget"]["mode"] == "auto"
     assert by_name["paseo-upstream-pending"]["chosen"] is False
     assert by_name["routing-recalibrate"]["kind"] == "paseo"
