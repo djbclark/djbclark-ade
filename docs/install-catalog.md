@@ -293,6 +293,11 @@ Offered `paseo-plugin-*` rows re-landed from stranded #354 (session-guard, baton
 
 ## H. Next units
 
+The next bounded S3 bootstrap unit targets hosts that already have Python 3.11+:
+an explicit, dry-run-default Just bootstrap followed by the existing installation
+preview. It must distinguish missing Just from broken/unverified Just and stop
+on failed acquisition. It does not acquire Python or authorize full setup.
+
 Ownership-aware reconcile beyond the install ledger (setup-plan S3), remaining
 owner installers (curl-free Cursor CLI fetch, Hermes offered path — basic setup
 via `just hermes-setup`, Paseo desktop/daemon and skill bundle), opt-in
