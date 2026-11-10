@@ -485,10 +485,12 @@ def linux_e2e(
         timeout_s=secretspec_timeout_s,
     )
     hard_ids = hard_component_ids(catalog)
+    # Pass the set through even when empty: build_apply_steps treats None as
+    # "every component" and an empty set as "select nothing" (hard-only dry-run).
     apply_results, apply_rc = apply(
         catalog,
         dry_run=True,
-        ids=hard_ids if hard_ids else None,
+        ids=hard_ids,
         allow_system=True,
         prefix=prefix,
         runner=runner,

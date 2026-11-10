@@ -506,6 +506,43 @@ def test_linux_e2e_proves_harddeps_keys_linger(tmp_path, monkeypatch):
     assert all("brew" not in " ".join(r.get("argv") or []) for r in apply_rows.values())
 
 
+def test_linux_e2e_empty_hard_selection_does_not_apply_all(tmp_path, monkeypatch):
+    """Empty hard_ids must pass an empty set (not None) so apply selects nothing.
+
+    None would tell build_apply_steps to process every component, so a catalog
+    with only offered/optional rows would dry-run those instead of hard-only.
+    """
+    root = tmp_path / "repo"
+    (root / "config").mkdir(parents=True)
+    (root / "config" / "install.schema.json").write_text(
+        (REPO / "config" / "install.schema.json").read_text()
+    )
+    (root / "config" / "install.toml").write_text(
+        "schema_version = 1\n"
+        "[[component]]\n"
+        'id = "opt"\n'
+        'class = "optional"\n'
+        "chosen = true\n"
+        'probe_argv = ["true"]\n'
+        'presence = "definitely-not-on-path-opt-empty-hard"\n'
+        # no install_argv → would be blocked if selected via ids=None
+        "[[component]]\n"
+        'id = "off"\n'
+        'class = "offered"\n'
+        "chosen = false\n"
+        'presence = "definitely-not-on-path-off-empty-hard"\n'
+    )
+    catalog = ai.load_catalog(root=root)
+    assert ai.hard_component_ids(catalog) == set()
+    linger_ok = ai.Observation(
+        "sched", "linger", "ok", "linger: n/a (backend=cron)"
+    )
+    _report, _rc = ai.linux_e2e(catalog, sched_linger=linger_ok)
+    assert _report["hard_ids"] == []
+    assert _report["stages"]["apply_hard_dry_run"]["results"] == []
+    assert _report["stages"]["apply_hard_dry_run"]["rc"] == 0
+
+
 def test_linux_e2e_ok_when_hard_present_linger_na(tmp_path, monkeypatch):
     root = tmp_path / "repo"
     (root / "config").mkdir(parents=True)
