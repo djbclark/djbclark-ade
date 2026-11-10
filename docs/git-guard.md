@@ -277,12 +277,15 @@ shell-string `--check` analyser (and the Claude PreToolUse hook it was for, W5).
     default target is `format.outputDirectory` when set, else cwd; unresolved config fails closed), when the output
     target is not inside the caller's active claimed workspace. `format-patch --stdout` stays allowed (no worktree file
     write), including when `format.outputDirectory` is set. Targets under another agent's claim name that owner;
-    otherwise the refusal says the target is outside your claim. Follow-ups measured 2026-11-10: (a) value-taking
+    otherwise the refusal says the target is outside your claim.     Follow-ups measured 2026-11-10: (a) value-taking
     shorts in a format-patch cluster (`-v`/`-S`/`-I`/`-G`/`-O`) consume the rest of the cluster, so `-vo.` is
     reroll-count `o.` and still triggers the `format.outputDirectory` check; (b) the default-outdir probe clears
     legacy `GIT_CONFIG` (format-patch ignores it; `git config` does not), so `GIT_CONFIG=/dev/null` cannot hide a
     repo value; (c) relative `stash show --output` paths resolve against the effective work tree (`--work-tree` /
-    `GIT_WORK_TREE` / `core.worktree`), not only the call cwd. Still out of reach by design: a shell redirect
+    `GIT_WORK_TREE` / `core.worktree`), not only the call cwd; (d) value-taking format-patch longs
+    (`--reroll-count`, `--suffix`, …, and git 2.56 `--commit-list-format` / `--range-diff-notes`) consume the
+    next argv token when not `--opt=value`, so `--commit-list-format -o .` cannot fake an in-claim `-o` while
+    git writes into `format.outputDirectory`. Still out of reach by design: a shell redirect
     (`git stash show -p > f`), `bundle create`, `config --file`, `bugreport -o`, `--export-marks`, and the bash fast
     path for allowlisted reads (a stray `--output` file there remains a nuisance, not lost work).
 
