@@ -20,8 +20,9 @@ The shared stale block starts at tendcf line 28 / nix2cf line 35.
 
 ### B1. Mechanics paragraph
 
-Replace the paragraph beginning “other repo keeps the default. The mechanics
-stay…” through “to get around them” with:
+Replace from “Every other repo keeps the default. The mechanics stay…”
+(including `Every` on the preceding line in the originals) through
+“to get around them” with:
 
 > Every other repo keeps the default. The mechanics stay: frontier allowance,
 > fresh quota readings, estimate floors and caps, headroom, per-wave limits

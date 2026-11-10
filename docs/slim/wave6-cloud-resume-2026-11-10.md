@@ -66,3 +66,24 @@ Keep `relay.py`, `acp-dispatch`, `acp-run`, and `review-launch`. Do not use
 `--allow-early`; the deadline remains 2026-11-20. No deletion PR before the
 real evidence gate exits 0 and the operator confirms. Keep Pi
 Grok/Antigravity/SIPB/Go `accepted=false`.
+
+## D. Resume prompt
+
+```text
+Continue Wave 6 / Pi from djbclark/djbclark-ade PR #538, branch
+wave6-cloud-resume-20261110 (base master 7589e329).
+Read docs/slim/wave6-cloud-resume-2026-11-10.md and
+docs/slim/a3-a4-native-routing-proposal-2026-11-10.md, then the prior
+wave6-cloud-handoff-2026-11-10.md and queue Carried item 1.
+Check PR #538's current head, review and CI; no APPROVE marker was invented.
+A3+A4 proposal is prepared and pushed, not applied outside ADE.
+Order-11 authorization was requested; no grant is recorded in this snapshot.
+Read the operator's subsequent answer before applying it. If authorized,
+re-fetch tendcf/nix2cf, use separate claimed worktrees, implement and review
+the scoped AGENTS.md replacements, and preserve the native admission hold.
+Then handle A5-A7 and X1 one authorization card at a time; preserve logs.
+This fresh cloud host has no prior Mac archive, paseo, aiuse or quota snapshot.
+Do not fabricate live evidence. C1+C2 already granted, no re-asking.
+Keep all shims/review-launch, held Pi pools false, and no --allow-early.
+Deletion needs actual gate exit 0 plus explicit operator confirmation.
+```
