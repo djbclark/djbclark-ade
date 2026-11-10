@@ -73,6 +73,12 @@ SHORT_BAD = {
 }
 # `xargs` options that take the next word, so it is not mistaken for the command.
 XARGS_ARG = frozenset({"-E", "-I", "-J", "-L", "-n", "-P", "-R", "-S", "-s"})
+# Long xargs options that take a separate operand (GNU; macOS xargs is BSD but agents
+# often write GNU forms). Equals-attached forms (`--max-args=1`) are one word already.
+XARGS_LONG_ARG = frozenset({
+    "--max-args", "--max-chars", "--max-procs", "--arg-file", "--delimiter",
+    "--replace", "--eof",
+})
 # Recursive grep/ggrep (2026-10-22). A leading -H/-L/-P on find is unrelated and is left alone.
 TREE_GREP = frozenset({"grep", "ggrep", "egrep", "fgrep", "gegrep", "gfgrep"})
 TREE_GREP_REASON = (
@@ -233,6 +239,27 @@ def words(stage: str) -> list[str]:
     return [w for w in re.split(r"\s+|\$\(|`|\(|\{", stage) if w]
 
 
+def _skip_xargs_opts(w: list[str]) -> list[str]:
+    """Drop xargs option words (and their operands) so the command is not mistaken for a flag value.
+
+    Codex P2 on #522: `xargs -n 1 open` must not leave `1` as the command word (that would
+    miss a bare `open` and let the agent environment leak into the launched app).
+    """
+    while w:
+        a = w[0]
+        if a == "--":
+            return w[1:]
+        if not a.startswith("-") or a == "-":
+            break
+        if a in XARGS_ARG or a in XARGS_LONG_ARG:
+            w = w[2:] if len(w) > 1 else []
+            continue
+        # Combined short opts that end in a takes-arg letter (`-n1` is one word; `-n` alone
+        # is handled above). `--max-args=1` is also one word.
+        w = w[1:]
+    return w
+
+
 def command_word(stage: str) -> tuple[str, list[str]]:
     """The command a pipeline stage runs, past VAR=x prefixes, wrappers, sudo/xargs/timeout and
     their flags; plus the words after it. (`sudo -u USER` would take USER as the command: rare,
@@ -244,8 +271,11 @@ def command_word(stage: str) -> tuple[str, list[str]]:
             w = w[1:]
         elif head in ("sudo", "xargs", "timeout", "gtimeout"):
             w = w[1:]
-            while w and w[0].startswith("-"):
-                w = w[1:]
+            if head == "xargs":
+                w = _skip_xargs_opts(w)
+            else:
+                while w and w[0].startswith("-"):
+                    w = w[1:]
             if head.endswith("timeout") and w:
                 w = w[1:]                       # the duration
         else:
@@ -344,8 +374,11 @@ def bare_open(stage: str) -> bool:
             w = w[1:]
         elif head in ("sudo", "xargs", "timeout", "gtimeout"):
             w = w[1:]
-            while w and w[0].startswith("-"):
-                w = w[1:]
+            if head == "xargs":
+                w = _skip_xargs_opts(w)
+            else:
+                while w and w[0].startswith("-"):
+                    w = w[1:]
             if head.endswith("timeout") and w:
                 w = w[1:]
         else:

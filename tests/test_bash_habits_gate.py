@@ -312,6 +312,10 @@ def test_closed_or_non_heredocs_pass(command):
     "time open x",
     "nohup open -a Ghostty &",
     "ls | xargs open",
+    "printf '%s\\n' https://example.com | xargs -n 1 open",  # Codex P2 on #522
+    "ls | xargs -n1 open",
+    "ls | xargs --max-args=1 open",
+    "ls | xargs --max-args 1 open",
     "timeout 5 open x",
     "x=$(open -g y)",
     "(open x)",
