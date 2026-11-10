@@ -762,3 +762,76 @@ def test_collect_refuses_silent_500_truncation(tmp_path: Path) -> None:
     r = run(gh, "--json", "--min", "1")
     assert r.returncode == 2, r.stdout + r.stderr
     assert "500" in (r.stderr + r.stdout)
+
+
+def test_merge_now_refuses_without_adversary_success(tmp_path: Path) -> None:
+    head = "1" * 40
+    listing = json.dumps(
+        [
+            {
+                "number": 481,
+                "title": "docs",
+                "headRefOid": head,
+                "baseRefName": "master",
+                "mergeable": "MERGEABLE",
+                "headRefName": "cursor/x-f576",
+                "author": {"login": "djbclark"},
+            }
+        ]
+    )
+    checks = "pytest-linux\tpass\t0\tx\nadversary-marker\tfail\t0\tx\n"
+    gh = write_fake_gh(
+        tmp_path,
+        textwrap.dedent(
+            f"""
+            set -e
+            case "$*" in
+              *"pr list"*) echo '{listing}' ;;
+              *"pr checks"*) printf '%s' '{checks}' ; exit 1 ;;
+              *"repo view"*) echo djbclark ;;
+              *"pr merge"*) echo "unexpected merge: $*" >&2; exit 99 ;;
+              *) echo "unexpected: $*" >&2; exit 99 ;;
+            esac
+            """
+        ),
+    )
+    r = run(gh, "merge-now", "--prs", "481", "--yes", "--min", "1")
+    assert r.returncode == 2
+    assert "refuse merge" in r.stderr
+    assert "merge_now" in r.stderr
+
+
+def test_merge_now_dry_run_when_green(tmp_path: Path) -> None:
+    head = "2" * 40
+    listing = json.dumps(
+        [
+            {
+                "number": 484,
+                "title": "owner trust",
+                "headRefOid": head,
+                "baseRefName": "master",
+                "mergeable": "MERGEABLE",
+                "headRefName": "cursor/adversary-owner-trust-f576",
+                "author": {"login": "djbclark"},
+            }
+        ]
+    )
+    checks = "pytest-linux\tpass\t0\tx\nadversary-marker\tpass\t0\tx\n"
+    gh = write_fake_gh(
+        tmp_path,
+        textwrap.dedent(
+            f"""
+            set -e
+            case "$*" in
+              *"pr list"*) echo '{listing}' ;;
+              *"pr checks"*) printf '%s' '{checks}' ;;
+              *"repo view"*) echo djbclark ;;
+              *"pr merge"*) echo "unexpected merge: $*" >&2; exit 99 ;;
+              *) echo "unexpected: $*" >&2; exit 99 ;;
+            esac
+            """
+        ),
+    )
+    r = run(gh, "merge-now", "--prs", "484", "--min", "1")
+    assert r.returncode == 0, r.stderr
+    assert f"would merge #484 --squash --match-head-commit {head}" in r.stdout

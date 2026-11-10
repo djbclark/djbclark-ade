@@ -5,6 +5,7 @@
   ade-merge-ready stacks [--group NAME] [--bottoms-only] [--repo …] [--min N] [--json]
   ade-merge-ready approve-paste [--base master] [--bottoms-only] [--repo …] [--min N]
   ade-merge-ready approve-post --i-reviewed --yes [--bottoms-only] [--trigger-marker] …
+  ade-merge-ready merge-now --prs N[,N…] [--yes]   # refuses unless adversary-marker success
   ade-merge-ready --help
 
 Uses `gh` to list open PRs (number >= --min, default 327; list limit 500 so
@@ -21,8 +22,12 @@ when the authenticated `gh` user is the repository owner and both
 `--i-reviewed` and `--yes` are set (dry-run otherwise). Default `--via auto`:
 owner-authored tips get a **body** append (today's gate counts body APPROVE
 on owner PRs; comments do not); outside tips get an issue **comment**.
-`--via body` / `--via comment` force one path. Never merges; never invents a
-head — each marker names the tip `headRefOid` just collected.
+`--via body` / `--via comment` force one path. Never invents a head — each
+marker names the tip `headRefOid` just collected. `merge-now` is the only
+merge path here: it refuses unless classify is `merge_now` (pytest-linux pass
+**and** adversary-marker success on the tip head); dry-run unless `--yes`.
+Do not raw `gh pr merge` when adversary-marker is missing or failing
+(2026-11-10: #481 was merged that way by mistake).
 
 `stacks` walks open PR base→same-repo head refs and prints bottom-up APPROVE
 order for named groups (install, claims, s1, wave6) with full tip SHAs for
@@ -655,6 +660,59 @@ def post_approve_body(
         _trigger_adversary_marker(gh, repo, number)
 
 
+def merge_now_prs(
+    gh: str,
+    repo: str,
+    rows: list[dict[str, Any]],
+    pr_numbers: set[int],
+    *,
+    dry_run: bool,
+) -> list[int]:
+    """Squash-merge only tips classified merge_now; refuse otherwise (no gate bypass)."""
+    by_n = {int(r["number"]): r for r in rows}
+    merged: list[int] = []
+    for n in sorted(pr_numbers):
+        r = by_n.get(n)
+        if r is None:
+            raise RuntimeError(
+                f"#{n} not in open listing for this --repo/--min — refuse merge"
+            )
+        if r.get("class") != "merge_now":
+            raise RuntimeError(
+                f"#{n} class={r.get('class')} adversary_marker={r.get('adversary_marker')} "
+                f"pytest_linux={r.get('pytest_linux')} — refuse merge "
+                "(need class=merge_now: pytest-linux pass + adversary-marker success)"
+            )
+        head = r.get("head") or ""
+        if not SHA40.fullmatch(head):
+            raise RuntimeError(f"#{n} missing 40-hex head — refuse merge")
+        if dry_run:
+            print(f"would merge #{n} --squash --match-head-commit {head}")
+            merged.append(n)
+            continue
+        p = run_gh(
+            gh,
+            [
+                "pr",
+                "merge",
+                str(n),
+                "--repo",
+                repo,
+                "--squash",
+                "--match-head-commit",
+                head,
+            ],
+            timeout=180,
+        )
+        if p.returncode != 0:
+            raise RuntimeError(
+                f"gh pr merge #{n} failed: {(p.stderr or p.stdout).strip()}"
+            )
+        print(f"merged #{n} squash head={head}")
+        merged.append(n)
+    return merged
+
+
 def print_stacks(stacks: list[dict[str, Any]]) -> None:
     print(
         "# Bottom-up APPROVE order from open PR base→head refs "
@@ -697,10 +755,10 @@ def main(argv: list[str] | None = None) -> int:
         "cmd",
         nargs="?",
         default="classify",
-        choices=("classify", "stacks", "approve-paste", "approve-post"),
+        choices=("classify", "stacks", "approve-paste", "approve-post", "merge-now"),
         help=(
-            "classify (default), stacks (bottom-up APPROVE order), "
-            "approve-paste (templates only), or approve-post (owner posts)"
+            "classify (default), stacks, approve-paste, approve-post, or "
+            "merge-now (squash only when adversary-marker is success)"
         ),
     )
     ap.add_argument(
@@ -749,7 +807,10 @@ def main(argv: list[str] | None = None) -> int:
         "--prs",
         default="",
         metavar="N,N,…",
-        help="approve-paste / approve-post: only these PR numbers (comma-separated)",
+        help=(
+            "approve-paste / approve-post / merge-now: only these PR numbers "
+            "(comma-separated; required for merge-now)"
+        ),
     )
     ap.add_argument(
         "--i-reviewed",
@@ -759,7 +820,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--yes",
         action="store_true",
-        help="approve-post: actually post comments (default is dry-run)",
+        help="approve-post / merge-now: actually write (default is dry-run)",
     )
     ap.add_argument(
         "--trigger-marker",
@@ -802,6 +863,26 @@ def main(argv: list[str] | None = None) -> int:
             sys.stdout.write("\n")
         else:
             print_stacks(stacks)
+        return 0
+
+    if a.cmd == "merge-now":
+        if pr_numbers is None:
+            return die("merge-now requires --prs N[,N…]")
+        dry_run = not a.yes
+        try:
+            merged = merge_now_prs(
+                a.gh, a.repo, rows, pr_numbers, dry_run=dry_run
+            )
+        except (RuntimeError, subprocess.TimeoutExpired, OSError) as e:
+            return die(str(e))
+        if a.json:
+            json.dump(
+                {"dry_run": dry_run, "merged": merged},
+                sys.stdout,
+                indent=2,
+                sort_keys=True,
+            )
+            sys.stdout.write("\n")
         return 0
 
     if a.cmd in ("approve-paste", "approve-post"):
