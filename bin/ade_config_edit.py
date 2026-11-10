@@ -7,8 +7,8 @@ type-aware tree with exactly that path changed.
 
 Does not write unmanaged environment-override sources (ROUTING_POLICY / GATES_TOML).
 Does not create ``config/ade.toml`` when absent (that would suppress legacy projection).
-Local sets record per-machine choices; production ``route_agent`` / ``ade_gates``
-readers have not adopted the effective-config loader yet (adoption=recorded-only).
+Local sets record per-machine choices. Effective-config readers adopt them on
+their next load; a set does not prove runtime reload (adoption=recorded-only).
 """
 from __future__ import annotations
 
@@ -28,8 +28,9 @@ import ade_config as ac
 
 ADOPTION_RECORDED_ONLY = "recorded-only"
 ADOPTION_NOTE = (
-    "local/repo set records the choice in TOML; route_agent and ade_gates still "
-    "read their legacy paths directly and have not adopted the effective-config reader"
+    "local/repo set records the choice in TOML; effective-config readers adopt it "
+    "on their next load, but this write does not reload running consumers or "
+    "prove runtime adoption"
 )
 
 # Paths under these roots are refused by the scalar editor (arrays / AoT / selectors).
