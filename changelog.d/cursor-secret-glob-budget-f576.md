@@ -7,3 +7,5 @@
   absolute/tilde walk truncated the same way fails closed (absolute deep globs keep the pattern fallback only when
   that shared budget did not truncate), and a second timeout fails closed (issue 284 / queue Carried #1 residual)
   (#413).
+- `secret_read_gate` keeps `_glob_budget_hit` sticky across brace alternatives (so `{,id_*}` / `{,*}` cannot clear a
+  prior truncate) and latches the same fail-closed path when `MAX_GLOB_HITS` truncates a walk (#413).

@@ -888,6 +888,69 @@ def test_first_pass_alone_id_star_fails_closed_when_scan_truncates(monkeypatch, 
         hook.check_command(ck, "cat id_*")
 
 
+def test_brace_trailing_empty_alt_keeps_glob_budget_hit(monkeypatch, tmp_path):
+    """Security HIGH (PR 413 tip c08b8db): `_glob_one` cleared `_glob_budget_hit` at the start of
+    every brace alternative, so `{,id_*}` / `{,*}` / `{,*,id_*}` reset the flag after an earlier
+    alt truncated on MAX_GLOB_SCAN and check_command ALLOWed. Sticky per-word flag must refuse."""
+    hook = load_hook()
+    for i in range(40):
+        (tmp_path / ("aaa%03d.txt" % i)).write_text("x\n")
+    (tmp_path / "id_rsa").write_text("PRIVATE\n")
+    ck = hook.Checker(
+        hook.Policy(["id_rsa", "*.key"], ["*.pub"], homes=[str(tmp_path)], fold=False),
+        str(tmp_path),
+    )
+    assert ck.glob_pattern_only("{,id_*}") is None
+    assert ck.glob_pattern_only("{,*}") is None
+    monkeypatch.setattr(hook, "MAX_GLOB_SCAN", 5)
+    hook._DEADLINE[0] = time.monotonic() + 5.0
+    with pytest.raises(hook.GlobBudgetExceeded):
+        hook.check_command(ck, "cat {,id_*}")
+    ck2 = hook.Checker(
+        hook.Policy(["id_rsa", "*.key"], ["*.pub"], homes=[str(tmp_path)], fold=False),
+        str(tmp_path),
+    )
+    monkeypatch.setattr(hook, "MAX_GLOB_SCAN", 5)
+    hook._DEADLINE[0] = time.monotonic() + 5.0
+    with pytest.raises(hook.GlobBudgetExceeded):
+        hook.check_command(ck2, "cat {,*}")
+    ck3 = hook.Checker(
+        hook.Policy(["id_rsa", "*.key"], ["*.pub"], homes=[str(tmp_path)], fold=False),
+        str(tmp_path),
+    )
+    monkeypatch.setattr(hook, "MAX_GLOB_SCAN", 5)
+    hook._DEADLINE[0] = time.monotonic() + 5.0
+    with pytest.raises(hook.GlobBudgetExceeded):
+        hook.check_command(ck3, "cat {,*,id_*}")
+
+
+def test_max_glob_hits_truncation_fails_closed(monkeypatch, tmp_path):
+    """Security MEDIUM (PR 413 tip): hitting MAX_GLOB_HITS marked the walk incomplete but did not
+    set `_glob_budget_hit`, so `cat *` could allow after 500 non-deny matches before `id_rsa`.
+    The hits bound must latch the same fail-closed path as GLOB_S / MAX_GLOB_SCAN."""
+    hook = load_hook()
+    (tmp_path / "id_rsa").write_text("PRIVATE\n")
+    # Controlled scandir order: MAX_GLOB_HITS+ non-deny matches, then id_rsa (never reached).
+    ents = [FakeEntry("f%04d.txt" % i, is_dir=False) for i in range(hook.MAX_GLOB_HITS + 3)]
+    ents.append(FakeEntry("id_rsa", is_dir=False))
+
+    def scandir(path):
+        assert path == str(tmp_path)
+        return FakeDir(ents)
+
+    monkeypatch.setattr(hook, "_scandir", scandir)
+    ck = hook.Checker(
+        hook.Policy(["id_rsa", "*.key"], ["*.pub"], homes=[str(tmp_path)], fold=False),
+        str(tmp_path),
+    )
+    assert ck.glob_pattern_only("*") is None
+    monkeypatch.setattr(hook, "MAX_GLOB_SCAN", 100000)
+    monkeypatch.setattr(hook, "GLOB_S", 30.0)
+    hook._DEADLINE[0] = time.monotonic() + 60.0
+    with pytest.raises(hook.GlobBudgetExceeded):
+        hook.check_command(ck, "cat *")
+
+
 def test_absolute_deep_glob_fails_closed_after_deferred_truncate(monkeypatch, tmp_path):
     """Security HIGH residual (PR 413): a dense `/` tree can burn WORD_S on /*/*/*/zzqq* → set-aside →
     deferred walk truncates on GLOB_S. Truncated absolute/tilde walks must fail closed (same as

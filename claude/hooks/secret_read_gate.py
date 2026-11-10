@@ -38,8 +38,9 @@ pattern is clean; a truncated walk never cache-allows). Eight crafted slow words
 and fail the call open before a later `cat ~/.ssh/id_*` (docs/secret-deny.md C7, 2026-11-04); the first-pass
 cap and set-aside retry close that: a word that times out twice, an OutOfTime while glob words remain unchecked,
 a set-aside word whose pattern-only check is inconclusive with no walk budget left, a deferred walk truncated
-by GLOB_S / MAX_GLOB_SCAN, or a first-pass glob (relative/cwd or absolute/tilde) truncated the same way,
-fails closed (blocks) instead of allowing.
+by GLOB_S / MAX_GLOB_SCAN / MAX_GLOB_HITS, or a first-pass glob (relative/cwd or absolute/tilde) truncated the
+same way, fails closed (blocks) instead of allowing. `_glob_budget_hit` is sticky across brace alternatives
+inside one word (`{,id_*}` must not clear a prior truncate).
 
 Grep (2026-11-04): Claude's Grep runs ripgrep with `--hidden`, so it reads dotfiles and descends into `~/.ssh`. Its root
 (`path`, else the cwd) is walked breadth-first (bounded: depth, entries, time shared by every root; VCS dirs and
@@ -602,7 +603,7 @@ class Checker:
         self._aside_count = {}   # times a glob word was set aside; a second time fails closed
         self._scanned = 0        # directory entries the glob walk has read in this call
         self._glob_until = None  # the glob walk's deadline, set on its first use
-        self._glob_budget_hit = False  # True when expand truncated on GLOB_S / MAX_GLOB_SCAN
+        self._glob_budget_hit = False  # True when expand truncated on GLOB_S / MAX_GLOB_SCAN / MAX_GLOB_HITS
 
     def path(self, raw: str):
         """(rule, shown path) for a literal path, or None."""
@@ -619,6 +620,9 @@ class Checker:
         """(rule, shown) for a glob: filesystem matches checked as paths; with none, the pattern itself."""
         if not raw or len(raw) > MAX_TOKEN or "\x00" in raw:
             return None
+        # Reset once per word, not per brace alternative: a later empty alt (`{,id_*}`) must not
+        # clear a truncate flag set while walking an earlier secret alt (Security HIGH, PR 413 tip).
+        self._glob_budget_hit = False
         for pat in expand_braces(expand_home(raw)):
             found = self._glob_one(raw, pat)
             if found:
@@ -716,7 +720,8 @@ class Checker:
         base = "/" if os.path.isabs(pat) else self.cwd
         segs = [x for x in pat.split("/") if x]
         state = {"complete": True}
-        self._glob_budget_hit = False
+        # Do not clear `_glob_budget_hit` here: brace alts share one word's sticky truncate flag
+        # (see `glob()`). Setting True below / in `expand` still latches for check_command.
         n = links = 0
         if segs:
             for h, is_match in self.expand(base, segs, state):
@@ -733,6 +738,9 @@ class Checker:
                     return found
                 if n >= MAX_GLOB_HITS:
                     state["complete"] = False
+                    # Hits bound is the same incomplete-walk case as GLOB_S / MAX_GLOB_SCAN: latch
+                    # so check_command fails closed for walk-dependent secrets (`*`, `id_*`).
+                    self._glob_budget_hit = True
                     break
         if n and state["complete"]:
             return None
