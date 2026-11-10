@@ -55,6 +55,17 @@ compatible with `ade-update`. Preserve foreign files/links and report conflicts.
 absent root (2026-11-06; it does not change the exit code): an absent root's
 skills are otherwise missing from the report without a word.
 
+**Exit codes** (2026-11-10): `0` success (link/remove finished, or `--check` finds
+no gaps on installed targets); `1` an installed-target gap or conflict
+(`--check --all` missing/chained/stale/foreign; link mode leaving a foreign path
+alone; a named skill with no `SKILL.md` outside `--remove`; a dangling Codex
+`AGENTS.md` on `--check`); `2` usage (unknown option, `--all` with names or with
+`--remove`, empty inventory, unsafe skill directory name, or no names given).
+A TUI binary that is not on `PATH` is skipped (printed `not installed`), not an
+error. Linux CI covers Pi linking into `~/.agents/skills` with omp/opencode
+absent from the target list even when those binaries are on `PATH`
+(`tests/test_skill_everywhere_all.py::test_linux_links_pi_without_omp_or_opencode`).
+
 If the skill has no directory yet, create it first: public skills in
 `~/src/djbclark-ade/skills/<name>/`, private ones (operator ruling required)
 in `~/ops/site-private/skills/<name>/` plus a line in `.githooks/private-paths`

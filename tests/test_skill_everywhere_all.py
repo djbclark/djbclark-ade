@@ -1,6 +1,7 @@
 """Bulk skill discovery and reconciliation, with isolated HOME and no live clients."""
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -206,3 +207,75 @@ def test_unsafe_discovered_name_fails_before_any_links(catalog):
     result = run(catalog, "--all")
     assert result.returncode == 2 and "unsafe skill directory" in result.stderr
     assert not (home / ".agents").exists()
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux-only: Pi skill-everywhere without omp/opencode")
+def test_linux_links_pi_without_omp_or_opencode(tmp_path):
+    """On Linux, with pi (and leftover omp/opencode) on PATH, link Pi into ~/.agents/skills and
+    never touch ~/.omp or ~/.config/opencode; exit codes match docs/skill-everywhere.md."""
+    home = tmp_path / "home"
+    home.mkdir()
+    public = tmp_path / "public skills"
+    public.mkdir()
+    private = tmp_path / "private skills"
+    private.mkdir()
+    site = tmp_path / "site root"
+    site.mkdir()
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    for name in ("pi", "omp", "opencode", "codex"):
+        stub = bindir / name
+        stub.write_text("#!/bin/sh\nexit 0\n")
+        stub.chmod(0o755)
+    source = skill(public, "steps")
+    env = dict(
+        os.environ,
+        HOME=str(home),
+        CODEX_HOME=str(home / ".codex"),
+        BASH_ENV="/dev/null",
+        SKILL_EVERYWHERE_ADE=str(public),
+        SKILL_EVERYWHERE_PRIVATE=str(private),
+        SKILL_EVERYWHERE_SITE=str(site),
+        SKILL_EVERYWHERE_NO_COPY="1",
+        PATH=str(bindir) + os.pathsep + os.environ["PATH"],
+    )
+    env.pop("ENV", None)
+    env.pop("SKILL_EVERYWHERE_ONLY", None)
+
+    targets = SCRIPT.read_text()
+    assert "\npi|~/.agents/skills\n" in targets
+    assert "omp|" not in targets and "opencode|" not in targets
+
+    before = subprocess.run(
+        [str(SCRIPT), "--check", "--all"], env=env, capture_output=True, text=True, timeout=30
+    )
+    assert before.returncode == 1, before.stdout + before.stderr
+    assert "pi" in before.stdout and "missing" in before.stdout
+    assert "omp" not in before.stdout and "opencode" not in before.stdout
+
+    linked = subprocess.run(
+        [str(SCRIPT), "--all"], env=env, capture_output=True, text=True, timeout=30
+    )
+    assert linked.returncode == 0, linked.stderr + linked.stdout
+    assert "pi" in linked.stdout and "linked" in linked.stdout
+    assert "omp" not in linked.stdout and "opencode" not in linked.stdout
+    agents = home / ".agents" / "skills"
+    assert (agents / "steps").is_symlink()
+    assert (agents / "steps").readlink() == source
+    assert not (home / ".omp").exists()
+    assert not (home / ".config" / "opencode").exists()
+
+    checked = subprocess.run(
+        [str(SCRIPT), "--check", "--all"], env=env, capture_output=True, text=True, timeout=30
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    assert "pi" in checked.stdout and "linked" in checked.stdout
+    assert checked.stdout.rstrip().endswith("== end")
+    assert "omp" not in checked.stdout and "opencode" not in checked.stdout
+    assert not (home / ".omp").exists()
+    assert not (home / ".config" / "opencode").exists()
+
+    usage = subprocess.run(
+        [str(SCRIPT), "--all", "steps"], env=env, capture_output=True, text=True, timeout=30
+    )
+    assert usage.returncode == 2
