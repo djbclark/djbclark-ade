@@ -103,6 +103,15 @@ D2. Rules for anything that reads an export or a captured turn:
    new entry point: loopback-only, bearer or path-secret, no
    `shell=True`, no forwarding of request bodies into agent prompts
    without an explicit retain step.
+5. **Opaque output by default (2026-11-10).** `normalize_export.py`
+   always writes event JSONL to a file (`--output`, or
+   `<input-stem>.events.jsonl` beside the export). Stdout is a
+   metadata summary only (schema, paths, event/conversation counts,
+   role tallies) — never message `text`. Agents are prompt-injectable
+   with operator rights ([threat-model.md](threat-model.md)); JSON
+   quoting and "treat as data" prose are not isolation. Keep the
+   JSONL on a non-agent ingest path (later S1 adapter / operator
+   inspection). Do not paste event bodies into an agent turn.
 
 D3. Cloud agents and CI in this public repo see only **synthetic
 fixtures** under `tests/fixtures/ingest-web-ai/`. Real Takeout / Grok
@@ -129,8 +138,10 @@ hermetic stub only.
 1. Design doc (this file) and queue cite.
 2. Offline normalizer + synthetic fixtures + hermetic tests (no network).
 3. Documented operator procedure: drop a Takeout / Grok / VESTI JSON
-   export at a local path → run the normalizer → (later) pipe JSONL into
-   the site-djbclark S1 adapter once E2 lands.
+   export at a local path → run the normalizer (opaque
+   `<stem>.events.jsonl` + metadata summary on stdout) → (later) point
+   the site-djbclark S1 adapter at that file once E2 lands (do not feed
+   event text through an agent tool transcript).
 4. Gemini backfill via Takeout **or** VESTI JSON export; Grok backfill
    via official export only.
 
@@ -158,7 +169,7 @@ hermetic stub only.
 | Path | Role |
 |---|---|
 | [skills/ingest-web-ai/SKILL.md](../skills/ingest-web-ai/SKILL.md) | Agent-facing summary; points here |
-| [skills/ingest-web-ai/scripts/normalize_export.py](../skills/ingest-web-ai/scripts/normalize_export.py) | Offline export → event JSONL |
+| [skills/ingest-web-ai/scripts/normalize_export.py](../skills/ingest-web-ai/scripts/normalize_export.py) | Offline export → opaque event JSONL + stdout metadata summary |
 | [tests/fixtures/ingest-web-ai/](../tests/fixtures/ingest-web-ai/) | Synthetic Gemini/Grok-shaped exports |
 | [tests/test_ingest_web_ai.py](../tests/test_ingest_web_ai.py) | Hermetic tests (no network, no home dirs) |
 

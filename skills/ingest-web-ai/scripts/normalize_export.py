@@ -3,7 +3,9 @@
 
 Design: docs/ingest-web-ai.md. No network, no S1/CAS writes, no credential reads.
 Reads one local JSON export (synthetic fixture or operator-supplied dump) and
-prints one JSON object per message to stdout or --output.
+writes one JSON object per message to an opaque output file. Stdout carries
+only a metadata summary (counts/paths) so agent tool transcripts never see
+raw export text by default (threat-model: agents are prompt-injectable).
 
 Exit 0 success, 2 usage / unreadable / invalid input.
 """
@@ -13,6 +15,7 @@ import argparse
 import hashlib
 import json
 import sys
+from collections import Counter
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -29,10 +32,41 @@ PRODUCERS = (
 # rather than allocating the whole file first.
 MAX_INPUT_BYTES = 32 * 1024 * 1024
 
+SUMMARY_SCHEMA = "ade.web-ai.normalize.summary.v0"
+
 
 def _die(msg: str, code: int = 2) -> None:
     print(f"normalize_export: {msg}", file=sys.stderr)
     raise SystemExit(code)
+
+
+def default_output_path(input_path: Path) -> Path:
+    """Opaque JSONL beside the export: ``foo.json`` → ``foo.events.jsonl``."""
+    if input_path.suffix.lower() == ".json":
+        return input_path.with_name(input_path.stem + ".events.jsonl")
+    return input_path.with_name(input_path.name + ".events.jsonl")
+
+
+def summarize_events(
+    events: list[dict[str, Any]],
+    *,
+    producer: str,
+    input_path: str,
+    output_path: str,
+) -> dict[str, Any]:
+    """Metadata-only summary safe for agent tool transcripts (no message text)."""
+    roles = Counter(str(ev.get("role") or "unknown") for ev in events)
+    conv_ids = {str(ev.get("conversation_id") or "") for ev in events}
+    conv_ids.discard("")
+    return {
+        "schema": SUMMARY_SCHEMA,
+        "producer": producer,
+        "input": input_path,
+        "output": output_path,
+        "event_count": len(events),
+        "conversation_count": len(conv_ids),
+        "roles": dict(sorted(roles.items())),
+    }
 
 
 def _sha256_text(text: str) -> str:
@@ -221,7 +255,8 @@ def read_bounded(path: Path, *, limit: int = MAX_INPUT_BYTES) -> bytes:
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
         description="Normalize a local web-AI export JSON into S1-shaped event JSONL "
-        "(no network; docs/ingest-web-ai.md)."
+        "(no network; docs/ingest-web-ai.md). Events always land in an opaque file; "
+        "stdout is a metadata summary only (no message text)."
     )
     p.add_argument("--input", "-i", required=True, help="Path to a local export JSON file")
     p.add_argument(
@@ -234,7 +269,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--output",
         "-o",
-        help="Write JSONL here (default: stdout). Parent dirs must already exist.",
+        help=(
+            "Opaque JSONL path for events (default: <input-stem>.events.jsonl beside "
+            "the export). Parent dirs must already exist. Never dumps event text to stdout."
+        ),
     )
     args = p.parse_args(argv)
 
@@ -251,17 +289,23 @@ def main(argv: list[str] | None = None) -> int:
     lines = [json.dumps(ev, ensure_ascii=False, sort_keys=True) for ev in events]
     body = ("\n".join(lines) + ("\n" if lines else "")).encode("utf-8")
 
-    if args.output:
-        out = Path(args.output)
-        try:
-            # Atomic replace beside the target (review rule 6).
-            tmp = out.with_name(out.name + ".tmp")
-            tmp.write_bytes(body)
-            tmp.replace(out)
-        except OSError as exc:
-            _die(f"cannot write {out}: {exc.__class__.__name__}")
-    else:
-        sys.stdout.buffer.write(body)
+    out = Path(args.output) if args.output else default_output_path(path)
+    try:
+        # Atomic replace beside the target (review rule 6).
+        tmp = out.with_name(out.name + ".tmp")
+        tmp.write_bytes(body)
+        tmp.replace(out)
+    except OSError as exc:
+        _die(f"cannot write {out}: {exc.__class__.__name__}")
+
+    summary = summarize_events(
+        events,
+        producer=args.producer,
+        input_path=str(path),
+        output_path=str(out),
+    )
+    # One JSON object on stdout — counts/paths only; no export text for agents.
+    sys.stdout.write(json.dumps(summary, ensure_ascii=False, sort_keys=True) + "\n")
     return 0
 
 
