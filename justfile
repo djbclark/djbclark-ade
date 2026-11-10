@@ -62,3 +62,50 @@ sched-list:
 
 sched-diff:
     "{{ root }}/bin/ade-sched" diff --root "{{ root }}"
+
+# Opt-in Hermes basic setup (setup-plan S3a). Does not install or force Hermes.
+# Default: open Claude Code on prompts/setup/hermes.md.
+# `just hermes-setup --self`: print the DIY checklist only (no agent, no peer-link).
+# Prompt+recipe only (no bin/ shim); exception to the thin-bin rule above.
+# [positional-arguments] forwards *args into the shebang recipe's $@ (without it,
+# --self/--help never reach the loop and the recipe always takes the AI path).
+[positional-arguments]
+hermes-setup *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    root="{{ root }}"
+    prompt="${root}/prompts/setup/hermes.md"
+    if [[ ! -f "${prompt}" ]]; then
+      printf '%s\n' "missing prompt: ${prompt}" >&2
+      exit 2
+    fi
+    mode=ai
+    for a in "$@"; do
+      case "${a}" in
+        --self|self) mode=self ;;
+        -h|--help|help)
+          printf '%s\n' \
+            "Usage: just hermes-setup [--self]" \
+            "  (default) open Claude Code on prompts/setup/hermes.md" \
+            "  --self    print the DIY checklist only (no agent)"
+          exit 0
+          ;;
+        *)
+          printf '%s\n' "unknown argument: ${a} (try --self or --help)" >&2
+          exit 2
+          ;;
+      esac
+    done
+    if [[ "${mode}" == self ]]; then
+      awk '
+        /^## DIY checklist/ {p=1}
+        p && /^## / && !/^## DIY checklist/ {exit}
+        p {print}
+      ' "${prompt}"
+      exit 0
+    fi
+    if ! command -v claude >/dev/null 2>&1; then
+      printf '%s\n' "claude not on PATH. Install Claude Code, or run: just hermes-setup --self" >&2
+      exit 2
+    fi
+    exec claude -- "Read and follow the checked-in prompt at ${prompt} for Hermes basic setup (setup-plan S3a). Opt-in only: do not install Hermes if the user skipped it; do not configure peer-link live. Walk the checklist one card at a time with the recommended option first; stop for each secret (user types into sudo-secretspec themselves, never into chat); finish with just install-doctor and hermes doctor when available."

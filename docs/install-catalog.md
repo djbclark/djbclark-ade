@@ -150,7 +150,7 @@ Pass `--ade` only with a durable checkout (`~/src/djbclark-ade`); never with a l
 | `claude-code` | `npm install -g @anthropic-ai/claude-code` (presence `claude`) |
 | `codex` | `npm install -g @openai/codex` |
 | `cursor-cli` | probe/update only (`agent --version` / `agent update`); install is official curl\|bash (no `install_argv` yet) |
-| `hermes` (offered) | probe/update only (`hermes doctor` / `hermes update`); install is official curl\|bash (no `install_argv` yet) |
+| `hermes` (offered) | probe/update only (`hermes doctor` / `hermes update`); install is official curl\|bash (no `install_argv` yet); opt-in basic setup `just hermes-setup` / `--self` (`prompts/setup/hermes.md`, `docs/hermes-setup.md`) |
 | others | still `UNKNOWN` / no `install_argv` |
 
 ## F. Operator path for live system apply (2026-11-09)
@@ -175,7 +175,7 @@ not pass `--apply-system` in automated jobs.
 
 Ownership-aware reconcile beyond the install ledger (setup-plan S3), remaining
 owner installers (sudo-secretspec Linux tarball, curl-free Cursor CLI fetch, Hermes
-offered path, Paseo desktop/daemon and skill bundle), recorded provider
+offered path — basic setup via `just hermes-setup`, Paseo desktop/daemon and skill bundle), recorded provider
 `verify_argv` recipes in the catalog, collect/set batch. S4 jobs stay explicit
 later work.
 Follow-up: tighten `--apply-system` with an ownership generation / read-back
