@@ -4,7 +4,6 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   buildAdeClaimsBindOwnerArgv,
-  buildAdeClaimsNewArgv,
   buildAdeClaimsReleaseArgv,
   buildAdeGitGuardInstallArgv,
   claimAllowsAgent,
@@ -14,6 +13,7 @@ import {
   parseClaimPointer,
   parseWorkspaceArchivePayload,
   parseWorktreePayload,
+  planWorktreeClaimCreate,
   resolveAdeClaimsScript,
   resolveClaimForCwd,
   resolveTrustedAdeClaimsScript,
@@ -115,7 +115,9 @@ export function runTrustedAdeGitGuardInstall(worktreePath) {
 }
 
 /**
- * W2: claim the worktree, then install ref hooks via trusted ade-git-guard.
+ * W2: claim the worktree (`ade_claims.py new --ttl`), then install ref hooks
+ * via trusted ade-git-guard. ADE_CLAIM_DRY_RUN=1|true|yes observes only:
+ * logs the planned argv (including --ttl) and skips registry write + install.
  *
  * @param {{ addHook: (name: string, handler: Function) => () => void }} server
  */
@@ -125,12 +127,20 @@ export function registerWorktreeClaimHook(server) {
     const script = resolveAdeClaimsScript(wt, process.env, { pluginRoot: PLUGIN_ROOT });
     const baseSha = gitRevParseHead(wt.path);
     const repoOrigin = gitRemoteOriginUrl(wt.path);
-    const { python, argv } = buildAdeClaimsNewArgv(wt, {
+    const plan = planWorktreeClaimCreate(wt, {
       adeClaimsScript: script,
       baseSha,
       repoOrigin,
+      env: process.env,
     });
-    const run = spawnSync(python, [script, ...argv], { encoding: "utf8" });
+    if (plan.dryRun) {
+      console.error(
+        `ade-claim: ADE_CLAIM_DRY_RUN: would run ${plan.python} ${script} ${plan.argv.join(" ")}`
+          + ` (ttlHours=${plan.ttlHours}); skipping ade-git-guard install`,
+      );
+      return;
+    }
+    const run = spawnSync(plan.python, [script, ...plan.argv], { encoding: "utf8" });
     if (run.status !== 0) {
       const detail = (run.stderr || run.stdout || "").trim();
       throw new Error(`ade_claims.py new failed (exit ${run.status})${detail ? `: ${detail}` : ""}`);

@@ -7,7 +7,9 @@ import {
   buildAdeClaimsReleaseArgv,
   buildAdeGitGuardInstallArgv,
   claimAllowsAgent,
+  DEFAULT_CLAIM_TTL_HOURS,
   deriveClaimId,
+  isAdeClaimDryRun,
   mergeAdeClaimIdEnv,
   mergeAgentBinPath,
   mergeOpenBeforeEnv,
@@ -16,8 +18,10 @@ import {
   parseClaimPointer,
   parseWorkspaceArchivePayload,
   parseWorktreePayload,
+  planWorktreeClaimCreate,
   resolveAdeClaimsScript,
   resolveClaimForCwd,
+  resolveClaimTtlHours,
   resolveTrustedAdeClaimsScript,
   resolveTrustedAdeGitGuard,
   resolveTrustedAgentBinDir,
@@ -70,6 +74,43 @@ test("buildAdeClaimsNewArgv maps hook fields to ade_claims.py new", () => {
     "--owner-record", "rec-1",
     "--ttl", "72",
   ]);
+});
+
+test("resolveClaimTtlHours defaults to 72 and reads ADE_CLAIM_TTL", () => {
+  assert.equal(resolveClaimTtlHours({}), DEFAULT_CLAIM_TTL_HOURS);
+  assert.equal(resolveClaimTtlHours({ ADE_CLAIM_TTL: "24" }), 24);
+  assert.equal(resolveClaimTtlHours({ ADE_CLAIM_TTL: "0" }), 0);
+  assert.throws(() => resolveClaimTtlHours({ ADE_CLAIM_TTL: "-1" }), /ADE_CLAIM_TTL/);
+  assert.throws(() => resolveClaimTtlHours({ ADE_CLAIM_TTL: "nope" }), /ADE_CLAIM_TTL/);
+});
+
+test("isAdeClaimDryRun accepts 1/true/yes", () => {
+  assert.equal(isAdeClaimDryRun({}), false);
+  assert.equal(isAdeClaimDryRun({ ADE_CLAIM_DRY_RUN: "0" }), false);
+  assert.equal(isAdeClaimDryRun({ ADE_CLAIM_DRY_RUN: "1" }), true);
+  assert.equal(isAdeClaimDryRun({ ADE_CLAIM_DRY_RUN: "TRUE" }), true);
+  assert.equal(isAdeClaimDryRun({ ADE_CLAIM_DRY_RUN: " yes " }), true);
+});
+
+test("planWorktreeClaimCreate always wires --ttl and marks dry-run", () => {
+  const live = planWorktreeClaimCreate(FIXTURE, {
+    adeClaimsScript: "/opt/ade/bin/ade_claims.py",
+    baseSha: "deadbeef",
+    env: {},
+  });
+  assert.equal(live.dryRun, false);
+  assert.equal(live.ttlHours, 72);
+  assert.ok(live.argv.includes("--ttl"));
+  assert.equal(live.argv[live.argv.indexOf("--ttl") + 1], "72");
+
+  const dry = planWorktreeClaimCreate(FIXTURE, {
+    adeClaimsScript: "/opt/ade/bin/ade_claims.py",
+    baseSha: "cafebabe",
+    env: { ADE_CLAIM_DRY_RUN: "1", ADE_CLAIM_TTL: "12" },
+  });
+  assert.equal(dry.dryRun, true);
+  assert.equal(dry.ttlHours, 12);
+  assert.equal(dry.argv[dry.argv.indexOf("--ttl") + 1], "12");
 });
 
 test("resolveAdeClaimsScript prefers ADE_CLAIMS_PY when readable", () => {
