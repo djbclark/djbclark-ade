@@ -14,6 +14,15 @@ A1. `config/routing.toml` (kinds, each pool's ranks per kind and suggested `--mo
 plenty gate, burn-first and pace knobs, the never-route list and aliases, dispatch gates and estimate floors, the lead's
 model) and `config/gates.toml [frontier]` (the frontier allowance, `docs/gates.md`). Print both with
 `bin/route_agent.py policy --md` (or `policy` for JSON); no other file restates them.
+Since **2026-11-10**, runtime routing reads these values through
+`ade_config.load_effective`: a valid `config/ade.toml` replaces the legacy base
+when present, and `~/.config/djbclark-ade/local.toml` overlays it per leaf
+(service arrays replace whole). `ROUTING_POLICY` isolates the routing domain
+from unified/local routing values. Invalid inputs stop initialization; the final
+overlaid routing policy retains the legacy shape/default validation. `policy`
+reports base/local source provenance. Explicit `load_policy(path)` and
+`reload_policy(path)` remain isolated legacy reads. Model-tier resolution keeps
+its existing reader in this unit. See [config precedence](config-migration.md).
 A2. `bin/route_agent.py plan --kinds …` applies them to the live quota and prints one `paseo run --provider … --no-wait` line per slice;
 `route`, `show`, `services [--check-models]`, `calibrate`, `substrate` and `hermes-chain` are its other commands.
 A3. **Monthly `good_at` re-rank (2026-11-10):** `route_agent.py calibrate --json --since 30` proposes rank
