@@ -2,9 +2,11 @@
 
 First bounded S1/S2 unit: effective config loader (`bin/ade_config.py`),
 CLI (`bin/ade-config check|get|diff|set`), checked-in JSON Schema (`config/ade.schema.json`),
-and thin `just config-check`. Existing readers (`bin/route_agent.py`, `bin/ade_gates.py`)
-are still unchanged. Comment-preserving atomic `set` landed 2026-11-08; consumer adoption
-of the effective-config reader remains a later unit.
+and thin `just config-check`. Comment-preserving atomic `set` landed 2026-11-08.
+**2026-11-09:** `bin/ade_gates.load_frontier` adopts `ade_config.load_effective` (legacy
+`gates.toml` / `GATES_TOML` when `ade.toml` is absent). `bin/route_agent.py` still reads
+`routing.toml` directly; its adoption is a later unit. Do not ship tracked `config/ade.toml`
+yet (`ade-install` refuses while it is present).
 
 ## A. Mapping table (one explicit projection)
 

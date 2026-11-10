@@ -1,6 +1,8 @@
 # The frontier allowance: `config/gates.toml [frontier]` (2026-10-27; trimmed 2026-11-07)
 
-`config/gates.toml` holds one gate since 2026-11-07 (slim-down E7): the frontier-model allowance, read by
+`config/gates.toml` holds one gate since 2026-11-07 (slim-down E7): the frontier-model allowance. Since
+2026-11-09, `ade_gates.load_frontier` reads it through `ade_config.load_effective` (legacy projection when
+`config/ade.toml` is absent; `GATES_TOML` still isolates the gates domain for tests). Consumed by
 `bin/route_agent.py` (the planner's per-wave cap and the Fable floor), `bin/acp-dispatch` (the `--frontier-reason`
 grant) and `claude/hooks/frontier_agent_gate.py` (Agent-tool Fable calls). The Claude quota gates that shared the file
 (the fleet governor's `[governor]` and the quota guard's `[quota_guard]` thresholds, the temporary gate profiles with

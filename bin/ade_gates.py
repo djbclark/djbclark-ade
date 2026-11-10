@@ -7,6 +7,10 @@ frontier half only: the Claude quota gates (the fleet governor, the quota guard,
 route_agent's merged quota snapshot (`aiuse --available --json` plus `paseo usage ls --json`) instead of the quota
 guard's state file.
 
+Since 2026-11-09 (S1 consumer adoption), `load_frontier` reads through `ade_config.load_effective` so a local
+`ade-config set` / `~/.config/djbclark-ade/local.toml` overlay applies; when `config/ade.toml` is absent the effective
+tree still projects legacy `config/gates.toml` (and `GATES_TOML` isolates that domain). Fail-closed numbers are unchanged.
+
   load_frontier(now) -> (thresholds, info)                 the effective [frontier] gate
   read_guard_state() -> dict | None                        the Claude reading for the allowance (route_agent.claude_quota_state)
   judged_guard_block(state, t, now) -> str | None          why claude's judged frontier use is not allowed now, or None
@@ -50,6 +54,7 @@ _LOGGED: set[str] = set()
 
 
 def toml_path() -> Path:
+    """Legacy gates path (tests still set GATES_TOML). Effective reads go through ade_config."""
     return Path(os.environ.get("GATES_TOML") or Path(__file__).resolve().parent.parent / "config" / "gates.toml")
 
 
@@ -90,16 +95,17 @@ def ny_date(dt: datetime) -> str:
 
 
 def read_toml() -> tuple[dict[str, Any] | None, str | None]:
+    """Legacy direct reader kept for tests (FIFO / non-regular probes). Prefer load_frontier."""
     path = toml_path()
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)      # a FIFO with no writer would block a plain open forever
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
         with os.fdopen(fd, "rb") as fh:
             if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
                 return None, f"{path}: not a regular file"
             return tomllib.load(fh), None
     except OSError as e:
         return None, f"{path}: {e.strerror or e}"
-    except (tomllib.TOMLDecodeError, ValueError, RecursionError) as e:     # 4300+ digit integer: ValueError; 5000 nested arrays: RecursionError
+    except (tomllib.TOMLDecodeError, ValueError, RecursionError) as e:
         return None, f"{path}: not valid TOML ({e})"
 
 
@@ -108,46 +114,54 @@ def code_direction(key: str) -> str:
     return "lower" if key.endswith("_min_left") else "higher"
 
 
-def baseline_limit(cfg: dict[str, Any], key: str, default: float) -> float:
-    """The loosest gates.toml value `key` may take: a "higher" key may rise to its `[floors.frontier]` numeric `bound` (the
-    standing allowance); a `*_min_left` key, or one whose bound is missing, trusts only the code `default`."""
-    if code_direction(key) == "higher":
-        floors = cfg.get("floors")
-        tbl = floors.get("frontier") if isinstance(floors, dict) else None
-        spec = tbl.get(key) if isinstance(tbl, dict) else None
-        if isinstance(spec, dict) and is_num(spec.get("bound")):
-            return float(spec["bound"])
-    return default
-
-
 def load_frontier(now: datetime | None = None) -> tuple[dict[str, float], dict[str, Any]]:
-    """The effective `frontier` gate (FRONTIER_DEFAULTS < gates.toml [frontier], capped at its floors) and its info dict.
-    `now` is accepted for the older signature (a gate profile used to depend on it) and ignored."""
-    base = dict(FRONTIER_DEFAULTS)
-    info: dict[str, Any] = {"source": "code", "toml_error": None, "toml_path": str(toml_path()), "baseline": dict(base),
-                            "profile": None, "baseline_guarded": {}}
-    cfg, err = read_toml()
-    if cfg is not None:
-        tbl = cfg.get("frontier")
-        if not isinstance(tbl, dict) or not tbl or not all(is_num(v) for v in tbl.values()):
-            err = f"{toml_path()}: [frontier] is missing, empty or holds a non-number"
-        else:
-            for k, v in tbl.items():
-                if k not in base:
-                    continue
-                v, lim = float(v), baseline_limit(cfg, k, FRONTIER_DEFAULTS[k])
-                if (v < lim) if code_direction(k) == "lower" else (v > lim):
-                    info["baseline_guarded"][k] = v
-                    _log_once(f"{toml_path()} [frontier].{k} = {v:g} is looser than "
-                              f"{'the code default' if lim == FRONTIER_DEFAULTS[k] else 'its floor bound'} {lim:g}; "
-                              "using the code default")
-                    continue
-                base[k] = v
-            info.update(source="gates.toml", baseline=dict(base))
-    if err:
-        info["toml_error"] = err
-        _log_once(f"{err}; using the closed code defaults for frontier")
-    return base, info
+    """The effective `frontier` gate via ade_config.load_effective (legacy gates.toml when ade.toml is absent).
+
+    `now` is accepted for the older signature (a gate profile used to depend on it) and ignored.
+    """
+    _ = now  # signature compatibility
+    here = str(Path(__file__).resolve().parent)
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    import ade_config
+
+    root = Path(__file__).resolve().parent.parent
+    try:
+        eff = ade_config.load_effective(root=root)
+    except ade_config.ConfigError as e:
+        info: dict[str, Any] = {
+            "source": "code",
+            "toml_error": str(e),
+            "toml_path": str(toml_path()),
+            "baseline": dict(FRONTIER_DEFAULTS),
+            "profile": None,
+            "baseline_guarded": {},
+        }
+        _log_once(f"{e}; using the closed code defaults for frontier")
+        return dict(FRONTIER_DEFAULTS), info
+
+    gates = eff.data.get("gates") if isinstance(eff.data, dict) else None
+    frontier = gates.get("frontier") if isinstance(gates, dict) else None
+    ginfo = eff.provenance.get("gates_info") if isinstance(eff.provenance, dict) else None
+    if not isinstance(ginfo, dict):
+        ginfo = {}
+    info = {
+        "source": ginfo.get("source") or "code",
+        "toml_error": ginfo.get("toml_error"),
+        "toml_path": eff.provenance.get("gates_source") or str(toml_path()),
+        "baseline": dict(frontier) if isinstance(frontier, dict) else dict(FRONTIER_DEFAULTS),
+        "profile": None,
+        "baseline_guarded": dict(ginfo.get("baseline_guarded") or {}),
+    }
+    if info["toml_error"]:
+        _log_once(f"{info['toml_error']}; using the closed code defaults for frontier")
+    if not isinstance(frontier, dict) or not frontier:
+        return dict(FRONTIER_DEFAULTS), info
+    out = dict(FRONTIER_DEFAULTS)
+    for k, v in frontier.items():
+        if k in out and is_num(v):
+            out[k] = float(v)
+    return out, info
 
 
 def frontier_reason(text: Any) -> tuple[str | None, str | None]:
