@@ -125,6 +125,43 @@ def test_probe_quota_pass_fail_unknown_and_claude_api_skip():
     assert "Claude API" in skip["detail"]
 
 
+def test_probe_quota_string_paseo_unknown_does_not_pass(tmp_path):
+    """_fold_paseo records paseo_unknown as a descriptive string, not bool True.
+
+    A fresh positive aiuse reading with that string must still fail quota (and not
+    mark the pool ready) — identity ``is True`` would miss it and report pass.
+    """
+    row = reading(55)
+    row["paseo_unknown"] = "paseo usage: no window reading"
+    result = pools.probe_quota("grok", quota={"grok": row}, snapshot_age=0)
+    assert result["status"] == "fail"
+    assert "unknown" in result["detail"]
+
+    bool_row = reading(55)
+    bool_row["paseo_unknown"] = True
+    assert pools.probe_quota("grok", quota={"grok": bool_row}, snapshot_age=0)["status"] == "fail"
+
+    path = write_acceptance(tmp_path, """
+[pools.grok]
+accepted = false
+identity = "xai-oauth-subscription"
+billing = "subscription"
+""")
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    (evidence / "grok.json").write_text(json.dumps({
+        "schema_version": 1,
+        "continuation": {"ok": True, "note": "ok"},
+    }))
+    code, results = pools.probe_pools(
+        ["grok"], path=path, quota={"grok": row}, snapshot_age=0, evidence=evidence,
+    )
+    assert code == 2
+    assert results[0]["probes"]["quota"]["status"] == "fail"
+    assert results[0]["all_dimensions_pass"] is False
+    assert results[0]["ready_for_operator_accept"] is False
+
+
 def test_probe_identity_and_continuation(tmp_path, monkeypatch):
     path = write_acceptance(tmp_path, """
 [pools.grok]

@@ -192,7 +192,9 @@ def probe_quota(
         return _dim("unknown", f"no named-pool quota reading for {pool}")
     if info.get("requires_operator_approval") is True:
         return _dim("fail", "quota requires operator approval", remaining=info.get("remaining"))
-    if info.get("unknown") is True or info.get("paseo_unknown") is True:
+    # route_agent._fold_paseo may set paseo_unknown to a descriptive string (not
+    # bool True) beside a fresh aiuse reading; treat any truthy flag as unknown.
+    if info.get("unknown") or info.get("paseo_unknown"):
         return _dim("fail", "quota reading is unknown", remaining=info.get("remaining"))
     remaining = _pct(info.get("remaining"))
     pool_age = _clean_age(info.get("age_s"))
