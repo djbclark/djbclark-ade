@@ -620,6 +620,10 @@ the operator's Grok Bot "Coding", following the current browser route (operator 
    **refused** here (S7). Private-key and client-id store stay operator stdin (never print PEM).
    `apply --verify` is API-only read-back of local manifest + environment + ruleset checks
    (T0–T3b throwaway PRs stay operator / later). Just: `github-setup-apply`, `github-setup-verify`.
+   - **2026-11-10 prerequisite ordering:** an environment or deployment-branch-policy
+     failure stops `apply --yes` before App ID discovery and ruleset operations.
+     The original failure and explicit `refused-prerequisite` ruleset result remain
+     visible. Mocked ordering regressions do not establish live T0–T3b acceptance.
 
 ## S9. Cloud agents talk to Paseo agents, and Paseo agents run them (last, and only with headroom)
 

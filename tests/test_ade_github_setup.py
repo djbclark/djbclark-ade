@@ -422,8 +422,10 @@ def test_apply_yes_refuses_ruleset_without_app_id(tmp_path):
     root = _fixture_root(tmp_path)  # no app_id
     cfg = ags.load_config(root=root)
     env_body = _env_api_body(cfg)
+    policy_created = False
 
     def runner(argv: list[str]) -> subprocess.CompletedProcess:
+        nonlocal policy_created
         joined = " ".join(argv)
         if "user/installations" in joined:
             return subprocess.CompletedProcess(argv, 0, stdout="[]\n", stderr="")
@@ -435,8 +437,10 @@ def test_apply_yes_refuses_ruleset_without_app_id(tmp_path):
             if "-X" in argv and "DELETE" in argv:
                 return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
             if "-X" in argv and "POST" in argv:
+                policy_created = True
                 return subprocess.CompletedProcess(argv, 0, stdout="{}\n", stderr="")
-            return subprocess.CompletedProcess(argv, 0, stdout="[]\n", stderr="")
+            policies = [{"id": 1, "name": "master", "type": "branch"}] if policy_created else []
+            return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(policies), stderr="")
         return subprocess.CompletedProcess(argv, 1, stdout="", stderr="unexpected\n")
 
     results, rc = ags.apply_yes(cfg, runner=runner)
@@ -494,6 +498,57 @@ def test_apply_yes_preserves_environment_put_failure(tmp_path):
     ]["reason"]
     # Branch ensure is skipped once PUT failed (no false "applied" from GET).
     assert "environment-branch" not in by_id
+
+
+@pytest.mark.parametrize("failure", ["environment-put", "branch-list", "branch-delete", "branch-post", "branch-readback"])
+def test_apply_yes_stops_before_ruleset_when_environment_prerequisite_fails(tmp_path, failure):
+    """Even a willing downstream API must not activate a gate after env failure."""
+    root = _fixture_root(tmp_path)  # No recorded App ID: discovery must also stop.
+    cfg = ags.load_config(root=root)
+    willing = _apply_runner_ok(cfg)
+    env_path = f"repos/{cfg.full_name}/environments/{cfg.github['environment']}"
+    branch_path = env_path + "/deployment-branch-policies"
+    ruleset_path = f"repos/{cfg.full_name}/rulesets"
+    # The downstream fake is capable of successful writes, so refusal below
+    # cannot be explained by a failing ruleset endpoint in the fixture.
+    assert willing(["gh", "api", "-X", "POST", ruleset_path]).returncode == 0
+    calls = []
+    branch_lists = 0
+
+    def runner(argv: list[str]) -> subprocess.CompletedProcess:
+        nonlocal branch_lists
+        calls.append(argv)
+        method = argv[argv.index("-X") + 1] if "-X" in argv else "GET"
+        failed = subprocess.CompletedProcess(argv, 1, "", "HTTP 403: prerequisite denied\n")
+        if failure == "environment-put" and env_path in argv and method == "PUT":
+            return failed
+        if branch_path in argv and method == "GET":
+            branch_lists += 1
+            if failure == "branch-list":
+                return failed
+            policies = []
+            if failure == "branch-delete" or (failure == "branch-readback" and branch_lists > 1):
+                policies = [{"id": 1, "name": "master", "type": "branch"},
+                            {"id": 2, "name": "develop", "type": "branch"}]
+            return subprocess.CompletedProcess(argv, 0, json.dumps(policies), "")
+        if failure == "branch-delete" and branch_path + "/2" in argv and method == "DELETE":
+            return failed
+        if failure == "branch-post" and branch_path in argv and method == "POST":
+            return failed
+        return willing(argv)
+
+    results, rc = ags.apply_yes(cfg, runner=runner)
+    by_id = {row["id"]: row for row in results}
+    assert rc == 1
+    prerequisite = "environment" if failure == "environment-put" else "environment-branch"
+    assert by_id[prerequisite]["ok"] is False
+    assert by_id["ruleset"]["action"] == "refused-prerequisite"
+    assert by_id["ruleset"]["ok"] is False and prerequisite in by_id["ruleset"]["reason"]
+    assert not any(any("user/installations" in arg or "/rulesets" in arg for arg in argv) for argv in calls)
+    # Operator-only secret/browser/hardening rows remain descriptive, not executed.
+    assert by_id["store-private-key"]["action"] == "refuse-operator-secret"
+    assert by_id["app-create"]["action"] == "refuse-browser"
+    assert by_id["hardening"]["action"] == "deferred"
 
 
 def test_apply_yes_updates_existing_ruleset(tmp_path):

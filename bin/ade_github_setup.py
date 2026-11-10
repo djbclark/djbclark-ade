@@ -1540,6 +1540,7 @@ def apply_yes(
     Never prints or accepts PEM material. Secret / client-id store stays
     operator stdin (printed as a redirect template only). Exit 0 when every
     result is ok (including expected refuses); 1 when any API step failed.
+    Failed environment prerequisites stop downstream App discovery/ruleset calls.
     """
     run = runner or _default_runner
     results: list[dict[str, Any]] = []
@@ -1596,7 +1597,8 @@ def apply_yes(
         )
     )
 
-    results.extend(_apply_environment(cfg, run, dry_run=False))
+    environment_results = _apply_environment(cfg, run, dry_run=False)
+    results.extend(environment_results)
 
     secret = cfg.github["private_key_secret"]
     env = cfg.github["environment"]
@@ -1627,8 +1629,23 @@ def apply_yes(
         )
     )
 
-    app_id = _discover_app_id(cfg, run)
-    results.append(_apply_ruleset(cfg, run, app_id=app_id, dry_run=False))
+    failed_prerequisites = [row["id"] for row in environment_results if not row.get("ok")]
+    if failed_prerequisites:
+        results.append(
+            _result(
+                id="ruleset",
+                action="refused-prerequisite",
+                reason=(
+                    "ruleset apply not started: failed environment prerequisite(s): "
+                    + ", ".join(failed_prerequisites)
+                    + "; repair the reported failures before retrying apply"
+                ),
+                ok=False,
+            )
+        )
+    else:
+        app_id = _discover_app_id(cfg, run)
+        results.append(_apply_ruleset(cfg, run, app_id=app_id, dry_run=False))
 
     results.append(
         _result(
