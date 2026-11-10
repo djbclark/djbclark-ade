@@ -258,6 +258,30 @@ hooks = true
 js_repl = false
 memories = true
 
+# Secret-read gate + post-edit syntax check (2026-11-09, queue Carried #1 / issue #284).
+# Codex tool names: shell tools match as Bash; apply_patch also matches Edit and Write
+# (skills/create-hook; learn.chatgpt.com/docs/hooks). Leave [hooks.state.*] out: Codex writes
+# those trust hashes on first /hooks trust. Apply to ~/.codex/config.toml only with the
+# operator's yes (order 11); do not also add the same handlers to ~/.codex/hooks.json or
+# Codex merges both and warns.
+[[hooks.PreToolUse]]
+matcher = "Bash|Edit|Write|apply_patch"
+
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "{{ .home }}/.claude/hooks/secret_read_gate.py"
+timeout = 15
+statusMessage = "Checking secret-file reads"
+
+[[hooks.PostToolUse]]
+matcher = "Edit|Write|apply_patch"
+
+[[hooks.PostToolUse.hooks]]
+type = "command"
+command = "{{ .home }}/src/djbclark-ade/bin/post-edit-check --hook"
+timeout = 20
+statusMessage = "Checking edited-file syntax"
+
 [mcp_servers.node_repl]
 args = []
 command = "{{ .chatgpt_app }}/Contents/Resources/cua_node/bin/node_repl"
