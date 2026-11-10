@@ -1258,7 +1258,9 @@ def test_stack_rebase_dry_run_parent_gone(tmp_path: Path) -> None:
     assert res["onto"] == "master"
     assert res["need_base_edit"] is True
     assert res["reason"] == "parent_gone"
+    assert res["upstream_exclude"] == "cursor/gone-parent-f576"
     assert "would rebase #511" in r.stderr
+    assert "exclude cursor/gone-parent-f576" in r.stderr
 
 
 def test_stack_rebase_dry_run_open_parent(tmp_path: Path) -> None:
@@ -1393,8 +1395,10 @@ def test_stack_rebase_yes_rebase_and_retarget(tmp_path: Path) -> None:
             if [[ "$1" == fetch ]]; then exit 0; fi
             if [[ "$1" == worktree && "$2" == add ]]; then mkdir -p "$4"; exit 0; fi
             if [[ "$1" == worktree && "$2" == remove ]]; then exit 0; fi
+            if [[ "$1" == rev-parse ]]; then echo deadbeef; exit 0; fi
             if [[ "$1" == rebase && "$2" == --abort ]]; then exit 0; fi
-            if [[ "$1" == rebase ]]; then exit 0; fi
+            if [[ "$1" == rebase && "$2" == --onto ]]; then exit 0; fi
+            if [[ "$1" == rebase ]]; then echo "unexpected plain rebase: $*" >&2; exit 99; fi
             if [[ "$1" == push ]]; then exit 0; fi
             exit 0
             """
@@ -1421,7 +1425,9 @@ def test_stack_rebase_yes_rebase_and_retarget(tmp_path: Path) -> None:
     assert "rebased #511 cursor/child-f576 onto master (base retargeted)" in r.stdout
     assert edits.exists()
     assert "--base master" in edits.read_text()
-    assert "push --force-with-lease" in git_log.read_text()
+    log = git_log.read_text()
+    assert "push --force-with-lease" in log
+    assert "rebase --onto origin/master origin/cursor/gone-f576" in log
 
 
 def test_stack_rebase_yes_conflict_refuses(tmp_path: Path) -> None:
@@ -1464,11 +1470,13 @@ def test_stack_rebase_yes_conflict_refuses(tmp_path: Path) -> None:
             if [[ "$1" == fetch ]]; then exit 0; fi
             if [[ "$1" == worktree && "$2" == add ]]; then mkdir -p "$4"; exit 0; fi
             if [[ "$1" == worktree && "$2" == remove ]]; then exit 0; fi
+            if [[ "$1" == rev-parse ]]; then echo deadbeef; exit 0; fi
             if [[ "$1" == rebase && "$2" == --abort ]]; then exit 0; fi
-            if [[ "$1" == rebase ]]; then
+            if [[ "$1" == rebase && "$2" == --onto ]]; then
               echo "CONFLICT (content): merge conflict in x" >&2
               exit 1
             fi
+            if [[ "$1" == rebase ]]; then echo "unexpected plain rebase" >&2; exit 99; fi
             if [[ "$1" == push ]]; then echo "unexpected push" >&2; exit 99; fi
             exit 0
             """
@@ -1493,3 +1501,82 @@ def test_stack_rebase_yes_conflict_refuses(tmp_path: Path) -> None:
     )
     assert r.returncode == 1, r.stderr + r.stdout
     assert "refused #512: rebase conflict" in r.stdout
+
+
+def test_stack_rebase_refuses_fork_head(tmp_path: Path) -> None:
+    head = "a" * 40
+    listing = json.dumps(
+        [
+            {
+                "number": 600,
+                "title": "fork child",
+                "headRefOid": head,
+                "baseRefName": "master",
+                "mergeable": "MERGEABLE",
+                "headRefName": "cursor/fork-child-f576",
+                "author": {"login": "outsider"},
+                "headRepository": {"nameWithOwner": "outsider/djbclark-ade"},
+                "isCrossRepository": True,
+            }
+        ]
+    )
+    checks = "pytest-linux\tpass\t0\tx\nadversary-marker\tfail\t0\tx\n"
+    gh = write_fake_gh(
+        tmp_path,
+        textwrap.dedent(
+            f"""
+            set -e
+            case "$*" in
+              *"pr list"*) echo '{listing}' ;;
+              *"pr checks"*) printf '%s' '{checks}' ;;
+              *"repo view"*) echo djbclark ;;
+              *) echo "unexpected: $*" >&2; exit 99 ;;
+            esac
+            """
+        ),
+    )
+    r = run(gh, "stack-rebase", "--prs", "600", "--min", "1", "--json")
+    assert r.returncode == 0, r.stderr + r.stdout
+    data = json.loads(r.stdout)
+    res = data["results"][0]
+    assert res["status"] == "would-refuse"
+    assert res["reason"] == "cross_repo_head"
+    assert "fork" in res["detail"] or "cross" in res["detail"]
+
+
+def test_stack_rebase_align_onto_needs_upstream(tmp_path: Path) -> None:
+    head = "b" * 40
+    listing = json.dumps(
+        [
+            {
+                "number": 601,
+                "title": "retargeted child",
+                "headRefOid": head,
+                "baseRefName": "master",
+                "mergeable": "MERGEABLE",
+                "headRefName": "cursor/retargeted-f576",
+                "author": {"login": "djbclark"},
+                "headRepository": {"nameWithOwner": "djbclark/djbclark-ade"},
+            }
+        ]
+    )
+    checks = "pytest-linux\tpass\t0\tx\nadversary-marker\tfail\t0\tx\n"
+    gh = write_fake_gh(
+        tmp_path,
+        textwrap.dedent(
+            f"""
+            set -e
+            case "$*" in
+              *"pr list"*) echo '{listing}' ;;
+              *"pr checks"*) printf '%s' '{checks}' ;;
+              *"repo view"*) echo djbclark ;;
+              *) echo "unexpected: $*" >&2; exit 99 ;;
+            esac
+            """
+        ),
+    )
+    r = run(gh, "stack-rebase", "--prs", "601", "--min", "1", "--json")
+    assert r.returncode == 0, r.stderr + r.stdout
+    res = json.loads(r.stdout)["results"][0]
+    assert res["status"] == "would-refuse"
+    assert res["reason"] == "align_onto_needs_upstream"

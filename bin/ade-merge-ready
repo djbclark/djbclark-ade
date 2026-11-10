@@ -7,7 +7,8 @@
   ade-merge-ready approve-post --i-reviewed --yes [--bottoms-only] [--trigger-marker] …
   ade-merge-ready retrigger-marker (--prs … | --bottoms-only | --class NAME) [--yes]
   ade-merge-ready merge-now --prs N[,N…] [--yes]   # refuses unless adversary-marker success
-  ade-merge-ready stack-rebase --prs N[,N…] [--onto master] [--yes --repo-dir PATH]
+  ade-merge-ready stack-rebase --prs N[,N…] [--onto master] [--upstream REF]
+                               [--yes --repo-dir PATH]
   ade-merge-ready --help
 
 Uses `gh` to list open PRs (number >= --min, default 327; list limit 500 so
@@ -39,10 +40,11 @@ way by mistake).
 `stack-rebase` restacks selected open children after a bottom lands (or when
 the recorded base drifted): dry-run by default; `--yes` needs `--repo-dir`
 (a local clone), rebases onto the open parent's head branch when that parent
-is still listed, else onto `--onto` (default `master`), retargets
-`gh pr edit --base` when needed, `git push --force-with-lease`, and refuses
-(leaves the tip alone) on rebase conflicts. Never invents an APPROVE and
-never merges.
+is still listed, else onto `--onto` (default `master`) with
+`git rebase --onto` excluding the old parent tip (squash-merge safe),
+retargets `gh pr edit --base` when needed, `git push --force-with-lease`,
+refuses fork/cross-repo heads, and refuses (leaves the tip alone) on rebase
+conflicts. Never invents an APPROVE and never merges.
 
 `stacks` walks open PR base→same-repo head refs and prints bottom-up APPROVE
 order for named groups (install, claims, s1, wave6) with full tip SHAs for
@@ -885,16 +887,27 @@ def plan_stack_rebase(
     *,
     onto: str = "master",
     listing_repo: str | None = None,
+    upstream_override: str | None = None,
 ) -> list[dict[str, Any]]:
     """Bottom-up rebase plan for selected open tips (no git yet).
 
     Open parent → onto that parent's headRefName. Else → ``onto`` (usually
     master after the parent merged). ``need_base_edit`` when GitHub's
     baseRefName differs from the chosen onto.
+
+    After a squash-merged parent, ``upstream_exclude`` is the old parent
+    branch (still named in ``base`` when GitHub has not retargeted yet) so
+    ``git rebase --onto <onto> <upstream_exclude>`` replays only child
+    commits. Fork / cross-repo heads are refused.
     """
     onto = (onto or "master").strip()
     if not onto or ".." in onto or onto.startswith("-") or "\n" in onto or " " in onto:
         raise RuntimeError(f"invalid --onto {onto!r}")
+    up_over = (upstream_override or "").strip() or None
+    if up_over is not None and (
+        ".." in up_over or up_over.startswith("-") or "\n" in up_over or " " in up_over
+    ):
+        raise RuntimeError(f"invalid --upstream {up_over!r}")
     linked = link_parents(rows, listing_repo=listing_repo)
     by_n = {int(r["number"]): r for r in linked}
     missing = sorted(n for n in pr_numbers if n not in by_n)
@@ -904,53 +917,122 @@ def plan_stack_rebase(
         )
     selected = [by_n[n] for n in sorted(pr_numbers)]
     ordered = bottom_up_order(selected)
+    repo = listing_repo or ""
     plans: list[dict[str, Any]] = []
+
+    def _refuse(
+        r: dict[str, Any],
+        *,
+        reason: str,
+        detail: str,
+        target: str,
+        parent_n: Any,
+    ) -> dict[str, Any]:
+        return {
+            "number": int(r["number"]),
+            "branch": str(r.get("branch") or ""),
+            "head": str(r.get("head") or ""),
+            "base": str(r.get("base") or ""),
+            "onto": target,
+            "need_base_edit": False,
+            "upstream_exclude": None,
+            "reason": reason,
+            "action": "refuse",
+            "parent_number": parent_n,
+            "class": r.get("class"),
+            "head_repo": r.get("head_repo") or "",
+            "detail": detail,
+        }
+
     for r in ordered:
         parent_n = r.get("parent_number")
         base = str(r.get("base") or "")
         branch = str(r.get("branch") or "")
         head = str(r.get("head") or "")
+        head_repo = str(r.get("head_repo") or "")
+        if repo:
+            if not head_repo:
+                plans.append(
+                    _refuse(
+                        r,
+                        reason="unknown_head_repo",
+                        detail=(
+                            "missing head_repo; refuse fork-unsafe rebase "
+                            "(cannot verify head is this listing repo)"
+                        ),
+                        target=onto,
+                        parent_n=parent_n,
+                    )
+                )
+                continue
+            if head_repo != repo:
+                plans.append(
+                    _refuse(
+                        r,
+                        reason="cross_repo_head",
+                        detail=(
+                            f"head_repo={head_repo!r} != listing {repo!r}; "
+                            "refuse fork head (would rebase/push the wrong origin branch)"
+                        ),
+                        target=onto,
+                        parent_n=parent_n,
+                    )
+                )
+                continue
         if not branch:
             plans.append(
-                {
-                    "number": int(r["number"]),
-                    "branch": branch,
-                    "head": head,
-                    "base": base,
-                    "onto": onto,
-                    "need_base_edit": False,
-                    "reason": "missing_head_ref",
-                    "action": "refuse",
-                    "parent_number": parent_n,
-                    "class": r.get("class"),
-                    "detail": "missing headRefName",
-                }
+                _refuse(
+                    r,
+                    reason="missing_head_ref",
+                    detail="missing headRefName",
+                    target=onto,
+                    parent_n=parent_n,
+                )
             )
             continue
+        upstream_exclude: str | None = None
         if isinstance(parent_n, int) and parent_n in by_n:
             parent = by_n[parent_n]
             target = str(parent.get("branch") or "")
             if not target:
                 plans.append(
-                    {
-                        "number": int(r["number"]),
-                        "branch": branch,
-                        "head": head,
-                        "base": base,
-                        "onto": onto,
-                        "need_base_edit": False,
-                        "reason": "parent_missing_head_ref",
-                        "action": "refuse",
-                        "parent_number": parent_n,
-                        "class": r.get("class"),
-                        "detail": f"open parent #{parent_n} has no headRefName",
-                    }
+                    _refuse(
+                        r,
+                        reason="parent_missing_head_ref",
+                        detail=f"open parent #{parent_n} has no headRefName",
+                        target=onto,
+                        parent_n=parent_n,
+                    )
                 )
                 continue
             reason = "open_parent"
+            # Parent tip is an ancestor of the child for commits shared with the
+            # parent; a plain rebase onto the parent tip only replays the child.
         else:
             target = onto
-            reason = "parent_gone" if base != onto else "align_onto"
+            if base != onto:
+                reason = "parent_gone"
+                # Old base branch name is the squash-parent exclusion tip.
+                upstream_exclude = up_over or base
+            else:
+                reason = "align_onto"
+                if up_over:
+                    upstream_exclude = up_over
+                else:
+                    plans.append(
+                        _refuse(
+                            r,
+                            reason="align_onto_needs_upstream",
+                            detail=(
+                                "base already equals --onto after parent merge; "
+                                "pass --upstream <old-parent-tip-or-branch> so only "
+                                "child commits replay (squash-merge restack)"
+                            ),
+                            target=target,
+                            parent_n=parent_n,
+                        )
+                    )
+                    continue
         plans.append(
             {
                 "number": int(r["number"]),
@@ -959,10 +1041,12 @@ def plan_stack_rebase(
                 "base": base,
                 "onto": target,
                 "need_base_edit": base != target,
+                "upstream_exclude": upstream_exclude,
                 "reason": reason,
                 "action": "rebase",
                 "parent_number": parent_n,
                 "class": r.get("class"),
+                "head_repo": head_repo,
                 "detail": "",
             }
         )
@@ -996,12 +1080,17 @@ def stack_rebase_prs(
     repo_dir: str | None = None,
     git: str = "git",
     remote: str = "origin",
+    upstream_override: str | None = None,
     progress: Any = None,
 ) -> list[dict[str, Any]]:
     """Rebase selected stack children; dry-run prints the plan only."""
     out = progress if progress is not None else sys.stdout
     plans = plan_stack_rebase(
-        rows, pr_numbers, onto=onto, listing_repo=repo
+        rows,
+        pr_numbers,
+        onto=onto,
+        listing_repo=repo,
+        upstream_override=upstream_override,
     )
     results: list[dict[str, Any]] = []
     if dry_run:
@@ -1019,9 +1108,11 @@ def stack_rebase_prs(
                 if plan["need_base_edit"]
                 else f"base={plan['base']}"
             )
+            excl = plan.get("upstream_exclude")
+            excl_note = f"; exclude {excl}" if excl else ""
             print(
                 f"would rebase #{n} {plan['branch']} onto {plan['onto']} "
-                f"({base_note}; {plan['reason']})",
+                f"({base_note}; {plan['reason']}{excl_note})",
                 file=out,
             )
             results.append({**plan, "status": "would-rebase"})
@@ -1072,7 +1163,28 @@ def stack_rebase_prs(
                     f"#{n} worktree add failed: {(add.stderr or add.stdout).strip()}"
                 )
             onto_ref = f"{remote}/{target}"
-            rb = _run_git(git, ["rebase", onto_ref], cwd=wt)
+            excl = plan.get("upstream_exclude")
+            if excl:
+                # Squash-merged parent: replay only commits after the old parent tip.
+                excl_ref = excl if SHA40.fullmatch(excl) else f"{remote}/{excl}"
+                # Confirm the exclusion tip resolves before rewriting.
+                rev = _run_git(git, ["rev-parse", "--verify", excl_ref], cwd=wt)
+                if rev.returncode != 0:
+                    detail = (rev.stderr or rev.stdout).strip()
+                    print(
+                        f"refused #{n}: upstream exclude {excl_ref} missing "
+                        f"({detail[:200]}); tip left alone",
+                        file=out,
+                    )
+                    row["status"] = "refused"
+                    row["detail"] = detail[:500]
+                    results.append(row)
+                    continue
+                rb = _run_git(
+                    git, ["rebase", "--onto", onto_ref, excl_ref], cwd=wt
+                )
+            else:
+                rb = _run_git(git, ["rebase", onto_ref], cwd=wt)
             if rb.returncode != 0:
                 _run_git(git, ["rebase", "--abort"], cwd=wt)
                 detail = (rb.stderr or rb.stdout).strip()
@@ -1295,6 +1407,16 @@ def main(argv: list[str] | None = None) -> int:
         help="stack-rebase: default base when no open parent (default master)",
     )
     ap.add_argument(
+        "--upstream",
+        default="",
+        metavar="REF",
+        help=(
+            "stack-rebase: old parent tip/branch to exclude when replaying "
+            "only child commits after a squash merge (default: the PR's "
+            "pre-retarget baseRefName)"
+        ),
+    )
+    ap.add_argument(
         "--repo-dir",
         default=os.environ.get("ADE_MERGE_READY_REPO_DIR", ""),
         metavar="PATH",
@@ -1472,6 +1594,7 @@ def main(argv: list[str] | None = None) -> int:
                 onto=a.onto,
                 repo_dir=(a.repo_dir or None),
                 git=a.git,
+                upstream_override=(a.upstream or None),
                 progress=out,
             )
         except (RuntimeError, subprocess.TimeoutExpired, OSError) as e:

@@ -166,9 +166,12 @@ tips — the gate trusts them without a marker.
 `stack-rebase` restacks selected children after a stack bottom merges (or when
 the base drifted): dry-run by default; `--yes` requires `--repo-dir` (a local
 clone), rebases onto the open parent's head branch when that parent is still
-open else onto `--onto` (default `master`), retargets `gh pr edit --base` when
-needed, pushes with `--force-with-lease`, and refuses (exit 1, tip untouched)
-on rebase conflicts. It never posts markers and never merges.
+open else onto `--onto` (default `master`) with `git rebase --onto` excluding
+the old parent tip (`--upstream` / pre-retarget `baseRefName`) so squash-merged
+parent commits are not replayed, retargets `gh pr edit --base` when needed,
+pushes with `--force-with-lease`, refuses fork/cross-repo heads, and refuses
+(exit 1, tip untouched) on rebase conflicts. It never posts markers and never
+merges.
 
 ## The `adversary-marker` Action
 
