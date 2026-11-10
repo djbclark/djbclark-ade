@@ -85,9 +85,10 @@ and security sequencing in the older plan; other unfinished planning stays intac
    points at it. The components fall into five classes:
    1. **Hard dependencies.** `just install` installs them, `just doctor` fails without them, and the daily job keeps
       them current:
-      - **sudo-secretspec** (`frdminc/sudo-secretspec`; `brew install frdminc/sudo-secretspec/sudo-secretspec`, or its
-        Linux path). It is the only way a key reaches a tool (review rule 3). Hard dependency by operator ruling of
-        2026-11-07.
+      - **sudo-secretspec** (`frdminc/sudo-secretspec`; Mac: `brew install frdminc/sudo-secretspec/sudo-secretspec`;
+        Linux x86_64: `ade-user-install sudo-secretspec` → versioned release tarball + sha256, then opt-in
+        `libexec` install — no Linux `system_argv`, catalog `install_argv`). It is the only way a key reaches a
+        tool (review rule 3). Hard dependency by operator ruling of 2026-11-07.
       - **aiuse** (`djbclark/aiuse`; Homebrew or PyPI, per its README). It is the main quota reading for routing.
         Hard dependency by operator ruling of 2026-11-07. Also **cswap** (`claude-swap`), which aiuse reads.
       - **Paseo** (`getpaseo/paseo`), its skill bundle (`npx skills add getpaseo/paseo`, set user-invocable-only),

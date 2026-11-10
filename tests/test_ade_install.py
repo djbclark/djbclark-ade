@@ -57,7 +57,15 @@ def test_repo_install_toml_checks_clean():
         "frdminc/sudo-secretspec/sudo-secretspec",
     ]
     assert by_id["sudo-secretspec"].get("probe_argv") == ["sudo-secretspec", "doctor"]
-    assert by_id["sudo-secretspec"].get("system_argv") is None  # Linux tarball still UNKNOWN
+    # Linux: multi-step helper via install_argv; no single system_argv / no pinned URL.
+    assert by_id["sudo-secretspec"].get("system_argv") is None
+    assert by_id["sudo-secretspec"].get("install_argv") == [
+        "{bin}/ade-user-install",
+        "sudo-secretspec",
+        "--prefix",
+        "{prefix}",
+    ]
+    assert "ade-user-install" in (by_id["sudo-secretspec"].get("install") or "")
     assert by_id["claude-code"].get("install_argv") == [
         "npm",
         "install",
@@ -1055,3 +1063,170 @@ def test_shipped_acceptance_warns_checklist_quiet_on_cursor_zai():
     assert "cursor" not in o.detail.lower()
     assert "zai" not in o.detail.lower()
     assert path.read_bytes() == before
+
+def test_secretspec_linux_urls_are_versioned_not_pinned():
+    meta = aui.secretspec_linux_download_urls("0.21.1-sudo.5")
+    assert meta["tag"] == "v0.21.1-sudo.5"
+    assert meta["tarball_name"] == (
+        "sudo-secretspec-0.21.1-sudo.5-x86_64-unknown-linux-gnu.tar.gz"
+    )
+    assert meta["tarball_url"].endswith(
+        "/releases/download/v0.21.1-sudo.5/"
+        "sudo-secretspec-0.21.1-sudo.5-x86_64-unknown-linux-gnu.tar.gz"
+    )
+    assert meta["sha256_url"].endswith(".tar.gz.sha256")
+    assert meta["latest_page"].endswith("/releases/latest")
+    # Must not invent a fixed tag in the download path without a resolved version.
+    assert "/download/latest/" not in meta["tarball_url"]
+
+
+def test_secretspec_linux_dry_run_uses_fake_resolver(monkeypatch, tmp_path):
+    monkeypatch.setattr(aui, "host_triplet", lambda: ("linux", "x86_64"))
+    prefix = tmp_path / "bin"
+    result = aui.install_sudo_secretspec(
+        prefix=prefix,
+        dry_run=True,
+        resolve_tag=lambda owner, repo: "0.21.1-sudo.5",
+    )
+    assert result["action"] == "would-fetch-extract"
+    assert result["version"] == "0.21.1-sudo.5"
+    assert "0.21.1-sudo.5" in result["tarball_url"]
+    assert result["libexec_install_argv"][0] == "sudo"
+    assert result["libexec_install_argv"][2:4] == ["install", "--declarations"]
+    # Placeholder path only — never a secret value.
+    assert result["libexec_install_argv"][-1] == "/path/secretspec.toml"
+    assert not any("sk-" in a or "secret=" in a.lower() for a in result["libexec_install_argv"])
+    assert not (tmp_path / "lib").exists()
+
+
+def _fake_secretspec_media_blobs(version: str = "0.21.1-sudo.5"):
+    import hashlib
+    import io
+    import tarfile
+
+    root_name = f"sudo-secretspec-{version}-x86_64-unknown-linux-gnu"
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        # libexec installer stub
+        data = b"#!/bin/sh\necho staged\n"
+        info = tarfile.TarInfo(name=f"{root_name}/libexec/sudo-secretspec")
+        info.size = len(data)
+        info.mode = 0o755
+        tar.addfile(info, io.BytesIO(data))
+        readme = b"media\n"
+        rinfo = tarfile.TarInfo(name=f"{root_name}/README.md")
+        rinfo.size = len(readme)
+        tar.addfile(rinfo, io.BytesIO(readme))
+    blob = buf.getvalue()
+    digest = hashlib.sha256(blob).hexdigest()
+    tarball = f"{root_name}.tar.gz"
+    sha_text = f"{digest}  {tarball}\n".encode()
+    return blob, sha_text, tarball
+
+
+def test_secretspec_linux_stage_with_fakes(monkeypatch, tmp_path):
+    monkeypatch.setattr(aui, "host_triplet", lambda: ("linux", "x86_64"))
+    blob, sha_text, tarball = _fake_secretspec_media_blobs()
+    urls = aui.secretspec_linux_download_urls("0.21.1-sudo.5")
+
+    def fake_urlopen(url: str) -> bytes:
+        if url == urls["tarball_url"]:
+            return blob
+        if url == urls["sha256_url"]:
+            return sha_text
+        raise AssertionError(f"unexpected URL {url!r} (tests must not hit network)")
+
+    prefix = tmp_path / "bin"
+    prefix.mkdir()
+    result = aui.install_sudo_secretspec(
+        prefix=prefix,
+        dry_run=False,
+        resolve_tag=lambda o, r: "0.21.1-sudo.5",
+        urlopen=fake_urlopen,
+    )
+    assert result["action"] == "staged"
+    assert result["run_install"] is False
+    media = Path(result["media_dir"])
+    assert (media / "libexec" / "sudo-secretspec").is_file()
+    assert result["libexec_install_argv"][0] == "sudo"
+    assert "--declarations" in result["libexec_install_argv"]
+    # No secret-looking argv tokens.
+    joined = " ".join(result["libexec_install_argv"])
+    assert "API_KEY" not in joined and "password" not in joined.lower()
+
+
+def test_secretspec_run_install_opt_in_with_fake_runner(monkeypatch, tmp_path):
+    monkeypatch.setattr(aui, "host_triplet", lambda: ("linux", "x86_64"))
+    blob, sha_text, _ = _fake_secretspec_media_blobs()
+    urls = aui.secretspec_linux_download_urls("0.21.1-sudo.5")
+
+    def fake_urlopen(url: str) -> bytes:
+        if url.endswith(".sha256"):
+            return sha_text
+        if url.endswith(".tar.gz"):
+            return blob
+        raise AssertionError(url)
+
+    decl = tmp_path / "secretspec.toml"
+    decl.write_text("[protocols]\n")
+    seen: list[list[str]] = []
+
+    def fake_runner(argv, cwd):
+        seen.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0, stdout="ok\n", stderr="")
+
+    result = aui.install_sudo_secretspec(
+        prefix=tmp_path / "bin",
+        dry_run=False,
+        declarations=decl,
+        run_install=True,
+        resolve_tag=lambda o, r: "0.21.1-sudo.5",
+        urlopen=fake_urlopen,
+        runner=fake_runner,
+    )
+    assert result["action"] == "installed"
+    assert len(seen) == 1
+    assert seen[0][0] == "sudo"
+    assert seen[0][2:] == ["install", "--declarations", str(decl.resolve())]
+    assert all(a != "" for a in seen[0])
+
+
+def test_plan_and_apply_linux_secretspec_uses_install_argv(monkeypatch, tmp_path):
+    # On Linux (no brew system_argv), needs_system rows with install_argv fall through.
+    monkeypatch.setattr(ai.platform, "system", lambda: "Linux")
+    root = tmp_path / "repo"
+    (root / "config").mkdir(parents=True)
+    (root / "bin").mkdir()
+    (root / "bin" / "ade-user-install").write_text("#!/bin/sh\n")
+    (root / "config" / "install.schema.json").write_text(
+        (REPO / "config" / "install.schema.json").read_text()
+    )
+    (root / "config" / "install.toml").write_text(
+        "schema_version = 1\n"
+        "[[component]]\n"
+        'id = "sudo-secretspec"\n'
+        'class = "hard"\n'
+        "needs_system = true\n"
+        "install_argv = "
+        '["{bin}/ade-user-install", "sudo-secretspec", "--prefix", "{prefix}"]\n'
+        'system_argv_darwin = ["brew", "install", "frdminc/sudo-secretspec/sudo-secretspec"]\n'
+        'probe_argv = ["true"]\n'
+        'presence = "true"\n'
+    )
+    catalog = ai.load_catalog(root=root)
+    steps = ai.plan(catalog)
+    by_id = {s["id"]: s for s in steps}
+    assert by_id["sudo-secretspec"]["action"] == "would-install"
+    assert by_id["sudo-secretspec"]["argv"][1] == "sudo-secretspec"
+    assert by_id["sudo-secretspec"]["needs_system"] is True
+
+    apply_steps = ai.build_apply_steps(catalog, force=True, allow_system=False)
+    assert apply_steps[0].action == "would-install"
+    assert apply_steps[0].argv is not None
+    assert apply_steps[0].argv[1] == "sudo-secretspec"
+
+    # Darwin still prefers brew system_argv when --system is set.
+    monkeypatch.setattr(ai.platform, "system", lambda: "Darwin")
+    darwin_steps = ai.build_apply_steps(catalog, force=True, allow_system=True)
+    assert darwin_steps[0].action == "would-system-install"
+    assert darwin_steps[0].argv[:2] == ["brew", "install"]
