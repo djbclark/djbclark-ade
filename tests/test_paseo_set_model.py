@@ -128,6 +128,21 @@ class TestLauncher(unittest.TestCase):
         self.assertIn("PASEO_SET_MODEL_HELPER", r.stderr)
         self.assertNotIn("Traceback", r.stderr)
 
+    def test_a_bare_helper_name_on_path_is_resolved(self):
+        # A bare PASEO_SET_MODEL_HELPER must search PATH (like subprocess.run), not cwd.
+        bindir = self.root / "bin"
+        bindir.mkdir()
+        named = bindir / "fake-helper-on-path"
+        named.write_text(self.helper.read_text())
+        named.chmod(0o755)
+        r = self.run_launcher(
+            "list", "--json",
+            extra={"PASEO_SET_MODEL_HELPER": "fake-helper-on-path",
+                   "PATH": f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}"},
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.calls()[0]["argv"][2:], ["list"])
+
 
 @unittest.skipUnless(NODE, "node not on PATH")
 class TestNodeHalf(unittest.TestCase):

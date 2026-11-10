@@ -31,6 +31,7 @@ PASEO_SET_MODEL_CLI_DIST (default: the bundled @getpaseo/cli dist directory insi
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -74,6 +75,11 @@ def main(argv: list[str]) -> int:
     else:
         return usage()
     helper = os.environ.get("PASEO_SET_MODEL_HELPER") or DEFAULT_HELPER
+    # Bare names (e.g. `node`) resolve via PATH, matching subprocess.run's lookup;
+    # absolute/relative paths keep their given form when which finds them.
+    resolved = shutil.which(helper)
+    if resolved is not None:
+        helper = resolved
     if not os.access(helper, os.X_OK):
         print(f"paseo-set-model: macOS only: Paseo Helper not found at {helper}; install Paseo.app or set "
               "PASEO_SET_MODEL_HELPER to a Paseo Helper (Electron node) binary", file=sys.stderr)
