@@ -37,7 +37,7 @@ read [AGENTS.md](AGENTS.md) (`CLAUDE.md` links to it) first; this page is the ma
 
 ```sh
 cd ~/src/djbclark-ade
-just doctor                                            # observe-only catalog probes
+just doctor                                            # observe-only catalog probes (+ Linux linger WARN/FAIL)
 just install                                           # dry-run apply; just install -- --yes for live user-scoped
 just update -- --check                                 # ade-update --check for this checkout
 just update                                            # fast-forward, relink skills, print changelog delta

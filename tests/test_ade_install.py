@@ -113,6 +113,87 @@ def test_doctor_probe_binary_missing(tmp_path):
     assert "probe binary not found" in o.detail
 
 
+def _sched_backend(name: str, env: dict | None = None):
+    import ade_sched as sched
+
+    return sched.Backend(name, dict(env or {}), f"test-{name}")
+
+
+def test_observe_sched_linger_launchd_and_cron_na():
+    for name in ("launchd", "cron"):
+        o = ai.observe_sched_linger(
+            detect_fn=lambda env=None, **kw: _sched_backend(name),
+            linger_fn=lambda env=None: "no",
+            labels_fn=lambda backend, env=None: ["should-not-matter"],
+        )
+        assert o.kind == "sched" and o.id == "linger"
+        assert o.status == "ok"
+        assert f"linger: n/a (backend={name})" in o.detail
+        assert "sudo" not in o.detail
+
+
+def test_observe_sched_linger_systemd_jobs_no_is_warn():
+    o = ai.observe_sched_linger(
+        detect_fn=lambda env=None, **kw: _sched_backend("systemd", {"USER": "tester"}),
+        linger_fn=lambda env=None: "no",
+        labels_fn=lambda backend, env=None: ["com.djbclark.ade-update-check"],
+    )
+    assert o.status == "warn"
+    assert "just linger" in o.detail
+    assert "enable-linger" in o.detail
+    assert "ade-update-check" in o.detail
+    assert "sudo" not in o.detail.lower()
+
+
+def test_observe_sched_linger_systemd_yes_or_no_jobs_ok():
+    yes = ai.observe_sched_linger(
+        detect_fn=lambda env=None, **kw: _sched_backend("systemd"),
+        linger_fn=lambda env=None: "yes",
+        labels_fn=lambda backend, env=None: ["com.djbclark.deadline-sweep"],
+    )
+    assert yes.status == "ok" and "linger: yes" in yes.detail
+    idle = ai.observe_sched_linger(
+        detect_fn=lambda env=None, **kw: _sched_backend("systemd"),
+        linger_fn=lambda env=None: "no",
+        labels_fn=lambda backend, env=None: [],
+    )
+    assert idle.status == "ok" and "no ade-sched systemd jobs" in idle.detail
+
+
+def test_doctor_sched_linger_warn_fails_exit(tmp_path):
+    root = _fixture_root(tmp_path)
+    catalog = ai.load_catalog(root=root)
+    # Skip live component probes' hard miss by forcing linger only: tool-c is missing,
+    # so use skip path via injected ok components — inject sched linger warn directly.
+    warn = ai.Observation(
+        "sched", "linger", "warn",
+        ai.linger_off_doctor_detail(["com.djbclark.ade-update-check"]),
+    )
+    # Count only linger: pass a catalog with no expected missing by observing with
+    # skip_sched_linger false and sched_linger injected; fixture still has tool-c missing.
+    # Use a hard-only-ok mini catalog instead.
+    (root / "config" / "install.toml").write_text(
+        "schema_version = 1\n"
+        "[[component]]\n"
+        'id = "tool-a"\n'
+        'class = "hard"\n'
+        'probe_argv = ["true"]\n'
+        'presence = "true"\n'
+    )
+    catalog = ai.load_catalog(root=root)
+    obs, rc = ai.doctor(catalog, sched_linger=warn)
+    assert rc == 1
+    linger = [o for o in obs if o.kind == "sched" and o.id == "linger"]
+    assert len(linger) == 1 and linger[0].status == "warn"
+    assert "sudo" not in linger[0].detail.lower()
+    obs_ok, rc_ok = ai.doctor(
+        catalog,
+        sched_linger=ai.Observation("sched", "linger", "ok", "linger: n/a (backend=launchd)"),
+    )
+    assert rc_ok == 0
+    assert any(o.detail.startswith("linger: n/a") for o in obs_ok if o.kind == "sched")
+
+
 def test_plan_blocks_unknown_install(tmp_path):
     root = _fixture_root(tmp_path)
     steps = ai.plan(ai.load_catalog(root=root))

@@ -89,7 +89,12 @@ Pass `--ade` only with a durable checkout (`~/src/djbclark-ade`); never with a l
   `blocked` / `skip`.
 - `doctor` prefers `probe_argv` (runs the tool; argv list, short timeout) and
   falls back to PATH `presence`. Missing or failed expected components fail
-  the command; `unknown` is neither healthy nor absent. Doctor does not repair.
+  the command; `unknown` is neither healthy nor absent. On Linux, when
+  ade-sched has installed **systemd** jobs and `loginctl` reports `Linger=no`,
+  doctor prints a `warn` line naming `just linger` / `enable-linger` and
+  **FAIL**s (exit 1); it never runs sudo and never enables linger.
+  launchd/cron report `linger: n/a` (ok); macOS exit behaviour is unchanged.
+  Doctor does not repair.
 - `apply` defaults to **dry-run**. `--yes` executes user `install_argv` for
   expected missing components (or `--force`). Writes an atomic ledger under
   `~/.local/state/djbclark-ade/install/ledger.json` (or `ADE_INSTALL_STATE_DIR`).

@@ -2,10 +2,11 @@
 
 Transitional source: ``config/install.toml`` when ``config/ade.toml`` is absent.
 Key entries are names and metadata only. Doctor runs ``probe_argv`` when
-recorded (else PATH presence) and never repairs. Apply is user-scoped only:
-``--dry-run`` by default, ``--yes`` to execute recorded ``install_argv``
-(argv lists, never shell=True). Root / ``--system`` effects are refused until
-a later unit. Secrets are never read.
+recorded (else PATH presence), checks Linux systemd linger when ade-sched
+jobs are installed (``just linger`` / enable-linger; never sudo), and never
+repairs. Apply is user-scoped only: ``--dry-run`` by default, ``--yes`` to
+execute recorded ``install_argv`` (argv lists, never shell=True). Root /
+``--system`` effects are refused until a later unit. Secrets are never read.
 """
 from __future__ import annotations
 
@@ -68,9 +69,9 @@ class Catalog:
 
 @dataclass(frozen=True)
 class Observation:
-    kind: str  # component | key | login | catalog
+    kind: str  # component | key | login | catalog | sched
     id: str
-    status: str  # ok | missing | unknown | error | unchosen | never
+    status: str  # ok | missing | unknown | error | unchosen | never | warn
     detail: str
 
 
@@ -356,13 +357,104 @@ def observe_login(row: dict[str, Any]) -> Observation:
     return Observation("login", lid, "unknown", f"login check recorded as {cmd!r}; not executed")
 
 
+def linger_off_doctor_detail(labels: list[str]) -> str:
+    """Doctor detail for Linger=no with installed systemd jobs (never names sudo)."""
+    names = ", ".join(labels) if labels else "(none)"
+    return (
+        f"Linger=no with installed ade-sched systemd job(s): {names}; "
+        f"user timers stop at logout. Check with `just linger` / `ade-sched linger`; "
+        f"enable-linger once for boot-time user timers (doctor never enables linger)."
+    )
+
+
+def observe_sched_linger(
+    *,
+    env: dict[str, str] | None = None,
+    detect_fn: Callable[..., Any] | None = None,
+    linger_fn: Callable[..., str | None] | None = None,
+    labels_fn: Callable[..., list[str]] | None = None,
+) -> Observation:
+    """Observe systemd linger when ade-sched jobs are present (Linux residual after just linger).
+
+    launchd/cron → ok ``linger: n/a`` (macOS / cron unchanged for exit). systemd with
+    installed ADE jobs and ``Linger=no`` → ``warn`` (doctor FAILs). Never runs sudo /
+    never enables linger. Detect/linger failures are ``unknown``, not a hard fail.
+    """
+    # Lazy import: catalog check / plan stay independent of ade_sched.
+    import ade_sched as sched  # noqa: PLC0415
+
+    detect = detect_fn or sched.detect
+    linger = linger_fn or sched.linger
+    labels = labels_fn or sched.installed_labels
+    try:
+        backend = detect(env=env)
+    except sched.SchedError as e:
+        return Observation(
+            "sched", "linger", "unknown",
+            f"scheduler unavailable for linger check: {e}",
+        )
+    except OSError as e:
+        return Observation(
+            "sched", "linger", "unknown",
+            f"scheduler probe error for linger check: {e}",
+        )
+    name = backend.name
+    if name in ("launchd", "cron"):
+        return Observation(
+            "sched", "linger", "ok",
+            f"linger: n/a (backend={name})",
+        )
+    if name != "systemd":
+        return Observation(
+            "sched", "linger", "ok",
+            f"linger: n/a (backend={name})",
+        )
+    try:
+        installed = list(labels(backend, env=backend.env))
+    except (sched.SchedError, OSError, TypeError) as e:
+        return Observation(
+            "sched", "linger", "unknown",
+            f"could not list ade-sched systemd jobs: {e}",
+        )
+    try:
+        state = linger(env=backend.env)
+    except (sched.SchedError, OSError) as e:
+        return Observation(
+            "sched", "linger", "unknown",
+            f"could not read Linger: {e}",
+        )
+    if not installed:
+        return Observation(
+            "sched", "linger", "ok",
+            f"linger: {state or 'unknown'} (no ade-sched systemd jobs)",
+        )
+    if state == "no":
+        return Observation(
+            "sched", "linger", "warn",
+            linger_off_doctor_detail(installed),
+        )
+    if state == "yes":
+        return Observation(
+            "sched", "linger", "ok",
+            f"linger: yes ({len(installed)} ade-sched systemd job(s))",
+        )
+    return Observation(
+        "sched", "linger", "unknown",
+        f"linger: unknown with {len(installed)} ade-sched systemd job(s); "
+        f"check with `just linger`",
+    )
+
+
 def doctor(
     catalog: Catalog,
     *,
     runner: Runner | None = None,
     probe_timeout_s: float = 15.0,
+    sched_linger: Observation | None = None,
+    skip_sched_linger: bool = False,
 ) -> tuple[list[Observation], int]:
-    """Observe-only doctor. Exit 1 if any expected component is missing/error; never repairs."""
+    """Observe-only doctor. Exit 1 if any expected component is missing/error, or
+    when Linux systemd jobs are installed with Linger=no; never repairs."""
     obs: list[Observation] = [
         Observation("catalog", str(catalog.path), "ok", "catalog validated"),
     ]
@@ -381,6 +473,12 @@ def doctor(
         obs.append(observe_key(row))
     for row in catalog.logins:
         obs.append(observe_login(row))
+    if not skip_sched_linger:
+        linger_obs = sched_linger if sched_linger is not None else observe_sched_linger()
+        obs.append(linger_obs)
+        # WARN line + FAIL exit when Linger=no with installed systemd jobs.
+        if linger_obs.status in ("warn", "error", "missing"):
+            hard_missing += 1
     return obs, (1 if hard_missing else 0)
 
 

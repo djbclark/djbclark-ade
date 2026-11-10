@@ -126,6 +126,9 @@ systemd install reads `loginctl show-user USER -p Linger --value`; `no` is **exi
 prints the same warning. ade-sched never runs sudo. An unreadable value is a note, not a refusal. `ade-sched backend`
 prints the state; `ade-sched linger` / `just linger` is the observe-only gate (exit 69 when `Linger=no`, `n/a` on
 launchd/cron) so a Linux one-step update path can check before `just update-check-install`.
+`ade-install doctor` / `just doctor` also observes this residual (2026-11-10): when ade-sched systemd jobs are
+installed and `Linger=no`, doctor **WARN**s (status `warn`) and **FAIL**s (exit 1), naming `just linger` /
+`enable-linger` only — never sudo. launchd/cron stay `linger: n/a` (ok); macOS is unchanged.
 
 ## Mapping
 
