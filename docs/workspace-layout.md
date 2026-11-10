@@ -13,8 +13,8 @@ order 9).
 
 1. **One workspace per genuine new isolated writing task** — create it with `paseo workspace create` or
    `paseo run --new-workspace …`, not per advisor, review round, or report folder.
-2. **Reuse the task workspace** for implementer, reviewer, and advisor tabs on that worktree (`paseo run --workspace wks_…`
-   or `acp-dispatch` with `--workspace` / `PASEO_WORKSPACE_ID` validated against `workspace ls`).
+2. **Reuse the task workspace** for implementer, reviewer, and advisor tabs on that worktree
+   (`paseo run --workspace wks_…`, with `PASEO_WORKSPACE_ID` validated against `paseo workspace ls` when needed).
 3. **Agent titles** stay short and identifiable; `paseo agent update ID --name "…"` or `paseo run --title T` at launch.
 4. **Closing a tab** you mean to end: archive that agent (`paseo agent archive ID`).
 
