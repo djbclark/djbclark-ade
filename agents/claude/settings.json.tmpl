@@ -396,17 +396,6 @@
     ],
     "SessionStart": [
       {
-        "matcher": "^(startup|resume|clear)$",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "\"$HOME\"/.claude/hooks/cswap_quota_context.sh",
-            "timeout": 10,
-            "statusMessage": "Reading Claude quota..."
-          }
-        ]
-      },
-      {
         "matcher": "^(startup|resume|clear|compact|fork)$",
         "hooks": [
           {
@@ -505,11 +494,6 @@
           {
             "type": "command",
             "command": "\"$HOME\"/ops/site-private/bin/hook-deadline 4 \"$HOME\"/.claude/hooks/context_size_nudge.py",
-            "timeout": 20
-          },
-          {
-            "type": "command",
-            "command": "\"$HOME\"/ops/site-private/bin/hook-deadline 2 \"$HOME\"/src/djbclark-ade/claude/hooks/quota_nudge.py",
             "timeout": 20
           },
           {

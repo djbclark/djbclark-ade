@@ -100,7 +100,7 @@ under **Carried**, newest first, one line each; an item leaves when it ships (in
 34. **Slim-down leftovers after Wave 6 deletion** (2026-11-07; deletion itself is Carried 1 / `docs/slim/wave6-follow-up.md`): port `skills/loose`'s
     upstream-issue reader off `acp-run --perm deny`; aiuse's acp-run
     readers (`src/aiuse/collectors/acp_usage.py`); the shim does not apply the Argon `fallback_block` at dispatch (E7 E5);
-    the `quota_nudge.py`/`cswap_quota_context.sh` decision (R2-18); `routing-recalibrate` as a Paseo schedule if wanted
+    `routing-recalibrate` as a Paseo schedule if wanted
     (E5); upstream Paseo filings (a codex read-only mode, a quota-pause primitive, a workspace-claim primitive).
 35. **`bin/review-pr` and `gh pr checks --watch` register no deadline of their own** (2026-11-07, W3 docs critic): run them under `deadline run` until one of them registers itself (`docs/deadline.md` Known gaps).
 36. **One-step install and automatic updates on a new machine, Mac and Linux** (operator, 2026-11-07): an easy way to install

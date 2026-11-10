@@ -50,9 +50,6 @@ if os.environ.get("ROUTE_AGENT_OMP_READY", "").strip().lower() not in ("0", "1")
 # 2026-11-07, slim-down E7). Off in tests so the suite never depends on, or spawns, the host's real Paseo daemon;
 # test_route_agent.py turns it on per test against tests/fakes/paseo or a canned ROUTE_AGENT_PASEO_USAGE_JSON.
 os.environ.setdefault("ROUTE_AGENT_PASEO", "off")
-# claude/hooks/quota_nudge.py (left in place pending the operator's decision, 2026-11-07) still reads this path: a test never
-# sees the real one.
-os.environ["CLAUDE_QUOTA_GUARD_STATE"] = "/nonexistent/quota-guard-state"
 # fleet.LINKS_FILE (who has messaged whom, and who ever acked; the old relay.py wrote it, fleet.py list reads it, 2026-10-25): never the
 # operator's real ledger. Unconditional. (The old relay.py's RELAY_DEFER_DIR queue went with it, 2026-11-06, docs/slim E3; this goes with
 # fleet.py in E3b.)

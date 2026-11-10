@@ -48,7 +48,7 @@ R2-14. Cursor: on J2's keep list (cursor-agent); stays unless the pool audit sho
 R2-15. Small-context provider: DECIDE at Wave 3 after the audit; if none survives, `web-get`, `web-digest*`, `firecrawl-router` and their tests go in Wave 3's E9 part.
 R2-16. `dialogue` and `research`: the 1-hour Claude-subagent port is attempted in E6 (`dialogue.py:751` is the seam); DELETE if it fails the hour (PLAN E6).
 R2-17. `tell-chief-of-staff`: E6/E9j (pointer stays here, code to peer-link); E1 leaves it.
-R2-18. `quota_nudge.py` and `cswap_quota_context.sh` (and their live hook lines): DECIDE after session-guard is verified on the Mac (D4); if removed, the hook lines join C2's operator edit.
+R2-18. `quota_nudge.py` and `cswap_quota_context.sh` (and their live hook lines): **DELETE** (2026-11-10). E7's session-guard / usage-auto-resume replaced the quota gate; both hooks and their template lines are gone; live `~/.claude` cleanup is the operator's.
 R2-19. Confirmed: the lead trims the template's four DELETE hook lines, the `herdr-agent-state.sh` hook and the DELETE-skill entries at merge (ruling 8); the live `~/.claude/settings.json` edit for the four C2 hook files is the operator's before the final merge.
 R2-20. `bg`: operator batch line 9.
 R2-21. `fleet-watch`: `site-djbclark/bin/fleet-watch` (seen in the clone); the paused watchers' LaunchAgents are listed by batch line 6 (`launchctl list | grep com.djbclark`).
@@ -1160,7 +1160,7 @@ R2-26. `bin/npm_metadata.py` and its test (0 refs): DELETE in E10.
 15. 15. Does a small-context provider survive (keeping web-get, web-digest, web-digest-mcp, firecrawl-router and their tests)?
 16. 16. dialogue and research: approve the 1-hour Claude-subagent port (dialogue.py:751 is the seam), or delete both?
 17. 17. tell-chief-of-staff: E1 (move to site-djbclark) or E6/E9j (pointer skill stays, code to peer-link)?
-18. 18. quota_nudge.py and cswap_quota_context.sh plus their live ~/.claude/settings.json lines: keep, or remove once session-guard is verified (D4)?
+18. 18. quota_nudge.py and cswap_quota_context.sh plus their live ~/.claude/settings.json lines: **DELETE** (2026-11-10; E7 session-guard replaced the quota gate; live lines = operator C5).
 19. 19. agents/claude/settings.json.tmpl: confirm the lead trims the four DELETE hook lines, the herdr-agent-state.sh hook and the DELETE-skill entries at merge (ruling 8), and that you edit the live ~/.claude/settings.json for the four C2 hook files before the final merge.
 20. 20. Which `bg` is live: ~/ops/site-private/bin/bg or ~/ops/site-public-djbclark/bin/bg (`ls -la` both on the Mac)?
 21. 21. fleet-watch: where does it live on the Mac, and where are the LaunchAgents of the paused CFEngine and Paseo watchers (needed for the C3 gate and the AGENTS.md:64 fix)?

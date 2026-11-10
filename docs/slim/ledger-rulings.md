@@ -38,7 +38,7 @@ R2-14. Cursor: on J2's keep list (cursor-agent); stays unless the pool audit sho
 R2-15. Small-context provider: DECIDE at Wave 3 after the audit; if none survives, `web-get`, `web-digest*`, `firecrawl-router` and their tests go in Wave 3's E9 part.
 R2-16. `dialogue` and `research`: the 1-hour Claude-subagent port is attempted in E6 (`dialogue.py:751` is the seam); DELETE if it fails the hour (PLAN E6).
 R2-17. `tell-chief-of-staff`: E6/E9j (pointer stays here, code to peer-link); E1 leaves it.
-R2-18. `quota_nudge.py` and `cswap_quota_context.sh` (and their live hook lines): DECIDE after session-guard is verified on the Mac (D4); if removed, the hook lines join C2's operator edit.
+R2-18. `quota_nudge.py` and `cswap_quota_context.sh` (and their live hook lines): **DELETE** (2026-11-10). E7 replaced the Claude quota gate with Paseo's session-guard and usage-auto-resume; `quota_nudge.py` only read the deleted guard's state file and was inert without it; `cswap_quota_context.sh` was the SessionStart display companion of that same Claude-quota path. Template hook lines removed in-repo; live `~/.claude/settings.json` lines and any `~/.claude/hooks/cswap_quota_context.sh` copy are an operator edit (no agent edits live `~/.claude`).
 R2-19. Confirmed: the lead trims the template's four DELETE hook lines, the `herdr-agent-state.sh` hook and the DELETE-skill entries at merge (ruling 8); the live `~/.claude/settings.json` edit for the four C2 hook files is the operator's before the final merge.
 R2-20. `bg`: operator batch line 9.
 R2-21. `fleet-watch`: `site-djbclark/bin/fleet-watch` (seen in the clone); the paused watchers' LaunchAgents are listed by batch line 6 (`launchctl list | grep com.djbclark`).
