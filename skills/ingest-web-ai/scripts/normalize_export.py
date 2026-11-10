@@ -25,6 +25,10 @@ PRODUCERS = (
     "unknown-web",
 )
 
+# Bound the input read (32 MiB + 1 probe byte) so a huge dump fails closed
+# rather than allocating the whole file first.
+MAX_INPUT_BYTES = 32 * 1024 * 1024
+
 
 def _die(msg: str, code: int = 2) -> None:
     print(f"normalize_export: {msg}", file=sys.stderr)
@@ -38,21 +42,6 @@ def _sha256_text(text: str) -> str:
 def _stable_id(*parts: str) -> str:
     raw = "\0".join(parts)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
-
-
-def _conversation_fingerprint(messages: list[Any]) -> str:
-    """Content fingerprint so untitled/id-less conversations do not collide.
-
-    Hashes role + text for each dict turn (in order). Non-dict items contribute
-    an empty slot so index alignment stays stable across sparse lists.
-    """
-    parts: list[str] = []
-    for raw in messages:
-        if not isinstance(raw, dict):
-            parts.append("")
-            continue
-        parts.append(f"{_role(raw)}\0{_message_text(raw)}")
-    return _sha256_text("\0".join(parts))
 
 
 def _message_text(msg: dict[str, Any]) -> str:
@@ -91,6 +80,21 @@ def _role(msg: dict[str, Any]) -> str:
     if role in ("tool", "function"):
         return "tool"
     return "unknown"
+
+
+def _conversation_fingerprint(messages: list[Any]) -> str:
+    """Content fingerprint so untitled/id-less conversations do not collide.
+
+    Hashes role + text for each dict turn (in order). Non-dict items contribute
+    an empty slot so index alignment stays stable across sparse lists.
+    """
+    parts: list[str] = []
+    for raw in messages:
+        if not isinstance(raw, dict):
+            parts.append("")
+            continue
+        parts.append(f"{_role(raw)}\0{_message_text(raw)}")
+    return _sha256_text("\0".join(parts))
 
 
 def iter_conversations(doc: Any) -> Iterator[dict[str, Any]]:
@@ -202,6 +206,18 @@ def normalize_document(
     return out
 
 
+def read_bounded(path: Path, *, limit: int = MAX_INPUT_BYTES) -> bytes:
+    """Read at most ``limit + 1`` bytes; refuse when the file exceeds ``limit``."""
+    try:
+        with path.open("rb") as fh:
+            data = fh.read(limit + 1)
+    except OSError as exc:
+        _die(f"cannot read {path}: {exc.__class__.__name__}")
+    if len(data) > limit:
+        _die(f"input larger than {limit} bytes; refuse")
+    return data
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
         description="Normalize a local web-AI export JSON into S1-shaped event JSONL "
@@ -225,13 +241,7 @@ def main(argv: list[str] | None = None) -> int:
     path = Path(args.input)
     if not path.is_file():
         _die(f"input is not a file: {path}")
-    try:
-        # Bound read so a huge dump fails closed rather than OOM'ing CI.
-        data = path.read_bytes()
-    except OSError as exc:
-        _die(f"cannot read {path}: {exc.__class__.__name__}")
-    if len(data) > 32 * 1024 * 1024:
-        _die(f"input larger than 32 MiB ({len(data)} bytes); refuse")
+    data = read_bounded(path)
     try:
         doc = json.loads(data.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:

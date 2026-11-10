@@ -5,15 +5,26 @@ tests/fixtures/ingest-web-ai/ are synthetic only.
 """
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 REPO = Path(__file__).resolve().parent.parent
 SCRIPT = REPO / "skills" / "ingest-web-ai" / "scripts" / "normalize_export.py"
 FIXTURES = REPO / "tests" / "fixtures" / "ingest-web-ai"
+
+
+def _load_normalize():
+    spec = importlib.util.spec_from_file_location("normalize_export", SCRIPT)
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 
 def run(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -149,3 +160,71 @@ def test_design_doc_exists():
     assert "Carried queue item **#23**" in text
     assert "Trust boundary" in text or "## D. Trust boundary" in text
     assert "No production capture" in text or "no production" in text.lower()
+
+
+def test_multi_conversation_fallback_ids_unique():
+    """Codex P2: missing id/title/ts must still yield distinct conversation_ids."""
+    mod = _load_normalize()
+    doc = [
+        {
+            "messages": [
+                {"role": "user", "text": "hello-a"},
+                {"role": "assistant", "text": "reply-a"},
+            ]
+        },
+        {
+            "messages": [
+                {"role": "user", "text": "hello-b"},
+                {"role": "assistant", "text": "reply-b"},
+            ]
+        },
+        {
+            # Identical text to the first conversation: ordinal still distinguishes.
+            "messages": [
+                {"role": "user", "text": "hello-a"},
+                {"role": "assistant", "text": "reply-a"},
+            ]
+        },
+    ]
+    events = mod.normalize_document(
+        doc, producer="unknown-web", source_path="/tmp/synthetic-export.json"
+    )
+    assert len(events) == 6
+    conv_ids = {ev["conversation_id"] for ev in events}
+    assert len(conv_ids) == 3
+    msg_ids = {ev["message_id"] for ev in events}
+    assert len(msg_ids) == 6
+    # Locators must be unique for a deduplicating sink.
+    locators = {(ev["producer"], ev["conversation_id"], ev["message_id"]) for ev in events}
+    assert len(locators) == 6
+
+
+def test_read_bounded_refuses_oversize(tmp_path: Path):
+    """Codex P2: bound the read before allocating the whole file."""
+    mod = _load_normalize()
+    path = tmp_path / "big.bin"
+    # Write limit+1 without needing a full 32 MiB fixture.
+    limit = 64
+    path.write_bytes(b"x" * (limit + 1))
+    with pytest.raises(SystemExit) as ei:
+        mod.read_bounded(path, limit=limit)
+    assert ei.value.code == 2
+
+    path.write_bytes(b'{"ok":true}')
+    data = mod.read_bounded(path, limit=limit)
+    assert data.startswith(b"{")
+
+
+def test_cli_oversized_input_exits_2(tmp_path: Path):
+    # Keep CLI coverage light: build a file just over 32 MiB via sparse write when possible.
+    path = tmp_path / "huge.json"
+    size = 32 * 1024 * 1024 + 1
+    with path.open("wb") as fh:
+        fh.truncate(size)
+        fh.seek(0)
+        fh.write(b"[")
+        fh.seek(size - 1)
+        fh.write(b"]")
+    cp = run("--input", str(path), check=False)
+    assert cp.returncode == 2
+    assert "larger than" in cp.stderr
