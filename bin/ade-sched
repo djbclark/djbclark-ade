@@ -9,7 +9,7 @@ usage:
   ade-sched [options] status [LABEL...]     installed / active / next run; no LABEL: every job ade-sched generated
   ade-sched [options] list                  print install.jobs / install.retired_jobs from the install catalog
   ade-sched [options] diff                  compare the catalog to live launchd/systemd/cron/paseo (report only)
-  ade-sched [options] reconcile             ADE-owned systemd/cron/paseo reconcile + ownership ledger (S4b; default dry-run)
+  ade-sched [options] reconcile             ADE-owned launchd/systemd/cron/paseo reconcile + ownership ledger (S4b; default dry-run)
 
 options (before or after the subcommand):
   --backend auto|launchd|systemd|cron   default auto (env ADE_SCHED_BACKEND; `none` there turns scheduling off, exit 69)
@@ -19,7 +19,7 @@ options (before or after the subcommand):
   --set KEY=VALUE       fill a placeholder, literally as written in the plist (__STATE__=..., @TARGET@=...); repeatable
   --dry-run             install/uninstall: print the artifacts and commands, change nothing;
                         reconcile: plan only (default for reconcile when --yes is absent)
-  --yes                 reconcile: execute ADE-scoped systemd/cron installs/removes and paseo schedule create/delete; write jobs.json
+  --yes                 reconcile: execute ADE-scoped launchd/systemd/cron installs/removes and paseo schedule create/delete; write jobs.json
   --name NAME           reconcile: limit to these logical job names (repeatable)
   --no-activate         install/uninstall/reconcile: write or remove the files, print the activation commands instead of running them
   --allow-no-linger     systemd install/reconcile: proceed when loginctl says Linger=no (default: exit 69 before writing, because
@@ -36,10 +36,11 @@ cron, ~/.local/bin:/usr/local/bin:/usr/bin:/bin go first in PATH (plist PATHs ar
 
 list/diff/reconcile read config/install.toml [install.jobs] / [install.retired_jobs] (S4b) and load the install catalog
 only then (so backend/install/status stay usable on Python 3.10 without tomllib). diff never unloads any job,
-including foreign owners (Orca/BB/herdr and unknown labels are reported only). reconcile's first write path is
-systemd user units only: it installs/reloads ADE-owned ade-sched jobs, removes only labels recorded in the
-ownership ledger (~/.local/state/djbclark-ade/jobs.json or ADE_JOBS_STATE_DIR), and never unloads foreign/unknown
-owners or root/--system units. A Paseo probe timeout/launch error or a failed host-backend scan is reported as
+including foreign owners (Orca/BB/herdr and unknown labels are reported only). reconcile writes ADE-owned
+ade-sched jobs on launchd, systemd user units, and user crontab (RECONCILE_WRITE_BACKENDS), creates/deletes
+ADE-owned paseo schedules (ledger backend=paseo), removes only labels recorded in the ownership ledger
+(~/.local/state/djbclark-ade/jobs.json or ADE_JOBS_STATE_DIR), and never unloads foreign/unknown owners or
+root/--system units. A Paseo probe timeout/launch error or a failed host-backend scan is reported as
 unknown, never as an empty job list.
 
 Overrides (env): ADE_SCHED_LAUNCHCTL, ADE_SCHED_SYSTEMCTL, ADE_SCHED_LOGINCTL, ADE_SCHED_CRONTAB (binaries);
@@ -49,7 +50,7 @@ ${XDG_STATE_HOME:-~/.local/state}/ade/ade-sched.lock); ADE_JOBS_STATE_DIR (owner
 ~/.local/state/djbclark-ade).
 
 exit: 0 ok; 1 an activation command failed (its stderr is quoted) or diff found ADE drift or reconcile had a
-blocked/failed step; 2 bad job or usage (also: reconcile --yes on a non-systemd backend); 3 status:
+blocked/failed step; 2 bad job or usage (also: reconcile --yes on a non-write host backend with no paseo work); 3 status:
 a LABEL is not installed; 69 no usable scheduler (none forced, none found, systemd user manager unreachable, Linger=no
 on a systemd install without --allow-no-linger, KeepAlive or a StartInterval under 60 s on cron). A `crontab -l`
 failure other than "no crontab" is exit 1 and the crontab is left untouched.

@@ -69,10 +69,10 @@ EX_ACTIVATE, EX_USAGE, EX_NOT_INSTALLED, EX_UNAVAILABLE = 1, 2, 3, 69
 OWNER_ADE = "djbclark-ade"
 JOBS_LEDGER_SCHEMA_VERSION = 1
 JOBS_LEDGER_NAME = "jobs.json"
-# Host write backends for ade-sched jobs (CI-testable). Paseo is a job kind, not a host
-# backend: reconcile plans/executes paseo schedule create/delete with ledger backend="paseo"
-# without adding "paseo" here. Launchd host writes remain later.
-RECONCILE_WRITE_BACKENDS = frozenset({"systemd", "cron"})
+# Host write backends for ade-sched jobs (CI-testable with fakes). Paseo is a job kind, not a
+# host backend: reconcile plans/executes paseo schedule create/delete with ledger
+# backend="paseo" without adding "paseo" here.
+RECONCILE_WRITE_BACKENDS = frozenset({"systemd", "cron", "launchd"})
 RECONCILE_WRITE_BACKEND = "systemd"  # legacy JSON/single-name field; prefer RECONCILE_WRITE_BACKENDS
 # Labels matching these prefixes are considered in-scope for foreign drift reports.
 FOREIGN_PREFIXES = ("com.djbclark.", "acpdispatch.")
@@ -2283,10 +2283,10 @@ def reconcile(
 
     Default is dry-run (plan only). ``dry_run=False`` executes installs/removes for
     ADE ledger scope only. Never unloads foreign/unknown owners. Never touches root
-    / ``--system`` units. Host write backends: systemd user timers and user crontab
-    (``RECONCILE_WRITE_BACKENDS``). Paseo schedule create/delete is orthogonal (ledger
-    ``backend="paseo"``) and does not require a host write backend. Launchd host
-    writes remain later.
+    / ``--system`` units. Host write backends: systemd user timers, user crontab, and
+    launchd LaunchAgents (``RECONCILE_WRITE_BACKENDS``). Paseo schedule create/delete
+    is orthogonal (ledger ``backend="paseo"``) and does not require a host write
+    backend.
 
     Exit 0 when the plan is clean (dry-run) or every touch succeeded; 1 on a failed
     mutation or blocked step; 2 when ``--yes`` refuses host writes on a non-write
