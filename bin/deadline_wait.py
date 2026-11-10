@@ -1,7 +1,8 @@
 """deadline_wait: how a long WAITER registers its own deadline (docs/deadline.md, "Waiters register themselves").
 
-Used by `bin/load-watch admit --wait` (the PR waiter that also used it was removed 2026-11-06, slim-down E8);
-`bin/acp-dispatch-wait` does the same in bash. A waiter holds no work (it only
+Used by `bin/load-watch admit --wait` (the PR waiter that also used it was removed 2026-11-06, slim-down E8;
+`bin/acp-dispatch-wait` is DELETE with the acp-dispatch shim in the Wave 6 follow-up — not a live caller).
+A waiter holds no work (it only
 polls), so the action on expiry is `kill` of its own process group: nothing is lost, and the caller just sees exit 124.
 
 Shape. `deadline start --pid` refuses the registrar's own parent (a top-level session must never register itself for a kill), so a process cannot
