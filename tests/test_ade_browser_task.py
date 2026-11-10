@@ -71,7 +71,12 @@ def test_repo_templates_list_and_render_clean():
     ids = {t["id"] for t in payload["tasks"]}
     assert {"github-app-create", "pr-access", "issue-access"} <= ids
 
-    proc_r = _run("render", "issue-access", "--json", root=REPO)
+    # Master tip has no config/github.toml (that lives with S8 github-setup); pass flags.
+    proc_r = _run(
+        "render", "issue-access", "--json",
+        "--owner", "djbclark", "--repo", "djbclark-ade",
+        root=REPO,
+    )
     assert proc_r.returncode == 0, proc_r.stderr
     rendered = json.loads(proc_r.stdout)
     assert rendered["ok"] is True
