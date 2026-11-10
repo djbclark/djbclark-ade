@@ -122,7 +122,7 @@ an archived TUI or infer that a manual Pi smoke test authorizes automatic routin
 Agent-tool sub-agents run with `model: "sonnet"`; Claude code slices use Sonnet.
 D5. **Quota fit uses `[dispatch.estimate_floor]` (and repo overrides for tendcf / nix2cf).** `route_agent.py plan` /
 `pool_fits` refuse a slice that does not fit the **current** remaining reading. They do **not** yet subtract sibling
-in-flight reservations across a parallel wave (that was `acp-dispatch`'s `write_and_recheck` / `inflight_recheck`).
+in-flight reservations across a parallel wave (that was the retired Wave 6 dispatch shim's write-and-recheck path).
 Until a native reservation lands: re-run `plan` immediately before each `paseo run`, and do not launch more same-pool
 slices from one plan snapshot than the floor estimate fits in remaining.
 D6. **Calibrate and monthly re-rank (2026-11-10):** `bin/route_agent.py calibrate [--json] [--since 30]` proposes
