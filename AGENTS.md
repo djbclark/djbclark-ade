@@ -41,6 +41,7 @@ Each doc carries its own summary.
 | [docs/deadline.md](docs/deadline.md) | `bin/deadline`: a maximum run time registered before a long command or wait, enforced from outside |
 | [docs/ade-verifycmd.md](docs/ade-verifycmd.md) | ADE-native verify-until-pass (verifyCmd) design (2026-11-10): register argv, exit semantics, deadline/handoff; #425 rejected goal-mode |
 | [docs/checkpoint.md](docs/checkpoint.md) | checkpoint and interruption recovery (2026-11-04, planned) |
+| [docs/paseo-host-ram-plugins.md](docs/paseo-host-ram-plugins.md) | macOS host RAM: `zedobaia/resources` not vitals; app update ≠ `paseo plugin update` (2026-11-10) |
 | [docs/ingest-web-ai.md](docs/ingest-web-ai.md) | Carried #23 design/spike (2026-11-10): Gemini/Grok web chats → ADE memory (sources, S1 sink, trust, gates); offline stub only |
 | [docs/context-hygiene.md](docs/context-hygiene.md) | `bin/context-watch` and `bin/context-budget-check`: how full a session is, and what a fresh one costs |
 | [docs/secret-deny.md](docs/secret-deny.md), [docs/claude-denyread-trial.md](docs/claude-denyread-trial.md), [docs/pr-policy.md](docs/pr-policy.md) | the secret-read deny list and its renderer; Claude `sandbox.filesystem.denyRead` operator trial (no live `~/.claude` apply); who may open PRs on djbclark's repositories |
