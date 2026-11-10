@@ -1,12 +1,13 @@
 # Wave 6 follow-up — shim and `acp-run` deletion readiness
 
-Snapshot: 2026-11-10 (status: C3 `--dry-run` FIXTURE path ready via #441;
-Mac live cycle still blocked; soft delete ~2026-11-20). Queue Carried
-**item 33**. The slim-down's Wave 6 **shipped the shims** (`docs/slim/PLAN.md`
-F). This doc is the **deletion readiness** checklist for the follow-up PR that
-removes `skills/session-finder/relay.py`, `bin/acp-dispatch`, and
-`tools/acp-run` after one Mac live cycle — **do not delete them in this
-readiness PR**. Soft deadline **2026-11-20**
+Snapshot: 2026-11-10 (status: C3 `--dry-run` FIXTURE path tightened —
+Mac+C3 FIXTURE labels + Linux-safe `cmd:`/`verified:` shape; Mac live cycle
+still blocked; soft delete ~2026-11-20). Queue Carried **item 33**. The
+slim-down's Wave 6 **shipped the shims** (`docs/slim/PLAN.md` F). This doc is
+the **deletion readiness** checklist for the follow-up PR that removes
+`skills/session-finder/relay.py`, `bin/acp-dispatch`, and `tools/acp-run`
+after one Mac live cycle — **do not delete them in this readiness PR**. Soft
+deadline **2026-11-20**
 (`tests/test_relay_shim.py::test_the_shim_is_removed_by_2026_11_20`).
 `bin/review-launch` and its boundary tests stay (E8 / review rule 11).
 
@@ -14,12 +15,15 @@ Gate tool: `bin/wave6-delete-check` (exit 0 only when every gate below is
 green; prints named reasons otherwise). **CI / local shape regression (not
 deletion-ready):** `bin/wave6-delete-check --dry-run` points at
 `tests/fixtures/wave6-mac-proofs/evidence.FIXTURE.json`, checks FAILCLOSED
-non-empty proof files + FIXTURE labels only, skips callers/soft_deadline, and
-keeps `ready: false` even when exit 0. Mac capture harness:
-`bin/wave6-mac-proof-capture --live --out DIR` (Darwin only; refuses to invent
-Mac stdout elsewhere). Run `--evidence` on **live** captures before opening
-the deletion PR. New code already calls Paseo directly (`paseo send`,
-`paseo run`).
+non-empty Mac **and** C3 FIXTURE labels + Linux-safe `cmd:`/`verified:`
+(or `waive:`) shape, skips callers/soft_deadline, keeps
+`mac_live_blocked: true` / `ready: false` even when exit 0, and
+`--evidence` on a FIXTURE or `--linux-safe` bundle fails closed
+(`mac_not_live`). Mac capture harness: `bin/wave6-mac-proof-capture --live
+--out DIR` (Darwin only) or `--linux-safe --out DIR` (pgrep + optional
+paseo; launchctl SKIPPED; labeled `LINUX-SAFE — NOT Mac live-cycle`). Run
+`--evidence` on **Darwin `--live`** captures before opening the deletion PR.
+New code already calls Paseo directly (`paseo send`, `paseo run`).
 
 ## Status (2026-11-10) — current open work
 
@@ -29,24 +33,26 @@ shims.** Soft deadline for relay / dispatch / `acp-run` removal:
 
 | Gate | State | Where / why |
 |---|---|---|
-| C3 dry-run FIXTURE path | **ready** | [#441](https://github.com/djbclark/djbclark-ade/pull/441): `bin/wave6-delete-check --dry-run` + labeled `tests/fixtures/wave6-mac-proofs/`; exit 0 proves shape only (`ready` stays `false`) |
-| Mac live cycle | **blocked** | No Darwin host on this cloud/CI path; harness refuses invented Mac stdout. Needs an operator Mac run of `bin/wave6-mac-proof-capture --live` (§B / §B0) |
+| C3 dry-run FIXTURE path | **ready (tightened)** | [#441](https://github.com/djbclark/djbclark-ade/pull/441) + [#453](https://github.com/djbclark/djbclark-ade/pull/453) stack: `--dry-run` FAILCLOSEs Mac **and** C3 FIXTURE labels + Linux-safe probe shape (`ready` stays `false`; `mac_live_blocked: true`) |
+| Linux-safe Mac partial probes | **ready** | `bin/wave6-mac-proof-capture --linux-safe` (pgrep + optional paseo; launchctl SKIPPED). `wave6-delete-check` reports `mac_not_live` if used as `--evidence` |
+| Mac live cycle | **blocked** | No Darwin host on this cloud/CI path; `--live` refuses non-Darwin; FIXTURE / LINUX-SAFE never count. Needs an operator Mac run of `bin/wave6-mac-proof-capture --live` (§B / §B0) |
 | In-repo callers (§A) | **open** | Wave 6 rewrite PRs still in flight; full `wave6-delete-check` (no `--dry-run`) still fails `callers_*` until they land and merge |
-| C3 outside migrations (§C) | **open / operator** | Order 11: probes on outside checkouts + migrate/waive proof files; not inventable from CI |
+| C3 outside migrations (§C) | **open / operator** | Order 11: probes on outside checkouts + migrate/waive proof files; FIXTURE `cmd:` rows document the Linux-safe `rg` shape only — not inventable from CI |
 | Soft delete deadline | **~2026-11-20** | `test_the_shim_is_removed_by_2026_11_20`; deletion PR waits on green evidence |
 
 ### What the operator must supply
 
-1. **Mac live-cycle proofs** (Darwin only): `bin/wave6-mac-proof-capture --live --out DIR --json`, then merge printed `mac_proofs` into a real `evidence.json` (not the FIXTURE bundle) and paste B1–B3 stdout into the deletion PR.
-2. **C3 row evidence** for each outside path in §C: either a migrated probe paste in `c3_proofs.<key>`, or a one-line waive in `docs/slim/log.md` copied into that proof file.
-3. **Land the readiness stack** before the deletion PR: #398 (checklist + gate) → #417 (FAILCLOSED proof files) → #441 (Mac harness + FIXTURE `--dry-run`) → this status update; merge remaining §A caller-rewrite PRs until `callers_skills` / `callers_loose` are green.
-4. **Deletion PR last**: `bin/wave6-delete-check --evidence <json>` must exit 0 (**never** treat `--dry-run` as deletion-ready); keep `bin/review-launch`.
+1. **Mac live-cycle proofs** (Darwin only): `bin/wave6-mac-proof-capture --live --out DIR --json`, then merge printed `mac_proofs` into a real `evidence.json` (not the FIXTURE / LINUX-SAFE bundle) and paste B1–B3 stdout into the deletion PR.
+2. **C3 row evidence** for each outside path in §C: either a migrated probe paste in `c3_proofs.<key>`, or a one-line waive in `docs/slim/log.md` copied into that proof file (FIXTURE `cmd:` lines are the Linux-safe shape stand-in only).
+3. **Land the readiness stack** before the deletion PR: #398 (checklist + gate) → #417 (FAILCLOSED proof files) → #441 (Mac harness + FIXTURE `--dry-run`) → #453 (C3 status) → this FIXTURE tighten; merge remaining §A caller-rewrite PRs until `callers_skills` / `callers_loose` are green.
+4. **Deletion PR last**: `bin/wave6-delete-check --evidence <json>` must exit 0 (**never** treat `--dry-run`, FIXTURE, or `--linux-safe` as deletion-ready); keep `bin/review-launch`.
 
 ### Readiness stack (open, do not merge as delete)
 
 - [#398](https://github.com/djbclark/djbclark-ade/pull/398) — delete-readiness checklist + `bin/wave6-delete-check`
 - [#417](https://github.com/djbclark/djbclark-ade/pull/417) — C3/Mac proof-file FAILCLOSED evidence
-- [#441](https://github.com/djbclark/djbclark-ade/pull/441) — Mac harness + FIXTURE `--dry-run` path (base of this status doc)
+- [#441](https://github.com/djbclark/djbclark-ade/pull/441) — Mac harness + FIXTURE `--dry-run` path
+- [#453](https://github.com/djbclark/djbclark-ade/pull/453) — C3 status (FIXTURE ready, Mac blocked)
 
 ## A. Remaining in-repo callers (must be gone or archived before delete)
 
@@ -193,33 +199,48 @@ invented live Mac proofs.
 
 Without a Mac live cycle yet, CI uses a **labeled fixture** bundle at
 [`tests/fixtures/wave6-mac-proofs/`](../../tests/fixtures/wave6-mac-proofs/)
-(`evidence.FIXTURE.json` + `*.FIXTURE.txt` proofs). Every file starts with
-`FIXTURE — NOT live Mac stdout` (or the C3 fixture equivalent). Tests under
-`tests/test_wave6_mac_proof_fixtures.py` prove FAILCLOSED non-empty shape and
-that the harness refuses to invent live stdout on non-Darwin.
+(`evidence.FIXTURE.json` + `*.FIXTURE.txt` proofs). Mac proofs start with
+`FIXTURE — NOT live Mac stdout`; C3 proofs start with
+`FIXTURE — NOT live outside-repo probe` and carry the Linux-safe `cmd:`
+(or `waive:`) + `verified:` shape from §C. Tests under
+`tests/test_wave6_mac_proof_fixtures.py` prove FAILCLOSED non-empty shape,
+C3 label/shape, that `--evidence` on the FIXTURE bundle reports
+`mac_not_live`, and that the harness refuses to invent live stdout on
+non-Darwin.
 
 **Regression CLI (FIXTURE only):**
 
 ```bash
 bin/wave6-delete-check --dry-run --json
-# exit 0 + fixture_shape_ok: true  → labeled FIXTURE proofs are non-empty
+# exit 0 + fixture_shape_ok: true + mac_live_blocked: true
+#   → labeled Mac+C3 FIXTURE proofs have FAILCLOSED shape
 # ready is always false in --dry-run (never treat as deletion green)
 # exit 2 if combined with --evidence / --allow-early
 ```
 
 `--dry-run` FAILCLOSEs (`fixture_invalid:…`) when the bundle is missing, the
-`recorded` field is not `FIXTURE-not-live-Mac`, the note omits FIXTURE/NOT, or
-a `mac_proofs` file drops the FIXTURE first-line label — so inventing “live”
-stdout under the fixture path cannot green the shape check.
+`recorded` field is not `FIXTURE-not-live-Mac`, the note omits FIXTURE/NOT, a
+`mac_proofs` / `c3_proofs` file drops its FIXTURE first-line label, or a
+proof drops the Linux-safe `cmd:`/`verified:` (or `waive:`) shape — so
+inventing “live” stdout under the fixture path cannot green the shape check.
 
-**These fixtures are not deletion evidence.** After the Mac live cycle:
+**Linux-safe partial Mac probes (still not Mac live):**
+
+```bash
+bin/wave6-mac-proof-capture --linux-safe --out ./wave6-linux-safe --json
+# writes *.LINUX-SAFE.txt (pgrep + optional paseo; launchctl SKIPPED)
+# wave6-delete-check --evidence … → mac_not_live (Mac live still blocked)
+```
+
+**These fixtures / linux-safe captures are not deletion evidence.** After the
+Mac live cycle:
 
 1. `bin/wave6-mac-proof-capture --live --out ./wave6-evidence --json`
    (Darwin + `--live` only; non-Darwin refuses — see harness docstring).
 2. Merge the printed `mac_proofs` map into the real `evidence.json` (keep C3
    outside probes / waives from §C).
 3. `bin/wave6-delete-check --evidence ./wave6-evidence/evidence.json` (exit 0).
-   Do **not** use `--dry-run` here.
+   Do **not** use `--dry-run`, the FIXTURE bundle, or `--linux-safe` output here.
 4. Paste live stdout into the deletion PR. Keep the FIXTURE bundle only as a
    shape regression, still labeled FIXTURE — never rename a fixture to look
    like a live capture.

@@ -22,12 +22,29 @@ DELETE_CHECK = ROOT / "bin" / "wave6-delete-check"
 FIXTURE_DIR = ROOT / "tests" / "fixtures" / "wave6-mac-proofs"
 FIXTURE_EVIDENCE = FIXTURE_DIR / "evidence.FIXTURE.json"
 FIXTURE_LABEL = "FIXTURE — NOT live Mac stdout"
+C3_FIXTURE_LABEL = "FIXTURE — NOT live outside-repo probe"
+LINUX_SAFE_LABEL = "LINUX-SAFE — NOT Mac live-cycle"
 
 MAC_FIXTURE_PROOFS = (
     "proofs/mac-b1-relay.FIXTURE.txt",
     "proofs/mac-b1-acp-run.FIXTURE.txt",
     "proofs/mac-b2-acp-dispatch.FIXTURE.txt",
     "proofs/mac-b3-paseo-smoke.FIXTURE.txt",
+)
+
+C3_KEYS = (
+    "tendcf",
+    "nix2cf",
+    "cfengine",
+    "paseo_upstream",
+    "plektra",
+    "paseo4herdr",
+    "pi",
+    "sudo_secretspec",
+    "aiuse",
+    "paseo_runner",
+    "site_public_home_agents",
+    "aiuse_config_opencode_go",
 )
 
 CALLER_SKILLS = (
@@ -102,14 +119,29 @@ def test_fixture_bundle_mac_proofs_are_labeled_not_live() -> None:
         text = path.read_text(encoding="utf-8")
         assert text.startswith(FIXTURE_LABEL), rel
         assert "kind: fixture" in text
+        assert "cmd:" in text and "verified:" in text, rel
         assert path.stat().st_size > 0
         assert "mac-" in path.name and "FIXTURE" in path.name
 
 
-def test_fixture_evidence_passes_delete_check_shape_on_clean_tree(tmp_path: Path) -> None:
-    """Fixture mac_proofs satisfy FAILCLOSED non-empty shape; not a live Mac claim."""
+def test_fixture_bundle_c3_proofs_are_labeled_with_linux_safe_cmd_shape() -> None:
+    """C3 FIXTURE proofs carry Linux-safe rg cmd/waive shape (not invented outside paste)."""
+    data = json.loads(FIXTURE_EVIDENCE.read_text(encoding="utf-8"))
+    for key in C3_KEYS:
+        rel = data["c3_proofs"][key]
+        path = FIXTURE_DIR / rel
+        assert path.is_file(), rel
+        text = path.read_text(encoding="utf-8")
+        assert text.startswith(C3_FIXTURE_LABEL), rel
+        assert f"c3_key: {key}" in text, rel
+        assert "cmd:" in text or "waive:" in text, rel
+        assert "verified:" in text, rel
+        assert path.stat().st_size > 0
+
+
+def test_fixture_evidence_refused_as_deletion_mac_live(tmp_path: Path) -> None:
+    """FIXTURE bundle must never green --evidence (Mac live stays blocked)."""
     tree = _write_clean_tree(tmp_path)
-    # Copy fixture bundle so paths resolve beside evidence.FIXTURE.json.
     dest = tmp_path / "fixture-bundle"
     dest.mkdir()
     import shutil
@@ -120,6 +152,62 @@ def test_fixture_evidence_passes_delete_check_shape_on_clean_tree(tmp_path: Path
         "--json",
         "--evidence",
         str(dest / "evidence.FIXTURE.json"),
+        "--allow-early",
+        root=tree,
+    )
+    assert r.returncode == 1, r.stdout + r.stderr
+    out = json.loads(r.stdout)
+    assert out["ready"] is False
+    joined = "\n".join(out["reasons"])
+    assert "mac_not_live:" in joined
+
+
+def test_live_labeled_evidence_still_greens_on_clean_tree(tmp_path: Path) -> None:
+    """Non-FIXTURE proof files still satisfy FAILCLOSED shape for --evidence."""
+    tree = _write_clean_tree(tmp_path)
+    bundle = tmp_path / "live-shaped"
+    proofs = bundle / "proofs"
+    proofs.mkdir(parents=True)
+    c3_proofs: dict[str, str] = {}
+    for key in C3_KEYS:
+        rel = f"proofs/c3-{key}.txt"
+        (bundle / rel).write_text(
+            f"c3_key: {key}\ncmd: rg …\nverified: no live shim names\n",
+            encoding="utf-8",
+        )
+        c3_proofs[key] = rel
+    mac_proofs: dict[str, str] = {}
+    for flag, name in (
+        ("relay_idle", "mac-b1-relay.txt"),
+        ("acp_run_idle", "mac-b1-acp-run.txt"),
+        ("acp_dispatch_idle", "mac-b2-acp-dispatch.txt"),
+        ("paseo_smoke_ok", "mac-b3-paseo-smoke.txt"),
+    ):
+        rel = f"proofs/{name}"
+        (bundle / rel).write_text(
+            f"source: wave6-mac-proof-capture --live\nflag: {flag}\n"
+            "cmd: pgrep\nverified: no match\n",
+            encoding="utf-8",
+        )
+        mac_proofs[flag] = rel
+    ev = bundle / "evidence.json"
+    ev.write_text(
+        json.dumps(
+            {
+                "recorded": "2026-11-10-live-Mac",
+                "note": "synthetic live-shaped proofs for gate unit test",
+                "c3": {k: "migrated" for k in C3_KEYS},
+                "c3_proofs": c3_proofs,
+                "mac": {f: True for f in mac_proofs},
+                "mac_proofs": mac_proofs,
+            }
+        ),
+        encoding="utf-8",
+    )
+    r = _run_delete_check(
+        "--json",
+        "--evidence",
+        str(ev),
         "--allow-early",
         root=tree,
     )
@@ -137,6 +225,7 @@ def test_dry_run_uses_fixture_bundle_and_never_claims_ready() -> None:
     assert out["dry_run"] is True
     assert out["mode"] == "dry-run-fixture"
     assert out["fixture_shape_ok"] is True
+    assert out["mac_live_blocked"] is True
     assert out["ready"] is False
     assert any("NOT deletion-ready" in x for x in out["reasons"])
     assert out["evidence"] and "evidence.FIXTURE.json" in out["evidence"]
@@ -177,8 +266,32 @@ def test_dry_run_failcloses_when_fixture_unlabeled(tmp_path: Path) -> None:
     assert "fixture_invalid:" in joined
     assert "FIXTURE-not-live-Mac" in joined or "FIXTURE" in joined
 
-def test_fixture_harness_refuses_out_without_live() -> None:
-    """Harness must not write invented Mac stdout when --live is absent."""
+
+def test_dry_run_failcloses_when_c3_fixture_unlabeled(tmp_path: Path) -> None:
+    """C3 FIXTURE proofs without the outside-probe label must not green --dry-run."""
+    import shutil
+
+    dest_root = tmp_path / "repo"
+    bundle = dest_root / "tests/fixtures/wave6-mac-proofs"
+    shutil.copytree(FIXTURE_DIR, bundle)
+    ev = bundle / "evidence.FIXTURE.json"
+    data = json.loads(ev.read_text(encoding="utf-8"))
+    c3 = bundle / data["c3_proofs"]["tendcf"]
+    c3.write_text(
+        "c3_key: tendcf\ncmd: rg …\nverified: pretend live outside paste\n",
+        encoding="utf-8",
+    )
+    r = _run_delete_check("--json", "--dry-run", root=dest_root)
+    assert r.returncode == 1, r.stdout + r.stderr
+    out = json.loads(r.stdout)
+    assert out["fixture_shape_ok"] is False
+    joined = "\n".join(out["reasons"])
+    assert "fixture_invalid:" in joined
+    assert "c3-tendcf" in joined or "outside-repo" in joined
+
+
+def test_fixture_harness_refuses_out_without_live_or_linux_safe() -> None:
+    """Harness must not write invented Mac stdout when --live/--linux-safe absent."""
     r = _run_capture("--out", "/tmp/wave6-mac-proof-should-not-write")
     assert r.returncode == 2
     assert "refusing to invent" in r.stderr or "requires --live" in r.stderr
@@ -201,6 +314,7 @@ def test_fixture_harness_default_mentions_fixture_replacement() -> None:
     joined = r.stderr + r.stdout
     assert "tests/fixtures/wave6-mac-proofs" in joined
     assert "--live" in joined
+    assert "--linux-safe" in joined
     assert "wave6-follow-up.md" in joined or "FIXTURE" in joined
 
 
@@ -328,11 +442,113 @@ def test_fixture_harness_marks_pgrep_probe_failure_not_idle(tmp_path: Path) -> N
     assert "verified: no match" not in relay
 
 
+def test_linux_safe_harness_writes_labeled_proofs_and_skips_launchctl(
+    tmp_path: Path,
+) -> None:
+    """--linux-safe runs pgrep on Linux; launchctl SKIPPED; never claims Mac live."""
+    import shutil
+
+    mod = _load_capture_mod()
+
+    def run_path(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        name = Path(argv[0]).name
+        if name == "pgrep":
+            return subprocess.CompletedProcess(argv, 1, "", "")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    out = tmp_path / "evidence"
+    with _with_stub_path(tmp_path, ("pgrep",)):
+        # No launchctl / paseo on PATH — linux-safe must still succeed for pgrep.
+        assert shutil.which("launchctl") is None or True
+        rel, ok = mod.write_linux_safe_proofs(
+            out, run=run_path, home=tmp_path / "home"
+        )
+
+    assert ok is True
+    assert set(rel) == {
+        "relay_idle",
+        "acp_run_idle",
+        "acp_dispatch_idle",
+        "paseo_smoke_ok",
+    }
+    for flag, rel_path in rel.items():
+        text = (out / rel_path).read_text(encoding="utf-8")
+        assert text.startswith(LINUX_SAFE_LABEL), flag
+        assert "mac_live_blocked: true" in text
+        assert "verified:" in text
+        assert "FIXTURE — NOT live Mac stdout" not in text
+        assert ".LINUX-SAFE.txt" in rel_path
+
+    acp_run = (out / rel["acp_run_idle"]).read_text(encoding="utf-8")
+    assert "verified: SKIPPED launchctl" in acp_run
+    assert "verified: no match launchctl" not in acp_run
+    dispatch = (out / rel["acp_dispatch_idle"]).read_text(encoding="utf-8")
+    assert "verified: SKIPPED launchctl" in dispatch
+    assert "cmd: pgrep -lf 'acp-dispatch'" in dispatch
+
+
+def test_linux_safe_cli_on_linux_writes_and_blocks_mac_evidence(
+    tmp_path: Path,
+) -> None:
+    """CLI --linux-safe works off Darwin; delete-check refuses those proofs as Mac live."""
+    if sys.platform == "darwin":
+        pytest.skip("exercise linux-safe refusal path on non-Darwin CI")
+    out = tmp_path / "out"
+    r = _run_capture("--linux-safe", "--out", str(out), "--json")
+    assert r.returncode == 0, r.stderr
+    payload = json.loads(r.stdout)
+    assert payload["mode"] == "linux-safe"
+    assert payload["mac_live_blocked"] is True
+    assert payload["probes_ok"] is True
+
+    tree = _write_clean_tree(tmp_path / "tree")
+    # Build evidence pointing at LINUX-SAFE mac proofs + minimal C3 proofs.
+    proofs = out / "proofs"
+    c3_proofs: dict[str, str] = {}
+    for key in C3_KEYS:
+        rel = f"proofs/c3-{key}.txt"
+        (out / rel).write_text(
+            f"c3_key: {key}\ncmd: rg\nverified: unit\n", encoding="utf-8"
+        )
+        c3_proofs[key] = rel
+    ev = out / "evidence.json"
+    ev.write_text(
+        json.dumps(
+            {
+                "recorded": "2026-11-10-linux-safe",
+                "note": "linux-safe partial probes only",
+                "c3": {k: "migrated" for k in C3_KEYS},
+                "c3_proofs": c3_proofs,
+                "mac": {f: True for f in payload["mac_proofs"]},
+                "mac_proofs": payload["mac_proofs"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    check = _run_delete_check(
+        "--json", "--evidence", str(ev), "--allow-early", root=tree
+    )
+    assert check.returncode == 1, check.stdout
+    out_j = json.loads(check.stdout)
+    assert out_j["ready"] is False
+    assert any("mac_not_live:" in x for x in out_j["reasons"])
+
+
+def test_linux_safe_mutually_exclusive_with_live(tmp_path: Path) -> None:
+    r = _run_capture(
+        "--live", "--linux-safe", "--out", str(tmp_path / "x")
+    )
+    assert r.returncode == 2
+    assert "mutually exclusive" in r.stderr
+
+
 def test_fixture_follow_up_doc_explains_live_replaces_fixtures() -> None:
     doc = (ROOT / "docs/slim/wave6-follow-up.md").read_text(encoding="utf-8")
     assert "tests/fixtures/wave6-mac-proofs" in doc
     assert "wave6-mac-proof-capture" in doc
     assert "FIXTURE" in doc
     assert "replace" in doc.lower()
+    assert "--linux-safe" in doc or "linux-safe" in doc
+    assert "mac_not_live" in doc or "Mac live" in doc
     # Must not claim fixtures are live Mac captures.
     assert "NOT live Mac" in doc or "not live Mac" in doc
