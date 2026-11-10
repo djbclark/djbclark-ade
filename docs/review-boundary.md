@@ -105,12 +105,13 @@ gh pr checks N --watch --required                 # wait for Tests and the marke
 gh pr merge N --squash --match-head-commit <the head the marker names>
 ```
 
-## Operator merge order (`bin/ade-merge-ready`, 2026-11-09; `approve-paste` 2026-11-10)
+## Operator merge order (`bin/ade-merge-ready`, 2026-11-09; `approve-paste` 2026-11-10; `approve-post` 2026-11-10)
 
 When many stacked ADE PRs wait on the merge gate (0 adversary SUCCESS), use the
-read-only helper — it never posts, merges, or invents an APPROVE. Open-PR listing
-uses `--limit 500` (fail closed if that cap is hit) so stack bottoms are not
-dropped when more than 100 PRs are open.
+helper. Classify / stacks / approve-paste never invent an APPROVE; open-PR
+listing uses `--limit 500` (fail closed if that cap is hit) so stack bottoms are
+not dropped when more than 100 PRs are open. The gate still requires a **live
+owner** marker — bots and cloud agents cannot satisfy it.
 
 ```sh
 bin/ade-merge-ready                  # classify open tips vs pytest-linux + adversary-marker
@@ -124,6 +125,9 @@ bin/ade-merge-ready approve-paste                 # templates only (all needs_ap
 bin/ade-merge-ready approve-paste --base master   # templates for master-base tips only
 bin/ade-merge-ready approve-paste --bottoms-only  # templates for named-stack bottoms only
 bin/ade-merge-ready approve-paste --group install --bottoms-only
+# Owner-only (gh auth as repo owner). Dry-run by default; posts only with both flags:
+bin/ade-merge-ready approve-post --bottoms-only --i-reviewed --yes --trigger-marker
+bin/ade-merge-ready approve-post --prs 327,332,334,335,336,337,342,359 --i-reviewed --yes --trigger-marker
 ```
 
 `approve-paste` prints only paste-ready `adversary-verdict:v1` APPROVE lines
@@ -132,6 +136,13 @@ bin/ade-merge-ready approve-paste --group install --bottoms-only
 are bottoms of the named stacks (install / claims / s1 / wave6) — the same
 bottom set `stacks --bottoms-only` uses — so the operator can paste markers for
 merge-order bottoms without the full table.
+
+`approve-post` posts those same templates as PR comments **only** when
+`gh api user` matches the repository owner and both `--i-reviewed` and `--yes`
+are set (otherwise dry-run). It never merges and never invents a head — each
+marker names the tip `headRefOid` just collected. `--trigger-marker` runs
+`adversary-marker.yml -f pr=N` after each successful post. Non-owner `gh`
+auth is refused (exit 2).
 
 `stacks` derives order from each open PR's `baseRefName` → same-repo
 `headRefName` edge (live `gh pr list`, qualified by

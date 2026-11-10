@@ -4,18 +4,21 @@
   ade-merge-ready [--repo OWNER/NAME] [--min N] [--json]
   ade-merge-ready stacks [--group NAME] [--bottoms-only] [--repo …] [--min N] [--json]
   ade-merge-ready approve-paste [--base master] [--bottoms-only] [--repo …] [--min N]
+  ade-merge-ready approve-post --i-reviewed --yes [--bottoms-only] [--trigger-marker] …
   ade-merge-ready --help
 
-Read-only. Uses `gh` to list open PRs (number >= --min, default 327; list
-limit 500 so stack bottoms are not dropped when >100 PRs are open), their
-pytest-linux / adversary-marker checks. A live APPROVE is taken only from the
+Uses `gh` to list open PRs (number >= --min, default 327; list limit 500 so
+stack bottoms are not dropped when >100 PRs are open), their pytest-linux /
+adversary-marker checks. A live APPROVE is taken only from the
 `adversary-marker` check (the Action runs `bin/adversary_marker.py`'s
 attribution-aware `decide`: owner body editor / owner comment history). Raw
 markers in the body or comments are never enough on their own — that would
-count an outside author's or bot's same-head APPROVE. Never posts, never
-merges, never invents an APPROVE. Prints a table (or JSON) plus paste-ready
-templates so an operator can post a real marker. `approve-paste` prints only
-those templates (optionally master-base or named-stack bottoms).
+count an outside author's or bot's same-head APPROVE. Classify / stacks /
+approve-paste never invent an APPROVE. `approve-paste` prints templates only.
+`approve-post` posts those templates as issue comments **only** when the
+authenticated `gh` user is the repository owner and both `--i-reviewed` and
+`--yes` are set (dry-run otherwise); it still never merges and never invents
+a head — each marker names the tip `headRefOid` just collected.
 
 `stacks` walks open PR base→same-repo head refs and prints bottom-up APPROVE
 order for named groups (install, claims, s1, wave6) with full tip SHAs for
@@ -430,6 +433,114 @@ def print_approve_paste(rows: list[dict[str, Any]]) -> None:
         print(tmpl)
 
 
+def select_approve_rows(
+    rows: list[dict[str, Any]],
+    *,
+    base: str,
+    bottoms_only: bool,
+    groups: list[str] | None,
+    listing_repo: str,
+    pr_numbers: set[int] | None = None,
+) -> list[dict[str, Any]]:
+    """needs_approve + green pytest-linux rows, optionally filtered like approve-paste."""
+    paste_rows = [
+        r
+        for r in rows
+        if r["class"] == "needs_approve"
+        and r["pytest_linux"] in ("pass", "success")
+        and r.get("marker_template")
+        and SHA40.match(r.get("head") or "")
+    ]
+    if base:
+        paste_rows = [r for r in paste_rows if r.get("base") == base]
+    if bottoms_only or groups:
+        stacks = build_named_stacks(
+            rows,
+            groups=groups,
+            bottoms_only=True,
+            listing_repo=listing_repo,
+        )
+        bottom_nums = {r["number"] for s in stacks for r in (s.get("order") or [])}
+        paste_rows = [r for r in paste_rows if r["number"] in bottom_nums]
+    if pr_numbers is not None:
+        paste_rows = [r for r in paste_rows if r["number"] in pr_numbers]
+    paste_rows.sort(key=lambda r: r["number"])
+    return paste_rows
+
+
+def gh_login(gh: str) -> str:
+    p = run_gh(gh, ["api", "user", "-q", ".login"], timeout=30)
+    if p.returncode != 0:
+        raise RuntimeError(f"gh api user failed: {(p.stderr or p.stdout).strip()}")
+    login = (p.stdout or "").strip()
+    if not login:
+        raise RuntimeError("gh api user returned empty login")
+    return login
+
+
+def repo_owner_login(gh: str, repo: str) -> str:
+    p = run_gh(
+        gh,
+        ["repo", "view", repo, "--json", "owner", "-q", ".owner.login"],
+        timeout=30,
+    )
+    if p.returncode != 0:
+        raise RuntimeError(f"gh repo view {repo} failed: {(p.stderr or p.stdout).strip()}")
+    owner = (p.stdout or "").strip()
+    if not owner:
+        raise RuntimeError(f"gh repo view {repo} returned empty owner")
+    return owner
+
+
+def post_approve_comment(
+    gh: str,
+    repo: str,
+    number: int,
+    head: str,
+    *,
+    dry_run: bool,
+    trigger_marker: bool,
+) -> None:
+    """Post one owner APPROVE comment naming *head*; optionally re-run the marker Action."""
+    body = f'<!-- adversary-verdict:v1 {{"verdict":"APPROVE","head":"{head}"}} -->'
+    if dry_run:
+        print(f"would post #{number} head={head}")
+        print(body)
+        if trigger_marker:
+            print(f"would trigger adversary-marker.yml pr={number}")
+        return
+    p = run_gh(
+        gh,
+        ["pr", "comment", str(number), "--repo", repo, "--body", body],
+        timeout=60,
+    )
+    if p.returncode != 0:
+        raise RuntimeError(
+            f"gh pr comment #{number} failed: {(p.stderr or p.stdout).strip()}"
+        )
+    print(f"posted #{number} head={head}")
+    if trigger_marker:
+        t = run_gh(
+            gh,
+            [
+                "workflow",
+                "run",
+                "adversary-marker.yml",
+                "--repo",
+                repo,
+                "-f",
+                f"pr={number}",
+            ],
+            timeout=60,
+        )
+        if t.returncode != 0:
+            raise RuntimeError(
+                f"workflow run adversary-marker pr={number} failed: "
+                f"{(t.stderr or t.stdout).strip()}"
+            )
+        print(f"triggered adversary-marker.yml pr={number}")
+
+
 def print_stacks(stacks: list[dict[str, Any]]) -> None:
     print(
         "# Bottom-up APPROVE order from open PR base→head refs "
@@ -464,17 +575,18 @@ def main(argv: list[str] | None = None) -> int:
         prog="ade-merge-ready",
         description=(
             "Classify open ADE PRs against pytest-linux + adversary-marker + live "
-            "APPROVE, or print bottom-up stack APPROVE order (read-only)."
+            "APPROVE, print bottom-up stack order, print paste templates, or "
+            "(owner only) post APPROVE comments after review."
         ),
     )
     ap.add_argument(
         "cmd",
         nargs="?",
         default="classify",
-        choices=("classify", "stacks", "approve-paste"),
+        choices=("classify", "stacks", "approve-paste", "approve-post"),
         help=(
             "classify (default), stacks (bottom-up APPROVE order), "
-            "or approve-paste (templates only)"
+            "approve-paste (templates only), or approve-post (owner posts)"
         ),
     )
     ap.add_argument(
@@ -501,29 +613,59 @@ def main(argv: list[str] | None = None) -> int:
         choices=list(STACK_GROUP_NAMES),
         metavar="NAME",
         help=(
-            "stacks only: limit to named stack(s): install, claims, s1, wave6 "
-            "(repeatable; default: all four)"
+            "stacks / approve-*: limit to named stack(s): install, claims, s1, "
+            "wave6 (repeatable; default: all four)"
         ),
     )
     ap.add_argument(
         "--bottoms-only",
         action="store_true",
         help=(
-            "stacks / approve-paste: print only stack bottoms within each "
-            "selected group (approve-paste uses named stacks when set)"
+            "stacks / approve-paste / approve-post: only stack bottoms within "
+            "each selected group (approve-* uses named stacks when set)"
         ),
     )
     ap.add_argument(
         "--base",
         default="",
         metavar="REF",
-        help="approve-paste only: restrict to PRs whose baseRefName equals REF",
+        help="approve-paste / approve-post: restrict to PRs whose baseRefName equals REF",
+    )
+    ap.add_argument(
+        "--prs",
+        default="",
+        metavar="N,N,…",
+        help="approve-paste / approve-post: only these PR numbers (comma-separated)",
+    )
+    ap.add_argument(
+        "--i-reviewed",
+        action="store_true",
+        help="approve-post: affirm a real review of each selected tip head",
+    )
+    ap.add_argument(
+        "--yes",
+        action="store_true",
+        help="approve-post: actually post comments (default is dry-run)",
+    )
+    ap.add_argument(
+        "--trigger-marker",
+        action="store_true",
+        help="approve-post: after each post, gh workflow run adversary-marker.yml -f pr=N",
     )
     a = ap.parse_args(argv)
     try:
         rows = collect(a.gh, a.repo, a.min)
     except (RuntimeError, subprocess.TimeoutExpired, OSError) as e:
         return die(str(e))
+
+    pr_numbers: set[int] | None = None
+    if a.prs.strip():
+        try:
+            pr_numbers = {int(x.strip()) for x in a.prs.split(",") if x.strip()}
+        except ValueError:
+            return die("--prs must be comma-separated integers")
+        if not pr_numbers:
+            return die("--prs is empty")
 
     if a.cmd == "stacks":
         stacks = build_named_stacks(
@@ -539,33 +681,76 @@ def main(argv: list[str] | None = None) -> int:
             print_stacks(stacks)
         return 0
 
-    if a.cmd == "approve-paste":
-        paste_rows = [
-            r
-            for r in rows
-            if r["class"] == "needs_approve"
-            and r["pytest_linux"] in ("pass", "success")
-            and r.get("marker_template")
-        ]
-        if a.base:
-            paste_rows = [r for r in paste_rows if r.get("base") == a.base]
-        if a.bottoms_only or a.group:
-            stacks = build_named_stacks(
-                rows,
-                groups=a.group,
-                bottoms_only=True,
-                listing_repo=a.repo,
+    if a.cmd in ("approve-paste", "approve-post"):
+        paste_rows = select_approve_rows(
+            rows,
+            base=a.base,
+            bottoms_only=a.bottoms_only,
+            groups=a.group,
+            listing_repo=a.repo,
+            pr_numbers=pr_numbers,
+        )
+        if a.cmd == "approve-paste":
+            if a.json:
+                json.dump(paste_rows, sys.stdout, indent=2, sort_keys=True)
+                sys.stdout.write("\n")
+            else:
+                print_approve_paste(paste_rows)
+            return 0
+
+        dry_run = not a.yes
+        if a.yes and not a.i_reviewed:
+            return die(
+                "approve-post --yes requires --i-reviewed (affirm real tip review)"
             )
-            bottom_nums = {
-                r["number"] for s in stacks for r in (s.get("order") or [])
-            }
-            paste_rows = [r for r in paste_rows if r["number"] in bottom_nums]
-        paste_rows.sort(key=lambda r: r["number"])
+        try:
+            login = gh_login(a.gh)
+            owner = repo_owner_login(a.gh, a.repo)
+        except (RuntimeError, subprocess.TimeoutExpired, OSError) as e:
+            return die(str(e))
+        if login != owner:
+            return die(
+                f"approve-post refuses: gh user {login!r} is not repo owner "
+                f"{owner!r} (only the owner's comment counts for APPROVE)"
+            )
+        if not paste_rows:
+            print(
+                "ade-merge-ready: no needs_approve rows matched filters",
+                file=sys.stderr,
+            )
+            return 0
+        if dry_run:
+            print(
+                f"# dry-run as owner {login} ({len(paste_rows)} tips); "
+                "pass --i-reviewed --yes to post"
+            )
+        posted = 0
+        for r in paste_rows:
+            try:
+                post_approve_comment(
+                    a.gh,
+                    a.repo,
+                    int(r["number"]),
+                    r["head"],
+                    dry_run=dry_run,
+                    trigger_marker=a.trigger_marker,
+                )
+            except (RuntimeError, subprocess.TimeoutExpired, OSError) as e:
+                return die(str(e))
+            posted += 1
         if a.json:
-            json.dump(paste_rows, sys.stdout, indent=2, sort_keys=True)
+            json.dump(
+                {
+                    "dry_run": dry_run,
+                    "owner": owner,
+                    "posted": posted,
+                    "numbers": [r["number"] for r in paste_rows],
+                },
+                sys.stdout,
+                indent=2,
+                sort_keys=True,
+            )
             sys.stdout.write("\n")
-        else:
-            print_approve_paste(paste_rows)
         return 0
 
     if a.json:

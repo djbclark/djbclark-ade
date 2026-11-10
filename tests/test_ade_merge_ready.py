@@ -502,6 +502,175 @@ def test_approve_paste_master_base_only(tmp_path: Path) -> None:
     assert head_s not in r.stdout
 
 
+def test_approve_post_dry_run_as_owner(tmp_path: Path) -> None:
+    """approve-post dry-run posts nothing; requires owner login match."""
+    head = "e" * 40
+    listing = json.dumps(
+        [
+            {
+                "number": 334,
+                "title": "install harddeps",
+                "headRefOid": head,
+                "baseRefName": "master",
+                "mergeable": "MERGEABLE",
+                "headRefName": "cursor/ade-install-harddeps-f576",
+            }
+        ]
+    )
+    checks = "pytest-linux\tpass\t0\tx\nadversary-marker\tfail\t0\tx\n"
+    gh = write_fake_gh(
+        tmp_path,
+        textwrap.dedent(
+            f"""
+            set -e
+            case "$*" in
+              *"pr list"*) echo '{listing}' ;;
+              *"pr checks"*) printf '%s' '{checks}' ; exit 1 ;;
+              *"api user"*) echo djbclark ;;
+              *"repo view"*) echo djbclark ;;
+              *"pr comment"*) echo "unexpected post: $*" >&2; exit 99 ;;
+              *) echo "unexpected: $*" >&2; exit 99 ;;
+            esac
+            """
+        ),
+    )
+    r = run(gh, "approve-post", "--prs", "334", "--min", "1")
+    assert r.returncode == 0, r.stderr
+    assert "dry-run" in r.stdout
+    assert head in r.stdout
+    assert "would post #334" in r.stdout
+
+
+def test_approve_post_yes_requires_i_reviewed(tmp_path: Path) -> None:
+    head = "f" * 40
+    listing = json.dumps(
+        [
+            {
+                "number": 334,
+                "title": "install harddeps",
+                "headRefOid": head,
+                "baseRefName": "master",
+                "mergeable": "MERGEABLE",
+                "headRefName": "cursor/ade-install-harddeps-f576",
+            }
+        ]
+    )
+    checks = "pytest-linux\tpass\t0\tx\nadversary-marker\tfail\t0\tx\n"
+    gh = write_fake_gh(
+        tmp_path,
+        textwrap.dedent(
+            f"""
+            set -e
+            case "$*" in
+              *"pr list"*) echo '{listing}' ;;
+              *"pr checks"*) printf '%s' '{checks}' ; exit 1 ;;
+              *) echo "unexpected: $*" >&2; exit 99 ;;
+            esac
+            """
+        ),
+    )
+    r = run(gh, "approve-post", "--yes", "--prs", "334", "--min", "1")
+    assert r.returncode == 2
+    assert "i-reviewed" in r.stderr
+
+
+def test_approve_post_refuses_non_owner(tmp_path: Path) -> None:
+    head = "a1" + "b" * 38
+    listing = json.dumps(
+        [
+            {
+                "number": 334,
+                "title": "install harddeps",
+                "headRefOid": head,
+                "baseRefName": "master",
+                "mergeable": "MERGEABLE",
+                "headRefName": "cursor/ade-install-harddeps-f576",
+            }
+        ]
+    )
+    checks = "pytest-linux\tpass\t0\tx\nadversary-marker\tfail\t0\tx\n"
+    gh = write_fake_gh(
+        tmp_path,
+        textwrap.dedent(
+            f"""
+            set -e
+            case "$*" in
+              *"pr list"*) echo '{listing}' ;;
+              *"pr checks"*) printf '%s' '{checks}' ; exit 1 ;;
+              *"api user"*) echo cursor-bot ;;
+              *"repo view"*) echo djbclark ;;
+              *) echo "unexpected: $*" >&2; exit 99 ;;
+            esac
+            """
+        ),
+    )
+    r = run(
+        gh,
+        "approve-post",
+        "--i-reviewed",
+        "--yes",
+        "--prs",
+        "334",
+        "--min",
+        "1",
+    )
+    assert r.returncode == 2
+    assert "not repo owner" in r.stderr
+
+
+def test_approve_post_yes_posts_comment(tmp_path: Path) -> None:
+    head = "c" * 40
+    listing = json.dumps(
+        [
+            {
+                "number": 334,
+                "title": "install harddeps",
+                "headRefOid": head,
+                "baseRefName": "master",
+                "mergeable": "MERGEABLE",
+                "headRefName": "cursor/ade-install-harddeps-f576",
+            }
+        ]
+    )
+    checks = "pytest-linux\tpass\t0\tx\nadversary-marker\tfail\t0\tx\n"
+    log = tmp_path / "posts.log"
+    gh = write_fake_gh(
+        tmp_path,
+        textwrap.dedent(
+            f"""
+            set -e
+            case "$*" in
+              *"pr list"*) echo '{listing}' ;;
+              *"pr checks"*) printf '%s' '{checks}' ; exit 1 ;;
+              *"api user"*) echo djbclark ;;
+              *"repo view"*) echo djbclark ;;
+              *"pr comment"*)
+                echo "$*" >> '{log}'
+                exit 0
+                ;;
+              *) echo "unexpected: $*" >&2; exit 99 ;;
+            esac
+            """
+        ),
+    )
+    r = run(
+        gh,
+        "approve-post",
+        "--i-reviewed",
+        "--yes",
+        "--prs",
+        "334",
+        "--min",
+        "1",
+    )
+    assert r.returncode == 0, r.stderr
+    assert "posted #334" in r.stdout
+    posted = log.read_text()
+    assert "pr comment 334" in posted
+    assert head in posted
+    assert "adversary-verdict:v1" in posted
+
+
 def test_collect_refuses_silent_500_truncation(tmp_path: Path) -> None:
     """If gh returns exactly 500 open PRs, refuse rather than drop bottoms."""
     prs = [
