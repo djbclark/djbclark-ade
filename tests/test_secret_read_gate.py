@@ -861,6 +861,30 @@ def test_first_pass_alone_id_star_fails_closed_when_scan_truncates(monkeypatch, 
         hook.check_command(ck, "cat id_*")
 
 
+def test_absolute_deep_glob_keeps_pattern_fallback_after_deferred_truncate(monkeypatch, tmp_path):
+    """CI residual (PR 413): a dense `/` tree can burn WORD_S on /*/*/*/zzqq* → set-aside → deferred
+    walk truncates on GLOB_S. Absolute deep globs must keep B1c pattern fallback (allow when the
+    pattern names no secret), not GlobBudgetExceeded — relative/cwd truncated walks still refuse."""
+    hook = load_hook()
+    ck = hook.Checker(
+        hook.Policy(["**/.env", "**/*.key", "**/id_rsa"], ["*.pub"], homes=[str(tmp_path)], fold=False),
+        str(tmp_path),
+    )
+    monkeypatch.setattr(hook, "WORD_S", 0.05)
+    monkeypatch.setattr(hook, "FIRST_PASS_S", 0.05)
+    monkeypatch.setattr(hook, "GLOB_S", 0.05)
+    monkeypatch.setattr(hook, "MAX_GLOB_SCAN", 3)
+    hook._DEADLINE[0] = time.monotonic() + 5.0
+    # Non-secret absolute deep glob: truncated deferred walk still allows via pattern_verdict.
+    assert hook.check_command(ck, "ls /*/*/*/*/zzqq*") is None
+    # Relative walk-dependent secret still fails closed under the same burned clocks.
+    (tmp_path / "id_rsa").write_text("PRIVATE\n")
+    for i in range(10):
+        (tmp_path / ("aaa%03d.txt" % i)).write_text("x\n")
+    with pytest.raises(hook.GlobBudgetExceeded):
+        hook.check_command(ck, "cat id_*")
+
+
 # ---- Codex payloads ---------------------------------------------------------------------------------------------------
 def patch(*headers, body="+x\n"):
     return "*** Begin Patch\n" + "".join("%s\n%s" % (h, body) for h in headers) + "*** End Patch\n"
