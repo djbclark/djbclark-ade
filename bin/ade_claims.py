@@ -1738,54 +1738,59 @@ def _push_decision(call: GitCall) -> Optional[Decision]:
     return None
 
 
-# Builtins that update refs/heads/*, HEAD or refs/stash (reference-transaction), or that push (pre-push). Read-only
-# forms are filtered in `_is_ref_write_or_push`. §10 residual (2026-11-10).
+# Builtins that update refs/heads/*, HEAD or refs/stash (reference-transaction), that push (pre-push), or that
+# fetch into local refs (`fetch` / `fetch-pack` / `remote update` — measured 2026-11-10: with a non-ade hooksPath,
+# `git fetch . src:refs/heads/claimed` moves claimed branches without the claim hooks). Read-only forms are filtered
+# in `_is_ref_write_or_push`. §10 residual (2026-11-10).
 _HOOK_GUARDED_SUBS = frozenset("""push send-pack http-push update-ref commit merge rebase cherry-pick revert am reset
-pull stash branch checkout switch symbolic-ref worktree""".split())
+pull stash branch checkout switch symbolic-ref worktree fetch fetch-pack remote""".split())
 
 
 def _is_ref_write_or_push(call: GitCall) -> bool:
-    """Push family, or a non-read form of a builtin that updates the refs the claim hooks guard."""
+    """Push family, fetch family, or a non-read form of a builtin that updates the refs the claim hooks guard."""
     sub = call.sub
     if sub not in _HOOK_GUARDED_SUBS:
         return False
-    if sub in ("push", "send-pack", "http-push", "update-ref"):
+    if sub in ("push", "send-pack", "http-push", "update-ref", "fetch", "fetch-pack"):
         return True
     if sub == "stash":
         return not (call.args and call.args[0] in ("list", "show"))
     if sub == "worktree":
         return bool(call.args) and call.args[0] != "list"
+    if sub == "remote":
+        # `remote update` (and `remote -v update`) fetches into local refs; other remote verbs do not.
+        s = scan(call.args)
+        return bool(s.pos) and s.pos[0] == "update"
     return not is_readonly(call)
 
 
 def _resolve_hooks_path(call: GitCall, value: str) -> Optional[Path]:
-    """Resolve `core.hooksPath` as git does: absolute as-is, else relative to the directory where hooks run
-    (work-tree root for a non-bare repository; the git dir for a bare one — git-config `core.hooksPath` /
-    githooks). None when git cannot name that directory (caller fails closed). An empty value is Path('')."""
+    """Resolve `core.hooksPath` as git does for hook lookup (measured git 2.43, 2026-11-10): expand a leading `~/`,
+    take an absolute path as-is, else join to the process cwd after every `-C` (`call.cwd`). Git does *not* resolve
+    relative hooksPath against `--work-tree` / `rev-parse --show-toplevel` (a dummy `--work-tree` with stubs only
+    under the real work tree is ignored; stubs under the cwd after `-C` are used). An empty value is Path('')."""
     if value == "":
         return Path("")
-    p = Path(value)
+    expanded = os.path.expanduser(value)
+    p = Path(expanded)
     if p.is_absolute():
         return p
-    status, gd, top = _git_says(call)
-    if status == "ok" and top:
-        return Path(top) / p
-    if status == "bare" and gd:
-        return Path(gd) / p
-    return None
+    return Path(call.cwd) / p
 
 
 def _stubs_in_dir(hooks_dir: Path) -> bool:
-    """True when `hooks_dir` holds every ade-git-guard stub (`STUB_MARK` in the first 400 bytes of each)
-    and each stub is executable (git ignores hooks without the executable bit)."""
+    """True when `hooks_dir` holds every ade-git-guard stub as the canonical installed content (`_stub_text`, which
+    invokes `HOOKS_SRC` by absolute path) and each stub is executable (git ignores hooks without the executable bit).
+    A forged script that only embeds `STUB_MARK` (or exits 0) is not the ade identity."""
     for name in HOOK_NAMES:
         path = hooks_dir / name
         try:
             if not os.access(path, os.X_OK):
                 return False
             with open(path, "r", encoding="utf-8", errors="replace") as f:
-                if STUB_MARK not in f.read(400):
-                    return False
+                have = f.read()
+            if have != _stub_text(name):
+                return False
         except OSError:
             return False
     return True
@@ -1793,8 +1798,8 @@ def _stubs_in_dir(hooks_dir: Path) -> bool:
 
 def _local_hooks_path_decision(call: GitCall, env: dict[str, str]) -> Optional[Decision]:
     """§10 residual (2026-11-10): a repository whose local/worktree `core.hooksPath` is set and is not the ade stubs
-    directory never runs the claim hooks. Refuse `push` and ref-writing subcommands (`hooks-path`, exit 77). An
-    ade-stub hooksPath (directory holds the installed, executable stubs; relative values from the hook cwd) stays
+    directory never runs the claim hooks. Refuse `push`, fetch and ref-writing subcommands (`hooks-path`, exit 77). An
+    ade-stub hooksPath (directory holds the canonical executable stubs; relative values from the cwd after `-C`) stays
     allowed; unset local hooksPath is unchanged."""
     if not _is_ref_write_or_push(call):
         return None
@@ -1810,7 +1815,7 @@ def _local_hooks_path_decision(call: GitCall, env: dict[str, str]) -> Optional[D
         return None
     shown = _esc(value) if value != "" else "(empty)"
     alt = ("unset core.hooksPath, point it at the ade-git-guard stubs directory, or ask the operator; without the "
-           "stubs, push and ref writes skip the claim guard")
+           "stubs, push, fetch and ref writes skip the claim guard")
     return _closed("hooks-path",
                    f"core.hooksPath is set ({scope} config, value `{shown}`) and is not the ade-git-guard stubs: {alt}")
 
@@ -1818,7 +1823,7 @@ def _local_hooks_path_decision(call: GitCall, env: dict[str, str]) -> Optional[D
 def evaluate(call: GitCall, env: Optional[dict[str, str]] = None, *, _depth: int = 0) -> Decision:
     """Decide one git call. Reads claims; asks real git (with the call's own config) for an alias or a branch's origin.
     Order: the fail-closed rules first (an option or subcommand the guard cannot read, hook-redirecting config, a push that
-    skips its hook, a local/worktree hooksPath that is not the ade stubs on push/ref-write), then the workspace rules,
+    skips its hook, a local/worktree hooksPath that is not the ade stubs on push/fetch/ref-write), then the workspace rules,
     then the targets the hooks cannot see."""
     env = os.environ if env is None else env
     if not is_agent_env(env):
