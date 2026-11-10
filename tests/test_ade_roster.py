@@ -109,3 +109,30 @@ def test_untracked_files_are_left_out_in_a_git_checkout(tmp_path):
     r = run("--check", root=root)
     assert r.returncode == 0, r.stderr
     assert "scratch-tool" not in run(root=root).stdout and "`local`" not in run(root=root).stdout
+
+
+def test_tracked_disables_inspected_tree_fsmonitor(tmp_path):
+    """--root may be untrusted: ls-files must not exec that checkout's core.fsmonitor (PR #445)."""
+    import shutil
+
+    if shutil.which("git") is None:
+        return
+    root = make_repo(tmp_path / "repo")
+    subprocess.run(["git", "-C", str(root), "init", "-q"], check=True)
+    subprocess.run(["git", "-C", str(root), "add", "skills", "bin", "README.md"], check=True)
+    marker = tmp_path / "fsmonitor-fired"
+    hook = tmp_path / "fsmonitor.sh"
+    hook.write_text(f"#!/bin/sh\necho fired >> {marker}\nprintf ''\n")
+    hook.chmod(0o755)
+    subprocess.run(["git", "-C", str(root), "config", "core.fsmonitor", str(hook)], check=True)
+    subprocess.run(["git", "-C", str(root), "config", "core.fsmonitorHook", str(hook)], check=True)
+    # Control: bare ls-files in that tree still fires the hook.
+    if marker.exists():
+        marker.unlink()
+    subprocess.run(["git", "-C", str(root), "ls-files"], check=True, capture_output=True)
+    assert marker.exists(), "control: core.fsmonitor must fire without -c override"
+    marker.unlink()
+    r = run(root=root)
+    assert r.returncode == 0, r.stderr
+    assert not marker.exists(), "ade-roster tracked() must disable the inspected tree's fsmonitor"
+    assert "tool-py" in r.stdout

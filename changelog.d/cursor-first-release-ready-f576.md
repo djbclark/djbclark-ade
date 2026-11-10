@@ -9,3 +9,4 @@
 ### Security
 
 - `bin/ade-release-ready`: run `changelog-fold` and `ade-roster` from the trusted script directory, never from `--repo` (#445).
+- `bin/ade-roster` `tracked()`: disable `core.fsmonitor` / `core.fsmonitorHook` when inspecting `--root`, so an untrusted tree's hook cannot run via `git ls-files` (#445).
