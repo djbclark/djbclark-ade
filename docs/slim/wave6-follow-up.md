@@ -33,7 +33,7 @@ shims.** Soft deadline for relay / dispatch / `acp-run` removal:
 
 | Gate | State | Where / why |
 |---|---|---|
-| C3 dry-run FIXTURE path | **ready (tightened)** | [#441](https://github.com/djbclark/djbclark-ade/pull/441) + [#453](https://github.com/djbclark/djbclark-ade/pull/453) stack: `--dry-run` FAILCLOSEs Mac **and** C3 FIXTURE labels + Linux-safe probe shape (`ready` stays `false`; `mac_live_blocked: true`) |
+| C3 dry-run FIXTURE path | **ready (tightened)** | [#441](https://github.com/djbclark/djbclark-ade/pull/441) + [#453](https://github.com/djbclark/djbclark-ade/pull/453) + [#470](https://github.com/djbclark/djbclark-ade/pull/470): `--dry-run` FAILCLOSEs Mac **and** C3 FIXTURE labels + Linux-safe probe shape (`ready` stays `false`; `mac_live_blocked: true`) |
 | Linux-safe Mac partial probes | **ready** | `bin/wave6-mac-proof-capture --linux-safe` (pgrep + optional paseo; launchctl SKIPPED). `wave6-delete-check` reports `mac_not_live` if used as `--evidence` |
 | Mac live cycle | **blocked** | No Darwin host on this cloud/CI path; `--live` refuses non-Darwin; FIXTURE / LINUX-SAFE never count. Needs an operator Mac run of `bin/wave6-mac-proof-capture --live` (§B / §B0) |
 | In-repo callers (§A) | **open** | Wave 6 rewrite PRs still in flight; full `wave6-delete-check` (no `--dry-run`) still fails `callers_*` until they land and merge |
@@ -53,6 +53,7 @@ shims.** Soft deadline for relay / dispatch / `acp-run` removal:
 - [#417](https://github.com/djbclark/djbclark-ade/pull/417) — C3/Mac proof-file FAILCLOSED evidence
 - [#441](https://github.com/djbclark/djbclark-ade/pull/441) — Mac harness + FIXTURE `--dry-run` path
 - [#453](https://github.com/djbclark/djbclark-ade/pull/453) — C3 status (FIXTURE ready, Mac blocked)
+- [#470](https://github.com/djbclark/djbclark-ade/pull/470) — C3 FIXTURE tighten + `--linux-safe` Mac probes (`mac_not_live`)
 
 ## A. Remaining in-repo callers (must be gone or archived before delete)
 

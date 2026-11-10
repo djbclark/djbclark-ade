@@ -88,7 +88,7 @@ under **Carried**, newest first, one line each; an item leaves when it ships (in
     (E5); upstream Paseo filings (a codex read-only mode, a quota-pause primitive, a workspace-claim primitive).
     **Delete readiness** (do not delete yet; status 2026-11-10 in
     `docs/slim/wave6-follow-up.md` §Status): C3 `--dry-run` FIXTURE path ready/tightened
-    (#441/#453 stack; Mac+C3 labels + Linux-safe `cmd:` shape; `--linux-safe` probes);
+    (#441/#453/#470; Mac+C3 labels + Linux-safe `cmd:` shape; `--linux-safe` probes);
     Mac live cycle still blocked (`mac_not_live` on FIXTURE/LINUX-SAFE); soft delete
     ~2026-11-20; operator must supply live Mac proofs + C3 migrate/waive pastes. Tools:
     `bin/wave6-delete-check` (`--dry-run` = FIXTURE FAILCLOSED shape only) +
