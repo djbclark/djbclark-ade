@@ -290,4 +290,3 @@ def _validate_install_jobs(data: dict[str, Any], *, path: Path) -> None:
             raise CatalogValidationError(
                 f"{path}: install.retired_jobs[{i}] name={row.get('name')!r}: label required"
             )
-
