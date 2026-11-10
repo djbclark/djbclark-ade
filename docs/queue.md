@@ -5,6 +5,10 @@ why it is still open (or how it closed), where it lives now. **The full text of 
 history**: `git show pre-slim-2026-11-06:docs/queue.md` (2,114 lines). New work is queued
 under **Carried**, newest first, one line each; an item leaves when it ships (into its doc) or is dropped (say why).
 
+## Stale
+
+1. **CONFLICTING master-bottom PRs** (2026-11-10): eight open PRs conflict with `master` (#194, #208, #227, #231, #256, #269, #270, #290); close/rebase/supersede guidance and the #290 vs #471 recovery split live in `docs/history/conflicting-pr-hygiene-2026-11-10.md`.
+
 ## Carried
 
 1. **Issue 284 follow-ups** (2026-11-04): the goal / verify-until-pass loop (evaluate the Paseo plugin `37chengshan/goal-mode`
