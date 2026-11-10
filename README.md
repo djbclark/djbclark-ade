@@ -144,6 +144,7 @@ Skills (23, from each `skills/*/SKILL.md`):
 | [`claude-settings-env`](bin/claude-settings-env) | Keep required and default `env` keys in ~/.claude/settings.json (2026-10-16). |
 | [`claude_identity.py`](bin/claude_identity.py) | Which Claude Code session is this process in? |
 | [`codex-env-policy-apply`](bin/codex-env-policy-apply) | Merge the template's [shell_environment_policy] tables into a Codex config.toml atomically. |
+| [`codex-open-threads`](bin/codex-open-threads) | Report-only lister for unresolved Codex review threads on merged PRs. |
 | [`completion-notice`](bin/completion-notice) | Format (and optionally send) a delegated slice's push-on-completion line via paseo send. |
 | [`context-budget-check`](bin/context-budget-check) | The nightly guard on what a fresh Claude Code session costs before the first prompt. |
 | [`context-watch`](bin/context-watch) | How full is each running Claude Code agent's context, against the REAL compaction ceiling. |
