@@ -55,62 +55,97 @@ context-log accounting and historical delegation-enforcement teaching.
 This is preliminary classification, not an exhaustive source audit. Retain
 logs and accounting; any historical-reader waive needs its own explicit grant.
 
-## C. Boundaries and next action
+## C. Current scope and hard stops
 
-A3+A4 authorization is granted and the implementation is recorded in section D.
-C1+C2 are already granted; do not ask again. A5–A7 and X1 still require
-separate authorization, one card at a time. X2 requires Mac access and proof
-the old lead has ended.
+Operator clarification, 2026-11-10: focus on **djbclark-ade**. Outside work
+is permitted only when a specific ADE dependency requires it. The scoped C3
+instruction/client migrations and X1 relay caller qualify; no general work on
+those projects is authorized by this session. The operator then requested
+wrapping work already in progress to a good stopping point; start no new items.
 
+The operator also permits capable available agents in place of agents required
+by local instructions but unavailable in this environment. This changes named
+model requirements, not review, CI, quota/admission or other approval boundaries.
+
+C1+C2 are granted; do not ask again. No further historical/passive-reader waiver
+has been granted. Preserve all historical records and usage accounting.
 Keep `relay.py`, `acp-dispatch`, `acp-run`, and `review-launch`. Do not use
-`--allow-early`; the deadline remains 2026-11-20. No deletion PR before the
-real evidence gate exits 0 and the operator confirms. Keep Pi
+`--allow-early`; deadline remains 2026-11-20. Deletion still requires real
+Mac evidence, a successful gate and explicit operator confirmation. Keep Pi
 Grok/Antigravity/SIPB/Go `accepted=false`.
 
-## D. A3/A4 authorized and implemented in PRs
+## D. Dependency checkpoint
 
-Operator explicitly authorized A3+A4 as proposed on 2026-11-10. Do not
-ask for this authorization again. Upstream heads still matched the pinned
-proposal. Separate claimed worktrees changed only `AGENTS.md`:
-
-| Project | PR | Pushed head |
+| ADE blocker | Artifact | Head / result |
 |---|---|---|
-| tendcf | [#44](https://github.com/frdminc/tendcf/pull/44) | `71fe7d6b8acfb8d8b162b6f198ca8f2b7c3789ec` |
-| nix2cf | [#7](https://github.com/frdminc/nix2cf/pull/7) | `f3965768d90b1ef2d022e9198dcc41c55b542d2b` |
+| A3 tendcf | [#44](https://github.com/frdminc/tendcf/pull/44) | `71fe7d6b8acfb8d8b162b6f198ca8f2b7c3789ec`; review clean, CI pending |
+| A4 nix2cf | [#7](https://github.com/frdminc/nix2cf/pull/7) | **merged** `572b0b705278bf54e53769820a91b8c20413e144`; reviewed head `f3965768d90b1ef2d022e9198dcc41c55b542d2b`; exact-head Check passed |
+| A5 cfengine-all | [#1](https://github.com/djbclark/cfengine-all/pull/1) | **merged** `134c9afb3aea11a00b72750562a935934101406a`; reviewed head `8ba9ce32a11802c04e390ece7dd83e0e8f129cda`; active instructions only |
+| A6 aiuse | [#54](https://github.com/djbclark/aiuse/pull/54) | draft `a69d2e80b0f743a65b7c54ec8421c2b9cc9ef32d`; local review clean, CI pending |
+| A7 home instructions | [#250](https://github.com/djbclark/site-djbclark/pull/250) | draft `05998b34c4c0e86655a131b854a0398f4ef23676`; review clean, CI pending |
+| X1 fleet-watch | branch `djbclark/site-djbclark:wave6-fleet-native-send` | repair in progress; record final head and review before resuming |
 
-Both pass `git diff --check` and the C3 AGENTS.md retired-launcher name
-probe has no matches. The shared checkouts remain clean. A GPT-6.1 Sol
-medium mechanical comparison found no application errors; this is **not**
-the projects' mandatory independent frontier review. No policy/runtime tests
-were run for these instruction-only changes.
+### D1. Review and validation
 
-**Availability exception granted (operator, 2026-11-10):** “We can override
-anything that requires agents we don't have access to in our environment.”
-Both PRs now document substitution of available capable agents for unavailable
-named leads/reviewers. Review, CI, quota/admission and other approval boundaries
-remain. A separate fresh-context GPT-6.1 Sol high reviewer is reviewing the
-full changes; this is not cross-family review. PRs are ready for review,
-not merged; exact-head review and CI remain pending. No C3 completion claimed.
+A3/A4: a separate fresh-context GPT-6.1 Sol high reviewer reviewed both full
+diffs against their pinned bases and ADE source: **no findings**. This is
+same-family review under the explicit availability exception, not cross-family
+frontier review. Both `git diff --check` and the AGENTS.md retired-launcher
+probes passed. No policy/runtime tests were run locally for instruction edits.
+
+A5: GPT-6.1 Sol medium authored the two prepared instruction replacements;
+the root independently reviewed the complete diff, preserving upstream-contact
+approvals and historical handoffs. No findings. No GitHub workflow directory
+exists in this repository. Documentation checks passed. Runtime watcher
+integration remains X1 work; preserved historical references still need a
+separate C3 disposition. The default branch is `main`.
+
+A6: GPT-6.1 Sol high authored the active runtime-message/instruction correction;
+root independently reviewed all eight changed files, with no findings. Full
+pytest: **1,897 passed before and after**; changed-file mypy, Ruff formatting
+and lint, Prettier, Markdownlint and whitespace checks passed. Passive ACP
+collectors, refusal/frozen-quota readers, schema and logs remain unchanged.
+Their historical references still need explicit operator disposition; this
+PR does not silently grant a waive or complete C3.
+
+A7: GPT-6.1 Sol medium authored the two instruction-file changes. Root review
+required clarification that ADE report classes are not native CLI exit codes,
+DONE/.done is success-only, and the unavailable-agent exception is explicit.
+The repaired diff has no findings. Stable unique rule IDs and all original
+memory/wiki pointers retained; retired names absent; whitespace clean. Size:
+`home-agents.md` 70 lines / 13,785 bytes; Cursor copy 75 / 13,998 bytes. No
+live home file was installed. PR #250 is mergeable; an initial false result
+while GitHub calculated mergeability was transient, not a confirmed conflict.
+
+### D2. Evidence limits
+
+Merged source is not proof of installed Mac state. No C3 evidence JSON has
+been fabricated or marked complete here. No Mac B2 recapture, live receipt
+round, live quota reading, pool acceptance, or extra waiver occurred. Archived
+historical matches in CFEngine/aiuse stay preserved. The old live lead's B2
+label and the date gate remain outstanding.
+
+The cloud `gh` API path is forbidden; use connected GitHub tools for metadata.
+The specialized commit-workflow wrapper returned empty results even when the
+repository Actions feed had runs. Inspect Actions runs/jobs and their full
+`head_sha`, not an empty wrapper result or a prior head's passing run.
 
 ## E. Resume prompt
 
 ```text
-Continue Wave 6 / Pi from djbclark/djbclark-ade PR #538, branch
-wave6-cloud-resume-20261110 (base master 7589e329).
-Read docs/slim/wave6-cloud-resume-2026-11-10.md and
-docs/slim/a3-a4-native-routing-proposal-2026-11-10.md, then the prior
-wave6-cloud-handoff-2026-11-10.md and queue Carried item 1.
-Check PR #538's current head, review and CI; no APPROVE marker was invented.
-A3+A4 authorization was granted and implemented in PRs:
-frdminc/tendcf#44 at 71fe7d6b8acfb8d8b162b6f198ca8f2b7c3789ec;
-frdminc/nix2cf#7 at f3965768d90b1ef2d022e9198dcc41c55b542d2b.
-Do not ask again. The operator permits available-agent substitutions. Obtain a separate fresh-
-context substantive review on those exact heads; record actual model/effort.
-Preserve quota/admission checks. Fix findings,
-re-review changed heads, verify CI, then merge. Preserve native admission hold.
-Then handle A5-A7 and X1 one authorization card at a time; preserve logs.
-This fresh cloud host has no prior Mac archive, paseo, aiuse or quota snapshot.
-Do not fabricate live evidence. C1+C2 already granted, no re-asking.
-Keep all shims/review-launch, held Pi pools false, and no --allow-early.
-Deletion needs actual gate exit 0 plus explicit operator confirmation.
+Resume ADE Wave 6 from djbclark/djbclark-ade PR #538,
+branch wave6-cloud-resume-20261110. Read this checkpoint and the prior
+wave6-cloud-handoff-2026-11-10.md, wave6-follow-up.md and queue Carried 1.
+The operator asked to wrap current work; do not start new work without a
+new continuation request. ADE is the focus; outside work is permitted only
+for specific ADE dependencies. A3+A4 authorization was granted. Required
+unavailable agents may be replaced by capable available agents; record the
+actual reviewer model/effort and preserve all other gates.
+Check the current exact heads and CI on the PRs in section D. Nix2cf#7 and
+cfengine-all#1 are merged. Tendcf#44, aiuse#54, site#250 and X1 require their
+recorded remaining checks. Preserve historical/passive accounting; no extra
+C3 waive is granted. Do not equate source merge with Mac deployment evidence.
+No Mac archive/paseo/aiuse/quota snapshot exists on this fresh cloud host.
+Keep shims/review-launch, held Pi pools false, no --allow-early. Deletion
+requires actual evidence gate exit 0 plus explicit operator confirmation.
 ```
