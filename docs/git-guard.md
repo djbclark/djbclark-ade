@@ -159,10 +159,12 @@ Evaluated in order; the module docstring has every form.
    repository chose it (husky, pre-commit), the hooks do not run there, and `install` reports it (78). **When that local /
    worktree `hooksPath` is set and is not the ade-git-guard stubs directory** (the directory holds the canonical
    installed stubs that invoke `HOOKS_SRC`, each executable — a forged script that only embeds the stub marker is
-   non-ade; a relative value is resolved from the process cwd after every `-C`, with `~/` expanded, matching Git's
-   hook-lookup semantics rather than `--work-tree` / `show-toplevel`;
+   non-ade; a relative value is resolved from the process cwd after every `-C`, with `~/` expanded, when unambiguous;
+   a `%(prefix)/…` (Git interpolates it; the shim does not) and a relative value while `--work-tree` /
+   `GIT_WORK_TREE` is set (Git joins to cwd for `update-ref`, to the work tree for `commit`/`checkout`/`merge`)
+   count as non-ade rather than inventing a path engine;
    `/dev/null`, empty, husky, non-executable copies, and any other path count as non-ade), **`push`, `fetch` /
-   `fetch-pack` / `remote update`, and ref-writing subcommands are refused** (`hooks-path`, exit 77; §10 residual,
+   `fetch-pack` / `remote update`, `filter-branch`, and ref-writing subcommands are refused** (`hooks-path`, exit 77; §10 residual,
    2026-11-10): without the stubs the claim hooks never run. Plain `git branch <new>` is not among them (it cannot
    overwrite an existing tip without `-f`); force/delete/move/copy `branch` forms still are. An ade-stub `hooksPath`
    stays allowed. If git answers neither 0 nor 1 (timeout, a

@@ -1878,7 +1878,7 @@ def test_relative_hooks_path_named_hooks_refuses_when_only_dot_git_hooks_has_stu
 
 
 def test_relative_hooks_path_uses_cwd_after_C_not_work_tree(tmp_path, state):
-    """Git resolves relative hooksPath against cwd after -C, not --work-tree (dummy work-tree mismatch)."""
+    """Relative hooksPath without --work-tree joins cwd-after-C; with --work-tree the shim refuses as ambiguous."""
     repo = mk_repo(tmp_path, state)
     ext = tmp_path / "extcwd"
     ext.mkdir()
@@ -1893,15 +1893,14 @@ def test_relative_hooks_path_uses_cwd_after_C_not_work_tree(tmp_path, state):
         p.write_text(f"#!/bin/bash\n{ade_claims.STUB_MARK}\nexit 0\n")
         p.chmod(0o755)
     plain(state, ["config", "core.hooksPath", "rel-hooks"], repo)
-    # cwd=ext (after -C), --work-tree=dummy: relative → ext/rel-hooks (real stubs) → allow
+    # Plain `branch <new>` is not hooks-path-guarded (lazy-install probes).
     r = run(state, ["-C", str(ext), "--git-dir", str(repo / ".git"), "--work-tree", str(dummy),
                     "branch", "from-cwd"], repo, who="B")
     assert r.returncode == 0 and "hooks-path" not in r.stderr, r.stderr
-    # cwd=repo: relative → repo/rel-hooks (forged) → refuse
+    # cwd=repo, no work-tree: relative → repo/rel-hooks (forged) → refuse
     r = run(state, ["branch", "-f", "x", "main"], repo, who="B")
     assert refused77(r) and "hooks-path" in r.stderr, r.stderr
-    # Real stubs only under work-tree; cwd elsewhere has none → refuse (Git ignores --work-tree here).
-    # Probe with force-update (plain `branch <new>` is not hooks-path-guarded).
+    # Relative + --work-tree is ambiguous (update-ref uses cwd; commit/checkout/merge use work-tree): refuse.
     for child in (ext / "rel-hooks").iterdir():
         child.unlink()
     (ext / "rel-hooks").rmdir()
@@ -1909,6 +1908,57 @@ def test_relative_hooks_path_uses_cwd_after_C_not_work_tree(tmp_path, state):
     r = run(state, ["--git-dir", str(repo / ".git"), "--work-tree", str(repo), "branch", "-f", "wt-only", "main"],
             ext, who="B")
     assert refused77(r) and "hooks-path" in r.stderr, r.stderr
+
+
+def test_prefix_hooks_path_refuses_even_with_cwd_planted_stubs(tmp_path, state):
+    """%(prefix)/… is Git-interpolated; planting stubs under <cwd>/%(prefix)/… must not allow."""
+    repo = mk_repo(tmp_path, state)
+    planted = repo / "%(prefix)" / "decoy"
+    _write_ade_stubs(planted)
+    plain(state, ["config", "core.hooksPath", "%(prefix)/decoy"], repo)
+    for argv in (["branch", "-f", "x", "main"],
+                 ["commit", "--allow-empty", "-m", "x"],
+                 ["update-ref", "refs/heads/y", "HEAD"]):
+        r = run(state, argv, repo, who="B")
+        assert refused77(r) and "hooks-path" in r.stderr, (argv, r.returncode, r.stderr)
+
+
+def test_relative_hooks_path_with_work_tree_refuses_ref_writes(tmp_path, state):
+    """Relative hooksPath + --work-tree/GIT_WORK_TREE: refuse rather than guess cwd vs work-tree join."""
+    repo = mk_repo(tmp_path, state)
+    ext = tmp_path / "extcwd"
+    ext.mkdir()
+    _write_ade_stubs(ext / "rel-hooks")
+    plain(state, ["config", "core.hooksPath", "rel-hooks"], repo)
+    # Stubs under cwd-after-C; Git would use work-tree for commit/checkout/merge — refuse.
+    for argv in (["-C", str(ext), "--git-dir", str(repo / ".git"), "--work-tree", str(repo),
+                  "commit", "--allow-empty", "-m", "x"],
+                 ["-C", str(ext), "--git-dir", str(repo / ".git"), "--work-tree", str(repo),
+                  "checkout", "-B", "nb", "main"],
+                 ["-C", str(ext), "--git-dir", str(repo / ".git"), "--work-tree", str(repo),
+                  "merge", "-m", "m", "main"],
+                 ["-C", str(ext), "--git-dir", str(repo / ".git"), "--work-tree", str(repo),
+                  "branch", "-f", "x", "main"],
+                 ["-C", str(ext), "--git-dir", str(repo / ".git"), "--work-tree", str(repo),
+                  "update-ref", "refs/heads/z", "HEAD"]):
+        r = run(state, argv, repo, who="B")
+        assert refused77(r) and "hooks-path" in r.stderr, (argv, r.returncode, r.stderr)
+    # Same ambiguity via GIT_WORK_TREE.
+    r = run(state, ["-C", str(ext), "--git-dir", str(repo / ".git"), "commit", "--allow-empty", "-m", "env"],
+            repo, who="B", GIT_WORK_TREE=str(repo))
+    assert refused77(r) and "hooks-path" in r.stderr, r.stderr
+
+
+def test_filter_branch_refused_when_local_hooks_path_non_ade(tmp_path, state):
+    """§10: filter-branch rewrites refs/heads/*; with hooksPath=/dev/null the claim hooks never run."""
+    repo = mk_repo(tmp_path, state)
+    plain(state, ["branch", "claimed", "main"], repo)
+    plain(state, ["config", "core.hooksPath", "/dev/null"], repo)
+    r = run(state, ["filter-branch", "-f", "--", "claimed"], repo, who="B")
+    assert refused77(r) and "hooks-path" in r.stderr, r.stderr
+    # Tip unchanged (refused before git ran).
+    before = plain(state, ["rev-parse", "claimed"], repo).strip()
+    assert before == plain(state, ["rev-parse", "main"], repo).strip()
 
 
 def test_tilde_hooks_path_expands_home(tmp_path, state, monkeypatch):
