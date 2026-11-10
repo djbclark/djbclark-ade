@@ -72,6 +72,12 @@ optional `verify_argv`, expiry=unknown|…). Doctor never reads
 key validation. Recorded login commands (2026-11-09): `claude auth login`,
 `codex login`, `agent login` — doctor does not execute them.
 
+The next bounded S3b verification unit covers only OpenAI model-list metadata
+and OpenRouter current-key metadata, using fixed authenticated GET endpoints.
+It must expose no values/bodies, reject redirects and keep authentication
+separate from inference entitlement, quota, subscriptions and pool acceptance.
+The other provider contracts remain unverified; no live key probes ran here.
+
 `ade-install keys` / `just keys` (2026-11-09 presence; 2026-11-10 verify) is
 setup-plan S3b check-then-verify:
 
