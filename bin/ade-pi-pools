@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Report Pi pool acceptance and observe-only continuation/quota/identity probes."""
+"""Report Pi pool acceptance, ready_for_operator_accept, and optional local accept records.
+
+``probe`` never writes ``accepted=true``. ``probe --record-accept`` writes only a
+local state file (docs/pi-defaults.md B4c); routing stays unchanged until the
+operator flips the toml.
+"""
 from ade_pi_pools import main
 
 raise SystemExit(main())

@@ -252,3 +252,155 @@ billing = "subscription"
     assert code == 3
     assert results[0]["probes"]["continuation"]["status"] == "unknown"
     assert results[0]["ready_for_operator_accept"] is False
+
+
+def _ready_grok_fixture(tmp_path):
+    path = write_acceptance(tmp_path, """
+[pools.grok]
+accepted = false
+identity = "xai-oauth-subscription"
+billing = "subscription"
+
+[pools.sipb]
+accepted = false
+identity = "sipb-shared-gpu"
+billing = "gateway"
+""")
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    (evidence / "grok.json").write_text(json.dumps({
+        "schema_version": 1,
+        "continuation": {"ok": True, "note": "ok"},
+    }))
+    return path, evidence
+
+
+def test_record_operator_accept_writes_local_only(monkeypatch, tmp_path, capsys):
+    path, evidence = _ready_grok_fixture(tmp_path)
+    before = path.read_bytes()
+    mtime = path.stat().st_mtime_ns
+    record_path = evidence / "operator-accept.json"
+    monkeypatch.setenv("PI_POOL_ACCEPTANCE", str(path))
+    monkeypatch.setattr(
+        router, "load_snapshot",
+        lambda bypass_memo=False: ({"grok": reading(55), "sipb": reading(40)}, 0.0),
+    )
+
+    # Without --record-accept: ready listed, no local file, toml untouched.
+    rc = pools.main([
+        "probe", "--json", "--pool", "grok", "--pool", "sipb",
+        "--evidence-dir", str(evidence),
+    ])
+    assert rc == 3  # sipb continuation missing
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ready_for_operator_accept"] == ["grok"]
+    assert payload["writes_routing_accepted"] is False
+    assert payload["record_accept"] is None
+    assert not record_path.exists()
+    assert path.read_bytes() == before
+
+    # Opt-in records only the ready pool; refuses inventing sipb; toml untouched.
+    rc = pools.main([
+        "probe", "--json", "--record-accept", "--pool", "grok", "--pool", "sipb",
+        "--evidence-dir", str(evidence),
+    ])
+    assert rc == 3
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["record_accept"]["recorded"] == ["grok"]
+    assert "sipb" in payload["record_accept"]["refused"]
+    assert payload["record_accept"]["writes_routing_accepted"] is False
+    assert path.read_bytes() == before
+    assert path.stat().st_mtime_ns == mtime
+    assert record_path.is_file()
+    stored = json.loads(record_path.read_text())
+    assert stored["schema_version"] == 1
+    assert stored["writes_routing_accepted"] is False
+    assert stored["pools"]["grok"]["all_dimensions_pass"] is True
+    assert stored["pools"]["grok"]["routing_accepted"] is False
+    assert "sipb" not in stored["pools"]
+    assert payload["pools"][0]["operator_accept_recorded"] is True
+
+    # Already-accepted routing pool is not ready; --record-accept invents nothing.
+    path.write_text("""
+[pools.grok]
+accepted = true
+identity = "xai-oauth-subscription"
+billing = "subscription"
+""")
+    monkeypatch.setenv("PI_POOL_ACCEPTANCE", str(path))
+    before2 = path.read_bytes()
+    rc = pools.main([
+        "probe", "--json", "--record-accept", "--pool", "grok",
+        "--evidence-dir", str(evidence),
+    ])
+    assert rc == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["record_accept"]["recorded"] == []
+    assert payload["ready_for_operator_accept"] == []
+    assert path.read_bytes() == before2
+
+
+def test_record_operator_accept_refuses_incomplete(monkeypatch, tmp_path, capsys):
+    path = write_acceptance(tmp_path, """
+[pools.grok]
+accepted = false
+identity = "xai-oauth-subscription"
+billing = "subscription"
+""")
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    before = path.read_bytes()
+    monkeypatch.setenv("PI_POOL_ACCEPTANCE", str(path))
+    monkeypatch.setattr(
+        router, "load_snapshot",
+        lambda bypass_memo=False: ({"grok": reading(55)}, 0.0),
+    )
+    rc = pools.main([
+        "probe", "--json", "--record-accept", "--pool", "grok",
+        "--evidence-dir", str(evidence),
+    ])
+    assert rc == 3
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["record_accept"]["recorded"] == []
+    assert payload["record_accept"]["refused"] == ["grok"]
+    assert not (evidence / "operator-accept.json").exists()
+    assert path.read_bytes() == before
+    assert pools.load_acceptance(path)["grok"]["accepted"] is False
+
+
+def test_probe_next_hint_shell_quotes_pool_names(monkeypatch, tmp_path, capsys):
+    """Text next-step hint must shlex.quote pool names (Codex P1 on #468 tip)."""
+    import shlex
+
+    weird = "weird pool;rm"
+    path = write_acceptance(
+        tmp_path,
+        f'''
+[pools."{weird}"]
+accepted = false
+identity = "xai-oauth-subscription"
+billing = "subscription"
+''',
+    )
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    (evidence / f"{weird}.json").write_text(json.dumps({
+        "schema_version": 1,
+        "continuation": {"ok": True, "note": "ok"},
+    }))
+    monkeypatch.setenv("PI_POOL_ACCEPTANCE", str(path))
+    monkeypatch.setattr(
+        router, "load_snapshot",
+        lambda bypass_memo=False: ({weird: reading(55)}, 0.0),
+    )
+    rc = pools.main([
+        "probe", "--pool", weird, "--evidence-dir", str(evidence),
+    ])
+    assert rc == 0
+    out = capsys.readouterr().out
+    hint_lines = [ln for ln in out.splitlines() if ln.startswith("# next (opt-in")]
+    assert len(hint_lines) == 1
+    hint = hint_lines[0]
+    assert "ade-pi-pools probe --record-accept" in hint
+    assert f"--pool {shlex.quote(weird)}" in hint
+    assert "--pool weird pool;rm" not in hint  # unquoted form must not appear
