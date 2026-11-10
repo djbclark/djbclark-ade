@@ -5,10 +5,12 @@ model: opus
 effort: high
 tools: Read, Grep, Glob, Bash
 ---
-<!-- 2026-10-23 (operator): adversary rounds go to the omp route first,
-     `acp-dispatch omp --model anthropic/claude-opus-5-5 --kind judgment --effort high` (API
-     credits). This agent stays `model: opus` for when omp is unavailable, and the caller passes
-     the Agent tool's `model: "sonnet"` override whenever the Claude windows are short
+<!-- 2026-10-23 (operator; Wave 6 wording 2026-11-09): adversary rounds go to the
+     judgment pool first via `route_agent.py plan --kinds judgment` → Choice.dispatch
+     (`paseo run --provider … [--thinking high] --label ade.kind=judgment --no-wait`).
+     The archived omp API route is not a launch target. This agent stays `model: opus`
+     for when that out-of-process path is unavailable, and the caller passes the Agent
+     tool's `model: "sonnet"` override whenever the Claude windows are short
      (`route_agent.py show`: claude under 30% left on its tightest window; the quota guard that
      said so was deleted 2026-11-07). The 2026-10-20 Claude weekly window ran out 2.6
      days early; Opus Agent-tool sub-agents were ~53% of that burn (the pool policy of the fan-out
@@ -69,16 +71,15 @@ For each request:
    the real HOME and touched 274 Cursor `-shm` files. A dry-run or check mode
    the brief explicitly allows is the one exception, and the brief names it.
 
-7. A probe that exercises `acp-dispatch` pins the runner and checks it before it
-   trusts the result. `dispatch` and `reroute` take `--acp-run <scratch fake>`:
-   pin it, then assert `shlex.split(rec["cmd"])[0]` equals the fake (`cmd` is a
-   shell-quoted string, never index it directly). `resume` has no `--acp-run`:
-   its new record inherits the runner of the record it resumes (`old_cmd[0]`),
-   so before resuming, assert the ORIGINAL scratch record's
-   `shlex.split(rec["cmd"])[0]` equals the fake, and assert the resumed record
-   the same way afterwards; never resume a record whose runner you did not
-   create. 2026-10-25, round 2: a reroute probe omitted the flag, fell through
-   to the live Codex runner, which ran 98 s and sent a real `hermes-ping`.
+7. A probe that exercises a launcher pins a fake before it trusts the result.
+   Prefer the test fake under `$FAKE_PASEO_STATE` / `tests/fakes/paseo` for native
+   `paseo run` / `paseo send` probes — do not invent shim flags (`--acp-run`,
+   `resume`, `reap`) that Wave 6 retired. If a remaining shim test still
+   exposes a runner pin, assert `shlex.split(rec["cmd"])[0]` equals the fake
+   (`cmd` is a shell-quoted string, never index it directly) before and after
+   any continue path; never continue a record whose runner you did not create.
+   2026-10-25, round 2: a reroute probe omitted the pin, fell through to the
+   live Codex runner, which ran 98 s and sent a real `hermes-ping`.
    "No live agent, no network, no notifications" in a brief means exactly this:
    a fake runner pinned and checked, no `hermes-ping`, no fetch.
 

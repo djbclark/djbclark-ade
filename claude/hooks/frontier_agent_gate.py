@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """PreToolUse (Agent): log and ask before an Agent-tool sub-agent runs on a frontier model.
 
-Operator 2026-10-18: Fable is scarce. acp-dispatch gates it, but an Agent-tool sub-agent never
-passes through acp-dispatch: `fable-deep` and `model: fable` reached it unseen (the opencodex
+Operator 2026-10-18: Fable is scarce. Out-of-process slices go through `paseo run` and the
+frontier allowance in `ade_gates` / `config/gates.toml`, but an Agent-tool sub-agent never
+passes that path: `fable-deep` and `model: fable` reached it unseen (the opencodex
 `ocx-*` sub-agents that also did were retired with the proxy on 2026-10-19). Each such call is appended to ~/.local/state/frontier-gate/agent-calls.jsonl and returns
 "ask", so the operator confirms it. Skipped when ACP_OPERATOR_APPROVED names `frontier-agent` or `fable-deep` (any
 frontier sub-agent this session) or FRONTIER_GATE_OFF=1. The script fails open on any error it catches before the call is known
@@ -178,8 +179,8 @@ def _ask(agent, model, what, note):
         "permissionDecisionReason": (
             f"Frontier sub-agent: {agent or 'model ' + model} runs on {what}, which is scarce (operator "
             "2026-10-18). Approve only if this really needs it; ordinary judgment is Opus at high first "
-            "(model: opus; omp Opus next, and codex gpt-6.1-sol at high through acp-dispatch while "
-            "its quota is plentiful, 2026-10-25), everyday work goes through acp-dispatch." + note)}}))
+            "(model: opus; next, route_agent.py plan --kinds judgment → paseo run --provider … while "
+            "codex gpt-6.1-sol quota is plentiful, 2026-10-25), everyday work goes through paseo run." + note)}}))
 
 
 try:
