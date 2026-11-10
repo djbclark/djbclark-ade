@@ -6,8 +6,10 @@ item 4.4 (2026-10-20) tracks them here as **templates**: the live file's structu
 every secret, account id, host name and home path replaced by a placeholder. This is the section 4.2 layout
 (`agents/<tui>/<file>.tmpl`); nothing here is applied yet. The proposal's chezmoi apply (section 4.4) will render
 these with the companion's data, as a `modify_` merge and never a symlink, because each app also writes its own file.
-Chezmoi `modify_` merges for Claude and Codex remain deferred (queue item 12); Phase 1 (2026-11-09) declares secret
-names and field homes without rewriting the apply path.
+Phase 1 (2026-11-09) declares secret names and field homes; the owned-key `modify_` merge helpers for Claude and
+Codex landed 2026-11-10 under `agents/claude/modify_merge.py` and `agents/codex/modify_merge.py` (shared algorithm in
+`agents/modify_merge_lib.py`). Chezmoi source-state wiring that calls them on apply is still deferred (queue item 12);
+the helpers refuse the operator's live `~/.claude/settings.json` and `~/.codex/config.toml` until that slice.
 
 **Current TUIs (Pi sole-TUI policy, 2026-11-09):** Claude Code, Codex, Hermes, and Pi as the sole general-purpose
 third-party client. Pi has **no** `agents/pi/` template here yet (it shares `~/.agents/skills` with Codex via
@@ -21,8 +23,8 @@ targets; the OpenCode template row below is **history only**.
 
 | Template | Live file | Notes |
 |---|---|---|
-| [claude/settings.json.tmpl](claude/settings.json.tmpl) | `~/.claude/settings.json` | Claude Code also writes it (plugins, tui); a merge keeps unowned keys |
-| [codex/config.toml.tmpl](codex/config.toml.tmpl) | `~/.codex/config.toml` | Codex writes `[projects.*]`, `[hooks.state.*]`, `[marketplaces.*]` |
+| [claude/settings.json.tmpl](claude/settings.json.tmpl) | `~/.claude/settings.json` | Claude Code also writes it (plugins, tui); [claude/modify_merge.py](claude/modify_merge.py) keeps unowned keys |
+| [codex/config.toml.tmpl](codex/config.toml.tmpl) | `~/.codex/config.toml` | Codex writes `[projects.*]`, `[hooks.state.*]`, marketplace `last_revision`; [codex/modify_merge.py](codex/modify_merge.py) keeps them |
 | [hermes/config.yaml.tmpl](hermes/config.yaml.tmpl) | `~/.hermes/config.yaml` | Hermes writes it too; `~/.hermes` is its own git repo |
 | [opencode/opencode.json.tmpl](opencode/opencode.json.tmpl) | `~/.config/opencode/opencode.json` | **Retired TUI (2026-11-09).** Kept as an archive template until cleanup; not a current apply target. opencode also read `opencode.jsonc` (a 50-byte `$schema` stub, never templated). |
 
@@ -148,3 +150,20 @@ Exit 0 clean, 1 findings. It needs no live file (CI runs it through `tests/test_
 PyYAML (`uv run --with pyyaml`). A new template goes in `agents/<tui>/`, its live path in `LIVE` in the tool, every
 new field in the Fields table and `companion/*.example`, and every new secret in the Secrets table and
 `secrets/secretspec.toml`.
+
+## Owned-key `modify_` merge helpers (2026-11-10)
+
+Claude and Codex configs are read-modify-write targets: the app also writes the file, so apply must keep unowned
+live keys and only set keys the rendered template owns. The helpers take already-rendered desired content (no
+secret reads here) and a live document:
+
+```
+agents/claude/modify_merge.py --desired RENDERED.json --live LIVE.json [--write OUT.json]
+agents/codex/modify_merge.py  --desired RENDERED.toml --live LIVE.toml [--write OUT.toml]
+```
+
+`--live` defaults to stdin and omit `--write` to print the merge (chezmoi `modify_` shape). Dicts merge
+recursively; lists and scalars from the template replace. Live-only keys stay (Claude plugins/tui extras; Codex
+`[hooks.trust.*]`, `/private/tmp` `[projects.*]`, marketplace `last_revision`). `--write` refuses the real
+`~/.claude/settings.json` and `~/.codex/config.toml`. Shared algorithm: [`modify_merge_lib.py`](modify_merge_lib.py);
+tests in `tests/test_agents_modify_merge.py`.
