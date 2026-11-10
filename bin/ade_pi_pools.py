@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import sys
 import tempfile
 import tomllib
@@ -650,11 +651,16 @@ def main(argv: list[str] | None = None) -> int:
                     + (", ".join(recorded_names) if recorded_names else "(none)")
                 )
                 if not a.record_accept and ready_names:
+                    # Shell-quote pool names: acceptance file names are not
+                    # guaranteed shell-safe (spaces / metacharacters).
+                    next_cmd = "ade-pi-pools probe --record-accept"
+                    if a.pool:
+                        next_cmd += "".join(
+                            f" --pool {shlex.quote(n)}" for n in ready_names
+                        )
                     print(
                         "# next (opt-in local record, no routing change): "
-                        "ade-pi-pools probe --record-accept"
-                        + ("".join(f" --pool {n}" for n in ready_names)
-                           if a.pool else "")
+                        + next_cmd
                     )
                     print(
                         f"# routing still needs accepted=true in {accept} "

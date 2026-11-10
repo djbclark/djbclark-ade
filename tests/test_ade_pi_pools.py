@@ -366,3 +366,41 @@ billing = "subscription"
     assert not (evidence / "operator-accept.json").exists()
     assert path.read_bytes() == before
     assert pools.load_acceptance(path)["grok"]["accepted"] is False
+
+
+def test_probe_next_hint_shell_quotes_pool_names(monkeypatch, tmp_path, capsys):
+    """Text next-step hint must shlex.quote pool names (Codex P1 on #468 tip)."""
+    import shlex
+
+    weird = "weird pool;rm"
+    path = write_acceptance(
+        tmp_path,
+        f'''
+[pools."{weird}"]
+accepted = false
+identity = "xai-oauth-subscription"
+billing = "subscription"
+''',
+    )
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    (evidence / f"{weird}.json").write_text(json.dumps({
+        "schema_version": 1,
+        "continuation": {"ok": True, "note": "ok"},
+    }))
+    monkeypatch.setenv("PI_POOL_ACCEPTANCE", str(path))
+    monkeypatch.setattr(
+        router, "load_snapshot",
+        lambda bypass_memo=False: ({weird: reading(55)}, 0.0),
+    )
+    rc = pools.main([
+        "probe", "--pool", weird, "--evidence-dir", str(evidence),
+    ])
+    assert rc == 0
+    out = capsys.readouterr().out
+    hint_lines = [ln for ln in out.splitlines() if ln.startswith("# next (opt-in")]
+    assert len(hint_lines) == 1
+    hint = hint_lines[0]
+    assert "ade-pi-pools probe --record-accept" in hint
+    assert f"--pool {shlex.quote(weird)}" in hint
+    assert "--pool weird pool;rm" not in hint  # unquoted form must not appear
