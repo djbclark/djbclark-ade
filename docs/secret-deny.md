@@ -88,10 +88,11 @@ config change).
     (broad globs such as `id_*` / `*` need the walk to catch `id_rsa` / `server.key` on disk; never allow those after
     set-aside on pattern-only alone). A word that times out twice, an overall-budget timeout while glob words remain,
     a set-aside word that still needs a walk with no budget left, a deferred walk truncated by the shared 2 s
-    glob-walk clock / entry bound, or a first-pass relative/cwd glob truncated the same way (completing slow
-    dummies can start and exhaust that clock under the per-word budget while the first-pass cap equals it, or
-    burn the entry bound while a later relative secret glob still has rem; absolute deep globs still fall back
-    to the pattern check), fails closed (C7).
+    glob-walk clock / entry bound, or a first-pass glob truncated the same way — relative/cwd or
+    absolute/tilde-expanded (completing slow dummies can start and exhaust that clock under the per-word
+    budget while the first-pass cap equals it, or burn the entry bound while a later secret glob still has
+    rem; absolute deep globs keep the pattern fallback only when that shared budget did not truncate),
+    fails closed (C7).
   - **B1d.** Codex `apply_patch` headers (`*** Add File:`, `*** Update File:`, `*** Delete File:`, `*** Move to:`) inside a
     `*** Begin Patch` block, in the command or any other string of a non-file tool. Only a genuine patch payload leaves the
     patch body out of the shell words, so a patch whose code mentions `.env` passes there: the `apply_patch` tool, or a
@@ -198,14 +199,14 @@ config change).
   `_glob_budget_hit` was only checked on deferred retry, so a first-pass relative word that still had
   `FIRST_PASS_S` rem after the shared clock / entry bound was already exhausted truncated, fell back to an
   inconclusive pattern check, cached allow, and never entered deferred — first-pass truncated relative/cwd
-  walks now fail closed too (absolute deep globs keep the pattern fallback). A CI residual the same day:
-  an absolute deep miss (`/*/*/*/zzqq*`) that burned `WORD_S` into deferred, then truncated on `GLOB_S` under
-  a dense `/` tree, was incorrectly refused by the deferred truncate check — deferred truncate fail-closed
-  now matches first-pass and applies only to relative/cwd words; absolute / tilde deep globs keep the
-  pattern fallback. A word that times out twice, an
+  walks now fail closed too. A further residual the same day: that first-pass refuse skipped tokens whose raw
+  text started with `/` or `~`, so an absolute dummy burn then `$ABS/id_*` (or `/tmp/.../id_*`) truncated,
+  fell back to an inconclusive pattern, cached miss, and ALLOWed while relative `id_*` correctly refused —
+  first-pass and deferred truncated absolute/tilde walks now fail closed the same way (absolute deep globs
+  keep the pattern fallback only when the shared budget did not truncate). A word that times out twice, an
   overall-budget timeout while Bash glob words remain unchecked, a set-aside word that still needs a walk with
-  no budget left, a deferred relative/cwd walk truncated by `GLOB_S` / the entry bound, or a first-pass
-  relative/cwd walk truncated the same way, exits 2 with
+  no budget left, a deferred walk truncated by `GLOB_S` / the entry bound, or a first-pass relative/cwd or
+  absolute/tilde walk truncated the same way, exits 2 with
   `glob analysis budget exceeded (fail closed)`: secret paths prefer deny over allow. A later literal path
   (`cat ~/.ssh/id_rsa`) is still checked first and blocks on the deny rule. A directory
   that opens but cannot be read to the end (`/proc/1/map_files`) is skipped by both walks, as the shell and ripgrep

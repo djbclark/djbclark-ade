@@ -25,19 +25,21 @@ a symlinked directory skipped), the pattern itself is checked: it blocks when so
 pattern and no allow pattern, under two rules that keep code and regexes from tripping it: the hidden-file rule (a
 wildcard never consumes a leading `.`) and pinning (the token's wildcards may not stand in for a deny pattern's literal
 text; a cheap test on the token's literals, `**/` read as "" or `/`, skips the rules it cannot spell). So every word gets
-at least that check, `cat ~/.ssh/id_*` and `find . -name '*.key'` block, while `echo *`, `grep 'a.*'` and `ls
-/*/*/*/*/*/*/*/x*` pass. A glob word gets WORD_S on its first try within a shared FIRST_PASS_S cap; one that runs longer is set aside
+at least that check, `cat ~/.ssh/id_*` and `find . -name '*.key'` block, while `echo *` and `grep 'a.*'`
+pass (an absolute deep miss that finishes under the shared glob budget also passes via the pattern check; one
+truncated by that budget fails closed). A glob word gets WORD_S on its first try within a shared FIRST_PASS_S cap; one that runs longer is set aside
 (cached) and retried after every other word: pattern-only first, then a real walk with remaining budget when the
 pattern cannot decide (broad globs such as `id_*` / `*` need the walk to catch `id_rsa` / `server.key` on disk).
 If that walk cannot run, times out, or is truncated by the shared GLOB_S / scan bound (completing slow dummies
 can start and exhaust GLOB_S under WORD_S while FIRST_PASS_S == GLOB_S, or burn MAX_GLOB_SCAN before a later
-relative secret glob), the call fails closed. Absolute deep globs that hit a bound still fall back to the
-pattern check (intentional allow when the pattern is clean). Eight crafted slow words used to spend 8×WORD_S
+secret glob — relative/cwd or absolute/tilde-expanded), the call fails closed. Absolute deep globs whose walk
+was not truncated by that shared budget still fall back to the pattern check (intentional allow when the
+pattern is clean; a truncated walk never cache-allows). Eight crafted slow words used to spend 8×WORD_S
 and fail the call open before a later `cat ~/.ssh/id_*` (docs/secret-deny.md C7, 2026-11-04); the first-pass
 cap and set-aside retry close that: a word that times out twice, an OutOfTime while glob words remain unchecked,
 a set-aside word whose pattern-only check is inconclusive with no walk budget left, a deferred walk truncated
-by GLOB_S / MAX_GLOB_SCAN, or a first-pass relative/cwd glob truncated the same way, fails closed (blocks)
-instead of allowing.
+by GLOB_S / MAX_GLOB_SCAN, or a first-pass glob (relative/cwd or absolute/tilde) truncated the same way,
+fails closed (blocks) instead of allowing.
 
 Grep (2026-11-04): Claude's Grep runs ripgrep with `--hidden`, so it reads dotfiles and descends into `~/.ssh`. Its root
 (`path`, else the cwd) is walked breadth-first (bounded: depth, entries, time shared by every root; VCS dirs and
@@ -1177,8 +1179,9 @@ def check_command(ck: Checker, cmd: str, shell_tool: bool = True):
     last, set-aside words are retried: pattern-only first, then a real walk with remaining budget when the pattern
     cannot decide. A second timeout on one word, an OutOfTime while glob words remain, a set-aside word that still
     needs a walk with no budget left, a deferred walk truncated by GLOB_S / MAX_GLOB_SCAN, or a first-pass
-    relative/cwd glob truncated the same way (expand ticks on truncate; absolute deep globs still use the
-    pattern fallback), fails closed (`GlobBudgetExceeded`) instead of allowing.
+    glob truncated the same way (relative/cwd or absolute/tilde-expanded; expand ticks on truncate; absolute
+    deep globs keep the pattern fallback only when the shared budget did not truncate), fails closed
+    (`GlobBudgetExceeded`) instead of allowing.
 
     For a shell tool (`shell_tool`, the default) every word of the text is analyzed, `*** Begin Patch` regions included:
     the shell runs them (2026-11-06, Cursor review on PR 289: `*** Begin Patch\\ncat ~/.ssh/id_rsa\\n*** End Patch`
@@ -1214,10 +1217,12 @@ def check_command(ck: Checker, cmd: str, shell_tool: bool = True):
             found = ck.word(w, min(WORD_S, rem))
             if found:
                 return found
-            # First-pass relative/cwd walk truncated by GLOB_S / MAX_GLOB_SCAN: expand marks
-            # _glob_budget_hit and falls back to an inconclusive pattern check — refuse, never cache-allow
-            # walk-dependent secrets (`id_*`, `*`). Absolute deep globs keep the pattern fallback (B1c).
-            if ck._glob_budget_hit and not (w.startswith("/") or w.startswith("~")):
+            # First-pass walk truncated by GLOB_S / MAX_GLOB_SCAN: expand marks _glob_budget_hit and may
+            # fall back to an inconclusive pattern check — refuse for relative/cwd and absolute/tilde alike,
+            # never cache-allow walk-dependent secrets (`id_*`, `$ABS/id_*`, `*`). Pattern fallback for
+            # absolute deep globs remains only when the shared budget did not truncate (and when the
+            # pattern itself denies: `if found` above still returns a hit).
+            if ck._glob_budget_hit:
                 raise GlobBudgetExceeded(w)
         while ck.deferred:
             w = ck.deferred.pop(0)
@@ -1238,12 +1243,12 @@ def check_command(ck: Checker, cmd: str, shell_tool: bool = True):
             # Walk timed out: re-enters set_aside and, with aside_count already 1, raises GlobBudgetExceeded.
             # Walk truncated by GLOB_S / MAX_GLOB_SCAN (e.g. completing dummies already burned GLOB_S while
             # FIRST_PASS_S == GLOB_S): expand ticks, but when WORD/DEADLINE still remain the incomplete walk
-            # used to fall through to an inconclusive pattern check and ALLOW — refuse relative/cwd words.
-            # Absolute / tilde deep globs already applied pattern_verdict inside _glob_one (B1c); keep that
-            # fallback so a dense `/` tree that burns GLOB_S on /*/*/*/zzqq* does not fail closed.
-            if ck._glob_budget_hit and not (w.startswith("/") or w.startswith("~")):
+            # used to fall through to an inconclusive pattern check and ALLOW — refuse for relative/cwd and
+            # absolute/tilde alike (same as first-pass). Pattern fallback for absolute deep globs remains
+            # only when the shared budget did not truncate; a deny from pattern_verdict still returns above.
+            if ck._glob_budget_hit:
                 raise GlobBudgetExceeded(w)
-            # Else the walk completed with no hit (verified miss), or absolute/tilde pattern fallback.
+            # Else the walk completed with no hit (verified miss).
     except OutOfTime:
         # Overall budget ended with Bash glob words still unresolved: fail closed (secret paths may remain).
         raise GlobBudgetExceeded(ck.deferred[0] if ck.deferred else (globs[-1] if globs else ""))
