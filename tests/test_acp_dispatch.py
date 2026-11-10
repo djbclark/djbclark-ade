@@ -189,7 +189,9 @@ class TestProviderMapAndArgv(Base):
                 rec = self.dry(agent, model, **extra)
                 argv = rec["argv"]
                 self.assertEqual(argv[1], "run")
-                self.assertEqual(argv[argv.index("--provider") + 1], f"{agent}/{model}")
+                # antigravity folds the effort into the id (paseo_model; high when none is given).
+                want = f"{model}-high" if agent == "antigravity" else model
+                self.assertEqual(argv[argv.index("--provider") + 1], f"{agent}/{want}")
                 # Known providers: YOLO map. Others: fake paseo's defaultMode.
                 self.assertEqual(
                     argv[argv.index("--mode") + 1],
