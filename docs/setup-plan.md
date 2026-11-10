@@ -291,6 +291,12 @@ Keys are saved with `sudo-secretspec`, and also through Paseo if it has a secure
 
 ## S4. Updates and keeping everything current
 
+Current implementation updates the ADE checkout and skill links only; catalog
+dependency `update_argv` entries are recorded but not executed by `just update`.
+The next bounded unit is a pure dependency-update plan: configured candidates
+with installed/version/activity and ownership explicitly unknown, no probes or
+updates. This planning unit does not authorize execution or scheduled apply.
+
 1. **`just update`** updates every installed component in `[install]` with that component's own update command:
    - djbclark-ade itself, as `bin/ade-update` does today (fast-forward, relink, changelog delta);
    - the site repository and the external skills;
