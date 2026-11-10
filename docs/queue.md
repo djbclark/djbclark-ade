@@ -5,6 +5,10 @@ why it is still open (or how it closed), where it lives now. **The full text of 
 history**: `git show pre-slim-2026-11-06:docs/queue.md` (2,114 lines). New work is queued
 under **Carried**, newest first, one line each; an item leaves when it ships (into its doc) or is dropped (say why).
 
+## Stale
+
+1. **CONFLICTING master-bottom PRs** (2026-11-10): eight open PRs conflict with `master` (#194, #208, #227, #231, #256, #269, #270, #290); close/rebase/supersede guidance and the #290 vs #471 recovery split live in `docs/history/conflicting-pr-hygiene-2026-11-10.md`.
+
 ## Carried
 
 1. **Wave 6 shim deletion** (2026-11-09): remove `relay.py`, `acp-dispatch` and `acp-run` after one live cycle (soft deadline 2026-11-20); C3 outside files migrated or waived; keep `review-launch`. Checklist: `docs/slim/wave6-follow-up.md` + `bin/wave6-delete-check` (do not delete until callers, C3 and Mac live-cycle gates pass). Blocked on Mac live-cycle evidence and order-11 C3 ticks. (Absorbs the deletion half of former Carried 33.)
