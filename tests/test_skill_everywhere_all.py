@@ -148,6 +148,31 @@ def test_grokbot_copy_names_the_root_it_came_from(catalog, tmp_path):
     assert run(catalog, "--check", "report", "steps").stdout.count("copied (") == 2
 
 
+def test_grokbot_check_removes_mktemp_when_render_fails(catalog, tmp_path):  # PR 20 LOW e
+    home, public, _, env = catalog
+    env["SKILL_EVERYWHERE_ONLY"] = "grokbot"
+    (home / "agent-data" / "workflows").mkdir(parents=True)
+    skill(public, "steps")
+    assert run(catalog, "steps").returncode == 0  # managed copy present so --check renders to compare
+    bindir = tmp_path / "fakebin"
+    bindir.mkdir()
+    mktemp_log = tmp_path / "mktemp.log"
+    real_mktemp = subprocess.check_output(["bash", "-lc", "command -v mktemp"], text=True).strip()
+    (bindir / "mktemp").write_text(
+        f"#!/bin/sh\nd=$({real_mktemp} -d)\nprintf '%s\\n' \"$d\" >>{mktemp_log}\nprintf '%s\\n' \"$d\"\n"
+    )
+    (bindir / "mktemp").chmod(0o755)
+    (bindir / "gawk").write_text("#!/bin/sh\nexit 1\n")  # render_copy fails after cp
+    (bindir / "gawk").chmod(0o755)
+    env["PATH"] = str(bindir) + os.pathsep + env["PATH"]
+    result = run(catalog, "--check", "steps")
+    # Named --check stays exit 0 for a stale/failed render (only --all raises rc); the leak fix is the mktemp rm.
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "stale copy" in result.stdout and "render for" in result.stderr
+    dirs = [Path(line) for line in mktemp_log.read_text().splitlines() if line]
+    assert dirs and all(not d.exists() for d in dirs), dirs
+
+
 def test_all_dry_run_is_read_only(catalog):
     home, public, _, _ = catalog
     skill(public, "steps")

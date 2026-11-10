@@ -532,17 +532,17 @@ def test_ignored_file_the_pull_would_create_is_exit_2_and_kept(env):  # Codex P1
     _refused_and_untouched(env, "local.txt", "mine\n", "local.txt")
 
 
-def test_a_file_inside_an_ignored_directory_blocks_only_the_path_the_pull_would_overwrite(env):  # Codex P1 on d3ece30
-    # `status -uall --ignored` lists the files of an ignored directory one by one (no `build/` entry); git
-    # overwrites only build/out.bin, so a new build/x beside it is not a collision.
+def test_a_file_inside_an_ignored_directory_blocks_paths_under_the_matching_ignored_dir(env):  # Codex P1 on d3ece30; PR 20 LOW b
+    # `--ignored=matching` reports one `!! build/` row (not every file under it). Any upstream path under
+    # that directory collides with local `build` (ancestor), including a sibling the pull would add.
     (env.machine / ".git" / "info" / "exclude").write_text("build/\n")
     (env.machine / "build").mkdir()
     (env.machine / "build" / "out.bin").write_text("mine\n")
     env.publish({"build/out.bin": "theirs\n", "build/x": "theirs\n"})
     r = env.run("--check", "--json")
-    assert json.loads(r.stdout)["blocked_by"] == ["build/out.bin"], r.stdout + r.stderr
+    assert json.loads(r.stdout)["blocked_by"] == ["build/out.bin", "build/x"], r.stdout + r.stderr
     r = env.run()
-    assert r.returncode == 2 and "build/out.bin" in r.stdout, r.stdout + r.stderr
+    assert r.returncode == 2 and "build/out.bin" in r.stdout and "build/x" in r.stdout, r.stdout + r.stderr
     assert env.head(env.machine) == env.first
     assert (env.machine / "build" / "out.bin").read_text() == "mine\n"
 
@@ -634,6 +634,44 @@ def test_collides_covers_equal_ancestor_and_descendant_paths():
     assert mod.collides({"a", "b/c", "d/e/f", "g", "h/i"}, {"a", "b", "d/", "g/x", "z"}) == {
         "a": "a", "b/c": "b", "d/e/f": "d", "g": "g/x"}
     assert mod.collides({"a"}, set()) == {}
+
+
+def test_collides_casefolds_when_ignorecase():  # PR 20 LOW a
+    mod = load_module()
+    assert mod.collides({"notes.txt"}, {"Notes.txt"}, ignorecase=True) == {"notes.txt": "Notes.txt"}
+    assert mod.collides({"notes.txt"}, {"Notes.txt"}, ignorecase=False) == {}
+    assert mod.collides({"Foo/Bar"}, {"foo"}, ignorecase=True) == {"Foo/Bar": "foo"}
+    assert mod.collides({"readme"}, {"README/x"}, ignorecase=True) == {"readme": "README/x"}
+
+
+def test_case_only_collision_blocks_check_when_core_ignorecase(env):  # PR 20 LOW a
+    # Upstream adds foo.txt while a local untracked Foo.txt exists. With core.ignorecase=true,
+    # `--check` must refuse (apply on a case-insensitive volume would too). A same-path edit of an
+    # already-tracked name is invisible to `git status` under ignorecase on a case-sensitive FS.
+    sh("git", "config", "core.ignorecase", "true", cwd=env.machine)
+    (env.machine / "Foo.txt").write_text("mine\n")
+    env.publish({"foo.txt": "theirs\n"})
+    r = env.run("--check", "--json")
+    out = json.loads(r.stdout)
+    assert r.returncode == 10, r.stdout + r.stderr
+    assert out["ignorecase"] is True
+    assert out["blocked_by"] == ["foo.txt"], r.stdout + r.stderr
+    assert "would refuse (exit 2)" in env.run("--check").stdout
+    assert "would run: git" not in env.run("--check").stdout
+    r = env.run()
+    assert r.returncode == 2 and "foo.txt" in r.stdout, r.stdout + r.stderr
+    assert env.head(env.machine) == env.first
+
+
+def test_run_replaces_non_utf8_bytes_instead_of_crashing(tmp_path):  # PR 20 LOW d
+    mod = load_module()
+    bad = tmp_path / "emit-bad"
+    bad.write_bytes(b"#!/usr/bin/env python3\nimport sys\nsys.stdout.buffer.write(bytes([0xff, 0xfe]) + b'-ok\\n')\n")
+    bad.chmod(bad.stat().st_mode | stat.S_IXUSR)
+    rc, out, err = mod.run([str(bad)])
+    assert rc == 0 and err == ""
+    assert out == "\ufffd\ufffd-ok\n"
+    assert mod.show_path("a\nb\x00c") == "a?b?c"
 
 
 def test_pull_failure_code_maps_an_overwrite_refusal_to_dirty():
@@ -935,6 +973,22 @@ def test_an_inherited_skill_everywhere_only_never_narrows_the_helper_run(tmp_pat
     monkeypatch.setenv("SKILL_EVERYWHERE_ONLY", "claude")
     env = mod.helper_env(tmp_path)
     assert "SKILL_EVERYWHERE_ONLY" not in env and env["SKILL_EVERYWHERE_ADE"] == str(tmp_path / "skills")
+    # PR 20 LOW e: check_skills and link_skills must use helper_env (not a raw os.environ), so an inherited
+    # ONLY never reaches the helper even when the R15-2 helper_env assertion alone would pass.
+    seen = []
+
+    def fake_run(argv, cwd=None, env=None, timeout=None):
+        seen.append(env)
+        if argv[1:2] == ["--check"]:
+            return 0, "== alpha\n  claude        linked\n== end\n", ""
+        return 0, "== alpha\n", ""
+
+    monkeypatch.setattr(mod, "run", fake_run)
+    script = str(tmp_path / "skill-everywhere")
+    mod.check_skills(script, tmp_path, ["alpha"])
+    mod.link_skills(script, tmp_path, ["alpha"])
+    assert len(seen) == 2 and all("SKILL_EVERYWHERE_ONLY" not in e for e in seen)
+    assert all(e["SKILL_EVERYWHERE_ADE"] == str(tmp_path / "skills") for e in seen)
 
 
 def test_a_copy_outside_the_canonical_checkout_warns_on_stderr(env):  # adversary R5-3
