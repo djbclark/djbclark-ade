@@ -5,8 +5,11 @@ this machine: what they were for, why they left, the gotchas worth remembering, 
 support lived. The keep/retire map starts from the consolidation plan ("the plan": PR 283,
 `docs/tui-consolidation.md` at commit `2c22ba5b`, snapshot 2026-11-04 10:10-10:40 EST) and is
 **superseded where djbclark's rulings of 2026-11-04 differ** ("the rulings"): **pi folds into omp;
-cline retires** (ClinePass may live outside the Cline client). Evidence pointers are repo-relative
-paths, commits/PRs, or dated sessions; private memory notes are restated as technical lessons only.
+cline retires** (ClinePass may live outside the Cline client). That keep/retire map is itself
+**superseded again on 2026-11-08** (Pi-only third-party client; queue item 36): **Pi is the sole
+third-party TUI**; omp, OpenCode and Crush are archived and never fallbacks. Evidence pointers are
+repo-relative paths, commits/PRs, or dated sessions; private memory notes are restated as technical
+lessons only.
 
 ## A. Scope
 
@@ -42,9 +45,15 @@ multi-provider harness; keep both omp and opencode per ruling 2026-11-04), **`he
 gateway, never a coding target).
 
 **Superseded 2026-11-06/07 (slim-down, `slim/log.md`):** the agy TUI and the grok CLI retired too, and pi retired
-outright (omp kept: "We want to use omp and not pi", 2026-11-07). Kept providers: claude, codex, cursor, antigravity
-(the Paseo provider, not the agy TUI), opencode, omp, hermes, and grok-bot through peer-link. Section H has one dated
-row per retirement.
+outright (omp kept: "We want to use omp and not pi", 2026-11-07). Kept providers *at that date*: claude, codex, cursor,
+antigravity (the Paseo provider, not the agy TUI), opencode, omp, hermes, and grok-bot through peer-link. Section H has
+one dated row per retirement.
+
+**Superseded again 2026-11-08 (Pi-only third-party client, queue item 36):** Pi restored as the sole third-party TUI;
+omp, OpenCode and Crush are archived and never fallbacks (including never automatic routes in `docs/pi-defaults.md`).
+Current kept surfaces: **claude**, **codex**, **cursor**, **antigravity** (Paseo provider), **Pi**, **hermes**
+(messaging), and **grok-bot** through peer-link. H1's "replaced by omp" row is historical for the slim-down only;
+see `docs/pi-defaults.md` and `docs/tui-security-and-pi-migration.md`.
 
 ## B. Cross-cutting lessons
 
@@ -407,18 +416,18 @@ row per retirement.
    credential exclusions as a named exception (plan G3). `feat/fleet-migrate` remains a successor
    with no PR (pi-support session 2026-11-03).
 5. **G5 Plan questions closed or still open.** Closed by ruling: H4 (fold pi → omp) and H3 (cline
-   retires). Still open: H5 (muse, pending; no removal without djbclark's explicit approval to retire it); operational: H1 roster now eight keepers — confirm
-   in G1 docs PR; H2 dsh uninstall vs unrouted trial; H6 X Subscription wait; H7 after the G3
-   verification. Migration order unchanged in spirit: registry/docs → trials (GLM + SIPB via
-   opencode) → re-point routing → machine removal after yes → plan decisions E1–E4. After drain,
-   **this document** plus CHANGELOG/handoff history should be the only intentional mentions of
-   the retired names (plan wave 4).
+   retires); H4 itself was reversed on 2026-11-08 (Pi-only third-party client). Still open historically:
+   H5 (muse — retired 2026-11-06 with approval, H8); operational items from 2026-11-04 (H1 roster,
+   H2 dsh, H6 X Subscription, H7 billing) are superseded by the slim-down and the 2026-11-08 Pi-only
+   ruling. After drain, **this document** plus CHANGELOG/handoff history should be the only
+   intentional mentions of the retired names (plan wave 4), with Pi named as the current sole
+   third-party TUI rather than as a retired client.
 
 ## H. Retired by the slim-down (2026-11-06/07; one row each, `slim/log.md` and `slim/reports/` hold the detail)
 
 | TUI | Retired | Lost on purpose | Replaced by |
 |---|---|---|---|
-| H1 pi | 2026-11-06 (E9), extension 2026-11-07 (Wave 3b) | Pi's measured OpenAI-API pool (`api-only` rank 2) and its fail-closed admission gate; the `pi/extensions/subagent` per-call model/thinking override; `--perm deny` refusals | omp (its native `task` tool, `task`/`smol` roles and agent definitions under `~/.omp/agent/agents/`; ruling 2026-11-07); a per-call override, if wanted, is an upstream request on oh-my-pi |
+| H1 pi | 2026-11-06 (E9), extension 2026-11-07 (Wave 3b); **restored 2026-11-08** as sole third-party TUI (queue item 36) | At slim-down: Pi's measured OpenAI-API pool (`api-only` rank 2) and its fail-closed admission gate; the `pi/extensions/subagent` per-call model/thinking override; `--perm deny` refusals. After 2026-11-08 those losses no longer stand: Pi is current; omp/OpenCode/Crush are the archived clients | Slim-down replacement was omp (ruling 2026-11-07); **reversed 2026-11-08** — Pi kept, omp archived (never a fallback). Dynamic defaults: `docs/pi-defaults.md` |
 | H2 zcode | 2026-11-06 (E9, Wave 3b) | zai GLM-5.3 as a code pool; `--perm read-only`/`deny` enforcement; `zcode-key-auth`'s keep-alive; ten slash wrappers | opencode's built-in `zai-coding-plan` provider (an operator login); `never_route` keeps the account out of discovery |
 | H3 grok CLI | 2026-11-07 (E9c; SuperGrok cancelled in favour of Cursor) | the only `realtime-web` pool; the per-run `GROK_HOME` strip and the grok deny semantics | Cursor's grok model through `cursor-agent` (research, the dialogue Grok seat); grok-bot stays (peer-link, Cursor-billed) |
 | H4 agy (Antigravity TUI) | 2026-11-06 (E9) | `acp-run agy` and its `zed` client-name workaround for the Claude/GPT ids; the agy session adapter | Paseo's `antigravity` provider (the `antigravity-argon` frontier-fallback row was restored by E7) |
