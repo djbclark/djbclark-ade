@@ -22,9 +22,22 @@ CLI = BIN / "ade-model-tiers"
 
 @pytest.fixture(autouse=True)
 def _clear_tiers_cache():
+    # Promotion tests reload the router. Its runtime tier snapshot now stays
+    # fixed until an explicit reload, so restore it as well as the file cache.
+    router = sys.modules.get("route_agent")
+    previous = None
+    if router is not None:
+        previous = (router.POLICY, router.POLICY_PATH, router.POLICY_PROVENANCE,
+                    router.MODEL_TIERS, router.SUBLIMIT_FAMILIES)
     mt.clear_cache()
     yield
     mt.clear_cache()
+    if previous is not None:
+        policy, path, provenance, tiers, families = previous
+        router.POLICY_PATH = path
+        router.apply_policy(policy)
+        router.POLICY_PROVENANCE = provenance
+        router.MODEL_TIERS, router.SUBLIMIT_FAMILIES = tiers, families
 
 
 def test_shipped_file_matches_defaults():

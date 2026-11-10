@@ -4,6 +4,7 @@ Design: docs/history/model-tiers-design.md (S2 loader + S4 promote core).
 Public API used by bin/ade-model-tiers and bin/route_agent.py:
 
   load(path=None) -> Tiers
+  from_dict(data, ...) -> Tiers    # pure effective-tree consumer; legacy load is unchanged
   resolve(vendor, role, route=None) -> str
   classify(model) -> (vendor|None, role|None, status)
   frontier_tokens() -> list[str]
@@ -135,7 +136,7 @@ class Tiers:
 
     data: dict[str, Any]
     path: Path | None = None
-    source: str = "code"  # "file" | "code"
+    source: str = "code"  # "file" | "code" | "effective"
     error: str | None = None
 
     def vendors(self) -> list[str]:
@@ -430,6 +431,39 @@ def _read_toml(path: Path) -> tuple[dict[str, Any] | None, str | None]:
         return None, f"{path}: {e.strerror or e}"
     except (tomllib.TOMLDecodeError, ValueError, RecursionError) as e:
         return None, f"{path}: not valid TOML ({e})"
+
+
+def from_dict(
+    data: dict[str, Any], *, path: Path | None = None, source: str = "effective",
+    error: str | None = None,
+) -> Tiers:
+    """Validate an effective tier tree without file reads or a default fallback.
+
+    Only canonical tier tables are inputs. Report fields such as source/path,
+    frontier_tokens and sublimit_families are never config authority. Preserve
+    legacy load() behavior; effective consumers additionally need the spell map
+    and pool_family types their helpers consume to be safe after overlays.
+    """
+    label = f"effective model tiers ({path})" if path else "effective model tiers"
+    if not isinstance(data, dict):
+        raise TiersError(f"{label}: root must be a table")
+    raw = {key: data[key] for key in ("meta", "rank", "vendor", "model", "former") if key in data}
+    validated = _validate(raw, label=label)
+    for vendor, body in validated["vendor"].items():
+        spell = body.get("spell", {})
+        if not isinstance(spell, dict) or not all(
+            isinstance(key, str) and isinstance(value, str) for key, value in spell.items()
+        ):
+            raise TiersError(f"{label}: vendor.{vendor}.spell must be a string map")
+        for role, pool_body in (body.get("pools") or {}).items():
+            family = pool_body.get("pool_family")
+            if family is not None and (not isinstance(family, str) or not family):
+                raise TiersError(f"{label}: vendor.{vendor}.pools.{role}.pool_family must be a non-empty string")
+    tiers = Tiers(data=validated, path=path, source=source, error=error)
+    # Derive before a runtime consumer publishes any state.
+    frontier_tokens(tiers)
+    sublimit_families(tiers)
+    return tiers
 
 
 def load(path: Path | str | None = None, *, use_cache: bool = True) -> Tiers:

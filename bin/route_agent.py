@@ -284,6 +284,9 @@ def resolve_policy_path() -> Path:
 POLICY_PATH = resolve_policy_path()
 POLICY: dict[str, Any] = {}
 POLICY_PROVENANCE: dict[str, Any] = {}
+MODEL_TIERS: _model_tiers.Tiers
+# Model caps share their provider's subscription windows; refreshed with tiers on reload.
+SUBLIMIT_FAMILIES: tuple[str, ...]
 SERVICE_KEYS = {f.name for f in fields(Service)}
 _SERVICE_REQUIRED = ("name", "cli", "good_at", "billing")
 # The orchestrating session's own model, [lead] in the policy file (2026-10-23).  LEAD_KEYS are
@@ -479,11 +482,11 @@ def apply_policy(data: dict[str, Any]) -> None:
     LEAD_FABLE_ALLOWED = (data.get("lead") or {}).get("fable_lead", False) is True
 
 
-def load_effective_policy(
+def _load_runtime_config(
     *, root: Path | None = None, home: Path | None = None,
     environ: dict[str, str] | None = None,
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Read the runtime routing domain, validating the final overlaid policy.
+) -> tuple[dict[str, Any], dict[str, Any], _model_tiers.Tiers]:
+    """Validate routing and model tiers from one effective-config snapshot.
 
     The effective schema deliberately leaves routing leaves open. Apply the
     pure legacy reader's shape/default contract after all overlays as well;
@@ -496,20 +499,46 @@ def load_effective_policy(
     ade_config.validate_legacy_routing_shape(data, source)
     provenance = {key: effective.provenance[key]
                   for key in ("routing_source", "new_config", "local_config")}
+    info = effective.provenance["model_tiers_info"]
+    tiers = _model_tiers.from_dict(
+        effective.data["model_tiers"],
+        path=Path(effective.provenance["model_tiers_source"]),
+        source=info["source"], error=info["error"],
+    )
+    if any(entry["name"] == "claude" for entry in data["service"]):
+        # A structurally valid tier table may omit a vendor. Validate the
+        # configured Claude service's fallback helpers before publishing state.
+        _model_tiers.pool("claude", "frontier", tiers)
+        _model_tiers.resolve("claude", "judgment", "claude", tiers)
+    return data, provenance, tiers
+
+
+def load_effective_policy(
+    *, root: Path | None = None, home: Path | None = None,
+    environ: dict[str, str] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Read validated runtime routing; leave explicit legacy reads isolated."""
+    data, provenance, _ = _load_runtime_config(root=root, home=home, environ=environ)
     return data, provenance
 
 
 def reload_policy(path: Path | str | None = None) -> dict[str, Any]:
     """Reload effective runtime config, or only the explicit legacy `path`."""
-    global POLICY_PATH, POLICY_PROVENANCE
+    global POLICY_PATH, POLICY_PROVENANCE, MODEL_TIERS, SUBLIMIT_FAMILIES
     if path is None:
-        data, provenance = load_effective_policy()
+        data, provenance, tiers = _load_runtime_config()
     else:
         data = load_policy(path)
         provenance = {"routing_source": str(path), "new_config": None, "local_config": None}
+        tiers = _model_tiers.load(use_cache=False)
+    # Complete tier derivation before apply_policy can publish routing constants.
+    _model_tiers.frontier_tokens(tiers)
+    families = _model_tiers.sublimit_families(tiers) or ("fable",)
     POLICY_PATH = Path(provenance["routing_source"])
     POLICY_PROVENANCE = provenance
     apply_policy(data)
+    MODEL_TIERS = tiers
+    SUBLIMIT_FAMILIES = families
     return data
 
 
@@ -572,7 +601,7 @@ def policy_public() -> dict[str, Any]:
         "opencode_go": json.loads((Path(__file__).resolve().parents[1] / "config/go-model-policy.json").read_text()),
         "lead": dict(POLICY["lead"]) if POLICY.get("lead") else None,
         # Roles → concrete ids (config/model-tiers.toml); promote shifts these without a code change.
-        "model_tiers": _model_tiers.public_dict(),
+        "model_tiers": _model_tiers.public_dict(MODEL_TIERS),
     }
 
 
@@ -750,12 +779,6 @@ def _clean_age(value: Any) -> float | None:
     except (ValueError, TypeError, OverflowError):
         return None
     return x if math.isfinite(x) and x >= 0 else None
-
-
-# pool_family values that are a model cap inside the provider's shared pool, not a pool of
-# their own (Claude's `fable` is at most 50% of the shared weekly, aiuse schema 1.1).
-# Sourced from config/model-tiers.toml [vendor.*.pools] (fallback: ("fable",)).
-SUBLIMIT_FAMILIES = _model_tiers.sublimit_families() or ("fable",)
 
 
 def _merge_caps(a: dict[str, Any] | None, b: dict[str, Any] | None) -> dict[str, Any]:
@@ -1740,11 +1763,11 @@ def suggest_model(svc: Service, kind: str, info: dict[str, Any]) -> str:
             raise ValueError("routine Go routing requires a classified routine model")
     if svc.name == "claude" and kind == "frontier":
         # Prefer the declared frontier pool_family; fall back to "fable" for older snapshots.
-        pool = _model_tiers.pool("claude", "frontier") or {}
+        pool = _model_tiers.pool("claude", "frontier", MODEL_TIERS) or {}
         fam = pool.get("pool_family") or "fable"
         left = (info.get("sublimits") or {}).get(fam)
         if left is not None and left < frontier_gate()["frontier1_min_left"]:
-            judgment = _model_tiers.resolve("claude", "judgment", "claude")
+            judgment = _model_tiers.resolve("claude", "judgment", "claude", MODEL_TIERS)
             model = f"{judgment} --effort high"
     return model
 
@@ -1900,7 +1923,7 @@ def frontier_model_tokens() -> list[str]:
     toks: list[str] = []
     seen: set[str] = set()
     for tok in list((POLICY.get("dispatch") or {}).get("frontier_models") or []) + list(
-        _model_tiers.frontier_tokens()
+        _model_tiers.frontier_tokens(MODEL_TIERS)
     ):
         low = str(tok).lower()
         if low and low not in seen:
