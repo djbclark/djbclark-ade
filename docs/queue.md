@@ -28,8 +28,10 @@ under **Carried**, newest first, one line each; an item leaves when it ships (in
 6. **Push on completion** (load-watch agent 96a17744, 2026-10-23): a delegated slice tells its requester "done: title,
    status, report" when its turn ends, instead of waiters polling; candidates are Paseo's `tell-agent` plugin (J6) or the
    dispatch footer. Lives in `docs/orchestration-practices.md`.
-7. **ade-git-guard's open items** (2026-10-25 onward): nothing creates claims yet (wire `ade_claims.py new --ttl` to a
-   Paseo `worktree.create.after` hook; E8 F4), the O2 redesign's residual (writes outside the caller's claimed workspace,
+7. **ade-git-guard's open items** (2026-10-25 onward; W2–W4 landed 2026-11-10): `plugins/ade-claim/` scaffolds
+   landed (#336 worktree claim, #355 `ADE_CLAIM_ID` + bind-owner, #357 `libexec/agent-bin` on PATH, #381
+   release-on-archive + install-on-create). Still open: live claim creation on the Mac (`paseo plugin install` +
+   observe/`new --ttl` hook path; E8 F4), the O2 redesign's residual (writes outside the caller's claimed workspace,
    with failing tests and an adversary round), the six-case enforcement pilot (S4) before any hard refusal, and the
    optional narrowing E8 declined (F3: a security decision for the operator). Lives in `docs/git-guard.md`.
 8. **Drop the brew Paseo for our fork** (2026-10-24): disruptive, **ask the operator first**; after the connected-hosts work.
@@ -48,10 +50,11 @@ under **Carried**, newest first, one line each; an item leaves when it ships (in
 15. **`ade-backup-stores` LOWs and schedule** (PR 24 rounds 4-22): a launchd schedule, a generation retention,
     `O_NOFOLLOW` walks, the unscrubbed `.part`; and scrub or delete the first generation (it predates the credential
     scrub). Lives in `bin/ade-backup-stores`.
-16. **First release tag and `ade-update` LOWs** (2026-10-20; plist scaffold 2026-11-09): tag once CI, rule 10 and
-    `ade-update` are settled (the final slim-down PR is a natural point). Daily `--check` plist is
-    `config/launchd/com.djbclark.ade-update-check.plist` (operator still runs `ade-sched install`); `just update` /
-    `just doctor` / `just install` aliases exist on the transitional catalog.
+16. **First release tag and `ade-update` LOWs** (2026-10-20; plist scaffold 2026-11-09; Linux systemd path #374):
+    tag once CI, rule 10 and `ade-update` are settled (the final slim-down PR is a natural point). Daily `--check`
+    plist is `config/launchd/com.djbclark.ade-update-check.plist` (operator still runs `ade-sched install`); Linux
+    systemd unit path landed (#374); `just update` / `just doctor` / `just install` aliases exist on the
+    transitional catalog. Mac schedule install + first release tag remain.
 17. **Codex Cloud environment** (2026-10-19): blocked upstream (openai/codex#50182, #51585); re-probe after each
     codex-cli release.
 18. **Claude API credits through Pi** (2026-11-08): the API check was billing-blocked; re-check only after funding
