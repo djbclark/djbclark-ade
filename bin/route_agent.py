@@ -476,11 +476,49 @@ def apply_policy(data: dict[str, Any]) -> None:
     LEAD_FABLE_ALLOWED = (data.get("lead") or {}).get("fable_lead", False) is True
 
 
+def load_routing_effective(*, root: Path | None = None) -> tuple[dict[str, Any], Path]:
+    """Routing domain via ade_config.load_effective (legacy routing.toml when ade.toml is absent).
+
+    Honours ROUTING_POLICY isolation the same way as ade-config. Returns
+    ``(policy_dict, source_path)`` in the shape ``apply_policy`` expects.
+    Keep ``load_policy(path)`` for tests that feed an arbitrary temp file.
+    """
+    import copy
+
+    here = str(Path(__file__).resolve().parent)
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    import ade_config
+
+    root_path = (root or Path(__file__).resolve().parent.parent).resolve()
+    try:
+        eff = ade_config.load_effective(root=root_path)
+    except ade_config.ConfigError as e:
+        raise ValueError(str(e)) from e
+
+    data: dict[str, Any] = {}
+    for key in ade_config.ROUTING_DOMAIN_KEYS:
+        if key in eff.data:
+            data[key] = copy.deepcopy(eff.data[key])
+
+    # Schema-backed ade.toml may omit optional pipeline_effort; match load_policy.
+    lead = data.get("lead")
+    if isinstance(lead, dict):
+        lead.setdefault("pipeline_effort", LEAD_PIPELINE_EFFORT_DEFAULT)
+
+    src = eff.provenance.get("routing_source")
+    source = Path(src) if isinstance(src, str) and src else resolve_policy_path()
+    return data, source
+
+
 def reload_policy(path: Path | str | None = None) -> dict[str, Any]:
-    """Re-read ROUTING_POLICY (or `path`) and re-apply. Used by tests."""
+    """Re-read policy and re-apply. Explicit ``path`` uses ``load_policy``; else ``load_effective``."""
     global POLICY_PATH
-    POLICY_PATH = Path(path) if path is not None else resolve_policy_path()
-    data = load_policy(POLICY_PATH)
+    if path is not None:
+        POLICY_PATH = Path(path)
+        data = load_policy(POLICY_PATH)
+    else:
+        data, POLICY_PATH = load_routing_effective()
     apply_policy(data)
     return data
 
@@ -611,7 +649,7 @@ def policy_markdown() -> str:
     return "\n".join(lines) + "\n"
 
 
-apply_policy(load_policy(POLICY_PATH))
+reload_policy()
 
 
 # -- quota snapshot + service discovery ----------------------------------

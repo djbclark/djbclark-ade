@@ -4,9 +4,11 @@ First bounded S1/S2 unit: effective config loader (`bin/ade_config.py`),
 CLI (`bin/ade-config check|get|diff|set`), checked-in JSON Schema (`config/ade.schema.json`),
 and thin `just config-check`. Comment-preserving atomic `set` landed 2026-11-08.
 **2026-11-09:** `bin/ade_gates.load_frontier` adopts `ade_config.load_effective` (legacy
-`gates.toml` / `GATES_TOML` when `ade.toml` is absent). `bin/route_agent.py` still reads
-`routing.toml` directly; its adoption is a later unit. Do not ship tracked `config/ade.toml`
-yet (`ade-install` refuses while it is present).
+`gates.toml` / `GATES_TOML` when `ade.toml` is absent). **Same day:** `bin/route_agent.py`
+module init and `reload_policy()` (no explicit path) adopt `load_routing_effective` →
+`ade_config.load_effective` (legacy `routing.toml` / `ROUTING_POLICY` when `ade.toml` is
+absent); `load_policy(path)` remains for tests that feed a temp file. Do not ship tracked
+`config/ade.toml` yet (`ade-install` refuses while it is present).
 
 ## A. Mapping table (one explicit projection)
 
@@ -98,11 +100,12 @@ arrays, inline tables, multiline strings, `[[service]]` paths and other unsuppor
 assignment forms are refused clearly. Unrelated complex TOML (including
 `[[service]]` arrays) is preserved byte-for-byte outside the value span.
 
-**Recording vs adoption.** Every successful `set` reports `adoption=recorded-only`:
-the choice is stored in TOML, but `route_agent` / `ade_gates` still read their
-legacy paths directly and have not adopted the effective-config reader. A local
-set is therefore not yet a live routing switch for those consumers. check/get/diff
-keep their no-write / no-auth / no-network contract.
+**Recording vs adoption.** Every successful `set` reports `adoption=recorded-only`
+in the CLI payload (the writer does not re-init live modules). As of 2026-11-09,
+`ade_gates.load_frontier` and `route_agent.reload_policy()` (no path) / module init
+do read through `ade_config.load_effective`, so a local override is live on the next
+frontier load or `reload_policy()` call (not mid-process without a reload).
+check/get/diff keep their no-write / no-auth / no-network contract.
 
 Python **3.11+** is required for standard-library `tomllib`; bootstrap is a later unit.
 
