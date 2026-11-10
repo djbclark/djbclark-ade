@@ -43,6 +43,7 @@ For the migration choices, compatibility names and Linux/macOS handoffs, read
 |---|---|---|
 | `fan-out` | Fans separable work out and collects it: the Agent tool or a Workflow in process, or native `paseo run --no-wait` for a slice in its own worktree, then `paseo wait` / `paseo send` to collect and steer (2026-11-09; Wave 6; the transitional `acp-dispatch` shim leaves ~2026-11-20). | "fan this out", "split this across agents". |
 | `model-routing` | The Claude tier for a role, effort, which pool takes a slice (`route_agent.py plan`), reading quota (aiuse, `paseo usage ls`), the frontier allowance, fallback chains (effort-routing and fallback-chains folded in, 2026-11-07). | Before a multi-agent run or when a quota window is tight. |
+| `watch` | Low-token terminal load inspection, memory churn check, and incident triage (`/watch load`, `/watch`, `/loadwatch`). | `/watch load`, "check load", "triage load spikes". |
 | `dialogue` | A multi-model dialogue that produces one artifact with a final-word model: fixed rounds through pinned routes (a `paseo` route runs `paseo run --no-wait`, then `paseo wait`, and reads the reply file), footers with point ids and dissent. | "have the models chat about it and write X". Script: `skills/dialogue/scripts/dialogue.py`. |
 | `research` | Evidence-grounded research: every claim logged with a verbatim quote, a counter-evidence pass, a script that checks quotes and citations. | "deep research on X". Script: `skills/research/scripts/research_check.py`. |
 
