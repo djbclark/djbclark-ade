@@ -70,6 +70,15 @@ BODY_TRUSTED_EDITOR_LOGINS = frozenset({
 })
 SHA40 = re.compile(r"^[0-9a-f]{40}$")
 
+# Exact docs-template JSON (AGENTS.md / PR-body examples). Invalid JSON on purpose (`APPROVE"|"BLOCK`);
+# agents often leave it unfenced. Treat as documentation, never malformed (2026-11-10, #484).
+_DOCS_TEMPLATE_JSON_COMPACT = '{"verdict":"APPROVE"|"BLOCK","head":"<40-hex>"}'
+
+
+def _is_docs_template_json(raw: str) -> bool:
+    """True for the canonical documentation marker payload (whitespace-insensitive)."""
+    return re.sub(r"\s+", "", raw or "") == _DOCS_TEMPLATE_JSON_COMPACT
+
 
 # ---- adversary verdict ----------------------------------------------------------------------------
 
@@ -593,10 +602,15 @@ def adversary_verdict(body: str, head: str) -> dict:
     # Validate EVERY LIVE marker, so a malformed one beside a good one is still reported.
     parsed: list[dict] = []
     placeholders = 0
+    docs_templates = 0
     for _start, jstart, jend in spans:
         # Parse JSON as written: backticks inside a JSON string are content, while
         # backticks outside strings must never be masked into valid JSON.
         raw = body[jstart:jend]
+        # Unfenced PR-template / AGENTS.md example: not a verdict, not a typo (2026-11-10).
+        if _is_docs_template_json(raw):
+            docs_templates += 1
+            continue
         try:
             doc = json.loads(raw, object_pairs_hook=_strict_object)
         except ValueError as e:
@@ -809,12 +823,17 @@ def adversary_verdict(body: str, head: str) -> dict:
                 "detail": "no adversary-verdict marker in the PR body (prose verdicts are not read)"}
 
     if not parsed:
-        if placeholders and not problems:
-            # Every marker was the template's own placeholder: documentation, not a verdict.
+        if (placeholders or docs_templates) and not problems:
+            # Every marker was documentation (placeholder head and/or the APPROVE"|"BLOCK template).
+            bits = []
+            if placeholders:
+                bits.append(f"{placeholders} marker(s) carry a placeholder head (<40-hex>)")
+            if docs_templates:
+                bits.append(f"{docs_templates} marker(s) are the docs template "
+                            f'(verdict "APPROVE"|"BLOCK")')
             return {"present": False, "verdict": None, "quoted_sha": None, "matches_head": False,
                     "conflict": False, "malformed": False,
-                    "detail": f"{placeholders} marker(s) carry a placeholder head (<40-hex>): "
-                              f"documentation, not a verdict"}
+                    "detail": "; ".join(bits) + ": documentation, not a verdict"}
         # A marker was present but unusable: its OWN outcome, so a typo is visibly a typo.
         return {"present": False, "verdict": None, "quoted_sha": None, "matches_head": False,
                 "conflict": False, "malformed": True,

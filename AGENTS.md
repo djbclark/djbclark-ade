@@ -262,9 +262,11 @@ trusted by the gate without a manual APPROVE marker.
       a BLOCK whose shortened head is not a prefix of this head. A **full 40-hex sha of another commit
       is not malformed**: it is a verdict for a different head, reported as other-head (property 4).
    3. **An APPROVE inside a fenced block or a single-line inline span, or an APPROVE whose head is the
-      template's `<40-hex>` placeholder, is documentation and is ignored.** That is what lets a PR
-      describe this format without tripping its own gate: nothing in those two blanked shapes can
-      approve, and a placeholder approves nothing. A BLOCK is never skipped this way (property 1), and
+      template's `<40-hex>` placeholder, is documentation and is ignored.** The unfenced AGENTS.md /
+      PR-body example payload `{"verdict":"APPROVE"|"BLOCK","head":"<40-hex>"}` is documentation too
+      (2026-11-10, #484), not `malformed`. That is what lets a PR describe this format without tripping
+      its own gate: nothing in those blanked shapes can approve, and a placeholder approves nothing. A
+      BLOCK is never skipped this way (property 1), and
       a **live** BLOCK whose head is the placeholder is `malformed` rather than documentation; a BLOCK
       in code that does not name this head is documentation too (the accepted limit in `_strip_code`). With readable
       structure (including trailing commas), nested object/array fields, a root array, and a head

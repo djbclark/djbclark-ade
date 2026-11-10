@@ -221,6 +221,24 @@ def test_a_placeholder_head_alone_is_documentation_not_malformed() -> None:
     assert "placeholder" in r["detail"]
 
 
+def test_an_unfenced_docs_template_is_documentation_not_malformed() -> None:
+    # Agents paste the AGENTS.md example unfenced into PR bodies; the payload is invalid JSON
+    # (`APPROVE"|"BLOCK`) and used to fail closed as malformed, blocking owner-trust (#484).
+    body = '<!-- adversary-verdict:v1 {"verdict":"APPROVE"|"BLOCK","head":"<40-hex>"} -->'
+    r = adv(body)
+    assert not r["malformed"] and not r["present"], r["detail"]
+    assert "docs template" in r["detail"]
+
+
+def test_an_unfenced_docs_template_does_not_hide_a_same_head_block() -> None:
+    body = (
+        '<!-- adversary-verdict:v1 {"verdict":"APPROVE"|"BLOCK","head":"<40-hex>"} -->\n'
+        + marker("BLOCK")
+    )
+    r = adv(body)
+    assert r["present"] and r["verdict"] == "BLOCK" and r["matches_head"]
+
+
 def test_a_real_marker_inside_a_fence_is_ignored() -> None:
     # The review's argument: the body is author-controlled, so reading fences protects nothing and
     # only creates false blocks. A quoted marker is text, not a claim.
