@@ -1530,12 +1530,16 @@ def test_apply_sched_reconcile_refuses_linked_worktree_root(monkeypatch, tmp_pat
         encoding="utf-8",
     )
     catalog = ai.load_catalog(root=root)
-    rows, rc = ai.apply_sched_reconcile(catalog, dry_run=False, names={"keys-check"})
-    assert rc == 1
-    assert not called
-    assert rows and rows[0]["action"] == "blocked"
-    assert "worktree" in rows[0]["reason"]
-    assert rows[0]["ok"] is False
+    for dry_run in (False, True):
+        called.clear()
+        rows, rc = ai.apply_sched_reconcile(
+            catalog, dry_run=dry_run, names={"keys-check"},
+        )
+        assert rc == 1, dry_run
+        assert not called, dry_run
+        assert rows and rows[0]["action"] == "blocked", dry_run
+        assert "worktree" in rows[0]["reason"], dry_run
+        assert rows[0]["ok"] is False, dry_run
 
 
 def test_apply_sched_reconcile_passes_implicit_ade(monkeypatch, tmp_path):

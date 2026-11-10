@@ -220,7 +220,10 @@ labeled jobs (`--no-reconcile-sched` to skip; `--reconcile-sched` to force when
 `--id` is set). Convenience: `just sched-reconcile-checks` (pass `-- --yes`).
 On a non-write host backend (launchd today on master), apply reports
 `skip-reconcile-backend` and the hand `just *-install` recipes still apply.
-See `docs/scheduling.md`.
+Full-apply reconcile omits `--ade` (passes `ade=None`) so `Job.from_*` keeps
+the linked-worktree refuse, and blocks when the catalog root itself is a linked
+worktree (exit 1 / `blocked`) — run from the primary checkout, or use
+`ade-sched install --ade <persistent-path>`. See `docs/scheduling.md`.
 
 ## G. J6 Paseo plugins (catalog only, 2026-11-10)
 

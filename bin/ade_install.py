@@ -1877,7 +1877,8 @@ def apply_sched_reconcile(
     # Implicit checkout (ade=None): Job.from_* refuses linked worktrees. Passing
     # ade=catalog.root would opt out of that guard (CLI --ade semantics) and let a
     # full apply from a task worktree pin persistent timers at a path deleted after merge.
-    if not dry_run and sched.is_linked_worktree(catalog.root):
+    # Refuse for dry-run too so the plan matches what --yes would do.
+    if sched.is_linked_worktree(catalog.root):
         return ([{
             "id": name,
             "action": "blocked",
