@@ -817,6 +817,50 @@ def test_deferred_walk_fails_closed_when_glob_s_burned_by_completing_dummies(mon
         hook.check_command(ck, cmd)
 
 
+def test_first_pass_walk_fails_closed_when_glob_budget_hit(monkeypatch, tmp_path):
+    """Security HIGH residual (PR 413 tip 220469b): `_glob_budget_hit` was only checked on deferred
+    retry. When FIRST_PASS_S still has rem but MAX_GLOB_SCAN is already exhausted, the first-pass
+    relative `id_*` walk truncates, pattern-only is inconclusive, and the old path cached None and
+    ALLOWed without ever entering deferred. First-pass truncated relative walks must raise
+    GlobBudgetExceeded (absolute deep globs keep the pattern fallback)."""
+    hook = load_hook()
+    (tmp_path / "id_rsa").write_text("PRIVATE\n")
+    for i in range(40):
+        (tmp_path / ("aaa%03d.txt" % i)).write_text("x\n")
+    for i in range(2):
+        (tmp_path / ("zzslow%d.txt" % i)).write_text("x\n")
+    ck = hook.Checker(
+        hook.Policy(["id_rsa", "*.key"], ["*.pub"], homes=[str(tmp_path)], fold=False),
+        str(tmp_path),
+    )
+    assert ck.glob_pattern_only("id_*") is None
+    # Burn the shared scan budget during first-pass dummy walks while FIRST_PASS_S still covers id_*.
+    monkeypatch.setattr(hook, "MAX_GLOB_SCAN", 25)
+    monkeypatch.setattr(hook, "FIRST_PASS_S", 5.0)
+    monkeypatch.setattr(hook, "GLOB_S", 5.0)
+    hook._DEADLINE[0] = time.monotonic() + 10.0
+    with pytest.raises(hook.GlobBudgetExceeded):
+        hook.check_command(ck, "cat zzslow0* zzslow1* id_*")
+
+
+def test_first_pass_alone_id_star_fails_closed_when_scan_truncates(monkeypatch, tmp_path):
+    """Even a lone first-pass relative `id_*` must refuse when MAX_GLOB_SCAN truncates before a deny
+    hit: the pattern check cannot see cwd `id_rsa`, so an incomplete walk must not allow."""
+    hook = load_hook()
+    for i in range(30):
+        (tmp_path / ("aaa%03d.txt" % i)).write_text("x\n")
+    (tmp_path / "id_rsa").write_text("PRIVATE\n")
+    ck = hook.Checker(
+        hook.Policy(["id_rsa", "*.key"], ["*.pub"], homes=[str(tmp_path)], fold=False),
+        str(tmp_path),
+    )
+    assert ck.glob_pattern_only("id_*") is None
+    monkeypatch.setattr(hook, "MAX_GLOB_SCAN", 5)
+    hook._DEADLINE[0] = time.monotonic() + 5.0
+    with pytest.raises(hook.GlobBudgetExceeded):
+        hook.check_command(ck, "cat id_*")
+
+
 # ---- Codex payloads ---------------------------------------------------------------------------------------------------
 def patch(*headers, body="+x\n"):
     return "*** Begin Patch\n" + "".join("%s\n%s" % (h, body) for h in headers) + "*** End Patch\n"

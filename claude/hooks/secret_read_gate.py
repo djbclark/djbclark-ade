@@ -30,11 +30,14 @@ at least that check, `cat ~/.ssh/id_*` and `find . -name '*.key'` block, while `
 (cached) and retried after every other word: pattern-only first, then a real walk with remaining budget when the
 pattern cannot decide (broad globs such as `id_*` / `*` need the walk to catch `id_rsa` / `server.key` on disk).
 If that walk cannot run, times out, or is truncated by the shared GLOB_S / scan bound (completing slow dummies
-can start and exhaust GLOB_S under WORD_S while FIRST_PASS_S == GLOB_S), the call fails closed. Eight crafted slow
-words used to spend 8×WORD_S and fail the call open before a later `cat ~/.ssh/id_*` (docs/secret-deny.md C7,
-2026-11-04); the first-pass cap and set-aside retry close that: a word that times out twice, an OutOfTime while
-glob words remain unchecked, a set-aside word whose pattern-only check is inconclusive with no walk budget left,
-or a deferred walk truncated by GLOB_S / MAX_GLOB_SCAN, fails closed (blocks) instead of allowing.
+can start and exhaust GLOB_S under WORD_S while FIRST_PASS_S == GLOB_S, or burn MAX_GLOB_SCAN before a later
+relative secret glob), the call fails closed. Absolute deep globs that hit a bound still fall back to the
+pattern check (intentional allow when the pattern is clean). Eight crafted slow words used to spend 8×WORD_S
+and fail the call open before a later `cat ~/.ssh/id_*` (docs/secret-deny.md C7, 2026-11-04); the first-pass
+cap and set-aside retry close that: a word that times out twice, an OutOfTime while glob words remain unchecked,
+a set-aside word whose pattern-only check is inconclusive with no walk budget left, a deferred walk truncated
+by GLOB_S / MAX_GLOB_SCAN, or a first-pass relative/cwd glob truncated the same way, fails closed (blocks)
+instead of allowing.
 
 Grep (2026-11-04): Claude's Grep runs ripgrep with `--hidden`, so it reads dotfiles and descends into `~/.ssh`. Its root
 (`path`, else the cwd) is walked breadth-first (bounded: depth, entries, time shared by every root; VCS dirs and
@@ -1173,9 +1176,9 @@ def check_command(ck: Checker, cmd: str, shell_tool: bool = True):
     pattern), then those with `**` (the costly ones), each glob word within WORD_S under a shared FIRST_PASS_S cap;
     last, set-aside words are retried: pattern-only first, then a real walk with remaining budget when the pattern
     cannot decide. A second timeout on one word, an OutOfTime while glob words remain, a set-aside word that still
-    needs a walk with no budget left, or a deferred walk truncated by GLOB_S / MAX_GLOB_SCAN (expand ticks on
-    truncate; incompleteness still fails closed when those deadlines have not yet fired), fails closed
-    (`GlobBudgetExceeded`) instead of allowing.
+    needs a walk with no budget left, a deferred walk truncated by GLOB_S / MAX_GLOB_SCAN, or a first-pass
+    relative/cwd glob truncated the same way (expand ticks on truncate; absolute deep globs still use the
+    pattern fallback), fails closed (`GlobBudgetExceeded`) instead of allowing.
 
     For a shell tool (`shell_tool`, the default) every word of the text is analyzed, `*** Begin Patch` regions included:
     the shell runs them (2026-11-06, Cursor review on PR 289: `*** Begin Patch\\ncat ~/.ssh/id_rsa\\n*** End Patch`
@@ -1211,6 +1214,11 @@ def check_command(ck: Checker, cmd: str, shell_tool: bool = True):
             found = ck.word(w, min(WORD_S, rem))
             if found:
                 return found
+            # First-pass relative/cwd walk truncated by GLOB_S / MAX_GLOB_SCAN: expand marks
+            # _glob_budget_hit and falls back to an inconclusive pattern check — refuse, never cache-allow
+            # walk-dependent secrets (`id_*`, `*`). Absolute deep globs keep the pattern fallback (B1c).
+            if ck._glob_budget_hit and not (w.startswith("/") or w.startswith("~")):
+                raise GlobBudgetExceeded(w)
         while ck.deferred:
             w = ck.deferred.pop(0)
             # Cheap pattern check first (*.key, ~/.ssh/id_*, …). Broad globs (id_*, *) often return None here.
