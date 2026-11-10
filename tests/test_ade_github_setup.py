@@ -308,6 +308,13 @@ def test_ruleset_preview_placeholder_without_app_id(tmp_path):
     assert adv2["integration_id"] == 99
 
 
+def _env_api_body(cfg: ags.GithubConfig) -> dict:
+    """Environment GET/PUT body with the expected deployment_branch_policy."""
+    body = ags.environment_payload(cfg)
+    body["name"] = cfg.github["environment"]
+    return body
+
+
 def _apply_runner_ok(cfg: ags.GithubConfig, *, ruleset_exists: bool = False):
     """Fake gh runner for apply --yes / --verify (no network)."""
     env = cfg.github["environment"]
@@ -315,6 +322,7 @@ def _apply_runner_ok(cfg: ags.GithubConfig, *, ruleset_exists: bool = False):
     app_id = cfg.github.get("app_id") or 4242
     full_ruleset = ags.ruleset_preview(cfg, app_id=app_id)
     full_ruleset["id"] = 9
+    env_body = _env_api_body(cfg)
 
     def runner(argv: list[str]) -> subprocess.CompletedProcess:
         joined = " ".join(argv)
@@ -336,8 +344,12 @@ def _apply_runner_ok(cfg: ags.GithubConfig, *, ruleset_exists: bool = False):
             )
         if f"environments/{env}" in joined and "deployment-branch" not in joined:
             if "-X" in argv and "PUT" in argv:
-                return subprocess.CompletedProcess(argv, 0, stdout="{}\n", stderr="")
-            return subprocess.CompletedProcess(argv, 0, stdout="{}\n", stderr="")
+                return subprocess.CompletedProcess(
+                    argv, 0, stdout=json.dumps(env_body) + "\n", stderr=""
+                )
+            return subprocess.CompletedProcess(
+                argv, 0, stdout=json.dumps(env_body) + "\n", stderr=""
+            )
         if "deployment-branch-policies" in joined:
             if "-X" in argv and "POST" in argv:
                 return subprocess.CompletedProcess(
@@ -401,13 +413,16 @@ def test_apply_yes_api_env_ruleset_refuses_browser(tmp_path):
 def test_apply_yes_refuses_ruleset_without_app_id(tmp_path):
     root = _fixture_root(tmp_path)  # no app_id
     cfg = ags.load_config(root=root)
+    env_body = _env_api_body(cfg)
 
     def runner(argv: list[str]) -> subprocess.CompletedProcess:
         joined = " ".join(argv)
         if "user/installations" in joined:
             return subprocess.CompletedProcess(argv, 0, stdout="[]\n", stderr="")
         if "environments/" in joined and "deployment-branch" not in joined:
-            return subprocess.CompletedProcess(argv, 0, stdout="{}\n", stderr="")
+            return subprocess.CompletedProcess(
+                argv, 0, stdout=json.dumps(env_body) + "\n", stderr=""
+            )
         if "deployment-branch-policies" in joined:
             if "-X" in argv and "POST" in argv:
                 return subprocess.CompletedProcess(argv, 0, stdout="{}\n", stderr="")
@@ -423,17 +438,19 @@ def test_apply_yes_refuses_ruleset_without_app_id(tmp_path):
     assert by_id["app-create"]["action"] == "refuse-browser"
 
 
-def test_apply_yes_updates_existing_ruleset(tmp_path):
+def test_apply_yes_preserves_environment_put_failure(tmp_path):
+    """PUT failure must not become success just because GET finds the env."""
     root = _fixture_root(tmp_path, app_id=4242)
     cfg = ags.load_config(root=root)
-    # Existing ruleset with wrong checks → PUT update.
     env = cfg.github["environment"]
-    want_rs = cfg.github["ruleset_name"]
-    stale = ags.ruleset_preview(cfg, app_id=4242)
-    stale["id"] = 9
-    stale["rules"][0]["parameters"]["required_status_checks"] = [
-        {"context": "adversary-marker", "integration_id": 1}
-    ]
+    # Stale env still readable after a permission-denied PUT.
+    stale = {
+        "name": env,
+        "deployment_branch_policy": {
+            "protected_branches": True,
+            "custom_branch_policies": False,
+        },
+    }
 
     def runner(argv: list[str]) -> subprocess.CompletedProcess:
         joined = " ".join(argv)
@@ -445,7 +462,56 @@ def test_apply_yes_updates_existing_ruleset(tmp_path):
                 stderr="",
             )
         if f"environments/{env}" in joined and "deployment-branch" not in joined:
-            return subprocess.CompletedProcess(argv, 0, stdout="{}\n", stderr="")
+            if "-X" in argv and "PUT" in argv:
+                return subprocess.CompletedProcess(
+                    argv,
+                    1,
+                    stdout="",
+                    stderr="HTTP 403: Resource not accessible by integration\n",
+                )
+            return subprocess.CompletedProcess(
+                argv, 0, stdout=json.dumps(stale) + "\n", stderr=""
+            )
+        return subprocess.CompletedProcess(argv, 1, stdout="", stderr="unexpected\n")
+
+    results, rc = ags.apply_yes(cfg, runner=runner)
+    assert rc == 1
+    by_id = {r["id"]: r for r in results}
+    assert by_id["environment"]["ok"] is False
+    assert by_id["environment"]["action"] == "failed"
+    assert "403" in by_id["environment"]["reason"] or "not accessible" in by_id[
+        "environment"
+    ]["reason"]
+    # Branch ensure is skipped once PUT failed (no false "applied" from GET).
+    assert "environment-branch" not in by_id
+
+
+def test_apply_yes_updates_existing_ruleset(tmp_path):
+    root = _fixture_root(tmp_path, app_id=4242)
+    cfg = ags.load_config(root=root)
+    # Existing ruleset with wrong checks → PUT update.
+    env = cfg.github["environment"]
+    want_rs = cfg.github["ruleset_name"]
+    stale = ags.ruleset_preview(cfg, app_id=4242)
+    stale["id"] = 9
+    stale["rules"][0]["parameters"]["required_status_checks"] = [
+        {"context": "adversary-marker", "integration_id": 1}
+    ]
+    env_body = _env_api_body(cfg)
+
+    def runner(argv: list[str]) -> subprocess.CompletedProcess:
+        joined = " ".join(argv)
+        if "user/installations" in joined:
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout='[{"app_id":4242,"app_slug":"ade-merge-gate"}]\n',
+                stderr="",
+            )
+        if f"environments/{env}" in joined and "deployment-branch" not in joined:
+            return subprocess.CompletedProcess(
+                argv, 0, stdout=json.dumps(env_body) + "\n", stderr=""
+            )
         if "deployment-branch-policies" in joined:
             return subprocess.CompletedProcess(
                 argv, 0, stdout='["master"]\n', stderr=""
@@ -475,6 +541,117 @@ def test_apply_yes_updates_existing_ruleset(tmp_path):
     by_id = {r["id"]: r for r in results}
     assert by_id["ruleset"]["action"] == "updated"
     assert by_id["environment-branch"]["action"] == "skipped"
+
+
+def test_apply_yes_updates_ruleset_with_wrong_scope(tmp_path):
+    """Wrong target/ref/bypass must not be treated as already reconciled."""
+    root = _fixture_root(tmp_path, app_id=4242)
+    cfg = ags.load_config(root=root)
+    env = cfg.github["environment"]
+    want_rs = cfg.github["ruleset_name"]
+    stale = ags.ruleset_preview(cfg, app_id=4242)
+    stale["id"] = 9
+    # Checks + enforcement match, but scope targets a non-default branch.
+    stale["conditions"] = {
+        "ref_name": {"include": ["refs/heads/develop"], "exclude": []}
+    }
+    stale["bypass_actors"] = [
+        {"actor_id": 1, "actor_type": "DeployKey", "bypass_mode": "always"}
+    ]
+    env_body = _env_api_body(cfg)
+    put_seen = {"n": 0}
+
+    def runner(argv: list[str]) -> subprocess.CompletedProcess:
+        joined = " ".join(argv)
+        if "user/installations" in joined:
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout='[{"app_id":4242,"app_slug":"ade-merge-gate"}]\n',
+                stderr="",
+            )
+        if f"environments/{env}" in joined and "deployment-branch" not in joined:
+            return subprocess.CompletedProcess(
+                argv, 0, stdout=json.dumps(env_body) + "\n", stderr=""
+            )
+        if "deployment-branch-policies" in joined:
+            return subprocess.CompletedProcess(
+                argv, 0, stdout='["master"]\n', stderr=""
+            )
+        if "rulesets/9" in joined and "PUT" not in argv:
+            return subprocess.CompletedProcess(
+                argv, 0, stdout=json.dumps(stale) + "\n", stderr=""
+            )
+        if "-X" in argv and "PUT" in argv and "rulesets/9" in joined:
+            put_seen["n"] += 1
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout=json.dumps(ags.ruleset_preview(cfg, app_id=4242)) + "\n",
+                stderr="",
+            )
+        if "rulesets" in joined:
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout=f'[{{"id":9,"name":"{want_rs}","enforcement":"active"}}]\n',
+                stderr="",
+            )
+        return subprocess.CompletedProcess(argv, 1, stdout="", stderr="unexpected\n")
+
+    results, rc = ags.apply_yes(cfg, runner=runner)
+    assert rc == 0, results
+    by_id = {r["id"]: r for r in results}
+    assert by_id["ruleset"]["action"] == "updated"
+    assert put_seen["n"] == 1
+    assert "conditions.ref_name" in by_id["ruleset"]["reason"]
+
+
+def test_verify_fails_ruleset_wrong_scope(tmp_path):
+    root = _fixture_root(tmp_path, app_id=4242)
+    cfg = ags.load_config(root=root)
+    env = cfg.github["environment"]
+    want_rs = cfg.github["ruleset_name"]
+    wrong = ags.ruleset_preview(cfg, app_id=4242)
+    wrong["id"] = 9
+    wrong["target"] = "tag"
+    env_body = _env_api_body(cfg)
+
+    def runner(argv: list[str]) -> subprocess.CompletedProcess:
+        joined = " ".join(argv)
+        if "user/installations" in joined:
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout='[{"app_id":4242,"app_slug":"ade-merge-gate"}]\n',
+                stderr="",
+            )
+        if f"environments/{env}" in joined and "deployment-branch" not in joined:
+            return subprocess.CompletedProcess(
+                argv, 0, stdout=json.dumps(env_body) + "\n", stderr=""
+            )
+        if "deployment-branch-policies" in joined:
+            return subprocess.CompletedProcess(
+                argv, 0, stdout='["master"]\n', stderr=""
+            )
+        if "rulesets/9" in joined:
+            return subprocess.CompletedProcess(
+                argv, 0, stdout=json.dumps(wrong) + "\n", stderr=""
+            )
+        if "rulesets" in joined:
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout=f'[{{"id":9,"name":"{want_rs}","enforcement":"active"}}]\n',
+                stderr="",
+            )
+        return subprocess.CompletedProcess(argv, 1, stdout="", stderr="unexpected\n")
+
+    results, rc = ags.verify(cfg, runner=runner)
+    assert rc == 1
+    by_id = {r["id"]: r for r in results}
+    assert by_id["ruleset"]["action"] == "verify-fail"
+    assert "target" in by_id["ruleset"]["reason"]
 
 
 def test_verify_api_ok(tmp_path):

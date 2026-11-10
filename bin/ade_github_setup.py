@@ -589,6 +589,86 @@ def _checks_match_want(
     return False, "; ".join(parts) or "mismatch"
 
 
+def _deployment_policy_matches(
+    env_obj: Any, want_body: dict[str, Any]
+) -> tuple[bool, str]:
+    """Compare ``deployment_branch_policy`` fields we PUT on the environment."""
+    want_pol = want_body.get("deployment_branch_policy") or {}
+    if not isinstance(env_obj, dict):
+        return False, f"no environment object; want policy={want_pol!r}"
+    got_pol = env_obj.get("deployment_branch_policy")
+    if not isinstance(got_pol, dict):
+        return False, f"missing deployment_branch_policy; want={want_pol!r}"
+    for key in ("protected_branches", "custom_branch_policies"):
+        if key not in want_pol:
+            continue
+        if got_pol.get(key) != want_pol[key]:
+            return False, (
+                f"deployment_branch_policy.{key}: "
+                f"want={want_pol[key]!r} got={got_pol.get(key)!r}"
+            )
+    return True, "deployment_branch_policy matches"
+
+
+def _ruleset_scope_matches(
+    got: dict[str, Any], want: dict[str, Any]
+) -> tuple[bool, str]:
+    """Compare ruleset target, ref conditions, and bypass actors (order-free)."""
+    parts: list[str] = []
+    if got.get("target") != want.get("target"):
+        parts.append(
+            f"target want={want.get('target')!r} got={got.get('target')!r}"
+        )
+
+    def ref_name_sets(conditions: Any) -> tuple[frozenset[Any], frozenset[Any]] | None:
+        if not isinstance(conditions, dict):
+            return None
+        rn = conditions.get("ref_name")
+        if not isinstance(rn, dict):
+            return None
+        include = rn.get("include") or []
+        exclude = rn.get("exclude") or []
+        if not isinstance(include, list) or not isinstance(exclude, list):
+            return None
+        return frozenset(include), frozenset(exclude)
+
+    want_refs = ref_name_sets(want.get("conditions"))
+    got_refs = ref_name_sets(got.get("conditions"))
+    if want_refs != got_refs:
+        parts.append(
+            f"conditions.ref_name want={want_refs!r} got={got_refs!r}"
+        )
+
+    def bypass_keys(actors: Any) -> frozenset[tuple[Any, ...]] | None:
+        if not isinstance(actors, list):
+            return None
+        keys: list[tuple[Any, ...]] = []
+        for actor in actors:
+            if isinstance(actor, dict):
+                keys.append(
+                    (
+                        actor.get("actor_id"),
+                        actor.get("actor_type"),
+                        actor.get("bypass_mode"),
+                    )
+                )
+            else:
+                keys.append((actor,))
+        return frozenset(keys)
+
+    want_bypass = bypass_keys(want.get("bypass_actors") or [])
+    got_bypass = bypass_keys(got.get("bypass_actors") or [])
+    if want_bypass != got_bypass:
+        parts.append(
+            f"bypass_actors want={want.get('bypass_actors')!r} "
+            f"got={got.get('bypass_actors')!r}"
+        )
+
+    if parts:
+        return False, "; ".join(parts)
+    return True, "target/conditions/bypass match"
+
+
 def _result(
     *,
     id: str,
@@ -1035,39 +1115,62 @@ def _apply_environment(
         ["api", "-X", "PUT", f"repos/{cfg.full_name}/environments/{env}"],
         body,
     )
+    # Preserve real PUT failures. Existence via GET after a failed PUT is not
+    # success — the old deployment policy may still be in place (Codex P2).
     if data is None and detail != "empty gh stdout":
-        # PUT may return empty body on some gh versions; treat empty as ok if
-        # a follow-up GET succeeds.
-        get_data, get_detail = _gh_json(
+        results.append(
+            _result(
+                id="environment",
+                action="failed",
+                reason=f"PUT environments/{env}: {detail}",
+                ok=False,
+            )
+        )
+        return results
+
+    env_obj: Any
+    if isinstance(data, dict) and isinstance(
+        data.get("deployment_branch_policy"), dict
+    ):
+        env_obj = data
+    else:
+        # Empty / incomplete successful PUT body: read back and compare policy.
+        env_obj, get_detail = _gh_json(
             run, ["api", f"repos/{cfg.full_name}/environments/{env}"]
         )
-        if get_data is None:
+        if not isinstance(env_obj, dict):
             results.append(
                 _result(
                     id="environment",
                     action="failed",
-                    reason=f"PUT environments/{env}: {detail}; GET: {get_detail}",
+                    reason=(
+                        f"PUT environments/{env} empty/incomplete body; "
+                        f"GET: {get_detail}"
+                    ),
                     ok=False,
                 )
             )
             return results
+
+    pol_ok, pol_detail = _deployment_policy_matches(env_obj, body)
+    if not pol_ok:
         results.append(
             _result(
                 id="environment",
-                action="applied",
-                reason=f"environment {env!r} present after PUT",
-                ok=True,
+                action="failed",
+                reason=f"PUT environments/{env}: {pol_detail}",
+                ok=False,
             )
         )
-    else:
-        results.append(
-            _result(
-                id="environment",
-                action="applied",
-                reason=f"PUT environments/{env} ok",
-                ok=True,
-            )
+        return results
+    results.append(
+        _result(
+            id="environment",
+            action="applied",
+            reason=f"PUT environments/{env} ok ({pol_detail})",
+            ok=True,
         )
+    )
 
     pol_data, pol_detail = _gh_json(
         run,
@@ -1220,7 +1323,18 @@ def _apply_ruleset(
         _ruleset_required_checks(current), checks
     )
     enf_ok = current.get("enforcement") == want["enforcement"]
-    if match and enf_ok:
+    scope_ok, scope_detail = _ruleset_scope_matches(current, want)
+    drift_parts: list[str] = []
+    if not match:
+        drift_parts.append(match_detail)
+    if not enf_ok:
+        drift_parts.append(
+            f"enforcement want={want['enforcement']!r} "
+            f"got={current.get('enforcement')!r}"
+        )
+    if not scope_ok:
+        drift_parts.append(scope_detail)
+    if match and enf_ok and scope_ok:
         return _result(
             id="ruleset",
             action="skipped",
@@ -1228,6 +1342,7 @@ def _apply_ruleset(
             ok=True,
             ruleset_id=rid,
         )
+    drift = "; ".join(drift_parts) or "drift"
     data, detail = _gh_json_body(
         run,
         ["api", "-X", "PUT", f"repos/{cfg.full_name}/rulesets/{rid}"],
@@ -1237,14 +1352,14 @@ def _apply_ruleset(
         return _result(
             id="ruleset",
             action="failed",
-            reason=f"PUT rulesets/{rid}: {detail} (was: {match_detail})",
+            reason=f"PUT rulesets/{rid}: {detail} (was: {drift})",
             ok=False,
             ruleset_id=rid,
         )
     return _result(
         id="ruleset",
         action="updated",
-        reason=f"PUT ruleset {want['name']!r} id={rid} ({match_detail})",
+        reason=f"PUT ruleset {want['name']!r} id={rid} ({drift})",
         ok=True,
         ruleset_id=rid,
     )
@@ -1426,14 +1541,27 @@ def verify(
                 )
             )
     else:
-        results.append(
-            _result(
-                id="environment",
-                action="verify-ok",
-                reason=f"environment {env!r} present",
-                ok=True,
+        want_env = environment_payload(cfg)
+        pol_ok, pol_match = _deployment_policy_matches(env_data, want_env)
+        if pol_ok:
+            results.append(
+                _result(
+                    id="environment",
+                    action="verify-ok",
+                    reason=f"environment {env!r} present ({pol_match})",
+                    ok=True,
+                )
             )
-        )
+        else:
+            results.append(
+                _result(
+                    id="environment",
+                    action="verify-fail",
+                    reason=f"environment {env!r}: {pol_match}",
+                    ok=False,
+                )
+            )
+            rc = 1
         pol_data, pol_detail = _gh_json(
             run,
             [
@@ -1545,14 +1673,15 @@ def verify(
         _ruleset_required_checks(current), want_checks
     )
     enf_ok = current.get("enforcement") == want["enforcement"]
-    if match and enf_ok:
+    scope_ok, scope_detail = _ruleset_scope_matches(current, want)
+    if match and enf_ok and scope_ok:
         results.append(
             _result(
                 id="ruleset",
                 action="verify-ok",
                 reason=(
                     f"ruleset {want['name']!r} id={rid} enforcement="
-                    f"{current.get('enforcement')} checks match "
+                    f"{current.get('enforcement')} checks+scope match "
                     f"(app_id={app_id})"
                 ),
                 ok=True,
@@ -1569,6 +1698,8 @@ def verify(
             )
         if not match:
             parts.append(match_detail)
+        if not scope_ok:
+            parts.append(scope_detail)
         results.append(
             _result(
                 id="ruleset",
