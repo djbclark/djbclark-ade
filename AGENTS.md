@@ -36,6 +36,7 @@ Each doc carries its own summary.
 | [docs/scheduling.md](docs/scheduling.md) | `bin/ade-sched` (2026-11-04): a launchd plist as a launchd agent, systemd user timer or cron; judgment jobs are Paseo schedules |
 | [docs/gates.md](docs/gates.md) | the frontier allowance, `config/gates.toml [frontier]` (trimmed 2026-11-07: the Claude quota gates went with the quota guard) |
 | [docs/deadline.md](docs/deadline.md) | `bin/deadline`: a maximum run time registered before a long command or wait, enforced from outside |
+| [docs/ade-verifycmd.md](docs/ade-verifycmd.md) | ADE-native verify-until-pass (verifyCmd) design (2026-11-10): register argv, exit semantics, deadline/handoff; #425 rejected goal-mode |
 | [docs/checkpoint.md](docs/checkpoint.md) | checkpoint and interruption recovery (2026-11-04, planned) |
 | [docs/ingest-web-ai.md](docs/ingest-web-ai.md) | Carried #23 design/spike (2026-11-10): Gemini/Grok web chats → ADE memory (sources, S1 sink, trust, gates); offline stub only |
 | [docs/context-hygiene.md](docs/context-hygiene.md) | `bin/context-watch` and `bin/context-budget-check`: how full a session is, and what a fresh one costs |
