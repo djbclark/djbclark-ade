@@ -15,6 +15,14 @@ import ade_install as ai  # noqa: E402
 import ade_sched as S  # noqa: E402
 
 
+def test_ade_sched_cli_defers_catalog_import():
+    """Module body must not import ade_install (tomllib/3.11); only list/diff may."""
+    src = (BIN / "ade-sched").read_text(encoding="utf-8")
+    head, _, rest = src.partition("\ndef ")
+    assert "import ade_install" not in head
+    assert "import ade_install as ai" in rest
+
+
 def _run_sched(*args: str, root: Path | None = None) -> subprocess.CompletedProcess:
     argv = [sys.executable, "-I", "-B", str(BIN / "ade-sched"), *args]
     if root is not None:
@@ -163,7 +171,54 @@ def test_diff_unprobeable_scheduler_is_unknown_not_fail(tmp_path):
     by = {r.name: r for r in rows}
     assert by["deadline-sweep"].status == "unknown" and not by["deadline-sweep"].fail
     assert by["context-budget"].status == "unknown" and not by["context-budget"].fail
+    assert by["skillopt-sleep"].status == "unknown" and not by["skillopt-sleep"].fail
     assert not any(r.fail for r in rows)
+
+
+def test_diff_failed_backend_scan_is_unknown_not_empty_missing(tmp_path):
+    """Detection ok + enumeration fail must not report every ADE job missing."""
+    root = _mini_catalog(tmp_path)
+    catalog = ai.load_catalog(root=root)
+    live = S.LiveScan(
+        "cron",
+        (),
+        ("backend scan: crontab read for scan: boom", "paseo not on PATH; paseo schedules not probed"),
+    )
+    rows = S.diff_jobs(catalog.jobs, catalog.retired_jobs, live)
+    by = {r.name: r for r in rows}
+    assert by["deadline-sweep"].status == "unknown" and not by["deadline-sweep"].fail
+    assert "not probed" in by["deadline-sweep"].detail
+    assert by["skillopt-sleep"].status == "unknown" and not by["skillopt-sleep"].fail
+    assert by["context-budget"].status == "unknown"
+    assert not any(r.status == "missing" for r in rows)
+    assert not any(r.fail for r in rows)
+
+
+def test_paseo_schedule_names_timeout_and_launch_are_unavailable():
+    def boom_timeout(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(argv, 30)
+
+    jobs, notes = S.paseo_schedule_names(run=boom_timeout)
+    assert jobs == []
+    assert any("timeout" in n for n in notes)
+    assert any("paseo schedule ls failed" in n for n in notes)
+
+    def boom_launch(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        raise FileNotFoundError("paseo")
+
+    jobs, notes = S.paseo_schedule_names(run=boom_launch)
+    assert jobs == []
+    assert any("launch:" in n for n in notes)
+
+    # diff must treat those notes as unprobeable, not missing.
+    live = S.LiveScan("systemd", (), notes)
+    rows = S.diff_jobs(
+        [{"name": "cb", "kind": "paseo", "owner": "djbclark-ade", "class": "hard",
+          "label": "context-budget", "mode": "auto"}],
+        [],
+        live,
+    )
+    assert rows[-1].status == "unknown" and not rows[-1].fail
 
 
 def test_doctor_includes_job_drift(tmp_path):

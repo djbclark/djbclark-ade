@@ -3,7 +3,7 @@
 The repo's unattended jobs (sweeps, watchers, collectors) are written as launchd plists in [`launchd/`](../launchd/) and
 [`config/launchd/`](../config/launchd/). Those plists stay the **source of truth**. [`bin/ade_sched.py`](../bin/ade_sched.py)
 (a library, issue #279 slice S0) and its CLI [`bin/ade-sched`](../bin/ade-sched) read a plist, fill its placeholders and
-install it on whatever this machine schedules with: (Python 3.10 or later for `ade-sched` itself; `pr-policy` needs 3.11+ for `tomllib` (`context-budget-check`, which also does, runs as a Paseo schedule since 2026-11-06, not through ade-sched), so on Ubuntu 22.04, whose python3 is 3.10, install a newer Python first; 2026-11-04):
+install it on whatever this machine schedules with: (Python 3.10 or later for `ade-sched` install/status/backend itself; `list`/`diff` pull the install catalog and need 3.11+ for `tomllib`, same as `pr-policy` (`context-budget-check`, which also does, runs as a Paseo schedule since 2026-11-06, not through ade-sched), so on Ubuntu 22.04, whose python3 is 3.10, install a newer Python before inventory commands; 2026-11-10):
 
 | backend | what it writes | how it activates |
 | --- | --- | --- |
@@ -68,6 +68,9 @@ Checked-in ADE jobs under `config/launchd/` include `com.djbclark.deadline-sweep
   ownership ledger (`docs/setup-plan.md` S4b).
 - Retired labels that reappear fail doctor; ADE-owned expected labels that are missing fail when
   a host scheduler (or paseo) is probeable. Planned rows without a label stay `planned`.
+- A Paseo probe timeout or launch error, and a host-backend enumeration failure after detection,
+  are `unknown` (unavailable), never a traceback and never an empty-job "all missing" false
+  positive (2026-11-10).
 
 The options go before or after the subcommand.
 

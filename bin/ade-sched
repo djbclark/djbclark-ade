@@ -30,8 +30,10 @@ __NAME__ or @NAME@ left unfilled is exit 2, and so is an EnvironmentVariables na
 launchd; plist key KillMode overrides), TimeoutStartSec=max(3 x StartInterval, 300s) and AccuracySec=1s. On systemd and
 cron, ~/.local/bin:/usr/local/bin:/usr/bin:/bin go first in PATH (plist PATHs are Mac paths).
 
-list/diff read config/install.toml [install.jobs] / [install.retired_jobs] (S4b). diff never unloads any job,
-including foreign owners (Orca/BB/herdr and unknown labels are reported only).
+list/diff read config/install.toml [install.jobs] / [install.retired_jobs] (S4b) and load the install catalog
+only then (so backend/install/status stay usable on Python 3.10 without tomllib). diff never unloads any job,
+including foreign owners (Orca/BB/herdr and unknown labels are reported only). A Paseo probe timeout/launch
+error or a failed host-backend scan is reported as unknown, never as an empty job list.
 
 Overrides (env): ADE_SCHED_LAUNCHCTL, ADE_SCHED_SYSTEMCTL, ADE_SCHED_LOGINCTL, ADE_SCHED_CRONTAB (binaries);
 ADE_SCHED_LAUNCH_AGENTS (default ~/Library/LaunchAgents), ADE_SCHED_UNIT_DIR (default
@@ -55,8 +57,10 @@ import sys
 from pathlib import Path
 
 sys.path[:0] = [d for d in (os.path.dirname(os.path.realpath(__file__)),) if d not in sys.path]   # python3 -I has no script dir
-import ade_install as ai  # noqa: E402
 import ade_sched
+
+# ade_install (and its tomllib via ade_config) is imported only inside list/diff. Other
+# subcommands must stay usable on Python 3.10 hosts (Ubuntu 22.04) that lack tomllib.
 
 
 class _Parser(argparse.ArgumentParser):
@@ -117,6 +121,8 @@ def _catalog_root(a: argparse.Namespace) -> Path:
 
 
 def _cmd_list(a: argparse.Namespace) -> int:
+    import ade_install as ai  # deferred: tomllib/3.11 only needed for catalog list/diff
+
     try:
         catalog = ai.load_catalog(root=_catalog_root(a))
     except ai.InstallError as e:
@@ -139,6 +145,8 @@ def _cmd_list(a: argparse.Namespace) -> int:
 
 
 def _cmd_diff(a: argparse.Namespace) -> int:
+    import ade_install as ai  # deferred: tomllib/3.11 only needed for catalog list/diff
+
     try:
         catalog = ai.load_catalog(root=_catalog_root(a))
     except ai.InstallError as e:

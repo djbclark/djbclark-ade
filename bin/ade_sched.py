@@ -1148,7 +1148,7 @@ def paseo_schedule_names(
     run: Callable[[list[str]], subprocess.CompletedProcess[str]] | None = None,
     which: Callable[[str], str | None] = shutil.which,
 ) -> tuple[list[LiveJob], tuple[str, ...]]:
-    """Names from `paseo schedule ls --json`. Missing paseo is a note, not an error."""
+    """Names from `paseo schedule ls --json`. Missing/unavailable paseo is a note, not an error."""
     notes: list[str] = []
     if run is None:
         if which("paseo") is None:
@@ -1159,7 +1159,15 @@ def paseo_schedule_names(
                 argv, capture_output=True, text=True, check=False, timeout=30,
             )
 
-    proc = run(["paseo", "schedule", "ls", "--json"])
+    try:
+        proc = run(["paseo", "schedule", "ls", "--json"])
+    except subprocess.TimeoutExpired:
+        notes.append("paseo schedule ls failed (timeout)")
+        return [], tuple(notes)
+    except OSError as e:
+        # FileNotFoundError and other launch failures: treat as unavailable, never traceback.
+        notes.append(f"paseo schedule ls failed (launch: {e})")
+        return [], tuple(notes)
     if proc.returncode != 0:
         notes.append(f"paseo schedule ls failed (rc={proc.returncode})")
         return [], tuple(notes)
@@ -1266,9 +1274,16 @@ def diff_jobs(
         live_jobs = tuple(live.get("jobs") or ())
         backend_name = str(live.get("backend") or "unknown")
 
-    # When no host scheduler is reachable, ade-sched jobs are unprobeable (unknown), not missing.
-    sched_probeable = backend_name in BACKENDS
-    paseo_probeable = not any("paseo not on PATH" in n or "paseo schedule ls failed" in n for n in notes)
+    # When no host scheduler is reachable — or detection succeeded but enumeration failed —
+    # ade-sched jobs are unprobeable (unknown), not missing. A failed scan keeps the backend
+    # name in notes ("backend scan: …") so we do not treat an unreadable scheduler as empty.
+    sched_probeable = (
+        backend_name in BACKENDS
+        and not any(n.startswith("backend scan:") for n in notes)
+    )
+    paseo_probeable = not any(
+        "paseo not on PATH" in n or "paseo schedule ls failed" in n for n in notes
+    )
 
     inventory_labels: set[str] = set()
     rows: list[DriftRow] = []
@@ -1328,9 +1343,14 @@ def diff_jobs(
             ))
             continue
         if not sched_probeable:
+            why = (
+                "backend enumeration failed"
+                if any(n.startswith("backend scan:") for n in notes)
+                else f"no host scheduler; backend={backend_name}"
+            )
             rows.append(DriftRow(
                 name, "unknown", owner,
-                f"label {label} not probed (no host scheduler; backend={backend_name})",
+                f"label {label} not probed ({why})",
                 fail=False,
             ))
         elif label in ids:
@@ -1350,8 +1370,21 @@ def diff_jobs(
         name = str(row["name"])
         owner = str(row.get("owner") or "?")
         pattern = str(row.get("label") or "")
-        hits = sorted(i for i in ids if _label_matches(pattern, i))
         inventory_labels.add(pattern)
+        if not sched_probeable:
+            why = (
+                "backend enumeration failed"
+                if any(n.startswith("backend scan:") for n in notes)
+                else f"no host scheduler; backend={backend_name}"
+            )
+            rows.append(DriftRow(
+                name, "unknown", owner,
+                f"retired label {pattern} not probed ({why})",
+                category="retired",
+                fail=False,
+            ))
+            continue
+        hits = sorted(i for i in ids if _label_matches(pattern, i))
         if hits:
             rows.append(DriftRow(
                 name, "present", owner,
