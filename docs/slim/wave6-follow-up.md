@@ -1,9 +1,10 @@
 # Wave 6 follow-up — shim and `acp-run` deletion readiness
 
-Snapshot: 2026-11-10 (status: in-repo §A LIVE_RE callers cleared on tip
-`#498` — `wave6-delete-check --inventory` → `callers_remaining=0`; C3
-`--dry-run` FIXTURE path tightened; Mac live cycle still blocked; soft
-delete ~2026-11-20). Queue Carried **item 1**.
+Snapshot: 2026-11-10 (status: in-repo §A LIVE_RE callers cleared on
+`origin/master` after `#498` — `wave6-delete-check --inventory` →
+`callers_remaining=0` / `gate_exits.callers=0`; C3 `--dry-run` FIXTURE
+path tightened; Mac live cycle still blocked; soft delete ~2026-11-20).
+Queue Carried **item 1**.
 The slim-down's Wave 6 **shipped the shims** (`docs/slim/PLAN.md` F). This doc
 is the **deletion readiness** checklist for the follow-up PR that removes
 `skills/session-finder/relay.py`, `bin/acp-dispatch`, and `tools/acp-run`
@@ -45,7 +46,7 @@ shims.** Soft deadline for relay / dispatch / `acp-run` removal:
 | Caller inventory (§A list) | **ready (inventory)** | `bin/wave6-delete-check --inventory` lists every gated §A hit + `gate_exits` proving coverage; ungated `skills/*/SKILL.md` FAILCLOSED; never Mac-live / never `ready` |
 | Linux-safe Mac partial probes | **ready** | `bin/wave6-mac-proof-capture --linux-safe` (pgrep + optional paseo; launchctl SKIPPED). `wave6-delete-check` reports `mac_not_live` if used as `--evidence` |
 | Mac live cycle | **blocked** | No Darwin host on this cloud/CI path; `--live` refuses non-Darwin; FIXTURE / LINUX-SAFE never count. Needs an operator Mac run of `bin/wave6-mac-proof-capture --live` (§B / §B0) |
-| In-repo callers (§A) | **green (tip `#498`)** | `wave6-delete-check --inventory` → `callers_remaining=0` / `gate_exits.callers=0` on `cursor/wave6-live-re-scrub-f576`; gated skills + bins + `skills/loose` scrubbed. Full check still fails `evidence_missing` (Mac + C3), not `callers_*` |
+| In-repo callers (§A) | **green on `master` (`#498`)** | Confirmed 2026-11-10: `wave6-delete-check --inventory` → `callers_remaining=0` / `gate_exits.callers=0` on `origin/master` (not tip-only). Full check still fails `evidence_missing` (Mac + C3), not `callers_*` |
 | C3 outside migrations (§C) | **open / operator** | Order 11: probes on outside checkouts + migrate/waive proof files; FIXTURE `cmd:` rows document the Linux-safe `rg` shape only — not inventable from CI |
 | Soft delete deadline | **~2026-11-20** | `test_the_shim_is_removed_by_2026_11_20`; deletion PR waits on green evidence |
 
@@ -53,7 +54,7 @@ shims.** Soft deadline for relay / dispatch / `acp-run` removal:
 
 1. **Mac live-cycle proofs** (Darwin only): `bin/wave6-mac-proof-capture --live --out DIR --json`, then merge printed `mac_proofs` into a real `evidence.json` (not the FIXTURE / LINUX-SAFE bundle) and paste B1–B3 stdout into the deletion PR.
 2. **C3 row evidence** for each outside path in §C: either a migrated probe paste in `c3_proofs.<key>`, or a one-line waive in `docs/slim/log.md` copied into that proof file (FIXTURE `cmd:` lines are the Linux-safe shape stand-in only).
-3. **Land the readiness stack** before the deletion PR: #398 → #417 → #441 → #453 → #470 → #472 (all MERGED) + tip `#498` (LIVE_RE scrub to zero callers). Confirm `callers_remaining=0` on master after `#498` merges.
+3. **Readiness stack landed** (#398 → #417 → #441 → #453 → #470 → #472 → `#498`, all MERGED). **Confirmed on `origin/master` 2026-11-10:** `callers_remaining=0` / `gate_exits.callers=0`. Remaining operator supply is Mac live (item 1) + C3 pastes (item 2) only.
 4. **Deletion PR last**: `bin/wave6-delete-check --evidence <json>` must exit 0 (**never** treat `--dry-run`, `--inventory`, FIXTURE, or `--linux-safe` as deletion-ready); keep `bin/review-launch`.
 
 ### Readiness stack (merged; do not treat as delete)
