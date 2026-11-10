@@ -30,11 +30,18 @@ _DEFAULT_FOOTER = _REPO_ROOT / "docs" / "dispatch-footer.md"
 _HOME_FOOTER = Path.home() / "src/djbclark-ade/docs/dispatch-footer.md"
 REPORT_IN_PROMPT = re.compile(r"(/[\w.@~+/-]+-report\.md)\b")
 REPORT_LABELLED = re.compile(r"(?i)report(?: path| file)?\s*(?:is|:|=)\s*`?(/[\w.@~+/-]+-report\.md)\b")
+# Same rule as acp-dispatch check_report_name: Claude Code refuses Write on these basenames.
+CLAUDE_REFUSED_BASENAME = re.compile(r"^(REPORT|SUMMARY|FINDINGS|ANALYSIS).*\.md$", re.IGNORECASE)
 DENY_REASON = (
     "This sub-agent prompt has no delivery footer (~/CLAUDE.md rule 25) and the hook could not build one. "
     "Paste the filled delivery contract from docs/dispatch-footer.md (it starts with '## Delivery "
     "contract') at the end of the prompt with {report} set to <scratchpad>/<name>-report.md, and launch "
     "again; then read that report file, not the final message.")
+
+
+def check_report_name(report: str) -> bool:
+    """False when Claude Code would refuse Write on this report basename (acp-dispatch parity)."""
+    return CLAUDE_REFUSED_BASENAME.match(Path(report).name) is None
 
 
 def slug(text):
@@ -75,6 +82,8 @@ def footer_file():
 
 def footer(report):
     """Fill docs/dispatch-footer.md placeholders; same substitutions as acp-dispatch footer once did."""
+    if not check_report_name(report):
+        return None
     path = footer_file()
     try:
         text = path.read_text()

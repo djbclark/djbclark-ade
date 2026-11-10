@@ -67,6 +67,16 @@ def test_footer_that_cannot_be_built_still_denies(tmp_path):
                env=footer_env(tmp_path, body="no delivery heading here\n"))["permissionDecision"] == "deny"
 
 
+def test_refused_report_basename_still_denies(tmp_path):
+    """Parity with acp-dispatch check_report_name: do not launch an undeliverable Write path."""
+    env = footer_env(tmp_path)
+    out = run({"prompt": "write /tmp/analysis-report.md please"}, env=env)
+    assert out["permissionDecision"] == "deny"
+    out = run({"description": "Summary", "prompt": "do the work"}, env=env)
+    # derived name is summary-report.md — also refused
+    assert out["permissionDecision"] == "deny"
+
+
 def test_footer_present_or_exempt_or_other_tool_passes():
     assert run({"subagent_type": "Explore", "prompt": "x\n## Delivery contract (shared footer)"}) is None
     assert run({"subagent_type": "claude-code-guide", "prompt": "q"}) is None
