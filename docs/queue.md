@@ -11,7 +11,7 @@ under **Carried**, newest first, one line each; an item leaves when it ships (in
 
 ## Carried
 
-1. **Wave 6 shim deletion** (2026-11-09; status 2026-11-10): remove `relay.py`, `acp-dispatch` and `acp-run` after one live cycle (soft deadline 2026-11-20); C3 outside files migrated or waived; keep `review-launch`. Checklist: `docs/slim/wave6-follow-up.md`. **§A confirmed on `origin/master` after `#498`:** `wave6-delete-check --inventory` → `callers_remaining=0` / `gate_exits.callers=0`. C3 `--dry-run` FIXTURE ready/tightened; Mac live still blocked (`mac_not_live`). Tools: `bin/wave6-delete-check` + `bin/wave6-mac-proof-capture`. Operator must supply live Mac proofs + C3 migrate/waive pastes before deletion. (Absorbs the deletion half of former Carried 33.)
+1. **Wave 6 shim deletion** (2026-11-09; status 2026-11-10 bigmac): remove `relay.py`, `acp-dispatch` and `acp-run` after one live cycle (soft deadline 2026-11-20); C3 outside files migrated or waived; keep `review-launch`. Checklist: `docs/slim/wave6-follow-up.md` + [`docs/slim/mac-live-2026-11-10.md`](slim/mac-live-2026-11-10.md). **§A green** (`callers_remaining=0`). **Mac live captured** (archive `18eab71c…`); `wave6-delete-check --evidence` still exit 1: seven C3 rows, B2 inherited label on lead `0cc34651…`, date gate. Pi Grok/Antigravity/SIPB/Go stay `accepted=false`. No deletion PR until gates pass + operator confirms.
 2. **Issue 284 follow-ups** (2026-11-04): the goal / verify-until-pass loop (evaluate the Paseo plugin `37chengshan/goal-mode`
    first), Codex and opencode wiring of `secret_read_gate.py` and `post-edit-check --hook`, a Claude `filesystem.denyRead`
    live trial (template/render landed 2026-11-09 in `agents/claude/settings.json.tmpl` via `bin/render-secret-deny`;
