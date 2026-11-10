@@ -811,6 +811,78 @@ def test_format_patch_repo_format_output_directory_into_foreign_claim_is_refused
     assert not list(a.glob("*.patch"))
 
 
+def test_format_patch_value_short_cluster_does_not_fake_dash_o(tmp_path, state):
+    """HIGH: `-vo.` is reroll-count `o.`, not `-o .`; format.outputDirectory must still be checked."""
+    a, b = two_claimed(tmp_path, state)
+    before = (a / "f").read_text()
+    # -vo. / -So. / -Io. / -Go.: the clustered o is the value-taking short's argument, not -o
+    for cluster in ("-vo.", "-So.", "-Io.", "-Go."):
+        r = run(state, ["-c", f"format.outputDirectory={a}", "format-patch", "-1", cluster], b, who="B")
+        assert refused77(r) and "output-file" in r.stderr, (cluster, r.returncode, r.stderr)
+        assert (a / "f").read_text() == before
+        assert not list(a.glob("*.patch")), cluster
+        assert not list(b.glob("*.patch")), cluster
+    # A real `-o` after a non-value short still counts ( -n is --numbered, then -o .)
+    r = run(state, ["format-patch", "-1", "-no", str(a)], b, who="B")
+    assert refused77(r) and "output-file" in r.stderr, r.stderr
+    assert not list(a.glob("*.patch"))
+
+
+def test_format_patch_git_config_env_does_not_hide_repo_output_directory(tmp_path, state):
+    """HIGH: format-patch ignores legacy GIT_CONFIG; a GIT_CONFIG=/dev/null probe must not treat the target as cwd."""
+    a, b = two_claimed(tmp_path, state)
+    plain(state, ["config", "format.outputDirectory", str(a)], b)
+    before = (a / "f").read_text()
+    r = run(state, ["format-patch", "-1"], b, who="B", GIT_CONFIG=os.devnull)
+    assert refused77(r) and "output-file" in r.stderr, r.stderr
+    assert (a / "f").read_text() == before
+    assert not list(a.glob("*.patch"))
+    assert not list(b.glob("*.patch"))
+
+
+def test_stash_show_relative_output_uses_effective_work_tree(tmp_path, state):
+    """MEDIUM: relative --output joins to --work-tree / GIT_WORK_TREE / core.worktree, not only call.cwd.
+
+    Use an unclaimed alternate work tree: a claimed peer is already refused as foreign-claim (stash is not
+    FOREIGN_READ), which would mask the output-file check this test targets. `-c core.worktree=` from inside
+    a normal checkout is ignored by git (measured 2026-11-10); the repo-local config form is what takes effect.
+    """
+    mine = mk_repo(tmp_path, state, "mine")
+    claim(mine, "B")
+    other = tmp_path / "other"
+    other.mkdir()
+    (mine / "g").write_text("other\nstashed\n")
+    plain(state, ["stash", "push", "-m", "wip", "--", "g"], mine)
+    plain(state, ["--work-tree", str(other), "checkout", "-f", "HEAD"], mine)
+    for args, extra in (
+        (["--work-tree", str(other), "stash", "show", "--output=stolen.out", "-p"], {}),
+        (["stash", "show", "--output=stolen.out", "-p"], {"GIT_WORK_TREE": str(other)}),
+        (["--work-tree", str(other), "stash", "show", "--out=stolen.out", "-p"], {}),
+    ):
+        r = run(state, args, mine, who="B", **extra)
+        assert refused77(r) and "output-file" in r.stderr, (args, extra, r.returncode, r.stderr)
+        assert not (other / "stolen.out").exists(), (args, extra)
+        assert not (mine / "stolen.out").exists(), (args, extra)
+    # Repo-local core.worktree (not -c): git relocates the work tree; relative --output must follow.
+    plain(state, ["config", "core.worktree", str(other)], mine)
+    r = run(state, ["stash", "show", "--output=stolen.out", "-p"], mine, who="B")
+    assert refused77(r) and "output-file" in r.stderr, r.stderr
+    assert not (other / "stolen.out").exists() and not (mine / "stolen.out").exists()
+    plain(state, ["config", "--unset", "core.worktree"], mine)
+    # Resolution itself: relative --output under --work-tree=<peer> is the peer path (defense in depth even
+    # when foreign-claim would also refuse the call).
+    peer = mk_repo(tmp_path, state, "peer")
+    claim(peer, "A")
+    env = base_env(state, who="B")
+    call = ade_claims.parse_git_argv(
+        ["--work-tree", str(peer), "stash", "show", "--output=stolen.out", "-p"], str(mine), env
+    )
+    targets = ade_claims._output_file_targets(call)
+    assert targets is not None and len(targets) == 1
+    assert ade_claims._path_inside(peer, targets[0])
+    assert not ade_claims._path_inside(mine, targets[0])
+
+
 # --- BLOCK-2: abbreviated long options ----------------------------------------------------
 
 @pytest.mark.parametrize("cmd", [

@@ -118,11 +118,13 @@ GIT_CONFIG_* plus the repository's, relative --git-dir/--work-tree/GIT_DIR/GIT_W
      destination, and a copy not at all (measured on git 2.56, 2026-10-25). The git dir and work tree the call lands on are
      asked of git itself (`rev-parse --absolute-git-dir --show-toplevel` under the call's own -C, -c, --git-dir, --work-tree and
      environment); when git cannot answer at all (timeout), the typed values are used and a call that is not read-only is
-     refused while another agent holds a claim (rule workspace-unresolved). Also (O2 residual, 2026-11-09): `stash show
-     --output*` / `--out*` and `format-patch` `-o` / `--output*` / `--output-directory` (and plain `format-patch`, whose
-     default directory is `format.outputDirectory` when set via `-c` / `GIT_CONFIG_*` / repo config, else cwd; unresolved
-     config fails closed) when the output target is not inside the caller's active claimed workspace (`output-file`);
-     `format-patch --stdout` stays allowed (no worktree file write).
+     refused while another agent holds a claim (rule workspace-unresolved). Also (O2 residual, 2026-11-09; follow-ups
+     2026-11-10): `stash show --output*` / `--out*` (relative paths against the effective work tree) and `format-patch`
+     `-o` / `--output*` / `--output-directory` (short clusters honor value-taking `-v`/`-S`/`-I`/`-G`/`-O`) and plain
+     `format-patch` (default directory is `format.outputDirectory` when set via `-c` / `GIT_CONFIG_*` / repo config —
+     probed without legacy `GIT_CONFIG`, which format-patch ignores — else cwd; unresolved config fails closed) when the
+     output target is not inside the caller's active claimed workspace (`output-file`); `format-patch --stdout` stays
+     allowed (no worktree file write).
   5. In my own claimed workspace everything else is allowed.
 Removed in O2 (the hooks replace them): the fetch/pull/remote-update and push dry-run preflights, the `update-ref`, `branch -d|-D|-f`,
 `checkout -B`, `switch -C` and `worktree add -B` target rules, the broader output-file rules (`bundle create`, `config --file`,
@@ -1526,24 +1528,56 @@ OUTPUT_FILE_ALT = ("write the patch with a shell redirect in your own claimed wo
                    "never redirect git's `--output` / `-o` into a tree you do not claim")
 
 
-def _resolve_out_path(cwd: str, value: str) -> str:
-    """Absolute path for an `--output` / `-o` value relative to the call's cwd (empty means cwd itself)."""
+def _resolve_out_path(base: str, value: str) -> str:
+    """Absolute path for an `--output` / `-o` value relative to `base` (empty means `base` itself)."""
     raw = value if value else "."
-    return raw if os.path.isabs(raw) else os.path.join(cwd, raw)
+    return raw if os.path.isabs(raw) else os.path.join(base, raw)
+
+
+# format-patch shorts that take a value and consume the rest of their cluster (or the next argv token when
+# last). Measured 2026-11-10: `-vo.` is `-v`/`--reroll-count` with value `o.`, NOT `-v -o .`; the inherited
+# diff options `-S`/`-I`/`-G`/`-O` do the same. Treating a clustered `o` after one of these as `-o` would
+# skip the `format.outputDirectory` check and allow a write into a foreign claim.
+_FORMAT_PATCH_VALUE_SHORT = frozenset("vSIGO")
+
+
+def _stash_show_output_base(call: GitCall) -> Optional[str]:
+    """Base directory for relative `stash show --output` / `--out` paths.
+
+    Measured 2026-11-10: when git's effective work tree lies outside the process cwd (`--work-tree` /
+    `GIT_WORK_TREE` / `core.worktree`), git chdirs there before opening `--output`, so a relative path
+    lands under that work tree; when cwd is already inside the work tree, relative paths stay relative to
+    cwd. Absolute `--output` paths are unchanged. None when the work tree cannot be resolved (fail closed
+    for relative targets).
+    """
+    kind, _, toplevel = _git_says(call)
+    if kind == "unknown":
+        return None
+    if kind == "ok" and toplevel:
+        if _path_inside(toplevel, call.cwd):
+            return call.cwd
+        return toplevel
+    # bare / none: no work tree to chdir into; relative paths stay at cwd (git may still fail the show)
+    return call.cwd
 
 
 def _format_patch_default_outdir(call: GitCall) -> Optional[str]:
     """Absolute directory plain `format-patch` writes into: `format.outputDirectory` as git would read it for this
     argv (`-c` / `--config-env` / `GIT_CONFIG_*`, then repository / global / system / includes), else cwd.
     None when the effective value cannot be resolved safely (fail closed). Measured 2026-11-09: without `-o`,
-    `git -c format.outputDirectory=<dir> format-patch -1` writes into `<dir>`, not cwd."""
-    rc, out = _call_git(call, "config", "--get", "format.outputDirectory")
+    `git -c format.outputDirectory=<dir> format-patch -1` writes into `<dir>`, not cwd. Measured 2026-11-10:
+    legacy `GIT_CONFIG` is honored by `git config` but ignored by `format-patch`, which still reads repository
+    / global / system `format.outputDirectory` — probe with `GIT_CONFIG` cleared so the helper matches
+    format-patch (a `GIT_CONFIG=/dev/null` that hid the repo value used to treat the target as cwd)."""
+    # Strip legacy GIT_CONFIG from both call.env and the inherited environment (`None` removes it in _run_git).
+    env = {**call.env, "GIT_CONFIG": None}
+    rc, out = _run_git([*_globals(call), "config", "--get", "format.outputDirectory"], 10, env)
     if rc == 0:
         val = out[:-1] if out.endswith("\n") else out
         return _resolve_out_path(call.cwd, val if val else ".")
     if rc == 1:
-        # Unset in every scope git searched. Prefer a value already on this argv / GIT_CONFIG_* if our parser
-        # saw one (belt: `_globals` should have passed those `-c` flags to the helper above).
+        # Unset in every scope format-patch would search. Prefer a value already on this argv / GIT_CONFIG_*
+        # if our parser saw one (belt: `_globals` should have passed those `-c` flags to the helper above).
         cfg = call.cfg("format.outputDirectory")
         return _resolve_out_path(call.cwd, cfg if cfg is not None else ".")
     # git unknown (timeout, cannot start, broken config): still honor a parsed `-c` / GIT_CONFIG_* value;
@@ -1568,6 +1602,7 @@ def _output_file_targets(call: GitCall) -> Optional[list[str]]:
     if sub == "stash":
         if not args or args[0] != "show":
             return None
+        base = _stash_show_output_base(call)
         targets: list[str] = []
         i, n = 1, len(args)
         while i < n:
@@ -1579,12 +1614,19 @@ def _output_file_targets(call: GitCall) -> Optional[list[str]]:
                 # any unique prefix of `output` (git's inclusive parse; matches foreign-workspace `_writes_a_file`)
                 if name and "output".startswith(name):
                     if eq:
-                        targets.append(_resolve_out_path(cwd, val))
+                        raw = val
                     elif i + 1 < n:
-                        targets.append(_resolve_out_path(cwd, args[i + 1]))
+                        raw = args[i + 1]
                         i += 1
                     else:
-                        targets.append(_resolve_out_path(cwd, ""))
+                        raw = ""
+                    abs_raw = raw if raw else "."
+                    if not os.path.isabs(abs_raw):
+                        if base is None:
+                            return []  # relative target, work tree unknown: fail closed
+                        targets.append(_resolve_out_path(base, raw))
+                    else:
+                        targets.append(abs_raw)
             i += 1
         return targets or None
     if sub == "format-patch":
@@ -1620,6 +1662,11 @@ def _output_file_targets(call: GitCall) -> Optional[list[str]]:
                 j = 0
                 while j < len(cl):
                     ch = cl[j]
+                    if ch in _FORMAT_PATCH_VALUE_SHORT:
+                        # Value-taking short: rest of cluster (or next argv token) is its value, not `-o`.
+                        if j + 1 >= len(cl) and i + 1 < n:
+                            i += 1
+                        break
                     if ch == "o":
                         saw_file_or_dir = True
                         if j + 1 < len(cl):
