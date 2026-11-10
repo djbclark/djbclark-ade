@@ -34,8 +34,8 @@ in primary P moving Z's branch: the hook must be in P; the shim also installs it
 non-read command there). The operator's shell and IDEs never go through the shim.
 
 **Hard refusal stays off** until the S4 six-case pilot below passes (queue item 6; staged enforcement of standing
-order 9, adopted 2026-10-25). This page only scaffolds the pilot's cases and pass/fail criteria; it does not enable
-PATH refusal, `~/.local/bin/git`, or any new refuse path.
+order 9, adopted 2026-10-25). Cases and pass/fail criteria are listed below; `bin/ade-claim-pilot` records the live
+metrics without enabling PATH refusal, `~/.local/bin/git`, or any new refuse path.
 
 ## Commands
 
@@ -50,6 +50,7 @@ PATH refusal, `~/.local/bin/git`, or any new refuse path.
 | `ade_claims.py list [--state S] [--json]` | What `claim ls` runs. |
 | `ade_claims.py guard -- GIT_ARGS...` | What the shim runs. |
 | `ade_claims.py hook-ref STATE`, `hook-push REMOTE URL` | What the two hooks run (stdin is git's). |
+| `ade-claim-pilot cases\|record\|status\|show\|clear\|gate` | S4 six-case metrics recorder (2026-11-09). Writes `$ADE_STATE_DIR/s4-pilot.json`; **never** enables hard refusal. `gate` exits 0 only when all six cases are recorded `pass` (still leaves refusal off). Exit 0 ok / gate ready, 1 gate not ready, 2 usage, 3 IO. |
 
 Exit codes: 77 = refused (`EX_NOPERM`); any other code of a shimmed call is the real git's (a call a hook refused ends
 with git's own 128 and `fatal: ... aborted by the reference-transaction hook`). Every `ade_claims.py` subcommand exits 0
@@ -257,7 +258,7 @@ The shim and the hooks are plain bash 3.2 (macOS `/bin/bash`): no `case` inside 
 On 2026-10-30 acp-run began shell-quoting the identity hook command and checking inherited hook pairs
 before treating a nested launch as guarded. A marker whose PARAMETERS transport was stripped is repaired.
 
-## S4 six-case enforcement pilot (scaffold 2026-11-09; pilot before hard refuse)
+## S4 six-case enforcement pilot (scaffold 2026-11-09; recorder 2026-11-09; pilot before hard refuse)
 
 Standing order 9's staged enforcement (adopted 2026-10-25; queue item 6) ends with **S4**: run six representative
 workflows under claim-aware workspaces **before any hard refusal** (before agents are forced through the PATH shim /
@@ -265,17 +266,24 @@ workflows under claim-aware workspaces **before any hard refusal** (before agent
 (PR 190). S1/S2 and the W2–W4 claim wiring are separate open work; this section does not implement them and does **not**
 flip refusal on.
 
-**Gate (explicit):** hard refusal stays off until every case below is run once, recorded with the metrics, and the
-operator accepts the result. A failing case or an unrun case blocks enabling hard refusal; it does not change today's
-rule-only posture. Optional narrowing of the guard (E8 F3) remains an operator security decision outside this pilot.
+**Recorder:** [`bin/ade-claim-pilot`](../bin/ade-claim-pilot) (2026-11-09) is the runnable metrics harness. It lists the
+six cases, records per-case setup delay / disk delta / path-binding failures / false refusals into
+`$ADE_STATE_DIR/s4-pilot.json`, and exposes `status` / `gate`. It never installs the PATH shim, never writes
+`~/.local/bin/git`, and never flips a refuse path — even when `gate` exits 0. Tests: `tests/test_ade_claim_pilot.py`.
+
+**Gate (explicit):** hard refusal stays off until every case below is run once, recorded with the metrics
+(`ade-claim-pilot record …` / `ade-claim-pilot gate`), and the operator accepts the result. A failing case or an unrun
+case blocks enabling hard refusal; it does not change today's rule-only posture. Optional narrowing of the guard
+(E8 F3) remains an operator security decision outside this pilot.
 
 ### Cases and pass/fail
 
 Measure each case for: setup delay, disk use, path-binding failures, and false refusals (a refuse that blocks a
 legitimate owner or named exception). Pass = the workflow completes under a claimed task workspace (or a named
-exception) with no false refusal and no path-binding failure; record the delay and disk figures even on pass. Fail =
-a false refusal, a path-binding failure that stops the workflow, or an unclaimed shared-checkout write that the pilot
-was meant to keep out of.
+exception) with no false refusal and no path-binding failure; record the delay and disk figures even on pass
+(`ade-claim-pilot record CASE --result pass --setup-delay-s … --disk-delta-bytes … --path-binding-failures 0
+--false-refusals 0`). Fail = a false refusal, a path-binding failure that stops the workflow, or an unclaimed
+shared-checkout write that the pilot was meant to keep out of (`--result fail` plus `--false-refusal-reason` as needed).
 
 | # | Case | What to run | Pass | Fail |
 |---|---|---|---|---|
@@ -288,11 +296,12 @@ was meant to keep out of.
 
 ### Test-plan scaffold (optional; not enabled)
 
-Checklist for a later live run (copy into the pilot PR or a run log; do not flip refusal while working the list):
+Checklist for a later live run (copy into the pilot PR or a run log; do not flip refusal while working the list). Use
+`ade-claim-pilot` to write the metrics; leave hard refusal off throughout:
 
 1. [ ] Preconditions: hooks installed on the repos under test (`ade-git-guard install`); claims created with `ade_claims.py new --ttl` (manual or W2 plugin once available); **PATH shim not forced** for the fleet.
-2. [ ] Run cases 1–6 once each; for each, record setup delay, disk delta, path-binding failures (count), false refusals (count + stderr reason).
+2. [ ] Run cases 1–6 once each; for each, `ade-claim-pilot record CASE --result pass|fail --setup-delay-s … --disk-delta-bytes … --path-binding-failures N --false-refusals N [--false-refusal-reason …]`.
 3. [ ] Confirm exit 77 only where a foreign/destructive rule should fire in observe mode; owner and human shells stay exit 0.
 4. [ ] Confirm expired claims free the path (`claim ls` shows `expired`; another owner may claim).
-5. [ ] Operator sign-off that S4 passed → only then schedule hard-refusal enablement (separate change; not this scaffold).
+5. [ ] `ade-claim-pilot gate` exits 0 and the operator signs off that S4 passed → only then schedule hard-refusal enablement (separate change; not this recorder).
 6. [ ] Until that sign-off: keep teaching agents the rule (order 9) without PATH hard refuse.
