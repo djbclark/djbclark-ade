@@ -32,8 +32,10 @@ agent and model with `~/src/djbclark-ade/bin/route_agent.py plan --kinds KIND` (
 
 For lookups, reviews and edits that fit this session's worktree, use the Agent tool (one sub-agent per slice,
 launched together) or a Claude Code Workflow (`/graph-audit` is a worked example). Paste the footer into
-each prompt: `~/src/djbclark-ade/bin/acp-dispatch footer --report <scratchpad>/<name>-report.md` prints it
-filled in (the `agent_footer_gate` hook appends it when a prompt lacks it). Read the report file, never the
+each prompt: `~/src/djbclark-ade/bin/acp-dispatch footer --report <scratchpad>/<name>-report.md --lead "$PASEO_AGENT_ID"`
+prints it filled in (`--lead` defaults to `$PASEO_AGENT_ID` when set, so the completion notice targets the
+requester rather than the literal `main` placeholder; the `agent_footer_gate` hook appends the footer when a
+prompt lacks it). Read the report file, never the
 sub-agent's final message: the harness cuts that at 4,000 characters.
 
 ## 3. Out of process: a slice in its own worktree
@@ -42,7 +44,8 @@ A slice that edits code gets its own linked worktree (AGENTS.md order 9:
 `git worktree add -b NAME ~/src/<repo>-NAME-wt origin/master`) and runs as a Paseo agent there:
 
     ~/src/djbclark-ade/bin/acp-dispatch claude --model sonnet --kind code --name NAME \
-        -f brief.md --workspace <existing-workspace-id> -C ~/src/<repo>-NAME-wt --task TASK --detach --no-wait
+        -f brief.md --workspace <existing-workspace-id> -C ~/src/<repo>-NAME-wt --task TASK \
+        --lead "$PASEO_AGENT_ID" --detach --no-wait
 
 `acp-dispatch` writes `~/.local/state/bigteam/TASK/NAME-brief.md` (your brief plus the footer), gates on
 `load-watch admit` and the agent cap (exit 75: retry later), and runs `paseo run --no-wait` with the
@@ -75,6 +78,12 @@ execution worktree and every repository tool call targets it explicitly. Never t
 - `paseo ls -g --label ade.via=acp-dispatch` shows what runs; `paseo permit ls` the permission cards.
 - `acp-dispatch tell RECORD "message"` reaches a running slice (its inbox plus `paseo send`; `accepted`,
   exit 5, is not proof of delivery: ask for an ack).
+- **Push on completion:** each brief's footer (rule 22) requires the slice, after `DONE` and `{done}`, to
+  `paseo send --json --no-wait` its requester `done: <title>, <PR URL>` (or `done: <title>, <status>[, <report>]`)
+  plus `Please reply: ack <slice id>` — never relay. Prefer
+  `~/src/djbclark-ade/bin/completion-notice --send --requester <lead-id> --title TITLE --pr URL`
+  (or `--status DONE --report PATH`). The lead treats that notice (and the named ack) as the wake-up; do not
+  invent an APPROVE. Prefer the notice over polling `wait` when the slice can reach you.
 - Verify each result against the artifact (the diff, the tests), then
   `acp-dispatch outcome RECORD --ci pass --review pass --merged` for `route_agent.py calibrate`.
 
@@ -84,9 +93,9 @@ Three independent fixes in one repository, one review:
 
 1. Lead writes `a.md`, `b.md`, `c.md` (one owner per file set, the check each slice runs) and three
    worktrees `~/src/r-a-wt`, `~/src/r-b-wt`, `~/src/r-c-wt`.
-2. `acp-dispatch claude --model sonnet --kind code --name a -f a.md --workspace <workspace-a> -C ~/src/r-a-wt --task fixes --detach --no-wait`,
+2. `acp-dispatch claude --model sonnet --kind code --name a -f a.md --workspace <workspace-a> -C ~/src/r-a-wt --task fixes --lead "$PASEO_AGENT_ID" --detach --no-wait`,
    with the separately selected existing workspace for `b` and `c` too (the agent and model from `route_agent.py plan --kinds code`).
 3. While they run, the lead does its own part (standing order 3), then `acp-dispatch wait` on each record.
 4. A BLOCKED report: answer with `acp-dispatch tell`, or re-brief under a new `--name`.
 5. Each DONE slice: review its diff, push its branch, open the PR; one read-only review per PR with
-   `acp-dispatch claude --model sonnet --kind judgment --perm read-only --name rev-a -f review.md --workspace <workspace-a> -C ~/src/r-a-wt`.
+   `acp-dispatch claude --model sonnet --kind judgment --perm read-only --name rev-a -f review.md --workspace <workspace-a> -C ~/src/r-a-wt --lead "$PASEO_AGENT_ID"`.
