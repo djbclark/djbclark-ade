@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -46,33 +47,36 @@ runpy.run_path(path, run_name="__main__")
 
 
 def test_no_arguments_only_print_guidance(tmp_path):
-    # Loading a catalog or invoking any observer is a failure. Audit actual
-    # filesystem/process/network effects as well as the callable boundary.
-    code = '''
-import runpy, sys
-path = sys.argv[1]
-sys.path.insert(0, str(__import__("pathlib").Path(path).parent))
-import ade_install
-def forbidden(*args, **kwargs):
-    raise AssertionError("first-run guidance touched installation state")
-ade_install.load_catalog = forbidden
-def audit(event, args):
-    if event in {"subprocess.Popen", "os.system", "socket.connect", "os.mkdir", "os.remove", "os.rename", "os.symlink"}:
-        forbidden()
-    if event == "open" and isinstance(args[2], int) and args[2] & 3:
-        forbidden()
-sys.addaudithook(audit)
-sys.argv = [path]
-runpy.run_path(path, run_name="__main__")
-'''
-    result = run_isolated(tmp_path, code)
+    # Execute the real shebang on a cold tree, without -B or preimported modules.
+    # A tripwire implementation would write a marker (and normally __pycache__)
+    # before any possible catalog reads, probes or downloads if it were imported.
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    executable = bindir / "ade-install"
+    executable.write_bytes(CLI.read_bytes())
+    executable.chmod(0o755)
+    (bindir / "ade_install.py").write_text(
+        "from pathlib import Path\n"
+        "Path(__file__).with_name('unexpected-import').touch()\n"
+        "raise AssertionError('first-run guidance imported installation code')\n"
+    )
+    home = tmp_path / "home"
+    home.mkdir()
+    def snapshot():
+        return {str(p.relative_to(tmp_path)): p.read_bytes() if p.is_file() else None
+                for p in tmp_path.rglob("*")}
+    before = snapshot()
+    result = subprocess.run(
+        [str(executable)], cwd=tmp_path, env={**os.environ, "HOME": str(home)},
+        capture_output=True, text=True, timeout=15,
+    )
     assert result.returncode == 0, result.stderr
     assert result.stderr == ""
     assert "guidance only; no changes made" in result.stdout
     assert "./bin/ade-install apply --dry-run" in result.stdout
     assert "./bin/ade-install apply --yes --id just" in result.stdout
     assert "bootstrap is not implemented" in result.stdout
-    assert list(tmp_path.iterdir()) == []
+    assert snapshot() == before
 
 
 def test_explicit_commands_keep_parser_and_validation_behavior(tmp_path):
