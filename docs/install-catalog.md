@@ -124,8 +124,13 @@ Pass `--ade` only with a durable checkout (`~/src/djbclark-ade`); never with a l
   while the vault still exists, **FAIL** (`error`) on/after the date while it
   still exists; absent is `ok`. Doctor **never deletes** the vault and never
   reads its contents (deletion waits for operator yes after the date). Missing
-  or failed expected components fail the command; `unknown` is neither healthy
-  nor absent. Doctor does not repair.
+  or failed expected components fail the command (including hard-dep `graft` when
+  `graft --version` is missing or errors); `unknown` is neither healthy
+  nor absent. When `config/pi-pool-acceptance.toml` is present under `--root`,
+  doctor also runs an **advisory** `ade-pi-pools` check: `warn` names every
+  still-UNACCEPTED pool and keeps exit 0; accepted pools (Cursor / Z.ai on the
+  shipped file) stay quiet; doctor never writes `accepted=true` (operator flips
+  the file; docs/pi-defaults.md B4). Doctor does not repair.
 - `keys` is observe-only: bulk presence via `sudo-secretspec check`, then
   per-key `verify_argv` under `sudo-secretspec run` when recorded; no secret
   values.

@@ -73,6 +73,8 @@ def test_repo_install_toml_checks_clean():
     assert by_id["hermes"].get("probe_argv") == ["hermes", "doctor"]
     assert by_id["hermes"].get("update_argv") == ["hermes", "update"]
     assert by_id["hermes"].get("install_argv") is None  # curl|bash; no argv-list yet
+    assert by_id["graft"]["class"] == "hard"
+    assert by_id["graft"].get("probe_argv") == ["graft", "--version"]
     proc = _run("check", "--json", root=REPO)
     assert proc.returncode == 0, proc.stderr
     payload = json.loads(proc.stdout)
@@ -933,3 +935,123 @@ def test_cli_keys_json(tmp_path, monkeypatch):
     kinds = {o["kind"] for o in payload["observations"]}
     assert "secretspec" in kinds
     assert state.is_file()
+
+
+def test_graft_hard_dep_missing_probe_fails_doctor(tmp_path):
+    """Hard-dep graft: missing ``graft --version`` binary fails doctor (exit 1)."""
+    root = tmp_path / "repo"
+    (root / "config").mkdir(parents=True)
+    (root / "config" / "install.schema.json").write_text(
+        (REPO / "config" / "install.schema.json").read_text()
+    )
+    (root / "config" / "install.toml").write_text(
+        "schema_version = 1\n"
+        "[[component]]\n"
+        'id = "graft"\n'
+        'class = "hard"\n'
+        'probe_argv = ["definitely-not-graft-xyz", "--version"]\n'
+        'presence = "definitely-not-graft-xyz"\n'
+    )
+    catalog = ai.load_catalog(root=root)
+    obs, rc = ai.doctor(catalog)
+    by_id = {o.id: o for o in obs if o.kind == "component"}
+    assert by_id["graft"].status == "missing"
+    assert "probe binary not found" in by_id["graft"].detail
+    assert rc == 1
+    # No acceptance file under fixture root → no pools advisory.
+    assert not any(o.kind == "pools" for o in obs)
+
+
+def test_observe_pi_pools_skips_without_acceptance_file(tmp_path):
+    assert ai.observe_pi_pools(root=tmp_path) is None
+
+
+def test_observe_pi_pools_warns_unaccepted_quiet_on_accepted(tmp_path):
+    """WARN names UNACCEPTED pools; accepted Cursor/Z.ai stay out of the detail."""
+    root = tmp_path / "repo"
+    path = root / "config" / "pi-pool-acceptance.toml"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "[pools.cursor]\naccepted = true\n"
+        "[pools.zai]\naccepted = true\n"
+        "[pools.grok]\naccepted = false\n"
+        "[pools.go]\naccepted = false\n"
+    )
+    before = path.read_bytes()
+    mtime = path.stat().st_mtime_ns
+    o = ai.observe_pi_pools(root=root, acceptance_path=path)
+    assert o is not None
+    assert o.kind == "pools" and o.id == "ade-pi-pools"
+    assert o.status == "warn"
+    assert "grok" in o.detail and "go" in o.detail
+    assert "UNACCEPTED" in o.detail
+    assert "never writes accepted=true" in o.detail
+    # Accepted shortlist stays quiet in the warn text.
+    assert "cursor" not in o.detail.lower()
+    assert "zai" not in o.detail.lower()
+    assert path.read_bytes() == before
+    assert path.stat().st_mtime_ns == mtime
+
+
+def test_observe_pi_pools_ok_when_all_accepted(tmp_path):
+    root = tmp_path / "repo"
+    path = root / "config" / "pi-pool-acceptance.toml"
+    path.parent.mkdir(parents=True)
+    # Cover every routing Pi service so status_rows has no unaccepted routing gap.
+    path.write_text(
+        "[pools.cursor]\naccepted = true\n"
+        "[pools.zai]\naccepted = true\n"
+    )
+    o = ai.observe_pi_pools(root=root, acceptance_path=path)
+    assert o is not None and o.status == "ok"
+    assert "accepted" in o.detail
+
+
+def test_doctor_pi_pools_advisory_warn_keeps_exit_zero(tmp_path):
+    """Pools warn is advisory: exit 0 when hard components are healthy."""
+    root = tmp_path / "repo"
+    (root / "config").mkdir(parents=True)
+    (root / "config" / "install.schema.json").write_text(
+        (REPO / "config" / "install.schema.json").read_text()
+    )
+    (root / "config" / "install.toml").write_text(
+        "schema_version = 1\n"
+        "[[component]]\n"
+        'id = "tool-a"\n'
+        'class = "hard"\n'
+        'probe_argv = ["true"]\n'
+        'presence = "true"\n'
+    )
+    accept = root / "config" / "pi-pool-acceptance.toml"
+    accept.write_text(
+        "[pools.cursor]\naccepted = true\n"
+        "[pools.zai]\naccepted = true\n"
+        "[pools.grok]\naccepted = false\n"
+    )
+    before = accept.read_bytes()
+
+    def runner(argv, cwd):
+        return subprocess.CompletedProcess(argv, 0, stdout="ok\n", stderr="")
+
+    obs, rc = ai.doctor(
+        ai.load_catalog(root=root),
+        runner=runner,
+        pi_pool_acceptance_path=accept,
+    )
+    pools = [o for o in obs if o.kind == "pools" and o.id == "ade-pi-pools"]
+    assert len(pools) == 1 and pools[0].status == "warn"
+    assert "grok" in pools[0].detail
+    assert rc == 0  # advisory only
+    assert accept.read_bytes() == before
+
+
+def test_shipped_acceptance_warns_checklist_quiet_on_cursor_zai():
+    path = REPO / "config" / "pi-pool-acceptance.toml"
+    before = path.read_bytes()
+    o = ai.observe_pi_pools(root=REPO, acceptance_path=path)
+    assert o is not None and o.status == "warn"
+    for name in ("grok", "antigravity", "sipb", "go"):
+        assert name in o.detail
+    assert "cursor" not in o.detail.lower()
+    assert "zai" not in o.detail.lower()
+    assert path.read_bytes() == before

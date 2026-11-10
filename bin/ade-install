@@ -269,7 +269,7 @@ def main(argv: list[str] | None = None) -> int:
         ("catalog", cmd_catalog, "list components, key references, and login checks"),
         ("plan", cmd_plan, "print-only install plan (no writes)"),
         ("doctor", cmd_doctor,
-         "run probe_argv / PATH presence, Claude context_size_nudge, and credential-bak delete-after; never repairs"),
+         "run probe_argv / PATH presence, Claude context_size_nudge, credential-bak delete-after, advisory UNACCEPTED Pi pools; never repairs"),
         (
             "keys",
             cmd_keys,

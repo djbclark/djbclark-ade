@@ -87,6 +87,12 @@ rows (Grok, Antigravity, SIPB, Go, …) that stay out of auto until both accepte
 here and added to the routing shortlist. Cursor and Z.ai are accepted as of the
 2026-11-08 live path (D3–D5); other pools remain false by default.
 
+B4a. **Doctor advisory (2026-11-10).** `ade-install doctor` / `just install-doctor`
+observes the same acceptance file: it `warn`s naming every still-UNACCEPTED
+pool and exits 0 for that check (advisory, not a hard fail). Accepted Cursor
+and Z.ai stay quiet in the warn detail. Doctor never writes `accepted=true`;
+only the operator edits the file. See `docs/install-catalog.md`.
+
 ## C. Failure and recovery
 
 C1. Unknown, stale, incomplete or approval-required quota cannot qualify a
