@@ -16,7 +16,12 @@
                                             may new work START now? exit 0 yes, 75 still too hot, 2 usage
     load-watch watcher set [--paseo ID] [--name N] [--chain C]|show [--json]|clear [T]|test [TEXT]
                                             the one Paseo agent told about every spike
-    load-watch install|uninstall            the launchd job (launchd/com.djbclark.load-watch.plist)
+    load-watch install|uninstall [--backend auto|launchd|systemd|cron] [--ade DIR] [--dry-run] [--allow-no-linger]
+                                            the 20 s sampler job, written from launchd/com.djbclark.load-watch.plist by bin/ade_sched.py
+                                            (launchd on the Mac, a systemd user timer on Linux; docs/scheduling.md). cron cannot run
+                                            every 20 s: exit 69, use systemd. Exit 69 also: no scheduler, or Linger=no without
+                                            --allow-no-linger. --ade is needed from a linked worktree (exit 2 otherwise).
+                                            `guard reset` is macOS only (exit 69 without launchctl); the sampler never needs it.
 
 Why (2026-10-18): agents keep starting heavy builds and tests on this 8-core Mac (load 24-41 that
 morning; 180 on 2026-10-13, 300-400 on 2026-10-04). `bg`, site-djbclark's `heavy-shim` and the Claude test hook throttle
@@ -156,6 +161,7 @@ import math
 import os
 import random
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -1152,6 +1158,9 @@ def cmd_guard(a):
     if not a.label:
         print("load-watch guard add|rm|reset needs LABEL", file=sys.stderr)
         return 2
+    if a.op == "reset" and shutil.which("launchctl") is None:
+        print("load-watch: the launchd job guard is macOS only", file=sys.stderr)
+        return 69
     if a.op == "add":
         lim = dict(LIMIT_KEYS)
         for kv in a.limits:
@@ -2379,20 +2388,24 @@ def cmd_admit(a):
 
 
 def cmd_install(a):
-    dest = HOME / "Library/LaunchAgents" / PLIST.name
-    dom = f"gui/{os.getuid()}"
-    subprocess.run(["launchctl", "bootout", f"{dom}/{LABEL}"], capture_output=True)
-    if a.cmd == "uninstall":
-        dest.unlink(missing_ok=True)
-        print(f"removed {dest}")
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import ade_sched
+    over = {}
+    if os.environ.get("LW_LAUNCH_AGENTS"):   # kept for older callers; ADE_SCHED_LAUNCH_AGENTS is the shared one
+        over["agents_dir"] = os.environ["LW_LAUNCH_AGENTS"]
+    try:
+        if a.cmd == "uninstall":
+            ade_sched.uninstall(LABEL, a.backend, dry_run=a.dry_run, **over)
+            return 0
+        if not a.dry_run:
+            STATE_DIR.mkdir(parents=True, exist_ok=True)
+        job = ade_sched.Job.from_plist(PLIST, ade=a.ade)
+        ade_sched.install(job, a.backend, dry_run=a.dry_run, allow_no_linger=a.allow_no_linger, **over)
         return 0
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = dest.with_suffix(".tmp")
-    tmp.write_text(PLIST.read_text())
-    tmp.replace(dest)
-    r = subprocess.run(["launchctl", "bootstrap", dom, str(dest)], capture_output=True, text=True)
-    print(f"installed {dest}" if r.returncode == 0 else f"bootstrap failed: {r.stderr.strip()}")
-    return r.returncode
+    except ade_sched.SchedError as e:
+        hint = " (use the systemd backend: cron cannot run every 20 s)" if e.code == 69 and "cron" in str(e) and "20" in str(e) else ""
+        print(f"load-watch {a.cmd}: {e}{hint}", file=sys.stderr)
+        return e.code
 
 
 def main(supervise=False):
@@ -2463,8 +2476,14 @@ def main(supervise=False):
     p.add_argument("--cwd", help="set: the session's directory (default: the current one)")
     p.add_argument("--chain", help="set: its session-handoff chain, for /baton")
     p.add_argument("--json", action="store_true", help="show: the record as JSON")
-    sub.add_parser("install")
-    sub.add_parser("uninstall")
+    for name in ("install", "uninstall"):
+        p = sub.add_parser(name)
+        p.add_argument("--backend", choices=["auto", "launchd", "systemd", "cron"], default=None,
+                       help="scheduler (default auto: launchd on macOS, systemd user timer on Linux; cron cannot run every 20 s)")
+        p.add_argument("--dry-run", action="store_true", help="print what would be written and run; change nothing")
+        if name == "install":
+            p.add_argument("--ade", metavar="DIR", help="the checkout the job runs from (required from a linked worktree)")
+            p.add_argument("--allow-no-linger", action="store_true", help="systemd: install although Linger=no")
     a = ap.parse_args()
     a.supervise = supervise   # set only by the command line: a test calling cmd_admit() in-process never starts a supervised copy
     if a.cmd is None:

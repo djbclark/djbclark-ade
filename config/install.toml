@@ -758,7 +758,7 @@ plist = "launchd/com.djbclark.load-watch.plist"
 schedule = "StartInterval 20"
 command = "bin/load-watch sample"
 platforms = ["mac", "linux"]
-notes = "Historically installed by load-watch install; inventory records ADE ownership (S4b)."
+notes = "Installed by load-watch install via ade_sched (launchd/systemd; StartInterval 20); inventory records ADE ownership (S4b)."
 
 [[install.jobs]]
 name = "deadline-sweep"
