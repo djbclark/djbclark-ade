@@ -8,7 +8,8 @@
 # redirects the hooks, `push --no-verify`). It installs the hooks lazily.
 #
 # SEATBELT, NOT A SANDBOX (design 5.7): it stops accidental or careless git, not a determined agent. Out of reach by
-# design: an absolute path to the real git, unsetting ACP_RUN_AGENT/ADE_CLAIM_ID, another agent's ADE_CLAIM_ID,
+# design: an absolute path to the real git, unsetting ACP_RUN_AGENT/PASEO_AGENT_ID/ADE_CLAIM_ID, another agent's
+# ADE_CLAIM_ID,
 # editing the claim registry, and EVERYTHING GIT ITSELF SPAWNS (`bisect run`, `submodule foreach`, pagers,
 # core.fsmonitor, diff.external, core.sshCommand, `fetch --upload-pack`, any `git` a `!` alias runs): git puts its own
 # exec-path first on its children's PATH, so they reach the real git, not this shim. (The hooks still run for those.)
@@ -32,7 +33,7 @@
 #   ade-git-guard --help
 #
 # Order of work, cheapest first (one bash exec and no Python for the common call):
-#   1. Not an agent process (neither ACP_RUN_AGENT=1 nor ADE_CLAIM_ID set): exec the real git untouched.
+#   1. Not an agent process (no ACP_RUN_AGENT=1, nonempty PASEO_AGENT_ID, nor ADE_CLAIM_ID): exec the real git untouched.
 #   2. Inside a git hook (GIT_INDEX_FILE set) or pre-commit (PRE_COMMIT set): exec the real git untouched.
 #   3. A plain read (status log show diff rev-parse ls-files ls-tree cat-file blame describe rev-list for-each-ref grep
 #      shortlog name-rev merge-base version help), after -C/-c/--git-dir=...: exec. No argument is scanned.
@@ -43,7 +44,8 @@
 # A broken guard (no python3, a crash) fails OPEN with a warning on stderr: a guard bug must not stop all git.
 #
 # Exit codes: 77 refused (EX_NOPERM); every other code is the real git's.
-# Environment: ADE_CLAIM_ID (the caller's claim id, exported by acp-dispatch), ACP_RUN_AGENT, ADE_STATE_DIR
+# Environment: ADE_CLAIM_ID (the caller's claim id, exported by acp-dispatch), ACP_RUN_AGENT, PASEO_AGENT_ID (native
+# paseo run), ADE_STATE_DIR
 # (default ~/.local/state/ade; claims/ and guard.log live there), ADE_REAL_GIT (skip the PATH search),
 # ADE_PYTHON (default python3), ACP_OPERATOR_APPROVED=git-guard (allow and log one call).
 set -u
@@ -134,7 +136,8 @@ if [ "${self##*/}" = "ade-git-guard" ]; then
 fi
 
 # 1-2: not an agent, or inside a git hook
-if { [ -z "${ADE_CLAIM_ID:-}" ] && { [ -z "${ACP_RUN_AGENT:-}" ] || [ "${ACP_RUN_AGENT}" = 0 ]; }; } \
+if { [ -z "${ADE_CLAIM_ID:-}" ] && { [ -z "${ACP_RUN_AGENT:-}" ] || [ "${ACP_RUN_AGENT}" = 0 ]; } \
+  && case "${PASEO_AGENT_ID:-}" in *[![:space:]]*) false ;; *) true ;; esac; } \
   || [ -n "${GIT_INDEX_FILE:-}" ] || [ -n "${PRE_COMMIT:-}" ]; then
   exec "$real" "$@"
 fi

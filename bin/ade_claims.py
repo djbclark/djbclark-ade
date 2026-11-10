@@ -59,7 +59,8 @@ Who is "mine" (`is_mine`): the caller identity (ADE_CLAIM_ID, else a harness ses
 claim id, owner.record, owner.session, or is in `allow`. `lead` is NOT implied: a lead that should
 write in a worker's workspace or push its branch goes into `allow`.
 
-Who is guarded. The shim and its rules: agents only (ACP_RUN_AGENT=1 or ADE_CLAIM_ID set; a human shell is never touched).
+Who is guarded. The shim and its rules: agents only (ACP_RUN_AGENT=1, a nonempty PASEO_AGENT_ID from native paseo run,
+or ADE_CLAIM_ID set; a human shell is never touched).
 The hooks: those two, plus a caller with CLAUDECODE, OMPCODE or CODEX_* set and no claim identity (an agent that may write
 nothing claimed). git's own hooks (GIT_INDEX_FILE set) and pre-commit (PRE_COMMIT set) are never refused.
 
@@ -495,7 +496,12 @@ def caller_ident(env: Optional[dict[str, str]] = None) -> Optional[str]:
 
 def is_agent_env(env: Optional[dict[str, str]] = None) -> bool:
     env = os.environ if env is None else env
-    return env.get("ACP_RUN_AGENT", "") not in ("", "0") or bool(env.get("ADE_CLAIM_ID"))
+    paseo = (env.get("PASEO_AGENT_ID") or "").strip()
+    return (
+        env.get("ACP_RUN_AGENT", "") not in ("", "0")
+        or bool(env.get("ADE_CLAIM_ID"))
+        or bool(paseo)
+    )
 
 
 _DEFAULT_PORTS = {"https": "443", "http": "80", "ssh": "22", "git": "9418", "ftp": "21"}
@@ -1932,7 +1938,7 @@ EXIT_PRE_ADE = 73       # install: NAME.pre-ade already exists, so the existing 
 
 
 def hook_is_agent(env: dict[str, str]) -> bool:
-    """The caller of a hook is an agent: the shim's markers (ACP_RUN_AGENT, ADE_CLAIM_ID), or a harness marker
+    """The caller of a hook is an agent: the shim's markers (ACP_RUN_AGENT, PASEO_AGENT_ID, ADE_CLAIM_ID), or a harness marker
     (CLAUDECODE, OMPCODE, CODEX_*) that names no claim: such an agent may write nothing that is claimed. A human, git's
     own hooks (GIT_INDEX_FILE) and pre-commit (PRE_COMMIT) are never refused."""
     if env.get("GIT_INDEX_FILE") or env.get("PRE_COMMIT"):

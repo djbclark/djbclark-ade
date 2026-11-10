@@ -7,21 +7,26 @@
 # non-zero exit aborts the transaction (the caller sees "aborted by the reference-transaction hook"); `committed` is logged.
 #   bin/ade_claims.py hook-ref STATE    the rules (claimed branch, foreign workspace, linked-worktree stash)
 #
-# Fast path, cheapest first: not an agent (no ACP_RUN_AGENT/ADE_CLAIM_ID, no CLAUDECODE/OMPCODE/CODEX_*) -> exit 0 before
-# anything else runs; no line about HEAD, refs/stash or refs/heads/ (a fetch of remote-tracking refs, tags) -> exit 0 without
-# Python. FAIL OPEN: this hook maps "python exited 77" to exit 77 (the one refusal code) and everything else (no python, a traceback, the 10 s alarm)
-# to exit 0, because a git hook that fails aborts the transaction for everyone, the operator included.
+# Fast path, cheapest first: not an agent (no ACP_RUN_AGENT/PASEO_AGENT_ID/ADE_CLAIM_ID, no CLAUDECODE/OMPCODE/CODEX_*)
+# -> exit 0 before anything else runs; no line about HEAD, refs/stash or refs/heads/ (a fetch of remote-tracking refs,
+# tags) -> exit 0 without Python. FAIL OPEN: this hook maps "python exited 77" to exit 77 (the one refusal code) and
+# everything else (no python, a traceback, the 10 s alarm) to exit 0, because a git hook that fails aborts the
+# transaction for everyone, the operator included.
 # NEVER runs a ref-writing git (the transaction's locks are held). bash 3.2: no associative arrays, no `case` inside $( ).
 set -u
 
 agent=0
-if [ -n "${ADE_CLAIM_ID:-}" ] || { [ -n "${ACP_RUN_AGENT:-}" ] && [ "${ACP_RUN_AGENT}" != 0 ]; } \
-  || [ -n "${CLAUDECODE:-}" ] || [ -n "${OMPCODE:-}" ]; then
-  agent=1
-else
-  for v in $(compgen -A export); do
-    case "$v" in CODEX_*) agent=1; break ;; esac
-  done
+# Wave 6 / native paseo: nonempty PASEO_AGENT_ID is an agent marker.
+case "${PASEO_AGENT_ID:-}" in *[![:space:]]*) agent=1 ;; esac
+if [ "$agent" = 0 ]; then
+  if [ -n "${ADE_CLAIM_ID:-}" ] || { [ -n "${ACP_RUN_AGENT:-}" ] && [ "${ACP_RUN_AGENT}" != 0 ]; } \
+    || [ -n "${CLAUDECODE:-}" ] || [ -n "${OMPCODE:-}" ]; then
+    agent=1
+  else
+    for v in $(compgen -A export); do
+      case "$v" in CODEX_*) agent=1; break ;; esac
+    done
+  fi
 fi
 [ "$agent" = 1 ] || exit 0
 # git's own hooks (a pre-commit hook's `git checkout` dance) and pre-commit are never refused

@@ -240,6 +240,15 @@ def test_acp_run_agent_zero_is_not_an_agent(tmp_path, state):
     assert r.returncode == 0
 
 
+def test_paseo_agent_id_alone_is_an_agent(tmp_path, state):
+    repo = mk_repo(tmp_path, state)
+    claim(repo, "A")
+    dirty(repo)
+    r = run(state, ["reset", "--hard"], repo, PASEO_AGENT_ID="paseo-agent-1")
+    assert r.returncode == 77
+    assert (repo / "f").read_text().endswith("uncommitted\n")
+
+
 @pytest.mark.parametrize("cmd", [
     ["status"], ["diff"], ["log", "--oneline"], ["show", "HEAD"], ["ls-files"], ["rev-parse", "HEAD"],
     ["branch", "--list"], ["branch"], ["config", "--get", "core.bare"], ["config", "user.name"],
@@ -529,7 +538,9 @@ def test_caller_identity_prefers_the_explicit_claim_id():
     assert ade_claims.caller_ident({"CLAUDE_CODE_SESSION_ID": "s"}) == "s"
     assert ade_claims.caller_ident({}) is None
     assert ade_claims.is_agent_env({"ACP_RUN_AGENT": "1"}) and ade_claims.is_agent_env({"ADE_CLAIM_ID": "x"})
+    assert ade_claims.is_agent_env({"PASEO_AGENT_ID": "abc123"})
     assert not ade_claims.is_agent_env({"ACP_RUN_AGENT": "0"}) and not ade_claims.is_agent_env({})
+    assert not ade_claims.is_agent_env({"PASEO_AGENT_ID": ""}) and not ade_claims.is_agent_env({"PASEO_AGENT_ID": "   "})
 
 
 def test_cli_new_and_list(tmp_path, state):
