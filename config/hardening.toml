@@ -1,0 +1,54 @@
+# Transitional GitHub hardening policy (docs/setup-plan.md S6).
+# Used while config/ade.toml lacks [hardening]. Observe-only via
+# `just harden-check` / `bin/ade-harden observe` — no live ruleset writes,
+# no interaction-limit auto-renew (setup-plan contract §7; S5 apply deferred).
+
+schema_version = 1
+
+[hardening]
+# Owners scanned for uncovered repos (E1.1). Empty skips inventory.
+owners = ["djbclark"]
+check_user_interaction_limits = true
+api_version = "2026-03-10"
+
+[hardening.defaults]
+# Applied to [[hardening.repo]] with profile = "active" (or omitted).
+pr_creation_policy = "collaborators_only" # collaborators_only | all | disabled | ignore
+issue_creation_policy = "collaborators_only" # no REST read-back yet → observe deferred
+disable_wiki = true
+disable_projects = true
+disable_discussions = true
+fork_pr_workflows_approval = "all_external_contributors" # or ignore
+default_workflow_permissions = "read" # read | write | ignore
+can_approve_pull_request_reviews = false # bool | "ignore"
+secret_scanning = "ignore" # enabled | ignore (GHAS may be unavailable)
+secret_scanning_push_protection = "ignore"
+merge_gate_ruleset = false
+ruleset_name = "merge-gate"
+
+[hardening.forks]
+# Implicit cover for owner forks that lack an explicit [[hardening.repo]] row.
+pr_creation_policy = "disabled"
+issue_creation_policy = "disabled"
+disable_wiki = true
+disable_projects = true
+disable_discussions = true
+fork_pr_workflows_approval = "ignore"
+default_workflow_permissions = "ignore"
+can_approve_pull_request_reviews = "ignore"
+secret_scanning = "ignore"
+secret_scanning_push_protection = "ignore"
+merge_gate_ruleset = false
+
+[hardening.interaction_limits]
+limit = "collaborators_only"
+# Drift when missing or expires within this many days. Never PUT from harden-check.
+min_remaining_days = 14
+expiry = "six_months" # remediation hint only
+
+[[hardening.repo]]
+owner = "djbclark"
+name = "djbclark-ade"
+profile = "active"
+merge_gate_ruleset = true
+ruleset_name = "merge-gate"

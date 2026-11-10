@@ -1,0 +1,133 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/djbclark/djbclark-ade/config/hardening.schema.json",
+  "title": "djbclark-ade hardening policy",
+  "description": "Transitional [hardening] policy (schema_version=1) for setup-plan S6 observe-only drift check. Used while config/ade.toml lacks [hardening].",
+  "type": "object",
+  "required": ["schema_version", "hardening"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "hardening": {
+      "type": "object",
+      "required": ["defaults"],
+      "additionalProperties": false,
+      "properties": {
+        "owners": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "check_user_interaction_limits": { "type": "boolean" },
+        "api_version": { "type": "string", "minLength": 1 },
+        "defaults": { "$ref": "#/$defs/policy" },
+        "forks": { "$ref": "#/$defs/policy" },
+        "interaction_limits": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "limit": {
+              "type": "string",
+              "enum": ["collaborators_only", "existing_users", "contributors_only", "ignore"]
+            },
+            "min_remaining_days": { "type": "integer", "minimum": 0 },
+            "expiry": {
+              "type": "string",
+              "enum": ["one_day", "three_days", "one_week", "one_month", "six_months"]
+            }
+          }
+        },
+        "repo": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/repo" }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "pr_creation_policy": {
+          "type": "string",
+          "enum": ["collaborators_only", "all", "disabled", "ignore"]
+        },
+        "issue_creation_policy": {
+          "type": "string",
+          "enum": ["collaborators_only", "all", "disabled", "ignore"]
+        },
+        "disable_wiki": { "type": "boolean" },
+        "disable_projects": { "type": "boolean" },
+        "disable_discussions": { "type": "boolean" },
+        "fork_pr_workflows_approval": {
+          "type": ["string", "boolean"],
+          "description": "all_external_contributors | ignore | false-like skip"
+        },
+        "default_workflow_permissions": {
+          "type": "string",
+          "enum": ["read", "write", "ignore"]
+        },
+        "can_approve_pull_request_reviews": {
+          "type": ["boolean", "string"]
+        },
+        "secret_scanning": {
+          "type": "string",
+          "enum": ["enabled", "disabled", "ignore"]
+        },
+        "secret_scanning_push_protection": {
+          "type": "string",
+          "enum": ["enabled", "disabled", "ignore"]
+        },
+        "merge_gate_ruleset": { "type": "boolean" },
+        "ruleset_name": { "type": "string", "minLength": 1 }
+      }
+    },
+    "repo": {
+      "type": "object",
+      "required": ["owner", "name"],
+      "additionalProperties": false,
+      "properties": {
+        "owner": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1 },
+        "profile": {
+          "type": "string",
+          "enum": ["active", "fork"]
+        },
+        "pr_creation_policy": {
+          "type": "string",
+          "enum": ["collaborators_only", "all", "disabled", "ignore"]
+        },
+        "issue_creation_policy": {
+          "type": "string",
+          "enum": ["collaborators_only", "all", "disabled", "ignore"]
+        },
+        "disable_wiki": { "type": "boolean" },
+        "disable_projects": { "type": "boolean" },
+        "disable_discussions": { "type": "boolean" },
+        "fork_pr_workflows_approval": {
+          "type": ["string", "boolean"]
+        },
+        "default_workflow_permissions": {
+          "type": "string",
+          "enum": ["read", "write", "ignore"]
+        },
+        "can_approve_pull_request_reviews": {
+          "type": ["boolean", "string"]
+        },
+        "secret_scanning": {
+          "type": "string",
+          "enum": ["enabled", "disabled", "ignore"]
+        },
+        "secret_scanning_push_protection": {
+          "type": "string",
+          "enum": ["enabled", "disabled", "ignore"]
+        },
+        "merge_gate_ruleset": { "type": "boolean" },
+        "ruleset_name": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}
