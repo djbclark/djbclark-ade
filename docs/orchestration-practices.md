@@ -235,7 +235,11 @@ its body (AGENTS.md, Trust).
    are an early warning, not a replacement.¹
 3. A check hook on task completion (lint plus tests before a task counts as
    done) catches what a worker forgot.³
-4. **Reuse CI and its watcher (2026-10-25).** Before manually dispatching a
+4. **Verify-until-pass is not `37chengshan/goal-mode` (2026-11-09).** That
+   plugin auto-continues on self-report markers; it does not run an acceptance
+   command. Issue 284 #4 still needs an ADE-native verifyCmd path. Eval,
+   install probes, accept/reject: [docs/goal-mode.md](goal-mode.md).
+5. **Reuse CI and its watcher (2026-10-25).** Before manually dispatching a
    workflow, check its triggers and existing runs for this branch and head.
    When opening a PR will trigger the required checks, finish the pre-PR
    review and use that automatic run rather than dispatching the same suite
