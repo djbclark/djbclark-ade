@@ -69,7 +69,7 @@ C3. Envelope fields the normalizer emits (v0, spike):
 | Field | Meaning |
 |---|---|
 | `producer` | platform id from B2 |
-| `conversation_id` | stable id from the export (or hashed title+started_at when missing) |
+| `conversation_id` | stable id from the export (or hashed title+started_at+source_path+ordinal+content fingerprint when missing) |
 | `message_id` | stable id per turn (or index within the conversation) |
 | `role` | `user` \| `assistant` \| `system` \| `tool` \| `unknown` |
 | `ts` | ISO-8601 when present; else omitted |

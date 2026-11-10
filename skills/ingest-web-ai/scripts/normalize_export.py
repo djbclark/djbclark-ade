@@ -40,6 +40,21 @@ def _stable_id(*parts: str) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
 
 
+def _conversation_fingerprint(messages: list[Any]) -> str:
+    """Content fingerprint so untitled/id-less conversations do not collide.
+
+    Hashes role + text for each dict turn (in order). Non-dict items contribute
+    an empty slot so index alignment stays stable across sparse lists.
+    """
+    parts: list[str] = []
+    for raw in messages:
+        if not isinstance(raw, dict):
+            parts.append("")
+            continue
+        parts.append(f"{_role(raw)}\0{_message_text(raw)}")
+    return _sha256_text("\0".join(parts))
+
+
 def _message_text(msg: dict[str, Any]) -> str:
     for key in ("text", "content", "body", "message"):
         val = msg.get(key)
@@ -106,6 +121,7 @@ def normalize_conversation(
     *,
     producer: str,
     source_path: str,
+    ordinal: int = 0,
 ) -> list[dict[str, Any]]:
     title = conv.get("title") or conv.get("name") or ""
     if not isinstance(title, str):
@@ -113,9 +129,6 @@ def normalize_conversation(
     started = conv.get("created_at") or conv.get("started_at") or conv.get("create_time")
     if started is not None and not isinstance(started, str):
         started = str(started)
-    conv_id = conv.get("id") or conv.get("conversation_id") or conv.get("uuid")
-    if not isinstance(conv_id, str) or not conv_id.strip():
-        conv_id = _stable_id(producer, title, started or "", source_path)
 
     messages = None
     for key in ("messages", "turns", "items"):
@@ -124,6 +137,22 @@ def normalize_conversation(
             break
     if messages is None:
         return []
+
+    # Resolve identity before emitting events. When the export omits id/title/
+    # timestamp, include the stable export ordinal and a content fingerprint so
+    # sibling conversations in the same file do not share one conversation_id
+    # (and therefore collide on message_id = "{conv_id}:{idx}" at the sink).
+    conv_id = conv.get("id") or conv.get("conversation_id") or conv.get("uuid")
+    if not isinstance(conv_id, str) or not conv_id.strip():
+        fingerprint = _conversation_fingerprint(messages)
+        conv_id = _stable_id(
+            producer,
+            title,
+            started or "",
+            source_path,
+            str(ordinal),
+            fingerprint,
+        )
 
     events: list[dict[str, Any]] = []
     for idx, raw in enumerate(messages):
@@ -161,9 +190,14 @@ def normalize_document(
     source_path: str,
 ) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
-    for conv in iter_conversations(doc):
+    for ordinal, conv in enumerate(iter_conversations(doc)):
         out.extend(
-            normalize_conversation(conv, producer=producer, source_path=source_path)
+            normalize_conversation(
+                conv,
+                producer=producer,
+                source_path=source_path,
+                ordinal=ordinal,
+            )
         )
     return out
 
