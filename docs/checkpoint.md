@@ -39,7 +39,9 @@ A long tool call is recorded as in flight; its heartbeat is liveness, not a comp
 B1. Keep Paseo as the execution authority and G1 (`ade-jobs`) as the durable job owner. Apply the
 plan's native → existing plugin → new plugin → ADE order. Since the slim-down (2026-11-07; the Paseo plan's status
 table) nothing in G1 is built here: the operator installs Paseo's published session-recovery, usage-auto-resume and
-session-guard plugins (PLAN J6), and PR 290 `ade-recovery` is parked until native resume (0.15.0) is measured (J9, R4). Do not introduce another harness or
+session-guard plugins (PLAN J6), and PR 290 `ade-recovery` is parked until native resume (0.15.0) is measured (J9, R4).
+Tip health 2026-11-10: PR 290 head `15186fb` is draft with Linux CI green; it does not run live D1/G1 probes — remaining
+gate is Mac native-resume measure, D1 capture probes on the live daemon, and operator yes before any install. Do not introduce another harness or
 workflow service for this feature. LangGraph/Temporal are useful design references; adopt a runtime
 only if a later measured need for durable multi-step workflows outweighs its operation and integration cost.
 The issue comment's hosted trace product is not selected: traces alone do not preserve artifacts.
