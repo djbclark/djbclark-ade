@@ -4,7 +4,8 @@
 
 The setup plan is **not complete**, and its remaining work is **not all Mac-only**.
 Wave 6 source migrations are a separate milestone from the full S1–S9 plan.
-This snapshot follows master `245804a8e81d605731c6df820aa7cdd21a9e2af2`.
+This checkpoint follows master `2d77c496aaad5f0babdca57c51aeb9f856629bdf`.
+All implementation PRs listed below are merged.
 It records code inspection, CI and review, not live installation acceptance.
 
 Recent merged ADE units:
@@ -17,6 +18,9 @@ Recent merged ADE units:
 | #543 | Merged-source status and remaining Mac evidence | `8de777502a45a3d7e32824b90e97a656a18fac8e` |
 | #544 | First-run guidance and Python prerequisite diagnostics | `488261bf901751c19e7f332001966fc2d08f50a7` |
 | #545 | Effective model-tier snapshot in runtime routing | `245804a8e81d605731c6df820aa7cdd21a9e2af2` |
+| #546 | Pure dependency-update planning | `e2030a53d87a2f8a1bb2dee0aa9c56dfee92290f` |
+| #547 | Whole-plan completion audit | `2f5fe462f589036e7703ccb79a4f5e7efb56dd88` |
+| #548 | Effective install/key metadata reader adoption | `2d77c496aaad5f0babdca57c51aeb9f856629bdf` |
 
 Required Linux/context-policy checks and owner-trust adversary status passed
 before these merges. Available independent reviewers replaced unavailable
@@ -25,17 +29,24 @@ results are not claimed as successful reviews. No approval marker or new
 waiver was invented. #544 passed 85 focused tests after repairing a cold
 Python-cache write; #545 passed 538 tests and 51 subtests, one skipped.
 
-[#546](https://github.com/djbclark/djbclark-ade/pull/546), head
-`30e4ab86aff95737ef9f34379367a2e613b74f68`, implements pure dependency
-update planning. Its 92 focused tests and independent review pass; full CI
-and merge remain pending at this snapshot. It executes no updates and
-establishes no installed state, version freshness, ownership or admission.
+#546 passed 92 focused tests, independent review, full Linux CI and the
+required owner-trust gate before merging. Its update-plan command executes
+no updates and establishes no installed state, freshness, ownership or admission.
+
+[#548](https://github.com/djbclark/djbclark-ade/pull/548), reviewed head
+`3e590145a1c438b39274bafd9b53374631385fce`, implements joint install/key
+metadata adoption. Combined tests: 702 passed, one skipped, 51 subtests.
+Independent architecture/correctness/security review found no remaining
+blockers after fixing optional-key semantics and full raw-schema validation
+before domain isolation. Full Linux CI, context-policy and owner-trust status
+passed before merge.
+No live configuration, key operations, installs or catalog choices changed.
 
 ## B. S1–S9 completion matrix
 
 | Section | Implemented | Still required |
 |---|---|---|
-| S1 configuration | Effective loader/schema, atomic scalar set, legacy isolation, routing/gates and runtime tiers | **Cloud code:** remaining domains and consumers. `KNOWN_TOP_LEVEL` in `bin/ade_config.py` covers only routing tables, gates and tiers. `ade_install.load_catalog()` still refuses a present unified file. No tracked `ade.toml` yet. |
+| S1 configuration | Effective loader/schema, atomic scalar set, legacy isolation, routing/gates and runtime tiers; #548 adds install/key reader adoption | **Cloud code:** remaining domains/consumers and explicit install/key writer adoption. #548 preserves isolated legacy `install_path` reads while the default reader adopts unified/local metadata. New install/key scalar writes remain refused. GitHub/hardening and other domains remain transitional; no tracked `ade.toml` yet. |
 | S2 entry point | Thin Just recipes for the implemented tools; scoped doctor | Recipes do not imply the underlying S3–S8 behaviors are complete. |
 | S3 installation | Typed catalog, doctor/plan, user install helpers, explicit system transaction and installation ledger; #544 diagnostics | **Cloud code:** real Python/Just bootstrap and orchestration, incomplete component recipes. **Live:** fresh Mac/Linux acceptance and provider logins. Diagnostics are not bootstrap. |
 | S3a Hermes | DIY/AI prompt and recipes, catalog installation and chosen-component doctor | **Cloud code:** install choice flow and richer checklist probes. **Live:** Hermes/bridge/skills configuration and credentials. Scoped doctor currently delegates to the existing catalog probe. |
@@ -55,16 +66,16 @@ entry, daemon update, installed-file change or live admission proof occurred.
 
 ## C. Next work and hard stops
 
-1. Finish #546's required checks and merge at its reviewed head.
-2. Prepare a bounded S1 install/keys fold: an explicit projection table,
-   schema composition, no import cycle, malformed-input refusal and preserved
-   class/choice/system boundaries. This is cloud code; design preparation is
-   underway, not an implemented adoption. Do not ship a tracked unified file.
-3. Follow with genuine S3 bootstrap/catalog coverage, configured S3b probes
-   or S7 completion verification, each as a separately tested unit.
-4. Keep scheduled automatic apply, new security implementation and S9 behind
+1. Continue remaining S1 domains and consumers, preserving explicit legacy
+   isolation and writer boundaries. The install/key mapping and compatibility
+   contract are in `docs/config-migration.md`; do not ship a tracked unified
+   file while remaining consumers still refuse it.
+2. Continue genuine S3 bootstrap/catalog coverage, configured S3b probes or
+   S7 completion verification as separately tested cloud units. These remain
+   code gaps, not Mac blockers.
+3. Keep scheduled automatic apply, new security implementation and S9 behind
    their existing decisions. Do not infer provider acceptance from code tests.
-5. Wave 6 still needs installed Mac migration proof, fleet delivery/receipt
+4. Wave 6 still needs installed Mac migration proof, fleet delivery/receipt
    verification, B2 drain and recapture. C1+C2 remain granted; CFEngine/aiuse
    retained-history waivers remain proposed. Preserve logs/history, shims and
    `review-launch`, held Pi pools, the November 20 gate and explicit deletion
@@ -76,9 +87,14 @@ entry, daemon update, installed-file change or live admission proof occurred.
 Continue djbclark/djbclark-ade from docs/setup-plan-progress-2026-11-10.md.
 Read AGENTS.md, setup-plan.md, this matrix and the Wave 6 continuation.
 Verify current PR/branch state rather than treating this snapshot as live.
-#540–#545 are merged. #546 is candidate-only update planning, not execution;
-finish required checks/review before merging if it remains open. Next S1
-install/keys adoption needs the explicit mapping and compatibility design.
+Fetch origin/master and create a fresh claimed task worktree; older ADE
+worktree paths in prior checkpoints are historical after cleanup.
+#540–#548 are merged. #546 is candidate-only update planning, not execution.
+#548 adopts install/key metadata readers, not new writer capabilities or live
+operations. Follow config-migration.md for its
+scopes and preserved explicit legacy reads. Next work is remaining S1 domains,
+genuine bootstrap/catalog coverage, configured key verification or browser
+completion read-back. No new source implementation should be assumed running.
 Use claimed worktrees, available capable independent reviewers, exact-head
 checks and owner-trust status; no fabricated APPROVE or new waivers.
 Do not claim whole-plan completion or a Mac-only remainder. Preserve security,
@@ -89,3 +105,7 @@ Commit/push coherent work and update this snapshot when evidence changes.
 
 Account quota/token telemetry is unavailable here; actual usage is unknown.
 This batch reused available agents with bounded implementation/review roles.
+
+Merged, clean ADE task worktrees through #548 were closed after verifying
+their exact heads on GitHub; their claims were released and remote branches
+retained. Source, handoff records and GitHub CI evidence remain available.
