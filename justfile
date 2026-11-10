@@ -57,6 +57,10 @@ install *args:
 update *args:
     "{{ root }}/bin/ade-update" --repo "{{ root }}" {{ args }}
 
+# Pure dependency command inventory; never runs updates or probes.
+update-plan:
+    "{{ root }}/bin/ade-install" update-plan --root "{{ root }}"
+
 # S4 stub: observe-only then exit 5 (full auto-apply not implemented; no scheduled apply).
 update-auto *args:
     "{{ root }}/bin/ade-update-auto" --repo "{{ root }}" {{ args }}
