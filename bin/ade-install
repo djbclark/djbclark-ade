@@ -5,6 +5,7 @@
   ade-install check [--root DIR] [--json]
   ade-install catalog [--root DIR] [--json]
   ade-install plan [--root DIR] [--json]
+  ade-install update-plan [--root DIR] [--json]
   ade-install doctor [--root DIR] [--id ID ...] [--json]
   ade-install keys [--root DIR] [--json] [--keys-state PATH]
   ade-install apply [--root DIR] [--json] [--dry-run|--yes] [--id ID ...] [--force]
@@ -65,6 +66,11 @@ from pathlib import Path
 BIN = Path(__file__).resolve().parent
 if str(BIN) not in sys.path:
     sys.path.insert(0, str(BIN))
+
+if __name__ == "__main__" and "update-plan" in sys.argv[1:]:
+    # Cover argparse's accepted option abbreviations without duplicating its
+    # grammar. Suppressing bytecode if an argument value matches is harmless.
+    sys.dont_write_bytecode = True
 
 import ade_install as ai  # noqa: E402
 
@@ -145,6 +151,33 @@ def cmd_plan(args: argparse.Namespace) -> int:
         print(f"ade-install plan: {len(steps)} step(s) (print-only; does not install)")
         for step in steps:
             print(f"  {step['action']}: {step['id']} — {step['reason']}")
+    return 0
+
+
+def cmd_update_plan(args: argparse.Namespace) -> int:
+    try:
+        catalog = ai.load_catalog(root=Path(args.root) if args.root else None)
+        steps = ai.update_plan(catalog)
+    except ai.ac.ConfigError as error:
+        if args.json:
+            _print_json({"mode": "plan-only", "errors": [str(error)]})
+        else:
+            print(str(error), file=sys.stderr)
+        return 1
+    note = (
+        "configured candidates only; installed/version/activity/ownership and root effects unknown; "
+        "no execution authorized, no probes or changes"
+    )
+    if args.json:
+        _print_json({"mode": "plan-only", "steps": steps, "note": note})
+    else:
+        print(f"ade-install update-plan: {len(steps)} component(s); {note}")
+        for step in steps:
+            managed = "unknown" if step["owner_managed"] is None else "true"
+            flags = f"needs_system={str(step['needs_system']).lower()} owner_managed={managed}"
+            print(f"  {step['action']}: {step['id']} ({flags}) — {step['reason']}")
+            if "argv" in step:
+                print("    argv=" + json.dumps(step["argv"]))
     return 0
 
 
@@ -325,6 +358,7 @@ def main(argv: list[str] | None = None) -> int:
         ("check", cmd_check, "validate config/install.toml"),
         ("catalog", cmd_catalog, "list components, key references, and login checks"),
         ("plan", cmd_plan, "print-only install plan (no writes)"),
+        ("update-plan", cmd_update_plan, "configured dependency update candidates only; no probes or writes"),
         ("doctor", cmd_doctor,
          "run probe_argv / PATH presence, Claude context_size_nudge, credential-bak delete-after, advisory UNACCEPTED Pi pools; never repairs"),
         (
