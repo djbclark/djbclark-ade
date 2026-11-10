@@ -1,4 +1,4 @@
-"""ade_install: install catalog, plan, observe-only doctor/keys, bounded apply.
+"""ade_install: install catalog, plan, observe-only doctor/keys, linux-e2e dry-run, bounded apply.
 
 Transitional source: ``config/install.toml`` when ``config/ade.toml`` is absent.
 Key entries are names and metadata only. Doctor runs ``probe_argv`` when

@@ -1,5 +1,5 @@
 #!/usr/bin/env -S python3 -I
-"""ade-install: transitional install catalog, plan, doctor, keys, and bounded apply.
+"""ade-install: transitional install catalog, plan, doctor, keys, linux-e2e, and bounded apply.
 
   ade-install check [--root DIR] [--json]
   ade-install catalog [--root DIR] [--json]
