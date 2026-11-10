@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import plistlib
+import re
 import shutil
 import signal
 import subprocess
@@ -18,6 +19,8 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "bin" / "deadline"
 T0 = 1_800_000_000
+# Match bin/ade_sched.PLACEHOLDER_RE — not bare "__" (temp paths may contain it).
+_PLACEHOLDER_LEFT = re.compile(r"__[A-Z][A-Z0-9_]*__|@[A-Z][A-Z0-9_]*@")
 
 
 class Env:
@@ -285,7 +288,8 @@ def test_install_dry_run_renders_a_valid_plist(env, tmp_path):
     assert r.returncode == 0, r.stderr
     p = plist_of(r.stdout)
     assert p["Label"] == "com.djbclark.deadline-sweep" and p["StartInterval"] == 60
-    assert p["ProgramArguments"] == [f"{ade.resolve()}/bin/deadline", "sweep"] and "__" not in r.stdout
+    assert p["ProgramArguments"] == [f"{ade.resolve()}/bin/deadline", "sweep"]
+    assert not _PLACEHOLDER_LEFT.search(r.stdout), r.stdout
 
 
 def _fake_sched(tmp: Path, linger: str = "yes") -> dict:
@@ -317,7 +321,8 @@ def test_install_dry_run_systemd_renders_timer_and_service(env, tmp_path):
     r = env.run("install", "--backend", "systemd", "--ade", str(ade), "--dry-run", **_fake_sched(tmp_path))
     assert r.returncode == 0, r.stderr
     assert "OnUnitActiveSec=60s" in r.stdout and "KillMode=process" in r.stdout
-    assert f"DEADLINE_STATE_DIR={env.state.resolve()}" in r.stdout and "__" not in r.stdout
+    assert f"DEADLINE_STATE_DIR={env.state.resolve()}" in r.stdout
+    assert not _PLACEHOLDER_LEFT.search(r.stdout), r.stdout
     assert f"{ade.resolve()}/bin/deadline" in r.stdout and not (tmp_path / "units").exists()
 
 
@@ -1139,7 +1144,8 @@ def test_install_renders_the_configured_state_dir_into_env_and_log_paths(env, tm
     p = plist_of(r.stdout)
     sd = str(env.state.resolve())
     assert p["EnvironmentVariables"]["DEADLINE_STATE_DIR"] == sd
-    assert p["StandardOutPath"] == p["StandardErrorPath"] == f"{sd}/sweep.log" and "__" not in r.stdout
+    assert p["StandardOutPath"] == p["StandardErrorPath"] == f"{sd}/sweep.log"
+    assert not _PLACEHOLDER_LEFT.search(r.stdout), r.stdout
 
 
 # ---------- PR 223 local Codex review round 12: anchor captured at registration, exhausted notice retries escalate once ----------

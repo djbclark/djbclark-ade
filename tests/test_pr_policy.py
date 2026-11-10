@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import os
 import plistlib
+import re
 import subprocess
 import sys
 import threading
@@ -18,6 +19,8 @@ import pytest
 
 REPO = Path(__file__).resolve().parent.parent
 CLI = REPO / "bin" / "pr-policy"
+# Match bin/ade_sched.PLACEHOLDER_RE — not bare "__" (temp paths may contain it).
+_PLACEHOLDER_LEFT = re.compile(r"__[A-Z][A-Z0-9_]*__|@[A-Z][A-Z0-9_]*@")
 
 
 def gh_repo(name, policy="all", archived=False, prs=True):
@@ -452,7 +455,7 @@ def test_bad_config_schema_exits_2(env):
 def test_install_dry_run_renders_the_template(env):
     p = env("install", "--backend", "launchd", "--dry-run", "--ade", str(REPO))
     assert p.returncode == 0, p.stderr
-    assert "__" not in p.stdout
+    assert not _PLACEHOLDER_LEFT.search(p.stdout), p.stdout
     pl = plist_of(p.stdout)
     assert pl["Label"] == "com.djbclark.pr-policy"
     assert pl["ProgramArguments"] == [str(REPO / "bin/pr-policy"), "apply", "--yes", "--notify", "--quiet"]
@@ -476,7 +479,8 @@ def _fake_sched(tmp: Path, linger: str = "yes") -> dict:
 def test_install_dry_run_systemd_renders_timer(env):
     p = env("install", "--backend", "systemd", "--dry-run", "--ade", str(REPO), extra=_fake_sched(env.tmp))
     assert p.returncode == 0, p.stderr
-    assert "OnUnitActiveSec=600s" in p.stdout and "KillMode=process" in p.stdout and "__" not in p.stdout
+    assert "OnUnitActiveSec=600s" in p.stdout and "KillMode=process" in p.stdout
+    assert not _PLACEHOLDER_LEFT.search(p.stdout), p.stdout
     assert f"PR_POLICY_STATE_DIR={(env.tmp / 'state').resolve()}" in p.stdout
     assert not (env.tmp / "units").exists()
 
