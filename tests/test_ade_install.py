@@ -1490,7 +1490,8 @@ def test_apply_sched_reconcile_skips_non_write_backend(monkeypatch, tmp_path):
     import ade_sched as sched
 
     class B:
-        name = "launchd"
+        # Host backend outside RECONCILE_WRITE_BACKENDS (launchd/cron/systemd write; paseo is orthogonal).
+        name = "paseo"
 
     monkeypatch.setattr(sched, "detect", lambda *_a, **_k: B())
     root = _fixture_root(tmp_path)
