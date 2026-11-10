@@ -1,6 +1,6 @@
 # The frontier-model allowance, versioned in git (2026-10-27; docs/gates.md). Read by bin/ade_gates.py `load_frontier`
-# for bin/route_agent.py (the planner's per-wave cap), bin/acp-dispatch (the dispatch grant) and
-# claude/hooks/frontier_agent_gate.py (Agent-tool frontier calls).
+# for bin/route_agent.py (the planner's per-wave cap; Wave 6 Choice.dispatch → paseo run / transitional shim),
+# and claude/hooks/frontier_agent_gate.py (Agent-tool frontier calls). The acp-dispatch grant path leaves ~2026-11-20.
 #
 # Since 2026-11-07 (slim-down E7) this file holds the frontier half only: the Claude quota gates ([governor],
 # [quota_guard], the gate profiles and their floors) were deleted with the fleet governor, the quota guard and the

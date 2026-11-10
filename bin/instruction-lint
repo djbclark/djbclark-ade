@@ -25,8 +25,9 @@ Checks (finding `check` ids):
                         case folded) that appears in 2 or more distinct real files: one copy
                         should link to the other. One finding per duplicated text, at the first
                         file; `detail` names the other files and lines.
-  retired-term   warn   a line naming a D7 sweep term (a tool retired or being retired from docs; some, like relay.py, acp-run and cow pastures, are still live) (herdr, orca, tmux, superset, paradev,
-                        tuicommander, tuios, cow pasture, relay.py, acp-run, acp-dispatch):
+  retired-term   warn   a line naming a D7 sweep term (a tool retired or being retired from docs; relay.py /
+                        acp-run / acp-dispatch remain live as Wave 6 one-cycle shims until ~2026-11-20) (herdr, orca,
+                        tmux, superset, paradev, tuicommander, tuios, cow pasture, relay.py, acp-run, acp-dispatch):
                         case-insensitive, word-bounded (`orchestration` and `orcas` do not hit);
                         the names `herdr4paseo` and `paseo4herdr` are exempt. One finding per line.
   heading-skill  warn   a heading whose slug equals a skill name, or starts with one followed by
