@@ -87,6 +87,14 @@ sched-diff:
 sched-reconcile *args:
     "{{ root }}/bin/ade-sched" reconcile --root "{{ root }}" {{ args }}
 
+# Linux one-step: reconcile every ADE-owned labeled job (update-check / keys-check /
+# harden-check / deadline-sweep / …). Default dry-run; pass -- --yes to write.
+# Folded into `ade-install apply` (full apply, no --id) as well.
+sched-reconcile-checks *args:
+    "{{ root }}/bin/ade-sched" reconcile --root "{{ root }}" \
+        --name ade-update-check --name keys-check --name harden-check \
+        --name deadline-sweep --name pr-policy --name load-watch {{ args }}
+
 # Validate github.toml + merge-gate App manifest (setup-plan S8; pure).
 github-setup-check:
     "{{ root }}/bin/ade-github-setup" check --root "{{ root }}"

@@ -197,6 +197,10 @@ def cmd_apply(args: argparse.Namespace) -> int:
         # Opt-in live path always implies --system consideration.
         args.system = True
     dry_run = not args.yes  # default dry-run; --yes executes
+    if args.reconcile_sched and args.no_reconcile_sched:
+        print("ade-install apply: refuse both --reconcile-sched and --no-reconcile-sched",
+              file=sys.stderr)
+        return 2
     try:
         catalog = ai.load_catalog(root=Path(args.root) if args.root else None)
         ids = set(args.id) if args.id else None
@@ -218,6 +222,11 @@ def cmd_apply(args: argparse.Namespace) -> int:
                     print(f"  {row['action']:18} {row['id']}: {row['reason']}{extra}")
             # Missing platform argv is a soft miss (exit 1); print-only never installs.
             return 0 if all(r.get("ok") for r in rows) or not rows else 1
+        reconcile_sched = None
+        if getattr(args, "reconcile_sched", False):
+            reconcile_sched = True
+        if getattr(args, "no_reconcile_sched", False):
+            reconcile_sched = False
         results, rc = ai.apply(
             catalog,
             dry_run=dry_run,
@@ -227,6 +236,7 @@ def cmd_apply(args: argparse.Namespace) -> int:
             apply_system=args.apply_system,
             state_dir=Path(args.state_dir) if args.state_dir else None,
             prefix=prefix,
+            reconcile_sched=reconcile_sched,
         )
     except ai.InstallError as e:
         if args.json:
@@ -350,12 +360,27 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="user install prefix for {prefix} token (default: ~/.local/bin)",
     )
+    ap.add_argument(
+        "--reconcile-sched",
+        action="store_true",
+        help=(
+            "after component steps, run ade-sched reconcile for ADE-owned labeled "
+            "jobs (default on for a full apply with no --id)"
+        ),
+    )
+    ap.add_argument(
+        "--no-reconcile-sched",
+        action="store_true",
+        help="skip the post-apply ade-sched reconcile step",
+    )
     ap.set_defaults(
         func=cmd_apply,
         dry_run_flag=False,
         yes=False,
         print_system_argv=False,
         apply_system=False,
+        reconcile_sched=False,
+        no_reconcile_sched=False,
     )
 
     args = parser.parse_args(argv)
