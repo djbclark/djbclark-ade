@@ -118,11 +118,11 @@ bin/ade-merge-ready merge-now --prs N --yes       # preferred; refuses unless ad
 Owner tips after owner-trust is on `master`: wait for Tests (or the push rejudge when the marker module lands), then
 `merge-now` — no paste, no per-PR dispatch.
 
-## Operator merge order (`bin/ade-merge-ready`, 2026-11-09; `approve-paste` / `approve-post` / `merge-now` 2026-11-10)
+## Operator merge order (`bin/ade-merge-ready`, 2026-11-09; `approve-paste` / `approve-post` / `retrigger-marker` / `merge-now` 2026-11-10)
 
 When many ADE PRs wait on the merge gate, use the helper. Classify / stacks /
-approve-paste / approve-post / merge-now never invent an APPROVE; open-PR
-listing uses `--limit 500` (fail closed if that cap is hit).
+approve-paste / approve-post / retrigger-marker / merge-now never invent an
+APPROVE; open-PR listing uses `--limit 500` (fail closed if that cap is hit).
 
 **After #484 on master (owner-trust + push rejudge):** owner-authored tips need
 no marker paste and no herdr HTML-comment paste. Use `approve-post` only for
@@ -130,6 +130,8 @@ no marker paste and no herdr HTML-comment paste. Use `approve-post` only for
 `gh pr merge` so a red/missing `adversary-marker` cannot slip through.
 `merge-now` squash-merges at the tip head and falls back to GitHub
 `merge-async` when the tip is in a native stack (GraphQL merge refuses those).
+`retrigger-marker` re-dispatches the Action when a tip still shows a stale
+status before the next Tests run (usually unnecessary after the push sweep).
 
 ```sh
 bin/ade-merge-ready                  # classify open tips vs pytest-linux + adversary-marker
@@ -138,6 +140,7 @@ bin/ade-merge-ready stacks --bottoms-only
 # Outside tips only (owner gh). Dry-run by default; posts only with both flags:
 bin/ade-merge-ready approve-post --prs N --i-reviewed --yes --expect-head N=<40hex> --trigger-marker
 bin/ade-merge-ready approve-paste --bottoms-only  # templates only (legacy / outside); prefer approve-post
+bin/ade-merge-ready retrigger-marker --class needs_approve
 bin/ade-merge-ready merge-now --prs N            # dry-run; refuses unless adversary-marker success
 bin/ade-merge-ready merge-now --prs N --yes      # squash at tip head only if class=merge_now
 ```

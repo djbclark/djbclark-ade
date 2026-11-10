@@ -5,6 +5,7 @@
   ade-merge-ready stacks [--group NAME] [--bottoms-only] [--repo …] [--min N] [--json]
   ade-merge-ready approve-paste [--base master] [--bottoms-only] [--repo …] [--min N]
   ade-merge-ready approve-post --i-reviewed --yes [--bottoms-only] [--trigger-marker] …
+  ade-merge-ready retrigger-marker (--prs … | --bottoms-only | --class NAME) [--yes]
   ade-merge-ready merge-now --prs N[,N…] [--yes]   # refuses unless adversary-marker success
   ade-merge-ready --help
 
@@ -15,22 +16,24 @@ adversary-marker checks. A live APPROVE is taken only from the
 attribution-aware `decide`: owner body editor / owner comment history). Raw
 markers in the body or comments are never enough on their own — that would
 count an outside author's or bot's same-head APPROVE. Classify / stacks /
-approve-paste never invent an APPROVE. `approve-paste` prints templates only
-(and warns: never paste them through herdr — herdr mangles `<!-- … -->`).
-`approve-post` posts those templates via the GitHub API (not herdr) **only**
-when the authenticated `gh` user is the repository owner and both
-`--i-reviewed` and `--yes` are set (dry-run otherwise). Default `--via auto`:
-owner-authored tips get a **body** append (today's gate counts body APPROVE
-on owner PRs; comments do not); outside tips get an issue **comment**.
-`--via body` / `--via comment` force one path. Never invents a head — each
-marker names the tip `headRefOid` just collected. `merge-now` is the only
-merge path here: it refuses unless classify is `merge_now` (pytest-linux pass
-**and** adversary-marker success on the tip head); dry-run unless `--yes`.
-It squash-merges at the tip head via `gh pr merge --match-head-commit`, and
-falls back to GitHub's `merge-async` API when the tip is in a native stack
-(2026-11-10: GraphQL merge refuses stacked PRs). Do not raw `gh pr merge`
-when adversary-marker is missing or failing (2026-11-10: #481 was merged
-that way by mistake).
+approve-paste / retrigger-marker never invent an APPROVE. `approve-paste`
+prints templates only (and warns: never paste them through herdr — herdr
+mangles `<!-- … -->`). `approve-post` posts those templates via the GitHub
+API (not herdr) **only** when the authenticated `gh` user is the repository
+owner and both `--i-reviewed` and `--yes` are set (dry-run otherwise).
+Default `--via auto`: owner-authored tips get a **body** append (today's gate
+counts body APPROVE on owner PRs; comments do not); outside tips get an issue
+**comment**. `--via body` / `--via comment` force one path. Never invents a
+head — each marker names the tip `headRefOid` just collected.
+`retrigger-marker` only runs `gh workflow run adversary-marker.yml -f pr=N`
+for selected open tips (dry-run unless `--yes`); it never posts markers and
+never merges. Require at least one of `--prs`, `--bottoms-only`, or
+`--class` so a bare invoke cannot fire the Action on every open PR.
+`merge-now` is the only merge path here: it refuses unless classify is
+`merge_now` (pytest-linux pass **and** adversary-marker success on the tip
+head); dry-run unless `--yes`. Do not raw `gh pr merge` when
+adversary-marker is missing or failing (2026-11-10: #481 was merged that
+way by mistake).
 
 `stacks` walks open PR base→same-repo head refs and prints bottom-up APPROVE
 order for named groups (install, claims, s1, wave6) with full tip SHAs for
@@ -470,6 +473,10 @@ def print_approve_paste(rows: list[dict[str, Any]]) -> None:
         "# Until #484: owner tips need a body APPROVE — approve-post --via auto "
         "does that; do not paste comments for owner PRs."
     )
+    print(
+        "# After #484: owner tips can pass without APPROVE once the Action is "
+        "re-run (retrigger-marker); outside tips still need an owner comment."
+    )
     for r in rows:
         head = r.get("head") or ""
         tmpl = r.get("marker_template") or ""
@@ -565,6 +572,76 @@ def _trigger_adversary_marker(
             f"{(t.stderr or t.stdout).strip()}"
         )
     print(f"triggered adversary-marker.yml pr={number}", file=out)
+
+
+CLASS_NAMES = (
+    "merge_now",
+    "needs_approve",
+    "tests_pending",
+    "tests_fail",
+    "conflicting",
+    "other",
+)
+
+
+def select_retrigger_rows(
+    rows: list[dict[str, Any]],
+    *,
+    bottoms_only: bool,
+    groups: list[str] | None,
+    listing_repo: str,
+    pr_numbers: set[int] | None = None,
+    class_name: str | None = None,
+) -> list[dict[str, Any]]:
+    """Open tips selected for adversary-marker re-run (never invents APPROVE).
+
+    Filters combine with AND. ``--bottoms-only`` without ``--group`` keeps
+    stack bottoms of the full open set (base outside the open graph). With
+    ``--group``, bottoms follow the same named-stack set as approve-*.
+    """
+    selected = list(rows)
+    if class_name:
+        selected = [r for r in selected if r.get("class") == class_name]
+    if bottoms_only or groups:
+        if groups:
+            stacks = build_named_stacks(
+                rows,
+                groups=groups,
+                bottoms_only=True,
+                listing_repo=listing_repo,
+            )
+            bottom_nums = {
+                r["number"] for s in stacks for r in (s.get("order") or [])
+            }
+        else:
+            linked = link_parents(rows, listing_repo=listing_repo)
+            bottom_nums = {r["number"] for r in stack_bottoms(linked)}
+        selected = [r for r in selected if r["number"] in bottom_nums]
+    if pr_numbers is not None:
+        selected = [r for r in selected if r["number"] in pr_numbers]
+    selected.sort(key=lambda r: r["number"])
+    return selected
+
+
+def retrigger_marker_prs(
+    gh: str,
+    repo: str,
+    rows: list[dict[str, Any]],
+    *,
+    dry_run: bool,
+    progress=None,
+) -> list[int]:
+    """Dry-run or fire ``adversary-marker.yml`` for each selected tip. No merge."""
+    out = progress if progress is not None else sys.stdout
+    fired: list[int] = []
+    for r in rows:
+        n = int(r["number"])
+        if dry_run:
+            print(f"would trigger adversary-marker.yml pr={n}", file=out)
+        else:
+            _trigger_adversary_marker(gh, repo, n, progress=out)
+        fired.append(n)
+    return fired
 
 
 def resolve_approve_via(via: str, owner_pr: bool) -> str:
@@ -884,18 +961,27 @@ def main(argv: list[str] | None = None) -> int:
         prog="ade-merge-ready",
         description=(
             "Classify open ADE PRs against pytest-linux + adversary-marker + live "
-            "APPROVE, print bottom-up stack order, print paste templates, or "
-            "(owner only) post APPROVE comments after review."
+            "APPROVE, print bottom-up stack order, print paste templates, "
+            "(owner only) post APPROVE comments after review, or re-run "
+            "adversary-marker on selected tips."
         ),
     )
     ap.add_argument(
         "cmd",
         nargs="?",
         default="classify",
-        choices=("classify", "stacks", "approve-paste", "approve-post", "merge-now"),
+        choices=(
+            "classify",
+            "stacks",
+            "approve-paste",
+            "approve-post",
+            "retrigger-marker",
+            "merge-now",
+        ),
         help=(
-            "classify (default), stacks, approve-paste, approve-post, or "
-            "merge-now (squash only when adversary-marker is success)"
+            "classify (default), stacks, approve-paste, approve-post, "
+            "retrigger-marker, or merge-now (squash only when "
+            "adversary-marker is success)"
         ),
     )
     ap.add_argument(
@@ -930,8 +1016,10 @@ def main(argv: list[str] | None = None) -> int:
         "--bottoms-only",
         action="store_true",
         help=(
-            "stacks / approve-paste / approve-post: only stack bottoms within "
-            "each selected group (approve-* uses named stacks when set)"
+            "stacks / approve-paste / approve-post / retrigger-marker: only "
+            "stack bottoms within each selected group (approve-* / "
+            "retrigger-marker with --group use named stacks; retrigger-marker "
+            "without --group uses bottoms of the full open set)"
         ),
     )
     ap.add_argument(
@@ -945,8 +1033,18 @@ def main(argv: list[str] | None = None) -> int:
         default="",
         metavar="N,N,…",
         help=(
-            "approve-paste / approve-post / merge-now: only these PR numbers "
-            "(comma-separated; required for merge-now)"
+            "approve-paste / approve-post / retrigger-marker / merge-now: only "
+            "these PR numbers (comma-separated; required for merge-now)"
+        ),
+    )
+    ap.add_argument(
+        "--class",
+        dest="class_name",
+        default="",
+        metavar="NAME",
+        help=(
+            "retrigger-marker: only tips with this classify class "
+            f"({', '.join(CLASS_NAMES)})"
         ),
     )
     ap.add_argument(
@@ -957,7 +1055,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--yes",
         action="store_true",
-        help="approve-post / merge-now: actually write (default is dry-run)",
+        help=(
+            "approve-post / retrigger-marker / merge-now: actually write "
+            "(default is dry-run)"
+        ),
     )
     ap.add_argument(
         "--trigger-marker",
@@ -1010,6 +1111,56 @@ def main(argv: list[str] | None = None) -> int:
             sys.stdout.write("\n")
         else:
             print_stacks(stacks)
+        return 0
+
+    if a.cmd == "retrigger-marker":
+        class_name = (a.class_name or "").strip() or None
+        if class_name is not None and class_name not in CLASS_NAMES:
+            return die(
+                f"--class must be one of: {', '.join(CLASS_NAMES)} "
+                f"(got {class_name!r})"
+            )
+        if pr_numbers is None and not a.bottoms_only and not class_name:
+            return die(
+                "retrigger-marker requires --prs N[,N…] and/or "
+                "--bottoms-only and/or --class NAME"
+            )
+        selected = select_retrigger_rows(
+            rows,
+            bottoms_only=a.bottoms_only,
+            groups=a.group,
+            listing_repo=a.repo,
+            pr_numbers=pr_numbers,
+            class_name=class_name,
+        )
+        dry_run = not a.yes
+        out = sys.stderr if a.json else sys.stdout
+        if dry_run:
+            print(
+                f"# dry-run retrigger-marker ({len(selected)} tips); "
+                "pass --yes to fire adversary-marker.yml",
+                file=out,
+            )
+        try:
+            fired = retrigger_marker_prs(
+                a.gh, a.repo, selected, dry_run=dry_run, progress=out
+            )
+        except (RuntimeError, subprocess.TimeoutExpired, OSError) as e:
+            return die(str(e))
+        if a.json:
+            json.dump(
+                {
+                    "dry_run": dry_run,
+                    "class": class_name,
+                    "bottoms_only": bool(a.bottoms_only),
+                    "triggered": fired,
+                    "numbers": [r["number"] for r in selected],
+                },
+                sys.stdout,
+                indent=2,
+                sort_keys=True,
+            )
+            sys.stdout.write("\n")
         return 0
 
     if a.cmd == "merge-now":
