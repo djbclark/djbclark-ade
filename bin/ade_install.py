@@ -1,12 +1,16 @@
-"""ade_install: install catalog, plan, observe-only doctor, bounded apply.
+"""ade_install: install catalog, plan, observe-only doctor/keys, linux-e2e dry-run, bounded apply.
 
 Transitional source: ``config/install.toml`` when ``config/ade.toml`` is absent.
 Key entries are names and metadata only. Doctor runs ``probe_argv`` when
 recorded (else PATH presence), checks Linux systemd linger when ade-sched
 jobs are installed (``just linger`` / enable-linger; never sudo), and never
-repairs. Apply is user-scoped only: ``--dry-run`` by default, ``--yes`` to
-execute recorded ``install_argv`` (argv lists, never shell=True). Root /
-``--system`` effects are refused until a later unit. Secrets are never read.
+repairs. ``keys`` runs observe-only ``sudo-secretspec check`` (no values).
+``linux_e2e`` / ``ade-install linux-e2e`` chains doctor + keys + hard-dep
+apply ``--dry-run`` (and Linux ``system_argv`` preview) so CI can prove the
+one-step path without a Mac. Apply is user-scoped only: ``--dry-run`` by
+default, ``--yes`` to execute recorded ``install_argv`` (argv lists, never
+shell=True). Root / live ``--system`` effects are refused until a later unit.
+Secrets are never read.
 """
 from __future__ import annotations
 
@@ -355,6 +359,182 @@ def observe_login(row: dict[str, Any]) -> Observation:
     if cmd == UNKNOWN:
         return Observation("login", lid, "unknown", "login command not recorded")
     return Observation("login", lid, "unknown", f"login check recorded as {cmd!r}; not executed")
+
+
+SECRETSPEC_CHECK_ARGV = [
+    "sudo-secretspec",
+    "check",
+    "--reason",
+    "ade-install keys",
+]
+
+
+def observe_secretspec_check(
+    *,
+    runner: Runner | None = None,
+    timeout_s: float = 30.0,
+    cwd: Path | None = None,
+) -> Observation:
+    """Observe-only bulk presence check via ``sudo-secretspec check``.
+
+    Never calls get/export/set/run. Does not print or request secret values.
+    """
+    if _probe_executable_missing(SECRETSPEC_CHECK_ARGV[0]):
+        return Observation(
+            "secretspec",
+            "check",
+            "unknown",
+            "sudo-secretspec not on PATH; cannot check presence (no values read)",
+        )
+    run = runner or (lambda a, d: _default_runner(a, d, timeout_s=timeout_s))
+    root = (cwd or Path.cwd()).resolve()
+    try:
+        proc = run(list(SECRETSPEC_CHECK_ARGV), root)
+    except subprocess.TimeoutExpired:
+        return Observation(
+            "secretspec",
+            "check",
+            "error",
+            f"sudo-secretspec check timed out after {timeout_s}s",
+        )
+    except OSError as e:
+        return Observation("secretspec", "check", "error", f"exec error: {e}")
+    # check exit: 0 = required credentials present; non-zero = missing/fail.
+    # stdout/stderr may name keys; never treat as values. Truncate one line.
+    if proc.returncode == 0:
+        return Observation(
+            "secretspec",
+            "check",
+            "ok",
+            "sudo-secretspec check: required credentials present (no values read)",
+        )
+    err = (proc.stderr or proc.stdout or "").strip().splitlines()
+    detail = err[0][:200] if err else f"exit {proc.returncode}"
+    return Observation(
+        "secretspec",
+        "check",
+        "missing",
+        f"sudo-secretspec check failed: {detail}",
+    )
+
+
+def keys_observe(
+    catalog: Catalog,
+    *,
+    runner: Runner | None = None,
+    timeout_s: float = 30.0,
+) -> tuple[list[Observation], int]:
+    """Observe-only keys path (S3b presence half).
+
+    Lists catalog key references, then runs ``sudo-secretspec check`` when the
+    binary exists. Exit 1 only when check runs and fails; missing binary is
+    ``unknown`` (exit 0) so Linux/CI without the boundary stays observant.
+    Never verifies individual keys and never reads values.
+    """
+    obs: list[Observation] = [
+        Observation("catalog", str(catalog.path), "ok", "catalog validated"),
+    ]
+    for row in catalog.keys:
+        obs.append(observe_key(row))
+    for row in catalog.logins:
+        obs.append(observe_login(row))
+    check = observe_secretspec_check(
+        runner=runner,
+        timeout_s=timeout_s,
+        cwd=catalog.root,
+    )
+    obs.append(check)
+    rc = 1 if check.status in ("missing", "error") else 0
+    return obs, rc
+
+
+def hard_component_ids(catalog: Catalog) -> set[str]:
+    """Ids of hard-class components (always expected on a full install)."""
+    return {str(row["id"]) for row in catalog.components if str(row["class"]) == "hard"}
+
+
+def linux_e2e(
+    catalog: Catalog,
+    *,
+    runner: Runner | None = None,
+    probe_timeout_s: float = 15.0,
+    sched_linger: Observation | None = None,
+    skip_sched_linger: bool = False,
+    secretspec_runner: Runner | None = None,
+    secretspec_timeout_s: float = 30.0,
+    prefix: Path | None = None,
+) -> tuple[dict[str, Any], int]:
+    """Linux one-step prove path: doctor (hard + linger) + keys + hard apply dry-run.
+
+    Always dry-run for apply; never sudo; never enables linger; never reads
+    secret values. Passes ``allow_system=True`` only so Linux ``system_argv``
+    harddeps preview as ``would-system-install`` (live system exec still
+    refused). Mac ``system_argv_darwin`` is not required. Injectable linger /
+    runners keep CI hermetic without a Mac or live secretspec.
+    """
+    doctor_obs, doctor_rc = doctor(
+        catalog,
+        runner=runner,
+        probe_timeout_s=probe_timeout_s,
+        sched_linger=sched_linger,
+        skip_sched_linger=skip_sched_linger,
+    )
+    keys_obs, keys_rc = keys_observe(
+        catalog,
+        runner=secretspec_runner,
+        timeout_s=secretspec_timeout_s,
+    )
+    hard_ids = hard_component_ids(catalog)
+    # Pass the set through even when empty: build_apply_steps treats None as
+    # "every component" and an empty set as "select nothing" (hard-only dry-run).
+    apply_results, apply_rc = apply(
+        catalog,
+        dry_run=True,
+        ids=hard_ids,
+        allow_system=True,
+        prefix=prefix,
+        runner=runner,
+    )
+    # Compose report; doctor observations already include key refs + linger.
+    linger = [o for o in doctor_obs if o.kind == "sched" and o.id == "linger"]
+    secretspec = [o for o in keys_obs if o.kind == "secretspec"]
+    hard_comp = [
+        o for o in doctor_obs
+        if o.kind == "component" and o.id in hard_ids
+    ]
+    report: dict[str, Any] = {
+        "ok": doctor_rc == 0 and keys_rc == 0 and apply_rc == 0,
+        "mode": "linux-e2e-dry-run",
+        "stages": {
+            "doctor": {"rc": doctor_rc, "observations": [
+                {"kind": o.kind, "id": o.id, "status": o.status, "detail": o.detail}
+                for o in doctor_obs
+            ]},
+            "keys": {"rc": keys_rc, "observations": [
+                {"kind": o.kind, "id": o.id, "status": o.status, "detail": o.detail}
+                for o in keys_obs
+            ]},
+            "apply_hard_dry_run": {"rc": apply_rc, "results": apply_results},
+        },
+        "hard_ids": sorted(hard_ids),
+        "linger": (
+            {"status": linger[0].status, "detail": linger[0].detail}
+            if linger else None
+        ),
+        "secretspec_check": (
+            {"status": secretspec[0].status, "detail": secretspec[0].detail}
+            if secretspec else None
+        ),
+        "hard_component_statuses": {
+            o.id: o.status for o in hard_comp
+        },
+        "note": (
+            "observe-only doctor + keys; apply --dry-run for hard ids with "
+            "allow_system preview; never sudo; never enable-linger; no Mac required"
+        ),
+    }
+    rc = 0 if report["ok"] else 1
+    return report, rc
 
 
 def linger_off_doctor_detail(labels: list[str]) -> str:
