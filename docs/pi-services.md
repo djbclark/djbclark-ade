@@ -73,8 +73,10 @@ and continuation acceptance must precede a routing-policy change. The operator
 gate is `config/pi-pool-acceptance.toml` (`accepted = false` for both as of
 2026-11-09); `bin/ade-pi-pools check` and `bin/pi-default` refuse automatic
 routing to an unaccepted pool ([dynamic defaults](pi-defaults.md) B4).
-`bin/ade-pi-pools probe` observes continuation/quota/identity for those pools
-without writing `accepted=true` and without probing Claude API billing (B4b).
+`bin/ade-pi-pools probe` observes continuation/quota/identity and
+`ready_for_operator_accept` for those pools without writing `accepted=true` and
+without probing Claude API billing (B4b). Opt-in `probe --record-accept` writes
+only a local state file; routing still waits for `accepted=true` here (B4c).
 
 ## SIPB's 32k context
 

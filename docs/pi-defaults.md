@@ -116,6 +116,24 @@ remains but unknown/skip do; 1 on usage or an unreadable config. A basic tool
 smoke is not continuation. Flip `accepted=true` only after a full pass and
 operator judgment; the harness never does.
 
+B4c. **Local accept record (2026-11-10, opt-in; no routing change).** One command
+shows readiness: `bin/ade-pi-pools probe` prints `ready_for_operator_accept` per
+pool (and a top-level list in `--json`). Explicit opt-in
+`bin/ade-pi-pools probe --record-accept` [`--pool NAME` …] records only pools
+that are already `ready_for_operator_accept` into a **local** state file
+(`ADE_PI_OPERATOR_ACCEPT_PATH`, else
+`ADE_PI_ACCEPTANCE_EVIDENCE_DIR/operator-accept.json`, else
+`~/.local/state/ade/pi-acceptance/operator-accept.json`). That write never sets
+`accepted=true` in `config/pi-pool-acceptance.toml` and never changes
+`ade/auto` / `bin/pi-default` routing. Incomplete pools are refused (no invented
+acceptance); exit 2 when `--record-accept` finds nothing ready and every
+selected pool otherwise passed. Routing still waits for the operator to edit
+`accepted=true` after judgment (B4). Schema:
+
+```json
+{"schema_version": 1, "writes_routing_accepted": false, "updated_at": "2026-11-10T00:00:00Z", "pools": {"grok": {"recorded_at": "2026-11-10T00:00:00Z", "all_dimensions_pass": true, "routing_accepted": false, "writes_routing_accepted": false, "probes": {"quota": "pass", "identity": "pass", "continuation": "pass"}}}}
+```
+
 ## C. Failure and recovery
 
 C1. Unknown, stale, incomplete or approval-required quota cannot qualify a

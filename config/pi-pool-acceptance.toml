@@ -7,8 +7,10 @@
 # continuation, quota freshness, identity and failure-handling acceptance
 # (docs/pi-defaults.md, docs/pi-services.md). `bin/ade-pi-pools check` reports
 # readiness for every routing Pi service. `bin/ade-pi-pools probe` observes
-# continuation/quota/identity without writing `accepted=true` and without
-# touching Claude API billing (B4b).
+# continuation/quota/identity and ready_for_operator_accept without writing
+# `accepted=true` and without touching Claude API billing (B4b). Opt-in
+# `probe --record-accept` writes only a local operator-accept.json (B4c); it
+# never flips `accepted` here and never changes routing.
 #
 # Optional `identity` / `billing` labels feed the observe-only identity probe.
 # Rows below that are not yet `agent = "pi"` services are the acceptance

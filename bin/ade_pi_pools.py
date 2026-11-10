@@ -9,13 +9,17 @@ per pool after continuation/quota/identity acceptance (docs/pi-defaults.md).
   ade-pi-pools check [--json]    exit 0 when every routing Pi service is accepted;
                                  exit 2 when any is missing or accepted=false;
                                  exit 1 on usage or an unreadable config
-  ade-pi-pools probe [--json] [--pool NAME ...]
+  ade-pi-pools probe [--json] [--pool NAME ...] [--record-accept]
                                  observe-only continuation/quota/identity probes;
-                                 never writes accepted=true; never touches Claude
-                                 API billing (docs/pi-defaults.md B4b)
+                                 prints ready_for_operator_accept per pool;
+                                 --record-accept (opt-in) writes only a local
+                                 state file — never accepted=true, never routing
+                                 (docs/pi-defaults.md B4b / B4c)
 
 PI_POOL_ACCEPTANCE redirects the acceptance file (tests).
-ADE_PI_ACCEPTANCE_EVIDENCE_DIR redirects continuation evidence (tests).
+ADE_PI_ACCEPTANCE_EVIDENCE_DIR redirects continuation evidence and the local
+operator-accept record (tests). ADE_PI_OPERATOR_ACCEPT_PATH overrides that
+record path alone.
 """
 from __future__ import annotations
 
@@ -23,7 +27,9 @@ import argparse
 import json
 import os
 import sys
+import tempfile
 import tomllib
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +42,8 @@ REPO = Path(__file__).resolve().parent.parent
 CLAUDE_API_BILLING_POOLS = frozenset({"omp", "anthropic", "claude-api"})
 
 PROBE_STATUSES = frozenset({"pass", "fail", "unknown", "skip"})
+
+OPERATOR_ACCEPT_SCHEMA = 1
 
 
 def _pct(value: Any) -> float | None:
@@ -67,6 +75,105 @@ def evidence_dir() -> Path:
     if env:
         return Path(env)
     return Path.home() / ".local" / "state" / "ade" / "pi-acceptance"
+
+
+def operator_accept_path(*, evidence: Path | None = None) -> Path:
+    """Local operator-accept record only; never the routing acceptance toml."""
+    env = os.environ.get("ADE_PI_OPERATOR_ACCEPT_PATH")
+    if env:
+        return Path(env)
+    base = evidence if evidence is not None else evidence_dir()
+    return base / "operator-accept.json"
+
+
+def _atomic_write_json(path: Path, data: dict[str, Any]) -> None:
+    """Temp file beside the target, fsync, os.replace (review rule 6)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=path.name + ".", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as out:
+            json.dump(data, out, allow_nan=False, sort_keys=True)
+            out.write("\n")
+            out.flush()
+            os.fsync(out.fileno())
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def load_operator_accept_records(path: Path | None = None) -> dict[str, dict[str, Any]]:
+    """Return `{pool: record}` from the local state file. Missing → {}. Unreadable → raise."""
+    target = path or operator_accept_path()
+    try:
+        raw = target.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    data = json.loads(raw)
+    if not isinstance(data, dict) or data.get("schema_version") != OPERATOR_ACCEPT_SCHEMA:
+        raise ValueError(f"operator-accept record needs schema_version={OPERATOR_ACCEPT_SCHEMA} ({target})")
+    pools = data.get("pools")
+    if pools is None:
+        return {}
+    if not isinstance(pools, dict):
+        raise ValueError(f"operator-accept record: pools must be an object ({target})")
+    out: dict[str, dict[str, Any]] = {}
+    for name, row in pools.items():
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError(f"operator-accept record: pool names must be non-empty strings ({target})")
+        if not isinstance(row, dict):
+            raise ValueError(f"operator-accept record: pools.{name} must be an object ({target})")
+        out[name] = row
+    return out
+
+
+def record_operator_accept(
+    results: list[dict[str, Any]],
+    *,
+    path: Path | None = None,
+    now: datetime | None = None,
+) -> tuple[list[str], list[str], Path]:
+    """Opt-in local record for pools with ready_for_operator_accept.
+
+    Writes only ``operator-accept.json`` (or ADE_PI_OPERATOR_ACCEPT_PATH). Never
+    mutates ``pi-pool-acceptance.toml`` and never invents acceptance for a pool
+    whose dimensions are incomplete. Returns (recorded, refused, path).
+    """
+    target = path or operator_accept_path()
+    stamp = (now or datetime.now(timezone.utc)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    existing = load_operator_accept_records(target) if target.is_file() else {}
+    recorded: list[str] = []
+    refused: list[str] = []
+    pools = dict(existing)
+    for result in results:
+        name = result["pool"]
+        if result.get("ready_for_operator_accept") is not True:
+            refused.append(name)
+            continue
+        probes = result.get("probes") or {}
+        pools[name] = {
+            "recorded_at": stamp,
+            "all_dimensions_pass": True,
+            "routing_accepted": False,
+            "writes_routing_accepted": False,
+            "probes": {dim: (probes.get(dim) or {}).get("status") for dim in ("quota", "identity", "continuation")},
+        }
+        recorded.append(name)
+    if not recorded:
+        return recorded, refused, target
+    payload = {
+        "schema_version": OPERATOR_ACCEPT_SCHEMA,
+        "writes_routing_accepted": False,
+        "note": (
+            "Local operator accept record only. Automatic routing still requires "
+            "accepted=true in config/pi-pool-acceptance.toml (docs/pi-defaults.md B4c)."
+        ),
+        "updated_at": stamp,
+        "pools": pools,
+    }
+    _atomic_write_json(target, payload)
+    return recorded, refused, target
 
 
 def load_acceptance(path: Path | None = None) -> dict[str, dict[str, Any]]:
@@ -326,6 +433,7 @@ def probe_pool(
     quota: dict[str, Any] | None = None,
     snapshot_age: float | None = None,
     evidence: Path | None = None,
+    operator_records: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Run the three observe-only dimensions for one pool. Never writes accepted=true."""
     rows = load_acceptance(path)
@@ -338,13 +446,18 @@ def probe_pool(
     }
     statuses = {d["status"] for d in dims.values()}
     ready = statuses == {"pass"}
+    records = operator_records if operator_records is not None else load_operator_accept_records()
+    recorded = records.get(pool) if isinstance(records.get(pool), dict) else None
     return {
         "pool": pool,
         "accepted": accepted,
         "probes": dims,
         "ready_for_operator_accept": ready and not accepted,
         "all_dimensions_pass": ready,
+        "operator_accept_recorded": recorded is not None,
+        "operator_accept_recorded_at": (recorded or {}).get("recorded_at", ""),
         "writes_accepted": False,
+        "writes_routing_accepted": False,
     }
 
 
@@ -355,6 +468,7 @@ def probe_pools(
     quota: dict[str, Any] | None = None,
     snapshot_age: float | None = None,
     evidence: Path | None = None,
+    operator_records: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[int, list[dict[str, Any]]]:
     """Probe selected pools (default: every acceptance + routing Pi name).
 
@@ -368,6 +482,12 @@ def probe_pools(
     # One snapshot for the whole run when the caller did not supply quota.
     if quota is None and any(n not in CLAUDE_API_BILLING_POOLS for n in names):
         quota, snapshot_age = router.load_snapshot(bypass_memo=True)
+    if operator_records is None:
+        try:
+            operator_records = load_operator_accept_records()
+        except (OSError, ValueError, json.JSONDecodeError):
+            # Probe stays observe-only even when the local record is unreadable.
+            operator_records = {}
     results = [
         probe_pool(
             name,
@@ -375,6 +495,7 @@ def probe_pools(
             quota=quota,
             snapshot_age=snapshot_age,
             evidence=evidence,
+            operator_records=operator_records,
         )
         for name in names
     ]
@@ -405,7 +526,8 @@ def main(argv: list[str] | None = None) -> int:
         sp.add_argument("--json", action="store_true", help="print machine-readable JSON")
     sp_probe = sub.add_parser(
         "probe",
-        help="observe-only continuation/quota/identity probes (never writes accepted=true)",
+        help="observe-only continuation/quota/identity; ready_for_operator_accept per pool "
+        "(never writes accepted=true; --record-accept writes local state only)",
     )
     sp_probe.add_argument("--json", action="store_true", help="print machine-readable JSON")
     sp_probe.add_argument(
@@ -420,6 +542,12 @@ def main(argv: list[str] | None = None) -> int:
         metavar="DIR",
         help="continuation evidence directory (default: ADE_PI_ACCEPTANCE_EVIDENCE_DIR "
         "or ~/.local/state/ade/pi-acceptance)",
+    )
+    sp_probe.add_argument(
+        "--record-accept",
+        action="store_true",
+        help="opt-in: for each ready_for_operator_accept pool, write a local "
+        "operator-accept.json record only (never flips accepted=true / never changes routing)",
     )
     a = p.parse_args(argv)
     try:
@@ -441,10 +569,41 @@ def main(argv: list[str] | None = None) -> int:
             before = accept.read_bytes() if accept.is_file() else None
             before_mtime = accept.stat().st_mtime_ns if accept.is_file() else None
             evidence = Path(a.evidence_dir) if a.evidence_dir else None
+            op_path = operator_accept_path(evidence=evidence)
+            try:
+                op_records = load_operator_accept_records(op_path)
+            except (OSError, ValueError, json.JSONDecodeError):
+                op_records = {}
             code, results = probe_pools(
                 a.pool or None,
                 evidence=evidence,
+                operator_records=op_records,
             )
+            record_info: dict[str, Any] | None = None
+            if a.record_accept:
+                recorded, refused, record_path = record_operator_accept(
+                    results, path=op_path,
+                )
+                record_info = {
+                    "path": str(record_path),
+                    "recorded": recorded,
+                    "refused": refused,
+                    "writes_routing_accepted": False,
+                }
+                if not recorded:
+                    print(
+                        "ade-pi-pools: --record-accept refused (no ready_for_operator_accept "
+                        "pool; will not invent acceptance; routing unchanged)",
+                        file=sys.stderr,
+                    )
+                    code = 2 if code == 0 else code
+                else:
+                    # Refresh recorded flags after a successful local write.
+                    records = load_operator_accept_records(record_path)
+                    for r in results:
+                        row = records.get(r["pool"])
+                        r["operator_accept_recorded"] = row is not None
+                        r["operator_accept_recorded_at"] = (row or {}).get("recorded_at", "")
             after = accept.read_bytes() if accept.is_file() else None
             if before != after or (
                 before_mtime is not None
@@ -453,16 +612,23 @@ def main(argv: list[str] | None = None) -> int:
             ):
                 print(
                     "ade-pi-pools: probe mutated pi-pool-acceptance.toml "
-                    "(must be observe-only; never write accepted=true)",
+                    "(must never write accepted=true; local --record-accept only)",
                     file=sys.stderr,
                 )
                 return 1
+            ready_names = [r["pool"] for r in results if r["ready_for_operator_accept"]]
+            recorded_names = [r["pool"] for r in results if r["operator_accept_recorded"]]
             payload = {
                 "schema_version": 1,
                 "path": str(accept),
                 "evidence_dir": str(evidence or evidence_dir()),
+                "operator_accept_path": str(op_path),
                 "writes_accepted": False,
+                "writes_routing_accepted": False,
                 "claude_api_billing_probed": False,
+                "ready_for_operator_accept": ready_names,
+                "operator_accept_recorded": recorded_names,
+                "record_accept": record_info,
                 "exit": code,
                 "pools": results,
             }
@@ -470,23 +636,55 @@ def main(argv: list[str] | None = None) -> int:
                 print(json.dumps(payload, allow_nan=False))
             else:
                 print(
-                    f"# observe-only probe (writes_accepted=false; "
+                    f"# observe-only probe (writes_accepted=false; writes_routing_accepted=false; "
                     f"claude_api_billing_probed=false)\n# acceptance: {accept}\n"
-                    f"# evidence: {payload['evidence_dir']}"
+                    f"# evidence: {payload['evidence_dir']}\n"
+                    f"# operator-accept record: {payload['operator_accept_path']}"
                 )
+                print(
+                    "# ready_for_operator_accept: "
+                    + (", ".join(ready_names) if ready_names else "(none)")
+                )
+                print(
+                    "# operator_accept_recorded (local only; routing unchanged): "
+                    + (", ".join(recorded_names) if recorded_names else "(none)")
+                )
+                if not a.record_accept and ready_names:
+                    print(
+                        "# next (opt-in local record, no routing change): "
+                        "ade-pi-pools probe --record-accept"
+                        + ("".join(f" --pool {n}" for n in ready_names)
+                           if a.pool else "")
+                    )
+                    print(
+                        f"# routing still needs accepted=true in {accept} "
+                        "(docs/pi-defaults.md B4c)"
+                    )
                 for r in results:
                     flag = "accepted" if r["accepted"] else "UNACCEPTED"
-                    ready = "ready-for-operator-accept" if r["ready_for_operator_accept"] else (
-                        "all-pass" if r["all_dimensions_pass"] else "incomplete"
-                    )
-                    print(f"{r['pool']}: {flag} [{ready}]")
+                    if r["ready_for_operator_accept"]:
+                        ready = "ready-for-operator-accept"
+                    elif r["all_dimensions_pass"]:
+                        ready = "all-pass"
+                    else:
+                        ready = "incomplete"
+                    local = " local-recorded" if r["operator_accept_recorded"] else ""
+                    print(f"{r['pool']}: {flag} [{ready}]{local}")
                     for dim, d in r["probes"].items():
                         print(f"  {dim}: {d['status']} — {d['detail']}")
+                if record_info is not None and record_info["recorded"]:
+                    print(
+                        "ade-pi-pools probe: recorded local operator accept for "
+                        + ", ".join(record_info["recorded"])
+                        + f" at {record_info['path']} "
+                        "(routing unchanged until accepted=true in pi-pool-acceptance.toml)"
+                    )
                 if code == 0:
                     print("ade-pi-pools probe: every selected pool passes continuation/quota/identity")
                 elif code == 2:
                     print(
                         "ade-pi-pools probe: at least one dimension failed "
+                        "or --record-accept found nothing ready "
                         "(operator reviews; harness never writes accepted=true)",
                         file=sys.stderr,
                     )
@@ -513,7 +711,7 @@ def main(argv: list[str] | None = None) -> int:
                     if r["blocks_auto"]:
                         print(f"  {r['pool']}: accepted=false or missing", file=sys.stderr)
         return code
-    except (OSError, ValueError, UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
+    except (OSError, ValueError, UnicodeDecodeError, tomllib.TOMLDecodeError, json.JSONDecodeError) as e:
         print(f"ade-pi-pools: {e}", file=sys.stderr)
         return 1
 

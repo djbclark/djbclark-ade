@@ -108,8 +108,10 @@ under **Carried**, newest first, one line each; an item leaves when it ships (in
     Machine-readable gate: `config/pi-pool-acceptance.toml` + `bin/ade-pi-pools check` (Cursor/Z.ai accepted
     2026-11-08; Grok/Antigravity/SIPB/Go still `accepted=false` until the operator flips them after
     continuation/quota/identity acceptance). Observe-only probes: `bin/ade-pi-pools probe` (docs/pi-defaults.md
-    B4b) reports those three dimensions without writing `accepted=true` and without touching Claude API
-    billing. Claude API credits remain billing-blocked, separate from the vendor subscription. Security
+    B4b) reports those three dimensions and `ready_for_operator_accept` without writing `accepted=true` and
+    without touching Claude API billing. Opt-in local record only: `probe --record-accept` (B4c) writes
+    `operator-accept.json` under the evidence dir and never changes routing until the operator edits the
+    toml. Claude API credits remain billing-blocked, separate from the vendor subscription. Security
     implementation and SIPB reliability work are deferred; prior evidence remains in
     `docs/tui-security-and-pi-migration.md`.
 
