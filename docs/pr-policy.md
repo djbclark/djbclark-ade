@@ -5,7 +5,10 @@ to approve, and make that the default for any future repos"). Config: effective
 `pr_policy` domain via `ade_config.load_effective` (legacy
 [`config/pr-policy.toml`](../config/pr-policy.toml) / `PR_POLICY_TOML` when `ade.toml`
 is absent; `--config` / `PR_POLICY_CONFIG` still accept an explicit legacy file;
-`docs/config-migration.md`).
+`docs/config-migration.md`). The same tables are folded under
+[`config/ade.toml`](../config/ade.toml) `[pr_policy]`; after editing the legacy
+file run `ade-config fold --write`, and CI's `context-policy` job runs
+`ade-config fold --check` so the mirror cannot drift (2026-11-10).
 
 ## What it enforces
 

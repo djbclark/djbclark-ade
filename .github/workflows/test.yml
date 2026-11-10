@@ -171,3 +171,7 @@ jobs:
         run: uv run python bin/instruction-lint --root .
       - name: README roster matches skills/ and bin/ (bin/ade-roster, 2026-11-07)
         run: python3 bin/ade-roster --check
+      # Fold mirrors: config/ade.toml must match legacy secret-deny / pr-policy / install
+      # (and the other policy domains) while both the unified file and the split TOMLs are kept.
+      - name: config/ade.toml matches fold from legacy mirrors (ade-config fold --check)
+        run: python3 bin/ade-config fold --check

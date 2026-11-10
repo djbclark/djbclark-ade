@@ -8,6 +8,7 @@ config change).
 | piece | what |
 | --- | --- |
 | [`config/secret-deny.toml`](../config/secret-deny.toml) | the policy, the one copy: `deny`, `allow`, and `[claude] static` (projects under `[secret_deny]` via `ade_config.load_effective`; see `docs/config-migration.md`) |
+| [`config/ade.toml`](../config/ade.toml) `[secret_deny]` | folded mirror of the same policy (`ade-config fold --write`); CI runs `ade-config fold --check` so this stays aligned with the legacy TOML (2026-11-10) |
 | [`bin/render-secret-deny`](../bin/render-secret-deny) | reads the effective `secret_deny` domain and renders it; `--check` reports drift; `--policy` still takes an explicit legacy file |
 | [`config/secret_deny_policy.json`](../config/secret_deny_policy.json) | generated, committed: the deny and allow lists the hook reads (it runs under Python 3.9, which has no TOML reader) |
 | [`claude/hooks/secret_read_gate.py`](../claude/hooks/secret_read_gate.py) | the `PreToolUse` hook |
@@ -182,14 +183,17 @@ config change).
 
 ## D. Changing the policy
 
-- **D1.** Edit `config/secret-deny.toml`.
+- **D1.** Edit `config/secret-deny.toml` (or `ade-config set` a `[secret_deny].*` leaf when `config/ade.toml` is present).
+- **D1a.** If you edited the legacy TOML, run `ade-config fold --write` so `config/ade.toml` `[secret_deny]` matches;
+  `ade-config fold --check` (and CI's `context-policy` job) fails on drift.
 - **D2.** Run `bin/render-secret-deny` (Python 3.11 or later). It rewrites `config/secret_deny_policy.json` and the
   `Read(...)`/`Edit(...)` entries of `permissions.deny` in `agents/claude/settings.json.tmpl`, by a text splice that keeps
   every other line and every `{{ ... }}` tag, then checks that the template still parses with the tags masked and differs
   only in that list.
-- **D3.** Commit the TOML, the JSON and the template together. `bin/render-secret-deny --check` exits 1 with a diff when
-  either output is stale, 0 when clean, 2 on a usage error, an invalid policy or a template whose `permissions.deny`
-  list cannot be found. Options: `--policy`, `--policy-json`, `--claude-template`.
+- **D3.** Commit the TOML (and folded `ade.toml` when regenerated), the JSON and the template together.
+  `bin/render-secret-deny --check` exits 1 with a diff when either output is stale, 0 when clean, 2 on a usage error,
+  an invalid policy or a template whose `permissions.deny` list cannot be found. Options: `--policy`, `--policy-json`,
+  `--claude-template`.
 - **D4.** The live settings come from the template through the normal install path; the hook reaches
   `~/.claude/hooks/secret_read_gate.py` as a symlink into this checkout (`bin/ade-update` reports a missing link), and
   finds the policy JSON from its own realpath (`../../config/`; `SECRET_DENY_POLICY` overrides it).
