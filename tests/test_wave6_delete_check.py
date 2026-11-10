@@ -157,6 +157,56 @@ def test_refuses_when_fan_out_still_names_acp_dispatch(tmp_path: Path) -> None:
     assert any(x.startswith("callers_skills:") for x in data["reasons"])
 
 
+def test_refuses_acp_dispatch_agent_placeholder_and_backtick(tmp_path: Path) -> None:
+    """LIVE_RE must catch `acp-dispatch <agent>` / backticked name (rewrite leftovers)."""
+    tree = _write_clean_tree(tmp_path)
+    (tree / "skills/model-routing/SKILL.md").write_text(
+        "Prefer paseo run; legacy `acp-dispatch <agent> --model M --kind K` only while the shim remains.\n",
+        encoding="utf-8",
+    )
+    ev = _good_evidence(tmp_path)
+    r = run("--json", "--evidence", str(ev), "--allow-early", root=tree)
+    assert r.returncode == 1, r.stderr
+    data = json.loads(r.stdout)
+    assert any(x.startswith("callers_skills:") for x in data["reasons"])
+    assert data["ready"] is False
+
+    tree2 = _write_clean_tree(tmp_path / "bt")
+    (tree2 / "skills/model-routing/SKILL.md").write_text(
+        "While the Wave 6 shim remains, `acp-dispatch` wraps admit for non-Pi agents.\n",
+        encoding="utf-8",
+    )
+    ev2 = _good_evidence(tmp_path / "bt")
+    r2 = run("--json", "--evidence", str(ev2), "--allow-early", root=tree2)
+    assert r2.returncode == 1, r2.stderr
+    data2 = json.loads(r2.stdout)
+    assert any(x.startswith("callers_skills:") for x in data2["reasons"])
+    assert data2["ready"] is False
+
+
+def test_inventory_lists_agent_placeholder_hits(tmp_path: Path) -> None:
+    """--inventory lists `acp-dispatch <agent>` leftovers; never greening Mac/ready."""
+    tree = _write_clean_tree(tmp_path)
+    (tree / "skills/model-routing/SKILL.md").write_text(
+        "legacy `acp-dispatch <agent> --model M --kind K`\n",
+        encoding="utf-8",
+    )
+    r = run("--json", "--inventory", root=tree)
+    assert r.returncode == 0, r.stderr
+    data = json.loads(r.stdout)
+    assert data["ready"] is False
+    assert data["mac_live_blocked"] is True
+    assert data["inventory_ok"] is True
+    assert data["gate_exits"]["callers"] == 1
+    assert data["gate_exits"]["evaluate_no_evidence"] == 1
+    assert data["callers_remaining"] >= 1
+    assert any(
+        h["path"] == "skills/model-routing/SKILL.md"
+        and "acp-dispatch <agent>" in h["snippet"]
+        for h in data["references"]
+    )
+
+
 def test_refuses_when_deadline_still_invokes_relay(tmp_path: Path) -> None:
     # Codex P2: executable callers (bin/deadline) must block ready, not only skills.
     tree = _write_clean_tree(tmp_path)

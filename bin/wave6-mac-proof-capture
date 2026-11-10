@@ -1,5 +1,5 @@
 #!/usr/bin/env -S python3 -I
-"""wave6-mac-proof-capture: Mac live-cycle proof harness for wave6-delete-check (2026-11-10).
+"""wave6-mac-proof-capture: Mac --live / Linux-safe proof harness for wave6-delete-check (never invents Mac live; 2026-11-10).
 
   wave6-mac-proof-capture --out DIR --live [--json]
   wave6-mac-proof-capture --out DIR --linux-safe [--json]

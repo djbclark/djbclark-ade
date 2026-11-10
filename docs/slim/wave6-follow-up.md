@@ -62,6 +62,7 @@ shims.** Soft deadline for relay / dispatch / `acp-run` removal:
 - [#453](https://github.com/djbclark/djbclark-ade/pull/453) — C3 status (FIXTURE ready, Mac blocked)
 - [#470](https://github.com/djbclark/djbclark-ade/pull/470) — C3 FIXTURE tighten + `--linux-safe` Mac probes (`mac_not_live`)
 - [#472](https://github.com/djbclark/djbclark-ade/pull/472) — caller `--inventory`: untruncated §A reference list + `gate_exits` proof while Mac blocked
+- LIVE_RE tighten (stacked on #472): backticked `` `acp-dispatch` `` + `acp-dispatch <agent>` placeholders stay gated so rewrite tips cannot green `callers_skills` while those live teachings remain; Mac still blocked
 
 ## A. Remaining in-repo callers (must be gone or archived before delete)
 
@@ -438,4 +439,5 @@ Do not start (3) until (2) is green and C3 is ticked or waived.
 - Mac harness: [`bin/wave6-mac-proof-capture`](../../bin/wave6-mac-proof-capture)
 - FIXTURE bundle (NOT live): [`tests/fixtures/wave6-mac-proofs/`](../../tests/fixtures/wave6-mac-proofs/)
 - Standing orders: [../../AGENTS.md](../../AGENTS.md) 10 and "Two shims"
-- Stack: [#398](https://github.com/djbclark/djbclark-ade/pull/398) → [#417](https://github.com/djbclark/djbclark-ade/pull/417) → [#441](https://github.com/djbclark/djbclark-ade/pull/441)
+- Stack: [#398](https://github.com/djbclark/djbclark-ade/pull/398) → [#417](https://github.com/djbclark/djbclark-ade/pull/417) → [#441](https://github.com/djbclark/djbclark-ade/pull/441) → [#453](https://github.com/djbclark/djbclark-ade/pull/453) → [#470](https://github.com/djbclark/djbclark-ade/pull/470) → [#472](https://github.com/djbclark/djbclark-ade/pull/472) → LIVE_RE `<agent>` / `` `acp-dispatch` `` tighten (this tip; Mac still blocked)
+- LIVE_RE notes: `wave6-delete-check` also matches backticked `` `acp-dispatch` `` and `acp-dispatch <agent>` placeholders (not only named-agent argv), so `--inventory` / `callers_skills` cannot go green while rewrite tips leave those live teachings
