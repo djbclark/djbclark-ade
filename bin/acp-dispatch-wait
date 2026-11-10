@@ -1,5 +1,5 @@
 #!/bin/bash
-# acp-dispatch-wait — the cheap rearm waiter for one acp-dispatch record (2026-10-18).
+# acp-dispatch-wait — DELETE with the acp-dispatch shim (Wave 6 follow-up, ledger E6/D6); was the cheap rearm waiter for one acp-dispatch record (2026-10-18).
 #
 #   acp-dispatch-wait [--no-deadline] RECORD DONE
 #
