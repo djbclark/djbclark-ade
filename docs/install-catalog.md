@@ -102,6 +102,7 @@ ade-install                         # first-run guidance only; exit 0
 ade-install check [--root DIR] [--json]
 ade-install catalog [--root DIR] [--json]
 ade-install plan [--root DIR] [--json]
+ade-install update-plan [--root DIR] [--json]
 ade-install doctor [--root DIR] [--id ID ...] [--json]
 ade-install keys [--root DIR] [--json] [--keys-state PATH]
 ade-install apply [--root DIR] [--json] [--dry-run|--yes] [--id ID ...] [--force]
@@ -112,6 +113,7 @@ just install-doctor
 just keys / just keys-check   # ade-install keys (S3b observe; keys-check is the setup-plan alias)
 just keys-check-install       # daily ade-sched job for keys observe
 just install-plan
+just update-plan            # configured dependency candidates only; no probes/updates
 just install-apply-dry
 just install-print-system-argv
 just doctor                 # alias of install-doctor (setup-plan S2 name)
@@ -158,6 +160,26 @@ Pass `--ade` only with a durable checkout (`~/src/djbclark-ade`); never with a l
 
 - `plan` is print-only: `would-install` (has `install_argv`) / `needs-system` /
   `blocked` / `skip`.
+- `update-plan` is a pure inventory of configured dependency update candidates.
+  It never observes installation/version/activity, runs commands, checks keys,
+  reads ownership ledgers or writes state (including repository bytecode caches
+  on a cold CLI run). Selection follows catalog classes and recorded choices;
+  unchosen/never/suggested rows are skipped. Missing `update_argv` is
+  `unconfigured`; update prose is never interpreted as a command. Recorded argv
+  tokens are expanded for display only; an invalid token produces `blocked`.
+  Explicit `paseo_plugin` metadata marks an `owner-managed` integration and does
+  not produce an execution candidate. No component ownership field exists in
+  this catalog: every row reports `ownership=unknown` and
+  `execution_authorized=false`. `owner_managed=true` comes only from plugin
+  metadata; `null` means unspecified, never a claim of ADE ownership.
+  `needs_system` is the catalog flag, not proof that false means no root
+  effects. Installed/version/activity, root effects and platform compatibility
+  remain `unknown`; the catalog's platform list is printed without deciding
+  host applicability. JSON has `mode=plan-only`, `steps` and an explanatory
+  `note`; text carries the same limits. Exit 0 means a valid plan was produced,
+  even with skipped/unconfigured/blocked rows; invalid catalog input exits 1.
+  This changes neither `just update` (ADE checkout/skills only) nor automatic
+  update policy, package ownership, scheduling or pool acceptance.
 - `doctor` prefers `paseo_plugin` (observe-only `paseo plugin ls --json`), else
   `probe_argv` (runs the tool; argv list, short timeout), else PATH `presence`.
   When `agents/claude/settings.json.tmpl` is present under `--root`, it also

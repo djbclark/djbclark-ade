@@ -1,5 +1,8 @@
 # Setup, hardening and updates: plan (queue Carried 35)
 
+Implementation snapshot: [S1–S9 progress and remaining work, 2026-11-10](setup-plan-progress-2026-11-10.md).
+The plan is not complete; cloud implementation gaps remain alongside live and policy gates.
+
 Plan, 2026-11-07. The first bounded config-core unit shipped on 2026-11-08 ([PR 308](https://github.com/djbclark/djbclark-ade/pull/308)); later phases remain planned.
 Overall and local coordination now belongs to the operator-appointed local
 workhorse lead, with higher-tier judgment delegated through the router. This transfers coordination from the Claude
@@ -297,6 +300,13 @@ Keys are saved with `sudo-secretspec`, and also through Paseo if it has a secure
    - A key replaced with `sudo-secretspec set` is re-delivered by the next `just keys`.
 
 ## S4. Updates and keeping everything current
+
+Current implementation updates the ADE checkout and skill links only; catalog
+dependency `update_argv` entries are recorded but not executed by `just update`.
+`ade-install update-plan` / `just update-plan` now describes configured
+dependency candidates with installed/version/activity and ownership explicitly
+unknown, without probes or updates. This planning unit does not authorize
+execution or scheduled apply. The numbered S4 behaviors below remain the goal.
 
 1. **`just update`** updates every installed component in `[install]` with that component's own update command:
    - djbclark-ade itself, as `bin/ade-update` does today (fast-forward, relink, changelog delta);

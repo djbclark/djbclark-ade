@@ -1352,6 +1352,43 @@ def plan(catalog: Catalog) -> list[dict[str, Any]]:
     return steps
 
 
+def update_plan(catalog: Catalog, *, prefix: Path | None = None) -> list[dict[str, Any]]:
+    """Describe configured update candidates, without observing or changing state.
+
+    Selection is catalog policy, not evidence of installation, ownership, host
+    compatibility or update safety. No commands run; no probes or ledger reads.
+    """
+    steps: list[dict[str, Any]] = []
+    for row in catalog.components:
+        step: dict[str, Any] = {
+            "id": row["id"],
+            "installed": "unknown", "version": "unknown", "activity": "unknown",
+            "ownership": "unknown", "root_effects": "unknown",
+            "platform_compatibility": "unknown",
+            "platforms": list(row.get("platforms") or []),
+            "execution_authorized": False,
+            "needs_system": bool(row.get("needs_system")),
+            # Only the explicit plugin metadata establishes this integration.
+            # All other components have no owner-management field in the schema.
+            "owner_managed": True if row.get("paseo_plugin") else None,
+        }
+        if not expected_installed(row):
+            step.update(action="skip", reason=f"class={row['class']} chosen={row.get('chosen')}; not selected")
+        elif row.get("paseo_plugin"):
+            step.update(action="owner-managed", reason="Paseo plugin metadata is observe-only; use its owner's update path")
+        elif not row.get("update_argv"):
+            step.update(action="unconfigured", reason="no update_argv recorded; update prose is not an executable recipe")
+        else:
+            try:
+                argv = expand_argv(list(row["update_argv"]), root=catalog.root, prefix=prefix)
+            except InstallError as error:
+                step.update(action="blocked", reason=str(error))
+            else:
+                step.update(action="candidate", argv=argv, reason="configured command only; installation, activity and authority unverified")
+        steps.append(step)
+    return steps
+
+
 def catalog_summary(catalog: Catalog) -> dict[str, Any]:
     by_class: dict[str, int] = {}
     for row in catalog.components:
