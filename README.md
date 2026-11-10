@@ -185,3 +185,7 @@ Skills (23, from each `skills/*/SKILL.md`):
 
 [Old way versus new way](docs/old-way-new-way.md) compares legacy skills with native Paseo,
 records plugin advice, and defines the Linux/macOS cross-host handoff acceptance checks.
+
+| [`bin/paseo-checkpoint`](bin/paseo-checkpoint) | Read-only recovery verdicts (2026-11-04) from the `ade-recovery` plugin's store; exit 0/1/2/3. |
+
+| [`plugins/`](plugins/) | `ade-recovery`, a passive Paseo plugin that records recovery evidence for interrupted agents (issue 278). |
