@@ -1,6 +1,6 @@
-"""skills/dialogue on Paseo (slim-down E6, 2026-11-06, the one-hour port of R2-16): an `acp` or `paseo` route runs
-`paseo run --no-wait --json` and `paseo wait`, and the turn text is the reply file the pointer prompt names. Against the
-fake `paseo` in tests/fakes/ (no daemon)."""
+"""skills/dialogue on Paseo (slim-down E6, 2026-11-06; Wave 6 wording 2026-11-09): a `paseo` route (or its
+one-cycle `acp` alias) runs `paseo run --no-wait --json` and `paseo wait`, and the turn text is the reply
+file the pointer prompt names. Against the fake `paseo` in tests/fakes/ (no daemon)."""
 from __future__ import annotations
 
 import json
@@ -41,6 +41,14 @@ def test_an_acp_route_runs_on_paseo_and_reads_the_reply_file(tmp_path):
     assert "probe.prompt.md" in run[-1] and "probe.prompt.reply.md" in run[-1]
     wait = next(c for c in calls if c[0] == "wait")
     assert wait[wait.index("--timeout") + 1] == "300"
+
+
+def test_a_paseo_route_is_the_preferred_kind_and_matches_the_acp_alias(tmp_path):
+    r, calls = world(tmp_path, [{"kind": "paseo", "agent": "cursor", "model": "grok-4.7", "set": ["reasoning_effort=high"]}])
+    assert r.returncode == 0, r.stdout + r.stderr
+    run = next(c for c in calls if c[0] == "run")
+    assert run[run.index("--provider") + 1] == "cursor/grok-4.7"
+    assert run[run.index("--thinking") + 1] == "high"
 
 
 def test_a_non_idle_wait_or_a_missing_reply_fails_the_route(tmp_path):

@@ -155,18 +155,21 @@ Each turn runs a model for many minutes: in an interactive session start `round`
 1. **Pin each model's routes in `dialogue.json`** for the whole run; never borrow the
    lead's own override (the ai-heaven turn 15 was empty because Astra ran on the lead's
    copilot override). Two routes per model at most; the second runs only on failure.
-2. Route kinds: `paseo` (since 2026-11-06; `acp`, the acp-run kind, is now its alias: `agent` is the Paseo
-   provider): `paseo run --provider <agent>/<model> --mode <mode, default the provider's defaultMode>
+2. Route kinds: prefer `paseo` (Wave 6, 2026-11-09). `acp` remains a one-cycle alias for the same
+   native path (old configs). `agent` is the Paseo provider:
+   `paseo run --provider <agent>/<model> --mode <mode, default the provider's defaultMode>
    --no-wait --json --cwd <cwd> -- <pointer>`, the pointer naming the turn's prompt file and a reply file
    beside it, then `paseo wait ID --timeout S --json` (its status field, never `$?`); the reply file is the
    turn text. A `set` entry with an effort key (`reasoning_effort=high`) becomes `--thinking high`; other
    `set` entries are ignored. Always give a `model`. `claude` (`claude -p --model <m> --effort <e>`, prompt on
    stdin, `CLAUDECODE` unset) and `cmd` (any argv with `{prompt}`/`{cwd}`) are unchanged.
-3. Defaults that the cursor route was the unprobed second route until 2026-11-07, when it became the Grok seat's first route: re-probe before relying on it (through acp-run then; re-probe on Paseo): the Grok seat is Cursor's grok model (`cursor` / `grok-4.7` with
-   `reasoning_effort=high`; the standalone xAI CLI retired 2026-11-07; grok-bot is the other possible occupant); Fable `claude -p --model claude-fable-5-1 --effort high`; **Astra `codex` /
-   `gpt-6-astra` with `reasoning_effort=xhigh`**. Astra via copilot is reserved to the ai-heaven lead session
-   (operator ruling 2026-10-10); never configure it elsewhere. The second route in the example (the `claude` provider
-   for Fable) is unprobed: run `probe` before relying on them.
+3. Defaults: the cursor route was the unprobed second route until 2026-11-07, when it became the Grok
+   seat's first route — re-probe on Paseo before relying on it. The Grok seat is Cursor's grok model
+   (`cursor` / `grok-4.7` with `reasoning_effort=high`; the standalone xAI CLI retired 2026-11-07;
+   grok-bot is the other possible occupant); Fable `claude -p --model claude-fable-5-1 --effort high`;
+   **Astra `codex` / `gpt-6-astra` with `reasoning_effort=xhigh`**. Astra via copilot is reserved to the
+   ai-heaven lead session (operator ruling 2026-10-10); never configure it elsewhere. The second route
+   in the example (the `claude` provider for Fable) is unprobed: run `probe` before relying on them.
 4. Routing never changes authority: the final-word model's rulings stand whichever route
    carried them.
 5. **Moving a seat off a spent pool: env overrides, no config edit.** For seat `<SEAT>` (the
@@ -177,7 +180,8 @@ Each turn runs a model for many minutes: in an interactive session start `round`
    `DIALOGUE_<SEAT>_SET=k=v,k2=v2` replaces the first route's `set` list (empty clears);
    `DIALOGUE_<SEAT>_POOL=<label>` changes the `aiuse` pool the quota wait reads. Examples:
    `DIALOGUE_FABLE_MODEL=claude-opus-5-5` (Fable weekly cap spent, 2026-10-10);
-   `DIALOGUE_GROK_AGENT=opencode DIALOGUE_GROK_MODEL=opencode-go/grok-4.7 DIALOGUE_GROK_POOL=Go`.
+   `DIALOGUE_GROK_AGENT=cursor DIALOGUE_GROK_MODEL=grok-4.7 DIALOGUE_GROK_POOL=Cursor`
+   (OpenCode/omp seats are retired; Pi is the sole 3rd-party TUI — do not point overrides at them).
    The turn prints the override, `costs.jsonl` records it (`route`, `override`), and the
    prompt header tells the model which model holds the seat. Run `probe` with the same
    variables set before relying on the new route.
