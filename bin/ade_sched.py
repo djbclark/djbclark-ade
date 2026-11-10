@@ -1652,6 +1652,57 @@ def artifact_hash(files: Mapping[Path, str]) -> str:
     return h.hexdigest()
 
 
+def extract_cron_block(text: str, label: str) -> str | None:
+    """Return the ade-sched crontab block for ``label`` (BEGIN..END inclusive), or None."""
+    begin, end = cron_begin(label), cron_end(label)
+    lines = text.splitlines(keepends=True)
+    start = None
+    for i, line in enumerate(lines):
+        if line.rstrip("\n") == begin:
+            start = i
+            break
+    if start is None:
+        return None
+    for j in range(start + 1, len(lines)):
+        if lines[j].rstrip("\n") == end:
+            block = "".join(lines[start : j + 1])
+            if not block.endswith("\n"):
+                block += "\n"
+            return block
+    return None
+
+
+def _on_disk_files_match(
+    rendered: Rendered,
+    *,
+    backend_name: str,
+    label: str,
+    env: Mapping[str, str],
+    overrides: Mapping[str, Any],
+) -> bool:
+    """True when installed artifacts match the ADE render (systemd unit files or cron block)."""
+    try:
+        if backend_name == "cron":
+            want = rendered.files.get(Path("crontab"))
+            if want is None and rendered.cron_block:
+                want = rendered.cron_block
+            if want is None:
+                return False
+            c = _ctx(backend_name, env, dict(overrides))
+            text = _crontab_read(c)
+            have = extract_cron_block(text, label)
+            if have is None:
+                return False
+            return artifact_hash({Path("crontab"): have}) == artifact_hash({Path("crontab"): want})
+        current: dict[Path, str] = {}
+        for path in rendered.files:
+            if path.is_file():
+                current[path] = path.read_text(encoding="utf-8")
+        return set(current) == set(rendered.files) and artifact_hash(current) == artifact_hash(rendered.files)
+    except (OSError, SchedError):
+        return False
+
+
 def _ledger_owns(entry: Mapping[str, Any] | None, *, label: str) -> bool:
     """Removal authority: only a readable ADE ledger row for this label (intent alone is not enough)."""
     if not isinstance(entry, dict):
@@ -1852,19 +1903,16 @@ def plan_reconcile(
         want_hash = artifact_hash(rendered.files)
         entry = entries.get(name) if isinstance(entries.get(name), dict) else None
         st = status(label, backend_name, env=env, **overrides)
-        on_disk_match = False
-        if st.installed:
-            try:
-                current: dict[Path, str] = {}
-                for path in rendered.files:
-                    if path.is_file():
-                        current[path] = path.read_text(encoding="utf-8")
-                on_disk_match = (
-                    set(current) == set(rendered.files)
-                    and artifact_hash(current) == want_hash
-                )
-            except OSError:
-                on_disk_match = False
+        on_disk_match = bool(
+            st.installed
+            and _on_disk_files_match(
+                rendered,
+                backend_name=backend_name,
+                label=label,
+                env=env,
+                overrides=overrides,
+            )
+        )
         ledger_match = (
             isinstance(entry, dict)
             and entry.get("status") in ("committed", "installed")
@@ -1925,6 +1973,16 @@ def plan_reconcile(
             steps.append(ReconcileStep(
                 logical_id, "report", owner,
                 f"ledger entry owner={owner}; never unload",
+                label=label,
+                category="ledger",
+            ))
+            return
+        entry_backend = entry.get("backend")
+        if isinstance(entry_backend, str) and entry_backend and entry_backend != backend_name:
+            steps.append(ReconcileStep(
+                logical_id, "report", owner,
+                f"ledger backend={entry_backend!r}; refuse remove on {backend_name} "
+                f"(reconcile with that backend to unload {label})",
                 label=label,
                 category="ledger",
             ))
@@ -2350,6 +2408,17 @@ def reconcile(
                     )
                     row["touch"] = False
                     # Not a hard failure of the run: safety refusal.
+                    results.append(row)
+                    continue
+                entry_backend = entry.get("backend")
+                if isinstance(entry_backend, str) and entry_backend and entry_backend != b.name:
+                    row["ok"] = False
+                    row["action"] = "report"
+                    row["detail"] = (
+                        f"refusing remove of {label}: ledger backend={entry_backend!r}; "
+                        f"reconcile backend={b.name}"
+                    )
+                    row["touch"] = False
                     results.append(row)
                     continue
                 live = entries.get(step.name)
