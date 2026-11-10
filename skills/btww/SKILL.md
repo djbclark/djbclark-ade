@@ -28,16 +28,17 @@ question. It names the native command for the TUI you are running in.
 5. TUI not in the table: say it is not covered and that no native side-question
    command is known there.
 
-## Table (verified 2026-11-01)
+## Table (verified 2026-11-09; Pi-only third-party TUI, queue item 36)
 
 | TUI | Native command | Notes |
 |---|---|---|
 | Claude Code | `/btw <question>` | forked query, tools off |
 | Codex | `/side` | ephemeral side conversation in a temporary fork; needs a started thread; Ctrl+C returns to the main thread |
 | Cursor `cursor-agent` | `/btw <question>` | tools disabled |
-| omp | `/btw <question>` | bare `/btw` opens side-question history. In omp, `/btww <question>` already runs it (`~/.omp/agent/commands/btww.md`, `side: true`); you only see this text through `/skill:btww` |
+| Pi | none found | sole third-party TUI (2026-11-08); ask as a normal message |
 | Hermes | `/btw <question>` | CLI: `/btww <question>` is a `quick_commands` alias for it. Telegram and gateways: use `/btw` |
-| opencode | `/btw <question>` | one-shot answer from session context, not added to the conversation |
 | Grok Bot | none found | |
 
-Canonical copy: `~/src/djbclark-ade/skills/btww/`. Wrappers: `omp/commands/btww.md` (the zcode wrapper was deleted 2026-11-06); the Hermes alias is in `agents/hermes/config.yaml.tmpl`.
+**Archived (never fallbacks):** omp and OpenCode had `/btw` (omp also ran `/btww` via `omp/commands/btww.md`, `side: true`); those clients are archive-history only under the Pi-only ruling. The checked-in `omp/commands/btww.md` wrapper is historical.
+
+Canonical copy: `~/src/djbclark-ade/skills/btww/`. Hermes alias: `agents/hermes/config.yaml.tmpl`.
