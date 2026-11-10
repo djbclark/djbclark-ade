@@ -34,6 +34,7 @@ Each doc carries its own summary.
 | [docs/threat-model.md](docs/threat-model.md) | threat model (2026-10-20, re-based 2026-11-07): assets, actors, entry points, ranked threats |
 | [docs/review-boundary.md](docs/review-boundary.md) | `bin/review-launch`, `bin/review-pr` and the `adversary-marker` Action (2026-11-06): the boundary, the merge gate, what is untrusted |
 | [docs/git-guard.md](docs/git-guard.md) | `bin/ade-git-guard`, the ref hooks and the claim registry (owner and expiry): commands, exit codes, refusal rules |
+| [docs/jj-vs-paseo-worktrees.md](docs/jj-vs-paseo-worktrees.md) | design (2026-11-10): jj vs Paseo worktrees post-CoW claims; recommendation defer / guarded pilot only |
 | [docs/workspace-layout.md](docs/workspace-layout.md) | naming: `<topic>-pw` Paseo workspaces, `<name>-pt` tabs; renames with `paseo workspace rename`, `paseo agent update --name` |
 | [docs/scheduling.md](docs/scheduling.md) | `bin/ade-sched` (2026-11-04): a launchd plist as a launchd agent, systemd user timer or cron; judgment jobs are Paseo schedules |
 | [docs/gates.md](docs/gates.md) | the frontier allowance, `config/gates.toml [frontier]` (trimmed 2026-11-07: the Claude quota gates went with the quota guard) |
