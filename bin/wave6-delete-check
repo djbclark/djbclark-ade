@@ -1,5 +1,5 @@
 #!/usr/bin/env -S python3 -I
-"""wave6-delete-check: refuse Wave 6 shim deletion until gates pass (2026-11-09).
+"""wave6-delete-check: refuse Wave 6 shim deletion until gates pass; `--dry-run` = FIXTURE FAILCLOSED shape only (2026-11-09/10).
 
   wave6-delete-check [--root DIR] [--evidence PATH] [--json] [--allow-early]
   wave6-delete-check --dry-run [--root DIR] [--json]
