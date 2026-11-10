@@ -1,5 +1,6 @@
 """Bulk skill discovery and reconciliation, with isolated HOME and no live clients."""
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -206,3 +207,66 @@ def test_unsafe_discovered_name_fails_before_any_links(catalog):
     result = run(catalog, "--all")
     assert result.returncode == 2 and "unsafe skill directory" in result.stderr
     assert not (home / ".agents").exists()
+
+
+def _default_root_env(home: Path, tmp_path: Path) -> dict:
+    """HOME isolated; no SKILL_EVERYWHERE_ADE; private/site roots cannot leak the operator's."""
+    env = dict(os.environ, HOME=str(home), BASH_ENV="/dev/null",
+               SKILL_EVERYWHERE_PRIVATE=str(tmp_path / "none-private"),
+               SKILL_EVERYWHERE_SITE=str(tmp_path / "none-site"),
+               SKILL_EVERYWHERE_ONLY="nonesuch")
+    env.pop("SKILL_EVERYWHERE_ADE", None)
+    env.pop("ENV", None)
+    return env
+
+
+def test_default_root_resolves_from_symlinked_script(tmp_path):
+    """No SKILL_EVERYWHERE_ADE and no ~/src/djbclark-ade: the repo of the script's real path is used."""
+    home = tmp_path / "home"
+    home.mkdir()
+    link = tmp_path / "linkdir" / "skill-everywhere"
+    link.parent.mkdir()
+    link.symlink_to(SCRIPT)
+    r = subprocess.run([str(link), "--check", "no-such-skill-xyz"], env=_default_root_env(home, tmp_path),
+                       capture_output=True, text=True, timeout=30)
+    root = SCRIPT.resolve().parents[1]
+    common = subprocess.run(["git", "-C", str(root), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+                            capture_output=True, text=True).stdout.strip()
+    if common.endswith("/.git") and Path(common).parent != root and (Path(common).parent / "bin/skill-everywhere").is_file():
+        root = Path(common).parent        # the suite runs from a linked worktree: the script resolves its primary checkout
+    expected = root / "skills" / "no-such-skill-xyz"
+    assert str(expected.parent) in r.stderr, r.stderr
+    assert str(home) not in r.stderr
+
+
+def test_default_root_from_linked_worktree_uses_primary_checkout(tmp_path):
+    """Run from a linked worktree, the default root is the primary checkout's skills/ (a worktree is removed after
+    its merge, so links into it would dangle)."""
+    primary = tmp_path / "primary"
+    (primary / "bin").mkdir(parents=True)
+    (primary / "skills").mkdir()
+    (primary / "skills" / ".keep").write_text("")
+    shutil.copy2(SCRIPT, primary / "bin" / "skill-everywhere")
+    git = ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"]
+    for argv in (["init", "-q"], ["add", "-A"], ["commit", "-qm", "init"],
+                 ["worktree", "add", "-q", str(tmp_path / "wt"), "-b", "wt"]):
+        subprocess.run([*git, *argv], cwd=primary, check=True, capture_output=True)
+    home = tmp_path / "home"
+    home.mkdir()
+    r = subprocess.run([str(tmp_path / "wt" / "bin" / "skill-everywhere"), "--check", "no-such-skill-xyz"],
+                       env=_default_root_env(home, tmp_path), capture_output=True, text=True, timeout=30)
+    assert str(primary.resolve() / "skills") in r.stderr, r.stderr
+    assert str(tmp_path / "wt" / "skills") not in r.stderr
+
+
+def test_canonical_checkout_wins_when_it_exists(tmp_path):
+    """With ~/src/djbclark-ade present, its skills/ is the default even when the script runs from another checkout
+    (a second clone must not report false gaps or link into a removable copy; adversary on PR 292)."""
+    home = tmp_path / "home"
+    canon = home / "src" / "djbclark-ade"
+    (canon / "bin").mkdir(parents=True)
+    (canon / "skills").mkdir()
+    (canon / "bin" / "skill-everywhere").write_text("")
+    r = subprocess.run([str(SCRIPT), "--check", "no-such-skill-xyz"], env=_default_root_env(home, tmp_path),
+                       capture_output=True, text=True, timeout=30)
+    assert str(canon / "skills") in r.stderr, r.stderr

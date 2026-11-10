@@ -17,8 +17,8 @@ no hub, no chained symlinks (the old TUI → `site-private/skills` →
 `site-djbclark/skills` → djbclark-ade chain was collapsed 2026-10-14; ops-repo
 churn can no longer break skill loading):
 
-- public skills: `~/src/djbclark-ade/skills/<name>/` — link target
-  `~/src/djbclark-ade/skills/<name>`
+- public skills: `~/src/djbclark-ade/skills/<name>/` when that checkout exists,
+  otherwise `<this-checkout>/skills/<name>/` (see section 1) — link target that path
 - private skills: `~/ops/site-private/skills/<name>/` (real directory; only
   `1password` today) — link target `~/ops/site-private/skills/<name>`
 - site skills (since 2026-11-06, the skills moved out of this repo by the
@@ -34,15 +34,17 @@ copy. The stale copy is `~/.agents/skills/.trash/`.
 
 ## 1. Link it
 
+Run `bin/skill-everywhere` from your checkout (or the installed `~/.local/bin/skill-everywhere` symlink). The public skills dir is `~/src/djbclark-ade/skills` when that checkout exists; otherwise (a host whose checkout lives elsewhere) it is `skills/` of the repo the script's real path sits in (symlinks followed; a linked worktree resolves to its primary checkout). `SKILL_EVERYWHERE_ADE` overrides both (2026-11-10; revived from closed PR 292 / #279).
+
 After a new skill is linked, run `/reload-skills` in running Claude sessions (per-skill symlinks are the documented mechanism; a directory-level symlink is not, so none is used).
 
 ```sh
-~/src/djbclark-ade/bin/skill-everywhere --all                # sync all shared skills
-~/src/djbclark-ade/bin/skill-everywhere --check --all        # exit 1 for installed-target gaps
-~/src/djbclark-ade/bin/skill-everywhere --dry-run --all      # preview all repairs
-~/src/djbclark-ade/bin/skill-everywhere <name>...          # link, idempotent
-~/src/djbclark-ade/bin/skill-everywhere --check <name>...  # status only
-~/src/djbclark-ade/bin/skill-everywhere --remove <name>... # undo
+skill-everywhere --all                # sync all shared skills
+skill-everywhere --check --all        # exit 1 for installed-target gaps
+skill-everywhere --dry-run --all      # preview all repairs
+skill-everywhere <name>...          # link, idempotent
+skill-everywhere --check <name>...  # status only
+skill-everywhere --remove <name>... # undo
 ```
 
 `--all` (2026-10-25) discovers readable `*/SKILL.md` files directly under the
