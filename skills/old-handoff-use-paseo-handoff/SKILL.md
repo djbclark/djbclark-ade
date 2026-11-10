@@ -213,8 +213,9 @@ next `/baton` re-arms from these entries.
 - [ ] Failed approaches + why
 - [ ] Blockers / open questions, including every sub-agent report whose
       first line is `BLOCKED: <question>` and every dispatched slice with no
-      report (scan report dirs / `.done` markers; `acp-dispatch check` only while
-      that shim still exists): an unanswered
+      report (scan report dirs / `.done` markers from native `paseo run` /
+      `paseo send` slices, or Detached jobs this handoff skill lists;
+      `acp-dispatch check` is Wave 6 transitional): an unanswered
       sub-agent question does not survive a compaction unless it is written here
 - [ ] ONE explicit next action at the top of Where We're Going
 - [ ] Every open job record of this session is listed under Detached jobs
