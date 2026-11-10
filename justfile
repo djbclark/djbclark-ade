@@ -99,6 +99,18 @@ github-setup-apply:
 github-setup-verify:
     "{{ root }}/bin/ade-github-setup" apply --verify --root "{{ root }}"
 
+# Validate hardening.toml (setup-plan S6; pure).
+harden-check-config:
+    "{{ root }}/bin/ade-harden" check --root "{{ root }}"
+
+# Observe-only hardening drift (gh read-back; no writes, no auto-reapply).
+harden-check:
+    "{{ root }}/bin/ade-harden" observe --root "{{ root }}"
+
+# Local-only harden-check (skip gh network probes).
+harden-check-local:
+    "{{ root }}/bin/ade-harden" observe --local --root "{{ root }}"
+
 # Opt-in Hermes basic setup (setup-plan S3a). Does not install or force Hermes.
 # Default: open Claude Code on prompts/setup/hermes.md.
 # `just hermes-setup --self`: print the DIY checklist only (no agent, no peer-link).
