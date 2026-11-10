@@ -711,6 +711,48 @@ def test_keys_verify_expiring_marker(tmp_path):
     assert "2026-12-01" in key.detail
 
 
+def test_classify_verify_expiring_date_must_be_iso_calendar_day():
+    status, detail = ai.classify_verify_result(
+        ai.VERIFY_EXIT_OK,
+        stderr="ADE_KEY_VERIFY:expiring:sk-leakMe1234567890abcdef\n",
+    )
+    assert status == "expiring"
+    assert "sk-leakMe" not in detail
+    assert "leak" not in detail
+    assert detail == "verify expiring (no value read)"
+
+    status, detail = ai.classify_verify_result(
+        ai.VERIFY_EXIT_OK,
+        stderr="ADE_KEY_VERIFY:expiring:2026-12-01T00:00:00Z\n",
+    )
+    assert status == "expiring"
+    assert "2026-12-01T" not in detail
+    assert detail == "verify expiring (no value read)"
+
+    status, detail = ai.classify_verify_result(
+        ai.VERIFY_EXIT_OK,
+        stderr="ADE_KEY_VERIFY:expiring:2026-12-01\n",
+    )
+    assert status == "expiring"
+    assert detail == "verify expiring 2026-12-01 (no value read)"
+
+
+def test_classify_verify_keeps_failure_when_expiring_marker_present():
+    for code, want in (
+        (ai.VERIFY_EXIT_INVALID, "invalid"),
+        (ai.VERIFY_EXIT_NO_QUOTA, "no-quota"),
+        (ai.VERIFY_EXIT_UNREACHABLE, "unreachable"),
+        (ai.VERIFY_EXIT_MISSING, "missing"),
+    ):
+        status, detail = ai.classify_verify_result(
+            code,
+            stderr="ADE_KEY_VERIFY:expiring:2026-12-01\n",
+        )
+        assert status == want, (code, status, detail)
+        assert "expiring" not in status
+        assert "2026-12-01" not in detail
+
+
 def test_keys_verify_argv_validated(tmp_path):
     root = tmp_path / "repo"
     (root / "config").mkdir(parents=True)

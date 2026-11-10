@@ -57,7 +57,8 @@ setup-plan S3b check-then-verify:
    <verify_argv…>` (argv lists; the probe reads the key from the injected
    environment). Exit contract: `0` ok, `10` invalid, `11` no-quota,
    `12` unreachable, `13` expiring, `14` missing. Optional stderr marker
-   `ADE_KEY_VERIFY:expiring:YYYY-MM-DD` may refine an expiring outcome.
+   `ADE_KEY_VERIFY:expiring:YYYY-MM-DD` may refine an ok or expiring
+   outcome (ISO calendar date only; failure exits stay failure).
 4. Writes outcomes atomically to `~/.local/state/djbclark-ade/keys.json` (or
    `ADE_KEYS_STATE_PATH` / `--keys-state`); **no values and no hashes**.
 

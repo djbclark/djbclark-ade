@@ -27,6 +27,7 @@ import sys
 import tempfile
 import time
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 from typing import Any, Callable
 
@@ -569,11 +570,30 @@ def secretspec_verify_argv(name: str, probe_argv: list[str]) -> list[str]:
     ]
 
 
+def _parse_expiring_iso_date(raw: str) -> str | None:
+    """Return ``YYYY-MM-DD`` when ``raw`` is exactly that calendar date.
+
+    Docs require ``ADE_KEY_VERIFY:expiring:YYYY-MM-DD``. Refuse datetimes,
+    free text, and credential-shaped payloads so they never reach detail
+    or ``keys.json``.
+    """
+    text = (raw or "").strip()
+    if len(text) != 10 or text[4] != "-" or text[7] != "-":
+        return None
+    try:
+        date.fromisoformat(text)
+    except ValueError:
+        return None
+    return text
+
+
 def _safe_verify_marker(stderr: str) -> tuple[str | None, str | None]:
     """Parse a narrow ADE_KEY_VERIFY marker from the first stderr line.
 
     Returns ``(status, expiring_date)``. Anything that is not an allowlisted
-    token is ignored so probe output cannot leak into observations.
+    token is ignored so probe output cannot leak into observations. An
+    ``expiring:`` suffix keeps status ``expiring`` only when the date is a
+    validated ISO calendar day; otherwise the date is dropped.
     """
     line = (stderr or "").strip().splitlines()
     if not line:
@@ -583,11 +603,7 @@ def _safe_verify_marker(stderr: str) -> tuple[str | None, str | None]:
         return None, None
     rest = first[len(VERIFY_MARKER_PREFIX) :]
     if rest.startswith("expiring:"):
-        date = rest.split(":", 1)[1].strip()
-        # ISO date only; refuse anything that looks like a payload.
-        if len(date) <= 32 and all(c.isalnum() or c in "-T:+Z" for c in date):
-            return "expiring", date
-        return "expiring", None
+        return "expiring", _parse_expiring_iso_date(rest.split(":", 1)[1])
     if rest in VERIFY_ALLOWED_MARKERS:
         return rest, None
     return None, None
@@ -603,10 +619,13 @@ def classify_verify_result(
     status = VERIFY_STATUS_BY_EXIT.get(returncode)
     if status is None:
         status = "error"
-    if marker_status == "expiring" or status == "expiring":
+    # Expiry marker may refine ok/expiring only; never override 10/11/12/14/…
+    if marker_status == "expiring" and status in {"ok", "expiring"}:
         status = "expiring"
         if expiring_date:
             return status, f"verify expiring {expiring_date} (no value read)"
+        return status, "verify expiring (no value read)"
+    if status == "expiring":
         return status, "verify expiring (no value read)"
     if marker_status and marker_status != "expiring":
         # Marker may refine an otherwise opaque non-zero when exit is unmapped.
