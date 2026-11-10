@@ -120,11 +120,12 @@ GIT_CONFIG_* plus the repository's, relative --git-dir/--work-tree/GIT_DIR/GIT_W
      environment); when git cannot answer at all (timeout), the typed values are used and a call that is not read-only is
      refused while another agent holds a claim (rule workspace-unresolved). Also (O2 residual, 2026-11-09; follow-ups
      2026-11-10): `stash show --output*` / `--out*` (relative paths against the effective work tree) and `format-patch`
-     `-o` / `--output*` / `--output-directory` (short clusters honor value-taking `-v`/`-S`/`-I`/`-G`/`-O`) and plain
-     `format-patch` (default directory is `format.outputDirectory` when set via `-c` / `GIT_CONFIG_*` / repo config —
-     probed without legacy `GIT_CONFIG`, which format-patch ignores — else cwd; unresolved config fails closed) when the
-     output target is not inside the caller's active claimed workspace (`output-file`); `format-patch --stdout` stays
-     allowed (no worktree file write).
+     `-o` / `--output*` / `--output-directory` (short clusters honor value-taking `-v`/`-S`/`-I`/`-G`/`-O`; value-taking
+     longs like `--reroll-count` consume the next argv token when not `--opt=value`) and plain `format-patch` (default
+     directory is `format.outputDirectory` when set via `-c` / `GIT_CONFIG_*` / repo config — probed without legacy
+     `GIT_CONFIG`, which format-patch ignores — else cwd; unresolved config fails closed) when the output target is not
+     inside the caller's active claimed workspace (`output-file`); `format-patch --stdout` stays allowed (no worktree
+     file write).
   5. In my own claimed workspace everything else is allowed.
 Removed in O2 (the hooks replace them): the fetch/pull/remote-update and push dry-run preflights, the `update-ref`, `branch -d|-D|-f`,
 `checkout -B`, `switch -C` and `worktree add -B` target rules, the broader output-file rules (`bundle create`, `config --file`,
@@ -1540,6 +1541,24 @@ def _resolve_out_path(base: str, value: str) -> str:
 # skip the `format.outputDirectory` check and allow a write into a foreign claim.
 _FORMAT_PATCH_VALUE_SHORT = frozenset("vSIGO")
 
+# format-patch longs that always take a value (separate token or `--opt=value`). Measured 2026-11-10:
+# `format-patch --reroll-count -o .` binds `-o` as reroll-count's value and still writes into
+# `format.outputDirectory`; the same for the other required-value longs below (optional-value forms
+# like `--from`/`--thread`/`--unified` do NOT consume a following `-o`). Skipping only `--output` /
+# `--output-directory` left those attacks treating `-o .` as a real in-claim output directory.
+# `no-*` negations are omitted: they do not take a value. Abbreviations that uniquely (or, via
+# expand_long's danger set, ambiguously) match a name here also consume the next token.
+_FORMAT_PATCH_VALUE_LONG = frozenset({
+    "output", "output-directory",
+    "reroll-count", "suffix", "start-number", "filename-max-length",
+    "cover-from-description", "description-file", "subject-prefix",
+    "add-header", "to", "cc", "in-reply-to", "signature", "base",
+    "signature-file", "interdiff", "range-diff", "creation-factor",
+    # inherited diff options whose long form always takes a value (kin of -I/-O and kin)
+    "ignore-matching-lines", "order-file", "src-prefix", "dst-prefix",
+    "inter-hunk-context", "find-object", "diff-filter",
+})
+
 
 def _stash_show_output_base(call: GitCall) -> Optional[str]:
     """Base directory for relative `stash show --output` / `--out` paths.
@@ -1642,6 +1661,9 @@ def _output_file_targets(call: GitCall) -> Optional[list[str]]:
                 name, eq, val = a[2:].partition("=")
                 names = expand_long(name, danger=("output-directory", "output"),
                                     table=_with_negations({"stdout"}))
+                # Fail closed on any unique/ambiguous prefix of a value-taking long (same expand_long
+                # danger rule as elsewhere): the next token is that option's value, not `-o`.
+                value_hit = expand_long(name, danger=_FORMAT_PATCH_VALUE_LONG) & _FORMAT_PATCH_VALUE_LONG
                 if names & {"stdout"} and "no-stdout" not in names:
                     stdout = True
                 if names & {"no-stdout"}:
@@ -1657,6 +1679,11 @@ def _output_file_targets(call: GitCall) -> Optional[list[str]]:
                         i += 1
                     else:
                         targets.append(_resolve_out_path(cwd, ""))
+                elif value_hit and not eq and i + 1 < n:
+                    # Required-value long without `=`: consume the next token so a following
+                    # `-o .` is not misread as an output directory while git still writes into
+                    # format.outputDirectory (Security HIGH on #400).
+                    i += 1
             elif a.startswith("-") and len(a) > 1:
                 cl = a[1:]
                 j = 0

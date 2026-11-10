@@ -828,6 +828,36 @@ def test_format_patch_value_short_cluster_does_not_fake_dash_o(tmp_path, state):
     assert not list(a.glob("*.patch"))
 
 
+def test_format_patch_value_long_does_not_fake_dash_o(tmp_path, state):
+    """HIGH: value-taking longs bind a following `-o` as their value; format.outputDirectory must still be checked.
+
+    Attack (measured 2026-11-10): from a claimed workspace,
+    `git -c format.outputDirectory=<peer> format-patch -1 --reroll-count -o .` is allowed by a parser
+    that only skips the next token for `--output` / `--output-directory`, then writes into the peer.
+    """
+    a, b = two_claimed(tmp_path, state)
+    before = (a / "f").read_text()
+    for opt in (
+        "--reroll-count", "--suffix", "--subject-prefix", "--to", "--cc",
+        "--add-header", "--signature", "--in-reply-to", "--description-file",
+        "--range-diff",
+    ):
+        r = run(
+            state,
+            ["-c", f"format.outputDirectory={a}", "format-patch", "-1", opt, "-o", "."],
+            b,
+            who="B",
+        )
+        assert refused77(r) and "output-file" in r.stderr, (opt, r.returncode, r.stderr)
+        assert (a / "f").read_text() == before
+        assert not list(a.glob("*.patch")), opt
+        assert not list(b.glob("*.patch")), opt
+    # `--opt=value` already attaches the value: a following `-o` is a real output directory.
+    r = run(state, ["format-patch", "-1", "--reroll-count=1", "-o", str(a)], b, who="B")
+    assert refused77(r) and "output-file" in r.stderr, r.stderr
+    assert not list(a.glob("*.patch"))
+
+
 def test_format_patch_git_config_env_does_not_hide_repo_output_directory(tmp_path, state):
     """HIGH: format-patch ignores legacy GIT_CONFIG; a GIT_CONFIG=/dev/null probe must not treat the target as cwd."""
     a, b = two_claimed(tmp_path, state)
