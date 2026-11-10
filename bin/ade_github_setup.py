@@ -610,6 +610,65 @@ def _deployment_policy_matches(
     return True, "deployment_branch_policy matches"
 
 
+# jq: id + name + type so apply/verify can refuse leftover policies.
+_BRANCH_POLICIES_JQ = "[.branch_policies[] | {id, name, type}]"
+
+
+def _normalize_branch_policies(raw: Any) -> list[dict[str, Any]] | None:
+    """Normalize deployment-branch-policies list; ``None`` if unreadable."""
+    if not isinstance(raw, list):
+        return None
+    out: list[dict[str, Any]] = []
+    for item in raw:
+        if isinstance(item, str):
+            # Legacy name-only fixtures / jq; treat as type=branch, no id.
+            out.append({"id": None, "name": item, "type": "branch"})
+            continue
+        if not isinstance(item, dict):
+            return None
+        name = item.get("name")
+        if not isinstance(name, str) or not name:
+            return None
+        typ = item.get("type")
+        if typ is None:
+            typ = "branch"
+        if typ not in ("branch", "tag"):
+            return None
+        out.append({"id": item.get("id"), "name": name, "type": typ})
+    return out
+
+
+def _branch_policies_exact(
+    policies: list[dict[str, Any]], want_branch: str
+) -> tuple[bool, str]:
+    """True only when the list is exactly ``want_branch`` with type=branch."""
+    got = sorted((p["name"], p["type"]) for p in policies)
+    want = [(want_branch, "branch")]
+    if got == want:
+        return True, f"deployment branch {want_branch!r} only"
+    return False, f"want exactly {[want_branch]!r} type=branch; got {got!r}"
+
+
+def _list_deployment_branch_policies(
+    cfg: GithubConfig, run: Runner, env: str
+) -> tuple[list[dict[str, Any]] | None, str]:
+    raw, detail = _gh_json(
+        run,
+        [
+            "api",
+            f"repos/{cfg.full_name}/environments/{env}/deployment-branch-policies",
+            "--jq",
+            _BRANCH_POLICIES_JQ,
+        ],
+    )
+    if raw is None:
+        return None, detail
+    norms = _normalize_branch_policies(raw)
+    if norms is None:
+        return None, f"unreadable deployment-branch-policies: {raw!r}"
+    return norms, detail
+
+
 def _ruleset_scope_matches(
     got: dict[str, Any], want: dict[str, Any]
 ) -> tuple[bool, str]:
@@ -872,25 +931,9 @@ def observe(
                 detail=f"environment {env!r} present",
             )
         )
-        pol_data, pol_detail = _gh_json(
-            run,
-            [
-                "api",
-                f"repos/{cfg.full_name}/environments/{env}/deployment-branch-policies",
-                "--jq",
-                "[.branch_policies[].name]",
-            ],
-        )
         want_branch = cfg.github["environment_branch"]
-        if isinstance(pol_data, list) and want_branch in pol_data:
-            obs.append(
-                Observation(
-                    id="environment-branch",
-                    status="ok",
-                    detail=f"deployment branch {want_branch!r} listed",
-                )
-            )
-        elif pol_data is None:
+        policies, pol_detail = _list_deployment_branch_policies(cfg, run, env)
+        if policies is None:
             obs.append(
                 Observation(
                     id="environment-branch",
@@ -899,14 +942,24 @@ def observe(
                 )
             )
         else:
-            obs.append(
-                Observation(
-                    id="environment-branch",
-                    status="missing",
-                    detail=f"want branch {want_branch!r}; got {pol_data!r}",
+            exact_ok, exact_detail = _branch_policies_exact(policies, want_branch)
+            if exact_ok:
+                obs.append(
+                    Observation(
+                        id="environment-branch",
+                        status="ok",
+                        detail=exact_detail,
+                    )
                 )
-            )
-            rc = 1
+            else:
+                obs.append(
+                    Observation(
+                        id="environment-branch",
+                        status="missing",
+                        detail=exact_detail,
+                    )
+                )
+                rc = 1
 
     # Secret / variable *names* only (gh secret list does not print values)
     secret_name = cfg.github["private_key_secret"]
@@ -1104,7 +1157,10 @@ def _apply_environment(
             _result(
                 id="environment-branch",
                 action="would-api",
-                reason=f"POST deployment-branch-policy name={branch}",
+                reason=(
+                    f"ensure deployment-branch-policies exactly "
+                    f"name={branch} type=branch (delete extras)"
+                ),
                 ok=True,
             )
         )
@@ -1172,55 +1228,91 @@ def _apply_environment(
         )
     )
 
-    pol_data, pol_detail = _gh_json(
-        run,
-        [
-            "api",
-            f"repos/{cfg.full_name}/environments/{env}/deployment-branch-policies",
-            "--jq",
-            "[.branch_policies[].name]",
-        ],
-    )
-    if isinstance(pol_data, list) and branch in pol_data:
-        results.append(
-            _result(
-                id="environment-branch",
-                action="skipped",
-                reason=f"deployment branch {branch!r} already listed",
-                ok=True,
-            )
-        )
-        return results
-    if pol_data is None and "404" not in pol_detail.lower():
+    policies, pol_detail = _list_deployment_branch_policies(cfg, run, env)
+    if policies is None:
         # Unknown list state — still try POST; surface list detail on failure.
-        pass
+        if "404" not in pol_detail.lower():
+            pass
+        policies = []
 
-    post_data, post_detail = _gh_json(
-        run,
-        [
-            "api",
-            "-X",
-            "POST",
-            f"repos/{cfg.full_name}/environments/{env}/deployment-branch-policies",
-            "-f",
-            f"name={branch}",
-            "-f",
-            "type=branch",
-        ],
+    extras = [
+        p
+        for p in policies
+        if not (p.get("name") == branch and p.get("type") == "branch")
+    ]
+    want_present = any(
+        p.get("name") == branch and p.get("type") == "branch" for p in policies
     )
-    if post_data is None and "empty gh stdout" not in post_detail:
-        # Idempotent: already-exists is ok.
-        low = post_detail.lower()
-        if "already" in low or "422" in low or "exists" in low:
+    deleted: list[str] = []
+    for extra in extras:
+        eid = extra.get("id")
+        label = f"{extra.get('name')!r}/{extra.get('type')!r}"
+        if eid is None:
             results.append(
                 _result(
                     id="environment-branch",
-                    action="skipped",
-                    reason=f"deployment branch {branch!r}: {post_detail}",
-                    ok=True,
+                    action="failed",
+                    reason=(
+                        f"extra deployment policy {label} has no id "
+                        f"(cannot DELETE); list={policies!r}"
+                    ),
+                    ok=False,
                 )
             )
-        else:
+            return results
+        del_data, del_detail = _gh_json(
+            run,
+            [
+                "api",
+                "-X",
+                "DELETE",
+                (
+                    f"repos/{cfg.full_name}/environments/{env}/"
+                    f"deployment-branch-policies/{eid}"
+                ),
+            ],
+        )
+        # DELETE often returns empty body; treat non-error as success.
+        if del_data is None and del_detail and "empty gh stdout" not in del_detail:
+            low = del_detail.lower()
+            if "404" not in low and "not found" not in low:
+                results.append(
+                    _result(
+                        id="environment-branch",
+                        action="failed",
+                        reason=f"DELETE deployment policy {label} id={eid}: {del_detail}",
+                        ok=False,
+                    )
+                )
+                return results
+        deleted.append(label)
+
+    if not want_present:
+        post_data, post_detail = _gh_json(
+            run,
+            [
+                "api",
+                "-X",
+                "POST",
+                f"repos/{cfg.full_name}/environments/{env}/deployment-branch-policies",
+                "-f",
+                f"name={branch}",
+                "-f",
+                "type=branch",
+            ],
+        )
+        if post_data is None and "empty gh stdout" not in post_detail:
+            low = post_detail.lower()
+            if "already" in low or "422" in low or "exists" in low:
+                results.append(
+                    _result(
+                        id="environment-branch",
+                        action="skipped",
+                        reason=f"deployment branch {branch!r}: {post_detail}",
+                        ok=True,
+                    )
+                )
+                return results
             results.append(
                 _result(
                     id="environment-branch",
@@ -1229,12 +1321,39 @@ def _apply_environment(
                     ok=False,
                 )
             )
+            return results
+        reason = f"deployment branch {branch!r} ensured"
+        if deleted:
+            reason += f"; deleted extras {deleted}"
+        results.append(
+            _result(
+                id="environment-branch",
+                action="applied",
+                reason=reason,
+                ok=True,
+            )
+        )
         return results
+
+    if deleted:
+        results.append(
+            _result(
+                id="environment-branch",
+                action="applied",
+                reason=(
+                    f"deployment branch {branch!r} kept; "
+                    f"deleted extras {deleted}"
+                ),
+                ok=True,
+            )
+        )
+        return results
+
     results.append(
         _result(
             id="environment-branch",
-            action="applied",
-            reason=f"deployment branch {branch!r} ensured",
+            action="skipped",
+            reason=f"deployment branch {branch!r} only already listed",
             ok=True,
         )
     )
@@ -1562,26 +1681,9 @@ def verify(
                 )
             )
             rc = 1
-        pol_data, pol_detail = _gh_json(
-            run,
-            [
-                "api",
-                f"repos/{cfg.full_name}/environments/{env}/deployment-branch-policies",
-                "--jq",
-                "[.branch_policies[].name]",
-            ],
-        )
         want_branch = cfg.github["environment_branch"]
-        if isinstance(pol_data, list) and want_branch in pol_data:
-            results.append(
-                _result(
-                    id="environment-branch",
-                    action="verify-ok",
-                    reason=f"deployment branch {want_branch!r} listed",
-                    ok=True,
-                )
-            )
-        elif pol_data is None:
+        policies, pol_detail = _list_deployment_branch_policies(cfg, run, env)
+        if policies is None:
             results.append(
                 _result(
                     id="environment-branch",
@@ -1591,15 +1693,26 @@ def verify(
                 )
             )
         else:
-            results.append(
-                _result(
-                    id="environment-branch",
-                    action="verify-fail",
-                    reason=f"want branch {want_branch!r}; got {pol_data!r}",
-                    ok=False,
+            exact_ok, exact_detail = _branch_policies_exact(policies, want_branch)
+            if exact_ok:
+                results.append(
+                    _result(
+                        id="environment-branch",
+                        action="verify-ok",
+                        reason=exact_detail,
+                        ok=True,
+                    )
                 )
-            )
-            rc = 1
+            else:
+                results.append(
+                    _result(
+                        id="environment-branch",
+                        action="verify-fail",
+                        reason=exact_detail,
+                        ok=False,
+                    )
+                )
+                rc = 1
 
     app_id = _discover_app_id(cfg, run)
     want = ruleset_preview(cfg, app_id=app_id)

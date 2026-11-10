@@ -10,3 +10,6 @@
 - Made `ade-github-setup apply --yes` refuse browser App create/install confirm
   (setup-plan S7) and refuse private-key / client-id store (operator stdin
   only; never prints PEM) (#462).
+- Made environment deployment-branch-policies require exactly the configured
+  branch (type=branch): `apply --yes` deletes leftovers; `apply --verify`
+  fails when extras remain (#462).

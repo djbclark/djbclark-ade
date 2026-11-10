@@ -351,12 +351,20 @@ def _apply_runner_ok(cfg: ags.GithubConfig, *, ruleset_exists: bool = False):
                 argv, 0, stdout=json.dumps(env_body) + "\n", stderr=""
             )
         if "deployment-branch-policies" in joined:
+            if "-X" in argv and "DELETE" in argv:
+                return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
             if "-X" in argv and "POST" in argv:
                 return subprocess.CompletedProcess(
-                    argv, 0, stdout='{"id":1,"name":"master"}\n', stderr=""
+                    argv,
+                    0,
+                    stdout='{"id":1,"name":"master","type":"branch"}\n',
+                    stderr="",
                 )
             return subprocess.CompletedProcess(
-                argv, 0, stdout='["master"]\n', stderr=""
+                argv,
+                0,
+                stdout='[{"id":1,"name":"master","type":"branch"}]\n',
+                stderr="",
             )
         if "rulesets/" in joined and joined.rstrip("/").split("rulesets/")[-1].isdigit():
             return subprocess.CompletedProcess(
@@ -424,6 +432,8 @@ def test_apply_yes_refuses_ruleset_without_app_id(tmp_path):
                 argv, 0, stdout=json.dumps(env_body) + "\n", stderr=""
             )
         if "deployment-branch-policies" in joined:
+            if "-X" in argv and "DELETE" in argv:
+                return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
             if "-X" in argv and "POST" in argv:
                 return subprocess.CompletedProcess(argv, 0, stdout="{}\n", stderr="")
             return subprocess.CompletedProcess(argv, 0, stdout="[]\n", stderr="")
@@ -667,6 +677,96 @@ def test_verify_api_ok(tmp_path):
     assert by_id["ruleset"]["app_id"] == 4242
     blob = json.dumps(results)
     assert "PRIVATE KEY" not in blob
+
+
+def test_verify_fails_when_extra_branch_policies(tmp_path):
+    """Membership of master is not enough — leftover policies must fail verify."""
+    root = _fixture_root(tmp_path, app_id=4242)
+    cfg = ags.load_config(root=root)
+    env = cfg.github["environment"]
+    want_rs = cfg.github["ruleset_name"]
+    env_body = _env_api_body(cfg)
+    full_ruleset = ags.ruleset_preview(cfg, app_id=4242)
+    full_ruleset["id"] = 9
+    extras = [
+        {"id": 1, "name": "master", "type": "branch"},
+        {"id": 2, "name": "develop", "type": "branch"},
+    ]
+
+    def runner(argv: list[str]) -> subprocess.CompletedProcess:
+        joined = " ".join(argv)
+        if "user/installations" in joined:
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout='[{"id":77,"app_id":4242,"app_slug":"ade-merge-gate"}]\n',
+                stderr="",
+            )
+        if f"environments/{env}" in joined and "deployment-branch" not in joined:
+            return subprocess.CompletedProcess(
+                argv, 0, stdout=json.dumps(env_body) + "\n", stderr=""
+            )
+        if "deployment-branch-policies" in joined:
+            return subprocess.CompletedProcess(
+                argv, 0, stdout=json.dumps(extras) + "\n", stderr=""
+            )
+        if "rulesets/" in joined and joined.rstrip("/").split("rulesets/")[-1].isdigit():
+            return subprocess.CompletedProcess(
+                argv, 0, stdout=json.dumps(full_ruleset) + "\n", stderr=""
+            )
+        if "rulesets" in joined:
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout=f'[{{"id":9,"name":"{want_rs}","enforcement":"active"}}]\n',
+                stderr="",
+            )
+        return subprocess.CompletedProcess(argv, 1, stdout="", stderr="unexpected\n")
+
+    results, rc = ags.verify(cfg, runner=runner)
+    assert rc == 1
+    by_id = {r["id"]: r for r in results}
+    assert by_id["environment-branch"]["action"] == "verify-fail"
+    assert "develop" in by_id["environment-branch"]["reason"]
+
+
+def test_apply_yes_deletes_extra_branch_policies(tmp_path):
+    """apply --yes must DELETE leftover policies, not skip on membership."""
+    root = _fixture_root(tmp_path, app_id=4242)
+    cfg = ags.load_config(root=root)
+    env = cfg.github["environment"]
+    deleted: list[str] = []
+    base = _apply_runner_ok(cfg)
+    extras = [
+        {"id": 1, "name": "master", "type": "branch"},
+        {"id": 99, "name": "hotfix", "type": "branch"},
+    ]
+
+    def runner(argv: list[str]) -> subprocess.CompletedProcess:
+        joined = " ".join(argv)
+        if "deployment-branch-policies" in joined:
+            if "-X" in argv and "DELETE" in argv:
+                deleted.append(argv[-1].rsplit("/", 1)[-1])
+                return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+            if "-X" in argv and "POST" in argv:
+                return subprocess.CompletedProcess(
+                    argv,
+                    0,
+                    stdout='{"id":1,"name":"master","type":"branch"}\n',
+                    stderr="",
+                )
+            return subprocess.CompletedProcess(
+                argv, 0, stdout=json.dumps(extras) + "\n", stderr=""
+            )
+        return base(argv)
+
+    results, rc = ags.apply_yes(cfg, runner=runner)
+    assert rc == 0, results
+    by_id = {r["id"]: r for r in results}
+    assert by_id["environment-branch"]["ok"] is True
+    assert by_id["environment-branch"]["action"] == "applied"
+    assert "hotfix" in by_id["environment-branch"]["reason"]
+    assert "99" in deleted
 
 
 def test_cli_apply_verify_mode_json_shape(tmp_path, monkeypatch):
