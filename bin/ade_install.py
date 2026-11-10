@@ -6,11 +6,12 @@ recorded (else PATH presence), checks live Claude ``context_size_nudge`` hook
 registration against ``agents/claude/settings.json.tmpl`` when that template
 is present under ``--root``, and never repairs or mutates
 ``~/.claude/settings.json`` (order 11). ``keys`` runs ``sudo-secretspec
-check`` for bulk presence only (no get/export/set/verify). Apply defaults to
-dry-run; ``--yes`` executes user ``install_argv`` (argv lists, never
-shell=True). ``--system --dry-run`` / ``--print-system-argv`` preview
-``system_argv``. Live ``system_argv`` needs ``--yes --system --apply-system``
-(opt-in; default refuse). Secrets are never read.
+check`` for bulk presence, then per-key ``verify_argv`` probes under
+``sudo-secretspec run`` when recorded (no get/export/set; never prints
+values). Apply defaults to dry-run; ``--yes`` executes user ``install_argv``
+(argv lists, never shell=True). ``--system --dry-run`` / ``--print-system-argv``
+preview ``system_argv``. Live ``system_argv`` needs ``--yes --system
+--apply-system`` (opt-in; default refuse). Secrets are never read.
 """
 from __future__ import annotations
 
@@ -37,18 +38,44 @@ import ade_config as ac  # noqa: E402
 
 SCHEMA_VERSION = 1
 LEDGER_SCHEMA_VERSION = 1
+KEYS_STATE_SCHEMA_VERSION = 1
 UNKNOWN = "UNKNOWN"
 COMPONENT_CLASSES = frozenset({"hard", "offered", "optional", "suggested", "never"})
 # Classes that require an explicit chosen bool in the catalog.
 CHOICE_CLASSES = frozenset({"offered", "optional", "suggested"})
 
-# Placeholders expanded in install_argv / update_argv / probe_argv before exec.
+# Placeholders expanded in install_argv / update_argv / probe_argv / verify_argv.
 ARGV_TOKENS = ("{bin}", "{root}", "{home}", "{prefix}")
 
 # Live Claude settings vs agents/claude/settings.json.tmpl (queue Carried #10).
 CONTEXT_SIZE_NUDGE = "context_size_nudge.py"
 CLAUDE_SETTINGS_TMPL = Path("agents") / "claude" / "settings.json.tmpl"
 _TMPL_TAG = re.compile(r"\{\{.*?\}\}", re.DOTALL)
+
+# Exit contract for recorded key verify_argv probes (under sudo-secretspec run).
+# Probes must not print secret values; ade-install never echoes probe stdout/stderr
+# except a narrow ADE_KEY_VERIFY marker for expiring dates.
+VERIFY_EXIT_OK = 0
+VERIFY_EXIT_INVALID = 10
+VERIFY_EXIT_NO_QUOTA = 11
+VERIFY_EXIT_UNREACHABLE = 12
+VERIFY_EXIT_EXPIRING = 13
+VERIFY_EXIT_MISSING = 14
+VERIFY_STATUS_BY_EXIT: dict[int, str] = {
+    VERIFY_EXIT_OK: "ok",
+    VERIFY_EXIT_INVALID: "invalid",
+    VERIFY_EXIT_NO_QUOTA: "no-quota",
+    VERIFY_EXIT_UNREACHABLE: "unreachable",
+    VERIFY_EXIT_EXPIRING: "expiring",
+    VERIFY_EXIT_MISSING: "missing",
+}
+VERIFY_FAIL_STATUSES = frozenset(
+    {"invalid", "no-quota", "unreachable", "missing", "error"}
+)
+VERIFY_MARKER_PREFIX = "ADE_KEY_VERIFY:"
+VERIFY_ALLOWED_MARKERS = frozenset(
+    {"ok", "invalid", "no-quota", "unreachable", "missing", "expiring"}
+)
 
 Runner = Callable[[list[str], Path], "subprocess.CompletedProcess[str]"]
 
@@ -117,6 +144,17 @@ def default_state_dir() -> Path:
     return Path.home() / ".local" / "state" / "djbclark-ade" / "install"
 
 
+def default_keys_state_path() -> Path:
+    """Atomic outcomes file for ``ade-install keys`` (no values, no hashes)."""
+    env = os.environ.get("ADE_KEYS_STATE_PATH")
+    if env:
+        return Path(env).expanduser()
+    install = default_state_dir()
+    if install.name == "install":
+        return install.parent / "keys.json"
+    return install / "keys.json"
+
+
 def default_prefix() -> Path:
     env = os.environ.get("ADE_INSTALL_PREFIX")
     if env:
@@ -151,24 +189,26 @@ def _reject_duplicate_ids(rows: list[dict[str, Any]], *, key: str, label: str) -
         seen[name] = i
 
 
-def _validate_argv_field(row: dict[str, Any], *, field: str, path: Path, index: int) -> None:
+def _validate_argv_field(
+    row: dict[str, Any],
+    *,
+    field: str,
+    path: Path,
+    index: int,
+    row_kind: str = "component",
+    row_id_key: str = "id",
+) -> None:
     val = row.get(field)
     if val is None:
         return
+    label = f"{path}: {row_kind}[{index}] {row_id_key}={row.get(row_id_key)!r}"
     if not isinstance(val, list) or not val:
-        raise InstallError(
-            f"{path}: component[{index}] id={row.get('id')!r}: "
-            f"{field} must be a non-empty array of strings"
-        )
+        raise InstallError(f"{label}: {field} must be a non-empty array of strings")
     for j, part in enumerate(val):
         if not isinstance(part, str) or not part:
-            raise InstallError(
-                f"{path}: component[{index}].{field}[{j}] must be a non-empty string"
-            )
+            raise InstallError(f"{label}.{field}[{j}] must be a non-empty string")
         if any(ch in part for ch in ("\0", "\n", "\r")):
-            raise InstallError(
-                f"{path}: component[{index}].{field}[{j}]: control characters refused"
-            )
+            raise InstallError(f"{label}.{field}[{j}]: control characters refused")
 
 
 def validate_catalog_semantics(data: dict[str, Any], *, path: Path) -> None:
@@ -216,6 +256,15 @@ def validate_catalog_semantics(data: dict[str, Any], *, path: Path) -> None:
         if not isinstance(keys, list):
             raise InstallError(f"{path}: key must be an array of tables")
         _reject_duplicate_ids(keys, key="name", label=f"{path} key")
+        for i, row in enumerate(keys):
+            _validate_argv_field(
+                row,
+                field="verify_argv",
+                path=path,
+                index=i,
+                row_kind="key",
+                row_id_key="name",
+            )
     logins = data.get("login") or []
     if logins:
         if not isinstance(logins, list):
@@ -355,7 +404,14 @@ def observe_key(row: dict[str, Any]) -> Observation:
     name = str(row["name"])
     verify = row.get("verify") or UNKNOWN
     expiry = row.get("expiry") or "unknown"
-    detail = f"reference only; verify={verify}; expiry={expiry} (no value read)"
+    has_argv = isinstance(row.get("verify_argv"), list) and bool(row.get("verify_argv"))
+    if has_argv:
+        detail = (
+            f"verify_argv recorded; verify={verify}; expiry={expiry} "
+            "(probe deferred; no value read)"
+        )
+    else:
+        detail = f"reference only; verify={verify}; expiry={expiry} (no value read)"
     return Observation("key", name, "unknown", detail)
 
 
@@ -497,6 +553,118 @@ SECRETSPEC_CHECK_ARGV = [
 ]
 
 
+def secretspec_verify_argv(name: str, probe_argv: list[str]) -> list[str]:
+    """Build ``sudo-secretspec run -- …`` argv for one key verify probe.
+
+    The key name appears only in ``--reason`` (not a secret). Probe argv must
+    read the value from the injected environment, never from argv.
+    """
+    return [
+        "sudo-secretspec",
+        "run",
+        "--reason",
+        f"ade-install keys verify {name}",
+        "--",
+        *probe_argv,
+    ]
+
+
+def _safe_verify_marker(stderr: str) -> tuple[str | None, str | None]:
+    """Parse a narrow ADE_KEY_VERIFY marker from the first stderr line.
+
+    Returns ``(status, expiring_date)``. Anything that is not an allowlisted
+    token is ignored so probe output cannot leak into observations.
+    """
+    line = (stderr or "").strip().splitlines()
+    if not line:
+        return None, None
+    first = line[0].strip()
+    if not first.startswith(VERIFY_MARKER_PREFIX):
+        return None, None
+    rest = first[len(VERIFY_MARKER_PREFIX) :]
+    if rest.startswith("expiring:"):
+        date = rest.split(":", 1)[1].strip()
+        # ISO date only; refuse anything that looks like a payload.
+        if len(date) <= 32 and all(c.isalnum() or c in "-T:+Z" for c in date):
+            return "expiring", date
+        return "expiring", None
+    if rest in VERIFY_ALLOWED_MARKERS:
+        return rest, None
+    return None, None
+
+
+def classify_verify_result(
+    returncode: int,
+    *,
+    stderr: str = "",
+) -> tuple[str, str]:
+    """Map probe exit code (+ optional marker) to status/detail. Never echoes bodies."""
+    marker_status, expiring_date = _safe_verify_marker(stderr)
+    status = VERIFY_STATUS_BY_EXIT.get(returncode)
+    if status is None:
+        status = "error"
+    if marker_status == "expiring" or status == "expiring":
+        status = "expiring"
+        if expiring_date:
+            return status, f"verify expiring {expiring_date} (no value read)"
+        return status, "verify expiring (no value read)"
+    if marker_status and marker_status != "expiring":
+        # Marker may refine an otherwise opaque non-zero when exit is unmapped.
+        if returncode not in VERIFY_STATUS_BY_EXIT:
+            status = marker_status
+    if status == "ok":
+        return status, "verify ok under sudo-secretspec run (no value read)"
+    if status == "error":
+        return status, f"verify error (exit {returncode}; no value read)"
+    return status, f"verify {status} (no value read)"
+
+
+def observe_key_verify(
+    row: dict[str, Any],
+    *,
+    root: Path,
+    runner: Runner | None = None,
+    timeout_s: float = 30.0,
+) -> Observation:
+    """Run one key's ``verify_argv`` under ``sudo-secretspec run``.
+
+    Never calls get/export/set. Never prints or records secret values.
+    """
+    name = str(row["name"])
+    raw_argv = row.get("verify_argv")
+    if not isinstance(raw_argv, list) or not raw_argv:
+        return observe_key(row)
+    try:
+        probe_argv = expand_argv(list(raw_argv), root=root)
+    except InstallError as e:
+        return Observation("key", name, "error", str(e))
+    argv = secretspec_verify_argv(name, probe_argv)
+    if _probe_executable_missing(argv[0]):
+        return Observation(
+            "key",
+            name,
+            "unknown",
+            "sudo-secretspec not on PATH; cannot verify (no value read)",
+        )
+    run = runner or (lambda a, d: _default_runner(a, d, timeout_s=timeout_s))
+    try:
+        proc = run(argv, root)
+    except subprocess.TimeoutExpired:
+        return Observation(
+            "key",
+            name,
+            "unreachable",
+            f"verify timed out after {timeout_s}s (no value read)",
+        )
+    except OSError as e:
+        return Observation("key", name, "error", f"verify exec error: {e}")
+    status, detail = classify_verify_result(
+        int(proc.returncode),
+        stderr=proc.stderr or "",
+    )
+    return Observation("key", name, status, detail)
+
+
 def observe_secretspec_check(
     *,
     runner: Runner | None = None,
@@ -505,7 +673,7 @@ def observe_secretspec_check(
 ) -> Observation:
     """Observe-only bulk presence check via ``sudo-secretspec check``.
 
-    Never calls get/export/set/run. Does not print or request secret values.
+    Never calls get/export/set. Does not print or request secret values.
     """
     if _probe_executable_missing(SECRETSPEC_CHECK_ARGV[0]):
         return Observation(
@@ -546,24 +714,52 @@ def observe_secretspec_check(
     )
 
 
+def save_keys_state(
+    path: Path,
+    *,
+    observations: list[Observation],
+) -> Path:
+    """Write verify/presence outcomes atomically. No values and no hashes."""
+    keys: dict[str, Any] = {}
+    for o in observations:
+        if o.kind != "key":
+            continue
+        keys[o.id] = {
+            "status": o.status,
+            "detail": o.detail,
+        }
+    check = next((o for o in observations if o.kind == "secretspec"), None)
+    out = {
+        "schema_version": KEYS_STATE_SCHEMA_VERSION,
+        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "secretspec_check": (
+            {"status": check.status, "detail": check.detail} if check else None
+        ),
+        "keys": keys,
+    }
+    _atomic_write_json(path, out)
+    return path
+
+
 def keys_observe(
     catalog: Catalog,
     *,
     runner: Runner | None = None,
     timeout_s: float = 30.0,
+    keys_state_path: Path | None = None,
 ) -> tuple[list[Observation], int]:
-    """Observe-only keys path (S3b presence half).
+    """S3b keys path: bulk presence check, then per-key verify probes.
 
-    Lists catalog key references, then runs ``sudo-secretspec check`` when the
-    binary exists. Exit 1 only when check runs and fails; missing binary is
-    ``unknown`` (exit 0) so Linux/CI without the boundary stays observant.
-    Never verifies individual keys and never reads values.
+    Lists catalog key/login references, runs ``sudo-secretspec check`` when the
+    binary exists, then runs each recorded ``verify_argv`` under
+    ``sudo-secretspec run``. Exit 1 when check fails or any verify lands in
+    ``VERIFY_FAIL_STATUSES``. Missing ``sudo-secretspec`` is ``unknown``
+    (exit 0) so Linux/CI without the boundary stays observant. Never reads or
+    prints secret values; outcomes go to ``keys.json``.
     """
     obs: list[Observation] = [
         Observation("catalog", str(catalog.path), "ok", "catalog validated"),
     ]
-    for row in catalog.keys:
-        obs.append(observe_key(row))
     for row in catalog.logins:
         obs.append(observe_login(row))
     check = observe_secretspec_check(
@@ -572,7 +768,29 @@ def keys_observe(
         cwd=catalog.root,
     )
     obs.append(check)
-    rc = 1 if check.status in ("missing", "error") else 0
+    can_run = check.status != "unknown"
+    for row in catalog.keys:
+        raw_argv = row.get("verify_argv")
+        if can_run and isinstance(raw_argv, list) and raw_argv:
+            obs.append(
+                observe_key_verify(
+                    row,
+                    root=catalog.root,
+                    runner=runner,
+                    timeout_s=timeout_s,
+                )
+            )
+        else:
+            obs.append(observe_key(row))
+    state_path = keys_state_path or default_keys_state_path()
+    save_keys_state(state_path, observations=obs)
+    rc = 0
+    if check.status in ("missing", "error"):
+        rc = 1
+    for o in obs:
+        if o.kind == "key" and o.status in VERIFY_FAIL_STATUSES:
+            rc = 1
+            break
     return obs, rc
 
 
