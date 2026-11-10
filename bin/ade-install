@@ -11,8 +11,9 @@
 
 Doctor runs recorded probe_argv when present (else PATH presence) and, when
 agents/claude/settings.json.tmpl is under --root, checks live
-~/.claude/settings.json for context_size_nudge.py registration; never
-repairs or mutates settings. Keys runs sudo-secretspec check, then per-key
+~/.claude/settings.json for context_size_nudge.py registration; also probes
+credential-bak delete-after (WARN approaching / FAIL past; never deletes);
+never repairs or mutates settings. Keys runs sudo-secretspec check, then per-key
 verify_argv under sudo-secretspec run when recorded (no values printed).
 Apply defaults to --dry-run; --yes runs user install_argv. --system --dry-run /
 --print-system-argv preview system_argv. Live system_argv needs --yes --system
@@ -268,7 +269,7 @@ def main(argv: list[str] | None = None) -> int:
         ("catalog", cmd_catalog, "list components, key references, and login checks"),
         ("plan", cmd_plan, "print-only install plan (no writes)"),
         ("doctor", cmd_doctor,
-         "run probe_argv / PATH presence and Claude context_size_nudge registration; never repairs"),
+         "run probe_argv / PATH presence, Claude context_size_nudge, and credential-bak delete-after; never repairs"),
         (
             "keys",
             cmd_keys,

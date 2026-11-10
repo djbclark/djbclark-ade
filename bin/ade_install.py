@@ -4,8 +4,9 @@ Transitional source: ``config/install.toml`` when ``config/ade.toml`` is absent.
 Key entries are names and metadata only. Doctor runs ``probe_argv`` when
 recorded (else PATH presence), checks live Claude ``context_size_nudge`` hook
 registration against ``agents/claude/settings.json.tmpl`` when that template
-is present under ``--root``, and never repairs or mutates
-``~/.claude/settings.json`` (order 11). ``keys`` runs ``sudo-secretspec
+is present under ``--root``, probes the Carried #14 credential vault
+delete-after (WARN approaching / FAIL past; never deletes), and never repairs
+or mutates ``~/.claude/settings.json`` (order 11). ``keys`` runs ``sudo-secretspec
 check`` for bulk presence, then per-key ``verify_argv`` probes under
 ``sudo-secretspec run`` when recorded (no get/export/set; never prints
 values). Apply defaults to dry-run; ``--yes`` executes user ``install_argv``
@@ -16,6 +17,7 @@ preview ``system_argv``. Live ``system_argv`` needs ``--yes --system
 from __future__ import annotations
 
 import copy
+import datetime
 import json
 import os
 import platform
@@ -54,7 +56,7 @@ OWNER_ADE = "djbclark-ade"
 # Placeholders expanded in install_argv / update_argv / probe_argv / verify_argv.
 ARGV_TOKENS = ("{bin}", "{root}", "{home}", "{prefix}")
 
-# Live Claude settings vs agents/claude/settings.json.tmpl (queue Carried #10).
+# Live Claude settings vs agents/claude/settings.json.tmpl (queue Carried #11).
 CONTEXT_SIZE_NUDGE = "context_size_nudge.py"
 CLAUDE_SETTINGS_TMPL = Path("agents") / "claude" / "settings.json.tmpl"
 _TMPL_TAG = re.compile(r"\{\{.*?\}\}", re.DOTALL)
@@ -83,6 +85,13 @@ VERIFY_MARKER_PREFIX = "ADE_KEY_VERIFY:"
 VERIFY_ALLOWED_MARKERS = frozenset(
     {"ok", "invalid", "no-quota", "unreachable", "missing", "expiring"}
 )
+
+# Carried queue #14: credential vault moved 2026-10-20; delete-after 2026-11-19
+# (docs/queue.md, docs/history/ade-everywhere-inventory-2026-10-20-stores.md).
+# Doctor WARNs inside the lead window and FAILs on/after the date while the
+# vault directory still exists. Doctor never deletes and never reads contents.
+CREDENTIAL_BAK_DELETE_AFTER = datetime.date(2026, 11, 19)
+CREDENTIAL_BAK_WARN_LEAD_DAYS = 14
 
 Runner = Callable[[list[str], Path], "subprocess.CompletedProcess[str]"]
 
@@ -127,9 +136,9 @@ class Catalog:
 
 @dataclass(frozen=True)
 class Observation:
-    kind: str  # component | key | login | catalog | settings | job | retired-job
+    kind: str  # component | key | login | catalog | settings | job | retired-job | vault
     id: str
-    status: str  # ok | missing | unknown | error | unchosen | never | planned | present | foreign
+    status: str  # ok | missing | unknown | error | unchosen | never | planned | present | foreign | warn
     detail: str
 
 
@@ -655,6 +664,76 @@ def observe_context_size_nudge(
         f"{CONTEXT_SIZE_NUDGE} registered under {', '.join(sorted(actual))} in {live}",
     )
 
+def default_credential_bak_path() -> Path:
+    """Default path for the Carried #14 credential vault (never deleted by doctor)."""
+    return Path.home() / ".local" / "state" / "ade" / "credential-bak"
+
+
+def observe_credential_bak(
+    *,
+    today: datetime.date | None = None,
+    path: Path | None = None,
+    exists_fn: Callable[[Path], bool] | None = None,
+) -> Observation:
+    """Observe credential-bak delete-after (Carried #14 residual).
+
+    Presence only (``Path.is_dir`` / injected ``exists_fn``). Never lists or
+    reads vault contents, never deletes, never asks for sudo. Approaching the
+    delete-after date → ``warn`` (doctor FAILs); on/after that date while still
+    present → ``error`` (doctor FAILs). Absent → ``ok``.
+    """
+    day = today or datetime.date.today()
+    vault = path if path is not None else default_credential_bak_path()
+    try:
+        present = exists_fn(vault) if exists_fn is not None else vault.is_dir()
+    except OSError as e:
+        return Observation(
+            "vault",
+            "credential-bak",
+            "unknown",
+            f"could not probe credential-bak at {vault}: {e}; doctor never deletes",
+        )
+    delete_after = CREDENTIAL_BAK_DELETE_AFTER
+    warn_start = delete_after - datetime.timedelta(days=CREDENTIAL_BAK_WARN_LEAD_DAYS)
+    if not present:
+        return Observation(
+            "vault",
+            "credential-bak",
+            "ok",
+            f"credential-bak absent at {vault} "
+            f"(delete-after {delete_after.isoformat()} satisfied or never created); "
+            f"doctor never deletes",
+        )
+    if day >= delete_after:
+        return Observation(
+            "vault",
+            "credential-bak",
+            "error",
+            f"credential-bak still present at {vault} on/after delete-after "
+            f"{delete_after.isoformat()} (today {day.isoformat()}); "
+            f"ask operator yes before deleting — doctor never deletes",
+        )
+    if day >= warn_start:
+        days_left = (delete_after - day).days
+        return Observation(
+            "vault",
+            "credential-bak",
+            "warn",
+            f"credential-bak still present at {vault}; delete-after "
+            f"{delete_after.isoformat()} in {days_left} day(s) "
+            f"(today {day.isoformat()}); ask operator yes after that date — "
+            f"doctor never deletes",
+        )
+    days_left = (delete_after - day).days
+    return Observation(
+        "vault",
+        "credential-bak",
+        "ok",
+        f"credential-bak present at {vault}; delete-after "
+        f"{delete_after.isoformat()} ({days_left} day(s) away); "
+        f"doctor never deletes",
+    )
+
 
 SECRETSPEC_CHECK_ARGV = [
     "sudo-secretspec",
@@ -931,8 +1010,12 @@ def doctor(
     settings_path: Path | None = None,
     jobs_live: Mapping[str, Any] | None = None,
     skip_jobs: bool = False,
+    credential_bak: Observation | None = None,
+    skip_credential_bak: bool = False,
 ) -> tuple[list[Observation], int]:
-    """Observe-only doctor. Exit 1 if any expected component/settings/job drifts; never repairs or unloads."""
+    """Observe-only doctor. Exit 1 if any expected component/settings/job drifts
+    or credential-bak WARN/FAIL fires; never repairs or unloads; never deletes
+    the vault; never mutates ``~/.claude/settings.json``."""
     obs: list[Observation] = [
         Observation("catalog", str(catalog.path), "ok", "catalog validated"),
     ]
@@ -974,6 +1057,16 @@ def doctor(
             obs.append(Observation(kind, row.name, row.status, row.detail))
             if row.fail:
                 hard_missing += 1
+    if not skip_credential_bak:
+        bak_obs = (
+            credential_bak
+            if credential_bak is not None
+            else observe_credential_bak()
+        )
+        obs.append(bak_obs)
+        # WARN approaching + FAIL past (and warn itself fails the doctor run).
+        if bak_obs.status in ("warn", "error", "missing"):
+            hard_missing += 1
     return obs, (1 if hard_missing else 0)
 
 

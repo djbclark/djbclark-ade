@@ -118,9 +118,14 @@ Pass `--ade` only with a durable checkout (`~/src/djbclark-ade`); never with a l
   present under `--root`, it also checks that live `~/.claude/settings.json`
   registers `context_size_nudge.py` under every hook event the template does
   (queue Carried #10, 2026-11-09); a miss prints a hand-apply hint and fails.
-  Doctor never mutates live settings (order 11). Missing or failed expected
-  components fail the command; `unknown` is neither healthy nor absent.
-  Doctor does not repair.
+  Doctor never mutates live settings (order 11). Doctor also probes
+  `~/.local/state/ade/credential-bak/` (Carried #14, delete-after
+  **2026-11-19**): presence only — **WARN** within 14 days before that date
+  while the vault still exists, **FAIL** (`error`) on/after the date while it
+  still exists; absent is `ok`. Doctor **never deletes** the vault and never
+  reads its contents (deletion waits for operator yes after the date). Missing
+  or failed expected components fail the command; `unknown` is neither healthy
+  nor absent. Doctor does not repair.
 - `keys` is observe-only: bulk presence via `sudo-secretspec check`, then
   per-key `verify_argv` under `sudo-secretspec run` when recorded; no secret
   values.

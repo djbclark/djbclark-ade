@@ -1,6 +1,7 @@
 """ade-install catalog / plan / doctor / bounded apply."""
 from __future__ import annotations
 
+import datetime
 import json
 import subprocess
 import sys
@@ -81,7 +82,7 @@ def test_repo_install_toml_checks_clean():
 def test_fixture_doctor_missing_vs_unchosen(tmp_path):
     root = _fixture_root(tmp_path)
     catalog = ai.load_catalog(root=root)
-    obs, rc = ai.doctor(catalog)
+    obs, rc = ai.doctor(catalog, skip_credential_bak=True)
     by_id = {o.id: o for o in obs if o.kind == "component"}
     assert by_id["tool-a"].status == "ok"
     assert "probe ok" in by_id["tool-a"].detail
@@ -101,11 +102,154 @@ def test_doctor_probe_argv_fail_is_error(tmp_path):
 
     # Replace tool-a's observation path by applying runner to all probes.
     # tool-c has no probe_argv → still missing via presence.
-    obs, rc = ai.doctor(catalog, runner=runner)
+    obs, rc = ai.doctor(catalog, runner=runner, skip_credential_bak=True)
     by_id = {o.id: o for o in obs if o.kind == "component"}
     assert by_id["tool-a"].status == "error"
     assert "boom" in by_id["tool-a"].detail
     assert rc == 1
+
+
+def test_observe_credential_bak_absent_ok(tmp_path):
+    vault = tmp_path / "credential-bak"
+    o = ai.observe_credential_bak(
+        today=datetime.date(2026, 11, 25),
+        path=vault,
+        exists_fn=lambda p: False,
+    )
+    assert o.kind == "vault" and o.id == "credential-bak"
+    assert o.status == "ok"
+    assert "absent" in o.detail
+    assert "never deletes" in o.detail
+    assert "2026-11-19" in o.detail
+
+
+def test_observe_credential_bak_early_present_ok(tmp_path):
+    vault = tmp_path / "credential-bak"
+    vault.mkdir()
+    o = ai.observe_credential_bak(
+        today=datetime.date(2026, 10, 20),
+        path=vault,
+    )
+    assert o.status == "ok"
+    assert "present" in o.detail
+    assert "never deletes" in o.detail
+
+
+def test_observe_credential_bak_approaching_is_warn(tmp_path):
+    vault = tmp_path / "credential-bak"
+    vault.mkdir()
+    # 9 days before delete-after (within 14-day lead).
+    o = ai.observe_credential_bak(
+        today=datetime.date(2026, 11, 10),
+        path=vault,
+    )
+    assert o.status == "warn"
+    assert "in 9 day(s)" in o.detail
+    assert "never deletes" in o.detail
+    assert "rm" not in o.detail.lower()
+    assert "unlink" not in o.detail.lower()
+
+
+def test_observe_credential_bak_past_is_error(tmp_path):
+    vault = tmp_path / "credential-bak"
+    vault.mkdir()
+    o = ai.observe_credential_bak(
+        today=datetime.date(2026, 11, 19),
+        path=vault,
+    )
+    assert o.status == "error"
+    assert "on/after delete-after" in o.detail
+    assert "operator yes" in o.detail
+    assert "never deletes" in o.detail
+
+
+def test_observe_credential_bak_never_calls_delete(tmp_path):
+    """Guard: injected exists_fn must be the only filesystem touch for presence."""
+    vault = tmp_path / "credential-bak"
+    vault.mkdir()
+    marker = tmp_path / "secret.txt"
+    marker.write_text("do-not-read", encoding="utf-8")
+    calls: list[Path] = []
+
+    def exists_fn(p: Path) -> bool:
+        calls.append(p)
+        return True
+
+    o = ai.observe_credential_bak(
+        today=datetime.date(2026, 11, 20),
+        path=vault,
+        exists_fn=exists_fn,
+    )
+    assert o.status == "error"
+    assert calls == [vault]
+    # Vault and marker untouched.
+    assert vault.is_dir()
+    assert marker.read_text(encoding="utf-8") == "do-not-read"
+
+
+def test_doctor_credential_bak_warn_fails_exit(tmp_path):
+    root = tmp_path / "repo"
+    (root / "config").mkdir(parents=True)
+    (root / "config" / "install.schema.json").write_text(
+        (REPO / "config" / "install.schema.json").read_text()
+    )
+    (root / "config" / "install.toml").write_text(
+        "schema_version = 1\n"
+        "[[component]]\n"
+        'id = "tool-a"\n'
+        'class = "hard"\n'
+        'probe_argv = ["true"]\n'
+        'presence = "true"\n'
+    )
+    catalog = ai.load_catalog(root=root)
+    warn = ai.Observation(
+        "vault",
+        "credential-bak",
+        "warn",
+        "credential-bak still present; doctor never deletes",
+    )
+    obs, rc = ai.doctor(catalog, credential_bak=warn)
+    assert rc == 1
+    bak = [o for o in obs if o.kind == "vault" and o.id == "credential-bak"]
+    assert len(bak) == 1 and bak[0].status == "warn"
+    obs_ok, rc_ok = ai.doctor(
+        catalog,
+        credential_bak=ai.Observation(
+            "vault",
+            "credential-bak",
+            "ok",
+            "credential-bak absent; doctor never deletes",
+        ),
+    )
+    assert rc_ok == 0
+    assert any(o.status == "ok" for o in obs_ok if o.kind == "vault")
+
+
+def test_doctor_credential_bak_error_fails_exit(tmp_path):
+    root = tmp_path / "repo"
+    (root / "config").mkdir(parents=True)
+    (root / "config" / "install.schema.json").write_text(
+        (REPO / "config" / "install.schema.json").read_text()
+    )
+    (root / "config" / "install.toml").write_text(
+        "schema_version = 1\n"
+        "[[component]]\n"
+        'id = "tool-a"\n'
+        'class = "hard"\n'
+        'probe_argv = ["true"]\n'
+        'presence = "true"\n'
+    )
+    catalog = ai.load_catalog(root=root)
+    err = ai.Observation(
+        "vault",
+        "credential-bak",
+        "error",
+        "credential-bak still present on/after delete-after; doctor never deletes",
+    )
+    obs, rc = ai.doctor(catalog, credential_bak=err)
+    assert rc == 1
+    bak = [o for o in obs if o.kind == "vault" and o.id == "credential-bak"]
+    assert len(bak) == 1 and bak[0].status == "error"
 
 
 def test_doctor_probe_binary_missing(tmp_path):
@@ -489,7 +633,7 @@ def test_observe_context_size_nudge_ok_and_missing(tmp_path):
 def test_doctor_includes_context_size_nudge_check(tmp_path):
     root = _fixture_root(tmp_path)
     # No template beside the fixture catalog → nudge skipped; doctor still fails on tool-c.
-    obs, rc = ai.doctor(catalog=ai.load_catalog(root=root), settings_path=tmp_path / "absent.json")
+    obs, rc = ai.doctor(catalog=ai.load_catalog(root=root), settings_path=tmp_path / "absent.json", skip_credential_bak=True)
     assert not any(o.kind == "settings" for o in obs)
     assert rc == 1
 
@@ -498,7 +642,7 @@ def test_doctor_includes_context_size_nudge_check(tmp_path):
     tmpl.write_text((REPO / ai.CLAUDE_SETTINGS_TMPL).read_text())
     live = tmp_path / "live-settings.json"
     live.write_text("{}")
-    obs, rc = ai.doctor(catalog=ai.load_catalog(root=root), settings_path=live)
+    obs, rc = ai.doctor(catalog=ai.load_catalog(root=root), settings_path=live, skip_credential_bak=True)
     nudge = [o for o in obs if o.kind == "settings" and o.id == "context_size_nudge"]
     assert len(nudge) == 1 and nudge[0].status == "missing"
     assert rc == 1

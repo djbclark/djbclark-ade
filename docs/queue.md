@@ -50,7 +50,9 @@ under **Carried**, newest first, one line each; an item leaves when it ships (in
 13. **Templates, Phase 1** (2026-10-20): declare the `TODO_*` secret names, give each template field a home, make the
     Codex and Claude templates merges, and the `ade-template-check` scanner LOWs (adversary round 3 on PR 23). Lives in
     `agents/README.md`.
-14. **Delete the credential vault after 2026-11-19** (owner djbclark): `~/.local/state/ade/credential-bak/`, nothing reads it.
+14. **Delete the credential vault after 2026-11-19** (owner djbclark): `~/.local/state/ade/credential-bak/`,
+    nothing reads it. `ade-install doctor` WARNs within 14 days before that date and FAILs on/after it while
+    the vault still exists (never deletes; operator yes still required). Lives in `bin/ade_install.py`.
 15. **`ade-backup-stores` LOWs and schedule** (PR 24 rounds 4-22): a launchd schedule, a generation retention,
     `O_NOFOLLOW` walks, the unscrubbed `.part`; and scrub or delete the first generation (it predates the credential
     scrub). Lives in `bin/ade-backup-stores`.
