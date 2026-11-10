@@ -41,7 +41,7 @@ review-launch --check [--mode review|read-only] [--allow-web] [--json]
 | Mode | Tools (`--tools`) | The init event must list exactly |
 |---|---|---|
 | `review` (rule 11, `bin/review-pr`) | `Read,Grep,Glob` | `Glob, Grep, Read, StructuredOutput` |
-| `read-only` (the dispatch shim's Claude restricted mode) | `Read,Grep,Glob`; `--allow-web` adds `WebFetch,WebSearch` (2026-11-07) | those plus `StructuredOutput` |
+| `read-only` (Claude restricted tools; also used by the transitional `acp-dispatch` shim until ~2026-11-20) | `Read,Grep,Glob`; `--allow-web` adds `WebFetch,WebSearch` (2026-11-07) | those plus `StructuredOutput` |
 
 Three more guards, all from 2026-11-07 (Argon review F-HIGH-2, and the Opus review of PR 297):
 

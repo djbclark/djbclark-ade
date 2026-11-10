@@ -1,34 +1,49 @@
-# Agent guard contract (2026-11-03)
+# Agent guard contract (2026-11-03; Wave 6 native-Paseo wording 2026-11-09)
 
 Agents read untrusted text (briefs, files, tool output, web pages). Anything that changes what a slice bills, or
 whose credentials it uses, is a **consent flag**: it is set by the operator or the dispatcher, never by an
-argument a model can emit. Since the shim (2026-11-06) the only pass-through is the shim's own `paseo run` launch argv,
-which must pin exactly the admitted `--provider P/M`; `acp-dispatch --acp-arg` is retired (exit 2).
+argument a model can emit.
+
+**Current path.** Live ops launch with native `paseo run` (or the launch line from `route_agent.py`
+`Choice.dispatch`: for Pi, `paseo run --provider pi/<model> [--thinking E] --no-wait`). Pi is the sole
+general-purpose third-party TUI (2026-11-08); archived omp/OpenCode clients are not live launch targets or
+fallbacks. Messaging uses `paseo send --json`.
+
+**Transitional shims (until ~2026-11-20 Wave 6 deletion).** `bin/acp-dispatch` (over `paseo run`),
+`tools/acp-run`, and `skills/session-finder/relay.py` (over `paseo send`) remain for one cycle. On the
+dispatch shim, the only pass-through is the shim's own `paseo run` launch argv, which must pin exactly the
+admitted `--provider P/M`; `acp-dispatch --acp-arg` is retired (exit 2). Soft deadline:
+`tests/test_relay_shim.py::test_the_shim_is_removed_by_2026_11_20` (AGENTS.md "Two shims").
 
 ## Contract
 
-- **Identity guard (since the shim, 2026-11-06).** `bin/agent_guard.py` holds the per-agent rows (`AGENT_GUARDS`,
-  `policy()`); the judging is the shim's own `identity_refusal(agent, argv, model)` (`bin/acp-dispatch:658`), called on
-  the built launch argv just before `paseo run` (`:961`, exit 2): the argv must carry exactly one `--provider P/M` (or
-  review-launch `--model M`), the admitted model, and no `--env`, `--settings`, `--mcp-config` or `--agent`. The shim
-  has no runner, no resumed or legacy records and no `--acp-arg`; its exit 2 is a refused launch, exit 5 an
-  unavailable pool before launch.
-- **Before the shim (2026-11-03 to 2026-11-06, kept in `agent_guard.py` for its tests until the follow-up PR).** For a
-  `guarded` row, the acp-run options `--model`, `--meta`, `--agent-arg`, `--agent-env`, `--auth`, their `=` forms,
-  abbreviations and packed tokens were refused in `--acp-arg`, and `--set` passed only for a reasoning-effort key;
-  `dispatch()` called `identity_override` before any gate, and the runner's `spawn_refusal` called `record_refusal`
-  on every stored record before a spawn.
-- **Admission mapping.** A guarded row names the routing `pool` its slices are admitted on; `bin/route_agent.py`'s map
-  carries it (the acp-dispatch shim resolves through it), so `--min-headroom`, the in-flight reservation and the record's
-  `service` see the pool. Since the shim (2026-11-06) there is no `--acp-arg`: it checks its own launch argv instead
-  (exactly one `--provider P/M` or review-launch `--model M`, the admitted model).
-  omp (`omp` pool, Claude API credits) is measured when a reading exists and admitted without one, like any
-  ordinary pool; only a reserve or a fallback-only pool fails closed, and none is configured since 2026-11-06 (pi,
-copilot and the grok CLI retired).
-- **Direct `acp-run`.** acp-run keeps its own omp guard (`--model anthropic/<claude model>` for every prompt run,
-  `--resume` included; no model/provider/profile/role-model/key flag in `--agent-arg`;
-  `ACP_RUN_OMP_ANY_MODEL=1` is the operator-side override). Operator-side `ACP_RUN_ENV_<AGENT>`,
-  `ACP_RUN_ARGS_<AGENT>` and `~/.config/acp-run.env` are not dispatch inputs and are not covered.
+- **Identity guard (transitional shim since 2026-11-06).** `bin/agent_guard.py` holds the per-agent rows
+  (`AGENT_GUARDS`, `policy()`); the judging is the shim's own `identity_refusal(agent, argv, model)`
+  (`bin/acp-dispatch:658`), called on the built launch argv just before `paseo run` (`:961`, exit 2): the argv
+  must carry exactly one `--provider P/M` (or review-launch `--model M`), the admitted model, and no `--env`,
+  `--settings`, `--mcp-config` or `--agent`. The shim has no runner, no resumed or legacy records and no
+  `--acp-arg`; its exit 2 is a refused launch, exit 5 an unavailable pool before launch. Native `paseo run` /
+  `Choice.dispatch` do not call `identity_refusal`; the table stays for the shim and its tests until the
+  follow-up PR decides whether `review-launch` or a surviving Pi path still needs it.
+- **Before the shim (2026-11-03 to 2026-11-06, kept in `agent_guard.py` for its tests until the follow-up PR).**
+  For a `guarded` row, the acp-run options `--model`, `--meta`, `--agent-arg`, `--agent-env`, `--auth`, their
+  `=` forms, abbreviations and packed tokens were refused in `--acp-arg`, and `--set` passed only for a
+  reasoning-effort key; `dispatch()` called `identity_override` before any gate, and the runner's
+  `spawn_refusal` called `record_refusal` on every stored record before a spawn.
+- **Admission mapping.** A guarded row names the routing `pool` its slices are admitted on;
+  `bin/route_agent.py`'s map carries it (the transitional acp-dispatch shim resolves through it), so
+  `--min-headroom`, the in-flight reservation and the record's `service` see the pool. Since the shim
+  (2026-11-06) there is no `--acp-arg`: it checks its own launch argv instead (exactly one `--provider P/M` or
+  review-launch `--model M`, the admitted model). The retired omp transport's `omp` pool (Claude API credits)
+  was measured when a reading exists and admitted without one, like any ordinary pool; only a reserve or a
+  fallback-only pool fails closed, and none is configured since 2026-11-06 (copilot and the grok CLI retired;
+  Pi left the acp-run / shim provider map and launches only via native `paseo run`).
+- **Direct `acp-run` (transitional).** While `tools/acp-run` remains, it keeps its own omp-model guard
+  (`--model anthropic/<claude model>` for every prompt run, `--resume` included; no
+  model/provider/profile/role-model/key flag in `--agent-arg`; `ACP_RUN_OMP_ANY_MODEL=1` is the operator-side
+  override). Operator-side `ACP_RUN_ENV_<AGENT>`, `ACP_RUN_ARGS_<AGENT>` and `~/.config/acp-run.env` are not
+  dispatch inputs and are not covered. omp itself is not a live launch target under the 2026-11-08 Pi sole-TUI
+  policy; the guard remains because the transitional binary still implements it.
 
 ## Evidence (2026-11-03 audit)
 
@@ -42,20 +57,22 @@ passed the substring test, a post-`acp` `--agent-arg=--model` swapped the model,
 ## Adding an agent
 
 1. Add or flip its row in `AGENT_GUARDS` (`bin/agent_guard.py`): `status=GUARDED`, `gates` (what judges its model), `pool`.
-2. Map it in `_AGENT_PROVIDER_MAP` in `bin/route_agent.py`, if it has a pool (the acp-dispatch shim reads that one since 2026-11-06).
-3. Grep the callers that dispatch the agent (`acp-dispatch <agent>`, `paseo run --provider <agent>/…`) and confirm none
-   relies on a pass-through argument (`--acp-arg` exits 2 since 2026-11-06).
-4. Add the agent to the replacement tests in `tests/test_agent_guard.py` (`GUARDED`); the shim's launch-argv check is in
-   `tests/test_acp_dispatch.py` (`identity_refusal`).
+2. Map it in `_AGENT_PROVIDER_MAP` in `bin/route_agent.py`, if it has a pool (the transitional acp-dispatch shim
+   reads that one since 2026-11-06; Pi uses `Choice.dispatch` → native `paseo run` and has no shim provider).
+3. Grep the callers that dispatch the agent (`paseo run --provider <agent>/…`, `Choice.dispatch`, and any
+   remaining `acp-dispatch <agent>` until deletion) and confirm none relies on a pass-through argument
+   (`--acp-arg` exits 2 since 2026-11-06).
+4. Add the agent to the replacement tests in `tests/test_agent_guard.py` (`GUARDED`); the shim's launch-argv
+   check is in `tests/test_acp_dispatch.py` (`identity_refusal`).
 
 ## Status per Paseo provider
 
 | Agent | Row | Notes |
 |---|---|---|
-| pi | retired | row removed 2026-11-06 (pi left acp-run) |
-| omp | guarded | `omp` pool; acp-run's own model guard too |
-| codex | guarded | frontier, plenty and pool gates judge `--model` |
-| claude | guarded | frontier and fable-xhigh gates judge `--model` |
-| opencode, cursor, hermes | unreviewed | today's pass-through; flip when reviewed |
+| pi | n/a (native) | sole general-purpose third-party TUI (2026-11-08); `Choice.dispatch` → `paseo run --provider pi/…`; row removed from `AGENT_GUARDS` 2026-11-06 (pi left acp-run / the shim) |
+| omp | guarded (retired transport) | not a live launch target; `omp` pool row and transitional acp-run model guard remain until Wave 6 deletion |
+| codex | guarded | frontier, plenty and pool gates judge `--model` on the transitional shim path |
+| claude | guarded | frontier and fable-xhigh gates judge `--model` on the transitional shim path |
+| opencode, cursor, hermes | unreviewed | opencode is a retired transport (not a live launch target); cursor / hermes stay vendor / channel clients; flip when reviewed |
 | antigravity | unreviewed | shim provider since 2026-11-06, no `AGENT_GUARDS` row |
-| cursor-cloud | n/a | no acp-run |
+| cursor-cloud | n/a | `Choice.dispatch` → `cursor-cloud launch`; no acp-run |
