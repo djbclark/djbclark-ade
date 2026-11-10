@@ -100,6 +100,13 @@ acceptance. Remaining ten provider rows still have no probe; collect/delivery,
 expiry interpretation and live acceptance remain unfinished. Component/key
 selection behavior is unchanged.
 
+The next bounded coverage batch depends on #552's fixed transport and adds
+only shipped Anthropic, Gemini and DeepSeek key metadata. Official references
+document model-list GETs with header authentication, including Gemini's
+`x-goog-api-key` alternative to query-string examples and Anthropic's explicit
+API-version header. This batch does not make inference, billing or pool
+acceptance claims and will be validated using mocked responses only.
+
 `ade-install keys` / `just keys` (2026-11-09 presence; 2026-11-10 verify) is
 setup-plan S3b check-then-verify:
 
