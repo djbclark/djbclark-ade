@@ -223,13 +223,7 @@ def load_effective_config(*, root: Path | None = None, home: Path | None = None,
     try:
         effective = ac.load_effective(root=root or REPO, home=home, environ=environ,
                                       domains=ac.CONTEXT_BUDGET_DOMAINS)
-        raw = effective.data.get("context_budget", {})
-        cfg = {"dirs": raw.get("dirs") or ["~/src/djbclark-ade", "~"], "budget": raw.get("budget") or {}}
-        # Validate the directories actually used, including defaults for dirs=[]
-        # and --from-file --dir. Scalar row names cannot double as override maps.
-        selected = [directory_label] if directory_label else cfg["dirs"]
-        ac.validate_context_budget({"context_budget": {**cfg, "dirs": selected}},
-                                   path=Path("effective context budgets"))
+        cfg = ac.context_budget_config(effective.data, directory_label=directory_label)
     except ac.ConfigError as error:
         raise ConfigError(str(error)) from error
     return cfg

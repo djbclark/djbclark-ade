@@ -193,11 +193,11 @@ def test_router_scope_ignores_unselected_legacy_context(tree):
 
 
 @pytest.mark.parametrize("target", ["repo", "local"])
-def test_scalar_writer_refuses_context_without_effects(tree, target):
+def test_scalar_writer_refuses_context_arrays_without_effects(tree, target):
     root, home, cli = tree
     before = snapshot(root.parent)
-    with pytest.raises(edit.EditError, match="read-only until writer adoption"):
-        edit.resolve_set_target("context_budget.budget.total", target=target, root=root, home=home)
+    with pytest.raises(edit.EditError, match="numeric budget leaves"):
+        edit.resolve_set_target("context_budget.dirs", target=target, root=root, home=home)
     assert snapshot(root.parent) == before
 
 

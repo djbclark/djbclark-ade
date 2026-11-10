@@ -432,6 +432,19 @@ EFFECTIVE_DOMAINS = frozenset({"routing", "gates", "model_tiers", "install", "ke
 ROUTER_DOMAINS = frozenset({"routing", "gates", "model_tiers"})
 CATALOG_DOMAINS = frozenset({"install", "keys"})
 CONTEXT_BUDGET_DOMAINS = frozenset({"context_budget"})
+CONTEXT_BUDGET_DEFAULT_DIRS = ("~/src/djbclark-ade", "~")
+
+
+def context_budget_config(data: dict[str, Any], *, directory_label: str | None = None) -> dict[str, Any]:
+    """Normalize the effective consumer's defaults and validate actual labels."""
+    raw = data.get("context_budget", {})
+    validate_context_budget(data, path=Path("effective context budgets"))
+    cfg = {"dirs": copy.deepcopy(raw.get("dirs") or list(CONTEXT_BUDGET_DEFAULT_DIRS)),
+           "budget": copy.deepcopy(raw.get("budget") or {})}
+    selected = [directory_label] if directory_label else cfg["dirs"]
+    validate_context_budget({"context_budget": {**cfg, "dirs": selected}},
+                            path=Path("effective context budgets"))
+    return cfg
 
 
 def validate_context_budget(data: dict[str, Any], *, path: Path) -> None:
@@ -534,6 +547,7 @@ def load_effective(
     include_local: bool = True,
     environ: dict[str, str] | None = None,
     domains: frozenset[str] | set[str] | None = None,
+    _candidate: tuple[Path, dict[str, Any]] | None = None,
 ) -> EffectiveConfig:
     """Load the effective schema_version=1 tree. Never writes.
 
@@ -553,8 +567,35 @@ def load_effective(
         local_config if local_config is not None else default_local_path(home_path)
     ) if include_local else None
 
-    using_new = input_present(new_path)
-    using_local = local_path is not None and input_present(local_path)
+    # Internal writer preview: exactly one approved metadata input is replaced
+    # in memory. The ordinary raw/schema/semantic/overlay pipeline below remains
+    # authoritative; no temporary config file or alternate precedence is used.
+    candidate_path = None
+    if _candidate is not None:
+        candidate_path = _candidate[0].resolve()
+        allowed = {default_new_config_path(root).resolve(),
+                   (root / "config/install.toml").resolve(),
+                   (root / "config/context-budget.toml").resolve()}
+        if local_path is not None:
+            allowed.add(local_path.resolve())
+        if not selected <= (CATALOG_DOMAINS | CONTEXT_BUDGET_DOMAINS) or candidate_path not in allowed:
+            raise ConfigError("candidate snapshots are restricted to metadata input paths/domains")
+        if (candidate_path == (root / "config/install.toml").resolve() and not selected <= CATALOG_DOMAINS or
+            candidate_path == (root / "config/context-budget.toml").resolve() and not selected <= CONTEXT_BUDGET_DOMAINS):
+            raise ConfigError("candidate legacy input must match its metadata domain")
+        if candidate_path != (local_path.resolve() if local_path is not None else None) and not input_present(_candidate[0]):
+            raise ConfigError("candidate snapshot refuses creation of a repository config source")
+
+    def present(path: Path) -> bool:
+        return (candidate_path is not None and path.resolve() == candidate_path) or input_present(path)
+
+    def read(path: Path) -> dict[str, Any]:
+        if candidate_path is not None and path.resolve() == candidate_path:
+            return copy.deepcopy(_candidate[1])
+        return read_toml(path)
+
+    using_new = present(new_path)
+    using_local = local_path is not None and present(local_path)
     schema = _read_effective_schema(root, selected, require_full=using_new or using_local)
 
     routing_env = env.get("ROUTING_POLICY") or None
@@ -585,7 +626,7 @@ def load_effective(
     data: dict[str, Any] = {"schema_version": SCHEMA_VERSION}
 
     if using_new:
-        raw = read_toml(new_path)
+        raw = read(new_path)
         require_schema_version(raw, new_path, required=True)
         unknown_top_level(raw, new_path)
         validate_tree(raw, schema, label=str(new_path))
@@ -655,8 +696,8 @@ def load_effective(
             provenance["install_source"] = provenance["keys_source"] = str(new_path)
         else:
             path = root / "config/install.toml"
-            if input_present(path):
-                raw_catalog = read_toml(path)
+            if present(path):
+                raw_catalog = read(path)
                 require_schema_version(raw_catalog, path, required=True)
                 validate_tree(raw_catalog, read_catalog_schema(root), label=str(path))
                 try:
@@ -675,15 +716,15 @@ def load_effective(
             provenance["context_budget_source"] = str(new_path)
         else:
             path = root / "config/context-budget.toml"
-            if input_present(path):
-                projected = {"context_budget": read_toml(path)}
+            if present(path):
+                projected = {"context_budget": read(path)}
                 validate_context_budget(projected, path=path)
                 data.update(projected)
                 provenance["context_budget_source"] = str(path)
 
     # --- local override ---
     if using_local:
-        local = read_toml(local_path)
+        local = read(local_path)
         require_schema_version(local, local_path, required=False)
         unknown_top_level(local, local_path)
         validate_tree(local, schema, label=str(local_path), partial=True)

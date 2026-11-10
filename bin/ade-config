@@ -12,8 +12,9 @@ set performs a comment-preserving atomic scalar write (default --target local).
 Missing config/ade.toml projects legacy routing.toml + gates.toml. Present invalid
 or unknown-version config fails. Local override: ~/.config/djbclark-ade/local.toml.
 ROUTING_POLICY / GATES_TOML remain isolated legacy-format overrides and are never
-set targets. Local/repo set records choices; route_agent / ade_gates have not adopted
-the effective-config reader yet (adoption=recorded-only). See docs/config-migration.md.
+set targets. Local/repo set records choices; effective readers adopt on their next
+load, and set does not prove runtime reload (adoption=recorded-only). Bounded
+context/key metadata writes are documented in docs/config-migration.md.
 """
 from __future__ import annotations
 
