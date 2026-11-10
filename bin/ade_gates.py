@@ -1,7 +1,8 @@
 """ade_gates: the frontier-model allowance, from code defaults and config/gates.toml [frontier] (docs/gates.md).
 
-Imported by bin/route_agent.py (the planner's per-wave cap), bin/acp-dispatch (the dispatch grant) and
-claude/hooks/frontier_agent_gate.py (the Agent-tool hook). Not a program. Since 2026-11-07 (slim-down E7) this is the
+Imported by bin/route_agent.py (the planner's per-wave cap; Wave 6 Choice.dispatch → paseo run / transitional
+shim) and claude/hooks/frontier_agent_gate.py (the Agent-tool hook). The acp-dispatch grant path leaves ~2026-11-20.
+Not a program. Since 2026-11-07 (slim-down E7) this is the
 frontier half only: the Claude quota gates (the fleet governor, the quota guard, the gate profile tool and their
 [governor]/[quota_guard]/[profiles] tables) were deleted, and the Claude reading the allowance needs comes from
 route_agent's merged quota snapshot (`aiuse --available --json` plus `paseo usage ls --json`) instead of the quota

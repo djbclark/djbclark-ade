@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Which Claude Code session is this process in? ONE shared answer for ade_claims.py and acp-dispatch (in bin/ since 2026-11-06, docs/slim E3; fleet.py and autorename, its other callers, were removed the same day).
+"""Which Claude Code session is this process in? ONE shared answer for ade_claims.py and the Wave 6 transitional
+dispatch path (in bin/ since 2026-11-06, docs/slim E3; fleet.py and autorename, its other callers, were removed the
+same day). Prefer callers via claims / Paseo; acp-dispatch leaves ~2026-11-20.
 
 `CLAUDE_CODE_SESSION_ID` in a tool shell is not reliable (2026-11-02, PR 259; upstream issue 81304): a session started from another session's
 environment (a /baton or /handoff successor, a Paseo agent launched from a shell inside the predecessor, `--fork-session`) keeps the PREDECESSOR's
