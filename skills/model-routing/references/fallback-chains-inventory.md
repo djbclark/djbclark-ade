@@ -76,7 +76,7 @@ Each listed alias except those two falls back to the other real aliases, never t
 
 f1. (Retired from djbclark-ade 2026-10-31: `bin/herdr-ai` is removed and `scripts/chains-check.py` no longer reads it. As of 2026-10-10 it fell back only for its default model, `gemini-free-lite` → `gemini-free` → `gemini-free-lite`, a cycle.)
 
-f2. `acp-run` has one transport fallback, not a model chain. A Claude ACP handshake failure retries as `claude -p`, keeping the requested model, or `sonnet` if none was requested. `--no-fallback` disables it. Every other agent has no CLI fallback.
+f2. `acp-run` has one transport fallback, not a model chain (Wave 6: leaves ~2026-11-20 with `tools/acp-run`). A Claude ACP handshake failure retries as `claude -p`, keeping the requested model, or `sonnet` if none was requested. `--no-fallback` disables it. Every other agent has no CLI fallback. After the shim delete, Pi/`paseo run` transports do not inherit this ACP handshake retry.
 
 ## g. Looked at, not a live chain
 
