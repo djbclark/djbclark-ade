@@ -655,8 +655,10 @@ def test_launchd_remove_keeps_ledger_when_still_loaded(fake, tmp_path):
     assert rc == 1, results
     assert any(r["action"] == "failed" and r["name"] == "skillopt-sleep" for r in results)
     entry = S.load_jobs_ledger(fake.state, env=env)["entries"]["skillopt-sleep"]
-    assert entry["status"] == "failed"
+    # Keep pending-remove so the next reconcile retries unload (same as paseo #520 P2).
+    assert entry["status"] == "pending-remove"
     assert "still loaded" in entry.get("detail", "")
+    assert S._ledger_owns(entry, label=label)
     assert plist.is_file()  # uninstall refuses to unlink while loaded
 
 
