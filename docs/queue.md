@@ -111,7 +111,7 @@ under **Carried**, newest first, one line each; an item leaves when it ships (in
     (`config/ade.toml`), a justfile entry point, and browser-only steps through Grok Bot: the plan is `docs/setup-plan.md`.
     Later operator additions (2026-11-07): S4b manages ADE-owned jobs and checks other owners without taking them over;
     residual (2026-11-10): inventory + `ade-sched list`/`diff` + doctor drift landed (never unload foreign);
-    first systemd reconcile + `jobs.json` ownership ledger write path landed; launchd/cron/paseo write paths still open;
+    systemd + cron reconcile + `jobs.json` ownership ledger write path landed; launchd/paseo write paths still open;
     S5a originally accompanied setup, but security implementation is deferred by the 2026-11-08 operator ruling;
     S9 plans cloud-agent communication last, after signing and the earlier sections, and builds only with headroom
     (design slice: `docs/s9-cloud-paseo.md`, 2026-11-10 — prerequisites, non-goals, paper phases; no live wiring).

@@ -70,7 +70,10 @@ OWNER_ADE = "djbclark-ade"
 JOBS_LEDGER_SCHEMA_VERSION = 1
 JOBS_LEDGER_NAME = "jobs.json"
 # First reconcile slice writes only the systemd user path (CI-testable; Mac live not required).
-RECONCILE_WRITE_BACKEND = "systemd"
+# First write path was systemd only (#461). Cron landed next (2026-11-10): both may
+# mutate ADE-owned jobs + jobs.json. Launchd / paseo remain report-only until later.
+RECONCILE_WRITE_BACKENDS = frozenset({"systemd", "cron"})
+RECONCILE_WRITE_BACKEND = "systemd"  # legacy JSON/single-name field; prefer RECONCILE_WRITE_BACKENDS
 # Labels matching these prefixes are considered in-scope for foreign drift reports.
 FOREIGN_PREFIXES = ("com.djbclark.", "acpdispatch.")
 SYSTEMD_UP = ("running", "degraded", "starting", "initializing")
@@ -1759,14 +1762,14 @@ def plan_reconcile(
     extra_subst: Mapping[str, str] | None = None,
     **overrides: Any,
 ) -> list[ReconcileStep]:
-    """Plan ADE-scoped systemd reconcile actions. Never plans unload of foreign/unknown owners."""
+    """Plan ADE-scoped systemd/cron reconcile actions. Never plans unload of foreign/unknown owners."""
     env = os.environ if env is None else env
     live = live or LiveScan(backend_name, ())
     entries = ledger.get("entries") if isinstance(ledger.get("entries"), dict) else {}
     assert isinstance(entries, dict)
     steps: list[ReconcileStep] = []
     expected_labels: dict[str, str] = {}  # label -> logical name
-    write_ok = backend_name == RECONCILE_WRITE_BACKEND
+    write_ok = backend_name in RECONCILE_WRITE_BACKENDS
 
     for n in live.notes:
         steps.append(ReconcileStep("live-scan", "report", OWNER_ADE, n, touch=False, category="job"))
@@ -1822,7 +1825,7 @@ def plan_reconcile(
         if not write_ok:
             steps.append(ReconcileStep(
                 name, "refuse-backend", owner,
-                f"first reconcile write path is {RECONCILE_WRITE_BACKEND} only; backend={backend_name}",
+                f"reconcile write backends are {sorted(RECONCILE_WRITE_BACKENDS)}; backend={backend_name}",
                 label=label,
             ))
             continue
@@ -1940,7 +1943,7 @@ def plan_reconcile(
         if not write_ok:
             steps.append(ReconcileStep(
                 logical_id, "refuse-backend", owner,
-                f"would remove ledger-owned {label} but write path is {RECONCILE_WRITE_BACKEND} only",
+                f"would remove ledger-owned {label} but write backends are {sorted(RECONCILE_WRITE_BACKENDS)}; backend={backend_name}",
                 label=label,
                 category="ledger",
             ))
@@ -2063,14 +2066,16 @@ def reconcile(
     err: TextIO | None = None,
     **overrides: Any,
 ) -> tuple[list[dict[str, Any]], int]:
-    """Reconcile ADE-owned ade-sched jobs on systemd and write the ownership ledger.
+    """Reconcile ADE-owned ade-sched jobs on systemd/cron and write the ownership ledger.
 
     Default is dry-run (plan only). ``dry_run=False`` executes installs/removes for
     ADE ledger scope only. Never unloads foreign/unknown owners. Never touches root
-    / ``--system`` units. First write path is systemd user timers only.
+    / ``--system`` units. Write backends: systemd user timers and user crontab
+    (``RECONCILE_WRITE_BACKENDS``); launchd/paseo remain later.
 
     Exit 0 when the plan is clean (dry-run) or every touch succeeded; 1 on a failed
-    mutation or blocked step; 2 when ``--yes`` is asked on a non-systemd backend.
+    mutation or blocked step; 2 when ``--yes`` is asked on a non-write backend
+    (launchd today).
     """
     out = out or sys.stdout
     err = err or sys.stderr
@@ -2130,14 +2135,17 @@ def reconcile(
         return results, rc
 
     # --yes path
-    if b.name != RECONCILE_WRITE_BACKEND:
+    if b.name not in RECONCILE_WRITE_BACKENDS:
         for step in steps:
             results.append({
                 "name": step.name,
                 "action": "refuse-backend",
                 "owner": step.owner,
                 "label": step.label,
-                "detail": step.detail,
+                "detail": step.detail or (
+                    f"reconcile write backends are {sorted(RECONCILE_WRITE_BACKENDS)}; "
+                    f"backend={b.name}"
+                ),
                 "category": step.category,
                 "touch": False,
                 "ok": False,
