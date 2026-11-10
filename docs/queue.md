@@ -27,8 +27,10 @@ under **Carried**, newest first, one line each; an item leaves when it ships (in
    dispatch footer. Lives in `docs/orchestration-practices.md`.
 6. **ade-git-guard's open items** (2026-10-25 onward): nothing creates claims yet (wire `ade_claims.py new --ttl` to a
    Paseo `worktree.create.after` hook; E8 F4), the O2 redesign's residual (writes outside the caller's claimed workspace,
-   with failing tests and an adversary round), the six-case enforcement pilot (S4) before any hard refusal, and the
-   optional narrowing E8 declined (F3: a security decision for the operator). Lives in `docs/git-guard.md`.
+   with failing tests and an adversary round), the six-case enforcement pilot (S4) before any hard refusal — cases and
+   pass/fail are in `docs/git-guard.md`, and `bin/ade-claim-pilot` records the metrics without enabling refusal; the live
+   Mac run and operator sign-off are still open — and the optional narrowing E8 declined (F3: a security decision for
+   the operator). Lives in `docs/git-guard.md`.
 7. **Drop the brew Paseo for our fork** (2026-10-24): disruptive, **ask the operator first**; after the connected-hosts work.
 8. **Paseo connected hosts** (2026-10-24): connect vps-primary (user `djbclark`) after a quiesced Paseo upgrade.
 9. **Paseo in-place model change upstream** (2026-10-23): `docs/upstream-issues.md` entry 17 (`paseo agent model <id>

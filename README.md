@@ -99,13 +99,14 @@ Skills (22, from each `skills/*/SKILL.md`):
 | [`tell-chief-of-staff`](skills/tell-chief-of-staff/SKILL.md) | Pointer (2026-11-06) for messaging the operator's cloud Grok Bot "Chief of Staff" ("tell grok", "tell Chief of Staff", "hand this to grokbot") and for its ask_claude callback; the sender and its setup live outside this repository. |
 | [`tell-coding-bot`](skills/tell-coding-bot/SKILL.md) | Pointer (2026-11-06) for talking to the operator's cloud Grok Bot "Coding" ("tell the Coding bot", "ask Coding", "hand this to the Coding bot", a task that needs a real browser session); the coding-bot code now lives in the peer-link repository. |
 
-`bin/` (55, from each file's first docstring or comment):
+`bin/` (56, from each file's first docstring or comment):
 
 | Tool | What |
 |---|---|
 | [`acp-dispatch`](bin/acp-dispatch) | Hand a slice to an agent through Paseo and get its report back (a shim, slim-down E6, 2026-11-06). |
 | [`acp-dispatch-wait`](bin/acp-dispatch-wait) | The cheap rearm waiter for one acp-dispatch record (2026-10-18). |
 | [`ade-backup-stores`](bin/ade-backup-stores) | One consistent copy of every agent session store, plus the Hermes JSONL export. |
+| [`ade-claim-pilot`](bin/ade-claim-pilot) | Record the S4 six-case claim-enforcement pilot metrics (no hard refuse). |
 | [`ade-config`](bin/ade-config) | Check/get/diff/set for the versioned effective ADE config (schema_version=1). |
 | [`ade-git-guard`](bin/ade-git-guard) | A `git` front door for what git's own hooks cannot see in a workspace another agent owns. |
 | [`ade-install`](bin/ade-install) | Transitional install catalog, plan, doctor, and bounded apply. |
