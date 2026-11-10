@@ -38,3 +38,11 @@ install *args:
 
 update *args:
     "{{ root }}/bin/ade-update" --repo "{{ root }}" {{ args }}
+
+# Install the daily ade-update --check job (Linux: systemd; Mac: launchd via --backend auto).
+# Requires --set __STATE__; never auto-applies updates (check only).
+# Omit --ade so ade-sched's linked-worktree guard applies (install from the
+# canonical checkout; docs show --ade ~/src/djbclark-ade when that path is used).
+update-check-install:
+    "{{ root }}/bin/ade-sched" --backend auto install "{{ root }}/config/launchd/com.djbclark.ade-update-check.plist" \
+        --set "__STATE__={{ env_var_or_default('HOME', '/tmp') }}/.local/state/ade"
