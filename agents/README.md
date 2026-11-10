@@ -1,18 +1,23 @@
 # agents/ templates
 
-The four config files that matter most were tracked nowhere
+The config files that matter most were tracked nowhere
 ([docs/history/ade-everywhere-proposal.md](../docs/history/ade-everywhere-proposal.md) section 2 and 8 item 1). Phase 0
 item 4.4 (2026-10-20) tracks them here as **templates**: the live file's structure, key order and comments, with
 every secret, account id, host name and home path replaced by a placeholder. This is the section 4.2 layout
 (`agents/<tui>/<file>.tmpl`); nothing here is applied yet. The proposal's chezmoi apply (section 4.4) will render
 these with the companion's data, as a `modify_` merge and never a symlink, because each app also writes its own file.
 
+**Current TUIs (Pi sole-TUI policy, 2026-11-09):** Claude Code, Codex, Hermes, and Pi as the sole general-purpose
+third-party client. Pi has **no** `agents/pi/` template here yet (it shares `~/.agents/skills` with Codex via
+`skill-everywhere`; its own runtime config stays outside this tree until templated). omp/OpenCode are retired live
+targets; the OpenCode template row below is **history only**.
+
 | Template | Live file | Notes |
 |---|---|---|
 | [claude/settings.json.tmpl](claude/settings.json.tmpl) | `~/.claude/settings.json` | Claude Code also writes it (plugins, tui); a merge keeps unowned keys |
 | [codex/config.toml.tmpl](codex/config.toml.tmpl) | `~/.codex/config.toml` | Codex writes `[projects.*]`, `[hooks.state.*]`, `[marketplaces.*]` |
-| [opencode/opencode.json.tmpl](opencode/opencode.json.tmpl) | `~/.config/opencode/opencode.json` | opencode reads `opencode.jsonc` too; that file is a 50-byte `$schema` stub, so it is not templated. `tui.json` and `cli.json` beside them hold no secrets and are not templated yet |
 | [hermes/config.yaml.tmpl](hermes/config.yaml.tmpl) | `~/.hermes/config.yaml` | Hermes writes it too; `~/.hermes` is its own git repo |
+| [opencode/opencode.json.tmpl](opencode/opencode.json.tmpl) | `~/.config/opencode/opencode.json` | **Retired TUI (2026-11-09).** Kept as an archive template until cleanup; not a current apply target. opencode also read `opencode.jsonc` (a 50-byte `$schema` stub, never templated). |
 
 ## Codex tool environment (2026-10-25)
 
@@ -22,9 +27,10 @@ Herdr (retired from djbclark-ade 2026-10-31; the variables still pass through un
 HERDR_BIN_PATH`, and multiplexer and runtime variables such as `TERM`, `TMUX` and `SSH_AUTH_SOCK`), with Codex's default
 `KEY`/`SECRET`/`TOKEN` name exclusions kept on (`ignore_default_excludes = false`) and the `set` keys applied after
 them. There is no `include_only` allowlist: an arbitrary terminal environment reaches tools by decision. Outside Herdr
-no `HERDR_*` variable exists, so none appears; no value is written into the file. `acp-run` drops the four owner ids
-from the agents it starts; the relay deliverer keeps no owner id. `tests/test_codex_shell_env_policy.py` pins the
-policy, including a read-back through the installed `codex app-server` (no model call).
+no `HERDR_*` variable exists, so none appears; no value is written into the file. Prefer native `paseo run` for new
+agents; the Wave 6 shims `tools/acp-run` (via `bin/acp-dispatch`) and `skills/session-finder/relay.py` still drop the
+four owner ids / keep no owner id until deletion. `tests/test_codex_shell_env_policy.py` pins the policy, including a
+read-back through the installed `codex app-server` (no model call).
 
 1. `ignore_default_excludes = false` is the one filter: it removes variables whose names contain `KEY`, `SECRET` or
    `TOKEN` before `set` runs. `set` values are never removed by it.
@@ -41,10 +47,11 @@ policy, including a read-back through the installed `codex app-server` (no model
    Table headers may have trailing TOML comments; their comments remain hidden in the diff.
     Diagnostics name files and `set` keys, never values; a TOML parse error is reduced to line and column.
    A running Codex keeps the policy it started with; only sessions started after the change see it.
-4. Detached fallback. `acp-run` and the relay deliverer already drop the four owner ids. A headless command started
-   any other way from a Codex tool (for example `codex exec` or a worker script outside ACP) inherits the whole Codex environment (including the six Herdr names),
-   so it must clear the owner ids itself: `env -u HERDR_ENV -u HERDR_WORKSPACE_ID -u HERDR_TAB_ID -u HERDR_PANE_ID
-   COMMAND`. `HERDR_SOCKET_PATH` and `HERDR_BIN_PATH` are service routing, not identity, and may stay.
+4. Detached fallback. Native `paseo run` and the transitional `acp-run` / relay deliverer already drop the four owner
+   ids. A headless command started any other way from a Codex tool (for example `codex exec` or a worker script outside
+   ACP) inherits the whole Codex environment (including the six Herdr names), so it must clear the owner ids itself:
+   `env -u HERDR_ENV -u HERDR_WORKSPACE_ID -u HERDR_TAB_ID -u HERDR_PANE_ID COMMAND`. `HERDR_SOCKET_PATH` and
+   `HERDR_BIN_PATH` are service routing, not identity, and may stay.
 
 ## Placeholder syntax
 
@@ -92,15 +99,15 @@ parses to something else.
 
 | Secret | Used by | Why a secret |
 |---|---|---|
-| `JINA_API_KEY` | opencode `mcp.jina.headers.Authorization` | plaintext Bearer key in the live file |
-| `EXA_API_KEY` | opencode `mcp.exa.headers.x-api-key` | plaintext key in the live file |
+| `JINA_API_KEY` | retired OpenCode template `mcp.jina.headers.Authorization` | plaintext Bearer key in the live file (archive only) |
+| `EXA_API_KEY` | retired OpenCode template `mcp.exa.headers.x-api-key` | plaintext key in the live file (archive only) |
 | `TODO_BEZALEL_API_KEY` | codex `mcp_servers.bezalel.http_headers.Authorization` | plaintext Bearer token in the live file; Hermes's `.env` calls it `MCP_BEZALEL_API_KEY` |
 | `TODO_LITELLM_HERMES_KEY` | hermes `providers.litellm-local.api_key` | a `sk-` style key for the local LiteLLM proxy |
 | `TODO_HERMES_DASHBOARD_PASSWORD_HASH` | hermes `dashboard.basic_auth.password_hash` | a scrypt hash; offline-guessable, so treated as a secret |
 
 ## Kept as-is (machine-specific, not secret)
 
-1. Model lists and provider catalogs (SIPB, Cline, LiteLLM, opencode `provider.sipb.models`).
+1. Model lists and provider catalogs (SIPB, Cline, LiteLLM; retired OpenCode `provider.sipb.models` stays in the archive template).
 2. Loopback ports of the shared MCP servers and proxies: 8890 (sipb-llms-proxy), 4000 (LiteLLM), 18765 (Signal
    bridge), 18790, 18796, 18798, 18800, 18802, 18804, 23373, 6806.
 3. Homebrew-prefixed tool paths (`/opt/homebrew/...`, Apple silicon); a Linux apply needs a `brew_prefix` field
