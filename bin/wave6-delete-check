@@ -1,19 +1,43 @@
 #!/usr/bin/env -S python3 -I
-"""wave6-delete-check: refuse Wave 6 shim deletion until gates pass (2026-11-09).
+"""wave6-delete-check: refuse Wave 6 shim deletion until gates pass; `--dry-run` / `--inventory` never invent Mac live (2026-11-10).
 
   wave6-delete-check [--root DIR] [--evidence PATH] [--json] [--allow-early]
+  wave6-delete-check --dry-run [--root DIR] [--json]
+  wave6-delete-check --inventory [--dry-run] [--root DIR] [--json]
 
 Read-only. Exit 0 only when every gate is green (safe to open the deletion PR
 that removes relay.py / acp-dispatch / acp-run). Exit 1 with named reasons
 otherwise. Exit 2 usage / unreadable root or evidence. Never deletes, never
-posts, never merges. Docs: docs/slim/wave6-follow-up.md (queue Carried 1).
+posts, never merges. Docs: docs/slim/wave6-follow-up.md (queue Carried 33).
+
+--dry-run (FIXTURE regression only):
+  Points at tests/fixtures/wave6-mac-proofs/evidence.FIXTURE.json under --root,
+  checks FAILCLOSED proof-file shape for Mac *and* C3 labels (skips callers /
+  soft_deadline), and refuses unless the bundle is still labeled FIXTURE.
+  Exit 0 means fixture shape OK — never live Mac proof, never deletion-ready.
+  `mac_live_blocked` stays true. Incompatible with --evidence / --allow-early.
+  Linux-safe partial Mac probes: bin/wave6-mac-proof-capture --linux-safe
+  (NOT deletion evidence). Live Mac cycle: --live (Darwin only).
+
+--inventory (caller inventory; Mac still blocked):
+  Lists every remaining LIVE_RE hit under the gated §A paths (CALLER_SKILLS /
+  CALLER_BINS / loose) untruncated, scans other skills/*/SKILL.md for ungated
+  holes, and reports gate_exits proving callers are covered (callers exit 1
+  while hits remain; evaluate_no_evidence exit 1 without Mac/C3 evidence).
+  Exit 0 when coverage_ok (no ungated skill hits) and — if combined with
+  --dry-run — fixture_shape_ok; ready stays false; mac_live_blocked stays true.
+  Exit 1 on ungated holes or (with --dry-run) bad FIXTURE shape. Never invents
+  Mac live proof. Incompatible with --evidence / --allow-early.
 
 Gates:
   callers_skills   listed skills still teach/invoke the shims as live commands
   callers_bins     listed bin/ callers still invoke the shims at runtime
   callers_loose    skills/loose still uses acp-run --perm deny (must port first)
+  ungated_skills   --inventory found LIVE_RE in a skills/*/SKILL.md outside §A
   evidence_missing --evidence not passed (Mac live-cycle + C3 ticks required)
   evidence_invalid evidence JSON missing keys or bad values
+  fixture_invalid  --dry-run bundle missing, unlabeled, or not FIXTURE
+  mac_not_live     --evidence points at FIXTURE / LINUX-SAFE Mac proofs
   c3_<key>         that C3 row is not migrated|waived
   c3_<key>_proof_missing   c3_proofs.<key> path missing, empty, or unreadable
   mac_<flag>       that Mac idle/smoke flag is not true
@@ -27,6 +51,7 @@ The gate FAILCLOSEs when a proof path is absent, empty, or unreadable — it
 never invents Mac stdout or outside-repo migration proofs. Mac B1 idle
 captures must still be non-empty: record cmd + `verified: no match` (see
 docs/slim/wave6-follow-up.md); a bare empty `pgrep` redirect is not evidence.
+FIXTURE and LINUX-SAFE labeled Mac proofs never green deletion (`mac_not_live`).
 Stdlib only.
 """
 from __future__ import annotations
@@ -41,6 +66,13 @@ from typing import Any
 
 TOOL = "wave6-delete-check"
 SOFT_DEADLINE = datetime.date(2026, 11, 20)
+FIXTURE_EVIDENCE_REL = Path("tests/fixtures/wave6-mac-proofs/evidence.FIXTURE.json")
+FIXTURE_RECORDED = "FIXTURE-not-live-Mac"
+FIXTURE_PROOF_LABEL = "FIXTURE — NOT live Mac stdout"
+C3_FIXTURE_PROOF_LABEL = "FIXTURE — NOT live outside-repo probe"
+LINUX_SAFE_PROOF_LABEL = "LINUX-SAFE — NOT Mac live-cycle"
+# First-line markers that mean the Mac proof is not a Darwin --live capture.
+MAC_NOT_LIVE_PREFIXES = (FIXTURE_PROOF_LABEL, LINUX_SAFE_PROOF_LABEL)
 
 # Paths that must not teach the shims as live commands before deletion.
 CALLER_SKILLS = (
@@ -65,6 +97,8 @@ CALLER_BINS = (
 )
 
 # Live invocation / path forms (not every historical prose mention).
+# Also catches backticked `acp-dispatch` and `acp-dispatch <agent>` placeholders
+# that rewrite tips can leave while named-agent argv forms are gone (2026-11-10).
 LIVE_RE = re.compile(
     r"(?:"
     r"bin/acp-dispatch(?:-wait)?"
@@ -73,6 +107,8 @@ LIVE_RE = re.compile(
     r"|\[\"acp-run\""
     r"|`acp-run`"
     r"|acp-run\s+--perm"
+    r"|`acp-dispatch`"
+    r"|acp-dispatch\s+<"
     r"|acp-dispatch\s+(?:claude|codex|antigravity|cursor|omp|hermes|footer|check|wait|tell|resume|reap|outcome|ls)"
     r"|relay\.py\s+<"
     r")"
@@ -157,6 +193,169 @@ def check_callers(root: Path) -> list[str]:
     return reasons
 
 
+def _rel_posix(root: Path, path: Path) -> str:
+    try:
+        return path.resolve().relative_to(root.resolve()).as_posix()
+    except (OSError, ValueError):
+        return path.as_posix()
+
+
+def _scan_inventory_hits(
+    root: Path,
+    path: Path,
+    *,
+    kind: str,
+    match_acp_run_any: bool = False,
+) -> list[dict[str, Any]]:
+    """Structured LIVE_RE (and optional any-acp-run) hits with relative path:line."""
+    rel = _rel_posix(root, path)
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return [
+            {
+                "path": rel,
+                "line": 0,
+                "kind": kind,
+                "gated": True,
+                "snippet": "unreadable",
+            }
+        ]
+    hits: list[dict[str, Any]] = []
+    for i, line in enumerate(text.splitlines(), 1):
+        if LIVE_RE.search(line) or (match_acp_run_any and "acp-run" in line):
+            hits.append(
+                {
+                    "path": rel,
+                    "line": i,
+                    "kind": kind,
+                    "gated": True,
+                    "snippet": line.strip()[:160],
+                }
+            )
+    return hits
+
+
+def inventory_gated_references(root: Path) -> list[dict[str, Any]]:
+    """Every remaining gated §A reference — untruncated (skills / bins / loose)."""
+    refs: list[dict[str, Any]] = []
+    for rel in CALLER_SKILLS:
+        refs.extend(_scan_inventory_hits(root, root / rel, kind="skills"))
+    for rel in CALLER_BINS:
+        refs.extend(_scan_inventory_hits(root, root / rel, kind="bins"))
+    refs.extend(
+        _scan_inventory_hits(
+            root,
+            root / LOOSE_SKILL,
+            kind="loose",
+            match_acp_run_any=True,
+        )
+    )
+    return refs
+
+
+def inventory_ungated_skill_hits(root: Path) -> list[dict[str, Any]]:
+    """LIVE_RE in skills/*/SKILL.md outside CALLER_SKILLS/loose — gate coverage holes."""
+    gated = frozenset(CALLER_SKILLS) | {LOOSE_SKILL}
+    skills_dir = root / "skills"
+    if not skills_dir.is_dir():
+        return []
+    hits: list[dict[str, Any]] = []
+    for skill_md in sorted(skills_dir.glob("*/SKILL.md")):
+        rel = _rel_posix(root, skill_md)
+        if rel in gated:
+            continue
+        for hit in _scan_inventory_hits(root, skill_md, kind="ungated"):
+            hit["gated"] = False
+            hits.append(hit)
+    return hits
+
+
+def evaluate_inventory(root: Path, *, with_dry_run: bool) -> dict[str, Any]:
+    """List every gated caller hit + prove gate exit codes; never Mac-live / never ready."""
+    references = inventory_gated_references(root)
+    ungated = inventory_ungated_skill_hits(root)
+    caller_reasons = check_callers(root)
+    callers_exit = 1 if caller_reasons else 0
+    # Prove the deletion gate refuses without Mac/C3 evidence (and while callers remain).
+    full = evaluate(root, evidence=None, allow_early=False)
+    full_exit = 0 if full["ready"] else 1
+
+    dry_exit: int | None = None
+    fixture_shape_ok: bool | None = None
+    reasons: list[str] = []
+    if ungated:
+        sample = ", ".join(f"{h['path']}:{h['line']}" for h in ungated[:8])
+        more = "" if len(ungated) <= 8 else f" (+{len(ungated) - 8} more)"
+        reasons.append(f"ungated_skills: {sample}{more}")
+
+    if with_dry_run:
+        dry = evaluate_dry_run(root)
+        fixture_shape_ok = bool(dry.get("fixture_shape_ok"))
+        dry_exit = 0 if fixture_shape_ok else 1
+        if not fixture_shape_ok:
+            # Keep fixture reasons; drop the soft "OK but not ready" advisory when failing.
+            reasons.extend(
+                r for r in dry["reasons"] if not r.startswith("dry_run:")
+            )
+
+    # Consistency: remaining gated hits must make the callers gate refuse.
+    if references and callers_exit != 1:
+        reasons.append(
+            "inventory_inconsistent: gated references present but callers gate exit != 1"
+        )
+    if full_exit != 1:
+        reasons.append(
+            "inventory_inconsistent: evaluate_no_evidence exit != 1 "
+            "(expected refuse without Mac/C3 evidence)"
+        )
+
+    coverage_ok = not ungated and not any(
+        r.startswith("inventory_inconsistent:") for r in reasons
+    )
+    shape_ok = True if fixture_shape_ok is None else fixture_shape_ok
+    inventory_ok = coverage_ok and shape_ok and full_exit == 1
+
+    advisory: list[str] = []
+    if inventory_ok:
+        advisory.append(
+            "inventory: every remaining skill LIVE_RE hit is under gated §A paths; "
+            f"callers_remaining={len(references)}; gate_exits.callers={callers_exit}; "
+            f"gate_exits.evaluate_no_evidence={full_exit}"
+            + (
+                f"; gate_exits.dry_run_fixture={dry_exit}"
+                if dry_exit is not None
+                else ""
+            )
+            + " — NOT live Mac; NOT deletion-ready"
+        )
+
+    return {
+        "tool": TOOL,
+        "root": str(root),
+        "soft_deadline": SOFT_DEADLINE.isoformat(),
+        "allow_early": False,
+        "evidence": None,
+        "dry_run": with_dry_run,
+        "mode": "caller-inventory",
+        "references": references,
+        "callers_remaining": len(references),
+        "ungated_references": ungated,
+        "gate_exits": {
+            "callers": callers_exit,
+            "evaluate_no_evidence": full_exit,
+            "dry_run_fixture": dry_exit,
+        },
+        "gate_reasons": caller_reasons,
+        "coverage_ok": coverage_ok,
+        "fixture_shape_ok": fixture_shape_ok,
+        "inventory_ok": inventory_ok,
+        "mac_live_blocked": True,
+        "ready": False,
+        "reasons": reasons if reasons else advisory,
+    }
+
+
 def _proof_path(evidence_dir: Path, raw: Any) -> Path | None:
     """Resolve a proof path relative to the evidence JSON's directory."""
     if not isinstance(raw, str) or not raw.strip():
@@ -202,7 +401,48 @@ def _check_proof_file(
     return None
 
 
-def check_evidence(path: Path | None, *, allow_early: bool) -> list[str]:
+def _mac_not_live_reasons(data: dict[str, Any], evidence_dir: Path) -> list[str]:
+    """Refuse FIXTURE / LINUX-SAFE Mac proofs as deletion evidence (Mac live blocked)."""
+    reasons: list[str] = []
+    if data.get("recorded") == FIXTURE_RECORDED:
+        reasons.append(
+            "mac_not_live: evidence.recorded is FIXTURE-not-live-Mac "
+            "(use Darwin wave6-mac-proof-capture --live, not the FIXTURE bundle)"
+        )
+    note = data.get("note")
+    if isinstance(note, str) and "FIXTURE" in note and "NOT" in note:
+        # Only when recorded did not already trip (avoid duplicate noise).
+        if data.get("recorded") != FIXTURE_RECORDED:
+            reasons.append(
+                "mac_not_live: evidence.note declares FIXTURE / NOT live Mac"
+            )
+    mac_proofs = data.get("mac_proofs")
+    if not isinstance(mac_proofs, dict):
+        return reasons
+    for flag in MAC_FLAGS:
+        path = _proof_path(evidence_dir, mac_proofs.get(flag))
+        if path is None:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for prefix in MAC_NOT_LIVE_PREFIXES:
+            if text.startswith(prefix):
+                reasons.append(
+                    f"mac_not_live: mac_proofs.{flag} starts with {prefix!r} "
+                    "(not Darwin --live capture)"
+                )
+                break
+    return reasons
+
+
+def check_evidence(
+    path: Path | None,
+    *,
+    allow_early: bool,
+    refuse_non_live_mac: bool = True,
+) -> list[str]:
     reasons: list[str] = []
     if path is None:
         reasons.append(
@@ -267,6 +507,10 @@ def check_evidence(path: Path | None, *, allow_early: bool) -> list[str]:
         if miss is not None:
             reasons.append(miss)
 
+    # Deletion path only: FIXTURE / LINUX-SAFE Mac captures never count as live.
+    if refuse_non_live_mac:
+        reasons.extend(_mac_not_live_reasons(data, evidence_dir))
+
     today = datetime.date.today()
     if today < SOFT_DEADLINE and not allow_early:
         reasons.append(
@@ -290,8 +534,151 @@ def evaluate(
         "soft_deadline": SOFT_DEADLINE.isoformat(),
         "allow_early": allow_early,
         "evidence": str(evidence) if evidence else None,
+        "dry_run": False,
         "ready": not reasons,
         "reasons": reasons,
+    }
+
+
+def _fixture_label_reasons(evidence: Path) -> list[str]:
+    """FAILCLOSED: dry-run only accepts the labeled FIXTURE bundle (not invented live)."""
+    reasons: list[str] = []
+    try:
+        data: Any = json.loads(evidence.read_text(encoding="utf-8"))
+    except OSError as exc:
+        return [f"fixture_invalid: cannot read {evidence}: {exc.__class__.__name__}"]
+    except json.JSONDecodeError:
+        return [f"fixture_invalid: {evidence} is not JSON"]
+    if not isinstance(data, dict):
+        return ["fixture_invalid: root must be a JSON object"]
+    if data.get("recorded") != FIXTURE_RECORDED:
+        reasons.append(
+            f"fixture_invalid: recorded must be {FIXTURE_RECORDED!r}, "
+            f"got {data.get('recorded')!r}"
+        )
+    note = data.get("note")
+    if not isinstance(note, str) or "FIXTURE" not in note or "NOT" not in note:
+        reasons.append(
+            "fixture_invalid: note must declare FIXTURE / NOT live Mac "
+            "(refuse invented live proofs)"
+        )
+    try:
+        evidence_dir = evidence.resolve().parent
+    except OSError as exc:
+        return [f"fixture_invalid: cannot resolve {evidence}: {exc.__class__.__name__}"]
+
+    mac_proofs = data.get("mac_proofs")
+    if not isinstance(mac_proofs, dict):
+        reasons.append("fixture_invalid: missing mac_proofs object")
+    else:
+        for flag in MAC_FLAGS:
+            path = _proof_path(evidence_dir, mac_proofs.get(flag))
+            if path is None:
+                reasons.append(
+                    f"fixture_invalid: mac_proofs.{flag} missing for FIXTURE label check"
+                )
+                continue
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError as exc:
+                reasons.append(
+                    f"fixture_invalid: unreadable mac proof {path}: "
+                    f"{exc.__class__.__name__}"
+                )
+                continue
+            if not text.startswith(FIXTURE_PROOF_LABEL):
+                reasons.append(
+                    f"fixture_invalid: {path.name} must start with "
+                    f"{FIXTURE_PROOF_LABEL!r} (not live Mac stdout)"
+                )
+            elif "cmd:" not in text or "verified:" not in text:
+                reasons.append(
+                    f"fixture_invalid: {path.name} must include cmd: and verified: "
+                    "(Linux-safe probe shape; still NOT live Mac)"
+                )
+
+    c3_proofs = data.get("c3_proofs")
+    if not isinstance(c3_proofs, dict):
+        reasons.append("fixture_invalid: missing c3_proofs object")
+    else:
+        for key in C3_KEYS:
+            path = _proof_path(evidence_dir, c3_proofs.get(key))
+            if path is None:
+                reasons.append(
+                    f"fixture_invalid: c3_proofs.{key} missing for FIXTURE label check"
+                )
+                continue
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError as exc:
+                reasons.append(
+                    f"fixture_invalid: unreadable c3 proof {path}: "
+                    f"{exc.__class__.__name__}"
+                )
+                continue
+            if not text.startswith(C3_FIXTURE_PROOF_LABEL):
+                reasons.append(
+                    f"fixture_invalid: {path.name} must start with "
+                    f"{C3_FIXTURE_PROOF_LABEL!r} (not invented outside probe)"
+                )
+                continue
+            # C3 FIXTURE shape: key + Linux-safe cmd (or waive) + verified stand-in.
+            if f"c3_key: {key}" not in text:
+                reasons.append(
+                    f"fixture_invalid: {path.name} must declare c3_key: {key}"
+                )
+            has_cmd = "cmd:" in text
+            has_waive = "waive:" in text
+            if not has_cmd and not has_waive:
+                reasons.append(
+                    f"fixture_invalid: {path.name} must include cmd: (Linux-safe rg) "
+                    "or waive: (operator one-liner)"
+                )
+            if "verified:" not in text:
+                reasons.append(
+                    f"fixture_invalid: {path.name} must include verified: "
+                    "(FIXTURE stand-in until outside probe paste)"
+                )
+    return reasons
+
+
+def evaluate_dry_run(root: Path) -> dict[str, Any]:
+    """FIXTURE-only FAILCLOSED shape regression; never deletion-ready / never live Mac."""
+    evidence = root / FIXTURE_EVIDENCE_REL
+    reasons: list[str] = []
+    if not evidence.is_file():
+        reasons.append(f"fixture_invalid: missing {FIXTURE_EVIDENCE_REL.as_posix()}")
+    else:
+        reasons.extend(_fixture_label_reasons(evidence))
+        # Soft deadline does not apply to fixture shape regression.
+        # Skip mac_not_live: dry-run *requires* the FIXTURE Mac labels.
+        reasons.extend(
+            check_evidence(evidence, allow_early=True, refuse_non_live_mac=False)
+        )
+    # Drop soft_deadline if check_evidence ever reintroduces it without allow_early.
+    reasons = [r for r in reasons if not r.startswith("soft_deadline:")]
+    fixture_shape_ok = not reasons
+    return {
+        "tool": TOOL,
+        "root": str(root),
+        "soft_deadline": SOFT_DEADLINE.isoformat(),
+        "allow_early": False,
+        "evidence": str(evidence) if evidence.is_file() else None,
+        "dry_run": True,
+        "mode": "dry-run-fixture",
+        "fixture_shape_ok": fixture_shape_ok,
+        # Mac live cycle stays blocked on this path (no Darwin host required).
+        "mac_live_blocked": True,
+        # Never green deletion from --dry-run, even when fixture shape is OK.
+        "ready": False,
+        "reasons": reasons
+        if reasons
+        else [
+            "dry_run: FIXTURE Mac+C3 proofs shape OK — NOT live Mac; NOT deletion-ready "
+            "(C3 outside still needs operator paste; Mac needs "
+            "wave6-mac-proof-capture --live on Darwin; Linux-safe probes via --linux-safe "
+            "never count as Mac live)"
+        ],
     }
 
 
@@ -317,8 +704,31 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="permit delete before 2026-11-20 when evidence gates are green",
     )
+    p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "FIXTURE FAILCLOSED shape regression only "
+            f"({FIXTURE_EVIDENCE_REL.as_posix()}); not deletion-ready"
+        ),
+    )
+    p.add_argument(
+        "--inventory",
+        action="store_true",
+        help=(
+            "list every remaining gated §A relay/acp-dispatch/acp-run reference "
+            "with gate_exits proving coverage; never Mac-live / never deletion-ready"
+        ),
+    )
     p.add_argument("--json", action="store_true", help="print the full result as JSON")
     args = p.parse_args(argv)
+
+    if (args.dry_run or args.inventory) and (
+        args.evidence is not None or args.allow_early
+    ):
+        return die(
+            "--dry-run/--inventory is incompatible with --evidence / --allow-early"
+        )
 
     root = args.root
     if root is None:
@@ -330,17 +740,71 @@ def main(argv: list[str] | None = None) -> int:
     if not root.is_dir():
         return die(f"root is not a directory: {root}")
 
-    result = evaluate(root, evidence=args.evidence, allow_early=args.allow_early)
+    if args.inventory:
+        result = evaluate_inventory(root, with_dry_run=args.dry_run)
+        ok = bool(result.get("inventory_ok"))
+    elif args.dry_run:
+        result = evaluate_dry_run(root)
+        ok = bool(result.get("fixture_shape_ok"))
+    else:
+        result = evaluate(root, evidence=args.evidence, allow_early=args.allow_early)
+        ok = bool(result["ready"])
+
     if args.json:
         print(json.dumps(result, indent=2, sort_keys=True))
+    elif args.inventory and ok:
+        n = int(result.get("callers_remaining") or 0)
+        print(
+            f"{TOOL}: inventory OK ({n} gated caller hit(s); "
+            "NOT live Mac; NOT deletion-ready)"
+        )
+        # Success still lists every gated hit + gate_exits (help text promise;
+        # operators must not need --json to see remaining callers).
+        _print_inventory_details(result, stream=sys.stdout)
+    elif args.dry_run and ok:
+        print(
+            f"{TOOL}: dry-run FIXTURE shape OK "
+            "(NOT live Mac; NOT deletion-ready)"
+        )
     elif result["ready"]:
         print(f"{TOOL}: ready (all gates green)")
     else:
-        print(f"{TOOL}: not ready ({len(result['reasons'])} reason(s))", file=sys.stderr)
+        if args.inventory:
+            label = "inventory not OK"
+        elif args.dry_run:
+            label = "dry-run not OK"
+        else:
+            label = "not ready"
+        print(
+            f"{TOOL}: {label} ({len(result['reasons'])} reason(s))",
+            file=sys.stderr,
+        )
         for r in result["reasons"]:
             print(f"  - {r}", file=sys.stderr)
+        if args.inventory and not args.json:
+            _print_inventory_details(result, stream=sys.stderr)
 
-    return 0 if result["ready"] else 1
+    return 0 if ok else 1
+
+
+def _print_inventory_details(
+    result: dict[str, Any], *, stream: Any
+) -> None:
+    """Emit gated references and gate_exits for human --inventory output."""
+    exits = result.get("gate_exits") or {}
+    print(
+        "  gate_exits: "
+        f"callers={exits.get('callers')}; "
+        f"evaluate_no_evidence={exits.get('evaluate_no_evidence')}; "
+        f"dry_run_fixture={exits.get('dry_run_fixture')}",
+        file=stream,
+    )
+    for hit in result.get("references") or []:
+        print(
+            f"  ref: {hit.get('kind')} {hit.get('path')}:{hit.get('line')} "
+            f"{hit.get('snippet')}",
+            file=stream,
+        )
 
 
 if __name__ == "__main__":

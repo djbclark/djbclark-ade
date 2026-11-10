@@ -1,9 +1,10 @@
 # Wave 6 follow-up — shim and `acp-run` deletion readiness
 
-Snapshot: 2026-11-09 (C3 proof-file gate; Mac B1 idle capture writes
-`verified: no match` so idle proofs stay non-empty). Queue Carried **item 1**. The slim-down's Wave 6
-**shipped the shims** (`docs/slim/PLAN.md` F, gate marked done). This doc is the
-**deletion readiness** checklist for the follow-up PR that removes
+Snapshot: 2026-11-10 (status: C3 `--dry-run` FIXTURE path tightened;
+`--inventory` lists every gated §A caller hit with `gate_exits` proof; Mac
+live cycle still blocked; soft delete ~2026-11-20). Queue Carried **item 33**.
+The slim-down's Wave 6 **shipped the shims** (`docs/slim/PLAN.md` F). This doc
+is the **deletion readiness** checklist for the follow-up PR that removes
 `skills/session-finder/relay.py`, `bin/acp-dispatch`, and `tools/acp-run`
 after one Mac live cycle — **do not delete them in this readiness PR**. Soft
 deadline **2026-11-20**
@@ -11,8 +12,57 @@ deadline **2026-11-20**
 `bin/review-launch` and its boundary tests stay (E8 / review rule 11).
 
 Gate tool: `bin/wave6-delete-check` (exit 0 only when every gate below is
-green; prints named reasons otherwise). Run it before opening the deletion
-PR. New code already calls Paseo directly (`paseo send`, `paseo run`).
+green; prints named reasons otherwise). **CI / local shape regression (not
+deletion-ready):** `bin/wave6-delete-check --dry-run` points at
+`tests/fixtures/wave6-mac-proofs/evidence.FIXTURE.json`, checks FAILCLOSED
+non-empty Mac **and** C3 FIXTURE labels + Linux-safe `cmd:`/`verified:`
+(or `waive:`) shape, skips callers/soft_deadline, keeps
+`mac_live_blocked: true` / `ready: false` even when exit 0, and
+`--evidence` on a FIXTURE or `--linux-safe` bundle fails closed
+(`mac_not_live`). **Caller inventory (Mac still blocked):**
+`bin/wave6-delete-check --inventory` lists every remaining LIVE_RE hit under
+the gated §A paths untruncated, fails on ungated `skills/*/SKILL.md` holes,
+and reports `gate_exits` (`callers`, `evaluate_no_evidence`, optional
+`dry_run_fixture`) proving those refs are gated — `ready` stays false and
+`mac_live_blocked` stays true (combine with `--dry-run` for FIXTURE shape in
+the same pass). Mac capture harness: `bin/wave6-mac-proof-capture --live
+--out DIR` (Darwin only) or `--linux-safe --out DIR` (pgrep + optional
+paseo; launchctl SKIPPED; labeled `LINUX-SAFE — NOT Mac live-cycle`). Run
+`--evidence` on **Darwin `--live`** captures before opening the deletion PR.
+New code already calls Paseo directly (`paseo send`, `paseo run`).
+
+## Status (2026-11-10) — current open work
+
+Queue Carried **[item 33](../queue.md)** residual. **Nothing here deletes the
+shims.** Soft deadline for relay / dispatch / `acp-run` removal:
+**~2026-11-20** (sooner only when every gate below is green).
+
+| Gate | State | Where / why |
+|---|---|---|
+| C3 dry-run FIXTURE path | **ready (tightened)** | [#441](https://github.com/djbclark/djbclark-ade/pull/441) + [#453](https://github.com/djbclark/djbclark-ade/pull/453) + [#470](https://github.com/djbclark/djbclark-ade/pull/470): `--dry-run` FAILCLOSEs Mac **and** C3 FIXTURE labels + Linux-safe probe shape (`ready` stays `false`; `mac_live_blocked: true`) |
+| Caller inventory (§A list) | **ready (inventory)** | `bin/wave6-delete-check --inventory` lists every gated §A hit + `gate_exits` proving coverage; ungated `skills/*/SKILL.md` FAILCLOSED; never Mac-live / never `ready` |
+| Linux-safe Mac partial probes | **ready** | `bin/wave6-mac-proof-capture --linux-safe` (pgrep + optional paseo; launchctl SKIPPED). `wave6-delete-check` reports `mac_not_live` if used as `--evidence` |
+| Mac live cycle | **blocked** | No Darwin host on this cloud/CI path; `--live` refuses non-Darwin; FIXTURE / LINUX-SAFE never count. Needs an operator Mac run of `bin/wave6-mac-proof-capture --live` (§B / §B0) |
+| In-repo callers (§A) | **open** | Wave 6 rewrite PRs still in flight; full `wave6-delete-check` (no `--dry-run`/`--inventory`) still fails `callers_*` until they land and merge; `--inventory` tracks remaining hits meanwhile |
+| C3 outside migrations (§C) | **open / operator** | Order 11: probes on outside checkouts + migrate/waive proof files; FIXTURE `cmd:` rows document the Linux-safe `rg` shape only — not inventable from CI |
+| Soft delete deadline | **~2026-11-20** | `test_the_shim_is_removed_by_2026_11_20`; deletion PR waits on green evidence |
+
+### What the operator must supply
+
+1. **Mac live-cycle proofs** (Darwin only): `bin/wave6-mac-proof-capture --live --out DIR --json`, then merge printed `mac_proofs` into a real `evidence.json` (not the FIXTURE / LINUX-SAFE bundle) and paste B1–B3 stdout into the deletion PR.
+2. **C3 row evidence** for each outside path in §C: either a migrated probe paste in `c3_proofs.<key>`, or a one-line waive in `docs/slim/log.md` copied into that proof file (FIXTURE `cmd:` lines are the Linux-safe shape stand-in only).
+3. **Land the readiness stack** before the deletion PR: #398 (checklist + gate) → #417 (FAILCLOSED proof files) → #441 (Mac harness + FIXTURE `--dry-run`) → #453 (C3 status) → #470 (FIXTURE tighten) → caller `--inventory`; merge remaining §A caller-rewrite PRs until `callers_skills` / `callers_loose` are green.
+4. **Deletion PR last**: `bin/wave6-delete-check --evidence <json>` must exit 0 (**never** treat `--dry-run`, `--inventory`, FIXTURE, or `--linux-safe` as deletion-ready); keep `bin/review-launch`.
+
+### Readiness stack (open, do not merge as delete)
+
+- [#398](https://github.com/djbclark/djbclark-ade/pull/398) — delete-readiness checklist + `bin/wave6-delete-check`
+- [#417](https://github.com/djbclark/djbclark-ade/pull/417) — C3/Mac proof-file FAILCLOSED evidence
+- [#441](https://github.com/djbclark/djbclark-ade/pull/441) — Mac harness + FIXTURE `--dry-run` path
+- [#453](https://github.com/djbclark/djbclark-ade/pull/453) — C3 status (FIXTURE ready, Mac blocked)
+- [#470](https://github.com/djbclark/djbclark-ade/pull/470) — C3 FIXTURE tighten + `--linux-safe` Mac probes (`mac_not_live`)
+- [#472](https://github.com/djbclark/djbclark-ade/pull/472) — caller `--inventory`: untruncated §A reference list + `gate_exits` proof while Mac blocked
+- LIVE_RE tighten (stacked on #472): backticked `` `acp-dispatch` `` + `acp-dispatch <agent>` placeholders stay gated so rewrite tips cannot green `callers_skills` while those live teachings remain; Mac still blocked
 
 ## A. Remaining in-repo callers (must be gone or archived before delete)
 
@@ -28,7 +78,7 @@ Skills and tools that still teach or invoke the shims as **live** commands
 | `skills/session-handoff/SKILL.md` | Paseo's `paseo-handoff` / `paseo send`; no absolute `relay.py` |
 | `skills/old-handoff-use-paseo-handoff/SKILL.md` | same; drop `acp-dispatch check` / slice wording |
 | `skills/oc-go-key/SKILL.md` | `paseo send`; drop `relay.py` absolute-path examples |
-| `skills/loose/SKILL.md` | **port** the upstream-issue reader off `acp-run --perm deny` (queue Carried 34 leftovers); Paseo read-only / deny path |
+| `skills/loose/SKILL.md` | **port** the upstream-issue reader off `acp-run --perm deny` (item 33); Paseo read-only / deny path |
 | `skills/baton/SKILL.md` | drop `acp-dispatch check` / `resume` / `reap` rearm instructions |
 | `skills/research/SKILL.md` | dispatch via `paseo run`; drop `acp-dispatch` examples |
 | `skills/dialogue/SKILL.md` | drop live `acp-run` kind alias as current; archive wording only |
@@ -41,7 +91,7 @@ agent".
 
 Open Wave 6 caller-rewrite PRs (base `master` or stacked tips) cover parts of
 this table; the deletion PR waits until `wave6-delete-check` reports
-`callers_skills`, `callers_bins` and `callers_loose` green.
+`callers_skills` and `callers_loose` green.
 
 ## B. Mac live-cycle proof commands (paste into the deletion PR)
 
@@ -55,14 +105,26 @@ non-empty `mac_proofs` files named by the evidence JSON for
 # B1. No live shim argv (agents / launchd / leftover waiters).
 # Idle (no match) is the desired state — always record cmd + exit / verified line
 # so the capture is non-empty (wave6-delete-check FAILCLOSEs on empty proof files).
+# Prefer bin/wave6-mac-proof-capture --live: it also covers acp-dispatch process/
+# launchd in the dispatch proof and exits 1 on probe FAILED (not verified idle).
 echo "cmd: pgrep -lf 'relay\\.py|acp-dispatch|acp-run'"
 pgrep -lf 'relay\.py|acp-dispatch|acp-run' || echo "verified: no match (exit $?)"
 echo "cmd: launchctl list | grep -E 'acp-dispatch|acp-run'"
-launchctl list 2>/dev/null | grep -E 'acp-dispatch|acp-run' \
-  || echo "verified: no match (exit $?)"
+# Do not `2>/dev/null | grep` alone: a failed launchctl with empty stdout must
+# be FAILED, never "verified: no match".
+launchctl list >"$TMPDIR/wave6-lc.out" 2>"$TMPDIR/wave6-lc.err"
+lc_rc=$?
+if [ "$lc_rc" -ne 0 ]; then
+  [ -s "$TMPDIR/wave6-lc.err" ] && echo "stderr: $(cat "$TMPDIR/wave6-lc.err")"
+  echo "verified: FAILED launchctl (exit $lc_rc)"
+else
+  grep -E 'acp-dispatch|acp-run' "$TMPDIR/wave6-lc.out" \
+    || echo "verified: no match (exit 0)"
+fi
 # B2. No outstanding dispatch records (C7). `acp-dispatch ls` does not exist —
 # use `check` on the state root and Paseo's label listing. Failures are real;
 # an empty/drained result is exit 0 / empty JSON — still echo a verified line.
+# Also keep B1 process/launchd for acp-dispatch (harness puts them in this proof).
 STATE="${ACP_DISPATCH_STATE:-$HOME/.local/state/bigteam}"
 if ! command -v acp-dispatch >/dev/null 2>&1; then
   echo "B2: acp-dispatch not on PATH (record as drained only after uninstall + empty paseo ls)"
@@ -139,14 +201,83 @@ as a missing paste, not as idle proof:
 Each `c3` value is exactly `migrated` or `waived`. A waive needs the
 operator's one-line note in `docs/slim/log.md`, and that note (or a paste of
 it) must sit in the matching `c3_proofs` file. Mac proof files are
-operator-captured on the Mac from section B (paste B1/B2/B3 stdout); this
-readiness PR does **not** ship invented Mac proofs.
+operator-captured on the Mac from section B (paste B1/B2/B3 stdout) or via
+`bin/wave6-mac-proof-capture --live`. This readiness stack does **not** ship
+invented live Mac proofs.
 
-Suggested capture (Mac; paths match the sample `mac_proofs` above).
+### B0. FIXTURE proofs (CI shape only) → replace after Mac live cycle
+
+Without a Mac live cycle yet, CI uses a **labeled fixture** bundle at
+[`tests/fixtures/wave6-mac-proofs/`](../../tests/fixtures/wave6-mac-proofs/)
+(`evidence.FIXTURE.json` + `*.FIXTURE.txt` proofs). Mac proofs start with
+`FIXTURE — NOT live Mac stdout`; C3 proofs start with
+`FIXTURE — NOT live outside-repo probe` and carry the Linux-safe `cmd:`
+(or `waive:`) + `verified:` shape from §C. Tests under
+`tests/test_wave6_mac_proof_fixtures.py` prove FAILCLOSED non-empty shape,
+C3 label/shape, that `--evidence` on the FIXTURE bundle reports
+`mac_not_live`, and that the harness refuses to invent live stdout on
+non-Darwin.
+
+**Regression CLI (FIXTURE only):**
+
+```bash
+bin/wave6-delete-check --dry-run --json
+# exit 0 + fixture_shape_ok: true + mac_live_blocked: true
+#   → labeled Mac+C3 FIXTURE proofs have FAILCLOSED shape
+# ready is always false in --dry-run (never treat as deletion green)
+# exit 2 if combined with --evidence / --allow-early
+```
+
+**Caller inventory (Mac still blocked; not deletion-ready):**
+
+```bash
+bin/wave6-delete-check --inventory --json
+# exit 0 + inventory_ok / coverage_ok + mac_live_blocked: true + ready: false
+#   → references[] lists every gated §A LIVE_RE hit (untruncated)
+#   → gate_exits.callers == 1 while hits remain; evaluate_no_evidence == 1
+#   → ungated skills/*/SKILL.md LIVE_RE hits → exit 1 (ungated_skills)
+bin/wave6-delete-check --inventory --dry-run --json
+# also sets gate_exits.dry_run_fixture from the FIXTURE shape check
+# exit 2 if combined with --evidence / --allow-early
+```
+
+`--dry-run` FAILCLOSEs (`fixture_invalid:…`) when the bundle is missing, the
+`recorded` field is not `FIXTURE-not-live-Mac`, the note omits FIXTURE/NOT, a
+`mac_proofs` / `c3_proofs` file drops its FIXTURE first-line label, or a
+proof drops the Linux-safe `cmd:`/`verified:` (or `waive:`) shape — so
+inventing “live” stdout under the fixture path cannot green the shape check.
+
+**Linux-safe partial Mac probes (still not Mac live):**
+
+```bash
+bin/wave6-mac-proof-capture --linux-safe --out ./wave6-linux-safe --json
+# writes *.LINUX-SAFE.txt (pgrep + optional paseo; launchctl SKIPPED)
+# wave6-delete-check --evidence … → mac_not_live (Mac live still blocked)
+```
+
+**These fixtures / linux-safe captures are not deletion evidence.** After the
+Mac live cycle:
+
+1. `bin/wave6-mac-proof-capture --live --out ./wave6-evidence --json`
+   (Darwin + `--live` only; non-Darwin refuses — see harness docstring).
+2. Merge the printed `mac_proofs` map into the real `evidence.json` (keep C3
+   outside probes / waives from §C).
+3. `bin/wave6-delete-check --evidence ./wave6-evidence/evidence.json` (exit 0).
+   Do **not** use `--dry-run`, the FIXTURE bundle, or `--linux-safe` output here.
+4. Paste live stdout into the deletion PR. Keep the FIXTURE bundle only as a
+   shape regression, still labeled FIXTURE — never rename a fixture to look
+   like a live capture.
+
+Suggested capture (Mac; paths match the sample `mac_proofs` above). Prefer
+`bin/wave6-mac-proof-capture --live --out "$EVID"` over hand redirects.
+The harness exits **1** when any probe FAILED (diagnostics still written);
+do not paste a failed capture as idle evidence — `wave6-delete-check` only
+checks that proof files are non-empty.
 **Do not** redirect bare `pgrep … || true` alone: when idle, that writes an
 empty file and `wave6-delete-check` reports `mac_*_proof_missing` even though
 idle is the desired state. Always record the command and an explicit
-`verified: no match` (or match listing) plus exit status:
+`verified: no match` (or match listing) plus exit status; mark probe failures
+as `verified: FAILED` (preserve stderr), never as verified idle:
 
 ```bash
 EVID=./wave6-evidence   # directory that will hold evidence.json + proofs/
@@ -157,13 +288,37 @@ mkdir -p "$EVID/proofs"
   pgrep -lf 'relay\.py' || echo "verified: no match (exit $?)"
 } > "$EVID/proofs/mac-b1-relay.txt"
 {
-  echo "cmd: pgrep -lf 'acp-run'; launchctl list | grep -E 'acp-run'"
+  echo "cmd: pgrep -lf 'acp-run'"
   pgrep -lf 'acp-run' || echo "verified: no match pgrep (exit $?)"
-  launchctl list 2>/dev/null | grep -E 'acp-run' \
-    || echo "verified: no match launchctl (exit $?)"
+  echo "cmd: launchctl list | grep -E 'acp-run'"
+  launchctl list >"$EVID/proofs/.lc.out" 2>"$EVID/proofs/.lc.err"
+  lc_rc=$?
+  if [ "$lc_rc" -ne 0 ]; then
+    [ -s "$EVID/proofs/.lc.err" ] && echo "stderr: $(cat "$EVID/proofs/.lc.err")"
+    echo "verified: FAILED launchctl (exit $lc_rc)"
+  else
+    grep -E 'acp-run' "$EVID/proofs/.lc.out" \
+      || echo "verified: no match launchctl (exit 0)"
+  fi
+  rm -f "$EVID/proofs/.lc.out" "$EVID/proofs/.lc.err"
 } > "$EVID/proofs/mac-b1-acp-run.txt"
-# B2 → acp_dispatch_idle
+# B2 → acp_dispatch_idle (B1 process/launchd for acp-dispatch + B2 drain).
+# Prefer the harness: it records launchctl/paseo failures as FAILED (with
+# stderr), never as verified idle, and exits 1 when any probe fails.
 {
+  echo "cmd: pgrep -lf 'acp-dispatch'"
+  pgrep -lf 'acp-dispatch' || echo "verified: no match pgrep (exit $?)"
+  echo "cmd: launchctl list | grep -E 'acp-dispatch'"
+  launchctl list >"$EVID/proofs/.lc.out" 2>"$EVID/proofs/.lc.err"
+  lc_rc=$?
+  if [ "$lc_rc" -ne 0 ]; then
+    [ -s "$EVID/proofs/.lc.err" ] && echo "stderr: $(cat "$EVID/proofs/.lc.err")"
+    echo "verified: FAILED launchctl (exit $lc_rc)"
+  else
+    grep -E 'acp-dispatch' "$EVID/proofs/.lc.out" \
+      || echo "verified: no match launchctl (exit 0)"
+  fi
+  rm -f "$EVID/proofs/.lc.out" "$EVID/proofs/.lc.err"
   STATE="${ACP_DISPATCH_STATE:-$HOME/.local/state/bigteam}"
   if ! command -v acp-dispatch >/dev/null 2>&1; then
     echo "B2: acp-dispatch not on PATH"
@@ -173,8 +328,12 @@ mkdir -p "$EVID/proofs"
     acp-dispatch check "$STATE"
   fi
   echo "cmd: paseo ls -g --label ade.via=acp-dispatch --json"
-  out=$(paseo ls -g --label ade.via=acp-dispatch --json 2>&1) || true
-  if [ -n "$out" ]; then
+  out=$(paseo ls -g --label ade.via=acp-dispatch --json 2>&1)
+  ls_rc=$?
+  if [ "$ls_rc" -ne 0 ]; then
+    [ -n "$out" ] && printf '%s\n' "$out"
+    echo "verified: FAILED paseo ls (exit $ls_rc)"
+  elif [ -n "$out" ]; then
     printf '%s\n' "$out"
   else
     echo "verified: no match (empty paseo ls)"
@@ -190,9 +349,6 @@ mkdir -p "$EVID/proofs"
   fi
 } > "$EVID/proofs/mac-b3-paseo-smoke.txt"
 ```
-
-Wave 6's final PR already re-ran C7/C1 as its merge gate; this follow-up only
-needs proof the **cycle after that merge** left the shims idle.
 
 ## C. C3 gates (outside files; order 11)
 
@@ -219,7 +375,7 @@ are operator/lead work; this gate only checks the captured files.
 | `paseo4herdr` | paseo4herdr | `acp-dispatch`, `relay.py`, `self-slash` | In paseo4herdr: `rg -n 'acp-dispatch\|relay\.py\|self-slash' .` |
 | `pi` | Pi (`pi/extensions/…`, hand links, `agent_guard.py`) | I4f | In Pi tree: `rg -n 'acp-dispatch\|relay\.py\|agent_guard\|subagent' pi extensions hand 2>/dev/null` |
 | `sudo_secretspec` | sudo-secretspec | `relay.py`, `acp-dispatch`/`acp-run` as clients | In sudo-secretspec: `rg -n 'relay\.py\|acp-dispatch\|acp-run' .` |
-| `aiuse` | **aiuse** (incl. `src/aiuse/collectors/acp_usage.py`) | Carried 1 residual / item 34 | In aiuse: `rg -n 'acp-run\|acp-dispatch\|relay\.py\|acp_usage' .` |
+| `aiuse` | **aiuse** (incl. `src/aiuse/collectors/acp_usage.py`) | item 33 | In aiuse: `rg -n 'acp-run\|acp-dispatch\|relay\.py\|acp_usage' .` |
 | `paseo_runner` | paseo-runner | same clients | In paseo-runner: `rg -n 'relay\.py\|acp-dispatch\|acp-run' .` |
 | `site_public_home_agents` | `~/ops/site-public-djbclark/home-agents.md` item 40 | `coding-bot` | `rg -n 'coding-bot\|acp-run\|acp-dispatch' home-agents.md` |
 | `aiuse_config_opencode_go` | `~/.config/aiuse/config.toml` | `opencode-go` exclusion (after PR 260) | `rg -n 'opencode-go' ~/.config/aiuse/config.toml` (gone or waived after PR 260) |
@@ -257,29 +413,11 @@ After the bins go: `bin/ade-roster --write`.
 4. README roster regeneration; `docs/skills.md` / orchestration docs that still
    present the shims as current.
 5. Changelog fragment under `### Removed` (one line per user-visible deletion),
-   citing queue Carried 1.
+   citing queue item 33.
 6. Remove or archive this readiness doc's "must rewrite" table rows that are
    done; keep a short "deleted on YYYY-MM-DD" note in `docs/slim/log.md`.
 
-## F. Pi sole-TUI (related, not the same PR)
-
-Policy: `docs/tui-security-and-pi-migration.md` A1–A6, `docs/setup-plan.md`
-"Current operator policy — 2026-11-08", `docs/pi-services.md`.
-
-Wave 6 deletion does **not** finish Pi migration. Keep these as separate
-tracks (Linux-safe in-repo docs/routing first; Mac installs and pool
-acceptance need the operator):
-
-1. Routing and skills mention only Pi + retained vendor clients + Hermes.
-2. Install catalog (`config/install.toml`) does not reinstall omp / OpenCode /
-   Crush / Goose / Aider / Qwen Code as default components.
-3. Per-pool acceptance before automatic routing (OpenAI API vs Codex sub;
-   Anthropic API vs Claude sub; Google; etc.) — queue Carried 18 for Claude
-   API-through-Pi after funding.
-4. Archive / uninstall of retired TUIs on the Mac (operator step; order 11 for
-   live settings).
-
-## G. Suggested PR shape
+## F. Suggested PR shape
 
 1. **Delete readiness** (this file + `bin/wave6-delete-check` + queue/PLAN
    pointers): lands first; **does not delete shims**.
@@ -291,11 +429,15 @@ acceptance need the operator):
 
 Do not start (3) until (2) is green and C3 is ticked or waived.
 
-## H. Links
+## G. Links
 
+- Status (open work): [§Status](#status-2026-11-10--current-open-work) above
 - Plan: [PLAN.md](PLAN.md) F Wave 6, E3, E6, C3, I1, I2, I8
-- Ledger: [ledger.md](ledger.md) A4 (`agent_guard.py` keep-through-Wave-6)
-- Queue: [../queue.md](../queue.md) Carried item 1
+- Ledger: [ledger.md](ledger.md) A4 (`agent_guard.py`)
+- Queue: [../queue.md](../queue.md) Carried item 33
 - Gate: [`bin/wave6-delete-check`](../../bin/wave6-delete-check)
+- Mac harness: [`bin/wave6-mac-proof-capture`](../../bin/wave6-mac-proof-capture)
+- FIXTURE bundle (NOT live): [`tests/fixtures/wave6-mac-proofs/`](../../tests/fixtures/wave6-mac-proofs/)
 - Standing orders: [../../AGENTS.md](../../AGENTS.md) 10 and "Two shims"
-- Pi: [../tui-security-and-pi-migration.md](../tui-security-and-pi-migration.md), [../pi-services.md](../pi-services.md)
+- Stack: [#398](https://github.com/djbclark/djbclark-ade/pull/398) → [#417](https://github.com/djbclark/djbclark-ade/pull/417) → [#441](https://github.com/djbclark/djbclark-ade/pull/441) → [#453](https://github.com/djbclark/djbclark-ade/pull/453) → [#470](https://github.com/djbclark/djbclark-ade/pull/470) → [#472](https://github.com/djbclark/djbclark-ade/pull/472) → LIVE_RE `<agent>` / `` `acp-dispatch` `` tighten (this tip; Mac still blocked)
+- LIVE_RE notes: `wave6-delete-check` also matches backticked `` `acp-dispatch` `` and `acp-dispatch <agent>` placeholders (not only named-agent argv), so `--inventory` / `callers_skills` cannot go green while rewrite tips leave those live teachings

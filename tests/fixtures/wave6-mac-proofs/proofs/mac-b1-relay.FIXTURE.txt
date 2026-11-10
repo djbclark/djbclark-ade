@@ -1,0 +1,7 @@
+FIXTURE — NOT live Mac stdout (tests/fixtures/wave6-mac-proofs; Carried #33 residual)
+kind: fixture
+flag: relay_idle
+shape: cmd + verified: no match (idle desired state)
+cmd: pgrep -lf 'relay\.py'
+verified: no match (fixture stand-in; exit 1)
+replace_with: bin/wave6-mac-proof-capture --live --out DIR

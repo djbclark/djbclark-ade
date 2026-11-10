@@ -1,0 +1,7 @@
+FIXTURE — NOT live Mac stdout (tests/fixtures/wave6-mac-proofs; Carried #33 residual)
+kind: fixture
+flag: paseo_smoke_ok
+shape: paseo send/run --help smoke
+cmd: paseo send --help; paseo run --help
+verified: paseo send/run --help ok (exit 0) (fixture stand-in)
+replace_with: bin/wave6-mac-proof-capture --live --out DIR
