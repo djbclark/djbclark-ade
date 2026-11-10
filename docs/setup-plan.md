@@ -93,7 +93,7 @@ and security sequencing in the older plan; other unfinished planning stays intac
         Hard dependency by operator ruling of 2026-11-07. Also **cswap** (`claude-swap`), which aiuse reads.
       - **Paseo** (`getpaseo/paseo`), its skill bundle (`npx skills add getpaseo/paseo`, set user-invocable-only),
         and the Paseo plugins of the J6 set, each with its settings from `[install.paseo_plugins]`: session-guard,
-        baton, asks, questions-please (`djbclark/paseo-plugin-questions-please`), tell-agent, vitals, skills,
+        baton, asks, questions-please (`djbclark/paseo-plugin-questions-please`), tell-agent, resources (`zedobaia/resources`, mac host RAM; vitals on Linux only — `docs/paseo-host-ram-plugins.md`), skills,
         pr-radar, claude-code-entrypoint-env, session-janitor, session-recovery. The ones not chosen are recorded too
         (zerosub, usage-auto-resume, plan-auto), so `doctor` can tell "not chosen" from "missing".
       - **The operator's own Paseo plugins and forks**, each as a Paseo plugin component:

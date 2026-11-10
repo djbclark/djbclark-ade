@@ -227,7 +227,7 @@ worktree (exit 1 / `blocked`) — run from the primary checkout, or use
 
 ## G. J6 Paseo plugins (catalog only, 2026-11-10)
 
-Offered `paseo-plugin-*` rows re-landed from stranded #354 (session-guard, baton, asks, questions-please, tell-agent, vitals, skills, and siblings). Install/probe argv stay UNKNOWN until Mac live `paseo plugin ls` (order 11). Doctor observes presence only.
+Offered `paseo-plugin-*` rows re-landed from stranded #354 (session-guard, baton, asks, questions-please, tell-agent, vitals, resources, skills, and siblings). **macOS host RAM:** `paseo-plugin-resources` chosen, not vitals (`docs/paseo-host-ram-plugins.md`). Install/probe argv stay UNKNOWN until Mac live `paseo plugin ls` (order 11). Doctor observes presence only.
 
 ## H. Next units
 
