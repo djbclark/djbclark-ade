@@ -467,15 +467,12 @@ def print_approve_paste(rows: list[dict[str, Any]]) -> None:
     )
     print(
         "# Prefer: bin/ade-merge-ready approve-post --via auto "
-        "(GitHub API, not herdr; body for owner tips, comment for outside)."
+        "(GitHub API, not herdr; outside tips → owner comment)."
     )
     print(
-        "# Until #484: owner tips need a body APPROVE — approve-post --via auto "
-        "does that; do not paste comments for owner PRs."
-    )
-    print(
-        "# After #484: owner tips can pass without APPROVE once the Action is "
-        "re-run (retrigger-marker); outside tips still need an owner comment."
+        "# Owner tips (after #484 on master): no APPROVE paste — Tests / push "
+        "rejudge flips adversary-marker; use merge-now. Outside tips still need "
+        "an owner comment (+ approve-post or dispatch)."
     )
     for r in rows:
         head = r.get("head") or ""
