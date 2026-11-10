@@ -35,7 +35,7 @@ def test_an_acp_route_runs_on_paseo_and_reads_the_reply_file(tmp_path):
     assert "ok" in r.stdout
     run = next(c for c in calls if c[0] == "run")
     assert run[run.index("--provider") + 1] == "cursor/grok-4.7"
-    assert run[run.index("--mode") + 1] == "default"                     # the provider's defaultMode
+    assert run[run.index("--mode") + 1] == "default"                     # cursor: no YOLO map → defaultMode fallback
     assert run[run.index("--thinking") + 1] == "high"
     assert "--no-wait" in run and "--json" in run and "--prompt-file" not in run
     assert "probe.prompt.md" in run[-1] and "probe.prompt.reply.md" in run[-1]
@@ -49,6 +49,14 @@ def test_a_paseo_route_is_the_preferred_kind_and_matches_the_acp_alias(tmp_path)
     run = next(c for c in calls if c[0] == "run")
     assert run[run.index("--provider") + 1] == "cursor/grok-4.7"
     assert run[run.index("--thinking") + 1] == "high"
+
+
+def test_a_claude_paseo_route_uses_bypass_not_default_mode(tmp_path):
+    r, calls = world(tmp_path, [{"kind": "paseo", "agent": "claude", "model": "sonnet"}])
+    assert r.returncode == 0, r.stdout + r.stderr
+    run = next(c for c in calls if c[0] == "run")
+    assert run[run.index("--provider") + 1] == "claude/sonnet"
+    assert run[run.index("--mode") + 1] == "bypassPermissions"
 
 
 def test_a_non_idle_wait_or_a_missing_reply_fails_the_route(tmp_path):

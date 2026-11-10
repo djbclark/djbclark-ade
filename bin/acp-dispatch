@@ -26,7 +26,9 @@ Retired with the shim (exit 2 naming the replacement): resume, reroute, auto-res
 Agents are Paseo providers: claude, codex, antigravity, cursor, opencode, hermes, omp (same name);
 any other exits 2 with that list. `--model M` becomes `--provider P/M`. `--mode` is always passed (Claude's default is `auto`,
 so no mode would not be read-only):
-    --perm all        the provider's `defaultMode` from `paseo provider ls --json` (enabled and available, else 2)
+    --perm all        the provider's unattended YOLO mode (`bin/paseo_yolo.py`: Claude `bypassPermissions`,
+                      Codex `full-access`, OpenCode `build`, …). Restored 2026-11-10 after Wave 4 E6's
+                      `defaultMode` mapping left seats in Always Ask. Provider must be Enabled/available.
     --perm read-only  claude: `bin/review-launch --mode read-only` (Read, Grep, Glob; no web since 2026-11-07; empty
                       settings, MCP and hooks; bypass refused; tripwire 77).
     --perm deny       claude: `bin/review-launch --mode review` (Read, Grep, Glob, no network).
@@ -973,8 +975,14 @@ def dispatch(a: argparse.Namespace) -> int:
     elif a.frontier_reason not in (None, ""):
         die("--frontier-reason applies only to a --kind frontier dispatch")
     provider, perm_note = PROVIDERS[a.agent], None
+    if str(HERE) not in sys.path:
+        sys.path.insert(0, str(HERE))
+    import paseo_yolo  # noqa: E402
     if a.perm == "all":
-        boundary, mode = "paseo", str(provider_entry(provider).get("defaultMode") or "default")
+        entry = provider_entry(provider)  # refuse when missing / not Enabled+available
+        boundary, mode = "paseo", paseo_yolo.resolve_launch_mode(
+            provider, fallback=str(entry.get("defaultMode") or "") or None,
+        )
     elif a.agent == "claude":
         boundary, mode = "review-launch", REVIEW_MODES[a.perm]
     else:

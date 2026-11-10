@@ -190,7 +190,19 @@ class TestProviderMapAndArgv(Base):
                 argv = rec["argv"]
                 self.assertEqual(argv[1], "run")
                 self.assertEqual(argv[argv.index("--provider") + 1], f"{agent}/{model}")
-                self.assertEqual(argv[argv.index("--mode") + 1], {"claude": "auto", "codex": "auto"}.get(agent, "default"))
+                # Known providers: YOLO map. Others: fake paseo's defaultMode.
+                self.assertEqual(
+                    argv[argv.index("--mode") + 1],
+                    {
+                        "claude": "bypassPermissions",
+                        "codex": "full-access",
+                        "opencode": "build",
+                        "omp": "full",
+                        "antigravity": "default",
+                        "hermes": "default",
+                        "cursor": "default",
+                    }.get(agent),
+                )
                 for flag in ("--no-wait", "--json", "--title", "--cwd"):
                     self.assertIn(flag, argv)
                 self.assertEqual(argv[argv.index("--workspace") + 1], "wks_test_default")
