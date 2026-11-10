@@ -50,19 +50,19 @@ site_root="${SKILL_EVERYWHERE_SITE:-${OPS_ROOT:-$HOME/ops}/site-public-djbclark/
 # dir we fill (a second link there would list the skill twice), or "x <why>",
 # or "copy <dir>" for a target that needs a rendered copy (see copy_target).
 # Verified 2026-10-03 by asking each TUI headlessly whether it saw 'steps'.
-# omp (oh-my-pi) added 2026-10-13: it also reads ~/.agents/skills, but dedups
-# by realpath, so its native dir lists each skill once and keeps working if
-# its agents provider is turned off.
-# (goose, pi, agy, copilot, qwen, devin, cline, muse and zcode rows removed 2026-11-06, slim-down E9:
-# those TUIs retired; the links they held in ~/.agents/skills, ~/.gemini/antigravity-cli/skills,
-# ~/.copilot/skills, ~/.qwen/skills, ~/.config/devin/skills and ~/.cline/skills are the operator's to remove.)
+# Pi restored 2026-11-09 (sole 3rd-party TUI policy): it natively scans
+# ~/.agents/skills (same shared dir as Codex). A second link under
+# ~/.pi/agent/skills causes name collisions — do not add one.
+# omp / opencode dropped 2026-11-09 (retired clients; Pi-only + retained
+# vendor clients + Hermes). Operator may remove leftover ~/.omp and
+# ~/.config/opencode skill links by hand.
+# (goose, agy, copilot, qwen, devin, cline, muse and zcode rows removed 2026-11-06, slim-down E9.)
 targets='
 claude|~/.claude/skills
 codex|~/.agents/skills
-opencode|~/.config/opencode/skills
+pi|~/.agents/skills
 hermes|~/.local/share/skill-everywhere/skills
 cursor-agent|via ~/.claude/skills
-omp|~/.omp/agent/skills
 grokbot|copy ~/agent-data/workflows
 '
 

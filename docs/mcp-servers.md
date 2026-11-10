@@ -20,7 +20,7 @@ why, and how to re-enable. This table is otherwise the 2026-08-23 snapshot.
 | `ghost-os` | stdio: `/opt/homebrew/bin/ghost mcp` | user | macOS UI automation via accessibility tree + vision. **Blocked in Claude Code since 2026-10-10** (`deniedMcpServers`) |
 | `hindsight` | stdio: `node ~/.hindsight/coding-agents/dist/mcp-server.js` | user | Per-repo Hindsight coding-agent memory (the 🧠 banner) |
 | `hindsight-shared` | HTTP: `http://127.0.0.1:8888/mcp/hermes-shared/` | user | Shared Hindsight bank (`hermes-shared` in the URL is the bank name) |
-| `firecrawl` | HTTP: `http://127.0.0.1:18804/mcp` (LaunchAgent `com.djbclark.firecrawl-mcp`, machine-side) | Claude Code, Codex, opencode | Scrape, search, crawl, map on self-hosted Firecrawl (SIPB Hyades), through this repo's `bin/firecrawl-router` (kept by the operator's ruling of 2026-11-07, after the slim-down first deleted it): it proxies the MCP to Hyades, answers `query`/`json` with SIPB LLMs then LiteLLM, answers developer search from GitHub, and serves Hermes' search backend on 18805. The `firecrawl` skill lives in site-djbclark. |
+| `firecrawl` | HTTP: `http://127.0.0.1:18804/mcp` (LaunchAgent `com.djbclark.firecrawl-mcp`, machine-side) | Claude Code, Codex (Pi sole-TUI 2026-11-09: opencode registration dropped; Pi is not a separate MCP client here) | Scrape, search, crawl, map on self-hosted Firecrawl (SIPB Hyades), through this repo's `bin/firecrawl-router` (kept by the operator's ruling of 2026-11-07, after the slim-down first deleted it): it proxies the MCP to Hyades, answers `query`/`json` with SIPB LLMs then LiteLLM, answers developer search from GitHub, and serves Hermes' search backend on 18805. The `firecrawl` skill lives in site-djbclark. |
 | claude.ai Gmail / Google Calendar / Google Drive | HTTPS (Google-hosted) | claude.ai account | Remote connectors managed on claude.ai, not in local config |
 
 ## Firecrawl developer search (2026-10-24)
@@ -171,7 +171,9 @@ loops.
 
 ### Messaging: use Hermes (operator decision, 2026-08-23)
 
-**Default to `hermes` for operator-facing platform messaging** (Discord, Signal, …; agent-to-agent messages go by `paseo send --json` or the relay shim with a named ack, standing order 10, never through this bridge). Beeper Desktop is often not
+**Default to `hermes` for operator-facing platform messaging** (Discord, Signal, …; agent-to-agent messages go by
+native `paseo send --json` with a named ack, standing order 10, never through this bridge; `skills/session-finder/relay.py`
+is a one-cycle Wave 6 shim over that path until deletion, soft deadline 2026-11-20). Beeper Desktop is often not
 running, and the operator uses it only occasionally — so it is not a
 dependable path for an agent. Reach for it only when the operator explicitly
 asks, or when you need cross-network *search* that Hermes cannot do and you
