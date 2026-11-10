@@ -49,12 +49,13 @@ from Paseo (`npx skills add getpaseo/paseo`). Details: [docs/skill-everywhere.md
 
 ## The review gate
 
-Master takes changes **by PR only** (branch protection, admins included). The PR body carries the adversary's
-verdict marker (AGENTS.md review rule 1); the `adversary-marker` Action (logic in `bin/adversary_marker.py`) reads it
-and posts the required `adversary-marker` status beside the Tests checks. `bin/review-pr PR` is the local review
-(rule 11: Claude inside `bin/review-launch`'s boundary, [docs/review-boundary.md](docs/review-boundary.md)) and prints
-the marker. After a body edit `gh workflow run adversary-marker.yml -f pr=N`; wait with `gh pr checks N --watch
---required`; merge with `gh pr merge --squash --match-head-commit <reviewed sha>`.
+Master takes changes **by PR only** (branch protection, admins included). The `adversary-marker` Action (logic in
+`bin/adversary_marker.py`) posts the required `adversary-marker` status beside the Tests checks
+([docs/review-boundary.md](docs/review-boundary.md)). **Owner-authored PRs** (2026-11-10) pass without a pasted
+APPROVE marker; landing the marker module on master rejudges every open tip automatically. **Outside PRs** still
+need a live APPROVE in an owner issue comment, then `gh workflow run adversary-marker.yml -f pr=N`.
+`bin/review-pr PR` is the local review (rule 11) and prints a marker for the record. Wait with
+`gh pr checks N --watch --required`; merge with `gh pr merge --squash --match-head-commit <reviewed sha>`.
 
 ## Where things went
 

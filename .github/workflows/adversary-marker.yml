@@ -22,8 +22,11 @@ name: Adversary marker
 # a GitHub App). A listed App editing an outside body cannot approve it. A BLOCK naming the head counts in
 # the body or any comment, whoever wrote it.
 #
-# A body edit (writing the marker after the push) is not a Tests run: re-check with
-#   gh workflow run adversary-marker.yml -f pr=N
+# Owner-authored PRs need no marker paste (owner-trust, 2026-11-10). A body/comment edit on an outside PR is
+# not a Tests run: re-check with `gh workflow run adversary-marker.yml -f pr=N`. A push of this workflow or
+# `bin/adversary_marker.py` to the default branch rejudges every open PR (one marker job per head, same
+# concurrency group as dispatch / workflow_run for that sha), so landing owner-trust flips owner tips green
+# without per-PR dispatch.
 
 on:
   workflow_run:
@@ -35,24 +38,28 @@ on:
         description: Pull request number to re-check (after the marker was written or edited)
         required: true
         type: string
+  push:
+    paths:
+      - "bin/adversary_marker.py"
+      - ".github/workflows/adversary-marker.yml"
 
 permissions: {}
 
 jobs:
-  # Job 1 finds the PR(s) the event is about and every other open PR at the same head, and outputs that head as the
-  # key: PRs sharing a head share ONE commit status, so job 2's concurrency group is the head sha, and a dispatch and a
-  # workflow_run for one head serialize (a run id would never cancel a stale run). No secret, no environment.
+  # Job 1 finds the PR(s) and emits a strategy.matrix with one cell per head (push: every open same-repo PR
+  # grouped by head; workflow_run / dispatch: the event's PRs plus every other open PR at that head). No secret,
+  # no environment. Belt and braces beside the environment's branch policy: a dispatch/push from any other ref
+  # does nothing.
   resolve:
-    # Belt and braces beside the environment's branch policy: a dispatch from any other ref does nothing.
     if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    timeout-minutes: 5
     permissions:
       pull-requests: read
       contents: read
     outputs:
-      prs: ${{ steps.find.outputs.prs }}
-      key: ${{ steps.find.outputs.key }}
+      matrix: ${{ steps.find.outputs.matrix }}
+      has_work: ${{ steps.find.outputs.has_work }}
     steps:
       - name: Check out the default branch (never the PR)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -64,14 +71,19 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: python3 -I bin/adversary_marker.py --resolve --event "$GITHUB_EVENT_PATH" --event-name "$GITHUB_EVENT_NAME" --repo "$GITHUB_REPOSITORY"
 
+  # One job per head. Concurrency group is always the head sha, so a push sweep never races a dispatch or
+  # Tests completion that posts on the same commit (2026-11-10).
   marker:
     needs: resolve
-    if: ${{ needs.resolve.outputs.key != '' }}
+    if: ${{ needs.resolve.outputs.has_work == 'true' }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.resolve.outputs.matrix) }}
     concurrency:
-      group: adversary-marker-${{ needs.resolve.outputs.key }}
+      group: adversary-marker-${{ matrix.head }}
       cancel-in-progress: true
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 30
     environment: merge-gate
     permissions:
       pull-requests: read
@@ -95,7 +107,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           STATUS_TOKEN: ${{ steps.app-token.outputs.token }}
-          PRS: ${{ needs.resolve.outputs.prs }}
-          AT_HEAD: ${{ needs.resolve.outputs.key }}
+          PRS: ${{ matrix.prs }}
+          AT_HEAD: ${{ matrix.head }}
           # MARKER_POST_AS: check-run   # the fallback if an App status does not satisfy the ruleset (docs/review-boundary.md)
         run: python3 -I bin/adversary_marker.py --prs "$PRS" --at-head "$AT_HEAD" --event "$GITHUB_EVENT_PATH" --event-name "$GITHUB_EVENT_NAME" --repo "$GITHUB_REPOSITORY"

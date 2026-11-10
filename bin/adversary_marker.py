@@ -7,17 +7,18 @@
   adversary_marker.py --event FILE [--event-name NAME] [--repo OWNER/NAME] [--resolve | --prs LIST [--at-head SHA]]
                       [--api-answers FILE]
       what `.github/workflows/adversary-marker.yml` runs. `--resolve` (its first job) finds the PRs the event is
-      about, every open PR at the same head included, and writes `prs=` and `key=` (that head) to $GITHUB_OUTPUT
-      (the second job's concurrency group is keyed by the head); `--prs LIST --at-head SHA` (its second job) reads
+      about, every open PR at the same head included, and writes `matrix=` / `has_work=` to $GITHUB_OUTPUT (one
+      cell per head; the second job's concurrency group is `adversary-marker-<head>`); `--prs LIST --at-head SHA`
+      (each matrix cell) reads
       each PR's body and head through the API, decides, re-reads the head, body, author, last editor and the PR's
       issue comments, and posts ONE `adversary-marker` commit status per head: success only when every open PR at
-      it is approved. An owner-authored PR is approved by a live APPROVE naming the head in its body whose last
-      editor is the owner or a login in BODY_TRUSTED_EDITOR_LOGINS (Cursor cloud body rewrites, 2026-11-09);
-      any other PR only by such an APPROVE in an issue comment the owner posted (not via a GitHub App)
-      and nobody but the owner ever edited (GraphQL `editor` and `userContentEdits`; unknown attribution fails).
-      A BLOCK or malformed marker in the body or any comment fails it. MARKER_POST_AS=check-run posts a check run
-      instead. `--api-answers` serves canned API answers from a JSON file and prints the status it would post
-      instead of posting (the tests' entry)
+      it is approved. An owner-authored PR is approved by default (operator 2026-11-10: trust the owner and AIs
+      they run under that login) — no APPROVE marker required; an explicit body APPROVE still counts when its
+      last editor is the owner or BODY_TRUSTED_EDITOR_LOGINS. Any other PR is approved only by a live APPROVE
+      in an issue comment the owner posted (not via a GitHub App) and nobody but the owner ever edited
+      (GraphQL `editor` and `userContentEdits`; unknown attribution fails). A BLOCK or malformed marker in the
+      body or any comment fails it. MARKER_POST_AS=check-run posts a check run instead. `--api-answers` serves
+      canned API answers from a JSON file and prints the status it would post instead of posting (the tests' entry)
 
 The marker (AGENTS.md review rule 1, its five properties):
 
@@ -37,18 +38,15 @@ and head are read through the API with the job's read-only `GITHUB_TOKEN`; the s
 token of the `ade-merge-gate` GitHub App (`STATUS_TOKEN`), whose key lives in the `merge-gate`
 environment that only `master` can deploy to, and the ruleset pins the required check to that App's
 `integration_id`, so a status a PR's own workflow posts under the same context does not satisfy it.
-Everything a PR carries is untrusted data (operator, 2026-11-07: "any GitHub artifacts not directly from us are
-suspect"): its body, title, commits, branch name, comments and check output are read, never executed or
-interpolated. An APPROVE counts only (2026-11-07; trusted-editor allowlist 2026-11-09) in the body of a PR the
-repository owner wrote whose last editor is the owner or a login in BODY_TRUSTED_EDITOR_LOGINS, or, for every
-other PR (MEMBER and COLLABORATOR authors included: the operator's agents act under the owner's login), in an
-issue comment by the owner that no GitHub App posted and no one but the owner edited
-(`_pr_state_trusted`, `_pr_comments_trusted`, `decide`). The allowlist does not help an outside PR: Cursor (or
-any other listed editor) last-editing a non-owner body still cannot approve it. The owner's edit of an outside
-body no longer makes it trusted: ticking a task-list box is an edit, and the author can hide an APPROVE in an
-HTML comment. Agents must not write a live APPROVE marker (fenced examples only); the allowlist only keeps an
-owner-authored body's APPROVE valid after a cloud agent rewrites the PR text. A BLOCK naming the head counts
-in the body or any comment, whoever wrote it.
+GitHub artifacts **not** from the repository owner are untrusted data (operator, 2026-11-07; restated
+2026-11-10: distrust only what does not come from the owner or AIs they run). Body, title, commits, branch
+name, comments and check output are read, never executed or interpolated. Owner-authored PRs (the owner's
+login, including Cloud Agents acting under it) are trusted by default: `decide` succeeds without an APPROVE
+marker (2026-11-10). Outside / MEMBER / COLLABORATOR PRs still need a live APPROVE in an owner issue comment
+that no GitHub App posted and no one but the owner edited (`_pr_comments_trusted`, `decide`). An explicit
+APPROVE in an owner PR body still counts when the last editor is the owner or BODY_TRUSTED_EDITOR_LOGINS;
+the allowlist does not help an outside PR. The owner's edit of an outside body never makes a hidden body
+APPROVE count. A BLOCK naming the head counts in the body or any comment, whoever wrote it.
 
 Python 3.9+ (the Mac's stock python3 and the Actions runner's); stdlib only.
 """
@@ -72,6 +70,15 @@ BODY_TRUSTED_EDITOR_LOGINS = frozenset({
     "cursor",  # Cursor GitHub App / Cloud Agent body edits (PR 318, 2026-11-08)
 })
 SHA40 = re.compile(r"^[0-9a-f]{40}$")
+
+# Exact docs-template JSON (AGENTS.md / PR-body examples). Invalid JSON on purpose (`APPROVE"|"BLOCK`);
+# agents often leave it unfenced. Treat as documentation, never malformed (2026-11-10, #484).
+_DOCS_TEMPLATE_JSON_COMPACT = '{"verdict":"APPROVE"|"BLOCK","head":"<40-hex>"}'
+
+
+def _is_docs_template_json(raw: str) -> bool:
+    """True for the canonical documentation marker payload (whitespace-insensitive)."""
+    return re.sub(r"\s+", "", raw or "") == _DOCS_TEMPLATE_JSON_COMPACT
 
 
 # ---- adversary verdict ----------------------------------------------------------------------------
@@ -596,10 +603,15 @@ def adversary_verdict(body: str, head: str) -> dict:
     # Validate EVERY LIVE marker, so a malformed one beside a good one is still reported.
     parsed: list[dict] = []
     placeholders = 0
+    docs_templates = 0
     for _start, jstart, jend in spans:
         # Parse JSON as written: backticks inside a JSON string are content, while
         # backticks outside strings must never be masked into valid JSON.
         raw = body[jstart:jend]
+        # Unfenced PR-template / AGENTS.md example: not a verdict, not a typo (2026-11-10).
+        if _is_docs_template_json(raw):
+            docs_templates += 1
+            continue
         try:
             doc = json.loads(raw, object_pairs_hook=_strict_object)
         except ValueError as e:
@@ -812,12 +824,17 @@ def adversary_verdict(body: str, head: str) -> dict:
                 "detail": "no adversary-verdict marker in the PR body (prose verdicts are not read)"}
 
     if not parsed:
-        if placeholders and not problems:
-            # Every marker was the template's own placeholder: documentation, not a verdict.
+        if (placeholders or docs_templates) and not problems:
+            # Every marker was documentation (placeholder head and/or the APPROVE"|"BLOCK template).
+            bits = []
+            if placeholders:
+                bits.append(f"{placeholders} marker(s) carry a placeholder head (<40-hex>)")
+            if docs_templates:
+                bits.append(f"{docs_templates} marker(s) are the docs template "
+                            f'(verdict "APPROVE"|"BLOCK")')
             return {"present": False, "verdict": None, "quoted_sha": None, "matches_head": False,
                     "conflict": False, "malformed": False,
-                    "detail": f"{placeholders} marker(s) carry a placeholder head (<40-hex>): "
-                              f"documentation, not a verdict"}
+                    "detail": "; ".join(bits) + ": documentation, not a verdict"}
         # A marker was present but unusable: its OWN outcome, so a typo is visibly a typo.
         return {"present": False, "verdict": None, "quoted_sha": None, "matches_head": False,
                 "conflict": False, "malformed": True,
@@ -934,6 +951,8 @@ def describe(word: str, head: str, where: str = "") -> str:
         label += " in a comment"
     elif where == "owner comment":
         label += " in an owner comment"
+    elif where == "owner_pr":
+        label = "owner-authored PR (marker optional)"
     return f"{label} at {head[:12]}"[:140]
 
 
@@ -1081,6 +1100,29 @@ def _open_prs_at(api, repo: str, head: str) -> list[int]:
             and _same_repo(((p.get("base") or {}).get("repo") or {}).get("full_name"), repo)]
 
 
+def _open_prs_by_head(api, repo: str) -> dict[str, list[int]]:
+    """Open same-repo PRs grouped by full head sha (push all-open rejudge).
+
+    Used by ``resolve`` to emit one matrix cell per head so each ``marker`` job shares the
+    ``adversary-marker-<head>`` concurrency group with dispatch / ``workflow_run`` for that sha
+    (Codex P1 on #490, 2026-11-10: a single ``push-rejudge-all-open`` key raced those jobs).
+    Raises ValueError when an open PR's head is not 40 hex; ApiError on a failed page.
+    """
+    by: dict[str, list[int]] = {}
+    for p in _all_pages(api, f"repos/{repo}/pulls?state=open"):
+        if not isinstance(p.get("number"), int):
+            continue
+        if p.get("state", "open") != "open":
+            continue
+        if not _same_repo(((p.get("base") or {}).get("repo") or {}).get("full_name"), repo):
+            continue
+        head = str(((p.get("head") or {}).get("sha")) or "").lower()
+        if not SHA40.match(head):
+            raise ValueError(f"open PR #{p['number']} has a non-40-hex head: {head!r}")
+        by.setdefault(head, []).append(p["number"])
+    return {h: sorted(set(ns)) for h, ns in by.items()}
+
+
 def find_prs(event_name: str, event: dict, repo: str, api) -> tuple[list[int], str, str]:
     """The PR numbers this event is about, how they were found, and the head they were found at.
 
@@ -1090,9 +1132,15 @@ def find_prs(event_name: str, event: dict, repo: str, api) -> tuple[list[int], s
 
     workflow_dispatch: the `pr` input (digits only); its head is read from `GET pulls/{pr}`. workflow_run: the event's
     `pull_requests[]` (same-repo PRs only; GitHub leaves it empty for a fork PR) and the commit lookup, else
-    `GET pulls?head=OWNER:BRANCH` from the run's head repository and branch. Raises ValueError for an event it cannot
-    read, ApiError when a lookup fails.
+    `GET pulls?head=OWNER:BRANCH` from the run's head repository and branch. push: every open same-repo PR, with
+    head ``""`` — ``resolve`` expands them into a per-head matrix so each marker job uses the head-keyed
+    concurrency group (never invents APPROVE). Raises ValueError for an event it cannot read, ApiError when a
+    lookup fails.
     """
+    if event_name == "push":
+        # Paths filter in the workflow limits this to marker module / workflow edits on the default branch.
+        by = _open_prs_by_head(api, repo)
+        return sorted({n for ns in by.values() for n in ns}), "push all-open", ""
     if event_name == "workflow_dispatch":
         pr = str(((event.get("inputs") or {}).get("pr")) or "").strip()
         if not re.fullmatch(r"[1-9][0-9]{0,9}", pr):
@@ -1100,7 +1148,10 @@ def find_prs(event_name: str, event: dict, repo: str, api) -> tuple[list[int], s
         _state, head, _body = _pr_state(api, repo, int(pr))
         return sorted({int(pr), *_open_prs_at(api, repo, head)}), "dispatch input", head
     if event_name != "workflow_run":
-        raise ValueError(f"unsupported event {event_name!r} (only workflow_run and workflow_dispatch)")
+        raise ValueError(
+            f"unsupported event {event_name!r} "
+            "(only workflow_run, workflow_dispatch, and push)"
+        )
     wr = event.get("workflow_run") or {}
     head_sha = str(wr.get("head_sha") or "").lower()
     if not SHA40.match(head_sha):
@@ -1182,13 +1233,13 @@ def _pr_state_trusted(api, repo: str, n: int) -> dict:
     editor, which no body trust survives.
 
     `owner_pr`: the author is the repository owner (logins compare case-insensitively). `body_trusted`: an owner PR
-    whose body last editor is the owner or a BODY_TRUSTED_EDITOR_LOGINS login (2026-11-09). Only such a body can
-    approve (2026-11-07 owner-author rule after a Gemini 4 Argon and an Opus review; allowlist added so a Cursor
-    Cloud rewrite of an owner PR body does not void a live APPROVE). Before 2026-11-07, the owner's last edit made
-    ANY body trusted, so an owner who ticked a task-list box on an outside PR turned an APPROVE the author had
-    hidden in an HTML comment into a trusted one; MEMBER or COLLABORATOR authors stay outside-like, because the
-    operator's agents act under the owner's login. An outside PR is approved only by an owner comment
-    (`_pr_comments`, `decide`); a listed App editing that body still cannot approve it.
+    whose body last editor is the owner or a BODY_TRUSTED_EDITOR_LOGINS login (2026-11-09). An explicit body APPROVE
+    on an owner PR still needs that trust; a markerless owner PR is approved via owner-trust (2026-11-10). The
+    allowlist exists so a Cursor Cloud rewrite of an owner PR body does not void an explicit live APPROVE
+    (2026-11-09). Before 2026-11-07, the owner's last edit made ANY body trusted, so an owner who ticked a
+    task-list box on an outside PR turned an APPROVE the author had hidden in an HTML comment into a trusted
+    one; MEMBER or COLLABORATOR authors stay outside-like (outside PRs still need an owner comment). A listed
+    App editing an outside body still cannot approve it.
     """
     owner, name = repo.split("/", 1)
     data = api.graphql(PR_QUERY, {"owner": owner, "name": name, "number": n})
@@ -1336,8 +1387,10 @@ def decide(head: str, owner: str, pr: dict, comments: list[dict]) -> tuple[str, 
     1. A BLOCK for this head anywhere (the body, or ANY comment, whoever wrote it) blocks, then a malformed marker
        anywhere: the same asymmetry as the body's (rule 1, property 1). A comment marker naming another head is
        history (an approval of an earlier push), not a failure.
-    2. An owner PR: the body decides as before, and its APPROVE needs a trusted body editor (the owner or a
-       BODY_TRUSTED_EDITOR_LOGINS login; `untrusted` otherwise). Comments cannot approve it.
+    2. An owner PR (repository owner authored it — including Cloud Agents under that login): trusted by default
+       (operator 2026-11-10: trust what comes only from the owner or AIs they run). No APPROVE marker is required.
+       An explicit body APPROVE still counts when the body editor is trusted (owner or BODY_TRUSTED_EDITOR_LOGINS);
+       an APPROVE body last edited by anyone else is `untrusted`. BLOCK/malformed still fail closed.
     3. Any other PR (an outside, MEMBER or COLLABORATOR author): an APPROVE in the body never counts, whoever edited
        it last (a listed App included); only a live APPROVE for this head in a comment by the repository owner, not
        posted via a GitHub App, and never edited by anyone but the owner (`_edit_attribution`), approves. Otherwise
@@ -1359,7 +1412,13 @@ def decide(head: str, owner: str, pr: dict, comments: list[dict]) -> tuple[str, 
     if pr["owner_pr"]:
         if body_word == "approve" and not pr["body_trusted"]:
             return "untrusted", "", f"owner PR body last edited by {pr['editor'] or '(ghost)'}"
-        return body_word, "", body_adv.get("detail") or ""
+        if body_word == "approve":
+            return "approve", "", body_adv.get("detail") or ""
+        # Owner-authored tip: marker optional (trust the owner / their agents).
+        return "approve", "owner_pr", (
+            f"owner-authored PR (author {pr.get('author') or '(ghost)'}); "
+            "APPROVE marker not required under owner-trust"
+        )
     own = [c for c, w in judged if w == "approve" and not c.get("scan_only") and not c.get("via_app", True)
            and c.get("author_kind") == "owner"]
     for c in own:
@@ -1418,18 +1477,55 @@ def judge_pr(api, repo: str, n: int, target_url: str = "") -> dict:
             "detail": detail}
 
 
+def _matrix_payload(include: list[dict]) -> dict:
+    """``matrix`` / ``has_work`` for the workflow's ``strategy.matrix: ${{ fromJson(...) }}``."""
+    return {
+        "matrix": json.dumps({"include": include}, separators=(",", ":")),
+        "has_work": "true" if include else "false",
+    }
+
+
 def resolve(event_name: str, event: dict, repo: str, api) -> tuple[int, dict]:
-    """The workflow's first job: the PR numbers and the concurrency key. The key is the HEAD SHA the PRs were found at
-    (empty when there is no PR): PRs sharing a head share one commit status, so every run that could post on that
-    sha, a dispatch and a `workflow_run` alike, is in one concurrency group and they never race (2026-11-07; the
-    key was the PR numbers, so a dispatch for #10 and a run for #10 and #11 at the same head could post in parallel)."""
+    """The workflow's first job: a per-head matrix for ``marker``, plus legacy ``prs`` / ``key`` / ``at_head``.
+
+    Every ``marker`` cell uses concurrency group ``adversary-marker-<head>`` and ``--at-head`` for that sha, so a
+    push sweep, a dispatch and a ``workflow_run`` that could post on the same commit serialize together
+    (2026-11-07; push used a single ``push-rejudge-all-open`` key until 2026-11-10 and raced those jobs — Codex P1
+    on #490). ``workflow_run`` / ``workflow_dispatch`` emit one cell; ``push`` emits one cell per distinct open
+    head (paths-filtered landing of the marker module / workflow; never invents APPROVE).
+    """
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo or ""):
         return 2, {"error": f"not an OWNER/NAME repository: {repo!r}"}
+    if event_name == "push":
+        try:
+            by = _open_prs_by_head(api, repo)
+        except (ValueError, ApiError) as e:
+            return 2, {"error": str(e)}
+        include = [
+            {"head": h, "prs": ",".join(str(n) for n in nums)}
+            for h, nums in sorted(by.items())
+        ]
+        prs_csv = ",".join(str(n) for n in sorted({n for ns in by.values() for n in ns}))
+        return 0, {
+            "prs": prs_csv,
+            "key": "",
+            "at_head": "",
+            "found_by": "push all-open",
+            **_matrix_payload(include),
+        }
     try:
         prs, how, head = find_prs(event_name, event, repo, api)
     except (ValueError, ApiError) as e:
         return 2, {"error": str(e)}
-    return 0, {"prs": ",".join(str(n) for n in prs), "key": head if prs else "", "found_by": how}
+    key = head if prs else ""
+    include = [{"head": head, "prs": ",".join(str(n) for n in prs)}] if prs else []
+    return 0, {
+        "prs": ",".join(str(n) for n in prs),
+        "key": key,
+        "at_head": key,
+        "found_by": how,
+        **_matrix_payload(include),
+    }
 
 
 def parse_prs(text: str) -> list[int]:
@@ -1486,9 +1582,14 @@ def run_event(event_name: str, event: dict, repo: str, api, target_url: str = ""
     for head, rs in by_head.items():
         status = dict(rs[0]["status"])
         nums = _pr_list(rs)
-        if unread:
-            # The run's PRs were found at one head, so a PR that could not be read may share this status: fail closed.
-            bad = _pr_list(unread)
+        # Scope unread failures to this head only (Codex P2 on #490, 2026-11-10): a push sweep used to
+        # poison every head when any PR in the batch was unreadable. A single-head cell (`at_head`) also
+        # fails closed on a PR that never yielded a head (still this concurrency group's status).
+        unread_here = [r for r in unread if r.get("head") == head]
+        if at_head and head == at_head:
+            unread_here = unread_here + [r for r in unread if not r.get("head")]
+        if unread_here:
+            bad = _pr_list(unread_here)
             status.update(state="failure", description=f"PR {bad} at this head could not be read ({head[:12]})"[:140])
         elif len(rs) > 1 and any(r["outcome"] != "approve" for r in rs):
             status.update(state="failure", description=f"PRs {nums} share head {head[:12]} and not all approve"[:140])
@@ -1544,11 +1645,19 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(out, sort_keys=True))
             if rc == 0 and os.environ.get("GITHUB_OUTPUT"):
                 with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
-                    f.write(f"prs={out['prs']}\nkey={out['key']}\n")
+                    f.write(
+                        f"prs={out['prs']}\n"
+                        f"key={out['key']}\n"
+                        f"at_head={out.get('at_head', out['key'])}\n"
+                        f"matrix={out['matrix']}\n"
+                        f"has_work={out['has_work']}\n"
+                    )
             return rc
         try:
             prs_given = parse_prs(a.prs) if a.prs is not None else None
-            at_head = None if a.at_head is None else a.at_head.strip().lower()
+            # Empty --at-head (push all-open rejudge) means no single-head filter.
+            raw_at = None if a.at_head is None else a.at_head.strip().lower()
+            at_head = None if not raw_at else raw_at
             if at_head is not None and not SHA40.match(at_head):
                 raise ValueError(f"--at-head is not 40 hex: {a.at_head!r}")
         except ValueError as e:

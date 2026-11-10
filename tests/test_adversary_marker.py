@@ -221,6 +221,24 @@ def test_a_placeholder_head_alone_is_documentation_not_malformed() -> None:
     assert "placeholder" in r["detail"]
 
 
+def test_an_unfenced_docs_template_is_documentation_not_malformed() -> None:
+    # Agents paste the AGENTS.md example unfenced into PR bodies; the payload is invalid JSON
+    # (`APPROVE"|"BLOCK`) and used to fail closed as malformed, blocking owner-trust (#484).
+    body = '<!-- adversary-verdict:v1 {"verdict":"APPROVE"|"BLOCK","head":"<40-hex>"} -->'
+    r = adv(body)
+    assert not r["malformed"] and not r["present"], r["detail"]
+    assert "docs template" in r["detail"]
+
+
+def test_an_unfenced_docs_template_does_not_hide_a_same_head_block() -> None:
+    body = (
+        '<!-- adversary-verdict:v1 {"verdict":"APPROVE"|"BLOCK","head":"<40-hex>"} -->\n'
+        + marker("BLOCK")
+    )
+    r = adv(body)
+    assert r["present"] and r["verdict"] == "BLOCK" and r["matches_head"]
+
+
 def test_a_real_marker_inside_a_fence_is_ignored() -> None:
     # The review's argument: the body is author-controlled, so reading fences protects nothing and
     # only creates false blocks. A quoted marker is text, not a claim.
@@ -1098,6 +1116,8 @@ def test_documentation_approve_matrix_respects_documented_c1_limits(context, hea
 
 REPO_A = "djbclark/djbclark-ade"
 H1 = "1" * 40
+OUTSIDE_PR = {"author": "stranger", "assoc": "NONE"}
+GHAPP = {"id": 1, "slug": "some-app", "owner": {"login": "djbclark"}}
 H2 = "2" * 40
 
 
@@ -1221,14 +1241,15 @@ def test_a_verdict_for_this_head_posts_its_status_on_that_head(verdict, state, w
     assert report["prs"][0]["outcome"] == word
 
 
-@pytest.mark.parametrize("body,word", [
-    ("no marker, only prose: APPROVE " + H1, "missing"),
-    ('<!-- adversary-verdict:v1 {broken -->', "malformed"),
-    (None, "other-head"),
+@pytest.mark.parametrize("body,word,trust", [
+    # Outside PRs still need an owner comment; markerless / wrong-head body does not approve them.
+    ("no marker, only prose: APPROVE " + H1, "outside", OUTSIDE_PR),
+    ('<!-- adversary-verdict:v1 {broken -->', "malformed", {}),
+    (None, "outside", OUTSIDE_PR),
 ])
-def test_anything_but_a_live_approve_for_this_head_posts_failure(body, word):
+def test_anything_but_a_live_approve_for_this_head_posts_failure(body, word, trust):
     body = marker("APPROVE", H2) if body is None else body
-    rc, report, api = run_ev(wr_event(), serve(7, body))
+    rc, report, api = run_ev(wr_event(), serve(7, body, **trust))
     assert rc == 0 and [p["state"] for p in api.posted] == ["failure"], report
     assert report["prs"][0]["outcome"] == word
 
@@ -1409,9 +1430,13 @@ def workflow() -> dict:
 
 def test_the_workflow_runs_only_on_workflow_run_of_tests_and_a_dispatch():
     on = workflow()["on"]
-    assert set(on) == {"workflow_run", "workflow_dispatch"}
+    assert set(on) == {"workflow_run", "workflow_dispatch", "push"}
     assert on["workflow_run"] == {"workflows": ["Tests"], "types": ["completed"]}
     assert on["workflow_dispatch"]["inputs"]["pr"]["required"] is True
+    assert on["push"]["paths"] == [
+        "bin/adversary_marker.py",
+        ".github/workflows/adversary-marker.yml",
+    ]
     code = [ln for ln in WORKFLOW.read_text().splitlines() if not ln.lstrip().startswith("#")]
     assert not any("pull_request_target" in ln or "pull_request:" in ln for ln in code)
 
@@ -1495,10 +1520,6 @@ def test_a_body_approve_counts_only_on_an_owner_pr_with_a_trusted_body_editor(tr
     assert api.posted[0]["state"] == ("success" if word == "approve" else "failure")
     assert api.posted[0]["description"] == {"approve": f"APPROVE at {H1[:12]}", "untrusted": UNTRUSTED,
                                             "outside": OUTSIDE}[word]
-
-
-OUTSIDE_PR = {"author": "stranger", "assoc": "NONE"}
-GHAPP = {"id": 1, "slug": "some-app", "owner": {"login": "djbclark"}}
 
 
 def test_hole2_an_owner_edit_of_an_outside_body_never_approves_its_hidden_marker():
@@ -1587,11 +1608,20 @@ def test_a_malformed_marker_in_any_comment_fails_the_check():
     assert api.posted[0]["description"] == f"malformed marker in a comment at {H1[:12]}"
 
 
-def test_an_owner_pr_body_still_approves_and_a_comment_cannot_stand_in_for_it():
+def test_an_owner_pr_body_still_approves_and_markerless_owner_pr_also_approves():
+    """Owner PRs: explicit body APPROVE still works; no marker is also success (owner-trust, 2026-11-10)."""
     rc, report, api = run_ev(wr_event(), serve(7, marker("APPROVE", H1)))
     assert api.posted[0]["state"] == "success" and api.posted[0]["description"] == f"APPROVE at {H1[:12]}"
     rc, report, api = run_ev(wr_event(), serve(7, "", comments=[comment(marker("APPROVE", H1))]))
-    assert api.posted[0]["state"] == "failure" and report["prs"][0]["outcome"] == "missing"
+    assert api.posted[0]["state"] == "success" and report["prs"][0]["outcome"] == "approve"
+    assert report["prs"][0]["where"] == "owner_pr"
+    assert "marker optional" in api.posted[0]["description"]
+
+
+def test_an_owner_pr_with_no_marker_at_all_approves_under_owner_trust():
+    rc, report, api = run_ev(wr_event(), serve(7, "just a description, no marker"))
+    assert rc == 0 and api.posted[0]["state"] == "success"
+    assert report["prs"][0]["outcome"] == "approve" and report["prs"][0]["where"] == "owner_pr"
 
 
 def test_comments_are_read_on_every_page():
@@ -1642,7 +1672,12 @@ def dispatch(n: int) -> dict:
 
 @pytest.mark.parametrize("sibling", [marker("BLOCK", H1), "", marker("APPROVE", H2)], ids=["block", "none", "other-head"])
 def test_hole1_a_dispatch_for_an_approved_pr_fails_when_another_open_pr_at_its_head_does_not_approve(sibling):
-    answers = {**serve(10, marker("APPROVE", H1)), **serve(11, sibling), **at_head(H1, 10, 11)}
+    # Sibling is an outside PR so markerless / other-head does not ride owner-trust (2026-11-10).
+    answers = {
+        **serve(10, marker("APPROVE", H1)),
+        **serve(11, sibling, **OUTSIDE_PR),
+        **at_head(H1, 10, 11),
+    }
     rc, report, api = run_ev(dispatch(10), answers, name="workflow_dispatch")
     assert rc == 0, report
     assert [r["pr"] for r in report["prs"]] == [10, 11]
@@ -1695,8 +1730,9 @@ def test_at_head_posts_only_on_the_runs_own_head():
     assert report["prs"][1]["result"] == "head-moved"
 
 
-@pytest.mark.parametrize("head,rc", [(H1, 0), (H1.upper(), 0), ("abc", 2), ("", 2)])
+@pytest.mark.parametrize("head,rc", [(H1, 0), (H1.upper(), 0), ("abc", 2), ("", 0)])
 def test_the_cli_at_head_takes_only_a_full_sha(tmp_path, head, rc):
+    # Empty --at-head is the push all-open path (no single-head filter).
     (tmp_path / "ev.json").write_text(json.dumps(wr_event(prs=())))
     (tmp_path / "api.json").write_text(json.dumps(serve(7, marker("APPROVE", H1))))
     r = cli("--prs", "7", "--at-head", head, "--event", str(tmp_path / "ev.json"), "--event-name", "workflow_run",
@@ -1708,8 +1744,9 @@ def test_the_cli_at_head_takes_only_a_full_sha(tmp_path, head, rc):
 
 def test_the_marker_job_passes_the_resolved_head_as_at_head():
     judge = workflow()["jobs"]["marker"]["steps"][-1]
-    assert judge["env"]["AT_HEAD"] == "${{ needs.resolve.outputs.key }}"
+    assert judge["env"]["AT_HEAD"] == "${{ matrix.head }}"
     assert '--at-head "$AT_HEAD"' in judge["run"]
+    assert "at_head" not in workflow()["jobs"]["resolve"]["outputs"]
 
 
 def test_a_block_from_an_untrusted_author_still_fails_the_check():
@@ -1773,14 +1810,62 @@ def test_body_uses_current_editor_and_comment_history_is_bounded_newest_first():
 # ---- the resolve job and --prs ---------------------------------------------------------------------------
 
 def test_resolve_gives_the_pr_numbers_and_the_concurrency_key():
-    # The key is the HEAD the PRs were found at (2026-11-07): one status per sha, so one concurrency group per sha.
+    # The key / matrix cell is the HEAD the PRs were found at (2026-11-07): one status per sha.
     api = adversary_marker.CannedApi(at_head(H1, 11))
-    assert adversary_marker.resolve("workflow_run", wr_event(prs=(9, 7)), REPO_A, api) == \
-        (0, {"prs": "7,9,11", "key": H1, "found_by": "workflow_run.pull_requests"})
+    rc, out = adversary_marker.resolve("workflow_run", wr_event(prs=(9, 7)), REPO_A, api)
+    assert rc == 0
+    assert out["prs"] == "7,9,11" and out["key"] == H1 and out["at_head"] == H1
+    assert out["found_by"] == "workflow_run.pull_requests"
+    assert out["has_work"] == "true"
+    assert json.loads(out["matrix"]) == {"include": [{"head": H1, "prs": "7,9,11"}]}
     api = adversary_marker.CannedApi({commits_key(H1): [{"json": []}]})
     rc, out = adversary_marker.resolve("workflow_run", wr_event(prs=()), REPO_A, api)
-    assert rc == 0 and out["key"] == "" and out["prs"] == ""
+    assert rc == 0 and out["key"] == "" and out["prs"] == "" and out["at_head"] == ""
+    assert out["has_work"] == "false" and json.loads(out["matrix"]) == {"include": []}
     assert adversary_marker.resolve("pull_request", wr_event(), REPO_A, api)[0] == 2
+
+
+def test_resolve_push_emits_one_matrix_cell_per_head():
+    """Landing owner-trust on master flips open tips without per-PR dispatch; one job per head."""
+    open_key = f"GET repos/{REPO_A}/pulls?state=open&per_page=100&page=1"
+    answers = {
+        open_key: [{
+            "json": [
+                pull_entry(7, H1),
+                pull_entry(8, H2),
+                pull_entry(9, H1, state="closed"),
+                {"number": 10, "state": "open", "head": {"sha": H1},
+                 "base": {"repo": {"full_name": "other/fork"}}},
+            ],
+        }],
+    }
+    rc, out = adversary_marker.resolve(
+        "push", {"ref": "refs/heads/master"}, REPO_A, adversary_marker.CannedApi(answers)
+    )
+    assert rc == 0
+    assert out["prs"] == "7,8"
+    assert out["key"] == "" and out["at_head"] == ""
+    assert out["found_by"] == "push all-open"
+    assert out["has_work"] == "true"
+    assert json.loads(out["matrix"]) == {
+        "include": [
+            {"head": H1, "prs": "7"},
+            {"head": H2, "prs": "8"},
+        ],
+    }
+
+
+def test_unread_failure_on_one_head_does_not_poison_another():
+    # Push-style multi-head batch: #10 at H1 approves; #11 at H2 is unreadable → only H1 is posted.
+    answers = {
+        **serve(10, marker("APPROVE", H1)),
+        **serve(11, marker("APPROVE", H2), head=H2),
+        "GRAPHQL 11": [{"error": "HTTP 502"}],
+    }
+    rc, report, api = run_ev(
+        wr_event(prs=()), answers, prs_given=[10, 11], at_head=None,
+    )
+    assert rc == 2 and [(p["sha"], p["state"]) for p in api.posted] == [(H1, "success")], report
 
 
 def test_the_cli_resolve_writes_github_output(tmp_path):
@@ -1791,7 +1876,10 @@ def test_the_cli_resolve_writes_github_output(tmp_path):
                         "--event-name", "workflow_run", "--repo", REPO_A, "--api-answers", str(tmp_path / "api.json")],
                        capture_output=True, text=True, timeout=60, env={"PATH": "/usr/bin:/bin", "GITHUB_OUTPUT": str(out)})
     assert r.returncode == 0, r.stderr
-    assert out.read_text() == f"prs=7\nkey={H1}\n"
+    text = out.read_text()
+    assert f"prs=7\nkey={H1}\nat_head={H1}\n" in text
+    assert "has_work=true\n" in text
+    assert f'matrix={{"include":[{{"head":"{H1}","prs":"7"}}]}}\n' in text
 
 
 @pytest.mark.parametrize("prs,rc", [("7", 0), ("7,9", 0), ("", 2), ("7;rm", 2), ("0", 2), ("7,x", 2)])
@@ -1809,12 +1897,25 @@ def test_the_marker_job_is_keyed_by_the_resolved_pr_and_requests_both_app_permis
     jobs = workflow()["jobs"]
     assert set(jobs) == {"resolve", "marker"}
     assert "environment" not in jobs["resolve"] and jobs["marker"]["needs"] == "resolve"
-    assert jobs["marker"]["concurrency"] == {"group": "adversary-marker-${{ needs.resolve.outputs.key }}",
-                                             "cancel-in-progress": True}
+    assert jobs["resolve"]["outputs"] == {
+        "matrix": "${{ steps.find.outputs.matrix }}",
+        "has_work": "${{ steps.find.outputs.has_work }}",
+    }
+    assert jobs["marker"]["if"] == "${{ needs.resolve.outputs.has_work == 'true' }}"
+    assert jobs["marker"]["strategy"] == {
+        "fail-fast": False,
+        "matrix": "${{ fromJson(needs.resolve.outputs.matrix) }}",
+    }
+    assert jobs["marker"]["concurrency"] == {
+        "group": "adversary-marker-${{ matrix.head }}",
+        "cancel-in-progress": True,
+    }
     app = [s for s in jobs["marker"]["steps"] if s.get("uses", "").startswith("actions/create-github-app-token@")][0]
     assert app["with"]["permission-statuses"] == "write" and app["with"]["permission-checks"] == "write"
     judge = jobs["marker"]["steps"][-1]
-    assert '--prs "$PRS"' in judge["run"] and judge["env"]["PRS"] == "${{ needs.resolve.outputs.prs }}"
+    assert '--prs "$PRS"' in judge["run"]
+    assert judge["env"]["PRS"] == "${{ matrix.prs }}"
+    assert judge["env"]["AT_HEAD"] == "${{ matrix.head }}"
 
 
 # ---- B1 (Codex review, 2026-11-07): an owner comment approves only if nobody but the owner edited it ----------------
