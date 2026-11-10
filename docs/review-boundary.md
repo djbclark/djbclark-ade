@@ -126,8 +126,8 @@ bin/ade-merge-ready approve-paste --base master   # templates for master-base ti
 bin/ade-merge-ready approve-paste --bottoms-only  # templates for named-stack bottoms only
 bin/ade-merge-ready approve-paste --group install --bottoms-only
 # Owner-only (gh auth as repo owner). Dry-run by default; posts only with both flags:
-bin/ade-merge-ready approve-post --bottoms-only --i-reviewed --yes --trigger-marker
-bin/ade-merge-ready approve-post --prs 327,332,334,335,336,337,342,359 --i-reviewed --yes --trigger-marker
+bin/ade-merge-ready approve-post --bottoms-only   # dry-run; prints --expect-head N=sha pins
+bin/ade-merge-ready approve-post --prs 484 --i-reviewed --yes --expect-head 484=<40hex> --trigger-marker
 bin/ade-merge-ready merge-now --prs 484            # dry-run; refuses unless adversary-marker success
 bin/ade-merge-ready merge-now --prs 484 --yes      # squash --match-head-commit only if merge_now
 ```

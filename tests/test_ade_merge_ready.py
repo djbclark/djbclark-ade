@@ -666,6 +666,8 @@ def test_approve_post_yes_posts_comment_for_outside(tmp_path: Path) -> None:
         "--yes",
         "--prs",
         "334",
+        "--expect-head",
+        f"334={head}",
         "--min",
         "1",
     )
@@ -723,6 +725,8 @@ def test_approve_post_yes_body_edits_owner_pr(tmp_path: Path) -> None:
         "--yes",
         "--prs",
         "484",
+        "--expect-head",
+        f"484={head}",
         "--min",
         "1",
     )
@@ -731,6 +735,100 @@ def test_approve_post_yes_body_edits_owner_pr(tmp_path: Path) -> None:
     patched = log.read_text()
     assert head in patched
     assert "adversary-verdict:v1" in patched
+
+
+def test_approve_post_yes_requires_expect_head(tmp_path: Path) -> None:
+    head = "e" * 40
+    listing = json.dumps(
+        [
+            {
+                "number": 334,
+                "title": "install",
+                "headRefOid": head,
+                "baseRefName": "master",
+                "mergeable": "MERGEABLE",
+                "headRefName": "cursor/x-f576",
+                "author": {"login": "djbclark"},
+            }
+        ]
+    )
+    checks = "pytest-linux\tpass\t0\tx\nadversary-marker\tfail\t0\tx\n"
+    gh = write_fake_gh(
+        tmp_path,
+        textwrap.dedent(
+            f"""
+            set -e
+            case "$*" in
+              *"pr list"*) echo '{listing}' ;;
+              *"pr checks"*) printf '%s' '{checks}' ; exit 1 ;;
+              *"api user"*) echo djbclark ;;
+              *"repo view"*) echo djbclark ;;
+              *) echo "unexpected: $*" >&2; exit 99 ;;
+            esac
+            """
+        ),
+    )
+    r = run(
+        gh,
+        "approve-post",
+        "--i-reviewed",
+        "--yes",
+        "--prs",
+        "334",
+        "--min",
+        "1",
+    )
+    assert r.returncode == 2
+    assert "expect-head" in r.stderr
+
+
+def test_approve_post_yes_refuses_moved_head(tmp_path: Path) -> None:
+    live = "a" * 40
+    reviewed = "b" * 40
+    listing = json.dumps(
+        [
+            {
+                "number": 334,
+                "title": "install",
+                "headRefOid": live,
+                "baseRefName": "master",
+                "mergeable": "MERGEABLE",
+                "headRefName": "cursor/x-f576",
+                "author": {"login": "djbclark"},
+            }
+        ]
+    )
+    checks = "pytest-linux\tpass\t0\tx\nadversary-marker\tfail\t0\tx\n"
+    gh = write_fake_gh(
+        tmp_path,
+        textwrap.dedent(
+            f"""
+            set -e
+            case "$*" in
+              *"pr list"*) echo '{listing}' ;;
+              *"pr checks"*) printf '%s' '{checks}' ; exit 1 ;;
+              *"api user"*) echo djbclark ;;
+              *"repo view"*) echo djbclark ;;
+              *) echo "unexpected: $*" >&2; exit 99 ;;
+            esac
+            """
+        ),
+    )
+    r = run(
+        gh,
+        "approve-post",
+        "--i-reviewed",
+        "--yes",
+        "--prs",
+        "334",
+        "--expect-head",
+        f"334={reviewed}",
+        "--min",
+        "1",
+    )
+    assert r.returncode == 2
+    assert "live head" in r.stderr
+    assert "tip moved" in r.stderr
 
 
 def test_collect_refuses_silent_500_truncation(tmp_path: Path) -> None:

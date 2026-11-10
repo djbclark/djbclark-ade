@@ -538,7 +538,10 @@ def _approve_marker(head: str) -> str:
     return f'<!-- adversary-verdict:v1 {{"verdict":"APPROVE","head":"{head}"}} -->'
 
 
-def _trigger_adversary_marker(gh: str, repo: str, number: int) -> None:
+def _trigger_adversary_marker(
+    gh: str, repo: str, number: int, *, progress=None
+) -> None:
+    out = progress if progress is not None else sys.stdout
     t = run_gh(
         gh,
         [
@@ -557,7 +560,7 @@ def _trigger_adversary_marker(gh: str, repo: str, number: int) -> None:
             f"workflow run adversary-marker pr={number} failed: "
             f"{(t.stderr or t.stdout).strip()}"
         )
-    print(f"triggered adversary-marker.yml pr={number}")
+    print(f"triggered adversary-marker.yml pr={number}", file=out)
 
 
 def resolve_approve_via(via: str, owner_pr: bool) -> str:
@@ -570,6 +573,60 @@ def resolve_approve_via(via: str, owner_pr: bool) -> str:
     raise RuntimeError(f"unknown --via {via!r} (want auto|body|comment)")
 
 
+def parse_expect_heads(items: list[str]) -> dict[int, str]:
+    """Parse --expect-head N=40hex / N:40hex into {pr: sha}."""
+    out: dict[int, str] = {}
+    for raw in items or []:
+        s = (raw or "").strip()
+        if not s:
+            continue
+        if "=" in s:
+            left, right = s.split("=", 1)
+        elif ":" in s:
+            left, right = s.split(":", 1)
+        else:
+            raise RuntimeError(
+                f"bad --expect-head {raw!r} (want N=40hex or N:40hex)"
+            )
+        try:
+            n = int(left.strip())
+        except ValueError as e:
+            raise RuntimeError(
+                f"bad --expect-head {raw!r}: PR number must be int"
+            ) from e
+        sha = right.strip().lower()
+        if not SHA40.fullmatch(sha):
+            raise RuntimeError(
+                f"bad --expect-head {raw!r}: head must be a 40-hex sha"
+            )
+        out[n] = sha
+    return out
+
+
+def require_expect_heads(
+    paste_rows: list[dict[str, Any]], expect: dict[int, str]
+) -> None:
+    """Refuse --yes when a tip's live head is missing from or differs from expect."""
+    if not expect:
+        raise RuntimeError(
+            "approve-post --yes requires --expect-head N=40hex for each tip "
+            "(pin the SHA you reviewed; dry-run prints them)"
+        )
+    for r in paste_rows:
+        n = int(r["number"])
+        live = (r.get("head") or "").lower()
+        want = expect.get(n)
+        if want is None:
+            raise RuntimeError(
+                f"approve-post --yes missing --expect-head {n}={live or '…'}"
+            )
+        if want != live:
+            raise RuntimeError(
+                f"#{n} live head {live} != --expect-head {want} "
+                "(tip moved after review; re-review and pin the new sha)"
+            )
+
+
 def post_approve_comment(
     gh: str,
     repo: str,
@@ -578,14 +635,16 @@ def post_approve_comment(
     *,
     dry_run: bool,
     trigger_marker: bool,
+    progress=None,
 ) -> None:
     """Post one owner APPROVE comment naming *head*; optionally re-run the marker Action."""
+    out = progress if progress is not None else sys.stdout
     marker = _approve_marker(head)
     if dry_run:
-        print(f"would comment #{number} head={head}")
-        print(marker)
+        print(f"would comment #{number} head={head}", file=out)
+        print(marker, file=out)
         if trigger_marker:
-            print(f"would trigger adversary-marker.yml pr={number}")
+            print(f"would trigger adversary-marker.yml pr={number}", file=out)
         return
     p = run_gh(
         gh,
@@ -596,9 +655,9 @@ def post_approve_comment(
         raise RuntimeError(
             f"gh pr comment #{number} failed: {(p.stderr or p.stdout).strip()}"
         )
-    print(f"commented #{number} head={head}")
+    print(f"commented #{number} head={head}", file=out)
     if trigger_marker:
-        _trigger_adversary_marker(gh, repo, number)
+        _trigger_adversary_marker(gh, repo, number, progress=out)
 
 
 def post_approve_body(
@@ -609,14 +668,16 @@ def post_approve_body(
     *,
     dry_run: bool,
     trigger_marker: bool,
+    progress=None,
 ) -> None:
     """Append one APPROVE marker to the PR body (owner tips; not herdr)."""
+    out = progress if progress is not None else sys.stdout
     marker = _approve_marker(head)
     if dry_run:
-        print(f"would body-edit #{number} head={head}")
-        print(marker)
+        print(f"would body-edit #{number} head={head}", file=out)
+        print(marker, file=out)
         if trigger_marker:
-            print(f"would trigger adversary-marker.yml pr={number}")
+            print(f"would trigger adversary-marker.yml pr={number}", file=out)
         return
     view = run_gh(
         gh,
@@ -633,7 +694,7 @@ def post_approve_body(
         raise RuntimeError(f"gh pr view #{number} JSON: {e}") from e
     old = cur.get("body") or ""
     if marker in old:
-        print(f"body already has marker #{number} head={head}")
+        print(f"body already has marker #{number} head={head}", file=out)
     else:
         new_body = old.rstrip() + "\n\n" + marker + "\n"
         # Prefer REST JSON body to avoid shell metacharacters in markers.
@@ -655,9 +716,9 @@ def post_approve_body(
                 f"gh api PATCH pulls/{number} failed: "
                 f"{(patch.stderr or patch.stdout).strip()}"
             )
-        print(f"body-edited #{number} head={head}")
+        print(f"body-edited #{number} head={head}", file=out)
     if trigger_marker:
-        _trigger_adversary_marker(gh, repo, number)
+        _trigger_adversary_marker(gh, repo, number, progress=out)
 
 
 def merge_now_prs(
@@ -836,6 +897,16 @@ def main(argv: list[str] | None = None) -> int:
             "or force body / comment (default auto)"
         ),
     )
+    ap.add_argument(
+        "--expect-head",
+        action="append",
+        default=[],
+        metavar="N=40HEX",
+        help=(
+            "approve-post: reviewed tip SHA for PR N (repeatable; N=sha or N:sha). "
+            "Required with --yes; refuse if live headRefOid differs"
+        ),
+    )
     a = ap.parse_args(argv)
     try:
         rows = collect(a.gh, a.repo, a.min)
@@ -908,6 +979,7 @@ def main(argv: list[str] | None = None) -> int:
                 "approve-post --yes requires --i-reviewed (affirm real tip review)"
             )
         try:
+            expect_heads = parse_expect_heads(a.expect_head)
             login = gh_login(a.gh)
             owner = repo_owner_login(a.gh, a.repo)
         except (RuntimeError, subprocess.TimeoutExpired, OSError) as e:
@@ -923,11 +995,23 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 0
+        if a.yes:
+            try:
+                require_expect_heads(paste_rows, expect_heads)
+            except RuntimeError as e:
+                return die(str(e))
+        out = sys.stderr if a.json else sys.stdout
         if dry_run:
             print(
                 f"# dry-run as owner {login} ({len(paste_rows)} tips, via={a.via}); "
-                "pass --i-reviewed --yes to post"
+                "pass --i-reviewed --yes --expect-head N=sha… to post",
+                file=out,
             )
+            for r in paste_rows:
+                print(
+                    f"# pin: --expect-head {r['number']}={r.get('head') or ''}",
+                    file=out,
+                )
         posted = 0
         vias: list[str] = []
         for r in paste_rows:
@@ -942,6 +1026,7 @@ def main(argv: list[str] | None = None) -> int:
                         r["head"],
                         dry_run=dry_run,
                         trigger_marker=a.trigger_marker,
+                        progress=out,
                     )
                 else:
                     post_approve_comment(
@@ -951,6 +1036,7 @@ def main(argv: list[str] | None = None) -> int:
                         r["head"],
                         dry_run=dry_run,
                         trigger_marker=a.trigger_marker,
+                        progress=out,
                     )
             except (RuntimeError, subprocess.TimeoutExpired, OSError) as e:
                 return die(str(e))
@@ -963,6 +1049,7 @@ def main(argv: list[str] | None = None) -> int:
                     "via": a.via,
                     "posted": posted,
                     "numbers": [r["number"] for r in paste_rows],
+                    "heads": {str(r["number"]): r.get("head") for r in paste_rows},
                     "vias": vias,
                 },
                 sys.stdout,
