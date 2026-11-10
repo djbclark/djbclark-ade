@@ -1,0 +1,9 @@
+{
+  "name": "@djbclark/paseo-plugin-ade-claim",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "node --test server/claim-lib.test.mjs"
+  }
+}
