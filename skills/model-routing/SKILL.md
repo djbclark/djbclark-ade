@@ -120,8 +120,11 @@ a quota limit and continue it after the reset. The fleet governor and the quota 
 windows are short (`route_agent.py show`), select a fresh eligible pool through the router. Do not fall back to
 an archived TUI or infer that a manual Pi smoke test authorizes automatic routing. When those windows are short,
 Agent-tool sub-agents run with `model: "sonnet"`; Claude code slices use Sonnet.
-D5. **In-flight slices reserve quota per service** (`[dispatch.estimate_floor]`, the repo overrides for tendcf and
-nix2cf): admit / plan refuse a slice that does not fit (exit 5, class `inflight`).
+D5. **Quota fit uses `[dispatch.estimate_floor]` (and repo overrides for tendcf / nix2cf).** `route_agent.py plan` /
+`pool_fits` refuse a slice that does not fit the **current** remaining reading. They do **not** yet subtract sibling
+in-flight reservations across a parallel wave (that was `acp-dispatch`'s `write_and_recheck` / `inflight_recheck`).
+Until a native reservation lands: re-run `plan` immediately before each `paseo run`, and do not launch more same-pool
+slices from one plan snapshot than the floor estimate fits in remaining.
 D6. **Calibrate and monthly re-rank (2026-11-10):** `bin/route_agent.py calibrate [--json] [--since 30]` proposes
 `good_at` rank deltas from recent outcomes. The optional Paseo schedule `routing-recalibrate` (Day 1 09:00,
 `--mode auto`; create line in `docs/scheduling.md`, inventory in `config/install.toml`) applies them; leave

@@ -41,9 +41,11 @@ sub-agent's final message: the harness cuts that at 4,000 characters.
 
 A slice that edits code gets its own linked worktree (AGENTS.md order 9:
 `git worktree add -b NAME ~/src/<repo>-NAME-wt origin/master`) and runs as a Paseo agent there.
-After `route_agent.py plan` / `route` and `load-watch admit`:
+After `route_agent.py plan` / `route` and `load-watch admit` (machine capacity — not service quota):
 
 ```bash
+# Re-plan immediately before EACH launch when several slices share one quota pool
+# (plan/pool_fits do not yet reserve sibling in-flight usage; see model-routing D5).
 paseo run --provider PROVIDER/MODEL --no-wait \
   --workspace wks_… --cwd ~/src/<repo>-NAME-wt \
   --label ade.kind=KIND --label ade.name=NAME --label ade.lead=LEAD \
@@ -52,9 +54,9 @@ paseo run --provider PROVIDER/MODEL --no-wait \
 # or, minting for a claimed worktree: --new-workspace local --cwd ~/src/<repo>-NAME-wt …
 ```
 
-Take `Choice.dispatch` from `route_agent.py plan` **as-is** (native `paseo run --provider …`), then append
+Take `Choice.dispatch` from a **fresh** `route_agent.py plan` **as-is** (native `paseo run --provider …`), then append
 only placement flags and the positional brief (`paseo run` has no `--prompt-file`). Write the footer into
-the brief yourself. Create a workspace only with native `paseo workspace create` or
+the brief yourself. For parallel same-pool waves, re-plan (or stagger) so combined floor estimates stay under remaining. Create a workspace only with native `paseo workspace create` or
 `paseo run --new-workspace …` when deliberate — ordinary dispatch never mints workspaces.
 As verified on 2026-11-07, agent-origin runs, or runs with `PASEO_WORKSPACE_ID` set, must explicitly select a workspace:
 `--cwd` alone inherits the parent agent's workspace and directory. Pass `--workspace` (validated against
