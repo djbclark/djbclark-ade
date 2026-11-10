@@ -1,4 +1,4 @@
-# Install catalog (transitional, 2026-11-09)
+# Install catalog (folded under [install], 2026-11-10)
 
 Typed component / key-reference catalog with print-only `plan`, observe-only
 `doctor` (runs `probe_argv` when recorded), and **bounded user-scoped `apply`**.
@@ -10,16 +10,16 @@ reconciliation and `--system` root effects remain later work
 
 | File | Role |
 | --- | --- |
-| `config/install.toml` | Transitional editable catalog (`schema_version = 1`) |
-| `config/install.schema.json` | Structural schema (checked by `ade-install check`) |
+| `config/ade.toml` `[install]` | Preferred editable catalog when present (`[[install.component]]` / `[[install.key]]` / `[[install.login]]`) |
+| `config/install.toml` | Legacy fold source and fallthrough when `ade.toml` is absent or lacks `[install]` |
+| `config/install.schema.json` | Structural schema (checked by `ade-install check` on either source) |
 | `bin/ade_install.py` / `bin/ade-install` | Loader, plan, doctor, apply |
 | `bin/ade_user_install.py` / `bin/ade-user-install` | User-scoped uv/just fetch and `bin/` symlinks |
 
-Loaded while `config/ade.toml` does **not** yet carry an install catalog (S1
-policy-domain fold may land `ade.toml` first). If the unified file already has
-`[install]` / folded component|key|login tables, `ade-install` refuses the
-transitional file so there is no permanent duplicate editable authority. A later
-fold must carry install/keys into the unified file with reviewed consumer adoption.
+`ade-config fold --write` projects `config/install.toml` under `[install]`.
+`ade-install` prefers the folded catalog; transitional `install.toml` remains so
+a missing unified file still loads. `fold --check` keeps the two in sync while
+both are kept.
 
 ## B. Component classes
 
@@ -38,9 +38,10 @@ fold must carry install/keys into the unified file with reviewed consumer adopti
 
 ## C. Keys and logins
 
-`[[key]]` entries are **names and metadata only** (create URL, verify=UNKNOWN,
-expiry=unknown|…). Doctor never reads `sudo-secretspec` values. Login checks are
-separate from keys; consent is not key validation.
+`[[install.key]]` / legacy `[[key]]` entries are **names and metadata only**
+(create URL, verify=UNKNOWN, expiry=unknown|…). Doctor never reads
+`sudo-secretspec` values. Login checks are separate from keys; consent is not
+key validation.
 
 ## D. CLI
 

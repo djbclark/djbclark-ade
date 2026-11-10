@@ -275,6 +275,72 @@
           "type": "object"
         }
       }
+    },
+    "install": {
+      "type": "object",
+      "description": "Folded from legacy config/install.toml under [install] (component/key/login catalog). Semantic checks stay in ade-install / install.schema.json.",
+      "additionalProperties": false,
+      "required": [
+        "component"
+      ],
+      "properties": {
+        "schema_version": {
+          "type": "integer",
+          "const": 1
+        },
+        "component": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "class"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "class": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": true
+          }
+        },
+        "key": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "additionalProperties": true
+          }
+        },
+        "login": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "id"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "additionalProperties": true
+          }
+        }
+      }
     }
   }
 }

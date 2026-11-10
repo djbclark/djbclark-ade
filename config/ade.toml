@@ -1,8 +1,8 @@
-# config/ade.toml — schema_version=1 unified ADE config (folded 2026-11-09).
+# config/ade.toml — schema_version=1 unified ADE config (folded 2026-11-09; install 2026-11-10).
 # Canonical repo base when present (docs/config-migration.md). Legacy split TOMLs
-# (routing/gates/context-budget/secret-deny/pr-policy) remain for fallthrough when
-# this file is absent. Install/keys stay transitional in config/install.toml until
-# a reviewed install fold. Regenerate from legacy with: ade-config fold --write
+# (routing/gates/context-budget/secret-deny/pr-policy/install) remain for fallthrough
+# when this file is absent. Install/keys fold under [install] from config/install.toml.
+# Regenerate from legacy with: ade-config fold --write
 # Edit scalars with: ade-config set PATH VALUE --target repo
 
 schema_version = 1
@@ -111,6 +111,451 @@ draft_prefix = "WIP: "
 exempt_repos = []
 trusted_authors = []
 approved_label = "pr-policy-approved"
+
+[install]
+schema_version = 1
+
+[[install.component]]
+id = "just"
+class = "hard"
+summary = "Recipe runner; bootstrap installs it if missing"
+source = "https://github.com/casey/just"
+install = "ade-user-install just (GitHub release → ~/.local/bin)"
+install_argv = [ "{bin}/ade-user-install", "just", "--prefix", "{prefix}" ]
+update = "ade-user-install just (re-fetch latest release)"
+update_argv = [ "{bin}/ade-user-install", "just", "--prefix", "{prefix}" ]
+probe = "just --version"
+probe_argv = [ "just", "--version" ]
+presence = "just"
+platforms = [ "mac", "linux" ]
+
+[[install.component]]
+id = "git"
+class = "hard"
+summary = "Source control"
+install = "apt-get install -y git (Linux); brew install git (Mac)"
+needs_system = true
+system_argv = [ "apt-get", "install", "-y", "git" ]
+system_argv_darwin = [ "brew", "install", "git" ]
+update = "package manager"
+probe = "git --version"
+probe_argv = [ "git", "--version" ]
+presence = "git"
+platforms = [ "mac", "linux" ]
+notes = "system_argv = Linux apt; system_argv_darwin = Homebrew. Preview with apply --system --dry-run."
+
+[[install.component]]
+id = "gh"
+class = "hard"
+summary = "GitHub CLI"
+source = "https://cli.github.com"
+install = "apt-get install -y gh (Linux); brew install gh (Mac)"
+needs_system = true
+system_argv = [ "apt-get", "install", "-y", "gh" ]
+system_argv_darwin = [ "brew", "install", "gh" ]
+update = "package manager"
+probe = "gh --version"
+probe_argv = [ "gh", "--version" ]
+presence = "gh"
+platforms = [ "mac", "linux" ]
+notes = "system_argv = Linux apt; system_argv_darwin = Homebrew."
+
+[[install.component]]
+id = "uv"
+class = "hard"
+summary = "Python tool runner used by bin/pytest and install paths"
+source = "https://github.com/astral-sh/uv"
+install = "ade-user-install uv (GitHub release → ~/.local/bin)"
+install_argv = [ "{bin}/ade-user-install", "uv", "--prefix", "{prefix}" ]
+update = "ade-user-install uv (re-fetch latest release)"
+update_argv = [ "{bin}/ade-user-install", "uv", "--prefix", "{prefix}" ]
+probe = "uv --version"
+probe_argv = [ "uv", "--version" ]
+presence = "uv"
+platforms = [ "mac", "linux" ]
+
+[[install.component]]
+id = "sudo-secretspec"
+class = "hard"
+summary = "Only way a key reaches a tool (review rule 3)"
+source = "https://github.com/frdminc/sudo-secretspec"
+install = "brew install frdminc/sudo-secretspec/sudo-secretspec (Mac); Linux: release tarball installer (packaging/README)"
+needs_system = true
+system_argv_darwin = [ "brew", "install", "frdminc/sudo-secretspec/sudo-secretspec" ]
+update = "brew upgrade (Mac) then interactive sudo-secretspec install; Linux tarball UNKNOWN for argv"
+probe = "sudo-secretspec doctor"
+probe_argv = [ "sudo-secretspec", "doctor" ]
+presence = "sudo-secretspec"
+platforms = [ "mac", "linux" ]
+notes = "Hard by operator ruling 2026-11-07. Package install ≠ privilege boundary: interactive `sudo-secretspec install` is a later unit. Linux system_argv still UNKNOWN (tarball). Preview Mac brew with apply --system --dry-run."
+
+[[install.component]]
+id = "aiuse"
+class = "hard"
+summary = "Quota reading for routing"
+source = "https://github.com/djbclark/aiuse"
+install = "uv tool install git+https://github.com/djbclark/aiuse"
+install_argv = [ "uv", "tool", "install", "git+https://github.com/djbclark/aiuse" ]
+update = "uv tool upgrade aiuse"
+update_argv = [ "uv", "tool", "upgrade", "aiuse" ]
+probe = "aiuse --help"
+probe_argv = [ "aiuse", "--help" ]
+presence = "aiuse"
+platforms = [ "mac", "linux" ]
+notes = "Hard by operator ruling 2026-11-07; user-scoped via uv tool"
+
+[[install.component]]
+id = "cswap"
+class = "hard"
+summary = "claude-swap; aiuse reads it"
+install = "UNKNOWN"
+update = "UNKNOWN"
+probe = "UNKNOWN"
+presence = "cswap"
+platforms = [ "mac", "linux" ]
+
+[[install.component]]
+id = "paseo"
+class = "hard"
+summary = "Sole harness"
+source = "https://github.com/getpaseo/paseo"
+install = "UNKNOWN"
+update = "UNKNOWN"
+probe = "paseo --version"
+probe_argv = [ "paseo", "--version" ]
+presence = "paseo"
+platforms = [ "mac", "linux" ]
+
+[[install.component]]
+id = "graft"
+class = "hard"
+summary = "Repo context graph CLI"
+source = "https://www.npmjs.com/package/@nanonets/graft"
+install = "npm install -g @nanonets/graft (user npm prefix → ~/.local)"
+install_argv = [ "npm", "install", "-g", "@nanonets/graft" ]
+update = "npm update -g @nanonets/graft"
+update_argv = [ "npm", "update", "-g", "@nanonets/graft" ]
+probe = "graft --version"
+probe_argv = [ "graft", "--version" ]
+presence = "graft"
+platforms = [ "mac", "linux" ]
+notes = "Requires a writable npm prefix (e.g. ~/.local); not a root package-manager path"
+
+[[install.component]]
+id = "pi"
+class = "hard"
+summary = "Sole general-purpose third-party TUI"
+install = "UNKNOWN"
+update = "UNKNOWN"
+probe = "pi --version"
+probe_argv = [ "pi", "--version" ]
+presence = "pi"
+platforms = [ "mac", "linux" ]
+notes = "Pi policy 2026-11-08; archived omp/OpenCode/Crush are never reinstall targets"
+
+[[install.component]]
+id = "claude-code"
+class = "hard"
+summary = "Vendor client for Claude monthly plan"
+install = "UNKNOWN"
+update = "UNKNOWN"
+probe = "claude --version"
+probe_argv = [ "claude", "--version" ]
+presence = "claude"
+platforms = [ "mac", "linux" ]
+
+[[install.component]]
+id = "codex"
+class = "hard"
+summary = "Vendor client for Codex monthly plan (not OpenAI API credits)"
+install = "UNKNOWN"
+update = "UNKNOWN"
+probe = "codex --version"
+probe_argv = [ "codex", "--version" ]
+presence = "codex"
+platforms = [ "mac", "linux" ]
+
+[[install.component]]
+id = "cursor-cli"
+class = "hard"
+summary = "Cursor CLI / vendor client"
+install = "UNKNOWN"
+update = "UNKNOWN"
+probe = "cursor --version"
+probe_argv = [ "cursor", "--version" ]
+presence = "cursor"
+platforms = [ "mac", "linux" ]
+
+[[install.component]]
+id = "skill-everywhere"
+class = "hard"
+summary = "Link skills into every TUI from this repo"
+source = "bin/skill-everywhere"
+install = "symlink bin/skill-everywhere into ~/.local/bin, then skill-everywhere --all"
+install_argv = [ "{bin}/ade-user-install", "link", "skill-everywhere", "--root", "{root}", "--prefix", "{prefix}" ]
+update = "skill-everywhere --all"
+update_argv = [ "{prefix}/skill-everywhere", "--all" ]
+probe = "bash -n bin/skill-everywhere"
+probe_argv = [ "bash", "-n", "{bin}/skill-everywhere" ]
+presence = "skill-everywhere"
+platforms = [ "mac", "linux" ]
+notes = "Apply links the CLI; a follow-up --all sync is update_argv / later reconcile. Doctor syntax-checks the script (not --check --all)."
+
+[[install.component]]
+id = "firecrawl-router"
+class = "offered"
+chosen = true
+summary = "bin/firecrawl-router toward a firecrawl endpoint"
+source = "bin/firecrawl-router"
+install = "symlink bin/firecrawl-router into ~/.local/bin"
+install_argv = [ "{bin}/ade-user-install", "link", "firecrawl-router", "--root", "{root}", "--prefix", "{prefix}" ]
+update = "repo pull (symlink target)"
+probe = "firecrawl-router --help"
+probe_argv = [ "{bin}/firecrawl-router", "--help" ]
+presence = "firecrawl-router"
+platforms = [ "mac", "linux" ]
+
+[[install.component]]
+id = "hermes"
+class = "offered"
+chosen = true
+summary = "Offered Hermes install and basic setup (S3a)"
+install = "UNKNOWN"
+update = "UNKNOWN"
+probe = "UNKNOWN"
+presence = "hermes"
+platforms = [ "mac", "linux" ]
+
+[[install.component]]
+id = "peer-link"
+class = "offered"
+chosen = true
+summary = "Grok Bot channel (frdminc/peer-link)"
+source = "https://github.com/frdminc/peer-link"
+install = "UNKNOWN"
+update = "UNKNOWN"
+probe = "UNKNOWN"
+platforms = [ "mac", "linux" ]
+
+[[install.component]]
+id = "litellm"
+class = "offered"
+chosen = true
+summary = "LiteLLM proxy fork; Hermes fallback"
+install = "UNKNOWN"
+update = "UNKNOWN"
+probe = "UNKNOWN"
+platforms = [ "mac", "linux" ]
+
+[[install.component]]
+id = "1password"
+class = "optional"
+chosen = false
+summary = "1Password app, op CLI, and skill"
+install = "UNKNOWN"
+update = "UNKNOWN"
+probe = "UNKNOWN"
+presence = "op"
+platforms = [ "mac", "linux" ]
+
+[[install.component]]
+id = "grok-bot-setup"
+class = "optional"
+chosen = false
+summary = "Cloud Grok Bot side setup (Cursor-billed; not SuperGrok)"
+install = "UNKNOWN"
+update = "UNKNOWN"
+probe = "UNKNOWN"
+platforms = [ "mac", "linux" ]
+notes = "Distinct from cancelled SuperGrok / Pi xai-oauth allowance"
+
+[[install.component]]
+id = "github-advanced-security"
+class = "optional"
+chosen = false
+summary = "Enable GHAS where the account allows"
+install = "UNKNOWN"
+update = "UNKNOWN"
+probe = "UNKNOWN"
+platforms = [ "mac", "linux" ]
+
+[[install.component]]
+id = "hosted-firecrawl"
+class = "optional"
+chosen = false
+summary = "firecrawl.dev API upstream for the router"
+install = "UNKNOWN"
+update = "UNKNOWN"
+probe = "UNKNOWN"
+platforms = [ "mac", "linux" ]
+
+[[install.component]]
+id = "greptile"
+class = "optional"
+chosen = false
+summary = "Greptile CLI/app and skill"
+install = "UNKNOWN"
+update = "UNKNOWN"
+probe = "UNKNOWN"
+platforms = [ "mac", "linux" ]
+
+[[install.component]]
+id = "coderabbit"
+class = "optional"
+chosen = false
+summary = "CodeRabbit CLI/app and skill"
+install = "UNKNOWN"
+update = "UNKNOWN"
+probe = "UNKNOWN"
+platforms = [ "mac", "linux" ]
+
+[[install.component]]
+id = "herdr-bridges"
+class = "optional"
+chosen = false
+summary = "herdr4paseo / paseo4herdr and herdr-server-run only if herdr still runs"
+install = "UNKNOWN"
+update = "UNKNOWN"
+probe = "UNKNOWN"
+platforms = [ "mac", "linux" ]
+notes = "Archives preserved; do not auto-reinstall herdr"
+
+[[install.component]]
+id = "ovhcloud-hosting"
+class = "suggested"
+chosen = false
+summary = "Suggested always-on host vendor; not installed automatically"
+install = "UNKNOWN"
+update = "UNKNOWN"
+probe = "UNKNOWN"
+platforms = [ "mac", "linux" ]
+
+[[install.component]]
+id = "paid-plans"
+class = "never"
+chosen = false
+summary = "Paid plans themselves are never installed; users buy and log in"
+install = "UNKNOWN"
+update = "UNKNOWN"
+probe = "UNKNOWN"
+platforms = [ "mac", "linux" ]
+
+[[install.key]]
+name = "ANTHROPIC_API_KEY"
+components = [ "pi" ]
+create_url = "https://console.anthropic.com/settings/keys"
+verify = "UNKNOWN"
+expiry = "unknown"
+
+[[install.key]]
+name = "OPENAI_API_KEY"
+components = [ "pi" ]
+create_url = "https://platform.openai.com/api-keys"
+verify = "UNKNOWN"
+expiry = "unknown"
+notes = "API credits through Pi; distinct from Codex monthly"
+
+[[install.key]]
+name = "GEMINI_API_KEY"
+components = [ "pi" ]
+create_url = "https://aistudio.google.com/apikey"
+verify = "UNKNOWN"
+expiry = "unknown"
+
+[[install.key]]
+name = "OPENROUTER_API_KEY"
+components = [ "pi" ]
+create_url = "https://openrouter.ai/keys"
+verify = "UNKNOWN"
+expiry = "unknown"
+
+[[install.key]]
+name = "DEEPSEEK_API_KEY"
+components = [ "pi" ]
+create_url = "https://platform.deepseek.com/api_keys"
+verify = "UNKNOWN"
+expiry = "unknown"
+
+[[install.key]]
+name = "ZAI_CODING_PLAN_API_KEY"
+components = [ "pi" ]
+create_url = "UNKNOWN"
+verify = "UNKNOWN"
+expiry = "unknown"
+
+[[install.key]]
+name = "CURSOR_API_KEY"
+components = [ "cursor-cli" ]
+create_url = "UNKNOWN"
+verify = "UNKNOWN"
+expiry = "unknown"
+
+[[install.key]]
+name = "EXA_API_KEY"
+components = []
+create_url = "https://dashboard.exa.ai"
+verify = "UNKNOWN"
+expiry = "unknown"
+
+[[install.key]]
+name = "JINA_API_KEY"
+components = []
+create_url = "https://jina.ai"
+verify = "UNKNOWN"
+expiry = "unknown"
+
+[[install.key]]
+name = "TELEGRAM_BOT_TOKEN"
+components = [ "hermes" ]
+create_url = "UNKNOWN"
+verify = "UNKNOWN"
+expiry = "unknown"
+notes = "Via BotFather; login/consent distinct from key validation"
+
+[[install.key]]
+name = "FIRECRAWL_GITHUB_PUBLIC_TOKEN"
+components = [ "firecrawl-router" ]
+create_url = "https://github.com/settings/personal-access-tokens/new"
+verify = "UNKNOWN"
+expiry = "unknown"
+notes = "Known to expire; expiry probe is a later managed phase"
+
+[[install.key]]
+name = "GREPTILE_API_KEY"
+components = [ "greptile" ]
+create_url = "UNKNOWN"
+verify = "UNKNOWN"
+expiry = "unknown"
+
+[[install.login]]
+id = "claude-code"
+summary = "Claude Code account login for monthly plan"
+command = "UNKNOWN"
+
+[[install.login]]
+id = "codex"
+summary = "Codex vendor login for monthly plan"
+command = "UNKNOWN"
+
+[[install.login]]
+id = "cursor"
+summary = "Cursor account login"
+command = "UNKNOWN"
+
+[[install.login]]
+id = "antigravity"
+summary = "Paseo antigravity / Google AI plan login"
+command = "UNKNOWN"
+
+[[install.login]]
+id = "github"
+summary = "gh auth login"
+command = "gh auth login"
+
+[[install.login]]
+id = "sudo-secretspec"
+summary = "sudo-secretspec configured for this machine"
+command = "UNKNOWN"
 
 [[service]]
 name = "claude"

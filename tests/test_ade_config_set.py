@@ -316,6 +316,7 @@ def test_unified_fold_nested_tables_allow_scalar_set(home, tmp_path):
         "context-budget.toml",
         "secret-deny.toml",
         "pr-policy.toml",
+        "install.toml",
     ):
         shutil.copy(REPO / "config" / name, root / "config" / name)
     assert _run_cli("fold", "--write", "--root", str(root), home=home).returncode == 0
@@ -323,6 +324,7 @@ def test_unified_fold_nested_tables_allow_scalar_set(home, tmp_path):
     text = ade.read_text()
     assert "[gates.frontier]" in text and "frontier = {" not in text
     assert "[pr_policy.github]" in text
+    assert "[[install.component]]" in text
     g = ace.set_scalar(
         "gates.frontier.frontier1_judged", 0, target="repo", root=root, home=home
     )
