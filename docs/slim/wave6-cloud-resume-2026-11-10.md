@@ -67,7 +67,30 @@ Keep `relay.py`, `acp-dispatch`, `acp-run`, and `review-launch`. Do not use
 real evidence gate exits 0 and the operator confirms. Keep Pi
 Grok/Antigravity/SIPB/Go `accepted=false`.
 
-## D. Resume prompt
+## D. A3/A4 authorized and implemented in draft PRs
+
+Operator explicitly authorized A3+A4 as proposed on 2026-11-10. Do not
+ask for this authorization again. Upstream heads still matched the pinned
+proposal. Separate claimed worktrees changed only `AGENTS.md`:
+
+| Project | Draft PR | Pushed head |
+|---|---|---|
+| tendcf | [#44](https://github.com/frdminc/tendcf/pull/44) | `1a783835045cbde9124f17c683eef786b7a2d38d` |
+| nix2cf | [#7](https://github.com/frdminc/nix2cf/pull/7) | `ada50aa52e70e497c7d32b784fcce8d62341859f` |
+
+Both pass `git diff --check` and the C3 AGENTS.md retired-launcher name
+probe has no matches. The shared checkouts remain clean. A GPT-6.1 Sol
+medium mechanical comparison found no application errors; this is **not**
+the projects' mandatory independent frontier review. No policy/runtime tests
+were run for these instruction-only changes.
+
+**Merge blocker:** both projects require Fable or Argon for Codex-authored
+work, including docs. Neither `claude`, `antigravity`, nor `paseo` is on this
+host's PATH, and no corresponding connected launch tool is available. Live
+quota/admission proof is absent. Draft PRs retain that blocker; no reviewer
+verdict, waiver, C3 completion or deletion readiness is claimed.
+
+## E. Resume prompt
 
 ```text
 Continue Wave 6 / Pi from djbclark/djbclark-ade PR #538, branch
@@ -76,11 +99,12 @@ Read docs/slim/wave6-cloud-resume-2026-11-10.md and
 docs/slim/a3-a4-native-routing-proposal-2026-11-10.md, then the prior
 wave6-cloud-handoff-2026-11-10.md and queue Carried item 1.
 Check PR #538's current head, review and CI; no APPROVE marker was invented.
-A3+A4 proposal is prepared and pushed, not applied outside ADE.
-Order-11 authorization was requested; no grant is recorded in this snapshot.
-Read the operator's subsequent answer before applying it. If authorized,
-re-fetch tendcf/nix2cf, use separate claimed worktrees, implement and review
-the scoped AGENTS.md replacements, and preserve the native admission hold.
+A3+A4 authorization was granted and implemented in draft PRs:
+frdminc/tendcf#44 at 1a783835045cbde9124f17c683eef786b7a2d38d;
+frdminc/nix2cf#7 at ada50aa52e70e497c7d32b784fcce8d62341859f.
+Do not ask again. Obtain the required Fable/Argon independent frontier review
+on those exact heads using verified fresh quota/admission. Fix findings,
+re-review changed heads, verify CI, then merge. Preserve native admission hold.
 Then handle A5-A7 and X1 one authorization card at a time; preserve logs.
 This fresh cloud host has no prior Mac archive, paseo, aiuse or quota snapshot.
 Do not fabricate live evidence. C1+C2 already granted, no re-asking.
