@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# opencode-plugin-guard — keep the tool-managed OpenCode plugin (rtk) at the v2
-# module shape that OpenCode 2 requires.
+# opencode-plugin-guard — Archive (Pi-only 2026-11-08): keep the tool-managed OpenCode plugin (rtk) at the v2
+# module shape; OpenCode is not a live TUI.
 #
 # Why: rtk writes its plugin file from an embedded template that is still the
 # v1 shape (a bare exported function), which OpenCode 2 rejects at load.

@@ -150,7 +150,7 @@ Skills (23, from each `skills/*/SKILL.md`):
 | [`herdr-server-run`](bin/herdr-server-run) | What the dev.herdr.server LaunchAgent runs instead of `herdr server` (2026-10-25). |
 | [`instruction-lint`](bin/instruction-lint) | Read-only lint for agent instruction files (issue 284, 2026-11-04). |
 | [`load-watch`](bin/load-watch) | Find the agent behind a sustained load spike, tell it, and steer that work to CI (free GitHub runners; Forgejo/Hyades for MIT/SIPB work). |
-| [`opencode-plugin-guard`](bin/opencode-plugin-guard) | Keep the tool-managed OpenCode plugin (rtk) at the v2 module shape that OpenCode 2 requires. |
+| [`opencode-plugin-guard`](bin/opencode-plugin-guard) | Archive (Pi-only 2026-11-08): keep the tool-managed OpenCode plugin (rtk) at the v2 module shape; OpenCode is not a live TUI. |
 | [`ops-post-checkout-guard`](bin/ops-post-checkout-guard) | Post-checkout guard for ~/ops/* deploy checkouts. |
 | [`paseo-set-model`](bin/paseo-set-model) | Switch a live Paseo agent's model in place, or list the daemon's agents. |
 | [`paseo-set-model.mjs`](bin/paseo-set-model.mjs) | The node half of bin/paseo-set-model. |
