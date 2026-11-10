@@ -115,6 +115,7 @@ def _read(path: Path, name: str) -> dict[str, Any]:
                 or observation.get("observed_at") != completed
                 or observation.get("status") != "matched"
                 or observation.get("source") != "github-rest-repository"
+                or observation.get("hostname") != "github.com"
                 or observation.get("target") != (record["owner"] + "/" + record["repo"]).casefold()
                 or observation.get("template_sha256") != record["template_sha256"]
                 or observation.get("policy") != "collaborators_only"
@@ -218,7 +219,7 @@ def verify(
             rendered = _render(Path(record["root"]), record["owner"], record["repo"])
         except tasks.BrowserTaskError:
             rendered = None
-        observation: dict[str, Any] = {"status": "unknown", "source": "github-rest-repository"}
+        observation: dict[str, Any] = {"status": "unknown", "source": "github-rest-repository", "hostname": "github.com"}
         matches = False
         if rendered is None or _digest(rendered) != record["template_sha256"]:
             observation["reason"] = "template-binding-changed"
@@ -269,5 +270,6 @@ def verify(
 
 
 def _verify_argv(record: dict[str, Any]) -> list[str]:
-    return ["gh", "api", "--method", "GET", "-H", "X-GitHub-Api-Version: " + API_VERSION,
+    # The checked-in template is bound to github.com, regardless of GH_HOST.
+    return ["gh", "api", "--hostname", "github.com", "--method", "GET", "-H", "X-GitHub-Api-Version: " + API_VERSION,
             "repos/" + record["owner"] + "/" + record["repo"]]

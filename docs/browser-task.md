@@ -89,8 +89,10 @@ to reconcile uncertainty. This command does not install the deadline sweep job
 or prove that it is running; external expiry notification depends on that
 existing job and its delivery path. No receipt establishes task completion.
 
-`verify` performs only `gh api --method GET repos/OWNER/REPO`, using S6's API
-version header. It requires the exact repository identity (case-insensitive),
+`verify` performs only `gh api --hostname github.com --method GET repos/OWNER/REPO`,
+using S6's API version header. The hostname is fixed to the template's
+`github.com` even when `GH_HOST` selects an enterprise host. It requires the
+exact repository identity (case-insensitive),
 `has_pull_requests: true` and
 `pull_request_creation_policy: "collaborators_only"`. Missing fields, mismatched
 identity, unreadable JSON, failed authentication/network calls or a changed
@@ -98,6 +100,8 @@ template binding leave the task not done. It checks time again after the bounded
 request; proof arriving at/after the fixed deadline cannot complete the task.
 Expired records cannot be revived. `verify --dry-run` prints the GET argv and
 changes nothing; ordinary verification persists only a narrow observation.
+Completed-record proof must also name `github.com`; a completed record without
+that host binding is refused rather than treated as valid historical evidence.
 
 On matching readback before the deadline, the record becomes `completed` and
 the tool closes its confirmed deadline registration with `deadline done`.

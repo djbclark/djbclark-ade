@@ -119,7 +119,7 @@ def test_completed_requires_exact_authoritative_get_and_cleanup(layout):
     runner = Mock(side_effect=[result(proof(full_name="ALICE/Project")), result()])
     payload, rc = state.verify("restrict-prs", directory=layout[1], runner=runner, clock=lambda: 1020)
     assert rc == 0 and payload["completed"] and payload["state"] == "completed"
-    assert runner.call_args_list[0].args[0] == ["gh", "api", "--method", "GET", "-H",
+    assert runner.call_args_list[0].args[0] == ["gh", "api", "--hostname", "github.com", "--method", "GET", "-H",
         "X-GitHub-Api-Version: 2026-03-10", "repos/alice/project"]
     assert runner.call_args_list[1].args[0] == [sys.executable, "-I", str(state.DEADLINE),
                                               "done", payload["deadline_name"]]
@@ -127,6 +127,21 @@ def test_completed_requires_exact_authoritative_get_and_cleanup(layout):
     # Once completed this historical result is stable; no replay/send/network.
     again, rc = state.verify("restrict-prs", directory=layout[1], runner=Mock(side_effect=AssertionError()), clock=lambda: 2000)
     assert again["completed"] and rc == 0
+
+
+def test_github_host_override_cannot_retarget_bound_template(layout, monkeypatch):
+    monkeypatch.setenv("GH_HOST", "enterprise.example")
+    tracked(layout)
+    runner = Mock(side_effect=[result(proof()), result()])
+    plan, rc = state.verify("restrict-prs", directory=layout[1], dry_run=True, runner=runner)
+    assert rc == 0 and runner.call_count == 0
+    payload, rc = state.verify("restrict-prs", directory=layout[1], runner=runner, clock=lambda: 1020)
+    assert rc == 0 and payload["completed"]
+    get = runner.call_args_list[0].args[0]
+    assert get == plan["verify_argv"]
+    assert get[get.index("--hostname") + 1] == "github.com"
+    assert get[-1] == "repos/alice/project"
+    assert os.environ["GH_HOST"] == "enterprise.example"
 
 
 @pytest.mark.parametrize("response", [
@@ -209,6 +224,7 @@ def test_verify_dry_run_preserves_state_and_does_not_lock(layout):
     {"observation": {"status": "sent"}},
     {"observation.policy": "all"}, {"observation.pull_requests_enabled": False},
     {"observation.source": "bot-reply"}, {"observation.observed_at": 1019},
+    {"observation.hostname": None}, {"observation.hostname": "enterprise.example"},
     {"observation.target": "someone/other"}, {"observation.template_sha256": "0" * 64},
 ])
 def test_malformed_completed_records_never_infer_success(layout, corrupt):
