@@ -108,16 +108,14 @@ never outlives its own `--timeout`/`--wait` by more than the margin plus the swe
 
 ## Known gaps (follow-ups)
 
-1. **`gh pr checks --watch`** still registers no deadline of its own (2026-11-09): run it under `deadline run` (the example above).
-2. **`bin/review-pr`** (2026-11-09): the Claude review step runs under `deadline run` by default (`review-pr-<pr>-<head7>-<pid>`,
-   budget `ceil(--timeout) + 600 + 60` s for the review-launch subprocess cushion and margin, owner `PASEO_AGENT_ID` or `-`;
-   **no `--heartbeat`**, because neither `review-pr` nor `review-launch` emits `deadline beat` and a heartbeat interval would
-   stop a healthy review early); fetch and worktree setup stay outside that record. `--no-deadline` opts out; with `DEADLINE_NAME`
-   set (already under a caller's `deadline run`) it does not register twice. `review-launch` still enforces its own `--timeout`
-   (review-pr's default 1500 s).
-3. **Sweep owner delivery still names "relay"** (2026-11-09, after slim-down E8 and Wave 6 #340): `--on-expire relay` and expiry notices use
-   `skills/session-finder/relay.py` (shim over `paseo send --json`; removal tracked in `docs/queue.md` item 33, 2026-11-20). `bin/deadline_wait.py`
-   never called relay; only `load-watch admit --wait` and `acp-dispatch-wait` self-register after the shared PR waiter was removed (E8).
+1. **Sweep owner delivery still names "relay"** (2026-11-09, after slim-down E8 and Wave 6 #340): `--on-expire relay` and expiry notices use
+   `skills/session-finder/relay.py` (shim over `paseo send --json`; removal tracked in `docs/queue.md` Carried Wave 6 shim
+   deletion, soft 2026-11-20). `bin/deadline_wait.py` never called relay; only `load-watch admit --wait` and
+   `acp-dispatch-wait` self-register after the shared PR waiter was removed (E8).
+
+Shipped (kept here so the Known gaps history is searchable): `bin/gh-pr-checks --watch` self-registers (#448);
+`bin/review-pr` wraps its Claude step in `deadline run` by default (#361 / #393; `--no-deadline` opts out; no
+`--heartbeat` because review-launch does not emit beats).
 
 ## `bg` records and the holder (2026-11-02)
 
