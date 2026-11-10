@@ -33,6 +33,7 @@ bin/ade-sched [options] uninstall LABEL       remove it (not installed: exit 0)
 bin/ade-sched [options] status [LABEL...]     installed / active / next run; no LABEL: every job ade-sched generated
 bin/ade-sched [options] list                  print config/install.toml [install.jobs] / [install.retired_jobs]
 bin/ade-sched [options] diff                  compare the inventory to live launchd/systemd/cron/paseo (report only)
+bin/ade-sched [options] reconcile             ADE-owned systemd reconcile + ownership ledger (default dry-run; --yes writes)
 
 Checked-in ADE jobs under `config/launchd/` include `com.djbclark.deadline-sweep`,
 `com.djbclark.pr-policy`, and (2026-11-09) `com.djbclark.ade-update-check` (daily
@@ -45,12 +46,14 @@ Checked-in ADE jobs under `config/launchd/` include `com.djbclark.deadline-sweep
 | --- | --- |
 | `--backend auto\|launchd\|systemd\|cron` | default `auto` (the detection below) |
 | `--ade DIR` | the checkout that fills `__ADE__` / `@ADE@`; default: the checkout `bin/ade-sched` is in |
-| `--root DIR` | catalog root for `list`/`diff` (default: the checkout containing `bin/ade-sched`) |
+| `--root DIR` | catalog root for `list`/`diff`/`reconcile` (default: the checkout containing `bin/ade-sched`) |
 | `--set KEY=VALUE` | fill a placeholder, written exactly as in the plist (`__STATE__=...`, `@TARGET@=...`); repeatable |
-| `--dry-run` | install/uninstall: print every artifact and command, change nothing |
-| `--no-activate` | install/uninstall: write or remove the files and print the activation commands instead of running them |
-| `--allow-no-linger` | systemd install: proceed although `Linger=no` (see Linger) |
-| `--json` | `list`/`diff`: machine-readable output |
+| `--dry-run` | install/uninstall: print every artifact and command, change nothing; reconcile: plan only (also the reconcile default) |
+| `--no-activate` | install/uninstall/reconcile: write or remove the files and print the activation commands instead of running them |
+| `--allow-no-linger` | systemd install/reconcile: proceed although `Linger=no` (see Linger) |
+| `--json` | `list`/`diff`/`reconcile`: machine-readable output |
+| `--yes` | `reconcile`: execute ADE-scoped systemd installs/removes and write the ownership ledger (default is dry-run) |
+| `--name NAME` | `reconcile`: limit to these logical job names (repeatable) |
 
 ## Inventory and drift (S4b, 2026-11-10)
 
@@ -62,15 +65,41 @@ Checked-in ADE jobs under `config/launchd/` include `com.djbclark.deadline-sweep
 - `ade-sched list` / `just sched-list` prints the inventory.
 - `ade-sched diff` / `just sched-diff` and `just doctor` (via `ade-install doctor`) compare live
   `launchctl` / `systemctl --user` / `crontab` / `paseo schedule ls --json` to that inventory.
-- **Report only:** diff and doctor never unload or repair. Foreign and unknown owners (including
-  Orca, BB, herdr, and any label not ADE-owned) are reported and left alone. Only a later ADE
-  reconcile step may touch jobs whose owner is `djbclark-ade` and that are recorded in the
-  ownership ledger (`docs/setup-plan.md` S4b).
+- **Report only (diff/doctor):** never unload or repair. Foreign and unknown owners (including
+  Orca, BB, herdr, and any label not ADE-owned) are reported and left alone.
 - Retired labels that reappear fail doctor; ADE-owned expected labels that are missing fail when
   a host scheduler (or paseo) is probeable. Planned rows without a label stay `planned`.
 - A Paseo probe timeout or launch error, and a host-backend enumeration failure after detection,
   are `unknown` (unavailable), never a traceback and never an empty-job "all missing" false
   positive (2026-11-10).
+
+## Reconcile and ownership ledger (S4b first write path, 2026-11-10)
+
+`ade-sched reconcile` / `just sched-reconcile` is the first ADE job write path on top of the inventory:
+
+- **Backend:** systemd user units only in this slice (CI-testable with fakes). `--yes` on launchd/cron
+  refuses (exit 2). No Mac live proof is required for this unit. Root / `--system` units are never
+  touched.
+- **Default dry-run**; `--yes` executes. Pending intent is written to the ownership ledger before any
+  host write; committed ownership is recorded only after install/uninstall read-back.
+- **Ledger:** `~/.local/state/djbclark-ade/jobs.json` (or `ADE_JOBS_STATE_DIR`), schema_version 1, with
+  generation, logical id, host/user, backend, managed paths, artifact hash, and status
+  (`pending` / `committed` / `pending-remove` / `failed`). Atomic replace; reconcile takes
+  `reconcile.lock` beside it.
+- **Install/reload** only ADE-owned expected `kind=ade-sched` rows that have `label` + `plist`.
+  Unchanged healthy units (on-disk hash matches ledger **and** the timer is active when a timer is
+  expected) get no reload; an inactive timer with matching files is activated. Completed oneshot
+  services without a timer may stay inactive. Matching active units without a ledger row are
+  adopted into the ledger without reload. Implicit `__ADE__` (no `--ade`) still refuses a linked
+  worktree. A label rename keeps the old ledger identity (`prior_identity`) until that label's
+  removal completes.
+- **Remove** only labels recorded in the ledger as ADE-owned with removal authority
+  (`committed` / `pending-remove` / legacy `installed`). Intent-only `pending` is **not** removal
+  authority. Retired or dropped-from-inventory labels that are live but **not** in the ledger are
+  reported only — never unloaded. Foreign/unknown owners are never unloaded.
+- Paseo schedules and dependency/site services stay report-only here (later slices).
+- Plists for `update --auto` / `harden-check` / `keys --check` remain planned inventory rows until
+  those plists land.
 
 ## Paseo schedules (operator create, 2026-11-10)
 
