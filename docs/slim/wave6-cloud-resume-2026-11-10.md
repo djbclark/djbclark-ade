@@ -57,10 +57,10 @@ logs and accounting; any historical-reader waive needs its own explicit grant.
 
 ## C. Boundaries and next action
 
-The next decision remains A3+A4 order-11 authorization, on a concrete
-instruction-file migration proposal. No outside edits are authorized by this
-record. C1+C2 are already granted; do not ask again. A5–A7 and X1 follow one
-card at a time. X2 requires Mac access and proof the old lead has ended.
+A3+A4 authorization is granted and the implementation is recorded in section D.
+C1+C2 are already granted; do not ask again. A5–A7 and X1 still require
+separate authorization, one card at a time. X2 requires Mac access and proof
+the old lead has ended.
 
 Keep `relay.py`, `acp-dispatch`, `acp-run`, and `review-launch`. Do not use
 `--allow-early`; the deadline remains 2026-11-20. No deletion PR before the
