@@ -2,12 +2,13 @@
 
 Transitional unit for Carried #35 / setup-plan **S8**: check in the
 `ade-merge-gate` App manifest, a `[github]` config, and
-`bin/ade-github-setup` with **observe / plan / dry-run** first. Live
-`apply --yes` (App create, environment POST, ruleset POST, secret store) and
-`just harden-check` stay for a follow-up. S5a injection classifier stays
-deferred (operator 2026-11-08).
+`bin/ade-github-setup` with observe / plan / dry-run, plus **API-only**
+`apply --yes` (environment + ruleset) and `apply --verify`. Browser App
+confirm stays **S7** (refused here). Secret store stays operator stdin
+(never print PEM). S5a injection classifier stays deferred (operator
+2026-11-08).
 
-Snapshot: 2026-11-09.
+Snapshot: 2026-11-10.
 
 ## Entry points
 
@@ -16,7 +17,7 @@ Snapshot: 2026-11-09.
 | `config/github.toml` | Owner, repo, App names, environment, secret/variable *names*, required checks |
 | `config/github.schema.json` | Structural schema (checked by `ade-github-setup check`) |
 | `.github/app-manifest.json` | GitHub App Manifest (webhook inactive; statuses+checks write; PRs read) |
-| `bin/ade_github_setup.py` / `bin/ade-github-setup` | Loader, observe, plan, dry-run |
+| `bin/ade_github_setup.py` / `bin/ade-github-setup` | Loader, observe, plan, apply, verify |
 | `just github-setup*` | Thin recipes over the bin tool |
 
 While `config/ade.toml` is absent, the transitional file is the source. If
@@ -30,7 +31,7 @@ refuses the transitional file so there is no dual source (same pattern as
 ade-github-setup check [--root DIR] [--json]
 ade-github-setup observe [--root DIR] [--json] [--local]
 ade-github-setup plan [--root DIR] [--json]
-ade-github-setup apply [--root DIR] [--json] [--dry-run|--yes]
+ade-github-setup apply [--root DIR] [--json] [--dry-run|--yes|--verify]
 ```
 
 - **check** — validate TOML + manifest permissions / inactive webhook.
@@ -40,12 +41,22 @@ ade-github-setup apply [--root DIR] [--json] [--dry-run|--yes]
   `merge-gate` environment + branch policy, secret/variable *name* presence,
   and ruleset name. Never reads secret values. `--local` skips `gh`.
 - **plan** — print-only S8 steps (browser App create, environment, stdin
-  secret store, ruleset, deferred harden/verify).
-- **apply** — defaults to `--dry-run` (payloads printed). `--yes` is refused
-  in this unit.
+  secret store, ruleset, API verify; hardening deferred).
+- **apply --dry-run** (default) — print steps and payloads; change nothing.
+- **apply --yes** — API mutations only:
+  - local manifest check;
+  - `PUT` environment + ensure deployment-branch policy;
+  - `POST` / `PUT` ruleset (needs `github.app_id` or a discoverable install);
+  - **refuses** browser App create/install confirm (setup-plan **S7**);
+  - **refuses** private-key / client-id store (operator stdin redirect only;
+    never prints PEM).
+- **apply --verify** — API-only read-back of local manifest + environment +
+  ruleset required checks (no throwaway T0–T3b PRs; those stay operator /
+  later).
 
 Just recipes: `just github-setup-check`, `github-setup-observe`,
-`github-setup-plan`, `github-setup` / `github-setup-dry` (dry-run apply).
+`github-setup-plan`, `github-setup` / `github-setup-dry` (dry-run),
+`github-setup-apply` (`--yes`), `github-setup-verify` (`--verify`).
 
 ## Secrets never on argv
 
@@ -60,7 +71,8 @@ gh secret set MERGE_GATE_PRIVATE_KEY --env merge-gate --repo OWNER/REPO \
   < ade-merge-gate.private-key.pem
 ```
 
-Config holds the secret *name* only (`private_key_secret`).
+Config holds the secret *name* only (`private_key_secret`). Apply / verify
+output never prints PEM material.
 
 ## Manifest
 
@@ -71,11 +83,12 @@ Config holds the secret *name* only (`private_key_secret`).
 - `default_permissions`: statuses write, checks write, pull_requests read, metadata read
 - `default_events: []`
 
-Create flow (manual confirm): open
-https://github.com/settings/apps/new and submit the checked-in manifest JSON
-(or use a follow-up that posts it). Then install on the configured repository
-only, note App ID + Client ID, and continue with environment / secrets /
-ruleset as in `docs/slim/reports/wave4-E8.md` section E.
+Create flow (manual confirm — **S7**, not `apply --yes`): open
+https://github.com/settings/apps/new and submit the checked-in manifest JSON.
+Then install on the configured repository only, note App ID + Client ID,
+set `github.app_id` in `config/github.toml`, and continue with environment /
+secrets / ruleset (`apply --yes` + operator secret store) as in
+`docs/slim/reports/wave4-E8.md` section E.
 
 ## Related
 

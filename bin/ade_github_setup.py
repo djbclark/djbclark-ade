@@ -1,9 +1,10 @@
-"""ade_github_setup: observe / plan / dry-run for setup-plan S8 (merge-gate App).
+"""ade_github_setup: observe / plan / apply / verify for setup-plan S8.
 
 Transitional source: ``config/github.toml`` when ``config/ade.toml`` lacks a
 ``[github]`` table. Never reads secret values. Refuse PEM / private-key /
-client-secret material on argv. Live ``apply --yes`` mutations are deferred:
-this unit ships check, observe, plan, and apply dry-run only.
+client-secret material on argv. ``apply --yes`` mutates environment and
+ruleset via the GitHub API only; browser App confirm stays S7 (refused here).
+``apply --verify`` is API-only read-back (no throwaway PRs / T0–T3b).
 """
 from __future__ import annotations
 
@@ -11,6 +12,7 @@ import json
 import re
 import shutil
 import subprocess
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -429,8 +431,12 @@ def plan(cfg: GithubConfig) -> list[PlanStep]:
         ),
         PlanStep(
             id="verify",
-            action="deferred",
-            reason="just github-setup --verify (T0-T3b) deferred until live apply lands",
+            action="api",
+            reason=(
+                "ade-github-setup apply --verify: API-only read-back of "
+                "manifest + environment + ruleset (T0-T3b throwaway PRs stay "
+                "operator / later)"
+            ),
         ),
     ]
 
@@ -442,11 +448,20 @@ def _default_runner(argv: list[str]) -> subprocess.CompletedProcess[str]:
 def _gh_json(
     runner: Runner,
     args: list[str],
+    *,
+    input_path: Path | None = None,
 ) -> tuple[Any | None, str]:
-    """Run ``gh …``; return (parsed JSON or None, detail)."""
+    """Run ``gh …``; return (parsed JSON or None, detail).
+
+    When ``input_path`` is set, append ``--input <path>`` (JSON body on disk;
+    never PEM — payloads here are environment / ruleset only).
+    """
     if shutil.which("gh") is None and runner is _default_runner:
         return None, "gh not on PATH"
-    proc = runner(["gh", *args])
+    argv = ["gh", *args]
+    if input_path is not None:
+        argv.extend(["--input", str(input_path)])
+    proc = runner(argv)
     if proc.returncode != 0:
         err = (proc.stderr or proc.stdout or "").strip().splitlines()
         detail = err[0] if err else f"gh exit {proc.returncode}"
@@ -458,6 +473,138 @@ def _gh_json(
         return json.loads(text), "ok"
     except json.JSONDecodeError as e:
         return None, f"gh JSON: {e}"
+
+
+def _gh_json_body(
+    runner: Runner,
+    args: list[str],
+    body: dict[str, Any],
+) -> tuple[Any | None, str]:
+    """POST/PUT JSON via a temp ``--input`` file (no secrets in these bodies)."""
+    with tempfile.TemporaryDirectory(prefix="ade-github-setup-") as td:
+        path = Path(td) / "body.json"
+        path.write_text(json.dumps(body), encoding="utf-8")
+        return _gh_json(runner, args, input_path=path)
+
+
+def environment_payload(cfg: GithubConfig) -> dict[str, Any]:
+    return {
+        "deployment_branch_policy": {
+            "protected_branches": False,
+            "custom_branch_policies": True,
+        }
+    }
+
+
+def _discover_app_id(cfg: GithubConfig, run: Runner) -> int | None:
+    """Return App ID from config or ``GET /user/installations`` (operator gh)."""
+    recorded = cfg.github.get("app_id")
+    if isinstance(recorded, int) and recorded >= 1:
+        return recorded
+    data, _detail = _gh_json(
+        run,
+        [
+            "api",
+            "user/installations?per_page=100",
+            "--jq",
+            "[.installations[] | {app_id, app_slug}]",
+        ],
+    )
+    if not isinstance(data, list):
+        return None
+    want = cfg.github["app_slug"]
+    for row in data:
+        if isinstance(row, dict) and row.get("app_slug") == want:
+            aid = row.get("app_id")
+            if isinstance(aid, int) and aid >= 1:
+                return aid
+    return None
+
+
+def _list_rulesets(
+    cfg: GithubConfig, run: Runner
+) -> tuple[list[dict[str, Any]] | None, str]:
+    data, detail = _gh_json(
+        run,
+        [
+            "api",
+            f"repos/{cfg.full_name}/rulesets",
+            "--jq",
+            "[.[] | {id,name,enforcement}]",
+        ],
+    )
+    if data is None:
+        return None, detail
+    if not isinstance(data, list):
+        return None, "unexpected rulesets payload"
+    return [r for r in data if isinstance(r, dict)], "ok"
+
+
+def _get_ruleset(
+    cfg: GithubConfig, run: Runner, ruleset_id: int
+) -> tuple[dict[str, Any] | None, str]:
+    data, detail = _gh_json(
+        run,
+        ["api", f"repos/{cfg.full_name}/rulesets/{ruleset_id}"],
+    )
+    if data is None:
+        return None, detail
+    if not isinstance(data, dict):
+        return None, "unexpected ruleset payload"
+    return data, "ok"
+
+
+def _ruleset_required_checks(ruleset: dict[str, Any]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for rule in ruleset.get("rules") or []:
+        if not isinstance(rule, dict) or rule.get("type") != "required_status_checks":
+            continue
+        params = rule.get("parameters") or {}
+        if not isinstance(params, dict):
+            continue
+        for row in params.get("required_status_checks") or []:
+            if isinstance(row, dict) and isinstance(row.get("context"), str):
+                out.append(row)
+    return out
+
+
+def _checks_match_want(
+    got: list[dict[str, Any]], want: list[dict[str, Any]]
+) -> tuple[bool, str]:
+    """Compare required-check lists by context + integration_id (order-free)."""
+    def key(row: dict[str, Any]) -> tuple[str, Any]:
+        return (str(row.get("context")), row.get("integration_id"))
+
+    got_set = {key(r) for r in got}
+    want_set = {key(r) for r in want}
+    if got_set == want_set:
+        return True, "required_status_checks match"
+    missing = sorted(want_set - got_set)
+    extra = sorted(got_set - want_set)
+    parts: list[str] = []
+    if missing:
+        parts.append(f"missing={missing!r}")
+    if extra:
+        parts.append(f"extra={extra!r}")
+    return False, "; ".join(parts) or "mismatch"
+
+
+def _result(
+    *,
+    id: str,
+    action: str,
+    reason: str,
+    ok: bool,
+    **extra: Any,
+) -> dict[str, Any]:
+    row: dict[str, Any] = {
+        "id": id,
+        "action": action,
+        "reason": reason,
+        "ok": ok,
+    }
+    row.update(extra)
+    return row
 
 
 def _observe_app_install(cfg: GithubConfig, run: Runner) -> Observation:
@@ -823,25 +970,20 @@ def apply_dry_run(cfg: GithubConfig) -> list[dict[str, Any]]:
         if step.secret_handling:
             row["secret_handling"] = step.secret_handling
         out.append(row)
-    # Include concrete dry-run payloads (no secrets).
+    # Include concrete dry-run payloads (no secrets / no PEM).
     out.append(
         {
             "id": "environment-payload",
             "action": "would-api",
             "reason": "PUT environments/" + cfg.github["environment"],
-            "body": {
-                "deployment_branch_policy": {
-                    "protected_branches": False,
-                    "custom_branch_policies": True,
-                }
-            },
+            "body": environment_payload(cfg),
         }
     )
     out.append(
         {
             "id": "ruleset-payload",
             "action": "would-api",
-            "reason": "POST rulesets (APP_ID unsubstituted until observe records it)",
+            "reason": "POST/PUT rulesets (APP_ID unsubstituted until recorded or discovered)",
             "body": ruleset_preview(cfg),
         }
     )
@@ -849,7 +991,10 @@ def apply_dry_run(cfg: GithubConfig) -> list[dict[str, Any]]:
         {
             "id": "manifest-create",
             "action": "would-browser",
-            "reason": f"open {MANIFEST_CREATE_URL} and submit checked-in manifest JSON",
+            "reason": (
+                f"open {MANIFEST_CREATE_URL} and submit checked-in manifest JSON "
+                "(confirm click is S7 / operator; apply --yes refuses browser App confirm)"
+            ),
             "url": MANIFEST_CREATE_URL,
             "manifest": cfg.manifest_rel,
         }
@@ -857,9 +1002,582 @@ def apply_dry_run(cfg: GithubConfig) -> list[dict[str, Any]]:
     return out
 
 
-def apply_yes_refused() -> GithubSetupError:
-    return GithubSetupError(
-        "ade-github-setup apply --yes is refused in this unit "
-        "(observe/plan/dry-run only; live App create, secret store, and ruleset "
-        "POST land in a follow-up). Re-run with --dry-run (default)."
+def _apply_environment(
+    cfg: GithubConfig, run: Runner, *, dry_run: bool = False
+) -> list[dict[str, Any]]:
+    """PUT environment + ensure deployment-branch policy (API-only)."""
+    env = cfg.github["environment"]
+    branch = cfg.github["environment_branch"]
+    body = environment_payload(cfg)
+    results: list[dict[str, Any]] = []
+    if dry_run:
+        results.append(
+            _result(
+                id="environment",
+                action="would-api",
+                reason=f"PUT environments/{env}",
+                ok=True,
+                body=body,
+            )
+        )
+        results.append(
+            _result(
+                id="environment-branch",
+                action="would-api",
+                reason=f"POST deployment-branch-policy name={branch}",
+                ok=True,
+            )
+        )
+        return results
+
+    data, detail = _gh_json_body(
+        run,
+        ["api", "-X", "PUT", f"repos/{cfg.full_name}/environments/{env}"],
+        body,
     )
+    if data is None and detail != "empty gh stdout":
+        # PUT may return empty body on some gh versions; treat empty as ok if
+        # a follow-up GET succeeds.
+        get_data, get_detail = _gh_json(
+            run, ["api", f"repos/{cfg.full_name}/environments/{env}"]
+        )
+        if get_data is None:
+            results.append(
+                _result(
+                    id="environment",
+                    action="failed",
+                    reason=f"PUT environments/{env}: {detail}; GET: {get_detail}",
+                    ok=False,
+                )
+            )
+            return results
+        results.append(
+            _result(
+                id="environment",
+                action="applied",
+                reason=f"environment {env!r} present after PUT",
+                ok=True,
+            )
+        )
+    else:
+        results.append(
+            _result(
+                id="environment",
+                action="applied",
+                reason=f"PUT environments/{env} ok",
+                ok=True,
+            )
+        )
+
+    pol_data, pol_detail = _gh_json(
+        run,
+        [
+            "api",
+            f"repos/{cfg.full_name}/environments/{env}/deployment-branch-policies",
+            "--jq",
+            "[.branch_policies[].name]",
+        ],
+    )
+    if isinstance(pol_data, list) and branch in pol_data:
+        results.append(
+            _result(
+                id="environment-branch",
+                action="skipped",
+                reason=f"deployment branch {branch!r} already listed",
+                ok=True,
+            )
+        )
+        return results
+    if pol_data is None and "404" not in pol_detail.lower():
+        # Unknown list state — still try POST; surface list detail on failure.
+        pass
+
+    post_data, post_detail = _gh_json(
+        run,
+        [
+            "api",
+            "-X",
+            "POST",
+            f"repos/{cfg.full_name}/environments/{env}/deployment-branch-policies",
+            "-f",
+            f"name={branch}",
+            "-f",
+            "type=branch",
+        ],
+    )
+    if post_data is None and "empty gh stdout" not in post_detail:
+        # Idempotent: already-exists is ok.
+        low = post_detail.lower()
+        if "already" in low or "422" in low or "exists" in low:
+            results.append(
+                _result(
+                    id="environment-branch",
+                    action="skipped",
+                    reason=f"deployment branch {branch!r}: {post_detail}",
+                    ok=True,
+                )
+            )
+        else:
+            results.append(
+                _result(
+                    id="environment-branch",
+                    action="failed",
+                    reason=f"POST deployment-branch-policy: {post_detail}",
+                    ok=False,
+                )
+            )
+        return results
+    results.append(
+        _result(
+            id="environment-branch",
+            action="applied",
+            reason=f"deployment branch {branch!r} ensured",
+            ok=True,
+        )
+    )
+    return results
+
+
+def _apply_ruleset(
+    cfg: GithubConfig,
+    run: Runner,
+    *,
+    app_id: int | None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """POST ruleset when absent; PUT when present but drifted."""
+    want = ruleset_preview(cfg, app_id=app_id)
+    checks = want["rules"][0]["parameters"]["required_status_checks"]
+    if any(c.get("integration_id") == "APP_ID" for c in checks):
+        return _result(
+            id="ruleset",
+            action="refused",
+            reason=(
+                "ruleset apply refused: App ID unknown (set github.app_id in "
+                "config/github.toml after S7 App create, or install the App so "
+                "GET /user/installations can discover it)"
+            ),
+            ok=False,
+            body=want,
+        )
+    if dry_run:
+        return _result(
+            id="ruleset",
+            action="would-api",
+            reason=f"POST/PUT rulesets name={want['name']!r}",
+            ok=True,
+            body=want,
+        )
+
+    listed, list_detail = _list_rulesets(cfg, run)
+    if listed is None:
+        return _result(
+            id="ruleset",
+            action="failed",
+            reason=f"list rulesets: {list_detail}",
+            ok=False,
+        )
+    existing = next((r for r in listed if r.get("name") == want["name"]), None)
+    if existing is None:
+        data, detail = _gh_json_body(
+            run,
+            ["api", "-X", "POST", f"repos/{cfg.full_name}/rulesets"],
+            want,
+        )
+        if data is None and detail != "empty gh stdout":
+            return _result(
+                id="ruleset",
+                action="failed",
+                reason=f"POST rulesets: {detail}",
+                ok=False,
+            )
+        rid = data.get("id") if isinstance(data, dict) else None
+        return _result(
+            id="ruleset",
+            action="applied",
+            reason=f"POST ruleset {want['name']!r} id={rid}",
+            ok=True,
+            ruleset_id=rid,
+        )
+
+    rid = existing.get("id")
+    if not isinstance(rid, int):
+        return _result(
+            id="ruleset",
+            action="failed",
+            reason=f"ruleset {want['name']!r} listed without numeric id",
+            ok=False,
+        )
+    current, get_detail = _get_ruleset(cfg, run, rid)
+    if current is None:
+        return _result(
+            id="ruleset",
+            action="failed",
+            reason=f"GET rulesets/{rid}: {get_detail}",
+            ok=False,
+        )
+    match, match_detail = _checks_match_want(
+        _ruleset_required_checks(current), checks
+    )
+    enf_ok = current.get("enforcement") == want["enforcement"]
+    if match and enf_ok:
+        return _result(
+            id="ruleset",
+            action="skipped",
+            reason=f"ruleset {want['name']!r} id={rid} already matches",
+            ok=True,
+            ruleset_id=rid,
+        )
+    data, detail = _gh_json_body(
+        run,
+        ["api", "-X", "PUT", f"repos/{cfg.full_name}/rulesets/{rid}"],
+        want,
+    )
+    if data is None and detail != "empty gh stdout":
+        return _result(
+            id="ruleset",
+            action="failed",
+            reason=f"PUT rulesets/{rid}: {detail} (was: {match_detail})",
+            ok=False,
+            ruleset_id=rid,
+        )
+    return _result(
+        id="ruleset",
+        action="updated",
+        reason=f"PUT ruleset {want['name']!r} id={rid} ({match_detail})",
+        ok=True,
+        ruleset_id=rid,
+    )
+
+
+def apply_yes(
+    cfg: GithubConfig,
+    *,
+    runner: Runner | None = None,
+) -> tuple[list[dict[str, Any]], int]:
+    """Live apply: environment + ruleset via API; refuse browser App confirm (S7).
+
+    Never prints or accepts PEM material. Secret / client-id store stays
+    operator stdin (printed as a redirect template only). Exit 0 when every
+    result is ok (including expected refuses); 1 when any API step failed.
+    """
+    run = runner or _default_runner
+    results: list[dict[str, Any]] = []
+
+    # Local manifest check (no network; never prints PEM).
+    man_path = cfg.manifest_path()
+    man = load_manifest(man_path)
+    man_errs = validate_manifest(man, path=man_path)
+    if man_errs:
+        results.append(
+            _result(
+                id="manifest",
+                action="failed",
+                reason="; ".join(man_errs),
+                ok=False,
+            )
+        )
+        return results, 1
+    results.append(
+        _result(
+            id="manifest",
+            action="checked",
+            reason=f"{cfg.manifest_rel} permissions+webhook inactive ok",
+            ok=True,
+        )
+    )
+
+    # Browser App confirm is S7 — refuse here (API-only apply).
+    results.append(
+        _result(
+            id="app-create",
+            action="refuse-browser",
+            reason=(
+                f"browser App confirm refused (setup-plan S7): open "
+                f"{MANIFEST_CREATE_URL}, submit {cfg.manifest_rel}, then record "
+                f"app_id in config/github.toml; ade-github-setup never drives "
+                f"the confirm click"
+            ),
+            ok=True,
+            browser=True,
+            url=MANIFEST_CREATE_URL,
+        )
+    )
+    results.append(
+        _result(
+            id="app-install",
+            action="refuse-browser",
+            reason=(
+                f"App install on {cfg.full_name} is operator / S7 "
+                "(API apply does not open the install UI)"
+            ),
+            ok=True,
+            browser=True,
+        )
+    )
+
+    results.extend(_apply_environment(cfg, run, dry_run=False))
+
+    secret = cfg.github["private_key_secret"]
+    env = cfg.github["environment"]
+    results.append(
+        _result(
+            id="store-private-key",
+            action="refuse-operator-secret",
+            reason=(
+                f"private key store is operator-only (never print PEM): "
+                f"gh secret set {secret} --env {env} --repo {cfg.full_name} "
+                f"< {cfg.github['app_slug']}.private-key.pem"
+            ),
+            ok=True,
+            secret_handling="stdin-file-redirect",
+        )
+    )
+    var = cfg.github["client_id_variable"]
+    results.append(
+        _result(
+            id="store-client-id",
+            action="refuse-operator-variable",
+            reason=(
+                f"client id store is operator-only: "
+                f"gh variable set {var} --env {env} --repo {cfg.full_name} "
+                f"--body '<Client ID>'"
+            ),
+            ok=True,
+        )
+    )
+
+    app_id = _discover_app_id(cfg, run)
+    results.append(_apply_ruleset(cfg, run, app_id=app_id, dry_run=False))
+
+    results.append(
+        _result(
+            id="hardening",
+            action="deferred",
+            reason="[hardening] / harden-check (S5) and S5a stay deferred",
+            ok=True,
+        )
+    )
+
+    failed = sum(1 for r in results if not r.get("ok"))
+    return results, (1 if failed else 0)
+
+
+def verify(
+    cfg: GithubConfig,
+    *,
+    runner: Runner | None = None,
+) -> tuple[list[dict[str, Any]], int]:
+    """API-only verify of manifest + environment + ruleset (no mutations).
+
+    Does not run throwaway T0–T3b PRs (those stay operator / later). Never
+    reads secret values — only names via observe-shaped probes where needed.
+    Exit 0 when every check is ok; 1 on drift / missing; unknown probes do
+    not alone fail (same posture as observe for unreadable endpoints).
+    """
+    run = runner or _default_runner
+    results: list[dict[str, Any]] = []
+    rc = 0
+
+    man_path = cfg.manifest_path()
+    man = load_manifest(man_path)
+    man_errs = validate_manifest(man, path=man_path)
+    if man_errs:
+        results.append(
+            _result(
+                id="manifest",
+                action="verify-fail",
+                reason="; ".join(man_errs),
+                ok=False,
+            )
+        )
+        return results, 1
+    results.append(
+        _result(
+            id="manifest",
+            action="verify-ok",
+            reason=f"{cfg.manifest_rel} local permissions+webhook inactive ok",
+            ok=True,
+        )
+    )
+
+    env = cfg.github["environment"]
+    env_data, env_detail = _gh_json(
+        run, ["api", f"repos/{cfg.full_name}/environments/{env}"]
+    )
+    if env_data is None:
+        if "404" in env_detail.lower() or "not found" in env_detail.lower():
+            results.append(
+                _result(
+                    id="environment",
+                    action="verify-fail",
+                    reason=f"environment {env!r} absent: {env_detail}",
+                    ok=False,
+                )
+            )
+            rc = 1
+        else:
+            results.append(
+                _result(
+                    id="environment",
+                    action="verify-unknown",
+                    reason=env_detail,
+                    ok=True,
+                )
+            )
+    else:
+        results.append(
+            _result(
+                id="environment",
+                action="verify-ok",
+                reason=f"environment {env!r} present",
+                ok=True,
+            )
+        )
+        pol_data, pol_detail = _gh_json(
+            run,
+            [
+                "api",
+                f"repos/{cfg.full_name}/environments/{env}/deployment-branch-policies",
+                "--jq",
+                "[.branch_policies[].name]",
+            ],
+        )
+        want_branch = cfg.github["environment_branch"]
+        if isinstance(pol_data, list) and want_branch in pol_data:
+            results.append(
+                _result(
+                    id="environment-branch",
+                    action="verify-ok",
+                    reason=f"deployment branch {want_branch!r} listed",
+                    ok=True,
+                )
+            )
+        elif pol_data is None:
+            results.append(
+                _result(
+                    id="environment-branch",
+                    action="verify-unknown",
+                    reason=pol_detail,
+                    ok=True,
+                )
+            )
+        else:
+            results.append(
+                _result(
+                    id="environment-branch",
+                    action="verify-fail",
+                    reason=f"want branch {want_branch!r}; got {pol_data!r}",
+                    ok=False,
+                )
+            )
+            rc = 1
+
+    app_id = _discover_app_id(cfg, run)
+    want = ruleset_preview(cfg, app_id=app_id)
+    want_checks = want["rules"][0]["parameters"]["required_status_checks"]
+    if any(c.get("integration_id") == "APP_ID" for c in want_checks):
+        results.append(
+            _result(
+                id="ruleset",
+                action="verify-fail",
+                reason=(
+                    "App ID unknown — cannot verify adversary-marker pin "
+                    "(record github.app_id or install the App)"
+                ),
+                ok=False,
+            )
+        )
+        return results, 1
+
+    listed, list_detail = _list_rulesets(cfg, run)
+    if listed is None:
+        results.append(
+            _result(
+                id="ruleset",
+                action="verify-unknown",
+                reason=list_detail,
+                ok=True,
+            )
+        )
+        return results, rc
+
+    existing = next(
+        (r for r in listed if r.get("name") == want["name"]), None
+    )
+    if existing is None:
+        results.append(
+            _result(
+                id="ruleset",
+                action="verify-fail",
+                reason=f"ruleset {want['name']!r} not found",
+                ok=False,
+            )
+        )
+        return results, 1
+
+    rid = existing.get("id")
+    if not isinstance(rid, int):
+        results.append(
+            _result(
+                id="ruleset",
+                action="verify-fail",
+                reason=f"ruleset {want['name']!r} has no numeric id",
+                ok=False,
+            )
+        )
+        return results, 1
+
+    current, get_detail = _get_ruleset(cfg, run, rid)
+    if current is None:
+        results.append(
+            _result(
+                id="ruleset",
+                action="verify-unknown",
+                reason=get_detail,
+                ok=True,
+                ruleset_id=rid,
+            )
+        )
+        return results, rc
+
+    match, match_detail = _checks_match_want(
+        _ruleset_required_checks(current), want_checks
+    )
+    enf_ok = current.get("enforcement") == want["enforcement"]
+    if match and enf_ok:
+        results.append(
+            _result(
+                id="ruleset",
+                action="verify-ok",
+                reason=(
+                    f"ruleset {want['name']!r} id={rid} enforcement="
+                    f"{current.get('enforcement')} checks match "
+                    f"(app_id={app_id})"
+                ),
+                ok=True,
+                ruleset_id=rid,
+                app_id=app_id,
+            )
+        )
+    else:
+        parts = []
+        if not enf_ok:
+            parts.append(
+                f"enforcement want={want['enforcement']!r} "
+                f"got={current.get('enforcement')!r}"
+            )
+        if not match:
+            parts.append(match_detail)
+        results.append(
+            _result(
+                id="ruleset",
+                action="verify-fail",
+                reason="; ".join(parts),
+                ok=False,
+                ruleset_id=rid,
+                app_id=app_id,
+            )
+        )
+        rc = 1
+    return results, rc

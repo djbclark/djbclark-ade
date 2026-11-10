@@ -44,10 +44,18 @@ github-setup-observe-local:
 github-setup-plan:
     "{{ root }}/bin/ade-github-setup" plan --root "{{ root }}"
 
-# Dry-run github setup apply (default; live --yes refused in this unit).
+# Dry-run github setup apply (default; no mutations).
 github-setup:
     "{{ root }}/bin/ade-github-setup" apply --dry-run --root "{{ root }}"
 
 # Alias for github-setup (explicit dry-run name).
 github-setup-dry:
     "{{ root }}/bin/ade-github-setup" apply --dry-run --root "{{ root }}"
+
+# Live API apply: environment + ruleset (refuses browser App confirm / PEM store).
+github-setup-apply:
+    "{{ root }}/bin/ade-github-setup" apply --yes --root "{{ root }}"
+
+# API-only verify of manifest + environment + ruleset (no throwaway T0-T3b).
+github-setup-verify:
+    "{{ root }}/bin/ade-github-setup" apply --verify --root "{{ root }}"

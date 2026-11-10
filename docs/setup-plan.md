@@ -529,10 +529,17 @@ the operator's Grok Bot "Coding", following the current browser route (operator 
    `github-setup-observe-local`, `github-setup-plan`, `github-setup` / `github-setup-dry`.
    - `check` validates config + manifest (webhook inactive; statuses/checks write; PRs read).
    - `observe` is read-only (`--local` skips `gh`; network probes never read secret *values*).
-   - `plan` and `apply --dry-run` (default) print steps and payloads; `apply --yes` is refused until
-     a follow-up lands live App/environment/ruleset mutations.
+   - `plan` and `apply --dry-run` (default) print steps and payloads.
    - Secrets refuse argv (PEM / `--private-key` / client-secret patterns); stdin redirect only
      (`docs/github-setup.md`). S5 harden recipes and S5a stay deferred.
+
+4. **Shipped 2026-11-10 (apply --yes + --verify, API-only):** `ade-github-setup apply --yes`
+   mutates the `merge-gate` environment and ruleset via `gh api` (idempotent PUT/POST; ruleset
+   POST or PUT when drifted). Needs `github.app_id` (or a discoverable install via
+   `GET /user/installations`) to pin `adversary-marker`. Browser App create/install confirm is
+   **refused** here (S7). Private-key and client-id store stay operator stdin (never print PEM).
+   `apply --verify` is API-only read-back of local manifest + environment + ruleset checks
+   (T0–T3b throwaway PRs stay operator / later). Just: `github-setup-apply`, `github-setup-verify`.
 
 ## S9. Cloud agents talk to Paseo agents, and Paseo agents run them (last, and only with headroom)
 
