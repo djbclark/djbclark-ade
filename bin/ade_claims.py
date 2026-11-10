@@ -1308,7 +1308,7 @@ def shared_destructive(call: GitCall) -> Optional[Rule]:
 
 
 FOREIGN_ALT = ("only read-only git runs here (status, log, show, diff, rev-parse, ls-files, grep, `branch --list`, ...); to edit, "
-               "make your own workspace (a Paseo worktree, or `acp-dispatch --workspace auto`)")
+               "make your own workspace (a Paseo worktree: `paseo run --new-workspace worktree …`)")
 
 
 @dataclasses.dataclass
@@ -1516,7 +1516,7 @@ def _target_decision(call: GitCall, wss: list[Optional[Workspace]], ident: Optio
             c = claim_at(t)
             if c is not None and not is_mine(c, ident):
                 return _foreign(c, f"worktree {verb} of a claimed workspace",
-                                "ask the owner (a Paseo agent: `skills/session-finder/relay.py OWNER --message-file -`) to remove it; read-only `git worktree list` is fine")
+                                "ask the owner (a Paseo agent: `paseo send --json --no-wait OWNER --prompt '…'`) to remove it; read-only `git worktree list` is fine")
             if verb == "remove" and force and c is None:
                 return Decision(False, "worktree remove --force",
                                 "`git worktree remove <path>` without --force (git then refuses a dirty tree), or claim it first",
@@ -1890,7 +1890,7 @@ def refusal_text(decision: Decision, call: GitCall) -> str:
             f"{_esc(decision.detail.get('cwd', call.cwd))}\n"
             + who +
             f"  Safe alternative: {_esc(decision.message)}.\n"
-            f"  Ask the owner (a Paseo agent) with `skills/session-finder/relay.py OWNER --message-file -`; exit 77 is an answer, not an obstacle to route around. "
+            f"  Ask the owner (a Paseo agent) with `paseo send --json --no-wait OWNER --prompt '…'`; exit 77 is an answer, not an obstacle to route around. "
             f"Logged in {_esc(guard_log_path())}.\n")
 
 
@@ -2061,7 +2061,7 @@ def _hook_refusal(rule: str, d: Decision, via: str, what: str, env: dict[str, st
                      + (f"  claim {_esc(d.claim_id)}: {_esc(d.owner)}; you are {me}.\n" if d.claim_id else
                         f"  {_esc(d.owner)}; you are {me}.\n")
                      + f"  Safe alternative: {_esc(d.message)}.\n"
-                     "  Ask the owner (a Paseo agent) with `skills/session-finder/relay.py OWNER --message-file -`; exit 77 is an answer, not an obstacle to route "
+                     "  Ask the owner (a Paseo agent) with `paseo send --json --no-wait OWNER --prompt '…'`; exit 77 is an answer, not an obstacle to route "
                      f"around. Logged in {_esc(guard_log_path())}.\n")
     return EXIT_REFUSED
 

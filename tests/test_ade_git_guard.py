@@ -176,7 +176,7 @@ def test_foreign_agent_is_refused_and_owner_edit_is_byte_identical(tmp_path, sta
     assert r.returncode == 77, r.stderr
     assert "codex" in r.stderr and "(A)" in r.stderr and "claim A" in r.stderr   # names the owner
     assert "Safe alternative" in r.stderr
-    assert "exit 77" in r.stderr and "relay.py" in r.stderr
+    assert "exit 77" in r.stderr and "paseo send" in r.stderr
     after = (repo / "f").read_bytes(), (repo / "u.txt").read_bytes(), plain(state, ["status", "--porcelain"], repo)
     assert before == after
     assert plain(state, ["stash", "list"], repo) == ""

@@ -197,7 +197,7 @@ def test_refusal_names_owner_claim_and_alternative_and_is_logged(world):
     r = git(world.state, ["branch", "-f", "cb", "main"], world.repo, who="B")
     assert refused(r)
     assert "claim Z" in r.stderr and "codex" in r.stderr and "you are B" in r.stderr
-    assert "Safe alternative" in r.stderr and "exit 77" in r.stderr and "relay.py" in r.stderr
+    assert "Safe alternative" in r.stderr and "exit 77" in r.stderr and "paseo send" in r.stderr
     last = log_lines(world.state)[-1]
     assert last["outcome"] == "refused" and last["via"] == "reference-transaction" and last["ref"] == "refs/heads/cb"
     assert last["ident"] == "B" and last["claim"] == "Z" and last["rule"] == "ref-claimed-branch"
