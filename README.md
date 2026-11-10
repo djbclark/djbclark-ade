@@ -30,9 +30,9 @@ read [AGENTS.md](AGENTS.md) (`CLAUDE.md` links to it) first; this page is the ma
 | `skills/` | the canonical copy of every hand-written skill (edit here, never through a TUI's path); roster below |
 | `bin/` | the tools; roster below. `libexec/git-hooks/` and `libexec/agent-bin/git` are the git guard's hooks and shim |
 | `claude/` | Claude Code `agents/` (`adversary`, `backend`, `fable-deep`, `ux`), `hooks/`, `commands/` (only `resume.md`), linked from `~/.claude/` |
-| `agents/<tui>/*.tmpl` | the live Claude, Codex, opencode and Hermes config files as templates, secrets as `{{ secret "NAME" }}`; `bin/ade-template-check` is their gate ([agents/README.md](agents/README.md)) |
+| `agents/<tui>/*.tmpl` | templates for live Claude, Codex and Hermes configs (Pi has no `agents/pi/` template yet; OpenCode's is archive-only — [agents/README.md](agents/README.md)); secrets as `{{ secret "NAME" }}`; gate: `bin/ade-template-check` |
 | `config/` | `routing.toml` (pools, `[lead].fable_lead`), `gates.toml` (frontier allowance), `secret-deny.toml`, `pr-policy.toml`, schemas |
-| `tools/acp-run/`, `opencode-plugins/`, `omp/` | transitional ACP client (removed with `acp-dispatch` in Wave 6 deletion); OpenCode plugins; omp's commands — Pi is the sole 3rd-party TUI policy ([docs/tui-security-and-pi-migration.md](docs/tui-security-and-pi-migration.md)) |
+| `tools/acp-run/`, `opencode-plugins/`, `omp/` | Wave 6 deletion targets (ACP client with `acp-dispatch`) plus archived OpenCode plugins and omp commands — Pi is the sole 3rd-party TUI ([docs/tui-security-and-pi-migration.md](docs/tui-security-and-pi-migration.md); queue item 36) |
 | `docs/` | AGENTS.md lists the live docs; `docs/history/` holds retired designs and records, `docs/slim/` the slim-down's plan and log |
 | `changelog.d/`, `graft/` | one changelog fragment per PR (review rule 10); the generated context graph (`graft build`) |
 
