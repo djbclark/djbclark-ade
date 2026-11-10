@@ -1,0 +1,34 @@
+# Transitional GitHub setup for a new djbclark-ade user (docs/setup-plan.md S8).
+# Used while config/ade.toml lacks [github]. Secrets are names only — never PEM
+# material, client secrets, or tokens here (review rule 3; argv refusal in
+# bin/ade-github-setup).
+
+schema_version = 1
+
+[github]
+owner = "djbclark"
+repository = "djbclark-ade"
+app_name = "ade-merge-gate"
+app_slug = "ade-merge-gate"
+manifest = ".github/app-manifest.json"
+environment = "merge-gate"
+environment_branch = "master"
+private_key_secret = "MERGE_GATE_PRIVATE_KEY"
+client_id_variable = "MERGE_GATE_CLIENT_ID"
+ruleset_name = "merge-gate"
+# GitHub Actions' App ID (pins Tests checks in the merge-gate ruleset).
+github_actions_app_id = 15368
+# Optional: record the App ID after create so dry-run can pin the ruleset offline.
+# app_id = 0
+
+[[github.required_check]]
+context = "adversary-marker"
+source = "app"
+
+[[github.required_check]]
+context = "pytest-linux"
+source = "github_actions"
+
+[[github.required_check]]
+context = "context-policy"
+source = "github_actions"

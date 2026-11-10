@@ -1,0 +1,228 @@
+#!/usr/bin/env -S python3 -I
+"""ade-github-setup: observe / plan / dry-run for the merge-gate App (setup-plan S8).
+
+  ade-github-setup check [--root DIR] [--json]
+  ade-github-setup observe [--root DIR] [--json] [--local]
+  ade-github-setup plan [--root DIR] [--json]
+  ade-github-setup apply [--root DIR] [--json] [--dry-run|--yes]
+
+Check validates config/github.toml and .github/app-manifest.json. Observe is
+read-only (optional gh probes; --local skips network). Plan and apply
+--dry-run (default) print steps; apply --yes is refused until a follow-up.
+Secrets never appear on argv (PEM / --private-key / client-secret refused).
+Uses config/github.toml only while config/ade.toml is absent.
+See docs/github-setup.md.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+BIN = Path(__file__).resolve().parent
+if str(BIN) not in sys.path:
+    sys.path.insert(0, str(BIN))
+
+import ade_github_setup as ags  # noqa: E402
+
+
+def _print_json(obj: object) -> None:
+    json.dump(obj, sys.stdout, indent=2, sort_keys=True, default=str)
+    sys.stdout.write("\n")
+
+
+def cmd_check(args: argparse.Namespace) -> int:
+    try:
+        cfg = ags.load_config(root=Path(args.root) if args.root else None)
+    except ags.GithubSetupError as e:
+        if args.json:
+            _print_json({"ok": False, "errors": [str(e)]})
+        else:
+            print(str(e), file=sys.stderr)
+            print("ade-github-setup check: FAIL", file=sys.stderr)
+        return 1
+    summary = ags.config_summary(cfg)
+    if args.json:
+        _print_json({"ok": True, "summary": summary})
+    else:
+        print("ade-github-setup check: OK")
+        print(f"  path={summary['path']}")
+        print(f"  repo={summary['repo']} app={summary['app_name']}")
+        print(f"  manifest={summary['manifest']} env={summary['environment']}")
+        print(
+            "  required_checks="
+            + ",".join(c["context"] for c in summary["required_checks"])
+        )
+    return 0
+
+
+def cmd_observe(args: argparse.Namespace) -> int:
+    try:
+        cfg = ags.load_config(root=Path(args.root) if args.root else None)
+        observations, rc = ags.observe(cfg, network=not args.local)
+    except ags.GithubSetupError as e:
+        if args.json:
+            _print_json({"ok": False, "errors": [str(e)]})
+        else:
+            print(str(e), file=sys.stderr)
+            print("ade-github-setup observe: FAIL", file=sys.stderr)
+        return 1
+    if args.json:
+        _print_json(
+            {
+                "ok": rc == 0,
+                "local_only": bool(args.local),
+                "observations": [
+                    {"id": o.id, "status": o.status, "detail": o.detail}
+                    for o in observations
+                ],
+            }
+        )
+    else:
+        mode = "local" if args.local else "network"
+        print(
+            "ade-github-setup observe: "
+            + ("OK" if rc == 0 else "FAIL")
+            + f" ({mode}; observe-only; no repair; secrets not read)"
+        )
+        for o in observations:
+            print(f"  {o.status:9} {o.id}: {o.detail}")
+    return rc
+
+
+def cmd_plan(args: argparse.Namespace) -> int:
+    try:
+        cfg = ags.load_config(root=Path(args.root) if args.root else None)
+        steps = ags.plan(cfg)
+    except ags.GithubSetupError as e:
+        print(str(e), file=sys.stderr)
+        return 1
+    if args.json:
+        _print_json(
+            {
+                "steps": [
+                    {
+                        "id": s.id,
+                        "action": s.action,
+                        "reason": s.reason,
+                        "browser": s.browser,
+                        "secret_handling": s.secret_handling,
+                    }
+                    for s in steps
+                ],
+                "note": "print-only; ade-github-setup apply --dry-run previews payloads",
+            }
+        )
+    else:
+        print(f"ade-github-setup plan: {len(steps)} step(s) (print-only; does not mutate)")
+        for s in steps:
+            flags = []
+            if s.browser:
+                flags.append("browser")
+            if s.secret_handling:
+                flags.append("secret=" + s.secret_handling)
+            extra = f" [{', '.join(flags)}]" if flags else ""
+            print(f"  {s.action}: {s.id} — {s.reason}{extra}")
+    return 0
+
+
+def cmd_apply(args: argparse.Namespace) -> int:
+    if args.yes and args.dry_run_flag:
+        print(
+            "ade-github-setup apply: refuse both --yes and --dry-run",
+            file=sys.stderr,
+        )
+        return 2
+    dry_run = not args.yes
+    try:
+        if not dry_run:
+            raise ags.apply_yes_refused()
+        cfg = ags.load_config(root=Path(args.root) if args.root else None)
+        results = ags.apply_dry_run(cfg)
+    except ags.GithubSetupError as e:
+        if args.json:
+            _print_json({"ok": False, "errors": [str(e)]})
+        else:
+            print(str(e), file=sys.stderr)
+            print("ade-github-setup apply: REFUSED", file=sys.stderr)
+        return 2
+    if args.json:
+        _print_json({"ok": True, "mode": "dry-run", "results": results})
+    else:
+        print("ade-github-setup apply (dry-run): OK")
+        for row in results:
+            print(f"  {row['action']:18} {row['id']}: {row['reason']}")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    raw = list(sys.argv[1:] if argv is None else argv)
+    try:
+        ags.refuse_secret_argv(raw)
+    except ags.GithubSetupError as e:
+        print(str(e), file=sys.stderr)
+        return 2
+
+    shared = argparse.ArgumentParser(add_help=False)
+    shared.add_argument(
+        "--root",
+        default=argparse.SUPPRESS,
+        help="repository root; before/after command, last explicit wins",
+    )
+    parser = argparse.ArgumentParser(
+        prog="ade-github-setup",
+        description=(
+            "GitHub merge-gate setup: check, observe, plan, and dry-run "
+            "(setup-plan S8). Live apply deferred."
+        ),
+        parents=[shared],
+    )
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    for name, func, help_text in (
+        ("check", cmd_check, "validate config/github.toml and app-manifest.json"),
+        (
+            "observe",
+            cmd_observe,
+            "observe-only local (+ optional gh) state; never repairs or reads secrets",
+        ),
+        ("plan", cmd_plan, "print-only S8 step plan (no writes)"),
+    ):
+        p = sub.add_parser(name, parents=[shared], help=help_text)
+        p.add_argument("--json", action="store_true")
+        if name == "observe":
+            p.add_argument(
+                "--local",
+                action="store_true",
+                help="skip gh network probes (manifest + config only)",
+            )
+        p.set_defaults(func=func)
+
+    ap = sub.add_parser(
+        "apply",
+        parents=[shared],
+        help="dry-run (default) prints payloads; --yes refused until follow-up",
+    )
+    ap.add_argument("--json", action="store_true")
+    mode = ap.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--dry-run",
+        dest="dry_run_flag",
+        action="store_true",
+        help="print planned API/browser steps; change nothing (default)",
+    )
+    mode.add_argument(
+        "--yes",
+        action="store_true",
+        help="refused in this unit (observe/plan/dry-run first)",
+    )
+    ap.set_defaults(func=cmd_apply, dry_run_flag=False, yes=False)
+
+    args = parser.parse_args(raw)
+    args.root = getattr(args, "root", None)
+    return int(args.func(args))
+
+
+if __name__ == "__main__":
+    sys.exit(main())
