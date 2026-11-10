@@ -74,20 +74,18 @@ under **Carried**, newest first, one line each; an item leaves when it ships (in
     failing `just ops-memory-sync`; file the upstream drafts in `docs/upstream-issues.md` (operator decision).
 29. **Re-check Context7 use** (due 2026-10-24): count its calls in the transcripts; if still about zero, ask whether to
     block it (the 2026-10-10 numbers: `docs/history/disabled-skills.md`).
-30. **Keep the instruction files lean** (2026-08-24 cost review): Claude's docs advise under 200 lines; AGENTS.md is
-    338 lines after the E11 rewrite (2026-11-07), the review rules being most of it.
-31. **`bg` registers its own deadline** (2026-11-01): site-public-djbclark `bin/bg`, waits for the operator's yes (order 11).
-32. **Two test LOWs from the 2026-10-23 rework-2 PRs**: `tests/test_bin_modes.py`'s docstring says "outside tests/" while
+30. **`bg` registers its own deadline** (2026-11-01): site-public-djbclark `bin/bg`, waits for the operator's yes (order 11).
+31. **Two test LOWs from the 2026-10-23 rework-2 PRs**: `tests/test_bin_modes.py`'s docstring says "outside tests/" while
     the code exempts a `tests/` directory at any depth (PR 32 round 6); no test pins that `xhigh` and `max` are accepted as
     `[lead]` effort values (PR 33 round 2).
-33. **From the slim-down, for the follow-up PR and after** (2026-11-07): remove the relay shim (by 2026-11-20) and the
+32. **From the slim-down, for the follow-up PR and after** (2026-11-07): remove the relay shim (by 2026-11-20) and the
     dispatch shim with `tools/acp-run` after one live cycle (Wave 6), keeping `bin/review-launch`, and port `skills/loose`'s
     upstream-issue reader off `acp-run --perm deny`; aiuse's acp-run
     readers (`src/aiuse/collectors/acp_usage.py`); the shim does not apply the Argon `fallback_block` at dispatch (E7 E5);
     the `quota_nudge.py`/`cswap_quota_context.sh` decision (R2-18); `routing-recalibrate` as a Paseo schedule if wanted
     (E5); upstream Paseo filings (a codex read-only mode, a quota-pause primitive, a workspace-claim primitive).
-34. **`bin/review-pr` and `gh pr checks --watch` register no deadline of their own** (2026-11-07, W3 docs critic): run them under `deadline run` until one of them registers itself (`docs/deadline.md` Known gaps).
-35. **One-step install and automatic updates on a new machine, Mac and Linux** (operator, 2026-11-07): an easy way to install
+33. **`bin/review-pr` and `gh pr checks --watch` register no deadline of their own** (2026-11-07, W3 docs critic): run them under `deadline run` until one of them registers itself (`docs/deadline.md` Known gaps).
+34. **One-step install and automatic updates on a new machine, Mac and Linux** (operator, 2026-11-07): an easy way to install
     djbclark-ade with all its dependencies and TUIs (Paseo and its providers' CLIs, the modern-CLI tools, `graft`, `aiuse`,
     skills linked by `skill-everywhere`), and an automatic way to keep it and every dependency current (software tracks
     its latest release, order 8). Start from what exists: `bin/ade-update` (this checkout only), `bin/ade-sched` for the
@@ -100,7 +98,7 @@ under **Carried**, newest first, one line each; an item leaves when it ships (in
     S9 plans cloud-agent communication last, after signing and the earlier sections, and builds only with headroom.
     Overall and local coordination now share the local lead.
 
-36. **Pi-only third-party client** (operator, 2026-11-08): migration and archive-only history search shipped;
+35. **Pi-only third-party client** (operator, 2026-11-08): migration and archive-only history search shipped;
     omp/OpenCode/Crush are archived, never fallbacks. Dynamic defaults use explicit per-pool acceptance and
     task boundaries (`docs/pi-defaults.md`); normal startup and an unpinned live request passed after activation.
     Restored Grok subscription access (Pi and vendor ACP) and Antigravity Pi passed basic tool checks
@@ -157,7 +155,8 @@ under **Carried**, newest first, one line each; an item leaves when it ships (in
 10. Quota-aware cross-vendor routing (queued 2026-08-23): `route_agent.py plan|route|show` (2026-10).
 11. Implement cow (2026-08-23; removed with `cow-pasture` 2026-11-06).
 12. Completed 2026-08-23: `~/src/ops-worktrees/` retired with every branch preserved.
-13. Token-cost hygiene review of 2026-08-24 (its one open point is Carried 30).
+13. Token-cost hygiene review of 2026-08-24; Carried 30 shipped 2026-11-10: AGENTS.md Code review →
+    `docs/code-review.md`, AGENTS.md ≤200 lines.
 14. Monthly plans that work with Hermes (research of 2026-08-24; ClinePass).
 15. Why the `sed` edit failed twice (2026-10-14): `~/CLAUDE.md` item 33.
 16. Flaky MockWebServer tests on the SIPB runner (2026-10-14).

@@ -4,7 +4,7 @@ and the Action's event logic (.github/workflows/adversary-marker.yml).
 The marker tests below the banner "adversary verdict MARKER in the PR body" moved from the waiter's test file
 UNCHANGED: only `load_module()` (now the imported module) and the `gate()` helper's last two lines (the waiter's
 `assess()` became `adversary_marker.gate()`, its adversary branch) differ. They are the acceptance test of the
-port (AGENTS.md review rule 1's five properties). The Action's tests are at the end.
+port (docs/code-review.md rule 1's five properties). The Action's tests are at the end.
 """
 
 import json

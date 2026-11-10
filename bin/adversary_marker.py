@@ -19,7 +19,7 @@
       instead. `--api-answers` serves canned API answers from a JSON file and prints the status it would post
       instead of posting (the tests' entry)
 
-The marker (AGENTS.md review rule 1, its five properties):
+The marker (docs/code-review.md rule 1, its five properties):
 
     <!-- adversary-verdict:v1 {"verdict":"APPROVE"|"BLOCK","head":"<40-hex>"} -->
 
