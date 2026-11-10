@@ -404,6 +404,19 @@ probe = "paseo plugin ls --json (id=ade-claim → ok|disabled|missing)"
 platforms = ["mac", "linux"]
 notes = "2026-11-10: catalog/doctor observe-only. Reports missing when not installed, disabled when installed but not enabled; never writes install_argv and never runs enable."
 
+[[component]]
+id = "ade-yolo"
+class = "optional"
+chosen = false
+summary = "Paseo plugin: agent.create.before forces Bypass/YOLO so MCP subagents do not start in Always Ask"
+source = "plugins/ade-yolo"
+paseo_plugin = "ade-yolo"
+install = "paseo plugin install /absolute/path/to/plugins/ade-yolo (operator only; doctor/apply never install or enable)"
+update = "UNKNOWN"
+probe = "paseo plugin ls --json (id=ade-yolo → ok|disabled|missing)"
+platforms = ["mac", "linux"]
+notes = "2026-11-10: restores pre-slim-down YOLO (paseo-bypass-watch / paseo-new-seat). Observe-only in catalog; never auto-install."
+
 # --- suggested / never (recorded, not installed by default) ---
 
 [[component]]

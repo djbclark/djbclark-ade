@@ -796,7 +796,8 @@ def run_paseo_route(run: Run, route: dict[str, Any], prompt_file: Path, timeout:
                "with nothing else in that file, and end your turn. Write no other file.")
     thinking = [kv.split("=", 1)[1] for kv in route.get("set", []) if kv.split("=", 1)[0] in EFFORT_KEYS and "=" in kv]
     mode = route.get("mode")
-    if not mode:      # the provider's own default mode (Claude's is `auto`); a missing row is the route's error
+    if not mode:
+        # Unattended YOLO (2026-11-10): not the provider's defaultMode (Always Ask / auto).
         try:
             rows = json.loads(subprocess.run([os.environ.get("DIALOGUE_PASEO") or "paseo", "provider", "ls", "--json"],
                                              capture_output=True, text=True, timeout=60).stdout or "[]")
@@ -806,7 +807,13 @@ def run_paseo_route(run: Run, route: dict[str, Any], prompt_file: Path, timeout:
             if isinstance(rows, list) else None
         if not row or row.get("enabled") != "Enabled" or row.get("status") != "available":
             return "", f"Paseo provider {provider} is not enabled and available ({row})"
-        mode = str(row.get("defaultMode") or "default")
+        bin_dir = Path(__file__).resolve().parents[3] / "bin"
+        if str(bin_dir) not in sys.path:
+            sys.path.insert(0, str(bin_dir))
+        import paseo_yolo  # noqa: E402
+        mode = paseo_yolo.resolve_launch_mode(
+            provider, fallback=str(row.get("defaultMode") or "") or None,
+        )
     argv = ["run", "--provider", f"{provider}/{route['model']}" if route.get("model") else provider,
             "--mode", mode, "--no-wait", "--title", f"dialogue-{prompt_file.stem}",
             "--cwd", str(run.cwd), *(["--thinking", route.get("effort") or thinking[-1]] if route.get("effort") or thinking else []),

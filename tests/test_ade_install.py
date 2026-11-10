@@ -123,6 +123,9 @@ def test_repo_install_toml_checks_clean():
     assert by_id["ade-claim"].get("paseo_plugin") == "ade-claim"
     assert by_id["ade-claim"].get("chosen") is False
     assert by_id["ade-claim"].get("install_argv") is None
+    assert by_id["ade-yolo"].get("paseo_plugin") == "ade-yolo"
+    assert by_id["ade-yolo"].get("chosen") is False
+    assert by_id["ade-yolo"].get("install_argv") is None
     proc = _run("check", "--json", root=REPO)
     assert proc.returncode == 0, proc.stderr
     payload = json.loads(proc.stdout)

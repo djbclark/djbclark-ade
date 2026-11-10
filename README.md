@@ -105,7 +105,7 @@ Skills (23, from each `skills/*/SKILL.md`):
 | [`tell-chief-of-staff`](skills/tell-chief-of-staff/SKILL.md) | Pointer (2026-11-06) for messaging the operator's cloud Grok Bot "Chief of Staff" ("tell grok", "tell Chief of Staff", "hand this to grokbot") and for its ask_claude callback; the sender and its setup live outside this repository. |
 | [`tell-coding-bot`](skills/tell-coding-bot/SKILL.md) | Pointer (2026-11-06) for talking to the operator's cloud Grok Bot "Coding" ("tell the Coding bot", "ask Coding", "hand this to the Coding bot", a task that needs a real browser session); the coding-bot code now lives in the peer-link repository. |
 
-`bin/` (76, from each file's first docstring or comment):
+`bin/` (77, from each file's first docstring or comment):
 
 | Tool | What |
 |---|---|
@@ -170,6 +170,7 @@ Skills (23, from each `skills/*/SKILL.md`):
 | [`ops-post-checkout-guard`](bin/ops-post-checkout-guard) | Post-checkout guard for ~/ops/* deploy checkouts. |
 | [`paseo-set-model`](bin/paseo-set-model) | Switch a live Paseo agent's model in place, or list the daemon's agents. |
 | [`paseo-set-model.mjs`](bin/paseo-set-model.mjs) | The node half of bin/paseo-set-model. |
+| [`paseo_yolo.py`](bin/paseo_yolo.py) | Provider → unattended (YOLO / Bypass) Paseo mode ids. |
 | [`pi-cursor-agent`](bin/pi-cursor-agent) | Cursor provider child launcher: preserve CLI auth; run print mode unattended. |
 | [`pi-default`](bin/pi-default) | Choose a physical Pi model for the current task, without starting inference. |
 | [`pi_defaults.py`](bin/pi_defaults.py) | Per-task Pi choices from the existing ADE router; no model calls or credentials. |

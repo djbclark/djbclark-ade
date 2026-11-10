@@ -1,0 +1,9 @@
+{
+  "name": "@djbclark/paseo-plugin-ade-yolo",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "node --test server/yolo-lib.test.mjs"
+  }
+}

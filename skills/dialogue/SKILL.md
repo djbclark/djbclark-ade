@@ -157,7 +157,8 @@ Each turn runs a model for many minutes: in an interactive session start `round`
    copilot override). Two routes per model at most; the second runs only on failure.
 2. Route kinds: prefer `paseo` (Wave 6, 2026-11-09). `acp` remains a one-cycle alias for the same
    native path (old configs). `agent` is the Paseo provider:
-   `paseo run --provider <agent>/<model> --mode <mode, default the provider's defaultMode>
+   `paseo run --provider <agent>/<model> --mode <mode, default the provider's YOLO / Bypass id from
+   bin/paseo_yolo.py — not Always Ask / defaultMode>
    --no-wait --json --cwd <cwd> -- <pointer>`, the pointer naming the turn's prompt file and a reply file
    beside it, then `paseo wait ID --timeout S --json` (its status field, never `$?`); the reply file is the
    turn text. A `set` entry with an effort key (`reasoning_effort=high`) becomes `--thinking high`; other
