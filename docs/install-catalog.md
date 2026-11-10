@@ -15,10 +15,11 @@ reconciliation and `--system` root effects remain later work
 | `bin/ade_install.py` / `bin/ade-install` | Loader, plan, doctor, apply |
 | `bin/ade_user_install.py` / `bin/ade-user-install` | User-scoped uv/just fetch and `bin/` symlinks |
 
-Loaded **only while `config/ade.toml` is absent**. If a unified `ade.toml` is
-present, `ade-install` refuses the transitional file so there is no permanent
-duplicate editable authority. A later fold must carry install/keys into the
-unified file with reviewed consumer adoption.
+Loaded while `config/ade.toml` does **not** yet carry an install catalog (S1
+policy-domain fold may land `ade.toml` first). If the unified file already has
+`[install]` / folded component|key|login tables, `ade-install` refuses the
+transitional file so there is no permanent duplicate editable authority. A later
+fold must carry install/keys into the unified file with reviewed consumer adoption.
 
 ## B. Component classes
 

@@ -44,7 +44,8 @@ def _append(path, text):
 @pytest.fixture(autouse=True)
 def _no_fable_lead(monkeypatch, tmp_path_factory):
     """The relaunch-on-Opus tests run under the 2026-10-23 rule (`[lead].fable_lead` false); the shipped
-    config/routing.toml allows a Fable lead (2026-11-07), tested on its own below.
+    policy (`config/ade.toml` when present, else `config/routing.toml`) allows a Fable lead (2026-11-07),
+    tested on its own below.
 
     An incomplete ROUTING_POLICY fails closed through ade_config.load_effective (ConfigError → False),
     which is enough to force the Opus relaunch note without rewriting a full policy file.
@@ -661,13 +662,36 @@ def test_fable_session_gets_the_relaunch_note_in_both_messages(hook, tmp_path):
     assert "Context is large" in out and _OPUS_NOTE in out
 
 
+def test_routing_policy_path_prefers_ade_toml_then_legacy(monkeypatch, tmp_path):
+    """S1: `_routing_policy_path` follows load_effective provenance (ade.toml when present, else routing.toml)."""
+    from types import SimpleNamespace
+
+    ade = tmp_path / "ade.toml"
+    legacy = tmp_path / "routing.toml"
+    fake_ac = SimpleNamespace(
+        load_effective=lambda root=None: SimpleNamespace(
+            provenance={"routing_source": str(ade)},
+        ),
+    )
+    monkeypatch.setattr(nudge, "_ade_config", lambda: (fake_ac, tmp_path))
+    ade.write_text("schema_version = 1\n")
+    assert nudge._routing_policy_path() == ade
+
+    fake_ac.load_effective = lambda root=None: SimpleNamespace(
+        provenance={"routing_source": str(legacy)},
+    )
+    assert nudge._routing_policy_path() == legacy
+
+
 def test_fable_lead_true_means_no_relaunch_note(hook, tmp_path, monkeypatch):
-    """Operator 2026-11-07: `[lead].fable_lead = true` allows a Fable lead, so the Opus note goes; the shipped file says true."""
+    """Operator 2026-11-07: `[lead].fable_lead = true` allows a Fable lead, so the Opus note goes; the shipped policy says true."""
     import shutil
 
-    shipped = Path(nudge.__file__).resolve().parents[2] / "config" / "routing.toml"
+    repo = Path(nudge.__file__).resolve().parents[2]
+    # ROUTING_POLICY is a legacy-format override: copy routing.toml (complete validated shape).
+    legacy = repo / "config" / "routing.toml"
     policy = tmp_path / "routing.toml"
-    shutil.copy(shipped, policy)
+    shutil.copy(legacy, policy)
     text = policy.read_text()
     # Keep a complete valid ROUTING_POLICY (ade_config validates the full shape) with fable_lead true.
     if "fable_lead = false" in text:
@@ -677,7 +701,10 @@ def test_fable_lead_true_means_no_relaunch_note(hook, tmp_path, monkeypatch):
     out, _ = hook("s-fable-lead", _model_transcript(tmp_path, _FABLE, 46_000, nudge.BOUNDARY_TOTAL))
     assert "relaunch" not in out
     monkeypatch.delenv("ROUTING_POLICY")
-    assert nudge._routing_policy_path() == shipped.resolve() and nudge._fable_lead_allowed() is True
+    # S1: ade.toml is the preferred routing source when present; else legacy routing.toml.
+    preferred = repo / "config" / "ade.toml"
+    expected = preferred.resolve() if preferred.is_file() else legacy.resolve()
+    assert nudge._routing_policy_path() == expected and nudge._fable_lead_allowed() is True
 
 
 @pytest.mark.parametrize("text", ["[lead]\nmodel = \"opus\"\n", "[lead]\nfable_lead = false\n",
@@ -731,9 +758,10 @@ def test_fable_lead_without_tomllib_is_fail_closed(monkeypatch, tmp_path):
     """ade_config needs tomllib; without it the hook fails closed (never a Fable lead)."""
     import shutil
 
-    shipped = Path(nudge.__file__).resolve().parents[2] / "config" / "routing.toml"
+    # ROUTING_POLICY expects legacy routing.toml shape (isolation override, not the S1 ade.toml path).
+    legacy = Path(nudge.__file__).resolve().parents[2] / "config" / "routing.toml"
     policy = tmp_path / "routing.toml"
-    shutil.copy(shipped, policy)
+    shutil.copy(legacy, policy)
     monkeypatch.setenv("ROUTING_POLICY", str(policy))
     monkeypatch.setitem(sys.modules, "tomllib", None)
     for name in list(sys.modules):

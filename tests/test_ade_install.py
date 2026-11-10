@@ -125,10 +125,28 @@ def test_plan_blocks_unknown_install(tmp_path):
     assert by_id["tool-d"]["needs_system"] is True
 
 
-def test_refuses_when_ade_toml_present(tmp_path):
+def test_loads_install_while_ade_toml_present_without_install_fold(tmp_path):
+    """Policy-domain ade.toml may land before install/keys; keep install.toml."""
     root = tmp_path / "repo"
     (root / "config").mkdir(parents=True)
     (root / "config" / "ade.toml").write_text("schema_version = 1\n")
+    (root / "config" / "install.toml").write_text((FIX / "minimal.toml").read_text())
+    (root / "config" / "install.schema.json").write_text(
+        (REPO / "config" / "install.schema.json").read_text()
+    )
+    catalog = ai.load_catalog(root=root)
+    assert catalog.provenance["ade_toml_present"] is True
+    assert catalog.provenance["ade_toml_has_install"] is False
+    assert catalog.provenance["source"] == "install.toml"
+    assert len(catalog.components) >= 1
+
+
+def test_refuses_install_toml_when_ade_toml_carries_install(tmp_path):
+    root = tmp_path / "repo"
+    (root / "config").mkdir(parents=True)
+    (root / "config" / "ade.toml").write_text(
+        "schema_version = 1\n[install]\nnote = \"folded\"\n"
+    )
     (root / "config" / "install.toml").write_text((FIX / "minimal.toml").read_text())
     (root / "config" / "install.schema.json").write_text(
         (REPO / "config" / "install.schema.json").read_text()

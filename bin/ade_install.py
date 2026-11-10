@@ -1,6 +1,7 @@
 """ade_install: install catalog, plan, observe-only doctor, bounded apply.
 
-Transitional source: ``config/install.toml`` when ``config/ade.toml`` is absent.
+Transitional source: ``config/install.toml`` while install/keys are not yet
+folded into ``config/ade.toml`` (policy domains may already live there).
 Key entries are names and metadata only. Doctor runs ``probe_argv`` when
 recorded (else PATH presence) and never repairs. Apply is user-scoped only:
 ``--dry-run`` by default, ``--yes`` to execute recorded ``install_argv``
@@ -221,22 +222,42 @@ def load_catalog(
     root = (root or repo_root_from_here()).resolve()
     new_path = default_new_config_path(root)
     path = install_path if install_path is not None else default_install_path(root)
+    ade_present = ac.input_present(new_path)
+    # S1 policy-domain fold may land config/ade.toml before install/keys move.
+    # Keep loading install.toml until a reviewed install fold; refuse only when the
+    # unified file already carries an install catalog (duplicate editable authority).
+    ade_has_install = False
+    if ade_present:
+        try:
+            ade_raw = ac.read_toml(new_path)
+        except ac.ConfigError as e:
+            raise InstallError(str(e)) from e
+        ade_has_install = isinstance(ade_raw.get("install"), dict) or bool(
+            ade_raw.get("component") or ade_raw.get("key") or ade_raw.get("login")
+        )
     provenance: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "root": str(root),
         "install_config": str(path),
-        "ade_toml_present": ac.input_present(new_path),
+        "ade_toml_present": ade_present,
+        "ade_toml_has_install": ade_has_install,
         "source": "install.toml",
         "note": (
-            "transitional catalog while config/ade.toml is absent; "
-            "a present ade.toml must eventually carry install/keys after a reviewed fold"
+            "transitional catalog: install/keys remain in config/install.toml until folded; "
+            "config/ade.toml may already hold policy domains"
+            if ade_present and not ade_has_install
+            else (
+                "transitional catalog while config/ade.toml is absent; "
+                "a present ade.toml must eventually carry install/keys after a reviewed fold"
+                if not ade_present
+                else "config/ade.toml already carries install/keys; refuse duplicate install.toml"
+            )
         ),
     }
-    if ac.input_present(new_path):
-        # Do not silently invent a second editable authority beside a unified file.
+    if ade_has_install:
         raise InstallError(
-            f"{new_path}: present; refuse transitional config/install.toml until install/keys "
-            "are folded into the unified file (no permanent duplicate editable authorities)"
+            f"{new_path}: carries install/keys; refuse transitional config/install.toml "
+            "(no permanent duplicate editable authorities)"
         )
     if not ac.input_present(path):
         raise InstallError(f"{path}: missing install catalog")

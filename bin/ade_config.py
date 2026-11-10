@@ -1,14 +1,16 @@
-"""ade_config: versioned read-only effective ADE config (schema_version=1).
+"""ade_config: versioned effective ADE config (schema_version=1).
 
-Builds one effective tree from optional ``config/ade.toml``, legacy
+Builds one effective tree from ``config/ade.toml`` when present, else legacy
 ``config/routing.toml`` + ``config/gates.toml`` + ``config/context-budget.toml``
-+ ``config/secret-deny.toml`` + ``config/pr-policy.toml``, and optional
-``~/.config/djbclark-ade/local.toml``. Does not write files or resolve secrets.
-Consumers adopt via ``load_effective`` (``route_agent``, ``ade_gates.load_frontier``,
++ ``config/secret-deny.toml`` + ``config/pr-policy.toml``, plus optional
+``~/.config/djbclark-ade/local.toml``. ``fold_legacy_domains`` / ``write_ade_toml``
+commit the unified file from those legacy domains. Consumers adopt via
+``load_effective`` (``route_agent``, ``ade_gates.load_frontier``,
 ``context-budget-check``, ``render-secret-deny``, ``review-launch``, ``pr-policy``, …).
 
 Public:
   load_effective(...) -> EffectiveConfig
+  fold_legacy_domains(...) / encode_toml_document / write_ade_toml
   get_path(data, dotted) -> value
   local_diff(...) -> list[Change]
   check(...) -> tuple[list[str], EffectiveConfig | None]   # empty errors means OK
@@ -967,3 +969,292 @@ def check(
     except ConfigError as e:
         return [str(e)], None
     return [], effective
+
+
+# --- fold legacy domains → config/ade.toml ------------------------------------------------------
+
+# Stable emit order: routing tables first (as in routing.toml), then nested domains, services last.
+_FOLD_ROOT_KEYS: tuple[str, ...] = (
+    "schema_version",
+    "routing",
+    "calibrate",
+    "dispatch",
+    "lead",
+    "substrate",
+    "hermes",
+    "gates",
+    "context_budget",
+    "secret_deny",
+    "pr_policy",
+    "service",
+)
+
+ADE_TOML_HEADER = """\
+# config/ade.toml — schema_version=1 unified ADE config (folded 2026-11-09).
+# Canonical repo base when present (docs/config-migration.md). Legacy split TOMLs
+# (routing/gates/context-budget/secret-deny/pr-policy) remain for fallthrough when
+# this file is absent. Install/keys stay transitional in config/install.toml until
+# a reviewed install fold. Regenerate from legacy with: ade-config fold --write
+# Edit scalars with: ade-config set PATH VALUE --target repo
+"""
+
+
+def fold_legacy_domains(*, root: Path | None = None) -> dict[str, Any]:
+    """Project every legacy domain file into one schema_version=1 tree.
+
+    Does not read local.toml or env isolation overrides. Gates keep raw frontier
+    requests (pre-clamp), matching what a hand-authored ade.toml stores; clamping
+    still happens inside load_effective when the file is loaded.
+    """
+    root = (root or repo_root_from_here()).resolve()
+    data: dict[str, Any] = {"schema_version": SCHEMA_VERSION}
+    data.update(load_legacy_routing(default_routing_path(root)))
+    gates, gate_err = raw_legacy_gates(default_gates_path(root))
+    if gate_err:
+        raise ConfigError(gate_err)
+    data["gates"] = gates
+    data["context_budget"] = load_legacy_context_budget(
+        default_context_budget_path(root), required=True
+    )
+    data["secret_deny"] = load_legacy_secret_deny(
+        default_secret_deny_path(root), required=True
+    )
+    data["pr_policy"] = load_legacy_pr_policy(
+        default_pr_policy_path(root), required=True
+    )
+    schema = read_schema(default_schema_path(root))
+    validate_tree(data, schema, label="folded ade.toml")
+    reject_duplicate_services(data.get("service"), label="folded ade.toml")
+    return data
+
+
+def _toml_key(key: str) -> str:
+    if key.isidentifier() or (
+        key and key[0].isalnum() and all(c.isalnum() or c in "_-" for c in key)
+    ):
+        return key
+    return json.dumps(key, ensure_ascii=False)
+
+
+def encode_toml_scalar(value: Any) -> str:
+    """Encode a Python scalar as a single-line TOML value (fold emitter)."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int) and not isinstance(value, bool):
+        return str(value)
+    if isinstance(value, float):
+        if value != value or value in (float("inf"), float("-inf")):  # noqa: PLR0124
+            raise ConfigError("float value must be finite")
+        text = repr(value)
+        if "e" in text.lower() or "." in text:
+            return text
+        return text + ".0"
+    if isinstance(value, str):
+        return json.dumps(value, ensure_ascii=False)
+    raise ConfigError(f"unsupported TOML scalar type {type(value).__name__}")
+
+
+def _encode_inline_table(data: dict[str, Any]) -> str:
+    parts: list[str] = []
+    for key, value in data.items():
+        parts.append(f"{_toml_key(key)} = {_encode_value(value, inline=True)}")
+    return "{ " + ", ".join(parts) + " }" if parts else "{}"
+
+
+def _encode_value(value: Any, *, inline: bool = False) -> str:
+    if isinstance(value, dict):
+        return _encode_inline_table(value)
+    if isinstance(value, list):
+        if any(isinstance(x, dict) for x in value):
+            raise ConfigError("array of tables cannot be encoded inline")
+        return "[ " + ", ".join(_encode_value(x, inline=True) for x in value) + " ]" \
+            if value else "[]"
+    return encode_toml_scalar(value)
+
+
+def _emit_table_body(
+    data: dict[str, Any],
+    *,
+    prefer_inline_nested: bool,
+    inline_flat_tables: bool = False,
+) -> tuple[list[str], list[tuple[str, dict[str, Any]]], list[tuple[str, list[dict[str, Any]]]]]:
+    """Split a table into scalar lines, nested tables, and arrays-of-tables.
+
+    When prefer_inline_nested is false (gates/pr_policy/context_budget/secret_deny),
+    nested dicts become section tables so ``ade-config set`` can edit scalar leaves.
+    ``inline_flat_tables`` (deep nests only) keeps legacy-style flat record objects
+    inline, e.g. ``gates.floors.frontier.frontier1_judged = { bound = 1, ... }``.
+    """
+    lines: list[str] = []
+    nested: list[tuple[str, dict[str, Any]]] = []
+    aot: list[tuple[str, list[dict[str, Any]]]] = []
+    for key, value in data.items():
+        if isinstance(value, dict):
+            if prefer_inline_nested or (
+                inline_flat_tables and _dict_flat_scalar_values(value)
+            ):
+                lines.append(f"{_toml_key(key)} = {_encode_inline_table(value)}")
+            else:
+                nested.append((key, value))
+        elif isinstance(value, list) and value and all(isinstance(x, dict) for x in value):
+            aot.append((key, value))
+        elif isinstance(value, list):
+            lines.append(f"{_toml_key(key)} = {_encode_value(value)}")
+        else:
+            lines.append(f"{_toml_key(key)} = {encode_toml_scalar(value)}")
+    return lines, nested, aot
+
+
+def _dict_flat_scalar_values(data: dict[str, Any]) -> bool:
+    """True when every value is a scalar or list of scalars (no nested table)."""
+    for value in data.values():
+        if isinstance(value, dict):
+            return False
+        if isinstance(value, list):
+            if any(isinstance(x, (dict, list)) for x in value):
+                return False
+        elif not isinstance(value, (bool, int, float, str)):
+            return False
+    return True
+
+
+def _emit_section(
+    lines: list[str],
+    header: str,
+    data: dict[str, Any],
+    *,
+    prefer_inline_nested: bool,
+    depth: int = 0,
+) -> None:
+    # Depth 0 stays nested headers (prior split TOML shape: [gates.frontier],
+    # [pr_policy.github], [context_budget.budget], …). Depth >= 1 may inline flat
+    # record objects (floors.frontier.* and budget."~") so set_scalar never hits a
+    # quoted-key header it refuses, while still matching legacy leaf inlines.
+    body, nested, aot = _emit_table_body(
+        data,
+        prefer_inline_nested=prefer_inline_nested,
+        inline_flat_tables=depth >= 1,
+    )
+    lines.append(header)
+    lines.extend(body)
+    if body or not nested:
+        lines.append("")
+    for key, child in nested:
+        if header.startswith("[") and not header.startswith("[["):
+            child_header = f"[{header[1:-1]}.{_toml_key(key)}]"
+        else:
+            child_header = f"[{_toml_key(key)}]"
+        _emit_section(
+            lines,
+            child_header,
+            child,
+            prefer_inline_nested=prefer_inline_nested,
+            depth=depth + 1,
+        )
+    for key, rows in aot:
+        base = header[1:-1] if header.startswith("[") and not header.startswith("[[") else ""
+        for row in rows:
+            row_header = f"[[{base}.{_toml_key(key)}]]" if base else f"[[{_toml_key(key)}]]"
+            # Inside AoT rows, nest dicts as inline tables so TOML stays unambiguous.
+            row_body, row_nested, row_aot = _emit_table_body(row, prefer_inline_nested=True)
+            if row_nested or row_aot:
+                raise ConfigError(
+                    f"{row_header}: fold emitter refuses nested tables/AoT inside array-of-tables"
+                )
+            lines.append(row_header)
+            lines.extend(row_body)
+            lines.append("")
+
+
+def encode_toml_document(data: dict[str, Any], *, header: str = ADE_TOML_HEADER) -> str:
+    """Encode a folded ade.toml tree. Dependency-free; round-trips through tomllib."""
+    if not isinstance(data, dict):
+        raise ConfigError("encode_toml_document: root must be a table")
+    lines: list[str] = []
+    if header:
+        lines.append(header.rstrip("\n"))
+        lines.append("")
+    ordered_keys = [k for k in _FOLD_ROOT_KEYS if k in data]
+    ordered_keys.extend(sorted(k for k in data if k not in _FOLD_ROOT_KEYS))
+
+    # Root scalars first (schema_version).
+    for key in ordered_keys:
+        value = data[key]
+        if not isinstance(value, (dict, list)):
+            lines.append(f"{_toml_key(key)} = {encode_toml_scalar(value)}")
+    if any(not isinstance(data[k], (dict, list)) for k in ordered_keys):
+        lines.append("")
+
+    for key in ordered_keys:
+        value = data[key]
+        if isinstance(value, dict):
+            # Routing-domain tables: compact inline nests. Policy domains (gates, …):
+            # nested section tables so ade-config set can edit scalar leaves.
+            prefer_inline = key in ROUTING_DOMAIN_KEYS and key != "service"
+            _emit_section(
+                lines,
+                f"[{_toml_key(key)}]",
+                value,
+                prefer_inline_nested=prefer_inline,
+            )
+        elif isinstance(value, list) and value and all(isinstance(x, dict) for x in value):
+            for row in value:
+                row_body, row_nested, row_aot = _emit_table_body(
+                    row, prefer_inline_nested=True
+                )
+                if row_nested or row_aot:
+                    raise ConfigError(
+                        f"[[{key}]]: fold emitter refuses nested tables/AoT inside array-of-tables"
+                    )
+                lines.append(f"[[{_toml_key(key)}]]")
+                lines.extend(row_body)
+                lines.append("")
+        elif isinstance(value, list):
+            lines.append(f"{_toml_key(key)} = {_encode_value(value)}")
+            lines.append("")
+
+    text = "\n".join(lines)
+    if not text.endswith("\n"):
+        text += "\n"
+    # Fail closed: encoded text must parse back to the same tree.
+    try:
+        parsed = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as e:
+        raise ConfigError(f"fold emitter produced invalid TOML: {e}") from e
+    if parsed != data:
+        raise ConfigError("fold emitter round-trip mismatch (encoder bug)")
+    return text
+
+
+def write_ade_toml(
+    text: str,
+    *,
+    root: Path | None = None,
+    path: Path | None = None,
+) -> Path:
+    """Atomically write config/ade.toml (temp beside, fsync, os.replace)."""
+    import tempfile
+
+    root = (root or repo_root_from_here()).resolve()
+    target = path if path is not None else default_new_config_path(root)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    # Validate before replace.
+    parsed = tomllib.loads(text)
+    require_schema_version(parsed, target, required=True)
+    schema = read_schema(default_schema_path(root))
+    validate_tree(parsed, schema, label=str(target))
+    fd, tmp = tempfile.mkstemp(prefix=target.name + ".", dir=str(target.parent), text=True)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as out:
+            out.write(text)
+            out.flush()
+            os.fsync(out.fileno())
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, target)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    return target

@@ -106,7 +106,7 @@ Skills (22, from each `skills/*/SKILL.md`):
 | [`acp-dispatch`](bin/acp-dispatch) | Hand a slice to an agent through Paseo and get its report back (a shim, slim-down E6, 2026-11-06). |
 | [`acp-dispatch-wait`](bin/acp-dispatch-wait) | The cheap rearm waiter for one acp-dispatch record (2026-10-18). |
 | [`ade-backup-stores`](bin/ade-backup-stores) | One consistent copy of every agent session store, plus the Hermes JSONL export. |
-| [`ade-config`](bin/ade-config) | Check/get/diff/set for the versioned effective ADE config (schema_version=1). |
+| [`ade-config`](bin/ade-config) | Check/get/diff/set/fold for the versioned effective ADE config (schema_version=1). |
 | [`ade-git-guard`](bin/ade-git-guard) | A `git` front door for what git's own hooks cannot see in a workspace another agent owns. |
 | [`ade-install`](bin/ade-install) | Transitional install catalog, plan, doctor, and bounded apply. |
 | [`ade-retro`](bin/ade-retro) | A read-only raw report for a retrospective over a date window (2026-11-04). |
@@ -116,7 +116,7 @@ Skills (22, from each `skills/*/SKILL.md`):
 | [`ade-update`](bin/ade-update) | Keep this machine's djbclark-ade checkout current: pull, relink, say what changed. |
 | [`ade-user-install`](bin/ade-user-install) | User-scoped uv/just GitHub-release fetch or repo bin/ symlink into ~/.local/bin. |
 | [`ade_claims.py`](bin/ade_claims.py) | The workspace claim library, the git-guard rules and the ref hooks (isolation slice W1, 2026-10-24; O2 redesign 2026-10-25). |
-| [`ade_config.py`](bin/ade_config.py) | Versioned read-only effective ADE config (schema_version=1). |
+| [`ade_config.py`](bin/ade_config.py) | Versioned effective ADE config (schema_version=1). |
 | [`ade_config_edit.py`](bin/ade_config_edit.py) | Comment-preserving atomic scalar set for ADE config TOML. |
 | [`ade_gates.py`](bin/ade_gates.py) | The frontier-model allowance, from code defaults and config/gates.toml [frontier] (docs/gates.md). |
 | [`ade_install.py`](bin/ade_install.py) | Install catalog, plan, observe-only doctor, bounded apply. |

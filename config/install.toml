@@ -1,5 +1,6 @@
 # Transitional install catalog (schema_version=1), 2026-11-09.
-# Used when config/ade.toml is absent. Values are references and recipes, never secret values.
+# Transitional while install/keys are not folded into config/ade.toml (policy domains
+# may already live there). Values are references and recipes, never secret values.
 # install/update/probe = "UNKNOWN" means not yet recorded. presence = PATH basename fallback for doctor.
 # install_argv / probe_argv = argv lists (tokens: {bin} {root} {home} {prefix}); doctor prefers probe_argv.
 # needs_system = true means package-manager/root; bounded apply refuses without a later --system unit.

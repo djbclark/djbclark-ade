@@ -54,9 +54,11 @@ def _run_cli(*args: str, home: Path, env: dict | None = None) -> subprocess.Comp
     )
 
 
-def test_legacy_effective_matches_routing_toml_and_clamped_gates(home):
+def test_shipped_ade_toml_is_repo_base_and_matches_legacy_domains(home):
     import tomllib
 
+    ade_path = REPO / "config" / "ade.toml"
+    assert ade_path.is_file()
     eff = ac.load_effective(root=REPO, home=home)
     shipped = tomllib.loads((REPO / "config" / "routing.toml").read_text())
     for key in ("routing", "lead", "dispatch", "substrate", "hermes", "calibrate", "service"):
@@ -64,11 +66,13 @@ def test_legacy_effective_matches_routing_toml_and_clamped_gates(home):
     assert eff.data["schema_version"] == 1
     frontier, info = ag.load_frontier()
     assert eff.data["gates"]["frontier"] == frontier
-    assert eff.provenance["routing_source"].endswith("config/routing.toml")
-    assert eff.provenance["gates_source"].endswith("config/gates.toml")
-    assert eff.provenance["context_budget_source"].endswith("config/context-budget.toml")
-    assert eff.provenance["secret_deny_source"].endswith("config/secret-deny.toml")
-    assert eff.provenance["pr_policy_source"].endswith("config/pr-policy.toml")
+    # Present ade.toml is the repo base for every policy domain.
+    assert eff.provenance["new_config"] == str(ade_path.resolve())
+    assert eff.provenance["routing_source"].endswith("config/ade.toml")
+    assert eff.provenance["gates_source"].endswith("config/ade.toml")
+    assert eff.provenance["context_budget_source"].endswith("config/ade.toml")
+    assert eff.provenance["secret_deny_source"].endswith("config/ade.toml")
+    assert eff.provenance["pr_policy_source"].endswith("config/ade.toml")
     assert eff.provenance["local_config"] is None
     assert info["source"] == "gates.toml"
     cb_shipped = tomllib.loads((REPO / "config" / "context-budget.toml").read_text())
@@ -82,6 +86,80 @@ def test_legacy_effective_matches_routing_toml_and_clamped_gates(home):
     assert eff.data["pr_policy"]["meta"] == pp_shipped["meta"]
     assert eff.data["pr_policy"]["github"] == pp_shipped["github"]
     assert eff.data["pr_policy"]["forgejo"] == pp_shipped["forgejo"]
+    # Fold from legacy mirrors still matches the committed file.
+    assert ac.fold_legacy_domains(root=REPO) == tomllib.loads(ade_path.read_text())
+
+
+def test_legacy_fallthrough_when_ade_toml_absent(home, tmp_path):
+    """Synthetic root with only legacy files still projects every domain."""
+    import shutil
+
+    root = tmp_path / "legacy-only"
+    (root / "config").mkdir(parents=True)
+    for name in (
+        "ade.schema.json",
+        "routing.toml",
+        "gates.toml",
+        "context-budget.toml",
+        "secret-deny.toml",
+        "pr-policy.toml",
+    ):
+        shutil.copy(REPO / "config" / name, root / "config" / name)
+    assert not (root / "config" / "ade.toml").exists()
+    eff = ac.load_effective(root=root, home=home)
+    assert eff.provenance["new_config"] is None
+    assert eff.provenance["routing_source"].endswith("config/routing.toml")
+    assert eff.provenance["gates_source"].endswith("config/gates.toml")
+    assert eff.provenance["context_budget_source"].endswith("config/context-budget.toml")
+    assert eff.provenance["secret_deny_source"].endswith("config/secret-deny.toml")
+    assert eff.provenance["pr_policy_source"].endswith("config/pr-policy.toml")
+    shipped = ac.fold_legacy_domains(root=REPO)
+    for key in (
+        "routing", "lead", "dispatch", "substrate", "hermes", "calibrate", "service",
+        "context_budget", "secret_deny", "pr_policy",
+    ):
+        assert eff.data.get(key) == shipped.get(key)
+
+
+def test_fold_write_check_cli(home, tmp_path):
+    import shutil
+
+    root = tmp_path / "fold-root"
+    (root / "config").mkdir(parents=True)
+    for name in (
+        "ade.schema.json",
+        "routing.toml",
+        "gates.toml",
+        "context-budget.toml",
+        "secret-deny.toml",
+        "pr-policy.toml",
+    ):
+        shutil.copy(REPO / "config" / name, root / "config" / name)
+    missing = _run_cli("fold", "--check", "--root", str(root), home=home)
+    assert missing.returncode == 1
+    written = _run_cli("fold", "--write", "--root", str(root), home=home)
+    assert written.returncode == 0, written.stderr
+    assert (root / "config" / "ade.toml").is_file()
+    folded_text = (root / "config" / "ade.toml").read_text()
+    # Nested section tables (not inline) so ade-config set can edit scalar leaves.
+    assert "[gates.frontier]" in folded_text
+    assert "frontier = {" not in folded_text
+    assert "[pr_policy.github]" in folded_text
+    assert "github = {" not in folded_text
+    assert "[context_budget.budget]" in folded_text
+    assert 'budget = {' not in folded_text
+    assert '"~" = {' in folded_text  # quoted-key override stays inline (set_scalar)
+    assert "[secret_deny.claude]" in folded_text
+    assert "[gates.floors.frontier]" in folded_text
+    assert "frontier1_judged = { bound = 1" in folded_text  # floor records stay inline
+    ok = _run_cli("fold", "--check", "--json", "--root", str(root), home=home)
+    assert ok.returncode == 0, ok.stderr
+    assert json.loads(ok.stdout)["ok"] is True
+    # Drift fails --check.
+    ade = root / "config" / "ade.toml"
+    ade.write_text(ade.read_text() + "\n# drift\n[lead]\nfable_lead = false\n")
+    drifted = _run_cli("fold", "--check", "--root", str(root), home=home)
+    assert drifted.returncode == 1
 
 
 def test_local_override_preserves_sibling_lead_leaves(home):
@@ -584,6 +662,7 @@ def test_r3_main_preserves_explicit_targets(home, synthetic_root, command, place
         'cmd_get': handler,
         'cmd_diff': handler,
         'cmd_set': handler,
+        'cmd_fold': handler,
     }
     exec(compile(ast.Module(body=[node], type_ignores=[]), 'actual ade-config.main', 'exec'), namespace)
     assert namespace['main'](_r3_cli_targets(command, synthetic_root, home, placement)) == 0

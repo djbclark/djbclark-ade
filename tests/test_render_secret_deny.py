@@ -131,9 +131,18 @@ def test_inline_empty_deny_list(fx):
 
 
 def test_committed_policy_json_equals_a_fresh_render(fx):
-    r = render(fx, policy=TOML)
+    # S1: committed JSON is produced by the default path (ade_config.load_effective →
+    # config/ade.toml when present). An explicit --policy forces legacy attribution and
+    # would disagree only on `_generated`.
+    out = fx / "policy.json"
+    r = subprocess.run(
+        [sys.executable, str(RENDER),
+         "--policy-json", str(out),
+         "--claude-template", str(fx / "settings.json.tmpl")],
+        capture_output=True, text=True, timeout=60, cwd=str(ROOT),
+    )
     assert r.returncode == 0, r.stderr
-    assert (fx / "policy.json").read_text() == POLICY_JSON.read_text()
+    assert out.read_text() == POLICY_JSON.read_text()
 
 
 def test_policy_json_shape(fx):
@@ -242,7 +251,7 @@ def _load_render():
 
 
 def test_default_load_policy_uses_load_effective(tmp_path, monkeypatch):
-    """S1: no --policy path → effective secret_deny (legacy file when ade.toml absent)."""
+    """S1: no --policy path → effective secret_deny (ade.toml when present, else legacy)."""
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
@@ -251,7 +260,12 @@ def test_default_load_policy_uses_load_effective(tmp_path, monkeypatch):
     via_eff, src_eff = mod.load_policy(root=ROOT, home=home, environ={})
     assert via_eff == via_path
     assert via_eff["deny"]
-    assert "secret-deny.toml" in src_eff or "secret-deny.toml" in src_path
+    preferred = ROOT / "config" / "ade.toml"
+    if preferred.is_file():
+        assert src_eff.endswith("config/ade.toml") or "ade.toml" in src_eff
+    else:
+        assert "secret-deny.toml" in src_eff
+    assert "secret-deny.toml" in src_path
 
 
 def test_secret_deny_toml_env_reaches_load_policy(tmp_path, monkeypatch):

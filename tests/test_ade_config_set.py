@@ -305,6 +305,59 @@ def test_unified_ade_toml_is_repo_source_when_present(home, tmp_path):
     assert "fable_lead = false" in ade.read_text()
 
 
+def test_unified_fold_nested_tables_allow_scalar_set(home, tmp_path):
+    """Fold emits [gates.frontier]/[pr_policy.github] (not inline); set edits those leaves."""
+    root = tmp_path / "repo"
+    (root / "config").mkdir(parents=True)
+    for name in (
+        "ade.schema.json",
+        "routing.toml",
+        "gates.toml",
+        "context-budget.toml",
+        "secret-deny.toml",
+        "pr-policy.toml",
+    ):
+        shutil.copy(REPO / "config" / name, root / "config" / name)
+    assert _run_cli("fold", "--write", "--root", str(root), home=home).returncode == 0
+    ade = root / "config" / "ade.toml"
+    text = ade.read_text()
+    assert "[gates.frontier]" in text and "frontier = {" not in text
+    assert "[pr_policy.github]" in text
+    g = ace.set_scalar(
+        "gates.frontier.frontier1_judged", 0, target="repo", root=root, home=home
+    )
+    assert g.target.kind == "unified" and g.changed is True
+    p = ace.set_scalar(
+        "pr_policy.github.approved_label",
+        "other-label",
+        target="repo",
+        root=root,
+        home=home,
+    )
+    assert p.changed is True
+    c = ace.set_scalar(
+        "context_budget.budget.total", 31000, target="repo", root=root, home=home
+    )
+    assert c.changed is True
+    after = ade.read_text()
+    assert "frontier1_judged = 0" in after
+    assert 'approved_label = "other-label"' in after
+    assert "total = 31000" in after
+    data = ac.read_toml(ade)
+    assert data["gates"]["frontier"]["frontier1_judged"] == 0
+    assert data["pr_policy"]["github"]["approved_label"] == "other-label"
+    assert data["context_budget"]["budget"]["total"] == 31000
+    # Floor record objects stay inline; set still refuses those leaves.
+    with pytest.raises(ace.EditError, match="table|inline|simple"):
+        ace.set_scalar(
+            "gates.floors.frontier.frontier1_judged.bound",
+            2,
+            target="repo",
+            root=root,
+            home=home,
+        )
+
+
 def test_invalid_schema_refused(home):
     path = _local(home)
     path.parent.mkdir(parents=True)

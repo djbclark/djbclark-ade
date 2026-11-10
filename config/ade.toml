@@ -1,0 +1,249 @@
+# config/ade.toml — schema_version=1 unified ADE config (folded 2026-11-09).
+# Canonical repo base when present (docs/config-migration.md). Legacy split TOMLs
+# (routing/gates/context-budget/secret-deny/pr-policy) remain for fallthrough when
+# this file is absent. Install/keys stay transitional in config/install.toml until
+# a reviewed install fold. Regenerate from legacy with: ade-config fold --write
+# Edit scalars with: ade-config set PATH VALUE --target repo
+
+schema_version = 1
+
+[routing]
+kinds = [ "judgment", "frontier", "code", "bulk", "research", "mechanical", "github", "realtime-web", "api-only" ]
+burn_first_min = 40.0
+burn_first_bonus = 4.0
+burn_first_waste_min = 30.0
+pace_penalty_above = 1.5
+pace_penalty = 6.0
+pace_penalty_judgment_factor = 0.5
+quality_max_rank_gap = { code = 10, judgment = 10 }
+plenty_min = 50.0
+default_profile = { bulk = 60, mechanical = 60 }
+never_route = [ "hermes", "clinepass", "antigravity", "alibaba", "devin", "copilot", "pi", "crush", "kiro", "cline", "agy", "qwen", "goose", "zcode", "muse", "aider", "venicecode", "grok", "grok-bot" ]
+aliases = { claude-agent-teams = "claude", openclaude = "claude", opencode = "opencode-go", kimi = "opencode-go" }
+
+[calibrate]
+min_outcomes = 5
+min_peers = 2
+suggest_worse_below = 25.0
+suggest_worse_delta = 5
+suggest_better_above = 15.0
+suggest_better_delta = 3
+
+[dispatch]
+operator_gated = [ "hermes" ]
+fable_gated_efforts = [ "xhigh", "max" ]
+frontier_models = [ "gpt-6-astra", "fable", "gemini-4-argon" ]
+inflight_cap = {}
+extra = {}
+estimate_floor = { "codex:frontier" = 60.0, "codex:judgment" = 25.0, codex = 10.0, claude = 8.0 }
+repo_overrides = { tendcf = { estimate_floor = { "codex:frontier" = 20.0 } }, nix2cf = { estimate_floor = { "codex:frontier" = 20.0 } } }
+
+[lead]
+model = "opus"
+effort = "high"
+pipeline_model = "sonnet"
+pipeline_effort = "medium"
+fable_lead = true
+
+[substrate]
+lifeline = [ "clinepass" ]
+
+[hermes]
+provider_name = { clinepass = "cline" }
+models = { opencode-zen-free = [ "deepseek-v4-flash-free", "hy3-free", "nemotron-3.5-lightning-free" ], clinepass = [ "cline-pass/deepseek-v4-flash", "cline-pass/minimax-m3" ] }
+
+[gates]
+[gates.frontier]
+frontier1_judged = 1
+frontier2_judged = 1
+frontier1_per_wave = 2
+frontier2_per_wave = 1
+frontier1_agent_calls_per_day = 4
+frontier1_min_left = 15.0
+frontier1_window_min_left = 30.0
+frontier2_min_left = 60.0
+
+[gates.floors]
+[gates.floors.frontier]
+frontier1_judged = { bound = 1, loosen = "higher" }
+frontier2_judged = { bound = 1, loosen = "higher" }
+frontier1_per_wave = { bound = 2, loosen = "higher" }
+frontier2_per_wave = { bound = 1, loosen = "higher" }
+frontier1_agent_calls_per_day = { bound = 4, loosen = "higher" }
+
+[context_budget]
+dirs = [ "~/src/djbclark-ade", "~" ]
+
+[context_budget.budget]
+total = 30000
+memory = 10000
+skills = 7500
+mcp_tools = 6500
+mcp_instructions = 5000
+grow_alert = 2000
+"~" = { memory = 12000 }
+
+[secret_deny]
+version = 1
+deny = [ ".env", ".env.*", "*.key", "*.p12", "*.pfx", "*-key.pem", "*.key.pem", "privkey*.pem", "id_rsa", "id_ecdsa", "id_ed25519", "~/.ssh/**", "~/.aws/credentials", "~/.netrc", "~/.config/gh/hosts.yml", "~/.docker/config.json", "~/.kube/config" ]
+allow = [ ".env.example", ".env.sample", ".env.template", "*.pub", "~/.ssh/known_hosts", "~/.ssh/config" ]
+
+[secret_deny.claude]
+static = [ ".env", "*.key", "*.p12", "*.pfx", "*-key.pem", "*.key.pem", "privkey*.pem", "id_rsa", "id_ecdsa", "id_ed25519", "~/.ssh/id_rsa", "~/.ssh/id_ecdsa", "~/.ssh/id_ed25519", "~/.aws/credentials", "~/.netrc", "~/.config/gh/hosts.yml", "~/.docker/config.json", "~/.kube/config" ]
+
+[pr_policy]
+[pr_policy.meta]
+schema = 1
+
+[pr_policy.github]
+token_secret = "GITHUB_TOKEN"
+owners = [ "djbclark", "frdminc" ]
+policy = "collaborators_only"
+exempt_repos = []
+trusted_authors = []
+approved_label = "pr-policy-approved"
+
+[pr_policy.forgejo]
+host = "forgejo.mit.edu"
+token_secret = "DJBCLARK_FORGEJO_MIT_EDU_TOKEN"
+owners = [ "djbclark" ]
+draft_prefix = "WIP: "
+exempt_repos = []
+trusted_authors = []
+approved_label = "pr-policy-approved"
+
+[[service]]
+name = "claude"
+cli = "claude (Opus 5.5 @ high for judgment; Sonnet 5.5 for code; Fable only for frontier)"
+good_at = { judgment = 1, frontier = 2, code = 12 }
+billing = "subscription"
+note = "orchestration pool; Fable is a sublimit of the SAME weekly window (at most 50% of it), not a separate allowance"
+judgment_tier = true
+access = "cli-only"
+models = { judgment = "opus --effort high", frontier = "fable --effort high", code = "sonnet --effort high" }
+
+[[service]]
+name = "omp"
+retired = true
+cli = "omp (Claude API credits: acp-dispatch omp --model anthropic/claude-sonnet-5-5)"
+good_at = { api-only = 1, judgment = 2, code = 13, bulk = 35 }
+billing = "credits"
+judgment_tier = true
+note = "Claude Max monthly API credits (expiring grant); API-only work first, then judgment (adversary rounds), else code/bulk so the credits are spent before the reset"
+grant_days = 30
+ready_probe = "omp-anthropic"
+max_parallel = 2
+access = "cli-only"
+models = { api-only = "anthropic/claude-sonnet-5-5 --effort high", judgment = "anthropic/claude-opus-5-5 --effort high", code = "anthropic/claude-sonnet-5-5 --effort high", bulk = "anthropic/claude-haiku-5-5 --effort low" }
+
+[[service]]
+name = "codex"
+cli = "codex (gpt-6-astra for frontier; gpt-6.1-sol / gpt-6-luna for everyday kinds while quota is plentiful)"
+good_at = { frontier = 1, judgment = 3, mechanical = 12, code = 15, bulk = 20 }
+billing = "subscription"
+note = "frontier: only a slice that really needs astra to look it over; judgment/code/bulk/mechanical on gpt-6.1-sol / gpt-6-luna only while every codex window has >= [routing].plenty_min left (operator 2026-10-25); one at a time"
+judgment_tier = true
+max_parallel = 1
+access = "cli-only"
+plenty_kinds = [ "judgment", "code", "bulk", "mechanical" ]
+models = { frontier = "gpt-6-astra --effort high", judgment = "gpt-6.1-sol --effort high", code = "gpt-6.1-sol --effort medium", bulk = "gpt-6-luna --effort low", mechanical = "gpt-6-luna --effort low" }
+
+[[service]]
+name = "opencode-zen-free"
+retired = true
+cli = "opencode (zen free models)"
+good_at = { bulk = 5, mechanical = 5, code = 45 }
+billing = "free"
+note = "free half of opencode-zen; usable by Claude via the opencode TUI and by Hermes as a direct API provider"
+access = "api"
+agent = "opencode"
+
+[[service]]
+name = "opencode-go"
+retired = true
+cli = "opencode (go tier)"
+good_at = { bulk = 2, mechanical = 1 }
+billing = "subscription"
+note = "Go Plus shares one monthly allowance; bulk and mechanical only, never code; costly models require bounded read-only advice (config/go-model-policy.json)"
+agent = "opencode"
+models = { bulk = "opencode-go/minimax-m3", mechanical = "opencode-go/gpt-6-luna --effort low" }
+
+[[service]]
+name = "cursor-auto"
+cli = "cursor (Auto pool)"
+good_at = { code = 14, mechanical = 4, bulk = 6, research = 12 }
+billing = "subscription"
+note = "Cursor Auto/Composer pool; monthly, use-it-or-lose-it"
+burn_first = true
+pool = [ "cursor", "auto" ]
+max_parallel = 2
+agent = "cursor"
+models = { code = "default", mechanical = "default", bulk = "default", research = "default" }
+
+[[service]]
+name = "cursor"
+cli = "pi (retained Cursor subscription CLI bridge)"
+ready_probe = "pi"
+good_at = { code = 20, mechanical = 10, bulk = 18, research = 18 }
+billing = "subscription"
+note = "Composer 2.5 through the retained vendor CLI; Cursor owns inner tools, so direct Pi-hook tasks exclude this route"
+agent = "pi"
+measured_only = true
+burn_first = true
+models = { code = "cursor/composer-2.5", mechanical = "cursor/composer-2.5", bulk = "cursor/composer-2.5", research = "cursor/composer-2.5" }
+
+[[service]]
+name = "zai"
+cli = "pi (Z.ai Coding Plan)"
+ready_probe = "pi"
+agent = "pi"
+good_at = { code = 22, mechanical = 9, bulk = 8, research = 18 }
+billing = "subscription"
+access = "cli-only"
+measured_only = true
+max_parallel = 2
+note = "Direct Pi tool loop; fresh named Z.ai quota required; no API/subscription or other-account inference"
+models = { code = "zai/glm-5.3-flash --effort high", mechanical = "zai/glm-5.3-flash --effort low", bulk = "zai/glm-5.3-flash --effort high", research = "zai/glm-5.3-flash --effort high" }
+
+[[service]]
+name = "cursor-cloud"
+cli = "cursor-cloud (Cursor Cloud Agents)"
+good_at = { code = 24, bulk = 26, mechanical = 18 }
+billing = "subscription"
+note = "Cursor Cloud Agent: leaves the Mac, pushes a branch, lead opens the PR; API price on the Cursor pool"
+shares_pool = "cursor"
+max_parallel = 2
+models = { code = "claude-sonnet-5-5", bulk = "claude-haiku-5-5", mechanical = "claude-haiku-5-5" }
+
+[[service]]
+name = "antigravity-argon"
+cli = "antigravity (Gemini 4 Argon; frontier fallback behind gpt-6-astra and Fable)"
+good_at = { frontier = 5 }
+billing = "subscription"
+note = "Gemini 4 Argon on the Google AI Pro plan, 1M context; own weekly window; frontier fallback only (operator 2026-10-31)"
+judgment_tier = true
+pool = [ "antigravity", "gemini_argon" ]
+fallback_after = [ "codex", "claude" ]
+window = "Gemini 4 Argon weekly"
+max_parallel = 1
+access = "cli-only"
+agent = "antigravity"
+models = { frontier = "gemini-4-argon --effort high" }
+
+[[service]]
+name = "clinepass"
+cli = "cline-pass API (Hermes/Dann substrate; no TUI)"
+good_at = { bulk = 40, code = 40, mechanical = 40 }
+billing = "subscription"
+note = "Hermes-usable API pool; watch the burn alert"
+access = "api"
+models = { bulk = "cline-pass/deepseek-v4.1-flash", mechanical = "cline-pass/deepseek-v4.1-flash", code = "cline-pass/glm-5.3" }
+
+[[service]]
+name = "opencode-zen"
+cli = "opencode (zen paid models)"
+good_at = { code = 50, bulk = 50 }
+billing = "prepaid"
+note = "paid half of opencode-zen; prepaid tier retired 2026-08-23"
+retired = true
+agent = "opencode"
