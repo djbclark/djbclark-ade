@@ -21,8 +21,10 @@ when present, and `~/.config/djbclark-ade/local.toml` overlays it per leaf
 from unified/local routing values. Invalid inputs stop initialization; the final
 overlaid routing policy retains the legacy shape/default validation. `policy`
 reports base/local source provenance. Explicit `load_policy(path)` and
-`reload_policy(path)` remain isolated legacy reads. Model-tier resolution keeps
-its existing reader in this unit. See [config precedence](config-migration.md).
+`reload_policy(path)` remain isolated legacy reads. The router's tier helpers
+use one validated effective model-tier snapshot, refreshed by default reload;
+`MODEL_TIERS_TOML` isolates that domain and preserves its legacy default fallback.
+See [config precedence](config-migration.md).
 A2. `bin/route_agent.py plan --kinds …` applies them to the live quota and prints one `paseo run --provider … --no-wait` line per slice;
 `route`, `show`, `services [--check-models]`, `calibrate`, `substrate` and `hermes-chain` are its other commands.
 A3. **Monthly `good_at` re-rank (2026-11-10):** `route_agent.py calibrate --json --since 30` proposes rank
@@ -103,6 +105,10 @@ Keep briefs short (OpenCode exposes no smaller context window); the Go plugin co
 G1. Design: `docs/history/model-tiers-design.md`. This slice ships the file, the loader (`bin/model_tiers.py`), the CLI
 (`bin/ade-model-tiers`) and the first readers (`route_agent`, `load_effective`). Full consumer migration (routing.toml
 `@role` placeholders, render, literal scan) stays later.
+Runtime adoption **2026-11-10**: router tier reporting, frontier tokens, sublimit
+families and judgment fallback consume the final effective `[model_tiers]` tree.
+Malformed overlays fail before publishing runtime state. Legacy file readers and
+the tier writer remain unchanged; no model promotion ships with this adoption.
 G2. Today's table (re-check with `bin/ade-model-tiers show`):
 
 | role | claude (rank 1) | codex (rank 2) |

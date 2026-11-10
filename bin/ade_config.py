@@ -4,8 +4,8 @@ Builds one effective tree from optional ``config/ade.toml``, legacy
 ``config/routing.toml`` + ``config/gates.toml`` + ``config/model-tiers.toml``,
 and optional ``~/.config/djbclark-ade/local.toml``. Does not write files,
 resolve secrets, or initialize live routing. ``route_agent`` and ``ade_gates``
-consume this tree for routing/gates; ``model_tiers`` is still read directly by
-``route_agent`` for model resolution.
+consume this tree for routing/gates and the router's model-tier snapshot.
+Legacy model-tier file APIs remain separate and never import this loader.
 
 Public:
   load_effective(...) -> EffectiveConfig
@@ -512,10 +512,12 @@ def load_effective(
         provenance["gates_source"] = str(gpath)
 
     # --- model tiers (roles → ids); before local so local can overlay ---
+    tier_info: dict[str, Any] = {"source": "effective", "error": None, "local_config": None}
     if model_tiers_env:
         mt_path = Path(model_tiers_env)
         _model_tiers.clear_cache()
         tiers = _model_tiers.load(mt_path, use_cache=False)
+        tier_info.update(source=tiers.source, error=tiers.error)
         data["model_tiers"] = _model_tiers.public_dict(tiers)
         provenance["model_tiers_source"] = str(mt_path)
     elif using_new and isinstance(data.get("model_tiers"), dict) and data["model_tiers"]:
@@ -524,6 +526,7 @@ def load_effective(
         mt_path = default_model_tiers_path(root)
         _model_tiers.clear_cache()
         tiers = _model_tiers.load(mt_path, use_cache=False)
+        tier_info.update(source=tiers.source, error=tiers.error)
         data["model_tiers"] = _model_tiers.public_dict(tiers)
         provenance["model_tiers_source"] = str(mt_path)
 
@@ -542,9 +545,12 @@ def load_effective(
             merge_src.pop("gates", None)
         if model_tiers_env:
             merge_src.pop("model_tiers", None)
+        elif "model_tiers" in merge_src:
+            tier_info.update(source="effective", local_config=str(local_path))
         data = merge_maps(data, merge_src, path="")
         provenance["local_config"] = str(local_path)
 
+    provenance["model_tiers_info"] = tier_info
     reject_duplicate_services(data.get("service"), label="effective config")
     gates, ginfo = project_gates_from_new(
         data["gates"], source_label=provenance["gates_source"]

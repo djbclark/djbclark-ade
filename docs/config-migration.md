@@ -72,10 +72,22 @@ B9. **Runtime routing adoption (2026-11-10).** `route_agent.load_effective_polic
     and `reload_policy()` use it. `load_policy(path)` and `reload_policy(path)` retain
     their isolated legacy-format behavior and do not read unified/local config.
     `policy` JSON adds `provenance` with the routing base and optional unified/local
-    paths; Markdown names a loaded local override too. Model-tier resolution remains
-    on the existing `model_tiers` reader; this unit does not adopt effective
-    model-tier overlays. Frontier gate clamping, quota/acceptance checks and
+    paths; Markdown names a loaded local override too. Frontier gate clamping, quota/acceptance checks and
     estimate floors/caps are unchanged.
+B10. **Runtime model-tier adoption (2026-11-10).** The router validates one final
+    overlaid `[model_tiers]` tree with `model_tiers.from_dict` and passes that
+    snapshot to its existing tier helpers. Policy reporting, frontier tokens,
+    sublimit families and the low-frontier-cap judgment fallback use the same
+    snapshot; default `reload_policy()` refreshes them together. Invalid effective
+    tiers stop initialization/reload before routing state is published. Validation
+    reuses the tier contract, with additional checks for the consumed `spell` map
+    and `pool_family` string types. Derived tokens/families and source metadata are
+    recomputed, never trusted from editable report fields. `MODEL_TIERS_TOML`
+    retains domain isolation and the legacy missing/bad-file default fallback;
+    `ROUTING_POLICY` isolates routing only, so it does not suppress tier overlays.
+    `model_tiers.load(path)` and explicit `reload_policy(path)` retain legacy file
+    behavior; writers and `@role` migration are outside this unit. No tracked
+    model choices or policy limits changed.
 
 ## C. CLI
 
@@ -119,10 +131,10 @@ assignment forms are refused clearly. Unrelated complex TOML (including
 
 **Recording vs adoption (2026-11-10).** Every successful `set` still reports
 `adoption=recorded-only`: this is the writer's conservative status, not proof that
-a running consumer reloaded. `route_agent` adopts the routing domain on its next
+a running consumer reloaded. `route_agent` adopts routing and model tiers on its next
 initialization or default `reload_policy()`; `ade_gates.load_frontier` already
 reads the effective gates domain. Existing processes do not hot-reload routing
-constants on a `set`. Other consumers, including model-tier resolution, retain
+constants on a `set`. Other consumers and the legacy model-tier CLI retain
 their own paths until separately adopted. check/get/diff keep their no-write /
 no-auth / no-network contract.
 
