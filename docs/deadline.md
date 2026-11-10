@@ -23,10 +23,13 @@ deadline install [--ade DIR] [--dry-run] [--backend auto|launchd|systemd|cron] [
 ```
 
 `--on-expire`: `kill` (default: SIGTERM to the process group, SIGKILL after `--grace`, default 60 s; Hermes is pinged), `notify` (owner and Hermes
-only, nothing killed), `relay` (kill, then tell the owner through `relay.py` with the name, budget, overrun and checkpoint). `reroute:RECORD`
-was retired on 2026-11-07 (slim-down E7; the acp-dispatch shim has no `reroute`): `start` and `run` refuse it with exit 2 pointing at `relay`,
-whose owner re-dispatches the slice on the next rung (`model-routing` D2). A record registered with it before then is stopped, nothing is
-dispatched, and the owner and the operator are told "reroute FAILED ... nothing replaced it".
+only, nothing killed), `relay` (kill, then tell the owner through the transitional `skills/session-finder/relay.py` shim over
+`paseo send --json` — soft delete ~2026-11-20, [docs/slim/wave6-follow-up.md](slim/wave6-follow-up.md) / #398 / #417 — with the name,
+budget, overrun and checkpoint). Live agents messaging a peer use native `paseo send --json` (standing order 10), not a new
+`relay.py` call site. `reroute:RECORD` was retired on 2026-11-07 (slim-down E7; the transitional `acp-dispatch` shim has no
+`reroute`): `start` and `run` refuse it with exit 2 pointing at `relay`, whose owner re-dispatches the slice on the next rung
+(`model-routing` D2). A record registered with it before then is stopped, nothing is dispatched, and the owner and the operator
+are told "reroute FAILED ... nothing replaced it".
 **A budget is enforced, never only announced.** The one named exception is the announce-only wait: a record with no `--pid`/`--pgid` has
 nothing to kill, so `start` refuses the default `kill` for it (exit 2) and it must say `--on-expire notify` or `relay`
 explicitly; `--on-expire notify` with a pid is likewise the operator's explicit choice.
@@ -70,18 +73,22 @@ exits between two `run` polls is not `lost`: while its `run` registrar is alive 
 
 ## Waiters register themselves (2026-11-02)
 
-`bin/load-watch admit --wait S` (S > 0; a pure check waits for nothing) and `bin/acp-dispatch-wait` register a deadline for their own
-wait by default, through `deadline run` (B9 rule 2; budgets are the plan's B9 rule 3). A waiter holds no work, so on expiry the action is `kill` of
-**its own process group** and nothing else: nothing is lost, and the caller sees exit 124 (re-run it).
-Two exceptions. `acp-dispatch-wait` exits **76**, never 124: 124 already means "the record's `wait_timeout` passed" (the slice timed out), and a lead that
-read a deadline stop as that would re-task a slice that is still running; 76 means only the waiter was stopped, so re-arm with the same line. It tells the
-two apart by the record's state (`expired`) after `deadline run` returns 124. And `load-watch admit`: its callers (`acp-dispatch`, `bg`) fail OPEN on an exit they do not know, so a deadline stop is
-answered as **exit 75, "still too hot"** (with a stderr line), the answer the wait would have given had it run out.
+`bin/load-watch admit --wait S` (S > 0; a pure check waits for nothing) registers a deadline for its own wait by default, through
+`deadline run` (B9 rule 2; budgets are the plan's B9 rule 3). Live slice collection uses native `paseo wait ID --json` (reads `idle`
+when the agent's turn has ended); do not start new waits on the transitional dispatch shim. While it remains (soft delete ~2026-11-20,
+[docs/slim/wave6-follow-up.md](slim/wave6-follow-up.md) / #398 / #417), `bin/acp-dispatch-wait` still registers the same way for
+shim-era records. A waiter holds no work, so on expiry the action is `kill` of **its own process group** and nothing else: nothing is
+lost, and the caller sees exit 124 (re-run it).
+Two exceptions. Transitional `acp-dispatch-wait` exits **76**, never 124: 124 already means "the record's `wait_timeout` passed" (the
+slice timed out), and a lead that read a deadline stop as that would re-task a slice that is still running; 76 means only the waiter
+was stopped, so re-arm with the same line. It tells the two apart by the record's state (`expired`) after `deadline run` returns 124.
+And `load-watch admit`: its callers (the transitional `acp-dispatch` shim, `bg`) fail OPEN on an exit they do not know, so a deadline
+stop is answered as **exit 75, "still too hot"** (with a stderr line), the answer the wait would have given had it run out.
 
 |waiter|name|budget|heartbeat|
 |---|---|---|---|
 |`load-watch admit --wait S`|`admit-wait-<pid>`|min(S, 30 min) + 60 s (the admission class maximum)|per poll; timeout 5 min|
-|`acp-dispatch-wait RECORD DONE`|`dispatch-wait-<record file name>-<pid>`|min(the record's `wait_timeout` read at arm time, 2 h) + 60 s (2 h when 0 or unreadable; 2 h is the longest a lead's tool holds a waiter, so a longer slice is covered by re-arming on 76)|per 60 s pass; timeout 10 min|
+|`acp-dispatch-wait RECORD DONE` (transitional until ~2026-11-20)|`dispatch-wait-<record file name>-<pid>`|min(the record's `wait_timeout` read at arm time, 2 h) + 60 s (2 h when 0 or unreadable; 2 h is the longest a lead's tool holds a waiter, so a longer slice is covered by re-arming on 76)|per 60 s pass; timeout 10 min|
 
 The 60 s margin lets the waiter's own timeout path (it writes its result files) finish before the enforcer can fire; a registered waiter therefore
 never outlives its own `--timeout`/`--wait` by more than the margin plus the sweep's worst overrun (about two minutes). Owner: the caller's
@@ -90,9 +97,10 @@ never outlives its own `--timeout`/`--wait` by more than the margin plus the swe
 1. **Why a supervisor.** `deadline start --pid` refuses the registrar's own parent (safety rule 3), so a process cannot register itself. The waiter
    runs *itself* under `deadline run --name N --budget B --heartbeat H --on-expire kill -- SELF ARGS` and returns its exit code; the inner copy
    waits. `bin/deadline` is unchanged, and `done` on every exit path (success, failure, signals: the supervisor forwards SIGTERM/SIGINT/SIGHUP
-   once) is `deadline run`'s own bounded stop. `bin/deadline_wait.py` is the Python waiter's code (the PR waiter that shared it was removed 2026-11-06, slim-down E8); `acp-dispatch-wait` does the
-   same in bash. The price is one resident `deadline run` Python process per registered waiter (`acp-dispatch-wait` was bash-only by design on
-   2026-10-18; `--no-deadline` restores that; whether this waiter should be opt-in is the operator's call).
+   once) is `deadline run`'s own bounded stop. `bin/deadline_wait.py` is the Python waiter's code (the PR waiter that shared it was removed 2026-11-06, slim-down E8); the transitional
+   `acp-dispatch-wait` does the same in bash. The price is one resident `deadline run` Python process per registered waiter (`acp-dispatch-wait`
+   was bash-only by design on 2026-10-18; `--no-deadline` restores that; whether this waiter should be opt-in is the operator's call; the waiter
+   itself goes with the Wave 6 shim deletion).
    Names carry the supervisor's pid (each run leaves one terminal record file until `prune` removes it after 7 days), so a second waiter for the same record (a re-arm) or a second admission wait is never refused as "name already live".
 2. **Opt out and nesting.** `--no-deadline` on each. A waiter started under `deadline run` (env `DEADLINE_NAME` set, even empty) does not register
    again and does not beat the caller's record; the inner copy of a supervised waiter sees the same variable, which is also what stops a loop. The inner
@@ -176,11 +184,13 @@ hand: two schedulers are safe (every record is under its own flock) but they dou
 2. `deadline run` reserves its name (a `starting` placeholder, left alone by the sweep for 60 s) BEFORE it starts the command, so a refused name never
    ran the command; and it only advances or finishes the record carrying its own `reg_id`, so an old `run` whose terminal name was registered again
    cannot mark the new registration done.
-3. The owner relay reads delivery proof from the relay shim (2026-11-06, docs/slim E3: `relay.py OWNER --message-file -`, which reads `paseo send
+3. The owner notice today still goes through the transitional relay shim (2026-11-06, docs/slim E3; soft delete ~2026-11-20,
+   [docs/slim/wave6-follow-up.md](slim/wave6-follow-up.md) / #398 / #417: `relay.py OWNER --message-file -`, which reads `paseo send
    --json`'s `.status`: exit 0 only for `sent` or `completed`, which a sourceless send such as deadline's gets; 2 not delivered (`queued`, `timeout`,
    `permission`, `error`, or a target `paseo agent inspect` does not show idle or running with no card), 1 paseo failed, 3 not a Paseo agent and 4 no
    sender stay pending and are retried) and declares its sender (`RELAY_SENDER_NAME`, `deadline-sweep` in the launchd plist, `deadline` otherwise),
-   which the shim names in a `[relay from NAME]` prefix, since a launchd job has no Paseo id.
+   which the shim names in a `[relay from NAME]` prefix, since a launchd job has no Paseo id. New agent-to-agent messaging uses native
+   `paseo send --json` directly (standing order 10); do not add `relay.py` call sites.
 4. A stop is confirmed only when the target is `gone` (or its pid was recycled). `unverified` (a leaderless group whose anchor exited while other
    members may still run) is never a confirmed stop: the record goes to `kill-failed`, the owner is told, nothing is rerouted. An empty group is `gone`.
 5. `deadline run` keeps enforcing after its command's leader exits: while the process group has survivors it sends SIGKILL after the grace and runs the
