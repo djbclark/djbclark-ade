@@ -7,16 +7,20 @@ usage:
   ade-sched [options] install PLIST         write and activate the job
   ade-sched [options] uninstall LABEL       remove it (not installed: exit 0)
   ade-sched [options] status [LABEL...]     installed / active / next run; no LABEL: every job ade-sched generated
+  ade-sched [options] list                  print install.jobs / install.retired_jobs from the install catalog
+  ade-sched [options] diff                  compare the catalog to live launchd/systemd/cron/paseo (report only)
 
 options (before or after the subcommand):
   --backend auto|launchd|systemd|cron   default auto (env ADE_SCHED_BACKEND; `none` there turns scheduling off, exit 69)
   --ade DIR             the checkout that fills __ADE__ / @ADE@ (default: the one this script is in; install refuses
                         that default with exit 2 when it is a linked git worktree, which is deleted after its merge)
+  --root DIR            catalog root for list/diff (default: checkout containing this script)
   --set KEY=VALUE       fill a placeholder, literally as written in the plist (__STATE__=..., @TARGET@=...); repeatable
   --dry-run             install/uninstall: print the artifacts and commands, change nothing
   --no-activate         install/uninstall: write or remove the files, print the activation commands instead of running them
   --allow-no-linger     systemd install: proceed when loginctl says Linger=no (default: exit 69 before writing, because
                         user timers stop at logout); never runs sudo, prints `sudo loginctl enable-linger USER`
+  --json                list/diff: machine-readable output
 
 Auto-detection: darwin with launchctl -> launchd; a booted systemd whose `systemctl --user is-system-running` answers
 running/degraded/starting/initializing -> systemd; booted systemd with no reachable user manager -> exit 69 (never a
@@ -26,15 +30,18 @@ __NAME__ or @NAME@ left unfilled is exit 2, and so is an EnvironmentVariables na
 launchd; plist key KillMode overrides), TimeoutStartSec=max(3 x StartInterval, 300s) and AccuracySec=1s. On systemd and
 cron, ~/.local/bin:/usr/local/bin:/usr/bin:/bin go first in PATH (plist PATHs are Mac paths).
 
+list/diff read config/install.toml [install.jobs] / [install.retired_jobs] (S4b). diff never unloads any job,
+including foreign owners (Orca/BB/herdr and unknown labels are reported only).
+
 Overrides (env): ADE_SCHED_LAUNCHCTL, ADE_SCHED_SYSTEMCTL, ADE_SCHED_LOGINCTL, ADE_SCHED_CRONTAB (binaries);
 ADE_SCHED_LAUNCH_AGENTS (default ~/Library/LaunchAgents), ADE_SCHED_UNIT_DIR (default
 ${XDG_CONFIG_HOME:-~/.config}/systemd/user), ADE_SCHED_LOCK (the crontab edit lock, default
 ${XDG_STATE_HOME:-~/.local/state}/ade/ade-sched.lock).
 
-exit: 0 ok; 1 an activation command failed (its stderr is quoted); 2 bad job or usage; 3 status: a LABEL is not
-installed; 69 no usable scheduler (none forced, none found, systemd user manager unreachable, Linger=no on a systemd
-install without --allow-no-linger, KeepAlive or a StartInterval under 60 s on cron). A `crontab -l` failure other than
-"no crontab" is exit 1 and the crontab is left untouched.
+exit: 0 ok; 1 an activation command failed (its stderr is quoted) or diff found ADE drift; 2 bad job or usage; 3 status:
+a LABEL is not installed; 69 no usable scheduler (none forced, none found, systemd user manager unreachable, Linger=no
+on a systemd install without --allow-no-linger, KeepAlive or a StartInterval under 60 s on cron). A `crontab -l`
+failure other than "no crontab" is exit 1 and the crontab is left untouched.
 
 Notes and warnings (unmapped plist keys, cron rounding) go to stderr and do not change the exit status.
 docs/scheduling.md is the manual.
@@ -42,10 +49,13 @@ docs/scheduling.md is the manual.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
+from pathlib import Path
 
 sys.path[:0] = [d for d in (os.path.dirname(os.path.realpath(__file__)),) if d not in sys.path]   # python3 -I has no script dir
+import ade_install as ai  # noqa: E402
 import ade_sched
 
 
@@ -62,11 +72,13 @@ def _common(p: argparse.ArgumentParser, top: bool) -> None:
         return {"default": v if top else argparse.SUPPRESS}
     p.add_argument("--backend", choices=("auto", *ade_sched.BACKENDS), **dflt("auto"))
     p.add_argument("--ade", metavar="DIR", **dflt(None))
+    p.add_argument("--root", metavar="DIR", **dflt(None))
     # its own dest on a subcommand: an append there would REPLACE the top-level list, dropping earlier --set values
     p.add_argument("--set", action="append", metavar="KEY=VALUE", dest="subst" if top else "sub_subst", **dflt([]))
     p.add_argument("--dry-run", action="store_true", **dflt(False))
     p.add_argument("--no-activate", action="store_true", **dflt(False))
     p.add_argument("--allow-no-linger", action="store_true", **dflt(False))
+    p.add_argument("--json", action="store_true", **dflt(False))
 
 
 def parse(argv: list[str]) -> argparse.Namespace:
@@ -75,7 +87,8 @@ def parse(argv: list[str]) -> argparse.Namespace:
     _common(ap, top=True)
     sub = ap.add_subparsers(dest="cmd", required=True, parser_class=_Parser)
     for name, arg, nargs in (("backend", None, None), ("render", "plist", None), ("install", "plist", None),
-                             ("uninstall", "label", None), ("status", "labels", "*")):
+                             ("uninstall", "label", None), ("status", "labels", "*"),
+                             ("list", None, None), ("diff", None, None)):
         sp = sub.add_parser(name)
         _common(sp, top=False)
         if arg:
@@ -95,13 +108,101 @@ def _subst(a: argparse.Namespace) -> dict[str, str]:
     return subst
 
 
+def _catalog_root(a: argparse.Namespace) -> Path:
+    if a.root:
+        return Path(a.root)
+    if a.ade:
+        return Path(a.ade)
+    return Path(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+
+
+def _cmd_list(a: argparse.Namespace) -> int:
+    try:
+        catalog = ai.load_catalog(root=_catalog_root(a))
+    except ai.InstallError as e:
+        print(f"ade-sched: {e}", file=sys.stderr)
+        return ade_sched.EX_USAGE
+    if a.json:
+        json.dump(
+            {"jobs": catalog.jobs, "retired_jobs": catalog.retired_jobs},
+            sys.stdout,
+            indent=2,
+            sort_keys=True,
+        )
+        sys.stdout.write("\n")
+        return 0
+    lines = ade_sched.format_job_list(catalog.jobs, catalog.retired_jobs)
+    print(f"ade-sched list: {len(catalog.jobs)} jobs, {len(catalog.retired_jobs)} retired")
+    for line in lines:
+        print(line)
+    return 0
+
+
+def _cmd_diff(a: argparse.Namespace) -> int:
+    try:
+        catalog = ai.load_catalog(root=_catalog_root(a))
+    except ai.InstallError as e:
+        print(f"ade-sched: {e}", file=sys.stderr)
+        return ade_sched.EX_USAGE
+    backend = None if a.backend == "auto" else a.backend
+    try:
+        live = ade_sched.scan_live(backend)
+    except ade_sched.SchedError as e:
+        print(f"ade-sched: {e}", file=sys.stderr)
+        return e.code
+    rows = ade_sched.diff_jobs(catalog.jobs, catalog.retired_jobs, live, unload=False)
+    failed = sum(1 for r in rows if r.fail)
+    if a.json:
+        json.dump(
+            {
+                "backend": live.backend,
+                "live": [{"id": j.id, "backend": j.backend, "source": j.source, "active": j.active}
+                         for j in live.jobs],
+                "notes": list(live.notes),
+                "drift": [
+                    {
+                        "name": r.name,
+                        "status": r.status,
+                        "owner": r.owner,
+                        "detail": r.detail,
+                        "category": r.category,
+                        "fail": r.fail,
+                        "action": r.action,
+                    }
+                    for r in rows
+                ],
+                "ok": failed == 0,
+            },
+            sys.stdout,
+            indent=2,
+            sort_keys=True,
+        )
+        sys.stdout.write("\n")
+    else:
+        print(
+            f"ade-sched diff: backend={live.backend} live={len(live.jobs)} "
+            f"drift_rows={len(rows)} (report only; never unload)"
+        )
+        for r in rows:
+            mark = "FAIL" if r.fail else r.status
+            print(f"  {mark:9} {r.category}/{r.name} owner={r.owner}: {r.detail}")
+    return 1 if failed else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     a = parse(sys.argv[1:] if argv is None else argv)
     if a.ade and not os.path.isdir(a.ade):
         print(f"ade-sched: --ade {a.ade} is not a directory", file=sys.stderr)
         return ade_sched.EX_USAGE
+    if a.root and not os.path.isdir(a.root):
+        print(f"ade-sched: --root {a.root} is not a directory", file=sys.stderr)
+        return ade_sched.EX_USAGE
     backend = None if a.backend == "auto" else a.backend
     try:
+        if a.cmd == "list":
+            return _cmd_list(a)
+        if a.cmd == "diff":
+            return _cmd_diff(a)
         if a.cmd == "backend":
             b = ade_sched.detect(backend)
             print(f"backend: {b.name} ({b.reason})")

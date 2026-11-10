@@ -31,21 +31,43 @@ bin/ade-sched [options] render PLIST          print what install would write (on
 bin/ade-sched [options] install PLIST         write and activate the job
 bin/ade-sched [options] uninstall LABEL       remove it (not installed: exit 0)
 bin/ade-sched [options] status [LABEL...]     installed / active / next run; no LABEL: every job ade-sched generated
+bin/ade-sched [options] list                  print config/install.toml [install.jobs] / [install.retired_jobs]
+bin/ade-sched [options] diff                  compare the inventory to live launchd/systemd/cron/paseo (report only)
 
 Checked-in ADE jobs under `config/launchd/` include `com.djbclark.deadline-sweep`,
 `com.djbclark.pr-policy`, and (2026-11-09) `com.djbclark.ade-update-check` (daily
 `ade-update --check` only; not installed until an operator runs
 `ade-sched install … --set __STATE__=$HOME/.local/state/ade`).
+`launchd/com.djbclark.load-watch.plist` is also inventoried (S4b).
 ```
 
 | option | meaning |
 | --- | --- |
 | `--backend auto\|launchd\|systemd\|cron` | default `auto` (the detection below) |
 | `--ade DIR` | the checkout that fills `__ADE__` / `@ADE@`; default: the checkout `bin/ade-sched` is in |
+| `--root DIR` | catalog root for `list`/`diff` (default: the checkout containing `bin/ade-sched`) |
 | `--set KEY=VALUE` | fill a placeholder, written exactly as in the plist (`__STATE__=...`, `@TARGET@=...`); repeatable |
 | `--dry-run` | install/uninstall: print every artifact and command, change nothing |
 | `--no-activate` | install/uninstall: write or remove the files and print the activation commands instead of running them |
 | `--allow-no-linger` | systemd install: proceed although `Linger=no` (see Linger) |
+| `--json` | `list`/`diff`: machine-readable output |
+
+## Inventory and drift (S4b, 2026-11-10)
+
+`config/install.toml` carries transitional `[install.jobs]` and `[install.retired_jobs]` (the setup-plan's
+`config/ade.toml [install.jobs]` home while that file is absent). Each job records `name`, `kind`
+(`ade-sched` / `paseo` / `service`), `owner`, `class`, and for probeable rows a `label` (plus `plist` /
+`mode` as needed). Paseo rows require an explicit `mode` (`auto` / `auto-review`).
+
+- `ade-sched list` / `just sched-list` prints the inventory.
+- `ade-sched diff` / `just sched-diff` and `just doctor` (via `ade-install doctor`) compare live
+  `launchctl` / `systemctl --user` / `crontab` / `paseo schedule ls --json` to that inventory.
+- **Report only:** diff and doctor never unload or repair. Foreign and unknown owners (including
+  Orca, BB, herdr, and any label not ADE-owned) are reported and left alone. Only a later ADE
+  reconcile step may touch jobs whose owner is `djbclark-ade` and that are recorded in the
+  ownership ledger (`docs/setup-plan.md` S4b).
+- Retired labels that reappear fail doctor; ADE-owned expected labels that are missing fail when
+  a host scheduler (or paseo) is probeable. Planned rows without a label stay `planned`.
 
 The options go before or after the subcommand.
 
@@ -156,8 +178,8 @@ dry-run and render are allowed.
 
 | code | meaning |
 | --- | --- |
-| 0 | done (uninstall of something not installed included) |
-| 1 | an activation command failed (its stderr is quoted), or `crontab -l` failed for a reason other than "no crontab" |
+| 0 | done (uninstall of something not installed included); `diff` with no failing drift |
+| 1 | an activation command failed (its stderr is quoted), or `crontab -l` failed for a reason other than "no crontab"; `diff`/`doctor` ADE drift (missing expected or retired still present) |
 | 2 | bad job or usage: unparsable plist, unfilled placeholder, newline in a value, secret-looking env name, worktree guard |
 | 3 | `status LABEL`: a named label is not installed |
 | 69 | no usable scheduler: `none` forced, nothing found, systemd user manager unreachable, Linger=no without `--allow-no-linger`, KeepAlive or StartInterval < 60 s on cron |
@@ -184,8 +206,9 @@ except ade_sched.SchedError as e:
 `install(job, backend=None, *, dry_run, activate, allow_no_linger, env, out, err, **overrides)`,
 `uninstall(label, backend=None, *, dry_run, activate, env, out, err, **overrides) -> bool`,
 `status(label, backend=None, *, env, **overrides) -> Status(backend, label, installed, active, next_run, paths)`,
-`installed_labels(...)`, `linger(...)`, `systemd_version(...)`. The module docstring is the reference.
+`installed_labels(...)`, `scan_live(...)`, `diff_jobs(jobs, retired, live, *, unload=False)` (unload is ignored;
+always report-only), `linger(...)`, `systemd_version(...)`. The module docstring is the reference.
 
 Tests: `tests/test_ade_sched.py` (every checked-in plist on all three backends, quoting with a hostile path, the calendar
 and cron mappings, the detection matrix, install/uninstall/status against fake binaries, and `systemd-analyze verify` on
-generated units when the tool is installed).
+generated units when the tool is installed); `tests/test_ade_jobs_inventory.py` (S4b inventory, list/diff, doctor drift).

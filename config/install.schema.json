@@ -160,6 +160,108 @@
           }
         }
       }
+    },
+    "install": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "jobs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "kind",
+              "owner",
+              "class"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "kind": {
+                "type": "string"
+              },
+              "owner": {
+                "type": "string",
+                "minLength": 1
+              },
+              "class": {
+                "type": "string"
+              },
+              "chosen": {
+                "type": "boolean"
+              },
+              "label": {
+                "type": "string",
+                "minLength": 1
+              },
+              "plist": {
+                "type": "string"
+              },
+              "schedule": {
+                "type": "string"
+              },
+              "command": {
+                "type": "string"
+              },
+              "mode": {
+                "type": "string"
+              },
+              "set": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "platforms": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "notes": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "retired_jobs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "kind",
+              "owner"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "kind": {
+                "type": "string"
+              },
+              "owner": {
+                "type": "string",
+                "minLength": 1
+              },
+              "label": {
+                "type": "string",
+                "minLength": 1
+              },
+              "notes": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
     }
   }
 }
