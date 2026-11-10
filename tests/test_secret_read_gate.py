@@ -822,7 +822,7 @@ def test_first_pass_walk_fails_closed_when_glob_budget_hit(monkeypatch, tmp_path
     retry. When FIRST_PASS_S still has rem but MAX_GLOB_SCAN is already exhausted, the first-pass
     relative `id_*` walk truncates, pattern-only is inconclusive, and the old path cached None and
     ALLOWed without ever entering deferred. First-pass truncated relative walks must raise
-    GlobBudgetExceeded (absolute deep globs keep the pattern fallback)."""
+    GlobBudgetExceeded (absolute deep globs keep the pattern fallback only when not truncated)."""
     hook = load_hook()
     (tmp_path / "id_rsa").write_text("PRIVATE\n")
     for i in range(40):
@@ -843,6 +843,33 @@ def test_first_pass_walk_fails_closed_when_glob_budget_hit(monkeypatch, tmp_path
         hook.check_command(ck, "cat zzslow0* zzslow1* id_*")
 
 
+def test_first_pass_absolute_walk_fails_closed_after_absolute_dummy_burn(monkeypatch, tmp_path):
+    """Security HIGH residual (PR 413 tip 7d962f3): first-pass fail-closed skipped tokens whose raw
+    text started with `/` or `~`. Absolute dummies burned MAX_GLOB_SCAN, then `$ABS/id_*` truncated,
+    fell back to an inconclusive pattern, cached miss, and check_command ALLOWed — while relative
+    `id_*` correctly raised GlobBudgetExceeded. Absolute/tilde truncated walks must refuse too."""
+    hook = load_hook()
+    abs_dir = str(tmp_path)
+    (tmp_path / "id_rsa").write_text("PRIVATE\n")
+    for i in range(40):
+        (tmp_path / ("aaa%03d.txt" % i)).write_text("x\n")
+    for i in range(2):
+        (tmp_path / ("zzslow%d.txt" % i)).write_text("x\n")
+    ck = hook.Checker(
+        hook.Policy(["id_rsa", "*.key"], ["*.pub"], homes=[abs_dir], fold=False),
+        abs_dir,
+    )
+    abs_id = abs_dir + "/id_*"
+    assert ck.glob_pattern_only(abs_id) is None
+    monkeypatch.setattr(hook, "MAX_GLOB_SCAN", 25)
+    monkeypatch.setattr(hook, "FIRST_PASS_S", 5.0)
+    monkeypatch.setattr(hook, "GLOB_S", 5.0)
+    hook._DEADLINE[0] = time.monotonic() + 10.0
+    cmd = "cat %s/zzslow0* %s/zzslow1* %s" % (abs_dir, abs_dir, abs_id)
+    with pytest.raises(hook.GlobBudgetExceeded):
+        hook.check_command(ck, cmd)
+
+
 def test_first_pass_alone_id_star_fails_closed_when_scan_truncates(monkeypatch, tmp_path):
     """Even a lone first-pass relative `id_*` must refuse when MAX_GLOB_SCAN truncates before a deny
     hit: the pattern check cannot see cwd `id_rsa`, so an incomplete walk must not allow."""
@@ -861,10 +888,10 @@ def test_first_pass_alone_id_star_fails_closed_when_scan_truncates(monkeypatch, 
         hook.check_command(ck, "cat id_*")
 
 
-def test_absolute_deep_glob_keeps_pattern_fallback_after_deferred_truncate(monkeypatch, tmp_path):
-    """CI residual (PR 413): a dense `/` tree can burn WORD_S on /*/*/*/zzqq* → set-aside → deferred
-    walk truncates on GLOB_S. Absolute deep globs must keep B1c pattern fallback (allow when the
-    pattern names no secret), not GlobBudgetExceeded — relative/cwd truncated walks still refuse."""
+def test_absolute_deep_glob_fails_closed_after_deferred_truncate(monkeypatch, tmp_path):
+    """Security HIGH residual (PR 413): a dense `/` tree can burn WORD_S on /*/*/*/zzqq* → set-aside →
+    deferred walk truncates on GLOB_S. Truncated absolute/tilde walks must fail closed (same as
+    relative/cwd); pattern fallback remains only when the shared budget did not truncate."""
     hook = load_hook()
     ck = hook.Checker(
         hook.Policy(["**/.env", "**/*.key", "**/id_rsa"], ["*.pub"], homes=[str(tmp_path)], fold=False),
@@ -875,8 +902,8 @@ def test_absolute_deep_glob_keeps_pattern_fallback_after_deferred_truncate(monke
     monkeypatch.setattr(hook, "GLOB_S", 0.05)
     monkeypatch.setattr(hook, "MAX_GLOB_SCAN", 3)
     hook._DEADLINE[0] = time.monotonic() + 5.0
-    # Non-secret absolute deep glob: truncated deferred walk still allows via pattern_verdict.
-    assert hook.check_command(ck, "ls /*/*/*/*/zzqq*") is None
+    with pytest.raises(hook.GlobBudgetExceeded):
+        hook.check_command(ck, "ls /*/*/*/*/zzqq*")
     # Relative walk-dependent secret still fails closed under the same burned clocks.
     (tmp_path / "id_rsa").write_text("PRIVATE\n")
     for i in range(10):
@@ -1069,18 +1096,21 @@ def test_bash_glob_walk_of_a_tree_that_never_matches_is_bounded(monkeypatch, tmp
 
 
 def test_bash_glob_walk_time_bound_still_checks_every_word(monkeypatch, tmp_path):
+    """A truncated absolute deep glob fails closed under the shared GLOB_S budget (no residual ALLOW);
+    the call must not hang past the bound while later words wait."""
     hook = load_hook()
     scandir, _ = deep_tree(delay=0.01)
     monkeypatch.setattr(hook, "_scandir", scandir)
     monkeypatch.setattr(hook, "GLOB_S", 0.3)
     ck = checker(hook, tmp_path)
     t0 = time.monotonic()
-    found = hook.check_command(ck, "ls /*/*/*/*/*/*/*/zzqq* /*/*/*/*/*/*/*/yy* %s/.ssh/id_*" % tmp_path)
-    assert found and found[0] == "~/.ssh/**"
+    with pytest.raises(hook.GlobBudgetExceeded):
+        hook.check_command(ck, "ls /*/*/*/*/*/*/*/zzqq* /*/*/*/*/*/*/*/yy* %s/.ssh/id_*" % tmp_path)
     assert time.monotonic() - t0 < 2.0
 
 
-def test_bash_glob_time_bound_through_main_allows_without_failing_open(monkeypatch, tmp_path, capsys):
+def test_bash_glob_time_bound_through_main_fails_closed_without_failing_open(monkeypatch, tmp_path, capsys):
+    """Absolute deep globs that hit GLOB_S fail closed (exit 2), never fail open (exit 0 with no notice)."""
     hook = load_hook()
     scandir, _ = deep_tree(delay=0.05)
     monkeypatch.setattr(hook, "_scandir", scandir)
@@ -1090,9 +1120,11 @@ def test_bash_glob_time_bound_through_main_allows_without_failing_open(monkeypat
     monkeypatch.delenv("SECRET_DENY_OFF", raising=False)
     monkeypatch.delenv("SECRET_DENY_POLICY", raising=False)
     t0 = time.monotonic()
-    assert hook.main() == 0
+    assert hook.main() == 2
     assert time.monotonic() - t0 < 3
-    assert capsys.readouterr().err == ""                    # a bounded walk, then the pattern: no fail-open notice
+    err = capsys.readouterr().err
+    assert "glob analysis budget exceeded" in err
+    assert "fail closed" in err
 
 
 def test_bash_glob_hits_are_capped_then_the_pattern_is_checked(monkeypatch, tmp_path):
@@ -1219,11 +1251,16 @@ def test_bash_glob_walk_hidden_names_follow_the_shell(tmp_path):
 
 
 def test_bash_deep_root_glob_repro_is_fast(env):
-    """The adversary's repro on the real filesystem, through the hook."""
+    """The adversary's repro on the real filesystem, through the hook: stays bounded. A truncated
+    absolute deep glob fails closed; a walk that finishes under budget with a clean pattern may
+    still allow (intentional fallback only when not truncated)."""
     t0 = time.monotonic()
     rc, err = run(env, "Bash", {"command": "ls /*/*/*/*/*/*/*/zzqq*"})
-    assert (rc, err) == (0, "")
     assert time.monotonic() - t0 < 8.0
+    if rc == 2:
+        assert "glob analysis budget exceeded" in err
+    else:
+        assert (rc, err) == (0, "")
     assert run(env, "Bash", {"command": "ls /*/*/*/*/*/*/*/zzqq* ~/.ssh/id_*"})[0] == 2
 
 
