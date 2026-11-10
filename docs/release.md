@@ -18,16 +18,22 @@ fragments:
 
 It checks:
 
-1. **Rule 10** — `CHANGELOG.md` has `## Unreleased`; `changelog-fold --check` passes;
-   after an in-memory fold (same whole-file dedup as `changelog-fold`) Unreleased has
-   at least one `- ` entry. Fragment files alone are not enough: an interrupted fold
-   can leave fragments whose entries already sit under a dated section.
+1. **Rule 10** — `CHANGELOG.md` has `## Unreleased`; trusted `changelog-fold --check`
+   (beside this script, never from `--repo`) passes; after an in-memory fold (same
+   whole-file dedup as `changelog-fold`) Unreleased has at least one `- ` entry.
+   Fragment files alone are not enough: an interrupted fold can leave fragments whose
+   entries already sit under a dated section.
 2. **CI** — `.github/workflows/test.yml` and `adversary-marker.yml` are present;
-   `ade-roster --check` passes (same local gate CI's `context-policy` runs).
-3. **`ade-update`** — `bin/ade-update` exists and advertises `--check`; sibling
-   `bin/changelog-fold` is present.
+   trusted `ade-roster --check` passes (same local gate CI's `context-policy` runs);
+   inspected `bin/ade-roster` is present as content settle (not executed).
+3. **`ade-update`** — inspected `bin/ade-update` exists and advertises `--check`;
+   sibling `bin/changelog-fold` is present (content settle; not executed).
 4. **Tag slot** — no local semver tag `vX.Y.Z` / `X.Y.Z` and no `## X.Y.Z` CHANGELOG
    section yet (`slim-*` / `pre-slim-*` tags are ignored).
+
+Helpers always resolve from the trusted script's `bin/` (`Path(__file__).resolve().parent`)
+and take `--repo` / `--root` pointing at the inspected tree — an untrusted checkout must
+not supply the code that runs.
 
 On success it prints the dry-run plan (fold N fragments; move Unreleased under
 `## X.Y.Z - DATE`; create tag `vX.Y.Z` at HEAD) and exits 0. It never performs those

@@ -8,16 +8,22 @@ creates, moves or pushes a git tag, never writes CHANGELOG.md, and never folds
 fragments (it only runs `changelog-fold --check`). The daily `ade-update --check`
 timer install is out of scope (Mac/Linux install PRs; no launchd/systemd apply here).
 
+Helpers: `changelog-fold` and `ade-roster` are always resolved beside this script
+(`Path(__file__).resolve().parent`) and pointed at `--repo` with `--repo`/`--root`.
+They are never executed from the inspected tree (an untrusted `--repo` must not run
+as the operator).
+
 Checks (queue Carried #15: "tag once CI, rule 10 and ade-update are settled"):
 
-  1. rule 10 — CHANGELOG.md has `## Unreleased`; `changelog-fold --check` passes;
+  1. rule 10 — CHANGELOG.md has `## Unreleased`; trusted `changelog-fold --check` passes;
      after an in-memory fold (same whole-file dedup as changelog-fold) Unreleased has
      at least one `- ` entry — fragment presence alone is not enough (interrupted-fold
      recovery can leave only already-shipped entries)
   2. CI     — `.github/workflows/test.yml` and `adversary-marker.yml` are present;
-     `ade-roster --check` passes (the same local gate CI's context-policy runs)
-  3. ade-update — `bin/ade-update` and sibling `bin/changelog-fold` exist; ade-update's
-     usage text advertises `--check`
+     trusted `ade-roster --check` passes (the same local gate CI's context-policy runs);
+     inspected `bin/ade-roster` is present (content settle; not executed)
+  3. ade-update — inspected `bin/ade-update` and sibling `bin/changelog-fold` exist;
+     ade-update's usage text advertises `--check` (content settle; not executed)
   4. tag slot — no local git tag `vX.Y.Z` / `X.Y.Z`, and CHANGELOG has no `## X.Y.Z`
      section yet (slim-* / pre-slim-* tags are ignored)
 
@@ -155,16 +161,25 @@ def script_mentions_check(path: Path) -> bool:
 
 
 def assess(repo: Path, version: str, release_date: str) -> dict:
-    """Build the readiness report. Never mutates the tree or creates a tag."""
+    """Build the readiness report. Never mutates the tree or creates a tag.
+
+    Executed helpers (`changelog-fold`, `ade-roster`) always come from HERE — the
+    directory of this trusted script — never from ``repo/bin``. Inspected-tree
+    paths are presence/content checks only.
+    """
     problems: list[str] = []
     notes: list[str] = []
     checks: dict[str, object] = {}
 
     changelog = repo / "CHANGELOG.md"
     frag_dir = repo / "changelog.d"
-    fold = repo / "bin" / "changelog-fold"
+    # Trusted helpers: beside this script. Never execute repo/bin copies.
+    trusted_fold = HERE / "changelog-fold"
+    trusted_roster = HERE / "ade-roster"
+    # Inspected-tree settle paths (presence / usage text only — not executed).
+    repo_fold = repo / "bin" / "changelog-fold"
     update = repo / "bin" / "ade-update"
-    roster = repo / "bin" / "ade-roster"
+    repo_roster = repo / "bin" / "ade-roster"
     test_wf = repo / ".github" / "workflows" / "test.yml"
     adv_wf = repo / ".github" / "workflows" / "adversary-marker.yml"
 
@@ -189,12 +204,19 @@ def assess(repo: Path, version: str, release_date: str) -> dict:
 
     fold_rc = None
     fold_out = fold_err = ""
-    if not fold.is_file():
-        problems.append("rule10: bin/changelog-fold missing")
-        checks["changelog_fold"] = "missing"
+    checks["trusted_helpers"] = {
+        "changelog_fold": str(trusted_fold),
+        "ade_roster": str(trusted_roster),
+    }
+    if not trusted_fold.is_file():
+        problems.append(
+            "rule10: trusted changelog-fold missing beside ade-release-ready "
+            "(refusing to run helpers from --repo)"
+        )
+        checks["changelog_fold"] = "trusted-missing"
     else:
         fold_rc, fold_out, fold_err = run(
-            [sys.executable, str(fold), "--check", "--repo", str(repo)], timeout=60
+            [sys.executable, str(trusted_fold), "--check", "--repo", str(repo)], timeout=60
         )
         checks["changelog_fold"] = {"rc": fold_rc, "out": (fold_out or fold_err).strip()[:300]}
         if fold_rc != 0:
@@ -209,6 +231,7 @@ def assess(repo: Path, version: str, release_date: str) -> dict:
     checks["fragments"] = frags
     # Prospective fold: fragment files may be leftover after an interrupted fold whose
     # entries already live under a dated section; changelog-fold would skip them all.
+    # load_fold() already reads the trusted helper beside this script (HERE), not --repo.
     releasable = entries
     if frags and fold_rc == 0 and cl_text:
         fold_mod = load_fold()
@@ -216,7 +239,7 @@ def assess(repo: Path, version: str, release_date: str) -> dict:
             checks["prospective_fold"] = "unavailable"
             if entries == 0:
                 problems.append(
-                    "rule10: Unreleased empty and could not load bin/changelog-fold "
+                    "rule10: Unreleased empty and could not load trusted changelog-fold "
                     "for a prospective fold"
                 )
         else:
@@ -257,12 +280,20 @@ def assess(repo: Path, version: str, release_date: str) -> dict:
         checks["adversary_workflow"] = True
 
     roster_rc = None
-    if not roster.is_file():
+    if not repo_roster.is_file():
         problems.append("ci: bin/ade-roster missing (CI context-policy runs --check)")
-        checks["ade_roster"] = "missing"
+        checks["ade_roster_present"] = False
+    else:
+        checks["ade_roster_present"] = True
+    if not trusted_roster.is_file():
+        problems.append(
+            "ci: trusted ade-roster missing beside ade-release-ready "
+            "(refusing to run helpers from --repo)"
+        )
+        checks["ade_roster"] = "trusted-missing"
     else:
         roster_rc, roster_out, roster_err = run(
-            [sys.executable, str(roster), "--check", "--root", str(repo)], timeout=60
+            [sys.executable, str(trusted_roster), "--check", "--root", str(repo)], timeout=60
         )
         checks["ade_roster"] = {"rc": roster_rc, "err": (roster_err or roster_out).strip()[:200]}
         if roster_rc != 0:
@@ -271,7 +302,7 @@ def assess(repo: Path, version: str, release_date: str) -> dict:
                 f"{(roster_err or roster_out).strip()[:200] or 'stale or missing roster block'}"
             )
 
-    # --- ade-update ---
+    # --- ade-update (inspected content only; never executed) ---
     if not update.is_file():
         problems.append("ade-update: bin/ade-update missing")
         checks["ade_update"] = "missing"
@@ -280,10 +311,8 @@ def assess(repo: Path, version: str, release_date: str) -> dict:
         checks["ade_update"] = {"path": str(update), "has_check": has_check}
         if not has_check:
             problems.append("ade-update: bin/ade-update does not advertise --check")
-    if not fold.is_file():
-        # already reported under rule10; keep the settle check explicit
-        if "ade-update: bin/changelog-fold missing (ade-update's fragment sibling)" not in problems:
-            problems.append("ade-update: bin/changelog-fold missing (ade-update's fragment sibling)")
+    if not repo_fold.is_file():
+        problems.append("ade-update: bin/changelog-fold missing (ade-update's fragment sibling)")
 
     # --- tag slot ---
     tag_name = f"v{version}"

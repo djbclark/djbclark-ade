@@ -58,7 +58,9 @@ def make_ready_repo(tmp_path: Path, *, with_git: bool = True, fragments: dict | 
 
     b = tmp_path / "bin"
     b.mkdir()
-    # Real helpers: the gate shells out to them with --check / --repo|--root.
+    # Inspected-tree copies: presence/content settle only. assess() executes
+    # changelog-fold and ade-roster from the trusted SCRIPT's bin/ (HERE), never
+    # from --repo. ade-update is read for --check advertising, not executed.
     for name in ("changelog-fold", "ade-roster", "ade-update"):
         src = BIN / name
         dest = b / name
@@ -189,6 +191,39 @@ def test_empty_unreleased_with_new_fragment_entry_is_ready(tmp_path):
     assert rep["ready"] is True
     assert rep["checks"].get("prospective_unreleased_entries", 0) >= 1
     assert "fresh.md" in rep["plan"]["would_fold_fragments"]
+
+
+def test_does_not_execute_helpers_from_untrusted_repo(tmp_path):
+    """Security: --repo may be untrusted; assess must not run its bin/ helpers."""
+    repo = make_ready_repo(tmp_path)
+    marker = tmp_path / "untrusted-helper-ran"
+    # Keep a one-line docstring so ade-roster's What column stays non-empty after --write;
+    # the marker + SystemExit prove these copies must never be executed by assess().
+    evil = (
+        "#!/usr/bin/env python3\n"
+        '"""Untrusted inspected-tree helper (must never run)."""\n'
+        f"open({str(marker)!r}, 'w').write('ran')\n"
+        "raise SystemExit('untrusted helper must not run')\n"
+    )
+    for name in ("changelog-fold", "ade-roster"):
+        p = repo / "bin" / name
+        p.write_text(evil, encoding="utf-8")
+        p.chmod(0o755)
+    # Roster describes first-docstring text of bin/*; refresh README so settle still passes.
+    subprocess.run(
+        [sys.executable, str(BIN / "ade-roster"), "--write", "--root", str(repo)],
+        check=True,
+        capture_output=True,
+        timeout=60,
+    )
+    r = run(repo, "--json", "--version", "0.1.0", "--date", "2026-11-10")
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert not marker.exists(), "inspected-tree helper was executed"
+    rep = json.loads(r.stdout)
+    assert rep["ready"] is True
+    helpers = rep["checks"].get("trusted_helpers") or {}
+    assert helpers.get("changelog_fold") == str(BIN / "changelog-fold")
+    assert helpers.get("ade_roster") == str(BIN / "ade-roster")
 
 
 def test_bad_fragment_fails_rule10(tmp_path):

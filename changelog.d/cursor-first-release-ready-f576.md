@@ -5,3 +5,7 @@
 ### Fixed
 
 - `bin/ade-release-ready`: require Unreleased entries after a prospective in-memory fold (same dedup as `changelog-fold`), so leftover fragments that only duplicate older CHANGELOG sections are not READY (#445).
+
+### Security
+
+- `bin/ade-release-ready`: run `changelog-fold` and `ade-roster` from the trusted script directory, never from `--repo` (#445).
