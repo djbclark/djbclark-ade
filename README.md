@@ -105,7 +105,7 @@ Skills (23, from each `skills/*/SKILL.md`):
 | [`tell-chief-of-staff`](skills/tell-chief-of-staff/SKILL.md) | Pointer (2026-11-06) for messaging the operator's cloud Grok Bot "Chief of Staff" ("tell grok", "tell Chief of Staff", "hand this to grokbot") and for its ask_claude callback; the sender and its setup live outside this repository. |
 | [`tell-coding-bot`](skills/tell-coding-bot/SKILL.md) | Pointer (2026-11-06) for talking to the operator's cloud Grok Bot "Coding" ("tell the Coding bot", "ask Coding", "hand this to the Coding bot", a task that needs a real browser session); the coding-bot code now lives in the peer-link repository. |
 
-`bin/` (75, from each file's first docstring or comment):
+`bin/` (76, from each file's first docstring or comment):
 
 | Tool | What |
 |---|---|
@@ -165,6 +165,7 @@ Skills (23, from each `skills/*/SKILL.md`):
 | [`instruction-lint`](bin/instruction-lint) | Read-only lint for agent instruction files (issue 284, 2026-11-04). |
 | [`load-watch`](bin/load-watch) | Find the agent behind a sustained load spike, tell it, and steer that work to CI (free GitHub runners; Forgejo/Hyades for MIT/SIPB work). |
 | [`model_tiers.py`](bin/model_tiers.py) | Roles → concrete models per vendor (config/model-tiers.toml). |
+| [`open-clean`](bin/open-clean) | `open` with a minimal environment, so a GUI app an agent launches never inherits the agent's session. |
 | [`opencode-plugin-guard`](bin/opencode-plugin-guard) | Archive (Pi-only 2026-11-08): keep the tool-managed OpenCode plugin (rtk) at the v2 module shape; OpenCode is not a live TUI. |
 | [`ops-post-checkout-guard`](bin/ops-post-checkout-guard) | Post-checkout guard for ~/ops/* deploy checkouts. |
 | [`paseo-set-model`](bin/paseo-set-model) | Switch a live Paseo agent's model in place, or list the daemon's agents. |
