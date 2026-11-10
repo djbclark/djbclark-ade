@@ -11,7 +11,7 @@ under **Carried**, newest first, one line each; an item leaves when it ships (in
 
 ## Carried
 
-1. **Wave 6 shim deletion** (2026-11-09; status 2026-11-10): remove `relay.py`, `acp-dispatch` and `acp-run` after one live cycle (soft deadline 2026-11-20); C3 outside files migrated or waived; keep `review-launch`. Checklist: `docs/slim/wave6-follow-up.md`. C3 `--dry-run` FIXTURE path ready/tightened; `--inventory` lists gated shim callers with `gate_exits`; Mac live cycle still blocked (`mac_not_live` on FIXTURE/LINUX-SAFE). Tools: `bin/wave6-delete-check` (`--dry-run` = FIXTURE shape; `--inventory` = §A caller list) + `bin/wave6-mac-proof-capture` (`--live` Darwin / `--linux-safe` partial; labeled FIXTURE proofs under `tests/fixtures/wave6-mac-proofs/` until replaced). Operator must supply live Mac proofs + C3 migrate/waive pastes. (Absorbs the deletion half of former Carried 33.)
+1. **Wave 6 shim deletion** (2026-11-09; status 2026-11-10): remove `relay.py`, `acp-dispatch` and `acp-run` after one live cycle (soft deadline 2026-11-20); C3 outside files migrated or waived; keep `review-launch`. Checklist: `docs/slim/wave6-follow-up.md`. In-repo §A LIVE_RE callers cleared on tip `#498` (`wave6-delete-check --inventory` → `callers_remaining=0`); C3 `--dry-run` FIXTURE path ready/tightened; Mac live cycle still blocked (`mac_not_live` on FIXTURE/LINUX-SAFE). Tools: `bin/wave6-delete-check` + `bin/wave6-mac-proof-capture`. Operator must supply live Mac proofs + C3 migrate/waive pastes before deletion. (Absorbs the deletion half of former Carried 33.)
 2. **Issue 284 follow-ups** (2026-11-04): the goal / verify-until-pass loop (evaluate the Paseo plugin `37chengshan/goal-mode`
    first), Codex and opencode wiring of `secret_read_gate.py` and `post-edit-check --hook`, a Claude `filesystem.denyRead`
    live trial (template/render landed 2026-11-09 in `agents/claude/settings.json.tmpl` via `bin/render-secret-deny`;
@@ -99,9 +99,8 @@ under **Carried**, newest first, one line each; an item leaves when it ships (in
 33. **Two test LOWs from the 2026-10-23 rework-2 PRs**: `tests/test_bin_modes.py`'s docstring says "outside tests/" while
     the code exempts a `tests/` directory at any depth (PR 32 round 6); no test pins that `xhigh` and `max` are accepted as
     `[lead]` effort values (PR 33 round 2).
-34. **Slim-down leftovers after Wave 6 deletion** (2026-11-07; deletion itself is Carried 1 / `docs/slim/wave6-follow-up.md`): port `skills/loose`'s
-    upstream-issue reader off `acp-run --perm deny`; aiuse's acp-run
-    readers (`src/aiuse/collectors/acp_usage.py`); the shim does not apply the Argon `fallback_block` at dispatch (E7 E5);
+34. **Slim-down leftovers after Wave 6 deletion** (2026-11-07; deletion itself is Carried 1 / `docs/slim/wave6-follow-up.md`): `skills/loose` upstream-issue reader already uses Claude CLI `-p` (no `acp-run --perm deny`; scrubbed on tip `#498`); remaining: aiuse's acp-run
+    readers (`src/aiuse/collectors/acp_usage.py`, order 11); the shim does not apply the Argon `fallback_block` at dispatch (E7 E5);
     `routing-recalibrate` as a Paseo schedule if wanted
     (E5); upstream Paseo filings (a codex read-only mode, a quota-pause primitive, a workspace-claim primitive).
 35. **`bin/review-pr` and `gh pr checks --watch` register no deadline of their own** (2026-11-07, W3 docs critic): run them under `deadline run` until one of them registers itself (`docs/deadline.md` Known gaps).
