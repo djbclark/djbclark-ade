@@ -229,6 +229,7 @@ def test_mapping_table_covers_routing_and_gates():
     assert "[[service]]" in targets
     assert "[gates.frontier]" in targets
     assert "[gates.floors.frontier]" in targets
+    assert "[model_tiers]" in targets
 
 
 @pytest.fixture
@@ -236,7 +237,7 @@ def synthetic_root(tmp_path):
     """Only public tracked schema/legacy policy copied; no machine-local input."""
     root = tmp_path / "repo"
     (root / "config").mkdir(parents=True)
-    for name in ("ade.schema.json", "routing.toml", "gates.toml"):
+    for name in ("ade.schema.json", "routing.toml", "gates.toml", "model-tiers.toml"):
         (root / "config" / name).write_bytes((REPO / "config" / name).read_bytes())
     return root
 

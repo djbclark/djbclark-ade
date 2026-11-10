@@ -3,6 +3,8 @@
 
 > Status (2026-10-31, djbclark): merged as a design; build queued after D1 of docs/paseo-only-rearchitecture.md, once the
 > Paseo-only phases settle what routing still needs. Values below are as of 2026-10-26.
+> Status (2026-11-09): S2 loader + promote core shipped (`config/model-tiers.toml`, `bin/model_tiers.py`,
+> `bin/ade-model-tiers`, `route_agent` / `load_effective` readers). S3–S5 consumer migration still open.
 > Note 2026-11-06 (slim-down E10): `bin/failover.py`, named below as a live reader, was deleted; ignore those rows.
 > Note 2026-11-07 (slim-down E7): the fleet governor, the quota guard, the gate profile tool and the effort skill, named
 > below as live readers, were deleted (the `[frontier]` gate stays, `docs/gates.md`); ignore those rows.

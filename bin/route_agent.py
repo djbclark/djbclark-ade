@@ -130,6 +130,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import ade_gates  # noqa: E402  (the frontier gate: config/gates.toml [frontier], docs/gates.md)
+import model_tiers as _model_tiers  # noqa: E402  (config/model-tiers.toml roles → ids)
 
 DEFAULT_SNAPSHOT = Path.home() / ".cache" / "aiuse" / "snapshots" / "latest.json"
 SNAPSHOT = Path(os.environ.get("AIUSE_SNAPSHOT") or DEFAULT_SNAPSHOT)
@@ -543,6 +544,8 @@ def policy_public() -> dict[str, Any]:
         "services": [svc_row(s) for s in SERVICES],
         "opencode_go": json.loads((Path(__file__).resolve().parents[1] / "config/go-model-policy.json").read_text()),
         "lead": dict(POLICY["lead"]) if POLICY.get("lead") else None,
+        # Roles → concrete ids (config/model-tiers.toml); promote shifts these without a code change.
+        "model_tiers": _model_tiers.public_dict(),
     }
 
 
@@ -722,7 +725,8 @@ def _clean_age(value: Any) -> float | None:
 
 # pool_family values that are a model cap inside the provider's shared pool, not a pool of
 # their own (Claude's `fable` is at most 50% of the shared weekly, aiuse schema 1.1).
-SUBLIMIT_FAMILIES = ("fable",)
+# Sourced from config/model-tiers.toml [vendor.*.pools] (fallback: ("fable",)).
+SUBLIMIT_FAMILIES = _model_tiers.sublimit_families() or ("fable",)
 
 
 def _merge_caps(a: dict[str, Any] | None, b: dict[str, Any] | None) -> dict[str, Any]:
@@ -1646,17 +1650,22 @@ class Choice:
 def suggest_model(svc: Service, kind: str, info: dict[str, Any]) -> str:
     """The model/effort to pass for `kind` on `svc`, from its profile.
 
-    claude's frontier slot is Fable 5.1 while the Fable sublimit (at most 50%
-    of the shared weekly) has room, else Opus at the same effort."""
+    claude's frontier slot is the tiers frontier role while its pool_family sublimit
+    (at most 50% of the shared weekly) has room, else the judgment role at the same effort
+    (ids from config/model-tiers.toml)."""
     model = svc.models.get(kind, "")
     if svc.name == "opencode-go" and model:
         from go_model_policy import classification
         if classification(model.split()[0]) != "routine":
             raise ValueError("routine Go routing requires a classified routine model")
     if svc.name == "claude" and kind == "frontier":
-        fable = (info.get("sublimits") or {}).get("fable")
-        if fable is not None and fable < frontier_gate()["frontier1_min_left"]:
-            model = "opus --effort high"
+        # Prefer the declared frontier pool_family; fall back to "fable" for older snapshots.
+        pool = _model_tiers.pool("claude", "frontier") or {}
+        fam = pool.get("pool_family") or "fable"
+        left = (info.get("sublimits") or {}).get(fam)
+        if left is not None and left < frontier_gate()["frontier1_min_left"]:
+            judgment = _model_tiers.resolve("claude", "judgment", "claude")
+            model = f"{judgment} --effort high"
     return model
 
 
@@ -1805,10 +1814,25 @@ _FRONTIER_HISTORY_MEMO: dict[str, tuple[float, list[tuple[float, dict]]]] = {}  
 FRONTIER_HISTORY_TTL = 30.0
 
 
+def frontier_model_tokens() -> list[str]:
+    """Union of [dispatch].frontier_models (untiered extras such as gemini-4-argon) and
+    every spelling/alias of each tiered vendor's frontier role from config/model-tiers.toml."""
+    toks: list[str] = []
+    seen: set[str] = set()
+    for tok in list((POLICY.get("dispatch") or {}).get("frontier_models") or []) + list(
+        _model_tiers.frontier_tokens()
+    ):
+        low = str(tok).lower()
+        if low and low not in seen:
+            seen.add(low)
+            toks.append(str(tok))
+    return toks
+
+
 def is_frontier_model(model: str | None) -> bool:
-    """acp-dispatch's `is_frontier_model`: a [dispatch].frontier_models token is a substring of the model."""
+    """A frontier token (dispatch list ∪ model-tiers frontier spellings) is a substring of the model."""
     low = (model or "").lower()
-    return bool(low) and any(str(tok).lower() in low for tok in (POLICY.get("dispatch") or {}).get("frontier_models") or [])
+    return bool(low) and any(str(tok).lower() in low for tok in frontier_model_tokens())
 
 
 def floor_lookup(table: dict[str, float], name: str, kind: str | None, frontier_model: bool) -> float | None:

@@ -1,9 +1,11 @@
 """ade_config: versioned read-only effective ADE config (schema_version=1).
 
 Builds one effective tree from optional ``config/ade.toml``, legacy
-``config/routing.toml`` + ``config/gates.toml``, and optional
-``~/.config/djbclark-ade/local.toml``. Does not write files, resolve secrets,
-or switch existing readers (``route_agent`` / ``ade_gates`` stay on their paths).
+``config/routing.toml`` + ``config/gates.toml`` + ``config/model-tiers.toml``,
+and optional ``~/.config/djbclark-ade/local.toml``. Does not write files,
+resolve secrets, or switch existing readers (``route_agent`` / ``ade_gates``
+stay on their paths for routing/gates; ``model_tiers`` is also read directly
+by ``route_agent``).
 
 Public:
   load_effective(...) -> EffectiveConfig
@@ -18,10 +20,16 @@ import copy
 import json
 import os
 import stat
+import sys
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+_BIN = Path(__file__).resolve().parent
+if str(_BIN) not in sys.path:
+    sys.path.insert(0, str(_BIN))
+import model_tiers as _model_tiers  # noqa: E402
 
 # Fail-safe closed frontier (mirrors ade_gates.FRONTIER_DEFAULTS; kept local so
 # this module does not import route_agent / ade_gates side effects).
@@ -49,6 +57,7 @@ LEGACY_PROJECTION: tuple[tuple[str, str, str], ...] = (
     ("config/routing.toml", "[[service]]", "[[service]]"),
     ("config/gates.toml", "[frontier]", "[gates.frontier]"),
     ("config/gates.toml", "[floors.frontier]", "[gates.floors.frontier]"),
+    ("config/model-tiers.toml", "[meta]/[rank]/[vendor.*]/[model.*]/[former]", "[model_tiers]"),
 )
 
 ROUTING_DOMAIN_KEYS: frozenset[str] = frozenset({
@@ -59,6 +68,7 @@ KNOWN_TOP_LEVEL: frozenset[str] = frozenset({
     "schema_version",
     *ROUTING_DOMAIN_KEYS,
     "gates",
+    "model_tiers",
 })
 
 
@@ -95,6 +105,10 @@ def default_routing_path(root: Path) -> Path:
 
 def default_gates_path(root: Path) -> Path:
     return root / "config" / "gates.toml"
+
+
+def default_model_tiers_path(root: Path) -> Path:
+    return root / "config" / "model-tiers.toml"
 
 
 def default_local_path(home: Path | None = None) -> Path:
@@ -435,6 +449,8 @@ def load_effective(
     routing_env = env.get("ROUTING_POLICY") or None
     gates_env = env.get("GATES_TOML") or None
 
+    model_tiers_env = env.get("MODEL_TIERS_TOML") or None
+
     provenance: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "root": str(root),
@@ -442,8 +458,10 @@ def load_effective(
         "local_config": str(local_path) if using_local else None,
         "routing_source": None,
         "gates_source": None,
+        "model_tiers_source": None,
         "routing_env": routing_env,
         "gates_env": gates_env,
+        "model_tiers_env": model_tiers_env,
         "gates_info": None,
         "mapping": [
             {"legacy_file": a, "legacy": b, "effective": c}
@@ -493,6 +511,22 @@ def load_effective(
         data["gates"], legacy_gate_error = raw_legacy_gates(gpath)
         provenance["gates_source"] = str(gpath)
 
+    # --- model tiers (roles → ids); before local so local can overlay ---
+    if model_tiers_env:
+        mt_path = Path(model_tiers_env)
+        _model_tiers.clear_cache()
+        tiers = _model_tiers.load(mt_path, use_cache=False)
+        data["model_tiers"] = _model_tiers.public_dict(tiers)
+        provenance["model_tiers_source"] = str(mt_path)
+    elif using_new and isinstance(data.get("model_tiers"), dict) and data["model_tiers"]:
+        provenance["model_tiers_source"] = str(new_path)
+    else:
+        mt_path = default_model_tiers_path(root)
+        _model_tiers.clear_cache()
+        tiers = _model_tiers.load(mt_path, use_cache=False)
+        data["model_tiers"] = _model_tiers.public_dict(tiers)
+        provenance["model_tiers_source"] = str(mt_path)
+
     # --- local override ---
     if using_local:
         local = read_toml(local_path)
@@ -506,6 +540,8 @@ def load_effective(
                 merge_src.pop(key, None)
         if gates_env:
             merge_src.pop("gates", None)
+        if model_tiers_env:
+            merge_src.pop("model_tiers", None)
         data = merge_maps(data, merge_src, path="")
         provenance["local_config"] = str(local_path)
 
@@ -517,6 +553,7 @@ def load_effective(
         ginfo.update(source="code", toml_error=legacy_gate_error)
     data["gates"] = gates
     provenance["gates_info"] = ginfo
+
     validate_tree(data, schema, label="effective config")
 
     return EffectiveConfig(data=data, provenance=provenance)

@@ -1,0 +1,66 @@
+# Model tiers: roles → concrete models per vendor (docs/history/model-tiers-design.md).
+# Snapshot 2026-11-09: projects today's routing.toml / route_agent policy tables.
+# Edit via `bin/ade-model-tiers promote|set` in a claimed workspace; merge by PR.
+# Untiered pools (minimax, glm, gemini-4-argon, …) stay as literal ids in routing.toml.
+
+[meta]
+schema = 1
+updated = "2026-11-09"
+
+# Vendor rank by acclaimed coding quality, best first (operator 2026-10-26).
+[rank]
+order = ["claude", "codex"]
+since = "2026-10-26"
+reason = "djbclark 2026-10-26: Fable is the top frontier coding model; codex astra is the acclaimed second"
+
+[vendor.claude]
+# A model string belongs here when it matches; an UNKNOWN id that matches is treated as frontier
+# (strictest) until promote/set names it.
+family = '^(anthropic/|claude/|omp/anthropic/)?(claude-[a-z]+-[0-9][\w.\[\]-]*|opus|sonnet|haiku|fable)$'
+roles = { frontier = "claude-fable-5-1", judgment = "claude-opus-5-5", everyday = "claude-sonnet-5-5", bulk = "claude-haiku-5-5" }
+spell = { claude = "{alias}", claude-code = "{alias}", paseo = "{id}", omp = "anthropic/{id}", agy = "{id}", cursor = "{id}", copilot = "{id_dotted}" }
+cascade = 2
+pools = { frontier = { pool_family = "fable", quota_scope = "model_sublimit", label_has = "Fable" } }
+
+[vendor.codex]
+family = '^(opencode-go/)?gpt-[0-9][\w.-]*$'
+roles = { frontier = "gpt-6-astra", judgment = "gpt-6.1-sol", everyday = "gpt-6.1-sol", bulk = "gpt-6-luna" }
+spell = { codex = "{id}", opencode-go = "opencode-go/{id}" }
+cascade = 2
+pools = {}
+
+[model."claude-fable-5-1"]
+vendor = "claude"
+alias = "fable"
+display = "Fable 5.1"
+
+[model."claude-opus-5-5"]
+vendor = "claude"
+alias = "opus"
+display = "Opus 5.5"
+
+[model."claude-sonnet-5-5"]
+vendor = "claude"
+alias = "sonnet"
+display = "Sonnet 5.5"
+spellings = { copilot = "claude-sonnet-5.5" }
+
+[model."claude-haiku-5-5"]
+vendor = "claude"
+alias = "haiku"
+display = "Haiku 5.5"
+
+[model."gpt-6-astra"]
+vendor = "codex"
+display = "GPT-6 Astra"
+
+[model."gpt-6.1-sol"]
+vendor = "codex"
+display = "GPT-6.1 Sol"
+
+[model."gpt-6-luna"]
+vendor = "codex"
+display = "GPT-6 Luna"
+
+# Ids that held a role and no longer do. promote appends here.
+[former]
