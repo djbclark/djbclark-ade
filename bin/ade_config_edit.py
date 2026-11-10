@@ -167,6 +167,8 @@ def resolve_set_target(
     if target not in ("local", "repo"):
         raise EditError(f"unknown --target {target!r} (want local or repo)")
     parts = split_dotted_path(dotted)
+    if parts[0] in {"install", "keys"}:
+        raise EditError(f"PATH {dotted!r}: install/keys metadata is read-only until writer adoption")
     root = root.resolve()
     home = home.resolve()
 

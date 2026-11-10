@@ -41,17 +41,18 @@ if str(BIN) not in sys.path:
     sys.path.insert(0, str(BIN))
 
 import ade_config as ac  # noqa: E402
+import ade_install_catalog as catalog_policy  # noqa: E402
 
 SCHEMA_VERSION = 1
 LEDGER_SCHEMA_VERSION = 1
 KEYS_STATE_SCHEMA_VERSION = 1
 UNKNOWN = "UNKNOWN"
-COMPONENT_CLASSES = frozenset({"hard", "offered", "optional", "suggested", "never"})
-JOB_CLASSES = frozenset({"hard", "offered", "optional"})
-JOB_KINDS = frozenset({"ade-sched", "paseo", "service"})
-PASEO_MODES = frozenset({"auto", "auto-review"})
+COMPONENT_CLASSES = catalog_policy.COMPONENT_CLASSES
+JOB_CLASSES = catalog_policy.JOB_CLASSES
+JOB_KINDS = catalog_policy.JOB_KINDS
+PASEO_MODES = catalog_policy.PASEO_MODES
 # Classes that require an explicit chosen bool in the catalog.
-CHOICE_CLASSES = frozenset({"offered", "optional", "suggested"})
+CHOICE_CLASSES = catalog_policy.CHOICE_CLASSES
 # ADE may reconcile these later; every other owner is report-only (never unload).
 OWNER_ADE = "djbclark-ade"
 
@@ -195,228 +196,21 @@ def default_prefix() -> Path:
 
 
 def read_install_schema(root: Path) -> dict[str, Any]:
-    path = default_install_schema_path(root)
     try:
-        schema = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, RecursionError) as e:
-        raise InstallError(f"{path}: invalid or unreadable schema ({e})") from e
-    ac._check_schema_node(schema, str(path))
-    if schema.get("title") != "djbclark-ade install catalog":
-        raise InstallError(f"{path}: unexpected title")
-    if schema.get("properties", {}).get("schema_version", {}).get("const") != SCHEMA_VERSION:
-        raise InstallError(f"{path}: unsupported schema version declaration")
-    return schema
-
-
-def _reject_duplicate_ids(rows: list[dict[str, Any]], *, key: str, label: str) -> None:
-    seen: dict[str, int] = {}
-    for i, row in enumerate(rows):
-        if not isinstance(row, dict):
-            raise InstallError(f"{label}[{i}]: must be a table")
-        name = row.get(key)
-        if not isinstance(name, str) or not name:
-            raise InstallError(f"{label}[{i}]: missing {key}")
-        if name in seen:
-            raise InstallError(f"{label}: duplicate {key} {name!r} (entries {seen[name]} and {i})")
-        seen[name] = i
-
-
-def _validate_argv_field(
-    row: dict[str, Any],
-    *,
-    field: str,
-    path: Path,
-    index: int,
-    row_kind: str = "component",
-    row_id_key: str = "id",
-) -> None:
-    val = row.get(field)
-    if val is None:
-        return
-    label = f"{path}: {row_kind}[{index}] {row_id_key}={row.get(row_id_key)!r}"
-    if not isinstance(val, list) or not val:
-        raise InstallError(f"{label}: {field} must be a non-empty array of strings")
-    for j, part in enumerate(val):
-        if not isinstance(part, str) or not part:
-            raise InstallError(f"{label}.{field}[{j}] must be a non-empty string")
-        if any(ch in part for ch in ("\0", "\n", "\r")):
-            raise InstallError(f"{label}.{field}[{j}]: control characters refused")
+        return ac.read_catalog_schema(root)
+    except ac.ConfigError as error:
+        raise InstallError(str(error)) from error
 
 
 def validate_catalog_semantics(data: dict[str, Any], *, path: Path) -> None:
-    components = data.get("component") or []
-    if not isinstance(components, list) or not components:
-        raise InstallError(f"{path}: component array is required and must be non-empty")
-    _reject_duplicate_ids(components, key="id", label=f"{path} component")
-    for i, row in enumerate(components):
-        cls = row.get("class")
-        if cls not in COMPONENT_CLASSES:
-            raise InstallError(
-                f"{path}: component[{i}] id={row.get('id')!r}: "
-                f"class must be one of {sorted(COMPONENT_CLASSES)}, got {cls!r}"
-            )
-        if cls in CHOICE_CLASSES and "chosen" not in row:
-            raise InstallError(
-                f"{path}: component[{i}] id={row.get('id')!r}: "
-                f"class {cls!r} requires an explicit chosen boolean"
-            )
-        if cls == "hard" and row.get("chosen") is False:
-            raise InstallError(
-                f"{path}: component[{i}] id={row.get('id')!r}: hard components cannot set chosen=false"
-            )
-        for field in ("install", "update", "probe"):
-            val = row.get(field)
-            if val is not None and not isinstance(val, str):
-                raise InstallError(f"{path}: component[{i}].{field} must be a string")
-        _validate_argv_field(row, field="install_argv", path=path, index=i)
-        _validate_argv_field(row, field="update_argv", path=path, index=i)
-        _validate_argv_field(row, field="probe_argv", path=path, index=i)
-        _validate_argv_field(row, field="system_argv", path=path, index=i)
-        _validate_argv_field(row, field="system_argv_darwin", path=path, index=i)
-        ns = row.get("needs_system")
-        if ns is not None and not isinstance(ns, bool):
-            raise InstallError(
-                f"{path}: component[{i}] id={row.get('id')!r}: needs_system must be a boolean"
-            )
-        if (row.get("system_argv") or row.get("system_argv_darwin")) and not ns:
-            raise InstallError(
-                f"{path}: component[{i}] id={row.get('id')!r}: "
-                "system_argv / system_argv_darwin require needs_system=true"
-            )
-        pp = row.get("paseo_plugin")
-        if pp is not None:
-            if not isinstance(pp, str) or not pp.strip():
-                raise InstallError(
-                    f"{path}: component[{i}] id={row.get('id')!r}: "
-                    "paseo_plugin must be a non-empty string plugin id"
-                )
-            if row.get("install_argv"):
-                raise InstallError(
-                    f"{path}: component[{i}] id={row.get('id')!r}: "
-                    "paseo_plugin observe-only rows must not set install_argv "
-                    "(doctor/apply never install or enable)"
-                )
-    keys = data.get("key") or []
-    if keys:
-        if not isinstance(keys, list):
-            raise InstallError(f"{path}: key must be an array of tables")
-        _reject_duplicate_ids(keys, key="name", label=f"{path} key")
-        for i, row in enumerate(keys):
-            _validate_argv_field(
-                row,
-                field="verify_argv",
-                path=path,
-                index=i,
-                row_kind="key",
-                row_id_key="name",
-            )
-    logins = data.get("login") or []
-    if logins:
-        if not isinstance(logins, list):
-            raise InstallError(f"{path}: login must be an array of tables")
-        _reject_duplicate_ids(logins, key="id", label=f"{path} login")
-    _validate_install_jobs(data, path=path)
+    """Validate through the pure shared contract, retaining InstallError."""
+    try:
+        catalog_policy.validate_catalog_semantics(data, path=path)
+    except catalog_policy.CatalogValidationError as error:
+        raise InstallError(str(error)) from error
 
 
-def _validate_install_jobs(data: dict[str, Any], *, path: Path) -> None:
-    install = data.get("install")
-    if install is None:
-        return
-    if not isinstance(install, dict):
-        raise InstallError(f"{path}: install must be a table")
-    jobs = install.get("jobs") or []
-    retired = install.get("retired_jobs") or []
-    if jobs and not isinstance(jobs, list):
-        raise InstallError(f"{path}: install.jobs must be an array of tables")
-    if retired and not isinstance(retired, list):
-        raise InstallError(f"{path}: install.retired_jobs must be an array of tables")
-    if isinstance(jobs, list) and jobs:
-        _reject_duplicate_ids(jobs, key="name", label=f"{path} install.jobs")
-    if isinstance(retired, list) and retired:
-        _reject_duplicate_ids(retired, key="name", label=f"{path} install.retired_jobs")
-    for i, row in enumerate(jobs if isinstance(jobs, list) else []):
-        name = row.get("name")
-        kind = row.get("kind")
-        if kind not in JOB_KINDS:
-            raise InstallError(
-                f"{path}: install.jobs[{i}] name={name!r}: "
-                f"kind must be one of {sorted(JOB_KINDS)}, got {kind!r}"
-            )
-        owner = row.get("owner")
-        if not isinstance(owner, str) or not owner:
-            raise InstallError(f"{path}: install.jobs[{i}] name={name!r}: owner required")
-        cls = row.get("class")
-        if cls not in JOB_CLASSES:
-            raise InstallError(
-                f"{path}: install.jobs[{i}] name={name!r}: "
-                f"class must be one of {sorted(JOB_CLASSES)}, got {cls!r}"
-            )
-        if cls in CHOICE_CLASSES and "chosen" not in row:
-            raise InstallError(
-                f"{path}: install.jobs[{i}] name={name!r}: "
-                f"class {cls!r} requires an explicit chosen boolean"
-            )
-        if cls == "hard" and row.get("chosen") is False:
-            raise InstallError(
-                f"{path}: install.jobs[{i}] name={name!r}: hard jobs cannot set chosen=false"
-            )
-        if kind == "paseo":
-            mode = row.get("mode")
-            if mode not in PASEO_MODES:
-                raise InstallError(
-                    f"{path}: install.jobs[{i}] name={name!r}: "
-                    f"paseo jobs require mode in {sorted(PASEO_MODES)}, got {mode!r}"
-                )
-            if not row.get("label"):
-                raise InstallError(
-                    f"{path}: install.jobs[{i}] name={name!r}: paseo jobs require label"
-                )
-            for key in ("timezone", "provider", "cwd", "prompt"):
-                val = row.get(key)
-                if val is None:
-                    continue
-                if not isinstance(val, str) or not val.strip():
-                    raise InstallError(
-                        f"{path}: install.jobs[{i}] name={name!r}: "
-                        f"paseo {key} must be a non-empty string when set"
-                    )
-        if kind == "ade-sched" and row.get("plist"):
-            plist = row["plist"]
-            if not isinstance(plist, str) or plist.startswith("/") or ".." in Path(plist).parts:
-                raise InstallError(
-                    f"{path}: install.jobs[{i}] name={name!r}: "
-                    "plist must be a relative path without .."
-                )
-        sets = row.get("set")
-        if sets is not None:
-            if not isinstance(sets, list) or not sets:
-                raise InstallError(
-                    f"{path}: install.jobs[{i}] name={name!r}: set must be a non-empty string array"
-                )
-            for j, item in enumerate(sets):
-                if not isinstance(item, str) or "=" not in item:
-                    raise InstallError(
-                        f"{path}: install.jobs[{i}] name={name!r}: "
-                        f"set[{j}] must be KEY=VALUE"
-                    )
-    for i, row in enumerate(retired if isinstance(retired, list) else []):
-        kind = row.get("kind")
-        if kind not in JOB_KINDS:
-            raise InstallError(
-                f"{path}: install.retired_jobs[{i}] name={row.get('name')!r}: "
-                f"kind must be one of {sorted(JOB_KINDS)}, got {kind!r}"
-            )
-        if not isinstance(row.get("owner"), str) or not row.get("owner"):
-            raise InstallError(
-                f"{path}: install.retired_jobs[{i}] name={row.get('name')!r}: owner required"
-            )
-        if not row.get("label"):
-            raise InstallError(
-                f"{path}: install.retired_jobs[{i}] name={row.get('name')!r}: label required"
-            )
-
-
-def load_catalog(
+def _load_legacy_catalog(
     *,
     root: Path | None = None,
     install_path: Path | None = None,
@@ -451,6 +245,46 @@ def load_catalog(
     schema = read_install_schema(root)
     ac.validate_tree(raw, schema, label=str(path))
     validate_catalog_semantics(raw, path=path)
+    return Catalog(data=copy.deepcopy(raw), path=path, provenance=provenance, root=root)
+
+
+def load_catalog(
+    *, root: Path | None = None, install_path: Path | None = None,
+    home: Path | None = None, environ: dict[str, str] | None = None,
+) -> Catalog:
+    """Read joint effective install/keys metadata; explicit paths stay legacy.
+
+    This is reader adoption only. The Catalog adapter preserves existing
+    component/key/login/job consumers, choices and execution boundaries.
+    """
+    if install_path is not None:
+        return _load_legacy_catalog(root=root, install_path=install_path)
+    root = (root or repo_root_from_here()).resolve()
+    try:
+        effective = ac.load_effective(root=root, home=home, environ=environ,
+                                      domains=ac.CATALOG_DOMAINS)
+        missing = {"install"} - set(effective.data)
+        if missing:
+            if not effective.provenance["new_config"]:
+                raise InstallError(f"{default_install_path(root)}: missing install catalog")
+            raise InstallError(
+                f"{effective.provenance['new_config']}: missing effective catalog domain(s) "
+                f"{sorted(missing)}; refuse transitional legacy fallback"
+            )
+        raw = catalog_policy.catalog_from_effective(effective.data)
+        path = Path(effective.provenance["install_source"] or default_install_path(root))
+        ac.validate_tree(raw, read_install_schema(root), label=str(path))
+        validate_catalog_semantics(raw, path=path)
+    except (ac.ConfigError, catalog_policy.CatalogValidationError) as error:
+        raise InstallError(str(error)) from error
+    provenance = {
+        "schema_version": SCHEMA_VERSION, "root": str(root),
+        "install_config": str(path), "keys_config": effective.provenance["keys_source"],
+        "local_config": effective.provenance["local_config"],
+        "ade_toml_present": effective.provenance["new_config"] is not None,
+        "source": "effective" if effective.provenance["new_config"] or effective.provenance["local_config"] else "install.toml",
+        "note": "joint install/keys metadata; existing consumers retain their operation boundaries",
+    }
     return Catalog(data=copy.deepcopy(raw), path=path, provenance=provenance, root=root)
 
 

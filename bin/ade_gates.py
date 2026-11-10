@@ -128,7 +128,7 @@ def load_frontier(now: datetime | None = None) -> tuple[dict[str, float], dict[s
 
     root = Path(__file__).resolve().parent.parent
     try:
-        eff = ade_config.load_effective(root=root)
+        eff = ade_config.load_effective(root=root, domains=ade_config.ROUTER_DOMAINS)
     except ade_config.ConfigError as e:
         info: dict[str, Any] = {
             "source": "code",

@@ -30,6 +30,7 @@ _BIN = Path(__file__).resolve().parent
 if str(_BIN) not in sys.path:
     sys.path.insert(0, str(_BIN))
 import model_tiers as _model_tiers  # noqa: E402
+import ade_install_catalog as _catalog  # noqa: E402
 
 # Fail-safe closed frontier (mirrors ade_gates.FRONTIER_DEFAULTS; kept local so
 # this module does not import route_agent / ade_gates side effects).
@@ -58,6 +59,11 @@ LEGACY_PROJECTION: tuple[tuple[str, str, str], ...] = (
     ("config/gates.toml", "[frontier]", "[gates.frontier]"),
     ("config/gates.toml", "[floors.frontier]", "[gates.floors.frontier]"),
     ("config/model-tiers.toml", "[meta]/[rank]/[vendor.*]/[model.*]/[former]", "[model_tiers]"),
+    ("config/install.toml", "[[component]]", "[[install.component]]"),
+    ("config/install.toml", "[[login]]", "[[install.login]]"),
+    ("config/install.toml", "[[install.jobs]]", "[[install.jobs]]"),
+    ("config/install.toml", "[[install.retired_jobs]]", "[[install.retired_jobs]]"),
+    ("config/install.toml", "[[key]] keyed by name", "[keys.<NAME>]"),
 )
 
 ROUTING_DOMAIN_KEYS: frozenset[str] = frozenset({
@@ -69,6 +75,7 @@ KNOWN_TOP_LEVEL: frozenset[str] = frozenset({
     *ROUTING_DOMAIN_KEYS,
     "gates",
     "model_tiers",
+    "install", "keys",
 })
 
 
@@ -420,6 +427,65 @@ def reject_duplicate_services(services: Any, *, label: str) -> None:
         seen[name] = i
 
 
+EFFECTIVE_DOMAINS = frozenset({"routing", "gates", "model_tiers", "install", "keys"})
+ROUTER_DOMAINS = frozenset({"routing", "gates", "model_tiers"})
+CATALOG_DOMAINS = frozenset({"install", "keys"})
+
+
+def _domain_view(data: dict[str, Any], domains: frozenset[str]) -> dict[str, Any]:
+    keys = domains - {"routing"}
+    if "routing" in domains:
+        keys |= ROUTING_DOMAIN_KEYS
+    return {key: copy.deepcopy(value) for key, value in data.items()
+            if key == "schema_version" or key in keys}
+
+
+def read_catalog_schema(root: Path) -> dict[str, Any]:
+    path = root / "config/install.schema.json"
+    try:
+        schema = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, RecursionError) as error:
+        raise ConfigError(f"{path}: invalid or unreadable schema ({error})") from error
+    _check_schema_node(schema, str(path))
+    if schema.get("title") != "djbclark-ade install catalog":
+        raise ConfigError(f"{path}: unexpected title")
+    if schema.get("properties", {}).get("schema_version", {}).get("const") != SCHEMA_VERSION:
+        raise ConfigError(f"{path}: unsupported schema version declaration")
+    return schema
+
+
+def _read_effective_schema(
+    root: Path, domains: frozenset[str], *, require_full: bool,
+) -> dict[str, Any]:
+    path = default_schema_path(root)
+    if input_present(path) or not domains <= CATALOG_DOMAINS:
+        return read_schema(path)
+    if require_full:
+        bundled = default_schema_path(_BIN.parent)
+        if input_present(bundled):
+            return read_schema(bundled)
+        raise ConfigError(
+            f"{root}: full effective schema required to validate raw unified/local config; "
+            "neither root nor bundled ade.schema.json is available"
+        )
+    # Preserve install-only --root inputs: their existing catalog schema is
+    # sufficient for this domain view; unrelated routing schema/files are absent.
+    return {
+        "title": "djbclark-ade effective config", "type": "object",
+        "required": ["schema_version"], "additionalProperties": False,
+        "properties": {"schema_version": {"type": "integer", "const": SCHEMA_VERSION},
+                       **_catalog.effective_schema_parts(read_catalog_schema(root))},
+    }
+
+
+def _validate_catalog_domains(data: dict[str, Any], path: Path) -> None:
+    if "install" in data or "keys" in data:
+        try:
+            _catalog.validate_effective_catalog(data, path=path)
+        except _catalog.CatalogValidationError as error:
+            raise ConfigError(str(error)) from error
+
+
 def load_effective(
     *,
     root: Path | None = None,
@@ -428,12 +494,18 @@ def load_effective(
     local_config: Path | None = None,
     include_local: bool = True,
     environ: dict[str, str] | None = None,
+    domains: frozenset[str] | set[str] | None = None,
 ) -> EffectiveConfig:
     """Load the effective schema_version=1 tree. Never writes.
 
     include_local=False disables local path resolution, presence checks and reads;
     diff uses it for a baseline with no secondary local-file authority.
+    domains=None exposes every supported domain; explicit views read only their
+    selected legacy sources while validating raw unified/local declarations.
     """
+    selected = EFFECTIVE_DOMAINS if domains is None else frozenset(domains)
+    if not selected or selected - EFFECTIVE_DOMAINS:
+        raise ConfigError(f"unknown or empty effective-config domains: {sorted(selected)}")
     root = (root or repo_root_from_here()).resolve()
     home_path = home if home is not None else Path.home()
     env = environ if environ is not None else dict(os.environ)
@@ -442,9 +514,9 @@ def load_effective(
         local_config if local_config is not None else default_local_path(home_path)
     ) if include_local else None
 
-    schema = read_schema(default_schema_path(root))
     using_new = input_present(new_path)
     using_local = local_path is not None and input_present(local_path)
+    schema = _read_effective_schema(root, selected, require_full=using_new or using_local)
 
     routing_env = env.get("ROUTING_POLICY") or None
     gates_env = env.get("GATES_TOML") or None
@@ -463,6 +535,8 @@ def load_effective(
         "gates_env": gates_env,
         "model_tiers_env": model_tiers_env,
         "gates_info": None,
+        "install_source": None, "keys_source": None,
+        "domains": sorted(selected),
         "mapping": [
             {"legacy_file": a, "legacy": b, "effective": c}
             for a, b, c in LEGACY_PROJECTION
@@ -474,69 +548,94 @@ def load_effective(
     if using_new:
         raw = read_toml(new_path)
         require_schema_version(raw, new_path, required=True)
+        unknown_top_level(raw, new_path)
         validate_tree(raw, schema, label=str(new_path))
         reject_duplicate_services(raw.get("service"), label=str(new_path))
-        data = copy.deepcopy(raw)
+        _validate_catalog_domains(raw, new_path)
+        data = _domain_view(raw, selected)
         data["schema_version"] = SCHEMA_VERSION
         provenance["new_config"] = str(new_path)
 
-    # --- routing domain ---
-    if routing_env:
-        rpath = Path(routing_env)
-        projected = load_legacy_routing(rpath)
-        for key in ROUTING_DOMAIN_KEYS:
-            data.pop(key, None)
-        data.update(projected)
-        provenance["routing_source"] = str(rpath)
-    elif using_new:
-        # Raw new-file identities were validated before domain isolation.
-        provenance["routing_source"] = str(new_path)
-    else:
-        rpath = default_routing_path(root)
-        projected = load_legacy_routing(rpath)
-        data.update(projected)
-        provenance["routing_source"] = str(rpath)
+    if "routing" in selected:
+        # --- routing domain ---
+        if routing_env:
+            rpath = Path(routing_env)
+            projected = load_legacy_routing(rpath)
+            for key in ROUTING_DOMAIN_KEYS:
+                data.pop(key, None)
+            data.update(projected)
+            provenance["routing_source"] = str(rpath)
+        elif using_new:
+            # Raw new-file identities were validated before domain isolation.
+            provenance["routing_source"] = str(new_path)
+        else:
+            rpath = default_routing_path(root)
+            projected = load_legacy_routing(rpath)
+            data.update(projected)
+            provenance["routing_source"] = str(rpath)
 
     # Keep requests and floors raw until all non-isolated overlays have merged.
     legacy_gate_error = None
-    if gates_env:
-        gpath = Path(gates_env)
-        data["gates"], legacy_gate_error = raw_legacy_gates(gpath)
-        provenance["gates_source"] = str(gpath)
-    elif using_new:
-        data.setdefault("gates", {})
-        provenance["gates_source"] = str(new_path)
-    else:
-        gpath = default_gates_path(root)
-        data["gates"], legacy_gate_error = raw_legacy_gates(gpath)
-        provenance["gates_source"] = str(gpath)
+    if "gates" in selected:
+        if gates_env:
+            gpath = Path(gates_env)
+            data["gates"], legacy_gate_error = raw_legacy_gates(gpath)
+            provenance["gates_source"] = str(gpath)
+        elif using_new:
+            data.setdefault("gates", {})
+            provenance["gates_source"] = str(new_path)
+        else:
+            gpath = default_gates_path(root)
+            data["gates"], legacy_gate_error = raw_legacy_gates(gpath)
+            provenance["gates_source"] = str(gpath)
 
     # --- model tiers (roles → ids); before local so local can overlay ---
     tier_info: dict[str, Any] = {"source": "effective", "error": None, "local_config": None}
-    if model_tiers_env:
-        mt_path = Path(model_tiers_env)
-        _model_tiers.clear_cache()
-        tiers = _model_tiers.load(mt_path, use_cache=False)
-        tier_info.update(source=tiers.source, error=tiers.error)
-        data["model_tiers"] = _model_tiers.public_dict(tiers)
-        provenance["model_tiers_source"] = str(mt_path)
-    elif using_new and isinstance(data.get("model_tiers"), dict) and data["model_tiers"]:
-        provenance["model_tiers_source"] = str(new_path)
-    else:
-        mt_path = default_model_tiers_path(root)
-        _model_tiers.clear_cache()
-        tiers = _model_tiers.load(mt_path, use_cache=False)
-        tier_info.update(source=tiers.source, error=tiers.error)
-        data["model_tiers"] = _model_tiers.public_dict(tiers)
-        provenance["model_tiers_source"] = str(mt_path)
+    if "model_tiers" in selected:
+        if model_tiers_env:
+            mt_path = Path(model_tiers_env)
+            _model_tiers.clear_cache()
+            tiers = _model_tiers.load(mt_path, use_cache=False)
+            tier_info.update(source=tiers.source, error=tiers.error)
+            data["model_tiers"] = _model_tiers.public_dict(tiers)
+            provenance["model_tiers_source"] = str(mt_path)
+        elif using_new and isinstance(data.get("model_tiers"), dict) and data["model_tiers"]:
+            provenance["model_tiers_source"] = str(new_path)
+        else:
+            mt_path = default_model_tiers_path(root)
+            _model_tiers.clear_cache()
+            tiers = _model_tiers.load(mt_path, use_cache=False)
+            tier_info.update(source=tiers.source, error=tiers.error)
+            data["model_tiers"] = _model_tiers.public_dict(tiers)
+            provenance["model_tiers_source"] = str(mt_path)
+
+    # --- joint install/keys metadata; absence is optional for unrelated readers ---
+    if selected & CATALOG_DOMAINS:
+        if using_new:
+            provenance["install_source"] = provenance["keys_source"] = str(new_path)
+        else:
+            path = root / "config/install.toml"
+            if input_present(path):
+                raw_catalog = read_toml(path)
+                require_schema_version(raw_catalog, path, required=True)
+                validate_tree(raw_catalog, read_catalog_schema(root), label=str(path))
+                try:
+                    _catalog.validate_catalog_semantics(raw_catalog, path=path)
+                    projected = _catalog.project_catalog(raw_catalog)
+                except _catalog.CatalogValidationError as error:
+                    raise ConfigError(str(error)) from error
+                data.update(_domain_view(projected, selected))
+                provenance["install_source"] = provenance["keys_source"] = str(path)
 
     # --- local override ---
     if using_local:
         local = read_toml(local_path)
         require_schema_version(local, local_path, required=False)
+        unknown_top_level(local, local_path)
         validate_tree(local, schema, label=str(local_path), partial=True)
         reject_duplicate_services(local.get("service"), label=str(local_path))
-        merge_src = copy.deepcopy(local)
+        _validate_catalog_domains(local, local_path)
+        merge_src = _domain_view(local, selected)
         merge_src.pop("schema_version", None)
         if routing_env:
             for key in ROUTING_DOMAIN_KEYS:
@@ -552,13 +651,15 @@ def load_effective(
 
     provenance["model_tiers_info"] = tier_info
     reject_duplicate_services(data.get("service"), label="effective config")
-    gates, ginfo = project_gates_from_new(
-        data["gates"], source_label=provenance["gates_source"]
-    )
-    if legacy_gate_error:
-        ginfo.update(source="code", toml_error=legacy_gate_error)
-    data["gates"] = gates
-    provenance["gates_info"] = ginfo
+    if "gates" in selected:
+        gates, ginfo = project_gates_from_new(
+            data["gates"], source_label=provenance["gates_source"]
+        )
+        if legacy_gate_error:
+            ginfo.update(source="code", toml_error=legacy_gate_error)
+        data["gates"] = gates
+        provenance["gates_info"] = ginfo
+    _validate_catalog_domains(data, Path("effective config"))
 
     validate_tree(data, schema, label="effective config")
 
