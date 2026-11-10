@@ -39,6 +39,7 @@ Each doc carries its own summary.
 | [docs/gates.md](docs/gates.md) | the frontier allowance, `config/gates.toml [frontier]` (trimmed 2026-11-07: the Claude quota gates went with the quota guard) |
 | [docs/deadline.md](docs/deadline.md) | `bin/deadline`: a maximum run time registered before a long command or wait, enforced from outside |
 | [docs/checkpoint.md](docs/checkpoint.md) | checkpoint and interruption recovery (2026-11-04, planned) |
+| [docs/ingest-web-ai.md](docs/ingest-web-ai.md) | Carried #23 design/spike (2026-11-10): Gemini/Grok web chats → ADE memory (sources, S1 sink, trust, gates); offline stub only |
 | [docs/context-hygiene.md](docs/context-hygiene.md) | `bin/context-watch` and `bin/context-budget-check`: how full a session is, and what a fresh one costs |
 | [docs/secret-deny.md](docs/secret-deny.md), [docs/pr-policy.md](docs/pr-policy.md) | the secret-read deny list and its renderer; who may open PRs on djbclark's repositories |
 | [docs/dispatch-footer.md](docs/dispatch-footer.md), [docs/agent-guard-contract.md](docs/agent-guard-contract.md) | the delivery footer every brief carries; the dispatch shim's per-agent argument guard (both go with the shim in Wave 6) |
