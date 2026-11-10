@@ -4,8 +4,8 @@
 PR 32 replaced bin/claude-settings-env with a 100644 copy. Its tests ran it through sys.executable and passed, four
 review rounds missed it, and Codex caught it. The same check found claude/hooks/context_size_nudge.py at 100644
 since 836b306 (2026-10-19): hook-deadline execs it directly, so it exited 127 and no context-size nudge ran for four
-days (fixed in d618809). Making a file executable never breaks a caller that runs it through an interpreter, so the
-rule has no exemptions."""
+days (fixed in d618809). Making a file executable never breaks a caller that runs it through an interpreter, so
+non-`tests/` shebang files have no mode exemptions; only nested `tests/` paths are skipped."""
 from __future__ import annotations
 
 import shutil
