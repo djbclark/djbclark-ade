@@ -62,6 +62,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -432,25 +433,104 @@ def hermes_ping(msg: str) -> str:
     return f"ping rc={rc}"
 
 
+# Sourceless-send contract (same as skills/session-finder/relay.py until Wave 6 deletes it).
+_DELIVERED = ("sent", "completed")
+_SENDABLE = ("idle", "running", "closed")
+_STEER_PROVIDERS = ("claude", "codex", "opencode", "omp", "pi")
+
+
+def _send_status(obj: object) -> str:
+    return str((obj.get("status") or obj.get("deliveryStatus") or "") if isinstance(obj, dict) else "")
+
+
+def _owner_send_refusal(info: object, aid: str) -> str | None:
+    """Why the owner must not get this notice yet (pending card / archive / non-steerable run)."""
+    if not isinstance(info, dict) or info.get("Id") != aid:
+        return f"`paseo agent inspect` did not describe {aid}"
+    if info.get("Archived") is not False:
+        return f"{aid} is archived (a send would unarchive it), or inspect does not say it is not"
+    if info.get("PendingPermissions") != []:
+        return f"{aid} waits on a permission or question card (`paseo permit ls`), or inspect does not say it does not"
+    status = info.get("Status")
+    if status not in _SENDABLE:
+        return f"{aid} is {status!r}, not idle, running or closed"
+    if status == "running":
+        caps = info.get("Capabilities") if isinstance(info.get("Capabilities"), dict) else {}
+        steer = [v for k, v in caps.items() if "steer" in str(k).lower()]
+        provider = str(info.get("Provider") or "").split("/")[0]
+        if not (steer[0] is True if steer else provider in _STEER_PROVIDERS):
+            return f"{aid} is busy, not sent (provider {provider or '?'} cannot steer: its running turn would be replaced)"
+    return None
+
+
+def _paseo_json(*args: str, timeout: float = 30) -> tuple[int, object | None, str]:
+    """(rc, parsed JSON or None, err). Uses DEADLINE_PASEO / PATH like other deadline paseo calls."""
+    try:
+        r = subprocess.run(paseo_cmd(*args), capture_output=True, text=True, timeout=timeout, env=clean_env())
+    except subprocess.TimeoutExpired:
+        return 1, None, f"paseo {args[0] if args else '?'} timeout after {timeout:g}s"
+    except OSError as e:
+        return 127, None, str(e)
+    if r.returncode != 0:
+        return 1, None, ((r.stderr or r.stdout or "").strip() or f"paseo exited {r.returncode}")[:200]
+    try:
+        return 0, json.loads(r.stdout), ""
+    except ValueError:
+        return 1, None, f"paseo gave no JSON: {(r.stdout or r.stderr or '').strip()[:200]}"
+
+
 def relay_rc(owner: str, text: str) -> tuple[int, str]:
-    """Send to the owner through the relay shim (2026-11-06, docs/slim E3): exit 0 only when `paseo send --json` read sent or completed;
-    2 not delivered (queued, timeout, permission, error, or a target not idle/running with no card), 1 paseo failed, 3 not a Paseo agent,
-    4 no sender; anything but 0 stays pending and is retried. clean_env drops PASEO_AGENT_ID, so this send is sourceless and its `sent` is
-    delivery (an agent's send would only ever read `queued`, exit 5).
-    No `--wait`: the shim's --wait waits for the owner to go idle, which a busy owner never does in 20 s, and a retry would send the notice
-    again. The sender is declared (RELAY_SENDER_NAME): the shim names it in a `[relay from NAME]` prefix, a launchd job having no Paseo id."""
+    """Send to the owner. Default (2026-11-09, Wave 6): native sourceless `paseo send` matching the shim contract:
+    inspect for pending cards / non-steerable runs, `--behavior steer` (default without PASEO_AGENT_ID is interrupt),
+    and delivery only when JSON `.status` is `sent`/`completed` (`paseo send` exits 0 for every status).
+
+    `DEADLINE_RELAY` (tests / transitional) still invokes the Wave 6 shim with `ID --message-file -` until
+    that shim is deleted (docs/slim/wave6-follow-up.md)."""
     if not owner or owner == "-":
         return 0, "relay skipped: no owner"
-    argv = tool("DEADLINE_RELAY", "skills/session-finder/relay.py") + [owner, "--message-file", "-"]
+    if os.environ.get("DEADLINE_RELAY"):
+        argv = tool("DEADLINE_RELAY", "skills/session-finder/relay.py") + [owner, "--message-file", "-"]
+        try:
+            r = subprocess.run(argv, input=text, capture_output=True, text=True, timeout=90, env=clean_env())
+        except subprocess.TimeoutExpired:
+            return 124, "relay timeout after 90s"
+        except OSError as e:
+            return 127, str(e)
+        out = ((r.stdout or "") + (r.stderr or "")).strip()
+        return r.returncode, f"relay rc={r.returncode}: {out.splitlines()[-1] if out else ''}"[:200]
+
+    # Native path: same gates as relay.py (threat-model: sourceless send clears pending permissions).
+    rc, info, err = _paseo_json("agent", "inspect", owner, "--json", timeout=30)
+    why = f"`paseo agent inspect` failed: {err}" if rc else _owner_send_refusal(info, owner)
+    if why:
+        return 2, f"not sent: {why}"
+    with tempfile.TemporaryDirectory(prefix="deadline-notice-") as tmp:
+        path = os.path.join(tmp, "message.txt")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        # steer, not interrupt: clean_env drops PASEO_AGENT_ID, so Paseo's default would cancel the owner's turn
+        try:
+            r = subprocess.run(
+                paseo_cmd("send", owner, "--prompt-file", path, "--behavior", "steer", "--no-wait", "--json"),
+                capture_output=True, text=True, timeout=90, env=clean_env(),
+            )
+        except subprocess.TimeoutExpired:
+            return 124, "relay timeout after 90s"
+        except OSError as e:
+            return 127, str(e)
+    if r.returncode != 0:
+        err = ((r.stderr or r.stdout or "").strip() or f"paseo send exited {r.returncode}")[:160]
+        return 1, f"relay rc=1: paseo send failed: {err}"
     try:
-        r = subprocess.run(argv, input=text, capture_output=True, text=True, timeout=90,
-                           env=clean_env())
-    except subprocess.TimeoutExpired:
-        return 124, "relay timeout after 90s"
-    except OSError as e:
-        return 127, str(e)
-    out = ((r.stdout or "") + (r.stderr or "")).strip()
-    return r.returncode, f"relay rc={r.returncode}: {out.splitlines()[-1] if out else ''}"[:200]
+        payload = json.loads(r.stdout or "")
+    except ValueError:
+        return 2, "relay rc=2: paseo send gave no JSON status"
+    st = _send_status(payload)
+    if st in _DELIVERED:
+        return 0, f"relay rc=0: delivered ({st})"
+    if st == "queued":
+        return 2, "relay rc=2: queued (accepted by the daemon, not delivered)"
+    return 2, f"relay rc=2: {st or 'no status'}"
 
 
 def relay(owner: str, text: str) -> str:
