@@ -1,11 +1,13 @@
 """ade_install: install catalog, plan, observe-only doctor, bounded apply.
 
 Transitional source: ``config/install.toml`` when ``config/ade.toml`` is absent.
-Key entries are names and metadata only. Doctor runs ``probe_argv`` when
-recorded (else PATH presence) and never repairs. Apply is user-scoped only:
-``--dry-run`` by default, ``--yes`` to execute recorded ``install_argv``
-(argv lists, never shell=True). Root / ``--system`` effects are refused until
-a later unit. Secrets are never read.
+Key entries are names and metadata only. Doctor runs ``paseo_plugin`` probes
+(``paseo plugin ls --json`` → ok/disabled/missing; never install/enable), else
+``probe_argv`` when recorded (else PATH presence), and never repairs. Apply is
+user-scoped only: ``--dry-run`` by default, ``--yes`` to execute recorded
+``install_argv`` (argv lists, never shell=True); ``paseo_plugin`` rows are
+always skipped/blocked. Root / ``--system`` effects are refused until a later
+unit. Secrets are never read.
 """
 from __future__ import annotations
 
@@ -70,7 +72,7 @@ class Catalog:
 class Observation:
     kind: str  # component | key | login | catalog
     id: str
-    status: str  # ok | missing | unknown | error | unchosen | never
+    status: str  # ok | missing | disabled | unknown | error | unchosen | never
     detail: str
 
 
@@ -200,6 +202,19 @@ def validate_catalog_semantics(data: dict[str, Any], *, path: Path) -> None:
                 f"{path}: component[{i}] id={row.get('id')!r}: "
                 "system_argv / system_argv_darwin require needs_system=true"
             )
+        pp = row.get("paseo_plugin")
+        if pp is not None:
+            if not isinstance(pp, str) or not pp.strip():
+                raise InstallError(
+                    f"{path}: component[{i}] id={row.get('id')!r}: "
+                    "paseo_plugin must be a non-empty string plugin id"
+                )
+            if row.get("install_argv"):
+                raise InstallError(
+                    f"{path}: component[{i}] id={row.get('id')!r}: "
+                    "paseo_plugin observe-only rows must not set install_argv "
+                    "(doctor/apply never install or enable)"
+                )
     keys = data.get("key") or []
     if keys:
         if not isinstance(keys, list):
@@ -268,6 +283,166 @@ def _probe_executable_missing(argv0: str) -> bool:
     return shutil.which(argv0) is None
 
 
+def _paseo_plugin_rows(payload: Any) -> list[dict[str, Any]]:
+    """Normalize ``paseo plugin ls --json`` into a list of plugin objects."""
+    if isinstance(payload, list):
+        return [p for p in payload if isinstance(p, dict)]
+    if isinstance(payload, dict):
+        for key in ("plugins", "items", "data"):
+            inner = payload.get(key)
+            if isinstance(inner, list):
+                return [p for p in inner if isinstance(p, dict)]
+        # Single plugin object.
+        if any(k in payload for k in ("id", "name", "pluginId", "plugin_id")):
+            return [payload]
+    return []
+
+
+def _paseo_plugin_id(row: dict[str, Any]) -> str:
+    for key in ("id", "pluginId", "plugin_id", "name"):
+        val = row.get(key)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+    return ""
+
+
+def _paseo_plugin_enabled(row: dict[str, Any]) -> bool | None:
+    """True/False when the row states enablement; None when unknown."""
+    if "enabled" in row:
+        en = row.get("enabled")
+        if isinstance(en, bool):
+            return en
+        if isinstance(en, str):
+            low = en.strip().lower()
+            if low in ("enabled", "true", "yes", "on", "1"):
+                return True
+            if low in ("disabled", "false", "no", "off", "0"):
+                return False
+    status = row.get("status")
+    if isinstance(status, str):
+        low = status.strip().lower()
+        if low in ("running", "enabled", "active", "ok"):
+            return True
+        if low in ("disabled", "stopped", "inactive", "off"):
+            return False
+    return None
+
+
+def observe_paseo_plugin(
+    component_id: str,
+    plugin_id: str,
+    *,
+    root: Path | None = None,
+    runner: Runner | None = None,
+    probe_timeout_s: float = 15.0,
+) -> Observation:
+    """Observe a Paseo plugin via ``paseo plugin ls --json``. Never installs or enables.
+
+    Statuses: ``ok`` (installed and enabled/running), ``disabled`` (installed but not
+    enabled), ``missing`` (not installed / paseo absent), ``error`` (ls failed).
+    """
+    root = (root or repo_root_from_here()).resolve()
+    argv = ["paseo", "plugin", "ls", "--json"]
+    if _probe_executable_missing(argv[0]):
+        return Observation(
+            "component", component_id, "missing",
+            f"paseo plugin {plugin_id!r}: paseo not on PATH (observe-only; never install/enable)",
+        )
+    run = runner or (
+        lambda a, cwd: _default_runner(a, cwd, timeout_s=probe_timeout_s)
+    )
+    try:
+        proc = run(argv, root)
+    except subprocess.TimeoutExpired:
+        return Observation(
+            "component", component_id, "error",
+            f"paseo plugin {plugin_id!r}: ls timed out after {probe_timeout_s}s",
+        )
+    except OSError as e:
+        return Observation(
+            "component", component_id, "error",
+            f"paseo plugin {plugin_id!r}: ls exec error: {e}",
+        )
+    if proc.returncode != 0:
+        err = (proc.stderr or proc.stdout or "").strip().splitlines()
+        detail = err[0][:200] if err else f"exit {proc.returncode}"
+        # Treat a missing daemon / empty install the same as missing plugin when
+        # the CLI cannot list plugins at all (common on CI / Cloud without Paseo).
+        low = detail.lower()
+        if "not found" in low or "no such" in low or "daemon" in low:
+            return Observation(
+                "component", component_id, "missing",
+                f"paseo plugin {plugin_id!r}: not listable ({detail}); "
+                "observe-only; never install/enable",
+            )
+        return Observation(
+            "component", component_id, "error",
+            f"paseo plugin {plugin_id!r}: ls failed: {detail}",
+        )
+    text = (proc.stdout or "").strip()
+    if not text:
+        return Observation(
+            "component", component_id, "missing",
+            f"paseo plugin {plugin_id!r}: empty ls --json; observe-only; never install/enable",
+        )
+    # Tolerate preamble before the JSON payload (same pattern as route_agent).
+    start = text.find("{")
+    start_arr = text.find("[")
+    if start_arr >= 0 and (start < 0 or start_arr < start):
+        start = start_arr
+    if start < 0:
+        return Observation(
+            "component", component_id, "error",
+            f"paseo plugin {plugin_id!r}: ls --json had no JSON object/array",
+        )
+    try:
+        payload = json.loads(text[start:])
+    except ValueError as e:
+        return Observation(
+            "component", component_id, "error",
+            f"paseo plugin {plugin_id!r}: ls --json unreadable ({e})",
+        )
+    want = plugin_id.strip()
+    match: dict[str, Any] | None = None
+    for prow in _paseo_plugin_rows(payload):
+        if _paseo_plugin_id(prow) == want:
+            match = prow
+            break
+    if match is None:
+        return Observation(
+            "component", component_id, "missing",
+            f"paseo plugin {plugin_id!r}: not installed "
+            "(observe-only; operator may `paseo plugin install`; never auto-enable)",
+        )
+    enabled = _paseo_plugin_enabled(match)
+    status_raw = match.get("status")
+    if enabled is False or (
+        enabled is None
+        and isinstance(status_raw, str)
+        and status_raw.strip().lower() in ("disabled", "stopped", "inactive", "off")
+    ):
+        return Observation(
+            "component", component_id, "disabled",
+            f"paseo plugin {plugin_id!r}: installed but disabled "
+            "(observe-only; never enable via ade-install)",
+        )
+    if enabled is True:
+        snippet = (
+            status_raw if isinstance(status_raw, str) and status_raw.strip() else "enabled"
+        )
+        return Observation(
+            "component", component_id, "ok",
+            f"paseo plugin {plugin_id!r}: {snippet}",
+        )
+    # Installed but enablement unknown: surface as disabled so doctor never
+    # treats an ambiguous install as healthy, and never enables it.
+    return Observation(
+        "component", component_id, "disabled",
+        f"paseo plugin {plugin_id!r}: installed but enablement unknown "
+        "(observe-only; never enable via ade-install)",
+    )
+
+
 def observe_component(
     row: dict[str, Any],
     *,
@@ -277,12 +452,27 @@ def observe_component(
 ) -> Observation:
     """Observe one component. Never repairs.
 
-    Prefer ``probe_argv`` (run the tool) when recorded; otherwise PATH ``presence``.
+    ``paseo_plugin`` rows always probe ``paseo plugin ls`` (missing/disabled/ok)
+    and never install or enable. Otherwise prefer ``probe_argv``; else PATH
+    ``presence``.
     """
     cid = str(row["id"])
     cls = str(row["class"])
     if cls == "never":
         return Observation("component", cid, "never", "recorded as never-installed")
+
+    paseo_plugin = row.get("paseo_plugin")
+    if isinstance(paseo_plugin, str) and paseo_plugin.strip():
+        # Always observe, even when unchosen: doctor must distinguish missing
+        # from disabled from not-chosen catalog rows without installing.
+        return observe_paseo_plugin(
+            cid,
+            paseo_plugin.strip(),
+            root=root,
+            runner=runner,
+            probe_timeout_s=probe_timeout_s,
+        )
+
     if cls == "suggested" and not row.get("chosen"):
         return Observation("component", cid, "unchosen", "suggested only; not chosen")
     if cls in CHOICE_CLASSES and not row.get("chosen"):
@@ -362,7 +552,7 @@ def doctor(
     runner: Runner | None = None,
     probe_timeout_s: float = 15.0,
 ) -> tuple[list[Observation], int]:
-    """Observe-only doctor. Exit 1 if any expected component is missing/error; never repairs."""
+    """Observe-only doctor. Exit 1 if any expected component is missing/disabled/error; never repairs."""
     obs: list[Observation] = [
         Observation("catalog", str(catalog.path), "ok", "catalog validated"),
     ]
@@ -375,7 +565,9 @@ def doctor(
             probe_timeout_s=probe_timeout_s,
         )
         obs.append(o)
-        if expected_installed(row) and o.status in ("missing", "error"):
+        # Unchosen paseo_plugin rows still report missing/disabled for visibility,
+        # but only expected components fail the doctor exit code. Never install/enable.
+        if expected_installed(row) and o.status in ("missing", "disabled", "error"):
             hard_missing += 1
     for row in catalog.keys:
         obs.append(observe_key(row))
@@ -597,6 +789,16 @@ def build_apply_steps(
     for row in catalog.components:
         cid = str(row["id"])
         if ids is not None and cid not in ids:
+            continue
+        if row.get("paseo_plugin"):
+            # Observe-only: doctor may report missing/disabled; apply never
+            # installs or enables a Paseo plugin (operator `paseo plugin install`).
+            steps.append(ApplyStep(
+                cid,
+                "skip" if not expected_installed(row) else "blocked",
+                None,
+                "observe-only paseo_plugin; ade-install never installs or enables",
+            ))
             continue
         if not expected_installed(row):
             steps.append(ApplyStep(cid, "skip", None, f"class={row['class']} chosen={row.get('chosen')}"))

@@ -34,6 +34,11 @@ unified file with reviewed consumer adoption.
   `system_argv` (Linux) and optional `system_argv_darwin` (Homebrew).
   `--system --dry-run` previews the platform pick; live system exec is refused.
 - `presence` is a PATH basename fallback when `probe_argv` is absent.
+- `paseo_plugin` is an observe-only Paseo plugin id. Doctor runs
+  `paseo plugin ls --json` and reports `ok` / `disabled` / `missing` (never
+  installs or enables). `install_argv` is refused on these rows; apply skips
+  or blocks them. Unchosen optional rows still get a status so missing and
+  disabled are visible without failing the doctor exit code.
 
 ## C. Keys and logins
 
@@ -58,9 +63,12 @@ just install-apply-dry
 
 - `plan` is print-only: `would-install` (has `install_argv`) / `needs-system` /
   `blocked` / `skip`.
-- `doctor` prefers `probe_argv` (runs the tool; argv list, short timeout) and
-  falls back to PATH `presence`. Missing or failed expected components fail
-  the command; `unknown` is neither healthy nor absent. Doctor does not repair.
+- `doctor` prefers `paseo_plugin` (observe-only `paseo plugin ls --json`), else
+  `probe_argv` (runs the tool; argv list, short timeout), else PATH `presence`.
+  Missing, disabled, or failed **expected** components fail the command;
+  unchosen `paseo_plugin` rows still print `missing`/`disabled` without failing;
+  `unknown` is neither healthy nor absent. Doctor does not repair, install, or
+  enable.
 - `apply` defaults to **dry-run**. `--yes` executes user `install_argv` for
   expected missing components (or `--force`). Writes an atomic ledger under
   `~/.local/state/djbclark-ade/install/ledger.json` (or `ADE_INSTALL_STATE_DIR`).
@@ -79,6 +87,7 @@ just install-apply-dry
 | `graft` | `npm install -g @nanonets/graft` (user npm prefix) |
 | `git`, `gh` | `needs_system` + Linux `system_argv` (`apt-get`) + `system_argv_darwin` (`brew`); dry-run only |
 | `aiuse` | `uv tool install git+https://github.com/djbclark/aiuse` |
+| `ade-claim` | observe-only `paseo_plugin`; no `install_argv` (operator `paseo plugin install`) |
 | others | still `UNKNOWN` / no `install_argv` |
 
 ## F. Next units
