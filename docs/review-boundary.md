@@ -140,11 +140,12 @@ merge-order bottoms without the full table.
 **herdr paste warning (2026-11-10):** Do not paste an `adversary-verdict:v1`
 marker through herdr (body or comment). herdr rewrites `<!-- … -->` into
 `<-- env … herdr --session … -->`, and the gate never sees a live marker.
-Prefer `bin/ade-merge-ready approve-post` (owner `gh`; posts via
-`gh pr comment` / GitHub API, not herdr). Until #484, owner-authored tips still
-need a **body** edit done outside herdr; comments do not satisfy those tips yet.
+Prefer `bin/ade-merge-ready approve-post` (owner `gh`; GitHub API, not herdr).
+Default `--via auto`: **body** append for owner-authored tips (required until
+#484; comments do not count on owner PRs yet), **comment** for outside tips.
+`--via body` / `--via comment` force one path.
 
-`approve-post` posts those same templates as PR comments **only** when
+`approve-post` writes those templates **only** when
 `gh api user` matches the repository owner and both `--i-reviewed` and `--yes`
 are set (otherwise dry-run). It never merges and never invents a head — each
 marker names the tip `headRefOid` just collected. `--trigger-marker` runs

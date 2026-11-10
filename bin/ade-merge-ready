@@ -16,11 +16,13 @@ markers in the body or comments are never enough on their own — that would
 count an outside author's or bot's same-head APPROVE. Classify / stacks /
 approve-paste never invent an APPROVE. `approve-paste` prints templates only
 (and warns: never paste them through herdr — herdr mangles `<!-- … -->`).
-`approve-post` posts those templates as issue comments via `gh pr comment`
-(GitHub API, not herdr) **only** when the authenticated `gh` user is the
-repository owner and both `--i-reviewed` and `--yes` are set (dry-run
-otherwise); it still never merges and never invents a head — each marker
-names the tip `headRefOid` just collected.
+`approve-post` posts those templates via the GitHub API (not herdr) **only**
+when the authenticated `gh` user is the repository owner and both
+`--i-reviewed` and `--yes` are set (dry-run otherwise). Default `--via auto`:
+owner-authored tips get a **body** append (today's gate counts body APPROVE
+on owner PRs; comments do not); outside tips get an issue **comment**.
+`--via body` / `--via comment` force one path. Never merges; never invents a
+head — each marker names the tip `headRefOid` just collected.
 
 `stacks` walks open PR base→same-repo head refs and prints bottom-up APPROVE
 order for named groups (install, claims, s1, wave6) with full tip SHAs for
@@ -89,9 +91,15 @@ def die(msg: str, code: int = 2) -> int:
     return code
 
 
-def run_gh(gh: str, args: list[str], timeout: float = 120) -> subprocess.CompletedProcess[str]:
+def run_gh(
+    gh: str,
+    args: list[str],
+    timeout: float = 120,
+    input_text: str | None = None,
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [gh, *args],
+        input=input_text,
         capture_output=True,
         text=True,
         errors="replace",
@@ -174,6 +182,10 @@ def collect(gh: str, repo: str, min_n: int) -> list[dict[str, Any]]:
     # bottoms (#334–#368) from classify/stacks paste output. Cap high enough
     # for this repo; still fail closed if gh truncates silently (we cannot
     # see a next page without GraphQL).
+    try:
+        owner = repo_owner_login(gh, repo)
+    except RuntimeError:
+        owner = ""
     listing = run_gh(
         gh,
         [
@@ -187,7 +199,7 @@ def collect(gh: str, repo: str, min_n: int) -> list[dict[str, Any]]:
             "500",
             "--json",
             "number,title,headRefOid,baseRefName,mergeable,headRefName,"
-            "headRepository,headRepositoryOwner,isCrossRepository",
+            "headRepository,headRepositoryOwner,isCrossRepository,author",
         ],
     )
     if listing.returncode != 0:
@@ -208,6 +220,13 @@ def collect(gh: str, repo: str, min_n: int) -> list[dict[str, Any]]:
         if n < min_n:
             continue
         head = p.get("headRefOid") or ""
+        author = ""
+        auth = p.get("author")
+        if isinstance(auth, dict):
+            author = (auth.get("login") or "").strip()
+        elif isinstance(auth, str):
+            author = auth.strip()
+        owner_pr = bool(author) and bool(owner) and author.lower() == owner.lower()
         checks = run_gh(gh, ["pr", "checks", str(n), "--repo", repo])
         # gh pr checks exits 1 when any check failed; stdout still usable
         check_text = checks.stdout or ""
@@ -232,6 +251,8 @@ def collect(gh: str, repo: str, min_n: int) -> list[dict[str, Any]]:
                 "head": head,
                 "base": p.get("baseRefName") or "",
                 "branch": p.get("headRefName") or "",
+                "author": author,
+                "owner_pr": owner_pr,
                 "head_repo": head_repository_nwo(p, repo),
                 "listing_repo": repo,
                 "mergeable": p.get("mergeable"),
@@ -433,12 +454,12 @@ def print_approve_paste(rows: list[dict[str, Any]]) -> None:
         "so the gate never sees a live marker."
     )
     print(
-        "# Prefer: bin/ade-merge-ready approve-post "
-        "(posts via gh / GitHub API, not herdr)."
+        "# Prefer: bin/ade-merge-ready approve-post --via auto "
+        "(GitHub API, not herdr; body for owner tips, comment for outside)."
     )
     print(
-        "# Until #484: owner PRs need a PR-body edit outside herdr "
-        "(owner-PR comments do not count yet)."
+        "# Until #484: owner tips need a body APPROVE — approve-post --via auto "
+        "does that; do not paste comments for owner PRs."
     )
     for r in rows:
         head = r.get("head") or ""
@@ -508,6 +529,42 @@ def repo_owner_login(gh: str, repo: str) -> str:
     return owner
 
 
+def _approve_marker(head: str) -> str:
+    return f'<!-- adversary-verdict:v1 {{"verdict":"APPROVE","head":"{head}"}} -->'
+
+
+def _trigger_adversary_marker(gh: str, repo: str, number: int) -> None:
+    t = run_gh(
+        gh,
+        [
+            "workflow",
+            "run",
+            "adversary-marker.yml",
+            "--repo",
+            repo,
+            "-f",
+            f"pr={number}",
+        ],
+        timeout=60,
+    )
+    if t.returncode != 0:
+        raise RuntimeError(
+            f"workflow run adversary-marker pr={number} failed: "
+            f"{(t.stderr or t.stdout).strip()}"
+        )
+    print(f"triggered adversary-marker.yml pr={number}")
+
+
+def resolve_approve_via(via: str, owner_pr: bool) -> str:
+    """Return 'body' or 'comment' for one tip under --via auto|body|comment."""
+    v = (via or "auto").strip().lower()
+    if v == "auto":
+        return "body" if owner_pr else "comment"
+    if v in ("body", "comment"):
+        return v
+    raise RuntimeError(f"unknown --via {via!r} (want auto|body|comment)")
+
+
 def post_approve_comment(
     gh: str,
     repo: str,
@@ -518,43 +575,84 @@ def post_approve_comment(
     trigger_marker: bool,
 ) -> None:
     """Post one owner APPROVE comment naming *head*; optionally re-run the marker Action."""
-    body = f'<!-- adversary-verdict:v1 {{"verdict":"APPROVE","head":"{head}"}} -->'
+    marker = _approve_marker(head)
     if dry_run:
-        print(f"would post #{number} head={head}")
-        print(body)
+        print(f"would comment #{number} head={head}")
+        print(marker)
         if trigger_marker:
             print(f"would trigger adversary-marker.yml pr={number}")
         return
     p = run_gh(
         gh,
-        ["pr", "comment", str(number), "--repo", repo, "--body", body],
+        ["pr", "comment", str(number), "--repo", repo, "--body", marker],
         timeout=60,
     )
     if p.returncode != 0:
         raise RuntimeError(
             f"gh pr comment #{number} failed: {(p.stderr or p.stdout).strip()}"
         )
-    print(f"posted #{number} head={head}")
+    print(f"commented #{number} head={head}")
     if trigger_marker:
-        t = run_gh(
+        _trigger_adversary_marker(gh, repo, number)
+
+
+def post_approve_body(
+    gh: str,
+    repo: str,
+    number: int,
+    head: str,
+    *,
+    dry_run: bool,
+    trigger_marker: bool,
+) -> None:
+    """Append one APPROVE marker to the PR body (owner tips; not herdr)."""
+    marker = _approve_marker(head)
+    if dry_run:
+        print(f"would body-edit #{number} head={head}")
+        print(marker)
+        if trigger_marker:
+            print(f"would trigger adversary-marker.yml pr={number}")
+        return
+    view = run_gh(
+        gh,
+        ["pr", "view", str(number), "--repo", repo, "--json", "body"],
+        timeout=60,
+    )
+    if view.returncode != 0:
+        raise RuntimeError(
+            f"gh pr view #{number} failed: {(view.stderr or view.stdout).strip()}"
+        )
+    try:
+        cur = json.loads(view.stdout or "{}")
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"gh pr view #{number} JSON: {e}") from e
+    old = cur.get("body") or ""
+    if marker in old:
+        print(f"body already has marker #{number} head={head}")
+    else:
+        new_body = old.rstrip() + "\n\n" + marker + "\n"
+        # Prefer REST JSON body to avoid shell metacharacters in markers.
+        patch = run_gh(
             gh,
             [
-                "workflow",
-                "run",
-                "adversary-marker.yml",
-                "--repo",
-                repo,
-                "-f",
-                f"pr={number}",
+                "api",
+                "--method",
+                "PATCH",
+                f"repos/{repo}/pulls/{number}",
+                "--input",
+                "-",
             ],
             timeout=60,
+            input_text=json.dumps({"body": new_body}),
         )
-        if t.returncode != 0:
+        if patch.returncode != 0:
             raise RuntimeError(
-                f"workflow run adversary-marker pr={number} failed: "
-                f"{(t.stderr or t.stdout).strip()}"
+                f"gh api PATCH pulls/{number} failed: "
+                f"{(patch.stderr or patch.stdout).strip()}"
             )
-        print(f"triggered adversary-marker.yml pr={number}")
+        print(f"body-edited #{number} head={head}")
+    if trigger_marker:
+        _trigger_adversary_marker(gh, repo, number)
 
 
 def print_stacks(stacks: list[dict[str, Any]]) -> None:
@@ -668,6 +766,15 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="approve-post: after each post, gh workflow run adversary-marker.yml -f pr=N",
     )
+    ap.add_argument(
+        "--via",
+        default="auto",
+        choices=("auto", "body", "comment"),
+        help=(
+            "approve-post: auto=body for owner-authored tips else comment; "
+            "or force body / comment (default auto)"
+        ),
+    )
     a = ap.parse_args(argv)
     try:
         rows = collect(a.gh, a.repo, a.min)
@@ -737,20 +844,33 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if dry_run:
             print(
-                f"# dry-run as owner {login} ({len(paste_rows)} tips); "
+                f"# dry-run as owner {login} ({len(paste_rows)} tips, via={a.via}); "
                 "pass --i-reviewed --yes to post"
             )
         posted = 0
+        vias: list[str] = []
         for r in paste_rows:
             try:
-                post_approve_comment(
-                    a.gh,
-                    a.repo,
-                    int(r["number"]),
-                    r["head"],
-                    dry_run=dry_run,
-                    trigger_marker=a.trigger_marker,
-                )
+                via = resolve_approve_via(a.via, bool(r.get("owner_pr")))
+                vias.append(via)
+                if via == "body":
+                    post_approve_body(
+                        a.gh,
+                        a.repo,
+                        int(r["number"]),
+                        r["head"],
+                        dry_run=dry_run,
+                        trigger_marker=a.trigger_marker,
+                    )
+                else:
+                    post_approve_comment(
+                        a.gh,
+                        a.repo,
+                        int(r["number"]),
+                        r["head"],
+                        dry_run=dry_run,
+                        trigger_marker=a.trigger_marker,
+                    )
             except (RuntimeError, subprocess.TimeoutExpired, OSError) as e:
                 return die(str(e))
             posted += 1
@@ -759,8 +879,10 @@ def main(argv: list[str] | None = None) -> int:
                 {
                     "dry_run": dry_run,
                     "owner": owner,
+                    "via": a.via,
                     "posted": posted,
                     "numbers": [r["number"] for r in paste_rows],
+                    "vias": vias,
                 },
                 sys.stdout,
                 indent=2,
