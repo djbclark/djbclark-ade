@@ -388,30 +388,39 @@ are operator/lead work; this gate only checks the captured files.
 | `tools/acp-run/` | whole tree |
 | `tests/test_acp_dispatch.py` and shim-only siblings | go with the shim |
 | `tests/test_acp_run_*` | ~4.5k named in PLAN E6 |
-| `bin/go_model_policy.py`, `config/go-model-policy.json`, `tests/test_go_model_policy.py` | SHIM with `acp-run` once opencode retirement / PR 260 allows (ledger ruling 5) |
+| `bin/go_model_policy.py`, `config/go-model_policy.json`, `tests/test_go_model_policy.py` | **DECIDE** (ledger ruling 5): `route_agent.py` still loads the JSON. **Recommended default:** keep the trio in the shim-deletion PR; delete only acp-run's install path/tests. Rewrite `route_agent` off the policy, or waive opencode (PR 260 / J2) first, only with an explicit operator pick. |
 | `docs/dispatch-footer.md`, `docs/agent-guard-contract.md` | fold still-true facts into orchestration-practices / review-boundary, then remove or `docs/history/` |
 
 **Keep (explicit):** `bin/review-launch`, `bin/adversary_marker.py`,
-review-boundary docs and tests. `bin/agent_guard.py` until the deletion PR
-decides whether `review-launch` or a surviving Pi path still needs it
-(ledger A4).
+review-boundary docs and `tests/test_review_launch.py`. `bin/agent_guard.py` (+
+`tests/test_agent_guard.py` / `tests/test_omp_operator_gate.py`): prefer
+**delete** in the shim PR unless a live Pi path still imports it (ledger A4;
+`review-launch` does not). Confirm with `rg agent_guard` on the deletion tip.
 
 After the bins go: `bin/ade-roster --write`.
 
 ## E. Test and doc updates required with the deletion PR
 
-1. Drop or rewrite every test that imports only the shims (section D).
-2. Port boundary coverage already owned by `bin/review-launch` (do **not**
-   delete `tests` that review-launch still needs — ledger ruling 3:
-   `test_acp_run_deny.py` / `test_acp_run_read_only.py` were the source; confirm
-   review-launch's own tests cover the boundary before deleting).
-3. AGENTS.md: standing order 10 and machine-context "Two shims" bullet.
-4. README roster regeneration; `docs/skills.md` / orchestration docs that still
-   present the shims as current.
+1. Drop or rewrite every test that imports only the shims (section D), including
+   all `tests/test_acp_run_*.py` and `tests/test_acp_dispatch.py`.
+2. Boundary coverage: `tests/test_review_launch.py` already owns deny/read-only
+   allowlists, secret-deny, symlink refuse, and tripwire (2026-11-10 prep map).
+   **Safe to drop** `tests/test_acp_run_deny.py` and
+   `tests/test_acp_run_read_only.py` with `tools/acp-run/` — do **not** delete
+   `tests/test_review_launch.py`. Drop `.github/workflows/test.yml` explicit
+   acp / go_model path entries only when those files go.
+3. AGENTS.md: standing order 10 (native `paseo send` + named ack only) and
+   delete the machine-context "Two shims" bullet; review rule 4 loses the
+   `tools/acp-run --verify` `shell=True` exception once acp-run is gone.
+4. README roster regeneration (`bin/ade-roster --write`); `docs/skills.md` /
+   `docs/orchestration-practices.md` / `docs/review-boundary.md` that still
+   present the shims as current; fold or archive `docs/dispatch-footer.md` and
+   `docs/agent-guard-contract.md`.
 5. Changelog fragment under `### Removed` (one line per user-visible deletion),
-   citing queue item 33.
+   citing queue Carried **item 1** (Wave 6 shim deletion).
 6. Remove or archive this readiness doc's "must rewrite" table rows that are
-   done; keep a short "deleted on YYYY-MM-DD" note in `docs/slim/log.md`.
+   done; keep a short "deleted on YYYY-MM-DD" note in `docs/slim/log.md`; close
+   or reword queue Carried item 1 after the deletion merges.
 
 ## F. Suggested PR shape
 
