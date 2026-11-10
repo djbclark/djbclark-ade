@@ -6,6 +6,7 @@
   ade-install catalog [--root DIR] [--json]
   ade-install plan [--root DIR] [--json]
   ade-install update-plan [--root DIR] [--json]
+  ade-install bootstrap [--root DIR] [--prefix DIR] [--dry-run|--yes] [--json]
   ade-install doctor [--root DIR] [--id ID ...] [--json]
   ade-install keys [--root DIR] [--json] [--keys-state PATH]
   ade-install apply [--root DIR] [--json] [--dry-run|--yes] [--id ID ...] [--force]
@@ -68,7 +69,7 @@ BIN = Path(__file__).resolve().parent
 if str(BIN) not in sys.path:
     sys.path.insert(0, str(BIN))
 
-if __name__ == "__main__" and "update-plan" in sys.argv[1:]:
+if __name__ == "__main__" and any(command in sys.argv[1:] for command in ("update-plan", "bootstrap")):
     # Cover argparse's accepted option abbreviations without duplicating its
     # grammar. Suppressing bytecode if an argument value matches is harmless.
     sys.dont_write_bytecode = True
@@ -180,6 +181,30 @@ def cmd_update_plan(args: argparse.Namespace) -> int:
             if "argv" in step:
                 print("    argv=" + json.dumps(step["argv"]))
     return 0
+
+
+def cmd_bootstrap(args: argparse.Namespace) -> int:
+    try:
+        report, rc = ai.bootstrap_just(
+            root=Path(args.root) if args.root else BIN.parent,
+            prefix=Path(args.prefix) if args.prefix else None,
+            yes=args.yes,
+        )
+    except OSError as error:
+        report, rc = {"status": "unknown", "setup_complete": False, "reason": str(error)}, 1
+    if args.json:
+        _print_json(report)
+    else:
+        print(f"ade-install bootstrap: {report['status']} (full setup not performed)")
+        print("  " + report.get("reason", report.get("note", "")))
+        for key in ("install_argv", "preview_argv"):
+            if key in report:
+                print(f"  {key}=" + json.dumps(report[key]))
+        if report.get("preview_stdout"):
+            print(report["preview_stdout"])
+        if report.get("preview_stderr"):
+            print(report["preview_stderr"], file=sys.stderr)
+    return rc
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
@@ -383,6 +408,14 @@ def main(argv: list[str] | None = None) -> int:
                 "or ADE_KEYS_STATE_PATH); never stores values",
             )
         p.set_defaults(func=func)
+
+    bp = sub.add_parser("bootstrap", parents=[shared], help="explicit Just bootstrap followed only by installation preview")
+    bp.add_argument("--json", action="store_true")
+    bp.add_argument("--prefix", help="user Just destination (default: ADE_INSTALL_PREFIX or ~/.local/bin)")
+    mode = bp.add_mutually_exclusive_group()
+    mode.add_argument("--dry-run", action="store_true", help="plan only; no subprocesses or downloads (default)")
+    mode.add_argument("--yes", action="store_true", help="install missing Just, verify it, then run only the installation preview")
+    bp.set_defaults(func=cmd_bootstrap)
 
     ap = sub.add_parser(
         "apply",
