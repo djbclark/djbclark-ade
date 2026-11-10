@@ -86,6 +86,8 @@ def test_shipped_ade_toml_is_repo_base_and_matches_legacy_domains(home):
     assert eff.data["pr_policy"]["meta"] == pp_shipped["meta"]
     assert eff.data["pr_policy"]["github"] == pp_shipped["github"]
     assert eff.data["pr_policy"]["forgejo"] == pp_shipped["forgejo"]
+    install_shipped = tomllib.loads((REPO / "config" / "install.toml").read_text())
+    assert eff.data["install"] == install_shipped
     # Fold from legacy mirrors still matches the committed file.
     assert ac.fold_legacy_domains(root=REPO) == tomllib.loads(ade_path.read_text())
 
@@ -103,6 +105,7 @@ def test_legacy_fallthrough_when_ade_toml_absent(home, tmp_path):
         "context-budget.toml",
         "secret-deny.toml",
         "pr-policy.toml",
+        "install.toml",
     ):
         shutil.copy(REPO / "config" / name, root / "config" / name)
     assert not (root / "config" / "ade.toml").exists()
@@ -119,6 +122,10 @@ def test_legacy_fallthrough_when_ade_toml_absent(home, tmp_path):
         "context_budget", "secret_deny", "pr_policy",
     ):
         assert eff.data.get(key) == shipped.get(key)
+    # Install is folded into ade.toml but not projected by load_effective fallthrough
+    # (ade-install owns catalog loading). Fold still carries it.
+    assert "install" not in eff.data
+    assert "install" in shipped
 
 
 def test_fold_write_check_cli(home, tmp_path):
@@ -133,6 +140,7 @@ def test_fold_write_check_cli(home, tmp_path):
         "context-budget.toml",
         "secret-deny.toml",
         "pr-policy.toml",
+        "install.toml",
     ):
         shutil.copy(REPO / "config" / name, root / "config" / name)
     missing = _run_cli("fold", "--check", "--root", str(root), home=home)
@@ -152,6 +160,10 @@ def test_fold_write_check_cli(home, tmp_path):
     assert "[secret_deny.claude]" in folded_text
     assert "[gates.floors.frontier]" in folded_text
     assert "frontier1_judged = { bound = 1" in folded_text  # floor records stay inline
+    assert "[install]" in folded_text
+    assert "[[install.component]]" in folded_text
+    assert "[[install.key]]" in folded_text
+    assert "[[install.login]]" in folded_text
     ok = _run_cli("fold", "--check", "--json", "--root", str(root), home=home)
     assert ok.returncode == 0, ok.stderr
     assert json.loads(ok.stdout)["ok"] is True

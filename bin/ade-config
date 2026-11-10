@@ -10,10 +10,11 @@
 
 check/get/diff stay read-only: no writes, no secret resolution, no network/auth.
 set performs a comment-preserving atomic scalar write (default --target local).
-fold projects legacy domain TOMLs into the schema_version=1 tree (print, --write
-config/ade.toml, or --check that a present ade.toml matches the fold).
-Missing config/ade.toml projects legacy split files. Present valid ade.toml is the
-repo base. Present invalid or unknown-version config fails. Local override:
+fold projects legacy domain TOMLs (including install/keys under [install]) into the
+schema_version=1 tree (print, --write config/ade.toml, or --check that a present
+ade.toml matches the fold). Missing config/ade.toml projects legacy split files.
+Present valid ade.toml is the repo base. Present invalid or unknown-version config
+fails. Local override:
 ~/.config/djbclark-ade/local.toml. ROUTING_POLICY / GATES_TOML / CONTEXT_BUDGET_TOML /
 SECRET_DENY_TOML / PR_POLICY_TOML remain isolated legacy-format overrides and are
 never set targets. See docs/config-migration.md.

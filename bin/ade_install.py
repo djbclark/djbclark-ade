@@ -1,9 +1,12 @@
 """ade_install: install catalog, plan, observe-only doctor, bounded apply.
 
-Transitional source: ``config/install.toml`` while install/keys are not yet
-folded into ``config/ade.toml`` (policy domains may already live there).
-Key entries are names and metadata only. Doctor runs ``probe_argv`` when
-recorded (else PATH presence) and never repairs. Apply is user-scoped only:
+Prefers folded ``[install]`` from ``ade_config.load_effective`` (repo
+``config/ade.toml`` merged with ``~/.config/djbclark-ade/local.toml``) when
+that domain is present; falls through to transitional ``config/install.toml``
+when the unified file is absent or lacks ``[install]``. A present but empty
+or invalid ``[install]`` fails validation instead of falling through. Key
+entries are names and metadata only. Doctor runs ``probe_argv`` when recorded
+(else PATH presence) and never repairs. Apply is user-scoped only:
 ``--dry-run`` by default, ``--yes`` to execute recorded ``install_argv``
 (argv lists, never shell=True). Root / ``--system`` effects are refused until
 a later unit. Secrets are never read.
@@ -217,48 +220,93 @@ def load_catalog(
     *,
     root: Path | None = None,
     install_path: Path | None = None,
+    home: Path | None = None,
+    local_config: Path | None = None,
+    include_local: bool = True,
+    environ: dict[str, str] | None = None,
 ) -> Catalog:
-    """Load and validate the transitional install catalog. Never writes."""
+    """Load and validate the install catalog. Never writes.
+
+    Preference: effective ``[install]`` via ``ade_config.load_effective``
+    (``config/ade.toml`` merged with local.toml) when that domain is present;
+    otherwise transitional ``config/install.toml``. A present ``[install]`` that
+    is empty or invalid fails validation (no silent fallthrough). An explicit
+    ``install_path`` forces the legacy file (tests / tooling) and skips the
+    effective preference.
+    """
     root = (root or repo_root_from_here()).resolve()
     new_path = default_new_config_path(root)
     path = install_path if install_path is not None else default_install_path(root)
     ade_present = ac.input_present(new_path)
-    # S1 policy-domain fold may land config/ade.toml before install/keys move.
-    # Keep loading install.toml until a reviewed install fold; refuse only when the
-    # unified file already carries an install catalog (duplicate editable authority).
     ade_has_install = False
-    if ade_present:
+    local_used: str | None = None
+
+    if ade_present and install_path is None:
         try:
-            ade_raw = ac.read_toml(new_path)
+            eff = ac.load_effective(
+                root=root,
+                home=home,
+                local_config=local_config,
+                include_local=include_local,
+                environ=environ,
+            )
         except ac.ConfigError as e:
             raise InstallError(str(e)) from e
-        ade_has_install = isinstance(ade_raw.get("install"), dict) or bool(
-            ade_raw.get("component") or ade_raw.get("key") or ade_raw.get("login")
-        )
-    provenance: dict[str, Any] = {
+        local_used = eff.provenance.get("local_config")
+        if "install" in eff.data:
+            ade_has_install = True
+            folded = eff.data["install"]
+            if not isinstance(folded, dict):
+                raise InstallError(f"{new_path} [install]: must be a table")
+            raw = copy.deepcopy(folded)
+            if "schema_version" not in raw:
+                raw["schema_version"] = SCHEMA_VERSION
+            ver = raw.get("schema_version")
+            if ver != SCHEMA_VERSION:
+                raise InstallError(
+                    f"{new_path} [install]: unsupported schema_version {ver!r} "
+                    f"(need {SCHEMA_VERSION})"
+                )
+            schema = read_install_schema(root)
+            ac.validate_tree(raw, schema, label=f"{new_path} [install]")
+            validate_catalog_semantics(raw, path=new_path)
+            note = (
+                "folded [install] from ade_config.load_effective "
+                "(config/ade.toml ± local.toml); "
+                "config/install.toml remains for fallthrough when [install] is absent"
+            )
+            if local_used:
+                note += f"; local overlay applied from {local_used}"
+            provenance: dict[str, Any] = {
+                "schema_version": SCHEMA_VERSION,
+                "root": str(root),
+                "install_config": str(new_path),
+                "ade_toml_present": True,
+                "ade_toml_has_install": True,
+                "legacy_install_present": ac.input_present(default_install_path(root)),
+                "local_config": local_used,
+                "source": "ade.toml",
+                "note": note,
+            }
+            return Catalog(
+                data=copy.deepcopy(raw), path=new_path, provenance=provenance, root=root
+            )
+
+    provenance = {
         "schema_version": SCHEMA_VERSION,
         "root": str(root),
         "install_config": str(path),
         "ade_toml_present": ade_present,
         "ade_toml_has_install": ade_has_install,
+        "local_config": local_used,
         "source": "install.toml",
         "note": (
-            "transitional catalog: install/keys remain in config/install.toml until folded; "
-            "config/ade.toml may already hold policy domains"
-            if ade_present and not ade_has_install
-            else (
-                "transitional catalog while config/ade.toml is absent; "
-                "a present ade.toml must eventually carry install/keys after a reviewed fold"
-                if not ade_present
-                else "config/ade.toml already carries install/keys; refuse duplicate install.toml"
-            )
+            "transitional fallthrough: config/ade.toml present without [install]; "
+            "loading config/install.toml"
+            if ade_present
+            else "transitional fallthrough: config/ade.toml absent; loading config/install.toml"
         ),
     }
-    if ade_has_install:
-        raise InstallError(
-            f"{new_path}: carries install/keys; refuse transitional config/install.toml "
-            "(no permanent duplicate editable authorities)"
-        )
     if not ac.input_present(path):
         raise InstallError(f"{path}: missing install catalog")
     raw = ac.read_toml(path)

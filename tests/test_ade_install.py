@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -16,11 +18,34 @@ import ade_install as ai  # noqa: E402
 import ade_user_install as aui  # noqa: E402
 
 
-def _run(*args: str, root: Path | None = None) -> subprocess.CompletedProcess:
+@pytest.fixture
+def home(tmp_path, monkeypatch):
+    """Temp HOME so ~/.config/djbclark-ade/local.toml never touches the real one."""
+    h = tmp_path / "home"
+    h.mkdir()
+    monkeypatch.setenv("HOME", str(h))
+    return h
+
+
+def _run(
+    *args: str,
+    root: Path | None = None,
+    home: Path | None = None,
+) -> subprocess.CompletedProcess:
     argv = [sys.executable, "-I", "-B", str(BIN / "ade-install"), *args]
     if root is not None:
         argv[4:4] = ["--root", str(root)]
-    return subprocess.run(argv, capture_output=True, text=True, cwd=str(REPO), check=False)
+    env = dict(os.environ)
+    if home is not None:
+        env["HOME"] = str(home)
+    return subprocess.run(
+        argv, capture_output=True, text=True, cwd=str(REPO), check=False, env=env
+    )
+
+
+def _write_ade_schema(root: Path) -> None:
+    (root / "config").mkdir(parents=True, exist_ok=True)
+    shutil.copy(REPO / "config" / "ade.schema.json", root / "config" / "ade.schema.json")
 
 
 def _fixture_root(tmp_path: Path) -> Path:
@@ -33,9 +58,12 @@ def _fixture_root(tmp_path: Path) -> Path:
     return root
 
 
-def test_repo_install_toml_checks_clean():
-    catalog = ai.load_catalog(root=REPO)
+def test_repo_install_toml_checks_clean(home):
+    catalog = ai.load_catalog(root=REPO, home=home)
     assert catalog.data["schema_version"] == 1
+    assert catalog.provenance["source"] == "ade.toml"
+    assert catalog.provenance["ade_toml_has_install"] is True
+    assert str(catalog.path).endswith("config/ade.toml")
     assert len(catalog.components) >= 20
     assert len(catalog.keys) >= 6
     assert len(catalog.logins) >= 4
@@ -57,10 +85,21 @@ def test_repo_install_toml_checks_clean():
     ]
     assert by_id["sudo-secretspec"].get("probe_argv") == ["sudo-secretspec", "doctor"]
     assert by_id["sudo-secretspec"].get("system_argv") is None  # Linux tarball still UNKNOWN
-    proc = _run("check", "--json", root=REPO)
+    proc = _run("check", "--json", root=REPO, home=home)
     assert proc.returncode == 0, proc.stderr
     payload = json.loads(proc.stdout)
     assert payload["ok"] is True
+
+
+def test_folded_catalog_matches_legacy_install_toml(home):
+    """Folded [install] and transitional install.toml are the same catalog body."""
+    folded = ai.load_catalog(root=REPO, home=home)
+    legacy = ai.load_catalog(
+        root=REPO, install_path=REPO / "config" / "install.toml"
+    )
+    assert folded.provenance["source"] == "ade.toml"
+    assert legacy.provenance["source"] == "install.toml"
+    assert folded.data == legacy.data
 
 
 def test_fixture_doctor_missing_vs_unchosen(tmp_path):
@@ -125,34 +164,175 @@ def test_plan_blocks_unknown_install(tmp_path):
     assert by_id["tool-d"]["needs_system"] is True
 
 
-def test_loads_install_while_ade_toml_present_without_install_fold(tmp_path):
-    """Policy-domain ade.toml may land before install/keys; keep install.toml."""
+def test_loads_install_while_ade_toml_present_without_install_fold(tmp_path, home):
+    """ade.toml without [install] falls through to transitional install.toml."""
     root = tmp_path / "repo"
-    (root / "config").mkdir(parents=True)
+    _write_ade_schema(root)
     (root / "config" / "ade.toml").write_text("schema_version = 1\n")
     (root / "config" / "install.toml").write_text((FIX / "minimal.toml").read_text())
     (root / "config" / "install.schema.json").write_text(
         (REPO / "config" / "install.schema.json").read_text()
     )
-    catalog = ai.load_catalog(root=root)
+    catalog = ai.load_catalog(root=root, home=home)
     assert catalog.provenance["ade_toml_present"] is True
     assert catalog.provenance["ade_toml_has_install"] is False
     assert catalog.provenance["source"] == "install.toml"
     assert len(catalog.components) >= 1
 
 
-def test_refuses_install_toml_when_ade_toml_carries_install(tmp_path):
+def test_prefers_folded_install_when_ade_toml_carries_catalog(tmp_path, home):
+    """When both exist, prefer folded [install]; legacy file stays for fallthrough."""
     root = tmp_path / "repo"
-    (root / "config").mkdir(parents=True)
+    _write_ade_schema(root)
+    folded = (
+        "schema_version = 1\n"
+        "[install]\n"
+        "schema_version = 1\n"
+        "[[install.component]]\n"
+        'id = "folded-tool"\n'
+        'class = "hard"\n'
+        'presence = "true"\n'
+        'probe_argv = ["true"]\n'
+    )
+    (root / "config" / "ade.toml").write_text(folded)
+    (root / "config" / "install.toml").write_text((FIX / "minimal.toml").read_text())
+    (root / "config" / "install.schema.json").write_text(
+        (REPO / "config" / "install.schema.json").read_text()
+    )
+    catalog = ai.load_catalog(root=root, home=home)
+    assert catalog.provenance["source"] == "ade.toml"
+    assert catalog.provenance["legacy_install_present"] is True
+    assert [c["id"] for c in catalog.components] == ["folded-tool"]
+    # Explicit legacy path still loads install.toml (tooling / parity checks).
+    legacy = ai.load_catalog(root=root, install_path=root / "config" / "install.toml")
+    assert legacy.provenance["source"] == "install.toml"
+    assert [c["id"] for c in legacy.components] != ["folded-tool"]
+
+
+def test_doctor_same_folded_vs_legacy(tmp_path, home):
+    """Doctor observations match for the same catalog body from either source."""
+    root = tmp_path / "repo"
+    _write_ade_schema(root)
+    minimal = (FIX / "minimal.toml").read_text()
+    (root / "config" / "install.toml").write_text(minimal)
+    (root / "config" / "install.schema.json").write_text(
+        (REPO / "config" / "install.schema.json").read_text()
+    )
+    # Build ade.toml with only [install] from the same body.
+    import tomllib
+
+    body = tomllib.loads(minimal)
+    lines = ["schema_version = 1", "", "[install]", "schema_version = 1", ""]
+    for row in body["component"]:
+        lines.append("[[install.component]]")
+        for k, v in row.items():
+            if isinstance(v, bool):
+                lines.append(f"{k} = {'true' if v else 'false'}")
+            elif isinstance(v, list):
+                inner = ", ".join(json.dumps(x) for x in v)
+                lines.append(f"{k} = [ {inner} ]")
+            else:
+                lines.append(f"{k} = {json.dumps(v)}")
+        lines.append("")
+    for section in ("key", "login"):
+        for row in body.get(section) or []:
+            lines.append(f"[[install.{section}]]")
+            for k, v in row.items():
+                if isinstance(v, list):
+                    inner = ", ".join(json.dumps(x) for x in v)
+                    lines.append(f"{k} = [ {inner} ]")
+                else:
+                    lines.append(f"{k} = {json.dumps(v)}")
+            lines.append("")
+    (root / "config" / "ade.toml").write_text("\n".join(lines) + "\n")
+    folded = ai.load_catalog(root=root, home=home)
+    legacy = ai.load_catalog(root=root, install_path=root / "config" / "install.toml")
+    assert folded.data == legacy.data
+    obs_f, rc_f = ai.doctor(folded)
+    obs_l, rc_l = ai.doctor(legacy)
+    assert rc_f == rc_l
+    # Catalog observation ids name the source path; component/key/login probes match.
+    assert [(o.kind, o.id, o.status, o.detail) for o in obs_f if o.kind != "catalog"] == [
+        (o.kind, o.id, o.status, o.detail) for o in obs_l if o.kind != "catalog"
+    ]
+    assert [o.status for o in obs_f if o.kind == "catalog"] == ["ok"]
+    assert [o.status for o in obs_l if o.kind == "catalog"] == ["ok"]
+
+
+def test_local_toml_install_override_applied(tmp_path, home):
+    """local.toml [install] array replace merges into ade-install catalog."""
+    root = tmp_path / "repo"
+    _write_ade_schema(root)
     (root / "config" / "ade.toml").write_text(
-        "schema_version = 1\n[install]\nnote = \"folded\"\n"
+        "schema_version = 1\n"
+        "[install]\n"
+        "schema_version = 1\n"
+        "[[install.component]]\n"
+        'id = "base-tool"\n'
+        'class = "hard"\n'
+        'presence = "true"\n'
+        'probe_argv = ["true"]\n'
+    )
+    (root / "config" / "install.schema.json").write_text(
+        (REPO / "config" / "install.schema.json").read_text()
+    )
+    (root / "config" / "install.toml").write_text((FIX / "minimal.toml").read_text())
+    local = home / ".config" / "djbclark-ade" / "local.toml"
+    local.parent.mkdir(parents=True)
+    local.write_text(
+        "schema_version = 1\n"
+        "[install]\n"
+        "schema_version = 1\n"
+        "[[install.component]]\n"
+        'id = "local-tool"\n'
+        'class = "optional"\n'
+        "chosen = true\n"
+        'presence = "true"\n'
+        'probe_argv = ["true"]\n'
+        'install_argv = ["true"]\n'
+    )
+    catalog = ai.load_catalog(root=root, home=home)
+    assert catalog.provenance["source"] == "ade.toml"
+    assert catalog.provenance["local_config"] == str(local)
+    assert [c["id"] for c in catalog.components] == ["local-tool"]
+    steps = ai.plan(catalog)
+    assert steps[0]["id"] == "local-tool"
+    assert steps[0]["action"] == "would-install"
+
+
+def test_present_install_schema_only_fails_not_fallthrough(tmp_path, home):
+    """[install] with only schema_version must fail, not load install.toml."""
+    root = tmp_path / "repo"
+    _write_ade_schema(root)
+    (root / "config" / "ade.toml").write_text(
+        "schema_version = 1\n"
+        "[install]\n"
+        "schema_version = 1\n"
     )
     (root / "config" / "install.toml").write_text((FIX / "minimal.toml").read_text())
     (root / "config" / "install.schema.json").write_text(
         (REPO / "config" / "install.schema.json").read_text()
     )
-    with pytest.raises(ai.InstallError, match="refuse transitional"):
-        ai.load_catalog(root=root)
+    with pytest.raises(ai.InstallError, match=r"\[install\].*component|missing required"):
+        ai.load_catalog(root=root, home=home)
+
+
+def test_present_install_empty_component_fails_not_fallthrough(tmp_path, home):
+    """[install] with component=[] must fail validation, not load install.toml."""
+    root = tmp_path / "repo"
+    _write_ade_schema(root)
+    (root / "config" / "ade.toml").write_text(
+        "schema_version = 1\n"
+        "[install]\n"
+        "schema_version = 1\n"
+        "component = []\n"
+    )
+    (root / "config" / "install.toml").write_text((FIX / "minimal.toml").read_text())
+    (root / "config" / "install.schema.json").write_text(
+        (REPO / "config" / "install.schema.json").read_text()
+    )
+    with pytest.raises(ai.InstallError, match="non-empty|component"):
+        ai.load_catalog(root=root, home=home)
 
 
 def test_duplicate_component_id_rejected(tmp_path):

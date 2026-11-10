@@ -4,9 +4,11 @@ Builds one effective tree from ``config/ade.toml`` when present, else legacy
 ``config/routing.toml`` + ``config/gates.toml`` + ``config/context-budget.toml``
 + ``config/secret-deny.toml`` + ``config/pr-policy.toml``, plus optional
 ``~/.config/djbclark-ade/local.toml``. ``fold_legacy_domains`` / ``write_ade_toml``
-commit the unified file from those legacy domains. Consumers adopt via
+commit the unified file from those legacy domains and from transitional
+``config/install.toml`` under ``[install]``. Consumers adopt via
 ``load_effective`` (``route_agent``, ``ade_gates.load_frontier``,
-``context-budget-check``, ``render-secret-deny``, ``review-launch``, ``pr-policy``, …).
+``context-budget-check``, ``render-secret-deny``, ``review-launch``, ``pr-policy``, …)
+and ``ade_install.load_catalog`` (prefers effective folded ``[install]``).
 
 Public:
   load_effective(...) -> EffectiveConfig
@@ -62,6 +64,10 @@ LEGACY_PROJECTION: tuple[tuple[str, str, str], ...] = (
     ("config/pr-policy.toml", "[meta]", "[pr_policy].meta"),
     ("config/pr-policy.toml", "[github]", "[pr_policy].github"),
     ("config/pr-policy.toml", "[forgejo]", "[pr_policy].forgejo"),
+    ("config/install.toml", "schema_version", "[install].schema_version"),
+    ("config/install.toml", "[[component]]", "[[install.component]]"),
+    ("config/install.toml", "[[key]]", "[[install.key]]"),
+    ("config/install.toml", "[[login]]", "[[install.login]]"),
 )
 
 ROUTING_DOMAIN_KEYS: frozenset[str] = frozenset({
@@ -88,6 +94,7 @@ KNOWN_TOP_LEVEL: frozenset[str] = frozenset({
     "context_budget",
     "secret_deny",
     "pr_policy",
+    "install",
 })
 
 
@@ -136,6 +143,10 @@ def default_secret_deny_path(root: Path) -> Path:
 
 def default_pr_policy_path(root: Path) -> Path:
     return root / "config" / "pr-policy.toml"
+
+
+def default_install_path(root: Path) -> Path:
+    return root / "config" / "install.toml"
 
 
 def default_local_path(home: Path | None = None) -> Path:
@@ -973,7 +984,8 @@ def check(
 
 # --- fold legacy domains → config/ade.toml ------------------------------------------------------
 
-# Stable emit order: routing tables first (as in routing.toml), then nested domains, services last.
+# Stable emit order: routing tables first (as in routing.toml), then nested domains,
+# install catalog, services last.
 _FOLD_ROOT_KEYS: tuple[str, ...] = (
     "schema_version",
     "routing",
@@ -986,17 +998,39 @@ _FOLD_ROOT_KEYS: tuple[str, ...] = (
     "context_budget",
     "secret_deny",
     "pr_policy",
+    "install",
     "service",
 )
 
 ADE_TOML_HEADER = """\
-# config/ade.toml — schema_version=1 unified ADE config (folded 2026-11-09).
+# config/ade.toml — schema_version=1 unified ADE config (folded 2026-11-09; install 2026-11-10).
 # Canonical repo base when present (docs/config-migration.md). Legacy split TOMLs
-# (routing/gates/context-budget/secret-deny/pr-policy) remain for fallthrough when
-# this file is absent. Install/keys stay transitional in config/install.toml until
-# a reviewed install fold. Regenerate from legacy with: ade-config fold --write
+# (routing/gates/context-budget/secret-deny/pr-policy/install) remain for fallthrough
+# when this file is absent. Install/keys fold under [install] from config/install.toml.
+# Regenerate from legacy with: ade-config fold --write
 # Edit scalars with: ade-config set PATH VALUE --target repo
 """
+
+
+def load_legacy_install(path: Path, *, required: bool = True) -> dict[str, Any]:
+    """Load transitional ``config/install.toml`` as the ``[install]`` domain body.
+
+    Keeps the catalog's own ``schema_version`` so ``ade-install`` can validate the
+    extracted domain against ``config/install.schema.json``.
+    """
+    if not input_present(path):
+        if required:
+            raise ConfigError(f"{path}: missing install catalog")
+        return {}
+    raw = read_toml(path)
+    ver = raw.get("schema_version")
+    if ver != SCHEMA_VERSION:
+        raise ConfigError(
+            f"{path}: unsupported schema_version {ver!r} (need {SCHEMA_VERSION})"
+        )
+    if not isinstance(raw.get("component"), list) or not raw["component"]:
+        raise ConfigError(f"{path}: component array is required and must be non-empty")
+    return copy.deepcopy(raw)
 
 
 def fold_legacy_domains(*, root: Path | None = None) -> dict[str, Any]:
@@ -1022,6 +1056,7 @@ def fold_legacy_domains(*, root: Path | None = None) -> dict[str, Any]:
     data["pr_policy"] = load_legacy_pr_policy(
         default_pr_policy_path(root), required=True
     )
+    data["install"] = load_legacy_install(default_install_path(root), required=True)
     schema = read_schema(default_schema_path(root))
     validate_tree(data, schema, label="folded ade.toml")
     reject_duplicate_services(data.get("service"), label="folded ade.toml")

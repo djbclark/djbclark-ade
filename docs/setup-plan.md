@@ -47,8 +47,10 @@ and security sequencing in the older plan; other unfinished planning stays intac
    `[context_budget]`, `[pr_policy]`, `[secret_deny]`, `[install]`, `[update]`, `[github]`, `[hardening]`.
    - Today's files fold into it one at a time: `routing.toml`, `gates.toml`, `context-budget.toml`, `pr-policy.toml`,
      `secret-deny.toml`, and the JSON policies where they are hand-edited.
-   - **2026-11-09:** policy domains are folded into tracked `config/ade.toml` (`ade-config fold --write`);
-     install/keys remain transitional in `config/install.toml` until their reviewed fold.
+   - **2026-11-09:** policy domains are folded into tracked `config/ade.toml` (`ade-config fold --write`).
+   - **2026-11-10:** install/keys fold under `[install]` from transitional `config/install.toml`
+     (`ade-config fold --write` / `--check`); `ade-install` prefers the folded catalog and
+     falls through to `install.toml` when `ade.toml` is absent or lacks `[install]`.
    - During migration, a missing new-format file uses a documented legacy projection. A present valid new-format file
      takes precedence; malformed new-format input fails validation rather than silently using legacy policy.
      Existing readers stay unchanged until their explicit adoption PR (implementation contracts below).

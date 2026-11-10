@@ -21,8 +21,13 @@ and `bin/review-launch` read the `secret_deny` domain, and `bin/pr-policy` reads
 **Same day (stacked, scout gap A1):** tracked `config/ade.toml` is committed via
 `ade-config fold --write` (projects every policy domain above). When present it is the
 repo base; legacy split TOMLs remain for fallthrough when it is absent.
-`ade-install` still reads transitional `config/install.toml` until install/keys are folded
-(refuses only when `ade.toml` already carries an install catalog).
+**2026-11-10 (stacked, scout B1):** `ade-config fold` also projects
+`config/install.toml` under `[install]` (component/key/login). `ade-install`
+loads the folded catalog through `ade_config.load_effective` (so
+`~/.config/djbclark-ade/local.toml` `[install]` overlays apply) and falls
+through to transitional `install.toml` when `ade.toml` is absent or lacks
+`[install]`; a present but empty or invalid `[install]` fails validation
+instead of falling through.
 
 ## A. Mapping table (one explicit projection)
 
@@ -41,12 +46,16 @@ repo base; legacy split TOMLs remain for fallthrough when it is absent.
 | `config/context-budget.toml` | `[budget]` | `[context_budget].budget` |
 | `config/secret-deny.toml` | `version` / `deny` / `allow` / `[claude]` | `[secret_deny].*` |
 | `config/pr-policy.toml` | `[meta]` / `[github]` / `[forgejo]` | `[pr_policy].*` |
+| `config/install.toml` | `schema_version` | `[install].schema_version` |
+| `config/install.toml` | `[[component]]` | `[[install.component]]` |
+| `config/install.toml` | `[[key]]` | `[[install.key]]` |
+| `config/install.toml` | `[[login]]` | `[[install.login]]` |
 
 Routing's current public tables stay at the effective root (not nested under a single
 `[routing]` umbrella that would drop `[lead]` / `[[service]]`). Gates nest under
 `[gates]` so the frontier allowance does not collide with routing keys. Context-budget,
-secret-deny and pr-policy nest under `[context_budget]`, `[secret_deny]` and
-`[pr_policy]` the same way.
+secret-deny, pr-policy and install nest under `[context_budget]`, `[secret_deny]`,
+`[pr_policy]` and `[install]` the same way.
 
 `schema_version` is exactly `1`. Unsupported versions fail closed.
 
@@ -93,16 +102,18 @@ B9. **`PR_POLICY_TOML`**: isolated legacy-format override for `[pr_policy]`.
     missing projects `{meta.schema=1}` with no forge tables. Consumer
     `--config` / `PR_POLICY_CONFIG` remain an explicit legacy-format path (not this
     isolation env).
-B10. **Tracked `config/ade.toml`** (2026-11-09): committed by `ade-config fold --write`
-    from the legacy domain files. `ade-config fold --check` asserts the file still matches
-    that fold while both the unified file and the legacy mirrors are kept. Prefer
-    `ade-config set --target repo` for scalar edits (writes `ade.toml` when present).
-    The fold emitter writes nested section tables for gates/pr_policy/context_budget/
-    secret_deny (e.g. `[gates.frontier]`, `[pr_policy.github]`), matching the prior split
-    TOML shape, so scalar set can edit those leaves; routing-domain tables may still use
-    compact inline nests, and flat floor / `budget."~"` records stay inline. Legacy files
-    stay for fallthrough when `ade.toml` is absent; a later PR may drop them once
-    fallthrough is unused.
+B10. **Tracked `config/ade.toml`** (2026-11-09; install 2026-11-10): committed by
+    `ade-config fold --write` from the legacy domain files (including
+    `config/install.toml` → `[install]`). `ade-config fold --check` asserts the file
+    still matches that fold while both the unified file and the legacy mirrors are kept.
+    Prefer `ade-config set --target repo` for scalar edits (writes `ade.toml` when
+    present). The fold emitter writes nested section tables for
+    gates/pr_policy/context_budget/secret_deny (e.g. `[gates.frontier]`,
+    `[pr_policy.github]`), matching the prior split TOML shape, so scalar set can edit
+    those leaves; routing-domain tables may still use compact inline nests, and flat
+    floor / `budget."~"` records stay inline. Install emits `[[install.component]]` /
+    `[[install.key]]` / `[[install.login]]`. Legacy files stay for fallthrough when
+    `ade.toml` is absent; a later PR may drop them once fallthrough is unused.
 
 ## C. CLI
 
@@ -172,13 +183,13 @@ check/get/diff stay pure: no config writes, no secret resolution, no
 network/auth/scheduling probes. `--home` points local.toml resolution at a temp
 tree in tests; tests must not write the real HOME config or flip live lead flags.
 
-## D. Install catalog (transitional, 2026-11-09)
+## D. Install catalog (folded 2026-11-10)
 
-Separate from the policy-domain effective tree: `config/install.toml` + `ade-install`
-(`docs/install-catalog.md`). Still the install/keys source while `config/ade.toml` holds
-only policy domains. Refused when `ade.toml` already carries an install catalog
-(`[install]` / folded component|key|login tables) so those are not a second permanent
-authority beside a unified file.
+`ade-config fold` projects `config/install.toml` under `[install]`. `ade-install`
+(`docs/install-catalog.md`) prefers that folded catalog when present and falls through
+to transitional `config/install.toml` when `ade.toml` is absent or lacks `[install]`.
+`fold --check` keeps the mirror aligned while both files are kept; there is no second
+permanent editable authority once the unified file carries install/keys.
 
 ## E. Provenance
 
