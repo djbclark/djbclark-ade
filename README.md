@@ -144,7 +144,7 @@ Skills (22, from each `skills/*/SKILL.md`):
 | [`load-watch`](bin/load-watch) | Find the agent behind a sustained load spike, tell it, and steer that work to CI (free GitHub runners; Forgejo/Hyades for MIT/SIPB work). |
 | [`opencode-plugin-guard`](bin/opencode-plugin-guard) | Keep the tool-managed OpenCode plugin (rtk) at the v2 module shape that OpenCode 2 requires. |
 | [`ops-post-checkout-guard`](bin/ops-post-checkout-guard) | Post-checkout guard for ~/ops/* deploy checkouts. |
-| [`paseo-set-model`](bin/paseo-set-model) | Switch a live Paseo agent's model in place, or list the daemon's agents. |
+| [`paseo-set-model`](bin/paseo-set-model) | Switch a live Paseo agent's model in place, or list the daemon's agents. Exit 69 when the Paseo Helper (or `PASEO_SET_MODEL_HELPER`) is missing. |
 | [`paseo-set-model.mjs`](bin/paseo-set-model.mjs) | The node half of bin/paseo-set-model. |
 | [`pi-cursor-agent`](bin/pi-cursor-agent) | Cursor provider child launcher: preserve CLI auth; run print mode unattended. |
 | [`pi-default`](bin/pi-default) | Choose a physical Pi model for the current task, without starting inference. |
