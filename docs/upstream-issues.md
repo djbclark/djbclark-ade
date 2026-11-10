@@ -1135,9 +1135,11 @@ getpaseo/paseo (#7145 and #6257 are open but about other packages' type imports)
 
 **Status:** filed 2026-10-19: https://github.com/Daaaaave/paseo-telegram/issues/1
 
-## 17. Paseo — CLI: change an existing agent's model (`paseo agent model <id> <provider/model>`) (draft, not filed, 2026-10-23)
+## 17. Paseo — CLI: change an existing agent's model (`paseo agent model <id> <provider/model>`) (filed 2026-11-09)
 
 **Repo:** getpaseo/paseo, Paseo 0.12.0 (`/Applications/Paseo.app`, bundle read with `rg -a`; no live call made).
+
+**Status:** filed 2026-11-09: https://github.com/getpaseo/paseo/issues/9245. Duplicate-searched 2026-11-09 on `getpaseo/paseo` (`paseo agent model`, `agent model`, `in-place model`, `agent update --model`, `feat(cli) model`, open `CLI` / `model` lists): no prior open issue asked for a CLI to change an existing agent's model in place. Cloud Agent `gh` could `issue create` on that repo (edit/close remain denied); accidental probe https://github.com/getpaseo/paseo/issues/9244 (title `test`) should be closed by the operator. Tracked here as **Carried #9** in `docs/queue.md` (do not edit that file from this PR; #358 owns queue edits).
 
 ### What happens
 
