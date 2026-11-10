@@ -86,9 +86,11 @@ config change).
     every other word: pattern-only first, then a real walk with remaining budget when the pattern cannot decide
     (broad globs such as `id_*` / `*` need the walk to catch `id_rsa` / `server.key` on disk; never allow those after
     set-aside on pattern-only alone). A word that times out twice, an overall-budget timeout while glob words remain,
-    a set-aside word that still needs a walk with no budget left, or a deferred walk truncated by the shared 2 s
-    glob-walk clock / entry bound (completing slow dummies can start and exhaust that clock under the per-word
-    budget while the first-pass cap equals it), fails closed (C7).
+    a set-aside word that still needs a walk with no budget left, a deferred walk truncated by the shared 2 s
+    glob-walk clock / entry bound, or a first-pass relative/cwd glob truncated the same way (completing slow
+    dummies can start and exhaust that clock under the per-word budget while the first-pass cap equals it, or
+    burn the entry bound while a later relative secret glob still has rem; absolute deep globs still fall back
+    to the pattern check), fails closed (C7).
   - **B1d.** Codex `apply_patch` headers (`*** Add File:`, `*** Update File:`, `*** Delete File:`, `*** Move to:`) inside a
     `*** Begin Patch` block, in the command or any other string of a non-file tool. Only a genuine patch payload leaves the
     patch body out of the shell words, so a patch whose code mentions `.env` passes there: the `apply_patch` tool, or a
@@ -183,9 +185,14 @@ config change).
   `server.key`) were allowed — the deferred retry now walks with remaining budget or fails closed. A further residual
   closed 2026-11-10: those completing dummies also start the shared 2 s glob-walk clock (`GLOB_S`); with
   `FIRST_PASS_S == GLOB_S` the deferred walk is already truncated, `expand` used not to `tick` on truncate, and an
-  inconclusive pattern check ALLOWed — truncated deferred walks now fail closed. A word that times out twice, an
-  overall-budget timeout while Bash glob words remain unchecked, a set-aside word that still needs a walk with no
-  budget left, or a deferred walk truncated by `GLOB_S` / the entry bound, exits 2 with
+  inconclusive pattern check ALLOWed — truncated deferred walks now fail closed. A further residual the same day:
+  `_glob_budget_hit` was only checked on deferred retry, so a first-pass relative word that still had
+  `FIRST_PASS_S` rem after the shared clock / entry bound was already exhausted truncated, fell back to an
+  inconclusive pattern check, cached allow, and never entered deferred — first-pass truncated relative/cwd
+  walks now fail closed too (absolute deep globs keep the pattern fallback). A word that times out twice, an
+  overall-budget timeout while Bash glob words remain unchecked, a set-aside word that still needs a walk with
+  no budget left, a deferred walk truncated by `GLOB_S` / the entry bound, or a first-pass relative/cwd walk
+  truncated the same way, exits 2 with
   `glob analysis budget exceeded (fail closed)`: secret paths prefer deny over allow. A later literal path
   (`cat ~/.ssh/id_rsa`) is still checked first and blocks on the deny rule. A directory
   that opens but cannot be read to the end (`/proc/1/map_files`) is skipped by both walks, as the shell and ripgrep
@@ -211,6 +218,6 @@ config change).
   a fake `rg` on PATH (widening, a narrower list, a failing and a hanging one),   Bash, the lines of a patch block under
   Bash, `**` recursion, symlinked directories, Codex patches, fail-open, glob-budget fail-closed (eight slow words, a lone
   slow word, set-aside walk/refuse after first-pass burn, deferred walk refuse when `GLOB_S` is burned by completing
-  dummies, `GlobBudgetExceeded` through `main`), the glob walk's bounds on a synthetic endless tree and a symlink loop, heredoc speed including a
+  dummies, first-pass relative refuse when the shared scan/clock truncates before deferred, `GlobBudgetExceeded` through `main`), the glob walk's bounds on a synthetic endless tree and a symlink loop, heredoc speed including a
   60-line `.gitignore`, the per-word budget and first-pass cap, Python 3.9 syntax) and `tests/test_render_secret_deny.py` (render into copies of the template: idempotent, `--check`, tags and
   other entries kept, the committed JSON equals a fresh render).
