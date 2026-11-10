@@ -299,14 +299,14 @@ gone) there are two ways to continue, and an agent cannot run a built-in slash c
    ```
 
    The `env -u` prefix keeps `paseo run` from parenting the new agent to this one (it parents to the caller). When
-   the Claude pools are exhausted, the successor is omp (`--provider omp --model anthropic/claude-sonnet-5-5
-   --thinking high`, no `--mode`: omp has its own default), else codex (`--provider codex --model gpt-6.1-sol --mode
-   full-access`, first prompt `'$baton PATH'`, single-quoted). Check the new agent's mode with `paseo agent inspect
-   <new id> --json` (`paseo agent mode <new id> --list` shows the provider's modes). **The successor archives its
-   predecessor by id once it has answered** (`paseo agent archive PRED_ID`; name `PRED_ID`, this agent's id, in the
-   Tier 2 document): a running agent cannot archive itself, and `--force` cascades to its children. Pass the chain's
-   own `SESSION_LOG.md`, never a bare `/baton`, when this chain lists the repo as a side workspace (2026-10-23: a bare
-   `/baton` resumed another chain's work).
+   the Claude pools are exhausted, the successor is **Pi** (sole third-party TUI since 2026-11-08; pick the provider
+   and model from `bin/route_agent.py plan` / accepted Pi pools — never archived omp/OpenCode), else codex
+   (`--provider codex --model gpt-6.1-sol --mode full-access`, first prompt `'$baton PATH'`, single-quoted). Check
+   the new agent's mode with `paseo agent inspect <new id> --json` (`paseo agent mode <new id> --list` shows the
+   provider's modes). **The successor archives its predecessor by id once it has answered** (`paseo agent archive
+   PRED_ID`; name `PRED_ID`, this agent's id, in the Tier 2 document): a running agent cannot archive itself, and
+   `--force` cascades to its children. Pass the chain's own `SESSION_LOG.md`, never a bare `/baton`, when this chain
+   lists the repo as a side workspace (2026-10-23: a bare `/baton` resumed another chain's work).
 
 **Verify the successor started, every time (djbclark, 2026-10-28).** A `paseo run --no-wait` that printed an id proves
 only that the daemon accepted it. Wait about 30 s, then check, and report what you saw, never "should start":
@@ -343,5 +343,6 @@ this step), not only into the final message.
 (above). `loose` Rule 4 option 1 wants this step to run: it does not make a handoff document-only. Say in the report
 that Step 9 was skipped and why.
 
-OpenCode V2 Go sessions use the native `ade_compact` tool for manual compaction (`docs/context-hygiene.md`); it compacts
-only the verified current session and is not a successor. Write the checkpoint first.
+**Archived (OpenCode, not a live TUI):** OpenCode V2 Go sessions used the native `ade_compact` tool for manual
+compaction (`docs/context-hygiene.md` §3); that path is archive-only under the Pi-only ruling. Write the checkpoint
+first; current clients use auto-compaction and handoff, not `ade_compact`.

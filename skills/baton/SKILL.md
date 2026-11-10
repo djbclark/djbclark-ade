@@ -10,7 +10,10 @@ description: >-
 
 # Baton — resume a task workspace from its Tier 1 pointer
 
-**Provider scope (2026-10-25).** A native OpenCode compaction continues its existing session; it does not start a new baton. Only resume a fresh session after the owned Tier 1 checkpoint is durable and the supported lifecycle controller has acknowledged that successor. Never clear a parent session to make a child resume. See [context hygiene](../../docs/context-hygiene.md).
+**Provider scope (2026-10-25; Pi-only 2026-11-08).** Compaction (Claude/Pi auto-compaction or an archived OpenCode
+`ade_compact`) continues an existing session; it does not start a new baton. Only resume a fresh session after the
+owned Tier 1 checkpoint is durable and the supported lifecycle controller has acknowledged that successor. Never
+clear a parent session to make a child resume. See [context hygiene](../../docs/context-hygiene.md).
 
 After a handoff the operator types `/clear` and then `/baton`, or a successor agent starts with `/baton PATH` as its
 first prompt (`handoff` Step 9; `self-slash`, which used to queue the `/baton` itself, was removed 2026-11-06).
@@ -47,12 +50,12 @@ this agent's own chain wins. A
 directory-resolved pointer whose owner is another live session is not yours: say so and look further.
 **Live owner: ask before the first write (2026-11-01).** After resolving any chain, run `session-handoff`'s
 **Owner check** (Reader protocol; the one wording: how to match `session_id` to a fleet row for claude,
-omp, codex and Paseo logs, the fail-closed rule when nothing matches, the exemptions for your own chain,
-the named successor and your own chain after `/clear` or `/new`). It applies only before the first write
-or resume; a read-only `/baton` just reports the owner. Reconciled with the paragraph above: a
-directory-resolved pointer owned by another live session is not yours, look further; a chain that is yours
-by `/new` or the operator's naming but that a live other session also owns is asked about
-first. Incident: 2026-10-31, a `/baton` after `/clear` merged PR 173 ahead of PR 177.
+Pi, codex and Paseo logs — archived omp/OpenCode transcript rows are history only — the fail-closed rule when
+nothing matches, the exemptions for your own chain, the named successor and your own chain after `/clear` or
+`/new`). It applies only before the first write or resume; a read-only `/baton` just reports the owner.
+Reconciled with the paragraph above: a directory-resolved pointer owned by another live session is not yours,
+look further; a chain that is yours by `/new` or the operator's naming but that a live other session also owns
+is asked about first. Incident: 2026-10-31, a `/baton` after `/clear` merged PR 173 ahead of PR 177.
 
 If the operator invoked this with no argument, resolve the current
 directory against the Tier 1 path convention in `session-handoff` (or,
@@ -121,8 +124,6 @@ that loads this skill, next to its own built-in `/resume` session picker).
 Do not duplicate the reader protocol's steps here — if they ever change,
 they change in exactly one place (`session-handoff`'s SKILL.md), not two.
 
-OpenCode V2 Go sessions use the native `ade_compact` tool for manual compaction.
-The plugin never rewrites shell commands. It compacts only the verified current session; it does not implement a
-new-session/baton successor.
-See `docs/context-hygiene.md`. Write the checkpoint first and require the normal
-host identity/acknowledgment checks for a lifecycle cycle.
+**Archived (OpenCode):** the native `ade_compact` tool was OpenCode V2 Go's manual compaction path; it is not a
+live client under Pi-only (2026-11-08). See `docs/context-hygiene.md` §3 (archive). Write the checkpoint first and
+require the normal host identity/acknowledgment checks for a lifecycle cycle.

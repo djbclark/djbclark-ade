@@ -14,22 +14,24 @@ does not launch, resume, restore, message or install a retired client.
    python3 -I -B ~/src/djbclark-ade/skills/session-finder/session-history.py --json -- query words
    ```
 
-2. `--agent omp`, `--agent opencode`, `--agent crush` or `--agent pi` narrows
-   results. Repeat `--agent` for several clients. Other already-indexed client
-   names are searchable too. `--limit 20` bounds results. `--literal` performs
-   a literal substring search instead of FTS term matching.
+2. `--agent pi` (live third-party TUI) or `--agent omp` / `--agent opencode` /
+   `--agent crush` (archived clients under the Pi-only ruling) narrows results.
+   Repeat `--agent` for several clients. Other already-indexed client names are
+   searchable too. `--limit 20` bounds results. `--literal` performs a literal
+   substring search instead of FTS term matching.
 3. `--status` reports per-client counts and refresh timestamps without writing.
    `--check` checks the existing SQLite database and FTS engine. Normal search
    is read-only and never refreshes, prunes or rebuilds the database.
 4. If a source log is newer than its index, explicitly run `--update-only`
-   with `--agent` for the relevant restored data reader. Readers currently
-   support omp, OpenCode, Crush and Pi. They parse retained JSONL/SQLite stores
-   without calling any TUI executable. A refresh preserves all other clients'
-   rows, missing-source rows and successfully indexed history after a load error.
-   Malformed JSON, non-object records and invalid UTF-8 reject the entire JSONL
-   load so an incomplete parse cannot replace a previously indexed transcript.
-   Crush refresh also follows per-project database paths already recorded in
-   the index when its old project registries are absent.
+   with `--agent` for the relevant restored data reader. Readers support Pi
+   plus the archived omp, OpenCode and Crush stores. They parse retained
+   JSONL/SQLite stores without calling any TUI executable. A refresh preserves
+   all other clients' rows, missing-source rows and successfully indexed history
+   after a load error. Malformed JSON, non-object records and invalid UTF-8
+   reject the entire JSONL load so an incomplete parse cannot replace a
+   previously indexed transcript. Archived Crush refresh also follows
+   per-project database paths already recorded in the index when its old
+   project registries are absent.
    Legacy and path-based keys can both match one session; these retained
    duplicates can consume more than one result slot. `--status` separates the
    old global `legacy_refresh` timestamp from per-client refresh attempts.

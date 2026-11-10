@@ -1,10 +1,12 @@
 # Context hygiene — 2026-10-25
 
-Trimmed 2026-11-07 (slim-down E11): the tools are `bin/context-watch` (how full each running Claude agent is,
-section 6), `bin/context-budget-check` (what a fresh session costs, section 7), the Claude nudge hook
-(`claude/hooks/context_size_nudge.py`, section 2) and OpenCode's native compaction plugin (section 3). `self-slash`,
-which typed `/new` and `/compact` into an agent's own input, was removed 2026-11-06 (E4): compaction is left to
-auto-compaction, and a clear is the operator's `/clear` (the `handoff` skill, Step 9).
+Trimmed 2026-11-07 (slim-down E11); Pi-only third-party TUI 2026-11-08. The live tools are `bin/context-watch`
+(how full each running Claude agent is, section 6), `bin/context-budget-check` (what a fresh session costs,
+section 7) and the Claude nudge hook (`claude/hooks/context_size_nudge.py`, section 2). Compaction for current
+clients is auto-compaction plus a handoff (`skills/handoff` / Paseo `paseo-handoff`); Pi has no separate ADE
+compaction plugin. Section 3 keeps the **archived** OpenCode native-compaction notes only (OpenCode is not a
+live TUI). `self-slash`, which typed `/new` and `/compact` into an agent's own input, was removed 2026-11-06
+(E4): a clear is the operator's `/clear` (the `handoff` skill, Step 9).
 
 Context capacity is a correctness ceiling, not a cost budget. Cached input is
 billed again on every request, and Go models debit the same monthly allowance
@@ -93,55 +95,62 @@ symlinks and directories are preserved. The two-second alarm still covers the en
 Claude's existing `autoCompactWindow` stays at 300,000. Measurements that motivated
 its growth and cooldown guards showed substantial summary/cache-write overhead;
 lowering that window indiscriminately can cost more. Those Claude measurements
-must not be presented as OpenCode Go prices or compaction thresholds.
+must not be presented as (archived) OpenCode Go prices or compaction thresholds.
 
-## 3. Native OpenCode compaction
+## 3. Archived: native OpenCode compaction (not a live TUI)
 
-Use OpenCode V2's own compaction API at a safe point, including for an ACP
-session. Do not type Claude slash commands into a presumed parent terminal.
-The [native Go context plugin](../opencode-plugins/go-context/README.md) warns
-at 64k and compacts at 96k plus 32k growth (hard trigger 128k) for routine models;
-costly models warn at 32k, compact at 64k plus growth and hard-trigger at 96k.
-These are local initial policy values, not vendor recommendations. Use current input plus cached reads/writes;
-lifetime token totals and output totals do not measure current context.
+> **Archive (2026-11-09).** OpenCode is not a current TUI under the Pi-only
+> ruling (2026-11-08; `docs/queue.md` item 36). Keep this section for the
+> `opencode-plugins/go-context` tree and Wave 6 cleanup. Do not launch OpenCode
+> or teach `ade_compact` as a live path; use Claude/Pi auto-compaction and
+> handoff instead.
 
-The plugin adds the `ade_compact` tool, scoped by the native tool context. Use
-it for manual native compaction. The plugin never rewrites shell or JavaScript
-source before permission matching. (A host controller, `self-slash`, could call the same guarded RPC until
-2026-11-06.) `ade_compact` uses the **same** provider/session
+When OpenCode was still a live client, its V2 compaction API ran at a safe
+point (including ACP sessions). Do not type Claude slash commands into a
+presumed parent terminal. The [native Go context plugin](../opencode-plugins/go-context/README.md)
+warned at 64k and compacted at 96k plus 32k growth (hard trigger 128k) for
+routine models; costly models warned at 32k, compacted at 64k plus growth and
+hard-triggered at 96k. Those were local initial policy values, not vendor
+recommendations. Use current input plus cached reads/writes; lifetime token
+totals and output totals do not measure current context.
+
+The plugin added the `ade_compact` tool, scoped by the native tool context, for
+manual native compaction. It never rewrote shell or JavaScript source before
+permission matching. (A host controller, `self-slash`, could call the same
+guarded RPC until 2026-11-06.) `ade_compact` used the **same** provider/session
 verification, durable pending state, cooldown and ineffective-baseline block as
-automatic compaction. No separate shell cooldown or direct compact endpoint is
-used. ACP launches scrub both inherited session ID and native directory.
-Model/provider switches preserve session-level pending, cooldown and retry
-blocks; changing models cannot admit another summary charge.
-Acceptance is not completion; native compaction events confirm completion.
-An uncertain write is persisted and never blindly retried; a failed lookup is
-only a read failure, eligible for retry after the cooldown. (The `self-slash`
-helper's `--dry-run` and its refusal when the plugin was unavailable went with
+automatic compaction. No separate shell cooldown or direct compact endpoint was
+used. ACP launches scrubbed both inherited session ID and native directory.
+Model/provider switches preserved session-level pending, cooldown and retry
+blocks; changing models could not admit another summary charge. Acceptance was
+not completion; native compaction events confirmed completion. An uncertain
+write was persisted and never blindly retried; a failed lookup was only a read
+failure, eligible for retry after the cooldown. (The `self-slash` helper's
+`--dry-run` and its refusal when the plugin was unavailable went with
 `bin/self-slash`, slim-down E4, 2026-11-06.)
 
-Native compaction does not accept the Claude `/compact <focus>` syntax here.
+Native compaction did not accept the Claude `/compact <focus>` syntax here.
 Save the focus in the checkpoint first. `/new`, `/clear` and `/reset` through
-the scoped native path fail closed: a native reset must have both a durable
+the scoped native path failed closed: a native reset needed both a durable
 owned handoff and a supported, acknowledged successor/baton path. A successful
-compaction request alone is not that evidence. The successor path is a
+compaction request alone was not that evidence. The successor path remains a
 top-level `env -u PASEO_AGENT_ID -u PASEO_AGENT_CWD paseo run …` that archives its
 predecessor once it answers (`skills/handoff` Step 9; `self-slash --finish --successor`
 went 2026-11-06).
 
-OpenCode V2 settings are `compaction.auto`, `compaction.keep.tokens` and
-`compaction.buffer`; `agents.compaction.model` chooses its summarizer. The
+OpenCode V2 settings were `compaction.auto`, `compaction.keep.tokens` and
+`compaction.buffer`; `agents.compaction.model` chose its summarizer. The
 buffer is relative to model capacity, not an absolute cost cap. Do not copy V1
-`reserved` or pruning settings into V2. Background compaction is not enabled as
+`reserved` or pruning settings into V2. Background compaction was not enabled as
 a cost optimization: an unused speculative summary still costs tokens.
 
-## 4. Verification
+## 4. Verification (archived OpenCode probes)
 
 On 2026-10-25 the actual guard loaded on an isolated OpenCode 2.1.4 server and
 answered its read-only status RPC (`ready: true`, no probe session known).
 The native `self-slash` path (removed 2026-11-06) also reached the guard and refused a nonexistent
 session through the real RPC transport. Both probes used a temporary HOME and
-private server, with zero inference or compaction calls. This verifies setup
+private server, with zero inference or compaction calls. This verified setup
 and transport, not a paid production compaction or real event sequence.
 A cold plugin listing did not initialize plugins; checking that proxy alone
 would have produced a false negative. Native RPC schemas also reject regex
@@ -149,11 +158,11 @@ patterns by default, so the guard validates session IDs in code. Isolate shell
 startup too (`BASH_ENV=/dev/null`, no `ENV`) in native test wrappers; a user
 startup file can replace the test PATH.
 
-
-Test offline with fake native APIs and separate temporary session state. Cover
-provider/session identity, concurrent and duplicate requests, uncertain writes,
-compaction completion, out-of-order usage, fixed-baseline loops and parent
-lifecycle protection. Do not make paid inference requests just to test a guard.
+Offline tests of the archived plugin use fake native APIs and separate temporary
+session state. Cover provider/session identity, concurrent and duplicate
+requests, uncertain writes, compaction completion, out-of-order usage,
+fixed-baseline loops and parent lifecycle protection. Do not make paid inference
+requests just to test a guard. Live Claude nudge tests remain the current path.
 
 Local focused tests use the full `bg` path. Record the explicit decision first:
 
@@ -165,16 +174,18 @@ Local focused tests use the full `bg` path. Record the explicit decision first:
 ~/ops/site-private/bin/bg bin/pytest -q claude/hooks/handoff-tools/tests/test_context_size_nudge.py
 ```
 
-## 5. Primary sources
+## 5. Primary sources (archived OpenCode docs)
 
 1. [OpenCode V2 compaction](https://opencode.ai/v2/docs/compaction): safe-point
    scheduling, recent-tail retention, completion events, fixed-baseline limits
-   and speculative summary cost.
+   and speculative summary cost (historical reference only).
 2. [OpenCode Go usage limits](https://opencode.ai/v2/docs/console/go/#usage-limits)
-   and [allowance accounting](https://opencode.ai/v2/docs/console/api/inference/#cost).
+   and [allowance accounting](https://opencode.ai/v2/docs/console/api/inference/#cost)
+   (historical; Go/Zen pools migrate through Pi acceptance, not the OpenCode TUI).
 3. [OpenCode V2 plugins](https://opencode.ai/v2/docs/plugins): native server
-   hooks and plugin discovery. Check the installed SDK against these docs;
-   similar V1 names do not establish a V2 hook contract.
+   hooks and plugin discovery. Check the installed SDK against these docs only
+   when touching the archived `opencode-plugins/` tree; similar V1 names do not
+   establish a V2 hook contract.
 
 ## 6. Live readout: `bin/context-watch` (2026-10-28)
 
