@@ -77,6 +77,7 @@ unit.
 ## D. CLI
 
 ```
+ade-install                         # first-run guidance only; exit 0
 ade-install check [--root DIR] [--json]
 ade-install catalog [--root DIR] [--json]
 ade-install plan [--root DIR] [--json]
@@ -98,6 +99,16 @@ just install [-- --yes]    # ade-install apply (dry-run by default; --yes for li
 just update [-- --check|--auto|--auto --apply-checkout]
 just update-auto [-- --apply-checkout]  # default observe-only exit 5; opt-in checkout apply; plist pending
 ```
+
+Python 3.11+ must already be available as `python3` on PATH. Older Python exits
+2 with a prerequisite diagnostic before importing the catalog implementation;
+without Python, the executable's shebang cannot start. No-argument guidance
+does not load a catalog, probe components, download tools or change files.
+Explicit subcommands keep their existing behavior and exit contracts. Just is
+not needed for these direct CLI commands: preview with `ade-install plan` /
+`ade-install apply --dry-run`, then explicitly request a missing Just install
+with `ade-install apply --yes --id just`. Automatic Python/Just bootstrap is
+still unimplemented; no package-manager or Python acquisition path is selected.
 
 Daily behind-check (not auto-apply): install
 `config/launchd/com.djbclark.ade-update-check.plist` with an explicit log dir
