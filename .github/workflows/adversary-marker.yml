@@ -24,6 +24,8 @@ name: Adversary marker
 #
 # A body edit (writing the marker after the push) is not a Tests run: re-check with
 #   gh workflow run adversary-marker.yml -f pr=N
+# A push of this workflow or `bin/adversary_marker.py` to the default branch rejudges every open PR
+# (2026-11-10: after owner-trust lands, that flips owner tips green without per-PR dispatch).
 
 on:
   workflow_run:
@@ -35,24 +37,30 @@ on:
         description: Pull request number to re-check (after the marker was written or edited)
         required: true
         type: string
+  push:
+    paths:
+      - "bin/adversary_marker.py"
+      - ".github/workflows/adversary-marker.yml"
 
 permissions: {}
 
 jobs:
   # Job 1 finds the PR(s) the event is about and every other open PR at the same head, and outputs that head as the
   # key: PRs sharing a head share ONE commit status, so job 2's concurrency group is the head sha, and a dispatch and a
-  # workflow_run for one head serialize (a run id would never cancel a stale run). No secret, no environment.
+  # workflow_run for one head serialize (a run id would never cancel a stale run). A `push` of the marker module
+  # rejudges every open PR: key is a fixed sentinel and at_head is empty (no single-sha filter). No secret, no environment.
   resolve:
-    # Belt and braces beside the environment's branch policy: a dispatch from any other ref does nothing.
+    # Belt and braces beside the environment's branch policy: a dispatch/push from any other ref does nothing.
     if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    timeout-minutes: 5
     permissions:
       pull-requests: read
       contents: read
     outputs:
       prs: ${{ steps.find.outputs.prs }}
       key: ${{ steps.find.outputs.key }}
+      at_head: ${{ steps.find.outputs.at_head }}
     steps:
       - name: Check out the default branch (never the PR)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -71,7 +79,7 @@ jobs:
       group: adversary-marker-${{ needs.resolve.outputs.key }}
       cancel-in-progress: true
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 30
     environment: merge-gate
     permissions:
       pull-requests: read
@@ -96,6 +104,6 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           STATUS_TOKEN: ${{ steps.app-token.outputs.token }}
           PRS: ${{ needs.resolve.outputs.prs }}
-          AT_HEAD: ${{ needs.resolve.outputs.key }}
+          AT_HEAD: ${{ needs.resolve.outputs.at_head }}
           # MARKER_POST_AS: check-run   # the fallback if an App status does not satisfy the ruleset (docs/review-boundary.md)
         run: python3 -I bin/adversary_marker.py --prs "$PRS" --at-head "$AT_HEAD" --event "$GITHUB_EVENT_PATH" --event-name "$GITHUB_EVENT_NAME" --repo "$GITHUB_REPOSITORY"

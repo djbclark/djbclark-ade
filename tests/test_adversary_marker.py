@@ -1430,9 +1430,13 @@ def workflow() -> dict:
 
 def test_the_workflow_runs_only_on_workflow_run_of_tests_and_a_dispatch():
     on = workflow()["on"]
-    assert set(on) == {"workflow_run", "workflow_dispatch"}
+    assert set(on) == {"workflow_run", "workflow_dispatch", "push"}
     assert on["workflow_run"] == {"workflows": ["Tests"], "types": ["completed"]}
     assert on["workflow_dispatch"]["inputs"]["pr"]["required"] is True
+    assert on["push"]["paths"] == [
+        "bin/adversary_marker.py",
+        ".github/workflows/adversary-marker.yml",
+    ]
     code = [ln for ln in WORKFLOW.read_text().splitlines() if not ln.lstrip().startswith("#")]
     assert not any("pull_request_target" in ln or "pull_request:" in ln for ln in code)
 
@@ -1726,8 +1730,9 @@ def test_at_head_posts_only_on_the_runs_own_head():
     assert report["prs"][1]["result"] == "head-moved"
 
 
-@pytest.mark.parametrize("head,rc", [(H1, 0), (H1.upper(), 0), ("abc", 2), ("", 2)])
+@pytest.mark.parametrize("head,rc", [(H1, 0), (H1.upper(), 0), ("abc", 2), ("", 0)])
 def test_the_cli_at_head_takes_only_a_full_sha(tmp_path, head, rc):
+    # Empty --at-head is the push all-open path (no single-head filter).
     (tmp_path / "ev.json").write_text(json.dumps(wr_event(prs=())))
     (tmp_path / "api.json").write_text(json.dumps(serve(7, marker("APPROVE", H1))))
     r = cli("--prs", "7", "--at-head", head, "--event", str(tmp_path / "ev.json"), "--event-name", "workflow_run",
@@ -1739,8 +1744,11 @@ def test_the_cli_at_head_takes_only_a_full_sha(tmp_path, head, rc):
 
 def test_the_marker_job_passes_the_resolved_head_as_at_head():
     judge = workflow()["jobs"]["marker"]["steps"][-1]
-    assert judge["env"]["AT_HEAD"] == "${{ needs.resolve.outputs.key }}"
+    assert judge["env"]["AT_HEAD"] == "${{ needs.resolve.outputs.at_head }}"
     assert '--at-head "$AT_HEAD"' in judge["run"]
+    assert workflow()["jobs"]["resolve"]["outputs"]["at_head"] == (
+        "${{ steps.find.outputs.at_head }}"
+    )
 
 
 def test_a_block_from_an_untrusted_author_still_fails_the_check():
@@ -1807,11 +1815,35 @@ def test_resolve_gives_the_pr_numbers_and_the_concurrency_key():
     # The key is the HEAD the PRs were found at (2026-11-07): one status per sha, so one concurrency group per sha.
     api = adversary_marker.CannedApi(at_head(H1, 11))
     assert adversary_marker.resolve("workflow_run", wr_event(prs=(9, 7)), REPO_A, api) == \
-        (0, {"prs": "7,9,11", "key": H1, "found_by": "workflow_run.pull_requests"})
+        (0, {"prs": "7,9,11", "key": H1, "at_head": H1, "found_by": "workflow_run.pull_requests"})
     api = adversary_marker.CannedApi({commits_key(H1): [{"json": []}]})
     rc, out = adversary_marker.resolve("workflow_run", wr_event(prs=()), REPO_A, api)
-    assert rc == 0 and out["key"] == "" and out["prs"] == ""
+    assert rc == 0 and out["key"] == "" and out["prs"] == "" and out["at_head"] == ""
     assert adversary_marker.resolve("pull_request", wr_event(), REPO_A, api)[0] == 2
+
+
+def test_resolve_push_rejudges_every_open_pr_without_a_head_filter():
+    """Landing owner-trust on master must flip open tips without per-PR dispatch."""
+    open_key = f"GET repos/{REPO_A}/pulls?state=open&per_page=100&page=1"
+    answers = {
+        open_key: [{
+            "json": [
+                pull_entry(7, H1),
+                pull_entry(8, H2),
+                pull_entry(9, H1, state="closed"),
+                {"number": 10, "state": "open", "head": {"sha": H1},
+                 "base": {"repo": {"full_name": "other/fork"}}},
+            ],
+        }],
+    }
+    rc, out = adversary_marker.resolve(
+        "push", {"ref": "refs/heads/master"}, REPO_A, adversary_marker.CannedApi(answers)
+    )
+    assert rc == 0
+    assert out["prs"] == "7,8"
+    assert out["key"] == adversary_marker.PUSH_REJUDGE_KEY
+    assert out["at_head"] == ""
+    assert out["found_by"] == "push all-open"
 
 
 def test_the_cli_resolve_writes_github_output(tmp_path):
@@ -1822,7 +1854,7 @@ def test_the_cli_resolve_writes_github_output(tmp_path):
                         "--event-name", "workflow_run", "--repo", REPO_A, "--api-answers", str(tmp_path / "api.json")],
                        capture_output=True, text=True, timeout=60, env={"PATH": "/usr/bin:/bin", "GITHUB_OUTPUT": str(out)})
     assert r.returncode == 0, r.stderr
-    assert out.read_text() == f"prs=7\nkey={H1}\n"
+    assert out.read_text() == f"prs=7\nkey={H1}\nat_head={H1}\n"
 
 
 @pytest.mark.parametrize("prs,rc", [("7", 0), ("7,9", 0), ("", 2), ("7;rm", 2), ("0", 2), ("7,x", 2)])
