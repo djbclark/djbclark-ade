@@ -66,7 +66,9 @@ data only — it does not launch retired clients). The one-cycle relay shim `rel
 add getpaseo/paseo`, `docs/skill-everywhere.md` 3a); the Claude template keeps them `user-invocable-only`.
 
 **Where the others went (2026-10-31 to 2026-11-07; `slim/log.md` has each):** moved to site-djbclark
-(`~/ops/site-public-djbclark/skills`, 2026-11-06): aws-rules, barnowl, book-to-kb (as `tools/book-to-kb`), bottom-config,
+(`~/ops/site-public-djbclark/skills`, 2026-11-06): aws-rules, barnowl, book-to-kb (as `tools/book-to-kb`), bottom-config
+(outstanding fork-doc tip from retired ade PR #227: uncapped Command column + agent pane-size preview — see
+`docs/history/bottom-config-uncapped-command-2026-11-10.md`; land in site-djbclark, do not restore the skill here),
 coderabbit-feeder, diskfree, firecrawl, gmail-search, greptile, ovhcloud-api, report, setup-modern-cli, teach,
 terminus-kira, todo. Unlinked from here (2026-11-06, E1); the operator relinks them from their own repositories in the final-merge batch
 (`docs/slim/operator-batch.md`): sudo-secretspec, forgejo, forgejo-ci, hyades-docker, sipb-llm-bench. Deleted: herdr-tidy, reorg-orca (2026-10-31); siyuan and its three companions,
