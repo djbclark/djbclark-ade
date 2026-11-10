@@ -185,3 +185,7 @@ Skills (23, from each `skills/*/SKILL.md`):
 
 [Old way versus new way](docs/old-way-new-way.md) compares legacy skills with native Paseo,
 records plugin advice, and defines the Linux/macOS cross-host handoff acceptance checks.
+
+| [`bin/quota-surplus`](bin/quota-surplus), [`docs/surplus-work.md`](docs/surplus-work.md) | "Use it or lose it" watchdog: spend a quota surplus before reset. |
+
+| [`quota-surplus`](skills/quota-surplus/SKILL.md) | Spend a use-it-or-lose-it quota surplus before its reset: `quota-surplus`. |
