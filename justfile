@@ -43,8 +43,13 @@ install-print-system-argv *args:
 # Canonical names from docs/setup-plan.md (thin wrappers over install-* / ade-update).
 # `just install` defaults to apply dry-run; pass `-- --yes` for live user-scoped apply.
 # doctor includes install.jobs drift (ade-sched scan); never unloads foreign owners.
-doctor:
-    "{{ root }}/bin/ade-install" doctor --root "{{ root }}"
+[positional-arguments]
+doctor component="":
+    #!/usr/bin/env bash
+    set -eu
+    args=()
+    if [[ -n "${1:-}" ]]; then args=(--id "$1"); fi
+    exec "{{ root }}/bin/ade-install" doctor --root "{{ root }}" "${args[@]}"
 
 install *args:
     "{{ root }}/bin/ade-install" apply --root "{{ root }}" {{ args }}
@@ -152,8 +157,7 @@ hermes-setup *args:
     root="{{ root }}"
     prompt="${root}/prompts/setup/hermes.md"
     if [[ ! -f "${prompt}" ]]; then
-      printf '%s
-' "missing prompt: ${prompt}" >&2
+      printf '%s\n' "missing prompt: ${prompt}" >&2
       exit 2
     fi
     mode=ai
@@ -161,16 +165,14 @@ hermes-setup *args:
       case "${a}" in
         --self|self) mode=self ;;
         -h|--help|help)
-          printf '%s
-' \
+          printf '%s\n' \
             "Usage: just hermes-setup [--self]" \
             "  (default) open Claude Code on prompts/setup/hermes.md" \
             "  --self    print the DIY checklist only (no agent)"
           exit 0
           ;;
         *)
-          printf '%s
-' "unknown argument: ${a} (try --self or --help)" >&2
+          printf '%s\n' "unknown argument: ${a} (try --self or --help)" >&2
           exit 2
           ;;
       esac
@@ -184,8 +186,7 @@ hermes-setup *args:
       exit 0
     fi
     if ! command -v claude >/dev/null 2>&1; then
-      printf '%s
-' "claude not on PATH. Install Claude Code, or run: just hermes-setup --self" >&2
+      printf '%s\n' "claude not on PATH. Install Claude Code, or run: just hermes-setup --self" >&2
       exit 2
     fi
     exec claude -- "Read and follow the checked-in prompt at ${prompt} for Hermes basic setup (setup-plan S3a). Opt-in only: do not install Hermes if the user skipped it; do not configure peer-link live. Walk the checklist one card at a time with the recommended option first; stop for each secret (user types into sudo-secretspec themselves, never into chat); finish with just install-doctor and hermes doctor when available."

@@ -1251,6 +1251,7 @@ def observe_pi_pools(
 def doctor(
     catalog: Catalog,
     *,
+    component_ids: list[str] | None = None,
     runner: Runner | None = None,
     probe_timeout_s: float = 15.0,
     settings_path: Path | None = None,
@@ -1265,16 +1266,38 @@ def doctor(
     WARN/FAIL fires; never repairs, installs, enables, or unloads; never deletes
     the vault; never mutates ``~/.claude/settings.json``.
 
+    With component_ids, validate the full selection before probes and check only
+    those components. Unchosen components never probe, including Paseo plugins.
+    Skip keys, logins, settings, jobs, credential-bak and pool advisories; success
+    describes this selection only. None retains the full doctor behavior.
+
     Hard deps (including ``graft`` via ``graft --version``) fail the command when
     missing/error. Unchosen ``paseo_plugin`` rows still print missing/disabled
     without failing. The Pi pool advisory (``ade-pi-pools``) may ``warn`` on
     UNACCEPTED pools without changing the exit code; it never writes acceptance.
     """
+    # Validate the entire selection before any probe. None keeps the original
+    # full-installation check; an explicit selection checks components only.
+    components = catalog.components
+    if component_ids is not None:
+        if not component_ids:
+            raise InstallError("doctor component selection must not be empty")
+        unknown = set(component_ids) - {row["id"] for row in components}
+        if unknown:
+            raise InstallError("unknown doctor component id(s): " + ", ".join(sorted(unknown)))
+        components = [row for row in components if row["id"] in component_ids]
     obs: list[Observation] = [
         Observation("catalog", str(catalog.path), "ok", "catalog validated"),
     ]
     hard_missing = 0
-    for row in catalog.components:
+    for row in components:
+        if component_ids is not None and not expected_installed(row):
+            status = "never" if row["class"] == "never" else "unchosen"
+            obs.append(Observation(
+                "component", str(row["id"]), status,
+                "not selected for installation; no probe",
+            ))
+            continue
         o = observe_component(
             row,
             root=catalog.root,
@@ -1286,6 +1309,8 @@ def doctor(
         # but only expected components fail the doctor exit code. Never install/enable.
         if expected_installed(row) and o.status in ("missing", "disabled", "error"):
             hard_missing += 1
+    if component_ids is not None:
+        return obs, (1 if hard_missing else 0)
     for row in catalog.keys:
         obs.append(observe_key(row))
     for row in catalog.logins:

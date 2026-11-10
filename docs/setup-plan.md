@@ -204,6 +204,10 @@ Hermes current like every other component.
    Catalog install remains `ade-user-install hermes` (#345). Wiring `just install`
    to ask the three S3a paths, and richer `just doctor hermes` item probes, stay
    for follow-ups.
+5. **Component-scoped doctor (2026-11-10):** `just doctor hermes` /
+   `ade-install doctor --id hermes` runs the existing catalog probe only when
+   Hermes is chosen. Scoped output does not claim installation-wide health;
+   plain doctor keeps its full checks. This adds no richer configuration probes.
 
 ### S3b. API keys: check, verify, collect, deliver
 
