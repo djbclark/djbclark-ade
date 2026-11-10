@@ -1987,12 +1987,13 @@ def _push_decision(call: GitCall) -> Optional[Decision]:
     return None
 
 
-# Builtins that update refs/heads/*, HEAD or refs/stash (reference-transaction), that push (pre-push), or that
+# Builtins that update refs/heads/*, HEAD or refs/stash (reference-transaction), that push (pre-push), that
 # fetch into local refs (`fetch` / `fetch-pack` / `remote update` — measured 2026-11-10: with a non-ade hooksPath,
-# `git fetch . src:refs/heads/claimed` moves claimed branches without the claim hooks). Read-only forms are filtered
-# in `_is_ref_write_or_push`. §10 residual (2026-11-10).
+# `git fetch . src:refs/heads/claimed` moves claimed branches without the claim hooks), or that rewrite history
+# onto branch tips (`filter-branch`). Read-only forms are filtered in `_is_ref_write_or_push`. §10 residual
+# (2026-11-10; filter-branch 2026-11-10 follow-up).
 _HOOK_GUARDED_SUBS = frozenset("""push send-pack http-push update-ref commit merge rebase cherry-pick revert am reset
-pull stash branch checkout switch symbolic-ref worktree fetch fetch-pack remote""".split())
+pull stash branch checkout switch symbolic-ref worktree fetch fetch-pack remote filter-branch""".split())
 
 
 def _is_ref_write_or_push(call: GitCall) -> bool:
@@ -2023,16 +2024,28 @@ def _is_ref_write_or_push(call: GitCall) -> bool:
 
 
 def _resolve_hooks_path(call: GitCall, value: str) -> Optional[Path]:
-    """Resolve `core.hooksPath` as git does for hook lookup (measured git 2.43, 2026-11-10): expand a leading `~/`,
-    take an absolute path as-is, else join to the process cwd after every `-C` (`call.cwd`). Git does *not* resolve
-    relative hooksPath against `--work-tree` / `rev-parse --show-toplevel` (a dummy `--work-tree` with stubs only
-    under the real work tree is ignored; stubs under the cwd after `-C` are used). An empty value is Path('')."""
+    """Resolve `core.hooksPath` for the stubs-directory check (measured git 2.43, 2026-11-10).
+
+    Expand a leading `~/`, take an absolute path as-is, else join to the process cwd after every `-C`
+    (`call.cwd`) when that is unambiguous. Return None (caller treats as non-ade / refuse) when the value
+    cannot be matched safely to the directory Git will run:
+
+    - a `%(prefix)/…` (or any `%(…)`) interpolations: Git expands them (e.g. `%(prefix)/decoy` → `/usr/decoy`);
+      we do not invent a prefix engine, so planting stubs under `<cwd>/%(prefix)/…` must not allow;
+    - a relative value while `--work-tree` / `GIT_WORK_TREE` is set: for `update-ref` Git joins to cwd-after-`-C`,
+      but for `commit` / `checkout` / `merge` it joins to the work tree — refuse rather than guess.
+
+    An empty value is Path('')."""
     if value == "":
         return Path("")
+    if "%(" in value:
+        return None
     expanded = os.path.expanduser(value)
     p = Path(expanded)
     if p.is_absolute():
         return p
+    if call.worktree:
+        return None
     return Path(call.cwd) / p
 
 
@@ -2057,8 +2070,9 @@ def _stubs_in_dir(hooks_dir: Path) -> bool:
 def _local_hooks_path_decision(call: GitCall, env: dict[str, str]) -> Optional[Decision]:
     """§10 residual (2026-11-10): a repository whose local/worktree `core.hooksPath` is set and is not the ade stubs
     directory never runs the claim hooks. Refuse `push`, fetch and ref-writing subcommands (`hooks-path`, exit 77). An
-    ade-stub hooksPath (directory holds the canonical executable stubs; relative values from the cwd after `-C`) stays
-    allowed; unset local hooksPath is unchanged."""
+    ade-stub hooksPath (directory holds the canonical executable stubs; relative values from the cwd after `-C`, when
+    unambiguous) stays allowed; an unresolvable `%(prefix)/…` or relative value with `--work-tree`/`GIT_WORK_TREE` is
+    refused as non-ade; unset local hooksPath is unchanged."""
     if not _is_ref_write_or_push(call):
         return None
     state, scoped = _config_scopes(call, env)
