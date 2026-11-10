@@ -218,3 +218,71 @@ def test_missing_task_exits_1(tmp_path):
     assert proc.returncode == 1
     payload = json.loads(proc.stdout)
     assert payload["ok"] is False
+
+
+def test_root_after_subcommand_matches_just_recipes(tmp_path):
+    """Just recipes put --root after the subcommand; that order must parse."""
+    root = _fixture_root(tmp_path)
+    argv = [
+        sys.executable,
+        "-I",
+        "-B",
+        str(BIN / "ade-browser-task"),
+        "list",
+        "--root",
+        str(root),
+        "--json",
+    ]
+    proc = subprocess.run(
+        argv, capture_output=True, text=True, cwd=str(REPO), check=False
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout)["ok"] is True
+
+    argv_r = [
+        sys.executable,
+        "-I",
+        "-B",
+        str(BIN / "ade-browser-task"),
+        "relay",
+        "github-app-create",
+        "--dry-run",
+        "--root",
+        str(root),
+        "--json",
+    ]
+    proc_r = subprocess.run(
+        argv_r, capture_output=True, text=True, cwd=str(REPO), check=False
+    )
+    assert proc_r.returncode == 0, proc_r.stderr
+    assert json.loads(proc_r.stdout)["status"] == "dry-run"
+
+
+def test_send_and_dry_run_are_mutually_exclusive(tmp_path):
+    root = _fixture_root(tmp_path)
+    # Fake coding-bot on PATH so a silent --send win would actually send.
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    fake_bot = fake_bin / "coding-bot"
+    fake_bot.write_text("#!/bin/sh\nexit 0\n")
+    fake_bot.chmod(0o755)
+    env = {**os.environ, "PATH": f"{fake_bin}:{os.environ.get('PATH', '')}"}
+    argv = [
+        sys.executable,
+        "-I",
+        "-B",
+        str(BIN / "ade-browser-task"),
+        "relay",
+        "issue-access",
+        "--send",
+        "--dry-run",
+        "--root",
+        str(root),
+        "--json",
+    ]
+    proc = subprocess.run(
+        argv, capture_output=True, text=True, cwd=str(REPO), check=False, env=env
+    )
+    assert proc.returncode == 2
+    assert "not allowed with" in proc.stderr or "mutually exclusive" in proc.stderr.lower()
+    assert "sent" not in (proc.stdout or "").lower()

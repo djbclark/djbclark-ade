@@ -32,7 +32,8 @@ def _print_json(obj: object) -> None:
 
 
 def _root(args: argparse.Namespace) -> Path:
-    return Path(args.root) if args.root else abt.repo_root_from_here()
+    root = getattr(args, "root", None)
+    return Path(root) if root else abt.repo_root_from_here()
 
 
 def cmd_list(args: argparse.Namespace) -> int:
@@ -126,21 +127,33 @@ def cmd_relay(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    # Shared --root on top-level and each subparser (ade-install / ade-github-setup):
+    # just recipes and docs put --root after the subcommand; help also accepts before.
+    shared = argparse.ArgumentParser(add_help=False)
+    shared.add_argument(
+        "--root",
+        default=argparse.SUPPRESS,
+        help="repository root; before/after command, last explicit wins",
+    )
     p = argparse.ArgumentParser(
         prog="ade-browser-task",
         description=(
             "Render/relay browser-only prompts from prompts/browser/ "
             "(setup-plan S7; no live browser required)."
         ),
+        parents=[shared],
     )
-    p.add_argument("--root", help="repository root (default: this checkout)")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    p_list = sub.add_parser("list", help="list checked-in browser tasks")
+    p_list = sub.add_parser(
+        "list", parents=[shared], help="list checked-in browser tasks"
+    )
     p_list.add_argument("--json", action="store_true")
     p_list.set_defaults(func=cmd_list)
 
-    p_render = sub.add_parser("render", help="render one task prompt to stdout")
+    p_render = sub.add_parser(
+        "render", parents=[shared], help="render one task prompt to stdout"
+    )
     p_render.add_argument("task", help="task id (prompts/browser/<task>.md)")
     p_render.add_argument("--owner", help="GitHub owner (default: config/github.toml)")
     p_render.add_argument("--repo", help="GitHub repository name")
@@ -149,23 +162,26 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_relay = sub.add_parser(
         "relay",
+        parents=[shared],
         help="relay a rendered prompt (default --dry-run; --send uses coding-bot ask)",
     )
     p_relay.add_argument("task", help="task id (prompts/browser/<task>.md)")
     p_relay.add_argument("--owner", help="GitHub owner (default: config/github.toml)")
     p_relay.add_argument("--repo", help="GitHub repository name")
-    p_relay.add_argument(
+    mode = p_relay.add_mutually_exclusive_group()
+    mode.add_argument(
         "--send",
         action="store_true",
         help="call coding-bot ask when available; else print unsent (default: dry-run)",
     )
-    p_relay.add_argument(
+    mode.add_argument(
         "--dry-run",
+        dest="dry_run_flag",
         action="store_true",
-        help="print the prompt; do not call coding-bot (default; mutually documents --send)",
+        help="print the prompt; do not call coding-bot (default; exclusive with --send)",
     )
     p_relay.add_argument("--json", action="store_true")
-    p_relay.set_defaults(func=cmd_relay)
+    p_relay.set_defaults(func=cmd_relay, send=False, dry_run_flag=False)
 
     return p
 
@@ -179,6 +195,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     parser = build_parser()
     args = parser.parse_args(argv)
+    args.root = getattr(args, "root", None)
     return int(args.func(args))
 
 
