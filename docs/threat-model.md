@@ -28,7 +28,9 @@ tool describes the surface as it was.
   `bin/review-launch` for a restricted Claude run), `skills/session-finder/relay.py` (over `paseo send --json`; Paseo
   agents only, no anonymous send, fails closed on `paseo agent inspect`), and `tools/acp-run` beside the dispatch
   shim. They keep one-cycle callers working; they are **not** the default launch or messaging path. Soft deadline
-  ~2026-11-20 (`tests/test_relay_shim.py::test_the_shim_is_removed_by_2026_11_20`; AGENTS.md "Two shims").
+  ~2026-11-20 ([docs/slim/wave6-follow-up.md](slim/wave6-follow-up.md); open #398 / #417;
+  `tests/test_relay_shim.py::test_the_shim_is_removed_by_2026_11_20`; AGENTS.md "Two shims"). Do not invent Mac
+  live-cycle proofs here; do not delete the shims in a docs PR.
 * **TUI policy (2026-11-08)**: Pi is the sole general-purpose third-party TUI; required monthly-plan vendor clients
   and Hermes remain. Archived omp/OpenCode clients are not live launch targets or fallbacks
   (`docs/tui-security-and-pi-migration.md`).
