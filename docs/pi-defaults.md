@@ -93,6 +93,29 @@ pool and exits 0 for that check (advisory, not a hard fail). Accepted Cursor
 and Z.ai stay quiet in the warn detail. Doctor never writes `accepted=true`;
 only the operator edits the file. See `docs/install-catalog.md`.
 
+B4b. **Acceptance probes (2026-11-10, observe-only).** `bin/ade-pi-pools probe`
+[`--pool NAME` …] [`--json`] reports three dimensions per pool without ever
+writing `accepted=true` and without touching Claude API billing (queue #17 /
+billing-blocked; Claude Max subscription is a separate pool):
+
+| Dimension | Pass when | Source |
+| --- | --- | --- |
+| quota | named-pool remaining known and > 0, age ≤ `STALE_SOFT`, not approval-required / unknown | `route_agent.load_snapshot` (aiuse + paseo usage); never a Claude API call |
+| identity | `pools.<name>.identity` and `billing` are set (or a curated routing row supplies billing) and billing is not bare `api` | `config/pi-pool-acceptance.toml` + `config/routing.toml` |
+| continuation | evidence file says `continuation.ok = true` | `ADE_PI_ACCEPTANCE_EVIDENCE_DIR/<pool>.json` or `~/.local/state/ade/pi-acceptance/<pool>.json` |
+
+Evidence schema (operator or a live two-request resume records it; the probe
+only reads):
+
+```json
+{"schema_version": 1, "pool": "grok", "continuation": {"ok": true, "at": "2026-11-10T00:00:00Z", "note": "two-request resume retained nonce"}}
+```
+
+Exit 0 when every selected pool passes all three; 2 on any fail; 3 when no fail
+remains but unknown/skip do; 1 on usage or an unreadable config. A basic tool
+smoke is not continuation. Flip `accepted=true` only after a full pass and
+operator judgment; the harness never does.
+
 ## C. Failure and recovery
 
 C1. Unknown, stale, incomplete or approval-required quota cannot qualify a

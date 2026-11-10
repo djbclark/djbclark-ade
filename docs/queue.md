@@ -107,9 +107,11 @@ under **Carried**, newest first, one line each; an item leaves when it ships (in
     (`docs/pi-services.md`); Grok uses the cancelled plan's remaining allowance and stays manual-only.
     Machine-readable gate: `config/pi-pool-acceptance.toml` + `bin/ade-pi-pools check` (Cursor/Z.ai accepted
     2026-11-08; Grok/Antigravity/SIPB/Go still `accepted=false` until the operator flips them after
-    continuation/quota/identity acceptance). Claude API credits remain billing-blocked, separate from the
-    vendor subscription. Security implementation and SIPB reliability work are deferred; prior evidence
-    remains in `docs/tui-security-and-pi-migration.md`.
+    continuation/quota/identity acceptance). Observe-only probes: `bin/ade-pi-pools probe` (docs/pi-defaults.md
+    B4b) reports those three dimensions without writing `accepted=true` and without touching Claude API
+    billing. Claude API credits remain billing-blocked, separate from the vendor subscription. Security
+    implementation and SIPB reliability work are deferred; prior evidence remains in
+    `docs/tui-security-and-pi-migration.md`.
 
 ## Closed by the slim-down (2026-11-06/07; the slice that closed it)
 

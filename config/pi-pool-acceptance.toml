@@ -1,43 +1,58 @@
 # Pi pool acceptance for automatic routing (`ade/auto`, `bin/pi-default`).
-# Snapshot: 2026-11-09. Queue Carried #36 / docs/pi-defaults.md.
+# Snapshot: 2026-11-10. Queue Carried #36 / docs/pi-defaults.md.
 #
 # Fail closed: a Pi [[service]] in config/routing.toml (`agent = "pi"`) with no
 # row here, or with `accepted = false`, cannot win automatic routing. Manual
 # model pins are unchanged. The operator flips `accepted = true` per pool after
 # continuation, quota freshness, identity and failure-handling acceptance
 # (docs/pi-defaults.md, docs/pi-services.md). `bin/ade-pi-pools check` reports
-# readiness for every routing Pi service.
+# readiness for every routing Pi service. `bin/ade-pi-pools probe` observes
+# continuation/quota/identity without writing `accepted=true` and without
+# touching Claude API billing (B4b).
 #
+# Optional `identity` / `billing` labels feed the observe-only identity probe.
 # Rows below that are not yet `agent = "pi"` services are the acceptance
 # checklist for manual Pi paths; they stay out of auto until both accepted here
 # and added to the routing shortlist.
 
 [pools.cursor]
 accepted = true
+identity = "cursor-subscription-cli"
+billing = "subscription"
 # 2026-11-08: live Composer 2.5 path (docs/pi-defaults.md D3–D5)
 note = "retained Cursor subscription CLI bridge"
 
 [pools.zai]
 accepted = true
+identity = "zai-coding-plan"
+billing = "subscription"
 # 2026-11-08: Flash native-tools mechanical + shortlist (docs/pi-defaults.md B1, D3)
 note = "Z.ai Coding Plan GLM 5.3 Flash"
 
 [pools.grok]
 accepted = false
+identity = "xai-oauth-subscription"
+billing = "subscription"
 # 2026-11-08: basic tool check only; continuation/quota/identity pending (docs/pi-services.md)
 note = "xAI subscription via Pi; manual only until accepted"
 
 [pools.antigravity]
 accepted = false
+identity = "google-oauth-antigravity"
+billing = "subscription"
 # 2026-11-08: basic tool check only; not in ade/auto shortlist (docs/pi-services.md)
 note = "Google OAuth via Pi; manual only until accepted"
 
 [pools.sipb]
 accepted = false
+identity = "sipb-shared-gpu"
+billing = "gateway"
 # 2026-11-08: parked; full-ADE task completion did not pass (docs/pi-services.md)
 note = "SIPB shared GPU"
 
 [pools.go]
 accepted = false
+identity = "opencode-go"
+billing = "subscription"
 # awaits account scoping (docs/pi-defaults.md B3)
 note = "Pi Go path; not automatic"
