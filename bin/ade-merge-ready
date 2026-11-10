@@ -3,16 +3,19 @@
 
   ade-merge-ready [--repo OWNER/NAME] [--min N] [--json]
   ade-merge-ready stacks [--group NAME] [--bottoms-only] [--repo …] [--min N] [--json]
+  ade-merge-ready approve-paste [--base master] [--bottoms-only] [--repo …] [--min N]
   ade-merge-ready --help
 
-Read-only. Uses `gh` to list open PRs (number >= --min, default 327), their
+Read-only. Uses `gh` to list open PRs (number >= --min, default 327; list
+limit 500 so stack bottoms are not dropped when >100 PRs are open), their
 pytest-linux / adversary-marker checks. A live APPROVE is taken only from the
 `adversary-marker` check (the Action runs `bin/adversary_marker.py`'s
 attribution-aware `decide`: owner body editor / owner comment history). Raw
 markers in the body or comments are never enough on their own — that would
 count an outside author's or bot's same-head APPROVE. Never posts, never
 merges, never invents an APPROVE. Prints a table (or JSON) plus paste-ready
-templates so an operator can post a real marker.
+templates so an operator can post a real marker. `approve-paste` prints only
+those templates (optionally master-base or named-stack bottoms).
 
 `stacks` walks open PR base→same-repo head refs and prints bottom-up APPROVE
 order for named groups (install, claims, s1, wave6) with full tip SHAs for
@@ -162,6 +165,10 @@ def head_repository_nwo(pr: dict[str, Any], listing_repo: str) -> str:
 
 
 def collect(gh: str, repo: str, min_n: int) -> list[dict[str, Any]]:
+    # Open count can exceed 100 (2026-11-10: 151); a hard 100 dropped stack
+    # bottoms (#334–#368) from classify/stacks paste output. Cap high enough
+    # for this repo; still fail closed if gh truncates silently (we cannot
+    # see a next page without GraphQL).
     listing = run_gh(
         gh,
         [
@@ -172,7 +179,7 @@ def collect(gh: str, repo: str, min_n: int) -> list[dict[str, Any]]:
             "--state",
             "open",
             "--limit",
-            "100",
+            "500",
             "--json",
             "number,title,headRefOid,baseRefName,mergeable,headRefName,"
             "headRepository,headRepositoryOwner,isCrossRepository",
@@ -184,6 +191,11 @@ def collect(gh: str, repo: str, min_n: int) -> list[dict[str, Any]]:
         prs = json.loads(listing.stdout or "[]")
     except json.JSONDecodeError as e:
         raise RuntimeError(f"gh pr list JSON: {e}") from e
+    if len(prs) >= 500:
+        raise RuntimeError(
+            "gh pr list returned 500 open PRs (tool limit); "
+            "raise --limit / paginate before trusting classify/stacks"
+        )
 
     rows: list[dict[str, Any]] = []
     for p in prs:
@@ -400,10 +412,22 @@ def print_table(rows: list[dict[str, Any]]) -> None:
     ]
     if needs:
         print()
-        print("# Paste-ready APPROVE templates (operator only; after a real review of that head):")
-        for r in needs[:12]:
-            print(f"# PR {r['number']} ({r['head'][:7]})")
-            print(r["marker_template"])
+        print_approve_paste(needs)
+
+
+def print_approve_paste(rows: list[dict[str, Any]]) -> None:
+    """Emit every paste-ready marker (no truncation); operator posts after review."""
+    print(
+        "# Paste-ready APPROVE templates "
+        "(operator only; after a real review of that head):"
+    )
+    for r in rows:
+        head = r.get("head") or ""
+        tmpl = r.get("marker_template") or ""
+        if not tmpl:
+            continue
+        print(f"# PR {r['number']} ({head[:7]}) base={r.get('base') or '?'}")
+        print(tmpl)
 
 
 def print_stacks(stacks: list[dict[str, Any]]) -> None:
@@ -447,8 +471,11 @@ def main(argv: list[str] | None = None) -> int:
         "cmd",
         nargs="?",
         default="classify",
-        choices=("classify", "stacks"),
-        help="classify (default) or stacks (bottom-up APPROVE order)",
+        choices=("classify", "stacks", "approve-paste"),
+        help=(
+            "classify (default), stacks (bottom-up APPROVE order), "
+            "or approve-paste (templates only)"
+        ),
     )
     ap.add_argument(
         "--repo",
@@ -481,7 +508,16 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--bottoms-only",
         action="store_true",
-        help="stacks only: print only stack bottoms within each selected group",
+        help=(
+            "stacks / approve-paste: print only stack bottoms within each "
+            "selected group (approve-paste uses named stacks when set)"
+        ),
+    )
+    ap.add_argument(
+        "--base",
+        default="",
+        metavar="REF",
+        help="approve-paste only: restrict to PRs whose baseRefName equals REF",
     )
     a = ap.parse_args(argv)
     try:
@@ -501,6 +537,35 @@ def main(argv: list[str] | None = None) -> int:
             sys.stdout.write("\n")
         else:
             print_stacks(stacks)
+        return 0
+
+    if a.cmd == "approve-paste":
+        paste_rows = [
+            r
+            for r in rows
+            if r["class"] == "needs_approve"
+            and r["pytest_linux"] in ("pass", "success")
+            and r.get("marker_template")
+        ]
+        if a.base:
+            paste_rows = [r for r in paste_rows if r.get("base") == a.base]
+        if a.bottoms_only or a.group:
+            stacks = build_named_stacks(
+                rows,
+                groups=a.group,
+                bottoms_only=True,
+                listing_repo=a.repo,
+            )
+            bottom_nums = {
+                r["number"] for s in stacks for r in (s.get("order") or [])
+            }
+            paste_rows = [r for r in paste_rows if r["number"] in bottom_nums]
+        paste_rows.sort(key=lambda r: r["number"])
+        if a.json:
+            json.dump(paste_rows, sys.stdout, indent=2, sort_keys=True)
+            sys.stdout.write("\n")
+        else:
+            print_approve_paste(paste_rows)
         return 0
 
     if a.json:
