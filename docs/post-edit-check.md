@@ -37,12 +37,13 @@ Claude Code (`PostToolUse`, matcher `Write|Edit|MultiEdit`):
 
 with `timeout` 20. Claude reads stderr when a hook exits 2 and shows it to the model.
 
-**`hook-deadline` exit 2 (verified 2026-11-09; queue Carried #1 residual):** the wrapper lives outside this repo
-(canonical source: site-djbclark `bin/hook-deadline`; the Claude template still points at
-`$HOME/ops/site-private/bin/hook-deadline`). Its contract and a live run of that script both confirm: when the child
-finishes before the deadline, stdout and the child's exit code are forwarded unchanged (so exit 2 reaches Claude and
-surfaces stderr); only a deadline hit kills the process group and exits 0 with no output. The 2026-11-04 open question
-is closed — a broken `.py` edit behind this wrapper is not silent.
+**`hook-deadline` exit 2 (verified 2026-11-09, re-probed 2026-11-10; queue Carried #1 residual):** the wrapper lives
+outside this repo (canonical source: [site-djbclark `bin/hook-deadline`](https://github.com/djbclark/site-djbclark/blob/master/bin/hook-deadline);
+the Claude template still points at `$HOME/ops/site-private/bin/hook-deadline`). Its contract (`finished in time: same
+stdout, same exit code as the command`; deadline hit → exit 0 with no output) and live runs of that script both confirm
+exit 2 is forwarded: `hook-deadline 2 sh -c 'echo problem >&2; exit 2'` → rc=2 with stderr inherited; a deadline hit
+(`0.3s` + `sleep 2; exit 2`) → rc=0, empty stdout. The 2026-11-04 open question is closed — a broken `.py` edit behind
+this wrapper is not silent. No code change in this repo: behavior was already correct.
 
 Codex (`agents/codex/config.toml.tmpl`, 2026-11-09): `PostToolUse` matcher `Edit|Write|apply_patch` runs
 `{{ .home }}/src/djbclark-ade/bin/post-edit-check --hook` with `timeout` 20 (no `hook-deadline` wrapper: Codex's own
