@@ -61,7 +61,7 @@ plugin is absent, `disabled` when it is installed but not enabled, and `ok` when
 `paseo plugin install` or `enable`; apply skips/blocks the row (no `install_argv`). Unchosen (`chosen = false`)
 so a missing Mac install is visible without failing the doctor exit code. See [`docs/install-catalog.md`](install-catalog.md).
 
-**Hard refusal stays off** until the S4 six-case pilot below passes (queue item 6; staged enforcement of standing
+**Hard refusal stays off** until the S4 six-case pilot below passes (queue item 5; staged enforcement of standing
 order 9, adopted 2026-10-25). This page only scaffolds the pilot's cases and pass/fail criteria; it does not enable
 PATH refusal, `~/.local/bin/git`, or any new refuse path.
 
@@ -349,7 +349,7 @@ marker whose PARAMETERS transport was stripped is repaired.
 
 ## S4 six-case enforcement pilot (scaffold 2026-11-09; pilot before hard refuse)
 
-Standing order 9's staged enforcement (adopted 2026-10-25; queue item 6) ends with **S4**: run six representative
+Standing order 9's staged enforcement (adopted 2026-10-25; queue item 5) ends with **S4**: run six representative
 workflows under claim-aware workspaces **before any hard refusal** (before agents are forced through the PATH shim /
 `~/.local/bin/git`, and before `~/ops` leaves its transitional plain-master practice). S3 (changelog fragments) is done
 (PR 190). S1/S2 are separate open work; W2–W4 claim wiring lands via the ade-claim promote PR (plugin + doctor probe). This section does **not**
