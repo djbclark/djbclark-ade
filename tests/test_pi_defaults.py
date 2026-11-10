@@ -163,5 +163,5 @@ def test_pi_dispatch_is_a_native_paseo_launch(service, model, thinking):
     expected = ["paseo", "run", "--provider", "pi/" + model.split()[0]]
     if thinking:
         expected += ["--thinking", thinking]
-    expected += ["--no-wait"]
+    expected += ["--label", "ade.kind=code", "--no-wait"]
     assert shlex.split(choice.dispatch) == expected

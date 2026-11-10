@@ -14,7 +14,7 @@ A1. `config/routing.toml` (kinds, each pool's ranks per kind and suggested `--mo
 plenty gate, burn-first and pace knobs, the never-route list and aliases, dispatch gates and estimate floors, the lead's
 model) and `config/gates.toml [frontier]` (the frontier allowance, `docs/gates.md`). Print both with
 `bin/route_agent.py policy --md` (or `policy` for JSON); no other file restates them.
-A2. `bin/route_agent.py plan --kinds …` applies them to the live quota and prints one `acp-dispatch` line per slice;
+A2. `bin/route_agent.py plan --kinds …` applies them to the live quota and prints one `paseo run --provider … --no-wait` line per slice;
 `route`, `show`, `services [--check-models]`, `calibrate`, `substrate` and `hermes-chain` are its other commands.
 
 ## B. The pools (J2 pool audit, `docs/slim/log.md`, 2026-11-06; grok retired 2026-11-07)

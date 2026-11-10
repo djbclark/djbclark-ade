@@ -93,8 +93,9 @@ preferences, because they encode consequences a score cannot see:
 - the prepaid tier (opencode-zen) is retired until an
   explicit operator top-up.
 
-Every route comes with a `--model [--effort]` suggestion and the
-`acp-dispatch` line to run (the shim over `paseo run`; `cursor-cloud launch` for the Cursor Cloud row);
+Every route comes with a `--model [--effort]` suggestion and the native
+`paseo run --provider …` launch line (`cursor-cloud launch` for the Cursor Cloud row;
+the Wave 6 `acp-dispatch` shim is transitional only);
 the context window is the caller's choice (the agent's default unless the slice reads a whole corpus or a
 long log).
 
@@ -1597,21 +1598,23 @@ class Choice:
     score: float
     why: str = ""
     alternatives: list[str] = field(default_factory=list)
-    model: str = ""                 # "<model> [--effort L]" for acp-dispatch
-    kind: str = ""                  # required by acp-dispatch (2026-10-18)
+    model: str = ""                 # "<model> [--effort L]" for paseo run --thinking
+    kind: str = ""                  # recorded as --label ade.kind=… on paseo run
 
     @property
     def dispatch(self) -> str:
-        """Launch template: Pi uses native Paseo; legacy agents use acp-dispatch;
-        Cursor Cloud uses cursor-cloud launch. Add the task and transport-specific placement flags."""
+        """Launch template: native `paseo run` (Wave 6; acp-dispatch is transitional only).
+        Cursor Cloud uses cursor-cloud launch. Callers add placement flags and the brief."""
         agent = self.service.acp_agent
-        extra = DISPATCH_EXTRA.get(agent, "")
-        kind = f" --kind {self.kind}" if self.kind else ""
-        # Quote only the model id: suggest_model may append " --effort …".
+        # DISPATCH_EXTRA retained for config compatibility; unused on the native path
+        # (was appended to acp-dispatch lines; empty in config/routing.toml).
+        _ = DISPATCH_EXTRA.get(agent, "")
+        # Whitespace split keeps literal backslashes in model ids (shlex.split would eat them).
         parts = self.model.split(None, 1)
-        model = (shlex.quote(parts[0]) + (f" {parts[1]}" if len(parts) > 1 else "")) if parts else ""
+        if agent == "cursor-cloud":
+            return ("cursor-cloud launch --repo <url> --ref <branch> --prompt-file <brief>"
+                    + (f" --model {shlex.quote(parts[0])}" if parts else ""))
         if agent == "pi":
-            # Pi is native Paseo only; the transitional acp-dispatch shim has no Pi provider.
             # Keep provider and full physical namespace together, translating only explicit effort.
             spec = shlex.split(self.model)
             if not spec or len(spec) not in (1, 3) or (len(spec) == 3 and spec[1] != "--effort"):
@@ -1619,13 +1622,22 @@ class Choice:
             argv = ["paseo", "run", "--provider", f"pi/{spec[0]}"]
             if len(spec) == 3:
                 argv += ["--thinking", spec[2]]
+            if self.kind:
+                argv += ["--label", f"ade.kind={self.kind}"]
             return shlex.join(argv + ["--no-wait"])
-        if agent == "cursor-cloud":
-            return ("cursor-cloud launch --repo <url> --ref <branch> --prompt-file <brief>"
-                    + (f" --model {shlex.quote(parts[0])}" if parts else ""))
-        if model:
-            return f"acp-dispatch {agent} --model {model}{extra}{kind}"
-        return f"acp-dispatch {agent} --model <id from: paseo provider models {agent}>{kind}"
+        if not parts:
+            return (f"paseo run --provider {agent}/<id from: paseo provider models {agent}> "
+                    + (f"--label ade.kind={self.kind} " if self.kind else "")
+                    + "--no-wait")
+        argv = ["paseo", "run", "--provider", f"{agent}/{parts[0]}"]
+        # suggest_model may append " --effort LEVEL"; map to paseo --thinking.
+        if len(parts) == 2:
+            rest = parts[1].split()
+            if len(rest) >= 2 and rest[0] == "--effort":
+                argv += ["--thinking", rest[1]]
+        if self.kind:
+            argv += ["--label", f"ade.kind={self.kind}"]
+        return shlex.join(argv + ["--no-wait"])
 
 
 # DISPATCH_EXTRA comes from [dispatch].extra in config/routing.toml.
