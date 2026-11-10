@@ -16,6 +16,10 @@ install-check:
 install-doctor:
     "{{ root }}/bin/ade-install" doctor --root "{{ root }}"
 
+# Observe-only key presence via sudo-secretspec check (no values).
+keys:
+    "{{ root }}/bin/ade-install" keys --root "{{ root }}"
+
 # Print-only install plan.
 install-plan:
     "{{ root }}/bin/ade-install" plan --root "{{ root }}"
@@ -38,6 +42,11 @@ install *args:
 
 update *args:
     "{{ root }}/bin/ade-update" --repo "{{ root }}" {{ args }}
+
+# Linux one-step prove path (no Mac): doctor (hard + linger) + keys + hard apply dry-run.
+# Never sudo; never enable-linger; apply stays dry-run; CI-safe when secretspec absent.
+linux-e2e:
+    "{{ root }}/bin/ade-install" linux-e2e --root "{{ root }}"
 
 # Observe-only systemd linger (Linux user timers). Exit 69 when Linger=no; never runs sudo.
 # n/a (exit 0) on launchd/cron. Operator enables once: sudo loginctl enable-linger $USER

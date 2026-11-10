@@ -40,6 +40,15 @@ system_argv = ["apt-get", "install", "-y", "tool-d"]
 presence = "definitely-not-on-path-sys"
 platforms = ["linux"]
 
+[[component]]
+id = "tool-e"
+class = "hard"
+summary = "hard user-scoped missing with install_argv (linux e2e)"
+install = "true"
+install_argv = ["true"]
+presence = "definitely-not-on-path-hard-e"
+platforms = ["linux"]
+
 [[key]]
 name = "EXAMPLE_API_KEY"
 components = ["tool-a"]

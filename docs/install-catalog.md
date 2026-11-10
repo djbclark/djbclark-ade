@@ -12,7 +12,7 @@ reconciliation and `--system` root effects remain later work
 | --- | --- |
 | `config/install.toml` | Transitional editable catalog (`schema_version = 1`) |
 | `config/install.schema.json` | Structural schema (checked by `ade-install check`) |
-| `bin/ade_install.py` / `bin/ade-install` | Loader, plan, doctor, apply |
+| `bin/ade_install.py` / `bin/ade-install` | Loader, plan, doctor, keys, linux-e2e, apply |
 | `bin/ade_user_install.py` / `bin/ade-user-install` | User-scoped uv/just fetch and `bin/` symlinks |
 
 Loaded **only while `config/ade.toml` is absent**. If a unified `ade.toml` is
@@ -48,14 +48,18 @@ ade-install check [--root DIR] [--json]
 ade-install catalog [--root DIR] [--json]
 ade-install plan [--root DIR] [--json]
 ade-install doctor [--root DIR] [--json]
+ade-install keys [--root DIR] [--json]
+ade-install linux-e2e [--root DIR] [--json]
 ade-install apply [--root DIR] [--json] [--dry-run|--yes] [--id ID ...] [--force]
                   [--state-dir DIR] [--prefix DIR]
 just install-check
 just install-doctor
+just keys                   # observe-only sudo-secretspec check (no values)
 just install-plan
 just install-apply-dry
 just doctor                 # alias of install-doctor (setup-plan S2 name)
 just install [-- --yes]    # ade-install apply (dry-run by default; --yes for live)
+just linux-e2e              # doctor + keys + hard apply dry-run (Linux; no Mac)
 just update [-- --check]   # bin/ade-update for this checkout
 just linger                 # Linux: observe-only systemd linger (exit 69 when Linger=no)
 just update-check-install   # daily ade-update --check via ade-sched (auto backend)
@@ -81,6 +85,16 @@ bin/ade-sched --backend launchd install config/launchd/com.djbclark.ade-update-c
 # or from the canonical checkout: just update-check-install
 ```
 
+Linux prove path before enabling linger / installing the daily job (no Mac):
+
+```
+just linux-e2e                 # doctor + keys + hard apply dry-run; exit 1 on FAIL
+# or: bin/ade-install linux-e2e --json
+just doctor                    # same probes; linger WARN/FAIL when jobs + Linger=no
+just keys                      # sudo-secretspec check when present (unknown if absent)
+just install                   # apply dry-run (all ids); linux-e2e limits to hard
+```
+
 `__ADE__` / `__HOME__` are filled automatically; `__STATE__` is not and exits 2 if left blank.
 Pass `--ade` only with a durable checkout (`~/src/djbclark-ade`); never with a linked worktree path.
 `just update-check-install` omits `--ade` so a linked worktree cannot install a job that vanishes after merge.
@@ -89,7 +103,21 @@ Pass `--ade` only with a durable checkout (`~/src/djbclark-ade`); never with a l
   `blocked` / `skip`.
 - `doctor` prefers `probe_argv` (runs the tool; argv list, short timeout) and
   falls back to PATH `presence`. Missing or failed expected components fail
-  the command; `unknown` is neither healthy nor absent. Doctor does not repair.
+  the command; `unknown` is neither healthy nor absent. On Linux, when
+  ade-sched has installed **systemd** jobs and `loginctl` reports `Linger=no`,
+  doctor prints a `warn` line naming `just linger` / `enable-linger` and
+  **FAIL**s (exit 1); it never runs sudo and never enables linger.
+  launchd/cron report `linger: n/a` (ok); macOS exit behaviour is unchanged.
+  Doctor does not repair.
+- `keys` is observe-only: catalog key/login references plus
+  `sudo-secretspec check` when the binary is on PATH (no get/export/set/verify;
+  missing binary → `unknown`, exit 0 so Linux CI without secretspec stays green).
+- `linux-e2e` / `just linux-e2e` (2026-11-10) is the Linux one-step prove path:
+  `doctor` (hard-dep probes + linger) → `keys` → apply **dry-run** limited to
+  hard ids with `--system` preview for Linux `system_argv`. Never sudo, never
+  enable-linger, never reads secret values, and does not require a Mac
+  (`system_argv_darwin` unused). Exit 1 if any stage fails. Use it from Linux
+  CI or a Linux host to prove harddeps + keys + linger without macOS.
 - `apply` defaults to **dry-run**. `--yes` executes user `install_argv` for
   expected missing components (or `--force`). Writes an atomic ledger under
   `~/.local/state/djbclark-ade/install/ledger.json` (or `ADE_INSTALL_STATE_DIR`).

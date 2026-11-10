@@ -37,7 +37,9 @@ read [AGENTS.md](AGENTS.md) (`CLAUDE.md` links to it) first; this page is the ma
 
 ```sh
 cd ~/src/djbclark-ade
-just doctor                                            # observe-only catalog probes
+just doctor                                            # observe-only catalog probes (+ Linux linger WARN/FAIL)
+just keys                                              # observe-only sudo-secretspec check (no values)
+just linux-e2e                                         # doctor + keys + hard apply dry-run (Linux; no Mac)
 just install                                           # dry-run apply; just install -- --yes for live user-scoped
 just update -- --check                                 # ade-update --check for this checkout
 just update                                            # fast-forward, relink skills, print changelog delta
@@ -118,7 +120,7 @@ Skills (22, from each `skills/*/SKILL.md`):
 | [`ade-backup-stores`](bin/ade-backup-stores) | One consistent copy of every agent session store, plus the Hermes JSONL export. |
 | [`ade-config`](bin/ade-config) | Check/get/diff/set for the versioned effective ADE config (schema_version=1). |
 | [`ade-git-guard`](bin/ade-git-guard) | A `git` front door for what git's own hooks cannot see in a workspace another agent owns. |
-| [`ade-install`](bin/ade-install) | Transitional install catalog, plan, doctor, and bounded apply. |
+| [`ade-install`](bin/ade-install) | Transitional install catalog, plan, doctor, keys, linux-e2e, and bounded apply. |
 | [`ade-retro`](bin/ade-retro) | A read-only raw report for a retrospective over a date window (2026-11-04). |
 | [`ade-roster`](bin/ade-roster) | Print README's skills and bin/ roster, generated from the files themselves (2026-11-07, slim-down E11). |
 | [`ade-sched`](bin/ade-sched) | Install a checked-in launchd plist on this machine's scheduler (launchd, systemd user units or cron). |
@@ -129,7 +131,7 @@ Skills (22, from each `skills/*/SKILL.md`):
 | [`ade_config.py`](bin/ade_config.py) | Versioned read-only effective ADE config (schema_version=1). |
 | [`ade_config_edit.py`](bin/ade_config_edit.py) | Comment-preserving atomic scalar set for ADE config TOML. |
 | [`ade_gates.py`](bin/ade_gates.py) | The frontier-model allowance, from code defaults and config/gates.toml [frontier] (docs/gates.md). |
-| [`ade_install.py`](bin/ade_install.py) | Install catalog, plan, observe-only doctor, bounded apply. |
+| [`ade_install.py`](bin/ade_install.py) | Install catalog, plan, observe-only doctor/keys, linux-e2e dry-run, bounded apply. |
 | [`ade_sched.py`](bin/ade_sched.py) | Install a launchd plist as a launchd agent, a systemd user unit or a crontab block (issue #279, 2026-11-04). |
 | [`ade_user_install.py`](bin/ade_user_install.py) | User-scoped tool bootstrap (no shell=True, no root). |
 | [`adversary_marker.py`](bin/adversary_marker.py) | Read the adversary's verdict marker from a PR body and judge it against the PR head. |

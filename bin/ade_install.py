@@ -1,11 +1,16 @@
-"""ade_install: install catalog, plan, observe-only doctor, bounded apply.
+"""ade_install: install catalog, plan, observe-only doctor/keys, linux-e2e dry-run, bounded apply.
 
 Transitional source: ``config/install.toml`` when ``config/ade.toml`` is absent.
 Key entries are names and metadata only. Doctor runs ``probe_argv`` when
-recorded (else PATH presence) and never repairs. Apply is user-scoped only:
-``--dry-run`` by default, ``--yes`` to execute recorded ``install_argv``
-(argv lists, never shell=True). Root / ``--system`` effects are refused until
-a later unit. Secrets are never read.
+recorded (else PATH presence), checks Linux systemd linger when ade-sched
+jobs are installed (``just linger`` / enable-linger; never sudo), and never
+repairs. ``keys`` runs observe-only ``sudo-secretspec check`` (no values).
+``linux_e2e`` / ``ade-install linux-e2e`` chains doctor + keys + hard-dep
+apply ``--dry-run`` (and Linux ``system_argv`` preview) so CI can prove the
+one-step path without a Mac. Apply is user-scoped only: ``--dry-run`` by
+default, ``--yes`` to execute recorded ``install_argv`` (argv lists, never
+shell=True). Root / live ``--system`` effects are refused until a later unit.
+Secrets are never read.
 """
 from __future__ import annotations
 
@@ -68,9 +73,9 @@ class Catalog:
 
 @dataclass(frozen=True)
 class Observation:
-    kind: str  # component | key | login | catalog
+    kind: str  # component | key | login | catalog | sched
     id: str
-    status: str  # ok | missing | unknown | error | unchosen | never
+    status: str  # ok | missing | unknown | error | unchosen | never | warn
     detail: str
 
 
@@ -356,13 +361,280 @@ def observe_login(row: dict[str, Any]) -> Observation:
     return Observation("login", lid, "unknown", f"login check recorded as {cmd!r}; not executed")
 
 
+SECRETSPEC_CHECK_ARGV = [
+    "sudo-secretspec",
+    "check",
+    "--reason",
+    "ade-install keys",
+]
+
+
+def observe_secretspec_check(
+    *,
+    runner: Runner | None = None,
+    timeout_s: float = 30.0,
+    cwd: Path | None = None,
+) -> Observation:
+    """Observe-only bulk presence check via ``sudo-secretspec check``.
+
+    Never calls get/export/set/run. Does not print or request secret values.
+    """
+    if _probe_executable_missing(SECRETSPEC_CHECK_ARGV[0]):
+        return Observation(
+            "secretspec",
+            "check",
+            "unknown",
+            "sudo-secretspec not on PATH; cannot check presence (no values read)",
+        )
+    run = runner or (lambda a, d: _default_runner(a, d, timeout_s=timeout_s))
+    root = (cwd or Path.cwd()).resolve()
+    try:
+        proc = run(list(SECRETSPEC_CHECK_ARGV), root)
+    except subprocess.TimeoutExpired:
+        return Observation(
+            "secretspec",
+            "check",
+            "error",
+            f"sudo-secretspec check timed out after {timeout_s}s",
+        )
+    except OSError as e:
+        return Observation("secretspec", "check", "error", f"exec error: {e}")
+    # check exit: 0 = required credentials present; non-zero = missing/fail.
+    # stdout/stderr may name keys; never treat as values. Truncate one line.
+    if proc.returncode == 0:
+        return Observation(
+            "secretspec",
+            "check",
+            "ok",
+            "sudo-secretspec check: required credentials present (no values read)",
+        )
+    err = (proc.stderr or proc.stdout or "").strip().splitlines()
+    detail = err[0][:200] if err else f"exit {proc.returncode}"
+    return Observation(
+        "secretspec",
+        "check",
+        "missing",
+        f"sudo-secretspec check failed: {detail}",
+    )
+
+
+def keys_observe(
+    catalog: Catalog,
+    *,
+    runner: Runner | None = None,
+    timeout_s: float = 30.0,
+) -> tuple[list[Observation], int]:
+    """Observe-only keys path (S3b presence half).
+
+    Lists catalog key references, then runs ``sudo-secretspec check`` when the
+    binary exists. Exit 1 only when check runs and fails; missing binary is
+    ``unknown`` (exit 0) so Linux/CI without the boundary stays observant.
+    Never verifies individual keys and never reads values.
+    """
+    obs: list[Observation] = [
+        Observation("catalog", str(catalog.path), "ok", "catalog validated"),
+    ]
+    for row in catalog.keys:
+        obs.append(observe_key(row))
+    for row in catalog.logins:
+        obs.append(observe_login(row))
+    check = observe_secretspec_check(
+        runner=runner,
+        timeout_s=timeout_s,
+        cwd=catalog.root,
+    )
+    obs.append(check)
+    rc = 1 if check.status in ("missing", "error") else 0
+    return obs, rc
+
+
+def hard_component_ids(catalog: Catalog) -> set[str]:
+    """Ids of hard-class components (always expected on a full install)."""
+    return {str(row["id"]) for row in catalog.components if str(row["class"]) == "hard"}
+
+
+def linux_e2e(
+    catalog: Catalog,
+    *,
+    runner: Runner | None = None,
+    probe_timeout_s: float = 15.0,
+    sched_linger: Observation | None = None,
+    skip_sched_linger: bool = False,
+    secretspec_runner: Runner | None = None,
+    secretspec_timeout_s: float = 30.0,
+    prefix: Path | None = None,
+) -> tuple[dict[str, Any], int]:
+    """Linux one-step prove path: doctor (hard + linger) + keys + hard apply dry-run.
+
+    Always dry-run for apply; never sudo; never enables linger; never reads
+    secret values. Passes ``allow_system=True`` only so Linux ``system_argv``
+    harddeps preview as ``would-system-install`` (live system exec still
+    refused). Mac ``system_argv_darwin`` is not required. Injectable linger /
+    runners keep CI hermetic without a Mac or live secretspec.
+    """
+    doctor_obs, doctor_rc = doctor(
+        catalog,
+        runner=runner,
+        probe_timeout_s=probe_timeout_s,
+        sched_linger=sched_linger,
+        skip_sched_linger=skip_sched_linger,
+    )
+    keys_obs, keys_rc = keys_observe(
+        catalog,
+        runner=secretspec_runner,
+        timeout_s=secretspec_timeout_s,
+    )
+    hard_ids = hard_component_ids(catalog)
+    # Pass the set through even when empty: build_apply_steps treats None as
+    # "every component" and an empty set as "select nothing" (hard-only dry-run).
+    apply_results, apply_rc = apply(
+        catalog,
+        dry_run=True,
+        ids=hard_ids,
+        allow_system=True,
+        prefix=prefix,
+        runner=runner,
+    )
+    # Compose report; doctor observations already include key refs + linger.
+    linger = [o for o in doctor_obs if o.kind == "sched" and o.id == "linger"]
+    secretspec = [o for o in keys_obs if o.kind == "secretspec"]
+    hard_comp = [
+        o for o in doctor_obs
+        if o.kind == "component" and o.id in hard_ids
+    ]
+    report: dict[str, Any] = {
+        "ok": doctor_rc == 0 and keys_rc == 0 and apply_rc == 0,
+        "mode": "linux-e2e-dry-run",
+        "stages": {
+            "doctor": {"rc": doctor_rc, "observations": [
+                {"kind": o.kind, "id": o.id, "status": o.status, "detail": o.detail}
+                for o in doctor_obs
+            ]},
+            "keys": {"rc": keys_rc, "observations": [
+                {"kind": o.kind, "id": o.id, "status": o.status, "detail": o.detail}
+                for o in keys_obs
+            ]},
+            "apply_hard_dry_run": {"rc": apply_rc, "results": apply_results},
+        },
+        "hard_ids": sorted(hard_ids),
+        "linger": (
+            {"status": linger[0].status, "detail": linger[0].detail}
+            if linger else None
+        ),
+        "secretspec_check": (
+            {"status": secretspec[0].status, "detail": secretspec[0].detail}
+            if secretspec else None
+        ),
+        "hard_component_statuses": {
+            o.id: o.status for o in hard_comp
+        },
+        "note": (
+            "observe-only doctor + keys; apply --dry-run for hard ids with "
+            "allow_system preview; never sudo; never enable-linger; no Mac required"
+        ),
+    }
+    rc = 0 if report["ok"] else 1
+    return report, rc
+
+
+def linger_off_doctor_detail(labels: list[str]) -> str:
+    """Doctor detail for Linger=no with installed systemd jobs (never names sudo)."""
+    names = ", ".join(labels) if labels else "(none)"
+    return (
+        f"Linger=no with installed ade-sched systemd job(s): {names}; "
+        f"user timers stop at logout. Check with `just linger` / `ade-sched linger`; "
+        f"enable-linger once for boot-time user timers (doctor never enables linger)."
+    )
+
+
+def observe_sched_linger(
+    *,
+    env: dict[str, str] | None = None,
+    detect_fn: Callable[..., Any] | None = None,
+    linger_fn: Callable[..., str | None] | None = None,
+    labels_fn: Callable[..., list[str]] | None = None,
+) -> Observation:
+    """Observe systemd linger when ade-sched jobs are present (Linux residual after just linger).
+
+    launchd/cron → ok ``linger: n/a`` (macOS / cron unchanged for exit). systemd with
+    installed ADE jobs and ``Linger=no`` → ``warn`` (doctor FAILs). Never runs sudo /
+    never enables linger. Detect/linger failures are ``unknown``, not a hard fail.
+    """
+    # Lazy import: catalog check / plan stay independent of ade_sched.
+    import ade_sched as sched  # noqa: PLC0415
+
+    detect = detect_fn or sched.detect
+    linger = linger_fn or sched.linger
+    labels = labels_fn or sched.installed_labels
+    try:
+        backend = detect(env=env)
+    except sched.SchedError as e:
+        return Observation(
+            "sched", "linger", "unknown",
+            f"scheduler unavailable for linger check: {e}",
+        )
+    except OSError as e:
+        return Observation(
+            "sched", "linger", "unknown",
+            f"scheduler probe error for linger check: {e}",
+        )
+    name = backend.name
+    if name in ("launchd", "cron"):
+        return Observation(
+            "sched", "linger", "ok",
+            f"linger: n/a (backend={name})",
+        )
+    if name != "systemd":
+        return Observation(
+            "sched", "linger", "ok",
+            f"linger: n/a (backend={name})",
+        )
+    try:
+        installed = list(labels(backend, env=backend.env))
+    except (sched.SchedError, OSError, TypeError) as e:
+        return Observation(
+            "sched", "linger", "unknown",
+            f"could not list ade-sched systemd jobs: {e}",
+        )
+    try:
+        state = linger(env=backend.env)
+    except (sched.SchedError, OSError) as e:
+        return Observation(
+            "sched", "linger", "unknown",
+            f"could not read Linger: {e}",
+        )
+    if not installed:
+        return Observation(
+            "sched", "linger", "ok",
+            f"linger: {state or 'unknown'} (no ade-sched systemd jobs)",
+        )
+    if state == "no":
+        return Observation(
+            "sched", "linger", "warn",
+            linger_off_doctor_detail(installed),
+        )
+    if state == "yes":
+        return Observation(
+            "sched", "linger", "ok",
+            f"linger: yes ({len(installed)} ade-sched systemd job(s))",
+        )
+    return Observation(
+        "sched", "linger", "unknown",
+        f"linger: unknown with {len(installed)} ade-sched systemd job(s); "
+        f"check with `just linger`",
+    )
+
+
 def doctor(
     catalog: Catalog,
     *,
     runner: Runner | None = None,
     probe_timeout_s: float = 15.0,
+    sched_linger: Observation | None = None,
+    skip_sched_linger: bool = False,
 ) -> tuple[list[Observation], int]:
-    """Observe-only doctor. Exit 1 if any expected component is missing/error; never repairs."""
+    """Observe-only doctor. Exit 1 if any expected component is missing/error, or
+    when Linux systemd jobs are installed with Linger=no; never repairs."""
     obs: list[Observation] = [
         Observation("catalog", str(catalog.path), "ok", "catalog validated"),
     ]
@@ -381,6 +653,12 @@ def doctor(
         obs.append(observe_key(row))
     for row in catalog.logins:
         obs.append(observe_login(row))
+    if not skip_sched_linger:
+        linger_obs = sched_linger if sched_linger is not None else observe_sched_linger()
+        obs.append(linger_obs)
+        # WARN line + FAIL exit when Linger=no with installed systemd jobs.
+        if linger_obs.status in ("warn", "error", "missing"):
+            hard_missing += 1
     return obs, (1 if hard_missing else 0)
 
 
