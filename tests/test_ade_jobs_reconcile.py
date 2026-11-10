@@ -1042,6 +1042,85 @@ def test_paseo_adopt_ledger_without_create(fake, tmp_path):
     assert entry["backend"] == "paseo" and entry["status"] == "committed"
 
 
+def test_paseo_presence_ignores_same_label_host_job(fake, tmp_path):
+    """Codex P2: a host LiveJob with the same id must not count as a live paseo schedule."""
+    root = _mini_catalog(tmp_path)
+    catalog = ai.load_catalog(root=root)
+    store = tmp_path / "paseo-schedules.json"
+    store.write_text("[]", encoding="utf-8")
+    run = _fake_paseo_run(store)
+    steps = S.plan_reconcile(
+        catalog.jobs,
+        catalog.retired_jobs,
+        ledger=S.empty_jobs_ledger(env=fake.env),
+        live=S.LiveScan(
+            "systemd",
+            (S.LiveJob("context-budget", "systemd", "generated", True),),
+        ),
+        backend_name="systemd",
+        root=root,
+        ade=root,
+        env=fake.env,
+        names={"context-budget"},
+        platform_name="linux",
+    )
+    assert any(s.action == "install" and s.name == "context-budget" for s in steps)
+    assert not any(s.action in ("skip", "adopt-ledger") and s.name == "context-budget" for s in steps)
+
+
+def test_paseo_delete_failure_keeps_pending_remove(fake, tmp_path):
+    """Codex P2: failed paseo delete must keep removal authority for the next reconcile."""
+    root = _mini_catalog(tmp_path)
+    catalog = ai.load_catalog(root=root)
+    store = tmp_path / "paseo-schedules.json"
+    store.write_text(json.dumps(["context-budget"]), encoding="utf-8")
+
+    def run(argv, **_k):
+        # delete always fails; ls still sees the schedule
+        if argv[:3] == ["paseo", "schedule", "delete"]:
+            return subprocess.CompletedProcess(argv, 1, "", "boom")
+        return _fake_paseo_run(store)(argv)
+
+    jobs = [j for j in catalog.jobs if j["name"] != "context-budget"]
+    ledger = S.empty_jobs_ledger(env=fake.env)
+    ledger["generation"] = 1
+    ledger["entries"]["context-budget"] = {
+        "logical_id": "context-budget",
+        "label": "context-budget",
+        "owner": "djbclark-ade",
+        "backend": "paseo",
+        "scope": "user",
+        "paths": ["paseo-schedule:context-budget"],
+        "artifact_hash": "deadbeef",
+        "generation": 1,
+        "status": "committed",
+    }
+    S.save_jobs_ledger(ledger, fake.state, env=fake.env)
+    results, rc = S.reconcile(
+        jobs,
+        catalog.retired_jobs,
+        dry_run=False,
+        backend="systemd",
+        root=root,
+        ade=root,
+        env=fake.env,
+        state_dir=fake.state,
+        names={"context-budget"},
+        live=S.LiveScan(
+            "systemd",
+            (S.LiveJob("context-budget", "paseo", "paseo", True),),
+        ),
+        platform_name="linux",
+        paseo_run=run,
+    )
+    assert rc == 1, results
+    assert any(r["action"] == "failed" and r["name"] == "context-budget" for r in results)
+    entry = S.load_jobs_ledger(fake.state, env=fake.env)["entries"]["context-budget"]
+    assert entry["status"] == "pending-remove"
+    assert "boom" in (entry.get("detail") or "")
+    assert S._ledger_owns(entry, label="context-budget")
+
+
 def test_paseo_remove_ledger_owned_never_foreign(fake, tmp_path):
     root = _mini_catalog(tmp_path)
     catalog = ai.load_catalog(root=root)
@@ -1237,8 +1316,10 @@ def test_paseo_delete_readback_probe_failure_keeps_ledger(fake, tmp_path):
     assert rc == 1, results
     assert any(r["action"] == "failed" and r["name"] == "context-budget" for r in results)
     entry = S.load_jobs_ledger(fake.state, env=fake.env)["entries"]["context-budget"]
-    assert entry["status"] == "failed"
+    # Keep pending-remove so the next reconcile retries (Codex P2 on #520).
+    assert entry["status"] == "pending-remove"
     assert "ls failed" in entry.get("detail", "")
+    assert S._ledger_owns(entry, label="context-budget")
 
 
 def test_plan_activates_inactive_timer_even_when_hashes_match(fake, tmp_path):

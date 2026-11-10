@@ -1930,6 +1930,8 @@ def plan_reconcile(
     expected_labels: dict[str, str] = {}  # label -> logical name
     write_ok = backend_name in RECONCILE_WRITE_BACKENDS
     live_ids = live.ids
+    # Host + Paseo share LiveScan; Paseo presence must not treat a same-label host job as live.
+    paseo_live_ids = {j.id for j in live.jobs if j.backend == "paseo"}
 
     for n in live.notes:
         steps.append(ReconcileStep("live-scan", "report", OWNER_ADE, n, touch=False, category="job"))
@@ -1982,7 +1984,7 @@ def plan_reconcile(
                 continue
             expected_labels[label] = name
             entry = entries.get(name) if isinstance(entries.get(name), dict) else None
-            if label in live_ids:
+            if label in paseo_live_ids:
                 ledger_match = (
                     isinstance(entry, dict)
                     and entry.get("status") in ("committed", "installed")
@@ -2819,44 +2821,21 @@ def reconcile(
                                 EX_ACTIVATE,
                                 f"read-back: launchd {label} still loaded after uninstall",
                             )
-                except SchedError as e:
+                except (SchedError, OSError, subprocess.TimeoutExpired) as e:
+                    # Keep pending-remove so the next reconcile retries; "failed" alone
+                    # would drop _ledger_owns and leave a surviving schedule forever.
                     live_entry = entries.get(step.name)
                     if isinstance(live_entry, dict) and live_entry.get("label") == label:
                         entries[step.name] = {
                             **entry,
-                            "status": "failed",
+                            "status": "pending-remove",
                             "detail": str(e),
                             "updated_at": _utc_now(),
                             "generation": generation,
                         }
                     elif isinstance(live_entry, dict) and _prior_identity(live_entry) is not None:
                         prior = dict(entry)
-                        prior["status"] = "failed"
-                        prior["detail"] = str(e)
-                        prior["updated_at"] = _utc_now()
-                        prior["generation"] = generation
-                        entries[step.name] = {**live_entry, "prior_identity": prior}
-                    ledger["entries"] = entries
-                    save_jobs_ledger(ledger, state_dir, env=env)
-                    row["ok"] = False
-                    row["action"] = "failed"
-                    row["detail"] = str(e)
-                    failed += 1
-                    results.append(row)
-                    continue
-                except (OSError, subprocess.TimeoutExpired) as e:
-                    live_entry = entries.get(step.name)
-                    if isinstance(live_entry, dict) and live_entry.get("label") == label:
-                        entries[step.name] = {
-                            **entry,
-                            "status": "failed",
-                            "detail": str(e),
-                            "updated_at": _utc_now(),
-                            "generation": generation,
-                        }
-                    elif isinstance(live_entry, dict) and _prior_identity(live_entry) is not None:
-                        prior = dict(entry)
-                        prior["status"] = "failed"
+                        prior["status"] = "pending-remove"
                         prior["detail"] = str(e)
                         prior["updated_at"] = _utc_now()
                         prior["generation"] = generation
