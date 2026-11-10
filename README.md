@@ -116,7 +116,7 @@ Skills (23, from each `skills/*/SKILL.md`):
 | [`ade-config`](bin/ade-config) | Check/get/diff/set for the versioned effective ADE config (schema_version=1). |
 | [`ade-git-guard`](bin/ade-git-guard) | A `git` front door for what git's own hooks cannot see in a workspace another agent owns. |
 | [`ade-github-setup`](bin/ade-github-setup) | Observe / plan / apply / verify for the merge-gate App (S8). |
-| [`ade-harden`](bin/ade-harden) | Observe-only hardening drift check (setup-plan S6). |
+| [`ade-harden`](bin/ade-harden) | Observe-only GitHub hardening drift check (setup-plan S6). |
 | [`ade-install`](bin/ade-install) | Transitional install catalog, plan, doctor, keys, and bounded apply. |
 | [`ade-merge-ready`](bin/ade-merge-ready) | Classify open ADE PRs against the merge gate (2026-11-09). |
 | [`ade-pi-pools`](bin/ade-pi-pools) | Report and enforce Pi pool acceptance before automatic routing (ade/auto). |
@@ -133,7 +133,7 @@ Skills (23, from each `skills/*/SKILL.md`):
 | [`ade_config_edit.py`](bin/ade_config_edit.py) | Comment-preserving atomic scalar set for ADE config TOML. |
 | [`ade_gates.py`](bin/ade_gates.py) | The frontier-model allowance, from code defaults and config/gates.toml [frontier] (docs/gates.md). |
 | [`ade_github_setup.py`](bin/ade_github_setup.py) | Observe / plan / apply / verify for setup-plan S8. |
-| [`ade_harden.py`](bin/ade_harden.py) | Observe-only harden-check drift observer (S6). |
+| [`ade_harden.py`](bin/ade_harden.py) | Observe-only GitHub hardening drift check (setup-plan S6). |
 | [`ade_install.py`](bin/ade_install.py) | Install catalog, plan, observe-only doctor/keys, bounded apply. |
 | [`ade_pi_pools.py`](bin/ade_pi_pools.py) | Pi pool acceptance for automatic routing (ade/auto / bin/pi-default). |
 | [`ade_sched.py`](bin/ade_sched.py) | Install a launchd plist as a launchd agent, a systemd user unit or a crontab block (issue #279, 2026-11-04). |
