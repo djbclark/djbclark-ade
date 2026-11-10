@@ -352,7 +352,7 @@ marker whose PARAMETERS transport was stripped is repaired.
 Standing order 9's staged enforcement (adopted 2026-10-25; queue item 6) ends with **S4**: run six representative
 workflows under claim-aware workspaces **before any hard refusal** (before agents are forced through the PATH shim /
 `~/.local/bin/git`, and before `~/ops` leaves its transitional plain-master practice). S3 (changelog fragments) is done
-(PR 190). S1/S2 and the W2–W4 claim wiring are separate open work; this section does not implement them and does **not**
+(PR 190). S1/S2 are separate open work; W2–W4 claim wiring lands via the ade-claim promote PR (plugin + doctor probe). This section does **not**
 flip refusal on.
 
 **Gate (explicit):** hard refusal stays off until every case below is run once, recorded with the metrics, and the
