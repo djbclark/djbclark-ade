@@ -64,6 +64,7 @@ LEGACY_PROJECTION: tuple[tuple[str, str, str], ...] = (
     ("config/install.toml", "[[install.jobs]]", "[[install.jobs]]"),
     ("config/install.toml", "[[install.retired_jobs]]", "[[install.retired_jobs]]"),
     ("config/install.toml", "[[key]] keyed by name", "[keys.<NAME>]"),
+    ("config/context-budget.toml", "dirs / [budget]", "[context_budget]"),
 )
 
 ROUTING_DOMAIN_KEYS: frozenset[str] = frozenset({
@@ -75,7 +76,7 @@ KNOWN_TOP_LEVEL: frozenset[str] = frozenset({
     *ROUTING_DOMAIN_KEYS,
     "gates",
     "model_tiers",
-    "install", "keys",
+    "install", "keys", "context_budget",
 })
 
 
@@ -427,9 +428,41 @@ def reject_duplicate_services(services: Any, *, label: str) -> None:
         seen[name] = i
 
 
-EFFECTIVE_DOMAINS = frozenset({"routing", "gates", "model_tiers", "install", "keys"})
+EFFECTIVE_DOMAINS = frozenset({"routing", "gates", "model_tiers", "install", "keys", "context_budget"})
 ROUTER_DOMAINS = frozenset({"routing", "gates", "model_tiers"})
 CATALOG_DOMAINS = frozenset({"install", "keys"})
+CONTEXT_BUDGET_DOMAINS = frozenset({"context_budget"})
+
+
+def validate_context_budget(data: dict[str, Any], *, path: Path) -> None:
+    """Validate consumed budget leaves without importing the measurement CLI.
+
+    Budget entries are numeric defaults or one directory's numeric overrides.
+    Arbitrary row/directory names retain the legacy map's extensibility; nested
+    directory maps, booleans and nonfinite numbers cannot reach comparisons.
+    """
+    if "context_budget" not in data:
+        return
+    cfg = data["context_budget"]
+    if not isinstance(cfg, dict):
+        raise ConfigError(f"{path}: context_budget must be a table")
+    unknown = set(cfg) - {"dirs", "budget"}
+    if unknown:
+        raise ConfigError(f"{path}: context_budget unknown key(s) {sorted(unknown)}")
+    dirs = cfg.get("dirs", [])
+    if not isinstance(dirs, list) or not all(isinstance(d, str) for d in dirs):
+        raise ConfigError(f"{path}: context_budget.dirs must be a string array")
+    budget = cfg.get("budget", {})
+    if not isinstance(budget, dict):
+        raise ConfigError(f"{path}: context_budget.budget must be a table")
+    for key, value in budget.items():
+        if key in {"total", "memory", "skills", "mcp_tools", "mcp_instructions", "grow_alert"} and not is_num(value):
+            raise ConfigError(f"{path}: context_budget.budget.{key} must be a finite number")
+        leaves = value.items() if isinstance(value, dict) else [(None, value)]
+        for leaf, number in leaves:
+            label = f"context_budget.budget.{key}" + (f".{leaf}" if leaf is not None else "")
+            if not is_num(number):
+                raise ConfigError(f"{path}: {label} must be a finite number")
 
 
 def _domain_view(data: dict[str, Any], domains: frozenset[str]) -> dict[str, Any]:
@@ -535,7 +568,7 @@ def load_effective(
         "gates_env": gates_env,
         "model_tiers_env": model_tiers_env,
         "gates_info": None,
-        "install_source": None, "keys_source": None,
+        "install_source": None, "keys_source": None, "context_budget_source": None,
         "domains": sorted(selected),
         "mapping": [
             {"legacy_file": a, "legacy": b, "effective": c}
@@ -552,6 +585,7 @@ def load_effective(
         validate_tree(raw, schema, label=str(new_path))
         reject_duplicate_services(raw.get("service"), label=str(new_path))
         _validate_catalog_domains(raw, new_path)
+        validate_context_budget(raw, path=new_path)
         data = _domain_view(raw, selected)
         data["schema_version"] = SCHEMA_VERSION
         provenance["new_config"] = str(new_path)
@@ -627,6 +661,20 @@ def load_effective(
                 data.update(_domain_view(projected, selected))
                 provenance["install_source"] = provenance["keys_source"] = str(path)
 
+    # Context-only consumers do not load routing, gates, tiers or catalog files.
+    # Absent legacy input (or absent unified domain) keeps the CLI's defaults;
+    # a unified file never revives the legacy context-budget file.
+    if "context_budget" in selected:
+        if using_new:
+            provenance["context_budget_source"] = str(new_path)
+        else:
+            path = root / "config/context-budget.toml"
+            if input_present(path):
+                projected = {"context_budget": read_toml(path)}
+                validate_context_budget(projected, path=path)
+                data.update(projected)
+                provenance["context_budget_source"] = str(path)
+
     # --- local override ---
     if using_local:
         local = read_toml(local_path)
@@ -635,6 +683,7 @@ def load_effective(
         validate_tree(local, schema, label=str(local_path), partial=True)
         reject_duplicate_services(local.get("service"), label=str(local_path))
         _validate_catalog_domains(local, local_path)
+        validate_context_budget(local, path=local_path)
         merge_src = _domain_view(local, selected)
         merge_src.pop("schema_version", None)
         if routing_env:
@@ -660,6 +709,7 @@ def load_effective(
         data["gates"] = gates
         provenance["gates_info"] = ginfo
     _validate_catalog_domains(data, Path("effective config"))
+    validate_context_budget(data, path=Path("effective config"))
 
     validate_tree(data, schema, label="effective config")
 

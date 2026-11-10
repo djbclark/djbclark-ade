@@ -4,7 +4,7 @@
     context-budget-check [--from-file PATH [--dir LABEL]] [--dry-run] [--config PATH]
                          [--state-dir DIR] [--date YYYY-MM-DD] [--json] [--instruction-lint]
 
-Runs `claude -p "/context"` in each directory of config/context-budget.toml (default
+Runs `claude -p "/context"` in each configured directory (legacy config/context-budget.toml; default
 ~/src/djbclark-ade and ~; a /context call makes no model request), parses the category table plus
 the Memory files, MCP tools, Skills and Custom agents sub-tables, writes
 ~/.local/state/context-budget/<YYYY-MM-DD>.json, and compares each directory with
@@ -23,6 +23,10 @@ Why it exists: the 2026-10-10 preamble trim regrew by 2026-10-18 through three c
 the directory it stands for (default the first in the config). --dry-run prints the ping instead of
 sending it and writes no state. The `claude` and `hermes-ping` paths come from CONTEXT_BUDGET_CLAUDE
 and CONTEXT_BUDGET_PING.
+
+Default reads use the effective [context_budget] domain: unified config replaces
+the legacy base, then local overrides merge. --config selects only that legacy
+file. Invalid effective config exits 2 before measurement, state or notification.
 
 Schedule (J3, 2026-11-06): it runs nightly as a Paseo schedule, an agent that runs
 `context-budget-check --instruction-lint` and reports what it printed (the script sends its own ping). The
@@ -55,6 +59,11 @@ import tomllib
 from datetime import date as _date
 from pathlib import Path
 
+# Default reads import local pure config modules; cold dry runs must not create
+# repository bytecode caches as a side effect of adopting the reader.
+if __name__ == "__main__":
+    sys.dont_write_bytecode = True
+
 REPO = Path(__file__).resolve().parent.parent
 CONFIG = REPO / "config" / "context-budget.toml"
 CLAUDE_TIMEOUT_S = 180
@@ -85,6 +94,10 @@ DEFAULT_BUDGET = {"total": 32000, "memory": 9000, "skills": 7500, "mcp_tools": 6
 
 
 class ParseError(Exception):
+    pass
+
+
+class ConfigError(ValueError):
     pass
 
 
@@ -194,7 +207,25 @@ def measure(label: str) -> dict:
 # ---------------------------------------------------------------- config and state
 
 def load_config(path: Path) -> dict:
+    """Isolated legacy-format reader; explicit --config retains this behavior."""
     cfg = tomllib.loads(path.read_text()) if path.exists() else {}
+    return {"dirs": cfg.get("dirs") or ["~/src/djbclark-ade", "~"], "budget": cfg.get("budget") or {}}
+
+
+def load_effective_config(*, root: Path | None = None, home: Path | None = None,
+                          environ: dict | None = None) -> dict:
+    """Default read adopts only validated context metadata, without effects."""
+    bindir = str(REPO / "bin")
+    if bindir not in sys.path:
+        sys.path.insert(0, bindir)
+    import ade_config as ac
+
+    try:
+        effective = ac.load_effective(root=root or REPO, home=home, environ=environ,
+                                      domains=ac.CONTEXT_BUDGET_DOMAINS)
+    except ac.ConfigError as error:
+        raise ConfigError(str(error)) from error
+    cfg = effective.data.get("context_budget", {})
     return {"dirs": cfg.get("dirs") or ["~/src/djbclark-ade", "~"], "budget": cfg.get("budget") or {}}
 
 
@@ -380,7 +411,11 @@ def send_ping(text: str) -> int:
 # ---------------------------------------------------------------- commands
 
 def cmd_run(a: argparse.Namespace) -> int:
-    cfg = load_config(Path(a.config) if a.config else CONFIG)
+    try:
+        cfg = load_config(Path(a.config)) if a.config else load_effective_config()
+    except ConfigError as error:
+        print(f"context-budget-check: config: {error}", file=sys.stderr)
+        return 2
     today = a.date or _date.today().isoformat()
     sdir = state_dir(a.state_dir)
     pdate, pstate = previous(sdir, today)
@@ -441,7 +476,7 @@ def main(argv: list[str]) -> int:
     p.add_argument("--from-file", help="parse this saved /context output instead of running claude")
     p.add_argument("--dir", help="config directory label the --from-file output stands for")
     p.add_argument("--dry-run", action="store_true", help="print the ping, send nothing, write no state")
-    p.add_argument("--config", help=f"budget file (default {CONFIG})")
+    p.add_argument("--config", help="isolated legacy budget file (default: effective context_budget)")
     p.add_argument("--state-dir", help="where <date>.json files live (default ~/.local/state/context-budget)")
     p.add_argument("--date", help="today's date, YYYY-MM-DD (tests)")
     p.add_argument("--json", action="store_true", help="also print the parsed entries and alerts as JSON")

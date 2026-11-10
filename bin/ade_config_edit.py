@@ -169,6 +169,8 @@ def resolve_set_target(
     parts = split_dotted_path(dotted)
     if parts[0] in {"install", "keys"}:
         raise EditError(f"PATH {dotted!r}: install/keys metadata is read-only until writer adoption")
+    if parts[0] == "context_budget":
+        raise EditError(f"PATH {dotted!r}: context_budget metadata is read-only until writer adoption")
     root = root.resolve()
     home = home.resolve()
 
@@ -684,11 +686,13 @@ def validate_target_tree(data: dict[str, Any], target: SetTarget, *, root: Path)
     if target.kind == "local":
         ac.require_schema_version(data, target.path, required=False)
         ac.validate_tree(data, schema, label=str(target.path), partial=True)
+        ac.validate_context_budget(data, path=target.path)
         ac.reject_duplicate_services(data.get("service"), label=str(target.path))
         return
     if target.kind == "unified":
         ac.require_schema_version(data, target.path, required=True)
         ac.validate_tree(data, schema, label=str(target.path))
+        ac.validate_context_budget(data, path=target.path)
         ac.reject_duplicate_services(data.get("service"), label=str(target.path))
         return
     if target.kind == "legacy_routing":
