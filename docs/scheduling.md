@@ -99,9 +99,10 @@ Checked-in ADE jobs under `config/launchd/` include `com.djbclark.deadline-sweep
   reported only — never unloaded. Foreign/unknown owners are never unloaded.
 - Paseo schedules and dependency/site services stay report-only here (later slices).
 - Plists for `harden-check` and `keys-check` landed 2026-11-10
-  (`config/launchd/com.djbclark.harden-check.plist` / `just harden-check-install`;
-  `config/launchd/com.djbclark.keys-check.plist` / `just keys-check-install`).
-  `update --auto` remains planned until that plist lands.
+  (`com.djbclark.harden-check.plist` / `just harden-check-install`;
+  `com.djbclark.keys-check.plist` / `just keys-check-install`).
+  `update --auto` has a **CLI stub** only (`ade-update --auto` / `ade-update-auto`:
+  observe-only then exit 5); no apply plist yet (PR 359 check-only gate).
 
 ## Paseo schedules (operator create, 2026-11-10)
 

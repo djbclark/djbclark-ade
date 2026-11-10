@@ -1,0 +1,136 @@
+#!/usr/bin/env python3
+"""S4 CLI stub: accept ``update --auto`` without inventing scheduled apply.
+
+    ade-update-auto [--repo PATH] [--json]
+    ade-update --auto …
+
+Runs observe-only steps (``ade-update --check`` + ``ade-install keys``), then
+exits nonzero naming that full S4 auto-apply is not implemented: no
+multi-component update, no scheduled apply plist, no failure ping. Daily
+behind-check remains ``ade-update-check`` / ``just update-check-install``
+(never auto-applies; PR 359). Real apply stays bare ``ade-update`` /
+``just update`` until an operator-chosen auto-apply policy lands.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+EXIT_OK = 0
+EXIT_USAGE = 2
+EXIT_NOT_IMPLEMENTED = 5
+EXIT_ERROR = 4
+DEFAULT_REPO = os.path.expanduser("~/src/djbclark-ade")
+NOT_IMPLEMENTED = (
+    "ade-update-auto: not implemented — S4 auto-apply (multi-component update, "
+    "mid-turn skip, failure ping, scheduled apply) is not landed; this run was "
+    "observe-only (--check + keys). Use bare ade-update / just update to apply "
+    "this checkout; daily check remains just update-check-install (never auto-applies)."
+)
+
+
+def _here() -> Path:
+    return Path(__file__).resolve().parent
+
+
+def _run(argv: list[str], *, timeout: int = 600) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(  # noqa: S603 — argv list only
+        argv, capture_output=True, text=True, check=False, timeout=timeout,
+    )
+
+
+def run_auto(
+    *,
+    repo: Path,
+    as_json: bool = False,
+    run: Any = _run,
+    update_bin: Path | None = None,
+    install_bin: Path | None = None,
+) -> int:
+    report: dict[str, Any] = {
+        "repo": str(repo),
+        "status": "not_implemented",
+        "ade_update_check_rc": None,
+        "keys_rc": None,
+        "notes": [],
+    }
+    update = update_bin or (_here() / "ade-update")
+    install = install_bin or (_here() / "ade-install")
+    if not update.is_file() or not install.is_file():
+        report["status"] = "error"
+        report["notes"].append("sibling ade-update or ade-install missing")
+        return _emit(report, as_json, EXIT_ERROR)
+
+    try:
+        up = run([str(update), "--check", "--repo", str(repo)], timeout=900)
+    except subprocess.TimeoutExpired:
+        report["status"] = "error"
+        report["notes"].append("ade-update --check timed out")
+        return _emit(report, as_json, EXIT_ERROR)
+    report["ade_update_check_rc"] = up.returncode
+    if up.stdout:
+        report["notes"].append(up.stdout.strip()[-500:])
+    # --check uses 0 current / 10 behind; both are observe outcomes
+    if up.returncode not in (0, 10):
+        report["status"] = "error"
+        report["notes"].append(f"ade-update --check failed (rc={up.returncode})")
+        if up.stderr:
+            report["notes"].append(up.stderr.strip()[-300:])
+        return _emit(report, as_json, up.returncode if up.returncode else EXIT_ERROR)
+
+    try:
+        keys = run([str(install), "keys", "--root", str(repo)], timeout=300)
+    except subprocess.TimeoutExpired:
+        report["status"] = "error"
+        report["notes"].append("ade-install keys timed out")
+        return _emit(report, as_json, EXIT_ERROR)
+    report["keys_rc"] = keys.returncode
+    if keys.returncode != 0:
+        report["status"] = "error"
+        report["notes"].append(f"ade-install keys failed (rc={keys.returncode})")
+        return _emit(report, as_json, keys.returncode if keys.returncode else EXIT_ERROR)
+
+    report["notes"].append(NOT_IMPLEMENTED)
+    return _emit(report, as_json, EXIT_NOT_IMPLEMENTED)
+
+
+def _emit(report: dict[str, Any], as_json: bool, rc: int) -> int:
+    if as_json:
+        json.dump(report, sys.stdout, indent=2, sort_keys=True)
+        sys.stdout.write("\n")
+    else:
+        print(f"ade-update-auto: {report.get('status')} repo={report.get('repo')}")
+        for note in report.get("notes") or []:
+            for line in str(note).splitlines() or [""]:
+                print(f"  {line}")
+        if report.get("ade_update_check_rc") is not None:
+            print(f"  ade_update_check_rc={report['ade_update_check_rc']}")
+        if report.get("keys_rc") is not None:
+            print(f"  keys_rc={report['keys_rc']}")
+        if rc == EXIT_NOT_IMPLEMENTED:
+            print(NOT_IMPLEMENTED, file=sys.stderr)
+    return rc
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(
+        prog="ade-update-auto",
+        description="S4 stub: observe-only --auto, then refuse full auto-apply (exit 5).",
+    )
+    ap.add_argument("--repo", default=DEFAULT_REPO, help=f"checkout (default {DEFAULT_REPO})")
+    ap.add_argument("--json", action="store_true", help="print one JSON object")
+    args = ap.parse_args(argv)
+    repo = Path(args.repo).expanduser()
+    if not repo.is_dir():
+        print(f"ade-update-auto: not a directory: {repo}", file=sys.stderr)
+        return EXIT_USAGE
+    return run_auto(repo=repo, as_json=args.json)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

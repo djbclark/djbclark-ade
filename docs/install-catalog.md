@@ -94,7 +94,8 @@ just install-apply-dry
 just install-print-system-argv
 just doctor                 # alias of install-doctor (setup-plan S2 name)
 just install [-- --yes]    # ade-install apply (dry-run by default; --yes for live)
-just update [-- --check]   # bin/ade-update for this checkout
+just update [-- --check|--auto]  # --auto → ade-update-auto stub (observe-only, exit 5)
+just update-auto                 # same stub; no update-auto-install (plist pending)
 ```
 
 Daily behind-check (not auto-apply): install

@@ -52,6 +52,10 @@ install *args:
 update *args:
     "{{ root }}/bin/ade-update" --repo "{{ root }}" {{ args }}
 
+# S4 stub: observe-only then exit 5 (full auto-apply not implemented; no scheduled apply).
+update-auto *args:
+    "{{ root }}/bin/ade-update-auto" --repo "{{ root }}" {{ args }}
+
 # Install the daily ade-update --check job (Linux: systemd; Mac: launchd via --backend auto).
 # Requires --set __STATE__; never auto-applies updates (check only).
 # Omit --ade so ade-sched's linked-worktree guard applies (install from the
