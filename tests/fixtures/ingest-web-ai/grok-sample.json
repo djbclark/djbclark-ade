@@ -1,0 +1,23 @@
+{
+  "conversations": [
+    {
+      "id": "grok-conv-001",
+      "title": "Synthetic Grok sample",
+      "created_at": "2026-08-23T13:00:00Z",
+      "messages": [
+        {
+          "id": "grok-m1",
+          "author": "user",
+          "content": "Does VESTI capture Grok yet?",
+          "timestamp": "2026-08-23T13:00:01Z"
+        },
+        {
+          "id": "grok-m2",
+          "author": "assistant",
+          "content": "No — Grok is the named gap; use the official export for backfill.",
+          "timestamp": "2026-08-23T13:00:04Z"
+        }
+      ]
+    }
+  ]
+}

@@ -55,6 +55,7 @@ For the migration choices, compatibility names and Linux/macOS handoffs, read
 | `create-hook` | Writes, merges and removes native OpenAI Codex hooks (`~/.codex/hooks.json`, `<repo>/.codex/hooks.json`). Codex only. | "add a Codex hook". |
 | `oc-go-key` | **Retired OpenCode path (Pi sole-TUI 2026-11-09).** Historically recovered a session stopped by "Go usage limit exceeded": read which OpenCode Go account served this Mac, swapped the credential (`oc-go-key use <label>`), resumed the turn. Keep for archive/history only; not a live Pi or Paseo recovery path. | Legacy OpenCode Go-limit recovery only. |
 | `paseo-screen` | The one screen-control tool (2026-10-31): looks at and drives the Mac's GUI through the Paseo plugin `paseo-screen`; safety rules inside (look before clicking). | `/paseo-screen`; "take a screenshot of the screen". |
+| `ingest-web-ai` | Design + offline normalizer for Gemini/Grok (and similar) web chats into ADE memory (Carried #23). No live scrape, no credentials, no S1 writes. | `/ingest-web-ai`; "normalize a Gemini export". Doc: `docs/ingest-web-ai.md`. |
 | `tell-chief-of-staff` | Pointer (2026-11-06): messaging the Grok Bot "Chief of Staff" lives in the peer-link repository. | "tell grok", "tell Chief of Staff". |
 | `tell-coding-bot` | Pointer (2026-11-06): the Grok Bot "Coding" sender lives in the peer-link repository. | "tell the Coding bot". |
 
