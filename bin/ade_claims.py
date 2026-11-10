@@ -1773,10 +1773,14 @@ def _resolve_hooks_path(call: GitCall, value: str) -> Optional[Path]:
 
 
 def _stubs_in_dir(hooks_dir: Path) -> bool:
-    """True when `hooks_dir` holds every ade-git-guard stub (`STUB_MARK` in the first 400 bytes of each)."""
+    """True when `hooks_dir` holds every ade-git-guard stub (`STUB_MARK` in the first 400 bytes of each)
+    and each stub is executable (git ignores hooks without the executable bit)."""
     for name in HOOK_NAMES:
+        path = hooks_dir / name
         try:
-            with open(hooks_dir / name, "r", encoding="utf-8", errors="replace") as f:
+            if not os.access(path, os.X_OK):
+                return False
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
                 if STUB_MARK not in f.read(400):
                     return False
         except OSError:
@@ -1787,7 +1791,7 @@ def _stubs_in_dir(hooks_dir: Path) -> bool:
 def _local_hooks_path_decision(call: GitCall, env: dict[str, str]) -> Optional[Decision]:
     """§10 residual (2026-11-10): a repository whose local/worktree `core.hooksPath` is set and is not the ade stubs
     directory never runs the claim hooks. Refuse `push` and ref-writing subcommands (`hooks-path`, exit 77). An
-    ade-stub hooksPath (the directory holds the installed stubs) stays allowed; unset local hooksPath is unchanged."""
+    ade-stub hooksPath (the directory holds the installed stubs, each executable) stays allowed; unset local hooksPath is unchanged."""
     if not _is_ref_write_or_push(call):
         return None
     state, scoped = _config_scopes(call, env)

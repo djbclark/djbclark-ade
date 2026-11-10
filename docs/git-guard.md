@@ -157,10 +157,10 @@ Evaluated in order; the module docstring has every form.
    caller's environment, 5 s timeout: `HOME`, `XDG_CONFIG_HOME`, `GIT_CONFIG_GLOBAL/SYSTEM`, `[include]`d files; exit 0 = set,
    1 = unset) (`hook-config`). A repository's own (local or worktree) `hooksPath` is not refused for ordinary calls: the
    repository chose it (husky, pre-commit), the hooks do not run there, and `install` reports it (78). **When that local /
-   worktree `hooksPath` is set and is not the ade-git-guard stubs directory** (the directory holds the installed stubs;
-   `/dev/null`, empty, husky, and any other path count as non-ade), **`push` and ref-writing subcommands are refused**
-   (`hooks-path`, exit 77; §10 residual, 2026-11-10): without the stubs the claim hooks never run. An ade-stub
-   `hooksPath` stays allowed. If git answers neither 0 nor 1 (timeout, a
+   worktree `hooksPath` is set and is not the ade-git-guard stubs directory** (the directory holds the installed stubs,
+   each executable; `/dev/null`, empty, husky, non-executable copies, and any other path count as non-ade), **`push` and
+   ref-writing subcommands are refused** (`hooks-path`, exit 77; §10 residual, 2026-11-10): without the stubs the claim
+   hooks never run. An ade-stub `hooksPath` stays allowed. If git answers neither 0 nor 1 (timeout, a
    config file it cannot parse) the call is refused with that reason (`hook-config-unknown`): **the shim fails closed, the
    hooks fail open**. **acp-run's own config pairs (2026-10-30; transitional until Wave 6 deletes `tools/acp-run`):** while
    `acp-run` still launches agents it puts two `GIT_CONFIG_PARAMETERS` entries in every agent's environment,
@@ -233,10 +233,11 @@ analyser (and the Claude PreToolUse hook it was for, W5).
     `clone -c core.hooksPath=...` (above). Reproduced before round 11 (d9b0583, 3fb69ba): shim
     `clone -q --config core.hooksPath=/dev/null <up> c2`, then `push -f origin main:cb` in c2 moved the upstream branch.
     The durable rule now runs in the shim (`ade_claims.py` rule `hooks-path`, exit 77): when local/worktree
-    `core.hooksPath` is set and is not the ade-git-guard stubs directory (`/dev/null`, empty, husky, any other path),
-    refuse `push` and ref-writing subcommands (`update-ref`, non-read `branch`/`checkout`/`switch`/`commit`/`merge`/
-    `rebase`/`reset`/`stash`/`pull`/`symbolic-ref`/`worktree`, …). An ade-stub `hooksPath` (the directory holds the
-    installed stubs) stays allowed; ordinary non-ref-writing calls with a non-ade local `hooksPath` stay allowed.
+    `core.hooksPath` is set and is not the ade-git-guard stubs directory (`/dev/null`, empty, husky, non-executable
+    stub copies, any other path), refuse `push` and ref-writing subcommands (`update-ref`, non-read `branch`/
+    `checkout`/`switch`/`commit`/`merge`/`rebase`/`reset`/`stash`/`pull`/`symbolic-ref`/`worktree`, …). An ade-stub
+    `hooksPath` (the directory holds the installed stubs, each executable) stays allowed; ordinary non-ref-writing
+    calls with a non-ade local `hooksPath` stay allowed.
     Still out of reach by design: an absolute path to the real git (the hooks still would not run, and this shim never
     sees the call), and a human shell.
 11. **Template sources the shim only reads for `clone`, `init`:** `submodule add|update` and `fetch|pull --recurse-submodules` also

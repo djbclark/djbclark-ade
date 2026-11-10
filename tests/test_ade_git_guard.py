@@ -1576,6 +1576,20 @@ def test_local_ade_stub_hooks_path_allows_push_and_ref_writes(tmp_path, state):
     assert r.returncode == 0 and "hooks-path" not in r.stderr, r.stderr
 
 
+def test_local_non_executable_ade_stubs_hooks_path_refuses_push(tmp_path, state):
+    """§10: stubs without the executable bit are ignored by git — treat the hooksPath as non-ade."""
+    repo = mk_repo(tmp_path, state)
+    stubs = _write_ade_stubs(tmp_path / "ade-stubs")
+    for name in ade_claims.HOOK_NAMES:
+        (stubs / name).chmod(0o644)
+    plain(state, ["config", "core.hooksPath", str(stubs)], repo)
+    r = run(state, ["branch", "-f", "x", "main"], repo, who="B")
+    assert refused77(r) and "hooks-path" in r.stderr, r.stderr
+    r = run(state, ["push", "origin", "main"], repo, who="B")
+    # no remote configured: still the hooks-path refusal (exit 77), not git's own error
+    assert refused77(r) and "hooks-path" in r.stderr, r.stderr
+
+
 def test_relative_local_non_ade_hooks_path_refuses_push(tmp_path, state):
     """hooksPath relative to the common dir that is not the stubs is refused the same as an absolute one."""
     repo = mk_repo(tmp_path, state)
