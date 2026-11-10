@@ -30,6 +30,7 @@ Each doc carries its own summary.
 | [docs/slim/PLAN.md](docs/slim/PLAN.md), [docs/slim/log.md](docs/slim/log.md), [docs/slim/wave6-follow-up.md](docs/slim/wave6-follow-up.md) | the slim-down (2026-11-06/07): the plan, its rulings and the per-wave record of what was lost on purpose; Wave 6 follow-up deletion checklist for `relay.py` / `acp-dispatch` / `acp-run` (`bin/wave6-delete-check`, soft deadline 2026-11-20, queue Carried 1) |
 | [docs/paseo-only-rearchitecture.md](docs/paseo-only-rearchitecture.md) | the Paseo-only plan of 2026-10-30; the phases the slim-down superseded are marked |
 | [docs/queue.md](docs/queue.md) | carried work and blockers, one line each: check it before proposing new work |
+| [docs/s9-cloud-paseo.md](docs/s9-cloud-paseo.md) | design (2026-11-10): setup-plan S9 cloud ↔ Paseo — prerequisites, non-goals, phased experiments; no live wiring |
 | [docs/threat-model.md](docs/threat-model.md) | threat model (2026-10-20, re-based 2026-11-07): assets, actors, entry points, ranked threats |
 | [docs/review-boundary.md](docs/review-boundary.md) | `bin/review-launch`, `bin/review-pr` and the `adversary-marker` Action (2026-11-06): the boundary, the merge gate, what is untrusted |
 | [docs/git-guard.md](docs/git-guard.md) | `bin/ade-git-guard`, the ref hooks and the claim registry (owner and expiry): commands, exit codes, refusal rules |

@@ -525,6 +525,9 @@ the operator's Grok Bot "Coding", following the current browser route (operator 
 
 ## S9. Cloud agents talk to Paseo agents, and Paseo agents run them (last, and only with headroom)
 
+Design slice (2026-11-10, no live wiring): [`docs/s9-cloud-paseo.md`](s9-cloud-paseo.md) — prerequisites
+(item-24 signing, S5a deferred, headroom), non-goals, and phased experiments that do not install or route yet.
+
 Operator, 2026-11-07: plan it now, but build it at the tail end, and only if there is headroom. Cloud agents (Cursor's
 Cloud Agents, Claude Code cloud sessions, Codex cloud) should be able to message our Paseo agents, and Paseo agents
 should be able to start and manage them.

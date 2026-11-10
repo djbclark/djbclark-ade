@@ -111,7 +111,8 @@ under **Carried**, newest first, one line each; an item leaves when it ships (in
     (`config/ade.toml`), a justfile entry point, and browser-only steps through Grok Bot: the plan is `docs/setup-plan.md`.
     Later operator additions (2026-11-07): S4b manages ADE-owned jobs and checks other owners without taking them over;
     S5a originally accompanied setup, but security implementation is deferred by the 2026-11-08 operator ruling;
-    S9 plans cloud-agent communication last, after signing and the earlier sections, and builds only with headroom.
+    S9 plans cloud-agent communication last, after signing and the earlier sections, and builds only with headroom
+    (design slice: `docs/s9-cloud-paseo.md`, 2026-11-10 — prerequisites, non-goals, paper phases; no live wiring).
     Overall and local coordination now share the local lead.
 
 37. **Pi-only third-party client** (operator, 2026-11-08): migration and archive-only history search shipped;
