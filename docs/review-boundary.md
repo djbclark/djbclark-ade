@@ -105,10 +105,12 @@ gh pr checks N --watch --required                 # wait for Tests and the marke
 gh pr merge N --squash --match-head-commit <the head the marker names>
 ```
 
-## Operator merge order (`bin/ade-merge-ready`, 2026-11-09)
+## Operator merge order (`bin/ade-merge-ready`, 2026-11-09; `approve-paste` 2026-11-10)
 
 When many stacked ADE PRs wait on the merge gate (0 adversary SUCCESS), use the
-read-only helper — it never posts, merges, or invents an APPROVE:
+read-only helper — it never posts, merges, or invents an APPROVE. Open-PR listing
+uses `--limit 500` (fail closed if that cap is hit) so stack bottoms are not
+dropped when more than 100 PRs are open.
 
 ```sh
 bin/ade-merge-ready                  # classify open tips vs pytest-linux + adversary-marker
@@ -118,7 +120,18 @@ bin/ade-merge-ready stacks --group claims
 bin/ade-merge-ready stacks --group s1
 bin/ade-merge-ready stacks --group wave6          # full wave6 chains
 bin/ade-merge-ready stacks --bottoms-only         # bottoms only in each selected group
+bin/ade-merge-ready approve-paste                 # templates only (all needs_approve)
+bin/ade-merge-ready approve-paste --base master   # templates for master-base tips only
+bin/ade-merge-ready approve-paste --bottoms-only  # templates for named-stack bottoms only
+bin/ade-merge-ready approve-paste --group install --bottoms-only
 ```
+
+`approve-paste` prints only paste-ready `adversary-verdict:v1` APPROVE lines
+(no classify table). With `--base REF` it keeps PRs whose `baseRefName` equals
+`REF`. With `--bottoms-only` (and optional `--group`), it keeps only PRs that
+are bottoms of the named stacks (install / claims / s1 / wave6) — the same
+bottom set `stacks --bottoms-only` uses — so the operator can paste markers for
+merge-order bottoms without the full table.
 
 `stacks` derives order from each open PR's `baseRefName` → same-repo
 `headRefName` edge (live `gh pr list`, qualified by

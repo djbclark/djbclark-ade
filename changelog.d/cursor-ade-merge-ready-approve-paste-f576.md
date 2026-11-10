@@ -1,6 +1,6 @@
 ### Added
 
-- `ade-merge-ready approve-paste` prints paste-ready `adversary-verdict:v1` APPROVE templates (`--base`, `--bottoms-only`) without inventing or posting markers (#474).
+- `ade-merge-ready approve-paste` prints paste-ready `adversary-verdict:v1` APPROVE templates (`--base`, `--bottoms-only`) without inventing or posting markers; documented in `docs/review-boundary.md` Operator merge order (#474).
 
 ### Fixed
 
