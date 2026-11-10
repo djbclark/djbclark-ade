@@ -77,6 +77,20 @@ def test_docs_only_skips(repo: Path) -> None:
     assert "suite=skip" in r.stdout
 
 
+def test_root_instruction_markdown_only_skips(repo: Path) -> None:
+    """AGENTS/README/LICENSE alone should not burn ~11 min of pytest-linux (2026-11-10)."""
+    base = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    (repo / "AGENTS.md").write_text("# agents\n", encoding="utf-8")
+    (repo / "README.md").write_text("# readme\n", encoding="utf-8")
+    (repo / "LICENSE").write_text("MIT\n", encoding="utf-8")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "root md")
+    head = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    r = _run(repo, base, head)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "suite=skip" in r.stdout
+
+
 def test_code_change_needs_suite(repo: Path) -> None:
     base = _git(repo, "rev-parse", "HEAD").stdout.strip()
     (repo / "keep.py").write_text("x = 2\n", encoding="utf-8")

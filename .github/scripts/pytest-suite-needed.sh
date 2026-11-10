@@ -38,11 +38,14 @@ done
 [ -n "$base" ] && [ -n "$head" ] || usage
 
 # Paths that do not require the full suite. Keep in sync with docs/ci-notes.md.
-# Intentionally narrow: workflow, bin/, tests/, config/, skills/, AGENTS.md, etc.
-# always force a full run. context-policy still runs on every PR.
+# Intentionally narrow: workflow, bin/, tests/, config/, skills/, etc. still force
+# a full run. Root instruction markdown and LICENSE are covered by context-policy /
+# instruction-lint, not the 6k-test suite. context-policy still runs on every PR.
 skippable_path() {
   case "$1" in
     CHANGELOG.md|changelog.d/*|docs/*) return 0 ;;
+    # Root prose / license only (2026-11-10): AGENTS/CLAUDE/GEMINI/README/LICENSE.
+    AGENTS.md|CLAUDE.md|GEMINI.md|README.md|LICENSE) return 0 ;;
     *) return 1 ;;
   esac
 }
