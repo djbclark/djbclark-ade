@@ -1761,6 +1761,198 @@ def test_push_no_verify_and_every_no_v_prefix_is_refused_and_a_plain_push_is_not
     assert run(state, ["push", "--no-verify", "origin", "main"], repo).returncode == 0     # a human
 
 
+def _write_ade_stubs(hooks_dir: Path) -> Path:
+    """Install the ade-git-guard stubs into an arbitrary hooksPath directory (§10 allowed case)."""
+    hooks_dir.mkdir(parents=True, exist_ok=True)
+    for name in ade_claims.HOOK_NAMES:
+        dest = hooks_dir / name
+        dest.write_text(ade_claims._stub_text(name))
+        dest.chmod(0o755)
+    return hooks_dir
+
+
+@pytest.mark.parametrize("hooks_path", ["/dev/null", "/tmp/not-ade-hooks", ""], ids=["dev-null", "foreign-dir", "empty"])
+def test_local_non_ade_hooks_path_refuses_push_and_ref_writes(tmp_path, state, hooks_path):
+    """§10 residual: local core.hooksPath=/dev/null (or any non-ade path) lets push/ref-writes skip the claim hooks."""
+    repo = mk_repo(tmp_path, state)
+    bare = tmp_path / "o.git"
+    plain(state, ["init", "-q", "--bare", "-b", "main", str(bare)], tmp_path)
+    plain(state, ["remote", "add", "origin", str(bare)], repo)
+    if hooks_path == "":
+        plain(state, ["config", "core.hooksPath", ""], repo)   # empty value: git looks nowhere
+    else:
+        plain(state, ["config", "core.hooksPath", hooks_path], repo)
+    for argv in (["push", "origin", "main"], ["push", "-f", "origin", "main"],
+                 ["branch", "-f", "other", "main"], ["update-ref", "refs/heads/other", "HEAD"],
+                 ["commit", "--allow-empty", "-m", "x"], ["checkout", "-B", "nb"]):
+        r = run(state, argv, repo, who="B")
+        assert refused77(r) and "hooks-path" in r.stderr, (argv, r.returncode, r.stderr)
+    assert "main" not in plain(state, ["--git-dir", str(bare), "branch", "--list"], tmp_path)
+    # Ordinary non-ref-writing calls stay allowed (husky / pre-commit repos still work for status/add).
+    # Plain `branch <new>` too: without -f it cannot overwrite a claimed tip (lazy-install probes use it).
+    assert run(state, ["status", "--short"], repo, who="B").returncode == 0
+    assert run(state, ["add", "f"], repo, who="B").returncode == 0
+    assert run(state, ["branch", "--list"], repo, who="B").returncode == 0
+    assert run(state, ["branch", "plain-new"], repo, who="B").returncode == 0
+    assert run(state, ["stash", "list"], repo, who="B").returncode == 0
+    # A human shell is untouched.
+    assert run(state, ["push", "origin", "main"], repo).returncode == 0
+
+
+def test_local_ade_stub_hooks_path_allows_push_and_ref_writes(tmp_path, state):
+    """§10: when local hooksPath points at the ade stubs directory, the claim hooks still run — do not refuse."""
+    repo = mk_repo(tmp_path, state)
+    bare = tmp_path / "o.git"
+    plain(state, ["init", "-q", "--bare", "-b", "main", str(bare)], tmp_path)
+    plain(state, ["remote", "add", "origin", str(bare)], repo)
+    stubs = _write_ade_stubs(tmp_path / "ade-stubs")
+    plain(state, ["config", "core.hooksPath", str(stubs)], repo)
+    r = run(state, ["push", "origin", "main"], repo, who="B")
+    assert r.returncode == 0 and "hooks-path" not in r.stderr, r.stderr
+    assert "main" in plain(state, ["--git-dir", str(bare), "branch", "--list"], tmp_path)
+    r = run(state, ["branch", "extra"], repo, who="B")
+    assert r.returncode == 0 and "hooks-path" not in r.stderr, r.stderr
+    r = run(state, ["commit", "--allow-empty", "-m", "ok"], repo, who="B")
+    assert r.returncode == 0 and "hooks-path" not in r.stderr, r.stderr
+
+
+def test_local_non_executable_ade_stubs_hooks_path_refuses_push(tmp_path, state):
+    """§10: stubs without the executable bit are ignored by git — treat the hooksPath as non-ade."""
+    repo = mk_repo(tmp_path, state)
+    stubs = _write_ade_stubs(tmp_path / "ade-stubs")
+    for name in ade_claims.HOOK_NAMES:
+        (stubs / name).chmod(0o644)
+    plain(state, ["config", "core.hooksPath", str(stubs)], repo)
+    r = run(state, ["branch", "-f", "x", "main"], repo, who="B")
+    assert refused77(r) and "hooks-path" in r.stderr, r.stderr
+    r = run(state, ["push", "origin", "main"], repo, who="B")
+    # no remote configured: still the hooks-path refusal (exit 77), not git's own error
+    assert refused77(r) and "hooks-path" in r.stderr, r.stderr
+
+
+def test_forged_marker_only_stubs_hooks_path_refuses_push(tmp_path, state):
+    """§10: a script that only embeds STUB_MARK (and exits 0) is not the ade stub identity."""
+    repo = mk_repo(tmp_path, state)
+    stubs = tmp_path / "forged-stubs"
+    stubs.mkdir()
+    for name in ade_claims.HOOK_NAMES:
+        dest = stubs / name
+        dest.write_text(f"#!/bin/bash\n{ade_claims.STUB_MARK}\nexit 0\n")
+        dest.chmod(0o755)
+    plain(state, ["config", "core.hooksPath", str(stubs)], repo)
+    r = run(state, ["branch", "-f", "x", "main"], repo, who="B")
+    assert refused77(r) and "hooks-path" in r.stderr, r.stderr
+    r = run(state, ["push", "origin", "main"], repo, who="B")
+    assert refused77(r) and "hooks-path" in r.stderr, r.stderr
+
+
+def test_relative_local_non_ade_hooks_path_refuses_push(tmp_path, state):
+    """Relative hooksPath resolves from the process cwd after -C, not the common dir."""
+    repo = mk_repo(tmp_path, state)
+    plain(state, ["config", "core.hooksPath", "custom-hooks"], repo)
+    (repo / "custom-hooks").mkdir()
+    r = run(state, ["branch", "-f", "x", "main"], repo, who="B")
+    assert refused77(r) and "hooks-path" in r.stderr, r.stderr
+
+
+def test_relative_dot_git_hooks_path_allows_when_stubs_installed(tmp_path, state):
+    """core.hooksPath=.git/hooks from the work-tree cwd resolves to <cwd>/.git/hooks."""
+    repo = mk_repo(tmp_path, state)
+    bare = tmp_path / "o.git"
+    plain(state, ["init", "-q", "--bare", "-b", "main", str(bare)], tmp_path)
+    plain(state, ["remote", "add", "origin", str(bare)], repo)
+    _write_ade_stubs(repo / ".git" / "hooks")
+    plain(state, ["config", "core.hooksPath", ".git/hooks"], repo)
+    r = run(state, ["push", "origin", "main"], repo, who="B")
+    assert r.returncode == 0 and "hooks-path" not in r.stderr, r.stderr
+    assert "main" in plain(state, ["--git-dir", str(bare), "branch", "--list"], tmp_path)
+
+
+def test_relative_hooks_path_named_hooks_refuses_when_only_dot_git_hooks_has_stubs(tmp_path, state):
+    """core.hooksPath=hooks looks in <cwd>/hooks; stubs only under .git/hooks must still refuse."""
+    repo = mk_repo(tmp_path, state)
+    _write_ade_stubs(repo / ".git" / "hooks")
+    plain(state, ["config", "core.hooksPath", "hooks"], repo)
+    r = run(state, ["branch", "-f", "x", "main"], repo, who="B")
+    assert refused77(r) and "hooks-path" in r.stderr, r.stderr
+
+
+def test_relative_hooks_path_uses_cwd_after_C_not_work_tree(tmp_path, state):
+    """Git resolves relative hooksPath against cwd after -C, not --work-tree (dummy work-tree mismatch)."""
+    repo = mk_repo(tmp_path, state)
+    ext = tmp_path / "extcwd"
+    ext.mkdir()
+    dummy = tmp_path / "dummy-wt"
+    dummy.mkdir()
+    # Canonical stubs under the external cwd; forged marker+exit0 under the real work tree.
+    _write_ade_stubs(ext / "rel-hooks")
+    forged = repo / "rel-hooks"
+    forged.mkdir()
+    for name in ade_claims.HOOK_NAMES:
+        p = forged / name
+        p.write_text(f"#!/bin/bash\n{ade_claims.STUB_MARK}\nexit 0\n")
+        p.chmod(0o755)
+    plain(state, ["config", "core.hooksPath", "rel-hooks"], repo)
+    # cwd=ext (after -C), --work-tree=dummy: relative → ext/rel-hooks (real stubs) → allow
+    r = run(state, ["-C", str(ext), "--git-dir", str(repo / ".git"), "--work-tree", str(dummy),
+                    "branch", "from-cwd"], repo, who="B")
+    assert r.returncode == 0 and "hooks-path" not in r.stderr, r.stderr
+    # cwd=repo: relative → repo/rel-hooks (forged) → refuse
+    r = run(state, ["branch", "-f", "x", "main"], repo, who="B")
+    assert refused77(r) and "hooks-path" in r.stderr, r.stderr
+    # Real stubs only under work-tree; cwd elsewhere has none → refuse (Git ignores --work-tree here).
+    # Probe with force-update (plain `branch <new>` is not hooks-path-guarded).
+    for child in (ext / "rel-hooks").iterdir():
+        child.unlink()
+    (ext / "rel-hooks").rmdir()
+    _write_ade_stubs(repo / "rel-hooks")
+    r = run(state, ["--git-dir", str(repo / ".git"), "--work-tree", str(repo), "branch", "-f", "wt-only", "main"],
+            ext, who="B")
+    assert refused77(r) and "hooks-path" in r.stderr, r.stderr
+
+
+def test_tilde_hooks_path_expands_home(tmp_path, state, monkeypatch):
+    """Git expands a leading ~/ in core.hooksPath; the guard must too."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    repo = mk_repo(tmp_path, state)
+    _write_ade_stubs(home / "ade-hooks")
+    plain(state, ["config", "core.hooksPath", "~/ade-hooks"], repo)
+    r = run(state, ["branch", "ok-tilde"], repo, who="B")
+    assert r.returncode == 0 and "hooks-path" not in r.stderr, r.stderr
+    (home / "bad-hooks").mkdir()
+    plain(state, ["config", "core.hooksPath", "~/bad-hooks"], repo)
+    r = run(state, ["branch", "-f", "x", "main"], repo, who="B")
+    assert refused77(r) and "hooks-path" in r.stderr, r.stderr
+
+
+def test_fetch_and_remote_update_refused_when_local_hooks_path_non_ade(tmp_path, state):
+    """§10: fetch / fetch-pack / remote update can move refs/heads/* when hooksPath skips the claim hooks."""
+    repo = mk_repo(tmp_path, state)
+    plain(state, ["branch", "src", "main"], repo)
+    plain(state, ["config", "core.hooksPath", "/dev/null"], repo)
+    for argv in (["fetch", ".", "main:refs/heads/claimed"],
+                 ["fetch", ".", "src:refs/heads/claimed"],
+                 ["fetch-pack", str(repo)],
+                 ["remote", "update"],
+                 ["remote", "-v", "update"]):
+        r = run(state, argv, repo, who="B")
+        assert refused77(r) and "hooks-path" in r.stderr, (argv, r.returncode, r.stderr)
+    # Claimed dest must not have moved (fetch was refused before git ran).
+    assert "claimed" not in plain(state, ["branch", "--list"], repo)
+    # Ordinary remote verbs that do not fetch stay allowed.
+    assert run(state, ["remote"], repo, who="B").returncode == 0
+
+
+def test_operator_override_allows_hooks_path_refusal(tmp_path, state):
+    repo = mk_repo(tmp_path, state)
+    plain(state, ["config", "core.hooksPath", "/dev/null"], repo)
+    r = run(state, ["branch", "-f", "x", "main"], repo, who="B", ACP_OPERATOR_APPROVED="git-guard")
+    assert r.returncode == 0 and "ACP_OPERATOR_APPROVED=git-guard" in r.stderr
+    assert guard_log(state)[-1]["outcome"] == "override" and guard_log(state)[-1]["rule"] == "hooks-path"
+
+
 def test_the_operator_override_allows_a_fail_closed_refusal_and_logs_it(tmp_path, state):
     repo = mk_repo(tmp_path, state)
     r = run(state, ["frobnicate"], repo, who="B", ACP_OPERATOR_APPROVED="git-guard")
