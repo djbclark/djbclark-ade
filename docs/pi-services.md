@@ -69,7 +69,10 @@ image resources disabled unless separately chosen.
 
 Grok and Antigravity remain manual service paths. Their successful basic checks
 do not add them to `ade/auto`; named-pool freshness, identity, failure handling
-and continuation acceptance must precede a routing-policy change.
+and continuation acceptance must precede a routing-policy change. The operator
+gate is `config/pi-pool-acceptance.toml` (`accepted = false` for both as of
+2026-11-09); `bin/ade-pi-pools check` and `bin/pi-default` refuse automatic
+routing to an unaccepted pool ([dynamic defaults](pi-defaults.md) B4).
 
 ## SIPB's 32k context
 
