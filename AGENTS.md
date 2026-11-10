@@ -2,8 +2,8 @@
 
 You are an AI agent on djbclark's machine. This repo is the operating guide
 for running AI agents as **graphs** here: read this file, then follow the
-pointers. It applies to any agent (Claude Code, Codex, Cursor, OpenCode, omp,
-Hermes, Antigravity, …).
+pointers. It applies to any agent (Claude Code, Codex, Cursor, Pi, Hermes,
+Antigravity, …). OpenCode/omp are archived third-party TUIs (Pi-only ruling, 2026-11-08; docs/queue.md item 36).
 
 ## What this repo is
 
