@@ -8,8 +8,9 @@ and thin `just config-check`. Comment-preserving atomic `set` landed 2026-11-08.
 initialization and default reload in `bin/route_agent.py` also adopt `load_effective`.
 The final overlaid routing domain passes the legacy reader's shape/default checks
 before becoming routing constants. No new routes or policy values ship with this
-adoption. Do not ship tracked `config/ade.toml` yet (`ade-install` refuses while it
-is present).
+adoption. Install/keys metadata also has a bounded reader adoption below. Do not
+ship tracked `config/ade.toml` yet: other transitional readers still require
+separate adoption.
 
 ## A. Mapping table (one explicit projection)
 
@@ -25,6 +26,10 @@ is present).
 | `config/gates.toml` | `[frontier]` | `[gates.frontier]` |
 | `config/gates.toml` | `[floors.frontier]` | `[gates.floors.frontier]` |
 | `config/model-tiers.toml` | `[meta]` / `[rank]` / `[vendor.*]` / `[model.*]` / `[former]` | `[model_tiers]` |
+| `config/install.toml` | `[[component]]` | `[[install.component]]` |
+| `config/install.toml` | `[[login]]` | `[[install.login]]` |
+| `config/install.toml` | `[[install.jobs]]` / `[[install.retired_jobs]]` | unchanged |
+| `config/install.toml` | `[[key]]` identified by `name` | `[keys.<NAME>]` (name becomes the table identity) |
 
 Routing's current public tables stay at the effective root (not nested under a single
 `[routing]` umbrella that would drop `[lead]` / `[[service]]`). Gates nest under
@@ -88,6 +93,25 @@ B10. **Runtime model-tier adoption (2026-11-10).** The router validates one fina
     `model_tiers.load(path)` and explicit `reload_policy(path)` retain legacy file
     behavior; writers and `@role` migration are outside this unit. No tracked
     model choices or policy limits changed.
+B11. **Joint catalog reader adoption (2026-11-10).** `load_effective(domains=None)`
+    exposes every supported domain, including install/keys when present. The
+    router and frontier reader explicitly select their existing routing/gates/tiers
+    domains and do not start requiring `install.toml`. `ade_install.load_catalog()`
+    selects only install/keys, so catalog-only roots do not need routing files.
+    Legacy catalog absence is optional for unrelated readers; the catalog consumer
+    requires an effective install domain and non-empty component array. A present
+    unified file never falls back to legacy catalog data. Missing optional `[keys]`
+    means an empty registry, matching legacy optional-key behavior.
+    Named keys merge by metadata leaf; component/login/job arrays replace whole.
+    Duplicate legacy identities are rejected before projection into named tables.
+    Final metadata uses the existing catalog schema and pure semantic validator;
+    component choices, plugin observation, key operations and system boundaries
+    are unchanged. Explicit `load_catalog(install_path=...)` retains the isolated
+    legacy reader, including its refusal when a unified file is present.
+    For catalog-only roots without `ade.schema.json`, raw unified/local inputs
+    use the bundled full effective schema before domain isolation; if unavailable,
+    overlays refuse explicitly. With no overlays, the existing catalog schema is
+    sufficient. These readers perform no probes, installs or state writes.
 
 ## C. CLI
 
@@ -112,6 +136,8 @@ no alternate supposedly absent filename is probed or loaded. The pure loader's
 ### C2. `set` (2026-11-08)
 
 `ade-config set` is the comment-preserving atomic scalar writer (`bin/ade_config_edit.py`).
+Install/keys paths explicitly refuse `set` for every target until a separate
+writer adoption; adding their read schema does not enable edits to those domains.
 
 | Flag | Behaviour |
 | --- | --- |
@@ -159,9 +185,13 @@ tree in tests; tests must not write the real HOME config or flip live lead flags
 
 ## D. Install catalog (transitional, 2026-11-09)
 
-Separate from the routing/gates effective tree: `config/install.toml` + `ade-install`
-(`docs/install-catalog.md`). Refused when `config/ade.toml` is present so install/keys
-are not a second permanent authority beside a unified file.
+`config/install.toml` remains the legacy input when the unified file is absent.
+The effective loader projects its complete metadata and `ade-install` adapts that
+view back to the existing Catalog interface (`docs/install-catalog.md`). Pure
+shared validation lives in `bin/ade_install_catalog.py`, which imports neither
+the effective loader nor runtime installer. Explicit legacy path reads retain
+their original unified-presence refusal. No tracked unified file or writer
+expansion ships with this reader adoption.
 
 ## E. Provenance
 
