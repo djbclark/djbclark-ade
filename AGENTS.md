@@ -42,7 +42,8 @@ Each doc carries its own summary.
 | [docs/secret-deny.md](docs/secret-deny.md), [docs/pr-policy.md](docs/pr-policy.md) | the secret-read deny list and its renderer; who may open PRs on djbclark's repositories |
 | [docs/dispatch-footer.md](docs/dispatch-footer.md), [docs/agent-guard-contract.md](docs/agent-guard-contract.md) | the delivery footer every brief carries; the dispatch shim's per-agent argument guard (both go with the shim in Wave 6) |
 | [docs/skill-everywhere.md](docs/skill-everywhere.md), [docs/skills.md](docs/skills.md) | how skills are linked into every TUI; the skill inventory. [skills/](skills/) is the canonical copy: **edit and add skills here**, never via a TUI path |
-| [docs/mcp-servers.md](docs/mcp-servers.md), [docs/hand-alias.md](docs/hand-alias.md), [docs/post-edit-check.md](docs/post-edit-check.md), [docs/opencode-plugin-v2.md](docs/opencode-plugin-v2.md) | the MCP roster; the `/hand` alias per TUI; the post-edit syntax hook; OpenCode 2's plugin contract |
+| [docs/mcp-servers.md](docs/mcp-servers.md), [docs/hand-alias.md](docs/hand-alias.md), [docs/post-edit-check.md](docs/post-edit-check.md) | the MCP roster; the `/hand` alias per TUI; the post-edit syntax hook |
+| [docs/opencode-plugin-v2.md](docs/opencode-plugin-v2.md) | **archive only** (OpenCode retired under the 2026-11-08 Pi-only ruling): OpenCode 2's plugin contract |
 | [docs/upstream-issues.md](docs/upstream-issues.md), [docs/tui-lessons-learned.md](docs/tui-lessons-learned.md) | unfiled bug drafts for third-party projects; what each retired TUI was for and taught |
 | [.claude/workflows/graph-audit.js](.claude/workflows/graph-audit.js) | runnable micro-graph example, `/graph-audit` |
 | [skills/handoff/](skills/handoff/SKILL.md) | tab lifecycle: the successor starts top-level (`env -u PASEO_AGENT_ID -u PASEO_AGENT_CWD paseo run …`), archives its predecessor once it answers, and tells every sibling the new id; Paseo's own `paseo-handoff` once installed |
