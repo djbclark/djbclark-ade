@@ -23,6 +23,7 @@ Each doc carries its own summary.
 | Doc | For |
 |---|---|
 | [docs/model-routing.md](docs/model-routing.md) | which provider, model and effort for what work; numbers are dated, re-probe (`route_agent.py show`) |
+| [docs/dynamic-model-effort.md](docs/dynamic-model-effort.md) | design (2026-11-10): measured token efficiency → route/effort policy; gates; no live auto-route / no Jev nudge / no Pi acceptance writes (queue #24) |
 | [docs/orchestration-practices.md](docs/orchestration-practices.md) | rules every fan-out follows: briefs, the shim's exit codes, messaging, the stagger rule |
 | [docs/slim/PLAN.md](docs/slim/PLAN.md), [docs/slim/log.md](docs/slim/log.md), [docs/slim/wave6-follow-up.md](docs/slim/wave6-follow-up.md) | the slim-down (2026-11-06/07): the plan, its rulings and the per-wave record of what was lost on purpose; Wave 6 follow-up deletion checklist (`bin/wave6-delete-check`, soft deadline 2026-11-20, queue Carried 1) |
 | [docs/paseo-only-rearchitecture.md](docs/paseo-only-rearchitecture.md) | the Paseo-only plan of 2026-10-30; the phases the slim-down superseded are marked |
