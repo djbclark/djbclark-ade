@@ -1230,10 +1230,37 @@ def _apply_environment(
 
     policies, pol_detail = _list_deployment_branch_policies(cfg, run, env)
     if policies is None:
-        # Unknown list state — still try POST; surface list detail on failure.
-        if "404" not in pol_detail.lower():
-            pass
-        policies = []
+        # Fail closed: without a readable list we cannot DELETE extras or
+        # prove the set is exactly environment_branch (Security MEDIUM).
+        results.append(
+            _result(
+                id="environment-branch",
+                action="failed",
+                reason=f"cannot list deployment-branch-policies: {pol_detail}",
+                ok=False,
+            )
+        )
+        return results
+
+    def _readback_exact(prefix: str) -> dict[str, Any] | None:
+        """Re-list; return a failed result dict when not exactly want_branch."""
+        again, again_detail = _list_deployment_branch_policies(cfg, run, env)
+        if again is None:
+            return _result(
+                id="environment-branch",
+                action="failed",
+                reason=f"{prefix}; re-list failed: {again_detail}",
+                ok=False,
+            )
+        ok_exact, exact_detail = _branch_policies_exact(again, branch)
+        if not ok_exact:
+            return _result(
+                id="environment-branch",
+                action="failed",
+                reason=f"{prefix}; read-back: {exact_detail}",
+                ok=False,
+            )
+        return None
 
     extras = [
         p
@@ -1304,11 +1331,21 @@ def _apply_environment(
         if post_data is None and "empty gh stdout" not in post_detail:
             low = post_detail.lower()
             if "already" in low or "422" in low or "exists" in low:
+                # Idempotent POST is not proof the set is exclusive — re-list.
+                fail = _readback_exact(
+                    f"POST reported already-exists for {branch!r} ({post_detail})"
+                )
+                if fail is not None:
+                    results.append(fail)
+                    return results
                 results.append(
                     _result(
                         id="environment-branch",
                         action="skipped",
-                        reason=f"deployment branch {branch!r}: {post_detail}",
+                        reason=(
+                            f"deployment branch {branch!r} only "
+                            f"(POST already-exists; read-back ok)"
+                        ),
                         ok=True,
                     )
                 )
@@ -1325,6 +1362,10 @@ def _apply_environment(
         reason = f"deployment branch {branch!r} ensured"
         if deleted:
             reason += f"; deleted extras {deleted}"
+        fail = _readback_exact(reason)
+        if fail is not None:
+            results.append(fail)
+            return results
         results.append(
             _result(
                 id="environment-branch",
@@ -1336,14 +1377,19 @@ def _apply_environment(
         return results
 
     if deleted:
+        reason = (
+            f"deployment branch {branch!r} kept; "
+            f"deleted extras {deleted}"
+        )
+        fail = _readback_exact(reason)
+        if fail is not None:
+            results.append(fail)
+            return results
         results.append(
             _result(
                 id="environment-branch",
                 action="applied",
-                reason=(
-                    f"deployment branch {branch!r} kept; "
-                    f"deleted extras {deleted}"
-                ),
+                reason=reason,
                 ok=True,
             )
         )

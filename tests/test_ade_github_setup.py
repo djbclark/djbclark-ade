@@ -741,6 +741,8 @@ def test_apply_yes_deletes_extra_branch_policies(tmp_path):
         {"id": 1, "name": "master", "type": "branch"},
         {"id": 99, "name": "hotfix", "type": "branch"},
     ]
+    only_master = [{"id": 1, "name": "master", "type": "branch"}]
+    listed = {"n": 0}
 
     def runner(argv: list[str]) -> subprocess.CompletedProcess:
         joined = " ".join(argv)
@@ -755,8 +757,11 @@ def test_apply_yes_deletes_extra_branch_policies(tmp_path):
                     stdout='{"id":1,"name":"master","type":"branch"}\n',
                     stderr="",
                 )
+            listed["n"] += 1
+            # First list has extras; read-back after DELETE is exact.
+            payload = extras if listed["n"] == 1 else only_master
             return subprocess.CompletedProcess(
-                argv, 0, stdout=json.dumps(extras) + "\n", stderr=""
+                argv, 0, stdout=json.dumps(payload) + "\n", stderr=""
             )
         return base(argv)
 
@@ -767,6 +772,86 @@ def test_apply_yes_deletes_extra_branch_policies(tmp_path):
     assert by_id["environment-branch"]["action"] == "applied"
     assert "hotfix" in by_id["environment-branch"]["reason"]
     assert "99" in deleted
+
+
+def test_apply_yes_fails_when_branch_policy_list_unreadable(tmp_path):
+    """Unreadable policy list must fail closed (no coerce-to-[] success)."""
+    root = _fixture_root(tmp_path, app_id=4242)
+    cfg = ags.load_config(root=root)
+    env = cfg.github["environment"]
+    env_body = _env_api_body(cfg)
+
+    def runner(argv: list[str]) -> subprocess.CompletedProcess:
+        joined = " ".join(argv)
+        if "user/installations" in joined:
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout='[{"id":77,"app_id":4242,"app_slug":"ade-merge-gate"}]\n',
+                stderr="",
+            )
+        if f"environments/{env}" in joined and "deployment-branch" not in joined:
+            return subprocess.CompletedProcess(
+                argv, 0, stdout=json.dumps(env_body) + "\n", stderr=""
+            )
+        if "deployment-branch-policies" in joined:
+            return subprocess.CompletedProcess(
+                argv, 1, stdout="", stderr="HTTP 403: Resource not accessible\n"
+            )
+        return subprocess.CompletedProcess(argv, 1, stdout="", stderr="unexpected\n")
+
+    results, rc = ags.apply_yes(cfg, runner=runner)
+    assert rc == 1
+    by_id = {r["id"]: r for r in results}
+    assert by_id["environment-branch"]["ok"] is False
+    assert by_id["environment-branch"]["action"] == "failed"
+    assert "cannot list" in by_id["environment-branch"]["reason"]
+
+
+def test_apply_yes_post_already_exists_with_extras_fails(tmp_path):
+    """422 already-exists must re-list; extras remaining → fail, not skipped ok."""
+    root = _fixture_root(tmp_path, app_id=4242)
+    cfg = ags.load_config(root=root)
+    env = cfg.github["environment"]
+    env_body = _env_api_body(cfg)
+    listed = {"n": 0}
+    extras = [
+        {"id": 1, "name": "master", "type": "branch"},
+        {"id": 2, "name": "develop", "type": "branch"},
+    ]
+
+    def runner(argv: list[str]) -> subprocess.CompletedProcess:
+        joined = " ".join(argv)
+        if "user/installations" in joined:
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout='[{"id":77,"app_id":4242,"app_slug":"ade-merge-gate"}]\n',
+                stderr="",
+            )
+        if f"environments/{env}" in joined and "deployment-branch" not in joined:
+            return subprocess.CompletedProcess(
+                argv, 0, stdout=json.dumps(env_body) + "\n", stderr=""
+            )
+        if "deployment-branch-policies" in joined:
+            if "-X" in argv and "POST" in argv:
+                return subprocess.CompletedProcess(
+                    argv, 1, stdout="", stderr="HTTP 422: already exists\n"
+                )
+            listed["n"] += 1
+            # First list empty → POST; re-list after 422 still has extras.
+            if listed["n"] == 1:
+                return subprocess.CompletedProcess(argv, 0, stdout="[]\n", stderr="")
+            return subprocess.CompletedProcess(
+                argv, 0, stdout=json.dumps(extras) + "\n", stderr=""
+            )
+        return subprocess.CompletedProcess(argv, 1, stdout="", stderr="unexpected\n")
+
+    results, rc = ags.apply_yes(cfg, runner=runner)
+    assert rc == 1
+    by_id = {r["id"]: r for r in results}
+    assert by_id["environment-branch"]["ok"] is False
+    assert "develop" in by_id["environment-branch"]["reason"]
 
 
 def test_cli_apply_verify_mode_json_shape(tmp_path, monkeypatch):

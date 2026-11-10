@@ -13,3 +13,6 @@
 - Made environment deployment-branch-policies require exactly the configured
   branch (type=branch): `apply --yes` deletes leftovers; `apply --verify`
   fails when extras remain (#462).
+- Made `apply --yes` fail closed when deployment-branch-policies cannot be
+  listed, and re-list after POST already-exists / deletes before reporting
+  success (#462).
