@@ -236,7 +236,7 @@ owner installers (curl-free Cursor CLI fetch, Hermes offered path — basic setu
 via `just hermes-setup`, Paseo desktop/daemon and skill bundle), opt-in
 privilege-boundary `sudo-secretspec install --declarations` as a managed apply
 step (Linux media staging is recorded), recorded provider `verify_argv` recipes
-in the catalog, collect/set batch. S4b launchd/cron/`paseo schedule` reconcile
-write paths remain later work.
+in the catalog, collect/set batch. S4b cron reconcile write path landed with
+systemd (2026-11-10); launchd/`paseo schedule` reconcile write paths remain later work.
 Follow-up: tighten `--apply-system` with an ownership generation / read-back
 lock if multi-agent installs share a machine.

@@ -364,9 +364,55 @@ def test_pending_intent_is_not_removal_authority(fake, tmp_path):
     assert (fake.units / f"{label}.service").is_file()
 
 
-def test_yes_on_non_systemd_refuses(fake, tmp_path):
+def test_yes_on_launchd_refuses(fake, tmp_path):
+    """Launchd remains report-only for reconcile --yes (cron+systemd write)."""
     root = _mini_catalog(tmp_path)
     catalog = ai.load_catalog(root=root)
+    results, rc = S.reconcile(
+        catalog.jobs,
+        catalog.retired_jobs,
+        dry_run=False,
+        backend="launchd",
+        root=root,
+        ade=root,
+        env=fake.env,
+        state_dir=fake.state,
+        names={"deadline-sweep"},
+        live=S.LiveScan("launchd", ()),
+        platform_name="mac",
+    )
+    assert rc == S.EX_USAGE
+    assert all(r["action"] == "refuse-backend" for r in results)
+    assert not (fake.state / "jobs.json").exists() or S.load_jobs_ledger(fake.state, env=fake.env)["entries"] == {}
+
+
+def _cron_store_scripts(tmp_path: Path, log: Path) -> Path:
+    """Writable fake crontab: -l reads store; - replaces store from stdin."""
+    b = tmp_path / "cronbin"
+    b.mkdir(exist_ok=True)
+    store = tmp_path / "crontab.txt"
+    store.write_text("")
+    _script(
+        b / "crontab",
+        f'echo "crontab $*" >> "{log}"\n'
+        f'store="{store}"\n'
+        'case "$*" in\n'
+        '  -l)\n'
+        '    if [ ! -s "$store" ]; then echo "no crontab for tester" >&2; exit 1; fi\n'
+        '    cat "$store"; exit 0;;\n'
+        '  -)\n'
+        '    cat > "$store"; exit 0;;\n'
+        'esac\n'
+        'echo "unexpected crontab $*" >&2; exit 2\n',
+    )
+    return b / "crontab"
+
+
+def test_yes_on_cron_installs_and_ledgers(fake, tmp_path):
+    root = _mini_catalog(tmp_path)
+    catalog = ai.load_catalog(root=root)
+    crontab = _cron_store_scripts(tmp_path, fake.log)
+    env = {**fake.env, "ADE_SCHED_CRONTAB": str(crontab)}
     results, rc = S.reconcile(
         catalog.jobs,
         catalog.retired_jobs,
@@ -374,15 +420,157 @@ def test_yes_on_non_systemd_refuses(fake, tmp_path):
         backend="cron",
         root=root,
         ade=root,
-        env=fake.env,
+        env=env,
         state_dir=fake.state,
         names={"deadline-sweep"},
         live=S.LiveScan("cron", ()),
         platform_name="linux",
     )
-    assert rc == S.EX_USAGE
-    assert all(r["action"] == "refuse-backend" for r in results)
-    assert not (fake.state / "jobs.json").exists() or S.load_jobs_ledger(fake.state, env=fake.env)["entries"] == {}
+    assert rc == 0, results
+    assert any(r["action"] == "installed" and r["name"] == "deadline-sweep" for r in results)
+    ledger = S.load_jobs_ledger(fake.state, env=env)
+    entry = ledger["entries"]["deadline-sweep"]
+    assert entry["status"] == "committed"
+    assert entry["backend"] == "cron"
+    assert entry["label"] == "com.djbclark.deadline-sweep"
+    store = (tmp_path / "crontab.txt").read_text()
+    assert "# BEGIN ade-sched:com.djbclark.deadline-sweep" in store
+    st = S.status("com.djbclark.deadline-sweep", "cron", env=env)
+    assert st.installed is True
+
+    # Idempotent second pass: compare the installed crontab block (not Path("crontab").is_file()).
+    before = (tmp_path / "crontab.txt").read_text()
+    results2, rc2 = S.reconcile(
+        catalog.jobs,
+        catalog.retired_jobs,
+        dry_run=False,
+        backend="cron",
+        root=root,
+        ade=root,
+        env=env,
+        state_dir=fake.state,
+        names={"deadline-sweep"},
+        live=S.LiveScan(
+            "cron",
+            (S.LiveJob("com.djbclark.deadline-sweep", "cron", "crontab", True),),
+        ),
+        platform_name="linux",
+    )
+    assert rc2 == 0, results2
+    assert any(r["action"] == "skip" and r["name"] == "deadline-sweep" for r in results2)
+    assert (tmp_path / "crontab.txt").read_text() == before
+    assert S.load_jobs_ledger(fake.state, env=env)["entries"]["deadline-sweep"]["artifact_hash"] == entry["artifact_hash"]
+
+
+def test_cron_reconcile_refuses_cross_backend_ledger_remove(fake, tmp_path):
+    """A systemd ledger row must not be cleared by cron --yes (Codex P2 on #511)."""
+    root = _mini_catalog(tmp_path)
+    catalog = ai.load_catalog(root=root)
+    crontab = _cron_store_scripts(tmp_path, fake.log)
+    env = {**fake.env, "ADE_SCHED_CRONTAB": str(crontab)}
+    label = "com.djbclark.skillopt-sleep"
+    (fake.units / f"{label}.service").write_text(
+        f"# {S.GENERATED} from retired\n[Service]\nExecStart=/bin/true\n",
+        encoding="utf-8",
+    )
+    ledger = S.empty_jobs_ledger(env=env)
+    ledger["generation"] = 1
+    ledger["entries"]["skillopt-sleep"] = {
+        "logical_id": "skillopt-sleep",
+        "label": label,
+        "owner": "djbclark-ade",
+        "backend": "systemd",
+        "scope": "user",
+        "paths": [str(fake.units / f"{label}.service")],
+        "artifact_hash": "deadbeef",
+        "generation": 1,
+        "status": "committed",
+    }
+    S.save_jobs_ledger(ledger, fake.state, env=env)
+
+    steps = S.plan_reconcile(
+        catalog.jobs,
+        catalog.retired_jobs,
+        ledger=S.load_jobs_ledger(fake.state, env=env),
+        live=S.LiveScan("cron", ()),
+        backend_name="cron",
+        root=root,
+        ade=root,
+        env=env,
+        names={"skillopt-sleep"},
+        platform_name="linux",
+    )
+    assert not any(s.action == "remove" for s in steps)
+    assert any(
+        s.action == "report" and "ledger backend='systemd'" in s.detail for s in steps
+    )
+
+    results, rc = S.reconcile(
+        catalog.jobs,
+        catalog.retired_jobs,
+        dry_run=False,
+        backend="cron",
+        root=root,
+        ade=root,
+        env=env,
+        state_dir=fake.state,
+        names={"skillopt-sleep"},
+        live=S.LiveScan("cron", ()),
+        platform_name="linux",
+    )
+    assert rc == 0, results
+    assert not any(r["action"] == "removed" for r in results)
+    assert "skillopt-sleep" in S.load_jobs_ledger(fake.state, env=env)["entries"]
+    assert (fake.units / f"{label}.service").is_file()
+
+
+def test_yes_on_cron_removes_ledger_owned(fake, tmp_path):
+    root = _mini_catalog(tmp_path)
+    catalog = ai.load_catalog(root=root)
+    crontab = _cron_store_scripts(tmp_path, fake.log)
+    env = {**fake.env, "ADE_SCHED_CRONTAB": str(crontab)}
+    label = "com.djbclark.skillopt-sleep"
+    # Seed an ADE-owned cron block + ledger authority (retired inventory name).
+    (tmp_path / "crontab.txt").write_text(
+        f"# BEGIN ade-sched:{label}\n"
+        f"# generated by ade-sched\n"
+        f"* * * * * /bin/true\n"
+        f"# END ade-sched:{label}\n",
+        encoding="utf-8",
+    )
+    ledger = S.empty_jobs_ledger(env=env)
+    ledger["generation"] = 1
+    ledger["entries"]["skillopt-sleep"] = {
+        "logical_id": "skillopt-sleep",
+        "label": label,
+        "owner": "djbclark-ade",
+        "backend": "cron",
+        "scope": "user",
+        "paths": ["crontab"],
+        "artifact_hash": "deadbeef",
+        "generation": 1,
+        "status": "committed",
+    }
+    S.save_jobs_ledger(ledger, fake.state, env=env)
+
+    results, rc = S.reconcile(
+        catalog.jobs,
+        catalog.retired_jobs,
+        dry_run=False,
+        backend="cron",
+        root=root,
+        ade=root,
+        env=env,
+        state_dir=fake.state,
+        names={"skillopt-sleep"},
+        live=S.LiveScan("cron", (S.LiveJob(label, "cron", "crontab", True),)),
+        platform_name="linux",
+    )
+    assert rc == 0, results
+    assert any(r["action"] == "removed" and r["name"] == "skillopt-sleep" for r in results)
+    assert "skillopt-sleep" not in S.load_jobs_ledger(fake.state, env=env)["entries"]
+    store = (tmp_path / "crontab.txt").read_text()
+    assert f"# BEGIN ade-sched:{label}" not in store
 
 
 def test_cli_reconcile_dry_run_and_yes(fake, tmp_path):
@@ -393,6 +581,7 @@ def test_cli_reconcile_dry_run_and_yes(fake, tmp_path):
     data = json.loads(proc.stdout)
     assert data["mode"] == "dry-run"
     assert data["write_backend"] == "systemd"
+    assert data["write_backends"] == ["cron", "systemd"]
     assert any(r["action"] == "would-install" and r["name"] == "deadline-sweep" for r in data["results"])
     assert not (fake.units / "com.djbclark.deadline-sweep.service").exists()
 

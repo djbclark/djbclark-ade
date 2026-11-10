@@ -513,6 +513,14 @@ def test_drop_cron_block():
     assert S.drop_cron_block("a", "x") == ("a\n", False)
 
 
+def test_extract_cron_block():
+    block = "# BEGIN ade-sched:x\n1\n# END ade-sched:x\n"
+    text = "a\n" + block + "b\n# BEGIN ade-sched:xy\n2\n# END ade-sched:xy\n"
+    assert S.extract_cron_block(text, "x") == block
+    assert S.extract_cron_block("nope\n", "x") is None
+    assert S.extract_cron_block("# BEGIN ade-sched:x\nno end\n", "x") is None
+
+
 def test_drop_cron_block_refuses_an_unterminated_block():
     """A BEGIN with no END must not swallow the operator's following lines (adversary confirm on PR 291)."""
     text = "0 1 * * * mine\n" + S.cron_begin("x") + "\n* * * * * job\n5 5 * * * also-mine\n"
