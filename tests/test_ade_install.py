@@ -75,10 +75,134 @@ def test_repo_install_toml_checks_clean():
     assert by_id["hermes"].get("install_argv") is None  # curl|bash; no argv-list yet
     assert by_id["graft"]["class"] == "hard"
     assert by_id["graft"].get("probe_argv") == ["graft", "--version"]
+    assert by_id["ade-claim"].get("paseo_plugin") == "ade-claim"
+    assert by_id["ade-claim"].get("chosen") is False
+    assert by_id["ade-claim"].get("install_argv") is None
     proc = _run("check", "--json", root=REPO)
     assert proc.returncode == 0, proc.stderr
     payload = json.loads(proc.stdout)
     assert payload["ok"] is True
+
+
+def _paseo_plugin_catalog(tmp_path: Path, *, chosen: bool = False) -> Path:
+    root = tmp_path / "repo"
+    (root / "config").mkdir(parents=True)
+    (root / "config" / "install.schema.json").write_text(
+        (REPO / "config" / "install.schema.json").read_text()
+    )
+    (root / "config" / "install.toml").write_text(
+        "schema_version = 1\n"
+        "[[component]]\n"
+        'id = "ade-claim"\n'
+        'class = "optional"\n'
+        f"chosen = {'true' if chosen else 'false'}\n"
+        'paseo_plugin = "ade-claim"\n'
+        'install = "operator paseo plugin install only"\n'
+    )
+    return root
+
+
+def test_paseo_plugin_missing_when_paseo_absent(tmp_path, monkeypatch):
+    root = _paseo_plugin_catalog(tmp_path)
+    catalog = ai.load_catalog(root=root)
+    monkeypatch.setattr(ai.shutil, "which", lambda name: None)
+    o = ai.observe_component(catalog.components[0], root=catalog.root)
+    assert o.status == "missing"
+    assert "paseo not on PATH" in o.detail
+    assert "never install" in o.detail
+    obs, rc = ai.doctor(catalog)
+    by_id = {x.id: x for x in obs if x.kind == "component"}
+    assert by_id["ade-claim"].status == "missing"
+    assert rc == 0  # unchosen: visible, not a doctor failure
+
+
+def test_paseo_plugin_disabled_and_ok(tmp_path, monkeypatch):
+    root = _paseo_plugin_catalog(tmp_path)
+    catalog = ai.load_catalog(root=root)
+    monkeypatch.setattr(
+        ai.shutil, "which",
+        lambda name: "/usr/bin/paseo" if name == "paseo" else None,
+    )
+
+    def runner_disabled(argv, cwd):
+        assert argv == ["paseo", "plugin", "ls", "--json"]
+        body = json.dumps([
+            {"id": "other", "status": "running", "enabled": True},
+            {"id": "ade-claim", "status": "disabled", "enabled": False},
+        ])
+        return subprocess.CompletedProcess(argv, 0, stdout=body, stderr="")
+
+    o = ai.observe_component(catalog.components[0], root=catalog.root, runner=runner_disabled)
+    assert o.status == "disabled"
+    assert "never enable" in o.detail
+
+    def runner_ok(argv, cwd):
+        body = json.dumps({"plugins": [{"id": "ade-claim", "status": "running", "enabled": True}]})
+        return subprocess.CompletedProcess(argv, 0, stdout=body, stderr="")
+
+    o = ai.observe_component(catalog.components[0], root=catalog.root, runner=runner_ok)
+    assert o.status == "ok"
+    assert "running" in o.detail
+
+    def runner_absent(argv, cwd):
+        body = json.dumps([{"id": "session-guard", "status": "running"}])
+        return subprocess.CompletedProcess(argv, 0, stdout=body, stderr="")
+
+    o = ai.observe_component(catalog.components[0], root=catalog.root, runner=runner_absent)
+    assert o.status == "missing"
+    assert "not installed" in o.detail
+
+
+def test_paseo_plugin_chosen_disabled_fails_doctor(tmp_path, monkeypatch):
+    root = _paseo_plugin_catalog(tmp_path, chosen=True)
+    catalog = ai.load_catalog(root=root)
+    monkeypatch.setattr(
+        ai.shutil, "which",
+        lambda name: "/usr/bin/paseo" if name == "paseo" else None,
+    )
+
+    def runner(argv, cwd):
+        body = json.dumps([{"id": "ade-claim", "enabled": False, "status": "disabled"}])
+        return subprocess.CompletedProcess(argv, 0, stdout=body, stderr="")
+
+    obs, rc = ai.doctor(catalog, runner=runner)
+    by_id = {x.id: x for x in obs if x.kind == "component"}
+    assert by_id["ade-claim"].status == "disabled"
+    assert rc == 1
+
+
+def test_paseo_plugin_apply_never_installs(tmp_path):
+    root = _paseo_plugin_catalog(tmp_path, chosen=True)
+    catalog = ai.load_catalog(root=root)
+    results, rc = ai.apply(catalog, dry_run=True, ids={"ade-claim"})
+    assert results[0]["action"] == "blocked"
+    assert "never installs or enables" in results[0]["reason"]
+    assert rc == 1
+    # unchosen → skip
+    root2 = _paseo_plugin_catalog(tmp_path / "unchosen", chosen=False)
+    catalog2 = ai.load_catalog(root=root2)
+    results, rc = ai.apply(catalog2, dry_run=True, ids={"ade-claim"})
+    assert results[0]["action"] == "skip"
+    assert rc == 0
+
+
+def test_paseo_plugin_rejects_install_argv(tmp_path):
+    root = tmp_path / "repo"
+    (root / "config").mkdir(parents=True)
+    (root / "config" / "install.schema.json").write_text(
+        (REPO / "config" / "install.schema.json").read_text()
+    )
+    (root / "config" / "install.toml").write_text(
+        "schema_version = 1\n"
+        "[[component]]\n"
+        'id = "ade-claim"\n'
+        'class = "optional"\n'
+        "chosen = false\n"
+        'paseo_plugin = "ade-claim"\n'
+        'install_argv = ["paseo", "plugin", "install", "x"]\n'
+    )
+    with pytest.raises(ai.InstallError, match="install_argv"):
+        ai.load_catalog(root=root)
 
 
 def test_fixture_doctor_missing_vs_unchosen(tmp_path):

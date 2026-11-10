@@ -22,7 +22,7 @@ fully resolved ref name, and a non-zero exit aborts the transaction. So:
    verbs, rename/copy destinations), and **fails closed** on what it cannot read: under the old design a parser miss was a
    bypass, now it is a false refusal with a readable message.
 
-## Integration status (2026-10-25; re-based 2026-11-07; plugin scaffold 2026-11-09; W2 follow-up + W3+W4 draft 2026-11-09)
+## Integration status (2026-10-25; re-based 2026-11-07; plugin scaffold 2026-11-09; W2 follow-up + W3+W4 draft 2026-11-09; doctor probe 2026-11-10)
 
 The guard, the hooks and the claim library exist; claims carry an owner and expire (`ade_claims.py new --ttl`, default
 72 h; `ade-git-guard claim ls`, slim-down E8). **A thin Paseo plugin lives at
@@ -44,6 +44,12 @@ releases claims in a live session until `paseo plugin install` wires it. The ope
 `ade-git-guard install <repo>` once over `~/src/*` (the dangerous case is agent B in primary P moving Z's
 branch: the hook must be in P; the shim also installs it the first time an agent runs a non-read command there).
 The operator's shell and IDEs never go through the shim.
+
+**Doctor / catalog (2026-11-10, observe-only):** `config/install.toml` carries an `ade-claim` component with
+`paseo_plugin = "ade-claim"`. `ade-install doctor` runs `paseo plugin ls --json` and reports `missing` when the
+plugin is absent, `disabled` when it is installed but not enabled, and `ok` when enabled/running. It never runs
+`paseo plugin install` or `enable`; apply skips/blocks the row (no `install_argv`). Unchosen (`chosen = false`)
+so a missing Mac install is visible without failing the doctor exit code. See [`docs/install-catalog.md`](install-catalog.md).
 
 **Hard refusal stays off** until the S4 six-case pilot below passes (queue item 6; staged enforcement of standing
 order 9, adopted 2026-10-25). This page only scaffolds the pilot's cases and pass/fail criteria; it does not enable
