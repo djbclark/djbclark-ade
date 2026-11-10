@@ -4,6 +4,7 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import plistlib
 import re
 import shutil
 import sqlite3
@@ -622,7 +623,8 @@ def test_a_link_that_slips_past_the_check_is_dropped_not_followed(env, monkeypat
 def test_help_documents_exit_codes_exclusions_and_the_hermes_override():
     proc = subprocess.run([sys.executable, str(SCRIPT), "--help"], capture_output=True, text=True)
     assert proc.returncode == 0
-    for needle in ("ADE_BACKUP_HERMES", "Exit: 0 clean", "MANIFEST.json", "scrubbed", "--check-schemas", ".part"):
+    for needle in ("ADE_BACKUP_HERMES", "Exit: 0 clean", "MANIFEST.json", "scrubbed", "--check-schemas", ".part",
+                   "--keep", "--clean-parts", "--strict-stores", "cannot predict a schema-guard", ".ssh"):
         assert needle in proc.stdout, needle
 
 
@@ -2588,3 +2590,222 @@ def test_copy_regular_leaves_no_descriptor_open_on_a_directory_source(real, tmp_
         with pytest.raises(OSError, match="not a regular file"):
             mod.copy_regular(home / "adir", tmp_path / "dst")
     assert open_fd_count() == before
+
+
+# --- PR 24 carried LOWs: retention, leftover .part, hermes resolve, exclusions, CRED_RE (2026-11-09) ---
+
+def test_leftover_part_dirs_are_reported_and_clean_parts_removes_them(env, capsys):
+    mod, home, dest, tmp = env
+    populate(home)
+    parent = dest.parent
+    leftover = parent / "old.part"
+    leftover.mkdir()
+    (leftover / "unscrubbed.db").write_bytes(b"secret-bytes")
+    assert mod.main(["--dest", str(dest), "--only", "walstore", "--dry-run"]) == 0
+    err = capsys.readouterr().err
+    assert "leftover incomplete generation" in err and str(leftover) in err
+    assert leftover.is_dir()
+    assert mod.main(["--dest", str(dest), "--only", "walstore", "--clean-parts"]) == 0
+    assert not leftover.exists()
+    assert (dest / "MANIFEST.json").is_file()
+    assert "removed leftover incomplete generation" in capsys.readouterr().err
+
+
+def test_keep_prunes_older_complete_generations(env, capsys):
+    mod, home, dest, tmp = env
+    populate(home)
+    parent = dest.parent
+    for stamp in ("20260101T000000Z", "20260102T000000Z", "20260103T000000Z"):
+        g = parent / stamp
+        g.mkdir()
+        (g / "MANIFEST.json").write_text("{}")
+    (parent / "orphan-no-manifest").mkdir()
+    (parent / "half.part").mkdir()
+    new_dest = parent / "20260104T000000Z"
+    assert mod.main(["--dest", str(new_dest), "--only", "walstore", "--keep", "2"]) == 0
+    remaining = sorted(p.name for p in parent.iterdir() if p.is_dir())
+    assert remaining == ["20260103T000000Z", "20260104T000000Z", "half.part", "orphan-no-manifest"]
+    assert "pruned old generation" in capsys.readouterr().err
+    assert json.loads((new_dest / "MANIFEST.json").read_text())["ok"] is True
+
+
+def test_failed_runs_do_not_prune_or_consume_successful_keep_slots(env, monkeypatch, capsys):
+    """N failed runs must not replace usable --keep N backups (Codex P1 on PR 402)."""
+    mod, home, dest, tmp = env
+    populate(home)
+    parent = dest.parent
+    for stamp in ("20260101T000000Z", "20260102T000000Z"):
+        g = parent / stamp
+        g.mkdir()
+        (g / "MANIFEST.json").write_text(json.dumps({"ok": True, "errors": []}))
+    failed = parent / "20260103T000000Z-failed"
+    failed.mkdir()
+    (failed / "MANIFEST.json").write_text(json.dumps({
+        "ok": False, "errors": [{"store": "walstore", "error": "boom"}],
+    }))
+    # A real failed run (schema guard): rename succeeds, exit 1, must not prune the two good gens.
+    con = sqlite3.connect(str(home / ".fake/state.db"))
+    con.execute("CREATE TABLE accounts (secret_blob TEXT)")
+    con.execute("INSERT INTO accounts VALUES ('x')")
+    con.close()
+    bad_dest = parent / "20260104T000000Z"
+    assert mod.main(["--dest", str(bad_dest), "--only", "walstore", "--keep", "2"]) == 1
+    remaining = sorted(p.name for p in parent.iterdir() if p.is_dir())
+    assert remaining == [
+        "20260101T000000Z", "20260102T000000Z", "20260103T000000Z-failed", "20260104T000000Z",
+    ]
+    assert json.loads((bad_dest / "MANIFEST.json").read_text())["ok"] is False
+    assert "pruned old generation" not in capsys.readouterr().err
+    # A later successful run with --keep 2 prunes only successful gens; failed ones stay and do not
+    # occupy the retention count (keep the newest 2 successful: 20260102 and the new one).
+    for name in ("state.db", "state.db-wal", "state.db-shm"):
+        (home / ".fake" / name).unlink(missing_ok=True)
+    wal = make_wal_db(home / ".fake/state.db", ["one", "two"])
+    wal.execute("INSERT INTO t VALUES ('wal-only-row')")
+    wal.close()
+    good_dest = parent / "20260105T000000Z"
+    assert mod.main(["--dest", str(good_dest), "--only", "walstore", "--keep", "2"]) == 0
+    remaining = sorted(p.name for p in parent.iterdir() if p.is_dir())
+    assert remaining == [
+        "20260102T000000Z", "20260103T000000Z-failed", "20260104T000000Z", "20260105T000000Z",
+    ]
+    assert not (parent / "20260101T000000Z").exists()
+    assert "pruned old generation" in capsys.readouterr().err
+
+
+def test_failed_rename_does_not_prune_prior_successful_generations(env, monkeypatch, capsys):
+    mod, home, dest, tmp = env
+    populate(home)
+    parent = dest.parent
+    for stamp in ("20260101T000000Z", "20260102T000000Z"):
+        g = parent / stamp
+        g.mkdir()
+        (g / "MANIFEST.json").write_text(json.dumps({"ok": True, "errors": []}))
+    real_rename = os.rename
+
+    def boom(src, dst):
+        raise OSError(16, "device busy")
+
+    monkeypatch.setattr(os, "rename", boom)
+    new_dest = parent / "20260103T000000Z"
+    assert mod.main(["--dest", str(new_dest), "--only", "walstore", "--keep", "1"]) == 1
+    monkeypatch.setattr(os, "rename", real_rename)
+    remaining = sorted(p.name for p in parent.iterdir() if p.is_dir())
+    assert "20260101T000000Z" in remaining and "20260102T000000Z" in remaining
+    assert not new_dest.exists()
+    assert (parent / "20260103T000000Z.part").is_dir()
+    assert "pruned old generation" not in capsys.readouterr().err
+
+
+def test_clean_parts_refuses_before_delete_when_dest_is_inside_a_store(env, capsys):
+    """Invalid --dest must not delete sibling *.part under a live store (Codex P1 on PR 402)."""
+    mod, home, _, tmp = env
+    populate(home)
+    store_root = home / ".fake"
+    leftover = store_root / "live.part"
+    leftover.mkdir()
+    (leftover / "unscrubbed.db").write_bytes(b"secret-bytes")
+    bad_dest = store_root / "20260101T000000Z"
+    assert mod.main(["--dest", str(bad_dest), "--only", "walstore", "--clean-parts"]) == 2
+    err = capsys.readouterr().err
+    assert "refusing" in err and "inside the" in err
+    assert leftover.is_dir() and (leftover / "unscrubbed.db").read_bytes() == b"secret-bytes"
+    assert not bad_dest.exists()
+
+
+def test_clean_parts_refuses_when_parent_holds_a_source_store(env, monkeypatch, capsys):
+    mod, home, _, tmp = env
+    populate(home)
+    parent = tmp / "mixed"
+    parent.mkdir()
+    # Sibling of the proposed dest is a configured store root; cleanup must not touch its *.part.
+    store_root = parent / "wal-root"
+    store_root.mkdir()
+    leftover = parent / "sibling.part"
+    leftover.mkdir()
+    (leftover / "x").write_text("keep")
+    stores = [
+        {"name": "walstore", "kind": "sqlite", "files": [store_root / "state.db"]},
+        {"name": "tree", "kind": "sqlite-tree", "root": home / ".fake/chats", "dbs": ["*/*/store.db"],
+         "sidecars": ["meta.json"]},
+        {"name": "filestore", "kind": "files", "roots": [("sessions", home / ".fake/sessions")]},
+    ]
+    monkeypatch.setattr(mod, "build_stores", lambda h: stores)
+    bad_dest = parent / "20260101T000000Z"
+    assert mod.main(["--dest", str(bad_dest), "--only", "walstore", "--clean-parts"]) == 2
+    err = capsys.readouterr().err
+    assert "refusing" in err and "holds the" in err
+    assert leftover.is_dir() and (leftover / "x").read_text() == "keep"
+
+
+def test_dry_run_rejects_an_unresolvable_ade_backup_hermes_like_the_real_run(real, monkeypatch, capsys):
+    mod, home, tmp = real
+    make_hermes_db(home, (("a", 2),))
+    monkeypatch.setenv("ADE_BACKUP_HERMES", str(tmp / "no-such-hermes-binary"))
+    assert mod.main(["--only", "hermes-export", "--dry-run", "--json", "--dest", str(home / "dry")]) == 1
+    dry = json.loads(capsys.readouterr().out)
+    dest = home / "out" / "bk"
+    assert mod.main(["--only", "hermes-export", "--dest", str(dest)]) == 1
+    real_errors = manifest_of(dest)["stores"][0]["errors"]
+    assert dry["errors"] == real_errors
+    assert "ADE_BACKUP_HERMES does not resolve" in real_errors[0]["error"]
+
+
+def test_ssh_netrc_and_aws_credential_paths_are_excluded(real):
+    mod, home, _ = real
+    ex = mod.Excluder(home)
+    assert ex.path(home / ".ssh/id_ed25519")
+    assert ex.path(home / ".ssh")
+    assert ex.path(home / ".netrc")
+    assert ex.path(home / ".aws/credentials")
+    assert mod.is_excluded_name("id_rsa")
+    assert mod.is_excluded_name("id_ed25519")
+    assert mod.is_excluded_name("id_ed25519.pub")  # id_ed25519.*
+
+
+def test_cred_re_hits_authorization_cookie_jwt_and_a_tokens_table(real):
+    mod, _, _ = real
+    assert mod.CRED_RE.search("authorization")
+    assert mod.CRED_RE.search("cookie")
+    assert mod.CRED_RE.search("jwt_token") or mod.CRED_RE.search("jwt")
+    assert mod.CRED_RE.search("session_key")
+    hits = []
+    con = sqlite3.connect(":memory:")
+    con.execute("CREATE TABLE tokens (v TEXT)")
+    con.execute("CREATE TABLE t (input_tokens INT, api_key TEXT)")
+    hits = mod.schema_hits(con)
+    con.close()
+    assert ("tokens", None) in hits  # table named tokens is not counter-exempt
+    assert ("t", "api_key") in hits
+    assert ("t", "input_tokens") not in hits  # column counter still exempt
+
+
+def test_scrub_drops_triggers_before_deleting_credential_rows(real, tmp_path):
+    mod, _, _ = real
+    db = tmp_path / "oc.db"
+    con = sqlite3.connect(str(db))
+    con.executescript(
+        "CREATE TABLE credential (k TEXT); CREATE TABLE mirror (k TEXT);"
+        "CREATE TRIGGER copy_cred AFTER DELETE ON credential BEGIN "
+        "INSERT INTO mirror VALUES (old.k); END;"
+        "INSERT INTO credential VALUES ('live-key');"
+    )
+    con.close()
+    scrubbed = mod.scrub_copy(db, mod.SCRUB["opencode"])
+    assert "credential" in scrubbed
+    con = sqlite3.connect(str(db))
+    assert con.execute("SELECT COUNT(*) FROM credential").fetchone()[0] == 0
+    assert con.execute("SELECT COUNT(*) FROM mirror").fetchone()[0] == 0
+    assert con.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='trigger'").fetchone()[0] == 0
+    con.close()
+
+
+def test_schedule_plist_is_checked_in_with_strict_keep_and_clean_parts():
+    plist = ROOT / "config/launchd/com.djbclark.ade-backup-stores.plist"
+    assert plist.is_file()
+    data = plistlib.loads(plist.read_bytes())
+    argv = data["ProgramArguments"]
+    assert argv[0].endswith("bin/ade-backup-stores")
+    assert "--strict-stores" in argv and "--clean-parts" in argv
+    assert argv[argv.index("--keep") + 1] == "3"
+    assert "StartCalendarInterval" in data

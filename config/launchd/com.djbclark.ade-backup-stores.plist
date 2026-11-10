@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Template: bin/ade-sched install replaces __ADE__ (checkout), __HOME__, __STATE__ (log dir).
+     Daily scrubbed backup of every agent session store (PR 24 carried LOWs: schedule, retention, leftover .part).
+     Args: strict-stores, keep 3, clean-parts (scheduled readiness, retain three generations, remove leftover .part).
+     PATH prefers Homebrew / ~/.local/bin before /usr/bin so the shebang's python3 is not Apple's 3.9
+     (quiet WAL without -shm fails ro_connect under system SQLite 3.54). No secrets in argv or env.
+     Operator: ade-sched install config/launchd/com.djbclark.ade-backup-stores.plist
+     and set __STATE__ to $HOME/.local/state/ade/backups.
+     First generation 20261020T081802Z (pre credential scrub) stays an operator delete on the Mac. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.djbclark.ade-backup-stores</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__ADE__/bin/ade-backup-stores</string>
+    <string>--strict-stores</string>
+    <string>--keep</string>
+    <string>3</string>
+    <string>--clean-parts</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key><integer>4</integer>
+    <key>Minute</key><integer>20</integer>
+  </dict>
+  <key>RunAtLoad</key><false/>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>__HOME__/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>StandardOutPath</key><string>__STATE__/ade-backup-stores.log</string>
+  <key>StandardErrorPath</key><string>__STATE__/ade-backup-stores.log</string>
+</dict>
+</plist>
