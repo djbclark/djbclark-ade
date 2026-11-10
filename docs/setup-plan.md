@@ -279,6 +279,14 @@ Keys are saved with `sudo-secretspec`, and also through Paseo if it has a secure
 
      Outcomes go in `~/.local/state/djbclark-ade/keys.json`, written atomically, with no value and no hash of one.
    - A probe never spends money, never posts, and is rate-limited to one per key per run.
+   **Bounded coverage (2026-11-10):** the existing engine now has recorded
+   `verify_argv` for OpenAI model-list metadata and OpenRouter current-key
+   metadata. Both are fixed authenticated GETs with no inference calls or body
+   output; credentials stay in the injected environment/header. Their `ok`
+   verifies metadata authentication only, not inference entitlement, funding,
+   subscription quota or Pi acceptance. The other ten tracked provider rows,
+   expiry checks and live validation remain unfinished. See
+   [install-catalog.md](install-catalog.md) for contracts and sources.
 4. **Collect in one batch, one key at a time.** After the check, it prints one list of every key that is missing or
    failing, with its purpose and URL, and asks once whether to enter them now.
    - For each key in turn it shows the name, what uses it and the URL, then runs `sudo-secretspec set NAME`. That is

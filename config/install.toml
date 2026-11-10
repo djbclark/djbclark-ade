@@ -670,7 +670,8 @@ expiry = "unknown"
 name = "OPENAI_API_KEY"
 components = ["pi"]
 create_url = "https://platform.openai.com/api-keys"
-verify = "UNKNOWN"
+verify = "Authenticated GET /v1/models metadata only; not inference entitlement or quota"
+verify_argv = ["{bin}/ade-install", "verify-key", "openai"]
 expiry = "unknown"
 notes = "API credits through Pi; distinct from Codex monthly"
 
@@ -685,7 +686,8 @@ expiry = "unknown"
 name = "OPENROUTER_API_KEY"
 components = ["pi"]
 create_url = "https://openrouter.ai/keys"
-verify = "UNKNOWN"
+verify = "Authenticated GET /api/v1/key metadata only; not inference entitlement or quota"
+verify_argv = ["{bin}/ade-install", "verify-key", "openrouter"]
 expiry = "unknown"
 
 [[key]]

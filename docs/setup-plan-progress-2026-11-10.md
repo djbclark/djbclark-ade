@@ -5,7 +5,8 @@
 The setup plan is **not complete**, and its remaining work is **not all Mac-only**.
 Wave 6 source migrations are a separate milestone from the full S1–S9 plan.
 This checkpoint follows master `2d77c496aaad5f0babdca57c51aeb9f856629bdf`.
-All implementation PRs listed below are merged.
+The recent-PR table lists merged units; pending implementation PRs are
+identified explicitly in the matrix.
 It records code inspection, CI and review, not live installation acceptance.
 
 Recent merged ADE units:
@@ -48,9 +49,9 @@ No live configuration, key operations, installs or catalog choices changed.
 |---|---|---|
 | S1 configuration | Effective loader/schema, atomic scalar set, legacy isolation, routing/gates and runtime tiers; #548 adds install/key readers; #551 adds the context-budget reader | **Cloud code:** remaining domains/consumers and explicit install/key/context-budget writer adoption. #548 preserves isolated legacy `install_path` reads while the default reader adopts unified/local metadata. New install/key scalar writes remain refused. GitHub/hardening and other domains remain transitional; no tracked `ade.toml` yet. |
 | S2 entry point | Thin Just recipes for the implemented tools; scoped doctor | Recipes do not imply the underlying S3–S8 behaviors are complete. |
-| S3 installation | Typed catalog, doctor/plan, user install helpers, explicit system transaction and installation ledger; #544 diagnostics | **Cloud code:** real Python/Just bootstrap and orchestration, incomplete component recipes. **Live:** fresh Mac/Linux acceptance and provider logins. Diagnostics are not bootstrap. |
+| S3 installation | Typed catalog, doctor/plan, user install helpers, explicit system transaction and installation ledger; #544 diagnostics. #550 merged at `333e9f370fd32fa07cdd161fd30f922d8700f2cb`: explicit missing-Just acquisition followed only by installation preview | **Cloud code:** Python acquisition and full bootstrap/orchestration, incomplete component recipes. **Live:** fresh Mac/Linux acceptance and provider logins. Successful Just bootstrap is not full setup. |
 | S3a Hermes | DIY/AI prompt and recipes, catalog installation and chosen-component doctor | **Cloud code:** install choice flow and richer checklist probes. **Live:** Hermes/bridge/skills configuration and credentials. Scoped doctor currently delegates to the existing catalog probe. |
-| S3b keys | Registry, bulk presence check, verification engine, outcome state and daily check artifact | **Cloud code:** configured verification coverage, batch collect/retry/skip, delivery and expiry handling. All 12 shipped key rows currently lack `verify_argv`. **Live:** credentials, authenticated validation and evidence of Paseo's secure-store behavior. |
+| S3b keys | Registry, bulk presence check, verification engine, outcome state and daily check artifact. #552 adds fixed OpenAI/OpenRouter metadata-authentication probes (review/CI/merge pending) | **Cloud code:** remaining ten provider probes, batch collect/retry/skip, delivery and expiry handling. Metadata authentication does not establish inference funding/quota or pool acceptance. **Live:** credentials, authenticated validation and evidence of Paseo's secure-store behavior. |
 | S4 updates | Checkout/skill-link updater and daily behind-check; opt-in checkout-only auto-apply; #546 candidate planning | **Cloud code:** dependency execution, installed/ownership/activity evidence, retry/doctor outcomes and new-dependency handling. **Policy:** scheduled apply, mid-turn behavior and failure notification remain the stated options 2–3 decision. |
 | S4b jobs/services | Backend inventory/diff; launchd/systemd/cron and Paseo writes; pending/committed ownership ledger, locking and read-back | **Cloud code:** stronger shared admission, per-job activity/draining, durable busy/unknown/self-update deferral and cross-backend migration contracts. Backend support alone does not prove these. **Live:** backend activation, Linux user-manager/linger and installed-job verification. |
 | S5/S5a hardening | Existing trust/review boundaries and design documents | **Explicitly deferred:** new hardening application/classifier, reader adoption and canaries. `ade_harden.apply_refused()` still refuses mutation. This is a policy deferral, not a Mac limitation. |

@@ -860,6 +860,86 @@ def classify_verify_result(
     return status, f"verify {status} (no value read)"
 
 
+def verify_key_metadata(
+    provider: str,
+    *,
+    environ: Mapping[str, str] | None = None,
+    opener: Callable[..., Any] | None = None,
+) -> int:
+    """Two fixed authenticated metadata GETs; return existing verify exit codes.
+
+    Intended for verify_argv under sudo-secretspec run. No URL/key argv, body
+    output, retries, inference requests or quota/acceptance decisions.
+    """
+    import http.client
+    import math
+    import urllib.error
+    import urllib.request
+
+    endpoints = {
+        "openai": ("OPENAI_API_KEY", "https://api.openai.com/v1/models"),
+        "openrouter": ("OPENROUTER_API_KEY", "https://openrouter.ai/api/v1/key"),
+    }
+    if provider not in endpoints:
+        return 2
+    name, url = endpoints[provider]
+    key = (os.environ if environ is None else environ).get(name)
+    if not isinstance(key, str) or not key:
+        return VERIFY_EXIT_MISSING
+    if any(ord(char) < 33 or ord(char) > 126 for char in key):
+        return VERIFY_EXIT_INVALID
+
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            return None  # never forward Authorization to another request
+
+    open_request = opener or urllib.request.build_opener(NoRedirect()).open
+    request = urllib.request.Request(
+        url, method="GET", headers={"Authorization": "Bearer " + key, "Accept": "application/json"},
+    )
+    limit = 256 * 1024
+    try:
+        with open_request(request, timeout=10) as response:
+            status = response.getcode()
+            if status != 200:
+                return VERIFY_EXIT_INVALID if status in (401, 403) else VERIFY_EXIT_UNREACHABLE
+            body = response.read(limit + 1)
+    except urllib.error.HTTPError as error:
+        # Never read/print the error body or stringify the exception.
+        error.close()
+        return VERIFY_EXIT_INVALID if error.code in (401, 403) else VERIFY_EXIT_UNREACHABLE
+    except (urllib.error.URLError, OSError, http.client.HTTPException):
+        return VERIFY_EXIT_UNREACHABLE
+    except (ValueError, UnicodeError):
+        return 1
+    if not isinstance(body, bytes) or len(body) > limit:
+        return 1
+
+    def reject_nonfinite(_value):
+        raise ValueError("nonfinite JSON constant")
+
+    try:
+        payload = json.loads(body, parse_constant=reject_nonfinite)
+    except (ValueError, UnicodeError, RecursionError):
+        return 1
+    if not isinstance(payload, dict):
+        return 1
+    data = payload.get("data")
+    if provider == "openai":
+        valid = payload.get("object") == "list" and isinstance(data, list) and all(
+            isinstance(row, dict) and row.get("object") == "model"
+            and isinstance(row.get("id"), str) and bool(row["id"])
+            for row in data
+        )
+    else:
+        usage = data.get("usage") if isinstance(data, dict) else None
+        valid_usage = (
+            isinstance(usage, int) and not isinstance(usage, bool) and usage >= 0
+        ) or (isinstance(usage, float) and math.isfinite(usage) and usage >= 0)
+        valid = isinstance(data, dict) and isinstance(data.get("is_free_tier"), bool) and valid_usage
+    return VERIFY_EXIT_OK if valid else 1
+
+
 def observe_key_verify(
     row: dict[str, Any],
     *,
