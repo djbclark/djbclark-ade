@@ -1,10 +1,10 @@
 # Install catalog (transitional, 2026-11-09)
 
 Typed component / key-reference catalog with print-only `plan`, observe-only
-`doctor` (runs `probe_argv` when recorded), and **bounded user-scoped `apply`**.
-Doctor does **not** repair or read secret values. Full ownership-aware
-reconciliation and `--system` root effects remain later work
-(`docs/setup-plan.md` S3).
+`doctor` (runs `probe_argv` when recorded), observe-only `keys` (bulk
+`sudo-secretspec check`), and **bounded user-scoped `apply`**. Doctor and keys
+do **not** repair or read secret values. Full ownership-aware reconciliation
+and `--system` root effects remain later work (`docs/setup-plan.md` S3).
 
 ## A. Source
 
@@ -43,6 +43,13 @@ separate from keys; consent is not key validation. Recorded login commands
 (2026-11-09): `claude auth login`, `codex login`, `agent login` — doctor does
 not execute them.
 
+`ade-install keys` / `just keys` (2026-11-09) is the **presence half** of
+setup-plan S3b: it lists catalog key/login references, then runs
+`sudo-secretspec check --reason "ade-install keys"` when the binary is on
+PATH. It never calls get/export/set/run, never prints values, and does not
+yet run per-key verify probes (those stay a later unit). Exit 1 only when
+`check` runs and fails; a missing `sudo-secretspec` is `unknown` (exit 0).
+
 ## D. CLI
 
 ```
@@ -50,10 +57,12 @@ ade-install check [--root DIR] [--json]
 ade-install catalog [--root DIR] [--json]
 ade-install plan [--root DIR] [--json]
 ade-install doctor [--root DIR] [--json]
+ade-install keys [--root DIR] [--json]
 ade-install apply [--root DIR] [--json] [--dry-run|--yes] [--id ID ...] [--force]
                   [--state-dir DIR] [--prefix DIR]
 just install-check
 just install-doctor
+just keys
 just install-plan
 just install-apply-dry
 just doctor                 # alias of install-doctor (setup-plan S2 name)
@@ -91,6 +100,8 @@ Pass `--ade` only with a durable checkout (`~/src/djbclark-ade`); never with a l
   Doctor never mutates live settings (order 11). Missing or failed expected
   components fail the command; `unknown` is neither healthy nor absent.
   Doctor does not repair.
+- `keys` is observe-only bulk presence via `sudo-secretspec check`; no
+  verify probes and no secret values.
 - `apply` defaults to **dry-run**. `--yes` executes user `install_argv` for
   expected missing components (or `--force`). Writes an atomic ledger under
   `~/.local/state/djbclark-ade/install/ledger.json` (or `ADE_INSTALL_STATE_DIR`).
@@ -122,5 +133,5 @@ Pass `--ade` only with a durable checkout (`~/src/djbclark-ade`); never with a l
 
 Live system apply (root/`apt`/`brew` execution with ownership ledger), remaining
 owner installers (sudo-secretspec Linux tarball, curl-free Cursor CLI fetch, Hermes
-offered path, Paseo desktop/daemon and skill bundle), managed key verify probes.
-S4 jobs stay explicit later work.
+offered path, Paseo desktop/daemon and skill bundle), per-key verify probes under
+`sudo-secretspec run`, collect/set batch. S4 jobs stay explicit later work.

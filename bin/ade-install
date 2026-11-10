@@ -1,18 +1,20 @@
 #!/usr/bin/env -S python3 -I
-"""ade-install: transitional install catalog, plan, doctor, and bounded apply.
+"""ade-install: transitional install catalog, plan, doctor, keys, and bounded apply.
 
   ade-install check [--root DIR] [--json]
   ade-install catalog [--root DIR] [--json]
   ade-install plan [--root DIR] [--json]
   ade-install doctor [--root DIR] [--json]
+  ade-install keys [--root DIR] [--json]
   ade-install apply [--root DIR] [--json] [--dry-run|--yes] [--id ID ...] [--force]
 
 Doctor runs recorded probe_argv when present (else PATH presence) and, when
 agents/claude/settings.json.tmpl is under --root, checks live
 ~/.claude/settings.json for context_size_nudge.py registration; never
-repairs or mutates settings. Apply defaults to --dry-run; --yes runs user
-install_argv. --system --dry-run previews system_argv; executing system_argv
-is refused. Secrets are never read.
+repairs or mutates settings. Keys is observe-only presence via
+sudo-secretspec check (no values). Apply defaults to --dry-run; --yes runs
+user install_argv. --system --dry-run previews system_argv; executing
+system_argv is refused. Secrets are never read.
 Uses config/install.toml only while config/ade.toml is absent.
 See docs/install-catalog.md.
 """
@@ -132,6 +134,37 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     return rc
 
 
+def cmd_keys(args: argparse.Namespace) -> int:
+    try:
+        catalog = ai.load_catalog(root=Path(args.root) if args.root else None)
+        observations, rc = ai.keys_observe(catalog)
+    except ai.InstallError as e:
+        if args.json:
+            _print_json({"ok": False, "errors": [str(e)]})
+        else:
+            print(str(e), file=sys.stderr)
+            print("ade-install keys: FAIL", file=sys.stderr)
+        return 1
+    if args.json:
+        _print_json({
+            "ok": rc == 0,
+            "observations": [
+                {"kind": o.kind, "id": o.id, "status": o.status, "detail": o.detail}
+                for o in observations
+            ],
+            "note": "observe-only; sudo-secretspec check only; no get/export/set/verify",
+        })
+    else:
+        print(
+            "ade-install keys: "
+            + ("OK" if rc == 0 else "FAIL")
+            + " (observe-only; no values; no verify probes yet)"
+        )
+        for o in observations:
+            print(f"  {o.status:9} {o.kind}/{o.id}: {o.detail}")
+    return rc
+
+
 def cmd_apply(args: argparse.Namespace) -> int:
     if args.yes and args.dry_run_flag:
         print("ade-install apply: refuse both --yes and --dry-run", file=sys.stderr)
@@ -191,6 +224,11 @@ def main(argv: list[str] | None = None) -> int:
         ("plan", cmd_plan, "print-only install plan (no writes)"),
         ("doctor", cmd_doctor,
          "run probe_argv / PATH presence and Claude context_size_nudge registration; never repairs"),
+        (
+            "keys",
+            cmd_keys,
+            "observe-only key presence via sudo-secretspec check; never reads values",
+        ),
     ):
         p = sub.add_parser(name, parents=[shared], help=help_text)
         p.add_argument("--json", action="store_true")

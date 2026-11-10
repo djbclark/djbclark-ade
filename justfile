@@ -16,6 +16,10 @@ install-check:
 install-doctor:
     "{{ root }}/bin/ade-install" doctor --root "{{ root }}"
 
+# Observe-only key presence via sudo-secretspec check (no values, no verify).
+keys:
+    "{{ root }}/bin/ade-install" keys --root "{{ root }}"
+
 # Print-only install plan.
 install-plan:
     "{{ root }}/bin/ade-install" plan --root "{{ root }}"

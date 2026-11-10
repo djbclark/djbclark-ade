@@ -411,3 +411,56 @@ def test_repo_template_registers_context_size_nudge_events():
         ai.CONTEXT_SIZE_NUDGE,
     )
     assert events == {"PostToolUse", "UserPromptSubmit"}
+
+
+def test_keys_observe_missing_binary_is_unknown(tmp_path, monkeypatch):
+    root = _fixture_root(tmp_path)
+    catalog = ai.load_catalog(root=root)
+    monkeypatch.setattr(ai.shutil, "which", lambda _name: None)
+    obs, rc = ai.keys_observe(catalog)
+    assert rc == 0
+    by = {(o.kind, o.id): o for o in obs}
+    assert by[("secretspec", "check")].status == "unknown"
+    assert "not on PATH" in by[("secretspec", "check")].detail
+    assert any(o.kind == "key" for o in obs)
+
+
+def test_keys_observe_check_fail_exits_1(tmp_path):
+    root = _fixture_root(tmp_path)
+    catalog = ai.load_catalog(root=root)
+
+    def runner(argv, cwd):
+        assert argv[:2] == ["sudo-secretspec", "check"]
+        assert "--reason" in argv
+        return subprocess.CompletedProcess(argv, 1, stdout="", stderr="missing ANTHROPIC_API_KEY\n")
+
+    # Force binary "present" via argv0 path check: monkeypatch which for presence
+    # by making argv0 look like an existing file through a fake which.
+    real_missing = ai._probe_executable_missing
+
+    def not_missing(argv0: str) -> bool:
+        if argv0 == "sudo-secretspec":
+            return False
+        return real_missing(argv0)
+
+    ai._probe_executable_missing = not_missing  # type: ignore[assignment]
+    try:
+        obs, rc = ai.keys_observe(catalog, runner=runner)
+    finally:
+        ai._probe_executable_missing = real_missing  # type: ignore[assignment]
+    assert rc == 1
+    check = next(o for o in obs if o.kind == "secretspec")
+    assert check.status == "missing"
+    assert "missing ANTHROPIC_API_KEY" in check.detail
+
+
+def test_cli_keys_json(tmp_path, monkeypatch):
+    root = _fixture_root(tmp_path)
+    monkeypatch.setattr(ai.shutil, "which", lambda _name: None)
+    proc = _run("keys", "--json", root=root)
+    assert proc.returncode == 0, proc.stderr
+    payload = json.loads(proc.stdout)
+    assert payload["ok"] is True
+    assert "no get/export" in payload["note"]
+    kinds = {o["kind"] for o in payload["observations"]}
+    assert "secretspec" in kinds

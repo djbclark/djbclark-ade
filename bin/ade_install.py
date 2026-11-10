@@ -1,14 +1,15 @@
-"""ade_install: install catalog, plan, observe-only doctor, bounded apply.
+"""ade_install: install catalog, plan, observe-only doctor/keys, bounded apply.
 
 Transitional source: ``config/install.toml`` when ``config/ade.toml`` is absent.
 Key entries are names and metadata only. Doctor runs ``probe_argv`` when
 recorded (else PATH presence), checks live Claude ``context_size_nudge`` hook
 registration against ``agents/claude/settings.json.tmpl`` when that template
 is present under ``--root``, and never repairs or mutates
-``~/.claude/settings.json`` (order 11). Apply is user-scoped only:
-``--dry-run`` by default, ``--yes`` to execute recorded ``install_argv``
-(argv lists, never shell=True). Root / ``--system`` effects are refused until
-a later unit. Secrets are never read.
+``~/.claude/settings.json`` (order 11). ``keys`` runs ``sudo-secretspec
+check`` for bulk presence only (no get/export/set/verify). Apply is
+user-scoped only: ``--dry-run`` by default, ``--yes`` to execute recorded
+``install_argv`` (argv lists, never shell=True). Root / ``--system`` effects
+are refused until a later unit. Secrets are never read.
 """
 from __future__ import annotations
 
@@ -485,6 +486,93 @@ def observe_context_size_nudge(
         "settings", "context_size_nudge", "ok",
         f"{CONTEXT_SIZE_NUDGE} registered under {', '.join(sorted(actual))} in {live}",
     )
+
+
+SECRETSPEC_CHECK_ARGV = [
+    "sudo-secretspec",
+    "check",
+    "--reason",
+    "ade-install keys",
+]
+
+
+def observe_secretspec_check(
+    *,
+    runner: Runner | None = None,
+    timeout_s: float = 30.0,
+    cwd: Path | None = None,
+) -> Observation:
+    """Observe-only bulk presence check via ``sudo-secretspec check``.
+
+    Never calls get/export/set/run. Does not print or request secret values.
+    """
+    if _probe_executable_missing(SECRETSPEC_CHECK_ARGV[0]):
+        return Observation(
+            "secretspec",
+            "check",
+            "unknown",
+            "sudo-secretspec not on PATH; cannot check presence (no values read)",
+        )
+    run = runner or (lambda a, d: _default_runner(a, d, timeout_s=timeout_s))
+    root = (cwd or Path.cwd()).resolve()
+    try:
+        proc = run(list(SECRETSPEC_CHECK_ARGV), root)
+    except subprocess.TimeoutExpired:
+        return Observation(
+            "secretspec",
+            "check",
+            "error",
+            f"sudo-secretspec check timed out after {timeout_s}s",
+        )
+    except OSError as e:
+        return Observation("secretspec", "check", "error", f"exec error: {e}")
+    # check exit: 0 = required credentials present; non-zero = missing/fail.
+    # stdout/stderr may name keys; never treat as values. Truncate one line.
+    if proc.returncode == 0:
+        return Observation(
+            "secretspec",
+            "check",
+            "ok",
+            "sudo-secretspec check: required credentials present (no values read)",
+        )
+    err = (proc.stderr or proc.stdout or "").strip().splitlines()
+    detail = err[0][:200] if err else f"exit {proc.returncode}"
+    return Observation(
+        "secretspec",
+        "check",
+        "missing",
+        f"sudo-secretspec check failed: {detail}",
+    )
+
+
+def keys_observe(
+    catalog: Catalog,
+    *,
+    runner: Runner | None = None,
+    timeout_s: float = 30.0,
+) -> tuple[list[Observation], int]:
+    """Observe-only keys path (S3b presence half).
+
+    Lists catalog key references, then runs ``sudo-secretspec check`` when the
+    binary exists. Exit 1 only when check runs and fails; missing binary is
+    ``unknown`` (exit 0) so Linux/CI without the boundary stays observant.
+    Never verifies individual keys and never reads values.
+    """
+    obs: list[Observation] = [
+        Observation("catalog", str(catalog.path), "ok", "catalog validated"),
+    ]
+    for row in catalog.keys:
+        obs.append(observe_key(row))
+    for row in catalog.logins:
+        obs.append(observe_login(row))
+    check = observe_secretspec_check(
+        runner=runner,
+        timeout_s=timeout_s,
+        cwd=catalog.root,
+    )
+    obs.append(check)
+    rc = 1 if check.status in ("missing", "error") else 0
+    return obs, rc
 
 
 def doctor(
