@@ -72,6 +72,36 @@ Checked-in ADE jobs under `config/launchd/` include `com.djbclark.deadline-sweep
   are `unknown` (unavailable), never a traceback and never an empty-job "all missing" false
   positive (2026-11-10).
 
+## Paseo schedules (operator create, 2026-11-10)
+
+Judgment jobs live in `paseo schedule`, not ade-sched. Inventory rows (`kind = "paseo"`) record the
+intended name, cron, and `--mode`; the operator creates each one once (S4b reconcile may automate
+this later). Always pass an explicit `--mode` (`auto` for Claude, `auto-review` for Codex). Model id
+is the operator's pick; timezone is the Mac's IANA zone (`readlink /etc/localtime | sed 's|.*/zoneinfo/||'`).
+
+**context-budget** (C69, hard; nightly):
+
+```
+paseo schedule create --cron "50 3 * * *" --timezone <IANA> --name context-budget \
+  --mode auto --provider claude/<model> --cwd ~/src/djbclark-ade \
+  "Run ~/src/djbclark-ade/bin/context-budget-check --instruction-lint. Report its exit code and output in one paragraph; change nothing. Exit 1 is a budget breach or a rise, 3 a directory it could not measure."
+```
+
+**routing-recalibrate** (Carried #33 / E5; optional until `chosen = true` in `config/install.toml`):
+monthly Day 1 at 09:00, the judgment agent that used to be `bin/routing-recalibrate` + launchd
+(`com.djbclark.routing-recalibrate`, retired). It runs `route_agent.py calibrate` and, only when
+there are suggestions, edits `good_at` ranks in `config/routing.toml`.
+
+```
+paseo schedule create --cron "0 9 1 * *" --timezone <IANA> --name routing-recalibrate \
+  --mode auto --provider claude/<model> --cwd ~/src/djbclark-ade \
+  "Run ~/src/djbclark-ade/bin/route_agent.py calibrate --json --since 30. If suggestions is empty, say so and end (change nothing). Otherwise re-rank only the suggested service × kind good_at ranks in config/routing.toml by each listed delta (+N means worse / higher rank number; negative means better). One commit listing each before/after and the done_rate vs peer median that justified it; never change kinds eligibility, gates, reserve floors, frontier rows, burn_first, pace thresholds, or [calibrate]/[discovery]/[dispatch]/[hermes]/[lead]. Never touch a group under min_n. Run bin/pytest -q tests/test_route_agent.py (and calibrate siblings if present); open a PR from a worktree (master is PR-only). Do not push master."
+```
+
+After create: `paseo schedule ls --json`, then set `chosen = true` on the inventory row when you want
+doctor to expect it. The old launchd label stays in `[install.retired_jobs]` as
+`routing-recalibrate-launchd` / `com.djbclark.routing-recalibrate`.
+
 The options go before or after the subcommand.
 
 ### Linux quickstart

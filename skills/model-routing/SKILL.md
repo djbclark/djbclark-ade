@@ -122,6 +122,10 @@ an archived TUI or infer that a manual Pi smoke test authorizes automatic routin
 Agent-tool sub-agents run with `model: "sonnet"`; Claude code slices use Sonnet.
 D5. **In-flight slices reserve quota per service** (`[dispatch.estimate_floor]`, the repo overrides for tendcf and
 nix2cf): `acp-dispatch` refuses a slice that does not fit (exit 5, class `inflight`).
+D6. **Calibrate and monthly re-rank (2026-11-10):** `bin/route_agent.py calibrate [--json] [--since 30]` proposes
+`good_at` rank deltas from recent outcomes. The optional Paseo schedule `routing-recalibrate` (Day 1 09:00,
+`--mode auto`; create line in `docs/scheduling.md`, inventory in `config/install.toml`) applies them; leave
+`chosen = false` until the operator creates the schedule. Do not revive the deleted launchd script.
 
 ## E. Reading quota (a misreading here already cost a dispatch round)
 
