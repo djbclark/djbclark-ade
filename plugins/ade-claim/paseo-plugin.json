@@ -1,8 +1,8 @@
 {
   "id": "ade-claim",
   "name": "ADE workspace claim",
-  "description": "Creates an ade_claims registry entry when Paseo adds a git worktree (worktree.create.after).",
-  "version": "0.1.0",
+  "description": "Creates ade_claims and runs ade-git-guard install on worktree.create.after; releases on workspace.archive.after; on agent.open.before exports ADE_CLAIM_ID and prepends libexec/agent-bin to PATH; binds claim owner on agent.create.after.",
+  "version": "0.4.0",
   "requirements": {
     "paseo": ">=0.14.0"
   }

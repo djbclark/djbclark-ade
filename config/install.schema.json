@@ -98,6 +98,11 @@
           },
           "notes": {
             "type": "string"
+          },
+          "paseo_plugin": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Observe-only Paseo plugin id. Doctor runs `paseo plugin ls --json` and reports ok/disabled/missing; ade-install never installs or enables."
           }
         }
       }

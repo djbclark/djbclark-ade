@@ -37,6 +37,11 @@ unified file with reviewed consumer adoption.
   `--system --dry-run` / `--print-system-argv` preview the platform pick;
   live system exec needs `--yes --system --apply-system` (default refuse).
 - `presence` is a PATH basename fallback when `probe_argv` is absent.
+- `paseo_plugin` is an observe-only Paseo plugin id. Doctor runs
+  `paseo plugin ls --json` and reports `ok` / `disabled` / `missing` (never
+  installs or enables). `install_argv` is refused on these rows; apply skips
+  or blocks them. Unchosen optional rows still get a status so missing and
+  disabled are visible without failing the doctor exit code.
 
 ## C. Keys and logins
 
@@ -113,24 +118,26 @@ Pass `--ade` only with a durable checkout (`~/src/djbclark-ade`); never with a l
 
 - `plan` is print-only: `would-install` (has `install_argv`) / `needs-system` /
   `blocked` / `skip`.
-- `doctor` prefers `probe_argv` (runs the tool; argv list, short timeout) and
-  falls back to PATH `presence`. When `agents/claude/settings.json.tmpl` is
-  present under `--root`, it also checks that live `~/.claude/settings.json`
-  registers `context_size_nudge.py` under every hook event the template does
-  (queue Carried #10, 2026-11-09); a miss prints a hand-apply hint and fails.
-  Doctor never mutates live settings (order 11). Doctor also probes
-  `~/.local/state/ade/credential-bak/` (Carried #14, delete-after
-  **2026-11-19**): presence only — **WARN** within 14 days before that date
-  while the vault still exists, **FAIL** (`error`) on/after the date while it
-  still exists; absent is `ok`. Doctor **never deletes** the vault and never
-  reads its contents (deletion waits for operator yes after the date). Missing
-  or failed expected components fail the command (including hard-dep `graft` when
-  `graft --version` is missing or errors); `unknown` is neither healthy
-  nor absent. When `config/pi-pool-acceptance.toml` is present under `--root`,
-  doctor also runs an **advisory** `ade-pi-pools` check: `warn` names every
-  still-UNACCEPTED pool and keeps exit 0; accepted pools (Cursor / Z.ai on the
-  shipped file) stay quiet; doctor never writes `accepted=true` (operator flips
-  the file; docs/pi-defaults.md B4). Doctor does not repair.
+- `doctor` prefers `paseo_plugin` (observe-only `paseo plugin ls --json`), else
+  `probe_argv` (runs the tool; argv list, short timeout), else PATH `presence`.
+  When `agents/claude/settings.json.tmpl` is present under `--root`, it also
+  checks that live `~/.claude/settings.json` registers `context_size_nudge.py`
+  under every hook event the template does (queue Carried #10, 2026-11-09); a
+  miss prints a hand-apply hint and fails. Doctor never mutates live settings
+  (order 11). Doctor also probes `~/.local/state/ade/credential-bak/` (Carried
+  #14, delete-after **2026-11-19**): presence only — **WARN** within 14 days
+  before that date while the vault still exists, **FAIL** (`error`) on/after the
+  date while it still exists; absent is `ok`. Doctor **never deletes** the vault
+  and never reads its contents (deletion waits for operator yes after the date).
+  Missing, disabled, or failed **expected** components fail the command
+  (including hard-dep `graft` when `graft --version` is missing or errors);
+  unchosen `paseo_plugin` rows still print `missing`/`disabled` without failing;
+  `unknown` is neither healthy nor absent. When `config/pi-pool-acceptance.toml`
+  is present under `--root`, doctor also runs an **advisory** `ade-pi-pools`
+  check: `warn` names every still-UNACCEPTED pool and keeps exit 0; accepted
+  pools (Cursor / Z.ai on the shipped file) stay quiet; doctor never writes
+  `accepted=true` (operator flips the file; docs/pi-defaults.md B4). Doctor does
+  not repair, install, or enable.
 - `keys` is observe-only: bulk presence via `sudo-secretspec check`, then
   per-key `verify_argv` under `sudo-secretspec run` when recorded; no secret
   values.
@@ -161,6 +168,7 @@ Pass `--ade` only with a durable checkout (`~/src/djbclark-ade`); never with a l
 | `codex` | `npm install -g @openai/codex` |
 | `cursor-cli` | probe/update only (`agent --version` / `agent update`); install is official curl\|bash (no `install_argv` yet) |
 | `hermes` (offered) | probe/update only (`hermes doctor` / `hermes update`); install is official curl\|bash (no `install_argv` yet); opt-in basic setup `just hermes-setup` / `--self` (`prompts/setup/hermes.md`, `docs/hermes-setup.md`) |
+| `ade-claim` | observe-only `paseo_plugin`; no `install_argv` (operator `paseo plugin install`) |
 | others | still `UNKNOWN` / no `install_argv` |
 
 ## F. Operator path for live system apply (2026-11-09)

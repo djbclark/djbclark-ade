@@ -22,20 +22,44 @@ fully resolved ref name, and a non-zero exit aborts the transaction. So:
    verbs, rename/copy destinations), and **fails closed** on what it cannot read: under the old design a parser miss was a
    bypass, now it is a false refusal with a readable message.
 
-## Integration status (2026-10-25; re-based 2026-11-07; plugin scaffold 2026-11-09)
+## Integration status (2026-10-25; re-based 2026-11-07; plugin scaffold 2026-11-09; W2 follow-up + W3+W4 draft 2026-11-09; doctor probe + W2 `--ttl`/dry-run 2026-11-10)
 
 The guard, the hooks and the claim library exist; claims carry an owner and expire (`ade_claims.py new --ttl`, default
-72 h; `ade-git-guard claim ls`, slim-down E8). **A thin Paseo plugin scaffold lives at
-[`plugins/ade-claim/`](../plugins/ade-claim/)** (W2 / E8 F4): it registers `worktree.create.after` and runs
-`ade_claims.py new` with argv built from `{ worktree.path, worktree.branch }` plus
-`git rev-parse HEAD` and optional `remote.origin.url`. The helper path is **not** taken from the new
-worktree's checkout (untrusted): only `ADE_CLAIMS_PY` or `bin/ade_claims.py` beside the plugin install.
-It is **not installed or enabled on the operator Mac yet**; nothing creates claims in a live session until
-`paseo plugin install` wires it. Still to build: W2 follow-up (`ade-git-guard install` per new worktree if
-needed), W3 exporting `ADE_CLAIM_ID` (or binding owner on `agent.create.after`), W4 putting
-`libexec/agent-bin` first on each agent's PATH. The operator runs `ade-git-guard install <repo>` once over `~/src/*` (the
-dangerous case is agent B in primary P moving Z's branch: the hook must be in P; the shim also installs it the first time
-an agent runs a non-read command there). The operator's shell and IDEs never go through the shim.
+72 h; `ade-git-guard claim ls`, slim-down E8). **A thin Paseo plugin lives at
+[`plugins/ade-claim/`](../plugins/ade-claim/)** (W2 / E8 F4 + W2 follow-up + W3 + W4 draft):
+
+| Wave | Hook | What |
+|---|---|---|
+| W2 | `worktree.create.after` (waiting) | `ade_claims.py new --ttl` from `{ worktree.path, worktree.branch }` plus `git rev-parse HEAD` and optional `remote.origin.url` (TTL defaults to 72 h; override with `ADE_CLAIM_TTL`); then trusted `ade-git-guard install <path>` (soft-fails on exit 73/78 or a missing binary so create is not rolled back). `ADE_CLAIM_DRY_RUN=1` observes only: logs the planned argv and skips both `new` and install. |
+| W2 follow-up | `workspace.archive.after` (notification) | If an active claim exists for `workspace.cwd`, run `ade_claims.py release --id` (worktree teardown can still be pending). |
+| W3 | `agent.open.before` (waiting) | If an active claim exists for `request.cwd` **and** is unbound or owned by `request.agentId`, merge `ADE_CLAIM_ID=<claim id>` into the launch env (covers create's first open and resumes; never exports a foreign claim id). |
+| W3 | `agent.create.after` (notification) | If a claim for `agent.cwd` is unbound or already this agent, run `ade_claims.py bind-owner` (refuses overwriting another `owner.agent`). Cannot set env: Paseo's after-hook is fire-and-forget. |
+| W4 | `agent.open.before` (waiting) | Prepend trusted `libexec/agent-bin` to `PATH` so `git` resolves to the `ade-git-guard` shim (`ADE_AGENT_BIN` or `libexec/agent-bin` beside the plugin install). |
+
+### W2 hook path (design, 2026-11-10)
+
+Paseo fires `worktree.create.after` after a worktree exists on disk. The plugin's pure planner
+(`planWorktreeClaimCreate` in `plugins/ade-claim/server/claim-lib.mjs`) builds
+`python3 <trusted ade_claims.py> new --id … --path … --branch … --base-sha … --created-by paseo-ade-claim-plugin [--repo-origin …] --ttl <hours>`
+without spawning. The live hook then either:
+
+1. **Observe** (`ADE_CLAIM_DRY_RUN=1|true|yes`): log that argv (including `--ttl`) to stderr and return — no registry write, no `ade-git-guard install`. Safe for Mac dry-runs before `paseo plugin install` enables the plugin for real.
+2. **Create**: `spawnSync` the planned argv; on success soft-run trusted `ade-git-guard install <path>`.
+
+Helpers are never taken from the agent's worktree (untrusted): only `ADE_CLAIMS_PY` /
+`ADE_GIT_GUARD` / `ADE_AGENT_BIN` or `bin/ade_claims.py` / `bin/ade-git-guard` / `libexec/agent-bin` beside the
+plugin install. Claim lookup prefers `<git-dir>/ade-claim`, then `ade_claims.py list --json --state active`
+filtered by path. It is **not installed or enabled on the operator Mac yet**; nothing creates, installs or
+releases claims in a live session until `paseo plugin install` wires it (and dry-run stays observe-only even then). The operator may still run
+`ade-git-guard install <repo>` once over `~/src/*` (the dangerous case is agent B in primary P moving Z's
+branch: the hook must be in P; the shim also installs it the first time an agent runs a non-read command there).
+The operator's shell and IDEs never go through the shim.
+
+**Doctor / catalog (2026-11-10, observe-only):** `config/install.toml` carries an `ade-claim` component with
+`paseo_plugin = "ade-claim"`. `ade-install doctor` runs `paseo plugin ls --json` and reports `missing` when the
+plugin is absent, `disabled` when it is installed but not enabled, and `ok` when enabled/running. It never runs
+`paseo plugin install` or `enable`; apply skips/blocks the row (no `install_argv`). Unchosen (`chosen = false`)
+so a missing Mac install is visible without failing the doctor exit code. See [`docs/install-catalog.md`](install-catalog.md).
 
 **Hard refusal stays off** until the S4 six-case pilot below passes (queue item 6; staged enforcement of standing
 order 9, adopted 2026-10-25). This page only scaffolds the pilot's cases and pass/fail criteria; it does not enable
@@ -52,6 +76,8 @@ PATH refusal, `~/.local/bin/git`, or any new refuse path.
 | `ade-git-guard claim ls [--state active\|released\|merged\|expired] [--json]` | List what the claim registry holds: id, state, branch, owner, path, `expires_at` (2026-11-06; until then the listing was only `ade_claims.py list`, PLAN C5). Exit 2 for any other `claim` verb. |
 | `ade_claims.py new --id ID --path DIR --branch B --base-sha S [--ttl HOURS] [...]` | Create a claim and its pointer; it expires after `--ttl` hours (default 72, 0 = never); exit 3 id exists, 4 path held by another owner's active claim. |
 | `ade_claims.py list [--state S] [--json]` | What `claim ls` runs. |
+| `ade_claims.py bind-owner --id ID --owner-agent A [--owner-record R] [--owner-session S]` | W3: merge `owner.*` on an active claim (what `plugins/ade-claim` runs from `agent.create.after`); exit 2 missing/inactive/usage. |
+| `ade_claims.py release --id ID` | W2 follow-up: mark a claim `released` (what `plugins/ade-claim` runs from `workspace.archive.after`); idempotent when already released/merged; exit 2 missing/usage. |
 | `ade_claims.py guard -- GIT_ARGS...` | What the shim runs. |
 | `ade_claims.py hook-ref STATE`, `hook-push REMOTE URL` | What the two hooks run (stdin is git's). |
 
@@ -67,8 +93,9 @@ A claim names its owner (`owner.record`, `owner.session`, `allow`) and, since 20
 treat its workspace as unclaimed, `claim ls` shows it as `expired`, and another owner may claim the path. Expiry is read, not
 written, so an agent that died never leaves a workspace guarded for good; a record with no `expires_at` (all records before
 2026-11-06) never expires, and one that does not parse keeps the protection on. The CLI verbs `show`, `find` and
-`set-state` had no caller and were removed the same day (the library functions stay for the guard, the hooks and the tests);
-a claim is ended by its owner's tooling with `ade_claims.set_state(id, "released")`, or simply expires.
+generic `set-state` had no caller and were removed the same day (the library functions stay for the guard, the hooks and the
+tests); `release` returned 2026-11-09 for the ade-claim archive hook. A claim is ended by `ade_claims.py release --id`
+(or `ade_claims.set_state(id, "released")`), or simply expires.
 
 ## Who is guarded
 
@@ -325,7 +352,7 @@ marker whose PARAMETERS transport was stripped is repaired.
 Standing order 9's staged enforcement (adopted 2026-10-25; queue item 6) ends with **S4**: run six representative
 workflows under claim-aware workspaces **before any hard refusal** (before agents are forced through the PATH shim /
 `~/.local/bin/git`, and before `~/ops` leaves its transitional plain-master practice). S3 (changelog fragments) is done
-(PR 190). S1/S2 and the W2–W4 claim wiring are separate open work; this section does not implement them and does **not**
+(PR 190). S1/S2 are separate open work; W2–W4 claim wiring lands via the ade-claim promote PR (plugin + doctor probe). This section does **not**
 flip refusal on.
 
 **Gate (explicit):** hard refusal stays off until every case below is run once, recorded with the metrics, and the

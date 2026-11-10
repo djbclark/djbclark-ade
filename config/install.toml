@@ -343,6 +343,19 @@ probe = "UNKNOWN"
 platforms = ["mac", "linux"]
 notes = "Archives preserved; do not auto-reinstall herdr"
 
+[[component]]
+id = "ade-claim"
+class = "optional"
+chosen = false
+summary = "Paseo plugin that auto-wires ade_claims on worktree create/archive (observe-only until operator install)"
+source = "plugins/ade-claim"
+paseo_plugin = "ade-claim"
+install = "paseo plugin install /absolute/path/to/plugins/ade-claim (operator only; doctor/apply never install or enable)"
+update = "UNKNOWN"
+probe = "paseo plugin ls --json (id=ade-claim → ok|disabled|missing)"
+platforms = ["mac", "linux"]
+notes = "2026-11-10: catalog/doctor observe-only. Reports missing when not installed, disabled when installed but not enabled; never writes install_argv and never runs enable."
+
 # --- suggested / never (recorded, not installed by default) ---
 
 [[component]]

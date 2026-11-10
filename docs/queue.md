@@ -32,12 +32,14 @@ under **Carried**, newest first, one line each; an item leaves when it ships (in
 6. **Push on completion** (load-watch agent 96a17744, 2026-10-23): a delegated slice tells its requester "done: title,
    status, report" when its turn ends, instead of waiters polling; candidates are Paseo's `tell-agent` plugin (J6) or the
    dispatch footer. Lives in `docs/orchestration-practices.md`.
-7. **ade-git-guard's open items** (2026-10-25 onward; W2–W4 landed 2026-11-10): `plugins/ade-claim/` scaffolds
-   landed (#336 worktree claim, #355 `ADE_CLAIM_ID` + bind-owner, #357 `libexec/agent-bin` on PATH, #381
-   release-on-archive + install-on-create). Still open: live claim creation on the Mac (`paseo plugin install` +
-   observe/`new --ttl` hook path; E8 F4), the O2 redesign's residual (writes outside the caller's claimed workspace,
-   with failing tests and an adversary round), the six-case enforcement pilot (S4) before any hard refusal, and the
-   optional narrowing E8 declined (F3: a security decision for the operator). Lives in `docs/git-guard.md`.
+7. **ade-git-guard's open items** (2026-10-25 onward; W2–W4 + doctor probe + W2 `--ttl`/dry-run 2026-11-10):
+   `plugins/ade-claim/` W2–W4 + W2 follow-up land on master; W2 always passes `ade_claims.py new --ttl` and
+   supports `ADE_CLAIM_DRY_RUN` observe-only; `ade-install` catalog/doctor observe `paseo_plugin=ade-claim` as
+   missing/disabled/ok and **never** install or enable. Still open: live Mac `paseo plugin install` (or dry-run
+   first) + observe/`new --ttl` hook path (E8 F4), the O2 redesign's residual (writes outside the caller's claimed
+   workspace, with failing tests and an adversary round), the six-case enforcement pilot (S4) before any hard
+   refusal, and the optional narrowing E8 declined (F3: a security decision for the operator). Lives in
+   `docs/git-guard.md`.
 8. **Drop the brew Paseo for our fork** (2026-10-24): disruptive, **ask the operator first**; after the connected-hosts work.
 9. **Paseo connected hosts** (2026-10-24): connect vps-primary (user `djbclark`) after a quiesced Paseo upgrade.
 10. **Paseo in-place model change upstream** (2026-10-23): `docs/upstream-issues.md` entry 17 (`paseo agent model <id>
