@@ -67,6 +67,38 @@ sched-diff:
 sched-reconcile *args:
     "{{ root }}/bin/ade-sched" reconcile --root "{{ root }}" {{ args }}
 
+# Validate github.toml + merge-gate App manifest (setup-plan S8; pure).
+github-setup-check:
+    "{{ root }}/bin/ade-github-setup" check --root "{{ root }}"
+
+# Observe-only merge-gate setup (optional gh probes; no repair, no secret reads).
+github-setup-observe:
+    "{{ root }}/bin/ade-github-setup" observe --root "{{ root }}"
+
+# Local-only observe (skip gh network probes).
+github-setup-observe-local:
+    "{{ root }}/bin/ade-github-setup" observe --local --root "{{ root }}"
+
+# Print-only S8 step plan.
+github-setup-plan:
+    "{{ root }}/bin/ade-github-setup" plan --root "{{ root }}"
+
+# Dry-run github setup apply (default; no mutations).
+github-setup:
+    "{{ root }}/bin/ade-github-setup" apply --dry-run --root "{{ root }}"
+
+# Alias for github-setup (explicit dry-run name).
+github-setup-dry:
+    "{{ root }}/bin/ade-github-setup" apply --dry-run --root "{{ root }}"
+
+# Live API apply: environment + ruleset (refuses browser App confirm / PEM store).
+github-setup-apply:
+    "{{ root }}/bin/ade-github-setup" apply --yes --root "{{ root }}"
+
+# API-only verify of manifest + environment + ruleset (no throwaway T0-T3b).
+github-setup-verify:
+    "{{ root }}/bin/ade-github-setup" apply --verify --root "{{ root }}"
+
 # Opt-in Hermes basic setup (setup-plan S3a). Does not install or force Hermes.
 # Default: open Claude Code on prompts/setup/hermes.md.
 # `just hermes-setup --self`: print the DIY checklist only (no agent, no peer-link).
