@@ -39,7 +39,7 @@ For the migration choices, compatibility names and Linux/macOS handoffs, read
 
 | Skill | What it does | How to use |
 |---|---|---|
-| `fan-out` | Fans separable work out and collects it: the Agent tool or a Workflow in process, `acp-dispatch` (the `paseo run` shim) or `paseo run --no-wait` for a slice in its own worktree, `paseo wait`/`acp-dispatch wait` to collect, the shared footer (2026-11-07; replaced `bigteam`). | "fan this out", "split this across agents". |
+| `fan-out` | Fans separable work out and collects it: the Agent tool or a Workflow in process, or native `paseo run --no-wait` for a slice in its own worktree, then `paseo wait` / `paseo send` to collect and steer (2026-11-09; Wave 6; the transitional `acp-dispatch` shim leaves ~2026-11-20). | "fan this out", "split this across agents". |
 | `model-routing` | The Claude tier for a role, effort, which pool takes a slice (`route_agent.py plan`), reading quota (aiuse, `paseo usage ls`), the frontier allowance, fallback chains (effort-routing and fallback-chains folded in, 2026-11-07). | Before a multi-agent run or when a quota window is tight. |
 | `dialogue` | A multi-model dialogue that produces one artifact with a final-word model: fixed rounds through pinned routes (a `paseo` route runs `paseo run --no-wait`, then `paseo wait`, and reads the reply file), footers with point ids and dissent. | "have the models chat about it and write X". Script: `skills/dialogue/scripts/dialogue.py`. |
 | `research` | Evidence-grounded research: every claim logged with a verbatim quote, a counter-evidence pass, a script that checks quotes and citations. | "deep research on X". Script: `skills/research/scripts/research_check.py`. |
@@ -57,9 +57,10 @@ For the migration choices, compatibility names and Linux/macOS handoffs, read
 | `tell-coding-bot` | Pointer (2026-11-06): the Grok Bot "Coding" sender lives in the peer-link repository. | "tell the Coding bot". |
 
 `skills/session-finder/` holds no skill any more: only the one-cycle relay shim `relay.py` over `paseo send` (until
-2026-11-20) and a `claude_identity.py` stub (the module is `bin/claude_identity.py`). Paseo's own skills (`paseo`,
-`paseo-advisor`, `paseo-committee`, `paseo-handoff`, `paseo-help`, `paseo-plugin`) are installed from Paseo (`npx skills
-add getpaseo/paseo`, `docs/skill-everywhere.md` 3a); the Claude template keeps them `user-invocable-only`.
+2026-11-20; new code calls `paseo send` directly) and a `claude_identity.py` stub (the module is `bin/claude_identity.py`).
+Paseo's own skills (`paseo`, `paseo-advisor`, `paseo-committee`, `paseo-handoff`, `paseo-help`, `paseo-plugin`) are
+installed from Paseo (`npx skills add getpaseo/paseo`, `docs/skill-everywhere.md` 3a); the Claude template keeps them
+`user-invocable-only`.
 
 **Where the others went (2026-10-31 to 2026-11-07; `slim/log.md` has each):** moved to site-djbclark
 (`~/ops/site-public-djbclark/skills`, 2026-11-06): aws-rules, barnowl, book-to-kb (as `tools/book-to-kb`), bottom-config,
