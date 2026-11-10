@@ -47,7 +47,8 @@ DEFAULT_LIMIT = 50
 MAX_LIMIT = 500
 GH_TIMEOUT = 120
 TITLE_MAX = 200
-BODY_MARK_SCAN = 4000  # only the head of a body is scanned for finding marks / title
+# Page size for GraphQL merged-PR listing (MERGED_AT desc); limit is applied after that order.
+MERGED_PAGE = 50
 
 FINDING_MARKS = (
     ("codex-code-review-finding:v1", "code"),
@@ -62,6 +63,15 @@ THREADS_QUERY = (
     "pullRequest(number:$number){reviewThreads(first:100,after:$cursor){pageInfo{hasNextPage endCursor} "
     "nodes{isResolved isOutdated comments(first:100){nodes{databaseId author{login} path "
     "originalCommit{oid}}}}}}}}"
+)
+
+# Repository.pullRequests ordered by MERGED_AT so --limit truncates the newest merges, not
+# updated-time order (REST pulls?sort=updated would let an old PR's new comment displace a
+# recent merge before the limit was applied).
+MERGED_PRS_QUERY = (
+    "query($owner:String!,$name:String!,$first:Int!,$cursor:String){repository(owner:$owner,name:$name){"
+    "pullRequests(states:MERGED,orderBy:{field:MERGED_AT,direction:DESC},first:$first,after:$cursor){"
+    "pageInfo{hasNextPage endCursor} nodes{number title mergedAt url}}}}"
 )
 
 # GraphQL mutation field names that must never appear in a query this tool builds.
@@ -107,10 +117,12 @@ def finding_kind(body: str) -> str | None:
     """Return 'code' or 'security' when BODY carries a Codex finding mark; else None.
 
     BODY is treated as opaque data: only literal mark presence is checked.
+    Scan the full body — Codex puts the mark at the end, and a long finding can
+    exceed any head truncation (title truncation is separate, in title_of).
     """
-    head = body[:BODY_MARK_SCAN] if body else ""
+    text = body or ""
     for mark, kind in FINDING_MARKS:
-        if mark in head:
+        if mark in text:
             return kind
     return None
 
@@ -283,41 +295,56 @@ def open_threads_for_pr(
 
 
 def list_merged_prs(gh: GhRunner, repo: str, limit: int) -> list[dict]:
-    """Newest merged PRs (by merged_at), up to limit. closed+merged_at via REST pulls."""
-    # Walk closed PRs newest-updated first; keep those with merged_at until limit.
+    """Newest merged PRs (by merged_at desc), up to limit.
+
+    Uses GraphQL pullRequests(states:MERGED, orderBy:MERGED_AT) so selection is by
+    merge time before --limit is applied. REST closed+sort=updated would stop early
+    on recently-touched old merges and hide newer ones.
+    """
+    owner, name = repo.split("/", 1)
     picked: list[dict] = []
-    # Cap pages so a huge repo cannot hang the hygiene sweep (100 per page).
-    max_pages = max(1, (limit + 99) // 100) + 2
-    page = 1
-    while len(picked) < limit and page <= max_pages:
-        endpoint = (
-            f"repos/{repo}/pulls?state=closed&sort=updated&direction=desc"
-            f"&per_page=100&page={page}"
-        )
+    cursor: str | None = None
+    seen: set[str] = set()
+    # Cap pages: enough for `limit`, plus a small slack for empty/partial pages.
+    max_pages = max(1, (limit + MERGED_PAGE - 1) // MERGED_PAGE) + 2
+    page = 0
+    while len(picked) < limit and page < max_pages:
+        page += 1
+        first = min(MERGED_PAGE, limit - len(picked))
+        args = [
+            "api", "graphql",
+            "-f", f"owner={owner}", "-f", f"name={name}",
+            "-F", f"first={first}", "-f", f"query={MERGED_PRS_QUERY}",
+        ]
+        if cursor is not None:
+            args += ["-f", f"cursor={cursor}"]
         try:
-            raw = gh("api", endpoint)
-            batch = json.loads(raw)
-        except (ValueError, TypeError) as e:
-            raise GhError(f"pulls list page {page}: {e}") from e
-        if not isinstance(batch, list):
-            raise GhError(f"pulls list page {page}: unexpected shape {type(batch).__name__}")
-        if not batch:
-            break
-        for p in batch:
-            if not isinstance(p, dict) or not p.get("merged_at"):
+            doc = json.loads(gh(*args))
+            conn = doc["data"]["repository"]["pullRequests"]
+            nodes, info = conn["nodes"], conn["pageInfo"]
+        except (ValueError, KeyError, TypeError) as e:
+            raise GhError(f"graphql merged PRs page {page}: unusable answer: {e}") from e
+        if doc.get("errors"):
+            raise GhError(f"graphql merged PRs page {page}: errors: {str(doc['errors'])[:200]}")
+        for n in nodes or []:
+            if not isinstance(n, dict) or not n.get("mergedAt"):
                 continue
             picked.append({
-                "number": p.get("number"),
-                "title": (p.get("title") or "")[:TITLE_MAX],
-                "merged_at": p.get("merged_at"),
-                "url": p.get("html_url") or f"https://github.com/{repo}/pull/{p.get('number')}",
+                "number": n.get("number"),
+                "title": (n.get("title") or "")[:TITLE_MAX],
+                "merged_at": n.get("mergedAt"),
+                "url": n.get("url") or f"https://github.com/{repo}/pull/{n.get('number')}",
             })
             if len(picked) >= limit:
                 break
-        if len(batch) < 100:
+        if len(picked) >= limit or not info.get("hasNextPage"):
             break
-        page += 1
-    # Prefer true merged_at order among the candidates we collected.
+        cursor = info.get("endCursor")
+        if not cursor or cursor in seen:
+            raise GhError(f"graphql merged PRs page {page}: hasNextPage without a new endCursor")
+        seen.add(cursor)
+    # Already MERGED_AT desc from GraphQL; keep an explicit sort before the limit slice
+    # so a mis-ordered page (or a future REST fallback) cannot invert the contract.
     picked.sort(key=lambda x: x.get("merged_at") or "", reverse=True)
     return picked[:limit]
 

@@ -85,12 +85,21 @@ class FakeGh:
         if args[:2] == ("api", "--paginate"):
             return f"paginate:{args[2]}"
         if len(args) >= 2 and args[0] == "api" and args[1] == "graphql":
-            # Extract PR number from -F number=N
+            # Threads: -F number=N; merged list: -F first=N (no number=).
             num = None
+            first = None
             for i, a in enumerate(args):
-                if a == "-F" and i + 1 < len(args) and args[i + 1].startswith("number="):
-                    num = args[i + 1].split("=", 1)[1]
-            return f"graphql:{num}"
+                if a == "-F" and i + 1 < len(args):
+                    v = args[i + 1]
+                    if v.startswith("number="):
+                        num = v.split("=", 1)[1]
+                    elif v.startswith("first="):
+                        first = v.split("=", 1)[1]
+            if num is not None:
+                return f"graphql:{num}"
+            if first is not None:
+                return "graphql:merged"
+            return "graphql:?"
         if len(args) >= 2 and args[0] == "api":
             return f"api:{args[1]}"
         return " ".join(args)
@@ -103,6 +112,11 @@ def test_finding_kind_and_title_treat_body_as_data(cot):
     assert cot.title_of(body) == "P1: shell=True in helper"
     assert "Ignore previous" not in cot.title_of(body)
     assert len(cot.title_of("x" * 500)) == cot.TITLE_MAX
+    # Marker at the end of a long body must still match (Codex trailing mark).
+    long_body = ("x" * 5000) + "\n<!-- codex-code-review-finding:v1 -->\n"
+    assert cot.finding_kind(long_body) == "code"
+    long_sec = ("y" * 8000) + "\n<!-- codex-security-review-finding:v1 -->\n"
+    assert cot.finding_kind(long_sec) == "security"
 
 
 def test_is_codex_user_requires_bot_login(cot):
@@ -205,12 +219,26 @@ def test_skip_outdated(cot):
     assert cot.open_threads_for_pr(FakeGh(cot, routes), "o/r", 1, skip_outdated=True) == []
 
 
+def gql_merged(nodes: list[dict], *, has_next: bool = False, cursor: str | None = None) -> str:
+    return json.dumps({
+        "data": {
+            "repository": {
+                "pullRequests": {
+                    "pageInfo": {"hasNextPage": has_next, "endCursor": cursor},
+                    "nodes": nodes,
+                }
+            }
+        }
+    })
+
+
 def test_scan_merged_list_and_not_merged_skip(cot):
-    pulls = [
-        {"number": 50, "title": "merged one", "merged_at": "2026-10-23T12:00:00Z",
-         "html_url": "https://github.com/o/r/pull/50"},
-        {"number": 49, "title": "closed unmerged", "merged_at": None,
-         "html_url": "https://github.com/o/r/pull/49"},
+    # GraphQL MERGED_AT order: newest merge first (50), older (40) later.
+    merged_nodes = [
+        {"number": 50, "title": "merged one", "mergedAt": "2026-10-23T12:00:00Z",
+         "url": "https://github.com/o/r/pull/50"},
+        {"number": 40, "title": "older merge", "mergedAt": "2026-09-01T00:00:00Z",
+         "url": "https://github.com/o/r/pull/40"},
     ]
     comments = [{
         "id": 5,
@@ -230,23 +258,41 @@ def test_scan_merged_list_and_not_merged_skip(cot):
         }],
     )]
     gh = FakeGh(cot, {
-        "api:repos/o/r/pulls?state=closed&sort=updated&direction=desc&per_page=100&page=1":
-            json.dumps(pulls),
+        "graphql:merged": gql_merged(merged_nodes),
         "paginate:repos/o/r/pulls/50/comments?per_page=100": json.dumps(comments),
         "graphql:50": gql_threads(nodes),
+        "paginate:repos/o/r/pulls/40/comments?per_page=100": json.dumps([]),
+        "graphql:40": gql_threads([]),
         "api:repos/o/r/pulls/49": json.dumps({
             "number": 49, "title": "closed unmerged", "merged_at": None, "state": "closed",
             "html_url": "https://github.com/o/r/pull/49",
         }),
     })
     doc = cot.scan(gh, "o/r", limit=10)
-    assert doc["summary"]["prs_scanned"] == 1
+    assert doc["summary"]["prs_scanned"] == 2
     assert doc["summary"]["threads"] == 1
     assert doc["threads"][0]["pr"] == 50
+    assert [s["pr"] for s in doc["scanned"]] == [50, 40]
 
     doc2 = cot.scan(gh, "o/r", prs=[49])
     assert doc2["summary"]["prs_scanned"] == 0
     assert doc2["skipped"][0]["reason"] == "not-merged"
+
+
+def test_list_merged_prs_applies_limit_after_merged_at(cot):
+    """--limit truncates MERGED_AT order, not updated-time order."""
+    # Newest merge is 99; an older PR (10) that would sort first by updated is second here.
+    merged_nodes = [
+        {"number": 99, "title": "just merged", "mergedAt": "2026-11-09T20:00:00Z",
+         "url": "https://github.com/o/r/pull/99"},
+        {"number": 10, "title": "old but newly commented", "mergedAt": "2026-01-01T00:00:00Z",
+         "url": "https://github.com/o/r/pull/10"},
+    ]
+    gh = FakeGh(cot, {"graphql:merged": gql_merged(merged_nodes)})
+    got = cot.list_merged_prs(gh, "o/r", limit=1)
+    assert len(got) == 1
+    assert got[0]["number"] == 99
+    assert got[0]["merged_at"] == "2026-11-09T20:00:00Z"
 
 
 def test_include_open_with_pr(cot):
@@ -286,8 +332,7 @@ def test_format_text_and_json_main(cot, capsys):
     assert "1 unresolved Codex thread" in text
 
     empty = FakeGh(cot, {
-        "api:repos/djbclark/djbclark-ade/pulls?state=closed&sort=updated&direction=desc&per_page=100&page=1":
-            json.dumps([]),
+        "graphql:merged": gql_merged([]),
     })
     rc = cot.main(["--repo", "djbclark/djbclark-ade", "--limit", "5", "--json"], gh=empty)
     assert rc == 0
@@ -318,9 +363,10 @@ def test_default_gh_refuses_mutation_argv(cot):
         cot.default_gh("api", "graphql", "-f", "query=mutation { resolveReviewThread(input:{}) { clientMutationId } }")
     with pytest.raises(cot.GhError, match="mutating HTTP"):
         cot.default_gh("api", "-X", "POST", "repos/o/r/issues/1/comments", "-f", "body=x")
-    # sort=updated is a read filter, not a mutation:
+    # MERGED_AT listing query is read-only (no mutation fields):
     cot.assert_read_only_gh_argv(
-        ("api", "repos/o/r/pulls?state=closed&sort=updated&direction=desc&per_page=100&page=1")
+        ("api", "graphql", "-f", "owner=o", "-f", "name=r", "-F", "first=10",
+         f"-f", f"query={cot.MERGED_PRS_QUERY}")
     )
 
 
