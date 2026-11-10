@@ -1,10 +1,24 @@
 # MicroVMs inventory (podman, kev, laya, hyades-docker)
 
-Snapshot **2026-11-09**. First cut for Carried **#20** (`docs/queue.md`): what this
+Snapshot **2026-11-10**. First cut for Carried **#20** (`docs/queue.md`): what this
 repo already records about the four named resources, and what is still unknown on
 the live Mac / SIPB Hyades host. **No live host facts are invented here** — rows
 marked TBD need an operator (or an agent on the Mac with Hyades access) to run
 the suggested probes and update this doc with a new snapshot date.
+
+## Probe status (this environment)
+
+**Unavailable for a full inventory** from the Cursor Cloud agent (2026-11-10):
+
+| Check | Result here | Counts as live inventory? |
+|---|---|---|
+| Mac `podman` binary / machine | not installed in this cloud image (`command -v podman` empty) | no |
+| Hyades / `*.sipb.cloud` SSH console | DNS resolves; TCP/22 answers; `ssh -o BatchMode=yes` → `Permission denied (publickey,…)` (no operator key in this agent) | no — reachability ≠ auth |
+| `hyades list` / `getconf` / `jevlike ask` | skill unlinked here; no SIPB console wrapper or `JEVLIKE_API_KEY` path in this agent | no |
+
+Do **not** treat DNS or an open port as proof that a named microVM is up, which
+judge is loaded, or what image/env it runs. Fill the TBD tables only from an
+on-machine pass (checklist in [G](#g-on-machine-inventory-checklist)).
 
 ## Scope
 
@@ -217,3 +231,29 @@ routing work stays on Carried #20 until those land.
 - `docs/history/apply-toolchain-prompt.md` (jevlike / forgejo rows)
 - `docs/history/software-factory-reviews/codex-research-2026-10-19.md` (podman path)
 - `docs/handoffs/HANDOFF_standalone-59e7_*`, `HANDOFF_standalone-cdee_*`
+
+## G. On-machine inventory checklist
+
+Run on the operator Mac (with Hyades SSH / `sudo-secretspec` access). Record
+answers into this doc with a new snapshot date; never paste secrets or full
+`getconf` blobs.
+
+1. **podman (local):** `command -v podman`; `podman --version`; `podman machine ls`;
+   one disposable `podman run --rm --network none alpine:3.20 true` (rc only).
+2. **hyades-docker skill:** confirm `~/src/sipb-agent-skills/skills/hyades-docker`
+   (and whether agent skill dirs are relinked); `command -v hyades`.
+3. **Hyades roster:** `hyades list` (or equivalent); for each of
+   `djbclark-kev`, `djbclark-laya`, `djbclark-jevlike`, `djbclark-fc-api`,
+   `djbclark-fc-searxng`: `hyades status <name>` and filtered image/name fields
+   only from getconf — note whether kev/laya are distinct VMs or only
+   `djbclark-jevlike`.
+4. **Judge load:** which model is loaded on the judge host (Kev default vs Laya
+   variant); optional smoke via `jevlike ask choice` under `sudo-secretspec run`
+   (key never on argv / never logged).
+5. **Limits:** account microVM quota used vs free (repo note: 10); Hyades CI
+   runner `capacity` / labels still match capacity 4 and stock toolchains; disk
+   via `hyades df` where needed.
+6. **Push path:** whether `hyades-registry` uses podman, crane, or skopeo on this
+   Mac (`command -v` each; read live skill).
+7. **Routing readiness (after facts):** which ADE jobs should move to forgejo-ci /
+   disposable podman / jevlike — still Carried #20 work, not this checklist.
