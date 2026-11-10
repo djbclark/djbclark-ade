@@ -1,3 +1,3 @@
 ### Added
 
-- `bin/wave6-mac-proof-capture` Mac live-cycle proof harness (Darwin `--live` only; refuses invented Mac stdout) and labeled FIXTURE `mac_proofs` bundle under `tests/fixtures/wave6-mac-proofs/` for CI shape until the Mac live cycle replaces them (queue Carried item 33) (#PR).
+- `bin/wave6-mac-proof-capture` Mac live-cycle proof harness (Darwin `--live` only; refuses invented Mac stdout) and labeled FIXTURE `mac_proofs` bundle under `tests/fixtures/wave6-mac-proofs/` for CI shape until the Mac live cycle replaces them (queue Carried item 33) (#441).
