@@ -149,6 +149,7 @@ Skills (23, from each `skills/*/SKILL.md`):
 | [`deadline`](bin/deadline) | Register a maximum run time before a long command or wait, and enforce it from outside. |
 | [`deadline_wait.py`](bin/deadline_wait.py) | How a long WAITER registers its own deadline (docs/deadline.md, "Waiters register themselves"). |
 | [`firecrawl-router`](bin/firecrawl-router) | Firecrawl REST API with a self-hosted primary and a commercial fallback. |
+| [`gh-pr-checks`](bin/gh-pr-checks) | Thin wrapper around `gh pr checks` that self-registers a deadline for `--watch`. |
 | [`git-commit-own`](bin/git-commit-own) | Commit only your own paths, without pre-commit's whole-tree stash. |
 | [`gnu-tools-check`](bin/gnu-tools-check) | Find macOS shell code that calls a BSD tool where the GNU one is wanted. |
 | [`go_model_policy.py`](bin/go_model_policy.py) | Shared Go cost policy for routing and ACP entry points; no provider calls. |
