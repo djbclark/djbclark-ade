@@ -1,11 +1,13 @@
 """ade_install: install catalog, plan, observe-only doctor, bounded apply.
 
-Prefers folded ``[install]`` from ``config/ade.toml`` when present; falls
-through to transitional ``config/install.toml`` when the unified file is
-absent or lacks an install catalog (same fallthrough pattern as policy
-domains). Key entries are names and metadata only. Doctor runs ``probe_argv``
-when recorded (else PATH presence) and never repairs. Apply is user-scoped
-only: ``--dry-run`` by default, ``--yes`` to execute recorded ``install_argv``
+Prefers folded ``[install]`` from ``ade_config.load_effective`` (repo
+``config/ade.toml`` merged with ``~/.config/djbclark-ade/local.toml``) when
+that domain is present; falls through to transitional ``config/install.toml``
+when the unified file is absent or lacks ``[install]``. A present but empty
+or invalid ``[install]`` fails validation instead of falling through. Key
+entries are names and metadata only. Doctor runs ``probe_argv`` when recorded
+(else PATH presence) and never repairs. Apply is user-scoped only:
+``--dry-run`` by default, ``--yes`` to execute recorded ``install_argv``
 (argv lists, never shell=True). Root / ``--system`` effects are refused until
 a later unit. Secrets are never read.
 """
@@ -214,80 +216,81 @@ def validate_catalog_semantics(data: dict[str, Any], *, path: Path) -> None:
         _reject_duplicate_ids(logins, key="id", label=f"{path} login")
 
 
-def _extract_folded_install(ade_raw: dict[str, Any]) -> dict[str, Any] | None:
-    """Return the install catalog body from ade.toml, or None when absent.
-
-    Prefers nested ``[install]`` (fold emitter shape). Also accepts top-level
-    ``component``/``key``/``login`` tables for the documented alternate form.
-    """
-    nested = ade_raw.get("install")
-    if isinstance(nested, dict) and (
-        nested.get("component") or nested.get("key") or nested.get("login")
-    ):
-        return copy.deepcopy(nested)
-    if ade_raw.get("component") or ade_raw.get("key") or ade_raw.get("login"):
-        out: dict[str, Any] = {}
-        if "schema_version" in ade_raw:
-            out["schema_version"] = ade_raw["schema_version"]
-        for key in ("component", "key", "login"):
-            if key in ade_raw:
-                out[key] = copy.deepcopy(ade_raw[key])
-        return out
-    return None
-
-
 def load_catalog(
     *,
     root: Path | None = None,
     install_path: Path | None = None,
+    home: Path | None = None,
+    local_config: Path | None = None,
+    include_local: bool = True,
+    environ: dict[str, str] | None = None,
 ) -> Catalog:
     """Load and validate the install catalog. Never writes.
 
-    Preference: folded ``[install]`` in ``config/ade.toml`` when present;
-    otherwise transitional ``config/install.toml``. An explicit ``install_path``
-    forces the legacy file (tests / tooling) and skips the folded preference.
+    Preference: effective ``[install]`` via ``ade_config.load_effective``
+    (``config/ade.toml`` merged with local.toml) when that domain is present;
+    otherwise transitional ``config/install.toml``. A present ``[install]`` that
+    is empty or invalid fails validation (no silent fallthrough). An explicit
+    ``install_path`` forces the legacy file (tests / tooling) and skips the
+    effective preference.
     """
     root = (root or repo_root_from_here()).resolve()
     new_path = default_new_config_path(root)
     path = install_path if install_path is not None else default_install_path(root)
     ade_present = ac.input_present(new_path)
     ade_has_install = False
-    folded: dict[str, Any] | None = None
+    local_used: str | None = None
+
     if ade_present and install_path is None:
         try:
-            ade_raw = ac.read_toml(new_path)
+            eff = ac.load_effective(
+                root=root,
+                home=home,
+                local_config=local_config,
+                include_local=include_local,
+                environ=environ,
+            )
         except ac.ConfigError as e:
             raise InstallError(str(e)) from e
-        folded = _extract_folded_install(ade_raw)
-        ade_has_install = folded is not None
-
-    if folded is not None:
-        raw = folded
-        if "schema_version" not in raw:
-            raw["schema_version"] = SCHEMA_VERSION
-        ver = raw.get("schema_version")
-        if ver != SCHEMA_VERSION:
-            raise InstallError(
-                f"{new_path} [install]: unsupported schema_version {ver!r} "
-                f"(need {SCHEMA_VERSION})"
+        local_used = eff.provenance.get("local_config")
+        if "install" in eff.data:
+            ade_has_install = True
+            folded = eff.data["install"]
+            if not isinstance(folded, dict):
+                raise InstallError(f"{new_path} [install]: must be a table")
+            raw = copy.deepcopy(folded)
+            if "schema_version" not in raw:
+                raw["schema_version"] = SCHEMA_VERSION
+            ver = raw.get("schema_version")
+            if ver != SCHEMA_VERSION:
+                raise InstallError(
+                    f"{new_path} [install]: unsupported schema_version {ver!r} "
+                    f"(need {SCHEMA_VERSION})"
+                )
+            schema = read_install_schema(root)
+            ac.validate_tree(raw, schema, label=f"{new_path} [install]")
+            validate_catalog_semantics(raw, path=new_path)
+            note = (
+                "folded [install] from ade_config.load_effective "
+                "(config/ade.toml ± local.toml); "
+                "config/install.toml remains for fallthrough when [install] is absent"
             )
-        schema = read_install_schema(root)
-        ac.validate_tree(raw, schema, label=f"{new_path} [install]")
-        validate_catalog_semantics(raw, path=new_path)
-        provenance: dict[str, Any] = {
-            "schema_version": SCHEMA_VERSION,
-            "root": str(root),
-            "install_config": str(new_path),
-            "ade_toml_present": True,
-            "ade_toml_has_install": True,
-            "legacy_install_present": ac.input_present(default_install_path(root)),
-            "source": "ade.toml",
-            "note": (
-                "folded [install] from config/ade.toml; "
-                "config/install.toml remains for fallthrough when ade.toml is absent"
-            ),
-        }
-        return Catalog(data=copy.deepcopy(raw), path=new_path, provenance=provenance, root=root)
+            if local_used:
+                note += f"; local overlay applied from {local_used}"
+            provenance: dict[str, Any] = {
+                "schema_version": SCHEMA_VERSION,
+                "root": str(root),
+                "install_config": str(new_path),
+                "ade_toml_present": True,
+                "ade_toml_has_install": True,
+                "legacy_install_present": ac.input_present(default_install_path(root)),
+                "local_config": local_used,
+                "source": "ade.toml",
+                "note": note,
+            }
+            return Catalog(
+                data=copy.deepcopy(raw), path=new_path, provenance=provenance, root=root
+            )
 
     provenance = {
         "schema_version": SCHEMA_VERSION,
@@ -295,6 +298,7 @@ def load_catalog(
         "install_config": str(path),
         "ade_toml_present": ade_present,
         "ade_toml_has_install": ade_has_install,
+        "local_config": local_used,
         "source": "install.toml",
         "note": (
             "transitional fallthrough: config/ade.toml present without [install]; "
