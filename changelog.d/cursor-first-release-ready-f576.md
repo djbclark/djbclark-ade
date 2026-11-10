@@ -1,3 +1,7 @@
 ### Added
 
 - `bin/ade-release-ready`: dry-run first-release readiness gate (CI, rule 10, `ade-update`, empty tag slot); never creates or pushes a tag (`docs/release.md`) (#445).
+
+### Fixed
+
+- `bin/ade-release-ready`: require Unreleased entries after a prospective in-memory fold (same dedup as `changelog-fold`), so leftover fragments that only duplicate older CHANGELOG sections are not READY (#445).

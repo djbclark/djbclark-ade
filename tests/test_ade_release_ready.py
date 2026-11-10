@@ -146,6 +146,51 @@ def test_empty_unreleased_and_no_fragments_is_not_ready(tmp_path):
     assert any("nothing to release" in p for p in rep["problems"])
 
 
+def test_empty_unreleased_with_fragments_that_only_dedupe_is_not_ready(tmp_path):
+    """Interrupted-fold recovery: Unreleased empty, fragments valid, but every entry
+    already lives under a dated section — changelog-fold would skip them all."""
+    repo = make_ready_repo(
+        tmp_path,
+        fragments={"leftover.md": "### Added\n\n- once shipped (#50)\n"},
+    )
+    (repo / "CHANGELOG.md").write_text(
+        "# Changelog\n\n## Unreleased\n\n"
+        "## 0.0.1 - 2026-01-01\n\n### Added\n\n- once shipped (#50)\n",
+        encoding="utf-8",
+    )
+    before_cl = (repo / "CHANGELOG.md").read_text(encoding="utf-8")
+    before_frags = sorted(p.name for p in (repo / "changelog.d").iterdir())
+    r = run(repo, "--json", "--version", "0.1.0", "--date", "2026-11-10")
+    assert r.returncode == 1, r.stderr + r.stdout
+    rep = json.loads(r.stdout)
+    assert rep["ready"] is False
+    assert any("prospective fold" in p and "already present" in p for p in rep["problems"])
+    assert rep["checks"].get("prospective_fold") == "ok"
+    assert rep["checks"].get("prospective_unreleased_entries") == 0
+    assert rep["checks"].get("prospective_fold_skipped", 0) >= 1
+    assert (repo / "CHANGELOG.md").read_text(encoding="utf-8") == before_cl
+    assert sorted(p.name for p in (repo / "changelog.d").iterdir()) == before_frags
+
+
+def test_empty_unreleased_with_new_fragment_entry_is_ready(tmp_path):
+    """Control: empty Unreleased + a fragment that adds a new entry is READY."""
+    repo = make_ready_repo(
+        tmp_path,
+        fragments={"fresh.md": "### Added\n\n- brand new for the tag (#99)\n"},
+    )
+    (repo / "CHANGELOG.md").write_text(
+        "# Changelog\n\n## Unreleased\n\n"
+        "## 0.0.1 - 2026-01-01\n\n### Added\n\n- once shipped (#50)\n",
+        encoding="utf-8",
+    )
+    r = run(repo, "--json", "--version", "0.1.0", "--date", "2026-11-10")
+    assert r.returncode == 0, r.stderr + r.stdout
+    rep = json.loads(r.stdout)
+    assert rep["ready"] is True
+    assert rep["checks"].get("prospective_unreleased_entries", 0) >= 1
+    assert "fresh.md" in rep["plan"]["would_fold_fragments"]
+
+
 def test_bad_fragment_fails_rule10(tmp_path):
     repo = make_ready_repo(tmp_path, fragments={"bad.md": "### Added\n\n- no pr number\n"})
     r = run(repo, "--json")

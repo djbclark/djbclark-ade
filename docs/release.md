@@ -19,7 +19,9 @@ fragments:
 It checks:
 
 1. **Rule 10** — `CHANGELOG.md` has `## Unreleased`; `changelog-fold --check` passes;
-   Unreleased and/or valid `changelog.d/` fragments have something to ship.
+   after an in-memory fold (same whole-file dedup as `changelog-fold`) Unreleased has
+   at least one `- ` entry. Fragment files alone are not enough: an interrupted fold
+   can leave fragments whose entries already sit under a dated section.
 2. **CI** — `.github/workflows/test.yml` and `adversary-marker.yml` are present;
    `ade-roster --check` passes (same local gate CI's `context-policy` runs).
 3. **`ade-update`** — `bin/ade-update` exists and advertises `--check`; sibling

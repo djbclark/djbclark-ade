@@ -11,7 +11,9 @@ timer install is out of scope (Mac/Linux install PRs; no launchd/systemd apply h
 Checks (queue Carried #15: "tag once CI, rule 10 and ade-update are settled"):
 
   1. rule 10 — CHANGELOG.md has `## Unreleased`; `changelog-fold --check` passes;
-     Unreleased (plus valid fragments that would fold) has at least one `- ` entry
+     after an in-memory fold (same whole-file dedup as changelog-fold) Unreleased has
+     at least one `- ` entry — fragment presence alone is not enough (interrupted-fold
+     recovery can leave only already-shipped entries)
   2. CI     — `.github/workflows/test.yml` and `adversary-marker.yml` are present;
      `ade-roster --check` passes (the same local gate CI's context-policy runs)
   3. ade-update — `bin/ade-update` and sibling `bin/changelog-fold` exist; ade-update's
@@ -32,10 +34,13 @@ import json
 import re
 import subprocess
 import sys
+import types
 from datetime import date
 from pathlib import Path
 
 EXIT_OK, EXIT_NOT_READY, EXIT_USAGE = 0, 1, 2
+
+HERE = Path(__file__).resolve().parent
 
 VERSION_RE = re.compile(r"^\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?$")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -59,6 +64,22 @@ def run(argv: list[str], *, cwd: Path | None = None, timeout: float = 60) -> tup
     return p.returncode, out, err
 
 
+def load_fold():
+    """bin/changelog-fold beside this script as a module, or None (same load shape as ade-retro)."""
+    cand = HERE / "changelog-fold"
+    if not cand.is_file():
+        return None
+    try:
+        mod = types.ModuleType("changelog_fold_for_release_ready")
+        mod.__file__ = str(cand)
+        exec(compile(cand.read_text(encoding="utf-8"), str(cand), "exec"), mod.__dict__)
+    except Exception:
+        return None
+    if not callable(getattr(mod, "parse_fragment", None)) or not callable(getattr(mod, "merge", None)):
+        return None
+    return mod
+
+
 def fragment_names(frag_dir: Path) -> list[str]:
     if not frag_dir.is_dir():
         return []
@@ -80,6 +101,21 @@ def unreleased_entry_count(text: str) -> int:
     end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith("## ")), len(lines))
     return sum(1 for l in lines[start + 1:end] if l.startswith("- "))
 
+
+def prospective_unreleased_count(cl_text: str, frag_dir: Path, frag_names: list[str], fold) -> tuple[int, int, int] | None:
+    """After an in-memory fold (changelog-fold merge + whole-file dedup), return
+    (unreleased_entry_count, added, skipped), or None if a fragment cannot be parsed.
+    """
+    parsed = []
+    for name in frag_names:
+        sections, problems = fold.parse_fragment(frag_dir / name)
+        if problems:
+            return None
+        parsed.append((name, sections))
+    if not parsed:
+        return unreleased_entry_count(cl_text), 0, 0
+    new_text, added, skipped = fold.merge(cl_text, parsed)
+    return unreleased_entry_count(new_text), added, skipped
 
 def changelog_has_version(text: str, version: str) -> bool:
     for line in text.splitlines():
@@ -171,10 +207,42 @@ def assess(repo: Path, version: str, release_date: str) -> dict:
     entries = unreleased_entry_count(cl_text) if cl_text else 0
     checks["unreleased_entries"] = entries
     checks["fragments"] = frags
-    if entries == 0 and not frags:
+    # Prospective fold: fragment files may be leftover after an interrupted fold whose
+    # entries already live under a dated section; changelog-fold would skip them all.
+    releasable = entries
+    if frags and fold_rc == 0 and cl_text:
+        fold_mod = load_fold()
+        if fold_mod is None:
+            checks["prospective_fold"] = "unavailable"
+            if entries == 0:
+                problems.append(
+                    "rule10: Unreleased empty and could not load bin/changelog-fold "
+                    "for a prospective fold"
+                )
+        else:
+            result = prospective_unreleased_count(cl_text, frag_dir, frags, fold_mod)
+            if result is None:
+                checks["prospective_fold"] = "parse-failed"
+                if entries == 0:
+                    # --check already passed; a parse failure here is unexpected — fail closed
+                    problems.append(
+                        "rule10: prospective fold could not parse a validated fragment"
+                    )
+            else:
+                releasable, added, skipped = result
+                checks["prospective_unreleased_entries"] = releasable
+                checks["prospective_fold_added"] = added
+                checks["prospective_fold_skipped"] = skipped
+                checks["prospective_fold"] = "ok"
+    if releasable == 0 and not frags:
         problems.append("rule10: nothing to release (Unreleased empty and no changelog.d fragments)")
-    elif entries == 0 and frags and fold_rc not in (0, None):
+    elif releasable == 0 and frags and fold_rc not in (0, None):
         problems.append("rule10: Unreleased empty and fragments did not validate (cannot count a fold)")
+    elif releasable == 0 and frags and fold_rc == 0 and checks.get("prospective_fold") == "ok":
+        problems.append(
+            "rule10: nothing to release (Unreleased empty after prospective fold; "
+            "fragment entries already present in CHANGELOG)"
+        )
 
     # --- CI ---
     if not test_wf.is_file():
