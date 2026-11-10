@@ -7,7 +7,7 @@ under **Carried**, newest first, one line each; an item leaves when it ships (in
 
 ## Stale
 
-1. **CONFLICTING master-bottom PRs** (2026-11-10): eight open PRs conflict with `master` (#194, #208, #256, #290; #269 superseded — `bin/coding-bot` moved to peer-link (E6/E9j), demanual `cursor/coding-bot-peer-link-f576`; #227 superseded — skill in site-djbclark, demanual `cursor/bottom-config-uncapped-f576`; #231 superseded by #517; #270 closed 2026-11-10); close/rebase/supersede guidance and the #290 vs #471 recovery split live in `docs/history/conflicting-pr-hygiene-2026-11-10.md`.
+1. **CONFLICTING master-bottom PRs** (2026-11-10): eight open PRs conflict with `master` (#194, #208, #290; #256 ported on `cursor/open-clean-env-f576` — close once that merges; #269 superseded — `bin/coding-bot` moved to peer-link (E6/E9j), closed via #523; #227 superseded — skill in site-djbclark, demanual `cursor/bottom-config-uncapped-f576`; #231 superseded by #517; #270 closed 2026-11-10); close/rebase/supersede guidance and the #290 vs #471 recovery split live in `docs/history/conflicting-pr-hygiene-2026-11-10.md`.
 
 ## Carried
 

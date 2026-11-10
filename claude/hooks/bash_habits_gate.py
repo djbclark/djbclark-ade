@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""PreToolUse (Bash): deny four shell mistakes that recur, and warn on a fifth (2026-10-18).
+"""PreToolUse (Bash): deny five shell mistakes that recur, and warn on a sixth (2026-10-18).
 
 1. Bare `sed` (deny). On this Mac it is BSD sed; GNU `gsed` is the rule (2026-10-15: a BSD
    `sed -i` broke an edit; home CLAUDE.md item 1). An explicit `/usr/bin/sed` is a deliberate
@@ -25,6 +25,11 @@
    it machine-wide) lets `sudo -n` run anything, so it proves nothing about a NOPASSWD rule:
    on 2026-10-18 a "narrow rule" check passed for a command the rule never allowed.
    `sudo -k -n CMD` ignores the cache without clearing it (man sudo, -k with a command).
+6. Bare `open` (deny, 2026-11-02). macOS `open` hands the caller's whole environment to the app
+   it starts: an agent's `open -a` left CLAUDE_CODE_CHILD_SESSION in Quicksilver, then Ghostty and
+   every shell in it. The command word `open` or `/usr/bin/open` (any pipeline segment, past
+   VAR=x, `env`, `sudo`, `xargs`, `timeout`) is denied and bin/open-clean is named. `env -i ...
+   open` and `open-clean` pass; so do `xdg-open`, `opencode`, `open` as an argument or in quotes.
 
 Words inside quotes, heredoc bodies and comments do not count. Fails open on any parse error.
 The tool table is separate from bin/gnu-tools-check's, which flags every long option on its
@@ -310,6 +315,44 @@ def xargs_args(stage: str) -> list[str]:
     return []
 
 
+OPEN_REASON = ("Launch apps and URLs with `~/src/djbclark-ade/bin/open-clean`, not bare `open`: "
+               "macOS `open` hands your whole environment to the app it starts. On 2026-11-02 an "
+               "agent's `open -a` left CLAUDE_CODE_CHILD_SESSION and CLAUDE_CODE_SESSION_ID in "
+               "Quicksilver, then in Ghostty and every shell in it, so each `claude` there lost "
+               "its transcript and relay took those shells for the agent. `open-clean` takes the "
+               "same arguments and runs `/usr/bin/open` with HOME, USER, LOGNAME, a fixed PATH, "
+               "LANG/LC_* and TMPDIR only. `env -i HOME=\"$HOME\" /usr/bin/open ...` also passes.")
+
+
+def bare_open(stage: str) -> bool:
+    """True when the stage's command word is `open` or `/usr/bin/open` (past VAR=x, wrappers,
+    sudo/xargs/timeout) and nothing scrubs the environment first: `env -i`, `env -` or
+    `env --ignore-environment` before it make it a clean launch. `xdg-open`, `opencode` and
+    `open` as an argument never match: only the command word does."""
+    w = words(stage)
+    scrubbed = False
+    while w:
+        head = w[0]
+        if head == "env":
+            w = w[1:]
+            while w and w[0].startswith("-") and w[0] != "--":
+                if w[0] in ("-i", "-", "--ignore-environment") or (
+                        not w[0].startswith("--") and "i" in w[0][1:]):
+                    scrubbed = True
+                w = w[2:] if w[0] in ("-u", "-C", "-S", "-P") else w[1:]
+        elif re.fullmatch(r"\w+=\S*", head) or head in WRAPPERS:
+            w = w[1:]
+        elif head in ("sudo", "xargs", "timeout", "gtimeout"):
+            w = w[1:]
+            while w and w[0].startswith("-"):
+                w = w[1:]
+            if head.endswith("timeout") and w:
+                w = w[1:]
+        else:
+            return head in ("open", "/usr/bin/open") and not scrubbed
+    return False
+
+
 def gnu_reason(tool: str, flag: str, via_xargs: bool = False) -> str:
     where = f"xargs {tool}" if via_xargs else tool
     g = "gxargs" if tool == "xargs" else f"g{tool}"
@@ -401,6 +444,8 @@ def check(cmd: str) -> tuple[str | None, str | None]:
                 tool, args = command_word(stage)
                 if tree_grep(tool, args):
                     return TREE_GREP_REASON, None
+                if bare_open(stage):
+                    return OPEN_REASON, None
                 flag = gnu_only(tool, args)
                 if flag:
                     return gnu_reason(tool, flag, bool(re.search(r"\bxargs\b", stage))

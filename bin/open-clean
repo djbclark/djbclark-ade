@@ -1,0 +1,63 @@
+#!/usr/bin/env python3
+"""open-clean - `open` with a minimal environment, so a GUI app an agent launches never inherits the agent's session.
+
+    open-clean [any `open` arguments]        e.g.  open-clean -a Quicksilver
+                                                   open-clean https://example.com
+    open-clean --open-clean-help             this text
+
+Why (2026-11-02): macOS `open` hands the caller's whole environment to an app it starts. A Claude Code
+session relaunched Quicksilver and Default Folder X with `open -a` from its Bash tool; both carried
+CLAUDE_CODE_CHILD_SESSION=1, CLAUDE_CODE_SESSION_ID, CLAUDECODE=1 and CLAUDE_CODE_ENTRYPOINT. djbclark then
+opened Ghostty through Quicksilver, so Ghostty and every shell in it inherited them: each `claude` started there
+printed "Transcript saving is off - inherited CLAUDE_CODE_CHILD_SESSION marker" and lost its transcript, and tools
+that read CLAUDE_CODE_SESSION_ID (relay's sender resolution) could take those sessions for the launcher. Any
+agent-side variable leaks the same way (PASEO_AGENT_ID, HERDR_PANE_ID, ACP_RUN_AGENT, OMP_*, CODEX_*, API keys
+injected by `sudo-secretspec run`).
+
+What it does: runs `/usr/bin/open` with the arguments passed through untouched (an argv list, no shell) and ONLY
+this environment: HOME, USER, LOGNAME, PATH=/usr/bin:/bin:/usr/sbin:/sbin, LANG and every LC_* if set, TMPDIR if
+set. `open` replaces this process (execve), so its exit status is ours. Nothing else is read, written or logged.
+macOS only: on another OS it says so and exits 2.
+
+The Claude Code / Codex / Cursor Bash gate (claude/hooks/bash_habits_gate.py) denies a bare `open` and names this
+tool. `env -i ... open ...` is allowed there too.
+
+Test hook: OPEN_CLEAN_OPEN_BIN replaces /usr/bin/open (tests only; never set it otherwise).
+"""
+
+import os
+import sys
+
+OPEN = "/usr/bin/open"
+PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
+KEEP = ("HOME", "USER", "LOGNAME", "LANG", "TMPDIR")
+
+
+def clean_env(src) -> dict:
+    env = {k: src[k] for k in KEEP if k in src}
+    env.update({k: v for k, v in src.items() if k.startswith("LC_")})
+    env["PATH"] = PATH
+    return env
+
+
+def main(argv: list[str]) -> int:
+    if argv == ["--open-clean-help"]:
+        print(__doc__.strip())
+        return 0
+    binary = os.environ.get("OPEN_CLEAN_OPEN_BIN") or OPEN
+    if binary == OPEN and sys.platform != "darwin":
+        print("open-clean: macOS only (it wraps /usr/bin/open); on this OS launch the app "
+              "with a minimal environment yourself, e.g. `env -i HOME=\"$HOME\" "
+              "PATH=/usr/bin:/bin xdg-open URL`.", file=sys.stderr)
+        return 2
+    env = clean_env(os.environ)
+    try:
+        os.execve(binary, [binary, *argv], env)
+    except OSError as e:
+        print(f"open-clean: cannot run {binary}: {e}", file=sys.stderr)
+        return 127
+    return 0  # not reached
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
