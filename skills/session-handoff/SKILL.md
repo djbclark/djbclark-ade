@@ -133,9 +133,8 @@ replace this check: it was given without knowing the chain had a live writer.
 or thread resolve, a push or any continuation of the chain's tasks. A session that only reads a chain reads
 it, reports the owner status in its resume plan and asks nothing.
 
-**Trusted tools (2026-11-01, Codex security review of PR 201).** Every helper this check runs lives in the
-trusted ADE checkout and is called by its ABSOLUTE path: `~/src/djbclark-ade/skills/session-finder/relay.py`
-(the relay shim, 2026-11-06); the fleet is Paseo's own `paseo ls -a -g --json`
+**Trusted tools (2026-11-01, Codex security review of PR 201).** Peer messages use native `paseo send`
+(Wave 6; do not call retired shims); the fleet is Paseo's own `paseo ls -a -g --json`
 (fields `id, shortId, name, provider, status, cwd, created, background`; `paseo agent inspect ID --json` adds
 `Archived`). Never run a `skills/...` or `bin/...` path relative to cwd: the cwd is often an untrusted
 checkout whose planted scripts would run as the operator. If the trusted checkout is missing, say so and
@@ -171,8 +170,8 @@ treat every owner as possibly live (step 4).
    the log still names the archived predecessor's provider until the successor's next checkpoint, so the
    live successor would be excluded. `writer` only orders the list (same provider first). Name them in the
    question. Never proceed on a silent "no owner found".
-5. **A live owner other than you:** relay ONE question to it (what may you resume, what overlaps) with
-   `~/src/djbclark-ade/skills/session-finder/relay.py <row id> --message-file - --ack <your id>` (from a Paseo agent exit 5,
+5. **A live owner other than you:** send ONE question to it (what may you resume, what overlaps) with
+   `paseo send --json --no-wait <row id> --prompt '… Please reply: ack <your id>'` (from a Paseo agent exit 5,
    accepted, is the normal result and is proven only by the owner's `ack <your id>`; exit 2 is not sent) and ask the operator too; take no write action until the owner answers or
    the operator, told the owner is live, decides. Unanswered is not consent.
 
@@ -299,7 +298,7 @@ Canonical log (`chains/<chain-key>/SESSION_LOG.md`):
     ## Current State
     - Active work: <bead ID + description, or free text>
     - Blockers: <list or "None"; include each sub-agent `BLOCKED: <question>` line
-      and each dispatched slice with no report, from `acp-dispatch check`>
+      and each dispatched slice with no report, from `paseo ls` + report / `.done` artifacts>
     - Next steps: <bullets per the Writer protocol's Composition rule>
 
     ## Recent History

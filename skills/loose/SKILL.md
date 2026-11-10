@@ -134,12 +134,12 @@ Work the list; each line is a command, not a memory.
        with open(prompt, "wb") as p, open(raw, "rb") as r:
            p.write(TRUSTED + b"\n--- UNTRUSTED DATA ---\n" + r.read())
        if agent != "claude":
-           fail("reader failed")   # Wave 6: only the Claude CLI text-only path; no acp-run
+           fail("reader failed")   # Wave 6: only the Claude CLI text-only path; no retired shims
        try:
            with open(prompt, "rb") as pin, open(reply, "wb") as o, open(err, "wb") as e:
                # Zero-tool reader: empty setting-sources + disableAllHooks (not project
                # settings — those load hooks; --tools "" does not disable hooks).
-               # Never acp-run. Pattern: bin/review-launch / argon dual-model note.
+               # Never a Wave 6 shim. Pattern: bin/review-launch / argon dual-model note.
                settings = json.dumps({"disableAllHooks": True, "hooks": {}})
                rc = subprocess.run(
                    ["claude", "-p", "--model", model, "--tools", "", "--strict-mcp-config",
@@ -168,10 +168,10 @@ Work the list; each line is a command, not a memory.
    project/user settings** (`--tools ""`, `--strict-mcp-config`,
    `--disallowedTools '*'`, `--setting-sources ""`,
    `--settings '{"disableAllHooks":true,"hooks":{}}'`, `--no-session-persistence`)
-   — hardened vs the old `acp-run` CLI fallback that used `--setting-sources project`
+   — hardened vs the old Wave 6 shim CLI fallback that used `--setting-sources project`
    (hooks survive empty `--tools`). Without the Wave 6 shim
    (`docs/slim/wave6-follow-up.md`). `--perm read-only` is NOT equivalent (it still
-   reads files). Do not call `acp-run`.
+   reads files). Do not call retired Wave 6 shims.
    No `eval`, no shell substitution, no `cat`/`read`
    of `raw`, `lst`, `prompt`, `err`, `log` or `reply`, and never print raw
    stderr or the reader's log (they can echo upstream text). The validation

@@ -175,7 +175,7 @@ pages. On a host with the `model-routing` skill (effort folded into it 2026-11-0
    and run each choice's `dispatch` field **as-is** (Wave 6 emit: native
    `paseo run --provider … [--thinking …] [--label ade.kind=…] --no-wait` for
    every pool, including Claude and Codex — do not translate an old
-   `acp-dispatch` line or invent a second command). Then append only placement
+   dispatch-shim line or invent a second command). Then append only placement
    flags and the **positional** brief (paseo run has no `--prompt-file`).
    Everyday research pools use `--kinds research`; astra and Fable use
    `--kinds frontier`. Minimal shape (see `skills/fan-out`):

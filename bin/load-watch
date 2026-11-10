@@ -111,7 +111,7 @@ second (default 1000, env LW_MAX_PAGEINS_S: macOS `Pageins` also counts file-bac
 with memory to spare; that errs toward waiting); or, ONLY when the caller passes --max-agents (a dispatcher that STARTS
 agents does; `bg` never does: a test run starts no agent, and gating it would starve the very sessions the cap counts),
 the live Paseo agents machine-wide (`paseo ls -g --background --json`, status `running` or `initializing`; retired
-`acp-run` / `acp-dispatch` process names are never counted) number N or more (bare --max-agents = 14, env LW_MAX_AGENTS,
+Wave 6 shim process names are never counted) number N or more (bare --max-agents = 14, env LW_MAX_AGENTS,
 0 = no cap: THE knob to tune how many agent slices may START); an admission under the cap is recorded as a reservation
 (agent-reservations.json, flock) counted with the live ones until `load-watch release ID` (the dispatcher does it at
 spawn) or LW_RESERVE_S (1200), so concurrent dispatchers cannot all pass at 13 of 14 (--no-reserve: records none but
@@ -339,7 +339,7 @@ def agent_label(a):
 
 # Agent CLIs by binary name: a walk up from a busy process stops at the first of these (with the providers `paseo ls`
 # names), so work is never pinned on whatever daemon, multiplexer or shell above the agent shares a cwd with another one.
-# Wave 6 (2026-11-09): `paseo` is the harness; retired `acp-run` / `acp-dispatch` names are never agent CLIs.
+# Wave 6 (2026-11-09): `paseo` is the harness; retired Wave 6 shim names are never agent CLIs.
 AGENT_CLIS = frozenset({"claude", "codex", "opencode", "omp", "pi", "gemini", "copilot", "cursor-agent", "agy",
                         "crush", "kimi", "qwen", "goose", "aider", "amp", "droid", "kiro-cli", "paseo"})
 RETIRED_AGENT_NAMES = frozenset({"acp-run", "acp-dispatch"})  # negative matchers / tests; never live agent classes
@@ -1813,7 +1813,7 @@ LIVE_AGENT_STATUSES = frozenset({"running", "initializing"})  # admit --max-agen
 
 def count_agents():
     """Live Paseo agents machine-wide (`paseo ls -g --background --json`, status running or initializing).
-    Retired `acp-run` / `acp-dispatch` process names are never counted (Wave 6). None when there is no `paseo`
+    Retired Wave 6 shim process names (see RETIRED_AGENT_NAMES) are never counted. None when there is no `paseo`
     binary; ReadFailed when paseo fails, times out or prints something that is not a list of agents."""
     cli = paseo_cli()
     try:

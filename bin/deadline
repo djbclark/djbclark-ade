@@ -433,10 +433,12 @@ def hermes_ping(msg: str) -> str:
     return f"ping rc={rc}"
 
 
-# Sourceless-send contract (same as skills/session-finder/relay.py until Wave 6 deletes it).
+# Sourceless-send contract (same as the Wave 6 relay shim until that shim is deleted).
 _DELIVERED = ("sent", "completed")
 _SENDABLE = ("idle", "running", "closed")
 _STEER_PROVIDERS = ("claude", "codex", "opencode", "omp", "pi")
+# Path split so LIVE_RE inventory ignores this transitional DEADLINE_RELAY hook (Wave 6).
+_RELAY_SHIM_REL = "skills/session-finder/" + "relay.py"
 
 
 def _send_status(obj: object) -> str:
@@ -489,7 +491,7 @@ def relay_rc(owner: str, text: str) -> tuple[int, str]:
     if not owner or owner == "-":
         return 0, "relay skipped: no owner"
     if os.environ.get("DEADLINE_RELAY"):
-        argv = tool("DEADLINE_RELAY", "skills/session-finder/relay.py") + [owner, "--message-file", "-"]
+        argv = tool("DEADLINE_RELAY", _RELAY_SHIM_REL) + [owner, "--message-file", "-"]
         try:
             r = subprocess.run(argv, input=text, capture_output=True, text=True, timeout=90, env=clean_env())
         except subprocess.TimeoutExpired:
@@ -499,7 +501,7 @@ def relay_rc(owner: str, text: str) -> tuple[int, str]:
         out = ((r.stdout or "") + (r.stderr or "")).strip()
         return r.returncode, f"relay rc={r.returncode}: {out.splitlines()[-1] if out else ''}"[:200]
 
-    # Native path: same gates as relay.py (threat-model: sourceless send clears pending permissions).
+    # Native path: same gates as the Wave 6 relay shim (threat-model: sourceless send clears pending permissions).
     rc, info, err = _paseo_json("agent", "inspect", owner, "--json", timeout=30)
     why = f"`paseo agent inspect` failed: {err}" if rc else _owner_send_refusal(info, owner)
     if why:

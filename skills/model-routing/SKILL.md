@@ -32,7 +32,7 @@ threshold from this file or any other.
 
 A5. Fable is a frontier model: a dispatched Fable slice is `--kind frontier` (and a `--frontier-reason` for judged
 use, section D), an advisor unless `ACP_OPERATOR_APPROVED=frontier-exec`, and Fable at `xhigh`/`max` through
-`acp-dispatch` needs `ACP_OPERATOR_APPROVED=fable-xhigh`. Fable is a **sublimit** (at most 50%) of the shared Claude
+native `paseo run` needs `ACP_OPERATOR_APPROVED=fable-xhigh`. Fable is a **sublimit** (at most 50%) of the shared Claude
 weekly window, not a separate allowance: every Fable run bills the 5-hour and weekly windows too.
 A6. **Fable leads are allowed for now (operator 2026-11-07).** The one switch is `fable_lead = true` in the `[lead]` table
 of `config/routing.toml`; set it to `false` (or delete the line) to restore the 2026-10-23 rule, never a Fable lead (Fable
@@ -51,8 +51,8 @@ model uses that model's effort.
 B2. Classify the next several actions, not the last one: applying a decision already made (edits, commits, docs, known
 commands) is `low`/Haiku; normal implementation with a clear shape is `medium`/Sonnet; an unclear shape (architecture,
 adjudication, a bug that defeated one attempt) is `high`/Opus, Fable only when that really needs it.
-B3. A running session cannot re-tier itself mid-turn. The levers: dispatch the stretch (a sub-agent or `acp-dispatch`
-with its own `--model`/`--effort`), or say in one line that the next stretch is mechanical and `/effort low` or
+B3. A running session cannot re-tier itself mid-turn. The levers: dispatch the stretch (a sub-agent or a fresh
+`paseo run` with its own provider/model/thinking), or say in one line that the next stretch is mechanical and `/effort low` or
 `/model sonnet` would cost less, and keep working. Name every switch and why. One hard call inside ordinary work is a
 dispatched judgment question, not a raised session.
 B4. What dominates cost is the conversation re-sent on every request (prompt caching makes the re-read cheap, not
@@ -100,8 +100,8 @@ retired: `plan` leaves them queued.
 ## D. Routing, the frontier allowance and quota
 
 D1. **Plan a wave with the router, re-plan at every slice boundary:** `bin/route_agent.py plan --kinds code,code,bulk
-[--repo NAME]` prints native `paseo run --provider pi/…` for Pi, legacy `acp-dispatch <agent> --model M --kind K`
-for other agents (or `cursor-cloud launch …`), spreads
+[--repo NAME]` prints native `paseo run --provider …` for every pool (Wave 6 emit), or `cursor-cloud launch …` for
+the Cursor Cloud row, spreads
 the wave over pools by `max_parallel`, and keeps a slice queued rather than buy a much weaker pool into code or judgment
 (`quality_max_rank_gap`). `route --kind K [--json]` picks one; `show` prints each pool's headroom, pace, expected waste
 and source; `services [--check-models]` lists the roster with each provider's `paseo provider ls` status and checks
@@ -110,8 +110,8 @@ D2. **Start cheap, climb on a verified failure** (operator 2026-10-18): mechanic
 one rung at a time, never straight to frontier; `research` climbs to judgment. Re-dispatch the failed slice on the
 next rung with its report and diff.
 D3. **Frontier allowance** (`docs/gates.md`; standing since 2026-10-27): you MAY use Fable or `gpt-6-astra` where you
-judge it significantly better than Opus 5.5, with a one-line reason (`acp-dispatch … --kind frontier --frontier-reason
-"10-200 chars"`; Agent tool: a `frontier-reason: …` line in the prompt), within the per-wave caps and the Agent-tool
+judge it significantly better than Opus 5.5, with a one-line reason (`paseo run … --label ade.kind=frontier` plus a
+`--frontier-reason "10-200 chars"` grant where the admit path still asks; Agent tool: a `frontier-reason: …` line in the prompt), within the per-wave caps and the Agent-tool
 daily cap. For claude it needs a fresh, known Claude reading (aiuse or `paseo usage ls`) with the tightest window and
 the Fable cap above their floors; stale, unknown or short means the closed rules (one frontier slice per pool per wave,
 an Agent-tool Fable call asks).
@@ -120,8 +120,11 @@ a quota limit and continue it after the reset. The fleet governor and the quota 
 windows are short (`route_agent.py show`), select a fresh eligible pool through the router. Do not fall back to
 an archived TUI or infer that a manual Pi smoke test authorizes automatic routing. When those windows are short,
 Agent-tool sub-agents run with `model: "sonnet"`; Claude code slices use Sonnet.
-D5. **In-flight slices reserve quota per service** (`[dispatch.estimate_floor]`, the repo overrides for tendcf and
-nix2cf): `acp-dispatch` refuses a slice that does not fit (exit 5, class `inflight`).
+D5. **Quota fit uses `[dispatch.estimate_floor]` (and repo overrides for tendcf / nix2cf).** `route_agent.py plan` /
+`pool_fits` refuse a slice that does not fit the **current** remaining reading. They do **not** yet subtract sibling
+in-flight reservations across a parallel wave (that was the retired Wave 6 dispatch shim's write-and-recheck path).
+Until a native reservation lands: re-run `plan` immediately before each `paseo run`, and do not launch more same-pool
+slices from one plan snapshot than the floor estimate fits in remaining.
 D6. **Calibrate and monthly re-rank (2026-11-10):** `bin/route_agent.py calibrate [--json] [--since 30]` proposes
 `good_at` rank deltas from recent outcomes. The optional Paseo schedule `routing-recalibrate` (Day 1 09:00,
 `--mode auto`; create line in `docs/scheduling.md`, inventory in `config/install.toml`) applies them; leave

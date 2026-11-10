@@ -95,7 +95,7 @@ login wins and the key is not substituted.
 
 The turn that hit the wall **already failed**. A new key alone leaves the tab idle and silent: the
 entity is dark, now with a working credential. Re-prompt it with native `paseo send` (Wave 6:
-do **not** call `relay.py` / `acp-dispatch` / `acp-run`):
+do **not** call the retired Wave 6 shims):
 
 ```sh
 YOUR_ID=$(paseo ls -a -g --json | …)   # this agent's id; never invent one
