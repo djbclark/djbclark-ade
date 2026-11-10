@@ -5,3 +5,4 @@
 ### Fixed
 
 - Relative local `core.hooksPath` values are resolved from the process cwd after every `-C` (with a leading `~/` expanded), matching Git's hook-lookup semantics, not from `--work-tree` / `show-toplevel` or the common Git directory (#432).
+- `hooks-path` no longer refuses plain `git branch <new>` when local `core.hooksPath` is non-ade; only force/delete/move/copy `branch` forms (plus push/fetch/other ref-writes) are refused, so lazy-install probes still get git's own exit (#432).

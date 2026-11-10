@@ -1551,9 +1551,11 @@ def test_local_non_ade_hooks_path_refuses_push_and_ref_writes(tmp_path, state, h
         assert refused77(r) and "hooks-path" in r.stderr, (argv, r.returncode, r.stderr)
     assert "main" not in plain(state, ["--git-dir", str(bare), "branch", "--list"], tmp_path)
     # Ordinary non-ref-writing calls stay allowed (husky / pre-commit repos still work for status/add).
+    # Plain `branch <new>` too: without -f it cannot overwrite a claimed tip (lazy-install probes use it).
     assert run(state, ["status", "--short"], repo, who="B").returncode == 0
     assert run(state, ["add", "f"], repo, who="B").returncode == 0
     assert run(state, ["branch", "--list"], repo, who="B").returncode == 0
+    assert run(state, ["branch", "plain-new"], repo, who="B").returncode == 0
     assert run(state, ["stash", "list"], repo, who="B").returncode == 0
     # A human shell is untouched.
     assert run(state, ["push", "origin", "main"], repo).returncode == 0
@@ -1660,12 +1662,13 @@ def test_relative_hooks_path_uses_cwd_after_C_not_work_tree(tmp_path, state):
     # cwd=repo: relative → repo/rel-hooks (forged) → refuse
     r = run(state, ["branch", "-f", "x", "main"], repo, who="B")
     assert refused77(r) and "hooks-path" in r.stderr, r.stderr
-    # Real stubs only under work-tree; cwd elsewhere has none → refuse (Git ignores --work-tree here)
+    # Real stubs only under work-tree; cwd elsewhere has none → refuse (Git ignores --work-tree here).
+    # Probe with force-update (plain `branch <new>` is not hooks-path-guarded).
     for child in (ext / "rel-hooks").iterdir():
         child.unlink()
     (ext / "rel-hooks").rmdir()
     _write_ade_stubs(repo / "rel-hooks")
-    r = run(state, ["--git-dir", str(repo / ".git"), "--work-tree", str(repo), "branch", "wt-only"],
+    r = run(state, ["--git-dir", str(repo / ".git"), "--work-tree", str(repo), "branch", "-f", "wt-only", "main"],
             ext, who="B")
     assert refused77(r) and "hooks-path" in r.stderr, r.stderr
 

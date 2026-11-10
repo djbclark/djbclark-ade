@@ -1747,7 +1747,12 @@ pull stash branch checkout switch symbolic-ref worktree fetch fetch-pack remote"
 
 
 def _is_ref_write_or_push(call: GitCall) -> bool:
-    """Push family, fetch family, or a non-read form of a builtin that updates the refs the claim hooks guard."""
+    """Push family, fetch family, or a non-read form of a builtin that updates the refs the claim hooks guard.
+
+    Plain `git branch <new>` is not included: without `-f`/`-d`/`-D`/`-m`/`-M`/`-c`/`-C` (and the related write
+    longs) it cannot overwrite or delete an existing tip, so a non-ade local hooksPath does not let it bypass
+    claim protection. Lazy-install probes use that form while hooksPath is set and expect git's own exit, not
+    `hooks-path` (exit 77)."""
     sub = call.sub
     if sub not in _HOOK_GUARDED_SUBS:
         return False
@@ -1761,6 +1766,10 @@ def _is_ref_write_or_push(call: GitCall) -> bool:
         # `remote update` (and `remote -v update`) fetches into local refs; other remote verbs do not.
         s = scan(call.args)
         return bool(s.pos) and s.pos[0] == "update"
+    if sub == "branch":
+        s = scan(call.args, value_long={"contains", "no-contains", "merged", "no-merged", "points-at", "format", "sort",
+                                       "abbrev"}, danger=D_WRITE_BRANCH)
+        return bool(s.shorts & set("dDmMcCuft") or s.longs & D_WRITE_BRANCH)
     return not is_readonly(call)
 
 

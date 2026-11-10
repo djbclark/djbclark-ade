@@ -163,7 +163,9 @@ Evaluated in order; the module docstring has every form.
    hook-lookup semantics rather than `--work-tree` / `show-toplevel`;
    `/dev/null`, empty, husky, non-executable copies, and any other path count as non-ade), **`push`, `fetch` /
    `fetch-pack` / `remote update`, and ref-writing subcommands are refused** (`hooks-path`, exit 77; §10 residual,
-   2026-11-10): without the stubs the claim hooks never run. An ade-stub `hooksPath` stays allowed. If git answers neither 0 nor 1 (timeout, a
+   2026-11-10): without the stubs the claim hooks never run. Plain `git branch <new>` is not among them (it cannot
+   overwrite an existing tip without `-f`); force/delete/move/copy `branch` forms still are. An ade-stub `hooksPath`
+   stays allowed. If git answers neither 0 nor 1 (timeout, a
    config file it cannot parse) the call is refused with that reason (`hook-config-unknown`): **the shim fails closed, the
    hooks fail open**. **acp-run's own config pairs (2026-10-30; transitional until Wave 6 deletes `tools/acp-run`):** while
    `acp-run` still launches agents it puts two `GIT_CONFIG_PARAMETERS` entries in every agent's environment,
@@ -238,11 +240,13 @@ analyser (and the Claude PreToolUse hook it was for, W5).
     The durable rule now runs in the shim (`ade_claims.py` rule `hooks-path`, exit 77): when local/worktree
     `core.hooksPath` is set and is not the ade-git-guard stubs directory (`/dev/null`, empty, husky, non-executable
     stub copies, marker-only forgeries, any other path), refuse `push`, `fetch`/`fetch-pack`/`remote update`, and
-    ref-writing subcommands (`update-ref`, non-read `branch`/`checkout`/`switch`/`commit`/`merge`/`rebase`/`reset`/
-    `stash`/`pull`/`symbolic-ref`/`worktree`, …). An ade-stub `hooksPath` (the directory holds the canonical stubs
-    that invoke `HOOKS_SRC`, each executable) stays allowed; a relative value is resolved from the process cwd
-    after every `-C` (with `~/` expanded), matching Git's hook-lookup semantics, not `--work-tree` /
-    `show-toplevel`. Ordinary non-ref-writing calls with a non-ade local `hooksPath` stay allowed.
+    ref-writing subcommands (`update-ref`, force/delete/move/copy `branch`, non-read `checkout`/`switch`/`commit`/
+    `merge`/`rebase`/`reset`/`stash`/`pull`/`symbolic-ref`/`worktree`, …). Plain `git branch <new>` is not refused
+    (without `-f`/`-d`/`-D`/`-m`/`-M`/`-c`/`-C` it cannot overwrite a claimed tip; lazy-install probes use it while
+    hooksPath is set). An ade-stub `hooksPath` (the directory holds the canonical stubs that invoke `HOOKS_SRC`,
+    each executable) stays allowed; a relative value is resolved from the process cwd after every `-C` (with `~/`
+    expanded), matching Git's hook-lookup semantics, not `--work-tree` / `show-toplevel`. Ordinary non-ref-writing
+    calls with a non-ade local `hooksPath` stay allowed.
     Still out of reach by design: an absolute path to the real git (the hooks still would not run, and this shim never
     sees the call), and a human shell.
 11. **Template sources the shim only reads for `clone`, `init`:** `submodule add|update` and `fetch|pull --recurse-submodules` also
