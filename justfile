@@ -27,3 +27,14 @@ install-apply-dry:
 # Preview system_argv without executing (Linux apt paths today).
 install-apply-system-dry:
     "{{ root }}/bin/ade-install" apply --system --dry-run --root "{{ root }}"
+
+# Canonical names from docs/setup-plan.md (thin wrappers over install-* / ade-update).
+# `just install` defaults to apply dry-run; pass `-- --yes` for live user-scoped apply.
+doctor:
+    "{{ root }}/bin/ade-install" doctor --root "{{ root }}"
+
+install *args:
+    "{{ root }}/bin/ade-install" apply --root "{{ root }}" {{ args }}
+
+update *args:
+    "{{ root }}/bin/ade-update" --repo "{{ root }}" {{ args }}
