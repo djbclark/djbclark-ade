@@ -129,6 +129,54 @@ def test_fixture_evidence_passes_delete_check_shape_on_clean_tree(tmp_path: Path
     assert out["reasons"] == []
 
 
+def test_dry_run_uses_fixture_bundle_and_never_claims_ready() -> None:
+    """CLI --dry-run: FIXTURE FAILCLOSED shape only; exit 0 ≠ deletion-ready."""
+    r = _run_delete_check("--json", "--dry-run", root=ROOT)
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)
+    assert out["dry_run"] is True
+    assert out["mode"] == "dry-run-fixture"
+    assert out["fixture_shape_ok"] is True
+    assert out["ready"] is False
+    assert any("NOT deletion-ready" in x for x in out["reasons"])
+    assert out["evidence"] and "evidence.FIXTURE.json" in out["evidence"]
+
+
+def test_dry_run_refuses_evidence_and_allow_early() -> None:
+    r = _run_delete_check(
+        "--dry-run",
+        "--evidence",
+        str(FIXTURE_EVIDENCE),
+        root=ROOT,
+    )
+    assert r.returncode == 2
+    assert "incompatible" in r.stderr
+
+
+def test_dry_run_failcloses_when_fixture_unlabeled(tmp_path: Path) -> None:
+    """Invented 'live' labels under the fixture path must not green --dry-run."""
+    import shutil
+
+    dest_root = tmp_path / "repo"
+    bundle = dest_root / "tests/fixtures/wave6-mac-proofs"
+    shutil.copytree(FIXTURE_DIR, bundle)
+    ev = bundle / "evidence.FIXTURE.json"
+    data = json.loads(ev.read_text(encoding="utf-8"))
+    data["recorded"] = "2026-11-10-live-Mac"  # pretend live
+    data["note"] = "live capture"
+    ev.write_text(json.dumps(data), encoding="utf-8")
+    # Also strip FIXTURE label from one mac proof (invented live stdout).
+    mac = bundle / data["mac_proofs"]["relay_idle"]
+    mac.write_text("cmd: pgrep\nverified: no match\n", encoding="utf-8")
+    r = _run_delete_check("--json", "--dry-run", root=dest_root)
+    assert r.returncode == 1, r.stdout + r.stderr
+    out = json.loads(r.stdout)
+    assert out["fixture_shape_ok"] is False
+    assert out["ready"] is False
+    joined = "\n".join(out["reasons"])
+    assert "fixture_invalid:" in joined
+    assert "FIXTURE-not-live-Mac" in joined or "FIXTURE" in joined
+
 def test_fixture_harness_refuses_out_without_live() -> None:
     """Harness must not write invented Mac stdout when --live is absent."""
     r = _run_capture("--out", "/tmp/wave6-mac-proof-should-not-write")

@@ -292,3 +292,18 @@ def test_repo_root_not_ready_today() -> None:
     assert data["ready"] is False
     joined = "\n".join(data["reasons"])
     assert "evidence_missing:" in joined or "callers_skills:" in joined
+
+
+def test_dry_run_help_documents_fixture_not_live() -> None:
+    """Usage must advertise --dry-run as FIXTURE regression, not live Mac."""
+    r = subprocess.run(
+        [sys.executable, "-I", str(SCRIPT), "--help"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert r.returncode == 0, r.stderr
+    text = r.stdout + r.stderr
+    assert "--dry-run" in text
+    assert "FIXTURE" in text
+    assert "deletion-ready" in text or "not deletion" in text.lower()

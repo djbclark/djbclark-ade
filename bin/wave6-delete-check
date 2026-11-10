@@ -2,11 +2,20 @@
 """wave6-delete-check: refuse Wave 6 shim deletion until gates pass (2026-11-09).
 
   wave6-delete-check [--root DIR] [--evidence PATH] [--json] [--allow-early]
+  wave6-delete-check --dry-run [--root DIR] [--json]
 
 Read-only. Exit 0 only when every gate is green (safe to open the deletion PR
 that removes relay.py / acp-dispatch / acp-run). Exit 1 with named reasons
 otherwise. Exit 2 usage / unreadable root or evidence. Never deletes, never
 posts, never merges. Docs: docs/slim/wave6-follow-up.md (queue Carried 33).
+
+--dry-run (FIXTURE regression only):
+  Points at tests/fixtures/wave6-mac-proofs/evidence.FIXTURE.json under --root,
+  checks FAILCLOSED proof-file shape only (skips callers / soft_deadline), and
+  refuses unless the bundle is still labeled FIXTURE. Exit 0 means fixture
+  shape OK — never live Mac proof, never deletion-ready. Incompatible with
+  --evidence / --allow-early. Live Mac cycle: bin/wave6-mac-proof-capture
+  --live (Darwin only), then --evidence on real captures.
 
 Gates:
   callers_skills   listed skills still teach/invoke the shims as live commands
@@ -14,6 +23,7 @@ Gates:
   callers_loose    skills/loose still uses acp-run --perm deny (must port first)
   evidence_missing --evidence not passed (Mac live-cycle + C3 ticks required)
   evidence_invalid evidence JSON missing keys or bad values
+  fixture_invalid  --dry-run bundle missing, unlabeled, or not FIXTURE
   c3_<key>         that C3 row is not migrated|waived
   c3_<key>_proof_missing   c3_proofs.<key> path missing, empty, or unreadable
   mac_<flag>       that Mac idle/smoke flag is not true
@@ -41,6 +51,9 @@ from typing import Any
 
 TOOL = "wave6-delete-check"
 SOFT_DEADLINE = datetime.date(2026, 11, 20)
+FIXTURE_EVIDENCE_REL = Path("tests/fixtures/wave6-mac-proofs/evidence.FIXTURE.json")
+FIXTURE_RECORDED = "FIXTURE-not-live-Mac"
+FIXTURE_PROOF_LABEL = "FIXTURE — NOT live Mac stdout"
 
 # Paths that must not teach the shims as live commands before deletion.
 CALLER_SKILLS = (
@@ -290,8 +303,95 @@ def evaluate(
         "soft_deadline": SOFT_DEADLINE.isoformat(),
         "allow_early": allow_early,
         "evidence": str(evidence) if evidence else None,
+        "dry_run": False,
         "ready": not reasons,
         "reasons": reasons,
+    }
+
+
+def _fixture_label_reasons(evidence: Path) -> list[str]:
+    """FAILCLOSED: dry-run only accepts the labeled FIXTURE bundle (not invented live)."""
+    reasons: list[str] = []
+    try:
+        data: Any = json.loads(evidence.read_text(encoding="utf-8"))
+    except OSError as exc:
+        return [f"fixture_invalid: cannot read {evidence}: {exc.__class__.__name__}"]
+    except json.JSONDecodeError:
+        return [f"fixture_invalid: {evidence} is not JSON"]
+    if not isinstance(data, dict):
+        return ["fixture_invalid: root must be a JSON object"]
+    if data.get("recorded") != FIXTURE_RECORDED:
+        reasons.append(
+            f"fixture_invalid: recorded must be {FIXTURE_RECORDED!r}, "
+            f"got {data.get('recorded')!r}"
+        )
+    note = data.get("note")
+    if not isinstance(note, str) or "FIXTURE" not in note or "NOT" not in note:
+        reasons.append(
+            "fixture_invalid: note must declare FIXTURE / NOT live Mac "
+            "(refuse invented live proofs)"
+        )
+    try:
+        evidence_dir = evidence.resolve().parent
+    except OSError as exc:
+        return [f"fixture_invalid: cannot resolve {evidence}: {exc.__class__.__name__}"]
+    mac_proofs = data.get("mac_proofs")
+    if not isinstance(mac_proofs, dict):
+        reasons.append("fixture_invalid: missing mac_proofs object")
+        return reasons
+    for flag in MAC_FLAGS:
+        path = _proof_path(evidence_dir, mac_proofs.get(flag))
+        if path is None:
+            reasons.append(
+                f"fixture_invalid: mac_proofs.{flag} missing for FIXTURE label check"
+            )
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            reasons.append(
+                f"fixture_invalid: unreadable mac proof {path}: "
+                f"{exc.__class__.__name__}"
+            )
+            continue
+        if not text.startswith(FIXTURE_PROOF_LABEL):
+            reasons.append(
+                f"fixture_invalid: {path.name} must start with "
+                f"{FIXTURE_PROOF_LABEL!r} (not live Mac stdout)"
+            )
+    return reasons
+
+
+def evaluate_dry_run(root: Path) -> dict[str, Any]:
+    """FIXTURE-only FAILCLOSED shape regression; never deletion-ready / never live Mac."""
+    evidence = root / FIXTURE_EVIDENCE_REL
+    reasons: list[str] = []
+    if not evidence.is_file():
+        reasons.append(f"fixture_invalid: missing {FIXTURE_EVIDENCE_REL.as_posix()}")
+    else:
+        reasons.extend(_fixture_label_reasons(evidence))
+        # Soft deadline does not apply to fixture shape regression.
+        reasons.extend(check_evidence(evidence, allow_early=True))
+    # Drop soft_deadline if check_evidence ever reintroduces it without allow_early.
+    reasons = [r for r in reasons if not r.startswith("soft_deadline:")]
+    fixture_shape_ok = not reasons
+    return {
+        "tool": TOOL,
+        "root": str(root),
+        "soft_deadline": SOFT_DEADLINE.isoformat(),
+        "allow_early": False,
+        "evidence": str(evidence) if evidence.is_file() else None,
+        "dry_run": True,
+        "mode": "dry-run-fixture",
+        "fixture_shape_ok": fixture_shape_ok,
+        # Never green deletion from --dry-run, even when fixture shape is OK.
+        "ready": False,
+        "reasons": reasons
+        if reasons
+        else [
+            "dry_run: FIXTURE proofs shape OK — NOT live Mac; NOT deletion-ready "
+            "(use --evidence with Mac live captures after wave6-mac-proof-capture --live)"
+        ],
     }
 
 
@@ -317,8 +417,19 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="permit delete before 2026-11-20 when evidence gates are green",
     )
+    p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "FIXTURE FAILCLOSED shape regression only "
+            f"({FIXTURE_EVIDENCE_REL.as_posix()}); not deletion-ready"
+        ),
+    )
     p.add_argument("--json", action="store_true", help="print the full result as JSON")
     args = p.parse_args(argv)
+
+    if args.dry_run and (args.evidence is not None or args.allow_early):
+        return die("--dry-run is incompatible with --evidence / --allow-early")
 
     root = args.root
     if root is None:
@@ -330,17 +441,32 @@ def main(argv: list[str] | None = None) -> int:
     if not root.is_dir():
         return die(f"root is not a directory: {root}")
 
-    result = evaluate(root, evidence=args.evidence, allow_early=args.allow_early)
+    if args.dry_run:
+        result = evaluate_dry_run(root)
+        ok = bool(result.get("fixture_shape_ok"))
+    else:
+        result = evaluate(root, evidence=args.evidence, allow_early=args.allow_early)
+        ok = bool(result["ready"])
+
     if args.json:
         print(json.dumps(result, indent=2, sort_keys=True))
+    elif args.dry_run and ok:
+        print(
+            f"{TOOL}: dry-run FIXTURE shape OK "
+            "(NOT live Mac; NOT deletion-ready)"
+        )
     elif result["ready"]:
         print(f"{TOOL}: ready (all gates green)")
     else:
-        print(f"{TOOL}: not ready ({len(result['reasons'])} reason(s))", file=sys.stderr)
+        label = "dry-run not OK" if args.dry_run else "not ready"
+        print(
+            f"{TOOL}: {label} ({len(result['reasons'])} reason(s))",
+            file=sys.stderr,
+        )
         for r in result["reasons"]:
             print(f"  - {r}", file=sys.stderr)
 
-    return 0 if result["ready"] else 1
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":

@@ -1,20 +1,25 @@
 # Wave 6 follow-up — shim and `acp-run` deletion readiness
 
-Snapshot: 2026-11-10 (Mac proof harness + FIXTURE bundle for CI shape; live
-Mac cycle still pending). Queue Carried **item 33**. The slim-down's Wave 6
-**shipped the shims** (`docs/slim/PLAN.md` F). This doc is the **deletion
-readiness** checklist for the follow-up PR that removes
-`skills/session-finder/relay.py`, `bin/acp-dispatch`, and `tools/acp-run`
-after one Mac live cycle — **do not delete them in this readiness PR**. Soft
-deadline **2026-11-20**
+Snapshot: 2026-11-10 (Mac proof harness + FIXTURE bundle + `--dry-run`
+FAILCLOSED shape path; live Mac cycle still pending). Queue Carried
+**item 33**. The slim-down's Wave 6 **shipped the shims** (`docs/slim/PLAN.md`
+F). This doc is the **deletion readiness** checklist for the follow-up PR that
+removes `skills/session-finder/relay.py`, `bin/acp-dispatch`, and
+`tools/acp-run` after one Mac live cycle — **do not delete them in this
+readiness PR**. Soft deadline **2026-11-20**
 (`tests/test_relay_shim.py::test_the_shim_is_removed_by_2026_11_20`).
 `bin/review-launch` and its boundary tests stay (E8 / review rule 11).
 
 Gate tool: `bin/wave6-delete-check` (exit 0 only when every gate below is
-green; prints named reasons otherwise). Mac capture harness:
+green; prints named reasons otherwise). **CI / local shape regression (not
+deletion-ready):** `bin/wave6-delete-check --dry-run` points at
+`tests/fixtures/wave6-mac-proofs/evidence.FIXTURE.json`, checks FAILCLOSED
+non-empty proof files + FIXTURE labels only, skips callers/soft_deadline, and
+keeps `ready: false` even when exit 0. Mac capture harness:
 `bin/wave6-mac-proof-capture --live --out DIR` (Darwin only; refuses to invent
-Mac stdout elsewhere). Run the gate before opening the deletion PR. New code
-already calls Paseo directly (`paseo send`, `paseo run`).
+Mac stdout elsewhere). Run `--evidence` on **live** captures before opening
+the deletion PR. New code already calls Paseo directly (`paseo send`,
+`paseo run`).
 
 ## A. Remaining in-repo callers (must be gone or archived before delete)
 
@@ -166,12 +171,28 @@ Without a Mac live cycle yet, CI uses a **labeled fixture** bundle at
 `tests/test_wave6_mac_proof_fixtures.py` prove FAILCLOSED non-empty shape and
 that the harness refuses to invent live stdout on non-Darwin.
 
+**Regression CLI (FIXTURE only):**
+
+```bash
+bin/wave6-delete-check --dry-run --json
+# exit 0 + fixture_shape_ok: true  → labeled FIXTURE proofs are non-empty
+# ready is always false in --dry-run (never treat as deletion green)
+# exit 2 if combined with --evidence / --allow-early
+```
+
+`--dry-run` FAILCLOSEs (`fixture_invalid:…`) when the bundle is missing, the
+`recorded` field is not `FIXTURE-not-live-Mac`, the note omits FIXTURE/NOT, or
+a `mac_proofs` file drops the FIXTURE first-line label — so inventing “live”
+stdout under the fixture path cannot green the shape check.
+
 **These fixtures are not deletion evidence.** After the Mac live cycle:
 
 1. `bin/wave6-mac-proof-capture --live --out ./wave6-evidence --json`
+   (Darwin + `--live` only; non-Darwin refuses — see harness docstring).
 2. Merge the printed `mac_proofs` map into the real `evidence.json` (keep C3
    outside probes / waives from §C).
 3. `bin/wave6-delete-check --evidence ./wave6-evidence/evidence.json` (exit 0).
+   Do **not** use `--dry-run` here.
 4. Paste live stdout into the deletion PR. Keep the FIXTURE bundle only as a
    shape regression, still labeled FIXTURE — never rename a fixture to look
    like a live capture.
