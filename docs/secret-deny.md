@@ -83,9 +83,17 @@ template into live `~/.codex/config.toml` still needs the operator's yes (order 
     nothing matches, or the walk was cut short (a bound, the match cap, or a symlinked directory left unentered), the
     pattern itself is checked (B3), so every word gets at least that check and a bound never lets one through
     unchecked. Measured 2026-11-04: that repro takes 0.07 s through the hook. The order is cheapest first (2026-11-04):
-    every literal word, then the glob words without `**`, then those with it; each glob word gets 1 s on its first try,
-    and one that runs longer is set aside and retried, with the rest of the 8 s, after every other word, so a slow word
-    cannot use up the time a later `cat ~/.ssh/id_*` needs.
+    every literal word, then the glob words without `**`, then those with it; each glob word gets 1 s on its first try
+    within a shared 2 s first-pass cap (2026-11-09), and one that runs longer is set aside (cached) and retried after
+    every other word: pattern-only first, then a real walk with remaining budget when the pattern cannot decide
+    (broad globs such as `id_*` / `*` need the walk to catch `id_rsa` / `server.key` on disk; never allow those after
+    set-aside on pattern-only alone). A word that times out twice, an overall-budget timeout while glob words remain,
+    a set-aside word that still needs a walk with no budget left, a deferred walk truncated by the shared 2 s
+    glob-walk clock / entry bound, or a first-pass glob truncated the same way — relative/cwd or
+    absolute/tilde-expanded (completing slow dummies can start and exhaust that clock under the per-word
+    budget while the first-pass cap equals it, or burn the entry bound while a later secret glob still has
+    rem; absolute deep globs keep the pattern fallback only when that shared budget did not truncate),
+    fails closed (C7).
   - **B1d.** Codex `apply_patch` headers (`*** Add File:`, `*** Update File:`, `*** Delete File:`, `*** Move to:`) inside a
     `*** Begin Patch` block, in the command or any other string of a non-file tool. Only a genuine patch payload leaves the
     patch body out of the shell words, so a patch whose code mentions `.env` passes there: the `apply_patch` tool, or a
@@ -176,19 +184,42 @@ template into live `~/.codex/config.toml` still needs the operator's yes (order 
   files with the Write tool rather than a heredoc, or have the operator set `SECRET_DENY_OFF=1` in the environment Claude
   Code starts from. `ls ~/.ssh` is blocked too (the directory rule).
 - **C6. Case.** Paths are matched case-sensitively except on macOS, where `.ENV` opens `.env`.
-- **C7. Fail open.** Bad hook input, a missing or corrupt policy JSON, an internal error, or analysis longer than 8 s
-  exits 0 with a one-line `secret-read-gate: ... allowing (fail open)` notice on stderr. The Bash glob walk (B1c) does
-  not reach that budget: it stops at its own bounds (20000 entries, 2 s, leaving at least 3 s of the 8 s) and falls back
-  to the pattern check, with no notice (2026-11-04). A glob word whose check runs past its own 1 s is retried after
-  every other word (B1c), so one slow word cannot starve a later read. Limit (adversary round 4, 2026-11-04): about
-  eight crafted slow glob words (each repeat or variant spends its own 1 s) still use up the 8 s before a later glob
-  read such as `cat ~/.ssh/id_*` is reached, and the call fails open; a later literal path (`cat ~/.ssh/id_rsa`) is
-  checked first and still blocks. Ordinary code tokens are fast; the fix (cache set-aside words, cap the first pass) is
-  queued in `docs/queue.md`. A directory that opens but cannot be read to the end
-  (`/proc/1/map_files`) is skipped by both walks, as the shell and ripgrep skip it; before 2026-11-04 it raised and
-  failed the hook open. A Grep walk that hits its own bound allows silently, unless its glob's text blocks (B1b) or the
-  root is above a home-level deny (C4). The hook is registered without `onFailure: block`, so a broken hook never
-  blocks every Read; the static rules (B2) still hold then.
+- **C7. Fail open / glob fail closed.** Bad hook input, a missing or corrupt policy JSON, an internal error, or
+  non-glob analysis longer than 8 s exits 0 with a one-line `secret-read-gate: ... allowing (fail open)` notice on
+  stderr. The Bash glob walk (B1c) does not reach that budget: it stops at its own bounds (20000 entries, 2 s, leaving
+  at least 3 s of the 8 s) and falls back to the pattern check, with no notice (2026-11-04). A glob word whose check
+  runs past its own 1 s is set aside (cached) and retried after every other word (B1c): pattern-only first, then a
+  real walk when the pattern cannot decide, under a shared 2 s first-pass cap so about eight crafted slow words cannot
+  spend 8×1 s before a later read (closed 2026-11-09; was a known limit from adversary round 4, 2026-11-04). A residual
+  closed 2026-11-09: when the first-pass cap was burned by *completing* (not timed-out) slow globs, remaining words
+  were set aside and pattern-only-retried, so walk-dependent secrets (`cat id_*` / `cat *` beside `id_rsa` /
+  `server.key`) were allowed — the deferred retry now walks with remaining budget or fails closed. A further residual
+  closed 2026-11-10: those completing dummies also start the shared 2 s glob-walk clock (`GLOB_S`); with
+  `FIRST_PASS_S == GLOB_S` the deferred walk is already truncated, `expand` used not to `tick` on truncate, and an
+  inconclusive pattern check ALLOWed — truncated deferred walks now fail closed. A further residual the same day:
+  `_glob_budget_hit` was only checked on deferred retry, so a first-pass relative word that still had
+  `FIRST_PASS_S` rem after the shared clock / entry bound was already exhausted truncated, fell back to an
+  inconclusive pattern check, cached allow, and never entered deferred — first-pass truncated relative/cwd
+  walks now fail closed too. A further residual the same day: that first-pass refuse skipped tokens whose raw
+  text started with `/` or `~`, so an absolute dummy burn then `$ABS/id_*` (or `/tmp/.../id_*`) truncated,
+  fell back to an inconclusive pattern, cached miss, and ALLOWed while relative `id_*` correctly refused —
+  first-pass and deferred truncated absolute/tilde walks now fail closed the same way (absolute deep globs
+  keep the pattern fallback only when the shared budget did not truncate). A further residual the same day:
+  `_glob_one` cleared `_glob_budget_hit` at the start of every brace alternative, so after `MAX_GLOB_SCAN`
+  was burned an earlier alt truncated and a later empty/cheap alt (`{,id_*}`, `{,*}`, `{,*,id_*}`) reset the
+  flag and ALLOWed — budget-hit is now sticky across brace alts. Another the same day: hitting `MAX_GLOB_HITS`
+  marked the walk incomplete but did not set `_glob_budget_hit`, so 500 non-deny matches before `id_rsa`
+  under `*` left the deny unchecked and an inconclusive pattern ALLOWed — `MAX_GLOB_HITS` truncation now
+  fail-closes like `GLOB_S`. A word that times out twice, an overall-budget timeout while Bash glob words
+  remain unchecked, a set-aside word that still needs a walk with no budget left, a deferred walk truncated
+  by `GLOB_S` / the entry bound / `MAX_GLOB_HITS`, or a first-pass relative/cwd or absolute/tilde walk
+  truncated the same way, exits 2 with `glob analysis budget exceeded (fail closed)`: secret paths prefer
+  deny over allow. A later literal path (`cat ~/.ssh/id_rsa`) is still checked first and blocks on the deny
+  rule. A directory that opens but cannot be read to the end (`/proc/1/map_files`) is skipped by both walks,
+  as the shell and ripgrep skip it; before 2026-11-04 it raised and failed the hook open. A Grep walk that
+  hits its own bound allows silently, unless its glob's text blocks (B1b) or the root is above a home-level
+  deny (C4). The hook is registered without `onFailure: block`, so a broken hook never blocks every Read;
+  the static rules (B2) still hold then.
 
 ## D. Changing the policy
 
