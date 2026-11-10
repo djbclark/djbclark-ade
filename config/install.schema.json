@@ -224,6 +224,26 @@
               "mode": {
                 "type": "string"
               },
+              "timezone": {
+                "type": "string",
+                "minLength": 1,
+                "description": "IANA timezone for paseo schedule create; ADE_TIMEZONE used when omitted"
+              },
+              "provider": {
+                "type": "string",
+                "minLength": 1,
+                "description": "paseo --provider for schedule create (e.g. claude/sonnet)"
+              },
+              "cwd": {
+                "type": "string",
+                "minLength": 1,
+                "description": "paseo --cwd; __ADE__/__HOME__ placeholders filled"
+              },
+              "prompt": {
+                "type": "string",
+                "minLength": 1,
+                "description": "paseo schedule create prompt (positional)"
+              },
               "set": {
                 "type": "array",
                 "items": {
