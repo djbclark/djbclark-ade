@@ -69,10 +69,10 @@ EX_ACTIVATE, EX_USAGE, EX_NOT_INSTALLED, EX_UNAVAILABLE = 1, 2, 3, 69
 OWNER_ADE = "djbclark-ade"
 JOBS_LEDGER_SCHEMA_VERSION = 1
 JOBS_LEDGER_NAME = "jobs.json"
-# Host write backends for ade-sched jobs (CI-testable). Paseo is a job kind, not a host
-# backend: reconcile plans/executes paseo schedule create/delete with ledger backend="paseo"
-# without adding "paseo" here. Launchd host writes remain later.
-RECONCILE_WRITE_BACKENDS = frozenset({"systemd", "cron"})
+# Host write backends for ade-sched jobs (CI-testable with fakes). Paseo is a job kind, not a
+# host backend: reconcile plans/executes paseo schedule create/delete with ledger
+# backend="paseo" without adding "paseo" here.
+RECONCILE_WRITE_BACKENDS = frozenset({"systemd", "cron", "launchd"})
 RECONCILE_WRITE_BACKEND = "systemd"  # legacy JSON/single-name field; prefer RECONCILE_WRITE_BACKENDS
 # Labels matching these prefixes are considered in-scope for foreign drift reports.
 FOREIGN_PREFIXES = ("com.djbclark.", "acpdispatch.")
@@ -966,7 +966,16 @@ def uninstall(label: str, backend: str | Backend | None = None, *, dry_run: bool
             print(f"# run: {shlex.join(cmd)}", file=out)
             return path.exists()
         if activate:
+            # bootout of a missing job fails: ignore that, but refuse to drop the plist
+            # while launchctl still reports the job loaded (Codex P2 on #514).
             _activate(c, cmd, ignore=True)
+            rc, _, err_txt = _run([c.launchctl, "print", f"gui/{c.uid}/{label}"], c.env)
+            if rc == 0:
+                raise SchedError(
+                    EX_ACTIVATE,
+                    f"launchd {label} still loaded after bootout"
+                    + (f": {err_txt.strip()}" if err_txt and err_txt.strip() else ""),
+                )
         else:
             print(shlex.join(cmd), file=out)
         found = path.exists()
@@ -1808,8 +1817,20 @@ def _expects_timer(rendered: Rendered) -> bool:
     return any(isinstance(p, Path) and p.name.endswith(".timer") for p in rendered.files)
 
 
-def _unit_active_ok(st: Status, *, expects_timer: bool) -> bool:
-    """Matching artifacts are healthy only when the timer is active; completed oneshots may be inactive."""
+def _unit_active_ok(
+    st: Status,
+    *,
+    expects_timer: bool,
+    backend_name: str | None = None,
+) -> bool:
+    """Matching artifacts are healthy only when the manager has them loaded when required.
+
+    Systemd: require active when a ``.timer`` is expected; oneshots without a timer may
+    stay inactive. Launchd: always require ``launchctl print`` success (loaded), even
+    though plists never produce a ``.timer`` (Codex P2 on #514).
+    """
+    if backend_name == "launchd":
+        return bool(st.active)
     if expects_timer:
         return bool(st.active)
     return True
@@ -2064,7 +2085,9 @@ def plan_reconcile(
             and entry.get("backend") == backend_name
         )
         expects_timer = _expects_timer(rendered)
-        active_ok = _unit_active_ok(st, expects_timer=expects_timer)
+        active_ok = _unit_active_ok(
+            st, expects_timer=expects_timer, backend_name=backend_name,
+        )
         if on_disk_match and ledger_match and active_ok:
             steps.append(ReconcileStep(
                 name, "skip", owner,
@@ -2082,11 +2105,14 @@ def plan_reconcile(
             ))
             continue
         if on_disk_match and not active_ok:
-            detail = (
-                f"activate inactive timer {label} (units match; hash ok)"
-                if st.installed else
-                f"install missing label {label} from {plist}"
-            )
+            if backend_name == "launchd":
+                detail = f"load inactive LaunchAgent {label} (plist match; hash ok)"
+            else:
+                detail = (
+                    f"activate inactive timer {label} (units match; hash ok)"
+                    if st.installed else
+                    f"install missing label {label} from {plist}"
+                )
         else:
             detail = (
                 f"install/reload label {label} from {plist}"
@@ -2283,10 +2309,10 @@ def reconcile(
 
     Default is dry-run (plan only). ``dry_run=False`` executes installs/removes for
     ADE ledger scope only. Never unloads foreign/unknown owners. Never touches root
-    / ``--system`` units. Host write backends: systemd user timers and user crontab
-    (``RECONCILE_WRITE_BACKENDS``). Paseo schedule create/delete is orthogonal (ledger
-    ``backend="paseo"``) and does not require a host write backend. Launchd host
-    writes remain later.
+    / ``--system`` units. Host write backends: systemd user timers, user crontab, and
+    launchd LaunchAgents (``RECONCILE_WRITE_BACKENDS``). Paseo schedule create/delete
+    is orthogonal (ledger ``backend="paseo"``) and does not require a host write
+    backend.
 
     Exit 0 when the plan is clean (dry-run) or every touch succeeded; 1 on a failed
     mutation or blocked step; 2 when ``--yes`` refuses host writes on a non-write
@@ -2788,6 +2814,11 @@ def reconcile(
                         st = status(label, b, env=env, **overrides)
                         if st.installed:
                             raise SchedError(EX_ACTIVATE, f"read-back: {label} still installed after uninstall")
+                        if b.name == "launchd" and activate and st.active:
+                            raise SchedError(
+                                EX_ACTIVATE,
+                                f"read-back: launchd {label} still loaded after uninstall",
+                            )
                 except SchedError as e:
                     live_entry = entries.get(step.name)
                     if isinstance(live_entry, dict) and live_entry.get("label") == label:

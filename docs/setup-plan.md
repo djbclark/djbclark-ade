@@ -310,15 +310,15 @@ Keys are saved with `sudo-secretspec`, and also through Paseo if it has a secure
 Operator, 2026-11-07: install and update manage every scheduled job and service that is reasonable to manage. On the
 card the operator chose "ours, plus checks": djbclark-ade manages its own jobs and checks the rest.
 
-**Status (2026-11-10, residual inventory + systemd/cron/paseo reconcile):** transitional
+**Status (2026-11-10, residual inventory + launchd/systemd/cron/paseo reconcile):** transitional
 `config/install.toml [[install.jobs]]` / `[[install.retired_jobs]]` (folds into `config/ade.toml [install.jobs]`
 later), `ade-sched list`/`diff`, and `just doctor` / `just sched-diff` observe launchd/systemd/cron/paseo
 without unloading anyone. `ade-sched reconcile` (default dry-run; `--yes` writes) installs/reloads
-ADE-owned `ade-sched` jobs on **systemd user** units **and** the user **crontab**, creates/deletes
+ADE-owned `ade-sched` jobs on **launchd**, **systemd user** units, **and** the user **crontab**, creates/deletes
 ADE-owned **paseo schedules** (ledger `backend="paseo"`; not a host write backend), and records ownership in
 `~/.local/state/djbclark-ade/jobs.json`; it removes only ledger-owned labels and never unloads
-foreign/unknown owners or root/`--system` units. **Launchd host write path** remains later work;
-systemd/cron/`paseo schedule` reconcile write paths land with the S4b stack. Plists for scheduled
+foreign/unknown owners or root/`--system` units. Host write backends (launchd/systemd/cron)
+and ADE-owned paseo schedule reconcile are in the S4b stack. Plists for scheduled
 `update --auto` apply remain later under the contracts below;
 `harden-check` and `keys-check` have daily plists (`just harden-check-install` /
 `just keys-check-install`, 2026-11-10). `ade-update --auto` is a CLI stub

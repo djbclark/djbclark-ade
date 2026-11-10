@@ -33,7 +33,7 @@ bin/ade-sched [options] uninstall LABEL       remove it (not installed: exit 0)
 bin/ade-sched [options] status [LABEL...]     installed / active / next run; no LABEL: every job ade-sched generated
 bin/ade-sched [options] list                  print config/install.toml [install.jobs] / [install.retired_jobs]
 bin/ade-sched [options] diff                  compare the inventory to live launchd/systemd/cron/paseo (report only)
-bin/ade-sched [options] reconcile             ADE-owned systemd/cron reconcile + ownership ledger (default dry-run; --yes writes)
+bin/ade-sched [options] reconcile             ADE-owned launchd/systemd/cron/paseo reconcile + ownership ledger (default dry-run; --yes writes)
 
 Checked-in ADE jobs under `config/launchd/` include `com.djbclark.deadline-sweep`,
 `com.djbclark.pr-policy`, and (2026-11-09) `com.djbclark.ade-update-check` (daily
@@ -52,7 +52,7 @@ Checked-in ADE jobs under `config/launchd/` include `com.djbclark.deadline-sweep
 | `--no-activate` | install/uninstall/reconcile: write or remove the files and print the activation commands instead of running them |
 | `--allow-no-linger` | systemd install/reconcile: proceed although `Linger=no` (see Linger) |
 | `--json` | `list`/`diff`/`reconcile`: machine-readable output |
-| `--yes` | `reconcile`: execute ADE-scoped systemd installs/removes and write the ownership ledger (default is dry-run) |
+| `--yes` | `reconcile`: execute ADE-scoped launchd/systemd/cron installs/removes and paseo create/delete; write the ownership ledger (default is dry-run) |
 | `--name NAME` | `reconcile`: limit to these logical job names (repeatable) |
 
 ## Inventory and drift (S4b, 2026-11-10)
@@ -77,9 +77,8 @@ Checked-in ADE jobs under `config/launchd/` include `com.djbclark.deadline-sweep
 
 `ade-sched reconcile` / `just sched-reconcile` is the ADE job write path on top of the inventory:
 
-- **Backend:** systemd user units **and** user crontab (CI-testable with fakes; 2026-11-10 cron
-  write path). `--yes` on launchd still refuses host writes (exit 2) unless only paseo touches
-  remain. No Mac live proof is required for this unit. Root / `--system` units are never touched.
+- **Backend:** launchd LaunchAgents, systemd user units, **and** user crontab (CI-testable with
+  fakes; 2026-11-10 launchd/cron write paths). Root / `--system` units are never touched.
   **Paseo schedule create/delete** landed 2026-11-10 (S4b): orthogonal to host backends (not in
   `RECONCILE_WRITE_BACKENDS`); ledger rows use `backend="paseo"`.
 - **Default dry-run**; `--yes` executes. Pending intent is written to the ownership ledger before any
@@ -98,14 +97,16 @@ Checked-in ADE jobs under `config/launchd/` include `com.djbclark.deadline-sweep
 - **Remove** only labels recorded in the ledger as ADE-owned with removal authority
   (`committed` / `pending-remove` / legacy `installed`). Intent-only `pending` is **not** removal
   authority. Retired or dropped-from-inventory labels that are live but **not** in the ledger are
-  reported only — never unloaded. Foreign/unknown owners are never unloaded.
+  reported only — never unloaded. Foreign/unknown owners are never unloaded. Cross-backend ledger
+  removes refuse (reconcile with that backend to unload).
 - **Paseo** (`kind=paseo`, ADE-owned, expected): reconcile plans create when the label is absent,
   adopts the ledger when live without ownership, skips when live+ledger match, and deletes only
   ledger-owned retired/dropped rows. Missing `--mode` or create fields (schedule, provider, cwd,
   prompt; timezone from inventory or `ADE_TIMEZONE`) blocks. Foreign/unknown paseo schedules are
   never unloaded without ledger authority. Injectable `paseo_run` (same pattern as
   `paseo_schedule_names`).
-- Dependency/site services stay report-only. Launchd host writes remain later (see PR stack).
+- Dependency/site services stay report-only. Host write backends are complete for S4b
+  (`RECONCILE_WRITE_BACKENDS` = launchd/systemd/cron).
 - Plists for `harden-check` and `keys-check` landed 2026-11-10
   (`com.djbclark.harden-check.plist` / `just harden-check-install`;
   `com.djbclark.keys-check.plist` / `just keys-check-install`).

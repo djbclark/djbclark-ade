@@ -44,9 +44,20 @@ def fake(tmp_path):
     b.mkdir()
     log = tmp_path / "calls.log"
     ct = tmp_path / "crontab.txt"
+    loaded = tmp_path / "launchd-loaded"
+    loaded.mkdir()
     _script(b / "launchctl", f'echo "launchctl $*" >> "{log}"\n'
-            'if [ "$1" = bootstrap ] && [ -n "$FAKE_BOOTSTRAP_FAIL" ]; then echo "Bootstrap failed: 5: Input/output error" >&2; exit 5; fi\n'
-            'if [ "$1" = print ]; then exit "${FAKE_PRINT_RC:-0}"; fi\nexit 0\n')
+            f'LOADED="{loaded}"\n'
+            'if [ "$1" = bootstrap ]; then\n'
+            '  if [ -n "$FAKE_BOOTSTRAP_FAIL" ]; then echo "Bootstrap failed: 5: Input/output error" >&2; exit 5; fi\n'
+            '  base=$(basename "$3" .plist); touch "$LOADED/$base"; exit 0\n'
+            'fi\n'
+            'if [ "$1" = bootout ]; then lab="${2##*/}"; rm -f "$LOADED/$lab"; exit 0; fi\n'
+            'if [ "$1" = print ]; then\n'
+            '  if [ -n "$FAKE_PRINT_RC" ]; then exit "$FAKE_PRINT_RC"; fi\n'
+            '  lab="${2##*/}"; if [ -f "$LOADED/$lab" ]; then exit 0; fi; exit 1\n'
+            'fi\n'
+            'exit 0\n')
     _script(b / "systemctl", f'echo "systemctl $*" >> "{log}"\n'
             'case "$*" in\n'
             '  --version) echo "systemd ${FAKE_SD_VERSION:-255} (255.4)"; echo "+PAM";;\n'

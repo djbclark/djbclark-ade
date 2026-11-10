@@ -1,4 +1,4 @@
-"""S4b: first ADE job reconcile + ownership ledger write path (systemd, CI-testable)."""
+"""S4b: ADE job reconcile + ownership ledger write path (launchd/systemd/cron/paseo, CI-testable)."""
 from __future__ import annotations
 
 import json
@@ -24,10 +24,34 @@ def _script(path: Path, body: str) -> Path:
 
 @pytest.fixture
 def fake(tmp_path):
-    """Fake systemctl/loginctl; unit dir + jobs ledger under tmp (never touch host systemd)."""
+    """Fake launchctl/systemctl/loginctl; agents + unit dirs + jobs ledger under tmp (never touch host)."""
     b = tmp_path / "fakebin"
     b.mkdir()
     log = tmp_path / "calls.log"
+    loaded = tmp_path / "launchd-loaded"
+    loaded.mkdir()
+    _script(
+        b / "launchctl",
+        f'echo "launchctl $*" >> "{log}"\n'
+        f'LOADED="{loaded}"\n'
+        'if [ "$1" = bootstrap ]; then\n'
+        '  if [ -n "$FAKE_BOOTSTRAP_FAIL" ]; then '
+        'echo "Bootstrap failed: 5: Input/output error" >&2; exit 5; fi\n'
+        '  # bootstrap gui/UID PATH → mark basename(PATH) loaded (strip .plist)\n'
+        '  base=$(basename "$3" .plist); touch "$LOADED/$base"; exit 0\n'
+        'fi\n'
+        'if [ "$1" = bootout ]; then\n'
+        '  # bootout gui/UID/LABEL\n'
+        '  lab="${2##*/}"; rm -f "$LOADED/$lab"; exit 0\n'
+        'fi\n'
+        'if [ "$1" = print ]; then\n'
+        '  if [ -n "$FAKE_PRINT_RC" ]; then exit "$FAKE_PRINT_RC"; fi\n'
+        '  lab="${2##*/}"\n'
+        '  if [ -f "$LOADED/$lab" ]; then exit 0; fi\n'
+        '  exit 1\n'
+        'fi\n'
+        "exit 0\n",
+    )
     _script(
         b / "systemctl",
         f'echo "systemctl $*" >> "{log}"\n'
@@ -46,9 +70,11 @@ def fake(tmp_path):
         "HOME": str(tmp_path / "home"),
         "USER": "tester",
         "ADE_TIMEZONE": "America/New_York",
+        "ADE_SCHED_LAUNCHCTL": str(b / "launchctl"),
         "ADE_SCHED_SYSTEMCTL": str(b / "systemctl"),
         "ADE_SCHED_LOGINCTL": str(b / "loginctl"),
         "ADE_SCHED_CRONTAB": str(b / "crontab"),
+        "ADE_SCHED_LAUNCH_AGENTS": str(tmp_path / "agents"),
         "ADE_SCHED_UNIT_DIR": str(tmp_path / "units"),
         "ADE_SCHED_LOCK": str(tmp_path / "lock" / "ade-sched.lock"),
         "ADE_JOBS_STATE_DIR": str(tmp_path / "jobs-state"),
@@ -56,6 +82,7 @@ def fake(tmp_path):
     env.pop("ADE_SCHED_BACKEND", None)
     (tmp_path / "home").mkdir()
     (tmp_path / "units").mkdir()
+    (tmp_path / "agents").mkdir()
 
     class F:
         pass
@@ -63,6 +90,7 @@ def fake(tmp_path):
     f = F()
     f.env, f.log, f.tmp = env, log, tmp_path
     f.units = tmp_path / "units"
+    f.agents = tmp_path / "agents"
     f.state = tmp_path / "jobs-state"
     f.calls = lambda: log.read_text().splitlines() if log.exists() else []
     return f
@@ -369,8 +397,7 @@ def test_pending_intent_is_not_removal_authority(fake, tmp_path):
     assert (fake.units / f"{label}.service").is_file()
 
 
-def test_yes_on_launchd_refuses(fake, tmp_path):
-    """Launchd remains report-only for reconcile --yes (cron+systemd write)."""
+def test_yes_on_launchd_installs_and_ledgers(fake, tmp_path):
     root = _mini_catalog(tmp_path)
     catalog = ai.load_catalog(root=root)
     results, rc = S.reconcile(
@@ -386,9 +413,251 @@ def test_yes_on_launchd_refuses(fake, tmp_path):
         live=S.LiveScan("launchd", ()),
         platform_name="mac",
     )
-    assert rc == S.EX_USAGE
-    assert all(r["action"] == "refuse-backend" for r in results)
-    assert not (fake.state / "jobs.json").exists() or S.load_jobs_ledger(fake.state, env=fake.env)["entries"] == {}
+    assert rc == 0, results
+    assert any(r["action"] == "installed" and r["name"] == "deadline-sweep" for r in results)
+    ledger = S.load_jobs_ledger(fake.state, env=fake.env)
+    entry = ledger["entries"]["deadline-sweep"]
+    assert entry["status"] == "committed"
+    assert entry["backend"] == "launchd"
+    assert entry["label"] == "com.djbclark.deadline-sweep"
+    plist = fake.agents / "com.djbclark.deadline-sweep.plist"
+    assert plist.is_file()
+    assert S.GENERATED in plist.read_text(encoding="utf-8")
+    st = S.status("com.djbclark.deadline-sweep", "launchd", env=fake.env)
+    assert st.installed is True
+
+    before = plist.read_text(encoding="utf-8")
+    results2, rc2 = S.reconcile(
+        catalog.jobs,
+        catalog.retired_jobs,
+        dry_run=False,
+        backend="launchd",
+        root=root,
+        ade=root,
+        env=fake.env,
+        state_dir=fake.state,
+        names={"deadline-sweep"},
+        live=S.LiveScan(
+            "launchd",
+            (S.LiveJob("com.djbclark.deadline-sweep", "launchd", "generated", True),),
+        ),
+        platform_name="mac",
+    )
+    assert rc2 == 0, results2
+    assert any(r["action"] == "skip" and r["name"] == "deadline-sweep" for r in results2)
+    assert plist.read_text(encoding="utf-8") == before
+    assert S.load_jobs_ledger(fake.state, env=fake.env)["entries"]["deadline-sweep"]["artifact_hash"] == entry[
+        "artifact_hash"
+    ]
+
+
+def test_launchd_reconcile_refuses_cross_backend_ledger_remove(fake, tmp_path):
+    """A systemd ledger row must not be cleared by launchd --yes."""
+    root = _mini_catalog(tmp_path)
+    catalog = ai.load_catalog(root=root)
+    label = "com.djbclark.skillopt-sleep"
+    (fake.units / f"{label}.service").write_text(
+        f"# {S.GENERATED} from retired\n[Service]\nExecStart=/bin/true\n",
+        encoding="utf-8",
+    )
+    ledger = S.empty_jobs_ledger(env=fake.env)
+    ledger["generation"] = 1
+    ledger["entries"]["skillopt-sleep"] = {
+        "logical_id": "skillopt-sleep",
+        "label": label,
+        "owner": "djbclark-ade",
+        "backend": "systemd",
+        "scope": "user",
+        "paths": [str(fake.units / f"{label}.service")],
+        "artifact_hash": "deadbeef",
+        "generation": 1,
+        "status": "committed",
+    }
+    S.save_jobs_ledger(ledger, fake.state, env=fake.env)
+
+    steps = S.plan_reconcile(
+        catalog.jobs,
+        catalog.retired_jobs,
+        ledger=S.load_jobs_ledger(fake.state, env=fake.env),
+        live=S.LiveScan("launchd", ()),
+        backend_name="launchd",
+        root=root,
+        ade=root,
+        env=fake.env,
+        names={"skillopt-sleep"},
+        platform_name="mac",
+    )
+    assert not any(s.action == "remove" for s in steps)
+    assert any(
+        s.action == "report" and "ledger backend='systemd'" in s.detail for s in steps
+    )
+
+    results, rc = S.reconcile(
+        catalog.jobs,
+        catalog.retired_jobs,
+        dry_run=False,
+        backend="launchd",
+        root=root,
+        ade=root,
+        env=fake.env,
+        state_dir=fake.state,
+        names={"skillopt-sleep"},
+        live=S.LiveScan("launchd", ()),
+        platform_name="mac",
+    )
+    assert rc == 0, results
+    assert not any(r["action"] == "removed" for r in results)
+    assert "skillopt-sleep" in S.load_jobs_ledger(fake.state, env=fake.env)["entries"]
+    assert (fake.units / f"{label}.service").is_file()
+
+
+def test_yes_on_launchd_removes_ledger_owned(fake, tmp_path):
+    root = _mini_catalog(tmp_path)
+    catalog = ai.load_catalog(root=root)
+    label = "com.djbclark.skillopt-sleep"
+    plist = fake.agents / f"{label}.plist"
+    plist.write_text(
+        f"# {S.GENERATED} from retired\n"
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
+        '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+        "<plist version=\"1.0\"><dict>"
+        f"<key>Label</key><string>{label}</string>"
+        "<key>ProgramArguments</key><array><string>/bin/true</string></array>"
+        "</dict></plist>\n",
+        encoding="utf-8",
+    )
+    # Mark loaded so bootout has something to clear (Codex P2 unload verify).
+    (tmp_path / "launchd-loaded" / label).write_text("")
+    ledger = S.empty_jobs_ledger(env=fake.env)
+    ledger["generation"] = 1
+    ledger["entries"]["skillopt-sleep"] = {
+        "logical_id": "skillopt-sleep",
+        "label": label,
+        "owner": "djbclark-ade",
+        "backend": "launchd",
+        "scope": "user",
+        "paths": [str(plist)],
+        "artifact_hash": "deadbeef",
+        "generation": 1,
+        "status": "committed",
+    }
+    S.save_jobs_ledger(ledger, fake.state, env=fake.env)
+
+    results, rc = S.reconcile(
+        catalog.jobs,
+        catalog.retired_jobs,
+        dry_run=False,
+        backend="launchd",
+        root=root,
+        ade=root,
+        env=fake.env,
+        state_dir=fake.state,
+        names={"skillopt-sleep"},
+        live=S.LiveScan("launchd", (S.LiveJob(label, "launchd", "generated", True),)),
+        platform_name="mac",
+    )
+    assert rc == 0, results
+    assert any(r["action"] == "removed" and r["name"] == "skillopt-sleep" for r in results)
+    assert "skillopt-sleep" not in S.load_jobs_ledger(fake.state, env=fake.env)["entries"]
+    assert not plist.exists()
+
+
+def test_launchd_plan_loads_when_plist_matches_but_unloaded(fake, tmp_path):
+    """Matching plist that is not loaded must install/load, not skip (Codex P2 on #514)."""
+    root = _mini_catalog(tmp_path)
+    catalog = ai.load_catalog(root=root)
+    # Install once (loads), then unload while leaving the plist + ledger.
+    results, rc = S.reconcile(
+        catalog.jobs,
+        catalog.retired_jobs,
+        dry_run=False,
+        backend="launchd",
+        root=root,
+        ade=root,
+        env=fake.env,
+        state_dir=fake.state,
+        names={"deadline-sweep"},
+        live=S.LiveScan("launchd", ()),
+        platform_name="mac",
+    )
+    assert rc == 0, results
+    label = "com.djbclark.deadline-sweep"
+    loaded = tmp_path / "launchd-loaded" / label
+    assert loaded.is_file()
+    loaded.unlink()
+    assert S.status(label, "launchd", env=fake.env).active is False
+
+    steps = S.plan_reconcile(
+        catalog.jobs,
+        catalog.retired_jobs,
+        ledger=S.load_jobs_ledger(fake.state, env=fake.env),
+        live=S.LiveScan("launchd", ()),
+        backend_name="launchd",
+        root=root,
+        ade=root,
+        env=fake.env,
+        names={"deadline-sweep"},
+        platform_name="mac",
+    )
+    assert any(
+        s.action == "install" and s.name == "deadline-sweep" and "load inactive" in s.detail
+        for s in steps
+    )
+
+
+def test_launchd_remove_keeps_ledger_when_still_loaded(fake, tmp_path):
+    """Failed unload (still loaded) must not clear ownership (Codex P2 on #514)."""
+    root = _mini_catalog(tmp_path)
+    catalog = ai.load_catalog(root=root)
+    label = "com.djbclark.skillopt-sleep"
+    plist = fake.agents / f"{label}.plist"
+    plist.write_text(
+        f"# {S.GENERATED} from retired\n"
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        "<plist version=\"1.0\"><dict>"
+        f"<key>Label</key><string>{label}</string>"
+        "<key>ProgramArguments</key><array><string>/bin/true</string></array>"
+        "</dict></plist>\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "launchd-loaded" / label).write_text("")
+    # Force print to keep reporting loaded even after bootout.
+    env = {**fake.env, "FAKE_PRINT_RC": "0"}
+    ledger = S.empty_jobs_ledger(env=env)
+    ledger["generation"] = 1
+    ledger["entries"]["skillopt-sleep"] = {
+        "logical_id": "skillopt-sleep",
+        "label": label,
+        "owner": "djbclark-ade",
+        "backend": "launchd",
+        "scope": "user",
+        "paths": [str(plist)],
+        "artifact_hash": "deadbeef",
+        "generation": 1,
+        "status": "committed",
+    }
+    S.save_jobs_ledger(ledger, fake.state, env=env)
+
+    results, rc = S.reconcile(
+        catalog.jobs,
+        catalog.retired_jobs,
+        dry_run=False,
+        backend="launchd",
+        root=root,
+        ade=root,
+        env=env,
+        state_dir=fake.state,
+        names={"skillopt-sleep"},
+        live=S.LiveScan("launchd", (S.LiveJob(label, "launchd", "generated", True),)),
+        platform_name="mac",
+    )
+    assert rc == 1, results
+    assert any(r["action"] == "failed" and r["name"] == "skillopt-sleep" for r in results)
+    entry = S.load_jobs_ledger(fake.state, env=env)["entries"]["skillopt-sleep"]
+    assert entry["status"] == "failed"
+    assert "still loaded" in entry.get("detail", "")
+    assert plist.is_file()  # uninstall refuses to unlink while loaded
 
 
 def _cron_store_scripts(tmp_path: Path, log: Path) -> Path:
@@ -586,7 +855,7 @@ def test_cli_reconcile_dry_run_and_yes(fake, tmp_path):
     data = json.loads(proc.stdout)
     assert data["mode"] == "dry-run"
     assert data["write_backend"] == "systemd"
-    assert data["write_backends"] == ["cron", "systemd"]
+    assert data["write_backends"] == ["cron", "launchd", "systemd"]
     assert any(r["action"] == "would-install" and r["name"] == "deadline-sweep" for r in data["results"])
     assert not (fake.units / "com.djbclark.deadline-sweep.service").exists()
 
@@ -884,8 +1153,13 @@ def test_paseo_yes_works_on_launchd_host_backend(fake, tmp_path):
     assert any(r["action"] == "skip" and r["name"] == "context-budget" for r in results2)
 
 
-def test_paseo_yes_mixed_with_host_refuse_exits_2(fake, tmp_path):
-    """Paseo create on launchd plus planned host refuse still exits 2 (Codex P2 on #513)."""
+def test_paseo_yes_mixed_with_host_refuse_exits_2(fake, tmp_path, monkeypatch):
+    """Paseo create plus planned host refuse still exits 2 (Codex P2 on #513).
+
+    After launchd joined RECONCILE_WRITE_BACKENDS (#514), pin a non-write host set so
+    the refuse-counting path stays covered.
+    """
+    monkeypatch.setattr(S, "RECONCILE_WRITE_BACKENDS", frozenset({"systemd", "cron"}))
     root = _mini_catalog(tmp_path)
     catalog = ai.load_catalog(root=root)
     store = tmp_path / "paseo-schedules.json"
