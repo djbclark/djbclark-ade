@@ -26,10 +26,10 @@ Pick **one** destination policy for every set (the scan's `<DEST>`). Per-set exc
 | Option | Meaning | Fits when |
 |---|---|---|
 | **host** | Copy report markdown (not whole dirs) into a durable private tree that is itself backed up or git-tracked — scan suggested `~/ops/site-private/…/<task>/` (rule 23 / private unreviewed AI text). | Reports should stay searchable and individually readable. |
-| **bundle** | One archive of the report files (e.g. `tar` of `<task>/*report*.md` for all 41) into a backup location; no live tree. | Preserve once, rarely open; keep out of day-to-day trees. |
+| **bundle** | One archive of the report files for all 41 into a backup location; no live tree. Select with a depth-aware walk (not a shallow `<task>/*report*.md` glob), e.g. `find <task> -type f -name '*report*.md'` (optional `-maxdepth 3` to match the scan), then `tar` while preserving relative paths under `<task>/`. | Preserve once, rarely open; keep out of day-to-day trees. |
 | **delete** | Do not preserve; remove or leave to later scratch cleanup after operator confirms nothing unique remains. | Operator has already absorbed the content elsewhere, or accepts loss. |
 
-**Default capture shape (if host or bundle; from scan §3.1, not run):** copy only `*report*.md` files into `<DEST>/<task>/`, preserving names. Do **not** copy worktrees, APKs, or jsonl logs unless a `mixed` row below is marked "logs matter".
+**Default capture shape (if host or bundle; from scan §3.1, not run):** select every `*report*.md` under the task dir with a depth-aware walk that enters nested and `.*` directories (scan searched ~3 levels; the shallow shell glob `<task>/*report*.md` omits inventoried paths such as `mdnsresearch/.acp-dispatch/mdns-r1-report.md`). Example: `find <task> -type f -name '*report*.md'` (or with `-maxdepth 3` to match the scan). Copy into `<DEST>/<task>/` preserving relative paths under `<task>/` (so `.acp-dispatch/…` stays nested). Do **not** flatten to basenames only, and do **not** copy worktrees, APKs, or jsonl logs unless a `mixed` row below is marked "logs matter".
 
 **Open before acting:** several dirs had an open `CLAIM` or unclosed job records on 2026-10-20 (column below). Re-check CLAIM / job freshness on the Mac before copy or delete.
 
