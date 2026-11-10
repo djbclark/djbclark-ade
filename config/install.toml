@@ -653,10 +653,13 @@ name = "harden-check"
 kind = "ade-sched"
 owner = "djbclark-ade"
 class = "hard"
-schedule = "daily (plist pending)"
-command = "just harden-check"
+label = "com.djbclark.harden-check"
+plist = "config/launchd/com.djbclark.harden-check.plist"
+schedule = "StartInterval 86400"
+command = "bin/ade-harden observe"
+set = ["__STATE__={home}/.local/state/ade"]
 platforms = ["mac", "linux"]
-notes = "S6 read-only drift check; plist/install path not yet recorded (planned)."
+notes = "S6 daily read-only drift check; never mutates GitHub settings (observe only)."
 
 [[install.jobs]]
 name = "keys-check"
