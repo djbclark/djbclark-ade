@@ -203,16 +203,22 @@ config change).
   text started with `/` or `~`, so an absolute dummy burn then `$ABS/id_*` (or `/tmp/.../id_*`) truncated,
   fell back to an inconclusive pattern, cached miss, and ALLOWed while relative `id_*` correctly refused —
   first-pass and deferred truncated absolute/tilde walks now fail closed the same way (absolute deep globs
-  keep the pattern fallback only when the shared budget did not truncate). A word that times out twice, an
-  overall-budget timeout while Bash glob words remain unchecked, a set-aside word that still needs a walk with
-  no budget left, a deferred walk truncated by `GLOB_S` / the entry bound, or a first-pass relative/cwd or
-  absolute/tilde walk truncated the same way, exits 2 with
-  `glob analysis budget exceeded (fail closed)`: secret paths prefer deny over allow. A later literal path
-  (`cat ~/.ssh/id_rsa`) is still checked first and blocks on the deny rule. A directory
-  that opens but cannot be read to the end (`/proc/1/map_files`) is skipped by both walks, as the shell and ripgrep
-  skip it; before 2026-11-04 it raised and failed the hook open. A Grep walk that hits its own bound allows silently,
-  unless its glob's text blocks (B1b) or the root is above a home-level deny (C4). The hook is registered without
-  `onFailure: block`, so a broken hook never blocks every Read; the static rules (B2) still hold then.
+  keep the pattern fallback only when the shared budget did not truncate). A further residual the same day:
+  `_glob_one` cleared `_glob_budget_hit` at the start of every brace alternative, so after `MAX_GLOB_SCAN`
+  was burned an earlier alt truncated and a later empty/cheap alt (`{,id_*}`, `{,*}`, `{,*,id_*}`) reset the
+  flag and ALLOWed — budget-hit is now sticky across brace alts. Another the same day: hitting `MAX_GLOB_HITS`
+  marked the walk incomplete but did not set `_glob_budget_hit`, so 500 non-deny matches before `id_rsa`
+  under `*` left the deny unchecked and an inconclusive pattern ALLOWed — `MAX_GLOB_HITS` truncation now
+  fail-closes like `GLOB_S`. A word that times out twice, an overall-budget timeout while Bash glob words
+  remain unchecked, a set-aside word that still needs a walk with no budget left, a deferred walk truncated
+  by `GLOB_S` / the entry bound / `MAX_GLOB_HITS`, or a first-pass relative/cwd or absolute/tilde walk
+  truncated the same way, exits 2 with `glob analysis budget exceeded (fail closed)`: secret paths prefer
+  deny over allow. A later literal path (`cat ~/.ssh/id_rsa`) is still checked first and blocks on the deny
+  rule. A directory that opens but cannot be read to the end (`/proc/1/map_files`) is skipped by both walks,
+  as the shell and ripgrep skip it; before 2026-11-04 it raised and failed the hook open. A Grep walk that
+  hits its own bound allows silently, unless its glob's text blocks (B1b) or the root is above a home-level
+  deny (C4). The hook is registered without `onFailure: block`, so a broken hook never blocks every Read;
+  the static rules (B2) still hold then.
 
 ## D. Changing the policy
 
