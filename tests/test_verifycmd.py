@@ -1,9 +1,12 @@
 """Tests for bin/verifycmd: register argv, run under deadline, exit table 0/1/2/4/75/124.
 
-Hermetic: VERIFYCMD_STATE_DIR temp dir, stub DEADLINE_BIN / VERIFYCMD_BG, no real daemon.
+Hermetic: VERIFYCMD_STATE_DIR + ADE_STATE_DIR temp dirs, stub DEADLINE_BIN / VERIFYCMD_BG,
+linked claimed worktree via ade_claims (order 9), no real daemon.
 """
 from __future__ import annotations
 
+import importlib.machinery
+import importlib.util
 import json
 import os
 import subprocess
@@ -14,16 +17,73 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "bin" / "verifycmd"
+sys.path.insert(0, str(ROOT / "bin"))
+import ade_claims  # noqa: E402
+
+
+def _load_verifycmd():
+    # bin/verifycmd has no .py suffix; SourceFileLoader still loads it.
+    loader = importlib.machinery.SourceFileLoader("verifycmd_under_test", str(SCRIPT))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+vc = _load_verifycmd()
+
 DROP = ("VERIFYCMD_STATE_DIR", "VERIFYCMD_BG", "VERIFYCMD_NO_BG", "DEADLINE_BIN",
-        "DEADLINE_NAME", "PASEO_AGENT_ID")
+        "DEADLINE_NAME", "PASEO_AGENT_ID", "ADE_STATE_DIR", "ADE_CLAIM_ID", "ACP_RUN_AGENT",
+        "CLAUDE_CODE_SESSION_ID")
+
+
+def _git_env(state: Path) -> dict[str, str]:
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith(("GIT_", "ADE_", "ACP_", "CLAUDE_CODE", "PASEO", "PRE_COMMIT"))}
+    env.update({
+        "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0",
+        "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
+        "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid",
+        "ADE_STATE_DIR": str(state),
+    })
+    return env
+
+
+def _git(state: Path, args: list[str], cwd: Path) -> None:
+    r = subprocess.run(["git", *args], cwd=cwd, env=_git_env(state),
+                       capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, (args, r.stderr)
+
+
+def _mk_linked_claimed(tmp: Path, ade_state: Path, claim_id: str = "agent-1") -> tuple[Path, Path]:
+    """Primary (shared) checkout + linked worktree claimed by claim_id. Returns (primary, wt)."""
+    primary = tmp / "primary"
+    primary.mkdir()
+    _git(ade_state, ["init", "-q", "-b", "main"], primary)
+    (primary / "f").write_text("base\n")
+    _git(ade_state, ["add", "f"], primary)
+    _git(ade_state, ["commit", "-qm", "init"], primary)
+    wt = tmp / "workspace"
+    _git(ade_state, ["worktree", "add", "-q", "-b", "wtb", str(wt)], primary)
+    c = ade_claims.make_claim(
+        id=claim_id, path=wt, branch="wtb", base_sha="deadbeef",
+        owner_record=claim_id, owner_agent="verify-agent",
+    )
+    # ADE_STATE_DIR must already point at ade_state (fixture sets it).
+    assert os.environ.get("ADE_STATE_DIR") == str(ade_state)
+    ade_claims.create_claim(c, pointer_for=wt)
+    return primary, wt
 
 
 class World:
-    def __init__(self, tmp: Path) -> None:
+    def __init__(self, tmp: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         self.tmp = tmp
         self.state = tmp / "verifycmd-state"
-        self.ws = tmp / "workspace"
-        self.ws.mkdir()
+        self.ade_state = tmp / "ade-state"
+        self.ade_state.mkdir()
+        monkeypatch.setenv("ADE_STATE_DIR", str(self.ade_state))
+        self.primary, self.ws = _mk_linked_claimed(tmp, self.ade_state, "agent-1")
         self.log = tmp / "calls.log"
         # passthrough deadline: run the command after --, optionally force an rc via marker file
         (tmp / "deadline").write_text(
@@ -48,6 +108,9 @@ class World:
         self.env = {k: v for k, v in os.environ.items() if k not in DROP}
         self.env.update(
             VERIFYCMD_STATE_DIR=str(self.state),
+            ADE_STATE_DIR=str(self.ade_state),
+            ADE_CLAIM_ID="agent-1",
+            ACP_RUN_AGENT="1",
             DEADLINE_BIN=str(tmp / "deadline"),
             VERIFYCMD_BG=str(tmp / "bg"),
             VC_LOG=str(self.log),
@@ -83,8 +146,8 @@ class World:
 
 
 @pytest.fixture
-def world(tmp_path: Path) -> World:
-    return World(tmp_path)
+def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> World:
+    return World(tmp_path, monkeypatch)
 
 
 def test_register_status_clear(world: World) -> None:
@@ -115,6 +178,45 @@ def test_register_refuses_cwd_outside_workspace(world: World) -> None:
     assert "outside workspace" in r.stderr
 
 
+def test_register_refuses_shared_checkout(world: World) -> None:
+    r = world.run("register", "--workspace", str(world.primary), "--", "true")
+    assert r.returncode == 2, r.stderr
+    assert "shared/primary" in r.stderr
+
+
+def test_register_refuses_foreign_claim(world: World, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Claim owned by other-agent; caller is still agent-1
+    foreign_wt = world.tmp / "foreign-wt"
+    _git(world.ade_state, ["worktree", "add", "-q", "-b", "foreign-br", str(foreign_wt)],
+         world.primary)
+    monkeypatch.setenv("ADE_STATE_DIR", str(world.ade_state))
+    c = ade_claims.make_claim(
+        id="other-agent", path=foreign_wt, branch="foreign-br", base_sha="deadbeef",
+        owner_record="other-agent", owner_agent="other",
+    )
+    ade_claims.create_claim(c, pointer_for=foreign_wt)
+    r = world.run("register", "--workspace", str(foreign_wt), "--", "true")
+    assert r.returncode == 2, r.stderr
+    assert "belongs to" in r.stderr or "claim" in r.stderr.lower()
+
+
+def test_register_refuses_non_git(world: World) -> None:
+    plain = world.tmp / "plain"
+    plain.mkdir()
+    r = world.run("register", "--workspace", str(plain), "--", "true")
+    assert r.returncode == 2
+    assert "not a git worktree" in r.stderr
+
+
+def test_run_once_refuses_after_claim_released(world: World, monkeypatch: pytest.MonkeyPatch) -> None:
+    assert world.run("register", "--workspace", str(world.ws), "--", "true").returncode == 0
+    monkeypatch.setenv("ADE_STATE_DIR", str(world.ade_state))
+    ade_claims.set_state("agent-1", "released")
+    r = world.run("run-once")
+    assert r.returncode == 2, r.stderr
+    assert "no active claim" in r.stderr
+
+
 def test_register_refuses_empty_argv(world: World) -> None:
     r = world.run("register", "--workspace", str(world.ws), "--")
     assert r.returncode == 2
@@ -139,6 +241,9 @@ def test_run_once_pass_exit_0(world: World) -> None:
     calls = world.log.read_text()
     assert "DEADLINE" in calls
     assert "BG" in calls
+    # collision-resistant name includes digest + attempt
+    assert "verifycmd-" in calls
+    assert "-1" in calls  # attempt suffix
 
 
 def test_run_once_fail_exit_1_then_exhausted_4(world: World) -> None:
@@ -260,3 +365,22 @@ def test_nested_short_budget_skips_second_deadline(world: World) -> None:
     assert "DEADLINE beat outer-deadline" in calls
     assert "DEADLINE run" not in calls
     assert "BG" in calls
+
+
+def test_deadline_name_distinguishes_sanitize_collisions() -> None:
+    a = vc.deadline_name("agent:a", 1)
+    b = vc.deadline_name("agent@a", 1)
+    assert a != b
+    assert a.endswith("-1") and b.endswith("-1")
+    assert len(a) <= 100 and len(b) <= 100
+    assert a.startswith("verifycmd-") and b.startswith("verifycmd-")
+
+
+def test_deadline_name_keeps_attempt_under_long_id() -> None:
+    long_id = "agent-" + ("x" * 200) + ":tail"
+    name = vc.deadline_name(long_id, 12)
+    assert name.endswith("-12")
+    assert len(name) <= 100
+    # digest still present
+    digest = __import__("hashlib").sha256(long_id.encode()).hexdigest()[:12]
+    assert digest in name

@@ -97,7 +97,9 @@ armed → run(argv) under deadline+bg → rc==0? → passed
    `BLOCKED: verifyCmd exhausted after 3` (or the dispatch shim's exit 4
    shape once wired).
 4. **Missing command / refuse:** exit 2 from the runner (bad argv, workspace
-   claim mismatch, already `passed`/`failed` and not re-armed).
+   claim mismatch — shared/primary checkout, no active claim, expired claim,
+   or foreign owner via `ade_claims` helpers — already `passed`/`failed` and
+   not re-armed).
 5. **Deadline stop of the verify process:** exit 124 (same as `deadline run`);
    counts as a failed attempt, not a pass.
 
@@ -118,7 +120,7 @@ on a fan-out worker slice that the orchestrator already verifies centrally
 |---|---|
 | **0** | Acceptance command exited 0; record `state=passed`. |
 | **1** | Acceptance command exited nonzero and attempts remain (or the runner is reporting "not yet passed" to a waiter). |
-| **2** | Refused: no record, bad argv, cwd outside claim, or terminal state without re-arm. |
+| **2** | Refused: no record, bad argv, cwd outside claim, shared/primary or foreign/expired claim (order 9), or terminal state without re-arm. |
 | **4** | Exhausted (`max_attempts` reached, still nonzero). Aligns with dispatch `BLOCKED`. |
 | **75** | Machine too hot (`load-watch` / `bg` refusal); nothing run; attempt **not** consumed. |
 | **124** | Deadline killed the verify process; attempt consumed as failure. |
@@ -198,8 +200,12 @@ Rules:
    Mitigation: 75 does not burn; operator may re-arm; max stays 3 (issue
    284), not goal-mode's 10.
 8. **Workspace claim.** Running argv outside the claimed worktree breaks
-   order 9. Mitigation: refuse cwd outside claim; no follow of symlinks out
-   of the tree (same spirit as `review-launch`).
+   order 9. Mitigation: `register` and `run-once` call `ade_claims`
+   `find_workspace` / `find_claim` / `is_mine` and refuse (exit 2) a
+   shared/primary checkout, a worktree with no active claim, an expired
+   claim, or a foreign owner's claim; also refuse cwd outside the
+   workspace; no follow of symlinks out of the tree (same spirit as
+   `review-launch`).
 
 ## F. MVP scope
 

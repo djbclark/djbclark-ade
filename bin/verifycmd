@@ -15,15 +15,17 @@ State: ~/.local/state/ade/verifycmd/<agent_id>.json (VERIFYCMD_STATE_DIR overrid
 (temp beside, os.replace); fields read with .get. argv is an argv list, never a shell string.
 
 Exit (docs/ade-verifycmd.md §C): 0 passed; 1 failed attempt, attempts remain; 2 refused (no
-record, bad argv, cwd outside workspace, terminal state without re-arm); 4 exhausted; 75 machine
-too hot (bg / load-watch; attempt not consumed); 124 deadline killed the verify process (attempt
-consumed). status/clear/register/rearm/handoff: 0 ok, 2 refused/usage.
+record, bad argv, cwd outside workspace, shared/primary checkout or foreign/expired claim,
+terminal state without re-arm); 4 exhausted; 75 machine too hot (bg / load-watch; attempt not
+consumed); 124 deadline killed the verify process (attempt consumed). status/clear/register/
+rearm/handoff: 0 ok, 2 refused/usage.
 
 Design 2026-11-10 (PR tip of #455). MVP: no goal-mode, no live Stop hook, handoff re-key/clear only.
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -146,6 +148,78 @@ def resolve_under(workspace: Path, cwd: Path) -> Path | None:
     return cur
 
 
+# ---------- workspace ownership (AGENTS order 9 / ade_claims) ----------
+
+def _ade_claims():
+    """Load bin/ade_claims.py (same directory; not an installed package)."""
+    bin_dir = str(HERE)
+    if bin_dir not in sys.path:
+        sys.path.insert(0, bin_dir)
+    import ade_claims  # type: ignore[import-not-found]
+    return ade_claims
+
+
+def require_owned_workspace(workspace: Path, agent_id: str) -> str | None:
+    """None when workspace is a linked worktree with an active claim owned by this caller.
+
+    Refuses (message for exit 2): non-git path, shared/primary checkout, no active claim,
+    expired claim, or a claim owned by someone else. Uses ade_claims.find_workspace /
+    find_claim / is_mine / caller_ident (order 9).
+    """
+    claims = _ade_claims()
+    ws = claims.find_workspace(workspace)
+    if ws is None:
+        return f"workspace is not a git worktree: {workspace}"
+    try:
+        same_root = os.path.samefile(ws.root, workspace)
+    except OSError:
+        try:
+            same_root = Path(ws.root).resolve() == workspace.resolve()
+        except OSError:
+            return f"workspace path unreadable: {workspace}"
+    if not same_root:
+        return f"workspace must be a worktree root (got {workspace}, root is {ws.root})"
+    if not ws.linked:
+        return (f"refusing shared/primary checkout (order 9 requires a linked claimed "
+                f"worktree): {workspace}")
+    claim = claims.find_claim(ws)
+    if claim is None:
+        return f"workspace has no active claim: {workspace}"
+    # ADE_CLAIM_ID first (caller_ident), then verifycmd's agent_id / PASEO_AGENT_ID.
+    idents: list[str] = []
+    for raw in (claims.caller_ident(), agent_id, os.environ.get("ADE_CLAIM_ID"),
+                os.environ.get("PASEO_AGENT_ID")):
+        if isinstance(raw, str) and raw and raw not in idents:
+            idents.append(raw)
+    if not any(claims.is_mine(claim, i) for i in idents):
+        return (f"workspace claim belongs to {claims.owner_label(claim)}, "
+                f"not caller/agent {agent_id!r}")
+    return None
+
+
+def deadline_name(agent_id: str, attempt: int) -> str:
+    """Collision-resistant deadline name; attempt suffix always kept within the 100-char limit.
+
+    Sanitizing alone maps `agent:a` and `agent@a` to the same string; a short sha256 of the
+    raw id keeps them distinct, and the attempt suffix is reserved before truncating the slug.
+    """
+    digest = hashlib.sha256(agent_id.encode("utf-8")).hexdigest()[:12]
+    slug = re.sub(r"[^A-Za-z0-9._-]", "-", agent_id).strip(".-_") or "id"
+    if slug[0] in ".-":
+        slug = "id" + slug
+    suffix = f"-{attempt}"
+    # NAME_RE: ^[A-Za-z0-9_][A-Za-z0-9._-]{0,99}$ — budget for slug between prefix and digest.
+    prefix = "verifycmd-"
+    # verifycmd-<slug>-<digest>-<attempt>
+    fixed = len(prefix) + 1 + len(digest) + len(suffix)  # dashes around digest counted
+    budget = 100 - fixed
+    if budget < 1:
+        name = f"{prefix}{digest}{suffix}"
+    else:
+        name = f"{prefix}{slug[:budget]}-{digest}{suffix}"
+    return name[:100]
+
+
 # ---------- runners ----------
 
 def deadline_bin() -> str | None:
@@ -196,8 +270,7 @@ def run_argv(argv: list[str], cwd: Path, budget: str, owner: str, agent_id: str,
     dbin = deadline_bin()
 
     if use_own_deadline and dbin:
-        name = f"verifycmd-{agent_id}-{attempt}"
-        name = re.sub(r"[^A-Za-z0-9._-]", "-", name)[:100]
+        name = deadline_name(agent_id, attempt)
         cmd = [dbin, "run", "--budget", budget, "--owner", owner or "-", "--name", name,
                "--on-expire", "kill", "--", *inner]
         if nested:
@@ -283,6 +356,10 @@ def cmd_register(a: argparse.Namespace) -> int:
         return die(f"workspace: {e}")
     if not workspace.is_dir():
         return die(f"workspace is not a directory: {workspace}")
+
+    owned = require_owned_workspace(workspace, agent_id)
+    if owned is not None:
+        return die(owned)
 
     cwd_raw = a.cwd or str(workspace)
     try:
@@ -406,6 +483,10 @@ def cmd_run_once(a: argparse.Namespace) -> int:
     cwd_res = resolve_under(workspace, cwd)
     if cwd_res is None:
         return die(f"cwd {cwd} is outside workspace {workspace}")
+    # Re-check ownership at run time: claim may have expired or changed hands since register.
+    owned = require_owned_workspace(workspace, agent_id)
+    if owned is not None:
+        return die(owned)
     try:
         budget = clamp_budget(str(rec.get("budget") or DEFAULT_BUDGET))
     except ValueError as e:
