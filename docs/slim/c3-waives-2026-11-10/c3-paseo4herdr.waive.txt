@@ -1,0 +1,5 @@
+source: operator waive (2026-11-10 cloud handoff closeout); paste into Mac c3_proofs.paseo4herdr
+key: paseo4herdr
+waive: 2026-11-10: waive Wave 6 C3 paseo4herdr for immutable dated handoff references; do not rewrite those records or reinstall retired tools.
+verified: operator granted C1 historical-reference waive; dated docs/handoffs only; do not rewrite history
+log: docs/slim/log.md section "Wave 6 C1+C2 historical waives (2026-11-10)"
