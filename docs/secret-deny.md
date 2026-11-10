@@ -14,6 +14,7 @@ template into live `~/.codex/config.toml` still needs the operator's yes (order 
 | [`claude/hooks/secret_read_gate.py`](../claude/hooks/secret_read_gate.py) | the `PreToolUse` hook (Claude and Codex) |
 | `agents/claude/settings.json.tmpl`, `permissions.deny` | the generated `Read(...)` and `Edit(...)` entries |
 | `agents/claude/settings.json.tmpl`, `sandbox.filesystem.denyRead` | the same `[claude] static` paths in sandbox form (2026-11-09); render owns the array; does not set `sandbox.enabled` |
+| `agents/codex/config.toml.tmpl`, `[permissions.ade-secret-deny]` | Codex deny-read profile from `[codex] static` (inactive; no `default_permissions`) |
 
 ## A. The policy (2026-11-04)
 
@@ -161,6 +162,8 @@ template into live `~/.codex/config.toml` still needs the operator's yes (order 
   Docs note: Claude claims `denyRead` also merges from `Read(...)` deny rules, but Bash has been observed to honour
   only the explicit `filesystem.denyRead` list (anthropics/claude-code#55288), which is why the paths are rendered
   here too.
+  Codex's analogous wall is the inactive `ade-secret-deny` permissions profile; live apply and a re-probe of
+  deny-glob enforcement (openai/codex#22179) remain open.
 - **C4. Grep: what the walk trades (2026-11-04; corrects the earlier claim that ripgrep skips hidden files, which is
   false for Claude's Grep).** A Grep whose root holds a `.env` is blocked even when `.gitignore` lists it and ripgrep
   would skip it: the hook does not parse ignore files, so a whole-project Grep in a project with a `.env` needs a `glob`
@@ -225,21 +228,24 @@ template into live `~/.codex/config.toml` still needs the operator's yes (order 
 
 - **D1.** Edit `config/secret-deny.toml`.
 - **D2.** Run `bin/render-secret-deny` (Python 3.11 or later). It rewrites `config/secret_deny_policy.json`, the
-  `Read(...)`/`Edit(...)` entries of `permissions.deny`, and `sandbox.filesystem.denyRead` in
-  `agents/claude/settings.json.tmpl`, by a text splice that keeps every other line and every `{{ ... }}` tag, then
-  checks that the template still parses with the tags masked and differs only in those owned lists.
-- **D3.** Commit the TOML, the JSON and the template together. `bin/render-secret-deny --check` exits 1 with a diff when
-  either output is stale, 0 when clean, 2 on a usage error, an invalid policy or a template whose `permissions.deny`
-  list cannot be found. Options: `--policy`, `--policy-json`, `--claude-template`.
-- **D4.** The live settings come from the template through the normal install path; the hook reaches
+  `Read(...)`/`Edit(...)` entries of `permissions.deny` and `sandbox.filesystem.denyRead` in
+  `agents/claude/settings.json.tmpl`, and the managed `ade-secret-deny` block in `agents/codex/config.toml.tmpl`,
+  by text splices that keep every other line and every `{{ ... }}` tag, then checks that each template still
+  parses with the tags masked and differs only in the owned region.
+- **D3.** Commit the TOML, the JSON and both templates together. `bin/render-secret-deny --check` exits 1 with a diff when
+  any output is stale, 0 when clean, 2 on a usage error, an invalid policy or a template whose owned region cannot be
+  found. Options: `--policy`, `--policy-json`, `--claude-template`, `--codex-template`.
+- **D4.** The live settings come from the templates through the normal install path; the hook reaches
   `~/.claude/hooks/secret_read_gate.py` as a symlink into this checkout (`bin/ade-update` reports a missing link), and
   finds the policy JSON from its own realpath (`../../config/`; `SECRET_DENY_POLICY` overrides it). Merging the
   template's `sandbox.filesystem.denyRead` into live `~/.claude/settings.json`, and setting `sandbox.enabled` for the
-  trial, is an operator step (order 11) — agents must not rewrite that live file from this change alone.
+  trial, is an operator step (order 11). Applying the Codex profile into live `~/.codex/config.toml`
+  (setting `default_permissions = "ade-secret-deny"`) likewise needs the operator's yes (order 11); this repo does
+  not write `~/.codex` or rewrite live Claude settings from this change alone.
 - **D5.** Tests: `tests/test_secret_read_gate.py` (the matrix, symlinks, Grep's walk, a Grep root `link/..`, glob
   readings, how `glob` and `type` combine, the `type` map and its live union against the installed `rg --type-list` and
   a fake `rg` on PATH (widening, a narrower list, a failing and a hanging one), Bash, the lines of a patch block under
   Bash, `**` recursion, symlinked directories, Codex patches, fail-open, the glob walk's bounds on a synthetic endless tree and a symlink loop, heredoc speed including a
-  60-line `.gitignore`, the per-word budget, Python 3.9 syntax), `tests/test_render_secret_deny.py` (render into copies of the template: idempotent, `--check`, tags and
-  other entries kept, `sandbox.filesystem.denyRead` paths and preservation of other sandbox keys, the committed JSON equals a fresh render), and
-  `tests/test_secret_deny_repo.py` (committed template `--check` clean; denyRead present; sandbox not enabled).
+  60-line `.gitignore`, the per-word budget, Python 3.9 syntax), `tests/test_render_secret_deny.py` (render into copies of the templates: idempotent, `--check`, tags and
+  other entries kept, `sandbox.filesystem.denyRead` paths and preservation of other sandbox keys, Codex profile shape and inactivity, the committed JSON equals a fresh render),
+  `tests/test_codex_denyread_profile.py` (committed Codex template pins), and `tests/test_secret_deny_repo.py` (committed templates `--check` clean; denyRead present; sandbox not enabled; Codex inactive).

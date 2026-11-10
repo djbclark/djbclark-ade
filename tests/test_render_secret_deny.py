@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""bin/render-secret-deny: the secret-deny policy rendered into the hook JSON and the Claude template (2026-11-04).
+"""bin/render-secret-deny: the secret-deny policy rendered into the hook JSON, Claude template, and Codex profile (2026-11-04; Codex 2026-11-09/10).
 
-Every render runs on copies in tmp_path (of the real template and policy), never on the tracked files.
+Every render runs on copies in tmp_path (of the real templates and policy), never on the tracked files.
 sandbox.filesystem.denyRead coverage added 2026-11-09 (queue Carried #1 / issue #284 C3)."""
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -19,6 +20,8 @@ RENDER = ROOT / "bin" / "render-secret-deny"
 TOML = ROOT / "config" / "secret-deny.toml"
 POLICY_JSON = ROOT / "config" / "secret_deny_policy.json"
 TMPL = ROOT / "agents" / "claude" / "settings.json.tmpl"
+CODEX_TMPL = ROOT / "agents" / "codex" / "config.toml.tmpl"
+CODEX_BEGIN = "# BEGIN ade-secret-deny (managed by bin/render-secret-deny; do not edit by hand)"
 TAG = re.compile(r"\{\{.*?\}\}")
 
 EXPECTED_STATIC = [
@@ -33,20 +36,26 @@ EXPECTED_SANDBOX_DENY_READ = [
     "~/.ssh/id_rsa", "~/.ssh/id_ecdsa", "~/.ssh/id_ed25519",
     "~/.aws/credentials", "~/.netrc", "~/.config/gh/hosts.yml", "~/.docker/config.json", "~/.kube/config",
 ]
+EXPECTED_CODEX_ROOTS = [
+    "**/.env", "**/*.key", "**/*.p12", "**/*.pfx", "**/*-key.pem", "**/*.key.pem", "**/privkey*.pem",
+    "**/id_rsa", "**/id_ecdsa", "**/id_ed25519",
+]
 
 
 @pytest.fixture
 def fx(tmp_path):
     shutil.copy(TOML, tmp_path / "policy.toml")
     shutil.copy(TMPL, tmp_path / "settings.json.tmpl")
+    shutil.copy(CODEX_TMPL, tmp_path / "config.toml.tmpl")
     return tmp_path
 
 
-def render(fx, *extra, policy=None, tmpl=None, out=None):
+def render(fx, *extra, policy=None, tmpl=None, codex=None, out=None):
     args = [sys.executable, str(RENDER),
             "--policy", str(policy or fx / "policy.toml"),
             "--policy-json", str(out or fx / "policy.json"),
-            "--claude-template", str(tmpl or fx / "settings.json.tmpl"), *extra]
+            "--claude-template", str(tmpl or fx / "settings.json.tmpl"),
+            "--codex-template", str(codex or fx / "config.toml.tmpl"), *extra]
     return subprocess.run(args, capture_output=True, text=True, timeout=60)
 
 
@@ -88,10 +97,12 @@ def test_static_entries_avoid_every_allow_exception(fx):
 
 def test_render_is_idempotent_and_check_is_clean(fx):
     assert render(fx).returncode == 0
-    first = (fx / "settings.json.tmpl").read_text(), (fx / "policy.json").read_text()
+    first = ((fx / "settings.json.tmpl").read_text(), (fx / "policy.json").read_text(),
+             (fx / "config.toml.tmpl").read_text())
     r = render(fx)
     assert r.returncode == 0 and "already up to date" in r.stdout
-    assert ((fx / "settings.json.tmpl").read_text(), (fx / "policy.json").read_text()) == first
+    assert ((fx / "settings.json.tmpl").read_text(), (fx / "policy.json").read_text(),
+            (fx / "config.toml.tmpl").read_text()) == first
     assert render(fx, "--check").returncode == 0
 
 
@@ -267,13 +278,18 @@ def test_policy_json_shape(fx):
     assert data["version"] == 1
     assert ".env" in data["deny"] and ".env.example" in data["allow"]
     assert "*.pem" not in data["deny"]
+    assert ".env" in data["codex_static"]
+    assert data["codex_static"] == data["claude_static"]
 
 
 # ---- refusals: exit 2, nothing written -------------------------------------------------------------------------------
-def write_policy(fx, deny, allow, static):
+def write_policy(fx, deny, allow, static, codex_static=None):
     def arr(xs):
         return "[" + ", ".join(json.dumps(x) for x in xs) + "]"
-    (fx / "policy.toml").write_text(f"version = 1\ndeny = {arr(deny)}\nallow = {arr(allow)}\n[claude]\nstatic = {arr(static)}\n")
+    cs = static if codex_static is None else codex_static
+    (fx / "policy.toml").write_text(
+        f"version = 1\ndeny = {arr(deny)}\nallow = {arr(allow)}\n"
+        f"[claude]\nstatic = {arr(static)}\n[codex]\nstatic = {arr(cs)}\n")
 
 
 @pytest.mark.parametrize("deny,allow,static", [
@@ -291,9 +307,11 @@ def write_policy(fx, deny, allow, static):
 def test_bad_policy_is_refused(fx, deny, allow, static):
     write_policy(fx, deny, allow, static)
     before = (fx / "settings.json.tmpl").read_text()
+    before_codex = (fx / "config.toml.tmpl").read_text()
     r = render(fx)
     assert r.returncode == 2, (r.stdout, r.stderr)
     assert (fx / "settings.json.tmpl").read_text() == before
+    assert (fx / "config.toml.tmpl").read_text() == before_codex
     assert not (fx / "policy.json").exists()
 
 
@@ -347,6 +365,53 @@ def test_rendered_template_passes_ade_template_check(fx):
     r = subprocess.run([sys.executable, str(ROOT / "bin" / "ade-template-check"), "--root", str(root),
                         str(root / "agents" / "claude" / "settings.json.tmpl")], capture_output=True, text=True, timeout=60)
     assert r.returncode == 0, r.stdout + r.stderr
+
+
+
+def test_render_writes_codex_ade_secret_deny_profile(fx):
+    r = render(fx)
+    assert r.returncode == 0, r.stderr
+    text = (fx / "config.toml.tmpl").read_text()
+    assert CODEX_BEGIN in text and "# END ade-secret-deny" in text
+    assert not re.search(r'(?m)^default_permissions\s*=\s*"ade-secret-deny"\s*$', text)
+    masked_txt = TAG.sub("x", text)
+    data = tomllib.loads(masked_txt)
+    assert data.get("default_permissions") != "ade-secret-deny"
+    assert data["sandbox_mode"] == "danger-full-access"
+    profile = data["permissions"]["ade-secret-deny"]
+    assert profile["extends"] == ":workspace"
+    roots = profile["filesystem"][":workspace_roots"]
+    assert list(roots) == EXPECTED_CODEX_ROOTS
+    assert all(v == "deny" for v in roots.values())
+    exact = {k: v for k, v in profile["filesystem"].items() if k != ":workspace_roots"}
+    assert all(v == "deny" for v in exact.values())
+    assert any(k.endswith("/.aws/credentials") for k in exact)
+    assert "22179" in text and "Do not claim #22179 landed" in text
+
+
+def test_check_reports_codex_profile_drift(fx):
+    render(fx)
+    t = fx / "config.toml.tmpl"
+    text = t.read_text().replace('"**/.env" = "deny"\n', "", 1)
+    t.write_text(text)
+    r = render(fx, "--check")
+    assert r.returncode == 1
+    assert "**/.env" in r.stdout
+    assert t.read_text() == text
+
+
+def test_bad_codex_static_is_refused_independently(fx):
+    write_policy(fx, [".env", "~/.ssh/**"], ["*.pub"], [".env"], codex_static=["~/.ssh/**"])
+    before = (fx / "config.toml.tmpl").read_text()
+    r = render(fx)
+    assert r.returncode == 2, r.stderr
+    assert "codex.static" in r.stderr
+    assert (fx / "config.toml.tmpl").read_text() == before
+
+
+def test_missing_codex_static_section_is_refused(fx):
+    (fx / "policy.toml").write_text('version = 1\ndeny = [".env"]\nallow = []\n[claude]\nstatic = [".env"]\n')
+    assert render(fx).returncode == 2
 
 
 def test_executable_with_env_shebang():

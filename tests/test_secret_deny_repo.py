@@ -1,9 +1,9 @@
 """Repo-level pins for the secret read-deny wiring (issue 284).
 
-The committed Claude template must equal what bin/render-secret-deny produces from
-config/secret-deny.toml, and its PreToolUse gate entry must exec the hook directly (a missing
-file then exits 127, which never blocks) with timeout 15 and no fail-closed `onFailure`.
-Also pins sandbox.filesystem.denyRead (2026-11-09, C3 template path; live apply is order 11).
+The committed Claude and Codex templates must equal what bin/render-secret-deny produces from
+config/secret-deny.toml, and Claude's PreToolUse gate entry must exec the hook directly (a missing
+file then exits 127, which never blocks) with timeout 15 and no fail-closed `onFailure`. The Codex
+ade-secret-deny profile stays inactive (no default_permissions).
 """
 from __future__ import annotations
 
@@ -11,10 +11,12 @@ import json
 import re
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 TEMPLATE = REPO / "agents" / "claude" / "settings.json.tmpl"
+CODEX = REPO / "agents" / "codex" / "config.toml.tmpl"
 
 
 def test_render_check_clean_on_repo():
@@ -25,6 +27,10 @@ def test_render_check_clean_on_repo():
 
 def _settings():
     return json.loads(re.sub(r"\{\{.*?\}\}", "x", TEMPLATE.read_text()))
+
+
+def _codex():
+    return tomllib.loads(re.sub(r"\{\{.*?\}\}", "x", CODEX.read_text()))
 
 
 def test_gate_entry_exec_direct_fail_open():
@@ -42,6 +48,17 @@ def test_gate_matcher_covers_file_tools_not_glob():
               if any("secret_read_gate.py" in h.get("command", "") for h in g["hooks"])]
     tools = set(groups[0]["matcher"].split("|"))
     assert {"Read", "Edit", "Bash", "Grep"} <= tools and "Glob" not in tools
+
+
+def test_codex_ade_secret_deny_present_and_inactive():
+    data = _codex()
+    assert "ade-secret-deny" in data["permissions"]
+    assert data.get("default_permissions") != "ade-secret-deny"
+    assert data["sandbox_mode"] == "danger-full-access"
+    assert data["permissions"]["ade-secret-deny"]["extends"] == ":workspace"
+    text = CODEX.read_text()
+    assert "# BEGIN ade-secret-deny" in text
+    assert "Do not claim #22179 landed" in text
 
 
 def test_template_has_sandbox_filesystem_deny_read_without_enabling():
