@@ -860,6 +860,86 @@ def classify_verify_result(
     return status, f"verify {status} (no value read)"
 
 
+def verify_key_metadata(
+    provider: str,
+    *,
+    environ: Mapping[str, str] | None = None,
+    opener: Callable[..., Any] | None = None,
+) -> int:
+    """Two fixed authenticated metadata GETs; return existing verify exit codes.
+
+    Intended for verify_argv under sudo-secretspec run. No URL/key argv, body
+    output, retries, inference requests or quota/acceptance decisions.
+    """
+    import http.client
+    import math
+    import urllib.error
+    import urllib.request
+
+    endpoints = {
+        "openai": ("OPENAI_API_KEY", "https://api.openai.com/v1/models"),
+        "openrouter": ("OPENROUTER_API_KEY", "https://openrouter.ai/api/v1/key"),
+    }
+    if provider not in endpoints:
+        return 2
+    name, url = endpoints[provider]
+    key = (os.environ if environ is None else environ).get(name)
+    if not isinstance(key, str) or not key:
+        return VERIFY_EXIT_MISSING
+    if any(ord(char) < 33 or ord(char) > 126 for char in key):
+        return VERIFY_EXIT_INVALID
+
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            return None  # never forward Authorization to another request
+
+    open_request = opener or urllib.request.build_opener(NoRedirect()).open
+    request = urllib.request.Request(
+        url, method="GET", headers={"Authorization": "Bearer " + key, "Accept": "application/json"},
+    )
+    limit = 256 * 1024
+    try:
+        with open_request(request, timeout=10) as response:
+            status = response.getcode()
+            if status != 200:
+                return VERIFY_EXIT_INVALID if status in (401, 403) else VERIFY_EXIT_UNREACHABLE
+            body = response.read(limit + 1)
+    except urllib.error.HTTPError as error:
+        # Never read/print the error body or stringify the exception.
+        error.close()
+        return VERIFY_EXIT_INVALID if error.code in (401, 403) else VERIFY_EXIT_UNREACHABLE
+    except (urllib.error.URLError, OSError, http.client.HTTPException):
+        return VERIFY_EXIT_UNREACHABLE
+    except (ValueError, UnicodeError):
+        return 1
+    if not isinstance(body, bytes) or len(body) > limit:
+        return 1
+
+    def reject_nonfinite(_value):
+        raise ValueError("nonfinite JSON constant")
+
+    try:
+        payload = json.loads(body, parse_constant=reject_nonfinite)
+    except (ValueError, UnicodeError, RecursionError):
+        return 1
+    if not isinstance(payload, dict):
+        return 1
+    data = payload.get("data")
+    if provider == "openai":
+        valid = payload.get("object") == "list" and isinstance(data, list) and all(
+            isinstance(row, dict) and row.get("object") == "model"
+            and isinstance(row.get("id"), str) and bool(row["id"])
+            for row in data
+        )
+    else:
+        usage = data.get("usage") if isinstance(data, dict) else None
+        valid_usage = (
+            isinstance(usage, int) and not isinstance(usage, bool) and usage >= 0
+        ) or (isinstance(usage, float) and math.isfinite(usage) and usage >= 0)
+        valid = isinstance(data, dict) and isinstance(data.get("is_free_tier"), bool) and valid_usage
+    return VERIFY_EXIT_OK if valid else 1
+
+
 def observe_key_verify(
     row: dict[str, Any],
     *,
@@ -1387,6 +1467,99 @@ def update_plan(catalog: Catalog, *, prefix: Path | None = None) -> list[dict[st
                 step.update(action="candidate", argv=argv, reason="configured command only; installation, activity and authority unverified")
         steps.append(step)
     return steps
+
+
+def bootstrap_just(
+    *,
+    root: Path,
+    prefix: Path | None = None,
+    yes: bool = False,
+    runner: Callable[[list[str], Path, dict[str, str]], subprocess.CompletedProcess[str]] | None = None,
+    find_just: Callable[[], str | None] | None = None,
+) -> tuple[dict[str, Any], int]:
+    """Acquire missing user-scoped Just explicitly, then run install's preview.
+
+    Python is already running; this does not acquire it or complete setup.
+    Default mode performs PATH/file metadata checks only, never subprocesses.
+    """
+    root = root.expanduser().resolve()
+    prefix = (prefix or default_prefix()).expanduser().resolve()
+    report: dict[str, Any] = {
+        "mode": "yes" if yes else "dry-run", "status": "dry-run",
+        "just_status": "unknown", "setup_complete": False, "root": str(root),
+        "note": "only missing Just may be installed; the next install step is preview only; Python acquisition and full setup are not performed",
+    }
+
+    def fail(status: str, reason: str) -> tuple[dict[str, Any], int]:
+        report.update(status=status, reason=reason)
+        return report, 1
+
+    if not (root / "justfile").is_file():
+        return fail("invalid-root", "selected root has no justfile; nothing started")
+    try:
+        found = (find_just or (lambda: shutil.which("just")))()
+        destination = prefix / "just"
+        # An existing off-PATH file or dangling link must be verified, not replaced.
+        present = found is not None or destination.exists() or destination.is_symlink()
+    except OSError:
+        return fail("unknown", "Just presence could not be determined; nothing started")
+    just = Path(found).absolute() if found is not None else destination
+    report.update(just=str(just), just_status="present-unverified" if present else "missing")
+    helper = root / "bin" / "ade-user-install"
+    install_argv = [sys.executable, "-I", str(helper), "just", "--prefix", str(prefix)]
+    preview_argv = [str(just), "--justfile", str(root / "justfile"), "install", "--dry-run"]
+    report["preview_argv"] = preview_argv
+    report["cwd"] = str(root)
+    if not present:
+        if not helper.is_file():
+            return fail("invalid-root", "Just acquisition helper is missing; nothing started")
+        report["install_argv"] = install_argv
+    if not yes:
+        return report, 0
+    run = runner or (lambda argv, cwd, env: subprocess.run(
+        argv, cwd=str(cwd), env=env, capture_output=True, text=True,
+        check=False, shell=False, stdin=subprocess.DEVNULL,
+        timeout=15 if argv[-1:] == ["--version"] else 300,
+    ))
+    env = dict(os.environ)
+    if not present:
+        try:
+            result = run(install_argv, root, env)
+        except (OSError, subprocess.TimeoutExpired):
+            report["just_status"] = "unknown"
+            return fail("acquisition-failed", "Just acquisition failed or timed out; preview was not started")
+        report["install_returncode"] = result.returncode
+        if result.returncode != 0:
+            report["just_status"] = "unknown"
+            return fail("acquisition-failed", "Just acquisition returned failure; preview was not started")
+    try:
+        result = run([str(just), "--version"], root, env)
+    except (OSError, subprocess.TimeoutExpired):
+        report["just_status"] = "unknown"
+        return fail("unknown", "Just could not be verified; preview was not started")
+    if result.returncode != 0:
+        report["just_status"] = "broken"
+        return fail("broken", "Just --version failed; it was not replaced and preview was not started")
+    version = (result.stdout or "").strip()
+    if not version.startswith("just ") or "\n" in version:
+        report["just_status"] = "unknown"
+        return fail("unknown", "Just version output was not recognized; preview was not started")
+    report.update(just_status="ready", just_version=version)
+    # The selected Just must remain visible even when the user bin prefix was
+    # not on PATH before acquisition. Never modify the caller's environment.
+    preview_env = dict(env, PATH=str(just.parent) + os.pathsep + (env.get("PATH") or os.defpath))
+    report["preview_path_prefix"] = str(just.parent)
+    try:
+        result = run(preview_argv, root, preview_env)
+    except (OSError, subprocess.TimeoutExpired):
+        return fail("preview-failed", "installation preview failed or timed out; full setup was not performed")
+    report["preview_returncode"] = result.returncode
+    report["preview_stdout"] = (result.stdout or "")[-8000:]
+    report["preview_stderr"] = (result.stderr or "")[-2000:]
+    if result.returncode != 0:
+        return fail("preview-failed", "installation preview returned failure; full setup was not performed")
+    report["status"] = "preview-complete"
+    return report, 0
 
 
 def catalog_summary(catalog: Catalog) -> dict[str, Any]:

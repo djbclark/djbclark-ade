@@ -87,8 +87,14 @@ and security sequencing in the older plan; other unfinished planning stays intac
    exits 2 before loading the catalog implementation. Without Python, the
    executable's shebang cannot start. Direct `check`, `plan` and `apply --dry-run`
    commands do not require Just; explicit `apply --yes --id just` uses its existing
-   user-scoped catalog installer. Automatically obtaining suitable Python,
-   installing missing Just and continuing into the recipe remain planned work.
+   user-scoped catalog installer. `ade-install bootstrap` now previews an
+   explicit Just bootstrap with no subprocesses/downloads or changes; `--yes`
+   acquires only missing Just through the existing user installer, verifies
+   `just --version`, then runs `just install --dry-run` explicitly. Existing
+   broken/unverifiable Just stops without replacement; acquisition failure
+   never falls through. Successful bootstrap means the installation preview
+   finished, not that full setup is complete. Python acquisition, automatic
+   first-run installation and the remaining full setup stay planned work.
 2. **Every dependency is in one system** (operator, 2026-11-07: "All of the listed things should be part of our easy
    install/update/keep-updated system"; commercial services first left out, then made optional the same day). The list
    lives in `[install]`, one entry per component, each with its install, update and probe command. `vendor/README.md`
@@ -273,6 +279,14 @@ Keys are saved with `sudo-secretspec`, and also through Paseo if it has a secure
 
      Outcomes go in `~/.local/state/djbclark-ade/keys.json`, written atomically, with no value and no hash of one.
    - A probe never spends money, never posts, and is rate-limited to one per key per run.
+   **Bounded coverage (2026-11-10):** the existing engine now has recorded
+   `verify_argv` for OpenAI model-list metadata and OpenRouter current-key
+   metadata. Both are fixed authenticated GETs with no inference calls or body
+   output; credentials stay in the injected environment/header. Their `ok`
+   verifies metadata authentication only, not inference entitlement, funding,
+   subscription quota or Pi acceptance. The other ten tracked provider rows,
+   expiry checks and live validation remain unfinished. See
+   [install-catalog.md](install-catalog.md) for contracts and sources.
 4. **Collect in one batch, one key at a time.** After the check, it prints one list of every key that is missing or
    failing, with its purpose and URL, and asks once whether to enter them now.
    - For each key in turn it shows the name, what uses it and the URL, then runs `sudo-secretspec set NAME`. That is

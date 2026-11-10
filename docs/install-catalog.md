@@ -72,6 +72,34 @@ optional `verify_argv`, expiry=unknown|…). Doctor never reads
 key validation. Recorded login commands (2026-11-09): `claude auth login`,
 `codex login`, `agent login` — doctor does not execute them.
 
+Two fixed S3b metadata probes are implemented through `ade-install verify-key
+openai|openrouter`, referenced by those keys' `verify_argv` entries. This helper
+is intended to run under the existing `sudo-secretspec run` boundary, reads only
+the selected key from its injected environment, sends it only in the
+Authorization header, and emits no stdout/stderr. No key/URL value flags exist.
+
+| Key | Fixed read-only request | Validated metadata shape |
+|---|---|---|
+| `OPENAI_API_KEY` | `GET https://api.openai.com/v1/models` | `object=list`, array of model objects/ids (empty allowed) |
+| `OPENROUTER_API_KEY` | `GET https://openrouter.ai/api/v1/key` | `data.is_free_tier` boolean and nonnegative finite `data.usage` |
+
+Provider contracts checked 2026-11-10: [OpenAI models list](https://developers.openai.com/api/reference/resources/models/methods/list)
+and [OpenRouter current key](https://openrouter.ai/docs/api/api-reference/api-keys/get-current-api-key).
+No actual credential requests were made during implementation. The helper
+makes at most one GET, uses a 10-second socket timeout (the existing outer
+key engine also bounds the process), reads at most 256 KiB plus one overflow
+byte and refuses redirects. It does not print response or exception bodies,
+model ids, key labels, balances or values; no inference call is made.
+
+Helper exits: 0 authenticated metadata; 10 HTTP 401/403 or invalid header-value
+characters; 12 network/TLS/timeout, redirects and other HTTP failures (including
+429); 14 missing value; 1 malformed/oversized success data. Rate limits are not
+guessed to mean exhausted quota. Authentication success proves neither inference
+entitlement/funding nor subscription availability, routing eligibility or Pi
+acceptance. Remaining ten provider rows still have no probe; collect/delivery,
+expiry interpretation and live acceptance remain unfinished. Component/key
+selection behavior is unchanged.
+
 `ade-install keys` / `just keys` (2026-11-09 presence; 2026-11-10 verify) is
 setup-plan S3b check-then-verify:
 
@@ -103,8 +131,10 @@ ade-install check [--root DIR] [--json]
 ade-install catalog [--root DIR] [--json]
 ade-install plan [--root DIR] [--json]
 ade-install update-plan [--root DIR] [--json]
+ade-install bootstrap [--root DIR] [--prefix DIR] [--dry-run|--yes] [--json]
 ade-install doctor [--root DIR] [--id ID ...] [--json]
 ade-install keys [--root DIR] [--json] [--keys-state PATH]
+ade-install verify-key openai|openrouter  # probe exit code only; normally under sudo-secretspec run
 ade-install apply [--root DIR] [--json] [--dry-run|--yes] [--id ID ...] [--force]
                   [--system] [--print-system-argv] [--apply-system]
                   [--state-dir DIR] [--prefix DIR]
@@ -132,6 +162,32 @@ not needed for these direct CLI commands: preview with `ade-install plan` /
 `ade-install apply --dry-run`, then explicitly request a missing Just install
 with `ade-install apply --yes --id just`. Automatic Python/Just bootstrap is
 still unimplemented; no package-manager or Python acquisition path is selected.
+
+`ade-install bootstrap` is a separate opt-in partial bootstrap for a host that
+already has suitable Python. Default / `--dry-run` checks PATH and destination
+metadata and prints exact argv/cwd only: no version probes, subprocesses,
+downloads or state/cache writes. Existing Just is `present-unverified`, never
+assumed healthy. Missing Just is planned for the existing user-scoped
+`ade-user-install just --prefix DIR` helper; default prefix follows
+`ADE_INSTALL_PREFIX` or `~/.local/bin`.
+
+With explicit `--yes`, missing Just is acquired, then the selected executable
+must pass `--version` before the next step. An existing off-PATH file or dangling
+destination link is verified instead of overwritten. Nonzero version status is
+`broken`; execution/timeout or unrecognized version output is `unknown`. Either
+stops the flow, as does failed acquisition. The preview argv is exactly
+`JUST --justfile ROOT/justfile install --dry-run`, with cwd `ROOT` and the
+selected Just's parent prepended only to the child's PATH. No `--yes` is passed
+to the installation recipe; other components, keys and provider credentials
+are not installed/configured by bootstrap. The preview may run the existing
+installer's observe-only component/scheduler checks, so only default bootstrap
+is subprocess-free. Acquisition does not create an ownership/removal grant.
+
+Exit 0 means the dry-run was described or the explicitly requested acquisition
+and installation preview completed; `setup_complete` always remains false.
+Exit 1 reports acquisition/verification/preview failure (or invalid root), and
+parser conflicts such as `--yes --dry-run` exit 2. Bare `ade-install` keeps its
+guidance-only behavior. This does not acquire Python or establish full setup.
 
 Daily behind-check (not auto-apply): install
 `config/launchd/com.djbclark.ade-update-check.plist` with an explicit log dir
@@ -292,6 +348,9 @@ worktree (exit 1 / `blocked`) — run from the primary checkout, or use
 Offered `paseo-plugin-*` rows re-landed from stranded #354 (session-guard, baton, asks, questions-please, tell-agent, vitals, resources, skills, and siblings). **macOS host RAM:** `paseo-plugin-resources` chosen, not vitals (`docs/paseo-host-ram-plugins.md`). Install/probe argv stay UNKNOWN until Mac live `paseo plugin ls` (order 11). Doctor observes presence only.
 
 ## H. Next units
+
+The bounded S3 Just bootstrap above is implemented; Python acquisition and
+automatic full setup remain unfinished.
 
 Ownership-aware reconcile beyond the install ledger (setup-plan S3), remaining
 owner installers (curl-free Cursor CLI fetch, Hermes offered path — basic setup
