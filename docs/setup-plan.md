@@ -317,7 +317,7 @@ without unloading anyone. `ade-sched reconcile` (default dry-run; `--yes` writes
 ADE-owned `ade-sched` jobs on **systemd user** units and records ownership in
 `~/.local/state/djbclark-ade/jobs.json`; it removes only ledger-owned labels and never unloads
 foreign/unknown owners or root/`--system` units. Launchd/cron/`paseo schedule` write paths, and plists
-for `update --auto` / `harden-check` / `keys --check`, remain later work under the contracts below.
+for `update --auto` / `keys --check`, remain later work under the contracts below; `harden-check` has a daily plist (`just harden-check-install`, 2026-11-10).
 
 1. **One inventory**, `config/ade.toml [install.jobs]` (transitional: `config/install.toml [[install.jobs]]`). Each entry has:
    - name;
