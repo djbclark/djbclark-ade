@@ -454,3 +454,80 @@ def test_stacks_cli_fork_master_does_not_parent_listing_tips(tmp_path: Path) -> 
     assert [row["number"] for row in order] == [336]
     assert order[0]["parent_number"] is None
     assert order[0]["head_repo"] == LISTING_REPO
+
+
+def test_approve_paste_master_base_only(tmp_path: Path) -> None:
+    """approve-paste --base master emits only matching needs_approve templates."""
+    head_m = "c" * 40
+    head_s = "d" * 40
+    listing = json.dumps(
+        [
+            {
+                "number": 334,
+                "title": "install harddeps",
+                "headRefOid": head_m,
+                "baseRefName": "master",
+                "mergeable": "MERGEABLE",
+                "headRefName": "cursor/ade-install-harddeps-f576",
+            },
+            {
+                "number": 469,
+                "title": "linux e2e",
+                "headRefOid": head_s,
+                "baseRefName": "cursor/doctor-linger-linux-f576",
+                "mergeable": "MERGEABLE",
+                "headRefName": "cursor/ade-install-linux-e2e-f576",
+            },
+        ]
+    )
+    checks = "pytest-linux\tpass\t0\tx\nadversary-marker\tfail\t0\tx\n"
+    gh = write_fake_gh(
+        tmp_path,
+        textwrap.dedent(
+            f"""
+            set -e
+            case "$*" in
+              *"pr list"*) echo '{listing}' ;;
+              *"pr checks"*) printf '%s' '{checks}' ; exit 1 ;;
+              *) echo "unexpected: $*" >&2; exit 99 ;;
+            esac
+            """
+        ),
+    )
+    r = run(gh, "approve-paste", "--base", "master", "--min", "1")
+    assert r.returncode == 0, r.stderr
+    assert "# PR 334" in r.stdout
+    assert head_m in r.stdout
+    assert "# PR 469" not in r.stdout
+    assert head_s not in r.stdout
+
+
+def test_collect_refuses_silent_500_truncation(tmp_path: Path) -> None:
+    """If gh returns exactly 500 open PRs, refuse rather than drop bottoms."""
+    prs = [
+        {
+            "number": 1000 + i,
+            "title": f"pr{i}",
+            "headRefOid": f"{i:040x}",
+            "baseRefName": "master",
+            "mergeable": "MERGEABLE",
+            "headRefName": f"cursor/x-{i}-f576",
+        }
+        for i in range(500)
+    ]
+    listing = json.dumps(prs)
+    gh = write_fake_gh(
+        tmp_path,
+        textwrap.dedent(
+            f"""
+            set -e
+            case "$*" in
+              *"pr list"*) echo '{listing}' ;;
+              *) echo "unexpected: $*" >&2; exit 99 ;;
+            esac
+            """
+        ),
+    )
+    r = run(gh, "--json", "--min", "1")
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "500" in (r.stderr + r.stdout)
