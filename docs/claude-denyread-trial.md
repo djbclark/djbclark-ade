@@ -71,12 +71,25 @@ Notes:
   process start). Confirm the session is sandboxed (Claude's sandbox indicator / docs for the
   installed version).
 - **B4. Positive probes (must refuse).** In that session, via **Bash** (the wall is for Bash and
-  children): attempt reads that should fail, e.g. `cat ~/.aws/credentials`, `cat ~/.netrc`,
-  `cat ~/.ssh/id_ed25519` (only if that key exists; otherwise `cat` of a path matching `~/**/*.key`
-  you control). Record the error text and whether a non-Bash `Read` tool still hits the hook /
-  static deny (different layer — both should refuse; only Bash proves the OS wall).
+  children): attempt reads that should fail **without ever printing secret bytes**. Prefer synthetic
+  canaries that match deny patterns, or an open-only check that reports success/fail only:
+  - **B4a. Glob canaries (preferred).** Under a disposable dir you own, create non-secret files whose
+    names match the A list, e.g. `mkdir -p ~/tmp/denyread-trial && printf 'canary-not-a-secret\n' >
+    ~/tmp/denyread-trial/canary.key` (and optionally `…/canary.env`, `…/privkey-canary.pem`). Then
+    `cat ~/tmp/denyread-trial/canary.key` (and siblings). Expect refuse; the printed text, if any,
+    is only the canary string or the sandbox/hook error — never a live key.
+  - **B4b. Exact-path probes (open-only).** For exact entries (`~/.aws/credentials`, `~/.netrc`,
+    `~/.ssh/id_ed25519`, …) do **not** `cat` them. Skip any exact path that is absent
+    (`test -e …`). For a path that exists, probe open without emitting contents, e.g.
+    `python3 -c 'from pathlib import Path; open(Path.home()/".aws"/"credentials","rb").close(); print("opened")'`
+    and record only the exit code / sandbox error text (refuse → non-zero or blocked stderr; never
+    log or paste file bytes into the session note).
+  - **B4c.** Record the error text and whether a non-Bash `Read` tool still hits the hook / static
+    deny (different layer — both should refuse; only Bash proves the OS wall). Remove the canary
+    dir when done: `rm -rf ~/tmp/denyread-trial`.
 - **B5. Negative probes (must still work).** `cat ~/.ssh/known_hosts`, `cat ~/.ssh/config`, read an
-  `.env.example` in a project, and ordinary project source. A false refuse here is a rollback trigger.
+  `.env.example` in a project, and ordinary project source (none of these are secret material in the
+  deny policy). A false refuse here is a rollback trigger.
 - **B6. Scope check.** Confirm sandbox did not break unrelated work you care about (network, writes
   outside the project, nested tools). Note anything surprising beside denyRead.
 - **B7. Record.** Write the date, Claude Code version, probe results, and whether B4's Bash refuse
