@@ -61,6 +61,47 @@ pr_creation_policy = "nope"
         ah.load_config(root=root)
 
 
+def test_rejects_shell_metachar_interaction_limits_expiry(tmp_path):
+    """Codex Security P2: attacker-controlled --root must not inject expiry."""
+    import shlex
+
+    evil = "six_months; touch /tmp/pwned #"
+    root = _fixture_root(
+        tmp_path,
+        toml=f"""
+schema_version = 1
+[hardening.defaults]
+pr_creation_policy = "collaborators_only"
+[hardening.interaction_limits]
+limit = "collaborators_only"
+expiry = {evil!r}
+""",
+    )
+    with pytest.raises(ah.HardenError, match="interaction_limits.expiry"):
+        ah.load_config(root=root)
+    # Belt-and-suspenders: remediation quotes even a bypassed loader value.
+    rem = ah.interaction_limits_remediation(evil)
+    cmd, _, note = rem.partition("  #")
+    assert "auto-reapply deferred" in note
+    parts = shlex.split(cmd)
+    assert parts == [
+        "just",
+        "harden",
+        "interaction_limits",
+        "--expiry",
+        evil,
+    ]
+    # Unquoted paste must not leave a bare semicolon command separator.
+    assert f"--expiry {evil}" not in rem
+    assert shlex.quote(evil) in rem
+
+
+def test_interaction_limits_remediation_quotes_valid_expiry():
+    rem = ah.interaction_limits_remediation("six_months")
+    assert rem.startswith("just harden interaction_limits --expiry six_months")
+    assert "auto-reapply deferred" in rem
+
+
 def test_rejects_duplicate_repo(tmp_path):
     root = _fixture_root(
         tmp_path,
@@ -382,6 +423,7 @@ def test_observe_interaction_limit_expiry_drift_no_reapply(tmp_path):
     assert exp.status == "drift"
     assert exp.remediation is not None
     assert "auto-reapply deferred" in exp.remediation
+    assert exp.remediation == ah.interaction_limits_remediation("six_months")
     # Only GET-style gh api / list probes — no mutation verbs in argv.
     assert all("api" in c for c in calls)
 

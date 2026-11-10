@@ -32,13 +32,16 @@ ade-harden observe [--root DIR] [--json] [--local]
 ade-harden apply …   # refused (exit 2)
 ```
 
-- **check** — validate `config/hardening.toml`.
+- **check** — validate `config/hardening.toml` (including the GitHub
+  `interaction_limits.expiry` enum: `one_day` … `six_months`).
 - **observe** — local always; with network, `gh api` probes each
   `[[hardening.repo]]` (PR/issue units, wiki/projects/discussions, Actions
   fork-PR approval + workflow permissions, optional merge-gate ruleset name),
   `GET /user/interaction-limits`, and an owner inventory for uncovered
   non-fork repos. `--local` skips `gh`. Exit **1** on `drift` / `missing` /
   `uncovered`; exit **0** when only `ok` / `unknown` / `deferred` remain.
+  Print-only remediation lines are built with `shlex.join` so a hostile
+  `--root` tree cannot inject shell metacharacters into a copied hint.
 - **apply** — always refused in this unit (including `--yes` / `--reapply` /
   `--renew`).
 

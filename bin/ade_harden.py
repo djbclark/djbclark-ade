@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 import shutil
 import subprocess
 import urllib.parse
@@ -49,6 +50,14 @@ ISSUE_POLICIES = frozenset({"collaborators_only", "all", "disabled", IGNORE})
 WORKFLOW_PERMS = frozenset({"read", "write", IGNORE})
 SECRET_STATES = frozenset({"enabled", "disabled", IGNORE})
 PROFILES = frozenset({"active", "fork"})
+INTERACTION_LIMITS = frozenset(
+    {"collaborators_only", "existing_users", "contributors_only", IGNORE}
+)
+# GitHub interaction-limit expiry enum (config/hardening.schema.json).
+INTERACTION_EXPIRIES = frozenset(
+    {"one_day", "three_days", "one_week", "one_month", "six_months"}
+)
+DEFAULT_INTERACTION_EXPIRY = "six_months"
 
 Runner = Callable[[list[str]], "subprocess.CompletedProcess[str]"]
 
@@ -206,17 +215,17 @@ def _validate_hardening(data: dict[str, Any], *, path: Path) -> list[str]:
             errors.append(f"{path}: [hardening.interaction_limits] must be a table")
         else:
             lim = il.get("limit")
-            if lim is not None and lim not in {
-                "collaborators_only",
-                "existing_users",
-                "contributors_only",
-                IGNORE,
-            }:
+            if lim is not None and lim not in INTERACTION_LIMITS:
                 errors.append(f"{path}: interaction_limits.limit invalid: {lim!r}")
             days = il.get("min_remaining_days")
             if days is not None and not (isinstance(days, int) and days >= 0):
                 errors.append(
                     f"{path}: interaction_limits.min_remaining_days must be int >= 0"
+                )
+            expiry = il.get("expiry")
+            if expiry is not None and expiry not in INTERACTION_EXPIRIES:
+                errors.append(
+                    f"{path}: interaction_limits.expiry invalid: {expiry!r}"
                 )
     repos = hard.get("repo") or []
     if not isinstance(repos, list):
@@ -303,11 +312,24 @@ def resolve_policy(cfg: HardenConfig, row: dict[str, Any]) -> dict[str, Any]:
 
 
 def remediation_hint(full_name: str, setting: str) -> str:
-    """Print-only remediation line (apply itself is deferred)."""
+    """Print-only remediation line (apply itself is deferred).
+
+    Args are shell-quoted so an attacker-controlled ``--root`` tree cannot
+    inject metacharacters into a copied remediation.
+    """
     option = setting
     if setting.startswith("has_"):
         option = setting
-    return f"just harden {option} --repos {full_name}  # apply deferred; observe-only unit"
+    cmd = shlex.join(["just", "harden", option, "--repos", full_name])
+    return f"{cmd}  # apply deferred; observe-only unit"
+
+
+def interaction_limits_remediation(expiry: str) -> str:
+    """Print-only interaction-limits remediation; ``expiry`` must be enum-valid."""
+    cmd = shlex.join(
+        ["just", "harden", "interaction_limits", "--expiry", expiry]
+    )
+    return f"{cmd}  # auto-reapply deferred; observe-only"
 
 
 def _default_runner(argv: list[str]) -> subprocess.CompletedProcess[str]:
@@ -840,7 +862,17 @@ def observe_interaction_limits(
             )
         ]
     min_days = int(il.get("min_remaining_days", 14))
-    expiry_hint = str(il.get("expiry") or "six_months")
+    raw_expiry = il.get("expiry")
+    expiry_hint = (
+        DEFAULT_INTERACTION_EXPIRY if raw_expiry is None else str(raw_expiry)
+    )
+    # load_config enum-validates expiry; defend in depth for callers that
+    # construct HardenConfig without the loader.
+    if expiry_hint not in INTERACTION_EXPIRIES:
+        raise HardenError(
+            f"interaction_limits.expiry invalid: {expiry_hint!r}"
+        )
+    rem = interaction_limits_remediation(expiry_hint)
     data, detail = _gh_json(
         runner,
         ["api", "user/interaction-limits"],
@@ -859,10 +891,7 @@ def observe_interaction_limits(
                     found=None,
                     status="missing",
                     detail=detail,
-                    remediation=(
-                        f"just harden interaction_limits "
-                        f"--expiry {expiry_hint}  # auto-reapply deferred; observe-only"
-                    ),
+                    remediation=rem,
                 )
             ]
         return [
@@ -895,10 +924,7 @@ def observe_interaction_limits(
             wanted=want_limit,
             found=found_limit,
             ok=found_limit == want_limit,
-            remediation=(
-                f"just harden interaction_limits --expiry {expiry_hint}  "
-                "# auto-reapply deferred; observe-only"
-            ),
+            remediation=rem,
         )
     )
     expires = _parse_expires_at(data.get("expires_at"))
@@ -930,14 +956,7 @@ def observe_interaction_limits(
                     if not ok
                     else "expiry far enough"
                 ),
-                remediation=(
-                    None
-                    if ok
-                    else (
-                        f"just harden interaction_limits --expiry {expiry_hint}  "
-                        "# auto-reapply deferred; observe-only"
-                    )
-                ),
+                remediation=None if ok else rem,
             )
         )
     return findings
