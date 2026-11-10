@@ -76,9 +76,16 @@ and security sequencing in the older plan; other unfinished planning stays intac
 
 ## S3. Install on a new machine (Mac and Linux)
 
-1. **`just install`** (bootstrap: `curl … | sh` is not used). A new machine runs
+1. **`just install`** (planned full bootstrap: `curl … | sh` is not used). A new machine runs
    `git clone https://github.com/djbclark/djbclark-ade ~/src/djbclark-ade && cd ~/src/djbclark-ade && ./bin/ade-install`,
-   which installs `just` if it is missing and then runs the recipe.
+   after making Python 3.11+ available as `python3` on PATH. The current bare
+   invocation prints first-run guidance and exits 0 without probes, downloads or
+   changes; it does not install Just. Older Python reports the prerequisite and
+   exits 2 before loading the catalog implementation. Without Python, the
+   executable's shebang cannot start. Direct `check`, `plan` and `apply --dry-run`
+   commands do not require Just; explicit `apply --yes --id just` uses its existing
+   user-scoped catalog installer. Automatically obtaining suitable Python,
+   installing missing Just and continuing into the recipe remain planned work.
 2. **Every dependency is in one system** (operator, 2026-11-07: "All of the listed things should be part of our easy
    install/update/keep-updated system"; commercial services first left out, then made optional the same day). The list
    lives in `[install]`, one entry per component, each with its install, update and probe command. `vendor/README.md`

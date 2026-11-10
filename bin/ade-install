@@ -1,6 +1,7 @@
 #!/usr/bin/env -S python3 -I
 """ade-install: transitional install catalog, plan, doctor, keys, and bounded apply.
 
+  ade-install                 print first-run guidance only (exit 0)
   ade-install check [--root DIR] [--json]
   ade-install catalog [--root DIR] [--json]
   ade-install plan [--root DIR] [--json]
@@ -23,9 +24,20 @@ See docs/install-catalog.md.
 """
 from __future__ import annotations
 
+import sys
+
+if sys.version_info < (3, 11):
+    print(
+        "ade-install requires Python 3.11+ (running "
+        f"{sys.version_info[0]}.{sys.version_info[1]}). "
+        "Make a supported python3 available on PATH, then rerun. "
+        "No installation was attempted.",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
+
 import argparse
 import json
-import sys
 from pathlib import Path
 
 BIN = Path(__file__).resolve().parent
@@ -273,6 +285,21 @@ def cmd_apply(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if not argv:
+        print(
+            "ADE first-run checklist (guidance only; no changes made).\n"
+            "Prerequisite: Python 3.11+ available as python3 on PATH.\n"
+            "From the cloned repository, validate and preview:\n"
+            "  ./bin/ade-install check\n"
+            "  ./bin/ade-install plan\n"
+            "  ./bin/ade-install apply --dry-run\n"
+            "To install missing Just explicitly when ready:\n"
+            "  ./bin/ade-install apply --yes --id just\n"
+            "These direct commands do not require Just. Automatic Python/Just "
+            "bootstrap is not implemented."
+        )
+        return 0
     shared = argparse.ArgumentParser(add_help=False)
     shared.add_argument("--root", default=argparse.SUPPRESS,
                         help="repository root; before/after command, last explicit wins")
