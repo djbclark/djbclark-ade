@@ -73,14 +73,45 @@ def test_repo_install_toml_checks_clean():
         "@anthropic-ai/claude-code",
     ]
     assert by_id["codex"].get("install_argv") == ["npm", "install", "-g", "@openai/codex"]
+    assert by_id["node"].get("probe_argv") == ["node", "--version"]
+    assert by_id["npm"].get("needs_system") is True
+    assert by_id["npm"].get("system_argv_darwin") == ["brew", "install", "node"]
+    assert by_id["npm"].get("probe_argv") == ["npm", "--version"]
+    assert by_id["npm"].get("presence") == "npm"
     assert by_id["cursor-cli"].get("presence") == "agent"
     assert by_id["cursor-cli"].get("probe_argv") == ["agent", "--version"]
     assert by_id["cursor-cli"].get("update_argv") == ["agent", "update"]
-    assert by_id["cursor-cli"].get("install_argv") is None  # curl|bash; no argv-list yet
+    assert by_id["cursor-cli"].get("install_argv") == [
+        "{bin}/ade-user-install",
+        "cursor-cli",
+        "--prefix",
+        "{prefix}",
+    ]
     assert by_id["hermes"].get("chosen") is True
     assert by_id["hermes"].get("probe_argv") == ["hermes", "doctor"]
     assert by_id["hermes"].get("update_argv") == ["hermes", "update"]
-    assert by_id["hermes"].get("install_argv") is None  # curl|bash; no argv-list yet
+    assert by_id["hermes"].get("install_argv") == ["{bin}/ade-user-install", "hermes"]
+    assert by_id["peer-link"].get("install_argv") is None  # private; prose only
+    assert by_id["litellm"].get("install_argv") is None  # fork/role; prose only
+    assert by_id["grok-bot-setup"].get("install_argv") == [
+        "npm",
+        "install",
+        "-g",
+        "--ignore-scripts",
+        "grok-bot-setup",
+    ]
+    assert by_id["grok-bot-setup"].get("probe_argv") == ["adapters", "help"]
+    assert by_id["1password"].get("needs_system") is True
+    assert by_id["1password"].get("system_argv_darwin") == [
+        "brew",
+        "install",
+        "--cask",
+        "1password",
+        "1password-cli",
+    ]
+    assert by_id["omp"]["class"] == "never"
+    assert by_id["opencode"]["class"] == "never"
+    assert by_id["crush"]["class"] == "never"
     assert by_id["graft"]["class"] == "hard"
     assert by_id["graft"].get("probe_argv") == ["graft", "--version"]
     assert by_id["ade-claim"].get("paseo_plugin") == "ade-claim"
@@ -1354,3 +1385,48 @@ def test_plan_and_apply_linux_secretspec_uses_install_argv(monkeypatch, tmp_path
     darwin_steps = ai.build_apply_steps(catalog, force=True, allow_system=True)
     assert darwin_steps[0].action == "would-system-install"
     assert darwin_steps[0].argv[:2] == ["brew", "install"]
+
+
+def test_safe_extract_refuses_path_traversal(tmp_path):
+    import io
+    import tarfile
+
+    bad = io.BytesIO()
+    with tarfile.open(fileobj=bad, mode="w:gz") as tar:
+        info = tarfile.TarInfo(name="../escape")
+        payload = b"x"
+        info.size = 1
+        tar.addfile(info, io.BytesIO(payload))
+    with pytest.raises(aui.UserInstallError, match="unsafe|escapes"):
+        aui._safe_extract_tar_gz(bad.getvalue(), tmp_path / "bad")
+
+
+def test_hermes_and_cursor_dry_run(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        aui,
+        "_resolve_cursor_version",
+        lambda: "2026.11.05-86047df",
+    )
+    prefix = tmp_path / "bin"
+    result = aui.install_cursor_cli(prefix=prefix, share=tmp_path / "share", dry_run=True)
+    assert result["action"] == "would-fetch"
+    assert "2026.11.05-86047df" in result["url"]
+    assert result["dest"] == str(prefix / "agent")
+    assert result["trust"] == aui.VENDOR_TRUST_ENV
+    assert not prefix.exists()
+
+    h = aui.install_hermes(dry_run=True)
+    assert h["action"] == "would-run-script"
+    assert h["url"] == aui.HERMES_INSTALL_SCRIPT
+    assert h["argv"][-1] == "--non-interactive"
+    assert h["trust"] == aui.VENDOR_TRUST_ENV
+
+
+def test_vendor_install_refuses_without_trust_env(monkeypatch, tmp_path):
+    monkeypatch.delenv(aui.VENDOR_TRUST_ENV, raising=False)
+    monkeypatch.setattr(aui, "_resolve_cursor_version", lambda: "2026.11.05-86047df")
+    with pytest.raises(aui.UserInstallError, match=aui.VENDOR_TRUST_ENV):
+        aui.install_cursor_cli(prefix=tmp_path / "bin", share=tmp_path / "share", dry_run=False)
+    with pytest.raises(aui.UserInstallError, match=aui.VENDOR_TRUST_ENV):
+        aui.install_hermes(dry_run=False)
+
