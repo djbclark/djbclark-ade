@@ -67,6 +67,7 @@ and security sequencing in the older plan; other unfinished planning stays intac
    The recipes stay thin: each calls a `bin/` tool, so CI and agents can call the tool without just.
 2. Recipe groups:
    - `install`, `update`, `doctor`
+   - `hermes-setup` (S3a; opt-in prompt+recipe)
    - `github-setup`, `harden`, `harden-check`
    - `config-check`
    - `browser-task` (S7)
@@ -193,6 +194,15 @@ three paths:
 
 Either path can be re-run later (`just hermes-setup`, `just hermes-setup --self`), and `just update` keeps an installed
 Hermes current like every other component.
+
+4. **Shipped 2026-11-10 (prompt + recipe only):** checked-in
+   `prompts/setup/hermes.md` and `just hermes-setup` / `just hermes-setup --self`
+   (`docs/hermes-setup.md`). Opt-in: the recipe does not install Hermes, does not
+   flip `chosen`, and does not configure peer-link live. AI path opens Claude Code
+   with a pointer to the prompt; `--self` prints the DIY checklist section.
+   Catalog install remains `ade-user-install hermes` (#345). Wiring `just install`
+   to ask the three S3a paths, and richer `just doctor hermes` item probes, stay
+   for follow-ups.
 
 ### S3b. API keys: check, verify, collect, deliver
 
