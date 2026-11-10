@@ -185,3 +185,5 @@ Skills (23, from each `skills/*/SKILL.md`):
 
 [Old way versus new way](docs/old-way-new-way.md) compares legacy skills with native Paseo,
 records plugin advice, and defines the Linux/macOS cross-host handoff acceptance checks.
+
+| [`bottom-config`](skills/bottom-config/SKILL.md) | Edit, strictly validate and preview the config of bottom (`btm`) and document the uncapped Command column. |
