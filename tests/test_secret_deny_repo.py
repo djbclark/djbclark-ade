@@ -1,8 +1,9 @@
 """Repo-level pins for the secret read-deny wiring (issue 284).
 
-The committed Claude template must equal what bin/render-secret-deny produces from
-config/secret-deny.toml, and its PreToolUse gate entry must exec the hook directly (a missing
-file then exits 127, which never blocks) with timeout 15 and no fail-closed `onFailure`.
+The committed Claude template must equal what bin/render-secret-deny produces from the
+effective secret_deny domain (config/ade.toml when folded; legacy secret-deny.toml otherwise),
+and its PreToolUse gate entry must exec the hook directly (a missing file then exits 127, which
+never blocks) with timeout 15 and no fail-closed `onFailure`.
 """
 from __future__ import annotations
 
