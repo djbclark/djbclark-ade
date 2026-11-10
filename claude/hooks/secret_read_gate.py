@@ -29,11 +29,12 @@ at least that check, `cat ~/.ssh/id_*` and `find . -name '*.key'` block, while `
 /*/*/*/*/*/*/*/x*` pass. A glob word gets WORD_S on its first try within a shared FIRST_PASS_S cap; one that runs longer is set aside
 (cached) and retried after every other word: pattern-only first, then a real walk with remaining budget when the
 pattern cannot decide (broad globs such as `id_*` / `*` need the walk to catch `id_rsa` / `server.key` on disk).
-If that walk cannot run or times out, the call fails closed. Eight crafted slow words used to spend 8×WORD_S and
-fail the call open before a later `cat ~/.ssh/id_*` (docs/secret-deny.md C7, 2026-11-04); the first-pass cap and
-set-aside retry close that: a word that times out twice, an OutOfTime while glob words remain unchecked, or a
-set-aside word whose pattern-only check is inconclusive with no walk budget left, fails closed (blocks) instead of
-allowing.
+If that walk cannot run, times out, or is truncated by the shared GLOB_S / scan bound (completing slow dummies
+can start and exhaust GLOB_S under WORD_S while FIRST_PASS_S == GLOB_S), the call fails closed. Eight crafted slow
+words used to spend 8×WORD_S and fail the call open before a later `cat ~/.ssh/id_*` (docs/secret-deny.md C7,
+2026-11-04); the first-pass cap and set-aside retry close that: a word that times out twice, an OutOfTime while
+glob words remain unchecked, a set-aside word whose pattern-only check is inconclusive with no walk budget left,
+or a deferred walk truncated by GLOB_S / MAX_GLOB_SCAN, fails closed (blocks) instead of allowing.
 
 Grep (2026-11-04): Claude's Grep runs ripgrep with `--hidden`, so it reads dotfiles and descends into `~/.ssh`. Its root
 (`path`, else the cwd) is walked breadth-first (bounded: depth, entries, time shared by every root; VCS dirs and
@@ -596,6 +597,7 @@ class Checker:
         self._aside_count = {}   # times a glob word was set aside; a second time fails closed
         self._scanned = 0        # directory entries the glob walk has read in this call
         self._glob_until = None  # the glob walk's deadline, set on its first use
+        self._glob_budget_hit = False  # True when expand truncated on GLOB_S / MAX_GLOB_SCAN
 
     def path(self, raw: str):
         """(rule, shown path) for a literal path, or None."""
@@ -643,6 +645,8 @@ class Checker:
                 self._scanned += 1
                 if self._scanned > MAX_GLOB_SCAN or time.monotonic() > until:
                     state["complete"] = False
+                    self._glob_budget_hit = True
+                    tick()   # WordOutOfTime / OutOfTime when those deadlines also elapsed
                     return
                 p = os.path.join(d, seg)
                 if last:
@@ -668,6 +672,8 @@ class Checker:
                             self._scanned += 1
                             if self._scanned > MAX_GLOB_SCAN or time.monotonic() > until:
                                 state["complete"] = False
+                                self._glob_budget_hit = True
+                                tick()   # WordOutOfTime / OutOfTime when those deadlines also elapsed
                                 return
                             name = e.name
                             if (name[:1] == "." and not dot) or (rx is not None and not rx.match(name)):
@@ -705,6 +711,7 @@ class Checker:
         base = "/" if os.path.isabs(pat) else self.cwd
         segs = [x for x in pat.split("/") if x]
         state = {"complete": True}
+        self._glob_budget_hit = False
         n = links = 0
         if segs:
             for h, is_match in self.expand(base, segs, state):
@@ -1165,8 +1172,10 @@ def check_command(ck: Checker, cmd: str, shell_tool: bool = True):
     """Patch headers, then every literal word (cheap), then the glob words without `**` (a bounded walk, then their
     pattern), then those with `**` (the costly ones), each glob word within WORD_S under a shared FIRST_PASS_S cap;
     last, set-aside words are retried: pattern-only first, then a real walk with remaining budget when the pattern
-    cannot decide. A second timeout on one word, an OutOfTime while glob words remain, or a set-aside word that still
-    needs a walk with no budget left, fails closed (`GlobBudgetExceeded`) instead of allowing.
+    cannot decide. A second timeout on one word, an OutOfTime while glob words remain, a set-aside word that still
+    needs a walk with no budget left, or a deferred walk truncated by GLOB_S / MAX_GLOB_SCAN (expand ticks on
+    truncate; incompleteness still fails closed when those deadlines have not yet fired), fails closed
+    (`GlobBudgetExceeded`) instead of allowing.
 
     For a shell tool (`shell_tool`, the default) every word of the text is analyzed, `*** Begin Patch` regions included:
     the shell runs them (2026-11-06, Cursor review on PR 289: `*** Begin Patch\\ncat ~/.ssh/id_rsa\\n*** End Patch`
@@ -1218,8 +1227,13 @@ def check_command(ck: Checker, cmd: str, shell_tool: bool = True):
             found = ck.word(w, min(WORD_S, rem), pattern_only=False)
             if found:
                 return found
-            # Walk completed with no hit (verified), or timed out: a timeout re-enters set_aside and, with
-            # aside_count already 1, raises GlobBudgetExceeded (fail closed).
+            # Walk timed out: re-enters set_aside and, with aside_count already 1, raises GlobBudgetExceeded.
+            # Walk truncated by GLOB_S / MAX_GLOB_SCAN (e.g. completing dummies already burned GLOB_S while
+            # FIRST_PASS_S == GLOB_S): expand ticks, but when WORD/DEADLINE still remain the incomplete walk
+            # used to fall through to an inconclusive pattern check and ALLOW — refuse instead.
+            if ck._glob_budget_hit:
+                raise GlobBudgetExceeded(w)
+            # Else the walk completed with no hit (verified miss).
     except OutOfTime:
         # Overall budget ended with Bash glob words still unresolved: fail closed (secret paths may remain).
         raise GlobBudgetExceeded(ck.deferred[0] if ck.deferred else (globs[-1] if globs else ""))

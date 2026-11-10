@@ -784,6 +784,39 @@ def test_setaside_walk_retry_fails_closed_when_no_budget(monkeypatch, tmp_path):
         hook.check_command(ck, "cat id_*")
 
 
+def test_deferred_walk_fails_closed_when_glob_s_burned_by_completing_dummies(monkeypatch, tmp_path):
+    """Security HIGH residual (PR 413): WORD_S-under-budget completing dummies start GLOB_S; with
+    FIRST_PASS_S == GLOB_S that clock is already expired when deferred `id_*` walks. expand truncates
+    without raising (tick no-ops while WORD/DEADLINE remain), pattern-only is inconclusive, and the
+    old path ALLOWed. Deferred incomplete walk must raise GlobBudgetExceeded."""
+    hook = load_hook()
+    (tmp_path / "id_rsa").write_text("PRIVATE\n")
+    for i in range(3):
+        (tmp_path / ("zzslow%d.txt" % i)).write_text("x\n")
+    ck = hook.Checker(
+        hook.Policy(["id_rsa", "*.key"], ["*.pub"], homes=[str(tmp_path)], fold=False),
+        str(tmp_path),
+    )
+    # Prove the residual shape: pattern-only cannot see cwd id_rsa under id_*.
+    assert ck.glob_pattern_only("id_*") is None
+    monkeypatch.setattr(hook, "GLOB_S", 0.25)
+    monkeypatch.setattr(hook, "FIRST_PASS_S", 0.25)   # same as GLOB_S (production: both 2.0)
+    monkeypatch.setattr(hook, "WORD_S", 1.0)          # dummies finish under WORD_S
+    real_scandir = hook._scandir
+
+    def slow_scandir(path):
+        time.sleep(0.12)   # completing zzslow* walks burn GLOB_S while still finishing
+        return real_scandir(path)
+
+    monkeypatch.setattr(hook, "_scandir", slow_scandir)
+    hook._DEADLINE[0] = time.monotonic() + 5.0
+    # Completing dummies (not WordOutOfTime) then id_*: first pass burns GLOB_S + FIRST_PASS_S;
+    # deferred id_* walk truncates immediately → refuse, never allow.
+    cmd = "cat zzslow0* zzslow1* zzslow2* id_*"
+    with pytest.raises(hook.GlobBudgetExceeded):
+        hook.check_command(ck, cmd)
+
+
 # ---- Codex payloads ---------------------------------------------------------------------------------------------------
 def patch(*headers, body="+x\n"):
     return "*** Begin Patch\n" + "".join("%s\n%s" % (h, body) for h in headers) + "*** End Patch\n"

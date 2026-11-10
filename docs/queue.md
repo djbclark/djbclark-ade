@@ -12,7 +12,8 @@ under **Carried**, newest first, one line each; an item leaves when it ships (in
    trial, a Codex deny-read profile (openai/codex#22179), whether `hook-deadline` passes exit 2 through, applying the
    template's new hook and deny entries live (operator's yes, order 11), and `bin/instruction-lint` over `~/AGENTS.md`
    and `home-agents.mdc`. Slow-glob budget LOW closed 2026-11-09 (first-pass cap + set-aside cache; deferred walk or
-   fail closed so pattern-only never allows walk-dependent secrets). Lives
+   fail closed so pattern-only never allows walk-dependent secrets; 2026-11-10: deferred walk also refuses when
+   `GLOB_S` was burned by completing dummies). Lives
    in `docs/secret-deny.md`, `docs/post-edit-check.md`.
 2. **Interruption recovery** (issue 278, 2026-11-04): D1 provider and capture probes, G1 persistence and failure-injection
    gates, a canary, legacy record recovery; PR 290 (`ade-recovery`) parked until Paseo's native resume is measured (PLAN J6,

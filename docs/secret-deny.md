@@ -86,7 +86,9 @@ config change).
     every other word: pattern-only first, then a real walk with remaining budget when the pattern cannot decide
     (broad globs such as `id_*` / `*` need the walk to catch `id_rsa` / `server.key` on disk; never allow those after
     set-aside on pattern-only alone). A word that times out twice, an overall-budget timeout while glob words remain,
-    or a set-aside word that still needs a walk with no budget left, fails closed (C7).
+    a set-aside word that still needs a walk with no budget left, or a deferred walk truncated by the shared 2 s
+    glob-walk clock / entry bound (completing slow dummies can start and exhaust that clock under the per-word
+    budget while the first-pass cap equals it), fails closed (C7).
   - **B1d.** Codex `apply_patch` headers (`*** Add File:`, `*** Update File:`, `*** Delete File:`, `*** Move to:`) inside a
     `*** Begin Patch` block, in the command or any other string of a non-file tool. Only a genuine patch payload leaves the
     patch body out of the shell words, so a patch whose code mentions `.env` passes there: the `apply_patch` tool, or a
@@ -178,10 +180,14 @@ config change).
   spend 8×1 s before a later read (closed 2026-11-09; was a known limit from adversary round 4, 2026-11-04). A residual
   closed 2026-11-09: when the first-pass cap was burned by *completing* (not timed-out) slow globs, remaining words
   were set aside and pattern-only-retried, so walk-dependent secrets (`cat id_*` / `cat *` beside `id_rsa` /
-  `server.key`) were allowed — the deferred retry now walks with remaining budget or fails closed. A word that times
-  out twice, an overall-budget timeout while Bash glob words remain unchecked, or a set-aside word that still needs a
-  walk with no budget left, exits 2 with `glob analysis budget exceeded (fail closed)`: secret paths prefer deny over
-  allow. A later literal path (`cat ~/.ssh/id_rsa`) is still checked first and blocks on the deny rule. A directory
+  `server.key`) were allowed — the deferred retry now walks with remaining budget or fails closed. A further residual
+  closed 2026-11-10: those completing dummies also start the shared 2 s glob-walk clock (`GLOB_S`); with
+  `FIRST_PASS_S == GLOB_S` the deferred walk is already truncated, `expand` used not to `tick` on truncate, and an
+  inconclusive pattern check ALLOWed — truncated deferred walks now fail closed. A word that times out twice, an
+  overall-budget timeout while Bash glob words remain unchecked, a set-aside word that still needs a walk with no
+  budget left, or a deferred walk truncated by `GLOB_S` / the entry bound, exits 2 with
+  `glob analysis budget exceeded (fail closed)`: secret paths prefer deny over allow. A later literal path
+  (`cat ~/.ssh/id_rsa`) is still checked first and blocks on the deny rule. A directory
   that opens but cannot be read to the end (`/proc/1/map_files`) is skipped by both walks, as the shell and ripgrep
   skip it; before 2026-11-04 it raised and failed the hook open. A Grep walk that hits its own bound allows silently,
   unless its glob's text blocks (B1b) or the root is above a home-level deny (C4). The hook is registered without
@@ -204,6 +210,7 @@ config change).
   readings, how `glob` and `type` combine, the `type` map and its live union against the installed `rg --type-list` and
   a fake `rg` on PATH (widening, a narrower list, a failing and a hanging one),   Bash, the lines of a patch block under
   Bash, `**` recursion, symlinked directories, Codex patches, fail-open, glob-budget fail-closed (eight slow words, a lone
-  slow word, `GlobBudgetExceeded` through `main`), the glob walk's bounds on a synthetic endless tree and a symlink loop, heredoc speed including a
+  slow word, set-aside walk/refuse after first-pass burn, deferred walk refuse when `GLOB_S` is burned by completing
+  dummies, `GlobBudgetExceeded` through `main`), the glob walk's bounds on a synthetic endless tree and a symlink loop, heredoc speed including a
   60-line `.gitignore`, the per-word budget and first-pass cap, Python 3.9 syntax) and `tests/test_render_secret_deny.py` (render into copies of the template: idempotent, `--check`, tags and
   other entries kept, the committed JSON equals a fresh render).
