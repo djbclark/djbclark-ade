@@ -128,6 +128,10 @@ Runaway Chrome (operator 2026-10-25): the sample step tells the watcher (never k
 (not "Chrome for Testing") has used LW_CHROME_CORES (0.9) or more for LW_CHROME_SUSTAIN_S (300), once an hour per pid, with its kind, the
 URL on its command line when it has one, and role-aware Task Manager (Shift+Esc) advice: match the pid and
 report the task; a browser/GPU alert does not identify a busy tab. Only an identified tab may be ended by the operator.
+mds probe (2026-11-01, ported onto Wave 6 Paseo counting 2026-11-10 from #231): when root's Spotlight `mds` has used
+LW_MDS_CORES (0.5) or more over consecutive samples spanning LW_MDS_SUSTAIN_S (120; a gap over LW_MDS_MAX_GAP_S, 90 s,
+restarts the span), one log line per LW_MDS_COOLDOWN_S (1800) names mds, Finder and the six busiest other processes by
+program name only. No ping, no signal, no root required; an optional installed root helper may append XPC clients.
 Calm boost (operator 2026-10-25): while churn is known and at most --boost-max-churn (default = the compressor limit, 20000; 25000 until 2026-11-01)
 the per-core limit is --boost-per-core (default 4.0, was 2.0 until 2026-11-01; 0 turns it off) instead of --max-per-core, even when a caller such as `bg`
 passes its base; at higher churn, or when churn cannot be read, the base limit holds. Hysteresis (2026-11-01): the boost
@@ -1341,6 +1345,75 @@ def chrome_alert(st, t, table, dry):
             log(body)
 
 
+MDS_CORES = float(os.environ.get("LW_MDS_CORES", "0.5"))
+MDS_SUSTAIN_S = float(os.environ.get("LW_MDS_SUSTAIN_S", "120"))
+MDS_MAX_GAP_S = float(os.environ.get("LW_MDS_MAX_GAP_S", "90"))  # samples run every ~20 s; longer is a sleep or a stall
+MDS_COOLDOWN_S = float(os.environ.get("LW_MDS_COOLDOWN_S", "1800"))
+MDS_HELPER = "/usr/local/libexec/djbclark/mds-xpc-clients"  # root:wheel 0755, one NOPASSWD sudoers line, no arguments
+MDS_PEER_RE = re.compile(r"(\d+) (\d+) ([A-Za-z0-9][A-Za-z0-9 ._+-]*)")
+
+
+def mds_peers():
+    """Processes holding a send right to mds as ["COUNT PID NAME", ...], busiest first (at most 6), or None when the
+    root helper is missing, sudo refuses (it never prompts: -n), it fails or takes over 20 s. Only lines of the
+    exact helper shape are kept; nothing is passed to the helper and nothing from it reaches a shell."""
+    if not os.path.exists(MDS_HELPER):
+        return None
+    try:
+        r = subprocess.run(["sudo", "-n", MDS_HELPER], capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode != 0:
+        return None
+    return [ln for ln in r.stdout.splitlines() if MDS_PEER_RE.fullmatch(ln)][:6]
+
+
+def exe_name(cmd):
+    """Basename of the program (first token) only, restricted to [A-Za-z0-9._+-]. Never an argument: those can
+    hold secrets (`env TOKEN=x cmd`, `mysql -pSECRET`) and a path argument must not make a process look like another."""
+    tok = cmd.split(None, 1)[0] if cmd.strip() else ""
+    return re.sub(r"[^A-Za-z0-9._+-]", "", os.path.basename(tok))
+
+
+def mds_probe(st, t, table, dry):
+    """Record who is busy while Spotlight's mds is (2026-11-01: mds sat at 25-70% for hours; the cause was Finder
+    re-listing /private/tmp, found only by hand with `sample` and `fs_usage`, both root). Needs no root: once mds
+    has used MDS_CORES or more over consecutive samples spanning MDS_SUSTAIN_S (a gap over MDS_MAX_GAP_S restarts
+    the span), log one line per MDS_COOLDOWN_S with mds, Finder and the six busiest other processes by program
+    name only. A log line only: it pings nobody and signals nothing. XPC client pids (`lsmp`) need root:
+    macos/mds-xpc-clients in site-public-djbclark is the root helper, a later change calls it."""
+    mds = sum(c for _pp, uid, c, cmd in table.values() if uid == 0 and exe_name(cmd) == "mds")  # root's, not a lookalike
+    last, st["mds_last"] = st.get("mds_last"), t
+    if mds < MDS_CORES or (last is not None and t - last > MDS_MAX_GAP_S):
+        st.pop("mds_hot", None)
+        if mds < MDS_CORES:
+            return
+    since = st.setdefault("mds_hot", t)
+    cd = st["cooldown"]
+    if t - since < MDS_SUSTAIN_S or t - cd.get("mds", -MDS_COOLDOWN_S) < MDS_COOLDOWN_S:
+        return
+    finder = sum(c for _pp, _uid, c, cmd in table.values() if exe_name(cmd) == "Finder")
+    others = sorted(((c, pid, exe_name(cmd)) for pid, (_pp, uid, c, cmd) in table.items()
+                     if not (uid == 0 and exe_name(cmd) == "mds")), reverse=True)[:6]
+    top = "; ".join(f"{pid} {c:.2f} {name}" for c, pid, name in others)
+    line = f"mds probe: mds {mds:.2f} cores for {(t - since) / 60:.0f}+ min, Finder {finder:.2f}; top others: {top}"
+    if dry:
+        print(f"load-watch: {line}")
+        return
+    peers = mds_peers()  # root helper; None keeps the line as it was
+    if peers:
+        line += "; xpc clients (ports pid name): " + "; ".join(peers)
+    log(line)
+    cd["mds"] = t
+
+
+def prune_cooldowns(cd, t):
+    """Drop cooldown stamps older than their hold: COOLDOWN_S, or longer for a key whose own hold is longer
+    (the mds probe's LW_MDS_COOLDOWN_S can exceed LW_COOLDOWN_H; pruned early it would log again at once)."""
+    own = {"mds": MDS_COOLDOWN_S}
+    return {k: v for k, v in cd.items() if t - v < max(COOLDOWN_S, own.get(k, 0))}
+
+
 def cmd_sample(a):
     st = load_state()
     t = now()
@@ -1374,7 +1447,7 @@ def cmd_sample(a):
         st["samples"] = [x for x in st.get("samples", []) if x["t"] >= t - SUSTAIN_S] + [{"t": t, "d": d}]
         st["streak"] = st.get("streak", 0) + 1
     st["load1"] = load1
-    st["cooldown"] = {k: v for k, v in st.get("cooldown", {}).items() if t - v < COOLDOWN_S}
+    st["cooldown"] = prune_cooldowns(st.get("cooldown", {}), t)
     try:
         churn_alert(st, t, table, a.dry_run)
     except Exception as e:  # noqa: BLE001
@@ -1383,6 +1456,10 @@ def cmd_sample(a):
         chrome_alert(st, t, table, a.dry_run)
     except Exception as e:  # noqa: BLE001
         log(f"chrome alert error: {e!r}")
+    try:
+        mds_probe(st, t, table, a.dry_run)
+    except Exception as e:  # noqa: BLE001
+        log(f"mds probe error: {e!r}")
     if a.verbose:
         print(f"load {load1:.1f}/{ncpu} hot={hot} streak={st['streak']}")
     if hot and t - st["hot_since"] >= SUSTAIN_S:
@@ -1551,7 +1628,8 @@ def cmd_status(a):
     if _num(cs):
         print(f"  calm boost: calm for {now() - cs:.0f}/{ADMIT_BOOST_CALM_S:g} s (the {ADMIT_BOOST_PER_CORE:g}/core boost applies after that; any hot reading resets it)")
     for k, v in st.get("cooldown", {}).items():
-        print(f"  cooldown {k} until {stamp(v + (WATCHER_NOCPU_S if k.endswith('-watcher') else COOLDOWN_S))}")
+        hold = {'mds': MDS_COOLDOWN_S}.get(k, WATCHER_NOCPU_S if k.endswith('-watcher') else COOLDOWN_S)
+        print(f"  cooldown {k} until {stamp(v + hold)}")
     return 0
 
 
