@@ -60,7 +60,7 @@ under **Carried**, newest first, one line each; an item leaves when it ships (in
     scrub). Lives in `bin/ade-backup-stores`.
 16. **First release tag and `ade-update` LOWs** (2026-10-20; plist scaffold 2026-11-09; Linux systemd path #374):
     tag once CI, rule 10 and `ade-update` are settled (the final slim-down PR is a natural point). Daily `--check`
-    plist is `config/launchd/com.djbclark.ade-update-check.plist` (operator still runs `ade-sched install`); Linux
+    plist is `config/launchd/com.djbclark.ade-update-check.plist` (folded into full `ade-install apply` / `just sched-reconcile-checks` on Linux write backends; Mac hand `just *-install` until launchd reconcile lands on master); Linux
     systemd unit path landed (#374); `just update` / `just doctor` / `just install` aliases exist on the
     transitional catalog. Mac schedule install + first release tag remain.
 17. **Codex Cloud environment** (2026-10-19): blocked upstream (openai/codex#50182, #51585); re-probe after each
