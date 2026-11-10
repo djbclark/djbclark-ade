@@ -1,21 +1,67 @@
 # Upstream issues worth filing
 
-Written 2026-08-23 from problems verified on this machine. **Both are now
-filed** — kept here because the write-ups carry evidence and measurements the
-issue text summarises:
+Evidence write-ups for third-party defects, started 2026-08-23. **Hygiene pass
+2026-11-09** (queue Carried #28 tidy): every draft below has a **Status** of
+`ready-to-file`, `blocked`, or `already-filed` (URL when known). **Do not open
+live issues or comments against third parties without the operator's yes**
+(Carried #28; order 11 for anything outside this repo). Re-probe before filing:
+URLs and open/closed state below were checked 2026-11-09.
 
-- #1 → [NanoNets/Graft#185](https://github.com/NanoNets/Graft/issues/185)
-  (**fixed upstream, verified 2026-10-24**: installed 0.25.0 and `origin/main`
-  both render `graft · 0 nodes / 0 edges · ✓ synced` for a built-but-empty
-  docs-only repo — `resolveStats` in `src/claude/statusline.ts` falls back to
-  `wiring.json`, and "not built" shows only when the artifact is missing.
-  Checked in a `fix/statusline-empty-built` worktree; no edits needed, nothing
-  merged back.)
-- #2 → [vectorize-io/hindsight#3735](https://github.com/vectorize-io/hindsight/issues/3735)
-  (the package `@vectorize-io/hindsight-coding-agents` lives in the
-  `vectorize-io/hindsight` repo)
+ADE framing that ages several drafts (slim-down / Wave 6 / Pi, 2026-11-07/08):
+Paseo is the only harness; herdr and Orca left this repo on 2026-10-31; Wave 6
+removes `tools/acp-run` after one live cycle; Pi is the third-party client path
+(omp/OpenCode/Crush archived, never fallbacks). Graft's public GitHub home is
+now [trailhq/Trail-Code](https://github.com/trailhq/Trail-Code) (older
+NanoNets/Graft issue URLs redirect there).
+
+## Status ledger (2026-11-09)
+
+| Id | Topic | Status | URL / note |
+|---|---|---|---|
+| 1 | graft statusline empty-but-built | already-filed (fixed) | [Trail-Code#185](https://github.com/trailhq/Trail-Code/issues/185) CLOSED; verified fixed 2026-10-24 |
+| 2 | hindsight undocumented config keys | already-filed (fixed) | [hindsight#3735](https://github.com/vectorize-io/hindsight/issues/3735) CLOSED |
+| — | graft `build` edits tracked `.gitignore` | ready-to-file | residual only: no switch for `ensureBuildConfigIgnored` (`/.graft/`); main case has `GRAFT_NO_GITIGNORE=1` / `--no-gitignore` |
+| 3 | orca CLI structural-reorg parity | already-filed | [orca#23272](https://github.com/stablyai/orca/issues/23272) OPEN; **historical for ADE** (Orca left 2026-10-31) |
+| 4 | orca worktree sleep CLI evidence comment | blocked | target [orca#22571](https://github.com/stablyai/orca/issues/22571) OPEN; ADE no longer uses Orca — do not post unless operator wants it for upstream goodwill |
+| 5 | herdr idle sleep/wake Discussion | already-filed | [herdr#631 comment](https://github.com/herdrdev/herdr/discussions/631#discussioncomment-18769271); herdr left ADE 2026-10-31 |
+| 6 | graft `init` bakes absolute paths | already-filed | [Trail-Code#309](https://github.com/trailhq/Trail-Code/issues/309) OPEN; comment posted 2026-10-08 |
+| 7 | zcode-acp `$/` turnState + stats chunk | already-filed (fixed) | [#311](https://github.com/william0wang/zcode-acp/issues/311) [#312](https://github.com/william0wang/zcode-acp/issues/312) CLOSED; zcode retired E9 |
+| 8 | ralph-orchestrator hook timeout orphans children | ready-to-file | draft complete; no duplicate found 2026-10-09 / recheck 2026-11-09 |
+| 9 | Claude Code collapsed paste drops slash cmds | already-filed | [claude-code#85654](https://github.com/anthropics/claude-code/issues/85654) OPEN; herdr/`self-slash` delivery path gone here |
+| 10 | herdr ACP launcher session-ref addendum | blocked (moot) | [herdr#3184](https://github.com/herdrdev/herdr/issues/3184); herdr + acp-run Wave 6 — will not happen |
+| 11 | CodexBar alibabatokenplan hang | blocked | needs a `sample` of the hung process before filing |
+| 12 | Collie `update --help` runs update | already-filed (fixed) | [collie#392](https://github.com/AltanS/collie/issues/392) CLOSED |
+| 13 | Collie unpaired phone → `/auth/` 404 | already-filed (fixed) | [collie#393](https://github.com/AltanS/collie/issues/393) CLOSED |
+| 12b | Claude Code post-compact hook dumps full command | already-filed | [claude-code#101139](https://github.com/anthropics/claude-code/issues/101139) OPEN |
+| 14 | SkillOpt `max_tokens_per_night` never enforced | already-filed (fixed) | [SkillOpt#313](https://github.com/microsoft/SkillOpt/issues/313) CLOSED |
+| 15 | SkillOpt harvest checkpoint not per-source | already-filed | [SkillOpt#312](https://github.com/microsoft/SkillOpt/issues/312) OPEN; local night cycle gone E10 |
+| 16 | SkillOpt pluggable sources/backends | already-filed | [SkillOpt#314](https://github.com/microsoft/SkillOpt/issues/314) OPEN; local adapters gone E10 |
+| — | Fastino GLiDE `model` echo / empty `state` | blocked | operator decides; no public issues channel found |
+| — | siyuan-skills SiYuan 3.8 + optional `api_token` | already-filed | [siyuan-skills#3](https://github.com/zhiluop/siyuan-skills/issues/3) OPEN |
+| — | graft per-prompt pack has no opt-out | already-filed | [Trail-Code#497 comment](https://github.com/trailhq/Trail-Code/issues/497#issuecomment-6257408007) |
+| — | Claude Code `deniedMcpServers` as "enterprise policy" | already-filed | [claude-code#103330](https://github.com/anthropics/claude-code/issues/103330) OPEN |
+| — | Paseo self-send of root-only slash cmds | ready-to-file | still relevant to handoff (`env -u PASEO_AGENT_ID`); `self-slash` gone E4 |
+| P1 | paseo-continuity `@getpaseo/client` build | already-filed | [paseo-continuity#2](https://github.com/keefeere/paseo-continuity/issues/2) OPEN |
+| P2 | agents-dash-list `@getpaseo/client` build | already-filed | [paseo-plugins#13](https://github.com/panrafal/paseo-plugins/issues/13) OPEN |
+| P3 | fresh-worktrees Paseo `^0.11.0` pin | already-filed (fixed) | [paseo-plugins#361](https://github.com/omercnet/paseo-plugins/issues/361) CLOSED |
+| P4 | paseo-telegram `<0.12.0` pin | already-filed | [paseo-telegram#1](https://github.com/Daaaaave/paseo-telegram/issues/1) OPEN; also Carried #18 |
+| 17 | Paseo CLI `agent model` in-place switch | ready-to-file | Carried #9; no CLI issue found 2026-11-09; related [#7592](https://github.com/getpaseo/paseo/issues/7592) CLOSED |
+| 10b | Paseo startup skill sync through symlink | already-filed | [paseo#7700](https://github.com/getpaseo/paseo/issues/7700) OPEN (+ PRs #7817, #8542; #8572) |
+| 18 | zcode-acp disallowed-tools ignored in app-server | already-filed (fixed) | [zcode-acp#340](https://github.com/william0wang/zcode-acp/issues/340) CLOSED; zcode retired E9 |
+| 19 | Paseo CLI terminal rename + events stream | ready-to-file | operator decides split; inspect workspace id was #7592 (CLOSED) |
+
+Unfiled and actionable without more evidence: **8**, **17**, **19**, the Paseo
+self-send slash draft, and the residual graft `/.graft/` gitignore gap. Blocked
+on operator/channel/evidence: **4**, **10**, **11**, Fastino.
 
 ## 1. graft — statusline conflates "built but empty" with "not built"
+
+**Status: already-filed (fixed)** — [Trail-Code#185](https://github.com/trailhq/Trail-Code/issues/185)
+(CLOSED; was NanoNets/Graft#185). Verified fixed 2026-10-24: installed 0.25.0
+and `origin/main` both render `graft · 0 nodes / 0 edges · ✓ synced` for a
+built-but-empty docs-only repo — `resolveStats` in `src/claude/statusline.ts`
+falls back to `wiring.json`, and "not built" shows only when the artifact is
+missing. Checked in a `fix/statusline-empty-built` worktree; no edits needed.
 
 **Repo:** `@nanonets/graft` (npm; installed globally at
 `/opt/homebrew/lib/node_modules/@nanonets/graft`)
@@ -69,6 +115,8 @@ the Claude Code statusline.
 
 ## 2. hindsight-coding-agents — documented config keys are a subset of what's read
 
+**Status: already-filed (fixed)** — [hindsight#3735](https://github.com/vectorize-io/hindsight/issues/3735) (CLOSED).
+
 **Package:** `@vectorize-io/hindsight-coding-agents` (0.3.4 on this machine)
 
 **What happens:** the bundled `hindsight-coding-agent` skill documents a small
@@ -99,6 +147,12 @@ the home directory itself).
 `~/ops/site-private/memory/project_hindsight_memory_restructure.md`.
 
 ## Not filed — a papercut worth knowing: `graft build` edits tracked `.gitignore`
+
+**Status: ready-to-file** (residual only, 2026-11-09). The main `.gitignore`
+edit already has `GRAFT_NO_GITIGNORE=1` / `graft build --no-gitignore` (see
+root-cause fix below). What remains to raise upstream: no opt-out for
+`ensureBuildConfigIgnored` writing `/.graft/`. Local ADE workaround still
+applies; filing waits for operator yes.
 
 Every `graft build` appends `/graft/` to the repo's **tracked** `.gitignore`
 and drops an untracked `.ignore` file, so a repo that was clean before the
@@ -143,6 +197,11 @@ option is saved): that one has no switch in 0.23.0.
 
 ## 3. orca — CLI parity for structural reorg (filed 2026-09-26)
 
+**Status: already-filed** — [stablyai/orca#23272](https://github.com/stablyai/orca/issues/23272)
+(OPEN as of 2026-11-09). **Historical for ADE:** Orca left this repo
+2026-10-31 (Paseo-only); keep the write-up for the filed umbrella, do not
+chase parity work here.
+
 **Filed:** [stablyai/orca#23272](https://github.com/stablyai/orca/issues/23272)
 (umbrella). Comments added to [#9632](https://github.com/stablyai/orca/issues/9632#issuecomment-5849981913)
 (terminal move), [#12306](https://github.com/stablyai/orca/issues/12306#issuecomment-5849982200)
@@ -172,6 +231,11 @@ partial window.
 
 ## 4. orca — evidence for #22571 "Expose worktree sleep as a CLI command" (draft comment, 2026-09-26)
 
+**Status: blocked** (2026-11-09). Target
+[stablyai/orca#22571](https://github.com/stablyai/orca/issues/22571) is still
+OPEN, but ADE retired Orca on 2026-10-31; posting the evidence comment is
+optional goodwill only — wait for operator yes.
+
 **Not a new issue.** [stablyai/orca#22571](https://github.com/stablyai/orca/issues/22571)
 (opened 2026-09-23) already asks for exactly this and names the runtime
 methods. Add evidence as a comment instead of a duplicate:
@@ -200,6 +264,10 @@ methods. Add evidence as a comment instead of a duplicate:
 > the docs page.
 
 ## 5. herdr — Discussion: sleep/wake for idle resumable agents (draft, 2026-09-26)
+
+**Status: already-filed** — posted 2026-10-05 as a
+[#631 comment](https://github.com/herdrdev/herdr/discussions/631#discussioncomment-18769271).
+**Historical for ADE:** herdr left this repo 2026-10-31 (Paseo-only).
 
 **Repo:** `herdrdev/herdr` (Rust, Apache-2.0). Per its `CONTRIBUTING.md`
 unsolicited PRs are auto-closed and feature ideas go to **GitHub
@@ -338,7 +406,11 @@ Discussion — after the soak (started 2026-10-04 evening; post on/after
 
 ## 6. graft — `init` bakes machine/worktree-specific absolute paths into tracked hook files (not filed — already NanoNets/Graft#309, checked 2026-10-08)
 
-> **Already reported:** [NanoNets/Graft#309](https://github.com/NanoNets/Graft/issues/309)
+**Status: already-filed** — [Trail-Code#309](https://github.com/trailhq/Trail-Code/issues/309)
+(OPEN as of 2026-11-09; was NanoNets/Graft#309). Comment posted 2026-10-08.
+
+> **Already reported:** [Trail-Code#309](https://github.com/trailhq/Trail-Code/issues/309)
+> (was [NanoNets/Graft#309](https://github.com/NanoNets/Graft/issues/309))
 > (open) describes the same root cause — `.cursor/hooks.json` with an absolute
 > checkout path and `BAKED` with the generating machine's `node_modules` — and
 > asks for a repo-relative `init` mode. Searched issues and the web 2026-10-08;
@@ -377,6 +449,11 @@ entry for the same reason.
 deleting the worktree.
 
 ## 7. zcode-acp — `$/zcode/turnState` uses a non-ACP extension prefix; turn stats arrive as agent text (filed 2026-10-09)
+
+**Status: already-filed (fixed)** — [#311](https://github.com/william0wang/zcode-acp/issues/311)
+and [#312](https://github.com/william0wang/zcode-acp/issues/312) CLOSED.
+**Stale for ADE (Wave 6 / E9):** zcode was retired 2026-11-06; acp-run itself
+goes in Wave 6, so nothing here still consumes the bridge.
 
 Repo: william0wang/zcode-acp (npm `zcode-acp-server` 0.65.1), the bridge that
 wraps `zcode app-server --stdio` as an ACP agent. Seen here with `acp-run zcode`
@@ -428,7 +505,8 @@ Filed / found (2026-10-09):
 
 ## 8. ralph-orchestrator — a timed-out lifecycle hook is killed, its children keep running (draft, 2026-10-09)
 
-**Status: draft, not filed.**
+**Status: ready-to-file** (2026-11-09). Draft complete; no duplicate found on
+2026-10-09 or a light recheck 2026-11-09. Filing waits for operator yes.
 
 **Repo:** [mikeyobrien/ralph-orchestrator](https://github.com/mikeyobrien/ralph-orchestrator)
 (Homebrew `ralph-orchestrator`, release binary `ralph-cli`).
@@ -484,8 +562,10 @@ report `ralph-nits-report.md` item 1d (ClaudeHelm scratchpad, 2026-10-09).
 
 ## 9. Claude Code — a long slash command sent with `herdr pane run` arrives as a collapsed paste and never runs (not filed — already anthropics/claude-code#85654, checked 2026-10-09)
 
-**Status: draft, not filed.** No new issue: the defect is Claude Code's and
-is already reported, reproduced and labelled there.
+**Status: already-filed** — [claude-code#85654](https://github.com/anthropics/claude-code/issues/85654)
+(OPEN as of 2026-11-09). No new issue. **ADE delivery path gone:** herdr
+retired 2026-10-31 and `bin/self-slash` deleted E4 (2026-11-06); optional
+evidence comment still valid if the thread goes quiet.
 
 **Repos:** [anthropics/claude-code](https://github.com/anthropics/claude-code)
 (where the defect is) and [herdrdev/herdr](https://github.com/herdrdev/herdr)
@@ -541,7 +621,9 @@ and the helm-auto learnings note in the ClaudeHelm scratchpad
 
 ## 10. herdr — session refs from an ACP launcher: comment-sized addendum for herdrdev/herdr#3184 (draft, 2026-10-09)
 
-**Status: moot, not filed** (2026-11-07): herdr was retired 2026-10-31 and acp-run is a one-cycle shim removed in Wave 6, so the live-pane test and the launcher-side fix below will not happen.
+**Status: blocked (moot)** (2026-11-07, restated 2026-11-09): herdr was retired
+2026-10-31 and acp-run is a one-cycle shim removed in Wave 6, so the live-pane
+test and the launcher-side fix below will not happen. Do not file.
 
 **Repo:** [herdrdev/herdr](https://github.com/herdrdev/herdr). Collie
 ([AltanS/collie](https://github.com/AltanS/collie), 1.17.2) only shows the
@@ -601,7 +683,10 @@ class in `tools/acp-run/acp-run`; herdr `session_ref_from_report` in
 
 ## 11. CodexBar — `codexbar usage --provider alibabatokenplan` hangs with no output (draft, 2026-10-09)
 
-**Status: draft, not filed.**
+**Status: blocked** (2026-11-09). Draft is otherwise ready, but the write-up
+still lacks a stack/`sample` of the hung process ("Not yet known: where it
+blocks"). No duplicate found on a light recheck 2026-11-09. Do not file until
+that evidence exists (and operator yes).
 
 **Repo:** [steipete/CodexBar](https://github.com/steipete/CodexBar).
 
@@ -652,7 +737,7 @@ and the operator disabled the provider in aiuse on 2026-10-08 (`daf9eec`).
 
 ## 12. Collie — `collie update --help` starts a live update instead of printing usage (filed 2026-10-09)
 
-**Status: filed as [AltanS/collie#392](https://github.com/AltanS/collie/issues/392).**
+**Status: already-filed (fixed)** — [AltanS/collie#392](https://github.com/AltanS/collie/issues/392) (CLOSED as of 2026-11-09).
 
 **Repo:** [AltanS/collie](https://github.com/AltanS/collie).
 
@@ -704,7 +789,8 @@ session transcript for 07:4x EDT; `~/.collie/logs/stdout.log` around
 
 ## 13. Collie — after the 1.18 upgrade an unpaired phone lands on `/auth/`, a dead-end 404 with no hint to pair (filed 2026-10-09)
 
-**Status: filed as [AltanS/collie#393](https://github.com/AltanS/collie/issues/393), stale-shell cause labelled a hypothesis.**
+**Status: already-filed (fixed)** — [AltanS/collie#393](https://github.com/AltanS/collie/issues/393)
+(CLOSED as of 2026-11-09); stale-shell cause labelled a hypothesis in the filing.
 
 **Searched first** (gh, AltanS/collie, open and closed issues and PRs, 2026-10-09
 19:20 EDT; terms: `auth`, `sign in`, `Sign in link`, `not paired banner`,
@@ -767,10 +853,15 @@ Filed as #393 (operator decision 2026-10-09 19:30 EDT). To confirm the cause on 
 shows "Sign in" → `/auth/` against a 1.18.x bridge; this machine's phone is now
 paired (device `t2e`, 17:37 EDT) and the evidence above is host-side only.
 
-## 12. Claude Code — post-compact hook lines print the full hook command into context (filed 2026-10-10: anthropics/claude-code#101139)
+## 12b. Claude Code — post-compact hook lines print the full hook command into context (filed 2026-10-10: anthropics/claude-code#101139)
+
+**Status: already-filed** — [claude-code#101139](https://github.com/anthropics/claude-code/issues/101139)
+(OPEN as of 2026-11-09). (Renumbered 12→12b in the ledger to avoid the
+duplicate "12" with Collie `update --help`.)
 
 Found because Orca's ~3 KB `PostCompact` wrapper shows after every `/compact`
-(Orca side: stablyai/orca#25209 / PR #25211, docs/queue.md). Filed text:
+(Orca side: stablyai/orca#25209 / PR #25211; Orca left ADE 2026-10-31 — the
+Claude Code defect remains). Filed text:
 
 ### What happens
 
@@ -804,6 +895,9 @@ I searched anthropics/claude-code issues for "PostCompact", "PreCompact complete
 
 ## 14. SkillOpt — `max_tokens_per_night` is documented and defaulted but never enforced (filed 2026-10-12: microsoft/SkillOpt#313)
 
+**Status: already-filed (fixed)** — [SkillOpt#313](https://github.com/microsoft/SkillOpt/issues/313)
+(CLOSED as of 2026-11-09). Local nightly SkillOpt cycle deleted E10 (2026-11-07).
+
 **Repo:** microsoft/SkillOpt, `skillopt_sleep`, main at
 343db229dbd5ddaf9df6b1d5540d8bcdb2604d5c (installed with `uv tool install`).
 
@@ -831,6 +925,9 @@ before filing (open and closed, issues and PRs, 12 terms); filed as
 https://github.com/microsoft/SkillOpt/issues/313, citing #57.
 
 ## 15. SkillOpt — the harvest checkpoint is keyed by project, not by (project, source) (filed 2026-10-12: microsoft/SkillOpt#312)
+
+**Status: already-filed** — [SkillOpt#312](https://github.com/microsoft/SkillOpt/issues/312)
+(OPEN as of 2026-11-09). Local `bin/skillopt-night` workaround deleted E10.
 
 **Repo:** microsoft/SkillOpt, main at 343db229.
 
@@ -871,6 +968,10 @@ https://github.com/microsoft/SkillOpt/issues/286#issuecomment-6132512856
 (replay provenance applies to CLI rollouts too).
 
 ## 16. SkillOpt — make transcript sources and backends pluggable (filed 2026-10-12: microsoft/SkillOpt#314)
+
+**Status: already-filed** — [SkillOpt#314](https://github.com/microsoft/SkillOpt/issues/314)
+(OPEN as of 2026-11-09). Local adapters (`bin/skillopt_sources.py`,
+`bin/skillopt-night`) deleted E10; Pi-only path does not restore them.
 
 **Repo:** microsoft/SkillOpt, `skillopt_sleep`, main at 343db229.
 
@@ -932,6 +1033,10 @@ offer to send the PR: https://github.com/microsoft/SkillOpt/issues/314.
 
 ## Fastino GLiDE: response `model` is `glide_v2`, docs say `glide` (not filed)
 
+**Status: blocked** (2026-11-09). Still not filed: no public issues repo found;
+channel unknown (support or Discord). Operator decides whether/where to file.
+Local skill: `.claude/skills/fastino-glide` (still in-tree).
+
 **Seen:** 2026-10-11/12 on `POST https://api.fastino.ai/v1/systemone` with `"model": "fastino/glide"`.
 
 1. The response `model` field is `glide_v2` on every call (noul, choice and score). The contract page
@@ -951,6 +1056,9 @@ Fastino has no public docs repo that turned up, so the channel is unknown (suppo
 **Not filed:** operator decides.
 
 ## 3. zhiluop/siyuan-skills — `import_article.py` breaks on SiYuan 3.8 and without an `api_token`
+
+**Status: already-filed** — [siyuan-skills#3](https://github.com/zhiluop/siyuan-skills/issues/3)
+(OPEN as of 2026-11-09).
 
 **Repo:** https://github.com/zhiluop/siyuan-skills (commit 2984f56, 2026-04-28).
 **Seen against:** SiYuan 3.8.6 (kernel), 2026-10-12, a live create-and-delete test.
@@ -976,6 +1084,10 @@ list. Found one unrelated closed question ("docker的siyuan如何配置？") and
 [zhiluop/siyuan-skills#3](https://github.com/zhiluop/siyuan-skills/issues/3).
 
 ## graft — the per-prompt pack has no opt-out, and `graft init` re-adds it (posted 2026-10-18: https://github.com/trailhq/Trail-Code/issues/497#issuecomment-6257408007)
+
+**Status: already-filed** — comment on
+[Trail-Code#497](https://github.com/trailhq/Trail-Code/issues/497#issuecomment-6257408007)
+(parent OPEN as of 2026-11-09).
 
 **Where:** a comment on https://github.com/trailhq/Trail-Code/issues/497 ("graft init wires Claude Code hooks
 at user and project level, so every hook runs twice"). Searched 2026-10-18 in `trailhq/Trail-Code`:
@@ -1009,6 +1121,9 @@ the per-prompt pack itself.
 
 ## Claude Code — user-level `deniedMcpServers` reported as "enterprise policy" (filed 2026-10-18: https://github.com/anthropics/claude-code/issues/103330)
 
+**Status: already-filed** — [claude-code#103330](https://github.com/anthropics/claude-code/issues/103330)
+(OPEN as of 2026-11-09).
+
 Searched 2026-10-18 in `anthropics/claude-code` for "blocked by enterprise policy", "deniedMcpServers
 enterprise policy" and "deniedMcpServers user settings". Nearest threads: #96408 (remote managed
 `allowedMcpServers` not enforced when the fetch is slow) and #94803 (plugin MCP servers ignored under
@@ -1039,6 +1154,11 @@ auto-injected). None covers the label.
 
 ## Paseo — a self-send of a root-only slash command is enveloped and reaches Claude as text (not filed, 2026-10-19)
 
+**Status: ready-to-file** (2026-11-09). Still relevant under Paseo-only / handoff
+(`skills/handoff` starts successors with `env -u PASEO_AGENT_ID …`); `bin/self-slash`
+is gone (E4) but the daemon behaviour is not. No duplicate found on a light
+recheck 2026-11-09. Filing waits for operator yes.
+
 **Repo:** getpaseo/paseo. **Version seen:** Paseo 0.12.0 (desktop, 2026-10-19), Claude provider.
 
 **What happens:** from inside a Claude agent (`PASEO_AGENT_ID` set), `paseo send <own id> "/compact"`
@@ -1057,6 +1177,9 @@ model as prose. A self-send was the case `bin/self-slash` needed, so it stripped
 
 ## Paseo plugins that fail to install on Paseo 0.12.0 (four filed 2026-10-19)
 
+**Status (group):** all four **already-filed** (rechecked 2026-11-09: P1 OPEN, P2 OPEN,
+P3 CLOSED, P4 OPEN). P4 also blocks Carried #18 (Telegram as phone surface).
+
 Found in the 2026-10-19 plugin trial (`/tmp/paseo-install.log`, `/tmp/paseo-install2.log`; see also commit 7e92320). Daemon and desktop 0.12.0, macOS; installed with `paseo plugin add <registry id>` and
 `paseo plugin install <npm:|git: source>`. Existing issues searched first (each plugin repo, open and closed, with
 "0.12", "requires Paseo", "@getpaseo/client"; and `getpaseo/paseo` for "@getpaseo/client", "0.12.0 plugin requires",
@@ -1066,6 +1189,8 @@ closed) call deliberate and answer with `"build": [["npm", "ci"]]`; so they went
 getpaseo/paseo (#7145 and #6257 are open but about other packages' type imports).
 
 ### 1. keefeere/paseo-continuity — `@getpaseo/client` unresolved in `server/failover.ts` (filed 2026-10-19: https://github.com/keefeere/paseo-continuity/issues/2)
+
+**Status: already-filed** — https://github.com/keefeere/paseo-continuity/issues/2 (OPEN as of 2026-11-09).
 
 **Draft title:** Install fails on Paseo 0.12.0: Could not resolve type dependency "@getpaseo/client" (server/failover.ts)
 
@@ -1083,6 +1208,8 @@ getpaseo/paseo (#7145 and #6257 are open but about other packages' type imports)
 **Status:** filed 2026-10-19: https://github.com/keefeere/paseo-continuity/issues/2
 
 ### 2. panrafal/paseo-plugins — agents-dash-list: `@getpaseo/client` unresolved in `client/dash-surface.tsx` (filed 2026-10-19: https://github.com/panrafal/paseo-plugins/issues/13)
+
+**Status: already-filed** — https://github.com/panrafal/paseo-plugins/issues/13 (OPEN as of 2026-11-09).
 
 **Draft title:** agents-dash-list: install fails on Paseo 0.12.0: Could not resolve type dependency "@getpaseo/client" (client/dash-surface.tsx)
 
@@ -1103,6 +1230,8 @@ getpaseo/paseo (#7145 and #6257 are open but about other packages' type imports)
 
 ### 3. omercnet/paseo-plugins — fresh-worktrees stable 3.0.0 pinned `^0.11.0` (filed 2026-10-19: https://github.com/omercnet/paseo-plugins/issues/361)
 
+**Status: already-filed (fixed)** — https://github.com/omercnet/paseo-plugins/issues/361 (CLOSED as of 2026-11-09).
+
 **Draft title:** fresh-worktrees: stable 3.0.0 and registry install refused on Paseo 0.12.0 (requires ^0.11.0); next tag already allows ^0.12.0
 
 > **Versions:** registry `omercnet/fresh-worktrees` and npm `@omercnet/paseo-fresh-worktrees` `latest` 3.0.0
@@ -1121,6 +1250,9 @@ getpaseo/paseo (#7145 and #6257 are open but about other packages' type imports)
 
 ### 4. Daaaaave/paseo-telegram — pinned `>=0.11.2 <0.12.0` (filed 2026-10-19: https://github.com/Daaaaave/paseo-telegram/issues/1)
 
+**Status: already-filed** — https://github.com/Daaaaave/paseo-telegram/issues/1
+(OPEN as of 2026-11-09). Also Carried #18 (phone surface blocked on a compatible release).
+
 **Draft title:** Install refused on Paseo 0.12.0: requires >=0.11.2 <0.12.0
 
 > **Versions:** registry `daaaaave/telegram` and npm `paseo-telegram` 0.2.0; `main` (pushed 2026-10-18) has the same range
@@ -1136,6 +1268,13 @@ getpaseo/paseo (#7145 and #6257 are open but about other packages' type imports)
 **Status:** filed 2026-10-19: https://github.com/Daaaaave/paseo-telegram/issues/1
 
 ## 17. Paseo — CLI: change an existing agent's model (`paseo agent model <id> <provider/model>`) (filed 2026-11-09)
+
+**Status: ready-to-file** (2026-11-09). Still the ask behind Carried #9
+(`bin/paseo-set-model` / `route_agent.py substrate --apply`). Light duplicate
+search 2026-11-09 found no CLI issue for in-place `agent model`. Related
+[#7592](https://github.com/getpaseo/paseo/issues/7592) (inspect omits workspace
+id) is **CLOSED** (2026-10-23) — drop that half from any new filing. Filing
+waits for operator yes.
 
 **Repo:** getpaseo/paseo, Paseo 0.12.0 (`/Applications/Paseo.app`, bundle read with `rg -a`; no live call made).
 
@@ -1201,7 +1340,11 @@ so `claude-opus-5-5` fails with a 400 version gate: relevant to anyone downshift
 2. **The ade-side workaround** (`bin/self-slash --finish --successor`, handoff Step 9, the context hook, 24 tests):
    built in about 15 minutes of wall-clock agent time on 2026-10-23, research of the Paseo CLI source included. It existed only because the CLI lacks this command (deleted 2026-11-06, E4, with its tests and the self-slash code in `context_size_nudge.py`; the handoff skill's `paseo run` successor is what remains), and it still cannot keep the agent id, labels or subagent links.
 
-## 10. Paseo — the start-up skill sync writes through a symlinked skill directory (filed 2026-10-23)
+## 10b. Paseo — the start-up skill sync writes through a symlinked skill directory (filed 2026-10-23)
+
+**Status: already-filed** — https://github.com/getpaseo/paseo/issues/7700
+(OPEN as of 2026-11-09). (Renumbered 10→10b in the ledger to avoid the
+duplicate "10" with the herdr ACP addendum.)
 
 **Filed:** https://github.com/getpaseo/paseo/issues/7700 (searched first: nothing on this; #4823 and #5440 are
 about duplicate Codex entries and non-default homes).
@@ -1230,6 +1373,11 @@ https://github.com/getpaseo/paseo/issues/8572.
 
 ## 18. zcode-acp — `ZCODE_DISALLOWED_TOOLS` / `--disallowed-tools` never reaches the backend session (filed 2026-10-25: https://github.com/william0wang/zcode-acp/issues/340)
 
+**Status: already-filed (fixed)** — [zcode-acp#340](https://github.com/william0wang/zcode-acp/issues/340)
+(CLOSED as of 2026-11-09). **Stale for ADE (E9 / Wave 6):** zcode retired
+2026-11-06; the `zcode-denylist-shim.cjs` workaround and acp-run adapter are
+gone / going with Wave 6.
+
 Repo: william0wang/zcode-acp (npm `zcode-acp-server`), wrapping `zcode app-server --stdio` (zcode-app-cli
 `vendor/zcode.cjs`). `backendArgs()` (`dist/backend/resolve.js`) passes the merged `ZCODE_DISALLOWED_TOOLS` and the
 default `Cron*` list to the backend as `--disallowed-tools`, but the backend's protocol-server path (`app-server`)
@@ -1245,6 +1393,12 @@ Our workaround: `tools/acp-run/zcode-denylist-shim.cjs`, a stdio shim started as
 Duplicate-searched 2026-10-25: no existing report; #192 (closed) is the related `Cron*` default that relies on the same flag.
 
 ## 19. Paseo — CLI: rename a terminal tab, stream UI renames, and inspect's workspace id (draft, not filed, 2026-10-24)
+
+**Status: ready-to-file** (2026-11-09), with a trim: request (3) was
+[#7592](https://github.com/getpaseo/paseo/issues/7592) and is **CLOSED**
+(2026-10-23) — file only terminal rename and/or events stream (operator
+decides the split). Light duplicate search 2026-11-09 found no CLI
+`terminal rename` / events-stream issue. Filing waits for operator yes.
 
 **Repo:** getpaseo/paseo. Checked against the local app bundle `/Applications/Paseo.app` with `rg -a` (no live daemon call; app version not read here, item 17 cites 0.12.0).
 
@@ -1274,4 +1428,6 @@ Whether a `paseo events` command already exists in the CLI: the name comes from 
 
 ### Ask
 
-djbclark decides whether to file. Suggested split: the terminal rename and the event stream as separate issues; the inspect workspace id as a comment on #7592.
+djbclark decides whether to file. Suggested split: the terminal rename and the
+event stream as separate issues. The inspect workspace id was #7592 and is
+closed (2026-10-23) — do not re-file it.
