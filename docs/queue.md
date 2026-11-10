@@ -40,7 +40,13 @@ under **Carried**, newest first, one line each; an item leaves when it ships (in
 12. **Templates, Phase 1** (2026-10-20): declare the `TODO_*` secret names, give each template field a home, make the
     Codex and Claude templates merges, and the `ade-template-check` scanner LOWs (adversary round 3 on PR 23). Lives in
     `agents/README.md`.
-13. **Delete the credential vault after 2026-11-19** (owner djbclark): `~/.local/state/ade/credential-bak/`, nothing reads it.
+13. **Delete the credential vault after 2026-11-19** (owner djbclark; note 2026-11-10): path
+    `~/.local/state/ade/credential-bak/` (moved 2026-10-20; see
+    `docs/history/ade-everywhere-inventory-2026-10-20-stores.md` §5 item 5). Delete-after: **2026-11-19**.
+    Deletion waits for operator yes after that date — do not delete before, and do not delete without the
+    yes. Before asking: `ls -la ~/.local/state/ade/credential-bak/`; and confirm nothing in this repo
+    reads the vault (`graft grep credential-bak` / `rg -n credential-bak`: only `bin/ade-backup-stores`
+    exclude lists, their tests, this queue line, and the inventory).
 14. **`ade-backup-stores` LOWs and schedule** (PR 24 rounds 4-22): a launchd schedule, a generation retention,
     `O_NOFOLLOW` walks, the unscrubbed `.part`; and scrub or delete the first generation (it predates the credential
     scrub). Lives in `bin/ade-backup-stores`.
