@@ -42,7 +42,9 @@ names are home-anchored as `~/**/…` so Linux has a fixed folder before the wil
       "~/.kube/config"
     ]
   },
-  "enabled": true
+  "enabled": true,
+  "allowUnsandboxedCommands": false,
+  "failIfUnavailable": true
 }
 ```
 
@@ -57,19 +59,32 @@ Notes:
   paths here explicitly.
 - **A4.** If PR #405 has already landed, copy `denyRead` from the rendered
   `agents/claude/settings.json.tmpl` rather than retyping; keep `sandbox.enabled` off in the
-  template and flip it only in the live trial copy.
+  template and flip it only in the live trial copy. Do **not** bake `enabled: true` into the
+  template; the live trial copy still needs A5's escape-hatch closers before claiming an OS wall.
+- **A5. Close the unsandboxed-retry escape hatch before treating `denyRead` as the OS wall.** With
+  the template's `permissions.defaultMode: "bypassPermissions"` (`docs/secret-deny.md` C2), a
+  sandboxed Bash that hits `denyRead` can still be retried with `dangerouslyDisableSandbox` and
+  that retry runs **without a prompt**, so `denyRead` is bypassed. Set
+  `sandbox.allowUnsandboxedCommands` to `false` (Claude ignores `dangerouslyDisableSandbox`) and
+  `sandbox.failIfUnavailable` to `true` (no silent fall-back to unsandboxed when the sandbox cannot
+  start). See [Claude sandboxing — unsandboxed retry](https://code.claude.com/docs/en/sandboxing#the-unsandboxed-retry-escape-hatch).
+  A trial that only sets `enabled` + `denyRead` is incomplete.
 
 ## B. How to trial (operator)
 
 - **B1. Backup.** Copy live settings aside (do not overwrite a previous backup):
   `cp -a ~/.claude/settings.json ~/.claude/settings.json.bak-denyread-$(date +%Y%m%d)`.
 - **B2. Merge.** In a **manual** edit of `~/.claude/settings.json` (not by an agent, not by
-  `ade-update` alone): set `sandbox.filesystem.denyRead` to the A list and set `sandbox.enabled` to
-  `true`. Leave every other key alone (`permissions`, hooks, `defaultMode`, skill overrides). Prefer
-  a JSON-aware editor; a broken settings file takes Claude Code down.
+  `ade-update` alone): set `sandbox.filesystem.denyRead` to the A list, set `sandbox.enabled` to
+  `true`, set `sandbox.allowUnsandboxedCommands` to `false`, and set `sandbox.failIfUnavailable` to
+  `true` (A5 — required before any B4 refuse counts as the OS wall). Leave every other key alone
+  (`permissions`, hooks, `defaultMode`, skill overrides). Prefer a JSON-aware editor; a broken
+  settings file takes Claude Code down.
 - **B3. Fresh session.** Start a new Claude Code session after the edit (sandbox settings are read at
-  process start). Confirm the session is sandboxed (Claude's sandbox indicator / docs for the
-  installed version).
+  process start). Confirm the session is sandboxed (Claude's sandbox indicator / `/sandbox` Overrides
+  shows unsandboxed retries off / docs for the installed version). If Claude Code exits at startup
+  because the sandbox is unavailable, that is `failIfUnavailable` working — fix deps or roll back
+  (D); do not flip it back to false for the trial.
 - **B4. Positive probes (must refuse).** In that session, via **Bash** (the wall is for Bash and
   children): attempt reads that should fail **without ever printing secret bytes**. Prefer synthetic
   canaries that match deny patterns, or an open-only check that reports success/fail only:
@@ -101,7 +116,8 @@ Notes:
 
 - **C1. Broader than denyRead.** `sandbox.enabled = true` turns on Claude's whole sandbox, not only
   the read-deny list. Expect side effects on network, writes, and child processes that have nothing
-  to do with secrets.
+  to do with secrets. `allowUnsandboxedCommands: false` also means Claude cannot offer an unsandboxed
+  retry for those failures — run the command yourself outside the session, or roll back (D).
 - **C2. Incomplete mirror of `deny`.** `.env.*` and `~/.ssh/**` stay hook-only so allows keep
   working; a sandboxed Bash that constructs `~/.ssh/other-secret` or `.env.local` may still read it
   at the OS layer. The hook remains required.
@@ -109,29 +125,36 @@ Notes:
   deny paths that exist only as `permissions.deny` `Read(...)` rules. Always put paths in
   `filesystem.denyRead`. After apply, re-probe — do not assume the template landing (#405) equals a
   working wall.
-- **C4. Codex parallel (#446).** Shipping an inactive profile / template list is not evidence the
+- **C4. Unsandboxed retry under `bypassPermissions`.** Leaving `allowUnsandboxedCommands` at its
+  default while `defaultMode` is `bypassPermissions` keeps the `dangerouslyDisableSandbox` escape
+  hatch: a prompt-injected agent can retry a denied Bash unsandboxed with no operator prompt and
+  walk past `denyRead`. Closing that hatch (A5 / B2) is a trial precondition, not an optional harden.
+- **C5. Codex parallel (#446).** Shipping an inactive profile / template list is not evidence the
   installed binary enforces it. openai/codex#22179 is the same class of trap for Codex; treat the
   Claude trial the same way: measure, then claim.
-- **C5. Operator-only apply.** An agent rewriting `~/.claude/settings.json` violates order 11. A
+- **C6. Operator-only apply.** An agent rewriting `~/.claude/settings.json` violates order 11. A
   botched JSON edit or an accidental commit of live settings into this repo are both out of scope
   for this trial doc's automation — there is none.
-- **C6. Fail-open elsewhere.** The PreToolUse hook still fails open on bad input / budget
+- **C7. Fail-open elsewhere.** The PreToolUse hook still fails open on bad input / budget
   (`docs/secret-deny.md` C7). The sandbox trial does not fix that; it only adds an OS layer when it
   actually runs.
 
 ## D. Rollback
 
 - **D1. Fast.** Set `"sandbox": { "enabled": false }` in `~/.claude/settings.json` (keep or drop
-  `denyRead`; with enabled false the OS wall is off). Restart Claude Code.
+  `denyRead` / `allowUnsandboxedCommands` / `failIfUnavailable`; with enabled false the OS wall is
+  off). Restart Claude Code.
 - **D2. Clean.** Restore the B1 backup: `cp -a ~/.claude/settings.json.bak-denyread-YYYYMMDD
   ~/.claude/settings.json`, then restart.
-- **D3. Template.** Do **not** set `sandbox.enabled` in `agents/claude/settings.json.tmpl` as part of
-  rollback or trial success; the template stays disabled so installs do not surprise other machines.
-  Render-owned `denyRead` in the template (PR #405) can remain.
+- **D3. Template.** Do **not** set `sandbox.enabled` (nor force-on the escape-hatch closers as a
+  surprise enable) in `agents/claude/settings.json.tmpl` as part of rollback or trial success; the
+  template stays disabled so installs do not surprise other machines. Render-owned `denyRead` in the
+  template (PR #405) can remain.
 
 ## E. Done when
 
-The trial is done (Carried #1's denyRead bullet can narrow) when B4 shows a **sandbox** refuse on at
+The trial is done (Carried #1's denyRead bullet can narrow) when the live settings carry A5's
+`allowUnsandboxedCommands: false` and `failIfUnavailable: true`, B4 shows a **sandbox** refuse on at
 least one denied Bash read, B5 shows no false refuses on allows, and the operator either keeps
-`sandbox.enabled` on with the A list or rolls back and records why. Template/render without live
-apply does not close the item.
+`sandbox.enabled` on with the A list (including A5) or rolls back and records why. Template/render
+without live apply, or `enabled`+`denyRead` without A5, does not close the item.
