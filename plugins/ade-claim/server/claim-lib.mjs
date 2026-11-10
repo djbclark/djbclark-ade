@@ -4,6 +4,7 @@
  * W2: worktree.create.after → ade_claims.py new
  * W3: agent.open.before exports ADE_CLAIM_ID; agent.create.after binds owner
  *     (Paseo's agent.create.after is a notification and cannot change env).
+ * W4: agent.open.before prepends trusted libexec/agent-bin to PATH.
  *
  * @typedef {{ path: string, branch: string, sourceCheckout: string }} WorktreeHookPayload
  * @typedef {{ agentId: string, cwd: string, env: Record<string, string> }} AgentOpenBeforePayload
@@ -215,6 +216,65 @@ export function mergeAdeClaimIdEnv(env, claimId) {
 }
 
 /**
+ * Prepend a trusted libexec/agent-bin directory to PATH (W4).
+ * Returns undefined when PATH already starts with that directory and was already
+ * present on the override map (or when agentBinDir is empty).
+ *
+ * @param {Record<string, string> | null | undefined} env
+ * @param {string | null | undefined} agentBinDir
+ * @param {{ fallbackPath?: string }} [opts]
+ * @returns {Record<string, string> | undefined}
+ */
+export function mergeAgentBinPath(env, agentBinDir, opts = {}) {
+  if (!agentBinDir) return undefined;
+  if (typeof agentBinDir !== "string" || !agentBinDir.trim()) {
+    throw new Error("agentBinDir must be a non-empty string when set");
+  }
+  const dir = agentBinDir.replace(/\/+$/, "") || "/";
+  const base = env && typeof env === "object" ? { ...env } : {};
+  const current = Object.prototype.hasOwnProperty.call(base, "PATH")
+    ? base.PATH
+    : (opts.fallbackPath ?? "");
+  if (typeof current !== "string") {
+    throw new Error("PATH must be a string");
+  }
+  const parts = current.split(":").filter((p) => p.length > 0);
+  const rest = parts.filter((p) => p !== dir);
+  const next = [dir, ...rest].join(":");
+  if (base.PATH === next) return undefined;
+  return { ...base, PATH: next };
+}
+
+/**
+ * Compose W3 ADE_CLAIM_ID + W4 agent-bin PATH into one open.before env map.
+ * Returns undefined when nothing changes.
+ *
+ * @param {Record<string, string> | null | undefined} env
+ * @param {{
+ *   claimId?: string | null,
+ *   agentBinDir?: string | null,
+ *   fallbackPath?: string,
+ * }} opts
+ * @returns {Record<string, string> | undefined}
+ */
+export function mergeOpenBeforeEnv(env, opts = {}) {
+  const { claimId = null, agentBinDir = null, fallbackPath } = opts;
+  let cur = env && typeof env === "object" ? { ...env } : {};
+  let changed = false;
+  const withClaim = mergeAdeClaimIdEnv(cur, claimId);
+  if (withClaim) {
+    cur = withClaim;
+    changed = true;
+  }
+  const withPath = mergeAgentBinPath(cur, agentBinDir, { fallbackPath });
+  if (withPath) {
+    cur = withPath;
+    changed = true;
+  }
+  return changed ? cur : undefined;
+}
+
+/**
  * @param {{
  *   adeClaimsScript: string,
  *   claimId: string,
@@ -341,6 +401,52 @@ export function resolveTrustedAdeClaimsScript(env = process.env, opts = {}) {
   }
   throw new Error(
     "ade_claims.py not found beside the plugin install; set ADE_CLAIMS_PY to a trusted absolute path",
+  );
+}
+
+function isDir(path) {
+  try {
+    accessSync(path, constants.R_OK);
+    // access alone is not enough for "is directory"; use a cheap readdir probe via join+git shim
+    accessSync(join(path, "git"), constants.R_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Locate a trusted libexec/agent-bin (W4 PATH shim directory).
+ *
+ * Prefer ADE_AGENT_BIN, else walk parents of the plugin install for
+ * libexec/agent-bin containing the git shim. Never uses a worktree path.
+ *
+ * @param {NodeJS.ProcessEnv} [env]
+ * @param {{ pluginRoot?: string }} [opts]
+ */
+export function resolveTrustedAgentBinDir(env = process.env, opts = {}) {
+  if (env.ADE_AGENT_BIN) {
+    if (!isDir(env.ADE_AGENT_BIN)) {
+      throw new Error(`ADE_AGENT_BIN is not a usable agent-bin dir: ${env.ADE_AGENT_BIN}`);
+    }
+    return env.ADE_AGENT_BIN.replace(/\/+$/, "") || "/";
+  }
+  const start = opts.pluginRoot;
+  if (typeof start !== "string" || !start.trim()) {
+    throw new Error(
+      "libexec/agent-bin not found: set ADE_AGENT_BIN to a trusted absolute path (checkout-local shims are refused)",
+    );
+  }
+  let dir = start;
+  for (let i = 0; i < 10 && dir && dir !== "/"; i++) {
+    const candidate = join(dir, "libexec", "agent-bin");
+    if (isDir(candidate)) return candidate;
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  throw new Error(
+    "libexec/agent-bin not found beside the plugin install; set ADE_AGENT_BIN to a trusted absolute path",
   );
 }
 

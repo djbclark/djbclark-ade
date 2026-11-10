@@ -1,8 +1,8 @@
 {
   "id": "ade-claim",
   "name": "ADE workspace claim",
-  "description": "Creates ade_claims on worktree.create.after; exports ADE_CLAIM_ID on agent.open.before and binds claim owner on agent.create.after.",
-  "version": "0.2.0",
+  "description": "Creates ade_claims on worktree.create.after; on agent.open.before exports ADE_CLAIM_ID and prepends libexec/agent-bin to PATH; binds claim owner on agent.create.after.",
+  "version": "0.3.0",
   "requirements": {
     "paseo": ">=0.14.0"
   }
