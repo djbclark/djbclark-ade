@@ -1,0 +1,203 @@
+#!/usr/bin/env -S python3 -I
+"""ade-browser-task: render / relay browser-only prompts (setup-plan S7).
+
+  ade-browser-task list [--root DIR] [--json]
+  ade-browser-task render TASK [--root DIR] [--owner O] [--repo R] [--json]
+  ade-browser-task relay TASK [--root DIR] [--owner O] [--repo R]
+                              [--dry-run|--send] [--json]
+
+List and render checked-in templates under prompts/browser/. Relay uses
+coding-bot ask when available; otherwise prints a self-contained prompt and
+reports unsent. Default relay mode is --dry-run (no send). A send proves
+neither completion nor the setting. Secrets and access-widening tasks are
+refused. See docs/browser-task.md.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+BIN = Path(__file__).resolve().parent
+if str(BIN) not in sys.path:
+    sys.path.insert(0, str(BIN))
+
+import ade_browser_task as abt  # noqa: E402
+
+
+def _print_json(obj: object) -> None:
+    json.dump(obj, sys.stdout, indent=2, sort_keys=True, default=str)
+    sys.stdout.write("\n")
+
+
+def _root(args: argparse.Namespace) -> Path:
+    root = getattr(args, "root", None)
+    return Path(root) if root else abt.repo_root_from_here()
+
+
+def cmd_list(args: argparse.Namespace) -> int:
+    root = _root(args)
+    prompts = abt.default_prompts_dir(root)
+    try:
+        templates = abt.list_templates(prompts)
+    except abt.BrowserTaskError as e:
+        if args.json:
+            _print_json({"ok": False, "errors": [str(e)]})
+        else:
+            print(str(e), file=sys.stderr)
+        return 1
+    rows = [abt.template_summary(t) for t in templates]
+    if args.json:
+        _print_json({"ok": True, "prompts_dir": str(prompts), "tasks": rows})
+        return 0
+    print(f"ade-browser-task list: {len(rows)} task(s) in {prompts}")
+    for row in rows:
+        title = row.get("title") or ""
+        url = row.get("url") or ""
+        extra = f"  {title}" if title else ""
+        if url:
+            extra += f"  url={url}"
+        print(f"  {row['id']}{extra}")
+    return 0
+
+
+def cmd_render(args: argparse.Namespace) -> int:
+    root = _root(args)
+    try:
+        rendered = abt.render_task(
+            root,
+            args.task,
+            owner=args.owner,
+            repo=args.repo,
+        )
+    except abt.BrowserTaskError as e:
+        if args.json:
+            _print_json({"ok": False, "errors": [str(e)]})
+        else:
+            print(str(e), file=sys.stderr)
+            print("ade-browser-task render: FAIL", file=sys.stderr)
+        return 1
+    if args.json:
+        _print_json({"ok": True, **abt.rendered_payload(rendered)})
+        return 0
+    if rendered.url:
+        print(f"# url: {rendered.url}", file=sys.stderr)
+    sys.stdout.write(rendered.text)
+    return 0
+
+
+def cmd_relay(args: argparse.Namespace) -> int:
+    root = _root(args)
+    dry_run = not args.send
+    try:
+        rendered = abt.render_task(
+            root,
+            args.task,
+            owner=args.owner,
+            repo=args.repo,
+        )
+        result = abt.relay_task(rendered, dry_run=dry_run)
+    except abt.BrowserTaskError as e:
+        if args.json:
+            _print_json({"ok": False, "errors": [str(e)]})
+        else:
+            print(str(e), file=sys.stderr)
+            print("ade-browser-task relay: FAIL", file=sys.stderr)
+        return 1
+    payload = abt.relay_payload(result)
+    # unsent / dry-run still exit 0: the operator can paste; sent also 0.
+    if args.json:
+        _print_json({"ok": True, "url": rendered.url, **payload})
+        return 0
+    print(f"ade-browser-task relay: status={result.status}")
+    print(f"  task={result.task_id}")
+    if rendered.url:
+        print(f"  url={rendered.url}")
+    if result.coding_bot:
+        print(f"  coding_bot={result.coding_bot}")
+    print(f"  detail={result.detail}")
+    if result.prompt:
+        print("--- prompt ---")
+        sys.stdout.write(result.prompt)
+        if not result.prompt.endswith("\n"):
+            sys.stdout.write("\n")
+        print("--- end ---")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    # Shared --root on top-level and each subparser (ade-install / ade-github-setup):
+    # just recipes and docs put --root after the subcommand; help also accepts before.
+    shared = argparse.ArgumentParser(add_help=False)
+    shared.add_argument(
+        "--root",
+        default=argparse.SUPPRESS,
+        help="repository root; before/after command, last explicit wins",
+    )
+    p = argparse.ArgumentParser(
+        prog="ade-browser-task",
+        description=(
+            "Render/relay browser-only prompts from prompts/browser/ "
+            "(setup-plan S7; no live browser required)."
+        ),
+        parents=[shared],
+    )
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    p_list = sub.add_parser(
+        "list", parents=[shared], help="list checked-in browser tasks"
+    )
+    p_list.add_argument("--json", action="store_true")
+    p_list.set_defaults(func=cmd_list)
+
+    p_render = sub.add_parser(
+        "render", parents=[shared], help="render one task prompt to stdout"
+    )
+    p_render.add_argument("task", help="task id (prompts/browser/<task>.md)")
+    p_render.add_argument("--owner", help="GitHub owner (default: config/github.toml)")
+    p_render.add_argument("--repo", help="GitHub repository name")
+    p_render.add_argument("--json", action="store_true")
+    p_render.set_defaults(func=cmd_render)
+
+    p_relay = sub.add_parser(
+        "relay",
+        parents=[shared],
+        help="relay a rendered prompt (default --dry-run; --send uses coding-bot ask)",
+    )
+    p_relay.add_argument("task", help="task id (prompts/browser/<task>.md)")
+    p_relay.add_argument("--owner", help="GitHub owner (default: config/github.toml)")
+    p_relay.add_argument("--repo", help="GitHub repository name")
+    mode = p_relay.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--send",
+        action="store_true",
+        help="call coding-bot ask when available; else print unsent (default: dry-run)",
+    )
+    mode.add_argument(
+        "--dry-run",
+        dest="dry_run_flag",
+        action="store_true",
+        help="print the prompt; do not call coding-bot (default; exclusive with --send)",
+    )
+    p_relay.add_argument("--json", action="store_true")
+    p_relay.set_defaults(func=cmd_relay, send=False, dry_run_flag=False)
+
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    try:
+        abt.refuse_secret_argv(argv)
+    except abt.BrowserTaskError as e:
+        print(str(e), file=sys.stderr)
+        return 2
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    args.root = getattr(args, "root", None)
+    return int(args.func(args))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

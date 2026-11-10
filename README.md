@@ -112,6 +112,7 @@ Skills (23, from each `skills/*/SKILL.md`):
 | [`acp-dispatch`](bin/acp-dispatch) | Hand a slice to an agent through Paseo and get its report back (a shim, slim-down E6, 2026-11-06). |
 | [`acp-dispatch-wait`](bin/acp-dispatch-wait) | DELETE with the acp-dispatch shim (Wave 6 follow-up, ledger E6/D6); was the cheap rearm waiter for one acp-dispatch record (2026-10-18). |
 | [`ade-backup-stores`](bin/ade-backup-stores) | One consistent copy of every agent session store, plus the Hermes JSONL export. |
+| [`ade-browser-task`](bin/ade-browser-task) | Render / relay browser-only prompts (setup-plan S7). |
 | [`ade-config`](bin/ade-config) | Check/get/diff/set for the versioned effective ADE config (schema_version=1). |
 | [`ade-git-guard`](bin/ade-git-guard) | A `git` front door for what git's own hooks cannot see in a workspace another agent owns. |
 | [`ade-github-setup`](bin/ade-github-setup) | Observe / plan / dry-run for the merge-gate App (setup-plan S8). |
@@ -124,6 +125,7 @@ Skills (23, from each `skills/*/SKILL.md`):
 | [`ade-template-check`](bin/ade-template-check) | Check the agents/ config templates (Phase 0 item 4.4, 2026-10-20). |
 | [`ade-update`](bin/ade-update) | Keep this machine's djbclark-ade checkout current: pull, relink, say what changed. |
 | [`ade-user-install`](bin/ade-user-install) | User-scoped uv/just GitHub-release fetch or repo bin/ symlink into ~/.local/bin. |
+| [`ade_browser_task.py`](bin/ade_browser_task.py) | Render / relay browser-only prompts (setup-plan S7). |
 | [`ade_claims.py`](bin/ade_claims.py) | The workspace claim library, the git-guard rules and the ref hooks (isolation slice W1, 2026-10-24; O2 redesign 2026-10-25). |
 | [`ade_config.py`](bin/ade_config.py) | Versioned read-only effective ADE config (schema_version=1). |
 | [`ade_config_edit.py`](bin/ade_config_edit.py) | Comment-preserving atomic scalar set for ADE config TOML. |
