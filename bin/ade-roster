@@ -68,10 +68,20 @@ def frontmatter(path: Path) -> dict[str, str]:
     return out
 
 
+# When --root points at an untrusted tree (ade-release-ready --repo, CI on a PR checkout,
+# any foreign --root), that checkout's core.fsmonitor / core.fsmonitorHook is attacker-controlled.
+# Empty -c overrides win over the inspected repo's config so ls-files cannot exec its hook.
+_GIT_SAFE = ("-c", "core.fsmonitor=", "-c", "core.fsmonitorHook=")
+
+
 def tracked(root: Path, top: str) -> set[str] | None:
     """Repo-relative paths git tracks under TOP, or None when ROOT is not a git checkout (then the filesystem decides)."""
     try:
-        out = subprocess.run(["git", "-C", str(root), "ls-files", "-z", "--", top], capture_output=True, timeout=30)
+        out = subprocess.run(
+            ["git", *_GIT_SAFE, "-C", str(root), "ls-files", "-z", "--", top],
+            capture_output=True,
+            timeout=30,
+        )
     except (OSError, subprocess.SubprocessError):
         return None
     if out.returncode != 0:
