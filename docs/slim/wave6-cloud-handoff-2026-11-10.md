@@ -36,8 +36,9 @@ Commands, not memory:
 | This session's worktrees | `/tmp/wave6-cloud-handoff-wt` and `/tmp/update-multi-wt` gone; branch deleted after merge |
 | Shared checkout dirt | only untracked `.gemini/` (not ours); `audit-linux-install-d382` behind master — not ours to reset |
 | Archive re-hash | SHA + 47/47 MANIFEST members OK |
-| Open waits **deferred by operator** (not oversights) | **C1+C2** historical waives; Mac **B2** label drain; date gate / deletion confirm; Pi pool decisions |
-| Invented waives / deletion PR | **none** (correct) |
+| Open waits **deferred by operator** (not oversights) | Mac **B2** label drain; A3–A7 + fleet-watch (order 11); date gate / deletion confirm; Pi pool decisions |
+| C1+C2 historical waives | **granted** 2026-11-10 (`log.md` + `c3-waives-2026-11-10/`) |
+| Invented waives / deletion PR | **none** beyond the granted C1+C2 lines (correct) |
 
 ## B. Gate (artifact) — still blocked
 
@@ -64,19 +65,21 @@ and calls `relay.py` (`proofs/outside-fleet-watch-relay.txt`).
 
 Ask **one card at a time**. Cheapest unlock first.
 
-### C1 + C2 — historical waives (ask first; NOT granted)
+### C1 + C2 — historical waives (**GRANTED** 2026-11-10)
 
-Dated handoffs only. Does **not** authorize outside code edits.
+Operator chose: grant C1+C2, leave A3+ for the successor. Dated handoffs
+only. Does **not** authorize outside code edits.
 
-Proposed lines (copy into `docs/slim/log.md` + the matching `c3_proofs`
-files only after the operator says yes):
+Recorded in [`log.md`](log.md) and ready-to-paste proof snippets under
+[`c3-waives-2026-11-10/`](c3-waives-2026-11-10/). Cloud evidence copy under
+`~/tmp/wave6-mac-from-bigmac-20261110/` has `c3.paseo4herdr` /
+`c3.sudo_secretspec` = `waived` with `waive:` lines appended; Mac should
+refresh its live evidence from those snippets on the next capture.
 
 - **C1 `paseo4herdr`:**
   `2026-11-10: waive Wave 6 C3 paseo4herdr for immutable dated handoff references; do not rewrite those records or reinstall retired tools.`
 - **C2 `sudo_secretspec`:**
   `2026-11-10: waive Wave 6 C3 sudo_secretspec for preserved dated handoff references; new runtime callers use native Paseo.`
-
-Reply options: `yes C1+C2` · `C1 only` · `C2 only` · `neither` · rewrite lines.
 
 (Alias in earlier notes: A1+A2 = C1+C2.)
 
@@ -123,51 +126,48 @@ Manual Antigravity inference is **not** automatic-routing acceptance.
 
 ## F. Resume prompt (copy for a successor agent)
 
-Paste the fenced block below into a new agent session (refreshed after `#534`
-landed; agent-side handoff complete; operator C1+C2 still open):
+Final closeout prompt lives in the chat after this PR merges; the block below
+is the durable in-repo copy (C1+C2 granted; A3+ deferred):
 
 ```
-RESUME — Wave 6 / Pi Mac evidence handoff (2026-11-10 bigmac → cloud).
+RESUME — Wave 6 / Pi after cloud handoff closeout (2026-11-10).
 
-Read first (in order):
-- docs/slim/wave6-cloud-handoff-2026-11-10.md  (this handoff; post-#534 refresh)
-- docs/slim/mac-live-2026-11-10.md
+Read first:
+- docs/slim/wave6-cloud-handoff-2026-11-10.md
+- docs/slim/log.md  (C1+C2 waive section)
+- docs/slim/c3-waives-2026-11-10/
 - docs/slim/outside-migration-proposals-2026-11-10.md
+- docs/slim/mac-live-2026-11-10.md
 - docs/slim/wave6-follow-up.md
 - docs/queue.md Carried item 1
-- https://github.com/djbclark/djbclark-ade/pull/534 (MERGED — initial handoff docs)
-Verified archive (optional local): ~/tmp/wave6-mac-from-bigmac-20261110/
-  SHA256 18eab71cc7227a3f7eaa1a5a096e6dd2049a06ef33971d042995c844ce236155
-  (initial + recapture/ preserved; MANIFEST re-verified on cloud Linux after #534)
+- #534 MERGED (handoff docs); this file's follow-up PR for C1+C2 + resume refresh
 
-Agent-side done (do not re-do):
-- Archive reconstructed + verified; #534 merged to master (48eaaefa).
-- No open merge_now ≥510; no deletion PR started.
-- /loose audit: only remaining opens are operator/Mac deferred items below.
+Cloud evidence: ~/tmp/wave6-mac-from-bigmac-20261110/
+  archive SHA 18eab71cc7227a3f7eaa1a5a096e6dd2049a06ef33971d042995c844ce236155
+  evidence.json now has c3.paseo4herdr + c3.sudo_secretspec = waived (local copy)
+  On next Mac capture: paste docs/slim/c3-waives-2026-11-10/*.waive.txt into live proofs.
 
-State still blocked:
-- wave6-delete-check --evidence exit 1.
-- C3: 5 migrated / 7 open (tendcf, nix2cf, cfengine, paseo4herdr,
-  sudo_secretspec, aiuse, site_public_home_agents).
-- Extra: ~/ops/site-private-djbclark/bin/fleet-watch still calls relay.py.
-- B2 not drained: live lead 0cc34651-d6e5-4d88-b4cd-8166038da11e has
-  inherited ade.via=acp-dispatch (do not stop/relabel from cloud).
-- Soft deadline 2026-11-20; no --allow-early granted.
+Done — do not re-ask:
+- Mac archive verified; handoff docs on master (#534+).
+- Operator granted C1+C2 historical waives (paseo4herdr, sudo_secretspec).
+- /loose: agent-side handoff complete; no deletion PR; no invented APPROVE.
+
+Still blocked (successor work):
+- C3 open (need migrate|waive): tendcf, nix2cf, cfengine, aiuse,
+  site_public_home_agents  (5). Migrated: 5. Waived: paseo4herdr, sudo_secretspec.
+- fleet-watch still calls relay.py (order 11).
+- B2: lead 0cc34651… still ade.via=acp-dispatch — clear after Mac work ends, recapture.
+- Soft deadline 2026-11-20; no --allow-early.
 - Pi grok/antigravity/sipb/go stay accepted=false.
 
-Next (operator-gated; one card at a time):
-1. Ask C1+C2 historical waives (paseo4herdr, sudo_secretspec) — proposed
-   lines in this handoff / outside-migration-proposals. NOT granted.
-2. After yes: record waive lines in docs/slim/log.md + c3_proofs files;
-   never invent waives.
-3. Then seek order-11 yes for A3–A7 + fleet-watch migrations (outside repos).
-4. After Mac lead finishes: confirm B2 label drain + recapture.
-5. Deletion PR only when wave6-delete-check --evidence exits 0 AND operator
-   confirms. Keep relay.py, acp-dispatch, acp-run, review-launch.
+Next (one card at a time):
+1. Order-11 yes for A3 tendcf + A4 nix2cf AGENTS.md migrations (claimed WTs).
+2. A5 cfengine classify then migrate active; A6 aiuse live+readers; A7 home-agents.
+3. X1 fleet-watch off UPSTREAM_RELAY.
+4. X2 B2 drain + Mac recapture; merge waive snippets into live evidence if needed.
+5. Deletion PR only when wave6-delete-check --evidence exits 0 AND operator confirms.
+   Keep relay.py, acp-dispatch, acp-run, review-launch.
 
-Hard stops: no invented APPROVE / waived / Pi accepted=true; no deletion PR
-early; no outside edits without order 11; preserve handoffs/logs.
-
-Unrelated hygiene observed (not repaired): sudo-secretspec doctor fail,
-Hermes doctor timeout, missing ade-claim plugin — handle via normal owners.
+Hard stops: no invented APPROVE / extra waives / Pi accepted=true; no outside
+edits without order 11; preserve handoffs/logs.
 ```

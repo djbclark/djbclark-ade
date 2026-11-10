@@ -2,6 +2,18 @@
 
 One entry per wave (PLAN.md F): what merged, what was lost on purpose, what the operator must do by hand. Appended by the slim lead; the operator pastes gate output (C7, C1) here when asked.
 
+## Wave 6 C1+C2 historical waives (2026-11-10)
+
+Operator grant (cloud handoff closeout): dated handoff references only; do **not**
+rewrite those records or reinstall retired tools. Active A3–A7 / fleet-watch
+migrations remain open (order 11). Copy each `waive:` line into the matching
+Mac `c3_proofs` file and set `evidence.json` `c3.<key>` to `waived` on the next
+evidence refresh (ready-to-paste snippets:
+[`c3-waives-2026-11-10/`](c3-waives-2026-11-10/)).
+
+- **C1 `paseo4herdr`:** `2026-11-10: waive Wave 6 C3 paseo4herdr for immutable dated handoff references; do not rewrite those records or reinstall retired tools.`
+- **C2 `sudo_secretspec`:** `2026-11-10: waive Wave 6 C3 sudo_secretspec for preserved dated handoff references; new runtime callers use native Paseo.`
+
 ## R2-18 decided DELETE (2026-11-10)
 
 - **Decision:** delete `claude/hooks/quota_nudge.py` and `claude/hooks/cswap_quota_context.sh` with their template hook lines. E7 replaced the Claude quota gate with Paseo's session-guard and usage-auto-resume; `quota_nudge.py` only read the deleted guard's `quota-guard.json` and was silent without it; `cswap_quota_context.sh` was the SessionStart display companion of that same path (~950 tokens of `cswap list`). `tests/test_claude_quota_guard.py` already held the nudge's tests and went with E7; `tests/conftest.py` no longer pins `CLAUDE_QUOTA_GUARD_STATE`; `tests/test_hook_deadline_timeouts.py` expects three wrapped hooks.
