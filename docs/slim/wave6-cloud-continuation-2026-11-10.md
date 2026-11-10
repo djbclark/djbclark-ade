@@ -35,7 +35,8 @@ and owner-trust adversary status passed. No invented APPROVE marker was used.
   `b131be1becb41c3c2f4a0c1d6a071d8db0baa026`: runtime routing adopts the
   effective configuration with final shape validation; explicit legacy
   readers stay isolated. 515 tests and 51 subtests pass, one test skipped.
-  Independent review and full CI remain to be checked.
+  Separate read-only review found no actionable issues; full CI remains
+  to be checked.
 
 Tests used mocks and temporary homes; no live configuration, provider probes,
 quota policy, Pi pool acceptance or installed Mac state changed. Named-model
