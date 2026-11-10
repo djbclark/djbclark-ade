@@ -1,7 +1,7 @@
 # Wave 6 follow-up — shim and `acp-run` deletion readiness
 
-Snapshot: 2026-11-09 (C3 proof-file gate; Mac B1 idle capture writes
-`verified: no match` so idle proofs stay non-empty). Queue Carried **item 33**. The slim-down's Wave 6
+Snapshot: 2026-11-10 (Mac proof harness + FIXTURE bundle for CI shape; live
+Mac cycle still pending). Queue Carried **item 33**. The slim-down's Wave 6
 **shipped the shims** (`docs/slim/PLAN.md` F). This doc is the **deletion
 readiness** checklist for the follow-up PR that removes
 `skills/session-finder/relay.py`, `bin/acp-dispatch`, and `tools/acp-run`
@@ -11,8 +11,10 @@ deadline **2026-11-20**
 `bin/review-launch` and its boundary tests stay (E8 / review rule 11).
 
 Gate tool: `bin/wave6-delete-check` (exit 0 only when every gate below is
-green; prints named reasons otherwise). Run it before opening the deletion
-PR. New code already calls Paseo directly (`paseo send`, `paseo run`).
+green; prints named reasons otherwise). Mac capture harness:
+`bin/wave6-mac-proof-capture --live --out DIR` (Darwin only; refuses to invent
+Mac stdout elsewhere). Run the gate before opening the deletion PR. New code
+already calls Paseo directly (`paseo send`, `paseo run`).
 
 ## A. Remaining in-repo callers (must be gone or archived before delete)
 
@@ -139,10 +141,31 @@ as a missing paste, not as idle proof:
 Each `c3` value is exactly `migrated` or `waived`. A waive needs the
 operator's one-line note in `docs/slim/log.md`, and that note (or a paste of
 it) must sit in the matching `c3_proofs` file. Mac proof files are
-operator-captured on the Mac from section B (paste B1/B2/B3 stdout); this
-readiness PR does **not** ship invented Mac proofs.
+operator-captured on the Mac from section B (paste B1/B2/B3 stdout) or via
+`bin/wave6-mac-proof-capture --live`. This readiness stack does **not** ship
+invented live Mac proofs.
 
-Suggested capture (Mac; paths match the sample `mac_proofs` above).
+### B0. FIXTURE proofs (CI shape only) → replace after Mac live cycle
+
+Without a Mac live cycle yet, CI uses a **labeled fixture** bundle at
+[`tests/fixtures/wave6-mac-proofs/`](../../tests/fixtures/wave6-mac-proofs/)
+(`evidence.FIXTURE.json` + `*.FIXTURE.txt` proofs). Every file starts with
+`FIXTURE — NOT live Mac stdout` (or the C3 fixture equivalent). Tests under
+`tests/test_wave6_mac_proof_fixtures.py` prove FAILCLOSED non-empty shape and
+that the harness refuses to invent live stdout on non-Darwin.
+
+**These fixtures are not deletion evidence.** After the Mac live cycle:
+
+1. `bin/wave6-mac-proof-capture --live --out ./wave6-evidence --json`
+2. Merge the printed `mac_proofs` map into the real `evidence.json` (keep C3
+   outside probes / waives from §C).
+3. `bin/wave6-delete-check --evidence ./wave6-evidence/evidence.json` (exit 0).
+4. Paste live stdout into the deletion PR. Keep the FIXTURE bundle only as a
+   shape regression, still labeled FIXTURE — never rename a fixture to look
+   like a live capture.
+
+Suggested capture (Mac; paths match the sample `mac_proofs` above). Prefer
+`bin/wave6-mac-proof-capture --live --out "$EVID"` over hand redirects.
 **Do not** redirect bare `pgrep … || true` alone: when idle, that writes an
 empty file and `wave6-delete-check` reports `mac_*_proof_missing` even though
 idle is the desired state. Always record the command and an explicit
@@ -276,4 +299,6 @@ Do not start (3) until (2) is green and C3 is ticked or waived.
 - Ledger: [ledger.md](ledger.md) A4 (`agent_guard.py`)
 - Queue: [../queue.md](../queue.md) Carried item 33
 - Gate: [`bin/wave6-delete-check`](../../bin/wave6-delete-check)
+- Mac harness: [`bin/wave6-mac-proof-capture`](../../bin/wave6-mac-proof-capture)
+- FIXTURE bundle (NOT live): [`tests/fixtures/wave6-mac-proofs/`](../../tests/fixtures/wave6-mac-proofs/)
 - Standing orders: [../../AGENTS.md](../../AGENTS.md) 10 and "Two shims"

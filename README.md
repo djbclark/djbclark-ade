@@ -99,7 +99,7 @@ Skills (22, from each `skills/*/SKILL.md`):
 | [`tell-chief-of-staff`](skills/tell-chief-of-staff/SKILL.md) | Pointer (2026-11-06) for messaging the operator's cloud Grok Bot "Chief of Staff" ("tell grok", "tell Chief of Staff", "hand this to grokbot") and for its ask_claude callback; the sender and its setup live outside this repository. |
 | [`tell-coding-bot`](skills/tell-coding-bot/SKILL.md) | Pointer (2026-11-06) for talking to the operator's cloud Grok Bot "Coding" ("tell the Coding bot", "ask Coding", "hand this to the Coding bot", a task that needs a real browser session); the coding-bot code now lives in the peer-link repository. |
 
-`bin/` (56, from each file's first docstring or comment):
+`bin/` (57, from each file's first docstring or comment):
 
 | Tool | What |
 |---|---|
@@ -159,6 +159,7 @@ Skills (22, from each `skills/*/SKILL.md`):
 | [`skill-everywhere`](bin/skill-everywhere) | Make a shared skill visible to every agent TUI on this machine by symlinking it into each TUI's user-level skills dir. |
 | [`wait-file`](bin/wait-file) | Block until a file the waited-on command writes is ready, with a hard timeout. |
 | [`wave6-delete-check`](bin/wave6-delete-check) | Refuse Wave 6 shim deletion until gates pass (2026-11-09). |
+| [`wave6-mac-proof-capture`](bin/wave6-mac-proof-capture) | Mac live-cycle proof harness for wave6-delete-check (2026-11-10). |
 <!-- roster:end -->
 
 ## Workflow migration

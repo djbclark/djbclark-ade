@@ -1,0 +1,5 @@
+FIXTURE — NOT live outside-repo probe (tests/fixtures/wave6-mac-proofs; Carried #33 residual)
+kind: fixture
+c3_key: paseo_upstream
+note: shape-only stand-in for wave6-delete-check FAILCLOSED tests; not a migrated/waived outside capture
+replace_with: operator probe paste per docs/slim/wave6-follow-up.md §C (order 11)
