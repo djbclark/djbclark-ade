@@ -57,14 +57,26 @@ non-empty `mac_proofs` files named by the evidence JSON for
 # B1. No live shim argv (agents / launchd / leftover waiters).
 # Idle (no match) is the desired state — always record cmd + exit / verified line
 # so the capture is non-empty (wave6-delete-check FAILCLOSEs on empty proof files).
+# Prefer bin/wave6-mac-proof-capture --live: it also covers acp-dispatch process/
+# launchd in the dispatch proof and exits 1 on probe FAILED (not verified idle).
 echo "cmd: pgrep -lf 'relay\\.py|acp-dispatch|acp-run'"
 pgrep -lf 'relay\.py|acp-dispatch|acp-run' || echo "verified: no match (exit $?)"
 echo "cmd: launchctl list | grep -E 'acp-dispatch|acp-run'"
-launchctl list 2>/dev/null | grep -E 'acp-dispatch|acp-run' \
-  || echo "verified: no match (exit $?)"
+# Do not `2>/dev/null | grep` alone: a failed launchctl with empty stdout must
+# be FAILED, never "verified: no match".
+launchctl list >"$TMPDIR/wave6-lc.out" 2>"$TMPDIR/wave6-lc.err"
+lc_rc=$?
+if [ "$lc_rc" -ne 0 ]; then
+  [ -s "$TMPDIR/wave6-lc.err" ] && echo "stderr: $(cat "$TMPDIR/wave6-lc.err")"
+  echo "verified: FAILED launchctl (exit $lc_rc)"
+else
+  grep -E 'acp-dispatch|acp-run' "$TMPDIR/wave6-lc.out" \
+    || echo "verified: no match (exit 0)"
+fi
 # B2. No outstanding dispatch records (C7). `acp-dispatch ls` does not exist —
 # use `check` on the state root and Paseo's label listing. Failures are real;
 # an empty/drained result is exit 0 / empty JSON — still echo a verified line.
+# Also keep B1 process/launchd for acp-dispatch (harness puts them in this proof).
 STATE="${ACP_DISPATCH_STATE:-$HOME/.local/state/bigteam}"
 if ! command -v acp-dispatch >/dev/null 2>&1; then
   echo "B2: acp-dispatch not on PATH (record as drained only after uninstall + empty paseo ls)"
@@ -166,10 +178,14 @@ that the harness refuses to invent live stdout on non-Darwin.
 
 Suggested capture (Mac; paths match the sample `mac_proofs` above). Prefer
 `bin/wave6-mac-proof-capture --live --out "$EVID"` over hand redirects.
+The harness exits **1** when any probe FAILED (diagnostics still written);
+do not paste a failed capture as idle evidence — `wave6-delete-check` only
+checks that proof files are non-empty.
 **Do not** redirect bare `pgrep … || true` alone: when idle, that writes an
 empty file and `wave6-delete-check` reports `mac_*_proof_missing` even though
 idle is the desired state. Always record the command and an explicit
-`verified: no match` (or match listing) plus exit status:
+`verified: no match` (or match listing) plus exit status; mark probe failures
+as `verified: FAILED` (preserve stderr), never as verified idle:
 
 ```bash
 EVID=./wave6-evidence   # directory that will hold evidence.json + proofs/
@@ -180,13 +196,37 @@ mkdir -p "$EVID/proofs"
   pgrep -lf 'relay\.py' || echo "verified: no match (exit $?)"
 } > "$EVID/proofs/mac-b1-relay.txt"
 {
-  echo "cmd: pgrep -lf 'acp-run'; launchctl list | grep -E 'acp-run'"
+  echo "cmd: pgrep -lf 'acp-run'"
   pgrep -lf 'acp-run' || echo "verified: no match pgrep (exit $?)"
-  launchctl list 2>/dev/null | grep -E 'acp-run' \
-    || echo "verified: no match launchctl (exit $?)"
+  echo "cmd: launchctl list | grep -E 'acp-run'"
+  launchctl list >"$EVID/proofs/.lc.out" 2>"$EVID/proofs/.lc.err"
+  lc_rc=$?
+  if [ "$lc_rc" -ne 0 ]; then
+    [ -s "$EVID/proofs/.lc.err" ] && echo "stderr: $(cat "$EVID/proofs/.lc.err")"
+    echo "verified: FAILED launchctl (exit $lc_rc)"
+  else
+    grep -E 'acp-run' "$EVID/proofs/.lc.out" \
+      || echo "verified: no match launchctl (exit 0)"
+  fi
+  rm -f "$EVID/proofs/.lc.out" "$EVID/proofs/.lc.err"
 } > "$EVID/proofs/mac-b1-acp-run.txt"
-# B2 → acp_dispatch_idle
+# B2 → acp_dispatch_idle (B1 process/launchd for acp-dispatch + B2 drain).
+# Prefer the harness: it records launchctl/paseo failures as FAILED (with
+# stderr), never as verified idle, and exits 1 when any probe fails.
 {
+  echo "cmd: pgrep -lf 'acp-dispatch'"
+  pgrep -lf 'acp-dispatch' || echo "verified: no match pgrep (exit $?)"
+  echo "cmd: launchctl list | grep -E 'acp-dispatch'"
+  launchctl list >"$EVID/proofs/.lc.out" 2>"$EVID/proofs/.lc.err"
+  lc_rc=$?
+  if [ "$lc_rc" -ne 0 ]; then
+    [ -s "$EVID/proofs/.lc.err" ] && echo "stderr: $(cat "$EVID/proofs/.lc.err")"
+    echo "verified: FAILED launchctl (exit $lc_rc)"
+  else
+    grep -E 'acp-dispatch' "$EVID/proofs/.lc.out" \
+      || echo "verified: no match launchctl (exit 0)"
+  fi
+  rm -f "$EVID/proofs/.lc.out" "$EVID/proofs/.lc.err"
   STATE="${ACP_DISPATCH_STATE:-$HOME/.local/state/bigteam}"
   if ! command -v acp-dispatch >/dev/null 2>&1; then
     echo "B2: acp-dispatch not on PATH"
@@ -196,8 +236,12 @@ mkdir -p "$EVID/proofs"
     acp-dispatch check "$STATE"
   fi
   echo "cmd: paseo ls -g --label ade.via=acp-dispatch --json"
-  out=$(paseo ls -g --label ade.via=acp-dispatch --json 2>&1) || true
-  if [ -n "$out" ]; then
+  out=$(paseo ls -g --label ade.via=acp-dispatch --json 2>&1)
+  ls_rc=$?
+  if [ "$ls_rc" -ne 0 ]; then
+    [ -n "$out" ] && printf '%s\n' "$out"
+    echo "verified: FAILED paseo ls (exit $ls_rc)"
+  elif [ -n "$out" ]; then
     printf '%s\n' "$out"
   else
     echo "verified: no match (empty paseo ls)"

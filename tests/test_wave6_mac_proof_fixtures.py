@@ -156,23 +156,47 @@ def test_fixture_harness_default_mentions_fixture_replacement() -> None:
     assert "wave6-follow-up.md" in joined or "FIXTURE" in joined
 
 
-def test_fixture_harness_write_live_proofs_with_injected_runner(tmp_path: Path) -> None:
-    """Unit-level: capture helpers write non-empty idle proofs without claiming Darwin."""
-    import shutil
+def _load_capture_mod():
     import types
 
     # bin/wave6-mac-proof-capture has no .py suffix; load by exec (stdlib only).
     mod = types.ModuleType("wave6_mac_proof_capture")
     code = CAPTURE.read_text(encoding="utf-8")
     exec(compile(code, str(CAPTURE), "exec"), mod.__dict__)  # noqa: S102
+    return mod
 
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    for name in ("pgrep", "launchctl", "paseo"):
-        path = bin_dir / name
-        path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-        path.chmod(0o755)
-    env_path = str(bin_dir) + os.pathsep + os.environ.get("PATH", "")
+
+def _with_stub_path(tmp_path: Path, names: tuple[str, ...]):
+    """Context: PATH with stub binaries so shutil.which finds them."""
+    import contextlib
+
+    @contextlib.contextmanager
+    def _ctx():
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir(exist_ok=True)
+        for name in names:
+            path = bin_dir / name
+            path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            path.chmod(0o755)
+        env_path = str(bin_dir) + os.pathsep + os.environ.get("PATH", "")
+        old = os.environ.get("PATH")
+        os.environ["PATH"] = env_path
+        try:
+            yield
+        finally:
+            if old is None:
+                os.environ.pop("PATH", None)
+            else:
+                os.environ["PATH"] = old
+
+    return _ctx()
+
+
+def test_fixture_harness_write_live_proofs_with_injected_runner(tmp_path: Path) -> None:
+    """Unit-level: capture helpers write non-empty idle proofs without claiming Darwin."""
+    import shutil
+
+    mod = _load_capture_mod()
 
     def run_path(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
         name = Path(argv[0]).name
@@ -181,18 +205,12 @@ def test_fixture_harness_write_live_proofs_with_injected_runner(tmp_path: Path) 
         return subprocess.CompletedProcess(argv, 0, "", "")
 
     out = tmp_path / "evidence"
-    old = os.environ.get("PATH")
-    os.environ["PATH"] = env_path
-    try:
-        # shutil.which inside the module must see the stubs.
+    with _with_stub_path(tmp_path, ("pgrep", "launchctl", "paseo")):
         assert shutil.which("paseo") is not None
-        rel = mod.write_live_proofs(out, run=run_path, home=tmp_path / "home")
-    finally:
-        if old is None:
-            os.environ.pop("PATH", None)
-        else:
-            os.environ["PATH"] = old
+        assert shutil.which("launchctl") is not None
+        rel, ok = mod.write_live_proofs(out, run=run_path, home=tmp_path / "home")
 
+    assert ok is True
     assert set(rel) == {
         "relay_idle",
         "acp_run_idle",
@@ -204,7 +222,62 @@ def test_fixture_harness_write_live_proofs_with_injected_runner(tmp_path: Path) 
         assert text.startswith("source: wave6-mac-proof-capture --live")
         assert f"flag: {flag}" in text
         assert "verified:" in text
+        assert "verified: FAILED" not in text
         assert (out / rel_path).stat().st_size > 0
+
+    dispatch = (out / rel["acp_dispatch_idle"]).read_text(encoding="utf-8")
+    assert "cmd: pgrep -lf 'acp-dispatch'" in dispatch
+    assert "cmd: launchctl list | grep -E 'acp-dispatch'" in dispatch
+    assert "verified: no match pgrep" in dispatch
+    assert "verified: no match launchctl" in dispatch
+
+
+def test_fixture_harness_marks_launchctl_failure_not_idle(tmp_path: Path) -> None:
+    """Failed launchctl must be FAILED (with stderr), not verified no-match idle."""
+    mod = _load_capture_mod()
+
+    def run_path(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        name = Path(argv[0]).name
+        if name == "pgrep":
+            return subprocess.CompletedProcess(argv, 1, "", "")
+        if name == "launchctl":
+            return subprocess.CompletedProcess(
+                argv, 70, "", "Bootstrap failed: 5: Input/output error\n"
+            )
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    out = tmp_path / "evidence"
+    with _with_stub_path(tmp_path, ("pgrep", "launchctl", "paseo")):
+        rel, ok = mod.write_live_proofs(out, run=run_path, home=tmp_path / "home")
+
+    assert ok is False
+    acp_run = (out / rel["acp_run_idle"]).read_text(encoding="utf-8")
+    assert "stderr: Bootstrap failed: 5: Input/output error" in acp_run
+    assert "verified: FAILED launchctl (exit 70)" in acp_run
+    assert "verified: no match launchctl" not in acp_run
+    dispatch = (out / rel["acp_dispatch_idle"]).read_text(encoding="utf-8")
+    assert "verified: FAILED launchctl (exit 70)" in dispatch
+
+
+def test_fixture_harness_marks_pgrep_probe_failure_not_idle(tmp_path: Path) -> None:
+    """Empty pgrep stdout with a non-1 exit is FAILED, not verified idle."""
+    mod = _load_capture_mod()
+
+    def run_path(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        name = Path(argv[0]).name
+        if name == "pgrep":
+            return subprocess.CompletedProcess(argv, 3, "", "pgrep: invalid option\n")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    out = tmp_path / "evidence"
+    with _with_stub_path(tmp_path, ("pgrep", "launchctl", "paseo")):
+        rel, ok = mod.write_live_proofs(out, run=run_path, home=tmp_path / "home")
+
+    assert ok is False
+    relay = (out / rel["relay_idle"]).read_text(encoding="utf-8")
+    assert "stderr: pgrep: invalid option" in relay
+    assert "verified: FAILED pgrep" in relay
+    assert "verified: no match" not in relay
 
 
 def test_fixture_follow_up_doc_explains_live_replaces_fixtures() -> None:

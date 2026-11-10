@@ -6,6 +6,9 @@
 Writes the four non-empty `mac_proofs` files that `bin/wave6-delete-check` expects
 (docs/slim/wave6-follow-up.md §B). Idle probes always record `cmd:` plus
 `verified: no match` so a successful idle capture is never an empty file.
+Probe failures (non-idle-capable exits, missing tools, stderr-only errors) are
+recorded as `verified: FAILED …` with diagnostics preserved; the harness then
+exits 1 so a failed capture cannot green `wave6-delete-check` as idle proof.
 
 Modes:
   --live   Run real Mac probes (pgrep / launchctl / acp-dispatch / paseo).
@@ -17,13 +20,15 @@ After a real Mac live cycle, point evidence.json `mac_proofs` at the files this
 tool writes under DIR/proofs/, replacing the checked-in FIXTURE files (which
 must not be used as deletion evidence). Queue Carried item 33 residual.
 
-Exit: 0 wrote live proofs / printed help; 2 usage or refused non-Mac --live;
-      3 probe write failure. Stdlib only.
+Exit: 0 wrote live proofs with every probe succeeding (match or verified idle)
+      / printed help; 1 one or more probes FAILED (proofs still written);
+      2 usage or refused non-Mac --live; 3 probe write failure. Stdlib only.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -45,6 +50,8 @@ FIXTURE_HINT = (
     "replace those with this harness's --live output before the deletion PR"
 )
 
+RunFn = Callable[..., subprocess.CompletedProcess[str]]
+
 
 def die(msg: str, code: int = 2) -> int:
     print(f"{TOOL}: {msg}", file=sys.stderr)
@@ -61,66 +68,123 @@ def _run(argv: list[str], *, timeout: float = 30) -> subprocess.CompletedProcess
     )
 
 
-def capture_relay_idle(run: Callable[..., subprocess.CompletedProcess[str]]) -> str:
+def _append_stderr(lines: list[str], r: subprocess.CompletedProcess[str]) -> None:
+    err = (r.stderr or "").rstrip()
+    if err:
+        lines.append(f"stderr: {err}")
+
+
+def _record_pgrep(
+    lines: list[str],
+    run: RunFn,
+    pattern: str,
+    *,
+    label: str = "pgrep",
+) -> bool:
+    """Append a pgrep probe. True = probe succeeded (match or verified idle)."""
+    lines.append(f"cmd: pgrep -lf {pattern!r}")
+    try:
+        r = run(["pgrep", "-lf", pattern])
+    except OSError as exc:
+        lines.append(
+            f"verified: FAILED {label} ({exc.__class__.__name__}: {exc})"
+        )
+        return False
+    body = (r.stdout or "").rstrip()
+    _append_stderr(lines, r)
+    if body:
+        lines.append(body)
+        lines.append(f"verified: {label} match listed (exit {r.returncode})")
+        return True
+    # pgrep: exit 1 + empty = no match (idle). Any other empty result is failure.
+    if r.returncode == 1:
+        lines.append(f"verified: no match {label} (exit {r.returncode})")
+        return True
+    lines.append(
+        f"verified: FAILED {label} (exit {r.returncode}, empty stdout)"
+    )
+    return False
+
+
+def _record_launchctl(
+    lines: list[str],
+    run: RunFn,
+    needle: str,
+) -> bool:
+    """Append a launchctl list probe filtered for needle. True = probe ok."""
+    lines.append(f"cmd: launchctl list | grep -E {needle!r}")
+    launchctl = shutil.which("launchctl")
+    if launchctl is None:
+        lines.append("verified: FAILED launchctl (launchctl not on PATH)")
+        return False
+    try:
+        listed = run([launchctl, "list"])
+    except OSError as exc:
+        lines.append(
+            f"verified: FAILED launchctl ({exc.__class__.__name__}: {exc})"
+        )
+        return False
+    _append_stderr(lines, listed)
+    if listed.returncode != 0:
+        body = (listed.stdout or "").rstrip()
+        if body:
+            lines.append(body)
+        lines.append(
+            f"verified: FAILED launchctl (exit {listed.returncode})"
+        )
+        return False
+    matches = [
+        ln for ln in (listed.stdout or "").splitlines() if needle in ln
+    ]
+    if matches:
+        lines.extend(matches)
+        lines.append("verified: launchctl match listed")
+        return True
+    lines.append(
+        f"verified: no match launchctl (exit {listed.returncode})"
+    )
+    return True
+
+
+def capture_relay_idle(run: RunFn) -> tuple[str, bool]:
     lines = [
         "source: wave6-mac-proof-capture --live",
         "flag: relay_idle",
-        "cmd: pgrep -lf 'relay\\.py'",
     ]
-    r = run(["pgrep", "-lf", r"relay\.py"])
-    body = (r.stdout or "").rstrip()
-    if body:
-        lines.append(body)
-        lines.append(f"verified: match listed (exit {r.returncode})")
-    else:
-        lines.append(f"verified: no match (exit {r.returncode})")
-    return "\n".join(lines) + "\n"
+    ok = _record_pgrep(lines, run, r"relay\.py")
+    return "\n".join(lines) + "\n", ok
 
 
-def capture_acp_run_idle(run: Callable[..., subprocess.CompletedProcess[str]]) -> str:
+def capture_acp_run_idle(run: RunFn) -> tuple[str, bool]:
     lines = [
         "source: wave6-mac-proof-capture --live",
         "flag: acp_run_idle",
-        "cmd: pgrep -lf 'acp-run'; launchctl list | grep -E 'acp-run'",
     ]
-    r = run(["pgrep", "-lf", "acp-run"])
-    body = (r.stdout or "").rstrip()
-    if body:
-        lines.append(body)
-        lines.append(f"verified: pgrep match listed (exit {r.returncode})")
-    else:
-        lines.append(f"verified: no match pgrep (exit {r.returncode})")
-    # launchctl is Mac-only; keep argv-list form (no shell=True).
-    launchctl = shutil.which("launchctl")
-    if launchctl is None:
-        lines.append("verified: no match launchctl (launchctl not on PATH)")
-    else:
-        listed = run([launchctl, "list"])
-        # Only acp-run for this flag (acp-dispatch has its own proof file).
-        matches = [
-            ln for ln in (listed.stdout or "").splitlines() if "acp-run" in ln
-        ]
-        if matches:
-            lines.extend(matches)
-            lines.append("verified: launchctl match listed")
-        else:
-            lines.append(
-                f"verified: no match launchctl (exit {listed.returncode})"
-            )
-    return "\n".join(lines) + "\n"
+    ok_p = _record_pgrep(lines, run, "acp-run")
+    # Only acp-run for this flag (acp-dispatch has its own proof file / B1 share).
+    ok_l = _record_launchctl(lines, run, "acp-run")
+    return "\n".join(lines) + "\n", ok_p and ok_l
 
 
 def capture_acp_dispatch_idle(
-    run: Callable[..., subprocess.CompletedProcess[str]],
+    run: RunFn,
     *,
     home: Path,
-) -> str:
+) -> tuple[str, bool]:
+    """B1 process/launchd for acp-dispatch + B2 drain (records / labeled agents)."""
     lines = [
         "source: wave6-mac-proof-capture --live",
         "flag: acp_dispatch_idle",
     ]
+    ok = True
+    # B1 (docs/slim/wave6-follow-up.md): process + launchd, not only records.
+    if not _record_pgrep(lines, run, "acp-dispatch"):
+        ok = False
+    if not _record_launchctl(lines, run, "acp-dispatch"):
+        ok = False
+
     state = Path(
-        __import__("os").environ.get(
+        os.environ.get(
             "ACP_DISPATCH_STATE", str(home / ".local/state/bigteam")
         )
     )
@@ -131,29 +195,60 @@ def capture_acp_dispatch_idle(
         lines.append(f"B2: no state dir at {state} (empty)")
     else:
         lines.append(f"cmd: acp-dispatch check {state}")
-        r = run([acp, "check", str(state)])
-        out = ((r.stdout or "") + (r.stderr or "")).rstrip()
-        if out:
-            lines.append(out)
-        lines.append(f"verified: acp-dispatch check exit {r.returncode}")
+        try:
+            r = run([acp, "check", str(state)])
+        except OSError as exc:
+            lines.append(
+                f"verified: FAILED acp-dispatch check "
+                f"({exc.__class__.__name__}: {exc})"
+            )
+            ok = False
+        else:
+            out = ((r.stdout or "") + (r.stderr or "")).rstrip()
+            if out:
+                lines.append(out)
+            if r.returncode != 0:
+                lines.append(
+                    f"verified: FAILED acp-dispatch check (exit {r.returncode})"
+                )
+                ok = False
+            else:
+                lines.append(f"verified: acp-dispatch check exit {r.returncode}")
+
     lines.append("cmd: paseo ls -g --label ade.via=acp-dispatch --json")
     paseo = shutil.which("paseo")
     if paseo is None:
-        lines.append("verified: paseo not on PATH")
+        lines.append("verified: FAILED paseo ls (paseo not on PATH)")
+        ok = False
     else:
-        r = run(
-            [paseo, "ls", "-g", "--label", "ade.via=acp-dispatch", "--json"]
-        )
-        out = ((r.stdout or "") + (r.stderr or "")).rstrip()
-        if out:
-            lines.append(out)
-            lines.append(f"verified: paseo ls exit {r.returncode}")
+        try:
+            r = run(
+                [paseo, "ls", "-g", "--label", "ade.via=acp-dispatch", "--json"]
+            )
+        except OSError as exc:
+            lines.append(
+                f"verified: FAILED paseo ls ({exc.__class__.__name__}: {exc})"
+            )
+            ok = False
         else:
-            lines.append("verified: no match (empty paseo ls)")
-    return "\n".join(lines) + "\n"
+            out = (r.stdout or "").rstrip()
+            _append_stderr(lines, r)
+            if r.returncode != 0:
+                if out:
+                    lines.append(out)
+                lines.append(
+                    f"verified: FAILED paseo ls (exit {r.returncode})"
+                )
+                ok = False
+            elif out:
+                lines.append(out)
+                lines.append(f"verified: paseo ls exit {r.returncode}")
+            else:
+                lines.append("verified: no match (empty paseo ls)")
+    return "\n".join(lines) + "\n", ok
 
 
-def capture_paseo_smoke(run: Callable[..., subprocess.CompletedProcess[str]]) -> str:
+def capture_paseo_smoke(run: RunFn) -> tuple[str, bool]:
     lines = [
         "source: wave6-mac-proof-capture --live",
         "flag: paseo_smoke_ok",
@@ -162,36 +257,52 @@ def capture_paseo_smoke(run: Callable[..., subprocess.CompletedProcess[str]]) ->
     paseo = shutil.which("paseo")
     if paseo is None:
         lines.append("verified: FAILED (paseo not on PATH)")
-        return "\n".join(lines) + "\n"
-    r1 = run([paseo, "send", "--help"])
-    r2 = run([paseo, "run", "--help"])
+        return "\n".join(lines) + "\n", False
+    try:
+        r1 = run([paseo, "send", "--help"])
+        r2 = run([paseo, "run", "--help"])
+    except OSError as exc:
+        lines.append(
+            f"verified: FAILED ({exc.__class__.__name__}: {exc})"
+        )
+        return "\n".join(lines) + "\n", False
     if r1.returncode == 0 and r2.returncode == 0:
         lines.append("verified: paseo send/run --help ok (exit 0)")
-    else:
-        lines.append(
-            f"verified: FAILED (send exit {r1.returncode}, run exit {r2.returncode})"
-        )
-    return "\n".join(lines) + "\n"
+        return "\n".join(lines) + "\n", True
+    _append_stderr(lines, r1)
+    _append_stderr(lines, r2)
+    lines.append(
+        f"verified: FAILED (send exit {r1.returncode}, run exit {r2.returncode})"
+    )
+    return "\n".join(lines) + "\n", False
 
 
 def write_live_proofs(
     out: Path,
     *,
-    run: Callable[..., subprocess.CompletedProcess[str]] = _run,
+    run: RunFn = _run,
     home: Path | None = None,
-) -> dict[str, str]:
-    """Write the four mac proof files under out/proofs/; return relative mac_proofs map."""
+) -> tuple[dict[str, str], bool]:
+    """Write the four mac proof files under out/proofs/.
+
+    Returns (relative mac_proofs map, all_probes_ok). Proofs are always written
+    when the write succeeds; callers must treat all_probes_ok False as a failed
+    capture (exit 1), not as verified idle evidence.
+    """
     proofs = out / "proofs"
     proofs.mkdir(parents=True, exist_ok=True)
     home = home or Path.home()
-    bodies = {
+    bodies: dict[str, tuple[str, bool]] = {
         "relay_idle": capture_relay_idle(run),
         "acp_run_idle": capture_acp_run_idle(run),
         "acp_dispatch_idle": capture_acp_dispatch_idle(run, home=home),
         "paseo_smoke_ok": capture_paseo_smoke(run),
     }
     rel_map: dict[str, str] = {}
-    for flag, body in bodies.items():
+    all_ok = True
+    for flag, (body, ok) in bodies.items():
+        if not ok:
+            all_ok = False
         name = MAC_PROOF_FILES[flag]
         path = proofs / name
         tmp = path.with_suffix(path.suffix + ".tmp")
@@ -200,7 +311,7 @@ def write_live_proofs(
         if path.stat().st_size == 0:
             raise OSError(f"refusing empty proof write: {path}")
         rel_map[flag] = f"proofs/{name}"
-    return rel_map
+    return rel_map, all_ok
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -252,7 +363,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         out = args.out.resolve()
         out.mkdir(parents=True, exist_ok=True)
-        rel_map = write_live_proofs(out)
+        rel_map, probes_ok = write_live_proofs(out)
     except OSError as exc:
         return die(f"write failed: {exc}", code=3)
 
@@ -261,19 +372,32 @@ def main(argv: list[str] | None = None) -> int:
         "mode": "live",
         "out": str(out),
         "mac_proofs": rel_map,
-        "note": "Paste paths into evidence.json mac_proofs; replace FIXTURE files.",
+        "probes_ok": probes_ok,
+        "note": (
+            "Paste paths into evidence.json mac_proofs; replace FIXTURE files."
+            if probes_ok
+            else "Probe FAILED — do not treat these files as verified idle proofs."
+        ),
     }
     if args.json:
         print(json.dumps(payload, indent=2, sort_keys=True))
     else:
-        print(f"{TOOL}: wrote live mac_proofs under {out / 'proofs'}")
+        status = "wrote live mac_proofs" if probes_ok else "PROBE FAILED — wrote diagnostics"
+        print(f"{TOOL}: {status} under {out / 'proofs'}")
         for flag, rel in rel_map.items():
             print(f"  {flag}: {rel}")
-        print(
-            "Next: set evidence.json mac_proofs to these paths, then "
-            "bin/wave6-delete-check --evidence <json>"
-        )
-    return 0
+        if probes_ok:
+            print(
+                "Next: set evidence.json mac_proofs to these paths, then "
+                "bin/wave6-delete-check --evidence <json>"
+            )
+        else:
+            print(
+                f"{TOOL}: refusing exit 0 — fix probe failures before using as "
+                "idle evidence (wave6-delete-check accepts any non-empty file)",
+                file=sys.stderr,
+            )
+    return 0 if probes_ok else 1
 
 
 if __name__ == "__main__":

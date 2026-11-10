@@ -1,7 +1,11 @@
 FIXTURE — NOT live Mac stdout (tests/fixtures/wave6-mac-proofs; Carried #33 residual)
 kind: fixture
 flag: acp_dispatch_idle
-shape: B2 drain / empty paseo ls + verified line
+shape: B1 process/launchd + B2 drain / empty paseo ls + verified line
+cmd: pgrep -lf 'acp-dispatch'
+verified: no match pgrep (fixture stand-in; exit 1)
+cmd: launchctl list | grep -E 'acp-dispatch'
+verified: no match launchctl (fixture stand-in)
 B2: acp-dispatch not on PATH (fixture stand-in)
 cmd: paseo ls -g --label ade.via=acp-dispatch --json
 verified: no match (empty paseo ls) (fixture stand-in)
