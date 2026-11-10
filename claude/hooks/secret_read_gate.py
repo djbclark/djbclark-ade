@@ -1238,10 +1238,12 @@ def check_command(ck: Checker, cmd: str, shell_tool: bool = True):
             # Walk timed out: re-enters set_aside and, with aside_count already 1, raises GlobBudgetExceeded.
             # Walk truncated by GLOB_S / MAX_GLOB_SCAN (e.g. completing dummies already burned GLOB_S while
             # FIRST_PASS_S == GLOB_S): expand ticks, but when WORD/DEADLINE still remain the incomplete walk
-            # used to fall through to an inconclusive pattern check and ALLOW — refuse instead.
-            if ck._glob_budget_hit:
+            # used to fall through to an inconclusive pattern check and ALLOW — refuse relative/cwd words.
+            # Absolute / tilde deep globs already applied pattern_verdict inside _glob_one (B1c); keep that
+            # fallback so a dense `/` tree that burns GLOB_S on /*/*/*/zzqq* does not fail closed.
+            if ck._glob_budget_hit and not (w.startswith("/") or w.startswith("~")):
                 raise GlobBudgetExceeded(w)
-            # Else the walk completed with no hit (verified miss).
+            # Else the walk completed with no hit (verified miss), or absolute/tilde pattern fallback.
     except OutOfTime:
         # Overall budget ended with Bash glob words still unresolved: fail closed (secret paths may remain).
         raise GlobBudgetExceeded(ck.deferred[0] if ck.deferred else (globs[-1] if globs else ""))

@@ -189,10 +189,14 @@ config change).
   `_glob_budget_hit` was only checked on deferred retry, so a first-pass relative word that still had
   `FIRST_PASS_S` rem after the shared clock / entry bound was already exhausted truncated, fell back to an
   inconclusive pattern check, cached allow, and never entered deferred — first-pass truncated relative/cwd
-  walks now fail closed too (absolute deep globs keep the pattern fallback). A word that times out twice, an
+  walks now fail closed too (absolute deep globs keep the pattern fallback). A CI residual the same day:
+  an absolute deep miss (`/*/*/*/zzqq*`) that burned `WORD_S` into deferred, then truncated on `GLOB_S` under
+  a dense `/` tree, was incorrectly refused by the deferred truncate check — deferred truncate fail-closed
+  now matches first-pass and applies only to relative/cwd words; absolute / tilde deep globs keep the
+  pattern fallback. A word that times out twice, an
   overall-budget timeout while Bash glob words remain unchecked, a set-aside word that still needs a walk with
-  no budget left, a deferred walk truncated by `GLOB_S` / the entry bound, or a first-pass relative/cwd walk
-  truncated the same way, exits 2 with
+  no budget left, a deferred relative/cwd walk truncated by `GLOB_S` / the entry bound, or a first-pass
+  relative/cwd walk truncated the same way, exits 2 with
   `glob analysis budget exceeded (fail closed)`: secret paths prefer deny over allow. A later literal path
   (`cat ~/.ssh/id_rsa`) is still checked first and blocks on the deny rule. A directory
   that opens but cannot be read to the end (`/proc/1/map_files`) is skipped by both walks, as the shell and ripgrep
