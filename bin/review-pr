@@ -1,5 +1,5 @@
 #!/usr/bin/env -S python3 -I
-"""review-pr: the local Claude review of a PR's exact head (AGENTS.md review rule 11), through bin/review-launch.
+"""review-pr: the local Claude review of a PR's exact head (docs/code-review.md rule 11), through bin/review-launch.
 
   review-pr PR [--repo OWNER/NAME] [--allow-untrusted] [--model M] [--timeout S] [--no-deadline] [--json]
 

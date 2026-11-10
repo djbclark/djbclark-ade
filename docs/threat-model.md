@@ -198,7 +198,7 @@ others, and the merge path is unenforced. "Control" is what exists; "Gap" is wha
   it when `CURSOR_API_KEY` is absent; `bin/zcode-key-auth` does the same for `ZAI_CODING_PLAN_API_KEY` and
   prints only hashes via `fp()`) or `get` captured into memory, cached per process and never printed
   (`bin/failover.py` `secret_value`). The vault ledger is audited (`audit-verify`, skill file).
-  AGENTS.md, Code review section (PR 9, 2026-10-20), rule 3 forbids a key in argv, a log, a tracked file
+  [docs/code-review.md](code-review.md) (PR 9, 2026-10-20), rule 3 forbids a key in argv, a log, a tracked file
   or a fixture.
 * **Gap 1.** `get` and `export` print values to the caller's stdout; the client does not redact. An
   injected agent that runs them puts values in its transcript. The boundary cannot tell an honest agent
@@ -233,7 +233,7 @@ others, and the merge path is unenforced. "Control" is what exists; "Gap" is wha
 
 ### 4.3 Unenforced review and merge
 
-* **Control (procedure only).** AGENTS.md, Code review section (PR 9, merged 2026-10-20), rule
+* **Control (procedure only).** [docs/code-review.md](code-review.md) (PR 9, merged 2026-10-20), rule
   1 requires the PR body to carry the adversary verdict as a machine-readable marker naming the head
   reviewed (`<!-- adversary-verdict:v1 {...} -->`, since 2026-10-25), and whoever merges to use
   `gh pr merge --squash --match-head-commit <reviewed sha>`. The marker parser (in the PR waiter from
@@ -396,7 +396,7 @@ tampered state file can do is still a finding (section 6 item 6).
 
 ## 6. What a reviewer should check on a PR
 
-Follow the **Code review** section of [AGENTS.md](../AGENTS.md) (PR 9, merged 2026-10-20): rules 1-8 cover the adversary verdict with head SHA, no result through a pipe,
+Follow [docs/code-review.md](code-review.md) (extracted from AGENTS.md; PR 9, merged 2026-10-20): rules 1-8 cover the adversary verdict with head SHA, no result through a pipe,
 secrets only via `sudo-secretspec`, argv lists and `shlex.quote`, macOS and Linux, atomic records, dated
 facts, docs moving with code. Beyond them, raise these for this threat model:
 

@@ -2,8 +2,10 @@
 
 2026-11-06 (slim-down E8, `docs/slim/PLAN.md` E8 as amended by `docs/slim/research/wave4-2026-11-06.md`). Two pieces replace
 the PR waiter and the Codex local review: **`bin/review-launch`**, the only way Claude is launched for a review, and the
-**`adversary-marker` Action**, which turns AGENTS.md review rule 1's marker into a required check. Waiting is
-`gh pr checks PR --watch --required`. The scripts' docstrings are the full reference; this page is the summary.
+**`adversary-marker` Action**, which turns [docs/code-review.md](code-review.md) rule 1's marker into a required
+check. Waiting is `gh pr checks PR --watch --required`. The scripts' docstrings are the full reference; this page
+is the summary. The reviewer checklist (rules 1–11) lives in [code-review.md](code-review.md); AGENTS.md keeps a
+short pointer and the machine-readable marker requirement.
 
 ## What is untrusted (operator, 2026-11-07; restated 2026-11-10: distrust only what is not from the owner or AIs they run)
 
