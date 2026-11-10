@@ -802,13 +802,10 @@ name = "update-auto"
 kind = "ade-sched"
 owner = "djbclark-ade"
 class = "hard"
-label = "com.djbclark.update-auto"
-plist = "config/launchd/com.djbclark.update-auto.plist"
-schedule = "StartInterval 86400"
-command = "bin/ade-update-auto"
-set = ["__STATE__={home}/.local/state/ade"]
+schedule = "daily (plist pending)"
+command = "just update --auto"
 platforms = ["mac", "linux"]
-notes = "S4 first slice: this checkout ff-only + keys observe; skip mid-turn; never --system (multi-component later)."
+notes = "S4: CLI stub landed (ade-update --auto / ade-update-auto observe-only then exit 5 not-implemented); scheduled apply plist still pending (PR 359 check-only gate stands)."
 
 [[install.jobs]]
 name = "harden-check"

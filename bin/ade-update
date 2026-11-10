@@ -852,8 +852,8 @@ def main(argv=None):
     ap.add_argument("--repo", default=DEFAULT_REPO, help=f"the checkout (default {DEFAULT_REPO})")
     ap.add_argument("--check", action="store_true", help="report only; change nothing, exit 10 when behind or links missing")
     ap.add_argument("--auto", action="store_true",
-                    help="S4 first slice: skip when a Paseo agent is mid-turn, then apply this checkout + ade-install keys "
-                         "(multi-component updates later; see bin/ade-update-auto)")
+                    help="S4 stub: observe-only (--check + keys) then exit 5 not-implemented for full auto-apply "
+                         "(see bin/ade-update-auto; daily check remains --check / update-check-install)")
     ap.add_argument("--json", action="store_true", help="print the report as JSON")
     ap.add_argument("--state", default=None, help=f"applied-revision record (default {DEFAULT_STATE}; a non-canonical "
                     "--repo defaults to its own record beside it)")
