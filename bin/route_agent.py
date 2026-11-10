@@ -1173,8 +1173,9 @@ def pi_catalog_models() -> list[str] | None:
     if not exe:
         return None
     try:
+        # A neutral cwd: Pi loads project-local config and extensions from the directory it starts in.
         proc = subprocess.run([exe, "--list-models"], capture_output=True, text=True, timeout=_paseo_timeout(),
-                              stdin=subprocess.DEVNULL, check=False)
+                              stdin=subprocess.DEVNULL, check=False, cwd=os.path.expanduser("~"))
     except (subprocess.TimeoutExpired, OSError):
         return None
     rows = [ln.split() for ln in proc.stdout.splitlines()]
