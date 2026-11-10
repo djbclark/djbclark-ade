@@ -38,6 +38,7 @@ install-print-system-argv *args:
 
 # Canonical names from docs/setup-plan.md (thin wrappers over install-* / ade-update).
 # `just install` defaults to apply dry-run; pass `-- --yes` for live user-scoped apply.
+# doctor includes install.jobs drift (ade-sched scan); never unloads foreign owners.
 doctor:
     "{{ root }}/bin/ade-install" doctor --root "{{ root }}"
 
@@ -54,3 +55,10 @@ update *args:
 update-check-install:
     "{{ root }}/bin/ade-sched" --backend auto install "{{ root }}/config/launchd/com.djbclark.ade-update-check.plist" \
         --set "__STATE__={{ env_var_or_default('HOME', '/tmp') }}/.local/state/ade"
+
+# S4b: ADE-owned jobs inventory and live drift (report only; never unload).
+sched-list:
+    "{{ root }}/bin/ade-sched" list --root "{{ root }}"
+
+sched-diff:
+    "{{ root }}/bin/ade-sched" diff --root "{{ root }}"

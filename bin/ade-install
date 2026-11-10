@@ -55,8 +55,11 @@ def cmd_check(args: argparse.Namespace) -> int:
         s = ai.catalog_summary(catalog)
         print("ade-install check: OK")
         print(f"  path={s['path']}")
-        print(f"  components={s['components']} keys={s['keys']} logins={s['logins']}")
+        print(f"  components={s['components']} keys={s['keys']} logins={s['logins']} "
+              f"jobs={s.get('jobs', 0)} retired_jobs={s.get('retired_jobs', 0)}")
         print(f"  by_class={s['by_class']}")
+        if s.get("jobs_by_owner"):
+            print(f"  jobs_by_owner={s['jobs_by_owner']}")
     return 0
 
 

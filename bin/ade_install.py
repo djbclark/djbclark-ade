@@ -25,9 +25,10 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 BIN = Path(__file__).resolve().parent
 if str(BIN) not in sys.path:
@@ -39,8 +40,13 @@ SCHEMA_VERSION = 1
 LEDGER_SCHEMA_VERSION = 1
 UNKNOWN = "UNKNOWN"
 COMPONENT_CLASSES = frozenset({"hard", "offered", "optional", "suggested", "never"})
+JOB_CLASSES = frozenset({"hard", "offered", "optional"})
+JOB_KINDS = frozenset({"ade-sched", "paseo", "service"})
+PASEO_MODES = frozenset({"auto", "auto-review"})
 # Classes that require an explicit chosen bool in the catalog.
 CHOICE_CLASSES = frozenset({"offered", "optional", "suggested"})
+# ADE may reconcile these later; every other owner is report-only (never unload).
+OWNER_ADE = "djbclark-ade"
 
 # Placeholders expanded in install_argv / update_argv / probe_argv before exec.
 ARGV_TOKENS = ("{bin}", "{root}", "{home}", "{prefix}")
@@ -76,12 +82,26 @@ class Catalog:
     def logins(self) -> list[dict[str, Any]]:
         return list(self.data.get("login") or [])
 
+    @property
+    def jobs(self) -> list[dict[str, Any]]:
+        install = self.data.get("install") or {}
+        if not isinstance(install, dict):
+            return []
+        return list(install.get("jobs") or [])
+
+    @property
+    def retired_jobs(self) -> list[dict[str, Any]]:
+        install = self.data.get("install") or {}
+        if not isinstance(install, dict):
+            return []
+        return list(install.get("retired_jobs") or [])
+
 
 @dataclass(frozen=True)
 class Observation:
-    kind: str  # component | key | login | catalog | settings
+    kind: str  # component | key | login | catalog | settings | job | retired-job
     id: str
-    status: str  # ok | missing | unknown | error | unchosen | never
+    status: str  # ok | missing | unknown | error | unchosen | never | planned | present | foreign
     detail: str
 
 
@@ -221,6 +241,96 @@ def validate_catalog_semantics(data: dict[str, Any], *, path: Path) -> None:
         if not isinstance(logins, list):
             raise InstallError(f"{path}: login must be an array of tables")
         _reject_duplicate_ids(logins, key="id", label=f"{path} login")
+    _validate_install_jobs(data, path=path)
+
+
+def _validate_install_jobs(data: dict[str, Any], *, path: Path) -> None:
+    install = data.get("install")
+    if install is None:
+        return
+    if not isinstance(install, dict):
+        raise InstallError(f"{path}: install must be a table")
+    jobs = install.get("jobs") or []
+    retired = install.get("retired_jobs") or []
+    if jobs and not isinstance(jobs, list):
+        raise InstallError(f"{path}: install.jobs must be an array of tables")
+    if retired and not isinstance(retired, list):
+        raise InstallError(f"{path}: install.retired_jobs must be an array of tables")
+    if isinstance(jobs, list) and jobs:
+        _reject_duplicate_ids(jobs, key="name", label=f"{path} install.jobs")
+    if isinstance(retired, list) and retired:
+        _reject_duplicate_ids(retired, key="name", label=f"{path} install.retired_jobs")
+    for i, row in enumerate(jobs if isinstance(jobs, list) else []):
+        name = row.get("name")
+        kind = row.get("kind")
+        if kind not in JOB_KINDS:
+            raise InstallError(
+                f"{path}: install.jobs[{i}] name={name!r}: "
+                f"kind must be one of {sorted(JOB_KINDS)}, got {kind!r}"
+            )
+        owner = row.get("owner")
+        if not isinstance(owner, str) or not owner:
+            raise InstallError(f"{path}: install.jobs[{i}] name={name!r}: owner required")
+        cls = row.get("class")
+        if cls not in JOB_CLASSES:
+            raise InstallError(
+                f"{path}: install.jobs[{i}] name={name!r}: "
+                f"class must be one of {sorted(JOB_CLASSES)}, got {cls!r}"
+            )
+        if cls in CHOICE_CLASSES and "chosen" not in row:
+            raise InstallError(
+                f"{path}: install.jobs[{i}] name={name!r}: "
+                f"class {cls!r} requires an explicit chosen boolean"
+            )
+        if cls == "hard" and row.get("chosen") is False:
+            raise InstallError(
+                f"{path}: install.jobs[{i}] name={name!r}: hard jobs cannot set chosen=false"
+            )
+        if kind == "paseo":
+            mode = row.get("mode")
+            if mode not in PASEO_MODES:
+                raise InstallError(
+                    f"{path}: install.jobs[{i}] name={name!r}: "
+                    f"paseo jobs require mode in {sorted(PASEO_MODES)}, got {mode!r}"
+                )
+            if not row.get("label"):
+                raise InstallError(
+                    f"{path}: install.jobs[{i}] name={name!r}: paseo jobs require label"
+                )
+        if kind == "ade-sched" and row.get("plist"):
+            plist = row["plist"]
+            if not isinstance(plist, str) or plist.startswith("/") or ".." in Path(plist).parts:
+                raise InstallError(
+                    f"{path}: install.jobs[{i}] name={name!r}: "
+                    "plist must be a relative path without .."
+                )
+        sets = row.get("set")
+        if sets is not None:
+            if not isinstance(sets, list) or not sets:
+                raise InstallError(
+                    f"{path}: install.jobs[{i}] name={name!r}: set must be a non-empty string array"
+                )
+            for j, item in enumerate(sets):
+                if not isinstance(item, str) or "=" not in item:
+                    raise InstallError(
+                        f"{path}: install.jobs[{i}] name={name!r}: "
+                        f"set[{j}] must be KEY=VALUE"
+                    )
+    for i, row in enumerate(retired if isinstance(retired, list) else []):
+        kind = row.get("kind")
+        if kind not in JOB_KINDS:
+            raise InstallError(
+                f"{path}: install.retired_jobs[{i}] name={row.get('name')!r}: "
+                f"kind must be one of {sorted(JOB_KINDS)}, got {kind!r}"
+            )
+        if not isinstance(row.get("owner"), str) or not row.get("owner"):
+            raise InstallError(
+                f"{path}: install.retired_jobs[{i}] name={row.get('name')!r}: owner required"
+            )
+        if not row.get("label"):
+            raise InstallError(
+                f"{path}: install.retired_jobs[{i}] name={row.get('name')!r}: label required"
+            )
 
 
 def load_catalog(
@@ -582,8 +692,10 @@ def doctor(
     runner: Runner | None = None,
     probe_timeout_s: float = 15.0,
     settings_path: Path | None = None,
+    jobs_live: Mapping[str, Any] | None = None,
+    skip_jobs: bool = False,
 ) -> tuple[list[Observation], int]:
-    """Observe-only doctor. Exit 1 if any expected component or settings check is missing/error; never repairs."""
+    """Observe-only doctor. Exit 1 if any expected component/settings/job drifts; never repairs or unloads."""
     obs: list[Observation] = [
         Observation("catalog", str(catalog.path), "ok", "catalog validated"),
     ]
@@ -607,7 +719,38 @@ def doctor(
         obs.append(nudge)
         if nudge.status in ("missing", "error"):
             hard_missing += 1
+    if not skip_jobs and (catalog.jobs or catalog.retired_jobs):
+        # Lazy import: ade_sched is optional at catalog-check time; doctor needs live probes.
+        import ade_sched as sched  # noqa: WPS433
+
+        live = jobs_live
+        if live is None:
+            live = sched.scan_live(paseo_run=_paseo_runner(runner, catalog.root))
+        drift_rows = sched.diff_jobs(
+            catalog.jobs,
+            catalog.retired_jobs,
+            live,
+            unload=False,  # S4b: never unload; foreign owners always report-only
+        )
+        for row in drift_rows:
+            kind = "retired-job" if row.category == "retired" else "job"
+            obs.append(Observation(kind, row.name, row.status, row.detail))
+            if row.fail:
+                hard_missing += 1
     return obs, (1 if hard_missing else 0)
+
+
+def _paseo_runner(
+    runner: Runner | None,
+    root: Path,
+) -> Callable[[list[str]], "subprocess.CompletedProcess[str]"] | None:
+    if runner is None:
+        return None
+
+    def _run(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        return runner(argv, root)
+
+    return _run
 
 
 def expand_argv(
@@ -742,12 +885,19 @@ def catalog_summary(catalog: Catalog) -> dict[str, Any]:
     by_class: dict[str, int] = {}
     for row in catalog.components:
         by_class[row["class"]] = by_class.get(row["class"], 0) + 1
+    jobs_by_owner: dict[str, int] = {}
+    for row in catalog.jobs:
+        owner = str(row.get("owner") or "?")
+        jobs_by_owner[owner] = jobs_by_owner.get(owner, 0) + 1
     return {
         "path": str(catalog.path),
         "schema_version": catalog.data.get("schema_version"),
         "components": len(catalog.components),
         "keys": len(catalog.keys),
         "logins": len(catalog.logins),
+        "jobs": len(catalog.jobs),
+        "retired_jobs": len(catalog.retired_jobs),
+        "jobs_by_owner": jobs_by_owner,
         "by_class": by_class,
         "provenance": catalog.provenance,
     }

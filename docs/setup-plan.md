@@ -299,7 +299,13 @@ Keys are saved with `sudo-secretspec`, and also through Paseo if it has a secure
 Operator, 2026-11-07: install and update manage every scheduled job and service that is reasonable to manage. On the
 card the operator chose "ours, plus checks": djbclark-ade manages its own jobs and checks the rest.
 
-1. **One inventory**, `config/ade.toml [install.jobs]`. Each entry has:
+**Status (2026-11-10, residual inventory + doctor drift):** transitional
+`config/install.toml [[install.jobs]]` / `[[install.retired_jobs]]` (folds into `config/ade.toml [install.jobs]`
+later), `ade-sched list`/`diff`, and `just doctor` / `just sched-diff` observe launchd/systemd/cron/paseo
+without unloading anyone. Full ADE reconcile, ownership ledger writes, and plists for `update --auto` /
+`harden-check` / `keys --check` remain later work under the contracts below.
+
+1. **One inventory**, `config/ade.toml [install.jobs]` (transitional: `config/install.toml [[install.jobs]]`). Each entry has:
    - name;
    - kind: launchd agent, systemd user timer, cron (only where neither of those exists), Paseo schedule, or service;
    - owner: `djbclark-ade`, the site repo, or a dependency;

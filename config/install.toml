@@ -488,3 +488,235 @@ command = "gh auth login"
 id = "sudo-secretspec"
 summary = "sudo-secretspec configured for this machine"
 command = "UNKNOWN"
+
+# --- install.jobs (S4b inventory, 2026-11-10) ---
+# Transitional home of setup-plan [install.jobs] while config/ade.toml is absent.
+# owner=djbclark-ade: ADE may reconcile later. Other owners: doctor reports only; never unload.
+# kind=ade-sched → plist via bin/ade-sched (launchd/systemd/cron by backend). kind=paseo → paseo schedule.
+# kind=service → dependency/site service; observe only.
+
+[[install.jobs]]
+name = "load-watch"
+kind = "ade-sched"
+owner = "djbclark-ade"
+class = "hard"
+label = "com.djbclark.load-watch"
+plist = "launchd/com.djbclark.load-watch.plist"
+schedule = "StartInterval 20"
+command = "bin/load-watch sample"
+platforms = ["mac", "linux"]
+notes = "Historically installed by load-watch install; inventory records ADE ownership (S4b)."
+
+[[install.jobs]]
+name = "deadline-sweep"
+kind = "ade-sched"
+owner = "djbclark-ade"
+class = "hard"
+label = "com.djbclark.deadline-sweep"
+plist = "config/launchd/com.djbclark.deadline-sweep.plist"
+schedule = "StartInterval 60"
+command = "bin/deadline sweep"
+set = ["__STATE__={home}/.local/state/deadlines"]
+platforms = ["mac", "linux"]
+
+[[install.jobs]]
+name = "pr-policy"
+kind = "ade-sched"
+owner = "djbclark-ade"
+class = "hard"
+label = "com.djbclark.pr-policy"
+plist = "config/launchd/com.djbclark.pr-policy.plist"
+schedule = "StartCalendarInterval (see plist)"
+command = "bin/pr-policy"
+set = ["__STATE__={home}/.local/state/pr-policy"]
+platforms = ["mac", "linux"]
+
+[[install.jobs]]
+name = "ade-update-check"
+kind = "ade-sched"
+owner = "djbclark-ade"
+class = "hard"
+label = "com.djbclark.ade-update-check"
+plist = "config/launchd/com.djbclark.ade-update-check.plist"
+schedule = "StartInterval 86400"
+command = "bin/ade-update --check"
+set = ["__STATE__={home}/.local/state/ade"]
+platforms = ["mac", "linux"]
+notes = "Daily check only; never auto-applies (S4 / PR 359)."
+
+[[install.jobs]]
+name = "update-auto"
+kind = "ade-sched"
+owner = "djbclark-ade"
+class = "hard"
+schedule = "daily (plist pending)"
+command = "just update --auto"
+platforms = ["mac", "linux"]
+notes = "S4 daily auto-update; plist/install path not yet recorded (planned)."
+
+[[install.jobs]]
+name = "harden-check"
+kind = "ade-sched"
+owner = "djbclark-ade"
+class = "hard"
+schedule = "daily (plist pending)"
+command = "just harden-check"
+platforms = ["mac", "linux"]
+notes = "S6 read-only drift check; plist/install path not yet recorded (planned)."
+
+[[install.jobs]]
+name = "keys-check"
+kind = "ade-sched"
+owner = "djbclark-ade"
+class = "hard"
+schedule = "with update --auto (plist pending)"
+command = "just keys --check"
+platforms = ["mac", "linux"]
+notes = "S3b; runs from daily update --auto when that job lands."
+
+[[install.jobs]]
+name = "context-budget"
+kind = "paseo"
+owner = "djbclark-ade"
+class = "hard"
+label = "context-budget"
+schedule = "50 3 * * *"
+mode = "auto"
+command = "bin/context-budget-check --instruction-lint (Paseo schedule; see docs/scheduling.md)"
+platforms = ["mac", "linux"]
+notes = "C69; explicit --mode auto required on create."
+
+[[install.jobs]]
+name = "paseo-upstream-pending"
+kind = "paseo"
+owner = "djbclark-ade"
+class = "optional"
+chosen = false
+label = "paseo-upstream-pending"
+schedule = "0 */4 * * *"
+mode = "auto"
+command = "Read fleet-watch upstream-paseo.json; report only (C70)"
+platforms = ["mac", "linux"]
+notes = "Optional operator schedule; doctor quiet when unchosen."
+
+[[install.jobs]]
+name = "paseo-daemon"
+kind = "service"
+owner = "dependency"
+class = "hard"
+label = "paseo"
+command = "paseo daemon (dependency installer)"
+platforms = ["mac", "linux"]
+notes = "Installed by Paseo's own path; doctor observes, ADE never reimplements."
+
+[[install.jobs]]
+name = "herdr-server"
+kind = "service"
+owner = "dependency"
+class = "optional"
+chosen = false
+label = "dev.herdr.server"
+plist = "config/launchd/dev.herdr.server.plist"
+command = "herdr server (if still running)"
+platforms = ["mac"]
+notes = "AGENTS.md: never touch herdr config; inventory records so doctor reports without unloading."
+
+# --- install.retired_jobs (slim-down C7–C16, C18–C19; doctor checks absence) ---
+
+[[install.retired_jobs]]
+name = "claude-fleet-governor"
+kind = "ade-sched"
+owner = "djbclark-ade"
+label = "com.djbclark.claude-fleet-governor"
+notes = "C7 / wave4-E7"
+
+[[install.retired_jobs]]
+name = "claude-quota-guard"
+kind = "ade-sched"
+owner = "djbclark-ade"
+label = "com.djbclark.claude-quota-guard"
+notes = "C7 / wave4-E7"
+
+[[install.retired_jobs]]
+name = "acp-dispatch-reap"
+kind = "ade-sched"
+owner = "djbclark-ade"
+label = "com.djbclark.acp-dispatch-reap"
+notes = "C8 / wave4-E6"
+
+[[install.retired_jobs]]
+name = "skillopt-sleep"
+kind = "ade-sched"
+owner = "djbclark-ade"
+label = "com.djbclark.skillopt-sleep"
+notes = "C9 / wave3-E10"
+
+[[install.retired_jobs]]
+name = "rumination-watch"
+kind = "ade-sched"
+owner = "djbclark-ade"
+label = "com.djbclark.rumination-watch"
+notes = "C10 / wave3-E5"
+
+[[install.retired_jobs]]
+name = "routing-recalibrate"
+kind = "ade-sched"
+owner = "djbclark-ade"
+label = "com.djbclark.routing-recalibrate"
+notes = "C11 / wave3-E5"
+
+[[install.retired_jobs]]
+name = "session-history-update"
+kind = "ade-sched"
+owner = "djbclark-ade"
+label = "com.djbclark.session-history-update"
+notes = "C12 / wave3-E5"
+
+[[install.retired_jobs]]
+name = "context-budget-launchd"
+kind = "ade-sched"
+owner = "djbclark-ade"
+label = "com.djbclark.context-budget"
+notes = "C13; replaced by Paseo schedule context-budget"
+
+[[install.retired_jobs]]
+name = "cpu-watch-family"
+kind = "ade-sched"
+owner = "djbclark-ade"
+label = "com.djbclark.*-cpu-watch"
+notes = "C14; glob match on live labels"
+
+[[install.retired_jobs]]
+name = "watch"
+kind = "ade-sched"
+owner = "djbclark-ade"
+label = "com.djbclark.watch"
+notes = "C15 / wave3b"
+
+[[install.retired_jobs]]
+name = "ade-lander"
+kind = "ade-sched"
+owner = "djbclark-ade"
+label = "com.djbclark.ade-lander"
+notes = "C16 / J11"
+
+[[install.retired_jobs]]
+name = "ade-feeder"
+kind = "ade-sched"
+owner = "djbclark-ade"
+label = "com.djbclark.ade-feeder"
+notes = "C16 / J11"
+
+[[install.retired_jobs]]
+name = "zcode-key-auth"
+kind = "ade-sched"
+owner = "djbclark-ade"
+label = "com.djbclark.zcode-key-auth"
+notes = "C18 / wave2-E9"
+
+[[install.retired_jobs]]
+name = "acpdispatch-n2maskform-reset"
+kind = "ade-sched"
+owner = "djbclark-ade"
+label = "acpdispatch.n2maskform.reset"
+notes = "C19 one-shot"
