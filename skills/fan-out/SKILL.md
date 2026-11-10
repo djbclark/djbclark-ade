@@ -84,6 +84,11 @@ execution worktree and every repository tool call targets it explicitly. Never t
 - `paseo ls -g --label ade.task=TASK` shows what runs; `paseo permit ls` the permission cards.
 - `paseo send --json --no-wait <id> --prompt "…"` reaches a running slice (`accepted`,
   exit 5, is not proof of delivery: ask for an ack).
+- **Push on completion:** after a slice writes `DONE` and touches `{done}`, it must
+  `paseo send --json --no-wait` its requester `done: <title>, <PR URL>` (or
+  `done: <title>, <status>[, <report>]`) plus `Please reply: ack <your agent id>`
+  (footer rule 22). Prefer `bin/completion-notice --send --requester <lead-id>
+  --title TITLE --pr URL` (or `--status` / `--report`) so the shape stays exact.
 - Verify each result against the artifact (the diff, the tests), then record outcomes for
   `route_agent.py calibrate` (ci / review / merged fields in the measured history).
 

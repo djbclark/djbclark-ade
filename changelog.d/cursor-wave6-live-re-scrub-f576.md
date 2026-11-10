@@ -4,3 +4,6 @@
 
 ### Fixed
 - Documented that native `paseo run` fan-out must re-plan per launch until in-flight quota reservation is native; corrected model-routing D5 (#498).
+
+### Fixed
+- Restored fan-out Collect teaching for `bin/completion-notice` / `done: <title>, <PR URL>` after the LIVE_RE scrub (#498).
