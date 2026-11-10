@@ -55,7 +55,7 @@ shims.** Soft deadline for relay / dispatch / `acp-run` removal:
 ### What the operator must supply
 
 1. **Mac live-cycle proofs** — **received 2026-11-10** (bigmac). Still need B2 drain/recapture after lead `0cc34651…` label clears. Do not open the deletion PR on this capture alone.
-2. **C3 row evidence** for the seven open keys in §C: either a migrated probe paste in `c3_proofs.<key>`, or a one-line waive in `docs/slim/log.md` copied into that proof file. **Do not invent waives.** Proposed historical lines for `paseo4herdr` / `sudo_secretspec` are in the Mac archive's `outside-migration-proposals.md` (NOT granted).
+2. **C3 row evidence** for the seven open keys in §C: either a migrated probe paste in `c3_proofs.<key>`, or a one-line waive in `docs/slim/log.md` copied into that proof file. **Do not invent waives.** Proposed historical lines for `paseo4herdr` / `sudo_secretspec` (**C1+C2**, NOT granted) are in [`outside-migration-proposals-2026-11-10.md`](outside-migration-proposals-2026-11-10.md) and the ordered card in [`wave6-cloud-handoff-2026-11-10.md`](wave6-cloud-handoff-2026-11-10.md).
 3. **Extra outside client:** authorize migration of `~/ops/site-private-djbclark/bin/fleet-watch` off `UPSTREAM_RELAY` / `relay.py` (order 11).
 4. **Deletion PR last**: `bin/wave6-delete-check --evidence <json>` must exit 0 (**never** treat `--dry-run`, `--inventory`, FIXTURE, or `--linux-safe` as deletion-ready); keep `bin/review-launch`. No `--allow-early` without explicit yes after C3+Mac complete.
 
