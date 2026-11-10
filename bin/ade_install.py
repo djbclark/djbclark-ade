@@ -1398,13 +1398,13 @@ def plan(catalog: Catalog) -> list[dict[str, Any]]:
             continue
         if row.get("needs_system"):
             sys_argv = pick_system_argv(row)
-            reason = (
-                "needs_system=true; ade-install apply --system --dry-run / "
-                "--print-system-argv shows system_argv; live needs "
-                "--yes --system --apply-system"
-            )
-            resolved = None
             if sys_argv:
+                reason = (
+                    "needs_system=true; ade-install apply --system --dry-run / "
+                    "--print-system-argv shows system_argv; live needs "
+                    "--yes --system --apply-system"
+                )
+                resolved = None
                 try:
                     resolved = expand_argv(sys_argv, root=catalog.root)
                     reason = reason + "; argv=" + " ".join(
@@ -1412,16 +1412,27 @@ def plan(catalog: Catalog) -> list[dict[str, Any]]:
                     )
                 except InstallError as e:
                     reason = f"{reason}; system_argv invalid: {e}"
-            elif row.get("install_argv"):
-                reason = reason + "; system_argv missing (install_argv is user-scoped only)"
-            steps.append({
-                "id": cid,
-                "action": "needs-system",
-                "reason": reason,
-                "needs_system": True,
-                **({"argv": resolved} if resolved else {}),
-            })
-            continue
+                steps.append({
+                    "id": cid,
+                    "action": "needs-system",
+                    "reason": reason,
+                    "needs_system": True,
+                    **({"argv": resolved} if resolved else {}),
+                })
+                continue
+            # No platform system_argv (e.g. Linux sudo-secretspec): fall through
+            # to install_argv when a user-scoped multi-step helper is recorded.
+            if not (isinstance(row.get("install_argv"), list) and row.get("install_argv")):
+                steps.append({
+                    "id": cid,
+                    "action": "needs-system",
+                    "reason": (
+                        "needs_system=true; no system_argv for this platform and "
+                        "no install_argv helper recorded"
+                    ),
+                    "needs_system": True,
+                })
+                continue
         argv = row.get("install_argv")
         if isinstance(argv, list) and argv:
             try:
@@ -1433,13 +1444,19 @@ def plan(catalog: Catalog) -> list[dict[str, Any]]:
                     "reason": str(e),
                 })
                 continue
+            helper_note = (
+                "no system_argv on this platform; ade-install apply --yes runs "
+                "install_argv helper (not system package argv); default is --dry-run"
+                if row.get("needs_system")
+                else "ade-install apply --yes runs install_argv; default is --dry-run"
+            )
             steps.append({
                 "id": cid,
                 "action": "would-install",
                 "reason": " ".join(shlex.quote(a) for a in resolved),
                 "argv": resolved,
-                "needs_system": False,
-                "note": "ade-install apply --yes runs install_argv; default is --dry-run",
+                "needs_system": bool(row.get("needs_system")),
+                "note": helper_note,
             })
             continue
         install = row.get("install") or UNKNOWN
@@ -1639,38 +1656,41 @@ def build_apply_steps(
             steps.append(ApplyStep(cid, "skip", None, f"already present ({obs.detail})"))
             continue
         if row.get("needs_system"):
-            if not allow_system:
+            sys_raw = pick_system_argv(row)
+            if sys_raw:
+                if not allow_system:
+                    steps.append(ApplyStep(
+                        cid, "refuse-system", None,
+                        "needs_system=true; pass --system --dry-run to preview system_argv "
+                        "(live: --yes --system --apply-system)",
+                    ))
+                    continue
+                try:
+                    argv = expand_argv(list(sys_raw), root=catalog.root, prefix=prefix)
+                except InstallError as e:
+                    steps.append(ApplyStep(cid, "blocked", None, str(e)))
+                    continue
+                if apply_system:
+                    reason = "ready for --apply-system (operator opt-in)"
+                else:
+                    reason = (
+                        "system dry-run / preview only; live needs "
+                        "--yes --system --apply-system"
+                    )
                 steps.append(ApplyStep(
-                    cid, "refuse-system", None,
-                    "needs_system=true; pass --system --dry-run to preview system_argv "
-                    "(live: --yes --system --apply-system)",
+                    cid, "would-system-install", argv,
+                    reason,
+                    detail=shlex.join(argv),
                 ))
                 continue
-            sys_raw = pick_system_argv(row)
-            if not sys_raw:
+            # No system_argv on this platform: use install_argv helper when present
+            # (Linux sudo-secretspec multi-step media staging via ade-user-install).
+            if not (isinstance(row.get("install_argv"), list) and row.get("install_argv")):
                 steps.append(ApplyStep(
                     cid, "blocked", None,
-                    "needs_system but no system_argv for this platform",
+                    "needs_system but no system_argv for this platform and no install_argv",
                 ))
                 continue
-            try:
-                argv = expand_argv(list(sys_raw), root=catalog.root, prefix=prefix)
-            except InstallError as e:
-                steps.append(ApplyStep(cid, "blocked", None, str(e)))
-                continue
-            if apply_system:
-                reason = "ready for --apply-system (operator opt-in)"
-            else:
-                reason = (
-                    "system dry-run / preview only; live needs "
-                    "--yes --system --apply-system"
-                )
-            steps.append(ApplyStep(
-                cid, "would-system-install", argv,
-                reason,
-                detail=shlex.join(argv),
-            ))
-            continue
         argv_raw = row.get("install_argv")
         if not isinstance(argv_raw, list) or not argv_raw:
             steps.append(ApplyStep(

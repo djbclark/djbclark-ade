@@ -15,7 +15,7 @@ remains later work (`docs/setup-plan.md` S3).
 | `config/install.toml` | Transitional editable catalog (`schema_version = 1`) |
 | `config/install.schema.json` | Structural schema (checked by `ade-install check`) |
 | `bin/ade_install.py` / `bin/ade-install` | Loader, plan, doctor, apply |
-| `bin/ade_user_install.py` / `bin/ade-user-install` | User-scoped uv/just fetch and `bin/` symlinks |
+| `bin/ade_user_install.py` / `bin/ade-user-install` | User-scoped uv/just fetch, `bin/` symlinks, Linux sudo-secretspec media |
 
 Loaded **only while `config/ade.toml` is absent**. If a unified `ade.toml` is
 present, `ade-install` refuses the transitional file so there is no permanent
@@ -151,6 +151,12 @@ Pass `--ade` only with a durable checkout (`~/src/djbclark-ade`); never with a l
   Exit 0 ok, 1 blocked/failed, 2 system-exec refused / usage.
 - `ade-user-install uv|just|link <name>` fetches GitHub release binaries or
   symlinks a repo `bin/` tool into the prefix. No `shell=True`, no root.
+- `ade-user-install sudo-secretspec` (Linux x86_64): resolve
+  `frdminc/sudo-secretspec` `releases/latest`, fetch the versioned
+  `.tar.gz` + `.sha256`, verify, extract under
+  `{prefix.parent}/lib/sudo-secretspec/<version>/`, report
+  `libexec` install argv. Opt-in privilege step:
+  `--declarations PATH --run-install` (never puts secret values on argv).
 
 ## E. Recorded recipes (2026-11-09)
 
@@ -160,6 +166,7 @@ Pass `--ade` only with a durable checkout (`~/src/djbclark-ade`); never with a l
 | `skill-everywhere`, `firecrawl-router` | `ade-user-install link` into `{prefix}` |
 | `graft` | `npm install -g @nanonets/graft` (user npm prefix) |
 | `git`, `gh` | `needs_system` + Linux `system_argv` (`apt-get`) + `system_argv_darwin` (`brew`); preview or `--apply-system` |
+| `sudo-secretspec` | Mac: `system_argv_darwin` brew tap (`--system` / `--apply-system`). Linux: no `system_argv`; `install_argv` → `ade-user-install sudo-secretspec` (latest → versioned asset → sha256 → extract; libexec install opt-in) |
 | `aiuse` | `uv tool install git+https://github.com/djbclark/aiuse` |
 | `cswap` | `uv tool install claude-swap` (presence `cswap`) |
 | `paseo` | `npm install -g @getpaseo/cli` (CLI only; desktop/daemon later) |
@@ -198,9 +205,11 @@ path (systemd user units + `jobs.json` ownership ledger; dry-run default;
 ## G. Next units
 
 Ownership-aware reconcile beyond the install ledger (setup-plan S3), remaining
-owner installers (sudo-secretspec Linux tarball, curl-free Cursor CLI fetch, Hermes
-offered path — basic setup via `just hermes-setup`, Paseo desktop/daemon and skill bundle), recorded provider
-`verify_argv` recipes in the catalog, collect/set batch. S4b launchd/cron/
-`paseo schedule` reconcile write paths remain later work.
+owner installers (curl-free Cursor CLI fetch, Hermes offered path — basic setup
+via `just hermes-setup`, Paseo desktop/daemon and skill bundle), opt-in
+privilege-boundary `sudo-secretspec install --declarations` as a managed apply
+step (Linux media staging is recorded), recorded provider `verify_argv` recipes
+in the catalog, collect/set batch. S4b launchd/cron/`paseo schedule` reconcile
+write paths remain later work.
 Follow-up: tighten `--apply-system` with an ownership generation / read-back
 lock if multi-agent installs share a machine.
