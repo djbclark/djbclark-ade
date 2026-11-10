@@ -94,7 +94,8 @@ the task, and the ambiguity is copied into every slice.² ³ Every brief has:
    workspace, give the name the GUI shows (`<topic>-pw`) and its id (`wks_…`); for an agent, its agent id too. A GUI
    rename makes a name alone unreliable, and an id alone is unreadable.
 9. **The delivery footer** ([docs/dispatch-footer.md](dispatch-footer.md)): where the report goes, the `.done`
-   marker, and the last line `DONE`, `BLOCKED: …` or `NO-REPORT: …`. Paste the filled contract into every Agent-tool
+   marker, the last line `DONE`, `BLOCKED: …` or `NO-REPORT: …`, and rule 22's push-on-completion
+   `paseo send` (`done: <title>, <PR URL>` or status/report, with named ack; `bin/completion-notice`). Paste the filled contract into every Agent-tool
    or `paseo run` brief (`{report}`, `{lead}`, `{done}`, `{inbox}`, `{replies}`). While `acp-dispatch` still exists,
    `acp-dispatch footer --report PATH` can print a filled copy for prompts only — it is not a launch path and goes with
    the Wave 6 shim deletion.
@@ -214,6 +215,11 @@ paseo run --provider PROVIDER/MODEL --no-wait \
 4. A reply written in your own turn reaches nobody: answer a peer by sending to it. A slice's channel back is its
    report file; a mid-run nudge is `paseo send --json --no-wait <id> --prompt '…'` (plus the ack ask), not a shim
    `tell` subcommand.
+
+5. **Push on completion (2026-11-09).** A delegated slice, once its report is finished and `.done` is touched, tells
+   its requester with `paseo send --json --no-wait` (never relay): two lines, `done: <title>, <PR URL>` (or
+   `done: <title>, <status>[, <report>]`) then `Please reply: ack <its id>`. The dispatch footer rule 22 and
+   `bin/completion-notice` hold the shape; `skills/fan-out` Collect expects it so the lead does not poll.
 
 The transitional `skills/session-finder/relay.py` shim remains until Wave 6 deletion (soft deadline 2026-11-20) —
 do not add new call sites.
