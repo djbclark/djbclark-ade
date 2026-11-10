@@ -158,14 +158,15 @@ Evaluated in order; the module docstring has every form.
    1 = unset) (`hook-config`). A repository's own (local or worktree) `hooksPath` is not refused: the repository chose it
    (husky, pre-commit), the hooks do not run there, and `install` reports it (78). If git answers neither 0 nor 1 (timeout, a
    config file it cannot parse) the call is refused with that reason (`hook-config-unknown`): **the shim fails closed, the
-   hooks fail open**. **acp-run's own config pairs (2026-10-30):** acp-run puts two `GIT_CONFIG_PARAMETERS` entries in every agent's
-   environment, `hook.acp-run-identity.event=reference-transaction` and `hook.acp-run-identity.command=~/.cache/acp-run/git-identity-guard.sh`
+   hooks fail open**. **acp-run's own config pairs (2026-10-30; transitional until Wave 6 deletes `tools/acp-run`):** while
+   `acp-run` still launches agents it puts two `GIT_CONFIG_PARAMETERS` entries in every agent's environment,
+   `hook.acp-run-identity.event=reference-transaction` and `hook.acp-run-identity.command=~/.cache/acp-run/git-identity-guard.sh`
    (a config hook that checks the git identity; a config hook only adds a hook, it cannot switch the hooks directory's off). The
    per-key rule exempts exactly those two pairs from environment configuration (PARAMETERS or legacy COUNT pairs; command value
    shell-decoded as exactly one argument and matched exactly to the expected guard path (or its realpath),
    with canonical shell quoting and no lexical path normalization), spending each environment occurrence once. Another value, a command-line copy via `-c` or
    `--config-env`, and every other `hook.*`,
-   `include*` and `core.hooksPath` key stay refused. **`clone` and `init` copy a template directory (its `config` and `hooks` included) into the new repository
+   `include*` and `core.hooksPath` key stay refused. Native `paseo run` agents do not inherit those pairs. **`clone` and `init` copy a template directory (its `config` and `hooks` included) into the new repository
    (round 11, 2026-10-25; djbclark's ruling): the shim refuses every non-default template source** as `hook-config`: `--template`
    (any abbreviation, `=` or next word), `GIT_TEMPLATE_DIR` in the environment, `init.templateDir` set on the command line, in the
    environment or in any config scope but the repository's own (asked of git like `core.hooksPath`; unanswered is
@@ -246,21 +247,34 @@ analyser (and the Claude PreToolUse hook it was for, W5).
     The durable rule, left to the operator (`docs/queue.md`): refuse `--output*`, `-o` and `--output-directory` on
     `stash show` and `format-patch` when the target lies inside a tree that is not the caller's claimed workspace.
 
-## Refusal, log and override
+## Refusal, log and override (Wave 6 native-Paseo wording 2026-11-09)
 
 A refusal prints the owner, the claim id and a safe alternative, appends one JSON line to `<state>/guard.log` (option names
-from an allowlist only; values never), and exits 77 (a hook refusal makes git exit 128 after the same text). The operator
-allows and logs one call with `ACP_OPERATOR_APPROVED=git-guard` (the convention `bin/acp-dispatch` already uses), in the shim
-and the hooks alike. Other environment: `ADE_REAL_GIT` (skip the PATH search), `ADE_PYTHON` (default `python3`),
-`ADE_STATE_DIR`.
+from an allowlist only; values never), and exits 77 (a hook refusal makes git exit 128 after the same text). Exit 77 is an
+answer, not an obstacle to route around. Ask the claim's owner (a Paseo agent) with native
+
+```sh
+paseo send --json --no-wait OWNER --prompt '…'
+```
+
+(positional id + `--prompt`; ask for `ack <your id>` and prove delivery per AGENTS.md order 10). To edit elsewhere, make
+your own workspace (`paseo run --new-workspace worktree …`), never borrow a claimed one. The one-cycle shim
+`skills/session-finder/relay.py` (over `paseo send`) remains until Wave 6 deletion (soft deadline 2026-11-20;
+[docs/slim/PLAN.md](slim/PLAN.md) F) — do not start new call sites on it. Code refusal strings are the twin of this
+teaching ([#338](https://github.com/djbclark/djbclark-ade/pull/338)).
+
+The operator allows and logs one call with `ACP_OPERATOR_APPROVED=git-guard` (the same env name the transitional
+`bin/acp-dispatch` shim historically used; Wave 6 deletes that shim after one live cycle), in the shim and the hooks
+alike. Other environment: `ADE_REAL_GIT` (skip the PATH search), `ADE_PYTHON` (default `python3`), `ADE_STATE_DIR`.
 
 The shim and the hooks are plain bash 3.2 (macOS `/bin/bash`): no `case` inside `$( )`, no associative arrays; a test runs
 `/bin/bash -n` on them. Since 2026-10-29 macOS CI runs only on a manual `Tests` dispatch with `macos: true`, and Ubuntu's
 `/bin/bash` is bash 5, so that test passes vacuously against bash 3.2 syntax there: a bash 3.2 regression is caught only by a
 `macos: true` dispatch or a local run on the Mac.
 
-On 2026-10-30 acp-run began shell-quoting the identity hook command and checking inherited hook pairs
-before treating a nested launch as guarded. A marker whose PARAMETERS transport was stripped is repaired.
+On 2026-10-30 `acp-run` began shell-quoting the identity hook command and checking inherited hook pairs before treating
+a nested launch as guarded (kept as history while `tools/acp-run` remains; Wave 6 removes it with the dispatch shim). A
+marker whose PARAMETERS transport was stripped is repaired.
 
 ## S4 six-case enforcement pilot (scaffold 2026-11-09; pilot before hard refuse)
 
