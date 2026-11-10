@@ -22,7 +22,7 @@ fully resolved ref name, and a non-zero exit aborts the transaction. So:
    verbs, rename/copy destinations), and **fails closed** on what it cannot read: under the old design a parser miss was a
    bypass, now it is a false refusal with a readable message.
 
-## Integration status (2026-10-25; re-based 2026-11-07; plugin scaffold 2026-11-09; W2 follow-up + W3+W4 draft 2026-11-09; doctor probe 2026-11-10)
+## Integration status (2026-10-25; re-based 2026-11-07; plugin scaffold 2026-11-09; W2 follow-up + W3+W4 draft 2026-11-09; doctor probe + W2 `--ttl`/dry-run 2026-11-10)
 
 The guard, the hooks and the claim library exist; claims carry an owner and expire (`ade_claims.py new --ttl`, default
 72 h; `ade-git-guard claim ls`, slim-down E8). **A thin Paseo plugin lives at
@@ -30,17 +30,27 @@ The guard, the hooks and the claim library exist; claims carry an owner and expi
 
 | Wave | Hook | What |
 |---|---|---|
-| W2 | `worktree.create.after` (waiting) | `ade_claims.py new` from `{ worktree.path, worktree.branch }` plus `git rev-parse HEAD` and optional `remote.origin.url`; then trusted `ade-git-guard install <path>` (soft-fails on exit 73/78 or a missing binary so create is not rolled back). |
+| W2 | `worktree.create.after` (waiting) | `ade_claims.py new --ttl` from `{ worktree.path, worktree.branch }` plus `git rev-parse HEAD` and optional `remote.origin.url` (TTL defaults to 72 h; override with `ADE_CLAIM_TTL`); then trusted `ade-git-guard install <path>` (soft-fails on exit 73/78 or a missing binary so create is not rolled back). `ADE_CLAIM_DRY_RUN=1` observes only: logs the planned argv and skips both `new` and install. |
 | W2 follow-up | `workspace.archive.after` (notification) | If an active claim exists for `workspace.cwd`, run `ade_claims.py release --id` (worktree teardown can still be pending). |
 | W3 | `agent.open.before` (waiting) | If an active claim exists for `request.cwd` **and** is unbound or owned by `request.agentId`, merge `ADE_CLAIM_ID=<claim id>` into the launch env (covers create's first open and resumes; never exports a foreign claim id). |
 | W3 | `agent.create.after` (notification) | If a claim for `agent.cwd` is unbound or already this agent, run `ade_claims.py bind-owner` (refuses overwriting another `owner.agent`). Cannot set env: Paseo's after-hook is fire-and-forget. |
 | W4 | `agent.open.before` (waiting) | Prepend trusted `libexec/agent-bin` to `PATH` so `git` resolves to the `ade-git-guard` shim (`ADE_AGENT_BIN` or `libexec/agent-bin` beside the plugin install). |
 
-The helper path is **not** taken from the agent's worktree (untrusted): only `ADE_CLAIMS_PY` /
+### W2 hook path (design, 2026-11-10)
+
+Paseo fires `worktree.create.after` after a worktree exists on disk. The plugin's pure planner
+(`planWorktreeClaimCreate` in `plugins/ade-claim/server/claim-lib.mjs`) builds
+`python3 <trusted ade_claims.py> new --id … --path … --branch … --base-sha … --created-by paseo-ade-claim-plugin [--repo-origin …] --ttl <hours>`
+without spawning. The live hook then either:
+
+1. **Observe** (`ADE_CLAIM_DRY_RUN=1|true|yes`): log that argv (including `--ttl`) to stderr and return — no registry write, no `ade-git-guard install`. Safe for Mac dry-runs before `paseo plugin install` enables the plugin for real.
+2. **Create**: `spawnSync` the planned argv; on success soft-run trusted `ade-git-guard install <path>`.
+
+Helpers are never taken from the agent's worktree (untrusted): only `ADE_CLAIMS_PY` /
 `ADE_GIT_GUARD` / `ADE_AGENT_BIN` or `bin/ade_claims.py` / `bin/ade-git-guard` / `libexec/agent-bin` beside the
 plugin install. Claim lookup prefers `<git-dir>/ade-claim`, then `ade_claims.py list --json --state active`
 filtered by path. It is **not installed or enabled on the operator Mac yet**; nothing creates, installs or
-releases claims in a live session until `paseo plugin install` wires it. The operator may still run
+releases claims in a live session until `paseo plugin install` wires it (and dry-run stays observe-only even then). The operator may still run
 `ade-git-guard install <repo>` once over `~/src/*` (the dangerous case is agent B in primary P moving Z's
 branch: the hook must be in P; the shim also installs it the first time an agent runs a non-read command there).
 The operator's shell and IDEs never go through the shim.
