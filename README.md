@@ -81,6 +81,7 @@ Skills (23, from each `skills/*/SKILL.md`):
 
 | Skill | What |
 |---|---|
+| [`bottom-config`](skills/bottom-config/SKILL.md) | Edit, strictly validate and preview bottom (`btm`) config; uncapped Command column. |
 | [`ade-update`](skills/ade-update/SKILL.md) | Keep this machine's djbclark-ade checkout current: fast-forward pull, relink missing skills, check CLAUDE.md and ~/.claude links, print the CHANGELOG delta. |
 | [`baton`](skills/baton/SKILL.md) | Start-of-session resume from the Tier 1 pointer: follow session-handoff's Reader protocol for this directory, or its chain discovery when cwd resolves to none. |
 | [`btww`](skills/btww/SKILL.md) | Remind the user which native side-question command this TUI has (Claude Code /btw, Codex /side, and so on), or say that it has none. |
@@ -185,5 +186,3 @@ Skills (23, from each `skills/*/SKILL.md`):
 
 [Old way versus new way](docs/old-way-new-way.md) compares legacy skills with native Paseo,
 records plugin advice, and defines the Linux/macOS cross-host handoff acceptance checks.
-
-| [`bottom-config`](skills/bottom-config/SKILL.md) | Edit, strictly validate and preview the config of bottom (`btm`) and document the uncapped Command column. |
