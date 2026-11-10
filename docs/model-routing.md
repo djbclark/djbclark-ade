@@ -16,6 +16,10 @@ model) and `config/gates.toml [frontier]` (the frontier allowance, `docs/gates.m
 `bin/route_agent.py policy --md` (or `policy` for JSON); no other file restates them.
 A2. `bin/route_agent.py plan --kinds …` applies them to the live quota and prints one `paseo run --provider … --no-wait` line per slice;
 `route`, `show`, `services [--check-models]`, `calibrate`, `substrate` and `hermes-chain` are its other commands.
+A3. **Monthly `good_at` re-rank (2026-11-10):** `route_agent.py calibrate --json --since 30` proposes rank
+deltas from recent dispatch outcomes. The optional Paseo schedule `routing-recalibrate` (Day 1 09:00,
+`--mode auto`) applies those suggestions; inventory + create line in `docs/scheduling.md` and
+`config/install.toml [[install.jobs]]` (Carried #33 residual; launchd job retired in slim-down E5).
 
 ## B. The pools (J2 pool audit, `docs/slim/log.md`, 2026-11-06; grok retired 2026-11-07)
 

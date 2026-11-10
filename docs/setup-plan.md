@@ -316,8 +316,10 @@ without unloading anyone. Full ADE reconcile, ownership ledger writes, and plist
    on Linux, cron otherwise.
    - Today's list: `load-watch sample`, `deadline-sweep`, `pr-policy`, the daily `just update --auto` (S4), the daily
      `just harden-check` (S6) and `just keys --check` (S3b).
-   - Paseo schedules (the context-budget check C69, the upstream check C70) are created, updated or deleted by name
-     with `paseo schedule create|update|delete`, then read back with `paseo schedule ls --json`.
+   - Paseo schedules (the context-budget check C69, the upstream check C70, and optional
+     `routing-recalibrate` monthly `good_at` re-rank from Carried #33 / E5) are created, updated or deleted by name
+     with `paseo schedule create|update|delete`, then read back with `paseo schedule ls --json`
+     (create lines in `docs/scheduling.md`).
    - Re-running is idempotent: an unchanged job is left alone, a changed one is reloaded.
 3. **Dependencies' services** are installed by each dependency's own installer, never re-implemented here: the Paseo
    daemon, aiuse's sampler, and Hermes' gateway and dashboard where Hermes was chosen. `just doctor` checks that each

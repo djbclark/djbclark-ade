@@ -114,12 +114,19 @@ def test_repo_jobs_inventory_loads():
     assert "load-watch" in names
     assert "ade-update-check" in names
     assert "context-budget" in names
+    assert "routing-recalibrate" in names
     retired = {r["name"]: r["label"] for r in catalog.retired_jobs}
     assert retired["skillopt-sleep"] == "com.djbclark.skillopt-sleep"
     assert "*" in retired["cpu-watch-family"]
+    assert retired["routing-recalibrate-launchd"] == "com.djbclark.routing-recalibrate"
+    assert "routing-recalibrate" not in retired
     by_name = {j["name"]: j for j in catalog.jobs}
     assert by_name["context-budget"]["mode"] == "auto"
     assert by_name["paseo-upstream-pending"]["chosen"] is False
+    assert by_name["routing-recalibrate"]["kind"] == "paseo"
+    assert by_name["routing-recalibrate"]["mode"] == "auto"
+    assert by_name["routing-recalibrate"]["chosen"] is False
+    assert by_name["routing-recalibrate"]["schedule"] == "0 9 1 * *"
     summary = ai.catalog_summary(catalog)
     assert summary["jobs"] >= 8
     assert summary["retired_jobs"] >= 10

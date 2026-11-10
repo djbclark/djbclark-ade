@@ -298,7 +298,8 @@ others, and the merge path is unenforced. "Control" is what exists; "Gap" is wha
   `pr-policy install`, or `bin/ade-sched`; `skillopt-night install`, acp-dispatch's reap sweep installer,
   `zcode-key-auth install` and `context-budget-check install` were removed 2026-11-06),
   copied from `launchd/` to `~/Library/LaunchAgents`. No installer was found (2026-10-20) for
-  the monthly routing re-rank plist (deleted 2026-11-06; a Paseo schedule replaces it if wanted). No per-slice jobs remain.
+  the monthly routing re-rank plist (deleted 2026-11-06; optional Paseo schedule `routing-recalibrate` in
+  `config/install.toml` / `docs/scheduling.md`, 2026-11-10). No per-slice jobs remain.
 * **Gap.** A plist in a PR is code that runs as the operator at every login: review label,
   `ProgramArguments`, `WorkingDirectory`, `PATH` (fixed paths under `/Users/djbclark/...`). Every shipped
   plist runs its script from the live checkout, so a change to `bin/load-watch` (every 20 s),
