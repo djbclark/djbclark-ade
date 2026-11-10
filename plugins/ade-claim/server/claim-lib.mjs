@@ -1,7 +1,8 @@
 /**
  * Pure helpers for the ade-claim Paseo plugin (unit-tested without a daemon).
  *
- * W2: worktree.create.after → ade_claims.py new + trusted ade-git-guard install
+ * W2: worktree.create.after → ade_claims.py new --ttl + trusted ade-git-guard install
+ *     (ADE_CLAIM_DRY_RUN observes argv only; ADE_CLAIM_TTL overrides default 72 h)
  * W2 follow-up: workspace.archive.after → ade_claims.py release
  * W3: agent.open.before exports ADE_CLAIM_ID; agent.create.after binds owner
  *     (Paseo's agent.create.after is a notification and cannot change env).
@@ -18,6 +19,84 @@ import { accessSync, constants } from "node:fs";
 import { dirname, join } from "node:path";
 
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+
+/** Matches `bin/ade_claims.py` DEFAULT_TTL_H (72 h; 0 = never). */
+export const DEFAULT_CLAIM_TTL_HOURS = 72;
+
+/** Max TTL hours accepted by ade_claims.py (one year). */
+const MAX_CLAIM_TTL_HOURS = 24 * 366;
+
+/**
+ * Truthy ADE_CLAIM_DRY_RUN (1 / true / yes, case-insensitive): observe-only.
+ * worktree.create.after logs the planned `ade_claims.py new --ttl` argv and
+ * skips both the registry write and ade-git-guard install.
+ *
+ * @param {NodeJS.ProcessEnv | Record<string, string | undefined> | undefined} env
+ */
+export function isAdeClaimDryRun(env = process.env) {
+  const raw = env?.ADE_CLAIM_DRY_RUN;
+  if (typeof raw !== "string") return false;
+  const v = raw.trim().toLowerCase();
+  return v === "1" || v === "true" || v === "yes";
+}
+
+/**
+ * Resolve claim TTL for W2 `ade_claims.py new --ttl`.
+ * Prefers ADE_CLAIM_TTL (hours); otherwise DEFAULT_CLAIM_TTL_HOURS (72).
+ * 0 is allowed (never expire). Invalid values throw.
+ *
+ * @param {NodeJS.ProcessEnv | Record<string, string | undefined> | undefined} env
+ * @returns {number}
+ */
+export function resolveClaimTtlHours(env = process.env) {
+  const raw = env?.ADE_CLAIM_TTL;
+  if (raw == null || raw === "") return DEFAULT_CLAIM_TTL_HOURS;
+  if (typeof raw !== "string") {
+    throw new Error("ADE_CLAIM_TTL must be a string number of hours (or unset)");
+  }
+  const n = Number(raw.trim());
+  if (!Number.isFinite(n) || n < 0 || n > MAX_CLAIM_TTL_HOURS) {
+    throw new Error(
+      `ADE_CLAIM_TTL must be hours in [0, ${MAX_CLAIM_TTL_HOURS}] (0 = never); got ${JSON.stringify(raw)}`,
+    );
+  }
+  return n;
+}
+
+/**
+ * Pure W2 plan for worktree.create.after: argv + dry-run flag.
+ * Safe to call without spawning; dry-run callers log and skip exec.
+ *
+ * @param {WorktreeHookPayload} worktree
+ * @param {{
+ *   adeClaimsScript: string,
+ *   baseSha: string,
+ *   repoOrigin?: string,
+ *   env?: NodeJS.ProcessEnv | Record<string, string | undefined>,
+ *   ttlHours?: number,
+ *   ownerRecord?: string,
+ *   ownerAgent?: string,
+ * }} opts
+ */
+export function planWorktreeClaimCreate(worktree, opts) {
+  const env = opts.env ?? {};
+  const ttlHours = opts.ttlHours !== undefined
+    ? opts.ttlHours
+    : resolveClaimTtlHours(env);
+  const built = buildAdeClaimsNewArgv(worktree, {
+    adeClaimsScript: opts.adeClaimsScript,
+    baseSha: opts.baseSha,
+    repoOrigin: opts.repoOrigin,
+    ttlHours,
+    ownerRecord: opts.ownerRecord,
+    ownerAgent: opts.ownerAgent,
+  });
+  return {
+    ...built,
+    ttlHours,
+    dryRun: isAdeClaimDryRun(env),
+  };
+}
 
 /** @param {unknown} worktree */
 export function parseWorktreePayload(worktree) {
