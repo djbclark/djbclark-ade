@@ -1,9 +1,13 @@
 # Goal Mode (`37chengshan/goal-mode`): paper eval for issue 284 #4
 
-Snapshot **2026-11-09**. Source read at registry head
+Snapshot **2026-11-10** (paper eval started 2026-11-09). Public fetch only: registry
+[paseo.sh/plugins/37chengshan/goal-mode](https://paseo.sh/plugins/37chengshan/goal-mode) and source
+[`37chengshan/paseo-goal-mode`](https://github.com/37chengshan/paseo-goal-mode) at tip
 [`afd07503494c13746a5ca676f6990a9d3db71520`](https://github.com/37chengshan/paseo-goal-mode/commit/afd07503494c13746a5ca676f6990a9d3db71520)
-(`paseo-goal-mode` 0.1.0; listing [paseo.sh/plugins/37chengshan/goal-mode](https://paseo.sh/plugins/37chengshan/goal-mode)).
-**No live Mac install in this eval** (Cloud Agent has no `paseo`; Mac probe is operator-needed).
+(`paseo-goal-mode` 0.1.0; two commits on 2026-10-19; no `LICENSE` / no tests in tree).
+**No live Mac / `~/.paseo` install in this eval** (PLAN I6 / order 11; Cloud Agent has no `paseo`; Mac probe is
+operator-needed). Plugin is **not** on the J6 Wave-3 install list (PLAN I3: unsandboxed daemon code, per-plugin
+source summary before install).
 
 Issue 284 item 4 asked for a **goal / verify-until-pass** loop after `acp-run --verify` retired: opt-in acceptance
 command, Stop hook / skill for interactive sessions, **max 3 attempts**, under `deadline` + `bg`. Queue Carried #1
@@ -72,19 +76,28 @@ collisions with an in-flight turn. Paste those facts back into Carried #1 / this
 | Fan-out: one message at a time, idle-gated | Auto-steer on every finished turn can collide with orchestrator sends |
 | Verify centrally after DONE | Self-report can claim complete with failing tests |
 
-### C3. Verdict (paper, 2026-11-09)
+### C3. Verdict (paper, 2026-11-10): **reject**
 
-1. **Reject as the verify-until-pass replacement.** It does not run verifyCmd and treats model prose as
-   success. Building ADE's loop on top of it would still need an external checker; the plugin would only
-   supply auto-continue noise.
+1. **Reject as the verify-until-pass replacement** (and as Carried #1's goal-loop implementer). It does not
+   run verifyCmd and treats model prose as success. Building ADE's loop on top of it would still need an
+   external checker; the plugin would only supply auto-continue noise. (Adopt / defer do not fit that gap.)
 2. **Do not install on the trusted daemon for that purpose** until a Mac probe (section B) and an operator
-   yes. Auto-continue that steers agents is the same trust class as other unattended prompt senders
-   (`docs/slim/research/plugins-trust-2026-11-06.md`).
+   yes. Auto-continue that steers agents (`activeTurnBehavior: "steer"`) is the same trust class as other
+   unattended prompt senders (`docs/slim/research/plugins-trust-2026-11-06.md`).
 3. **Optional later (separate decision):** interactive "keep working on this tab" after the Mac smoke, with
    `--max` ≤ 3 and never on fan-out worker slices. That is not issue 284 #4.
 4. **Next for 284 #4:** design the small ADE-native path (Stop hook / skill + opt-in verifyCmd under
    `deadline`/`bg`, max 3) without depending on this plugin; keep this page as the reject record.
 
-## D. Mac probe status
+## D. Install surface (evidence)
 
-**Operator-needed** (2026-11-09). Not run from Cloud Agent (`paseo` absent). No install/disable claimed.
+D1. Registry slug: `paseo plugin add 37chengshan/goal-mode` (marketplace page).
+D2. Source package / README: install `37chengshan/paseo-goal-mode` from the plugin browser or CLI with the
+    repo URL (`https://github.com/37chengshan/paseo-goal-mode`).
+D3. Runtime on the daemon host: plugin id `goal-mode`; state `~/.paseo/plugin-state/goal-mode.json`; slash
+    `/goal`; Goals sidebar / command-center screen; `agent.turn_ended` server hook.
+D4. Cloud / this checkout must not run `paseo plugin add` (no second plugin host).
+
+## E. Mac probe status
+
+**Operator-needed** (2026-11-10). Not run from Cloud Agent (`paseo` / `~/.paseo` absent). No install/disable claimed.
