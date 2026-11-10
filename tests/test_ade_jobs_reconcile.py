@@ -413,3 +413,277 @@ def test_cli_refuse_yes_and_dry_run(fake, tmp_path):
     proc = _run_sched("reconcile", "--yes", "--dry-run", env=fake.env, root=root)
     assert proc.returncode == 2
     assert "refuse both" in proc.stderr
+
+
+def test_plan_activates_inactive_timer_even_when_hashes_match(fake, tmp_path):
+    """P1: matching unit files are not skip/adopt while the timer is inactive."""
+    root = _mini_catalog(tmp_path)
+    catalog = ai.load_catalog(root=root)
+    # Install once so artifacts exist, then force is-active -> inactive.
+    results, rc = S.reconcile(
+        catalog.jobs,
+        catalog.retired_jobs,
+        dry_run=False,
+        backend="systemd",
+        root=root,
+        ade=root,
+        env=fake.env,
+        state_dir=fake.state,
+        names={"deadline-sweep"},
+        live=S.LiveScan("systemd", ()),
+        platform_name="linux",
+        allow_no_linger=True,
+    )
+    assert rc == 0, results
+    label = "com.djbclark.deadline-sweep"
+    assert (fake.units / f"{label}.timer").is_file()
+
+    inactive_bin = fake.tmp / "fakebin" / "systemctl"
+    inactive_bin.write_text(
+        inactive_bin.read_text().replace(
+            '  *is-active*) echo active;;\n',
+            '  *is-active*) echo inactive; exit 3;;\n',
+        )
+    )
+    steps = S.plan_reconcile(
+        catalog.jobs,
+        catalog.retired_jobs,
+        ledger=S.load_jobs_ledger(fake.state, env=fake.env),
+        live=S.LiveScan("systemd", (S.LiveJob(label, "systemd", "generated", False),)),
+        backend_name="systemd",
+        root=root,
+        ade=root,
+        env=fake.env,
+        names={"deadline-sweep"},
+        platform_name="linux",
+    )
+    by = {(s.name, s.action): s for s in steps}
+    assert ("deadline-sweep", "install") in by
+    assert ("deadline-sweep", "skip") not in by
+    assert "inactive timer" in by[("deadline-sweep", "install")].detail
+
+
+def test_plan_skips_inactive_oneshot_without_timer(fake, tmp_path):
+    """Completed oneshot services (no timer) may remain inactive and still skip/adopt."""
+    root = tmp_path / "repo-oneshot"
+    (root / "config" / "launchd").mkdir(parents=True)
+    (root / "bin").mkdir(parents=True)
+    (root / "bin" / "tool").write_text("#!/bin/sh\nexit 0\n")
+    (root / "bin" / "tool").chmod(0o755)
+    (root / "config" / "launchd" / "com.djbclark.oneshot.plist").write_text(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.djbclark.oneshot</string>
+  <key>ProgramArguments</key><array>
+    <string>__ADE__/bin/tool</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+</dict></plist>
+""",
+        encoding="utf-8",
+    )
+    (root / "config" / "install.schema.json").write_text(
+        (REPO / "config" / "install.schema.json").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    (root / "config" / "install.toml").write_text(
+        """
+schema_version = 1
+[[component]]
+id = "tool-a"
+class = "hard"
+presence = "python3"
+probe_argv = ["python3", "--version"]
+[[install.jobs]]
+name = "oneshot-job"
+kind = "ade-sched"
+owner = "djbclark-ade"
+class = "hard"
+label = "com.djbclark.oneshot"
+plist = "config/launchd/com.djbclark.oneshot.plist"
+platforms = ["linux"]
+""",
+        encoding="utf-8",
+    )
+    catalog = ai.load_catalog(root=root)
+    results, rc = S.reconcile(
+        catalog.jobs,
+        catalog.retired_jobs,
+        dry_run=False,
+        backend="systemd",
+        root=root,
+        ade=root,
+        env=fake.env,
+        state_dir=fake.state,
+        names={"oneshot-job"},
+        live=S.LiveScan("systemd", ()),
+        platform_name="linux",
+        allow_no_linger=True,
+    )
+    assert rc == 0, results
+    assert (fake.units / "com.djbclark.oneshot.service").is_file()
+    assert not (fake.units / "com.djbclark.oneshot.timer").exists()
+
+    inactive_bin = fake.tmp / "fakebin" / "systemctl"
+    inactive_bin.write_text(
+        inactive_bin.read_text().replace(
+            '  *is-active*) echo active;;\n',
+            '  *is-active*) echo inactive; exit 3;;\n',
+        )
+    )
+    steps = S.plan_reconcile(
+        catalog.jobs,
+        catalog.retired_jobs,
+        ledger=S.load_jobs_ledger(fake.state, env=fake.env),
+        live=S.LiveScan(
+            "systemd",
+            (S.LiveJob("com.djbclark.oneshot", "systemd", "generated", False),),
+        ),
+        backend_name="systemd",
+        root=root,
+        ade=root,
+        env=fake.env,
+        names={"oneshot-job"},
+        platform_name="linux",
+    )
+    assert any(s.action == "skip" and s.name == "oneshot-job" for s in steps)
+
+
+def test_reconcile_preserves_implicit_ade_worktree_refuse(fake, tmp_path, monkeypatch):
+    """P1: ade=ade or root must not turn an implicit ADE into an explicit override."""
+    root = _mini_catalog(tmp_path)
+    catalog = ai.load_catalog(root=root)
+    wt, common = tmp_path / "wt", tmp_path / "main.git" / "worktrees" / "wt"
+    common.mkdir(parents=True)
+    (common / "commondir").write_text("../..\n")
+    (wt).mkdir()
+    (wt / ".git").write_text(f"gitdir: {common}\n")
+    assert S.is_linked_worktree(wt)
+
+    # Point REPO at the linked worktree and call with ade=None (CLI without --ade).
+    monkeypatch.setattr(S, "REPO", wt.resolve())
+    # Catalog plists live under root; copy the ADE path into subst via explicit root files that use __ADE__.
+    job = next(j for j in catalog.jobs if j["name"] == "deadline-sweep")
+    subst = S.job_subst_from_row(job, root=root, env=fake.env)
+    built = S.Job.from_plist(root / job["plist"], subst, ade=None)
+    assert built.worktree == str(wt.resolve())
+
+    steps = S.plan_reconcile(
+        catalog.jobs,
+        catalog.retired_jobs,
+        ledger=S.empty_jobs_ledger(env=fake.env),
+        live=S.LiveScan("systemd", ()),
+        backend_name="systemd",
+        root=root,
+        ade=None,  # implicit — must keep worktree refuse on install
+        env=fake.env,
+        names={"deadline-sweep"},
+        platform_name="linux",
+    )
+    # Plan may still emit install; execute must refuse via job.worktree.
+    assert any(s.action == "install" and s.name == "deadline-sweep" for s in steps)
+    results, rc = S.reconcile(
+        catalog.jobs,
+        catalog.retired_jobs,
+        dry_run=False,
+        backend="systemd",
+        root=root,
+        ade=None,
+        env=fake.env,
+        state_dir=fake.state,
+        names={"deadline-sweep"},
+        live=S.LiveScan("systemd", ()),
+        platform_name="linux",
+        allow_no_linger=True,
+    )
+    assert rc == 1
+    failed = [r for r in results if r["name"] == "deadline-sweep"]
+    assert failed and failed[0]["action"] == "failed"
+    assert "worktree" in failed[0]["detail"]
+    # Explicit --ade still bypasses the refuse (operator choice).
+    built_explicit = S.Job.from_plist(root / job["plist"], subst, ade=wt)
+    assert built_explicit.worktree is None
+
+
+def test_label_change_keeps_old_identity_until_remove(fake, tmp_path):
+    """P2: renaming a label for the same logical name must remove the old timer."""
+    root = _mini_catalog(tmp_path)
+    catalog = ai.load_catalog(root=root)
+    results, rc = S.reconcile(
+        catalog.jobs,
+        catalog.retired_jobs,
+        dry_run=False,
+        backend="systemd",
+        root=root,
+        ade=root,
+        env=fake.env,
+        state_dir=fake.state,
+        names={"deadline-sweep"},
+        live=S.LiveScan("systemd", ()),
+        platform_name="linux",
+        allow_no_linger=True,
+    )
+    assert rc == 0, results
+    old_label = "com.djbclark.deadline-sweep"
+    new_label = "com.djbclark.deadline-sweep-v2"
+    assert (fake.units / f"{old_label}.timer").is_file()
+
+    # Rewrite catalog label + plist Label to the new identity.
+    plist = root / "config" / "launchd" / "com.djbclark.deadline-sweep.plist"
+    plist.write_text(
+        plist.read_text(encoding="utf-8").replace(old_label, new_label),
+        encoding="utf-8",
+    )
+    install_toml = root / "config" / "install.toml"
+    install_toml.write_text(
+        install_toml.read_text(encoding="utf-8").replace(
+            f'label = "{old_label}"',
+            f'label = "{new_label}"',
+            1,
+        ),
+        encoding="utf-8",
+    )
+    catalog2 = ai.load_catalog(root=root)
+    live = S.LiveScan(
+        "systemd",
+        (S.LiveJob(old_label, "systemd", "generated", True),),
+    )
+    steps = S.plan_reconcile(
+        catalog2.jobs,
+        catalog2.retired_jobs,
+        ledger=S.load_jobs_ledger(fake.state, env=fake.env),
+        live=live,
+        backend_name="systemd",
+        root=root,
+        ade=root,
+        env=fake.env,
+        names={"deadline-sweep"},
+        platform_name="linux",
+    )
+    assert any(s.action == "install" and s.label == new_label for s in steps)
+    assert any(s.action == "remove" and s.label == old_label for s in steps)
+
+    results2, rc2 = S.reconcile(
+        catalog2.jobs,
+        catalog2.retired_jobs,
+        dry_run=False,
+        backend="systemd",
+        root=root,
+        ade=root,
+        env=fake.env,
+        state_dir=fake.state,
+        names={"deadline-sweep"},
+        live=live,
+        platform_name="linux",
+        allow_no_linger=True,
+    )
+    assert rc2 == 0, results2
+    assert any(r["action"] == "removed" and r["label"] == old_label for r in results2)
+    assert any(r["action"] == "installed" and r["label"] == new_label for r in results2)
+    assert not (fake.units / f"{old_label}.service").exists()
+    assert (fake.units / f"{new_label}.service").is_file()
+    entry = S.load_jobs_ledger(fake.state, env=fake.env)["entries"]["deadline-sweep"]
+    assert entry["label"] == new_label
+    assert entry["status"] == "committed"
+    assert "prior_identity" not in entry

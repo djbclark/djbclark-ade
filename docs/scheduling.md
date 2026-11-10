@@ -87,8 +87,12 @@ Checked-in ADE jobs under `config/launchd/` include `com.djbclark.deadline-sweep
   (`pending` / `committed` / `pending-remove` / `failed`). Atomic replace; reconcile takes
   `reconcile.lock` beside it.
 - **Install/reload** only ADE-owned expected `kind=ade-sched` rows that have `label` + `plist`.
-  Unchanged healthy units (on-disk hash matches ledger) get no reload. Matching units without a
-  ledger row are adopted into the ledger without reload.
+  Unchanged healthy units (on-disk hash matches ledger **and** the timer is active when a timer is
+  expected) get no reload; an inactive timer with matching files is activated. Completed oneshot
+  services without a timer may stay inactive. Matching active units without a ledger row are
+  adopted into the ledger without reload. Implicit `__ADE__` (no `--ade`) still refuses a linked
+  worktree. A label rename keeps the old ledger identity (`prior_identity`) until that label's
+  removal completes.
 - **Remove** only labels recorded in the ledger as ADE-owned with removal authority
   (`committed` / `pending-remove` / legacy `installed`). Intent-only `pending` is **not** removal
   authority. Retired or dropped-from-inventory labels that are live but **not** in the ledger are

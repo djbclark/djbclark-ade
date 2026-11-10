@@ -1662,6 +1662,74 @@ def _ledger_owns(entry: Mapping[str, Any] | None, *, label: str) -> bool:
     return status in ("committed", "pending-remove", "installed")
 
 
+def _expects_timer(rendered: Rendered) -> bool:
+    """True when the ADE render includes a systemd timer unit (interval/calendar jobs)."""
+    return any(isinstance(p, Path) and p.name.endswith(".timer") for p in rendered.files)
+
+
+def _unit_active_ok(st: Status, *, expects_timer: bool) -> bool:
+    """Matching artifacts are healthy only when the timer is active; completed oneshots may be inactive."""
+    if expects_timer:
+        return bool(st.active)
+    return True
+
+
+def _prior_identity(entry: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """Old ledger identity kept until its removal completes (label rename of the same logical name)."""
+    if not isinstance(entry, dict):
+        return None
+    prior = entry.get("prior_identity")
+    return prior if isinstance(prior, dict) else None
+
+
+def _removal_entry(
+    entries: Mapping[str, Any],
+    name: str,
+    label: str,
+    *,
+    snapshot: Mapping[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Find removal authority for ``label`` under ``name``, including a preserved prior identity."""
+    live = entries.get(name)
+    if isinstance(live, dict) and live.get("label") == label and _ledger_owns(live, label=label):
+        return live
+    prior = _prior_identity(live if isinstance(live, dict) else None)
+    if prior is not None and prior.get("label") == label and _ledger_owns(prior, label=label):
+        return prior
+    if isinstance(snapshot, dict) and snapshot.get("label") == label and _ledger_owns(snapshot, label=label):
+        return dict(snapshot)
+    return None
+
+
+def _with_prior_identity(
+    new_entry: dict[str, Any],
+    prev: Mapping[str, Any] | None,
+    *,
+    new_label: str,
+) -> dict[str, Any]:
+    """Keep the old owned identity when the logical name's label changes before removal finishes."""
+    if not isinstance(prev, dict):
+        return new_entry
+    old_label = prev.get("label")
+    if not isinstance(old_label, str) or not old_label or old_label == new_label:
+        return new_entry
+    if not _ledger_owns(prev, label=old_label):
+        return new_entry
+    keep = {
+        k: prev[k]
+        for k in (
+            "logical_id", "label", "owner", "backend", "scope", "paths",
+            "artifact_hash", "status", "generation", "detail", "updated_at",
+        )
+        if k in prev
+    }
+    # Nested prior from an earlier rename: keep the outermost old label for this transition.
+    nested = _prior_identity(prev)
+    if nested is not None and nested.get("label") not in (None, old_label, new_label):
+        keep = dict(nested)
+    return {**new_entry, "prior_identity": keep}
+
+
 @dataclass(frozen=True)
 class ReconcileStep:
     """One planned reconcile action. touch=True means --yes would mutate host + ledger."""
@@ -1673,6 +1741,7 @@ class ReconcileStep:
     label: str | None = None
     touch: bool = False
     category: str = "job"  # job | retired | foreign | ledger
+    ledger_snapshot: Mapping[str, Any] | None = None  # remove: ownership at plan time
 
 
 def plan_reconcile(
@@ -1767,7 +1836,8 @@ def plan_reconcile(
             continue
         try:
             subst = job_subst_from_row(row, root=root, env=env, extra=extra_subst)
-            job = Job.from_plist(plist_path, subst, ade=ade or root)
+            # Preserve ade=None (implicit checkout): Job.from_* only refuses linked worktrees when ade is unset.
+            job = Job.from_plist(plist_path, subst, ade=ade)
             rendered = render(job, backend_name, env=env, **overrides)
         except SchedError as e:
             steps.append(ReconcileStep(
@@ -1799,14 +1869,16 @@ def plan_reconcile(
             and entry.get("label") == label
             and entry.get("backend") == backend_name
         )
-        if on_disk_match and ledger_match:
+        expects_timer = _expects_timer(rendered)
+        active_ok = _unit_active_ok(st, expects_timer=expects_timer)
+        if on_disk_match and ledger_match and active_ok:
             steps.append(ReconcileStep(
                 name, "skip", owner,
                 f"label {label} healthy (hash match; no reload)",
                 label=label,
             ))
             continue
-        if on_disk_match and not ledger_match:
+        if on_disk_match and not ledger_match and active_ok:
             # Files match ADE render but ledger lacks committed ownership: record without reload.
             steps.append(ReconcileStep(
                 name, "adopt-ledger", owner,
@@ -1815,11 +1887,18 @@ def plan_reconcile(
                 touch=True,
             ))
             continue
-        detail = (
-            f"install/reload label {label} from {plist}"
-            if st.installed else
-            f"install missing label {label} from {plist}"
-        )
+        if on_disk_match and not active_ok:
+            detail = (
+                f"activate inactive timer {label} (units match; hash ok)"
+                if st.installed else
+                f"install missing label {label} from {plist}"
+            )
+        else:
+            detail = (
+                f"install/reload label {label} from {plist}"
+                if st.installed else
+                f"install missing label {label} from {plist}"
+            )
         steps.append(ReconcileStep(
             name, "install", owner, detail, label=label, touch=True,
         ))
@@ -1834,17 +1913,10 @@ def plan_reconcile(
         retired_patterns.append((name, owner, pattern))
 
     # Removals: only labels ADE recorded in the ledger, and only when retired or dropped.
+    # Also remove a preserved prior_identity when the logical name's label changed.
     live_ids = live.ids
-    for logical_id, entry in sorted(entries.items()):
-        if names is not None and logical_id not in names:
-            continue
-        if not isinstance(entry, dict):
-            continue
-        label = entry.get("label")
-        if not isinstance(label, str) or not label:
-            continue
-        if label in expected_labels:
-            continue  # still desired
+
+    def _plan_remove(logical_id: str, entry: Mapping[str, Any], *, label: str) -> None:
         owner = str(entry.get("owner") or "?")
         if owner != OWNER_ADE:
             steps.append(ReconcileStep(
@@ -1853,9 +1925,9 @@ def plan_reconcile(
                 label=label,
                 category="ledger",
             ))
-            continue
+            return
         is_retired = any(_label_matches(pat, label) for _, _, pat in retired_patterns if pat)
-        dropped = not is_retired  # dropped from inventory (or retired without pattern match handled above)
+        dropped = not is_retired
         if not _ledger_owns(entry, label=label):
             steps.append(ReconcileStep(
                 logical_id, "report", owner,
@@ -1864,7 +1936,7 @@ def plan_reconcile(
                 label=label,
                 category="ledger",
             ))
-            continue
+            return
         if not write_ok:
             steps.append(ReconcileStep(
                 logical_id, "refuse-backend", owner,
@@ -1872,7 +1944,7 @@ def plan_reconcile(
                 label=label,
                 category="ledger",
             ))
-            continue
+            return
         why = "retired" if is_retired else ("dropped from inventory" if dropped else "orphan")
         steps.append(ReconcileStep(
             logical_id, "remove", owner,
@@ -1880,7 +1952,27 @@ def plan_reconcile(
             label=label,
             touch=True,
             category="retired" if is_retired else "ledger",
+            ledger_snapshot=dict(entry),
         ))
+
+    for logical_id, entry in sorted(entries.items()):
+        if names is not None and logical_id not in names:
+            continue
+        if not isinstance(entry, dict):
+            continue
+        label = entry.get("label")
+        if isinstance(label, str) and label and label not in expected_labels:
+            _plan_remove(logical_id, entry, label=label)
+        prior = _prior_identity(entry)
+        if prior is not None:
+            prior_label = prior.get("label")
+            if (
+                isinstance(prior_label, str)
+                and prior_label
+                and prior_label not in expected_labels
+                and not any(s.action == "remove" and s.label == prior_label for s in steps)
+            ):
+                _plan_remove(logical_id, prior, label=prior_label)
 
     # Retired live but not ledger-owned: report only (never unload).
     for name, owner, pattern in retired_patterns:
@@ -2074,7 +2166,13 @@ def reconcile(
         generation = int(ledger.get("generation") or 0) + 1
         entries: dict[str, Any] = dict(ledger.get("entries") or {})
 
-        for step in steps:
+        # Removals first so a label rename keeps the old ledger identity until unload completes.
+        ordered_steps = (
+            [s for s in steps if s.action == "remove"]
+            + [s for s in steps if s.action != "remove"]
+        )
+
+        for step in ordered_steps:
             row: dict[str, Any] = {
                 "name": step.name,
                 "action": step.action,
@@ -2106,7 +2204,7 @@ def reconcile(
                     continue
                 try:
                     subst = job_subst_from_row(job_row, root=root, env=env, extra=extra_subst)
-                    job = Job.from_plist(root / str(job_row["plist"]), subst, ade=ade or root)
+                    job = Job.from_plist(root / str(job_row["plist"]), subst, ade=ade)
                     rendered = render(job, b, env=env, **overrides)
                     ah = artifact_hash(rendered.files)
                 except SchedError as e:
@@ -2116,15 +2214,20 @@ def reconcile(
                     failed += 1
                     results.append(row)
                     continue
-                entries[step.name] = _entry_for_install(
-                    name=step.name,
-                    label=label,
-                    backend=b.name,
-                    paths=[str(p) for p in rendered.files],
-                    artifact=ah,
-                    generation=generation,
-                    status="committed",
-                    detail="adopted existing matching units",
+                prev = entries.get(step.name) if isinstance(entries.get(step.name), dict) else None
+                entries[step.name] = _with_prior_identity(
+                    _entry_for_install(
+                        name=step.name,
+                        label=label,
+                        backend=b.name,
+                        paths=[str(p) for p in rendered.files],
+                        artifact=ah,
+                        generation=generation,
+                        status="committed",
+                        detail="adopted existing matching units",
+                    ),
+                    prev if isinstance(prev, dict) else None,
+                    new_label=label,
                 )
                 mutated = True
                 row["action"] = "adopted"
@@ -2142,7 +2245,7 @@ def reconcile(
                     continue
                 try:
                     subst = job_subst_from_row(job_row, root=root, env=env, extra=extra_subst)
-                    job = Job.from_plist(root / str(job_row["plist"]), subst, ade=ade or root)
+                    job = Job.from_plist(root / str(job_row["plist"]), subst, ade=ade)
                     rendered = render(job, b, env=env, **overrides)
                     ah = artifact_hash(rendered.files)
                 except SchedError as e:
@@ -2152,15 +2255,20 @@ def reconcile(
                     failed += 1
                     results.append(row)
                     continue
+                prev = entries.get(step.name) if isinstance(entries.get(step.name), dict) else None
                 # Pending intent before any host write (setup-plan contract 4).
-                entries[step.name] = _entry_for_install(
-                    name=step.name,
-                    label=label,
-                    backend=b.name,
-                    paths=[str(p) for p in rendered.files],
-                    artifact=ah,
-                    generation=generation,
-                    status="pending",
+                entries[step.name] = _with_prior_identity(
+                    _entry_for_install(
+                        name=step.name,
+                        label=label,
+                        backend=b.name,
+                        paths=[str(p) for p in rendered.files],
+                        artifact=ah,
+                        generation=generation,
+                        status="pending",
+                    ),
+                    prev if isinstance(prev, dict) else None,
+                    new_label=label,
                 )
                 ledger["entries"] = entries
                 ledger["generation"] = generation
@@ -2175,15 +2283,19 @@ def reconcile(
                     if not st.installed:
                         raise SchedError(EX_ACTIVATE, f"read-back: {label} not installed after install")
                 except SchedError as e:
-                    entries[step.name] = _entry_for_install(
-                        name=step.name,
-                        label=label,
-                        backend=b.name,
-                        paths=[str(p) for p in rendered.files],
-                        artifact=ah,
-                        generation=generation,
-                        status="failed",
-                        detail=str(e),
+                    entries[step.name] = _with_prior_identity(
+                        _entry_for_install(
+                            name=step.name,
+                            label=label,
+                            backend=b.name,
+                            paths=[str(p) for p in rendered.files],
+                            artifact=ah,
+                            generation=generation,
+                            status="failed",
+                            detail=str(e),
+                        ),
+                        prev if isinstance(prev, dict) else None,
+                        new_label=label,
                     )
                     ledger["entries"] = entries
                     save_jobs_ledger(ledger, state_dir, env=env)
@@ -2193,7 +2305,7 @@ def reconcile(
                     failed += 1
                     results.append(row)
                     continue
-                entries[step.name] = _entry_for_install(
+                committed = _entry_for_install(
                     name=step.name,
                     label=label,
                     backend=b.name,
@@ -2202,6 +2314,15 @@ def reconcile(
                     generation=generation,
                     status="committed",
                 )
+                # Preserve prior_identity across pending -> committed if remove has not cleared it yet.
+                cur = entries.get(step.name)
+                if isinstance(cur, dict) and _prior_identity(cur) is not None:
+                    committed = {**committed, "prior_identity": cur["prior_identity"]}
+                else:
+                    committed = _with_prior_identity(
+                        committed, prev if isinstance(prev, dict) else None, new_label=label,
+                    )
+                entries[step.name] = committed
                 ledger["entries"] = entries
                 save_jobs_ledger(ledger, state_dir, env=env)
                 mutated = True
@@ -2210,8 +2331,10 @@ def reconcile(
                 continue
 
             if step.action == "remove":
-                entry = entries.get(step.name)
-                if not _ledger_owns(entry if isinstance(entry, dict) else None, label=label):
+                entry = _removal_entry(
+                    entries, step.name, label, snapshot=step.ledger_snapshot,
+                )
+                if entry is None:
                     row["ok"] = False
                     row["action"] = "report"
                     row["detail"] = (
@@ -2221,13 +2344,21 @@ def reconcile(
                     # Not a hard failure of the run: safety refusal.
                     results.append(row)
                     continue
-                assert isinstance(entry, dict)
-                entries[step.name] = {
-                    **entry,
-                    "status": "pending-remove",
-                    "updated_at": _utc_now(),
-                    "generation": generation,
-                }
+                live = entries.get(step.name)
+                if isinstance(live, dict) and live.get("label") == label:
+                    entries[step.name] = {
+                        **live,
+                        "status": "pending-remove",
+                        "updated_at": _utc_now(),
+                        "generation": generation,
+                    }
+                elif isinstance(live, dict) and _prior_identity(live) is not None:
+                    # New label already claimed this logical_id; mark only the preserved identity.
+                    prior = dict(live["prior_identity"])
+                    prior["status"] = "pending-remove"
+                    prior["updated_at"] = _utc_now()
+                    prior["generation"] = generation
+                    entries[step.name] = {**live, "prior_identity": prior}
                 ledger["entries"] = entries
                 ledger["generation"] = generation
                 save_jobs_ledger(ledger, state_dir, env=env)
@@ -2237,13 +2368,22 @@ def reconcile(
                     if st.installed:
                         raise SchedError(EX_ACTIVATE, f"read-back: {label} still installed after uninstall")
                 except SchedError as e:
-                    entries[step.name] = {
-                        **entry,
-                        "status": "failed",
-                        "detail": str(e),
-                        "updated_at": _utc_now(),
-                        "generation": generation,
-                    }
+                    live = entries.get(step.name)
+                    if isinstance(live, dict) and live.get("label") == label:
+                        entries[step.name] = {
+                            **entry,
+                            "status": "failed",
+                            "detail": str(e),
+                            "updated_at": _utc_now(),
+                            "generation": generation,
+                        }
+                    elif isinstance(live, dict) and _prior_identity(live) is not None:
+                        prior = dict(entry)
+                        prior["status"] = "failed"
+                        prior["detail"] = str(e)
+                        prior["updated_at"] = _utc_now()
+                        prior["generation"] = generation
+                        entries[step.name] = {**live, "prior_identity": prior}
                     ledger["entries"] = entries
                     save_jobs_ledger(ledger, state_dir, env=env)
                     row["ok"] = False
@@ -2252,7 +2392,13 @@ def reconcile(
                     failed += 1
                     results.append(row)
                     continue
-                entries.pop(step.name, None)
+                live = entries.get(step.name)
+                if isinstance(live, dict) and live.get("label") == label:
+                    entries.pop(step.name, None)
+                elif isinstance(live, dict) and _prior_identity(live) is not None:
+                    cleared = dict(live)
+                    cleared.pop("prior_identity", None)
+                    entries[step.name] = cleared
                 ledger["entries"] = entries
                 save_jobs_ledger(ledger, state_dir, env=env)
                 mutated = True
