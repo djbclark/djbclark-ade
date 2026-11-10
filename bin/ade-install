@@ -11,7 +11,8 @@ Doctor runs recorded probe_argv when present (else PATH presence); never
 repairs. Apply defaults to --dry-run; --yes runs user install_argv.
 --system --dry-run previews system_argv; executing system_argv is refused.
 Secrets are never read.
-Uses config/install.toml only while config/ade.toml is absent.
+Prefers folded [install] via ade_config.load_effective (ade.toml ± local.toml);
+falls through to config/install.toml when [install] is absent.
 See docs/install-catalog.md.
 """
 from __future__ import annotations

@@ -23,8 +23,11 @@ and `bin/review-launch` read the `secret_deny` domain, and `bin/pr-policy` reads
 repo base; legacy split TOMLs remain for fallthrough when it is absent.
 **2026-11-10 (stacked, scout B1):** `ade-config fold` also projects
 `config/install.toml` under `[install]` (component/key/login). `ade-install`
-prefers the folded catalog and falls through to transitional `install.toml` when
-`ade.toml` is absent or lacks `[install]`.
+loads the folded catalog through `ade_config.load_effective` (so
+`~/.config/djbclark-ade/local.toml` `[install]` overlays apply) and falls
+through to transitional `install.toml` when `ade.toml` is absent or lacks
+`[install]`; a present but empty or invalid `[install]` fails validation
+instead of falling through.
 **2026-11-10 (stacked, scout B3):** CI's `context-policy` job runs
 `ade-config fold --check` so a PR that edits a legacy mirror
 (`secret-deny.toml` / `pr-policy.toml` / `install.toml`, or any other folded

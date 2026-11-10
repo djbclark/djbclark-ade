@@ -8,7 +8,7 @@ commit the unified file from those legacy domains and from transitional
 ``config/install.toml`` under ``[install]``. Consumers adopt via
 ``load_effective`` (``route_agent``, ``ade_gates.load_frontier``,
 ``context-budget-check``, ``render-secret-deny``, ``review-launch``, ``pr-policy``, …)
-and ``ade_install.load_catalog`` (prefers folded ``[install]``).
+and ``ade_install.load_catalog`` (prefers effective folded ``[install]``).
 
 Public:
   load_effective(...) -> EffectiveConfig

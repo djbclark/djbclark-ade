@@ -11,15 +11,18 @@ reconciliation and `--system` root effects remain later work
 | File | Role |
 | --- | --- |
 | `config/ade.toml` `[install]` | Preferred editable catalog when present (`[[install.component]]` / `[[install.key]]` / `[[install.login]]`) |
+| `~/.config/djbclark-ade/local.toml` `[install]` | Untracked overlay merged by `ade_config.load_effective` (arrays replace whole) before `ade-install` validates |
 | `config/install.toml` | Legacy fold source and fallthrough when `ade.toml` is absent or lacks `[install]` |
 | `config/install.schema.json` | Structural schema (checked by `ade-install check` on either source) |
 | `bin/ade_install.py` / `bin/ade-install` | Loader, plan, doctor, apply |
 | `bin/ade_user_install.py` / `bin/ade-user-install` | User-scoped uv/just fetch and `bin/` symlinks |
 
 `ade-config fold --write` projects `config/install.toml` under `[install]`.
-`ade-install` prefers the folded catalog; transitional `install.toml` remains so
-a missing unified file still loads. `fold --check` keeps the two in sync while
-both are kept.
+`ade-install` loads the folded catalog through `ade_config.load_effective` so
+local.toml `[install]` overlays apply to plan/doctor/apply; transitional
+`install.toml` remains when the unified file is absent or has no `[install]`
+key. A present but empty or invalid `[install]` fails validation instead of
+falling through. `fold --check` keeps the two in sync while both are kept.
 
 ## B. Component classes
 
