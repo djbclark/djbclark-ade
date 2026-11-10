@@ -1,7 +1,7 @@
 # Wave 6 follow-up — shim and `acp-run` deletion readiness
 
-Snapshot: 2026-11-10 (Mac proof harness + FIXTURE bundle + `--dry-run`
-FAILCLOSED shape path; live Mac cycle still pending). Queue Carried
+Snapshot: 2026-11-10 (status: C3 `--dry-run` FIXTURE path ready via #441;
+Mac live cycle still blocked; soft delete ~2026-11-20). Queue Carried
 **item 33**. The slim-down's Wave 6 **shipped the shims** (`docs/slim/PLAN.md`
 F). This doc is the **deletion readiness** checklist for the follow-up PR that
 removes `skills/session-finder/relay.py`, `bin/acp-dispatch`, and
@@ -20,6 +20,33 @@ keeps `ready: false` even when exit 0. Mac capture harness:
 Mac stdout elsewhere). Run `--evidence` on **live** captures before opening
 the deletion PR. New code already calls Paseo directly (`paseo send`,
 `paseo run`).
+
+## Status (2026-11-10) — current open work
+
+Queue Carried **[item 33](../queue.md)** residual. **Nothing here deletes the
+shims.** Soft deadline for relay / dispatch / `acp-run` removal:
+**~2026-11-20** (sooner only when every gate below is green).
+
+| Gate | State | Where / why |
+|---|---|---|
+| C3 dry-run FIXTURE path | **ready** | [#441](https://github.com/djbclark/djbclark-ade/pull/441): `bin/wave6-delete-check --dry-run` + labeled `tests/fixtures/wave6-mac-proofs/`; exit 0 proves shape only (`ready` stays `false`) |
+| Mac live cycle | **blocked** | No Darwin host on this cloud/CI path; harness refuses invented Mac stdout. Needs an operator Mac run of `bin/wave6-mac-proof-capture --live` (§B / §B0) |
+| In-repo callers (§A) | **open** | Wave 6 rewrite PRs still in flight; full `wave6-delete-check` (no `--dry-run`) still fails `callers_*` until they land and merge |
+| C3 outside migrations (§C) | **open / operator** | Order 11: probes on outside checkouts + migrate/waive proof files; not inventable from CI |
+| Soft delete deadline | **~2026-11-20** | `test_the_shim_is_removed_by_2026_11_20`; deletion PR waits on green evidence |
+
+### What the operator must supply
+
+1. **Mac live-cycle proofs** (Darwin only): `bin/wave6-mac-proof-capture --live --out DIR --json`, then merge printed `mac_proofs` into a real `evidence.json` (not the FIXTURE bundle) and paste B1–B3 stdout into the deletion PR.
+2. **C3 row evidence** for each outside path in §C: either a migrated probe paste in `c3_proofs.<key>`, or a one-line waive in `docs/slim/log.md` copied into that proof file.
+3. **Land the readiness stack** before the deletion PR: #398 (checklist + gate) → #417 (FAILCLOSED proof files) → #441 (Mac harness + FIXTURE `--dry-run`) → this status update; merge remaining §A caller-rewrite PRs until `callers_skills` / `callers_loose` are green.
+4. **Deletion PR last**: `bin/wave6-delete-check --evidence <json>` must exit 0 (**never** treat `--dry-run` as deletion-ready); keep `bin/review-launch`.
+
+### Readiness stack (open, do not merge as delete)
+
+- [#398](https://github.com/djbclark/djbclark-ade/pull/398) — delete-readiness checklist + `bin/wave6-delete-check`
+- [#417](https://github.com/djbclark/djbclark-ade/pull/417) — C3/Mac proof-file FAILCLOSED evidence
+- [#441](https://github.com/djbclark/djbclark-ade/pull/441) — Mac harness + FIXTURE `--dry-run` path (base of this status doc)
 
 ## A. Remaining in-repo callers (must be gone or archived before delete)
 
@@ -360,6 +387,7 @@ Do not start (3) until (2) is green and C3 is ticked or waived.
 
 ## G. Links
 
+- Status (open work): [§Status](#status-2026-11-10--current-open-work) above
 - Plan: [PLAN.md](PLAN.md) F Wave 6, E3, E6, C3, I1, I2, I8
 - Ledger: [ledger.md](ledger.md) A4 (`agent_guard.py`)
 - Queue: [../queue.md](../queue.md) Carried item 33
@@ -367,3 +395,4 @@ Do not start (3) until (2) is green and C3 is ticked or waived.
 - Mac harness: [`bin/wave6-mac-proof-capture`](../../bin/wave6-mac-proof-capture)
 - FIXTURE bundle (NOT live): [`tests/fixtures/wave6-mac-proofs/`](../../tests/fixtures/wave6-mac-proofs/)
 - Standing orders: [../../AGENTS.md](../../AGENTS.md) 10 and "Two shims"
+- Stack: [#398](https://github.com/djbclark/djbclark-ade/pull/398) → [#417](https://github.com/djbclark/djbclark-ade/pull/417) → [#441](https://github.com/djbclark/djbclark-ade/pull/441)
