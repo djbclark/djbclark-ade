@@ -5,18 +5,18 @@
   ade-install catalog [--root DIR] [--json]
   ade-install plan [--root DIR] [--json]
   ade-install doctor [--root DIR] [--json]
-  ade-install keys [--root DIR] [--json]
+  ade-install keys [--root DIR] [--json] [--keys-state PATH]
   ade-install apply [--root DIR] [--json] [--dry-run|--yes] [--id ID ...] [--force]
                     [--system] [--print-system-argv] [--apply-system]
 
 Doctor runs recorded probe_argv when present (else PATH presence) and, when
 agents/claude/settings.json.tmpl is under --root, checks live
 ~/.claude/settings.json for context_size_nudge.py registration; never
-repairs or mutates settings. Keys is observe-only presence via
-sudo-secretspec check (no values). Apply defaults to --dry-run; --yes runs
-user install_argv. --system --dry-run / --print-system-argv preview
-system_argv. Live system_argv needs --yes --system --apply-system
-(default refuse). Secrets are never read.
+repairs or mutates settings. Keys runs sudo-secretspec check, then per-key
+verify_argv under sudo-secretspec run when recorded (no values printed).
+Apply defaults to --dry-run; --yes runs user install_argv. --system --dry-run /
+--print-system-argv preview system_argv. Live system_argv needs --yes --system
+--apply-system (default refuse). Secrets are never read.
 Uses config/install.toml only while config/ade.toml is absent.
 See docs/install-catalog.md.
 """
@@ -142,7 +142,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 def cmd_keys(args: argparse.Namespace) -> int:
     try:
         catalog = ai.load_catalog(root=Path(args.root) if args.root else None)
-        observations, rc = ai.keys_observe(catalog)
+        state = Path(args.keys_state) if getattr(args, "keys_state", None) else None
+        observations, rc = ai.keys_observe(catalog, keys_state_path=state)
     except ai.InstallError as e:
         if args.json:
             _print_json({"ok": False, "errors": [str(e)]})
@@ -157,13 +158,16 @@ def cmd_keys(args: argparse.Namespace) -> int:
                 {"kind": o.kind, "id": o.id, "status": o.status, "detail": o.detail}
                 for o in observations
             ],
-            "note": "observe-only; sudo-secretspec check only; no get/export/set/verify",
+            "note": (
+                "observe-only; sudo-secretspec check then verify_argv under "
+                "sudo-secretspec run; no get/export/set; no values printed"
+            ),
         })
     else:
         print(
             "ade-install keys: "
             + ("OK" if rc == 0 else "FAIL")
-            + " (observe-only; no values; no verify probes yet)"
+            + " (observe-only; no values; verify under sudo-secretspec run when recorded)"
         )
         for o in observations:
             print(f"  {o.status:9} {o.kind}/{o.id}: {o.detail}")
@@ -268,11 +272,18 @@ def main(argv: list[str] | None = None) -> int:
         (
             "keys",
             cmd_keys,
-            "observe-only key presence via sudo-secretspec check; never reads values",
+            "sudo-secretspec check + per-key verify_argv under run; never prints values",
         ),
     ):
         p = sub.add_parser(name, parents=[shared], help=help_text)
         p.add_argument("--json", action="store_true")
+        if name == "keys":
+            p.add_argument(
+                "--keys-state",
+                default=None,
+                help="outcomes JSON path (default ~/.local/state/djbclark-ade/keys.json "
+                "or ADE_KEYS_STATE_PATH); never stores values",
+            )
         p.set_defaults(func=func)
 
     ap = sub.add_parser(

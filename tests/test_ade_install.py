@@ -521,29 +521,7 @@ def test_repo_template_registers_context_size_nudge_events():
     assert events == {"PostToolUse", "UserPromptSubmit"}
 
 
-def test_keys_observe_missing_binary_is_unknown(tmp_path, monkeypatch):
-    root = _fixture_root(tmp_path)
-    catalog = ai.load_catalog(root=root)
-    monkeypatch.setattr(ai.shutil, "which", lambda _name: None)
-    obs, rc = ai.keys_observe(catalog)
-    assert rc == 0
-    by = {(o.kind, o.id): o for o in obs}
-    assert by[("secretspec", "check")].status == "unknown"
-    assert "not on PATH" in by[("secretspec", "check")].detail
-    assert any(o.kind == "key" for o in obs)
-
-
-def test_keys_observe_check_fail_exits_1(tmp_path):
-    root = _fixture_root(tmp_path)
-    catalog = ai.load_catalog(root=root)
-
-    def runner(argv, cwd):
-        assert argv[:2] == ["sudo-secretspec", "check"]
-        assert "--reason" in argv
-        return subprocess.CompletedProcess(argv, 1, stdout="", stderr="missing ANTHROPIC_API_KEY\n")
-
-    # Force binary "present" via argv0 path check: monkeypatch which for presence
-    # by making argv0 look like an existing file through a fake which.
+def _force_secretspec_present():
     real_missing = ai._probe_executable_missing
 
     def not_missing(argv0: str) -> bool:
@@ -551,9 +529,43 @@ def test_keys_observe_check_fail_exits_1(tmp_path):
             return False
         return real_missing(argv0)
 
+    return real_missing, not_missing
+
+
+def test_keys_observe_missing_binary_is_unknown(tmp_path, monkeypatch):
+    root = _fixture_root(tmp_path)
+    catalog = ai.load_catalog(root=root)
+    state = tmp_path / "keys.json"
+    monkeypatch.setattr(ai.shutil, "which", lambda _name: None)
+    obs, rc = ai.keys_observe(catalog, keys_state_path=state)
+    assert rc == 0
+    by = {(o.kind, o.id): o for o in obs}
+    assert by[("secretspec", "check")].status == "unknown"
+    assert "not on PATH" in by[("secretspec", "check")].detail
+    assert any(o.kind == "key" for o in obs)
+    assert state.is_file()
+    saved = json.loads(state.read_text())
+    assert "values" not in saved
+    assert "hash" not in json.dumps(saved).lower()
+    for entry in saved["keys"].values():
+        assert set(entry) <= {"status", "detail"}
+    assert saved["keys"]["EXAMPLE_API_KEY"]["status"] == "unknown"
+
+
+def test_keys_observe_check_fail_exits_1(tmp_path):
+    root = _fixture_root(tmp_path)
+    catalog = ai.load_catalog(root=root)
+    state = tmp_path / "keys.json"
+
+    def runner(argv, cwd):
+        assert argv[:2] == ["sudo-secretspec", "check"]
+        assert "--reason" in argv
+        return subprocess.CompletedProcess(argv, 1, stdout="", stderr="missing ANTHROPIC_API_KEY\n")
+
+    real_missing, not_missing = _force_secretspec_present()
     ai._probe_executable_missing = not_missing  # type: ignore[assignment]
     try:
-        obs, rc = ai.keys_observe(catalog, runner=runner)
+        obs, rc = ai.keys_observe(catalog, runner=runner, keys_state_path=state)
     finally:
         ai._probe_executable_missing = real_missing  # type: ignore[assignment]
     assert rc == 1
@@ -562,13 +574,218 @@ def test_keys_observe_check_fail_exits_1(tmp_path):
     assert "missing ANTHROPIC_API_KEY" in check.detail
 
 
+def test_keys_verify_under_secretspec_run_ok(tmp_path):
+    root = tmp_path / "repo"
+    (root / "config").mkdir(parents=True)
+    (root / "config" / "install.schema.json").write_text(
+        (REPO / "config" / "install.schema.json").read_text()
+    )
+    (root / "config" / "install.toml").write_text(
+        "schema_version = 1\n"
+        "[[component]]\n"
+        'id = "tool-a"\n'
+        'class = "hard"\n'
+        'presence = "python3"\n'
+        "[[key]]\n"
+        'name = "EXAMPLE_API_KEY"\n'
+        'verify = "fixture"\n'
+        'verify_argv = ["true"]\n'
+    )
+    catalog = ai.load_catalog(root=root)
+    state = tmp_path / "keys.json"
+    seen: list[list[str]] = []
+
+    def runner(argv, cwd):
+        seen.append(list(argv))
+        if argv[:2] == ["sudo-secretspec", "check"]:
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+        assert argv[:2] == ["sudo-secretspec", "run"]
+        assert "--reason" in argv
+        reason = argv[argv.index("--reason") + 1]
+        assert reason == "ade-install keys verify EXAMPLE_API_KEY"
+        assert "--" in argv
+        assert argv[argv.index("--") + 1 :] == ["true"]
+        # Deliberate fake secret in stdout: must never appear in observations.
+        return subprocess.CompletedProcess(
+            argv, 0, stdout="SECRET_VALUE_SHOULD_NOT_LEAK\n", stderr=""
+        )
+
+    real_missing, not_missing = _force_secretspec_present()
+    ai._probe_executable_missing = not_missing  # type: ignore[assignment]
+    try:
+        obs, rc = ai.keys_observe(catalog, runner=runner, keys_state_path=state)
+    finally:
+        ai._probe_executable_missing = real_missing  # type: ignore[assignment]
+    assert rc == 0
+    key = next(o for o in obs if o.kind == "key")
+    assert key.status == "ok"
+    assert "SECRET_VALUE_SHOULD_NOT_LEAK" not in key.detail
+    assert "no value read" in key.detail
+    blob = state.read_text()
+    assert "SECRET_VALUE_SHOULD_NOT_LEAK" not in blob
+    saved = json.loads(blob)
+    assert saved["keys"]["EXAMPLE_API_KEY"]["status"] == "ok"
+    assert any(a[:2] == ["sudo-secretspec", "run"] for a in seen)
+
+
+def test_keys_verify_invalid_exits_1_and_hides_bodies(tmp_path):
+    root = tmp_path / "repo"
+    (root / "config").mkdir(parents=True)
+    (root / "config" / "install.schema.json").write_text(
+        (REPO / "config" / "install.schema.json").read_text()
+    )
+    (root / "config" / "install.toml").write_text(
+        "schema_version = 1\n"
+        "[[component]]\n"
+        'id = "tool-a"\n'
+        'class = "hard"\n'
+        'presence = "python3"\n'
+        "[[key]]\n"
+        'name = "EXAMPLE_API_KEY"\n'
+        'verify_argv = ["probe-bin"]\n'
+    )
+    catalog = ai.load_catalog(root=root)
+    state = tmp_path / "keys.json"
+
+    def runner(argv, cwd):
+        if argv[:2] == ["sudo-secretspec", "check"]:
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+        return subprocess.CompletedProcess(
+            argv,
+            ai.VERIFY_EXIT_INVALID,
+            stdout="token=sk-leak-me\n",
+            stderr="ADE_KEY_VERIFY:invalid\nbad body sk-leak-me\n",
+        )
+
+    real_missing, not_missing = _force_secretspec_present()
+    ai._probe_executable_missing = not_missing  # type: ignore[assignment]
+    try:
+        obs, rc = ai.keys_observe(catalog, runner=runner, keys_state_path=state)
+    finally:
+        ai._probe_executable_missing = real_missing  # type: ignore[assignment]
+    assert rc == 1
+    key = next(o for o in obs if o.kind == "key")
+    assert key.status == "invalid"
+    assert "sk-leak-me" not in key.detail
+    assert "sk-leak-me" not in state.read_text()
+
+
+def test_keys_verify_expiring_marker(tmp_path):
+    root = tmp_path / "repo"
+    (root / "config").mkdir(parents=True)
+    (root / "config" / "install.schema.json").write_text(
+        (REPO / "config" / "install.schema.json").read_text()
+    )
+    (root / "config" / "install.toml").write_text(
+        "schema_version = 1\n"
+        "[[component]]\n"
+        'id = "tool-a"\n'
+        'class = "hard"\n'
+        'presence = "python3"\n'
+        "[[key]]\n"
+        'name = "EXAMPLE_API_KEY"\n'
+        'verify_argv = ["probe-bin"]\n'
+    )
+    catalog = ai.load_catalog(root=root)
+    state = tmp_path / "keys.json"
+
+    def runner(argv, cwd):
+        if argv[:2] == ["sudo-secretspec", "check"]:
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+        return subprocess.CompletedProcess(
+            argv,
+            ai.VERIFY_EXIT_EXPIRING,
+            stdout="",
+            stderr="ADE_KEY_VERIFY:expiring:2026-12-01\n",
+        )
+
+    real_missing, not_missing = _force_secretspec_present()
+    ai._probe_executable_missing = not_missing  # type: ignore[assignment]
+    try:
+        obs, rc = ai.keys_observe(catalog, runner=runner, keys_state_path=state)
+    finally:
+        ai._probe_executable_missing = real_missing  # type: ignore[assignment]
+    assert rc == 0  # expiring is advisory, not VERIFY_FAIL_STATUSES
+    key = next(o for o in obs if o.kind == "key")
+    assert key.status == "expiring"
+    assert "2026-12-01" in key.detail
+
+
+def test_classify_verify_expiring_date_must_be_iso_calendar_day():
+    status, detail = ai.classify_verify_result(
+        ai.VERIFY_EXIT_OK,
+        stderr="ADE_KEY_VERIFY:expiring:sk-leakMe1234567890abcdef\n",
+    )
+    assert status == "expiring"
+    assert "sk-leakMe" not in detail
+    assert "leak" not in detail
+    assert detail == "verify expiring (no value read)"
+
+    status, detail = ai.classify_verify_result(
+        ai.VERIFY_EXIT_OK,
+        stderr="ADE_KEY_VERIFY:expiring:2026-12-01T00:00:00Z\n",
+    )
+    assert status == "expiring"
+    assert "2026-12-01T" not in detail
+    assert detail == "verify expiring (no value read)"
+
+    status, detail = ai.classify_verify_result(
+        ai.VERIFY_EXIT_OK,
+        stderr="ADE_KEY_VERIFY:expiring:2026-12-01\n",
+    )
+    assert status == "expiring"
+    assert detail == "verify expiring 2026-12-01 (no value read)"
+
+
+def test_classify_verify_keeps_failure_when_expiring_marker_present():
+    for code, want in (
+        (ai.VERIFY_EXIT_INVALID, "invalid"),
+        (ai.VERIFY_EXIT_NO_QUOTA, "no-quota"),
+        (ai.VERIFY_EXIT_UNREACHABLE, "unreachable"),
+        (ai.VERIFY_EXIT_MISSING, "missing"),
+    ):
+        status, detail = ai.classify_verify_result(
+            code,
+            stderr="ADE_KEY_VERIFY:expiring:2026-12-01\n",
+        )
+        assert status == want, (code, status, detail)
+        assert "expiring" not in status
+        assert "2026-12-01" not in detail
+
+
+def test_keys_verify_argv_validated(tmp_path):
+    root = tmp_path / "repo"
+    (root / "config").mkdir(parents=True)
+    (root / "config" / "install.schema.json").write_text(
+        (REPO / "config" / "install.schema.json").read_text()
+    )
+    (root / "config" / "install.toml").write_text(
+        "schema_version = 1\n"
+        "[[component]]\n"
+        'id = "tool-a"\n'
+        'class = "hard"\n'
+        'presence = "python3"\n'
+        "[[key]]\n"
+        'name = "BAD"\n'
+        "verify_argv = []\n"
+    )
+    try:
+        ai.load_catalog(root=root)
+        raise AssertionError("expected InstallError")
+    except ai.InstallError as e:
+        assert "verify_argv" in str(e)
+
+
 def test_cli_keys_json(tmp_path, monkeypatch):
     root = _fixture_root(tmp_path)
+    state = tmp_path / "keys-cli.json"
     monkeypatch.setattr(ai.shutil, "which", lambda _name: None)
-    proc = _run("keys", "--json", root=root)
+    proc = _run("keys", "--json", "--keys-state", str(state), root=root)
     assert proc.returncode == 0, proc.stderr
     payload = json.loads(proc.stdout)
     assert payload["ok"] is True
     assert "no get/export" in payload["note"]
+    assert "verify_argv" in payload["note"]
     kinds = {o["kind"] for o in payload["observations"]}
     assert "secretspec" in kinds
+    assert state.is_file()

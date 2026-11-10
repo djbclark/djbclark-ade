@@ -2,7 +2,8 @@
 
 Typed component / key-reference catalog with print-only `plan`, observe-only
 `doctor` (runs `probe_argv` when recorded), observe-only `keys` (bulk
-`sudo-secretspec check`), and **bounded `apply`** (user `install_argv` by
+`sudo-secretspec check` plus per-key `verify_argv` under `sudo-secretspec
+run` when recorded), and **bounded `apply`** (user `install_argv` by
 default; `system_argv` only with explicit `--apply-system`). Doctor and keys
 do **not** repair or read secret values. Full ownership-aware reconciliation
 remains later work (`docs/setup-plan.md` S3).
@@ -39,18 +40,34 @@ unified file with reviewed consumer adoption.
 
 ## C. Keys and logins
 
-`[[key]]` entries are **names and metadata only** (create URL, verify=UNKNOWN,
-expiry=unknown|…). Doctor never reads `sudo-secretspec` values. Login checks are
-separate from keys; consent is not key validation. Recorded login commands
-(2026-11-09): `claude auth login`, `codex login`, `agent login` — doctor does
-not execute them.
+`[[key]]` entries are **names and metadata only** (create URL, `verify`,
+optional `verify_argv`, expiry=unknown|…). Doctor never reads
+`sudo-secretspec` values. Login checks are separate from keys; consent is not
+key validation. Recorded login commands (2026-11-09): `claude auth login`,
+`codex login`, `agent login` — doctor does not execute them.
 
-`ade-install keys` / `just keys` (2026-11-09) is the **presence half** of
-setup-plan S3b: it lists catalog key/login references, then runs
-`sudo-secretspec check --reason "ade-install keys"` when the binary is on
-PATH. It never calls get/export/set/run, never prints values, and does not
-yet run per-key verify probes (those stay a later unit). Exit 1 only when
-`check` runs and fails; a missing `sudo-secretspec` is `unknown` (exit 0).
+`ade-install keys` / `just keys` (2026-11-09 presence; 2026-11-10 verify) is
+setup-plan S3b check-then-verify:
+
+1. Lists catalog key/login references.
+2. Runs `sudo-secretspec check --reason "ade-install keys"` when the binary is
+   on PATH.
+3. For each key with a recorded `verify_argv`, runs
+   `sudo-secretspec run --reason "ade-install keys verify <NAME>" --
+   <verify_argv…>` (argv lists; the probe reads the key from the injected
+   environment). Exit contract: `0` ok, `10` invalid, `11` no-quota,
+   `12` unreachable, `13` expiring, `14` missing. Optional stderr marker
+   `ADE_KEY_VERIFY:expiring:YYYY-MM-DD` may refine an ok or expiring
+   outcome (ISO calendar date only; failure exits stay failure).
+4. Writes outcomes atomically to `~/.local/state/djbclark-ade/keys.json` (or
+   `ADE_KEYS_STATE_PATH` / `--keys-state`); **no values and no hashes**.
+
+It never calls get/export/set, never prints secret values, and never echoes
+probe stdout/stderr bodies into observations. Catalog rows may still say
+`verify = "UNKNOWN"` until a probe argv is recorded. Exit 1 when `check`
+fails or any verify status is invalid/no-quota/unreachable/missing/error; a
+missing `sudo-secretspec` is `unknown` (exit 0). Collect/set remains a later
+unit.
 
 ## D. CLI
 
@@ -59,7 +76,7 @@ ade-install check [--root DIR] [--json]
 ade-install catalog [--root DIR] [--json]
 ade-install plan [--root DIR] [--json]
 ade-install doctor [--root DIR] [--json]
-ade-install keys [--root DIR] [--json]
+ade-install keys [--root DIR] [--json] [--keys-state PATH]
 ade-install apply [--root DIR] [--json] [--dry-run|--yes] [--id ID ...] [--force]
                   [--system] [--print-system-argv] [--apply-system]
                   [--state-dir DIR] [--prefix DIR]
@@ -104,8 +121,9 @@ Pass `--ade` only with a durable checkout (`~/src/djbclark-ade`); never with a l
   Doctor never mutates live settings (order 11). Missing or failed expected
   components fail the command; `unknown` is neither healthy nor absent.
   Doctor does not repair.
-- `keys` is observe-only bulk presence via `sudo-secretspec check`; no
-  verify probes and no secret values.
+- `keys` is observe-only: bulk presence via `sudo-secretspec check`, then
+  per-key `verify_argv` under `sudo-secretspec run` when recorded; no secret
+  values.
 - `apply` defaults to **dry-run**. `--yes` executes user `install_argv` for
   expected missing components (or `--force`). Writes an atomic ledger under
   `~/.local/state/djbclark-ade/install/ledger.json` (or `ADE_INSTALL_STATE_DIR`).
@@ -157,7 +175,8 @@ not pass `--apply-system` in automated jobs.
 
 Ownership-aware reconcile beyond the install ledger (setup-plan S3), remaining
 owner installers (sudo-secretspec Linux tarball, curl-free Cursor CLI fetch, Hermes
-offered path, Paseo desktop/daemon and skill bundle), per-key verify probes under
-`sudo-secretspec run`, collect/set batch. S4 jobs stay explicit later work.
+offered path, Paseo desktop/daemon and skill bundle), recorded provider
+`verify_argv` recipes in the catalog, collect/set batch. S4 jobs stay explicit
+later work.
 Follow-up: tighten `--apply-system` with an ownership generation / read-back
 lock if multi-agent installs share a machine.

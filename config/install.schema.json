@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/djbclark/djbclark-ade/config/install.schema.json",
   "title": "djbclark-ade install catalog",
-  "description": "Transitional install/component catalog (schema_version=1). Projected when config/ade.toml is absent. Secrets are reference names only; doctor does not verify key values.",
+  "description": "Transitional install/component catalog (schema_version=1). Projected when config/ade.toml is absent. Secrets are reference names only; doctor does not read values. keys may run verify_argv under sudo-secretspec run without printing values.",
   "type": "object",
   "required": [
     "schema_version",
@@ -125,7 +125,16 @@
             "type": "string"
           },
           "verify": {
-            "type": "string"
+            "type": "string",
+            "description": "Human/status note; UNKNOWN until a probe is recorded. Outcomes come from verify_argv."
+          },
+          "verify_argv": {
+            "type": "array",
+            "description": "Argv for the cheapest read-only authenticated probe, run under sudo-secretspec run. Must read the key from the environment; never print values. Exit contract: 0 ok, 10 invalid, 11 no-quota, 12 unreachable, 13 expiring, 14 missing. Non-empty enforced by ade-install validation.",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
           },
           "expiry": {
             "type": "string"
