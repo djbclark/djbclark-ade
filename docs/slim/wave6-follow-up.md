@@ -61,7 +61,7 @@ shims.** Soft deadline for relay / dispatch / `acp-run` removal:
 - [#441](https://github.com/djbclark/djbclark-ade/pull/441) — Mac harness + FIXTURE `--dry-run` path
 - [#453](https://github.com/djbclark/djbclark-ade/pull/453) — C3 status (FIXTURE ready, Mac blocked)
 - [#470](https://github.com/djbclark/djbclark-ade/pull/470) — C3 FIXTURE tighten + `--linux-safe` Mac probes (`mac_not_live`)
-- caller `--inventory` (this PR) — untruncated §A reference list + `gate_exits` proof while Mac blocked
+- [#472](https://github.com/djbclark/djbclark-ade/pull/472) — caller `--inventory`: untruncated §A reference list + `gate_exits` proof while Mac blocked
 
 ## A. Remaining in-repo callers (must be gone or archived before delete)
 
