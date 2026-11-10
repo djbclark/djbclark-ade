@@ -37,6 +37,10 @@ needed), W3 exporting `ADE_CLAIM_ID` (or binding owner on `agent.create.after`),
 dangerous case is agent B in primary P moving Z's branch: the hook must be in P; the shim also installs it the first time
 an agent runs a non-read command there). The operator's shell and IDEs never go through the shim.
 
+**Hard refusal stays off** until the S4 six-case pilot below passes (queue item 6; staged enforcement of standing
+order 9, adopted 2026-10-25). This page only scaffolds the pilot's cases and pass/fail criteria; it does not enable
+PATH refusal, `~/.local/bin/git`, or any new refuse path.
+
 ## Commands
 
 | Command | What |
@@ -257,3 +261,43 @@ The shim and the hooks are plain bash 3.2 (macOS `/bin/bash`): no `case` inside 
 
 On 2026-10-30 acp-run began shell-quoting the identity hook command and checking inherited hook pairs
 before treating a nested launch as guarded. A marker whose PARAMETERS transport was stripped is repaired.
+
+## S4 six-case enforcement pilot (scaffold 2026-11-09; pilot before hard refuse)
+
+Standing order 9's staged enforcement (adopted 2026-10-25; queue item 6) ends with **S4**: run six representative
+workflows under claim-aware workspaces **before any hard refusal** (before agents are forced through the PATH shim /
+`~/.local/bin/git`, and before `~/ops` leaves its transitional plain-master practice). S3 (changelog fragments) is done
+(PR 190). S1/S2 and the W2–W4 claim wiring are separate open work; this section does not implement them and does **not**
+flip refusal on.
+
+**Gate (explicit):** hard refusal stays off until every case below is run once, recorded with the metrics, and the
+operator accepts the result. A failing case or an unrun case blocks enabling hard refusal; it does not change today's
+rule-only posture. Optional narrowing of the guard (E8 F3) remains an operator security decision outside this pilot.
+
+### Cases and pass/fail
+
+Measure each case for: setup delay, disk use, path-binding failures, and false refusals (a refuse that blocks a
+legitimate owner or named exception). Pass = the workflow completes under a claimed task workspace (or a named
+exception) with no false refusal and no path-binding failure; record the delay and disk figures even on pass. Fail =
+a false refusal, a path-binding failure that stops the workflow, or an unclaimed shared-checkout write that the pilot
+was meant to keep out of.
+
+| # | Case | What to run | Pass | Fail |
+|---|---|---|---|---|
+| 1 | ADE code task | One code change in a linked worktree of `djbclark-ade` with an active claim; stage, commit, push the branch. | Owner git through the claim succeeds; foreign write to the same path would be refused if the shim were on PATH (observe only; do not enable). | Owner refused; or the work lands in the shared primary checkout. |
+| 2 | One-line queue task | One-line edit to `docs/queue.md` (or a stand-in docs line) in its own claimed worktree, PR-only to master. | Edit and PR from the claimed workspace; no collision with another writer's uncommitted queue edit. | Edit made in a shared checkout; or a false refusal of the owner. |
+| 3 | Ops promotion | Designated promoter: clean `git merge --ff-only` of a primary / `~/ops` master to a published revision (order 9 exception b); no commit made there. | Fast-forward succeeds under the named exception; no claim required on the integration checkout for that single step. | Promoter blocked as if it were an agent writer; or a non-promoter write is treated as allowed. |
+| 4 | Submodule task | One task that updates or builds through a submodule / nested checkout from a claimed parent worktree. | Paths resolve inside the claim; submodule git does not write a foreign claimed branch. | Path-binding failure; or a submodule ref write escapes the claim unnoticed when hooks are installed. |
+| 5 | Fixed-cwd agent | An agent whose tool cwd is fixed (cannot `cd` to a worktree) but whose git writes must still target a claimed workspace (`-C` / explicit worktree path). | Writes land only in the claimed path; reads of foreign trees stay on the read allowlist. | Agent writes the shared primary because cwd was fixed; or a legitimate `-C` owner write is refused. |
+| 6 | Long-lived server | A long-running process (dev server, watcher) started from a claimed workspace and left up across other agents' turns. | Process keeps its claim's cwd/paths; no second writer mutates the same workspace until it exits (order 9 one-writer rule). | Second writer edits the same workspace while the server is still a writer; or stopping the server leaves a permanent claim (TTL/expiry should free it). |
+
+### Test-plan scaffold (optional; not enabled)
+
+Checklist for a later live run (copy into the pilot PR or a run log; do not flip refusal while working the list):
+
+1. [ ] Preconditions: hooks installed on the repos under test (`ade-git-guard install`); claims created with `ade_claims.py new --ttl` (manual or W2 plugin once available); **PATH shim not forced** for the fleet.
+2. [ ] Run cases 1–6 once each; for each, record setup delay, disk delta, path-binding failures (count), false refusals (count + stderr reason).
+3. [ ] Confirm exit 77 only where a foreign/destructive rule should fire in observe mode; owner and human shells stay exit 0.
+4. [ ] Confirm expired claims free the path (`claim ls` shows `expired`; another owner may claim).
+5. [ ] Operator sign-off that S4 passed → only then schedule hard-refusal enablement (separate change; not this scaffold).
+6. [ ] Until that sign-off: keep teaching agents the rule (order 9) without PATH hard refuse.
