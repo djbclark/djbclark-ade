@@ -7,6 +7,8 @@
 #     skill-everywhere --check <name>...    report per-TUI status, change nothing; ends with a "== end" line
 #     skill-everywhere --remove <name>...   remove links this script would make
 #     --dry-run (-n) with link or --remove: print the changes, make none
+#     Exit codes: 0 ok; 1 installed-target gap/conflict (or missing named skill outside --remove);
+#       2 usage (bad option, --all with names/--remove, empty inventory, unsafe name, no names)
 #     SKILL_EVERYWHERE_ONLY=grokbot,claude limits the run to those targets
 #     After a new skill is linked, run `/reload-skills` in running Claude sessions (per-skill symlinks are the
 #     documented mechanism; a directory-level symlink is not, so none is used).
