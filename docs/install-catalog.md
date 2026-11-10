@@ -87,7 +87,8 @@ ade-install apply [--root DIR] [--json] [--dry-run|--yes] [--id ID ...] [--force
                   [--state-dir DIR] [--prefix DIR]
 just install-check
 just install-doctor
-just keys
+just keys / just keys-check   # ade-install keys (S3b observe; keys-check is the setup-plan alias)
+just keys-check-install       # daily ade-sched job for keys observe
 just install-plan
 just install-apply-dry
 just install-print-system-argv
@@ -107,6 +108,11 @@ bin/ade-sched --backend systemd install config/launchd/com.djbclark.ade-update-c
   --set __STATE__=$HOME/.local/state/ade --ade ~/src/djbclark-ade
 # or from the canonical checkout: just update-check-install
 # (omits --ade so a linked worktree cannot install a job that vanishes after merge)
+
+# Daily S3b keys observe (never prompts / never prints values)
+bin/ade-sched --backend systemd install config/launchd/com.djbclark.keys-check.plist \
+  --set __STATE__=$HOME/.local/state/ade --ade ~/src/djbclark-ade
+# or: just keys-check-install
 
 # macOS (launchd; auto backend also picks this when launchctl is present)
 bin/ade-sched --backend launchd install config/launchd/com.djbclark.ade-update-check.plist \

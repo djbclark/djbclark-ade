@@ -825,10 +825,13 @@ name = "keys-check"
 kind = "ade-sched"
 owner = "djbclark-ade"
 class = "hard"
-schedule = "with update --auto (plist pending)"
-command = "just keys --check"
+label = "com.djbclark.keys-check"
+plist = "config/launchd/com.djbclark.keys-check.plist"
+schedule = "StartInterval 86400"
+command = "bin/ade-install keys"
+set = ["__STATE__={home}/.local/state/ade"]
 platforms = ["mac", "linux"]
-notes = "S3b; runs from daily update --auto when that job lands."
+notes = "S3b daily keys observe; never prompts or prints secret values (ade-install keys)."
 
 [[install.jobs]]
 name = "context-budget"
