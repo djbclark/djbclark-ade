@@ -67,11 +67,21 @@ def test_legacy_effective_matches_routing_toml_and_clamped_gates(home):
     assert eff.provenance["routing_source"].endswith("config/routing.toml")
     assert eff.provenance["gates_source"].endswith("config/gates.toml")
     assert eff.provenance["context_budget_source"].endswith("config/context-budget.toml")
+    assert eff.provenance["secret_deny_source"].endswith("config/secret-deny.toml")
+    assert eff.provenance["pr_policy_source"].endswith("config/pr-policy.toml")
     assert eff.provenance["local_config"] is None
     assert info["source"] == "gates.toml"
     cb_shipped = tomllib.loads((REPO / "config" / "context-budget.toml").read_text())
     assert eff.data["context_budget"]["dirs"] == cb_shipped["dirs"]
     assert eff.data["context_budget"]["budget"] == cb_shipped["budget"]
+    sd_shipped = tomllib.loads((REPO / "config" / "secret-deny.toml").read_text())
+    assert eff.data["secret_deny"]["deny"] == sd_shipped["deny"]
+    assert eff.data["secret_deny"]["allow"] == sd_shipped["allow"]
+    assert eff.data["secret_deny"]["claude"]["static"] == sd_shipped["claude"]["static"]
+    pp_shipped = tomllib.loads((REPO / "config" / "pr-policy.toml").read_text())
+    assert eff.data["pr_policy"]["meta"] == pp_shipped["meta"]
+    assert eff.data["pr_policy"]["github"] == pp_shipped["github"]
+    assert eff.data["pr_policy"]["forgejo"] == pp_shipped["forgejo"]
 
 
 def test_local_override_preserves_sibling_lead_leaves(home):
@@ -174,6 +184,54 @@ def test_missing_selected_context_budget_toml_errors(home, monkeypatch):
         ac.load_effective(root=REPO, home=home, environ=dict(os.environ))
 
 
+def test_secret_deny_toml_isolates_domain_from_local(home, tmp_path, monkeypatch):
+    selected = tmp_path / "sd.toml"
+    selected.write_text(
+        'version = 1\ndeny = [".only-selected"]\nallow = []\n[claude]\nstatic = []\n'
+    )
+    monkeypatch.setenv("SECRET_DENY_TOML", str(selected))
+    _local_write(
+        home,
+        '[secret_deny]\nversion = 1\ndeny = [".from-local"]\nallow = []\n'
+        "[secret_deny.claude]\nstatic = []\n",
+    )
+    eff = ac.load_effective(root=REPO, home=home, environ=dict(os.environ))
+    assert eff.data["secret_deny"]["deny"] == [".only-selected"]
+    assert eff.provenance["secret_deny_env"] == str(selected)
+
+
+def test_missing_selected_secret_deny_toml_errors(home, monkeypatch):
+    missing = home / "no-such-secret-deny.toml"
+    monkeypatch.setenv("SECRET_DENY_TOML", str(missing))
+    with pytest.raises(ac.ConfigError, match="not a regular file"):
+        ac.load_effective(root=REPO, home=home, environ=dict(os.environ))
+
+
+def test_pr_policy_toml_isolates_domain_from_local(home, tmp_path, monkeypatch):
+    selected = tmp_path / "pp.toml"
+    selected.write_text(
+        '[meta]\nschema = 1\n[github]\npolicy = "selected-only"\nowners = ["sel"]\n'
+        'token_secret = "T"\n'
+    )
+    monkeypatch.setenv("PR_POLICY_TOML", str(selected))
+    _local_write(
+        home,
+        '[pr_policy.meta]\nschema = 1\n[pr_policy.github]\npolicy = "from-local"\n',
+    )
+    eff = ac.load_effective(root=REPO, home=home, environ=dict(os.environ))
+    assert eff.data["pr_policy"]["github"]["policy"] == "selected-only"
+    assert eff.data["pr_policy"]["github"]["owners"] == ["sel"]
+    assert "forgejo" not in eff.data["pr_policy"]
+    assert eff.provenance["pr_policy_env"] == str(selected)
+
+
+def test_missing_selected_pr_policy_toml_errors(home, monkeypatch):
+    missing = home / "no-such-pr-policy.toml"
+    monkeypatch.setenv("PR_POLICY_TOML", str(missing))
+    with pytest.raises(ac.ConfigError, match="not a regular file"):
+        ac.load_effective(root=REPO, home=home, environ=dict(os.environ))
+
+
 def test_gate_loosen_clamped_to_code_defaults(home):
     eff = ac.load_effective(
         root=REPO,
@@ -251,7 +309,7 @@ def test_new_minimal_ade_toml_loads(home):
     assert eff.data["gates"]["frontier"]["frontier1_per_wave"] == 2.0
 
 
-def test_mapping_table_covers_routing_gates_and_context_budget():
+def test_mapping_table_covers_routing_gates_context_budget_secret_deny_pr_policy():
     targets = {row[2] for row in ac.LEGACY_PROJECTION}
     assert "[routing]" in targets
     assert "[[service]]" in targets
@@ -259,6 +317,11 @@ def test_mapping_table_covers_routing_gates_and_context_budget():
     assert "[gates.floors.frontier]" in targets
     assert "[context_budget].dirs" in targets
     assert "[context_budget].budget" in targets
+    assert "[secret_deny].deny" in targets
+    assert "[secret_deny].claude" in targets
+    assert "[pr_policy].meta" in targets
+    assert "[pr_policy].github" in targets
+    assert "[pr_policy].forgejo" in targets
 
 
 @pytest.fixture
@@ -286,6 +349,11 @@ def synthetic_root(tmp_path):
     '[context_budget]\nunknown = 1',
     '[context_budget]\ndirs = 1',
     '[context_budget]\nbudget = 1',
+    '[secret_deny]\nunknown = 1',
+    '[secret_deny]\ndeny = 1',
+    '[secret_deny]\nversion = 2',
+    '[pr_policy]\nunknown = 1',
+    '[pr_policy.meta]\nschema = 2',
 ])
 @pytest.mark.parametrize("location", ["new", "local"])
 def test_raw_schema_failures_all_commands(home, synthetic_root, text, location):

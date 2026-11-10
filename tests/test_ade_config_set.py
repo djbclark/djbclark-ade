@@ -248,6 +248,43 @@ def test_repo_context_budget_scalar_strips_prefix(home, tmp_path):
     assert data["budget"]["total"] == 31000
 
 
+def test_repo_secret_deny_scalar_strips_prefix(home, tmp_path):
+    root = tmp_path / "repo"
+    (root / "config").mkdir(parents=True)
+    shutil.copy(REPO / "config" / "ade.schema.json", root / "config" / "ade.schema.json")
+    sd = root / "config" / "secret-deny.toml"
+    sd.write_text(
+        'version = 1\ndeny = [".env"]\nallow = []\n[claude]\nstatic = [".env"]\n'
+    )
+    result = ace.set_scalar(
+        "secret_deny.version", 1, target="repo", root=root, home=home
+    )
+    assert result.target.kind == "legacy_secret_deny"
+    assert result.target.path == sd
+    assert 'version = 1' in sd.read_text()
+    assert ac.read_toml(sd)["deny"] == [".env"]
+
+
+def test_repo_pr_policy_scalar_strips_prefix(home, tmp_path):
+    root = tmp_path / "repo"
+    (root / "config").mkdir(parents=True)
+    shutil.copy(REPO / "config" / "ade.schema.json", root / "config" / "ade.schema.json")
+    pp = root / "config" / "pr-policy.toml"
+    pp.write_text(
+        '[meta]\nschema = 1\n[github]\npolicy = "collaborators_only"\n'
+        'token_secret = "T"\nowners = ["djbclark"]\n'
+    )
+    result = ace.set_scalar(
+        "pr_policy.github.policy", "collaborators_only", target="repo",
+        root=root, home=home,
+    )
+    assert result.target.kind == "legacy_pr_policy"
+    assert result.target.path == pp
+    data = ac.read_toml(pp)
+    assert data["github"]["policy"] == "collaborators_only"
+    assert data["meta"]["schema"] == 1
+
+
 def test_unified_ade_toml_is_repo_source_when_present(home, tmp_path):
     root = tmp_path / "repo"
     (root / "config").mkdir(parents=True)

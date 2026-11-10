@@ -218,6 +218,63 @@
           "description": "Ceilings and per-directory overrides (legacy [budget] / [budget.\"~\"])."
         }
       }
+    },
+    "secret_deny": {
+      "type": "object",
+      "description": "Legacy secret-deny.toml version/deny/allow/[claude] project under secret_deny.*",
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "type": "integer",
+          "const": 1
+        },
+        "deny": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "allow": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "claude": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "static": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "pr_policy": {
+      "type": "object",
+      "description": "Legacy pr-policy.toml [meta]/[github]/[forgejo] project under pr_policy.*",
+      "additionalProperties": false,
+      "properties": {
+        "meta": {
+          "type": "object",
+          "properties": {
+            "schema": {
+              "type": "integer",
+              "const": 1
+            }
+          }
+        },
+        "github": {
+          "type": "object"
+        },
+        "forgejo": {
+          "type": "object"
+        }
+      }
     }
   }
 }

@@ -28,12 +28,13 @@ THE LAUNCH (every flag is fixed; nothing is passed through):
   "disableBypassPermissionsMode": "disable", "deny": [Read(~/.ssh/**) and the other secret paths]}}: the key
   confines Read/Grep/Glob to the worktree in every mode, bypass included (Claude Code >= 2.1.257); the deny
   rules are a second layer, never the first. They are the union of this file's own list (DENY_PATHS) and every
-  `deny` pattern of config/secret-deny.toml (found from this file's realpath, <repo>/bin/ -> <repo>/config/; read
-  with tomllib, or, on a Python without it (3.9), from the rendered config/secret_deny_policy.json that
-  `bin/render-secret-deny --check` keeps in step), each as Read(...) in Claude's form (a bare name `**/NAME`, an
-  absolute `//PATH`). The policy's `allow` exceptions are not carried over (Claude has no exception syntax), so
-  e.g. `.env.example` is refused here too. A missing secret-deny.toml leaves the own list alone; one that exists
-  but does not parse (or whose rendered JSON, without tomllib, is missing or bad) refuses every launch and
+  `deny` pattern of the effective ``secret_deny`` domain (legacy ``config/secret-deny.toml`` via
+  ``ade_config.load_effective`` when ``ade.toml`` is absent; on a Python without tomllib (3.9), from the
+  rendered config/secret_deny_policy.json that `bin/render-secret-deny --check` keeps in step), each as
+  Read(...) in Claude's form (a bare name `**/NAME`, an absolute `//PATH`). The policy's `allow` exceptions
+  are not carried over (Claude has no exception syntax), so e.g. `.env.example` is refused here too. A missing
+  secret-deny policy leaves the own list alone; one that exists but does not parse (or whose rendered JSON,
+  without tomllib, is missing or bad) refuses every launch and
   check (exit 2). The environment drops every variable whose name says token,
   secret, password, credential or api key, and every GH_* and GITHUB_* one (the removed Codex local review's SECRET_ENV_RE);
   HOME, PATH and CLAUDE_CONFIG_DIR stay (OAuth needs HOME). The prompt is argv (after `--`), never a file in
@@ -124,6 +125,13 @@ HERE = Path(__file__).resolve()
 REPO = HERE.parent.parent
 POLICY_TOML = REPO / "config" / "secret-deny.toml"
 POLICY_JSON = REPO / "config" / "secret_deny_policy.json"   # bin/render-secret-deny writes it from POLICY_TOML
+_BIN = str(HERE.parent)
+if _BIN not in sys.path:
+    sys.path.insert(0, _BIN)
+try:
+    import ade_config  # noqa: E402
+except ImportError:  # stripped test copies of this launcher without bin/ade_config.py
+    ade_config = None
 EXIT_OK, EXIT_USAGE, EXIT_NO_OUTPUT, EXIT_TRIP, EXIT_TIMEOUT = 0, 2, 3, 77, 124
 MODES = {"review": ["Read", "Grep", "Glob"], "read-only": ["Read", "Grep", "Glob"]}
 WEB_TOOLS = ["WebFetch", "WebSearch"]
@@ -169,8 +177,8 @@ def _patterns(lst: object, where: str) -> list[str]:
     return lst
 
 
-def policy_deny(toml_path: Path = POLICY_TOML, json_path: Path = POLICY_JSON) -> list[str]:
-    """Every `deny` pattern of config/secret-deny.toml; [] when the file is missing (DENY_PATHS alone then)."""
+def _policy_deny_legacy(toml_path: Path, json_path: Path) -> list[str]:
+    """Direct legacy TOML/JSON reader (tests; Python without tomllib; no ade_config)."""
     if not toml_path.exists():
         return []
     if tomllib is None:
@@ -188,6 +196,48 @@ def policy_deny(toml_path: Path = POLICY_TOML, json_path: Path = POLICY_JSON) ->
     if not isinstance(data, dict) or data.get("version") != 1:
         raise PolicyError(f"{where}: version must be 1")
     return _patterns(data.get("deny"), where)
+
+
+def policy_deny(
+    toml_path: Path | None = None,
+    json_path: Path | None = None,
+    *,
+    root: Path | None = None,
+    home: Path | None = None,
+    environ: dict | None = None,
+) -> list[str]:
+    """Every ``secret_deny.deny`` pattern; [] when the policy is absent (DENY_PATHS alone then).
+
+    Default path uses ``ade_config.load_effective`` (legacy ``config/secret-deny.toml`` /
+    ``SECRET_DENY_TOML`` when ``ade.toml`` is absent). Explicit ``toml_path`` /
+    ``json_path`` keep the legacy reader for tests. Without ``ade_config`` or its
+    schema (stripped test repos), falls back to the legacy files beside this launcher.
+    """
+    if toml_path is not None or json_path is not None:
+        return _policy_deny_legacy(
+            toml_path if toml_path is not None else POLICY_TOML,
+            json_path if json_path is not None else POLICY_JSON,
+        )
+    root_path = root or REPO
+    schema = root_path / "config" / "ade.schema.json"
+    if ade_config is None or tomllib is None or not schema.is_file():
+        return _policy_deny_legacy(POLICY_TOML, POLICY_JSON)
+    try:
+        eff = ade_config.load_effective(
+            root=root_path,
+            home=home,
+            environ=environ,
+        )
+    except ade_config.ConfigError as e:
+        raise PolicyError(str(e)) from e
+    sd = eff.data.get("secret_deny") if isinstance(eff.data, dict) else None
+    if not isinstance(sd, dict):
+        return []
+    deny = sd.get("deny") or []
+    if not deny:
+        return []
+    where = str(eff.provenance.get("secret_deny_source") or "effective config")
+    return _patterns(deny, where)
 
 
 def deny_rules(extra: list[str]) -> list[str]:

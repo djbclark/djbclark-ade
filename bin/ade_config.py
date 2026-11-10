@@ -1,10 +1,11 @@
 """ade_config: versioned read-only effective ADE config (schema_version=1).
 
 Builds one effective tree from optional ``config/ade.toml``, legacy
-``config/routing.toml`` + ``config/gates.toml`` + ``config/context-budget.toml``,
-and optional ``~/.config/djbclark-ade/local.toml``. Does not write files or
-resolve secrets. Consumers adopt via ``load_effective`` (``route_agent``,
-``ade_gates.load_frontier``, ``context-budget-check``, …).
+``config/routing.toml`` + ``config/gates.toml`` + ``config/context-budget.toml``
++ ``config/secret-deny.toml`` + ``config/pr-policy.toml``, and optional
+``~/.config/djbclark-ade/local.toml``. Does not write files or resolve secrets.
+Consumers adopt via ``load_effective`` (``route_agent``, ``ade_gates.load_frontier``,
+``context-budget-check``, ``render-secret-deny``, ``review-launch``, ``pr-policy``, …).
 
 Public:
   load_effective(...) -> EffectiveConfig
@@ -52,6 +53,13 @@ LEGACY_PROJECTION: tuple[tuple[str, str, str], ...] = (
     ("config/gates.toml", "[floors.frontier]", "[gates.floors.frontier]"),
     ("config/context-budget.toml", "dirs", "[context_budget].dirs"),
     ("config/context-budget.toml", "[budget]", "[context_budget].budget"),
+    ("config/secret-deny.toml", "version", "[secret_deny].version"),
+    ("config/secret-deny.toml", "deny", "[secret_deny].deny"),
+    ("config/secret-deny.toml", "allow", "[secret_deny].allow"),
+    ("config/secret-deny.toml", "[claude]", "[secret_deny].claude"),
+    ("config/pr-policy.toml", "[meta]", "[pr_policy].meta"),
+    ("config/pr-policy.toml", "[github]", "[pr_policy].github"),
+    ("config/pr-policy.toml", "[forgejo]", "[pr_policy].forgejo"),
 )
 
 ROUTING_DOMAIN_KEYS: frozenset[str] = frozenset({
@@ -61,11 +69,23 @@ ROUTING_DOMAIN_KEYS: frozenset[str] = frozenset({
 # Defaults match bin/context-budget-check when the legacy file is absent.
 DEFAULT_CONTEXT_BUDGET_DIRS: list[str] = ["~/src/djbclark-ade", "~"]
 
+# Absent legacy secret-deny / pr-policy: empty deny (review-launch uses DENY_PATHS alone)
+# and meta.schema=1 with no forge tables (pr-policy connect() skips missing forges).
+DEFAULT_SECRET_DENY: dict[str, Any] = {
+    "version": 1,
+    "deny": [],
+    "allow": [],
+    "claude": {"static": []},
+}
+DEFAULT_PR_POLICY: dict[str, Any] = {"meta": {"schema": 1}}
+
 KNOWN_TOP_LEVEL: frozenset[str] = frozenset({
     "schema_version",
     *ROUTING_DOMAIN_KEYS,
     "gates",
     "context_budget",
+    "secret_deny",
+    "pr_policy",
 })
 
 
@@ -106,6 +126,14 @@ def default_gates_path(root: Path) -> Path:
 
 def default_context_budget_path(root: Path) -> Path:
     return root / "config" / "context-budget.toml"
+
+
+def default_secret_deny_path(root: Path) -> Path:
+    return root / "config" / "secret-deny.toml"
+
+
+def default_pr_policy_path(root: Path) -> Path:
+    return root / "config" / "pr-policy.toml"
 
 
 def default_local_path(home: Path | None = None) -> Path:
@@ -439,6 +467,104 @@ def normalize_context_budget(raw: Any, *, label: str) -> dict[str, Any]:
     )
 
 
+def _string_list(raw: Any, *, label: str, key: str) -> list[str]:
+    if raw is None:
+        return []
+    if not isinstance(raw, list) or not all(isinstance(x, str) for x in raw):
+        raise ConfigError(f"{label}: {key} must be an array of strings")
+    return list(raw)
+
+
+def project_secret_deny_domain(
+    legacy: dict[str, Any], *, label: str, allow_empty_deny: bool = False
+) -> dict[str, Any]:
+    """Nest legacy secret-deny.toml under ``[secret_deny]`` (identity keys)."""
+    if not isinstance(legacy, dict):
+        raise ConfigError(f"{label}: root must be a table")
+    version = legacy.get("version", 1)
+    if version != 1:
+        raise ConfigError(f"{label}: version must be 1")
+    deny = _string_list(legacy.get("deny"), label=label, key="deny")
+    if not deny and not allow_empty_deny:
+        raise ConfigError(f"{label}: `deny` is empty")
+    allow = _string_list(legacy.get("allow"), label=label, key="allow")
+    claude_raw = legacy.get("claude")
+    if claude_raw is None:
+        claude_out: dict[str, Any] = {"static": []}
+    else:
+        if not isinstance(claude_raw, dict):
+            raise ConfigError(f"{label}: [claude] must be a table")
+        static = _string_list(claude_raw.get("static"), label=label, key="claude.static")
+        claude_out = {"static": static}
+    return {
+        "version": 1,
+        "deny": deny,
+        "allow": allow,
+        "claude": claude_out,
+    }
+
+
+def load_legacy_secret_deny(path: Path, *, required: bool = False) -> dict[str, Any]:
+    """Project a legacy secret-deny.toml. Missing → empty deny unless ``required``."""
+    if not input_present(path):
+        if required:
+            raise ConfigError(f"{path}: not a regular file")
+        return copy.deepcopy(DEFAULT_SECRET_DENY)
+    return project_secret_deny_domain(read_toml(path), label=str(path), allow_empty_deny=False)
+
+
+def normalize_secret_deny(raw: Any, *, label: str) -> dict[str, Any]:
+    """Ensure ``secret_deny`` is a table with version/deny/allow/claude for consumers."""
+    if raw is None:
+        return copy.deepcopy(DEFAULT_SECRET_DENY)
+    if not isinstance(raw, dict):
+        raise ConfigError(f"{label}: [secret_deny] must be a table")
+    return project_secret_deny_domain(raw, label=label, allow_empty_deny=True)
+
+
+def project_pr_policy_domain(legacy: dict[str, Any], *, label: str) -> dict[str, Any]:
+    """Nest legacy pr-policy.toml tables under ``[pr_policy]``."""
+    if not isinstance(legacy, dict):
+        raise ConfigError(f"{label}: root must be a table")
+    out: dict[str, Any] = {}
+    meta = legacy.get("meta")
+    if meta is None:
+        out["meta"] = copy.deepcopy(DEFAULT_PR_POLICY["meta"])
+    else:
+        if not isinstance(meta, dict):
+            raise ConfigError(f"{label}: [meta] must be a table")
+        schema = meta.get("schema")
+        if schema != 1:
+            raise ConfigError(f"{label}: [meta] schema must be 1")
+        out["meta"] = copy.deepcopy(meta)
+    for key in ("github", "forgejo"):
+        block = legacy.get(key)
+        if block is None:
+            continue
+        if not isinstance(block, dict):
+            raise ConfigError(f"{label}: [{key}] must be a table")
+        out[key] = copy.deepcopy(block)
+    return out
+
+
+def load_legacy_pr_policy(path: Path, *, required: bool = False) -> dict[str, Any]:
+    """Project a legacy pr-policy.toml. Missing → meta-only unless ``required``."""
+    if not input_present(path):
+        if required:
+            raise ConfigError(f"{path}: not a regular file")
+        return copy.deepcopy(DEFAULT_PR_POLICY)
+    return project_pr_policy_domain(read_toml(path), label=str(path))
+
+
+def normalize_pr_policy(raw: Any, *, label: str) -> dict[str, Any]:
+    """Ensure ``pr_policy`` is a table with meta (and optional forge blocks)."""
+    if raw is None:
+        return copy.deepcopy(DEFAULT_PR_POLICY)
+    if not isinstance(raw, dict):
+        raise ConfigError(f"{label}: [pr_policy] must be a table")
+    return project_pr_policy_domain(raw, label=label)
+
+
 def reject_duplicate_services(services: Any, *, label: str) -> None:
     if services is None:
         return
@@ -488,6 +614,8 @@ def load_effective(
     routing_env = env.get("ROUTING_POLICY") or None
     gates_env = env.get("GATES_TOML") or None
     context_budget_env = env.get("CONTEXT_BUDGET_TOML") or None
+    secret_deny_env = env.get("SECRET_DENY_TOML") or None
+    pr_policy_env = env.get("PR_POLICY_TOML") or None
 
     provenance: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
@@ -497,9 +625,13 @@ def load_effective(
         "routing_source": None,
         "gates_source": None,
         "context_budget_source": None,
+        "secret_deny_source": None,
+        "pr_policy_source": None,
         "routing_env": routing_env,
         "gates_env": gates_env,
         "context_budget_env": context_budget_env,
+        "secret_deny_env": secret_deny_env,
+        "pr_policy_env": pr_policy_env,
         "gates_info": None,
         "mapping": [
             {"legacy_file": a, "legacy": b, "effective": c}
@@ -564,6 +696,36 @@ def load_effective(
         data["context_budget"] = load_legacy_context_budget(cb_path, required=False)
         provenance["context_budget_source"] = str(cb_path)
 
+    # --- secret_deny domain ---
+    if secret_deny_env:
+        sd_path = Path(secret_deny_env)
+        data["secret_deny"] = load_legacy_secret_deny(sd_path, required=True)
+        provenance["secret_deny_source"] = str(sd_path)
+    elif using_new:
+        data["secret_deny"] = normalize_secret_deny(
+            data.get("secret_deny"), label=str(new_path)
+        )
+        provenance["secret_deny_source"] = str(new_path)
+    else:
+        sd_path = default_secret_deny_path(root)
+        data["secret_deny"] = load_legacy_secret_deny(sd_path, required=False)
+        provenance["secret_deny_source"] = str(sd_path)
+
+    # --- pr_policy domain ---
+    if pr_policy_env:
+        pp_path = Path(pr_policy_env)
+        data["pr_policy"] = load_legacy_pr_policy(pp_path, required=True)
+        provenance["pr_policy_source"] = str(pp_path)
+    elif using_new:
+        data["pr_policy"] = normalize_pr_policy(
+            data.get("pr_policy"), label=str(new_path)
+        )
+        provenance["pr_policy_source"] = str(new_path)
+    else:
+        pp_path = default_pr_policy_path(root)
+        data["pr_policy"] = load_legacy_pr_policy(pp_path, required=False)
+        provenance["pr_policy_source"] = str(pp_path)
+
     # --- local override ---
     if using_local:
         local = read_toml(local_path)
@@ -579,6 +741,10 @@ def load_effective(
             merge_src.pop("gates", None)
         if context_budget_env:
             merge_src.pop("context_budget", None)
+        if secret_deny_env:
+            merge_src.pop("secret_deny", None)
+        if pr_policy_env:
+            merge_src.pop("pr_policy", None)
         data = merge_maps(data, merge_src, path="")
         provenance["local_config"] = str(local_path)
 
@@ -591,6 +757,12 @@ def load_effective(
     data["gates"] = gates
     data["context_budget"] = normalize_context_budget(
         data.get("context_budget"), label="effective config"
+    )
+    data["secret_deny"] = normalize_secret_deny(
+        data.get("secret_deny"), label="effective config"
+    )
+    data["pr_policy"] = normalize_pr_policy(
+        data.get("pr_policy"), label="effective config"
     )
     provenance["gates_info"] = ginfo
     validate_tree(data, schema, label="effective config")

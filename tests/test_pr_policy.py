@@ -506,3 +506,47 @@ def test_install_systemd_without_linger_is_69_unless_allowed(env):
 
 def test_uninstall_on_linux_is_not_69_when_nothing_is_installed(env):
     assert env("uninstall", "--backend", "systemd", extra=_fake_sched(env.tmp)).returncode == 0
+
+
+def _load_pr_policy():
+    import importlib.machinery
+    import importlib.util
+
+    loader = importlib.machinery.SourceFileLoader("pr_policy", str(CLI))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    mod = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_default_load_config_uses_load_effective(tmp_path, monkeypatch):
+    """S1: no --config / PR_POLICY_CONFIG → effective pr_policy."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("PR_POLICY_CONFIG", raising=False)
+    monkeypatch.delenv("PR_POLICY_TOML", raising=False)
+    mod = _load_pr_policy()
+    shipped = REPO / "config" / "pr-policy.toml"
+    via_path = mod.load_config(shipped)
+    via_eff = mod.load_config(root=REPO, home=home, environ={})
+    assert via_eff == via_path
+    assert via_eff["meta"]["schema"] == 1
+    assert "github" in via_eff and "forgejo" in via_eff
+
+
+def test_pr_policy_toml_env_reaches_load_config(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    selected = tmp_path / "override.toml"
+    selected.write_text(
+        '[meta]\nschema = 1\n[github]\npolicy = "override"\nowners = ["o"]\n'
+        'token_secret = "T"\n'
+    )
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("PR_POLICY_TOML", str(selected))
+    mod = _load_pr_policy()
+    cfg = mod.load_config(root=REPO, home=home, environ=dict(os.environ))
+    assert cfg["github"]["policy"] == "override"
+    assert "forgejo" not in cfg

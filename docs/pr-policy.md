@@ -1,7 +1,11 @@
 # pr-policy: who may open pull requests on djbclark's repositories
 
 `bin/pr-policy` (2026-11-04, operator request: "only accept PRs from me, everyone else can only do draft PRs for me
-to approve, and make that the default for any future repos"). Config: [`config/pr-policy.toml`](../config/pr-policy.toml).
+to approve, and make that the default for any future repos"). Config: effective
+`pr_policy` domain via `ade_config.load_effective` (legacy
+[`config/pr-policy.toml`](../config/pr-policy.toml) / `PR_POLICY_TOML` when `ade.toml`
+is absent; `--config` / `PR_POLICY_CONFIG` still accept an explicit legacy file;
+`docs/config-migration.md`).
 
 ## What it enforces
 
