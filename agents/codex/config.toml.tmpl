@@ -264,6 +264,39 @@ memories = true
 # those trust hashes on first /hooks trust. Apply to ~/.codex/config.toml only with the
 # operator's yes (order 11); do not also add the same handlers to ~/.codex/hooks.json or
 # Codex merges both and warns.
+
+# BEGIN ade-secret-deny (managed by bin/render-secret-deny; do not edit by hand)
+# Codex filesystem deny-read profile from config/secret-deny.toml [codex] static.
+# Not activated: do not set default_permissions = "ade-secret-deny" here; sandbox_mode stays
+# danger-full-access until the operator applies this into ~/.codex/config.toml (order 11).
+# openai/codex#22179 tracked early deny-glob documentation that did not enforce; re-probe
+# the installed Codex before treating this profile as an OS wall. Do not claim #22179 landed.
+[permissions.ade-secret-deny]
+extends = ":workspace"
+
+[permissions.ade-secret-deny.filesystem]
+"{{ .home }}/.ssh/id_rsa" = "deny"
+"{{ .home }}/.ssh/id_ecdsa" = "deny"
+"{{ .home }}/.ssh/id_ed25519" = "deny"
+"{{ .home }}/.aws/credentials" = "deny"
+"{{ .home }}/.netrc" = "deny"
+"{{ .home }}/.config/gh/hosts.yml" = "deny"
+"{{ .home }}/.docker/config.json" = "deny"
+"{{ .home }}/.kube/config" = "deny"
+
+[permissions.ade-secret-deny.filesystem.":workspace_roots"]
+"**/.env" = "deny"
+"**/*.key" = "deny"
+"**/*.p12" = "deny"
+"**/*.pfx" = "deny"
+"**/*-key.pem" = "deny"
+"**/*.key.pem" = "deny"
+"**/privkey*.pem" = "deny"
+"**/id_rsa" = "deny"
+"**/id_ecdsa" = "deny"
+"**/id_ed25519" = "deny"
+# END ade-secret-deny
+
 [[hooks.PreToolUse]]
 matcher = "Bash|Edit|Write|apply_patch"
 
