@@ -534,9 +534,20 @@ platforms = ["mac", "linux"]
 [[component]]
 id = "paseo-plugin-vitals"
 class = "offered"
-chosen = true
-summary = "J6: host vitals display (tomgrin10/vitals); load-watch admit stays ADE-owned"
+chosen = false
+summary = "J6: tomgrin10/vitals (Linux / per-agent trees). Not chosen on macOS: host RAM used os.freemem until tomgrin10/paseo-vitals#11; use paseo-plugin-resources on Mac. load-watch admit stays ADE-owned"
 source = "https://paseo.sh/plugins"
+install = "UNKNOWN"
+update = "UNKNOWN"
+probe = "UNKNOWN"
+platforms = ["mac", "linux"]
+
+[[component]]
+id = "paseo-plugin-resources"
+class = "offered"
+chosen = true
+summary = "Mac host CPU/RAM/disk (zedobaia/resources; memory_pressure). Replaces vitals on macOS 2026-11-10"
+source = "https://paseo.sh/plugins/zedobaia/resources"
 install = "UNKNOWN"
 update = "UNKNOWN"
 probe = "UNKNOWN"
