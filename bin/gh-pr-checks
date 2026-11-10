@@ -1,0 +1,192 @@
+#!/usr/bin/env -S python3 -I
+"""gh-pr-checks: thin wrapper around `gh pr checks` that self-registers a deadline for `--watch`.
+
+  gh-pr-checks [--budget DUR] [--no-deadline] [--] [gh pr checks args…]
+
+Forwards every argument to `gh pr checks` (GH_BIN, default `gh`). When `--watch` is present and
+DEADLINE_NAME is unset, re-runs this wrapper under `deadline run` (name `gh-pr-checks-<pid>`,
+default budget 20m, `--on-expire kill`, no heartbeat: gh does not beat). The supervisor forwards
+SIGTERM/SIGINT/SIGHUP once to that `deadline run` (same pattern as `deadline_wait.supervised` /
+`acp-dispatch-wait`); a missing or unusable deadline tool, or a refuse/crash before the supervised
+copy touches the start mark, is one stderr warning and the watch continues unregistered (docs/
+deadline.md "Never costs the wait"). `--no-deadline` opts out. A non-watch call never registers.
+"""
+from __future__ import annotations
+
+import os
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+DEFAULT_BUDGET = "20m"
+ENV_NAME = "DEADLINE_WAIT_NAME"       # our registration name (supervised copy matches DEADLINE_NAME)
+ENV_MARK = "DEADLINE_WAIT_MARK"       # file the supervised copy creates once the watch is running
+ENV_SUP = "DEADLINE_WAIT_SUPERVISOR"  # supervisor pid (stripped on entry so descendants inherit none)
+
+
+def note(msg: str) -> None:
+    print(f"gh-pr-checks: {msg}", file=sys.stderr, flush=True)
+
+
+def gh_bin() -> str:
+    return os.environ.get("GH_BIN") or "gh"
+
+
+def deadline_tool() -> Path | None:
+    tool = Path(os.environ.get("DEADLINE_BIN") or (HERE / "deadline"))
+    return tool if tool.is_file() else None
+
+
+def split_argv(argv: list[str]) -> tuple[str, bool, list[str]]:
+    """Pull our flags; the rest is forwarded to `gh pr checks`."""
+    budget = os.environ.get("GH_PR_CHECKS_BUDGET") or DEFAULT_BUDGET
+    no_deadline = False
+    out: list[str] = []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--":
+            out.extend(argv[i + 1 :])
+            break
+        if a == "--no-deadline":
+            no_deadline = True
+        elif a == "--budget":
+            i += 1
+            if i >= len(argv):
+                note("--budget needs a duration (e.g. 20m)")
+                raise SystemExit(2)
+            budget = argv[i]
+        elif a.startswith("--budget="):
+            budget = a.split("=", 1)[1]
+            if not budget:
+                note("--budget needs a duration (e.g. 20m)")
+                raise SystemExit(2)
+        else:
+            out.append(a)
+        i += 1
+    return budget, no_deadline, out
+
+
+def wants_watch(gh_argv: list[str]) -> bool:
+    return "--watch" in gh_argv
+
+
+def _claim_supervised_mark() -> None:
+    """If this is the supervised copy of our own registration, mark that the watch began; always strip the three vars."""
+    mark = os.environ.pop(ENV_MARK, None)
+    mine = os.environ.pop(ENV_NAME, None)
+    os.environ.pop(ENV_SUP, None)
+    if mark and mine and os.environ.get("DEADLINE_NAME") == mine:
+        try:
+            Path(mark).touch()
+        except OSError:
+            pass
+
+
+def maybe_supervise_under_deadline(
+    gh_argv: list[str],
+    *,
+    budget: str,
+    no_deadline: bool,
+    script: str | None = None,
+    self_argv: list[str] | None = None,
+) -> int | None:
+    """Re-run this wrapper under `deadline run` when watching and uncovered. None = call gh here."""
+    if no_deadline:
+        return None
+    if "DEADLINE_NAME" in os.environ:
+        # under `deadline run` (ours or a caller's; empty value = failed registration): never register twice
+        _claim_supervised_mark()
+        return None
+    if not wants_watch(gh_argv):
+        return None
+    tool = deadline_tool()
+    if tool is None:
+        note("no usable deadline tool (bin/deadline or $DEADLINE_BIN): continuing without a registered deadline")
+        return None
+    name = f"gh-pr-checks-{os.getpid()}"
+    try:
+        mark_dir = tempfile.mkdtemp(prefix="gh-pr-checks-")  # 0700: nobody else can pre-create or symlink the mark
+    except OSError as e:
+        note(f"cannot make a private directory ({e}): continuing without a registered deadline")
+        return None
+    mark = os.path.join(mark_dir, "started")
+    script_path = script or str(HERE / "gh-pr-checks")
+    exe = [script_path] if os.access(script_path, os.X_OK) else [sys.executable, script_path]
+    inner = list(self_argv if self_argv is not None else gh_argv)
+    cmd = [str(tool), "run"]
+    owner = (os.environ.get("PASEO_AGENT_ID") or "").strip()
+    if owner:
+        cmd += ["--owner", owner]
+    # No --heartbeat: gh does not emit deadline beat; budget alone is the outer limit (docs example's 5m
+    # heartbeat would kill a healthy watch that never beats).
+    cmd += ["--name", name, "--budget", budget, "--on-expire", "kill", "--", *exe, *inner]
+    note(f"registering deadline {name} budget={budget}")
+    sys.stdout.flush()
+    sys.stderr.flush()
+    try:
+        # own session: a terminal or group signal reaches only this supervisor, which forwards it ONCE
+        child = subprocess.Popen(
+            cmd,
+            env={**os.environ, ENV_NAME: name, ENV_MARK: mark, ENV_SUP: str(os.getpid())},
+            start_new_session=True,
+        )
+    except OSError as e:
+        shutil.rmtree(mark_dir, ignore_errors=True)
+        note(f"deadline run failed to start ({e}): continuing without a registered deadline")
+        return None
+
+    got: list[int] = []
+
+    def forward(sg, _frame):
+        got.append(sg)
+        try:
+            child.send_signal(sg)
+        except OSError:
+            pass
+
+    old = {s: signal.signal(s, forward) for s in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)}
+    try:
+        rc = child.wait()
+    finally:
+        for s, h in old.items():
+            signal.signal(s, h)
+    started = os.path.exists(mark)
+    shutil.rmtree(mark_dir, ignore_errors=True)
+    if got and not started:  # cancelled before the watch began: the caller asked it to stop
+        return 128 + got[0]
+    if not started:  # refused / crashed before the supervised copy ran: never costs the wait
+        note(f"the deadline tool did not run the watch (exit {rc}): continuing without a registered deadline")
+        return None
+    return 128 - rc if rc < 0 else rc
+
+
+def run_gh(gh_argv: list[str]) -> int:
+    cmd = [gh_bin(), "pr", "checks", *gh_argv]
+    try:
+        return subprocess.call(cmd)
+    except OSError as e:
+        note(f"cannot run {cmd[0]!r} ({e})")
+        return 127
+
+
+def main(argv: list[str] | None = None) -> int:
+    raw = list(argv if argv is not None else sys.argv[1:])
+    try:
+        budget, no_deadline, gh_argv = split_argv(raw)
+    except SystemExit as e:
+        return int(e.code) if isinstance(e.code, int) else 2
+    supervised = maybe_supervise_under_deadline(
+        gh_argv, budget=budget, no_deadline=no_deadline, self_argv=raw,
+    )
+    if supervised is not None:
+        return supervised
+    return run_gh(gh_argv)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
