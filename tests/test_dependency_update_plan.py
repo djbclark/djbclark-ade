@@ -112,7 +112,7 @@ def snapshot(root):
 def test_cold_cli_has_no_state_cache_or_command_effects(catalog, tmp_path, before_command, root_option):
     bindir = catalog.root / "bin"
     bindir.mkdir()
-    for name in ("ade-install", "ade_install.py", "ade_config.py", "model_tiers.py"):
+    for name in ("ade-install", "ade_install.py", "ade_install_catalog.py", "ade_config.py", "model_tiers.py"):
         shutil.copyfile(REPO / "bin" / name, bindir / name)
     executable = bindir / "ade-install"
     executable.chmod(0o755)

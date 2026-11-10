@@ -17,10 +17,31 @@ remains later work (`docs/setup-plan.md` S3).
 | `bin/ade_install.py` / `bin/ade-install` | Loader, plan, doctor, apply |
 | `bin/ade_user_install.py` / `bin/ade-user-install` | User-scoped uv/just fetch, `bin/` symlinks, Linux sudo-secretspec media |
 
-Loaded **only while `config/ade.toml` is absent**. If a unified `ade.toml` is
-present, `ade-install` refuses the transitional file so there is no permanent
-duplicate editable authority. A later fold must carry install/keys into the
-unified file with reviewed consumer adoption.
+Reader adoption **2026-11-10**: default `ade_install.load_catalog()` reads the
+joint install/keys domain through `ade_config.load_effective`. Without a unified
+file, the legacy catalog projects unchanged. A present unified file supplies the
+base; local metadata overlays it by leaf, and arrays replace whole. No legacy
+catalog data is resurrected behind a present unified file. The catalog requires
+`install.component`; optional missing `keys` means an empty registry. Pure shared
+validation/mapping lives in `bin/ade_install_catalog.py`.
+
+The explicit library `install_path=` override retains its isolated legacy read
+and original refusal when `config/ade.toml` is present. Default adoption does not
+change the installer, keys engine, ledger paths or system-execution permissions.
+No tracked `config/ade.toml` ships, and `ade-config set` explicitly refuses the new
+install/keys paths until writer adoption.
+
+The mapping preserves legacy row fields: `[[component]]` and `[[login]]` become
+`[[install.component]]` and `[[install.login]]`; jobs/retired jobs keep their
+`install.*` paths. `[[key]]` becomes `[keys.<NAME>]`, with the name restored in
+the Catalog adapter. Existing key metadata fields merge independently without
+ever storing a credential value.
+
+`--root` catalog-only trees still need only `install.toml` and its schema for a
+legacy read. Raw unified/local inputs require the root or bundled full effective
+schema before scope isolation; an unavailable schema refuses overlays. Generic
+`ade-config check|get|diff` expose and validate new domains when present, while
+router/gate readers retain their explicit existing domain scope.
 
 ## B. Component classes
 

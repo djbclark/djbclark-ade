@@ -20,7 +20,7 @@ import route_agent as router
 def tree(tmp_path, monkeypatch):
     root = tmp_path / "repo"
     (root / "bin").mkdir(parents=True)
-    for name in ("route_agent.py", "ade_config.py", "ade_gates.py", "model_tiers.py"):
+    for name in ("route_agent.py", "ade_config.py", "ade_gates.py", "model_tiers.py", "ade_install_catalog.py"):
         shutil.copy2(REPO / "bin" / name, root / "bin" / name)
     shutil.copytree(REPO / "config", root / "config")
     home = tmp_path / "home"

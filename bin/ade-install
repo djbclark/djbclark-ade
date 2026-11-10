@@ -20,7 +20,8 @@ verify_argv under sudo-secretspec run when recorded (no values printed).
 Apply defaults to --dry-run; --yes runs user install_argv. --system --dry-run /
 --print-system-argv preview system_argv. Live system_argv needs --yes --system
 --apply-system (default refuse). Secrets are never read.
-Uses config/install.toml only while config/ade.toml is absent.
+Default catalog reads adopt effective install/keys metadata; explicit library
+install_path reads retain the legacy unified-presence refusal. No writer expansion.
 See docs/install-catalog.md.
 """
 from __future__ import annotations

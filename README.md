@@ -107,7 +107,7 @@ Skills (25, from each `skills/*/SKILL.md`):
 | [`tell-coding-bot`](skills/tell-coding-bot/SKILL.md) | Pointer (2026-11-06) for talking to the operator's cloud Grok Bot "Coding" ("tell the Coding bot", "ask Coding", "hand this to the Coding bot", a task that needs a real browser session); the coding-bot code now lives in the peer-link repository. |
 | [`watch`](skills/watch/SKILL.md) | Inspect machine load, memory churn, and active incidents from your terminal with minimal token use, or manage system watchers. |
 
-`bin/` (78, from each file's first docstring or comment):
+`bin/` (79, from each file's first docstring or comment):
 
 | Tool | What |
 |---|---|
@@ -141,6 +141,7 @@ Skills (25, from each `skills/*/SKILL.md`):
 | [`ade_github_setup.py`](bin/ade_github_setup.py) | Observe / plan / apply / verify for setup-plan S8. |
 | [`ade_harden.py`](bin/ade_harden.py) | Observe-only GitHub hardening drift check (setup-plan S6). |
 | [`ade_install.py`](bin/ade_install.py) | Install catalog, plan, observe-only doctor/keys, bounded apply. |
+| [`ade_install_catalog.py`](bin/ade_install_catalog.py) | Pure install-catalog validation, schema projection and metadata mapping. |
 | [`ade_pi_pools.py`](bin/ade_pi_pools.py) | Pi pool acceptance for automatic routing (ade/auto / bin/pi-default). |
 | [`ade_sched.py`](bin/ade_sched.py) | Install a launchd plist as a launchd agent, a systemd user unit or a crontab block (issue #279, 2026-11-04). |
 | [`ade_user_install.py`](bin/ade_user_install.py) | User-scoped tool bootstrap (no shell=True, no root). |

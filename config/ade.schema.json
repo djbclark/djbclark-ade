@@ -57,7 +57,7 @@
     },
     "model_tiers": {
       "type": "object",
-      "description": "Projected from config/model-tiers.toml (roles → concrete model ids per vendor). Written by bin/ade-model-tiers promote|set.",
+      "description": "Projected from config/model-tiers.toml (roles \u2192 concrete model ids per vendor). Written by bin/ade-model-tiers promote|set.",
       "additionalProperties": true
     },
     "gates": {
@@ -202,6 +202,283 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "install": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "jobs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "kind",
+              "owner",
+              "class"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "kind": {
+                "type": "string"
+              },
+              "owner": {
+                "type": "string",
+                "minLength": 1
+              },
+              "class": {
+                "type": "string"
+              },
+              "chosen": {
+                "type": "boolean"
+              },
+              "label": {
+                "type": "string",
+                "minLength": 1
+              },
+              "plist": {
+                "type": "string"
+              },
+              "schedule": {
+                "type": "string"
+              },
+              "command": {
+                "type": "string"
+              },
+              "mode": {
+                "type": "string"
+              },
+              "timezone": {
+                "type": "string",
+                "minLength": 1,
+                "description": "IANA timezone for paseo schedule create; ADE_TIMEZONE used when omitted"
+              },
+              "provider": {
+                "type": "string",
+                "minLength": 1,
+                "description": "paseo --provider for schedule create (e.g. claude/sonnet)"
+              },
+              "cwd": {
+                "type": "string",
+                "minLength": 1,
+                "description": "paseo --cwd; __ADE__/__HOME__ placeholders filled"
+              },
+              "prompt": {
+                "type": "string",
+                "minLength": 1,
+                "description": "paseo schedule create prompt (positional)"
+              },
+              "set": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "platforms": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "notes": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "retired_jobs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "kind",
+              "owner"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "kind": {
+                "type": "string"
+              },
+              "owner": {
+                "type": "string",
+                "minLength": 1
+              },
+              "label": {
+                "type": "string",
+                "minLength": 1
+              },
+              "notes": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "component": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "class"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "class": {
+                "type": "string"
+              },
+              "chosen": {
+                "type": "boolean"
+              },
+              "summary": {
+                "type": "string"
+              },
+              "source": {
+                "type": "string"
+              },
+              "install": {
+                "type": "string"
+              },
+              "install_argv": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "update": {
+                "type": "string"
+              },
+              "update_argv": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "probe": {
+                "type": "string"
+              },
+              "probe_argv": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "presence": {
+                "type": "string"
+              },
+              "needs_system": {
+                "type": "boolean"
+              },
+              "system_argv": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "system_argv_darwin": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "platforms": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "notes": {
+                "type": "string"
+              },
+              "paseo_plugin": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Observe-only Paseo plugin id. Doctor runs `paseo plugin ls --json` and reports ok/disabled/missing; ade-install never installs or enables."
+              }
+            }
+          }
+        },
+        "login": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "id"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "summary": {
+                "type": "string"
+              },
+              "command": {
+                "type": "string"
+              },
+              "notes": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "keys": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": [],
+        "additionalProperties": false,
+        "properties": {
+          "components": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "create_url": {
+            "type": "string"
+          },
+          "verify": {
+            "type": "string",
+            "description": "Human/status note; UNKNOWN until a probe is recorded. Outcomes come from verify_argv."
+          },
+          "verify_argv": {
+            "type": "array",
+            "description": "Argv for the cheapest read-only authenticated probe, run under sudo-secretspec run. Must read the key from the environment; never print values. Exit contract: 0 ok, 10 invalid, 11 no-quota, 12 unreachable, 13 expiring, 14 missing. Non-empty enforced by ade-install validation.",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "expiry": {
+            "type": "string"
+          },
+          "notes": {
+            "type": "string"
           }
         }
       }

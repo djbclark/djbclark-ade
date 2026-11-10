@@ -493,7 +493,8 @@ def _load_runtime_config(
     importing this reader never imports live routing back through ade_config.
     Explicit load_policy(path) remains an isolated legacy-format file read.
     """
-    effective = ade_config.load_effective(root=root, home=home, environ=environ)
+    effective = ade_config.load_effective(root=root, home=home, environ=environ,
+                                          domains=ade_config.ROUTER_DOMAINS)
     data = ade_config.project_routing_domain(effective.data)
     source = Path(effective.provenance["routing_source"])
     ade_config.validate_legacy_routing_shape(data, source)
