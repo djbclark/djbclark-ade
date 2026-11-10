@@ -170,8 +170,8 @@ Pass `--ade` only with a durable checkout (`~/src/djbclark-ade`); never with a l
 | --- | --- |
 | `just`, `uv` | `ade-user-install` release fetch → `{prefix}` |
 | `skill-everywhere`, `firecrawl-router` | `ade-user-install link` into `{prefix}` |
-| `node` | Mac `system_argv_darwin` `brew install node`; Linux system recipe still UNKNOWN; `node --version` probe |
-| `npm` | separate hard row (`npm --version`); Mac same brew recipe as node so node-without-npm cannot look healthy |
+| `node` | Mac `brew install node`; Linux `system_argv` `apt-get install -y nodejs npm`; `node --version` probe |
+| `npm` | separate hard row (`npm --version`); same Mac brew / Linux apt argv as node |
 | `graft` | `npm install -g @nanonets/graft` (user npm prefix) |
 | `git`, `gh` | `needs_system` + Linux `system_argv` (`apt-get`) + `system_argv_darwin` (`brew`); preview or `--apply-system` |
 | `sudo-secretspec` | Mac: `system_argv_darwin` brew tap (`--system` / `--apply-system`). Linux: no `system_argv`; `install_argv` → `ade-user-install sudo-secretspec` (latest → versioned asset → sha256 → extract; libexec install opt-in) |

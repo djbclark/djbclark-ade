@@ -194,30 +194,32 @@ id = "node"
 class = "hard"
 summary = "Node.js runtime (paired with hard npm; brew install node supplies both on Mac)"
 source = "https://nodejs.org/"
-install = "Mac: brew install node; Linux: distro nodejs/npm or nodesource (system_argv still UNKNOWN)"
+install = "Mac: brew install node; Linux (Debian/Ubuntu apt): apt-get install -y nodejs npm"
+needs_system = true
+system_argv = ["apt-get", "install", "-y", "nodejs", "npm"]
+system_argv_darwin = ["brew", "install", "node"]
 update = "Mac: brew upgrade node; Linux: package manager"
 probe = "node --version"
 probe_argv = ["node", "--version"]
 presence = "node"
-needs_system = true
-system_argv_darwin = ["brew", "install", "node"]
 platforms = ["mac", "linux"]
-notes = "Hard prerequisite for every npm install_argv row. Linux system_argv still UNKNOWN (distro vs nodesource). Preview Mac with apply --system --dry-run."
+notes = "Hard prerequisite for every npm install_argv row. Linux system_argv = Debian/Ubuntu apt (2026-11-09, re-land #389); NodeSource and other distros stay out of scope for this argv. Preview with apply --system --dry-run."
 
 [[component]]
 id = "npm"
 class = "hard"
 summary = "npm CLI (ships with Node; required so npm install_argv recipes are not skipped when node alone is present)"
 source = "https://nodejs.org/"
-install = "Mac: brew install node (includes npm); Linux: distro npm package or nodesource"
+install = "Mac: brew install node (includes npm); Linux (Debian/Ubuntu apt): apt-get install -y nodejs npm"
+needs_system = true
+system_argv = ["apt-get", "install", "-y", "nodejs", "npm"]
+system_argv_darwin = ["brew", "install", "node"]
 update = "with node (package manager)"
 probe = "npm --version"
 probe_argv = ["npm", "--version"]
 presence = "npm"
-needs_system = true
-system_argv_darwin = ["brew", "install", "node"]
 platforms = ["mac", "linux"]
-notes = "Separate hard row so doctor/apply cannot treat node-without-npm as healthy. Linux system_argv still UNKNOWN."
+notes = "Separate hard row so doctor/apply cannot treat node-without-npm as healthy. Linux system_argv matches node (apt nodejs+npm, re-land #389)."
 
 [[component]]
 id = "cursor-cli"

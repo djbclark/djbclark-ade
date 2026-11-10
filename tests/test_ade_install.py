@@ -74,7 +74,9 @@ def test_repo_install_toml_checks_clean():
     ]
     assert by_id["codex"].get("install_argv") == ["npm", "install", "-g", "@openai/codex"]
     assert by_id["node"].get("probe_argv") == ["node", "--version"]
+    assert by_id["node"].get("system_argv") == ["apt-get", "install", "-y", "nodejs", "npm"]
     assert by_id["npm"].get("needs_system") is True
+    assert by_id["npm"].get("system_argv") == ["apt-get", "install", "-y", "nodejs", "npm"]
     assert by_id["npm"].get("system_argv_darwin") == ["brew", "install", "node"]
     assert by_id["npm"].get("probe_argv") == ["npm", "--version"]
     assert by_id["npm"].get("presence") == "npm"
