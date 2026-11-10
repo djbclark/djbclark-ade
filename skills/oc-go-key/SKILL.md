@@ -1,22 +1,25 @@
 ---
 name: oc-go-key
 description: >-
-  Recover a session that stopped with "Go usage limit exceeded" or "Insufficient account funds":
-  read which OpenCode Go account is serving this Mac, swap the live credential with `oc-go-key use
-  <label>`, and resume the aborted turn so the entity is not dark with a working key. Use when a
-  Paseo/OpenCode tab dies mid-turn on a quota or credit error, when OpenCode Go quota is tight,
-  when asked which Go account is active or to switch OpenCode accounts, or when a session must
-  continue in place instead of in a new tab.
+  Archive only (Pi sole-TUI 2026-11-08/09): historically recovered an OpenCode Go session that
+  stopped with "Go usage limit exceeded" or "Insufficient account funds" via `oc-go-key use
+  <label>` and a resume. OpenCode is not a live TUI; do not choose it for new work. Prefer Pi /
+  native `paseo run` pools once separately accepted (`docs/pi-defaults.md`, queue item 36).
 version: 0.1.0
 author: Dan Clark (djbclark), Dann 7
 license: Apache-2.0
 platforms: macos
-tags: opencode, opencode-go, quota, credentials, continuity, macos
+tags: opencode, opencode-go, quota, credentials, continuity, macos, archive
 ---
 
-# oc-go-key — the OpenCode Go quota wall
+# oc-go-key — archived OpenCode Go quota wall
 
-A Go quota wall does not look like a crash. It looks like the tab quietly stopped:
+**Archive (Pi sole-TUI policy, 2026-11-08/09).** OpenCode is not a current chooser, default, or
+supported live TUI. This skill records the retired OpenCode Go credential-rotation path only; it
+is not a live Pi or Paseo recovery path. Keep for history; do not start OpenCode for new work.
+
+A Go quota wall (on the retired OpenCode transport) did not look like a crash. It looked like the
+tab quietly stopped:
 
 | Text in the tab | Bill it refused | Helps to rotate the credential? |
 | --- | --- | --- |
