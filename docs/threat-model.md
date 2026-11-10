@@ -10,8 +10,9 @@ Every claim names the file that shows it; a claim without a file is the operator
 Read this block first; the body below is the 2026-10-20 snapshot with dated notes, and a line that names a deleted
 tool describes the surface as it was.
 
-* **Deleted surfaces** (2026-11-06/07): `bin/zcode-key-auth`,
+* **Deleted surfaces** (2026-11-06/07; R2-18 hooks 2026-11-10): `bin/zcode-key-auth`,
   `bin/skillopt-night`, `bin/skillopt_sources.py`, `bin/failover.py`, `bin/skill-get`, `claude/hooks/prior_art_nudge.py`,
+  `claude/hooks/quota_nudge.py`, `claude/hooks/cswap_quota_context.sh`,
   `bin/web-get`, `bin/ade-scan-state`, `bin/pr-wait`, `bin/local-review`, the quota guard and fleet governor, the
   watch family, session-finder's launcher and fleet, the pi subagent extension, and every retired TUI's adapter.
 * **Entry points today**: (a) native `paseo run` (live ops; the launch line from `route_agent.py` `Choice.dispatch`,

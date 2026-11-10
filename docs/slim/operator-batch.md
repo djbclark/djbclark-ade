@@ -66,7 +66,7 @@ Hook lines in `~/.claude/settings.json` (the C2 list), before `ade update`
 - C2. Remove the two live `prior_art_nudge.py` lines (PostToolUse/PostToolUseFailure and UserPromptSubmit) (wave3-E10 G2).
 - C3. Remove the `relay_prose_nudge.py` Stop hook entry (wave3-E3 F1).
 - C4. Remove the `autorename_nudge.py` UserPromptSubmit entry (wave3-E4 F1).
-- C5. Quota nudge: remove the `quota_nudge.py` UserPromptSubmit line (`"$HOME"/ops/site-private/bin/hook-deadline 2 "$HOME"/src/djbclark-ade/claude/hooks/quota_nudge.py`) once session-guard is verified (recommended; it is inert now), and keep or drop `"$HOME"/.claude/hooks/cswap_quota_context.sh` (it reads `cswap`, not the guard) (decision) (wave4-E7 H4).
+- C5. Quota nudge (R2-18, decided DELETE 2026-11-10): remove the live `quota_nudge.py` UserPromptSubmit line (`"$HOME"/ops/site-private/bin/hook-deadline 2 "$HOME"/src/djbclark-ade/claude/hooks/quota_nudge.py`) and the SessionStart `"$HOME"/.claude/hooks/cswap_quota_context.sh` line (and `rm` that live hook copy if present). The repo template no longer ships either; E7's session-guard / usage-auto-resume replaced the quota gate (wave4-E7 H4).
 
 Stop the jobs and remove state, before `ade update`
 - C6. Remove the harvested evidence dirs `~/src/djbclark-ade/.skillopt-sleep` and `~/src/djbclark-ade/.skillopt-sleep-handoff`, and the same in any live worktree (the two `.gitignore` lines then go in D4) (wave3-E10 G0).

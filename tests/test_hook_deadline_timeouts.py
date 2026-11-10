@@ -4,7 +4,8 @@
 hook-deadline kills its command after N seconds and exits 0 silently, but only once perl has started. At load
 30-50 on 8 cores, with memory compressor churn, starting it alone took longer than the old 5 s outer timeout, so
 Claude Code killed the wrapper first and printed "timed out after 5s" for prior_art_nudge and quota_nudge on every
-prompt. The outer timeout is only a backstop, so it must stay above both the deadline and the spawn delay."""
+prompt. The outer timeout is only a backstop, so it must stay above both the deadline and the spawn delay.
+quota_nudge itself was deleted 2026-11-10 (R2-18: session-guard replaced the quota gate)."""
 from __future__ import annotations
 
 import json
@@ -30,9 +31,9 @@ def wrapped_hooks() -> list[tuple[str, float, object]]:
 
 class HookDeadlineTimeoutsTest(unittest.TestCase):
     def test_some_hooks_are_wrapped(self) -> None:
-        # Six wrapped hooks until 2026-11-06; the slim-down removed prior_art_nudge (three objects), so the template
-        # keeps four (quota_nudge, post-edit-check, context_size_nudge twice).
-        self.assertGreaterEqual(len(wrapped_hooks()), 4)
+        # Six wrapped hooks until 2026-11-06; slim-down removed prior_art_nudge (three); R2-18 removed quota_nudge
+        # (2026-11-10). Three remain: post-edit-check, context_size_nudge twice.
+        self.assertGreaterEqual(len(wrapped_hooks()), 3)
 
     def test_outer_timeout_leaves_room_for_a_loaded_machine(self) -> None:
         for event, deadline, timeout in wrapped_hooks():
