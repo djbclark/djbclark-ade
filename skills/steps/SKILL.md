@@ -32,10 +32,12 @@ Grok Bot is not such a runtime: it has a question widget, rule 5.)
 
 Use the native chooser your runtime actually has. Do not invent a second UX.
 
-1. **Claude Code, Copilot, Cursor, OpenCode, and any agent with
-   `AskUserQuestion` / `question`:** the native arrow-key chooser
-   (`AskUserQuestion` on Claude-class agents, `question` on OpenCode).
-   Keep using it even if you also have something else.
+1. **Claude Code, Copilot, Cursor, Pi, and any agent with
+   `AskUserQuestion`:** the native arrow-key chooser (`AskUserQuestion` on
+   Claude-class agents). Keep using it even if you also have something else.
+   Pi is the sole third-party TUI (2026-11-08, queue item 36); it has no
+   OpenCode-style `question` tool — use `AskUserQuestion` when present, else
+   the numbered one-at-a-time fallback in rule 4 below.
 2. **Hermes:** `clarify`. On Telegram that is a native card: the **question**
    in the message, and **one full-width button per choice whose label is the
    choice text** (not `1`/`2`/`3`), plus "✏️ Other (type answer)".
@@ -157,19 +159,13 @@ strings **are** the Telegram button labels.
 4. Artifacts go in the prose line before the call, not inside `choices`.
 5. One entry in `questions`. `multi_select` stays off.
 
-### 2c. `question` (OpenCode)
+### 2c. `question` (OpenCode) — archived
 
-`question` is the OpenCode analogue of `AskUserQuestion`: an arrow-key chooser
-with 2–4 options, descriptions, optional `multiple`. There is no `header` chip,
-so the position (`2/4`) goes at the start of `question`.
-
-1. Lead with the position, then one or two sentences on what it is and what it
-   does — same shape as `2a`.
-2. First option is the recommendation; label it `(Recommended)` and put the
-   reason in its description. Each option's description carries the consequence.
-3. Leave `multiple` unset (off).
-4. The "Other (type answer)" line is added by the tool; he types `stop` there
-   to end the walk.
+**Archived (never a fallback):** OpenCode's `question` tool was the analogue of
+`AskUserQuestion` (arrow-key chooser, 2–4 options, descriptions, optional
+`multiple`; no `header` chip, so position went at the start of `question`).
+Under the 2026-11-08 Pi-only ruling, OpenCode is not a live TUI; do not call
+`question`. Use section 2a / rule 4 instead.
 
 ### 2d. Grok Bot widget (`SendToUser`, type `"widget"`)
 
