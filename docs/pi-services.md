@@ -35,15 +35,17 @@ consume the same subscription pool;
 they are not two allowances. An API key or separate API credits are a different
 pool. Successful requests do not measure the exact debit or qualify every model.
 
-The Pi SDK streamer-discovery repair is
-[upstream PR 13](https://github.com/stnly/pi-grok/pull/13). Until upstream includes
-it, the normal Pi package installation uses
-`git:github.com/djbclark/pi-grok@fix/pi15-compat-loader`. This is a temporary fork
-branch, not a version pin. Once upstream includes the fix, return to its normal
-source through Pi's package manager, retaining the existing `xai-oauth` OAuth
-credential and session history. Do not enable both copies of the extension.
-The fix passed source review, full fork tests/typecheck, and an actual Pi SDK
-load before installation; the later tool checks establish runtime use separately.
+The Pi SDK streamer-discovery repair was
+[upstream PR 13](https://github.com/stnly/pi-grok/pull/13), merged 2026-11-08 and
+released in pi-grok 0.13.1 (`dd01214`). On 2026-11-10 the Mac returned to the
+normal source `git:github.com/stnly/pi-grok` through Pi's package manager
+(`pi remove` of the temporary fork branch, then `pi update`), keeping the existing
+`xai-oauth` OAuth credential and session history. Only one copy of the extension
+is installed; the temporary fork has been archived and is no longer referenced.
+After the switch, `pi --list-models grok` lists the `xai-oauth` Grok models, and a
+non-interactive `pi -p --model xai-oauth/grok-4.7` request authenticated and
+reached xAI, which answered 402 "Grok Build usage balance exhausted"; that is a
+subscription balance state, not a login or extension failure.
 
 ## Antigravity through Pi
 
