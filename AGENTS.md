@@ -12,9 +12,9 @@ git home of the orchestration and session-hygiene skills. Two altitudes: the
 **micro graph** (in-process subagents/workflows) and the **macro graph** (a DAG of
 Paseo agents via `skills/fan-out`). [README.md](README.md): loop, layout, roster.
 
-Retired tools (herdr bar bridges / `bin/herdr-server-run`, Orca, BB, and more from
-the 2026-11-06/07 slim-down) must not be presented as current: see
-[docs/slim/log.md](docs/slim/log.md) and [docs/history/](docs/history/).
+Tools left this repo on 2026-10-31 and in the 2026-11-06/07 slim-down must not be
+presented as current: see [docs/slim/log.md](docs/slim/log.md) and
+[docs/history/](docs/history/).
 
 ## Read before acting
 
@@ -121,14 +121,14 @@ under the owner's login) is ours. The review boundary and the merge gate below a
    ended the shared-file conflicts. Another session's uncommitted edits in a shared checkout are migrated by their owner
    (message it, order 10), never stashed or reset by you.
 
-10. **A message to another agent is sent with `paseo send --json` or the relay shim (`skills/session-finder/relay.py`, until
+10. **A message to another agent is sent with `paseo send --json` or the session-finder relay shim (Wave 6 delete by
    2026-11-20), and not delivered until you have proof** (operator, 2026-10-25: "we always need to verify that the other agent
    got our message otherwise we may be on a broken one-way receive-only link"; mechanics re-based on Paseo 2026-11-06). A
    sourceless send (deadline, load-watch) is delivered when `.status` reads `sent` or `completed` (exit 0); an agent's send
    is accepted (exit 5: Paseo queues every agent-to-agent message and reports no later delivery) and proven only by the
    peer's `ack <your agent id>`; exit 2 is not delivered; `paseo send`'s `$?` is never read as delivery. Writing an answer
    in your own turn does not reach a peer: a message from a peer is answered by sending to that peer, not in prose. Every
-   message that needs to be known delivered asks for the named ack (relay.py's `--ack <your id>` appends the request; `paseo send` has no `--ack`, so write
+   message that needs to be known delivered asks for the named ack (the relay shim's `--ack <your id>` appends the request; `paseo send` has no `--ack`, so write
    `Please reply: ack <your id>` into the text and pass `--no-wait`, since a send to a busy peer can block for minutes); the first
    message to a new peer always asks for one, to prove the return path; check your own inbox for it, re-send when none
    arrives, and report a peer you cannot reach to the operator, never assume it read.
@@ -148,8 +148,9 @@ under the owner's login) is ours. The review boundary and the merge gate below a
 - **Paseo is the only harness (2026-10-31).** `paseo ls -a -g --json` / `paseo run` /
   `paseo permit ls`; screen control via `paseo-screen`. Registry:
   `paseo provider ls --json` (docs/model-routing.md).
-- **Two shims, one cycle each** (then Paseo directly): `skills/session-finder/relay.py`
-  over `paseo send` (until 2026-11-20); `bin/acp-dispatch` + `tools/acp-run` (Wave 6).
+- **Two shims, one cycle each** (then Paseo directly): session-finder relay over
+  `paseo send` (Wave 6 delete by 2026-11-20); dispatch shim under `bin/` + acp runner
+  under `tools/` (Wave 6 follow-up delete after one live cycle).
 - Master is **PR-only** (branch protection includes admins). Work in a worktree
   (order 9); merge when `adversary-marker` and Tests are green
   (`gh pr merge --squash --match-head-commit`). Repo: `djbclark/djbclark-ade`.
