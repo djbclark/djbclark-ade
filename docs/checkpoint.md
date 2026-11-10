@@ -152,3 +152,20 @@ E2. These are implementation gates, not tests performed by this documentation up
 daemons and throwaway processes per B10; Linux CI first. Platform-specific persistence/process
 behavior requires explicit macOS validation before claiming parity, without adding a macOS PR leg.
 A future checkpoint skill documents proven interfaces after implementation, not invented commands.
+
+E3. D1 / native-resume preflight CLI (2026-11-10). `bin/ade-recovery-d1` is the observe-only
+preflight for Carried queue **#2** while PR 290 (`ade-recovery`) stays parked until native resume
+is measured (PLAN J6, J9). It prints the host matrix (docs contract, `paseo` CLI/version/daemon,
+`$PASEO_HOME/agents`, presence of `local-credential` without reading it, optional
+`session-recovery` plugin-data, node runtime) and exits 0 only when docs + CLI + daemon probes are
+green — meaning this host can run the D1 measurement, not that recovery works. It never installs
+plugins, never resumes or sends to agents, and never writes state.
+
+```
+bin/ade-recovery-d1                 # text report; exit 0 ready, 1 blocked
+bin/ade-recovery-d1 --json          # one JSON object
+bin/ade-recovery-d1 --paseo-home DIR
+```
+
+Operator measurement of native `paseo send` / `agent reload` / `agent import` on the live daemon
+still waits for a Mac/operator session; this CLI only clears the "can we probe here?" gate.

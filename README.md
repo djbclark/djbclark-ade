@@ -119,6 +119,7 @@ Skills (23, from each `skills/*/SKILL.md`):
 | [`ade-install`](bin/ade-install) | Transitional install catalog, plan, doctor, keys, and bounded apply. |
 | [`ade-merge-ready`](bin/ade-merge-ready) | Classify open ADE PRs against the merge gate (2026-11-09). |
 | [`ade-pi-pools`](bin/ade-pi-pools) | Report and enforce Pi pool acceptance before automatic routing (ade/auto). |
+| [`ade-recovery-d1`](bin/ade-recovery-d1) | Observe-only D1 / native-resume preflight (Carried #2, 2026-11-10). |
 | [`ade-release-ready`](bin/ade-release-ready) | Dry-run gate for the first (or next) release tag (Carried #15, 2026-11-10). |
 | [`ade-retro`](bin/ade-retro) | A read-only raw report for a retrospective over a date window (2026-11-04). |
 | [`ade-roster`](bin/ade-roster) | Print README's skills and bin/ roster, generated from the files themselves (2026-11-07, slim-down E11). |
