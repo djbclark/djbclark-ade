@@ -10,7 +10,9 @@ under **Carried**, newest first, one line each; an item leaves when it ships (in
 1. **Wave 6 shim deletion** (2026-11-09): remove `relay.py`, `acp-dispatch` and `acp-run` after one live cycle (soft deadline 2026-11-20); C3 outside files migrated or waived; keep `review-launch`. Checklist: `docs/slim/wave6-follow-up.md`. Blocked on Mac live-cycle evidence and order-11 C3 ticks. (Absorbs the deletion half of former Carried 33.)
 2. **Issue 284 follow-ups** (2026-11-04): the goal / verify-until-pass loop (evaluate the Paseo plugin `37chengshan/goal-mode`
    first), Codex and opencode wiring of `secret_read_gate.py` and `post-edit-check --hook`, a Claude `filesystem.denyRead`
-   trial, a Codex deny-read profile (openai/codex#22179), whether `hook-deadline` passes exit 2 through, applying the
+   live trial (template/render landed 2026-11-09 in `agents/claude/settings.json.tmpl` via `bin/render-secret-deny`;
+   applying denyRead and enabling `sandbox.enabled` in live `~/.claude/settings.json` still needs the operator's yes,
+   order 11), a Codex deny-read profile (openai/codex#22179), whether `hook-deadline` passes exit 2 through, applying the
    template's new hook and deny entries live (operator's yes, order 11), the gate's slow-glob budget LOW, and
    `bin/instruction-lint` over `~/AGENTS.md` and `home-agents.mdc`. Lives in `docs/secret-deny.md`, `docs/post-edit-check.md`.
 3. **Interruption recovery** (issue 278, 2026-11-04): D1 provider and capture probes, G1 persistence and failure-injection

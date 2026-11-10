@@ -75,6 +75,30 @@
     ],
     "defaultMode": "bypassPermissions"
   },
+  "sandbox": {
+    "filesystem": {
+      "denyRead": [
+        "~/**/.env",
+        "~/**/*.key",
+        "~/**/*.p12",
+        "~/**/*.pfx",
+        "~/**/*-key.pem",
+        "~/**/*.key.pem",
+        "~/**/privkey*.pem",
+        "~/**/id_rsa",
+        "~/**/id_ecdsa",
+        "~/**/id_ed25519",
+        "~/.ssh/id_rsa",
+        "~/.ssh/id_ecdsa",
+        "~/.ssh/id_ed25519",
+        "~/.aws/credentials",
+        "~/.netrc",
+        "~/.config/gh/hosts.yml",
+        "~/.docker/config.json",
+        "~/.kube/config"
+      ]
+    }
+  },
   "model": "sonnet",
   "skillOverrides": {
     "bailian-cli": "off",

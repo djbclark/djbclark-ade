@@ -3,6 +3,7 @@
 The committed Claude template must equal what bin/render-secret-deny produces from
 config/secret-deny.toml, and its PreToolUse gate entry must exec the hook directly (a missing
 file then exits 127, which never blocks) with timeout 15 and no fail-closed `onFailure`.
+Also pins sandbox.filesystem.denyRead (2026-11-09, C3 template path; live apply is order 11).
 """
 from __future__ import annotations
 
@@ -41,3 +42,10 @@ def test_gate_matcher_covers_file_tools_not_glob():
               if any("secret_read_gate.py" in h.get("command", "") for h in g["hooks"])]
     tools = set(groups[0]["matcher"].split("|"))
     assert {"Read", "Edit", "Bash", "Grep"} <= tools and "Glob" not in tools
+
+
+def test_template_has_sandbox_filesystem_deny_read_without_enabling():
+    sb = _settings()["sandbox"]
+    deny = sb["filesystem"]["denyRead"]
+    assert "~/**/.env" in deny and "~/.aws/credentials" in deny
+    assert "enabled" not in sb

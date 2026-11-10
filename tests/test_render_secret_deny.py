@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """bin/render-secret-deny: the secret-deny policy rendered into the hook JSON and the Claude template (2026-11-04).
 
-Every render runs on copies in tmp_path (of the real template and policy), never on the tracked files."""
+Every render runs on copies in tmp_path (of the real template and policy), never on the tracked files.
+sandbox.filesystem.denyRead coverage added 2026-11-09 (queue Carried #1 / issue #284 C3)."""
 from __future__ import annotations
 
 import json
@@ -23,6 +24,13 @@ TAG = re.compile(r"\{\{.*?\}\}")
 EXPECTED_STATIC = [
     "**/.env", "**/*.key", "**/*.p12", "**/*.pfx", "**/*-key.pem", "**/*.key.pem", "**/privkey*.pem",
     "**/id_rsa", "**/id_ecdsa", "**/id_ed25519", "~/.ssh/id_rsa", "~/.ssh/id_ecdsa", "~/.ssh/id_ed25519",
+    "~/.aws/credentials", "~/.netrc", "~/.config/gh/hosts.yml", "~/.docker/config.json", "~/.kube/config",
+]
+# Sandbox form: bare/`**/` names are home-anchored (`~/**/…`); exact `~/…` paths stay.
+EXPECTED_SANDBOX_DENY_READ = [
+    "~/**/.env", "~/**/*.key", "~/**/*.p12", "~/**/*.pfx", "~/**/*-key.pem", "~/**/*.key.pem",
+    "~/**/privkey*.pem", "~/**/id_rsa", "~/**/id_ecdsa", "~/**/id_ed25519",
+    "~/.ssh/id_rsa", "~/.ssh/id_ecdsa", "~/.ssh/id_ed25519",
     "~/.aws/credentials", "~/.netrc", "~/.config/gh/hosts.yml", "~/.docker/config.json", "~/.kube/config",
 ]
 
@@ -59,11 +67,23 @@ def test_render_writes_the_expected_static_entries(fx):
     assert not any(e.startswith(("Read(!", "Edit(!")) for e in deny)
 
 
+def test_render_writes_sandbox_filesystem_deny_read(fx):
+    r = render(fx)
+    assert r.returncode == 0, r.stderr
+    data = masked(fx / "settings.json.tmpl")
+    sb = data["sandbox"]
+    assert sb["filesystem"]["denyRead"] == EXPECTED_SANDBOX_DENY_READ
+    assert "enabled" not in sb, "render must not enable the sandbox; live apply is order 11"
+
+
 def test_static_entries_avoid_every_allow_exception(fx):
     render(fx)
     text = " ".join(e for e in masked(fx / "settings.json.tmpl")["permissions"]["deny"] if managed(e))
     for hook_only in ("(**/.env.*)", "(~/.ssh/**)", "(~/.ssh/id_*)", "(**/*.pem)"):
         assert hook_only not in text
+    deny_read = " ".join(masked(fx / "settings.json.tmpl")["sandbox"]["filesystem"]["denyRead"])
+    for hook_only in ("~/**/.env.*", "~/.ssh/**", "~/**/*.pem"):
+        assert hook_only not in deny_read
 
 
 def test_render_is_idempotent_and_check_is_clean(fx):
@@ -84,10 +104,20 @@ def test_tags_and_other_entries_survive(fx):
     assert [e for e in new["permissions"]["deny"] if not managed(e)] == \
         [e for e in old["permissions"]["deny"] if not managed(e)]
     old["permissions"]["deny"] = new["permissions"]["deny"]
+    # committed template already carries denyRead; sync it for the equality check
+    old.setdefault("sandbox", {}).setdefault("filesystem", {})["denyRead"] = \
+        new["sandbox"]["filesystem"]["denyRead"]
     assert old == new
-    # only the deny block's lines changed
     changed = [ln for ln in after.splitlines() if ln not in before.splitlines()]
-    assert all(re.search(r'"(Read|Edit)\(', ln) or ln.strip().rstrip(",").startswith('"') for ln in changed)
+    assert all(
+        re.search(r'"(Read|Edit)\(', ln)
+        or '"denyRead"' in ln
+        or '"sandbox"' in ln
+        or '"filesystem"' in ln
+        or ln.strip().rstrip(",").startswith('"')
+        or ln.strip() in ("{", "}", "},", "],", "]")
+        for ln in changed
+    )
 
 
 def test_check_reports_template_drift_with_a_diff(fx):
@@ -99,6 +129,17 @@ def test_check_reports_template_drift_with_a_diff(fx):
     assert r.returncode == 1
     assert "+" in r.stdout and "Read(~/.netrc)" in r.stdout
     assert t.read_text() == text            # --check writes nothing
+
+
+def test_check_reports_sandbox_deny_read_drift(fx):
+    render(fx)
+    t = fx / "settings.json.tmpl"
+    text = t.read_text().replace('        "~/.netrc",\n', "", 1)
+    t.write_text(text)
+    r = render(fx, "--check")
+    assert r.returncode == 1
+    assert "~/.netrc" in r.stdout and "+" in r.stdout
+    assert t.read_text() == text
 
 
 def test_check_reports_policy_json_drift(fx):
@@ -119,6 +160,56 @@ def test_hand_added_read_entry_is_replaced_and_other_entries_keep_their_order(fx
     assert deny[:5] == ["Artifact", "ScheduleWakeup", "SendFeedback", "Workflow", "mcp__basic-memory__delete_project"]
 
 
+def test_hand_added_sandbox_deny_read_is_replaced_other_sandbox_keys_kept(fx):
+    t = fx / "settings.json.tmpl"
+    data = masked(t)
+    # seed a sandbox with enabled + a foreign denyRead path, then re-render
+    seeded = {
+        **{k: v for k, v in data.items() if k != "sandbox"},
+        "sandbox": {
+            "enabled": True,
+            "filesystem": {
+                "allowWrite": ["/tmp/build"],
+                "denyRead": ["~/custom-secret"],
+            },
+            "network": {"allowedDomains": ["github.com"]},
+        },
+    }
+    # write with tags restored for home placeholders that were masked to x in unrelated strings only;
+    # the fixture copy still has real tags — rebuild from the rendered text by splicing keys.
+    text = t.read_text()
+    # replace the existing sandbox block with a richer one
+    import re as _re
+    rich = (
+        '  "sandbox": {\n'
+        '    "enabled": true,\n'
+        '    "filesystem": {\n'
+        '      "allowWrite": ["/tmp/build"],\n'
+        '      "denyRead": [\n'
+        '        "~/custom-secret"\n'
+        '      ]\n'
+        '    },\n'
+        '    "network": {"allowedDomains": ["github.com"]}\n'
+        '  },\n'
+    )
+    text2, n = _re.subn(
+        r'  "sandbox": \{.*?\n  \},?\n',
+        rich,
+        text,
+        count=1,
+        flags=_re.S,
+    )
+    assert n == 1
+    t.write_text(text2)
+    assert render(fx, tmpl=t).returncode == 0, render(fx, tmpl=t).stderr
+    sb = masked(t)["sandbox"]
+    assert sb["enabled"] is True
+    assert sb["filesystem"]["allowWrite"] == ["/tmp/build"]
+    assert sb["network"] == {"allowedDomains": ["github.com"]}
+    assert sb["filesystem"]["denyRead"] == EXPECTED_SANDBOX_DENY_READ
+    assert "~/custom-secret" not in sb["filesystem"]["denyRead"]
+
+
 def test_inline_empty_deny_list(fx):
     t = fx / "tiny.json.tmpl"
     t.write_text('{\n  "env": {"H": "{{ .home }}"},\n  "permissions": {\n    "allow": [],\n    "deny": [],\n'
@@ -126,6 +217,40 @@ def test_inline_empty_deny_list(fx):
     assert render(fx, tmpl=t).returncode == 0
     data = masked(t)
     assert data["permissions"]["deny"][0] == "Read(**/.env)"
+    assert data["sandbox"]["filesystem"]["denyRead"] == EXPECTED_SANDBOX_DENY_READ
+    assert "enabled" not in data["sandbox"]
+    assert data["env"] == {"H": "x"} and data["permissions"]["defaultMode"] == "x"
+    assert render(fx, "--check", tmpl=t).returncode == 0
+
+
+def test_inline_empty_sandbox_object(fx):
+    """`"sandbox": {}` on one line must expand before insert (Codex P2 on fb2918d2)."""
+    t = fx / "inline-sandbox.json.tmpl"
+    t.write_text(
+        '{\n  "env": {"H": "{{ .home }}"},\n  "permissions": {\n    "allow": [],\n    "deny": [],\n'
+        '    "defaultMode": "x"\n  },\n  "sandbox": {}\n}\n'
+    )
+    r = render(fx, tmpl=t)
+    assert r.returncode == 0, r.stderr
+    data = masked(t)
+    assert data["sandbox"]["filesystem"]["denyRead"] == EXPECTED_SANDBOX_DENY_READ
+    assert "enabled" not in data["sandbox"]
+    assert data["env"] == {"H": "x"} and data["permissions"]["defaultMode"] == "x"
+    assert render(fx, "--check", tmpl=t).returncode == 0
+
+
+def test_inline_empty_filesystem_object(fx):
+    """`"filesystem": {}` on one line inside sandbox must expand before insert (Codex P2 on fb2918d2)."""
+    t = fx / "inline-filesystem.json.tmpl"
+    t.write_text(
+        '{\n  "env": {"H": "{{ .home }}"},\n  "permissions": {\n    "allow": [],\n    "deny": [],\n'
+        '    "defaultMode": "x"\n  },\n  "sandbox": {\n    "filesystem": {}\n  }\n}\n'
+    )
+    r = render(fx, tmpl=t)
+    assert r.returncode == 0, r.stderr
+    data = masked(t)
+    assert data["sandbox"]["filesystem"]["denyRead"] == EXPECTED_SANDBOX_DENY_READ
+    assert "enabled" not in data["sandbox"]
     assert data["env"] == {"H": "x"} and data["permissions"]["defaultMode"] == "x"
     assert render(fx, "--check", tmpl=t).returncode == 0
 
