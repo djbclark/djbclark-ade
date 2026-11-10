@@ -1,0 +1,643 @@
+#!/usr/bin/env -S python3 -I
+"""wave6-mac-proof-capture: Mac --live / Linux-safe proof harness for wave6-delete-check (never invents Mac live; 2026-11-10).
+
+  wave6-mac-proof-capture --out DIR --live [--json]
+  wave6-mac-proof-capture --out DIR --linux-safe [--json]
+
+Writes the four non-empty `mac_proofs` files that `bin/wave6-delete-check` expects
+(docs/slim/wave6-follow-up.md §B). Idle probes always record `cmd:` plus
+`verified: no match` so a successful idle capture is never an empty file.
+Probe failures (non-idle-capable exits, missing tools, stderr-only errors) are
+recorded as `verified: FAILED …` with diagnostics preserved; the harness then
+exits 1 so a failed capture cannot green `wave6-delete-check` as idle proof.
+
+Modes:
+  --live        Run real Mac probes (pgrep / launchctl / acp-dispatch / paseo).
+                Refuses on non-Darwin (exit 2) — never invents live Mac stdout.
+  --linux-safe  Run Linux-safe subset (pgrep + optional paseo smoke); skip
+                launchctl with verified SKIPPED. Labels every file
+                LINUX-SAFE — NOT Mac live-cycle. wave6-delete-check refuses
+                these as deletion Mac evidence (`mac_not_live`). Closes the
+                gap for CI/cloud hosts without a Mac; does not unblock Mac live.
+  default       Print the harness usage and the fixture→live replacement path;
+                writes nothing. CI uses tests/fixtures/wave6-mac-proofs/ instead.
+
+After a real Mac live cycle, point evidence.json `mac_proofs` at the files this
+tool writes under DIR/proofs/, replacing the checked-in FIXTURE files (which
+must not be used as deletion evidence). Queue Carried item 33 residual.
+
+Exit: 0 wrote live/--linux-safe proofs with every required probe succeeding
+      (match or verified idle / intentional SKIPPED) / printed help;
+      1 one or more probes FAILED (proofs still written);
+      2 usage or refused non-Mac --live / incompatible flags;
+      3 probe write failure. Stdlib only.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any, Callable
+
+TOOL = "wave6-mac-proof-capture"
+
+# Filenames match docs/slim/wave6-follow-up.md sample mac_proofs map.
+MAC_PROOF_FILES: dict[str, str] = {
+    "relay_idle": "mac-b1-relay.txt",
+    "acp_run_idle": "mac-b1-acp-run.txt",
+    "acp_dispatch_idle": "mac-b2-acp-dispatch.txt",
+    "paseo_smoke_ok": "mac-b3-paseo-smoke.txt",
+}
+
+LINUX_SAFE_PROOF_FILES: dict[str, str] = {
+    "relay_idle": "mac-b1-relay.LINUX-SAFE.txt",
+    "acp_run_idle": "mac-b1-acp-run.LINUX-SAFE.txt",
+    "acp_dispatch_idle": "mac-b2-acp-dispatch.LINUX-SAFE.txt",
+    "paseo_smoke_ok": "mac-b3-paseo-smoke.LINUX-SAFE.txt",
+}
+
+LINUX_SAFE_LABEL = "LINUX-SAFE — NOT Mac live-cycle"
+
+FIXTURE_HINT = (
+    "tests/fixtures/wave6-mac-proofs/ (FIXTURE — NOT live Mac stdout); "
+    "replace those with this harness's --live output before the deletion PR"
+)
+
+RunFn = Callable[..., subprocess.CompletedProcess[str]]
+
+
+def die(msg: str, code: int = 2) -> int:
+    print(f"{TOOL}: {msg}", file=sys.stderr)
+    return code
+
+
+def _run(argv: list[str], *, timeout: float = 30) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        argv,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+
+
+def _append_stderr(lines: list[str], r: subprocess.CompletedProcess[str]) -> None:
+    err = (r.stderr or "").rstrip()
+    if err:
+        lines.append(f"stderr: {err}")
+
+
+def _record_pgrep(
+    lines: list[str],
+    run: RunFn,
+    pattern: str,
+    *,
+    label: str = "pgrep",
+) -> bool:
+    """Append a pgrep probe. True = probe succeeded (match or verified idle)."""
+    lines.append(f"cmd: pgrep -lf {pattern!r}")
+    try:
+        r = run(["pgrep", "-lf", pattern])
+    except OSError as exc:
+        lines.append(
+            f"verified: FAILED {label} ({exc.__class__.__name__}: {exc})"
+        )
+        return False
+    body = (r.stdout or "").rstrip()
+    _append_stderr(lines, r)
+    if body:
+        lines.append(body)
+        lines.append(f"verified: {label} match listed (exit {r.returncode})")
+        return True
+    # pgrep: exit 1 + empty = no match (idle). Any other empty result is failure.
+    if r.returncode == 1:
+        lines.append(f"verified: no match {label} (exit {r.returncode})")
+        return True
+    lines.append(
+        f"verified: FAILED {label} (exit {r.returncode}, empty stdout)"
+    )
+    return False
+
+
+def _record_launchctl(
+    lines: list[str],
+    run: RunFn,
+    needle: str,
+) -> bool:
+    """Append a launchctl list probe filtered for needle. True = probe ok."""
+    lines.append(f"cmd: launchctl list | grep -E {needle!r}")
+    launchctl = shutil.which("launchctl")
+    if launchctl is None:
+        lines.append("verified: FAILED launchctl (launchctl not on PATH)")
+        return False
+    try:
+        listed = run([launchctl, "list"])
+    except OSError as exc:
+        lines.append(
+            f"verified: FAILED launchctl ({exc.__class__.__name__}: {exc})"
+        )
+        return False
+    _append_stderr(lines, listed)
+    if listed.returncode != 0:
+        body = (listed.stdout or "").rstrip()
+        if body:
+            lines.append(body)
+        lines.append(
+            f"verified: FAILED launchctl (exit {listed.returncode})"
+        )
+        return False
+    matches = [
+        ln for ln in (listed.stdout or "").splitlines() if needle in ln
+    ]
+    if matches:
+        lines.extend(matches)
+        lines.append("verified: launchctl match listed")
+        return True
+    lines.append(
+        f"verified: no match launchctl (exit {listed.returncode})"
+    )
+    return True
+
+
+def capture_relay_idle(run: RunFn) -> tuple[str, bool]:
+    lines = [
+        "source: wave6-mac-proof-capture --live",
+        "flag: relay_idle",
+    ]
+    ok = _record_pgrep(lines, run, r"relay\.py")
+    return "\n".join(lines) + "\n", ok
+
+
+def capture_acp_run_idle(run: RunFn) -> tuple[str, bool]:
+    lines = [
+        "source: wave6-mac-proof-capture --live",
+        "flag: acp_run_idle",
+    ]
+    ok_p = _record_pgrep(lines, run, "acp-run")
+    # Only acp-run for this flag (acp-dispatch has its own proof file / B1 share).
+    ok_l = _record_launchctl(lines, run, "acp-run")
+    return "\n".join(lines) + "\n", ok_p and ok_l
+
+
+def capture_acp_dispatch_idle(
+    run: RunFn,
+    *,
+    home: Path,
+) -> tuple[str, bool]:
+    """B1 process/launchd for acp-dispatch + B2 drain (records / labeled agents)."""
+    lines = [
+        "source: wave6-mac-proof-capture --live",
+        "flag: acp_dispatch_idle",
+    ]
+    ok = True
+    # B1 (docs/slim/wave6-follow-up.md): process + launchd, not only records.
+    if not _record_pgrep(lines, run, "acp-dispatch"):
+        ok = False
+    if not _record_launchctl(lines, run, "acp-dispatch"):
+        ok = False
+
+    state = Path(
+        os.environ.get(
+            "ACP_DISPATCH_STATE", str(home / ".local/state/bigteam")
+        )
+    )
+    acp = shutil.which("acp-dispatch")
+    if acp is None:
+        lines.append("B2: acp-dispatch not on PATH")
+    elif not state.is_dir():
+        lines.append(f"B2: no state dir at {state} (empty)")
+    else:
+        lines.append(f"cmd: acp-dispatch check {state}")
+        try:
+            r = run([acp, "check", str(state)])
+        except OSError as exc:
+            lines.append(
+                f"verified: FAILED acp-dispatch check "
+                f"({exc.__class__.__name__}: {exc})"
+            )
+            ok = False
+        else:
+            out = ((r.stdout or "") + (r.stderr or "")).rstrip()
+            if out:
+                lines.append(out)
+            if r.returncode != 0:
+                lines.append(
+                    f"verified: FAILED acp-dispatch check (exit {r.returncode})"
+                )
+                ok = False
+            else:
+                lines.append(f"verified: acp-dispatch check exit {r.returncode}")
+
+    lines.append("cmd: paseo ls -g --label ade.via=acp-dispatch --json")
+    paseo = shutil.which("paseo")
+    if paseo is None:
+        lines.append("verified: FAILED paseo ls (paseo not on PATH)")
+        ok = False
+    else:
+        try:
+            r = run(
+                [paseo, "ls", "-g", "--label", "ade.via=acp-dispatch", "--json"]
+            )
+        except OSError as exc:
+            lines.append(
+                f"verified: FAILED paseo ls ({exc.__class__.__name__}: {exc})"
+            )
+            ok = False
+        else:
+            out = (r.stdout or "").rstrip()
+            _append_stderr(lines, r)
+            if r.returncode != 0:
+                if out:
+                    lines.append(out)
+                lines.append(
+                    f"verified: FAILED paseo ls (exit {r.returncode})"
+                )
+                ok = False
+            elif out:
+                lines.append(out)
+                lines.append(f"verified: paseo ls exit {r.returncode}")
+            else:
+                lines.append("verified: no match (empty paseo ls)")
+    return "\n".join(lines) + "\n", ok
+
+
+def capture_paseo_smoke(run: RunFn) -> tuple[str, bool]:
+    lines = [
+        "source: wave6-mac-proof-capture --live",
+        "flag: paseo_smoke_ok",
+        "cmd: paseo send --help; paseo run --help",
+    ]
+    paseo = shutil.which("paseo")
+    if paseo is None:
+        lines.append("verified: FAILED (paseo not on PATH)")
+        return "\n".join(lines) + "\n", False
+    try:
+        r1 = run([paseo, "send", "--help"])
+        r2 = run([paseo, "run", "--help"])
+    except OSError as exc:
+        lines.append(
+            f"verified: FAILED ({exc.__class__.__name__}: {exc})"
+        )
+        return "\n".join(lines) + "\n", False
+    if r1.returncode == 0 and r2.returncode == 0:
+        lines.append("verified: paseo send/run --help ok (exit 0)")
+        return "\n".join(lines) + "\n", True
+    _append_stderr(lines, r1)
+    _append_stderr(lines, r2)
+    lines.append(
+        f"verified: FAILED (send exit {r1.returncode}, run exit {r2.returncode})"
+    )
+    return "\n".join(lines) + "\n", False
+
+
+def write_live_proofs(
+    out: Path,
+    *,
+    run: RunFn = _run,
+    home: Path | None = None,
+) -> tuple[dict[str, str], bool]:
+    """Write the four mac proof files under out/proofs/.
+
+    Returns (relative mac_proofs map, all_probes_ok). Proofs are always written
+    when the write succeeds; callers must treat all_probes_ok False as a failed
+    capture (exit 1), not as verified idle evidence.
+    """
+    proofs = out / "proofs"
+    proofs.mkdir(parents=True, exist_ok=True)
+    home = home or Path.home()
+    bodies: dict[str, tuple[str, bool]] = {
+        "relay_idle": capture_relay_idle(run),
+        "acp_run_idle": capture_acp_run_idle(run),
+        "acp_dispatch_idle": capture_acp_dispatch_idle(run, home=home),
+        "paseo_smoke_ok": capture_paseo_smoke(run),
+    }
+    rel_map: dict[str, str] = {}
+    all_ok = True
+    for flag, (body, ok) in bodies.items():
+        if not ok:
+            all_ok = False
+        name = MAC_PROOF_FILES[flag]
+        path = proofs / name
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(body, encoding="utf-8")
+        tmp.replace(path)
+        if path.stat().st_size == 0:
+            raise OSError(f"refusing empty proof write: {path}")
+        rel_map[flag] = f"proofs/{name}"
+    return rel_map, all_ok
+
+
+def _linux_safe_header(flag: str) -> list[str]:
+    return [
+        LINUX_SAFE_LABEL,
+        f"source: wave6-mac-proof-capture --linux-safe (platform={sys.platform})",
+        f"flag: {flag}",
+        "mac_live_blocked: true",
+        "note: wave6-delete-check refuses LINUX-SAFE files as Mac deletion evidence",
+    ]
+
+
+def capture_linux_safe_relay_idle(run: RunFn) -> tuple[str, bool]:
+    lines = _linux_safe_header("relay_idle")
+    ok = _record_pgrep(lines, run, r"relay\.py")
+    return "\n".join(lines) + "\n", ok
+
+
+def capture_linux_safe_acp_run_idle(run: RunFn) -> tuple[str, bool]:
+    lines = _linux_safe_header("acp_run_idle")
+    ok = _record_pgrep(lines, run, "acp-run")
+    # launchctl is Darwin-only; record the skip so the Mac live gap stays visible.
+    lines.append("cmd: launchctl list | grep -E 'acp-run'")
+    lines.append(
+        "verified: SKIPPED launchctl (not Darwin; Mac live-cycle still blocked)"
+    )
+    return "\n".join(lines) + "\n", ok
+
+
+def capture_linux_safe_acp_dispatch_idle(
+    run: RunFn,
+    *,
+    home: Path,
+) -> tuple[str, bool]:
+    """Linux-safe B1 pgrep + B2/paseo when available; launchctl always SKIPPED."""
+    lines = _linux_safe_header("acp_dispatch_idle")
+    ok = _record_pgrep(lines, run, "acp-dispatch")
+    lines.append("cmd: launchctl list | grep -E 'acp-dispatch'")
+    lines.append(
+        "verified: SKIPPED launchctl (not Darwin; Mac live-cycle still blocked)"
+    )
+
+    state = Path(
+        os.environ.get(
+            "ACP_DISPATCH_STATE", str(home / ".local/state/bigteam")
+        )
+    )
+    acp = shutil.which("acp-dispatch")
+    if acp is None:
+        lines.append("B2: acp-dispatch not on PATH")
+    elif not state.is_dir():
+        lines.append(f"B2: no state dir at {state} (empty)")
+    else:
+        lines.append(f"cmd: acp-dispatch check {state}")
+        try:
+            r = run([acp, "check", str(state)])
+        except OSError as exc:
+            lines.append(
+                f"verified: FAILED acp-dispatch check "
+                f"({exc.__class__.__name__}: {exc})"
+            )
+            ok = False
+        else:
+            out = ((r.stdout or "") + (r.stderr or "")).rstrip()
+            if out:
+                lines.append(out)
+            if r.returncode != 0:
+                lines.append(
+                    f"verified: FAILED acp-dispatch check (exit {r.returncode})"
+                )
+                ok = False
+            else:
+                lines.append(f"verified: acp-dispatch check exit {r.returncode}")
+
+    lines.append("cmd: paseo ls -g --label ade.via=acp-dispatch --json")
+    paseo = shutil.which("paseo")
+    if paseo is None:
+        lines.append(
+            "verified: SKIPPED paseo ls (paseo not on PATH; optional on linux-safe)"
+        )
+    else:
+        try:
+            r = run(
+                [paseo, "ls", "-g", "--label", "ade.via=acp-dispatch", "--json"]
+            )
+        except OSError as exc:
+            lines.append(
+                f"verified: FAILED paseo ls ({exc.__class__.__name__}: {exc})"
+            )
+            ok = False
+        else:
+            out = (r.stdout or "").rstrip()
+            _append_stderr(lines, r)
+            if r.returncode != 0:
+                if out:
+                    lines.append(out)
+                lines.append(
+                    f"verified: FAILED paseo ls (exit {r.returncode})"
+                )
+                ok = False
+            elif out:
+                lines.append(out)
+                lines.append(f"verified: paseo ls exit {r.returncode}")
+            else:
+                lines.append("verified: no match (empty paseo ls)")
+    return "\n".join(lines) + "\n", ok
+
+
+def capture_linux_safe_paseo_smoke(run: RunFn) -> tuple[str, bool]:
+    lines = _linux_safe_header("paseo_smoke_ok")
+    lines.append("cmd: paseo send --help; paseo run --help")
+    paseo = shutil.which("paseo")
+    if paseo is None:
+        lines.append(
+            "verified: SKIPPED (paseo not on PATH; optional on linux-safe; "
+            "Mac live still blocked)"
+        )
+        # Missing paseo is not a hard failure for linux-safe: the goal is
+        # exercising available probes, not inventing a Mac smoke green.
+        return "\n".join(lines) + "\n", True
+    try:
+        r1 = run([paseo, "send", "--help"])
+        r2 = run([paseo, "run", "--help"])
+    except OSError as exc:
+        lines.append(
+            f"verified: FAILED ({exc.__class__.__name__}: {exc})"
+        )
+        return "\n".join(lines) + "\n", False
+    if r1.returncode == 0 and r2.returncode == 0:
+        lines.append("verified: paseo send/run --help ok (exit 0)")
+        return "\n".join(lines) + "\n", True
+    _append_stderr(lines, r1)
+    _append_stderr(lines, r2)
+    lines.append(
+        f"verified: FAILED (send exit {r1.returncode}, run exit {r2.returncode})"
+    )
+    return "\n".join(lines) + "\n", False
+
+
+def write_linux_safe_proofs(
+    out: Path,
+    *,
+    run: RunFn = _run,
+    home: Path | None = None,
+) -> tuple[dict[str, str], bool]:
+    """Write LINUX-SAFE labeled mac proof files (never deletion Mac evidence)."""
+    proofs = out / "proofs"
+    proofs.mkdir(parents=True, exist_ok=True)
+    home = home or Path.home()
+    bodies: dict[str, tuple[str, bool]] = {
+        "relay_idle": capture_linux_safe_relay_idle(run),
+        "acp_run_idle": capture_linux_safe_acp_run_idle(run),
+        "acp_dispatch_idle": capture_linux_safe_acp_dispatch_idle(run, home=home),
+        "paseo_smoke_ok": capture_linux_safe_paseo_smoke(run),
+    }
+    rel_map: dict[str, str] = {}
+    all_ok = True
+    for flag, (body, ok) in bodies.items():
+        if not ok:
+            all_ok = False
+        if not body.startswith(LINUX_SAFE_LABEL):
+            raise OSError(f"refusing unlabeled linux-safe proof for {flag}")
+        name = LINUX_SAFE_PROOF_FILES[flag]
+        path = proofs / name
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(body, encoding="utf-8")
+        tmp.replace(path)
+        if path.stat().st_size == 0:
+            raise OSError(f"refusing empty proof write: {path}")
+        rel_map[flag] = f"proofs/{name}"
+    return rel_map, all_ok
+
+
+def main(argv: list[str] | None = None) -> int:
+    p = argparse.ArgumentParser(
+        prog=TOOL,
+        description=__doc__.split("\n\n")[0],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            f"Fixture stand-ins (CI only): {FIXTURE_HINT}\n"
+            "Live Mac captures replace fixtures; never commit invented Mac stdout.\n"
+            "--linux-safe exercises pgrep (+ optional paseo) on Linux/CI; "
+            "wave6-delete-check still blocks Mac live (`mac_not_live`)."
+        ),
+    )
+    p.add_argument(
+        "--out",
+        type=Path,
+        default=None,
+        help="evidence directory (writes proofs/ + prints mac_proofs map)",
+    )
+    p.add_argument(
+        "--live",
+        action="store_true",
+        help="run real Mac probes (Darwin only; refuses elsewhere)",
+    )
+    p.add_argument(
+        "--linux-safe",
+        action="store_true",
+        help=(
+            "run Linux-safe pgrep (+ optional paseo) probes; skip launchctl; "
+            "label LINUX-SAFE — NOT Mac live-cycle (never deletion Mac evidence)"
+        ),
+    )
+    p.add_argument("--json", action="store_true", help="print mac_proofs map as JSON")
+    args = p.parse_args(argv)
+
+    if args.live and args.linux_safe:
+        return die("--live and --linux-safe are mutually exclusive")
+
+    if not args.live and not args.linux_safe:
+        print(
+            f"{TOOL}: pass --live --out DIR on the Mac to capture B1/B2/B3 proofs.\n"
+            f"  Linux/CI partial probes: --linux-safe --out DIR "
+            f"(pgrep + optional paseo; launchctl SKIPPED; NOT Mac live).\n"
+            f"  CI fixtures: {FIXTURE_HINT}\n"
+            "  Docs: docs/slim/wave6-follow-up.md §B (fixture → live replacement).\n"
+            "  Gate: bin/wave6-delete-check --evidence <evidence.json>",
+            file=sys.stderr,
+        )
+        return 0 if args.out is None else die(
+            "--out requires --live or --linux-safe "
+            "(refusing to invent Mac stdout as live proof)"
+        )
+
+    if args.out is None:
+        mode = "--live" if args.live else "--linux-safe"
+        return die(f"{mode} requires --out DIR")
+
+    if args.live and sys.platform != "darwin":
+        return die(
+            f"--live refused on platform {sys.platform!r}; "
+            "run on the Mac, or use --linux-safe for partial probes, "
+            "or the labeled FIXTURE bundle under "
+            "tests/fixtures/wave6-mac-proofs/ for CI shape only"
+        )
+
+    try:
+        out = args.out.resolve()
+        out.mkdir(parents=True, exist_ok=True)
+        if args.linux_safe:
+            rel_map, probes_ok = write_linux_safe_proofs(out)
+            mode = "linux-safe"
+        else:
+            rel_map, probes_ok = write_live_proofs(out)
+            mode = "live"
+    except OSError as exc:
+        return die(f"write failed: {exc}", code=3)
+
+    if mode == "linux-safe":
+        note = (
+            "LINUX-SAFE proofs written — NOT Mac live-cycle; "
+            "wave6-delete-check will report mac_not_live if used as --evidence. "
+            "Replace with --live on Darwin before the deletion PR."
+            if probes_ok
+            else "Probe FAILED — diagnostics written; still NOT Mac live evidence."
+        )
+    else:
+        note = (
+            "Paste paths into evidence.json mac_proofs; replace FIXTURE files."
+            if probes_ok
+            else "Probe FAILED — do not treat these files as verified idle proofs."
+        )
+
+    payload: dict[str, Any] = {
+        "tool": TOOL,
+        "mode": mode,
+        "out": str(out),
+        "mac_proofs": rel_map,
+        "probes_ok": probes_ok,
+        "mac_live_blocked": mode != "live",
+        "note": note,
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        if mode == "linux-safe":
+            status = (
+                "wrote LINUX-SAFE mac_proofs (NOT Mac live)"
+                if probes_ok
+                else "PROBE FAILED — wrote LINUX-SAFE diagnostics"
+            )
+        else:
+            status = (
+                "wrote live mac_proofs"
+                if probes_ok
+                else "PROBE FAILED — wrote diagnostics"
+            )
+        print(f"{TOOL}: {status} under {out / 'proofs'}")
+        for flag, rel in rel_map.items():
+            print(f"  {flag}: {rel}")
+        if mode == "linux-safe":
+            print(
+                "Next: Mac live still blocked — run --live on Darwin before "
+                "bin/wave6-delete-check --evidence <json>"
+            )
+        elif probes_ok:
+            print(
+                "Next: set evidence.json mac_proofs to these paths, then "
+                "bin/wave6-delete-check --evidence <json>"
+            )
+        else:
+            print(
+                f"{TOOL}: refusing exit 0 — fix probe failures before using as "
+                "idle evidence (wave6-delete-check accepts any non-empty file)",
+                file=sys.stderr,
+            )
+    return 0 if probes_ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

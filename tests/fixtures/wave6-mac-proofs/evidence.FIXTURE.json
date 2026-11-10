@@ -1,0 +1,44 @@
+{
+  "recorded": "FIXTURE-not-live-Mac",
+  "note": "FIXTURE bundle for CI shape only \u2014 NOT Mac live-cycle evidence (Carried #33 residual). Mac+C3 FIXTURE labels + Linux-safe cmd/verified shape. Replace mac_proofs via bin/wave6-mac-proof-capture --live (Darwin) before the deletion PR; --linux-safe / this bundle both trip mac_not_live under --evidence.",
+  "c3": {
+    "tendcf": "migrated",
+    "nix2cf": "migrated",
+    "cfengine": "waived",
+    "paseo_upstream": "waived",
+    "plektra": "migrated",
+    "paseo4herdr": "migrated",
+    "pi": "migrated",
+    "sudo_secretspec": "migrated",
+    "aiuse": "migrated",
+    "paseo_runner": "migrated",
+    "site_public_home_agents": "waived",
+    "aiuse_config_opencode_go": "waived"
+  },
+  "c3_proofs": {
+    "tendcf": "proofs/c3-tendcf.FIXTURE.txt",
+    "nix2cf": "proofs/c3-nix2cf.FIXTURE.txt",
+    "cfengine": "proofs/c3-cfengine.FIXTURE.txt",
+    "paseo_upstream": "proofs/c3-paseo_upstream.FIXTURE.txt",
+    "plektra": "proofs/c3-plektra.FIXTURE.txt",
+    "paseo4herdr": "proofs/c3-paseo4herdr.FIXTURE.txt",
+    "pi": "proofs/c3-pi.FIXTURE.txt",
+    "sudo_secretspec": "proofs/c3-sudo_secretspec.FIXTURE.txt",
+    "aiuse": "proofs/c3-aiuse.FIXTURE.txt",
+    "paseo_runner": "proofs/c3-paseo_runner.FIXTURE.txt",
+    "site_public_home_agents": "proofs/c3-site_public_home_agents.FIXTURE.txt",
+    "aiuse_config_opencode_go": "proofs/c3-aiuse_config_opencode_go.FIXTURE.txt"
+  },
+  "mac": {
+    "relay_idle": true,
+    "acp_dispatch_idle": true,
+    "acp_run_idle": true,
+    "paseo_smoke_ok": true
+  },
+  "mac_proofs": {
+    "relay_idle": "proofs/mac-b1-relay.FIXTURE.txt",
+    "acp_dispatch_idle": "proofs/mac-b2-acp-dispatch.FIXTURE.txt",
+    "acp_run_idle": "proofs/mac-b1-acp-run.FIXTURE.txt",
+    "paseo_smoke_ok": "proofs/mac-b3-paseo-smoke.FIXTURE.txt"
+  }
+}
