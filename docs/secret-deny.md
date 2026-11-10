@@ -83,9 +83,11 @@ config change).
     pattern itself is checked (B3), so every word gets at least that check and a bound never lets one through
     unchecked. Measured 2026-11-04: that repro takes 0.07 s through the hook. The order is cheapest first (2026-11-04):
     every literal word, then the glob words without `**`, then those with it; each glob word gets 1 s on its first try
-    within a shared 2 s first-pass cap (2026-11-09), and one that runs longer is set aside (cached) and retried with a
-    pattern-only check after every other word, so a slow word cannot use up the time a later `cat ~/.ssh/id_*` needs. A
-    word that times out twice, or an overall-budget timeout while glob words remain, fails closed (C7).
+    within a shared 2 s first-pass cap (2026-11-09), and one that runs longer is set aside (cached) and retried after
+    every other word: pattern-only first, then a real walk with remaining budget when the pattern cannot decide
+    (broad globs such as `id_*` / `*` need the walk to catch `id_rsa` / `server.key` on disk; never allow those after
+    set-aside on pattern-only alone). A word that times out twice, an overall-budget timeout while glob words remain,
+    or a set-aside word that still needs a walk with no budget left, fails closed (C7).
   - **B1d.** Codex `apply_patch` headers (`*** Add File:`, `*** Update File:`, `*** Delete File:`, `*** Move to:`) inside a
     `*** Begin Patch` block, in the command or any other string of a non-file tool. Only a genuine patch payload leaves the
     patch body out of the shell words, so a patch whose code mentions `.env` passes there: the `apply_patch` tool, or a
@@ -180,16 +182,19 @@ config change).
   non-glob analysis longer than 8 s exits 0 with a one-line `secret-read-gate: ... allowing (fail open)` notice on
   stderr. The Bash glob walk (B1c) does not reach that budget: it stops at its own bounds (20000 entries, 2 s, leaving
   at least 3 s of the 8 s) and falls back to the pattern check, with no notice (2026-11-04). A glob word whose check
-  runs past its own 1 s is set aside (cached) and retried with a pattern-only check after every other word (B1c),
-  under a shared 2 s first-pass cap so about eight crafted slow words cannot spend 8×1 s before a later read (closed
-  2026-11-09; was a known limit from adversary round 4, 2026-11-04). A word that times out twice, or an overall-budget
-  timeout while Bash glob words remain unchecked, exits 2 with `glob analysis budget exceeded (fail closed)`: secret
-  paths prefer deny over allow. A later literal path (`cat ~/.ssh/id_rsa`) is still checked first and blocks on the
-  deny rule. A directory that opens but cannot be read to the end (`/proc/1/map_files`) is skipped by both walks, as
-  the shell and ripgrep skip it; before 2026-11-04 it raised and failed the hook open. A Grep walk that hits its own
-  bound allows silently, unless its glob's text blocks (B1b) or the root is above a home-level deny (C4). The hook is
-  registered without `onFailure: block`, so a broken hook never blocks every Read; the static rules (B2) still hold
-  then.
+  runs past its own 1 s is set aside (cached) and retried after every other word (B1c): pattern-only first, then a
+  real walk when the pattern cannot decide, under a shared 2 s first-pass cap so about eight crafted slow words cannot
+  spend 8×1 s before a later read (closed 2026-11-09; was a known limit from adversary round 4, 2026-11-04). A residual
+  closed 2026-11-09: when the first-pass cap was burned by *completing* (not timed-out) slow globs, remaining words
+  were set aside and pattern-only-retried, so walk-dependent secrets (`cat id_*` / `cat *` beside `id_rsa` /
+  `server.key`) were allowed — the deferred retry now walks with remaining budget or fails closed. A word that times
+  out twice, an overall-budget timeout while Bash glob words remain unchecked, or a set-aside word that still needs a
+  walk with no budget left, exits 2 with `glob analysis budget exceeded (fail closed)`: secret paths prefer deny over
+  allow. A later literal path (`cat ~/.ssh/id_rsa`) is still checked first and blocks on the deny rule. A directory
+  that opens but cannot be read to the end (`/proc/1/map_files`) is skipped by both walks, as the shell and ripgrep
+  skip it; before 2026-11-04 it raised and failed the hook open. A Grep walk that hits its own bound allows silently,
+  unless its glob's text blocks (B1b) or the root is above a home-level deny (C4). The hook is registered without
+  `onFailure: block`, so a broken hook never blocks every Read; the static rules (B2) still hold then.
 
 ## D. Changing the policy
 

@@ -27,10 +27,13 @@ wildcard never consumes a leading `.`) and pinning (the token's wildcards may no
 text; a cheap test on the token's literals, `**/` read as "" or `/`, skips the rules it cannot spell). So every word gets
 at least that check, `cat ~/.ssh/id_*` and `find . -name '*.key'` block, while `echo *`, `grep 'a.*'` and `ls
 /*/*/*/*/*/*/*/x*` pass. A glob word gets WORD_S on its first try within a shared FIRST_PASS_S cap; one that runs longer is set aside
-(cached) and retried after every other word with a pattern-only check (no second filesystem walk). Eight crafted
-slow words used to spend 8×WORD_S and fail the call open before a later `cat ~/.ssh/id_*` (docs/secret-deny.md C7,
-2026-11-04); the first-pass cap and set-aside cache close that: a word that times out twice, or an OutOfTime while
-glob words remain unchecked, fails closed (blocks) instead of allowing.
+(cached) and retried after every other word: pattern-only first, then a real walk with remaining budget when the
+pattern cannot decide (broad globs such as `id_*` / `*` need the walk to catch `id_rsa` / `server.key` on disk).
+If that walk cannot run or times out, the call fails closed. Eight crafted slow words used to spend 8×WORD_S and
+fail the call open before a later `cat ~/.ssh/id_*` (docs/secret-deny.md C7, 2026-11-04); the first-pass cap and
+set-aside retry close that: a word that times out twice, an OutOfTime while glob words remain unchecked, or a
+set-aside word whose pattern-only check is inconclusive with no walk budget left, fails closed (blocks) instead of
+allowing.
 
 Grep (2026-11-04): Claude's Grep runs ripgrep with `--hidden`, so it reads dotfiles and descends into `~/.ssh`. Its root
 (`path`, else the cwd) is walked breadth-first (bounded: depth, entries, time shared by every root; VCS dirs and
@@ -745,7 +748,8 @@ class Checker:
             self.deferred.append(raw)
 
     def glob_pattern_only(self, raw: str):
-        """Pattern check only (no filesystem walk): used when a set-aside word is retried after its walk timed out."""
+        """Pattern check only (no filesystem walk): cheap first step of a set-aside retry. Inconclusive for broad
+        globs (`id_*`, `*`) that need a walk to catch deny matches on disk — the deferred retry then walks or refuses."""
         if not raw or len(raw) > MAX_TOKEN or "\x00" in raw:
             return None
         for pat in expand_braces(expand_home(raw)):
@@ -763,8 +767,9 @@ class Checker:
     def word(self, raw: str, word_s=None, pattern_only: bool = False):
         """A word's (rule, shown) or None. With `word_s`, a glob word whose check runs longer than that is set aside in
         self.deferred (answering None for now), so one slow word cannot use up the time the words after it need.
-        A set-aside is cached (`_SET_ASIDE`); a deferred retry clears it and, with `pattern_only`, skips the walk.
-        A second set-aside of the same word fails closed (`GlobBudgetExceeded`)."""
+        A set-aside is cached (`_SET_ASIDE`); a deferred retry clears it and, with `pattern_only`, skips the walk
+        (caller then walks or fails closed when the pattern cannot decide). A second set-aside of the same word fails
+        closed (`GlobBudgetExceeded`)."""
         if raw in self._words:
             cached = self._words[raw]
             if cached is not _SET_ASIDE:
@@ -1159,8 +1164,9 @@ def strings(obj):
 def check_command(ck: Checker, cmd: str, shell_tool: bool = True):
     """Patch headers, then every literal word (cheap), then the glob words without `**` (a bounded walk, then their
     pattern), then those with `**` (the costly ones), each glob word within WORD_S under a shared FIRST_PASS_S cap;
-    last, set-aside words are retried with a pattern-only check (WORD_S each). A second timeout on one word, or an
-    OutOfTime while glob words remain, fails closed (`GlobBudgetExceeded`) instead of allowing.
+    last, set-aside words are retried: pattern-only first, then a real walk with remaining budget when the pattern
+    cannot decide. A second timeout on one word, an OutOfTime while glob words remain, or a set-aside word that still
+    needs a walk with no budget left, fails closed (`GlobBudgetExceeded`) instead of allowing.
 
     For a shell tool (`shell_tool`, the default) every word of the text is analyzed, `*** Begin Patch` regions included:
     the shell runs them (2026-11-06, Cursor review on PR 289: `*** Begin Patch\\ncat ~/.ssh/id_rsa\\n*** End Patch`
@@ -1198,9 +1204,22 @@ def check_command(ck: Checker, cmd: str, shell_tool: bool = True):
                 return found
         while ck.deferred:
             w = ck.deferred.pop(0)
+            # Cheap pattern check first (*.key, ~/.ssh/id_*, …). Broad globs (id_*, *) often return None here.
             found = ck.word(w, WORD_S, pattern_only=True)
             if found:
                 return found
+            # Pattern alone cannot decide: never allow a walk-dependent secret glob after set-aside. Retry with a
+            # real filesystem walk under the remaining overall budget, or fail closed.
+            rem = _DEADLINE[0] - time.monotonic()
+            if rem <= 0:
+                raise GlobBudgetExceeded(w)
+            if w in ck._words:
+                del ck._words[w]   # drop the pattern-only None cache so word() walks
+            found = ck.word(w, min(WORD_S, rem), pattern_only=False)
+            if found:
+                return found
+            # Walk completed with no hit (verified), or timed out: a timeout re-enters set_aside and, with
+            # aside_count already 1, raises GlobBudgetExceeded (fail closed).
     except OutOfTime:
         # Overall budget ended with Bash glob words still unresolved: fail closed (secret paths may remain).
         raise GlobBudgetExceeded(ck.deferred[0] if ck.deferred else (globs[-1] if globs else ""))
