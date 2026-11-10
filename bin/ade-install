@@ -7,14 +7,16 @@
   ade-install doctor [--root DIR] [--json]
   ade-install keys [--root DIR] [--json]
   ade-install apply [--root DIR] [--json] [--dry-run|--yes] [--id ID ...] [--force]
+                    [--system] [--print-system-argv] [--apply-system]
 
 Doctor runs recorded probe_argv when present (else PATH presence) and, when
 agents/claude/settings.json.tmpl is under --root, checks live
 ~/.claude/settings.json for context_size_nudge.py registration; never
 repairs or mutates settings. Keys is observe-only presence via
 sudo-secretspec check (no values). Apply defaults to --dry-run; --yes runs
-user install_argv. --system --dry-run previews system_argv; executing
-system_argv is refused. Secrets are never read.
+user install_argv. --system --dry-run / --print-system-argv preview
+system_argv. Live system_argv needs --yes --system --apply-system
+(default refuse). Secrets are never read.
 Uses config/install.toml only while config/ade.toml is absent.
 See docs/install-catalog.md.
 """
@@ -169,18 +171,54 @@ def cmd_apply(args: argparse.Namespace) -> int:
     if args.yes and args.dry_run_flag:
         print("ade-install apply: refuse both --yes and --dry-run", file=sys.stderr)
         return 2
+    if args.print_system_argv and (args.yes or args.apply_system):
+        print(
+            "ade-install apply: --print-system-argv is print-only "
+            "(refuse with --yes / --apply-system)",
+            file=sys.stderr,
+        )
+        return 2
+    if args.apply_system and not args.yes:
+        print(
+            "ade-install apply: --apply-system requires --yes "
+            "(use --system --dry-run or --print-system-argv to preview)",
+            file=sys.stderr,
+        )
+        return 2
+    if args.apply_system and not args.system:
+        # Opt-in live path always implies --system consideration.
+        args.system = True
     dry_run = not args.yes  # default dry-run; --yes executes
     try:
         catalog = ai.load_catalog(root=Path(args.root) if args.root else None)
         ids = set(args.id) if args.id else None
+        prefix = Path(args.prefix) if args.prefix else None
+        if args.print_system_argv:
+            rows = ai.collect_system_argv(catalog, ids=ids, prefix=prefix)
+            if args.json:
+                _print_json({
+                    "ok": all(r.get("ok") for r in rows) if rows else True,
+                    "mode": "print-system-argv",
+                    "results": rows,
+                })
+            else:
+                print(f"ade-install apply (print-system-argv): {len(rows)} row(s)")
+                for row in rows:
+                    extra = ""
+                    if row.get("argv"):
+                        extra = " argv=" + " ".join(row["argv"])
+                    print(f"  {row['action']:18} {row['id']}: {row['reason']}{extra}")
+            # Missing platform argv is a soft miss (exit 1); print-only never installs.
+            return 0 if all(r.get("ok") for r in rows) or not rows else 1
         results, rc = ai.apply(
             catalog,
             dry_run=dry_run,
             ids=ids,
             force=args.force,
             allow_system=args.system,
+            apply_system=args.apply_system,
             state_dir=Path(args.state_dir) if args.state_dir else None,
-            prefix=Path(args.prefix) if args.prefix else None,
+            prefix=prefix,
         )
     except ai.InstallError as e:
         if args.json:
@@ -189,7 +227,7 @@ def cmd_apply(args: argparse.Namespace) -> int:
             print(str(e), file=sys.stderr)
             print("ade-install apply: FAIL", file=sys.stderr)
         return 2
-    mode = "dry-run" if dry_run else "yes"
+    mode = "dry-run" if dry_run else ("yes+apply-system" if args.apply_system else "yes")
     if args.json:
         _print_json({
             "ok": rc == 0,
@@ -237,7 +275,10 @@ def main(argv: list[str] | None = None) -> int:
     ap = sub.add_parser(
         "apply",
         parents=[shared],
-        help="bounded apply: --dry-run (default) or --yes; --system dry-runs system_argv only",
+        help=(
+            "bounded apply: --dry-run (default) or --yes; "
+            "--system previews system_argv; --apply-system opts into live system_argv"
+        ),
     )
     ap.add_argument("--json", action="store_true")
     mode = ap.add_mutually_exclusive_group()
@@ -266,7 +307,23 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--system",
         action="store_true",
-        help="preview system_argv (with --dry-run); executing system_argv is always refused",
+        help=(
+            "consider system_argv: with --dry-run preview as would-system-install; "
+            "with --yes alone still refuse; with --yes --apply-system execute"
+        ),
+    )
+    ap.add_argument(
+        "--print-system-argv",
+        action="store_true",
+        help="print-only: dump platform system_argv for needs_system rows; never execute",
+    )
+    ap.add_argument(
+        "--apply-system",
+        action="store_true",
+        help=(
+            "operator opt-in: with --yes (and --system), execute system_argv via argv "
+            "list (never shell); default without this flag is refuse-system-exec"
+        ),
     )
     ap.add_argument(
         "--state-dir",
@@ -278,7 +335,13 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="user install prefix for {prefix} token (default: ~/.local/bin)",
     )
-    ap.set_defaults(func=cmd_apply, dry_run_flag=False, yes=False)
+    ap.set_defaults(
+        func=cmd_apply,
+        dry_run_flag=False,
+        yes=False,
+        print_system_argv=False,
+        apply_system=False,
+    )
 
     args = parser.parse_args(argv)
     args.root = getattr(args, "root", None)

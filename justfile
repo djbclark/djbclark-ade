@@ -32,6 +32,10 @@ install-apply-dry:
 install-apply-system-dry:
     "{{ root }}/bin/ade-install" apply --system --dry-run --root "{{ root }}"
 
+# Print-only platform system_argv (never executes; safe in CI).
+install-print-system-argv *args:
+    "{{ root }}/bin/ade-install" apply --print-system-argv --root "{{ root }}" {{ args }}
+
 # Canonical names from docs/setup-plan.md (thin wrappers over install-* / ade-update).
 # `just install` defaults to apply dry-run; pass `-- --yes` for live user-scoped apply.
 doctor:

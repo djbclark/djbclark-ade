@@ -2,9 +2,10 @@
 
 Typed component / key-reference catalog with print-only `plan`, observe-only
 `doctor` (runs `probe_argv` when recorded), observe-only `keys` (bulk
-`sudo-secretspec check`), and **bounded user-scoped `apply`**. Doctor and keys
+`sudo-secretspec check`), and **bounded `apply`** (user `install_argv` by
+default; `system_argv` only with explicit `--apply-system`). Doctor and keys
 do **not** repair or read secret values. Full ownership-aware reconciliation
-and `--system` root effects remain later work (`docs/setup-plan.md` S3).
+remains later work (`docs/setup-plan.md` S3).
 
 ## A. Source
 
@@ -32,7 +33,8 @@ unified file with reviewed consumer adoption.
   `ADE_INSTALL_PREFIX`).
 - `needs_system = true` marks package-manager / root paths; pair with
   `system_argv` (Linux) and optional `system_argv_darwin` (Homebrew).
-  `--system --dry-run` previews the platform pick; live system exec is refused.
+  `--system --dry-run` / `--print-system-argv` preview the platform pick;
+  live system exec needs `--yes --system --apply-system` (default refuse).
 - `presence` is a PATH basename fallback when `probe_argv` is absent.
 
 ## C. Keys and logins
@@ -59,12 +61,14 @@ ade-install plan [--root DIR] [--json]
 ade-install doctor [--root DIR] [--json]
 ade-install keys [--root DIR] [--json]
 ade-install apply [--root DIR] [--json] [--dry-run|--yes] [--id ID ...] [--force]
+                  [--system] [--print-system-argv] [--apply-system]
                   [--state-dir DIR] [--prefix DIR]
 just install-check
 just install-doctor
 just keys
 just install-plan
 just install-apply-dry
+just install-print-system-argv
 just doctor                 # alias of install-doctor (setup-plan S2 name)
 just install [-- --yes]    # ade-install apply (dry-run by default; --yes for live)
 just update [-- --check]   # bin/ade-update for this checkout
@@ -105,9 +109,11 @@ Pass `--ade` only with a durable checkout (`~/src/djbclark-ade`); never with a l
 - `apply` defaults to **dry-run**. `--yes` executes user `install_argv` for
   expected missing components (or `--force`). Writes an atomic ledger under
   `~/.local/state/djbclark-ade/install/ledger.json` (or `ADE_INSTALL_STATE_DIR`).
-  `--system --dry-run` previews `system_argv` as `would-system-install`.
-  Executing `system_argv` is always refused (exit 2). Exit 0 ok, 1
-  blocked/failed, 2 system-exec refused / usage.
+  `--system --dry-run` previews `system_argv` as `would-system-install`;
+  `--print-system-argv` dumps the same argv print-only. Live `system_argv`
+  requires `--yes --system --apply-system` (argv list via subprocess, never
+  `shell=True`); `--yes --system` alone still exits 2 (`refuse-system-exec`).
+  Exit 0 ok, 1 blocked/failed, 2 system-exec refused / usage.
 - `ade-user-install uv|just|link <name>` fetches GitHub release binaries or
   symlinks a repo `bin/` tool into the prefix. No `shell=True`, no root.
 
@@ -118,7 +124,7 @@ Pass `--ade` only with a durable checkout (`~/src/djbclark-ade`); never with a l
 | `just`, `uv` | `ade-user-install` release fetch → `{prefix}` |
 | `skill-everywhere`, `firecrawl-router` | `ade-user-install link` into `{prefix}` |
 | `graft` | `npm install -g @nanonets/graft` (user npm prefix) |
-| `git`, `gh` | `needs_system` + Linux `system_argv` (`apt-get`) + `system_argv_darwin` (`brew`); dry-run only |
+| `git`, `gh` | `needs_system` + Linux `system_argv` (`apt-get`) + `system_argv_darwin` (`brew`); preview or `--apply-system` |
 | `aiuse` | `uv tool install git+https://github.com/djbclark/aiuse` |
 | `cswap` | `uv tool install claude-swap` (presence `cswap`) |
 | `paseo` | `npm install -g @getpaseo/cli` (CLI only; desktop/daemon later) |
@@ -129,9 +135,29 @@ Pass `--ade` only with a durable checkout (`~/src/djbclark-ade`); never with a l
 | `hermes` (offered) | probe/update only (`hermes doctor` / `hermes update`); install is official curl\|bash (no `install_argv` yet) |
 | others | still `UNKNOWN` / no `install_argv` |
 
-## F. Next units
+## F. Operator path for live system apply (2026-11-09)
 
-Live system apply (root/`apt`/`brew` execution with ownership ledger), remaining
+Default refuse stays: `ade-install apply --yes --system` → exit 2
+`refuse-system-exec`. Opt-in live path (operator machine only; never CI root):
+
+```
+# Preview (safe anywhere)
+ade-install apply --system --dry-run --id git
+ade-install apply --print-system-argv --id git --json
+
+# Live (explicit; writes ledger kind=system_argv)
+ade-install apply --yes --system --apply-system --id git
+```
+
+`subprocess` uses argv lists only. Prefer `--id` so one package set is
+applied at a time. CI must keep using dry-run / print / mocked runners — do
+not pass `--apply-system` in automated jobs.
+
+## G. Next units
+
+Ownership-aware reconcile beyond the install ledger (setup-plan S3), remaining
 owner installers (sudo-secretspec Linux tarball, curl-free Cursor CLI fetch, Hermes
 offered path, Paseo desktop/daemon and skill bundle), per-key verify probes under
 `sudo-secretspec run`, collect/set batch. S4 jobs stay explicit later work.
+Follow-up: tighten `--apply-system` with an ownership generation / read-back
+lock if multi-agent installs share a machine.
