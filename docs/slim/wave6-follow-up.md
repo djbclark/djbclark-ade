@@ -1,6 +1,7 @@
 # Wave 6 follow-up — shim and `acp-run` deletion readiness
 
-Snapshot: 2026-11-09. Queue Carried **item 1**. The slim-down's Wave 6
+Snapshot: 2026-11-09 (C3 proof-file gate; Mac B1 idle capture writes
+`verified: no match` so idle proofs stay non-empty). Queue Carried **item 1**. The slim-down's Wave 6
 **shipped the shims** (`docs/slim/PLAN.md` F, gate marked done). This doc is the
 **deletion readiness** checklist for the follow-up PR that removes
 `skills/session-finder/relay.py`, `bin/acp-dispatch`, and `tools/acp-run`
@@ -46,16 +47,22 @@ this table; the deletion PR waits until `wave6-delete-check` reports
 
 Sooner than 2026-11-20 is allowed when **every** C3 row is migrated or waived
 **and** these show no remaining caller. Run on the Mac after the slim final
-merge's live cycle; paste stdout into the deletion PR (and into the evidence
-JSON for `wave6-delete-check --evidence`):
+merge's live cycle; paste stdout into the deletion PR **and** into the
+non-empty `mac_proofs` files named by the evidence JSON for
+`wave6-delete-check --evidence` (see shape below):
 
 ```bash
-# B1. No live shim argv (agents / launchd / leftover waiters)
-pgrep -lf 'relay\.py|acp-dispatch|acp-run' || true
-launchctl list 2>/dev/null | grep -E 'acp-dispatch|acp-run' || true
+# B1. No live shim argv (agents / launchd / leftover waiters).
+# Idle (no match) is the desired state — always record cmd + exit / verified line
+# so the capture is non-empty (wave6-delete-check FAILCLOSEs on empty proof files).
+echo "cmd: pgrep -lf 'relay\\.py|acp-dispatch|acp-run'"
+pgrep -lf 'relay\.py|acp-dispatch|acp-run' || echo "verified: no match (exit $?)"
+echo "cmd: launchctl list | grep -E 'acp-dispatch|acp-run'"
+launchctl list 2>/dev/null | grep -E 'acp-dispatch|acp-run' \
+  || echo "verified: no match (exit $?)"
 # B2. No outstanding dispatch records (C7). `acp-dispatch ls` does not exist —
 # use `check` on the state root and Paseo's label listing. Failures are real;
-# an empty/drained result is exit 0 / empty JSON.
+# an empty/drained result is exit 0 / empty JSON — still echo a verified line.
 STATE="${ACP_DISPATCH_STATE:-$HOME/.local/state/bigteam}"
 if ! command -v acp-dispatch >/dev/null 2>&1; then
   echo "B2: acp-dispatch not on PATH (record as drained only after uninstall + empty paseo ls)"
@@ -68,11 +75,20 @@ paseo ls -g --label ade.via=acp-dispatch --json
 # B3. Standing order 10 smoke without the shim (named ack path)
 paseo send --help >/dev/null
 paseo run --help >/dev/null
+echo "verified: paseo send/run --help ok"
 # optional: two-agent ack round with `paseo send --json --no-wait` and
 # `Please reply: ack <your id>` — see AGENTS.md order 10
 ```
 
-Evidence JSON shape (`wave6-delete-check --evidence PATH`):
+Evidence JSON shape (`wave6-delete-check --evidence PATH`). Status ticks
+alone are not enough: every C3 key and Mac flag needs a **non-empty proof
+file** named under `c3_proofs` / `mac_proofs` (paths relative to the evidence
+JSON's directory). The gate FAILCLOSEs (`c3_<key>_proof_missing` /
+`mac_<flag>_proof_missing`, exit 1) when a path is absent, empty or
+unreadable — it never invents Mac stdout or outside-repo captures. A
+successful Mac B1 idle probe (no matching process) must still leave a
+non-empty file (`cmd:` + `verified: no match`); an empty redirect is treated
+as a missing paste, not as idle proof:
 
 ```json
 {
@@ -91,17 +107,89 @@ Evidence JSON shape (`wave6-delete-check --evidence PATH`):
     "site_public_home_agents": "waived",
     "aiuse_config_opencode_go": "waived"
   },
+  "c3_proofs": {
+    "tendcf": "proofs/c3-tendcf.txt",
+    "nix2cf": "proofs/c3-nix2cf.txt",
+    "cfengine": "proofs/c3-cfengine.txt",
+    "paseo_upstream": "proofs/c3-paseo-upstream.txt",
+    "plektra": "proofs/c3-plektra.txt",
+    "paseo4herdr": "proofs/c3-paseo4herdr.txt",
+    "pi": "proofs/c3-pi.txt",
+    "sudo_secretspec": "proofs/c3-sudo-secretspec.txt",
+    "aiuse": "proofs/c3-aiuse.txt",
+    "paseo_runner": "proofs/c3-paseo-runner.txt",
+    "site_public_home_agents": "proofs/c3-site-public-home-agents.txt",
+    "aiuse_config_opencode_go": "proofs/c3-aiuse-config-opencode-go.txt"
+  },
   "mac": {
     "relay_idle": true,
     "acp_dispatch_idle": true,
     "acp_run_idle": true,
     "paseo_smoke_ok": true
+  },
+  "mac_proofs": {
+    "relay_idle": "proofs/mac-b1-relay.txt",
+    "acp_dispatch_idle": "proofs/mac-b2-acp-dispatch.txt",
+    "acp_run_idle": "proofs/mac-b1-acp-run.txt",
+    "paseo_smoke_ok": "proofs/mac-b3-paseo-smoke.txt"
   }
 }
 ```
 
 Each `c3` value is exactly `migrated` or `waived`. A waive needs the
-operator's one-line note in `docs/slim/log.md`.
+operator's one-line note in `docs/slim/log.md`, and that note (or a paste of
+it) must sit in the matching `c3_proofs` file. Mac proof files are
+operator-captured on the Mac from section B (paste B1/B2/B3 stdout); this
+readiness PR does **not** ship invented Mac proofs.
+
+Suggested capture (Mac; paths match the sample `mac_proofs` above).
+**Do not** redirect bare `pgrep … || true` alone: when idle, that writes an
+empty file and `wave6-delete-check` reports `mac_*_proof_missing` even though
+idle is the desired state. Always record the command and an explicit
+`verified: no match` (or match listing) plus exit status:
+
+```bash
+EVID=./wave6-evidence   # directory that will hold evidence.json + proofs/
+mkdir -p "$EVID/proofs"
+# B1 → relay_idle + acp_run_idle (split or share; both files must be non-empty)
+{
+  echo "cmd: pgrep -lf 'relay\\.py'"
+  pgrep -lf 'relay\.py' || echo "verified: no match (exit $?)"
+} > "$EVID/proofs/mac-b1-relay.txt"
+{
+  echo "cmd: pgrep -lf 'acp-run'; launchctl list | grep -E 'acp-run'"
+  pgrep -lf 'acp-run' || echo "verified: no match pgrep (exit $?)"
+  launchctl list 2>/dev/null | grep -E 'acp-run' \
+    || echo "verified: no match launchctl (exit $?)"
+} > "$EVID/proofs/mac-b1-acp-run.txt"
+# B2 → acp_dispatch_idle
+{
+  STATE="${ACP_DISPATCH_STATE:-$HOME/.local/state/bigteam}"
+  if ! command -v acp-dispatch >/dev/null 2>&1; then
+    echo "B2: acp-dispatch not on PATH"
+  elif [ ! -d "$STATE" ]; then
+    echo "B2: no state dir at $STATE (empty)"
+  else
+    acp-dispatch check "$STATE"
+  fi
+  echo "cmd: paseo ls -g --label ade.via=acp-dispatch --json"
+  out=$(paseo ls -g --label ade.via=acp-dispatch --json 2>&1) || true
+  if [ -n "$out" ]; then
+    printf '%s\n' "$out"
+  else
+    echo "verified: no match (empty paseo ls)"
+  fi
+} > "$EVID/proofs/mac-b2-acp-dispatch.txt"
+# B3 → paseo_smoke_ok
+{
+  echo "cmd: paseo send --help; paseo run --help"
+  if paseo send --help >/dev/null && paseo run --help >/dev/null; then
+    echo "verified: paseo send/run --help ok (exit 0)"
+  else
+    echo "verified: FAILED (exit $?)"
+  fi
+} > "$EVID/proofs/mac-b3-paseo-smoke.txt"
+```
 
 Wave 6's final PR already re-ran C7/C1 as its merge gate; this follow-up only
 needs proof the **cycle after that merge** left the shims idle.
@@ -110,22 +198,31 @@ needs proof the **cycle after that merge** left the shims idle.
 
 PLAN.md C3. The slim lead may merge in the five named repos and asks when
 unsure; everything else is a proposal. Tick each before the deletion PR
-merges (`wave6-delete-check` reads the evidence JSON keys above):
+merges (`wave6-delete-check` reads the evidence JSON keys + proof files
+above).
 
-| Key | Outside | Names |
-|---|---|---|
-| `tendcf` | tendcf `AGENTS.md` | `acp-dispatch --kind frontier`, `acp-run`, `relay.py`, … |
-| `nix2cf` | nix2cf `AGENTS.md` | same |
-| `cfengine` | CFEngine | `cfenginewatch`, `watch`, `fleet-watch` |
-| `paseo_upstream` | Paseo upstream | `paseowatch` |
-| `plektra` | Plektra | `acp-dispatch`, `relay.py`, `autorename`, `self-slash` |
-| `paseo4herdr` | paseo4herdr | `acp-dispatch`, `relay.py`, `self-slash` |
-| `pi` | Pi (`pi/extensions/…`, hand links, `agent_guard.py`) | I4f |
-| `sudo_secretspec` | sudo-secretspec | `relay.py`, `acp-dispatch`/`acp-run` as clients |
-| `aiuse` | **aiuse** (incl. `src/aiuse/collectors/acp_usage.py`) | queue Carried 34 |
-| `paseo_runner` | paseo-runner | same clients |
-| `site_public_home_agents` | `~/ops/site-public-djbclark/home-agents.md` item 40 | `coding-bot` |
-| `aiuse_config_opencode_go` | `~/.config/aiuse/config.toml` | `opencode-go` exclusion (after PR 260) |
+**Done when (per row):** either (a) `status=migrated` and the probe finds
+**no** live shim / retired-tool names in the named outside path, with the
+probe stdout (or a PR/merge citation) pasted into `c3_proofs.<key>`; or
+(b) `status=waived` with the operator's one-line waive in
+`docs/slim/log.md` pasted into that proof file. Missing/empty proof →
+`c3_<key>_proof_missing` (exit 1). Order 11: probes on outside checkouts
+are operator/lead work; this gate only checks the captured files.
+
+| Key | Outside | Names to clear | Operator probe (paste into `c3_proofs.<key>`) |
+|---|---|---|---|
+| `tendcf` | tendcf `AGENTS.md` | `acp-dispatch --kind frontier`, `acp-run`, `relay.py`, … | In tendcf: `rg -n 'acp-dispatch\|acp-run\|relay\.py' AGENTS.md` (empty = migrated) |
+| `nix2cf` | nix2cf `AGENTS.md` | same | In nix2cf: same `rg` on `AGENTS.md` |
+| `cfengine` | CFEngine | `cfenginewatch`, `watch`, `fleet-watch` | In CFEngine checkout: `rg -n 'cfenginewatch\|\bfleet-watch\b\|bin/watch' .` |
+| `paseo_upstream` | Paseo upstream | `paseowatch` | Against Paseo upstream / fleet-watch registration: `rg -n 'paseowatch' .` |
+| `plektra` | Plektra | `acp-dispatch`, `relay.py`, `autorename`, `self-slash` | In Plektra: `rg -n 'acp-dispatch\|relay\.py\|autorename\|self-slash' .` |
+| `paseo4herdr` | paseo4herdr | `acp-dispatch`, `relay.py`, `self-slash` | In paseo4herdr: `rg -n 'acp-dispatch\|relay\.py\|self-slash' .` |
+| `pi` | Pi (`pi/extensions/…`, hand links, `agent_guard.py`) | I4f | In Pi tree: `rg -n 'acp-dispatch\|relay\.py\|agent_guard\|subagent' pi extensions hand 2>/dev/null` |
+| `sudo_secretspec` | sudo-secretspec | `relay.py`, `acp-dispatch`/`acp-run` as clients | In sudo-secretspec: `rg -n 'relay\.py\|acp-dispatch\|acp-run' .` |
+| `aiuse` | **aiuse** (incl. `src/aiuse/collectors/acp_usage.py`) | Carried 1 residual / item 34 | In aiuse: `rg -n 'acp-run\|acp-dispatch\|relay\.py\|acp_usage' .` |
+| `paseo_runner` | paseo-runner | same clients | In paseo-runner: `rg -n 'relay\.py\|acp-dispatch\|acp-run' .` |
+| `site_public_home_agents` | `~/ops/site-public-djbclark/home-agents.md` item 40 | `coding-bot` | `rg -n 'coding-bot\|acp-run\|acp-dispatch' home-agents.md` |
+| `aiuse_config_opencode_go` | `~/.config/aiuse/config.toml` | `opencode-go` exclusion (after PR 260) | `rg -n 'opencode-go' ~/.config/aiuse/config.toml` (gone or waived after PR 260) |
 
 ## D. Exact files to remove (deletion PR only)
 

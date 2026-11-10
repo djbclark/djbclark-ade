@@ -15,10 +15,18 @@ Gates:
   evidence_missing --evidence not passed (Mac live-cycle + C3 ticks required)
   evidence_invalid evidence JSON missing keys or bad values
   c3_<key>         that C3 row is not migrated|waived
+  c3_<key>_proof_missing   c3_proofs.<key> path missing, empty, or unreadable
   mac_<flag>       that Mac idle/smoke flag is not true
+  mac_<flag>_proof_missing mac_proofs.<flag> path missing, empty, or unreadable
   soft_deadline    today < 2026-11-20 and --allow-early was not passed
                    (even with evidence; early delete needs the flag explicitly)
 
+Evidence JSON must name a non-empty proof file per C3 key and Mac flag
+(`c3_proofs` / `mac_proofs`; paths relative to the evidence file's directory).
+The gate FAILCLOSEs when a proof path is absent, empty, or unreadable — it
+never invents Mac stdout or outside-repo migration proofs. Mac B1 idle
+captures must still be non-empty: record cmd + `verified: no match` (see
+docs/slim/wave6-follow-up.md); a bare empty `pgrep` redirect is not evidence.
 Stdlib only.
 """
 from __future__ import annotations
@@ -149,6 +157,51 @@ def check_callers(root: Path) -> list[str]:
     return reasons
 
 
+def _proof_path(evidence_dir: Path, raw: Any) -> Path | None:
+    """Resolve a proof path relative to the evidence JSON's directory."""
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    p = Path(raw)
+    if not p.is_absolute():
+        p = evidence_dir / p
+    return p
+
+
+def _check_proof_file(
+    *,
+    reason_prefix: str,
+    evidence_dir: Path,
+    proofs: Any,
+    key: str,
+) -> str | None:
+    """Return a named reason when the proof file is missing/empty/unreadable."""
+    if not isinstance(proofs, dict):
+        return f"{reason_prefix}_proof_missing: c3_proofs/mac_proofs object missing"
+    raw = proofs.get(key)
+    path = _proof_path(evidence_dir, raw)
+    if path is None:
+        return (
+            f"{reason_prefix}_proof_missing: want non-empty path for {key!r}, "
+            f"got {raw!r}"
+        )
+    try:
+        if not path.is_file():
+            return f"{reason_prefix}_proof_missing: not a file: {path}"
+        # Fail closed on empty captures (claimed tick with no paste). Idle Mac
+        # B1 probes that find no process must still write cmd + verified line —
+        # see docs/slim/wave6-follow-up.md capture recipe (Codex P2 on #417).
+        if path.stat().st_size == 0:
+            return f"{reason_prefix}_proof_missing: empty file: {path}"
+        # Touch-read so an unreadable path cannot green the gate.
+        path.read_bytes()
+    except OSError as exc:
+        return (
+            f"{reason_prefix}_proof_missing: unreadable {path}: "
+            f"{exc.__class__.__name__}"
+        )
+    return None
+
+
 def check_evidence(path: Path | None, *, allow_early: bool) -> list[str]:
     reasons: list[str] = []
     if path is None:
@@ -168,22 +221,51 @@ def check_evidence(path: Path | None, *, allow_early: bool) -> list[str]:
     if not isinstance(data, dict):
         return ["evidence_invalid: root must be a JSON object"]
 
+    try:
+        evidence_dir = path.resolve().parent
+    except OSError as exc:
+        return [f"evidence_invalid: cannot resolve {path}: {exc.__class__.__name__}"]
+
     c3 = data.get("c3")
     if not isinstance(c3, dict):
         reasons.append("evidence_invalid: missing c3 object")
         c3 = {}
+    c3_proofs = data.get("c3_proofs")
+    if not isinstance(c3_proofs, dict):
+        reasons.append("evidence_invalid: missing c3_proofs object")
+        c3_proofs = {}
     for key in C3_KEYS:
         val = c3.get(key)
         if val not in C3_OK:
             reasons.append(f"c3_{key}: want migrated|waived, got {val!r}")
+        miss = _check_proof_file(
+            reason_prefix=f"c3_{key}",
+            evidence_dir=evidence_dir,
+            proofs=c3_proofs,
+            key=key,
+        )
+        if miss is not None:
+            reasons.append(miss)
 
     mac = data.get("mac")
     if not isinstance(mac, dict):
         reasons.append("evidence_invalid: missing mac object")
         mac = {}
+    mac_proofs = data.get("mac_proofs")
+    if not isinstance(mac_proofs, dict):
+        reasons.append("evidence_invalid: missing mac_proofs object")
+        mac_proofs = {}
     for flag in MAC_FLAGS:
         if mac.get(flag) is not True:
             reasons.append(f"mac_{flag}: want true, got {mac.get(flag)!r}")
+        miss = _check_proof_file(
+            reason_prefix=f"mac_{flag}",
+            evidence_dir=evidence_dir,
+            proofs=mac_proofs,
+            key=flag,
+        )
+        if miss is not None:
+            reasons.append(miss)
 
     today = datetime.date.today()
     if today < SOFT_DEADLINE and not allow_early:
