@@ -120,10 +120,10 @@ bin/ade-merge-ready merge-now --prs N --yes       # preferred; refuses unless ad
 Owner tips after owner-trust is on `master`: wait for Tests (or the push rejudge when the marker module lands), then
 `merge-now` — no paste, no per-PR dispatch.
 
-## Operator merge order (`bin/ade-merge-ready`, 2026-11-09; `approve-paste` / `approve-post` / `retrigger-marker` / `merge-now` 2026-11-10)
+## Operator merge order (`bin/ade-merge-ready`, 2026-11-09; `approve-paste` / `approve-post` / `retrigger-marker` / `merge-now` 2026-11-10; `stack-rebase` 2026-11-10)
 
 When many ADE PRs wait on the merge gate, use the helper. Classify / stacks /
-approve-paste / approve-post / retrigger-marker / merge-now never invent an
+approve-paste / approve-post / retrigger-marker / merge-now / stack-rebase never invent an
 APPROVE; open-PR listing uses `--limit 500` (fail closed if that cap is hit).
 
 **After #484 on master (owner-trust + push rejudge):** owner-authored tips need
@@ -145,6 +145,8 @@ bin/ade-merge-ready approve-paste --bottoms-only  # templates only (legacy / out
 bin/ade-merge-ready retrigger-marker --class needs_approve
 bin/ade-merge-ready merge-now --prs N            # dry-run; refuses unless adversary-marker success
 bin/ade-merge-ready merge-now --prs N --yes      # squash at tip head only if class=merge_now
+bin/ade-merge-ready stack-rebase --prs N         # dry-run restack after a bottom lands
+bin/ade-merge-ready stack-rebase --prs N --yes --repo-dir PATH  # rebase + force-with-lease; refuse on conflict
 ```
 
 **herdr paste warning (2026-11-10):** Do not paste an `adversary-verdict:v1`
@@ -160,6 +162,16 @@ tips — the gate trusts them without a marker.
 `merge-now` is the only merge path in this tool: refuses unless classify is
 `merge_now` (pytest-linux pass + adversary-marker success). Dry-run unless
 `--yes`.
+
+`stack-rebase` restacks selected children after a stack bottom merges (or when
+the base drifted): dry-run by default; `--yes` requires `--repo-dir` (a local
+clone), rebases onto the open parent's head branch when that parent is still
+open else onto `--onto` (default `master`) with `git rebase --onto` excluding
+the old parent tip (`--upstream` / pre-retarget `baseRefName`) so squash-merged
+parent commits are not replayed, retargets `gh pr edit --base` when needed,
+pushes with `--force-with-lease`, refuses fork/cross-repo heads, and refuses
+(exit 1, tip untouched) on rebase conflicts. It never posts markers and never
+merges.
 
 ## The `adversary-marker` Action
 

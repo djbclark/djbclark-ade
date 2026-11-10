@@ -1179,3 +1179,404 @@ def test_retrigger_marker_bottoms_only(tmp_path: Path) -> None:
     assert r.returncode == 0, r.stderr
     assert "would trigger adversary-marker.yml pr=400" in r.stdout
     assert "pr=401" not in r.stdout
+
+
+def test_stack_rebase_requires_prs(tmp_path: Path) -> None:
+    listing = json.dumps(
+        [
+            {
+                "number": 500,
+                "title": "child",
+                "headRefOid": "a" * 40,
+                "baseRefName": "cursor/parent-f576",
+                "mergeable": "MERGEABLE",
+                "headRefName": "cursor/child-f576",
+                "author": {"login": "djbclark"},
+            }
+        ]
+    )
+    checks = "pytest-linux\tpass\t0\tx\nadversary-marker\tfail\t0\tx\n"
+    gh = write_fake_gh(
+        tmp_path,
+        textwrap.dedent(
+            f"""
+            set -e
+            case "$*" in
+              *"pr list"*) echo '{listing}' ;;
+              *"pr checks"*) printf '%s' '{checks}' ;;
+              *"repo view"*) echo djbclark ;;
+              *) echo "unexpected: $*" >&2; exit 99 ;;
+            esac
+            """
+        ),
+    )
+    r = run(gh, "stack-rebase", "--min", "1")
+    assert r.returncode == 2, r.stderr
+    assert "requires --prs" in r.stderr
+
+
+def test_stack_rebase_dry_run_parent_gone(tmp_path: Path) -> None:
+    head = "b" * 40
+    listing = json.dumps(
+        [
+            {
+                "number": 511,
+                "title": "orphan child after bottom merged",
+                "headRefOid": head,
+                "baseRefName": "cursor/gone-parent-f576",
+                "mergeable": "MERGEABLE",
+                "headRefName": "cursor/sched-cron-reconcile-f576",
+                "author": {"login": "djbclark"},
+                "headRepository": {"nameWithOwner": "djbclark/djbclark-ade"},
+            }
+        ]
+    )
+    checks = "pytest-linux\tpending\t0\tx\nadversary-marker\tfail\t0\tx\n"
+    gh = write_fake_gh(
+        tmp_path,
+        textwrap.dedent(
+            f"""
+            set -e
+            case "$*" in
+              *"pr list"*) echo '{listing}' ;;
+              *"pr checks"*) printf '%s' '{checks}' ;;
+              *"repo view"*) echo djbclark ;;
+              *"pr edit"*) echo "unexpected edit: $*" >&2; exit 99 ;;
+              *) echo "unexpected: $*" >&2; exit 99 ;;
+            esac
+            """
+        ),
+    )
+    r = run(gh, "stack-rebase", "--prs", "511", "--min", "1", "--json")
+    assert r.returncode == 0, r.stderr + r.stdout
+    data = json.loads(r.stdout)
+    assert data["dry_run"] is True
+    assert data["onto"] == "master"
+    assert len(data["results"]) == 1
+    res = data["results"][0]
+    assert res["status"] == "would-rebase"
+    assert res["onto"] == "master"
+    assert res["need_base_edit"] is True
+    assert res["reason"] == "parent_gone"
+    assert res["upstream_exclude"] == "cursor/gone-parent-f576"
+    assert "would rebase #511" in r.stderr
+    assert "exclude cursor/gone-parent-f576" in r.stderr
+
+
+def test_stack_rebase_dry_run_open_parent(tmp_path: Path) -> None:
+    head_p = "c" * 40
+    head_c = "d" * 40
+    listing = json.dumps(
+        [
+            {
+                "number": 500,
+                "title": "parent",
+                "headRefOid": head_p,
+                "baseRefName": "master",
+                "mergeable": "MERGEABLE",
+                "headRefName": "cursor/parent-f576",
+                "author": {"login": "djbclark"},
+                "headRepository": {"nameWithOwner": "djbclark/djbclark-ade"},
+            },
+            {
+                "number": 501,
+                "title": "child",
+                "headRefOid": head_c,
+                "baseRefName": "cursor/parent-f576",
+                "mergeable": "MERGEABLE",
+                "headRefName": "cursor/child-f576",
+                "author": {"login": "djbclark"},
+                "headRepository": {"nameWithOwner": "djbclark/djbclark-ade"},
+            },
+        ]
+    )
+    checks = "pytest-linux\tpass\t0\tx\nadversary-marker\tfail\t0\tx\n"
+    gh = write_fake_gh(
+        tmp_path,
+        textwrap.dedent(
+            f"""
+            set -e
+            case "$*" in
+              *"pr list"*) echo '{listing}' ;;
+              *"pr checks"*) printf '%s' '{checks}' ;;
+              *"repo view"*) echo djbclark ;;
+              *) echo "unexpected: $*" >&2; exit 99 ;;
+            esac
+            """
+        ),
+    )
+    r = run(gh, "stack-rebase", "--prs", "501", "--min", "1", "--json")
+    assert r.returncode == 0, r.stderr + r.stdout
+    data = json.loads(r.stdout)
+    res = data["results"][0]
+    assert res["onto"] == "cursor/parent-f576"
+    assert res["need_base_edit"] is False
+    assert res["reason"] == "open_parent"
+    assert res["status"] == "would-rebase"
+
+
+def test_stack_rebase_yes_requires_repo_dir(tmp_path: Path) -> None:
+    listing = json.dumps(
+        [
+            {
+                "number": 511,
+                "title": "child",
+                "headRefOid": "e" * 40,
+                "baseRefName": "cursor/gone-f576",
+                "mergeable": "MERGEABLE",
+                "headRefName": "cursor/child-f576",
+                "author": {"login": "djbclark"},
+                "headRepository": {"nameWithOwner": "djbclark/djbclark-ade"},
+            }
+        ]
+    )
+    checks = "pytest-linux\tpass\t0\tx\nadversary-marker\tfail\t0\tx\n"
+    gh = write_fake_gh(
+        tmp_path,
+        textwrap.dedent(
+            f"""
+            set -e
+            case "$*" in
+              *"pr list"*) echo '{listing}' ;;
+              *"pr checks"*) printf '%s' '{checks}' ;;
+              *"repo view"*) echo djbclark ;;
+              *) echo "unexpected: $*" >&2; exit 99 ;;
+            esac
+            """
+        ),
+    )
+    r = run(gh, "stack-rebase", "--prs", "511", "--yes", "--min", "1")
+    assert r.returncode == 2, r.stderr
+    assert "--repo-dir" in r.stderr
+
+
+def test_stack_rebase_yes_rebase_and_retarget(tmp_path: Path) -> None:
+    head = "f" * 40
+    listing = json.dumps(
+        [
+            {
+                "number": 511,
+                "title": "child",
+                "headRefOid": head,
+                "baseRefName": "cursor/gone-f576",
+                "mergeable": "MERGEABLE",
+                "headRefName": "cursor/child-f576",
+                "author": {"login": "djbclark"},
+                "headRepository": {"nameWithOwner": "djbclark/djbclark-ade"},
+            }
+        ]
+    )
+    checks = "pytest-linux\tpass\t0\tx\nadversary-marker\tfail\t0\tx\n"
+    edits = tmp_path / "edits.log"
+    gh = write_fake_gh(
+        tmp_path,
+        textwrap.dedent(
+            f"""
+            set -e
+            case "$*" in
+              *"pr list"*) echo '{listing}' ;;
+              *"pr checks"*) printf '%s' '{checks}' ;;
+              *"repo view"*) echo djbclark ;;
+              *"pr edit"*)
+                echo "$*" >> '{edits}'
+                ;;
+              *) echo "unexpected: $*" >&2; exit 99 ;;
+            esac
+            """
+        ),
+    )
+    git_log = tmp_path / "git.log"
+    git = tmp_path / "git"
+    git.write_text(
+        textwrap.dedent(
+            f"""\
+            #!/usr/bin/env bash
+            echo "$*" >> '{git_log}'
+            if [[ "$1" == fetch ]]; then exit 0; fi
+            if [[ "$1" == worktree && "$2" == add ]]; then mkdir -p "$4"; exit 0; fi
+            if [[ "$1" == worktree && "$2" == remove ]]; then exit 0; fi
+            if [[ "$1" == rev-parse ]]; then echo deadbeef; exit 0; fi
+            if [[ "$1" == rebase && "$2" == --abort ]]; then exit 0; fi
+            if [[ "$1" == rebase && "$2" == --onto ]]; then exit 0; fi
+            if [[ "$1" == rebase ]]; then echo "unexpected plain rebase: $*" >&2; exit 99; fi
+            if [[ "$1" == push ]]; then exit 0; fi
+            exit 0
+            """
+        )
+    )
+    git.chmod(git.stat().st_mode | stat.S_IXUSR)
+    repo_dir = tmp_path / "clone"
+    repo_dir.mkdir()
+    (repo_dir / ".git").mkdir()
+    r = run(
+        gh,
+        "stack-rebase",
+        "--prs",
+        "511",
+        "--yes",
+        "--repo-dir",
+        str(repo_dir),
+        "--git",
+        str(git),
+        "--min",
+        "1",
+    )
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert "rebased #511 cursor/child-f576 onto master (base retargeted)" in r.stdout
+    assert edits.exists()
+    assert "--base master" in edits.read_text()
+    log = git_log.read_text()
+    assert "push --force-with-lease" in log
+    assert "rebase --onto origin/master origin/cursor/gone-f576" in log
+
+
+def test_stack_rebase_yes_conflict_refuses(tmp_path: Path) -> None:
+    head = "1" * 40
+    listing = json.dumps(
+        [
+            {
+                "number": 512,
+                "title": "conflict child",
+                "headRefOid": head,
+                "baseRefName": "cursor/gone-f576",
+                "mergeable": "CONFLICTING",
+                "headRefName": "cursor/conflict-f576",
+                "author": {"login": "djbclark"},
+                "headRepository": {"nameWithOwner": "djbclark/djbclark-ade"},
+            }
+        ]
+    )
+    checks = "pytest-linux\tpass\t0\tx\nadversary-marker\tfail\t0\tx\n"
+    gh = write_fake_gh(
+        tmp_path,
+        textwrap.dedent(
+            f"""
+            set -e
+            case "$*" in
+              *"pr list"*) echo '{listing}' ;;
+              *"pr checks"*) printf '%s' '{checks}' ;;
+              *"repo view"*) echo djbclark ;;
+              *"pr edit"*) echo "unexpected edit" >&2; exit 99 ;;
+              *) echo "unexpected: $*" >&2; exit 99 ;;
+            esac
+            """
+        ),
+    )
+    git = tmp_path / "git"
+    git.write_text(
+        textwrap.dedent(
+            """\
+            #!/usr/bin/env bash
+            if [[ "$1" == fetch ]]; then exit 0; fi
+            if [[ "$1" == worktree && "$2" == add ]]; then mkdir -p "$4"; exit 0; fi
+            if [[ "$1" == worktree && "$2" == remove ]]; then exit 0; fi
+            if [[ "$1" == rev-parse ]]; then echo deadbeef; exit 0; fi
+            if [[ "$1" == rebase && "$2" == --abort ]]; then exit 0; fi
+            if [[ "$1" == rebase && "$2" == --onto ]]; then
+              echo "CONFLICT (content): merge conflict in x" >&2
+              exit 1
+            fi
+            if [[ "$1" == rebase ]]; then echo "unexpected plain rebase" >&2; exit 99; fi
+            if [[ "$1" == push ]]; then echo "unexpected push" >&2; exit 99; fi
+            exit 0
+            """
+        )
+    )
+    git.chmod(git.stat().st_mode | stat.S_IXUSR)
+    repo_dir = tmp_path / "clone"
+    repo_dir.mkdir()
+    (repo_dir / ".git").mkdir()
+    r = run(
+        gh,
+        "stack-rebase",
+        "--prs",
+        "512",
+        "--yes",
+        "--repo-dir",
+        str(repo_dir),
+        "--git",
+        str(git),
+        "--min",
+        "1",
+    )
+    assert r.returncode == 1, r.stderr + r.stdout
+    assert "refused #512: rebase conflict" in r.stdout
+
+
+def test_stack_rebase_refuses_fork_head(tmp_path: Path) -> None:
+    head = "a" * 40
+    listing = json.dumps(
+        [
+            {
+                "number": 600,
+                "title": "fork child",
+                "headRefOid": head,
+                "baseRefName": "master",
+                "mergeable": "MERGEABLE",
+                "headRefName": "cursor/fork-child-f576",
+                "author": {"login": "outsider"},
+                "headRepository": {"nameWithOwner": "outsider/djbclark-ade"},
+                "isCrossRepository": True,
+            }
+        ]
+    )
+    checks = "pytest-linux\tpass\t0\tx\nadversary-marker\tfail\t0\tx\n"
+    gh = write_fake_gh(
+        tmp_path,
+        textwrap.dedent(
+            f"""
+            set -e
+            case "$*" in
+              *"pr list"*) echo '{listing}' ;;
+              *"pr checks"*) printf '%s' '{checks}' ;;
+              *"repo view"*) echo djbclark ;;
+              *) echo "unexpected: $*" >&2; exit 99 ;;
+            esac
+            """
+        ),
+    )
+    r = run(gh, "stack-rebase", "--prs", "600", "--min", "1", "--json")
+    assert r.returncode == 0, r.stderr + r.stdout
+    data = json.loads(r.stdout)
+    res = data["results"][0]
+    assert res["status"] == "would-refuse"
+    assert res["reason"] == "cross_repo_head"
+    assert "fork" in res["detail"] or "cross" in res["detail"]
+
+
+def test_stack_rebase_align_onto_needs_upstream(tmp_path: Path) -> None:
+    head = "b" * 40
+    listing = json.dumps(
+        [
+            {
+                "number": 601,
+                "title": "retargeted child",
+                "headRefOid": head,
+                "baseRefName": "master",
+                "mergeable": "MERGEABLE",
+                "headRefName": "cursor/retargeted-f576",
+                "author": {"login": "djbclark"},
+                "headRepository": {"nameWithOwner": "djbclark/djbclark-ade"},
+            }
+        ]
+    )
+    checks = "pytest-linux\tpass\t0\tx\nadversary-marker\tfail\t0\tx\n"
+    gh = write_fake_gh(
+        tmp_path,
+        textwrap.dedent(
+            f"""
+            set -e
+            case "$*" in
+              *"pr list"*) echo '{listing}' ;;
+              *"pr checks"*) printf '%s' '{checks}' ;;
+              *"repo view"*) echo djbclark ;;
+              *) echo "unexpected: $*" >&2; exit 99 ;;
+            esac
+            """
+        ),
+    )
+    r = run(gh, "stack-rebase", "--prs", "601", "--min", "1", "--json")
+    assert r.returncode == 0, r.stderr + r.stdout
+    res = json.loads(r.stdout)["results"][0]
+    assert res["status"] == "would-refuse"
+    assert res["reason"] == "align_onto_needs_upstream"
