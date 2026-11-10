@@ -739,7 +739,8 @@ class Checker:
                 if n >= MAX_GLOB_HITS:
                     state["complete"] = False
                     # Hits bound is the same incomplete-walk case as GLOB_S / MAX_GLOB_SCAN: latch
-                    # so check_command fails closed for walk-dependent secrets (`*`, `id_*`).
+                    # `_glob_budget_hit` so check_command fails closed for walk-dependent secrets
+                    # (`*`, `id_*`) — closes the PR 413 Security MEDIUM fail-open on hits alone.
                     self._glob_budget_hit = True
                     break
         if n and state["complete"]:

@@ -924,10 +924,11 @@ def test_brace_trailing_empty_alt_keeps_glob_budget_hit(monkeypatch, tmp_path):
         hook.check_command(ck3, "cat {,*,id_*}")
 
 
-def test_max_glob_hits_truncation_fails_closed(monkeypatch, tmp_path):
-    """Security MEDIUM (PR 413 tip): hitting MAX_GLOB_HITS marked the walk incomplete but did not
-    set `_glob_budget_hit`, so `cat *` could allow after 500 non-deny matches before `id_rsa`.
-    The hits bound must latch the same fail-closed path as GLOB_S / MAX_GLOB_SCAN."""
+def test_max_glob_hits_sets_glob_budget_hit_and_fails_closed(monkeypatch, tmp_path):
+    """Security MEDIUM closed (PR 413 tip bd94b617+): MAX_GLOB_HITS used to mark the walk incomplete
+    without setting `_glob_budget_hit`, so `cat *` could allow after 500 non-deny matches before
+    `id_rsa`. Hits truncation now latches `_glob_budget_hit` and raises GlobBudgetExceeded like
+    GLOB_S / MAX_GLOB_SCAN (check_command first-pass and deferred paths)."""
     hook = load_hook()
     (tmp_path / "id_rsa").write_text("PRIVATE\n")
     # Controlled scandir order: MAX_GLOB_HITS+ non-deny matches, then id_rsa (never reached).
