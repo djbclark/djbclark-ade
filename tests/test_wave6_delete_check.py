@@ -307,3 +307,103 @@ def test_dry_run_help_documents_fixture_not_live() -> None:
     assert "--dry-run" in text
     assert "FIXTURE" in text
     assert "deletion-ready" in text or "not deletion" in text.lower()
+
+
+def test_inventory_help_documents_caller_list_not_live() -> None:
+    """Usage must advertise --inventory as gated caller list, not live Mac."""
+    r = subprocess.run(
+        [sys.executable, "-I", str(SCRIPT), "--help"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert r.returncode == 0, r.stderr
+    text = r.stdout + r.stderr
+    assert "--inventory" in text
+    assert "gated" in text.lower() or "caller" in text.lower()
+    assert "Mac" in text or "mac" in text
+
+
+def test_inventory_lists_every_gated_hit_and_proves_gate_exits() -> None:
+    """--inventory lists untruncated §A hits; gate_exits prove they are gated."""
+    r = run("--json", "--inventory", root=ROOT)
+    assert r.returncode == 0, r.stderr
+    data = json.loads(r.stdout)
+    assert data["mode"] == "caller-inventory"
+    assert data["ready"] is False
+    assert data["mac_live_blocked"] is True
+    assert data["inventory_ok"] is True
+    assert data["coverage_ok"] is True
+    assert data["ungated_references"] == []
+    refs = data["references"]
+    assert data["callers_remaining"] == len(refs)
+    assert data["callers_remaining"] >= 1
+    # Untruncated: every hit carries path/line/kind/snippet.
+    for hit in refs:
+        assert hit["gated"] is True
+        assert hit["kind"] in {"skills", "bins", "loose"}
+        assert isinstance(hit["path"], str) and hit["path"]
+        assert isinstance(hit["line"], int) and hit["line"] >= 1
+        assert isinstance(hit["snippet"], str) and hit["snippet"]
+    exits = data["gate_exits"]
+    assert exits["callers"] == 1
+    assert exits["evaluate_no_evidence"] == 1
+    assert exits["dry_run_fixture"] is None
+    # Gate reasons still name callers_* while hits remain.
+    joined = "\n".join(data["gate_reasons"])
+    assert "callers_skills:" in joined or "callers_bins:" in joined or "callers_loose:" in joined
+
+
+def test_inventory_with_dry_run_keeps_fixture_exit_and_never_ready() -> None:
+    """--inventory --dry-run reports dry_run_fixture exit 0 without greening ready."""
+    r = run("--json", "--inventory", "--dry-run", root=ROOT)
+    assert r.returncode == 0, r.stderr
+    data = json.loads(r.stdout)
+    assert data["dry_run"] is True
+    assert data["fixture_shape_ok"] is True
+    assert data["gate_exits"]["dry_run_fixture"] == 0
+    assert data["gate_exits"]["callers"] == 1
+    assert data["ready"] is False
+    assert data["mac_live_blocked"] is True
+
+
+def test_inventory_refuses_evidence_and_allow_early() -> None:
+    r = run("--inventory", "--evidence", "/tmp/nope.json")
+    assert r.returncode == 2, r.stderr
+    r2 = run("--inventory", "--allow-early")
+    assert r2.returncode == 2, r2.stderr
+
+
+def test_inventory_exit_1_on_ungated_skill(tmp_path: Path) -> None:
+    """A LIVE_RE hit in skills/*/SKILL.md outside §A fails coverage (exit 1)."""
+    tree = _write_clean_tree(tmp_path)
+    other = tree / "skills/other/SKILL.md"
+    other.parent.mkdir(parents=True, exist_ok=True)
+    other.write_text(
+        "Do not: bin/acp-dispatch claude --model sonnet --kind code\n",
+        encoding="utf-8",
+    )
+    r = run("--json", "--inventory", root=tree)
+    assert r.returncode == 1, r.stderr
+    data = json.loads(r.stdout)
+    assert data["ready"] is False
+    assert data["mac_live_blocked"] is True
+    assert data["coverage_ok"] is False
+    assert data["inventory_ok"] is False
+    assert any(x.startswith("ungated_skills:") for x in data["reasons"])
+    assert data["ungated_references"]
+    assert data["ungated_references"][0]["gated"] is False
+
+
+def test_inventory_clean_tree_callers_exit_0_still_blocks_mac(tmp_path: Path) -> None:
+    """No §A hits → callers gate exit 0; evaluate_no_evidence still 1; never ready."""
+    tree = _write_clean_tree(tmp_path)
+    r = run("--json", "--inventory", root=tree)
+    assert r.returncode == 0, r.stderr
+    data = json.loads(r.stdout)
+    assert data["references"] == []
+    assert data["callers_remaining"] == 0
+    assert data["gate_exits"]["callers"] == 0
+    assert data["gate_exits"]["evaluate_no_evidence"] == 1
+    assert data["ready"] is False
+    assert data["mac_live_blocked"] is True

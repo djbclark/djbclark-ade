@@ -1,8 +1,9 @@
 #!/usr/bin/env -S python3 -I
-"""wave6-delete-check: refuse Wave 6 shim deletion until gates pass; `--dry-run` = FIXTURE FAILCLOSED shape only (2026-11-09/10).
+"""wave6-delete-check: refuse Wave 6 shim deletion until gates pass; `--dry-run` / `--inventory` never invent Mac live (2026-11-10).
 
   wave6-delete-check [--root DIR] [--evidence PATH] [--json] [--allow-early]
   wave6-delete-check --dry-run [--root DIR] [--json]
+  wave6-delete-check --inventory [--dry-run] [--root DIR] [--json]
 
 Read-only. Exit 0 only when every gate is green (safe to open the deletion PR
 that removes relay.py / acp-dispatch / acp-run). Exit 1 with named reasons
@@ -18,10 +19,21 @@ posts, never merges. Docs: docs/slim/wave6-follow-up.md (queue Carried 33).
   Linux-safe partial Mac probes: bin/wave6-mac-proof-capture --linux-safe
   (NOT deletion evidence). Live Mac cycle: --live (Darwin only).
 
+--inventory (caller inventory; Mac still blocked):
+  Lists every remaining LIVE_RE hit under the gated §A paths (CALLER_SKILLS /
+  CALLER_BINS / loose) untruncated, scans other skills/*/SKILL.md for ungated
+  holes, and reports gate_exits proving callers are covered (callers exit 1
+  while hits remain; evaluate_no_evidence exit 1 without Mac/C3 evidence).
+  Exit 0 when coverage_ok (no ungated skill hits) and — if combined with
+  --dry-run — fixture_shape_ok; ready stays false; mac_live_blocked stays true.
+  Exit 1 on ungated holes or (with --dry-run) bad FIXTURE shape. Never invents
+  Mac live proof. Incompatible with --evidence / --allow-early.
+
 Gates:
   callers_skills   listed skills still teach/invoke the shims as live commands
   callers_bins     listed bin/ callers still invoke the shims at runtime
   callers_loose    skills/loose still uses acp-run --perm deny (must port first)
+  ungated_skills   --inventory found LIVE_RE in a skills/*/SKILL.md outside §A
   evidence_missing --evidence not passed (Mac live-cycle + C3 ticks required)
   evidence_invalid evidence JSON missing keys or bad values
   fixture_invalid  --dry-run bundle missing, unlabeled, or not FIXTURE
@@ -175,6 +187,169 @@ def check_callers(root: Path) -> list[str]:
                 "(port off --perm deny before delete)"
             )
     return reasons
+
+
+def _rel_posix(root: Path, path: Path) -> str:
+    try:
+        return path.resolve().relative_to(root.resolve()).as_posix()
+    except (OSError, ValueError):
+        return path.as_posix()
+
+
+def _scan_inventory_hits(
+    root: Path,
+    path: Path,
+    *,
+    kind: str,
+    match_acp_run_any: bool = False,
+) -> list[dict[str, Any]]:
+    """Structured LIVE_RE (and optional any-acp-run) hits with relative path:line."""
+    rel = _rel_posix(root, path)
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return [
+            {
+                "path": rel,
+                "line": 0,
+                "kind": kind,
+                "gated": True,
+                "snippet": "unreadable",
+            }
+        ]
+    hits: list[dict[str, Any]] = []
+    for i, line in enumerate(text.splitlines(), 1):
+        if LIVE_RE.search(line) or (match_acp_run_any and "acp-run" in line):
+            hits.append(
+                {
+                    "path": rel,
+                    "line": i,
+                    "kind": kind,
+                    "gated": True,
+                    "snippet": line.strip()[:160],
+                }
+            )
+    return hits
+
+
+def inventory_gated_references(root: Path) -> list[dict[str, Any]]:
+    """Every remaining gated §A reference — untruncated (skills / bins / loose)."""
+    refs: list[dict[str, Any]] = []
+    for rel in CALLER_SKILLS:
+        refs.extend(_scan_inventory_hits(root, root / rel, kind="skills"))
+    for rel in CALLER_BINS:
+        refs.extend(_scan_inventory_hits(root, root / rel, kind="bins"))
+    refs.extend(
+        _scan_inventory_hits(
+            root,
+            root / LOOSE_SKILL,
+            kind="loose",
+            match_acp_run_any=True,
+        )
+    )
+    return refs
+
+
+def inventory_ungated_skill_hits(root: Path) -> list[dict[str, Any]]:
+    """LIVE_RE in skills/*/SKILL.md outside CALLER_SKILLS/loose — gate coverage holes."""
+    gated = frozenset(CALLER_SKILLS) | {LOOSE_SKILL}
+    skills_dir = root / "skills"
+    if not skills_dir.is_dir():
+        return []
+    hits: list[dict[str, Any]] = []
+    for skill_md in sorted(skills_dir.glob("*/SKILL.md")):
+        rel = _rel_posix(root, skill_md)
+        if rel in gated:
+            continue
+        for hit in _scan_inventory_hits(root, skill_md, kind="ungated"):
+            hit["gated"] = False
+            hits.append(hit)
+    return hits
+
+
+def evaluate_inventory(root: Path, *, with_dry_run: bool) -> dict[str, Any]:
+    """List every gated caller hit + prove gate exit codes; never Mac-live / never ready."""
+    references = inventory_gated_references(root)
+    ungated = inventory_ungated_skill_hits(root)
+    caller_reasons = check_callers(root)
+    callers_exit = 1 if caller_reasons else 0
+    # Prove the deletion gate refuses without Mac/C3 evidence (and while callers remain).
+    full = evaluate(root, evidence=None, allow_early=False)
+    full_exit = 0 if full["ready"] else 1
+
+    dry_exit: int | None = None
+    fixture_shape_ok: bool | None = None
+    reasons: list[str] = []
+    if ungated:
+        sample = ", ".join(f"{h['path']}:{h['line']}" for h in ungated[:8])
+        more = "" if len(ungated) <= 8 else f" (+{len(ungated) - 8} more)"
+        reasons.append(f"ungated_skills: {sample}{more}")
+
+    if with_dry_run:
+        dry = evaluate_dry_run(root)
+        fixture_shape_ok = bool(dry.get("fixture_shape_ok"))
+        dry_exit = 0 if fixture_shape_ok else 1
+        if not fixture_shape_ok:
+            # Keep fixture reasons; drop the soft "OK but not ready" advisory when failing.
+            reasons.extend(
+                r for r in dry["reasons"] if not r.startswith("dry_run:")
+            )
+
+    # Consistency: remaining gated hits must make the callers gate refuse.
+    if references and callers_exit != 1:
+        reasons.append(
+            "inventory_inconsistent: gated references present but callers gate exit != 1"
+        )
+    if full_exit != 1:
+        reasons.append(
+            "inventory_inconsistent: evaluate_no_evidence exit != 1 "
+            "(expected refuse without Mac/C3 evidence)"
+        )
+
+    coverage_ok = not ungated and not any(
+        r.startswith("inventory_inconsistent:") for r in reasons
+    )
+    shape_ok = True if fixture_shape_ok is None else fixture_shape_ok
+    inventory_ok = coverage_ok and shape_ok and full_exit == 1
+
+    advisory: list[str] = []
+    if inventory_ok:
+        advisory.append(
+            "inventory: every remaining skill LIVE_RE hit is under gated §A paths; "
+            f"callers_remaining={len(references)}; gate_exits.callers={callers_exit}; "
+            f"gate_exits.evaluate_no_evidence={full_exit}"
+            + (
+                f"; gate_exits.dry_run_fixture={dry_exit}"
+                if dry_exit is not None
+                else ""
+            )
+            + " — NOT live Mac; NOT deletion-ready"
+        )
+
+    return {
+        "tool": TOOL,
+        "root": str(root),
+        "soft_deadline": SOFT_DEADLINE.isoformat(),
+        "allow_early": False,
+        "evidence": None,
+        "dry_run": with_dry_run,
+        "mode": "caller-inventory",
+        "references": references,
+        "callers_remaining": len(references),
+        "ungated_references": ungated,
+        "gate_exits": {
+            "callers": callers_exit,
+            "evaluate_no_evidence": full_exit,
+            "dry_run_fixture": dry_exit,
+        },
+        "gate_reasons": caller_reasons,
+        "coverage_ok": coverage_ok,
+        "fixture_shape_ok": fixture_shape_ok,
+        "inventory_ok": inventory_ok,
+        "mac_live_blocked": True,
+        "ready": False,
+        "reasons": reasons if reasons else advisory,
+    }
 
 
 def _proof_path(evidence_dir: Path, raw: Any) -> Path | None:
@@ -533,11 +708,23 @@ def main(argv: list[str] | None = None) -> int:
             f"({FIXTURE_EVIDENCE_REL.as_posix()}); not deletion-ready"
         ),
     )
+    p.add_argument(
+        "--inventory",
+        action="store_true",
+        help=(
+            "list every remaining gated §A relay/acp-dispatch/acp-run reference "
+            "with gate_exits proving coverage; never Mac-live / never deletion-ready"
+        ),
+    )
     p.add_argument("--json", action="store_true", help="print the full result as JSON")
     args = p.parse_args(argv)
 
-    if args.dry_run and (args.evidence is not None or args.allow_early):
-        return die("--dry-run is incompatible with --evidence / --allow-early")
+    if (args.dry_run or args.inventory) and (
+        args.evidence is not None or args.allow_early
+    ):
+        return die(
+            "--dry-run/--inventory is incompatible with --evidence / --allow-early"
+        )
 
     root = args.root
     if root is None:
@@ -549,7 +736,10 @@ def main(argv: list[str] | None = None) -> int:
     if not root.is_dir():
         return die(f"root is not a directory: {root}")
 
-    if args.dry_run:
+    if args.inventory:
+        result = evaluate_inventory(root, with_dry_run=args.dry_run)
+        ok = bool(result.get("inventory_ok"))
+    elif args.dry_run:
         result = evaluate_dry_run(root)
         ok = bool(result.get("fixture_shape_ok"))
     else:
@@ -558,6 +748,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.json:
         print(json.dumps(result, indent=2, sort_keys=True))
+    elif args.inventory and ok:
+        n = int(result.get("callers_remaining") or 0)
+        print(
+            f"{TOOL}: inventory OK ({n} gated caller hit(s); "
+            "NOT live Mac; NOT deletion-ready)"
+        )
     elif args.dry_run and ok:
         print(
             f"{TOOL}: dry-run FIXTURE shape OK "
@@ -566,13 +762,26 @@ def main(argv: list[str] | None = None) -> int:
     elif result["ready"]:
         print(f"{TOOL}: ready (all gates green)")
     else:
-        label = "dry-run not OK" if args.dry_run else "not ready"
+        if args.inventory:
+            label = "inventory not OK"
+        elif args.dry_run:
+            label = "dry-run not OK"
+        else:
+            label = "not ready"
         print(
             f"{TOOL}: {label} ({len(result['reasons'])} reason(s))",
             file=sys.stderr,
         )
         for r in result["reasons"]:
             print(f"  - {r}", file=sys.stderr)
+        if args.inventory and not args.json:
+            # Always surface the untruncated gated list on stderr for humans.
+            for hit in result.get("references") or []:
+                print(
+                    f"  ref: {hit.get('kind')} {hit.get('path')}:{hit.get('line')} "
+                    f"{hit.get('snippet')}",
+                    file=sys.stderr,
+                )
 
     return 0 if ok else 1
 

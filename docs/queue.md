@@ -89,10 +89,11 @@ under **Carried**, newest first, one line each; an item leaves when it ships (in
     **Delete readiness** (do not delete yet; status 2026-11-10 in
     `docs/slim/wave6-follow-up.md` §Status): C3 `--dry-run` FIXTURE path ready/tightened
     (#441/#453/#470; Mac+C3 labels + Linux-safe `cmd:` shape; `--linux-safe` probes);
+    `--inventory` lists every gated §A caller hit + `gate_exits` while Mac blocked;
     Mac live cycle still blocked (`mac_not_live` on FIXTURE/LINUX-SAFE); soft delete
     ~2026-11-20; operator must supply live Mac proofs + C3 migrate/waive pastes. Tools:
-    `bin/wave6-delete-check` (`--dry-run` = FIXTURE FAILCLOSED shape only) +
-    `bin/wave6-mac-proof-capture` (`--live` Darwin / `--linux-safe` partial; labeled
+    `bin/wave6-delete-check` (`--dry-run` = FIXTURE shape; `--inventory` = §A caller list)
+    + `bin/wave6-mac-proof-capture` (`--live` Darwin / `--linux-safe` partial; labeled
     FIXTURE proofs under `tests/fixtures/wave6-mac-proofs/` until replaced).
 34. **`bin/review-pr` and `gh pr checks --watch` register no deadline of their own** (2026-11-07, W3 docs critic): run them under `deadline run` until one of them registers itself (`docs/deadline.md` Known gaps).
 35. **One-step install and automatic updates on a new machine, Mac and Linux** (operator, 2026-11-07): an easy way to install
