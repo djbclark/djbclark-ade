@@ -185,3 +185,5 @@ Skills (23, from each `skills/*/SKILL.md`):
 
 [Old way versus new way](docs/old-way-new-way.md) compares legacy skills with native Paseo,
 records plugin advice, and defines the Linux/macOS cross-host handoff acceptance checks.
+
+| [`bin/open-clean`](bin/open-clean) | Launch macOS apps with a minimal environment; Bash gate denies bare `open`. |
