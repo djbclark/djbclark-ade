@@ -255,6 +255,14 @@ FILE expands). Exit 0 ok, 1 breach or rise, 3 a directory it could not measure. 
 runs nightly as a Paseo schedule (J3): the `paseo schedule create` line is in the script's module docstring; the launchd job and its
 `install`/`uninstall` subcommands were removed 2026-11-06 (E5). Tests: `tests/test_context_budget_check.py`.
 
+Since 2026-11-10, its default reader adopts effective `[context_budget]` from
+`config/ade.toml` or the legacy file, with per-machine `local.toml` overrides.
+Directory arrays replace whole; numeric budget and directory-map leaves merge.
+Missing context metadata keeps the existing code defaults. Explicit `--config`
+retains an isolated legacy-file read. Invalid effective config exits 2 before
+measurement, notification or state writes. `--from-file ... --dry-run` remains
+the offline verification path. See [precedence and validation](config-migration.md).
+
 This is the *baseline* half of context visibility (what a fresh session already costs before any
 turn). For *live* fullness of running agents against the real autoCompact wall — and for the
 Paseo Desktop meter mismatch tracked in getpaseo/paseo#4949 — use section 6's `context-watch`,

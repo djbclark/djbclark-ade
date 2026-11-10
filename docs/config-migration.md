@@ -30,6 +30,7 @@ separate adoption.
 | `config/install.toml` | `[[login]]` | `[[install.login]]` |
 | `config/install.toml` | `[[install.jobs]]` / `[[install.retired_jobs]]` | unchanged |
 | `config/install.toml` | `[[key]]` identified by `name` | `[keys.<NAME>]` (name becomes the table identity) |
+| `config/context-budget.toml` | `dirs` / `[budget]` | `[context_budget]` |
 
 Routing's current public tables stay at the effective root (not nested under a single
 `[routing]` umbrella that would drop `[lead]` / `[[service]]`). Gates nest under
@@ -113,6 +114,23 @@ B11. **Joint catalog reader adoption (2026-11-10).** `load_effective(domains=Non
     overlays refuse explicitly. With no overlays, the existing catalog schema is
     sufficient. These readers perform no probes, installs or state writes.
 
+B12. **Context-budget reader adoption (2026-11-10).** Default
+    `context-budget-check` reads only effective `[context_budget]`; it does not
+    require routing, gates, tiers or install files. Legacy `dirs` and `[budget]`
+    project without changing tracked values. Local directory arrays replace whole,
+    while default budgets and per-directory override maps merge by leaf. Absent
+    legacy input, an omitted unified domain, empty `dirs` or empty `budget` retain
+    the CLI's existing code defaults; a unified file never revives legacy context
+    data. Explicit `--config PATH` and `load_config(path)` remain isolated legacy
+    reads, including their missing-file defaults and parse/type behavior.
+    Effective raw inputs and final merged budgets validate directory arrays and
+    numeric leaves before measurement/state/ping; booleans, nonfinite values and
+    nested override maps refuse (CLI exit 2). The six consumed default budget
+    entries must be numeric, not maps. Existing numeric row names, directory map
+    names and numeric values are otherwise retained; this unit adds no budget
+    limits or schedule changes. `ade-config check/get/diff` includes the domain;
+    `set context_budget.*` refuses until a separate writer adoption.
+
 ## C. CLI
 
 ```
@@ -136,7 +154,7 @@ no alternate supposedly absent filename is probed or loaded. The pure loader's
 ### C2. `set` (2026-11-08)
 
 `ade-config set` is the comment-preserving atomic scalar writer (`bin/ade_config_edit.py`).
-Install/keys paths explicitly refuse `set` for every target until a separate
+Install/keys and context_budget paths explicitly refuse `set` for every target until a separate
 writer adoption; adding their read schema does not enable edits to those domains.
 
 | Flag | Behaviour |
