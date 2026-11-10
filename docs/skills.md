@@ -58,11 +58,11 @@ For the migration choices, compatibility names and Linux/macOS handoffs, read
 | `tell-chief-of-staff` | Pointer (2026-11-06): messaging the Grok Bot "Chief of Staff" lives in the peer-link repository. | "tell grok", "tell Chief of Staff". |
 | `tell-coding-bot` | Pointer (2026-11-06): the Grok Bot "Coding" sender lives in the peer-link repository. | "tell the Coding bot". |
 
-`skills/session-finder/` holds no skill any more: only the one-cycle relay shim `relay.py` over `paseo send` (until
-2026-11-20; new code calls `paseo send` directly) and a `claude_identity.py` stub (the module is `bin/claude_identity.py`).
-Paseo's own skills (`paseo`, `paseo-advisor`, `paseo-committee`, `paseo-handoff`, `paseo-help`, `paseo-plugin`) are
-installed from Paseo (`npx skills add getpaseo/paseo`, `docs/skill-everywhere.md` 3a); the Claude template keeps them
-`user-invocable-only`.
+`skills/session-finder/` was restored 2026-11-08 for Pi-first transcript history search (`session-history.py`;
+data only — it does not launch retired clients). The one-cycle relay shim `relay.py` over `paseo send` remains until
+2026-11-20; `claude_identity.py` is a stub (the module is `bin/claude_identity.py`). Paseo's own skills (`paseo`,
+`paseo-advisor`, `paseo-committee`, `paseo-handoff`, `paseo-help`, `paseo-plugin`) are installed from Paseo (`npx skills
+add getpaseo/paseo`, `docs/skill-everywhere.md` 3a); the Claude template keeps them `user-invocable-only`.
 
 **Where the others went (2026-10-31 to 2026-11-07; `slim/log.md` has each):** moved to site-djbclark
 (`~/ops/site-public-djbclark/skills`, 2026-11-06): aws-rules, barnowl, book-to-kb (as `tools/book-to-kb`), bottom-config,
