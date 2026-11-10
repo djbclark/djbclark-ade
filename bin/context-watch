@@ -1,19 +1,25 @@
 #!/usr/bin/env python3
 """context-watch: how full is each running Claude Code agent's context, against the REAL compaction ceiling.
 
-    context-watch [--json] [--min-pct N] [--source auto|paseo|recent] [--recent-minutes M]
+    context-watch [--json] [--min-pct N] [--min-band BAND] [--source auto|paseo|recent]
+                  [--recent-minutes M]
 
 One line per agent, fullest first:
 
-    <agent id8> <title> 214k/267k (80%) wall in 53k
+    <agent id8> <title> 214k/267k (80%) hard · wall in 53k · paseo~21%
 
 `wall in` is the headroom left before Claude Code compacts by itself; past it the line says
-`wall passed by 5k`. An agent whose size cannot be read prints `<id8> <title> ?` (no state file, no
+`wall passed by 5k`. The band is the same ladder the Claude nudge hook uses (ok / early /
+boundary / hard / wall), scored against this agent's real autoCompact ceiling — never against
+Paseo's 1M manifest meter. `paseo~N%` is what that wrong meter would show (tokens / manifest
+window), so a line that reads 80% real / paseo~21% is the getpaseo/paseo#4949 mismatch in one
+glance. An agent whose size cannot be read prints `<id8> <title> ?` (no state file, no
 transcript, unreadable transcript) and one whose newest record is a compaction (no request since)
 prints `compacted`. Read-only; exit 0 always (2 only for bad usage). Nothing is written.
 
-Why it exists: `paseo inspect` reports no context fields (getpaseo/paseo#4949, 2026-10-28), and
-Paseo's own context bar divides by a 1M window and ignores autoCompactWindow.
+Why it exists: `paseo inspect` reports no context fields (getpaseo/paseo#4949, open 2026-10-28), and
+Paseo's own context bar divides by a 1M window and ignores autoCompactWindow. Fix the meter
+upstream there; this tool is the in-repo live readout that does not wait on that fix.
 
 Tokens: the newest non-sidechain assistant usage block of the session transcript
 (~/.claude/projects/*/<session>.jsonl), input + cache_read + cache_creation. The parser is
@@ -50,9 +56,14 @@ Which agents (--source, default auto):
   auto    paseo; recent when `paseo ls` is missing, fails or prints no JSON (a note goes to stderr).
           A working paseo with no Claude agents prints nothing.
 
---min-pct N hides agents below N percent full and every `?` / `compacted` line. --json prints a list
-of records (id, short_id, title, cwd, session, transcript, source, status, tokens, ceiling, pct,
-headroom), sorted like the text; status is ok, compacted, no-session, no-transcript or unreadable.
+--min-pct N hides agents below N percent full and every `?` / `compacted` line. --min-band BAND
+hides agents whose nudge band is below BAND (ok < early < boundary < hard < wall); unknown sizes
+(`?` / `compacted`) are hidden the same way. --json prints a list of records (id, short_id, title,
+cwd, session, transcript, source, status, tokens, ceiling, pct, headroom, nudge_band, nudge_level,
+nudge_growth, paseo_window, paseo_pct), sorted like the text; status is ok, compacted, no-session,
+no-transcript or unreadable. nudge_band / paseo_* are set only on status=ok; nudge_level is the
+hook's last fired level from ~/.claude/state/context-nudges.json when that session has an entry
+(None otherwise); nudge_growth is tokens minus that entry's baseline when the baseline is an int.
 """
 import argparse
 import glob
@@ -72,6 +83,8 @@ sys.dont_write_bytecode = True  # before the imports by path below: "nothing is 
 DEFAULT_MODEL_WINDOW = 200_000
 LONG_MODEL_WINDOW = 1_000_000
 MAX_WINDOW = 10_000_000  # a configured window above this is taken as junk (unset)
+# Urgency ladder shared by --min-band and the line label; keep in sync with nudge_band().
+BAND_ORDER = ("ok", "early", "boundary", "hard", "wall")
 HOOK = Path(__file__).resolve().parent.parent / "claude" / "hooks" / "context_size_nudge.py"
 _loaded = {}
 
@@ -127,6 +140,55 @@ def model_window(model):
     if "[1m]" in name:
         return LONG_MODEL_WINDOW
     return DEFAULT_MODEL_WINDOW if "haiku" in name else None
+
+
+def paseo_meter_window(model):
+    """Denominator Paseo Desktop's context bar uses today (getpaseo/paseo#4949): the model manifest
+    window, never autoCompactWindow. Haiku is 200k; every other Claude id is treated as 1M (the
+    hardcoded manifest value that makes the percentage wrong when autoCompactWindow is lower)."""
+    known = model_window(model)
+    return known if known is not None else LONG_MODEL_WINDOW
+
+
+def nudge_state_path():
+    return Path.home() / ".claude" / "state" / "context-nudges.json"
+
+
+def load_nudge_state():
+    """The nudge hook's shared state dict, or {} when missing/unreadable. Read-only."""
+    try:
+        data = json.loads(nudge_state_path().read_text())
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def session_nudge(state, session):
+    """One session's nudge record from `state`, or {}."""
+    if not isinstance(session, str) or not isinstance(state, dict):
+        return {}
+    block = state.get(session)
+    return block if isinstance(block, dict) else {}
+
+
+def nudge_band(tokens, ceiling, growth=None):
+    """ok / early / boundary / hard / wall against this agent's real ceiling and the hook's tiers.
+
+    wall: at or past the autoCompact wall. hard: within ASK_HEADROOM of that wall, at or past the
+    hook's ASK_TOTAL, or growth past ASK_GROWTH. boundary: at or past BOUNDARY_TOTAL. early: growth
+    past EARLY_GROWTH (needs a baseline from the nudge state). Totals alone never invent early.
+    """
+    hook = _hook()
+    if tokens >= ceiling:
+        return "wall"
+    if (tokens >= ceiling - hook.ASK_HEADROOM or tokens >= hook.ASK_TOTAL
+            or (isinstance(growth, int) and growth >= hook.ASK_GROWTH)):
+        return "hard"
+    if tokens >= hook.BOUNDARY_TOTAL:
+        return "boundary"
+    if isinstance(growth, int) and growth >= hook.EARLY_GROWTH:
+        return "early"
+    return "ok"
 
 
 def ceiling(settings, model=None):
@@ -239,12 +301,15 @@ def read_cwd(path):
         return None
 
 
-def measure(row, transcript, settings, model=None):
-    """Fill ceiling/tokens/pct/headroom/status of `row` from `transcript` (None = missing). `model` is the agent's
-    model when its provider string names one, else the model of the transcript's newest assistant record."""
+def measure(row, transcript, settings, model=None, nudge_state=None):
+    """Fill ceiling/tokens/pct/headroom/status/nudge_*/paseo_* of `row` from `transcript` (None = missing).
+    `model` is the agent's model when its provider string names one, else the model of the transcript's
+    newest assistant record. `nudge_state` is the shared context-nudges.json dict (or {})."""
     hook = _hook()
     row["transcript"] = transcript
     row["tokens"] = row["pct"] = row["headroom"] = None
+    row["nudge_band"] = row["nudge_level"] = row["nudge_growth"] = None
+    row["paseo_window"] = row["paseo_pct"] = None
     if not model and transcript:
         model = hook._last_assistant_model(transcript)
     limit = row["ceiling"] = ceiling(settings, model)
@@ -255,7 +320,17 @@ def measure(row, transcript, settings, model=None):
     if tokens == hook.COMPACTED:
         row["status"] = "compacted"
     elif isinstance(tokens, int):
-        row.update(status="ok", tokens=tokens, pct=round(100 * tokens / limit, 1), headroom=limit - tokens)
+        note = session_nudge(nudge_state or {}, row.get("session"))
+        baseline = note.get("baseline")
+        growth = max(0, tokens - baseline) if isinstance(baseline, int) else None
+        fired = note.get("level")
+        fired = fired if isinstance(fired, int) else None
+        paseo_win = paseo_meter_window(model)
+        row.update(
+            status="ok", tokens=tokens, pct=round(100 * tokens / limit, 1), headroom=limit - tokens,
+            nudge_band=nudge_band(tokens, limit, growth), nudge_level=fired, nudge_growth=growth,
+            paseo_window=paseo_win, paseo_pct=round(100 * tokens / paseo_win, 1),
+        )
     else:
         row["status"] = "unreadable"
     return row
@@ -266,7 +341,7 @@ def base_row(agent_id, title, cwd, session, source):
             "source": source}
 
 
-def paseo_rows(settings, agents):
+def paseo_rows(settings, agents, nudge_state=None):
     rows = []
     for a in agents:
         provider = a.get("provider")
@@ -283,11 +358,11 @@ def paseo_rows(settings, agents):
             transcript = None
         else:
             transcript = find_transcript(session)
-        rows.append(measure(row, transcript, settings, provider.partition("/")[2]))
+        rows.append(measure(row, transcript, settings, provider.partition("/")[2], nudge_state))
     return rows
 
 
-def recent_rows(settings, minutes):
+def recent_rows(settings, minutes, nudge_state=None):
     cutoff = time.time() - minutes * 60
     rows = []
     for path in glob.glob(os.path.join(glob.escape(str(projects_dir())), "*", "*.jsonl")):
@@ -301,7 +376,8 @@ def recent_rows(settings, minutes):
             continue
         cwd = read_cwd(path)
         title = Path(cwd).name if cwd else Path(path).parent.name.rsplit("-", 1)[-1]
-        rows.append(measure(base_row(session, title, cwd, session, "recent"), path, settings))
+        rows.append(measure(base_row(session, title, cwd, session, "recent"), path, settings,
+                            nudge_state=nudge_state))
     return rows
 
 
@@ -327,7 +403,11 @@ def format_row(row):
     if row["status"] == "ok":
         tokens, limit, left = row["tokens"], row["ceiling"], row["headroom"]
         wall = f"wall in {_distance(left)}" if left >= 0 else f"wall passed by {_distance(-left)}"
-        return f"{head} {_k(tokens)}/{_k(limit)} ({round(100 * tokens / limit)}%) {wall}"
+        band = row.get("nudge_band") or "ok"
+        paseo = row.get("paseo_pct")
+        paseo_bit = f" · paseo~{round(paseo)}%" if isinstance(paseo, (int, float)) else ""
+        return (f"{head} {_k(tokens)}/{_k(limit)} ({round(100 * tokens / limit)}%) "
+                f"{band} · {wall}{paseo_bit}")
     return f"{head} compacted" if row["status"] == "compacted" else f"{head} ?"
 
 
@@ -341,11 +421,21 @@ def nonneg(text):
     return value
 
 
+def band_name(text):
+    name = str(text).strip().lower()
+    if name not in BAND_ORDER:
+        raise argparse.ArgumentTypeError(
+            f"band must be one of {', '.join(BAND_ORDER)}: {text!r}")
+    return name
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="context-watch", description=__doc__.split("\n\n")[0])
     ap.add_argument("--json", action="store_true", help="print a JSON list of records")
     ap.add_argument("--min-pct", type=nonneg, default=None, metavar="N",
                     help="hide agents below N percent full and every unknown size")
+    ap.add_argument("--min-band", type=band_name, default=None, metavar="BAND",
+                    help="hide agents below BAND (ok|early|boundary|hard|wall) and every unknown size")
     ap.add_argument("--source", choices=("auto", "paseo", "recent"), default="auto")
     ap.add_argument("--recent-minutes", type=nonneg, default=30, metavar="M")
     args = ap.parse_args(argv)
@@ -356,12 +446,13 @@ def main(argv=None):
         print(f"context-watch: cannot load {HOOK}: {e}", file=sys.stderr)
         return 0
     settings = read_settings()
+    nudge_state = load_nudge_state()
 
     rows = None
     if args.source in ("auto", "paseo"):
         agents, why = paseo_agents()
         if agents is not None:
-            rows = paseo_rows(settings, agents)
+            rows = paseo_rows(settings, agents, nudge_state)
         elif args.source == "paseo":
             print(f"context-watch: {why}", file=sys.stderr)
             rows = []
@@ -369,10 +460,14 @@ def main(argv=None):
             print(f"context-watch: {why}; using transcripts modified in the last "
                   f"{args.recent_minutes:g} min", file=sys.stderr)
     if rows is None:
-        rows = recent_rows(settings, args.recent_minutes)
+        rows = recent_rows(settings, args.recent_minutes, nudge_state)
 
     if args.min_pct is not None:  # the unrounded share: 49.96% is not "50"
         rows = [r for r in rows if r["tokens"] is not None and 100 * r["tokens"] / r["ceiling"] >= args.min_pct]
+    if args.min_band is not None:
+        floor = BAND_ORDER.index(args.min_band)
+        rows = [r for r in rows if r.get("nudge_band") in BAND_ORDER
+                and BAND_ORDER.index(r["nudge_band"]) >= floor]
     rows.sort(key=lambda r: (r["pct"] is None, -(r["pct"] or 0), r["id"]))
 
     if args.json:
