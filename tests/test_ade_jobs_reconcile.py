@@ -45,6 +45,7 @@ def fake(tmp_path):
         **os.environ,
         "HOME": str(tmp_path / "home"),
         "USER": "tester",
+        "ADE_TIMEZONE": "America/New_York",
         "ADE_SCHED_SYSTEMCTL": str(b / "systemctl"),
         "ADE_SCHED_LOGINCTL": str(b / "loginctl"),
         "ADE_SCHED_CRONTAB": str(b / "crontab"),
@@ -134,6 +135,10 @@ owner = "djbclark-ade"
 class = "hard"
 label = "context-budget"
 mode = "auto"
+schedule = "50 3 * * *"
+provider = "claude/test-model"
+cwd = "__ADE__"
+prompt = "Run __ADE__/bin/context-budget-check --instruction-lint. Report only."
 
 [[install.jobs]]
 name = "dep-svc"
@@ -219,7 +224,7 @@ def test_plan_never_unloads_foreign_or_unledgered_retired(fake, tmp_path):
     by = {(s.name, s.action): s for s in steps}
     assert ("deadline-sweep", "install") in by and by[("deadline-sweep", "install")].touch
     assert ("planned-job", "planned") in by
-    assert ("context-budget", "report") in by  # paseo later
+    assert ("context-budget", "install") in by and by[("context-budget", "install")].touch
     assert ("dep-svc", "report") in by
     # Retired live without ledger ownership: report only.
     assert any(s.category == "retired" and s.action == "report" and not s.touch for s in steps)
@@ -602,6 +607,364 @@ def test_cli_refuse_yes_and_dry_run(fake, tmp_path):
     proc = _run_sched("reconcile", "--yes", "--dry-run", env=fake.env, root=root)
     assert proc.returncode == 2
     assert "refuse both" in proc.stderr
+
+
+def _fake_paseo_run(store: Path):
+    """Injectable paseo CLI: schedule ls/create/delete mutate a tmp JSON list of names."""
+
+    def run(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        assert argv and argv[0] == "paseo"
+        names: list[str] = []
+        if store.is_file():
+            names = json.loads(store.read_text(encoding="utf-8"))
+        if argv[1:4] == ["schedule", "ls", "--json"]:
+            body = json.dumps([{"name": n} for n in names])
+            return subprocess.CompletedProcess(argv, 0, body, "")
+        if argv[1:3] == ["schedule", "create"]:
+            # --name LABEL somewhere before the prompt positional
+            try:
+                ni = argv.index("--name")
+                label = argv[ni + 1]
+            except (ValueError, IndexError):
+                return subprocess.CompletedProcess(argv, 2, "", "missing --name")
+            if "--mode" not in argv:
+                return subprocess.CompletedProcess(argv, 2, "", "missing --mode")
+            if label not in names:
+                names.append(label)
+                store.write_text(json.dumps(names), encoding="utf-8")
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        if argv[1:3] == ["schedule", "delete"]:
+            try:
+                ni = argv.index("--name")
+                label = argv[ni + 1]
+            except (ValueError, IndexError):
+                return subprocess.CompletedProcess(argv, 2, "", "missing --name")
+            names = [n for n in names if n != label]
+            store.write_text(json.dumps(names), encoding="utf-8")
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        return subprocess.CompletedProcess(argv, 2, "", f"unexpected {argv}")
+
+    return run
+
+
+def test_paseo_create_argv_shape_and_timezone_refuse(fake, tmp_path):
+    root = _mini_catalog(tmp_path)
+    catalog = ai.load_catalog(root=root)
+    row = next(j for j in catalog.jobs if j["name"] == "context-budget")
+    argv = S.paseo_schedule_create_argv(row, ade=root, env=fake.env)
+    assert argv[:3] == ["paseo", "schedule", "create"]
+    assert "--cron" in argv and argv[argv.index("--cron") + 1] == "50 3 * * *"
+    assert "--timezone" in argv and argv[argv.index("--timezone") + 1] == "America/New_York"
+    assert "--name" in argv and argv[argv.index("--name") + 1] == "context-budget"
+    assert "--mode" in argv and argv[argv.index("--mode") + 1] == "auto"
+    assert "--provider" in argv and argv[argv.index("--provider") + 1] == "claude/test-model"
+    assert "--cwd" in argv and argv[argv.index("--cwd") + 1] == str(root.resolve())
+    assert argv[-1].startswith("Run ") and "context-budget-check" in argv[-1]
+    assert S.paseo_schedule_delete_argv("context-budget") == [
+        "paseo", "schedule", "delete", "--name", "context-budget",
+    ]
+    env_no_tz = {k: v for k, v in fake.env.items() if k != "ADE_TIMEZONE"}
+    with pytest.raises(S.SchedError, match="timezone"):
+        S.paseo_schedule_create_argv(row, ade=root, env=env_no_tz)
+
+
+def test_paseo_missing_mode_blocked(fake, tmp_path):
+    root = _mini_catalog(tmp_path)
+    catalog = ai.load_catalog(root=root)
+    jobs = []
+    for j in catalog.jobs:
+        if j["name"] == "context-budget":
+            j = dict(j)
+            j.pop("mode", None)
+        jobs.append(j)
+    steps = S.plan_reconcile(
+        jobs,
+        catalog.retired_jobs,
+        ledger=S.empty_jobs_ledger(env=fake.env),
+        live=S.LiveScan("systemd", ()),
+        backend_name="systemd",
+        root=root,
+        ade=root,
+        env=fake.env,
+        names={"context-budget"},
+        platform_name="linux",
+    )
+    assert any(s.action == "blocked" and s.name == "context-budget" and "--mode" in s.detail for s in steps)
+
+
+def test_paseo_reconcile_creates_and_ledgers(fake, tmp_path):
+    root = _mini_catalog(tmp_path)
+    catalog = ai.load_catalog(root=root)
+    store = tmp_path / "paseo-schedules.json"
+    store.write_text("[]", encoding="utf-8")
+    run = _fake_paseo_run(store)
+    results, rc = S.reconcile(
+        catalog.jobs,
+        catalog.retired_jobs,
+        dry_run=False,
+        backend="systemd",
+        root=root,
+        ade=root,
+        env=fake.env,
+        state_dir=fake.state,
+        names={"context-budget"},
+        live=S.LiveScan("systemd", ()),
+        platform_name="linux",
+        paseo_run=run,
+    )
+    assert rc == 0, results
+    assert any(r["action"] == "installed" and r["name"] == "context-budget" for r in results)
+    assert "context-budget" in json.loads(store.read_text(encoding="utf-8"))
+    entry = S.load_jobs_ledger(fake.state, env=fake.env)["entries"]["context-budget"]
+    assert entry["backend"] == "paseo"
+    assert entry["status"] == "committed"
+    assert entry["label"] == "context-budget"
+
+    # Idempotent: live + ledger → skip (no second create).
+    live = S.LiveScan(
+        "systemd",
+        (S.LiveJob("context-budget", "paseo", "paseo", True),),
+    )
+    results2, rc2 = S.reconcile(
+        catalog.jobs,
+        catalog.retired_jobs,
+        dry_run=False,
+        backend="systemd",
+        root=root,
+        ade=root,
+        env=fake.env,
+        state_dir=fake.state,
+        names={"context-budget"},
+        live=live,
+        platform_name="linux",
+        paseo_run=run,
+    )
+    assert rc2 == 0, results2
+    assert any(r["action"] == "skip" and r["name"] == "context-budget" for r in results2)
+
+
+def test_paseo_adopt_ledger_without_create(fake, tmp_path):
+    root = _mini_catalog(tmp_path)
+    catalog = ai.load_catalog(root=root)
+    store = tmp_path / "paseo-schedules.json"
+    store.write_text(json.dumps(["context-budget"]), encoding="utf-8")
+    run = _fake_paseo_run(store)
+    results, rc = S.reconcile(
+        catalog.jobs,
+        catalog.retired_jobs,
+        dry_run=False,
+        backend="systemd",
+        root=root,
+        ade=root,
+        env=fake.env,
+        state_dir=fake.state,
+        names={"context-budget"},
+        live=S.LiveScan(
+            "systemd",
+            (S.LiveJob("context-budget", "paseo", "paseo", True),),
+        ),
+        platform_name="linux",
+        paseo_run=run,
+    )
+    assert rc == 0, results
+    assert any(r["action"] == "adopted" and r["name"] == "context-budget" for r in results)
+    assert json.loads(store.read_text(encoding="utf-8")) == ["context-budget"]
+    entry = S.load_jobs_ledger(fake.state, env=fake.env)["entries"]["context-budget"]
+    assert entry["backend"] == "paseo" and entry["status"] == "committed"
+
+
+def test_paseo_remove_ledger_owned_never_foreign(fake, tmp_path):
+    root = _mini_catalog(tmp_path)
+    catalog = ai.load_catalog(root=root)
+    store = tmp_path / "paseo-schedules.json"
+    store.write_text(json.dumps(["context-budget", "mystery-agent"]), encoding="utf-8")
+    run = _fake_paseo_run(store)
+    # Drop context-budget from expected inventory so ledger-owned remove fires.
+    jobs = [j for j in catalog.jobs if j["name"] != "context-budget"]
+    ledger = S.empty_jobs_ledger(env=fake.env)
+    ledger["generation"] = 1
+    ledger["entries"]["context-budget"] = {
+        "logical_id": "context-budget",
+        "label": "context-budget",
+        "owner": "djbclark-ade",
+        "backend": "paseo",
+        "scope": "user",
+        "paths": ["paseo-schedule:context-budget"],
+        "artifact_hash": "deadbeef",
+        "generation": 1,
+        "status": "committed",
+    }
+    S.save_jobs_ledger(ledger, fake.state, env=fake.env)
+    live = S.LiveScan(
+        "systemd",
+        (
+            S.LiveJob("context-budget", "paseo", "paseo", True),
+            S.LiveJob("mystery-agent", "paseo", "paseo", True),
+        ),
+    )
+    results, rc = S.reconcile(
+        jobs,
+        catalog.retired_jobs,
+        dry_run=False,
+        backend="systemd",
+        root=root,
+        ade=root,
+        env=fake.env,
+        state_dir=fake.state,
+        names={"context-budget"},
+        live=live,
+        platform_name="linux",
+        paseo_run=run,
+    )
+    assert rc == 0, results
+    assert any(r["action"] == "removed" and r["name"] == "context-budget" for r in results)
+    assert "context-budget" not in S.load_jobs_ledger(fake.state, env=fake.env)["entries"]
+    assert json.loads(store.read_text(encoding="utf-8")) == ["mystery-agent"]
+
+    # Foreign live paseo without ledger: report only (never delete) when in plan scope.
+    steps = S.plan_reconcile(
+        jobs,
+        catalog.retired_jobs,
+        ledger=S.empty_jobs_ledger(env=fake.env),
+        live=live,
+        backend_name="systemd",
+        root=root,
+        ade=root,
+        env=fake.env,
+        platform_name="linux",
+    )
+    assert not any(s.action == "remove" and s.label == "mystery-agent" for s in steps)
+
+
+def test_paseo_yes_works_on_launchd_host_backend(fake, tmp_path):
+    """Paseo writes are orthogonal: --yes on launchd may still create paseo schedules."""
+    root = _mini_catalog(tmp_path)
+    catalog = ai.load_catalog(root=root)
+    store = tmp_path / "paseo-schedules.json"
+    store.write_text("[]", encoding="utf-8")
+    run = _fake_paseo_run(store)
+    results, rc = S.reconcile(
+        catalog.jobs,
+        catalog.retired_jobs,
+        dry_run=False,
+        backend="launchd",
+        root=root,
+        ade=root,
+        env=fake.env,
+        state_dir=fake.state,
+        names={"context-budget"},
+        live=S.LiveScan("launchd", ()),
+        platform_name="mac",
+        paseo_run=run,
+    )
+    assert rc == 0, results
+    assert any(r["action"] == "installed" and r["name"] == "context-budget" for r in results)
+    assert S.load_jobs_ledger(fake.state, env=fake.env)["entries"]["context-budget"]["backend"] == "paseo"
+
+    # Idempotent second pass: skip must not exit 2 (Codex P2 on #513).
+    live = S.LiveScan(
+        "launchd",
+        (S.LiveJob("context-budget", "paseo", "paseo", True),),
+    )
+    results2, rc2 = S.reconcile(
+        catalog.jobs,
+        catalog.retired_jobs,
+        dry_run=False,
+        backend="launchd",
+        root=root,
+        ade=root,
+        env=fake.env,
+        state_dir=fake.state,
+        names={"context-budget"},
+        live=live,
+        platform_name="mac",
+        paseo_run=run,
+    )
+    assert rc2 == 0, results2
+    assert any(r["action"] == "skip" and r["name"] == "context-budget" for r in results2)
+
+
+def test_paseo_yes_mixed_with_host_refuse_exits_2(fake, tmp_path):
+    """Paseo create on launchd plus planned host refuse still exits 2 (Codex P2 on #513)."""
+    root = _mini_catalog(tmp_path)
+    catalog = ai.load_catalog(root=root)
+    store = tmp_path / "paseo-schedules.json"
+    store.write_text("[]", encoding="utf-8")
+    run = _fake_paseo_run(store)
+    results, rc = S.reconcile(
+        catalog.jobs,
+        catalog.retired_jobs,
+        dry_run=False,
+        backend="launchd",
+        root=root,
+        ade=root,
+        env=fake.env,
+        state_dir=fake.state,
+        names={"context-budget", "deadline-sweep"},
+        live=S.LiveScan("launchd", ()),
+        platform_name="mac",
+        paseo_run=run,
+    )
+    assert rc == S.EX_USAGE, results
+    assert any(r["action"] == "installed" and r["name"] == "context-budget" for r in results)
+    assert any(r["action"] == "refuse-backend" and r["name"] == "deadline-sweep" for r in results)
+    assert any(r["action"] == "refuse-backend" and r.get("ok") is False for r in results)
+
+
+def test_paseo_delete_readback_probe_failure_keeps_ledger(fake, tmp_path):
+    """Failed post-delete ls must not clear ownership (Codex P2 on #513)."""
+    root = _mini_catalog(tmp_path)
+    catalog = ai.load_catalog(root=root)
+    store = tmp_path / "paseo-schedules.json"
+    store.write_text(json.dumps(["context-budget"]), encoding="utf-8")
+    base = _fake_paseo_run(store)
+    jobs = [j for j in catalog.jobs if j["name"] != "context-budget"]
+    ledger = S.empty_jobs_ledger(env=fake.env)
+    ledger["generation"] = 1
+    ledger["entries"]["context-budget"] = {
+        "logical_id": "context-budget",
+        "label": "context-budget",
+        "owner": "djbclark-ade",
+        "backend": "paseo",
+        "scope": "user",
+        "paths": ["paseo-schedule:context-budget"],
+        "artifact_hash": "deadbeef",
+        "generation": 1,
+        "status": "committed",
+    }
+    S.save_jobs_ledger(ledger, fake.state, env=fake.env)
+
+    def run_fail_after_delete(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        if argv[1:3] == ["schedule", "delete"]:
+            return base(argv)
+        if argv[1:4] == ["schedule", "ls", "--json"]:
+            names = json.loads(store.read_text(encoding="utf-8")) if store.is_file() else []
+            if "context-budget" not in names:
+                return subprocess.CompletedProcess(argv, 1, "", "ls failed")
+        return base(argv)
+
+    results, rc = S.reconcile(
+        jobs,
+        catalog.retired_jobs,
+        dry_run=False,
+        backend="systemd",
+        root=root,
+        ade=root,
+        env=fake.env,
+        state_dir=fake.state,
+        names={"context-budget"},
+        live=S.LiveScan(
+            "systemd",
+            (S.LiveJob("context-budget", "paseo", "paseo", True),),
+        ),
+        platform_name="linux",
+        paseo_run=run_fail_after_delete,
+    )
+    assert rc == 1, results
+    assert any(r["action"] == "failed" and r["name"] == "context-budget" for r in results)
+    entry = S.load_jobs_ledger(fake.state, env=fake.env)["entries"]["context-budget"]
+    assert entry["status"] == "failed"
+    assert "ls failed" in entry.get("detail", "")
 
 
 def test_plan_activates_inactive_timer_even_when_hashes_match(fake, tmp_path):

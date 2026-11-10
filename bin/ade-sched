@@ -9,7 +9,7 @@ usage:
   ade-sched [options] status [LABEL...]     installed / active / next run; no LABEL: every job ade-sched generated
   ade-sched [options] list                  print install.jobs / install.retired_jobs from the install catalog
   ade-sched [options] diff                  compare the catalog to live launchd/systemd/cron/paseo (report only)
-  ade-sched [options] reconcile             ADE-owned systemd reconcile + ownership ledger (S4b; default dry-run)
+  ade-sched [options] reconcile             ADE-owned systemd/cron/paseo reconcile + ownership ledger (S4b; default dry-run)
 
 options (before or after the subcommand):
   --backend auto|launchd|systemd|cron   default auto (env ADE_SCHED_BACKEND; `none` there turns scheduling off, exit 69)
@@ -19,7 +19,7 @@ options (before or after the subcommand):
   --set KEY=VALUE       fill a placeholder, literally as written in the plist (__STATE__=..., @TARGET@=...); repeatable
   --dry-run             install/uninstall: print the artifacts and commands, change nothing;
                         reconcile: plan only (default for reconcile when --yes is absent)
-  --yes                 reconcile: execute ADE-scoped systemd installs/removes and write jobs.json
+  --yes                 reconcile: execute ADE-scoped systemd/cron installs/removes and paseo schedule create/delete; write jobs.json
   --name NAME           reconcile: limit to these logical job names (repeatable)
   --no-activate         install/uninstall/reconcile: write or remove the files, print the activation commands instead of running them
   --allow-no-linger     systemd install/reconcile: proceed when loginctl says Linger=no (default: exit 69 before writing, because

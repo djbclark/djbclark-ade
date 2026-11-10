@@ -841,9 +841,13 @@ class = "hard"
 label = "context-budget"
 schedule = "50 3 * * *"
 mode = "auto"
+# timezone from ADE_TIMEZONE when unset (reconcile refuses create if still missing).
+provider = "claude/sonnet"
+cwd = "__ADE__"
+prompt = "Run __ADE__/bin/context-budget-check --instruction-lint. Report its exit code and output in one paragraph; change nothing. Exit 1 is a budget breach or a rise, 3 a directory it could not measure."
 command = "bin/context-budget-check --instruction-lint (Paseo schedule; see docs/scheduling.md)"
 platforms = ["mac", "linux"]
-notes = "C69; explicit --mode auto required on create."
+notes = "C69; explicit --mode auto required on create; S4b reconcile create/delete via paseo schedule."
 
 [[install.jobs]]
 name = "routing-recalibrate"
