@@ -504,6 +504,13 @@ not been measured on our own traffic is a false sense of security, not a gate.
 3. **New repositories:** the check lists repositories with no `[hardening]` entry, so a new repository is caught on its
    first day.
 
+4. **Shipped 2026-11-10 (observe-only unit):** transitional `config/hardening.toml` +
+   `bin/ade-harden` (`check` / `observe`) and `just harden-check` / `harden-check-local`.
+   Gh read-back for configured repos, user interaction limits, and owner inventory;
+   print-only remediation hints. **No** live ruleset writes, **no** interaction-limit
+   auto-renew, **no** `apply --yes`. Daily sched/CI ping, Forgejo, and S5a canary remain
+   follow-ups. Detail: [harden-check.md](harden-check.md).
+
 ## S7. Browser-only steps through Grok Bot
 
 Some steps have no API: creating the `ade-merge-gate` App (the manifest flow can pre-fill it, but a person or a browser

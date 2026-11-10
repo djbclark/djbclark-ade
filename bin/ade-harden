@@ -1,0 +1,167 @@
+#!/usr/bin/env -S python3 -I
+"""ade-harden: observe-only GitHub hardening drift check (setup-plan S6).
+
+  ade-harden check [--root DIR] [--json]
+  ade-harden observe [--root DIR] [--json] [--local]
+  ade-harden apply …          # refused (observe-only unit)
+
+Check validates config/hardening.toml. Observe reads every configured
+[hardening] setting back via gh api and exits nonzero on drift, naming
+target, setting, wanted, and found. Never writes rulesets, never renews
+interaction limits. See docs/harden-check.md.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+BIN = Path(__file__).resolve().parent
+if str(BIN) not in sys.path:
+    sys.path.insert(0, str(BIN))
+
+import ade_harden as ah  # noqa: E402
+
+
+def _print_json(obj: object) -> None:
+    json.dump(obj, sys.stdout, indent=2, sort_keys=True, default=str)
+    sys.stdout.write("\n")
+
+
+def cmd_check(args: argparse.Namespace) -> int:
+    try:
+        cfg = ah.load_config(root=Path(args.root) if args.root else None)
+    except ah.HardenError as e:
+        if args.json:
+            _print_json({"ok": False, "errors": [str(e)]})
+        else:
+            print(str(e), file=sys.stderr)
+            print("ade-harden check: FAIL", file=sys.stderr)
+        return 1
+    summary = ah.config_summary(cfg)
+    if args.json:
+        _print_json({"ok": True, "summary": summary})
+    else:
+        print("ade-harden check: OK")
+        print(f"  path={summary['path']}")
+        print(f"  owners={','.join(summary['owners']) or '(none)'}")
+        print(f"  repos={','.join(summary['repos']) or '(none)'}")
+        print(f"  api_version={summary['api_version']}")
+    return 0
+
+
+def cmd_observe(args: argparse.Namespace) -> int:
+    try:
+        cfg = ah.load_config(root=Path(args.root) if args.root else None)
+        findings, rc = ah.observe(cfg, network=not args.local)
+    except ah.HardenError as e:
+        if args.json:
+            _print_json({"ok": False, "errors": [str(e)]})
+        else:
+            print(str(e), file=sys.stderr)
+            print("ade-harden observe: FAIL", file=sys.stderr)
+        return 1
+    if args.json:
+        _print_json(
+            {
+                "ok": rc == 0,
+                "local_only": bool(args.local),
+                "observe_only": True,
+                "writes": False,
+                "auto_reapply": False,
+                "findings": [f.as_dict() for f in findings],
+            }
+        )
+    else:
+        mode = "local" if args.local else "network"
+        print(
+            "ade-harden observe: "
+            + ("OK" if rc == 0 else "DRIFT")
+            + f" ({mode}; observe-only; no ruleset writes; no auto-reapply)"
+        )
+        for f in findings:
+            line = (
+                f"  {f.status:10} {f.target} {f.setting}: "
+                f"wanted={f.wanted!r} found={f.found!r}"
+            )
+            if f.detail:
+                line += f" — {f.detail}"
+            print(line)
+            if f.remediation and f.status in {"drift", "missing", "uncovered"}:
+                print(f"             remediation: {f.remediation}")
+    return rc
+
+
+def cmd_apply(_args: argparse.Namespace) -> int:
+    print(str(ah.apply_refused()), file=sys.stderr)
+    print("ade-harden apply: REFUSED", file=sys.stderr)
+    return 2
+
+
+def main(argv: list[str] | None = None) -> int:
+    raw = list(sys.argv[1:] if argv is None else argv)
+    try:
+        # Refuse mutate tokens even before subparser (e.g. stray --yes).
+        if any(
+            t in {"--yes", "--write", "--reapply", "--renew"}
+            or t.startswith(("--yes=", "--write=", "--reapply=", "--renew="))
+            for t in raw
+        ):
+            ah.refuse_mutate_argv(raw)
+    except ah.HardenError as e:
+        print(str(e), file=sys.stderr)
+        return 2
+
+    shared = argparse.ArgumentParser(add_help=False)
+    shared.add_argument(
+        "--root",
+        default=argparse.SUPPRESS,
+        help="repository root; before/after command, last explicit wins",
+    )
+    parser = argparse.ArgumentParser(
+        prog="ade-harden",
+        description=(
+            "GitHub hardening drift observer (setup-plan S6). "
+            "Observe-only: no live writes, no auto-reapply."
+        ),
+        parents=[shared],
+    )
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    for name, func, help_text in (
+        ("check", cmd_check, "validate config/hardening.toml"),
+        (
+            "observe",
+            cmd_observe,
+            "gh read-back of [hardening]; exit 1 on drift; never repairs",
+        ),
+    ):
+        p = sub.add_parser(name, parents=[shared], help=help_text)
+        p.add_argument("--json", action="store_true")
+        if name == "observe":
+            p.add_argument(
+                "--local",
+                action="store_true",
+                help="skip gh network probes (config only)",
+            )
+        p.set_defaults(func=func)
+
+    # Listed so `ade-harden apply --help` explains the refusal; always exit 2.
+    ap = sub.add_parser(
+        "apply",
+        parents=[shared],
+        help="refused in this unit (observe-only harden-check)",
+    )
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument("--yes", action="store_true", help="refused")
+    ap.add_argument("--dry-run", action="store_true", help="ignored; apply refused")
+    ap.set_defaults(func=cmd_apply)
+
+    args = parser.parse_args(raw)
+    args.root = getattr(args, "root", None)
+    return int(args.func(args))
+
+
+if __name__ == "__main__":
+    sys.exit(main())
