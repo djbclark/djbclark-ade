@@ -368,7 +368,6 @@ def test_selected_legacy_defaults_parity(home, synthetic_root, tmp_path, lead):
         assert 'fable_lead' not in eff.data['lead']
 
 
-
 @pytest.mark.parametrize("effort", ["xhigh", "max"])
 def test_lead_effort_accepts_xhigh_and_max(home, synthetic_root, tmp_path, effort):
     """Queue item 32: pin that [lead] effort accepts Paseo CLAUDE_EFFORT_LEVELS xhigh/max."""
