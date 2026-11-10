@@ -28,12 +28,28 @@ def fake(tmp_path):
     b = tmp_path / "fakebin"
     b.mkdir()
     log = tmp_path / "calls.log"
+    loaded = tmp_path / "launchd-loaded"
+    loaded.mkdir()
     _script(
         b / "launchctl",
         f'echo "launchctl $*" >> "{log}"\n'
-        'if [ "$1" = bootstrap ] && [ -n "$FAKE_BOOTSTRAP_FAIL" ]; then '
+        f'LOADED="{loaded}"\n'
+        'if [ "$1" = bootstrap ]; then\n'
+        '  if [ -n "$FAKE_BOOTSTRAP_FAIL" ]; then '
         'echo "Bootstrap failed: 5: Input/output error" >&2; exit 5; fi\n'
-        'if [ "$1" = print ]; then exit "${FAKE_PRINT_RC:-0}"; fi\n'
+        '  # bootstrap gui/UID PATH → mark basename(PATH) loaded (strip .plist)\n'
+        '  base=$(basename "$3" .plist); touch "$LOADED/$base"; exit 0\n'
+        'fi\n'
+        'if [ "$1" = bootout ]; then\n'
+        '  # bootout gui/UID/LABEL\n'
+        '  lab="${2##*/}"; rm -f "$LOADED/$lab"; exit 0\n'
+        'fi\n'
+        'if [ "$1" = print ]; then\n'
+        '  if [ -n "$FAKE_PRINT_RC" ]; then exit "$FAKE_PRINT_RC"; fi\n'
+        '  lab="${2##*/}"\n'
+        '  if [ -f "$LOADED/$lab" ]; then exit 0; fi\n'
+        '  exit 1\n'
+        'fi\n'
         "exit 0\n",
     )
     _script(
@@ -511,6 +527,8 @@ def test_yes_on_launchd_removes_ledger_owned(fake, tmp_path):
         "</dict></plist>\n",
         encoding="utf-8",
     )
+    # Mark loaded so bootout has something to clear (Codex P2 unload verify).
+    (tmp_path / "launchd-loaded" / label).write_text("")
     ledger = S.empty_jobs_ledger(env=fake.env)
     ledger["generation"] = 1
     ledger["entries"]["skillopt-sleep"] = {
@@ -543,6 +561,103 @@ def test_yes_on_launchd_removes_ledger_owned(fake, tmp_path):
     assert any(r["action"] == "removed" and r["name"] == "skillopt-sleep" for r in results)
     assert "skillopt-sleep" not in S.load_jobs_ledger(fake.state, env=fake.env)["entries"]
     assert not plist.exists()
+
+
+def test_launchd_plan_loads_when_plist_matches_but_unloaded(fake, tmp_path):
+    """Matching plist that is not loaded must install/load, not skip (Codex P2 on #514)."""
+    root = _mini_catalog(tmp_path)
+    catalog = ai.load_catalog(root=root)
+    # Install once (loads), then unload while leaving the plist + ledger.
+    results, rc = S.reconcile(
+        catalog.jobs,
+        catalog.retired_jobs,
+        dry_run=False,
+        backend="launchd",
+        root=root,
+        ade=root,
+        env=fake.env,
+        state_dir=fake.state,
+        names={"deadline-sweep"},
+        live=S.LiveScan("launchd", ()),
+        platform_name="mac",
+    )
+    assert rc == 0, results
+    label = "com.djbclark.deadline-sweep"
+    loaded = tmp_path / "launchd-loaded" / label
+    assert loaded.is_file()
+    loaded.unlink()
+    assert S.status(label, "launchd", env=fake.env).active is False
+
+    steps = S.plan_reconcile(
+        catalog.jobs,
+        catalog.retired_jobs,
+        ledger=S.load_jobs_ledger(fake.state, env=fake.env),
+        live=S.LiveScan("launchd", ()),
+        backend_name="launchd",
+        root=root,
+        ade=root,
+        env=fake.env,
+        names={"deadline-sweep"},
+        platform_name="mac",
+    )
+    assert any(
+        s.action == "install" and s.name == "deadline-sweep" and "load inactive" in s.detail
+        for s in steps
+    )
+
+
+def test_launchd_remove_keeps_ledger_when_still_loaded(fake, tmp_path):
+    """Failed unload (still loaded) must not clear ownership (Codex P2 on #514)."""
+    root = _mini_catalog(tmp_path)
+    catalog = ai.load_catalog(root=root)
+    label = "com.djbclark.skillopt-sleep"
+    plist = fake.agents / f"{label}.plist"
+    plist.write_text(
+        f"# {S.GENERATED} from retired\n"
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        "<plist version=\"1.0\"><dict>"
+        f"<key>Label</key><string>{label}</string>"
+        "<key>ProgramArguments</key><array><string>/bin/true</string></array>"
+        "</dict></plist>\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "launchd-loaded" / label).write_text("")
+    # Force print to keep reporting loaded even after bootout.
+    env = {**fake.env, "FAKE_PRINT_RC": "0"}
+    ledger = S.empty_jobs_ledger(env=env)
+    ledger["generation"] = 1
+    ledger["entries"]["skillopt-sleep"] = {
+        "logical_id": "skillopt-sleep",
+        "label": label,
+        "owner": "djbclark-ade",
+        "backend": "launchd",
+        "scope": "user",
+        "paths": [str(plist)],
+        "artifact_hash": "deadbeef",
+        "generation": 1,
+        "status": "committed",
+    }
+    S.save_jobs_ledger(ledger, fake.state, env=env)
+
+    results, rc = S.reconcile(
+        catalog.jobs,
+        catalog.retired_jobs,
+        dry_run=False,
+        backend="launchd",
+        root=root,
+        ade=root,
+        env=env,
+        state_dir=fake.state,
+        names={"skillopt-sleep"},
+        live=S.LiveScan("launchd", (S.LiveJob(label, "launchd", "generated", True),)),
+        platform_name="mac",
+    )
+    assert rc == 1, results
+    assert any(r["action"] == "failed" and r["name"] == "skillopt-sleep" for r in results)
+    entry = S.load_jobs_ledger(fake.state, env=env)["entries"]["skillopt-sleep"]
+    assert entry["status"] == "failed"
+    assert "still loaded" in entry.get("detail", "")
+    assert plist.is_file()  # uninstall refuses to unlink while loaded
 
 
 def _cron_store_scripts(tmp_path: Path, log: Path) -> Path:
