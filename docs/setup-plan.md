@@ -150,7 +150,7 @@ and security sequencing in the older plan; other unfinished planning stays intac
       - the ChatGPT plan behind Codex;
       - Cursor, which also bills Grok Bot;
       - the Google AI plan behind the antigravity provider;
-      - opencode Go;
+      - OpenCode Go subscription credits when accepted through Pi (the OpenCode TUI itself is archived; do not install it);
       - the Z.ai coding plan;
       - ClinePass.
 
@@ -214,7 +214,7 @@ Keys are saved with `sudo-secretspec`, and also through Paseo if it has a secure
    - `agents/*/*.tmpl` `{{ secret "…" }}`: `EXA_API_KEY`, `JINA_API_KEY`, the Hermes and LiteLLM entries;
    - site-djbclark `human/API-KEYS-E4.md`: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`,
      `OPENROUTER_API_KEY`, `DEEPSEEK_API_KEY`, `TELEGRAM_BOT_TOKEN`, which `sudo-secretspec run` itself requires;
-   - the tools: `ZAI_CODING_PLAN_API_KEY` (Pi), the OpenCode Go service keys (`skills/oc-go-key`), `CURSOR_API_KEY`
+   - the tools: `ZAI_CODING_PLAN_API_KEY` (Pi), the OpenCode Go service keys when that pool is still recovered via `skills/oc-go-key` (OpenCode TUI archived), `CURSOR_API_KEY`
      (`bin/cursor-cloud`), `FIRECRAWL_GITHUB_PUBLIC_TOKEN` (the router; it expires), `GREPTILE_API_KEY`, CodeRabbit's,
      hosted firecrawl's, and the merge-gate App's private key (S8; stored in GitHub, not locally).
 
