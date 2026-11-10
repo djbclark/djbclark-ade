@@ -2289,8 +2289,8 @@ def reconcile(
     writes remain later.
 
     Exit 0 when the plan is clean (dry-run) or every touch succeeded; 1 on a failed
-    mutation or blocked step; 2 when ``--yes`` is asked for host writes on a
-    non-write backend (launchd today) with no paseo touches to run.
+    mutation or blocked step; 2 when ``--yes`` refuses host writes on a non-write
+    backend (planned ``refuse-backend`` counted even alongside paseo work).
     """
     out = out or sys.stdout
     err = err or sys.stderr
@@ -2359,27 +2359,11 @@ def reconcile(
         rc = 1 if any(r["action"] == "blocked" for r in results) else 0
         return results, rc
 
-    # --yes path
+    # --yes path. Host writes are refused per planned refuse-backend / touch steps when the
+    # host backend is not in RECONCILE_WRITE_BACKENDS; paseo touches remain orthogonal.
+    # Do not blanket-refuse when the plan is already clean (skip/report only): that made
+    # idempotent paseo --yes on launchd exit 2 (Codex P2 on #513).
     write_ok = b.name in RECONCILE_WRITE_BACKENDS
-    paseo_touches = [s for s in steps if s.touch and _step_targets_paseo(s)]
-    # Host ade-sched writes may already be planned as refuse-backend (touch=False) when
-    # the host backend is not writable; without paseo work, keep the launchd blanket refuse.
-    if not write_ok and not paseo_touches:
-        for step in steps:
-            results.append({
-                "name": step.name,
-                "action": "refuse-backend",
-                "owner": step.owner,
-                "label": step.label,
-                "detail": step.detail or (
-                    f"reconcile write backends are {sorted(RECONCILE_WRITE_BACKENDS)}; "
-                    f"backend={b.name}"
-                ),
-                "category": step.category,
-                "touch": False,
-                "ok": False,
-            })
-        return results, EX_USAGE
 
     failed = 0
     refused_host = 0
@@ -2425,6 +2409,11 @@ def reconcile(
                 if step.action == "blocked":
                     row["ok"] = False
                     failed += 1
+                elif step.action == "refuse-backend":
+                    # Planned host refuse (touch=False): still exit 2 when mixed with paseo
+                    # work (Codex P2 on #513).
+                    row["ok"] = False
+                    refused_host += 1
                 results.append(row)
                 continue
 
@@ -2558,7 +2547,12 @@ def reconcile(
                         if proc.returncode != 0:
                             detail = (proc.stderr or proc.stdout or "").strip() or f"rc={proc.returncode}"
                             raise SchedError(EX_ACTIVATE, f"paseo schedule create failed: {detail}")
-                        live_jobs, _notes = paseo_schedule_names(run=run_paseo)
+                        live_jobs, ls_notes = paseo_schedule_names(run=run_paseo)
+                        if ls_notes:
+                            raise SchedError(
+                                EX_ACTIVATE,
+                                f"read-back: paseo schedule ls failed after create: {ls_notes[0]}",
+                            )
                         if label not in {lj.id for lj in live_jobs}:
                             raise SchedError(EX_ACTIVATE, f"read-back: paseo schedule {label} not listed after create")
                     except SchedError as e:
@@ -2781,7 +2775,12 @@ def reconcile(
                         if proc.returncode != 0:
                             detail = (proc.stderr or proc.stdout or "").strip() or f"rc={proc.returncode}"
                             raise SchedError(EX_ACTIVATE, f"paseo schedule delete failed: {detail}")
-                        live_jobs, _notes = paseo_schedule_names(run=run_paseo)
+                        live_jobs, ls_notes = paseo_schedule_names(run=run_paseo)
+                        if ls_notes:
+                            raise SchedError(
+                                EX_ACTIVATE,
+                                f"read-back: paseo schedule ls failed after delete: {ls_notes[0]}",
+                            )
                         if label in {lj.id for lj in live_jobs}:
                             raise SchedError(EX_ACTIVATE, f"read-back: paseo schedule {label} still listed after delete")
                     else:

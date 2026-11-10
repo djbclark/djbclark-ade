@@ -861,6 +861,111 @@ def test_paseo_yes_works_on_launchd_host_backend(fake, tmp_path):
     assert any(r["action"] == "installed" and r["name"] == "context-budget" for r in results)
     assert S.load_jobs_ledger(fake.state, env=fake.env)["entries"]["context-budget"]["backend"] == "paseo"
 
+    # Idempotent second pass: skip must not exit 2 (Codex P2 on #513).
+    live = S.LiveScan(
+        "launchd",
+        (S.LiveJob("context-budget", "paseo", "paseo", True),),
+    )
+    results2, rc2 = S.reconcile(
+        catalog.jobs,
+        catalog.retired_jobs,
+        dry_run=False,
+        backend="launchd",
+        root=root,
+        ade=root,
+        env=fake.env,
+        state_dir=fake.state,
+        names={"context-budget"},
+        live=live,
+        platform_name="mac",
+        paseo_run=run,
+    )
+    assert rc2 == 0, results2
+    assert any(r["action"] == "skip" and r["name"] == "context-budget" for r in results2)
+
+
+def test_paseo_yes_mixed_with_host_refuse_exits_2(fake, tmp_path):
+    """Paseo create on launchd plus planned host refuse still exits 2 (Codex P2 on #513)."""
+    root = _mini_catalog(tmp_path)
+    catalog = ai.load_catalog(root=root)
+    store = tmp_path / "paseo-schedules.json"
+    store.write_text("[]", encoding="utf-8")
+    run = _fake_paseo_run(store)
+    results, rc = S.reconcile(
+        catalog.jobs,
+        catalog.retired_jobs,
+        dry_run=False,
+        backend="launchd",
+        root=root,
+        ade=root,
+        env=fake.env,
+        state_dir=fake.state,
+        names={"context-budget", "deadline-sweep"},
+        live=S.LiveScan("launchd", ()),
+        platform_name="mac",
+        paseo_run=run,
+    )
+    assert rc == S.EX_USAGE, results
+    assert any(r["action"] == "installed" and r["name"] == "context-budget" for r in results)
+    assert any(r["action"] == "refuse-backend" and r["name"] == "deadline-sweep" for r in results)
+    assert any(r["action"] == "refuse-backend" and r.get("ok") is False for r in results)
+
+
+def test_paseo_delete_readback_probe_failure_keeps_ledger(fake, tmp_path):
+    """Failed post-delete ls must not clear ownership (Codex P2 on #513)."""
+    root = _mini_catalog(tmp_path)
+    catalog = ai.load_catalog(root=root)
+    store = tmp_path / "paseo-schedules.json"
+    store.write_text(json.dumps(["context-budget"]), encoding="utf-8")
+    base = _fake_paseo_run(store)
+    jobs = [j for j in catalog.jobs if j["name"] != "context-budget"]
+    ledger = S.empty_jobs_ledger(env=fake.env)
+    ledger["generation"] = 1
+    ledger["entries"]["context-budget"] = {
+        "logical_id": "context-budget",
+        "label": "context-budget",
+        "owner": "djbclark-ade",
+        "backend": "paseo",
+        "scope": "user",
+        "paths": ["paseo-schedule:context-budget"],
+        "artifact_hash": "deadbeef",
+        "generation": 1,
+        "status": "committed",
+    }
+    S.save_jobs_ledger(ledger, fake.state, env=fake.env)
+
+    def run_fail_after_delete(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        if argv[1:3] == ["schedule", "delete"]:
+            return base(argv)
+        if argv[1:4] == ["schedule", "ls", "--json"]:
+            names = json.loads(store.read_text(encoding="utf-8")) if store.is_file() else []
+            if "context-budget" not in names:
+                return subprocess.CompletedProcess(argv, 1, "", "ls failed")
+        return base(argv)
+
+    results, rc = S.reconcile(
+        jobs,
+        catalog.retired_jobs,
+        dry_run=False,
+        backend="systemd",
+        root=root,
+        ade=root,
+        env=fake.env,
+        state_dir=fake.state,
+        names={"context-budget"},
+        live=S.LiveScan(
+            "systemd",
+            (S.LiveJob("context-budget", "paseo", "paseo", True),),
+        ),
+        platform_name="linux",
+        paseo_run=run_fail_after_delete,
+    )
+    assert rc == 1, results
+    assert any(r["action"] == "failed" and r["name"] == "context-budget" for r in results)
+    entry = S.load_jobs_ledger(fake.state, env=fake.env)["entries"]["context-budget"]
+    assert entry["status"] == "failed"
+    assert "ls failed" in entry.get("detail", "")
+
 
 def test_plan_activates_inactive_timer_even_when_hashes_match(fake, tmp_path):
     """P1: matching unit files are not skip/adopt while the timer is inactive."""
