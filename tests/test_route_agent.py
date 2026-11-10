@@ -2620,10 +2620,40 @@ class TestArgonFrontierFallback(unittest.TestCase):
         q.update(codex={"remaining": 0.0}, claude={"remaining": 0.0})
         c = r.route("frontier", quota=q)
         self.assertEqual(
-            (c.service.name, c.dispatch),
+            (c.service.name, c.emit_dispatch(q)),
             ("antigravity-argon",
              "paseo run --provider antigravity/gemini-4-argon --thinking high "
              "--label ade.kind=frontier --no-wait"),
         )
         q.pop("antigravity-argon")
         self.assertIsNone(r.route("frontier", quota=q))          # a fallback with no reading fails closed
+
+    def test_emit_dispatch_refuses_argon_while_primaries_can_take_frontier(self):
+        """Wave 6 native path: emit_dispatch applies fallback_block (shim delete drops the re-check)."""
+        argon = r.BY_NAME["antigravity-argon"]
+        q = {**IDLE, "antigravity-argon": {"remaining": 90.0}}
+        c = r.Choice(argon, 90.0, 5.0, model="gemini-4-argon --effort high", kind="frontier")
+        with self.assertRaises(r.FallbackDispatchRefused) as cm:
+            c.emit_dispatch(q)
+        self.assertIn("fallback behind", str(cm.exception))
+        self.assertIsNotNone(r.fallback_dispatch_refusal(argon, "frontier", q))
+        # route-override skips eligibility only
+        self.assertEqual(
+            c.emit_dispatch(q, approved={"route-override"}),
+            "paseo run --provider antigravity/gemini-4-argon --thinking high "
+            "--label ade.kind=frontier --no-wait",
+        )
+
+    def test_admit_provider_refuses_then_allows_when_a_primary_is_short(self):
+        q = {**IDLE, "antigravity-argon": {"remaining": 90.0}}
+        self.assertIsNotNone(r.admit_provider("antigravity/gemini-4-argon", "frontier", quota=q, fresh=False))
+        q["codex"] = {"remaining": 0.0}
+        self.assertIsNone(r.admit_provider("antigravity/gemini-4-argon", "frontier", quota=q, fresh=False))
+        # a non-fallback provider always admits
+        self.assertIsNone(r.admit_provider("codex/gpt-6-astra", "frontier", quota=IDLE, fresh=False))
+
+    def test_admit_cli_exits_2_when_argon_is_blocked(self):
+        q = {**IDLE, "antigravity-argon": {"remaining": 90.0}}
+        with mock.patch.object(r, "load_snapshot", return_value=(q, 0.0)):
+            rc = r.main(["admit", "--provider", "antigravity/gemini-4-argon", "--kind", "frontier", "--json"])
+        self.assertEqual(rc, 2)

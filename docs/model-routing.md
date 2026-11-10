@@ -14,8 +14,11 @@ A1. `config/routing.toml` (kinds, each pool's ranks per kind and suggested `--mo
 plenty gate, burn-first and pace knobs, the never-route list and aliases, dispatch gates and estimate floors, the lead's
 model) and `config/gates.toml [frontier]` (the frontier allowance, `docs/gates.md`). Print both with
 `bin/route_agent.py policy --md` (or `policy` for JSON); no other file restates them.
-A2. `bin/route_agent.py plan --kinds …` applies them to the live quota and prints one `paseo run --provider … --no-wait` line per slice;
-`route`, `show`, `services [--check-models]`, `calibrate`, `substrate` and `hermes-chain` are its other commands.
+A2. `bin/route_agent.py plan --kinds …` applies them to the live quota and prints one `paseo run --provider … --no-wait` line per slice
+(`Choice.emit_dispatch` re-applies Argon's `fallback_block` at emit time; `route_agent.py admit --provider P/M --kind K`
+re-checks on a fresh snapshot before launch, exit 2 if refused — Wave 6, so shim delete can drop the dispatch-time
+re-check). `route`, `admit`, `show`, `services [--check-models]`, `calibrate`, `substrate` and `hermes-chain` are its
+other commands.
 
 ## B. The pools (J2 pool audit, `docs/slim/log.md`, 2026-11-06; grok retired 2026-11-07)
 
@@ -27,7 +30,7 @@ A2. `bin/route_agent.py plan --kinds …` applies them to the live quota and pri
 | B4. `cursor-auto`, `cursor` | cursor | subscription (Auto and third-party sublimits) | Auto is burn-first; GrokBot's separate Cursor pool (`grok-bot`) is never a target |
 | B5. `cursor-cloud` | none (`bin/cursor-cloud launch`) | API price on the Cursor pool | leaves the Mac, pushes a branch; acp-dispatch stopped launching it with the Paseo shim |
 | B6. `opencode-go`, `opencode-zen-free` (retired transport) | opencode, disabled | Go Plus subscription (one shared monthly allowance); the free zen models | bulk and mechanical, never code (djbclark 2026-10-30); section F |
-| B7. `antigravity-argon` | antigravity | Google AI Pro subscription (Gemini 4 Argon weekly window) | frontier FALLBACK only, behind codex and claude (operator 2026-10-31); restored 2026-11-07 for tendcf/nix2cf's review route 3 |
+| B7. `antigravity-argon` | antigravity | Google AI Pro subscription (Gemini 4 Argon weekly window) | frontier FALLBACK only, behind codex and claude (operator 2026-10-31); restored 2026-11-07 for tendcf/nix2cf's review route 3; native emit/admit enforce `fallback_block` (2026-11-09) |
 | B8. `clinepass`, `hermes` | none; hermes | Cline-pass API; the operator's assistant | never a delegation target; ClinePass is the Hermes/Dann lifeline (`substrate`, `hermes-chain`) |
 | B9. `opencode-zen` (paid) | opencode | prepaid | retired until an operator top-up |
 

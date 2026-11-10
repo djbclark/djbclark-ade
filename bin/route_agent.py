@@ -102,6 +102,8 @@ long log).
 Usage:
     route_agent.py route --kind bulk
     route_agent.py route --kind judgment --json
+    route_agent.py plan --kinds frontier,code   # emit_dispatch applies Argon fallback_block
+    route_agent.py admit --provider antigravity/gemini-4-argon --kind frontier   # exit 2 if refused
     aiuse --available --live --json # (not route_agent) force a fresh quota collect; this script only reads aiuse's snapshot
     route_agent.py show             # cache age, headroom, pace, expected waste, source per pool
     route_agent.py services [--check-models]   # the roster; --check-models: every suggested model in its
@@ -220,8 +222,10 @@ class Service:
     plenty_kinds: tuple[str, ...] = ()
     # Services this one is a FALLBACK behind (Gemini 4 Argon behind codex and claude, operator 2026-10-31): it is used
     # only while at least ONE named service is short (not usable: see pool_usable), never while all of them could take
-    # the kind, whatever its score. route() and acp-dispatch apply the same predicate (`fallback_block`). A per-wave
-    # cap or an `exclude` does not make a named service short. A fallback with no fresh reading fails closed.
+    # the kind, whatever its score. route() and native emit/admit (`Choice.emit_dispatch`, `route_agent.py admit`)
+    # apply the same predicate (`fallback_block`); the Wave 6 acp-dispatch shim is transitional and may omit the
+    # re-check. A per-wave cap or an `exclude` does not make a named service short. A fallback with no fresh reading
+    # fails closed.
     fallback_after: tuple[str, ...] = ()
     # The aiuse window label that bounds this pool, named in a refusal when its reading is missing ("Gemini 4 Argon weekly").
     window: str = ""
@@ -1591,6 +1595,10 @@ def frontier_per_wave(pool: str, gate: dict[str, float] | None = None, quota: di
     return closed if block else cap
 
 
+class FallbackDispatchRefused(RuntimeError):
+    """A fallback-only pool (Argon) may not launch now; `fallback_block` named why."""
+
+
 @dataclass
 class Choice:
     service: Service
@@ -1603,8 +1611,22 @@ class Choice:
 
     @property
     def dispatch(self) -> str:
-        """Launch template: native `paseo run` (Wave 6; acp-dispatch is transitional only).
-        Cursor Cloud uses cursor-cloud launch. Callers add placement flags and the brief."""
+        """Launch template only (no quota gate). Prefer `emit_dispatch(quota)` at plan/launch time
+        so Argon's `fallback_block` is enforced; `route_agent.py admit` re-checks on a fresh snapshot."""
+        return self._format_dispatch()
+
+    def emit_dispatch(self, quota: dict[str, Any], *, repo: str | None = None,
+                      min_headroom: float = 15.0,
+                      approved: frozenset[str] | set[str] | None = None) -> str:
+        """Native launch line after `fallback_block` (Wave 6: replaces acp-dispatch's dispatch-time re-check)."""
+        why = fallback_dispatch_refusal(self.service, self.kind, quota, repo=repo,
+                                        min_headroom=min_headroom, approved=approved)
+        if why:
+            raise FallbackDispatchRefused(why)
+        return self._format_dispatch()
+
+    def _format_dispatch(self) -> str:
+        """Build the native `paseo run` / cursor-cloud launch string (no admission)."""
         agent = self.service.acp_agent
         # DISPATCH_EXTRA retained for config compatibility; unused on the native path
         # (was appended to acp-dispatch lines; empty in config/routing.toml).
@@ -1967,8 +1989,8 @@ def fallback_block(svc: Service, kind: str, quota: dict[str, Any], *, services: 
                    min_headroom: float = 15.0, repo: str | None = None) -> str | None:
     """Why `svc`, a fallback (`fallback_after`), may not take `kind` now: every service it sits behind is usable. None when it
     may (some pool it sits behind is short, or it is no fallback). The one predicate of the planner (`route`) and of
-    acp-dispatch's fallback-only enforcement. `services` maps names to the services that exist (default: the whole policy,
-    a name not in it counts as short)."""
+    native emit/admit (`fallback_dispatch_refusal`). `services` maps names to the services that exist (default: the whole
+    policy, a name not in it counts as short)."""
     if not svc.fallback_after:
         return None
     known = BY_NAME if services is None else services
@@ -1979,6 +2001,47 @@ def fallback_block(svc: Service, kind: str, quota: dict[str, Any], *, services: 
     return (f"{svc.name} is a fallback behind {', '.join(svc.fallback_after)} (operator 2026-10-31) and "
             f"{', '.join(ok)} can take --kind {kind} now; use it only when one is short of quota, or "
             f"ACP_OPERATOR_APPROVED=route-override")
+
+
+def operator_approved(env: dict[str, str] | None = None) -> set[str]:
+    """Tokens in ACP_OPERATOR_APPROVED (comma-separated); `route-override` skips fallback eligibility."""
+    raw = (env if env is not None else os.environ).get("ACP_OPERATOR_APPROVED", "")
+    return {x.strip() for x in raw.split(",") if x.strip()}
+
+
+def fallback_dispatch_refusal(svc: Service, kind: str | None, quota: dict[str, Any], *,
+                              services: dict[str, Service] | None = None, min_headroom: float = 15.0,
+                              repo: str | None = None,
+                              approved: frozenset[str] | set[str] | None = None) -> str | None:
+    """Why a native `paseo run` of `svc` for `kind` must not start now (Argon `fallback_block`), else None.
+
+    Wave 6: owned here so shim delete can drop acp-dispatch's dispatch-time re-check. `route-override` in
+    `approved` (default: `ACP_OPERATOR_APPROVED`) skips eligibility only."""
+    if not kind or not svc.fallback_after:
+        return None
+    tokens = operator_approved() if approved is None else set(approved)
+    if "route-override" in tokens:
+        return None
+    return fallback_block(svc, kind, quota, services=services, min_headroom=min_headroom, repo=repo)
+
+
+def admit_provider(provider_model: str, kind: str, *, quota: dict[str, Any] | None = None,
+                   repo: str | None = None, min_headroom: float = 15.0,
+                   approved: frozenset[str] | set[str] | None = None,
+                   fresh: bool = True) -> str | None:
+    """Why `paseo run --provider provider_model` must not start for `kind` now, else None.
+
+    Resolves the routing service via `dispatch_service_name`. Non-fallback pools always admit. `fresh`
+    skips the aiuse/paseo 30 s memo (spawn-time look)."""
+    if "/" not in provider_model:
+        raise ValueError(f"provider must be PROVIDER/MODEL, got {provider_model!r}")
+    agent, _, model = provider_model.partition("/")
+    name = dispatch_service_name(agent, model)
+    svc = BY_NAME.get(name)
+    if svc is None or not svc.fallback_after:
+        return None
+    q = quota if quota is not None else load_snapshot(bypass_memo=fresh)[0]
+    return fallback_dispatch_refusal(svc, kind, q, min_headroom=min_headroom, repo=repo, approved=approved)
 
 
 def route(kind: str, *, quota: dict[str, Any] | None = None,
@@ -2768,6 +2831,13 @@ def main(argv: list[str] | None = None) -> int:
     pl.add_argument("--json", action="store_true")
     pl.add_argument("--brief", action="append", default=[],
                     help="brief file per kind, in --kinds order (repeat; accepted and ignored since 2026-11-06)")
+    ad = sub.add_parser("admit", help="re-check Argon fallback_block before a native paseo run (exit 2 if refused)")
+    ad.add_argument("--provider", required=True,
+                    help="PROVIDER/MODEL as on `paseo run --provider` (e.g. antigravity/gemini-4-argon)")
+    ad.add_argument("--kind", required=True, choices=KINDS)
+    ad.add_argument("--repo", help="repository for [dispatch.repo_overrides] (default: cwd origin)")
+    ad.add_argument("--min-headroom", type=float, default=15.0)
+    ad.add_argument("--json", action="store_true")
     sub.add_parser("show", help="snapshot age, headroom, pace, expected waste")
     sv = sub.add_parser("services", help="every service discovered right now, with its Paseo provider's status")
     sv.add_argument("--check-models", action="store_true",
@@ -2819,24 +2889,40 @@ def main(argv: list[str] | None = None) -> int:
             parser.error(f"unknown kind(s) {bad}; choose from {KINDS}")
         skip = {x.strip() for arg in args.exclude for x in arg.split(",") if x.strip()}
         skip |= operator_disabled()
-        rows = plan(kinds, quota=quota, min_headroom=args.min_headroom, exclude=skip,
-                    repo=(args.repo or repo_of(os.getcwd())))
+        plan_repo = args.repo or repo_of(os.getcwd())
+        rows = plan(kinds, quota=quota, min_headroom=args.min_headroom, exclude=skip, repo=plan_repo)
         if args.brief:
             if len(args.brief) != len(kinds):
                 parser.error("--brief must be given once per kind, in --kinds order")
         stale = (not quota) or age is None or age > STALE_SOFT
+
+        def _emit(c: Choice | None) -> str | None:
+            if c is None:
+                return None
+            try:
+                return c.emit_dispatch(quota, repo=plan_repo, min_headroom=args.min_headroom)
+            except FallbackDispatchRefused:
+                return None
+
         if args.json:
+            slices = []
+            for k, c in rows:
+                line = _emit(c)
+                ok = c is not None and line is not None
+                slices.append({
+                    "kind": k,
+                    "service": c.service.name if ok else None,
+                    "cli": c.service.cli if ok else None,
+                    "agent": c.service.acp_agent if ok else None,
+                    "model": c.model if ok else None,
+                    "dispatch": line,
+                    "remaining": c.remaining if ok else None,
+                    "why": c.why if ok else unrouted_why(k, quota, skip),
+                })
             print(json.dumps({
                 "snapshot_age_s": age, "stale": stale,
                 "quota_source": quota_source_info(),
-                "slices": [{"kind": k, "service": c.service.name if c else None,
-                            "cli": c.service.cli if c else None,
-                            "agent": c.service.acp_agent if c else None,
-                            "model": c.model if c else None,
-                            "dispatch": c.dispatch if c else None,
-                            "remaining": c.remaining if c else None,
-                            "why": c.why if c else unrouted_why(k, quota, skip)}
-                           for k, c in rows]}, indent=1))
+                "slices": slices}, indent=1))
         else:
             if QuotaSource.fallback_reason:
                 print(f"WARNING: {QuotaSource.fallback_reason}; quota below is from the "
@@ -2848,13 +2934,14 @@ def main(argv: list[str] | None = None) -> int:
                       + " -> run `aiuse --available --live` first; routing below "
                       "is capability-only for unmeasured pools", file=sys.stderr)
             for i, (k, c) in enumerate(rows, 1):
-                if c is None:
+                line = _emit(c)
+                if line is None:
                     print(f"{i}. {k:10} -> (none: {unrouted_why(k, quota, skip)}; "
                           "re-plan at the next boundary)")
                 else:
                     rem = "" if c.remaining is None else f" {c.remaining:.0f}% left"
                     print(f"{i}. {k:10} -> {c.service.name}{rem}  [{c.service.cli}]"
-                          f"  {c.dispatch}")
+                          f"  {line}")
         return 0
 
     if args.command == "show":
@@ -2986,17 +3073,42 @@ def main(argv: list[str] | None = None) -> int:
             print("  every suggested model is listed by its Paseo provider")
         return 1 if missing else 2 if unreadable else 0
 
+    if args.command == "admit":
+        admit_repo = args.repo or repo_of(os.getcwd())
+        # Spawn-time look: skip the 30 s memo (same as the retired acp-dispatch re-check).
+        fresh_quota, _ = load_snapshot(bypass_memo=True)
+        try:
+            why = admit_provider(args.provider, args.kind, quota=fresh_quota, repo=admit_repo,
+                                 min_headroom=args.min_headroom, fresh=True)
+        except ValueError as e:
+            parser.error(str(e))
+            return 2
+        if args.json:
+            print(json.dumps({"provider": args.provider, "kind": args.kind, "ok": why is None,
+                              "reason": why, "repo": admit_repo}, indent=2))
+        elif why:
+            print(why, file=sys.stderr)
+        else:
+            print(f"ok: {args.provider} admitted for --kind {args.kind}")
+        return 2 if why else 0
+
+    route_repo = args.repo or repo_of(os.getcwd())
     choice = route(args.kind, quota=quota, min_headroom=args.min_headroom, exclude=operator_disabled(),
-                   repo=(args.repo or repo_of(os.getcwd())))
+                   repo=route_repo)
     if choice is None:
         print(json.dumps({"kind": args.kind, "service": None,
                           "reason": "no eligible service with headroom"}))
+        return 1
+    try:
+        dispatch_line = choice.emit_dispatch(quota, repo=route_repo, min_headroom=args.min_headroom)
+    except FallbackDispatchRefused as e:
+        print(json.dumps({"kind": args.kind, "service": None, "reason": str(e)}))
         return 1
     if args.json:
         print(json.dumps({
             "kind": args.kind, "service": choice.service.name, "cli": choice.service.cli,
             "agent": choice.service.acp_agent, "model": choice.model,
-            "dispatch": choice.dispatch,
+            "dispatch": dispatch_line,
             "remaining_percent": choice.remaining, "why": choice.why,
             "alternatives": choice.alternatives,
             "snapshot_age_seconds": None if age is None else round(age),
@@ -3004,7 +3116,7 @@ def main(argv: list[str] | None = None) -> int:
         }, indent=2))
     else:
         print(f"{choice.service.cli}   — {choice.why}")
-        print(f"  dispatch: {choice.dispatch}")
+        print(f"  dispatch: {dispatch_line}")
         if choice.alternatives:
             print(f"  alternatives: {', '.join(choice.alternatives)}")
     return 0
