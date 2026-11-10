@@ -14,7 +14,8 @@ With no TEMPLATE it checks every agents/*/*.tmpl under the repo (or --root). For
      `--token`/`--api-key`/`--password`/`--secret` argument and its value, and `?key=`/`&token=` URL parameters.
   2. render: `{{ .field }}` and `{{ secret "NAME" }}` are filled from a dummy context and the result must parse
      (.json, .toml or .yaml by the name before `.tmpl`). Every field used must be documented in
-     agents/README.md (a table row starting with the field in backticks).
+     agents/README.md (a table row starting with the field in backticks). Every secret used must also be declared
+     in secrets/secretspec.toml (Phase 1).
      The render runs twice: with plain dummies, and with a hostile value (quotes, `: `, `#`, backslash) in every
      placeholder but the home ones, escaped the way Phase 1's renderer must (JSON and TOML: `toJson` inside
      "..."; YAML: `'` doubled inside '...'); each parsed string must equal the hostile value. A placeholder that
@@ -62,19 +63,25 @@ ALLOW_BLOBS = {
 }
 
 # A placeholder tag (masked) must be the whole value: `{{ secret "X" }}<leaked tail>` is a hit.
-_MASKED = re.escape(MASK) + r"""(?:["'\s,\]]|$)"""
-_ENVREF = r"""\$\{?[A-Za-z_]\w*\}?(?:["'\s,\]]|$)"""
+# `]` terminates only when it closes the value (array/object end), so `{{ secret "X" }}]leaked` stays a hit
+# (adversary round 3 LOW on PR 23).
+_MASKED = re.escape(MASK) + r"""(?:["'\s,]|\](?=\s*[,}\]]|$)|$)"""
+_ENVREF = r"""\$\{?[A-Za-z_]\w*\}?(?:["'\s,]|\](?=\s*[,}\]]|$)|$)"""
 # Key names that hold a credential, in JSON ("x-api-key": "v"), YAML (token: v) and TOML (token = "v") forms.
 _KEYNAME = (r"""(?<![A-Za-z0-9])["']?(?:(?:x-)?api[-_]?key|apikey|(?:auth|access|refresh|bot)?[-_]?token|secret|"""
             r"""client[-_]?secret|private[-_]?key|credential|passw(?:or)?d\w*|\w*[-_](?:key|secret|token|password))["']?""")
-# An Authorization (or Proxy-Authorization) header with any scheme or none: the possessive group eats one scheme
-# word (`Bearer`, `Basic`, `Token`, `Bot`, ...) so `Bearer {{ secret "X" }}` and `Basic ${X}` stay clean while
-# `Basic <base64>` and a bare value do not. `\\?["']` lets it match inside an escaped JSON string in a command.
-_AUTH = (r"""(?<![A-Za-z0-9])(?:proxy-)?authorization\\?["']?\s*[:=]\s*\\?["']?(?:[A-Za-z][\w-]*[ \t]+)?+"""
+# An Authorization (or Proxy-Authorization) header with any scheme or none. Scheme words are a closed list
+# (adversary round 3 LOW: an open `[A-Za-z][\w-]*` group ate a short letter-initial key as the "scheme").
+# `Bearer {{ secret "X" }}` and `Basic ${X}` stay clean; `Basic <base64>` and a bare value do not.
+# `\\?["']` lets it match inside an escaped JSON string in a command.
+# Possessive `?+` keeps a matched scheme word (so `Bearer {{ secret }}` is not re-parsed with
+# `Bearer` as the bare credential value). Closed scheme list: round 3 LOW on PR 23.
+_AUTH = (r"""(?<![A-Za-z0-9])(?:proxy-)?authorization\\?["']?\s*[:=]\s*\\?["']?(?:(?:Bearer|Basic|Token|Bot|Digest)[ \t]+)?+"""
          + r"""(?!""" + _MASKED + r"""|""" + _ENVREF + r"""|%|\\?["']|\s|$|<)[^\s"',\\]{4,}""")
 # A credential-named flag followed by its value: `["--token", "v"]`, `- --token` / `- v` on two lines, `--api-key v`.
-# `--password-file` and `--max-tokens` are not matched: the flag name must be followed by `,`, `"` or whitespace.
-_FLAG = r"""--(?:\w+-)*(?:token|api-?key|secret|password|passwd)"""
+# Ends with `key` so `--key` and `--access-key` match (adversary round 3 LOW). `--password-file` and `--max-tokens`
+# are not matched: the flag name must be followed by `,`, `"` or whitespace.
+_FLAG = r"""--(?:\w+-)*(?:token|api-?key|secret|password|passwd|key)"""
 ARGV = re.compile(r"""(?<![\w-])""" + _FLAG + r"""["']?\s*(?:,|\s)\s*(?:-\s+)?["']?(?!""" + _MASKED + r"""|""" + _ENVREF
          + r"""|%|-|\s|<)[^\s"',\]]{4,}""", re.I)
 # A query parameter that carries a credential, in a URL.
@@ -211,8 +218,19 @@ def _scalar_pairs(text: str, kind: str) -> list[tuple[str, str, int | None]]:
                     return
                 visited.add((id(node), key))
                 if isinstance(node, yaml.MappingNode):
+                    # R6-3 (PR 23): `{name: Authorization, value: <key>}` — nearest key is `value`, so use the
+                    # sibling `name` scalar as the credential key name when both are present.
+                    siblings: dict[str, object] = {}
                     for k, v in node.value:
-                        walk(v, k.value if isinstance(k, yaml.ScalarNode) else key, k.start_mark.line + 1)
+                        if isinstance(k, yaml.ScalarNode):
+                            siblings[k.value] = v
+                    name_node = siblings.get("name")
+                    for k, v in node.value:
+                        cred_key = k.value if isinstance(k, yaml.ScalarNode) else key
+                        if (isinstance(k, yaml.ScalarNode) and k.value == "value"
+                                and isinstance(name_node, yaml.ScalarNode) and name_node.value):
+                            cred_key = str(name_node.value)
+                        walk(v, cred_key, k.start_mark.line + 1 if isinstance(k, yaml.ScalarNode) else line)
                 elif isinstance(node, yaml.SequenceNode):
                     for item in node.value:
                         walk(item, key, line)
@@ -370,6 +388,27 @@ def documented_fields(readme: Path) -> set[str]:
     return set(re.findall(r"^\|\s*`([A-Za-z_][A-Za-z0-9_]*)`\s*\|", readme.read_text(), re.M))
 
 
+def declared_secrets(secretspec: Path) -> set[str]:
+    """Secret names declared in secrets/secretspec.toml `[profiles.*]` (Phase 1)."""
+    if not secretspec.is_file():
+        return set()
+    try:
+        data = tomllib.loads(secretspec.read_text())
+    except tomllib.TOMLDecodeError:
+        return set()
+    names: set[str] = set()
+    profiles = data.get("profiles")
+    if not isinstance(profiles, dict):
+        return set()
+    for body in profiles.values():
+        if not isinstance(body, dict):
+            continue
+        for key in body:
+            if key != "defaults" and isinstance(key, str) and key.isidentifier():
+                names.add(key)
+    return names
+
+
 def flatten(o, prefix: str = "") -> dict[str, object]:
     out: dict[str, object] = {}
     if isinstance(o, dict):
@@ -442,6 +481,10 @@ def check_one(path: Path, root: Path, do_diff: bool, out) -> int:
         findings += 1
     for s in sorted(secrets - doc):
         print(f"{label}: secret `{s}` is not in the agents/README.md table", file=out)
+        findings += 1
+    declared = declared_secrets(root / "secrets" / "secretspec.toml")
+    for s in sorted(secrets - declared):
+        print(f"{label}: secret `{s}` is not declared in secrets/secretspec.toml", file=out)
         findings += 1
 
     ctx = {f: f"dummy-{f}" for f in fields}

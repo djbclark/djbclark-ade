@@ -39,6 +39,14 @@ README = """| Field | Meaning |
 | `JINA_API_KEY` | secret |
 """
 
+SECRETSPEC = """[project]
+name = "test"
+revision = "1.0"
+
+[profiles.default]
+JINA_API_KEY = { description = "test" }
+"""
+
 
 def run(*argv: str) -> tuple[int, str]:
     out = io.StringIO()
@@ -47,13 +55,16 @@ def run(*argv: str) -> tuple[int, str]:
 
 
 class Root:
-    """A throwaway repo root with agents/README.md and one json template."""
+    """A throwaway repo root with agents/README.md, secrets/secretspec.toml and one json template."""
 
-    def __init__(self, test: unittest.TestCase, body: str, name: str = "t/x.json.tmpl", readme: str = README):
+    def __init__(self, test: unittest.TestCase, body: str, name: str = "t/x.json.tmpl",
+                 readme: str = README, secretspec: str = SECRETSPEC):
         self.dir = Path(tempfile.mkdtemp())
         test.addCleanup(lambda: __import__("shutil").rmtree(self.dir))
         (self.dir / "agents").mkdir()
         (self.dir / "agents" / "README.md").write_text(readme)
+        (self.dir / "secrets").mkdir()
+        (self.dir / "secrets" / "secretspec.toml").write_text(secretspec)
         self.tmpl = self.dir / "agents" / name
         self.tmpl.parent.mkdir(parents=True, exist_ok=True)
         self.tmpl.write_text(body)
@@ -165,7 +176,19 @@ class ScanTest(unittest.TestCase):
             ("credential flag argument", "  - --password\n  - abcd1234"),
             ("credential flag argument", 'args = [\n  "--secret",\n  "abcd1234",\n]'),
             ("credential flag argument", "command: tool --api-key abcd1234"),
+            # adversary round 3 LOWs: --key / --access-key
+            ("credential flag argument", 'args = ["--key", "abcd1234"]'),
+            ("credential flag argument", 'args = ["--access-key", "abcd1234"]'),
+            ("credential flag argument", "command: tool --key abcd1234"),
+            ("credential flag argument", "command: tool --access-key abcd1234"),
             ("password=", 'args = ["--password=abcd1234"]'),
+            # adversary round 3 LOW: scheme group must not eat a letter-initial key
+            ("Authorization header", '"Authorization": "Abcd1234 x"'),
+            ("Authorization header", '"Authorization": "Token1234 x"'),
+            # adversary round 3 LOW: ] after a placeholder must not hide a leaked tail
+            ("secret-looking key: value", 'token = "{{ secret "X" }}]leaked1234"'),
+            ("credential flag argument", 'args = ["--token", "{{ secret "X" }}]oops12"]'),
+
             ("credential in a URL query", 'u = "https://x.example/api?key=abcd1234"'),
             ("credential in a URL query", 'u = "https://x.example/api?a=1&access_token=abcd1234"'),
             ("credential in a URL query", 'u = "https://x.example/api?sig=abcd1234"'),
@@ -267,6 +290,16 @@ class ScanTest(unittest.TestCase):
         }.items():
             with self.subTest(name):
                 self.assertEqual(self.rules(text), set())
+
+    @unittest.skipUnless(HAVE_YAML, "PyYAML not importable")
+    def test_yaml_header_name_value_siblings_are_scanned(self):
+        # adversary round 6 R6-3: nearest key is `value`; use sibling `name` as the credential key
+        value = "Zq7Lm2Xw9Rt4Vb8Nc3Hd6Fk1"
+        text = f"headers:\n  - name: Authorization\n    value: Basic {value}\n"
+        self.assertIn("Authorization header", {r for _, r in atc.scan(text, "yaml")})
+        self.assertEqual(atc.scan("headers:\n  - name: Authorization\n    value: Basic {{ secret \"X\" }}\n", "yaml"), [])
+        self.assertIn("secret-looking key: value",
+                      {r for _, r in atc.scan(f"headers:\n  - name: x-api-key\n    value: {value}\n", "yaml")})
 
     @unittest.skipUnless(HAVE_YAML, "PyYAML not importable")
     def test_yaml_block_scalar_values_are_scanned(self):
@@ -441,6 +474,23 @@ class RenderTest(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("field `nope`", out)
         self.assertIn("secret `NOPE_KEY`", out)
+        self.assertIn("not declared in secrets/secretspec.toml", out)
+
+    def test_secret_in_readme_but_not_secretspec_fails(self):
+        readme = README + "| `ONLY_README_KEY` | secret |\n"
+        body = '{"s": "{{ secret "ONLY_README_KEY" }}"}'
+        rc, out = Root(self, body, readme=readme).check()
+        self.assertEqual(rc, 1)
+        self.assertIn("not declared in secrets/secretspec.toml", out)
+        self.assertNotIn("ONLY_README_KEY` is not in the agents/README.md", out)
+
+    def test_real_secretspec_declares_every_template_secret(self):
+        declared = atc.declared_secrets(REPO / "secrets" / "secretspec.toml")
+        self.assertTrue(declared)
+        for rel in atc.LIVE:
+            _, secrets = atc.fields_used((REPO / "agents" / rel).read_text())
+            with self.subTest(rel):
+                self.assertTrue(secrets <= declared, sorted(secrets - declared))
 
     def test_other_tag_forms_fail(self):
         rc, out = Root(self, '{"h": "{{ env "HOME" }}"}').check()
