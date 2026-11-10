@@ -525,6 +525,15 @@ the operator's Grok Bot "Coding", following the current browser route (operator 
    - secrets: the App's private key is downloaded by the operator and stored with `gh secret set`;
    - anything that widens access (adding a collaborator or a bypass actor);
    - anything taken from a GitHub artifact not written by the owner.
+5. **Shipped 2026-11-10 (render / relay first):** `prompts/browser/` templates
+   `github-app-create.md`, `pr-access.md`, `issue-access.md`; `bin/ade-browser-task` /
+   `bin/ade_browser_task.py`; just recipes `browser-task-list`, `browser-task-render`,
+   `browser-task` (dry-run relay), `browser-task-send`.
+   - `list` / `render` are local only (owner/repo from `config/github.toml` or flags).
+   - `relay` defaults to `--dry-run`; `--send` calls `coding-bot ask` when on PATH, else
+     prints the prompt and reports `unsent` (no live browser required for this unit).
+   - Secrets and `widens_access` tasks refused on argv / frontmatter. Completion
+     verification (API read-back, deadline) stays for a follow-up (`docs/browser-task.md`).
 
 ## S8. GitHub setup for a new djbclark-ade user
 
