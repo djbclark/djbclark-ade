@@ -253,20 +253,23 @@ class = "offered"
 chosen = true
 summary = "Grok Bot channel (frdminc/peer-link)"
 source = "https://github.com/frdminc/peer-link"
-install = "UNKNOWN"
-update = "UNKNOWN"
-probe = "UNKNOWN"
+install = "private clone to ~/src/peer-link (frdminc/peer-link; not public). coding-bot wraps peer_mail.py from that tree (PR #269)."
+update = "git -C ~/src/peer-link pull --ff-only (operator-owned private repo; order 11)"
+probe = "PEER_LINK_TOOL or ~/src/peer-link/peer_mail.py check (via coding-bot status)"
 platforms = ["mac", "linux"]
+notes = "No install_argv: private source + order 11. Operator must grant clone access / confirm path before apply can record argv."
 
 [[component]]
 id = "litellm"
 class = "offered"
 chosen = true
 summary = "LiteLLM proxy fork; Hermes fallback"
-install = "UNKNOWN"
-update = "UNKNOWN"
-probe = "UNKNOWN"
+source = "https://github.com/BerriAI/litellm"
+install = "operator fork at ~/src/litellm (site-djbclark roles/litellm); do not npm/pip install stock as the ADE fallback without that role"
+update = "git -C ~/src/litellm pull --ff-only (upstream-tracking rule; order 11 for deploy)"
+probe = "HTTP health on the configured proxy port (often :4000) or litellm --help in the fork venv"
 platforms = ["mac", "linux"]
+notes = "No install_argv until the operator names the fork remote and the apply unit for roles/litellm. Stock BerriAI/litellm is the documented upstream, not the auto-apply recipe."
 
 # --- optional (off by default unless chosen) ---
 
@@ -275,22 +278,31 @@ id = "1password"
 class = "optional"
 chosen = false
 summary = "1Password app, op CLI, and skill"
-install = "UNKNOWN"
-update = "UNKNOWN"
-probe = "UNKNOWN"
+install = "Mac: brew cask 1password + 1password-cli; Linux app/store UNKNOWN (record later). Skill is site-private skills/1password (order 11 to publish)."
+update = "brew upgrade --cask 1password 1password-cli (Mac)"
+probe = "op --version"
+probe_argv = ["op", "--version"]
 presence = "op"
+needs_system = true
+system_argv_darwin = ["brew", "install", "--cask", "1password", "1password-cli"]
 platforms = ["mac", "linux"]
+notes = "Linux system_argv still UNKNOWN. Skill linking is skill-everywhere once the skill is available to the user."
 
 [[component]]
 id = "grok-bot-setup"
 class = "optional"
 chosen = false
 summary = "Cloud Grok Bot side setup (Cursor-billed; not SuperGrok)"
-install = "UNKNOWN"
-update = "UNKNOWN"
-probe = "UNKNOWN"
+source = "https://github.com/BlockedPath/grok-bot-setup"
+install = "npm install -g grok-bot-setup (→ adapters on PATH); host hook/bootstrap is a later Sand-side unit"
+install_argv = ["npm", "install", "-g", "--ignore-scripts", "grok-bot-setup"]
+update = "npm update -g grok-bot-setup"
+update_argv = ["npm", "update", "-g", "grok-bot-setup"]
+probe = "adapters help"
+probe_argv = ["adapters", "help"]
+presence = "adapters"
 platforms = ["mac", "linux"]
-notes = "Distinct from cancelled SuperGrok / Pi xai-oauth allowance"
+notes = "Distinct from cancelled SuperGrok / Pi xai-oauth allowance. Full Sand host patch remains curl|bash bootstrap (no install_argv for that path)."
 
 [[component]]
 id = "github-advanced-security"
@@ -406,16 +418,18 @@ expiry = "unknown"
 [[key]]
 name = "ZAI_CODING_PLAN_API_KEY"
 components = ["pi"]
-create_url = "UNKNOWN"
+create_url = "https://z.ai/"
 verify = "UNKNOWN"
 expiry = "unknown"
+notes = "Z.ai coding plan console; exact keys URL may move — re-probe before documenting a deeper path."
 
 [[key]]
 name = "CURSOR_API_KEY"
 components = ["cursor-cli"]
-create_url = "UNKNOWN"
+create_url = "https://cursor.com/settings"
 verify = "UNKNOWN"
 expiry = "unknown"
+notes = "Cursor dashboard / settings; Agent CLI also uses `agent login`."
 
 [[key]]
 name = "EXA_API_KEY"
@@ -434,7 +448,7 @@ expiry = "unknown"
 [[key]]
 name = "TELEGRAM_BOT_TOKEN"
 components = ["hermes"]
-create_url = "UNKNOWN"
+create_url = "https://t.me/BotFather"
 verify = "UNKNOWN"
 expiry = "unknown"
 notes = "Via BotFather; login/consent distinct from key validation"
@@ -487,4 +501,5 @@ command = "gh auth login"
 [[login]]
 id = "sudo-secretspec"
 summary = "sudo-secretspec configured for this machine"
-command = "UNKNOWN"
+command = "sudo-secretspec doctor"
+notes = "Presence/config probe, not an interactive login; secrets stay in the secretspec store."
