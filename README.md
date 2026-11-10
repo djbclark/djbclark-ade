@@ -81,6 +81,7 @@ Skills (23, from each `skills/*/SKILL.md`):
 
 | Skill | What |
 |---|---|
+| [`quota-surplus`](skills/quota-surplus/SKILL.md) | Spend a use-it-or-lose-it quota surplus before its reset. |
 | [`ade-update`](skills/ade-update/SKILL.md) | Keep this machine's djbclark-ade checkout current: fast-forward pull, relink missing skills, check CLAUDE.md and ~/.claude links, print the CHANGELOG delta. |
 | [`baton`](skills/baton/SKILL.md) | Start-of-session resume from the Tier 1 pointer: follow session-handoff's Reader protocol for this directory, or its chain discovery when cwd resolves to none. |
 | [`btww`](skills/btww/SKILL.md) | Remind the user which native side-question command this TUI has (Claude Code /btw, Codex /side, and so on), or say that it has none. |
@@ -109,6 +110,7 @@ Skills (23, from each `skills/*/SKILL.md`):
 
 | Tool | What |
 |---|---|
+| [`quota-surplus`](bin/quota-surplus) | Use-it-or-lose-it quota watchdog; see [`docs/surplus-work.md`](docs/surplus-work.md). |
 | [`acp-dispatch`](bin/acp-dispatch) | Hand a slice to an agent through Paseo and get its report back (a shim, slim-down E6, 2026-11-06). |
 | [`acp-dispatch-wait`](bin/acp-dispatch-wait) | DELETE with the acp-dispatch shim (Wave 6 follow-up, ledger E6/D6); was the cheap rearm waiter for one acp-dispatch record (2026-10-18). |
 | [`ade-backup-stores`](bin/ade-backup-stores) | One consistent copy of every agent session store, plus the Hermes JSONL export. |
@@ -185,7 +187,3 @@ Skills (23, from each `skills/*/SKILL.md`):
 
 [Old way versus new way](docs/old-way-new-way.md) compares legacy skills with native Paseo,
 records plugin advice, and defines the Linux/macOS cross-host handoff acceptance checks.
-
-| [`bin/quota-surplus`](bin/quota-surplus), [`docs/surplus-work.md`](docs/surplus-work.md) | "Use it or lose it" watchdog: spend a quota surplus before reset. |
-
-| [`quota-surplus`](skills/quota-surplus/SKILL.md) | Spend a use-it-or-lose-it quota surplus before its reset: `quota-surplus`. |
