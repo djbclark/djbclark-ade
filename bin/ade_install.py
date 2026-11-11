@@ -26,6 +26,7 @@ import platform
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -1141,7 +1142,10 @@ def save_keys_state(
 def load_keys_plan_cache(path: Path) -> tuple[dict[str, Any], str]:
     """Read bounded nonsecret outcome metadata; never expose parse/error text."""
     try:
-        with path.open("rb") as stream:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+        with os.fdopen(fd, "rb") as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                return {}, "invalid"
             raw = stream.read(1024 * 1024 + 1)
         if len(raw) > 1024 * 1024:
             return {}, "invalid"

@@ -258,3 +258,42 @@ def test_just_recipe_forwards_arguments_to_cli(tmp_path):
                             capture_output=True, text=True, timeout=15)
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout) == ['keys-plan', '--root', str(root), '--json', '--state', 'cache.json']
+
+
+@pytest.mark.parametrize('kind', ['fifo', 'directory', 'device'])
+def test_nonregular_cache_refused_without_blocking(tmp_path, kind):
+    path = tmp_path / 'nonregular'
+    if kind == 'fifo':
+        os.mkfifo(path)
+    elif kind == 'directory':
+        path.mkdir()
+    else:
+        path = Path('/dev/null')
+    # Isolate in a subprocess: the regression's blocking open cannot stall pytest.
+    code = '''
+import json,sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import ade_install as ai
+print(json.dumps(ai.load_keys_plan_cache(Path(sys.argv[2]))))
+'''
+    result = subprocess.run([sys.executable, '-I', '-B', '-c', code, str(REPO / 'bin'), str(path)],
+                            capture_output=True, text=True, timeout=5)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == [{}, 'invalid']
+
+
+def test_cache_descriptor_is_readonly_nonblocking(tmp_path, monkeypatch):
+    path = tmp_path / 'state.json'
+    path.write_text(json.dumps(cache()))
+    real_open = ai.os.open
+    flags_seen = []
+    def checked_open(path, flags, *args, **kwargs):
+        assert flags & os.O_NONBLOCK
+        assert flags & os.O_CLOEXEC
+        assert not flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND)
+        flags_seen.append(flags)
+        return real_open(path, flags, *args, **kwargs)
+    monkeypatch.setattr(ai.os, 'open', checked_open)
+    assert ai.load_keys_plan_cache(path)[1] == 'loaded'
+    assert len(flags_seen) == 1

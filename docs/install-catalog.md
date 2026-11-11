@@ -461,6 +461,8 @@ setup_complete false**, even when every cached status is ok. Reports emit only
 allowlisted status tokens and validated UTC timestamps from state; raw details,
 extra fields and malformed data are not copied to output. No executable store
 argv or automatic replacement authorization is produced.
+Cache reads are capped at 1 MiB and use nonblocking descriptors; FIFOs, devices
+and other nonregular inputs are reported as invalid rather than read.
 
 Interactive collection remains unfinished. Source checked 2026-11-11 at
 sudo-secretspec `3c37fe3511e4907d643f35d615d27d898bf3b68a` confirms
