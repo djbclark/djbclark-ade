@@ -586,7 +586,16 @@ the operator's Grok Bot "Coding", following the current browser route (operator 
    - `relay` defaults to `--dry-run`; `--send` calls `coding-bot ask` when on PATH, else
      prints the prompt and reports `unsent` (no live browser required for this unit).
    - Secrets and `widens_access` tasks refused on argv / frontmatter. Completion
-     verification (API read-back, deadline) stays for a follow-up (`docs/browser-task.md`).
+     verification initially stayed for a follow-up (`docs/browser-task.md`).
+   - **2026-11-10 bounded follow-up:** opt-in `track pr-access` records an
+     immutable target/template/deadline and explicitly registers a notify-only
+     `bin/deadline` wait. Default tracking and `verify --dry-run` are pure plans;
+     `status` reads local state. `verify` can mark completed only from the exact
+     repository's GET readback showing PRs enabled and collaborators-only before
+     the deadline. Receipts never complete tasks; failed/unknown registration
+     remains explicit and does not prove an installed sweep job. No live browser
+     action or settings change is part of this unit. Issue/App completion and
+     automatic polling remain pending.
 
 ## S8. GitHub setup for a new djbclark-ade user
 
