@@ -17,6 +17,7 @@ import copy
 import fcntl
 import json
 import os
+import re
 import stat
 import tempfile
 import tomllib
@@ -25,6 +26,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 import ade_config as ac
+import ade_install_catalog as catalog
 
 ADOPTION_RECORDED_ONLY = "recorded-only"
 ADOPTION_NOTE = (
@@ -35,6 +37,7 @@ ADOPTION_NOTE = (
 
 # Paths under these roots are refused by the scalar editor (arrays / AoT / selectors).
 _REFUSED_ROOTS = frozenset({"service"})
+KEY_METADATA_FIELDS = frozenset({"create_url", "verify", "expiry", "notes"})
 
 
 class EditError(ac.ConfigError):
@@ -47,9 +50,10 @@ class SetTarget:
 
     path: Path
     file_parts: tuple[str, ...]  # dotted path parts inside the file
-    kind: str  # "local" | "unified" | "legacy_routing" | "legacy_gates"
+    kind: str  # local/unified/legacy_routing/legacy_gates/legacy_context/legacy_key
     target: str  # "local" | "repo"
     created: bool
+    key_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -121,10 +125,16 @@ def values_equal(left: Any, right: Any) -> bool:
 def split_dotted_path(dotted: str) -> tuple[str, ...]:
     if not dotted or dotted.strip() != dotted:
         raise EditError("PATH must be a non-empty dotted path without surrounding whitespace")
-    parts = tuple(dotted.split("."))
+    if dotted.startswith(("context_budget.", "keys.")):
+        try:
+            parts = ac.metadata_path_parts(dotted)
+        except ac.ConfigError as error:
+            raise EditError(str(error)) from error
+    else:
+        parts = tuple(dotted.split("."))
     if any(not p or p.strip() != p for p in parts):
         raise EditError(f"invalid PATH {dotted!r}")
-    if "[" in dotted or "]" in dotted:
+    if "[" in dotted or "]" in dotted or "\n" in dotted or "\r" in dotted or "\0" in dotted:
         raise EditError(
             f"PATH {dotted!r}: service selectors and index paths are not supported by scalar set"
         )
@@ -168,10 +178,12 @@ def resolve_set_target(
     if target not in ("local", "repo"):
         raise EditError(f"unknown --target {target!r} (want local or repo)")
     parts = split_dotted_path(dotted)
-    if parts[0] in {"install", "keys"}:
-        raise EditError(f"PATH {dotted!r}: install/keys metadata is read-only until writer adoption")
-    if parts[0] == "context_budget":
-        raise EditError(f"PATH {dotted!r}: context_budget metadata is read-only until writer adoption")
+    if parts[0] == "install":
+        raise EditError(f"PATH {dotted!r}: install arrays remain unsupported by scalar set")
+    if parts[0] == "keys" and (len(parts) != 3 or parts[2] not in KEY_METADATA_FIELDS):
+        raise EditError(f"PATH {dotted!r}: keys set only supports existing named-key string metadata: {sorted(KEY_METADATA_FIELDS)}")
+    if parts[0] == "context_budget" and (len(parts) not in {3, 4} or parts[1] != "budget"):
+        raise EditError(f"PATH {dotted!r}: context set only supports numeric budget leaves")
     root = root.resolve()
     home = home.resolve()
 
@@ -197,6 +209,14 @@ def resolve_set_target(
         )
 
     # Legacy projection: route domain keys live in routing.toml; gates.* in gates.toml.
+    if parts[0] == "context_budget":
+        path = root / "config/context-budget.toml"
+        return SetTarget(path=path, file_parts=parts[1:], kind="legacy_context", target="repo",
+                         created=not ac.input_present(path))
+    if parts[0] == "keys":
+        path = root / "config/install.toml"
+        return SetTarget(path=path, file_parts=(parts[2],), kind="legacy_key", target="repo",
+                         created=not ac.input_present(path), key_name=parts[1])
     if parts[0] == "gates":
         if len(parts) < 2:
             raise EditError("PATH gates alone is a table; scalar set needs a leaf under gates.*")
@@ -303,25 +323,18 @@ def _parse_header(line: str) -> tuple[str, tuple[str, ...]] | None:
     s = line.strip()
     if not s.startswith("["):
         return None
-    # strip trailing comment carefully: headers don't contain strings with #
-    if "#" in s:
-        # headers are simple; cut comment
-        s = s.split("#", 1)[0].rstrip()
-    if s.startswith("[[") and s.endswith("]]"):
-        body = s[2:-2].strip()
-        kind = "aot"
-    elif s.startswith("[") and s.endswith("]"):
-        body = s[1:-1].strip()
-        kind = "table"
-    else:
-        return None
-    if not body:
-        return None
-    parts = tuple(p.strip() for p in body.split("."))
-    if any(not p or not all(_is_bare_key_char(c) for c in p) for p in parts):
-        # quoted header keys: refuse rather than mis-edit
-        raise EditError(f"unsupported table header form: {line.strip()!r}")
-    return kind, parts
+    return _decode_table_header(s)
+
+
+def _decode_table_header(line: str) -> tuple[str, tuple[str, ...]]:
+    try:
+        return ac.decode_table_key_chain(line)
+    except ac.ConfigError as error:
+        raise EditError(str(error)) from error
+
+
+def _encode_key(part: str) -> str:
+    return part if re.fullmatch(r"[A-Za-z0-9_-]+", part) else json.dumps(part, ensure_ascii=False)
 
 
 @dataclass
@@ -607,11 +620,6 @@ def apply_scalar_edit(text: str, file_parts: tuple[str, ...], value: Any) -> str
         raise EditError("empty file path")
     table_parts = file_parts[:-1]
     key = file_parts[-1]
-    if not all(_is_bare_key_char(c) for c in key):
-        raise EditError(f"key {key!r} must be a bare TOML key for scalar set")
-    for part in table_parts:
-        if not all(_is_bare_key_char(c) for c in part):
-            raise EditError(f"table part {part!r} must be a bare TOML key")
 
     encoded = encode_toml_scalar(value)
     hit = find_scalar_assignment(text, table_parts, key)
@@ -620,7 +628,7 @@ def apply_scalar_edit(text: str, file_parts: tuple[str, ...], value: Any) -> str
 
     # Insert
     insert_at, exists = find_table_insert_point(text, table_parts)
-    line = f"{key} = {encoded}"
+    line = f"{_encode_key(key)} = {encoded}"
     if exists:
         prefix = text[:insert_at]
         suffix = text[insert_at:]
@@ -631,7 +639,7 @@ def apply_scalar_edit(text: str, file_parts: tuple[str, ...], value: Any) -> str
         return prefix + chunk + suffix
 
     # Create table header(s) at EOF
-    header = ".".join(table_parts) if table_parts else ""
+    header = ".".join(_encode_key(part) for part in table_parts)
     parts_out: list[str] = []
     body = text
     if body and not body.endswith("\n"):
@@ -681,6 +689,90 @@ def _parse_file_tree(text: str, path: Path) -> dict[str, Any]:
     return data
 
 
+def _key_row_index(data: dict[str, Any], name: str) -> int:
+    rows = data.get("key", [])
+    if not isinstance(rows, list):
+        raise EditError("legacy key registry must be an array of tables")
+    matches = [i for i, row in enumerate(rows) if isinstance(row, dict) and row.get("name") == name]
+    if len(matches) != 1:
+        raise EditError(f"key {name!r}: exactly one existing legacy identity required")
+    return matches[0]
+
+
+def _legacy_key_edit(text: str, index: int, field: str, value: Any) -> str:
+    """Edit one existing [[key]] body through a synthetic ordinary table.
+
+    Lexical boundaries reuse the scalar scanner's string/bracket skipping. The
+    caller additionally proves the complete parsed catalog changed only one
+    indexed metadata field; no public array editing is enabled.
+    """
+    headers = []
+    i = 0
+    while i < len(text):
+        while i < len(text) and text[i] in " \t\r\n\ufeff":
+            i += 1
+        if i >= len(text):
+            break
+        start = i
+        if text[i] == "[":
+            end = text.find("\n", i)
+            end = len(text) if end == -1 else end
+            parsed = _parse_header(text[i:end])
+            if parsed is None:
+                raise EditError("unsupported catalog header")
+            headers.append((start, end, parsed))
+            i = end
+        else:
+            while i < len(text) and text[i] not in "\r\n":
+                if text[i] == "#":
+                    end = text.find("\n", i)
+                    i = len(text) if end == -1 else end
+                elif text[i] in "\"'":
+                    i = _scan_string_end(text, i)
+                elif text[i] in "[{":
+                    i = _skip_brackets(text, i)
+                else:
+                    i += 1
+    rows = [i for i, (_, _, parsed) in enumerate(headers) if parsed == ("aot", ("key",))]
+    if index >= len(rows):
+        raise EditError("legacy key row could not be located in supported TOML text")
+    header_index = rows[index]
+    start, body_start, _ = headers[header_index]
+    end = headers[header_index + 1][0] if header_index + 1 < len(headers) else len(text)
+    synthetic = "[__ade_key_row__]"
+    edited = apply_scalar_edit(synthetic + text[body_start:end], ("__ade_key_row__", field), value)
+    if not edited.startswith(synthetic):
+        raise EditError("legacy key scalar verification failed")
+    return text[:body_start] + edited[len(synthetic):] + text[end:]
+
+
+def _metadata_domain(parts: tuple[str, ...]) -> frozenset[str] | None:
+    if parts[0] == "context_budget":
+        return ac.CONTEXT_BUDGET_DOMAINS
+    if parts[0] == "keys":
+        return ac.CATALOG_DOMAINS
+    return None
+
+
+def _validate_metadata_effective(data: dict[str, Any], *, root: Path, domains: frozenset[str]) -> None:
+    if domains == ac.CONTEXT_BUDGET_DOMAINS:
+        ac.context_budget_config(data)
+    else:
+        try:
+            raw = catalog.catalog_from_effective(data)
+            ac.validate_tree(raw, ac.read_catalog_schema(root), label="effective install catalog")
+            catalog.validate_catalog_semantics(raw, path=Path("effective install catalog"))
+        except catalog.CatalogValidationError as error:
+            raise EditError(str(error)) from error
+
+
+def _validate_metadata_candidate(after: dict[str, Any], target: SetTarget, *, root: Path,
+                                 home: Path, domains: frozenset[str]) -> None:
+    effective = ac.load_effective(root=root, home=home, domains=domains,
+                                  _candidate=(target.path, after))
+    _validate_metadata_effective(effective.data, root=root, domains=domains)
+
+
 def validate_target_tree(data: dict[str, Any], target: SetTarget, *, root: Path) -> None:
     """Validate the post-edit file against the real source constraints for that kind."""
     schema = ac.read_schema(ac.default_schema_path(root))
@@ -688,13 +780,27 @@ def validate_target_tree(data: dict[str, Any], target: SetTarget, *, root: Path)
         ac.require_schema_version(data, target.path, required=False)
         ac.validate_tree(data, schema, label=str(target.path), partial=True)
         ac.validate_context_budget(data, path=target.path)
+        ac._validate_catalog_domains(data, target.path)
         ac.reject_duplicate_services(data.get("service"), label=str(target.path))
         return
     if target.kind == "unified":
         ac.require_schema_version(data, target.path, required=True)
         ac.validate_tree(data, schema, label=str(target.path))
         ac.validate_context_budget(data, path=target.path)
+        ac._validate_catalog_domains(data, target.path)
         ac.reject_duplicate_services(data.get("service"), label=str(target.path))
+        return
+    if target.kind == "legacy_context":
+        projected = {"context_budget": data}
+        ac.validate_context_budget(projected, path=target.path)
+        return
+    if target.kind == "legacy_key":
+        ac.require_schema_version(data, target.path, required=True)
+        ac.validate_tree(data, ac.read_catalog_schema(root), label=str(target.path))
+        try:
+            catalog.validate_catalog_semantics(data, path=target.path)
+        except catalog.CatalogValidationError as error:
+            raise EditError(str(error)) from error
         return
     if target.kind == "legacy_routing":
         # Full legacy shape, including unrelated [[service]] entries.
@@ -767,10 +873,21 @@ def set_scalar(
     root = (root or ac.repo_root_from_here()).resolve()
     home_path = (home if home is not None else Path.home()).resolve()
     resolved = resolve_set_target(dotted, target=target, root=root, home=home_path)
+    parts = split_dotted_path(dotted)
+    domains = _metadata_domain(parts)
+    if parts[0] == "context_budget" and not ac.is_num(value):
+        raise EditError("context budget values must be finite numeric scalars")
+    if parts[0] == "keys" and not isinstance(value, str):
+        raise EditError("key metadata values must be strings")
 
     with _file_lock(resolved.path):
+        if parts[0] == "keys":
+            current = ac.load_effective(root=root, home=home_path, domains=ac.CATALOG_DOMAINS)
+            _validate_metadata_effective(current.data, root=root, domains=ac.CATALOG_DOMAINS)
+            if parts[1] not in current.data.get("keys", {}):
+                raise EditError(f"key {parts[1]!r}: creating a new registry identity is not supported")
         mode: int | None = None
-        exists = resolved.path.exists()
+        exists = ac.input_present(resolved.path)
         if not exists:
             if resolved.kind != "local":
                 raise EditError(
@@ -786,7 +903,8 @@ def set_scalar(
             text_before, mode = _read_text_regular(resolved.path)
             before_tree = _parse_file_tree(text_before, resolved.path)
             try:
-                before_value = get_from_tree(before_tree, resolved.file_parts)
+                before_value = (before_tree["key"][_key_row_index(before_tree, resolved.key_name)][resolved.file_parts[0]]
+                                if resolved.kind == "legacy_key" else get_from_tree(before_tree, resolved.file_parts))
                 missing_before = False
             except KeyError:
                 before_value = None
@@ -799,6 +917,9 @@ def set_scalar(
                 )
 
         if not missing_before and values_equal(before_value, value):
+            if domains is not None:
+                validate_target_tree(before_tree, resolved, root=root)
+                _validate_metadata_candidate(before_tree, resolved, root=root, home=home_path, domains=domains)
             return SetResult(
                 target=resolved,
                 before=before_value,
@@ -813,7 +934,7 @@ def set_scalar(
 
         # If the value exists in the parsed tree but we could not find a simple
         # assignment (dotted key / inline / etc.), refuse rather than double-write.
-        if not missing_before:
+        if not missing_before and resolved.kind != "legacy_key":
             hit = find_scalar_assignment(
                 text_before, resolved.file_parts[:-1], resolved.file_parts[-1]
             )
@@ -823,15 +944,23 @@ def set_scalar(
                     "table key assignment; refused"
                 )
 
-        text_after = apply_scalar_edit(text_before, resolved.file_parts, value)
+        text_after = (_legacy_key_edit(text_before, _key_row_index(before_tree, resolved.key_name),
+                                       resolved.file_parts[0], value) if resolved.kind == "legacy_key" else
+                      apply_scalar_edit(text_before, resolved.file_parts, value))
         after_tree = _parse_file_tree(text_after, resolved.path)
-        expected = set_in_tree(before_tree, resolved.file_parts, value)
+        if resolved.kind == "legacy_key":
+            expected = copy.deepcopy(before_tree)
+            expected["key"][_key_row_index(expected, resolved.key_name)][resolved.file_parts[0]] = copy.deepcopy(value)
+        else:
+            expected = set_in_tree(before_tree, resolved.file_parts, value)
         if not values_equal(after_tree, expected):
             raise EditError(
                 f"{dotted}: edit verification failed "
                 "(parsed tree is not exactly the requested scalar change)"
             )
         validate_target_tree(after_tree, resolved, root=root)
+        if domains is not None:
+            _validate_metadata_candidate(after_tree, resolved, root=root, home=home_path, domains=domains)
 
         if not dry_run:
             _atomic_replace(resolved.path, text_after, mode=mode)

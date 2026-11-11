@@ -385,3 +385,13 @@ in the catalog, collect/set batch. S4b cron reconcile write path landed with
 systemd (2026-11-10); launchd/`paseo schedule` reconcile write paths remain later work.
 Follow-up: tighten `--apply-system` with an ownership generation / read-back
 lock if multi-agent installs share a machine.
+
+## Bounded key metadata edits (2026-11-10)
+
+`ade-config set keys.NAME.FIELD VALUE` supports string `create_url`, `verify`,
+`expiry` and `notes` for an existing valid registry identity. Local targets
+overlay metadata; repo targets edit unified keys when present or the unique
+legacy `[[key]]` row. The writer validates the final overlaid catalog and
+changes no credential or verification-outcome state. New identities,
+`verify_argv`, `components`, installation choices and other array fields remain
+refused. See [the scalar contract](config-migration.md#c3-bounded-metadata-writes-2026-11-10).

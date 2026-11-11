@@ -132,7 +132,7 @@ B12. **Context-budget reader adoption (2026-11-10).** Default
     refuse before effects, including `--dir` and normalized default directories.
     Explicit legacy reads keep their old type behavior. This unit adds no budget
     limits or schedule changes. `ade-config check/get/diff` includes the domain;
-    `set context_budget.*` refuses until a separate writer adoption.
+    The bounded scalar writer adoption below adds numeric budget edits.
 
 ## C. CLI
 
@@ -157,8 +157,8 @@ no alternate supposedly absent filename is probed or loaded. The pure loader's
 ### C2. `set` (2026-11-08)
 
 `ade-config set` is the comment-preserving atomic scalar writer (`bin/ade_config_edit.py`).
-Install/keys and context_budget paths explicitly refuse `set` for every target until a separate
-writer adoption; adding their read schema does not enable edits to those domains.
+Install arrays and unsupported key/context fields explicitly refuse `set`.
+Numeric budget leaves and four existing-key string metadata fields are supported below.
 
 | Flag | Behaviour |
 | --- | --- |
@@ -203,6 +203,44 @@ the file it edits.
 check/get/diff stay pure: no config writes, no secret resolution, no
 network/auth/scheduling probes. `--home` points local.toml resolution at a temp
 tree in tests; tests must not write the real HOME config or flip live lead flags.
+
+### C3. Bounded metadata writes (2026-11-10)
+
+Supported scalar paths are `context_budget.budget.ROW` and
+`context_budget.budget.DIRECTORY.ROW` (finite numbers), and
+`keys.NAME.create_url|verify|expiry|notes` (strings, existing registry identities
+only). TOML quoted path parts address literal directory/key names, for example:
+
+```sh
+ade-config set 'context_budget.budget."~".memory' 14000
+ade-config set keys.EXAMPLE_API_KEY.expiry unknown --string --target repo
+```
+
+Local writes use `local.toml`; a missing local file may be created. Repo writes
+use the existing unified file when present, otherwise `context-budget.toml`
+with the prefix stripped or the unique existing `[[key]]` row selected by name
+in `install.toml`. A named legacy key edit changes exactly one scalar field;
+array creation, ordering, indices, component/job choices and other array edits
+remain unsupported. Key identities, new registry rows, credential/value fields,
+`components`, `verify_argv` and `context_budget.dirs` are refused. `verify` is a
+human annotation; writing it does not record an authenticated verification result.
+
+Before replacement **and before a no-op success**, the writer validates the raw
+target and the final merged effective metadata through the normal loader using
+one in-memory candidate snapshot. Ignored raw unified/local declarations still
+validate; malformed unrelated declarations cannot be hidden by selecting another
+domain. Context defaults and directory-label collisions use the same pure
+normalizer as the runtime checker. Key edits require an existing valid effective
+registry and a final complete catalog satisfying its schema and semantics.
+No probes, key retrieval, installs, schedules or acceptance writes occur.
+
+Quoted header/key decoding uses stdlib TOML parsing of a single key chain;
+unsupported assignment forms still refuse. Every edit must reparse to exactly
+the expected type-aware whole tree, preserving unrelated text. Atomic replacement,
+mode preservation, locks, dry runs and unchanged-file mtime on a no-op retain
+the existing scalar writer contract. A set remains `recorded-only`; running
+consumers adopt it only on their own next load. Metadata `get` and `set` share the same bounded quoted path syntax; existing
+service selectors keep their separate behavior. `set` reports its result directly.
 
 ## D. Install catalog (transitional, 2026-11-09)
 

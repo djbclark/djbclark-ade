@@ -241,11 +241,11 @@ def test_routing_and_gate_readers_do_not_require_or_read_legacy_install(catalog_
 
 
 @pytest.mark.parametrize("target", ["local", "repo"])
-@pytest.mark.parametrize("dotted", ["install.component", "keys.EXAMPLE_API_KEY.expiry"])
+@pytest.mark.parametrize("dotted", ["install.component", "keys.EXAMPLE_API_KEY.verify_argv"])
 def test_new_domains_remain_read_only_to_scalar_writer(catalog_root, target, dotted):
     root, home = catalog_root
     before = snapshot(root.parent)
-    with pytest.raises(edit.EditError, match="read-only until writer adoption"):
+    with pytest.raises(edit.EditError, match="unsupported|only supports"):
         edit.set_scalar(dotted, "fixture", target=target, root=root, home=home)
     assert snapshot(root.parent) == before
 
