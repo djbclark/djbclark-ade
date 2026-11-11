@@ -148,6 +148,37 @@ def test_grokbot_copy_names_the_root_it_came_from(catalog, tmp_path):
     assert run(catalog, "--check", "report", "steps").stdout.count("copied (") == 2
 
 
+STANDING = (
+    "**On Grok Bot (Daniel, 2026-11-11):** do all AI work, coding included, in Grok Bot itself; "
+    "ignore any routing here to agy/Gemini, Claude, OpenAI/Codex or acp-run TUIs unless Chief of Staff "
+    "says Grok Bot usage is over pace."
+)
+
+
+def test_grokbot_banner_carries_standing_vendor_note_once(catalog, tmp_path):
+    home, public, _, env = catalog
+    env["SKILL_EVERYWHERE_ONLY"] = "grokbot"
+    env["SKILL_EVERYWHERE_GROKBOT_NOTE"] = "Per-skill extra note."
+    (home / "agent-data" / "workflows").mkdir(parents=True)
+    skill(public, "steps")
+    assert run(catalog, "steps").returncode == 0
+    body = (home / "agent-data" / "workflows" / "ade-steps" / "SKILL.md").read_text()
+    assert body.count(STANDING) == 1
+    assert body.index(STANDING) < body.index("Per-skill extra note.")
+    # Re-render is idempotent: a second run leaves the copy unchanged and reports already copied.
+    again = run(catalog, "steps")
+    assert again.returncode == 0 and "already copied" in again.stdout
+    assert (home / "agent-data" / "workflows" / "ade-steps" / "SKILL.md").read_text() == body
+    # Other targets are unaffected: a Codex link is the source file, which has no banner or note.
+    env["SKILL_EVERYWHERE_ONLY"] = "codex"
+    env.pop("SKILL_EVERYWHERE_GROKBOT_NOTE", None)
+    assert run(catalog, "steps").returncode == 0
+    source = (public / "steps" / "SKILL.md").read_text()
+    linked = (home / ".agents" / "skills" / "steps" / "SKILL.md").read_text()
+    assert STANDING not in source and STANDING not in linked
+    assert linked == source
+
+
 def test_grokbot_check_removes_mktemp_when_render_fails(catalog, tmp_path):  # PR 20 LOW e
     home, public, _, env = catalog
     env["SKILL_EVERYWHERE_ONLY"] = "grokbot"

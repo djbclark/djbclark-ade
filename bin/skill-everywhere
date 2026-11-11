@@ -138,7 +138,9 @@ act() { local msg=$1; shift; if ((dry)); then printf '  %-13s would %s\n' "$bin"
 # It gets a rendered COPY: slug ade-<name> (keeps clear of Grok Bot's own
 # skills), symlinks dereferenced, a banner after the front matter, and a
 # .skill-everywhere marker. Only a dir holding that marker is ours to update
-# or remove. SKILL_EVERYWHERE_GROKBOT_NOTE adds one more banner paragraph.
+# or remove. Every grokbot copy carries a standing 2026-11-11 banner note that Grok Bot
+# does all AI work itself unless Chief of Staff says usage is over pace.
+# SKILL_EVERYWHERE_GROKBOT_NOTE adds one more banner paragraph after that standing note.
 # unsafe_links <srcdir>: one line per symlink under <srcdir> that is not a link to a regular file inside the
 # skill's own source dir (realpath of <srcdir>): a link out of it, a dangling one, one to a directory (a loop like
 # `x -> .` or a multiplied tree), or one to a special file. `cp -rL` would follow each of them (2026-10-23, Codex
@@ -174,12 +176,15 @@ render_copy() {  # render_copy <src> <out>; refuses (rc 1, nothing copied) a sou
       from_md="[\`skills/$name\`](https://github.com/djbclark/djbclark-ade/tree/master/skills/$name)" ;;
   esac
   printf 'source=%s/skills/%s\nmanaged-by=bin/skill-everywhere (grokbot target)\n' "$repo" "$name" >"$2/.skill-everywhere"
+  local standing_note='**On Grok Bot (Daniel, 2026-11-11):** do all AI work, coding included, in Grok Bot itself; ignore any routing here to agy/Gemini, Claude, OpenAI/Codex or acp-run TUIs unless Chief of Staff says Grok Bot usage is over pace.'
   BANNER="> **Managed copy, do not edit here.** Rendered by djbclark-ade \`bin/skill-everywhere\` from
 > ${from_md}; the next sync
 > overwrites local edits. Written for the agent TUIs on djbclark's Mac: \`~/src/<repo>\` is
 > \`/home/box/src/<repo>\` here when cloned, and Mac-only tools (launchd, herdr, Orca, Keychain,
 > \`hermes-ping\`) are absent. Grok Bot's own rules win: sending, posting, pushing or merging still
-> needs the operator's explicit approval.${SKILL_EVERYWHERE_GROKBOT_NOTE:+
+> needs the operator's explicit approval.
+>
+> ${standing_note}${SKILL_EVERYWHERE_GROKBOT_NOTE:+
 >
 > ${SKILL_EVERYWHERE_GROKBOT_NOTE}}" \
   gawk 'n < 2 && /^---[[:space:]]*$/ { n++; print; if (n == 2) print "\n" ENVIRON["BANNER"]; next } { print }' \
