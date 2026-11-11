@@ -1,5 +1,7 @@
 # Operator batch for the final merge (compiled 2026-11-07)
 
+> **2026-11-11 preservation notice:** This document records historical slim-down work. Later restorations and dependency fixes supersede several removals. Read the [change inventory and preservation register](change-audit-2026-11-11.md), especially section B, before applying any deletion/uninstall step. `/watch load`, Pi, Firecrawl routing and required `agy` are among the intentional later changes; this is not authorization to revert them.
+
 Compiled from `docs/slim/log.md`, the twelve reports under `docs/slim/reports/` and `PLAN.md` F (Wave 6). Four phases, labelled A to D; every item is one line: what, the exact command where a source gives one, the source in parentheses, "(decision)" where you choose. "Unverified" is kept wherever a source says it. Nothing here was run; the commands are copied, not tested.
 
 Two placements differ from a literal reading of the request, both because a source says so:
