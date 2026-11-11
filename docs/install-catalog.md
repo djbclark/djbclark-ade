@@ -354,8 +354,10 @@ Pass `--ade` only with a durable checkout (`~/src/djbclark-ade`); never with a l
   This mutex covers concurrent live owners, not crash/orphan admission or
   recovery. A failed terminal save or unexpected runner exception may leave
   `pending` evidence, and a child could survive an owner crash. Those existing
-  unknown outcomes are preserved; this change grants no retry/adoption authority
-  and does not make the future bootstrap ledger bridge safe.
+  unknown outcomes are preserved. Existing explicit apply eligibility is unchanged;
+  this is not a new pending/orphan admission gate and introduces no automatic
+  retry or recovery. The future bootstrap ledger bridge is still unsafe without
+  its separate crash/admission work.
 - `ade-user-install uv|just|cursor-cli|hermes|link <name>|sudo-secretspec` fetches
   release binaries / vendor packages, symlinks a repo `bin/` tool, or stages
   Linux sudo-secretspec media into the prefix. No `shell=True`, no root. Cursor
