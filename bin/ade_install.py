@@ -1755,6 +1755,13 @@ def build_apply_steps(
         if obs.status == "ok" and not force:
             steps.append(ApplyStep(cid, "skip", None, f"already present ({obs.detail})"))
             continue
+        if obs.status != "missing" and not force:
+            steps.append(ApplyStep(
+                cid, "blocked", None,
+                f"installation presence is {obs.status}, not known missing ({obs.detail}); "
+                "repair/verify the probe or explicitly request repair with --force",
+            ))
+            continue
         if row.get("needs_system"):
             sys_raw = pick_system_argv(row)
             if sys_raw:

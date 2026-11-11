@@ -19,7 +19,9 @@ agents/claude/settings.json.tmpl is under --root, checks live
 credential-bak delete-after (WARN approaching / FAIL past; never deletes);
 never repairs or mutates settings. Keys runs sudo-secretspec check, then per-key
 verify_argv under sudo-secretspec run when recorded (no values printed).
-Apply defaults to --dry-run; --yes runs user install_argv. --system --dry-run /
+Apply defaults to --dry-run; --yes runs user install_argv for known missing
+components. Unknown/error observations block unless --force explicitly requests
+repair; --force retains component choices and system authority. --system --dry-run /
 --print-system-argv preview system_argv. Live system_argv needs --yes --system
 --apply-system (default refuse). Secrets are never read.
 Default catalog reads adopt effective install/keys metadata; explicit library
@@ -456,7 +458,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--force",
         action="store_true",
-        help="re-run install_argv even when presence probe is ok",
+        help="explicit repair/reinstall when present or probe is unknown/error; retains system authority checks",
     )
     ap.add_argument(
         "--system",

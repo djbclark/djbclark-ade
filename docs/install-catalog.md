@@ -293,6 +293,14 @@ Pass `--ade` only with a durable checkout (`~/src/djbclark-ade`); never with a l
 - `apply` defaults to **dry-run**. `--yes` executes user `install_argv` for
   expected missing components (or `--force`). Writes an atomic ledger under
   `~/.local/state/djbclark-ade/install/ledger.json` (or `ADE_INSTALL_STATE_DIR`).
+  As of **2026-11-11**, default apply requires a known `missing` observation:
+  an unknown presence, failed probe, timeout or probe execution error is
+  `blocked` (exit 1), with no installer command or component ledger write.
+  A healthy component still skips. `--force` explicitly requests repair or
+  reinstallation despite the observation; it does not choose an unchosen
+  component, enable observe-only plugins, bypass missing recipes or relax any
+  system-execution flag/ledger requirement. Repairing a probe may establish
+  presence without authorizing replacement.
   `--system --dry-run` previews `system_argv` as `would-system-install`;
   `--print-system-argv` dumps the same argv print-only. Live `system_argv`
   requires `--yes --system --apply-system` (argv list via subprocess, never
