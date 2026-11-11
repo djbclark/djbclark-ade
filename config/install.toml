@@ -663,7 +663,8 @@ platforms = ["mac", "linux"]
 name = "ANTHROPIC_API_KEY"
 components = ["pi"]
 create_url = "https://console.anthropic.com/settings/keys"
-verify = "UNKNOWN"
+verify = "Authenticated GET /v1/models metadata only; not inference entitlement or quota"
+verify_argv = ["{bin}/ade-install", "verify-key", "anthropic"]
 expiry = "unknown"
 
 [[key]]
@@ -679,7 +680,8 @@ notes = "API credits through Pi; distinct from Codex monthly"
 name = "GEMINI_API_KEY"
 components = ["pi"]
 create_url = "https://aistudio.google.com/apikey"
-verify = "UNKNOWN"
+verify = "Authenticated GET /v1beta/models using key header only; not inference entitlement or quota"
+verify_argv = ["{bin}/ade-install", "verify-key", "gemini"]
 expiry = "unknown"
 
 [[key]]
@@ -694,7 +696,8 @@ expiry = "unknown"
 name = "DEEPSEEK_API_KEY"
 components = ["pi"]
 create_url = "https://platform.deepseek.com/api_keys"
-verify = "UNKNOWN"
+verify = "Authenticated GET /models metadata only; not inference entitlement or quota"
+verify_argv = ["{bin}/ade-install", "verify-key", "deepseek"]
 expiry = "unknown"
 
 [[key]]

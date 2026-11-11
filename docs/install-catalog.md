@@ -72,33 +72,57 @@ optional `verify_argv`, expiry=unknown|…). Doctor never reads
 key validation. Recorded login commands (2026-11-09): `claude auth login`,
 `codex login`, `agent login` — doctor does not execute them.
 
-Two fixed S3b metadata probes are implemented through `ade-install verify-key
-openai|openrouter`, referenced by those keys' `verify_argv` entries. This helper
+Five fixed S3b metadata probes are implemented through `ade-install verify-key
+PROVIDER` (`openai`, `openrouter`, `anthropic`, `gemini`, `deepseek`), referenced
+by those keys' `verify_argv` entries. This helper
 is intended to run under the existing `sudo-secretspec run` boundary, reads only
-the selected key from its injected environment, sends it only in the
-Authorization header, and emits no stdout/stderr. No key/URL value flags exist.
+the selected key from its injected environment and emits no stdout/stderr.
+Keys are sent only in Bearer Authorization, except Gemini's `x-goog-api-key`
+header; no query-string secret or key/URL value flags exist.
 
 | Key | Fixed read-only request | Validated metadata shape |
 |---|---|---|
 | `OPENAI_API_KEY` | `GET https://api.openai.com/v1/models` | `object=list`, array of model objects/ids (empty allowed) |
 | `OPENROUTER_API_KEY` | `GET https://openrouter.ai/api/v1/key` | `data.is_free_tier` boolean and nonnegative finite `data.usage` |
+| `ANTHROPIC_API_KEY` | `GET https://api.anthropic.com/v1/models` | `data` model rows with `type=model`/id and boolean `has_more` |
+| `GEMINI_API_KEY` | `GET https://generativelanguage.googleapis.com/v1beta/models` | Explicit `models` array with `models/…` resource names |
+| `DEEPSEEK_API_KEY` | `GET https://api.deepseek.com/models` | `object=list`, array of model objects/ids |
 
 Provider contracts checked 2026-11-10: [OpenAI models list](https://developers.openai.com/api/reference/resources/models/methods/list)
 and [OpenRouter current key](https://openrouter.ai/docs/api/api-reference/api-keys/get-current-api-key).
+Additional fixed contracts: [Anthropic list models](https://platform.claude.com/docs/en/api/models/list)
+explicitly shows Bearer authentication plus `anthropic-version: 2026-10-21`;
+that is the implemented API contract, not a date-computed version.
+[Gemini authentication](https://aistudio.google.com/api-reference#authentication)
+documents header authentication, while [Gemini list models](https://aistudio.google.com/api-reference/models/list-models)
+documents the fixed GET and response. The query-key example is not used.
+[DeepSeek models](https://api-docs.deepseek.com/api/list-models/),
+[authentication](https://api-docs.deepseek.com/api/deepseek-api/) and
+[base URL](https://api-docs.deepseek.com/) document its model-list/Bearer contract.
 No actual credential requests were made during implementation. The helper
 makes at most one GET, uses a 10-second socket timeout (the existing outer
 key engine also bounds the process), reads at most 256 KiB plus one overflow
 byte and refuses redirects. It does not print response or exception bodies,
 model ids, key labels, balances or values; no inference call is made.
+Only the first page is checked; pagination tokens and `has_more` never cause
+extra requests. Explicit empty model arrays are accepted; missing/malformed
+arrays are not treated as successful verification.
 
 Helper exits: 0 authenticated metadata; 10 HTTP 401/403 or invalid header-value
 characters; 12 network/TLS/timeout, redirects and other HTTP failures (including
 429); 14 missing value; 1 malformed/oversized success data. Rate limits are not
 guessed to mean exhausted quota. Authentication success proves neither inference
 entitlement/funding nor subscription availability, routing eligibility or Pi
-acceptance. Remaining ten provider rows still have no probe; collect/delivery,
+acceptance. Other HTTP errors, including a provider's HTTP 400 key/configuration
+rejection, remain conservatively unsuccessful rather than parsed for an
+inferred quota/authentication diagnosis. Remaining seven provider rows still
+have no probe; collect/delivery,
 expiry interpretation and live acceptance remain unfinished. Component/key
 selection behavior is unchanged.
+
+The three-provider extension builds on #552's reviewed fixed transport. Its
+code tests use mocked responses only; no inference, billing or pool-acceptance
+claims are made. API credits and subscription pools remain separate.
 
 `ade-install keys` / `just keys` (2026-11-09 presence; 2026-11-10 verify) is
 setup-plan S3b check-then-verify:
@@ -134,7 +158,7 @@ ade-install update-plan [--root DIR] [--json]
 ade-install bootstrap [--root DIR] [--prefix DIR] [--dry-run|--yes] [--json]
 ade-install doctor [--root DIR] [--id ID ...] [--json]
 ade-install keys [--root DIR] [--json] [--keys-state PATH]
-ade-install verify-key openai|openrouter  # probe exit code only; normally under sudo-secretspec run
+ade-install verify-key PROVIDER  # one of the five fixed providers above; probe exit code only
 ade-install apply [--root DIR] [--json] [--dry-run|--yes] [--id ID ...] [--force]
                   [--system] [--print-system-argv] [--apply-system]
                   [--state-dir DIR] [--prefix DIR]

@@ -866,7 +866,7 @@ def verify_key_metadata(
     environ: Mapping[str, str] | None = None,
     opener: Callable[..., Any] | None = None,
 ) -> int:
-    """Two fixed authenticated metadata GETs; return existing verify exit codes.
+    """Fixed authenticated metadata GETs; return existing verify exit codes.
 
     Intended for verify_argv under sudo-secretspec run. No URL/key argv, body
     output, retries, inference requests or quota/acceptance decisions.
@@ -879,6 +879,9 @@ def verify_key_metadata(
     endpoints = {
         "openai": ("OPENAI_API_KEY", "https://api.openai.com/v1/models"),
         "openrouter": ("OPENROUTER_API_KEY", "https://openrouter.ai/api/v1/key"),
+        "anthropic": ("ANTHROPIC_API_KEY", "https://api.anthropic.com/v1/models"),
+        "gemini": ("GEMINI_API_KEY", "https://generativelanguage.googleapis.com/v1beta/models"),
+        "deepseek": ("DEEPSEEK_API_KEY", "https://api.deepseek.com/models"),
     }
     if provider not in endpoints:
         return 2
@@ -894,9 +897,15 @@ def verify_key_metadata(
             return None  # never forward Authorization to another request
 
     open_request = opener or urllib.request.build_opener(NoRedirect()).open
-    request = urllib.request.Request(
-        url, method="GET", headers={"Authorization": "Bearer " + key, "Accept": "application/json"},
-    )
+    headers = {"Accept": "application/json"}
+    if provider == "gemini":
+        headers["x-goog-api-key"] = key  # never put this value in the query string
+    else:
+        headers["Authorization"] = "Bearer " + key
+    if provider == "anthropic":
+        # Explicit current reference contract, not computed from the date.
+        headers["anthropic-version"] = "2026-10-21"
+    request = urllib.request.Request(url, method="GET", headers=headers)
     limit = 256 * 1024
     try:
         with open_request(request, timeout=10) as response:
@@ -925,11 +934,24 @@ def verify_key_metadata(
     if not isinstance(payload, dict):
         return 1
     data = payload.get("data")
-    if provider == "openai":
+    if provider in ("openai", "deepseek"):
         valid = payload.get("object") == "list" and isinstance(data, list) and all(
             isinstance(row, dict) and row.get("object") == "model"
             and isinstance(row.get("id"), str) and bool(row["id"])
             for row in data
+        )
+    elif provider == "anthropic":
+        valid = isinstance(data, list) and isinstance(payload.get("has_more"), bool) and all(
+            isinstance(row, dict) and row.get("type") == "model"
+            and isinstance(row.get("id"), str) and bool(row["id"])
+            for row in data
+        )
+    elif provider == "gemini":
+        models = payload.get("models")
+        valid = isinstance(models, list) and all(
+            isinstance(row, dict) and isinstance(row.get("name"), str)
+            and row["name"].startswith("models/") and len(row["name"]) > len("models/")
+            for row in models
         )
     else:
         usage = data.get("usage") if isinstance(data, dict) else None

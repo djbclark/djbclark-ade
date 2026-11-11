@@ -22,6 +22,12 @@ SPECS = {
     "openai": ("OPENAI_API_KEY", "https://api.openai.com/v1/models", {"object": "list", "data": []}),
     "openrouter": ("OPENROUTER_API_KEY", "https://openrouter.ai/api/v1/key",
                    {"data": {"is_free_tier": False, "usage": 0, "label": SECRET, "limit_remaining": 0}}),
+    "anthropic": ("ANTHROPIC_API_KEY", "https://api.anthropic.com/v1/models",
+                  {"data": [{"type": "model", "id": "fixture-model"}], "has_more": True}),
+    "gemini": ("GEMINI_API_KEY", "https://generativelanguage.googleapis.com/v1beta/models",
+               {"models": [{"name": "models/fixture-model"}], "nextPageToken": "not-followed"}),
+    "deepseek": ("DEEPSEEK_API_KEY", "https://api.deepseek.com/models",
+                 {"object": "list", "data": [{"object": "model", "id": "fixture-model"}]}),
 }
 
 
@@ -48,7 +54,14 @@ def test_fixed_get_headers_response_limit_and_no_output(provider, capsys):
         assert request.full_url == url
         assert request.get_method() == "GET"
         assert request.data is None
-        assert request.get_header("Authorization") == "Bearer " + SECRET
+        if provider == "gemini":
+            assert request.get_header("X-goog-api-key") == SECRET
+            assert request.get_header("Authorization") is None
+            assert "?" not in request.full_url
+        else:
+            assert request.get_header("Authorization") == "Bearer " + SECRET
+            assert request.get_header("X-goog-api-key") is None
+        assert request.get_header("Anthropic-version") == ("2026-10-21" if provider == "anthropic" else None)
         assert SECRET not in request.full_url
         assert timeout == 10
         return response
@@ -84,12 +97,30 @@ def test_network_tls_timeout_values_never_escape(error, capsys):
     assert capsys.readouterr() == ("", "")
 
 
+@pytest.mark.parametrize("provider", ["anthropic", "gemini", "deepseek"])
+@pytest.mark.parametrize("status,code", [(401, 10), (403, 10), (400, 12), (429, 12), (503, 12), (302, 12)])
+def test_added_provider_failures_remain_silent_and_conservative(provider, status, code, capsys):
+    name, url, _ = SPECS[provider]
+    opener = Mock(side_effect=urllib.error.HTTPError(url, status, SECRET, {}, io.BytesIO(SECRET.encode())))
+    assert ai.verify_key_metadata(provider, environ={name: SECRET}, opener=opener) == code
+    assert opener.call_count == 1
+    assert opener.call_args.args[0].full_url == url
+    assert capsys.readouterr() == ("", "")
+
+
 @pytest.mark.parametrize("provider,body", [
     ("openai", SECRET.encode()), ("openai", b"[]"), ("openai", b'{"object":"list","data":["bad"]}'),
     ("openai", b'{"data":[]}'), ("openai", b"x" * (256 * 1024 + 1)),
     ("openai", b'{"object":"list","data":[],"extra":NaN}'),
     ("openrouter", b'{"data":{}}'), ("openrouter", b'{"data":{"is_free_tier":true,"usage":true}}'),
     ("openrouter", b'{"data":{"is_free_tier":true,"usage":NaN}}'),
+    ("anthropic", b'{"data":[]}'),
+    ("anthropic", b'{"data":[],"has_more":1}'),
+    ("anthropic", b'{"data":[{"object":"model","id":"fixture"}],"has_more":false}'),
+    ("gemini", b'{}'), ("gemini", b'{"models":{}}'),
+    ("gemini", b'{"models":[{"name":"fixture"}]}'),
+    ("gemini", b'{"models":[{"name":"models/"}]}'),
+    ("deepseek", b'{"object":"list","data":[{"id":"fixture"}]}'),
 ])
 def test_malformed_success_is_error_not_authenticated(provider, body, capsys):
     name = SPECS[provider][0]
@@ -121,23 +152,25 @@ def test_catalog_engine_uses_secret_boundary_and_persists_only_status(tmp_path, 
             return subprocess.CompletedProcess(argv, 0, "", "")
         assert argv[:2] == ["sudo-secretspec", "run"]
         assert argv[argv.index("--") + 1:] in [
-            [str(REPO / "bin/ade-install"), "verify-key", "openai"],
-            [str(REPO / "bin/ade-install"), "verify-key", "openrouter"],
+            [str(REPO / "bin/ade-install"), "verify-key", provider] for provider in SPECS
         ]
         return subprocess.CompletedProcess(argv, 0, SECRET, SECRET)
     state = tmp_path / "keys.json"
     observations, rc = ai.keys_observe(catalog, runner=runner, keys_state_path=state)
     assert rc == 0
-    assert len(seen) == 3  # one bulk check and one request for each covered key
+    assert len(seen) == 6  # one bulk check and one request for each covered key
     assert rows["OPENAI_API_KEY"]["verify_argv"] == ["{bin}/ade-install", "verify-key", "openai"]
     assert rows["OPENROUTER_API_KEY"]["verify_argv"] == ["{bin}/ade-install", "verify-key", "openrouter"]
-    assert sum(bool(r.get("verify_argv")) for r in catalog.keys) == 2
+    for provider, (name, _, _) in SPECS.items():
+        assert rows[name]["verify_argv"] == ["{bin}/ade-install", "verify-key", provider]
+    assert sum(bool(r.get("verify_argv")) for r in catalog.keys) == 5
     assert SECRET not in state.read_text() and SECRET not in repr(observations)
     saved = json.loads(state.read_text())
     assert saved["keys"]["OPENAI_API_KEY"]["status"] == "ok"
 
 
-def test_cli_missing_key_is_silent_exit_only(tmp_path):
+@pytest.mark.parametrize("provider", SPECS)
+def test_cli_missing_key_is_silent_exit_only(tmp_path, provider):
     # An empty environment mapping is forced in-process before running the CLI;
     # no actual key or network source is consulted.
     code = '''
@@ -147,10 +180,10 @@ import ade_install
 original = ade_install.verify_key_metadata
 ade_install.verify_key_metadata = lambda p: original(p, environ={})
 path = sys.argv[2]
-sys.argv = [path, "verify-key", "openai"]
+sys.argv = [path, "verify-key", sys.argv[3]]
 runpy.run_path(path, run_name="__main__")
 '''
-    result = subprocess.run([sys.executable, "-I", "-B", "-c", code, str(REPO / "bin"), str(REPO / "bin/ade-install")],
+    result = subprocess.run([sys.executable, "-I", "-B", "-c", code, str(REPO / "bin"), str(REPO / "bin/ade-install"), provider],
                             cwd=tmp_path, capture_output=True, text=True, timeout=15)
     assert result.returncode == 14
     assert result.stdout == result.stderr == ""
