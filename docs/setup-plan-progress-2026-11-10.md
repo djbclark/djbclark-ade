@@ -1,5 +1,7 @@
 # Setup implementation progress — 2026-11-10
 
+Continuation: [verified merges and remaining work, 2026-11-11](setup-plan-progress-2026-11-11.md).
+
 ## A. Scope and evidence
 
 The setup plan is **not complete**, and its remaining work is **not all Mac-only**.
