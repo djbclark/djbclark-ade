@@ -341,6 +341,21 @@ Pass `--ade` only with a durable checkout (`~/src/djbclark-ade`); never with a l
   requires `--yes --system --apply-system` (argv list via subprocess, never
   `shell=True`); `--yes --system` alone still exits 2 (`refuse-system-exec`).
   Exit 0 ok, 1 blocked/failed, 2 system-exec refused / usage.
+  Live component execution holds a shared POSIX lock on the stable
+  `ledger.lock` file across fresh planning, ledger load, pending record, command
+  and terminal record. Concurrent applies serialize and recheck presence after
+  waiting; one stale snapshot cannot erase another operation's evidence. The
+  lock releases on errors and before scheduler reconciliation, which has its
+  own ownership ledger. Dry-run and blocked/skip/refused-only component plans
+  acquire no install lock and create no install state. `save_ledger` remains a
+  low-level atomic replacement whose read-modify-write callers must hold this
+  lock; all production callers do so.
+
+  This mutex covers concurrent live owners, not crash/orphan admission or
+  recovery. A failed terminal save or unexpected runner exception may leave
+  `pending` evidence, and a child could survive an owner crash. Those existing
+  unknown outcomes are preserved; this change grants no retry/adoption authority
+  and does not make the future bootstrap ledger bridge safe.
 - `ade-user-install uv|just|cursor-cli|hermes|link <name>|sudo-secretspec` fetches
   release binaries / vendor packages, symlinks a repo `bin/` tool, or stages
   Linux sudo-secretspec media into the prefix. No `shell=True`, no root. Cursor
