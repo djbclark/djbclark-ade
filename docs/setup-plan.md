@@ -300,8 +300,13 @@ Keys are saved with `sudo-secretspec`, and also through Paseo if it has a secure
      agent or a chat.
    - It verifies the key straight away and offers retry, skip or "skip all".
    - It ends with a table: each key, ok, skipped or failed.
-   - It reuses sudo-secretspec's `secrets-collect` where that already does the batch (it exists upstream; check its
-     flags when building). It is not reimplemented.
+   - Source inspection on 2026-11-11 confirmed the companion's supported entry command is
+     `sudo-secretspec set NAME --reason REASON`; its CLI has no `secrets-collect` verb.
+     Real-terminal stdin invokes its password prompt; nonterminal stdin instead reads a value stream.
+     Future ADE orchestration must require a real terminal and inherit its stdio directly, never collect
+     values in Python, pipes, chat or logs. See [install-catalog.md](install-catalog.md) for pinned evidence.
+   - The bounded `keys-plan` reporting unit describes cached outcomes and unresolved coverage only.
+     Interactive collection, retry/skip execution and delivery remain separate unfinished work.
    - In the AI-assisted setup (S3a.3) the agent stops at each key and the user types it into the prompt themselves.
 5. **Deliver to Paseo and the tools, only through a secure store.**
    - First probe whether Paseo has a secure credential store for provider keys (the Keychain on the Mac, a 0600 file

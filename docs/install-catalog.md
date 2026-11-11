@@ -436,3 +436,40 @@ legacy `[[key]]` row. The writer validates the final overlaid catalog and
 changes no credential or verification-outcome state. New identities,
 `verify_argv`, `components`, installation choices and other array fields remain
 refused. See [the scalar contract](config-migration.md#c3-bounded-metadata-writes-2026-11-10).
+
+## I. Cached key worklist (2026-11-11)
+
+`ade-install keys-plan --json` / `just keys-plan --json` reports cached outcomes
+from the existing nonsecret keys state. `--state PATH` selects another existing
+file; the default honors `ADE_KEYS_STATE_PATH`. It never refreshes observations,
+runs commands, contacts providers, reads credential values or writes files.
+Exit 0 means a report was produced, including missing/invalid cache; exit 1 means
+the catalog could not be loaded. Neither exit establishes healthy credentials.
+
+Every registered key remains visible. A key is selected only through a known
+component selected by existing install policy. Unchosen/never components are
+skipped; unlinked keys and unknown component references remain coverage gaps.
+The report lists selected component purposes and registry creation URLs, with
+unknown URLs and absent verify commands explicit. Registry URLs are metadata,
+not newly verified browser destinations.
+
+Cached `missing`, `invalid`, `no-quota` and `expiring` request credential review;
+`unreachable`/`error` request verification retry, not replacement. Unknown or
+absent outcomes remain unresolved. Cached `ok` avoids a replacement suggestion,
+but **freshness is always unverified, current verification unknown and
+setup_complete false**, even when every cached status is ok. Reports emit only
+allowlisted status tokens and validated UTC timestamps from state; raw details,
+extra fields and malformed data are not copied to output. No executable store
+argv or automatic replacement authorization is produced.
+
+Interactive collection remains unfinished. Source checked 2026-11-11 at
+sudo-secretspec `3c37fe3511e4907d643f35d615d27d898bf3b68a` confirms
+[`set NAME --reason REASON`](https://github.com/frdminc/sudo-secretspec/blob/3c37fe3511e4907d643f35d615d27d898bf3b68a/sudo-secretspec-cli/src/main.rs#L49),
+delegated by the [broker](https://github.com/frdminc/sudo-secretspec/blob/3c37fe3511e4907d643f35d615d27d898bf3b68a/sudo-secretspec-cli/src/broker.rs#L1139)
+to [`prompt_and_set`](https://github.com/frdminc/sudo-secretspec/blob/3c37fe3511e4907d643f35d615d27d898bf3b68a/secretspec/src/secrets.rs#L5722).
+TTY stdin invokes `inquire::Password`; non-TTY stdin reads value bytes. There is
+no companion `secrets-collect` CLI verb at that revision. Future collection must
+use direct inherited terminal stdio with no ADE value input/capture, preserve
+explicit choices and handle undeclared names without silently adding declarations.
+This audit does not establish installed runtime versions, Paseo secure storage,
+delivery/expiry policy or provider acceptance.
