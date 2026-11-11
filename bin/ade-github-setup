@@ -14,6 +14,9 @@ API-only read-back of manifest / environment / ruleset. Secrets never appear
 on argv (PEM / --private-key / client-secret refused); never print PEM.
 Uses config/github.toml only while config/ade.toml is absent.
 See docs/github-setup.md.
+
+apply --yes stops before App ID discovery and ruleset changes when environment
+or deployment-branch-policy setup fails (ruleset: refused-prerequisite; exit 1).
 """
 from __future__ import annotations
 

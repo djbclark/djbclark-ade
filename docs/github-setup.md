@@ -50,6 +50,12 @@ ade-github-setup apply [--root DIR] [--json] [--dry-run|--yes|--verify]
   - **refuses** browser App create/install confirm (setup-plan **S7**);
   - **refuses** private-key / client-id store (operator stdin redirect only;
     never prints PEM).
+  - **2026-11-10 prerequisite ordering:** when environment creation/policy or
+    deployment-branch-policy setup fails, retains the original failure and
+    reports `ruleset: refused-prerequisite` (exit 1). App ID discovery and all
+    ruleset reads/writes are skipped, so a gate cannot be activated downstream
+    of a known failed environment prerequisite. Repair that failure before
+    retrying. Prior successful environment changes are not rolled back.
 - **apply --verify** — API-only read-back of local manifest + environment +
   ruleset required checks (no throwaway T0–T3b PRs; those stay operator /
   later).
