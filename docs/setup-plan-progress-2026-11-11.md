@@ -81,8 +81,10 @@ State at 2026-11-12 (live `gh` snapshot; re-verify before acting):
 3. [#561](https://github.com/djbclark/djbclark-ade/pull/561): open, in fix; shared
    installer-ledger locking so concurrent operations keep each other's evidence.
    Python acquisition remains a later unit.
-4. #567 (native self-compaction/self-handoff) was closed unmerged on 2026-11-12;
-   #564, #565 and #569 are open. [#569](https://github.com/djbclark/djbclark-ade/pull/569)
+4. [#567](https://github.com/djbclark/djbclark-ade/pull/567) (native
+   self-compaction/self-handoff): in fix in the 2026-11-12 wave (`gh pr view 567`
+   reports `CLOSED` unmerged at `2026-11-12T17:04:55Z`); #564, #565 and #569
+   are open (2026-11-12 snapshot). [#569](https://github.com/djbclark/djbclark-ade/pull/569)
    hands cloud continuation to local agents: follow its
    `docs/handoffs/cloud-to-local-2026-11-12/` handoff once merged, not this file's
    resume prompt alone.
@@ -109,8 +111,9 @@ confirmation. See [the Wave 6 continuation](slim/wave6-cloud-continuation-2026-1
 Continue djbclark/djbclark-ade; do not stop at this checkpoint.
 Read AGENTS.md, docs/setup-plan.md, docs/setup-plan-progress-2026-11-11.md,
 the prior completion matrix and the Wave 6 continuation. Fetch master and
-verify actual PR, worktree, claim, agent and process states. #550–#558 merged
-(2026-11-12 snapshot); check #559/#561 and the local handoff (#569) before overlap.
+verify actual PR, worktree, claim, agent and process states. #550–#558, #562,
+#563, #566 and #568 merged (2026-11-12 snapshot); check #559, #561 and #567 (in fix)
+plus the local handoff (#569) before overlap.
 Resume existing owned work safely or create a fresh exclusively claimed WT.
 Use available independent exact-head reviewers when a provider is unavailable;
 preserve required CI/owner-trust checks. No invented approval or new waiver.
