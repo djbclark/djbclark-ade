@@ -99,6 +99,32 @@ def cmd_apply(_args: argparse.Namespace) -> int:
     return 2
 
 
+def cmd_renew(args: argparse.Namespace) -> int:
+    """The one authorized mutation: renew the user interaction limit."""
+    import ade_harden_coverage as cov
+
+    try:
+        cfg = ah.load_config(root=Path(args.root) if args.root else None)
+        plan = cov.renew_interaction_limits(
+            cfg, reader=ah._default_runner, dry_run=not args.apply
+        )
+    except ah.HardenError as e:
+        print(str(e), file=sys.stderr)
+        return 1
+    shown = {
+        k: plan[k]
+        for k in ("renew", "reason", "dry_run", "wrote", "readback_ok")
+        if k in plan
+    }
+    if args.json:
+        _print_json(shown)
+    else:
+        print("ade-harden renew: " + json.dumps(shown, sort_keys=True))
+    if plan.get("wrote") and not plan.get("readback_ok"):
+        return 1
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     raw = list(sys.argv[1:] if argv is None else argv)
     try:
@@ -157,6 +183,19 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--yes", action="store_true", help="refused")
     ap.add_argument("--dry-run", action="store_true", help="ignored; apply refused")
     ap.set_defaults(func=cmd_apply)
+
+    rn = sub.add_parser(
+        "renew",
+        parents=[shared],
+        help="renew the user interaction limit (dry-run unless --apply)",
+    )
+    rn.add_argument("--json", action="store_true")
+    rn.add_argument(
+        "--apply",
+        action="store_true",
+        help="perform the PUT; without it, report only",
+    )
+    rn.set_defaults(func=cmd_renew)
 
     args = parser.parse_args(raw)
     args.root = getattr(args, "root", None)

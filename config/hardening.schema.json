@@ -42,6 +42,22 @@
         "repo": {
           "type": "array",
           "items": { "$ref": "#/$defs/repo" }
+        },
+        "forgejo": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["base_url"],
+          "properties": {
+            "base_url": { "type": "string", "pattern": "^https://" }
+          }
+        },
+        "canaries": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["corpus"],
+          "properties": {
+            "corpus": { "type": "string", "minLength": 1 }
+          }
         }
       }
     }

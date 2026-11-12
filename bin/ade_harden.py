@@ -227,6 +227,26 @@ def _validate_hardening(data: dict[str, Any], *, path: Path) -> list[str]:
                 errors.append(
                     f"{path}: interaction_limits.expiry invalid: {expiry!r}"
                 )
+    forgejo = hard.get("forgejo")
+    if forgejo is not None:
+        if (
+            not isinstance(forgejo, dict)
+            or not isinstance(forgejo.get("base_url"), str)
+            or not forgejo["base_url"].startswith("https://")
+        ):
+            errors.append(
+                f"{path}: hardening.forgejo.base_url must be an https URL"
+            )
+    canaries = hard.get("canaries")
+    if canaries is not None:
+        if (
+            not isinstance(canaries, dict)
+            or not isinstance(canaries.get("corpus"), str)
+            or not canaries["corpus"].strip()
+        ):
+            errors.append(
+                f"{path}: hardening.canaries.corpus must be a non-empty path"
+            )
     repos = hard.get("repo") or []
     if not isinstance(repos, list):
         errors.append(f"{path}: [[hardening.repo]] must be an array")
@@ -1122,6 +1142,8 @@ def observe(
     network: bool = True,
     runner: Runner | None = None,
     now: datetime | None = None,
+    canary_runner: Callable[[list[str], str], "subprocess.CompletedProcess[str]"]
+    | None = None,
 ) -> tuple[list[DriftFinding], int]:
     """Observe-only drift check. Exit 1 on drift/missing/uncovered; never writes."""
     findings: list[DriftFinding] = [
@@ -1152,29 +1174,165 @@ def observe(
         findings.extend(observe_repo(cfg, row, runner=run))
     findings.extend(observe_interaction_limits(cfg, runner=run, now=now))
     findings.extend(observe_inventory(cfg, runner=run))
-    findings.append(
-        DriftFinding(
-            target="forgejo",
-            setting="forgejo",
-            wanted=None,
-            found=None,
-            status="deferred",
-            detail="Forgejo drift checks deferred (no token in this unit)",
-        )
-    )
-    findings.append(
-        DriftFinding(
-            target="s5a",
-            setting="injection_gate",
-            wanted=None,
-            found=None,
-            status="deferred",
-            detail="S5a injection-gate canary deferred (operator 2026-11-08)",
-        )
+    findings.extend(
+        _coverage_findings(cfg, runner=run, now=now, canary_runner=canary_runner)
     )
 
     bad = {f.status for f in findings} & {"drift", "missing", "uncovered", "error"}
     return findings, (1 if bad else 0)
+
+
+def _default_canary_runner(
+    argv: list[str], text: str
+) -> "subprocess.CompletedProcess[str]":
+    """Run the gate with the canary payload on stdin. Never logged."""
+    return subprocess.run(
+        argv, input=text, capture_output=True, text=True, check=False
+    )
+
+
+def _coverage_findings(
+    cfg: HardenConfig,
+    *,
+    runner: Runner,
+    now: datetime | None,
+    canary_runner: Callable[[list[str], str], "subprocess.CompletedProcess[str]"]
+    | None = None,
+) -> list[DriftFinding]:
+    """S6 coverage: Forgejo read-back, the renewal decision, the gate canary.
+
+    Imported lazily so the observe-only core does not depend on the coverage
+    module at import time. Read-only: the renewal is reported, never
+    performed, and the canary runs only when a corpus path is configured.
+    A missing corpus is ``deferred``, not a pass.
+    """
+    import ade_harden_coverage as cov
+
+    findings: list[DriftFinding] = []
+    forgejo = cfg.hardening.get("forgejo")
+    if isinstance(forgejo, dict) and forgejo.get("base_url"):
+        base = str(forgejo["base_url"])
+        for row in cfg.repos:
+            findings.extend(
+                cov.observe_forgejo_repo(cfg, row, runner=runner, base_url=base)
+            )
+        if not cfg.repos:
+            findings.append(
+                DriftFinding(
+                    target="forgejo",
+                    setting="forgejo",
+                    wanted="repos",
+                    found=[],
+                    status="ok",
+                    detail="forgejo configured; no [[hardening.repo]] rows",
+                )
+            )
+    else:
+        findings.append(
+            DriftFinding(
+                target="forgejo",
+                setting="forgejo",
+                wanted=None,
+                found=None,
+                status="deferred",
+                detail="Forgejo not configured (hardening.forgejo.base_url unset)",
+            )
+        )
+
+    il = cfg.interaction_limits
+    current, _detail = _gh_json(
+        runner, ["api", "user/interaction-limits"], api_version=cfg.api_version
+    )
+    plan = cov.renewal_plan(
+        current if isinstance(current, dict) else None,
+        want_limit=str(il.get("limit", "collaborators_only")),
+        want_expiry=str(il.get("expiry", DEFAULT_INTERACTION_EXPIRY)),
+        min_days=int(il.get("min_remaining_days", 14)),
+        now=now or datetime.now(timezone.utc),
+    )
+    # Due renewal is drift so the scheduled check's notification fires; the
+    # write itself is `ade-harden renew --apply`, never observe.
+    findings.append(
+        DriftFinding(
+            target="user",
+            setting="interaction_limits.renewal",
+            wanted="renew only inside the window, via ade-harden renew",
+            found=plan["reason"],
+            status="drift" if plan["renew"] else "ok",
+            detail="observe never renews",
+            remediation=None
+            if not plan["renew"]
+            else interaction_limits_remediation(
+                str(il.get("expiry", DEFAULT_INTERACTION_EXPIRY))
+            ),
+        )
+    )
+
+    canaries = cfg.hardening.get("canaries")
+    corpus = canaries.get("corpus") if isinstance(canaries, dict) else None
+    if not corpus:
+        findings.append(
+            DriftFinding(
+                target="s5a",
+                setting="injection_gate",
+                wanted="benign + injection canary",
+                found=None,
+                status="deferred",
+                detail="no canary corpus configured (hardening.canaries.corpus)",
+            )
+        )
+        return findings
+    path = Path(str(corpus))
+    if not path.is_file():
+        findings.append(
+            DriftFinding(
+                target="s5a",
+                setting="injection_gate",
+                wanted="readable canary corpus",
+                found=str(path),
+                status="unknown",
+                detail="canary corpus path is not a file",
+            )
+        )
+        return findings
+
+    run_canary = canary_runner or _default_canary_runner
+
+    def classify(text: str, surface: str) -> dict[str, Any]:
+        proc = run_canary(
+            [
+                sys.executable,
+                "-I",
+                str(BIN / "ade-injection-gate"),
+                "classify",
+                "--surface",
+                surface,
+            ],
+            text,
+        )
+        raw = (proc.stdout or "").strip()
+        try:
+            data = json.loads(raw) if raw else None
+        except json.JSONDecodeError:
+            data = None
+        if not isinstance(data, dict):
+            return {"status": "unavailable", "decide": "escalate"}
+        return data
+
+    try:
+        findings.extend(cov.gate_canary(path, classify=classify))
+    except HardenError as e:
+        findings.append(
+            DriftFinding(
+                target="s5a",
+                setting="injection_gate",
+                wanted="valid canary corpus",
+                found=None,
+                status="error",
+                detail=str(e),
+            )
+        )
+    return findings
 
 
 def apply_refused() -> HardenError:
