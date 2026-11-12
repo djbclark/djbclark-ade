@@ -157,6 +157,7 @@ Skills (from each `skills/*/SKILL.md`):
 | [`ade_injection_gate.py`](bin/ade_injection_gate.py) | Probability-only injection screening and payload-free measurement; no reader adoption. |
 | [`ade_install.py`](bin/ade_install.py) | Install catalog, plan, observe-only doctor/keys, bounded apply. |
 | [`ade_install_catalog.py`](bin/ade_install_catalog.py) | Pure install-catalog validation, schema projection and metadata mapping. |
+| [`ade_install_recovery.py`](bin/ade_install_recovery.py) | Installer crash/orphan recovery (W18, 2026-11-12). |
 | [`ade_nightly_learning.py`](bin/ade_nightly_learning.py) | Offline nightly-learning admission primitives; no runner or adoption authority. |
 | [`ade_pi_pools.py`](bin/ade_pi_pools.py) | Pi pool acceptance for automatic routing (ade/auto / bin/pi-default). |
 | [`ade_sched.py`](bin/ade_sched.py) | Install a launchd plist as a launchd agent, a systemd user unit or a crontab block (issue #279, 2026-11-04). |
