@@ -579,7 +579,11 @@ only; no live vault, terminal session or provider call was made.
    `keys.json` (status and a fixed-template detail only). Outcomes: `ok`, `stored-unverified` (stored but the
    probe was unreachable/inconclusive), `skipped`, `failed` (still failing or
    expiring after `set`; retry offered). The run ends with a table and exits 0
-   only when every key is `ok`.
+   only when every key is `ok`. Because `run` refuses while any required
+   secret is unset, a key verified early in a multi-key batch can be inconclusive
+   only because a later key was still missing; every `stored-unverified` key is
+   therefore re-verified once after the whole batch. A replacement key whose
+   expiry lies beyond the 14-day window counts as `ok`.
 6. **Delivery (decided 2026-11-12, S3b.5 fallback):** no Paseo secure credential
    store has been probed, so nothing is copied into Paseo or any tool's config.
    Each result names its consumers (the key's selected components) and the route

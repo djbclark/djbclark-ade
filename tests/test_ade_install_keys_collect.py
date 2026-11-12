@@ -231,16 +231,113 @@ def test_default_setter_inherits_terminal_stdio(monkeypatch, tmp_path):
         assert forbidden not in seen["kwargs"]
 
 
-def test_cli_json_lists_without_prompting_and_exits_3(catalog, tmp_path):
-    proc = subprocess.run(
-        [sys.executable, "-I", "-B", str(BIN / "ade-install"), "keys-collect", "--json",
+def _fake_secretspec(tmp_path, *, check_rc, probe_rc):
+    """A real executable named sudo-secretspec on a private PATH dir (stdout/stderr empty)."""
+    bindir = tmp_path / "fakebin"
+    bindir.mkdir()
+    exe = bindir / "sudo-secretspec"
+    exe.write_text(
+        "#!/bin/sh\n"
+        f'if [ "$1" = check ]; then exit {check_rc}; fi\n'
+        'if [ "$1" = set ]; then echo SET_WAS_RUN >> "$FAKE_LOG"; exit 0; fi\n'
+        f"exit {probe_rc}\n")
+    exe.chmod(0o755)
+    return bindir
+
+
+def _run_cli(catalog, tmp_path, bindir, *extra):
+    log = tmp_path / "fake.log"
+    return subprocess.run(
+        [sys.executable, "-I", "-B", str(BIN / "ade-install"), "keys-collect", *extra,
          "--root", str(catalog.root), "--keys-state", str(tmp_path / "k.json")],
         capture_output=True, text=True, check=False, stdin=subprocess.DEVNULL,
-        env={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "ADE_INSTALL_STATE_DIR": str(tmp_path)})
-    # No sudo-secretspec on this PATH: reported, nothing set, nothing prompted.
-    assert proc.returncode == 2, proc.stderr
+        env={"PATH": f"{bindir}:/usr/bin:/bin", "HOME": str(tmp_path),
+             "ADE_INSTALL_STATE_DIR": str(tmp_path), "FAKE_LOG": str(log)}), log
+
+
+def test_cli_json_exits_3_when_work_remains_and_never_sets(catalog, tmp_path):
+    # Every probe exits 14 (missing): the worklist is non-empty, so --json must exit 3.
+    proc, log = _run_cli(catalog, tmp_path, _fake_secretspec(tmp_path, check_rc=1, probe_rc=14), "--json")
+    assert proc.returncode == 3, proc.stderr
     payload = json.loads(proc.stdout)
     assert payload["interactive"] is False and payload["results"] == []
+    assert [w["name"] for w in payload["worklist"]] == ["A_KEY", "B_KEY"]
+    assert not log.exists()  # `set` never ran
+
+
+def test_cli_without_terminal_exits_3_and_lists_names(catalog, tmp_path):
+    proc, log = _run_cli(catalog, tmp_path, _fake_secretspec(tmp_path, check_rc=1, probe_rc=14))
+    assert proc.returncode == 3 and "A_KEY" in proc.stdout and "no terminal" in proc.stdout
+    assert not log.exists()
+
+
+def test_cli_json_exits_2_without_sudo_secretspec(catalog, tmp_path):
+    proc, _ = _run_cli(catalog, tmp_path, tmp_path / "nonexistent-bin", "--json")
+    assert proc.returncode == 2 and json.loads(proc.stdout)["worklist"] == []
+
+
+def test_replacement_key_with_distant_expiry_is_ok_not_unverified(catalog, tmp_path):
+    # F1 (PR 597 review): an expiring key replaced by one expiring in 30 days must end ok.
+    fake = Fake({"A_KEY": [13], "B_KEY": [0]},
+                stderr={"A_KEY": "ADE_KEY_VERIFY:expiring:2026-11-18\n"})
+    original = fake.runner
+    sets: list = []
+
+    def runner(argv, cwd):
+        proc = original(argv, cwd)
+        if "A_KEY" in " ".join(argv) and any(a == "run" for a in argv) and sets:
+            return subprocess.CompletedProcess(argv, 13, stdout="", stderr="ADE_KEY_VERIFY:expiring:2026-12-12\n")
+        return proc
+
+    lines: list[str] = []
+    result = ai.keys_collect(catalog, interactive=True, emit=lines.append, ask=_asker("y", ""),
+                             setter=lambda a, c: sets.append(a) or 0, runner=runner,
+                             keys_state_path=tmp_path / "keys.json", today=TODAY)
+    assert [(r["name"], r["outcome"]) for r in result["results"]] == [("A_KEY", "ok")]
+    assert result["rc"] == 0
+
+
+def test_earlier_keys_are_reverified_after_the_whole_batch(catalog, tmp_path):
+    # F2: `run` refuses while any required secret is unset, so A_KEY's immediate verify is
+    # inconclusive (exit 1) until B_KEY is set too. The post-batch pass must confirm both.
+    sets: list[str] = []
+
+    def runner(argv, cwd):
+        if argv[:2] == ["sudo-secretspec", "check"]:
+            return subprocess.CompletedProcess(argv, 1, stdout="", stderr="")
+        name = argv[argv.index("--reason") + 1].split()[-1]
+        done = {s[2] for s in sets}
+        if name in done and len(done) == 2:
+            code = 0
+        elif name in done:
+            code = 1  # blocked: the other required key is still unset
+        else:
+            code = 14
+        return subprocess.CompletedProcess(argv, code, stdout="", stderr="")
+
+    lines: list[str] = []
+    result = ai.keys_collect(catalog, interactive=True, emit=lines.append, ask=_asker("y", "", ""),
+                             setter=lambda a, c: sets.append(a) or 0, runner=runner,
+                             keys_state_path=tmp_path / "keys.json", today=TODAY)
+    assert [(r["name"], r["outcome"]) for r in result["results"]] == [("A_KEY", "ok"), ("B_KEY", "ok")]
+    assert result["rc"] == 0
+    assert any("confirmed after the batch" in line for line in lines)
+    assert json.loads((tmp_path / "keys.json").read_text())["keys"]["A_KEY"]["status"] == "ok"
+
+
+def test_still_inconclusive_after_the_batch_stays_stored_unverified(catalog, tmp_path):
+    sets: list = []
+
+    def runner(argv, cwd):
+        if argv[:2] == ["sudo-secretspec", "check"]:
+            return subprocess.CompletedProcess(argv, 1, stdout="", stderr="")
+        name = argv[argv.index("--reason") + 1].split()[-1]
+        return subprocess.CompletedProcess(argv, 1 if sets else 14, stdout="", stderr="")
+
+    result = ai.keys_collect(catalog, interactive=True, emit=lambda _l: None, ask=_asker("y", "", ""),
+                             setter=lambda a, c: sets.append(a) or 0, runner=runner,
+                             keys_state_path=tmp_path / "keys.json", today=TODAY)
+    assert {r["outcome"] for r in result["results"]} == {"stored-unverified"} and result["rc"] == 1
 
 
 def test_pasted_value_at_a_choice_prompt_is_discarded_never_echoed_never_acted_on(catalog, tmp_path):

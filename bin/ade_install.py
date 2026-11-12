@@ -1839,7 +1839,8 @@ def keys_collect(
                         post = observe_key_presence(row, root=catalog.root, runner=recording_runner, timeout_s=timeout_s)
                     obs = [post if (o.kind == "key" and o.id == name) else o for o in obs]
                     reason = keys_collect_reason(post.status, post.detail, today=today)
-                    if reason is None and post.status in ("ok", "present"):
+                    if reason is None and post.status in ("ok", "present", "expiring"):
+                        # "expiring" with no reason: a valid replacement whose expiry is beyond the window.
                         finish(item, "ok", post.detail)
                         emit(f"  {name}: {post.status}; consumers read it at launch from sudo-secretspec "
                              f"({DELIVERY_MODE}); nothing copied")
@@ -1864,6 +1865,31 @@ def keys_collect(
                     finish(item, "stored-unverified", "interrupted after set, before verification")
                 else:
                     finish(item, "failed", "interrupted during set")
+    # `sudo-secretspec run` refuses while ANY required secret is unset, so a key
+    # verified early in a multi-key batch may only be inconclusive because a later
+    # key was still missing. Re-verify those once now that the batch is done.
+    for r in results:
+        if r["outcome"] != "stored-unverified" or r["detail"].startswith("interrupted"):
+            continue
+        row = by_name.get(r["name"])
+        if row is None:
+            continue
+        try:
+            if row.get("verify_argv"):
+                post = observe_key_verify(row, root=catalog.root, runner=recording_runner, timeout_s=timeout_s)
+            else:
+                post = observe_key_presence(row, root=catalog.root, runner=recording_runner, timeout_s=timeout_s)
+        except KeyboardInterrupt:
+            break
+        obs = [post if (o.kind == "key" and o.id == r["name"]) else o for o in obs]
+        reason = keys_collect_reason(post.status, post.detail, today=today)
+        if reason is None and post.status in ("ok", "present", "expiring"):
+            r.update(outcome="ok", detail=post.detail, delivery=DELIVERY_MODE)
+            emit(f"  {_printable(r['name'])}: confirmed after the batch ({post.status})")
+        elif reason is not None:
+            r.update(outcome="failed", detail=f"stored but {reason}", delivery=None)
+        else:
+            r["detail"] = post.detail
     save_keys_state(state_path, observations=obs)
     emit("ade-install keys-collect: summary")
     for r in results:
