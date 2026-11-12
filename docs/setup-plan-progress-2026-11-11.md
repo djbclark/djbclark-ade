@@ -4,8 +4,9 @@
 
 This continues the [November 10 matrix](setup-plan-progress-2026-11-10.md).
 The implementation plan is still incomplete; remaining work is not all Mac-only.
-GitHub confirmed the following merges. The checkpoint base is
-`bc2a112a6e16f304d273f69b16d22c93e558dc6f`.
+GitHub confirmed the following merges. The original checkpoint base was
+`bc2a112a6e16f304d273f69b16d22c93e558dc6f`; refreshed 2026-11-12 against
+`origin/master` `0cd37cb17133039fde2e162d81cf1b56204d6d01` (see the additions below).
 
 | PR | Implemented result | Merge commit |
 |---|---|---|
@@ -16,6 +17,16 @@ GitHub confirmed the following merges. The checkpoint base is
 | #554 | Anthropic/Gemini/DeepSeek authenticated metadata probes; five catalog probes total | `991f8b51c4ffd1313c2f2ebdf1afa7c730611e08` |
 | #555 | Bounded context-budget and existing key-metadata scalar writes, including consistent quoted get/set paths | `7a5f55ff161b513f8644eb42b2020a768bdfd3bf` |
 | #556 | Failed GitHub environment prerequisites stop downstream App discovery and ruleset operations | `bc2a112a6e16f304d273f69b16d22c93e558dc6f` |
+
+Merged after that base (verified with `gh pr view`, 2026-11-12 snapshot):
+#557 (`e00a4989e3482fbec9610285124d60b838775a85`, 2026-11-11, Grok Bot
+vendor-routing note), #563 (`dc3463b16c400a3c7af00a4aef3a8cbb4a0e1276`,
+CFEngine-only upstream review gate), #562
+(`17e03e34ae918d9946d36e68db6e1c91890aad45`), #566
+(`d99a4cdf96ce84860f70f8996cb133446686cf11`), #558
+(`13d70edb04d5b487c0e2a34d039e34047a00f646`, refuse default install after
+unknown/failed probes) and #568 (`0cd37cb17133039fde2e162d81cf1b56204d6d01`),
+the last four on 2026-11-12.
 
 Required Linux CI, context-policy and owner-trust status passed before merge.
 Available independent reviewers covered the exact final heads. In #553,
@@ -61,20 +72,23 @@ account quota is unknown. No approval marker or new waiver was fabricated.
 
 ## C. Active continuation, not a stopping point
 
-At this checkpoint, the next scoped code units are:
+State at 2026-11-12 (live `gh` snapshot; re-verify before acting):
 
-1. [#558](https://github.com/djbclark/djbclark-ade/pull/558): refuse default
-   installation after unknown or failed component probes; explicit force must
-   retain every existing authority check.
-2. [#559](https://github.com/djbclark/djbclark-ade/pull/559): a pure nonsecret
-   key worklist with explicit cache/freshness and coverage gaps. This is planning,
+1. #558: merged (see A).
+2. [#559](https://github.com/djbclark/djbclark-ade/pull/559): open, in fix; a pure
+   nonsecret key worklist with cache/freshness and coverage gaps. Planning only,
    not credential collection or current verification.
-3. Shared installer-ledger locking to prevent concurrent operations from
-   replacing each other's evidence; preserve dry-run and refused-operation
-   behavior. Python acquisition remains a later unit.
+3. [#561](https://github.com/djbclark/djbclark-ade/pull/561): open, in fix; shared
+   installer-ledger locking so concurrent operations keep each other's evidence.
+   Python acquisition remains a later unit.
+4. #567 (native self-compaction/self-handoff) was closed unmerged on 2026-11-12;
+   #564, #565 and #569 are open. [#569](https://github.com/djbclark/djbclark-ade/pull/569)
+   hands cloud continuation to local agents: follow its
+   `docs/handoffs/cloud-to-local-2026-11-12/` handoff once merged, not this file's
+   resume prompt alone.
 
-Verify these live PR states before continuing. This document records a moving
-checkpoint; it does not authorize stopping while actionable work remains.
+This document records a moving checkpoint; it does not authorize stopping while
+actionable work remains.
 
 The progress watchdog is an in-session subagent, not a persistent cron service.
 Workers and the watchdog stopped across a session interruption and were explicitly
@@ -95,12 +109,12 @@ confirmation. See [the Wave 6 continuation](slim/wave6-cloud-continuation-2026-1
 Continue djbclark/djbclark-ade; do not stop at this checkpoint.
 Read AGENTS.md, docs/setup-plan.md, docs/setup-plan-progress-2026-11-11.md,
 the prior completion matrix and the Wave 6 continuation. Fetch master and
-verify actual PR, worktree, claim, agent and process states. #550–#556 merged;
-check #558/#559 and the installer-ledger locking unit before starting overlap.
+verify actual PR, worktree, claim, agent and process states. #550–#558 merged
+(2026-11-12 snapshot); check #559/#561 and the local handoff (#569) before overlap.
 Resume existing owned work safely or create a fresh exclusively claimed WT.
 Use available independent exact-head reviewers when a provider is unavailable;
 preserve required CI/owner-trust checks. No invented approval or new waiver.
-Continue cloud implementation while preserving security/S9, scheduled-apply,
+Continue implementation (local agents per #569) while preserving security/S9, scheduled-apply,
 credential, Pi acceptance, Mac/B2/evidence/date/operator-deletion boundaries.
 Commit and push coherent units; maintain this checkpoint without stopping work.
 ```
