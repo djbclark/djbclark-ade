@@ -92,6 +92,10 @@ def test_paseo_failure_does_not_loosen_primary(inputs):
 
 def test_fable_not_shared_quota(inputs):
     inputs[1][0]['report']['windows'].append({'id': 'weekly_model_fable', 'remainingPct': 0})
+    inputs[0]['available'][0]['windows'].append({
+        'window_id': 'weekly_model_fable', 'label': 'Weekly Fable',
+        'pool_family': 'fable', 'quota_scope': 'model_sublimit',
+        'remaining_percent': 0, 'state': 'exhausted'})
     assert run(inputs)['routable']
 
 
@@ -168,3 +172,43 @@ def test_live_clock_is_sampled_after_collection(inputs, monkeypatch, capsys):
     data = json.loads(capsys.readouterr().out)
     codex = next(p for p in data['pools'] if p['pool'] == 'codex/default')
     assert codex['routable']
+
+
+@pytest.mark.parametrize('metadata', [
+    {'pool_family': 'other'}, {'quota_scope': 'model_sublimit'},
+    {'label': 'Weekly Fable'}, {'id': 'weekly_model_fable'},
+    {'window_id': 'weekly_model_fable'},
+])
+def test_aiuse_filters_foreign_and_model_windows(inputs, metadata):
+    inputs[0]['available'][0]['windows'].append(
+        dict(remaining_percent=0, state='exhausted', **metadata))
+    assert run(inputs)['routable']
+    assert len(run(inputs)['windows']) == 1
+
+
+def test_only_foreign_windows_is_unknown(inputs):
+    inputs[0]['available'][0]['windows'] = [
+        {'pool_family': 'other', 'remaining_percent': 50}]
+    assert not run(inputs)['routable']
+    assert run(inputs)['reason'] == 'no_applicable_windows'
+
+
+def test_own_fable_sublimit_still_binds(inputs):
+    row = inputs[0]['available'][0]
+    row.update(pool_family='fable', quota_scope='model_sublimit')
+    row['windows'][0].update(pool_family='fable', quota_scope='model_sublimit',
+                             label='Weekly Fable', remaining_percent=0)
+    pools = qs.evaluate(*inputs[:2], NOW, START, inputs[2])['pools']
+    fable = next(p for p in pools if p['pool'] == 'codex/fable')
+    assert not fable['routable'] and fable['conserve']
+
+
+def test_cursor_grok_does_not_hide_empty_included_pools(inputs):
+    cursor = json.loads((FIXTURES / 'cursor-split.json').read_text())
+    pools = qs.evaluate(cursor, [], NOW, START, inputs[2])['pools']
+    cursor_pools = {p['pool']: p for p in pools if p['pool'].startswith('cursor/')}
+    assert cursor_pools['cursor/grok_bot']['routable']
+    assert cursor_pools['cursor/grok_bot']['remaining_percent'] == 82.072928
+    for family in ('total', 'auto', 'third_party'):
+        assert not cursor_pools[f'cursor/{family}']['routable']
+        assert cursor_pools[f'cursor/{family}']['reason'] == 'missing_or_ambiguous_pool'

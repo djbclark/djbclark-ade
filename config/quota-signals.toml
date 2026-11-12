@@ -22,3 +22,17 @@ family = "gemini_argon"
 [[pools]]
 provider = "antigravity"
 family = "claude_gpt"
+
+# Cursor included usage and Grok Bot are independent. Composer draws third_party.
+[[pools]]
+provider = "cursor"
+family = "total"
+[[pools]]
+provider = "cursor"
+family = "auto"
+[[pools]]
+provider = "cursor"
+family = "third_party"
+[[pools]]
+provider = "cursor"
+family = "grok_bot"

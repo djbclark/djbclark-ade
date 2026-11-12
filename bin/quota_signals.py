@@ -133,6 +133,15 @@ def signal(pool, rows, paseo, now, wave_start, cfg):
         if not isinstance(window, dict):
             result['reason'] = 'unknown_window'
             return result
+        window_family = window.get('pool_family')
+        if window_family and window_family != family:
+            continue
+        model_pool = row.get('quota_scope') == 'model_sublimit' or family == 'fable'
+        model_window = (window.get('quota_scope') == 'model_sublimit'
+                        or any('fable' in str(window.get(key, '')).lower()
+                               for key in ('label', 'id', 'window_id')))
+        if model_window and not model_pool:
+            continue
         rem = number(window.get('remaining_percent'), 100)
         if rem is None or window.get('state') in ('unknown', 'exhausted') or rem <= 0:
             result['reason'] = 'unknown_or_exhausted_window'
@@ -161,6 +170,9 @@ def signal(pool, rows, paseo, now, wave_start, cfg):
                                and (reset - now).total_seconds() <= cfg['surplus_horizon_hours'] * 3600)
             forecasts.append(item)
         result['windows'].append(item)
+    if not result['windows']:
+        result['reason'] = 'no_applicable_windows'
+        return result
     result['routable'] = True
     result['conserve'] = any(w['conserve'] for w in forecasts)
     # Never recommend spending more while another window is short or unforecastable.
