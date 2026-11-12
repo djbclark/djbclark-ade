@@ -335,27 +335,27 @@ def test_issue_access_completes_from_repository_readback(layout):
     assert again["completed"] and rc == 0
 
 
-@pytest.mark.parametrize("response,reason", [
-    (result({"full_name": "alice/project", "has_issues": True}), "field-missing"),
-    (result(issue_proof(issue_creation_policy=None)), None),
-    (result(issue_proof(issue_creation_policy="all")), None),
-    (result(issue_proof(issue_creation_policy="everyone")), None),
-    (result(issue_proof(has_issues=False)), None),
-    (result(issue_proof(has_issues="true")), None),
-    (result(issue_proof(full_name="alice/elsewhere")), "repository-identity-mismatch"),
-    (result(issue_proof(), rc=1), "api-unreadable"),
-    (OSError("no gh"), "api-unreadable"),
-    (subprocess.TimeoutExpired([], 30), "api-unreadable"),
-    (subprocess.CompletedProcess([], 0, "bad json", "arbitrary API/bot error text"), "api-unreadable"),
+@pytest.mark.parametrize("response,reason,observed", [
+    (result({"full_name": "alice/project", "has_issues": True}), "field-missing", "not-matched"),
+    (result(issue_proof(issue_creation_policy=None)), None, "not-matched"),
+    (result(issue_proof(issue_creation_policy="all")), None, "not-matched"),
+    (result(issue_proof(issue_creation_policy="everyone")), None, "not-matched"),
+    (result(issue_proof(has_issues=False)), None, "not-matched"),
+    (result(issue_proof(has_issues="true")), None, "not-matched"),
+    (result(issue_proof(full_name="alice/elsewhere")), "repository-identity-mismatch", "unknown"),
+    (result(issue_proof(), rc=1), "api-unreadable", "unknown"),
+    (OSError("no gh"), "api-unreadable", "unknown"),
+    (subprocess.TimeoutExpired([], 30), "api-unreadable", "unknown"),
+    (subprocess.CompletedProcess([], 0, "bad json", "arbitrary API/bot error text"), "api-unreadable", "unknown"),
 ])
-def test_issue_access_nonproof_never_completes_or_stores_payload(layout, response, reason):
+def test_issue_access_nonproof_never_completes_or_stores_payload(layout, response, reason, observed):
     issue_tracked(layout)
     runner = Mock(side_effect=[response])
     payload, rc = state.verify("restrict-issues", directory=layout[1], runner=runner, clock=lambda: 1020)
     assert rc == 1 and payload["state"] == "pending" and payload["completed"] is False
     if reason:
         assert payload["observation"]["reason"] == reason
-    assert payload["observation"]["status"] == "not-matched"
+    assert payload["observation"]["status"] == observed
     assert runner.call_count == 1
     assert "arbitrary API/bot" not in (layout[1] / "restrict-issues.json").read_text()
 
@@ -452,41 +452,35 @@ def test_app_verify_dry_run_lists_readback_argv_without_executing(layout):
     runner.assert_not_called()
 
 
-@pytest.mark.parametrize("responses,reason", [
-    (None, None),  # full proof via app_proof_responses()
-    ([result(rc=1)], "app-unreadable"),
-    ([result({"slug": "other-app", "id": 5})], "app-unreadable"),
-    ([result("bad json")], "app-unreadable"),
+@pytest.mark.parametrize("responses,reason,observed", [
+    ([result(rc=1)], "app-unreadable", "unknown"),
+    ([result({"slug": "other-app", "id": 5})], "app-unreadable", "unknown"),
+    ([result("bad json")], "app-unreadable", "unknown"),
     ([result(app_payload(permissions={"statuses": "read", "checks": "write", "pull_requests": "read"})),
-      result(installations_payload()), result(["alice/project"])], "permissions-mismatch"),
+      result(installations_payload()), result(["alice/project"])], "permissions-mismatch", "not-matched"),
     ([result(app_payload()), result(installations_payload()), result(["alice/other"])],
-     "installation-repos-extra"),
+     "installation-repos-extra", "not-matched"),
     ([result(app_payload()), result(installations_payload()),
-      result(["alice/project", "alice/other"])], "installation-repos-extra"),
+      result(["alice/project", "alice/other"])], "installation-repos-extra", "not-matched"),
     ([result(app_payload()), result(installations_payload()), result([])],
-     "installation-repos-missing"),
+     "installation-repos-missing", "not-matched"),
     ([result(app_payload()), result(installations_payload(account="someone")),
-      result(["alice/project"])], "installation-account-mismatch"),
+      result(["alice/project"])], "installation-account-mismatch", "not-matched"),
     ([result(app_payload()), result(installations_payload(app_slug="other"))],
-     "installation-missing"),
-    ([result(app_payload()), result(rc=1)], "installations-unreadable"),
+     "installation-missing", "not-matched"),
+    ([result(app_payload()), result(rc=1)], "installations-unreadable", "unknown"),
     ([result(app_payload()), result(installations_payload()), result(rc=1)],
-     "installation-repos-unreadable"),
+     "installation-repos-unreadable", "unknown"),
     ([result(app_payload()), result(installations_payload(id="x"))],
-     "installation-repos-unreadable"),
+     "installation-repos-unreadable", "unknown"),
 ])
-def test_app_nonproof_never_completes(layout, responses, reason):
+def test_app_nonproof_never_completes(layout, responses, reason, observed):
     app_tracked(layout)
-    runner = Mock(side_effect=responses if responses is not None else app_proof_responses())
-    if responses is None:
-        payload, rc = state.verify("create-app", directory=layout[1], runner=runner, clock=lambda: 1020)
-        assert rc == 0 and payload["completed"]
-        return
+    runner = Mock(side_effect=responses)
     payload, rc = state.verify("create-app", directory=layout[1], runner=runner, clock=lambda: 1020)
     assert rc == 1 and payload["state"] == "pending" and payload["completed"] is False
-    if reason:
-        assert payload["observation"]["reason"] == reason
-    assert payload["observation"]["status"] == "not-matched"
+    assert payload["observation"]["reason"] == reason
+    assert payload["observation"]["status"] == observed
 
 
 @pytest.mark.parametrize("corrupt", [
@@ -540,7 +534,7 @@ def test_app_completion_driven_by_exact_repo_list_not_selection_flag(layout):
 def test_poll_dry_run_is_a_pure_plan(layout):
     tracked(layout)
     root, directory = layout
-    before = (directory / "restrict-prs.json").read_bytes()
+    before = {p.name: p.read_bytes() for p in directory.iterdir()}
     runner = Mock(side_effect=AssertionError("plan executed a readback"))
     payload, rc = state.poll("restrict-prs", directory=directory, interval_seconds=30,
                              max_wait_seconds=120, dry_run=True, runner=runner, clock=lambda: 1000)
@@ -549,8 +543,7 @@ def test_poll_dry_run_is_a_pure_plan(layout):
     assert payload["planned_polls_upper_bound"] == 4
     assert payload["verify_argv"][-1] == "repos/alice/project"
     runner.assert_not_called()
-    assert (directory / "restrict-prs.json").read_bytes() == before
-    assert not list(directory.glob("*.lock"))
+    assert {p.name: p.read_bytes() for p in directory.iterdir()} == before
 
 
 def test_poll_stops_on_first_completion_without_sleeping(layout):
@@ -577,7 +570,7 @@ def test_poll_repeats_verify_on_interval_until_completed(layout):
 def test_poll_respects_max_wait_and_reports_pending(layout):
     tracked(layout)
     sleeps: list[float] = []
-    ticks = iter([1000, 1000, 1000, 1000, 1030, 1030, 1030, 1030])
+    ticks = iter([1000, 1000, 1000, 1000, 1030, 1030, 1030, 1030, 1030])
     runner = Mock(side_effect=[not_matched_response(), not_matched_response(), not_matched_response()])
     payload, rc = state.poll("restrict-prs", directory=layout[1], interval_seconds=60,
                              max_wait_seconds=30, runner=runner,
@@ -628,8 +621,10 @@ def test_cold_cli_poll_dry_run_creates_no_bytecode_or_changes(layout, tmp_path):
 
     proc = run("track", "pr-access", "--name", "restrict-prs", "--deadline-seconds", "60",
                "--notify-owner", "agent-123", "--owner", "alice", "--repo", "project", "--yes")
-    assert proc.returncode == 1, proc.stderr  # deadline binary missing: registration unknown
-    assert json.loads(proc.stdout)["monitoring"] == "registration-unknown"
+    assert proc.returncode == 1, proc.stderr
+    # PATH is empty and root/bin has no `deadline` script: python exits 2 on the
+    # missing file, so registration is reported failed (never silently retried).
+    assert json.loads(proc.stdout)["monitoring"] == "registration-failed"
     after_track = {str(p): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
     proc = run("poll", "restrict-prs", "--dry-run")
     assert proc.returncode == 0, proc.stderr

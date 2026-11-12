@@ -301,8 +301,12 @@ def verify(
     # A plan does not create a lock/state directory or execute anything.
     if dry_run:
         record = _read(path, name)
-        return {"status": "dry-run", "completed": False, "name": name,
-                "verify_argv": _verify_argv(record), "record_state": record["state"]}, 0
+        plan: dict[str, Any] = {"status": "dry-run", "completed": False, "name": name,
+                                "verify_argv": _verify_argv(record),
+                                "record_state": record["state"]}
+        if record["task_id"] == "github-app-create":
+            plan.update(_app_argv_plan(record))
+        return plan, 0
     # Lock spans read, bounded API request, and write: a late failed verifier
     # cannot overwrite another verifier's completed result.
     with _locked(path):
@@ -400,11 +404,7 @@ def poll(
             "verify_argv": _verify_argv(record),
         }
         if record["task_id"] == "github-app-create":
-            plan["verify_argv_all"] = [_verify_argv(record), _installations_argv()]
-            plan["verify_argv_note"] = (
-                "the installation-repositories GET is computed at runtime from "
-                "the observed installation id"
-            )
+            plan.update(_app_argv_plan(record))
         return plan, 0
     start = clock()
     if not _finite_time(start):
@@ -444,6 +444,16 @@ def poll(
     return payload, rc
 
 
+def _app_argv_plan(record: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "verify_argv_all": [_verify_argv(record), _installations_argv()],
+        "verify_argv_note": (
+            "the installation-repositories GET is computed at runtime from "
+            "the observed installation id"
+        ),
+    }
+
+
 def _verify_argv(record: dict[str, Any]) -> list[str]:
     # The checked-in template is bound to github.com, regardless of GH_HOST.
     if record["task_id"] == "github-app-create":
@@ -468,21 +478,22 @@ def _observe_task(record: dict[str, Any], observation: dict[str, Any],
         data = None
     if not isinstance(data, dict):
         observation["reason"] = "api-unreadable"
-        return False
+        return False  # status stays unknown: nothing authoritative observed
     full = data.get("full_name")
     if not (isinstance(full, str) and full.casefold() == (record["owner"] + "/" + record["repo"]).casefold()):
         observation["reason"] = "repository-identity-mismatch"
-        return False
+        return False  # status stays unknown: wrong repository is not our setting
     # Persist only fixed enums/bools; no API body or bot content.
     observation["target"] = (record["owner"] + "/" + record["repo"]).casefold()
     observation["template_sha256"] = record["template_sha256"]
+    matches = False
     if task == "pr-access":
         policy = data.get("pull_request_creation_policy")
         observation["policy"] = policy if policy in POLICY_VALUES else "unknown"
         enabled = data.get("has_pull_requests") is True
         observation["pull_requests_enabled"] = enabled
-        return policy == "collaborators_only" and enabled
-    if task == "issue-access":
+        matches = policy == "collaborators_only" and enabled
+    elif task == "issue-access":
         # The template documents no REST field for issue_creation_policy
         # (browser-only until GitHub exposes one). A missing field is recorded
         # explicitly and can never complete; a present field must carry the
@@ -493,9 +504,12 @@ def _observe_task(record: dict[str, Any], observation: dict[str, Any],
         observation["issue_creation_policy"] = ipolicy if ipolicy in POLICY_VALUES else "unknown"
         issues_on = data.get("has_issues") is True
         observation["issues_enabled"] = issues_on
-        return ipolicy == "collaborators_only" and issues_on
-    observation["reason"] = "unsupported-task"
-    return False
+        matches = ipolicy == "collaborators_only" and issues_on
+    else:
+        observation["reason"] = "unsupported-task"
+        return False
+    observation["status"] = "matched" if matches else "not-matched"
+    return matches
 
 
 def _observe_app(record: dict[str, Any], observation: dict[str, Any],
@@ -535,7 +549,7 @@ def _observe_app(record: dict[str, Any], observation: dict[str, Any],
         app = None
     if not isinstance(app, dict) or app.get("slug") != name:
         observation["reason"] = "app-unreadable"
-        return False
+        return False  # status stays unknown
     app_id = app.get("id")
     found = isinstance(app_id, int) and not isinstance(app_id, bool) and app_id >= 1
     observation["app_found"] = found
@@ -556,11 +570,12 @@ def _observe_app(record: dict[str, Any], observation: dict[str, Any],
         rows = None
     if not isinstance(rows, list):
         observation["reason"] = "installations-unreadable"
-        return False
+        return False  # status stays unknown
     candidates = [row for row in rows
                   if isinstance(row, dict) and row.get("app_slug") == name]
     if not candidates:
         observation["reason"] = "installation-missing"
+        observation["status"] = "not-matched"
         return False
     observation["installation_found"] = True
     # Prefer the configured owner's installation; bounded page-1 candidates.
@@ -587,13 +602,14 @@ def _observe_app(record: dict[str, Any], observation: dict[str, Any],
             break
     if readable is None:
         observation["reason"] = "installation-repos-unreadable"
-        return False
+        return False  # status stays unknown
     observation["installation_id"] = readable["id"]
     observation["installation_account_match"] = readable["account_match"]
     selection = readable["selection"]
     observation["repository_selection"] = selection if selection in ("selected", "all") else "unknown"
     observation["install_repos_count"] = readable["count"]
     observation["install_repos_exact"] = readable["exact"]
+    observation["status"] = "not-matched"
     if not readable["exact"]:
         observation["reason"] = ("installation-repos-missing" if readable["count"] == 0
                                  else "installation-repos-extra")
@@ -604,4 +620,5 @@ def _observe_app(record: dict[str, Any], observation: dict[str, Any],
     if not perms_ok:
         observation["reason"] = "permissions-mismatch"
         return False
+    observation["status"] = "matched"
     return True
