@@ -33,6 +33,13 @@ def ident(value: str) -> str:
         raise SessionError('a full UUID is required') from None
 
 
+def workspace_ident(value: str) -> str:
+    # Paseo workspace ls --json (2026-11-12): wks_ plus 16 lowercase hex digits.
+    if not isinstance(value, str) or re.fullmatch(r'wks_[0-9a-f]{16}', value) is None:
+        raise SessionError('a workspace id (wks_ plus 16 lowercase hex digits) is required')
+    return value
+
+
 def digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
@@ -200,7 +207,7 @@ class Service:
             if (not isinstance(source.get('Provider'), str) or not source['Provider']
                     or not isinstance(source.get('Model'), str) or source['Model'] in ('', '-', 'default')):
                 raise SessionError('concrete predecessor provider/model unavailable')
-            workspace = ident(self.env.get('PASEO_WORKSPACE_ID', ''))
+            workspace = workspace_ident(self.env.get('PASEO_WORKSPACE_ID', ''))
             plan = self.mode_plan(source, requested_mode)
             token = str(uuid.uuid4())
             preserved, sha = self.checkpoint(checkpoint, token=token)
