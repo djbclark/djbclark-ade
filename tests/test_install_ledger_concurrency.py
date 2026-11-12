@@ -31,7 +31,14 @@ def wait(s):
         time.sleep(.01)
 def observe(row, **kw):
     flag('planned-' + name).touch()
-    status = 'ok' if flag('installed-' + cid).exists() else 'missing'
+    if flag('installed-' + cid).exists():
+        status = 'ok'
+    elif flag('midflight-ok-' + cid).exists():
+        status = 'ok'
+    elif flag('midflight-error-' + cid).exists():
+        status = 'error'
+    else:
+        status = 'missing'
     return ai.Observation('component', cid, status, 'fixture')
 ai.observe_component = observe
 row = {'id': cid, 'class': 'hard', 'install_argv': ['fixture', cid]}
@@ -40,7 +47,16 @@ if kind == 'system':
 catalog = ai.Catalog({'schema_version': 1, 'component': [row]}, events / 'catalog', root=events)
 def run(argv, cwd):
     flag('entered-' + name).touch()
-    if name == 'A': wait('release-A')
+    if name == 'A':
+        if mode == 'transient-ok-then-fail':
+            flag('midflight-ok-' + cid).touch()
+        elif mode == 'midflight-probe-error':
+            flag('midflight-error-' + cid).touch()
+        wait('release-A')
+        flag('midflight-ok-' + cid).unlink(missing_ok=True)
+        flag('midflight-error-' + cid).unlink(missing_ok=True)
+        if mode == 'transient-ok-then-fail':
+            return subprocess.CompletedProcess(argv, 1, '', 'partial install rolled back')
     if mode == 'runner-error': raise RuntimeError('injected runner failure')
     if mode == 'exec-error': raise OSError('injected exec failure')
     flag('installed-' + cid).touch()
@@ -185,6 +201,41 @@ def test_scheduler_reconcile_can_run_another_apply_after_component_lock_released
     assert entries["first"]["status"] == entries["second"]["status"] == "installed"
 
 
+@pytest.mark.parametrize(
+    "mode,expected_a_rc,expected_b_action,expected_b_entered",
+    [
+        ("transient-ok-then-fail", 1, "installed", True),
+        ("midflight-probe-error", 0, "skip", False),
+    ],
+)
+def test_concurrent_apply_revalidates_executable_decision_under_lock(
+    workers, mode, expected_a_rc, expected_b_action, expected_b_entered
+):
+    state, events, start, seed = workers
+    first = start("A", "first", mode=mode)
+    wait_for(events / "entered-A", first)
+    second = start("B", "first")
+    wait_for(events / "planned-B", second)
+    # B's unlocked pre-plan saw either a transient mid-install "ok" (action="skip")
+    # or a partial-write probe "error" (action="blocked"), so B initially had no
+    # executable step. Because ledger.lock exists, B must still wait on the lock
+    # and re-evaluate executable eligibility after A finishes.
+    end = time.monotonic() + 0.3
+    while second.poll() is None and time.monotonic() < end:
+        time.sleep(0.01)
+    assert second.poll() is None, "B bypassed install_ledger_lock while A was mid-flight"
+    (events / "release-A").touch()
+    out_a, err_a = first.communicate(timeout=8)
+    out_b, err_b = second.communicate(timeout=8)
+    assert first.returncode == expected_a_rc, (out_a, err_a)
+    assert second.returncode == 0, (out_b, err_b)
+    assert json.loads(out_b)["rows"][0]["action"] == expected_b_action
+    assert (events / "entered-B").exists() is expected_b_entered
+    entries = json.loads((state / "ledger.json").read_text())["entries"]
+    assert entries["historical"] == seed
+    assert entries["first"]["status"] == "installed"
+
+
 @pytest.mark.parametrize("case,dry_run,allow_system", [("ready", True, False), ("blocked", False, False),
                                                       ("system", False, True), ("skip", False, False)])
 def test_nonexecuting_paths_create_no_state_or_lock(tmp_path, monkeypatch, case, dry_run, allow_system):
@@ -205,3 +256,34 @@ def test_nonexecuting_paths_create_no_state_or_lock(tmp_path, monkeypatch, case,
     assert rc == {"ready": 0, "blocked": 1, "system": 2, "skip": 0}[case]
     assert not state.exists()
     runner.assert_not_called()
+
+
+@pytest.mark.parametrize("with_lock_file", [False, True])
+@pytest.mark.parametrize("case,allow_system,expected_action,expected_rc", [
+    ("skip", False, "skip", 0),
+    ("blocked", False, "blocked", 1),
+    ("system", True, "refuse-system-exec", 2),
+])
+def test_nonexecuting_apply_does_not_load_ledger(
+    tmp_path, monkeypatch, with_lock_file, case, allow_system, expected_action, expected_rc
+):
+    row = {"id": "fixture", "class": "hard", "install_argv": ["never-run"]}
+    if case == "blocked":
+        row.pop("install_argv")
+    if case == "system":
+        row.update(needs_system=True, system_argv=["never-root"])
+    monkeypatch.setattr(ai, "observe_component", lambda *a, **kw:
+                        ai.Observation("component", "fixture", "ok" if case == "skip" else "missing", "fixture"))
+    monkeypatch.setattr(ai, "load_ledger", Mock(side_effect=AssertionError("load_ledger called when nothing executes")))
+    catalog = ai.Catalog({"component": [row]}, tmp_path / "catalog", root=tmp_path)
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "ledger.json").write_text("{corrupt-json", encoding="utf-8")
+    if with_lock_file:
+        (state / "ledger.lock").write_text("", encoding="utf-8")
+    rows, rc = ai.apply(
+        catalog, dry_run=False, allow_system=allow_system,
+        state_dir=state, ids={"fixture"}, reconcile_sched=False,
+    )
+    assert rows[0]["action"] == expected_action
+    assert rc == expected_rc

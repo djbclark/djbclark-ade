@@ -1795,9 +1795,11 @@ def load_ledger(state_dir: Path) -> dict[str, Any]:
 def install_ledger_lock(state_dir: Path) -> Iterator[None]:
     """Serialize component planning, execution and ledger read-modify-write.
 
-    Keep the lock on a stable file, not ledger.json (which is replaced). Only
-    live apply with executable component steps enters this context. The kernel
-    releases the lock on close/process exit, including exceptional outcomes.
+    Keep the lock on a stable file, not ledger.json (which is replaced). Live
+    apply enters this context whenever a component step is executable or
+    ledger.lock already exists so executable eligibility is decided or
+    re-validated under the lock. The kernel releases the lock on close/process
+    exit, including exceptional outcomes.
     """
     state_dir.mkdir(parents=True, exist_ok=True)
     fd = os.open(state_dir / "ledger.lock", os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
@@ -2238,16 +2240,28 @@ def apply(
             return runner(argv, cwd)
         return _default_runner(argv, cwd, timeout_s=timeout_s)
 
-    executable = not dry_run and any(
-        step.action == "would-install" or (step.action == "would-system-install" and apply_system)
-        for step in steps
-    )
-    with install_ledger_lock(state_dir) if executable else contextlib.nullcontext():
-        if executable:
-            # Another apply may have installed a component while this process
-            # waited. Refresh observations before acting on the old plan.
+    def has_executable(planned: list[ApplyStep]) -> bool:
+        return any(
+            step.action == "would-install"
+            or (step.action == "would-system-install" and apply_system)
+            for step in planned
+        )
+
+    # Decide or re-validate executable eligibility under install_ledger_lock so
+    # a concurrent installer cannot cause a double or skipped install. When no
+    # ledger.lock exists after an all-non-executable plan, no installer has
+    # entered the lock before or during planning, so no state or lock file is
+    # created.
+    lock_path = state_dir / "ledger.lock"
+    use_lock = not dry_run and (has_executable(steps) or lock_path.exists())
+    with install_ledger_lock(state_dir) if use_lock else contextlib.nullcontext():
+        if use_lock:
+            # Another apply may have installed or been installing a component
+            # while this process planned or waited. Refresh observations under
+            # the lock before deciding what executes.
             steps = plan_components()
-        ledger = load_ledger(state_dir) if not dry_run else None
+        executable = not dry_run and has_executable(steps)
+        ledger = load_ledger(state_dir) if executable else None
 
         for step in steps:
             row: dict[str, Any] = {
