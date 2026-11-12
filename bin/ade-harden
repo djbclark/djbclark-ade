@@ -73,23 +73,27 @@ def cmd_observe(args: argparse.Namespace) -> int:
                 "findings": [f.as_dict() for f in findings],
             }
         )
-    else:
-        mode = "local" if args.local else "network"
-        print(
-            "ade-harden observe: "
-            + ("OK" if rc == 0 else "DRIFT")
-            + f" ({mode}; observe-only; no ruleset writes; no auto-reapply)"
+        return rc
+    # Print-only: the notice names what needs attention and is never sent.
+    import ade_harden_coverage as cov
+
+    print(cov.render_notification(findings))
+    mode = "local" if args.local else "network"
+    print(
+        "ade-harden observe: "
+        + ("OK" if rc == 0 else "DRIFT")
+        + f" ({mode}; observe-only; no ruleset writes; no auto-reapply)"
+    )
+    for f in findings:
+        line = (
+            f"  {f.status:10} {f.target} {f.setting}: "
+            f"wanted={f.wanted!r} found={f.found!r}"
         )
-        for f in findings:
-            line = (
-                f"  {f.status:10} {f.target} {f.setting}: "
-                f"wanted={f.wanted!r} found={f.found!r}"
-            )
-            if f.detail:
-                line += f" — {f.detail}"
-            print(line)
-            if f.remediation and f.status in {"drift", "missing", "uncovered"}:
-                print(f"             remediation: {f.remediation}")
+        if f.detail:
+            line += f" — {f.detail}"
+        print(line)
+        if f.remediation and f.status in cov.ACTIONABLE:
+            print(f"             remediation: {f.remediation}")
     return rc
 
 
@@ -97,6 +101,43 @@ def cmd_apply(_args: argparse.Namespace) -> int:
     print(str(ah.apply_refused()), file=sys.stderr)
     print("ade-harden apply: REFUSED", file=sys.stderr)
     return 2
+
+
+def renew_interaction_limits(*args, **kwargs):
+    """Indirection so tests can replace the renewal without touching gh."""
+    import ade_harden_coverage as cov
+
+    return cov.renew_interaction_limits(*args, **kwargs)
+
+
+def cmd_renew(args: argparse.Namespace) -> int:
+    """The one authorized mutation: renew the user interaction limit."""
+    try:
+        cfg = ah.load_config(root=Path(args.root) if args.root else None)
+        plan = renew_interaction_limits(
+            cfg, reader=ah._default_runner, dry_run=not args.apply
+        )
+    except ah.HardenError as e:
+        print(str(e), file=sys.stderr)
+        return 1
+    shown = {
+        k: plan[k]
+        for k in (
+            "renew", "reason", "dry_run", "wrote", "readback_ok", "detail"
+        )
+        if k in plan
+    }
+    if args.json:
+        _print_json(shown)
+    else:
+        print("ade-harden renew: " + json.dumps(shown, sort_keys=True))
+    # A renewal that was due and was attempted must both be written and read
+    # back. A failed PUT leaves readback_ok false, so it exits nonzero too.
+    if plan.get("renew") and not plan.get("dry_run") and not (
+        plan.get("wrote") and plan.get("readback_ok")
+    ):
+        return 1
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -157,6 +198,19 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--yes", action="store_true", help="refused")
     ap.add_argument("--dry-run", action="store_true", help="ignored; apply refused")
     ap.set_defaults(func=cmd_apply)
+
+    rn = sub.add_parser(
+        "renew",
+        parents=[shared],
+        help="renew the user interaction limit (dry-run unless --apply)",
+    )
+    rn.add_argument("--json", action="store_true")
+    rn.add_argument(
+        "--apply",
+        action="store_true",
+        help="perform the PUT; without it, report only",
+    )
+    rn.set_defaults(func=cmd_renew)
 
     args = parser.parse_args(raw)
     args.root = getattr(args, "root", None)

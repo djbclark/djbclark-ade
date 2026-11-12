@@ -171,3 +171,23 @@ jobs:
         run: uv run python bin/instruction-lint --root .
       - name: README roster matches skills/ and bin/ (bin/ade-roster, 2026-11-07)
         run: python3 bin/ade-roster --check
+
+      # S6 (2026-11-12): the hardening policy is valid on every change, and the
+      # observe-only drift report is printed for the operator. Read-only: no
+      # gh calls, no renewal, no canary (the corpus is never committed).
+      - name: Hardening policy check (observe-only, local)
+        run: |
+          set -eu
+          bin/ade-harden check --root .
+          bin/ade-harden observe --local --json --root . > harden-observe.json
+          python3 - <<'PY'
+          import json, sys
+          report = json.load(open("harden-observe.json"))
+          assert report["writes"] is False and report["auto_reapply"] is False, report
+          bad = [f for f in report["findings"] if f["status"] in {"drift", "missing", "uncovered", "error"}]
+          print(f"harden-check local: {len(report['findings'])} findings, {len(bad)} actionable")
+          if bad:
+              for f in bad:
+                  print(f"  {f['status']}: {f['target']} {f['setting']}", file=sys.stderr)
+              sys.exit(1)
+          PY
