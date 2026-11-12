@@ -247,7 +247,8 @@ def recover(state_dir: Path, *, yes: bool = False, euid: int | None = None, now:
     actionable = [f for f in findings if f.status == "orphaned" and f.kind != "python-pending"]
     if not yes:
         report["would_repair"] = [f"{f.kind}/{f.id}" for f in actionable]
-        report["status"] = "dry-run" if actionable else "nothing-to-recover"
+        report["status"] = "dry-run" if actionable else (
+            "manual-repair-needed" if any(f.status == "corrupt" for f in findings) else "nothing-to-recover")
         return report, 0
     if (os.geteuid() if euid is None else euid) == 0:
         report.update(status="refused-root", reason="refusing to repair as root: the install state belongs to the target user. Nothing changed")
@@ -262,7 +263,7 @@ def recover(state_dir: Path, *, yes: bool = False, euid: int | None = None, now:
             if superseded is not None:
                 repaired.append("lock-holder/ledger.lock")  # evidence appended by the lock before it was superseded
             elif any(f.kind == "lock-holder" and f.status == "orphaned" for f in findings):
-                report["unrepaired"] = ["lock-holder/ledger.lock: the evidence log refused the write-ahead line, so the stale record was kept"]
+                report["unrepaired"] = ["lock-holder/ledger.lock: this run did not supersede the stale record (the evidence log refused the write-ahead line, or another installer already took the lock); rerun doctor"]
             locked = scan_locked(state_dir, now=now)
             orphans = [f for f in locked if f.kind == "ledger-entry" and f.status == "orphaned"]
             if orphans:

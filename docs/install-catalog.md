@@ -489,7 +489,7 @@ Pass `--ade` only with a durable checkout (`~/src/djbclark-ade`); never with a l
   opened `O_NOFOLLOW` and are only truncated or appended to when they are regular,
   singly-linked files owned by the effective user (a planted link must never
   redirect a write, e.g. a root `apply` that inherited the user's HOME); a link
-  makes `recover` and the lock refuse and doctor report one failing `state-file` row (no command repairs it: remove it by hand). The lock also refuses as root in a directory root does not own, so a `sudo` run that inherited the user's HOME never writes there. Pids in state
+  makes `recover` and the lock refuse and doctor report one failing `state-file` row (no command repairs it: remove it by hand). The lock also refuses as root, before creating anything, unless every existing ancestor of the state directory is root-owned, so a `sudo` run that inherited the user's HOME never writes there (`apply`/`update` as root therefore need a root-owned state directory, e.g. `ADE_INSTALL_STATE_DIR`). `recover` dry-run with only unrepairable rows reports `manual-repair-needed` (exit 0); `--yes` exits 1 `refused` for the same rows. Pids in state
   data are bounded (an absurd pid is `unknown`, never a crash), state-file reads are
   bounded and non-blocking, process start is compared with a 2 s tolerance (Linux
   `btime` drifts when the clock steps), a temp whose writer pid was reused is

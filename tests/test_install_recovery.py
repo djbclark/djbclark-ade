@@ -16,6 +16,14 @@ sys.path.insert(0, str(REPO / "bin"))
 import ade_install as ai
 import ade_install_recovery as rec
 
+@pytest.fixture(autouse=True)
+def _alarm_fails_the_test_not_pytest():
+    previous = signal.signal(signal.SIGALRM, lambda *a: (_ for _ in ()).throw(TimeoutError("state-file hang")))
+    yield
+    signal.alarm(0)
+    signal.signal(signal.SIGALRM, previous)
+
+
 PHASES = ("pre-pending", "in-command", "pre-terminal-save", "mid-atomic-write", "post-terminal-save")
 
 WORKER = r'''
@@ -336,6 +344,7 @@ def test_hostile_file_names_are_escaped_in_reports(tmp_path):
 
 
 def test_start_time_does_not_depend_on_the_callers_tz(tmp_path, monkeypatch):
+    spawned = time.time()
     child = subprocess.Popen([sys.executable, "-I", "-c", "import time; time.sleep(60)"])
     try:
         got = set()
@@ -347,6 +356,7 @@ def test_start_time_does_not_depend_on_the_callers_tz(tmp_path, monkeypatch):
             time.tzset()
             got.add(ai.process_start_time(child.pid))
         assert len(got) == 1 and None not in got
+        assert abs(next(iter(got)) - spawned) < 10  # a consistent zone offset would still pass the equality
     finally:
         child.kill()
         child.wait()
@@ -406,3 +416,12 @@ def test_dry_run_output_escapes_hostile_names(tmp_path):
     out = subprocess.run([sys.executable, "-I", "-B", str(REPO / "bin" / "ade-install"), "recover", "--state-dir", str(state)],
                          capture_output=True, text=True, env={**os.environ, "HOME": str(tmp_path / "home")})
     assert out.returncode == 0 and "\x1b" not in out.stdout and "Traceback" not in out.stderr
+
+
+def test_root_guard_runs_before_any_mkdir_and_judges_every_ancestor(tmp_path, monkeypatch):
+    fresh = tmp_path / "a" / "b" / "state"  # does not exist yet; ancestors are user-owned
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    with pytest.raises(ai.InstallError, match="as root|root does not own"):
+        with ai.install_ledger_lock(fresh):
+            pass
+    assert not (tmp_path / "a").exists()  # nothing was created before the refusal

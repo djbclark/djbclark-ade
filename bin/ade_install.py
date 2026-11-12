@@ -3036,13 +3036,17 @@ def install_ledger_lock(state_dir: Path, *, wait: bool = True) -> Iterator[dict[
     and is yielded to the caller; ``wait=False`` raises ``InstallError`` instead
     of blocking when another installer holds the lock.
     """
-    state_dir.mkdir(parents=True, exist_ok=True)
     if os.geteuid() == 0:
-        st = os.lstat(state_dir)
-        if stat.S_ISLNK(st.st_mode) or st.st_uid != 0:
-            # no root fall-through: a root run (sudo keeps the user's HOME) must not create or lock files in a
-            # user-controlled directory that a link there could point at a root-owned one
-            raise InstallError(f"{state_dir}: refusing to take the install lock as root in a directory root does not own; run as the target user")
+        # no root fall-through: sudo keeps the user's HOME, and a user-controlled directory (or a link in one of its
+        # parents) must not make root create or lock files there. Judge every existing ancestor before any mkdir.
+        for part in (state_dir.absolute(), *state_dir.absolute().parents):
+            try:
+                st = os.lstat(part)
+            except FileNotFoundError:
+                continue
+            if st.st_uid != 0:
+                raise InstallError(f"{part}: refusing to take the install lock as root under a path root does not own; run as the target user")
+    state_dir.mkdir(parents=True, exist_ok=True)
     try:
         fd = os.open(state_dir / "ledger.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
     except OSError as error:
