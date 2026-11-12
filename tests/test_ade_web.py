@@ -67,6 +67,7 @@ def wire(tmp_path):
         args += ['--url', value or target] if command == 'check' else [value or target]
         # Test-only transport mapping: validation sees a public IP, socket traffic stays local.
         loader = """
+import ipaddress
 import runpy
 import socket
 import sys
@@ -75,6 +76,8 @@ class LocalSocket(socket.socket):
     def connect(self, address):
         if address[0] == '93.184.216.34':
             address = ('127.0.0.1', address[1])
+        if not ipaddress.ip_address(address[0]).is_loopback:
+            raise OSError('test network blocked')
         return super().connect(address)
 
 socket.socket = LocalSocket

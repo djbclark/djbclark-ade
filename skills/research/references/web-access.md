@@ -52,3 +52,7 @@ Direct HTTP connections pin the validated IP addresses to avoid DNS rebinding;
 keyless redirects repeat validation and never inherit provider-base privileges.
 Configured provider bases retain their existing loopback/HTTPS access. Environment
 HTTP proxies are disabled so they cannot bypass target checks.
+
+These connection and redirect guards cover requests made by this CLI. Remote
+Firecrawl/Jina service internals retain their own network policies; this CLI
+cannot pin addresses or inspect redirect hops performed inside those services.

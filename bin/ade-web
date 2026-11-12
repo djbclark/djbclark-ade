@@ -255,7 +255,8 @@ class Web:
         row = rows[-1]
         if not isinstance(row, list) or len(row) != 2 or not re.fullmatch(r'\d{14}', str(row[0])):
             raise Failure('invalid archive capture')
-        return self.archived(valid_url(row[1], public=True), row[0])
+        with deadline(self.args.timeout): original = valid_url(row[1], public=True)
+        return self.archived(original, row[0])
 
     def crawl(self, target):
         # crwl owns its HTTP stack; it cannot share this CLI's redirect/IP guard.
