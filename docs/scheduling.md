@@ -142,6 +142,12 @@ Progress-panel item, sends one `hermes-ping` and wakes the agent via `paseo send
 built-in (heartbeat, schedule) fits without a model turn per firing. It adds no job or installer
 yet; it never restarts a closed or errored session.
 
+Slice 1 (2026-11-12) ships [`bin/ade-progress`](../bin/ade-progress) (`declare`, `retire`, `scan`, `inbox`, `ack`;
+state-changing commands default to `--dry-run`) and an **uninstalled** template,
+`config/launchd/com.djbclark.ade-progress.plist` (`scan --yes` every 300 s). There is no
+`config/install.toml` row and no loaded job: slice 1b adds both after the operator has seen
+`ade-progress scan --dry-run` on real declarations.
+
 Judgment jobs live in `paseo schedule`, not ade-sched. Inventory rows (`kind = "paseo"`) record the
 intended name, cron, `--mode`, and (for hard `context-budget`) provider/cwd/prompt for reconcile.
 `ade-sched reconcile --yes` creates/deletes ADE-owned expected rows via:
