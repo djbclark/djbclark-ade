@@ -1,0 +1,74 @@
+#!/usr/bin/env node
+/**
+ * ade-trail-check: detect drift in the installed Trail skill-consent matcher.
+ * Usage: node bin/ade-trail-check [--matcher /absolute/path/to/dist/skills/risk.js]
+ * Default: the package remembered by ~/.trail/install.json (claudeDist).
+ * Exit 0: all fixtures pass; 1: matcher drift; 2: missing/unreadable dependency.
+ * Calls only agentGuard with strings as data; never executes fixture commands.
+ */
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
+
+const phrase = ['skills', 'on'].join(' ');
+const heredoc = (body) => "python3 - <<'PY'\n" + body + '\nPY';
+const tick = String.fromCharCode(96);
+const fixtures = [
+  ['report', heredoc("from pathlib import Path\nPath('/tmp/report.md').write_text('" + phrase + "')"), null],
+  ['search', "gh issue list --search '" + phrase + "'", null],
+  ['message', "paseo send --json --no-wait -- peer 'hook said: " + phrase + "'", null],
+  ['print', "printf '%s' '" + phrase + "'", null],
+  ['ordinary_report', heredoc("print('ordinary report')"), null],
+  ['activation', 'trail ' + phrase, 'skills-on'],
+  ['wrapped_search', "timeout 300 gh issue list --search '" + phrase + "'", null],
+  ['wrapped_message', "timeout 300 paseo send --json --no-wait --behavior steer -- peer '" + phrase + "'", null],
+  ['report_encoding', heredoc("from pathlib import Path\nPath('/tmp/report.md').write_text('" + phrase + "', encoding='utf-8')\nPath('/tmp/report.md.done').touch()"), null],
+  ['substitution', 'gh issue list --search "$(trail ' + phrase + ')"', 'skills-on'],
+  ['backtick', 'paseo send -- peer "' + tick + 'trail ' + phrase + tick + '"', 'skills-on'],
+  ['eval', "eval 'trail " + phrase + "'", 'skills-on'],
+  ['pipeline', "printf '%s' 'trail " + phrase + "' | sh", 'skills-on'],
+  ['compound', "gh issue list --search 'hello'; trail " + phrase, 'skills-on'],
+  ['python_subprocess', heredoc("import subprocess\nsubprocess.run(['trail', 'skills', 'on'])\nprint('" + phrase + "')"), 'skills-on'],
+  ['python_os_system', heredoc("import os\nos.system('trail " + phrase + "')"), 'skills-on'],
+  ['python_eval', heredoc("eval(\"__import__('os').system('trail " + phrase + "')\")"), 'skills-on'],
+  ['python_fstring', heredoc("from pathlib import Path\nPath('/tmp/report.md').write_text(f'{__import__(\"os\").system(\"trail " + phrase + "\")}')"), 'skills-on'],
+  ['python_extra_statement', heredoc("from pathlib import Path\nPath('/tmp/report.md').write_text('" + phrase + "')\nexec('anything')"), 'skills-on'],
+  ['unquoted_heredoc_expansion', 'python3 - <<PY\nprint("$(trail ' + phrase + ')")\nPY', 'skills-on'],
+  ['gh_alias', "gh dangerous-alias '" + phrase + "'", 'skills-on'],
+  ['dynamic_activation', 'trail skills $mode', 'skills-on'],
+  ['renamed_activation', 'node /tmp/renamed.js ' + phrase, 'skills-on'],
+  ['env_split_search', "env -S 'trail " + phrase + "' gh issue list --search '" + phrase + "'", 'skills-on'],
+  ['env_split_report', "env -S 'trail " + phrase + "' " + heredoc("from pathlib import Path\nPath('/tmp/report.md').write_text('" + phrase + "')"), 'skills-on'],
+  ['python_exec_output', heredoc("from pathlib import Path\nPath('/tmp/activate.sh').write_text('trail " + phrase + "')"), 'skills-on'],
+];
+
+async function main() {
+  const args = process.argv.slice(2);
+  if (args.length && (args.length !== 2 || args[0] !== '--matcher' || !path.isAbsolute(args[1])))
+    throw new Error('usage: node bin/ade-trail-check [--matcher /absolute/path/to/dist/skills/risk.js]');
+  let matcher = args[1];
+  if (!matcher) {
+    const home = process.env.TRAIL_HOME ? path.resolve(process.env.TRAIL_HOME) : path.join(os.homedir(), '.trail');
+    const install = JSON.parse(fs.readFileSync(path.join(home, 'install.json'), 'utf8'));
+    if (typeof install.claudeDist !== 'string' || !path.isAbsolute(install.claudeDist))
+      throw new Error('install.json has no absolute claudeDist; pass --matcher explicitly');
+    matcher = path.resolve(install.claudeDist, '..', 'skills', 'risk.js');
+  }
+  const { agentGuard } = await import(pathToFileURL(matcher).href);
+  if (typeof agentGuard !== 'function') throw new Error('matcher exports no agentGuard');
+  const results = fixtures.map(([name, command, expected]) => {
+    const actual = agentGuard(command)?.hit ?? null;
+    return { name, expected, actual, ok: actual === expected };
+  });
+  const ok = results.every((r) => r.ok);
+  console.log(JSON.stringify({ status: ok ? 'ok' : 'drift', matcher, results }, null, 2));
+  return ok ? 0 : 1;
+}
+try {
+  process.exitCode = await main();
+} catch (error) {
+  console.error(JSON.stringify({ status: 'unavailable', error: error.message }));
+  process.exitCode = 2;
+}
+
