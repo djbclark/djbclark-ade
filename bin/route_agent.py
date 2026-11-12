@@ -1380,13 +1380,18 @@ def usage_from_paseo(rows: list[Any], now: datetime | None = None) -> dict[str, 
         if not isinstance(source, str) or not source:
             continue
         key = _usage_service(source)
-        # A provider-only usage report cannot identify a family-scoped allowance.
+        # Paseo's native Claude report is the subscription's default pool and
+        # currently omits family metadata (verified 2026-11-12). Normalize only
+        # that source; other providers and explicit families stay fail-closed.
+        family = row.get("pool_family")
+        if key == "claude" and family is None:
+            family = "default"
         scoped = any((svc.name == key and svc.pool_family)
                      or (svc.pool and svc.pool[0] == key) for svc in SERVICES)
         if scoped:
-            if row.get("pool_family") in SUBLIMIT_FAMILIES:
+            if family in SUBLIMIT_FAMILIES:
                 continue  # a standalone model cap cannot fund shared quota
-            key = pool_service(key, row.get("pool_family"))
+            key = pool_service(key, family)
             if key is None:
                 continue
         report = row.get("report") if isinstance(row.get("report"), dict) else {}
