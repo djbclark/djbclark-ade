@@ -130,6 +130,12 @@ D6. **Calibrate and monthly re-rank (2026-11-10):** `bin/route_agent.py calibrat
 `--mode auto`; create line in `docs/scheduling.md`, inventory in `config/install.toml`) applies them; leave
 `chosen = false` until the operator creates the schedule. Do not revive the deleted launchd script.
 
+D7. **Hold and restore for new launches (W8, 2026-11-12):** `bin/route_agent.py adjust --kinds …` is `plan` with memory: a kind's
+last pool that fell below its floor is held off, launches go to the next eligible pool, and the pool returns after it recovers a
+margin above its floor (hysteresis, one log line per change). It never touches a running agent, never downgrades a `frontier`
+slice (exit 3, `REFUSED`: report it, do not re-route by hand), and never targets omp. Use it where D1 says `plan`; detail in
+`docs/model-routing.md`, knobs in `[routing.adjust]`.
+
 ## E. Reading quota (a misreading here already cost a dispatch round)
 
 E0. At batch start run `python3 bin/quota_nudge.py` for per-pool advisory levels and active

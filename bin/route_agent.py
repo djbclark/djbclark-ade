@@ -107,10 +107,12 @@ Usage:
     route_agent.py services [--check-models]   # the roster; --check-models: every suggested model in its
                                     # provider's `paseo provider models` list (exit 1 when one is not)
     route_agent.py calibrate [--since DAYS] [--json] [--min N]
+    route_agent.py adjust --kinds code,bulk [--dry-run] [--json]   # plan with hold/restore hysteresis (W8)
 """
 from __future__ import annotations
 
 import argparse
+import contextlib
 import glob
 import json
 import math
@@ -126,6 +128,7 @@ import tomllib
 from dataclasses import dataclass, field, fields
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -2194,7 +2197,8 @@ def fallback_block(svc: Service, kind: str, quota: dict[str, Any], *, services: 
 
 def route(kind: str, *, quota: dict[str, Any] | None = None,
           min_headroom: float = 15.0,
-          exclude: frozenset[str] | set[str] = frozenset(), repo: str | None = None) -> Choice | None:
+          exclude: frozenset[str] | set[str] = frozenset(), repo: str | None = None,
+          avoid: frozenset[str] | set[str] = frozenset()) -> Choice | None:
     """Choose a service for `kind`, preferring idle paid capacity for bulk.
 
     Score = rank + (100 − remaining) × weight / 10, then pace/reset adjustments
@@ -2202,7 +2206,8 @@ def route(kind: str, *, quota: dict[str, Any] | None = None,
     static TOML flag when waste is unknown), and a pace_penalty when the
     binding window is burning ahead of schedule.
 
-    `exclude` names services to skip (full for this wave, or just failed)."""
+    `exclude` names services to skip (full for this wave, or just failed). `avoid` (route_adjust holds) skips
+    candidates the same way but, unlike `exclude`, does not move the quality band's anchor."""
     if kind not in KINDS:
         raise ValueError(f"kind must be one of {KINDS}")
     quota = {} if quota is None else quota
@@ -2213,7 +2218,7 @@ def route(kind: str, *, quota: dict[str, Any] | None = None,
 
     scored: list[tuple[float, Service, float | None, list[str]]] = []
     for svc in services:
-        if not svc.eligible(kind, quota) or svc.name in exclude:
+        if not svc.eligible(kind, quota) or svc.name in exclude or svc.name in avoid:
             continue
         if kind != "api-only" and not service_ready(svc):
             continue                       # e.g. omp without a working Anthropic login
@@ -2317,9 +2322,18 @@ def canary_pool(svc: Service) -> str | None:
 
 def plan(kinds: list[str], *, quota: dict[str, Any] | None = None,
          min_headroom: float = 15.0,
-         exclude: frozenset[str] | set[str] = frozenset(), repo: str | None = None
+         exclude: frozenset[str] | set[str] = frozenset(), repo: str | None = None,
+         kind_exclude: dict[str, set[str]] | None = None,
+         reject: Callable[[str, Choice], str | None] | None = None,
+         refusals: list[str | None] | None = None
          ) -> list[tuple[str, Choice | None]]:
     """Assign each slice kind to a service for ONE wave, right now.
+
+    `kind_exclude` (route_adjust, W8) holds pools off per kind (`route(avoid=)`, so the quality band
+    keeps its anchor); it is soft: a kind that finds no room, or only a choice `reject` refuses, is routed
+    again with them allowed, so a hold never strands a kind. `reject(kind, choice)` returns a refusal
+    reason or None; a refused slice comes back None, takes no wave slot, and its reason is appended to
+    `refusals` (one entry per slice, None when not refused).
 
     Greedy in the given order (put the hardest first), honouring each
     service's `max_parallel` so a wave spreads over pools. Slices that
@@ -2337,7 +2351,18 @@ def plan(kinds: list[str], *, quota: dict[str, Any] | None = None,
         if kind == "frontier":
             gate = frontier_gate()
             skip = skip | {n for n, k in frontier.items() if k >= frontier_per_wave(n, gate, quota)}
-        choice = route(kind, quota=quota, min_headroom=min_headroom, exclude=skip, repo=repo)
+        held = (kind_exclude or {}).get(kind) or set()
+        choice = route(kind, quota=quota, min_headroom=min_headroom, exclude=skip, repo=repo, avoid=held)
+        reason = reject(kind, choice) if reject and choice is not None else None
+        if held and (choice is None or reason):
+            retry = route(kind, quota=quota, min_headroom=min_headroom, exclude=skip, repo=repo)
+            retry_reason = reject(kind, retry) if reject and retry is not None else None
+            if retry is not None and (choice is None or not retry_reason):
+                choice, reason = retry, retry_reason
+        if reason:
+            choice = None                  # refused: no wave slot, the caller reports the reason
+        if refusals is not None:
+            refusals.append(reason)
         if choice is not None:
             name = choice.service.name
             pool = canary_pool(choice.service)
@@ -2974,6 +2999,83 @@ def format_calibrate_table(report: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+ADJUST_EXIT_REFUSED = 3
+
+
+def _adjust_command(args: argparse.Namespace, parser: argparse.ArgumentParser,
+                    quota: dict[str, Any], age: float | None) -> int:
+    """`adjust`: `plan` with memory. Exit 0 (rows may be queued), 3 when a slice was refused
+    (a frontier slice that would have been downgraded, or a never_target pool)."""
+    import route_adjust as ra
+    cfg = ra.settings(sys.modules[__name__])
+    try:
+        directory = ra.state_dir()
+    except ValueError as e:
+        parser.error(str(e))
+    if args.status:
+        state = ra.load_state(directory / "state.json")
+        print(json.dumps({"enabled": cfg["enabled"], "state_dir": str(directory), **state}, indent=1))
+        return 0
+    if not args.kinds:
+        parser.error("adjust needs --kinds (or --status)")
+    kinds = [k.strip() for k in args.kinds.split(",") if k.strip()]
+    bad = [k for k in kinds if k not in KINDS]
+    if bad:
+        parser.error(f"unknown kind(s) {bad}; choose from {KINDS}")
+    skip = {x.strip() for arg in args.exclude for x in arg.split(",") if x.strip()} | operator_disabled()
+    repo = args.repo or repo_of(os.getcwd())
+    write = cfg["enabled"] and not args.dry_run
+    try:
+        with (ra.locked(directory) if write else contextlib.nullcontext()):
+            state = ra.load_state(directory / "state.json") if cfg["enabled"] else ra.empty_state()
+            result = ra.adjust(sys.modules[__name__], kinds, quota=quota, age=age, state=state,
+                               exclude=skip, min_headroom=args.min_headroom, repo=repo, cfg=cfg)
+            if write:
+                ra.log_events(directory, result["events"])
+                ra.save_state(directory / "state.json", result["state"])
+    except ra.LockBusy as e:
+        # A hung holder must not block launches: plan read-only, record nothing.
+        print(f"WARNING: {e}; planning read-only (no hold or restore recorded)", file=sys.stderr)
+        result = ra.adjust(sys.modules[__name__], kinds, quota=quota, age=age,
+                           state=ra.load_state(directory / "state.json"), exclude=skip,
+                           min_headroom=args.min_headroom, repo=repo, cfg=cfg)
+    for event in result["events"]:
+        print("adjust: " + json.dumps(event, sort_keys=True), file=sys.stderr)
+    refused = any(r is not None for _, _, r in result["rows"])
+    if args.json:
+        print(json.dumps({
+            "enabled": cfg["enabled"], "snapshot_age_s": age, "fresh": result["fresh"],
+            "canary_pool_max": {p: 1 for p in sorted(CANARY_POOLS)},
+            "canary_release": "lead verifies one successful turn before adding agents",
+            "held": result["held"], "events": result["events"], "dry_run": args.dry_run,
+            "slices": [{"kind": k, "service": c.service.name if c else None,
+                        "agent": c.service.acp_agent if c else None,
+                        "model": c.model if c else None,
+                        "dispatch": c.dispatch if c else None,
+                        "remaining": c.remaining if c else None,
+                        "refused": refusal,
+                        "why": refusal or (c.why if c else unrouted_why(k, quota, skip))}
+                       for k, c, refusal in result["rows"]]}, indent=1))
+    else:
+        for pool in sorted(CANARY_POOLS):
+            print(f"canary pool {pool}: max=1; verify one successful turn before adding agents")
+        if not result["fresh"] and cfg["enabled"]:
+            print("WARNING: quota snapshot empty or older than "
+                  f"{cfg['max_age_seconds']:g}s -> no hold or restore changed; run `aiuse --available --live` first",
+                  file=sys.stderr)
+        for i, (k, c, refusal) in enumerate(result["rows"], 1):
+            if refusal:
+                print(f"{i}. {k:10} -> REFUSED: {refusal}")
+            elif c is None:
+                print(f"{i}. {k:10} -> (none: {unrouted_why(k, quota, skip)}; re-plan at the next boundary)")
+            else:
+                rem = "" if c.remaining is None else f" {c.remaining:.0f}% left"
+                print(f"{i}. {k:10} -> {c.service.name}{rem}  [{c.service.cli}]  {c.dispatch}")
+        if result["held"]:
+            print("held off: " + json.dumps(result["held"], sort_keys=True))
+    return ADJUST_EXIT_REFUSED if refused else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Route work to a vendor")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -2995,6 +3097,15 @@ def main(argv: list[str] | None = None) -> int:
     pl.add_argument("--json", action="store_true")
     pl.add_argument("--brief", action="append", default=[],
                     help="brief file per kind, in --kinds order (repeat; accepted and ignored since 2026-11-06)")
+    ad = sub.add_parser("adjust", help="plan a wave like `plan`, but move kinds off a pool that fell below its "
+                        "floor and back once it recovers (hysteresis, state and change log; new launches only)")
+    ad.add_argument("--kinds", help="comma list, hardest first, e.g. code,code,research,bulk")
+    ad.add_argument("--exclude", action="append", default=[], help="comma list of services to skip; repeatable")
+    ad.add_argument("--min-headroom", type=float, default=15.0)
+    ad.add_argument("--repo", help="repository the slices work in (default: the cwd's origin remote)")
+    ad.add_argument("--json", action="store_true")
+    ad.add_argument("--dry-run", action="store_true", help="compute and print, but write no state and no log")
+    ad.add_argument("--status", action="store_true", help="print the saved holds and exit")
     sub.add_parser("show", help="snapshot age, headroom, pace, expected waste")
     sv = sub.add_parser("services", help="every service discovered right now, with its Paseo provider's status")
     sv.add_argument("--check-models", action="store_true",
@@ -3087,6 +3198,9 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"{i}. {k:10} -> {c.service.name}{rem}  [{c.service.cli}]"
                           f"  {c.dispatch}")
         return 0
+
+    if args.command == "adjust":
+        return _adjust_command(args, parser, quota, age)
 
     if args.command == "show":
         import quota_nudge

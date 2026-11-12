@@ -190,7 +190,53 @@ arguments/config. Collector failures become unknown measurements, never a pass.
 
 A Z.ai 429 code 1302 is a request-rate limit, not exhaustion (PR 571 E1b): this
 script does not convert errors into exhausted quota or relax the five-agent
-concurrency rule. W8 owns adjustment/restoration. W9/W10 retain the operator's
+concurrency rule. W8 (below) owns adjustment/restoration. W9/W10 retain the operator's
 seed at `claude/hooks/quota_nudge.py` (the brief's `bin/` path does not exist).
 Its useful freshness and silent-on-missing-state principles are preserved here;
 its session nudges, profile state and locks remain untouched for those units.
+
+## Launch-time pool adjustment and restoration (W8, 2026-11-12)
+
+`bin/route_agent.py adjust --kinds code,bulk [--dry-run] [--json] [--exclude …]` plans a wave like `plan`
+and adds memory (`bin/route_adjust.py`; state and change log in `~/.local/state/ade/route-adjust/`,
+`$ADE_ROUTE_ADJUST_DIR` overrides). It reads the same merged quota (`aiuse --available --json` plus
+`paseo usage ls --json` via `load_snapshot`) as `plan`; it does not call `quota_signals.py`, whose output stays advisory.
+
+Method, per kind. The kind's last routed pool is *held off* when its reading drops below its floor (the router's
+`min_headroom`, a reserve's own floor, codex's `plenty_min` for an everyday kind, claude's Fable sublimit floor for
+`frontier`) or when the slice no longer fits (`pool_usable`). New launches of that kind then go to the next pool the
+router would pick (`plan`'s quality band, wave caps and frontier gates all still apply; a held pool is *avoided*,
+not excluded, so the band's anchor stays where plain `plan` puts it). The tracked pool of a kind is the one its first
+slice in a wave gets; later slices of the same kind neither move it nor log. Holds are keyed by repository too
+(`repo:kind`), because the estimate floors are repo-scoped. A held pool is restored only
+when it reads at least `restore_margin` points above its floor AND has been held `min_dwell_seconds`, so a pool
+hovering at its floor does not flap; the margin is applied to every reading and then the router's own `pool_usable`
+is asked, so it sits on the floor that actually binds (estimate floors and measured history included). With no
+acceptable other pool, an usable held pool is restored early (`plan(kind_exclude=…)` is soft, and also yields when
+the only alternative would be refused), so a hold never strands a kind.
+
+Rules, each tested offline with fixture quota:
+
+1. A snapshot with no readings or older than `max_age_seconds` changes no hold and releases none (the E1a
+   per-pool `collected_at` rule still stands: re-read with `aiuse --available --live --json` before a wave). A pool
+   with no reading is never displaced: absence of data is not a shortfall.
+2. A `frontier` slice is never silently downgraded. If the route would run on a non-frontier model (claude's Fable
+   sublimit short, so `suggest_model` falls to Opus, with no other frontier pool) `adjust` prints `REFUSED`, logs a
+   `refuse` event, leaves the kind's state alone and exits 3. A move to another frontier pool is allowed.
+3. `[routing.adjust].never_target` (omp, always, whatever the file says) is excluded from every kind and checked again
+   on the result by exact match on the pool name, its agent and the model's provider prefix, or an `omp-` family name
+   (never a substring: `cursor/composer-2.5` is allowed). Rules 2 and 3 also hold with `enabled = false`.
+4. Running agents are never touched: the output is a launch line for a NEW `paseo run`. No hook, daemon or schedule
+   calls `adjust`; the lead runs it where it ran `plan` (D1).
+5. A hold expires after `max_hold_seconds` even without a fresh reading; a timestamp in the future counts as expired.
+6. State is `state.json` (atomic replace; a corrupt or wrongly typed file reads as no holds), written under a lock
+   that gives up after 30 s (then `adjust` plans read-only and says so). The log and lock refuse symlinks, and
+   `$ADE_ROUTE_ADJUST_DIR` must be absolute.
+
+Every change is one JSON line in `changes.jsonl` and one `adjust: {…}` line on stderr: `route` (first pool for a
+kind), `switch` (from, to, why), `restore` (from, to), `hold` (a hold placed with no route line to carry it),
+`expire`, `refuse` (once per change, not per call), and `release` (a pool is eligible again without being chosen). `adjust --status` prints the saved holds; `--dry-run` writes nothing. `[routing.adjust].enabled =
+false` makes `adjust` plain `plan` plus rules 2 and 3 (no state, no log). Config keys and defaults: `config/routing.toml [routing.adjust]`. Known limits (adversary round 2): the tracked pool follows the wave as planned, so a wave-cap on another kind
+can make a hold yield early or log a `switch` that quota did not cause; a hold is never pruned except by expiry. Not built:
+effort or model-tier changes inside a pool (`docs/dynamic-model-effort.md` G4, still gated), automatic calls from other tools, and
+cross-kind promotion (a kind never moves to a different kind's pools).
