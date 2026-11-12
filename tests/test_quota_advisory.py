@@ -79,8 +79,8 @@ def test_invalid_config_is_advisory(tmp_path, monkeypatch, capsys):
 def test_cli_reads_aiuse_and_paseo_and_show(tmp_path):
     import os
     import subprocess
-    # Both sources identify the configured Claude pool. Provider-only readings
-    # are deliberately rejected by the router's pool-family contract (#581).
+    # aiuse names the configured Claude pool; native Paseo omits its family.
+    # Exercise that production shape through the ingest normalization.
     now = "2026-11-12T12:00:00+00:00"
     aiuse = tmp_path / "aiuse.json"
     aiuse.write_text(json.dumps({"schema_version": "1.3", "fresh": True, "age_seconds": 0,
@@ -113,7 +113,7 @@ runpy.run_path(sys.argv[0], run_name="__main__")
     # Exercise both directions: ignoring either source must fail an assertion.
     for paseo_left, expected in ((5, "claude: critical (5% left)"),
                                  (90, "claude: ok (80% left)")):
-        paseo.write_text(json.dumps([{"sourceId": "claude", "pool_family": "default",
+        paseo.write_text(json.dumps([{"sourceId": "claude",
             "id": "claude:default", "fetchedAt": now,
             "report": {"status": "available", "windows": [{"id": "weekly", "label": "Weekly",
                        "usedPct": 100 - paseo_left, "remainingPct": paseo_left}]}}]))
