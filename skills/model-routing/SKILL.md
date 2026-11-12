@@ -83,7 +83,7 @@ startup and dispatched tasks; known quota/billing latches require explicit recov
 | C4. `cursor-auto`, `cursor` | cursor for Auto; Pi for retained Cursor Composer | Cursor's Auto pool (burn-first, monthly) and its third-party pool, separately metered | the GrokBot pool (`grok-bot`, Cursor-billed): never a slice target |
 | C5. `cursor-cloud` | none: `cursor-cloud launch` | a slice that leaves the Mac and pushes a branch the lead reviews | `autoCreatePR` |
 | C6. Go and Zen free (historical OpenCode service IDs) | Pi for separately accepted routes; old services retired | Go basic route passed (not automatic-routing acceptance); retain `config/go-model-policy.json` cost/task constraints; Zen free hit its quota and is not accepted | archived OpenCode fallback; Go "Use balance"; treating Go and Zen balances as interchangeable |
-| C7. `antigravity-argon` (Google AI Pro) | antigravity | Gemini 4 Argon as the frontier FALLBACK, only while codex or claude is short (`plan` names it then; tendcf/nix2cf review route 3) | the provider's other pools (not routed); an API key path (bills separately) |
+| C7. `antigravity-argon` (Google AI Pro) | antigravity | Gemini 4 Argon as the frontier FALLBACK, only while codex or claude is short (`plan` names it then; tendcf/nix2cf review route 3); on the operator's word when agy headroom is about to expire, read-only reviews (`gemini-4-argon-high`) and research (`gemini-3.8-flash-high`), mode `full-access` | the provider's other pools (not routed); an API key path (bills separately); its `claude-*`/`gpt-*` models: a separate, small Claude/GPT weekly pool that ran out within minutes on 2026-11-12 (reset 141 h) while `aiuse` still showed 36% left |
 | C8. `hermes`, `clinepass` | hermes; none | Hermes is the operator's assistant; ClinePass is the Hermes/Dann lifeline (`route_agent.py substrate`, `hermes-chain`) | a delegation target, ever |
 
 C9. Prepaid opencode-zen stays retired until an operator top-up; credits-backed models (Claude usage credits, Codex
@@ -136,6 +136,17 @@ E1. Probes, in this order, per batch: `aiuse --available --json 2>/dev/null` (ex
 `.available[]`: `provider`, `pool_family`, `usable_now`, `headroom_percent`, `binding_window`; top-level `fresh` and
 `age_seconds`; add `--live` when stale), `paseo usage ls --json` (a report whose `report.status` is not `available` is
 unknown, never a pass), then `route_agent.py plan`. The contract is `aiuse schema`; never the human table.
+E1a. Top-level `fresh` is not enough: read each pool's `.available[].collected_at`. Before every dispatch wave, that
+pool's `collected_at` must be newer than the previous wave's start; if not, re-read with `aiuse --available --live --json`
+and size the wave to it (2026-11-12: one 11:53 AM EST agy reading, served as `fresh` for 25 minutes, fed ~16 agents; the
+agy Claude/GPT and Argon pools both ran out mid-wave).
+E1b. A request-rate limit is not quota: `aiuse` cannot see it. Pi z.ai answers `429` code `1302` ("Rate limit
+reached for requests") once about 7 z.ai agents run at once, with 70% of its 5-hour window left (2026-11-12). Keep at
+most 5 z.ai agents running; on a 1302, switch that agent in place to another subscription pool Pi reaches
+(`update_agent settings.model`, e.g. `cursor/composer-2.5` or `antigravity/gemini-3.8-flash-high`) or send a
+"continue" after the others finish, never mark the pool exhausted. **Pi's `openai/*` models are the metered OpenAI
+API, not the Codex subscription**: never a switch target (2026-11-12: one switch hit the org's enforced spend limit at
+once, while Codex showed 65% left). A Codex-pool agent is `paseo run --provider codex/...`, a new agent.
 E2. `used_percent` is the share consumed: 100 means empty. Quote "X% used / Y% left".
 E3. An account is usable only if every window has headroom: the fullest binds.
 E4. One provider can hold several pools (Cursor Auto vs third-party): a 429 describes the pool the model draws on.
