@@ -223,7 +223,7 @@ def _claude_report(fetched: datetime, status: str = "available", weekly_left: fl
                               "resetsAt": "2026-11-10T00:00:00Z"}]
     else:
         report["problem"] = {"kind": "rejected", "status": 403}
-    return {"id": "claude:default", "sourceId": "claude", "sourceLabel": "Claude", "icon": "<svg/>", "account": "x",
+    return {"id": "claude:default", "sourceId": "claude", "pool_family": "default", "sourceLabel": "Claude", "icon": "<svg/>", "account": "x",
             "fetchedAt": g.iso(fetched), "report": report, "loginErrors": []}
 
 

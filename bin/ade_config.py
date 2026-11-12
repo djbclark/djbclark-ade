@@ -239,7 +239,7 @@ def project_routing_domain(legacy: dict[str, Any]) -> dict[str, Any]:
 # Parity tests extract that function without importing live routing initialization.
 SERVICE_KEYS = frozenset({
     "name", "cli", "good_at", "billing", "note", "never_bulk", "retired",
-    "judgment_tier", "access", "hermes_only", "burn_first", "pool", "max_parallel",
+    "judgment_tier", "access", "hermes_only", "burn_first", "pool", "pool_family", "max_parallel",
     "agent", "models", "reserve_floor", "measured_only", "grant_days", "ready_probe",
     "shares_pool", "plenty_kinds", "fallback_after", "window",
 })
@@ -273,6 +273,9 @@ def validate_legacy_routing_shape(data: dict[str, Any], path: Path) -> None:
             raise ConfigError(
                 f"routing policy {path}: [[service]] {label!r}: "
                 f"missing required key(s) {missing}")
+        if entry.get("pool_family") is not None and not (
+                isinstance(entry["pool_family"], str) and entry["pool_family"]):
+            raise ConfigError(f"routing policy {path}: invalid pool_family for {label!r}")
         pool = entry.get("pool")
         if pool is not None and not (isinstance(pool, list) and len(pool) == 2
                                        and all(isinstance(x, str) for x in pool)):

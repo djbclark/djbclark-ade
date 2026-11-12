@@ -186,6 +186,8 @@ class Service:
     # use it for a model sublimit of a shared pool (Claude's `fable`): that
     # one is bounded by the parent windows and must stay with them.
     pool: tuple[str, str] | None = None
+    # Primary family for the provider-named service; absent metadata never matches.
+    pool_family: str | None = None
     # Most slices one bigteam wave should put on this service at once. Pools
     # with a burst limit or a dependant get a low cap so `plan` spreads a wave
     # over several pools instead of drowning the best-ranked one.
@@ -242,6 +244,9 @@ class Service:
         for questions about the profile alone (calibrate's history)."""
         if self.retired or self.hermes_only:
             return False
+        if (self.pool or self.pool_family or self.shares_pool) and not any_headroom:
+            if plenty_remaining((quota or {}).get(self.name)) is None:
+                return False
         if self.measured_only and not any_headroom:
             info = (quota or {}).get(self.name) or {}
             left, age = plenty_remaining(info), _clean_age(info.get("age_s"))
@@ -369,6 +374,9 @@ def load_policy(path: Path | str) -> dict[str, Any]:
             raise ValueError(
                 f"routing policy {path}: [[service]] {label!r}: "
                 f"missing required key(s) {missing}")
+        if entry.get("pool_family") is not None and not (
+                isinstance(entry["pool_family"], str) and entry["pool_family"]):
+            raise ValueError(f"routing policy {path}: invalid pool_family for {label!r}")
         pool = entry.get("pool")
         if pool is not None and not (isinstance(pool, list) and len(pool) == 2
                                        and all(isinstance(x, str) for x in pool)):
@@ -424,14 +432,14 @@ def apply_policy(data: dict[str, Any]) -> None:
     global BURN_FIRST_WASTE_MIN, PACE_PENALTY_ABOVE, PACE_PENALTY
     global PACE_PENALTY_JUDGMENT_FACTOR, QUALITY_MAX_RANK_GAP
     global PLENTY_MIN, DEFAULT_PROFILE, NEVER_ROUTE, OPERATOR_GATED
-    global ALIASES, DISPATCH_EXTRA, HERMES_MODELS
+    global ALIASES, DISPATCH_EXTRA, DISPATCH_MODES, HERMES_MODELS
     global HERMES_PROVIDER_NAME
     global SUBSTRATE_LIFELINE
     global CALIBRATE_MIN_OUTCOMES, CALIBRATE_MIN_PEERS
     global CALIBRATE_SUGGEST_WORSE_BELOW
     global CALIBRATE_SUGGEST_WORSE_DELTA, CALIBRATE_SUGGEST_BETTER_ABOVE
     global CALIBRATE_SUGGEST_BETTER_DELTA
-    global LEAD_FABLE_ALLOWED
+    global LEAD_FABLE_ALLOWED, CANARY_POOLS
 
     POLICY = data
     try:
@@ -441,6 +449,10 @@ def apply_policy(data: dict[str, Any]) -> None:
         calibrate = data["calibrate"]
 
         KINDS = tuple(routing["kinds"])
+        canary = routing.get("canary_pools", [])
+        if not isinstance(canary, list) or not all(isinstance(p, str) and p for p in canary):
+            raise ValueError("routing.canary_pools must be a list of non-empty pool names")
+        CANARY_POOLS = frozenset(canary)
         BURN_FIRST_MIN = float(routing["burn_first_min"])
         BURN_FIRST_BONUS = float(routing["burn_first_bonus"])
         BURN_FIRST_WASTE_MIN = float(routing["burn_first_waste_min"])
@@ -459,6 +471,12 @@ def apply_policy(data: dict[str, Any]) -> None:
         ALIASES = {str(k): str(v) for k, v in (routing.get("aliases") or {}).items()}
 
         DISPATCH_EXTRA = {str(k): str(v) for k, v in (dispatch.get("extra") or {}).items()}
+        modes = dispatch.get("unattended_modes", {})
+        if not isinstance(modes, dict) or not all(
+                isinstance(k, str) and k and isinstance(v, str) and v
+                for k, v in modes.items()):
+            raise ValueError("dispatch.unattended_modes must map providers to non-empty mode IDs")
+        DISPATCH_MODES = dict(modes)
         HERMES_MODELS = {str(k): [str(m) for m in v]
                           for k, v in (hermes.get("models") or {}).items()}
         HERMES_PROVIDER_NAME = {str(k): str(v)
@@ -552,7 +570,7 @@ def policy_public() -> dict[str, Any]:
             "retired": s.retired, "judgment_tier": s.judgment_tier,
             "access": s.access, "hermes_only": s.hermes_only,
             "burn_first": s.burn_first,
-            "pool": list(s.pool) if s.pool else None,
+            "pool": list(s.pool) if s.pool else None, "pool_family": s.pool_family,
             "max_parallel": s.max_parallel, "agent": s.agent,
             "models": dict(s.models), "reserve_floor": s.reserve_floor,
             "grant_days": s.grant_days, "ready_probe": s.ready_probe,
@@ -679,12 +697,24 @@ reload_policy()
 
 # -- quota snapshot + service discovery ----------------------------------
 
-def pool_service(provider: str, family: str | None) -> str:
-    """Routing service that an aiuse window of `family` belongs to."""
+def pool_service(provider: str, family: str | None) -> str | None:
+    """Match an explicit quota family; never credit an unrelated provider window."""
     for svc in SERVICES:
         if svc.pool == (provider, family):
             return svc.name
-    return provider
+    primary = next((s for s in SERVICES if s.name == provider), None)
+    if primary and primary.pool_family is not None:
+        if family == primary.pool_family:
+            return provider
+        # Claude model caps constrain the shared allowance, never add headroom.
+        if provider == "claude" and family in SUBLIMIT_FAMILIES:
+            return provider
+        return None
+    # Providers without family metadata retain their single unnamed pool. Once
+    # any family is declared, a missing or unclaimed family is unknown.
+    if family is None and not any(s.pool and s.pool[0] == provider for s in SERVICES):
+        return provider
+    return None
 
 
 AIUSE_CONFIG = Path(os.environ.get("AIUSE_CONFIG", "~/.config/aiuse/config.toml")).expanduser()
@@ -827,6 +857,8 @@ def _providers_from_available(rows: list[Any], age: float | None) -> dict[str, A
             continue
         family = row.get("pool_family")
         key = pool_service(name, family)
+        if key is None:
+            continue
         row_age = _clean_age(row.get("age_seconds"))
         if row_age is None:
             row_age = age
@@ -874,6 +906,12 @@ def _providers_from_available(rows: list[Any], age: float | None) -> dict[str, A
             cap = _tighter(entry["remaining"], entry["sublimits"].get(family))
             entry = {**entry, "remaining": None, "windows": {},
                      "sublimits": {family: cap}}
+        for cap in row.get("model_sublimits") or []:
+            if name == "claude" and cap.get("pool_family") in SUBLIMIT_FAMILIES:
+                value = (0.0 if cap.get("usable_now") is False
+                         else _pct(cap.get("headroom_percent")))
+                entry["sublimits"] = _merge_caps(
+                    entry["sublimits"], {cap["pool_family"]: value})
         _merge_pool(pools, key, entry)
     for fkey, rem in foreign:
         cur = pools.get(fkey)
@@ -913,6 +951,8 @@ def _providers_from_accounts(accounts: list[Any], age: float | None) -> dict[str
         for w in acct.get("windows") or []:
             family = w.get("pool_family")
             key = pool_service(name, family)
+            if key is None:
+                continue
             worst, detail, sublimits, bind = per_key.get(key, (None, {}, {}, {}))
             label = w.get("label") or "?"
 
@@ -935,7 +975,7 @@ def _providers_from_accounts(accounts: list[Any], age: float | None) -> dict[str
             detail[label] = rem_val
             is_cap = (w.get("quota_scope") == "model_sublimit"
                       and w.get("max_share_of_parent_percent") is not None)
-            if is_cap and key == name:
+            if (is_cap or family in SUBLIMIT_FAMILIES) and key == name:
                 # A model cap inside the shared pool (Claude's `fable`, at most
                 # 50% of the weekly): it bounds that model only and must not
                 # drag the whole account down. Kept for the model suggestion.
@@ -954,6 +994,28 @@ def _providers_from_accounts(accounts: list[Any], age: float | None) -> dict[str
 
         if not per_key:
             per_key[name] = (None, {}, {}, {})
+        # Shared parent windows can tighten a matched child, never create one.
+        for w in acct.get("windows") or []:
+            parent = w.get("shared_pool_family")
+            key = pool_service(name, w.get("pool_family"))
+            if not parent or key not in per_key:
+                continue
+            parents = [p for p in acct.get("windows") or [] if p.get("pool_family") == parent]
+            worst, detail, sublimits, bind = per_key[key]
+            if not parents:
+                detail[parent] = None  # declared parent is required, never inferred
+            for pw in parents:
+                rem = _pct(pw.get("headroom_percent"))
+                if rem is None:
+                    rem = _pct(pw.get("remaining_percent"))
+                if pw.get("state") == "exhausted" or pw.get("measurement_frozen") is True:
+                    rem = 0.0
+                elif is_old:
+                    rem = None
+                detail[pw.get("label") or parent] = rem
+                if rem is not None:
+                    worst = _tighter(worst, rem)
+            per_key[key] = (worst, detail, sublimits, bind)
         for key, (worst, detail, sublimits, bind) in per_key.items():
             prior = providers.get(key) or {}
             prior_rem = prior.get("remaining")
@@ -1315,6 +1377,15 @@ def usage_from_paseo(rows: list[Any], now: datetime | None = None) -> dict[str, 
         if not isinstance(source, str) or not source:
             continue
         key = _usage_service(source)
+        # A provider-only usage report cannot identify a family-scoped allowance.
+        scoped = any((svc.name == key and svc.pool_family)
+                     or (svc.pool and svc.pool[0] == key) for svc in SERVICES)
+        if scoped:
+            if row.get("pool_family") in SUBLIMIT_FAMILIES:
+                continue  # a standalone model cap cannot fund shared quota
+            key = pool_service(key, row.get("pool_family"))
+            if key is None:
+                continue
         report = row.get("report") if isinstance(row.get("report"), dict) else {}
         try:
             fetched = datetime.fromisoformat(str(row.get("fetchedAt")).replace("Z", "+00:00"))
@@ -1421,6 +1492,8 @@ def _apply_excluded(providers: dict[str, Any], excluded: Any) -> None:
             continue
         name, family = row["provider"], row.get("pool_family")
         key = pool_service(name, family)
+        if key is None:
+            continue
         prior = providers.get(key) or {"windows": {}, "sublimits": {}, "remaining": None}
         entry = dict(prior, excluded=True, reason=row.get("reason"))
         if family in SUBLIMIT_FAMILIES and key == name:
@@ -1714,6 +1787,8 @@ class Choice:
         """Launch template: native `paseo run` (Wave 6; acp-dispatch is transitional only).
         Cursor Cloud uses cursor-cloud launch. Callers add placement flags and the brief."""
         agent = self.service.acp_agent
+        mode = DISPATCH_MODES.get(agent)
+        mode_args = ["--mode", mode] if mode else []
         # DISPATCH_EXTRA retained for config compatibility; unused on the native path
         # (was appended to acp-dispatch lines; empty in config/routing.toml).
         _ = DISPATCH_EXTRA.get(agent, "")
@@ -1730,11 +1805,13 @@ class Choice:
             argv = ["paseo", "run", "--provider", f"pi/{spec[0]}"]
             if len(spec) == 3:
                 argv += ["--thinking", spec[2]]
+            argv += mode_args
             if self.kind:
                 argv += ["--label", f"ade.kind={self.kind}"]
             return shlex.join(argv + ["--no-wait"])
         if not parts:
             return (f"paseo run --provider {agent}/<id from: paseo provider models {agent}> "
+                    + (shlex.join(mode_args) + " " if mode_args else "")
                     + (f"--label ade.kind={self.kind} " if self.kind else "")
                     + "--no-wait")
         argv = ["paseo", "run", "--provider", f"{agent}/{parts[0]}"]
@@ -1743,6 +1820,7 @@ class Choice:
             rest = parts[1].split()
             if len(rest) >= 2 and rest[0] == "--effort":
                 argv += ["--thinking", rest[1]]
+        argv += mode_args
         if self.kind:
             argv += ["--label", f"ade.kind={self.kind}"]
         return shlex.join(argv + ["--no-wait"])
@@ -2224,6 +2302,14 @@ def route(kind: str, *, quota: dict[str, Any] | None = None,
                   kind=kind)
 
 
+def canary_pool(svc: Service) -> str | None:
+    """Quota identity for pools whose meter cannot warn before a first refusal."""
+    provider = svc.pool[0] if svc.pool else (svc.shares_pool or svc.name)
+    if svc.acp_agent == "antigravity":
+        provider = "antigravity"
+    return provider if provider in CANARY_POOLS else None
+
+
 def plan(kinds: list[str], *, quota: dict[str, Any] | None = None,
          min_headroom: float = 15.0,
          exclude: frozenset[str] | set[str] = frozenset(), repo: str | None = None
@@ -2236,17 +2322,23 @@ def plan(kinds: list[str], *, quota: dict[str, Any] | None = None,
     slice finishes. Re-run it at every wave boundary; it is a snapshot-file
     read, so it is instant and costs no tokens."""
     load: dict[str, int] = {}
+    canaries: set[str] = set()
     frontier: dict[str, int] = {}
     full = set(exclude)
     out: list[tuple[str, Choice | None]] = []
     for kind in kinds:
-        skip = full
+        skip = full | {s.name for s in discover(quota or {})
+                       if canary_pool(s) in canaries}
         if kind == "frontier":
             gate = frontier_gate()
-            skip = full | {n for n, k in frontier.items() if k >= frontier_per_wave(n, gate, quota)}
+            skip = skip | {n for n, k in frontier.items() if k >= frontier_per_wave(n, gate, quota)}
         choice = route(kind, quota=quota, min_headroom=min_headroom, exclude=skip, repo=repo)
         if choice is not None:
             name = choice.service.name
+            pool = canary_pool(choice.service)
+            if pool:
+                canaries.add(pool)
+                full.add(name)
             load[name] = load.get(name, 0) + 1
             if kind == "frontier":
                 frontier[name] = frontier.get(name, 0) + 1
@@ -2528,7 +2620,7 @@ ACP_DISPATCH_STATE = Path(os.environ.get("ACP_DISPATCH_STATE")
 # Copied from bin/acp-dispatch (do not import: slice B edits that file). Agent
 # name → (aiuse provider, pool_family). cursor/opencode are model-dependent.
 _AGENT_PROVIDER_MAP: dict[str, tuple[str, str | None]] = {
-    "claude": ("claude", None),
+    "claude": ("claude", "default"),
     "codex": ("codex", None),
     "cursor": ("cursor", None),
     "cursor-cloud": ("cursor-cloud", None),
@@ -2546,7 +2638,9 @@ def map_agent_to_provider(agent: str, model: str | None) -> tuple[str, str | Non
     if agent == "pi":
         # Pi is a transport, not a billing pool. Never map every Pi model to OpenAI credits.
         provider = (model or "").split("/", 1)[0]
-        if provider in ("zai", "cursor", "deepseek", "google", "openrouter"):
+        if provider == "cursor":
+            return "cursor", "third_party"
+        if provider in ("zai", "deepseek", "google", "openrouter"):
             return provider, None
         if provider == "openai":
             return "pi", "codex_api"
@@ -2558,7 +2652,7 @@ def map_agent_to_provider(agent: str, model: str | None) -> tuple[str, str | Non
     if agent == "cursor":
         if not model or model in ("default", "auto"):
             return "cursor", "auto"
-        return "cursor", None
+        return "cursor", "third_party"
     if agent == "antigravity":
         # the Gemini 4 Argon window is its own aiuse pool family; the provider's other pools are not routed
         return ("antigravity", "gemini_argon") if (model or "").lower().startswith("gemini-4-argon") else None
@@ -2577,7 +2671,7 @@ def dispatch_service_name(agent: str, model: str | None) -> str:
     mapping = map_agent_to_provider(agent, model)
     if mapping is None:
         return agent or "?"
-    return pool_service(mapping[0], mapping[1])
+    return pool_service(mapping[0], mapping[1]) or agent or "?"
 
 
 def _is_test_placeholder(rec: dict[str, Any]) -> bool:
@@ -2957,6 +3051,8 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({
                 "snapshot_age_s": age, "stale": stale,
                 "quota_source": quota_source_info(),
+                "canary_pool_max": {p: 1 for p in sorted(CANARY_POOLS)},
+                "canary_release": "lead verifies one successful turn before adding agents",
                 "slices": [{"kind": k, "service": c.service.name if c else None,
                             "cli": c.service.cli if c else None,
                             "agent": c.service.acp_agent if c else None,
@@ -2966,6 +3062,8 @@ def main(argv: list[str] | None = None) -> int:
                             "why": c.why if c else unrouted_why(k, quota, skip)}
                            for k, c in rows]}, indent=1))
         else:
+            for pool in sorted(CANARY_POOLS):
+                print(f"canary pool {pool}: max=1; verify one successful turn before adding agents")
             if QuotaSource.fallback_reason:
                 print(f"WARNING: {QuotaSource.fallback_reason}; quota below is from the "
                       "snapshot file and misses aiuse's credits override and Admin API "

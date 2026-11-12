@@ -168,15 +168,15 @@ class TestWasteBurning(RestorableTransportPolicyCase):
         self.assertNotEqual(r.route("code", quota=q).service.name, "codex")
 
 class TestDegradation(RestorableTransportPolicyCase):
-    def test_works_with_no_quota_at_all(self):
-        """A stale or missing cache must degrade to capability-only routing, except the `github` and `realtime-web`
-        kinds, which no pool serves since copilot (2026-11-06) and the grok CLI (2026-11-07) retired."""
+    def test_missing_quota_never_authorizes_a_family_scoped_route(self):
+        """Unnamed legacy pools may degrade; named family pools require readings."""
         for kind in r.KINDS:
             c = r.route(kind, quota={})
-            if kind in ("github", "realtime-web"):
-                self.assertIsNone(c, f"{kind} has no serving pool")
-            else:
-                self.assertIsNotNone(c, f"{kind} should still route without quota")
+            if kind in ("github", "realtime-web", "judgment"):
+                self.assertIsNone(c, kind)
+            elif c is not None:
+                self.assertFalse(c.service.pool or c.service.pool_family or c.service.shares_pool)
+                self.assertFalse(c.service.measured_only)
 
     def test_unknown_kind_rejected(self):
         with self.assertRaises(ValueError):
@@ -434,16 +434,169 @@ class TestDiscoverySources(unittest.TestCase):
 class TestPoolSplitIsGeneral(unittest.TestCase):
     """Any service can claim one pool family of its provider via `pool=`."""
 
-    def test_any_declared_pool_is_split_and_undeclared_families_stay_home(self):
+    def test_any_declared_pool_is_split_and_undeclared_families_are_unknown(self):
         svc = r.Service("copilot-premium", "copilot", {"code": 20}, "subscription",
                         pool=("copilot", "premium"))
         with mock.patch.object(r, "SERVICES", r.SERVICES + (svc,)):
             self.assertEqual(r.pool_service("copilot", "premium"), "copilot-premium")
-            self.assertEqual(r.pool_service("copilot", "chat"), "copilot")
-            self.assertEqual(r.pool_service("copilot", None), "copilot")
+            self.assertEqual(r.pool_service("copilot", "chat"), None)
+            self.assertEqual(r.pool_service("copilot", None), None)
 
     def test_claude_fable_sublimit_is_not_split(self):
         self.assertEqual(r.pool_service("claude", "fable"), "claude")
+
+
+class TestDispatchUnattendedModes(unittest.TestCase):
+    def test_each_provider_uses_its_native_unattended_mode(self):
+        for service, model, mode in (
+            ("claude", "sonnet --effort high", "bypassPermissions"),
+            ("codex", "gpt-6.1-sol --effort high", "full-access"),
+            ("antigravity-argon", "gemini-4-argon-high", "full-access"),
+            ("zai", "zai/glm-5.3-flash --effort high", None),
+            ("cursor-auto", "default", None),
+        ):
+            with self.subTest(service=service):
+                argv = shlex.split(r.Choice(r.BY_NAME[service], 80, 1,
+                                           model=model, kind="code").dispatch)
+                if mode is None:
+                    self.assertNotIn("--mode", argv)
+                else:
+                    self.assertEqual(argv[argv.index("--mode") + 1], mode)
+                    self.assertEqual(argv.count("--mode"), 1)
+                self.assertEqual(argv[argv.index("--label") + 1], "ade.kind=code")
+                self.assertEqual(argv[-1], "--no-wait")
+                if "--effort" in model:
+                    self.assertEqual(argv[argv.index("--thinking") + 1], "high")
+
+    def test_placeholder_dispatch_still_has_mode_and_pi_honors_configured_modes(self):
+        argv = shlex.split(r.Choice(r.BY_NAME["codex"], 80, 1).dispatch)
+        self.assertEqual(argv[argv.index("--mode") + 1], "full-access")
+        with mock.patch.object(r, "DISPATCH_MODES", {"pi": "provider-native-mode"}):
+            argv = shlex.split(r.Choice(r.BY_NAME["zai"], 80, 1,
+                                       model="zai/glm-5.3-flash").dispatch)
+            self.assertEqual(argv[argv.index("--mode") + 1], "provider-native-mode")
+
+
+class TestQuotaFamilyIsolation(unittest.TestCase):
+    """Sanitized shapes from aiuse schema 1.5, observed 2026-11-12."""
+
+    @staticmethod
+    def row(provider, family, left):
+        return {"provider": provider, "pool_family": family, "usable_now": left > 1,
+                "headroom_percent": left, "age_seconds": 60,
+                "binding_window": family, "models_hint": "family-specific allowance",
+                "windows": [{"label": family or "unnamed", "pool_family": family,
+                             "remaining_percent": left, "headroom_percent": left,
+                             "state": "ok" if left > 1 else "exhausted"}]}
+
+    def test_canary_first_caps_each_blind_pool_at_one_and_prints_max(self):
+        services = [r.Service(name, name, {"research": 1}, "subscription", max_parallel=4,
+                              agent="antigravity" if name == "antigravity" else "pi",
+                              models={"research": "zai/glm-5.3-flash"})
+                    for name in ("antigravity", "openai_api", "zai")]
+        services.append(r.Service("zai-alias", "alias", {"research": 1}, "subscription",
+                                  shares_pool="zai", agent="pi", max_parallel=4,
+                                  models={"research": "zai/glm-5.3-flash"}))
+        quota = {s.name: {"remaining": 80} for s in services}
+        with mock.patch.object(r, "discover", return_value=services), \
+                mock.patch.object(r, "operator_disabled", return_value=set()), \
+                mock.patch.object(r, "load_snapshot", return_value=(quota, 60)):
+            rows = r.plan(["research"] * 6, quota=quota)
+            names = [c.service.name for _, c in rows if c]
+            self.assertEqual(sorted(names), ["antigravity", "openai_api", "zai"])
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(r.main(["plan", "--kinds", "research,research", "--json"]), 0)
+            self.assertEqual(json.loads(out.getvalue())["canary_pool_max"],
+                             {"antigravity": 1, "openai_api": 1, "zai": 1})
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(r.main(["plan", "--kinds", "research"]), 0)
+            self.assertIn("canary pool zai: max=1", out.getvalue())
+
+    def test_dispatch_model_mapping_selects_explicit_policy_family(self):
+        self.assertEqual(r.map_agent_to_provider("claude", "sonnet"), ("claude", "default"))
+        self.assertEqual(r.map_agent_to_provider("claude", "fable"), ("claude", "default"))
+        self.assertEqual(r.map_agent_to_provider("cursor", "composer-2.5"), ("cursor", "third_party"))
+        self.assertEqual(r.map_agent_to_provider("pi", "cursor/composer-2.5"), ("cursor", "third_party"))
+        self.assertEqual(r.dispatch_service_name("claude", "sonnet"), "claude")
+
+    def test_cursor_grok_bot_cannot_fund_composer_or_auto(self):
+        bot = self.row("cursor", "grok_bot", 82)
+        for family in ("grok_bot", None, "unknown"):
+            row = dict(bot, pool_family=family)
+            q = r._providers_from_available([row], 60)
+            for name in ("cursor", "cursor-auto"):
+                self.assertNotIn(name, q)
+                self.assertFalse(r.BY_NAME[name].eligible("research", q))
+        windows = [self.row("cursor", f, 0)["windows"][0]
+                   for f in ("total", "auto", "third_party", "on_demand")]
+        q = r._providers_from_accounts([{"provider": "cursor", "windows": bot["windows"] + windows}], 60)
+        self.assertEqual(q["cursor"]["remaining"], 0)
+        self.assertEqual(q["cursor-auto"]["remaining"], 0)
+        self.assertEqual(r._providers_from_available(
+            [self.row("cursor", "third_party", 37)], 60)["cursor"]["remaining"], 37)
+
+    def test_cursor_shared_total_still_constrains_each_child(self):
+        windows = []
+        for family, left in (("total", 0), ("auto", 80), ("third_party", 90)):
+            w = self.row("cursor", family, left)["windows"][0]
+            if family != "total":
+                w["shared_pool_family"] = "total"
+            windows.append(w)
+        q = r._providers_from_accounts([{"provider": "cursor", "windows": windows}], 60)
+        self.assertEqual(q["cursor"]["remaining"], 0)
+        self.assertEqual(q["cursor-auto"]["remaining"], 0)
+
+    def test_cursor_missing_declared_parent_is_unknown(self):
+        w = self.row("cursor", "auto", 80)["windows"][0]
+        w["shared_pool_family"] = "total"
+        q = r._providers_from_accounts([{"provider": "cursor", "windows": [w]}], 60)
+        self.assertIsNone(r.plenty_remaining(q["cursor-auto"]))
+        self.assertFalse(r.BY_NAME["cursor-auto"].eligible("research", q))
+
+    def test_paseo_provider_only_report_cannot_authorize_family_route(self):
+        for provider in ("cursor", "antigravity", "claude"):
+            rows = [{"sourceId": provider, "fetchedAt": datetime.now(UTC).isoformat(),
+                     "report": {"status": "available", "windows": [
+                         {"label": "usage", "remainingPct": 82}]}}]
+            self.assertEqual(r.usage_from_paseo(rows), {})
+            rows[0]["pool_family"] = "fable"
+            self.assertEqual(r.usage_from_paseo(rows), {})
+
+    def test_argon_never_borrows_gemini_or_claude_gpt(self):
+        for fold in (r._providers_from_available, r._providers_from_accounts):
+            for family in ("gemini", "claude_gpt", None, "unknown"):
+                with self.subTest(fold=fold.__name__, family=family):
+                    q = fold([self.row("antigravity", family, 80)], 60)
+                    self.assertNotIn("antigravity-argon", q)
+                    self.assertFalse(r.BY_NAME["antigravity-argon"].eligible("frontier", q))
+            q = fold([self.row("antigravity", "gemini", 57),
+                      self.row("antigravity", "gemini_argon", 0),
+                      self.row("antigravity", "claude_gpt", 24)], 60)
+            self.assertEqual(q["antigravity-argon"]["remaining"], 0)
+            self.assertEqual(fold([self.row("antigravity", "gemini_argon", 32)], 60)
+                             ["antigravity-argon"]["remaining"], 32)
+
+    def test_claude_default_and_fable_cap_are_not_interchangeable(self):
+        default = self.row("claude", "default", 23)
+        cap = {"pool_family": "fable", "label": "Fable", "quota_scope": "model_sublimit",
+               "shared_pool_family": "default", "max_share_of_parent_percent": 50,
+               "headroom_percent": 0, "remaining_percent": 0, "usable_now": False,
+               "state": "exhausted"}
+        default["model_sublimits"] = [cap]
+        q = r._providers_from_available([default], 60)
+        self.assertEqual(q["claude"]["remaining"], 23)
+        self.assertEqual(q["claude"]["sublimits"]["fable"], 0)
+        account = {"provider": "claude", "windows": default["windows"] + [cap]}
+        q = r._providers_from_accounts([account], 60)
+        self.assertEqual(q["claude"]["remaining"], 23)
+        self.assertEqual(q["claude"]["sublimits"]["fable"], 0)
+        for fold in (r._providers_from_available, r._providers_from_accounts):
+            for family in ("fable", None, "unknown"):
+                q = fold([self.row("claude", family, 80)], 60)
+                self.assertIsNone(q.get("claude", {}).get("remaining"))
+                self.assertFalse(r.BY_NAME["claude"].eligible("code", q))
 
 
 class TestPlanWave(unittest.TestCase):
@@ -492,7 +645,7 @@ class TestPlanWave(unittest.TestCase):
         with mock.patch.object(r, "load_snapshot", return_value=(self.Q, 60.0)), \
              contextlib.redirect_stdout(buf):
             self.assertEqual(r.main(["plan", "--kinds", "code,bulk"]), 0)
-        lines = buf.getvalue().strip().splitlines()
+        lines = [line for line in buf.getvalue().strip().splitlines() if not line.startswith("canary pool ")]
         self.assertEqual(len(lines), 2)
         self.assertTrue(lines[0].startswith("1. code"))
 
@@ -651,7 +804,7 @@ class TestRoutingPolicy2026_10_15(unittest.TestCase):
         c = r.route("frontier", quota=IDLE)
         self.assertEqual(c.service.name, "codex")
         self.assertEqual(c.dispatch,
-                         "paseo run --provider codex/gpt-6-astra --thinking high "
+                         "paseo run --provider codex/gpt-6-astra --thinking high --mode full-access "
                          "--label ade.kind=frontier --no-wait")
 
 
@@ -703,7 +856,7 @@ class TestFrontierConservative2026_10_18(unittest.TestCase):
                                        "resetsAt": stamp(now + timedelta(hours=2))},
                                       {"id": "f", "label": "Weekly (Fable)", "usedPct": 40.0, "remainingPct": 60.0,
                                        "resetsAt": stamp(now + timedelta(days=3))}]})
-        path.write_text(json.dumps([{"id": "claude:default", "sourceId": "claude", "sourceLabel": "Claude", "icon": "<svg/>",
+        path.write_text(json.dumps([{"id": "claude:default", "sourceId": "claude", "pool_family": "default", "sourceLabel": "Claude", "icon": "<svg/>",
                                      "account": "a", "fetchedAt": stamp(fetched), "report": report, "loginErrors": []}]))
         return path
 
@@ -753,7 +906,7 @@ class TestFrontierConservative2026_10_18(unittest.TestCase):
         it is recorded (`paseo_unknown`), never a loosening and never a block of a known reading."""
         tmp = Path(tempfile.mkdtemp(prefix="ragate-aiuse-"))
         (tmp / "aiuse.json").write_text(json.dumps({"fresh": True, "age_seconds": 60, "available": [
-            {"provider": "claude", "pool_family": None, "usable_now": True, "headroom_percent": 64.0, "age_seconds": 60,
+            {"provider": "claude", "pool_family": "default", "usable_now": True, "headroom_percent": 64.0, "age_seconds": 60,
              "binding_window": "weekly"},
             {"provider": "claude", "pool_family": "fable", "usable_now": True, "headroom_percent": 55.0, "age_seconds": 60}]}))
         env = {**self.gate_env(claude="unknown"), "ROUTE_AGENT_AIUSE_JSON": str(tmp / "aiuse.json")}
@@ -763,7 +916,7 @@ class TestFrontierConservative2026_10_18(unittest.TestCase):
             self.assertIn("report unavailable", state["paseo_unknown"])
             self.assertEqual(r.frontier_per_wave("claude", r.frontier_gate(), IDLE), 2)
         (tmp / "aiuse.json").write_text(json.dumps({"fresh": True, "age_seconds": 60, "available": [
-            {"provider": "claude", "pool_family": None, "usable_now": True, "headroom_percent": 64.0, "age_seconds": 2400}]}))
+            {"provider": "claude", "pool_family": "default", "usable_now": True, "headroom_percent": 64.0, "age_seconds": 2400}]}))
         with mock.patch.dict(os.environ, env):
             self.assertEqual(r.frontier_per_wave("claude", r.frontier_gate(), IDLE), 1)     # a 40-minute-old row is stale
 
@@ -1301,7 +1454,7 @@ class TestQualityBand(unittest.TestCase):
 
     @mock.patch.dict(os.environ, {"ROUTE_AGENT_OMP_READY": "0"})   # omp-ready: TestOmpReadyRoster
     def test_the_2026_10_18_case_queues_code_instead_of_routing_far_down(self):
-        best = r.quality_best("code", list(r.discover(self.CASE)))
+        best = r.quality_best("code", list(r.discover(self.CASE)), quota=self.CASE)
         self.assertIsNotNone(best)
         c = r.route("code", quota=self.CASE)
         self.assertIsNone(c, c and f"{c.service.name} r{c.service.rank_for('code')}")
@@ -1315,10 +1468,10 @@ class TestQualityBand(unittest.TestCase):
         moment an in-band pool has room again, it gets the slice."""
         gap = r.QUALITY_MAX_RANK_GAP["code"]
         services = list(r.discover(self.CASE))
-        best = r.quality_best("code", services)
+        best = r.quality_best("code", services, quota=self.CASE)
         assert best is not None
         far = [s.name for s in services
-               if s.eligible("code") and s.rank_for("code") - best.rank_for("code") > gap]
+               if s.eligible("code", any_headroom=True) and s.rank_for("code") - best.rank_for("code") > gap]
         self.assertTrue(far, "fixture should include pools outside the band")
         q = dict(self.CASE, cursor={"remaining": 50.0, "age_s": 0})
         c = r.route("code", quota=q)
@@ -1339,9 +1492,9 @@ class TestQualityBand(unittest.TestCase):
     def test_an_excluded_best_pool_moves_the_band(self):
         """A failed pool passed in `exclude` no longer anchors the band (the reroute path)."""
         services = list(r.discover(self.CASE))
-        best = r.quality_best("code", services)
+        best = r.quality_best("code", services, quota=self.CASE)
         assert best is not None
-        nxt = r.quality_best("code", services, {best.name})
+        nxt = r.quality_best("code", services, {best.name}, quota=self.CASE)
         self.assertIsNotNone(nxt)
         self.assertNotEqual(nxt.name, best.name)
 
@@ -2530,7 +2683,8 @@ class TestQuotaFromPaseoUsage(unittest.TestCase):
         if status == "available":
             rep["windows"] = list(windows)
             rep["balances"] = list(balances)
-        return {"id": f"{source}:default", "sourceId": source, "sourceLabel": source, "icon": "<svg>x</svg>", "account": "a",
+        return {"id": f"{source}:default", "sourceId": source,
+                "pool_family": {"claude": "default", "cursor": "third_party"}.get(source), "sourceLabel": source, "icon": "<svg>x</svg>", "account": "a",
                 "fetchedAt": (self.NOW - timedelta(minutes=age_min)).strftime("%Y-%m-%dT%H:%M:%SZ"), "report": rep,
                 "loginErrors": [{"message": "x"}]}
 
@@ -2612,7 +2766,7 @@ class TestQuotaFromPaseoUsage(unittest.TestCase):
 
     def test_the_tighter_source_wins_per_pool_and_each_pool_names_its_source(self):
         aiuse = [{"provider": "codex", "pool_family": None, "usable_now": True, "headroom_percent": 80.0, "age_seconds": 20},
-                 {"provider": "claude", "pool_family": None, "usable_now": True, "headroom_percent": 40.0, "age_seconds": 20}]
+                 {"provider": "claude", "pool_family": "default", "usable_now": True, "headroom_percent": 40.0, "age_seconds": 20}]
         usage = [self.row("codex", windows=[self.win("5-hour", left=35.0)]), self.row("claude", windows=[self.win("Weekly", left=90.0)]),
                  self.row("cursor", windows=[self.win("Monthly", left=66.0)])]
         quota, _, info = self.load(aiuse, usage)
@@ -2629,7 +2783,7 @@ class TestQuotaFromPaseoUsage(unittest.TestCase):
         self.assertIn("report unavailable", quota["codex"]["paseo_unknown"])
         self.assertIsNone(quota["claude"]["remaining"])
         self.assertIn("report error", quota["claude"]["unknown"])
-        self.assertIsNone(r.route("judgment", quota={"claude": quota["claude"]}).remaining)   # unmeasured, not 100%
+        self.assertIsNone(r.route("judgment", quota={"claude": quota["claude"]}))   # unmeasured, not 100%
 
     def test_paseo_alone_fills_the_snapshot_when_aiuse_is_absent(self):
         quota, age, info = self.load(None, [self.row("claude", windows=[self.win("Weekly", left=77.0)])])
@@ -2669,7 +2823,7 @@ class TestArgonFrontierFallback(unittest.TestCase):
         self.assertEqual(
             (c.service.name, c.dispatch),
             ("antigravity-argon",
-             "paseo run --provider antigravity/gemini-4-argon-high "
+             "paseo run --provider antigravity/gemini-4-argon-high --mode full-access "
              "--label ade.kind=frontier --no-wait"),
         )
         q.pop("antigravity-argon")

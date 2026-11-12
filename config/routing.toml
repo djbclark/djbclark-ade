@@ -27,6 +27,8 @@
 # must establish its own account entitlement and fresh shared-pool quota.
 
 [routing]
+# Before-refusal blind spots: one canary per pool; lead verifies a successful turn before scaling.
+canary_pools = ["antigravity", "openai_api", "zai"]
 # Kinds of work. Deliberately few — a taxonomy nobody can apply is worse than
 # a coarse one that gets used.
 # `api-only` (operator 2026-10-19): work that needs the Claude API and cannot run through a
@@ -123,6 +125,8 @@ frontier_models = ["gpt-6-astra", "fable", "gemini-4-argon"]
 inflight_cap = {}
 # Flags a dispatch line needs for the agent to accept the model at all (none since crush retired, 2026-11-06).
 extra = {}
+# Provider-native unattended IDs (2026-11-12); Pi reports no selectable modes, so omit it.
+unattended_modes = { claude = "bypassPermissions", codex = "full-access", antigravity = "full-access" }
 
 # When there is no measured history, floor the brief-size default (operator 2026-10-18:
 # gpt-6-astra median 65% of codex's 5-hour window across 4 measured slices).
@@ -194,6 +198,7 @@ clinepass = ["cline-pass/deepseek-v4-flash", "cline-pass/minimax-m3"]
 
 [[service]]
 name = "claude"
+pool_family = "default"
 cli = "claude (Opus 5.5 @ high for judgment; Sonnet 5.5 for code; Fable only for frontier)"
 good_at = { judgment = 1, frontier = 2, code = 12 }
 billing = "subscription"
@@ -326,6 +331,7 @@ models = { code = "default", mechanical = "default", bulk = "default", research 
 
 [[service]]
 name = "cursor"
+pool_family = "third_party"
 cli = "pi (retained Cursor subscription CLI bridge)"
 ready_probe = "pi"
 good_at = { code = 20, mechanical = 10, bulk = 18, research = 18 }

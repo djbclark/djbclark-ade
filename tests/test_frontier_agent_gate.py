@@ -86,7 +86,7 @@ class TestAwayAllowance(unittest.TestCase):
                             "resetsAt": None})
         report = {"status": status, **({"windows": windows} if status == "available" else {"problem": {"kind": "rejected"}})}
         path = self.state / f"usage-{time.monotonic_ns()}.json"
-        path.write_text(json.dumps([{"id": "claude:default", "sourceId": "claude", "account": "a", "fetchedAt": _ts(fetched),
+        path.write_text(json.dumps([{"id": "claude:default", "sourceId": "claude", "pool_family": "default", "account": "a", "fetchedAt": _ts(fetched),
                                      "report": report}]))
         return str(path)
 

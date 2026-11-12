@@ -54,8 +54,11 @@ class Base(unittest.TestCase):
             (self.bin / name).symlink_to(FAKES / name)
         self.out, self.repo, self.state = self.tmp / "out", self.tmp / "repo", self.tmp / "paseo-state"
         self.repo.mkdir()
-        self.no_quota = self.tmp / "no-quota.json"
-        self.no_quota.write_text(json.dumps({"collected_at": "2099-01-01T00:00:00+00:00", "snapshot": {"accounts": []}}))
+        self.quota_snapshot = self.tmp / "known-quota.json"
+        self.quota_snapshot.write_text(json.dumps({
+            "collected_at": datetime.now(UTC).isoformat(), "snapshot": {"accounts": [
+                {"provider": "claude", "windows": [{"label": "shared weekly", "pool_family": "default",
+                 "remaining_percent": 100.0, "headroom_percent": 100.0, "state": "ok"}]}]}}))
 
     def workspace_row(self, ws_id: str = "wks_test_default", cwd: Path | None = None) -> dict[str, Any]:
         here = (cwd or self.repo).resolve()
@@ -75,7 +78,7 @@ class Base(unittest.TestCase):
                   "ACP_DISPATCH_STATE": str(self.tmp / "state"), "ACP_DISPATCH_LOCK_DIR": str(self.tmp / "lock"),
                   "ACP_DISPATCH_LOAD_WATCH": str(self.bin / "load-watch"),
                   "ACP_DISPATCH_REVIEW_LAUNCH": str(self.bin / "review-launch"),
-                  "AIUSE_SNAPSHOT": str(self.no_quota), "ROUTE_AGENT_AIUSE": "off", "ACP_DISPATCH_NO_LOAD_GATE": "1"})
+                  "AIUSE_SNAPSHOT": str(self.quota_snapshot), "ROUTE_AGENT_AIUSE": "off", "ACP_DISPATCH_NO_LOAD_GATE": "1"})
         e.update(self.workspaces_env())
         e.update(extra)
         return e
@@ -243,6 +246,18 @@ class TestProviderMapAndArgv(Base):
         self.assertEqual(Path(agents[0]["cwd"]).resolve(), self.repo.resolve())
         run = next(c for c in self.calls() if c[0] == "run")
         self.assertEqual(run[run.index("--workspace") + 1], child_id)
+
+    def test_family_scoped_dispatch_refuses_missing_or_unrelated_quota(self):
+        for family in (None, "unknown", "fable"):
+            with self.subTest(family=family):
+                path = self.tmp / "unmatched-quota.json"
+                path.write_text(json.dumps({"collected_at": datetime.now(UTC).isoformat(),
+                    "snapshot": {"accounts": [{"provider": "claude", "windows": [
+                        {"label": "unmatched", "pool_family": family, "remaining_percent": 90.0}]}]}}))
+                result = self.dispatch(AIUSE_SNAPSHOT=str(path))
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                self.assertIn("not eligible for --kind code", result.stderr)
+                self.assertNotIn("run", self.verbs())
 
     def test_effort_becomes_thinking(self):
         argv = self.dry("claude", "sonnet", "--effort", "high")["argv"]
@@ -557,7 +572,10 @@ class TestLoadGateAndCap(Base):
 
     def test_a_burst_of_twenty_launches_still_hits_the_fourteen_agent_cap(self):
         def one(i: int) -> int:
-            return self.gated("--detach", "--no-wait", name=f"b{i:02d}", FAKE_PASEO_AGENT="running").returncode
+            # Isolate the live-agent cap: 20 one-percent reservations fit the
+            # known 100% fixture, so quota cannot preempt the load gate.
+            return self.gated("--detach", "--no-wait", "--est-pct", "1",
+                              name=f"b{i:02d}", FAKE_PASEO_AGENT="running").returncode
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=20) as pool:
             codes = list(pool.map(one, range(20)))
@@ -614,7 +632,7 @@ class TestFrontierGuards(Base):
         report = {"status": "available", "windows": [
             {"id": "w", "label": "Weekly", "usedPct": 100 - weekly_left, "remainingPct": weekly_left, "resetsAt": None},
             {"id": "f", "label": "Weekly (Fable)", "usedPct": 100 - fable_left, "remainingPct": fable_left, "resetsAt": None}]}
-        (self.tmp / "usage.json").write_text(json.dumps([{"id": "claude:default", "sourceId": "claude", "account": "a",
+        (self.tmp / "usage.json").write_text(json.dumps([{"id": "claude:default", "sourceId": "claude", "pool_family": "default", "account": "a",
                                                           "fetchedAt": _ts(datetime.now(UTC) - timedelta(minutes=5)),
                                                           "report": report}]))
         env = {"ROUTE_AGENT_PASEO_USAGE_JSON": str(self.tmp / "usage.json"), "ROUTE_AGENT_AIUSE": "off",

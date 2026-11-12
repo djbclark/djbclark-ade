@@ -27,10 +27,13 @@ use one validated effective model-tier snapshot, refreshed by default reload;
 See [config precedence](config-migration.md).
 A2. `bin/route_agent.py plan --kinds …` applies them to the live quota and prints one `paseo run --provider … --no-wait` line per slice;
 `route`, `show`, `services [--check-models]`, `calibrate`, `substrate` and `hermes-chain` are its other commands.
+A2a. **Unattended dispatch (2026-11-12):** `Choice.dispatch` adds the provider-native mode from `[dispatch].unattended_modes`: Claude `bypassPermissions`, Codex and Antigravity `full-access`. Pi reports no selectable modes in `paseo provider ls --json`, so no mode is passed. This prevents workers from inheriting Default permissions.
 A3. **Monthly `good_at` re-rank (2026-11-10):** `route_agent.py calibrate --json --since 30` proposes rank
 deltas from recent dispatch outcomes. The optional Paseo schedule `routing-recalibrate` (Day 1 09:00,
 `--mode auto`) applies those suggestions; inventory + create line in `docs/scheduling.md` and
 `config/install.toml [[install.jobs]]` (Carried #33 residual; launchd job retired in slim-down E5).
+
+A4. **Canary waves (2026-11-12):** `[routing].canary_pools` names antigravity, openai_api and zai, whose meters cannot establish exhaustion before a refusal. Each `plan` assigns at most one agent per named pool, including aliases, and prints per-pool max=1 (`canary_pool_max` in JSON). The lead must observe one successful canary turn, re-probe quota/refusals, and only then expand within the normal `max_parallel`. The planner does not attest live canary success; another plan is not permission to launch a second unproven canary. No elapsed-time release is used.
 
 ## B. The pools (J2 pool audit, `docs/slim/log.md`, 2026-11-06; grok retired 2026-11-07)
 
@@ -63,6 +66,8 @@ checks every suggested model against it (exit 1 when one is not listed, 2 when P
 against the Mac's daemon: run it there after the merge.
 
 ## D. Quota: aiuse first, `paseo usage ls --json` second
+
+D0. **Family matching (2026-11-12):** quota rows and snapshot windows count only for the declared `pool = [provider, family]` or primary `pool_family`. Unknown/missing family metadata cannot authorize a family-scoped route. Cursor’s `grok_bot` allowance never funds Composer or Auto: `cursor` conservatively retains the policy’s included `third_party` family (actual Composer billing-family validation remains separate) and `cursor-auto` claims `auto`. Antigravity `gemini`, `gemini_argon` and `claude_gpt` do not substitute for one another. Claude `default` supplies shared headroom; `fable` and `model_sublimits` constrain only that model, never create shared headroom. Providers with one unnamed pool retain null-family readings. Dispatch eligibility loads quota for every scoped/measured service, including Claude code; model-to-pool mapping names the explicit shared/default or included family. Native Paseo report/account IDs are not inferred as quota families; familyless reports remain unknown.
 
 D1. `aiuse --available --json` stays the primary reading (it applies the operator's credits override, Admin API
 readings and grant expiry at read time; 20 s timeout, memoised 30 s; the snapshot file is the fallback).
