@@ -142,8 +142,11 @@ and size the wave to it (2026-11-12: one 11:53 AM EST agy reading, served as `fr
 agy Claude/GPT and Argon pools both ran out mid-wave).
 E1b. A request-rate limit is not quota: `aiuse` cannot see it. Pi z.ai answers `429` code `1302` ("Rate limit
 reached for requests") once about 7 z.ai agents run at once, with 70% of its 5-hour window left (2026-11-12). Keep at
-most 5 z.ai agents running; on a 1302, switch that agent in place to another Pi pool (`update_agent settings.model`,
-e.g. `openai/gpt-6.1-sol`) or send a "continue" after the others finish, never mark the pool exhausted.
+most 5 z.ai agents running; on a 1302, switch that agent in place to another subscription pool Pi reaches
+(`update_agent settings.model`, e.g. `cursor/composer-2.5` or `antigravity/gemini-3.8-flash-high`) or send a
+"continue" after the others finish, never mark the pool exhausted. **Pi's `openai/*` models are the metered OpenAI
+API, not the Codex subscription**: never a switch target (2026-11-12: one switch hit the org's enforced spend limit at
+once, while Codex showed 65% left). A Codex-pool agent is `paseo run --provider codex/...`, a new agent.
 E2. `used_percent` is the share consumed: 100 means empty. Quote "X% used / Y% left".
 E3. An account is usable only if every window has headroom: the fullest binds.
 E4. One provider can hold several pools (Cursor Auto vs third-party): a 429 describes the pool the model draws on.
