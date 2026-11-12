@@ -70,4 +70,3 @@ try {
   console.error(JSON.stringify({ status: 'unavailable', error: error.message }));
   process.exitCode = 2;
 }
-
