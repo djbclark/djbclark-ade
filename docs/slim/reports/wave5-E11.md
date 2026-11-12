@@ -1,5 +1,10 @@
 # Wave 5 report E11 (S-docs): README, AGENTS.md, docs/ and queue.md re-based on the slimmed repo, 2026-11-07
 
+Historical record. The operator-typed reset/resume handoff described below was
+superseded on 2026-11-12 by [agent-run self-handoff](../../self-session.md):
+the agent launches and verifies its successor without operator typing.
+
+
 Writer: one Claude agent (Opus 5.5) in worktree `/home/user/djbclark-ade/.claude/worktrees/agent-afedd044bb91d3fd4`, branch
 `worktree-agent-afedd044bb91d3fd4`. Before any edit the branch merged `claude/determined-maxwell-uvddaz` (3a3b731 is an
 ancestor of every commit here). Brief: `docs/slim/briefs/wave5-E11-docs.md`. Not pushed; the lead merges. Commits, in order:

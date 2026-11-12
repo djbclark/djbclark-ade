@@ -15,8 +15,11 @@ description: >-
 owned Tier 1 checkpoint is durable and the supported lifecycle controller has acknowledged that successor. Never
 clear a parent session to make a child resume. See [context hygiene](../../docs/context-hygiene.md).
 
-After a handoff the operator types `/clear` and then `/baton`, or a successor agent starts with `/baton PATH` as its
-first prompt (`handoff` Step 9; `self-slash`, which used to queue the `/baton` itself, was removed 2026-11-06).
+After a whole-session handoff, the predecessor runs `ade-self-session handoff`
+with its durable checkpoint; the new agent resumes from that checkpoint and its
+exact Tier 1 pointer. See [self-session](../../docs/self-session.md#c-self-handoff-to-a-new-session)
+for `accept` / `finish` and the agent-run fallback. The predecessor launches the
+successor itself; no operator reset or pasted prompt is required.
 
 **Syntax is per client (2026-10-25).** In Claude Code the skill is typed `/baton`. In Codex a skill is invoked with
 `$` (`$baton`, `$baton PATH`) and `/` is reserved for Codex's built-ins (`/new`, `/compact`, `/quit`): a `/baton` typed
@@ -30,10 +33,14 @@ has nothing to resume (no open work, `latest_handoff` already finished), say
 so and offer the `loose` Rule 4 choices (handoff and continue, finish and
 archive, keep working); never write another handoff automatically.
 
-A `/baton` can arrive three ways: typed by the operator after `/clear` (the same agent, fresh context), as the first
-prompt of a successor another session started (`env -u PASEO_AGENT_ID -u PASEO_AGENT_CWD paseo run … "/baton PATH"`),
-or from a dispatched slice's brief. Treat all three alike. A successor's brief names its predecessor's id: once you have
-answered, archive the predecessor (`paseo agent archive PRED_ID`, never `--force`) and tell its siblings your new id.
+A `/baton` can arrive as a successor's first prompt, a dispatched slice's brief,
+or an explicit operator resume request. Treat all three alike for reading.
+For a self-session transaction, read the preserved checkpoint/record, acknowledge
+it with `accept`, wait for predecessor idle, then retire it with `finish`.
+For an agent-run fallback, follow the same document's C1 acknowledgement and
+verified idle-only archive checks. Reconcile claim ownership before writes;
+then tell siblings your new id. A partial-transfer brief keeps its predecessor
+running. A dispatched slice never retires its parent's session.
 
 This is a thin entry point, not a separate protocol. Follow the
 `session-handoff` skill's **Reader protocol** section exactly (read

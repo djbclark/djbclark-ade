@@ -1,5 +1,10 @@
 # Wave 3 E4 report (helm, self-slash, autorename, paseo-* helpers)
 
+Historical record. The operator-typed reset/resume handoff described below was
+superseded on 2026-11-12 by [agent-run self-handoff](../../self-session.md):
+the agent launches and verifies its successor without operator typing.
+
+
 Worktree `/home/user/djbclark-ade/.claude/worktrees/agent-a1901adc45a1860e6`, branch `worktree-agent-a1901adc45a1860e6` (base master `fb3b9de`; commits not pushed). 2026-11-06.
 
 ## A. Deleted

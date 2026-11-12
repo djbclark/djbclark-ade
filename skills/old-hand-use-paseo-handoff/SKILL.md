@@ -1,9 +1,9 @@
 ---
 name: old-hand-use-paseo-handoff
-description: "OLD WAY: short alias for the ADE recovery handoff. Prefer paseo-handoff for a fresh agent."
+description: "OLD WAY: short alias for the ADE recovery handoff. Use acknowledged self-handoff for a fresh agent."
 ---
 
-# Old hand — use paseo-handoff for a fresh agent
+# Old hand — acknowledged self-handoff for a fresh agent
 
 The operator types `hand` in every TUI because `/handoff` historically collided
 with omp's built-in command of that name (omp is archive-only under the
@@ -22,4 +22,4 @@ Cursor, Hermes (skill route), and Pi (via `~/.agents/skills`, shared with Codex)
 `$hand` in Codex (its `/prompts:hand` form is deprecated and not installed).
 Archived wrappers for retired clients remain in-repo only
 (`omp/commands/hand.md`, `opencode/commands/hand.md`) — never install targets.
-Prefer Paseo's `paseo-handoff` for a fresh agent.
+Whole-session replacement follows handoff Step 9 and the ADE self-session protocol.
