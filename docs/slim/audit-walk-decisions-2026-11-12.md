@@ -190,3 +190,28 @@ work. Escalate concrete unusual difficulty or unresolved policy tradeoffs.
 | 5 | Recover web/skill capabilities; auto-adopt validated skill-only learning | Queued; standing-order edits remain proposals |
 | 6 | Recover useful review coordination; preserve owner trust and external boundary | Queued under existing policy |
 | 7 | Preserve evidence/date/operator deletion gates | No deletion authorized |
+
+## 8. Explicit restoration requirements — operator follow-up
+
+Operator explicitly requires restoring **self-compact** and
+**self-handoff-to-new-session**, not just documenting manual replacements.
+Investigate native APIs first and implement usable agent-invoked entry points
+with durable checkpoints, duplicate protection and successor acknowledgement
+before predecessor retirement. A provider/runtime lacking a supported API must
+report that limitation; do not claim compaction or handoff happened merely
+because a request was submitted. Ordinary self-requested handoff is authorized;
+this does not silently decide the separate unattended crash-restart policy.
+
+**YOLO is the default for all ordinary agent launches**, including children,
+reviewers of trusted internal work and fresh handoff successors. Restricted
+execution is reserved for external-security-critical work, including the
+prompt-injection boundary. Extend verification beyond creation-time mappings to
+current supported providers and resume/mode drift. Do not use defaultMode or an
+unavailable provider as an excuse for silent Always Ask stalls. Preserve explicit
+operator-requested restrictive modes; do not invent mode IDs or claim runtime
+permissions that the host does not actually provide. Prior statements retaining
+restricted review as a blanket rule must be interpreted under this narrower
+external-security-critical exception.
+
+These are implementation requirements, superseding the earlier design-only
+scope for self-handoff. No runtime plugin or mode was changed by this record.
