@@ -41,7 +41,7 @@ MAX_REFUSED_ATTEMPTS = 3
 SESSION_ENV = ("PASEO_AGENT_ID", "HERDR_PANE_ID", "CLAUDE_CODE_SESSION_ID", "HERMES_SESSION_ID")
 TASK_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 AGENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")   # no leading "-": never read as an option
-UI_RE = re.compile(r"^\s*(?:id\s*[:=]\s*)?(S\d+)\b", re.M)
+UI_RE = re.compile(r"^Flagged (S\d+):", re.M)   # paseo-progress 1.14.6 prints `Flagged S3: <reason>` (cli.ts:489-490)
 EX_TEMPFAIL = 75
 
 
@@ -221,7 +221,7 @@ def close_items(task: str, mode: str, recs: dict) -> list[str]:
     return notes
 
 
-def with_state(fn, busy: int = 0):
+def with_state(fn, busy: int = 0, as_json: bool = False):
     """Run fn(state) under the non-blocking user lock. Busy: a scan exits 0 without effects; a state-changing
     command exits EX_TEMPFAIL so the caller never takes a skipped retire for a success."""
     d = ensure_state_dir()
@@ -229,8 +229,8 @@ def with_state(fn, busy: int = 0):
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
-        print("busy: another ade-progress pass holds the lock; no effects" + ("; retry shortly" if busy else ""),
-              file=sys.stderr if busy else sys.stdout)
+        msg = "busy: another ade-progress pass holds the lock; no effects" + ("; retry shortly" if busy else "")
+        print(json.dumps({"busy": True, "message": msg}) if as_json else msg, file=sys.stderr if busy else sys.stdout)
         os.close(fd)
         return busy
     try:
@@ -365,6 +365,9 @@ def progress_item(d: dict, rec: dict) -> None:
     text = f"{d['task']}: {d['summary']} [{rec['reason']}]"
     rc, out = run(pp + ["stuck", "set", text], 15, cwd=d["workspace"])
     m = UI_RE.search(out) if rc == 0 else None
+    if rc == 0 and not m:   # the item may exist under an id we could not read: never set another (that would stack)
+        rec["ui"] = "unverified"
+        return
     if not m:   # a finished or missing run is the expected "no-run" outcome, not an anomaly
         rec["ui"] = "no-run"
         return
@@ -466,8 +469,15 @@ def process(st: dict, c: dict, paseo: list[str], rep: dict) -> dict | None:
         rec = {"key": key, "task": d["task"], "reason": c["reason"], "agent_id": d["agent_id"], "summary": d["summary"],
                "first": now(), "state": "prepared", "wake": None, "ping": None, "ui": None,
                "attempts": (old or {}).get("attempts", 0), "last_published": (old or {}).get("last_published", 0)}
-        if old and old.get("ui_id"):   # a repeat notice reuses the earlier Progress item instead of stacking another
-            rec.update(ui=old["ui"], ui_id=old["ui_id"], workspace=old.get("workspace"), first=old["first"])
+        prev = [r for r in st["events"].values() if r["task"] == d["task"] and not r.get("closed")
+                and (r.get("ui_id") or r.get("ui") == "unverified")]
+        if prev:   # a repeat notice, even for a new generation or reason, reuses the open Progress item instead of stacking
+            last = max(prev, key=lambda r: r.get("last_published", 0))
+            rec.update(ui=last["ui"], workspace=last.get("workspace"))
+            if last.get("ui_id"):
+                rec["ui_id"] = last["ui_id"]
+        if old:
+            rec["first"] = old["first"]
         if old and old.get("wake") in ("unknown", "refused"):
             rec["prior_wake"] = old["wake"]   # an earlier uncertain or refused attempt, kept visible
         st["events"][key] = rec
@@ -487,6 +497,8 @@ def process(st: dict, c: dict, paseo: list[str], rep: dict) -> dict | None:
             rec["wake"] = wake(paseo, d)
             rec["attempts"] += 1
     if rec["ui"] is None:   # step 3: Progress item, then (in the digest) the page
+        rec["ui"] = "intent"
+        save(st)   # intent before effect: a crash leaves "intent", reconciled to unverified, never set twice
         progress_item(d, rec)
     rec["state"], rec["last_published"] = "published-local", now()
     save(st)
@@ -509,6 +521,8 @@ def cmd_scan(a) -> int:
                 rec["wake"] = "unknown"
             if rec.get("ping") == "intent":
                 rec["ping"] = "unknown"
+            if rec.get("ui") == "intent":
+                rec["ui"] = "unverified"
         rc, out = run(paseo + ["ls", "-g", "--background", "--json"], 30)
         try:
             rows = {r["id"]: r for r in json.loads(out) if isinstance(r, dict) and r.get("id")} if rc == 0 else None
@@ -530,7 +544,7 @@ def cmd_scan(a) -> int:
             return emit(rep, a)
         fresh = []
         for c in cands:
-            if time.monotonic() > deadline:   # the 45 s bound covers the effects too, so the lock is not held for minutes
+            if time.monotonic() > deadline:   # the 45 s bound is checked before each event; one event's effects can still run past it (about 2 min worst case)
                 rep["partial"] = True
                 break
             r = process(st, c, paseo, rep)
@@ -538,7 +552,8 @@ def cmd_scan(a) -> int:
                 fresh.append(r)
         # every published record not yet paged rides the digest, so a crash before the page loses nothing
         pend = [r for r in st["events"].values() if r.get("ping") == "deferred-rate-limit"
-                or (r["state"] == "published-local" and r.get("ping") is None)]
+                or (r["state"] == "published-local" and r.get("ping") is None)
+                or (r["state"] == "prepared" and r.get("wake") == "unknown" and r.get("ping") is None)]
         rep["ping"] = send_digest(st, pend)
         rep["events"] = [{"task": r["task"], "reason": r["reason"], "wake": r["wake"], "ui": r["ui"], "ping": r.get("ping")}
                          for r in fresh]
@@ -547,7 +562,7 @@ def cmd_scan(a) -> int:
         return emit(rep, a)
 
     if a.yes:
-        return with_state(go)
+        return with_state(go, as_json=a.json)
     st = read_json(state_dir() / "state.json", {"events": {}, "pings": [], "wakes": {}, "last_scan": 0})
     return go(st)
 

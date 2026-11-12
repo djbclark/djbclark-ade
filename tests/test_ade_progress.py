@@ -66,9 +66,9 @@ FAKE_PP = textwrap.dedent('''\
         print("The run is finished"); sys.exit(1)
     if sys.argv[1:3] == ["stuck", "set"]:
         n = len(open(d + "/pp.jsonl").read().splitlines())
-        print("S%d" % n)
+        print("Flagged S%d: %s" % (n, sys.argv[3]))   # the real paseo-progress 1.14.6 output format
     elif sys.argv[1] == "show":
-        print("stuck: S1 S2 S3 S4" if not os.path.exists(d + "/pp.noshow") else "nothing")
+        print("Stuck: S1 S2 S3 S4 S12 (no S99)" if not os.path.exists(d + "/pp.noshow") else "nothing")
 ''')
 
 
@@ -401,7 +401,7 @@ def test_concurrent_scans_take_the_lock_once(e):
     time.sleep(0.4)
     p2 = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=60)
     out1, _ = p1.communicate(timeout=60)
-    assert p2.returncode == 0 and p2.stdout.startswith("busy")
+    assert p2.returncode == 0 and json.loads(p2.stdout)["busy"] is True
     assert json.loads(out1)["events"] and len(e.sends()) == 1 and len(e.pings()) == 1
 
 
@@ -550,3 +550,76 @@ def test_declaration_from_another_paseo_home_is_skipped(e):
     r = e.run("scan", "--yes", "--json", PASEO_HOME=str(e.tmp / "other-home"))
     rep = json.loads(r.stdout)
     assert rep["events"] == [] and any("another PASEO_HOME" in h for h in rep["health"]) and e.sends() == []
+
+
+def test_progress_id_is_read_from_the_real_flagged_line(e):
+    e.agent("a1", status="closed")
+    e.declare()
+    e.scan()
+    rec = e.inbox()[0]
+    assert rec["ui_id"] == "S1" and rec["ui"] == "verified"
+
+
+def test_rc0_without_a_readable_id_is_unverified_and_never_set_twice(e):
+    e.agent("a1", status="closed")
+    e.declare()
+    (e.fake / "pp.weird").write_text("1")
+    src = (e.fake / "paseo-progress").read_text().replace('print("Flagged S%d', 'print("something else %d" if os.path.exists(d + "/pp.weird") else "Flagged S%d')
+    (e.fake / "paseo-progress").write_text(src)
+    e.scan()
+    assert e.inbox()[0]["ui"] == "unverified"
+    e.clock += 3 * HOUR + 60
+    e.scan()
+    assert len([c for c in e.calls("pp.jsonl") if c[1:3] == ["stuck", "set"]]) == 1
+
+
+def test_generation_bump_reuses_the_open_progress_item(e):
+    e.agent("a1", status="closed")
+    e.declare()
+    e.scan()
+    e.run("declare", "--task", "t1", "--agent", "a1", "--summary", "next", "--generation", "1", "--yes")
+    e.clock += 60
+    e.scan()
+    assert len([c for c in e.calls("pp.jsonl") if c[1:3] == ["stuck", "set"]]) == 1
+    assert {r["ui_id"] for r in e.inbox()} == {"S1"}
+
+
+def test_crash_between_stuck_set_and_save_does_not_set_a_second_item(e):
+    e.agent("a1", status="closed")
+    e.declare()
+    e.scan()
+    sp = e.state / "state.json"
+    st = json.loads(sp.read_text())
+    (rec,) = st["events"].values()
+    rec.update(state="prepared", ui="intent", ui_id=None, ping=None, last_published=0)
+    sp.write_text(json.dumps(st))
+    e.scan()
+    assert len([c for c in e.calls("pp.jsonl") if c[1:3] == ["stuck", "set"]]) == 1
+    assert e.inbox()[0]["ui"] == "unverified"
+
+
+def test_prepared_record_with_unknown_wake_is_still_paged(e):
+    e.agent("a1")
+    e.declare()
+    e.scan()
+    sp = e.state / "state.json"
+    st = json.loads(sp.read_text())
+    (rec,) = st["events"].values()
+    rec.update(state="prepared", wake="intent", ping=None, ui=None, last_published=0)
+    st["pings"] = []
+    sp.write_text(json.dumps(st))
+    e.agent("a1", status="running")   # the woken agent is busy now: the trigger is gone
+    before = len(e.pings())
+    e.clock += 60
+    e.scan()
+    assert len(e.pings()) == before + 1 and len(e.sends()) == 1
+
+
+def test_busy_scan_json_is_json(e):
+    e.agent("a1")
+    e.declare()
+    p1 = subprocess.Popen([sys.executable, str(SCRIPT), "scan", "--yes"], env=e.env(FAKE_SLEEP="1.5"), stdout=subprocess.PIPE, text=True)
+    time.sleep(0.4)
+    r = e.run("scan", "--yes", "--json")
+    p1.communicate(timeout=60)
+    assert r.returncode == 0 and json.loads(r.stdout)["busy"] is True
