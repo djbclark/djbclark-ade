@@ -85,6 +85,8 @@ def report(quota, *, profiles=None, config=CONFIG):
     with config.open("rb") as handle:
         cfg = tomllib.load(handle)
     defaults = cfg["thresholds"]
+    if not isinstance(defaults, dict) or not isinstance(cfg.get("pools", {}), dict):
+        raise ValueError("advisory thresholds/pools must be tables")
     profiles = load_profiles() if profiles is None else profiles
     result = []
     for pool in sorted(set(quota) | set(profiles)):

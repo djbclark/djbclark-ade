@@ -62,3 +62,38 @@ def test_invalid_profile_rejected(tmp_path):
         with pytest.raises(ValueError):
             nudge.save_profile("pool", "spend", until, tmp_path / "profiles.json")
     assert not (tmp_path / "profiles.json").exists()
+
+
+def test_invalid_config_is_advisory(tmp_path, monkeypatch, capsys):
+    import pytest
+    config = tmp_path / "bad.toml"
+    config.write_text("pools=[]\n[thresholds]\ncritical_left=10\nconserve_left=30\nmax_age_seconds=60\n")
+    original = nudge.report
+    with pytest.raises(ValueError, match="must be tables"):
+        original({"pool": {}}, config=config)
+    monkeypatch.setattr(nudge, "report", lambda quota: original(quota, config=config))
+    nudge.print_reminder({"pool": {}})
+    assert "unavailable" in capsys.readouterr().out
+
+
+def test_cli_reads_aiuse_and_paseo_and_show(tmp_path):
+    import os
+    import subprocess
+    now = datetime.now(timezone.utc).isoformat()
+    aiuse = tmp_path / "aiuse.json"
+    aiuse.write_text(json.dumps({"schema_version": "1.3", "fresh": True, "age_seconds": 0,
+        "available": [{"provider": "claude", "pool_family": None, "age_seconds": 0,
+                       "usable_now": True, "headroom_percent": 80}]}))
+    paseo = tmp_path / "paseo.json"
+    paseo.write_text(json.dumps([{"sourceId": "claude", "id": "claude:default", "fetchedAt": now,
+        "report": {"status": "available", "windows": [{"id": "weekly", "label": "Weekly",
+                   "usedPct": 95, "remainingPct": 5}]}}]))
+    env = {**os.environ, "ROUTE_AGENT_AIUSE_JSON": str(aiuse),
+           "ROUTE_AGENT_PASEO_USAGE_JSON": str(paseo), "ROUTE_AGENT_PASEO": "on",
+           "AIUSE_SNAPSHOT": str(tmp_path / "absent.json"),
+           "ADE_SPENDING_PROFILES": str(tmp_path / "absent-profiles.json")}
+    for command in ([sys.executable, str(ROOT / "bin/quota_nudge.py")],
+                    [sys.executable, str(ROOT / "bin/route_agent.py"), "show"]):
+        run = subprocess.run(command, env=env, capture_output=True, text=True, timeout=20)
+        assert run.returncode == 0, run.stderr
+        assert "claude: critical (5% left)" in run.stdout
