@@ -32,6 +32,17 @@ presence = "definitely-not-on-path-abc"
 platforms = ["linux"]
 
 [[component]]
+id = "hermes"
+class = "offered"
+chosen = true
+summary = "fixture hermes"
+install = "UNKNOWN"
+probe = "hermes doctor"
+probe_argv = ["hermes", "doctor"]
+presence = "hermes"
+platforms = ["linux"]
+
+[[component]]
 id = "tool-d"
 class = "hard"
 summary = "needs system package manager"

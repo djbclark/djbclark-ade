@@ -10,6 +10,7 @@
                      [--state PATH] [--prefix DIR]
   ade-install bootstrap [--root DIR] [--prefix DIR] [--dry-run|--yes] [--json]
   ade-install doctor [--root DIR] [--id ID ...] [--json]
+  ade-install hermes-choice {skip,self,ai} [--state-dir DIR] [--json]
   ade-install keys [--root DIR] [--json] [--keys-state PATH]
   ade-install keys-plan [--root DIR] [--json] [--state PATH]
   ade-install verify-key PROVIDER  # fixed metadata probe under sudo-secretspec run; see --help
@@ -264,6 +265,26 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
         if report.get("preview_stderr"):
             print(report["preview_stderr"], file=sys.stderr)
     return rc
+
+
+def cmd_hermes_choice(args: argparse.Namespace) -> int:
+    """Record the S3a choice. Never installs, probes, or edits tracked config."""
+    state = Path(args.state_dir) if args.state_dir else None
+    try:
+        path = ai.save_hermes_choice(args.choice, state_dir=state)
+    except ai.InstallError as e:
+        if args.json:
+            _print_json({"ok": False, "errors": [str(e)]})
+        else:
+            print(str(e), file=sys.stderr)
+        return 1
+    hint = ai.hermes_setup_hint(args.choice)
+    if args.json:
+        _print_json({"ok": True, "choice": args.choice, "path": str(path), "next": hint})
+    else:
+        print(f"ade-install hermes-choice: recorded {args.choice} at {path}")
+        print(hint)
+    return 0
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
@@ -552,6 +573,19 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument("--dry-run", action="store_true", help="plan only; no subprocesses or downloads (default)")
     mode.add_argument("--yes", action="store_true", help="install missing Just, verify it, then run only the installation preview")
     bp.set_defaults(func=cmd_bootstrap)
+
+    hc = sub.add_parser(
+        "hermes-choice",
+        help="record the S3a Hermes choice (skip, self, ai); installs nothing",
+    )
+    hc.add_argument("choice", choices=ai.HERMES_CHOICES)
+    hc.add_argument("--json", action="store_true")
+    hc.add_argument(
+        "--state-dir",
+        default=None,
+        help="choice directory (default: the install ledger dir or ADE_INSTALL_STATE_DIR)",
+    )
+    hc.set_defaults(func=cmd_hermes_choice)
 
     ap = sub.add_parser(
         "apply",

@@ -213,18 +213,20 @@ three paths:
 Either path can be re-run later (`just hermes-setup`, `just hermes-setup --self`), and `just update` keeps an installed
 Hermes current like every other component.
 
-4. **Shipped 2026-11-10 (prompt + recipe only):** checked-in
+4. **Shipped 2026-11-10 (prompt + recipe):** checked-in
    `prompts/setup/hermes.md` and `just hermes-setup` / `just hermes-setup --self`
-   (`docs/hermes-setup.md`). Opt-in: the recipe does not install Hermes, does not
-   flip `chosen`, and does not configure peer-link live. AI path opens Claude Code
-   with a pointer to the prompt; `--self` prints the DIY checklist section.
-   Catalog install remains `ade-user-install hermes` (#345). Wiring `just install`
-   to ask the three S3a paths, and richer `just doctor hermes` item probes, stay
-   for follow-ups.
-5. **Component-scoped doctor (2026-11-10):** `just doctor hermes` /
-   `ade-install doctor --id hermes` runs the existing catalog probe only when
-   Hermes is chosen. Scoped output does not claim installation-wide health;
-   plain doctor keeps its full checks. This adds no richer configuration probes.
+   (`docs/hermes-setup.md`). The recipe does not configure peer-link live.
+   Catalog install remains `ade-user-install hermes` (#345).
+5. **Shipped 2026-11-12 (choice + checklist probes):** `just install` asks the
+   three paths on a tty (`ADE_HERMES_CHOICE=skip|self|ai` otherwise) and records
+   the answer with `ade-install hermes-choice` in the install state dir. The
+   record does not edit tracked config and does not flip catalog `chosen`.
+   `skip` makes `just doctor hermes` report `unchosen` with no probe. `self`
+   and `ai` run the catalog apply, then `just hermes-setup --self` or `just
+   hermes-setup`. When the catalog probe passes, scoped `doctor hermes` adds
+   observe-only checklist probes (config file, skills root, claude-collaboration
+   skill, `claude mcp list`, optional tell_chief_of_staff pointer). Plain
+   `just doctor` does not add them. Firecrawl stays its own component.
 
 ### S3b. API keys: check, verify, collect, deliver
 

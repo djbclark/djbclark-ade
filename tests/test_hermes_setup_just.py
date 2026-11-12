@@ -47,3 +47,17 @@ def test_hermes_setup_help_and_self_forward_args():
     assert self_run.returncode == 0, self_run.stderr
     assert "## DIY checklist" in self_run.stdout
     assert "claude not on PATH" not in self_run.stderr
+
+
+def test_install_recipe_offers_three_hermes_paths():
+    """just install asks skip/self/ai and records through ade-install hermes-choice."""
+    text = JUSTFILE.read_text()
+    body = text.split("install *args:", 1)[1].split("\nupdate *args:", 1)[0]
+    for choice in ("skip", "self", "ai"):
+        assert choice in body
+    assert "hermes-choice" in body
+    assert "hermes-setup --self" in body
+    assert 'exec just --justfile "${root}/justfile" hermes-setup\n' in body
+    # No tty and no ADE_HERMES_CHOICE: nothing is recorded, apply still runs.
+    assert "ADE_HERMES_CHOICE" in body
+    assert "-t 0" in body

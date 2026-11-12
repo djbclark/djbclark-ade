@@ -253,6 +253,94 @@ def test_paseo_plugin_rejects_install_argv(tmp_path):
         ai.load_catalog(root=root)
 
 
+def _hermes_ok_runner(argv, cwd):
+    return subprocess.CompletedProcess(argv, 0, stdout="hermes healthy\n", stderr="")
+
+
+def test_hermes_choice_skip_keeps_doctor_quiet(tmp_path):
+    """A recorded skip overrides catalog chosen=true: no probe, exit 0."""
+    root = _fixture_root(tmp_path)
+    catalog = ai.load_catalog(root=root)
+    record = {"choice": "skip"}
+    obs, rc = ai.doctor(
+        catalog, component_ids=["hermes"], hermes_choice=record,
+        runner=_hermes_ok_runner, skip_credential_bak=True,
+    )
+    hermes = [o for o in obs if o.id == "hermes"]
+    assert len(hermes) == 1
+    assert hermes[0].status == "unchosen"
+    assert not any(o.kind == "hermes-item" for o in obs)
+    assert rc == 0
+
+
+def test_hermes_choice_self_runs_checklist(tmp_path):
+    """self expects Hermes; a passing catalog probe then checks the checklist."""
+    root = _fixture_root(tmp_path)
+    catalog = ai.load_catalog(root=root)
+    home = tmp_path / "home"
+    (home / ".hermes").mkdir(parents=True)
+    (home / ".hermes" / "config.yaml").write_text("model: local\n")
+    skills = home / ".local" / "share" / "skill-everywhere" / "skills"
+    skills.mkdir(parents=True)
+    collab = home / ".hermes" / "skills" / "autonomous-ai-agents" / "claude-collaboration"
+    collab.mkdir(parents=True)
+    (collab / "SKILL.md").write_text("# claude-collaboration\n")
+
+    def runner(argv, cwd):
+        if argv[:2] == ["claude", "mcp"]:
+            return subprocess.CompletedProcess(argv, 0, stdout="hermes: connected\n", stderr="")
+        return _hermes_ok_runner(argv, cwd)
+
+    obs, rc = ai.doctor(
+        catalog, component_ids=["hermes"], hermes_choice={"choice": "self"},
+        runner=runner, hermes_home=home, skip_credential_bak=True,
+    )
+    by_id = {o.id: o for o in obs}
+    assert by_id["hermes"].status == "ok"
+    for item in (
+        "hermes-config", "hermes-skills-root", "hermes-claude-collaboration", "hermes-mcp-bridge",
+    ):
+        assert by_id[item].status == "ok", item
+    # tell_chief_of_staff is optional: absent still ok, and never fails doctor.
+    assert by_id["hermes-tell-chief"].status == "ok"
+    assert "optional" in by_id["hermes-tell-chief"].detail
+    assert rc == 0
+
+
+def test_hermes_checklist_missing_item_fails_scoped_doctor(tmp_path):
+    root = _fixture_root(tmp_path)
+    catalog = ai.load_catalog(root=root)
+    obs, rc = ai.doctor(
+        catalog, component_ids=["hermes"], hermes_choice={"choice": "ai"},
+        runner=_hermes_ok_runner, hermes_home=tmp_path / "empty-home",
+        skip_credential_bak=True,
+    )
+    by_id = {o.id: o for o in obs}
+    assert by_id["hermes"].status == "ok"
+    assert by_id["hermes-config"].status == "missing"
+    assert rc == 1
+
+
+def test_hermes_choice_roundtrip_and_refuse(tmp_path):
+    path = ai.save_hermes_choice("skip", state_dir=tmp_path)
+    assert path == tmp_path / "hermes-choice.json"
+    assert ai.load_hermes_choice(tmp_path)["choice"] == "skip"
+    with pytest.raises(ai.InstallError):
+        ai.save_hermes_choice("later", state_dir=tmp_path)
+    path.write_text("{not json")
+    with pytest.raises(ai.InstallError):
+        ai.load_hermes_choice(tmp_path)
+
+
+def test_hermes_choice_cli_records_without_install(tmp_path):
+    proc = _run("hermes-choice", "ai", "--state-dir", str(tmp_path), "--json")
+    assert proc.returncode == 0, proc.stderr
+    body = json.loads(proc.stdout)
+    assert body["choice"] == "ai"
+    assert "hermes-setup" in body["next"]
+    assert ai.load_hermes_choice(tmp_path)["choice"] == "ai"
+
+
 def test_fixture_doctor_missing_vs_unchosen(tmp_path):
     root = _fixture_root(tmp_path)
     catalog = ai.load_catalog(root=root)
@@ -262,6 +350,9 @@ def test_fixture_doctor_missing_vs_unchosen(tmp_path):
     assert "probe ok" in by_id["tool-a"].detail
     assert by_id["tool-b"].status == "unchosen"
     assert by_id["tool-c"].status == "missing"
+    # No choice record and no injected runner: the fixture's chosen=true stands.
+    # `hermes` exists on this machine, so its real probe runs and fails closed.
+    assert by_id["hermes"].status == "error"
     assert rc == 1  # chosen optional missing counts
     key_obs = [o for o in obs if o.kind == "key"]
     assert key_obs and key_obs[0].status == "unknown"
@@ -502,7 +593,7 @@ def test_cli_catalog_and_plan_json(tmp_path):
     root = _fixture_root(tmp_path)
     c = _run("catalog", "--json", root=root)
     assert c.returncode == 0, c.stderr
-    assert len(json.loads(c.stdout)["component"]) == 4
+    assert len(json.loads(c.stdout)["component"]) == 5
     p = _run("plan", "--json", root=root)
     assert p.returncode == 0, p.stderr
     assert "apply" in json.loads(p.stdout)["note"]
