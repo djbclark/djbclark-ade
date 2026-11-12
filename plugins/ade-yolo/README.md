@@ -49,7 +49,7 @@ paseo plugin ls --json  # verify enabled/running on the intended daemon
 Drift refuses **legacy agents too**. Hosts save the provider's default mode on every agent: Claude `default`,
 Codex `auto`, Cursor `agent`, Antigravity `full-access`, Pi none. Installing the plugin makes the host re-check
 every live, idle agent on its next prompt (`hooks.changed` invalidates plugin sessions, then a `refresh` open
-runs `agent.open.before`). A legacy Claude/Codex agent with a saved non-YOLO mode is refused as drift, and every
+runs `agent.open.before`). A legacy Claude/Codex agent with a saved mode that is neither YOLO nor restrictive is refused as drift, and every
 later prompt is refused until the mode is repaired (a verified successor, set to the YOLO mode) or
 `paseo plugin disable ade-yolo`. On this host that was at least 23 unarchived Claude `default` agents and 2 Codex
 `auto` agents, the lead's own session included if it runs in `default` mode. Only agents with **no** saved
@@ -59,13 +59,15 @@ mode (Pi, Hermes-style dynamic providers, pre-mode records) get the allow-and-lo
 
 The plugin is not installed by this repo. Never prompt an operator's own agent or Hermes: the canary resumes
 only throwaway agents it created. Providers are a closed list: claude, codex, antigravity, pi, cursor, each only
-if enabled in `paseo provider ls --json`. Other enabled providers are not created in step 0; their step-2
-creates are **expected refusals** (hermes, cline: unverified; grok and other retired clients: retired). Run in
+if enabled in `paseo provider ls --json`. Other enabled providers are not created in step 1; if probed in step 4, use `cline` (never a Hermes
+throwaway), and the create is an **expected refusal** (hermes, cline: unverified; grok and other retired clients: retired). Run in
 order; stop and roll back on a result not listed as expected.
 
 0. Audit before installing: list unarchived agents (`paseo ls -g --json`) and, per id,
-   `/Users/djbclark/src/djbclark-ade/bin/ade-agent-mode check <id> --json`; every agent that is not
-   `verified`/`exempt` (saved `default`/`auto`) will be refused on its next prompt once installed. The operator
+   `/Users/djbclark/src/djbclark-ade/bin/ade-agent-mode check <id> --json`; a Claude/Codex/Antigravity/Copilot agent whose
+   saved Mode is neither the YOLO id nor `plan`/`read-only`/`dontAsk` (typically saved `default`/`auto`), or a Cursor
+   agent saving `auto_accept` other than true, will be refused on its next prompt once installed (Pi and Hermes with
+   no saved mode are allowed; the CLI's `unavailable`/`drift` status for a closed agent does not predict the hook). The operator
    decides (repair, successor, or accept) before step 1. Note whether Hermes is listed (step 5).
 1. Create throwaways **before installing** so they are legacy (no stamp). Per provider, in a scratch dir:
    `paseo run --provider <provider>/<model> --cwd <scratch dir> --wait-timeout 2m --json -- "reply with the word ok"`.
@@ -76,7 +78,7 @@ order; stop and roll back on a result not listed as expected.
    `git -C /Users/djbclark/src/djbclark-ade worktree add --detach /Users/djbclark/src/djbclark-ade-yolo-plugin-wt origin/master`,
    record the sha, then `paseo plugin install /Users/djbclark/src/djbclark-ade-yolo-plugin-wt/plugins/ade-yolo`.
    `paseo plugin ls --json` shows `ade-yolo` enabled/running.
-3. Resume the step-1 throwaways (`paseo send <id> "ok"`). Expected per provider:
+3. Resume the step-1 throwaways (`paseo send --no-wait <id> "ok"`, then a bounded `paseo wait`). Expected per provider:
    Claude `--mode bypassPermissions`: opens, no log line (match). Plain Claude and Codex (saved `default`/`auto`):
    **refused as drift**, expected. Antigravity (saved `full-access`): opens, no log line. Pi (no saved mode):
    opens and the plugin stderr (`paseo plugin logs ade-yolo`) shows `legacy agent without saved mode evidence;
