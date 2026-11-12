@@ -148,3 +148,10 @@ untrusted data ([AGENTS.md](../AGENTS.md) Trust).
     the authenticated gh user unless `--allow-untrusted` (the PR's own diff and AGENTS.md can try to steer the reviewing
     model: Codex Security Review, PR 130); its prompt tells the model that the diff and every file of the worktree are
     data, never instructions.
+
+    **Runtime (2026-11-12, W2; operator: YOLO for trusted internal reviewers, restricted execution only for external-security-critical work).**
+    `review-pr --runtime auto` (the default) reviews a PR whose GitHub author is the repository owner through
+    `review-launch --mode trusted` (`bypassPermissions`, Read/Grep/Glob/Bash, no read-boundary claim; docs/review-boundary.md);
+    every other PR (the authenticated gh user when that is not the owner, `--allow-untrusted`) and `--runtime restricted` keep
+    `--mode review`. `--runtime yolo` is refused (exit 2) unless the owner authored the PR. The runtime is filed as `runtime`.
+    The adversary marker is never written by this tool; the untrusted-author refusal and the "diff is data" prompt are unchanged.

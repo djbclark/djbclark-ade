@@ -3,6 +3,8 @@
 
   review-launch --mode review|read-only -C WORKTREE --schema FILE (-p TEXT | -f FILE)
                 [--allow-web] [--head SHA] [--model M] [--max-turns N] [--timeout S] [--json]
+  review-launch --mode trusted --trusted-author LOGIN --head SHA -C WORKTREE --schema FILE (-p TEXT | -f FILE)
+                [--model M] [--max-turns N] [--timeout S] [--json]
   review-launch --check [--mode review|read-only] [--allow-web] [--json]
 
 The permanent review boundary of the slim-down (PLAN E8, 2026-11-06; docs/review-boundary.md). AGENTS.md
@@ -16,8 +18,18 @@ THE MODES
              what the model read somewhere.
   read-only  the same tools as review by default (2026-11-07: WebFetch and WebSearch are an exfiltration channel
              when the input is untrusted). `--allow-web` adds WebFetch and WebSearch, in read-only mode only
-             (with review mode it is refused, exit 2); init is then exactly those five plus StructuredOutput,
+             (with review or trusted mode it is refused, exit 2); init is then exactly those five plus StructuredOutput,
              and the self-check is a separate one.
+  trusted    YOLO for a TRUSTED INTERNAL review (operator, 2026-11-12: "YOLO is the default for all ordinary agent
+             launches ... restricted execution is reserved for external-security-critical work"). Tools Read, Grep,
+             Glob, Bash; `--permission-mode bypassPermissions`; the init event must list exactly {Bash, Glob, Grep,
+             Read, StructuredOutput} and say permissionMode bypassPermissions, cwd the worktree, no MCP, no extra
+             directories. It claims NO read boundary: no blockReadsOutsideWorkingDirectories, no read tripwire, no
+             symlink refusal, no self-check (`--check --mode trusted` is refused), hooks recorded not fatal. The
+             secret-path deny rules and the scrubbed environment stay as accidental-exposure guards only. It needs
+             `--trusted-author LOGIN` (who vouches for the input; recorded in --json) and `--head SHA` (an exact,
+             clean worktree). The launcher cannot verify the claim: the CALLER decides, and `bin/review-pr` does
+             so only for a PR GitHub reports as authored by the repository owner. Never for outside input.
 
 THE LAUNCH (every flag is fixed; nothing is passed through):
   claude -p --output-format stream-json --verbose --tools <mode's tools> --permission-mode default
@@ -125,7 +137,9 @@ REPO = HERE.parent.parent
 POLICY_TOML = REPO / "config" / "secret-deny.toml"
 POLICY_JSON = REPO / "config" / "secret_deny_policy.json"   # bin/render-secret-deny writes it from POLICY_TOML
 EXIT_OK, EXIT_USAGE, EXIT_NO_OUTPUT, EXIT_TRIP, EXIT_TIMEOUT = 0, 2, 3, 77, 124
-MODES = {"review": ["Read", "Grep", "Glob"], "read-only": ["Read", "Grep", "Glob"]}
+TRUSTED_MODE = "trusted"    # YOLO for trusted internal reviews (operator, 2026-11-12); never the default, never for outside input
+MODES = {"review": ["Read", "Grep", "Glob"], "read-only": ["Read", "Grep", "Glob"],
+         TRUSTED_MODE: ["Read", "Grep", "Glob", "Bash"]}
 WEB_TOOLS = ["WebFetch", "WebSearch"]
 WEB_PROFILE = "read-only+web"   # --mode read-only --allow-web; an internal key, never a --mode value
 TOOLS = {**MODES, WEB_PROFILE: MODES["read-only"] + WEB_TOOLS}
@@ -134,6 +148,7 @@ PATH_TOOLS = {"Read": ("file_path",), "Grep": ("path",), "Glob": ("path",)}
 # trips. redacted_thinking is thinking the API returns encrypted.
 CONTENT_TYPES = frozenset({"text", "thinking", "redacted_thinking", "tool_use"})
 EXPECTED_PERMISSION_MODE = "default"
+TRUSTED_PERMISSION_MODE = "bypassPermissions"   # Claude Code 2.x reports this in init (probed 2026-11-12)
 SECRET_ENV_RE = re.compile(r"(?i)(token|secret|passw|credential|api_?key)|^(GH|GITHUB)_")
 BYPASS_ENV_RE = re.compile(r"(?i)(permission_?mode|bypass_?permissions|skip_?permissions|dangerously)")
 # Flags that would widen or bypass the boundary. None of them is a launcher option; if one appears in the
@@ -209,6 +224,18 @@ SETTINGS = {"disableAllHooks": True, "hooks": {},
             "permissions": {"blockReadsOutsideWorkingDirectories": True, "disableBypassPermissionsMode": "disable",
                             "deny": deny_rules(_POLICY)}}
 SETTINGS_JSON = json.dumps(SETTINGS, sort_keys=True, separators=(",", ":"))
+# The trusted (YOLO) mode keeps hooks off and the secret-path deny rules (an accidental-read guard: Bash is not confined),
+# and drops the two keys that make a bypass impossible or confine reads. It claims no read boundary.
+TRUSTED_SETTINGS = {"disableAllHooks": True, "hooks": {}, "permissions": {"deny": deny_rules(_POLICY)}}
+TRUSTED_SETTINGS_JSON = json.dumps(TRUSTED_SETTINGS, sort_keys=True, separators=(",", ":"))
+
+
+def permission_mode(mode: str) -> str:
+    return TRUSTED_PERMISSION_MODE if mode == TRUSTED_MODE else EXPECTED_PERMISSION_MODE
+
+
+def settings_json(mode: str) -> str:
+    return TRUSTED_SETTINGS_JSON if mode == TRUSTED_MODE else SETTINGS_JSON
 CHECK_SCHEMA = {"type": "object", "properties": {"results": {"type": "array", "items": {
     "type": "object", "properties": {"name": {"type": "string"}, "read_ok": {"type": "boolean"}},
     "required": ["name", "read_ok"]}}}, "required": ["results"]}
@@ -232,8 +259,8 @@ def claude_bin() -> str | None:
 def fixed_argv(mode: str) -> list[str]:
     """The boundary flags, identical for a launch and its self-check (the cache key hashes them)."""
     return ["-p", "--output-format", "stream-json", "--verbose", "--tools", ",".join(TOOLS[mode]),
-            "--permission-mode", EXPECTED_PERMISSION_MODE, "--setting-sources", "", "--strict-mcp-config",
-            "--no-session-persistence", "--settings", SETTINGS_JSON]
+            "--permission-mode", permission_mode(mode), "--setting-sources", "", "--strict-mcp-config",
+            "--no-session-persistence", "--settings", settings_json(mode)]
 
 
 def build_argv(binary: str, mode: str, schema: dict, prompt: str, model: str | None, max_turns: int | None) -> list[str]:
@@ -423,8 +450,8 @@ def init_problems(init: dict, mode: str, worktree: str) -> list[str]:
         out.append(f"init tools {tools!r} are not exactly {sorted(want)}")
     if init.get("mcp_servers") != []:
         out.append(f"init mcp_servers {init.get('mcp_servers')!r} is not []")
-    if init.get("permissionMode") != EXPECTED_PERMISSION_MODE:
-        out.append(f"init permissionMode {init.get('permissionMode')!r} is not {EXPECTED_PERMISSION_MODE!r}")
+    if init.get("permissionMode") != permission_mode(mode):
+        out.append(f"init permissionMode {init.get('permissionMode')!r} is not {permission_mode(mode)!r}")
     cwd = init.get("cwd")
     if not isinstance(cwd, str) or os.path.realpath(cwd) != worktree:
         out.append(f"init cwd {cwd!r} is not the worktree {worktree}")
@@ -451,6 +478,8 @@ def run_claude(argv: list[str], worktree: str, mode: str, timeout: float, path_t
                keep_raw: bool = False) -> Run:
     run = Run()
     allowed = set(TOOLS[mode]) | {"StructuredOutput"}
+    trusted = mode == TRUSTED_MODE    # YOLO: no read tripwire, hooks recorded not fatal; tools, init and cwd still proven
+    path_trip = path_trip and not trusted
     err = tempfile.TemporaryFile()
     try:
         proc = subprocess.Popen(argv, cwd=worktree, env=child_env(), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
@@ -516,6 +545,8 @@ def run_claude(argv: list[str], worktree: str, mode: str, timeout: float, path_t
                 if probs:
                     trip("; ".join(probs))
                     break
+            elif kind == "system" and isinstance(sub, str) and sub.startswith("hook") and trusted:
+                continue
             elif kind == "system" and isinstance(sub, str) and sub.startswith("hook"):
                 trip(f"a hook ran ({sub}): no hook may run inside the boundary")
                 break
@@ -684,7 +715,7 @@ def check_key(binary: str, mode: str, model: str | None = None) -> tuple[str | N
         return None, f"`claude --version` exited {v.returncode}"
     version = v.stdout.strip()
     me = hashlib.sha256(HERE.read_bytes()).hexdigest()
-    blob = json.dumps({"claude_version": version, "settings": SETTINGS_JSON, "argv": fixed_argv(mode), "launcher": me,
+    blob = json.dumps({"claude_version": version, "settings": settings_json(mode), "argv": fixed_argv(mode), "launcher": me,
                        "model": model or ""}, sort_keys=True)
     return hashlib.sha256(blob.encode()).hexdigest(), version
 
@@ -724,7 +755,7 @@ def run_check(binary: str, mode: str, key: str, version: str, model: str | None 
         status, code = "passed", EXIT_OK
     doc = {"schema": SCHEMA_VERSION, "key": key, "mode": mode, "claude_version": version, "status": status,
            "exit": code, "checked": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-           "settings": SETTINGS, "argv": fixed_argv(mode), "launcher": str(HERE),
+           "settings": json.loads(settings_json(mode)), "argv": fixed_argv(mode), "launcher": str(HERE),
            "model_report": ((run.result or {}).get("structured_output") or {}).get("results")
            if isinstance((run.result or {}).get("structured_output"), dict) else None,
            **judged}
@@ -766,6 +797,8 @@ def parser() -> Parser:
     p.add_argument("--mode", choices=sorted(MODES), default=None)
     p.add_argument("--allow-web", action="store_true",
                    help="read-only mode only: add WebFetch and WebSearch (refused with review mode)")
+    p.add_argument("--trusted-author", metavar="LOGIN",
+                   help="--mode trusted only (required): the GitHub login that vouches for the reviewed input; recorded in --json")
     p.add_argument("-C", dest="worktree", help="the worktree the run is confined to (its cwd)")
     p.add_argument("--schema", help="JSON Schema file for the structured output")
     g = p.add_mutually_exclusive_group()
@@ -858,6 +891,13 @@ def main(argv: list[str]) -> int:
         note(f"refused: --allow-web is for --mode read-only only, not {mode}")
         return EXIT_USAGE
     profile = WEB_PROFILE if a.allow_web else mode     # the tool set: TOOLS[profile]
+    trusted = mode == TRUSTED_MODE
+    if a.trusted_author is not None and not trusted:
+        note(f"refused: --trusted-author is for --mode {TRUSTED_MODE} only, not {mode}")
+        return EXIT_USAGE
+    if trusted and a.check:
+        note(f"refused: --mode {TRUSTED_MODE} claims no read boundary, so there is nothing for --check to prove")
+        return EXIT_USAGE
     if a.check:
         key, version = check_key(binary, profile, a.model)
         if key is None:
@@ -883,12 +923,18 @@ def main(argv: list[str]) -> int:
     if not os.path.isdir(a.worktree):
         note(f"no such worktree: {a.worktree}")
         return EXIT_USAGE
+    if trusted and not (a.trusted_author or "").strip():
+        note(f"refused: --mode {TRUSTED_MODE} needs --trusted-author LOGIN (who vouches for the input)")
+        return EXIT_USAGE
+    if trusted and not a.head:
+        note(f"refused: --mode {TRUSTED_MODE} needs --head SHA (an exact, clean worktree)")
+        return EXIT_USAGE
     wt = os.path.realpath(a.worktree)
     why = worktree_problem(wt, a.head)
     if why:
         note(f"refused: {why}")
         return EXIT_USAGE
-    links = escaping_links(wt)
+    links = [] if trusted else escaping_links(wt)    # trusted: Bash is not confined, so no read boundary to protect
     if links:
         more = f" (and {len(links) - 1} more)" if len(links) > 1 else ""
         note(f"refused: the worktree holds a symlink that leaves it: {links[0][0]} -> {links[0][1]}{more}; "
@@ -912,7 +958,10 @@ def main(argv: list[str]) -> int:
     if a.max_turns is not None and a.max_turns < 1:
         note("--max-turns must be at least 1")
         return EXIT_USAGE
-    ok, where, check = ensure_check(binary, profile, a.model)
+    if trusted:
+        ok, where, check = True, "none: trusted YOLO mode claims no read boundary", None
+    else:
+        ok, where, check = ensure_check(binary, profile, a.model)
     if not ok:
         note(f"refused: {where}")
         return EXIT_USAGE
@@ -921,7 +970,7 @@ def main(argv: list[str]) -> int:
         note(run.reason)
     if a.json:
         init = run.init or {}
-        rec = {"exit": run.exit, "reason": run.reason, "mode": mode, "allow_web": bool(a.allow_web), "worktree": wt,
+        rec = {"exit": run.exit, "reason": run.reason, "mode": mode, "allow_web": bool(a.allow_web), "trusted_author": a.trusted_author, "worktree": wt,
                "head": a.head,
                "structured_output": (run.result or {}).get("structured_output") if run.exit == EXIT_OK else None,
                "init": {k: init.get(k) for k in ("tools", "mcp_servers", "permissionMode", "cwd", "model",
