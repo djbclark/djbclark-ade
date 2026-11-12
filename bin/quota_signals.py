@@ -131,8 +131,8 @@ def signal(pool, rows, paseo, now, wave_start, cfg):
     complete = True
     for window in windows:
         if not isinstance(window, dict):
-            complete = False
-            continue
+            result['reason'] = 'unknown_window'
+            return result
         rem = number(window.get('remaining_percent'), 100)
         if rem is None or window.get('state') in ('unknown', 'exhausted') or rem <= 0:
             result['reason'] = 'unknown_or_exhausted_window'
@@ -164,7 +164,8 @@ def signal(pool, rows, paseo, now, wave_start, cfg):
     result['routable'] = True
     result['conserve'] = any(w['conserve'] for w in forecasts)
     # Never recommend spending more while another window is short or unforecastable.
-    result['surplus'] = complete and not result['conserve'] and any(w['surplus'] for w in forecasts)
+    result['surplus'] = (complete and all(w['projected_remaining_percent'] >= 0 for w in forecasts)
+                         and any(w['surplus'] for w in forecasts))
     result['reason'] = 'forecast' if complete else 'pace_unavailable_or_early'
     return result
 
@@ -197,6 +198,8 @@ def main(argv=None):
         cfg = load_config(args.config)
         aiuse = collect(args.aiuse_json, ['aiuse', '--available', '--json'], cfg)
         paseo = collect(args.paseo_json, ['paseo', 'usage', 'ls', '--json'], cfg)
+        if not args.now:
+            now = datetime.now(UTC)
         print(json.dumps(evaluate(aiuse, paseo, now, start, cfg), allow_nan=False))
     except (OSError, ValueError, KeyError, TypeError) as exc:
         print(f'quota-signals: invalid configuration ({type(exc).__name__})', file=sys.stderr)

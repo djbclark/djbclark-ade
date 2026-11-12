@@ -166,7 +166,8 @@ window identities differ. Stale Paseo reports retain only a zero veto, until a
 known reset passes. Early, missing or non-finite pace produces no prediction.
 Any forecast deficit above `conserve_deficit_percent` signals `conserve`.
 `surplus` requires projected unused headroom above `surplus_min_percent` within
-`surplus_horizon_hours`, every window forecastable, and no conservation signal.
+`surplus_horizon_hours`, every window forecastable, and no projected negative remainder in any window
+(even a deficit smaller than the conservation alert threshold).
 Missing pace alone does not invalidate a fresh quota measurement. These linear
 forecasts assume steady spending and do not reserve in-flight sibling usage.
 

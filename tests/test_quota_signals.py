@@ -137,3 +137,34 @@ def test_offline_cli(capsys):
                     str(FIXTURES / 'paseo.json'), '--wave-start', START.isoformat(),
                     '--now', NOW.isoformat()]) == 0
     assert json.loads(capsys.readouterr().out)['schema_version'] == 1
+
+
+def test_malformed_window_is_unroutable(inputs):
+    inputs[0]['available'][0]['windows'] = [None]
+    assert not run(inputs)['routable']
+
+
+def test_small_deficit_vetoes_other_window_surplus(inputs):
+    row = inputs[0]['available'][0]
+    row['windows'][0]['pace_ratio'] = 0.84  # -2%, below conservation alert threshold
+    other = copy.deepcopy(row['windows'][0])
+    other['pace_ratio'] = 0.1
+    row['windows'].append(other)
+    assert not run(inputs)['conserve'] and not run(inputs)['surplus']
+
+
+def test_live_clock_is_sampled_after_collection(inputs, monkeypatch, capsys):
+    class Clock:
+        calls = 0
+        @classmethod
+        def now(cls, tz):
+            cls.calls += 1
+            return qs.stamp('2026-11-12T11:59:30Z') if cls.calls == 1 else NOW
+    values = iter(inputs[:2])
+    monkeypatch.setattr(qs, 'datetime', type('TestClock', (Clock,),
+        {'fromisoformat': staticmethod(qs.datetime.fromisoformat)}))
+    monkeypatch.setattr(qs, 'collect', lambda *args: next(values))
+    assert qs.main(['--wave-start', START.isoformat()]) == 0
+    data = json.loads(capsys.readouterr().out)
+    codex = next(p for p in data['pools'] if p['pool'] == 'codex/default')
+    assert codex['routable']
