@@ -28,19 +28,15 @@ def test_default_repair_is_native_read_only_plan():
     assert all('mode' not in c for c in n.calls)
 
 
-def test_yes_requires_exact_post_mutation_proof():
+def test_yes_refuses_without_atomic_live_only_native_mutation():
     n=Native()
-    with pytest.raises(Refused,match='not verified'): audit('agent-1',repair=True,yes=True,call=n)
-    n=Native(); n.after={**n.state,'Mode':'full-access'}
-    assert audit('agent-1',repair=True,yes=True,home='/host',call=n)['status']=='verified'
+    # Even a fake willing to acknowledge/return matching mode cannot cause an
+    # apply: the native mutation can race close and reopen the agent.
+    n.after={**n.state,'Mode':'full-access'}
+    with pytest.raises(Refused,match='atomic live-only'):
+        audit('agent-1',repair=True,yes=True,home='/host',call=n)
     assert all(c[:3]==['paseo','--home','/host'] for c in n.calls)
-    assert n.calls[-1][-3:]==['inspect','agent-1','--json']
-
-
-@pytest.mark.parametrize('patch',[{'Id':'other'},{'Provider':'claude'},{'Archived':True},{'Status':'closed'},{'AvailableModes':[]}])
-def test_wrong_or_incomplete_post_readback_never_success(patch):
-    n=Native(); n.after={**n.state,'Mode':'full-access',**patch}
-    with pytest.raises(Refused,match='not verified'): audit('agent-1',repair=True,yes=True,call=n)
+    assert all('mode' not in c for c in n.calls)
 
 
 @pytest.mark.parametrize('bad',['../x','--help','a b','a/b',''])

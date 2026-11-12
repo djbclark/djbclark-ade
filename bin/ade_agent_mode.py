@@ -1,4 +1,4 @@
-"""Native Paseo mode audit/explicit live-idle repair. No restart or message send."""
+"""Native Paseo mode audit/repair plan. Applying drift repair is capability-blocked."""
 from __future__ import annotations
 import argparse
 import json
@@ -59,15 +59,12 @@ def audit(agent_id, *, repair=False, yes=False, home=None, call=native):
     result['status']='planned'
     if not yes:
         return result
-    # The mutation response is only an acknowledgement. A new authoritative
-    # inspect must prove the exact identity/provider/live effective mode.
-    call(result['argv'])
-    observed=call([*base,'agent','inspect',agent_id,'--json'])
-    proof=verify_unattended_snapshot(plan,observed,agent_id=agent_id)
-    if not proof['ok']:
-        raise Refused('repair not verified: '+proof['reason'])
-    result.update(status='verified',reason=proof['reason'])
-    return result
+    # Native setAgentMode ensures an interactive session. Even an idle check
+    # immediately before the call can race close and reopen the agent. No native
+    # atomic live-only precondition exists in the inspected API; do not dispatch.
+    raise Refused('repair apply unavailable: native mode mutation can reopen a concurrently closed agent; '
+                  'an atomic live-only API is required (no mutation attempted)')
+
 
 
 def main(argv=None):
@@ -77,7 +74,7 @@ def main(argv=None):
     parser.add_argument('--home',help='explicit native Paseo home/daemon selection')
     parser.add_argument('--json',action='store_true')
     consent=parser.add_mutually_exclusive_group()
-    consent.add_argument('--yes',action='store_true',help='apply live-idle repair, then inspect readback')
+    consent.add_argument('--yes',action='store_true',help='request repair apply (refused until native atomic live-only mutation exists)')
     consent.add_argument('--dry-run',action='store_true',help='plan only (repair default); native reads only')
     args=parser.parse_args(argv)
     if args.command=='check' and args.yes:
