@@ -82,7 +82,8 @@ and security sequencing in the older plan; other unfinished planning stays intac
 
 1. **`just install`** (planned full bootstrap: `curl … | sh` is not used). A new machine runs
    `git clone https://github.com/djbclark/djbclark-ade ~/src/djbclark-ade && cd ~/src/djbclark-ade && ./bin/ade-install`,
-   after making Python 3.11+ available as `python3` on PATH. The current bare
+   after making Python 3.11+ available as `python3` on PATH (or, with no Python at all, previewing
+   `sh bin/ade-bootstrap`, then `--yes`: uv-only, user-scoped, never root; `docs/install-catalog.md`). The current bare
    invocation prints first-run guidance and exits 0 without probes, downloads or
    changes; it does not install Just. Older Python reports the prerequisite and
    exits 2 before loading the catalog implementation. Without Python, the
@@ -95,7 +96,8 @@ and security sequencing in the older plan; other unfinished planning stays intac
    broken/unverifiable Just stops without replacement; acquisition failure
    never falls through. Successful bootstrap means the installation preview
    finished, not that full setup is complete. Python acquisition, automatic
-   first-run installation and the remaining full setup stay planned work.
+   first-run installation and the remaining full setup stay planned work. Python acquisition is the explicit
+   `ade-install python` / `bin/ade-bootstrap` step (W17, 2026-11-12).
 2. **Every dependency is in one system** (operator, 2026-11-07: "All of the listed things should be part of our easy
    install/update/keep-updated system"; commercial services first left out, then made optional the same day). The list
    lives in `[install]`, one entry per component, each with its install, update and probe command. `vendor/README.md`

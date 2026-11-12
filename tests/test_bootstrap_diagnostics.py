@@ -75,7 +75,8 @@ def test_no_arguments_only_print_guidance(tmp_path):
     assert "guidance only; no changes made" in result.stdout
     assert "./bin/ade-install apply --dry-run" in result.stdout
     assert "./bin/ade-install apply --yes --id just" in result.stdout
-    assert "bootstrap is not implemented" in result.stdout
+    assert "Nothing runs automatically" in result.stdout
+    assert "bin/ade-bootstrap" in result.stdout
     assert snapshot() == before
 
 

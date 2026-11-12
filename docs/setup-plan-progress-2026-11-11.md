@@ -50,12 +50,12 @@ account quota is unknown. No approval marker or new waiver was fabricated.
    it with an equivalence proof. The tracked file itself waits for in-flight catalog slices (section F cut-over
    checklist). Before W16: other transitional consumers prevented shipping a tracked unified
    `ade.toml`. New hardening reader/application work retains its policy deferral.
-2. **S3:** supported Python must still be available before the merged Just
-   bootstrap starts. Python acquisition, fuller orchestration, catalog gaps,
-   and richer Hermes setup/probes remain. A proposed cold bootstrap bridge is
-   design-only: existing install-ledger writers need concurrency protection,
-   pending operations need explicit recovery, and elevated acquisition must not
-   fall through into a root-owned user installation.
+2. **S3:** (updated 2026-11-12, W17) Python acquisition and the cold-start bridge
+   are implemented as the explicit `ade-install python` and `sh bin/ade-bootstrap`
+   (uv-only, user-scoped, root refused, ledger-serialized, explicit `--recover`;
+   `docs/install-catalog.md`). Fuller orchestration, catalog gaps, crash/orphan
+   recovery of component operations (W18), and richer Hermes setup/probes remain;
+   uv itself is never fetched.
 3. **S3b:** five metadata probes establish authentication only, never inference
    entitlement, funding, quota, subscription status, or Pi acceptance. Seven
    registry probes remain unknown. Aggregate presence checks, unlinked keys and

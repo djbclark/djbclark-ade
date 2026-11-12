@@ -9,6 +9,7 @@
   ade-install update [--root DIR] [--json] [--dry-run|--yes] [--id ID ...]
                      [--state PATH] [--prefix DIR]
   ade-install bootstrap [--root DIR] [--prefix DIR] [--dry-run|--yes] [--json]
+  ade-install python [--state-dir DIR] [--dry-run|--yes] [--recover] [--json]
   ade-install doctor [--root DIR] [--id ID ...] [--json]
   ade-install hermes-choice {skip,self,ai} [--state-dir DIR] [--json]
   ade-install keys [--root DIR] [--json] [--keys-state PATH]
@@ -46,8 +47,9 @@ if sys.version_info < (3, 11):
     print(
         "ade-install requires Python 3.11+ (running "
         f"{sys.version_info[0]}.{sys.version_info[1]}). "
-        "Make a supported python3 available on PATH, then rerun. "
-        "No installation was attempted.",
+        "Make a supported python3 available on PATH, or run the cold-start "
+        "bridge `sh bin/ade-bootstrap` (preview first; uv-only, user-scoped), "
+        "then rerun. No installation was attempted.",
         file=sys.stderr,
     )
     raise SystemExit(2)
@@ -63,8 +65,10 @@ def print_first_run_guidance() -> None:
         "  ./bin/ade-install apply --dry-run\n"
         "To install missing Just explicitly when ready:\n"
         "  ./bin/ade-install apply --yes --id just\n"
-        "These direct commands do not require Just. Automatic Python/Just "
-        "bootstrap is not implemented."
+        "No Python 3.11+? Preview `sh bin/ade-bootstrap` (uv-only, user-scoped, "
+        "explicit --yes); with Python, `bin/ade-install python` and "
+        "`bin/ade-install bootstrap` are the explicit steps. These direct "
+        "commands do not require Just. Nothing runs automatically."
     )
 
 
@@ -82,7 +86,7 @@ BIN = Path(__file__).resolve().parent
 if str(BIN) not in sys.path:
     sys.path.insert(0, str(BIN))
 
-if __name__ == "__main__" and any(command in sys.argv[1:] for command in ("update-plan", "update", "bootstrap", "keys-plan")):
+if __name__ == "__main__" and any(command in sys.argv[1:] for command in ("update-plan", "update", "bootstrap", "keys-plan", "python")):
     # Cover argparse's accepted option abbreviations without duplicating its
     # grammar. Suppressing bytecode if an argument value matches is harmless.
     sys.dont_write_bytecode = True
@@ -265,6 +269,28 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
             print(report["preview_stdout"])
         if report.get("preview_stderr"):
             print(report["preview_stderr"], file=sys.stderr)
+    return rc
+
+
+def cmd_python(args: argparse.Namespace) -> int:
+    """Find or obtain Python 3.11+ via uv (user-scoped); explicit --yes to act."""
+    try:
+        report, rc = ai.acquire_python(
+            state_dir=Path(args.state_dir) if args.state_dir else None,
+            yes=args.yes, recover=args.recover,
+        )
+    except (OSError, ai.InstallError) as error:
+        report, rc = {"status": "unknown", "setup_complete": False, "reason": str(error)}, 1
+    if args.json:
+        _print_json(report)
+    else:
+        print(f"ade-install python: {report['status']} (full setup not performed)")
+        print("  " + report.get("reason", report.get("note", "")))
+        for key in ("python", "python_version", "install_argv", "recover_command"):
+            if report.get(key):
+                print(f"  {key}=" + json.dumps(report[key]))
+        if report.get("python") and report["status"] == "ready":
+            print(f"  next: {report['python']} -I {BIN / 'ade-install'} bootstrap --yes")
     return rc
 
 
@@ -610,6 +636,15 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument("--dry-run", action="store_true", help="plan only; no subprocesses or downloads (default)")
     mode.add_argument("--yes", action="store_true", help="install missing Just, verify it, then run only the installation preview")
     bp.set_defaults(func=cmd_bootstrap)
+
+    pp = sub.add_parser("python", help="find or obtain Python 3.11+ with uv (user-scoped, explicit --yes; never pip/sudo)")
+    pp.add_argument("--json", action="store_true")
+    pp.add_argument("--state-dir", help="ledger/state directory (default: ADE_INSTALL_STATE_DIR or ~/.local/state/djbclark-ade/install)")
+    pp.add_argument("--recover", action="store_true", help="verify and clear a pending acquisition left by an interrupted run (never re-downloads)")
+    pmode = pp.add_mutually_exclusive_group()
+    pmode.add_argument("--dry-run", action="store_true", help="plan only; no subprocesses or writes (default)")
+    pmode.add_argument("--yes", action="store_true", help="acquire if missing, verify, and record in the install ledger")
+    pp.set_defaults(func=cmd_python)
 
     hc = sub.add_parser(
         "hermes-choice",

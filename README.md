@@ -116,6 +116,7 @@ Skills (from each `skills/*/SKILL.md`):
 | [`ade-agent-mode`](bin/ade-agent-mode) | Check native agent permission mode or plan repair (apply capability-blocked). |
 | [`ade-auto-permit`](bin/ade-auto-permit) | Approve pending requests only for a lead's descendants or selected ADE labels. |
 | [`ade-backup-stores`](bin/ade-backup-stores) | One consistent copy of every agent session store, plus the Hermes JSONL export. |
+| [`ade-bootstrap`](bin/ade-bootstrap) | Cold-start bridge for a machine with no Python 3.11+ (W17, 2026-11-12). |
 | [`ade-browser-task`](bin/ade-browser-task) | Render / relay browser-only prompts (setup-plan S7). |
 | [`ade-claim-pilot`](bin/ade-claim-pilot) | Run (or dry-run) the S4 six-case claims enforcement pilot. |
 | [`ade-config`](bin/ade-config) | Check/get/diff/set for the versioned effective ADE config (schema_version=1). |
