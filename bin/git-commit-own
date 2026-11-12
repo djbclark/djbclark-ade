@@ -62,7 +62,6 @@ fi
 
 # Keep publishing subprocesses as argv lists and inspect their real exit codes.
 python3 - "$root" "$0" <<'PY'
-import os
 import runpy
 import subprocess
 import sys
@@ -132,12 +131,11 @@ try:
     policy = runpy.run_path(str(Path(sys.argv[2]).resolve().parent.parent
                                / "claude" / "hooks" / "upstream_review_gate.py"))
     urls = git("remote", "get-url", "--push", "--all", "--", remote).splitlines()
-    if not os.environ.get("UPSTREAM_REVIEW_GATE_OFF"):
-        for url in urls:
-            gated = policy["gated_url"](url)
-            if gated:
-                raise RuntimeError(f"upstream review gate refuses publishing to {gated}; "
-                                   "publish to an operator-owned fork instead")
+    for url in urls:
+        gated = policy["gated_url"](url)
+        if gated:
+            raise RuntimeError(f"upstream review gate refuses publishing to {gated}; "
+                               "publish to an operator-owned fork instead")
     # A missing target is normal on a first push; other lookup failures are fatal.
     exists = git("ls-remote", "--heads", "--", remote, ref)
     if exists:
@@ -190,7 +188,8 @@ try:
     print(f"git-commit-own: published HEAD to {remote} {ref}")
     if output:
         print(output)
-except (OSError, RuntimeError, ValueError, ImportError, SyntaxError, subprocess.TimeoutExpired) as exc:
+except (OSError, RuntimeError, ValueError, ImportError, SyntaxError, KeyError, TypeError,
+        AttributeError, subprocess.TimeoutExpired) as exc:
     print(f"git-commit-own: PUBLISH FAILED remote={remote} ref={ref}: {exc}", file=sys.stderr)
     sys.exit(3)
 PY

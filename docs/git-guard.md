@@ -107,8 +107,9 @@ workspace contract also applies to the final checkout update.
 Before contacting a target, the helper resolves every push URL and applies the
 existing [upstream review gate](upstream-review-gate.md)'s shared `gated_url` policy.
 It refuses GitHub targets owned by CFEngine or NorthernTechHQ even though the push
-runs as a subprocess. The gate's operator-set `UPSTREAM_REVIEW_GATE_OFF` escape
-remains available. Install this helper through the normal source-linked ADE path
+runs as a subprocess. This helper has no environment escape: the operator can use
+`--no-push` and publish explicitly through the normal shell review gate and its
+operator-only override. Install this helper through the normal source-linked ADE path
 so its policy module is available; a missing policy fails publishing closed.
 
 Publish failures exit **3** with `PUBLISH FAILED`, the remote, target ref and Git

@@ -303,14 +303,15 @@ def test_repo_wide_legacy_target_is_refused_loudly(published):
 
 @pytest.mark.parametrize("url", ["https://github.com/CFEngine/core.git",
                                  "git@github.com:NorthernTechHQ/libntech.git"])
-def test_automatic_push_obeys_upstream_gate_before_contacting_remote(published, url):
+@pytest.mark.parametrize("override", ["", "0", "1"])
+def test_automatic_push_obeys_upstream_gate_before_contacting_remote(published, url, override):
     import os
 
     repo, remote = published
     git(repo, "remote", "set-url", "--push", "origin", url)
     (repo / "mine").write_text("own gated change\n")
     env = os.environ.copy()
-    env.pop("UPSTREAM_REVIEW_GATE_OFF", None)
+    env["UPSTREAM_REVIEW_GATE_OFF"] = override
     result = subprocess.run([str(SCRIPT), "gated", "mine"], cwd=repo,
                             capture_output=True, text=True, timeout=10, env=env)
     assert result.returncode == 3
