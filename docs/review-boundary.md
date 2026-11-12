@@ -279,6 +279,8 @@ stdout/stderr, including partial evidence after a timeout. Replacement attempts 
 An interruption leaves its initial `running` record and stream for diagnosis; the launch child inherits the lock, retaining it until reviewer cleanup even if the caller is killed.
 
 Direct `review-launch` callers can request `--stall-timeout S` (default 0) and `--evidence-dir DIR`.
-The stream is created exclusively with mode 0600, flushed as lines arrive, and never overwritten.
+The stream is created exclusively with mode 0600, flushed as complete lines arrive, and never overwritten.
+An unterminated final line or a queued event not yet observed at interruption may be absent; this is
+complete-line diagnostic evidence, not byte-complete forensic capture.
 These options do not add tools, directories or permissions to either review runtime. Evidence is private
 runtime state and can contain reviewed text; it must not be published with a PR.
