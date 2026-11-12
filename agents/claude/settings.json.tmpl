@@ -292,6 +292,15 @@
     ],
     "PreToolUse": [
       {
+        "matcher": "Bash|mcp__.*[Cc]omposio.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.claude/hooks/upstream_review_gate.py\""
+          }
+        ]
+      },
+      {
         "matcher": "Read|Edit|MultiEdit|Write|NotebookEdit|Grep|Bash",
         "hooks": [
           {
