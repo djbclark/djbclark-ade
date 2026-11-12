@@ -57,7 +57,9 @@ def test_forgejo_readback_reports_drift(tmp_path):
 
     def runner(argv):
         seen.append(argv)
-        assert argv[:3] == ["fj", "api", "--base"]
+        # forgejo-api's real shape: --host HOST GET /repos/OWNER/NAME.
+        assert argv[1:4] == ["--host", "forgejo.example.test", "GET"]
+        assert argv[4] == "/repos/djbclark/djbclark-ade"
         assert "token" not in " ".join(argv).lower()
         return _completed(
             argv,
@@ -69,11 +71,12 @@ def test_forgejo_readback_reports_drift(tmp_path):
     findings = cov.observe_forgejo_repo(
         cfg, _repo_row(), runner=runner,
         base_url="https://forgejo.example.test",
+        api=tmp_path / "forgejo-api",
     )
     by = {f.setting: f for f in findings}
     assert by["has_wiki"].status == "drift"
     assert by["has_projects"].status == "ok"
-    assert seen[0][3] == "https://forgejo.example.test"
+    assert seen[0][0] == str(tmp_path / "forgejo-api")
 
 
 def test_forgejo_unreachable_is_unknown_not_drift(tmp_path):
@@ -83,10 +86,25 @@ def test_forgejo_unreachable_is_unknown_not_drift(tmp_path):
         return _completed(argv, rc=1, stderr="connection refused\n")
 
     findings = cov.observe_forgejo_repo(
-        cfg, _repo_row(), runner=runner, base_url="https://forgejo.example.test"
+        cfg, _repo_row(), runner=runner,
+        base_url="https://forgejo.example.test", api=tmp_path / "forgejo-api",
     )
     assert len(findings) == 1
     assert findings[0].status == "unknown"
+
+
+def test_forgejo_whitespace_stderr_does_not_crash(tmp_path):
+    cfg = _cfg(tmp_path)
+
+    def runner(argv):
+        return _completed(argv, rc=1, stderr="\n")
+
+    findings = cov.observe_forgejo_repo(
+        cfg, _repo_row(), runner=runner,
+        base_url="https://forgejo.example.test", api=tmp_path / "forgejo-api",
+    )
+    assert findings[0].status == "unknown"
+    assert findings[0].detail
 
 
 def test_forgejo_base_url_must_be_https(tmp_path):
@@ -173,6 +191,44 @@ def test_renew_apply_writes_then_reads_back(tmp_path):
     assert plan["wrote"] is True and plan["readback_ok"] is True
     assert reads["n"] == 2
     assert json.loads(written["body"])["expiry"] == "six_months"
+
+
+def test_renew_readback_requires_the_expiry_to_move_forward(tmp_path):
+    """A PUT that exits 0 but leaves the expiry unchanged is not success."""
+    cfg = _cfg(tmp_path)
+    soon = (NOW + timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def reader(argv):
+        return _completed(
+            argv,
+            stdout=json.dumps({"limit": "collaborators_only", "expires_at": soon}),
+        )
+
+    plan = cov.renew_interaction_limits(
+        cfg, reader=reader, writer=lambda a, b: _completed(a),
+        now=NOW, dry_run=False,
+    )
+    assert plan["wrote"] is True and plan["readback_ok"] is False
+
+
+def test_renew_whitespace_stderr_does_not_crash(tmp_path):
+    cfg = _cfg(tmp_path)
+    soon = (NOW + timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def reader(argv):
+        return _completed(
+            argv,
+            stdout=json.dumps({"limit": "collaborators_only", "expires_at": soon}),
+        )
+
+    def writer(argv, body):
+        return _completed(argv, rc=1, stderr="\n")
+
+    plan = cov.renew_interaction_limits(
+        cfg, reader=reader, writer=writer, now=NOW, dry_run=False
+    )
+    assert plan["wrote"] is False and plan["readback_ok"] is False
+    assert plan["detail"]
 
 
 def test_renew_apply_readback_failure_is_reported(tmp_path):
@@ -276,6 +332,50 @@ def test_canary_corpus_must_be_one_of_each(tmp_path):
         cov.load_canary_corpus(corpus)
 
 
+def test_canary_corpus_rejects_bad_json_bad_surface_and_non_object(tmp_path):
+    bad = tmp_path / "bad.jsonl"
+    bad.write_text("{not json\n")
+    with pytest.raises(ah.HardenError, match="not JSON"):
+        cov.load_canary_corpus(bad)
+
+    rows = [
+        {"id": "b1", "source": "own", "label": "benign",
+         "surface": "not-a-surface", "expected": "benign", "text": "x"},
+        {"id": "i1", "source": "own", "label": "injection",
+         "surface": "pr", "expected": "injection", "text": "y"},
+    ]
+    bad.write_text("\n".join(json.dumps(r) for r in rows))
+    with pytest.raises(ah.HardenError, match="surface"):
+        cov.load_canary_corpus(bad)
+
+    bad.write_text("42\n")
+    with pytest.raises(ah.HardenError, match="not an object"):
+        cov.load_canary_corpus(bad)
+
+
+def test_missing_configured_corpus_fails_the_check(tmp_path):
+    cfg = _cfg(tmp_path, extra='[hardening.canaries]\ncorpus = "/nowhere/canaries.jsonl"\n')
+
+    def runner(argv):
+        return _completed(argv, rc=1, stderr="no gh\n")
+
+    findings, rc = ah.observe(cfg, network=True, runner=runner, now=NOW)
+    gate = next(f for f in findings if f.setting == "injection_gate")
+    assert gate.status == "error"
+    assert rc == 1
+
+
+def test_observe_command_prints_the_notice(tmp_path):
+    root = _cfg(tmp_path).root
+    proc = subprocess.run(
+        [sys.executable, "-I", "-B", str(BIN / "ade-harden"),
+         "--root", str(root), "observe", "--local"],
+        capture_output=True, text=True, check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.startswith("harden-check:")
+
+
 def test_observe_wires_forgejo_and_canary(tmp_path):
     corpus = tmp_path / "canaries.jsonl"
     corpus.write_text(
@@ -299,7 +399,8 @@ def test_observe_wires_forgejo_and_canary(tmp_path):
     )
 
     def runner(argv):
-        if argv[:1] == ["fj"]:
+        if "GET" in argv:
+            assert "--host" in argv and "forgejo.example.test" in argv
             return _completed(
                 argv,
                 stdout=json.dumps({"has_wiki": False, "has_projects": False}),
@@ -314,7 +415,8 @@ def test_observe_wires_forgejo_and_canary(tmp_path):
         ))
 
     findings, rc = ah.observe(
-        cfg, network=True, runner=runner, now=NOW, canary_runner=canary_runner
+        cfg, network=True, runner=runner, now=NOW, canary_runner=canary_runner,
+        forgejo_api=tmp_path / "forgejo-api",
     )
     by = {(f.target, f.setting): f for f in findings}
     assert by[("forgejo:djbclark/djbclark-ade", "has_wiki")].status == "ok"

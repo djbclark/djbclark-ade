@@ -1144,6 +1144,7 @@ def observe(
     now: datetime | None = None,
     canary_runner: Callable[[list[str], str], "subprocess.CompletedProcess[str]"]
     | None = None,
+    forgejo_api: Path | None = None,
 ) -> tuple[list[DriftFinding], int]:
     """Observe-only drift check. Exit 1 on drift/missing/uncovered; never writes."""
     findings: list[DriftFinding] = [
@@ -1175,7 +1176,13 @@ def observe(
     findings.extend(observe_interaction_limits(cfg, runner=run, now=now))
     findings.extend(observe_inventory(cfg, runner=run))
     findings.extend(
-        _coverage_findings(cfg, runner=run, now=now, canary_runner=canary_runner)
+        _coverage_findings(
+            cfg,
+            runner=run,
+            now=now,
+            canary_runner=canary_runner,
+            forgejo_api=forgejo_api,
+        )
     )
 
     bad = {f.status for f in findings} & {"drift", "missing", "uncovered", "error"}
@@ -1198,6 +1205,7 @@ def _coverage_findings(
     now: datetime | None,
     canary_runner: Callable[[list[str], str], "subprocess.CompletedProcess[str]"]
     | None = None,
+    forgejo_api: Path | None = None,
 ) -> list[DriftFinding]:
     """S6 coverage: Forgejo read-back, the renewal decision, the gate canary.
 
@@ -1214,7 +1222,9 @@ def _coverage_findings(
         base = str(forgejo["base_url"])
         for row in cfg.repos:
             findings.extend(
-                cov.observe_forgejo_repo(cfg, row, runner=runner, base_url=base)
+                cov.observe_forgejo_repo(
+                    cfg, row, runner=runner, base_url=base, api=forgejo_api
+                )
             )
         if not cfg.repos:
             findings.append(
@@ -1290,8 +1300,8 @@ def _coverage_findings(
                 setting="injection_gate",
                 wanted="readable canary corpus",
                 found=str(path),
-                status="unknown",
-                detail="canary corpus path is not a file",
+                status="error",
+                detail="configured canary corpus is not a file",
             )
         )
         return findings
@@ -1321,7 +1331,7 @@ def _coverage_findings(
 
     try:
         findings.extend(cov.gate_canary(path, classify=classify))
-    except HardenError as e:
+    except (HardenError, json.JSONDecodeError, OSError, UnicodeError, ValueError) as e:
         findings.append(
             DriftFinding(
                 target="s5a",

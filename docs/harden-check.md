@@ -74,17 +74,21 @@ deep probe of every unlisted fork.
 ## Coverage added 2026-11-12
 
 **Forgejo.** `[hardening.forgejo]` with `base_url` (https only) makes
-`observe` read each `[[hardening.repo]]` back through an `fj api` argv list
-and compare `has_pull_requests`, `has_issues`, `has_wiki` and `has_projects`.
-The token is never on an argv: the caller injects it with
-`sudo-secretspec run` (key name `forgejo_token`). Unset `base_url` leaves the
-`forgejo` finding `deferred`, as before.
+`observe` read each `[[hardening.repo]]` back with
+`forgejo-api --host <host> GET /repos/{owner}/{name}` and compare
+`has_pull_requests`, `has_issues`, `has_wiki` and `has_projects`. That script
+(the forgejo skill) reads its own token from the environment and re-runs
+under `sudo-secretspec run` when it is absent, so the token is never on an
+argv and this code never names a key. `fj` (forgejo-cli) is not used: it has
+no generic API command and authenticates from its own keyring. Unset
+`base_url` leaves the `forgejo` finding `deferred`; a missing `forgejo-api`
+is `unknown`.
 
-**Notification.** `ade_harden_coverage.render_notification` renders the
-actionable findings (drift, missing, uncovered) as a notice for the operator.
-It prints; it never posts. CI runs `ade-harden observe --local` on every
-change (`.github/workflows/test.yml`, the `context-policy` job) and fails the
-job when that local report has actionable findings.
+**Notification.** `ade-harden observe` prints `render_notification`'s notice
+naming the actionable findings (drift, missing, uncovered) before the
+per-finding lines. It never posts. CI runs `ade-harden observe --local` on
+every change (`.github/workflows/test.yml`, the `context-policy` job) and
+fails the job when that local report has actionable findings.
 
 **Interaction-limit renewal.** `ade-harden renew` (dry-run by default;
 `--apply` to write) is the separately authorized operation from setup-plan
@@ -98,12 +102,13 @@ it reports `interaction_limits.renewal` as `drift` so the notice names it.
 **Gate canary.** `[hardening.canaries]` with `corpus` (a path outside the
 repo; payload text is never committed) runs one benign and one injection
 canary through `bin/ade-injection-gate classify`. The corpus rows record
-`id`, `source`, `label`, `surface` and `expected`; the check fails when a
-canary's decision differs from `expected`, the gate is unavailable, or the
-latency exceeds the gate's `max_ms`. With no corpus configured the finding
-stays `deferred`, which does not fail the check. The canary never authorizes
-adoption: the gate's own measurement report keeps `adoption_authorized:
-false`.
+`id`, `source`, `label`, `surface` (one of the gate's surfaces) and
+`expected`; the check fails when a canary's decision differs from
+`expected`, the gate is unavailable, the latency exceeds the gate's
+`max_ms`, or the configured corpus is missing or malformed. With no corpus
+configured the finding stays `deferred`, which does not fail the check. The
+canary never authorizes adoption: the gate's own measurement report keeps
+`adoption_authorized: false`.
 
 ## Related
 

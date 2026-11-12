@@ -73,23 +73,27 @@ def cmd_observe(args: argparse.Namespace) -> int:
                 "findings": [f.as_dict() for f in findings],
             }
         )
-    else:
-        mode = "local" if args.local else "network"
-        print(
-            "ade-harden observe: "
-            + ("OK" if rc == 0 else "DRIFT")
-            + f" ({mode}; observe-only; no ruleset writes; no auto-reapply)"
+        return rc
+    # Print-only: the notice names what needs attention and is never sent.
+    import ade_harden_coverage as cov
+
+    print(cov.render_notification(findings))
+    mode = "local" if args.local else "network"
+    print(
+        "ade-harden observe: "
+        + ("OK" if rc == 0 else "DRIFT")
+        + f" ({mode}; observe-only; no ruleset writes; no auto-reapply)"
+    )
+    for f in findings:
+        line = (
+            f"  {f.status:10} {f.target} {f.setting}: "
+            f"wanted={f.wanted!r} found={f.found!r}"
         )
-        for f in findings:
-            line = (
-                f"  {f.status:10} {f.target} {f.setting}: "
-                f"wanted={f.wanted!r} found={f.found!r}"
-            )
-            if f.detail:
-                line += f" — {f.detail}"
-            print(line)
-            if f.remediation and f.status in {"drift", "missing", "uncovered"}:
-                print(f"             remediation: {f.remediation}")
+        if f.detail:
+            line += f" — {f.detail}"
+        print(line)
+        if f.remediation and f.status in {"drift", "missing", "uncovered"}:
+            print(f"             remediation: {f.remediation}")
     return rc
 
 

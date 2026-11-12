@@ -3,17 +3,19 @@
 Three pieces, all read-only except the separately authorized interaction-limit
 renewal:
 
-- **Forgejo drift** — read-back of the same policy keys against a Forgejo
-  instance, through an injected runner (tests) or a ``fj`` argv list. The
-  token never appears on an argv; the caller injects it with
-  ``sudo-secretspec run`` (key name ``forgejo_token``).
-- **Notifications** — a drift report rendered for the operator. Delivery is
-  print-only here; nothing is posted.
+- **Forgejo drift** — a GET of ``/api/v1/repos/{owner}/{name}`` through the
+  ``forgejo-api`` script (skills/forgejo), which reads its own token from the
+  environment and re-runs under ``sudo-secretspec run`` when it is absent, so
+  the token is never on an argv. The installed ``fj`` (forgejo-cli) has no
+  generic API command and authenticates from its own keyring, so it is not
+  used.
+- **Notifications** — a drift report rendered for the operator. ``observe``
+  prints it; nothing is posted.
 - **Interaction-limit renewal** — the one mutation contract §7 authorizes:
   PUT ``/user/interaction-limits`` only after the exact current state was
   read and is the configured limit with the expiry inside the renewal
-  window, then a read-back of the new expiry. ``--dry-run`` (the default)
-  never writes.
+  window, then a read-back that the expiry moved forward. ``--dry-run`` (the
+  default) never writes.
 - **Gate canary** — one benign and one disclosed-payload canary through
   ``ade-injection-gate``, compared against recorded expected decisions.
   Canary text is never committed: the corpus lives outside the repo and is
@@ -26,9 +28,11 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlparse
 
 import ade_harden as ah
 
@@ -46,6 +50,11 @@ CANARY_EXPECTATIONS = {
 _ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 
 
+def _first_line(text: str, fallback: str) -> str:
+    """First non-empty line, bounded. Whitespace-only text returns fallback."""
+    return ((text or "").strip().splitlines() or [fallback])[0][:200]
+
+
 def _parse_body(text: str) -> tuple[Any | None, str]:
     body = (text or "").strip()
     if not body:
@@ -56,24 +65,67 @@ def _parse_body(text: str) -> tuple[Any | None, str]:
         return None, f"JSON: {e}"
 
 
+def forgejo_api_script() -> Path | None:
+    """The installed forgejo-api script, which holds the token itself.
+
+    It lives with the forgejo skill (``skills/forgejo/scripts/forgejo-api``).
+    A checkout that has not linked the skill has no Forgejo read path, and
+    the finding says so instead of inventing a command.
+    """
+    found = shutil.which("forgejo-api")
+    if found:
+        return Path(found)
+    return None
+
+
 def observe_forgejo_repo(
     cfg: ah.HardenConfig,
     row: dict[str, Any],
     *,
     runner: Callable[[list[str]], Any],
     base_url: str,
+    api: Path | None = None,
 ) -> list[ah.DriftFinding]:
-    """Read one Forgejo repo's settings back. Never writes."""
+    """Read one Forgejo repo's settings back. Never writes.
+
+    ``GET /api/v1/repos/{owner}/{name}`` via ``forgejo-api --host HOST``,
+    which authenticates itself. ``base_url`` is only the origin: an https URL
+    whose host is passed as ``--host`` and never interpolated into a shell.
+    """
     owner, name = str(row["owner"]), str(row["name"])
     full = f"{owner}/{name}"
     policy = ah.resolve_policy(cfg, row)
+    parsed = urlparse(base_url)
+    if parsed.scheme != "https" or not parsed.hostname:
+        return [
+            ah.DriftFinding(
+                target=f"forgejo:{full}",
+                setting="repo",
+                wanted="https base_url",
+                found=base_url,
+                status="error",
+                detail="hardening.forgejo.base_url is not an https URL",
+            )
+        ]
+    script = api if api is not None else forgejo_api_script()
+    if script is None:
+        return [
+            ah.DriftFinding(
+                target=f"forgejo:{full}",
+                setting="repo",
+                wanted="forgejo-api on PATH",
+                found=None,
+                status="unknown",
+                detail="forgejo-api is not installed; no Forgejo read path",
+            )
+        ]
     proc = runner(
         [
-            "fj",
-            "api",
-            "--base",
-            base_url,
-            f"repos/{owner}/{name}",
+            str(script),
+            "--host",
+            parsed.hostname,
+            "GET",
+            f"/repos/{owner}/{name}",
         ]
     )
     data, detail = _parse_body(proc.stdout or "")
@@ -85,9 +137,9 @@ def observe_forgejo_repo(
                 wanted="readable",
                 found=None,
                 status="unknown",
-                detail=(proc.stderr or detail or f"fj exit {proc.returncode}")
-                .strip()
-                .splitlines()[0][:200],
+                detail=_first_line(
+                    proc.stderr or "", detail or f"forgejo-api exit {proc.returncode}"
+                ),
             )
         ]
     findings: list[ah.DriftFinding] = []
@@ -252,19 +304,37 @@ def renew_interaction_limits(
         plan.update(
             wrote=False,
             readback_ok=False,
-            detail=(proc.stderr or "renew request failed").strip().splitlines()[0][:200],
+            detail=_first_line(proc.stderr or "", "renew request failed"),
         )
         return plan
     after, after_detail = ah._gh_json(
         reader, ["api", "user/interaction-limits"], api_version=cfg.api_version
     )
+    before = ah._parse_expires_at(
+        current.get("expires_at") if isinstance(current, dict) else None
+    )
+    after_expires = ah._parse_expires_at(
+        after.get("expires_at") if isinstance(after, dict) else None
+    )
+    # The new expiry must be strictly later: a PUT that exits 0 without
+    # effect would otherwise read back as success.
     ok = (
         isinstance(after, dict)
         and after.get("limit") == want_limit
-        and ah._parse_expires_at(after.get("expires_at")) is not None
+        and before is not None
+        and after_expires is not None
+        and after_expires > before
     )
     plan.update(wrote=True, readback_ok=ok, readback_detail=after_detail)
     return plan
+
+
+def _gate_surfaces() -> frozenset[str]:
+    """The surfaces ``ade-injection-gate`` accepts. Local import: the gate
+    module is heavy relative to a config check."""
+    import ade_injection_gate as gate
+
+    return frozenset(gate.SURFACES)
 
 
 def load_canary_corpus(path: Path) -> list[dict[str, Any]]:
@@ -274,11 +344,21 @@ def load_canary_corpus(path: Path) -> list[dict[str, Any]]:
     ``expected`` (the decision the canary must produce) and ``text`` (the
     canary payload, which this function returns but no report retains).
     """
-    rows = [
-        json.loads(line)
-        for line in path.read_text().splitlines()
-        if line.strip()
-    ]
+    try:
+        lines = path.read_text().splitlines()
+    except (OSError, UnicodeError) as e:
+        raise ah.HardenError(f"canary corpus unreadable: {type(e).__name__}") from e
+    rows = []
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError as e:
+            raise ah.HardenError(f"canary corpus line {e.lineno}: not JSON") from e
+        if not isinstance(row, dict):
+            raise ah.HardenError("canary corpus row is not an object")
+        rows.append(row)
     if len(rows) != 2:
         raise ah.HardenError("canary corpus must hold exactly two rows")
     labels = set()
@@ -288,6 +368,8 @@ def load_canary_corpus(path: Path) -> list[dict[str, Any]]:
                 raise ah.HardenError(f"canary {key} is not a short identifier")
         if row.get("label") not in CANARY_EXPECTATIONS:
             raise ah.HardenError("canary label must be benign or injection")
+        if row.get("surface") not in _gate_surfaces():
+            raise ah.HardenError("canary surface is not one the gate classifies")
         if row.get("expected") != CANARY_EXPECTATIONS[row["label"]]:
             raise ah.HardenError("canary expected decision disagrees with its label")
         if not isinstance(row.get("text"), str) or not row["text"].strip():

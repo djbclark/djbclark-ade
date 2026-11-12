@@ -566,11 +566,13 @@ not been measured on our own traffic is a false sense of security, not a gate.
    `bin/ade-harden` (`check` / `observe`) and `just harden-check` / `harden-check-local`.
    Gh read-back for configured repos, user interaction limits, and owner inventory;
    print-only remediation hints. **No** live ruleset writes, **no** `apply --yes`.
-   **2026-11-12:** Forgejo read-back (`[hardening.forgejo]`), the operator drift
-   notice, CI's local observe step, the interaction-limit renewal
-   (`ade-harden renew`, dry-run unless `--apply`; contract §7) and the S5a gate
-   canary (`[hardening.canaries]`, corpus outside the repo) shipped behind the
-   S5a gate (#576). Detail: [harden-check.md](harden-check.md).
+   **2026-11-12:** Forgejo read-back (`[hardening.forgejo]`, via `forgejo-api`),
+   the operator drift notice printed by `observe`, CI's local observe step, the
+   interaction-limit renewal (`ade-harden renew`, dry-run unless `--apply`;
+   contract §7; the read-back must show the expiry moved) and the S5a gate
+   canary (`[hardening.canaries]`, corpus outside the repo; a configured but
+   missing corpus fails the check) shipped behind the S5a gate (#576). Detail:
+   [harden-check.md](harden-check.md).
 
 ## S7. Browser-only steps through Grok Bot
 
