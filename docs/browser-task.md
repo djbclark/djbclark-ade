@@ -145,7 +145,8 @@ record (`--app-name`, default `ade-merge-gate`):
    `user/installations/{id}/repositories?per_page=100` list (operator `gh`
    credentials, never an App JWT — same probe as S8's `ade-github-setup`) —
    requires an installation of that App whose user-visible repository list is
-   **exactly** `[<owner>/<repo>]` and whose account is the configured owner.
+   **exactly** `[<owner>/<repo>]` and whose account matches the configured owner
+   case-insensitively (GitHub logins are case-insensitive, as `full_name` is).
    Anything wider (extra repositories, an empty list, a different account) is
    recorded and never completes; the first page of up to 5 matching
    installations is the bound, and `repository_selection` is recorded but never
@@ -165,10 +166,12 @@ record every `--interval-seconds` (5–3600, default 60) until the record is
 checking, not a scheduler: each iteration is one verify under the record's
 lock (one bounded GET; two or three for `github-app-create`), and the loop
 never sends prompts, registers, retries or deletes deadline waits, and never
-outlives its stated bound. When the wait cap or the deadline arrives with the
-record still pending, one final verify settles expiry and `poll` reports the
-last state with `poll_stopped`, `polls` and its interval/ bounds; exit 0 only
-when the record is completed at return. `poll --dry-run` is a pure plan (the
+outlives its stated bound. When the wait cap arrives the loop stops on the verify it already ran
+(`poll_stopped: max-wait-reached`) and does not issue another readback. When
+the record deadline is crossed after that verify, one settling verify persists
+`expired` instead of leaving a stale pending view. `poll` reports the last
+state with `poll_stopped`, `polls` and its interval bounds; exit 0 only when
+the record is completed at return. `poll --dry-run` is a pure plan (the
 readback argv, cadence and an upper bound on polls) with no lock, writes,
 network or sleeps. A registered deadline still does not prove a running sweep
 or successful notification — polling exists so the observing session can wait

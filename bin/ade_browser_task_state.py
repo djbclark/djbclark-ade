@@ -49,6 +49,11 @@ POLL_MAX_WAIT_BOUNDS = (1, 86400)
 POLL_HARD_CAP = 20000  # only reachable when the injected clock stands still
 
 
+def _same_login(left: Any, right: Any) -> bool:
+    """GitHub logins compare case-insensitively (API full_name already does)."""
+    return isinstance(left, str) and isinstance(right, str) and left.casefold() == right.casefold()
+
+
 def validate_app_name(name: Any) -> str:
     if not isinstance(name, str) or not APP_NAME.fullmatch(name):
         raise tasks.BrowserTaskError(
@@ -427,15 +432,17 @@ def poll(
             break
         remaining = min(max_wait_seconds - (now - start), deadline_at - now)
         if remaining <= 0:
-            if state_now == "pending":
-                # Settle expiry so the loop never ends on a stale pending view.
+            # The verify at the start of this iteration already ran. A wait-cap
+            # expiry is not a second readback. Only a clock that crossed the
+            # record deadline after that verify gets one settling pass, so the
+            # persisted state is expired rather than a stale pending view.
+            if state_now == "pending" and deadline_at - now <= 0:
                 payload, rc = verify(name, directory=directory, runner=runner, clock=clock)
                 polls += 1
                 stopped = str(payload.get("status"))
             else:
                 stopped = "max-wait-reached"
             break
-        stopped = "max-wait-reached"
         sleeper(min(interval_seconds, remaining))
     if payload.get("status") not in ("completed", "expired") and polls >= POLL_HARD_CAP:
         stopped = "poll-limit"
@@ -579,7 +586,7 @@ def _observe_app(record: dict[str, Any], observation: dict[str, Any],
         return False
     observation["installation_found"] = True
     # Prefer the configured owner's installation; bounded page-1 candidates.
-    candidates.sort(key=lambda row: 0 if row.get("account") == record["owner"] else 1)
+    candidates.sort(key=lambda row: 0 if _same_login(row.get("account"), record["owner"]) else 1)
     readable: dict[str, Any] | None = None
     for row in candidates[:5]:
         iid = row.get("id")
@@ -595,7 +602,7 @@ def _observe_app(record: dict[str, Any], observation: dict[str, Any],
         names = [r for r in repos if isinstance(r, str)]
         exact = len(names) == 1 and names[0].casefold() == target
         if readable is None or (exact and not readable["exact"]):
-            readable = {"id": iid, "account_match": row.get("account") == record["owner"],
+            readable = {"id": iid, "account_match": _same_login(row.get("account"), record["owner"]),
                         "selection": row.get("repository_selection"),
                         "count": len(names), "exact": exact}
         if exact:

@@ -570,13 +570,25 @@ def test_poll_repeats_verify_on_interval_until_completed(layout):
 def test_poll_respects_max_wait_and_reports_pending(layout):
     tracked(layout)
     sleeps: list[float] = []
-    ticks = iter([1000, 1000, 1000, 1000, 1030, 1030, 1030, 1030, 1030])
-    runner = Mock(side_effect=[not_matched_response(), not_matched_response(), not_matched_response()])
+    ticks = iter([1000, 1000, 1000, 1000, 1030, 1030, 1030, 1030])
+    runner = Mock(side_effect=[not_matched_response(), not_matched_response()])
     payload, rc = state.poll("restrict-prs", directory=layout[1], interval_seconds=60,
                              max_wait_seconds=30, runner=runner,
                              clock=lambda: next(ticks), sleeper=sleeps.append)
     assert rc == 1 and payload["state"] == "pending" and not payload["completed"]
-    assert payload["polls"] == 3 and payload["poll_stopped"] == "pending" and sleeps == [30]
+    # The wait cap stops on the verify already run; no third readback.
+    assert payload["polls"] == 2 and payload["poll_stopped"] == "max-wait-reached" and sleeps == [30]
+    assert runner.call_count == 2
+
+
+def test_app_account_match_is_case_insensitive(layout):
+    app_tracked(layout)
+    runner = Mock(side_effect=[result(app_payload()),
+                               result(installations_payload(account="ALICE")),
+                               result(["alice/project"]), result()])
+    payload, rc = state.verify("create-app", directory=layout[1], runner=runner, clock=lambda: 1020)
+    assert rc == 0 and payload["completed"]
+    assert payload["observation"]["installation_account_match"] is True
 
 
 def test_poll_stops_at_record_deadline_and_reports_expired(layout):
