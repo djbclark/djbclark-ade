@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import json
 import re
-import shlex
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -45,7 +44,6 @@ CANARY_EXPECTATIONS = {
     "injection": "injection",
 }
 _ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
-_RENEWAL_NOTE = "separately authorized renewal (setup-plan contract 7); dry-run"
 
 
 def _parse_body(text: str) -> tuple[Any | None, str]:
@@ -338,6 +336,3 @@ def gate_canary(
     return findings
 
 
-def notification_argv(text: str) -> list[str]:
-    """Argv a caller would use to deliver ``text``. Never executed here."""
-    return shlex.split(shlex.join(["hermes-ping", text]))
