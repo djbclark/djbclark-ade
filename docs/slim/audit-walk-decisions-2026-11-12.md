@@ -34,9 +34,23 @@ implementation after the walkthrough:
 Outcome: **repair queued**, not yet implemented or installed. This choice does
 not revive retired clients, remove their archives or change pool acceptance.
 
-## 3. Remaining walkthrough
+## 3. Dispatch and handoff
 
-Next: dispatch/handoff/unattended operation. Then quota/routing;
+Operator selected both **Verify native handoff and fix demonstrated gaps** and
+**Compare removed dispatch/handoff features in detail**.
+
+Queue focused cloud verification and repairs after the walkthrough: successor
+acknowledgement, preserved handoff records, predecessor archiving order, timeout
+behavior and explicit recovery outcomes. Distinguish source/fixture validation
+from later live Mac evidence. Do not revive the old launcher stack wholesale,
+change pool acceptance, remove transitional shims or infer permission for
+unattended session restart. Provide the detailed comparison during this walk.
+
+Outcome: **verification/repairs queued**; comparison delivered in the walkthrough.
+
+## 4. Remaining walkthrough
+
+Next after the detailed dispatch comparison: quota/routing;
 web/moved skills/nightly learning; review/permissions;
 remaining deletion gates and repairs. These items remain undecided except where
 prior operator instructions already apply. Ask one question at a time; act on
