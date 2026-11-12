@@ -3,10 +3,15 @@
 Trimmed 2026-11-07 (slim-down E11); Pi-only third-party TUI 2026-11-08. The live tools are `bin/context-watch`
 (how full each running Claude agent is, section 6), `bin/context-budget-check` (what a fresh session costs,
 section 7) and the Claude nudge hook (`claude/hooks/context_size_nudge.py`, section 2). Compaction for current
-clients is auto-compaction plus a handoff (`skills/handoff` / Paseo `paseo-handoff`); Pi has no separate ADE
-compaction plugin. Section 3 keeps the **archived** OpenCode native-compaction notes only (OpenCode is not a
-live TUI). `self-slash`, which typed `/new` and `/compact` into an agent's own input, was removed 2026-11-06
-(E4): a clear is the operator's `/clear` (the `handoff` skill, Step 9).
+clients includes auto-compaction and the explicit agent-invoked
+[`ade-self-session`](self-session.md) native request/handoff path (restored
+2026-11-12). Self-compaction preserves a checkpoint and requests native `/compact`;
+it never claims completion from a send receipt. Self-handoff requires a durable
+successor acknowledgement and idle-only predecessor retirement. Pi has no separate
+ADE compaction plugin. Section 3 keeps archived OpenCode notes only. The old
+pane-typing `self-slash` implementation remains removed; no terminal injection is
+restored. Unsupported hosts/providers report their limitation.
+
 
 Context capacity is a correctness ceiling, not a cost budget. Cached input is
 billed again on every request, and Go models debit the same monthly allowance
@@ -23,7 +28,9 @@ Continuous protection against unplanned interruption is the separate, planned
    owned Tier 1 log and handoff with absolute paths, branch/head, dirty files,
    unresolved decisions, active job records, unread results and exact next steps.
 2. A top-level session runs the `handoff` skill; its Step 9 leaves the operator `/clear` then `/baton`, or starts
-   a successor. A dispatched slice writes a document-only handoff; it must never clear or archive its parent.
+   a successor. A dispatched slice may hand off its own task with a durable checkpoint and
+   scope/ownership coordination, but must never clear or archive its parent. The native
+   self-session helper takes its predecessor only from its own Paseo identity.
 3. Never throw away an unsent draft, interrupt a running worker, or reset before
    the handoff is durable. Re-arm existing jobs instead of launching their
    work again. A failed lifecycle operation is reported, not retried in a loop.
