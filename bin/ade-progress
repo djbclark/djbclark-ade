@@ -214,7 +214,14 @@ def item_present(rec: dict) -> bool | None:
     if not pp or not rec.get("workspace") or not rec.get("ui_id"):
         return None
     rc, shown = run(pp + ["show"], 15, cwd=rec["workspace"])
-    return f"({rec['ui_id']}: {rec['task']}: " in shown if rc == 0 else None
+    if rc != 0:
+        return None
+    # exactly the text we set when we know it, else the `<task>: ` prefix
+    marker = f"({rec['ui_id']}: {rec['ui_text']})" if rec.get("ui_text") else f"({rec['ui_id']}: {rec['task']}: "
+    found = marker in shown
+    if not found and rec.get("marker_seen") is False:   # `show` never listed this item: its format may have drifted
+        return None                                     # so "absent" is not evidence; never mark gone, never clear
+    return found
 
 
 def close_items(task: str, mode: str, recs: dict) -> list[str]:
@@ -392,8 +399,11 @@ def progress_item(d: dict, rec: dict) -> None:
     if not m:   # a finished or missing run is the expected "no-run" outcome, not an anomaly
         rec["ui"] = "no-run"
         return
-    rec["ui_id"], rec["workspace"] = m.group(1), d["workspace"]
-    rec["ui"] = "verified" if item_present(rec) else "unverified"   # (id: task: ...) in show, not a bare token
+    rec["ui_id"], rec["workspace"], rec["ui_text"] = m.group(1), d["workspace"], text
+    seen = item_present(rec)   # `(id: text)` in show, not a bare token
+    rec["ui"] = "verified" if seen else "unverified"
+    if seen is False:
+        rec["marker_seen"] = False   # show answered but never listed the item we just made: do not trust "absent" later
 
 
 def digest(recs: list[dict]) -> str:
@@ -492,7 +502,10 @@ def carry_item(st: dict, d: dict, rec: dict, old: dict | None) -> None:
             if r.get("ui_id") == last["ui_id"]:
                 r["ui_gone"] = True
         return
-    rec.update(ui="unverified" if present is None else last["ui"], ui_id=last["ui_id"], workspace=last.get("workspace"))
+    rec.update(ui="unverified" if present is None else last["ui"], ui_id=last["ui_id"], workspace=last.get("workspace"),
+               ui_text=last.get("ui_text"))
+    if last.get("marker_seen") is False:
+        rec["marker_seen"] = False
 
 
 def process(st: dict, c: dict, paseo: list[str], rep: dict) -> dict | None:
@@ -511,6 +524,7 @@ def process(st: dict, c: dict, paseo: list[str], rep: dict) -> dict | None:
                "attempts": (old or {}).get("attempts", 0), "last_published": (old or {}).get("last_published", 0)}
         if old:
             rec["first"] = old["first"]
+        carry_item(st, d, rec, old)   # before the first save: the old record's item reference must never exist only in memory
         if old and old.get("wake") in ("unknown", "refused"):
             rec["prior_wake"] = old["wake"]   # an earlier uncertain or refused attempt, kept visible
         st["events"][key] = rec
@@ -530,11 +544,13 @@ def process(st: dict, c: dict, paseo: list[str], rep: dict) -> dict | None:
             rec["wake"] = wake(paseo, d)
             rec["attempts"] += 1
     if rec["ui"] is None:
-        carry_item(st, d, rec, old if old is not rec else None)
+        carry_item(st, d, rec, None)   # a resumed record (crash after creation) tries again
     if rec["ui"] is None:   # step 3: Progress item, then (in the digest) the page
         rec["ui"] = "intent"
         save(st)   # intent before effect: a crash leaves "intent", reconciled to unverified, never set twice
         progress_item(d, rec)
+        if rec.get("marker_seen") is False:
+            rep["health"].append(f"{d['task']}: show did not list the new Progress item (format drift?); ids not trusted")
     rec["state"], rec["last_published"] = "published-local", now()
     save(st)
     return rec
@@ -625,7 +641,7 @@ def cmd_inbox(a) -> int:
         print(f"{r['task']} {r['reason']} {r['state']} first={ny(r['first'])} wake={r['wake']} ui={r['ui']}"
               f"{'/' + r['ui_id'] if r.get('ui_id') else ''} ping={r['ping']}"
               f"{' acked' if r.get('acked') else ''}{' ' + r['closed'] if r.get('closed') else ''}"
-              f"{' ui_cleared=False (clear by hand: paseo-progress stuck clear ' + r['ui_id'] + ')' if r.get('ui_id') and r.get('ui_cleared') is False else ''}"
+              f"{' ui_cleared=False (in ' + str(r.get('workspace')) + ': run paseo-progress show; clear ' + r['ui_id'] + ' only if it lists (' + r['ui_id'] + ': ' + r['task'] + ': )' if r.get('ui_id') and r.get('ui_cleared') is False else ''}"
               f": {r['summary']}")
     return 0
 

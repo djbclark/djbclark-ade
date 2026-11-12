@@ -78,7 +78,10 @@ FAKE_PP = textwrap.dedent('''\
             print("No flagged blocker " + a[2]); sys.exit(1)
         del st["items"][a[2]]; save(); print("Cleared " + a[2])
     elif a[0] == "show":
-        if not os.path.exists(d + "/pp.noshow"):
+        if os.path.exists(d + "/pp.fmt"):
+            for i, r in st["items"].items():
+                print("  Blocked [%s] %s" % (i, r))   # a drifted show format
+        elif not os.path.exists(d + "/pp.noshow"):
             for i, r in st["items"].items():
                 print("  Blocked (%s: %s), since now" % (i, r))
     elif a[0] == "start":
@@ -687,3 +690,46 @@ def test_show_failure_never_triggers_a_blind_clear(e):
     assert "could not check" in r.stdout
     assert not [c for c in e.calls("pp.jsonl") if c[1:3] == ["stuck", "clear"]]
     assert "ui_cleared=False" in e.run("inbox").stdout
+
+
+def test_withdrawn_repeat_notice_keeps_the_item_reference(e):
+    e.agent("a1")
+    e.declare()
+    e.scan()   # S1 set
+    e.clock += 3 * HOUR + 60
+    e.agent("a1", idle_min=400)
+    idle = json.loads((e.fake / "inspect-a1.json").read_text())[0]
+    (e.fake / "inspect-a1.json").write_text(json.dumps([idle, idle, dict(idle, Status="running")]))   # step-2 withdrawal
+    assert e.scan()["withdrawn"] == 1
+    assert e.inbox()[0]["ui_id"] == "S1"   # the withdrawn record still holds the item
+    e.agent("a1", idle_min=400)
+    e.clock += 60
+    e.scan()
+    assert len([c for c in e.calls("pp.jsonl") if c[1:3] == ["stuck", "set"]]) == 1
+    e.run("ack", "--task", "t1", "--yes")
+    assert pp_state(e)["items"] == {}
+
+
+def test_show_format_drift_never_stacks_or_clears_blindly(e):
+    e.agent("a1", status="closed")
+    e.declare()
+    (e.fake / "pp.fmt").write_text("1")
+    rep = e.scan()
+    rec = e.inbox()[0]
+    assert rec["ui"] == "unverified" and rec["marker_seen"] is False and any("format drift" in h for h in rep["health"])
+    e.clock += 3 * HOUR + 60
+    e.scan()
+    assert len([c for c in e.calls("pp.jsonl") if c[1:3] == ["stuck", "set"]]) == 1
+    e.run("ack", "--task", "t1", "--yes")
+    assert not [c for c in e.calls("pp.jsonl") if c[1:3] == ["stuck", "clear"]]
+    assert "ui_cleared=False" in e.run("inbox").stdout
+
+
+def test_marker_is_the_exact_text_we_set(e):
+    e.agent("a1", status="closed")
+    e.declare()
+    e.scan()
+    # the agent's own item reusing the id with a similar prefix is not ours
+    (e.fake / "pp.state.json").write_text(json.dumps({"n": 1, "items": {"S1": "t1: waiting on X"}}))
+    r = e.run("ack", "--task", "t1", "--yes")
+    assert "not cleared (absent)" in r.stdout and pp_state(e)["items"] == {"S1": "t1: waiting on X"}
