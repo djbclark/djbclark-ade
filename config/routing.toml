@@ -194,6 +194,7 @@ clinepass = ["cline-pass/deepseek-v4-flash", "cline-pass/minimax-m3"]
 
 [[service]]
 name = "claude"
+pool_family = "default"
 cli = "claude (Opus 5.5 @ high for judgment; Sonnet 5.5 for code; Fable only for frontier)"
 good_at = { judgment = 1, frontier = 2, code = 12 }
 billing = "subscription"
@@ -326,6 +327,7 @@ models = { code = "default", mechanical = "default", bulk = "default", research 
 
 [[service]]
 name = "cursor"
+pool_family = "third_party"
 cli = "pi (retained Cursor subscription CLI bridge)"
 ready_probe = "pi"
 good_at = { code = 20, mechanical = 10, bulk = 18, research = 18 }

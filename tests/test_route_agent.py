@@ -434,16 +434,97 @@ class TestDiscoverySources(unittest.TestCase):
 class TestPoolSplitIsGeneral(unittest.TestCase):
     """Any service can claim one pool family of its provider via `pool=`."""
 
-    def test_any_declared_pool_is_split_and_undeclared_families_stay_home(self):
+    def test_any_declared_pool_is_split_and_undeclared_families_are_unknown(self):
         svc = r.Service("copilot-premium", "copilot", {"code": 20}, "subscription",
                         pool=("copilot", "premium"))
         with mock.patch.object(r, "SERVICES", r.SERVICES + (svc,)):
             self.assertEqual(r.pool_service("copilot", "premium"), "copilot-premium")
-            self.assertEqual(r.pool_service("copilot", "chat"), "copilot")
-            self.assertEqual(r.pool_service("copilot", None), "copilot")
+            self.assertEqual(r.pool_service("copilot", "chat"), None)
+            self.assertEqual(r.pool_service("copilot", None), None)
 
     def test_claude_fable_sublimit_is_not_split(self):
         self.assertEqual(r.pool_service("claude", "fable"), "claude")
+
+
+class TestQuotaFamilyIsolation(unittest.TestCase):
+    """Sanitized shapes from aiuse schema 1.5, observed 2026-11-12."""
+
+    @staticmethod
+    def row(provider, family, left):
+        return {"provider": provider, "pool_family": family, "usable_now": left > 1,
+                "headroom_percent": left, "age_seconds": 60,
+                "binding_window": family, "models_hint": "family-specific allowance",
+                "windows": [{"label": family or "unnamed", "pool_family": family,
+                             "remaining_percent": left, "headroom_percent": left,
+                             "state": "ok" if left > 1 else "exhausted"}]}
+
+    def test_cursor_grok_bot_cannot_fund_composer_or_auto(self):
+        bot = self.row("cursor", "grok_bot", 82)
+        for family in ("grok_bot", None, "unknown"):
+            row = dict(bot, pool_family=family)
+            q = r._providers_from_available([row], 60)
+            for name in ("cursor", "cursor-auto"):
+                self.assertNotIn(name, q)
+                self.assertFalse(r.BY_NAME[name].eligible("research", q))
+        windows = [self.row("cursor", f, 0)["windows"][0]
+                   for f in ("total", "auto", "third_party", "on_demand")]
+        q = r._providers_from_accounts([{"provider": "cursor", "windows": bot["windows"] + windows}], 60)
+        self.assertEqual(q["cursor"]["remaining"], 0)
+        self.assertEqual(q["cursor-auto"]["remaining"], 0)
+        self.assertEqual(r._providers_from_available(
+            [self.row("cursor", "third_party", 37)], 60)["cursor"]["remaining"], 37)
+
+    def test_cursor_shared_total_still_constrains_each_child(self):
+        windows = []
+        for family, left in (("total", 0), ("auto", 80), ("third_party", 90)):
+            w = self.row("cursor", family, left)["windows"][0]
+            if family != "total":
+                w["shared_pool_family"] = "total"
+            windows.append(w)
+        q = r._providers_from_accounts([{"provider": "cursor", "windows": windows}], 60)
+        self.assertEqual(q["cursor"]["remaining"], 0)
+        self.assertEqual(q["cursor-auto"]["remaining"], 0)
+
+    def test_paseo_provider_only_report_cannot_authorize_family_route(self):
+        for provider in ("cursor", "antigravity", "claude"):
+            rows = [{"sourceId": provider, "fetchedAt": datetime.now(UTC).isoformat(),
+                     "report": {"status": "available", "windows": [
+                         {"label": "usage", "remainingPct": 82}]}}]
+            self.assertEqual(r.usage_from_paseo(rows), {})
+
+    def test_argon_never_borrows_gemini_or_claude_gpt(self):
+        for fold in (r._providers_from_available, r._providers_from_accounts):
+            for family in ("gemini", "claude_gpt", None, "unknown"):
+                with self.subTest(fold=fold.__name__, family=family):
+                    q = fold([self.row("antigravity", family, 80)], 60)
+                    self.assertNotIn("antigravity-argon", q)
+                    self.assertFalse(r.BY_NAME["antigravity-argon"].eligible("frontier", q))
+            q = fold([self.row("antigravity", "gemini", 57),
+                      self.row("antigravity", "gemini_argon", 0),
+                      self.row("antigravity", "claude_gpt", 24)], 60)
+            self.assertEqual(q["antigravity-argon"]["remaining"], 0)
+            self.assertEqual(fold([self.row("antigravity", "gemini_argon", 32)], 60)
+                             ["antigravity-argon"]["remaining"], 32)
+
+    def test_claude_default_and_fable_cap_are_not_interchangeable(self):
+        default = self.row("claude", "default", 23)
+        cap = {"pool_family": "fable", "label": "Fable", "quota_scope": "model_sublimit",
+               "shared_pool_family": "default", "max_share_of_parent_percent": 50,
+               "headroom_percent": 0, "remaining_percent": 0, "usable_now": False,
+               "state": "exhausted"}
+        default["model_sublimits"] = [cap]
+        q = r._providers_from_available([default], 60)
+        self.assertEqual(q["claude"]["remaining"], 23)
+        self.assertEqual(q["claude"]["sublimits"]["fable"], 0)
+        account = {"provider": "claude", "windows": default["windows"] + [cap]}
+        q = r._providers_from_accounts([account], 60)
+        self.assertEqual(q["claude"]["remaining"], 23)
+        self.assertEqual(q["claude"]["sublimits"]["fable"], 0)
+        for fold in (r._providers_from_available, r._providers_from_accounts):
+            for family in ("fable", None, "unknown"):
+                q = fold([self.row("claude", family, 80)], 60)
+                self.assertIsNone(q.get("claude", {}).get("remaining"))
+                self.assertFalse(r.BY_NAME["claude"].eligible("code", q))
 
 
 class TestPlanWave(unittest.TestCase):
