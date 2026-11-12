@@ -16,7 +16,7 @@ import ade_self_session as ss
 PRED = '11111111-1111-4111-8111-111111111111'
 SUCC = '22222222-2222-4222-8222-222222222222'
 OTHER = '33333333-3333-4333-8333-333333333333'
-WS = '44444444-4444-4444-8444-444444444444'
+WS = 'wks_8bdc13f236e8850f'
 HEAD = 'a' * 40
 
 
@@ -133,6 +133,28 @@ def test_durable_checkpoint_top_level_creation_and_ack_before_archive(setup):
     assert service.finish(path)['status'] == 'archived'
     assert service.finish(path)['status'] == 'archived'
     assert native.archived == 1
+
+
+@pytest.mark.parametrize('workspace', [
+    '', PRED, 'wks_', 'wks_8bdc13f236e8850', 'wks_8bdc13f236e8850ff',
+    'wks_8bdc13f236e8850g', 'wks_8BDC13F236E8850F',
+    'wks_8bdc13f236e8850f\n', 'wks_8bdc13f236e8850f;echo bad',
+])
+def test_invalid_workspace_rejected_before_creation_intent(setup, workspace):
+    service, native, checkpoint = setup
+    service.env['PASEO_WORKSPACE_ID'] = workspace
+    with pytest.raises(ss.SessionError, match='workspace id'):
+        service.handoff(checkpoint, quiesced=True)
+    assert native.created == 0
+    assert not list(service.state.glob('handoff-*.json'))
+
+
+def test_workspace_id_is_not_accepted_as_agent_uuid(setup):
+    service, native, checkpoint = setup
+    service.env['PASEO_AGENT_ID'] = WS
+    with pytest.raises(ss.SessionError, match='full UUID'):
+        service.handoff(checkpoint, quiesced=True)
+    assert native.calls == []
 
 
 def test_create_intent_persisted_before_effect_and_never_replayed(setup):

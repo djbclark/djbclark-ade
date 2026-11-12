@@ -19,7 +19,9 @@ in a private state directory, plus repository HEAD for handoff. Original worktre
 files remain in place; archiving an agent is never workspace deletion.
 
 The executable requires the full `PASEO_AGENT_ID` supplied by Paseo. Handoff also
-requires `PASEO_WORKSPACE_ID`. An unrelated shell or a cross-host invocation is
+requires `PASEO_WORKSPACE_ID` in Paseo's `wks_` plus 16 lowercase hexadecimal
+digit format (verified against `paseo workspace ls --json`, 2026-11-12). Agent
+IDs retain UUID validation. An unrelated shell or a cross-host invocation is
 unsupported. `--paseo-home DIR` pins the local daemon home for every command;
 use the same home/state directory for every step. The default state directory is
 `~/.local/state/djbclark-ade/self-session`.
