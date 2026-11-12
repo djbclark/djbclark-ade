@@ -107,7 +107,7 @@ Skills (25, from each `skills/*/SKILL.md`):
 | [`tell-coding-bot`](skills/tell-coding-bot/SKILL.md) | Pointer (2026-11-06) for talking to the operator's cloud Grok Bot "Coding" ("tell the Coding bot", "ask Coding", "hand this to the Coding bot", a task that needs a real browser session); the coding-bot code now lives in the peer-link repository. |
 | [`watch`](skills/watch/SKILL.md) | Inspect machine load, memory churn, and active incidents from your terminal with minimal token use, or manage system watchers. |
 
-`bin/` (82, from each file's first docstring or comment):
+`bin/` (84, from each file's first docstring or comment):
 
 | Tool | What |
 |---|---|
@@ -121,6 +121,7 @@ Skills (25, from each `skills/*/SKILL.md`):
 | [`ade-git-guard`](bin/ade-git-guard) | A `git` front door for what git's own hooks cannot see in a workspace another agent owns. |
 | [`ade-github-setup`](bin/ade-github-setup) | Observe / plan / apply / verify for the merge-gate App (S8). |
 | [`ade-harden`](bin/ade-harden) | Observe-only GitHub hardening drift check (setup-plan S6). |
+| [`ade-injection-gate`](bin/ade-injection-gate) | Classify untrusted text or measure labeled Jev outcomes before reader adoption. |
 | [`ade-install`](bin/ade-install) | Transitional install catalog, plan, doctor, keys, and bounded apply. |
 | [`ade-merge-ready`](bin/ade-merge-ready) | Classify / stacks / approve / merge-now / stack-rebase for the ADE merge gate (2026-11-10). |
 | [`ade-model-tiers`](bin/ade-model-tiers) | Show/resolve/classify/validate/promote/set for config/model-tiers.toml. |
@@ -143,6 +144,7 @@ Skills (25, from each `skills/*/SKILL.md`):
 | [`ade_gates.py`](bin/ade_gates.py) | The frontier-model allowance, from code defaults and config/gates.toml [frontier] (docs/gates.md). |
 | [`ade_github_setup.py`](bin/ade_github_setup.py) | Observe / plan / apply / verify for setup-plan S8. |
 | [`ade_harden.py`](bin/ade_harden.py) | Observe-only GitHub hardening drift check (setup-plan S6). |
+| [`ade_injection_gate.py`](bin/ade_injection_gate.py) | Probability-only injection screening and payload-free measurement; no reader adoption. |
 | [`ade_install.py`](bin/ade_install.py) | Install catalog, plan, observe-only doctor/keys, bounded apply. |
 | [`ade_install_catalog.py`](bin/ade_install_catalog.py) | Pure install-catalog validation, schema projection and metadata mapping. |
 | [`ade_pi_pools.py`](bin/ade_pi_pools.py) | Pi pool acceptance for automatic routing (ade/auto / bin/pi-default). |

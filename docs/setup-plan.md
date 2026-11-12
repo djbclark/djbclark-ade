@@ -444,6 +444,10 @@ titles, issue bodies and comments. Reducing who can write those artifacts is the
 
 ## S5a. A typed classifier as an extra injection gate
 
+2026-11-12 OQ2: S5a gate/tool and measurement harness only are un-deferred.
+See [the implementation contract](injection-gate.md). Reader adoption, S5 apply
+and S6 canaries remain deferred; the earlier blanket deferral has this exception.
+
 The hardening in S5 reduces who can write outside content; this section adds a
 cheap probabilistic reader-side gate for the content that still reaches agents.
 It is built and measured **before** the final code and security reviews of any

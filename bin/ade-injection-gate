@@ -1,0 +1,91 @@
+#!/usr/bin/env -S python3 -I
+"""ade-injection-gate: classify untrusted text or measure labeled Jev outcomes before reader adoption.
+
+classify --surface SURFACE [--disabled] [--max-ms 5000] < text
+measure --replay FILE | --live --corpus FILE
+JSON stdout only; classify exits 0 for a valid score, 3 for unavailable/disabled;
+measurement exits 0 for a completed report (not acceptance), 2 for invalid input.
+Live requests require TYPESAFE_API_KEY injected with sudo-secretspec run.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import ade_injection_gate as gate
+
+
+def measure(args):
+    # Never print a bad row or decoder exception, which could expose payloads.
+    path = args.replay or args.corpus
+    rows = [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()]
+    if not rows or len(rows) > 10_000:
+        raise ValueError("corpus size")
+    outcomes = []
+    ids = set()
+    for row in rows:
+        for key in ("id", "source"):
+            value = row[key]
+            if not isinstance(value, str) or not value or len(value) > 128 or not all(c.isalnum() or c in "._-" for c in value):
+                raise ValueError("metadata")
+        if row["id"] in ids or row["label"] not in {"injection", "benign"} or row["surface"] not in gate.SURFACES:
+            raise ValueError("label/surface/id")
+        ids.add(row["id"])
+        if args.replay:
+            latency = row["latency_ms"]
+            if type(latency) not in (int, float) or not 0 <= latency <= 1_000_000_000 or not gate.math.isfinite(latency):
+                raise ValueError("latency")
+            # Replay cannot be mistaken for a live verdict: confined to measure.
+            def replay_request(text, max_ms):
+                if latency > 5000:
+                    raise ValueError("deadline")
+                return row["response"]
+            result = gate.classify("offline replay", row["surface"], request=replay_request)
+            result["latency_ms"] = latency
+            outcomes.append({**{k: row[k] for k in ("id", "source", "label")}, "run": 1, "result": result})
+        else:
+            if not isinstance(row["text"], str):
+                raise ValueError("text")
+            for run in (1, 2):
+                outcomes.append({**{k: row[k] for k in ("id", "source", "label")}, "run": run,
+                                 "result": gate.classify(row["text"], row["surface"])})
+    report = gate.measurement(outcomes)
+    report["mode"] = "offline-replay" if args.replay else "live"
+    # Per-row scores preserve reproducibility without retaining payloads.
+    report["scores"] = outcomes
+    return report
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    sub = parser.add_subparsers(dest="cmd", required=True)
+    c = sub.add_parser("classify")
+    c.add_argument("--surface", choices=gate.SURFACES, required=True)
+    c.add_argument("--disabled", action="store_true")
+    c.add_argument("--max-ms", type=int, default=5000)
+    m = sub.add_parser("measure")
+    mode = m.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--replay")
+    mode.add_argument("--live", action="store_true")
+    m.add_argument("--corpus")
+    args = parser.parse_args(argv)
+    try:
+        if args.cmd == "classify":
+            raw = sys.stdin.buffer.read(gate.MAX_BYTES + 1)
+            result = gate.classify(raw.decode("utf-8"), args.surface, max_ms=args.max_ms, enabled=not args.disabled)
+            rc = 0 if result["status"] == "ok" else 3
+        else:
+            if bool(args.live) != bool(args.corpus):
+                raise ValueError("corpus required only for live")
+            result, rc = measure(args), 0
+    except (OSError, ValueError, TypeError, KeyError, AttributeError, OverflowError, RecursionError):
+        result, rc = {"error": "invalid input", "decide": "escalate", "untrusted": True}, 2
+    print(json.dumps(result, sort_keys=True, allow_nan=False))
+    return rc
+
+
+if __name__ == "__main__":
+    sys.exit(main())
