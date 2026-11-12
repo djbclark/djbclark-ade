@@ -1,0 +1,6 @@
+#!/usr/bin/env python3
+"""Offline nightly-learning budget and proposal admission."""
+from ade_nightly_learning import main
+
+if __name__ == "__main__":
+    raise SystemExit(main())
