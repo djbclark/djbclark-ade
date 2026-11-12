@@ -128,7 +128,9 @@ under the owner's login) is ours. The review boundary and the merge gate below a
    default 72 h; `ade-git-guard claim ls`); nothing creates claims automatically yet (a Paseo `worktree.create.after` hook
    is the planned wiring, docs/git-guard.md), so this is the rule, not yet a guard. CHANGELOG fragments (review rule 10)
    ended the shared-file conflicts. Another session's uncommitted edits in a shared checkout are migrated by their owner
-   (message it, order 10), never stashed or reset by you.
+   (message it, order 10), never stashed or reset by you. **Never `git stash` in any worktree**: a repo's worktrees share
+   one stash stack, so a pop can apply another writer's WIP (2026-11-12: two workers swapped uncommitted edits); set work
+   aside with `git diff > PATCH` and `git checkout -- PATHS`, or a WIP commit on your own branch.
 
 10. **A message to another agent is sent with `paseo send --json` or the session-finder relay shim (Wave 6 delete by
    2026-11-20), and not delivered until you have proof** (operator, 2026-10-25: "we always need to verify that the other agent
@@ -162,7 +164,8 @@ under the owner's login) is ours. The review boundary and the merge gate below a
   under `tools/` (Wave 6 follow-up delete after one live cycle).
 - Master is **PR-only** (branch protection includes admins). Work in a worktree
   (order 9); merge when `adversary-marker` and Tests are green
-  (`gh pr merge --squash --match-head-commit`). Repo: `djbclark/djbclark-ade`.
+  (`gh pr merge --squash --match-head-commit`); before `--delete-branch`, `gh pr list --base <head-branch>` must be empty:
+  deleting a stacked PR's base closes that PR unmerged and it cannot be reopened (2026-11-12, #567). Repo: `djbclark/djbclark-ade`.
 - Facts carry snapshot dates; probes beat memory; update the doc when you verify
   (standing order 2). Ops-suite conventions live in `~/CLAUDE.md` / site-private.
 
