@@ -278,9 +278,22 @@ that did this was removed 2026-11-06, slim-down E4.)
 
 ## Step 9 — Clear and continue
 
-djbclark, 2026-10-20: "handoffs [should] immediately clear context and then start a baton and continue running without
-human intervention". Since 2026-11-06 (slim-down E4: `self-slash`, which typed `/new` into the agent's own input, is
-gone) there are two ways to continue, and an agent cannot run a built-in slash command on itself:
+Operator restoration, 2026-11-12: **self-compact and self-handoff to a fresh
+session are explicitly authorized**, including an ordinary same-model successor.
+After writing the checkpoint/Tier 1 record and finishing other writes/jobs, use
+`bin/ade-self-session handoff --checkpoint ABSOLUTE_BRIEF --quiesced` on a supported
+local Paseo host. Follow [the native transaction protocol](../../docs/self-session.md):
+creation is not success; the exact successor must read/acknowledge the preserved
+checkpoint and next action, then retire the idle predecessor without `--force`.
+Reconcile the exclusive workspace claim before further project writes. Ordinary
+successors use verified YOLO modes; explicit operator restrictions stay restricted.
+For self-compaction use `compact --checkpoint ABSOLUTE_BRIEF --request-id TOKEN`,
+then end the turn; a native send receipt is not completed compaction. Preserve
+records and report unsupported runtime/provider APIs instead of pretending success.
+
+The following are legacy manual alternatives for unsupported hosts or a separately
+routed model change. They do not revoke the same-model restoration above. The
+old pane-typing `self-slash` remains removed; do not reinstate terminal injection.
 
 1. **Same agent, fresh context (the default).** End the turn with one line for the operator: the handoff is written;
    type `/clear` (Claude Code; `/new` in Codex), then `/baton` (Codex: `$baton`). If the work simply goes on in this
@@ -288,7 +301,7 @@ gone) there are two ways to continue, and an agent cannot run a built-in slash c
 2. **A successor agent**, when something cannot change in place: (a) this session runs on Fable and
    `config/routing.toml [lead].fable_lead` is false (the shipped value is true since 2026-11-07, so a Fable lead stays),
    (b) `bin/route_agent.py show` reads the Claude pools exhausted, (c) the operator asked for another model, or (d) the
-   agent is wedged. Never a same-model or upward successor. Start it top-level in this agent's workspace, its first prompt
+   agent is wedged. For this legacy model-change route, retain the separately selected routing policy. Start it top-level in this agent's workspace, its first prompt
    the chain's pointer, and end the turn:
 
    ```bash

@@ -54,13 +54,18 @@ export function applyYoloToCreateRequest(request, catalog, controls) {
   return patch ? { ...request, config: { ...config, ...patch } } : undefined;
 }
 
-/** Pre-open check only: this is not post-open runtime readback. */
-export function assertResumeConfig(snapshot, request, catalog, controls) {
-  const config = { provider: request.provider, modeId: snapshot?.currentModeId,
-    providerOptions: snapshot?.options };
-  if (isExempt(config, request.metadata)) return;
+/** Identity precedes any mode-based exemption: a mismatched snapshot must not exempt itself. */
+export function assertResumeIdentity(snapshot, request) {
   if (!snapshot || snapshot.id !== request.agentId || snapshot.provider !== providerId(request.provider))
     throw new Error("ade-yolo: resume identity/readback unavailable");
+}
+
+/** Pre-open check only: this is not post-open runtime readback. */
+export function assertResumeConfig(snapshot, request, catalog, controls) {
+  assertResumeIdentity(snapshot, request);
+  const config = { provider: request.provider, modeId: snapshot.currentModeId,
+    providerOptions: snapshot.options };
+  if (isExempt(config, request.metadata)) return;
   const patch = planYoloPatch(config, request.metadata, catalog, controls);
   if (patch.modeId && snapshot.currentModeId !== patch.modeId)
     throw new Error("ade-yolo: saved mode drift; explicit repair and readback required before resume");

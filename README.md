@@ -107,7 +107,7 @@ Skills (25, from each `skills/*/SKILL.md`):
 | [`tell-coding-bot`](skills/tell-coding-bot/SKILL.md) | Pointer (2026-11-06) for talking to the operator's cloud Grok Bot "Coding" ("tell the Coding bot", "ask Coding", "hand this to the Coding bot", a task that needs a real browser session); the coding-bot code now lives in the peer-link repository. |
 | [`watch`](skills/watch/SKILL.md) | Inspect machine load, memory churn, and active incidents from your terminal with minimal token use, or manage system watchers. |
 
-`bin/` (82, from each file's first docstring or comment):
+`bin/` (84, from each file's first docstring or comment):
 
 | Tool | What |
 |---|---|
@@ -130,6 +130,7 @@ Skills (25, from each `skills/*/SKILL.md`):
 | [`ade-retro`](bin/ade-retro) | A read-only raw report for a retrospective over a date window (2026-11-04). |
 | [`ade-roster`](bin/ade-roster) | Print README's skills and bin/ roster, generated from the files themselves (2026-11-07, slim-down E11). |
 | [`ade-sched`](bin/ade-sched) | Install a checked-in launchd plist on this machine's scheduler (launchd, systemd user units or cron). |
+| [`ade-self-session`](bin/ade-self-session) | Explicit native self-session operations (local daemon only). |
 | [`ade-template-check`](bin/ade-template-check) | Check the agents/ config templates (Phase 0 item 4.4, 2026-10-20). |
 | [`ade-update`](bin/ade-update) | Keep this machine's djbclark-ade checkout current: pull, relink, say what changed. |
 | [`ade-update-auto`](bin/ade-update-auto) | S4 ``update --auto``: observe-only by default; optional this-checkout apply. |
@@ -147,6 +148,7 @@ Skills (25, from each `skills/*/SKILL.md`):
 | [`ade_install_catalog.py`](bin/ade_install_catalog.py) | Pure install-catalog validation, schema projection and metadata mapping. |
 | [`ade_pi_pools.py`](bin/ade_pi_pools.py) | Pi pool acceptance for automatic routing (ade/auto / bin/pi-default). |
 | [`ade_sched.py`](bin/ade_sched.py) | Install a launchd plist as a launchd agent, a systemd user unit or a crontab block (issue #279, 2026-11-04). |
+| [`ade_self_session.py`](bin/ade_self_session.py) | Explicit same-host self-session requests; no unattended crash restart. |
 | [`ade_user_install.py`](bin/ade_user_install.py) | User-scoped tool bootstrap (no shell=True, no root). |
 | [`adversary_marker.py`](bin/adversary_marker.py) | Read the adversary's verdict marker from a PR body and judge it against the PR head. |
 | [`agent_guard.py`](bin/agent_guard.py) | Per-agent identity guard for launch argv (2026-11-03 omp audit; Wave 6: Pi / native `paseo run` first). |

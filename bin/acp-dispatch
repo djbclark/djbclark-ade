@@ -27,7 +27,9 @@ Agents are Paseo providers: claude, codex, antigravity, cursor, opencode, hermes
 any other exits 2 with that list. `--model M` becomes `--provider P/M`. `--mode` is always passed (Claude's default is `auto`,
 so no mode would not be read-only):
     --perm all        the provider's unattended YOLO mode (`bin/paseo_yolo.py`: Claude `bypassPermissions`,
-                      Codex `full-access`, OpenCode `build`, …). Restored 2026-11-10 after Wave 4 E6's
+                      Codex `full-access`, Antigravity `full-access`, Copilot `allow-all`; CLI `resolve_launch_mode`
+                      only allows catalog-mode providers while Cursor requires the SDK `auto_accept` control hook,
+                      and OpenCode/omp are retired, 2026-11-12). Restored 2026-11-10 after Wave 4 E6's
                       `defaultMode` mapping left seats in Always Ask. Provider must be Enabled/available.
     --perm read-only  claude: `bin/review-launch --mode read-only` (Read, Grep, Glob; no web since 2026-11-07; empty
                       settings, MCP and hooks; bypass refused; tripwire 77).
