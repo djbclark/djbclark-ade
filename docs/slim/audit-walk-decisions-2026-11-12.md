@@ -20,10 +20,24 @@ removed monitoring capabilities. Queue the design after the walkthrough:
 Outcome: **design queued**, not implemented or installed. A session-local watchdog
 is not a persistent substitute and cannot be assumed to wake a stopped session.
 
-## 2. Remaining walkthrough
+## 2. Pi backup coverage
 
-Next: Pi/client retirement and backup coverage. Then dispatch/handoff/unattended
-operation; quota/routing; web/moved skills/nightly learning; review/permissions;
+Operator selected **Repair Pi backup coverage; preserve archives**. Queue the
+implementation after the walkthrough:
+
+- Restore coverage of Pi session/history data in the ADE backup tool.
+- Preserve credential exclusions and existing retired-client archives.
+- Add meaningful backup/recovery validation using fixtures; do not copy live
+  credentials or treat an archive reader as proof of backup coverage.
+- Live Mac verification remains separate from cloud source/test completion.
+
+Outcome: **repair queued**, not yet implemented or installed. This choice does
+not revive retired clients, remove their archives or change pool acceptance.
+
+## 3. Remaining walkthrough
+
+Next: dispatch/handoff/unattended operation. Then quota/routing;
+web/moved skills/nightly learning; review/permissions;
 remaining deletion gates and repairs. These items remain undecided except where
 prior operator instructions already apply. Ask one question at a time; act on
 small choices immediately and execute larger queued work after the walkthrough.
