@@ -711,7 +711,8 @@ expiry = "unknown"
 name = "CURSOR_API_KEY"
 components = ["cursor-cli"]
 create_url = "UNKNOWN"
-verify = "UNKNOWN"
+verify = "Authenticated GET /v1/me API-key info metadata only; not inference entitlement, usage or quota"
+verify_argv = ["{bin}/ade-install", "verify-key", "cursor"]
 expiry = "unknown"
 
 [[key]]
@@ -732,7 +733,8 @@ expiry = "unknown"
 name = "TELEGRAM_BOT_TOKEN"
 components = ["hermes"]
 create_url = "UNKNOWN"
-verify = "UNKNOWN"
+verify = "Authenticated getMe metadata only (the token is Telegram's documented path element, never a query string); not message delivery or login consent"
+verify_argv = ["{bin}/ade-install", "verify-key", "telegram"]
 expiry = "unknown"
 notes = "Via BotFather; login/consent distinct from key validation"
 
@@ -740,9 +742,10 @@ notes = "Via BotFather; login/consent distinct from key validation"
 name = "FIRECRAWL_GITHUB_PUBLIC_TOKEN"
 components = ["firecrawl-router"]
 create_url = "https://github.com/settings/personal-access-tokens/new"
-verify = "UNKNOWN"
+verify = "Authenticated GET /rate_limit metadata only (does not consume the limit); reports the token's expiry date when GitHub returns it; not repository access or permissions"
+verify_argv = ["{bin}/ade-install", "verify-key", "github"]
 expiry = "unknown"
-notes = "Known to expire; expiry probe is a later managed phase"
+notes = "Known to expire; the probe reports the expiry date GitHub returns in github-authentication-token-expiration, best-effort only"
 
 [[key]]
 name = "GREPTILE_API_KEY"

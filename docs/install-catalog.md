@@ -72,13 +72,17 @@ optional `verify_argv`, expiry=unknown|…). Doctor never reads
 key validation. Recorded login commands (2026-11-09): `claude auth login`,
 `codex login`, `agent login` — doctor does not execute them.
 
-Five fixed S3b metadata probes are implemented through `ade-install verify-key
-PROVIDER` (`openai`, `openrouter`, `anthropic`, `gemini`, `deepseek`), referenced
-by those keys' `verify_argv` entries. This helper
-is intended to run under the existing `sudo-secretspec run` boundary, reads only
-the selected key from its injected environment and emits no stdout/stderr.
-Keys are sent only in Bearer Authorization, except Gemini's `x-goog-api-key`
-header; no query-string secret or key/URL value flags exist.
+Eight fixed S3b metadata probes are implemented through `ade-install verify-key
+PROVIDER` (`openai`, `openrouter`, `anthropic`, `gemini`, `deepseek`, `cursor`,
+`github`, `telegram`), referenced by those keys' `verify_argv` entries. This
+helper is intended to run under the existing `sudo-secretspec run` boundary,
+reads only the selected key from its injected environment, and emits no stdout
+and no stderr except the allowlisted expiring marker (github). Keys are sent
+only in Bearer Authorization, except Gemini's `x-goog-api-key` header and
+Telegram's documented bot-token URL path (`api.telegram.org/bot<token>/getMe`;
+Telegram defines no header form, the value is interpolated in-process, and
+path/query structure characters are refused without any transport); no
+query-string secret or key/URL value flags exist.
 
 | Key | Fixed read-only request | Validated metadata shape |
 |---|---|---|
@@ -87,6 +91,9 @@ header; no query-string secret or key/URL value flags exist.
 | `ANTHROPIC_API_KEY` | `GET https://api.anthropic.com/v1/models` | `data` model rows with `type=model`/id and boolean `has_more` |
 | `GEMINI_API_KEY` | `GET https://generativelanguage.googleapis.com/v1beta/models` | Explicit `models` array with `models/…` resource names |
 | `DEEPSEEK_API_KEY` | `GET https://api.deepseek.com/models` | `object=list`, array of model objects/ids |
+| `CURSOR_API_KEY` | `GET https://api.cursor.com/v1/me` | Nonempty string `apiKeyName` |
+| `TELEGRAM_BOT_TOKEN` | `GET https://api.telegram.org/bot<token>/getMe` | `ok=true`, integer `result.id` (bool refused) and `result.is_bot=true` |
+| `FIRECRAWL_GITHUB_PUBLIC_TOKEN` | `GET https://api.github.com/rate_limit` | `resources.core.limit` integer ≥ 5000 (an accepted token's documented core rate limit; an unauthenticated 200 reports 60) |
 
 Provider contracts checked 2026-11-10: [OpenAI models list](https://developers.openai.com/api/reference/resources/models/methods/list)
 and [OpenRouter current key](https://openrouter.ai/docs/api/api-reference/api-keys/get-current-api-key).
@@ -99,7 +106,20 @@ documents the fixed GET and response. The query-key example is not used.
 [DeepSeek models](https://api-docs.deepseek.com/api/list-models/),
 [authentication](https://api-docs.deepseek.com/api/deepseek-api/) and
 [base URL](https://api-docs.deepseek.com/) document its model-list/Bearer contract.
-No actual credential requests were made during implementation. The helper
+2026-11-12 contracts: [Cursor Cloud Agents API endpoints](https://cursor.com/docs/cloud-agent/api/endpoints)
+document the API Key Info metadata `GET /v1/me` and Bearer authentication for
+that API; [Telegram `getMe`](https://core.telegram.org/bots/api#getme) documents
+the token-bearing path; [GitHub rate limit](https://docs.github.com/en/rest/rate-limit)
+documents `GET /rate_limit` (it does not count against the limit and rejects bad
+credentials with 401). GitHub's [token expiration and revocation](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/token-expiration-and-revocation)
+documents expiring tokens but not the response header's shape for fine-grained
+PATs, so the probe treats `github-authentication-token-expiration` as
+best-effort: only a leading ISO calendar date is kept, and an absent or
+unparseable header reports plain `ok`. Contract checks on 2026-11-12 used only
+unauthenticated requests (401/200 response shapes for the cursor and telegram
+routes and the github endpoint) plus public documentation; no
+credential-bearing request was made.
+No actual credential requests were made during the earlier implementation. The helper
 makes at most one GET, uses a 10-second socket timeout (the existing outer
 key engine also bounds the process), reads at most 256 KiB plus one overflow
 byte and refuses redirects. It does not print response or exception bodies,
@@ -109,20 +129,33 @@ extra requests. Explicit empty model arrays are accepted; missing/malformed
 arrays are not treated as successful verification.
 
 Helper exits: 0 authenticated metadata; 10 HTTP 401/403 or invalid header-value
-characters; 12 network/TLS/timeout, redirects and other HTTP failures (including
+characters (and Telegram path/query structure characters); 12 network/TLS/timeout, redirects and other HTTP failures (including
 429); 14 missing value; 1 malformed/oversized success data. Rate limits are not
 guessed to mean exhausted quota. Authentication success proves neither inference
 entitlement/funding nor subscription availability, routing eligibility or Pi
 acceptance. Other HTTP errors, including a provider's HTTP 400 key/configuration
 rejection, remain conservatively unsuccessful rather than parsed for an
-inferred quota/authentication diagnosis. Remaining seven provider rows still
-have no probe; collect/delivery,
-expiry interpretation and live acceptance remain unfinished. Component/key
-selection behavior is unchanged.
+inferred quota/authentication diagnosis. Four tracked rows still have no
+probe, recorded deliberately rather than probed against undocumented or
+money-spending endpoints (checked 2026-11-12): `ZAI_CODING_PLAN_API_KEY` — the
+z.ai API reference (docs.z.ai/llms.txt, checked 2026-11-12) documents chat,
+image, video, audio and tool endpoints but no metadata list for the coding-plan
+key, so the unauthenticated-observed `/models` route stays unprobed to avoid
+false failures; `EXA_API_KEY` — every public endpoint consumes paid credits and
+the usage API needs a separately enabled team service key, so any probe would
+spend; `JINA_API_KEY` — Reader/Search consume token quota on authenticated
+requests and no free metadata endpoint is documented; `GREPTILE_API_KEY` — the
+REST metadata routes answer 404 (observed 2026-11-12) and the current API is
+MCP with OAuth, whose `get_me` is a POST JSON-RPC call and probes never post.
+Expiry reporting is wired where a provider's metadata itself exposes a date
+(github); the other metadata endpoints expose none. Collect/delivery and live
+validation remain unfinished. Component/key selection behavior is unchanged.
 
 The three-provider extension builds on #552's reviewed fixed transport. Its
 code tests use mocked responses only; no inference, billing or pool-acceptance
-claims are made. API credits and subscription pools remain separate.
+claims are made. API credits and subscription pools remain separate. The
+2026-11-12 extension (cursor, telegram, github) reuses the same transport under
+the same rules.
 
 `ade-install keys` / `just keys` (2026-11-09 presence; 2026-11-10 verify) is
 setup-plan S3b check-then-verify:
@@ -158,7 +191,7 @@ ade-install update-plan [--root DIR] [--json]
 ade-install bootstrap [--root DIR] [--prefix DIR] [--dry-run|--yes] [--json]
 ade-install doctor [--root DIR] [--id ID ...] [--json]
 ade-install keys [--root DIR] [--json] [--keys-state PATH]
-ade-install verify-key PROVIDER  # one of the five fixed providers above; probe exit code only
+ade-install verify-key PROVIDER  # one of the eight fixed providers above; probe exit code only
 ade-install apply [--root DIR] [--json] [--dry-run|--yes] [--id ID ...] [--force]
                   [--system] [--print-system-argv] [--apply-system]
                   [--state-dir DIR] [--prefix DIR]
