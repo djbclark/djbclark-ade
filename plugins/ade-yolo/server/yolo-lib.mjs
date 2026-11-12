@@ -54,7 +54,7 @@ export function planYoloPatch(config, metadata, catalog, controls) {
   }
   // Operator ruling 2026-11-12: Pi never raises permission requests, so a modeless Pi catalog is
   // unattended by construction. Explicit allowlist: no other modeless provider (Hermes, unknown) is
-  // generalised from this. A Pi catalog that DOES list modes falls through to the refusal below.
+  // generalised from this. Pi with modes uses the catalog-marked rule above; unmarked modes refuse.
   if (UNATTENDED_BY_CONSTRUCTION.has(provider) && ids.length === 0) return {};
   return unavailable("no source-backed/catalog-marked unattended mode or supported control");
 }
@@ -96,23 +96,20 @@ export function assertResumeConfig(snapshot, request, catalog, controls, log = (
     providerOptions: snapshot.options };
   if (isExempt(config, request.metadata)) return;
   assertNotRetired(providerId(request.provider));
-  if (isLegacyWithoutEvidence(snapshot, request)) {
-    log(`ade-yolo: ${request.agentId}: legacy agent without saved mode evidence; allowed`);
+  if (isLegacyAgent(snapshot, request)) {
+    log(`ade-yolo: ${request.agentId}: provider=${providerId(request.provider)} saved mode=${JSON.stringify(snapshot.currentModeId ?? null)} auto_accept=${JSON.stringify(snapshot.options?.auto_accept ?? null)}; legacy agent allowed without mode mutation`);
     return;
   }
   const patch = planYoloPatch(config, request.metadata, catalog, controls);
-  const legacy = isLegacyAgent(snapshot, request);
   if (patch.modeId) {
     if (blank(snapshot.currentModeId)) {
-      if (!legacy) throw new Error("ade-yolo: saved mode evidence missing; explicit repair and readback required before resume");
-      log(`ade-yolo: ${request.agentId}: legacy agent without saved mode; allowed`);
+      throw new Error("ade-yolo: saved mode evidence missing; explicit repair and readback required before resume");
     } else if (snapshot.currentModeId !== patch.modeId)
       throw new Error("ade-yolo: saved mode drift; explicit repair and readback required before resume");
   }
   if (patch.providerOptions?.auto_accept === true) {
     if (blank(snapshot.options?.auto_accept)) {
-      if (!legacy) throw new Error("ade-yolo: saved auto_accept is unverified; explicit repair required before resume");
-      log(`ade-yolo: ${request.agentId}: legacy agent without saved auto_accept; allowed`);
+      throw new Error("ade-yolo: saved auto_accept is unverified; explicit repair required before resume");
     } else if (snapshot.options.auto_accept !== true)
       throw new Error("ade-yolo: saved auto_accept is unverified; explicit repair required before resume");
   }

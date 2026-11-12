@@ -15,18 +15,19 @@ catalogued mode when present. Unavailable/disabled/loading providers, missing
 IDs/controls, and unverified providers (Hermes, any unknown modeless provider) refuse ordinary
 creation with a diagnostic. **Pi is the one explicit exception (2026-11-12):** its catalog is modeless, but Pi never raises permission
 requests (with no UI-prompting Pi extension installed: a Pi `extension_ui_request` confirm/select becomes a permission question, so a future prompting extension voids this premise), so a ready, modeless Pi catalog is unattended by construction and the create passes unchanged
-(no mode is invented). A Pi catalog that lists modes, or is not enabled/ready, gets no exemption. The
+(no mode is invented). Pi with modes uses the same unique native `isUnattended` rule as any provider;
+unmarked modes refuse. A Pi catalog that is not enabled/ready gets no exemption. The
 allowlist (`UNATTENDED_BY_CONSTRUCTION`) is not generalised to other providers. Retired omp/OpenCode routes are not restored.
 
 `agent.open.before` checks saved mode/control evidence on resume, refresh and
-import. **Drift** (evidence present and contradicting) refuses. **Missing evidence** refuses only for agents
+import. **Drift** (evidence present and contradicting) and **missing evidence** refuse only for agents
 this plugin created: `agent.create.before` stamps those with metadata `ade-yolo.applied`. An agent without
 that stamp is *legacy*: created before the plugin was installed (Hermes included), while it was disabled,
 internal, imported, or stripped of its stamp (the SDK exposes no install time, so "no stamp" is a superset of
-"created before install"; none of these can escalate, they only turn a refusal into allow-and-log): missing evidence is allowed and logged
-(`ade-yolo: <id>: legacy agent without saved mode evidence; allowed`, written to the plugin's stderr), with no
-catalog lookup. Retired providers (omp, opencode, crush, agy, grok) are refused first, legacy or not. Drift refuses legacy agents too: see *Install impact*. If the
-host drops the metadata, every agent reads as legacy and only drift refuses. This hook can check or
+"created before install"). Legacy agents are allowed with a warning naming the agent id, provider,
+saved mode and `auto_accept` value, with no catalog lookup or mode mutation. Retired providers
+(omp, opencode, crush, agy, grok) are refused first for ordinary non-exempt opens, legacy or not.
+If the host drops the metadata, every agent reads as legacy and receives the allow-and-log policy. This hook can check or
 refuse, not mutate saved modes. History reads do not open a runtime and remain allowed.
 A matching saved value is a **preflight**, not post-open proof. Native runtime
 readback remains necessary after opening; see [agent modes](../../docs/agent-modes.md).
@@ -46,14 +47,13 @@ paseo plugin ls --json  # verify enabled/running on the intended daemon
 
 ## Install impact (read before installing; snapshot 2026-11-12)
 
-Drift refuses **legacy agents too**. Hosts save the provider's default mode on every agent: Claude `default`,
-Codex `auto`, Cursor `agent`, Antigravity `full-access`, Pi none. Installing the plugin makes the host re-check
-every live, idle agent on its next prompt (`hooks.changed` invalidates plugin sessions, then a `refresh` open
-runs `agent.open.before`). A legacy Claude/Codex agent with a saved mode that is neither YOLO nor restrictive is refused as drift, and every
-later prompt is refused until the mode is repaired (a verified successor, set to the YOLO mode) or
-`paseo plugin disable ade-yolo`. On this host that was at least 23 unarchived Claude `default` agents and 2 Codex
-`auto` agents, the lead's own session included if it runs in `default` mode. Only agents with **no** saved
-mode (Pi, Hermes-style dynamic providers, pre-mode records) get the allow-and-log path.
+Installing no longer refuses any pre-existing agent because of its saved mode, missing evidence,
+or unavailable catalog. Agents without an `ade-yolo.applied` stamp remain in their saved mode and
+are allowed with a warning, including Claude `default`, Codex `auto`, Cursor `agent` with absent/false
+`auto_accept`, and Pi/Hermes without a saved mode. Installing invalidates plugin sessions; their next
+prompt can run a `refresh` open and emit that warning. Identity checks and the existing retired-provider
+policy still apply. Stamped agents continue to refuse missing evidence or drift. The hook cannot mutate
+modes; refusing a legacy agent in a more restrictive mode would only create operator work.
 
 ## Canary procedure (lead runs this after merge)
 
@@ -66,9 +66,8 @@ order; stop and roll back on a result not listed as expected.
 0. Audit before installing: list unarchived agents (`paseo ls -g --json`) and, per id,
    `/Users/djbclark/src/djbclark-ade/bin/ade-agent-mode check <id> --json`; a Claude/Codex/Antigravity/Copilot agent whose
    saved Mode is neither the YOLO id nor `plan`/`read-only`/`dontAsk` (typically saved `default`/`auto`), or a Cursor
-   agent saving `auto_accept` other than true, will be refused on its next prompt once installed (Pi and Hermes with
-   no saved mode are allowed; the CLI's `unavailable`/`drift` status for a closed agent does not predict the hook). The operator
-   decides (repair, successor, or accept) before step 1. Note whether Hermes is listed (step 5).
+   agent saving `auto_accept` other than true, remains allowed if unstamped and logs its saved configuration.
+   The CLI's `unavailable`/`drift` status does not predict a legacy hook refusal. Note whether Hermes is listed (step 5).
 1. Create throwaways **before installing** so they are legacy (no stamp). Per provider, in a scratch dir:
    `paseo run --provider <provider>/<model> --cwd <scratch dir> --wait-timeout 2m --json -- "reply with the word ok"`.
    Record ids; also make a Claude one with `--mode bypassPermissions`.
@@ -79,11 +78,10 @@ order; stop and roll back on a result not listed as expected.
    record the sha, then `paseo plugin install /Users/djbclark/src/djbclark-ade-yolo-plugin-wt/plugins/ade-yolo`.
    `paseo plugin ls --json` shows `ade-yolo` enabled/running.
 3. Resume the step-1 throwaways (`paseo send --no-wait <id> "ok"`, then a bounded `paseo wait`). Expected per provider:
-   Claude `--mode bypassPermissions`: opens, no log line (match). Plain Claude and Codex (saved `default`/`auto`):
-   **refused as drift**, expected. Antigravity (saved `full-access`): opens, no log line. Pi (no saved mode):
-   opens and the plugin stderr (`paseo plugin logs ade-yolo`) shows `legacy agent without saved mode evidence;
-   allowed`. Cursor (saved `agent`): opens with `legacy agent without saved auto_accept; allowed`, or report it
-   unverified if `listControls` is unavailable.
+   All legacy throwaways open without mode mutation. Plugin stderr (`paseo plugin logs ade-yolo`) warns
+   `ade-yolo: <id>: provider=<provider> saved mode=<JSON value> auto_accept=<JSON value>; legacy agent allowed without mode mutation`.
+   Expect Claude `default` or `bypassPermissions`, Codex `auto`, Antigravity `full-access`, Cursor `agent`,
+   and Pi `null` as saved mode values; absent `auto_accept` logs `null`. No legacy catalog/control lookup is required.
 4. New creates: repeat step 1 per provider (now stamped). Expected `ade-agent-mode check <id> --json`
    (absolute path): Claude `bypassPermissions`, Codex/Antigravity `full-access`: `verified`. **Cursor and Pi
    report `unavailable` (exit 2) from that CLI by design** (it passes no controls; Pi has no mode): their
