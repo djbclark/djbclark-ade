@@ -149,6 +149,21 @@ no marker paste and no herdr HTML-comment paste. Use `approve-post` only for
 `retrigger-marker` re-dispatches the Action when a tip still shows a stale
 status before the next Tests run (usually unnecessary after the push sweep).
 
+**Missing-check self-heal (2026-11-12, PR #587).** The `adversary-marker` Action runs on `workflow_run` of
+Tests, and a `workflow_run` run reports master's head SHA, not the PR's; after a force-push the run can
+simply never produce a check for the new head (#587 sat at `needs_approve`, `adversary_marker=missing`
+until a human ran `gh workflow run adversary-marker.yml -f pr=587`). `classify` and `merge-now` now do
+that dispatch themselves, **once per head**, when all of these hold: class `needs_approve`, pytest-linux
+`pass`, the `adversary-marker` check **missing** (a pending or failed check is never touched), and
+pytest-linux completed more than `--marker-grace` seconds ago (default 180; completion time read from
+`gh pr checks N --json name,bucket,completedAt`, unknown = no dispatch). The dispatched head is recorded
+as `repo#N@head` in `~/.local/state/ade/merge-ready/marker-dispatch.json` (`--state-file` /
+`ADE_MERGE_READY_STATE`; atomic write, entries older than 30 days dropped), so a head is never dispatched
+twice; a force-push makes a new head and a new single dispatch. A failed dispatch is reported and not
+recorded. The tool does not wait: it prints `marker-dispatch #N (sha): …` (stderr under `--json` and for
+`merge-now`, which still refuses until the check is `success`), and the next run reads the result.
+It never writes or fakes a marker. `--no-marker-dispatch` turns it off.
+
 ```sh
 bin/ade-merge-ready                  # classify open tips vs pytest-linux + adversary-marker
 bin/ade-merge-ready stacks           # bottom-up merge order + full tip SHAs

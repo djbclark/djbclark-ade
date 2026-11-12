@@ -23,11 +23,14 @@ def write_fake_gh(tmp: Path, script: str) -> Path:
 
 
 def run(gh: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    # The marker self-heal state file must never land in the real home directory.
+    env = {**os.environ, "ADE_MERGE_READY_STATE": str(gh.parent / "marker-state.json")}
     return subprocess.run(
         [sys.executable, "-I", str(SCRIPT), "--gh", str(gh), *args],
         capture_output=True,
         text=True,
         timeout=30,
+        env=env,
     )
 
 
@@ -1580,3 +1583,197 @@ def test_stack_rebase_align_onto_needs_upstream(tmp_path: Path) -> None:
     res = json.loads(r.stdout)["results"][0]
     assert res["status"] == "would-refuse"
     assert res["reason"] == "align_onto_needs_upstream"
+
+
+# --- marker self-heal (2026-11-12, PR #587 incident) ---------------------------------
+
+
+def _heal_gh(
+    tmp: Path,
+    *,
+    head: str,
+    checks_tsv: str,
+    completed_at: str,
+    bucket: str = "pass",
+    log: Path | None = None,
+) -> Path:
+    listing = json.dumps(
+        [
+            {
+                "number": 587,
+                "title": "advisory quota levels",
+                "headRefOid": head,
+                "baseRefName": "master",
+                "mergeable": "MERGEABLE",
+                "headRefName": "quota-levels",
+            }
+        ]
+    )
+    checks_json = json.dumps(
+        [{"name": "pytest-linux", "bucket": bucket, "completedAt": completed_at}]
+    )
+    log = log or (tmp / "calls.log")
+    return write_fake_gh(
+        tmp,
+        textwrap.dedent(
+            f"""
+            echo "$*" >> '{log}'
+            case "$*" in
+              *"pr list"*) echo '{listing}' ;;
+              *"pr checks"*"--json"*) echo '{checks_json}' ;;
+              *"pr checks"*) printf '%s' '{checks_tsv}' ;;
+              *"workflow run adversary-marker.yml"*"-f pr=587"*) echo dispatched ;;
+              *) echo "unexpected: $*" >&2; exit 99 ;;
+            esac
+            """
+        ),
+    )
+
+
+def _dispatch_calls(tmp: Path) -> list[str]:
+    log = tmp / "calls.log"
+    if not log.exists():
+        return []
+    return [ln for ln in log.read_text().splitlines() if "workflow run" in ln]
+
+
+OLD_TS = "2026-11-12T10:00:00Z"
+PASS_ONLY = "pytest-linux\tpass\t0\tx\n"
+
+
+def test_missing_marker_check_is_dispatched_once_per_head(tmp_path: Path) -> None:
+    head = "5" * 40
+    gh = _heal_gh(tmp_path, head=head, checks_tsv=PASS_ONLY, completed_at=OLD_TS)
+    r = run(gh, "--json", "--min", "500")
+    assert r.returncode == 0, r.stderr
+    rows = json.loads(r.stdout)
+    assert rows[0]["class"] == "needs_approve"
+    assert rows[0]["marker_dispatch"] == "dispatched"
+    assert "marker-dispatch #587" in r.stderr
+    assert len(_dispatch_calls(tmp_path)) == 1
+    state = json.loads((tmp_path / "marker-state.json").read_text())
+    assert f"djbclark/djbclark-ade#587@{head}" in state["dispatched"]
+    # Second run for the same head: recorded, never repeated.
+    r2 = run(gh, "--json", "--min", "500")
+    assert json.loads(r2.stdout)[0]["marker_dispatch"] == "already_dispatched"
+    assert len(_dispatch_calls(tmp_path)) == 1
+
+
+def test_new_head_after_force_push_is_dispatched_again(tmp_path: Path) -> None:
+    gh = _heal_gh(tmp_path, head="1" * 40, checks_tsv=PASS_ONLY, completed_at=OLD_TS)
+    run(gh, "--json", "--min", "500")
+    gh = _heal_gh(tmp_path, head="2" * 40, checks_tsv=PASS_ONLY, completed_at=OLD_TS)
+    r = run(gh, "--json", "--min", "500")
+    assert json.loads(r.stdout)[0]["marker_dispatch"] == "dispatched"
+    assert len(_dispatch_calls(tmp_path)) == 2
+
+
+def test_within_grace_waits_and_does_not_record(tmp_path: Path) -> None:
+    import datetime as dt
+
+    fresh = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    gh = _heal_gh(tmp_path, head="3" * 40, checks_tsv=PASS_ONLY, completed_at=fresh)
+    r = run(gh, "--json", "--min", "500")
+    assert json.loads(r.stdout)[0]["marker_dispatch"] == "waiting"
+    assert _dispatch_calls(tmp_path) == []
+    assert not (tmp_path / "marker-state.json").exists()
+    # A zero grace dispatches immediately.
+    r2 = run(gh, "--json", "--min", "500", "--marker-grace", "0")
+    assert json.loads(r2.stdout)[0]["marker_dispatch"] == "dispatched"
+
+
+@pytest.mark.parametrize("state", ["fail", "pending", "pass"])
+def test_present_marker_check_is_never_dispatched(tmp_path: Path, state: str) -> None:
+    tsv = PASS_ONLY + f"adversary-marker\t{state}\t0\tx\n"
+    gh = _heal_gh(tmp_path, head="4" * 40, checks_tsv=tsv, completed_at=OLD_TS)
+    r = run(gh, "--json", "--min", "500")
+    assert r.returncode == 0, r.stderr
+    assert "marker_dispatch" not in json.loads(r.stdout)[0]
+    assert _dispatch_calls(tmp_path) == []
+
+
+def test_failed_tests_never_dispatch(tmp_path: Path) -> None:
+    gh = _heal_gh(
+        tmp_path,
+        head="6" * 40,
+        checks_tsv="pytest-linux\tfail\t0\tx\n",
+        completed_at=OLD_TS,
+        bucket="fail",
+    )
+    r = run(gh, "--json", "--min", "500")
+    assert json.loads(r.stdout)[0]["class"] == "tests_fail"
+    assert _dispatch_calls(tmp_path) == []
+
+
+def test_no_marker_dispatch_flag_disables_heal(tmp_path: Path) -> None:
+    gh = _heal_gh(tmp_path, head="7" * 40, checks_tsv=PASS_ONLY, completed_at=OLD_TS)
+    r = run(gh, "--json", "--min", "500", "--no-marker-dispatch")
+    assert r.returncode == 0, r.stderr
+    assert "marker_dispatch" not in json.loads(r.stdout)[0]
+    assert _dispatch_calls(tmp_path) == []
+
+
+def test_unparseable_completion_time_fails_closed(tmp_path: Path) -> None:
+    gh = _heal_gh(tmp_path, head="8" * 40, checks_tsv=PASS_ONLY, completed_at="not-a-time")
+    r = run(gh, "--json", "--min", "500")
+    assert json.loads(r.stdout)[0]["marker_dispatch"] == "unknown_tests_time"
+    assert _dispatch_calls(tmp_path) == []
+
+
+def test_dispatch_failure_is_reported_and_not_recorded(tmp_path: Path) -> None:
+    head = "9" * 40
+    listing = json.dumps(
+        [
+            {
+                "number": 587,
+                "title": "t",
+                "headRefOid": head,
+                "baseRefName": "master",
+                "mergeable": "MERGEABLE",
+                "headRefName": "b",
+            }
+        ]
+    )
+    checks_json = json.dumps(
+        [{"name": "pytest-linux", "bucket": "pass", "completedAt": OLD_TS}]
+    )
+    gh = write_fake_gh(
+        tmp_path,
+        textwrap.dedent(
+            f"""
+            case "$*" in
+              *"pr list"*) echo '{listing}' ;;
+              *"pr checks"*"--json"*) echo '{checks_json}' ;;
+              *"pr checks"*) printf '%s' 'pytest-linux\tpass\t0\tx\n' ;;
+              *"workflow run"*) echo boom >&2; exit 1 ;;
+              *) exit 99 ;;
+            esac
+            """
+        ),
+    )
+    r = run(gh, "--json", "--min", "500")
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout)[0]["marker_dispatch"] == "dispatch_failed"
+    assert not (tmp_path / "marker-state.json").exists()
+
+
+def test_merge_now_dispatches_but_still_refuses_without_marker(tmp_path: Path) -> None:
+    gh = _heal_gh(tmp_path, head="a" * 40, checks_tsv=PASS_ONLY, completed_at=OLD_TS)
+    r = run(gh, "merge-now", "--prs", "587", "--yes", "--min", "500")
+    assert r.returncode == 2
+    assert "refuse merge" in r.stderr
+    assert "marker-dispatch #587" in r.stderr
+    assert len(_dispatch_calls(tmp_path)) == 1
+    assert not any("pr merge" in ln for ln in (tmp_path / "calls.log").read_text().splitlines())
+
+
+def test_state_file_is_atomic_and_pruned(tmp_path: Path) -> None:
+    mod = {}
+    exec(compile(SCRIPT.read_text().split("\nif __name__")[0].split("\n", 1)[1], str(SCRIPT), "exec"), mod)
+    path = str(tmp_path / "sub" / "state.json")
+    now = 10_000_000.0
+    mod["save_dispatch_state"](path, {"old": 1.0, "new": now - 5}, now)
+    assert mod["load_dispatch_state"](path) == {"new": now - 5}
+    assert [p.name for p in (tmp_path / "sub").iterdir()] == ["state.json"]
+    (tmp_path / "sub" / "state.json").write_text("{not json")
+    assert mod["load_dispatch_state"](path) == {}
