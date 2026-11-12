@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Stateful, launch-time pool adjustment with restoration (W8, 2026-11-12).
 
 `route_agent.py plan` is a stateless snapshot: it picks the best pool right now. This
