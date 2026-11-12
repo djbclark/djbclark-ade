@@ -69,11 +69,29 @@ source presence is not proof of installed plugin or end-to-end behavior.
 Outcome: **investigations queued**, source comparison delivered; no mode changes,
 plugin installs or automatic recovery behavior enabled during the walkthrough.
 
-## 4. Quota controls — comparison requested
+## 4. Quota controls — retain/recover all capabilities
 
 Operator selected **Compare the removed quota controls in detail first**.
-No quota repair, forecasting implementation, model downshift, plugin activation
-or routing-policy change has been selected yet.
+After the comparison, operator instructed: **“We want to have all of these
+features unless one is esp. difficult to implement.”** This supersedes the prior
+unselected quota options. Queue all eight capability areas: predictive quota
+conservation, task-appropriate automatic model/provider adjustment and
+restoration, advisory levels/reminders, expiring spending profiles, quota-stop
+checkpoint/reset continuation, retained frontier allowances, surplus-before-reset
+signals, and cache/compaction cost what-if analysis.
+
+Use current providers and APIs; preserve existing restored functionality and
+prior hard stops. Capability recovery does not mean reverting historical code,
+reinstating retired clients or the governor's unconditional Fable downgrade.
+Existing implementations count where their behavior is verified. Investigate
+cost and feasibility first for provider switching and interruption recovery;
+report concrete exceptional difficulty with alternatives rather than silently
+omit features. No feature is declared exceptionally difficult solely on a
+preliminary estimate. Source work is queued; live configuration is not yet changed.
+
+For the rest of the audit, treat capability retention as the operator preference;
+do not repeat per-feature yes/no questions where that preference resolves them.
+Material tradeoffs and unusually difficult implementations still need explanation.
 
 Comparison distinguishes predictive fleet-wide conservation, quota advisory
 levels, temporary expiring profiles, exhaustion/reset recovery, retained frontier
@@ -84,7 +102,7 @@ these behaviors must not be resurrected from historical code without a new choic
 
 ## 5. Remaining walkthrough
 
-Finish quota choice, then
+Quota capability choice is settled; next:
 web/moved skills/nightly learning; review/permissions;
 remaining deletion gates and repairs. These items remain undecided except where
 prior operator instructions already apply. Ask one question at a time; act on
