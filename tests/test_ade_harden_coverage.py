@@ -112,6 +112,43 @@ def test_forgejo_base_url_must_be_https(tmp_path):
         _cfg(tmp_path, extra='[hardening.forgejo]\nbase_url = "http://insecure"\n')
 
 
+def test_forgejo_base_url_rejects_port_and_subpath(tmp_path):
+    """forgejo-api builds https://HOST/api/v1, so a port or path would misread."""
+    for i, bad in enumerate((
+        "https://forgejo.example.test:3000",
+        "https://forgejo.example.test/forgejo",
+        "https://forgejo.example.test/api?x=1",
+    )):
+        with pytest.raises(ah.HardenError, match="base_url"):
+            _cfg(tmp_path / str(i), extra=f'[hardening.forgejo]\nbase_url = "{bad}"\n')
+    cfg = _cfg(
+        tmp_path / "ok",
+        extra='[hardening.forgejo]\nbase_url = "https://forgejo.example.test"\n',
+    )
+    assert cfg.hardening["forgejo"]["base_url"].startswith("https://")
+
+
+def test_missing_forgejo_script_fails_a_configured_check(tmp_path, monkeypatch):
+    cfg = _cfg(
+        tmp_path, extra='[hardening.forgejo]\nbase_url = "https://forgejo.example.test"\n'
+    )
+    monkeypatch.setattr(cov, "forgejo_api_script", lambda: None)
+    findings = cov.observe_forgejo_repo(
+        cfg, _repo_row(), runner=lambda a: _completed(a),
+        base_url="https://forgejo.example.test",
+    )
+    assert findings[0].status == "error"
+
+
+def test_forgejo_script_resolves_from_the_skill_link(tmp_path, monkeypatch):
+    script = tmp_path / ".agents/skills/forgejo/scripts/forgejo-api"
+    script.parent.mkdir(parents=True)
+    script.write_text("#!/bin/sh\n")
+    monkeypatch.setattr(cov.shutil, "which", lambda name: None)
+    monkeypatch.setattr(cov.Path, "home", staticmethod(lambda: tmp_path))
+    assert cov.forgejo_api_script() == script
+
+
 def test_renewal_only_when_limit_matches_and_inside_window():
     soon = (NOW + timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
     plan = cov.renewal_plan(
@@ -256,11 +293,13 @@ def test_notification_names_only_actionable_findings():
     findings = [
         ah.DriftFinding("a", "s", "w", "f", "ok"),
         ah.DriftFinding("b", "s", "w", "f", "drift", remediation="just harden s"),
+        ah.DriftFinding("d", "s", "w", None, "error"),
         ah.DriftFinding("c", "s", "w", None, "deferred"),
     ]
     text = cov.render_notification(findings)
-    assert "1 finding" in text
+    assert "2 finding" in text
     assert "b s" in text and "just harden s" in text
+    assert "error: d s" in text
     assert "deferred" not in text
 
 

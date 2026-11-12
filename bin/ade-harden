@@ -92,7 +92,7 @@ def cmd_observe(args: argparse.Namespace) -> int:
         if f.detail:
             line += f" — {f.detail}"
         print(line)
-        if f.remediation and f.status in {"drift", "missing", "uncovered"}:
+        if f.remediation and f.status in cov.ACTIONABLE:
             print(f"             remediation: {f.remediation}")
     return rc
 

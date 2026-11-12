@@ -229,13 +229,24 @@ def _validate_hardening(data: dict[str, Any], *, path: Path) -> list[str]:
                 )
     forgejo = hard.get("forgejo")
     if forgejo is not None:
+        from urllib.parse import urlparse
+
+        base = forgejo.get("base_url") if isinstance(forgejo, dict) else None
+        parsed = urlparse(base) if isinstance(base, str) else None
+        # forgejo-api takes only a host and builds https://HOST/api/v1, so a
+        # port or a sub-path would silently read the wrong origin.
         if (
-            not isinstance(forgejo, dict)
-            or not isinstance(forgejo.get("base_url"), str)
-            or not forgejo["base_url"].startswith("https://")
+            parsed is None
+            or parsed.scheme != "https"
+            or not parsed.hostname
+            or parsed.port is not None
+            or parsed.path not in ("", "/")
+            or parsed.query
+            or parsed.fragment
         ):
             errors.append(
-                f"{path}: hardening.forgejo.base_url must be an https URL"
+                f"{path}: hardening.forgejo.base_url must be https://HOST "
+                "with no port, path or query"
             )
     canaries = hard.get("canaries")
     if canaries is not None:

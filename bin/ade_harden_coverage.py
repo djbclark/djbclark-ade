@@ -66,15 +66,22 @@ def _parse_body(text: str) -> tuple[Any | None, str]:
 
 
 def forgejo_api_script() -> Path | None:
-    """The installed forgejo-api script, which holds the token itself.
+    """The forgejo skill's ``forgejo-api`` script, which holds the token.
 
-    It lives with the forgejo skill (``skills/forgejo/scripts/forgejo-api``).
-    A checkout that has not linked the skill has no Forgejo read path, and
-    the finding says so instead of inventing a command.
+    The skill is not part of this repo and the script is not on PATH: it is
+    linked under ``~/.agents/skills/forgejo/scripts/`` (and the Claude skills
+    dir). ``which`` finds nothing, so those links are checked explicitly.
     """
     found = shutil.which("forgejo-api")
     if found:
         return Path(found)
+    home = Path.home()
+    for candidate in (
+        home / ".agents/skills/forgejo/scripts/forgejo-api",
+        home / ".claude/skills/forgejo/scripts/forgejo-api",
+    ):
+        if candidate.is_file():
+            return candidate
     return None
 
 
@@ -109,14 +116,19 @@ def observe_forgejo_repo(
         ]
     script = api if api is not None else forgejo_api_script()
     if script is None:
+        # Configured but unreadable fails the check. A missing script is a
+        # broken setup, not an unreachable host (that stays `unknown`).
         return [
             ah.DriftFinding(
                 target=f"forgejo:{full}",
                 setting="repo",
-                wanted="forgejo-api on PATH",
+                wanted="forgejo-api script",
                 found=None,
-                status="unknown",
-                detail="forgejo-api is not installed; no Forgejo read path",
+                status="error",
+                detail=(
+                    "forgejo-api not found on PATH or under "
+                    "~/.agents/skills/forgejo/scripts"
+                ),
             )
         ]
     proc = runner(
@@ -193,9 +205,14 @@ def observe_forgejo_repo(
     return findings
 
 
+# Statuses that fail the check. The notice must name exactly these, or it
+# can say "0 findings" while observe exits 1.
+ACTIONABLE = frozenset({"drift", "missing", "uncovered", "error"})
+
+
 def render_notification(findings: list[ah.DriftFinding]) -> str:
     """Operator-facing drift notice. Print-only: nothing is sent."""
-    bad = [f for f in findings if f.status in {"drift", "missing", "uncovered"}]
+    bad = [f for f in findings if f.status in ACTIONABLE]
     lines = [
         f"harden-check: {len(bad)} finding(s) need attention "
         "(observe-only; nothing was changed)"

@@ -73,20 +73,24 @@ deep probe of every unlisted fork.
 
 ## Coverage added 2026-11-12
 
-**Forgejo.** `[hardening.forgejo]` with `base_url` (https only) makes
-`observe` read each `[[hardening.repo]]` back with
-`forgejo-api --host <host> GET /repos/{owner}/{name}` and compare
-`has_pull_requests`, `has_issues`, `has_wiki` and `has_projects`. That script
-(the forgejo skill) reads its own token from the environment and re-runs
+**Forgejo.** `[hardening.forgejo]` with `base_url` makes `observe` read each
+`[[hardening.repo]]` back with `forgejo-api --host <host> GET
+/repos/{owner}/{name}` and compare `has_pull_requests`, `has_issues`,
+`has_wiki` and `has_projects`. `base_url` is `https://HOST` only: the script
+builds `https://HOST/api/v1` itself, so a port or a sub-path is rejected at
+load. The script belongs to the forgejo skill and is not on PATH; it is found
+through `PATH` or the skill links under `~/.agents/skills` and
+`~/.claude/skills`. It reads its own token from the environment and re-runs
 under `sudo-secretspec run` when it is absent, so the token is never on an
 argv and this code never names a key. `fj` (forgejo-cli) is not used: it has
 no generic API command and authenticates from its own keyring. Unset
-`base_url` leaves the `forgejo` finding `deferred`; a missing `forgejo-api`
-is `unknown`.
+`base_url` leaves the finding `deferred`. Forgejo configured but the script
+missing is `error` and fails the check; a host that does not answer is
+`unknown`.
 
 **Notification.** `ade-harden observe` prints `render_notification`'s notice
-naming the actionable findings (drift, missing, uncovered) before the
-per-finding lines. It never posts. CI runs `ade-harden observe --local` on
+naming every finding that fails the check (drift, missing, uncovered, error)
+before the per-finding lines. It never posts. CI runs `ade-harden observe --local` on
 every change (`.github/workflows/test.yml`, the `context-policy` job) and
 fails the job when that local report has actionable findings.
 

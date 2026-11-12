@@ -48,7 +48,11 @@
           "additionalProperties": false,
           "required": ["base_url"],
           "properties": {
-            "base_url": { "type": "string", "pattern": "^https://" }
+            "base_url": {
+              "type": "string",
+              "pattern": "^https://[A-Za-z0-9.-]+/?$",
+              "description": "https://HOST only; forgejo-api builds https://HOST/api/v1, so no port or sub-path"
+            }
           }
         },
         "canaries": {
