@@ -18,6 +18,7 @@ Secrets are never read. A full apply (no ``--id``) also runs ``ade-sched reconci
 """
 from __future__ import annotations
 
+import calendar
 import copy
 import contextlib
 import datetime
@@ -1960,6 +1961,7 @@ def doctor(
     hermes_choice: dict[str, Any] | None = None,
     hermes_choice_state_dir: Path | None = None,
     hermes_home: Path | None = None,
+    install_state_dir: Path | None = None,
 ) -> tuple[list[Observation], int]:
     """Observe-only doctor. Exit 1 if any expected component/settings/job drifts
     (including ``paseo_plugin`` missing/disabled when expected), or credential-bak
@@ -1975,6 +1977,10 @@ def doctor(
     missing/error. Unchosen ``paseo_plugin`` rows still print missing/disabled
     without failing. The Pi pool advisory (``ade-pi-pools``) may ``warn`` on
     UNACCEPTED pools without changing the exit code; it never writes acceptance.
+
+    With ``install_state_dir`` (full scope only) it also reports W18 crash leftovers
+    there (``install-state`` rows; orphaned/corrupt fail the exit code) and never
+    repairs them.
     """
     # Validate the entire selection before any probe. None keeps the original
     # full-installation check; an explicit selection checks components only.
@@ -2074,6 +2080,14 @@ def doctor(
         # WARN approaching + FAIL past (and warn itself fails the doctor run).
         if bak_obs.status in ("warn", "error", "missing"):
             hard_missing += 1
+    if install_state_dir is not None:
+        # W18: orphaned in-progress ledger entries, stale lock holders and
+        # half-written temp files. Observe-only; repair is `ade-install recover --yes`.
+        import ade_install_recovery as recovery  # noqa: WPS433
+
+        state_obs = recovery.observations(install_state_dir)
+        obs.extend(state_obs)
+        hard_missing += recovery.failing(state_obs)
     pools_obs = observe_pi_pools(
         root=catalog.root,
         acceptance_path=pi_pool_acceptance_path,
@@ -2763,7 +2777,7 @@ def acquire_python(
             if owner == os.getpid() and token and pending.get("token") == token:
                 adopted = True  # the cold-start bridge exec'd into this process (same pid and one-time token)
                 owned = pending
-            elif owner > 0 and owner != os.getpid() and _pid_alive(owner):
+            elif owner > 0 and owner != os.getpid() and sentinel_owner_status(pending) in ("alive", "unverifiable"):
                 return fail("owner-active", f"pid {owner} is still acquiring Python; wait for it (if it is certainly gone, remove {pending['path']}). Nothing started")
             elif not recover:
                 return fail("pending-recovery", f"an earlier Python acquisition left {pending['path']} with an unknown outcome; run `{recover_cmd}` to verify and clear it. Nothing started")
@@ -2780,7 +2794,7 @@ def acquire_python(
                 owned = _write_python_pending(state_dir, uv_install)
             except FileExistsError:
                 return fail("owner-active", "another Python acquisition just started; wait for it. Nothing started")
-            record(ledger, "pending")
+            record(ledger, "pending", owner=current_owner())
             try:
                 result = run(uv_install)
             except (OSError, subprocess.TimeoutExpired) as error:
@@ -2830,10 +2844,111 @@ def catalog_summary(catalog: Catalog) -> dict[str, Any]:
     }
 
 
+# W18 crash/orphan recovery (2026-11-12). An owner is identified by PID plus the
+# process start time, never by a name pattern: a bare PID is reused after a crash.
+RECOVERY_EVIDENCE = "recovery-evidence.jsonl"
+UNKNOWN_START_TOKEN = "unknown"
+
+
+def process_start_time(pid: int) -> int | None:
+    """Process start as epoch seconds (Linux /proc, else ``ps -o lstart=``); None if unreadable."""
+    if pid <= 0:
+        return None
+    try:
+        stat_text = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8", errors="replace")
+        ticks = int(stat_text.rpartition(")")[2].split()[19])  # field 22; comm may hold spaces
+        btime = next(int(line.split()[1]) for line in Path("/proc/stat").read_text().splitlines()
+                     if line.startswith("btime "))
+        return btime + ticks // os.sysconf("SC_CLK_TCK")
+    except (OSError, ValueError, IndexError, StopIteration):
+        pass
+    ps = shutil.which("ps")
+    if not ps:
+        return None
+    try:
+        proc = subprocess.run(  # noqa: S603 - fixed argv, never shell
+            [ps, "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True, check=False,
+            shell=False, timeout=5, env={**os.environ, "LC_ALL": "C"},
+        )
+        text = " ".join((proc.stdout or "").split())
+        return int(time.mktime(time.strptime(text, "%a %b %d %H:%M:%S %Y"))) if proc.returncode == 0 and text else None
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return None
+
+
+def current_owner() -> dict[str, Any]:
+    """Identity recorded on in-progress evidence: this process's PID and start time."""
+    return {"pid": os.getpid(), "start": process_start_time(os.getpid())}
+
+
+def _start_token(start: int | None) -> str:
+    return UNKNOWN_START_TOKEN if start is None else format(start & 0xFFFFFFFF, "08x")
+
+
+def owner_status(owner: Any) -> str:
+    """``alive`` | ``unverifiable`` (alive, start unknown: treated as live) | ``gone`` | ``reused`` | ``unknown``."""
+    if not isinstance(owner, dict):
+        return "unknown"
+    try:
+        pid = int(owner.get("pid"))
+    except (TypeError, ValueError):
+        return "unknown"
+    if pid <= 0:
+        return "unknown"
+    if not _pid_alive(pid):
+        return "gone"
+    recorded = owner.get("start")
+    now_start = process_start_time(pid)
+    if recorded is None or now_start is None:
+        return "unverifiable"
+    try:
+        return "alive" if int(recorded) == now_start else "reused"
+    except (TypeError, ValueError):
+        return "unverifiable"
+
+
+def sentinel_owner_status(fields: dict[str, str]) -> str:
+    """Owner of ``python-acquire.pending``: its ``started`` is the write time, so a
+    process that started after it is a reused PID. Missing evidence counts as live."""
+    try:
+        pid = int(fields.get("pid", ""))
+    except ValueError:
+        return "unknown"
+    if pid <= 0:
+        return "unknown"
+    if not _pid_alive(pid):
+        return "gone"
+    now_start = process_start_time(pid)
+    try:
+        written = calendar.timegm(time.strptime(fields.get("started", ""), "%Y-%m-%dT%H:%M:%SZ"))
+    except ValueError:
+        return "unverifiable"
+    if now_start is None:
+        return "unverifiable"
+    return "reused" if now_start > written + 5 else "alive"
+
+
+def append_recovery_evidence(state_dir: Path, record: dict[str, Any]) -> None:
+    """Append-only, fsynced evidence of what recovery saw or changed; never rewritten."""
+    state_dir.mkdir(parents=True, exist_ok=True)
+    line = json.dumps({"at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), **record}, sort_keys=True) + "\n"
+    fd = os.open(state_dir / RECOVERY_EVIDENCE, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_CLOEXEC, 0o600)
+    try:
+        os.write(fd, line.encode("utf-8"))
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 def _atomic_write_json(path: Path, data: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     text = json.dumps(data, indent=2, sort_keys=True) + "\n"
-    fd, tmp_name = tempfile.mkstemp(prefix=path.name + ".", dir=str(path.parent))
+    # The temp name carries the writer's pid and start token so a kill between create
+    # and replace leaves a half-written artifact that recovery can attribute.
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f"{path.name}.{os.getpid()}.{_start_token(process_start_time(os.getpid()))}.",
+        suffix=".tmp", dir=str(path.parent),
+    )
     tmp = Path(tmp_name)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
@@ -2873,7 +2988,7 @@ def load_ledger(state_dir: Path) -> dict[str, Any]:
 
 
 @contextlib.contextmanager
-def install_ledger_lock(state_dir: Path) -> Iterator[None]:
+def install_ledger_lock(state_dir: Path, *, wait: bool = True) -> Iterator[dict[str, Any] | None]:
     """Serialize component planning, execution and ledger read-modify-write.
 
     Keep the lock on a stable file, not ledger.json (which is replaced). Live
@@ -2881,14 +2996,53 @@ def install_ledger_lock(state_dir: Path) -> Iterator[None]:
     ledger.lock already exists so executable eligibility is decided or
     re-validated under the lock. The kernel releases the lock on close/process
     exit, including exceptional outcomes.
+
+    W18: while held, ledger.lock carries the holder's pid and start time, cleared
+    on a clean release, so a record left behind names a holder that was killed.
+    A stale record is appended to the recovery evidence before it is superseded
+    and is yielded to the caller; ``wait=False`` raises ``InstallError`` instead
+    of blocking when another installer holds the lock.
     """
     state_dir.mkdir(parents=True, exist_ok=True)
     fd = os.open(state_dir / "ledger.lock", os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
+        except BlockingIOError as error:
+            raise InstallError(f"{state_dir / 'ledger.lock'}: install lock is held by a running installer") from error
+        previous = _swap_lock_holder(state_dir, fd)
+        try:
+            yield previous
+        finally:
+            with contextlib.suppress(OSError):
+                os.ftruncate(fd, 0)
     finally:
         os.close(fd)
+
+
+def parse_lock_holder(raw: bytes) -> dict[str, Any] | None:
+    try:
+        rec = json.loads(raw.decode("utf-8")) if raw.strip() else None
+    except (ValueError, UnicodeDecodeError):
+        return None
+    return rec if isinstance(rec, dict) else None
+
+
+def _swap_lock_holder(state_dir: Path, fd: int) -> dict[str, Any] | None:
+    """Advisory holder record; failures here never fail the lock. Returns a stale prior record."""
+    stale = None
+    try:
+        prior = parse_lock_holder(os.pread(fd, 4096, 0))
+        if prior is not None and owner_status(prior) in ("gone", "reused"):
+            stale = prior
+            append_recovery_evidence(state_dir, {"event": "stale-lock-holder-superseded", "holder": prior})
+        record = {**current_owner(), "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+        os.ftruncate(fd, 0)
+        os.pwrite(fd, json.dumps(record).encode("utf-8"), 0)
+        os.fsync(fd)
+    except OSError:
+        pass
+    return stale
 
 
 def save_ledger(state_dir: Path, ledger: dict[str, Any]) -> Path:
@@ -3099,6 +3253,7 @@ def _run_install_argv(
         "kind": kind,
         "argv": list(step.argv),
         "at": stamp,
+        "owner": current_owner(),
     }
     save_ledger(state_dir, ledger)
     try:
