@@ -20,7 +20,7 @@ ERROR = "[System Error] There was a network issue connecting to the server, plea
 def fake(tmp_path, monkeypatch):
     data = {"agents": {
         LEAD: {"Id": LEAD, "ParentAgentId": None, "Archived": False, "Status": "running", "Provider": "codex"},
-        CHILD: {"Id": CHILD, "ParentAgentId": LEAD, "Archived": False, "Status": "error", "Provider": "antigravity"},
+        CHILD: {"Id": CHILD, "ParentAgentId": LEAD, "Archived": False, "Status": "error", "Provider": "antigravity", "UpdatedAt": "2026-11-12T20:00:00Z"},
     }, "logs": ERROR, "send_rc": 5}
     fixture = tmp_path / "fixture.json"
     sent = tmp_path / "sent.jsonl"
@@ -31,6 +31,7 @@ from pathlib import Path
 d = json.loads(Path(os.environ['FAKE_DATA']).read_text())
 a = sys.argv[1:]
 if a[:1] == ['ls']:
+    assert a == ['ls', '-g', '--background', '--json']
     print(json.dumps([{'id': k, 'status': v['Status']} for k,v in d['agents'].items()]))
 elif a[:2] == ['agent', 'inspect']:
     print(json.dumps(d['agents'][a[2]]))
@@ -90,6 +91,7 @@ def test_two_per_hour_across_invocations_and_expiry(fake):
     data, scan, sent, state = fake
     for i in range(3):
         data["logs"] = f"turn {i}\n{ERROR}"
+        data["agents"][CHILD]["UpdatedAt"] = f"error-event-{i}"
         assert scan() == 0
     assert len(sent.read_text().splitlines()) == 2
     path = state / "events.jsonl"
@@ -140,7 +142,7 @@ def test_both_endpoints_required(fake, monkeypatch):
 def test_uncertain_send_reservation_survives(fake):
     data, scan, sent, _ = fake
     data["send_rc"] = 1
-    with pytest.raises(M["ScanError"]): scan()
+    assert scan() == 0
     data["send_rc"] = 0
     assert scan() == 0
     assert len(sent.read_text().splitlines()) == 1
@@ -182,3 +184,46 @@ def test_watch_bounds(args):
 
 def test_invalid_lead_is_clean_error(tmp_path):
     assert M["main"](["--lead", "bad", "--state-dir", str(tmp_path)]) == 2
+
+
+@pytest.mark.parametrize("suffix", [" Too Many Requests", " 402 payment required", " forbidden", " permission denied", " context length exceeded", " overloaded"])
+def test_codex_suffix_fails_closed(suffix):
+    assert not M["transient"]("codex", "[System Error] error sending request for url" + suffix)
+
+
+def test_unresolvable_foreign_agent_does_not_block_descendant(fake):
+    data, scan, sent, _ = fake
+    orphan = "00000000-0000-0000-0000-000000000004"
+    agents = data["agents"]
+    data["agents"] = {orphan: {"Id": orphan, "Status": "error", "ParentAgentId": "missing"}, **agents}
+    assert scan() == 0
+    assert sent.exists()
+
+
+def test_health_curl_policy(monkeypatch, tmp_path):
+    import subprocess
+    original = Scanner.healthy
+    # The fake fixture is intentionally not used: exercise the real probe method offline.
+    calls = []
+    def run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return subprocess.CompletedProcess(argv, 0, "403", "")
+    monkeypatch.setattr(subprocess, "run", run)
+    scanner = Scanner(LEAD, tmp_path)
+    assert original(scanner, "https://api.github.com/")
+    argv, kwargs = calls[0]
+    assert argv[:2] == ["curl", "-q"]
+    assert "--location" not in argv
+    assert "--insecure" not in argv
+    assert kwargs["timeout"] <= 5
+    for code in ("429", "500", "000", "invalid"):
+        monkeypatch.setattr(subprocess, "run", lambda *a, **kw: subprocess.CompletedProcess(a, 0, code, ""))
+        assert not original(scanner, "https://api.github.com/")
+
+
+def test_stable_error_event_ignores_timeline_rendering(fake):
+    data, scan, sent, _ = fake
+    assert scan() == 0
+    data["logs"] = "different historical rendering\n" + ERROR
+    assert scan() == 0
+    assert len(sent.read_text().splitlines()) == 1

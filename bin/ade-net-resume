@@ -17,15 +17,13 @@ import re
 import subprocess
 import sys
 import time
-import urllib.error
-import urllib.request
 import uuid
 
 PROMPT = "network outage over; continue from where you stopped, re-fetch first, same report path"
 # Deliberately narrow: only the final rendered line, never a matching historical prompt.
 NETWORK = {
     "antigravity": (r"\[System Error\] There was a network issue connecting to the server, please try again\.",),
-    "codex": (r"\[System Error\] (?:stream disconnected before completion|error sending request for url)(?:[ :].*)?",),
+    "codex": (r"\[System Error\] (?:stream disconnected before completion|error sending request for url)",),
     "claude": (r"\[System Error\] (?:Connection error\.|Request timed out\.)",),
     "pi": (r"\[System Error\] (?:fetch failed|ECONNRESET|ETIMEDOUT)",),
 }
@@ -101,19 +99,26 @@ class Scanner:
         return False
 
     def healthy(self, url):
-        request = urllib.request.Request(url, method="HEAD", headers={"User-Agent": "ade-net-resume"})
-        # Do not follow redirects: only the named provider endpoint is probed.
-        class NoRedirect(urllib.request.HTTPRedirectHandler):
-            def redirect_request(self, *args, **kwargs):
-                return None
-        opener = urllib.request.build_opener(NoRedirect)
+        # A subprocess deadline also bounds DNS lookup, unlike a socket timeout.
+        budget = min(5, self.remaining())
         try:
-            with opener.open(request, timeout=min(5, self.remaining())) as response:
-                return 200 <= response.status < 400
-        except urllib.error.HTTPError as exc:
-            return 200 <= exc.code < 500 and exc.code != 429
-        except (OSError, urllib.error.URLError):
+            result = subprocess.run(
+                ["curl", "-q", "--silent", "--head", "--output", os.devnull,
+                 "--write-out", "%{http_code}", "--proto", "=https",
+                 "--max-time", str(budget), url],
+                capture_output=True, text=True, timeout=budget)
+            code = int(result.stdout.strip())
+            return result.returncode == 0 and 200 <= code < 500 and code != 429
+        except (OSError, subprocess.TimeoutExpired, ValueError):
             return False
+
+    def signature(self, record, logs):
+        # UpdatedAt identifies the error event; timeline rendering can vary.
+        updated = record.get("UpdatedAt")
+        if not isinstance(updated, str) or not updated:
+            raise ScanError("missing error event timestamp")
+        line = logs.strip().splitlines()[-1].strip()
+        return hashlib.sha256(json.dumps([updated, line]).encode()).hexdigest()
 
     def event(self, file, aid, action, **fields):
         row = {"time": time.time(), "lead": self.lead, "agent": aid,
@@ -142,48 +147,55 @@ class Scanner:
                 lead = self.inspect(self.lead)
                 if lead.get("Archived") is not False:
                     raise ScanError("lead is archived or unknown")
-                agents = json.loads(self.cli("ls", "-g", "--json"))
+                agents = json.loads(self.cli("ls", "-g", "--background", "--json"))
                 if not isinstance(agents, list):
                     raise ScanError("invalid agent listing")
                 for row in agents:
-                    if row.get("status") != "error":
-                        continue
-                    aid = agent_id(row.get("id"))
-                    if not self.descendant(aid):
-                        continue
-                    record = self.inspect(aid)
-                    provider = record.get("Provider", "")
-                    if record.get("Archived") is not False or record.get("Status") != "error":
-                        continue
-                    if provider not in HOSTS:
-                        continue
-                    logs = self.cli("logs", aid)
-                    if not transient(provider, logs):
-                        continue
-                    signature = hashlib.sha256(logs.encode()).hexdigest()
-                    attempts = [e for e in events if e.get("agent") == aid and e.get("action") == "reserved"]
-                    if (sum(e["time"] > time.time() - 3600 for e in attempts) >= 2
-                            or any(e.get("signature") == signature for e in attempts)):
-                        self.event(history, aid, "capped")
-                        continue
-                    if not (self.healthy("https://api.github.com/") and self.healthy(HOSTS[provider])):
-                        self.event(history, aid, "offline")
-                        continue
-                    if not self.apply:
-                        self.event(history, aid, "would-resume", signature=signature)
-                        continue
-                    # Probe may take seconds: re-read mutable state and ancestry before sending.
-                    fresh = self.inspect(aid)
-                    if (fresh.get("Status") != "error" or fresh.get("Archived") is not False
-                            or fresh.get("Provider") != provider or not self.descendant(aid)
-                            or self.cli("logs", aid) != logs):
-                        self.event(history, aid, "changed")
-                        continue
-                    # Reserve durably BEFORE the outward action. An uncertain send is never retried.
-                    self.event(history, aid, "reserved", signature=signature)
-                    events.append({"agent": aid, "action": "reserved", "time": time.time(), "signature": signature})
-                    self.cli("send", "--json", "--no-wait", "--", aid, PROMPT, accepted=True)
-                    self.event(history, aid, "submitted")
+                    try:
+                        if not isinstance(row, dict):
+                            continue
+                        if row.get("status") != "error":
+                            continue
+                        aid = agent_id(row.get("id"))
+                        if not self.descendant(aid):
+                            continue
+                        record = self.inspect(aid)
+                        provider = record.get("Provider", "")
+                        if record.get("Archived") is not False or record.get("Status") != "error":
+                            continue
+                        if provider not in HOSTS:
+                            continue
+                        logs = self.cli("logs", aid)
+                        if not transient(provider, logs):
+                            continue
+                        signature = self.signature(record, logs)
+                        attempts = [e for e in events if e.get("agent") == aid and e.get("action") == "reserved"]
+                        if (sum(e["time"] > time.time() - 3600 for e in attempts) >= 2
+                                or any(e.get("signature") == signature for e in attempts)):
+                            self.event(history, aid, "capped")
+                            continue
+                        if not (self.healthy("https://api.github.com/") and self.healthy(HOSTS[provider])):
+                            self.event(history, aid, "offline")
+                            continue
+                        if not self.apply:
+                            self.event(history, aid, "would-resume", signature=signature)
+                            continue
+                        # Probe may take seconds: re-read mutable state and ancestry before sending.
+                        fresh = self.inspect(aid)
+                        if (fresh.get("Status") != "error" or fresh.get("Archived") is not False
+                                or fresh.get("Provider") != provider or not self.descendant(aid)
+                                or self.signature(fresh, self.cli("logs", aid)) != signature):
+                            self.event(history, aid, "changed")
+                            continue
+                        # Reserve durably BEFORE the outward action. An uncertain send is never retried.
+                        self.event(history, aid, "reserved", signature=signature)
+                        events.append({"agent": aid, "action": "reserved", "time": time.time(), "signature": signature})
+                        self.cli("send", "--json", "--no-wait", "--", aid, PROMPT, accepted=True)
+                        self.event(history, aid, "submitted")
+                    except (ScanError, ValueError, TypeError, AttributeError):
+                        self.remaining()  # Expired watch still exits at its deadline.
+                        self.event(history, row.get("id") if isinstance(row, dict) else None, "unavailable")
+
         return 0
 
 
@@ -204,7 +216,9 @@ def main(argv=None):
         scanner = Scanner(args.lead, args.state_dir, args.apply, args.watch or 120)
         while True:
             rc = scanner.scan()
-            if rc or not args.watch:
+            if not args.watch:
+                return rc
+            if rc not in (0, 3):
                 return rc
             delay = min(args.interval, scanner.remaining())
             time.sleep(delay)
