@@ -43,6 +43,7 @@ StartInterval on cron).
 """
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import fnmatch
 import hashlib
@@ -1893,6 +1894,32 @@ def _with_prior_identity(
 
 
 @dataclass(frozen=True)
+class JobAdmission:
+    """Evidence held by an admission context across the entire mutation.
+
+    An adapter must exclude new launches, observe this job's running work,
+    and stop future triggers without killing work. No native adapter currently
+    proves all launch paths participate, so the default is conservative.
+    """
+
+    all_launch_paths: bool = False
+    activity: str = "unknown"  # idle | busy | unknown
+    triggers_drained: bool = False
+    updater_running: bool = False
+
+    def refusal(self) -> str | None:
+        if self.updater_running:
+            return "updater's own running service; next generation pending"
+        if not self.all_launch_paths:
+            return "shared admission incomplete; launch paths do not all participate"
+        if self.activity != "idle":
+            return f"per-job activity {self.activity}; preserve running work"
+        if not self.triggers_drained:
+            return "future triggers cannot be drained safely"
+        return None
+
+
+@dataclass(frozen=True)
 class ReconcileStep:
     """One planned reconcile action. touch=True means --yes would mutate host + ledger."""
 
@@ -1952,6 +1979,18 @@ def plan_reconcile(
             steps.append(ReconcileStep(
                 name, "skip", owner,
                 f"platforms={row.get('platforms')}; not for this host",
+            ))
+            continue
+        prior_entry = entries.get(name)
+        desired_backend = "paseo" if kind == "paseo" else backend_name
+        if (owner == OWNER_ADE and kind in ("ade-sched", "paseo")
+                and isinstance(prior_entry, dict)
+                and prior_entry.get("backend") != desired_backend):
+            steps.append(ReconcileStep(
+                name, "defer", owner,
+                f"backend migration {prior_entry.get('backend')} -> {desired_backend}; "
+                "preserve old identity until old-backend drain and verified absence",
+                label=str(row.get("label") or name),
             ))
             continue
         if kind == "service":
@@ -2139,6 +2178,8 @@ def plan_reconcile(
 
     def _plan_remove(logical_id: str, entry: Mapping[str, Any], *, label: str) -> None:
         owner = str(entry.get("owner") or "?")
+        if any(s.name == logical_id and s.action == "defer" for s in steps):
+            return  # Backend migration retains the old identity without unloading it.
         if owner != OWNER_ADE:
             steps.append(ReconcileStep(
                 logical_id, "report", owner,
@@ -2305,6 +2346,7 @@ def reconcile(
     paseo_run: Callable[[list[str]], subprocess.CompletedProcess[str]] | None = None,
     out: TextIO | None = None,
     err: TextIO | None = None,
+    admission: Callable[[ReconcileStep], Any] | None = None,
     **overrides: Any,
 ) -> tuple[list[dict[str, Any]], int]:
     """Reconcile ADE-owned ade-sched and paseo jobs; write the ownership ledger.
@@ -2317,7 +2359,7 @@ def reconcile(
     backend.
 
     Exit 0 when the plan is clean (dry-run) or every touch succeeded; 1 on a failed
-    mutation or blocked step; 2 when ``--yes`` refuses host writes on a non-write
+    mutation or blocked step; 6 when work is durably deferred; 2 when ``--yes`` refuses host writes on a non-write
     backend (planned ``refuse-backend`` counted even alongside paseo work).
     """
     out = out or sys.stdout
@@ -2380,11 +2422,12 @@ def reconcile(
                 "detail": step.detail,
                 "category": step.category,
                 "touch": step.touch,
-                "ok": step.action not in ("blocked",),
+                "ok": step.action not in ("blocked", "defer"),
             }
             results.append(row)
         # dry-run: blocked inventory rows fail the command; refuse-backend alone is informational
-        rc = 1 if any(r["action"] == "blocked" for r in results) else 0
+        rc = (1 if any(r["action"] == "blocked" for r in results)
+              else 6 if any(r["action"] == "defer" for r in results) else 0)
         return results, rc
 
     # --yes path. Host writes are refused per planned refuse-backend / touch steps when the
@@ -2396,6 +2439,7 @@ def reconcile(
     failed = 0
     refused_host = 0
     mutated = False
+    deferred = False
     with _ReconcileLock(reconcile_lock_path(state_dir, env=env)):
         # Reload under the lock so a concurrent writer cannot race removal authority.
         ledger = load_jobs_ledger(state_dir, env=env)
@@ -2416,6 +2460,18 @@ def reconcile(
         generation = int(ledger.get("generation") or 0) + 1
         entries: dict[str, Any] = dict(ledger.get("entries") or {})
 
+        deferrals_path = state_dir / "jobs-deferred.json"
+        if deferrals_path.exists():
+            try:
+                deferrals = json.loads(deferrals_path.read_text(encoding="utf-8"))
+                if not isinstance(deferrals, dict) or not isinstance(deferrals.get("jobs"), dict):
+                    raise ValueError("invalid deferral record")
+            except (OSError, ValueError) as exc:
+                raise SchedError(EX_USAGE, f"unreadable deferrals: {exc}") from exc
+        else:
+            deferrals = {"schema_version": 1, "jobs": {}}
+        deferred_names: set[str] = set()
+
         # Removals first so a label rename keeps the old ledger identity until unload completes.
         ordered_steps = (
             [s for s in steps if s.action == "remove"]
@@ -2423,129 +2479,118 @@ def reconcile(
         )
 
         for step in ordered_steps:
-            row: dict[str, Any] = {
-                "name": step.name,
-                "action": step.action,
-                "owner": step.owner,
-                "label": step.label,
-                "detail": step.detail,
-                "category": step.category,
-                "touch": step.touch,
-                "ok": True,
-            }
-            if not step.touch:
-                if step.action == "blocked":
-                    row["ok"] = False
-                    failed += 1
-                elif step.action == "refuse-backend":
-                    # Planned host refuse (touch=False): still exit 2 when mixed with paseo
-                    # work (Codex P2 on #513).
-                    row["ok"] = False
-                    refused_host += 1
-                results.append(row)
-                continue
-
-            label = step.label
-            assert isinstance(label, str)
-            is_paseo = _step_targets_paseo(step)
-            if not is_paseo and not write_ok:
-                row["action"] = "refuse-backend"
-                row["ok"] = False
-                row["touch"] = False
-                row["detail"] = step.detail or (
-                    f"reconcile write backends are {sorted(RECONCILE_WRITE_BACKENDS)}; "
-                    f"backend={b.name}"
-                )
-                refused_host += 1
-                results.append(row)
-                continue
-
-            if step.action == "adopt-ledger":
-                job_row = next((j for j in jobs if j.get("name") == step.name), None)
-                if is_paseo:
-                    if not isinstance(job_row, dict):
-                        row["ok"] = False
-                        row["action"] = "failed"
-                        row["detail"] = "adopt-ledger missing paseo catalog row"
-                        failed += 1
-                        results.append(row)
-                        continue
-                    try:
-                        ah = paseo_artifact_hash(job_row, ade=ade_eff, env=env)
-                    except SchedError:
-                        # Live schedule may predate create-field inventory; still adopt ownership.
-                        ah = hashlib.sha256(f"paseo:{label}".encode()).hexdigest()
-                    prev = entries.get(step.name) if isinstance(entries.get(step.name), dict) else None
-                    entries[step.name] = _with_prior_identity(
-                        _entry_for_install(
-                            name=step.name,
-                            label=label,
-                            backend="paseo",
-                            paths=[f"paseo-schedule:{label}"],
-                            artifact=ah,
-                            generation=generation,
-                            status="committed",
-                            detail="adopted existing paseo schedule",
-                        ),
-                        prev if isinstance(prev, dict) else None,
-                        new_label=label,
+            with contextlib.ExitStack() as admissions:
+                row: dict[str, Any] = {
+                    "name": step.name,
+                    "action": step.action,
+                    "owner": step.owner,
+                    "label": step.label,
+                    "detail": step.detail,
+                    "category": step.category,
+                    "touch": step.touch,
+                    "ok": True,
+                }
+                reason = step.detail if step.action == "defer" else None
+                previous = entries.get(step.name)
+                # A missing label in a stale/incomplete scan is no absence proof.
+                # Even an initial systemd install may remove a cron trigger.
+                disruptive = step.action in ("install", "remove")
+                if step.name in deferred_names:
+                    reason = "earlier operation for this logical job deferred"
+                elif disruptive:
+                    # The context must retain shared admission until after read-back
+                    # and ownership commit. A single idle-fleet snapshot is insufficient.
+                    evidence = admissions.enter_context(
+                        admission(step) if admission else contextlib.nullcontext(JobAdmission())
                     )
-                    mutated = True
-                    row["action"] = "adopted"
+                    reason = (evidence.refusal() if isinstance(evidence, JobAdmission)
+                              else "unknown shared admission evidence")
+                if reason is not None:
+                    deferred = True
+                    deferred_names.add(step.name)
+                    key = json.dumps([step.name, b.name, step.label, step.action])
+                    deferrals["jobs"][key] = {
+                        "logical_id": step.name, "backend": b.name, "label": step.label,
+                        "action": step.action, "reason": reason, "updated_at": _utc_now(),
+                        "prior_identity": previous,
+                    }
+                    _atomic_write_json(deferrals_path, deferrals)
+                    row.update(action="deferred", detail=reason, touch=False, ok=False)
                     results.append(row)
                     continue
-                if not isinstance(job_row, dict) or not isinstance(job_row.get("plist"), str):
-                    row["ok"] = False
-                    row["action"] = "failed"
-                    row["detail"] = "adopt-ledger missing catalog plist"
-                    failed += 1
+                if not step.touch:
+                    if step.action == "blocked":
+                        row["ok"] = False
+                        failed += 1
+                    elif step.action == "refuse-backend":
+                        # Planned host refuse (touch=False): still exit 2 when mixed with paseo
+                        # work (Codex P2 on #513).
+                        row["ok"] = False
+                        refused_host += 1
                     results.append(row)
                     continue
-                try:
-                    subst = job_subst_from_row(job_row, root=root, env=env, extra=extra_subst)
-                    job = Job.from_plist(root / str(job_row["plist"]), subst, ade=ade)
-                    rendered = render(job, b, env=env, **overrides)
-                    ah = artifact_hash(rendered.files)
-                except SchedError as e:
-                    row["ok"] = False
-                    row["action"] = "failed"
-                    row["detail"] = str(e)
-                    failed += 1
-                    results.append(row)
-                    continue
-                prev = entries.get(step.name) if isinstance(entries.get(step.name), dict) else None
-                entries[step.name] = _with_prior_identity(
-                    _entry_for_install(
-                        name=step.name,
-                        label=label,
-                        backend=b.name,
-                        paths=[str(p) for p in rendered.files],
-                        artifact=ah,
-                        generation=generation,
-                        status="committed",
-                        detail="adopted existing matching units",
-                    ),
-                    prev if isinstance(prev, dict) else None,
-                    new_label=label,
-                )
-                mutated = True
-                row["action"] = "adopted"
-                results.append(row)
-                continue
 
-            if step.action == "install":
-                job_row = next((j for j in jobs if j.get("name") == step.name), None)
-                if is_paseo:
-                    if not isinstance(job_row, dict):
+                label = step.label
+                assert isinstance(label, str)
+                is_paseo = _step_targets_paseo(step)
+                if not is_paseo and not write_ok:
+                    row["action"] = "refuse-backend"
+                    row["ok"] = False
+                    row["touch"] = False
+                    row["detail"] = step.detail or (
+                        f"reconcile write backends are {sorted(RECONCILE_WRITE_BACKENDS)}; "
+                        f"backend={b.name}"
+                    )
+                    refused_host += 1
+                    results.append(row)
+                    continue
+
+                if step.action == "adopt-ledger":
+                    job_row = next((j for j in jobs if j.get("name") == step.name), None)
+                    if is_paseo:
+                        if not isinstance(job_row, dict):
+                            row["ok"] = False
+                            row["action"] = "failed"
+                            row["detail"] = "adopt-ledger missing paseo catalog row"
+                            failed += 1
+                            results.append(row)
+                            continue
+                        try:
+                            ah = paseo_artifact_hash(job_row, ade=ade_eff, env=env)
+                        except SchedError:
+                            # Live schedule may predate create-field inventory; still adopt ownership.
+                            ah = hashlib.sha256(f"paseo:{label}".encode()).hexdigest()
+                        prev = entries.get(step.name) if isinstance(entries.get(step.name), dict) else None
+                        entries[step.name] = _with_prior_identity(
+                            _entry_for_install(
+                                name=step.name,
+                                label=label,
+                                backend="paseo",
+                                paths=[f"paseo-schedule:{label}"],
+                                artifact=ah,
+                                generation=generation,
+                                status="committed",
+                                detail="adopted existing paseo schedule",
+                            ),
+                            prev if isinstance(prev, dict) else None,
+                            new_label=label,
+                        )
+                        mutated = True
+                        row["action"] = "adopted"
+                        results.append(row)
+                        continue
+                    if not isinstance(job_row, dict) or not isinstance(job_row.get("plist"), str):
                         row["ok"] = False
                         row["action"] = "failed"
-                        row["detail"] = "install missing paseo catalog row"
+                        row["detail"] = "adopt-ledger missing catalog plist"
                         failed += 1
                         results.append(row)
                         continue
                     try:
-                        argv = paseo_schedule_create_argv(job_row, ade=ade_eff, env=env)
-                        ah = paseo_artifact_hash(job_row, ade=ade_eff, env=env)
+                        subst = job_subst_from_row(job_row, root=root, env=env, extra=extra_subst)
+                        job = Job.from_plist(root / str(job_row["plist"]), subst, ade=ade)
+                        rendered = render(job, b, env=env, **overrides)
+                        ah = artifact_hash(rendered.files)
                     except SchedError as e:
                         row["ok"] = False
                         row["action"] = "failed"
@@ -2558,8 +2603,168 @@ def reconcile(
                         _entry_for_install(
                             name=step.name,
                             label=label,
+                            backend=b.name,
+                            paths=[str(p) for p in rendered.files],
+                            artifact=ah,
+                            generation=generation,
+                            status="committed",
+                            detail="adopted existing matching units",
+                        ),
+                        prev if isinstance(prev, dict) else None,
+                        new_label=label,
+                    )
+                    mutated = True
+                    row["action"] = "adopted"
+                    results.append(row)
+                    continue
+
+                if step.action == "install":
+                    job_row = next((j for j in jobs if j.get("name") == step.name), None)
+                    if is_paseo:
+                        if not isinstance(job_row, dict):
+                            row["ok"] = False
+                            row["action"] = "failed"
+                            row["detail"] = "install missing paseo catalog row"
+                            failed += 1
+                            results.append(row)
+                            continue
+                        try:
+                            argv = paseo_schedule_create_argv(job_row, ade=ade_eff, env=env)
+                            ah = paseo_artifact_hash(job_row, ade=ade_eff, env=env)
+                        except SchedError as e:
+                            row["ok"] = False
+                            row["action"] = "failed"
+                            row["detail"] = str(e)
+                            failed += 1
+                            results.append(row)
+                            continue
+                        prev = entries.get(step.name) if isinstance(entries.get(step.name), dict) else None
+                        entries[step.name] = _with_prior_identity(
+                            _entry_for_install(
+                                name=step.name,
+                                label=label,
+                                backend="paseo",
+                                paths=[f"paseo-schedule:{label}"],
+                                artifact=ah,
+                                generation=generation,
+                                status="pending",
+                            ),
+                            prev if isinstance(prev, dict) else None,
+                            new_label=label,
+                        )
+                        ledger["entries"] = entries
+                        ledger["generation"] = generation
+                        save_jobs_ledger(ledger, state_dir, env=env)
+                        try:
+                            proc = run_paseo(argv)
+                            if proc.returncode != 0:
+                                detail = (proc.stderr or proc.stdout or "").strip() or f"rc={proc.returncode}"
+                                raise SchedError(EX_ACTIVATE, f"paseo schedule create failed: {detail}")
+                            live_jobs, ls_notes = paseo_schedule_names(run=run_paseo)
+                            if ls_notes:
+                                raise SchedError(
+                                    EX_ACTIVATE,
+                                    f"read-back: paseo schedule ls failed after create: {ls_notes[0]}",
+                                )
+                            if label not in {lj.id for lj in live_jobs}:
+                                raise SchedError(EX_ACTIVATE, f"read-back: paseo schedule {label} not listed after create")
+                        except SchedError as e:
+                            entries[step.name] = _with_prior_identity(
+                                _entry_for_install(
+                                    name=step.name,
+                                    label=label,
+                                    backend="paseo",
+                                    paths=[f"paseo-schedule:{label}"],
+                                    artifact=ah,
+                                    generation=generation,
+                                    status="failed",
+                                    detail=str(e),
+                                ),
+                                prev if isinstance(prev, dict) else None,
+                                new_label=label,
+                            )
+                            ledger["entries"] = entries
+                            save_jobs_ledger(ledger, state_dir, env=env)
+                            row["ok"] = False
+                            row["action"] = "failed"
+                            row["detail"] = str(e)
+                            failed += 1
+                            results.append(row)
+                            continue
+                        except (OSError, subprocess.TimeoutExpired) as e:
+                            entries[step.name] = _with_prior_identity(
+                                _entry_for_install(
+                                    name=step.name,
+                                    label=label,
+                                    backend="paseo",
+                                    paths=[f"paseo-schedule:{label}"],
+                                    artifact=ah,
+                                    generation=generation,
+                                    status="failed",
+                                    detail=str(e),
+                                ),
+                                prev if isinstance(prev, dict) else None,
+                                new_label=label,
+                            )
+                            ledger["entries"] = entries
+                            save_jobs_ledger(ledger, state_dir, env=env)
+                            row["ok"] = False
+                            row["action"] = "failed"
+                            row["detail"] = str(e)
+                            failed += 1
+                            results.append(row)
+                            continue
+                        committed = _entry_for_install(
+                            name=step.name,
+                            label=label,
                             backend="paseo",
                             paths=[f"paseo-schedule:{label}"],
+                            artifact=ah,
+                            generation=generation,
+                            status="committed",
+                        )
+                        cur = entries.get(step.name)
+                        if isinstance(cur, dict) and _prior_identity(cur) is not None:
+                            committed = {**committed, "prior_identity": cur["prior_identity"]}
+                        else:
+                            committed = _with_prior_identity(
+                                committed, prev if isinstance(prev, dict) else None, new_label=label,
+                            )
+                        entries[step.name] = committed
+                        ledger["entries"] = entries
+                        save_jobs_ledger(ledger, state_dir, env=env)
+                        mutated = True
+                        row["action"] = "installed"
+                        results.append(row)
+                        continue
+
+                    if not isinstance(job_row, dict) or not isinstance(job_row.get("plist"), str):
+                        row["ok"] = False
+                        row["action"] = "failed"
+                        row["detail"] = "install missing catalog plist"
+                        failed += 1
+                        results.append(row)
+                        continue
+                    try:
+                        subst = job_subst_from_row(job_row, root=root, env=env, extra=extra_subst)
+                        job = Job.from_plist(root / str(job_row["plist"]), subst, ade=ade)
+                        rendered = render(job, b, env=env, **overrides)
+                        ah = artifact_hash(rendered.files)
+                    except SchedError as e:
+                        row["ok"] = False
+                        row["action"] = "failed"
+                        row["detail"] = str(e)
+                        failed += 1
+                        results.append(row)
+                        continue
+                    prev = entries.get(step.name) if isinstance(entries.get(step.name), dict) else None
+                    # Pending intent before any host write (setup-plan contract 4).
+                    entries[step.name] = _with_prior_identity(
+                        _entry_for_install(
+                            name=step.name,
+                            label=label,
+                            backend=b.name,
+                            paths=[str(p) for p in rendered.files],
                             artifact=ah,
                             generation=generation,
                             status="pending",
@@ -2571,48 +2776,21 @@ def reconcile(
                     ledger["generation"] = generation
                     save_jobs_ledger(ledger, state_dir, env=env)
                     try:
-                        proc = run_paseo(argv)
-                        if proc.returncode != 0:
-                            detail = (proc.stderr or proc.stdout or "").strip() or f"rc={proc.returncode}"
-                            raise SchedError(EX_ACTIVATE, f"paseo schedule create failed: {detail}")
-                        live_jobs, ls_notes = paseo_schedule_names(run=run_paseo)
-                        if ls_notes:
-                            raise SchedError(
-                                EX_ACTIVATE,
-                                f"read-back: paseo schedule ls failed after create: {ls_notes[0]}",
-                            )
-                        if label not in {lj.id for lj in live_jobs}:
-                            raise SchedError(EX_ACTIVATE, f"read-back: paseo schedule {label} not listed after create")
+                        install(
+                            job, b, dry_run=False, activate=activate,
+                            allow_no_linger=allow_no_linger, env=env, out=out, err=err,
+                            **overrides,
+                        )
+                        st = status(label, b, env=env, **overrides)
+                        if not st.installed:
+                            raise SchedError(EX_ACTIVATE, f"read-back: {label} not installed after install")
                     except SchedError as e:
                         entries[step.name] = _with_prior_identity(
                             _entry_for_install(
                                 name=step.name,
                                 label=label,
-                                backend="paseo",
-                                paths=[f"paseo-schedule:{label}"],
-                                artifact=ah,
-                                generation=generation,
-                                status="failed",
-                                detail=str(e),
-                            ),
-                            prev if isinstance(prev, dict) else None,
-                            new_label=label,
-                        )
-                        ledger["entries"] = entries
-                        save_jobs_ledger(ledger, state_dir, env=env)
-                        row["ok"] = False
-                        row["action"] = "failed"
-                        row["detail"] = str(e)
-                        failed += 1
-                        results.append(row)
-                        continue
-                    except (OSError, subprocess.TimeoutExpired) as e:
-                        entries[step.name] = _with_prior_identity(
-                            _entry_for_install(
-                                name=step.name,
-                                label=label,
-                                backend="paseo",
-                                paths=[f"paseo-schedule:{label}"],
+                                backend=b.name,
+                                paths=[str(p) for p in rendered.files],
                                 artifact=ah,
                                 generation=generation,
                                 status="failed",
@@ -2632,12 +2810,13 @@ def reconcile(
                     committed = _entry_for_install(
                         name=step.name,
                         label=label,
-                        backend="paseo",
-                        paths=[f"paseo-schedule:{label}"],
+                        backend=b.name,
+                        paths=[str(p) for p in st.paths] if st.paths else [str(p) for p in rendered.files],
                         artifact=ah,
                         generation=generation,
                         status="committed",
                     )
+                    # Preserve prior_identity across pending -> committed if remove has not cleared it yet.
                     cur = entries.get(step.name)
                     if isinstance(cur, dict) and _prior_identity(cur) is not None:
                         committed = {**committed, "prior_identity": cur["prior_identity"]}
@@ -2653,216 +2832,131 @@ def reconcile(
                     results.append(row)
                     continue
 
-                if not isinstance(job_row, dict) or not isinstance(job_row.get("plist"), str):
-                    row["ok"] = False
-                    row["action"] = "failed"
-                    row["detail"] = "install missing catalog plist"
-                    failed += 1
-                    results.append(row)
-                    continue
-                try:
-                    subst = job_subst_from_row(job_row, root=root, env=env, extra=extra_subst)
-                    job = Job.from_plist(root / str(job_row["plist"]), subst, ade=ade)
-                    rendered = render(job, b, env=env, **overrides)
-                    ah = artifact_hash(rendered.files)
-                except SchedError as e:
-                    row["ok"] = False
-                    row["action"] = "failed"
-                    row["detail"] = str(e)
-                    failed += 1
-                    results.append(row)
-                    continue
-                prev = entries.get(step.name) if isinstance(entries.get(step.name), dict) else None
-                # Pending intent before any host write (setup-plan contract 4).
-                entries[step.name] = _with_prior_identity(
-                    _entry_for_install(
-                        name=step.name,
-                        label=label,
-                        backend=b.name,
-                        paths=[str(p) for p in rendered.files],
-                        artifact=ah,
-                        generation=generation,
-                        status="pending",
-                    ),
-                    prev if isinstance(prev, dict) else None,
-                    new_label=label,
-                )
-                ledger["entries"] = entries
-                ledger["generation"] = generation
-                save_jobs_ledger(ledger, state_dir, env=env)
-                try:
-                    install(
-                        job, b, dry_run=False, activate=activate,
-                        allow_no_linger=allow_no_linger, env=env, out=out, err=err,
-                        **overrides,
+                if step.action == "remove":
+                    entry = _removal_entry(
+                        entries, step.name, label, snapshot=step.ledger_snapshot,
                     )
-                    st = status(label, b, env=env, **overrides)
-                    if not st.installed:
-                        raise SchedError(EX_ACTIVATE, f"read-back: {label} not installed after install")
-                except SchedError as e:
-                    entries[step.name] = _with_prior_identity(
-                        _entry_for_install(
-                            name=step.name,
-                            label=label,
-                            backend=b.name,
-                            paths=[str(p) for p in rendered.files],
-                            artifact=ah,
-                            generation=generation,
-                            status="failed",
-                            detail=str(e),
-                        ),
-                        prev if isinstance(prev, dict) else None,
-                        new_label=label,
-                    )
-                    ledger["entries"] = entries
-                    save_jobs_ledger(ledger, state_dir, env=env)
-                    row["ok"] = False
-                    row["action"] = "failed"
-                    row["detail"] = str(e)
-                    failed += 1
-                    results.append(row)
-                    continue
-                committed = _entry_for_install(
-                    name=step.name,
-                    label=label,
-                    backend=b.name,
-                    paths=[str(p) for p in st.paths] if st.paths else [str(p) for p in rendered.files],
-                    artifact=ah,
-                    generation=generation,
-                    status="committed",
-                )
-                # Preserve prior_identity across pending -> committed if remove has not cleared it yet.
-                cur = entries.get(step.name)
-                if isinstance(cur, dict) and _prior_identity(cur) is not None:
-                    committed = {**committed, "prior_identity": cur["prior_identity"]}
-                else:
-                    committed = _with_prior_identity(
-                        committed, prev if isinstance(prev, dict) else None, new_label=label,
-                    )
-                entries[step.name] = committed
-                ledger["entries"] = entries
-                save_jobs_ledger(ledger, state_dir, env=env)
-                mutated = True
-                row["action"] = "installed"
-                results.append(row)
-                continue
-
-            if step.action == "remove":
-                entry = _removal_entry(
-                    entries, step.name, label, snapshot=step.ledger_snapshot,
-                )
-                if entry is None:
-                    row["ok"] = False
-                    row["action"] = "report"
-                    row["detail"] = (
-                        f"refusing remove of {label}: missing/invalid ledger ownership"
-                    )
-                    row["touch"] = False
-                    # Not a hard failure of the run: safety refusal.
-                    results.append(row)
-                    continue
-                entry_backend = entry.get("backend")
-                paseo_entry = entry_backend == "paseo"
-                if (
-                    not paseo_entry
-                    and isinstance(entry_backend, str)
-                    and entry_backend
-                    and entry_backend != b.name
-                ):
-                    row["ok"] = False
-                    row["action"] = "report"
-                    row["detail"] = (
-                        f"refusing remove of {label}: ledger backend={entry_backend!r}; "
-                        f"reconcile backend={b.name}"
-                    )
-                    row["touch"] = False
-                    results.append(row)
-                    continue
-                live_entry = entries.get(step.name)
-                if isinstance(live_entry, dict) and live_entry.get("label") == label:
-                    entries[step.name] = {
-                        **live_entry,
-                        "status": "pending-remove",
-                        "updated_at": _utc_now(),
-                        "generation": generation,
-                    }
-                elif isinstance(live_entry, dict) and _prior_identity(live_entry) is not None:
-                    # New label already claimed this logical_id; mark only the preserved identity.
-                    prior = dict(live_entry["prior_identity"])
-                    prior["status"] = "pending-remove"
-                    prior["updated_at"] = _utc_now()
-                    prior["generation"] = generation
-                    entries[step.name] = {**live_entry, "prior_identity": prior}
-                ledger["entries"] = entries
-                ledger["generation"] = generation
-                save_jobs_ledger(ledger, state_dir, env=env)
-                try:
-                    if paseo_entry:
-                        argv = paseo_schedule_delete_argv(label)
-                        proc = run_paseo(argv)
-                        if proc.returncode != 0:
-                            detail = (proc.stderr or proc.stdout or "").strip() or f"rc={proc.returncode}"
-                            raise SchedError(EX_ACTIVATE, f"paseo schedule delete failed: {detail}")
-                        live_jobs, ls_notes = paseo_schedule_names(run=run_paseo)
-                        if ls_notes:
-                            raise SchedError(
-                                EX_ACTIVATE,
-                                f"read-back: paseo schedule ls failed after delete: {ls_notes[0]}",
-                            )
-                        if label in {lj.id for lj in live_jobs}:
-                            raise SchedError(EX_ACTIVATE, f"read-back: paseo schedule {label} still listed after delete")
-                    else:
-                        uninstall(label, b, dry_run=False, activate=activate, env=env, out=out, err=err, **overrides)
-                        st = status(label, b, env=env, **overrides)
-                        if st.installed:
-                            raise SchedError(EX_ACTIVATE, f"read-back: {label} still installed after uninstall")
-                        if b.name == "launchd" and activate and st.active:
-                            raise SchedError(
-                                EX_ACTIVATE,
-                                f"read-back: launchd {label} still loaded after uninstall",
-                            )
-                except (SchedError, OSError, subprocess.TimeoutExpired) as e:
-                    # Keep pending-remove so the next reconcile retries; "failed" alone
-                    # would drop _ledger_owns and leave a surviving schedule forever.
+                    if entry is None:
+                        row["ok"] = False
+                        row["action"] = "report"
+                        row["detail"] = (
+                            f"refusing remove of {label}: missing/invalid ledger ownership"
+                        )
+                        row["touch"] = False
+                        # Not a hard failure of the run: safety refusal.
+                        results.append(row)
+                        continue
+                    entry_backend = entry.get("backend")
+                    paseo_entry = entry_backend == "paseo"
+                    if (
+                        not paseo_entry
+                        and isinstance(entry_backend, str)
+                        and entry_backend
+                        and entry_backend != b.name
+                    ):
+                        row["ok"] = False
+                        row["action"] = "report"
+                        row["detail"] = (
+                            f"refusing remove of {label}: ledger backend={entry_backend!r}; "
+                            f"reconcile backend={b.name}"
+                        )
+                        row["touch"] = False
+                        results.append(row)
+                        continue
                     live_entry = entries.get(step.name)
                     if isinstance(live_entry, dict) and live_entry.get("label") == label:
                         entries[step.name] = {
-                            **entry,
+                            **live_entry,
                             "status": "pending-remove",
-                            "detail": str(e),
                             "updated_at": _utc_now(),
                             "generation": generation,
                         }
                     elif isinstance(live_entry, dict) and _prior_identity(live_entry) is not None:
-                        prior = dict(entry)
+                        # New label already claimed this logical_id; mark only the preserved identity.
+                        prior = dict(live_entry["prior_identity"])
                         prior["status"] = "pending-remove"
-                        prior["detail"] = str(e)
                         prior["updated_at"] = _utc_now()
                         prior["generation"] = generation
                         entries[step.name] = {**live_entry, "prior_identity": prior}
                     ledger["entries"] = entries
+                    ledger["generation"] = generation
                     save_jobs_ledger(ledger, state_dir, env=env)
-                    row["ok"] = False
-                    row["action"] = "failed"
-                    row["detail"] = str(e)
-                    failed += 1
+                    try:
+                        if paseo_entry:
+                            argv = paseo_schedule_delete_argv(label)
+                            proc = run_paseo(argv)
+                            if proc.returncode != 0:
+                                detail = (proc.stderr or proc.stdout or "").strip() or f"rc={proc.returncode}"
+                                raise SchedError(EX_ACTIVATE, f"paseo schedule delete failed: {detail}")
+                            live_jobs, ls_notes = paseo_schedule_names(run=run_paseo)
+                            if ls_notes:
+                                raise SchedError(
+                                    EX_ACTIVATE,
+                                    f"read-back: paseo schedule ls failed after delete: {ls_notes[0]}",
+                                )
+                            if label in {lj.id for lj in live_jobs}:
+                                raise SchedError(EX_ACTIVATE, f"read-back: paseo schedule {label} still listed after delete")
+                        else:
+                            uninstall(label, b, dry_run=False, activate=activate, env=env, out=out, err=err, **overrides)
+                            st = status(label, b, env=env, **overrides)
+                            if st.installed:
+                                raise SchedError(EX_ACTIVATE, f"read-back: {label} still installed after uninstall")
+                            if b.name == "launchd" and activate and st.active:
+                                raise SchedError(
+                                    EX_ACTIVATE,
+                                    f"read-back: launchd {label} still loaded after uninstall",
+                                )
+                    except (SchedError, OSError, subprocess.TimeoutExpired) as e:
+                        # Keep pending-remove so the next reconcile retries; "failed" alone
+                        # would drop _ledger_owns and leave a surviving schedule forever.
+                        live_entry = entries.get(step.name)
+                        if isinstance(live_entry, dict) and live_entry.get("label") == label:
+                            entries[step.name] = {
+                                **entry,
+                                "status": "pending-remove",
+                                "detail": str(e),
+                                "updated_at": _utc_now(),
+                                "generation": generation,
+                            }
+                        elif isinstance(live_entry, dict) and _prior_identity(live_entry) is not None:
+                            prior = dict(entry)
+                            prior["status"] = "pending-remove"
+                            prior["detail"] = str(e)
+                            prior["updated_at"] = _utc_now()
+                            prior["generation"] = generation
+                            entries[step.name] = {**live_entry, "prior_identity": prior}
+                        ledger["entries"] = entries
+                        save_jobs_ledger(ledger, state_dir, env=env)
+                        row["ok"] = False
+                        row["action"] = "failed"
+                        row["detail"] = str(e)
+                        failed += 1
+                        results.append(row)
+                        continue
+                    live_entry = entries.get(step.name)
+                    if isinstance(live_entry, dict) and live_entry.get("label") == label:
+                        entries.pop(step.name, None)
+                    elif isinstance(live_entry, dict) and _prior_identity(live_entry) is not None:
+                        cleared = dict(live_entry)
+                        cleared.pop("prior_identity", None)
+                        entries[step.name] = cleared
+                    ledger["entries"] = entries
+                    save_jobs_ledger(ledger, state_dir, env=env)
+                    mutated = True
+                    row["action"] = "removed"
                     results.append(row)
                     continue
-                live_entry = entries.get(step.name)
-                if isinstance(live_entry, dict) and live_entry.get("label") == label:
-                    entries.pop(step.name, None)
-                elif isinstance(live_entry, dict) and _prior_identity(live_entry) is not None:
-                    cleared = dict(live_entry)
-                    cleared.pop("prior_identity", None)
-                    entries[step.name] = cleared
-                ledger["entries"] = entries
-                save_jobs_ledger(ledger, state_dir, env=env)
-                mutated = True
-                row["action"] = "removed"
-                results.append(row)
-                continue
 
-            results.append(row)
+                results.append(row)
+
+        completed_names = {r["name"] for r in results
+                           if r["action"] in ("installed", "removed", "adopted", "skip")}
+        resolved = {key: value for key, value in deferrals["jobs"].items()
+                    if value.get("logical_id") not in completed_names
+                    or value.get("logical_id") in deferred_names}
+        if resolved != deferrals["jobs"]:
+            deferrals["jobs"] = resolved
+            _atomic_write_json(deferrals_path, deferrals)
 
         if mutated and not failed:
             ledger["generation"] = generation
@@ -2871,4 +2965,4 @@ def reconcile(
 
     if refused_host and not failed:
         return results, EX_USAGE
-    return results, (1 if failed else 0)
+    return results, (1 if failed else (6 if deferred else 0))

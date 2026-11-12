@@ -1,6 +1,7 @@
 """S4b: ADE job reconcile + ownership ledger write path (launchd/systemd/cron/paseo, CI-testable)."""
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import subprocess
@@ -14,6 +15,17 @@ BIN = REPO / "bin"
 sys.path.insert(0, str(BIN))
 import ade_install as ai  # noqa: E402
 import ade_sched as S  # noqa: E402
+
+
+def _quiescent_reconcile(*args, **kwargs):
+    """Legacy effect tests provide a fully quiescent fake launch adapter.
+
+    Production has no such adapter; default conservative behavior is tested below.
+    """
+    kwargs["admission"] = lambda step: contextlib.nullcontext(
+        S.JobAdmission(all_launch_paths=True, activity="idle", triggers_drained=True)
+    )
+    return S.reconcile(*args, **kwargs)
 
 
 def _script(path: Path, body: str) -> Path:
@@ -264,7 +276,7 @@ def test_plan_never_unloads_foreign_or_unledgered_retired(fake, tmp_path):
 def test_reconcile_yes_installs_and_writes_committed_ledger(fake, tmp_path):
     root = _mini_catalog(tmp_path)
     catalog = ai.load_catalog(root=root)
-    results, rc = S.reconcile(
+    results, rc = _quiescent_reconcile(
         catalog.jobs,
         catalog.retired_jobs,
         dry_run=False,
@@ -293,7 +305,7 @@ def test_reconcile_yes_installs_and_writes_committed_ledger(fake, tmp_path):
     assert ledger["generation"] >= 1
 
     # Idempotent second pass: skip (hash match), no reload noise required.
-    results2, rc2 = S.reconcile(
+    results2, rc2 = _quiescent_reconcile(
         catalog.jobs,
         catalog.retired_jobs,
         dry_run=False,
@@ -342,7 +354,7 @@ def test_reconcile_removes_only_ledger_owned_retired(fake, tmp_path):
     }
     S.save_jobs_ledger(ledger, fake.state, env=fake.env)
 
-    results, rc = S.reconcile(
+    results, rc = _quiescent_reconcile(
         catalog.jobs,
         catalog.retired_jobs,
         dry_run=False,
@@ -400,7 +412,7 @@ def test_pending_intent_is_not_removal_authority(fake, tmp_path):
 def test_yes_on_launchd_installs_and_ledgers(fake, tmp_path):
     root = _mini_catalog(tmp_path)
     catalog = ai.load_catalog(root=root)
-    results, rc = S.reconcile(
+    results, rc = _quiescent_reconcile(
         catalog.jobs,
         catalog.retired_jobs,
         dry_run=False,
@@ -427,7 +439,7 @@ def test_yes_on_launchd_installs_and_ledgers(fake, tmp_path):
     assert st.installed is True
 
     before = plist.read_text(encoding="utf-8")
-    results2, rc2 = S.reconcile(
+    results2, rc2 = _quiescent_reconcile(
         catalog.jobs,
         catalog.retired_jobs,
         dry_run=False,
@@ -492,7 +504,7 @@ def test_launchd_reconcile_refuses_cross_backend_ledger_remove(fake, tmp_path):
         s.action == "report" and "ledger backend='systemd'" in s.detail for s in steps
     )
 
-    results, rc = S.reconcile(
+    results, rc = _quiescent_reconcile(
         catalog.jobs,
         catalog.retired_jobs,
         dry_run=False,
@@ -544,7 +556,7 @@ def test_yes_on_launchd_removes_ledger_owned(fake, tmp_path):
     }
     S.save_jobs_ledger(ledger, fake.state, env=fake.env)
 
-    results, rc = S.reconcile(
+    results, rc = _quiescent_reconcile(
         catalog.jobs,
         catalog.retired_jobs,
         dry_run=False,
@@ -568,7 +580,7 @@ def test_launchd_plan_loads_when_plist_matches_but_unloaded(fake, tmp_path):
     root = _mini_catalog(tmp_path)
     catalog = ai.load_catalog(root=root)
     # Install once (loads), then unload while leaving the plist + ledger.
-    results, rc = S.reconcile(
+    results, rc = _quiescent_reconcile(
         catalog.jobs,
         catalog.retired_jobs,
         dry_run=False,
@@ -639,7 +651,7 @@ def test_launchd_remove_keeps_ledger_when_still_loaded(fake, tmp_path):
     }
     S.save_jobs_ledger(ledger, fake.state, env=env)
 
-    results, rc = S.reconcile(
+    results, rc = _quiescent_reconcile(
         catalog.jobs,
         catalog.retired_jobs,
         dry_run=False,
@@ -689,7 +701,7 @@ def test_yes_on_cron_installs_and_ledgers(fake, tmp_path):
     catalog = ai.load_catalog(root=root)
     crontab = _cron_store_scripts(tmp_path, fake.log)
     env = {**fake.env, "ADE_SCHED_CRONTAB": str(crontab)}
-    results, rc = S.reconcile(
+    results, rc = _quiescent_reconcile(
         catalog.jobs,
         catalog.retired_jobs,
         dry_run=False,
@@ -716,7 +728,7 @@ def test_yes_on_cron_installs_and_ledgers(fake, tmp_path):
 
     # Idempotent second pass: compare the installed crontab block (not Path("crontab").is_file()).
     before = (tmp_path / "crontab.txt").read_text()
-    results2, rc2 = S.reconcile(
+    results2, rc2 = _quiescent_reconcile(
         catalog.jobs,
         catalog.retired_jobs,
         dry_run=False,
@@ -781,7 +793,7 @@ def test_cron_reconcile_refuses_cross_backend_ledger_remove(fake, tmp_path):
         s.action == "report" and "ledger backend='systemd'" in s.detail for s in steps
     )
 
-    results, rc = S.reconcile(
+    results, rc = _quiescent_reconcile(
         catalog.jobs,
         catalog.retired_jobs,
         dry_run=False,
@@ -829,7 +841,7 @@ def test_yes_on_cron_removes_ledger_owned(fake, tmp_path):
     }
     S.save_jobs_ledger(ledger, fake.state, env=env)
 
-    results, rc = S.reconcile(
+    results, rc = _quiescent_reconcile(
         catalog.jobs,
         catalog.retired_jobs,
         dry_run=False,
@@ -865,12 +877,12 @@ def test_cli_reconcile_dry_run_and_yes(fake, tmp_path):
         "reconcile", "--yes", "--json", "--name", "deadline-sweep", "--allow-no-linger",
         env=env, root=root,
     )
-    assert proc.returncode == 0, proc.stderr + proc.stdout
+    assert proc.returncode == 6, proc.stderr + proc.stdout
     data = json.loads(proc.stdout)
-    assert data["mode"] == "yes" and data["ok"] is True
-    assert (fake.units / "com.djbclark.deadline-sweep.service").is_file()
-    ledger = json.loads((fake.state / "jobs.json").read_text(encoding="utf-8"))
-    assert ledger["entries"]["deadline-sweep"]["status"] == "committed"
+    assert data["mode"] == "yes" and data["ok"] is False
+    assert not (fake.units / "com.djbclark.deadline-sweep.service").exists()
+    assert not (fake.state / "jobs.json").exists()
+    assert (fake.state / "jobs-deferred.json").is_file()
 
 
 def test_cli_refuse_yes_and_dry_run(fake, tmp_path):
@@ -969,7 +981,7 @@ def test_paseo_reconcile_creates_and_ledgers(fake, tmp_path):
     store = tmp_path / "paseo-schedules.json"
     store.write_text("[]", encoding="utf-8")
     run = _fake_paseo_run(store)
-    results, rc = S.reconcile(
+    results, rc = _quiescent_reconcile(
         catalog.jobs,
         catalog.retired_jobs,
         dry_run=False,
@@ -996,7 +1008,7 @@ def test_paseo_reconcile_creates_and_ledgers(fake, tmp_path):
         "systemd",
         (S.LiveJob("context-budget", "paseo", "paseo", True),),
     )
-    results2, rc2 = S.reconcile(
+    results2, rc2 = _quiescent_reconcile(
         catalog.jobs,
         catalog.retired_jobs,
         dry_run=False,
@@ -1020,7 +1032,7 @@ def test_paseo_adopt_ledger_without_create(fake, tmp_path):
     store = tmp_path / "paseo-schedules.json"
     store.write_text(json.dumps(["context-budget"]), encoding="utf-8")
     run = _fake_paseo_run(store)
-    results, rc = S.reconcile(
+    results, rc = _quiescent_reconcile(
         catalog.jobs,
         catalog.retired_jobs,
         dry_run=False,
@@ -1098,7 +1110,7 @@ def test_paseo_delete_failure_keeps_pending_remove(fake, tmp_path):
         "status": "committed",
     }
     S.save_jobs_ledger(ledger, fake.state, env=fake.env)
-    results, rc = S.reconcile(
+    results, rc = _quiescent_reconcile(
         jobs,
         catalog.retired_jobs,
         dry_run=False,
@@ -1152,7 +1164,7 @@ def test_paseo_remove_ledger_owned_never_foreign(fake, tmp_path):
             S.LiveJob("mystery-agent", "paseo", "paseo", True),
         ),
     )
-    results, rc = S.reconcile(
+    results, rc = _quiescent_reconcile(
         jobs,
         catalog.retired_jobs,
         dry_run=False,
@@ -1193,7 +1205,7 @@ def test_paseo_yes_works_on_launchd_host_backend(fake, tmp_path):
     store = tmp_path / "paseo-schedules.json"
     store.write_text("[]", encoding="utf-8")
     run = _fake_paseo_run(store)
-    results, rc = S.reconcile(
+    results, rc = _quiescent_reconcile(
         catalog.jobs,
         catalog.retired_jobs,
         dry_run=False,
@@ -1216,7 +1228,7 @@ def test_paseo_yes_works_on_launchd_host_backend(fake, tmp_path):
         "launchd",
         (S.LiveJob("context-budget", "paseo", "paseo", True),),
     )
-    results2, rc2 = S.reconcile(
+    results2, rc2 = _quiescent_reconcile(
         catalog.jobs,
         catalog.retired_jobs,
         dry_run=False,
@@ -1246,7 +1258,7 @@ def test_paseo_yes_mixed_with_host_refuse_exits_2(fake, tmp_path, monkeypatch):
     store = tmp_path / "paseo-schedules.json"
     store.write_text("[]", encoding="utf-8")
     run = _fake_paseo_run(store)
-    results, rc = S.reconcile(
+    results, rc = _quiescent_reconcile(
         catalog.jobs,
         catalog.retired_jobs,
         dry_run=False,
@@ -1298,7 +1310,7 @@ def test_paseo_delete_readback_probe_failure_keeps_ledger(fake, tmp_path):
                 return subprocess.CompletedProcess(argv, 1, "", "ls failed")
         return base(argv)
 
-    results, rc = S.reconcile(
+    results, rc = _quiescent_reconcile(
         jobs,
         catalog.retired_jobs,
         dry_run=False,
@@ -1329,7 +1341,7 @@ def test_plan_activates_inactive_timer_even_when_hashes_match(fake, tmp_path):
     root = _mini_catalog(tmp_path)
     catalog = ai.load_catalog(root=root)
     # Install once so artifacts exist, then force is-active -> inactive.
-    results, rc = S.reconcile(
+    results, rc = _quiescent_reconcile(
         catalog.jobs,
         catalog.retired_jobs,
         dry_run=False,
@@ -1416,7 +1428,7 @@ platforms = ["linux"]
         encoding="utf-8",
     )
     catalog = ai.load_catalog(root=root)
-    results, rc = S.reconcile(
+    results, rc = _quiescent_reconcile(
         catalog.jobs,
         catalog.retired_jobs,
         dry_run=False,
@@ -1492,7 +1504,7 @@ def test_reconcile_preserves_implicit_ade_worktree_refuse(fake, tmp_path, monkey
     )
     # Plan may still emit install; execute must refuse via job.worktree.
     assert any(s.action == "install" and s.name == "deadline-sweep" for s in steps)
-    results, rc = S.reconcile(
+    results, rc = _quiescent_reconcile(
         catalog.jobs,
         catalog.retired_jobs,
         dry_run=False,
@@ -1519,7 +1531,7 @@ def test_label_change_keeps_old_identity_until_remove(fake, tmp_path):
     """P2: renaming a label for the same logical name must remove the old timer."""
     root = _mini_catalog(tmp_path)
     catalog = ai.load_catalog(root=root)
-    results, rc = S.reconcile(
+    results, rc = _quiescent_reconcile(
         catalog.jobs,
         catalog.retired_jobs,
         dry_run=False,
@@ -1573,7 +1585,7 @@ def test_label_change_keeps_old_identity_until_remove(fake, tmp_path):
     assert any(s.action == "install" and s.label == new_label for s in steps)
     assert any(s.action == "remove" and s.label == old_label for s in steps)
 
-    results2, rc2 = S.reconcile(
+    results2, rc2 = _quiescent_reconcile(
         catalog2.jobs,
         catalog2.retired_jobs,
         dry_run=False,
@@ -1596,3 +1608,104 @@ def test_label_change_keeps_old_identity_until_remove(fake, tmp_path):
     assert entry["label"] == new_label
     assert entry["status"] == "committed"
     assert "prior_identity" not in entry
+
+
+@pytest.mark.parametrize('action', ['install', 'remove'])
+@pytest.mark.parametrize('backend', ['launchd', 'systemd', 'cron', 'paseo'])
+@pytest.mark.parametrize('evidence', [None, S.JobAdmission(),
+    S.JobAdmission(True, 'busy', True), S.JobAdmission(True, 'unknown', True),
+    S.JobAdmission(True, 'idle', False), S.JobAdmission(True, 'idle', True, True)])
+def test_disruptive_work_defers_without_effects(fake, tmp_path, monkeypatch, backend, evidence, action):
+    label = 'com.djbclark.old'
+    old = dict(logical_id='old', label=label, owner=S.OWNER_ADE, backend=backend,
+               scope='user', status='committed', paths=['old'], generation=1)
+    ledger = S.empty_jobs_ledger(env=fake.env)
+    ledger['entries']['old'] = old
+    S.save_jobs_ledger(ledger, fake.state, env=fake.env)
+    before = S.jobs_ledger_path(fake.state).read_bytes()
+    step = S.ReconcileStep('old', action, S.OWNER_ADE, 'retired', label,
+                           touch=True, ledger_snapshot=old)
+    monkeypatch.setattr(S, 'plan_reconcile', lambda *a, **kw: [step])
+    def no_effect(*a, **kw):
+        pytest.fail('deferred work must never unload or stop paid runs')
+    monkeypatch.setattr(S, 'uninstall', no_effect)
+    monkeypatch.setattr(S, 'install', no_effect)
+    kwargs = dict(dry_run=False, backend='launchd' if backend == 'paseo' else backend,
+                  root=tmp_path, env=fake.env, state_dir=fake.state,
+                  live=S.LiveScan(backend, ()), paseo_run=no_effect)
+    if evidence is not None:
+        kwargs['admission'] = lambda step: contextlib.nullcontext(evidence)
+    rows, rc = S.reconcile([], [], **kwargs)
+    assert rc == 6 and rows[0]['action'] == 'deferred'
+    assert S.jobs_ledger_path(fake.state).read_bytes() == before
+    deferred = json.loads((fake.state / 'jobs-deferred.json').read_text())
+    assert next(iter(deferred['jobs'].values()))['prior_identity'] == old
+    rows, rc = S.reconcile([], [], **kwargs)  # restart/retry retains intent
+    assert rc == 6
+    assert len(json.loads((fake.state / 'jobs-deferred.json').read_text())['jobs']) == 1
+
+
+@pytest.mark.parametrize('old_backend,new_backend', [('systemd', 'cron'), ('launchd', 'systemd'),
+                                                    ('cron', 'paseo'), ('paseo', 'launchd')])
+def test_backend_migration_retains_old_authority(fake, tmp_path, old_backend, new_backend):
+    old = dict(logical_id='job', label='same', owner=S.OWNER_ADE, backend=old_backend,
+               status='committed', scope='user', paths=['old'])
+    ledger = S.empty_jobs_ledger(env=fake.env)
+    ledger['entries']['job'] = old
+    S.save_jobs_ledger(ledger, fake.state, env=fake.env)
+    jobs = [dict(name='job', owner=S.OWNER_ADE, **{'class': 'hard'}, kind='paseo' if new_backend == 'paseo'
+                 else 'ade-sched', label='same', mode='auto')]
+    before = S.jobs_ledger_path(fake.state).read_bytes()
+    rows, rc = S.reconcile(jobs, [], dry_run=False,
+        backend='launchd' if new_backend == 'paseo' else new_backend,
+        root=tmp_path, env=fake.env, state_dir=fake.state,
+        live=S.LiveScan(new_backend, ()))
+    assert rc == 6
+    assert any(r['action'] == 'deferred' and 'migration' in r['detail'] for r in rows)
+    assert S.jobs_ledger_path(fake.state).read_bytes() == before
+
+
+def test_admission_held_through_removal_and_commit(fake, tmp_path, monkeypatch):
+    label = 'com.djbclark.old'
+    old = dict(logical_id='old', label=label, owner=S.OWNER_ADE, backend='launchd',
+               scope='user', status='committed', paths=['old'])
+    ledger = S.empty_jobs_ledger(env=fake.env)
+    ledger['entries']['old'] = old
+    S.save_jobs_ledger(ledger, fake.state, env=fake.env)
+    held = []
+    @contextlib.contextmanager
+    def admit(step):
+        held.append(step.name)
+        yield S.JobAdmission(True, 'idle', True)
+        assert 'old' not in S.load_jobs_ledger(fake.state, env=fake.env)['entries']
+        held.pop()
+    monkeypatch.setattr(S, 'plan_reconcile', lambda *a, **kw: [
+        S.ReconcileStep('old', 'remove', S.OWNER_ADE, 'retired', label,
+                         touch=True, ledger_snapshot=old)])
+    monkeypatch.setattr(S, 'uninstall', lambda *a, **kw: held or pytest.fail('no admission'))
+    monkeypatch.setattr(S, 'status', lambda *a, **kw: S.Status('launchd', label, False, False, None))
+    rows, rc = S.reconcile([], [], dry_run=False, backend='launchd', root=tmp_path,
+        env=fake.env, state_dir=fake.state, live=S.LiveScan('launchd', ()), admission=admit)
+    assert rc == 0 and rows[0]['action'] == 'removed' and held == []
+
+
+def test_install_apply_propagates_scheduler_deferral(fake, tmp_path, monkeypatch):
+    catalog = ai.load_catalog(root=_mini_catalog(tmp_path))
+    monkeypatch.setattr(ai, 'build_apply_steps', lambda *a, **kw: [])
+    monkeypatch.setattr(ai, 'apply_sched_reconcile', lambda *a, **kw: (
+        [dict(id='job', action='deferred', category='sched', ok=False)], 6))
+    rows, rc = ai.apply(catalog, dry_run=False, state_dir=fake.state)
+    assert rc == 6 and rows[0]['action'] == 'deferred'
+
+
+def test_empty_scan_does_not_admit_initial_install(fake, tmp_path, monkeypatch):
+    step = S.ReconcileStep('new', 'install', S.OWNER_ADE, 'install missing label',
+                           'com.djbclark.new', touch=True)
+    monkeypatch.setattr(S, 'plan_reconcile', lambda *a, **kw: [step])
+    def no_install(*a, **kw):
+        pytest.fail('empty scan is not cross-backend absence proof')
+    monkeypatch.setattr(S, 'install', no_install)
+    rows, rc = S.reconcile([], [], dry_run=False, backend='systemd',
+        env=fake.env, root=tmp_path, state_dir=fake.state, live=S.LiveScan('systemd', ()))
+    assert rc == 6 and rows[0]['action'] == 'deferred'
+    assert not S.jobs_ledger_path(fake.state).exists()

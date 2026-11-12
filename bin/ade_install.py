@@ -2494,6 +2494,7 @@ def apply(
     if system_exec_refused:
         return results, 2
 
+    sched_deferred = False
     if reconcile_sched:
         sched_rows, sched_rc = apply_sched_reconcile(
             catalog,
@@ -2502,7 +2503,8 @@ def apply(
             allow_no_linger=allow_no_linger,
         )
         results.extend(sched_rows)
-        if sched_rc != 0:
+        sched_deferred = sched_rc == 6
+        if sched_rc not in (0, 6):
             failed += 1
 
     # dry-run with only skips/would-install/would-system-install → 0; any blocked → 1
@@ -2513,5 +2515,5 @@ def apply(
             for r in results
         ) else 0
     else:
-        rc = 1 if failed else 0
+        rc = 1 if failed else (6 if sched_deferred else 0)
     return results, rc
