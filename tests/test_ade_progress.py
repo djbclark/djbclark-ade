@@ -44,6 +44,8 @@ FAKE_PASEO = textwrap.dedent('''\
     elif cmd == "send":
         out = open(d + "/send.json").read() if os.path.exists(d + "/send.json") else '{"status": "sent"}'
         print(out)
+        if os.path.exists(d + "/send.err"):
+            sys.stderr.write(open(d + "/send.err").read())
         sys.exit(int(open(d + "/send.rc").read()) if os.path.exists(d + "/send.rc") else 0)
 ''')
 FAKE_PING = textwrap.dedent('''\
@@ -411,7 +413,8 @@ def test_crash_between_intent_and_receipt_reconciles_without_duplicate_send(e):
     st = json.loads(sp.read_text())
     (rec,) = st["events"].values()
     rec.update(state="prepared", wake="intent", ping=None, ui=None, last_published=0)   # crashed after the wake intent
-    st["wakes"]["t1"]["ts"] = T0
+    for w in st["wakes"].values():
+        w["ts"] = T0
     sp.write_text(json.dumps(st))
     before = len(e.sends())
     rep = e.scan()
@@ -455,3 +458,95 @@ def test_plist_template_is_shipped_but_not_installed():
     assert d["ProgramArguments"] == ["__ADE__/bin/ade-progress", "scan", "--yes"] and d["StartInterval"] == 300
     # slice 1b adds the inventory row, after the operator has seen `scan --dry-run` on real declarations
     assert "ade-progress" not in (ROOT / "config" / "install.toml").read_text()
+
+
+def test_one_wake_per_agent_per_window_even_with_several_tasks(e):
+    e.agent("a1")
+    for t in ("t1", "t2", "t3"):
+        e.declare(task=t)
+    rep = e.scan()
+    assert sorted(x["wake"] for x in rep["events"]) == ["na", "na", "sent"]
+    assert len(e.sends()) == 1 and len(e.pings()) == 1
+    dry = e.run("scan", "--dry-run", "--json")
+    assert dry.returncode == 0
+
+
+def test_busy_lock_makes_state_changing_commands_exit_75_not_success(e):
+    e.agent("a1")
+    e.declare()
+    p1 = subprocess.Popen([sys.executable, str(SCRIPT), "scan", "--yes"], env=e.env(FAKE_SLEEP="1.5"),
+                          stdout=subprocess.PIPE, text=True)
+    time.sleep(0.4)
+    for args in (["retire", "--task", "t1", "--generation", "1", "--yes"], ["ack", "--task", "t1", "--yes"],
+                 ["declare", "--task", "t1", "--agent", "a1", "--summary", "z", "--generation", "1", "--yes"]):
+        r = e.run(*args)
+        assert r.returncode == 75 and "busy" in r.stderr, (args, r.stdout, r.stderr)
+    p1.communicate(timeout=60)
+    assert json.loads((e.state / "decl" / "t1.json").read_text())["state"] == "open"
+    assert e.run("retire", "--task", "t1", "--generation", "1", "--yes").returncode == 0
+
+
+def test_repeat_notice_reuses_the_progress_item_and_ack_clears_it(e):
+    e.agent("a1", status="closed")
+    e.declare()
+    e.scan()
+    e.clock += 3 * HOUR + 60
+    e.scan()
+    sets = [c for c in e.calls("pp.jsonl") if c[1:3] == ["stuck", "set"]]
+    assert len(sets) == 1
+    e.run("ack", "--task", "t1", "--yes")
+    assert [c[3] for c in e.calls("pp.jsonl") if c[1:3] == ["stuck", "clear"]] == ["S1"]
+
+
+def test_a_published_record_that_was_never_paged_rides_the_next_digest(e):
+    e.agent("a1", status="closed")
+    e.declare()
+    e.scan()
+    sp = e.state / "state.json"
+    st = json.loads(sp.read_text())
+    for rec in st["events"].values():
+        rec["ping"] = None   # a crash after publishing, before the page
+    st["pings"] = []
+    sp.write_text(json.dumps(st))
+    before = len(e.pings())
+    e.clock += 60
+    e.scan()
+    assert len(e.pings()) == before + 1
+
+
+def test_option_injection_and_unsafe_text_rejected(e):
+    for args in (["--task", "-h", "--summary", "x", "--agent", "a1"], ["--task=ok", "--summary", "x", "--agent=--x"],
+                 ["--task", "ok", "--summary", "a\u2028b", "--agent", "a1"], ["--task", "ok", "--summary", "x\x1b[31m", "--agent", "a1"],
+                 ["--task", "ok", "--summary", "x", "--agent", "a1", "--idle-after-min", "0"],
+                 ["--task", "ok", "--summary", "x", "--agent", "a1", "--pending", "-1"]):
+        r = e.run("declare", *args, "--yes")
+        assert r.returncode == 2, (args, r.stdout, r.stderr)
+    assert not (e.state / "decl").exists()
+
+
+def test_naive_review_after_is_utc_and_padded_summary_is_trimmed(e):
+    e.agent("a1", status="running")
+    r = e.run("declare", "--task", "t1", "--agent", "a1", "--summary", "  padded  ", "--review-after", "2027-01-01T00:00:00", "--yes")
+    assert r.returncode == 0
+    d = json.loads((e.state / "decl" / "t1.json").read_text())
+    assert d["summary"] == "padded" and d["review_after"] == "2027-01-01T00:00:00"
+    e.clock = datetime(2027, 1, 1, 0, 0, 1, tzinfo=timezone.utc).timestamp()
+    e.agent("a1", status="running")
+    assert [x["reason"] for x in e.scan()["events"]] == ["due"]
+
+
+def test_refusal_is_parsed_from_stdout_even_with_stderr_noise(e):
+    e.agent("a1")
+    (e.fake / "send.json").write_text('{"error": "no such agent"}')
+    (e.fake / "send.err").write_text("warning: something\n")
+    (e.fake / "send.rc").write_text("1")
+    e.declare()
+    assert [x["wake"] for x in e.scan()["events"]] == ["refused"]
+
+
+def test_declaration_from_another_paseo_home_is_skipped(e):
+    e.agent("a1")
+    e.declare()
+    r = e.run("scan", "--yes", "--json", PASEO_HOME=str(e.tmp / "other-home"))
+    rep = json.loads(r.stdout)
+    assert rep["events"] == [] and any("another PASEO_HOME" in h for h in rep["health"]) and e.sends() == []
