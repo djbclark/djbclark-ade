@@ -61,7 +61,9 @@ For the migration choices, compatibility names and Linux/macOS handoffs, read
 | `tell-coding-bot` | Pointer (2026-11-06): the Grok Bot "Coding" sender lives in the peer-link repository (do not restore `bin/coding-bot` here; retired ade PR #269 demanual: `docs/history/coding-bot-peer-link-2026-11-10.md`). | "tell the Coding bot". |
 
 `skills/session-finder/` was restored 2026-11-08 for Pi-first transcript history search (`session-history.py`;
-data only — it does not launch retired clients). The one-cycle relay shim `relay.py` over `paseo send` remains until
+data only — it does not launch retired clients). `skills/watch/` (with `/loadwatch` alias) was restored 2026-11-11
+(#539) for low-token terminal load inspection, memory churn check, and incident triage, superseding its earlier
+slim-down deletion. The one-cycle relay shim `relay.py` over `paseo send` remains until
 2026-11-20; `claude_identity.py` is a stub (the module is `bin/claude_identity.py`). Paseo's own skills (`paseo`,
 `paseo-advisor`, `paseo-committee`, `paseo-handoff`, `paseo-help`, `paseo-plugin`) are installed from Paseo (`npx skills
 add getpaseo/paseo`, `docs/skill-everywhere.md` 3a); the Claude template keeps them `user-invocable-only`.
@@ -74,8 +76,8 @@ coderabbit-feeder, diskfree, firecrawl, gmail-search, greptile, ovhcloud-api, re
 terminus-kira, todo. Unlinked from here (2026-11-06, E1); the operator relinks them from their own repositories in the final-merge batch
 (`docs/slim/operator-batch.md`): sudo-secretspec, forgejo, forgejo-ci, hyades-docker, sipb-llm-bench. Deleted: herdr-tidy, reorg-orca (2026-10-31); siyuan and its three companions,
 `_shared`, cow-workspaces, ralph-tui-orchestration, skillopt-sleep-learned, jevlike (E1, E2); helm, autorename (E4);
-session-finder's skill and peer-relay (E3); loadwatch (E5); skills-everywhere, skillopt-sleep (E10); watch, paseowatch,
-cfenginewatch and the six vendored `ade-paseo*` copies (Wave 3b); bigteam (E6, now `fan-out`); effort-routing and
+session-finder's skill and peer-relay (E3); loadwatch (E5; alias restored #539); skills-everywhere, skillopt-sleep (E10); watch, paseowatch,
+cfenginewatch and the six vendored `ade-paseo*` copies (Wave 3b; watch restored #539); bigteam (E6, now `fan-out`); effort-routing and
 fallback-chains (E7, folded into `model-routing`). The skills, plugins and MCP servers switched off in Claude Code on
 2026-10-10 are listed in `history/disabled-skills.md`.
 
