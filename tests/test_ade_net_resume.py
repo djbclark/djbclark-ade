@@ -1,4 +1,5 @@
 """Offline policy and subprocess integration tests; fake Paseo never contacts a harness."""
+from datetime import datetime, timezone
 import fcntl
 import json
 import os
@@ -13,6 +14,7 @@ Scanner = M["Scanner"]
 LEAD = "00000000-0000-0000-0000-000000000001"
 CHILD = "00000000-0000-0000-0000-000000000002"
 MIDDLE = "00000000-0000-0000-0000-000000000003"
+NOW = datetime(2026, 11, 12, 20, 0, tzinfo=timezone.utc).timestamp()
 ERROR = "[System Error] There was a network issue connecting to the server, please try again."
 
 
@@ -21,7 +23,7 @@ def fake(tmp_path, monkeypatch):
     data = {"agents": {
         LEAD: {"Id": LEAD, "ParentAgentId": None, "Archived": False, "Status": "running", "Provider": "codex"},
         CHILD: {"Id": CHILD, "ParentAgentId": LEAD, "Archived": False, "Status": "error", "Provider": "antigravity", "UpdatedAt": "2026-11-12T20:00:00Z"},
-    }, "logs": ERROR, "send_rc": 5}
+    }, "logs": ERROR, "send_rc": 5, "activity": []}
     fixture = tmp_path / "fixture.json"
     sent = tmp_path / "sent.jsonl"
     executable = tmp_path / "paseo"
@@ -36,7 +38,10 @@ if a[:1] == ['ls']:
 elif a[:2] == ['agent', 'inspect']:
     print(json.dumps(d['agents'][a[2]]))
 elif a[:1] == ['logs']:
-    print(d['logs'])
+    if '--json' in a:
+        print(json.dumps({'agentId': a[1], 'items': d['activity']}))
+    else:
+        print(d['logs'])
 elif a[:1] == ['send']:
     with open(os.environ['FAKE_SENT'], 'a') as f: f.write(json.dumps(a)+'\\n')
     sys.exit(d['send_rc'])
@@ -47,10 +52,11 @@ else: sys.exit(9)
     monkeypatch.setenv("FAKE_DATA", str(fixture))
     monkeypatch.setenv("FAKE_SENT", str(sent))
     monkeypatch.setattr(Scanner, "healthy", lambda self, url: True)
+    monkeypatch.setattr(M["time"], "time", lambda: NOW)
 
-    def scan(apply=True):
+    def scan(apply=True, **options):
         fixture.write_text(json.dumps(data))
-        return Scanner(LEAD, tmp_path / "state", apply).scan()
+        return Scanner(LEAD, tmp_path / "state", apply, **options).scan()
 
     return data, scan, sent, tmp_path / "state"
 
@@ -91,7 +97,7 @@ def test_two_per_hour_across_invocations_and_expiry(fake):
     data, scan, sent, state = fake
     for i in range(3):
         data["logs"] = f"turn {i}\n{ERROR}"
-        data["agents"][CHILD]["UpdatedAt"] = f"error-event-{i}"
+        data["agents"][CHILD]["UpdatedAt"] = datetime.fromtimestamp(NOW - i, timezone.utc).isoformat()
         assert scan() == 0
     assert len(sent.read_text().splitlines()) == 2
     path = state / "events.jsonl"
@@ -250,3 +256,107 @@ def test_full_send_budget_can_reserve(fake, monkeypatch):
     assert scan() == 0
     assert sent.exists()
     assert '"action": "reserved"' in (state / "events.jsonl").read_text()
+
+
+@pytest.mark.parametrize("stamp", [
+    "2026-11-12T17:00:00Z",  # The outage's old completed reviewers.
+    "2026-11-12T19:29:59Z",  # Just outside the default window.
+    "2026-11-12T20:00:01Z",  # Future timestamps fail closed.
+    "2026-11-12T20:00:00", "garbled", "", None,
+])
+def test_stale_or_unknown_error_never_probes_or_reserves(fake, monkeypatch, stamp):
+    data, scan, sent, state = fake
+    data["agents"][CHILD]["UpdatedAt"] = stamp
+    def forbidden(*args):
+        pytest.fail("ineligible error must be rejected before probes")
+    monkeypatch.setattr(Scanner, "healthy", forbidden)
+    assert scan() == 0
+    assert not sent.exists()
+    rows = [json.loads(line) for line in (state / "events.jsonl").read_text().splitlines()]
+    assert [row["action"] for row in rows] == ["stale"]
+
+
+@pytest.mark.parametrize("stamp", ["2026-11-12T19:30:00Z", "2026-11-12T15:00:00-05:00"])
+def test_fresh_window_boundary_and_timezone_offsets(fake, stamp):
+    data, scan, sent, _ = fake
+    data["agents"][CHILD]["UpdatedAt"] = stamp
+    assert scan() == 0
+    assert sent.exists()
+
+
+def test_configurable_error_age_window(fake):
+    data, scan, sent, _ = fake
+    data["agents"][CHILD]["UpdatedAt"] = "2026-11-12T19:15:00Z"
+    assert scan(False) == 0
+    assert not sent.exists()
+    assert scan(max_error_age_minutes=60) == 0
+    assert sent.exists()
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "nan", "inf", "1e308"])
+def test_invalid_error_age_window(value):
+    with pytest.raises(SystemExit) as exc:
+        M["main"](["--lead", LEAD, "--max-error-age-minutes", value])
+    assert exc.value.code == 2
+
+
+def test_delivered_assistant_output_skips_fresh_error(fake):
+    data, scan, sent, state = fake
+    data["activity"] = [
+        {"type": "user_message", "text": "please review"},
+        {"type": "assistant_message", "text": "done: W1 review https://example.test/pr/1"},
+        {"type": "tool_call", "detail": "delivery"},
+        {"type": "assistant_message", "text": ERROR},
+    ]
+    assert scan() == 0
+    assert not sent.exists()
+    assert '"action": "delivered"' in (state / "events.jsonl").read_text()
+    assert '"action": "reserved"' not in (state / "events.jsonl").read_text()
+
+
+@pytest.mark.parametrize("activity", [
+    [{"type": "user_message", "text": "done: quoted by user"}],
+    [{"type": "tool_call", "text": "done: tool output"}],
+    [{"type": "assistant_message", "text": "> done: quoted"}],
+    [{"type": "assistant_message", "text": "```text\ndone: example\n```"}],
+    [{"type": "assistant_message", "text": "done: old task"}, {"type": "user_message", "text": "new task"}],
+    [{"type": "assistant_message", "text": "done: old output"}, {"type": "assistant_message", "text": "still working"}],
+])
+def test_only_latest_unquoted_assistant_delivery_counts(fake, activity):
+    data, scan, sent, _ = fake
+    data["activity"] = activity + [{"type": "assistant_message", "text": ERROR}]
+    assert scan() == 0
+    assert sent.exists()
+
+
+def test_error_ages_out_during_probe_without_reservation(fake, monkeypatch):
+    data, scan, sent, state = fake
+    def healthy(self, url):
+        monkeypatch.setattr(M["time"], "time", lambda: NOW + 1801)
+        return True
+    monkeypatch.setattr(Scanner, "healthy", healthy)
+    assert scan() == 0
+    assert not sent.exists()
+    assert '"action": "reserved"' not in (state / "events.jsonl").read_text()
+
+
+def test_delivery_appears_before_send_without_reservation(fake, monkeypatch):
+    _, scan, sent, state = fake
+    calls = 0
+    def delivered(self, aid, provider):
+        nonlocal calls
+        calls += 1
+        return calls > 1
+    monkeypatch.setattr(Scanner, "delivered", delivered)
+    assert scan() == 0
+    assert not sent.exists()
+    assert '"action": "reserved"' not in (state / "events.jsonl").read_text()
+
+
+
+def test_delivery_combined_with_terminal_error_is_still_detected(fake):
+    data, scan, sent, state = fake
+    data["activity"] = [{"type": "assistant_message", "text": "done: review delivered\n" + ERROR}]
+    assert scan() == 0
+    assert not sent.exists()
+    assert '"action": "delivered"' in (state / "events.jsonl").read_text()

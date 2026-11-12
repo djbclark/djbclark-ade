@@ -12,6 +12,23 @@ bin/ade-net-resume --lead LEAD_UUID --apply
 bin/ade-net-resume --lead LEAD_UUID --apply --watch 600 --interval 30
 ```
 
+`--max-error-age-minutes MINUTES` defaults to **30 minutes**. The inspect
+`UpdatedAt` value must be a valid timezone-aware ISO timestamp between now and
+the configured age limit (inclusive). Missing, malformed, timezone-less or
+future timestamps are skipped as `stale`. A stale error is rejected before
+logs, endpoint probes or a budget reservation; age is rechecked before sending.
+This uses Paseo's updated time, which can reflect metadata changes as well as
+an error; it is not a guaranteed error-occurrence timestamp (2026-11-12).
+
+Structured `paseo logs ID --json` also checks for an unquoted, unfenced
+`done:` delivery line in the latest assistant output before the terminal network
+error. That agent is skipped as `delivered`, even when its error is recent.
+User messages and tool output cannot supply a delivery line; a newer user
+message resets the search, and prior assistant outputs are not searched beyond
+the latest non-error output. Unreadable structured logs fail closed. The delivery
+heuristic is deliberately narrow: other completion formats still rely on the
+age guard. Neither skip consumes budget. Both checks also apply to dry runs.
+
 Default is a single dry-run scan with a 120-second overall deadline. `--watch`
 accepts 1..3600 seconds, `--interval` 5..300 seconds (default 30). CLI calls and
 HTTPS probes have timeouts clipped to the remaining deadline. Offline scans
