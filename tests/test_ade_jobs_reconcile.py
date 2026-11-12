@@ -1710,3 +1710,30 @@ def test_empty_scan_does_not_admit_initial_install(fake, tmp_path, monkeypatch):
         env=fake.env, root=tmp_path, state_dir=fake.state, live=S.LiveScan('systemd', ()))
     assert rc == 6 and rows[0]['action'] == 'deferred'
     assert not S.jobs_ledger_path(fake.state).exists()
+
+
+@pytest.mark.parametrize('action', ['install', 'remove'])
+def test_paseo_deferral_identity_survives_host_backend_change(fake, tmp_path, monkeypatch, action):
+    label = 'paseo-nightly'
+    old = dict(logical_id='nightly', label=label, owner=S.OWNER_ADE,
+               backend='paseo', scope='user', status='committed')
+    ledger = S.empty_jobs_ledger(env=fake.env)
+    if action == 'remove':
+        ledger['entries']['nightly'] = old
+    S.save_jobs_ledger(ledger, fake.state, env=fake.env)
+    original = S.jobs_ledger_path(fake.state).read_bytes()
+    step = S.ReconcileStep('nightly', action, S.OWNER_ADE, 'pending', label,
+                           touch=True, ledger_snapshot=old if action == 'remove' else None)
+    monkeypatch.setattr(S, 'plan_reconcile', lambda *a, **kw: [step])
+    def no_effect(*args, **kwargs):
+        pytest.fail('deferred Paseo intent must not execute scheduler effects')
+    jobs = [dict(name='nightly', kind='paseo', label=label, owner=S.OWNER_ADE)]
+    for backend in ('launchd', 'systemd', 'cron'):
+        rows, rc = S.reconcile(jobs, [], dry_run=False, backend=backend,
+            root=tmp_path, env=fake.env, state_dir=fake.state,
+            live=S.LiveScan(backend, ()), paseo_run=no_effect)
+        assert rc == 6 and rows[0]['action'] == 'deferred'
+        intents = json.loads((fake.state / 'jobs-deferred.json').read_text())['jobs']
+        assert list(intents) == [json.dumps(['nightly', 'paseo', label, action])]
+        assert next(iter(intents.values()))['backend'] == 'paseo'
+        assert S.jobs_ledger_path(fake.state).read_bytes() == original

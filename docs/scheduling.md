@@ -372,7 +372,9 @@ admission contract; callers must not treat those paths as proof of global admiss
 
 Deferral intent is atomically stored in `jobs-deferred.json` beside `jobs.json`,
 under the existing reconciliation lock, with logical ID, action, backend, label,
-reason and prior identity. It confers no removal authority. Retries retain intent;
+reason and prior identity. Paseo intents use backend `paseo` regardless of the
+host backend selected, so retries update one logical intent. It confers no
+removal authority. Retries retain intent;
 a successfully reconciled logical job clears its resolved deferral. Dry-run writes
 no deferral record. `ade-install apply` propagates scheduler exit 6 when no other
 component fails. Component-ledger serialization and scheduled updater policy are

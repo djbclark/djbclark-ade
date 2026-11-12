@@ -2510,9 +2510,10 @@ def reconcile(
                 if reason is not None:
                     deferred = True
                     deferred_names.add(step.name)
-                    key = json.dumps([step.name, b.name, step.label, step.action])
+                    target_backend = "paseo" if _step_targets_paseo(step) else b.name
+                    key = json.dumps([step.name, target_backend, step.label, step.action])
                     deferrals["jobs"][key] = {
-                        "logical_id": step.name, "backend": b.name, "label": step.label,
+                        "logical_id": step.name, "backend": target_backend, "label": step.label,
                         "action": step.action, "reason": reason, "updated_at": _utc_now(),
                         "prior_identity": previous,
                     }
