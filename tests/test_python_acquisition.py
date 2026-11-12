@@ -252,7 +252,7 @@ def test_acquisition_waits_for_the_ledger_lock(state):
 
 # ---- sh cold-start bridge, with fake uv/python on a PATH holding nothing else ----
 
-TOOLS = ["od", "tr", "ps", "sh", "uname", "date", "sed", "dirname", "mkdir", "rm", "cat", "test", "[", "kill", "touch", "cut"]
+TOOLS = ["env", "od", "tr", "ps", "sh", "uname", "date", "sed", "dirname", "mkdir", "rm", "cat", "test", "[", "kill", "touch", "cut"]
 
 
 @pytest.fixture
@@ -405,7 +405,7 @@ def test_bridge_runs_uv_from_the_state_dir_not_the_callers_directory(cold, tmp_p
     assert r.returncode == 0, r.stderr
     cwds = [l.split("UVCWD ")[1] for l in cold.text().splitlines() if l.startswith("UVCWD ")]
     assert cwds and set(cwds) == {os.path.realpath(cold.state)}
-    assert "--system --no-project" in cold.text() and "uv --no-config python find" in cold.text()
+    assert "--system --managed-python --no-project" in cold.text() and "uv --no-config python find" in cold.text()
 
 
 def test_bridge_state_dir_tilde_forms(cold):
@@ -428,4 +428,32 @@ def test_python_side_runs_uv_with_no_config_and_state_dir_cwd(state, monkeypatch
     assert rc == 0
     uv_calls = [c for c in seen if c[0][0] == "/fake/uv"]
     assert uv_calls and all(c[0][1] == "--no-config" and c[1] == str(state) for c in uv_calls)
-    assert any(c[0][2:5] == ["python", "find", "--system"] and "--no-project" in c[0] for c in uv_calls)
+    assert any(c[0][2:6] == ["python", "find", "--system", "--managed-python"] and "--no-project" in c[0] for c in uv_calls)
+
+
+def test_python_side_scrubs_token_and_uv_env_and_absolutizes_which(state, monkeypatch):
+    envs = []
+
+    def fake_run(argv, **kw):
+        envs.append(kw.get("env"))
+        return done(0, "3.13.1\n" if argv[1:3] == ["-I", "-c"] else "/m/python3.13\n")
+
+    monkeypatch.setattr(ai.subprocess, "run", fake_run)
+    monkeypatch.setenv("ADE_BOOTSTRAP_TOKEN", "secret")
+    monkeypatch.setenv("UV_NO_MANAGED_PYTHON", "1")
+    monkeypatch.setenv("UV_PYTHON_PREFERENCE", "only-system")
+    r, rc = ai.acquire_python(state_dir=state, yes=True, which=lambda n: "relative-uv" if n == "uv" else None, euid=1000)
+    assert rc == 0 and envs
+    for env in envs:
+        assert not {"ADE_BOOTSTRAP_TOKEN", "UV_NO_MANAGED_PYTHON", "UV_PYTHON_PREFERENCE"} & set(env)
+    assert os.path.isabs(r["install_argv"][0])
+
+
+def test_bridge_normalises_relative_state_dir_and_ignores_uv_env_knobs(cold, tmp_path, monkeypatch):
+    managed = cold.python("managed-python")
+    cold.uv(managed=str(managed))
+    (tmp_path / "decoy" / "st").mkdir(parents=True)
+    r = subprocess.run(["/bin/sh", str(REPO / "bin/ade-bootstrap"), "--yes", "--state-dir", "st"], cwd=tmp_path, capture_output=True, text=True, timeout=30,
+                       env={"PATH": str(cold.bindir), "HOME": str(tmp_path / "home"), "CDPATH": str(tmp_path / "decoy"), "UV_NO_MANAGED_PYTHON": "1"})
+    assert r.returncode == 0, r.stderr
+    assert f"--state-dir {os.path.realpath(tmp_path / 'st')}" in cold.text()

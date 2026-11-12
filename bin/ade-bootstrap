@@ -53,14 +53,14 @@ find_python() {  # prints the first verified interpreter; skips macOS's /usr/bin
         if supported "$cand"; then printf '%s\n' "$cand"; return 0; fi
     done
     if [ -n "$UV" ]; then
-        cand=$(uv_run python find --system --no-project '>=3.11' 2>/dev/null | sed -n 1p)
+        cand=$(uv_run python find --system --managed-python --no-project '>=3.11' 2>/dev/null | sed -n 1p)
         if [ -n "$cand" ] && ! is_stub "$cand" && supported "$cand"; then printf '%s\n' "$cand"; return 0; fi
     fi
     return 1
 }
 
 uv_run() {  # uv independent of the caller's directory and config (no cwd venv, pyproject.toml or uv.toml)
-    ( cd "$STATE" && "$UV" --no-config "$@" )
+    ( CDPATH='' cd -- "$STATE" && env -u UV_NO_MANAGED_PYTHON -u UV_PYTHON_PREFERENCE -u UV_SYSTEM_PYTHON "$UV" --no-config "$@" )
 }
 
 is_stub() {  # macOS /usr/bin/python3 (CLT stub), through any spelling or symlink
@@ -107,6 +107,8 @@ if [ "$YES" = 0 ]; then
 fi
 
 mkdir -p "$STATE" || exit 1
+STATE=$(CDPATH='' cd -- "$STATE" && pwd -P) || exit 1  # absolute, CDPATH-proof
+SENT=$STATE/python-acquire.pending
 
 if [ -e "$SENT" ]; then
     owner=$(sentinel_pid)

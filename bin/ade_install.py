@@ -2653,11 +2653,21 @@ def acquire_python(
     silently and never by re-downloading.
     """
     state_dir = (state_dir or default_state_dir()).expanduser()
-    find = which or shutil.which
+    raw_find = which or shutil.which
+
+    def find(name: str) -> str | None:
+        # Children run with cwd=state_dir, so a relative PATH hit would resolve elsewhere.
+        hit = raw_find(name)
+        return os.path.abspath(hit) if hit else None
+
+    # The one-time hand-off token is read once and not passed on to uv or probed interpreters;
+    # uv env knobs that hide or force managed Pythons are dropped so install and find agree.
+    handoff_token = os.environ.pop("ADE_BOOTSTRAP_TOKEN", "")
+    uv_env = {k: v for k, v in os.environ.items() if k not in ("UV_NO_MANAGED_PYTHON", "UV_PYTHON_PREFERENCE", "UV_SYSTEM_PYTHON")}
     # uv runs from the state dir with --no-config: never from the caller's directory, whose
     # .venv, pyproject.toml or uv.toml would otherwise steer interpreter discovery and downloads.
     run = runner or (lambda argv: subprocess.run(
-        argv, capture_output=True, text=True, check=False, shell=False, cwd=str(state_dir),
+        argv, capture_output=True, text=True, check=False, shell=False, cwd=str(state_dir), env=uv_env,
         stdin=subprocess.DEVNULL, timeout=15 if argv[-1:] != [PYTHON_REQUEST] else 900,
     ))
     report: dict[str, Any] = {
@@ -2676,7 +2686,7 @@ def acquire_python(
     recover_cmd = "bin/ade-install python --recover --yes"
     uv = find("uv")
     uv_install = [uv or "uv", "--no-config", "python", "install", PYTHON_REQUEST]
-    uv_find = [uv or "uv", "--no-config", "python", "find", "--system", "--no-project", ">=%d.%d" % PYTHON_MIN]
+    uv_find = [uv or "uv", "--no-config", "python", "find", "--system", "--managed-python", "--no-project", ">=%d.%d" % PYTHON_MIN]
     report["install_argv"] = uv_install
     pending = read_python_pending(state_dir)
     if pending:
@@ -2744,7 +2754,7 @@ def acquire_python(
                 owner = int(pending.get("pid", ""))
             except ValueError:
                 owner = -1
-            token = os.environ.get("ADE_BOOTSTRAP_TOKEN", "")
+            token = handoff_token
             if owner == os.getpid() and token and pending.get("token") == token:
                 adopted = True  # the cold-start bridge exec'd into this process (same pid and one-time token)
                 owned = pending
