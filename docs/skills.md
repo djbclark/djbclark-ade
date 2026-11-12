@@ -85,5 +85,5 @@ fallback-chains (E7, folded into `model-routing`). The skills, plugins and MCP s
 
 1. Put the directory in `skills/<name>/` here with a `SKILL.md` (front matter `name` and `description`).
 2. Link it into every TUI: `~/src/djbclark-ade/bin/skill-everywhere <name>`, then `--check <name>`.
-3. Add a row above, run `bin/ade-roster --write` for README's roster, and add a changelog fragment. Nothing private
-   goes in a skill here.
+3. Add a row above, validate generation with `bin/ade-roster`, and add a changelog fragment. The Roster workflow
+   publishes `ROSTER.md` on the `generated-roster` branch after merges to master. Nothing private goes in a skill here.

@@ -55,4 +55,3 @@ def test_roster_contains_diagnostic_description():
     assert result.returncode == 0, result.stderr
     expected = "| [`ade-trail-check`](bin/ade-trail-check) | Detect drift in the installed Trail skill-consent matcher. |"
     assert expected in result.stdout
-    assert expected in (REPO / "README.md").read_text()
