@@ -54,7 +54,10 @@ target: unrelated commands, malformed input and any internal error exit 0 with n
 **E. Known limits.** A script or `just` recipe that runs `gh`/`git` itself is not seen. A fork with only an `origin`
 remote (its parent known only to the GitHub API) is not detected for a bare `gh pr create`: the hook makes no network
 call. `jj git push`, `ssh host gh ...` and Jira on `api.atlassian.com` are not parsed. Python or Node code that
-posts to Jira is not seen.
+posts to Jira is not seen. A `case` pattern's `)` inside `"$( )"` ends the substitution early; a dynamic
+`--git-dir` and a `cd` into a directory created earlier in the same command are judged by the old directory; a
+remote name only known at run time (`for r in $(git remote)`) is judged by the cwd's remotes, so name the remote
+literally.
 
 **F. Registration (not done by the PR).** Add a `PreToolUse` entry to `~/.claude/settings.json` (and the template
 `agents/claude/settings.json.tmpl`) with matcher `Bash|mcp__.*[Cc]omposio.*` running
