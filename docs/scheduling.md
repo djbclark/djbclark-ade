@@ -351,3 +351,37 @@ to `auto-permit.jsonl`. See [fan-out](../skills/fan-out/SKILL.md) for scope and
 failure behavior. Render/review is separate from `install`; this change does not
 activate a job. Unlike the judgment schedule defaults above, this system job
 implements the operator's explicit unattended permission grant for our agents.
+
+
+## Admission and deferred reconciliation (2026-11-12)
+
+`ade-sched reconcile --yes` now returns **6** for durable deferral. Existing
+healthy definitions still skip reloads. Installing, reloading or removing a job
+requires a shared admission
+context held through read-back and the ownership commit. Its `JobAdmission`
+evidence must prove all launch paths participate, per-job activity is idle,
+and future triggers are safely drained. Busy/unknown jobs and the updater's own
+running service defer without stopping work. A fleet idle snapshot is insufficient.
+
+No native backend adapter currently proves those conditions. Production therefore
+conservatively defers all installs and removals; it does not claim race-free quiescence.
+The library `admission` callback is a trusted adapter seam, not a CLI bypass or
+an environment opt-in. An adapter must retain the launch exclusion throughout
+its context and drain future triggers without killing running work. Direct low-level `install`/`uninstall` are outside this new reconcile
+admission contract; callers must not treat those paths as proof of global admission.
+
+Deferral intent is atomically stored in `jobs-deferred.json` beside `jobs.json`,
+under the existing reconciliation lock, with logical ID, action, backend, label,
+reason and prior identity. Paseo intents use backend `paseo` regardless of the
+host backend selected, so retries update one logical intent. It confers no
+removal authority. Retries retain intent;
+a successfully reconciled logical job clears its resolved deferral. Dry-run writes
+no deferral record. `ade-install apply` propagates scheduler exit 6 when no other
+component fails. Component-ledger serialization and scheduled updater policy are
+separate contracts.
+
+Backend migration of an existing logical ID defers before adoption, installation
+or removal, including same-label changes. The old ownership record stays intact.
+Automatic migration remains unavailable until an old-backend adapter can drain,
+verify absence (distinguishing unknown from absent), and only then install the
+new backend. No fallback to cron is introduced for unavailable user managers.
