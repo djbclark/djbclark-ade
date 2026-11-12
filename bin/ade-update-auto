@@ -1,19 +1,37 @@
 #!/usr/bin/env python3
-"""S4 ``update --auto``: observe-only by default; optional this-checkout apply.
+"""S4 ``update --auto``: observe-only by default; opt-in apply paths.
 
-    ade-update-auto [--repo PATH] [--json] [--apply-checkout]
-    ade-update --auto [--apply-checkout] …
+    ade-update-auto [--repo PATH] [--json] [--apply-checkout] [--apply]
+    ade-update --auto [--apply-checkout|--apply] …
 
 Always runs observe-only steps (``ade-update --check`` + ``ade-install keys``).
 
-Without ``--apply-checkout`` (and without ``ADE_UPDATE_AUTO_APPLY=1``): exits 5
-naming that scheduled / multi-component auto-apply is not landed (PR 359 / #510
-stub). Daily behind-check remains ``ade-update-check`` / ``just update-check-install``.
+Without ``--apply-checkout`` / ``--apply`` (and without ``ADE_UPDATE_AUTO_APPLY=1``):
+exits 5 naming that this run was observe-only. Daily behind-check remains
+``ade-update-check`` / ``just update-check-install``.
 
 With ``--apply-checkout`` / env: when ``--check`` reports behind (rc 10), runs
-bare ``ade-update`` for **this checkout only** (option 1 / recommended default).
-When already current (rc 0), exits 0 with no apply. Does **not** install the
-``update-auto`` schedule plist, mid-turn skip, or failure ping (options 2–3).
+bare ``ade-update`` for **this checkout only** (option 1). When already current
+(rc 0), exits 0 with no apply.
+
+With ``--apply`` (options 2-3, operator ruling 2026-11-12): the scheduled apply.
+- **Mid-turn skip** (contract 5, preserve active work): before any write, reads
+  machine-wide live Paseo agents (``paseo ls -g --background --json``). Any
+  agent ``running``/``initializing`` defers; an unavailable/failing/unknown
+  fleet reading defers too (unknown or busy state defers).
+- **Durable deferral / intent**: the deferral and the applying-intent records
+  are written atomically to ``<state>/update-auto.json`` (default
+  ``~/.local/state/djbclark-ade/``) before any write; deferral exits 6.
+- **Apply**: fast-forward checkout update (bare ``ade-update``; never merges or
+  rebases) when behind, then dependency updates via
+  ``ade-install update --yes --json`` (evidence + scoped doctor; one retry per
+  doctor-failing component, reported, never rolled back).
+- **Failure ping**: on any apply failure, one ``hermes-ping`` line per run
+  (``ADE_UPDATE_HERMES_PING`` overrides the tool path; a missing/failing ping
+  tool is recorded, never raised).
+
+This command never installs or loads a launchd/systemd/cron job; the daily
+check job stays check-only and no apply plist exists in this repository.
 """
 from __future__ import annotations
 
@@ -22,21 +40,30 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
 EXIT_OK = 0
 EXIT_USAGE = 2
-EXIT_NOT_IMPLEMENTED = 5
 EXIT_ERROR = 4
+EXIT_NOT_IMPLEMENTED = 5
+EXIT_DEFERRED = 6
 DEFAULT_REPO = os.path.expanduser("~/src/djbclark-ade")
-NOT_IMPLEMENTED = (
-    "ade-update-auto: not implemented — scheduled / multi-component auto-apply "
-    "(mid-turn skip, failure ping, update-auto plist) is not landed; this run was "
-    "observe-only (--check + keys). Pass --apply-checkout (or ADE_UPDATE_AUTO_APPLY=1) "
-    "to ff-only update this checkout when behind; daily check remains "
-    "just update-check-install (never auto-applies)."
+DEFAULT_STATE_DIR = Path(
+    os.environ.get("ADE_UPDATE_AUTO_STATE_DIR")
+    or os.path.expanduser("~/.local/state/djbclark-ade")
 )
+NOT_IMPLEMENTED = (
+    "ade-update-auto: this run was observe-only (--check + keys). Pass "
+    "--apply (scheduled apply: mid-turn skip + durable deferral + dependency "
+    "update_argv + doctor retry + failure ping) or --apply-checkout "
+    "(or ADE_UPDATE_AUTO_APPLY=1) to ff-only update this checkout when behind; "
+    "daily check remains just update-check-install (never auto-applies)."
+)
+# Machine-wide live agents; statuses that mean an agent is mid-turn.
+PASEO_LS = ("ls", "-g", "--background", "--json")
+MID_TURN_STATUSES = ("running", "initializing")
 
 
 def _here() -> Path:
@@ -48,32 +75,126 @@ def _env_apply() -> bool:
     return v in ("1", "true", "yes", "on")
 
 
+def _cli_env() -> dict:
+    """Environment for a `paseo` call: PASEO_AGENT_ID unset so the daemon does
+    not wrap a send as agent-to-agent text (same pattern as load-watch)."""
+    return {k: v for k, v in os.environ.items() if k not in ("PASEO_AGENT_ID", "PASEO_AGENT_CWD")}
+
+
+def _paseo_ls() -> tuple[list[dict[str, Any]] | None, str | None]:
+    """(agents, None) from `paseo ls -g --background --json`; (None, why) when
+    there is no paseo, it fails, times out or prints something unexpected.
+    Never raises; an unknown fleet reading defers the scheduled apply."""
+    cli = os.environ.get("PASEO_CLI") or "paseo"
+    try:
+        r = subprocess.run(  # noqa: S603 — argv list only
+            [cli, *PASEO_LS], capture_output=True, text=True, timeout=30,
+            check=False, env=_cli_env(),
+        )
+    except FileNotFoundError:
+        return None, f"no `{cli}` on PATH"
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return None, f"`{cli} ls` failed ({e.__class__.__name__})"
+    if r.returncode != 0:
+        return None, f"`{cli} ls` exited {r.returncode}: {' '.join((r.stderr or r.stdout or '').split())[:120]}"
+    try:
+        rows = json.loads(r.stdout)
+    except (TypeError, ValueError):
+        return None, f"`{cli} ls --json` printed no JSON"
+    if not isinstance(rows, list):
+        return None, f"`{cli} ls --json` printed no list of agents"
+    agents: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict) or not isinstance(row.get("id"), str) or not row["id"]:
+            continue
+        agents.append({
+            "id": row["id"],
+            "short": str(row.get("shortId") or row["id"][:8]),
+            "name": str(row.get("name") or ""),
+            "status": str(row.get("status") or ""),
+        })
+    return agents, None
+
+
+def _hermes_ping(msg: str, tool: str | None = None) -> dict[str, Any]:
+    """One ping line to the operator; never raises (deadline pattern)."""
+    path = tool or os.environ.get("ADE_UPDATE_HERMES_PING") or str(
+        Path.home() / ".local/bin/hermes-ping"
+    )
+    if not Path(path).is_file():
+        return {"tool": path, "error": "ping tool missing"}
+    try:
+        r = subprocess.run(  # noqa: S603 — argv list only
+            [path, msg], capture_output=True, text=True, timeout=30, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return {"tool": path, "error": f"ping failed ({e.__class__.__name__})"}
+    return {"tool": path, "rc": r.returncode}
+
+
+def _write_state(path: Path, payload: dict[str, Any]) -> None:
+    """Atomic durable record: deferrals and the applying intent land on disk
+    before any write, so an interrupted run leaves its state readable."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+    fd, tmp_name = tempfile.mkstemp(prefix=path.name + ".", dir=str(path.parent))
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        if tmp.exists():
+            tmp.unlink(missing_ok=True)
+        raise
+
+
+def _now() -> str:
+    import time
+
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
 def _run(argv: list[str], *, timeout: int = 600) -> subprocess.CompletedProcess[str]:
     return subprocess.run(  # noqa: S603 — argv list only
         argv, capture_output=True, text=True, check=False, timeout=timeout,
     )
 
 
-def run_auto(
+def run_auto(  # noqa: PLR0912 — one linear S4 pipeline, kept readable
     *,
     repo: Path,
     as_json: bool = False,
     apply_checkout: bool = False,
+    apply_full: bool = False,
     run: Any = _run,
     update_bin: Path | None = None,
     install_bin: Path | None = None,
+    paseo_ls: Any = None,
+    ping_fn: Any = None,
+    state_path: Path | None = None,
 ) -> int:
     report: dict[str, Any] = {
         "repo": str(repo),
         "status": "not_implemented",
         "apply_checkout": bool(apply_checkout),
+        "apply_full": bool(apply_full),
+        "mid_turn_checked": False,
+        "deferred_reason": None,
         "ade_update_check_rc": None,
         "ade_update_apply_rc": None,
+        "deps_update_rc": None,
+        "deps_exit": None,
+        "ping": None,
         "keys_rc": None,
         "notes": [],
     }
     update = update_bin or (_here() / "ade-update")
     install = install_bin or (_here() / "ade-install")
+    state = state_path or (DEFAULT_STATE_DIR / "update-auto.json")
+    report["state_path"] = str(state)
     if not update.is_file() or not install.is_file():
         report["status"] = "error"
         report["notes"].append("sibling ade-update or ade-install missing")
@@ -108,34 +229,149 @@ def run_auto(
         report["notes"].append(f"ade-install keys failed (rc={keys.returncode})")
         return _emit(report, as_json, keys.returncode if keys.returncode else EXIT_ERROR)
 
-    if not apply_checkout:
+    if not apply_checkout and not apply_full:
         report["notes"].append(NOT_IMPLEMENTED)
         return _emit(report, as_json, EXIT_NOT_IMPLEMENTED)
 
-    if up.returncode == 0:
+    behind = up.returncode == 10
+
+    def fail(detail: str, rc: int) -> int:
+        report["status"] = "failed"
+        report["notes"].append(detail)
+        report["ping"] = (ping_fn or _hermes_ping)(
+            f"djbclark-ade scheduled update FAILED on {repo}: {detail} "
+            f"(evidence: {state})"
+        )
+        _write_state(state, {
+            "updated_at": _now(),
+            "repo": str(repo),
+            "status": "failed",
+            "detail": detail,
+            "report": {k: v for k, v in report.items() if k != "notes"},
+        })
+        return rc
+
+    if apply_full:
+        # Contract 5: shared admission before any write. Busy or unknown fleet
+        # state defers durably; no writes happen on this run.
+        report["mid_turn_checked"] = True
+        agents, why = (paseo_ls or _paseo_ls)()
+        if why or agents is None:
+            report["deferred_reason"] = f"fleet-unknown: {why or 'no agent list'}"
+        else:
+            busy = [a for a in agents if a.get("status") in MID_TURN_STATUSES]
+            if busy:
+                names = ", ".join(str(a.get("short") or a.get("id") or "?") for a in busy)
+                report["deferred_reason"] = f"mid-turn agents: {names}"
+        if report["deferred_reason"]:
+            report["status"] = "deferred"
+            report["notes"].append(f"deferred: {report['deferred_reason']} (rerun later; exit 6)")
+            _write_state(state, {
+                "updated_at": _now(),
+                "repo": str(repo),
+                "status": "deferred",
+                "reason": report["deferred_reason"],
+                "behind": behind,
+            })
+            return _emit(report, as_json, EXIT_DEFERRED)
+        # Persist pending intent BEFORE writes (contract 4; full ledger is S4b/W21).
+        _write_state(state, {
+            "updated_at": _now(),
+            "repo": str(repo),
+            "status": "applying",
+            "behind": behind,
+            "mid_turn_checked": True,
+        })
+
+    if behind:
+        try:
+            apply = run([str(update), "--repo", str(repo)], timeout=900)
+        except subprocess.TimeoutExpired:
+            if apply_full:
+                return fail("ade-update apply timed out", EXIT_ERROR)
+            report["status"] = "error"
+            report["notes"].append("ade-update apply timed out")
+            return _emit(report, as_json, EXIT_ERROR)
+        report["ade_update_apply_rc"] = apply.returncode
+        if apply.stdout:
+            report["notes"].append(apply.stdout.strip()[-500:])
+        if apply.returncode not in (0, 10):
+            if apply_full:
+                return fail(
+                    f"ade-update apply failed (rc={apply.returncode})", apply.returncode,
+                )
+            report["status"] = "error"
+            report["notes"].append(f"ade-update apply failed (rc={apply.returncode})")
+            if apply.stderr:
+                report["notes"].append(apply.stderr.strip()[-300:])
+            return _emit(report, as_json, apply.returncode if apply.returncode else EXIT_ERROR)
+    elif apply_checkout:
         report["status"] = "current"
         report["notes"].append("ade-update --check: current; no apply")
         return _emit(report, as_json, EXIT_OK)
+    else:
+        report["notes"].append("checkout current; dependency update continues")
 
-    # behind (rc 10): apply this checkout only
+    if not apply_full:
+        # Option 1 stays checkout-only (mid-turn skip and dependency updates
+        # belong to the scheduled --apply path).
+        report["status"] = (
+            "applied" if report.get("ade_update_apply_rc") == 0 else "applied_with_link_debt"
+        )
+        report["notes"].append("checkout-only apply (option 1); no update-auto schedule")
+        return _emit(
+            report, as_json,
+            EXIT_OK if report.get("ade_update_apply_rc") == 0 else 10,
+        )
+
+    # Dependency updates with evidence + scoped doctor + one retry (ade-install update).
     try:
-        apply = run([str(update), "--repo", str(repo)], timeout=900)
+        deps = run(
+            [str(install), "update", "--root", str(repo), "--yes", "--json"],
+            timeout=7200,
+        )
     except subprocess.TimeoutExpired:
-        report["status"] = "error"
-        report["notes"].append("ade-update apply timed out")
-        return _emit(report, as_json, EXIT_ERROR)
-    report["ade_update_apply_rc"] = apply.returncode
-    if apply.stdout:
-        report["notes"].append(apply.stdout.strip()[-500:])
-    if apply.returncode not in (0, 10):
-        report["status"] = "error"
-        report["notes"].append(f"ade-update apply failed (rc={apply.returncode})")
-        if apply.stderr:
-            report["notes"].append(apply.stderr.strip()[-300:])
-        return _emit(report, as_json, apply.returncode if apply.returncode else EXIT_ERROR)
-    report["status"] = "applied" if apply.returncode == 0 else "applied_with_link_debt"
-    report["notes"].append("checkout-only apply (option 1); no update-auto schedule")
-    return _emit(report, as_json, EXIT_OK if apply.returncode == 0 else apply.returncode)
+        return fail("ade-install update timed out", EXIT_ERROR)
+    report["deps_update_rc"] = deps.returncode
+    try:
+        payload = json.loads(deps.stdout) if deps.stdout else None
+        if isinstance(payload, dict):
+            doctor = payload.get("doctor") or {}
+            report["deps_exit"] = payload.get("exit")
+            report["notes"].append(
+                "deps: mode={mode} exit={exit} after_fail={af}".format(
+                    mode=payload.get("mode"),
+                    exit=payload.get("exit"),
+                    af=doctor.get("after_fail"),
+                )
+            )
+    except (TypeError, ValueError):
+        if deps.stdout:
+            report["notes"].append(deps.stdout.strip()[-300:])
+    if deps.returncode != 0:
+        return fail(
+            f"ade-install update failed (rc={deps.returncode}, exit={report['deps_exit']})",
+            deps.returncode if deps.returncode else EXIT_ERROR,
+        )
+
+    checkout_note = (
+        "applied_with_link_debt" if report.get("ade_update_apply_rc") == 10
+        else ("checkout applied" if report.get("ade_update_apply_rc") is not None else "checkout current")
+    )
+    report["status"] = (
+        "applied_with_link_debt" if report.get("ade_update_apply_rc") == 10 else "applied"
+    )
+    report["notes"].append(
+        f"scheduled apply complete: {checkout_note}; dependency update_argv executed "
+        "with evidence (no apply plist installed by this repository)"
+    )
+    _write_state(state, {
+        "updated_at": _now(),
+        "repo": str(repo),
+        "status": report["status"],
+        "deps_exit": report["deps_exit"],
+    })
+    return _emit(report, as_json, EXIT_OK if report["status"] == "applied" else 10)
 
 
 def _emit(report: dict[str, Any], as_json: bool, rc: int) -> int:
@@ -147,10 +383,14 @@ def _emit(report: dict[str, Any], as_json: bool, rc: int) -> int:
         for note in report.get("notes") or []:
             for line in str(note).splitlines() or [""]:
                 print(f"  {line}")
+        if report.get("deferred_reason"):
+            print(f"  deferred: {report['deferred_reason']}")
         if report.get("ade_update_check_rc") is not None:
             print(f"  ade_update_check_rc={report['ade_update_check_rc']}")
         if report.get("ade_update_apply_rc") is not None:
             print(f"  ade_update_apply_rc={report['ade_update_apply_rc']}")
+        if report.get("deps_update_rc") is not None:
+            print(f"  deps_update_rc={report['deps_update_rc']}")
         if report.get("keys_rc") is not None:
             print(f"  keys_rc={report['keys_rc']}")
         if rc == EXIT_NOT_IMPLEMENTED:
@@ -161,7 +401,8 @@ def _emit(report: dict[str, Any], as_json: bool, rc: int) -> int:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         prog="ade-update-auto",
-        description="S4 update --auto: observe-only, or --apply-checkout for this repo only.",
+        description="S4 update --auto: observe-only, --apply-checkout for this repo, "
+                    "or --apply for the scheduled apply (mid-turn skip + failure ping).",
     )
     ap.add_argument("--repo", default=DEFAULT_REPO, help=f"checkout (default {DEFAULT_REPO})")
     ap.add_argument("--json", action="store_true", help="print one JSON object")
@@ -171,13 +412,22 @@ def main(argv: list[str] | None = None) -> int:
         help="when --check is behind, run bare ade-update for this checkout only "
              "(also ADE_UPDATE_AUTO_APPLY=1); does not install the update-auto schedule",
     )
+    ap.add_argument(
+        "--apply",
+        action="store_true",
+        help="scheduled apply (options 2-3): mid-turn skip (busy/unknown fleet defers "
+             "durably, exit 6), checkout fast-forward + dependency update_argv with "
+             "evidence and one doctor retry, hermes-ping on failure; installs no job",
+    )
     args = ap.parse_args(argv)
     repo = Path(args.repo).expanduser()
     if not repo.is_dir():
         print(f"ade-update-auto: not a directory: {repo}", file=sys.stderr)
         return EXIT_USAGE
     apply = bool(args.apply_checkout or _env_apply())
-    return run_auto(repo=repo, as_json=args.json, apply_checkout=apply)
+    return run_auto(
+        repo=repo, as_json=args.json, apply_checkout=apply, apply_full=args.apply,
+    )
 
 
 if __name__ == "__main__":

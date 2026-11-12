@@ -853,11 +853,17 @@ def main(argv=None):
     ap.add_argument("--check", action="store_true", help="report only; change nothing, exit 10 when behind or links missing")
     ap.add_argument("--auto", action="store_true",
                     help="S4: observe-only (--check + keys) then exit 5 unless --apply-checkout "
-                         "(or ADE_UPDATE_AUTO_APPLY=1) ff-only updates this checkout; "
-                         "scheduled auto-apply plist still pending (see bin/ade-update-auto)")
+                         "(or ADE_UPDATE_AUTO_APPLY=1) ff-only updates this checkout, or --apply "
+                         "runs the scheduled apply (mid-turn skip + failure ping; no plist installed; "
+                         "see bin/ade-update-auto)")
     ap.add_argument("--apply-checkout", action="store_true",
                     help="with --auto: when behind, run bare ade-update for this checkout only "
                          "(also ADE_UPDATE_AUTO_APPLY=1); ignored without --auto")
+    ap.add_argument("--apply", action="store_true",
+                    help="with --auto: scheduled apply (options 2-3, operator ruling 2026-11-12): "
+                         "mid-turn skip with durable deferral (exit 6), checkout fast-forward + "
+                         "dependency update_argv with evidence and one doctor retry, hermes-ping "
+                         "on failure; installs no job")
     ap.add_argument("--json", action="store_true", help="print the report as JSON")
     ap.add_argument("--state", default=None, help=f"applied-revision record (default {DEFAULT_STATE}; a non-canonical "
                     "--repo defaults to its own record beside it)")
@@ -868,6 +874,9 @@ def main(argv=None):
     if args.apply_checkout and not args.auto:
         print("ade-update: --apply-checkout requires --auto", file=sys.stderr)
         return 2
+    if args.apply and not args.auto:
+        print("ade-update: --apply requires --auto", file=sys.stderr)
+        return 2
     if args.auto:
         # Dispatch to the sibling auto runner (keeps mid-turn skip + keys out of the apply path).
         auto = Path(__file__).resolve().parent / "ade-update-auto"
@@ -876,6 +885,8 @@ def main(argv=None):
             argv_auto.append("--json")
         if args.apply_checkout:
             argv_auto.append("--apply-checkout")
+        if args.apply:
+            argv_auto.append("--apply")
         return subprocess.call(argv_auto)  # noqa: S603 — argv list only
     repo = Path(os.path.expanduser(args.repo)).resolve()
     if args.state is None:

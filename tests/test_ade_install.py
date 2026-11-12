@@ -1575,3 +1575,192 @@ def test_apply_sched_reconcile_passes_implicit_ade(monkeypatch, tmp_path):
     assert seen == [None]
     assert rows and rows[0]["id"] == "keys-check"
 
+
+
+# --- S4: ade-install update (execute dependency update_argv with evidence) ---
+
+
+def _update_run_spy(rc_by_call: list[int] | None = None):
+    """Fake run callable: records argv calls, returns CompletedProcess per rc list."""
+    calls: list[list[str]] = []
+
+    def run(argv):
+        calls.append([str(a) for a in argv])
+        rc = 0
+        if rc_by_call:
+            rc = rc_by_call.pop(0) if len(rc_by_call) > 1 else rc_by_call[0]
+        return subprocess.CompletedProcess(argv, rc, stdout=f"out {len(calls)}\n", stderr="")
+
+    return run, calls
+
+
+def test_update_dry_run_runs_nothing_writes_nothing(tmp_path):
+    root = _fixture_root(tmp_path)
+    catalog = ai.load_catalog(root=root)
+    run, calls = _update_run_spy()
+    report, rc = ai.apply_updates(
+        catalog, dry_run=True, run=run, state_path=tmp_path / "state" / "updates.json",
+    )
+    assert rc == 0
+    assert calls == []
+    assert report["mode"] == "dry-run"
+    entries = {e["id"]: e for e in report["components"]}
+    assert entries["tool-a"]["action"] == "would-update"
+    assert entries["tool-a"]["argv"] == ["true"]
+    assert entries["tool-a"]["pre"]["status"] == "ok"
+    assert not (tmp_path / "state" / "updates.json").exists()
+    # unchosen/blocked rows never become candidates
+    assert set(entries) == {"tool-a"}
+
+
+def test_update_yes_executes_and_writes_evidence(tmp_path):
+    root = _fixture_root(tmp_path)
+    catalog = ai.load_catalog(root=root)
+    run, calls = _update_run_spy()
+    state = tmp_path / "state" / "updates.json"
+    report, rc = ai.apply_updates(
+        catalog, dry_run=False, run=run, state_path=state,
+    )
+    assert rc == 0
+    assert calls == [["true"]]
+    entry = {e["id"]: e for e in report["components"]}["tool-a"]
+    assert entry["action"] == "updated"
+    assert entry["rc"] == 0
+    assert entry["doctor"] == "ok"
+    assert entry["retried"] is False
+    saved = json.loads(state.read_text())
+    assert saved["mode"] == "apply"
+    assert saved["exit"] == 0
+    assert saved["components"][0]["id"] == "tool-a"
+
+
+def test_update_yes_skips_missing_prestate(tmp_path):
+    root = _fixture_root(tmp_path)
+    # Make tool-a's probe binary absent so pre-observation is missing.
+    catalog = ai.load_catalog(root=root)
+    row = {c["id"]: c for c in catalog.components}["tool-a"]
+    row["probe_argv"] = ["definitely-not-a-binary-xyz", "--version"]
+    run, calls = _update_run_spy()
+    report, rc = ai.apply_updates(
+        catalog, dry_run=False, run=run, state_path=tmp_path / "updates.json",
+    )
+    assert rc == 0
+    assert calls == []  # never ran the update for an absent binary
+    entry = {e["id"]: e for e in report["components"]}["tool-a"]
+    assert entry["action"] == "skip-not-installed"
+    assert "doctor" not in entry
+
+
+def test_update_doctor_fail_retries_once_then_reports(tmp_path):
+    root = _fixture_root(tmp_path)
+    catalog = ai.load_catalog(root=root)
+    run, calls = _update_run_spy()
+
+    obs_fail = ai.Observation("component", "tool-a", "missing", "doctor: absent after update")
+    obs_ok = ai.Observation("component", "tool-a", "ok", "doctor: probe ok")
+    doctor_calls: list[list[str]] = []
+
+    def doctor_fn(_catalog, *, component_ids=None, probe_timeout_s=15.0):
+        doctor_calls.append(list(component_ids or []))
+        # first scoped doctor fails; after the retry it passes
+        if len(doctor_calls) == 1:
+            return [obs_fail], 1
+        return [obs_ok], 0
+
+    state = tmp_path / "updates.json"
+    report, rc = ai.apply_updates(
+        catalog, dry_run=False, run=run, doctor_fn=doctor_fn, state_path=state,
+    )
+    assert rc == 0  # healthy after the one retry
+    assert calls == [["true"], ["true"]]  # initial run + exactly one retry
+    assert doctor_calls == [["tool-a"], ["tool-a"]]
+    entry = {e["id"]: e for e in report["components"]}["tool-a"]
+    assert entry["retried"] is True
+    assert entry["retry_rc"] == 0
+    assert entry["doctor"] == "ok"
+    assert report["doctor"]["before_fail"] == ["tool-a"]
+    assert report["doctor"]["after_fail"] == []
+
+
+def test_update_doctor_still_failing_after_retry_exits_1_no_rollback(tmp_path):
+    root = _fixture_root(tmp_path)
+    catalog = ai.load_catalog(root=root)
+    run, calls = _update_run_spy()
+
+    obs_fail = ai.Observation("component", "tool-a", "error", "doctor: still broken")
+    doctor_calls: list[list[str]] = []
+
+    def doctor_fn(_catalog, *, component_ids=None, probe_timeout_s=15.0):
+        doctor_calls.append(list(component_ids or []))
+        return [obs_fail], 1
+
+    report, rc = ai.apply_updates(
+        catalog, dry_run=False, run=run, doctor_fn=doctor_fn, state_path=tmp_path / "updates.json",
+    )
+    assert rc == 1
+    assert calls == [["true"], ["true"]]  # one retry, then reported
+    entry = {e["id"]: e for e in report["components"]}["tool-a"]
+    assert entry["doctor"] == "fail"
+    assert entry["action"] == "updated"  # evidence recorded; never rolled back
+    assert report["doctor"]["after_fail"] == ["tool-a"]
+
+
+def test_update_failed_update_command_exits_1(tmp_path):
+    root = _fixture_root(tmp_path)
+    catalog = ai.load_catalog(root=root)
+    run, calls = _update_run_spy(rc_by_call=[3])
+
+    obs_ok = ai.Observation("component", "tool-a", "ok", "doctor: probe ok")
+
+    def doctor_fn(_catalog, *, component_ids=None, probe_timeout_s=15.0):
+        return [obs_ok], 0
+
+    report, rc = ai.apply_updates(
+        catalog, dry_run=False, run=run, doctor_fn=doctor_fn, state_path=tmp_path / "updates.json",
+    )
+    assert rc == 1  # update_argv exited 3; doctor ok does not hide it
+    entry = {e["id"]: e for e in report["components"]}["tool-a"]
+    assert entry["action"] == "update-failed"
+    assert entry["rc"] == 3
+    assert entry["doctor"] == "ok"
+
+
+def test_update_id_filter_and_unknown_id(tmp_path):
+    root = _fixture_root(tmp_path)
+    catalog = ai.load_catalog(root=root)
+    run, calls = _update_run_spy()
+    report, rc = ai.apply_updates(
+        catalog, dry_run=True, ids={"tool-a"}, run=run, state_path=tmp_path / "u.json",
+    )
+    assert rc == 0
+    assert [e["id"] for e in report["components"]] == ["tool-a"]
+    with pytest.raises(ai.InstallError, match="unknown update component"):
+        ai.apply_updates(catalog, dry_run=True, ids={"no-such"}, run=run)
+
+
+def test_update_cli_dry_run_and_yes(tmp_path):
+    root = _fixture_root(tmp_path)
+    dry = _run("update", root=root)
+    assert dry.returncode == 0
+    assert "would-update" in dry.stdout
+    state = tmp_path / "state"
+    yes = _run("update", "--yes", "--state", str(state / "updates.json"), root=root)
+    assert yes.returncode == 0
+    assert "updated" in yes.stdout
+    assert "evidence:" in yes.stdout
+    saved = json.loads((state / "updates.json").read_text())
+    assert saved["exit"] == 0
+    # refuse both flags
+    both = _run("update", "--yes", "--dry-run", root=root)
+    assert both.returncode == 2
+
+
+def test_update_cli_json_reports_state(tmp_path):
+    root = _fixture_root(tmp_path)
+    state = tmp_path / "updates.json"
+    out = _run("update", "--yes", "--json", "--state", str(state), root=root)
+    assert out.returncode == 0
+    payload = json.loads(out.stdout)
+    assert payload["ok"] is True
+    assert payload["mode"] == "apply"
+    assert payload["exit"] == 0
