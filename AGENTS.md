@@ -52,7 +52,7 @@ Each doc carries its own summary.
 | [docs/mcp-servers.md](docs/mcp-servers.md), [docs/hand-alias.md](docs/hand-alias.md), [docs/post-edit-check.md](docs/post-edit-check.md), [docs/opencode-plugin-v2.md](docs/opencode-plugin-v2.md) | the MCP roster; the `/hand` alias per TUI; the post-edit syntax hook; OpenCode 2's plugin contract |
 | [docs/upstream-issues.md](docs/upstream-issues.md), [docs/tui-lessons-learned.md](docs/tui-lessons-learned.md) | unfiled bug drafts for third-party projects; what each retired TUI was for and taught |
 | [.claude/workflows/graph-audit.js](.claude/workflows/graph-audit.js) | runnable micro-graph example, `/graph-audit` |
-| [skills/handoff/](skills/handoff/SKILL.md) | tab lifecycle: the successor starts top-level (`env -u PASEO_AGENT_ID -u PASEO_AGENT_CWD paseo run …`), archives its predecessor once it answers, and tells every sibling the new id; Paseo's own `paseo-handoff` once installed |
+| [skills/handoff/](skills/handoff/SKILL.md) | tab lifecycle: the successor starts top-level (`env -u PASEO_AGENT_ID -u PASEO_AGENT_CWD -u PASEO_WORKSPACE_ID paseo run …`), archives its predecessor once it answers, and tells every sibling the new id; Paseo's own `paseo-handoff` once installed |
 | [skills/paseo-screen/](skills/paseo-screen/SKILL.md) | THE screen-control tool (2026-10-31): the Paseo plugin `paseo-screen`; look before clicking, safety rules |
 | [vendor/README.md](vendor/README.md) | what this repo references that lives elsewhere (`fleet-watch`, the launchd fleet notices to Hermes, is site-djbclark's `bin/fleet-watch`; vendor/README.md lists it) |
 
