@@ -247,19 +247,27 @@ or write. Rules, shared by both:
   fall-through into a root-owned user install. A missing `uv` is not fetched:
   the report names the command to run (`brew install uv` or Astral's documented
   user installer; exit 69 / `uv-missing`).
-- A candidate counts only after it runs (`python -I`, version >= 3.11): `python3`
-  and `python3.11`-`3.13` on PATH, then `uv python find`. macOS's
-  `/usr/bin/python3` CLT stub is never probed (running it can raise an install
-  dialog). No `python3` shim is created, so a uv-managed interpreter is invoked
+- A candidate counts only after it runs (`python -I`, version >= 3.11): `python3.13`,
+  `3.12`, `3.11` and `python3` on PATH, then `uv python find` (and, after a
+  bridge hand-off or in recovery, the interpreter running `ade-install`). macOS's
+  `/usr/bin/python3` CLT stub is never probed, by any path or symlink (running it
+  can raise an install dialog). No `python3` shim is created, so a uv-managed interpreter is invoked
   by path: `PYTHON -I bin/ade-install ...`; the command prints that line.
 - Ledger concurrency (keeps #561): `ade-install python --yes` runs under
   `install_ledger_lock`, writes a `python` ledger entry `pending` before any
   download, then `installed` (path, version) or `failed`, preserving every other
   entry. The bridge cannot hold the flock, so it shares a sentinel instead,
-  `<state>/python-acquire.pending` (`pid=`, `started=`, `argv=`; exclusive
-  create, so a concurrent bridge or Python owner loses). The bridge `exec`s into
-  `ade-install python --yes`, keeping its pid; the Python side adopts a sentinel
-  carrying its own pid, verifies, records the ledger and removes the sentinel.
+  `<state>/python-acquire.pending` (`pid=`, `started=`, `token=`, `argv=`;
+  exclusive create, so a concurrent bridge or Python owner loses). The bridge
+  `exec`s into `ade-install python --yes`, keeping its pid and exporting the
+  one-time token as `ADE_BOOTSTRAP_TOKEN`; the Python side adopts a sentinel only
+  when both match (a stale file with a reused pid is never adopted), verifies,
+  records the ledger and removes the sentinel. Either side removes only a
+  sentinel it observed and adopted or wrote itself (re-read first), never a newer
+  owner's. Ledger `python` statuses: `installed` (acquired by uv here or by the
+  bridge), `present` (an interpreter found or recovered; source `found` /
+  `recovered-found`, so a Homebrew Python is never recorded as ADE-installed),
+  `pending`, `failed`.
 - Recovery is explicit, never silent: an unknown outcome (timeout, crash, kill)
   leaves the sentinel (and a `pending` ledger entry), and every later run
   refuses with `pending-recovery` (exit 75 from the bridge) naming

@@ -29,16 +29,18 @@ class Fake:
         self.path_python, self.uv, self.managed = path_python, uv, managed
         self.install_rc, self.install_raises = install_rc, install_raises
         self.installed = False
+        self.extra_names = {}
+        self.on_find = None
         self.sentinel_during_install = None
         self.ledger_during_install = None
 
     def which(self, name):
-        return {"python3": self.path_python, "uv": self.uv}.get(name)
+        return {"python3": self.path_python, "uv": self.uv, **self.extra_names}.get(name)
 
     def run(self, argv):
         self.calls.append(list(argv))
         if argv[1:3] == ["-I", "-c"]:
-            ok = argv[0] == self.managed and self.installed or argv[0] == self.path_python
+            ok = argv[0] == self.managed and self.installed or argv[0] == self.path_python or argv[0] in self.extra_names.values()
             return done(0, "3.13.1\n") if ok else done(1, "3.9.6\n")
         if argv[1:3] == ["python", "install"]:
             self.sentinel_during_install = (self.state / ai.PYTHON_PENDING).is_file()
@@ -48,6 +50,8 @@ class Fake:
             self.installed = self.install_rc == 0
             return done(self.install_rc, "", "boom" if self.install_rc else "")
         if argv[1:3] == ["python", "find"]:
+            if self.on_find:
+                self.on_find()
             return done(0, self.managed + "\n") if self.installed and self.managed else done(1)
         raise AssertionError(f"unexpected argv {argv}")
 
@@ -88,7 +92,7 @@ def test_yes_records_an_existing_supported_python_without_downloading(state):
     assert rc == 0 and report["status"] == "ready" and report["python"] == "/usr/local/bin/python3"
     assert not any(c[1:3] == ["python", "install"] for c in fake.calls)
     entry = ai.load_ledger(state)["entries"]["python"]
-    assert entry["status"] == "installed" and entry["version"] == "3.13.1"
+    assert entry["status"] == "present" and entry["source"] == "found" and entry["version"] == "3.13.1"
     assert not (state / ai.PYTHON_PENDING).exists()
 
 
@@ -100,7 +104,8 @@ def test_cold_acquisition_is_pending_before_download_then_verified(state):
     assert fake.sentinel_during_install is True
     assert fake.ledger_during_install["status"] == "pending"
     entries = ai.load_ledger(state)["entries"]
-    assert entries["python"]["status"] == "installed" and entries["python"]["path"] == "/uv/py/bin/python3.13"
+    assert entries["python"]["status"] == "installed" and entries["python"]["source"] == "acquired"
+    assert entries["python"]["path"] == "/uv/py/bin/python3.13"
     assert entries["just"] == {"status": "installed"}, "other components' evidence is preserved"
     assert not (state / ai.PYTHON_PENDING).exists()
     # only uv and the interpreter probe: never pip, sudo or a package manager
@@ -146,7 +151,7 @@ def test_unknown_outcome_blocks_until_explicit_recovery_which_never_downloads(st
     assert code == 0 and r["status"] == "ready"
     assert not any(c[1:3] == ["python", "install"] for c in recovered.calls)
     entry = ai.load_ledger(state)["entries"]["python"]
-    assert entry["status"] == "installed" and entry["recovered"] is True
+    assert entry["status"] == "present" and entry["source"] == "recovered-found" and entry["recovered"] is True
     assert not (state / ai.PYTHON_PENDING).exists()
 
 
@@ -173,13 +178,55 @@ def test_live_other_owner_blocks(state):
     assert rc == 1 and r["status"] == "owner-active" and fake.calls == []
 
 
-def test_bridge_handoff_adopts_its_own_pending_sentinel(state):
+def test_bridge_handoff_adopts_only_with_pid_and_token(state, monkeypatch):
     state.mkdir()
-    (state / ai.PYTHON_PENDING).write_text(f"pid={os.getpid()}\nstarted=x\nargv=[]\n")
+    (state / ai.PYTHON_PENDING).write_text(f"pid={os.getpid()}\nstarted=x\ntoken=abc123\nargv=[]\n")
+    # a stale sentinel that merely carries a reused pid is not adopted: recovery stays explicit
+    monkeypatch.delenv("ADE_BOOTSTRAP_TOKEN", raising=False)
+    stale = Fake(state, path_python="/uv/py/bin/python3.13")
+    r, rc = stale.acquire(yes=True)
+    assert rc == 1 and r["status"] == "pending-recovery" and stale.calls == []
+    assert (state / ai.PYTHON_PENDING).exists()
+    monkeypatch.setenv("ADE_BOOTSTRAP_TOKEN", "wrong")
+    assert Fake(state, path_python="/p").acquire(yes=True)[0]["status"] == "pending-recovery"
+    monkeypatch.setenv("ADE_BOOTSTRAP_TOKEN", "abc123")
     fake = Fake(state, path_python="/uv/py/bin/python3.13")
     r, rc = fake.acquire(yes=True)
     assert rc == 0 and r["status"] == "ready"
+    assert ai.load_ledger(state)["entries"]["python"]["source"] == "bridge"
     assert not (state / ai.PYTHON_PENDING).exists()
+
+
+def test_adopted_handoff_falls_back_to_the_running_interpreter(state, monkeypatch):
+    # the bridge verified an interpreter and uv is gone / uv find timed out: this 3.11+ process is still usable
+    state.mkdir()
+    (state / ai.PYTHON_PENDING).write_text(f"pid={os.getpid()}\ntoken=t\n")
+    monkeypatch.setenv("ADE_BOOTSTRAP_TOKEN", "t")
+    fake = Fake(state, uv=None)
+    monkeypatch.setattr(ai.sys, "executable", "/running/python3.12")
+    fake.extra_names = {"x": "/running/python3.12"}
+    r, rc = fake.acquire(yes=True)
+    assert rc == 0 and r["python"] == "/running/python3.12"
+
+
+def test_candidate_names_and_uv_less_handoff_on_python312(state):
+    # B2: bridge hands off on python3.12 while python3 is old and uv is absent
+    fake = Fake(state, uv=None, path_python=None)
+    fake.extra_names = {"python3.12": "/opt/homebrew/bin/python3.12"}
+    r, rc = fake.acquire(yes=True)
+    assert rc == 0 and r["python"] == "/opt/homebrew/bin/python3.12"
+    assert not any(c[1:3] == ["python", "install"] for c in fake.calls)
+
+
+def test_python_never_clears_a_sentinel_it_did_not_observe(state):
+    # B1: a bridge starts acquiring (writes its sentinel) while this call is probing
+    fake = Fake(state, managed="/uv/py", path_python=None)
+    theirs = "pid=%d\nstarted=now\ntoken=zzz\nargv=[]\n" % os.getppid()
+    fake.on_find = lambda: (state / ai.PYTHON_PENDING).write_text(theirs)
+    fake.extra_names = {"python3.12": "/opt/homebrew/bin/python3.12"}
+    r, rc = fake.acquire(yes=True)
+    assert rc == 0
+    assert (state / ai.PYTHON_PENDING).read_text() == theirs, "a live owner's evidence must survive"
 
 
 def test_acquisition_waits_for_the_ledger_lock(state):
@@ -205,7 +252,7 @@ def test_acquisition_waits_for_the_ledger_lock(state):
 
 # ---- sh cold-start bridge, with fake uv/python on a PATH holding nothing else ----
 
-TOOLS = ["sh", "uname", "date", "sed", "dirname", "mkdir", "rm", "cat", "test", "[", "kill", "touch", "cut"]
+TOOLS = ["od", "tr", "ps", "sh", "uname", "date", "sed", "dirname", "mkdir", "rm", "cat", "test", "[", "kill", "touch", "cut"]
 
 
 @pytest.fixture
@@ -227,7 +274,8 @@ def cold(tmp_path):
             "#!/bin/sh\n"
             f'if [ "$1" = -I ] && [ "$2" = -c ]; then exit {0 if supported else 1}; fi\n'
             f'echo "HANDOFF pid=$$ args=$*" >> "{log}"\n'
-            f'if [ -f "{state}/python-acquire.pending" ]; then echo "SENTINEL $(cat "{state}/python-acquire.pending" | sed -n 1p)" >> "{log}"; fi\n'
+            f'echo "ENVTOKEN ${{ADE_BOOTSTRAP_TOKEN:-}}" >> "{log}"\n'
+            f'if [ -f "{state}/python-acquire.pending" ]; then echo "SENTINEL $(tr "\\n" " " < "{state}/python-acquire.pending")" >> "{log}"; fi\n'
             "exit 0\n"
         )
         p.chmod(0o755)
@@ -286,7 +334,9 @@ def test_bridge_cold_path_installs_with_uv_then_hands_off_with_adoptable_sentine
     text = cold.text()
     assert "uv python install 3.13" in text and "HANDOFF" in text
     pid = text.split("HANDOFF pid=")[1].split()[0]
-    assert f"SENTINEL pid={pid}" in text, "the exec'd interpreter owns the sentinel (the Python side adopts it)"
+    assert f"SENTINEL pid={pid} " in text, "the exec'd interpreter owns the sentinel (the Python side adopts it)"
+    token = text.split("ENVTOKEN ")[1].split()[0]
+    assert len(token) >= 16 and f"token={token} " in text, "the sentinel and the exec'd environment share the one-time token"
     assert "args=-I" in text and "python --yes --state-dir" in text
 
 
@@ -334,3 +384,10 @@ def test_bridge_rejects_unknown_arguments_and_shows_help(cold):
     assert cold.run("--bogus").returncode == 2
     h = cold.run("--help")
     assert h.returncode == 0 and "cold-start bridge" in h.stdout and "Exit:" in h.stdout
+
+
+def test_bridge_expands_a_literal_tilde_state_dir(cold, tmp_path):
+    cold.uv(); cold.python("python3")
+    r = cold.run("--yes", env={"ADE_INSTALL_STATE_DIR": "~/st"})
+    assert r.returncode == 0, r.stderr
+    assert f"--state-dir {tmp_path / 'home' / 'st'}" in cold.text()

@@ -2592,18 +2592,40 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
-def _write_python_pending(state_dir: Path, argv: list[str]) -> None:
+def _pending_identity(fields: dict[str, str] | None) -> tuple[str, str, str] | None:
+    return None if fields is None else (fields.get("pid", ""), fields.get("started", ""), fields.get("token", ""))
+
+
+def _clear_python_pending(state_dir: Path, observed: dict[str, str] | None) -> None:
+    """Remove the sentinel only if it is still the one this call observed or wrote.
+
+    The shell bridge writes it without the ledger lock, so a different sentinel
+    (a new owner's evidence) must never be unlinked by a call that did not see it.
+    """
+    if observed is None:
+        return
+    if _pending_identity(read_python_pending(state_dir)) == _pending_identity(observed):
+        python_pending_path(state_dir).unlink(missing_ok=True)
+
+
+def _write_python_pending(state_dir: Path, argv: list[str]) -> dict[str, str]:
     """Exclusive create: loses to a concurrent shell bridge or Python owner."""
-    body = (
-        f"pid={os.getpid()}\n"
-        f"started={time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}\n"
-        f"argv={json.dumps(argv)}\n"
-    )
+    started = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    body = f"pid={os.getpid()}\nstarted={started}\nargv={json.dumps(argv)}\n"
     fd = os.open(python_pending_path(state_dir), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as fh:
         fh.write(body)
         fh.flush()
         os.fsync(fh.fileno())
+    return {"pid": str(os.getpid()), "started": started, "token": ""}
+
+
+PYTHON_CANDIDATE_NAMES = ("python3.13", "python3.12", "python3.11", "python3")
+
+
+def _is_macos_python_stub(path: str) -> bool:
+    """macOS /usr/bin/python3 is a CLT stub: running it can raise the developer-tools dialog."""
+    return sys.platform == "darwin" and os.path.realpath(path) == "/usr/bin/python3"
 
 
 def acquire_python(
@@ -2672,59 +2694,68 @@ def acquire_python(
         out = (proc.stdout or "").strip()
         return out if proc.returncode == 0 and re.fullmatch(r"\d+\.\d+\.\d+", out) else None
 
-    def locate() -> tuple[str, str] | None:
-        found = find("python3")
-        # macOS /usr/bin/python3 is a CLT stub: running it can raise the
-        # developer-tools install dialog, a system side effect. Never probe it.
-        if found and sys.platform == "darwin" and os.path.realpath(found) == "/usr/bin/python3":
-            found = None
-        candidates = [found] if found else []
+    def locate(*, own: bool = False) -> tuple[str, str] | None:
+        candidates: list[str] = []
+        for name in PYTHON_CANDIDATE_NAMES:
+            found = find(name)
+            if found and found not in candidates:
+                candidates.append(found)
         if uv:
             try:
                 proc = run(uv_find)
             except (OSError, subprocess.TimeoutExpired):
                 proc = None
             if proc and proc.returncode == 0 and (proc.stdout or "").strip():
-                candidates.append((proc.stdout or "").strip().splitlines()[0])
+                managed = (proc.stdout or "").strip().splitlines()[0]
+                if managed not in candidates:
+                    candidates.append(managed)
+        if own and sys.executable and sys.executable not in candidates:
+            candidates.append(sys.executable)  # bridge hand-off / recovery: this process already runs 3.11+
         for cand in candidates:
+            if _is_macos_python_stub(cand):
+                continue
             version = probe(cand)
             if version:
                 return cand, version
         return None
 
     def record(ledger: dict[str, Any], status: str, **extra: Any) -> None:
+        # "installed" only for what uv acquired; an interpreter found on PATH is "present".
         ledger.setdefault("entries", {})[PYTHON_LEDGER_ID] = {
             "status": status, "kind": "python-acquire", "argv": uv_install,
             "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), **extra,
         }
         save_ledger(state_dir, ledger)
 
-    def clear_pending() -> None:
-        python_pending_path(state_dir).unlink(missing_ok=True)
-
     with install_ledger_lock(state_dir):
         ledger = load_ledger(state_dir)
         pending = read_python_pending(state_dir)
         adopted = False
+        owned: dict[str, str] | None = None  # the sentinel this call may clear: observed-and-adopted/recovered, or written here
         if pending:
             try:
                 owner = int(pending.get("pid", ""))
             except ValueError:
                 owner = -1
-            if owner == os.getpid():
-                adopted = True  # the cold-start bridge exec'd into this process
-            elif owner > 0 and _pid_alive(owner):
-                return fail("owner-active", f"pid {owner} is still acquiring Python; wait for it. Nothing started")
+            token = os.environ.get("ADE_BOOTSTRAP_TOKEN", "")
+            if owner == os.getpid() and token and pending.get("token") == token:
+                adopted = True  # the cold-start bridge exec'd into this process (same pid and one-time token)
+                owned = pending
+            elif owner > 0 and owner != os.getpid() and _pid_alive(owner):
+                return fail("owner-active", f"pid {owner} is still acquiring Python; wait for it (if it is certainly gone, remove {pending['path']}). Nothing started")
             elif not recover:
                 return fail("pending-recovery", f"an earlier Python acquisition left {pending['path']} with an unknown outcome; run `{recover_cmd}` to verify and clear it. Nothing started")
+            else:
+                owned = pending
         elif recover:
             return fail("nothing-to-recover", "no pending Python acquisition; nothing started")
-        found = locate()
+        acquired = adopted
+        found = locate(own=adopted or recover)
         if found is None and not (adopted or recover):
             if not uv:
                 return fail("uv-missing", "no python3 on PATH and no uv; install uv yourself (e.g. `brew install uv`), then rerun. Nothing started")
             try:
-                _write_python_pending(state_dir, uv_install)
+                owned = _write_python_pending(state_dir, uv_install)
             except FileExistsError:
                 return fail("owner-active", "another Python acquisition just started; wait for it. Nothing started")
             record(ledger, "pending")
@@ -2735,16 +2766,22 @@ def acquire_python(
                 return fail("unknown-pending", f"uv outcome unknown; evidence left pending. Run `{recover_cmd}` to verify and clear")
             if result.returncode != 0:
                 record(ledger, "failed", returncode=result.returncode, detail=((result.stderr or result.stdout or "").strip()[:500]))
-                clear_pending()
+                _clear_python_pending(state_dir, owned)
                 return fail("acquisition-failed", "uv python install failed; recorded as failed")
+            acquired = True
             found = locate()
         if found is None:
             record(ledger, "failed", detail="no supported python after acquisition" if not recover else "recovery found no supported python")
-            clear_pending()
+            _clear_python_pending(state_dir, owned)
             return fail("unverified", "no Python 3.11+ could be verified; recorded as failed. Retry with `bin/ade-install python --yes`")
         path, version = found
-        record(ledger, "installed", path=path, version=version, **({"recovered": True} if recover else {}))
-        clear_pending()
+        if recover:
+            record(ledger, "present", source="recovered-found", recovered=True, path=path, version=version)
+        elif acquired:
+            record(ledger, "installed", source="bridge" if adopted else "acquired", path=path, version=version)
+        else:
+            record(ledger, "present", source="found", path=path, version=version)
+        _clear_python_pending(state_dir, owned)
     report.update(status="ready", python=path, python_status="ready", python_version=version)
     return report, 0
 

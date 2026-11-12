@@ -11,11 +11,12 @@
 # POSIX sh because nothing here may need Python. uv only (never pip); user-scoped (refuses as root; never sudo, never a
 # system package manager, never a write outside uv's own user directories and the state dir). It does not fetch uv: a
 # missing uv is reported with the command to run. A sentinel, <state>/python-acquire.pending (exclusive create, holder
-# pid; the Python side shares the file and the ledger lock), marks an unknown outcome; only --recover clears it.
+# pid and one-time hand-off token; the Python side shares the file and takes the ledger lock), marks an unknown outcome; only --recover clears it.
 # Exit: 0 ok/preview, 1 failed, 2 usage, 69 uv missing, 75 busy or pending recovery, 77 refused as root.
 set -u
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd -P) || exit 1
 STATE=${ADE_INSTALL_STATE_DIR:-$HOME/.local/state/djbclark-ade/install}
+case $STATE in "~") STATE=$HOME ;; "~/"*) STATE=$HOME/${STATE#"~/"} ;; esac  # the Python side expands ~ too
 YES=0
 RECOVER=0
 while [ $# -gt 0 ]; do
@@ -46,22 +47,38 @@ supported() {  # $1 = interpreter; true when it runs and is 3.11+
 find_python() {  # prints the first verified interpreter; skips macOS's /usr/bin/python3 CLT stub (it can raise an install dialog)
     for name in python3.13 python3.12 python3.11 python3; do
         cand=$(command -v "$name" 2>/dev/null) || continue
-        if [ "$(uname -s)" = Darwin ] && [ "$cand" = /usr/bin/python3 ]; then continue; fi
+        if is_stub "$cand"; then continue; fi
         if supported "$cand"; then printf '%s\n' "$cand"; return 0; fi
     done
     if [ -n "$UV" ]; then
         cand=$("$UV" python find '>=3.11' 2>/dev/null | sed -n 1p)
-        if [ -n "$cand" ] && supported "$cand"; then printf '%s\n' "$cand"; return 0; fi
+        if [ -n "$cand" ] && ! is_stub "$cand" && supported "$cand"; then printf '%s\n' "$cand"; return 0; fi
     fi
     return 1
 }
 
+is_stub() {  # macOS /usr/bin/python3 (CLT stub), through any spelling or symlink
+    [ "$(uname -s)" = Darwin ] && [ "$1" -ef /usr/bin/python3 ]
+}
+
 handoff() {  # exec: the sentinel's pid (this shell's) becomes the Python process, which adopts it
     # shellcheck disable=SC2086
+    ADE_BOOTSTRAP_TOKEN=${TOKEN:-}
+    export ADE_BOOTSTRAP_TOKEN
     exec "$PY" -I "$ROOT/bin/ade-install" python --yes --state-dir "$STATE" $1
 }
 
+clear_own() {  # remove the sentinel only if it still carries our token
+    case $(sentinel_text) in *"token=$TOKEN"*) rm -f "$SENT" ;; esac
+}
+
 sentinel_pid() { sed -n 's/^pid=//p' "$SENT" 2>/dev/null | sed -n 1p; }
+sentinel_text() { cat "$SENT" 2>/dev/null; }
+
+pid_alive() {  # a positive decimal pid that kill -0 or ps can see (kill -0 alone fails with EPERM for other users)
+    case $1 in ''|*[!0-9]*|0) return 1 ;; esac
+    kill -0 "$1" 2>/dev/null || ps -p "$1" >/dev/null 2>&1
+}
 
 if [ "$YES" = 0 ]; then
     echo "ade-bootstrap: preview (nothing run, downloaded or written)"
@@ -87,8 +104,9 @@ mkdir -p "$STATE" || exit 1
 
 if [ -e "$SENT" ]; then
     owner=$(sentinel_pid)
-    if [ -n "$owner" ] && kill -0 "$owner" 2>/dev/null; then
-        echo "ade-bootstrap: pid $owner is still acquiring Python; wait for it. Nothing started." >&2
+    seen=$(sentinel_text)
+    if pid_alive "$owner"; then
+        echo "ade-bootstrap: pid $owner is still acquiring Python; wait for it (if it is certainly gone, remove $SENT). Nothing started." >&2
         exit 75
     fi
     if [ "$RECOVER" = 0 ]; then
@@ -99,9 +117,14 @@ if [ -e "$SENT" ]; then
     if PY=$(find_python); then
         handoff --recover
     fi
-    rm -f "$SENT"
-    echo "ade-bootstrap: no Python 3.11+ is usable; cleared $SENT. Retry: sh bin/ade-bootstrap --yes"
-    exit 0
+    # Clear only the sentinel we examined; a fresh owner's file must survive.
+    if [ "$(sentinel_text)" = "$seen" ]; then
+        rm -f "$SENT"
+        echo "ade-bootstrap: no Python 3.11+ is usable; cleared $SENT (an install-ledger 'python' entry, if any, stays pending until a later 'ade-install python --yes' records the outcome). Retry: sh bin/ade-bootstrap --yes"
+        exit 0
+    fi
+    echo "ade-bootstrap: $SENT changed while recovering (another run started); left in place. Nothing cleared." >&2
+    exit 75
 elif [ "$RECOVER" = 1 ]; then
     echo "ade-bootstrap: nothing to recover (no $SENT). Nothing started." >&2
     exit 1
@@ -117,17 +140,21 @@ if [ -z "$UV" ]; then
 fi
 
 # Exclusive create (noclobber): a concurrent bridge or the Python side loses here.
-if ! ( set -C; printf 'pid=%s\nstarted=%s\nargv=%s\n' "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$install_cmd" > "$SENT" ) 2>/dev/null; then
+# The one-time token (also exported to the exec'd interpreter) proves hand-off, so a stale sentinel whose pid
+# was reused is never adopted.
+TOKEN=$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')
+[ -n "$TOKEN" ] || { echo "ade-bootstrap: could not make a hand-off token. Nothing started." >&2; exit 1; }
+if ! ( set -C; printf 'pid=%s\nstarted=%s\ntoken=%s\nargv=%s\n' "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$TOKEN" "$install_cmd" > "$SENT" ) 2>/dev/null; then
     echo "ade-bootstrap: another acquisition just started ($SENT). Nothing started." >&2
     exit 75
 fi
 if ! "$UV" python install "$REQUEST"; then
-    rm -f "$SENT"
+    clear_own
     echo "ade-bootstrap: '$install_cmd' failed; sentinel cleared (outcome known). Nothing else was changed by this bridge." >&2
     exit 1
 fi
 if ! PY=$(find_python); then
-    rm -f "$SENT"
+    clear_own
     echo "ade-bootstrap: uv finished but no Python 3.11+ could be verified; sentinel cleared. Retry: sh bin/ade-bootstrap --yes" >&2
     exit 1
 fi
