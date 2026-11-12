@@ -152,8 +152,41 @@ No new manual-paste requirement, invented APPROVE, provider dependency, live
 review launch or merge-gate code change is authorized by this comparison alone;
 existing feature-recovery scope and prior trust decisions govern implementation.
 
-## 7. Remaining walkthrough
+## 7. Final gates and execution sequence
 
-Offer review-detail comparison if wanted, then cover final deletion gates and
-repair sequencing. Prior hard stops remain unchanged. Execute queued larger
-work after the walkthrough; track source completion separately from live proof.
+Operator chose to continue to final gates and repair sequence. Walkthrough
+complete; no deletion approval requested or granted. Keep relay.py,
+acp-dispatch/acp-dispatch-wait and acp-run until actual live evidence passes
+wave6-delete-check, B2 is drained/recaptured, C3 installed callers are proved and
+the date gate is met. No --allow-early, invented waives, invented APPROVE or Pi
+acceptance flips. Deletion PR still requires explicit operator confirmation.
+review-launch remains permanent. Nov10 evidence is historical, not a new probe.
+
+Implementation order (parallelize disjoint work in separately claimed worktrees):
+
+1. Pi backup repair plus bounded persistent-progress design; resolve audit
+   documentation contradictions and preserve existing open implementation PRs.
+2. Native handoff, permission-mode verification/recovery and provider-independent
+   review evidence/coordination; build on proven current facilities.
+3. Full quota capability recovery, including forecasting, appropriate automatic
+   adjustments, temporary profiles, reset recovery and cost/waste analysis.
+4. Web fallback/digest gaps and nightly learning with enforced budgets,
+   independently reviewed automatic skill-only adoption and separate standing-order
+   proposals; validate moved-skill access without duplicating source.
+5. Live Mac validation/deployment evidence for completed source changes and, only
+   after all original gates pass, a separately confirmed shim deletion proposal.
+
+Design-only choices remain design-only (persistent reminder and one-command
+handoff investigation) until a concrete proposal is prepared; agreed fixes can
+proceed. No new broad permission question is needed for authorized ADE source
+work. Escalate concrete unusual difficulty or unresolved policy tradeoffs.
+
+| Item | Choice | Outcome at walkthrough close |
+|---|---|---|
+| 1 | Persistent progress reminder | Design queued; no runtime activation |
+| 2 | Pi backup repair; preserve archives | Implementation queued |
+| 3 | Verify/fix native handoff; investigate one-command handoff and mode drift | Queued |
+| 4 | All quota capabilities unless exceptionally difficult | Recovery work queued |
+| 5 | Recover web/skill capabilities; auto-adopt validated skill-only learning | Queued; standing-order edits remain proposals |
+| 6 | Recover useful review coordination; preserve owner trust and external boundary | Queued under existing policy |
+| 7 | Preserve evidence/date/operator deletion gates | No deletion authorized |
