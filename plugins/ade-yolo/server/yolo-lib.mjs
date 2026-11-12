@@ -79,7 +79,7 @@ export function hasSavedEvidence(snapshot) {
 }
 /**
  * An agent this plugin never stamped (created before install, with the plugin disabled, internal, or imported) is
- * legacy. Agents expose no install-time field, so "created before install" == "no stamp".
+ * legacy. Agents expose no install-time field, so "created before install" implies "no stamp" (the converse is false: disabled, internal and imported agents read as legacy too).
  */
 export function isLegacyAgent(snapshot, request) {
   return blank(snapshot?.metadata?.[STAMP_METADATA_KEY]) && blank(request?.metadata?.[STAMP_METADATA_KEY]);

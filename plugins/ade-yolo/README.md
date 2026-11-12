@@ -25,7 +25,7 @@ that stamp is *legacy*: created before the plugin was installed (Hermes included
 internal, imported, or stripped of its stamp (the SDK exposes no install time, so "no stamp" is a superset of
 "created before install"; none of these can escalate, they only turn a refusal into allow-and-log): missing evidence is allowed and logged
 (`ade-yolo: <id>: legacy agent without saved mode evidence; allowed`, written to the plugin's stderr), with no
-catalog lookup. Retired providers (omp, opencode, crush, agy, grok) are refused first, legacy or not. If the
+catalog lookup. Retired providers (omp, opencode, crush, agy, grok) are refused first, legacy or not. Drift refuses legacy agents too: see *Install impact*. If the
 host drops the metadata, every agent reads as legacy and only drift refuses. This hook can check or
 refuse, not mutate saved modes. History reads do not open a runtime and remain allowed.
 A matching saved value is a **preflight**, not post-open proof. Native runtime
@@ -44,36 +44,58 @@ paseo plugin install /absolute/path/to/djbclark-ade/plugins/ade-yolo
 paseo plugin ls --json  # verify enabled/running on the intended daemon
 ```
 
-## Canary procedure (lead runs this after merge; snapshot 2026-11-12)
+## Install impact (read before installing; snapshot 2026-11-12)
+
+Drift refuses **legacy agents too**. Hosts save the provider's default mode on every agent: Claude `default`,
+Codex `auto`, Cursor `agent`, Antigravity `full-access`, Pi none. Installing the plugin makes the host re-check
+every live, idle agent on its next prompt (`hooks.changed` invalidates plugin sessions, then a `refresh` open
+runs `agent.open.before`). A legacy Claude/Codex agent with a saved non-YOLO mode is refused as drift, and every
+later prompt is refused until the mode is repaired (a verified successor, set to the YOLO mode) or
+`paseo plugin disable ade-yolo`. On this host that was at least 23 unarchived Claude `default` agents and 2 Codex
+`auto` agents, the lead's own session included if it runs in `default` mode. Only agents with **no** saved
+mode (Pi, Hermes-style dynamic providers, pre-mode records) get the allow-and-log path.
+
+## Canary procedure (lead runs this after merge)
 
 The plugin is not installed by this repo. Never prompt an operator's own agent or Hermes: the canary resumes
-only throwaway agents it created. Run in order; stop and roll back on the first unexpected result.
+only throwaway agents it created. Providers are a closed list: claude, codex, antigravity, pi, cursor, each only
+if enabled in `paseo provider ls --json`. Other enabled providers are not created in step 0; their step-2
+creates are **expected refusals** (hermes, cline: unverified; grok and other retired clients: retired). Run in
+order; stop and roll back on a result not listed as expected.
 
-0. **Before installing**, per enabled provider from `paseo provider ls --json` (claude, codex, antigravity, pi,
-   cursor if present; skip and report disabled ones), create two idle throwaway agents, so they are legacy
-   (no stamp) by construction: `paseo run --provider <provider>/<model> --json -- "reply with the word ok"`.
-   Make one of the Claude throwaways with `--mode default` (the drift case). Record ids.
-1. Install from a clean pinned tree, not the shared checkout: `git -C /Users/djbclark/src/djbclark-ade fetch origin`,
-   `git -C /Users/djbclark/src/djbclark-ade worktree add --detach /Users/djbclark/src/djbclark-ade-yolo-canary-wt origin/master`,
-   record the sha, then `paseo plugin install /Users/djbclark/src/djbclark-ade-yolo-canary-wt/plugins/ade-yolo`.
-   `paseo plugin ls --json` shows `ade-yolo` enabled/running. Keep that worktree until rollback.
-2. New creates: per enabled provider create a fresh throwaway as in step 0 (it now gets the stamp). Expected
-   `bin/ade-agent-mode check <id> --json`: Claude `bypassPermissions`, Codex/Antigravity `full-access`:
-   `verified`. **Cursor and Pi report `unavailable` (exit 2) from that CLI by design** (it passes no controls,
-   and Pi has no mode): for them the pass criterion is that the create succeeded rather than being refused.
-3. Resume the step-0 throwaways (legacy, no saved mode): each opens (`paseo send <id> "ok"`), and the plugin
-   stderr (`paseo plugin logs ade-yolo` if the host offers it) shows `legacy agent without saved mode
-   evidence; allowed`. The `--mode default` Claude throwaway must be **refused as drift**: that refusal is the
-   expected result, not a failure.
-4. Hermes: do not prompt it. `paseo ls -g --json` still lists it with the same id/status; its next natural
-   open must show no `ade-yolo` refusal.
-5. Restrictive escape: create a throwaway with `--mode plan` (Claude); it creates restricted and
-   `ade-agent-mode check` reports `exempt`. (`ade-yolo.skip` is metadata-only: reachable through the MCP
-   `create_agent` metadata, not `paseo run`.)
-6. Archive every throwaway.
+0. Audit before installing: list unarchived agents (`paseo ls -g --json`) and, per id,
+   `/Users/djbclark/src/djbclark-ade/bin/ade-agent-mode check <id> --json`; every agent that is not
+   `verified`/`exempt` (saved `default`/`auto`) will be refused on its next prompt once installed. The operator
+   decides (repair, successor, or accept) before step 1. Note whether Hermes is listed (step 5).
+1. Create throwaways **before installing** so they are legacy (no stamp). Per provider, in a scratch dir:
+   `paseo run --provider <provider>/<model> --cwd <scratch dir> --wait-timeout 2m --json -- "reply with the word ok"`.
+   Record ids; also make a Claude one with `--mode bypassPermissions`.
+2. Install from a clean pinned tree, not the shared checkout. The host records the directory path, so the
+   worktree is the live plugin source: **it must persist** until rollback or reinstall. Run
+   `git -C /Users/djbclark/src/djbclark-ade fetch origin`, then
+   `git -C /Users/djbclark/src/djbclark-ade worktree add --detach /Users/djbclark/src/djbclark-ade-yolo-plugin-wt origin/master`,
+   record the sha, then `paseo plugin install /Users/djbclark/src/djbclark-ade-yolo-plugin-wt/plugins/ade-yolo`.
+   `paseo plugin ls --json` shows `ade-yolo` enabled/running.
+3. Resume the step-1 throwaways (`paseo send <id> "ok"`). Expected per provider:
+   Claude `--mode bypassPermissions`: opens, no log line (match). Plain Claude and Codex (saved `default`/`auto`):
+   **refused as drift**, expected. Antigravity (saved `full-access`): opens, no log line. Pi (no saved mode):
+   opens and the plugin stderr (`paseo plugin logs ade-yolo`) shows `legacy agent without saved mode evidence;
+   allowed`. Cursor (saved `agent`): opens with `legacy agent without saved auto_accept; allowed`, or report it
+   unverified if `listControls` is unavailable.
+4. New creates: repeat step 1 per provider (now stamped). Expected `ade-agent-mode check <id> --json`
+   (absolute path): Claude `bypassPermissions`, Codex/Antigravity `full-access`: `verified`. **Cursor and Pi
+   report `unavailable` (exit 2) from that CLI by design** (it passes no controls; Pi has no mode): their
+   pass criterion is that the create succeeded. Also confirm hermes/cline creates (if attempted) refuse as
+   expected, never as a surprise.
+5. Hermes: do not prompt it. If it was listed before install, `paseo ls -g --json` still lists it with the same
+   id/status afterwards, and its next natural open shows no `ade-yolo` refusal.
+6. Restrictive escape: create a throwaway with `--mode plan` (Claude); `ade-agent-mode check` reports `exempt`.
+   (`ade-yolo.skip` is metadata-only: reachable through MCP `create_agent` metadata, not `paseo run`.)
+7. Archive every throwaway.
 
 Rollback (exact): `paseo plugin remove ade-yolo` (the uninstall; `paseo plugin disable ade-yolo` is the
-reversible off switch), then `paseo plugin ls --json` shows no `ade-yolo` row; remove the canary worktree.
+reversible off switch, and the immediate cure for agents refused as drift), then `paseo plugin ls --json` shows
+no `ade-yolo` row; then `git -C /Users/djbclark/src/djbclark-ade worktree remove /Users/djbclark/src/djbclark-ade-yolo-plugin-wt`.
 
 Source contracts were inspected at upstream `4df5307e` (0.16.0-beta.2 source).
 Older hosts without the catalog/control SDK report unavailable rather than
