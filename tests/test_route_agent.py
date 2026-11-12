@@ -793,7 +793,7 @@ class TestFrontierConservative2026_10_18(unittest.TestCase):
                                        "resetsAt": stamp(now + timedelta(hours=2))},
                                       {"id": "f", "label": "Weekly (Fable)", "usedPct": 40.0, "remainingPct": 60.0,
                                        "resetsAt": stamp(now + timedelta(days=3))}]})
-        path.write_text(json.dumps([{"id": "claude:default", "sourceId": "claude", "sourceLabel": "Claude", "icon": "<svg/>",
+        path.write_text(json.dumps([{"id": "claude:default", "sourceId": "claude", "pool_family": "default", "sourceLabel": "Claude", "icon": "<svg/>",
                                      "account": "a", "fetchedAt": stamp(fetched), "report": report, "loginErrors": []}]))
         return path
 
@@ -843,7 +843,7 @@ class TestFrontierConservative2026_10_18(unittest.TestCase):
         it is recorded (`paseo_unknown`), never a loosening and never a block of a known reading."""
         tmp = Path(tempfile.mkdtemp(prefix="ragate-aiuse-"))
         (tmp / "aiuse.json").write_text(json.dumps({"fresh": True, "age_seconds": 60, "available": [
-            {"provider": "claude", "pool_family": None, "usable_now": True, "headroom_percent": 64.0, "age_seconds": 60,
+            {"provider": "claude", "pool_family": "default", "usable_now": True, "headroom_percent": 64.0, "age_seconds": 60,
              "binding_window": "weekly"},
             {"provider": "claude", "pool_family": "fable", "usable_now": True, "headroom_percent": 55.0, "age_seconds": 60}]}))
         env = {**self.gate_env(claude="unknown"), "ROUTE_AGENT_AIUSE_JSON": str(tmp / "aiuse.json")}
@@ -853,7 +853,7 @@ class TestFrontierConservative2026_10_18(unittest.TestCase):
             self.assertIn("report unavailable", state["paseo_unknown"])
             self.assertEqual(r.frontier_per_wave("claude", r.frontier_gate(), IDLE), 2)
         (tmp / "aiuse.json").write_text(json.dumps({"fresh": True, "age_seconds": 60, "available": [
-            {"provider": "claude", "pool_family": None, "usable_now": True, "headroom_percent": 64.0, "age_seconds": 2400}]}))
+            {"provider": "claude", "pool_family": "default", "usable_now": True, "headroom_percent": 64.0, "age_seconds": 2400}]}))
         with mock.patch.dict(os.environ, env):
             self.assertEqual(r.frontier_per_wave("claude", r.frontier_gate(), IDLE), 1)     # a 40-minute-old row is stale
 
@@ -2620,7 +2620,8 @@ class TestQuotaFromPaseoUsage(unittest.TestCase):
         if status == "available":
             rep["windows"] = list(windows)
             rep["balances"] = list(balances)
-        return {"id": f"{source}:default", "sourceId": source, "sourceLabel": source, "icon": "<svg>x</svg>", "account": "a",
+        return {"id": f"{source}:default", "sourceId": source,
+                "pool_family": "default" if source == "claude" else None, "sourceLabel": source, "icon": "<svg>x</svg>", "account": "a",
                 "fetchedAt": (self.NOW - timedelta(minutes=age_min)).strftime("%Y-%m-%dT%H:%M:%SZ"), "report": rep,
                 "loginErrors": [{"message": "x"}]}
 
@@ -2702,7 +2703,7 @@ class TestQuotaFromPaseoUsage(unittest.TestCase):
 
     def test_the_tighter_source_wins_per_pool_and_each_pool_names_its_source(self):
         aiuse = [{"provider": "codex", "pool_family": None, "usable_now": True, "headroom_percent": 80.0, "age_seconds": 20},
-                 {"provider": "claude", "pool_family": None, "usable_now": True, "headroom_percent": 40.0, "age_seconds": 20}]
+                 {"provider": "claude", "pool_family": "default", "usable_now": True, "headroom_percent": 40.0, "age_seconds": 20}]
         usage = [self.row("codex", windows=[self.win("5-hour", left=35.0)]), self.row("claude", windows=[self.win("Weekly", left=90.0)]),
                  self.row("cursor", windows=[self.win("Monthly", left=66.0)])]
         quota, _, info = self.load(aiuse, usage)
