@@ -100,10 +100,25 @@ analysis. Pause/resume does not replace exhaustion prediction. Old governor also
 downgraded Fable at every level and steered critical leads to now-retired omp;
 these behaviors must not be resurrected from historical code without a new choice.
 
-## 5. Remaining walkthrough
+## 5. Web, moved skills and nightly learning
 
-Quota capability choice is settled; next:
-web/moved skills/nightly learning; review/permissions;
+Walkthrough continued under the capability-retention preference. Recover web
+fetch fallbacks and bounded digest capability where current tools do not already
+provide them; keep the restored Firecrawl router. Verify discoverability of moved
+site skills rather than duplicate their source back into ADE. Restore useful
+skill maintenance capabilities through current distribution/validation tooling.
+
+Nightly learning source comparison: historical SkillOpt harvested transcripts,
+replayed tasks and staged skill/instruction proposals; auto_adopt was false.
+The historical guide explicitly reports max_tokens_per_night was unenforced at
+its cited revision. A replacement needs actual budget enforcement, evidence
+handling, current provider adapters and regression checks, not a blind runner
+restore. Proposal adoption policy is the open choice in this step. No learning
+job, transcript harvest, model call or automatic merge has been enabled here.
+
+## 6. Remaining walkthrough
+
+Settle nightly learning adoption policy; then review/permissions;
 remaining deletion gates and repairs. These items remain undecided except where
 prior operator instructions already apply. Ask one question at a time; act on
 small choices immediately and execute larger queued work after the walkthrough.
