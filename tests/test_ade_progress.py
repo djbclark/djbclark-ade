@@ -58,17 +58,31 @@ FAKE_PING = textwrap.dedent('''\
 ''')
 FAKE_PP = textwrap.dedent('''\
     #!/usr/bin/env python3
+    # Stateful fake of paseo-progress 1.14.6: ids restart per run (`start`), `show` lists `Title (S1: reason), since now`.
     import json, os, sys
     d = os.environ["FAKE_DIR"]
+    a = sys.argv[1:]
     with open(d + "/pp.jsonl", "a") as f:
-        f.write(json.dumps([os.getcwd()] + sys.argv[1:]) + "\\n")
+        f.write(json.dumps([os.getcwd()] + a) + "\\n")
     if os.path.exists(d + "/pp.norun"):
         print("The run is finished"); sys.exit(1)
-    if sys.argv[1:3] == ["stuck", "set"]:
-        n = len(open(d + "/pp.jsonl").read().splitlines())
-        print("Flagged S%d: %s" % (n, sys.argv[3]))   # the real paseo-progress 1.14.6 output format
-    elif sys.argv[1] == "show":
-        print("Stuck: S1 S2 S3 S4 S12 (no S99)" if not os.path.exists(d + "/pp.noshow") else "nothing")
+    sp = d + "/pp.state.json"
+    st = json.load(open(sp)) if os.path.exists(sp) else {"n": 0, "items": {}}
+    def save():
+        json.dump(st, open(sp, "w"))
+    if a[:2] == ["stuck", "set"]:
+        st["n"] += 1; i = "S%d" % st["n"]; st["items"][i] = a[2]; save()
+        print("something else %d" % st["n"] if os.path.exists(d + "/pp.weird") else "Flagged %s: %s" % (i, a[2]))
+    elif a[:2] == ["stuck", "clear"]:
+        if a[2] not in st["items"]:
+            print("No flagged blocker " + a[2]); sys.exit(1)
+        del st["items"][a[2]]; save(); print("Cleared " + a[2])
+    elif a[0] == "show":
+        if not os.path.exists(d + "/pp.noshow"):
+            for i, r in st["items"].items():
+                print("  Blocked (%s: %s), since now" % (i, r))
+    elif a[0] == "start":
+        st = {"n": 0, "items": {}}; save()
 ''')
 
 
@@ -564,8 +578,6 @@ def test_rc0_without_a_readable_id_is_unverified_and_never_set_twice(e):
     e.agent("a1", status="closed")
     e.declare()
     (e.fake / "pp.weird").write_text("1")
-    src = (e.fake / "paseo-progress").read_text().replace('print("Flagged S%d', 'print("something else %d" if os.path.exists(d + "/pp.weird") else "Flagged S%d')
-    (e.fake / "paseo-progress").write_text(src)
     e.scan()
     assert e.inbox()[0]["ui"] == "unverified"
     e.clock += 3 * HOUR + 60
@@ -623,3 +635,55 @@ def test_busy_scan_json_is_json(e):
     r = e.run("scan", "--yes", "--json")
     p1.communicate(timeout=60)
     assert r.returncode == 0 and json.loads(r.stdout)["busy"] is True
+
+
+def pp_state(e) -> dict:
+    return json.loads((e.fake / "pp.state.json").read_text())
+
+
+def test_item_the_agent_cleared_is_not_carried_as_verified(e):
+    e.agent("a1", status="closed")
+    e.declare()
+    e.scan()
+    (e.fake / "pp.state.json").write_text(json.dumps({"n": 1, "items": {}}))   # the agent ran `stuck clear S1` to finish
+    e.run("declare", "--task", "t1", "--agent", "a1", "--summary", "next", "--generation", "1", "--yes")
+    e.clock += 60
+    e.scan()
+    recs = {r["key"].split("|")[3]: r for r in e.inbox()}
+    assert recs["2"]["ui_id"] == "S2" and recs["2"]["ui"] == "verified" and recs["1"].get("ui_gone")
+    e.run("ack", "--task", "t1", "--yes")
+    assert pp_state(e)["items"] == {}   # S2 cleared, S1 was never touched again
+
+
+def test_ack_never_clears_an_id_that_is_now_the_agents_own_item(e):
+    e.agent("a1", status="closed")
+    e.declare()
+    e.scan()
+    (e.fake / "pp.state.json").write_text(json.dumps({"n": 1, "items": {"S1": "need creds"}}))   # new run reused S1
+    r = e.run("ack", "--task", "t1", "--yes")
+    assert r.returncode == 0 and "not cleared (absent)" in r.stdout
+    assert pp_state(e)["items"] == {"S1": "need creds"}
+    assert not [c for c in e.calls("pp.jsonl") if c[1:3] == ["stuck", "clear"]]
+
+
+def test_shared_item_is_cleared_once_and_a_failed_check_is_shown_in_the_inbox(e):
+    e.agent("a1", status="closed")
+    e.declare()
+    e.scan()
+    e.run("declare", "--task", "t1", "--agent", "a1", "--summary", "next", "--generation", "1", "--yes")
+    e.clock += 60
+    e.scan()   # second generation shares S1
+    e.run("ack", "--task", "t1", "--yes")
+    assert len([c for c in e.calls("pp.jsonl") if c[1:3] == ["stuck", "clear"]]) == 1
+    assert all(r["ui_cleared"] is True for r in e.inbox())
+
+
+def test_show_failure_never_triggers_a_blind_clear(e):
+    e.agent("a1", status="closed")
+    e.declare()
+    e.scan()
+    (e.fake / "pp.norun").write_text("1")   # show fails from now on
+    r = e.run("ack", "--task", "t1", "--yes")
+    assert "could not check" in r.stdout
+    assert not [c for c in e.calls("pp.jsonl") if c[1:3] == ["stuck", "clear"]]
+    assert "ui_cleared=False" in e.run("inbox").stdout

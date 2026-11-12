@@ -206,18 +206,39 @@ def cmd_declare(a) -> int:
     return with_state(go, busy=EX_TEMPFAIL)
 
 
+def item_present(rec: dict) -> bool | None:
+    """Is OUR item still on the panel? `show` lists a manual item as `(<id>: <reason>)` and our reason starts with
+    `<task>: `. Ids restart per run and the agent may clear ours, so a saved id is trusted only while this holds.
+    None: could not tell (no tool, no workspace, show failed)."""
+    pp = tool("ADE_PROGRESS_PASEO_PROGRESS", "paseo-progress")
+    if not pp or not rec.get("workspace") or not rec.get("ui_id"):
+        return None
+    rc, shown = run(pp + ["show"], 15, cwd=rec["workspace"])
+    return f"({rec['ui_id']}: {rec['task']}: " in shown if rc == 0 else None
+
+
 def close_items(task: str, mode: str, recs: dict) -> list[str]:
-    """Mark every event record of TASK closed; clear its Progress item (best effort, receipt kept). Returns notes."""
-    notes = []
+    """Mark every event record of TASK closed; clear its Progress item only while it is verifiably ours, once per
+    (workspace, id). Returns notes."""
+    notes, done = [], {}
+    pp = tool("ADE_PROGRESS_PASEO_PROGRESS", "paseo-progress")
     for rec in recs.values():
         if rec["task"] != task or rec.get("closed"):
             continue
         rec["closed"] = mode
-        pp = tool("ADE_PROGRESS_PASEO_PROGRESS", "paseo-progress")
-        if rec.get("ui_id") and pp and rec.get("workspace"):
-            rc, _ = run(pp + ["stuck", "clear", rec["ui_id"]], 15, cwd=rec["workspace"])
-            rec["ui_cleared"] = rc == 0
-            notes.append(f"{rec['ui_id']} clear rc={rc}")
+        if not rec.get("ui_id") or rec.get("ui_gone"):
+            continue
+        k = (rec.get("workspace"), rec["ui_id"])
+        if k not in done:
+            present = item_present(rec)
+            if present is True and pp:
+                rc, _ = run(pp + ["stuck", "clear", rec["ui_id"]], 15, cwd=rec["workspace"])
+                done[k] = rc == 0
+                notes.append(f"{rec['ui_id']} clear rc={rc}")
+            else:   # never a blind clear: the id may now be the agent's own item
+                done[k] = "absent" if present is False else False
+                notes.append(f"{rec['ui_id']} not cleared ({'absent' if present is False else 'could not check'})")
+        rec["ui_cleared"] = done[k]
     return notes
 
 
@@ -372,9 +393,7 @@ def progress_item(d: dict, rec: dict) -> None:
         rec["ui"] = "no-run"
         return
     rec["ui_id"], rec["workspace"] = m.group(1), d["workspace"]
-    rc, shown = run(pp + ["show"], 15, cwd=d["workspace"])
-    whole = re.search(rf"(?<![A-Za-z0-9]){re.escape(rec['ui_id'])}(?![A-Za-z0-9])", shown)   # S1 is not S12
-    rec["ui"] = "verified" if rc == 0 and whole else "unverified"
+    rec["ui"] = "verified" if item_present(rec) else "unverified"   # (id: task: ...) in show, not a bare token
 
 
 def digest(recs: list[dict]) -> str:
@@ -455,6 +474,27 @@ def wake_allowed(st: dict, c: dict) -> bool:
     return d["state"] == "open" and idle and c["reason"] in ("idle_with_work", "due") and now() - last >= COOLDOWN
 
 
+def carry_item(st: dict, d: dict, rec: dict, old: dict | None) -> None:
+    """A repeat notice (new generation, reason or cooldown) reuses the task's open Progress item instead of stacking one,
+    but only while the panel still shows OUR item; one the agent cleared (or a new run's reused id) is marked gone."""
+    # `old` is the record this one replaced under the same key: it is no longer in st["events"]
+    prev = [r for r in [*st["events"].values(), *([old] if old else [])] if r is not rec and r["task"] == d["task"]
+            and not r.get("closed") and not r.get("ui_gone") and (r.get("ui_id") or r.get("ui") == "unverified")]
+    if not prev:
+        return
+    last = max(prev, key=lambda r: r.get("last_published", 0))
+    if not last.get("ui_id"):
+        rec["ui"] = "unverified"   # an item may exist under an id we never read: set no second one
+        return
+    present = item_present(last)
+    if present is False:
+        for r in prev:
+            if r.get("ui_id") == last["ui_id"]:
+                r["ui_gone"] = True
+        return
+    rec.update(ui="unverified" if present is None else last["ui"], ui_id=last["ui_id"], workspace=last.get("workspace"))
+
+
 def process(st: dict, c: dict, paseo: list[str], rep: dict) -> dict | None:
     d, key = c["d"], c["key"]
     # step 0: preflight. A moved agent withdraws the event: nothing sent, cursor untouched.
@@ -469,13 +509,6 @@ def process(st: dict, c: dict, paseo: list[str], rep: dict) -> dict | None:
         rec = {"key": key, "task": d["task"], "reason": c["reason"], "agent_id": d["agent_id"], "summary": d["summary"],
                "first": now(), "state": "prepared", "wake": None, "ping": None, "ui": None,
                "attempts": (old or {}).get("attempts", 0), "last_published": (old or {}).get("last_published", 0)}
-        prev = [r for r in st["events"].values() if r["task"] == d["task"] and not r.get("closed")
-                and (r.get("ui_id") or r.get("ui") == "unverified")]
-        if prev:   # a repeat notice, even for a new generation or reason, reuses the open Progress item instead of stacking
-            last = max(prev, key=lambda r: r.get("last_published", 0))
-            rec.update(ui=last["ui"], workspace=last.get("workspace"))
-            if last.get("ui_id"):
-                rec["ui_id"] = last["ui_id"]
         if old:
             rec["first"] = old["first"]
         if old and old.get("wake") in ("unknown", "refused"):
@@ -496,6 +529,8 @@ def process(st: dict, c: dict, paseo: list[str], rep: dict) -> dict | None:
             save(st)
             rec["wake"] = wake(paseo, d)
             rec["attempts"] += 1
+    if rec["ui"] is None:
+        carry_item(st, d, rec, old if old is not rec else None)
     if rec["ui"] is None:   # step 3: Progress item, then (in the digest) the page
         rec["ui"] = "intent"
         save(st)   # intent before effect: a crash leaves "intent", reconciled to unverified, never set twice
@@ -589,7 +624,9 @@ def cmd_inbox(a) -> int:
     for r in rows:
         print(f"{r['task']} {r['reason']} {r['state']} first={ny(r['first'])} wake={r['wake']} ui={r['ui']}"
               f"{'/' + r['ui_id'] if r.get('ui_id') else ''} ping={r['ping']}"
-              f"{' acked' if r.get('acked') else ''}{' ' + r['closed'] if r.get('closed') else ''}: {r['summary']}")
+              f"{' acked' if r.get('acked') else ''}{' ' + r['closed'] if r.get('closed') else ''}"
+              f"{' ui_cleared=False (clear by hand: paseo-progress stuck clear ' + r['ui_id'] + ')' if r.get('ui_id') and r.get('ui_cleared') is False else ''}"
+              f": {r['summary']}")
     return 0
 
 
