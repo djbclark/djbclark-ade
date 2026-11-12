@@ -253,3 +253,32 @@ codex-open-threads --skip-outdated --json
 It never resolves, replies, posts or edits. Bot comment text is untrusted data: only a truncated first-line title is
 echoed. Exit 0 listed (including zero), 1 a `gh`/API failure, 2 usage. The lead still reads each thread against the
 code and fixes what is real; this tool only surfaces them.
+
+
+## Review attempts (2026-11-12, W5)
+
+`review-pr` retains each attempt under `REVIEW_PR_STATE_DIR/attempts/` with a time-and-UUID suffix.
+The old `<owner>__<repo>-pr<N>-<head>.json` path remains the latest-result compatibility record.
+A nonblocking per-PR advisory lock refuses concurrent attempts (exit 2), including different heads.
+A completed result for the same head, base, runtime, model and unresolved findings is reused by default;
+`--retry` requests another attempt. Failed attempts remain eligible for another invocation.
+
+Findings from all heads of this PR remain in `unresolved_findings`, keyed by a stable content hash.
+An APPROVE with earlier unresolved findings becomes a local BLOCK. Reviewers cannot clear earlier
+findings merely by omitting them. After checking the fix, the caller explicitly passes
+`--retry --resolve-finding ID` (repeatable); an unknown ID refuses. A repeated finding reopens its ID.
+Legacy latest-result records are also read. Corrupt history refuses rather than approving without it.
+These are local review semantics; GitHub's author trust, marker parser and required merge checks are unchanged.
+
+`--stall-timeout S` defaults to 300 seconds without a stdout stream line (`0` disables this detector).
+The overall `--timeout` still applies. Both produce exit 124 after the launcher kills the reviewer and
+its descendants. `--replacement-model M` (repeatable, ordered) starts a fresh attempt only after exit 124;
+there is no default replacement and no replacement after a refusal, tripwire, BLOCK or completed review.
+Each attempt retains a private `evidence/` directory with `stream.jsonl`, `stderr.txt`, and the launcher's
+stdout/stderr, including partial evidence after a timeout. Replacement attempts have separate IDs and files.
+An interruption leaves its initial `running` record and stream for diagnosis; the OS releases its lock.
+
+Direct `review-launch` callers can request `--stall-timeout S` (default 0) and `--evidence-dir DIR`.
+The stream is created exclusively with mode 0600, flushed as lines arrive, and never overwritten.
+These options do not add tools, directories or permissions to either review runtime. Evidence is private
+runtime state and can contain reviewed text; it must not be published with a PR.

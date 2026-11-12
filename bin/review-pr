@@ -2,7 +2,7 @@
 """review-pr: the local Claude review of a PR's exact head (docs/code-review.md rule 11), through bin/review-launch.
 
   review-pr PR [--repo OWNER/NAME] [--allow-untrusted] [--runtime auto|restricted|yolo] [--model M] [--timeout S]
-               [--no-deadline] [--json]
+               [--retry] [--resolve-finding ID] [--replacement-model M] [--stall-timeout S] [--no-deadline] [--json]
 
 Run it from a checkout of the repository, after the push has landed. It
   1. reads the PR with `gh pr view PR --repo R --json headRefOid,baseRefOid,baseRefName,author,state`;
@@ -27,7 +27,10 @@ Run it from a checkout of the repository, after the push has landed. It
          <!-- adversary-verdict:v1 {"verdict":"APPROVE","head":"<the 40-hex head>"} -->
      (verdict and head only: the model's free text never goes into the marker), confirms that
      bin/adversary_marker.py reads it back as the same verdict, and files
-     $REVIEW_PR_STATE_DIR (default ~/.local/state/review-launch)/<owner>__<name>-pr<N>-<head>.json (atomic, 0600);
+     $REVIEW_PR_STATE_DIR (default ~/.local/state/review-launch)/attempts/<owner>__<name>-pr<N>-<head>-<attempt>.json (atomic, 0600);
+     the old path remains a latest-result record. Completed matching results are reused unless --retry. Earlier
+     findings stay unresolved until --retry --resolve-finding ID. Only timeouts trigger --replacement-model;
+     partial evidence is preserved per attempt (docs/review-boundary.md).
   7. removes the worktree. It never posts anything to GitHub: the lead pastes the marker, then runs
      `gh workflow run adversary-marker.yml -f pr=N` so the merge gate reads the edited body.
 
@@ -38,6 +41,11 @@ failed), 77 review-launch's tripwire (the run left the boundary), 124 its timeou
 from __future__ import annotations
 
 import argparse
+import fcntl
+import io
+from contextlib import redirect_stdout
+import hashlib
+import uuid
 import json
 import math
 import os
@@ -150,6 +158,10 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--runtime", choices=RUNTIMES, default="auto",
                    help="auto (default): yolo for a PR the repository owner authored, else restricted; "
                         "yolo: refused unless the owner authored it; restricted: Read/Grep/Glob only, always allowed")
+    p.add_argument("--retry", action="store_true", help="create another attempt instead of reusing a completed matching review")
+    p.add_argument("--replacement-model", action="append", default=[], help="replace a timed-out reviewer with this model (repeatable, ordered)")
+    p.add_argument("--stall-timeout", type=float, default=300, help="replace after this many seconds without stream output; 0 disables (default 300)")
+    p.add_argument("--resolve-finding", action="append", default=[], metavar="ID", help="explicitly resolve a prior finding ID; requires --retry")
     p.add_argument("--model")
     p.add_argument("--timeout", type=float, default=1500.0, help="seconds for the review run (default 1500)")
     p.add_argument("--no-deadline", action="store_true", help="do not register deadline run around review-launch")
@@ -180,7 +192,80 @@ def _run_review_launch(launch: list[str], pr: int, head: str, timeout: float, no
                           timeout=budget + 120)
 
 
+def finding_id(finding: dict) -> str:
+    return hashlib.sha256(json.dumps(finding, sort_keys=True).encode()).hexdigest()[:16]
+
+
+def unresolved_findings(sd: Path, prefix: str) -> dict:
+    """Rebuild from immutable attempts, including the pre-attempt legacy record. Never infer resolution from silence."""
+    unresolved = {}
+    records = []
+    for path in list(sd.glob(prefix + "*.json")) + list((sd / "attempts").glob(prefix + "*.json")):
+        doc = json.loads(path.read_text())
+        if not isinstance(doc, dict):
+            raise ValueError(f"invalid review history: {path}")
+        records.append(doc)
+    # Resolution is an explicit operator/caller decision; reappearance in a later attempt reopens it.
+    unique = {d.get("attempt_id") or f"legacy-{i}": d for i, d in enumerate(records)}
+    for doc in sorted(unique.values(), key=lambda d: (d.get("started", ""), d.get("attempt_id", ""))):
+        for fid in doc.get("resolved_findings", []):
+            unresolved.pop(fid, None)
+        for f in doc.get("findings", []):
+            if isinstance(f, dict):
+                unresolved[finding_id(f)] = f
+    return unresolved
+
+
 def main(argv: list[str]) -> int:
+    try:
+        a = parser().parse_args(argv)
+        if not re.fullmatch(r"[\w.-]+/[\w.-]+", a.repo) or a.pr < 1:
+            return EXIT_USAGE
+        if not math.isfinite(a.timeout) or a.timeout <= 0 or not math.isfinite(a.stall_timeout) or a.stall_timeout < 0:
+            return EXIT_USAGE
+        if a.resolve_finding and not a.retry:
+            note("--resolve-finding requires --retry")
+            return EXIT_USAGE
+        sd = state_dir()
+        sd.mkdir(parents=True, exist_ok=True, mode=0o700)
+        lock = sd / f"{a.repo.lower().replace('/', '__')}-pr{a.pr}.lock"
+        fd = os.open(lock, os.O_CREAT | os.O_RDWR, 0o600)
+        with os.fdopen(fd, "w") as held:
+            try:
+                fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                note("another attempt is active for this PR; refusing a duplicate")
+                return EXIT_USAGE
+            for index, model in enumerate([a.model, *a.replacement_model]):
+                args = list(argv)
+                if index:
+                    # The first attempt already recorded the caller's resolution decisions.
+                    clean = []
+                    skip = False
+                    for token in args:
+                        if skip:
+                            skip = False
+                        elif token == "--resolve-finding":
+                            skip = True
+                        elif not token.startswith("--resolve-finding="):
+                            clean.append(token)
+                    args = clean + ["--retry", "--model", model]
+                    note(f"timed-out reviewer replaced by {model}; earlier evidence retained")
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    rc = review_attempt(args)
+                if rc != 124 or index == len(a.replacement_model):
+                    print(output.getvalue(), end="")
+                    return rc
+            return rc
+    except SystemExit as e:
+        return EXIT_USAGE if e.code else 0
+    except (OSError, ValueError) as e:
+        note(f"review state unavailable: {e}")
+        return EXIT_FAILED
+
+
+def review_attempt(argv: list[str]) -> int:
     try:
         a = parser().parse_args(argv)
     except SystemExit as e:
@@ -241,12 +326,38 @@ def main(argv: list[str]) -> int:
 
     sd = state_dir()
     stem = f"{repo.replace('/', '__')}-pr{a.pr}-{head}"
-    wt = sd / "wt" / f"{stem[-12:]}-{os.getpid()}"
+    prefix = f"{repo.replace('/', '__')}-pr{a.pr}-"
+    pending = unresolved_findings(sd, prefix)
+    for fid in a.resolve_finding:
+        if fid not in pending:
+            note(f"unknown unresolved finding: {fid}")
+            return EXIT_USAGE
+        pending.pop(fid)
+    cache = sd / f"{stem}.json"
+    if cache.exists() and not a.retry:
+        old = json.loads(cache.read_text())
+        if (old.get("result") in ("approve", "block") and old.get("runtime") == runtime
+                and old.get("model") == a.model and old.get("base_sha") == base_sha
+                and old.get("unresolved_findings", {}) == pending):
+            if a.json:
+                print(json.dumps({**old, "file": str(cache), "cached": True}, sort_keys=True))
+            else:
+                if old.get("marker"):
+                    print(old["marker"])
+                note(f"completed attempt already exists: {cache}; use --retry for another")
+            return EXIT_APPROVE if old["result"] == "approve" else EXIT_BLOCK
+    attempt_id = f"{time.time_ns()}-{uuid.uuid4().hex}"
+    path = sd / "attempts" / f"{stem}-{attempt_id}.json"
+    evidence = sd / "evidence" / f"{stem}-{attempt_id}"
+    wt = sd / "wt" / f"{head[:12]}-{attempt_id}"
     started = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     added = False
     result: dict = {"schema": SCHEMA_VERSION, "repo": repo, "pr": a.pr, "head": head, "base_ref": base_ref,
-                    "base_sha": base_sha, "author": author, "allow_untrusted": a.allow_untrusted, "runtime": runtime, "started": started}
+                    "base_sha": base_sha, "author": author, "allow_untrusted": a.allow_untrusted, "runtime": runtime, "started": started,
+                    "attempt_id": attempt_id, "model": a.model, "resolved_findings": a.resolve_finding,
+                    "evidence_dir": str(evidence)}
     rc = EXIT_FAILED
+    write_private(path, json.dumps({**result, "result": "running"}) + "\n")
     try:
         fetch = run(["git", "fetch", "-q", "origin", f"refs/pull/{a.pr}/head", f"+refs/heads/{base_ref}:refs/review-pr/base-{os.getpid()}"], cwd=root)
         run(["git", "update-ref", "-d", f"refs/review-pr/base-{os.getpid()}"], cwd=root)
@@ -270,10 +381,13 @@ def main(argv: list[str]) -> int:
                                head_short=head[:12], base_short=base_sha[:12], capability=CAPABILITY[runtime])
         mode_args = ["--mode", "trusted", "--trusted-author", repo.split("/")[0]] if runtime == "yolo" else ["--mode", "review"]
         launch = [sys.executable, "-I", str(HERE / "review-launch"), *mode_args, "-C", str(wt), "--head", head,
-                  "--schema", str(SCHEMA), "-p", prompt, "--timeout", str(a.timeout), "--json"]
+                  "--schema", str(SCHEMA), "-p", prompt, "--timeout", str(a.timeout), "--stall-timeout", str(a.stall_timeout),
+                  "--evidence-dir", str(evidence), "--json"]
         if a.model:
             launch += ["--model", a.model]
         proc = _run_review_launch(launch, a.pr, head, a.timeout, a.no_deadline)
+        write_private(evidence / "launcher.stdout", proc.stdout)
+        write_private(evidence / "launcher.stderr", proc.stderr)
         sys.stderr.write(proc.stderr)
         try:
             rec = json.loads(proc.stdout.strip().splitlines()[-1]) if proc.stdout.strip() else {}
@@ -291,7 +405,13 @@ def main(argv: list[str]) -> int:
             result["reason"] = f"the review's verdict {out.get('verdict')!r} for head {str(out.get('head'))[:12]!r} is not a verdict for {head[:12]}"
             result["output"] = out
         else:
-            line = marker_line(out["verdict"], head)
+            for f in out.get("findings", []):
+                if isinstance(f, dict):
+                    pending[finding_id(f)] = f
+            # A fresh APPROVE cannot silently erase earlier unresolved findings.
+            verdict = "BLOCK" if pending else out["verdict"]
+            out["verdict"] = verdict
+            line = marker_line(verdict, head)
             if not marker_reads_back(line, head, out["verdict"]):
                 raise RuntimeError("the merge gate's parser does not read the printed marker back")
             result.update({"result": out["verdict"].lower(), "verdict": out["verdict"], "marker": line,
@@ -308,11 +428,14 @@ def main(argv: list[str]) -> int:
                 shutil.rmtree(wt, ignore_errors=True)
                 run(["git", "worktree", "prune"], cwd=root)
     result["finished"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    path = sd / f"{stem}.json"
+    result["unresolved_findings"] = pending
+    result["exit"] = rc
     try:
         write_private(path, json.dumps(result, indent=1, sort_keys=True) + "\n")
+        write_private(cache, json.dumps(result, indent=1, sort_keys=True) + "\n")
     except OSError as e:
-        note(f"cannot file the result at {path}: {e}")
+        note(f"cannot file the result at {path}: {e}; withholding verdict")
+        return EXIT_FAILED
     if a.json:
         print(json.dumps({**result, "file": str(path)}, sort_keys=True))
     else:
