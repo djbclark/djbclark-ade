@@ -308,3 +308,21 @@ always report-only), `linger(...)`, `systemd_version(...)`. The module docstring
 Tests: `tests/test_ade_sched.py` (every checked-in plist on all three backends, quoting with a hostile path, the calendar
 and cron mappings, the detection matrix, install/uninstall/status against fake binaries, and `systemd-analyze verify` on
 generated units when the tool is installed); `tests/test_ade_jobs_inventory.py` (S4b inventory, list/diff, doctor drift).
+
+## Scoped permission sweeps (2026-11-12; template only)
+
+`config/launchd/com.djbclark.ade-auto-permit.plist` runs one scoped sweep every
+60 seconds, with no agent/model wake (minute resolution also renders for cron).
+It is not loaded or included in automatic reconcile. Render it for review with global options before the command:
+
+```sh
+bin/ade-sched --set __LEAD__=FULL_LEAD_UUID --set __STATE__=/absolute/existing/state/dir \
+  render config/launchd/com.djbclark.ade-auto-permit.plist
+```
+
+Only descendants of that lead qualify in this template; label selectors can be
+added as explicit `--ade-label ade.KEY=VALUE` argument pairs. Audit decisions go
+to `auto-permit.jsonl`. See [fan-out](../skills/fan-out/SKILL.md) for scope and
+failure behavior. Render/review is separate from `install`; this change does not
+activate a job. Unlike the judgment schedule defaults above, this system job
+implements the operator's explicit unattended permission grant for our agents.

@@ -1,0 +1,165 @@
+#!/usr/bin/env python3
+"""Approve pending requests only for a lead's descendants or selected ADE labels."""
+import argparse
+from datetime import datetime, timezone
+import fcntl
+import json
+import math
+from pathlib import Path
+import subprocess
+import time
+import uuid
+
+
+class ProbeError(Exception):
+    """An untrusted/unavailable CLI response; never authorizes a write."""
+
+
+def identifier(value):
+    try:
+        return str(uuid.UUID(value)) == value
+    except (ValueError, TypeError, AttributeError):
+        return False
+
+
+def call(args):
+    try:
+        result = subprocess.run(["paseo", *args, "--json"], capture_output=True,
+                                text=True, timeout=30, check=False)
+        if result.returncode:
+            raise ProbeError("paseo command failed")
+        return json.loads(result.stdout)
+    except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
+        raise ProbeError("paseo command unavailable or invalid JSON") from exc
+
+
+def rows(value):
+    if not isinstance(value, list):
+        raise ProbeError("expected JSON list")
+    return value
+
+
+def log_event(log, decision, reason, agent=None, request=None):
+    # Never record tool arguments, descriptions, stdout or stderr (may contain secrets).
+    log.write(json.dumps(dict(time=datetime.now(timezone.utc).isoformat(),
+                              decision=decision, reason=reason,
+                              agent=agent, request=request)) + "\n")
+    log.flush()
+
+
+def descendant(agent, lead, cache):
+    if agent == lead:
+        return False
+    seen = set()
+    while agent not in seen:
+        seen.add(agent)
+        if agent not in cache:
+            info = call(["agent", "inspect", agent])
+            if not isinstance(info, dict) or info.get("Id") != agent:
+                raise ProbeError("agent identity mismatch")
+            cache[agent] = info.get("ParentAgentId")
+        parent = cache[agent]
+        if parent is None:
+            return False
+        if not identifier(parent):
+            raise ProbeError("invalid parent id")
+        if parent == lead:
+            return True
+        agent = parent
+    return False
+
+
+def sweep(lead, labels, log):
+    requests = rows(call(["permit", "ls"]))
+    eligible = set()
+    # Installed CLI inspect/ls do not expose labels. Exact server-side filters prove them.
+    for label in labels:
+        for row in rows(call(["ls", "-a", "-g", "--label", label])):
+            if not isinstance(row, dict) or not identifier(row.get("id")):
+                raise ProbeError("invalid labelled agent")
+            eligible.add(row["id"])
+    cache, seen, failed = {}, set(), False
+    for row in requests:
+        if not isinstance(row, dict):
+            log_event(log, "skip", "malformed-request")
+            failed = True
+            continue
+        agent, request = row.get("agentId"), row.get("id")
+        if not identifier(agent) or not isinstance(request, str) or not request or request.startswith("-"):
+            log_event(log, "skip", "malformed-request")
+            failed = True
+            continue
+        if (agent, request) in seen:
+            continue
+        seen.add((agent, request))
+        try:
+            if agent == lead:
+                reason = None
+            elif agent in eligible:
+                reason = "ade-label"
+            else:
+                reason = "descendant" if descendant(agent, lead, cache) else None
+            if reason is None:
+                log_event(log, "skip", "outside-scope", agent, request)
+                continue
+            # Audit intent BEFORE the only mutation. An audit failure aborts approval.
+            log_event(log, "allow-attempt", reason, agent, request)
+            response = rows(call(["permit", "allow", agent, request]))
+            if not any(isinstance(r, dict) and r.get("agentId") == agent
+                       and r.get("requestId") == request and r.get("result") == "allowed"
+                       for r in response):
+                raise ProbeError("unconfirmed allow")
+            log_event(log, "allowed", reason, agent, request)
+        except ProbeError:
+            log_event(log, "error", "probe-or-allow-unconfirmed", agent, request)
+            failed = True
+    return 1 if failed else 0
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--lead", required=True, help="full lead UUID (lead itself is excluded)")
+    parser.add_argument("--ade-label", action="append", default=[], metavar="ade.KEY=VALUE",
+                        help="exact ADE label selectors; any matching selector qualifies")
+    parser.add_argument("--log", required=True, type=Path, help="append-only JSONL audit path")
+    parser.add_argument("--watch", action="store_true")
+    parser.add_argument("--interval", type=float, default=2)
+    parser.add_argument("--duration", type=float, default=3600, help="watch lifetime in seconds")
+    args = parser.parse_args()
+    if not identifier(args.lead):
+        parser.error("--lead must be a full canonical UUID")
+    if any(not v.startswith("ade.") or "=" not in v or not v.split("=", 1)[0][4:]
+           for v in args.ade_label):
+        parser.error("--ade-label must be ade.KEY=VALUE")
+    if any(not math.isfinite(v) or v <= 0 for v in (args.interval, args.duration)):
+        parser.error("interval and duration must be finite and positive")
+    args.log.parent.mkdir(parents=True, exist_ok=True)
+    # One writer per audit path; cron/launchd overlap must not double-allow.
+    with args.log.with_suffix(args.log.suffix + ".lock").open("a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return 1
+        with args.log.open("a", encoding="utf-8") as log:
+            deadline = time.monotonic() + args.duration
+            status = 0
+            while not args.watch or time.monotonic() < deadline:
+                try:
+                    status = sweep(args.lead, args.ade_label, log)
+                except ProbeError:
+                    log_event(log, "error", "enumeration-unavailable")
+                    status = 1
+                if not args.watch:
+                    return status
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return status
+                time.sleep(min(args.interval, remaining))
+            return status
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except KeyboardInterrupt:
+        raise SystemExit(130)
