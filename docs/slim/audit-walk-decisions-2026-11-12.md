@@ -48,6 +48,27 @@ unattended session restart. Provide the detailed comparison during this walk.
 
 Outcome: **verification/repairs queued**; comparison delivered in the walkthrough.
 
+### 3a. Additional investigations selected
+
+Operator selected both **Investigate a one-command native handoff** and
+**Examine permission-mode drift and recovery further**.
+
+Queue a native handoff convenience design with durable records, successor
+acknowledgement before predecessor retirement, retry/duplicate protection and
+explicit partial-failure outcomes. Do not restore input-typing or legacy relay
+machinery merely for convenience.
+
+Source inspection: ade-yolo hooks only agent.create.before; no resume or
+continuous mode-repair hook is registered. Static unattended mappings cover
+Claude/Codex and archived OpenCode/omp; Cursor/Pi/Antigravity/Hermes are not
+mapped because catalogs are dynamic/unverified. Preserve explicit restrictive
+modes and review-launch. Investigate provider-native mode discovery, verification
+and drift recovery for ordinary work under the existing unattended policy;
+source presence is not proof of installed plugin or end-to-end behavior.
+
+Outcome: **investigations queued**, source comparison delivered; no mode changes,
+plugin installs or automatic recovery behavior enabled during the walkthrough.
+
 ## 4. Remaining walkthrough
 
 Next after the detailed dispatch comparison: quota/routing;
