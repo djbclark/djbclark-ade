@@ -93,7 +93,7 @@ GH_GROUPS = frozenset({"pr", "issue", "release", "repo", "label", "workflow", "r
 GH_READ_VERBS = frozenset({
     "view", "list", "ls", "status", "diff", "checks", "checkout", "co", "clone", "fork", "browse", "watch",
     "download", "get", "field-list", "item-list", "search", "verify", "verify-asset", "check", "help",
-    "credits", "garden", "set-default",
+    "credits", "garden", "set-default", "sync",
 })
 # `gh repo deploy-key add`, `gh repo autolink create`: the verb is a namespace, the action is the next word
 GH_NESTED = frozenset({"deploy-key", "autolink", "gitignore", "license"})
@@ -193,17 +193,14 @@ def lenient_segments(text: str):
 
 
 def segments(text: str):
-    """The command text as a list of word lists (one per simple command) with "(" / ")" markers for subshells,
-    `$( )` and backticks. `$(which gh) pr ...` becomes ["gh", "pr", ...]. Files after `<` go to REDIR_IN."""
+    """The command text (substitutions already replaced by placeholders) as a list of word lists, one per simple
+    command, with "(" / ")" markers for subshells. Files after `<` go to REDIR_IN."""
     toks = tokenize(text)
     if toks is None:
         return lenient_segments(text)
     out = []
     cur = []
     skip = None
-    pending = None
-    in_bt = False
-    sub_stack = []
 
     def flush():
         nonlocal cur
@@ -219,58 +216,100 @@ def segments(text: str):
             continue
         if is_boundary(tok) and set(tok) <= set(PUNCT):
             for c in tok:
-                if c in ";|&\n":
+                if c in ";|&\n`":
                     flush()
-                    pending = None
-                elif c == "(":
-                    if cur and cur[-1].endswith("$"):
-                        cur[-1] = cur[-1][:-1]
-                        if not cur[-1]:
-                            cur.pop()
-                        sub_stack.append(True)
-                    else:
-                        sub_stack.append(False)
+                elif c in "()":
                     flush()
-                    out.append("(")
-                    pending = None
-                elif c == ")":
-                    flush()
-                    out.append(")")
-                    was_sub = sub_stack.pop() if sub_stack else False
-                    pending = None
-                    inner = _last_words(out)
-                    if was_sub and inner and base(inner[-1]) in ("gh", "git"):
-                        pending = base(inner[-1])
-                elif c == "`":
-                    flush()
-                    if in_bt:
-                        out.append(")")
-                        inner = _last_words(out)
-                        pending = base(inner[-1]) if inner and base(inner[-1]) in ("gh", "git") else None
-                    else:
-                        out.append("(")
-                        pending = None
-                    in_bt = not in_bt
+                    out.append(c)
         elif is_redirect(tok):
             skip = "<" if tok == "<" else ">"
             if len(cur) > 0 and len(cur[-1]) == 1 and cur[-1].isdigit():
                 cur.pop()                                # the fd of `2>&1` or `2>/dev/null`
         else:
-            if pending and not cur:
-                cur = [pending]
-            pending = None
             cur.append(tok)
     flush()
     return out
 
 
-def _last_words(out):
-    for item in reversed(out):
-        if isinstance(item, list):
-            return item
-        if item == "(":
-            return None
-    return None
+SUB = re.compile(r"__ADESUB(\d+)__")
+
+
+def dynamic(word: str) -> bool:
+    return "$" in word or "`" in word or "__ADESUB" in word
+
+
+def find_close(text: str, k: int) -> int:
+    """Index of the ")" closing a substitution whose body starts at k (len(text) when it never closes)."""
+    depth = 1
+    in_s = in_d = False
+    n = len(text)
+    while k < n:
+        c = text[k]
+        if in_s:
+            if c == "'":
+                in_s = False
+        elif c == "\\":
+            k += 1
+        elif c == "'" and not in_d:
+            in_s = True
+        elif c == '"':
+            in_d = not in_d
+        elif c == "(" and not in_d:
+            depth += 1
+        elif c == ")" and not in_d:
+            depth -= 1
+            if depth == 0:
+                return k
+        k += 1
+    return n
+
+
+def extract_substitutions(text: str):
+    """(text with every `$( )`, backtick and `<( )`/`>( )` body replaced by a placeholder word, [bodies]).
+    The surrounding command then parses as one command; each body is analysed on its own."""
+    bodies = []
+    out = []
+    i = 0
+    n = len(text)
+    in_s = in_d = False
+    while i < n:
+        c = text[i]
+        if in_s:
+            out.append(c)
+            if c == "'":
+                in_s = False
+            i += 1
+        elif c == "\\":
+            out.append(text[i:i + 2])
+            i += 2
+        elif c == "'" and not in_d:
+            in_s = True
+            out.append(c)
+            i += 1
+        elif c == '"':
+            in_d = not in_d
+            out.append(c)
+            i += 1
+        elif text.startswith("$((", i):
+            out.append(c)
+            i += 1
+        elif text.startswith("$(", i) or (c in "<>" and not in_d and text.startswith("(", i + 1)):
+            start = i + 2
+            end = find_close(text, start)
+            bodies.append(text[start:end])
+            out.append("__ADESUB%d__" % (len(bodies) - 1))
+            i = end + 1
+        elif c == "`":
+            j = i + 1
+            while j < n and text[j] != "`":
+                j += 2 if text[j] == "\\" else 1
+            bodies.append(text[i + 1:j])
+            out.append("__ADESUB%d__" % (len(bodies) - 1))
+            i = j + 1
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out), bodies
 
 
 def split_heredocs(text: str):
@@ -469,7 +508,7 @@ def check_git(args, cur: str, env=None, fulltext: str = "") -> None:
                 remote = val.strip()
                 break
         remote = remote or "origin"
-    if "$" in remote or "`" in remote:
+    if dynamic(remote):
         if mentions_gated(fulltext) or mentions_gated(" ".join(args)):
             raise Finding(reason_for("`git push` (remote not resolvable: %s)" % remote, "cfengine/NorthernTechHQ named in the command"))
         return
@@ -539,7 +578,7 @@ def api_target(endpoint: str):
     ep = re.sub(r"^https?://[^/]+/", "", endpoint.strip()).lstrip("/")
     m = re.match(r"repos/([^/]+)/([^/?]*)", ep)
     if m:
-        if m.group(1).startswith("$"):
+        if dynamic(m.group(1)):
             return ("unknown", ep, "")
         if m.group(1).startswith(("{", ":")):
             return ("cwd", "", "")
@@ -633,7 +672,7 @@ def check_gh(args, env, cur: str, fulltext: str) -> None:
             s = slug_of(v or "")
             if s:
                 targets.append(("repo", s[0], s[1]))
-            elif v and "$" in v:
+            elif v and dynamic(v):
                 targets.append(("unknown", v, ""))
     for v in flagmap.get("--owner", []):
         if v:
@@ -642,7 +681,7 @@ def check_gh(args, env, cur: str, fulltext: str) -> None:
         s = slug_of(env["GH_REPO"])
         if s:
             targets.append(("repo", s[0], s[1]))
-    if group != "api":
+    if group != "api" and (group, pos[1]) != ("label", "clone"):
         for p in pos[2:]:
             if re.match(r"(?i)^(https?://|git@|ssh://)?([\w.-]+@)?(www\.)?github\.com[/:]", p):
                 s = github_owner(p)
@@ -656,9 +695,9 @@ def check_gh(args, env, cur: str, fulltext: str) -> None:
         if kind in ("repo", "owner"):
             if owner.lower() in GATED_OWNERS:
                 raise Finding(reason_for("`%s`" % label, ("%s/%s" % (owner, name)) if name else owner))
-            if "$" not in owner:
+            if not dynamic(owner):
                 explicit = True
-        if kind == "unknown" or "$" in owner:
+        if kind == "unknown" or dynamic(owner):
             if mentions_gated(fulltext):
                 raise Finding(reason_for("`%s` (target is a shell variable)" % label,
                                          "cfengine/NorthernTechHQ named elsewhere in the command"))
@@ -756,8 +795,6 @@ def command_of(words, env):
     if not words:
         return None
     name = base(words[0])
-    if ("$(" in words[0] or "`" in words[0]) and re.search(r"(?<![\w-])(gh|git)(?![\w-])", words[0]):
-        name = re.search(r"(?<![\w-])(gh|git)(?![\w-])", words[0]).group(1)   # "$(command -v gh)" pr create
     if name in WRAPPERS:
         for j in range(1, len(words)):
             m = ASSIGN.match(words[j])
@@ -784,6 +821,8 @@ def expand(word: str, senv) -> str:
 
 def check_text(text: str, cwd: str, depth: int, senv=None):
     """Analyse one command text; returns the (cwd, environment) its end leaves for what follows."""
+    original = text
+    text, subs = extract_substitutions(text)
     segs = segments(text)
     cur = cwd
     seglist = []
@@ -801,9 +840,18 @@ def check_text(text: str, cwd: str, depth: int, senv=None):
                 cur, senv = stack.pop()
             continue
         for w in words:
-            if ("$(" in w or "`" in w) and depth < MAX_DEPTH:
-                check_command(w, cur, depth + 1, senv)
+            for m in SUB.finditer(w):                   # a substitution runs here, in this directory
+                if depth < MAX_DEPTH and int(m.group(1)) < len(subs):
+                    check_command(subs[int(m.group(1))], cur, depth + 1, senv)
         words = [expand(w, senv) for w in words]
+        while words and words[0] in RESERVED:
+            words = words[1:]
+        if words:                                       # `$(which gh) pr ...`, "$(command -v git)" push
+            m = SUB.fullmatch(words[0])
+            if m and int(m.group(1)) < len(subs):
+                tail = re.search(r"(?<![\w-])(gh|git)\s*$", subs[int(m.group(1))].strip())
+                if tail:
+                    words = [tail.group(1)] + words[1:]
         while words and words[0] in RESERVED:
             words = words[1:]
         assigns = words[1:] if words and words[0] in ("export", "declare", "typeset", "local", "readonly") else words
@@ -829,15 +877,15 @@ def check_text(text: str, cwd: str, depth: int, senv=None):
             if depth < MAX_DEPTH:
                 check_command(" ".join(args), cur, depth + 1, env)
         elif name == "gh":
-            check_gh(args, env, cur, text)
+            check_gh(args, env, cur, original)
         elif name == "git":
-            check_git(args, cur, env, text)
+            check_git(args, cur, env, original)
         elif name in HTTP_TOOLS:
             seglist.append((name, args))
     for words in segs:                                  # composio, `npx composio`, `uvx composio` alike
         if isinstance(words, list) and any(re.search(r"(?i)composio", w) for w in words):
             check_composio(words)
-    check_jira(seglist, text)
+    check_jira(seglist, original)
     return cur, senv
 
 
@@ -862,7 +910,7 @@ def check_mcp(tool_name: str, tool_input) -> None:
 def main() -> None:
     try:
         data = json.load(sys.stdin)
-    except (ValueError, OSError):
+    except (ValueError, OSError, RecursionError):
         sys.exit(0)
     if not isinstance(data, dict) or os.environ.get("UPSTREAM_REVIEW_GATE_OFF", "").lower() not in ("", "0", "false", "no"):
         sys.exit(0)

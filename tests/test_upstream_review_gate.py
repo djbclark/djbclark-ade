@@ -623,3 +623,43 @@ def test_pathological_inputs_finish(plain):
         t0 = time.time()
         run(cmd, plain)
         assert time.time() - t0 < 25
+
+
+# ---- adversary round 3 (2026-11-12, head 85a0aa89) --------------------------------------------------------------
+
+
+@pytest.mark.parametrize("command", [
+    "gh api repos/cfengine/core/pulls/$(gh pr view --json number -q .number)/merge -X PUT",
+    "gh pr merge $(gh pr list -R djbclark/core --json number -q '.[0].number') --squash -R cfengine/core",
+    "gh pr comment 5 --body \"$(printf \"a; b\")\" -R cfengine/core",
+    "gh pr comment 5 --body `date` -R cfengine/core",
+    "gh pr comment 5 --body \"$(echo 'it''s (x')\" -R cfengine/core",
+    "gh pr comment 5 --body-file <(echo hi) -R cfengine/core",
+    "echo \"$(echo $(echo hi))\" && gh pr close 5 -R cfengine/core",
+    "R=$(echo cfengine/core); gh issue comment 5 -R $R -b x",
+])
+def test_substitution_in_the_middle_does_not_split_the_command(plain, command):
+    assert denied(command, plain)
+    assert not denied(command.replace("cfengine/core", "djbclark/core"), plain)
+
+
+def test_substitution_body_is_still_analysed(plain):
+    assert denied("echo \"$(gh pr create -R cfengine/core -t x)\"", plain)
+    assert denied("X=`gh pr create -R cfengine/core -t x`", plain)
+    assert denied("echo <(gh pr create -R cfengine/core -t x)", plain)
+    assert not denied("echo \"$(gh pr view 5 -R cfengine/core)\" -R cfengine/core", plain)
+
+
+def test_label_clone_source_is_a_read(plain):
+    assert not denied("gh label clone cfengine/core -R djbclark/foo", plain)
+    assert denied("gh label clone djbclark/core -R cfengine/core", plain)
+
+
+def test_repo_sync_of_our_fork(core_fork):
+    assert not denied("gh repo sync djbclark/core", core_fork)
+
+
+def test_deeply_nested_json_input_is_silent(plain):
+    r = subprocess.run([sys.executable, str(HOOK)], input="[" * 200000, capture_output=True, text=True, timeout=60,
+                       env=ENV)
+    assert r.returncode == 0 and r.stdout == "" and r.stderr == ""
