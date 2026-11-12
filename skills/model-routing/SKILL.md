@@ -132,6 +132,11 @@ D6. **Calibrate and monthly re-rank (2026-11-10):** `bin/route_agent.py calibrat
 
 ## E. Reading quota (a misreading here already cost a dispatch round)
 
+E0. At batch start run `python3 bin/quota_nudge.py` for per-pool advisory levels and active
+operator spending profiles, then use E1 and plan normally. `route_agent.py show` includes
+the same reminder. Profiles expire on read and never change eligibility, gates, or Pi acceptance.
+See [quota advisories](../../docs/quota-advisory.md) for thresholds and profile commands.
+
 E1. Probes, in this order, per batch: `aiuse --available --json 2>/dev/null` (exit 3 = nothing usable; read
 `.available[]`: `provider`, `pool_family`, `usable_now`, `headroom_percent`, `binding_window`; top-level `fresh` and
 `age_seconds`; add `--live` when stale), `paseo usage ls --json` (a report whose `report.status` is not `available` is
