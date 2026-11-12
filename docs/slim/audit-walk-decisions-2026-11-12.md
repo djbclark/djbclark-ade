@@ -69,9 +69,22 @@ source presence is not proof of installed plugin or end-to-end behavior.
 Outcome: **investigations queued**, source comparison delivered; no mode changes,
 plugin installs or automatic recovery behavior enabled during the walkthrough.
 
-## 4. Remaining walkthrough
+## 4. Quota controls — comparison requested
 
-Next after the detailed dispatch comparison: quota/routing;
+Operator selected **Compare the removed quota controls in detail first**.
+No quota repair, forecasting implementation, model downshift, plugin activation
+or routing-policy change has been selected yet.
+
+Comparison distinguishes predictive fleet-wide conservation, quota advisory
+levels, temporary expiring profiles, exhaustion/reset recovery, retained frontier
+headroom gates, retained pace/waste routing information, and removed cost what-if
+analysis. Pause/resume does not replace exhaustion prediction. Old governor also
+downgraded Fable at every level and steered critical leads to now-retired omp;
+these behaviors must not be resurrected from historical code without a new choice.
+
+## 5. Remaining walkthrough
+
+Finish quota choice, then
 web/moved skills/nightly learning; review/permissions;
 remaining deletion gates and repairs. These items remain undecided except where
 prior operator instructions already apply. Ask one question at a time; act on
