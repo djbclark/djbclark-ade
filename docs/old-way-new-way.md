@@ -7,7 +7,7 @@ named skill are separate things. The **Baton plugin** is distinct from ADE's **b
 | Need | Old way | Preferred way | What still matters |
 |---|---|---|---|
 | Explicit self-compact / same-model successor | Removed pane-typing `self-slash` | `bin/ade-self-session` ([contract](self-session.md), 2026-11-12) | Durable checkpoint first; compact receipt is unconfirmed; successor acknowledgement before idle-only predecessor retirement. Unsupported native APIs block. |
-| Fresh agent for a task | `hand`, `handoff`, manual clear then `baton` | `paseo-handoff` with a self-contained briefing | Its inspected version creates a child. It does not promise predecessor archival, ADE pointer updates or file transfer. |
+| Whole-session successor | Manual reset and resume | `ade-self-session handoff` with a durable briefing (2026-11-12) | Agent launches and verifies its successor; acknowledgement precedes idle-only retirement. See the agent-run fallback in [self-session](self-session.md#c1-agent-run-fallback). |
 | Durable recovery record | ADE Tier 1 pointer and deep Tier 2 document | Baton plugin for convenient idle snapshots; retain ADE records when explicitly needed | Baton has bounded conversation input and host-local storage. It is not a drop-in replacement for ADE's ownership/lineage protocol. |
 | Resume an ADE checkpoint | ADE `baton` skill | Keep `baton` for existing Tier 1 chains | Read the exact pointer, check HEAD and owner. A native fresh-agent handoff does not make an old chain yours. |
 | Parallel work | `acp-dispatch`, `acp-run`, custom job records | Native `create_agent` / `paseo run`, with `fan-out` for slicing and review discipline | Claimed worktrees, one writer, provider routing, useful reports and result verification remain. Shims are transitional. |
@@ -27,7 +27,9 @@ and links continue to work. They retain the requested legacy behavior and point 
 The legacy skills remain model-accessible because existing automatic ADE recovery callbacks
 need them; the compatibility entry points forward numbered-step references to the canonical protocol.
 
-Use `paseo-handoff` for a new agent with a task briefing. Keep `session-handoff` and `baton`
+For whole-session replacement, use `handoff` Step 9 and `ade-self-session handoff`
+(2026-11-12). The external `paseo-handoff` skill supplies a task briefing format;
+its child creation/manual detach flow is not ADE's self-handoff lifecycle. Keep `session-handoff` and `baton`
 for reading/writing existing ADE recovery chains. Keep `fan-out`: slicing, ownership and review
 are still useful, while native Paseo is the preferred launch/communication surface.
 Do not label these remaining responsibilities obsolete merely because Paseo supplies the transport.

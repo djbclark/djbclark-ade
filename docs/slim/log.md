@@ -1,5 +1,10 @@
 # Slim-down log
 
+Historical record. The operator-typed reset/resume handoff described below was
+superseded on 2026-11-12 by [agent-run self-handoff](../self-session.md):
+the agent launches and verifies its successor without operator typing.
+
+
 One entry per wave (PLAN.md F): what merged, what was lost on purpose, what the operator must do by hand. Appended by the slim lead; the operator pastes gate output (C7, C1) here when asked.
 
 ## Wave 6 C1+C2 historical waives (2026-11-10)

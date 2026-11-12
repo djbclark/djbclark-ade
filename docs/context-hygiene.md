@@ -27,8 +27,10 @@ Continuous protection against unplanned interruption is the separate, planned
 1. At a completed task, write a handoff before beginning unrelated work. Write the
    owned Tier 1 log and handoff with absolute paths, branch/head, dirty files,
    unresolved decisions, active job records, unread results and exact next steps.
-2. A top-level session runs the `handoff` skill; its Step 9 leaves the operator `/clear` then `/baton`, or starts
-   a successor. A dispatched slice may hand off its own task with a durable checkpoint and
+2. A top-level session runs the `handoff` skill; Step 9 defaults to
+   `ade-self-session handoff` with a durable checkpoint. The agent launches and
+   verifies its own successor via [self-session](self-session.md), including the
+   agent-run fallback when supported; operator typing is never the fallback. A dispatched slice may hand off its own task with a durable checkpoint and
    scope/ownership coordination, but must never clear or archive its parent. The native
    self-session helper takes its predecessor only from its own Paseo identity.
 3. Never throw away an unsent draft, interrupt a running worker, or reset before

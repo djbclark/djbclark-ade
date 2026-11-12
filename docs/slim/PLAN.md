@@ -1,5 +1,9 @@
 # djbclark-ade slim-down: plan of record, v2 (2026-11-06)
 
+Lifecycle update, 2026-11-12: the reset/paste handoff instructions in this historical
+migration plan are superseded by [agent-run self-handoff](../self-session.md).
+The agent launches and verifies its own successor; operator typing is never the fallback.
+
 > **2026-11-11 preservation notice:** This document records historical slim-down work. Later restorations and dependency fixes supersede several removals. Read the [change inventory and preservation register](change-audit-2026-11-11.md), especially section B, before applying any deletion/uninstall step. `/watch load`, Pi, Firecrawl routing and required `agy` are among the intentional later changes; this is not authorization to revert them.
 
 Original lead: a Claude cloud session (Fable 5.1, effort high). Operator: djbclark.

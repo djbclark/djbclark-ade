@@ -48,6 +48,8 @@ correlated native API; no success is fabricated here.
 
 ## C. Self-handoff to a new session
 
+This is the default whole-session handoff (operator, 2026-11-12). The agent
+performs it itself, including successor launch; no operator typing is required.
 Finish other writes/background jobs and prepare the briefing, then:
 
 ```
@@ -94,6 +96,51 @@ archive timeout retains `archive-unknown`; retry first inspects native state and
 does not rearchive an already archived predecessor. Continue project writes only
 after verified retirement **and** reconciliation of the repository's exclusive
 workspace claim/ownership. This helper does not grant or rewrite claims.
+
+### C1. Agent-run fallback
+
+If the helper refuses **before any successor creation intent**, the predecessor
+starts its own successor. For a pending/unknown creation, use section D's
+reconciliation instead; inspect the transaction and native state before any
+fallback. Never retry an uncertain write by launching a second successor.
+
+Read the current provider/model and existing workspace from native inspect and
+verify the provider's unattended mode via `paseo agent mode ID --list`.
+Preserve any explicit operator restrictions. Use the trusted checkout's routing
+policy for a separately authorized model change. Launch with concrete values:
+
+```bash
+env -u PASEO_AGENT_ID -u PASEO_AGENT_CWD -u PASEO_WORKSPACE_ID \
+  paseo run --no-wait --provider PROVIDER --model MODEL --mode UNATTENDED_MODE \
+  --cwd /absolute/owned/worktree --workspace EXISTING_WORKSPACE_ID \
+  --title "Task successor" --json "Read /absolute/checkpoint.md and resume its exact Tier 1 chain. Predecessor: PREDECESSOR_ID. Follow docs/self-session.md C1; acknowledge before retirement."
+```
+
+The first prompt includes the checkpoint path, exact chain pointer, predecessor
+id, next action and whether this is a whole or partial transfer. Use the client's
+baton syntax when invoking the skill: Codex `$baton PATH`, Claude `/baton PATH`.
+Pass prompts as literal argv values (Python subprocess argv lists are preferred).
+
+Persist the returned successor id and creation receipt beside the checkpoint.
+Verify native inspect shows the expected provider/model/cwd/workspace, no parent,
+the verified unattended mode and no pending permissions; an id alone proves
+creation only. If creation times out, inspect native state and retain uncertainty
+instead of relaunching. The successor reads the exact checkpoint, verifies its
+SHA256 and repository HEAD, and sends the predecessor an acknowledgement naming
+both agent ids, checkpoint digest, HEAD and its accepted next action. Preserve
+that acknowledgement beside the checkpoint; a send receipt is not acceptance.
+After the predecessor receives the exact acknowledgement, it ends its turn and
+stops project writes. The successor then verifies predecessor idle/no pending
+permissions, archives only that id with `paseo agent archive PREDECESSOR_ID`
+(without `--force`), and verifies archived readback before reconciling the
+exclusive workspace claim and continuing writes. An archive timeout requires
+inspect before retry. A partial transfer leaves the predecessor running.
+
+If native identity/mode checks or acknowledgement cannot be completed, preserve
+the checkpoint and predecessor, report the precise blocker, and continue safe
+work in the existing session where possible. Operator typing is never a fallback;
+do not inject reset commands into a terminal. Unsupported runtime remains a
+blocker, not a successful handoff.
 
 ## D. Duplicates, partial failures and status
 

@@ -1,9 +1,9 @@
 ---
 name: old-handoff-use-paseo-handoff
-description: "OLD WAY: deep ADE recovery handoff. Prefer paseo-handoff for a fresh agent; retain this for explicitly requested Tier 1 and Tier 2 recovery records."
+description: "OLD WAY: deep ADE recovery handoff. Use acknowledged self-handoff for a fresh agent; retain this for explicitly requested Tier 1 and Tier 2 recovery records."
 ---
 
-# Old handoff — use paseo-handoff for a fresh agent
+# Old handoff — acknowledged self-handoff for a fresh agent
 
 See [old way versus new way](../../docs/old-way-new-way.md) for the preferred workflow and cross-host limits.
 
@@ -45,13 +45,13 @@ commit flow:
 
 ## `/handoff paseo` routes to a durable Paseo transfer (operator, 2026-10-27)
 
-When the arguments begin with the word `paseo` (`/handoff paseo`, `$handoff paseo`, "handoff to paseo"), this skill still writes the
-owned Tier 2 document and Tier 1 pointer (Steps 1-7, below), then **does not run Step 9**:
-it continues with the installed **paseo-handoff** skill. Read that skill's current instructions;
-do not assume it writes ADE pointers, transfers local files, starts a top-level successor, or archives
-the predecessor. The inspected 2026-11-07 version creates a child agent with a self-contained briefing.
-Any required durable records and host-qualified peer notices remain this session's responsibility.
-Plain `/handoff` keeps the legacy behavior below.
+When arguments begin with `paseo` (`/handoff paseo`, `$handoff paseo`, "handoff to paseo"),
+write the owned Tier 2 document and Tier 1 pointer (Steps 1-7), then run Step 9
+for a whole-session transfer. The installed `paseo-handoff` skill is external to
+ADE; its inspected 2026-11-07 version creates a child and requires manual detach,
+so it does not replace ADE's acknowledged self-handoff lifecycle. Use its briefing
+format if useful; ADE performs successor launch and verification itself.
+Partial transfers follow Step 9's partial-transfer rule and keep this agent running.
 
 For another computer, follow [the cross-host procedure](../../docs/old-way-new-way.md#c-cross-host-communication-and-handoff)
 before launching a recipient. Keep the predecessor available until the destination confirms its
@@ -276,59 +276,37 @@ Naming rules (`<name>-pt` tabs, `<topic>-pw` workspaces, at most 17 characters):
 Paseo, or with no `$PASEO_AGENT_ID`, skip it silently. Add its one-line result to the report. (The `autorename` skill
 that did this was removed 2026-11-06, slim-down E4.)
 
-## Step 9 — Clear and continue
+## Step 9 — Start and verify your successor
 
-Operator restoration, 2026-11-12: **self-compact and self-handoff to a fresh
-session are explicitly authorized**, including an ordinary same-model successor.
-After writing the checkpoint/Tier 1 record and finishing other writes/jobs, use
-`bin/ade-self-session handoff --checkpoint ABSOLUTE_BRIEF --quiesced` on a supported
-local Paseo host. Follow [the native transaction protocol](../../docs/self-session.md):
-creation is not success; the exact successor must read/acknowledge the preserved
-checkpoint and next action, then retire the idle predecessor without `--force`.
-Reconcile the exclusive workspace claim before further project writes. Ordinary
-successors use verified YOLO modes; explicit operator restrictions stay restricted.
+Operator restoration, 2026-11-12: agents hand off their own work without operator
+input. After the owned Tier 1/Tier 2 checkpoint is durable and other writes/jobs
+are finished, the default is:
+
+```bash
+~/src/djbclark-ade/bin/ade-self-session handoff --checkpoint ABSOLUTE_BRIEF --quiesced
+```
+
+Follow [the native transaction protocol](../../docs/self-session.md#c-self-handoff-to-a-new-session).
+Creation is pending, not completion: the exact successor reads and acknowledges
+the preserved checkpoint and next action with `accept`, waits for the predecessor to become
+idle, then runs `finish` to verify retirement without `--force`.
+Reconcile the exclusive workspace claim before further project writes. End this
+turn after requesting the handoff; stop scheduling project writes.
+
+If the helper refuses before creation, start the successor yourself using
+[the agent-run fallback](../../docs/self-session.md#c1-agent-run-fallback).
+An ambiguous creation must be reconciled first; never launch a duplicate.
+The fallback starts top-level in the existing workspace, with the provider's
+verified unattended mode and the chain's exact pointer in its first prompt.
+The successor acknowledges the checkpoint and next action before retiring the
+idle predecessor. Keep the predecessor available if verification fails; report
+the precise blocker. Asking the operator to type reset or resume commands is
+never the fallback. A separately authorized model change follows routing policy
+and the same acknowledgement/retirement checks.
+
 For self-compaction use `compact --checkpoint ABSOLUTE_BRIEF --request-id TOKEN`,
-then end the turn; a native send receipt is not completed compaction. Preserve
-records and report unsupported runtime/provider APIs instead of pretending success.
-
-The following are legacy manual alternatives for unsupported hosts or a separately
-routed model change. They do not revoke the same-model restoration above. The
-old pane-typing `self-slash` remains removed; do not reinstate terminal injection.
-
-1. **Same agent, fresh context (the default).** End the turn with one line for the operator: the handoff is written;
-   type `/clear` (Claude Code; `/new` in Codex), then `/baton` (Codex: `$baton`). If the work simply goes on in this
-   session, auto-compaction carries it; nothing to send.
-2. **A successor agent**, when something cannot change in place: (a) this session runs on Fable and
-   `config/routing.toml [lead].fable_lead` is false (the shipped value is true since 2026-11-07, so a Fable lead stays),
-   (b) `bin/route_agent.py show` reads the Claude pools exhausted, (c) the operator asked for another model, or (d) the
-   agent is wedged. For this legacy model-change route, retain the separately selected routing policy. Start it top-level in this agent's workspace, its first prompt
-   the chain's pointer, and end the turn:
-
-   ```bash
-   env -u PASEO_AGENT_ID -u PASEO_AGENT_CWD paseo run --no-wait --title "<short title>" \
-     --provider claude --model claude-opus-5-5 --thinking high --mode bypassPermissions \
-     --cwd "<this agent's cwd>" --workspace "$PASEO_WORKSPACE_ID" --json \
-     "/baton ~/.local/state/handoffs/chains/<chain-key>/SESSION_LOG.md"
-   ```
-
-   The `env -u` prefix keeps `paseo run` from parenting the new agent to this one (it parents to the caller). When
-   the Claude pools are exhausted, the successor is **Pi** (sole third-party TUI since 2026-11-08; pick the provider
-   and model from `bin/route_agent.py plan` / accepted Pi pools — never archived omp/OpenCode), else codex
-   (`--provider codex --model gpt-6.1-sol --mode full-access`, first prompt `'$baton PATH'`, single-quoted). Check
-   the new agent's mode with `paseo agent inspect <new id> --json` (`paseo agent mode <new id> --list` shows the
-   provider's modes). **The successor archives its predecessor by id once it has answered** (`paseo agent archive
-   PRED_ID`; name `PRED_ID`, this agent's id, in the Tier 2 document): a running agent cannot archive itself, and
-   `--force` cascades to its children. Pass the chain's own `SESSION_LOG.md`, never a bare `/baton`, when this chain
-   lists the repo as a side workspace (2026-10-23: a bare `/baton` resumed another chain's work).
-
-**Verify the successor started, every time (djbclark, 2026-10-28).** A `paseo run --no-wait` that printed an id proves
-only that the daemon accepted it. Wait about 30 s, then check, and report what you saw, never "should start":
-
-1. `paseo agent ls -g --json` lists the new agent (title, status idle or running) and `paseo agent inspect <new id>
-   --json` shows `ParentAgentId` null (`ls` does not carry it); say its title and workspace name to the operator;
-2. give it a tab: `paseo agent open <new id>` (2026-10-30: a lead without a tab sat 13 hours on a question card nobody
-   could see), and `paseo logs <new id>` shows the `/baton` was read;
-3. if a check fails, say so at once and ask which route; do not claim a handoff, and do not archive anything.
+then end the turn; a native send receipt is not completed compaction. The old
+pane-typing `self-slash` stays removed.
 
 **Workspaces (djbclark, 2026-10-23).** The successor is a top-level agent in an EXISTING workspace (`--workspace <id>`,
 this agent's by default), never a new workspace or window (`--new-workspace`) unless the operator asks. Keep the
@@ -338,7 +316,7 @@ successor (`paseo workspace archive` archives every agent in it and deletes a Pa
 
 **Partial handoff: the operator keeps this session** ("hand X off to a new tab", "I still use this agent for other
 things"). Write the handoff (Steps 1-7, scoped to the slice and written to its own chain), then start a separate
-top-level agent with the successor command above (Sonnet 5.5 with `--thinking medium` for pipeline-driving work) and
+top-level agent with the agent-run fallback (route the provider/model for the slice) and
 leave this one running: no archive. Skip Step 8 for a partial handoff: it would rename the session the operator keeps
 using. This is not `/handoff paseo` (the durable transfer of the whole session).
 
