@@ -548,10 +548,12 @@ only; no live vault, terminal session or provider call was made.
    takes into the batch only the keys `check` itself marks missing (from
    secretspec's source: a missing required secret is the line
    `✗ NAME - description (required)`, or `✗ NAME (required)`; found is `✓`,
-   optional or defaulted `○`; only that exact `✗ … (required)` shape counts, so a
-   name in a description or a continuation line never does; colour codes are
-   stripped; nothing from the output is printed). When `check` fails but marks no
-   selected key, it exits 1 as unconfirmed, never 0.
+   optional or defaulted `○`; only that exact `✗ … (required)` shape counts, matched
+   linearly on `\n`-split lines, and only when the count equals the footer's
+   `Summary: N found, M missing`, else nothing counts; a name in a description or
+   a stray look-alike line therefore fails safe; colour codes are stripped;
+   nothing from the output is printed). When `check` fails but no selected key is
+   marked, it exits 1 as unconfirmed, never 0.
 2. **Worklist** = `keys-plan` selection (components chosen) whose fresh status is
    `missing`, `invalid` or `no-quota`, or `expiring` with a date within 14 days
    (or past) or with no date. A later expiry date waits, so a year-out GitHub

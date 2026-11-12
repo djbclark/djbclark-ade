@@ -1640,20 +1640,33 @@ _ANSI_SGR = re.compile(r"\x1b\[[0-9;]*m")
 # Allowlist, from secretspec's own source (secrets.rs ``check`` output): a missing
 # required secret is exactly ``✗ NAME - description (required)`` (or
 # ``✗ NAME (required)`` with no description); found is ``✓``, optional/default
-# ``○``. Anything else, a continuation line of a multi-line description included,
-# never counts.
-_CHECK_MISSING_ENTRY = re.compile(
-    r"^\s*\u2717\s+([A-Z][A-Z0-9_]*)(?:\s+-\s.*)?\s+\(required\)\s*$")
+# ``○``. Anything else never counts. Matching is linear (no regex over the tail),
+# lines split on ``\n`` only (not U+2028/U+0085), and the matched count must equal
+# the ``Summary: N found, M missing`` footer or nothing counts (a stray
+# ``✗ … (required)`` line inside a description makes the counts disagree).
+_CHECK_MISSING_ENTRY = re.compile(r"^\s*\u2717\s+([A-Z][A-Z0-9_]*)(?:\s+-\s.*)?$")
+_CHECK_SUMMARY = re.compile(r"^Summary: \d+ found, (\d+) missing\b")
 
 
 def check_reported_missing(text: str) -> set[str]:
-    """Names ``sudo-secretspec check`` itself marks missing and required; nothing is printed."""
+    """Names ``sudo-secretspec check`` itself marks missing and required; nothing is printed.
+
+    Empty (fail safe: the caller reports unconfirmed, rc 1) when the Summary
+    footer is absent or its missing count disagrees with the matched entries.
+    """
     names: set[str] = set()
-    for line in _ANSI_SGR.sub("", text).splitlines():
-        entry = _CHECK_MISSING_ENTRY.match(line)
-        if entry:
-            names.add(entry.group(1))
-    return names
+    expected: int | None = None
+    for line in _ANSI_SGR.sub("", text).split("\n"):
+        line = line.rstrip()
+        summary = _CHECK_SUMMARY.match(line.lstrip())
+        if summary:
+            expected = int(summary.group(1))
+            continue
+        if line.endswith(" (required)"):
+            entry = _CHECK_MISSING_ENTRY.match(line[: -len(" (required)")])
+            if entry:
+                names.add(entry.group(1))
+    return names if expected is not None and expected == len(names) else set()
 
 
 def _devnull_stdin_runner(timeout_s: float) -> Runner:

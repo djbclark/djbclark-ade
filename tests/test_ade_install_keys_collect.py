@@ -295,9 +295,13 @@ def test_failed_check_never_reports_nothing_to_do(catalog, tmp_path):
 
 
 @pytest.mark.parametrize("text,expect", [
-    ("\u2717 B_KEY - desc (required)\n", {"B_KEY"}),
-    ("\u2717 B_KEY (required)\n", {"B_KEY"}),                       # no description
-    ("\x1b[31m\u2717\x1b[0m \x1b[1;36mB_KEY\x1b[0m - d (required)\n", {"B_KEY"}),  # forced colour
+    ("\u2717 B_KEY - desc (required)\nSummary: 0 found, 1 missing, 0 optional\n", {"B_KEY"}),
+    ("\u2717 B_KEY (required)\nSummary: 0 found, 1 missing, 0 optional\n", {"B_KEY"}),  # no description
+    ("\x1b[31m\u2717\x1b[0m \x1b[1;36mB_KEY\x1b[0m - d (required)\nSummary: 0 found, 1 missing\n", {"B_KEY"}),
+    ("\u2717 B_KEY - desc (required)\n", set()),                    # no Summary footer: unconfirmed
+    ("\u2713 A_KEY - see\n\u2717 FOO (required)\n\u2713 FOO - ok\nSummary: 2 found, 0 missing\n", set()),
+    ("\u2713 A_KEY - see\u2028\u2717 FOO (required)\nSummary: 1 found, 0 missing\n", set()),
+    ("\u2713 A_KEY - x\n\u2717 FOO (required)\n\u2717 BAR (required)\nSummary: 1 found, 1 missing\n", set()),
     ("\u2713 A_KEY - list:\n  - GH_TOKEN - legacy\n  uses GH_TOKEN\n", set()),    # continuation lines
     ("\u2713 A_KEY - multi\n\u2717 not a real mark line GH_TOKEN\n", set()),
     ("\u2713\ufe0f A_KEY - variant tick\n\u2714 B_KEY - heavy tick\n", set()),
