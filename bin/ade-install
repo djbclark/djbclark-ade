@@ -13,6 +13,7 @@
   ade-install hermes-choice {skip,self,ai} [--state-dir DIR] [--json]
   ade-install keys [--root DIR] [--json] [--keys-state PATH]
   ade-install keys-plan [--root DIR] [--json] [--state PATH]
+  ade-install keys-collect [--root DIR] [--json] [--keys-state PATH]  # batch `sudo-secretspec set`; terminal only
   ade-install verify-key PROVIDER  # fixed metadata probe under sudo-secretspec run; see --help
   ade-install apply [--root DIR] [--json] [--dry-run|--yes] [--id ID ...] [--force]
                     [--system] [--print-system-argv] [--apply-system]
@@ -388,6 +389,40 @@ def cmd_keys(args: argparse.Namespace) -> int:
     return rc
 
 
+def cmd_keys_collect(args: argparse.Namespace) -> int:
+    """Batch-collect missing/failing/expiring selected keys; prompts only at a terminal."""
+    interactive = (not args.json) and sys.stdin.isatty() and sys.stdout.isatty()
+    lines: list[str] = []
+
+    def emit(line: str) -> None:
+        if args.json:
+            lines.append(line)
+        else:
+            print(line, flush=True)
+
+    try:
+        catalog = ai.load_catalog(root=Path(args.root) if args.root else None)
+        ai.scrub_key_env(catalog)  # a stale exported NAME must not make a probe pass
+        state = Path(args.keys_state) if getattr(args, "keys_state", None) else None
+        result = ai.keys_collect(catalog, interactive=interactive, emit=emit, keys_state_path=state)
+    except ai.InstallError as e:
+        if args.json:
+            _print_json({"ok": False, "errors": [str(e)]})
+        else:
+            print(str(e), file=sys.stderr)
+            print("ade-install keys-collect: FAIL", file=sys.stderr)
+        return 1
+    if args.json:
+        _print_json({
+            "ok": result["rc"] == 0,
+            "interactive": result["interactive"],
+            "worklist": result["worklist"],
+            "results": result["results"],
+            "note": "names only; no values read; --json never prompts and never runs set",
+        })
+    return int(result["rc"])
+
+
 def cmd_apply(args: argparse.Namespace) -> int:
     if args.yes and args.dry_run_flag:
         print("ade-install apply: refuse both --yes and --dry-run", file=sys.stderr)
@@ -499,6 +534,8 @@ def main(argv: list[str] | None = None) -> int:
         ("keys-plan", cmd_keys_plan, "cached selected-key worklist; no probes, credential entry or writes"),
         ("doctor", cmd_doctor,
          "run probe_argv / PATH presence, Claude context_size_nudge, credential-bak delete-after, advisory UNACCEPTED Pi pools; never repairs"),
+        ("keys-collect", cmd_keys_collect,
+         "batch sudo-secretspec set for missing/failing/expiring selected keys (terminal only; --json lists, never prompts)"),
         (
             "keys",
             cmd_keys,
@@ -514,7 +551,7 @@ def main(argv: list[str] | None = None) -> int:
                 "--id", dest="ids", action="append",
                 help="check only this component (repeatable); skips installation-wide checks",
             )
-        if name == "keys":
+        if name in ("keys", "keys-collect"):
             p.add_argument(
                 "--keys-state",
                 default=None,

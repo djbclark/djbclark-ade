@@ -24,6 +24,11 @@ keys *args:
 keys-check *args:
     "{{ root }}/bin/ade-install" keys --root "{{ root }}" {{ args }}
 
+# Interactive batch: sudo-secretspec set for each missing/failing/expiring selected key.
+# At a terminal it prompts; otherwise it lists key names and exits 3 (never sets).
+keys-collect *args:
+    "{{ root }}/bin/ade-install" keys-collect --root "{{ root }}" {{ args }}
+
 # Cached worklist only; no checks, key entry or writes.
 [positional-arguments]
 keys-plan *args:
