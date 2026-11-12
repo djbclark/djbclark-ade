@@ -1,0 +1,222 @@
+#!/usr/bin/env python3
+"""Resume a lead's descendants after recognized transient network failures, dry-run by default.
+
+See docs/net-resume.md. Exit 0: scan completed; 2: usage/state/CLI failure;
+3: another scanner holds the lock. No schedules are installed by this command.
+"""
+from __future__ import annotations
+
+import argparse
+import fcntl
+import hashlib
+import json
+import math
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+import uuid
+
+PROMPT = "network outage over; continue from where you stopped, re-fetch first, same report path"
+# Deliberately narrow: only the final rendered line, never a matching historical prompt.
+NETWORK = {
+    "antigravity": (r"\[System Error\] There was a network issue connecting to the server, please try again\.",),
+    "codex": (r"\[System Error\] (?:stream disconnected before completion|error sending request for url)(?:[ :].*)?",),
+    "claude": (r"\[System Error\] (?:Connection error\.|Request timed out\.)",),
+    "pi": (r"\[System Error\] (?:fetch failed|ECONNRESET|ETIMEDOUT)",),
+}
+HOSTS = {
+    "antigravity": "https://daily-cloudcode-pa.googleapis.com/",
+    "codex": "https://chatgpt.com/",
+    "claude": "https://api.anthropic.com/",
+    # Pi can route many services; a host cannot be inferred safely from 'pi'.
+}
+DENIED = re.compile(r"1302|1308|\b429\b|\b40[13]\b|quota|rate.?limit|auth|credential|api.?key|refus|policy|billing|credit|usage.?limit|capacity", re.I)
+
+
+class ScanError(Exception):
+    pass
+
+
+def agent_id(value):
+    try:
+        return str(uuid.UUID(value))
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise ScanError("expected full agent UUID") from exc
+
+
+def transient(provider, logs):
+    lines = logs.strip().splitlines()
+    last = lines[-1].strip() if lines else ""
+    return bool(last and not DENIED.search(last) and any(
+        re.fullmatch(pattern, last) for pattern in NETWORK.get(provider, ())
+    ))
+
+
+class Scanner:
+    def __init__(self, lead, state, apply=False, duration=120):
+        self.lead = agent_id(lead)
+        self.state = state
+        self.apply = apply
+        self.deadline = time.monotonic() + duration
+
+    def remaining(self):
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0:
+            raise ScanError("scan deadline reached")
+        return remaining
+
+    def cli(self, *args, accepted=False):
+        try:
+            result = subprocess.run(["paseo", *args], capture_output=True, text=True,
+                                    timeout=min(15, self.remaining()))
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise ScanError("Paseo unavailable or timed out") from exc
+        if result.returncode not in ((0, 5) if accepted else (0,)):
+            raise ScanError("Paseo command failed")
+        return result.stdout
+
+    def inspect(self, aid):
+        data = json.loads(self.cli("agent", "inspect", agent_id(aid), "--json"))
+        if not isinstance(data, dict) or data.get("Id") != aid:
+            raise ScanError("invalid inspect response")
+        return data
+
+    def descendant(self, aid):
+        seen = {self.lead}
+        while aid and aid not in seen:
+            seen.add(aid)
+            record = self.inspect(aid)
+            # Missing ancestry is unknown, not a root.
+            if "ParentAgentId" not in record:
+                return False
+            parent = record.get("ParentAgentId")
+            if parent == self.lead:
+                return True
+            aid = parent
+        return False
+
+    def healthy(self, url):
+        request = urllib.request.Request(url, method="HEAD", headers={"User-Agent": "ade-net-resume"})
+        # Do not follow redirects: only the named provider endpoint is probed.
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, *args, **kwargs):
+                return None
+        opener = urllib.request.build_opener(NoRedirect)
+        try:
+            with opener.open(request, timeout=min(5, self.remaining())) as response:
+                return 200 <= response.status < 400
+        except urllib.error.HTTPError as exc:
+            return 200 <= exc.code < 500 and exc.code != 429
+        except (OSError, urllib.error.URLError):
+            return False
+
+    def event(self, file, aid, action, **fields):
+        row = {"time": time.time(), "lead": self.lead, "agent": aid,
+               "action": action, **fields}
+        file.write(json.dumps(row, sort_keys=True) + "\n")
+        file.flush()
+        os.fsync(file.fileno())
+        print(json.dumps(row, sort_keys=True), flush=True)
+
+    def scan(self):
+        self.state.mkdir(parents=True, exist_ok=True)
+        with (self.state / "lock").open("a") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return 3
+            # Malformed/truncated state fails closed; never silently reset the budget.
+            path = self.state / "events.jsonl"
+            with path.open("a+", encoding="utf-8") as history:
+                history.seek(0)
+                events = [json.loads(line) for line in history if line.strip()]
+                if any(not isinstance(e, dict) or not isinstance(e.get("time"), (int, float))
+                       or not math.isfinite(e["time"]) for e in events):
+                    raise ScanError("invalid event history")
+                history.seek(0, 2)
+                lead = self.inspect(self.lead)
+                if lead.get("Archived") is not False:
+                    raise ScanError("lead is archived or unknown")
+                agents = json.loads(self.cli("ls", "-g", "--json"))
+                if not isinstance(agents, list):
+                    raise ScanError("invalid agent listing")
+                for row in agents:
+                    if row.get("status") != "error":
+                        continue
+                    aid = agent_id(row.get("id"))
+                    if not self.descendant(aid):
+                        continue
+                    record = self.inspect(aid)
+                    provider = record.get("Provider", "")
+                    if record.get("Archived") is not False or record.get("Status") != "error":
+                        continue
+                    if provider not in HOSTS:
+                        continue
+                    logs = self.cli("logs", aid)
+                    if not transient(provider, logs):
+                        continue
+                    signature = hashlib.sha256(logs.encode()).hexdigest()
+                    attempts = [e for e in events if e.get("agent") == aid and e.get("action") == "reserved"]
+                    if (sum(e["time"] > time.time() - 3600 for e in attempts) >= 2
+                            or any(e.get("signature") == signature for e in attempts)):
+                        self.event(history, aid, "capped")
+                        continue
+                    if not (self.healthy("https://api.github.com/") and self.healthy(HOSTS[provider])):
+                        self.event(history, aid, "offline")
+                        continue
+                    if not self.apply:
+                        self.event(history, aid, "would-resume", signature=signature)
+                        continue
+                    # Probe may take seconds: re-read mutable state and ancestry before sending.
+                    fresh = self.inspect(aid)
+                    if (fresh.get("Status") != "error" or fresh.get("Archived") is not False
+                            or fresh.get("Provider") != provider or not self.descendant(aid)
+                            or self.cli("logs", aid) != logs):
+                        self.event(history, aid, "changed")
+                        continue
+                    # Reserve durably BEFORE the outward action. An uncertain send is never retried.
+                    self.event(history, aid, "reserved", signature=signature)
+                    events.append({"agent": aid, "action": "reserved", "time": time.time(), "signature": signature})
+                    self.cli("send", "--json", "--no-wait", "--", aid, PROMPT, accepted=True)
+                    self.event(history, aid, "submitted")
+        return 0
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--lead", required=True, help="full UUID; only descendants are eligible")
+    parser.add_argument("--apply", action="store_true", help="send the fixed continuation prompt")
+    parser.add_argument("--state-dir", type=Path, default=Path.home()/".local/state/ade/net-resume",
+                        help="shared cap ledger and lock; use the same directory for every invocation")
+    parser.add_argument("--watch", type=float, metavar="SECONDS", help="watch for 1..3600 seconds")
+    parser.add_argument("--interval", type=float, default=30, help="watch interval, 5..300 seconds")
+    args = parser.parse_args(argv)
+    if not math.isfinite(args.interval) or not 5 <= args.interval <= 300:
+        parser.error("interval must be 5..300 seconds")
+    if args.watch is not None and (not math.isfinite(args.watch) or not 1 <= args.watch <= 3600):
+        parser.error("watch must be 1..3600 seconds")
+    try:
+        scanner = Scanner(args.lead, args.state_dir, args.apply, args.watch or 120)
+        while True:
+            rc = scanner.scan()
+            if rc or not args.watch:
+                return rc
+            delay = min(args.interval, scanner.remaining())
+            time.sleep(delay)
+    except ScanError as exc:
+        if str(exc) == "scan deadline reached" and args.watch:
+            return 0
+        print(f"ade-net-resume: {exc}", file=sys.stderr)
+        return 2
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        print(f"ade-net-resume: unreadable state or response ({type(exc).__name__})", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())
