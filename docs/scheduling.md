@@ -117,6 +117,11 @@ Checked-in ADE jobs under `config/launchd/` include `com.djbclark.deadline-sweep
 
 ## Paseo schedules (reconcile + operator, 2026-11-10)
 
+The [persistent progress reminder design](persistent-progress-reminder-design.md)
+(2026-11-12) proposes a cheap host-scheduled scanner with local inbox readback.
+It adds no job or installer; automatic session restart remains outside its
+authority, and external notification needs a qualified delivery contract.
+
 Judgment jobs live in `paseo schedule`, not ade-sched. Inventory rows (`kind = "paseo"`) record the
 intended name, cron, `--mode`, and (for hard `context-budget`) provider/cwd/prompt for reconcile.
 `ade-sched reconcile --yes` creates/deletes ADE-owned expected rows via:
