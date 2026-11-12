@@ -2466,6 +2466,8 @@ def reconcile(
                 deferrals = json.loads(deferrals_path.read_text(encoding="utf-8"))
                 if not isinstance(deferrals, dict) or not isinstance(deferrals.get("jobs"), dict):
                     raise ValueError("invalid deferral record")
+                if not all(isinstance(v, dict) for v in deferrals["jobs"].values()):
+                    raise ValueError("invalid per-job deferral record")
             except (OSError, ValueError) as exc:
                 raise SchedError(EX_USAGE, f"unreadable deferrals: {exc}") from exc
         else:
@@ -2950,7 +2952,7 @@ def reconcile(
                 results.append(row)
 
         completed_names = {r["name"] for r in results
-                           if r["action"] in ("installed", "removed", "adopted", "skip")}
+                           if r["action"] in ("installed", "removed", "adopted")}
         resolved = {key: value for key, value in deferrals["jobs"].items()
                     if value.get("logical_id") not in completed_names
                     or value.get("logical_id") in deferred_names}

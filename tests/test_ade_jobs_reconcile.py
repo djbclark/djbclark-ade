@@ -1689,12 +1689,13 @@ def test_admission_held_through_removal_and_commit(fake, tmp_path, monkeypatch):
     assert rc == 0 and rows[0]['action'] == 'removed' and held == []
 
 
-def test_install_apply_propagates_scheduler_deferral(fake, tmp_path, monkeypatch):
+@pytest.mark.parametrize('dry_run', [True, False])
+def test_install_apply_propagates_scheduler_deferral(fake, tmp_path, monkeypatch, dry_run):
     catalog = ai.load_catalog(root=_mini_catalog(tmp_path))
     monkeypatch.setattr(ai, 'build_apply_steps', lambda *a, **kw: [])
     monkeypatch.setattr(ai, 'apply_sched_reconcile', lambda *a, **kw: (
         [dict(id='job', action='deferred', category='sched', ok=False)], 6))
-    rows, rc = ai.apply(catalog, dry_run=False, state_dir=fake.state)
+    rows, rc = ai.apply(catalog, dry_run=dry_run, state_dir=fake.state)
     assert rc == 6 and rows[0]['action'] == 'deferred'
 
 

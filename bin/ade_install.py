@@ -2511,9 +2511,10 @@ def apply(
     if dry_run:
         rc = 1 if any(
             r["action"] in ("blocked", "refuse-system", "refuse-system-exec")
-            or (r.get("category") == "sched" and not r.get("ok", True))
+            or (r.get("category") == "sched" and not r.get("ok", True)
+                and r.get("action") not in ("defer", "deferred"))
             for r in results
-        ) else 0
+        ) else (6 if sched_deferred else 0)
     else:
         rc = 1 if failed else (6 if sched_deferred else 0)
     return results, rc
