@@ -50,7 +50,8 @@ def test_print_lists_every_skill_and_tool_with_its_first_sentence(tmp_path):
     assert "| [`alpha`](skills/alpha/SKILL.md) | Do the alpha thing, e.g. a test. |" in out
     assert "| [`beta`](skills/beta/SKILL.md) | Beta has a \\| pipe. |" in out
     assert "nofile" not in out
-    assert "Skills (2," in out and "`bin/` (4," in out
+    assert "Skills (from each `skills/*/SKILL.md`):" in out
+    assert "`bin/` (from each file's first docstring or comment):" in out
     assert "| [`tool-py`](bin/tool-py) | Do a python thing. |" in out
     assert "| [`tool-sh`](bin/tool-sh) | Wrap a shell thing across two lines. |" in out
     assert "| [`lib.py`](bin/lib.py) | Library: no shebang, still listed. |" in out
@@ -136,3 +137,20 @@ def test_tracked_disables_inspected_tree_fsmonitor(tmp_path):
     assert r.returncode == 0, r.stderr
     assert not marker.exists(), "ade-roster tracked() must disable the inspected tree's fsmonitor"
     assert "tool-py" in r.stdout
+
+
+def test_additions_leave_headings_stable_and_rows_sorted(tmp_path):
+    root = make_repo(tmp_path)
+    before = run(root=root)
+    assert before.returncode == 0, before.stderr
+    (root / "skills" / "aardvark").mkdir()
+    (root / "skills" / "aardvark" / "SKILL.md").write_text(
+        "---\nname: aardvark\ndescription: New skill.\n---\n"
+    )
+    (root / "bin" / "aaa-tool").write_text("# aaa-tool: New tool.\n")
+    after = run(root=root)
+    assert after.returncode == 0, after.stderr
+    headings = lambda text: [line for line in text.splitlines() if line.startswith(("Skills (", "`bin/` ("))]
+    assert headings(before.stdout) == headings(after.stdout)
+    assert after.stdout.index("[`aardvark`]") < after.stdout.index("[`alpha`]") < after.stdout.index("[`beta`]")
+    assert after.stdout.index("[`aaa-tool`]") < after.stdout.index("[`lib.py`]") < after.stdout.index("[`node.mjs`]")
