@@ -403,6 +403,7 @@ def test_root_refuses_the_lock_in_a_user_owned_state_dir(tmp_path, monkeypatch):
     state = tmp_path / "state"
     state.mkdir()
     monkeypatch.setattr(os, "geteuid", lambda: 0)
+    monkeypatch.setattr(ai, "TRUSTED_OWNER_UIDS", frozenset())  # nobody is "root": holds even when CI runs as root
     with pytest.raises(ai.InstallError, match="as root"):
         with ai.install_ledger_lock(state):
             pass
@@ -421,7 +422,97 @@ def test_dry_run_output_escapes_hostile_names(tmp_path):
 def test_root_guard_runs_before_any_mkdir_and_judges_every_ancestor(tmp_path, monkeypatch):
     fresh = tmp_path / "a" / "b" / "state"  # does not exist yet; ancestors are user-owned
     monkeypatch.setattr(os, "geteuid", lambda: 0)
-    with pytest.raises(ai.InstallError, match="as root|root does not own"):
+    monkeypatch.setattr(ai, "TRUSTED_OWNER_UIDS", frozenset())
+    with pytest.raises(ai.InstallError, match="as root"):
         with ai.install_ledger_lock(fresh):
             pass
     assert not (tmp_path / "a").exists()  # nothing was created before the refusal
+
+
+@pytest.fixture
+def as_root(monkeypatch):
+    """Model euid 0 on a non-root machine: this user (and real root) count as the trusted owner."""
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    monkeypatch.setattr(ai, "TRUSTED_OWNER_UIDS", frozenset({0, os.getuid()}))
+
+
+def test_root_refuses_a_trusted_symlink_into_user_controlled_ancestry(tmp_path, as_root):
+    user_dir = tmp_path / "alice"
+    user_dir.mkdir()
+    (tmp_path / "opt-link").symlink_to(user_dir)  # "root-owned" link (trusted owner) to somewhere else
+    with pytest.raises(ai.InstallError, match="as root"):
+        with ai.install_ledger_lock(tmp_path / "opt-link" / "new-state"):
+            pass
+    assert list(user_dir.iterdir()) == []  # no mkdir, no lock file landed there
+    with pytest.raises(ai.InstallError, match="as root"):
+        ai.append_recovery_evidence(tmp_path / "opt-link" / "new-state", {"event": "x"})
+    assert list(user_dir.iterdir()) == []
+
+
+def test_root_refuses_untrusted_owner_and_writable_by_others_but_allows_sticky(tmp_path, monkeypatch, as_root):
+    open_dir = tmp_path / "open"
+    open_dir.mkdir()
+    os.chmod(open_dir, 0o777)
+    with pytest.raises(ai.InstallError, match="writable"):
+        ai.open_state_dir(open_dir / "state")
+    assert not (open_dir / "state").exists()
+    os.chmod(open_dir, 0o1777)  # sticky, like /tmp: allowed
+    os.close(ai.open_state_dir(open_dir / "state"))
+    assert (open_dir / "state").is_dir()
+    monkeypatch.setattr(ai, "TRUSTED_OWNER_UIDS", frozenset({0}))  # now this user is not trusted
+    with pytest.raises(ai.InstallError, match="owned by uid"):
+        ai.open_state_dir(open_dir / "state")
+
+
+def test_root_creates_missing_components_and_locks_via_directory_fds(tmp_path, as_root):
+    state = tmp_path / "a" / "b" / "state"
+    with ai.install_ledger_lock(state):
+        assert (state / "ledger.lock").is_file()  # (holder record skipped: the patched euid 0 does not own it)
+    assert oct((tmp_path / "a").stat().st_mode & 0o777) == "0o700"  # created 0700 by root's walk
+    with pytest.raises(ai.InstallError, match="regular file owned by you"):
+        ai.append_recovery_evidence(state, {"event": "ok"})  # the patched euid 0 does not own the new log either
+
+
+def test_swap_of_a_component_between_check_and_use_is_refused(tmp_path, monkeypatch, as_root):
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (tmp_path / "a" / "b" / "state").mkdir(parents=True)
+    real_hook = ai._before_open_component
+    swapped = []
+
+    def hook(parent, name):
+        real_hook(parent, name)
+        if parent == str(tmp_path / "a") and name == "b" and not swapped:
+            swapped.append(1)  # "a" was validated and held; now b is replaced by a link
+            os.rename(tmp_path / "a" / "b", tmp_path / "a" / "b.real")
+            (tmp_path / "a" / "b").symlink_to(victim)
+
+    monkeypatch.setattr(ai, "_before_open_component", hook)
+    with pytest.raises(ai.InstallError, match="as root"):
+        with ai.install_ledger_lock(tmp_path / "a" / "b" / "state"):
+            pass
+    assert swapped and list(victim.iterdir()) == []
+
+
+def test_swap_after_the_directory_is_open_cannot_redirect_the_lock(tmp_path, monkeypatch, as_root):
+    state, victim = tmp_path / "state", tmp_path / "victim"
+    state.mkdir()
+    victim.mkdir()
+
+    def swap(state_dir):
+        os.rename(state, tmp_path / "state.moved")
+        state.symlink_to(victim)
+
+    monkeypatch.setattr(ai, "_after_state_dir_open", swap)
+    with ai.install_ledger_lock(state):
+        pass
+    assert list(victim.iterdir()) == []  # opens were relative to the held fd, not the path
+    assert (tmp_path / "state.moved" / "ledger.lock").is_file()
+
+
+def test_atomic_writes_as_root_refuse_unsafe_ancestry(tmp_path, monkeypatch):
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    monkeypatch.setattr(ai, "TRUSTED_OWNER_UIDS", frozenset())
+    with pytest.raises(ai.InstallError, match="as root"):
+        ai._atomic_write_json(tmp_path / "x" / "ledger.json", {})
+    assert not (tmp_path / "x").exists()

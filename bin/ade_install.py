@@ -2956,14 +2956,84 @@ def read_small_file(path: Path, limit: int = 4096) -> bytes | None:
         os.close(fd)
 
 
-def append_recovery_evidence(state_dir: Path, record: dict[str, Any]) -> None:
-    """Append-only, fsynced evidence of what recovery saw or changed; never rewritten."""
-    state_dir.mkdir(parents=True, exist_ok=True)
-    line = json.dumps({"at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), **record}, sort_keys=True) + "\n"
+# Under euid 0 (sudo keeps the user's HOME) the state directory is only used when every component from "/"
+# is a real directory owned by a trusted uid and not writable by others (sticky is the one exception).
+# Tests that model "root-owned" on a non-root machine replace this set.
+TRUSTED_OWNER_UIDS: frozenset[int] = frozenset({0})
+_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+
+
+def _before_open_component(parent: str, name: str) -> None:
+    """Test seam: runs after ``parent`` was validated and before ``name`` is opened beneath it."""
+
+
+def _after_state_dir_open(state_dir: Path) -> None:
+    """Test seam: runs after the state dir fd is held and before ledger.lock is opened beneath it."""
+
+
+def _root_refuse(path: str, why: str) -> InstallError:
+    return InstallError(f"{path}: refusing to use the install state as root: {why}; run as the target user")
+
+
+def _require_trusted_dir(fd: int, path: str) -> None:
+    st = os.fstat(fd)
+    if st.st_uid not in TRUSTED_OWNER_UIDS:
+        raise _root_refuse(path, f"owned by uid {st.st_uid}, not root")
+    if st.st_mode & 0o022 and not st.st_mode & stat.S_ISVTX:
+        raise _root_refuse(path, "group/world-writable without the sticky bit")
+
+
+def open_state_dir(state_dir: Path) -> int:
+    """Directory fd for the install state dir, created if missing.
+
+    Non-root: a plain mkdir. Root: walk from ``/`` with directory fds (``O_NOFOLLOW``,
+    ``dir_fd=``), refuse any existing component that is a symlink, is not root-owned, or is
+    group/world-writable without sticky, and create missing components with ``mkdir(dir_fd=)``
+    then re-open them ``O_NOFOLLOW``. Every later open is relative to the returned fd, so a
+    swap between check and use cannot redirect it, and validated components cannot be swapped
+    by anyone but root.
+    """
+    if os.geteuid() != 0:
+        state_dir.mkdir(parents=True, exist_ok=True)
+        return os.open(state_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    names = [part for part in os.path.abspath(state_dir).split(os.sep) if part]
+    here = os.sep
+    fd = os.open(os.sep, _DIR_FLAGS)
     try:
-        fd = os.open(state_dir / RECOVERY_EVIDENCE, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, 0o600)
+        _require_trusted_dir(fd, here)
+        for name in names:
+            _before_open_component(here, name)
+            path = os.path.join(here, name)
+            try:
+                try:
+                    nxt = os.open(name, _DIR_FLAGS, dir_fd=fd)
+                except FileNotFoundError:
+                    os.mkdir(name, 0o700, dir_fd=fd)
+                    nxt = os.open(name, _DIR_FLAGS, dir_fd=fd)
+            except OSError as error:
+                raise _root_refuse(path, f"not a plain directory it can open or create ({error.strerror or error})") from error
+            os.close(fd)
+            fd, here = nxt, path
+            _require_trusted_dir(fd, here)
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def append_recovery_evidence(state_dir: Path, record: dict[str, Any], *, dir_fd: int | None = None) -> None:
+    """Append-only, fsynced evidence of what recovery saw or changed; never rewritten."""
+    line = json.dumps({"at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), **record}, sort_keys=True) + "\n"
+    own_dir = dir_fd is None
+    try:
+        if dir_fd is None:
+            dir_fd = open_state_dir(state_dir)
+        fd = os.open(RECOVERY_EVIDENCE, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, 0o600, dir_fd=dir_fd)
     except OSError as error:
         raise InstallError(f"{state_dir / RECOVERY_EVIDENCE}: cannot open the evidence log ({error}); it must be a plain file") from error
+    finally:
+        if own_dir and dir_fd is not None:
+            os.close(dir_fd)
     try:
         if not owned_regular_file(fd):
             raise InstallError(f"{state_dir / RECOVERY_EVIDENCE}: evidence log is not a regular file owned by you; refusing to write")
@@ -2974,7 +3044,10 @@ def append_recovery_evidence(state_dir: Path, record: dict[str, Any]) -> None:
 
 
 def _atomic_write_json(path: Path, data: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    if os.geteuid() == 0:
+        os.close(open_state_dir(path.parent))  # root: refuse unsafe ancestry before any write
+    else:
+        path.parent.mkdir(parents=True, exist_ok=True)
     text = json.dumps(data, indent=2, sort_keys=True) + "\n"
     # The temp name carries the writer's pid and start token so a kill between create
     # and replace leaves a half-written artifact that recovery can attribute.
@@ -3036,37 +3109,44 @@ def install_ledger_lock(state_dir: Path, *, wait: bool = True) -> Iterator[dict[
     and is yielded to the caller; ``wait=False`` raises ``InstallError`` instead
     of blocking when another installer holds the lock.
     """
-    if os.geteuid() == 0:
-        # no root fall-through: sudo keeps the user's HOME, and a user-controlled directory (or a link in one of its
-        # parents) must not make root create or lock files there. Judge every existing ancestor before any mkdir.
-        for part in (state_dir.absolute(), *state_dir.absolute().parents):
-            try:
-                st = os.lstat(part)
-            except FileNotFoundError:
-                continue
-            if st.st_uid != 0:
-                raise InstallError(f"{part}: refusing to take the install lock as root under a path root does not own; run as the target user")
-    state_dir.mkdir(parents=True, exist_ok=True)
     try:
-        fd = os.open(state_dir / "ledger.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        dir_fd = open_state_dir(state_dir)  # root: strict ancestry walk before anything is created or opened
     except OSError as error:
-        raise InstallError(f"{state_dir / 'ledger.lock'}: cannot open the install lock ({error}); it must be a plain file, not a link") from error
+        raise InstallError(f"{state_dir}: cannot open the install state directory ({error})") from error
     try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise InstallError(f"{state_dir / 'ledger.lock'}: the install lock must be a regular file")
+        _after_state_dir_open(state_dir)
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
-        except BlockingIOError as error:
-            raise InstallError(f"{state_dir / 'ledger.lock'}: install lock is held by a running installer") from error
-        previous, record_ok = _swap_lock_holder(state_dir, fd) if owned_regular_file(fd) else (None, False)
-        try:
-            yield previous
-        finally:
-            if record_ok:  # else keep the flock but never truncate/write through it, nor erase a record we could not log
-                with contextlib.suppress(OSError):
-                    os.ftruncate(fd, 0)
+            fd = os.open("ledger.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=dir_fd)
+        except OSError as error:
+            raise InstallError(f"{state_dir / 'ledger.lock'}: cannot open the install lock ({error}); it must be a plain file, not a link") from error
+        with _closing_after(fd):
+            yield from _held_lock(state_dir, fd, dir_fd, wait)
+    finally:
+        os.close(dir_fd)
+
+
+@contextlib.contextmanager
+def _closing_after(fd: int) -> Iterator[None]:
+    try:
+        yield
     finally:
         os.close(fd)
+
+
+def _held_lock(state_dir: Path, fd: int, dir_fd: int, wait: bool) -> Iterator[dict[str, Any] | None]:
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        raise InstallError(f"{state_dir / 'ledger.lock'}: the install lock must be a regular file")
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
+    except BlockingIOError as error:
+        raise InstallError(f"{state_dir / 'ledger.lock'}: install lock is held by a running installer") from error
+    previous, record_ok = _swap_lock_holder(state_dir, fd, dir_fd) if owned_regular_file(fd) else (None, False)
+    try:
+        yield previous
+    finally:
+        if record_ok:  # else keep the flock but never truncate/write through it, nor erase a record we could not log
+            with contextlib.suppress(OSError):
+                os.ftruncate(fd, 0)
 
 
 def parse_lock_holder(raw: bytes) -> dict[str, Any] | None:
@@ -3077,7 +3157,7 @@ def parse_lock_holder(raw: bytes) -> dict[str, Any] | None:
     return rec if isinstance(rec, dict) else None
 
 
-def _swap_lock_holder(state_dir: Path, fd: int) -> tuple[dict[str, Any] | None, bool]:
+def _swap_lock_holder(state_dir: Path, fd: int, dir_fd: int) -> tuple[dict[str, Any] | None, bool]:
     """Advisory holder record; failures here never fail the lock.
 
     Returns ``(stale prior record, whether our record was written)``. The stale record is
@@ -3087,7 +3167,7 @@ def _swap_lock_holder(state_dir: Path, fd: int) -> tuple[dict[str, Any] | None, 
     try:
         prior = parse_lock_holder(os.pread(fd, 4096, 0))
         if prior is not None and owner_status(prior) in ("gone", "reused"):
-            append_recovery_evidence(state_dir, {"event": "stale-lock-holder-superseded", "holder": prior})
+            append_recovery_evidence(state_dir, {"event": "stale-lock-holder-superseded", "holder": prior}, dir_fd=dir_fd)
             stale = prior
         record = {**current_owner(), "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
         os.ftruncate(fd, 0)
