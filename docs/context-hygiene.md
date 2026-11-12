@@ -187,7 +187,7 @@ is separate: `ci record DIR --job NAME --platform macos|linux|other --attempt ID
 --result failure|cancelled|success|slow`. Use a distinct CI run/job id per attempt;
 re-recording the same id updates it without counting twice. Linked worktrees
 share their main repository's job history; separate jobs and platforms never do.
-Success resets the failure count and slow flag. An unknown or timed-out verdict
+Re-reporting an attempt preserves its original order. Success resets the failure count and persisted slow flag. An unknown or timed-out verdict
 must not be recorded as a failure. History is serialized and atomically saved in
 `LW_STATE_DIR/ci-attempts.json` (the normal load-watch state directory by default).
 
@@ -197,7 +197,11 @@ fields: route (`ci|local|wait`), load gate (`-|16|bypass`), failure count; exit 
 attempt. Missing job/platform (or attempt/result for record) exits 2.
 `bg` callers set `BG_CI_JOB` to that same stable job name and `BG_CI_PLATFORM=macos`;
 Swift/Xcode commands default to macos. Set `BG_CI_SLOW=1` for the slow case.
-The fallback is evaluated per invocation; it never changes the repo's policy.
+Set `BG_CI_ATTEMPT` to a known CI run/job id to record a definitive offload
+success/failure automatically; without it, use `ci record` with verified evidence.
+Cancelled runs require an explicit `ci record --result cancelled`, since the offload
+exit code also covers unknown verdicts. The default job name is the original command
+and arguments when `BG_CI_JOB` is unset. The fallback is evaluated per invocation; it never changes the repo's policy.
 
 ```bash
 ~/src/djbclark-ade/bin/load-watch ci record /absolute/worktree --job xcode-tests --platform macos --attempt RUN-JOB-ID --result cancelled

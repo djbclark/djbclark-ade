@@ -693,11 +693,13 @@ def test_ci_macos_retry_route(tmp_path, monkeypatch):
     assert route() == ("local", "16", 1)
     assert route("linux") == ("ci", "-", 0)
     assert route(job="other") == ("ci", "-", 0)
+    assert lw.ci_job_route("/wt", "linux", "build", True) == ("ci", "-", 0)
     monkeypatch.setattr(lw.os, "getloadavg", lambda: (16.01, 0, 0))
     assert route() == ("wait", "16", 1)
     record("run2", "failure")
     assert route() == ("local", "bypass", 2)
     record("run3", "success")
+    record("run1", "cancelled")  # old event keeps its position before success
     assert route() == ("ci", "-", 0)
     assert lw.ci_job_route("/wt", "macos", "build", True) == ("wait", "16", 0)
     monkeypatch.setattr(lw.os, "getloadavg", lambda: (15.9, 0, 0))

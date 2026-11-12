@@ -1701,7 +1701,9 @@ def record_ci_attempt(top, platform, job, attempt, result):
         history = data.get(key, {})
         if not isinstance(history, dict):
             history = {}
-        history[attempt] = {"result": result, "t": time.time()}
+        existing = history.get(attempt, {})
+        timestamp = existing.get("t", time.time()) if isinstance(existing, dict) else time.time()
+        history[attempt] = {"result": result, "t": timestamp}
         data[key] = history
         with tempfile.NamedTemporaryFile(mode="w", dir=STATE_DIR, delete=False) as out:
             json.dump(data, out)
@@ -1714,6 +1716,7 @@ def ci_job_route(top, platform, job, slow=False):
     entries = history.values() if isinstance(history, dict) else []
     entries = sorted((r for r in entries if isinstance(r, dict)), key=lambda r: r.get("t", 0))
     failures = 0
+    explicit_slow = slow
     for row in entries:
         result = row.get("result")
         if result == "success":
@@ -1722,7 +1725,7 @@ def ci_job_route(top, platform, job, slow=False):
             failures += 1
         elif result == "slow":
             slow = True
-    if platform != "macos" or (not failures and not slow):
+    if platform != "macos" or (not failures and not (slow or explicit_slow)):
         return "ci", "-", failures
     if failures >= 2:
         return "local", "bypass", failures
