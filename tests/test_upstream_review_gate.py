@@ -655,8 +655,10 @@ def test_label_clone_source_is_a_read(plain):
     assert denied("gh label clone djbclark/core -R cfengine/core", plain)
 
 
-def test_repo_sync_of_our_fork(core_fork):
+def test_repo_sync_is_judged_by_the_repo_it_writes(core_fork, plain):
     assert not denied("gh repo sync djbclark/core", core_fork)
+    assert denied("gh repo sync cfengine/core --force", plain)
+    assert denied("gh repo sync NorthernTechHQ/libntech", core_fork)
 
 
 def test_deeply_nested_json_input_is_silent(plain):
@@ -687,3 +689,17 @@ def test_hyphenated_heredoc_delimiter(plain):
 def test_substitution_as_redirect_target(plain):
     assert denied("cat < <(gh pr create -R cfengine/core -t x)", plain)
     assert denied("echo hi > $(gh pr create -R cfengine/core -t x)", plain)
+
+
+# ---- adversary round 5 (2026-11-12, head f40534d2): remote names only known at run time ------------------------
+
+
+def test_remote_name_known_only_at_run_time(libntech, ours):
+    assert denied('for r in $(git remote); do git push "$r" HEAD; done', libntech)
+    assert denied("git remote | xargs -I{} git push {}", libntech)
+    assert not denied('for r in $(git remote); do git push "$r" HEAD; done', ours)
+
+
+def test_literal_loop_values_are_each_judged(libntech):
+    assert not denied("for r in fork; do git push $r main; done", libntech)
+    assert denied("for r in fork origin; do git push $r main; done", libntech)

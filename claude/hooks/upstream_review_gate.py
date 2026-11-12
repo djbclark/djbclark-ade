@@ -71,6 +71,7 @@ GIT_TIMEOUT_S = 5
 MAX_FILE = 262144
 MAX_SHLEX = 100000
 MAX_DELIMS = 20
+MAX_LOOP_VALUES = 50
 BUDGET_S = 10
 
 SHELLS = frozenset({"bash", "sh", "zsh", "dash", "ksh", "fish"})
@@ -93,7 +94,7 @@ GH_GROUPS = frozenset({"pr", "issue", "release", "repo", "label", "workflow", "r
 GH_READ_VERBS = frozenset({
     "view", "list", "ls", "status", "diff", "checks", "checkout", "co", "clone", "fork", "browse", "watch",
     "download", "get", "field-list", "item-list", "search", "verify", "verify-asset", "check", "help",
-    "credits", "garden", "set-default", "sync",
+    "credits", "garden", "set-default",
 })
 # `gh repo deploy-key add`, `gh repo autolink create`: the verb is a namespace, the action is the next word
 GH_NESTED = frozenset({"deploy-key", "autolink", "gitignore", "license"})
@@ -237,7 +238,7 @@ SUB = re.compile(r"__ADESUB(\d+)__")
 
 
 def dynamic(word: str) -> bool:
-    return "$" in word or "`" in word or "__ADESUB" in word
+    return "$" in word or "`" in word or "__ADESUB" in word or "{}" in word       # `{}` is xargs
 
 
 def find_close(text: str, k: int) -> int:
@@ -511,7 +512,8 @@ def check_git(args, cur: str, env=None, fulltext: str = "") -> None:
                 break
         remote = remote or "origin"
     if dynamic(remote):
-        if mentions_gated(fulltext) or mentions_gated(" ".join(args)):
+        # `for r in $(git remote); do git push "$r"; done`: the name is only known at run time
+        if mentions_gated(fulltext) or mentions_gated(" ".join(args)) or gated_remotes(dirpath):
             raise Finding(reason_for("`git push` (remote not resolvable: %s)" % remote, "cfengine/NorthernTechHQ named in the command"))
         return
     rc, out = git(dirpath, "remote", "get-url", "--push", "--all", remote, gitdir=gitdir)
@@ -683,6 +685,10 @@ def check_gh(args, env, cur: str, fulltext: str) -> None:
         s = slug_of(env["GH_REPO"])
         if s:
             targets.append(("repo", s[0], s[1]))
+    if (group, pos[1]) == ("repo", "sync") and len(pos) > 2:
+        s2 = slug_of(pos[2])                            # `gh repo sync OWNER/NAME` writes to that fork
+        if s2:
+            targets.append(("repo", s2[0], s2[1]))
     if group != "api" and (group, pos[1]) != ("label", "clone"):
         for p in pos[2:]:
             if re.match(r"(?i)^(https?://|git@|ssh://)?([\w.-]+@)?(www\.)?github\.com[/:]", p):
@@ -821,11 +827,30 @@ def expand(word: str, senv) -> str:
     return re.sub(r"\$\{(\w+)\}|\$(\w+)", lambda m: senv.get(m.group(1) or m.group(2), m.group(0)), word)
 
 
+def expand_loops(segs):
+    """`for r in a b; do git push $r; done`: a segment that uses a literal-list loop variable is analysed once per
+    value, so the loop is judged by every remote it will push to."""
+    loops = {}
+    out = []
+    for words in segs:
+        if isinstance(words, list):
+            if len(words) >= 4 and words[0] == "for" and words[2] == "in" and re.match(r"^\w+$", words[1]) \
+                    and not any(dynamic(w) for w in words[3:]):
+                loops[words[1]] = words[3:]
+            used = sorted({n for w in words for n in re.findall(r"\$\{?(\w+)", w) if n in loops})
+            if used:
+                for v in loops[used[0]][:MAX_LOOP_VALUES]:
+                    out.append([w.replace("${%s}" % used[0], v).replace("$" + used[0], v) for w in words])
+                continue
+        out.append(words)
+    return out
+
+
 def check_text(text: str, cwd: str, depth: int, senv=None):
     """Analyse one command text; returns the (cwd, environment) its end leaves for what follows."""
     original = text
     text, subs = extract_substitutions(text)
-    segs = segments(text)
+    segs = expand_loops(segments(text))
     cur = cwd
     seglist = []
     senv = dict(senv or {})
