@@ -269,7 +269,7 @@ already running) and the POSIX-sh cold-start bridge `sh bin/ade-bootstrap`
   `recovered-found`, so a Homebrew Python is never recorded as ADE-installed),
   `pending`, `failed`. `uv python find` is `--managed-python` too, so it never executes PATH
   interpreters itself (the macOS stub); ADE's own PATH scan covers those. The one-time token and the uv env knobs
-  `UV_NO_MANAGED_PYTHON`/`UV_PYTHON_PREFERENCE`/`UV_SYSTEM_PYTHON` are not passed to uv or probes. `--no-config`
+  `UV_NO_MANAGED_PYTHON`/`UV_PYTHON_PREFERENCE`/`UV_SYSTEM_PYTHON` and the `VIRTUAL_ENV`/`CONDA_*` interpreter hints are not passed to uv or probes. `--no-config`
   also ignores `uv.toml` files (only uv's environment variables, e.g. `UV_PYTHON_INSTALL_MIRROR`, `SSL_CERT_FILE`,
   apply). Every uv call runs `uv --no-config`, `uv python find --system
   --no-project`, from the state directory, never from the caller's directory, so a

@@ -442,10 +442,12 @@ def test_python_side_scrubs_token_and_uv_env_and_absolutizes_which(state, monkey
     monkeypatch.setenv("ADE_BOOTSTRAP_TOKEN", "secret")
     monkeypatch.setenv("UV_NO_MANAGED_PYTHON", "1")
     monkeypatch.setenv("UV_PYTHON_PREFERENCE", "only-system")
+    monkeypatch.setenv("CONDA_PREFIX", "/usr")
+    monkeypatch.setenv("VIRTUAL_ENV", "/x")
     r, rc = ai.acquire_python(state_dir=state, yes=True, which=lambda n: "relative-uv" if n == "uv" else None, euid=1000)
     assert rc == 0 and envs
     for env in envs:
-        assert not {"ADE_BOOTSTRAP_TOKEN", "UV_NO_MANAGED_PYTHON", "UV_PYTHON_PREFERENCE"} & set(env)
+        assert not {"ADE_BOOTSTRAP_TOKEN", "UV_NO_MANAGED_PYTHON", "UV_PYTHON_PREFERENCE", "CONDA_PREFIX", "VIRTUAL_ENV"} & set(env)
     assert os.path.isabs(r["install_argv"][0])
 
 

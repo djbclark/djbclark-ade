@@ -2620,6 +2620,11 @@ def _write_python_pending(state_dir: Path, argv: list[str]) -> dict[str, str]:
     return {"pid": str(os.getpid()), "started": started, "token": ""}
 
 
+# uv env that hides managed Pythons or points uv at another interpreter to execute.
+UV_ENV_DROP = frozenset({
+    "UV_NO_MANAGED_PYTHON", "UV_PYTHON_PREFERENCE", "UV_SYSTEM_PYTHON", "VIRTUAL_ENV",
+    "CONDA_PREFIX", "CONDA_DEFAULT_ENV", "UV_INTERNAL__PARENT_INTERPRETER",
+})
 PYTHON_CANDIDATE_NAMES = ("python3.13", "python3.12", "python3.11", "python3")
 
 
@@ -2663,7 +2668,7 @@ def acquire_python(
     # The one-time hand-off token is read once and not passed on to uv or probed interpreters;
     # uv env knobs that hide or force managed Pythons are dropped so install and find agree.
     handoff_token = os.environ.pop("ADE_BOOTSTRAP_TOKEN", "")
-    uv_env = {k: v for k, v in os.environ.items() if k not in ("UV_NO_MANAGED_PYTHON", "UV_PYTHON_PREFERENCE", "UV_SYSTEM_PYTHON")}
+    uv_env = {k: v for k, v in os.environ.items() if k not in UV_ENV_DROP}
     # uv runs from the state dir with --no-config: never from the caller's directory, whose
     # .venv, pyproject.toml or uv.toml would otherwise steer interpreter discovery and downloads.
     run = runner or (lambda argv: subprocess.run(

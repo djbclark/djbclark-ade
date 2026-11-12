@@ -35,6 +35,7 @@ BS_TOKEN=
 PY=
 REQUEST=3.13
 UV=$(command -v uv 2>/dev/null || true)
+case $UV in ""|/*) ;; *) UV=$PWD/$UV ;; esac  # dash prints a relative PATH hit as-is; uv runs from $STATE
 install_cmd="uv python install $REQUEST"
 
 if [ "$(id -u)" = 0 ]; then
@@ -60,7 +61,7 @@ find_python() {  # prints the first verified interpreter; skips macOS's /usr/bin
 }
 
 uv_run() {  # uv independent of the caller's directory and config (no cwd venv, pyproject.toml or uv.toml)
-    ( CDPATH='' cd -- "$STATE" && env -u UV_NO_MANAGED_PYTHON -u UV_PYTHON_PREFERENCE -u UV_SYSTEM_PYTHON "$UV" --no-config "$@" )
+    ( CDPATH='' cd -- "$STATE" && env -u UV_NO_MANAGED_PYTHON -u UV_PYTHON_PREFERENCE -u UV_SYSTEM_PYTHON -u VIRTUAL_ENV -u CONDA_PREFIX -u CONDA_DEFAULT_ENV -u UV_INTERNAL__PARENT_INTERPRETER "$UV" --no-config "$@" )
 }
 
 is_stub() {  # macOS /usr/bin/python3 (CLT stub), through any spelling or symlink
