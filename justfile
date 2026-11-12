@@ -25,8 +25,9 @@ keys-check *args:
     "{{ root }}/bin/ade-install" keys --root "{{ root }}" {{ args }}
 
 # Cached worklist only; no checks, key entry or writes.
+[positional-arguments]
 keys-plan *args:
-    "{{ root }}/bin/ade-install" keys-plan --root "{{ root }}" {{ args }}
+    "{{ root }}/bin/ade-install" keys-plan --root "{{ root }}" "$@"
 
 # Print-only install plan.
 install-plan:

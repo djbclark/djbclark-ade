@@ -211,6 +211,7 @@ def test_cli_refuses_effects_and_uses_default_cache(tmp_path, monkeypatch, capsy
     shutil.copyfile(REPO / 'tests/fixtures/install_catalog/minimal.toml', config / 'install.toml')
     state = tmp_path / 'existing-cache.json'
     state.write_text(json.dumps({'schema_version': 1, 'keys': {}}))
+    monkeypatch.setenv('HOME', str(tmp_path))  # never overlay the host's local.toml
     monkeypatch.setenv('ADE_KEYS_STATE_PATH', str(state))
     forbidden = Mock(side_effect=AssertionError('report attempted an effect'))
     monkeypatch.setattr(ai.subprocess, 'Popen', forbidden)
@@ -248,16 +249,50 @@ def test_cli_invalid_catalog_has_fixed_error(tmp_path):
 def test_just_recipe_forwards_arguments_to_cli(tmp_path):
     root = tmp_path / 'repo'
     (root / 'bin').mkdir(parents=True)
-    recipe = (REPO / 'justfile').read_text().split('\nkeys-plan *args:\n', 1)[1].split('\n\n', 1)[0]
-    (root / 'justfile').write_text('root := justfile_directory()\nkeys-plan *args:\n' + recipe + '\n')
+    text = (REPO / 'justfile').read_text()
+    assert '\n[positional-arguments]\nkeys-plan *args:\n' in text
+    recipe = text.split('\nkeys-plan *args:\n', 1)[1].split('\n\n', 1)[0]
+    (root / 'justfile').write_text(
+        'root := justfile_directory()\n[positional-arguments]\nkeys-plan *args:\n' + recipe + '\n')
     cli = root / 'bin/ade-install'
     cli.write_text('#!/usr/bin/env python3\nimport json,sys\nprint(json.dumps(sys.argv[1:]))\n')
     cli.chmod(0o755)
+    awkward = str(tmp_path / 'dir with space' / '$(touch pwned);*.json')
     result = subprocess.run([shutil.which('just'), '--justfile', str(root / 'justfile'),
-                             'keys-plan', '--json', '--state', 'cache.json'],
+                             'keys-plan', '--json', '--state', awkward],
                             capture_output=True, text=True, timeout=15)
     assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout) == ['keys-plan', '--root', str(root), '--json', '--state', 'cache.json']
+    assert json.loads(result.stdout) == ['keys-plan', '--root', str(root), '--json', '--state', awkward]
+    assert not (root / 'pwned').exists() and not Path('pwned').exists()
+
+
+def _minimal_root(tmp_path):
+    root = tmp_path / 'repo'
+    (root / 'config').mkdir(parents=True)
+    shutil.copyfile(REPO / 'config/install.schema.json', root / 'config/install.schema.json')
+    shutil.copyfile(REPO / 'tests/fixtures/install_catalog/minimal.toml', root / 'config/install.toml')
+    return root
+
+
+def test_explicit_empty_state_is_invalid_not_default(tmp_path, monkeypatch, capsys):
+    import runpy
+    root = _minimal_root(tmp_path)
+    live = tmp_path / 'live.json'
+    live.write_text(json.dumps({'schema_version': 1, 'keys': {}}))
+    monkeypatch.setenv('HOME', str(tmp_path))
+    monkeypatch.setenv('ADE_KEYS_STATE_PATH', str(live))
+    cli = runpy.run_path(str(REPO / 'bin/ade-install'))
+    assert cli['main'](['keys-plan', '--root', str(root), '--json', '--state', '']) == 0
+    assert json.loads(capsys.readouterr().out)['cache_status'] == 'invalid'
+
+
+def test_explicit_empty_root_is_invalid_catalog(tmp_path, monkeypatch, capsys):
+    import runpy
+    monkeypatch.setenv('HOME', str(tmp_path))
+    monkeypatch.chdir(REPO)  # an accidental fallback to cwd would find a valid catalog
+    cli = runpy.run_path(str(REPO / 'bin/ade-install'))
+    assert cli['main'](['keys-plan', '--root', '', '--json']) == 1
+    assert json.loads(capsys.readouterr().out) == {'mode': 'cached-plan-only', 'error': 'invalid-catalog'}
 
 
 @pytest.mark.parametrize('kind', ['fifo', 'directory', 'device'])

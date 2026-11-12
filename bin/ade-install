@@ -252,7 +252,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
 def cmd_keys_plan(args: argparse.Namespace) -> int:
     try:
-        catalog = ai.load_catalog(root=Path(args.root) if args.root else None)
+        if args.root == "":
+            raise ai.InstallError("empty --root")
+        catalog = ai.load_catalog(root=Path(args.root) if args.root is not None else None)
     except ai.InstallError:
         # Do not echo arbitrary config/error payloads through this reporting path.
         if args.json:
@@ -260,7 +262,11 @@ def cmd_keys_plan(args: argparse.Namespace) -> int:
         else:
             print("ade-install keys-plan: invalid catalog", file=sys.stderr)
         return 1
-    cache, status = ai.load_keys_plan_cache(Path(args.state) if args.state else ai.default_keys_state_path())
+    if args.state == "":
+        cache, status = {}, "invalid"  # explicit empty path: never fall back to live user state
+    else:
+        cache, status = ai.load_keys_plan_cache(
+            Path(args.state) if args.state is not None else ai.default_keys_state_path())
     result = ai.keys_plan(catalog, cache=cache, cache_status=status)
     if args.json:
         _print_json(result)

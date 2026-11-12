@@ -191,6 +191,7 @@ ade-install update-plan [--root DIR] [--json]
 ade-install bootstrap [--root DIR] [--prefix DIR] [--dry-run|--yes] [--json]
 ade-install doctor [--root DIR] [--id ID ...] [--json]
 ade-install keys [--root DIR] [--json] [--keys-state PATH]
+ade-install keys-plan [--root DIR] [--json] [--state PATH]   # cached worklist; no probes/writes
 ade-install verify-key PROVIDER  # one of the eight fixed providers above; probe exit code only
 ade-install apply [--root DIR] [--json] [--dry-run|--yes] [--id ID ...] [--force]
                   [--system] [--print-system-argv] [--apply-system]
@@ -198,6 +199,7 @@ ade-install apply [--root DIR] [--json] [--dry-run|--yes] [--id ID ...] [--force
 just install-check
 just install-doctor
 just keys / just keys-check   # ade-install keys (S3b observe; keys-check is the setup-plan alias)
+just keys-plan [--json] [--state PATH]   # ade-install keys-plan (cached outcomes only)
 just keys-check-install       # daily ade-sched job for keys observe
 just install-plan
 just update-plan            # configured dependency candidates only; no probes/updates
