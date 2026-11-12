@@ -52,7 +52,14 @@ claim continuous live monitoring. A resume preflight checks saved values only;
 `check` after opening establishes current evidence. Mode changes after a check
 can still drift; repeat a native readback at the next consequential boundary.
 
-B4. The installed plugin applies to UI/CLI/MCP creates and resume/refresh/import
+B4. The existing direct-Claude `review-pr` / `review-launch` restricted boundary
+is not rewritten in this unit. Its use for trusted internal reviews still needs
+an ordinary Paseo review path; external-security-critical review keeps that
+boundary. Merely changing the policy text or the create plugin does not fix a
+launch path that bypasses Paseo. This is an explicit remaining implementation
+gate, not a completed ordinary-review runtime claim.
+
+B5. The installed plugin applies to UI/CLI/MCP creates and resume/refresh/import
 opens. The transitional `acp-dispatch --perm all` and dialogue launchers pass
 source-backed native modes, then verify inspect before accepting the launch;
 unverified new agents receive a native stop request and a refused result.
