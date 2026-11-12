@@ -236,6 +236,7 @@ Rules, each tested offline with fixture quota:
 Every change is one JSON line in `changes.jsonl` and one `adjust: {…}` line on stderr: `route` (first pool for a
 kind), `switch` (from, to, why), `restore` (from, to), `hold` (a hold placed with no route line to carry it),
 `expire`, `refuse` (once per change, not per call), and `release` (a pool is eligible again without being chosen). `adjust --status` prints the saved holds; `--dry-run` writes nothing. `[routing.adjust].enabled =
-false` makes `adjust` exactly `plan`. Config keys and defaults: `config/routing.toml [routing.adjust]`. Not built:
+false` makes `adjust` plain `plan` plus rules 2 and 3 (no state, no log). Config keys and defaults: `config/routing.toml [routing.adjust]`. Known limits (adversary round 2): the tracked pool follows the wave as planned, so a wave-cap on another kind
+can make a hold yield early or log a `switch` that quota did not cause; a hold is never pruned except by expiry. Not built:
 effort or model-tier changes inside a pool (`docs/dynamic-model-effort.md` G4, still gated), automatic calls from other tools, and
 cross-kind promotion (a kind never moves to a different kind's pools).

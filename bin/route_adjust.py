@@ -74,6 +74,10 @@ def settings(router: Any) -> dict[str, Any]:
 LOCK_TIMEOUT_SECONDS = 30.0
 
 
+class LockBusy(TimeoutError):
+    """The state lock stayed held past the timeout (not any other timeout)."""
+
+
 def state_dir() -> Path:
     """`$ADE_ROUTE_ADJUST_DIR` or the default; a relative path is refused (it would land in the cwd,
     which can be a repository worktree)."""
@@ -85,7 +89,7 @@ def state_dir() -> Path:
 
 def skey(repo: str | None, kind: str) -> str:
     """State key: floors are repo-scoped ([dispatch.repo_overrides]), so holds are too."""
-    return f"{repo}:{kind}" if repo else kind
+    return f"{repo.lower()}:{kind}" if repo else kind
 
 
 def _iso(when: datetime) -> str:
@@ -159,7 +163,7 @@ def locked(directory: Path, timeout: float = LOCK_TIMEOUT_SECONDS) -> Iterator[N
                 break
             except BlockingIOError:
                 if time.monotonic() >= deadline:
-                    raise TimeoutError(f"route-adjust lock {directory / 'state.lock'} busy for {timeout:g}s") from None
+                    raise LockBusy(f"route-adjust lock {directory / 'state.lock'} busy for {timeout:g}s") from None
                 time.sleep(0.1)
         try:
             yield
@@ -331,7 +335,11 @@ def adjust(router: Any, kinds: list[str], *, quota: dict[str, Any], age: float |
         for key in keys.values():
             new_state["kinds"][key] = {"last": None, "held": {}, "refused": None}
     kind_exclude = {k: set(new_state["kinds"][key]["held"]) for k, key in keys.items()}
-    skip = set(exclude) | set(cfg["never_target"])
+    never = set(cfg["never_target"])
+    skip = set(exclude) | never | {
+        s.name for s in router.BY_NAME.values()
+        if _names_never(never, s, "") or any(_names_never(never, s, m.split()[0])
+                                             for m in s.models.values() if m.split())}
     refusals: list[str | None] = []
     planned = router.plan(kinds, quota=quota, min_headroom=min_headroom, exclude=skip, repo=repo,
                           kind_exclude=kind_exclude, reject=lambda k, c: _refusal(router, k, c, cfg),
@@ -348,7 +356,6 @@ def adjust(router: Any, kinds: list[str], *, quota: dict[str, Any], age: float |
             rows.append((kind, None, refusal))
             if first and row.get("refused") != refusal:
                 events.append(_event("refuse", kind, now, why=refusal))
-                changed.add(key)
             if first:
                 row["refused"] = refusal
             continue

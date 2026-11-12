@@ -96,7 +96,7 @@ aliases = { claude-agent-teams = "claude", openclaude = "claude", opencode = "op
 # eligible pool; it returns once it is `restore_margin` points above its floor and held at least `min_dwell_seconds`
 # (hysteresis); with no other pool an usable held pool is restored early. Never touches a running agent; never
 # downgrades a `frontier` slice (refused and reported); never targets `never_target` (omp is always in it).
-# `enabled = false` makes `adjust` behave exactly like `plan` (no state, no log).
+# `enabled = false` makes `adjust` plain `plan` plus the two hard rules above (no state, no log).
 [routing.adjust]
 enabled = true
 restore_margin = 10.0

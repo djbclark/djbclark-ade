@@ -302,6 +302,7 @@ class TestRepairs(Base):
             first = self.run_adjust(["frontier"], down, state)
             again = self.run_adjust(["frontier"], down, first["state"], now=NOW + timedelta(minutes=1))
             self.assertIn("refuse", [e["event"] for e in first["events"]])
+            self.assertIn("hold", [e["event"] for e in first["events"]])     # B1: the hold is logged too
             self.assertNotIn("refuse", [e["event"] for e in again["events"]])
             self.assertIsNotNone(again["rows"][0][2])
 
@@ -315,6 +316,18 @@ class TestRepairs(Base):
                           reject=lambda k, c: "no" if not refusals else None, refusals=refusals)
         self.assertEqual([c is None for _, c in rows], [True, False])   # the refused first slice freed the cap
         self.assertEqual(refusals, ["no", None])
+
+    def test_never_target_by_agent_is_skipped_not_refused(self):  # B7
+        bad = svc("w8-bad", 0, agent="omp")
+        with mock.patch.object(r, "discover", return_value=[bad, self.a, self.b]), \
+             mock.patch.object(r, "SERVICES", (bad, self.a, self.b)), \
+             mock.patch.object(r, "BY_NAME", {s.name: s for s in (bad, self.a, self.b)}):
+            res = self.run_adjust(["code"], {"w8-bad": reading(90), **self.ok()})
+        self.assertEqual(self.pools(res), ["w8-a"])
+        self.assertIsNone(res["rows"][0][2])
+
+    def test_repo_key_is_lowercased(self):  # B6
+        self.assertEqual(ra.skey("TendCF", "code"), "tendcf:code")
 
     def test_bad_held_type_reads_as_no_holds(self):  # A6
         with tempfile.TemporaryDirectory() as tmp:
@@ -459,14 +472,14 @@ class TestCli(Base):
         self.assertIn("REFUSED", out)
 
     def test_lock_timeout_plans_read_only(self):
-        with mock.patch.object(ra, "locked", side_effect=TimeoutError("busy")):
+        with mock.patch.object(ra, "locked", side_effect=ra.LockBusy("busy")):
             code, out, err = self.call("adjust", "--kinds", "code")
         self.assertEqual(code, 0)
         self.assertIn("w8-a", out)
         self.assertIn("planning read-only", err)
         self.assertEqual(os.listdir(self.tmp.name), [])
 
-    def test_disabled_is_plain_plan(self):
+    def test_disabled_is_plan_plus_hard_rules_no_state(self):
         with mock.patch.object(ra, "settings", return_value={**ra.DEFAULTS, "enabled": False}):
             code, out, _ = self.call("adjust", "--kinds", "code")
         self.assertEqual(code, 0)

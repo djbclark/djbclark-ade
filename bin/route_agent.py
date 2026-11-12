@@ -2328,7 +2328,7 @@ def plan(kinds: list[str], *, quota: dict[str, Any] | None = None,
     keeps its anchor); it is soft: a kind that finds no room, or only a choice `reject` refuses, is routed
     again with them allowed, so a hold never strands a kind. `reject(kind, choice)` returns a refusal
     reason or None; a refused slice comes back None, takes no wave slot, and its reason is appended to
-    `refusals` (one entry per kind, None when not refused).
+    `refusals` (one entry per slice, None when not refused).
 
     Greedy in the given order (put the hardest first), honouring each
     service's `max_parallel` so a wave spreads over pools. Slices that
@@ -3028,7 +3028,7 @@ def _adjust_command(args: argparse.Namespace, parser: argparse.ArgumentParser,
             if write:
                 ra.log_events(directory, result["events"])
                 ra.save_state(directory / "state.json", result["state"])
-    except TimeoutError as e:
+    except ra.LockBusy as e:
         # A hung holder must not block launches: plan read-only, record nothing.
         print(f"WARNING: {e}; planning read-only (no hold or restore recorded)", file=sys.stderr)
         result = ra.adjust(sys.modules[__name__], kinds, quota=quota, age=age,
