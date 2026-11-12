@@ -663,3 +663,27 @@ def test_deeply_nested_json_input_is_silent(plain):
     r = subprocess.run([sys.executable, str(HOOK)], input="[" * 200000, capture_output=True, text=True, timeout=60,
                        env=ENV)
     assert r.returncode == 0 and r.stdout == "" and r.stderr == ""
+
+
+# ---- adversary round 4 (2026-11-12, head f5380dfe) --------------------------------------------------------------
+
+
+@pytest.mark.parametrize("command", [
+    "cd \"$(git rev-parse --show-toplevel)\" && git push",
+    "cd `pwd` && git push",
+    "git -C \"$(pwd)\" push",
+    "cd $X && git push",
+])
+def test_dynamic_directory_keeps_the_cwd(libntech, command):
+    assert denied(command, libntech)
+
+
+def test_hyphenated_heredoc_delimiter(plain):
+    cmd = ("gh pr comment 5 --body \"$(cat <<'PR-BODY'\nit doesn't matter \"x\nPR-BODY\n)\" -R cfengine/core")
+    assert denied(cmd, plain)
+    assert not denied(cmd.replace("cfengine/core", "djbclark/core"), plain)
+
+
+def test_substitution_as_redirect_target(plain):
+    assert denied("cat < <(gh pr create -R cfengine/core -t x)", plain)
+    assert denied("echo hi > $(gh pr create -R cfengine/core -t x)", plain)

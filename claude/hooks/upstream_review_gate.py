@@ -84,7 +84,7 @@ HTTP_TOOLS = frozenset({"curl", "wget", "http", "https", "xh", "xhs"})
 INTERESTING = frozenset({"gh", "git", "cd", "pushd", "eval"}) | HTTP_TOOLS | SHELLS
 ASSIGN = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", re.S)
 SHELLISH = re.compile(r"(?<![\w.-])(bash|sh|zsh|dash|ksh|eval|source|python3?|node|perl|ruby|ssh|xargs)(?!\w)")
-HEREDOC_DELIM = re.compile(r"-?[ \t]*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+HEREDOC_DELIM = re.compile(r"-?[ \t]*(['\"]?)([A-Za-z_][A-Za-z0-9_.-]*)\1")
 PUNCT = ";&|()<>`\n"
 
 # gh groups that act on a repository, and the verbs in them that only read. Any other verb is a write.
@@ -212,6 +212,8 @@ def segments(text: str):
         if skip is not None:                            # the file or fd after a redirection
             if skip == "<":
                 REDIR_IN.append(tok)
+            if SUB.search(tok):                         # `< <(gh ...)`, `> $(...)`: the body still runs
+                cur.append(tok)
             skip = None
             continue
         if is_boundary(tok) and set(tok) <= set(PUNCT):
@@ -388,7 +390,7 @@ def base(word: str) -> str:
 def resolve_dir(path: str, cur: str) -> str:
     home = os.path.expanduser("~")
     path = path.replace("${HOME}", home).replace("$HOME", home)
-    if not path or "$" in path or "`" in path:
+    if not path or dynamic(path):                       # a substitution or variable: stay where we are
         return cur
     p = os.path.expanduser(path)
     if not os.path.isabs(p):
