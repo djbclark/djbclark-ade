@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # git-commit-own — commit only your own paths, without pre-commit's whole-tree stash.
 #
-#   git-commit-own [--no-push] "<message>" <path>...
+#   git-commit-own [--no-push] [--staged] "<message>" [<path>...]
 #
 # Why (djbclark, 2026-10-24): a plain `git commit` runs pre-commit, which stashes EVERY
 # unstaged change in the worktree for the 30-60 s of the hook run and restores it afterwards.
@@ -16,7 +16,7 @@
 # then run on the staged file names and the commit takes the index only (no pathspec).
 set -euo pipefail
 
-usage() { echo "usage: git-commit-own [--no-push] [--staged] \"<message>\" [<path>...] (pushes upstream, commit-own.pushRef, or origin/current-branch)" >&2; exit 2; }
+usage() { echo "usage: git-commit-own [--no-push] [--staged] \"<message>\" [<path>...] (pushRef, matching upstream, or origin/current-branch; publish failure exits 3)" >&2; exit 2; }
 
 staged=0
 push=1
@@ -64,13 +64,15 @@ fi
 python3 - "$root" <<'PY'
 import subprocess
 import sys
+import tempfile
+from pathlib import Path
 
 root = sys.argv[1]
 remote, ref = "<unresolved>", "<unresolved>"
 
 
-def git(*args, optional=False):
-    result = subprocess.run(["git", "-C", root, *args], capture_output=True,
+def git(*args, optional=False, cwd=root):
+    result = subprocess.run(["git", "-C", cwd, *args], capture_output=True,
                             text=True, timeout=300)
     if result.returncode and not (optional and result.returncode == 1):
         raise RuntimeError(result.stderr.strip() or result.stdout.strip()
@@ -79,21 +81,29 @@ def git(*args, optional=False):
 
 
 try:
-    branch = git("symbolic-ref", "--quiet", "--short", "HEAD")
+    branch = git("symbolic-ref", "--quiet", "--short", "HEAD", optional=True)
+    if not branch:
+        raise RuntimeError("detached HEAD; publish explicitly or use --no-push")
     # Git resolves upstream remote/ref names without splitting a remote/branch string.
     upstream = git("for-each-ref", "--format=%(upstream:remotename)%09%(upstream:remoteref)",
                    f"refs/heads/{branch}")
-    if upstream and upstream != "\t":
-        remote, ref = upstream.split("\t", 1)
-        if not remote or not ref:
-            raise RuntimeError("incomplete upstream configuration")
-    else:
+    configured = git("config", "--get", "commit-own.pushRef", optional=True)
+    upstream_remote, _, upstream_ref = upstream.partition("\t")
+    if configured:
         remote = git("config", "--get", "commit-own.pushRemote", optional=True) or "origin"
-        ref = git("config", "--get", "commit-own.pushRef", optional=True) or branch
-        if ref.startswith("HEAD:"):
-            ref = ref[5:]
-        if not ref.startswith("refs/heads/"):
-            ref = f"refs/heads/{ref}"
+        ref = configured
+    elif upstream_ref == f"refs/heads/{branch}" and upstream_remote:
+        remote, ref = upstream_remote, upstream_ref
+    else:
+        remote, ref = "origin", branch
+        if upstream_remote or upstream_ref:
+            print(f"git-commit-own: skipping mismatched upstream {upstream_remote} {upstream_ref}; "
+                  f"publishing origin/{branch}. Set commit-own.pushRef to opt in to another branch.",
+                  file=sys.stderr)
+    if ref.startswith("HEAD:"):
+        ref = ref[5:]
+    if not ref.startswith("refs/heads/"):
+        ref = f"refs/heads/{ref}"
     git("check-ref-format", ref)
     # A missing target is normal on a first push; other lookup failures are fatal.
     exists = git("ls-remote", "--heads", "--", remote, ref)
@@ -106,16 +116,29 @@ try:
             if git("status", "--porcelain"):
                 raise RuntimeError("target is ahead and worktree/index is dirty; commit saved locally; "
                                    "clean up and rebase explicitly before publishing")
-            try:
-                rebased = subprocess.run(["git", "-C", root, "-c", "rebase.autoStash=false",
-                                          "rebase", target], capture_output=True, text=True, timeout=300)
-            except subprocess.TimeoutExpired:
-                git("rebase", "--abort")
-                raise
-            if rebased.returncode:
-                git("rebase", "--abort")
-                raise RuntimeError("rebase failed and was aborted: " + rebased.stderr.strip()
-                                   + "\n" + rebased.stdout.strip())
+            if not git("merge-base", "HEAD", target, optional=True):
+                raise RuntimeError("target has unrelated history; rebase refused")
+            replay = git("rev-list", f"{target}..HEAD")
+            unpublished = git("rev-list", f"{target}..HEAD", "--not", "--remotes")
+            if set(replay.splitlines()) != set(unpublished.splitlines()):
+                raise RuntimeError("rebase would rewrite previously published commits; rebase explicitly")
+            original = git("rev-parse", "HEAD")
+            # Only the disposable tree sees conflict markers or destructive rebase cleanup.
+            with tempfile.TemporaryDirectory(prefix="git-commit-own-") as scratch:
+                temporary = str(Path(scratch) / "rebase")
+                git("worktree", "add", "--detach", temporary, original)
+                try:
+                    try:
+                        rebased = git("-c", "rebase.autoStash=false", "rebase", target, cwd=temporary)
+                    except (RuntimeError, subprocess.TimeoutExpired) as exc:
+                        raise RuntimeError(f"temporary rebase failed; original commit retained: {exc}") from exc
+                    new_head = git("rev-parse", "HEAD", cwd=temporary)
+                finally:
+                    git("worktree", "remove", "--force", temporary)
+            if git("rev-parse", "HEAD") != original or git("status", "--porcelain"):
+                raise RuntimeError("checkout changed during rebase; original checkout left untouched")
+            # --keep refuses overlapping edits rather than discarding them.
+            git("reset", "--keep", new_head)
         elif ancestor.returncode:
             raise RuntimeError(ancestor.stderr.strip() or "merge-base failed")
     output = git("push", "--", remote, f"HEAD:{ref}")
@@ -124,5 +147,5 @@ try:
         print(output)
 except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as exc:
     print(f"git-commit-own: PUBLISH FAILED remote={remote} ref={ref}: {exc}", file=sys.stderr)
-    sys.exit(1)
+    sys.exit(3)
 PY

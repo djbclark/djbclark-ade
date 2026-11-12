@@ -70,19 +70,30 @@ PATH refusal, `~/.local/bin/git`, or any new refuse path.
 ### Commit and publish (2026-11-12)
 
 `git-commit-own [--no-push] [--staged] "MSG" [PATHS...]` commits the selected paths
-or staged index, then publishes automatically. Target precedence is the branch's
-configured upstream remote and branch, then `commit-own.pushRef` (a branch name,
-`refs/heads/NAME`, or `HEAD:NAME`), then `origin` with the current branch name.
-Without an upstream, `commit-own.pushRemote` can replace `origin`. For example,
-`git config commit-own.pushRef HEAD:master` lets an untracked worktree branch
-publish to master; a configured upstream takes precedence over this setting.
+or staged index, then publishes automatically. Target precedence is an explicit
+`commit-own.pushRef` (a branch name, `refs/heads/NAME`, or `HEAD:NAME`), then the
+configured upstream only when its branch name matches the current branch, then
+`origin` with the current branch name. With an explicit ref, `commit-own.pushRemote`
+can replace `origin`. For example, `git config commit-own.pushRef HEAD:master`
+opts a worktree branch into publishing to master. A mismatched upstream inherited
+from `git worktree add -b NAME PATH origin/master` is skipped with a stderr
+notice naming it and explaining the opt-in; it is never an implicit push target.
 
 Publishing fetches an existing target and rebases onto it when needed. A dirty
-index or worktree prevents that rebase; a conflicting rebase is aborted. No
-autostash or force-push is used. Failures return nonzero with `PUBLISH FAILED`,
-the remote, target ref and Git error on stderr; the successful local commit is
-retained. Fix the reported problem and publish the existing commit explicitly.
-`--no-push` commits locally without contacting a remote.
+index or worktree (including untracked files) prevents that rebase. Unrelated
+histories and replaying commits reachable from remote-tracking refs are refused.
+Rebasing runs in a disposable linked worktree; conflicts and cleanup never reset
+the working checkout. Before adopting the rebased commit, the tool checks that
+the original checkout stayed unchanged and uses `reset --keep` to preserve edits
+that overlap that final step. No autostash or force-push is used.
+
+Publish failures exit **3** with `PUBLISH FAILED`, the remote, target ref and Git
+error on stderr; the successful local commit is retained (possibly rebased).
+Commit failures retain Git's status. Fix the problem and publish the existing
+commit explicitly rather than retrying the commit command. `--no-push` commits
+locally without contacting a remote. A detached HEAD requires explicit publishing
+or `--no-push`. As with any branch push, publishing includes all unpushed commits
+on the branch, including commits by other authors.
 
 | Command | What |
 |---|---|
