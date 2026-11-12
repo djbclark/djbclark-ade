@@ -36,7 +36,8 @@ def registration(argv):
 def layout(tmp_path):
     root = tmp_path / "repo with spaces"
     (root / "prompts/browser").mkdir(parents=True)
-    shutil.copyfile(REPO / "prompts/browser/pr-access.md", root / "prompts/browser/pr-access.md")
+    for template in ("pr-access.md", "issue-access.md", "github-app-create.md"):
+        shutil.copyfile(REPO / "prompts/browser" / template, root / "prompts/browser" / template)
     return root, tmp_path / "state"
 
 
@@ -102,7 +103,9 @@ def test_partial_registration_is_visible_never_retried_or_completed(layout, resp
 @pytest.mark.parametrize("change", [
     {"name": "../escape"}, {"name": "UPPER"}, {"seconds": 0}, {"seconds": 86401},
     {"notify_owner": "-"}, {"notify_owner": "agent with spaces"},
-    {"task_id": "issue-access"}, {"task_id": "github-app-create"},
+    {"task_id": "add-collaborator"}, {"task_id": "no-such-task"},
+    {"task_id": "github-app-create", "app_name": "../escape"},
+    {"task_id": "github-app-create", "app_name": "has_underscore"},
     {"owner": "other/repo"}, {"repo": "../escape"},
 ])
 def test_invalid_identifiers_fail_before_files_or_processes(layout, change, monkeypatch):
@@ -297,3 +300,347 @@ def test_cold_cli_default_track_creates_no_bytecode_or_state(layout, tmp_path):
     assert json.loads(proc.stdout)["status"] == "dry-run"
     assert {str(p): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
     assert not directory.exists() and list(home.iterdir()) == []
+
+
+# --- W22 (2026-11-12): issue-access / github-app-create readbacks, poll ---
+
+
+def issue_tracked(layout, **kwargs):
+    root, directory = layout
+    params = dict(root=root, task_id="issue-access", name="restrict-issues", seconds=60,
+                  notify_owner="agent-123", owner="alice", repo="project",
+                  directory=directory, yes=True, runner=registration, clock=lambda: 1000)
+    params.update(kwargs)
+    return state.track(**params)
+
+
+def issue_proof(**updates):
+    return {"full_name": "alice/project", "has_issues": True,
+            "issue_creation_policy": "collaborators_only", **updates}
+
+
+def test_issue_access_completes_from_repository_readback(layout):
+    issue_tracked(layout)
+    runner = Mock(side_effect=[result(issue_proof(full_name="ALICE/Project")), result()])
+    payload, rc = state.verify("restrict-issues", directory=layout[1], runner=runner, clock=lambda: 1020)
+    assert rc == 0 and payload["completed"] and payload["state"] == "completed"
+    assert runner.call_args_list[0].args[0] == ["gh", "api", "--hostname", "github.com", "--method", "GET", "-H",
+        "X-GitHub-Api-Version: 2026-03-10", "repos/alice/project"]
+    obs = payload["observation"]
+    assert obs["issue_creation_policy"] == "collaborators_only" and obs["issues_enabled"] is True
+    assert obs["source"] == "github-rest-repository" and obs["hostname"] == "github.com"
+    assert payload["deadline_cleanup"] == "done"
+    again, rc = state.verify("restrict-issues", directory=layout[1],
+                             runner=Mock(side_effect=AssertionError()), clock=lambda: 2000)
+    assert again["completed"] and rc == 0
+
+
+@pytest.mark.parametrize("response,reason,observed", [
+    (result({"full_name": "alice/project", "has_issues": True}), "field-missing", "not-matched"),
+    (result(issue_proof(issue_creation_policy=None)), None, "not-matched"),
+    (result(issue_proof(issue_creation_policy="all")), None, "not-matched"),
+    (result(issue_proof(issue_creation_policy="everyone")), None, "not-matched"),
+    (result(issue_proof(has_issues=False)), None, "not-matched"),
+    (result(issue_proof(has_issues="true")), None, "not-matched"),
+    (result(issue_proof(full_name="alice/elsewhere")), "repository-identity-mismatch", "unknown"),
+    (result(issue_proof(), rc=1), "api-unreadable", "unknown"),
+    (OSError("no gh"), "api-unreadable", "unknown"),
+    (subprocess.TimeoutExpired([], 30), "api-unreadable", "unknown"),
+    (subprocess.CompletedProcess([], 0, "bad json", "arbitrary API/bot error text"), "api-unreadable", "unknown"),
+])
+def test_issue_access_nonproof_never_completes_or_stores_payload(layout, response, reason, observed):
+    issue_tracked(layout)
+    runner = Mock(side_effect=[response])
+    payload, rc = state.verify("restrict-issues", directory=layout[1], runner=runner, clock=lambda: 1020)
+    assert rc == 1 and payload["state"] == "pending" and payload["completed"] is False
+    if reason:
+        assert payload["observation"]["reason"] == reason
+    assert payload["observation"]["status"] == observed
+    assert runner.call_count == 1
+    assert "arbitrary API/bot" not in (layout[1] / "restrict-issues.json").read_text()
+
+
+@pytest.mark.parametrize("corrupt", [
+    {"observation": None}, {"completed_at": 1060},
+    {"observation.issue_creation_policy": "all"},
+    {"observation.issue_creation_policy": "unknown"},
+    {"observation.issues_enabled": False},
+    {"observation.source": "bot-reply"},
+    {"observation.observed_at": 1019},
+    {"observation.target": "someone/other"},
+])
+def test_issue_completed_records_never_infer_success(layout, corrupt):
+    issue_tracked(layout)
+    state.verify("restrict-issues", directory=layout[1],
+                 runner=Mock(side_effect=[result(issue_proof()), result()]), clock=lambda: 1020)
+    path = layout[1] / "restrict-issues.json"
+    record = json.loads(path.read_text())
+    for key, value in corrupt.items():
+        if key.startswith("observation."):
+            record["observation"][key.split(".")[1]] = value
+        else:
+            record[key] = value
+    path.write_text(json.dumps(record))
+    with pytest.raises(tasks.BrowserTaskError, match="proof"):
+        state.status("restrict-issues", directory=layout[1])
+    with pytest.raises(tasks.BrowserTaskError, match="proof"):
+        state.verify("restrict-issues", directory=layout[1], runner=Mock(side_effect=AssertionError()))
+
+
+def app_tracked(layout, **kwargs):
+    root, directory = layout
+    params = dict(root=root, task_id="github-app-create", name="create-app", seconds=60,
+                  notify_owner="agent-123", owner="alice", repo="project",
+                  directory=directory, yes=True, runner=registration, clock=lambda: 1000)
+    params.update(kwargs)
+    return state.track(**params)
+
+
+def app_payload(**updates):
+    payload = {"slug": "ade-merge-gate", "id": 123,
+               "permissions": {"statuses": "write", "checks": "write", "pull_requests": "read"}}
+    payload.update(updates)
+    return payload
+
+
+def installations_payload(**updates):
+    row = {"id": 7, "app_id": 123, "app_slug": "ade-merge-gate",
+           "account": "alice", "repository_selection": "selected"}
+    row.update(updates)
+    return [row]
+
+
+def app_proof_responses():
+    return [result(app_payload()), result(installations_payload()),
+            result(["alice/project"]), result()]
+
+
+def test_app_create_completes_from_app_and_installation_readback(layout):
+    payload_track, _ = app_tracked(layout)
+    assert payload_track["app_name"] == "ade-merge-gate"
+    runner = Mock(side_effect=app_proof_responses())
+    payload, rc = state.verify("create-app", directory=layout[1], runner=runner, clock=lambda: 1020)
+    assert rc == 0 and payload["completed"] and payload["state"] == "completed"
+    argvs = [call.args[0] for call in runner.call_args_list]
+    assert argvs[0][:-1] == ["gh", "api", "--hostname", "github.com", "--method", "GET",
+                             "-H", "X-GitHub-Api-Version: 2026-03-10"]
+    assert argvs[0][-1] == "apps/ade-merge-gate"
+    assert argvs[1][-3] == "user/installations?per_page=100"
+    assert "account: .account.login" in argvs[1][-1]
+    assert argvs[2][-3] == "user/installations/7/repositories?per_page=100"
+    assert argvs[2][-1] == "[.repositories[].full_name]"
+    assert argvs[3][:4] == [sys.executable, "-I", str(state.DEADLINE), "done"]
+    obs = payload["observation"]
+    assert obs["source"] == "github-rest-app-and-installations"
+    assert obs["app_slug"] == "ade-merge-gate" and obs["app_found"] is True and obs["app_id"] == 123
+    assert (obs["perm_statuses"], obs["perm_checks"], obs["perm_pull_requests"]) == ("write", "write", "read")
+    assert obs["installation_found"] is True and obs["installation_id"] == 7
+    assert obs["installation_account_match"] is True and obs["install_repos_exact"] is True
+    assert obs["repository_selection"] == "selected" and obs["install_repos_count"] == 1
+    again, rc = state.verify("create-app", directory=layout[1],
+                             runner=Mock(side_effect=AssertionError()), clock=lambda: 2000)
+    assert again["completed"] and rc == 0
+
+
+def test_app_verify_dry_run_lists_readback_argv_without_executing(layout):
+    app_tracked(layout)
+    runner = Mock(side_effect=AssertionError("dry run executed a readback"))
+    plan, rc = state.verify("create-app", directory=layout[1], dry_run=True, runner=runner)
+    assert rc == 0 and plan["status"] == "dry-run"
+    assert plan["verify_argv"][-1] == "apps/ade-merge-gate"
+    assert len(plan["verify_argv_all"]) == 2
+    runner.assert_not_called()
+
+
+@pytest.mark.parametrize("responses,reason,observed", [
+    ([result(rc=1)], "app-unreadable", "unknown"),
+    ([result({"slug": "other-app", "id": 5})], "app-unreadable", "unknown"),
+    ([result("bad json")], "app-unreadable", "unknown"),
+    ([result(app_payload(permissions={"statuses": "read", "checks": "write", "pull_requests": "read"})),
+      result(installations_payload()), result(["alice/project"])], "permissions-mismatch", "not-matched"),
+    ([result(app_payload()), result(installations_payload()), result(["alice/other"])],
+     "installation-repos-extra", "not-matched"),
+    ([result(app_payload()), result(installations_payload()),
+      result(["alice/project", "alice/other"])], "installation-repos-extra", "not-matched"),
+    ([result(app_payload()), result(installations_payload()), result([])],
+     "installation-repos-missing", "not-matched"),
+    ([result(app_payload()), result(installations_payload(account="someone")),
+      result(["alice/project"])], "installation-account-mismatch", "not-matched"),
+    ([result(app_payload()), result(installations_payload(app_slug="other"))],
+     "installation-missing", "not-matched"),
+    ([result(app_payload()), result(rc=1)], "installations-unreadable", "unknown"),
+    ([result(app_payload()), result(installations_payload()), result(rc=1)],
+     "installation-repos-unreadable", "unknown"),
+    ([result(app_payload()), result(installations_payload(id="x"))],
+     "installation-repos-unreadable", "unknown"),
+])
+def test_app_nonproof_never_completes(layout, responses, reason, observed):
+    app_tracked(layout)
+    runner = Mock(side_effect=responses)
+    payload, rc = state.verify("create-app", directory=layout[1], runner=runner, clock=lambda: 1020)
+    assert rc == 1 and payload["state"] == "pending" and payload["completed"] is False
+    assert payload["observation"]["reason"] == reason
+    assert payload["observation"]["status"] == observed
+
+
+@pytest.mark.parametrize("corrupt", [
+    {"observation": {"status": "matched"}},
+    {"observation.app_slug": "other-app"},
+    {"observation.app_found": False},
+    {"observation.app_id": None},
+    {"observation.perm_checks": "unknown"},
+    {"observation.install_repos_exact": False},
+    {"observation.installation_account_match": False},
+    {"observation.source": "github-rest-repository"},
+    {"app_name": "other-app"},
+])
+def test_app_completed_records_never_infer_success(layout, corrupt):
+    app_tracked(layout)
+    state.verify("create-app", directory=layout[1],
+                 runner=Mock(side_effect=app_proof_responses()), clock=lambda: 1020)
+    path = layout[1] / "create-app.json"
+    record = json.loads(path.read_text())
+    for key, value in corrupt.items():
+        if key.startswith("observation."):
+            record["observation"][key.split(".")[1]] = value
+        else:
+            record[key] = value
+    path.write_text(json.dumps(record))
+    with pytest.raises(tasks.BrowserTaskError, match="proof"):
+        state.status("create-app", directory=layout[1])
+    with pytest.raises(tasks.BrowserTaskError, match="proof"):
+        state.verify("create-app", directory=layout[1], runner=Mock(side_effect=AssertionError()))
+
+
+def not_matched_response():
+    return result({"full_name": "alice/project", "has_pull_requests": True,
+                   "pull_request_creation_policy": "all"})
+
+
+def test_app_completion_driven_by_exact_repo_list_not_selection_flag(layout):
+    # A selection of "all" with a single-repo visible list is the same end
+    # state; the proof is the exact user-visible repository list, and the
+    # selection flag is recorded but never required.
+    app_tracked(layout)
+    runner = Mock(side_effect=[result(app_payload()),
+                               result(installations_payload(repository_selection="all")),
+                               result(["alice/project"]), result()])
+    payload, rc = state.verify("create-app", directory=layout[1], runner=runner, clock=lambda: 1020)
+    assert rc == 0 and payload["completed"]
+    assert payload["observation"]["repository_selection"] == "all"
+    assert payload["observation"]["install_repos_exact"] is True
+
+
+def test_poll_dry_run_is_a_pure_plan(layout):
+    tracked(layout)
+    root, directory = layout
+    before = {p.name: p.read_bytes() for p in directory.iterdir()}
+    runner = Mock(side_effect=AssertionError("plan executed a readback"))
+    payload, rc = state.poll("restrict-prs", directory=directory, interval_seconds=30,
+                             max_wait_seconds=120, dry_run=True, runner=runner, clock=lambda: 1000)
+    assert rc == 0 and payload["status"] == "dry-run" and payload["completed"] is False
+    assert payload["record_state"] == "pending" and payload["deadline_in_seconds"] == 60
+    assert payload["planned_polls_upper_bound"] == 4
+    assert payload["verify_argv"][-1] == "repos/alice/project"
+    runner.assert_not_called()
+    assert {p.name: p.read_bytes() for p in directory.iterdir()} == before
+
+
+def test_poll_stops_on_first_completion_without_sleeping(layout):
+    tracked(layout)
+    sleeps: list[float] = []
+    runner = Mock(side_effect=[result(proof()), result()])
+    payload, rc = state.poll("restrict-prs", directory=layout[1], runner=runner,
+                             clock=lambda: 1005, sleeper=sleeps.append)
+    assert rc == 0 and payload["completed"] and payload["state"] == "completed"
+    assert payload["polls"] == 1 and payload["poll_stopped"] == "completed" and sleeps == []
+
+
+def test_poll_repeats_verify_on_interval_until_completed(layout):
+    tracked(layout)
+    sleeps: list[float] = []
+    runner = Mock(side_effect=[not_matched_response(), result(proof()), result()])
+    payload, rc = state.poll("restrict-prs", directory=layout[1], interval_seconds=15,
+                             max_wait_seconds=600, runner=runner,
+                             clock=lambda: 1000 + 10 * len(sleeps), sleeper=sleeps.append)
+    assert rc == 0 and payload["completed"] and payload["polls"] == 2
+    assert payload["poll_stopped"] == "completed" and sleeps == [15]
+
+
+def test_poll_respects_max_wait_and_reports_pending(layout):
+    tracked(layout)
+    sleeps: list[float] = []
+    ticks = iter([1000, 1000, 1000, 1000, 1030, 1030, 1030, 1030])
+    runner = Mock(side_effect=[not_matched_response(), not_matched_response()])
+    payload, rc = state.poll("restrict-prs", directory=layout[1], interval_seconds=60,
+                             max_wait_seconds=30, runner=runner,
+                             clock=lambda: next(ticks), sleeper=sleeps.append)
+    assert rc == 1 and payload["state"] == "pending" and not payload["completed"]
+    # The wait cap stops on the verify already run; no third readback.
+    assert payload["polls"] == 2 and payload["poll_stopped"] == "max-wait-reached" and sleeps == [30]
+    assert runner.call_count == 2
+
+
+def test_app_account_match_is_case_insensitive(layout):
+    app_tracked(layout)
+    runner = Mock(side_effect=[result(app_payload()),
+                               result(installations_payload(account="ALICE")),
+                               result(["alice/project"]), result()])
+    payload, rc = state.verify("create-app", directory=layout[1], runner=runner, clock=lambda: 1020)
+    assert rc == 0 and payload["completed"]
+    assert payload["observation"]["installation_account_match"] is True
+
+
+def test_poll_stops_at_record_deadline_and_reports_expired(layout):
+    tracked(layout)
+    sleeps: list[float] = []
+    ticks = iter([1000, 1000, 1000, 1000, 1060])
+    runner = Mock(side_effect=[not_matched_response()])
+    payload, rc = state.poll("restrict-prs", directory=layout[1], interval_seconds=60,
+                             max_wait_seconds=600, runner=runner,
+                             clock=lambda: next(ticks), sleeper=sleeps.append)
+    assert rc == 1 and payload["state"] == "expired" and not payload["completed"]
+    assert payload["polls"] == 2 and payload["poll_stopped"] == "expired" and sleeps == [60]
+    runner.assert_called_once()  # the expiry pass never reaches the API
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"interval_seconds": 4}, {"interval_seconds": 3601}, {"interval_seconds": True},
+    {"max_wait_seconds": 0}, {"max_wait_seconds": 86401}, {"max_wait_seconds": False},
+])
+def test_poll_bounds_validated_before_any_read(layout, kwargs, monkeypatch):
+    tracked(layout)
+    read = Mock(side_effect=AssertionError("bounds checked after record read"))
+    monkeypatch.setattr(state, "_read", read)
+    with pytest.raises(tasks.BrowserTaskError):
+        state.poll("restrict-prs", directory=layout[1], dry_run=True, **kwargs)
+    read.assert_not_called()
+
+
+def test_cold_cli_poll_dry_run_creates_no_bytecode_or_changes(layout, tmp_path):
+    root, directory = layout
+    (root / "bin").mkdir()
+    for name in ("ade-browser-task", "ade_browser_task.py", "ade_browser_task_state.py"):
+        shutil.copyfile(REPO / "bin" / name, root / "bin" / name)
+    home = tmp_path / "home"
+    home.mkdir()
+    cli = [sys.executable, "-I", str(root / "bin/ade-browser-task")]
+    env = {**os.environ, "HOME": str(home), "PATH": ""}
+
+    def run(*args):
+        return subprocess.run(cli + list(args) + ["--state-dir", str(directory), "--json"],
+                              env=env, capture_output=True, text=True, timeout=10)
+
+    proc = run("track", "pr-access", "--name", "restrict-prs", "--deadline-seconds", "60",
+               "--notify-owner", "agent-123", "--owner", "alice", "--repo", "project", "--yes")
+    assert proc.returncode == 1, proc.stderr
+    # PATH is empty and root/bin has no `deadline` script: python exits 2 on the
+    # missing file, so registration is reported failed (never silently retried).
+    assert json.loads(proc.stdout)["monitoring"] == "registration-failed"
+    after_track = {str(p): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    proc = run("poll", "restrict-prs", "--dry-run")
+    assert proc.returncode == 0, proc.stderr
+    payload = json.loads(proc.stdout)
+    assert payload["status"] == "dry-run" and payload["record_state"] == "pending"
+    assert {str(p): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == after_track
+    assert list(home.iterdir()) == []

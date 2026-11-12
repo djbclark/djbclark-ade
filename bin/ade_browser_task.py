@@ -5,6 +5,11 @@ First unit (2026-11-10): list and render checked-in templates under
 PATH. With no coding-bot (or ``relay --dry-run``), print a self-contained
 prompt and report ``unsent``. No live browser session, no completion claim,
 no secret widening. See docs/browser-task.md.
+
+W22 (2026-11-12): completion readbacks for ``pr-access``, ``issue-access``
+and ``github-app-create`` (see ade_browser_task_state.py) plus a bounded
+``poll`` loop; sends, receipts and deadline registrations still never prove
+completion.
 """
 from __future__ import annotations
 
