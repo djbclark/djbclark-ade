@@ -484,6 +484,21 @@ Pass `--ade` only with a durable checkout (`~/src/djbclark-ade`); never with a l
   finds nothing. Tests (`tests/test_install_recovery.py`) SIGKILL a real apply at
   five phases (before the pending record, in the command, before the terminal
   save, between temp write and replace, after the terminal save).
+
+  Hardening (adversary review, 2026-11-12): `ledger.lock` and the evidence log are
+  opened `O_NOFOLLOW` and are only truncated or appended to when they are regular,
+  singly-linked files owned by the effective user (a planted link must never
+  redirect a write, e.g. a root `apply` that inherited the user's HOME); a link
+  makes `recover` and the lock refuse, doctor report it unverifiable. Pids in state
+  data are bounded (an absurd pid is `unknown`, never a crash), state-file reads are
+  bounded and non-blocking, process start is compared with a 2 s tolerance (Linux
+  `btime` drifts when the clock steps), a temp whose writer pid was reused is
+  orphaned only once 300 s old, and file names are escaped in reports. Known limits:
+  a child that outlives a killed owner is not detected, so its entry is relabelled
+  `interrupted` while it may still be installing (the outcome is unknown either
+  way: check `ade-install doctor`); the shell bridge (`bin/ade-bootstrap`) still
+  judges its sentinel by bare pid; the stale-holder supersede at the next lock
+  acquisition writes one evidence line and no repair.
 - `ade-user-install uv|just|cursor-cli|hermes|link <name>|sudo-secretspec` fetches
   release binaries / vendor packages, symlinks a repo `bin/` tool, or stages
   Linux sudo-secretspec media into the prefix. No `shell=True`, no root. Cursor

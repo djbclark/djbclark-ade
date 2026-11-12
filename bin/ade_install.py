@@ -2583,10 +2583,10 @@ def read_python_pending(state_dir: Path) -> dict[str, str] | None:
     """Parse the pending-acquisition sentinel (key=value lines; the cold-start
     shell bridge writes the same file). Unreadable content is still pending."""
     path = python_pending_path(state_dir)
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except FileNotFoundError:
+    if not os.path.lexists(path):
         return None
+    raw = read_small_file(path)
+    text = (raw or b"").decode("utf-8", errors="replace")  # a non-regular sentinel is still pending, content unknown
     fields: dict[str, str] = {}
     for line in text.splitlines():
         key, sep, value = line.partition("=")
@@ -2596,10 +2596,15 @@ def read_python_pending(state_dir: Path) -> dict[str, str] | None:
     return fields
 
 
+PID_MAX = 2**31 - 1
+
+
 def _pid_alive(pid: int) -> bool:
+    if not 0 < pid <= PID_MAX:
+        return False  # state-dir data can name any integer; nothing that large is a process
     try:
         os.kill(pid, 0)
-    except ProcessLookupError:
+    except (ProcessLookupError, OverflowError):
         return False
     except PermissionError:
         return True
@@ -2848,6 +2853,8 @@ def catalog_summary(catalog: Catalog) -> dict[str, Any]:
 # process start time, never by a name pattern: a bare PID is reused after a crash.
 RECOVERY_EVIDENCE = "recovery-evidence.jsonl"
 UNKNOWN_START_TOKEN = "unknown"
+START_TOLERANCE_S = 2
+SENTINEL_REUSE_GAP_S = 120  # a process starting this long after the sentinel was written is not its writer
 
 
 def process_start_time(pid: int) -> int | None:
@@ -2862,13 +2869,13 @@ def process_start_time(pid: int) -> int | None:
         return btime + ticks // os.sysconf("SC_CLK_TCK")
     except (OSError, ValueError, IndexError, StopIteration):
         pass
-    ps = shutil.which("ps")
+    ps = "/bin/ps" if os.access("/bin/ps", os.X_OK) else None  # never a PATH-resolved ps
     if not ps:
         return None
     try:
         proc = subprocess.run(  # noqa: S603 - fixed argv, never shell
             [ps, "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True, check=False,
-            shell=False, timeout=5, env={**os.environ, "LC_ALL": "C"},
+            shell=False, timeout=5, env={"LC_ALL": "C"},  # minimal env: nothing inherited reaches ps
         )
         text = " ".join((proc.stdout or "").split())
         return int(time.mktime(time.strptime(text, "%a %b %d %H:%M:%S %Y"))) if proc.returncode == 0 and text else None
@@ -2893,7 +2900,7 @@ def owner_status(owner: Any) -> str:
         pid = int(owner.get("pid"))
     except (TypeError, ValueError):
         return "unknown"
-    if pid <= 0:
+    if not 0 < pid <= PID_MAX:
         return "unknown"
     if not _pid_alive(pid):
         return "gone"
@@ -2902,7 +2909,8 @@ def owner_status(owner: Any) -> str:
     if recorded is None or now_start is None:
         return "unverifiable"
     try:
-        return "alive" if int(recorded) == now_start else "reused"
+        # +-START_TOLERANCE_S: /proc btime drifts when the wall clock is stepped (NTP, VM resume)
+        return "alive" if abs(int(recorded) - now_start) <= START_TOLERANCE_S else "reused"
     except (TypeError, ValueError):
         return "unverifiable"
 
@@ -2914,7 +2922,7 @@ def sentinel_owner_status(fields: dict[str, str]) -> str:
         pid = int(fields.get("pid", ""))
     except ValueError:
         return "unknown"
-    if pid <= 0:
+    if not 0 < pid <= PID_MAX:
         return "unknown"
     if not _pid_alive(pid):
         return "gone"
@@ -2925,15 +2933,40 @@ def sentinel_owner_status(fields: dict[str, str]) -> str:
         return "unverifiable"
     if now_start is None:
         return "unverifiable"
-    return "reused" if now_start > written + 5 else "alive"
+    return "reused" if now_start > written + SENTINEL_REUSE_GAP_S else "alive"
+
+
+def owned_regular_file(fd: int) -> bool:
+    """True for a regular, singly-linked file owned by the effective user: the only kind
+    this module truncates or appends to (a state-dir symlink must never redirect a write,
+    least of all one made by a root run that inherited the user's HOME)."""
+    st = os.fstat(fd)
+    return stat.S_ISREG(st.st_mode) and st.st_nlink == 1 and st.st_uid == os.geteuid()
+
+
+def read_small_file(path: Path, limit: int = 4096) -> bytes | None:
+    """Bounded, non-blocking, symlink-refusing read of a regular file; None if absent or not a regular file."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError:
+        return None
+    try:
+        return os.pread(fd, limit, 0) if stat.S_ISREG(os.fstat(fd).st_mode) else None
+    finally:
+        os.close(fd)
 
 
 def append_recovery_evidence(state_dir: Path, record: dict[str, Any]) -> None:
     """Append-only, fsynced evidence of what recovery saw or changed; never rewritten."""
     state_dir.mkdir(parents=True, exist_ok=True)
     line = json.dumps({"at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), **record}, sort_keys=True) + "\n"
-    fd = os.open(state_dir / RECOVERY_EVIDENCE, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_CLOEXEC, 0o600)
     try:
+        fd = os.open(state_dir / RECOVERY_EVIDENCE, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    except OSError as error:
+        raise InstallError(f"{state_dir / RECOVERY_EVIDENCE}: cannot open the evidence log ({error}); it must be a plain file") from error
+    try:
+        if not owned_regular_file(fd):
+            raise InstallError(f"{state_dir / RECOVERY_EVIDENCE}: evidence log is not a regular file owned by you; refusing to write")
         os.write(fd, line.encode("utf-8"))
         os.fsync(fd)
     finally:
@@ -3004,18 +3037,23 @@ def install_ledger_lock(state_dir: Path, *, wait: bool = True) -> Iterator[dict[
     of blocking when another installer holds the lock.
     """
     state_dir.mkdir(parents=True, exist_ok=True)
-    fd = os.open(state_dir / "ledger.lock", os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
+    try:
+        fd = os.open(state_dir / "ledger.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    except OSError as error:
+        raise InstallError(f"{state_dir / 'ledger.lock'}: cannot open the install lock ({error}); it must be a plain file, not a link") from error
     try:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
         except BlockingIOError as error:
             raise InstallError(f"{state_dir / 'ledger.lock'}: install lock is held by a running installer") from error
-        previous = _swap_lock_holder(state_dir, fd)
+        record_ok = owned_regular_file(fd)  # else keep the flock but never truncate/write through it
+        previous = _swap_lock_holder(state_dir, fd) if record_ok else None
         try:
             yield previous
         finally:
-            with contextlib.suppress(OSError):
-                os.ftruncate(fd, 0)
+            if record_ok:
+                with contextlib.suppress(OSError):
+                    os.ftruncate(fd, 0)
     finally:
         os.close(fd)
 
@@ -3040,7 +3078,7 @@ def _swap_lock_holder(state_dir: Path, fd: int) -> dict[str, Any] | None:
         os.ftruncate(fd, 0)
         os.pwrite(fd, json.dumps(record).encode("utf-8"), 0)
         os.fsync(fd)
-    except OSError:
+    except Exception:  # noqa: BLE001 - advisory record: no failure here (odd pid data, evidence log refused) may fail the lock
         pass
     return stale
 

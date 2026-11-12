@@ -21,7 +21,7 @@ from typing import Any
 
 import ade_install as ai
 
-LEGACY_TEMP_MIN_AGE_S = 300  # pre-W18 temp names carry no owner: only old ones are orphaned
+TEMP_MIN_AGE_S = 300  # no live writer holds a temp this long: gates pre-W18 temps and pid-reuse verdicts
 QUARANTINE_DIR = "recovered"
 PYTHON_RECOVER_COMMAND = "bin/ade-install python --recover --yes"
 RECOVER_COMMAND = "bin/ade-install recover --yes"
@@ -43,12 +43,14 @@ class Finding:
 def lock_state(state_dir: Path) -> str:
     """``absent`` | ``free`` | ``held`` (non-blocking probe; never creates the file)."""
     try:
-        fd = os.open(state_dir / "ledger.lock", os.O_RDWR | os.O_CLOEXEC)
+        fd = os.open(state_dir / "ledger.lock", os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
     except FileNotFoundError:
         return "absent"
     except OSError:
-        return "held"
+        return "held"  # a link or unopenable file: unverifiable, never "free"
     try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return "held"
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         return "held"  # EAGAIN/EACCES: another open file description holds it
@@ -58,10 +60,8 @@ def lock_state(state_dir: Path) -> str:
 
 
 def _read_lock_holder(state_dir: Path) -> dict[str, Any] | None:
-    try:
-        return ai.parse_lock_holder((state_dir / "ledger.lock").read_bytes()[:4096])
-    except OSError:
-        return None
+    raw = ai.read_small_file(state_dir / "ledger.lock")
+    return None if raw is None else ai.parse_lock_holder(raw)
 
 
 def _describe(owner: Any) -> str:
@@ -136,6 +136,7 @@ def _scan_temps(state_dir: Path, now: float) -> list[Finding]:
         if new:
             pid = int(new.group("pid"))
             tok = new.group("tok")
+            age = now - st.st_mtime
             if not ai._pid_alive(pid):
                 status, why = "orphaned", "writer process gone"
             else:
@@ -144,17 +145,19 @@ def _scan_temps(state_dir: Path, now: float) -> list[Finding]:
                     status, why = "active", "writer pid is running (start unverifiable)"
                 elif ai._start_token(start) == tok:
                     status, why = "active", "writer is running"
-                else:
+                elif age >= TEMP_MIN_AGE_S:
                     status, why = "orphaned", "writer pid reused by a later process"
+                else:
+                    status, why = "active", "writer start differs but the file is younger than %ds; may be in flight" % TEMP_MIN_AGE_S
         else:
             legacy = _LEGACY_TEMP.match(name)
             if not legacy or legacy.group("base") not in _TARGET_NAMES:
                 continue
             age = now - st.st_mtime
-            if age >= LEGACY_TEMP_MIN_AGE_S:
+            if age >= TEMP_MIN_AGE_S:
                 status, why = "orphaned", f"pre-W18 temp file, {int(age)}s old, no owner recorded"
             else:
-                status, why = "active", "pre-W18 temp file younger than %ds; may be in flight" % LEGACY_TEMP_MIN_AGE_S
+                status, why = "active", "pre-W18 temp file younger than %ds; may be in flight" % TEMP_MIN_AGE_S
         out.append(Finding("temp-file", name, status, f"{st.st_size} bytes; {why}; the target was never replaced by it",
                            RECOVER_COMMAND if status == "orphaned" else None))
     return out
@@ -183,13 +186,18 @@ def scan(state_dir: Path, *, now: float | None = None) -> list[Finding]:
             + _scan_temps(state_dir, time.time() if now is None else now) + _scan_python(state_dir))
 
 
+def safe(text: str) -> str:
+    """Escape control characters: state-dir file names are untrusted and reach the terminal."""
+    return text.encode("unicode_escape").decode("ascii")
+
+
 def observations(state_dir: Path, *, now: float | None = None) -> list[ai.Observation]:
     findings = scan(state_dir, now=now)
     if not findings:
         return [ai.Observation("install-state", str(state_dir), "ok", "no orphaned ledger entries, stale locks or half-written artifacts")]
     return [
-        ai.Observation("install-state", f"{f.kind}/{f.id}", f.status,
-                       f.detail + (f"; repair (explicit, never automatic): {f.repair}" if f.repair else ""))
+        ai.Observation("install-state", f"{f.kind}/{safe(f.id)}", f.status,
+                       safe(f.detail) + (f"; repair (explicit, never automatic): {f.repair}" if f.repair else ""))
         for f in findings
     ]
 
@@ -201,6 +209,9 @@ def failing(obs: list[ai.Observation]) -> int:
 def _quarantine(state_dir: Path, name: str, stamp: str) -> str:
     target_dir = state_dir / QUARANTINE_DIR
     target_dir.mkdir(parents=True, exist_ok=True)
+    st = os.lstat(target_dir)
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.geteuid():
+        raise ai.InstallError(f"{target_dir}: must be a directory you own (not a link); refusing to move files into it")
     target = target_dir / f"{stamp}-{name}"
     os.rename(state_dir / name, target)
     return str(target)
@@ -250,7 +261,7 @@ def recover(state_dir: Path, *, yes: bool = False, euid: int | None = None, now:
                 _quarantine(state_dir, f.id, stamp)
                 repaired.append(f"{f.kind}/{f.id}")
     except ai.InstallError as error:
-        report.update(status="lock-busy" if "lock is held" in str(error) else "ledger-unreadable", reason=str(error) + ". Nothing changed")
+        report.update(status="lock-busy" if "is held by a running" in str(error) else "refused", reason=str(error) + ". Remaining repairs not attempted")
         return report, 1
     report["repaired"] = repaired
     report["status"] = "recovered" if repaired else "nothing-to-recover"

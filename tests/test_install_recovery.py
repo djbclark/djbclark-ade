@@ -259,3 +259,77 @@ def test_cli_recover_dry_run_then_yes(tmp_path):
     assert dry["status"] == "dry-run" and "ledger-entry/tool" in dry["would_repair"]
     live = subprocess.run(cmd + ["--yes"], capture_output=True, text=True, env=env)
     assert live.returncode == 0 and json.loads(live.stdout)["status"] == "recovered"
+
+
+def test_symlinked_lock_and_evidence_never_redirect_a_write(tmp_path):
+    state = tmp_path / "state"
+    state.mkdir()
+    victim = tmp_path / "victim.txt"
+    victim.write_text("precious\n")
+    (state / "ledger.lock").symlink_to(victim)
+    with pytest.raises(ai.InstallError):
+        with ai.install_ledger_lock(state):
+            pass
+    assert victim.read_text() == "precious\n"
+    assert rec.lock_state(state) == "held"  # a link is unverifiable, never "free"
+    (state / "ledger.lock").unlink()
+    (state / ai.RECOVERY_EVIDENCE).symlink_to(victim)
+    with pytest.raises(ai.InstallError):
+        ai.append_recovery_evidence(state, {"event": "x"})
+    # a hostile stale holder plus a linked evidence log: the lock still works and writes nothing through the link
+    (state / "ledger.lock").write_text(json.dumps({"pid": 999999999, "start": 1}))
+    with ai.install_ledger_lock(state):
+        pass
+    assert victim.read_text() == "precious\n"
+    report, rc = rec.recover(state, yes=True)  # write-ahead evidence refused: no repair attempted
+    assert victim.read_text() == "precious\n"
+
+
+def test_hostile_state_dir_data_cannot_crash_lock_doctor_or_recover(tmp_path):
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "ledger.lock").write_text(json.dumps({"pid": 10**12, "start": 1}))
+    with ai.install_ledger_lock(state):  # OverflowError in the advisory holder swap must not fail the lock
+        pass
+    (state / f"ledger.json.{10**12}.unknown.x.tmp").write_text("{}")
+    assert {f.status for f in rec.scan(state)} == {"orphaned"}
+    assert rec.recover(state, yes=True)[1] == 0
+    assert ai.owner_status({"pid": 10**12, "start": 1}) == "unknown"
+    assert ai.owner_status({"pid": True and "x"}) == "unknown"
+
+
+def test_non_regular_lock_file_does_not_hang_the_scan(tmp_path):
+    state = tmp_path / "state"
+    state.mkdir()
+    os.mkfifo(state / "ledger.lock")
+    signal.alarm(10)
+    try:
+        assert rec.scan(state) == [] and rec.lock_state(state) == "held"
+    finally:
+        signal.alarm(0)
+
+
+def test_start_time_jitter_is_tolerated_and_young_reuse_verdicts_wait(tmp_path):
+    me = os.getpid()
+    start = ai.process_start_time(me)
+    if start is None:
+        pytest.skip("process start time unreadable here")
+    assert ai.owner_status({"pid": me, "start": start + 1}) == "alive"
+    assert ai.owner_status({"pid": me, "start": start - 1000}) == "reused"
+    state = tmp_path / "state"
+    state.mkdir()
+    temp = state / f"ledger.json.{me}.00000000.abc.tmp"  # live pid, different start token
+    temp.write_text("{}")
+    assert [f.status for f in rec.scan(state)] == ["active"]  # young: a lock-free writer may be mid-write
+    os.utime(temp, (time.time() - 3600, time.time() - 3600))
+    assert [f.status for f in rec.scan(state)] == ["orphaned"]
+    late = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(start + 30))
+    assert ai.sentinel_owner_status({"pid": str(me), "started": late}) == "alive"  # bridge clock step: not reused
+
+
+def test_hostile_file_names_are_escaped_in_reports(tmp_path):
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "ledger.json.99999999.unknown.\x1b[31m.tmp").write_text("{}")
+    rows = rec.observations(state)
+    assert rows and all("\x1b" not in r.id + r.detail for r in rows)

@@ -369,9 +369,9 @@ def cmd_recover(args: argparse.Namespace) -> int:
         if report.get("reason"):
             print("  " + report["reason"])
         for f in report.get("findings", []):
-            print(f"  {f['status']:12} {f['kind']}/{f['id']}: {f['detail']}")
+            print(f"  {f['status']:12} {f['kind']}/{recovery.safe(f['id'])}: {recovery.safe(f['detail'])}")
         for name in report.get("repaired", []):
-            print(f"  repaired     {name}")
+            print(f"  repaired     {recovery.safe(name)}")
         for f in report.get("deferred", []):
             print(f"  deferred     {f['kind']}/{f['id']}: run `{f['repair']}`")
         if report.get("would_repair"):
