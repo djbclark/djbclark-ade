@@ -9,6 +9,7 @@
   ade-install bootstrap [--root DIR] [--prefix DIR] [--dry-run|--yes] [--json]
   ade-install doctor [--root DIR] [--id ID ...] [--json]
   ade-install keys [--root DIR] [--json] [--keys-state PATH]
+  ade-install keys-plan [--root DIR] [--json] [--state PATH]
   ade-install verify-key PROVIDER  # fixed metadata probe under sudo-secretspec run; see --help
   ade-install apply [--root DIR] [--json] [--dry-run|--yes] [--id ID ...] [--force]
                     [--system] [--print-system-argv] [--apply-system]
@@ -72,7 +73,7 @@ BIN = Path(__file__).resolve().parent
 if str(BIN) not in sys.path:
     sys.path.insert(0, str(BIN))
 
-if __name__ == "__main__" and any(command in sys.argv[1:] for command in ("update-plan", "bootstrap")):
+if __name__ == "__main__" and any(command in sys.argv[1:] for command in ("update-plan", "bootstrap", "keys-plan")):
     # Cover argparse's accepted option abbreviations without duplicating its
     # grammar. Suppressing bytecode if an argument value matches is harmless.
     sys.dont_write_bytecode = True
@@ -249,6 +250,37 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     return rc
 
 
+def cmd_keys_plan(args: argparse.Namespace) -> int:
+    try:
+        if args.root == "":
+            raise ai.InstallError("empty --root")
+        catalog = ai.load_catalog(root=Path(args.root) if args.root is not None else None)
+    except ai.InstallError:
+        # Do not echo arbitrary config/error payloads through this reporting path.
+        if args.json:
+            _print_json({"mode": "cached-plan-only", "error": "invalid-catalog"})
+        else:
+            print("ade-install keys-plan: invalid catalog", file=sys.stderr)
+        return 1
+    if args.state == "":
+        cache, status = {}, "invalid"  # explicit empty path: never fall back to live user state
+    else:
+        cache, status = ai.load_keys_plan_cache(
+            Path(args.state) if args.state is not None else ai.default_keys_state_path())
+    result = ai.keys_plan(catalog, cache=cache, cache_status=status)
+    if args.json:
+        _print_json(result)
+    else:
+        print(f"ade-install keys-plan: {result['note']}")
+        print(f"cache={status}; cached_at={result['cached_at'] or 'unknown'}; freshness=unverified; setup_complete=false")
+        for row in result["keys"]:
+            print(f"  {row['action']}: {row['name']} (cached {row['cached_status']})")
+            print(f"    components={','.join(row['components']) or 'unlinked'}; selected={','.join(row['selected_components']) or 'none'}")
+            print(f"    purposes={'; '.join(row['purposes']) or 'UNKNOWN'}")
+            print(f"    create_url={row['create_url'] or 'UNKNOWN'}; gaps={','.join(row['coverage_gaps']) or 'none-recorded'}")
+    return 0
+
+
 def cmd_keys(args: argparse.Namespace) -> int:
     try:
         catalog = ai.load_catalog(root=Path(args.root) if args.root else None)
@@ -392,6 +424,7 @@ def main(argv: list[str] | None = None) -> int:
         ("catalog", cmd_catalog, "list components, key references, and login checks"),
         ("plan", cmd_plan, "print-only install plan (no writes)"),
         ("update-plan", cmd_update_plan, "configured dependency update candidates only; no probes or writes"),
+        ("keys-plan", cmd_keys_plan, "cached selected-key worklist; no probes, credential entry or writes"),
         ("doctor", cmd_doctor,
          "run probe_argv / PATH presence, Claude context_size_nudge, credential-bak delete-after, advisory UNACCEPTED Pi pools; never repairs"),
         (
@@ -402,6 +435,8 @@ def main(argv: list[str] | None = None) -> int:
     ):
         p = sub.add_parser(name, parents=[shared], help=help_text)
         p.add_argument("--json", action="store_true")
+        if name == "keys-plan":
+            p.add_argument("--state", help="existing nonsecret keys.json (default ADE_KEYS_STATE_PATH or user state); never refreshed")
         if name == "doctor":
             p.add_argument(
                 "--id", dest="ids", action="append",

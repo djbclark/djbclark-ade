@@ -26,6 +26,7 @@ import platform
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -1136,6 +1137,92 @@ def save_keys_state(
     }
     _atomic_write_json(path, out)
     return path
+
+
+def load_keys_plan_cache(path: Path) -> tuple[dict[str, Any], str]:
+    """Read bounded nonsecret outcome metadata; never expose parse/error text."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+        with os.fdopen(fd, "rb") as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                return {}, "invalid"
+            raw = stream.read(1024 * 1024 + 1)
+        if len(raw) > 1024 * 1024:
+            return {}, "invalid"
+        data = json.loads(raw)
+        if (not isinstance(data, dict) or type(data.get("schema_version")) is not int
+                or data.get("schema_version") != KEYS_STATE_SCHEMA_VERSION
+                or not isinstance(data.get("keys"), dict)):
+            return {}, "invalid"
+        return data, "loaded"
+    except FileNotFoundError:
+        return {}, "missing"
+    except (OSError, ValueError, UnicodeError, RecursionError):
+        return {}, "invalid"
+
+
+def keys_plan(catalog: Catalog, *, cache: Mapping[str, Any] | None = None,
+              cache_status: str = "missing") -> dict[str, Any]:
+    """Pure selected-key worklist from cached outcomes, never current health.
+
+    Ignore cache details and extra fields entirely. Unknown presence and failed
+    transport are not evidence a credential needs replacing. No executable argv
+    is produced, and every catalog row remains visible, including linkage gaps.
+    """
+    cache = cache or {}
+    timestamp = cache.get("updated_at") if cache_status == "loaded" else None
+    valid_timestamp = None
+    if isinstance(timestamp, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", timestamp):
+        try:
+            datetime.datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%SZ")
+            valid_timestamp = timestamp
+        except ValueError:
+            pass
+    outcomes = cache.get("keys")
+    if not isinstance(outcomes, dict) or cache_status != "loaded":
+        outcomes = {}
+    components = {str(row["id"]): row for row in catalog.components}
+    allowed = {"ok", "missing", "invalid", "no-quota", "unreachable", "error", "expiring", "unknown"}
+    rows = []
+    for key in catalog.keys:
+        name = str(key["name"])
+        linked = list(key.get("components") or [])
+        selected = [cid for cid in linked if cid in components and expected_installed(components[cid])]
+        unknown = [cid for cid in linked if cid not in components]
+        gaps = []
+        if not linked:
+            gaps.append("unlinked-key")
+        if unknown:
+            gaps.append("unknown-component")
+        if not key.get("verify_argv"):
+            gaps.append("no-verify-command")
+        url = key.get("create_url")
+        if not isinstance(url, str) or not re.fullmatch(r"https://[^/\s?#@]+(?:/[^\s]*)?", url):
+            url = None
+            gaps.append("creation-url-unknown")
+        observation = outcomes.get(name)
+        status = observation.get("status") if isinstance(observation, dict) else None
+        status = status if isinstance(status, str) and status in allowed else "unknown"
+        if not selected:
+            action = "resolve-coverage" if not linked or unknown else "skip-unchosen"
+        elif status in {"missing", "invalid", "no-quota", "expiring"}:
+            action = "review-credential"
+        elif status in {"unreachable", "error"}:
+            action = "retry-verification"
+        elif status == "ok":
+            action = "none-cached-ok"
+        else:
+            action = "resolve-coverage"
+        rows.append({"name": name, "components": linked, "selected_components": selected,
+                     "purposes": [components[cid].get("summary", cid) for cid in selected],
+                     "unknown_components": unknown, "create_url": url,
+                     "cached_status": status, "action": action, "coverage_gaps": gaps,
+                     "execution_authorized": False})
+    return {"mode": "cached-plan-only", "cache_status": cache_status if cache_status in {"loaded", "missing", "invalid"} else "invalid",
+            "cached_at": valid_timestamp, "freshness": "unverified",
+            "current_verification": "unknown", "setup_complete": False,
+            "note": "Cached outcomes only; no current verification, credential replacement or execution authorized.",
+            "keys": rows}
 
 
 def keys_observe(
