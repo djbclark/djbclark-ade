@@ -135,3 +135,49 @@ adversary rounds on omp first at that time (that client was archived 2026-11-08 
 H3. 2026-11-01: a cheap model as the daily coding driver was checked against Terminal-Bench 4.0 and this repo's own
 review of Flash-written code (four BLOCKs): code stays on tier-1 models (Sonnet 5.5, GPT-6.1 Sol); cheap models only for
 bulk and mechanical work a stronger model reviews.
+
+## Predictive quota signals (W7, 2026-11-12)
+
+`python3 bin/quota_signals.py --wave-start <previous-wave-start-ISO-time>` reads
+`aiuse --available --json` and `paseo usage ls --json` using bounded argv-list
+subprocesses, then prints JSON schema 1 with `pools[]`. Each pool has `routable`,
+`conserve`, `surplus`, `reason`, and per-window projections. This is advisory
+measurement eligibility: `routable` does not grant model/task eligibility or
+permission to spend. No launchd, fleet-watch, router, notification or state writes
+are wired in W7. Defaults and expected independent pools live in
+[`config/quota-signals.toml`](../config/quota-signals.toml).
+
+Per-pool `collected_at` must be within `max_age_seconds`, not in the future, and
+strictly newer than the supplied previous wave start (PR 571 E1a). Envelope
+freshness never substitutes for that timestamp. A stale, missing, ambiguous-account,
+unknown-window or exhausted pool is unroutable. Missing configured pools remain
+visible even though aiuse's available-only response omits exhausted pools. Unknown
+or failed Paseo data cannot create entitlement; fresh aiuse can stand alone.
+Only explicitly mapped sources constrain split pools; a provider aggregate must
+not grant quota to an independent Antigravity family. Model sublimits do not
+exhaust a shared pool (Paseo Fable windows are ignored for the shared cap).
+
+For a clocked window, estimated consumption per minute is
+`pace_ratio * 100 / window_minutes`. Projected remainder at reset is current
+remainder minus that rate times minutes from collection to reset. A tighter
+Paseo reading reduces each aiuse window by the difference between the aiuse
+binding headroom and Paseo's tighter cap; this is deliberately pessimistic when
+window identities differ. Stale Paseo reports retain only a zero veto, until a
+known reset passes. Early, missing or non-finite pace produces no prediction.
+Any forecast deficit above `conserve_deficit_percent` signals `conserve`.
+`surplus` requires projected unused headroom above `surplus_min_percent` within
+`surplus_horizon_hours`, every window forecastable, and no conservation signal.
+Missing pace alone does not invalidate a fresh quota measurement. These linear
+forecasts assume steady spending and do not reserve in-flight sibling usage.
+
+Offline replay uses `--aiuse-json PATH --paseo-json PATH --now ISO-TIME`; the
+sanitized fixtures under `tests/fixtures/quota-signals/` document both inputs.
+Exit 0 means JSON was produced, including unknown pools; exit 2 means invalid
+arguments/config. Collector failures become unknown measurements, never a pass.
+
+A Z.ai 429 code 1302 is a request-rate limit, not exhaustion (PR 571 E1b): this
+script does not convert errors into exhausted quota or relax the five-agent
+concurrency rule. W8 owns adjustment/restoration. W9/W10 retain the operator's
+seed at `claude/hooks/quota_nudge.py` (the brief's `bin/` path does not exist).
+Its useful freshness and silent-on-missing-state principles are preserved here;
+its session nudges, profile state and locks remain untouched for those units.

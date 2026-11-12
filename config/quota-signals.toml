@@ -1,0 +1,24 @@
+# Advisory only. No routing, concurrency or automatic-spending authorization.
+max_age_seconds = 1500
+command_timeout_seconds = 60
+conserve_deficit_percent = 5
+surplus_min_percent = 20
+surplus_horizon_hours = 24
+
+[[pools]]
+provider = "claude"
+paseo_source = "claude"
+[[pools]]
+provider = "codex"
+paseo_source = "codex"
+[[pools]]
+provider = "zai"
+[[pools]]
+provider = "antigravity"
+family = "gemini"
+[[pools]]
+provider = "antigravity"
+family = "gemini_argon"
+[[pools]]
+provider = "antigravity"
+family = "claude_gpt"
