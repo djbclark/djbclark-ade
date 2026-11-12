@@ -147,7 +147,7 @@ most 5 z.ai agents running; on a 1302, switch that agent in place to another sub
 "continue" after the others finish, never mark the pool exhausted. **Pi's `openai/*` models are the metered OpenAI
 API, not the Codex subscription**: never a switch target (2026-11-12: one switch hit the org's enforced spend limit at
 once, while Codex showed 65% left). A Codex-pool agent is `paseo run --provider codex/...`, a new agent.
-E1a. Match the route’s declared `pool_family` (or `pool` pair); missing/unmatched families are unknown, never a pass. Cursor `grok_bot` cannot fund Composer/Auto; Gemini, Argon and Claude/GPT stay separate; Fable only caps Claude’s shared default (2026-11-12).
+E1a. Apply the canary-first wave rule in E1b, and match the route’s declared `pool_family` (or `pool` pair); missing/unmatched families are unknown, never a pass. Cursor `grok_bot` cannot fund Composer/Auto; Gemini, Argon and Claude/GPT stay separate; Fable only caps Claude’s shared default (2026-11-12).
 E1b. Canary first for `[routing].canary_pools` (antigravity, Pi openai_api and Pi zai): `plan` caps each pool at one agent and prints max=1. These meters cannot warn before the first refusal (2026-11-12). Launch one canary, observe at least one successful turn, then re-probe and add work within normal pool limits; a quiet timer alone is insufficient. Repeated plans do not authorize extra canaries while one is unproven.
 E2. `used_percent` is the share consumed: 100 means empty. Quote "X% used / Y% left".
 E3. An account is usable only if every window has headroom: the fullest binds.

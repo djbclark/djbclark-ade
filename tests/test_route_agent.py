@@ -460,10 +460,12 @@ class TestQuotaFamilyIsolation(unittest.TestCase):
 
     def test_canary_first_caps_each_blind_pool_at_one_and_prints_max(self):
         services = [r.Service(name, name, {"research": 1}, "subscription", max_parallel=4,
-                              agent="antigravity" if name == "antigravity" else "pi")
+                              agent="antigravity" if name == "antigravity" else "pi",
+                              models={"research": "zai/glm-5.3-flash"})
                     for name in ("antigravity", "openai_api", "zai")]
         services.append(r.Service("zai-alias", "alias", {"research": 1}, "subscription",
-                                  shares_pool="zai", agent="pi", max_parallel=4))
+                                  shares_pool="zai", agent="pi", max_parallel=4,
+                                  models={"research": "zai/glm-5.3-flash"}))
         quota = {s.name: {"remaining": 80} for s in services}
         with mock.patch.object(r, "discover", return_value=services), \
                 mock.patch.object(r, "operator_disabled", return_value=set()), \
