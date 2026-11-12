@@ -1,7 +1,9 @@
 """S6 coverage: Forgejo read-back, renewal, notification, gate canary."""
 from __future__ import annotations
 
+import argparse
 import json
+import os
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -402,6 +404,72 @@ def test_missing_configured_corpus_fails_the_check(tmp_path):
     gate = next(f for f in findings if f.setting == "injection_gate")
     assert gate.status == "error"
     assert rc == 1
+
+
+def test_renew_command_fails_when_the_put_fails(tmp_path, monkeypatch):
+    """A failed PUT must exit nonzero and show the error detail.
+
+    A fake ``gh`` on PATH serves the read and fails the PUT, so the real
+    command runs and nothing reaches GitHub.
+    """
+    root = _cfg(tmp_path).root
+    soon = (NOW + timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    (bindir / "gh").write_text(
+        "#!/bin/sh\n"
+        "case \" $* \" in\n"
+        "  *--method*) echo 'gh: auth failed' >&2; exit 1;;\n"
+        "esac\n"
+        f"printf '%s\n' '{json.dumps({'limit': 'collaborators_only', 'expires_at': soon})}'\n"
+    )
+    (bindir / "gh").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bindir}:{os.environ['PATH']}")
+
+    proc = subprocess.run(
+        [sys.executable, "-I", "-B", str(BIN / "ade-harden"),
+         "--root", str(root), "renew", "--apply", "--json"],
+        capture_output=True, text=True, check=False,
+    )
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    payload = json.loads(proc.stdout)
+    assert payload["wrote"] is False and payload["readback_ok"] is False
+    assert "auth failed" in payload["detail"]
+
+
+def test_canary_corpus_expands_tilde(tmp_path, monkeypatch):
+    corpus = tmp_path / "canaries.jsonl"
+    rows = [
+        {"id": "b1", "source": "own", "label": "benign",
+         "surface": "pr", "expected": "benign", "text": "x"},
+        {"id": "i1", "source": "own", "label": "injection",
+         "surface": "pr", "expected": "injection", "text": "y"},
+    ]
+    corpus.write_text("\n".join(json.dumps(r) for r in rows))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    loaded = cov.load_canary_corpus(Path("~/canaries.jsonl"))
+    assert {r["id"] for r in loaded} == {"b1", "i1"}
+
+    cfg = _cfg(tmp_path / "repo", extra='[hardening.canaries]\ncorpus = "~/canaries.jsonl"\n')
+
+    def runner(argv):
+        return _completed(argv, rc=1, stderr="no gh in this test\n")
+
+    def classify(argv, text):
+        decide = "benign" if text == "x" else "injection"
+        return _completed(argv, stdout=json.dumps(
+            {"status": "ok", "decide": decide, "latency_ms": 1}))
+
+    findings, rc = ah.observe(
+        cfg, network=True, runner=runner, canary_runner=classify, now=NOW)
+    assert {(f.setting, f.status) for f in findings if f.setting.startswith("canary.")} == {
+        ("canary.benign", "ok"), ("canary.injection", "ok")}
+    assert rc == 0
+
+
+def test_malformed_port_is_a_clean_validation_error(tmp_path):
+    with pytest.raises(ah.HardenError, match="base_url"):
+        _cfg(tmp_path, extra='[hardening.forgejo]\nbase_url = "https://host:abc"\n')
 
 
 def test_observe_command_prints_the_notice(tmp_path):

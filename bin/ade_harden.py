@@ -232,14 +232,20 @@ def _validate_hardening(data: dict[str, Any], *, path: Path) -> list[str]:
         from urllib.parse import urlparse
 
         base = forgejo.get("base_url") if isinstance(forgejo, dict) else None
-        parsed = urlparse(base) if isinstance(base, str) else None
         # forgejo-api takes only a host and builds https://HOST/api/v1, so a
-        # port or a sub-path would silently read the wrong origin.
+        # port or a sub-path would silently read the wrong origin. A
+        # non-numeric port makes urlparse raise ValueError; that is invalid
+        # input, not a crash.
+        try:
+            parsed = urlparse(base) if isinstance(base, str) else None
+            port = parsed.port if parsed is not None else None
+        except ValueError:
+            parsed, port = None, None
         if (
             parsed is None
             or parsed.scheme != "https"
             or not parsed.hostname
-            or parsed.port is not None
+            or port is not None
             or parsed.path not in ("", "/")
             or parsed.query
             or parsed.fragment
@@ -1303,7 +1309,7 @@ def _coverage_findings(
             )
         )
         return findings
-    path = Path(str(corpus))
+    path = Path(str(corpus)).expanduser()
     if not path.is_file():
         findings.append(
             DriftFinding(

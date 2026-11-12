@@ -103,13 +103,18 @@ def cmd_apply(_args: argparse.Namespace) -> int:
     return 2
 
 
-def cmd_renew(args: argparse.Namespace) -> int:
-    """The one authorized mutation: renew the user interaction limit."""
+def renew_interaction_limits(*args, **kwargs):
+    """Indirection so tests can replace the renewal without touching gh."""
     import ade_harden_coverage as cov
 
+    return cov.renew_interaction_limits(*args, **kwargs)
+
+
+def cmd_renew(args: argparse.Namespace) -> int:
+    """The one authorized mutation: renew the user interaction limit."""
     try:
         cfg = ah.load_config(root=Path(args.root) if args.root else None)
-        plan = cov.renew_interaction_limits(
+        plan = renew_interaction_limits(
             cfg, reader=ah._default_runner, dry_run=not args.apply
         )
     except ah.HardenError as e:
@@ -117,14 +122,20 @@ def cmd_renew(args: argparse.Namespace) -> int:
         return 1
     shown = {
         k: plan[k]
-        for k in ("renew", "reason", "dry_run", "wrote", "readback_ok")
+        for k in (
+            "renew", "reason", "dry_run", "wrote", "readback_ok", "detail"
+        )
         if k in plan
     }
     if args.json:
         _print_json(shown)
     else:
         print("ade-harden renew: " + json.dumps(shown, sort_keys=True))
-    if plan.get("wrote") and not plan.get("readback_ok"):
+    # A renewal that was due and was attempted must both be written and read
+    # back. A failed PUT leaves readback_ok false, so it exits nonzero too.
+    if plan.get("renew") and not plan.get("dry_run") and not (
+        plan.get("wrote") and plan.get("readback_ok")
+    ):
         return 1
     return 0
 

@@ -355,12 +355,13 @@ def _gate_surfaces() -> frozenset[str]:
 
 
 def load_canary_corpus(path: Path) -> list[dict[str, Any]]:
-    """Read a payload-free canary manifest.
+    """Read a payload-free canary manifest. ``~`` is expanded.
 
     Each row: ``id``, ``source``, ``label`` (benign|injection), ``surface``,
     ``expected`` (the decision the canary must produce) and ``text`` (the
     canary payload, which this function returns but no report retains).
     """
+    path = Path(path).expanduser()
     try:
         lines = path.read_text().splitlines()
     except (OSError, UnicodeError) as e:
