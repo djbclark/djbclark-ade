@@ -8,7 +8,7 @@
   ids, retries each doctor-failing component once and reports it (never rolls
   back), and writes outcome evidence atomically to
   `~/.local/state/djbclark-ade/updates.json`. Exit 1 when an update command
-  fails or an updated component still fails doctor after its retry. (#N)
+  fails or an updated component still fails doctor after its retry. (#583)
 
 ### Changed
 
@@ -21,4 +21,4 @@
   hermes-ping per failed run (`ADE_UPDATE_HERMES_PING` overrides the tool).
   `ade-update --auto --apply` dispatches to it. No launchd/systemd/cron job is
   installed or loaded by the repository; the daily check job stays check-only.
-  (#N)
+  (#583)
