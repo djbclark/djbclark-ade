@@ -485,11 +485,20 @@ class TestQuotaFamilyIsolation(unittest.TestCase):
         self.assertEqual(q["cursor"]["remaining"], 0)
         self.assertEqual(q["cursor-auto"]["remaining"], 0)
 
+    def test_cursor_missing_declared_parent_is_unknown(self):
+        w = self.row("cursor", "auto", 80)["windows"][0]
+        w["shared_pool_family"] = "total"
+        q = r._providers_from_accounts([{"provider": "cursor", "windows": [w]}], 60)
+        self.assertIsNone(r.plenty_remaining(q["cursor-auto"]))
+        self.assertFalse(r.BY_NAME["cursor-auto"].eligible("research", q))
+
     def test_paseo_provider_only_report_cannot_authorize_family_route(self):
         for provider in ("cursor", "antigravity", "claude"):
             rows = [{"sourceId": provider, "fetchedAt": datetime.now(UTC).isoformat(),
                      "report": {"status": "available", "windows": [
                          {"label": "usage", "remainingPct": 82}]}}]
+            self.assertEqual(r.usage_from_paseo(rows), {})
+            rows[0]["pool_family"] = "fable"
             self.assertEqual(r.usage_from_paseo(rows), {})
 
     def test_argon_never_borrows_gemini_or_claude_gpt(self):

@@ -992,6 +992,8 @@ def _providers_from_accounts(accounts: list[Any], age: float | None) -> dict[str
                 continue
             parents = [p for p in acct.get("windows") or [] if p.get("pool_family") == parent]
             worst, detail, sublimits, bind = per_key[key]
+            if not parents:
+                detail[parent] = None  # declared parent is required, never inferred
             for pw in parents:
                 rem = _pct(pw.get("headroom_percent"))
                 if rem is None:
@@ -1369,6 +1371,8 @@ def usage_from_paseo(rows: list[Any], now: datetime | None = None) -> dict[str, 
         scoped = any((svc.name == key and svc.pool_family)
                      or (svc.pool and svc.pool[0] == key) for svc in SERVICES)
         if scoped:
+            if row.get("pool_family") in SUBLIMIT_FAMILIES:
+                continue  # a standalone model cap cannot fund shared quota
             key = pool_service(key, row.get("pool_family"))
             if key is None:
                 continue

@@ -64,7 +64,7 @@ against the Mac's daemon: run it there after the merge.
 
 ## D. Quota: aiuse first, `paseo usage ls --json` second
 
-D0. **Family matching (2026-11-12):** quota rows and snapshot windows count only for the declared `pool = [provider, family]` or primary `pool_family`. Unknown/missing family metadata cannot authorize a family-scoped route. Cursor’s `grok_bot` allowance never funds Composer or Auto: `cursor` retains the included `third_party` family and `cursor-auto` claims `auto`. Antigravity `gemini`, `gemini_argon` and `claude_gpt` do not substitute for one another. Claude `default` supplies shared headroom; `fable` and `model_sublimits` constrain only that model, never create shared headroom. Providers with one unnamed pool retain null-family readings.
+D0. **Family matching (2026-11-12):** quota rows and snapshot windows count only for the declared `pool = [provider, family]` or primary `pool_family`. Unknown/missing family metadata cannot authorize a family-scoped route. Cursor’s `grok_bot` allowance never funds Composer or Auto: `cursor` conservatively retains the policy’s included `third_party` family (actual Composer billing-family validation remains separate) and `cursor-auto` claims `auto`. Antigravity `gemini`, `gemini_argon` and `claude_gpt` do not substitute for one another. Claude `default` supplies shared headroom; `fable` and `model_sublimits` constrain only that model, never create shared headroom. Providers with one unnamed pool retain null-family readings.
 
 D1. `aiuse --available --json` stays the primary reading (it applies the operator's credits override, Admin API
 readings and grant expiry at read time; 20 s timeout, memoised 30 s; the snapshot file is the fallback).
