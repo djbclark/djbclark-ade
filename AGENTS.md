@@ -161,7 +161,8 @@ under the owner's login) is ours. The review boundary and the merge gate below a
   under `tools/` (Wave 6 follow-up delete after one live cycle).
 - Master is **PR-only** (branch protection includes admins). Work in a worktree
   (order 9); merge when `adversary-marker` and Tests are green
-  (`gh pr merge --squash --match-head-commit`). Repo: `djbclark/djbclark-ade`.
+  (`gh pr merge --squash --match-head-commit`); before `--delete-branch`, `gh pr list --base <head-branch>` must be empty:
+  deleting a stacked PR's base closes that PR unmerged and it cannot be reopened (2026-11-12, #567). Repo: `djbclark/djbclark-ade`.
 - Facts carry snapshot dates; probes beat memory; update the doc when you verify
   (standing order 2). Ops-suite conventions live in `~/CLAUDE.md` / site-private.
 
