@@ -489,7 +489,7 @@ changes no credential or verification-outcome state. See
 [the scalar contract](config-migration.md#c3-bounded-metadata-writes-2026-11-10).
 
 **W16 (2026-11-12).** The same command now also writes `keys.NAME.verify_argv` and
-`keys.NAME.components` (arrays of non-empty strings), adds a new identity with
+`keys.NAME.components` (arrays of non-empty strings, `--target repo` only), adds a new identity with
 `--create-key` (`NAME` matches `[A-Za-z_][A-Za-z0-9_]*`; a unified/local `[keys.NAME]` table or an appended
 legacy `[[key]]` row), and edits **existing** install rows by identity:
 `install.component.ID.{chosen,install_argv,update_argv,probe_argv,system_argv,system_argv_darwin,platforms}` and

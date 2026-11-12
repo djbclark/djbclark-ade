@@ -245,12 +245,12 @@ service selectors keep their separate behavior. `set` reports its result directl
 ### C4. Install arrays, choices and key identities (2026-11-12)
 
 Additional writable paths (all others stay refused). VALUE is a TOML literal; arrays hold **non-empty strings without
-control characters**.
+control/format characters** (any Unicode Cc, Cf, Zl, Zp); `platforms` values are `mac` or `linux`.
 
 | Path | Value | Targets |
 | --- | --- | --- |
 | `context_budget.dirs` | string array | local, repo (unified or legacy `context-budget.toml`) |
-| `keys.NAME.verify_argv`, `keys.NAME.components` | string array (argv non-empty) | local, repo |
+| `keys.NAME.verify_argv`, `keys.NAME.components` | string array (argv non-empty) | repo only (`verify_argv` runs with the secret injected, so it stays in the reviewed file) |
 | `keys.NAME.create_url`, `verify`, `expiry`, `notes` with `--create-key` | string; adds the identity | local, repo |
 | `install.component.ID.chosen`, `install.jobs.NAME.chosen` | `true` / `false` | repo only |
 | `install.component.ID.` + `install_argv`, `update_argv`, `probe_argv`, `system_argv`, `system_argv_darwin`, `platforms` | string array | repo only |
@@ -302,8 +302,8 @@ legacy files, so a present `ade.toml` never stands in for them.
 `model_tiers.load()`/`defaults_match_file()`/`ade-model-tiers show|resolve|classify|validate` read `[model_tiers]`
 from `config/ade.toml` when it carries one (`MODEL_TIERS_TOML` and explicit paths stay isolated legacy reads), and
 `claude/hooks/context_size_nudge.py` reads `[lead]` from `ade.toml` before `routing.toml` (local overlays are not
-read by that hook). **Writers follow:** `model_tiers.promote`/`set_role` (and `ade-model-tiers promote|set`) refuse
-while `ade.toml` carries tiers, naming the file, rather than editing a dead legacy copy.
+read by that hook; a present but unreadable `ade.toml` is an error, never a quiet legacy read). **Writers follow:** `model_tiers.promote`/`set_role` (and `ade-model-tiers promote|set`) refuse
+while `ade.toml` carries tiers (also for `--root`), naming the file, rather than editing a dead legacy copy.
 
 **Not committed in this PR (2026-11-12 decision).** A tracked `config/ade.toml` duplicates `config/install.toml`,
 which other open slices (S3b key probes, installer work) still edit; a mirror committed now would go stale and the

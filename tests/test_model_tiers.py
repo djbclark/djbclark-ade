@@ -291,3 +291,19 @@ def test_env_override_and_explicit_path_ignore_unified(tmp_path, monkeypatch):
     monkeypatch.setenv("MODEL_TIERS_TOML", str(tmp_path / "missing.toml"))
     assert mt.unified_source() is None
     assert mt.load(tmp_path / "missing.toml", use_cache=False).source == "code"
+
+
+def test_cli_writer_refuses_root_whose_ade_toml_carries_tiers(tmp_path, monkeypatch):
+    root = _unified_root(tmp_path, monkeypatch)
+    r = subprocess.run([sys.executable, "-I", "-B", str(BIN / "ade-model-tiers"), "--root", str(root), "set",
+                        "--vendor", "claude", "--role", "frontier", "--id", "claude-zeta-9", "--reason", "probe",
+                        "--dry-run"], capture_output=True, text=True, check=False,
+                       env={k: v for k, v in os.environ.items() if k != "MODEL_TIERS_TOML"})
+    assert r.returncode != 0 and "legacy tier writer" in r.stderr
+
+
+def test_unreadable_unified_file_is_an_error_not_a_legacy_fallback(tmp_path, monkeypatch):
+    root = _unified_root(tmp_path, monkeypatch)
+    (root / "config/ade.toml").write_text("not = [valid\n")
+    with pytest.raises(mt.TiersError):
+        mt.unified_source()

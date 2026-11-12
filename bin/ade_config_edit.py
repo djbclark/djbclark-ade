@@ -21,6 +21,7 @@ import re
 import stat
 import tempfile
 import tomllib
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator
@@ -44,6 +45,7 @@ COMPONENT_ARRAY_FIELDS = frozenset({"install_argv", "update_argv", "probe_argv",
                                     "system_argv_darwin", "platforms"})
 JOB_ARRAY_FIELDS = frozenset({"set", "platforms"})
 CHOICE_FIELDS = frozenset({"chosen"})
+PLATFORM_NAMES = frozenset({"mac", "linux"})
 KEY_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 # install row kinds: first path part after ``install`` -> (field allowlist, identity key)
 INSTALL_ROWS = {
@@ -104,7 +106,7 @@ def parse_cli_value(raw: str, *, as_string: bool) -> Any:
 def _check_string_array(value: Any) -> None:
     if not isinstance(value, list) or not all(isinstance(v, str) and v for v in value):
         raise EditError("array VALUE must be a TOML array of non-empty strings")
-    if any(ch in v for v in value for ch in ("\0", "\n", "\r")):
+    if any(unicodedata.category(ch) in {"Cc", "Cf", "Zl", "Zp"} for v in value for ch in v):
         raise EditError("array VALUE: control characters refused")
 
 
@@ -230,6 +232,11 @@ def resolve_set_target(
         parts == ("context_budget", "dirs") or (len(parts) in {3, 4} and parts[1] == "budget")
     ):
         raise EditError(f"PATH {dotted!r}: context set only supports numeric budget leaves and dirs")
+    if parts[0] == "keys" and parts[2] in KEY_ARRAY_FIELDS and target == "local":
+        raise EditError(
+            f"PATH {dotted!r}: key argv/component arrays are repo-reviewed metadata (verify_argv runs with the "
+            "secret injected); use --target repo"
+        )
     root = root.resolve()
     home = home.resolve()
 
@@ -976,6 +983,8 @@ def _check_value_shape(parts: tuple[str, ...], value: Any) -> None:
         if not is_array_path:
             raise EditError("VALUE must be a scalar (arrays are only accepted for the documented array fields)")
         _check_string_array(value)
+        if parts[-1] == "platforms" and not set(value) <= PLATFORM_NAMES:
+            raise EditError(f"platforms must be drawn from {sorted(PLATFORM_NAMES)}")
         return
     if is_array_path:
         raise EditError(f"{'.'.join(parts)} requires an array of non-empty strings")

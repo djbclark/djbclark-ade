@@ -476,6 +476,9 @@ def unified_source(root: Path | None = None) -> Path | None:
         return None
     cand = (root or repo_root_from_here()) / "config" / "ade.toml"
     raw, err = _read_toml(cand)
+    if err is not None and os.path.lexists(cand):
+        # Present but unreadable: ade_config errors on it, so a quiet legacy read would diverge.
+        raise TiersError(err)
     if err is not None or not isinstance(raw, dict) or not isinstance(raw.get("model_tiers"), dict):
         return None
     return cand

@@ -51,6 +51,13 @@ def _tiers_path(args: argparse.Namespace) -> Path | None:
     return None
 
 
+def _guard_write(args: argparse.Namespace) -> None:
+    """Writers edit the legacy file only; refuse for a --root whose ade.toml carries the tiers (W16)."""
+    root = _root_path(args)
+    if root is not None and not os.environ.get("MODEL_TIERS_TOML") and mt.unified_source(root) is not None:
+        raise mt.TiersError(f"{root / 'config/ade.toml'} carries [model_tiers]; the legacy tier writer cannot edit it yet")
+
+
 def cmd_show(args: argparse.Namespace) -> int:
     tiers = mt.load(_tiers_path(args), use_cache=False)
     pub = mt.public_dict(tiers)
@@ -129,6 +136,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
 
 def cmd_promote(args: argparse.Namespace) -> int:
     try:
+        _guard_write(args)
         result = mt.promote(
             vendor=args.vendor,
             new_id=args.new,
@@ -169,6 +177,7 @@ def cmd_promote(args: argparse.Namespace) -> int:
 
 def cmd_set(args: argparse.Namespace) -> int:
     try:
+        _guard_write(args)
         result = mt.set_role(
             vendor=args.vendor,
             role=args.role,

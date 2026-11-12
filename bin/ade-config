@@ -167,7 +167,7 @@ def cmd_export_unified(args: argparse.Namespace) -> int:
             return 0
         sys.stdout.write(acx.generate_unified(root))
         return 0
-    except ac.ConfigError as e:
+    except (ac.ConfigError, OSError) as e:
         print(str(e), file=sys.stderr)
         return 1
 

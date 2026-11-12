@@ -217,7 +217,7 @@ def test_quoted_identity_with_dot(tree):
 
 
 @pytest.mark.parametrize("base", ["legacy", "unified"])
-@pytest.mark.parametrize("target", ["repo", "local"])
+@pytest.mark.parametrize("target", ["repo"])
 def test_key_arrays_all_layers(tree, base, target):
     root, _ = tree
     if base == "unified":
@@ -241,9 +241,10 @@ def test_new_key_identity_needs_flag_and_is_created(tree, base, target):
         put(tree, "keys.NEW_API_KEY.notes", "n", target=target)
     assert snapshot(root) == before
     put(tree, "keys.NEW_API_KEY.notes", "fresh", target=target, create_key=True)
-    put(tree, "keys.NEW_API_KEY.verify_argv", ["probe", "--auth"], target=target)
+    if target == "repo":
+        put(tree, "keys.NEW_API_KEY.verify_argv", ["probe", "--auth"], target=target)
     row = key(tree, "NEW_API_KEY")
-    assert row["notes"] == "fresh" and row["verify_argv"] == ["probe", "--auth"]
+    assert row["notes"] == "fresh" and row.get("verify_argv") == (["probe", "--auth"] if target == "repo" else None)
     assert key(tree, "EXAMPLE_API_KEY")["name"] == "EXAMPLE_API_KEY"
 
 
@@ -353,3 +354,39 @@ def test_get_path_selects_catalog_rows_by_identity():
     assert ac.get_path(data, "install.component.1.id") == "b"
     with pytest.raises(ac.ConfigError):
         ac.get_path(data, "install.component.zzz.chosen")
+
+
+# --- F. adversary follow-ups (2026-11-12) ---------------------------------------------------------
+
+
+def test_key_arrays_refuse_local_target(tree):
+    root, home = tree
+    before = snapshot(root)
+    with pytest.raises(ac.ConfigError, match="repo-reviewed"):
+        put(tree, "keys.EXAMPLE_API_KEY.verify_argv", ["sh", "-c", "x"], target="local")
+    with pytest.raises(ac.ConfigError, match="repo-reviewed"):
+        put(tree, "keys.NEW_KEY.components", ["tool-a"], target="local", create_key=True)
+    assert snapshot(root) == before and not ac.default_local_path(home).exists()
+
+
+@pytest.mark.parametrize("value", [["windows"], ["linux", "darwin"], [""]])
+def test_platforms_must_be_known_names(tree, value):
+    root, _ = tree
+    before = snapshot(root)
+    with pytest.raises(ac.ConfigError):
+        put(tree, "install.component.tool-a.platforms", value, target="repo")
+    assert snapshot(root) == before
+
+
+@pytest.mark.parametrize("bad", ["a\x1bb", "a\tb", "a b", "a\x7fb", "a\x85b"])
+def test_array_values_refuse_all_control_characters(bad):
+    with pytest.raises(edit.EditError):
+        edit.encode_toml_value([bad])
+
+
+def test_cli_export_write_race_is_a_clean_error(tmp_path, monkeypatch):
+    root = tmp_path / "repo"
+    (root / "config").mkdir(parents=True)
+    r = subprocess.run([sys.executable, "-I", "-B", str(BIN / "ade-config"), "--root", str(root), "export-unified", "--write"],
+                       capture_output=True, text=True, check=False)
+    assert r.returncode == 1 and "Traceback" not in r.stderr
