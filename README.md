@@ -107,12 +107,13 @@ Skills (25, from each `skills/*/SKILL.md`):
 | [`tell-coding-bot`](skills/tell-coding-bot/SKILL.md) | Pointer (2026-11-06) for talking to the operator's cloud Grok Bot "Coding" ("tell the Coding bot", "ask Coding", "hand this to the Coding bot", a task that needs a real browser session); the coding-bot code now lives in the peer-link repository. |
 | [`watch`](skills/watch/SKILL.md) | Inspect machine load, memory churn, and active incidents from your terminal with minimal token use, or manage system watchers. |
 
-`bin/` (80, from each file's first docstring or comment):
+`bin/` (82, from each file's first docstring or comment):
 
 | Tool | What |
 |---|---|
 | [`acp-dispatch`](bin/acp-dispatch) | Hand a slice to an agent through Paseo and get its report back (a shim, slim-down E6, 2026-11-06). |
 | [`acp-dispatch-wait`](bin/acp-dispatch-wait) | DELETE with the acp-dispatch shim (Wave 6 follow-up, ledger E6/D6); was the cheap rearm waiter for one acp-dispatch record (2026-10-18). |
+| [`ade-agent-mode`](bin/ade-agent-mode) | Check or explicitly repair native agent permission mode (dry-run by default). |
 | [`ade-backup-stores`](bin/ade-backup-stores) | One consistent copy of every agent session store, plus the Hermes JSONL export. |
 | [`ade-browser-task`](bin/ade-browser-task) | Render / relay browser-only prompts (setup-plan S7). |
 | [`ade-claim-pilot`](bin/ade-claim-pilot) | Run (or dry-run) the S4 six-case claims enforcement pilot. |
@@ -133,6 +134,7 @@ Skills (25, from each `skills/*/SKILL.md`):
 | [`ade-update`](bin/ade-update) | Keep this machine's djbclark-ade checkout current: pull, relink, say what changed. |
 | [`ade-update-auto`](bin/ade-update-auto) | S4 ``update --auto``: observe-only by default; optional this-checkout apply. |
 | [`ade-user-install`](bin/ade-user-install) | Uv/just fetch, bin/ symlink, or Linux sudo-secretspec media staging. |
+| [`ade_agent_mode.py`](bin/ade_agent_mode.py) | Native Paseo mode audit/explicit live-idle repair. |
 | [`ade_browser_task.py`](bin/ade_browser_task.py) | Render / relay browser-only prompts (setup-plan S7). |
 | [`ade_browser_task_state.py`](bin/ade_browser_task_state.py) | Opt-in S7 pr-access records; only authoritative GET readback proves completion. |
 | [`ade_claims.py`](bin/ade_claims.py) | The workspace claim library, the git-guard rules and the ref hooks (isolation slice W1, 2026-10-24; O2 redesign 2026-10-25). |

@@ -1,70 +1,65 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import {
-  applyYoloToCreateRequest,
-  planYoloPatch,
-  providerId,
-  shouldSkip,
-} from "./yolo-lib.mjs";
+import { applyYoloToCreateRequest, planYoloPatch, assertResumeConfig } from "./yolo-lib.mjs";
+import { registerAdeYoloHooks } from "./hook.mjs";
+const row = (provider="claude", ids=["auto","bypassPermissions"]) => ({provider,enabled:true,status:"ready",modes:ids.map(id=>({id}))});
+const cfg = {provider:"claude/sonnet",modeId:"auto",cwd:"/repo"};
+const control = {controls:[{type:"toggle",key:"auto_accept"}]};
 
-test("providerId strips model suffix", () => {
-  assert.equal(providerId("claude/sonnet"), "claude");
-  assert.equal(providerId("codex"), "codex");
+test("all known current modes need actual catalog membership", () => {
+  for (const [provider, mode] of [["claude","bypassPermissions"],["codex","full-access"],["antigravity","full-access"],["copilot","allow-all"]]) {
+    assert.deepEqual(planYoloPatch({provider},{},row(provider,[mode])),{modeId:mode});
+    assert.throws(()=>planYoloPatch({provider},{},row(provider,["default"])),/no source-backed/);
+  }
 });
-
-test("shouldSkip reads ade-yolo.skip metadata", () => {
-  assert.equal(shouldSkip({ "ade-yolo.skip": true }), true);
-  assert.equal(shouldSkip({ "ade-yolo.skip": "yes" }), true);
-  assert.equal(shouldSkip({}), false);
+test("unavailable and flattened catalogs never grant permissions",()=>{
+  for (const catalog of [null,{...row(),enabled:false},{...row(),status:"loading"},{...row(),modes:"Bypass"},row("codex"),row("claude",["auto","auto"])])
+    assert.throws(()=>planYoloPatch(cfg,{},catalog),/ade-yolo/);
 });
-
-test("planYoloPatch forces bypass on Always Ask / auto / missing", () => {
-  assert.deepEqual(planYoloPatch({ provider: "claude", modeId: "default" }), {
-    modeId: "bypassPermissions",
-  });
-  assert.deepEqual(planYoloPatch({ provider: "claude", modeId: "auto" }), {
-    modeId: "bypassPermissions",
-  });
-  assert.deepEqual(planYoloPatch({ provider: "claude" }), {
-    modeId: "bypassPermissions",
-  });
-  assert.deepEqual(planYoloPatch({ provider: "codex", modeId: "auto-review" }), {
-    modeId: "full-access",
-  });
+test("explicit restrictive and external critical requests remain exempt",()=>{
+  for (const modeId of ["plan","read-only","dontAsk"]) assert.equal(planYoloPatch({...cfg,modeId}),null);
+  for (const metadata of [{"ade-yolo.skip":true},{"ade.work-scope":"external-security-critical"},{"ade.work-scope":"operator-restrictive"}])
+    assert.equal(applyYoloToCreateRequest({config:cfg,metadata}),undefined);
 });
-
-test("planYoloPatch keeps plan / read-only and skip metadata", () => {
-  assert.equal(planYoloPatch({ provider: "claude", modeId: "plan" }), null);
-  assert.equal(planYoloPatch({ provider: "claude", modeId: "read-only" }), null);
-  assert.equal(
-    planYoloPatch({ provider: "claude", modeId: "default" }, { "ade-yolo.skip": true }),
-    null,
-  );
+test("Cursor requires advertised auto_accept and persists providerOptions",()=>{
+  const catalog=row("cursor",[]);
+  assert.throws(()=>planYoloPatch({provider:"cursor"},{},catalog),/no source-backed/);
+  assert.deepEqual(planYoloPatch({provider:"cursor",providerOptions:{keep:1}},{},catalog,control),{providerOptions:{keep:1,auto_accept:true}});
+  assert.throws(()=>planYoloPatch({provider:"cursor",modeId:"invented"},{},catalog,control),/absent/);
 });
-
-test("planYoloPatch sets OpenCode build + auto_accept", () => {
-  assert.deepEqual(planYoloPatch({ provider: "opencode" }), {
-    modeId: "build",
-    featureValues: { auto_accept: true },
-  });
-  assert.deepEqual(
-    planYoloPatch({ provider: "opencode", modeId: "build", featureValues: {} }),
-    { modeId: "build", featureValues: { auto_accept: true } },
-  );
+test("modeless/unverified and retired providers refuse instead of prompting fallback",()=>{
+  for(const p of ["pi","hermes","muse","opencode","omp"]) assert.throws(()=>planYoloPatch({provider:p},{},row(p,[])),/ade-yolo/);
 });
-
-test("planYoloPatch leaves unknown providers alone", () => {
-  assert.equal(planYoloPatch({ provider: "cursor", modeId: "default" }), null);
-  assert.equal(planYoloPatch({ provider: "pi" }), null);
+test("create preserves unrelated fields",()=>{
+  const out=applyYoloToCreateRequest({config:{...cfg,title:"title",providerOptions:{keep:true}},env:{x:"y"}},row());
+  assert.equal(out.config.modeId,"bypassPermissions"); assert.equal(out.config.title,"title"); assert.equal(out.env.x,"y");
 });
-
-test("applyYoloToCreateRequest rewrites config.modeId", () => {
-  const out = applyYoloToCreateRequest({
-    config: { provider: "claude/sonnet", modeId: "default", title: "t" },
-    metadata: {},
-  });
-  assert.equal(out.config.modeId, "bypassPermissions");
-  assert.equal(out.config.title, "t");
-  assert.equal(out.config.provider, "claude/sonnet");
-  assert.equal(applyYoloToCreateRequest({ config: { provider: "claude", modeId: "plan" } }), undefined);
+test("resume drift or unavailable identity refuses; check never mutates snapshot",()=>{
+  const request={agentId:"a",provider:"claude",metadata:{}};
+  const snapshot={id:"a",provider:"claude",currentModeId:"bypassPermissions"};
+  assertResumeConfig(snapshot,request,row());
+  assert.throws(()=>assertResumeConfig({...snapshot,currentModeId:"auto"},request,row()),/drift/);
+  assert.throws(()=>assertResumeConfig({...snapshot,id:"b"},request,row()),/identity/);
+  assert.equal(snapshot.currentModeId,"bypassPermissions");
+});
+test("native hooks use catalog SDK and awaited exceptions stop ordinary create",async()=>{
+  const hooks={}; let reads=0;
+  const off=registerAdeYoloHooks({addHook(name,handler){hooks[name]=handler;return()=>delete hooks[name];}});
+  const paseo={providers:{snapshot:async options=>{reads++;assert.equal(options.cwd,"/repo");return{entries:[row()]};}},agents:{ref:()=>({refresh:async()=>({agent:{id:"a",provider:"claude",currentModeId:"auto"}})})}};
+  assert.equal((await hooks["agent.create.before"]({request:{config:cfg}},{paseo})).config.modeId,"bypassPermissions");
+  await assert.rejects(hooks["agent.open.before"]({request:{agentId:"a",provider:"claude",cwd:"/repo",reason:"resume",purpose:"interactive"}},{paseo}),/drift/);
+  await hooks["agent.open.before"]({request:{reason:"create"}},{paseo});
+  assert.equal(reads,2); off(); assert.deepEqual(hooks,{});
+});
+test("missing SDK refuses without pretending patch enforcement",async()=>{
+  const hooks={}; registerAdeYoloHooks({addHook(n,h){hooks[n]=h;return()=>{};}});
+  await assert.rejects(hooks["agent.create.before"]({request:{config:cfg}},{paseo:{}}),/API unavailable/);
+});
+test("resume checks Cursor effective option; native duplicate catalogs refuse",async()=>{
+  const request={agentId:"a",provider:"cursor",metadata:{}};
+  const snapshot={id:"a",provider:"cursor",options:{auto_accept:false}};
+  assert.throws(()=>assertResumeConfig(snapshot,request,row("cursor",[]),control),/auto_accept/);
+  assertResumeConfig({...snapshot,options:{auto_accept:true}},request,row("cursor",[]),control);
+  const hooks={}; registerAdeYoloHooks({addHook(n,h){hooks[n]=h;return()=>{};}});
+  await assert.rejects(hooks["agent.create.before"]({request:{config:cfg}},{paseo:{providers:{snapshot:async()=>({entries:[row(),row()]})}}}),/ambiguous/);
 });

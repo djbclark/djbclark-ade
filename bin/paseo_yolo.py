@@ -13,13 +13,13 @@ Always Ask prompt gate.
 """
 from __future__ import annotations
 
-# Provider id → modeId that Paseo's manifest marks isUnattended (or the closest
-# known no-prompt mode). ACP providers with dynamic mode catalogs (cursor, …)
-# are omitted: leave their create alone rather than invent a mode id.
+# Source-backed native mode IDs. Unknown/dynamic providers require exact
+# catalog/control evidence; no mode ID is inferred from a display label.
 YOLO_MODE_BY_PROVIDER: dict[str, str] = {
     "claude": "bypassPermissions",
     "codex": "full-access",
     "antigravity": "full-access",
+    "copilot": "allow-all",
     # Other providers require the catalog/control API below.
 }
 
@@ -32,14 +32,14 @@ PROMPTING_MODE_IDS = frozenset({
     "auto-review",   # Codex: still routes some approvals
 })
 
-# Explicit restrictive / review modes: never override.
+# Explicit operator restrictive modes: never override.
 RESTRICTIVE_MODE_IDS = frozenset({
     "plan",
     "read-only",
     "dontAsk",
 })
 
-# Already unattended — leave alone (plugin may still set OpenCode auto_accept).
+# Legacy ID vocabulary only; membership here never proves a provider mode.
 UNATTENDED_MODE_IDS = frozenset({
     "bypassPermissions",
     "bypass",
@@ -126,7 +126,7 @@ def plan_unattended_config(
     if len(ids) != len(set(ids)):
         result["reason"] = "duplicate native mode IDs"
         return result
-    source_modes = {"claude": "bypassPermissions", "codex": "full-access", "antigravity": "full-access"}
+    source_modes = {"claude": "bypassPermissions", "codex": "full-access", "antigravity": "full-access", "copilot": "allow-all"}
     marked = [m["id"] for m in modes if m.get("isUnattended") is True]
     selected = source_modes.get(pid)
     if selected in ids:

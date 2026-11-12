@@ -34,7 +34,7 @@ from pathlib import Path
 
 STATE = Path(os.environ.get("FAKE_PASEO_STATE") or "/nonexistent-fake-paseo-state")
 DEFAULT_MODES = {"claude": ["plan", "default", "acceptEdits", "auto", "bypassPermissions"],
-                 "codex": ["auto", "auto-review", "full-access"]}
+                 "codex": ["auto", "auto-review", "full-access"], "antigravity": ["full-access"]}
 
 
 def out(obj, code=0):
@@ -211,7 +211,8 @@ def run(args):
             payload = json.loads(env_inspect).get(aid)
         if payload is not None:
             out(payload)
-        out({"Id": aid, "Status": agent["status"], "Archived": False, "Provider": agent["provider"],
+        out({"Id": aid, "Status": agent["status"], "Archived": False, "Provider": agent["provider"].split("/")[0],
+             "AvailableModes": [{"id": m} for m in (json.loads(os.environ.get("FAKE_PASEO_MODES") or "null") or DEFAULT_MODES).get(agent["provider"].split("/")[0], [])],
              "Mode": os.environ.get("FAKE_PASEO_ACTIVE") or agent["mode"], "Cwd": agent.get("cwd", ""),
              "PendingPermissions": json.loads(os.environ.get("FAKE_PASEO_PENDING") or "[]")})
     if verb == "mode":

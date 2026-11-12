@@ -1,0 +1,4 @@
+#!/usr/bin/env python3
+"""Check or explicitly repair native agent permission mode (dry-run by default)."""
+from ade_agent_mode import main
+raise SystemExit(main())
