@@ -310,3 +310,29 @@ def test_footer_and_teaching_require_the_shape():
     assert "dual routes" in agents
     assert "prompt `ack <sender id> <msg-id>`" in agents
     assert "atomic `<done>.ack` disk artifact" in agents
+
+
+@pytest.mark.parametrize("with_disk", [False, True])
+def test_lead_ack_failed_send_requires_a_successful_route(tmp_path, monkeypatch, with_disk):
+    monkeypatch.setattr(mod, "wait_for_idle", lambda *a, **kw: True)
+    monkeypatch.setattr(mod, "run_send", lambda argv: (1, "", "send failed"))
+    done = tmp_path / "slice.done" if with_disk else None
+
+    rc, result = mod.lead_ack(worker=SENDER, msg_id=TEST_MSG_ID, done=done)
+
+    assert rc == (0 if with_disk else 1)
+    assert result["status"] == ("acked" if with_disk else "failed")
+    assert result["routes"] == (["disk"] if with_disk else [])
+    if with_disk:
+        assert mod.check_ack(done, msg_id=TEST_MSG_ID)["ack"] == SENDER
+
+
+def test_cli_lead_ack_requires_done_before_attempting_delivery(monkeypatch, capsys):
+    def unexpected_delivery(**kwargs):
+        pytest.fail("invalid arguments must not attempt delivery")
+
+    monkeypatch.setattr(mod, "lead_ack", unexpected_delivery)
+    rc = mod.main(["--lead-ack", "--worker", SENDER, "--msg-id", TEST_MSG_ID])
+
+    assert rc == 2
+    assert "--done is required for --lead-ack" in capsys.readouterr().err

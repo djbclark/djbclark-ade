@@ -244,7 +244,7 @@ def lead_ack(
         result["warning"] = "worker did not transition to idle within timeout; disk ack written"
         return (0 if "disk" in routes else 1), result
 
-    return 0, result
+    return (0 if routes else 1), result
 
 
 def send_argv(requester: str, message: str, *, paseo: str = "paseo") -> list[str]:
@@ -301,7 +301,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     # Lead / check options
     p.add_argument("--worker", help="worker agent id (for --lead-ack)")
-    p.add_argument("--done", help="path to done file (for --lead-ack)")
+    p.add_argument("--done", help="path to done file (required for --lead-ack)")
     p.add_argument("--timeout", type=float, default=None,
                    help="timeout in seconds for --check-ack or --lead-ack wait-for-idle")
     p.add_argument("--paseo", default=shutil.which("paseo") or "paseo",
@@ -324,6 +324,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 2
         if not args.msg_id:
             sys.stderr.write("completion-notice: --msg-id is required for --lead-ack\n")
+            return 2
+        if not args.done:
+            sys.stderr.write("completion-notice: --done is required for --lead-ack\n")
             return 2
         timeout = args.timeout if args.timeout is not None else 30.0
         rc, result = lead_ack(
