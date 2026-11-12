@@ -1786,3 +1786,36 @@ def test_update_timeout_is_failed_even_when_doctor_ok(tmp_path):
     assert entry["action"] == "update-failed"
     assert entry["rc"] is None
     assert entry["doctor"] == "ok"
+
+
+def test_update_retry_timeout_is_failed_even_when_doctor_ok(tmp_path):
+    root = _fixture_root(tmp_path)
+    catalog = ai.load_catalog(root=root)
+    calls = {"n": 0}
+
+    def run(_argv):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return subprocess.CompletedProcess(_argv, 0, stdout="first\n", stderr="")
+        raise subprocess.TimeoutExpired(_argv, 1)
+
+    obs_fail = ai.Observation("component", "tool-a", "missing", "doctor: absent")
+    obs_ok = ai.Observation("component", "tool-a", "ok", "doctor: probe ok")
+    doctor_calls = {"n": 0}
+
+    def doctor_fn(_catalog, *, component_ids=None, probe_timeout_s=15.0):
+        doctor_calls["n"] += 1
+        if doctor_calls["n"] == 1:
+            return [obs_fail], 1
+        return [obs_ok], 0
+
+    report, rc = ai.apply_updates(
+        catalog, dry_run=False, run=run, doctor_fn=doctor_fn, state_path=tmp_path / "updates.json",
+    )
+    assert rc == 1
+    assert calls["n"] == 2
+    entry = {e["id"]: e for e in report["components"]}["tool-a"]
+    assert entry["retried"] is True
+    assert entry["rc"] == 0
+    assert entry["retry_rc"] is None
+    assert entry["doctor"] == "ok"

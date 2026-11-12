@@ -1715,14 +1715,16 @@ def apply_updates(
                 e["doctor"] = "fail" if e["id"] in still else "ok"
 
     failed = [e for e in report["components"] if e["action"] != "skip-not-installed"]
-    # rc/retry_rc is None for timeout and exec errors (no process exit). That is a
-    # failed update, not success: only a real exit 0 counts as ok.
+    # rc and retry_rc are None for timeout and exec errors (no process exit).
+    # That is a failed update, not success. Only a real exit 0 counts as ok.
+    # An unretried row has no retry_rc key; a retry that never produced an exit
+    # stores None and must fail.
     bad = [
         e["id"] for e in failed
         if e.get("doctor") == "fail"
         or e.get("action") == "update-failed"
-        or e.get("rc") not in (0,)
-        or e.get("retry_rc") not in (None, 0)
+        or e.get("rc") != 0
+        or ("retry_rc" in e and e.get("retry_rc") != 0)
     ]
     rc = 1 if bad else 0
     report["exit"] = rc
