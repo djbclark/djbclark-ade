@@ -380,6 +380,8 @@ def hermes_choice_effective(row: dict[str, Any], record: dict[str, Any] | None) 
     expected. With no record, the catalog's own ``chosen`` stands, so this
     operator's tracked ``chosen = true`` is unchanged until a choice is made.
     """
+    if row.get("class") == "never":
+        return False
     if record is not None:
         return record.get("choice") != "skip"
     return expected_installed(row)

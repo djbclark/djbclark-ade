@@ -8,3 +8,8 @@
   adds observe-only checklist probes after the catalog probe passes
   (config, skills root, claude-collaboration, `claude mcp list`; the
   tell_chief_of_staff pointer stays optional) (#591).
+
+### Fixed
+
+- Keep install/doctor empty arrays safe under stock macOS Bash 3.2, preserve
+  never-installed Hermes classification, and restore the checklist test docstring (#591).

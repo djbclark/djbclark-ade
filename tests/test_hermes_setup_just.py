@@ -94,3 +94,36 @@ def test_install_executes_choice_with_literal_args(tmp_path, choice, live):
     assert calls[1] == ["apply", "--root", str(tmp_path), *args]
     assert calls[2:] == ([] if choice == "skip" or not live else
                         [["setup", *(["--self"] if choice == "self" else [])]])
+
+
+@pytest.mark.parametrize("recipe,args,choice", [
+    ("doctor", [], ""),
+    ("doctor", ["hermes"], ""),
+    ("install", [], "skip"),
+    ("install", ["--state-dir", "space path"], "skip"),
+])
+def test_empty_arrays_under_system_bash(tmp_path, recipe, args, choice):
+    """Execute actual recipe bodies with /bin/bash, including stock macOS 3.2."""
+    import json
+    import os
+    import sys
+    text = JUSTFILE.read_text()
+    signature = 'doctor component="":' if recipe == "doctor" else 'install *args:'
+    body = text.split(signature + "\n", 1)[1].split("\n\n", 1)[0]
+    lines = body.splitlines()
+    script = "\n".join(line[4:] for line in lines[1:]).replace("{{ root }}", str(tmp_path))
+    (tmp_path / "bin").mkdir()
+    capture = tmp_path / "calls"
+    tool = tmp_path / "bin/ade-install"
+    tool.write_text("#!" + sys.executable + '\nimport json, os, sys\n'
+                    + 'with open(os.environ["CAPTURE"], "a") as f: f.write(json.dumps(sys.argv[1:]) + "\\n")\n')
+    tool.chmod(0o755)
+    result = subprocess.run(["/bin/bash", "-c", script, recipe, *args],
+                            env={**os.environ, "CAPTURE": str(capture), "ADE_HERMES_CHOICE": choice},
+                            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stderr
+    calls = [json.loads(line) for line in capture.read_text().splitlines()]
+    if recipe == "doctor":
+        assert calls == [["doctor", "--root", str(tmp_path), *(["--id", "hermes"] if args else [])]]
+    else:
+        assert calls == [["hermes-choice", choice, *args], ["apply", "--root", str(tmp_path), *args]]

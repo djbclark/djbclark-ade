@@ -54,7 +54,7 @@ doctor component="":
     set -eu
     args=()
     if [[ -n "${1:-}" ]]; then args=(--id "$1"); fi
-    exec "{{ root }}/bin/ade-install" doctor --root "{{ root }}" "${args[@]}"
+    exec "{{ root }}/bin/ade-install" doctor --root "{{ root }}" ${args[@]+"${args[@]}"}
 
 # S3a: ask the three Hermes paths once, record the answer, then apply.
 # Non-interactive runs (no tty, or ADE_HERMES_CHOICE=skip|self|ai) never prompt.
@@ -97,7 +97,7 @@ install *args:
         skip|self|ai) ;;
         *) printf '%s\n' "ADE_HERMES_CHOICE must be skip, self or ai (got '${choice}')" >&2; exit 2 ;;
       esac
-      "${root}/bin/ade-install" hermes-choice "${choice}" "${state_args[@]}"
+      "${root}/bin/ade-install" hermes-choice "${choice}" ${state_args[@]+"${state_args[@]}"}
     fi
     "${root}/bin/ade-install" apply --root "${root}" "$@"
     if [[ "$live" == true && "${choice}" == self ]]; then

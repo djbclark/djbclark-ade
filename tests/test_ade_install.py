@@ -283,8 +283,8 @@ def test_hermes_choice_skip_keeps_doctor_quiet(tmp_path):
 
 
 def test_hermes_choice_self_runs_checklist(tmp_path, monkeypatch):
-    monkeypatch.setattr(ai, "_probe_executable_missing", lambda _: False)
     """self expects Hermes; a passing catalog probe then checks the checklist."""
+    monkeypatch.setattr(ai, "_probe_executable_missing", lambda _: False)
     root = _fixture_root(tmp_path)
     catalog = _hermes_catalog(root)
     home = tmp_path / "home"
@@ -1944,3 +1944,14 @@ def test_update_retry_timeout_is_failed_even_when_doctor_ok(tmp_path):
     assert entry["rc"] == 0
     assert entry["retry_rc"] is None
     assert entry["doctor"] == "ok"
+
+
+
+@pytest.mark.parametrize("choice", [None, "skip", "self", "ai"])
+def test_hermes_choice_never_stays_unselected(choice):
+    record = None if choice is None else {"choice": choice}
+    assert ai.hermes_choice_effective({"id": "hermes", "class": "never"}, record) is False
+
+
+def test_hermes_checklist_test_has_docstring():
+    assert test_hermes_choice_self_runs_checklist.__doc__
