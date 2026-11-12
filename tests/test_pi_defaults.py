@@ -84,7 +84,11 @@ def test_physical_pools_remain_distinct():
     assert router.map_agent_to_provider("pi", "openai/gpt-6.1-sol") == ("pi", "codex_api")
     assert router.map_agent_to_provider("codex", "gpt-6.1-sol") == ("codex", None)
     assert router.map_agent_to_provider("pi", MODELS[0]) == ("zai", None)
-    assert router.map_agent_to_provider("pi", MODELS[1]) == ("cursor", None)
+    # Composer uses the explicit included family retained in routing policy;
+    # provider-only or Grok Bot quota must never stand in for this family.
+    assert router.map_agent_to_provider("pi", MODELS[1]) == ("cursor", "third_party")
+    assert router.pool_service(*router.map_agent_to_provider("pi", MODELS[1])) == "cursor"
+    assert router.pool_service("cursor", "grok_bot") is None
     assert router.map_agent_to_provider("pi", "ade/auto") is None
 
 

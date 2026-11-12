@@ -4,3 +4,4 @@
 - Cap Antigravity and Pi OpenAI API/Z.ai waves at one canary per pool until the lead observes a successful turn. (#581)
 - Print provider-native unattended modes in dispatch commands so Claude, Codex and Antigravity workers do not inherit Default permissions; omit mode for Pi, which reports none. (#581)
 - Load named-family quota before dispatch eligibility checks, map models to their explicit policy families, and align gate fixtures with fail-closed unknown quota. (#581)
+- Align the Pi Cursor contract test with its explicit policy family and isolate the load-cap burst test from quota starvation using one-percent estimates. (#581)

@@ -572,7 +572,10 @@ class TestLoadGateAndCap(Base):
 
     def test_a_burst_of_twenty_launches_still_hits_the_fourteen_agent_cap(self):
         def one(i: int) -> int:
-            return self.gated("--detach", "--no-wait", name=f"b{i:02d}", FAKE_PASEO_AGENT="running").returncode
+            # Isolate the live-agent cap: 20 one-percent reservations fit the
+            # known 100% fixture, so quota cannot preempt the load gate.
+            return self.gated("--detach", "--no-wait", "--est-pct", "1",
+                              name=f"b{i:02d}", FAKE_PASEO_AGENT="running").returncode
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=20) as pool:
             codes = list(pool.map(one, range(20)))
