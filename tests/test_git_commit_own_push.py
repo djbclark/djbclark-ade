@@ -56,7 +56,7 @@ def test_default_push_creates_same_branch(published):
 def test_explicit_config_wins_over_upstream(published):
     repo, remote = published
     git(repo, "branch", "--set-upstream-to=origin/main")
-    git(repo, "config", "commit-own.pushRef", "chosen")
+    git(repo, "config", "branch.topic.commitOwnPushRef", "chosen")
     result = commit(repo)
     assert result.returncode == 0, result.stderr
     assert git(remote, "rev-parse", "chosen") == git(repo, "rev-parse", "HEAD")
@@ -65,7 +65,7 @@ def test_explicit_config_wins_over_upstream(published):
 @pytest.mark.parametrize("target", ["main", "refs/heads/main", "HEAD:main"])
 def test_configured_ref_supports_worktree_publish_target(published, target):
     repo, remote = published
-    git(repo, "config", "commit-own.pushRef", target)
+    git(repo, "config", "branch.topic.commitOwnPushRef", target)
     result = commit(repo)
     assert result.returncode == 0, result.stderr
     assert git(remote, "rev-parse", "main") == git(repo, "rev-parse", "HEAD")
@@ -84,8 +84,8 @@ def test_upstream_remote_and_slash_branch(published):
 def test_configured_remote(published):
     repo, remote = published
     git(repo, "remote", "rename", "origin", "publisher")
-    git(repo, "config", "commit-own.pushRemote", "publisher")
-    git(repo, "config", "commit-own.pushRef", "main")
+    git(repo, "config", "branch.topic.commitOwnPushRemote", "publisher")
+    git(repo, "config", "branch.topic.commitOwnPushRef", "main")
     result = commit(repo)
     assert result.returncode == 0, result.stderr
     assert git(remote, "rev-parse", "main") == git(repo, "rev-parse", "HEAD")
@@ -93,7 +93,7 @@ def test_configured_remote(published):
 
 def test_behind_target_rebases_then_pushes(published):
     repo, remote = published
-    git(repo, "config", "commit-own.pushRef", "main")
+    git(repo, "config", "branch.topic.commitOwnPushRef", "main")
     peer = advance(repo, remote)
     result = commit(repo)
     assert result.returncode == 0, result.stderr
@@ -104,7 +104,7 @@ def test_behind_target_rebases_then_pushes(published):
 
 def test_conflicting_rebase_aborts_and_keeps_local_commit(published):
     repo, remote = published
-    git(repo, "config", "commit-own.pushRef", "main")
+    git(repo, "config", "branch.topic.commitOwnPushRef", "main")
     peer = advance(repo, remote, conflict=True)
     result = commit(repo)
     assert result.returncode != 0
@@ -119,7 +119,7 @@ def test_conflicting_rebase_aborts_and_keeps_local_commit(published):
 
 def test_behind_target_does_not_stash_foreign_edits(published):
     repo, remote = published
-    git(repo, "config", "commit-own.pushRef", "main")
+    git(repo, "config", "branch.topic.commitOwnPushRef", "main")
     peer = advance(repo, remote)
     (repo / "foreign").write_text("leave alone\n")
     result = commit(repo)
@@ -131,7 +131,7 @@ def test_behind_target_does_not_stash_foreign_edits(published):
 
 def test_rejected_push_is_loud_and_nonzero(published):
     repo, remote = published
-    git(repo, "config", "commit-own.pushRef", "main")
+    git(repo, "config", "branch.topic.commitOwnPushRef", "main")
     hook = remote / "hooks" / "pre-receive"
     hook.write_text("#!/bin/sh\necho 'policy rejected' >&2\nexit 1\n")
     hook.chmod(0o755)
@@ -154,7 +154,7 @@ def test_no_push_still_commits_without_remote(published):
 
 def test_failed_commit_does_not_push(published):
     repo, remote = published
-    git(repo, "config", "commit-own.pushRef", "main")
+    git(repo, "config", "branch.topic.commitOwnPushRef", "main")
     before = git(remote, "rev-parse", "main")
     result = subprocess.run([str(SCRIPT), "nothing", "mine"], cwd=repo,
                             capture_output=True, text=True, timeout=60)
@@ -180,7 +180,7 @@ def test_missing_remote_is_failure_after_local_commit(published):
     result = commit(repo)
     assert result.returncode != 0
     assert "PUBLISH FAILED remote=origin ref=refs/heads/topic" in result.stderr
-    assert "does not appear to be a git repository" in result.stderr
+    assert "No such remote" in result.stderr
     assert git(repo, "log", "-1", "--format=%s") == "own change"
 
 
@@ -217,7 +217,7 @@ def test_unrelated_history_is_not_rebased(published):
     git(peer, "commit", "--no-verify", "-m", "unrelated")
     git(peer, "push", str(remote), "HEAD:other")
     before = git(remote, "rev-parse", "other")
-    git(repo, "config", "commit-own.pushRef", "other")
+    git(repo, "config", "branch.topic.commitOwnPushRef", "other")
     result = commit(repo)
     assert result.returncode == 3
     assert git(remote, "rev-parse", "other") == before
@@ -230,7 +230,7 @@ def test_published_commits_are_not_rewritten(published):
     git(repo, "add", "earlier")
     git(repo, "commit", "--no-verify", "-m", "published")
     git(repo, "push", "origin", "HEAD:already-published")
-    git(repo, "config", "commit-own.pushRef", "main")
+    git(repo, "config", "branch.topic.commitOwnPushRef", "main")
     before = advance(repo, remote)
     result = commit(repo)
     assert result.returncode == 3
@@ -242,7 +242,7 @@ def test_rebase_does_not_discard_edits_made_during_replay(published):
     import shlex
 
     repo, remote = published
-    git(repo, "config", "commit-own.pushRef", "main")
+    git(repo, "config", "branch.topic.commitOwnPushRef", "main")
     before = advance(repo, remote)
     hook = Path(git(repo, "rev-parse", "--absolute-git-dir")) / "hooks" / "post-rewrite"
     hook.write_text("#!/bin/sh\nprintf 'foreign edit\\n' > " + shlex.quote(str(repo / "mine")) + "\n")
@@ -261,3 +261,73 @@ def test_detached_head_explains_local_only_option(published):
     result = commit(repo)
     assert result.returncode == 3
     assert "detached HEAD; publish explicitly or use --no-push" in result.stderr
+
+
+@pytest.mark.parametrize("scope", ["branch", "worktree"])
+def test_explicit_target_does_not_leak_to_sibling_worktree(published, scope):
+    repo, remote = published
+    if scope == "branch":
+        git(repo, "config", "branch.topic.commitOwnPushRef", "main")
+    else:
+        git(repo, "config", "extensions.worktreeConfig", "true")
+        git(repo, "config", "--worktree", "commit-own.pushBranch", "topic")
+        git(repo, "config", "--worktree", "commit-own.pushRef", "main")
+    sibling = repo.parent / "sibling"
+    git(repo, "worktree", "add", "-b", "sibling", str(sibling), "origin/main")
+    before = git(remote, "rev-parse", "main")
+    result = commit(sibling)
+    assert result.returncode == 0, result.stderr
+    assert git(remote, "rev-parse", "main") == before
+    assert git(remote, "rev-parse", "sibling") == git(sibling, "rev-parse", "HEAD")
+
+
+def test_worktree_scoped_target_is_supported(published):
+    repo, remote = published
+    git(repo, "config", "extensions.worktreeConfig", "true")
+    git(repo, "config", "--worktree", "commit-own.pushBranch", "topic")
+    git(repo, "config", "--worktree", "commit-own.pushRef", "main")
+    result = commit(repo)
+    assert result.returncode == 0, result.stderr
+    assert git(remote, "rev-parse", "main") == git(repo, "rev-parse", "HEAD")
+
+
+def test_repo_wide_legacy_target_is_refused_loudly(published):
+    repo, remote = published
+    git(repo, "config", "commit-own.pushRef", "main")
+    before = git(remote, "rev-parse", "main")
+    result = commit(repo)
+    assert result.returncode == 3
+    assert "shared across worktrees" in result.stderr
+    assert git(remote, "rev-parse", "main") == before
+
+
+@pytest.mark.parametrize("url", ["https://github.com/CFEngine/core.git",
+                                 "git@github.com:NorthernTechHQ/libntech.git"])
+def test_automatic_push_obeys_upstream_gate_before_contacting_remote(published, url):
+    import os
+
+    repo, remote = published
+    git(repo, "remote", "set-url", "--push", "origin", url)
+    (repo / "mine").write_text("own gated change\n")
+    env = os.environ.copy()
+    env.pop("UPSTREAM_REVIEW_GATE_OFF", None)
+    result = subprocess.run([str(SCRIPT), "gated", "mine"], cwd=repo,
+                            capture_output=True, text=True, timeout=10, env=env)
+    assert result.returncode == 3
+    assert "upstream review gate refuses publishing" in result.stderr
+    assert git(repo, "log", "-1", "--format=%s") == "gated"
+
+
+def test_rebase_does_not_move_other_local_branches(published):
+    repo, remote = published
+    git(repo, "config", "branch.topic.commitOwnPushRef", "main")
+    git(repo, "config", "rebase.updateRefs", "true")
+    (repo / "earlier").write_text("earlier\n")
+    git(repo, "add", "earlier")
+    git(repo, "commit", "--no-verify", "-m", "earlier")
+    git(repo, "branch", "side")
+    side = git(repo, "rev-parse", "side")
+    advance(repo, remote)
+    result = commit(repo)
+    assert result.returncode == 0, result.stderr
+    assert git(repo, "rev-parse", "side") == side

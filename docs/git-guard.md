@@ -71,11 +71,20 @@ PATH refusal, `~/.local/bin/git`, or any new refuse path.
 
 `git-commit-own [--no-push] [--staged] "MSG" [PATHS...]` commits the selected paths
 or staged index, then publishes automatically. Target precedence is an explicit
-`commit-own.pushRef` (a branch name, `refs/heads/NAME`, or `HEAD:NAME`), then the
+publish ref (a branch name, `refs/heads/NAME`, or `HEAD:NAME`), then the
 configured upstream only when its branch name matches the current branch, then
-`origin` with the current branch name. With an explicit ref, `commit-own.pushRemote`
-can replace `origin`. For example, `git config commit-own.pushRef HEAD:master`
-opts a worktree branch into publishing to master. A mismatched upstream inherited
+`origin` with the current branch name. Use branch-scoped config, for example
+`git config branch.task-name.commitOwnPushRef HEAD:master`, to opt only `task-name`
+into publishing to master. `branch.task-name.commitOwnPushRemote` can replace
+`origin` for that explicit target. Alternatively enable `extensions.worktreeConfig`
+and set both `git config --worktree commit-own.pushBranch task-name` and
+`git config --worktree commit-own.pushRef HEAD:master` (and optionally
+`commit-own.pushRemote` with `--worktree`). Shared local/global `commit-own.pushRef`
+or `commit-own.pushRemote` settings are refused; they would leak into sibling
+worktrees. Git can copy worktree config when creating a sibling, so the alias
+requires that branch binding and is skipped when the current branch differs.
+Branch-scoped keys take precedence over the worktree-scoped aliases.
+A mismatched upstream inherited
 from `git worktree add -b NAME PATH origin/master` is skipped with a stderr
 notice naming it and explaining the opt-in; it is never an implicit push target.
 
@@ -85,7 +94,22 @@ histories and replaying commits reachable from remote-tracking refs are refused.
 Rebasing runs in a disposable linked worktree; conflicts and cleanup never reset
 the working checkout. Before adopting the rebased commit, the tool checks that
 the original checkout stayed unchanged and uses `reset --keep` to preserve edits
-that overlap that final step. No autostash or force-push is used.
+that overlap that final step. `rebase.updateRefs=false` prevents moving other
+local branches. Cleanup failures retain the temporary worktree and name its path
+without hiding the rebase error. No autostash or force-push is used.
+
+The ADE guard refuses `reset --keep` in an unclaimed shared checkout. Automatic
+publishing therefore stops safely there when rebasing is needed, retaining the
+local commit and reporting the guard error; rebase and publish from a claimed
+task workspace. This helper does not relax that guard. The normal exclusive-writer
+workspace contract also applies to the final checkout update.
+
+Before contacting a target, the helper resolves every push URL and applies the
+existing [upstream review gate](upstream-review-gate.md)'s shared `gated_url` policy.
+It refuses GitHub targets owned by CFEngine or NorthernTechHQ even though the push
+runs as a subprocess. The gate's operator-set `UPSTREAM_REVIEW_GATE_OFF` escape
+remains available. Install this helper through the normal source-linked ADE path
+so its policy module is available; a missing policy fails publishing closed.
 
 Publish failures exit **3** with `PUBLISH FAILED`, the remote, target ref and Git
 error on stderr; the successful local commit is retained (possibly rebased).

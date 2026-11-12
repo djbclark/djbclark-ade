@@ -61,7 +61,9 @@ fi
 [ "$push" -eq 1 ] || exit 0
 
 # Keep publishing subprocesses as argv lists and inspect their real exit codes.
-python3 - "$root" <<'PY'
+python3 - "$root" "$0" <<'PY'
+import os
+import runpy
 import subprocess
 import sys
 import tempfile
@@ -80,6 +82,24 @@ def git(*args, optional=False, cwd=root):
     return result.stdout.strip()
 
 
+def worktree_config(key):
+    scoped = git("config", "--show-scope", "--get", key, optional=True)
+    if not scoped:
+        return ""
+    scope, _, value = scoped.partition("\t")
+    if scope != "worktree":
+        raise RuntimeError(f"{key} is shared across worktrees; use branch.<name>.commitOwnPushRef/"
+                           "commitOwnPushRemote or enable extensions.worktreeConfig and set it --worktree")
+    bound = git("config", "--worktree", "--get", "commit-own.pushBranch", optional=True)
+    if not bound:
+        raise RuntimeError(f"{key} requires worktree-scoped commit-own.pushBranch to bind its target")
+    if bound != branch:
+        print(f"git-commit-own: skipping inherited {key} bound to branch {bound}, not {branch}",
+              file=sys.stderr)
+        return ""
+    return value
+
+
 try:
     branch = git("symbolic-ref", "--quiet", "--short", "HEAD", optional=True)
     if not branch:
@@ -87,10 +107,12 @@ try:
     # Git resolves upstream remote/ref names without splitting a remote/branch string.
     upstream = git("for-each-ref", "--format=%(upstream:remotename)%09%(upstream:remoteref)",
                    f"refs/heads/{branch}")
-    configured = git("config", "--get", "commit-own.pushRef", optional=True)
+    configured = (git("config", "--get", f"branch.{branch}.commitOwnPushRef", optional=True)
+                  or worktree_config("commit-own.pushRef"))
     upstream_remote, _, upstream_ref = upstream.partition("\t")
     if configured:
-        remote = git("config", "--get", "commit-own.pushRemote", optional=True) or "origin"
+        remote = (git("config", "--get", f"branch.{branch}.commitOwnPushRemote", optional=True)
+                  or worktree_config("commit-own.pushRemote") or "origin")
         ref = configured
     elif upstream_ref == f"refs/heads/{branch}" and upstream_remote:
         remote, ref = upstream_remote, upstream_ref
@@ -98,13 +120,24 @@ try:
         remote, ref = "origin", branch
         if upstream_remote or upstream_ref:
             print(f"git-commit-own: skipping mismatched upstream {upstream_remote} {upstream_ref}; "
-                  f"publishing origin/{branch}. Set commit-own.pushRef to opt in to another branch.",
+                  f"publishing origin/{branch}. Set branch.{branch}.commitOwnPushRef or worktree-scoped "
+                  "commit-own.pushRef to opt in to another branch.",
                   file=sys.stderr)
     if ref.startswith("HEAD:"):
         ref = ref[5:]
     if not ref.startswith("refs/heads/"):
         ref = f"refs/heads/{ref}"
     git("check-ref-format", ref)
+    # This subprocess is invisible to shell PreToolUse hooks: apply their shared URL policy here.
+    policy = runpy.run_path(str(Path(sys.argv[2]).resolve().parent.parent
+                               / "claude" / "hooks" / "upstream_review_gate.py"))
+    urls = git("remote", "get-url", "--push", "--all", "--", remote).splitlines()
+    if not os.environ.get("UPSTREAM_REVIEW_GATE_OFF"):
+        for url in urls:
+            gated = policy["gated_url"](url)
+            if gated:
+                raise RuntimeError(f"upstream review gate refuses publishing to {gated}; "
+                                   "publish to an operator-owned fork instead")
     # A missing target is normal on a first push; other lookup failures are fatal.
     exists = git("ls-remote", "--heads", "--", remote, ref)
     if exists:
@@ -124,17 +157,29 @@ try:
                 raise RuntimeError("rebase would rewrite previously published commits; rebase explicitly")
             original = git("rev-parse", "HEAD")
             # Only the disposable tree sees conflict markers or destructive rebase cleanup.
-            with tempfile.TemporaryDirectory(prefix="git-commit-own-") as scratch:
+            scratch = tempfile.mkdtemp(prefix="git-commit-own-")
+            try:
                 temporary = str(Path(scratch) / "rebase")
                 git("worktree", "add", "--detach", temporary, original)
                 try:
                     try:
-                        rebased = git("-c", "rebase.autoStash=false", "rebase", target, cwd=temporary)
+                        git("-c", "rebase.autoStash=false", "-c", "rebase.updateRefs=false",
+                            "rebase", target, cwd=temporary)
                     except (RuntimeError, subprocess.TimeoutExpired) as exc:
                         raise RuntimeError(f"temporary rebase failed; original commit retained: {exc}") from exc
                     new_head = git("rev-parse", "HEAD", cwd=temporary)
                 finally:
-                    git("worktree", "remove", "--force", temporary)
+                    failed = sys.exc_info()[0] is not None
+                    try:
+                        git("worktree", "remove", "--force", temporary)
+                    except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+                        cleanup = f"temporary worktree cleanup failed; retained {temporary}: {exc}"
+                        if not failed:
+                            raise RuntimeError(cleanup) from exc
+                        print(f"git-commit-own: {cleanup}", file=sys.stderr)
+            finally:
+                if not any(Path(scratch).iterdir()):
+                    Path(scratch).rmdir()
             if git("rev-parse", "HEAD") != original or git("status", "--porcelain"):
                 raise RuntimeError("checkout changed during rebase; original checkout left untouched")
             # --keep refuses overlapping edits rather than discarding them.
@@ -145,7 +190,7 @@ try:
     print(f"git-commit-own: published HEAD to {remote} {ref}")
     if output:
         print(output)
-except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as exc:
+except (OSError, RuntimeError, ValueError, ImportError, SyntaxError, subprocess.TimeoutExpired) as exc:
     print(f"git-commit-own: PUBLISH FAILED remote={remote} ref={ref}: {exc}", file=sys.stderr)
     sys.exit(3)
 PY
