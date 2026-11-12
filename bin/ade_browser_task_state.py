@@ -1,4 +1,13 @@
-"""Opt-in S7 pr-access records; only authoritative GET readback proves completion."""
+"""Opt-in S7 browser-task records; only authoritative GET readbacks prove completion.
+
+Supported completion readbacks (W22, 2026-11-12): ``pr-access`` and
+``issue-access`` via ``GET repos/{owner}/{repo}``, ``github-app-create`` via
+``GET apps/{app_slug}`` plus the operator-visible installation list and its
+repository list. Every readback is a bounded ``gh api`` GET bound to
+``github.com``; sends, receipts and deadline registrations never prove
+completion. ``poll`` runs a bounded foreground verify loop; it is not a
+scheduler.
+"""
 from __future__ import annotations
 
 import fcntl
@@ -23,6 +32,54 @@ NOTIFY_OWNER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$")
 DEADLINE = Path(__file__).resolve().parent / "deadline"
 API_VERSION = "2026-03-10"  # Match S6's shipped repository-policy readback.
 Runner = Callable[[list[str]], subprocess.CompletedProcess[str]]
+
+# Task templates with a supported completion readback (W22, 2026-11-12).
+SUPPORTED_TASKS: tuple[str, ...] = ("pr-access", "issue-access", "github-app-create")
+APP_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{0,62}$")
+# Enum values GitHub documents for *-creation policy fields; anything else is
+# recorded as "unknown" and never matches.
+POLICY_VALUES: tuple[str, ...] = ("all", "collaborators_only")
+# Sources named in persisted observations (per task kind).
+SOURCE_REPOSITORY = "github-rest-repository"
+SOURCE_APP_INSTALL = "github-rest-app-and-installations"
+
+# poll loop bounds: interval 5-3600 s, total wait 1-86400 s (as track deadlines).
+POLL_INTERVAL_BOUNDS = (5, 3600)
+POLL_MAX_WAIT_BOUNDS = (1, 86400)
+POLL_HARD_CAP = 20000  # only reachable when the injected clock stands still
+
+
+def validate_app_name(name: Any) -> str:
+    if not isinstance(name, str) or not APP_NAME.fullmatch(name):
+        raise tasks.BrowserTaskError(
+            "app-name must match " + APP_NAME.pattern + " (GitHub App slug)"
+        )
+    return name
+
+
+def _api_argv(path: str, jq: str | None = None) -> list[str]:
+    argv = ["gh", "api", "--hostname", "github.com", "--method", "GET",
+            "-H", "X-GitHub-Api-Version: " + API_VERSION, path]
+    if jq is not None:
+        argv.extend(["--jq", jq])
+    return argv
+
+
+def _installations_argv() -> list[str]:
+    # Same user-visible installation probe as S8's ade-github-setup: the
+    # operator's gh credentials, never an App JWT and never the private key.
+    return _api_argv(
+        "user/installations?per_page=100",
+        "[.installations[] | {id, app_id, app_slug, account: .account.login, "
+        "repository_selection}]",
+    )
+
+
+def _installation_repos_argv(installation_id: int) -> list[str]:
+    return _api_argv(
+        "user/installations/" + str(installation_id) + "/repositories?per_page=100",
+        "[.repositories[].full_name]",
+    )
 
 
 def validate_name(name: str) -> str:
@@ -60,12 +117,18 @@ def _locked(path: Path):
         yield
 
 
-def _render(root: Path, owner: str, repo: str) -> tasks.Rendered:
+def _render(root: Path, owner: str, repo: str, *, task_id: str = "pr-access",
+            app_name: str | None = None) -> tasks.Rendered:
     tasks.validate_owner_repo(owner, kind="owner")
     tasks.validate_owner_repo(repo, kind="repo")
     if owner in (".", "..") or repo in (".", ".."):
         raise tasks.BrowserTaskError("invalid repository target")
-    return tasks.render_task(root.expanduser().resolve(), "pr-access", owner=owner, repo=repo)
+    if task_id not in SUPPORTED_TASKS:
+        raise tasks.BrowserTaskError("task " + repr(task_id) + " has no completion readback")
+    # Pin the App slug the template was rendered with (W22: app-setup binding).
+    extra = {"app_name": app_name} if app_name is not None else None
+    return tasks.render_task(root.expanduser().resolve(), task_id, owner=owner, repo=repo,
+                             extra=extra)
 
 
 def _digest(rendered: tasks.Rendered) -> str:
@@ -84,8 +147,11 @@ def _read(path: Path, name: str) -> dict[str, Any]:
         raise tasks.BrowserTaskError("task record missing or unreadable") from error
     if not isinstance(record, dict) or record.get("schema_version") != 1 or record.get("name") != name:
         raise tasks.BrowserTaskError("invalid task record identity/schema")
-    if record.get("task_id") != "pr-access" or record.get("state") not in ("pending", "completed", "expired"):
+    if (not isinstance(record.get("task_id"), str) or record.get("task_id") not in SUPPORTED_TASKS
+            or record.get("state") not in ("pending", "completed", "expired")):
         raise tasks.BrowserTaskError("unsupported task/state in record")
+    if record["task_id"] == "github-app-create":
+        validate_app_name(record.get("app_name"))
     for key in ("owner", "repo"):
         value = record.get(key)
         if not isinstance(value, str):
@@ -109,34 +175,67 @@ def _read(path: Path, name: str) -> dict[str, Any]:
         if (isinstance(completed, bool) or not isinstance(completed, (int, float))
                 or not math.isfinite(completed)
                 or not record["created_at"] <= completed < record["deadline_at"]
-                or not isinstance(observation, dict)
-                or isinstance(observation.get("observed_at"), bool)
-                or not isinstance(observation.get("observed_at"), (int, float))
-                or observation.get("observed_at") != completed
-                or observation.get("status") != "matched"
-                or observation.get("source") != "github-rest-repository"
-                or observation.get("hostname") != "github.com"
-                or observation.get("target") != (record["owner"] + "/" + record["repo"]).casefold()
-                or observation.get("template_sha256") != record["template_sha256"]
-                or observation.get("policy") != "collaborators_only"
-                or observation.get("pull_requests_enabled") is not True):
+                or not isinstance(observation, dict)):
+            raise tasks.BrowserTaskError("completed task lacks valid bound API observation proof")
+        if not _completed_observation_ok(record, observation, completed):
             raise tasks.BrowserTaskError("completed task lacks valid bound API observation proof")
     return record
+
+
+def _completed_observation_ok(record: dict[str, Any], observation: dict[str, Any],
+                              completed: float) -> bool:
+    """A completed record must carry the exact observation that proved it."""
+    task = record["task_id"]
+    expected_source = SOURCE_APP_INSTALL if task == "github-app-create" else SOURCE_REPOSITORY
+    observed_at = observation.get("observed_at")
+    if (observation.get("status") != "matched"
+            or observation.get("source") != expected_source
+            or observation.get("hostname") != "github.com"
+            or observation.get("target") != (record["owner"] + "/" + record["repo"]).casefold()
+            or observation.get("template_sha256") != record["template_sha256"]
+            or isinstance(observed_at, bool) or not isinstance(observed_at, (int, float))
+            or observed_at != completed):
+        return False
+    if task == "pr-access":
+        return (observation.get("policy") == "collaborators_only"
+                and observation.get("pull_requests_enabled") is True)
+    if task == "issue-access":
+        return (observation.get("issue_creation_policy") == "collaborators_only"
+                and observation.get("issues_enabled") is True)
+    if task == "github-app-create":
+        app_id = observation.get("app_id")
+        return (observation.get("app_slug") == record.get("app_name")
+                and observation.get("app_found") is True
+                and isinstance(app_id, int) and not isinstance(app_id, bool) and app_id >= 1
+                and observation.get("perm_statuses") == "write"
+                and observation.get("perm_checks") == "write"
+                and observation.get("perm_pull_requests") == "read"
+                and observation.get("installation_found") is True
+                and observation.get("installation_account_match") is True
+                and observation.get("install_repos_exact") is True)
+    return False
 
 
 def track(
     *, root: Path, task_id: str, name: str, seconds: int, notify_owner: str,
     owner: str, repo: str, directory: Path | None = None, yes: bool = False,
+    app_name: str | None = None,
     runner: Runner = _run, clock: Callable[[], float] = time.time,
 ) -> tuple[dict[str, Any], int]:
     validate_name(name)
-    if task_id != "pr-access":
-        raise tasks.BrowserTaskError("only pr-access has a supported completion readback; other templates remain unverified")
+    if task_id not in SUPPORTED_TASKS:
+        raise tasks.BrowserTaskError(
+            "only " + ", ".join(SUPPORTED_TASKS)
+            + " have supported completion readbacks; other templates remain unverified"
+        )
+    app_name_resolved: str | None = None
+    if task_id == "github-app-create":
+        app_name_resolved = validate_app_name(app_name or "ade-merge-gate")
     if isinstance(seconds, bool) or not isinstance(seconds, int) or not 1 <= seconds <= 86400:
         raise tasks.BrowserTaskError("deadline-seconds must be between 1 and 86400")
     if not isinstance(notify_owner, str) or not NOTIFY_OWNER.fullmatch(notify_owner):
         raise tasks.BrowserTaskError("invalid notify-owner ID")
-    rendered = _render(root, owner, repo)
+    rendered = _render(root, owner, repo, task_id=task_id, app_name=app_name_resolved)
     root = root.expanduser().resolve()
     path = (directory or state_directory()).expanduser().resolve() / (name + ".json")
     deadline_name = "browser-task-" + name + "-" + uuid.uuid4().hex[:16]
@@ -159,6 +258,8 @@ def track(
                   "deadline_at": now + seconds, "notify_owner": notify_owner,
                   "state": "pending", "monitoring": "registration-unknown",
                   "deadline_name": deadline_name}
+        if app_name_resolved is not None:
+            record["app_name"] = app_name_resolved
         # Persist intent first: timeout/crash can leave an actual deadline registered.
         # Never automatically retry registration or erase the uncertain record.
         _write(path, record)
@@ -216,35 +317,20 @@ def verify(
             _write(path, record)
             return {**record, "status": "expired", "completed": False}, 1
         try:
-            rendered = _render(Path(record["root"]), record["owner"], record["repo"])
+            rendered = _render(Path(record["root"]), record["owner"], record["repo"],
+                               task_id=record["task_id"], app_name=record.get("app_name"))
         except tasks.BrowserTaskError:
             rendered = None
-        observation: dict[str, Any] = {"status": "unknown", "source": "github-rest-repository", "hostname": "github.com"}
+        observation: dict[str, Any] = {"status": "unknown",
+                                       "source": (SOURCE_APP_INSTALL
+                                                  if record["task_id"] == "github-app-create"
+                                                  else SOURCE_REPOSITORY),
+                                       "hostname": "github.com"}
         matches = False
         if rendered is None or _digest(rendered) != record["template_sha256"]:
             observation["reason"] = "template-binding-changed"
         else:
-            try:
-                proc = runner(_verify_argv(record))
-                data = json.loads(proc.stdout) if proc.returncode == 0 else None
-            except (OSError, subprocess.TimeoutExpired, ValueError, TypeError):
-                data = None
-            if isinstance(data, dict):
-                full = data.get("full_name")
-                identity = isinstance(full, str) and full.casefold() == (record["owner"] + "/" + record["repo"]).casefold()
-                if identity:
-                    # Persist only fixed enums/bools; no API body or bot content.
-                    policy = data.get("pull_request_creation_policy")
-                    observation["policy"] = policy if policy in ("all", "collaborators_only") else "unknown"
-                    observation["target"] = (record["owner"] + "/" + record["repo"]).casefold()
-                    observation["template_sha256"] = record["template_sha256"]
-                    observation["pull_requests_enabled"] = data.get("has_pull_requests") is True
-                    matches = policy == "collaborators_only" and data.get("has_pull_requests") is True
-                    observation["status"] = "matched" if matches else "not-matched"
-                else:
-                    observation["reason"] = "repository-identity-mismatch"
-            else:
-                observation["reason"] = "api-unreadable"
+            matches = _observe_task(record, observation, runner)
         observed_at = clock()
         valid_clock = _finite_time(observed_at) and observed_at >= checked_at
         if valid_clock:
@@ -269,7 +355,253 @@ def verify(
         return {**record, "status": record["state"], "completed": record["state"] == "completed"}, (0 if record["state"] == "completed" else 1)
 
 
+def poll(
+    name: str, *, directory: Path | None = None,
+    interval_seconds: int = 60, max_wait_seconds: int = 3600,
+    dry_run: bool = False, runner: Runner = _run,
+    clock: Callable[[], float] = time.time,
+    sleeper: Callable[[float], None] = time.sleep,
+) -> tuple[dict[str, Any], int]:
+    """Bounded automatic polling: run ``verify`` on an interval until done.
+
+    A foreground loop, not a scheduler: each iteration is one verify (its own
+    lock, one bounded GET readback; two more for github-app-create). Stops on
+    completed/expired, at ``max_wait_seconds``, at the record's own deadline,
+    or at POLL_HARD_CAP. Never sends prompts, never registers or retries
+    deadline waits. ``--dry-run`` is a pure plan: no lock, no writes, no
+    network, no sleeps. Exit 0 only when the record is completed at return.
+    """
+    validate_name(name)
+    if (isinstance(interval_seconds, bool) or not isinstance(interval_seconds, int)
+            or not POLL_INTERVAL_BOUNDS[0] <= interval_seconds <= POLL_INTERVAL_BOUNDS[1]):
+        raise tasks.BrowserTaskError(
+            "interval-seconds must be between "
+            + str(POLL_INTERVAL_BOUNDS[0]) + " and " + str(POLL_INTERVAL_BOUNDS[1])
+        )
+    if (isinstance(max_wait_seconds, bool) or not isinstance(max_wait_seconds, int)
+            or not POLL_MAX_WAIT_BOUNDS[0] <= max_wait_seconds <= POLL_MAX_WAIT_BOUNDS[1]):
+        raise tasks.BrowserTaskError(
+            "max-wait-seconds must be between "
+            + str(POLL_MAX_WAIT_BOUNDS[0]) + " and " + str(POLL_MAX_WAIT_BOUNDS[1])
+        )
+    path = (directory or state_directory()) / (name + ".json")
+    record = _read(path, name)
+    if dry_run:
+        now = clock()
+        horizon = min(float(max_wait_seconds), max(0.0, record["deadline_at"] - now))
+        planned = min(POLL_HARD_CAP, int(math.ceil(horizon / interval_seconds)) + 2)
+        plan: dict[str, Any] = {
+            "status": "dry-run", "completed": False, "name": name,
+            "record_state": record["state"],
+            "interval_seconds": interval_seconds,
+            "max_wait_seconds": max_wait_seconds,
+            "deadline_in_seconds": max(0.0, record["deadline_at"] - now),
+            "planned_polls_upper_bound": planned,
+            "verify_argv": _verify_argv(record),
+        }
+        if record["task_id"] == "github-app-create":
+            plan["verify_argv_all"] = [_verify_argv(record), _installations_argv()]
+            plan["verify_argv_note"] = (
+                "the installation-repositories GET is computed at runtime from "
+                "the observed installation id"
+            )
+        return plan, 0
+    start = clock()
+    if not _finite_time(start):
+        raise tasks.BrowserTaskError("clock anomaly: poll start time is not finite")
+    deadline_at = record["deadline_at"]
+    payload: dict[str, Any] = {}
+    rc = 1
+    polls = 0
+    stopped = "poll-limit"
+    while polls < POLL_HARD_CAP:
+        payload, rc = verify(name, directory=directory, runner=runner, clock=clock)
+        polls += 1
+        state_now = payload.get("status")
+        if state_now in ("completed", "expired"):
+            stopped = str(state_now)
+            break
+        now = clock()
+        if not _finite_time(now):
+            stopped = "clock-anomaly"
+            break
+        remaining = min(max_wait_seconds - (now - start), deadline_at - now)
+        if remaining <= 0:
+            if state_now == "pending":
+                # Settle expiry so the loop never ends on a stale pending view.
+                payload, rc = verify(name, directory=directory, runner=runner, clock=clock)
+                polls += 1
+                stopped = str(payload.get("status"))
+            else:
+                stopped = "max-wait-reached"
+            break
+        stopped = "max-wait-reached"
+        sleeper(min(interval_seconds, remaining))
+    if payload.get("status") not in ("completed", "expired") and polls >= POLL_HARD_CAP:
+        stopped = "poll-limit"
+    payload = {**payload, "polls": polls, "interval_seconds": interval_seconds,
+               "max_wait_seconds": max_wait_seconds, "poll_stopped": stopped}
+    return payload, rc
+
+
 def _verify_argv(record: dict[str, Any]) -> list[str]:
     # The checked-in template is bound to github.com, regardless of GH_HOST.
-    return ["gh", "api", "--hostname", "github.com", "--method", "GET", "-H", "X-GitHub-Api-Version: " + API_VERSION,
-            "repos/" + record["owner"] + "/" + record["repo"]]
+    if record["task_id"] == "github-app-create":
+        return _api_argv("apps/" + record["app_name"])
+    return _api_argv("repos/" + record["owner"] + "/" + record["repo"])
+
+
+def _observe_task(record: dict[str, Any], observation: dict[str, Any],
+                  runner: Runner) -> bool:
+    """Run the task's bounded GET readback(s); persist enums/bools only.
+
+    Never stores an API body, bot reply or subprocess output. Returns True
+    only when the exact requested end state is observed.
+    """
+    task = record["task_id"]
+    if task == "github-app-create":
+        return _observe_app(record, observation, runner)
+    try:
+        proc = runner(_verify_argv(record))
+        data = json.loads(proc.stdout) if proc.returncode == 0 else None
+    except (OSError, subprocess.TimeoutExpired, ValueError, TypeError):
+        data = None
+    if not isinstance(data, dict):
+        observation["reason"] = "api-unreadable"
+        return False
+    full = data.get("full_name")
+    if not (isinstance(full, str) and full.casefold() == (record["owner"] + "/" + record["repo"]).casefold()):
+        observation["reason"] = "repository-identity-mismatch"
+        return False
+    # Persist only fixed enums/bools; no API body or bot content.
+    observation["target"] = (record["owner"] + "/" + record["repo"]).casefold()
+    observation["template_sha256"] = record["template_sha256"]
+    if task == "pr-access":
+        policy = data.get("pull_request_creation_policy")
+        observation["policy"] = policy if policy in POLICY_VALUES else "unknown"
+        enabled = data.get("has_pull_requests") is True
+        observation["pull_requests_enabled"] = enabled
+        return policy == "collaborators_only" and enabled
+    if task == "issue-access":
+        # The template documents no REST field for issue_creation_policy
+        # (browser-only until GitHub exposes one). A missing field is recorded
+        # explicitly and can never complete; a present field must carry the
+        # exact collaborator-only value with issues still enabled.
+        if "issue_creation_policy" not in data:
+            observation["reason"] = "field-missing"
+        ipolicy = data.get("issue_creation_policy")
+        observation["issue_creation_policy"] = ipolicy if ipolicy in POLICY_VALUES else "unknown"
+        issues_on = data.get("has_issues") is True
+        observation["issues_enabled"] = issues_on
+        return ipolicy == "collaborators_only" and issues_on
+    observation["reason"] = "unsupported-task"
+    return False
+
+
+def _observe_app(record: dict[str, Any], observation: dict[str, Any],
+                 runner: Runner) -> bool:
+    """App identity/permissions plus the user-visible installation set.
+
+    ``GET /apps/{slug}`` (public) fixes the App identity and requested
+    permissions; ``GET /user/installations`` plus that installation's
+    repository list (operator gh credentials, never an App JWT) fix where it
+    is installed. Completion requires the repository list to be exactly the
+    configured repository — nothing wider. Aspects the public readback cannot
+    see (public/private flag, webhook active, repository list past page 1)
+    stay outside the proof and are never assumed.
+    """
+    name = record["app_name"]
+    target = (record["owner"] + "/" + record["repo"]).casefold()
+    observation.update(
+        target=target,
+        template_sha256=record["template_sha256"],
+        app_slug=name,
+        app_found=False,
+        app_id=None,
+        perm_statuses="unknown",
+        perm_checks="unknown",
+        perm_pull_requests="unknown",
+        installation_found=False,
+        installation_id=None,
+        installation_account_match=False,
+        repository_selection="unknown",
+        install_repos_exact=False,
+        install_repos_count=0,
+    )
+    try:
+        proc = runner(_verify_argv(record))
+        app = json.loads(proc.stdout) if proc.returncode == 0 else None
+    except (OSError, subprocess.TimeoutExpired, ValueError, TypeError):
+        app = None
+    if not isinstance(app, dict) or app.get("slug") != name:
+        observation["reason"] = "app-unreadable"
+        return False
+    app_id = app.get("id")
+    found = isinstance(app_id, int) and not isinstance(app_id, bool) and app_id >= 1
+    observation["app_found"] = found
+    observation["app_id"] = app_id if found else None
+    perms = app.get("permissions")
+    perms = perms if isinstance(perms, dict) else {}
+    observation["perm_statuses"] = perms.get("statuses") if perms.get("statuses") == "write" else "unknown"
+    observation["perm_checks"] = perms.get("checks") if perms.get("checks") == "write" else "unknown"
+    observation["perm_pull_requests"] = perms.get("pull_requests") if perms.get("pull_requests") == "read" else "unknown"
+    perms_ok = (found
+                and observation["perm_statuses"] == "write"
+                and observation["perm_checks"] == "write"
+                and observation["perm_pull_requests"] == "read")
+    try:
+        proc = runner(_installations_argv())
+        rows = json.loads(proc.stdout) if proc.returncode == 0 else None
+    except (OSError, subprocess.TimeoutExpired, ValueError, TypeError):
+        rows = None
+    if not isinstance(rows, list):
+        observation["reason"] = "installations-unreadable"
+        return False
+    candidates = [row for row in rows
+                  if isinstance(row, dict) and row.get("app_slug") == name]
+    if not candidates:
+        observation["reason"] = "installation-missing"
+        return False
+    observation["installation_found"] = True
+    # Prefer the configured owner's installation; bounded page-1 candidates.
+    candidates.sort(key=lambda row: 0 if row.get("account") == record["owner"] else 1)
+    readable: dict[str, Any] | None = None
+    for row in candidates[:5]:
+        iid = row.get("id")
+        if not (isinstance(iid, int) and not isinstance(iid, bool) and iid >= 1):
+            continue
+        try:
+            proc = runner(_installation_repos_argv(iid))
+            repos = json.loads(proc.stdout) if proc.returncode == 0 else None
+        except (OSError, subprocess.TimeoutExpired, ValueError, TypeError):
+            repos = None
+        if not isinstance(repos, list):
+            continue
+        names = [r for r in repos if isinstance(r, str)]
+        exact = len(names) == 1 and names[0].casefold() == target
+        if readable is None or (exact and not readable["exact"]):
+            readable = {"id": iid, "account_match": row.get("account") == record["owner"],
+                        "selection": row.get("repository_selection"),
+                        "count": len(names), "exact": exact}
+        if exact:
+            break
+    if readable is None:
+        observation["reason"] = "installation-repos-unreadable"
+        return False
+    observation["installation_id"] = readable["id"]
+    observation["installation_account_match"] = readable["account_match"]
+    selection = readable["selection"]
+    observation["repository_selection"] = selection if selection in ("selected", "all") else "unknown"
+    observation["install_repos_count"] = readable["count"]
+    observation["install_repos_exact"] = readable["exact"]
+    if not readable["exact"]:
+        observation["reason"] = ("installation-repos-missing" if readable["count"] == 0
+                                 else "installation-repos-extra")
+        return False
+    if not readable["account_match"]:
+        observation["reason"] = "installation-account-mismatch"
+        return False
+    if not perms_ok:
+        observation["reason"] = "permissions-mismatch"
+        return False
+    return True
