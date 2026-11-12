@@ -44,8 +44,11 @@ account quota is unknown. No approval marker or new waiver was fabricated.
 
 ## B. Remaining implementation and limits
 
-1. **S1:** install arrays/choices and unsupported metadata writes remain refused.
-   Other transitional consumers still prevent shipping a tracked unified
+1. **S1:** (2026-11-12, W16) install arrays/choices, key identities and `context_budget.dirs` writes landed
+   ([config-migration C4](config-migration.md#c4-install-arrays-choices-and-key-identities-2026-11-12)); the remaining
+   direct readers (`model_tiers`, `context_size_nudge`) now accept `ade.toml`, and `ade-config export-unified` generates
+   it with an equivalence proof. The tracked file itself waits for in-flight catalog slices (section F cut-over
+   checklist). Before W16: other transitional consumers prevented shipping a tracked unified
    `ade.toml`. New hardening reader/application work retains its policy deferral.
 2. **S3:** supported Python must still be available before the merged Just
    bootstrap starts. Python acquisition, fuller orchestration, catalog gaps,

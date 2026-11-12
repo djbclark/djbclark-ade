@@ -67,7 +67,7 @@ B6. **`GATES_TOML`**: isolated legacy-format override for `[gates]`. Missing/unr
     never a wider policy. Floor clamping matches `ade_gates` (higher-is-looser keys capped
     at `[floors.frontier].*.bound`; `*_min_left` never looser than the code default).
 B7. This unit does **not** ship an automatically adopted `config/ade.toml`. An example
-    may live under tests/fixtures only.
+    may live under tests/fixtures only. (2026-11-12: still untracked; the generator and cut-over are section F.)
 B8. **`MODEL_TIERS_TOML`** (2026-11-09): isolated override for `[model_tiers]`. Missing or
     unreadable files fall back to `model_tiers.DEFAULTS` (today's table), same fail-safe as
     `ade_gates`. `bin/ade-model-tiers` is the writer; `ade-config set` does not edit tiers.
@@ -157,8 +157,8 @@ no alternate supposedly absent filename is probed or loaded. The pure loader's
 ### C2. `set` (2026-11-08)
 
 `ade-config set` is the comment-preserving atomic scalar writer (`bin/ade_config_edit.py`).
-Install arrays and unsupported key/context fields explicitly refuse `set`.
-Numeric budget leaves and four existing-key string metadata fields are supported below.
+Row creation/reordering and credential fields explicitly refuse `set`. Numeric budget leaves, four existing-key
+string metadata fields (C3) and the 2026-11-12 array/choice writes (C4) are supported below.
 
 | Flag | Behaviour |
 | --- | --- |
@@ -242,6 +242,35 @@ the existing scalar writer contract. A set remains `recorded-only`; running
 consumers adopt it only on their own next load. Metadata `get` and `set` share the same bounded quoted path syntax; existing
 service selectors keep their separate behavior. `set` reports its result directly.
 
+### C4. Install arrays, choices and key identities (2026-11-12)
+
+Additional writable paths (all others stay refused). VALUE is a TOML literal; arrays hold **non-empty strings without
+control/format characters** (any Unicode Cc, Cf, Zl, Zp); `platforms` values are `mac` or `linux`.
+
+| Path | Value | Targets |
+| --- | --- | --- |
+| `context_budget.dirs` | string array | local, repo (unified or legacy `context-budget.toml`) |
+| `keys.NAME.verify_argv`, `keys.NAME.components` | string array (argv non-empty) | repo only (`verify_argv` runs with the secret injected, so it stays in the reviewed file) |
+| `keys.NAME.create_url`, `verify`, `expiry`, `notes` with `--create-key` | string; adds the identity | local, repo |
+| `install.component.ID.chosen`, `install.jobs.NAME.chosen` | `true` / `false` | repo only |
+| `install.component.ID.` + `install_argv`, `update_argv`, `probe_argv`, `system_argv`, `system_argv_darwin`, `platforms` | string array | repo only |
+| `install.jobs.NAME.` + `set` (items `KEY=VALUE`), `platforms` | string array | repo only |
+
+`install.*` rows are edited in place by identity (`id` for components, `name` for jobs): the unified file's
+`[[install.component]]` / `[[install.jobs]]` rows, else the legacy `[[component]]` / `[[install.jobs]]` rows of
+`config/install.toml`. They are `--target repo` only because local arrays replace whole (B4): a local row edit
+would shadow every other component. Mechanics are those of C2/C3: lock, read-modify-validate, one changed field
+proved on the whole reparsed tree, catalog schema and semantic validation of the file and of the final merged
+catalog (a `hard` row cannot be unchosen; argv arrays stay non-empty), atomic replace, and a no-op leaves bytes and
+mtime. Replacing an array rewrites that one assignment as a single-line array (comments inside the old array value
+are dropped; a trailing comment after it survives); an absent field is inserted at the end of its row, and a new
+root key of `context-budget.toml` goes before its first header. `--create-key` appends a `[[key]]` row holding only
+its identity (legacy) or a `[keys.NAME]` table (unified/local); `NAME` matches `[A-Za-z_][A-Za-z0-9_]*`, and without
+the flag a missing identity is refused. `ade-config get install.component.ID.chosen` selects catalog rows by
+identity. Nothing here probes, installs or resolves a secret; `verify_argv` is stored, never run. Row
+creation/removal/reordering, `class`, `id`, free-text `install`/`update`/`probe` commands and credential fields stay
+refused.
+
 ## D. Install catalog (transitional, 2026-11-09)
 
 `config/install.toml` remains the legacy input when the unified file is absent.
@@ -249,11 +278,37 @@ The effective loader projects its complete metadata and `ade-install` adapts tha
 view back to the existing Catalog interface (`docs/install-catalog.md`). Pure
 shared validation lives in `bin/ade_install_catalog.py`, which imports neither
 the effective loader nor runtime installer. Explicit legacy path reads retain
-their original unified-presence refusal. No tracked unified file or writer
-expansion ships with this reader adoption.
+their original unified-presence refusal. Writer expansion for this domain is C4.
 
 ## E. Provenance
 
 `load_effective(...).provenance` names non-secret paths and domain sources
 (`routing_source`, `gates_source`, `local_config`, `gates_info.source`) without
 dumping credential-bearing files.
+
+## F. Unified `ade.toml` generation and cut-over (2026-11-12)
+
+`ade-config export-unified [--root DIR] [--write | --check]` (`bin/ade_config_export.py`) builds
+`config/ade.toml` from the five legacy domain files: headers are re-pointed per section A (`gates.`,
+`model_tiers.` prefixes; `[[component]]`/`[[login]]` under `install.`; `[[key]]` to `[keys.NAME]` with the identity
+line removed; `dirs` and `[budget]` under `[context_budget]`), bodies and comments are kept, and the result is
+accepted only when the effective tree read from it equals the legacy projection (canonical tier tables for
+`model_tiers`) in isolated temp roots. Stdout is the default; `--write` creates the file atomically and never
+overwrites; `--check` exits 0 identical, 1 drift, 2 absent or not regenerable. The proof reads only copies of the
+legacy files, so a present `ade.toml` never stands in for them.
+
+**Readers accept the new file first (this PR).** Already effective: `route_agent` (routing, tiers), `ade_gates`,
+`context-budget-check`, `ade-install` catalog, `ade_pi_pools` (via the router). Migrated now: pathless
+`model_tiers.load()`/`defaults_match_file()`/`ade-model-tiers show|resolve|classify|validate` read `[model_tiers]`
+from `config/ade.toml` when it carries one (`MODEL_TIERS_TOML` and explicit paths stay isolated legacy reads), and
+`claude/hooks/context_size_nudge.py` reads `[lead]` from `ade.toml` before `routing.toml` (local overlays are not
+read by that hook; a present but unreadable `ade.toml` is an error, never a quiet legacy read). **Writers follow:** `model_tiers.promote`/`set_role` (and `ade-model-tiers promote|set`) refuse
+while `ade.toml` carries tiers (also for `--root`), naming the file, rather than editing a dead legacy copy.
+
+**Not committed in this PR (2026-11-12 decision).** A tracked `config/ade.toml` duplicates `config/install.toml`,
+which other open slices (S3b key probes, installer work) still edit; a mirror committed now would go stale and the
+cut-over must be one mechanical commit. Cut-over checklist, after those slices merge: (1) `ade-config
+export-unified --write` in a claimed workspace; (2) `ade-config check` and the full suite; (3) delete the five legacy
+files in the same commit (they are no longer read once `ade.toml` exists), keeping `ROUTING_POLICY`, `GATES_TOML`,
+`MODEL_TIERS_TOML` and explicit-path readers for isolated tests; (4) repoint docs that name the legacy files as the
+edit surface; (5) land the `ade-model-tiers` writer on `ade.toml`. The old files remain readable until then.

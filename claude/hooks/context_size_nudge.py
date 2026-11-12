@@ -404,14 +404,16 @@ def _last_assistant_model(transcript_path):
 
 
 def _routing_policy_path():
-    """config/routing.toml: ROUTING_POLICY (as bin/route_agent.py), else this checkout's, else ~/src/djbclark-ade's."""
+    """config/ade.toml or routing.toml: ROUTING_POLICY (as bin/route_agent.py), else this checkout's, else ~/src/djbclark-ade's."""
     env = os.environ.get("ROUTING_POLICY")
     if env:
         return Path(env)
-    for cand in (Path(__file__).resolve().parents[2] / "config" / "routing.toml",
-                 Path.home() / "src" / "djbclark-ade" / "config" / "routing.toml"):
-        if cand.is_file():
-            return cand
+    # W16 (2026-11-12): a unified config/ade.toml is the repo base and wins over the legacy file in the same
+    # checkout (`[lead]` sits at its root, so the same parse applies); local.toml overlays are not read here.
+    for base in (Path(__file__).resolve().parents[2] / "config", Path.home() / "src" / "djbclark-ade" / "config"):
+        for name in ("ade.toml", "routing.toml"):
+            if (base / name).is_file():
+                return base / name
     return None
 
 

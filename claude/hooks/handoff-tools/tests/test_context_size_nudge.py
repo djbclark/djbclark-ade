@@ -670,6 +670,19 @@ def test_fable_lead_true_means_no_relaunch_note(hook, tmp_path, monkeypatch):
     assert nudge._routing_policy_path() == shipped and nudge._fable_lead_allowed() is True
 
 
+def test_unified_ade_toml_wins_over_legacy_routing_in_the_same_checkout(tmp_path, monkeypatch):
+    """W16 (2026-11-12): config/ade.toml is the repo base once present; its `[lead]` decides, legacy is ignored."""
+    cfg = tmp_path / "repo" / "config"
+    cfg.mkdir(parents=True)
+    (cfg / "routing.toml").write_text("[lead]\nfable_lead = true\n")
+    monkeypatch.delenv("ROUTING_POLICY", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(nudge, "__file__", str(tmp_path / "repo" / "claude" / "hooks" / "context_size_nudge.py"))
+    assert nudge._routing_policy_path() == cfg / "routing.toml" and nudge._fable_lead_allowed() is True
+    (cfg / "ade.toml").write_text("schema_version = 1\n[lead]\nfable_lead = false\n")
+    assert nudge._routing_policy_path() == cfg / "ade.toml" and nudge._fable_lead_allowed() is False
+
+
 @pytest.mark.parametrize("text", ["[lead]\nmodel = \"opus\"\n", "[lead]\nfable_lead = false\n",
                                   "[other]\nfable_lead = true\n", "not = [toml\n", None])
 def test_fable_lead_absent_false_or_unreadable_keeps_the_relaunch_note(hook, tmp_path, monkeypatch, text):

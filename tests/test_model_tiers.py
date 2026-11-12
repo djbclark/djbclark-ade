@@ -251,3 +251,59 @@ def test_load_effective_projects_model_tiers(tmp_path, monkeypatch):
         m["legacy_file"] == "config/model-tiers.toml"
         for m in effective.provenance.get("mapping") or []
     )
+
+
+# --- W16 (2026-11-12): pathless readers accept config/ade.toml before any writer does ---------
+
+
+def _unified_root(tmp_path, monkeypatch):
+    import re
+    root = tmp_path / "repo"
+    (root / "config").mkdir(parents=True)
+    text = (REPO / "config/model-tiers.toml").read_text()
+    text = re.sub(r"^\[(meta|rank|vendor|model|former)", r"[model_tiers.\1", text, flags=re.M)
+    (root / "config/ade.toml").write_text("schema_version = 1\n" + text)
+    monkeypatch.delenv("MODEL_TIERS_TOML", raising=False)
+    monkeypatch.setattr(mt, "repo_root_from_here", lambda: root)
+    mt.clear_cache()
+    return root
+
+
+def test_pathless_load_reads_unified_tiers(tmp_path, monkeypatch):
+    root = _unified_root(tmp_path, monkeypatch)
+    tiers = mt.load(use_cache=False)
+    assert tiers.source == "file" and tiers.path == root / "config/ade.toml"
+    assert mt.public_dict(tiers)["rank"] == mt.public_dict(mt.load(REPO / "config/model-tiers.toml", use_cache=False))["rank"]
+
+
+def test_legacy_writers_refuse_when_unified_carries_tiers(tmp_path, monkeypatch):
+    root = _unified_root(tmp_path, monkeypatch)
+    before = (root / "config/ade.toml").read_bytes()
+    with pytest.raises(mt.TiersError, match="legacy tier writer"):
+        mt.set_role(vendor="claude", role="everyday", new_id="claude-sonnet-5-5", reason="test")
+    with pytest.raises(mt.TiersError, match="legacy tier writer"):
+        mt.promote(vendor="claude", new_id="claude-opus-5-5", reason="test")
+    assert (root / "config/ade.toml").read_bytes() == before
+
+
+def test_env_override_and_explicit_path_ignore_unified(tmp_path, monkeypatch):
+    root = _unified_root(tmp_path, monkeypatch)
+    monkeypatch.setenv("MODEL_TIERS_TOML", str(tmp_path / "missing.toml"))
+    assert mt.unified_source() is None
+    assert mt.load(tmp_path / "missing.toml", use_cache=False).source == "code"
+
+
+def test_cli_writer_refuses_root_whose_ade_toml_carries_tiers(tmp_path, monkeypatch):
+    root = _unified_root(tmp_path, monkeypatch)
+    r = subprocess.run([sys.executable, "-I", "-B", str(BIN / "ade-model-tiers"), "--root", str(root), "set",
+                        "--vendor", "claude", "--role", "frontier", "--id", "claude-zeta-9", "--reason", "probe",
+                        "--dry-run"], capture_output=True, text=True, check=False,
+                       env={k: v for k, v in os.environ.items() if k != "MODEL_TIERS_TOML"})
+    assert r.returncode != 0 and "legacy tier writer" in r.stderr
+
+
+def test_unreadable_unified_file_is_an_error_not_a_legacy_fallback(tmp_path, monkeypatch):
+    root = _unified_root(tmp_path, monkeypatch)
+    (root / "config/ade.toml").write_text("not = [valid\n")
+    with pytest.raises(mt.TiersError):
+        mt.unified_source()
