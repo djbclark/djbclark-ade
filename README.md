@@ -88,8 +88,8 @@ Skills (from each `skills/*/SKILL.md`):
 | [`dialogue`](skills/dialogue/SKILL.md) | Run a multi-model dialogue that produces one artifact (spec, report, design) with a final-word model: fixed speaking rounds through pinned headless routes, a machine-read footer per turn, the transcript as the record. |
 | [`fan-out`](skills/fan-out/SKILL.md) | Slice parallel work, assign owners and verify reports. |
 | [`graft`](skills/graft/SKILL.md) | This repo is indexed by graft/. |
-| [`hand`](skills/hand/SKILL.md) | OLD WAY compatibility alias: prefer paseo-handoff for a fresh agent. |
-| [`handoff`](skills/handoff/SKILL.md) | OLD WAY compatibility alias: prefer paseo-handoff for a fresh agent. |
+| [`hand`](skills/hand/SKILL.md) | OLD WAY compatibility alias: use acknowledged self-handoff for a fresh agent. |
+| [`handoff`](skills/handoff/SKILL.md) | OLD WAY compatibility alias: use acknowledged self-handoff for a fresh agent. |
 | [`ingest-web-ai`](skills/ingest-web-ai/SKILL.md) | Design and offline normalizer for feeding Gemini/Grok (and similar) web chats into ADE memory. |
 | [`loadwatch`](skills/loadwatch/SKILL.md) | Alias for /watch load: inspect machine load, memory churn, and active incidents from your terminal with minimal token use, or register as the machine's load watcher. |
 | [`loose`](skills/loose/SKILL.md) | Audit the current session for loose ends (unfinished work, unverified claims, leftover test artifacts, unreported upstream bugs), step the operator through each with /steps, then ask whether to hand off and continue, finish and archive, or keep working. |
