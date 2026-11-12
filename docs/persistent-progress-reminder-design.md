@@ -2,6 +2,8 @@
 
 ## A. Decision
 
+A0. **Status (2026-11-12):** slice 1 (G1) is built: `bin/ade-progress`, `tests/test_ade_progress.py` and an uninstalled `config/launchd/com.djbclark.ade-progress.plist`; nothing is scheduled or loaded, and G3 slice 1b and G4 stay open.
+
 A1. **Design only.** The operator selected a persistent, cheap progress reminder in the
 [audit walkthrough](slim/audit-walk-decisions-2026-11-12.md#1-load-monitoring-and-persistent-progress). This document adds no executable,
 job, plugin, setting or send.

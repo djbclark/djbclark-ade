@@ -1,0 +1,681 @@
+#!/usr/bin/env python3
+"""ade-progress: a bounded, zero-token reminder for agents that went quiet with declared open work (slice 1).
+
+Design: docs/persistent-progress-reminder-design.md (2026-11-12). Stdlib only; no model call, transcript read, git read or
+network request in a pass. Subprocesses are argv lists with timeouts.
+
+  declare --task T --summary S [--agent ID] [--pending N] [--state open|waiting] [--idle-after-min M]
+          [--review-after ISO] [--workspace DIR] [--generation G] [--yes]     enrol / update declared work
+  retire  --task T --generation G [--yes]       stop reminders for T, close its Progress item
+  scan    [--dry-run|--yes] [--json]            one pass: due / idle_with_work / stopped_with_open_work
+  inbox   [--json]                              the local record of every notice
+  ack     --task T [--yes]                      the operator saw it (not "done"); closes the Progress item
+
+State-changing commands default to --dry-run (--yes is explicit). State: ~/.local/state/djbclark-ade/progress/v1 (0700),
+override ADE_PROGRESS_STATE. Tool overrides: ADE_PROGRESS_PASEO, ADE_PROGRESS_HERMES_PING, ADE_PROGRESS_PASEO_PROGRESS;
+ADE_PROGRESS_NOW (epoch seconds) is the test clock; PASEO_HOME picks the Paseo home (key = realpath + agent id).
+Exit: 0 ok (a busy scan: no effects; a busy declare/retire/ack exits 75), 2 usage, 3 corrupt state (kept, not reset), 4 rejected (stale generation, conflict).
+"""
+from __future__ import annotations
+
+import argparse
+import fcntl
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+import unicodedata
+from datetime import datetime, timezone
+from pathlib import Path
+
+COOLDOWN = 3 * 3600          # an unresolved key may notify again after 3 hours
+PING_PER_HOUR = 3            # operator pages across the whole subsystem
+PING_CHARS = 300
+MAX_DECLS = 16
+PASS_SECONDS = 45
+MAX_REFUSED_ATTEMPTS = 3
+SESSION_ENV = ("PASEO_AGENT_ID", "HERDR_PANE_ID", "CLAUDE_CODE_SESSION_ID", "HERMES_SESSION_ID")
+TASK_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+AGENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")   # no leading "-": never read as an option
+UI_RE = re.compile(r"^Flagged (S\d+):", re.M)   # paseo-progress 1.14.6 prints `Flagged S3: <reason>` (cli.ts:489-490)
+EX_TEMPFAIL = 75
+
+
+class Fail(Exception):
+    def __init__(self, code: int, msg: str):
+        super().__init__(msg)
+        self.code = code
+
+
+# ---------- environment, clock, files ----------
+
+def now() -> float:
+    return float(os.environ.get("ADE_PROGRESS_NOW") or time.time())
+
+
+def state_dir() -> Path:
+    return Path(os.environ.get("ADE_PROGRESS_STATE") or Path.home() / ".local/state/djbclark-ade/progress/v1")
+
+
+def paseo_home() -> str:
+    return os.path.realpath(os.environ.get("PASEO_HOME") or str(Path.home() / ".paseo"))
+
+
+def tool(env_key: str, name: str) -> list[str] | None:
+    exe = os.environ.get(env_key) or shutil.which(name) or str(Path.home() / ".local/bin" / name)
+    return [exe] if os.access(exe, os.X_OK) else None
+
+
+def run(cmd: list[str], timeout: float, cwd: str | None = None) -> tuple[int, str]:
+    env = {k: v for k, v in os.environ.items() if k not in SESSION_ENV}   # no inherited session identity on a send
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, cwd=cwd, env=env, stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        return 124, "timeout"
+    except OSError as e:
+        return 127, str(e)
+    out = r.stdout or ""
+    return r.returncode, out if out.strip() or not r.returncode else (r.stderr or "")
+
+
+def ensure_state_dir() -> Path:
+    d = state_dir()
+    d.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(d, 0o700)
+    return d
+
+
+def write_atomic(path: Path, data: bytes) -> None:
+    ensure_state_dir()
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as f:
+        f.write(data)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+    if hashlib.sha256(path.read_bytes()).digest() != hashlib.sha256(data).digest():   # read back, hash-compare
+        raise Fail(3, f"read-back mismatch writing {path}")
+
+
+def read_json(path: Path, default):
+    if not path.exists():
+        return default
+    try:
+        return json.loads(path.read_text())
+    except (ValueError, OSError) as e:   # corrupt state is kept and reported, never replaced by an empty one
+        raise Fail(3, f"corrupt state {path}: {e}") from e
+
+
+def dump(obj) -> bytes:
+    return (json.dumps(obj, indent=1, sort_keys=True) + "\n").encode()
+
+
+def unsafe(ch: str) -> bool:
+    return unicodedata.category(ch)[0] == "C" or unicodedata.category(ch) in ("Zl", "Zp")
+
+
+def clean(text: str, limit: int = 160) -> str:
+    return "".join(" " if unsafe(c) else c for c in text).strip()[:limit]
+
+
+def ny(ts: float | None) -> str:
+    if not ts:
+        return "-"
+    try:
+        from zoneinfo import ZoneInfo
+        d = datetime.fromtimestamp(ts, ZoneInfo("America/New_York"))
+        return f"{d:%a %b %d %I:%M %p}".replace(" 0", " ")
+    except Exception:
+        return datetime.fromtimestamp(ts, timezone.utc).isoformat()
+
+
+def parse_iso(text: str | None) -> float | None:
+    try:
+        d = datetime.fromisoformat(str(text).replace("Z", "+00:00")) if text else None
+        return (d.replace(tzinfo=d.tzinfo or timezone.utc)).timestamp() if d else None
+    except ValueError:
+        return None
+
+
+# ---------- declarations ----------
+
+def decl_path(task: str) -> Path:
+    return state_dir() / "decl" / f"{task}.json"
+
+
+def load_decls() -> list[dict]:
+    d = state_dir() / "decl"
+    return [read_json(p, None) for p in sorted(d.glob("*.json"))] if d.is_dir() else []
+
+
+def find_decl(task: str) -> dict | None:
+    if not TASK_RE.match(task or ""):
+        raise Fail(2, f"bad task id {task!r}: use letters, digits, . _ - (1-64)")
+    return read_json(decl_path(task), None)
+
+
+def cmd_declare(a) -> int:
+    agent = a.agent or os.environ.get("PASEO_AGENT_ID")
+    if not agent or not AGENT_RE.match(agent):
+        raise Fail(2, "declare needs a valid --agent ID (or PASEO_AGENT_ID): letters, digits, . _ : -, not starting with -")
+    if a.review_after and parse_iso(a.review_after) is None:
+        raise Fail(2, f"--review-after is not an ISO timestamp (no zone means UTC): {a.review_after}")
+    if a.summary is not None and any(unsafe(c) for c in a.summary):
+        raise Fail(2, "--summary must be one line without control or line-separator characters")
+    if (a.idle_after_min is not None and a.idle_after_min < 1) or (a.pending is not None and a.pending < 0):
+        raise Fail(2, "--idle-after-min must be at least 1 and --pending at least 0")
+
+    def build() -> dict:   # re-run under the lock: the generation compare-and-swap must see the current file
+        old = find_decl(a.task)
+        if old:
+            if a.generation != old["generation"]:
+                raise Fail(4, f"stale generation for {a.task}: have {old['generation']}, got {a.generation}")
+            if old["state"] == "retired":
+                raise Fail(4, f"{a.task} is retired; declare a new task id")
+            if old["agent_id"] != agent or old["paseo_home"] != paseo_home():
+                raise Fail(4, f"{a.task} belongs to another agent key")
+        elif a.generation is not None:
+            raise Fail(4, f"{a.task} does not exist; omit --generation to create it")
+        base = old or {"task": a.task, "paseo_home": paseo_home(), "agent_id": agent, "generation": 0, "state": "open",
+                       "pending_count": 1, "idle_after_min": 30, "review_after": None, "summary": "", "workspace": None}
+        new = dict(base, generation=base["generation"] + 1, created=base.get("created") or now(), updated=now())
+        for field, val in (("summary", a.summary and clean(a.summary)), ("pending_count", a.pending), ("state", a.state),
+                           ("idle_after_min", a.idle_after_min), ("review_after", a.review_after),
+                           ("workspace", a.workspace and os.path.realpath(a.workspace))):
+            if val is not None:
+                new[field] = val
+        if not new["summary"]:
+            raise Fail(2, "declare needs --summary")
+        print(f"{'declare' if a.yes else 'would declare'} {a.task} generation {new['generation']} state={new['state']} "
+              f"pending={new['pending_count']} idle_after_min={new['idle_after_min']}")
+        return new
+
+    if not a.yes:
+        build()
+        return 0
+
+    def go(_st):
+        write_atomic(decl_path(a.task), dump(build()))
+        return 0
+    return with_state(go, busy=EX_TEMPFAIL)
+
+
+def item_present(rec: dict) -> bool | None:
+    """Is OUR item still on the panel? `show` lists a manual item as `(<id>: <reason>)` and our reason starts with
+    `<task>: `. Ids restart per run and the agent may clear ours, so a saved id is trusted only while this holds.
+    None: could not tell (no tool, no workspace, show failed)."""
+    pp = tool("ADE_PROGRESS_PASEO_PROGRESS", "paseo-progress")
+    if not pp or not rec.get("workspace") or not rec.get("ui_id"):
+        return None
+    rc, shown = run(pp + ["show"], 15, cwd=rec["workspace"])
+    if rc != 0:
+        return None
+    # exactly the text we set when we know it, else the `<task>: ` prefix
+    marker = f"({rec['ui_id']}: {rec['ui_text']})" if rec.get("ui_text") else f"({rec['ui_id']}: {rec['task']}: "
+    found = marker in shown
+    if not found and rec.get("marker_seen") is False:   # `show` never listed this item: its format may have drifted
+        return None                                     # so "absent" is not evidence; never mark gone, never clear
+    return found
+
+
+def close_items(task: str, mode: str, recs: dict) -> list[str]:
+    """Mark every event record of TASK closed; clear its Progress item only while it is verifiably ours, once per
+    (workspace, id). Returns notes."""
+    notes, done = [], {}
+    pp = tool("ADE_PROGRESS_PASEO_PROGRESS", "paseo-progress")
+    for rec in recs.values():
+        if rec["task"] != task or rec.get("closed"):
+            continue
+        rec["closed"] = mode
+        if not rec.get("ui_id") or rec.get("ui_gone"):
+            continue
+        k = (rec.get("workspace"), rec["ui_id"])
+        if k not in done:
+            present = item_present(rec)
+            if present is True and pp:
+                rc, _ = run(pp + ["stuck", "clear", rec["ui_id"]], 15, cwd=rec["workspace"])
+                done[k] = rc == 0
+                notes.append(f"{rec['ui_id']} clear rc={rc}")
+            else:   # never a blind clear: the id may now be the agent's own item
+                done[k] = "absent" if present is False else False
+                notes.append(f"{rec['ui_id']} not cleared ({'absent' if present is False else 'could not check'})")
+        rec["ui_cleared"] = done[k]
+    return notes
+
+
+def with_state(fn, busy: int = 0, as_json: bool = False):
+    """Run fn(state) under the non-blocking user lock. Busy: a scan exits 0 without effects; a state-changing
+    command exits EX_TEMPFAIL so the caller never takes a skipped retire for a success."""
+    d = ensure_state_dir()
+    fd = os.open(d / "lock", os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        msg = "busy: another ade-progress pass holds the lock; no effects" + ("; retry shortly" if busy else "")
+        print(json.dumps({"busy": True, "message": msg}) if as_json else msg, file=sys.stderr if busy else sys.stdout)
+        os.close(fd)
+        return busy
+    try:
+        return fn(read_json(d / "state.json", {"events": {}, "pings": [], "wakes": {}, "last_scan": 0}))
+    finally:
+        os.close(fd)
+
+
+def save(st: dict) -> None:
+    write_atomic(state_dir() / "state.json", dump(st))
+
+
+def cmd_retire(a) -> int:
+    def check() -> dict:
+        d = find_decl(a.task)
+        if not d:
+            raise Fail(4, f"no such task {a.task}")
+        if a.generation != d["generation"]:
+            raise Fail(4, f"stale generation for {a.task}: have {d['generation']}, got {a.generation}")
+        return d
+
+    if not a.yes:
+        check()
+        print(f"would retire {a.task}")
+        return 0
+
+    def go(st):
+        d = check()   # re-read under the lock
+        d["state"], d["updated"] = "retired", now()
+        write_atomic(decl_path(a.task), dump(d))
+        notes = close_items(a.task, "retired", st["events"])
+        save(st)
+        print(f"retire {a.task}; closed", *notes)
+        return 0
+    return with_state(go, busy=EX_TEMPFAIL)
+
+
+def cmd_ack(a) -> int:
+    if not find_decl(a.task):
+        raise Fail(4, f"no such task {a.task}")
+    if not a.yes:
+        print(f"would ack {a.task} (the operator saw it; the work is not marked done)")
+        return 0
+
+    def go(st):
+        for rec in st["events"].values():
+            if rec["task"] == a.task:
+                rec["acked"] = now()
+        notes = close_items(a.task, "acked", st["events"])
+        save(st)
+        print(f"ack {a.task} (the operator saw it; the work is not marked done); closed", *notes)
+        return 0
+    return with_state(go, busy=EX_TEMPFAIL)
+
+
+# ---------- native state ----------
+
+def classify(paseo: list[str], agent_id: str, ls_row: dict | None) -> dict:
+    """kind: idle | busy | stopped | unknown, from `paseo inspect`; contradictory or missing data is unknown."""
+    rc, out = run(paseo + ["inspect", agent_id, "--json"], 20)
+    try:
+        info = json.loads(out) if rc == 0 else None
+    except ValueError:
+        info = None
+    if not isinstance(info, dict):
+        return {"kind": "unknown", "why": f"inspect rc={rc}"}
+    status, archived, perms = info.get("Status"), info.get("Archived"), info.get("PendingPermissions")
+    updated = info.get("UpdatedAt")
+    if ls_row is not None and ls_row.get("status") not in (None, status):
+        return {"kind": "unknown", "why": f"ls says {ls_row.get('status')}, inspect says {status}"}
+    if archived is True or status in ("closed", "error"):
+        return {"kind": "stopped", "status": status, "updated": updated}
+    ts = parse_iso(updated)
+    if archived is not False or not isinstance(perms, list) or ts is None or not isinstance(status, str):
+        return {"kind": "unknown", "why": "inspect fields missing or malformed"}
+    if status == "idle" and not perms:
+        return {"kind": "idle", "status": status, "updated": updated, "age": now() - ts}
+    return {"kind": "busy", "status": status, "updated": updated, "permission_pending": bool(perms)}
+
+
+def triggers(d: dict, info: dict) -> list[str]:
+    """Reasons that hold for declaration D given the native reading. Unknown never triggers."""
+    if d["state"] not in ("open", "waiting") or d["pending_count"] <= 0 or info["kind"] == "unknown":
+        return []
+    if info["kind"] == "stopped":
+        return ["stopped_with_open_work"]
+    out = []
+    due = parse_iso(d.get("review_after"))
+    if due is not None and due <= now():
+        out.append("due")
+    if d["state"] == "open" and info["kind"] == "idle" and info["age"] >= d["idle_after_min"] * 60:
+        out.append("idle_with_work")
+    return out
+
+
+def same_reading(a: dict, b: dict) -> bool:
+    return a["kind"] == b["kind"] and (a["kind"] != "idle" or a["updated"] == b["updated"])
+
+
+def event_key(d: dict, reason: str) -> str:
+    return "|".join((d["paseo_home"], d["agent_id"], d["task"], str(d["generation"]), reason))
+
+
+def nudge(d: dict) -> str:
+    return (f"Progress reminder, task {d['task']}: {d['summary']} ({d['pending_count']} open). "
+            f"Reply with status, or run `ade-progress ack --task {d['task']} --yes`.")
+
+
+# ---------- channels ----------
+
+def wake(paseo: list[str], d: dict) -> str:
+    """Plain `paseo send` (the agent is idle; item 4). sent | refused | unknown. Never retried blindly."""
+    rc, out = run(paseo + ["send", "--json", "--no-wait", d["agent_id"], nudge(d)], 20)
+    try:
+        obj = json.loads(out)
+    except ValueError:
+        obj = None
+    status = str(obj.get("status") or obj.get("deliveryStatus") or "") if isinstance(obj, dict) else ""
+    if status in ("sent", "completed"):
+        return "sent"
+    return "refused" if rc != 0 and isinstance(obj, dict) and obj.get("error") else "unknown"
+
+
+def progress_item(d: dict, rec: dict) -> None:
+    pp = tool("ADE_PROGRESS_PASEO_PROGRESS", "paseo-progress")
+    if not pp:
+        rec["ui"] = "absent"
+        return
+    if not d.get("workspace"):
+        rec["ui"] = "no-run"
+        return
+    text = f"{d['task']}: {d['summary']} [{rec['reason']}]"
+    rc, out = run(pp + ["stuck", "set", text], 15, cwd=d["workspace"])
+    m = UI_RE.search(out) if rc == 0 else None
+    if rc == 0 and not m:   # the item may exist under an id we could not read: never set another (that would stack)
+        rec["ui"] = "unverified"
+        return
+    if not m:   # a finished or missing run is the expected "no-run" outcome, not an anomaly
+        rec["ui"] = "no-run"
+        return
+    rec["ui_id"], rec["workspace"], rec["ui_text"] = m.group(1), d["workspace"], text
+    seen = item_present(rec)   # `(id: text)` in show, not a bare token
+    rec["ui"] = "verified" if seen else "unverified"
+    if seen is False:
+        rec["marker_seen"] = False   # show answered but never listed the item we just made: do not trust "absent" later
+
+
+def digest(recs: list[dict]) -> str:
+    head = f"djbclark-ade: progress: {len(recs)} notice(s): "
+    tail = "; run ade-progress inbox"
+    parts = [f"{r['task']} {r['reason']}" for r in recs]
+    for keep in range(len(parts), 0, -1):
+        more = f" (+{len(parts) - keep} more)" if keep < len(parts) else ""
+        line = head + ", ".join(parts[:keep]) + more + tail
+        if len(line) <= PING_CHARS:
+            return line
+    return (head + parts[0] + tail)[:PING_CHARS]
+
+
+def send_digest(st: dict, pending: list[dict]) -> str:
+    """At most one hermes-ping per pass and PING_PER_HOUR per hour; the rest is deferred, not lost."""
+    pending = [r for r in pending if not r.get("acked") and not r.get("closed")]
+    if not pending:
+        return "none"
+    st["pings"] = [t for t in st["pings"] if now() - t < 3600]
+    hp = tool("ADE_PROGRESS_HERMES_PING", "hermes-ping")
+    if len(st["pings"]) >= PING_PER_HOUR:
+        for r in pending:
+            r["ping"] = "deferred-rate-limit"
+        return "deferred-rate-limit"
+    if not hp:
+        for r in pending:
+            r["ping"] = "failed"
+        return "hermes-ping absent"
+    for r in pending:
+        r["ping"] = "intent"
+    st["pings"].append(now())
+    save(st)   # intent before effect: a crash leaves "intent", reconciled to unknown, never replayed
+    rc, _ = run(hp + [digest(pending)], 20)
+    for r in pending:
+        r["ping"], r["ping_rc"] = ("sent" if rc == 0 else "failed"), rc
+    return f"rc={rc}"
+
+
+# ---------- scan ----------
+
+def candidates(st: dict, decls: list[dict], paseo: list[str], rows: dict, deadline: float, rep: dict) -> list[dict]:
+    out = []
+    active = [d for d in decls if d and d["state"] in ("open", "waiting") and d["pending_count"] > 0]
+    if len(active) > MAX_DECLS:
+        rep["partial"] = True
+    for d in active[:MAX_DECLS]:
+        if d["paseo_home"] != paseo_home():   # a declaration made under another Paseo home is not ours to inspect or wake
+            rep["health"].append(f"{d['task']}: declared under another PASEO_HOME; skipped")
+            continue
+        if time.monotonic() > deadline:
+            rep["partial"] = True
+            break
+        info = classify(paseo, d["agent_id"], rows.get(d["agent_id"]))
+        if info["kind"] == "unknown":
+            rep["health"].append(f"{d['task']}: unknown ({info['why']})")
+        for reason in triggers(d, info):
+            key = event_key(d, reason)
+            rec = st["events"].get(key)
+            if rec and (rec.get("acked") or rec.get("closed")):
+                continue
+            if rec and rec.get("state") == "published-local" and now() - rec["last_published"] < COOLDOWN:
+                continue
+            if rec and rec.get("attempts", 0) >= MAX_REFUSED_ATTEMPTS and rec.get("wake") == "refused":
+                continue
+            out.append({"d": d, "reason": reason, "key": key, "info": info})
+    return out
+
+
+def wake_key(d: dict) -> str:
+    return f"{d['paseo_home']}|{d['agent_id']}"
+
+
+def wake_allowed(st: dict, c: dict) -> bool:
+    d, info = c["d"], c["info"]
+    last = st["wakes"].get(wake_key(d), {}).get("ts", 0)   # per agent, not per task: one nudge per agent per window
+    idle = info["kind"] == "idle" and info["age"] >= d["idle_after_min"] * 60
+    return d["state"] == "open" and idle and c["reason"] in ("idle_with_work", "due") and now() - last >= COOLDOWN
+
+
+def carry_item(st: dict, d: dict, rec: dict, old: dict | None) -> None:
+    """A repeat notice (new generation, reason or cooldown) reuses the task's open Progress item instead of stacking one,
+    but only while the panel still shows OUR item; one the agent cleared (or a new run's reused id) is marked gone."""
+    # `old` is the record this one replaced under the same key: it is no longer in st["events"]
+    prev = [r for r in [*st["events"].values(), *([old] if old else [])] if r is not rec and r["task"] == d["task"]
+            and not r.get("closed") and not r.get("ui_gone") and (r.get("ui_id") or r.get("ui") == "unverified")]
+    if not prev:
+        return
+    last = max(prev, key=lambda r: r.get("last_published", 0))
+    if not last.get("ui_id"):
+        rec["ui"] = "unverified"   # an item may exist under an id we never read: set no second one
+        return
+    present = item_present(last)
+    if present is False:
+        for r in prev:
+            if r.get("ui_id") == last["ui_id"]:
+                r["ui_gone"] = True
+        return
+    rec.update(ui="unverified" if present is None else last["ui"], ui_id=last["ui_id"], workspace=last.get("workspace"),
+               ui_text=last.get("ui_text"))
+    if last.get("marker_seen") is False:
+        rec["marker_seen"] = False
+
+
+def process(st: dict, c: dict, paseo: list[str], rep: dict) -> dict | None:
+    d, key = c["d"], c["key"]
+    # step 0: preflight. A moved agent withdraws the event: nothing sent, cursor untouched.
+    if not same_reading(c["info"], classify(paseo, d["agent_id"], None)):
+        rep["withdrawn"] += 1
+        return None
+    old = rec = st["events"].get(key)
+    if rec and rec.get("state") == "prepared":   # resume a crashed attempt: never repeat a wake or ping that may have gone
+        if rec.get("wake") == "intent":
+            rec["wake"] = "unknown"
+    else:
+        rec = {"key": key, "task": d["task"], "reason": c["reason"], "agent_id": d["agent_id"], "summary": d["summary"],
+               "first": now(), "state": "prepared", "wake": None, "ping": None, "ui": None,
+               "attempts": (old or {}).get("attempts", 0), "last_published": (old or {}).get("last_published", 0)}
+        if old:
+            rec["first"] = old["first"]
+        carry_item(st, d, rec, old)   # before the first save: the old record's item reference must never exist only in memory
+        if old and old.get("wake") in ("unknown", "refused"):
+            rec["prior_wake"] = old["wake"]   # an earlier uncertain or refused attempt, kept visible
+        st["events"][key] = rec
+    save(st)   # step 1: the inbox record, as "prepared", before any effect
+    if rec["wake"] is None:   # step 2: wake first, behind a second re-inspect
+        if not wake_allowed(st, c):
+            rec["wake"] = "na"
+        elif not same_reading(c["info"], classify(paseo, d["agent_id"], None)):
+            rec["state"] = "withdrawn"
+            save(st)
+            rep["withdrawn"] += 1
+            return None
+        else:
+            rec["wake"] = "intent"
+            st["wakes"][wake_key(d)] = {"ts": now(), "key": key}
+            save(st)
+            rec["wake"] = wake(paseo, d)
+            rec["attempts"] += 1
+    if rec["ui"] is None:
+        carry_item(st, d, rec, None)   # a resumed record (crash after creation) tries again
+    if rec["ui"] is None:   # step 3: Progress item, then (in the digest) the page
+        rec["ui"] = "intent"
+        save(st)   # intent before effect: a crash leaves "intent", reconciled to unverified, never set twice
+        progress_item(d, rec)
+        if rec.get("marker_seen") is False:
+            rep["health"].append(f"{d['task']}: show did not list the new Progress item (format drift?); ids not trusted")
+    rec["state"], rec["last_published"] = "published-local", now()
+    save(st)
+    return rec
+
+
+def cmd_scan(a) -> int:
+    paseo = tool("ADE_PROGRESS_PASEO", "paseo")
+    rep = {"mode": "apply" if a.yes else "dry-run", "partial": False, "suppressed": None, "health": [], "events": [],
+           "withdrawn": 0, "ping": "none"}
+    if not paseo:
+        raise Fail(4, "paseo not found (ADE_PROGRESS_PASEO)")
+
+    def go(st):
+        deadline = time.monotonic() + PASS_SECONDS
+        if st["last_scan"] > now() + 60 or any(r.get("last_published", 0) > now() + 60 for r in st["events"].values()):
+            rep["suppressed"] = "clock rollback or future timestamp: no sends this pass"
+        for rec in st["events"].values():   # crash recovery: an effect that may have gone out is "unknown"
+            if rec.get("wake") == "intent":
+                rec["wake"] = "unknown"
+            if rec.get("ping") == "intent":
+                rec["ping"] = "unknown"
+            if rec.get("ui") == "intent":
+                rec["ui"] = "unverified"
+        rc, out = run(paseo + ["ls", "-g", "--background", "--json"], 30)
+        try:
+            rows = {r["id"]: r for r in json.loads(out) if isinstance(r, dict) and r.get("id")} if rc == 0 else None
+        except (ValueError, TypeError):
+            rows = None
+        if rows is None:
+            rep["health"].append(f"paseo ls unreadable (rc={rc}); no claim about any agent")
+            rows = {}
+            cands = []
+        else:
+            cands = candidates(st, load_decls(), paseo, rows, deadline, rep)
+        if not a.yes or rep["suppressed"]:
+            woken: set[str] = set()
+            rep["events"] = []
+            for c in cands:
+                w = wake_allowed(st, c) and wake_key(c["d"]) not in woken
+                woken.add(wake_key(c["d"])) if w else None
+                rep["events"].append({"task": c["d"]["task"], "reason": c["reason"], "wake": "would-wake" if w else "none"})
+            return emit(rep, a)
+        fresh = []
+        for c in cands:
+            if time.monotonic() > deadline:   # the 45 s bound is checked before each event; one event's effects can still run past it (about 2 min worst case)
+                rep["partial"] = True
+                break
+            r = process(st, c, paseo, rep)
+            if r:
+                fresh.append(r)
+        # every published record not yet paged rides the digest, so a crash before the page loses nothing
+        pend = [r for r in st["events"].values() if r.get("ping") == "deferred-rate-limit"
+                or (r["state"] == "published-local" and r.get("ping") is None)
+                or (r["state"] == "prepared" and r.get("wake") == "unknown" and r.get("ping") is None)]
+        rep["ping"] = send_digest(st, pend)
+        rep["events"] = [{"task": r["task"], "reason": r["reason"], "wake": r["wake"], "ui": r["ui"], "ping": r.get("ping")}
+                         for r in fresh]
+        st["last_scan"] = now()
+        save(st)
+        return emit(rep, a)
+
+    if a.yes:
+        return with_state(go, as_json=a.json)
+    st = read_json(state_dir() / "state.json", {"events": {}, "pings": [], "wakes": {}, "last_scan": 0})
+    return go(st)
+
+
+def emit(rep: dict, a) -> int:
+    if a.json:
+        print(json.dumps(rep, indent=1))
+    else:
+        print(f"scan ({rep['mode']}): {len(rep['events'])} event(s), {rep['withdrawn']} withdrawn, ping {rep['ping']}"
+              + (", PARTIAL" if rep["partial"] else "") + (f", {rep['suppressed']}" if rep["suppressed"] else ""))
+        for e in rep["events"]:
+            print("  " + " ".join(f"{k}={v}" for k, v in e.items()))
+        for h in rep["health"]:
+            print("  health:", h)
+    return 0
+
+
+def cmd_inbox(a) -> int:
+    st = read_json(state_dir() / "state.json", {"events": {}})
+    rows = sorted(st["events"].values(), key=lambda r: r["first"])
+    if a.json:
+        print(json.dumps(rows, indent=1))
+        return 0
+    for r in rows:
+        print(f"{r['task']} {r['reason']} {r['state']} first={ny(r['first'])} wake={r['wake']} ui={r['ui']}"
+              f"{'/' + r['ui_id'] if r.get('ui_id') else ''} ping={r['ping']}"
+              f"{' acked' if r.get('acked') else ''}{' ' + r['closed'] if r.get('closed') else ''}"
+              f"{' ui_cleared=False (in ' + str(r.get('workspace')) + ': run paseo-progress show; clear ' + r['ui_id'] + ' only if it lists (' + r['ui_id'] + ': ' + r['task'] + ': )' if r.get('ui_id') and r.get('ui_cleared') is False else ''}"
+              f": {r['summary']}")
+    return 0
+
+
+def main(argv: list[str]) -> int:
+    p = argparse.ArgumentParser(prog="ade-progress", description=__doc__.split("\n")[0])
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    def add(name, fn, *flags):
+        sp = sub.add_parser(name)
+        sp.set_defaults(fn=fn)
+        for f, kw in flags:
+            sp.add_argument(f, **kw)
+        return sp
+    task = ("--task", {"required": True})
+    yes = ("--yes", {"action": "store_true"})
+    gen = ("--generation", {"type": int})
+    add("declare", cmd_declare, task, ("--summary", {}), ("--agent", {}), ("--pending", {"type": int}),
+        ("--state", {"choices": ["open", "waiting"]}), ("--idle-after-min", {"type": int}), ("--review-after", {}),
+        ("--workspace", {}), gen, yes)
+    add("retire", cmd_retire, task, ("--generation", {"type": int, "required": True}), yes)
+    add("ack", cmd_ack, task, yes)
+    sc = add("scan", cmd_scan, yes, ("--json", {"action": "store_true"}))
+    sc.add_argument("--dry-run", action="store_true")
+    add("inbox", cmd_inbox, ("--json", {"action": "store_true"}))
+    a = p.parse_args(argv)
+    if getattr(a, "yes", False) and getattr(a, "dry_run", False):
+        p.error("--yes and --dry-run are exclusive")
+    try:
+        return a.fn(a)
+    except Fail as e:
+        print(f"ade-progress: {e}", file=sys.stderr)
+        return e.code
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
