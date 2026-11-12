@@ -1,0 +1,5 @@
+source: operator waive (2026-11-12 question card to lead 8cd86203); paste into Mac c3_proofs.cfengine
+key: cfengine
+waive: 2026-11-12: waive Wave 6 C3 cfengine for immutable dated handoffs in cfengine-all; cfengine-core and cfengine-all AGENTS.md are clean.
+verified: operator djbclark granted this C3 waive on 2026-11-12; recorded verbatim, nothing added
+log: docs/slim/log.md section "Wave 6 C3 historical waives (2026-11-12)"

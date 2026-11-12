@@ -1,0 +1,5 @@
+source: operator waive (2026-11-12 question card to lead 8cd86203); paste into Mac c3_proofs.aiuse
+key: aiuse
+waive: 2026-11-12: waive Wave 6 C3 aiuse only for passive consumption of existing ACP logs and its associated tests, format documentation and dated history; active launcher guidance is migrated.
+verified: operator djbclark granted this C3 waive on 2026-11-12; recorded verbatim, nothing added
+log: docs/slim/log.md section "Wave 6 C3 historical waives (2026-11-12)"
