@@ -163,7 +163,7 @@ Skills (from each `skills/*/SKILL.md`):
 | [`claude_identity.py`](bin/claude_identity.py) | Which Claude Code session is this process in? |
 | [`codex-env-policy-apply`](bin/codex-env-policy-apply) | Merge the template's [shell_environment_policy] tables into a Codex config.toml atomically. |
 | [`codex-open-threads`](bin/codex-open-threads) | Report-only lister for unresolved Codex review threads on merged PRs. |
-| [`completion-notice`](bin/completion-notice) | Format (and optionally send) a delegated slice's push-on-completion line via paseo send. |
+| [`completion-notice`](bin/completion-notice) | Format, send, and verify a delegated slice's push-on-completion notice via paseo send and disk ack. |
 | [`context-budget-check`](bin/context-budget-check) | The nightly guard on what a fresh Claude Code session costs before the first prompt. |
 | [`context-watch`](bin/context-watch) | How full is each running Claude Code agent's context, against the REAL compaction ceiling. |
 | [`cursor-cloud`](bin/cursor-cloud) | Launch and inspect Cursor Cloud Agents from the terminal (2026-10-19). |

@@ -142,7 +142,9 @@ under the owner's login) is ours. The review boundary and the merge gate below a
    message that needs to be known delivered asks for the named ack (the relay shim's `--ack <your id>` appends the request; `paseo send` has no `--ack`, so write
    `Please reply: ack <your id>` into the text and pass `--no-wait`, since a send to a busy peer can block for minutes); the first
    message to a new peer always asks for one, to prove the return path; check your own inbox for it, re-send when none
-   arrives, and report a peer you cannot reach to the operator, never assume it read.
+   arrives, and report a peer you cannot reach to the operator, never assume it read. For completion notices (operator
+   ruling 2026-11-12), proof uses dual routes: (a) prompt `ack <sender id> <msg-id>` sent only once target is `idle` (`paseo agent inspect`),
+   worker ends turn immediately after sending; (b) atomic `<done>.ack` disk artifact. Unique msg-id allows deduplication.
 
 11. **djbclark-ade is the lead's project; ask before changing code anywhere else** (operator, 2026-10-30: "You should ask me before you make changes to any code not
    in your project, which is djbclark-ade."). The lead of this repo edits, commits and pushes in djbclark-ade (and its worktrees) on its own judgment
