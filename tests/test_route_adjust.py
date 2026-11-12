@@ -471,6 +471,25 @@ class TestCli(Base):
         self.assertEqual(code, r.ADJUST_EXIT_REFUSED)
         self.assertIn("REFUSED", out)
 
+    def test_canary_cap_survives_adjust_and_json_mirrors_plan(self):  # review F1, F2 (#581)
+        a = svc("w8-a", 1, max_parallel=4)
+        alias = svc("w8-alias", 2, max_parallel=4, shares_pool="w8-a")     # same blind meter as w8-a
+        b = svc("w8-b", 5, max_parallel=4)
+        self.quota = {"w8-a": reading(80), "w8-alias": reading(80), "w8-b": reading(80)}
+        with mock.patch.object(r, "discover", return_value=[a, alias, b]), \
+             mock.patch.object(r, "SERVICES", (a, alias, b)), \
+             mock.patch.object(r, "BY_NAME", {"w8-a": a, "w8-alias": alias, "w8-b": b}), \
+             mock.patch.object(r, "CANARY_POOLS", frozenset({"w8-a"})):
+            code, out, _ = self.call("adjust", "--kinds", "code,code,code", "--json")
+            doc = json.loads(out)
+            self.assertEqual(code, 0)
+            self.assertEqual(doc["canary_pool_max"], {"w8-a": 1})
+            self.assertEqual(doc["canary_release"], "lead verifies one successful turn before adding agents")
+            names = [x["service"] for x in doc["slices"]]
+            self.assertEqual(names, ["w8-a", "w8-b", "w8-b"])                          # blind pool: one per wave, alias included
+            _, text, _ = self.call("adjust", "--kinds", "code", "--dry-run")
+            self.assertIn("canary pool w8-a: max=1", text)
+
     def test_lock_timeout_plans_read_only(self):
         with mock.patch.object(ra, "locked", side_effect=ra.LockBusy("busy")):
             code, out, err = self.call("adjust", "--kinds", "code")

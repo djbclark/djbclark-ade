@@ -3040,6 +3040,8 @@ def _adjust_command(args: argparse.Namespace, parser: argparse.ArgumentParser,
     if args.json:
         print(json.dumps({
             "enabled": cfg["enabled"], "snapshot_age_s": age, "fresh": result["fresh"],
+            "canary_pool_max": {p: 1 for p in sorted(CANARY_POOLS)},
+            "canary_release": "lead verifies one successful turn before adding agents",
             "held": result["held"], "events": result["events"], "dry_run": args.dry_run,
             "slices": [{"kind": k, "service": c.service.name if c else None,
                         "agent": c.service.acp_agent if c else None,
@@ -3050,6 +3052,8 @@ def _adjust_command(args: argparse.Namespace, parser: argparse.ArgumentParser,
                         "why": refusal or (c.why if c else unrouted_why(k, quota, skip))}
                        for k, c, refusal in result["rows"]]}, indent=1))
     else:
+        for pool in sorted(CANARY_POOLS):
+            print(f"canary pool {pool}: max=1; verify one successful turn before adding agents")
         if not result["fresh"] and cfg["enabled"]:
             print("WARNING: quota snapshot empty or older than "
                   f"{cfg['max_age_seconds']:g}s -> no hold or restore changed; run `aiuse --available --live` first",
