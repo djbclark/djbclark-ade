@@ -146,3 +146,5 @@ Codex full-access maps to `approval_policy = "never"` and
 Paseo's `applyCodexToolPolicy` explicitly writes per-tool approval values for its
 preapproved tools. Inspect those when a graft card persists; this helper does not
 edit `site-private`'s `codex/config.toml` or broaden MCP tool policies.
+
+Before committing or pushing a changelog fragment, run `python3 bin/changelog-fold --repo . --check` and inspect its exit status. A failed check stops the dependent commit/push; fix the fragment first. Fragments require a valid section heading as well as a trailing PR reference on every bullet.
