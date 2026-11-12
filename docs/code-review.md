@@ -142,7 +142,7 @@ untrusted data ([AGENTS.md](../AGENTS.md) Trust).
     PRs 112 and 124): Claude through `bin/review-launch --mode review`, in a clean detached worktree at the exact head, with
     read-only tools confined to that worktree, no MCP, no hooks and a tripwire (docs/review-boundary.md). Since 2026-11-07 it refuses (exit 2) a worktree with a symlink pointing outside it, takes its read-deny list from `config/secret-deny.toml`, and gives read-only mode no web tools unless `--allow-web` is passed. It prints the
     marker to paste into the PR body (verdict and head only; the model's free text never goes into it) and files
-    `~/.local/state/review-launch/<owner>__<name>-pr<N>-<head>.json`; it never posts. Exit 0 APPROVE, 1 BLOCK, 2 refused
+    `~/.local/state/review-launch/attempts/<owner>__<name>-pr<N>-<head>-<attempt>.json` (2026-11-12; the old path holds the latest result); it never posts. Completed matching reviews are reused unless `--retry`; unresolved findings require explicit `--resolve-finding ID` with `--retry`. Timeout-only replacement models and private partial evidence are described in [review-boundary.md](review-boundary.md). Exit 0 APPROVE, 1 BLOCK, 2 refused
     (usage, no such PR, an untrusted author, a refused launch), 3 failed, 77 tripwire (the run left the boundary), 124
     timeout. A push needs a new run: the head is the key. It refuses a PR whose author is neither the repository owner nor
     the authenticated gh user unless `--allow-untrusted` (the PR's own diff and AGENTS.md can try to steer the reviewing

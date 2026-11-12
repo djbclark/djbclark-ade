@@ -2,9 +2,9 @@
 """review-launch: run ONE `claude -p` inside a review boundary and print its structured output.
 
   review-launch --mode review|read-only -C WORKTREE --schema FILE (-p TEXT | -f FILE)
-                [--allow-web] [--head SHA] [--model M] [--max-turns N] [--timeout S] [--json]
+                [--allow-web] [--head SHA] [--model M] [--max-turns N] [--timeout S] [--stall-timeout S] [--evidence-dir DIR] [--json]
   review-launch --mode trusted --trusted-author LOGIN --head SHA -C WORKTREE --schema FILE (-p TEXT | -f FILE)
-                [--model M] [--max-turns N] [--timeout S] [--json]
+                [--model M] [--max-turns N] [--timeout S] [--stall-timeout S] [--evidence-dir DIR] [--json]
   review-launch --check [--mode review|read-only] [--allow-web] [--json]
 
 The permanent review boundary of the slim-down (PLAN E8, 2026-11-06; docs/review-boundary.md). AGENTS.md
@@ -114,6 +114,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import queue
 import re
@@ -475,16 +476,25 @@ class Run:
 
 
 def run_claude(argv: list[str], worktree: str, mode: str, timeout: float, path_trip: bool = True,
-               keep_raw: bool = False) -> Run:
+               keep_raw: bool = False, stall_timeout: float = 0, evidence_dir: Path | None = None) -> Run:
     run = Run()
     allowed = set(TOOLS[mode]) | {"StructuredOutput"}
     trusted = mode == TRUSTED_MODE    # YOLO: no read tripwire, hooks recorded not fatal; tools, init and cwd still proven
     path_trip = path_trip and not trusted
+    evidence = None
+    if evidence_dir is not None:
+        evidence_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        # Exclusive creation: even caller reuse cannot overwrite a previous stream.
+        fd = os.open(evidence_dir / "stream.jsonl", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        evidence = os.fdopen(fd, "wb")
     err = tempfile.TemporaryFile()
     try:
         proc = subprocess.Popen(argv, cwd=worktree, env=child_env(), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                 stderr=err, start_new_session=True)
     except OSError as e:
+        if evidence:
+            evidence.close()
+        err.close()
         run.reason = f"cannot start claude: {e}"
         return run
     lines: queue.Queue = queue.Queue()
@@ -498,6 +508,7 @@ def run_claude(argv: list[str], worktree: str, mode: str, timeout: float, path_t
     tracked: dict[int, str] = {}
     deadline = time.monotonic() + timeout
     last_ps = 0.0
+    last_output = time.monotonic()
     old = {s: signal.signal(s, _on_signal) for s in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)}
     raw_parts: list[str] = []
     exited_at: float | None = None
@@ -509,6 +520,9 @@ def run_claude(argv: list[str], worktree: str, mode: str, timeout: float, path_t
     try:
         while True:
             now = time.monotonic()
+            if stall_timeout and now - last_output >= stall_timeout:
+                run.exit, run.reason = EXIT_TIMEOUT, f"claude stalled without stream output for {stall_timeout:g} s"
+                break
             if now >= deadline:
                 run.exit, run.reason = EXIT_TIMEOUT, f"claude did not finish in {timeout:g} s"
                 break
@@ -529,6 +543,10 @@ def run_claude(argv: list[str], worktree: str, mode: str, timeout: float, path_t
                 continue
             if raw is None:
                 break
+            last_output = time.monotonic()
+            if evidence:
+                evidence.write(raw)
+                evidence.flush()
             text = raw.decode("utf-8", "replace")
             if keep_raw:
                 raw_parts.append(text)
@@ -599,6 +617,10 @@ def run_claude(argv: list[str], worktree: str, mode: str, timeout: float, path_t
             tail = err.read()[-2000:].decode("utf-8", "replace").strip()
         except OSError:
             tail = ""
+        if evidence:
+            evidence.close()
+            err.seek(0)
+            write_private(evidence_dir / "stderr.txt", err.read().decode("utf-8", "replace"))
         err.close()
         run.raw = "".join(raw_parts)
     if run.reason:
@@ -808,6 +830,8 @@ def parser() -> Parser:
     p.add_argument("--model")
     p.add_argument("--max-turns", type=int)
     p.add_argument("--timeout", type=float, default=900.0)
+    p.add_argument("--stall-timeout", type=float, default=0, help="seconds without stream output before exit 124; 0 disables")
+    p.add_argument("--evidence-dir", type=Path, help="save private stream.jsonl and stderr.txt here; refuses an existing stream")
     p.add_argument("--json", action="store_true", help="print one JSON run record instead of the bare output")
     p.add_argument("--check", action="store_true", help="run the boundary self-check now and cache its result")
     return p
@@ -875,6 +899,9 @@ def main(argv: list[str]) -> int:
         a = parser().parse_args(argv)
     except SystemExit as e:
         return EXIT_USAGE if e.code else EXIT_OK
+    if not math.isfinite(a.stall_timeout) or a.stall_timeout < 0:
+        note("--stall-timeout must be finite and nonnegative")
+        return EXIT_USAGE
     if POLICY_ERROR:
         note(f"refused: the secret-deny policy cannot be read, so the deny rules are unknown: {POLICY_ERROR}")
         return EXIT_USAGE
@@ -965,13 +992,18 @@ def main(argv: list[str]) -> int:
     if not ok:
         note(f"refused: {where}")
         return EXIT_USAGE
-    run = run_claude(build_argv(binary, profile, schema, prompt, a.model, a.max_turns), wt, profile, a.timeout)
+    try:
+        run = run_claude(build_argv(binary, profile, schema, prompt, a.model, a.max_turns), wt, profile, a.timeout,
+                         stall_timeout=a.stall_timeout, evidence_dir=a.evidence_dir)
+    except OSError as e:
+        note(f"cannot preserve evidence: {e}")
+        return EXIT_USAGE
     if run.reason:
         note(run.reason)
     if a.json:
         init = run.init or {}
         rec = {"exit": run.exit, "reason": run.reason, "mode": mode, "allow_web": bool(a.allow_web), "trusted_author": a.trusted_author, "worktree": wt,
-               "head": a.head,
+               "head": a.head, "evidence_dir": str(a.evidence_dir) if a.evidence_dir else None,
                "structured_output": (run.result or {}).get("structured_output") if run.exit == EXIT_OK else None,
                "init": {k: init.get(k) for k in ("tools", "mcp_servers", "permissionMode", "cwd", "model",
                                                  "claude_code_version", "apiKeySource")} if init else None,

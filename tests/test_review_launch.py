@@ -1117,3 +1117,124 @@ def test_an_owner_login_is_matched_case_insensitively_and_an_unknown_author_is_n
                  "author": {"login": "DJBClark"}, "state": "OPEN"})
     assert prw.review().returncode == 0
     assert argv_val(prw.launches()[-1]["argv"], "--permission-mode") == "bypassPermissions"
+
+
+# W5: attempts are durable; silence or a replacement never resolves a finding.
+def test_attempt_reuse_retry_and_explicit_resolution(prw):
+    prw.scenario(output={"verdict": "BLOCK", "head": prw.pr_head, "findings": [
+        {"file": "feature.txt", "line": 1, "severity": "high", "summary": "bad"}], "note": "n"})
+    assert prw.review("--no-deadline").returncode == 1
+    first = prw.filed()
+    attempts = list((prw.state / "attempts").glob("*.json"))
+    assert len(attempts) == 1
+    original = attempts[0].read_bytes()
+    prw.scenario()
+    assert prw.review("--no-deadline", "--json").returncode == 1
+    assert len(prw.launches()) == 1
+    assert prw.review("--no-deadline", "--retry").returncode == 1
+    assert prw.filed()["unresolved_findings"] == first["unresolved_findings"]
+    assert attempts[0].read_bytes() == original
+    fid = next(iter(first["unresolved_findings"]))
+    assert prw.review("--no-deadline", "--retry", "--resolve-finding", fid).returncode == 0
+    assert not prw.filed()["unresolved_findings"]
+    assert len(list((prw.state / "attempts").glob("*.json"))) == 3
+    for attempt in (prw.state / "attempts").glob("*.json"):
+        assert attempt.stat().st_mode & 0o777 == 0o600
+
+
+def test_concurrent_review_is_refused_before_launch(prw):
+    import fcntl
+    prw.state.mkdir()
+    with (prw.state / "djbclark__djbclark-ade-pr7.lock").open("w") as held:
+        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        result = prw.review("--no-deadline")
+        assert result.returncode == 2 and "active" in result.stderr
+        assert not prw.calls()
+
+
+def test_stall_preserves_stream_and_replacement_attempts(prw):
+    prw.scenario(sleep=60)
+    result = prw.review("--no-deadline", "--stall-timeout", "0.2", "--replacement-model", "replacement")
+    assert result.returncode == 124, result.stderr
+    attempts = [json.loads(p.read_text()) for p in (prw.state / "attempts").glob("*.json")]
+    assert len(attempts) == 2 and len(prw.launches()) == 2
+    assert {a["model"] for a in attempts} == {None, "replacement"}
+    for attempt in attempts:
+        evidence = Path(attempt["evidence_dir"])
+        assert '"init"' in (evidence / "stream.jsonl").read_text()
+        assert (evidence / "stream.jsonl").stat().st_mode & 0o777 == 0o600
+        assert (evidence / "launcher.stderr").exists()
+        assert attempt["exit"] == 124
+
+
+def test_evidence_cannot_be_overwritten(world):
+    world.passed_check()
+    evidence = world.tmp / "evidence"
+    assert world.launch("--evidence-dir", str(evidence)).returncode == 0
+    original = (evidence / "stream.jsonl").read_bytes()
+    assert world.launch("--evidence-dir", str(evidence)).returncode == 2
+    assert (evidence / "stream.jsonl").read_bytes() == original
+    assert len(world.launches()) == 1
+
+
+def test_history_carries_findings_across_heads_and_loads_legacy_records(tmp_path):
+    rp = load_launcher(REVIEW_PR)
+    prefix = "owner__repo-pr7-"
+    finding = {"file": "x", "line": 1, "severity": "high", "summary": "bad"}
+    fid = rp.finding_id(finding)
+    rp.write_private(tmp_path / (prefix + "a.json"), json.dumps({"started": "1", "findings": [finding]}))
+    rp.write_private(tmp_path / "attempts" / (prefix + "b-2.json"), json.dumps({
+        "started": "2", "attempt_id": "2", "findings": [], "resolved_findings": []}))
+    assert rp.unresolved_findings(tmp_path, prefix) == {fid: finding}
+    rp.write_private(tmp_path / "attempts" / (prefix + "c-3.json"), json.dumps({
+        "started": "3", "attempt_id": "3", "resolved_findings": [fid], "findings": []}))
+    assert rp.unresolved_findings(tmp_path, prefix) == {}
+    rp.write_private(tmp_path / "attempts" / (prefix + "d-4.json"), json.dumps({
+        "started": "4", "attempt_id": "4", "findings": [finding]}))
+    assert rp.unresolved_findings(tmp_path, prefix) == {fid: finding}
+    (tmp_path / (prefix + "broken.json")).write_text("{")
+    with pytest.raises(ValueError):
+        rp.unresolved_findings(tmp_path, prefix)
+
+
+def test_legacy_findings_survive_compatibility_record_overwrite(prw):
+    finding = {"file": "feature.txt", "line": 1, "severity": "high", "summary": "legacy"}
+    prw.state.mkdir()
+    latest = prw.state / f"djbclark__djbclark-ade-pr7-{prw.pr_head}.json"
+    latest.write_text(json.dumps({"started": "2000", "result": "block", "findings": [finding]}))
+    assert prw.review("--no-deadline").returncode == 1
+    assert prw.review("--no-deadline", "--retry").returncode == 1
+    assert prw.filed()["unresolved_findings"]
+    assert list((prw.state / "attempts").glob("*-legacy.json"))
+
+
+def test_killed_caller_does_not_release_lock_while_reviewer_runs(prw):
+    import fcntl
+    prw.scenario(sleep=60)
+    caller = subprocess.Popen([sys.executable, "-I", str(REVIEW_PR), "7", "--no-deadline",
+                               "--timeout", "4"], env=prw.env(), cwd=str(prw.clone),
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        deadline = time.monotonic() + 20
+        while not prw.launches() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert prw.launches()
+        caller.kill()
+        caller.wait(timeout=5)
+        result = prw.review("--no-deadline")
+        assert result.returncode == 2 and "active" in result.stderr
+        assert len(prw.launches()) == 1
+        lock = prw.state / "djbclark__djbclark-ade-pr7.lock"
+        with lock.open() as held:
+            deadline = time.monotonic() + 20
+            while True:
+                try:
+                    fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    assert time.monotonic() < deadline
+                    time.sleep(0.1)
+    finally:
+        if caller.poll() is None:
+            caller.kill()
+            caller.wait(timeout=5)
