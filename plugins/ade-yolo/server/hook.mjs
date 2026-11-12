@@ -1,4 +1,5 @@
-import { applyYoloToCreateRequest, assertResumeConfig, assertResumeIdentity, isExempt, providerId } from "./yolo-lib.mjs";
+import { applyYoloToCreateRequest, assertResumeConfig, assertResumeIdentity, isExempt, isLegacyWithoutEvidence,
+  providerId } from "./yolo-lib.mjs";
 
 async function nativeEvidence(paseo, config) {
   if (!paseo?.providers?.snapshot) throw new Error("ade-yolo: native catalog API unavailable; update host");
@@ -22,7 +23,8 @@ export function registerAdeYoloHooks(server) {
     const { catalog, controls } = await nativeEvidence(paseo, request.config);
     return applyYoloToCreateRequest(request, catalog, controls);
   });
-  const offOpen = server.addHook("agent.open.before", async ({ request }, { paseo }) => {
+  const offOpen = server.addHook("agent.open.before", async ({ request }, { paseo, logger }) => {
+    const log = msg => (logger?.warn ?? logger?.info ?? console.warn).call(logger ?? console, msg);
     // Create has just passed the config gate. History does not launch a runtime.
     if (request.reason === "create" || request.purpose === "history" || isExempt({}, request.metadata)) return;
     if (!paseo?.agents?.ref) throw new Error("ade-yolo: native agent snapshot API unavailable");
@@ -31,10 +33,15 @@ export function registerAdeYoloHooks(server) {
     const snapshot = refreshed?.agent;
     assertResumeIdentity(snapshot, request);
     if (isExempt({ modeId: snapshot.currentModeId }, request.metadata)) return;
+    // Legacy agent with no saved evidence (pre-plugin, Hermes): allow and log before any catalog lookup.
+    if (isLegacyWithoutEvidence(snapshot, request)) {
+      log(`ade-yolo: ${request.agentId}: legacy agent without saved mode evidence; allowed`);
+      return;
+    }
     const config = { provider: request.provider, cwd: request.cwd,
       modeId: snapshot?.currentModeId, providerOptions: snapshot?.options };
     const { catalog, controls } = await nativeEvidence(paseo, config);
-    assertResumeConfig(snapshot, request, catalog, controls);
+    assertResumeConfig(snapshot, request, catalog, controls, log);
   });
   return () => { offCreate(); offOpen(); };
 }

@@ -22,7 +22,7 @@ unverified through that interface, even when its create hook requested auto_acce
 | Antigravity | `full-access` in exact catalog | Same; availability/entitlement gates unchanged |
 | Native Copilot | `allow-all` in exact catalog | No router row added; retired CLI remains retired |
 | Cursor | Advertised ACP toggle `auto_accept`, native option readback | CLI inspect lacking options cannot verify/repair it |
-| Pi | No invented mode: source returns an empty mode list | Extension UI requests remain possible; no universal mode/control proof |
+| Pi | No invented mode: source returns an empty mode list | `bin/paseo_yolo.py` still reports it unverified (no readback); the `ade-yolo` plugin (2026-11-12 ruling: Pi never raises permission requests) admits a ready, modeless Pi catalog explicitly, no other provider |
 | Hermes / other dynamic providers | Native unique `isUnattended` marker if actually available | Otherwise explicit unavailable; no invented ID or label reconstruction |
 | omp / OpenCode / retired client IDs | Refused by ordinary planner | No route reactivation |
 

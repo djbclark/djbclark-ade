@@ -27,8 +27,8 @@ test("Cursor requires advertised auto_accept and persists providerOptions",()=>{
   assert.deepEqual(planYoloPatch({provider:"cursor",providerOptions:{keep:1}},{},catalog,control),{providerOptions:{keep:1,auto_accept:true}});
   assert.throws(()=>planYoloPatch({provider:"cursor",modeId:"invented"},{},catalog,control),/absent/);
 });
-test("modeless/unverified and retired providers refuse instead of prompting fallback",()=>{
-  for(const p of ["pi","hermes","muse","opencode","omp"]) assert.throws(()=>planYoloPatch({provider:p},{},row(p,[])),/ade-yolo/);
+test("modeless unknown and retired providers refuse instead of prompting fallback",()=>{
+  for(const p of ["hermes","muse","opencode","omp"]) assert.throws(()=>planYoloPatch({provider:p},{},row(p,[])),/ade-yolo/);
 });
 test("create preserves unrelated fields",()=>{
   const out=applyYoloToCreateRequest({config:{...cfg,title:"title",providerOptions:{keep:true}},env:{x:"y"}},row());
@@ -76,4 +76,56 @@ test("resume checks Cursor effective option; native duplicate catalogs refuse",a
   assertResumeConfig({...snapshot,options:{auto_accept:true}},request,row("cursor",[]),control);
   const hooks={}; registerAdeYoloHooks({addHook(n,h){hooks[n]=h;return()=>{};}});
   await assert.rejects(hooks["agent.create.before"]({request:{config:cfg}},{paseo:{providers:{snapshot:async()=>({entries:[row(),row()]})}}}),/ambiguous/);
+});
+
+test("Pi: modeless ready catalog is unattended by construction; create goes through unchanged",async()=>{
+  assert.deepEqual(planYoloPatch({provider:"pi/xai-oauth/grok-4.7"},{},row("pi",[])),{});
+  const out=applyYoloToCreateRequest({config:{provider:"pi/xai-oauth/grok-4.7",cwd:"/repo",title:"t"},env:{x:"y"}},row("pi",[]));
+  assert.equal(out.config.title,"t"); assert.equal(out.config.modeId,undefined); assert.equal(out.env.x,"y");
+  const hooks={}; registerAdeYoloHooks({addHook(n,h){hooks[n]=h;return()=>{};}});
+  const paseo={providers:{snapshot:async()=>({entries:[row("pi",[])]})}};
+  const made=await hooks["agent.create.before"]({request:{config:{provider:"pi/x/y",cwd:"/repo"}}},{paseo});
+  assert.equal(made.config.provider,"pi/x/y");
+});
+test("Pi allowlist is narrow: not-ready Pi, Pi with modes, and other modeless providers still refuse",()=>{
+  assert.throws(()=>planYoloPatch({provider:"pi"},{},{...row("pi",[]),enabled:false}),/not enabled\/ready/);
+  assert.throws(()=>planYoloPatch({provider:"pi"},{},{...row("pi",[]),status:"loading"}),/not enabled\/ready/);
+  assert.throws(()=>planYoloPatch({provider:"pi"},{},row("pi",["ask"])),/no source-backed/);
+  for(const p of ["hermes","unknownprov"]) assert.throws(()=>planYoloPatch({provider:p},{},row(p,[])),/no source-backed/);
+});
+test("create stamps plugin-made agents; resume of a stamped agent without evidence refuses",()=>{
+  const out=applyYoloToCreateRequest({config:cfg,metadata:{keep:1}},row());
+  assert.equal(out.metadata["ade-yolo.applied"],"1"); assert.equal(out.metadata.keep,1);
+  const request={agentId:"a",provider:"claude",metadata:{}};
+  assert.throws(()=>assertResumeConfig({id:"a",provider:"claude",metadata:{"ade-yolo.applied":"1"}},request,row()),/missing/);
+  assert.throws(()=>assertResumeConfig({id:"a",provider:"cursor",metadata:{"ade-yolo.applied":"1"}},{...request,provider:"cursor"},row("cursor",[]),control),/auto_accept/);
+});
+test("resume of a legacy agent with missing evidence is allowed and logged; drift still refuses",()=>{
+  const request={agentId:"a",provider:"claude",metadata:{}};
+  const logs=[];
+  assertResumeConfig({id:"a",provider:"claude"},request,row(),undefined,m=>logs.push(m));
+  assert.equal(logs.length,1); assert.match(logs[0],/legacy/);
+  assert.throws(()=>assertResumeConfig({id:"a",provider:"claude",currentModeId:"auto"},request,row()),/drift/);
+  const cursorReq={agentId:"a",provider:"cursor",metadata:{}};
+  assertResumeConfig({id:"a",provider:"cursor"},cursorReq,row("cursor",[]),control,m=>logs.push(m));
+  assert.throws(()=>assertResumeConfig({id:"a",provider:"cursor",options:{auto_accept:false}},cursorReq,row("cursor",[]),control),/auto_accept/);
+  // restrictive escapes unchanged
+  assertResumeConfig({id:"a",provider:"claude",currentModeId:"plan"},request,row());
+  assertResumeConfig({id:"a",provider:"claude"},{...request,metadata:{"ade-yolo.skip":true}},row());
+});
+test("open hook: legacy Hermes/Pi/Claude agents resume without catalog lookup; stamped and drifted refuse",async()=>{
+  const hooks={}; registerAdeYoloHooks({addHook(n,h){hooks[n]=h;return()=>{};}});
+  let lookups=0;
+  const paseoWith=agent=>({providers:{snapshot:async()=>{lookups++;return{entries:[row("claude")]};}},
+    agents:{ref:()=>({refresh:async()=>({agent})})}});
+  const logs=[]; const logger={warn:m=>logs.push(m)};
+  for(const provider of ["hermes","pi","claude"]){
+    const request={agentId:"a",provider,cwd:"/repo",reason:"resume",purpose:"interactive",metadata:{}};
+    await hooks["agent.open.before"]({request},{paseo:paseoWith({id:"a",provider}),logger});
+  }
+  assert.equal(lookups,0); assert.equal(logs.length,3);
+  const request={agentId:"a",provider:"claude",cwd:"/repo",reason:"resume",purpose:"interactive",metadata:{}};
+  await assert.rejects(hooks["agent.open.before"]({request},{paseo:paseoWith({id:"a",provider:"claude",metadata:{"ade-yolo.applied":"1"}})}),/missing/);
+  await assert.rejects(hooks["agent.open.before"]({request},{paseo:paseoWith({id:"a",provider:"claude",currentModeId:"auto"})}),/drift/);
+  await hooks["agent.open.before"]({request},{paseo:paseoWith({id:"a",provider:"claude",currentModeId:"bypassPermissions"})});
 });
