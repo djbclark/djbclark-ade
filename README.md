@@ -188,6 +188,7 @@ Skills (from each `skills/*/SKILL.md`):
 | [`post-edit-check`](bin/post-edit-check) | A fast, narrow syntax check of the file an agent just edited. |
 | [`pr-policy`](bin/pr-policy) | Only djbclark (and the collaborators he invited) open ready pull requests on his repositories. |
 | [`pytest`](bin/pytest) | Run this repo's pytest with the exact dependencies CI installs. |
+| [`quota_signals.py`](bin/quota_signals.py) | Read-only quota forecasts. |
 | [`render-secret-deny`](bin/render-secret-deny) | Render config/secret-deny.toml into the files that enforce it (2026-11-04, issue #284 item 2; docs/secret-deny.md). |
 | [`review-launch`](bin/review-launch) | Run ONE `claude -p` inside a review boundary and print its structured output. |
 | [`review-pr`](bin/review-pr) | The local Claude review of a PR's exact head (docs/code-review.md rule 11), through bin/review-launch. |
