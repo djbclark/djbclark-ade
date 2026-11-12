@@ -1,11 +1,10 @@
 #!/usr/bin/env node
-/**
- * ade-trail-check: detect drift in the installed Trail skill-consent matcher.
- * Usage: node bin/ade-trail-check [--matcher /absolute/path/to/dist/skills/risk.js]
- * Default: the package remembered by ~/.trail/install.json (claudeDist).
- * Exit 0: all fixtures pass; 1: matcher drift; 2: missing/unreadable dependency.
- * Calls only agentGuard with strings as data; never executes fixture commands.
- */
+// ade-trail-check: detect drift in the installed Trail skill-consent matcher.
+// Usage: node bin/ade-trail-check [--matcher PATH]
+// Relative matcher paths resolve from the current working directory.
+// Default: the package remembered by ~/.trail/install.json (claudeDist).
+// Exit 0: all fixtures pass; 1: matcher drift; 2: missing/unreadable dependency.
+// Calls only agentGuard with strings as data; never executes fixture commands.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -45,9 +44,9 @@ const fixtures = [
 
 async function main() {
   const args = process.argv.slice(2);
-  if (args.length && (args.length !== 2 || args[0] !== '--matcher' || !path.isAbsolute(args[1])))
-    throw new Error('usage: node bin/ade-trail-check [--matcher /absolute/path/to/dist/skills/risk.js]');
-  let matcher = args[1];
+  if (args.length && (args.length !== 2 || args[0] !== '--matcher' || !args[1]))
+    throw new Error('usage: node bin/ade-trail-check [--matcher PATH]');
+  let matcher = args[1] ? path.resolve(args[1]) : undefined;
   if (!matcher) {
     const home = process.env.TRAIL_HOME ? path.resolve(process.env.TRAIL_HOME) : path.join(os.homedir(), '.trail');
     const install = JSON.parse(fs.readFileSync(path.join(home, 'install.json'), 'utf8'));

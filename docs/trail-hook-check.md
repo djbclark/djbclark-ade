@@ -15,6 +15,8 @@ the installed matcher when the compatibility patch is present.
 The hook shim can choose a newer package than the remembered installation.
 When that happens, select its matcher explicitly with
 `node bin/ade-trail-check --matcher /absolute/path/to/dist/skills/risk.js`.
+Relative matcher paths are accepted and resolve from the current working
+directory; the JSON output always reports the resolved absolute path.
 The JSON output names the exact matcher checked. Exit 0 means all inert-data
 and execution fixtures passed; 1 means behavior drift; 2 means the dependency
 or invocation is unavailable. Missing Node/Python or a changed export needs
