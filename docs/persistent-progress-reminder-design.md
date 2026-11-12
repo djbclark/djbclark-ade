@@ -80,29 +80,56 @@ rest are clear (round-robin cursors are deferred).
 
 C4. **Event key and cooldown.** Key = `{paseo_home, agent_id, task, generation, reason}`. A tick, a
 new timestamp or an unrelated commit is not a new event. A new key notifies at once; an unresolved
-key may notify again after **3 hours** (one ping per pass, a digest when several are due).
+key may notify again after **3 hours**. Operator pages are aggregated and rate-limited (D1a).
 `ack` records that the operator saw it (not that the work is done); `retire` stops reminders; both
 close the Progress item (D2). Clock rollback or a future timestamp suppresses sends for that pass.
 
 ## D. Delivery channels
 
-D1. A new event writes channels in this order; each is independent, and one failing never blocks
-the next:
+D1. **Order.** A pass handles a new event in this order, so no operator alert precedes the last
+check that can cancel it (re-review F1):
+
+0. *Preflight.* Re-inspect the agent (`paseo inspect <id> --json`) and require the trigger still
+   holds: for `idle_with_work`, status `idle`, `UpdatedAt` unchanged, zero `PendingPermissions`;
+   for `due` and `stopped_with_open_work`, the same reading of the native state. If it no longer
+   holds the event is **withdrawn**: nothing is sent, the cooldown cursor does not advance, and the
+   next pass re-evaluates. A withdrawn event is not a failure.
+1. *Inbox* (the record), written as `prepared` before any effect.
+2. *Wake first* (`idle_with_work` only), with a second re-inspect immediately before the send. If
+   the agent changed in that gap, withdraw: the inbox record becomes `withdrawn`, and no UI item
+   or page is sent.
+3. *Progress item* and *operator page*, only after the wake was sent or was not applicable. They
+   can therefore say what happened ("agent nudged" / "agent stopped"), and a wake of
+   `unknown` outcome still alerts the operator.
+
+Each channel after step 1 is independent; one failing never blocks the next:
 
 | # | Channel | Mechanism | Receipt kept |
 |---|---|---|---|
 | 1 | Local inbox (the record) | Atomic write (temp + `mv`) under a non-blocking lock; read back and hash-compare. | `published-local`. Only this advances the cooldown cursor. |
 | 2 | **Paseo Progress panel (primary operator UI)** | `paseo-progress stuck set "<summary>"` with cwd = the declaration's workspace; parse the printed `S<n>` id; read it back with `paseo-progress show`. | `ui_id=S<n>` and `verified` / `unverified` / `no-run`. |
-| 3 | Operator page | `hermes-ping "ade-progress: <task> <reason>"` (one line; full URLs if it names a PR). | `ping rc=<n>` only. Exit 0 is **not** proof the operator read it. |
-| 4 | Agent wake (`idle_with_work` only) | `paseo send --json --no-wait <agent_id> "<nudge>"` with no `--behavior` flag (the agent is idle; `~/CLAUDE.md` item 4). | `.status` of `sent` / `completed` = accepted by the daemon; anything else = `unknown`. |
+| 3 | Operator page | One aggregated `hermes-ping` per pass (D1a). | `ping rc=<n>` attributed to every event key in that digest. Exit 0 is **not** proof the operator read it. |
+| 4 (runs before 2 and 3, step 2 above) | Agent wake (`idle_with_work` only) | `paseo send --json --no-wait <agent_id> "<nudge>"` with no `--behavior` flag (the agent is idle; `~/CLAUDE.md` item 4). | `.status` of `sent` / `completed` = accepted by the daemon; anything else = `unknown`. |
+
+D1a. **Operator page volume (re-review F2).** At most **one `hermes-ping` per pass**, and at most
+**3 per hour** across the whole subsystem. Format, one line, repo-tagged as `hermes-ping` requires:
+`djbclark-ade: progress: N notice(s): <task> <reason>[, <task> <reason>…][ (+M more)]; run ade-progress inbox`,
+cut to 300 characters (full URLs only if a summary names a PR). A pass with one event pings that
+event; several events share one ping. Each event key included records `ping=sent|failed`; an event
+cut by the hourly cap records `ping=deferred-rate-limit`, stays in the inbox and Progress panel, and
+rides the next permitted digest. Deferral is not loss and does not advance that channel's cooldown.
+A coalesced backlog after sleep/wake (E4) is therefore one ping, not up to 16.
 
 D2. **Why `stuck set`, not `activity add`.** `stuck` raises the "N stuck" pill above the composer
 (Progress README), the operator-visible attention signal; `activity` is a quiet feed line. It is an
 *item*, not a question: no invented human question, and the agent's own ticker is never touched.
 `ack`/`retire`/recovery run `stuck clear <id>` using the saved id, so a repeat updates one item
-rather than stacking. `paseo-progress` refuses an unfinished-run-less worktree ("The run … is
-finished"): that outcome is recorded as `no-run` and channels 3 and 4 still go. If the plugin is
-absent or errors, the same: recorded, never retried blindly, never an empty success.
+rather than stacking. `paseo-progress` refuses a worktree whose run is finished or that has no run
+("The run … is finished"). **`no-run` is the expected outcome for any agent whose Progress run has
+ended, not an anomaly** (re-review F4): the operator then reaches the event through the page and
+the inbox only, and the design does not pretend the panel is reliable for those agents. Channels 3
+and 4 still go. Plugin absent or erroring is recorded the same way: never retried blindly, never an
+empty success. Slice 1 starts no Progress run itself.
 
 D3. **Honest receipts.** `queued`/`accepted` is not `delivered`; `delivered` is not `read`; a
 process exit code proves nothing about a human. A timeout or malformed reply is `unknown`, and an
@@ -129,15 +156,22 @@ needed. A running deadline for the same agent suppresses nothing, because it cov
 state. Neither tool disables the other.
 
 E3. **The inspect/send race, accepted.** Between inspect and send an agent can start a turn, close
-or raise a permission. Mitigation, not a veto: re-inspect immediately before the send, and wake
-only if the status is still `idle` with an unchanged `UpdatedAt` and zero `PendingPermissions`.
+or raise a permission. Mitigation, not a veto: two re-inspects (D1 steps 0 and 2) before the send, and a wake only if the
+status is still `idle` with an unchanged `UpdatedAt` and zero `PendingPermissions`.
 Residual risk, recorded in the design: `paseo send` loads and, if needed, unarchives a stored
 runtime (`agent/agent-prompt.ts`), an agent send without `--behavior` defaults to `interrupt` for a
 sourceless caller (`cli/src/commands/agent/send.ts:207`), and the send path passes
 `clearPendingPermissions: true` (`server/session.ts`, send path near lines 8255-8290). So a
-permission card raised in the final moments could be cleared, and a turn started in them
-interrupted. The recheck and the idle-only rule make this a small window; this is an *accepted*
-risk, and `closed`/`error`/archived agents are never sent to at all (C3).
+permission card raised in the final moments could be cleared, a turn started in them interrupted
+(discarding that turn's work, which `~/CLAUDE.md` item 9 otherwise forbids), and a runtime that
+closed in the gap resurrected. The rechecks and the idle-only rule shrink this to a sub-second
+window; it is recorded here as an **accepted residual risk**, and `closed`/`error`/archived agents
+are never sent to at all (C3). Two options to narrow it further are open, neither decided here:
+(i) pass `--behavior steer`, which would queue into a just-started turn instead of interrupting it,
+but `~/CLAUDE.md` item 4 says an idle peer gets a plain `paseo send`, so slice 1 keeps the plain send
+unless the operator grants that exception; (ii) a native precondition (`paseo send --if-status idle`),
+which does not exist: an upstream feature request to Paseo, per standing order 8. The first
+runtime canary (G4) measures how often the window is actually hit.
 
 E4. **Host availability.** Sleep or offline time is unavailable time: missed ticks coalesce into
 one evaluation after wake. A loaded timer alone proves nothing; report last successful scan and
@@ -172,7 +206,11 @@ G2. **Required tests.** Unchanged facts stay quiet; `due` crossing, `idle_with_w
 `stopped_with_open_work` each notify once; cooldown holds 3 h; snooze/`ack`/`retire`/stale
 generation behave; `waiting`, busy, permission-pending, unknown and over-cap agents never wake;
 closed/error/archived agents get a notice and **no** `paseo send` (assert on the fake's call log);
-re-inspect-changed-status cancels the wake; one channel failing does not block the others; an
+status changing between preflight, second re-inspect and send withdraws the event with **no** page,
+Progress item or cooldown advance; a wake sent then outcome `unknown` still pages once;
+sixteen simultaneous events make one `hermes-ping` in the single-line format and attribute its receipt
+to all sixteen keys, and a fourth ping within the hour is deferred, not lost; `no-run`
+(finished run, no run, plugin absent) degrades to page + inbox without error; one channel failing does not block the others; an
 `unknown` send is not replayed; `no-run` and absent `paseo-progress` are recorded; two real
 concurrent scans take the lock once; a crash between write and receipt reconciles without a
 duplicate send; a cold `--dry-run` writes nothing; no model call is made.
