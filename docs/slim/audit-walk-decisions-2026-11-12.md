@@ -113,12 +113,29 @@ replayed tasks and staged skill/instruction proposals; auto_adopt was false.
 The historical guide explicitly reports max_tokens_per_night was unenforced at
 its cited revision. A replacement needs actual budget enforcement, evidence
 handling, current provider adapters and regression checks, not a blind runner
-restore. Proposal adoption policy is the open choice in this step. No learning
-job, transcript harvest, model call or automatic merge has been enabled here.
+restore.
 
-## 6. Remaining walkthrough
+Operator selected **Automatically merge validated skill-only improvements**:
+independent review and regression checks precede PR-based automatic adoption;
+standing-order changes remain separate proposals; suspected prompt injection
+blocks the affected proposal. Classify changes by their effect, not just the
+filename: a skill edit that rewrites standing policy is not routine skill-only
+learning. No learning job, transcript harvest, model call or automatic merge has
+been enabled during this walkthrough.
 
-Settle nightly learning adoption policy; then review/permissions;
-remaining deletion gates and repairs. These items remain undecided except where
-prior operator instructions already apply. Ask one question at a time; act on
-small choices immediately and execute larger queued work after the walkthrough.
+## 6. Reviews and permissions
+
+Apply existing operator decisions, not a fresh approval cycle: ordinary owned
+work runs unattended; owner-authored PRs do not need pasted APPROVE markers;
+unavailable review providers may be replaced with available independent reviews.
+Preserve the external-input prompt-injection boundary, actual findings, required
+checks and exact-head review evidence. Do not fabricate a marker or count a
+skipped/unavailable reviewer as a completed review. Useful old review safeguards
+should be recovered provider-neutrally, not by reviving a hard Cursor/Codex quota
+dependency. This step explains the recommendation; no gate code changed.
+
+## 7. Remaining walkthrough
+
+Offer review-detail comparison if wanted, then cover final deletion gates and
+repair sequencing. Prior hard stops remain unchanged. Execute queued larger
+work after the walkthrough; track source completion separately from live proof.
