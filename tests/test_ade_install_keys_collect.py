@@ -287,6 +287,18 @@ def test_failed_check_never_reports_nothing_to_do(catalog, tmp_path):
     result, lines = _collect(catalog, tmp_path, fake, interactive=False)
     assert result["worklist"] == [] and result["rc"] == 1
     assert any("unconfirmed" in line for line in lines)
+    # A realistic listing: found (✓) and optional (○) lines, key names inside descriptions, one ✗.
+    listing = ("Checking secrets in site (profile: default)...\n\n"
+               "\u2713 A_KEY - found; mentions B_KEY in its description\n"
+               "\u2717 B_KEY - Test key\n"
+               "\u25cb C_KEY - optional unset\n\nSummary: 1 found, 1 missing, 1 optional\n")
+    fake = Fake({"A_KEY": [1], "B_KEY": [1]}, check_rc=1, check_out=listing)
+    result, _ = _collect(catalog, tmp_path, fake, interactive=False)
+    assert [w["name"] for w in result["worklist"]] == ["B_KEY"]
+    healthy = ("\u2713 A_KEY - found, mentions B_KEY\n\u2713 B_KEY - found\n"
+               "Missing required secrets: OTHER\n")
+    assert ai.check_reported_missing(healthy) == {"OTHER"}
+    assert ai.check_reported_missing("\u2713 A_KEY - x\n\u25cb C_KEY - y\nSummary: 2 found, 0 missing\n") == set()
     # A name that merely contains a key name is not a match.
     fake = Fake({"A_KEY": [1], "B_KEY": [1]}, check_rc=1, check_out="B_KEY_TWO\n")
     result, _ = _collect(catalog, tmp_path, fake, interactive=False)
@@ -333,3 +345,15 @@ def test_interrupt_after_set_records_stored_unverified_and_saves_state(catalog, 
         ("A_KEY", "stored-unverified"), ("B_KEY", "skipped")]
     assert result["rc"] == 1 and (tmp_path / "keys.json").is_file()
     assert any("summary" in line for line in lines)
+
+
+def test_default_probe_runner_closes_stdin(tmp_path, monkeypatch):
+    seen = {}
+
+    def fake_run(argv, **kwargs):
+        seen.update(kwargs)
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(ai.subprocess, "run", fake_run)
+    ai._devnull_stdin_runner(5.0)(["sudo-secretspec", "check"], tmp_path)
+    assert seen["stdin"] is subprocess.DEVNULL and seen["shell"] is False

@@ -539,13 +539,18 @@ only; no live vault, terminal session or provider call was made.
    each recorded `verify_argv` under `run`) so the worklist reflects current
    outcomes, not the cache. A key with no `verify_argv` is settled by a
    value-free presence child under `run` (it exits 0 or 14 and prints nothing).
-   The CLI first removes every catalog key name from its own environment, because
-   `run` passes the caller's environment through and a stale exported `NAME`
-   would make a probe pass for a key the store lacks. `sudo-secretspec run`
-   refuses to start while a required secret is unset, so then every probe is
-   inconclusive: the command takes the key names `check` itself reports (names
-   matched, nothing printed) into the batch, and when `check` fails but names no
-   selected key it exits 1 as unconfirmed, never 0.
+   The CLI first removes every catalog key name from its own environment, so a
+   stale exported `NAME` cannot make a probe pass for a key the store lacks
+   (defence in depth: whether `run` forwards the caller's environment is not
+   verified). Probes run with stdin closed, so none can prompt on the terminal
+   before the batch question. `sudo-secretspec run` refuses to start while a
+   required secret is unset, so then every probe is inconclusive: the command
+   takes into the batch only the keys `check` itself marks missing (observed
+   2026-11-12: `check` lists every declared secret as `<mark> NAME - description`,
+   `✓` found, `○` optional unset; an entry with any other mark, or a
+   `Missing required secrets: A, B` line, counts; a name that merely appears in a
+   description never does; nothing from the output is printed). When `check`
+   fails but marks no selected key, it exits 1 as unconfirmed, never 0.
 2. **Worklist** = `keys-plan` selection (components chosen) whose fresh status is
    `missing`, `invalid` or `no-quota`, or `expiring` with a date within 14 days
    (or past) or with no date. A later expiry date waits, so a year-out GitHub
@@ -568,7 +573,7 @@ only; no live vault, terminal session or provider call was made.
    retry/skip/skip-all and prints a hint to declare the name with
    `sudo-secretspec add`; the name is never declared automatically.
 5. **Verify straight away** (probe or presence) and write the outcome to
-   `keys.json` (statuses only). Outcomes: `ok`, `stored-unverified` (stored but the
+   `keys.json` (status and a fixed-template detail only). Outcomes: `ok`, `stored-unverified` (stored but the
    probe was unreachable/inconclusive), `skipped`, `failed` (still failing or
    expiring after `set`; retry offered). The run ends with a table and exits 0
    only when every key is `ok`.

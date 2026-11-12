@@ -1636,6 +1636,40 @@ def _ask_choice(
     return "a"
 
 
+_CHECK_FOUND_MARKS = frozenset({"\u2713", "\u25cb"})  # found / optional-unset
+_CHECK_ENTRY = re.compile(r"^\s*(\S+)\s+([A-Z][A-Z0-9_]*)(?: - |\s*$)")
+_CHECK_MISSING_LINE = re.compile(r"^\s*Missing required secrets:\s*(.+)$")
+
+
+def check_reported_missing(text: str) -> set[str]:
+    """Names ``sudo-secretspec check`` itself reports as missing; nothing is printed.
+
+    Format observed 2026-11-12 (``check`` lists every declared secret as
+    ``<mark> NAME - description``; ``✓`` found, ``○`` optional and unset). Only
+    an entry line whose mark is neither counts, plus a ``Missing required
+    secrets: A, B`` line; a name merely mentioned in some description never does.
+    """
+    names: set[str] = set()
+    for line in text.splitlines():
+        listed = _CHECK_MISSING_LINE.match(line)
+        if listed:
+            names.update(n for n in re.split(r"[\s,]+", listed.group(1)) if SECRET_NAME_RE.fullmatch(n))
+            continue
+        entry = _CHECK_ENTRY.match(line)
+        if entry and entry.group(1) not in _CHECK_FOUND_MARKS and not entry.group(1).startswith(("Summary", "Checking")):
+            names.add(entry.group(2))
+    return names
+
+
+def _devnull_stdin_runner(timeout_s: float) -> Runner:
+    """Captured probe runner with stdin closed, so a probe can never prompt on the tty."""
+    def run(argv: list[str], cwd: Path) -> "subprocess.CompletedProcess[str]":
+        return subprocess.run(  # noqa: S603 - argv list only, never shell
+            argv, cwd=str(cwd), capture_output=True, text=True, check=False, shell=False,
+            timeout=timeout_s, stdin=subprocess.DEVNULL)
+    return run
+
+
 def scrub_key_env(catalog: Catalog, environ: Any = None) -> list[str]:
     """Drop catalog key names from the process environment before any probe.
 
@@ -1679,7 +1713,7 @@ def keys_collect(
         ask = getpass.getpass
     state_path = keys_state_path or default_keys_state_path()
     check_text: list[str] = []
-    base_runner = runner or (lambda a, d: _default_runner(a, d, timeout_s=timeout_s))
+    base_runner = runner or _devnull_stdin_runner(timeout_s)
 
     def recording_runner(argv: list[str], cwd: Path) -> "subprocess.CompletedProcess[str]":
         proc = base_runner(argv, cwd)
@@ -1707,8 +1741,7 @@ def keys_collect(
         # ``run`` refuses to start while a required secret is unset, so every
         # probe above is inconclusive. Take the key names ``check`` itself
         # reports (names matched, nothing printed from its output).
-        text = "\n".join(check_text)
-        reported = {n for n in by_name if re.search(rf"(?<![A-Z0-9_]){re.escape(n)}(?![A-Z0-9_])", text)}
+        reported = check_reported_missing("\n".join(check_text)) & set(by_name)
         obs = [
             Observation("key", o.id, "missing", "reported missing by sudo-secretspec check (no value read)")
             if o.kind == "key" and o.id in reported and o.status in ("unknown", "error") else o
@@ -1793,9 +1826,9 @@ def keys_collect(
                     stored = True
                     row = by_name[name]
                     if row.get("verify_argv"):
-                        post = observe_key_verify(row, root=catalog.root, runner=runner, timeout_s=timeout_s)
+                        post = observe_key_verify(row, root=catalog.root, runner=recording_runner, timeout_s=timeout_s)
                     else:
-                        post = observe_key_presence(row, root=catalog.root, runner=runner, timeout_s=timeout_s)
+                        post = observe_key_presence(row, root=catalog.root, runner=recording_runner, timeout_s=timeout_s)
                     obs = [post if (o.kind == "key" and o.id == name) else o for o in obs]
                     reason = keys_collect_reason(post.status, post.detail, today=today)
                     if reason is None and post.status in ("ok", "present"):
