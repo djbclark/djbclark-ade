@@ -232,3 +232,21 @@ def test_stable_error_event_ignores_timeline_rendering(fake):
     data["logs"] = "different historical rendering\n" + ERROR
     assert scan() == 0
     assert len(sent.read_text().splitlines()) == 1
+
+
+@pytest.mark.parametrize("remaining", [1, 5, 14.9, 15, 15.99])
+def test_short_deadline_does_not_reserve_or_send(fake, monkeypatch, remaining):
+    _, scan, sent, state = fake
+    monkeypatch.setattr(Scanner, "remaining", lambda self: remaining)
+    assert scan() == 0
+    assert not sent.exists()
+    events = [json.loads(line) for line in (state / "events.jsonl").read_text().splitlines()]
+    assert [event["action"] for event in events] == ["deadline-before-reserve"]
+
+
+def test_full_send_budget_can_reserve(fake, monkeypatch):
+    _, scan, sent, state = fake
+    monkeypatch.setattr(Scanner, "remaining", lambda self: M["CLI_TIMEOUT"] + M["RESERVE_MARGIN"])
+    assert scan() == 0
+    assert sent.exists()
+    assert '"action": "reserved"' in (state / "events.jsonl").read_text()

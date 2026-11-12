@@ -42,7 +42,8 @@ The fixed prompt is:
 `--state-dir` defaults to `~/.local/state/ade/net-resume`. Every invocation must
 share this directory: it contains a nonblocking exclusive lock and fsynced
 `events.jsonl`. Dry runs write observations but consume no resume budget. Apply
-reserves before sending, with at most **two attempts per agent per rolling
+requires at least 16 seconds remaining (the full 15-second CLI timeout plus a
+one-second reservation margin) before reserving and sending, with at most **two attempts per agent per rolling
 hour**, across leads and invocations. The same error-event fingerprint (`UpdatedAt` plus the final error line) is never sent
 twice, including after an uncertain send. Failed/timed-out sends consume budget;
 operators inspect these manually rather than resetting the ledger. State is
@@ -60,7 +61,9 @@ Exit codes: 0 completed scan/watch, 2 invalid usage or unreadable CLI/state,
 every minute. Render it with `ade-sched render ... --set __LEAD__=UUID
 --set __STATE__=/absolute/log/dir`; installing requires a deliberate operator
 action, and enabling sends also requires adding `--apply` to the template.
-This PR installs or loads nothing.
+The scheduler render fixtures supply `__LEAD__` using the same substitution
+contract as the merged auto-permit template (2026-11-12); unfilled placeholders
+are still refused. This PR installs or loads nothing.
 
 Offline tests use a fake Paseo executable and mocked endpoint health. CI runs
 them on Linux; no real agent is resumed by the tests.

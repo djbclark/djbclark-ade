@@ -19,6 +19,9 @@ import sys
 import time
 import uuid
 
+CLI_TIMEOUT = 15
+RESERVE_MARGIN = 1
+
 PROMPT = "network outage over; continue from where you stopped, re-fetch first, same report path"
 # Deliberately narrow: only the final rendered line, never a matching historical prompt.
 NETWORK = {
@@ -71,7 +74,7 @@ class Scanner:
     def cli(self, *args, accepted=False):
         try:
             result = subprocess.run(["paseo", *args], capture_output=True, text=True,
-                                    timeout=min(15, self.remaining()))
+                                    timeout=min(CLI_TIMEOUT, self.remaining()))
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise ScanError("Paseo unavailable or timed out") from exc
         if result.returncode not in ((0, 5) if accepted else (0,)):
@@ -191,7 +194,7 @@ class Scanner:
                             self.event(history, aid, "changed")
                             continue
                         # Reserve durably BEFORE the outward action. An uncertain send is never retried.
-                        if self.remaining() < 1:
+                        if self.remaining() < CLI_TIMEOUT + RESERVE_MARGIN:
                             self.event(history, aid, "deadline-before-reserve")
                             return 0
                         self.event(history, aid, "reserved", signature=signature)
