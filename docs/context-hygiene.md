@@ -28,7 +28,9 @@ Continuous protection against unplanned interruption is the separate, planned
    owned Tier 1 log and handoff with absolute paths, branch/head, dirty files,
    unresolved decisions, active job records, unread results and exact next steps.
 2. A top-level session runs the `handoff` skill; its Step 9 leaves the operator `/clear` then `/baton`, or starts
-   a successor. A dispatched slice writes a document-only handoff; it must never clear or archive its parent.
+   a successor. A dispatched slice may hand off its own task with a durable checkpoint and
+   scope/ownership coordination, but must never clear or archive its parent. The native
+   self-session helper takes its predecessor only from its own Paseo identity.
 3. Never throw away an unsent draft, interrupt a running worker, or reset before
    the handoff is durable. Re-arm existing jobs instead of launching their
    work again. A failed lifecycle operation is reported, not retried in a loop.

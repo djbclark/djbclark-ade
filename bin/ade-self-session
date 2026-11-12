@@ -1,0 +1,63 @@
+#!/usr/bin/env -S python3 -I
+"""Explicit native self-session operations (local daemon only).
+
+ade-self-session handoff --checkpoint FILE --quiesced
+ade-self-session compact --checkpoint FILE --request-id TOKEN
+ade-self-session status|reconcile|finish --record FILE
+ade-self-session accept --record FILE --ack-file FILE
+
+Checkpoint files are nonsecret agent-authored briefings. Creation/send receipts
+are requests, never completed handoffs or compactions. No force/workspace archive.
+"""
+from __future__ import annotations
+import argparse
+import json
+import os
+from pathlib import Path
+import sys
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from ade_self_session import Service, SessionError
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument('--state-dir', type=Path, default=Path.home() / '.local/state/djbclark-ade/self-session')
+    p.add_argument('--paseo-home', type=Path, default=Path(os.environ.get('PASEO_HOME') or Path.home() / '.paseo'))
+    sub = p.add_subparsers(dest='command', required=True)
+    for command in ('handoff', 'compact'):
+        q = sub.add_parser(command)
+        q.add_argument('--checkpoint', required=True, type=Path)
+        if command == 'handoff':
+            q.add_argument('--mode', choices=('plan', 'read-only', 'dontAsk'), help='explicit operator-requested restrictive successor mode; must exist in native catalog')
+            q.add_argument('--quiesced', action='store_true', help='attest other jobs/writes finished; successor waits for retirement')
+        else:
+            q.add_argument('--request-id', required=True, help='reuse on retry; new ID only for a deliberately new request')
+    for command in ('status', 'reconcile', 'accept', 'finish'):
+        q = sub.add_parser(command)
+        q.add_argument('--record', required=True, type=Path)
+        if command == 'accept':
+            q.add_argument('--ack-file', required=True, type=Path)
+    a = p.parse_args()
+    service = Service(a.state_dir, a.paseo_home)
+    try:
+        if a.command == 'handoff':
+            result = service.handoff(a.checkpoint, quiesced=a.quiesced, requested_mode=a.mode)
+        elif a.command == 'compact':
+            result = service.compact(a.checkpoint, request_id=a.request_id)
+        elif a.command == 'accept':
+            result = service.accept(a.record, a.ack_file)
+        else:
+            result = getattr(service, a.command)(a.record)
+    except SessionError as error:
+        print(json.dumps({'status': 'blocked', 'reason': str(error)}))
+        return 1
+    except (OSError, ValueError, KeyError, ImportError):
+        print(json.dumps({'status': 'blocked', 'reason': 'operation unconfirmed; preserve checkpoint/sessions and inspect supported API, identity and transaction before retry'}))
+        return 1
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0 if result['status'] in ('requested', 'awaiting-ack', 'acknowledged', 'archived') else 1
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())
