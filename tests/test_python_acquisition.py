@@ -42,14 +42,14 @@ class Fake:
         if argv[1:3] == ["-I", "-c"]:
             ok = argv[0] == self.managed and self.installed or argv[0] == self.path_python or argv[0] in self.extra_names.values()
             return done(0, "3.13.1\n") if ok else done(1, "3.9.6\n")
-        if argv[1:3] == ["python", "install"]:
+        if argv[2:4] == ["python", "install"]:
             self.sentinel_during_install = (self.state / ai.PYTHON_PENDING).is_file()
             self.ledger_during_install = ai.load_ledger(self.state)["entries"].get("python")
             if self.install_raises:
                 raise self.install_raises
             self.installed = self.install_rc == 0
             return done(self.install_rc, "", "boom" if self.install_rc else "")
-        if argv[1:3] == ["python", "find"]:
+        if argv[2:4] == ["python", "find"]:
             if self.on_find:
                 self.on_find()
             return done(0, self.managed + "\n") if self.installed and self.managed else done(1)
@@ -69,7 +69,7 @@ def test_dry_run_plans_without_subprocess_or_writes(state, monkeypatch):
     fake = Fake(state)
     report, rc = fake.acquire()
     assert rc == 0 and report["mode"] == "dry-run" and report["python_status"] == "missing"
-    assert report["install_argv"] == ["/fake/uv", "python", "install", "3.13"]
+    assert report["install_argv"] == ["/fake/uv", "--no-config", "python", "install", "3.13"]
     assert fake.calls == [] and not state.exists()
 
 
@@ -90,7 +90,7 @@ def test_yes_records_an_existing_supported_python_without_downloading(state):
     fake = Fake(state, path_python="/usr/local/bin/python3")
     report, rc = fake.acquire(yes=True)
     assert rc == 0 and report["status"] == "ready" and report["python"] == "/usr/local/bin/python3"
-    assert not any(c[1:3] == ["python", "install"] for c in fake.calls)
+    assert not any(c[2:4] == ["python", "install"] for c in fake.calls)
     entry = ai.load_ledger(state)["entries"]["python"]
     assert entry["status"] == "present" and entry["source"] == "found" and entry["version"] == "3.13.1"
     assert not (state / ai.PYTHON_PENDING).exists()
@@ -149,7 +149,7 @@ def test_unknown_outcome_blocks_until_explicit_recovery_which_never_downloads(st
     recovered.installed = True
     r, code = recovered.acquire(yes=True, recover=True)
     assert code == 0 and r["status"] == "ready"
-    assert not any(c[1:3] == ["python", "install"] for c in recovered.calls)
+    assert not any(c[2:4] == ["python", "install"] for c in recovered.calls)
     entry = ai.load_ledger(state)["entries"]["python"]
     assert entry["status"] == "present" and entry["source"] == "recovered-found" and entry["recovered"] is True
     assert not (state / ai.PYTHON_PENDING).exists()
@@ -215,7 +215,7 @@ def test_candidate_names_and_uv_less_handoff_on_python312(state):
     fake.extra_names = {"python3.12": "/opt/homebrew/bin/python3.12"}
     r, rc = fake.acquire(yes=True)
     assert rc == 0 and r["python"] == "/opt/homebrew/bin/python3.12"
-    assert not any(c[1:3] == ["python", "install"] for c in fake.calls)
+    assert not any(c[2:4] == ["python", "install"] for c in fake.calls)
 
 
 def test_python_never_clears_a_sentinel_it_did_not_observe(state):
@@ -287,6 +287,8 @@ def cold(tmp_path):
         u.write_text(
             "#!/bin/sh\n"
             f'echo "uv $*" >> "{log}"\n'
+            f'echo "UVCWD $(pwd -P)" >> "{log}"\n'
+            '[ "$1" = --no-config ] && shift\n'
             'if [ "$1 $2" = "python install" ]; then '
             f'[ {install_rc} = 0 ] && touch "{flag}"; exit {install_rc}; fi\n'
             f'if [ "$1 $2" = "python find" ]; then [ -f "{flag}" ] && echo "{managed}" && exit 0; exit 1; fi\n'
@@ -332,7 +334,7 @@ def test_bridge_cold_path_installs_with_uv_then_hands_off_with_adoptable_sentine
     r = cold.run("--yes")
     assert r.returncode == 0, r.stderr
     text = cold.text()
-    assert "uv python install 3.13" in text and "HANDOFF" in text
+    assert "uv --no-config python install 3.13" in text and "HANDOFF" in text
     pid = text.split("HANDOFF pid=")[1].split()[0]
     assert f"SENTINEL pid={pid} " in text, "the exec'd interpreter owns the sentinel (the Python side adopts it)"
     token = text.split("ENVTOKEN ")[1].split()[0]
@@ -391,3 +393,39 @@ def test_bridge_expands_a_literal_tilde_state_dir(cold, tmp_path):
     r = cold.run("--yes", env={"ADE_INSTALL_STATE_DIR": "~/st"})
     assert r.returncode == 0, r.stderr
     assert f"--state-dir {tmp_path / 'home' / 'st'}" in cold.text()
+
+
+def test_bridge_runs_uv_from_the_state_dir_not_the_callers_directory(cold, tmp_path):
+    managed = cold.python("managed-python")
+    cold.uv(managed=str(managed))
+    evil = tmp_path / "project with .venv"
+    evil.mkdir()
+    r = subprocess.run(["/bin/sh", str(REPO / "bin/ade-bootstrap"), "--yes"], cwd=evil, capture_output=True, text=True, timeout=30,
+                       env={"PATH": str(cold.bindir), "HOME": str(tmp_path / "home"), "ADE_INSTALL_STATE_DIR": str(cold.state)})
+    assert r.returncode == 0, r.stderr
+    cwds = [l.split("UVCWD ")[1] for l in cold.text().splitlines() if l.startswith("UVCWD ")]
+    assert cwds and set(cwds) == {os.path.realpath(cold.state)}
+    assert "--system --no-project" in cold.text() and "uv --no-config python find" in cold.text()
+
+
+def test_bridge_state_dir_tilde_forms(cold):
+    cold.uv(); cold.python("python3")
+    r = cold.run("--yes", "--state-dir", "~other/s")
+    assert r.returncode == 2 and cold.text() == ""
+    ok = cold.run("--yes", "--state-dir", "~/s2")
+    assert ok.returncode == 0 and "home/s2" in cold.text()
+
+
+def test_python_side_runs_uv_with_no_config_and_state_dir_cwd(state, monkeypatch):
+    seen = []
+
+    def fake_run(argv, **kw):
+        seen.append((list(argv), kw.get("cwd")))
+        return done(0, "3.13.1\n" if argv[1:3] == ["-I", "-c"] else "/m/python3.13\n")
+
+    monkeypatch.setattr(ai.subprocess, "run", fake_run)
+    r, rc = ai.acquire_python(state_dir=state, yes=True, which=lambda n: "/fake/uv" if n == "uv" else None, euid=1000)
+    assert rc == 0
+    uv_calls = [c for c in seen if c[0][0] == "/fake/uv"]
+    assert uv_calls and all(c[0][1] == "--no-config" and c[1] == str(state) for c in uv_calls)
+    assert any(c[0][2:5] == ["python", "find", "--system"] and "--no-project" in c[0] for c in uv_calls)

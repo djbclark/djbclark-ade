@@ -238,8 +238,8 @@ package-manager path is selected.
 **Python acquisition (W17, 2026-11-12).** Python is the one prerequisite the
 catalog cannot install, so it has its own step: `ade-install python` (Python
 already running) and the POSIX-sh cold-start bridge `sh bin/ade-bootstrap`
-(no Python yet). Both default to a preview that runs no subprocess, download
-or write. Rules, shared by both:
+(no Python yet). Both default to a preview that downloads and writes nothing (the bridge preview only runs
+`id -u`). Rules, shared by both:
 
 - Source is `uv` only (`uv python install 3.13`, then `uv python find
   '>=3.11'`); never pip, sudo, a system package manager or a write into system
@@ -250,7 +250,7 @@ or write. Rules, shared by both:
 - A candidate counts only after it runs (`python -I`, version >= 3.11): `python3.13`,
   `3.12`, `3.11` and `python3` on PATH, then `uv python find` (and, after a
   bridge hand-off or in recovery, the interpreter running `ade-install`). macOS's
-  `/usr/bin/python3` CLT stub is never probed, by any path or symlink (running it
+  `/usr/bin/python3` CLT stub is never probed by ADE's own code, by any path or symlink (running it
   can raise an install dialog). No `python3` shim is created, so a uv-managed interpreter is invoked
   by path: `PYTHON -I bin/ade-install ...`; the command prints that line.
 - Ledger concurrency (keeps #561): `ade-install python --yes` runs under
@@ -267,9 +267,12 @@ or write. Rules, shared by both:
   owner's. Ledger `python` statuses: `installed` (acquired by uv here or by the
   bridge), `present` (an interpreter found or recovered; source `found` /
   `recovered-found`, so a Homebrew Python is never recorded as ADE-installed),
-  `pending`, `failed`.
+  `pending`, `failed`. Every uv call runs `uv --no-config`, `uv python find --system
+  --no-project`, from the state directory, never from the caller's directory, so a
+  `.venv`, `pyproject.toml` or `uv.toml` there cannot steer discovery or downloads.
 - Recovery is explicit, never silent: an unknown outcome (timeout, crash, kill)
-  leaves the sentinel (and a `pending` ledger entry), and every later run
+  leaves the sentinel (and, when the Python side was the one acquiring, a
+  `pending` ledger entry; the bridge writes no ledger), and every later run
   refuses with `pending-recovery` (exit 75 from the bridge) naming
   `ade-install python --recover --yes` or `sh bin/ade-bootstrap --recover --yes`.
   Recovery verifies what is there and records it; it never re-downloads. A live

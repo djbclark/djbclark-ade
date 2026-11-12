@@ -2625,7 +2625,12 @@ PYTHON_CANDIDATE_NAMES = ("python3.13", "python3.12", "python3.11", "python3")
 
 def _is_macos_python_stub(path: str) -> bool:
     """macOS /usr/bin/python3 is a CLT stub: running it can raise the developer-tools dialog."""
-    return sys.platform == "darwin" and os.path.realpath(path) == "/usr/bin/python3"
+    if sys.platform != "darwin":
+        return False
+    try:
+        return os.path.samefile(path, "/usr/bin/python3")
+    except OSError:
+        return False
 
 
 def acquire_python(
@@ -2649,8 +2654,10 @@ def acquire_python(
     """
     state_dir = (state_dir or default_state_dir()).expanduser()
     find = which or shutil.which
+    # uv runs from the state dir with --no-config: never from the caller's directory, whose
+    # .venv, pyproject.toml or uv.toml would otherwise steer interpreter discovery and downloads.
     run = runner or (lambda argv: subprocess.run(
-        argv, capture_output=True, text=True, check=False, shell=False,
+        argv, capture_output=True, text=True, check=False, shell=False, cwd=str(state_dir),
         stdin=subprocess.DEVNULL, timeout=15 if argv[-1:] != [PYTHON_REQUEST] else 900,
     ))
     report: dict[str, Any] = {
@@ -2668,8 +2675,8 @@ def acquire_python(
         return fail("refused-root", "refusing to run as root: Python would be installed into root's home; rerun as the target user. Nothing started")
     recover_cmd = "bin/ade-install python --recover --yes"
     uv = find("uv")
-    uv_install = [uv or "uv", "python", "install", PYTHON_REQUEST]
-    uv_find = [uv or "uv", "python", "find", ">=%d.%d" % PYTHON_MIN]
+    uv_install = [uv or "uv", "--no-config", "python", "install", PYTHON_REQUEST]
+    uv_find = [uv or "uv", "--no-config", "python", "find", "--system", "--no-project", ">=%d.%d" % PYTHON_MIN]
     report["install_argv"] = uv_install
     pending = read_python_pending(state_dir)
     if pending:

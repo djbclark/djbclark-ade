@@ -16,7 +16,6 @@
 set -u
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd -P) || exit 1
 STATE=${ADE_INSTALL_STATE_DIR:-$HOME/.local/state/djbclark-ade/install}
-case $STATE in "~") STATE=$HOME ;; "~/"*) STATE=$HOME/${STATE#"~/"} ;; esac  # the Python side expands ~ too
 YES=0
 RECOVER=0
 while [ $# -gt 0 ]; do
@@ -25,12 +24,15 @@ while [ $# -gt 0 ]; do
         --dry-run) YES=0 ;;
         --recover) RECOVER=1 ;;
         --state-dir) [ $# -ge 2 ] || { echo "ade-bootstrap: --state-dir needs a value" >&2; exit 2; }; STATE=$2; shift ;;
-        -h|--help) sed -n '2,17p' "$0" | cut -c3-; exit 0 ;;
+        -h|--help) sed -n '2,15p' "$0" | cut -c3-; exit 0 ;;
         *) echo "ade-bootstrap: unknown argument: $1" >&2; exit 2 ;;
     esac
     shift
 done
+case $STATE in "~") STATE=$HOME ;; "~/"*) STATE=$HOME/${STATE#"~/"} ;; "~"*) echo "ade-bootstrap: --state-dir/ADE_INSTALL_STATE_DIR must not start with ~user; give a path or ~/path" >&2; exit 2 ;; esac
 SENT=$STATE/python-acquire.pending
+BS_TOKEN=
+PY=
 REQUEST=3.13
 UV=$(command -v uv 2>/dev/null || true)
 install_cmd="uv python install $REQUEST"
@@ -51,10 +53,14 @@ find_python() {  # prints the first verified interpreter; skips macOS's /usr/bin
         if supported "$cand"; then printf '%s\n' "$cand"; return 0; fi
     done
     if [ -n "$UV" ]; then
-        cand=$("$UV" python find '>=3.11' 2>/dev/null | sed -n 1p)
+        cand=$(uv_run python find --system --no-project '>=3.11' 2>/dev/null | sed -n 1p)
         if [ -n "$cand" ] && ! is_stub "$cand" && supported "$cand"; then printf '%s\n' "$cand"; return 0; fi
     fi
     return 1
+}
+
+uv_run() {  # uv independent of the caller's directory and config (no cwd venv, pyproject.toml or uv.toml)
+    ( cd "$STATE" && "$UV" --no-config "$@" )
 }
 
 is_stub() {  # macOS /usr/bin/python3 (CLT stub), through any spelling or symlink
@@ -63,13 +69,13 @@ is_stub() {  # macOS /usr/bin/python3 (CLT stub), through any spelling or symlin
 
 handoff() {  # exec: the sentinel's pid (this shell's) becomes the Python process, which adopts it
     # shellcheck disable=SC2086
-    ADE_BOOTSTRAP_TOKEN=${TOKEN:-}
+    ADE_BOOTSTRAP_TOKEN=${BS_TOKEN:-}
     export ADE_BOOTSTRAP_TOKEN
     exec "$PY" -I "$ROOT/bin/ade-install" python --yes --state-dir "$STATE" $1
 }
 
 clear_own() {  # remove the sentinel only if it still carries our token
-    case $(sentinel_text) in *"token=$TOKEN"*) rm -f "$SENT" ;; esac
+    case $(sentinel_text) in *"token=$BS_TOKEN"*) rm -f "$SENT" ;; esac
 }
 
 sentinel_pid() { sed -n 's/^pid=//p' "$SENT" 2>/dev/null | sed -n 1p; }
@@ -142,13 +148,13 @@ fi
 # Exclusive create (noclobber): a concurrent bridge or the Python side loses here.
 # The one-time token (also exported to the exec'd interpreter) proves hand-off, so a stale sentinel whose pid
 # was reused is never adopted.
-TOKEN=$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')
-[ -n "$TOKEN" ] || { echo "ade-bootstrap: could not make a hand-off token. Nothing started." >&2; exit 1; }
-if ! ( set -C; printf 'pid=%s\nstarted=%s\ntoken=%s\nargv=%s\n' "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$TOKEN" "$install_cmd" > "$SENT" ) 2>/dev/null; then
+BS_TOKEN=$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')
+[ -n "$BS_TOKEN" ] || { echo "ade-bootstrap: could not make a hand-off token. Nothing started." >&2; exit 1; }
+if ! ( set -C; printf 'pid=%s\nstarted=%s\ntoken=%s\nargv=%s\n' "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$BS_TOKEN" "$install_cmd" > "$SENT" ) 2>/dev/null; then
     echo "ade-bootstrap: another acquisition just started ($SENT). Nothing started." >&2
     exit 75
 fi
-if ! "$UV" python install "$REQUEST"; then
+if ! uv_run python install "$REQUEST"; then
     clear_own
     echo "ade-bootstrap: '$install_cmd' failed; sentinel cleared (outcome known). Nothing else was changed by this bridge." >&2
     exit 1
