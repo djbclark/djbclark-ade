@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # git-commit-own — commit only your own paths, without pre-commit's whole-tree stash.
 #
-#   git-commit-own "<message>" <path>...
+#   git-commit-own [--no-push] [--staged] "<message>" [<path>...]
 #
 # Why (djbclark, 2026-10-24): a plain `git commit` runs pre-commit, which stashes EVERY
 # unstaged change in the worktree for the 30-60 s of the hook run and restores it afterwards.
@@ -16,10 +16,18 @@
 # then run on the staged file names and the commit takes the index only (no pathspec).
 set -euo pipefail
 
-usage() { echo "usage: git-commit-own \"<message>\" <path>...   |   git-commit-own --staged \"<message>\"" >&2; exit 2; }
+usage() { echo "usage: git-commit-own [--no-push] [--staged] \"<message>\" [<path>...] (pushRef, matching upstream, or origin/current-branch; publish failure exits 3)" >&2; exit 2; }
 
 staged=0
-if [ "${1:-}" = "--staged" ]; then staged=1; shift; fi
+push=1
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --staged) staged=1; shift ;;
+    --no-push) push=0; shift ;;
+    --) shift; break ;;
+    *) break ;;
+  esac
+done
 [ "$#" -ge 1 ] || usage
 msg="$1"; shift
 [ -n "$msg" ] || usage
@@ -49,3 +57,143 @@ else
   [ "$(git ls-files -o --exclude-standard -- "$@" | wc -l)" -eq 0 ] || git ls-files -o --exclude-standard -z -- "$@" | xargs -0 git add --
   git commit --no-verify -m "$msg" -- "$@"
 fi
+
+[ "$push" -eq 1 ] || exit 0
+
+# Keep publishing subprocesses as argv lists and inspect their real exit codes.
+python3 - "$root" "$0" <<'PY'
+import runpy
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+root = sys.argv[1]
+remote, ref = "<unresolved>", "<unresolved>"
+
+
+def git(*args, optional=False, cwd=root):
+    result = subprocess.run(["git", "-C", cwd, *args], capture_output=True,
+                            text=True, timeout=300)
+    if result.returncode and not (optional and result.returncode == 1):
+        raise RuntimeError(result.stderr.strip() or result.stdout.strip()
+                           or f"git {args[0]} exited {result.returncode}")
+    return result.stdout.strip()
+
+
+def worktree_config(key):
+    scoped = git("config", "--show-scope", "--get", key, optional=True)
+    if not scoped:
+        return ""
+    scope, _, value = scoped.partition("\t")
+    if scope != "worktree":
+        raise RuntimeError(f"{key} is shared across worktrees; use branch.<name>.commitOwnPushRef/"
+                           "commitOwnPushRemote or enable extensions.worktreeConfig and set it --worktree")
+    bound = git("config", "--worktree", "--get", "commit-own.pushBranch", optional=True)
+    if not bound:
+        raise RuntimeError(f"{key} requires worktree-scoped commit-own.pushBranch to bind its target")
+    if bound != branch:
+        print(f"git-commit-own: skipping inherited {key} bound to branch {bound}, not {branch}",
+              file=sys.stderr)
+        return ""
+    return value
+
+
+try:
+    branch = git("symbolic-ref", "--quiet", "--short", "HEAD", optional=True)
+    if not branch:
+        raise RuntimeError("detached HEAD; publish explicitly or use --no-push")
+    # Git resolves upstream remote/ref names without splitting a remote/branch string.
+    upstream = git("for-each-ref", "--format=%(upstream:remotename)%09%(upstream:remoteref)",
+                   f"refs/heads/{branch}")
+    configured = (git("config", "--get", f"branch.{branch}.commitOwnPushRef", optional=True)
+                  or worktree_config("commit-own.pushRef"))
+    upstream_remote, _, upstream_ref = upstream.partition("\t")
+    if configured:
+        remote = (git("config", "--get", f"branch.{branch}.commitOwnPushRemote", optional=True)
+                  or worktree_config("commit-own.pushRemote") or "origin")
+        ref = configured
+    elif upstream_ref == f"refs/heads/{branch}" and upstream_remote:
+        remote, ref = upstream_remote, upstream_ref
+    else:
+        remote, ref = "origin", branch
+        if upstream_remote or upstream_ref:
+            print(f"git-commit-own: skipping mismatched upstream {upstream_remote} {upstream_ref}; "
+                  f"publishing origin/{branch}. Set branch.{branch}.commitOwnPushRef or worktree-scoped "
+                  "commit-own.pushRef to opt in to another branch.",
+                  file=sys.stderr)
+    if ref.startswith("HEAD:"):
+        ref = ref[5:]
+    if not ref.startswith("refs/heads/"):
+        ref = f"refs/heads/{ref}"
+    git("check-ref-format", ref)
+    # This subprocess is invisible to shell PreToolUse hooks: apply their shared URL policy here.
+    policy = runpy.run_path(str(Path(sys.argv[2]).resolve().parent.parent
+                               / "claude" / "hooks" / "upstream_review_gate.py"))
+    urls = git("remote", "get-url", "--push", "--all", "--", remote).splitlines()
+    for url in urls:
+        gated = policy["gated_url"](url)
+        if gated:
+            raise RuntimeError(f"upstream review gate refuses publishing to {gated}; "
+                               "publish to an operator-owned fork instead")
+    fetch_url = git("remote", "get-url", "--", remote)
+    if len(urls) != 1 or fetch_url != urls[0]:
+        raise RuntimeError(f"remote {remote} has different fetch/push URLs or multiple push URLs; "
+                           "use --no-push and publish explicitly")
+    # A missing target is normal on a first push; other lookup failures are fatal.
+    exists = git("ls-remote", "--heads", "--", remote, ref)
+    if exists:
+        git("fetch", "--no-tags", "--", remote, ref)
+        target = git("rev-parse", "FETCH_HEAD")
+        ancestor = subprocess.run(["git", "-C", root, "merge-base", "--is-ancestor",
+                                   target, "HEAD"], capture_output=True, text=True, timeout=300)
+        if ancestor.returncode == 1:
+            if git("status", "--porcelain"):
+                raise RuntimeError("target is ahead and worktree/index is dirty; commit saved locally; "
+                                   "clean up and rebase explicitly before publishing")
+            if not git("merge-base", "HEAD", target, optional=True):
+                raise RuntimeError("target has unrelated history; rebase refused")
+            replay = git("rev-list", f"{target}..HEAD")
+            unpublished = git("rev-list", f"{target}..HEAD", "--not", "--remotes")
+            if set(replay.splitlines()) != set(unpublished.splitlines()):
+                raise RuntimeError("rebase would rewrite previously published commits; rebase explicitly")
+            original = git("rev-parse", "HEAD")
+            # Only the disposable tree sees conflict markers or destructive rebase cleanup.
+            scratch = tempfile.mkdtemp(prefix="git-commit-own-")
+            try:
+                temporary = str(Path(scratch) / "rebase")
+                git("worktree", "add", "--detach", temporary, original)
+                try:
+                    try:
+                        git("-c", "rebase.autoStash=false", "-c", "rebase.updateRefs=false",
+                            "rebase", target, cwd=temporary)
+                    except (RuntimeError, subprocess.TimeoutExpired) as exc:
+                        raise RuntimeError(f"temporary rebase failed; original commit retained: {exc}") from exc
+                    new_head = git("rev-parse", "HEAD", cwd=temporary)
+                finally:
+                    failed = sys.exc_info()[0] is not None
+                    try:
+                        git("worktree", "remove", "--force", temporary)
+                    except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+                        cleanup = f"temporary worktree cleanup failed; retained {temporary}: {exc}"
+                        if not failed:
+                            raise RuntimeError(cleanup) from exc
+                        print(f"git-commit-own: {cleanup}", file=sys.stderr)
+            finally:
+                if not any(Path(scratch).iterdir()):
+                    Path(scratch).rmdir()
+            if git("rev-parse", "HEAD") != original or git("status", "--porcelain"):
+                raise RuntimeError("checkout changed during rebase; original checkout left untouched")
+            # --keep refuses overlapping edits rather than discarding them.
+            git("reset", "--keep", new_head)
+        elif ancestor.returncode:
+            raise RuntimeError(ancestor.stderr.strip() or "merge-base failed")
+    output = git("push", "--", remote, f"HEAD:{ref}")
+    print(f"git-commit-own: published HEAD to {remote} {ref}")
+    if output:
+        print(output)
+except (OSError, RuntimeError, ValueError, ImportError, SyntaxError, KeyError, TypeError,
+        AttributeError, subprocess.TimeoutExpired) as exc:
+    print(f"git-commit-own: PUBLISH FAILED remote={remote} ref={ref}: {exc}", file=sys.stderr)
+    sys.exit(3)
+PY

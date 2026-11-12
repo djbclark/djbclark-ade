@@ -67,6 +67,62 @@ PATH refusal, `~/.local/bin/git`, or any new refuse path.
 
 ## Commands
 
+### Commit and publish (2026-11-12)
+
+`git-commit-own [--no-push] [--staged] "MSG" [PATHS...]` commits the selected paths
+or staged index, then publishes automatically. Target precedence is an explicit
+publish ref (a branch name, `refs/heads/NAME`, or `HEAD:NAME`), then the
+configured upstream only when its branch name matches the current branch, then
+`origin` with the current branch name. Use branch-scoped config, for example
+`git config branch.task-name.commitOwnPushRef HEAD:master`, to opt only `task-name`
+into publishing to master. `branch.task-name.commitOwnPushRemote` can replace
+`origin` for that explicit target. Alternatively enable `extensions.worktreeConfig`
+and set both `git config --worktree commit-own.pushBranch task-name` and
+`git config --worktree commit-own.pushRef HEAD:master` (and optionally
+`commit-own.pushRemote` with `--worktree`). Shared local/global `commit-own.pushRef`
+or `commit-own.pushRemote` settings are refused; they would leak into sibling
+worktrees. Git can copy worktree config when creating a sibling, so the alias
+requires that branch binding and is skipped when the current branch differs.
+Branch-scoped keys take precedence over the worktree-scoped aliases.
+A mismatched upstream inherited
+from `git worktree add -b NAME PATH origin/master` is skipped with a stderr
+notice naming it and explaining the opt-in; it is never an implicit push target.
+
+Publishing fetches an existing target and rebases onto it when needed. A dirty
+index or worktree (including untracked files) prevents that rebase. Unrelated
+histories and replaying commits reachable from remote-tracking refs are refused.
+Rebasing runs in a disposable linked worktree; conflicts and cleanup never reset
+the working checkout. Before adopting the rebased commit, the tool checks that
+the original checkout stayed unchanged and uses `reset --keep` to preserve edits
+that overlap that final step. `rebase.updateRefs=false` prevents moving other
+local branches. Cleanup failures retain the temporary worktree and name its path
+without hiding the rebase error. No autostash or force-push is used.
+
+The ADE guard refuses `reset --keep` in an unclaimed shared checkout. Automatic
+publishing therefore stops safely there when rebasing is needed, retaining the
+local commit and reporting the guard error; rebase and publish from a claimed
+task workspace. This helper does not relax that guard. The normal exclusive-writer
+workspace contract also applies to the final checkout update.
+
+Before contacting a target, the helper resolves every push URL and applies the
+existing [upstream review gate](upstream-review-gate.md)'s shared `gated_url` policy.
+It also requires exactly one resolved push URL matching the resolved fetch URL.
+Different fetch/push endpoints or multiple push URLs cause exit 3 before any
+remote contact, naming the remote and advising `--no-push` and explicit publishing.
+It refuses GitHub targets owned by CFEngine or NorthernTechHQ even though the push
+runs as a subprocess. This helper has no environment escape: the operator can use
+`--no-push` and publish explicitly through the normal shell review gate and its
+operator-only override. Install this helper through the normal source-linked ADE path
+so its policy module is available; a missing policy fails publishing closed.
+
+Publish failures exit **3** with `PUBLISH FAILED`, the remote, target ref and Git
+error on stderr; the successful local commit is retained (possibly rebased).
+Commit failures retain Git's status. Fix the problem and publish the existing
+commit explicitly rather than retrying the commit command. `--no-push` commits
+locally without contacting a remote. A detached HEAD requires explicit publishing
+or `--no-push`. As with any branch push, publishing includes all unpushed commits
+on the branch, including commits by other authors.
+
 | Command | What |
 |---|---|
 | `git ARGS...` (the shim) | Run the real git, or refuse: exit 77, the reason on stderr, one line in `guard.log`. |
