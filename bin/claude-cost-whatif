@@ -1,0 +1,553 @@
+#!/usr/bin/env python3
+"""claude-cost-whatif: cache TTL, compaction threshold, and fresh-handoff cost simulator.
+
+    claude-cost-whatif [--days N] [--project SUBSTR] [--root DIR] [--thresholds LIST]
+                       [--floor F] [--preamble P] [--summary-tokens S]
+                       [--write W] [--write-5m W5] [--read R] [--output O]
+                       [--json]
+
+Simulates what-if cache and compaction scenarios on local Claude Code transcripts:
+
+1. Cache TTL What-If:
+   - Observed 1-hour TTL (writes 2.0x base input).
+   - 5-minute TTL everywhere (writes 1.25x base, but requests occurring after a 5-60 minute
+     idle gap bust prefix cache and rewrite cached tokens instead of reading them).
+   - Mixed TTL: 1-hour TTL for main sessions, 5-minute TTL for sub-agents.
+   - Measures requests after idle gaps and cached tokens rewritten.
+
+2. Compaction Threshold What-If:
+   - Evaluates context compaction thresholds T (default: 400k, 300k, 267k real ceiling,
+     250k, 217k hard trigger, 200k, 150k handoff tier).
+   - When context crosses T, compacts to post-compaction floor F (default 104k tokens,
+     from docs/context-hygiene.md measurements). Compaction costs a summarisation call
+     (read at model rate, ~6k summary output at 5.0x) plus rewriting floor F at write weight;
+     subsequent requests in that transcript save on cache reads until the next compaction.
+   - Recognises observed compactions (compact_boundary or >40% context drop) and resets
+     simulated drop accordingly.
+
+3. Fresh Handoff vs Compaction What-If:
+   - Evaluates handoff at threshold T to a fresh session (preamble P, default 46.5k from
+     bin/context-budget-check / docs/context-hygiene.md) instead of compacting to floor F.
+   - Fresh session pays initial preamble write but zero summarisation read/output overhead,
+     and subsequent reads carry preamble P rather than floor F (saving ~57.5k read tokens).
+
+Prices follow platform list-price equivalents (Opus 5.5 $4/MTok base, Sonnet 5.5 $2/MTok base,
+Fable 5.1 $10/MTok base; unknown models $1/MTok default; 1h write 2.0x, 5m write 1.25x, output 5.0x).
+
+Exit codes:
+  0: Success (results printed or JSON emitted).
+  2: Bad usage / invalid arguments.
+  3: No transcripts found in range.
+"""
+from __future__ import annotations
+
+import argparse
+from datetime import datetime
+import glob
+import json
+import os
+from pathlib import Path
+import re
+import sys
+
+# Prevent bytecode generation
+sys.dont_write_bytecode = True
+
+# Model id prefix -> (base input $/MTok, cache-read multiplier)
+PRICES = {
+    "claude-opus-5-5": (4.0, 0.05),
+    "claude-sonnet-5-5": (2.0, 0.05),
+    "claude-fable-5-1": (10.0, 0.025),
+}
+DEFAULT_PRICE = (1.0, 0.1)
+
+# Default context hygiene values (docs/context-hygiene.md, bin/context-watch, bin/context-budget-check)
+DEFAULT_FLOOR = 104_000         # Post-compaction floor F (tokens)
+DEFAULT_PREAMBLE = 46_500       # Fresh-session preamble P (tokens)
+DEFAULT_SUMMARY_OUT = 6_000     # Compaction summary output tokens
+DEFAULT_WRITE_1H = 2.0          # 1-hour TTL cache write weight
+DEFAULT_WRITE_5M = 1.25         # 5-minute TTL cache write weight
+DEFAULT_OUTPUT_WEIGHT = 5.0     # Output token weight
+
+# Default thresholds to evaluate:
+# 400k (legacy default), 300k (autoCompactWindow), 267k (real autoCompact ceiling = 300k - 33k buffer),
+# 250k, 217k (hard trigger = 267k - 50k headroom), 200k, 150k (handoff tier)
+DEFAULT_THRESHOLDS = [400_000, 300_000, 267_000, 250_000, 217_000, 200_000, 150_000]
+
+
+def parse_tokens(val: str | int | float) -> int:
+    """Parse token strings like '104k', '1.2M', '267000' into integer counts."""
+    if isinstance(val, (int, float)):
+        return int(val)
+    s = str(val).strip().lstrip("~").strip()
+    if not s:
+        raise ValueError("empty token string")
+    m = re.fullmatch(r"([\d,]*\.?\d+)\s*([kKmM]?)", s)
+    if not m:
+        raise ValueError(f"invalid token count: {val!r}")
+    num = float(m.group(1).replace(",", ""))
+    mult = {"": 1, "k": 1_000, "m": 1_000_000}[m.group(2).lower()]
+    return int(round(num * mult))
+
+
+def parse_thresholds(val: str) -> list[int]:
+    """Parse comma-separated threshold values."""
+    parts = [p.strip() for p in val.split(",") if p.strip()]
+    if not parts:
+        raise ValueError("empty thresholds list")
+    res = [parse_tokens(p) for p in parts]
+    return sorted(set(res), reverse=True)
+
+
+def parse_timestamp(s: str) -> float | None:
+    """Parse ISO8601 timestamp string to Unix epoch seconds."""
+    if not s or not isinstance(s, str):
+        return None
+    try:
+        return datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return None
+
+
+def price(model: str | None, read_override: float | None = None) -> tuple[float, float]:
+    """Return (base_price_per_token, cache_read_multiplier)."""
+    base, read = next((v for k, v in PRICES.items() if (model or "").startswith(k)), DEFAULT_PRICE)
+    rd = read_override if read_override is not None else read
+    return base / 1e6, rd
+
+
+def scan_transcripts(root: str, project: str = "", days: float = 7.0) -> list[list[dict]]:
+    """Scan transcripts under root modified within days, returning structured sequences of assistant turns."""
+    cutoff = datetime.now().timestamp() - (days * 86400.0)
+    pattern = os.path.join(os.path.expanduser(root), "**", "*.jsonl")
+    matched_files = [
+        f for f in glob.glob(pattern, recursive=True)
+        if project in f and os.path.getmtime(f) >= cutoff
+    ]
+
+    seqs: list[list[dict]] = []
+    for f in sorted(matched_files):
+        seen_mids = set()
+        seq: list[dict] = []
+        is_sub = "/subagents/" in f
+        had_boundary = False
+
+        try:
+            fh = open(f, errors="replace")
+        except OSError:
+            continue
+
+        with fh:
+            for line in fh:
+                try:
+                    d = json.loads(line)
+                except ValueError:
+                    continue
+
+                # Compaction boundary marker
+                if d.get("subtype") == "compact_boundary" or (
+                    d.get("type") == "system" and d.get("subtype") == "compact_boundary"
+                ):
+                    had_boundary = True
+                    continue
+
+                if d.get("type") != "assistant":
+                    continue
+
+                msg = d.get("message") or {}
+                mid = msg.get("id")
+                usage = msg.get("usage") or {}
+                if not mid or not usage or mid in seen_mids:
+                    continue
+                seen_mids.add(mid)
+
+                t = parse_timestamp(d.get("timestamp", ""))
+                model = msg.get("model")
+                inp = int(usage.get("input_tokens") or 0)
+                cw = int(usage.get("cache_creation_input_tokens") or 0)
+                cr = int(usage.get("cache_read_input_tokens") or 0)
+                out = int(usage.get("output_tokens") or 0)
+
+                seq.append({
+                    "ts": t,
+                    "model": model,
+                    "subagent": is_sub,
+                    "input_tokens": inp,
+                    "cache_creation_tokens": cw,
+                    "cache_read_tokens": cr,
+                    "output_tokens": out,
+                    "had_boundary": had_boundary,
+                })
+                had_boundary = False
+
+        if seq:
+            seqs.append(seq)
+
+    return seqs
+
+
+def simulate_ttl(
+    seqs: list[list[dict]],
+    w1h: float = DEFAULT_WRITE_1H,
+    w5m: float = DEFAULT_WRITE_5M,
+    out_w: float = DEFAULT_OUTPUT_WEIGHT,
+    read_override: float | None = None,
+) -> dict:
+    """Simulate cache TTL policies (observed 1h, 5m everywhere, sub-agents 5m)."""
+    obs_total = 0.0
+    five_total = 0.0
+    sub5_total = 0.0
+    gap_reqs = 0
+    gap_tokens = 0
+    total_reqs = sum(len(s) for s in seqs)
+
+    for seq in seqs:
+        prev_t: float | None = None
+        for item in seq:
+            t = item["ts"]
+            base, rd = price(item["model"], read_override)
+            i = item["input_tokens"]
+            cw = item["cache_creation_tokens"]
+            cr = item["cache_read_tokens"]
+            o = item["output_tokens"]
+            sub = item["subagent"]
+
+            # Observed cost under 1-hour TTL
+            here_cost = base * (i + (cw * w1h) + (cr * rd) + (o * out_w))
+            obs_total += here_cost
+
+            # Gap detection: request occurring 5 to 60 minutes after previous request
+            is_gap = prev_t is not None and t is not None and (300.0 < (t - prev_t) <= 3600.0)
+            if is_gap:
+                gap_reqs += 1
+                gap_tokens += cr
+                # Under 5m TTL, cached prefix busts and must be re-written at write weight
+                alt_cost = base * (i + ((cw + cr) * w5m) + (o * out_w))
+            else:
+                alt_cost = base * (i + (cw * w5m) + (cr * rd) + (o * out_w))
+
+            five_total += alt_cost
+            sub5_total += alt_cost if sub else here_cost
+
+            if t is not None:
+                prev_t = t
+
+    pct_five = (five_total - obs_total) / obs_total if obs_total > 0 else 0.0
+    pct_sub5 = (sub5_total - obs_total) / obs_total if obs_total > 0 else 0.0
+    gap_ratio = gap_reqs / total_reqs if total_reqs > 0 else 0.0
+
+    return {
+        "observed_1h_usd": obs_total,
+        "five_minute_usd": five_total,
+        "five_minute_pct_diff": pct_five,
+        "subagent_5m_usd": sub5_total,
+        "subagent_5m_pct_diff": pct_sub5,
+        "gap_requests": gap_reqs,
+        "gap_request_ratio": gap_ratio,
+        "gap_cached_tokens": gap_tokens,
+    }
+
+
+def simulate_compaction_threshold(
+    seqs: list[list[dict]],
+    threshold: int | None,
+    floor: int = DEFAULT_FLOOR,
+    summary_out: int = DEFAULT_SUMMARY_OUT,
+    w1h: float = DEFAULT_WRITE_1H,
+    out_w: float = DEFAULT_OUTPUT_WEIGHT,
+    read_override: float | None = None,
+) -> dict:
+    """Simulate compaction threshold T against observed transcript history."""
+    total_cost = 0.0
+    extra_compactions = 0
+
+    for seq in seqs:
+        drop = 0
+        prev_ctx = 0
+        for item in seq:
+            base, rd = price(item["model"], read_override)
+            i = item["input_tokens"]
+            cw = item["cache_creation_tokens"]
+            cr = item["cache_read_tokens"]
+            o = item["output_tokens"]
+            had_boundary = item["had_boundary"]
+
+            ctx = i + cw + cr
+            # An observed compaction or /clear already occurred in the transcript
+            if had_boundary or (prev_ctx > 0 and ctx < 0.6 * prev_ctx):
+                drop = 0
+            prev_ctx = ctx
+
+            eff = max(ctx - drop, 0)
+            if threshold is not None and eff > threshold:
+                extra_compactions += 1
+                # Compaction overhead:
+                # 1. Read current effective context at read rate
+                # 2. Output summary text (~6k tokens at output weight)
+                # 3. Rewrite post-compaction floor F at write weight
+                overhead = base * ((eff * rd) + (summary_out * out_w) + (floor * w1h))
+                total_cost += overhead
+                drop += max(eff - floor, 0)
+                eff = floor
+
+            cr_eff = max(cr - drop, 0)
+            req_cost = base * (i + (cw * w1h) + (cr_eff * rd) + (o * out_w))
+            total_cost += req_cost
+
+    return {
+        "threshold": threshold,
+        "label": "observed" if threshold is None else f"{threshold // 1000}k",
+        "total_usd": total_cost,
+        "extra_compactions": extra_compactions,
+    }
+
+
+def simulate_handoff_threshold(
+    seqs: list[list[dict]],
+    threshold: int,
+    compaction_total_usd: float,
+    preamble: int = DEFAULT_PREAMBLE,
+    floor: int = DEFAULT_FLOOR,
+    summary_out: int = DEFAULT_SUMMARY_OUT,
+    w1h: float = DEFAULT_WRITE_1H,
+    out_w: float = DEFAULT_OUTPUT_WEIGHT,
+    read_override: float | None = None,
+) -> dict:
+    """Simulate fresh handoff at threshold T (preamble P) vs compacting to floor F."""
+    handoff_total = 0.0
+
+    for seq in seqs:
+        drop = 0
+        prev_ctx = 0
+        for item in seq:
+            base, rd = price(item["model"], read_override)
+            i = item["input_tokens"]
+            cw = item["cache_creation_tokens"]
+            cr = item["cache_read_tokens"]
+            o = item["output_tokens"]
+            had_boundary = item["had_boundary"]
+
+            ctx = i + cw + cr
+            if had_boundary or (prev_ctx > 0 and ctx < 0.6 * prev_ctx):
+                drop = 0
+            prev_ctx = ctx
+
+            eff = max(ctx - drop, 0)
+            if eff > threshold:
+                # Fresh handoff overhead:
+                # No summarisation read, no summarisation output;
+                # Fresh session writes preamble P at write weight
+                overhead = base * (preamble * w1h)
+                handoff_total += overhead
+                drop += max(eff - preamble, 0)
+                eff = preamble
+
+            cr_eff = max(cr - drop, 0)
+            req_cost = base * (i + (cw * w1h) + (cr_eff * rd) + (o * out_w))
+            handoff_total += req_cost
+
+    saving_usd = compaction_total_usd - handoff_total
+    saving_pct = saving_usd / compaction_total_usd if compaction_total_usd > 0 else 0.0
+
+    return {
+        "threshold": threshold,
+        "label": f"{threshold // 1000}k",
+        "compaction_usd": compaction_total_usd,
+        "handoff_usd": handoff_total,
+        "saving_usd": saving_usd,
+        "saving_pct": saving_pct,
+    }
+
+
+def format_text_report(data: dict) -> str:
+    """Render human-readable text report."""
+    lines = []
+    lines.append("=" * 80)
+    lines.append("Claude Code Cache & Compaction Cost What-If Simulator")
+    lines.append(f"Transcripts: {data['transcripts']:,} (last {data['parameters']['days']:.1f} days), "
+                 f"Requests: {data['requests']:,}")
+    lines.append("=" * 80)
+
+    # Section A
+    ttl = data["ttl"]
+    lines.append("\nA. Cache TTL What-If")
+    lines.append(f"   Observed 1h TTL everywhere:                ${ttl['observed_1h_usd']:,.2f}")
+    lines.append(f"   5-minute TTL everywhere:                   ${ttl['five_minute_usd']:,.2f} "
+                 f"({ttl['five_minute_pct_diff']:+.1%})")
+    lines.append(f"   Main 1h + sub-agents 5m:                   ${ttl['subagent_5m_usd']:,.2f} "
+                 f"({ttl['subagent_5m_pct_diff']:+.1%})")
+    lines.append(f"   Requests after 5-60 min idle gap:          {ttl['gap_requests']:,} "
+                 f"({ttl['gap_request_ratio']:.1%})")
+    lines.append(f"   Cached tokens rewritten under 5m TTL:      {ttl['gap_cached_tokens'] / 1e6:,.1f}M tokens")
+
+    # Section B
+    f_k = data["parameters"]["floor_tokens"] // 1000
+    s_k = data["parameters"]["summary_tokens"] // 1000
+    lines.append(f"\nB. Compaction Threshold What-If (Floor F = {f_k}k, Summary Out = {s_k}k)")
+    lines.append(f"   {'Threshold':<16} {'Total Cost':<14} {'Diff vs Obs':<14} {'Extra Compactions':<18}")
+    lines.append(f"   {'-'*15:<16} {'-'*13:<14} {'-'*13:<14} {'-'*17:<18}")
+
+    for row in data["compaction_thresholds"]:
+        diff_str = f"{row['pct_diff']:+.1%}" if row["threshold"] is not None else "+0.0%"
+        lines.append(f"   {row['label']:<16} ${row['total_usd']:<13,.2f} {diff_str:<14} {row['extra_compactions']:<18,}")
+
+    # Section C
+    p_k = data["parameters"]["preamble_tokens"] / 1000
+    lines.append(f"\nC. Fresh Handoff vs Compaction What-If (Preamble P = {p_k:.1f}k vs Floor F = {f_k}k)")
+    lines.append(f"   {'Threshold':<16} {'Compaction':<14} {'Handoff':<14} {'Handoff Saving':<18}")
+    lines.append(f"   {'-'*15:<16} {'-'*13:<14} {'-'*13:<14} {'-'*17:<18}")
+
+    for row in data["handoff_comparison"]:
+        save_str = f"-${row['saving_usd']:,.2f} ({row['saving_pct']:.1%})"
+        lines.append(f"   {row['label']:<16} ${row['compaction_usd']:<13,.2f} ${row['handoff_usd']:<13,.2f} {save_str:<18}")
+
+    lines.append("")
+    return "\n".join(lines)
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    ap = argparse.ArgumentParser(
+        prog="claude-cost-whatif",
+        description="Simulate cache TTL, compaction threshold, and fresh-handoff cost scenarios.",
+    )
+    ap.add_argument("--days", type=float, default=7.0, help="Analyze transcripts from last N days (default: 7.0)")
+    ap.add_argument("--project", default="", help="Filter transcripts containing substring")
+    ap.add_argument("--root", default=os.path.expanduser("~/.claude/projects"), help="Transcripts root directory")
+    ap.add_argument(
+        "--thresholds",
+        default=",".join(f"{t // 1000}k" for t in DEFAULT_THRESHOLDS),
+        help="Comma-separated compaction thresholds (e.g. 400k,300k,267k,250k,217k,200k,150k)",
+    )
+    ap.add_argument("--floor", default="104k", help="Post-compaction floor in tokens (default: 104k)")
+    ap.add_argument("--preamble", default="46.5k", help="Fresh session preamble in tokens (default: 46.5k)")
+    ap.add_argument("--summary-tokens", default=DEFAULT_SUMMARY_OUT, type=int, help="Summary output tokens (default: 6000)")
+    ap.add_argument("--write", type=float, default=DEFAULT_WRITE_1H, help="1-hour TTL write multiplier (default: 2.0)")
+    ap.add_argument("--write-5m", type=float, default=DEFAULT_WRITE_5M, help="5-minute TTL write multiplier (default: 1.25)")
+    ap.add_argument("--read", type=float, default=None, help="Force fixed read multiplier across all models")
+    ap.add_argument("--output", type=float, default=DEFAULT_OUTPUT_WEIGHT, help="Output multiplier (default: 5.0)")
+    ap.add_argument("--json", action="store_true", help="Emit structured JSON output")
+    return ap
+
+
+def run_analysis(args: argparse.Namespace) -> tuple[int, str]:
+    """Execute analysis and return (exit_code, output_string)."""
+    try:
+        floor_tokens = parse_tokens(args.floor)
+        preamble_tokens = parse_tokens(args.preamble)
+        thresholds = parse_thresholds(args.thresholds)
+    except ValueError as e:
+        return 2, f"claude-cost-whatif: invalid argument: {e}\n"
+
+    seqs = scan_transcripts(args.root, project=args.project, days=args.days)
+    if not seqs:
+        return 3, f"claude-cost-whatif: no transcripts under {args.root} in the last {args.days:g} days\n"
+
+    total_requests = sum(len(s) for s in seqs)
+
+    # 1. TTL simulation
+    ttl_res = simulate_ttl(
+        seqs,
+        w1h=args.write,
+        w5m=args.write_5m,
+        out_w=args.output,
+        read_override=args.read,
+    )
+    observed_cost = ttl_res["observed_1h_usd"]
+
+    # 2. Compaction simulation (observed + custom thresholds)
+    compaction_results = []
+    # Observed baseline (threshold=None)
+    compaction_results.append({
+        "threshold": None,
+        "label": "observed",
+        "total_usd": observed_cost,
+        "diff_usd": 0.0,
+        "pct_diff": 0.0,
+        "extra_compactions": 0,
+    })
+
+    handoff_results = []
+    for t in thresholds:
+        res = simulate_compaction_threshold(
+            seqs,
+            threshold=t,
+            floor=floor_tokens,
+            summary_out=args.summary_tokens,
+            w1h=args.write,
+            out_w=args.output,
+            read_override=args.read,
+        )
+        diff_usd = res["total_usd"] - observed_cost
+        pct_diff = diff_usd / observed_cost if observed_cost > 0 else 0.0
+        row = {
+            "threshold": t,
+            "label": res["label"],
+            "total_usd": res["total_usd"],
+            "diff_usd": diff_usd,
+            "pct_diff": pct_diff,
+            "extra_compactions": res["extra_compactions"],
+        }
+        compaction_results.append(row)
+
+        # 3. Handoff simulation comparison for threshold
+        h_res = simulate_handoff_threshold(
+            seqs,
+            threshold=t,
+            compaction_total_usd=res["total_usd"],
+            preamble=preamble_tokens,
+            floor=floor_tokens,
+            summary_out=args.summary_tokens,
+            w1h=args.write,
+            out_w=args.output,
+            read_override=args.read,
+        )
+        handoff_results.append(h_res)
+
+    report_data = {
+        "parameters": {
+            "days": args.days,
+            "root": str(Path(args.root).resolve()),
+            "project": args.project,
+            "thresholds": thresholds,
+            "floor_tokens": floor_tokens,
+            "preamble_tokens": preamble_tokens,
+            "summary_tokens": args.summary_tokens,
+            "weights": {
+                "write_1h": args.write,
+                "write_5m": args.write_5m,
+                "output": args.output,
+                "read": args.read,
+            },
+        },
+        "transcripts": len(seqs),
+        "requests": total_requests,
+        "observed_cost_usd": observed_cost,
+        "ttl": ttl_res,
+        "compaction_thresholds": compaction_results,
+        "handoff_comparison": handoff_results,
+    }
+
+    if args.json:
+        return 0, json.dumps(report_data, indent=2) + "\n"
+    return 0, format_text_report(report_data)
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = build_arg_parser()
+    try:
+        args = ap.parse_args(argv)
+    except SystemExit as e:
+        return e.code if isinstance(e.code, int) else 2
+
+    code, output = run_analysis(args)
+    if code != 0 and code != 3:
+        sys.stderr.write(output)
+    elif code == 3:
+        sys.stderr.write(output)
+    else:
+        sys.stdout.write(output)
+    return code
+
+
+if __name__ == "__main__":
+    sys.exit(main())

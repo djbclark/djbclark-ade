@@ -2,7 +2,8 @@
 
 Trimmed 2026-11-07 (slim-down E11); Pi-only third-party TUI 2026-11-08. The live tools are `bin/context-watch`
 (how full each running Claude agent is, section 6), `bin/context-budget-check` (what a fresh session costs,
-section 7) and the Claude nudge hook (`claude/hooks/context_size_nudge.py`, section 2). Compaction for current
+section 7), the cache and compaction cost what-if simulator `bin/claude-cost-whatif` (section 8), and the
+Claude nudge hook (`claude/hooks/context_size_nudge.py`, section 2). Compaction for current
 clients includes auto-compaction and the explicit agent-invoked
 [`ade-self-session`](self-session.md) native request/handoff path (restored
 2026-11-12). Self-compaction preserves a checkpoint and requests native `/compact`;
@@ -11,7 +12,6 @@ successor acknowledgement and idle-only predecessor retirement. Pi has no separa
 ADE compaction plugin. Section 3 keeps archived OpenCode notes only. The old
 pane-typing `self-slash` implementation remains removed; no terminal injection is
 restored. Unsupported hosts/providers report their limitation.
-
 
 Context capacity is a correctness ceiling, not a cost budget. Cached input is
 billed again on every request, and Go models debit the same monthly allowance
@@ -308,3 +308,59 @@ This is the *baseline* half of context visibility (what a fresh session already 
 turn). For *live* fullness of running agents against the real autoCompact wall — and for the
 Paseo Desktop meter mismatch tracked in getpaseo/paseo#4949 — use section 6's `context-watch`,
 not the Desktop bar and not this nightly check.
+
+## 8. Cost what-if simulator: `bin/claude-cost-whatif` (2026-10-18; restored 2026-11-12)
+
+`bin/claude-cost-whatif` evaluates the cost impact of cache TTL configurations, context compaction
+thresholds, and fresh handoffs against historical Claude Code transcripts (`~/.claude/projects/**/*.jsonl`).
+It restores the removed what-if capability identified in the 2026-11-12 audit walk decisions (retained
+quota capabilities, area 5, unit W11).
+
+### 1. What it evaluates
+
+1. **Cache TTL policies:**
+   - **Observed 1-hour TTL:** Cache creation input tokens weighted at 2.0× base (Anthropic 1-hour cache write list price).
+   - **5-minute TTL everywhere:** Cache writes weighted at 1.25× base. Requests occurring after an idle gap of 5–60
+     minutes from the prior turn bust the ephemeral cache; their cached read tokens are billed as cache writes at 1.25×.
+     Our historical measurements showed a 5-minute TTL everywhere increased weekly spend by ~30% due to these idle gaps.
+   - **Main 1-hour + Sub-agents 5-minute TTL:** Sub-agents often wait on tool commands for minutes; testing showed
+     even sub-agent 5-minute TTL added ~2.9% net cost.
+2. **Compaction thresholds ($T$):**
+   - Simulates triggering context compaction whenever effective context exceeds $T$ (default ladder: 400k legacy default,
+     300k `autoCompactWindow`, 267k real ceiling from `context-watch`, 250k, 217k hard trigger from `context_size_nudge.py`,
+     200k, and 150k handoff tier).
+   - Each compaction incurs summarisation overhead: reading current effective context at the model's read multiplier,
+     producing ~6k summary output tokens at 5.0× base, and rewriting the post-compaction floor $F$ (default 104,000 tokens)
+     at write weight (2.0×). Subsequent requests shrink their cached read by the accumulated drop $(C - F)$ until the
+     next compaction.
+   - Existing compaction events in transcripts (`compact_boundary` records or $>40\%$ context drops) reset the simulation
+     drop to reflect actual history.
+3. **Fresh handoff vs. compaction:**
+   - Evaluates handing off at threshold $T$ to a fresh session starting with preamble $P$ (default 46,500 tokens,
+     from `bin/context-budget-check` measurements) instead of running in-session compaction.
+   - A fresh session pays initial preamble write tokens without summarisation read or output overhead, and subsequent
+     turns read preamble $P$ rather than floor $F$ (saving ~57.5k read tokens per request). At lower thresholds like
+     150k–217k, fresh handoffs consistently beat repeated compaction.
+
+### 2. CLI flags and options
+
+```bash
+bin/claude-cost-whatif [--days N] [--project SUBSTR] [--root DIR] [--thresholds LIST] \
+                       [--floor F] [--preamble P] [--summary-tokens S] \
+                       [--write W] [--write-5m W5] [--read R] [--output O] [--json]
+```
+
+- `--days N`: Lookback window in days (default 7.0).
+- `--project SUBSTR`: Filter transcript paths by substring.
+- `--root DIR`: Path to transcripts (default `~/.claude/projects`).
+- `--thresholds LIST`: Comma-separated token thresholds (e.g. `400k,300k,267k,250k,217k,200k,150k`).
+- `--floor F`: Post-compaction floor (default `104k`).
+- `--preamble P`: Fresh session baseline preamble (default `46.5k`).
+- `--summary-tokens S`: Summary output tokens per compaction (default `6000`).
+- `--write W`: 1-hour cache write multiplier (default `2.0`).
+- `--write-5m W5`: 5-minute cache write multiplier (default `1.25`).
+- `--output O`: Output token multiplier (default `5.0`).
+- `--read R`: Override model cache-read multiplier (defaults to model list price: 0.05 Opus/Sonnet 5.5, 0.025 Fable 5.1).
+- `--json`: Output structured JSON for automation.
+
+Exit codes: `0` success, `2` bad arguments/usage, `3` no transcripts in range. Tests: `tests/test_claude_cost_whatif.py`.

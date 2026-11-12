@@ -157,6 +157,7 @@ Skills (from each `skills/*/SKILL.md`):
 | [`bm-lint`](bin/bm-lint) | Read-only hygiene lint for a Basic Memory store (design-basicmemory W3 / R6, 2026-10-24). |
 | [`changelog-fold`](bin/changelog-fold) | Fold changelog.d/*.md fragments into CHANGELOG.md's `## Unreleased` (2026-10-31). |
 | [`claude-cost-mix`](bin/claude-cost-mix) | Where Claude Code spend goes, from local transcripts. |
+| [`claude-cost-whatif`](bin/claude-cost-whatif) | Cache TTL, compaction threshold, and fresh-handoff cost simulator. |
 | [`claude-settings-env`](bin/claude-settings-env) | Keep required and default `env` keys in ~/.claude/settings.json (2026-10-16). |
 | [`claude_identity.py`](bin/claude_identity.py) | Which Claude Code session is this process in? |
 | [`codex-env-policy-apply`](bin/codex-env-policy-apply) | Merge the template's [shell_environment_policy] tables into a Codex config.toml atomically. |
