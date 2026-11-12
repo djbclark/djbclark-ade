@@ -23,7 +23,7 @@ import ade_sched as S
 CLI = REPO / "bin" / "ade-sched"
 PLISTS = sorted([*(REPO / "launchd").glob("*.plist"), *(REPO / "config/launchd").glob("*.plist")])
 SUBST = {"@TARGET@": "claude", "@STATE@": "/st/cpu", "__STATE__": "/st/state", "__REPO__": "/r/ade",
-         "__INDEX_DIR__": "/i/index"}
+         "__INDEX_DIR__": "/i/index", "__LEAD__": "11111111-1111-4111-8111-111111111111"}
 NASTY = "a&b <c> 'd' %x $y \"z\""
 # (plist stem, backend) pairs that must refuse with 69 rather than render
 REFUSE = {("dev.herdr.server", "cron"),                     # KeepAlive: cron cannot supervise

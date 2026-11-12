@@ -48,6 +48,8 @@ def log_event(log, decision, reason, agent=None, request=None):
 
 
 def descendant(agent, lead, cache):
+    if agent == lead:
+        return False
     seen = set()
     while agent not in seen:
         seen.add(agent)
@@ -91,7 +93,12 @@ def sweep(lead, labels, log):
             continue
         seen.add((agent, request))
         try:
-            reason = "ade-label" if agent in eligible else "descendant" if descendant(agent, lead, cache) else None
+            if agent == lead:
+                reason = None
+            elif agent in eligible:
+                reason = "ade-label"
+            else:
+                reason = "descendant" if descendant(agent, lead, cache) else None
             if reason is None:
                 log_event(log, "skip", "outside-scope", agent, request)
                 continue
@@ -135,7 +142,8 @@ def main():
             return 1
         with args.log.open("a", encoding="utf-8") as log:
             deadline = time.monotonic() + args.duration
-            while True:
+            status = 0
+            while not args.watch or time.monotonic() < deadline:
                 try:
                     status = sweep(args.lead, args.ade_label, log)
                 except ProbeError:
@@ -147,6 +155,7 @@ def main():
                 if remaining <= 0:
                     return status
                 time.sleep(min(args.interval, remaining))
+            return status
 
 
 if __name__ == "__main__":

@@ -1,6 +1,7 @@
 """Exercise the actual CLI against a fake paseo; never contacts a daemon."""
 import json
 import os
+import runpy
 from pathlib import Path
 import subprocess
 import sys
@@ -103,3 +104,29 @@ def test_duplicate_and_option_request(tmp_path):
                                       'parents':{CHILD:LEAD}})
     assert result.returncode == 1
     assert sum(c[:2] == ['permit','allow'] for c in calls) == 1
+
+
+def test_lead_is_excluded_even_when_labelled(tmp_path):
+    result, calls = run_fake(tmp_path, {'requests':[req(LEAD)], 'labelled':[LEAD],
+                                      'parents':{LEAD:'error'}}, '--ade-label','ade.task=wave')
+    assert result.returncode == 0
+    assert not any(c[:2] in (['agent','inspect'], ['permit','allow']) for c in calls)
+    assert 'outside-scope' in (tmp_path/'audit.jsonl').read_text()
+    # An ancestry check on the lead itself must also avoid inspecting its parents.
+    module = runpy.run_path(str(SCRIPT))
+    assert module['descendant'](LEAD, LEAD, {}) is False
+
+
+def test_watch_checks_deadline_before_each_sweep(tmp_path, monkeypatch):
+    module = runpy.run_path(str(SCRIPT))
+    main = module['main']
+    clock = [0.0]
+    swept = []
+    monkeypatch.setattr(main.__globals__['time'], 'monotonic', lambda: clock[0])
+    monkeypatch.setattr(main.__globals__['time'], 'sleep', lambda seconds: clock.__setitem__(0, clock[0]+seconds))
+    monkeypatch.setitem(main.__globals__, 'sweep', lambda *args: swept.append(clock[0]) or 0)
+    monkeypatch.setattr(sys, 'argv', [str(SCRIPT), '--lead', LEAD, '--log', str(tmp_path/'audit.jsonl'),
+                                    '--watch', '--interval', '10', '--duration', '1'])
+    assert main() == 0
+    assert swept == [0.0]  # No second sweep after sleep reaches the deadline.
+    assert clock[0] == 1.0

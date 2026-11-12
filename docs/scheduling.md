@@ -312,8 +312,8 @@ generated units when the tool is installed); `tests/test_ade_jobs_inventory.py` 
 ## Scoped permission sweeps (2026-11-12; template only)
 
 `config/launchd/com.djbclark.ade-auto-permit.plist` runs one scoped sweep every
-10 seconds, with no agent/model wake. It is not loaded or included in automatic
-reconcile. Render it for review with global options before the command:
+60 seconds, with no agent/model wake (minute resolution also renders for cron).
+It is not loaded or included in automatic reconcile. Render it for review with global options before the command:
 
 ```sh
 bin/ade-sched --set __LEAD__=FULL_LEAD_UUID --set __STATE__=/absolute/existing/state/dir \

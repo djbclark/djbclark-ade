@@ -121,7 +121,8 @@ in `~/.paseo/config.json`; no config change or restart is required by this helpe
 The Claude enforced review boundary remains separate (`bin/review-launch`).
 
 `bin/ade-auto-permit --lead FULL_LEAD_UUID --log /absolute/path/permits.jsonl`
-runs one sweep. Add `--watch --duration 3600 --interval 2` for a bounded watcher.
+runs one sweep. The lead itself is excluded even if it matches an ADE label.
+Add `--watch --duration 3600 --interval 2` for a bounded watcher.
 It allows only descendants of the named lead (not the lead itself), or agents
 matching a repeated `--ade-label ade.KEY=VALUE` selector. Any matching selector
 qualifies. The installed Paseo inspect/ls JSON omits arbitrary labels; exact server-side
@@ -134,8 +135,10 @@ Only explicit pending `(agentId, requestId)` pairs are allowed; no `--all`.
 Failed/malformed discovery fails closed. JSONL records skips, attempts, confirmations
 and errors, without tool descriptions, arguments or CLI error bodies. Failed or
 unconfirmed writes are never retried through another surface; a later watch sweep
-can retry only if the request is still listed pending. Watch cycles recheck
-ancestry and labels; a per-log lock prevents overlapping instances sharing a log.
+can retry only if the request is still listed pending. Watch checks its deadline
+before each sweep; a sweep already running may finish after the deadline. Watch
+cycles recheck ancestry and labels; a per-log lock prevents overlapping instances
+sharing a log.
 Use one log per daemon/wave; do not run competing watchers with different logs.
 No daemon restart, installed configuration change or scheduler activation occurs.
 
