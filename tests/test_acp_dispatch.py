@@ -181,8 +181,23 @@ class TestProviderMapAndArgv(Base):
         self.assertEqual(r.returncode, 0, r.stderr)
         return json.loads(r.stdout)
 
-    def test_every_agent_maps_to_its_provider_with_its_default_mode(self):
-        for agent in ("claude", "codex", "antigravity", "cursor", "opencode", "hermes", "omp"):
+    def test_unverified_or_retired_provider_refuses_before_create(self):
+        for agent in ("cursor", "hermes", "opencode", "omp"):
+            with self.subTest(agent=agent):
+                model = "opencode-go/minimax-m3" if agent == "opencode" else "m-1"
+                r = self.dispatch(agent, model, ACP_OPERATOR_APPROVED="hermes,route-override")
+                self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+                self.assertIn("no verified unattended mode", r.stderr)
+                self.assertFalse(any(c[0] == "run" for c in self.calls()))
+
+    def test_unverified_effective_mode_stops_new_agent_and_refuses(self):
+        r = self.dispatch(FAKE_PASEO_ACTIVE="auto")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("unattended mode unverified", r.stdout)
+        self.assertTrue(any(c[:2] == ["agent", "stop"] for c in self.calls()))
+
+    def test_source_backed_providers_use_unattended_modes(self):
+        for agent in ("claude", "codex", "antigravity"):
             with self.subTest(agent=agent):
                 extra = {"ACP_OPERATOR_APPROVED": "hermes,route-override"}
                 model = {"opencode": "opencode-go/minimax-m3", "claude": "sonnet"}.get(agent, "m-1")
@@ -192,17 +207,13 @@ class TestProviderMapAndArgv(Base):
                 # antigravity folds the effort into the id (paseo_model; high when none is given).
                 want = f"{model}-high" if agent == "antigravity" else model
                 self.assertEqual(argv[argv.index("--provider") + 1], f"{agent}/{want}")
-                # Known providers: YOLO map. Others: fake paseo's defaultMode.
+                # Source-backed modes; never the provider default.
                 self.assertEqual(
                     argv[argv.index("--mode") + 1],
                     {
                         "claude": "bypassPermissions",
                         "codex": "full-access",
-                        "opencode": "build",
-                        "omp": "full",
-                        "antigravity": "default",
-                        "hermes": "default",
-                        "cursor": "default",
+                        "antigravity": "full-access",
                     }.get(agent),
                 )
                 for flag in ("--no-wait", "--json", "--title", "--cwd"):
@@ -542,7 +553,7 @@ class TestLoadGateAndCap(Base):
         calls = self.lw()
         self.assertEqual([c["argv"][0] for c in calls], ["admit", "release"])
         ls_after_run = self.verbs().index("run") + 1
-        self.assertEqual(self.verbs()[ls_after_run], "ls")                       # countable before the release
+        self.assertEqual(self.verbs()[ls_after_run:ls_after_run + 2], ["inspect", "ls"])  # mode proof, then countable before release
 
     def test_a_burst_of_twenty_launches_still_hits_the_fourteen_agent_cap(self):
         def one(i: int) -> int:

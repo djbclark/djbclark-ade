@@ -30,12 +30,12 @@ def world(tmp_path: Path, routes: list[dict], **env: str) -> tuple[subprocess.Co
 
 
 def test_an_acp_route_runs_on_paseo_and_reads_the_reply_file(tmp_path):
-    r, calls = world(tmp_path, [{"kind": "acp", "agent": "cursor", "model": "grok-4.7", "set": ["reasoning_effort=high"]}])
+    r, calls = world(tmp_path, [{"kind": "acp", "agent": "claude", "model": "sonnet", "set": ["reasoning_effort=high"]}])
     assert r.returncode == 0, r.stdout + r.stderr
     assert "ok" in r.stdout
     run = next(c for c in calls if c[0] == "run")
-    assert run[run.index("--provider") + 1] == "cursor/grok-4.7"
-    assert run[run.index("--mode") + 1] == "default"                     # cursor: no YOLO map → defaultMode fallback
+    assert run[run.index("--provider") + 1] == "claude/sonnet"
+    assert run[run.index("--mode") + 1] == "bypassPermissions"
     assert run[run.index("--thinking") + 1] == "high"
     assert "--no-wait" in run and "--json" in run and "--prompt-file" not in run
     assert "probe.prompt.md" in run[-1] and "probe.prompt.reply.md" in run[-1]
@@ -44,10 +44,10 @@ def test_an_acp_route_runs_on_paseo_and_reads_the_reply_file(tmp_path):
 
 
 def test_a_paseo_route_is_the_preferred_kind_and_matches_the_acp_alias(tmp_path):
-    r, calls = world(tmp_path, [{"kind": "paseo", "agent": "cursor", "model": "grok-4.7", "set": ["reasoning_effort=high"]}])
+    r, calls = world(tmp_path, [{"kind": "paseo", "agent": "claude", "model": "sonnet", "set": ["reasoning_effort=high"]}])
     assert r.returncode == 0, r.stdout + r.stderr
     run = next(c for c in calls if c[0] == "run")
-    assert run[run.index("--provider") + 1] == "cursor/grok-4.7"
+    assert run[run.index("--provider") + 1] == "claude/sonnet"
     assert run[run.index("--thinking") + 1] == "high"
 
 
@@ -68,3 +68,22 @@ def test_a_non_idle_wait_or_a_missing_reply_fails_the_route(tmp_path):
     other.mkdir()
     r, _ = world(other, [{"kind": "paseo", "provider": "codex", "model": "gpt-6.1-sol"}], FAKE_PASEO_AGENT="nothing")
     assert r.returncode == 1 and "without writing" in r.stdout
+
+
+def test_dynamic_provider_does_not_silently_fall_back_to_prompting_mode(tmp_path):
+    r, calls = world(tmp_path, [{"kind":"paseo","provider":"cursor","model":"grok-4.7"}])
+    assert r.returncode == 1 and "no verified unattended mode" in r.stdout
+    assert not any(c[0] == "run" for c in calls)
+
+
+def test_effective_mode_drift_is_refused_and_new_agent_stopped(tmp_path):
+    r, calls = world(tmp_path, [{"kind":"paseo","provider":"claude","model":"sonnet"}],FAKE_PASEO_ACTIVE="auto")
+    assert r.returncode == 1 and "mode unverified" in r.stdout
+    assert ["agent","stop","agent-0001","--json"] in calls
+
+
+def test_prompting_mode_override_still_gets_unattended_default(tmp_path):
+    r,calls = world(tmp_path,[{"kind":"paseo","provider":"codex","model":"gpt-6.1-sol","mode":"auto"}])
+    assert r.returncode == 0, r.stdout+r.stderr
+    run = next(c for c in calls if c[0]=="run")
+    assert run[run.index("--mode")+1] == "full-access"

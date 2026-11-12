@@ -1,0 +1,4 @@
+#!/usr/bin/env python3
+"""Check native agent permission mode or plan repair (apply capability-blocked)."""
+from ade_agent_mode import main
+raise SystemExit(main())
