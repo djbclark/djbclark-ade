@@ -140,6 +140,10 @@ E1a. Top-level `fresh` is not enough: read each pool's `.available[].collected_a
 pool's `collected_at` must be newer than the previous wave's start; if not, re-read with `aiuse --available --live --json`
 and size the wave to it (2026-11-12: one 11:53 AM EST agy reading, served as `fresh` for 25 minutes, fed ~16 agents; the
 agy Claude/GPT and Argon pools both ran out mid-wave).
+E1b. A request-rate limit is not quota: `aiuse` cannot see it. Pi z.ai answers `429` code `1302` ("Rate limit
+reached for requests") once about 7 z.ai agents run at once, with 70% of its 5-hour window left (2026-11-12). Keep at
+most 5 z.ai agents running; on a 1302, switch that agent in place to another Pi pool (`update_agent settings.model`,
+e.g. `openai/gpt-6.1-sol`) or send a "continue" after the others finish, never mark the pool exhausted.
 E2. `used_percent` is the share consumed: 100 means empty. Quote "X% used / Y% left".
 E3. An account is usable only if every window has headroom: the fullest binds.
 E4. One provider can hold several pools (Cursor Auto vs third-party): a 429 describes the pool the model draws on.
