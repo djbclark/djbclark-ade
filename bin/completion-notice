@@ -1,44 +1,64 @@
 #!/usr/bin/env -S python3 -I
-"""completion-notice: format (and optionally send) a delegated slice's push-on-completion line via paseo send.
+"""completion-notice: format, send, and verify a delegated slice's push-on-completion notice via paseo send and disk ack.
 
-  completion-notice --print --requester ID --title TITLE (--pr URL | --status STATUS) [--report PATH] [--sender ID]
-  completion-notice --send  --requester ID --title TITLE (--pr URL | --status STATUS) [--report PATH] [--sender ID]
+Worker commands:
+  completion-notice --print --requester ID --title TITLE (--pr URL | --status STATUS) [--report PATH] [--sender ID] [--msg-id ID] [--argv]
+  completion-notice --send  --requester ID --title TITLE (--pr URL | --status STATUS) [--report PATH] [--sender ID] [--msg-id ID]
+  completion-notice --check-ack DONE_PATH [--msg-id ID] [--timeout SECONDS]
+
+Lead commands:
+  completion-notice --lead-ack --worker ID --msg-id ID --done DONE_PATH [--timeout SECONDS] [--paseo PATH]
 
 A finished delegated slice tells its requester once, instead of waiters polling (queue carried item 5,
 docs/dispatch-footer.md rule 22, docs/orchestration-practices.md §5a). The required message shape is:
 
   done: <title>, <pr-url-or-status>[, <report-path>]
-  Please reply: ack <sender-id>
+  Please reply: ack <sender-id> [<msg-id>]
 
-`--print` writes that text on stdout and the `paseo send --json --no-wait` argv (one JSON object per line
-on stderr is never used: stdout is the message only; `--argv` prints the argv as JSON on a second stdout
-line). `--send` runs that argv; delivery for an agent's send is still only the peer's named ack (order 10),
-so this tool treats a readable `.status` of `sent` or `completed` as enough for a sourceless send, and any
-other status (including `queued`) as accepted-not-proven (exit 5). Never uses relay.py. Stdlib only.
+Per Operator Ruling 2026-11-12, completion delivery proof uses BOTH routes:
+  (a) Prompt ack: The worker ends its turn immediately after sending, transitioning to idle.
+      The lead checks that the worker is idle (`paseo agent inspect <worker> --json`) before sending
+      `ack <worker-id> <msg-id>` via paseo send (avoiding Paseo replaceRunning: true turn interrupts).
+  (b) Disk ack: The lead atomically writes `<done-path>.ack` next to the worker's done file.
+Every notice and ack carries a unique message ID (UUID) for deduplication.
 
-Exit: 0 printed or sourceless delivery; 5 agent's send accepted (queued; wait for ack); 1 send failed /
-unreadable; 2 usage or a shape that fails the required form.
+Exit codes:
+  0: Success (printed, sourceless delivery, verified disk ack, or lead ack completed)
+  5: Agent send accepted by Paseo (queued, delivery pending peer ack per order 10; not an error)
+  1: Send failed, unreadable response, ack check timed out / unverified, or agent inspect failed
+  2: Invalid arguments or message shape failure
 """
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import json
 import os
+from pathlib import Path
 import re
 import shutil
 import subprocess
 import sys
-from typing import Sequence
+import time
+from typing import Any, Sequence
+import uuid
 
 # One line: "done: <title>, <detail>" with an optional ", <report>" third field.
 # Title and detail must be non-empty and must not themselves introduce a newline.
 _DONE_LINE = re.compile(
     r"^done: (?P<title>[^\n,]+), (?P<detail>[^\n,]+)(?:, (?P<report>[^\n]+))?$"
 )
-_ACK_LINE = re.compile(r"^Please reply: ack (?P<sender>\S+)$")
+_ACK_LINE = re.compile(r"^Please reply: ack (?P<sender>\S+)(?: (?P<msg_id>\S+))?$")
 
 
-def build_message(*, title: str, detail: str, report: str | None, sender: str) -> str:
+def build_message(
+    *,
+    title: str,
+    detail: str,
+    report: str | None,
+    sender: str = "",
+    msg_id: str | None = None,
+) -> str:
     """Return the two-line completion message, or raise ValueError when the shape would be invalid."""
     title = title.strip()
     detail = detail.strip()
@@ -52,16 +72,28 @@ def build_message(*, title: str, detail: str, report: str | None, sender: str) -
         raise ValueError("report path must be non-empty and single-line when given")
     if not sender or any(c.isspace() for c in sender):
         raise ValueError("sender id must be a non-empty token (no whitespace)")
+
+    if msg_id is None:
+        msg_id_val = uuid.uuid4().hex
+    else:
+        msg_id_val = msg_id.strip()
+        if any(c.isspace() for c in msg_id_val):
+            raise ValueError("msg_id must contain no whitespace")
+
     if report_s:
         line = f"done: {title}, {detail}, {report_s}"
     else:
         line = f"done: {title}, {detail}"
-    text = f"{line}\nPlease reply: ack {sender}"
+
+    if msg_id_val:
+        text = f"{line}\nPlease reply: ack {sender} {msg_id_val}"
+    else:
+        text = f"{line}\nPlease reply: ack {sender}"
     parse_message(text)  # refuse anything we would not accept as the required shape
     return text
 
 
-def parse_message(text: str) -> dict[str, str]:
+def parse_message(text: str) -> dict[str, str | None]:
     """Parse a completion notice; raise ValueError when it is not the required shape."""
     lines = text.splitlines()
     if len(lines) != 2:
@@ -74,15 +106,145 @@ def parse_message(text: str) -> dict[str, str]:
         )
     a = _ACK_LINE.match(lines[1])
     if not a:
-        raise ValueError("second line must be 'Please reply: ack <sender-id>'")
-    out = {
+        raise ValueError("second line must be 'Please reply: ack <sender-id> [<msg-id>]'")
+    out: dict[str, str | None] = {
         "title": m.group("title"),
         "detail": m.group("detail"),
         "sender": a.group("sender"),
+        "msg_id": a.group("msg_id"),
     }
     if m.group("report"):
         out["report"] = m.group("report")
     return out
+
+
+def write_ack_file(done_path: str | Path, *, worker: str, msg_id: str) -> str:
+    """Atomically write <done_path>.ack with worker and msg_id. Returns the ack file path."""
+    done_p = Path(done_path).resolve()
+    ack_p = done_p.with_name(done_p.name + ".ack")
+    payload = {
+        "ack": worker,
+        "msg_id": msg_id,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    # Atomic write via temp file in same directory
+    tmp_p = done_p.with_name(f"{done_p.name}.ack.tmp.{os.getpid()}_{uuid.uuid4().hex[:8]}")
+    tmp_p.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    tmp_p.replace(ack_p)
+    return str(ack_p)
+
+
+def read_ack_file(done_path: str | Path) -> dict[str, Any] | None:
+    """Read <done_path>.ack if it exists. Returns parsed dict or None."""
+    done_p = Path(done_path).resolve()
+    ack_p = done_p.with_name(done_p.name + ".ack")
+    if not ack_p.is_file():
+        return None
+    content = ack_p.read_text(encoding="utf-8").strip()
+    try:
+        data = json.loads(content)
+        if isinstance(data, dict):
+            return data
+    except (ValueError, TypeError):
+        pass
+    # Also support plain text "ack <worker> <msg_id>"
+    parts = content.split()
+    if len(parts) >= 2 and parts[0] == "ack":
+        worker = parts[1]
+        msg_id = parts[2] if len(parts) > 2 else ""
+        return {"ack": worker, "msg_id": msg_id}
+    return {"raw": content}
+
+
+def check_ack(done_path: str | Path, *, msg_id: str | None = None, timeout: float = 0.0) -> dict[str, Any] | None:
+    """Check for <done_path>.ack, optionally polling up to timeout seconds."""
+    deadline = time.monotonic() + max(0.0, timeout)
+    while True:
+        data = read_ack_file(done_path)
+        if data is not None:
+            if msg_id:
+                if data.get("msg_id") == msg_id:
+                    return data
+            else:
+                return data
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(0.5)
+    return None
+
+
+def get_agent_status(worker_id: str, *, paseo: str = "paseo") -> str:
+    """Inspect agent via paseo agent inspect <worker_id> --json. Returns status string or 'unknown'."""
+    try:
+        r = subprocess.run([paseo, "agent", "inspect", worker_id, "--json"], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return "unknown"
+    if r.returncode != 0:
+        return "unknown"
+    try:
+        d = json.loads(r.stdout)
+        if isinstance(d, dict):
+            st = d.get("Status", d.get("status", "unknown"))
+            if isinstance(st, str):
+                return st.lower()
+    except (ValueError, TypeError):
+        pass
+    return "unknown"
+
+
+def wait_for_idle(worker_id: str, *, timeout: float = 30.0, paseo: str = "paseo") -> bool:
+    """Poll agent inspect until Status is idle or timeout expires."""
+    deadline = time.monotonic() + max(0.0, timeout)
+    while True:
+        st = get_agent_status(worker_id, paseo=paseo)
+        if st == "idle":
+            return True
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(1.0)
+    return False
+
+
+def lead_ack(
+    *,
+    worker: str,
+    msg_id: str,
+    done: str | None = None,
+    timeout: float = 30.0,
+    paseo: str = "paseo",
+) -> tuple[int, dict[str, Any]]:
+    """Execute both delivery-proof routes:
+    (b) write <done>.ack on disk
+    (a) wait for worker Status idle, then send ack <worker> <msg_id>
+    """
+    routes = []
+    ack_file = None
+    if done:
+        ack_file = write_ack_file(done, worker=worker, msg_id=msg_id)
+        routes.append("disk")
+
+    # Route (a): wait for idle
+    is_idle = wait_for_idle(worker, timeout=timeout, paseo=paseo)
+    if is_idle:
+        ack_msg = f"ack {worker} {msg_id}"
+        argv = send_argv(worker, ack_msg, paseo=paseo)
+        rc, out, err = run_send(argv)
+        if rc == 0:
+            routes.append("prompt")
+
+    result: dict[str, Any] = {
+        "status": "acked" if routes else "failed",
+        "worker": worker,
+        "msg_id": msg_id,
+        "routes": routes,
+    }
+    if ack_file:
+        result["ack_file"] = ack_file
+    if not is_idle:
+        result["warning"] = "worker did not transition to idle within timeout; disk ack written"
+        return (0 if "disk" in routes else 1), result
+
+    return 0, result
 
 
 def send_argv(requester: str, message: str, *, paseo: str = "paseo") -> list[str]:
@@ -119,28 +281,80 @@ def main(argv: Sequence[str] | None = None) -> int:
                       help="print the required message on stdout (and argv as JSON with --argv)")
     mode.add_argument("--send", action="store_true", dest="do_send",
                       help="run paseo send --json --no-wait with the message")
-    p.add_argument("--requester", required=True, help="requester's Paseo agent id (or unique shortId)")
-    p.add_argument("--title", required=True, help="short slice title (no commas)")
-    detail = p.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--check-ack", dest="check_ack_path", metavar="DONE_PATH",
+                      help="check for <done-path>.ack on disk and verify msg-id")
+    mode.add_argument("--lead-ack", action="store_true", dest="do_lead_ack",
+                      help="lead-side dual ack: write <done-path>.ack and prompt-ack worker when idle")
+
+    # Worker options
+    p.add_argument("--requester", help="requester's Paseo agent id (or unique shortId)")
+    p.add_argument("--title", help="short slice title (no commas)")
+    detail = p.add_mutually_exclusive_group()
     detail.add_argument("--pr", help="PR URL (preferred detail when a PR exists)")
     detail.add_argument("--status", help="status word when there is no PR yet (e.g. DONE, BLOCKED)")
     p.add_argument("--report", help="optional absolute report path as a third done-field")
     p.add_argument("--sender", default=os.environ.get("PASEO_AGENT_ID", ""),
                    help="this slice's agent id for the named ack (default: $PASEO_AGENT_ID)")
+    p.add_argument("--msg-id", help="unique message id (default: auto-generated uuid4 hex)")
     p.add_argument("--argv", action="store_true",
                    help="with --print, also print the paseo send argv as one JSON line after the message")
+
+    # Lead / check options
+    p.add_argument("--worker", help="worker agent id (for --lead-ack)")
+    p.add_argument("--done", help="path to done file (for --lead-ack)")
+    p.add_argument("--timeout", type=float, default=None,
+                   help="timeout in seconds for --check-ack or --lead-ack wait-for-idle")
     p.add_argument("--paseo", default=shutil.which("paseo") or "paseo",
                    help="paseo CLI path (default: PATH lookup, else 'paseo')")
     args = p.parse_args(argv)
 
+    if args.check_ack_path:
+        timeout = args.timeout if args.timeout is not None else 0.0
+        data = check_ack(args.check_ack_path, msg_id=args.msg_id, timeout=timeout)
+        if data is not None:
+            print(json.dumps({"status": "acked", "data": data, "ack_file": f"{args.check_ack_path}.ack"}))
+            return 0
+        sys.stderr.write(f"completion-notice: no valid ack file found for {args.check_ack_path}\n")
+        return 1
+
+    if args.do_lead_ack:
+        worker = args.worker or args.sender
+        if not worker:
+            sys.stderr.write("completion-notice: --worker (or $PASEO_AGENT_ID) is required for --lead-ack\n")
+            return 2
+        if not args.msg_id:
+            sys.stderr.write("completion-notice: --msg-id is required for --lead-ack\n")
+            return 2
+        timeout = args.timeout if args.timeout is not None else 30.0
+        rc, result = lead_ack(
+            worker=worker,
+            msg_id=args.msg_id,
+            done=args.done,
+            timeout=timeout,
+            paseo=args.paseo,
+        )
+        print(json.dumps(result))
+        return rc
+
     detail_s = args.pr or args.status
+    if not args.requester or not args.title or not detail_s:
+        sys.stderr.write("completion-notice: --requester, --title, and (--pr | --status) are required\n")
+        return 2
+
     try:
         message = build_message(
-            title=args.title, detail=detail_s, report=args.report, sender=args.sender or ""
+            title=args.title,
+            detail=detail_s,
+            report=args.report,
+            sender=args.sender or "",
+            msg_id=args.msg_id,
         )
     except ValueError as e:
         print(f"completion-notice: {e}", file=sys.stderr)
         return 2
+
+    parsed = parse_message(message)
+    msg_id = parsed.get("msg_id")
 
     argv_send = send_argv(args.requester.strip(), message, paseo=args.paseo)
     if args.do_print:
@@ -154,14 +368,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         sys.stderr.write(err or out or f"paseo send exited {rc}\n")
         return 1
     status = send_status(out)
-    # Sourceless send: sent/completed = delivered. Agent send: usually queued = accepted (exit 5).
+    # Sourceless send: sent/completed = delivered (exit 0). Agent send: usually queued = accepted (exit 5).
     if status in ("sent", "completed"):
-        print(json.dumps({"status": status, "result": "delivered"}))
+        print(json.dumps({"status": status, "result": "delivered", "msg_id": msg_id, "exit_code": 0}))
         return 0
     if status == "queued":
-        print(json.dumps({"status": status, "result": "accepted"}))
+        print(json.dumps({"status": status, "result": "accepted", "msg_id": msg_id, "exit_code": 5}))
         return 5
-    print(json.dumps({"status": status, "result": "unknown"}), file=sys.stderr)
+    print(json.dumps({"status": status, "result": "unknown", "exit_code": 1}), file=sys.stderr)
     return 1
 
 
