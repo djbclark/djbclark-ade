@@ -14,6 +14,14 @@ evidence refresh (ready-to-paste snippets:
 - **C1 `paseo4herdr`:** `2026-11-10: waive Wave 6 C3 paseo4herdr for immutable dated handoff references; do not rewrite those records or reinstall retired tools.`
 - **C2 `sudo_secretspec`:** `2026-11-10: waive Wave 6 C3 sudo_secretspec for preserved dated handoff references; new runtime callers use native Paseo.`
 
+## Wave 6 C3 historical waives (2026-11-12)
+
+Operator djbclark granted both waives on 2026-11-12 via question card to lead 8cd86203. Recorded verbatim
+(ready-to-paste snippets: [`c3-waives-2026-11-12/`](c3-waives-2026-11-12/)).
+
+- **C3 `cfengine`:** `2026-11-12: waive Wave 6 C3 cfengine for immutable dated handoffs in cfengine-all; cfengine-core and cfengine-all AGENTS.md are clean.`
+- **C3 `aiuse`:** `2026-11-12: waive Wave 6 C3 aiuse only for passive consumption of existing ACP logs and its associated tests, format documentation and dated history; active launcher guidance is migrated.`
+
 ## R2-18 decided DELETE (2026-11-10)
 
 - **Decision:** delete `claude/hooks/quota_nudge.py` and `claude/hooks/cswap_quota_context.sh` with their template hook lines. E7 replaced the Claude quota gate with Paseo's session-guard and usage-auto-resume; `quota_nudge.py` only read the deleted guard's `quota-guard.json` and was silent without it; `cswap_quota_context.sh` was the SessionStart display companion of that same path (~950 tokens of `cswap list`). `tests/test_claude_quota_guard.py` already held the nudge's tests and went with E7; `tests/conftest.py` no longer pins `CLAUDE_QUOTA_GUARD_STATE`; `tests/test_hook_deadline_timeouts.py` expects three wrapped hooks.
