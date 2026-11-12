@@ -47,7 +47,7 @@ After `route_agent.py plan` / `route` and `load-watch admit` (machine capacity �
 # Re-plan immediately before EACH launch when several slices share one quota pool
 # (plan/pool_fits do not yet reserve sibling in-flight usage; see model-routing D5).
 paseo run --provider PROVIDER/MODEL --no-wait \
-  --workspace wks_… --cwd ~/src/<repo>-NAME-wt \
+  --mode FULL_ACCESS_MODE --workspace wks_… --cwd ~/src/<repo>-NAME-wt \
   --label ade.kind=KIND --label ade.name=NAME --label ade.lead=LEAD \
   --label ade.task=TASK \
   "$(cat brief-with-footer.md)"
@@ -107,3 +107,42 @@ Three independent fixes in one repository, one review:
 5. Each DONE slice: review its diff, push its branch, open the PR; one read-only review per PR through
    `bin/review-launch` (Claude) or a judgment `paseo run` brief that says change nothing, in the same
    claimed workspace/cwd as the slice.
+
+## 6. Avoid operator permission cards (2026-11-12)
+
+Always launch our own Codex agents with `--mode full-access`, Claude with
+`--mode bypassPermissions`, and Antigravity with `--mode full-access`.
+`FULL_ACCESS_MODE` in the launch example means that provider's value. Set it at
+creation; changing a running agent's mode did not reliably remove old cards.
+The locally inspected `ProviderOverrideSchema` has no provider default-mode field.
+Omitted modes inherit same-provider parents, or fall through to the provider
+for a top-level interactive run (`create-agent-mode.ts`). Do not invent keys
+in `~/.paseo/config.json`; no config change or restart is required by this helper.
+The Claude enforced review boundary remains separate (`bin/review-launch`).
+
+`bin/ade-auto-permit --lead FULL_LEAD_UUID --log /absolute/path/permits.jsonl`
+runs one sweep. Add `--watch --duration 3600 --interval 2` for a bounded watcher.
+It allows only descendants of the named lead (not the lead itself), or agents
+matching a repeated `--ade-label ade.KEY=VALUE` selector. Any matching selector
+qualifies. The installed Paseo inspect/ls JSON omits arbitrary labels; exact server-side
+`ls -a -g --label` filters prove selected labels. A wildcard `ade.*` scan is
+not available through this CLI. Supply the labels used by the wave, for example
+`--ade-label ade.task=wave7`. Titles, cwd and provider names confer no authority.
+Labels are trusted local-agent scope markers, not an external security boundary.
+
+Only explicit pending `(agentId, requestId)` pairs are allowed; no `--all`.
+Failed/malformed discovery fails closed. JSONL records skips, attempts, confirmations
+and errors, without tool descriptions, arguments or CLI error bodies. Failed or
+unconfirmed writes are never retried through another surface; a later watch sweep
+can retry only if the request is still listed pending. Watch cycles recheck
+ancestry and labels; a per-log lock prevents overlapping instances sharing a log.
+Use one log per daemon/wave; do not run competing watchers with different logs.
+No daemon restart, installed configuration change or scheduler activation occurs.
+
+Codex full-access maps to `approval_policy = "never"` and
+`sandbox_mode = "danger-full-access"`. MCP approval settings are separate:
+`mcp_servers.<server>.default_tools_approval_mode` and
+`mcp_servers.<server>.tools.<tool>.approval_mode` (`"approve"` preapproves a tool).
+Paseo's `applyCodexToolPolicy` explicitly writes per-tool approval values for its
+preapproved tools. Inspect those when a graft card persists; this helper does not
+edit `site-private`'s `codex/config.toml` or broaden MCP tool policies.
