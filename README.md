@@ -138,7 +138,7 @@ Skills (from each `skills/*/SKILL.md`):
 | [`ade-user-install`](bin/ade-user-install) | Uv/just fetch, bin/ symlink, or Linux sudo-secretspec media staging. |
 | [`ade_agent_mode.py`](bin/ade_agent_mode.py) | Native Paseo mode audit/repair plan. |
 | [`ade_browser_task.py`](bin/ade_browser_task.py) | Render / relay browser-only prompts (setup-plan S7). |
-| [`ade_browser_task_state.py`](bin/ade_browser_task_state.py) | Opt-in S7 pr-access records; only authoritative GET readback proves completion. |
+| [`ade_browser_task_state.py`](bin/ade_browser_task_state.py) | Opt-in S7 browser-task records; only authoritative GET readbacks prove completion. |
 | [`ade_claims.py`](bin/ade_claims.py) | The workspace claim library, the git-guard rules and the ref hooks (isolation slice W1, 2026-10-24; O2 redesign 2026-10-25). |
 | [`ade_config.py`](bin/ade_config.py) | Versioned read-only effective ADE config (schema_version=1). |
 | [`ade_config_edit.py`](bin/ade_config_edit.py) | Comment-preserving atomic scalar set for ADE config TOML. |
