@@ -68,9 +68,59 @@ order; stop and roll back on a result not listed as expected.
    saved Mode is neither the YOLO id nor `plan`/`read-only`/`dontAsk` (typically saved `default`/`auto`), or a Cursor
    agent saving `auto_accept` other than true, remains allowed if unstamped and logs its saved configuration.
    The CLI's `unavailable`/`drift` status does not predict a legacy hook refusal. Note whether Hermes is listed (step 5).
-1. Create throwaways **before installing** so they are legacy (no stamp). Per provider, in a scratch dir:
-   `paseo run --provider <provider>/<model> --cwd <scratch dir> --wait-timeout 2m --json -- "reply with the word ok"`.
-   Record ids; also make a Claude one with `--mode bypassPermissions`.
+1. Create throwaways **before installing** so they are legacy (no stamp). Launch each one top-level
+   through Python subprocess argv lists, with both its process cwd and `--cwd` set to the scratch directory.
+   Remove inherited agent **and workspace** placement from a copy of the environment; keep the daemon/host
+   selection unchanged. Use this helper for every create in steps 1, 4 and 6:
+
+   ```python
+   import json
+   import os
+   from pathlib import Path
+   import subprocess
+
+   scratch = Path("/absolute/path/to/canary/scratch").resolve()
+   scratch.mkdir(parents=True, exist_ok=True)
+   env = os.environ.copy()
+   for key in ("PASEO_AGENT_ID", "PASEO_AGENT_CWD", "PASEO_WORKSPACE_ID"):
+       env.pop(key, None)
+
+   def create_throwaway(provider_model, mode=None):
+       argv = ["paseo", "run", "--provider", provider_model,
+               "--cwd", str(scratch), "--wait-timeout", "2m", "--json"]
+       if mode is not None:
+           argv += ["--mode", mode]
+       argv += ["--", "reply with the word ok"]
+       result = subprocess.run(argv, cwd=scratch, env=env, capture_output=True,
+                               text=True, timeout=300)
+       result.check_returncode()
+       created = json.loads(result.stdout)
+       agent_id = created["agentId"]
+       print("Created throwaway:", agent_id, flush=True)
+       # Persist this id in the canary record before inspection so rollback can archive it.
+       inspected = subprocess.run(
+           ["paseo", "agent", "inspect", agent_id, "--json"],
+           cwd=scratch, env=env, capture_output=True, text=True, timeout=300,
+           check=True,
+       )
+       snapshot = json.loads(inspected.stdout)
+       if (Path(snapshot["Cwd"]).resolve() != scratch
+               or snapshot.get("ParentAgentId") is not None):
+           raise RuntimeError(f"Unexpected placement for {agent_id}; stop and roll back")
+       return agent_id
+   ```
+
+   Call `create_throwaway("<provider>/<model>")` per enabled provider; also make a Claude one with
+   `create_throwaway("claude/<model>", "bypassPermissions")`. Record every id, including any whose placement
+   check fails, for step 7. Inspect the **first** create before proceeding to another create or installation.
+   Require its actual `Cwd` to equal scratch and `ParentAgentId` to be null; enforce the same check for later creates.
+
+   **Placement finding (2026-11-12):** the original agent-scoped command ignored the scratch `--cwd` and inherited
+   the caller workspace. A retry removing only `PASEO_AGENT_ID` and `PASEO_AGENT_CWD`, also using scratch as the
+   subprocess cwd, created a top-level agent but still reused the caller workspace while `PASEO_WORKSPACE_ID`
+   remained inherited. Both runs stopped before installation and archived their throwaways. Clearing workspace
+   placement as above is a proposed correction; that three-variable form has **not** passed a live canary.
+   The inspection gate must pass before this procedure can claim install/create/resume coverage.
 2. Install from a clean pinned tree, not the shared checkout. The host records the directory path, so the
    worktree is the live plugin source: **it must persist** until rollback or reinstall. Run
    `git -C /Users/djbclark/src/djbclark-ade fetch origin`, then
@@ -82,14 +132,15 @@ order; stop and roll back on a result not listed as expected.
    `ade-yolo: <id>: provider=<provider> saved mode=<JSON value> auto_accept=<JSON value>; legacy agent allowed without mode mutation`.
    Expect Claude `default` or `bypassPermissions`, Codex `auto`, Antigravity `full-access`, Cursor `agent`,
    and Pi `null` as saved mode values; absent `auto_accept` logs `null`. No legacy catalog/control lookup is required.
-4. New creates: repeat step 1 per provider (now stamped). Expected `ade-agent-mode check <id> --json`
+4. New creates: repeat step 1 per provider using `create_throwaway` and its placement check (now stamped). Expected `ade-agent-mode check <id> --json`
    (absolute path): Claude `bypassPermissions`, Codex/Antigravity `full-access`: `verified`. **Cursor and Pi
    report `unavailable` (exit 2) from that CLI by design** (it passes no controls; Pi has no mode): their
    pass criterion is that the create succeeded. Also confirm hermes/cline creates (if attempted) refuse as
    expected, never as a surprise.
 5. Hermes: do not prompt it. If it was listed before install, `paseo ls -g --json` still lists it with the same
    id/status afterwards, and its next natural open shows no `ade-yolo` refusal.
-6. Restrictive escape: create a throwaway with `--mode plan` (Claude); `ade-agent-mode check` reports `exempt`.
+6. Restrictive escape: use `create_throwaway("claude/<model>", "plan")` with the same placement check;
+   `ade-agent-mode check` reports `exempt`.
    (`ade-yolo.skip` is metadata-only: reachable through MCP `create_agent` metadata, not `paseo run`.)
 7. Archive every throwaway.
 
