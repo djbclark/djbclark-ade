@@ -79,24 +79,50 @@ def test_invalid_config_is_advisory(tmp_path, monkeypatch, capsys):
 def test_cli_reads_aiuse_and_paseo_and_show(tmp_path):
     import os
     import subprocess
-    now = datetime.now(timezone.utc).isoformat()
+    # Both sources identify the configured Claude pool. Provider-only readings
+    # are deliberately rejected by the router's pool-family contract (#581).
+    now = "2026-11-12T12:00:00+00:00"
     aiuse = tmp_path / "aiuse.json"
     aiuse.write_text(json.dumps({"schema_version": "1.3", "fresh": True, "age_seconds": 0,
-        "available": [{"provider": "claude", "pool_family": None, "age_seconds": 0,
+        "available": [{"provider": "claude", "pool_family": "default", "age_seconds": 0,
                        "usable_now": True, "headroom_percent": 80}]}))
     paseo = tmp_path / "paseo.json"
-    paseo.write_text(json.dumps([{"sourceId": "claude", "id": "claude:default", "fetchedAt": now,
-        "report": {"status": "available", "windows": [{"id": "weekly", "label": "Weekly",
-                   "usedPct": 95, "remainingPct": 5}]}}]))
     env = {**os.environ, "ROUTE_AGENT_AIUSE_JSON": str(aiuse),
            "ROUTE_AGENT_PASEO_USAGE_JSON": str(paseo), "ROUTE_AGENT_PASEO": "on",
            "AIUSE_SNAPSHOT": str(tmp_path / "absent.json"),
            "ADE_SPENDING_PROFILES": str(tmp_path / "absent-profiles.json")}
-    for command in ([sys.executable, str(ROOT / "bin/quota_nudge.py")],
-                    [sys.executable, str(ROOT / "bin/route_agent.py"), "show"]):
-        run = subprocess.run(command, env=env, capture_output=True, text=True, timeout=20)
-        assert run.returncode == 0, run.stderr
-        assert "claude: critical (5% left)" in run.stdout
+    # Freeze only the router's clock in each child. The real entry points,
+    # parser, source merge and freshness checks all run against fixed fixtures.
+    runner = """
+import runpy
+import sys
+from datetime import datetime
+sys.path.insert(0, sys.argv[1])
+import route_agent
+class FixtureDatetime(datetime):
+    @classmethod
+    def now(cls, tz=None):
+        stamp = cls.fromisoformat("2026-11-12T12:00:00+00:00")
+        return stamp.astimezone(tz) if tz else stamp.replace(tzinfo=None)
+route_agent.datetime = FixtureDatetime
+sys.argv = sys.argv[2:]
+if sys.argv[0].endswith("/route_agent.py"):
+    raise SystemExit(route_agent.main(sys.argv[1:]))
+runpy.run_path(sys.argv[0], run_name="__main__")
+"""
+    # Exercise both directions: ignoring either source must fail an assertion.
+    for paseo_left, expected in ((5, "claude: critical (5% left)"),
+                                 (90, "claude: ok (80% left)")):
+        paseo.write_text(json.dumps([{"sourceId": "claude", "pool_family": "default",
+            "id": "claude:default", "fetchedAt": now,
+            "report": {"status": "available", "windows": [{"id": "weekly", "label": "Weekly",
+                       "usedPct": 100 - paseo_left, "remainingPct": paseo_left}]}}]))
+        for entry in ([str(ROOT / "bin/quota_nudge.py")],
+                      [str(ROOT / "bin/route_agent.py"), "show"]):
+            command = [sys.executable, "-c", runner, str(ROOT / "bin"), *entry]
+            run = subprocess.run(command, env=env, capture_output=True, text=True, timeout=20)
+            assert run.returncode == 0, run.stderr
+            assert expected in run.stdout, (run.stdout, run.stderr)
 
 
 def test_malformed_pool_values_are_unknown(monkeypatch, capsys):
