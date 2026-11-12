@@ -5,6 +5,10 @@ At every batch boundary the lead runs `python3 bin/quota_nudge.py`.
 router's merged `aiuse --available --json` and `paseo usage ls --json` reading;
 the existing router environment variables support offline fixtures.
 
+Paseo's native Claude report omits its pool family (verified 2026-11-12), so
+the Paseo ingest treats that missing family as `default`. Explicit Claude
+families and all other providers still require a matching configured pool.
+
 `config/quota-advisory.toml` owns default thresholds and optional `[pools.ID]`
 overrides. Values are percent **remaining**, inclusive at each boundary:
 10 or less is critical; 30 or less is conserve; above that is ok. Missing,

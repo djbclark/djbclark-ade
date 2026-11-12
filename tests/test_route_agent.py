@@ -556,13 +556,30 @@ class TestQuotaFamilyIsolation(unittest.TestCase):
         self.assertFalse(r.BY_NAME["cursor-auto"].eligible("research", q))
 
     def test_paseo_provider_only_report_cannot_authorize_family_route(self):
-        for provider in ("cursor", "antigravity", "claude"):
+        for provider in ("cursor", "antigravity"):
             rows = [{"sourceId": provider, "fetchedAt": datetime.now(UTC).isoformat(),
                      "report": {"status": "available", "windows": [
                          {"label": "usage", "remainingPct": 82}]}}]
             self.assertEqual(r.usage_from_paseo(rows), {})
             rows[0]["pool_family"] = "fable"
             self.assertEqual(r.usage_from_paseo(rows), {})
+
+    def test_paseo_native_claude_defaults_only_missing_family(self):
+        now = datetime(2026, 11, 12, 12, tzinfo=UTC)
+        row = {"sourceId": "claude", "fetchedAt": now.isoformat(),
+               "report": {"status": "available", "windows": [
+                   {"label": "Weekly", "remainingPct": 23}]}}
+        expected = r.usage_from_paseo([dict(row, pool_family="default")], now=now)
+        self.assertEqual(expected["claude"]["remaining"], 23)
+        self.assertEqual(r.usage_from_paseo([row], now=now), expected)
+        self.assertEqual(r.usage_from_paseo([dict(row, pool_family=None)], now=now), expected)
+        for family in ("fable", "unknown", "", "api"):
+            with self.subTest(family=family):
+                self.assertEqual(r.usage_from_paseo([dict(row, pool_family=family)], now=now), {})
+        stale = dict(row, fetchedAt="2026-11-11T12:00:00+00:00")
+        self.assertIsNone(r.usage_from_paseo([stale], now=now)["claude"]["remaining"])
+        unavailable = dict(row, report={"status": "unavailable"})
+        self.assertIsNone(r.usage_from_paseo([unavailable], now=now)["claude"]["remaining"])
 
     def test_argon_never_borrows_gemini_or_claude_gpt(self):
         for fold in (r._providers_from_available, r._providers_from_accounts):
