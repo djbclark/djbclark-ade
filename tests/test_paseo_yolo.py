@@ -16,7 +16,7 @@ def snapshot(provider='claude', mode='bypassPermissions', **kw):
                 AvailableModes=[{'id': mode}], **kw)
 
 
-@pytest.mark.parametrize('provider,mode', [('claude','bypassPermissions'), ('codex','full-access'), ('antigravity','full-access')])
+@pytest.mark.parametrize('provider,mode', [('claude','bypassPermissions'), ('codex','full-access'), ('antigravity','full-access'), ('copilot','allow-all')])
 def test_source_mode_requires_native_membership(provider, mode):
     plan = y.plan_unattended_config(provider, catalog(provider,[mode]))
     assert plan['status'] == 'ready' and plan['mode_id'] == mode

@@ -1,118 +1,69 @@
-/**
- * Pure helpers for ade-yolo (no Paseo daemon I/O).
- *
- * Keep the provider → mode map aligned with bin/paseo_yolo.py.
- */
-
-/** @type {Record<string, { modeId: string, featureValues?: Record<string, unknown> }>} */
+/** Pure planning from native IDs/controls. Keep parity with bin/paseo_yolo.py. */
 export const YOLO_BY_PROVIDER = {
   claude: { modeId: "bypassPermissions" },
   codex: { modeId: "full-access" },
-  opencode: { modeId: "build", featureValues: { auto_accept: true } },
-  omp: { modeId: "full" },
-  // cursor / pi / antigravity / hermes / muse: leave alone (dynamic or unverified).
+  antigravity: { modeId: "full-access" },
+  copilot: { modeId: "allow-all" },
 };
-
-export const PROMPTING_MODE_IDS = new Set([
-  "default",
-  "auto",
-  "acceptEdits",
-  "auto-review",
-]);
-
-export const RESTRICTIVE_MODE_IDS = new Set([
-  "plan",
-  "read-only",
-  "dontAsk",
-]);
-
-export const UNATTENDED_MODE_IDS = new Set([
-  "bypassPermissions",
-  "bypass",
-  "full-access",
-  "full",
-  "build",
-  "danger-full-access",
-  "yolo",
-]);
-
+export const RESTRICTIVE_MODE_IDS = new Set(["plan", "read-only", "dontAsk"]);
 export const SKIP_METADATA_KEY = "ade-yolo.skip";
-
-/**
- * @param {unknown} provider
- * @returns {string}
- */
+export const SCOPE_METADATA_KEY = "ade.work-scope";
 export function providerId(provider) {
-  const raw = typeof provider === "string" ? provider.trim() : "";
-  if (!raw) return "";
-  return raw.split("/", 1)[0];
+  return typeof provider === "string" ? provider.trim().split("/", 1)[0] : "";
 }
-
-/**
- * @param {Record<string, unknown> | null | undefined} metadata
- * @returns {boolean}
- */
 export function shouldSkip(metadata) {
-  if (!metadata || typeof metadata !== "object") return false;
-  const v = metadata[SKIP_METADATA_KEY];
-  return v === true || v === 1 || v === "1" || v === "true" || v === "yes";
+  const value = metadata?.[SKIP_METADATA_KEY];
+  return [true, 1, "1", "true", "yes"].includes(value) ||
+    ["external-security-critical", "operator-restrictive"].includes(metadata?.[SCOPE_METADATA_KEY]);
+}
+export function isExempt(config, metadata) {
+  return shouldSkip(metadata) || RESTRICTIVE_MODE_IDS.has(config?.modeId);
 }
 
-/**
- * @param {{ provider?: unknown, modeId?: unknown, featureValues?: unknown, providerOptions?: unknown }} config
- * @param {Record<string, unknown> | null | undefined} metadata
- * @returns {null | { modeId: string, featureValues?: Record<string, unknown> }}
- */
-export function planYoloPatch(config, metadata) {
-  if (shouldSkip(metadata)) return null;
-  const cfg = config && typeof config === "object" ? config : {};
-  const modeRaw = cfg.modeId;
-  const modeId = modeRaw == null || modeRaw === "" ? null : String(modeRaw);
-  if (modeId && RESTRICTIVE_MODE_IDS.has(modeId)) return null;
-
-  const provider = providerId(cfg.provider);
-  const yolo = YOLO_BY_PROVIDER[provider];
-  if (!yolo) return null;
-
-  // Already unattended: still ensure OpenCode auto_accept (and similar).
-  if (modeId && UNATTENDED_MODE_IDS.has(modeId)) {
-    if (!yolo.featureValues) return null;
-    const current =
-      cfg.featureValues && typeof cfg.featureValues === "object" ? cfg.featureValues : {};
-    let changed = false;
-    const next = { ...current };
-    for (const [k, v] of Object.entries(yolo.featureValues)) {
-      if (next[k] !== v) {
-        next[k] = v;
-        changed = true;
-      }
-    }
-    return changed ? { modeId, featureValues: next } : null;
+/** A provider's default is never proof of unattended operation. */
+export function planYoloPatch(config, metadata, catalog, controls) {
+  if (isExempt(config, metadata)) return null;
+  const provider = providerId(config?.provider);
+  const unavailable = reason => { throw new Error(`ade-yolo: ${provider}: ${reason}`); };
+  if (["omp", "opencode", "crush", "agy", "grok"].includes(provider))
+    return unavailable("retired client is not an ordinary dispatch route");
+  if (!catalog || catalog.provider !== provider || catalog.enabled !== true || catalog.status !== "ready" || catalog.error)
+    return unavailable("native provider catalog is not enabled/ready");
+  if (!Array.isArray(catalog.modes) || catalog.modes.some(m => !m || typeof m.id !== "string" || !m.id))
+    return unavailable("native mode IDs are missing; labels/defaultMode are insufficient");
+  const ids = catalog.modes.map(m => m.id);
+  if (new Set(ids).size !== ids.length) return unavailable("duplicate native mode IDs");
+  let modeId = YOLO_BY_PROVIDER[provider]?.modeId;
+  const marked = catalog.modes.filter(m => m.isUnattended === true);
+  if (!ids.includes(modeId)) modeId = marked.length === 1 ? marked[0].id : null;
+  if (modeId) return { modeId };
+  if (provider === "cursor" && !controls?.error && Array.isArray(controls?.controls) &&
+      controls.controls.some(c => c.type === "toggle" && c.key === "auto_accept")) {
+    modeId = config.modeId ?? catalog.defaultModeId ?? null;
+    if (modeId !== null && !ids.includes(modeId)) return unavailable("Cursor mode absent from native catalog");
+    return { ...(modeId === null ? {} : { modeId }),
+      providerOptions: { ...config.providerOptions, auto_accept: true } };
   }
-
-  // Missing, prompting (Always Ask / auto / …), or any other non-restrictive mode → YOLO.
-  /** @type {{ modeId: string, featureValues?: Record<string, unknown> }} */
-  const patch = { modeId: yolo.modeId };
-  if (yolo.featureValues) {
-    const current =
-      cfg.featureValues && typeof cfg.featureValues === "object" ? cfg.featureValues : {};
-    patch.featureValues = { ...current, ...yolo.featureValues };
-  }
-  return patch;
+  return unavailable(provider === "pi" && ids.length === 0
+    ? "Pi is modeless; extension UI requests lack verified permission control"
+    : "no source-backed/catalog-marked unattended mode or supported control");
+}
+export function applyYoloToCreateRequest(request, catalog, controls) {
+  const config = request?.config ?? {};
+  const patch = planYoloPatch(config, request?.metadata, catalog, controls);
+  return patch ? { ...request, config: { ...config, ...patch } } : undefined;
 }
 
-/**
- * Apply a YOLO patch onto a create-before request.
- *
- * @param {{ config?: Record<string, unknown>, env?: unknown, metadata?: Record<string, unknown> }} request
- * @returns {undefined | { config: Record<string, unknown>, env?: unknown, metadata?: Record<string, unknown> }}
- */
-export function applyYoloToCreateRequest(request) {
-  if (!request || typeof request !== "object") return undefined;
-  const config = request.config && typeof request.config === "object" ? request.config : {};
-  const patch = planYoloPatch(config, request.metadata);
-  if (!patch) return undefined;
-  const nextConfig = { ...config, modeId: patch.modeId };
-  if (patch.featureValues) nextConfig.featureValues = patch.featureValues;
-  return { ...request, config: nextConfig };
+/** Pre-open check only: this is not post-open runtime readback. */
+export function assertResumeConfig(snapshot, request, catalog, controls) {
+  const config = { provider: request.provider, modeId: snapshot?.currentModeId,
+    providerOptions: snapshot?.options };
+  if (isExempt(config, request.metadata)) return;
+  if (!snapshot || snapshot.id !== request.agentId || snapshot.provider !== providerId(request.provider))
+    throw new Error("ade-yolo: resume identity/readback unavailable");
+  const patch = planYoloPatch(config, request.metadata, catalog, controls);
+  if (patch.modeId && snapshot.currentModeId !== patch.modeId)
+    throw new Error("ade-yolo: saved mode drift; explicit repair and readback required before resume");
+  if (patch.providerOptions?.auto_accept === true && snapshot.options?.auto_accept !== true)
+    throw new Error("ade-yolo: saved auto_accept is unverified; explicit repair required before resume");
 }

@@ -15,12 +15,13 @@ omp/OpenCode clients are not dispatch targets or fallbacks. `skills/fan-out` is 
 commands (soft deletion deadline 2026-11-20; [docs/slim/wave6-follow-up.md](slim/wave6-follow-up.md)). Do not start new
 call sites on them; do not invent shim flags.
 
-**Permission mode (2026-11-10):** ordinary work runs YOLO / Bypass (`bin/paseo_yolo.py`; Claude
-`bypassPermissions`, Codex `full-access`, OpenCode `build`). Wave 4 E6's use of each provider's
-`defaultMode` was plan drift and left MCP subagents in Always Ask. Install `plugins/ade-yolo` on the
-daemon so `agent.create.before` forces those modes (opt out with `plan` / `read-only` or metadata
-`ade-yolo.skip`). Restrictive review stays on `bin/review-launch`. Untrusted GitHub artifacts are
-**data** under AGENTS.md Trust — not a reason to leave seats in Always Ask.
+**Permission mode (2026-11-12):** every ordinary launch, child and trusted internal
+review uses catalog-backed unattended permissions. Explicit operator restrictions
+and external-security-critical work preserve the restricted boundary. Provider
+`defaultMode` is not proof. The create hook selects verified IDs/controls; resume
+preflights refuse saved mode drift. See [agent modes](agent-modes.md) for provider
+coverage, `ade-agent-mode check` / dry-run-default `repair`, runtime readback and
+unsupported native API limits. No plugin was installed by this cloud change.
 
 ## 1. Two kinds of work in an agent loop
 

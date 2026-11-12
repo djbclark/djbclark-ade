@@ -1,8 +1,8 @@
 {
   "id": "ade-yolo",
-  "name": "ADE YOLO / Bypass on create",
-  "description": "On agent.create.before, sets each new agent's modeId to the provider's unattended (Bypass / Full Access / build) mode unless the create already asked for a restrictive mode or metadata ade-yolo.skip is set. Restores the pre-slim-down YOLO policy (paseo-bypass-watch / paseo-new-seat) so MCP subagents and UI seats do not start in Always Ask.",
-  "version": "0.1.0",
+  "name": "ADE ordinary-agent YOLO",
+  "description": "Requires native catalog-backed unattended configuration on ordinary creates and checks saved configuration on resume; preserves explicit restrictive and external-security-critical scope.",
+  "version": "0.2.0",
   "requirements": {
     "paseo": ">=0.14.0"
   }

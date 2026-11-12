@@ -767,7 +767,7 @@ EFFORT_KEYS = ("reasoning_effort", "effort", "reasoning", "thought_level", "thin
 
 
 def paseo_call(args: list[str], timeout: float) -> tuple[dict[str, Any], str]:
-    """`paseo ARGS --json` (before a `--`) -> (the JSON object, '') or ({}, error). The status field is read, never $?."""
+    """`paseo ARGS --json` (before a `--`) -> (the JSON object, '') or ({}, error). Both exit status and structured output must succeed.."""
     cut = args.index("--") if "--" in args else len(args)
     try:
         r = subprocess.run([os.environ.get("DIALOGUE_PASEO") or "paseo", *args[:cut], "--json", *args[cut:]],
@@ -778,7 +778,7 @@ def paseo_call(args: list[str], timeout: float) -> tuple[dict[str, Any], str]:
         j = json.loads(r.stdout) if r.stdout.strip() else {}
     except json.JSONDecodeError:
         j = {}
-    if not isinstance(j, dict) or isinstance(j.get("error"), dict) or not j:
+    if r.returncode != 0 or not isinstance(j, dict) or isinstance(j.get("error"), dict) or not j:
         err = (j.get("error") or {}).get("message") if isinstance(j, dict) and isinstance(j.get("error"), dict) else ""
         return {}, f"paseo {args[0]} failed: {err or (r.stderr or r.stdout).strip()[-500:]}"
     return j, ""
@@ -795,25 +795,27 @@ def run_paseo_route(run: Run, route: dict[str, Any], prompt_file: Path, timeout:
     pointer = (f"Read the turn prompt in {prompt_file} in full and follow it, then write your reply to {reply_file}, "
                "with nothing else in that file, and end your turn. Write no other file.")
     thinking = [kv.split("=", 1)[1] for kv in route.get("set", []) if kv.split("=", 1)[0] in EFFORT_KEYS and "=" in kv]
-    mode = route.get("mode")
-    if not mode:
-        # Unattended YOLO (2026-11-10): not the provider's defaultMode (Always Ask / auto).
-        try:
-            rows = json.loads(subprocess.run([os.environ.get("DIALOGUE_PASEO") or "paseo", "provider", "ls", "--json"],
-                                             capture_output=True, text=True, timeout=60).stdout or "[]")
-        except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
-            rows = []
-        row = next((x for x in rows if isinstance(x, dict) and x.get("provider") == provider), None) \
-            if isinstance(rows, list) else None
-        if not row or row.get("enabled") != "Enabled" or row.get("status") != "available":
-            return "", f"Paseo provider {provider} is not enabled and available ({row})"
-        bin_dir = Path(__file__).resolve().parents[3] / "bin"
-        if str(bin_dir) not in sys.path:
-            sys.path.insert(0, str(bin_dir))
-        import paseo_yolo  # noqa: E402
-        mode = paseo_yolo.resolve_launch_mode(
-            provider, fallback=str(row.get("defaultMode") or "") or None,
-        )
+    requested_mode = route.get("mode")
+    mode = requested_mode
+    # Unattended YOLO (2026-11-10): not the provider's defaultMode (Always Ask / auto).
+    try:
+        registry = subprocess.run([os.environ.get("DIALOGUE_PASEO") or "paseo", "provider", "ls", "--json"],
+                                  capture_output=True, text=True, timeout=60)
+        rows = json.loads(registry.stdout or "[]") if registry.returncode == 0 else []
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
+        rows = []
+    row = next((x for x in rows if isinstance(x, dict) and x.get("provider") == provider), None) \
+        if isinstance(rows, list) else None
+    if not row or row.get("enabled") != "Enabled" or row.get("status") != "available":
+        return "", f"Paseo provider {provider} is not enabled and available ({row})"
+    bin_dir = Path(__file__).resolve().parents[3] / "bin"
+    if str(bin_dir) not in sys.path:
+        sys.path.insert(0, str(bin_dir))
+    import paseo_yolo  # noqa: E402
+    try:
+        mode = paseo_yolo.resolve_launch_mode(provider, requested=requested_mode)
+    except paseo_yolo.ModeUnavailable as exc:
+        return "", str(exc)
     argv = ["run", "--provider", f"{provider}/{route['model']}" if route.get("model") else provider,
             "--mode", mode, "--no-wait", "--title", f"dialogue-{prompt_file.stem}",
             "--cwd", str(run.cwd), *(["--thinking", route.get("effort") or thinking[-1]] if route.get("effort") or thinking else []),
@@ -822,6 +824,14 @@ def run_paseo_route(run: Run, route: dict[str, Any], prompt_file: Path, timeout:
     aid = started.get("agentId")
     if not aid:
         return "", err or "paseo run created no agent"
+    observed, read_error = paseo_call(["inspect", str(aid)], 60)
+    plan = paseo_yolo.plan_unattended_config(provider, {
+        "provider": provider, "enabled": True, "status": "ready", "modes": observed.get("AvailableModes"),
+    }, requested=mode)
+    proof = paseo_yolo.verify_unattended_snapshot(plan, observed, agent_id=str(aid))
+    if not proof["ok"]:
+        paseo_call(["agent", "stop", str(aid)], 60)
+        return "", f"paseo agent {aid}: unattended/restrictive mode unverified: {read_error or proof['reason']}"
     waited, err = paseo_call(["wait", str(aid), "--timeout", str(timeout)], timeout + 120)
     status = waited.get("status")
     if status != "idle":

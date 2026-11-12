@@ -998,9 +998,10 @@ def dispatch(a: argparse.Namespace) -> int:
     import paseo_yolo  # noqa: E402
     if a.perm == "all":
         entry = provider_entry(provider)  # refuse when missing / not Enabled+available
-        boundary, mode = "paseo", paseo_yolo.resolve_launch_mode(
-            provider, fallback=str(entry.get("defaultMode") or "") or None,
-        )
+        try:
+            boundary, mode = "paseo", paseo_yolo.resolve_launch_mode(provider)
+        except paseo_yolo.ModeUnavailable as exc:
+            die(str(exc))
     elif a.agent == "claude":
         boundary, mode = "review-launch", REVIEW_MODES[a.perm]
     else:
@@ -1214,6 +1215,22 @@ def launch_locked(record: Path, rec: dict) -> int | None:
     aid = data.get("agentId") if isinstance(data, dict) else None
     if not aid:
         return refuse_launch(record, f"paseo run did not create an agent: {why or data}", 2, "launch")
+    if rec.get("perm") == "all":
+        import paseo_yolo
+        observed, read_error = paseo_json(["inspect", str(aid)])
+        plan = paseo_yolo.plan_unattended_config(rec["provider"], {
+            "provider": rec["provider"], "enabled": True, "status": "ready",
+            "modes": observed.get("AvailableModes") if isinstance(observed, dict) else None,
+        })
+        proof = paseo_yolo.verify_unattended_snapshot(plan, observed, agent_id=str(aid))
+        if not proof["ok"]:
+            # A create receipt is not effective-mode proof. Stop this new agent,
+            # preserving the ID for recovery if native stop itself fails.
+            _, stop_error = paseo_json(["agent", "stop", str(aid)])
+            update_record(record, paseo_agent_id=str(aid), mode_readback=proof,
+                          mode_stop_error=stop_error or None)
+            return refuse_launch(record, f"unattended mode unverified: {read_error or proof['reason']}", 2, "mode")
+        update_record(record, mode_readback=proof)
     reported_cwd = data.get("cwd")
     expected_cwd = rec.get("dir")
     reported_ws = data.get("workspaceId") if isinstance(data.get("workspaceId"), str) else None
