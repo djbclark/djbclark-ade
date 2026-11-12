@@ -3084,6 +3084,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "show":
+        import quota_nudge
+        quota_nudge.print_reminder(quota)
         print(f"quota source: {quota_source_info()['source']}"
               + (f" (aiuse unavailable: {QuotaSource.fallback_reason})"
                  if QuotaSource.fallback_reason else ""))

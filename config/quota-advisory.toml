@@ -1,0 +1,9 @@
+# Advisory only; no routing/gate/acceptance effects. Percent REMAINING.
+[thresholds]
+critical_left = 10
+conserve_left = 30
+max_age_seconds = 1500
+
+# Optional per-pool overrides, keyed by the id printed by route_agent.py show:
+# [pools.antigravity]
+# conserve_left = 40
