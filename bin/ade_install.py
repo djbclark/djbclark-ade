@@ -19,7 +19,9 @@ Secrets are never read. A full apply (no ``--id``) also runs ``ade-sched reconci
 from __future__ import annotations
 
 import copy
+import contextlib
 import datetime
+import fcntl
 import json
 import os
 import platform
@@ -31,7 +33,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -1789,7 +1791,27 @@ def load_ledger(state_dir: Path) -> dict[str, Any]:
     }
 
 
+@contextlib.contextmanager
+def install_ledger_lock(state_dir: Path) -> Iterator[None]:
+    """Serialize component planning, execution and ledger read-modify-write.
+
+    Keep the lock on a stable file, not ledger.json (which is replaced). Live
+    apply enters this context whenever a component step is executable or
+    ledger.lock already exists so executable eligibility is decided or
+    re-validated under the lock. The kernel releases the lock on close/process
+    exit, including exceptional outcomes.
+    """
+    state_dir.mkdir(parents=True, exist_ok=True)
+    fd = os.open(state_dir / "ledger.lock", os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
 def save_ledger(state_dir: Path, ledger: dict[str, Any]) -> Path:
+    """Atomic low-level replacement; read-modify-write callers hold install_ledger_lock."""
     path = state_dir / "ledger.json"
     out = {
         "schema_version": LEDGER_SCHEMA_VERSION,
@@ -1987,7 +2009,7 @@ def _run_install_argv(
     kind: str,
     completed_reason: str,
 ) -> bool:
-    """Execute one argv list; update ``row`` and ledger. Return True if failed."""
+    """Execute under the caller's install_ledger_lock; return True if failed."""
     assert step.argv is not None
     entries = ledger.setdefault("entries", {})
     stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -2201,47 +2223,82 @@ def apply(
         raise InstallError("--apply-system requires --yes (refused with dry-run)")
     if reconcile_sched is None:
         reconcile_sched = ids is None
-    steps = build_apply_steps(
-        catalog,
-        ids=ids,
-        force=force,
-        allow_system=allow_system,
-        apply_system=apply_system,
-        prefix=prefix,
-    )
+    def plan_components() -> list[ApplyStep]:
+        return build_apply_steps(
+            catalog, ids=ids, force=force, allow_system=allow_system,
+            apply_system=apply_system, prefix=prefix,
+        )
+
+    steps = plan_components()
     state_dir = state_dir or default_state_dir()
     results: list[dict[str, Any]] = []
     failed = 0
     system_exec_refused = 0
-
-    ledger = load_ledger(state_dir) if not dry_run else None
 
     def _run(argv: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
         if runner is not None:
             return runner(argv, cwd)
         return _default_runner(argv, cwd, timeout_s=timeout_s)
 
-    for step in steps:
-        row: dict[str, Any] = {
-            "id": step.id,
-            "action": step.action,
-            "reason": step.reason,
-            "ok": step.action in ("skip", "would-install", "would-system-install"),
-        }
-        if step.argv is not None:
-            row["argv"] = list(step.argv)
-            row["detail"] = step.detail
-        if step.action == "would-system-install" and not dry_run:
-            if not apply_system:
-                # Default refuse: --yes --system alone never roots the machine.
-                system_exec_refused += 1
-                row["action"] = "refuse-system-exec"
-                row["ok"] = False
-                row["reason"] = (
-                    "system_argv execution refused; preview with --system --dry-run "
-                    "or --print-system-argv; live needs --yes --system --apply-system"
-                )
-            else:
+    def has_executable(planned: list[ApplyStep]) -> bool:
+        return any(
+            step.action == "would-install"
+            or (step.action == "would-system-install" and apply_system)
+            for step in planned
+        )
+
+    # Decide or re-validate executable eligibility under install_ledger_lock so
+    # a concurrent installer cannot cause a double or skipped install. When no
+    # ledger.lock exists after an all-non-executable plan, no installer has
+    # entered the lock before or during planning, so no state or lock file is
+    # created.
+    lock_path = state_dir / "ledger.lock"
+    use_lock = not dry_run and (has_executable(steps) or lock_path.exists())
+    with install_ledger_lock(state_dir) if use_lock else contextlib.nullcontext():
+        if use_lock:
+            # Another apply may have installed or been installing a component
+            # while this process planned or waited. Refresh observations under
+            # the lock before deciding what executes.
+            steps = plan_components()
+        executable = not dry_run and has_executable(steps)
+        ledger = load_ledger(state_dir) if executable else None
+
+        for step in steps:
+            row: dict[str, Any] = {
+                "id": step.id,
+                "action": step.action,
+                "reason": step.reason,
+                "ok": step.action in ("skip", "would-install", "would-system-install"),
+            }
+            if step.argv is not None:
+                row["argv"] = list(step.argv)
+                row["detail"] = step.detail
+            if step.action == "would-system-install" and not dry_run:
+                if not apply_system:
+                    # Default refuse: --yes --system alone never roots the machine.
+                    system_exec_refused += 1
+                    row["action"] = "refuse-system-exec"
+                    row["ok"] = False
+                    row["reason"] = (
+                        "system_argv execution refused; preview with --system --dry-run "
+                        "or --print-system-argv; live needs --yes --system --apply-system"
+                    )
+                else:
+                    assert ledger is not None
+                    if _run_install_argv(
+                        step=step,
+                        row=row,
+                        ledger=ledger,
+                        state_dir=state_dir,
+                        cwd=catalog.root,
+                        run=_run,
+                        timeout_s=timeout_s,
+                        kind="system_argv",
+                        completed_reason="system_argv completed",
+                    ):
+                        failed += 1
+            elif step.action == "would-install" and not dry_run:
+                assert step.argv is not None
                 assert ledger is not None
                 if _run_install_argv(
                     step=step,
@@ -2251,29 +2308,14 @@ def apply(
                     cwd=catalog.root,
                     run=_run,
                     timeout_s=timeout_s,
-                    kind="system_argv",
-                    completed_reason="system_argv completed",
+                    kind="install_argv",
+                    completed_reason="install_argv completed",
                 ):
                     failed += 1
-        elif step.action == "would-install" and not dry_run:
-            assert step.argv is not None
-            assert ledger is not None
-            if _run_install_argv(
-                step=step,
-                row=row,
-                ledger=ledger,
-                state_dir=state_dir,
-                cwd=catalog.root,
-                run=_run,
-                timeout_s=timeout_s,
-                kind="install_argv",
-                completed_reason="install_argv completed",
-            ):
+            elif step.action in ("blocked", "refuse-system", "refuse-system-exec"):
                 failed += 1
-        elif step.action in ("blocked", "refuse-system", "refuse-system-exec"):
-            failed += 1
-            row["ok"] = False
-        results.append(row)
+                row["ok"] = False
+            results.append(row)
 
     if system_exec_refused:
         return results, 2
