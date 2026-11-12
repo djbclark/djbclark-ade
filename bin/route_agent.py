@@ -128,6 +128,7 @@ import tomllib
 from dataclasses import dataclass, field, fields
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -2191,7 +2192,8 @@ def fallback_block(svc: Service, kind: str, quota: dict[str, Any], *, services: 
 
 def route(kind: str, *, quota: dict[str, Any] | None = None,
           min_headroom: float = 15.0,
-          exclude: frozenset[str] | set[str] = frozenset(), repo: str | None = None) -> Choice | None:
+          exclude: frozenset[str] | set[str] = frozenset(), repo: str | None = None,
+          avoid: frozenset[str] | set[str] = frozenset()) -> Choice | None:
     """Choose a service for `kind`, preferring idle paid capacity for bulk.
 
     Score = rank + (100 − remaining) × weight / 10, then pace/reset adjustments
@@ -2199,7 +2201,8 @@ def route(kind: str, *, quota: dict[str, Any] | None = None,
     static TOML flag when waste is unknown), and a pace_penalty when the
     binding window is burning ahead of schedule.
 
-    `exclude` names services to skip (full for this wave, or just failed)."""
+    `exclude` names services to skip (full for this wave, or just failed). `avoid` (route_adjust holds) skips
+    candidates the same way but, unlike `exclude`, does not move the quality band's anchor."""
     if kind not in KINDS:
         raise ValueError(f"kind must be one of {KINDS}")
     quota = {} if quota is None else quota
@@ -2210,7 +2213,7 @@ def route(kind: str, *, quota: dict[str, Any] | None = None,
 
     scored: list[tuple[float, Service, float | None, list[str]]] = []
     for svc in services:
-        if not svc.eligible(kind, quota) or svc.name in exclude:
+        if not svc.eligible(kind, quota) or svc.name in exclude or svc.name in avoid:
             continue
         if kind != "api-only" and not service_ready(svc):
             continue                       # e.g. omp without a working Anthropic login
@@ -2315,12 +2318,17 @@ def canary_pool(svc: Service) -> str | None:
 def plan(kinds: list[str], *, quota: dict[str, Any] | None = None,
          min_headroom: float = 15.0,
          exclude: frozenset[str] | set[str] = frozenset(), repo: str | None = None,
-         kind_exclude: dict[str, set[str]] | None = None
+         kind_exclude: dict[str, set[str]] | None = None,
+         reject: Callable[[str, Choice], str | None] | None = None,
+         refusals: list[str | None] | None = None
          ) -> list[tuple[str, Choice | None]]:
     """Assign each slice kind to a service for ONE wave, right now.
 
-    `kind_exclude` (route_adjust, W8) holds pools off per kind; it is soft: a kind that finds no
-    room without them is routed again with them allowed, so a hold never strands a kind.
+    `kind_exclude` (route_adjust, W8) holds pools off per kind (`route(avoid=)`, so the quality band
+    keeps its anchor); it is soft: a kind that finds no room, or only a choice `reject` refuses, is routed
+    again with them allowed, so a hold never strands a kind. `reject(kind, choice)` returns a refusal
+    reason or None; a refused slice comes back None, takes no wave slot, and its reason is appended to
+    `refusals` (one entry per kind, None when not refused).
 
     Greedy in the given order (put the hardest first), honouring each
     service's `max_parallel` so a wave spreads over pools. Slices that
@@ -2339,7 +2347,17 @@ def plan(kinds: list[str], *, quota: dict[str, Any] | None = None,
             gate = frontier_gate()
             skip = skip | {n for n, k in frontier.items() if k >= frontier_per_wave(n, gate, quota)}
         held = (kind_exclude or {}).get(kind) or set()
-        choice = route(kind, quota=quota, min_headroom=min_headroom, exclude=skip, repo=repo)
+        choice = route(kind, quota=quota, min_headroom=min_headroom, exclude=skip, repo=repo, avoid=held)
+        reason = reject(kind, choice) if reject and choice is not None else None
+        if held and (choice is None or reason):
+            retry = route(kind, quota=quota, min_headroom=min_headroom, exclude=skip, repo=repo)
+            retry_reason = reject(kind, retry) if reject and retry is not None else None
+            if retry is not None and (choice is None or not retry_reason):
+                choice, reason = retry, retry_reason
+        if reason:
+            choice = None                  # refused: no wave slot, the caller reports the reason
+        if refusals is not None:
+            refusals.append(reason)
         if choice is not None:
             name = choice.service.name
             pool = canary_pool(choice.service)
@@ -2985,7 +3003,10 @@ def _adjust_command(args: argparse.Namespace, parser: argparse.ArgumentParser,
     (a frontier slice that would have been downgraded, or a never_target pool)."""
     import route_adjust as ra
     cfg = ra.settings(sys.modules[__name__])
-    directory = ra.state_dir()
+    try:
+        directory = ra.state_dir()
+    except ValueError as e:
+        parser.error(str(e))
     if args.status:
         state = ra.load_state(directory / "state.json")
         print(json.dumps({"enabled": cfg["enabled"], "state_dir": str(directory), **state}, indent=1))
@@ -2998,19 +3019,21 @@ def _adjust_command(args: argparse.Namespace, parser: argparse.ArgumentParser,
         parser.error(f"unknown kind(s) {bad}; choose from {KINDS}")
     skip = {x.strip() for arg in args.exclude for x in arg.split(",") if x.strip()} | operator_disabled()
     repo = args.repo or repo_of(os.getcwd())
-    if not cfg["enabled"]:
-        # [routing.adjust].enabled = false: exactly `plan`, no state, no log.
-        rows = [(k, c, None) for k, c in plan(kinds, quota=quota, min_headroom=args.min_headroom, exclude=skip, repo=repo)]
-        result: dict[str, Any] = {"rows": rows, "events": [], "held": {}, "fresh": False}
-    else:
-        write = not args.dry_run
+    write = cfg["enabled"] and not args.dry_run
+    try:
         with (ra.locked(directory) if write else contextlib.nullcontext()):
-            state = ra.load_state(directory / "state.json")
+            state = ra.load_state(directory / "state.json") if cfg["enabled"] else ra.empty_state()
             result = ra.adjust(sys.modules[__name__], kinds, quota=quota, age=age, state=state,
                                exclude=skip, min_headroom=args.min_headroom, repo=repo, cfg=cfg)
             if write:
                 ra.log_events(directory, result["events"])
                 ra.save_state(directory / "state.json", result["state"])
+    except TimeoutError as e:
+        # A hung holder must not block launches: plan read-only, record nothing.
+        print(f"WARNING: {e}; planning read-only (no hold or restore recorded)", file=sys.stderr)
+        result = ra.adjust(sys.modules[__name__], kinds, quota=quota, age=age,
+                           state=ra.load_state(directory / "state.json"), exclude=skip,
+                           min_headroom=args.min_headroom, repo=repo, cfg=cfg)
     for event in result["events"]:
         print("adjust: " + json.dumps(event, sort_keys=True), file=sys.stderr)
     refused = any(r is not None for _, _, r in result["rows"])
@@ -3040,7 +3063,7 @@ def _adjust_command(args: argparse.Namespace, parser: argparse.ArgumentParser,
                 rem = "" if c.remaining is None else f" {c.remaining:.0f}% left"
                 print(f"{i}. {k:10} -> {c.service.name}{rem}  [{c.service.cli}]  {c.dispatch}")
         if result["held"]:
-            print("held off: " + "; ".join(f"{k}: {', '.join(v)}" for k, v in sorted(result["held"].items())))
+            print("held off: " + json.dumps(result["held"], sort_keys=True))
     return ADJUST_EXIT_REFUSED if refused else 0
 
 

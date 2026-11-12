@@ -28,10 +28,12 @@ import fcntl
 import json
 import os
 import tempfile
+import time
+from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 UTC = timezone.utc
 SCHEMA_VERSION = 1
@@ -69,8 +71,21 @@ def settings(router: Any) -> dict[str, Any]:
 
 # --- state and log ---------------------------------------------------------------------
 
+LOCK_TIMEOUT_SECONDS = 30.0
+
+
 def state_dir() -> Path:
-    return Path(os.environ.get("ADE_ROUTE_ADJUST_DIR") or "~/.local/state/ade/route-adjust").expanduser()
+    """`$ADE_ROUTE_ADJUST_DIR` or the default; a relative path is refused (it would land in the cwd,
+    which can be a repository worktree)."""
+    path = Path(os.environ.get("ADE_ROUTE_ADJUST_DIR") or "~/.local/state/ade/route-adjust").expanduser()
+    if not path.is_absolute():
+        raise ValueError(f"ADE_ROUTE_ADJUST_DIR must be an absolute path, got {str(path)!r}")
+    return path
+
+
+def skey(repo: str | None, kind: str) -> str:
+    """State key: floors are repo-scoped ([dispatch.repo_overrides]), so holds are too."""
+    return f"{repo}:{kind}" if repo else kind
 
 
 def _iso(when: datetime) -> str:
@@ -90,8 +105,8 @@ def empty_state() -> dict[str, Any]:
 
 
 def load_state(path: Path) -> dict[str, Any]:
-    """The saved state; a missing, corrupt or foreign-schema file reads as empty (no holds:
-    plain stateless routing, never a stranded kind)."""
+    """The saved state; a missing, corrupt, wrongly typed or foreign-schema file reads as empty or
+    drops the bad row (no holds: plain stateless routing, never a stranded kind)."""
     try:
         data = json.loads(path.read_text())
     except (OSError, ValueError):
@@ -100,13 +115,15 @@ def load_state(path: Path) -> dict[str, Any]:
             or not isinstance(data.get("kinds"), dict)):
         return empty_state()
     kinds: dict[str, Any] = {}
-    for kind, row in data["kinds"].items():
-        if not isinstance(kind, str) or not isinstance(row, dict):
+    for key, row in data["kinds"].items():
+        if not isinstance(key, str) or not isinstance(row, dict):
             continue
-        held = {pool: info for pool, info in (row.get("held") or {}).items()
+        raw_held = row.get("held")
+        held = {pool: info for pool, info in (raw_held if isinstance(raw_held, dict) else {}).items()
                 if isinstance(pool, str) and isinstance(info, dict) and _parse(info.get("since"))}
         last = row.get("last") if isinstance(row.get("last"), str) else None
-        kinds[kind] = {"last": last, "held": held}
+        refused = row.get("refused") if isinstance(row.get("refused"), str) else None
+        kinds[key] = {"last": last, "held": held, "refused": refused}
     return {"schema_version": SCHEMA_VERSION, "kinds": kinds}
 
 
@@ -128,15 +145,28 @@ def save_state(path: Path, state: dict[str, Any]) -> None:
 
 
 @contextmanager
-def locked(directory: Path) -> Iterator[None]:
-    """One writer at a time over read-modify-write (two leads re-planning together)."""
+def locked(directory: Path, timeout: float = LOCK_TIMEOUT_SECONDS) -> Iterator[None]:
+    """One writer at a time over read-modify-write (two leads re-planning together). Gives up after
+    `timeout` seconds with TimeoutError, so a hung holder cannot block every later call; symlinks are
+    not followed."""
     directory.mkdir(parents=True, exist_ok=True)
-    with open(directory / "state.lock", "a") as fh:
-        fcntl.flock(fh, fcntl.LOCK_EX)
+    fd = os.open(directory / "state.lock", os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(f"route-adjust lock {directory / 'state.lock'} busy for {timeout:g}s") from None
+                time.sleep(0.1)
         try:
             yield
         finally:
-            fcntl.flock(fh, fcntl.LOCK_UN)
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
 
 
 def log_events(directory: Path, events: list[dict[str, Any]]) -> None:
@@ -144,7 +174,7 @@ def log_events(directory: Path, events: list[dict[str, Any]]) -> None:
     if not events:
         return
     directory.mkdir(parents=True, exist_ok=True)
-    fd = os.open(directory / "changes.jsonl", os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+    fd = os.open(directory / "changes.jsonl", os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o644)
     try:
         for event in events:
             os.write(fd, (json.dumps(event, sort_keys=True) + "\n").encode())
@@ -156,9 +186,9 @@ def log_events(directory: Path, events: list[dict[str, Any]]) -> None:
 
 def floors(router: Any, svc: Any, kind: str, info: dict[str, Any], min_headroom: float
            ) -> list[tuple[str, float | None, float]]:
-    """(label, reading, floor) for each number that gates `kind` on `svc`: the pool's tightest
-    window against the router floor (a reserve's own floor, codex's `plenty_min` for an
-    everyday kind), and claude's Fable sublimit for `frontier`."""
+    """(label, reading, floor) for each simple number that gates `kind` on `svc`, for the reason text:
+    the pool's tightest window against the router floor (a reserve's own floor, codex's `plenty_min`
+    for an everyday kind), and claude's Fable sublimit for `frontier`."""
     floor = max(min_headroom, svc.reserve_floor or 0.0)
     if kind in (svc.plenty_kinds or ()):
         floor = max(floor, router.PLENTY_MIN)
@@ -184,38 +214,51 @@ def short_reason(router: Any, svc: Any, kind: str, quota: dict[str, Any], min_he
     return "slice does not fit the remaining window"
 
 
+def _cut(value: Any, margin: float) -> Any:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return value
+    return max(0.0, float(value) - margin)
+
+
 def recovered(router: Any, svc: Any, kind: str, quota: dict[str, Any], min_headroom: float,
               margin: float, repo: str | None) -> bool:
+    """Would the pool still take `kind` with `margin` points less in every reading? That puts the margin on
+    the floor that actually binds (min/reserve floor, plenty_min, the Fable sublimit, the slice's
+    estimate floor and measured history), not just on min_headroom."""
     info = quota.get(svc.name) or {}
     if info.get("remaining") is None:
         return False
-    if not router.pool_usable(svc, kind, quota, min_headroom=min_headroom, repo=repo):
-        return False
-    return all(value is None or value >= floor + margin
-               for _, value, floor in floors(router, svc, kind, info, min_headroom))
+    lowered = dict(info)
+    lowered["remaining"] = _cut(info.get("remaining"), margin)
+    for field in ("windows", "sublimits"):
+        if isinstance(info.get(field), dict):
+            lowered[field] = {k: _cut(v, margin) for k, v in info[field].items()}
+    return bool(router.pool_usable(svc, kind, {**quota, svc.name: lowered}, min_headroom=min_headroom, repo=repo))
 
 
 # --- the step --------------------------------------------------------------------------
 
-def transitions(router: Any, kinds: list[str], state: dict[str, Any], *, quota: dict[str, Any],
+def transitions(router: Any, keys: dict[str, str], state: dict[str, Any], *, quota: dict[str, Any],
                 fresh: bool, now: datetime, cfg: dict[str, Any], min_headroom: float,
-                repo: str | None) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, dict[str, str]]]:
-    """Expire, hold and release per kind. Returns (state, events, shorts) where `shorts` maps
-    kind -> {pool: reason} for pools held off this call. Without a fresh reading nothing is
-    held or released (a stale number is neither a dip nor a recovery); expiry still applies."""
+                repo: str | None) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, str]]:
+    """Expire, hold and release per kind. `keys` maps kind -> state key. Returns (state, events, placed)
+    where `placed` maps state key -> pool held this call. Without a fresh reading nothing is held or
+    released (a stale number is neither a dip nor a recovery); expiry still applies, and a timestamp
+    in the future counts as expired (a clock stepped back would otherwise pin the hold)."""
     out = json.loads(json.dumps(state))              # deep copy of plain JSON
     events: list[dict[str, Any]] = []
-    shorts: dict[str, dict[str, str]] = {}
+    placed: dict[str, str] = {}
     by_name = router.BY_NAME
-    for kind in dict.fromkeys(kinds):
-        row = out["kinds"].setdefault(kind, {"last": None, "held": {}})
+    for kind, key in keys.items():
+        row = out["kinds"].setdefault(key, {"last": None, "held": {}, "refused": None})
         held = row["held"]
         for pool in list(held):
             since = _parse(held[pool].get("since"))
-            if since is not None and (now - since).total_seconds() > cfg["max_hold_seconds"]:
+            age = None if since is None else (now - since).total_seconds()
+            if age is None or age < 0 or age > cfg["max_hold_seconds"]:
                 del held[pool]
                 events.append(_event("expire", kind, now, pool=pool,
-                                     why=f"hold older than {cfg['max_hold_seconds']:g}s"))
+                                     why=f"hold older than {cfg['max_hold_seconds']:g}s or timestamp invalid"))
         if not fresh:
             continue
         for pool in list(held):
@@ -225,7 +268,6 @@ def transitions(router: Any, kinds: list[str], state: dict[str, Any], *, quota: 
             if svc is None or (dwelled and recovered(router, svc, kind, quota, min_headroom,
                                                      cfg["restore_margin"], repo)):
                 del held[pool]
-                shorts.setdefault(kind, {})
                 events.append({"event": "release", "kind": kind, "pool": pool, "at": _iso(now)})
         last = row.get("last")
         svc = by_name.get(last) if last else None
@@ -234,21 +276,28 @@ def transitions(router: Any, kinds: list[str], state: dict[str, Any], *, quota: 
             if why:
                 info = quota.get(last) or {}
                 held[last] = {"since": _iso(now), "remaining": info.get("remaining"), "why": why}
-                shorts.setdefault(kind, {})[last] = why
-    return out, events, shorts
+                placed[key] = last
+    return out, events, placed
 
 
 def _event(name: str, kind: str, now: datetime, **fields: Any) -> dict[str, Any]:
     return {"event": name, "kind": kind, "at": _iso(now), **fields}
 
 
+def _names_never(never: set[str], svc: Any, model: str) -> bool:
+    """Exact matches only: the pool name, its agent, a model's provider prefix, or an `omp-` family name.
+    Never a substring of the model id ("composer" contains "omp")."""
+    provider = model.split("/", 1)[0] if "/" in model else ""
+    names = {svc.name, svc.acp_agent, getattr(svc, "agent", ""), provider}
+    return bool(names & never) or any(n.startswith(f"{x}-") for n in (svc.name, svc.acp_agent) for x in never)
+
+
 def _refusal(router: Any, kind: str, choice: Any, cfg: dict[str, Any]) -> str | None:
     """A reason this choice may not be launched, or None. The two hard rules."""
     svc = choice.service
-    model = (choice.model or "").split()[0] if (choice.model or "").split() else ""
-    never = set(cfg["never_target"])
-    if (svc.name in never or svc.acp_agent in never
-            or any(n in model.lower() for n in never if n)):
+    parts = (choice.model or "").split()
+    model = parts[0] if parts else ""
+    if _names_never(set(cfg["never_target"]), svc, model):
         return f"{svc.name} is in [routing.adjust].never_target"
     if kind == "frontier" and not router.is_frontier_model(model):
         return (f"frontier slice would run on {svc.name} {model or '(no model)'}, "
@@ -262,49 +311,80 @@ def adjust(router: Any, kinds: list[str], *, quota: dict[str, Any], age: float |
            ) -> dict[str, Any]:
     """Plan one wave with hysteresis. Pure: returns the new state and events, writes nothing.
 
+    The tracked pool of a kind is the one its FIRST slice in the wave gets; a kind's later slices (spread
+    over pools by `max_parallel`) neither move it nor log. `enabled = false` is `plan` plus the two hard
+    rules, with no state. Held pools are avoided, not excluded: the quality band stays anchored where plain
+    `plan` anchors it, and a held pool still takes the kind when nothing acceptable remains.
+
     Result: {"rows": [(kind, Choice|None, refusal|None)], "state": ..., "events": [...],
              "held": {kind: [pool...]}, "fresh": bool}."""
     now = now or datetime.now(UTC)
     cfg = cfg or settings(router)
     fresh = bool(quota) and age is not None and age <= cfg["max_age_seconds"]
-    new_state, events, _ = transitions(router, kinds, state, quota=quota, fresh=fresh, now=now,
-                                       cfg=cfg, min_headroom=min_headroom, repo=repo)
-    kind_exclude = {k: set(new_state["kinds"][k]["held"]) | set(cfg["never_target"])
-                    for k in new_state["kinds"] if k in kinds}
+    tracking = cfg["enabled"]
+    keys = {k: skey(repo, k) for k in dict.fromkeys(kinds)}
+    if tracking:
+        new_state, events, placed = transitions(router, keys, state, quota=quota, fresh=fresh, now=now,
+                                                cfg=cfg, min_headroom=min_headroom, repo=repo)
+    else:
+        new_state, events, placed = empty_state(), [], {}
+        for key in keys.values():
+            new_state["kinds"][key] = {"last": None, "held": {}, "refused": None}
+    kind_exclude = {k: set(new_state["kinds"][key]["held"]) for k, key in keys.items()}
     skip = set(exclude) | set(cfg["never_target"])
+    refusals: list[str | None] = []
     planned = router.plan(kinds, quota=quota, min_headroom=min_headroom, exclude=skip, repo=repo,
-                          kind_exclude=kind_exclude)
+                          kind_exclude=kind_exclude, reject=lambda k, c: _refusal(router, k, c, cfg),
+                          refusals=refusals)
     rows: list[tuple[str, Any, str | None]] = []
-    for kind, choice in planned:
-        row = new_state["kinds"][kind]
-        refusal = _refusal(router, kind, choice, cfg) if choice is not None else None
-        if choice is not None and refusal is not None:
-            events.append(_event("refuse", kind, now, pool=choice.service.name, why=refusal))
+    seen: set[str] = set()
+    changed: set[str] = set()                                   # state keys with a change line this call
+    for (kind, choice), refusal in zip(planned, refusals):
+        key = keys[kind]
+        row = new_state["kinds"][key]
+        first = key not in seen
+        seen.add(key)
+        if refusal is not None:
             rows.append((kind, None, refusal))
+            if first and row.get("refused") != refusal:
+                events.append(_event("refuse", kind, now, why=refusal))
+                changed.add(key)
+            if first:
+                row["refused"] = refusal
             continue
-        if choice is not None:
-            pool = choice.service.name
-            if pool in row["held"]:
-                # held, but nothing else could take the kind: restore early rather than strand it
-                why = row["held"].pop(pool)
-                events.append(_event("restore", kind, now, to=pool, why="no alternative pool",
-                                     was=why.get("why")))
-            elif row.get("last") != pool:
-                prev = row.get("last")
-                if prev is None:
-                    events.append(_event("route", kind, now, to=pool))
-                elif _released(events, kind, pool):
-                    events.append(_event("restore", kind, now, **{"from": prev}, to=pool,
-                                         why="recovered above floor + margin"))
-                else:
-                    held_why = (row["held"].get(prev) or {}).get("why")
-                    events.append(_event("switch", kind, now, **{"from": prev}, to=pool,
-                                         why=held_why or "better pool by score"))
-            row["last"] = pool
         rows.append((kind, choice, None))
+        if choice is None or not first:
+            continue
+        row["refused"] = None
+        pool = choice.service.name
+        if pool in row["held"]:
+            # held, but nothing acceptable could take the kind: restore early rather than strand it
+            was = row["held"].pop(pool)
+            events.append(_event("restore", kind, now, to=pool, why="no acceptable alternative pool",
+                                 was=was.get("why")))
+            changed.add(key)
+        elif row.get("last") != pool:
+            prev = row.get("last")
+            if prev is None:
+                events.append(_event("route", kind, now, to=pool))
+            elif _released(events, kind, pool):
+                events.append(_event("restore", kind, now, **{"from": prev}, to=pool,
+                                     why="recovered above floor + margin"))
+            else:
+                held_why = (row["held"].get(prev) or {}).get("why")
+                events.append(_event("switch", kind, now, **{"from": prev}, to=pool,
+                                     why=held_why or "better pool by score"))
+            changed.add(key)
+        row["last"] = pool
+    for key, pool in placed.items():                            # a hold with no route line to carry it
+        if key not in changed:
+            kind = next(k for k, v in keys.items() if v == key)
+            events.append(_event("hold", kind, now, pool=pool, why=new_state["kinds"][key]["held"][pool]["why"]))
     restored = {(e["kind"], e.get("to")) for e in events if e["event"] == "restore"}
     events = [e for e in events if not (e["event"] == "release" and (e["kind"], e["pool"]) in restored)]
-    held = {k: sorted(v["held"]) for k, v in new_state["kinds"].items() if v["held"]}
+    if not tracking:
+        events = [e for e in events if e["event"] == "refuse"]      # nothing else changed: no state kept
+    held = {k: sorted(new_state["kinds"][key]["held"]) for k, key in keys.items() if new_state["kinds"][key]["held"]}
     return {"rows": rows, "state": new_state, "events": events, "held": held, "fresh": fresh}
 
 
