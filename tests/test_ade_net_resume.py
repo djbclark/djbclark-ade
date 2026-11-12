@@ -186,6 +186,11 @@ def test_invalid_lead_is_clean_error(tmp_path):
     assert M["main"](["--lead", "bad", "--state-dir", str(tmp_path)]) == 2
 
 
+def test_empty_fresh_logs_fail_closed(tmp_path):
+    with pytest.raises(M["ScanError"]):
+        Scanner(LEAD, tmp_path).signature({"UpdatedAt": "event-1"}, "  \n")
+
+
 @pytest.mark.parametrize("suffix", [" Too Many Requests", " 402 payment required", " forbidden", " permission denied", " context length exceeded", " overloaded"])
 def test_codex_suffix_fails_closed(suffix):
     assert not M["transient"]("codex", "[System Error] error sending request for url" + suffix)

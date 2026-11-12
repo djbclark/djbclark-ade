@@ -117,7 +117,10 @@ class Scanner:
         updated = record.get("UpdatedAt")
         if not isinstance(updated, str) or not updated:
             raise ScanError("missing error event timestamp")
-        line = logs.strip().splitlines()[-1].strip()
+        lines = logs.strip().splitlines()
+        if not lines:
+            raise ScanError("error logs disappeared")
+        line = lines[-1].strip()
         return hashlib.sha256(json.dumps([updated, line]).encode()).hexdigest()
 
     def event(self, file, aid, action, **fields):
@@ -188,6 +191,9 @@ class Scanner:
                             self.event(history, aid, "changed")
                             continue
                         # Reserve durably BEFORE the outward action. An uncertain send is never retried.
+                        if self.remaining() < 1:
+                            self.event(history, aid, "deadline-before-reserve")
+                            return 0
                         self.event(history, aid, "reserved", signature=signature)
                         events.append({"agent": aid, "action": "reserved", "time": time.time(), "signature": signature})
                         self.cli("send", "--json", "--no-wait", "--", aid, PROMPT, accepted=True)
