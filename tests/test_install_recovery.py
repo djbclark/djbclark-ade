@@ -304,7 +304,7 @@ def test_non_regular_lock_file_does_not_hang_the_scan(tmp_path):
     os.mkfifo(state / "ledger.lock")
     signal.alarm(10)
     try:
-        assert rec.scan(state) == [] and rec.lock_state(state) == "held"
+        assert [(f.kind, f.status) for f in rec.scan(state)] == [("state-file", "corrupt")] and rec.lock_state(state) == "held"
     finally:
         signal.alarm(0)
 
@@ -333,3 +333,76 @@ def test_hostile_file_names_are_escaped_in_reports(tmp_path):
     (state / "ledger.json.99999999.unknown.\x1b[31m.tmp").write_text("{}")
     rows = rec.observations(state)
     assert rows and all("\x1b" not in r.id + r.detail for r in rows)
+
+
+def test_start_time_does_not_depend_on_the_callers_tz(tmp_path, monkeypatch):
+    child = subprocess.Popen([sys.executable, "-I", "-c", "import time; time.sleep(60)"])
+    try:
+        got = set()
+        for tz in ("UTC", "America/Los_Angeles", "Asia/Kolkata", None):
+            if tz is None:
+                monkeypatch.delenv("TZ", raising=False)
+            else:
+                monkeypatch.setenv("TZ", tz)
+            time.tzset()
+            got.add(ai.process_start_time(child.pid))
+        assert len(got) == 1 and None not in got
+    finally:
+        child.kill()
+        child.wait()
+        monkeypatch.undo()
+        time.tzset()
+
+
+def test_refused_evidence_log_keeps_the_stale_holder_record(tmp_path):
+    state = tmp_path / "state"
+    state.mkdir()
+    victim = tmp_path / "log-target"
+    victim.write_text("")
+    (state / ai.RECOVERY_EVIDENCE).symlink_to(victim)
+    stale = json.dumps({"pid": 999999999, "start": 1})
+    (state / "ledger.lock").write_text(stale)
+    with ai.install_ledger_lock(state):
+        pass
+    assert (state / "ledger.lock").read_text() == stale and victim.read_text() == ""  # nothing erased unlogged
+    report, rc = rec.recover(state, yes=True)
+    assert rc == 1 and report["status"] == "refused"
+    assert any(f["kind"] == "state-file" for f in report["findings"])  # doctor sees the unsafe log too
+
+
+def test_doctor_reports_unsafe_state_files_and_fifo_evidence_does_not_hang(tmp_path):
+    state = tmp_path / "state"
+    state.mkdir()
+    (tmp_path / "t").write_text("")
+    (state / "ledger.lock").symlink_to(tmp_path / "t")
+    obs = rec.observations(state)
+    assert [(o.status, o.id) for o in obs] == [("corrupt", "state-file/ledger.lock")] and rec.failing(obs) == 1
+    (state / "ledger.lock").unlink()
+    os.mkfifo(state / ai.RECOVERY_EVIDENCE)
+    (state / "ledger.lock").write_text(json.dumps({"pid": 999999999, "start": 1}))
+    signal.alarm(10)
+    try:
+        with ai.install_ledger_lock(state):  # a reader-less FIFO would block an O_WRONLY open forever
+            pass
+        assert rec.recover(state, yes=True)[1] == 1
+    finally:
+        signal.alarm(0)
+
+
+def test_root_refuses_the_lock_in_a_user_owned_state_dir(tmp_path, monkeypatch):
+    state = tmp_path / "state"
+    state.mkdir()
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    with pytest.raises(ai.InstallError, match="as root"):
+        with ai.install_ledger_lock(state):
+            pass
+    assert not (state / "ledger.lock").exists()
+
+
+def test_dry_run_output_escapes_hostile_names(tmp_path):
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "ledger.json.99999999.unknown.\x1b[31m.tmp").write_text("{}")  # APFS rejects invalid UTF-8 names, so no surrogates here
+    out = subprocess.run([sys.executable, "-I", "-B", str(REPO / "bin" / "ade-install"), "recover", "--state-dir", str(state)],
+                         capture_output=True, text=True, env={**os.environ, "HOME": str(tmp_path / "home")})
+    assert out.returncode == 0 and "\x1b" not in out.stdout and "Traceback" not in out.stderr

@@ -375,7 +375,7 @@ def cmd_recover(args: argparse.Namespace) -> int:
         for f in report.get("deferred", []):
             print(f"  deferred     {f['kind']}/{f['id']}: run `{f['repair']}`")
         if report.get("would_repair"):
-            print("  rerun with --yes to repair: " + ", ".join(report["would_repair"]))
+            print("  rerun with --yes to repair: " + ", ".join(recovery.safe(x) for x in report["would_repair"]))
     return rc
 
 

@@ -2875,10 +2875,10 @@ def process_start_time(pid: int) -> int | None:
     try:
         proc = subprocess.run(  # noqa: S603 - fixed argv, never shell
             [ps, "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True, check=False,
-            shell=False, timeout=5, env={"LC_ALL": "C"},  # minimal env: nothing inherited reaches ps
+            shell=False, timeout=5, env={"LC_ALL": "C", "TZ": "UTC0"},  # minimal, fixed zone: nothing inherited reaches ps
         )
         text = " ".join((proc.stdout or "").split())
-        return int(time.mktime(time.strptime(text, "%a %b %d %H:%M:%S %Y"))) if proc.returncode == 0 and text else None
+        return int(calendar.timegm(time.strptime(text, "%a %b %d %H:%M:%S %Y"))) if proc.returncode == 0 and text else None
     except (OSError, ValueError, subprocess.TimeoutExpired):
         return None
 
@@ -2961,7 +2961,7 @@ def append_recovery_evidence(state_dir: Path, record: dict[str, Any]) -> None:
     state_dir.mkdir(parents=True, exist_ok=True)
     line = json.dumps({"at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), **record}, sort_keys=True) + "\n"
     try:
-        fd = os.open(state_dir / RECOVERY_EVIDENCE, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        fd = os.open(state_dir / RECOVERY_EVIDENCE, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, 0o600)
     except OSError as error:
         raise InstallError(f"{state_dir / RECOVERY_EVIDENCE}: cannot open the evidence log ({error}); it must be a plain file") from error
     try:
@@ -3037,21 +3037,28 @@ def install_ledger_lock(state_dir: Path, *, wait: bool = True) -> Iterator[dict[
     of blocking when another installer holds the lock.
     """
     state_dir.mkdir(parents=True, exist_ok=True)
+    if os.geteuid() == 0:
+        st = os.lstat(state_dir)
+        if stat.S_ISLNK(st.st_mode) or st.st_uid != 0:
+            # no root fall-through: a root run (sudo keeps the user's HOME) must not create or lock files in a
+            # user-controlled directory that a link there could point at a root-owned one
+            raise InstallError(f"{state_dir}: refusing to take the install lock as root in a directory root does not own; run as the target user")
     try:
         fd = os.open(state_dir / "ledger.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
     except OSError as error:
         raise InstallError(f"{state_dir / 'ledger.lock'}: cannot open the install lock ({error}); it must be a plain file, not a link") from error
     try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise InstallError(f"{state_dir / 'ledger.lock'}: the install lock must be a regular file")
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
         except BlockingIOError as error:
             raise InstallError(f"{state_dir / 'ledger.lock'}: install lock is held by a running installer") from error
-        record_ok = owned_regular_file(fd)  # else keep the flock but never truncate/write through it
-        previous = _swap_lock_holder(state_dir, fd) if record_ok else None
+        previous, record_ok = _swap_lock_holder(state_dir, fd) if owned_regular_file(fd) else (None, False)
         try:
             yield previous
         finally:
-            if record_ok:
+            if record_ok:  # else keep the flock but never truncate/write through it, nor erase a record we could not log
                 with contextlib.suppress(OSError):
                     os.ftruncate(fd, 0)
     finally:
@@ -3066,21 +3073,25 @@ def parse_lock_holder(raw: bytes) -> dict[str, Any] | None:
     return rec if isinstance(rec, dict) else None
 
 
-def _swap_lock_holder(state_dir: Path, fd: int) -> dict[str, Any] | None:
-    """Advisory holder record; failures here never fail the lock. Returns a stale prior record."""
+def _swap_lock_holder(state_dir: Path, fd: int) -> tuple[dict[str, Any] | None, bool]:
+    """Advisory holder record; failures here never fail the lock.
+
+    Returns ``(stale prior record, whether our record was written)``. The stale record is
+    erased only after its evidence line was appended; if the log refuses, it stays put.
+    """
     stale = None
     try:
         prior = parse_lock_holder(os.pread(fd, 4096, 0))
         if prior is not None and owner_status(prior) in ("gone", "reused"):
-            stale = prior
             append_recovery_evidence(state_dir, {"event": "stale-lock-holder-superseded", "holder": prior})
+            stale = prior
         record = {**current_owner(), "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
         os.ftruncate(fd, 0)
         os.pwrite(fd, json.dumps(record).encode("utf-8"), 0)
         os.fsync(fd)
     except Exception:  # noqa: BLE001 - advisory record: no failure here (odd pid data, evidence log refused) may fail the lock
-        pass
-    return stale
+        return None, False
+    return stale, True
 
 
 def save_ledger(state_dir: Path, ledger: dict[str, Any]) -> Path:

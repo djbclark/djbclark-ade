@@ -104,7 +104,25 @@ def _scan_ledger(state_dir: Path, lock: str, python_sentinel: bool) -> list[Find
     return out
 
 
+def _unsafe_state_file(state_dir: Path, name: str, want_dir: bool = False) -> Finding | None:
+    """A link, FIFO, hardlinked or foreign-owned state file blocks apply and recovery; no command repairs it."""
+    try:
+        st = os.lstat(state_dir / name)
+    except OSError:
+        return None
+    ok_type = stat.S_ISDIR(st.st_mode) if want_dir else (stat.S_ISREG(st.st_mode) and st.st_nlink == 1)
+    if ok_type and st.st_uid == os.geteuid():
+        return None
+    return Finding("state-file", name, "corrupt",
+                   f"{name} is not a plain {'directory' if want_dir else 'file'} owned by you (link, special file, extra hard link or other owner); "
+                   "install and recovery refuse to write through it. Remove or fix it by hand; no command repairs this", None)
+
+
 def _scan_lock(state_dir: Path, lock: str) -> list[Finding]:
+    unsafe = [f for f in (_unsafe_state_file(state_dir, "ledger.lock"), _unsafe_state_file(state_dir, ai.RECOVERY_EVIDENCE),
+                          _unsafe_state_file(state_dir, QUARANTINE_DIR, want_dir=True)) if f]
+    if unsafe:
+        return unsafe
     holder = _read_lock_holder(state_dir)
     if holder is None:
         return []
@@ -243,6 +261,8 @@ def recover(state_dir: Path, *, yes: bool = False, euid: int | None = None, now:
             repaired: list[str] = []
             if superseded is not None:
                 repaired.append("lock-holder/ledger.lock")  # evidence appended by the lock before it was superseded
+            elif any(f.kind == "lock-holder" and f.status == "orphaned" for f in findings):
+                report["unrepaired"] = ["lock-holder/ledger.lock: the evidence log refused the write-ahead line, so the stale record was kept"]
             locked = scan_locked(state_dir, now=now)
             orphans = [f for f in locked if f.kind == "ledger-entry" and f.status == "orphaned"]
             if orphans:
@@ -264,6 +284,13 @@ def recover(state_dir: Path, *, yes: bool = False, euid: int | None = None, now:
         report.update(status="lock-busy" if "is held by a running" in str(error) else "refused", reason=str(error) + ". Remaining repairs not attempted")
         return report, 1
     report["repaired"] = repaired
+    blocked = [f"{f.kind}/{f.id}: {f.detail}" for f in findings if f.status == "corrupt"]
+    if blocked and not report.get("unrepaired"):
+        report["unrepaired"] = blocked  # no command repairs these; exit 1 so a script does not read this as healthy
+    if report.get("unrepaired"):
+        report["status"] = "refused"
+        report["reason"] = report["unrepaired"][0]
+        return report, 1
     report["status"] = "recovered" if repaired else "nothing-to-recover"
     return report, 0
 
