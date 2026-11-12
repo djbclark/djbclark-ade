@@ -54,12 +54,17 @@ saved values only; `check` after opening establishes current evidence. Mode
 changes after a check can still drift; repeat native readback at the next
 consequential boundary.
 
-B4. The existing direct-Claude `review-pr` / `review-launch` restricted boundary
-is not rewritten in this unit. Its use for trusted internal reviews still needs
-an ordinary Paseo review path; external-security-critical review keeps that
-boundary. Merely changing the policy text or the create plugin does not fix a
-launch path that bypasses Paseo. This is an explicit remaining implementation
-gate, not a completed ordinary-review runtime claim.
+B4. The direct-Claude `review-pr` / `review-launch` restricted boundary is kept
+for external-security-critical review. Since 2026-11-12 (W2) `review-pr` also
+has a trusted internal runtime: for a PR the repository owner authored,
+`--runtime auto` (the default) launches `review-launch --mode trusted`
+(`--permission-mode bypassPermissions`, Bash added, no read-boundary claim); any
+other author, and `--runtime restricted`, keep `--mode review`. The trusted
+launch proves its own init event (tools, `bypassPermissions`, cwd, no MCP) and
+nothing more; it is not a Paseo-created agent, so the native create/readback
+evidence above does not apply to it, and an ordinary Paseo review path for
+trusted work remains separate, unbuilt work. See
+[docs/review-boundary.md](review-boundary.md).
 
 B5. The installed plugin applies to UI/CLI/MCP creates and resume/refresh/import
 opens. The transitional `acp-dispatch --perm all` and dialogue launchers pass

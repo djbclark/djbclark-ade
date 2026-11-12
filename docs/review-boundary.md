@@ -45,6 +45,20 @@ review-launch --check [--mode review|read-only] [--allow-web] [--json]
 | `review` (rule 11, `bin/review-pr`) | `Read,Grep,Glob` | `Glob, Grep, Read, StructuredOutput` |
 | `read-only` (Claude restricted tools; also used by the transitional `acp-dispatch` shim until ~2026-11-20) | `Read,Grep,Glob`; `--allow-web` adds `WebFetch,WebSearch` (2026-11-07) | those plus `StructuredOutput` |
 
+| `trusted` (YOLO, 2026-11-12; `bin/review-pr` for an owner-authored PR) | `Read,Grep,Glob,Bash` with `--permission-mode bypassPermissions` | `Bash, Glob, Grep, Read, StructuredOutput`; `permissionMode == "bypassPermissions"` |
+
+**`trusted` is not a boundary** (operator, 2026-11-12; `docs/slim/audit-walk-decisions-2026-11-12.md` section 8: YOLO is the
+default for ordinary launches and trusted internal reviewers, restricted execution is reserved for external-security-critical
+work). It needs `--trusted-author LOGIN` and `--head SHA`, drops `blockReadsOutsideWorkingDirectories` and
+`disableBypassPermissionsMode`, and skips the read tripwire, the symlink refusal and the self-check (`--check --mode trusted` exits 2);
+a hook event is not fatal. The stream proof of tools, permission mode, cwd, no MCP and no extra directories, the scrubbed
+environment, the secret-path deny rules (an accidental-read guard: Bash is not confined), the timeout and the descendant kill stay. The launcher cannot verify that the input is trusted: `bin/review-pr`
+decides, and only for a PR GitHub reports as authored by the repository owner (`--runtime auto`, the default; `--runtime yolo`
+is refused for any other author; `--allow-untrusted` never enables it). An outside, MEMBER or COLLABORATOR PR, or
+anything with an untrusted author, always gets `--mode review`. A bypass or widening flag in the launcher's own argv and a permission-mode variable in its
+environment are still refused in every mode. Probe 2026-11-12: Claude Code's init event reports
+`permissionMode: "bypassPermissions"` for this flag in `-p` mode.
+
 Three more guards, all from 2026-11-07 (Argon review F-HIGH-2, and the Opus review of PR 297):
 
 - **Symlinks.** Before the self-check and the launch, review-launch looks for symlinks in the worktree, both in git
@@ -102,7 +116,7 @@ stopped by the tripwire (exit 77). The Mac's own check is an operator step (belo
 
 From a checkout of the repository, after the push: it reads the PR (`gh pr view --json headRefOid,baseRefOid,baseRefName,
 author,state`), refuses an author who is neither the repository owner nor the authenticated gh user unless
-`--allow-untrusted`, adds a clean detached worktree at exactly the head, writes `git diff BASE...HEAD` and the file list into
+`--allow-untrusted`, adds a clean detached worktree at exactly the head (an owner-authored PR runs the `trusted` mode, anything else `review`: `--runtime auto|restricted|yolo`, 2026-11-12), writes `git diff BASE...HEAD` and the file list into
 its `.review-launch/`, runs `review-launch --mode review --head HEAD` with `config/review-schema.json`, prints
 `<!-- adversary-verdict:v1 {"verdict":"…","head":"<the full head>"} -->` (checked against the gate's own parser), files
 `~/.local/state/review-launch/<owner>__<name>-pr<N>-<head>.json` and removes the worktree. Exit 0 APPROVE, 1 BLOCK, 2 refused,

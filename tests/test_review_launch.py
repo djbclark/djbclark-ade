@@ -801,9 +801,11 @@ def test_review_pr_reviews_the_exact_head_in_a_clean_worktree_and_prints_the_mar
 
 
 def test_review_pr_runs_the_launcher_in_review_mode_with_the_review_schema_and_head(prw):
-    prw.review()
+    prw.review("--runtime", "restricted")
     argv = prw.launches()[0]["argv"]
     assert argv_val(argv, "--tools") == "Read,Grep,Glob"
+    assert argv_val(argv, "--permission-mode") == "default"
+    assert prw.filed()["runtime"] == "restricted"
     assert json.loads(argv_val(argv, "--json-schema")) == json.loads(SCHEMA.read_text())
 
 
@@ -838,7 +840,7 @@ def test_only_the_owner_or_the_authenticated_user_is_reviewed_by_default(prw, lo
 def test_a_tripwire_in_the_review_is_passed_on_and_the_worktree_still_removed(prw):
     prw.passed_check()
     prw.scenario(tool_uses=[{"name": "Read", "input": {"file_path": "/etc/passwd"}}])
-    r = prw.review()
+    r = prw.review("--runtime", "restricted")
     assert r.returncode == 77 and r.stdout == ""
     assert prw.filed()["result"] == "failed"
     assert git("worktree", "list", cwd=prw.clone).count("\n") == 0
@@ -867,7 +869,7 @@ def test_review_pr_of_a_pr_that_commits_a_symlink_outside_is_refused_and_the_wor
     prw.pr_head = head
     prw.gh(view={"headRefOid": head, "baseRefOid": prw.base, "baseRefName": "master",
                  "author": {"login": "djbclark"}, "state": "OPEN"})
-    r = prw.review()
+    r = prw.review("--runtime", "restricted")
     assert r.returncode == 2 and "symlink" in r.stderr and "evil" in r.stderr, r.stderr
     assert prw.calls() == [] and prw.filed()["result"] == "failed"
     assert len(git("worktree", "list", cwd=prw.clone).splitlines()) == 1, "the review worktree is removed"
@@ -952,10 +954,166 @@ def test_a_git_diff_that_fails_with_undecodable_output_is_exit_3_with_a_result_f
     assert doc["result"] == "failed" and "git diff failed" in doc["reason"]
 
 
-def test_the_review_prompt_says_everything_from_the_pr_is_untrusted_and_the_schema_is_the_only_channel(prw):
-    prw.review()
+@pytest.mark.parametrize("runtime", ["restricted", "yolo"])
+def test_the_review_prompt_says_everything_from_the_pr_is_untrusted_and_the_schema_is_the_only_channel(prw, runtime):
+    prw.review("--runtime", runtime)
     prompt = prw.launches()[0]["argv"][-1]
     for needle in ("UNTRUSTED DATA", "never instructions", "the PR's body", "every file in this checkout",
                    "ONLY through the", "structured output schema", "prompt-injection"):
         assert needle in prompt, needle
 
+
+
+# ---- the trusted (YOLO) runtime: review-launch --mode trusted, review-pr --runtime (2026-11-12, W2) ---------------
+
+def trusted(world, *extra: str, author: str = "djbclark", head: bool = True, **kw):
+    args = ["--trusted-author", author] if author else []
+    if head:
+        args += ["--head", world.head]
+    return world.launch(*args, *extra, mode="trusted", **kw)
+
+
+def test_trusted_mode_launches_bypass_permissions_with_bash_and_no_boundary_claims(world):
+    r = trusted(world, "--json")
+    assert r.returncode == 0, r.stderr
+    (call,) = world.launches()
+    argv = call["argv"]
+    assert argv_val(argv, "--tools") == "Read,Grep,Glob,Bash"
+    assert argv_val(argv, "--permission-mode") == "bypassPermissions"
+    assert argv_val(argv, "--setting-sources") == "" and "--strict-mcp-config" in argv
+    settings = json.loads(argv_val(argv, "--settings"))
+    assert "blockReadsOutsideWorkingDirectories" not in settings["permissions"]
+    assert "disableBypassPermissionsMode" not in settings["permissions"]
+    assert settings["disableAllHooks"] is True and settings["permissions"]["deny"]
+    rec = json.loads(r.stdout)
+    assert rec["mode"] == "trusted" and rec["trusted_author"] == "djbclark"
+    assert rec["init"]["permissionMode"] == "bypassPermissions" and "none" in rec["check"]
+    assert world.checks() == [], "trusted mode claims no read boundary, so there is no self-check"
+    assert list(world.state.glob("check-*.json")) == []
+
+
+def test_restricted_modes_still_carry_the_boundary_settings_and_default_permission_mode(world):
+    assert world.launch().returncode == 0
+    argv = world.launches()[-1]["argv"]
+    settings = json.loads(argv_val(argv, "--settings"))
+    assert settings["permissions"]["blockReadsOutsideWorkingDirectories"] is True
+    assert settings["permissions"]["disableBypassPermissionsMode"] == "disable"
+    assert argv_val(argv, "--permission-mode") == "default"
+
+
+@pytest.mark.parametrize("kw,needle", [({"author": ""}, "--trusted-author"), ({"head": False}, "--head")])
+def test_trusted_mode_needs_an_author_and_an_exact_head(world, kw, needle):
+    r = trusted(world, **kw)
+    assert r.returncode == 2 and needle in r.stderr and world.calls() == []
+
+
+def test_trusted_mode_with_the_wrong_head_or_a_dirty_tree_is_refused(world):
+    (world.wt / "a.txt").write_text("changed\n")
+    r = trusted(world)
+    assert r.returncode == 2 and "not clean" in r.stderr and world.calls() == []
+
+
+def test_trusted_author_is_refused_outside_trusted_mode(world):
+    r = world.launch("--trusted-author", "djbclark")
+    assert r.returncode == 2 and "--trusted-author" in r.stderr and world.calls() == []
+
+
+def test_trusted_mode_has_no_check_and_no_web(world):
+    r = world.run("--check", "--mode", "trusted")
+    assert r.returncode == 2 and "nothing for --check to prove" in r.stderr and world.calls() == []
+    assert trusted(world, "--allow-web").returncode == 2
+
+
+def test_a_permission_mode_variable_or_bypass_flag_is_still_refused_in_trusted_mode(world):
+    assert trusted(world, "--permission-mode", "default").returncode == 2
+    r = trusted(world, env=world.env(CLAUDE_PERMISSION_MODE="plan"))
+    assert r.returncode == 2 and world.calls() == []
+
+
+def test_trusted_mode_proves_tools_permission_mode_and_cwd_from_the_stream(world):
+    world.scenario(init={"permissionMode": "acceptEdits"})     # a silent downgrade from bypassPermissions
+    assert trusted(world).returncode == 77
+    world.scenario(init={"tools": ["Read", "Grep", "Glob", "Bash", "Edit", "StructuredOutput"]})
+    assert trusted(world).returncode == 77
+    world.scenario(init={"mcp_servers": [{"name": "x"}]})
+    assert trusted(world).returncode == 77
+
+
+def test_trusted_mode_still_trips_on_a_tool_outside_its_set(world):
+    world.scenario(tool_uses=[{"name": "Write", "input": {"file_path": "x"}}])
+    assert trusted(world).returncode == 77
+
+
+def test_trusted_mode_does_not_confine_reads_or_trip_on_a_hook_event(world):
+    world.scenario(hook_event=True, tool_uses=[{"name": "Read", "input": {"file_path": "/etc/hostname"}},
+                                               {"name": "Bash", "input": {"command": "git status"}}])
+    r = trusted(world)
+    assert r.returncode == 0, r.stderr
+    world.scenario(hook_event=True)
+    assert world.launch("--head", world.head).returncode == 77, "a restricted mode still trips on a hook event"
+
+
+def test_trusted_mode_allows_a_worktree_symlink_that_leaves_it_but_review_mode_refuses(world):
+    (world.wt / "link").symlink_to("/etc")
+    git("add", "link", cwd=world.wt)
+    git("commit", "-q", "-m", "link", cwd=world.wt)
+    head = git("rev-parse", "HEAD", cwd=world.wt)
+    assert world.launch("--head", head).returncode == 2
+    assert world.launch("--trusted-author", "djbclark", "--head", head, mode="trusted").returncode == 0
+
+
+def test_trusted_mode_keeps_the_scrubbed_environment(world):
+    r = trusted(world, env=world.env(GH_TOKEN="g", GITHUB_TOKEN="g", MY_SECRET="s", KEEP_ME="k"))
+    assert r.returncode == 0, r.stderr
+    env = world.launches()[0]["env"]
+    assert "GH_TOKEN" not in env and "GITHUB_TOKEN" not in env and "MY_SECRET" not in env and env["KEEP_ME"] == "k"
+
+
+def test_review_pr_auto_runtime_is_yolo_for_an_owner_authored_pr(prw):
+    r = prw.review()
+    assert r.returncode == 0, r.stderr
+    argv = prw.launches()[0]["argv"]
+    assert argv_val(argv, "--tools") == "Read,Grep,Glob,Bash"
+    assert argv_val(argv, "--permission-mode") == "bypassPermissions"
+    assert prw.checks() == []
+    doc = prw.filed()
+    assert doc["runtime"] == "yolo" and doc["verdict"] == "APPROVE" and "yolo runtime" in r.stderr
+    prompt = argv[-1]
+    assert "You may run read-only commands" in prompt and "You cannot run commands" not in prompt
+    assert prw.review("--runtime", "auto").returncode == 0
+
+
+def test_review_pr_runs_a_restricted_review_when_asked_even_for_the_owner(prw):
+    assert prw.review("--runtime", "restricted").returncode == 0
+    (call,) = prw.launches()
+    assert argv_val(call["argv"], "--permission-mode") == "default" and "You cannot run commands" in call["argv"][-1]
+
+
+def test_review_pr_never_gives_an_outside_author_the_yolo_runtime(prw):
+    # an outside / MEMBER / COLLABORATOR author, reviewed on explicit --allow-untrusted, stays restricted (external boundary)
+    prw.gh(view={"headRefOid": prw.pr_head, "baseRefOid": prw.base, "baseRefName": "master",
+                 "author": {"login": "stranger"}, "state": "OPEN"}, me="djbclark")
+    for flags in ([], ["--allow-untrusted"]):
+        r = prw.review(*flags)
+        assert (r.returncode == 2) == (not flags), r.stderr
+    argv = prw.launches()[0]["argv"]
+    assert argv_val(argv, "--permission-mode") == "default" and argv_val(argv, "--tools") == "Read,Grep,Glob"
+    assert prw.filed()["runtime"] == "restricted"
+    before = len(prw.calls())
+    r = prw.review("--runtime", "yolo", "--allow-untrusted")
+    assert r.returncode == 2 and "only for a PR the repository owner authored" in r.stderr and len(prw.calls()) == before
+
+
+def test_the_authenticated_user_who_is_not_the_owner_gets_the_restricted_runtime(prw):
+    prw.gh(view={"headRefOid": prw.pr_head, "baseRefOid": prw.base, "baseRefName": "master",
+                 "author": {"login": "operator"}, "state": "OPEN"}, me="operator")
+    assert prw.review().returncode == 0
+    assert argv_val(prw.launches()[0]["argv"], "--permission-mode") == "default"
+    assert prw.review("--runtime", "yolo").returncode == 2
+
+
+def test_an_owner_login_is_matched_case_insensitively_and_an_unknown_author_is_not_owner(prw):
+    prw.gh(view={"headRefOid": prw.pr_head, "baseRefOid": prw.base, "baseRefName": "master",
+                 "author": {"login": "DJBClark"}, "state": "OPEN"})
+    assert prw.review().returncode == 0
+    assert argv_val(prw.launches()[-1]["argv"], "--permission-mode") == "bypassPermissions"

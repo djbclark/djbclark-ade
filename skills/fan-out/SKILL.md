@@ -66,7 +66,8 @@ Paseo 0.15.3 native inspect omitted workspace ids when checked on 2026-11-08; pa
 Only a launch without `PASEO_AGENT_ID` may use `PASEO_WORKSPACE_ID` as its fallback.
 Verify returned `cwd` and `workspaceId` against the assignment before treating a launch as correctly placed.
 
-For a review slice: Claude runs through `bin/review-launch` (the enforced review boundary); every other agent
+For a review slice: Claude runs through `bin/review-launch` (the enforced review boundary; `--mode trusted`, YOLO, only for work the
+repository owner authored, which `bin/review-pr --runtime auto` decides, 2026-11-12); every other agent
 runs best effort, in its default mode with a brief note to change nothing (operator ruling 2026-11-07).
 
 The operator's temporary all-tabs-with-the-lead arrangement is described in `docs/workspace-layout.md`.

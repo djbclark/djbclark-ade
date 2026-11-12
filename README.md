@@ -57,7 +57,7 @@ Master takes changes **by PR only** (branch protection, admins included). The PR
 verdict marker ([docs/code-review.md](docs/code-review.md) rule 1; AGENTS.md keeps a short pointer); the
 `adversary-marker` Action (logic in `bin/adversary_marker.py`) reads it and posts the required
 `adversary-marker` status beside the Tests checks. `bin/review-pr PR` is the local review (rule 11: Claude
-inside `bin/review-launch`'s boundary, [docs/review-boundary.md](docs/review-boundary.md)) and prints the
+inside `bin/review-launch`'s boundary, or its trusted YOLO mode for an owner-authored PR, [docs/review-boundary.md](docs/review-boundary.md)) and prints the
 marker. After a body edit `gh workflow run adversary-marker.yml -f pr=N`; wait with `gh pr checks N --watch
 --required`; merge with `gh pr merge --squash --match-head-commit <reviewed sha>`.
 
