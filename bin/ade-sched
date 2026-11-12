@@ -49,7 +49,7 @@ ${XDG_CONFIG_HOME:-~/.config}/systemd/user), ADE_SCHED_LOCK (the crontab edit lo
 ${XDG_STATE_HOME:-~/.local/state}/ade/ade-sched.lock); ADE_JOBS_STATE_DIR (ownership ledger dir, default
 ~/.local/state/djbclark-ade).
 
-exit: 0 ok; 1 an activation command failed (its stderr is quoted) or diff found ADE drift or reconcile had a
+exit: 6 durable reconcile deferral (admission/drain/migration); 0 ok; 1 an activation command failed (its stderr is quoted) or diff found ADE drift or reconcile had a
 blocked/failed step; 2 bad job or usage (also: reconcile --yes on a non-write host backend with no paseo work); 3 status:
 a LABEL is not installed; 69 no usable scheduler (none forced, none found, systemd user manager unreachable, Linger=no
 on a systemd install without --allow-no-linger, KeepAlive or a StartInterval under 60 s on cron). A `crontab -l`
