@@ -35,22 +35,24 @@ Paseo resolves to a different full ID is refused. No files, modes, prompts,
 archives, reloads or daemon settings are written.
 
 B2. `bin/ade-agent-mode repair FULL_ID [--dry-run|--yes] [--home PATH] [--json]`
-plans by default; `--dry-run` is explicit plan-only spelling. `--yes` may invoke
-native `agent mode` only on an **already-live idle, unarchived** agent with a
-source-backed catalogued mode. It then independently inspects the exact ID and
-reports success only on matching readback. Mutation errors or mismatched readback
-return unavailable; no hidden retry or send is attempted. An already-correct
-agent is a no-op. Explicit restrictive modes remain exempt. `--home` selects the
-same native daemon for all reads/writes; no remote host inference is performed.
+plans by default; `--dry-run` is explicit plan-only spelling. A needed repair is
+planned only for an already-live idle unarchived agent with a source-backed
+catalogued mode. **`--yes` currently refuses a needed mutation (exit 2):** native
+`setAgentMode` first ensures an interactive session, and an agent can close
+between any idle check and that call. Native source exposes no atomic live-only
+precondition, so this command never dispatches that potentially reopening call.
+A second inspect would narrow the race, not fix it. Already-verified agents are
+no-ops; explicit restrictive modes remain exempt. `--home` selects the same
+native daemon for all reads. No remote host inference or hidden retry is made.
 
-B3. Closed/running agent repair is refused. Native `setAgentMode` first ensures an
-interactive session; silently calling it on a closed drifted agent could reopen
-that agent. The open hook cannot patch mode configuration, so a closed refused
-agent needs an explicitly created verified successor or a future native atomic
-config/open facility. This unit does not automatically restart anything or
-claim continuous live monitoring. A resume preflight checks saved values only;
-`check` after opening establishes current evidence. Mode changes after a check
-can still drift; repeat a native readback at the next consequential boundary.
+B3. Closed/running drift repair is refused; applying idle drift repair remains
+blocked on an atomic native live-only mutation. The open hook cannot patch mode
+configuration, so a refused agent needs an explicitly created verified successor
+or a future native atomic config/open facility. This unit does not automatically
+restart anything or claim continuous live monitoring. A resume preflight checks
+saved values only; `check` after opening establishes current evidence. Mode
+changes after a check can still drift; repeat native readback at the next
+consequential boundary.
 
 B4. The existing direct-Claude `review-pr` / `review-launch` restricted boundary
 is not rewritten in this unit. Its use for trusted internal reviews still needs
@@ -86,7 +88,7 @@ This source snapshot is evidence, not a runtime version pin.
 
 C2. Mock tests cover catalog identity/availability, missing/duplicate IDs,
 advertised controls and absent readback, explicit restriction, resume drift,
-exact post-mutation readback, default no-mutation planning, fail-stop launch
+exact effective readback, default no-mutation planning, native repair capability refusal, fail-stop launch
 readback and no restart/send repair paths. This cloud environment has no Paseo
 executable or daemon; no live permission switches, plugin installations, provider
 accounts or runtime acceptance are claimed. After operator-authorized install,

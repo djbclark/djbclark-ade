@@ -20,7 +20,7 @@ review uses catalog-backed unattended permissions. Explicit operator restriction
 and external-security-critical work preserve the restricted boundary. Provider
 `defaultMode` is not proof. The create hook selects verified IDs/controls; resume
 preflights refuse saved mode drift. See [agent modes](agent-modes.md) for provider
-coverage, `ade-agent-mode check` / dry-run-default `repair`, runtime readback and
+coverage, `ade-agent-mode check` / dry-run-default repair planning, runtime readback and
 unsupported native API limits. No plugin was installed by this cloud change.
 
 ## 1. Two kinds of work in an agent loop
