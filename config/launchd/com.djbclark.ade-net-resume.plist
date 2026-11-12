@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Unloaded dry-run template. Explicit lead substitution required; see docs/net-resume.md. -->
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.djbclark.ade-net-resume</string>
+  <key>ProgramArguments</key><array>
+    <string>__ADE__/bin/ade-net-resume</string>
+    <string>--lead</string><string>__LEAD__</string>
+  </array>
+  <key>StartInterval</key><integer>60</integer>
+  <key>RunAtLoad</key><false/>
+  <key>EnvironmentVariables</key><dict>
+    <key>PATH</key><string>__HOME__/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>StandardOutPath</key><string>__STATE__/ade-net-resume.log</string>
+  <key>StandardErrorPath</key><string>__STATE__/ade-net-resume.log</string>
+</dict></plist>

@@ -126,6 +126,7 @@ Skills (from each `skills/*/SKILL.md`):
 | [`ade-install`](bin/ade-install) | Transitional install catalog, plan, doctor, keys, and bounded apply. |
 | [`ade-merge-ready`](bin/ade-merge-ready) | Classify / stacks / approve / merge-now / stack-rebase for the ADE merge gate (2026-11-10). |
 | [`ade-model-tiers`](bin/ade-model-tiers) | Show/resolve/classify/validate/promote/set for config/model-tiers.toml. |
+| [`ade-net-resume`](bin/ade-net-resume) | Resume a lead's descendants after recognized transient network failures, dry-run by default. |
 | [`ade-pi-pools`](bin/ade-pi-pools) | Report and enforce Pi pool acceptance before automatic routing (ade/auto). |
 | [`ade-recovery-d1`](bin/ade-recovery-d1) | Observe-only D1 / native-resume preflight (Carried #2, 2026-11-10). |
 | [`ade-release-ready`](bin/ade-release-ready) | Dry-run gate for the first (or next) release tag (Carried #15, 2026-11-10). |
