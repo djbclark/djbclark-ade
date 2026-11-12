@@ -1195,3 +1195,46 @@ def test_history_carries_findings_across_heads_and_loads_legacy_records(tmp_path
     (tmp_path / (prefix + "broken.json")).write_text("{")
     with pytest.raises(ValueError):
         rp.unresolved_findings(tmp_path, prefix)
+
+
+def test_legacy_findings_survive_compatibility_record_overwrite(prw):
+    finding = {"file": "feature.txt", "line": 1, "severity": "high", "summary": "legacy"}
+    prw.state.mkdir()
+    latest = prw.state / f"djbclark__djbclark-ade-pr7-{prw.pr_head}.json"
+    latest.write_text(json.dumps({"started": "2000", "result": "block", "findings": [finding]}))
+    assert prw.review("--no-deadline").returncode == 1
+    assert prw.review("--no-deadline", "--retry").returncode == 1
+    assert prw.filed()["unresolved_findings"]
+    assert list((prw.state / "attempts").glob("*-legacy.json"))
+
+
+def test_killed_caller_does_not_release_lock_while_reviewer_runs(prw):
+    import fcntl
+    prw.scenario(sleep=60)
+    caller = subprocess.Popen([sys.executable, "-I", str(REVIEW_PR), "7", "--no-deadline",
+                               "--timeout", "4"], env=prw.env(), cwd=str(prw.clone),
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        deadline = time.monotonic() + 20
+        while not prw.launches() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert prw.launches()
+        caller.kill()
+        caller.wait(timeout=5)
+        result = prw.review("--no-deadline")
+        assert result.returncode == 2 and "active" in result.stderr
+        assert len(prw.launches()) == 1
+        lock = prw.state / "djbclark__djbclark-ade-pr7.lock"
+        with lock.open() as held:
+            deadline = time.monotonic() + 20
+            while True:
+                try:
+                    fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    assert time.monotonic() < deadline
+                    time.sleep(0.1)
+    finally:
+        if caller.poll() is None:
+            caller.kill()
+            caller.wait(timeout=5)

@@ -66,6 +66,7 @@ EXIT_APPROVE, EXIT_BLOCK, EXIT_USAGE, EXIT_FAILED = 0, 1, 2, 3
 GH_TIMEOUT = 90
 GIT_TIMEOUT = 300
 SCHEMA_VERSION = 1
+ACTIVE_LOCK: int | None = None
 
 PROMPT = """You are the adversarial code reviewer for pull request #{pr} of {repo}.
 HEAD_SHA: {head}
@@ -177,11 +178,11 @@ def _run_review_launch(launch: list[str], pr: int, head: str, timeout: float, no
     """Run review-launch, under `deadline run` when bin/deadline is usable (docs/deadline.md Known gaps)."""
     if no_deadline or "DEADLINE_NAME" in os.environ:
         return subprocess.run(launch, capture_output=True, text=True, errors="replace", stdin=subprocess.DEVNULL,
-                              timeout=timeout + 600)
+                              pass_fds=(() if ACTIVE_LOCK is None else (ACTIVE_LOCK,)), timeout=timeout + 600)
     tool = HERE / "deadline"
     if not os.access(tool, os.X_OK):
         return subprocess.run(launch, capture_output=True, text=True, errors="replace", stdin=subprocess.DEVNULL,
-                              timeout=timeout + 600)
+                              pass_fds=(() if ACTIVE_LOCK is None else (ACTIVE_LOCK,)), timeout=timeout + 600)
     budget = max(1, math.ceil(timeout + 600 + 60))
     owner = os.environ.get("PASEO_AGENT_ID") or "-"
     # Budget-only: review-launch does not emit deadline beats, so --heartbeat would
@@ -189,7 +190,7 @@ def _run_review_launch(launch: list[str], pr: int, head: str, timeout: float, no
     argv = [str(tool), "run", "--name", _deadline_name(pr, head), "--budget", str(budget),
             "--owner", owner, "--", *launch]
     return subprocess.run(argv, capture_output=True, text=True, errors="replace", stdin=subprocess.DEVNULL,
-                          timeout=budget + 120)
+                          pass_fds=(() if ACTIVE_LOCK is None else (ACTIVE_LOCK,)), timeout=budget + 120)
 
 
 def finding_id(finding: dict) -> str:
@@ -204,6 +205,12 @@ def unresolved_findings(sd: Path, prefix: str) -> dict:
         doc = json.loads(path.read_text())
         if not isinstance(doc, dict):
             raise ValueError(f"invalid review history: {path}")
+        if not doc.get("attempt_id") and path.parent == sd:
+            # Archive pre-W5 history before its compatibility path can be overwritten.
+            doc = {**doc, "attempt_id": "legacy-" + path.stem}
+            archive = sd / "attempts" / (path.stem + "-legacy.json")
+            if not archive.exists():
+                write_private(archive, json.dumps(doc, sort_keys=True) + "\n")
         records.append(doc)
     # Resolution is an explicit operator/caller decision; reappearance in a later attempt reopens it.
     unique = {d.get("attempt_id") or f"legacy-{i}": d for i, d in enumerate(records)}
@@ -217,6 +224,7 @@ def unresolved_findings(sd: Path, prefix: str) -> dict:
 
 
 def main(argv: list[str]) -> int:
+    global ACTIVE_LOCK
     try:
         a = parser().parse_args(argv)
         if not re.fullmatch(r"[\w.-]+/[\w.-]+", a.repo) or a.pr < 1:
@@ -231,6 +239,7 @@ def main(argv: list[str]) -> int:
         lock = sd / f"{a.repo.lower().replace('/', '__')}-pr{a.pr}.lock"
         fd = os.open(lock, os.O_CREAT | os.O_RDWR, 0o600)
         with os.fdopen(fd, "w") as held:
+            ACTIVE_LOCK = fd
             try:
                 fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:

@@ -267,7 +267,7 @@ Findings from all heads of this PR remain in `unresolved_findings`, keyed by a s
 An APPROVE with earlier unresolved findings becomes a local BLOCK. Reviewers cannot clear earlier
 findings merely by omitting them. After checking the fix, the caller explicitly passes
 `--retry --resolve-finding ID` (repeatable); an unknown ID refuses. A repeated finding reopens its ID.
-Legacy latest-result records are also read. Corrupt history refuses rather than approving without it.
+Legacy latest-result records are archived before their compatibility paths are overwritten. Corrupt history refuses rather than approving without it.
 These are local review semantics; GitHub's author trust, marker parser and required merge checks are unchanged.
 
 `--stall-timeout S` defaults to 300 seconds without a stdout stream line (`0` disables this detector).
@@ -276,7 +276,7 @@ its descendants. `--replacement-model M` (repeatable, ordered) starts a fresh at
 there is no default replacement and no replacement after a refusal, tripwire, BLOCK or completed review.
 Each attempt retains a private `evidence/` directory with `stream.jsonl`, `stderr.txt`, and the launcher's
 stdout/stderr, including partial evidence after a timeout. Replacement attempts have separate IDs and files.
-An interruption leaves its initial `running` record and stream for diagnosis; the OS releases its lock.
+An interruption leaves its initial `running` record and stream for diagnosis; the launch child inherits the lock, retaining it until reviewer cleanup even if the caller is killed.
 
 Direct `review-launch` callers can request `--stall-timeout S` (default 0) and `--evidence-dir DIR`.
 The stream is created exclusively with mode 0600, flushed as lines arrive, and never overwritten.
