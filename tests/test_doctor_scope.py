@@ -46,9 +46,10 @@ def no_global_probes(monkeypatch):
 
 @pytest.mark.parametrize("exit_code", [0, 7])
 def test_selected_component_uses_only_its_probe(catalog, no_global_probes, monkeypatch, exit_code):
+    monkeypatch.setattr(ai, "observe_hermes_checklist", lambda **_: [])
     monkeypatch.setattr(ai, "_probe_executable_missing", lambda _: False)
     runner = Mock(return_value=subprocess.CompletedProcess([], exit_code, "fixture result", ""))
-    observations, rc = ai.doctor(catalog, component_ids=["hermes"], runner=runner)
+    observations, rc = ai.doctor(catalog, component_ids=["hermes"], runner=runner, hermes_choice={})
     runner.assert_called_once_with(["hermes", "doctor"], catalog.root)
     assert [o.id for o in observations if o.kind == "component"] == ["hermes"]
     assert rc == (0 if exit_code == 0 else 1)
@@ -111,7 +112,7 @@ def test_cli_scoped_text_does_not_claim_overall_health(catalog, monkeypatch, cap
 @pytest.mark.parametrize("component", [None, "hermes", "name with spaces;echo unsafe"])
 def test_just_doctor_forwards_one_literal_component(tmp_path, component):
     # Reuse the actual recipe and a fake CLI, so no live doctor is run.
-    recipe = (REPO / "justfile").read_text().split("[positional-arguments]\ndoctor ", 1)[1].split("\ninstall ", 1)[0]
+    recipe = (REPO / "justfile").read_text().split("[positional-arguments]\ndoctor ", 1)[1].split("\n# S3a:", 1)[0]
     (tmp_path / "justfile").write_text('root := justfile_directory()\n[positional-arguments]\ndoctor ' + recipe)
     (tmp_path / "bin").mkdir()
     capture = tmp_path / "args.json"

@@ -352,7 +352,9 @@ def load_hermes_choice(state_dir: Path | None = None) -> dict[str, Any] | None:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError, RecursionError) as e:
         raise InstallError(f"{path}: unreadable Hermes choice ({e})") from e
-    if not isinstance(raw, dict) or raw.get("choice") not in HERMES_CHOICES:
+    if (not isinstance(raw, dict) or raw.get("choice") not in HERMES_CHOICES
+            or raw.get("schema_version") != HERMES_CHOICE_SCHEMA
+            or raw.get("component") != "hermes"):
         raise InstallError(f"{path}: Hermes choice must be one of {', '.join(HERMES_CHOICES)}")
     return raw
 
@@ -381,6 +383,18 @@ def hermes_choice_effective(row: dict[str, Any], record: dict[str, Any] | None) 
     if record is not None:
         return record.get("choice") != "skip"
     return expected_installed(row)
+
+
+def catalog_with_hermes_choice(catalog: Catalog, record: dict[str, Any] | None) -> Catalog:
+    """Overlay the local choice on a copy, retaining the original catalog."""
+    if record is None:
+        return catalog
+    result = copy.copy(catalog)
+    result.data = copy.deepcopy(catalog.data)
+    for row in result.components:
+        if row["id"] == "hermes" and row["class"] != "never":
+            row["chosen"] = record["choice"] != "skip"
+    return result
 
 
 def hermes_setup_hint(choice: str) -> str:
@@ -1534,16 +1548,13 @@ def doctor(
     obs: list[Observation] = [
         Observation("catalog", str(catalog.path), "ok", "catalog validated"),
     ]
-    # S3a: a recorded Hermes choice overrides the catalog's chosen flag for
-    # this one component. None means "no record supplied": doctor reads the
-    # state dir itself. Tests pass an explicit record (including {}) to stay
-    # offline and away from the operator's live choice file.
-    # Only a doctor that actually selects Hermes reads the choice file, so a
-    # full doctor and fixture catalogs that have no hermes row stay offline.
-    selecting_hermes = component_ids is not None and "hermes" in component_ids
+    selecting_hermes = any(row["id"] == "hermes" for row in components)
     if hermes_choice is None and selecting_hermes:
         hermes_choice = load_hermes_choice(hermes_choice_state_dir)
     hermes_record = hermes_choice or None
+    effective = catalog_with_hermes_choice(catalog, hermes_record)
+    selected_ids = {row["id"] for row in components}
+    components = [row for row in effective.components if row["id"] in selected_ids]
 
     hard_missing = 0
     for row in components:
@@ -2592,6 +2603,10 @@ def apply(
         raise InstallError("--apply-system requires --yes (refused with dry-run)")
     if reconcile_sched is None:
         reconcile_sched = ids is None
+    state_dir = state_dir or default_state_dir()
+    if any(row["id"] == "hermes" and (ids is None or "hermes" in ids)
+           for row in catalog.components):
+        catalog = catalog_with_hermes_choice(catalog, load_hermes_choice(state_dir))
     def plan_components() -> list[ApplyStep]:
         return build_apply_steps(
             catalog, ids=ids, force=force, allow_system=allow_system,

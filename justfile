@@ -59,10 +59,23 @@ doctor component="":
 # S3a: ask the three Hermes paths once, record the answer, then apply.
 # Non-interactive runs (no tty, or ADE_HERMES_CHOICE=skip|self|ai) never prompt.
 # The choice file is local state; this never edits tracked config.
+[positional-arguments]
 install *args:
     #!/usr/bin/env bash
     set -euo pipefail
     root="{{ root }}"
+    live=false
+    state_args=()
+    want_state=false
+    for arg in "$@"; do
+      if [[ "$want_state" == true ]]; then state_args=(--state-dir "$arg"); want_state=false; continue; fi
+      case "$arg" in
+        --yes) live=true ;;
+        --state-dir) want_state=true ;;
+        --state-dir=*) state_args=(--state-dir "${arg#--state-dir=}") ;;
+      esac
+    done
+    if [[ "$want_state" == true ]]; then printf '%s\n' "--state-dir needs a value" >&2; exit 2; fi
     choice="${ADE_HERMES_CHOICE:-}"
     if [[ -z "${choice}" && -t 0 ]]; then
       printf '%s\n' \
@@ -84,13 +97,13 @@ install *args:
         skip|self|ai) ;;
         *) printf '%s\n' "ADE_HERMES_CHOICE must be skip, self or ai (got '${choice}')" >&2; exit 2 ;;
       esac
-      "${root}/bin/ade-install" hermes-choice "${choice}"
+      "${root}/bin/ade-install" hermes-choice "${choice}" "${state_args[@]}"
     fi
     "${root}/bin/ade-install" apply --root "${root}" "$@"
-    if [[ "${choice}" == self ]]; then
+    if [[ "$live" == true && "${choice}" == self ]]; then
       exec just --justfile "${root}/justfile" hermes-setup --self
     fi
-    if [[ "${choice}" == ai ]]; then
+    if [[ "$live" == true && "${choice}" == ai ]]; then
       exec just --justfile "${root}/justfile" hermes-setup
     fi
 

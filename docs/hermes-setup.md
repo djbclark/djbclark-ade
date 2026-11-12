@@ -88,3 +88,8 @@ stays as it was. Scoped output still does not claim whole-installation health.
 - Install catalog Hermes row: `config/install.toml`, `docs/install-catalog.md`
 - MCP bridge facts: `docs/mcp-servers.md`
 - peer-link pointer: `skills/tell-chief-of-staff/SKILL.md`
+
+Preview safety (2026-11-12): `just install` defaults to a preview. The DIY/AI
+setup recipe runs only after apply succeeds with `--yes`. Recorded choices also
+control subsequent apply runs and full doctor component expectations; the catalog
+file remains unchanged.

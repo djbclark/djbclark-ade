@@ -61,3 +61,35 @@ def test_install_recipe_offers_three_hermes_paths():
     # No tty and no ADE_HERMES_CHOICE: nothing is recorded, apply still runs.
     assert "ADE_HERMES_CHOICE" in body
     assert "-t 0" in body
+
+
+@pytest.mark.parametrize("choice,live", [("skip", True), ("self", True), ("ai", True), ("ai", False)])
+def test_install_executes_choice_with_literal_args(tmp_path, choice, live):
+    import json
+    import os
+    import sys
+    text = JUSTFILE.read_text()
+    recipe = text.split("[positional-arguments]\ninstall ", 1)[1].split("\nupdate ", 1)[0]
+    (tmp_path / "justfile").write_text(
+        'root := justfile_directory()\n[positional-arguments]\ninstall ' + recipe
+        + '\n[positional-arguments]\nhermes-setup *args:\n    #!/usr/bin/env python3\n    import json, os, sys\n'
+        + '    with open(os.environ["CAPTURE"], "a") as f: f.write(json.dumps(["setup", *sys.argv[1:]]) + "\\n")\n'
+    )
+    (tmp_path / "bin").mkdir()
+    tool = tmp_path / "bin/ade-install"
+    tool.write_text("#!" + sys.executable + '\nimport json, os, sys\n'
+                    + 'with open(os.environ["CAPTURE"], "a") as f: f.write(json.dumps(sys.argv[1:]) + "\\n")\n')
+    tool.chmod(0o755)
+    capture = tmp_path / "calls"
+    args = ["--id", "hermes", "--state-dir", "path with spaces;echo unsafe"]
+    if live:
+        args.append("--yes")
+    result = subprocess.run([shutil.which("just"), "install", *args], cwd=tmp_path,
+                            env={**os.environ, "ADE_HERMES_CHOICE": choice, "CAPTURE": str(capture)},
+                            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stderr
+    calls = [json.loads(line) for line in capture.read_text().splitlines()]
+    assert calls[0] == ["hermes-choice", choice, "--state-dir", "path with spaces;echo unsafe"]
+    assert calls[1] == ["apply", "--root", str(tmp_path), *args]
+    assert calls[2:] == ([] if choice == "skip" or not live else
+                        [["setup", *(["--self"] if choice == "self" else [])]])
