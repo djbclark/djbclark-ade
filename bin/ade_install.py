@@ -869,7 +869,9 @@ def verify_key_metadata(
     """Fixed authenticated metadata GETs; return existing verify exit codes.
 
     Intended for verify_argv under sudo-secretspec run. No URL/key argv, body
-    output, retries, inference requests or quota/acceptance decisions.
+    output, retries, inference requests or quota/acceptance decisions. The one
+    allowed output is the allowlisted ``ADE_KEY_VERIFY:expiring:`` stderr marker
+    when a provider's metadata itself reports a token expiry date (github).
     """
     import http.client
     import math
@@ -882,15 +884,29 @@ def verify_key_metadata(
         "anthropic": ("ANTHROPIC_API_KEY", "https://api.anthropic.com/v1/models"),
         "gemini": ("GEMINI_API_KEY", "https://generativelanguage.googleapis.com/v1beta/models"),
         "deepseek": ("DEEPSEEK_API_KEY", "https://api.deepseek.com/models"),
+        "cursor": ("CURSOR_API_KEY", "https://api.cursor.com/v1/me"),
+        "github": ("FIRECRAWL_GITHUB_PUBLIC_TOKEN", "https://api.github.com/rate_limit"),
     }
-    if provider not in endpoints:
+    if provider == "telegram":
+        name, url = "TELEGRAM_BOT_TOKEN", None  # URL built from the injected value only
+    elif provider in endpoints:
+        name, url = endpoints[provider]
+    else:
         return 2
-    name, url = endpoints[provider]
     key = (os.environ if environ is None else environ).get(name)
     if not isinstance(key, str) or not key:
         return VERIFY_EXIT_MISSING
     if any(ord(char) < 33 or ord(char) > 126 for char in key):
         return VERIFY_EXIT_INVALID
+    if provider == "telegram":
+        # Telegram's documented contract carries the bot token in the URL path
+        # (api.telegram.org/bot<token>/getMe); no header form exists. The value
+        # is interpolated here, never in argv, output, details or keys state, and
+        # the redirect refusal below keeps it from being forwarded elsewhere.
+        # Path/query structure characters are rejected first.
+        if any(char in "/?#%" for char in key):
+            return VERIFY_EXIT_INVALID
+        url = "https://api.telegram.org/bot" + key + "/getMe"
 
     class NoRedirect(urllib.request.HTTPRedirectHandler):
         def redirect_request(self, req, fp, code, msg, headers, newurl):
@@ -900,6 +916,8 @@ def verify_key_metadata(
     headers = {"Accept": "application/json"}
     if provider == "gemini":
         headers["x-goog-api-key"] = key  # never put this value in the query string
+    elif provider == "telegram":
+        pass  # token is the documented path element; Telegram defines no header form
     else:
         headers["Authorization"] = "Bearer " + key
     if provider == "anthropic":
@@ -907,11 +925,20 @@ def verify_key_metadata(
         headers["anthropic-version"] = "2026-10-21"
     request = urllib.request.Request(url, method="GET", headers=headers)
     limit = 256 * 1024
+    expiration_date = None
     try:
         with open_request(request, timeout=10) as response:
             status = response.getcode()
             if status != 200:
                 return VERIFY_EXIT_INVALID if status in (401, 403) else VERIFY_EXIT_UNREACHABLE
+            if provider == "github":
+                # Best-effort token-expiry information. GitHub documents this
+                # response header for expiring tokens but not the exact shape;
+                # only a leading ISO calendar date is kept and an absent or
+                # unparseable header changes nothing.
+                raw_expiration = response.headers.get(
+                    "github-authentication-token-expiration")
+                expiration_date = _parse_expiring_iso_date((raw_expiration or "")[:10])
             body = response.read(limit + 1)
     except urllib.error.HTTPError as error:
         # Never read/print the error body or stringify the exception.
@@ -953,13 +980,40 @@ def verify_key_metadata(
             and row["name"].startswith("models/") and len(row["name"]) > len("models/")
             for row in models
         )
+    elif provider == "cursor":
+        key_name = payload.get("apiKeyName")
+        valid = isinstance(key_name, str) and bool(key_name)
+    elif provider == "telegram":
+        result = payload.get("result")
+        token_id = result.get("id") if isinstance(result, dict) else None
+        valid = (
+            payload.get("ok") is True
+            and isinstance(result, dict)
+            and isinstance(token_id, int) and not isinstance(token_id, bool)
+            and result.get("is_bot") is True
+        )
+    elif provider == "github":
+        resources = payload.get("resources")
+        core = resources.get("core") if isinstance(resources, dict) else None
+        core_limit = core.get("limit") if isinstance(core, dict) else None
+        # A token GitHub accepts authenticates at the documented 5000/hour
+        # core limit; an unauthenticated 200 would report 60 instead.
+        valid = (
+            isinstance(resources, dict) and isinstance(core, dict)
+            and isinstance(core_limit, int) and not isinstance(core_limit, bool)
+            and core_limit >= 5000
+        )
     else:
         usage = data.get("usage") if isinstance(data, dict) else None
         valid_usage = (
             isinstance(usage, int) and not isinstance(usage, bool) and usage >= 0
         ) or (isinstance(usage, float) and math.isfinite(usage) and usage >= 0)
         valid = isinstance(data, dict) and isinstance(data.get("is_free_tier"), bool) and valid_usage
-    return VERIFY_EXIT_OK if valid else 1
+    if not valid:
+        return 1
+    if provider == "github" and expiration_date:
+        print(f"{VERIFY_MARKER_PREFIX}expiring:{expiration_date}", file=sys.stderr)
+    return VERIFY_EXIT_OK
 
 
 def observe_key_verify(

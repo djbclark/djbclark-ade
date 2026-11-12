@@ -28,12 +28,19 @@ SPECS = {
                {"models": [{"name": "models/fixture-model"}], "nextPageToken": "not-followed"}),
     "deepseek": ("DEEPSEEK_API_KEY", "https://api.deepseek.com/models",
                  {"object": "list", "data": [{"object": "model", "id": "fixture-model"}]}),
+    "cursor": ("CURSOR_API_KEY", "https://api.cursor.com/v1/me",
+               {"apiKeyName": "fixture-key", "createdAt": "2026-01-01T00:00:00.000Z"}),
+    "github": ("FIRECRAWL_GITHUB_PUBLIC_TOKEN", "https://api.github.com/rate_limit",
+               {"resources": {"core": {"limit": 5000, "remaining": 4999, "reset": 1765400000}},
+                "rate": {"limit": 5000}}),
 }
+ENGINE_PROVIDERS = [*SPECS, "telegram"]  # catalog rows with recorded verify_argv
 
 
 class Response:
-    def __init__(self, body, status=200):
+    def __init__(self, body, status=200, headers=None):
         self.body, self.status = body, status
+        self.headers = headers or {}
         self.read_sizes = []
     def __enter__(self):
         return self
@@ -121,11 +128,109 @@ def test_added_provider_failures_remain_silent_and_conservative(provider, status
     ("gemini", b'{"models":[{"name":"fixture"}]}'),
     ("gemini", b'{"models":[{"name":"models/"}]}'),
     ("deepseek", b'{"object":"list","data":[{"id":"fixture"}]}'),
+    ("cursor", b'{}'), ("cursor", b'{"apiKeyName":""}'), ("cursor", b'{"apiKeyName":123}'),
+    ("github", b'{}'), ("github", b'{"resources":{}}'),
+    ("github", b'{"resources":{"core":{"limit":60}}}'),
+    ("github", b'{"resources":{"core":{"limit":true}}}'),
 ])
 def test_malformed_success_is_error_not_authenticated(provider, body, capsys):
     name = SPECS[provider][0]
     assert ai.verify_key_metadata(provider, environ={name: SECRET}, opener=lambda *a, **k: Response(body)) == 1
     assert capsys.readouterr() == ("", "")
+
+
+def test_github_expiring_marker_is_the_only_output(capsys):
+    name, url, data = SPECS["github"]
+    response = Response(
+        json.dumps(data).encode(),
+        headers={"github-authentication-token-expiration": "2026-12-25 07:00:00 UTC"},
+    )
+    def opener(request, *, timeout):
+        assert request.get_header("Authorization") == "Bearer " + SECRET
+        return response
+    assert ai.verify_key_metadata("github", environ={name: SECRET}, opener=opener) == 0
+    assert capsys.readouterr() == ("", f"{ai.VERIFY_MARKER_PREFIX}expiring:2026-12-25\n")
+
+
+@pytest.mark.parametrize("header", [
+    "2026-12-25 07:00:00 UTC", "2026-12-25T07:00:00Z", "2026-12-25", "2026-12-25trailing",
+])
+def test_github_parseable_expiration_emits_only_the_marker(header, capsys):
+    name, url, data = SPECS["github"]
+    response = Response(
+        json.dumps(data).encode(),
+        headers={"github-authentication-token-expiration": header},
+    )
+    assert ai.verify_key_metadata("github", environ={name: SECRET}, opener=lambda *a, **k: response) == 0
+    assert capsys.readouterr() == ("", f"{ai.VERIFY_MARKER_PREFIX}expiring:2026-12-25\n")
+
+
+@pytest.mark.parametrize("header", [
+    None, "", "not-a-date", "2026-13-99 00:00:00 UTC", "junk2026-12-25", SECRET,
+])
+def test_github_unparseable_or_absent_expiration_stays_ok_and_silent(header, capsys):
+    name, url, data = SPECS["github"]
+    headers = {} if header is None else {"github-authentication-token-expiration": header}
+    response = Response(json.dumps(data).encode(), headers=headers)
+    assert ai.verify_key_metadata("github", environ={name: SECRET}, opener=lambda *a, **k: response) == 0
+    assert capsys.readouterr() == ("", "")
+
+
+def test_telegram_token_travels_in_documented_path_only(capsys):
+    response = Response(json.dumps(
+        {"ok": True, "result": {"id": 1, "is_bot": True, "username": "fixture_bot"}}
+    ).encode())
+    def opener(request, *, timeout):
+        # Telegram defines no header form; the token is its documented path
+        # element and must never appear in a query string or a header.
+        assert request.full_url == "https://api.telegram.org/bot" + SECRET + "/getMe"
+        assert request.get_method() == "GET"
+        assert request.data is None
+        assert request.get_header("Authorization") is None
+        assert "?" not in request.full_url
+        assert timeout == 10
+        return response
+    assert ai.verify_key_metadata("telegram", environ={"TELEGRAM_BOT_TOKEN": SECRET}, opener=opener) == 0
+    assert capsys.readouterr() == ("", "")
+
+
+@pytest.mark.parametrize("body", [
+    b'{}',
+    b'{"ok":true}',
+    b'{"ok":false,"result":{"id":1,"is_bot":true}}',
+    b'{"ok":true,"result":{"id":"1","is_bot":true}}',
+    b'{"ok":true,"result":{"id":1,"is_bot":false}}',
+    b'{"ok":true,"result":{"id":true,"is_bot":true}}',
+    (SECRET * 3).encode(),
+])
+def test_telegram_malformed_success_is_error_not_authenticated(body, capsys):
+    assert ai.verify_key_metadata(
+        "telegram", environ={"TELEGRAM_BOT_TOKEN": SECRET}, opener=lambda *a, **k: Response(body)
+    ) == 1
+    assert capsys.readouterr() == ("", "")
+
+
+@pytest.mark.parametrize("status,code", [(401, 10), (403, 10), (404, 12), (429, 12), (500, 12)])
+def test_telegram_http_failures_remain_silent_and_conservative(status, code, capsys):
+    url = "https://api.telegram.org/bot" + SECRET + "/getMe"
+    opener = Mock(side_effect=urllib.error.HTTPError(url, status, SECRET, {}, io.BytesIO(SECRET.encode())))
+    assert ai.verify_key_metadata("telegram", environ={"TELEGRAM_BOT_TOKEN": SECRET}, opener=opener) == code
+    assert opener.call_count == 1
+    assert capsys.readouterr() == ("", "")
+
+
+def test_telegram_network_error_is_unreachable(capsys):
+    opener = Mock(side_effect=urllib.error.URLError(SECRET))
+    assert ai.verify_key_metadata("telegram", environ={"TELEGRAM_BOT_TOKEN": SECRET}, opener=opener) == 12
+    opener.assert_called_once()
+    assert capsys.readouterr() == ("", "")
+
+
+@pytest.mark.parametrize("key", ["123:x/y", "123:x?y", "123:x#y", "123:x%y"])
+def test_telegram_structural_key_chars_rejected_without_transport(key):
+    opener = Mock(side_effect=AssertionError("structural key reached transport"))
+    assert ai.verify_key_metadata("telegram", environ={"TELEGRAM_BOT_TOKEN": key}, opener=opener) == 10
+    opener.assert_not_called()
 
 
 def test_transport_refuses_redirects(monkeypatch):
@@ -152,24 +257,25 @@ def test_catalog_engine_uses_secret_boundary_and_persists_only_status(tmp_path, 
             return subprocess.CompletedProcess(argv, 0, "", "")
         assert argv[:2] == ["sudo-secretspec", "run"]
         assert argv[argv.index("--") + 1:] in [
-            [str(REPO / "bin/ade-install"), "verify-key", provider] for provider in SPECS
+            [str(REPO / "bin/ade-install"), "verify-key", provider] for provider in ENGINE_PROVIDERS
         ]
         return subprocess.CompletedProcess(argv, 0, SECRET, SECRET)
     state = tmp_path / "keys.json"
     observations, rc = ai.keys_observe(catalog, runner=runner, keys_state_path=state)
     assert rc == 0
-    assert len(seen) == 6  # one bulk check and one request for each covered key
+    assert len(seen) == 9  # one bulk check and one request for each covered key
     assert rows["OPENAI_API_KEY"]["verify_argv"] == ["{bin}/ade-install", "verify-key", "openai"]
     assert rows["OPENROUTER_API_KEY"]["verify_argv"] == ["{bin}/ade-install", "verify-key", "openrouter"]
     for provider, (name, _, _) in SPECS.items():
         assert rows[name]["verify_argv"] == ["{bin}/ade-install", "verify-key", provider]
-    assert sum(bool(r.get("verify_argv")) for r in catalog.keys) == 5
+    assert rows["TELEGRAM_BOT_TOKEN"]["verify_argv"] == ["{bin}/ade-install", "verify-key", "telegram"]
+    assert sum(bool(r.get("verify_argv")) for r in catalog.keys) == 8
     assert SECRET not in state.read_text() and SECRET not in repr(observations)
     saved = json.loads(state.read_text())
     assert saved["keys"]["OPENAI_API_KEY"]["status"] == "ok"
 
 
-@pytest.mark.parametrize("provider", SPECS)
+@pytest.mark.parametrize("provider", [*SPECS, "telegram"])
 def test_cli_missing_key_is_silent_exit_only(tmp_path, provider):
     # An empty environment mapping is forced in-process before running the CLI;
     # no actual key or network source is consulted.

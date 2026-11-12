@@ -416,8 +416,8 @@ def main(argv: list[str] | None = None) -> int:
             )
         p.set_defaults(func=func)
 
-    vp = sub.add_parser("verify-key", help="fixed metadata-authentication probe; reads injected environment only and emits no output")
-    vp.add_argument("provider", choices=("openai", "openrouter", "anthropic", "gemini", "deepseek"))
+    vp = sub.add_parser("verify-key", help="fixed metadata-authentication probe; reads injected environment only; no output except the allowlisted expiring marker")
+    vp.add_argument("provider", choices=("openai", "openrouter", "anthropic", "gemini", "deepseek", "cursor", "github", "telegram"))
     vp.set_defaults(func=cmd_verify_key)
 
     bp = sub.add_parser("bootstrap", parents=[shared], help="explicit Just bootstrap followed only by installation preview")
