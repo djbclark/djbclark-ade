@@ -31,8 +31,9 @@ Simulates what-if cache and compaction scenarios on local Claude Code transcript
    - Fresh session pays initial preamble write but zero summarisation read/output overhead,
      and subsequent reads carry preamble P rather than floor F (saving ~57.5k read tokens).
 
-Prices follow platform list-price equivalents (Opus 5.5 $4/MTok base, Sonnet 5.5 $2/MTok base,
-Fable 5.1 $10/MTok base; unknown models $1/MTok default; 1h write 2.0x, 5m write 1.25x, output 5.0x).
+Prices are API list-price dollars per model (PRICES, from platform.claude.com/docs/en/about-claude/pricing,
+2026-10-18): Opus 5.5 $4/MTok base, Sonnet 5.5 $2/MTok base, Fable 5.1 $10/MTok base; unknown models $1/MTok default;
+1h write 2.0x, 5m write 1.25x, output 5.0x.
 
 Exit codes:
   0: Success (results printed or JSON emitted).
@@ -54,6 +55,7 @@ import sys
 sys.dont_write_bytecode = True
 
 # Model id prefix -> (base input $/MTok, cache-read multiplier)
+# Source: platform.claude.com/docs/en/about-claude/pricing (snapshot 2026-10-18, matching bin/claude-cost-mix)
 PRICES = {
     "claude-opus-5-5": (4.0, 0.05),
     "claude-sonnet-5-5": (2.0, 0.05),
@@ -116,13 +118,21 @@ def price(model: str | None, read_override: float | None = None) -> tuple[float,
     return base / 1e6, rd
 
 
+def _safe_mtime(path: str) -> float:
+    """Return mtime or 0.0 if file was deleted or unreadable during scanning."""
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return 0.0
+
+
 def scan_transcripts(root: str, project: str = "", days: float = 7.0) -> list[list[dict]]:
     """Scan transcripts under root modified within days, returning structured sequences of assistant turns."""
     cutoff = datetime.now().timestamp() - (days * 86400.0)
     pattern = os.path.join(os.path.expanduser(root), "**", "*.jsonl")
     matched_files = [
         f for f in glob.glob(pattern, recursive=True)
-        if project in f and os.path.getmtime(f) >= cutoff
+        if project in f and _safe_mtime(f) >= cutoff
     ]
 
     seqs: list[list[dict]] = []
@@ -291,7 +301,9 @@ def simulate_compaction_threshold(
                 eff = floor
 
             cr_eff = max(cr - drop, 0)
-            req_cost = base * (i + (cw * w1h) + (cr_eff * rd) + (o * out_w))
+            rem_drop = max(drop - cr, 0)
+            cw_eff = max(cw - rem_drop, 0)
+            req_cost = base * (i + (cw_eff * w1h) + (cr_eff * rd) + (o * out_w))
             total_cost += req_cost
 
     return {
@@ -343,7 +355,9 @@ def simulate_handoff_threshold(
                 eff = preamble
 
             cr_eff = max(cr - drop, 0)
-            req_cost = base * (i + (cw * w1h) + (cr_eff * rd) + (o * out_w))
+            rem_drop = max(drop - cr, 0)
+            cw_eff = max(cw - rem_drop, 0)
+            req_cost = base * (i + (cw_eff * w1h) + (cr_eff * rd) + (o * out_w))
             handoff_total += req_cost
 
     saving_usd = compaction_total_usd - handoff_total
@@ -398,7 +412,10 @@ def format_text_report(data: dict) -> str:
     lines.append(f"   {'-'*15:<16} {'-'*13:<14} {'-'*13:<14} {'-'*17:<18}")
 
     for row in data["handoff_comparison"]:
-        save_str = f"-${row['saving_usd']:,.2f} ({row['saving_pct']:.1%})"
+        if row["saving_usd"] >= 0:
+            save_str = f"-${row['saving_usd']:,.2f} ({row['saving_pct']:.1%})"
+        else:
+            save_str = f"+${abs(row['saving_usd']):,.2f} ({row['saving_pct']:+.1%})"
         lines.append(f"   {row['label']:<16} ${row['compaction_usd']:<13,.2f} ${row['handoff_usd']:<13,.2f} {save_str:<18}")
 
     lines.append("")

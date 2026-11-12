@@ -177,9 +177,72 @@ def test_compaction_and_handoff_simulation(tmp_path, capsys):
     assert len(out["handoff_comparison"]) == 1
     h_row = out["handoff_comparison"][0]
     assert h_row["threshold"] == 200_000
-    # Handoff avoids summarisation cost and writes 50k preamble vs 100k floor -> handoff saves money!
-    assert h_row["saving_usd"] > 0
-    assert h_row["saving_pct"] > 0
+    # Exact values: compaction $0.743, handoff $0.453, saving $0.290 (~39.0%)
+    assert abs(row["total_usd"] - 0.743) < 1e-4
+    assert abs(h_row["compaction_usd"] - 0.743) < 1e-4
+    assert abs(h_row["handoff_usd"] - 0.453) < 1e-4
+    assert abs(h_row["saving_usd"] - 0.290) < 1e-4
+    assert abs(h_row["saving_pct"] - (0.290 / 0.743)) < 1e-4
+
+
+def test_cache_miss_context_drop_deduction(tmp_path, capsys):
+    mod = load_module()
+    proj = tmp_path / "test-proj"
+    proj.mkdir(parents=True)
+
+    # Turn 1: 300k context (triggers compaction at 200k, floor 100k, drop = 200k)
+    # Turn 2: Cache miss / restart (>1h idle gap), so 300k is in cache_creation_tokens, cr=0.
+    # Drop must deduct from cw (F1 fix), rather than only cr.
+    u1 = {"input_tokens": 0, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 300000, "output_tokens": 0}
+    u2 = {"input_tokens": 0, "cache_creation_input_tokens": 300000, "cache_read_input_tokens": 0, "output_tokens": 0}
+
+    lines = [
+        make_assistant_turn("m1", u1, timestamp="2026-11-12T12:00:00Z"),
+        make_assistant_turn("m2", u2, timestamp="2026-11-12T14:00:00Z"),
+    ]
+    (proj / "cache_miss.jsonl").write_text("\n".join(json.dumps(x) for x in lines) + "\n")
+
+    code = mod.main(["--root", str(tmp_path), "--thresholds", "200k", "--floor", "100k", "--days", "30", "--json"])
+    assert code == 0
+    out = json.loads(capsys.readouterr().out)
+    row = out["compaction_thresholds"][1]
+    # Turn 1: overhead $0.490 + req $0.010 = $0.500
+    # Turn 2: eff cw = 100k * 2.0 * 2e-6 = $0.400 -> total = $0.900
+    assert abs(row["total_usd"] - 0.900) < 1e-4
+
+
+def test_negative_handoff_savings_formatting():
+    mod = load_module()
+    sample = {
+        "transcripts": 1,
+        "requests": 1,
+        "parameters": {"days": 1.0, "floor_tokens": 104000, "preamble_tokens": 46500, "summary_tokens": 6000},
+        "ttl": {
+            "observed_1h_usd": 10.0,
+            "five_minute_usd": 12.0,
+            "five_minute_pct_diff": 0.2,
+            "subagent_5m_usd": 10.5,
+            "subagent_5m_pct_diff": 0.05,
+            "gap_requests": 0,
+            "gap_request_ratio": 0.0,
+            "gap_cached_tokens": 0,
+        },
+        "compaction_thresholds": [
+            {"threshold": None, "label": "observed", "total_usd": 10.0, "diff_usd": 0.0, "pct_diff": 0.0, "extra_compactions": 0}
+        ],
+        "handoff_comparison": [
+            {"threshold": 150000, "label": "150k", "compaction_usd": 10.0, "handoff_usd": 12.5, "saving_usd": -2.5, "saving_pct": -0.25}
+        ],
+    }
+    report = mod.format_text_report(sample)
+    assert "+$2.50 (-25.0%)" in report
+    assert "-$-" not in report
+
+
+def test_safe_mtime_handles_deleted_file(tmp_path):
+    mod = load_module()
+    missing = tmp_path / "missing.jsonl"
+    assert mod._safe_mtime(str(missing)) == 0.0
 
 
 def test_observed_compaction_reset(tmp_path, capsys):
