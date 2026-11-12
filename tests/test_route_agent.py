@@ -446,6 +446,37 @@ class TestPoolSplitIsGeneral(unittest.TestCase):
         self.assertEqual(r.pool_service("claude", "fable"), "claude")
 
 
+class TestDispatchUnattendedModes(unittest.TestCase):
+    def test_each_provider_uses_its_native_unattended_mode(self):
+        for service, model, mode in (
+            ("claude", "sonnet --effort high", "bypassPermissions"),
+            ("codex", "gpt-6.1-sol --effort high", "full-access"),
+            ("antigravity-argon", "gemini-4-argon-high", "full-access"),
+            ("zai", "zai/glm-5.3-flash --effort high", None),
+            ("cursor-auto", "default", None),
+        ):
+            with self.subTest(service=service):
+                argv = shlex.split(r.Choice(r.BY_NAME[service], 80, 1,
+                                           model=model, kind="code").dispatch)
+                if mode is None:
+                    self.assertNotIn("--mode", argv)
+                else:
+                    self.assertEqual(argv[argv.index("--mode") + 1], mode)
+                    self.assertEqual(argv.count("--mode"), 1)
+                self.assertEqual(argv[argv.index("--label") + 1], "ade.kind=code")
+                self.assertEqual(argv[-1], "--no-wait")
+                if "--effort" in model:
+                    self.assertEqual(argv[argv.index("--thinking") + 1], "high")
+
+    def test_placeholder_dispatch_still_has_mode_and_pi_honors_configured_modes(self):
+        argv = shlex.split(r.Choice(r.BY_NAME["codex"], 80, 1).dispatch)
+        self.assertEqual(argv[argv.index("--mode") + 1], "full-access")
+        with mock.patch.object(r, "DISPATCH_MODES", {"pi": "provider-native-mode"}):
+            argv = shlex.split(r.Choice(r.BY_NAME["zai"], 80, 1,
+                                       model="zai/glm-5.3-flash").dispatch)
+            self.assertEqual(argv[argv.index("--mode") + 1], "provider-native-mode")
+
+
 class TestQuotaFamilyIsolation(unittest.TestCase):
     """Sanitized shapes from aiuse schema 1.5, observed 2026-11-12."""
 
@@ -766,7 +797,7 @@ class TestRoutingPolicy2026_10_15(unittest.TestCase):
         c = r.route("frontier", quota=IDLE)
         self.assertEqual(c.service.name, "codex")
         self.assertEqual(c.dispatch,
-                         "paseo run --provider codex/gpt-6-astra --thinking high "
+                         "paseo run --provider codex/gpt-6-astra --thinking high --mode full-access "
                          "--label ade.kind=frontier --no-wait")
 
 
@@ -2785,7 +2816,7 @@ class TestArgonFrontierFallback(unittest.TestCase):
         self.assertEqual(
             (c.service.name, c.dispatch),
             ("antigravity-argon",
-             "paseo run --provider antigravity/gemini-4-argon-high "
+             "paseo run --provider antigravity/gemini-4-argon-high --mode full-access "
              "--label ade.kind=frontier --no-wait"),
         )
         q.pop("antigravity-argon")

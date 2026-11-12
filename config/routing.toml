@@ -125,6 +125,8 @@ frontier_models = ["gpt-6-astra", "fable", "gemini-4-argon"]
 inflight_cap = {}
 # Flags a dispatch line needs for the agent to accept the model at all (none since crush retired, 2026-11-06).
 extra = {}
+# Provider-native unattended IDs (2026-11-12); Pi reports no selectable modes, so omit it.
+unattended_modes = { claude = "bypassPermissions", codex = "full-access", antigravity = "full-access" }
 
 # When there is no measured history, floor the brief-size default (operator 2026-10-18:
 # gpt-6-astra median 65% of codex's 5-hour window across 4 measured slices).

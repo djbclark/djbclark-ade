@@ -27,6 +27,7 @@ use one validated effective model-tier snapshot, refreshed by default reload;
 See [config precedence](config-migration.md).
 A2. `bin/route_agent.py plan --kinds …` applies them to the live quota and prints one `paseo run --provider … --no-wait` line per slice;
 `route`, `show`, `services [--check-models]`, `calibrate`, `substrate` and `hermes-chain` are its other commands.
+A2a. **Unattended dispatch (2026-11-12):** `Choice.dispatch` adds the provider-native mode from `[dispatch].unattended_modes`: Claude `bypassPermissions`, Codex and Antigravity `full-access`. Pi reports no selectable modes in `paseo provider ls --json`, so no mode is passed. This prevents workers from inheriting Default permissions.
 A3. **Monthly `good_at` re-rank (2026-11-10):** `route_agent.py calibrate --json --since 30` proposes rank
 deltas from recent dispatch outcomes. The optional Paseo schedule `routing-recalibrate` (Day 1 09:00,
 `--mode auto`) applies those suggestions; inventory + create line in `docs/scheduling.md` and

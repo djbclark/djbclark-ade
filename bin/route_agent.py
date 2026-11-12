@@ -432,7 +432,7 @@ def apply_policy(data: dict[str, Any]) -> None:
     global BURN_FIRST_WASTE_MIN, PACE_PENALTY_ABOVE, PACE_PENALTY
     global PACE_PENALTY_JUDGMENT_FACTOR, QUALITY_MAX_RANK_GAP
     global PLENTY_MIN, DEFAULT_PROFILE, NEVER_ROUTE, OPERATOR_GATED
-    global ALIASES, DISPATCH_EXTRA, HERMES_MODELS
+    global ALIASES, DISPATCH_EXTRA, DISPATCH_MODES, HERMES_MODELS
     global HERMES_PROVIDER_NAME
     global SUBSTRATE_LIFELINE
     global CALIBRATE_MIN_OUTCOMES, CALIBRATE_MIN_PEERS
@@ -471,6 +471,12 @@ def apply_policy(data: dict[str, Any]) -> None:
         ALIASES = {str(k): str(v) for k, v in (routing.get("aliases") or {}).items()}
 
         DISPATCH_EXTRA = {str(k): str(v) for k, v in (dispatch.get("extra") or {}).items()}
+        modes = dispatch.get("unattended_modes", {})
+        if not isinstance(modes, dict) or not all(
+                isinstance(k, str) and k and isinstance(v, str) and v
+                for k, v in modes.items()):
+            raise ValueError("dispatch.unattended_modes must map providers to non-empty mode IDs")
+        DISPATCH_MODES = dict(modes)
         HERMES_MODELS = {str(k): [str(m) for m in v]
                           for k, v in (hermes.get("models") or {}).items()}
         HERMES_PROVIDER_NAME = {str(k): str(v)
@@ -1781,6 +1787,8 @@ class Choice:
         """Launch template: native `paseo run` (Wave 6; acp-dispatch is transitional only).
         Cursor Cloud uses cursor-cloud launch. Callers add placement flags and the brief."""
         agent = self.service.acp_agent
+        mode = DISPATCH_MODES.get(agent)
+        mode_args = ["--mode", mode] if mode else []
         # DISPATCH_EXTRA retained for config compatibility; unused on the native path
         # (was appended to acp-dispatch lines; empty in config/routing.toml).
         _ = DISPATCH_EXTRA.get(agent, "")
@@ -1797,11 +1805,13 @@ class Choice:
             argv = ["paseo", "run", "--provider", f"pi/{spec[0]}"]
             if len(spec) == 3:
                 argv += ["--thinking", spec[2]]
+            argv += mode_args
             if self.kind:
                 argv += ["--label", f"ade.kind={self.kind}"]
             return shlex.join(argv + ["--no-wait"])
         if not parts:
             return (f"paseo run --provider {agent}/<id from: paseo provider models {agent}> "
+                    + (shlex.join(mode_args) + " " if mode_args else "")
                     + (f"--label ade.kind={self.kind} " if self.kind else "")
                     + "--no-wait")
         argv = ["paseo", "run", "--provider", f"{agent}/{parts[0]}"]
@@ -1810,6 +1820,7 @@ class Choice:
             rest = parts[1].split()
             if len(rest) >= 2 and rest[0] == "--effort":
                 argv += ["--thinking", rest[1]]
+        argv += mode_args
         if self.kind:
             argv += ["--label", f"ade.kind={self.kind}"]
         return shlex.join(argv + ["--no-wait"])
