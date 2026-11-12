@@ -549,3 +549,11 @@ def test_swap_of_an_already_validated_parent_cannot_redirect_the_children(tmp_pa
         pass
     assert list(victim.iterdir()) == []  # a path-based walk would have created state/ledger.lock in the victim
     assert (tmp_path / "a.real" / "state" / "ledger.lock").is_file()
+
+
+def test_a_repeated_name_earlier_in_the_path_is_not_taken_for_the_leaf(tmp_path, as_root):
+    shared = tmp_path / "x"
+    shared.mkdir()
+    os.chmod(shared, 0o1777)
+    os.close(ai.open_state_dir(shared / "y" / "x"))  # sticky "x" is an ancestor here; the leaf "x" is private
+    assert (shared / "y" / "x").is_dir()

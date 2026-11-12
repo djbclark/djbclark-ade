@@ -3007,7 +3007,7 @@ def open_state_dir(state_dir: Path) -> int:
     fd = os.open(os.sep, _DIR_FLAGS)
     try:
         _require_trusted_dir(fd, here, leaf=not names)
-        for name in names:
+        for index, name in enumerate(names):
             _before_open_component(here, name)
             path = os.path.join(here, name)
             try:
@@ -3023,7 +3023,7 @@ def open_state_dir(state_dir: Path) -> int:
                 raise _root_refuse(path, f"not a plain directory it can open or create ({error.strerror or error})") from error
             os.close(fd)
             fd, here = nxt, path
-            _require_trusted_dir(fd, here, leaf=name == names[-1])
+            _require_trusted_dir(fd, here, leaf=index == len(names) - 1)
         return fd
     except BaseException:
         os.close(fd)
