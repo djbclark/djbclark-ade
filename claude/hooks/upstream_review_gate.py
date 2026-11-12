@@ -63,33 +63,37 @@ import subprocess
 import sys
 
 GATED_OWNERS = frozenset({"cfengine", "northerntechhq"})
-GATED_TEXT = re.compile(r"(?i)(?<![\w.-])(cfengine|northerntechhq)(?![\w-])")
+GATED_TEXT = re.compile(r"(?i)(?<![\w.-])(cfengine|northerntechhq)(?![\w-]|\.\w)")
 GATED_SLASH = re.compile(r"(?i)(?<![\w.-])(cfengine|northerntechhq)/")
 MAX_DEPTH = 5
 GIT_TIMEOUT_S = 5
 MAX_FILE = 262144
+MAX_SHLEX = 100000
 
 SHELLS = frozenset({"bash", "sh", "zsh", "dash", "ksh", "fish"})
 WRAPPERS = frozenset({
     "env", "command", "exec", "time", "nice", "ionice", "nohup", "setsid", "builtin", "sudo", "doas", "timeout",
     "gtimeout", "xargs", "stdbuf", "caffeinate", "script", "watch", "rtk", "bg", "ts", "chronic", "parallel",
-    "!", "{",
+    "!", "{", "secretspec", "sudo-secretspec", "direnv", "op", "uv", "uvx", "npx", "mise", "flock",
+    "taskpolicy", "arch",
 })
 HTTP_TOOLS = frozenset({"curl", "wget", "http", "https", "xh", "xhs"})
 INTERESTING = frozenset({"gh", "git", "cd", "pushd", "eval"}) | HTTP_TOOLS | SHELLS
 ASSIGN = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", re.S)
-SHELLISH = re.compile(r"\b(bash|sh|zsh|dash|ksh|eval|source|python3?|node|perl|ruby|ssh|xargs)\b")
+SHELLISH = re.compile(r"(?<![\w.-])(bash|sh|zsh|dash|ksh|eval|source|python3?|node|perl|ruby|ssh|xargs)(?!\w)")
 HEREDOC_DELIM = re.compile(r"-?[ \t]*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 PUNCT = ";&|()<>`\n"
 
 # gh groups that act on a repository, and the verbs in them that only read. Any other verb is a write.
 GH_GROUPS = frozenset({"pr", "issue", "release", "repo", "label", "workflow", "run", "secret", "variable",
-                       "project", "ruleset", "cache", "discussion", "gist"})
+                       "project", "ruleset", "cache", "discussion"})
 GH_READ_VERBS = frozenset({
     "view", "list", "ls", "status", "diff", "checks", "checkout", "co", "clone", "fork", "browse", "watch",
     "download", "get", "field-list", "item-list", "search", "verify", "verify-asset", "check", "help",
-    "autolink", "deploy-key", "gitignore", "license", "credits", "garden",
+    "credits", "garden", "set-default",
 })
+# `gh repo deploy-key add`, `gh repo autolink create`: the verb is a namespace, the action is the next word
+GH_NESTED = frozenset({"deploy-key", "autolink", "gitignore", "license"})
 GH_VALUE_LONG = frozenset({
     "--repo", "--body", "--title", "--base", "--head", "--header", "--hostname", "--field", "--raw-field",
     "--input", "--method", "--jq", "--template", "--cache", "--body-file", "--notes", "--notes-file", "--tag",
@@ -99,11 +103,11 @@ GH_VALUE_LONG = frozenset({
     "--color", "--template-file", "--app", "--org", "--env", "--visibility", "--remote", "--source", "--reason",
     "--app", "--user", "--found-in", "--env-file", "--title", "--editor", "--add-label", "--remove-label",
     "--add-assignee", "--remove-assignee", "--add-reviewer", "--remove-reviewer", "--add-project",
-    "--remove-project", "--add-milestone", "--remove-milestone", "--format", "--field",
+    "--remove-project", "--add-milestone", "--remove-milestone", "--format", "--field", "--preview",
 })
-GH_VALUE_SHORT = frozenset("RbtBHFfXqamprsALnMS")
+GH_VALUE_SHORT = frozenset("RbtBHFfXq")   # the rest are booleans in some verbs (`pr merge -s URL`)
 
-WRITE_WORDS = re.compile(r"(?i)(?<![a-z])(create|update|add|comment|transition|delete|edit|assign|remove)(?![a-z])")
+WRITE_WORDS = re.compile(r"(?i)(?<![a-z])(create|update|add|comment|transition|delete|edit|assign|remove|link|move)(?![a-z])")
 
 
 class Finding(Exception):
@@ -118,6 +122,8 @@ def deny(reason: str) -> None:
 
 
 def reason_for(what: str, target: str) -> str:
+    what = re.sub(r"(?<=//)[^/@\s]+@", "", what)       # a remote URL may carry a token as userinfo
+    target = re.sub(r"(?<=//)[^/@\s]+@", "", target)
     return ("Upstream review gate: %s would write to CFEngine upstream (%s). Upstream accepts exactly what djbclark "
             "sends: show djbclark the exact text (title/body/payload) and let djbclark run it, or have djbclark lift "
             "the gate (UPSTREAM_REVIEW_GATE_OFF=1 in the Claude environment). Reads are not blocked; the forks "
@@ -131,6 +137,8 @@ def reason_for(what: str, target: str) -> str:
 
 def tokenize(text: str):
     """shlex words with the shell operators as their own tokens, or None when the quoting is unbalanced."""
+    if len(text) > MAX_SHLEX:                           # shlex is quadratic on a huge word
+        return None
     lex = shlex.shlex(text.replace("\\\n", " "), posix=True, punctuation_chars=PUNCT)
     lex.whitespace = " \t\r"
     lex.whitespace_split = True
@@ -156,8 +164,19 @@ def segments(text: str):
     cur = []
     if toks is None:                                    # unbalanced quote: split on operators, drop quote marks
         for piece in re.split(r"[;&|()`\n]+", text.replace("\\\n", " ")):
-            words = [w.strip("'\"") for w in piece.split()]
-            words = [w for w in words if w]
+            words = []
+            skip_next = False
+            for w in piece.split():
+                if skip_next:
+                    skip_next = False
+                    continue
+                m = re.match(r"^\d?(&>|[<>]+&?)(.*)$", w)
+                if m:
+                    skip_next = not m.group(2)
+                    continue
+                w = w.strip("'\"")
+                if w:
+                    words.append(w)
             if words:
                 out.append(words)
         return out
@@ -172,6 +191,8 @@ def segments(text: str):
             cur = []
         elif is_redirect(tok):
             skip = True
+            if len(cur) > 0 and len(cur[-1]) == 1 and cur[-1].isdigit():
+                cur.pop()                                # the fd of `2>&1` or `2>/dev/null`
         else:
             cur.append(tok)
     if cur:
@@ -180,10 +201,11 @@ def segments(text: str):
 
 
 def split_heredocs(text: str):
-    """(text with heredoc bodies removed, bodies of heredocs fed to a shell-like consumer)."""
+    """(text with heredoc bodies and comments removed, bodies fed to a shell-like consumer, every body)."""
     lines = text.split("\n")
     out = []
     kept = []
+    all_bodies = []
     in_s = in_d = False
     i = 0
     while i < len(lines):
@@ -210,6 +232,7 @@ def split_heredocs(text: str):
             elif c == '"':
                 in_d = True
             elif c == "#" and (j == 0 or line[j - 1] in " \t;|&("):
+                out[-1] = line[:j]                       # a shell comment is not part of the command
                 break
             elif line.startswith("<<", j) and not line.startswith("<<<", j) and (j == 0 or line[j - 1] != "<"):
                 m = HEREDOC_DELIM.match(line, j + 2)
@@ -225,9 +248,10 @@ def split_heredocs(text: str):
                 if (cand.strip("\t") if dash else cand).rstrip("\r") == delim:
                     break
                 body.append(cand)
+            all_bodies.append("\n".join(body))
             if SHELLISH.search(line):
                 kept.append("\n".join(body))
-    return "\n".join(out), kept
+    return "\n".join(out), kept, all_bodies
 
 
 def base(word: str) -> str:
@@ -235,6 +259,8 @@ def base(word: str) -> str:
 
 
 def resolve_dir(path: str, cur: str) -> str:
+    home = os.path.expanduser("~")
+    path = path.replace("${HOME}", home).replace("$HOME", home)
     if not path or "$" in path or "`" in path:
         return cur
     p = os.path.expanduser(path)
@@ -246,18 +272,20 @@ def resolve_dir(path: str, cur: str) -> str:
 # ---- git ------------------------------------------------------------------------------------------------------
 
 _GIT_CACHE = {}
+DATA = []          # every heredoc body of the command: stdin for `gh api graphql -F query=@-`
 
 
-def git(dirpath: str, *args: str):
-    """(returncode, stdout) of `git -C dirpath args`, or (127, "") when git or the directory is unusable."""
-    key = (dirpath,) + args
+def git(dirpath: str, *args: str, gitdir=None):
+    """(returncode, stdout) of `git -C dirpath args` (or --git-dir), or (127, "") when git is unusable."""
+    key = (dirpath, gitdir) + args
     if key in _GIT_CACHE:
         return _GIT_CACHE[key]
     res = (127, "")
     if os.path.isdir(dirpath):
         try:
             env = dict(os.environ, GIT_TERMINAL_PROMPT="0", GIT_OPTIONAL_LOCKS="0")
-            r = subprocess.run(["git", "-C", dirpath] + list(args), capture_output=True, text=True,
+            argv = ["git", "--git-dir", gitdir] if gitdir else ["git", "-C", dirpath]
+            r = subprocess.run(argv + list(args), capture_output=True, text=True, cwd=dirpath,
                                timeout=GIT_TIMEOUT_S, env=env)
             res = (r.returncode, r.stdout)
         except (OSError, subprocess.SubprocessError):
@@ -268,10 +296,10 @@ def git(dirpath: str, *args: str):
 
 def github_owner(url: str):
     """(owner, name) of a github.com URL (https, ssh, scp-like), else None."""
-    m = re.search(r"github\.com[:/]+([\w.-]+)/([\w.-]+?)(?:\.git)?/?(?:[#?].*)?$", url.strip())
+    m = re.search(r"(?i)github\.com[:/]+([\w.-]+)/([\w.-]+?)(?:\.git)?/?(?:[#?].*)?$", url.strip())
     if m:
         return m.group(1), m.group(2)
-    m = re.search(r"github\.com[:/]+([\w.-]+)(?:/|$)", url.strip())
+    m = re.search(r"(?i)github\.com[:/]+([\w.-]+)(?:/|$)", url.strip())
     return (m.group(1), "") if m else None
 
 
@@ -295,15 +323,22 @@ def gated_remotes(dirpath: str):
     return found
 
 
-def check_git(args, cur: str) -> None:
+def check_git(args, cur: str, env=None) -> None:
     i = 0
     dirpath = cur
+    gitdir = resolve_dir(env["GIT_DIR"], cur) if env and env.get("GIT_DIR") else None
     while i < len(args) and args[i].startswith("-"):
         a = args[i]
         if a == "-C" and i + 1 < len(args):
             dirpath = resolve_dir(args[i + 1], dirpath)
             i += 2
-        elif a in ("-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--config-env"):
+        elif a.startswith("--git-dir="):
+            gitdir = resolve_dir(a.split("=", 1)[1], dirpath)
+            i += 1
+        elif a == "--git-dir" and i + 1 < len(args):
+            gitdir = resolve_dir(args[i + 1], dirpath)
+            i += 2
+        elif a in ("-c", "--work-tree", "--namespace", "--exec-path", "--config-env"):
             i += 2
         else:
             i += 1
@@ -335,12 +370,12 @@ def check_git(args, cur: str) -> None:
     if remote is None and positionals:
         remote = positionals[0]
     if remote is None:
-        rc, branch = git(dirpath, "symbolic-ref", "--short", "-q", "HEAD")
+        rc, branch = git(dirpath, "symbolic-ref", "--short", "-q", "HEAD", gitdir=gitdir)
         branch = branch.strip() if rc == 0 else ""
         keys = (["branch.%s.pushRemote" % branch] if branch else []) + ["remote.pushDefault"] + \
                (["branch.%s.remote" % branch] if branch else [])
         for key in keys:
-            rc, val = git(dirpath, "config", "--get", key)
+            rc, val = git(dirpath, "config", "--get", key, gitdir=gitdir)
             if rc == 0 and val.strip():
                 remote = val.strip()
                 break
@@ -349,7 +384,7 @@ def check_git(args, cur: str) -> None:
         if GATED_SLASH.search(" ".join(args)):
             raise Finding(reason_for("`git push` (remote not resolvable: %s)" % remote, "cfengine/NorthernTechHQ named in the command"))
         return
-    rc, out = git(dirpath, "remote", "get-url", "--push", "--all", remote)
+    rc, out = git(dirpath, "remote", "get-url", "--push", "--all", remote, gitdir=gitdir)
     urls = out.split() if rc == 0 else [remote]
     for u in urls:
         slug = gated_url(u)
@@ -415,7 +450,7 @@ def api_target(endpoint: str):
     ep = re.sub(r"^https?://[^/]+/", "", endpoint.strip()).lstrip("/")
     m = re.match(r"repos/([^/]+)/([^/?]*)", ep)
     if m:
-        if m.group(1).startswith("{"):
+        if m.group(1).startswith(("{", ":", "$")):
             return ("cwd", "", "")
         return ("repo", m.group(1), m.group(2))
     m = re.match(r"(?:orgs|users)/([^/?]+)", ep)
@@ -458,7 +493,7 @@ def check_gh(args, env, cur: str, fulltext: str) -> None:
         has_field = any(f in flagmap for f in ("-f", "-F", "--field", "--raw-field", "--input"))
         is_graphql = re.sub(r"^https?://[^/]+/", "", ep).strip("/") == "graphql"
         if is_graphql:
-            text = fulltext
+            text = fulltext + "\n" + "\n".join(DATA)
             for f in ("-f", "-F", "--field", "--raw-field"):
                 for v in flagmap.get(f, []):
                     if v and "=@" in v:
@@ -484,7 +519,10 @@ def check_gh(args, env, cur: str, fulltext: str) -> None:
         if group not in GH_GROUPS or len(pos) < 2:
             return
         verb = pos[1]
-        if verb in GH_READ_VERBS:
+        if verb in GH_NESTED:
+            if len(pos) > 2 and pos[2] in GH_READ_VERBS:
+                return
+        elif verb in GH_READ_VERBS:
             return
         write = True
     if not write:
@@ -506,7 +544,7 @@ def check_gh(args, env, cur: str, fulltext: str) -> None:
             targets.append(("repo", s[0], s[1]))
     if group != "api":
         for p in pos[2:]:
-            if re.match(r"^(https?://|git@|ssh://)?([\w.-]+@)?github\.com[/:]", p):
+            if re.match(r"(?i)^(https?://|git@|ssh://)?([\w.-]+@)?(www\.)?github\.com[/:]", p):
                 s = github_owner(p)
                 if s:
                     targets.append(("repo", s[0], s[1]))
@@ -536,6 +574,8 @@ def check_gh(args, env, cur: str, fulltext: str) -> None:
 # ---- Jira / Composio ------------------------------------------------------------------------------------------
 
 JIRA_HOST = re.compile(r"(?i)atlassian\.net")
+HTTPIE = frozenset({"http", "https", "xh", "xhs"})
+CURL_VALUE_SHORT = frozenset("AbcCdDeEFHKmoPQrTuUwxXyYz")
 CURL_DATA = re.compile(r"^(--data(-raw|-binary|-ascii|-urlencode)?|--json|--form|--form-string|--upload-file|"
                        r"--post-data|--post-file|--body-data|--body-file)(=|$)")
 
@@ -543,6 +583,7 @@ CURL_DATA = re.compile(r"^(--data(-raw|-binary|-ascii|-urlencode)?|--json|--form
 def http_write(name: str, args) -> bool:
     get_mode = False
     data = False
+    implicit_data = False
     method = None
     i = 0
     while i < len(args):
@@ -558,12 +599,28 @@ def http_write(name: str, args) -> bool:
             method = a[2:].lstrip("=").upper()
         elif CURL_DATA.match(a):
             data = True
+        elif name == "curl" and re.match(r"^-[A-Za-z]{2,}", a):       # a cluster: -sSX DELETE, -sd @b
+            for k, letter in enumerate(a[1:], 1):
+                if letter in CURL_VALUE_SHORT:
+                    rest = a[k + 1:]
+                    if letter == "X":
+                        if rest:
+                            method = rest.lstrip("=").upper()
+                        elif i + 1 < len(args):
+                            method = args[i + 1].upper()
+                    elif letter in "dFT":
+                        data = True
+                    break
         elif a in ("-d", "-F", "-T") or (re.match(r"^-[dFT].", a) and name == "curl"):
             data = True
-        elif name in ("http", "https", "xh", "xhs") and a.upper() in ("POST", "PUT", "PATCH", "DELETE"):
+        elif name in HTTPIE and a.upper() in ("POST", "PUT", "PATCH", "DELETE"):
             method = a.upper()
+        elif name in HTTPIE and not a.startswith("-") and "://" not in a and re.match(r"^[^=:\s]+(=(?!=)|:=)", a):
+            implicit_data = True                       # httpie sends a POST once there are data items
         i += 1
     if method in ("POST", "PUT", "PATCH", "DELETE"):
+        return True
+    if implicit_data and method in (None, "GET") and not get_mode:
         return True
     return data and not get_mode
 
@@ -599,6 +656,8 @@ def command_of(words, env):
     if not words:
         return None
     name = base(words[0])
+    if ("$(" in words[0] or "`" in words[0]) and re.search(r"(?<![\w-])(gh|git)(?![\w-])", words[0]):
+        name = re.search(r"(?<![\w-])(gh|git)(?![\w-])", words[0]).group(1)   # "$(command -v gh)" pr create
     if name in WRAPPERS:
         for j in range(1, len(words)):
             m = ASSIGN.match(words[j])
@@ -616,11 +675,18 @@ def check_text(text: str, cwd: str, depth: int) -> None:
     segs = segments(text)
     cur = cwd
     seglist = []
+    senv = {k: os.environ[k] for k in ("GH_REPO", "GIT_DIR") if os.environ.get(k)}
     for words in segs:
         for w in words:
             if ("$(" in w or "`" in w) and depth < MAX_DEPTH:
                 check_command(w, cur, depth + 1)
-        cmd = command_of(words, {})
+        assigns = words[1:] if words and words[0] in ("export", "declare", "typeset", "local", "readonly") else words
+        if assigns and all(ASSIGN.match(w) for w in assigns):
+            for w in assigns:                           # `export GH_REPO=cfengine/core; gh issue create ...`
+                k, v = ASSIGN.match(w).groups()
+                senv[k] = v
+            continue
+        cmd = command_of(words, senv)
         if not cmd:
             continue
         name, args, env = cmd
@@ -639,7 +705,7 @@ def check_text(text: str, cwd: str, depth: int) -> None:
         elif name == "gh":
             check_gh(args, env, cur, text)
         elif name == "git":
-            check_git(args, cur)
+            check_git(args, cur, env)
         elif name in HTTP_TOOLS:
             seglist.append((name, args))
     for words in segs:                                  # composio, `npx composio`, `uvx composio` alike
@@ -651,7 +717,8 @@ def check_text(text: str, cwd: str, depth: int) -> None:
 def check_command(cmd: str, cwd: str, depth: int = 0) -> None:
     if depth > MAX_DEPTH or not cmd:
         return
-    body, kept = split_heredocs(cmd)
+    body, kept, bodies = split_heredocs(cmd)
+    DATA.extend(bodies)
     for text in [body] + kept:
         check_text(text, cwd, depth)
 
@@ -659,8 +726,8 @@ def check_command(cmd: str, cwd: str, depth: int = 0) -> None:
 def check_mcp(tool_name: str, tool_input) -> None:
     if "composio" not in tool_name.lower():
         return
-    blob = json.dumps(tool_input)
-    if re.search(r"(?i)jira", blob) and re.search(r"(?i)jira_\w*(create|update|add|edit|delete|assign|transition|comment|remove)", blob):
+    blob = tool_name + " " + json.dumps(tool_input)
+    if re.search(r"(?i)jira", blob) and re.search(r"(?i)jira_\w*(create|update|add|edit|delete|assign|transition|comment|remove|link|move)", blob):
         raise Finding(reason_for("this Composio tool call", "a Jira write"))
 
 
@@ -669,7 +736,7 @@ def main() -> None:
         data = json.load(sys.stdin)
     except (ValueError, OSError):
         sys.exit(0)
-    if not isinstance(data, dict) or os.environ.get("UPSTREAM_REVIEW_GATE_OFF"):
+    if not isinstance(data, dict) or os.environ.get("UPSTREAM_REVIEW_GATE_OFF", "").lower() not in ("", "0", "false", "no"):
         sys.exit(0)
     tool = str(data.get("tool_name") or "")
     tin = data.get("tool_input") or {}

@@ -39,8 +39,9 @@ was judged by the cwd's remotes, never the path; `gh api -f/-F` with no `-X` is 
 **C. Parsing.** `shlex` over the command. `;`, `&&`, `||`, `|`, `&`, newlines, parentheses and backticks separate
 simple commands; any gated write in any of them denies. `$( )`, backticks, `bash -c STR`, `eval`, and heredocs fed to
 a shell are analysed again; wrappers (`env`, `sudo`, `timeout`, `xargs`, `nohup`, `rtk`, `bg`, ...) are looked
-through; heredoc bodies fed to `cat`, `git`, `gh` are data. Quoting shlex cannot parse falls back to splitting on the
-shell operators, so a stray apostrophe does not let a gated write through. The hook fails closed only for a gated
+through; heredoc bodies fed to `cat`, `git`, `gh` are data. Quoting shlex cannot parse (or a command over 100 KB, where shlex is quadratic) falls back to splitting on the
+shell operators with redirections dropped, so a stray apostrophe does not let a gated write through. Comments are
+removed; `export GH_REPO=...`, `GIT_DIR=` and `--git-dir` are carried to the later segments. The hook fails closed only for a gated
 target: unrelated commands, malformed input and any internal error exit 0 with no output.
 
 **D. Contract.** Deny is stdout JSON `permissionDecision: "deny"` plus a reason that names the target, not the payload

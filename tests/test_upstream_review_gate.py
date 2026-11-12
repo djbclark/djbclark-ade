@@ -376,3 +376,146 @@ def test_reason_names_target_and_how_to_proceed(plain):
     reason = out["permissionDecisionReason"]
     assert "cfengine/core" in reason and "djbclark" in reason and "UPSTREAM_REVIEW_GATE_OFF" in reason
     assert "title=x" not in reason                                  # the payload is not echoed
+
+
+# ---- adversary round 1 (2026-11-12, head 94dce695) --------------------------------------------------------------
+
+
+@pytest.mark.parametrize("command", [
+    "git push 2>&1", "git push > x.log 2>&1", "git push 2>/dev/null", "git push -u 2>&1 | tail -3",
+    "git push  # to origin", "git push &>/dev/null", "git push 2>&1 # trailing comment\n",
+])
+def test_redirects_and_comments_do_not_become_the_remote(libntech, command):
+    assert denied(command, libntech)
+
+
+def test_redirect_and_comment_forms_in_lenient_parsing(libntech):
+    assert denied("echo it's; git push 2>&1", libntech)
+    assert denied("echo it's; git push > log", libntech)
+
+
+def test_comment_text_is_not_executed(plain):
+    assert not denied("ls # gh pr create -R cfengine/core -t x", plain)
+    assert denied("echo ok # fine\ngh pr create -R cfengine/core -t x", plain)
+
+
+def test_exported_gh_repo_and_environment(plain, monkeypatch):
+    assert denied("export GH_REPO=cfengine/core; gh issue create -t x -b y", plain)
+    assert denied("GH_REPO=NorthernTechHQ/libntech\ngh issue create -t x", plain)
+    assert not denied("export GH_REPO=djbclark/core; gh issue create -t x", plain)
+    assert denied("gh issue create -t x", plain, env=dict(ENV, GH_REPO="cfengine/core"))
+
+
+@pytest.mark.parametrize("command", [
+    "gh pr merge -s https://github.com/cfengine/core/pull/5",
+    "gh pr review -a https://github.com/cfengine/core/pull/5",
+    "gh pr review -r https://github.com/cfengine/core/pull/5 -b no",
+    "gh issue close https://github.com/NorthernTechHQ/libntech/issues/3",
+    "gh pr comment https://GitHub.com/cfengine/core/pull/5 -b hi",
+    "gh pr comment https://www.github.com/cfengine/core/pull/5 -b hi",
+])
+def test_boolean_short_flags_do_not_eat_the_url(plain, command):
+    assert denied(command, plain)
+
+
+def test_cd_with_home_forms(libntech, tmp_path):
+    env = dict(ENV, HOME=str(libntech.parent))
+    assert denied('cd "$HOME/libntech" && git push', tmp_path, env=env)
+    assert denied("cd ${HOME}/libntech && git push", tmp_path, env=env)
+    assert denied("cd ~/libntech && git push", tmp_path, env=env)
+
+
+def test_git_dir_forms(libntech, plain):
+    assert denied("git --git-dir=%s/.git push" % libntech, plain)
+    assert denied("git --git-dir %s/.git push" % libntech, plain)
+    assert denied("GIT_DIR=%s/.git git push" % libntech, plain)
+    assert not denied("git --git-dir=%s/.git push fork main" % libntech, plain)
+
+
+def test_remote_url_host_case(plain):
+    assert denied("git push https://GitHub.com/cfengine/core.git HEAD", plain)
+    assert denied("git push git@GITHUB.COM:NorthernTechHQ/libntech.git HEAD", plain)
+
+
+def test_graphql_body_from_a_heredoc(core_fork, ours):
+    cmd = ("gh api graphql -F query=@- <<'EOF'\nmutation { addComment(input:{subjectId:\"X\", body:\"b\"}) "
+           "{ clientMutationId } }\nEOF")
+    assert denied(cmd, core_fork)
+    assert not denied(cmd, ours)
+    assert denied(cmd.replace("subjectId", "owner: \"cfengine\", subjectId"), ours)
+
+
+def test_composio_tool_name_carries_the_slug(plain):
+    assert denied("", plain, tool="mcp__composio__JIRA_CREATE_ISSUE", tool_input={"summary": "x"})
+    assert denied("", plain, tool="mcp__composio__JIRA_LINK_ISSUES", tool_input={})
+    assert not denied("", plain, tool="mcp__composio__JIRA_GET_ISSUE", tool_input={})
+
+
+@pytest.mark.parametrize("command", [
+    "gh repo deploy-key add key.pub -R cfengine/core",
+    "gh repo autolink create REF URL -R cfengine/core",
+])
+def test_nested_gh_repo_verbs_are_judged_by_the_action(plain, command):
+    assert denied(command, plain)
+
+
+@pytest.mark.parametrize("command", [
+    "gh repo deploy-key list -R cfengine/core", "gh repo autolink list -R cfengine/core",
+])
+def test_nested_gh_repo_reads_pass(plain, command):
+    assert not denied(command, plain)
+
+
+def test_local_gh_commands_in_a_gated_fork_pass(core_fork):
+    assert not denied("gh gist create f.txt", core_fork)
+    assert not denied("gh repo set-default djbclark/core", core_fork)
+
+
+@pytest.mark.parametrize("command", [
+    "curl -sX DELETE https://northerntech.atlassian.net/rest/api/3/issue/CFE-1",
+    "curl -sSd @b.json https://northerntech.atlassian.net/rest/api/3/issue",
+    "curl -sSXPOST https://northerntech.atlassian.net/rest/api/3/issue",
+    "http https://northerntech.atlassian.net/rest/api/3/issue summary=hi",
+    "xh https://northerntech.atlassian.net/rest/api/3/issue summary:='\"hi\"'",
+    "gh api --preview x repos/cfengine/core/issues -f title=x",
+    "gh api -X POST repos/:owner/:repo/issues -f title=x",
+])
+def test_more_forms_denied(core_fork, command):
+    assert denied(command, core_fork)
+
+
+def test_httpie_reads_pass(plain):
+    assert not denied("http https://northerntech.atlassian.net/rest/api/3/search jql==x", plain)
+    assert not denied("curl -sS https://northerntech.atlassian.net/rest/api/3/issue/CFE-1", plain)
+
+
+@pytest.mark.parametrize("command", [
+    "secretspec run -- gh pr create -R cfengine/core -t x",
+    "direnv exec . gh pr create -R cfengine/core -t x",
+    "\"$(command -v gh)\" pr create -R cfengine/core -t x",
+    "uvx --from x gh pr create -R cfengine/core -t x",
+])
+def test_more_wrappers(plain, command):
+    assert denied(command, plain)
+
+
+def test_huge_input_is_linear_and_still_checked(plain):
+    big = "echo " + "a" * 2000000 + "; gh pr create -R cfengine/core -t x"
+    assert denied(big, plain)
+    assert not denied("echo " + "a" * 2000000, plain)
+
+
+def test_deny_reason_strips_remote_userinfo(tmp_path):
+    repo = make_repo(tmp_path / "t", origin="https://x-access-token:ghp_SECRET123@github.com/cfengine/core.git")
+    out = run("git push", repo)
+    assert out and "ghp_SECRET123" not in out["permissionDecisionReason"]
+    assert "cfengine/core" in out["permissionDecisionReason"]
+
+
+def test_false_denies_found_by_the_adversary(plain):
+    assert not denied("cat > notes.sh <<'EOF'\ngh pr create -R cfengine/core -t x\nEOF", plain)
+    assert not denied("gh api graphql -f query='mutation { x(url:\"https://cfengine.com\") { id } }'", plain)
+
+
+def test_off_switch_zero_does_not_disable(plain):
+    assert denied("gh pr create -R cfengine/core -t x", plain, env=dict(ENV, UPSTREAM_REVIEW_GATE_OFF="0"))
