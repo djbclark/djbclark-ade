@@ -5,4 +5,4 @@
   process start time, and `ade-install recover [--yes]` is the explicit repair: it relabels orphaned `pending` entries
   `interrupted`, quarantines temp files and appends everything to `recovery-evidence.jsonl`, deleting nothing, never
   waiting on a running installer and refusing as root. `python-acquire.pending` no longer reports `owner-active` for a
-  reused pid. (#PRNUM)
+  reused pid. (#609)
