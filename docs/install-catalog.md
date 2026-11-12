@@ -545,12 +545,13 @@ only; no live vault, terminal session or provider call was made.
    verified). Probes run with stdin closed, so none can prompt on the terminal
    before the batch question. `sudo-secretspec run` refuses to start while a
    required secret is unset, so then every probe is inconclusive: the command
-   takes into the batch only the keys `check` itself marks missing (observed
-   2026-11-12: `check` lists every declared secret as `<mark> NAME - description`,
-   `✓` found, `○` optional unset; an entry with any other mark, or a
-   `Missing required secrets: A, B` line, counts; a name that merely appears in a
-   description never does; nothing from the output is printed). When `check`
-   fails but marks no selected key, it exits 1 as unconfirmed, never 0.
+   takes into the batch only the keys `check` itself marks missing (from
+   secretspec's source: a missing required secret is the line
+   `✗ NAME - description (required)`, or `✗ NAME (required)`; found is `✓`,
+   optional or defaulted `○`; only that exact `✗ … (required)` shape counts, so a
+   name in a description or a continuation line never does; colour codes are
+   stripped; nothing from the output is printed). When `check` fails but marks no
+   selected key, it exits 1 as unconfirmed, never 0.
 2. **Worklist** = `keys-plan` selection (components chosen) whose fresh status is
    `missing`, `invalid` or `no-quota`, or `expiring` with a date within 14 days
    (or past) or with no date. A later expiry date waits, so a year-out GitHub

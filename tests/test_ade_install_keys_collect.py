@@ -278,31 +278,36 @@ def test_default_choice_reader_is_getpass_without_echo(catalog, tmp_path, monkey
 
 
 def test_failed_check_never_reports_nothing_to_do(catalog, tmp_path):
-    # A required secret is unset: every `run` probe exits 1 (unknown/error), check names B_KEY.
-    fake = Fake({"A_KEY": [1], "B_KEY": [1]}, check_rc=1, check_out="Missing required secrets: B_KEY\n")
-    result, lines = _collect(catalog, tmp_path, fake, interactive=False)
-    assert [w["name"] for w in result["worklist"]] == ["B_KEY"] and result["rc"] == 3
-    # check fails and names no selected key: unconfirmed, never rc 0.
-    fake = Fake({"A_KEY": [1], "B_KEY": [1]}, check_rc=1, check_out="Missing required secrets: OTHER\n")
-    result, lines = _collect(catalog, tmp_path, fake, interactive=False)
-    assert result["worklist"] == [] and result["rc"] == 1
-    assert any("unconfirmed" in line for line in lines)
-    # A realistic listing: found (✓) and optional (○) lines, key names inside descriptions, one ✗.
+    # A required secret is unset: every `run` probe exits 1 (unknown/error); check marks B_KEY.
     listing = ("Checking secrets in site (profile: default)...\n\n"
                "\u2713 A_KEY - found; mentions B_KEY in its description\n"
-               "\u2717 B_KEY - Test key\n"
-               "\u25cb C_KEY - optional unset\n\nSummary: 1 found, 1 missing, 1 optional\n")
+               "\u2717 B_KEY - Test key (required)\n"
+               "\u25cb C_KEY - optional unset (optional)\n\nSummary: 1 found, 1 missing, 1 optional\n")
     fake = Fake({"A_KEY": [1], "B_KEY": [1]}, check_rc=1, check_out=listing)
-    result, _ = _collect(catalog, tmp_path, fake, interactive=False)
-    assert [w["name"] for w in result["worklist"]] == ["B_KEY"]
-    healthy = ("\u2713 A_KEY - found, mentions B_KEY\n\u2713 B_KEY - found\n"
-               "Missing required secrets: OTHER\n")
-    assert ai.check_reported_missing(healthy) == {"OTHER"}
-    assert ai.check_reported_missing("\u2713 A_KEY - x\n\u25cb C_KEY - y\nSummary: 2 found, 0 missing\n") == set()
-    # A name that merely contains a key name is not a match.
-    fake = Fake({"A_KEY": [1], "B_KEY": [1]}, check_rc=1, check_out="B_KEY_TWO\n")
-    result, _ = _collect(catalog, tmp_path, fake, interactive=False)
-    assert result["worklist"] == [] and result["rc"] == 1
+    result, lines = _collect(catalog, tmp_path, fake, interactive=False)
+    assert [w["name"] for w in result["worklist"]] == ["B_KEY"] and result["rc"] == 3
+    # check fails and marks no selected key: unconfirmed, never rc 0, nothing offered.
+    for out in ("\u2717 OTHER - x (required)\n", "B_KEY_TWO\n", "\u2713 B_KEY - found\n", ""):
+        fake = Fake({"A_KEY": [1], "B_KEY": [1]}, check_rc=1, check_out=out)
+        result, lines = _collect(catalog, tmp_path, fake, interactive=False)
+        assert result["worklist"] == [] and result["rc"] == 1
+        assert any("unconfirmed" in line for line in lines)
+
+
+@pytest.mark.parametrize("text,expect", [
+    ("\u2717 B_KEY - desc (required)\n", {"B_KEY"}),
+    ("\u2717 B_KEY (required)\n", {"B_KEY"}),                       # no description
+    ("\x1b[31m\u2717\x1b[0m \x1b[1;36mB_KEY\x1b[0m - d (required)\n", {"B_KEY"}),  # forced colour
+    ("\u2713 A_KEY - list:\n  - GH_TOKEN - legacy\n  uses GH_TOKEN\n", set()),    # continuation lines
+    ("\u2713 A_KEY - multi\n\u2717 not a real mark line GH_TOKEN\n", set()),
+    ("\u2713\ufe0f A_KEY - variant tick\n\u2714 B_KEY - heavy tick\n", set()),
+    ("\u25cb C_KEY - x (optional)\n\u25cb D_KEY - y (has default)\n", set()),
+    ("\u2717 C_KEY - optional-looking (optional)\n", set()),             # not (required)
+    ("Missing required secrets: B_KEY\nSummary: 1 found, 1 missing\n", set()),
+    ("Secret 'B_KEY' is required but not set\n", set()),
+])
+def test_check_reported_missing_is_an_allowlist(text, expect):
+    assert ai.check_reported_missing(text) == expect
 
 
 def test_catalog_text_cannot_inject_terminal_escapes(tmp_path, monkeypatch):

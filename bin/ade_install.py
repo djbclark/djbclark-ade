@@ -1636,28 +1636,23 @@ def _ask_choice(
     return "a"
 
 
-_CHECK_FOUND_MARKS = frozenset({"\u2713", "\u25cb"})  # found / optional-unset
-_CHECK_ENTRY = re.compile(r"^\s*(\S+)\s+([A-Z][A-Z0-9_]*)(?: - |\s*$)")
-_CHECK_MISSING_LINE = re.compile(r"^\s*Missing required secrets:\s*(.+)$")
+_ANSI_SGR = re.compile(r"\x1b\[[0-9;]*m")
+# Allowlist, from secretspec's own source (secrets.rs ``check`` output): a missing
+# required secret is exactly ``✗ NAME - description (required)`` (or
+# ``✗ NAME (required)`` with no description); found is ``✓``, optional/default
+# ``○``. Anything else, a continuation line of a multi-line description included,
+# never counts.
+_CHECK_MISSING_ENTRY = re.compile(
+    r"^\s*\u2717\s+([A-Z][A-Z0-9_]*)(?:\s+-\s.*)?\s+\(required\)\s*$")
 
 
 def check_reported_missing(text: str) -> set[str]:
-    """Names ``sudo-secretspec check`` itself reports as missing; nothing is printed.
-
-    Format observed 2026-11-12 (``check`` lists every declared secret as
-    ``<mark> NAME - description``; ``✓`` found, ``○`` optional and unset). Only
-    an entry line whose mark is neither counts, plus a ``Missing required
-    secrets: A, B`` line; a name merely mentioned in some description never does.
-    """
+    """Names ``sudo-secretspec check`` itself marks missing and required; nothing is printed."""
     names: set[str] = set()
-    for line in text.splitlines():
-        listed = _CHECK_MISSING_LINE.match(line)
-        if listed:
-            names.update(n for n in re.split(r"[\s,]+", listed.group(1)) if SECRET_NAME_RE.fullmatch(n))
-            continue
-        entry = _CHECK_ENTRY.match(line)
-        if entry and entry.group(1) not in _CHECK_FOUND_MARKS and not entry.group(1).startswith(("Summary", "Checking")):
-            names.add(entry.group(2))
+    for line in _ANSI_SGR.sub("", text).splitlines():
+        entry = _CHECK_MISSING_ENTRY.match(line)
+        if entry:
+            names.add(entry.group(1))
     return names
 
 
