@@ -212,3 +212,25 @@ def test_cursor_grok_does_not_hide_empty_included_pools(inputs):
     for family in ('total', 'auto', 'third_party'):
         assert not cursor_pools[f'cursor/{family}']['routable']
         assert cursor_pools[f'cursor/{family}']['reason'] == 'missing_or_ambiguous_pool'
+
+
+@pytest.mark.parametrize('unknown_parent', [False, True])
+def test_model_pool_retains_shared_parent_window(inputs, unknown_parent):
+    row = inputs[0]['available'][0]
+    row.update(provider='claude', pool_family='fable', quota_scope='model_sublimit',
+               shared_pool_family='default')
+    parent = row['windows'][0]
+    parent.update(pool_family='default', quota_scope='shared')
+    cap = copy.deepcopy(parent)
+    cap.update(pool_family='fable', quota_scope='model_sublimit', label='Weekly Fable',
+               remaining_percent=80, pace_ratio=0.1)
+    row['windows'].append(cap)
+    if unknown_parent:
+        parent['remaining_percent'] = None
+    pools = qs.evaluate(*inputs[:2], NOW, START, inputs[2])['pools']
+    fable = next(p for p in pools if p['pool'] == 'claude/fable')
+    assert not fable['surplus']
+    if unknown_parent:
+        assert not fable['routable']
+    else:
+        assert fable['conserve'] and len(fable['windows']) == 2

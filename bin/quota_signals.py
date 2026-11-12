@@ -134,9 +134,12 @@ def signal(pool, rows, paseo, now, wave_start, cfg):
             result['reason'] = 'unknown_window'
             return result
         window_family = window.get('pool_family')
-        if window_family and window_family != family:
-            continue
         model_pool = row.get('quota_scope') == 'model_sublimit' or family == 'fable'
+        families = {family}
+        if model_pool and isinstance(row.get('shared_pool_family'), str):
+            families.add(row['shared_pool_family'])
+        if window_family and window_family not in families:
+            continue
         model_window = (window.get('quota_scope') == 'model_sublimit'
                         or any('fable' in str(window.get(key, '')).lower()
                                for key in ('label', 'id', 'window_id')))
