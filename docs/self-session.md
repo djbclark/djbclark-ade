@@ -134,3 +134,15 @@ Installed older hosts may lack `--home`, exact inspect fields or modes. Such
 hosts are unsupported until observed; source compatibility is not live runtime
 acceptance. There is no automatic restart loop, cross-host transfer, forced
 archive, claim takeover or provider acceptance change.
+
+### E1. Completion adapter still required for verified self-compaction
+
+The missing contract is a daemon-owned operation ID bound to the exact agent
+and native session, with queryable requested/running/completed/failed outcomes.
+An idempotency token must return the original operation on a retry, including
+after a disconnected caller. Provider start acknowledgements must remain pending;
+only the matching native success boundary may complete the operation. Pi's error
+path must produce failure even if its UI closes a compaction marker. Another
+manual or automatic compaction must not complete this request. This needs source
+and fixture validation for each provider plus installed-host acceptance before
+ADE can report verified completion. No such API is invented or deployed here.
