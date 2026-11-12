@@ -134,7 +134,7 @@ Skills (from each `skills/*/SKILL.md`):
 | [`ade-self-session`](bin/ade-self-session) | Explicit native self-session operations (local daemon only). |
 | [`ade-template-check`](bin/ade-template-check) | Check the agents/ config templates (Phase 0 item 4.4, 2026-10-20). |
 | [`ade-update`](bin/ade-update) | Keep this machine's djbclark-ade checkout current: pull, relink, say what changed. |
-| [`ade-update-auto`](bin/ade-update-auto) | S4 ``update --auto``: observe-only by default; optional this-checkout apply. |
+| [`ade-update-auto`](bin/ade-update-auto) | S4 ``update --auto``: observe-only by default; opt-in apply paths. |
 | [`ade-user-install`](bin/ade-user-install) | Uv/just fetch, bin/ symlink, or Linux sudo-secretspec media staging. |
 | [`ade_agent_mode.py`](bin/ade_agent_mode.py) | Native Paseo mode audit/repair plan. |
 | [`ade_browser_task.py`](bin/ade_browser_task.py) | Render / relay browser-only prompts (setup-plan S7). |

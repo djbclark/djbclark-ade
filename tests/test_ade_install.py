@@ -1764,3 +1764,25 @@ def test_update_cli_json_reports_state(tmp_path):
     assert payload["ok"] is True
     assert payload["mode"] == "apply"
     assert payload["exit"] == 0
+
+
+def test_update_timeout_is_failed_even_when_doctor_ok(tmp_path):
+    root = _fixture_root(tmp_path)
+    catalog = ai.load_catalog(root=root)
+
+    def run(_argv):
+        raise subprocess.TimeoutExpired(_argv, 1)
+
+    obs_ok = ai.Observation("component", "tool-a", "ok", "doctor: probe ok")
+
+    def doctor_fn(_catalog, *, component_ids=None, probe_timeout_s=15.0):
+        return [obs_ok], 0
+
+    report, rc = ai.apply_updates(
+        catalog, dry_run=False, run=run, doctor_fn=doctor_fn, state_path=tmp_path / "updates.json",
+    )
+    assert rc == 1
+    entry = {e["id"]: e for e in report["components"]}["tool-a"]
+    assert entry["action"] == "update-failed"
+    assert entry["rc"] is None
+    assert entry["doctor"] == "ok"

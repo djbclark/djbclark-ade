@@ -426,3 +426,56 @@ def test_inventory_row_documents_apply():
     assert row.get("plist") in (None, "")
     assert "--apply" in (row.get("notes") or "")
     assert "mid-turn" in (row.get("notes") or "")
+
+
+def test_apply_full_check_timeout_pings_and_records(tmp_path):
+    mod = _load_auto()
+    update_bin, install_bin = _bins(tmp_path)
+    state = tmp_path / "state" / "update-auto.json"
+    pings: list[str] = []
+
+    def fake_run(argv, **kwargs):
+        if "ade-update" in str(argv[0]) and "--check" in argv:
+            raise subprocess.TimeoutExpired(argv, 1)
+        raise AssertionError(argv)
+
+    rc = mod.run_auto(
+        repo=tmp_path,
+        apply_full=True,
+        run=fake_run,
+        update_bin=update_bin,
+        install_bin=install_bin,
+        paseo_ls=lambda: ([], None),
+        ping_fn=pings.append,
+        state_path=state,
+    )
+    assert rc == mod.EXIT_ERROR
+    assert len(pings) == 1
+    assert "FAILED" in pings[0]
+    saved = json.loads(state.read_text())
+    assert saved["status"] == "failed"
+    assert "timed out" in saved["detail"]
+
+
+def test_observe_only_check_timeout_does_not_ping(tmp_path):
+    mod = _load_auto()
+    update_bin, install_bin = _bins(tmp_path)
+    state = tmp_path / "state" / "update-auto.json"
+    pings: list[str] = []
+
+    def fake_run(argv, **kwargs):
+        if "ade-update" in str(argv[0]) and "--check" in argv:
+            raise subprocess.TimeoutExpired(argv, 1)
+        raise AssertionError(argv)
+
+    rc = mod.run_auto(
+        repo=tmp_path,
+        run=fake_run,
+        update_bin=update_bin,
+        install_bin=install_bin,
+        ping_fn=pings.append,
+        state_path=state,
+    )
+    assert rc == mod.EXIT_ERROR
+    assert pings == []
+    assert not state.exists()

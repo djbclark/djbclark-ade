@@ -1715,10 +1715,13 @@ def apply_updates(
                 e["doctor"] = "fail" if e["id"] in still else "ok"
 
     failed = [e for e in report["components"] if e["action"] != "skip-not-installed"]
+    # rc/retry_rc is None for timeout and exec errors (no process exit). That is a
+    # failed update, not success: only a real exit 0 counts as ok.
     bad = [
         e["id"] for e in failed
         if e.get("doctor") == "fail"
-        or e.get("rc") not in (None, 0)
+        or e.get("action") == "update-failed"
+        or e.get("rc") not in (0,)
         or e.get("retry_rc") not in (None, 0)
     ]
     rc = 1 if bad else 0

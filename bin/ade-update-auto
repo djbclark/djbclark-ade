@@ -195,45 +195,6 @@ def run_auto(  # noqa: PLR0912 — one linear S4 pipeline, kept readable
     install = install_bin or (_here() / "ade-install")
     state = state_path or (DEFAULT_STATE_DIR / "update-auto.json")
     report["state_path"] = str(state)
-    if not update.is_file() or not install.is_file():
-        report["status"] = "error"
-        report["notes"].append("sibling ade-update or ade-install missing")
-        return _emit(report, as_json, EXIT_ERROR)
-
-    try:
-        up = run([str(update), "--check", "--repo", str(repo)], timeout=900)
-    except subprocess.TimeoutExpired:
-        report["status"] = "error"
-        report["notes"].append("ade-update --check timed out")
-        return _emit(report, as_json, EXIT_ERROR)
-    report["ade_update_check_rc"] = up.returncode
-    if up.stdout:
-        report["notes"].append(up.stdout.strip()[-500:])
-    # --check uses 0 current / 10 behind; both are observe outcomes
-    if up.returncode not in (0, 10):
-        report["status"] = "error"
-        report["notes"].append(f"ade-update --check failed (rc={up.returncode})")
-        if up.stderr:
-            report["notes"].append(up.stderr.strip()[-300:])
-        return _emit(report, as_json, up.returncode if up.returncode else EXIT_ERROR)
-
-    try:
-        keys = run([str(install), "keys", "--root", str(repo)], timeout=300)
-    except subprocess.TimeoutExpired:
-        report["status"] = "error"
-        report["notes"].append("ade-install keys timed out")
-        return _emit(report, as_json, EXIT_ERROR)
-    report["keys_rc"] = keys.returncode
-    if keys.returncode != 0:
-        report["status"] = "error"
-        report["notes"].append(f"ade-install keys failed (rc={keys.returncode})")
-        return _emit(report, as_json, keys.returncode if keys.returncode else EXIT_ERROR)
-
-    if not apply_checkout and not apply_full:
-        report["notes"].append(NOT_IMPLEMENTED)
-        return _emit(report, as_json, EXIT_NOT_IMPLEMENTED)
-
-    behind = up.returncode == 10
 
     def fail(detail: str, rc: int) -> int:
         report["status"] = "failed"
@@ -250,6 +211,50 @@ def run_auto(  # noqa: PLR0912 — one linear S4 pipeline, kept readable
             "report": {k: v for k, v in report.items() if k != "notes"},
         })
         return rc
+
+    def pre_fail(detail: str, rc: int) -> int:
+        """Pre-apply check failure. Scheduled --apply pings and records; observe-only does not."""
+        if apply_full:
+            return fail(detail, rc)
+        report["status"] = "error"
+        report["notes"].append(detail)
+        return _emit(report, as_json, rc)
+
+    if not update.is_file() or not install.is_file():
+        return pre_fail("sibling ade-update or ade-install missing", EXIT_ERROR)
+
+    try:
+        up = run([str(update), "--check", "--repo", str(repo)], timeout=900)
+    except subprocess.TimeoutExpired:
+        return pre_fail("ade-update --check timed out", EXIT_ERROR)
+    report["ade_update_check_rc"] = up.returncode
+    if up.stdout:
+        report["notes"].append(up.stdout.strip()[-500:])
+    # --check uses 0 current / 10 behind; both are observe outcomes
+    if up.returncode not in (0, 10):
+        if up.stderr:
+            report["notes"].append(up.stderr.strip()[-300:])
+        return pre_fail(
+            f"ade-update --check failed (rc={up.returncode})",
+            up.returncode if up.returncode else EXIT_ERROR,
+        )
+
+    try:
+        keys = run([str(install), "keys", "--root", str(repo)], timeout=300)
+    except subprocess.TimeoutExpired:
+        return pre_fail("ade-install keys timed out", EXIT_ERROR)
+    report["keys_rc"] = keys.returncode
+    if keys.returncode != 0:
+        return pre_fail(
+            f"ade-install keys failed (rc={keys.returncode})",
+            keys.returncode if keys.returncode else EXIT_ERROR,
+        )
+
+    if not apply_checkout and not apply_full:
+        report["notes"].append(NOT_IMPLEMENTED)
+        return _emit(report, as_json, EXIT_NOT_IMPLEMENTED)
+
+    behind = up.returncode == 10
 
     if apply_full:
         # Contract 5: shared admission before any write. Busy or unknown fleet
