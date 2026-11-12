@@ -124,6 +124,7 @@ Skills (from each `skills/*/SKILL.md`):
 | [`ade-harden`](bin/ade-harden) | Observe-only GitHub hardening drift check (setup-plan S6). |
 | [`ade-injection-gate`](bin/ade-injection-gate) | Classify untrusted text or measure labeled Jev outcomes before reader adoption. |
 | [`ade-install`](bin/ade-install) | Transitional install catalog, plan, doctor, keys, and bounded apply. |
+| [`ade-bootstrap`](bin/ade-bootstrap) | POSIX-sh cold start for a machine with no Python 3.11+: preview, then `--yes` obtains one with uv (user-scoped) and hands off to `ade-install python`. |
 | [`ade-merge-ready`](bin/ade-merge-ready) | Classify / stacks / approve / merge-now / stack-rebase for the ADE merge gate (2026-11-10). |
 | [`ade-model-tiers`](bin/ade-model-tiers) | Show/resolve/classify/validate/promote/set for config/model-tiers.toml. |
 | [`ade-net-resume`](bin/ade-net-resume) | Resume a lead's descendants after recognized transient network failures, dry-run by default. |

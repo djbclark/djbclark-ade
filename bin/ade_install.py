@@ -2465,7 +2465,7 @@ def bootstrap_just(
 ) -> tuple[dict[str, Any], int]:
     """Acquire missing user-scoped Just explicitly, then run install's preview.
 
-    Python is already running; this does not acquire it or complete setup.
+    Python is already running; acquire_python() is the separate Python step.
     Default mode performs PATH/file metadata checks only, never subprocesses.
     """
     root = root.expanduser().resolve()
@@ -2545,6 +2545,207 @@ def bootstrap_just(
     if result.returncode != 0:
         return fail("preview-failed", "installation preview returned failure; full setup was not performed")
     report["status"] = "preview-complete"
+    return report, 0
+
+
+# W17 Python acquisition (2026-11-12). Python is the one prerequisite the
+# catalog cannot install, so acquisition is user-scoped, uv-only (never pip),
+# explicit (--yes), serialized by the install ledger lock, and never elevated.
+PYTHON_MIN = (3, 11)
+PYTHON_REQUEST = "3.13"
+PYTHON_PENDING = "python-acquire.pending"
+PYTHON_LEDGER_ID = "python"
+_PYTHON_PROBE = (
+    "import sys; print('%d.%d.%d' % sys.version_info[:3]); "
+    "raise SystemExit(0 if sys.version_info >= (3, 11) else 1)"
+)
+
+
+def python_pending_path(state_dir: Path) -> Path:
+    return state_dir / PYTHON_PENDING
+
+
+def read_python_pending(state_dir: Path) -> dict[str, str] | None:
+    """Parse the pending-acquisition sentinel (key=value lines; the cold-start
+    shell bridge writes the same file). Unreadable content is still pending."""
+    path = python_pending_path(state_dir)
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except FileNotFoundError:
+        return None
+    fields: dict[str, str] = {}
+    for line in text.splitlines():
+        key, sep, value = line.partition("=")
+        if sep:
+            fields[key.strip()] = value.strip()
+    fields["path"] = str(path)
+    return fields
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _write_python_pending(state_dir: Path, argv: list[str]) -> None:
+    """Exclusive create: loses to a concurrent shell bridge or Python owner."""
+    body = (
+        f"pid={os.getpid()}\n"
+        f"started={time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}\n"
+        f"argv={json.dumps(argv)}\n"
+    )
+    fd = os.open(python_pending_path(state_dir), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(body)
+        fh.flush()
+        os.fsync(fh.fileno())
+
+
+def acquire_python(
+    *,
+    state_dir: Path | None = None,
+    yes: bool = False,
+    recover: bool = False,
+    runner: Callable[[list[str]], subprocess.CompletedProcess[str]] | None = None,
+    which: Callable[[str], str | None] | None = None,
+    euid: int | None = None,
+) -> tuple[dict[str, Any], int]:
+    """Find a Python 3.11+ for ADE tools or obtain one with ``uv python install``.
+
+    Default mode only reads PATH/files: no subprocess, download or write.
+    ``--yes`` serializes under ``install_ledger_lock``, records ``pending``
+    evidence before any download, and verifies the interpreter by running it.
+    Refuses as root (no fall-through into a root-owned install) and never calls
+    sudo, pip or a system package manager. An unknown outcome (timeout, crash)
+    leaves ``python-acquire.pending``; only ``--recover`` clears it, never
+    silently and never by re-downloading.
+    """
+    state_dir = (state_dir or default_state_dir()).expanduser()
+    find = which or shutil.which
+    run = runner or (lambda argv: subprocess.run(
+        argv, capture_output=True, text=True, check=False, shell=False,
+        stdin=subprocess.DEVNULL, timeout=15 if argv[-1:] != [PYTHON_REQUEST] else 900,
+    ))
+    report: dict[str, Any] = {
+        "mode": ("recover-" if recover else "") + ("yes" if yes else "dry-run"),
+        "status": "dry-run", "setup_complete": False, "state_dir": str(state_dir),
+        "required": ">=%d.%d" % PYTHON_MIN, "python": None,
+        "note": "user-scoped uv only; no pip, sudo, root or system-Python writes; Just and full setup are not performed",
+    }
+
+    def fail(status: str, reason: str) -> tuple[dict[str, Any], int]:
+        report.update(status=status, reason=reason)
+        return report, 1
+
+    if (os.geteuid() if euid is None else euid) == 0:
+        return fail("refused-root", "refusing to run as root: Python would be installed into root's home; rerun as the target user. Nothing started")
+    recover_cmd = "bin/ade-install python --recover --yes"
+    uv = find("uv")
+    uv_install = [uv or "uv", "python", "install", PYTHON_REQUEST]
+    uv_find = [uv or "uv", "python", "find", ">=%d.%d" % PYTHON_MIN]
+    report["install_argv"] = uv_install
+    pending = read_python_pending(state_dir)
+    if pending:
+        report["pending"] = pending
+        report["recover_command"] = recover_cmd
+    if not yes:
+        if pending and not recover:
+            return fail("pending-recovery", f"an earlier Python acquisition left {pending['path']}; inspect then run `{recover_cmd}`. Nothing started")
+        if recover and not pending:
+            return fail("nothing-to-recover", "no pending Python acquisition; nothing started")
+        cand = find("python3")
+        report.update(python=cand, python_status="present-unverified" if cand else "missing")
+        if not cand and not uv:
+            return fail("uv-missing", "no python3 on PATH and no uv; install uv yourself (e.g. `brew install uv`, or Astral's documented user installer), then rerun. Nothing started")
+        return report, 0
+
+    def probe(path: str) -> str | None:
+        try:
+            proc = run([path, "-I", "-c", _PYTHON_PROBE])
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        out = (proc.stdout or "").strip()
+        return out if proc.returncode == 0 and re.fullmatch(r"\d+\.\d+\.\d+", out) else None
+
+    def locate() -> tuple[str, str] | None:
+        found = find("python3")
+        # macOS /usr/bin/python3 is a CLT stub: running it can raise the
+        # developer-tools install dialog, a system side effect. Never probe it.
+        if found and sys.platform == "darwin" and os.path.realpath(found) == "/usr/bin/python3":
+            found = None
+        candidates = [found] if found else []
+        if uv:
+            try:
+                proc = run(uv_find)
+            except (OSError, subprocess.TimeoutExpired):
+                proc = None
+            if proc and proc.returncode == 0 and (proc.stdout or "").strip():
+                candidates.append((proc.stdout or "").strip().splitlines()[0])
+        for cand in candidates:
+            version = probe(cand)
+            if version:
+                return cand, version
+        return None
+
+    def record(ledger: dict[str, Any], status: str, **extra: Any) -> None:
+        ledger.setdefault("entries", {})[PYTHON_LEDGER_ID] = {
+            "status": status, "kind": "python-acquire", "argv": uv_install,
+            "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), **extra,
+        }
+        save_ledger(state_dir, ledger)
+
+    def clear_pending() -> None:
+        python_pending_path(state_dir).unlink(missing_ok=True)
+
+    with install_ledger_lock(state_dir):
+        ledger = load_ledger(state_dir)
+        pending = read_python_pending(state_dir)
+        adopted = False
+        if pending:
+            try:
+                owner = int(pending.get("pid", ""))
+            except ValueError:
+                owner = -1
+            if owner == os.getpid():
+                adopted = True  # the cold-start bridge exec'd into this process
+            elif owner > 0 and _pid_alive(owner):
+                return fail("owner-active", f"pid {owner} is still acquiring Python; wait for it. Nothing started")
+            elif not recover:
+                return fail("pending-recovery", f"an earlier Python acquisition left {pending['path']} with an unknown outcome; run `{recover_cmd}` to verify and clear it. Nothing started")
+        elif recover:
+            return fail("nothing-to-recover", "no pending Python acquisition; nothing started")
+        found = locate()
+        if found is None and not (adopted or recover):
+            if not uv:
+                return fail("uv-missing", "no python3 on PATH and no uv; install uv yourself (e.g. `brew install uv`), then rerun. Nothing started")
+            try:
+                _write_python_pending(state_dir, uv_install)
+            except FileExistsError:
+                return fail("owner-active", "another Python acquisition just started; wait for it. Nothing started")
+            record(ledger, "pending")
+            try:
+                result = run(uv_install)
+            except (OSError, subprocess.TimeoutExpired) as error:
+                report["detail"] = str(error)
+                return fail("unknown-pending", f"uv outcome unknown; evidence left pending. Run `{recover_cmd}` to verify and clear")
+            if result.returncode != 0:
+                record(ledger, "failed", returncode=result.returncode, detail=((result.stderr or result.stdout or "").strip()[:500]))
+                clear_pending()
+                return fail("acquisition-failed", "uv python install failed; recorded as failed")
+            found = locate()
+        if found is None:
+            record(ledger, "failed", detail="no supported python after acquisition" if not recover else "recovery found no supported python")
+            clear_pending()
+            return fail("unverified", "no Python 3.11+ could be verified; recorded as failed. Retry with `bin/ade-install python --yes`")
+        path, version = found
+        record(ledger, "installed", path=path, version=version, **({"recovered": True} if recover else {}))
+        clear_pending()
+    report.update(status="ready", python=path, python_status="ready", python_version=version)
     return report, 0
 
 

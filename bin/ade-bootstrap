@@ -1,0 +1,134 @@
+#!/bin/sh
+# ade-bootstrap: cold-start bridge for a machine with no Python 3.11+ (W17, 2026-11-12).
+#
+#   sh bin/ade-bootstrap                    preview (default): PATH lookups only, no subprocess, download or write
+#   sh bin/ade-bootstrap --yes              find Python 3.11+, else obtain it with `uv python install`, then hand off
+#                                           to `ade-install python --yes` (which records it in the install ledger)
+#   sh bin/ade-bootstrap --recover --yes    after an interrupted run: hand off to `ade-install python --recover --yes`
+#                                           (or, with still no Python, clear the sentinel; never re-downloads)
+#   --state-dir DIR                         default: $ADE_INSTALL_STATE_DIR or ~/.local/state/djbclark-ade/install
+#
+# POSIX sh because nothing here may need Python. uv only (never pip); user-scoped (refuses as root; never sudo, never a
+# system package manager, never a write outside uv's own user directories and the state dir). It does not fetch uv: a
+# missing uv is reported with the command to run. A sentinel, <state>/python-acquire.pending (exclusive create, holder
+# pid; the Python side shares the file and the ledger lock), marks an unknown outcome; only --recover clears it.
+# Exit: 0 ok/preview, 1 failed, 2 usage, 69 uv missing, 75 busy or pending recovery, 77 refused as root.
+set -u
+ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd -P) || exit 1
+STATE=${ADE_INSTALL_STATE_DIR:-$HOME/.local/state/djbclark-ade/install}
+YES=0
+RECOVER=0
+while [ $# -gt 0 ]; do
+    case $1 in
+        --yes) YES=1 ;;
+        --dry-run) YES=0 ;;
+        --recover) RECOVER=1 ;;
+        --state-dir) [ $# -ge 2 ] || { echo "ade-bootstrap: --state-dir needs a value" >&2; exit 2; }; STATE=$2; shift ;;
+        -h|--help) sed -n '2,17p' "$0" | cut -c3-; exit 0 ;;
+        *) echo "ade-bootstrap: unknown argument: $1" >&2; exit 2 ;;
+    esac
+    shift
+done
+SENT=$STATE/python-acquire.pending
+REQUEST=3.13
+UV=$(command -v uv 2>/dev/null || true)
+install_cmd="uv python install $REQUEST"
+
+if [ "$(id -u)" = 0 ]; then
+    echo "ade-bootstrap: refusing to run as root: Python would be installed into root's home. Rerun as the target user. Nothing started." >&2
+    exit 77
+fi
+
+supported() {  # $1 = interpreter; true when it runs and is 3.11+
+    "$1" -I -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' >/dev/null 2>&1
+}
+
+find_python() {  # prints the first verified interpreter; skips macOS's /usr/bin/python3 CLT stub (it can raise an install dialog)
+    for name in python3.13 python3.12 python3.11 python3; do
+        cand=$(command -v "$name" 2>/dev/null) || continue
+        if [ "$(uname -s)" = Darwin ] && [ "$cand" = /usr/bin/python3 ]; then continue; fi
+        if supported "$cand"; then printf '%s\n' "$cand"; return 0; fi
+    done
+    if [ -n "$UV" ]; then
+        cand=$("$UV" python find '>=3.11' 2>/dev/null | sed -n 1p)
+        if [ -n "$cand" ] && supported "$cand"; then printf '%s\n' "$cand"; return 0; fi
+    fi
+    return 1
+}
+
+handoff() {  # exec: the sentinel's pid (this shell's) becomes the Python process, which adopts it
+    # shellcheck disable=SC2086
+    exec "$PY" -I "$ROOT/bin/ade-install" python --yes --state-dir "$STATE" $1
+}
+
+sentinel_pid() { sed -n 's/^pid=//p' "$SENT" 2>/dev/null | sed -n 1p; }
+
+if [ "$YES" = 0 ]; then
+    echo "ade-bootstrap: preview (nothing run, downloaded or written)"
+    if [ -e "$SENT" ]; then
+        echo "  pending: $SENT exists (an earlier acquisition has an unknown outcome)"
+        echo "  recovery is explicit: sh bin/ade-bootstrap --recover --yes"
+        exit 75
+    fi
+    for name in python3.13 python3.12 python3.11 python3; do
+        cand=$(command -v "$name" 2>/dev/null) || continue
+        echo "  candidate on PATH (unverified until --yes): $cand"
+    done
+    if [ -n "$UV" ]; then
+        echo "  if none is 3.11+: $install_cmd  (uv: $UV; then ade-install python --yes records it)"
+    else
+        echo "  uv not found. Install uv yourself, then rerun (e.g. 'brew install uv' or Astral's documented user installer); this bridge does not fetch it."
+    fi
+    echo "  to act: sh bin/ade-bootstrap --yes"
+    exit 0
+fi
+
+mkdir -p "$STATE" || exit 1
+
+if [ -e "$SENT" ]; then
+    owner=$(sentinel_pid)
+    if [ -n "$owner" ] && kill -0 "$owner" 2>/dev/null; then
+        echo "ade-bootstrap: pid $owner is still acquiring Python; wait for it. Nothing started." >&2
+        exit 75
+    fi
+    if [ "$RECOVER" = 0 ]; then
+        echo "ade-bootstrap: $SENT is left by an interrupted acquisition (unknown outcome)." >&2
+        echo "  Recover explicitly: sh bin/ade-bootstrap --recover --yes. Nothing started." >&2
+        exit 75
+    fi
+    if PY=$(find_python); then
+        handoff --recover
+    fi
+    rm -f "$SENT"
+    echo "ade-bootstrap: no Python 3.11+ is usable; cleared $SENT. Retry: sh bin/ade-bootstrap --yes"
+    exit 0
+elif [ "$RECOVER" = 1 ]; then
+    echo "ade-bootstrap: nothing to recover (no $SENT). Nothing started." >&2
+    exit 1
+fi
+
+if PY=$(find_python); then
+    handoff ""
+fi
+
+if [ -z "$UV" ]; then
+    echo "ade-bootstrap: no Python 3.11+ and no uv. Install uv yourself (e.g. 'brew install uv'), then rerun. Nothing started." >&2
+    exit 69
+fi
+
+# Exclusive create (noclobber): a concurrent bridge or the Python side loses here.
+if ! ( set -C; printf 'pid=%s\nstarted=%s\nargv=%s\n' "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$install_cmd" > "$SENT" ) 2>/dev/null; then
+    echo "ade-bootstrap: another acquisition just started ($SENT). Nothing started." >&2
+    exit 75
+fi
+if ! "$UV" python install "$REQUEST"; then
+    rm -f "$SENT"
+    echo "ade-bootstrap: '$install_cmd' failed; sentinel cleared (outcome known). Nothing else was changed by this bridge." >&2
+    exit 1
+fi
+if ! PY=$(find_python); then
+    rm -f "$SENT"
+    echo "ade-bootstrap: uv finished but no Python 3.11+ could be verified; sentinel cleared. Retry: sh bin/ade-bootstrap --yes" >&2
+    exit 1
+fi
+handoff ""

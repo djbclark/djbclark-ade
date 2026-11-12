@@ -193,6 +193,8 @@ ade-install update-plan [--root DIR] [--json]
 ade-install update [--root DIR] [--json] [--dry-run|--yes] [--id ID ...]
                    [--state PATH] [--prefix DIR]
 ade-install bootstrap [--root DIR] [--prefix DIR] [--dry-run|--yes] [--json]
+ade-install python [--state-dir DIR] [--dry-run|--yes] [--recover] [--json]
+sh bin/ade-bootstrap [--yes] [--recover] [--state-dir DIR]   # cold start: no Python 3.11+ yet
 ade-install doctor [--root DIR] [--id ID ...] [--json]
 ade-install hermes-choice {skip,self,ai} [--state-dir DIR] [--json]
 ade-install keys [--root DIR] [--json] [--keys-state PATH]
@@ -229,8 +231,45 @@ does not load a catalog, probe components, download tools or change files.
 Explicit subcommands keep their existing behavior and exit contracts. Just is
 not needed for these direct CLI commands: preview with `ade-install plan` /
 `ade-install apply --dry-run`, then explicitly request a missing Just install
-with `ade-install apply --yes --id just`. Automatic Python/Just bootstrap is
-still unimplemented; no package-manager or Python acquisition path is selected.
+with `ade-install apply --yes --id just`. Python acquisition is the separate,
+explicit step below (W17, 2026-11-12); nothing runs automatically, and no
+package-manager path is selected.
+
+**Python acquisition (W17, 2026-11-12).** Python is the one prerequisite the
+catalog cannot install, so it has its own step: `ade-install python` (Python
+already running) and the POSIX-sh cold-start bridge `sh bin/ade-bootstrap`
+(no Python yet). Both default to a preview that runs no subprocess, download
+or write. Rules, shared by both:
+
+- Source is `uv` only (`uv python install 3.13`, then `uv python find
+  '>=3.11'`); never pip, sudo, a system package manager or a write into system
+  Python. They refuse as root (exit 77 / `refused-root`): there is no
+  fall-through into a root-owned user install. A missing `uv` is not fetched:
+  the report names the command to run (`brew install uv` or Astral's documented
+  user installer; exit 69 / `uv-missing`).
+- A candidate counts only after it runs (`python -I`, version >= 3.11): `python3`
+  and `python3.11`-`3.13` on PATH, then `uv python find`. macOS's
+  `/usr/bin/python3` CLT stub is never probed (running it can raise an install
+  dialog). No `python3` shim is created, so a uv-managed interpreter is invoked
+  by path: `PYTHON -I bin/ade-install ...`; the command prints that line.
+- Ledger concurrency (keeps #561): `ade-install python --yes` runs under
+  `install_ledger_lock`, writes a `python` ledger entry `pending` before any
+  download, then `installed` (path, version) or `failed`, preserving every other
+  entry. The bridge cannot hold the flock, so it shares a sentinel instead,
+  `<state>/python-acquire.pending` (`pid=`, `started=`, `argv=`; exclusive
+  create, so a concurrent bridge or Python owner loses). The bridge `exec`s into
+  `ade-install python --yes`, keeping its pid; the Python side adopts a sentinel
+  carrying its own pid, verifies, records the ledger and removes the sentinel.
+- Recovery is explicit, never silent: an unknown outcome (timeout, crash, kill)
+  leaves the sentinel (and a `pending` ledger entry), and every later run
+  refuses with `pending-recovery` (exit 75 from the bridge) naming
+  `ade-install python --recover --yes` or `sh bin/ade-bootstrap --recover --yes`.
+  Recovery verifies what is there and records it; it never re-downloads. A live
+  owner pid reports `owner-active`. A known failure (`uv` exit nonzero, nothing
+  verifiable) is recorded `failed` and the sentinel cleared.
+- Not done here: crash/orphan recovery of component operations (W18), a
+  `python3` shim, fetching uv, Just and full setup (`ade-install bootstrap` and
+  `just install` stay separate explicit steps).
 
 `ade-install bootstrap` is a separate opt-in partial bootstrap for a host that
 already has suitable Python. Default / `--dry-run` checks PATH and destination
@@ -256,7 +295,8 @@ Exit 0 means the dry-run was described or the explicitly requested acquisition
 and installation preview completed; `setup_complete` always remains false.
 Exit 1 reports acquisition/verification/preview failure (or invalid root), and
 parser conflicts such as `--yes --dry-run` exit 2. Bare `ade-install` keeps its
-guidance-only behavior. This does not acquire Python or establish full setup.
+guidance-only behavior. This does not acquire Python (see the Python acquisition
+step above) or establish full setup.
 
 Daily behind-check (not auto-apply): install
 `config/launchd/com.djbclark.ade-update-check.plist` with an explicit log dir
@@ -392,8 +432,9 @@ Pass `--ade` only with a durable checkout (`~/src/djbclark-ade`); never with a l
   may leave `pending` evidence, and a child could survive an owner crash. Those
   existing unknown outcomes are preserved. Existing explicit apply eligibility is
   unchanged; this is not a new pending/orphan admission gate and introduces no
-  automatic retry or recovery. The future bootstrap ledger bridge is still unsafe
-  without its separate crash/admission work.
+  automatic retry or recovery. The Python acquisition bridge (W17) uses this lock plus a
+  pending sentinel with explicit `--recover` (above); crash/orphan recovery of
+  component operations is still separate work (W18).
 - `ade-user-install uv|just|cursor-cli|hermes|link <name>|sudo-secretspec` fetches
   release binaries / vendor packages, symlinks a repo `bin/` tool, or stages
   Linux sudo-secretspec media into the prefix. No `shell=True`, no root. Cursor
@@ -469,8 +510,8 @@ Offered `paseo-plugin-*` rows re-landed from stranded #354 (session-guard, baton
 
 ## H. Next units
 
-The bounded S3 Just bootstrap above is implemented; Python acquisition and
-automatic full setup remain unfinished.
+The bounded S3 Just bootstrap and the explicit Python acquisition step above
+are implemented; automatic full setup remains unfinished.
 
 Ownership-aware reconcile beyond the install ledger (setup-plan S3), remaining
 owner installers (curl-free Cursor CLI fetch, Hermes offered path — basic setup
