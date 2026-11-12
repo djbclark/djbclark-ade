@@ -215,7 +215,8 @@ def test_cursor_grok_does_not_hide_empty_included_pools(inputs):
 
 
 @pytest.mark.parametrize('unknown_parent', [False, True])
-def test_model_pool_retains_shared_parent_window(inputs, unknown_parent):
+@pytest.mark.parametrize('parent_location', ['row', 'window'])
+def test_model_pool_retains_shared_parent_window(inputs, unknown_parent, parent_location):
     row = inputs[0]['available'][0]
     row.update(provider='claude', pool_family='fable', quota_scope='model_sublimit',
                shared_pool_family='default')
@@ -224,6 +225,9 @@ def test_model_pool_retains_shared_parent_window(inputs, unknown_parent):
     cap = copy.deepcopy(parent)
     cap.update(pool_family='fable', quota_scope='model_sublimit', label='Weekly Fable',
                remaining_percent=80, pace_ratio=0.1)
+    if parent_location == 'window':
+        row.pop('shared_pool_family')
+        cap['shared_pool_family'] = 'default'
     row['windows'].append(cap)
     if unknown_parent:
         parent['remaining_percent'] = None

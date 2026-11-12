@@ -129,15 +129,18 @@ def signal(pool, rows, paseo, now, wave_start, cfg):
         return result
     forecasts = []
     complete = True
+    own_caps = [w for w in windows if isinstance(w, dict)
+                and w.get('pool_family') == family and w.get('quota_scope') == 'model_sublimit']
+    model_pool = row.get('quota_scope') == 'model_sublimit' or family == 'fable' or bool(own_caps)
+    families = {family}
+    if model_pool:
+        parents = [row.get('shared_pool_family'), *(w.get('shared_pool_family') for w in own_caps)]
+        families.update(parent for parent in parents if isinstance(parent, str) and parent)
     for window in windows:
         if not isinstance(window, dict):
             result['reason'] = 'unknown_window'
             return result
         window_family = window.get('pool_family')
-        model_pool = row.get('quota_scope') == 'model_sublimit' or family == 'fable'
-        families = {family}
-        if model_pool and isinstance(row.get('shared_pool_family'), str):
-            families.add(row['shared_pool_family'])
         if window_family and window_family not in families:
             continue
         model_window = (window.get('quota_scope') == 'model_sublimit'

@@ -158,7 +158,7 @@ not grant quota to an independent Antigravity family. Model sublimits do not
 exhaust a shared pool: both aiuse and Paseo exclude Fable windows from the shared
 cap. aiuse windows with another explicit pool_family are skipped; model-only
 windows apply only to a model sublimit pool. Model pools also retain windows
-of their declared shared_pool_family parent; parent exhaustion/unknown readings
+of their declared shared_pool_family parent (from the model-cap window or row); parent exhaustion/unknown readings
 and forecasts still bind the model. Filtering to zero applicable windows
 leaves the pool unknown and unroutable. Cursor total/auto/third_party included
 usage and grok_bot are explicit expected pools. A healthy Grok Bot reading never
