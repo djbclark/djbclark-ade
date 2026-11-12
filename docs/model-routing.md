@@ -32,6 +32,8 @@ deltas from recent dispatch outcomes. The optional Paseo schedule `routing-recal
 `--mode auto`) applies those suggestions; inventory + create line in `docs/scheduling.md` and
 `config/install.toml [[install.jobs]]` (Carried #33 residual; launchd job retired in slim-down E5).
 
+A4. **Canary waves (2026-11-12):** `[routing].canary_pools` names antigravity, openai_api and zai, whose meters cannot establish exhaustion before a refusal. Each `plan` assigns at most one agent per named pool, including aliases, and prints per-pool max=1 (`canary_pool_max` in JSON). The lead must observe one successful canary turn, re-probe quota/refusals, and only then expand within the normal `max_parallel`. The planner does not attest live canary success; another plan is not permission to launch a second unproven canary. No elapsed-time release is used.
+
 ## B. The pools (J2 pool audit, `docs/slim/log.md`, 2026-11-06; grok retired 2026-11-07)
 
 | Pool (router service) | Paseo provider | Billing | Notes |

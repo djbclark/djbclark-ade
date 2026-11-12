@@ -439,7 +439,7 @@ def apply_policy(data: dict[str, Any]) -> None:
     global CALIBRATE_SUGGEST_WORSE_BELOW
     global CALIBRATE_SUGGEST_WORSE_DELTA, CALIBRATE_SUGGEST_BETTER_ABOVE
     global CALIBRATE_SUGGEST_BETTER_DELTA
-    global LEAD_FABLE_ALLOWED
+    global LEAD_FABLE_ALLOWED, CANARY_POOLS
 
     POLICY = data
     try:
@@ -449,6 +449,10 @@ def apply_policy(data: dict[str, Any]) -> None:
         calibrate = data["calibrate"]
 
         KINDS = tuple(routing["kinds"])
+        canary = routing.get("canary_pools", [])
+        if not isinstance(canary, list) or not all(isinstance(p, str) and p for p in canary):
+            raise ValueError("routing.canary_pools must be a list of non-empty pool names")
+        CANARY_POOLS = frozenset(canary)
         BURN_FIRST_MIN = float(routing["burn_first_min"])
         BURN_FIRST_BONUS = float(routing["burn_first_bonus"])
         BURN_FIRST_WASTE_MIN = float(routing["burn_first_waste_min"])
@@ -2287,6 +2291,14 @@ def route(kind: str, *, quota: dict[str, Any] | None = None,
                   kind=kind)
 
 
+def canary_pool(svc: Service) -> str | None:
+    """Quota identity for pools whose meter cannot warn before a first refusal."""
+    provider = svc.pool[0] if svc.pool else (svc.shares_pool or svc.name)
+    if svc.acp_agent == "antigravity":
+        provider = "antigravity"
+    return provider if provider in CANARY_POOLS else None
+
+
 def plan(kinds: list[str], *, quota: dict[str, Any] | None = None,
          min_headroom: float = 15.0,
          exclude: frozenset[str] | set[str] = frozenset(), repo: str | None = None
@@ -2299,17 +2311,23 @@ def plan(kinds: list[str], *, quota: dict[str, Any] | None = None,
     slice finishes. Re-run it at every wave boundary; it is a snapshot-file
     read, so it is instant and costs no tokens."""
     load: dict[str, int] = {}
+    canaries: set[str] = set()
     frontier: dict[str, int] = {}
     full = set(exclude)
     out: list[tuple[str, Choice | None]] = []
     for kind in kinds:
-        skip = full
+        skip = full | {s.name for s in discover(quota or {})
+                       if canary_pool(s) in canaries}
         if kind == "frontier":
             gate = frontier_gate()
-            skip = full | {n for n, k in frontier.items() if k >= frontier_per_wave(n, gate, quota)}
+            skip = skip | {n for n, k in frontier.items() if k >= frontier_per_wave(n, gate, quota)}
         choice = route(kind, quota=quota, min_headroom=min_headroom, exclude=skip, repo=repo)
         if choice is not None:
             name = choice.service.name
+            pool = canary_pool(choice.service)
+            if pool:
+                canaries.add(pool)
+                full.add(name)
             load[name] = load.get(name, 0) + 1
             if kind == "frontier":
                 frontier[name] = frontier.get(name, 0) + 1
@@ -3020,6 +3038,8 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({
                 "snapshot_age_s": age, "stale": stale,
                 "quota_source": quota_source_info(),
+                "canary_pool_max": {p: 1 for p in sorted(CANARY_POOLS)},
+                "canary_release": "lead verifies one successful turn before adding agents",
                 "slices": [{"kind": k, "service": c.service.name if c else None,
                             "cli": c.service.cli if c else None,
                             "agent": c.service.acp_agent if c else None,
@@ -3029,6 +3049,8 @@ def main(argv: list[str] | None = None) -> int:
                             "why": c.why if c else unrouted_why(k, quota, skip)}
                            for k, c in rows]}, indent=1))
         else:
+            for pool in sorted(CANARY_POOLS):
+                print(f"canary pool {pool}: max=1; verify one successful turn before adding agents")
             if QuotaSource.fallback_reason:
                 print(f"WARNING: {QuotaSource.fallback_reason}; quota below is from the "
                       "snapshot file and misses aiuse's credits override and Admin API "

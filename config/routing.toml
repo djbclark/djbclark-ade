@@ -27,6 +27,8 @@
 # must establish its own account entitlement and fresh shared-pool quota.
 
 [routing]
+# Before-refusal blind spots: one canary per pool; lead verifies a successful turn before scaling.
+canary_pools = ["antigravity", "openai_api", "zai"]
 # Kinds of work. Deliberately few — a taxonomy nobody can apply is worse than
 # a coarse one that gets used.
 # `api-only` (operator 2026-10-19): work that needs the Claude API and cannot run through a

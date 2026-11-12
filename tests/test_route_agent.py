@@ -458,6 +458,29 @@ class TestQuotaFamilyIsolation(unittest.TestCase):
                              "remaining_percent": left, "headroom_percent": left,
                              "state": "ok" if left > 1 else "exhausted"}]}
 
+    def test_canary_first_caps_each_blind_pool_at_one_and_prints_max(self):
+        services = [r.Service(name, name, {"research": 1}, "subscription", max_parallel=4,
+                              agent="antigravity" if name == "antigravity" else "pi")
+                    for name in ("antigravity", "openai_api", "zai")]
+        services.append(r.Service("zai-alias", "alias", {"research": 1}, "subscription",
+                                  shares_pool="zai", agent="pi", max_parallel=4))
+        quota = {s.name: {"remaining": 80} for s in services}
+        with mock.patch.object(r, "discover", return_value=services), \
+                mock.patch.object(r, "operator_disabled", return_value=set()), \
+                mock.patch.object(r, "load_snapshot", return_value=(quota, 60)):
+            rows = r.plan(["research"] * 6, quota=quota)
+            names = [c.service.name for _, c in rows if c]
+            self.assertEqual(sorted(names), ["antigravity", "openai_api", "zai"])
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(r.main(["plan", "--kinds", "research,research", "--json"]), 0)
+            self.assertEqual(json.loads(out.getvalue())["canary_pool_max"],
+                             {"antigravity": 1, "openai_api": 1, "zai": 1})
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(r.main(["plan", "--kinds", "research"]), 0)
+            self.assertIn("canary pool zai: max=1", out.getvalue())
+
     def test_cursor_grok_bot_cannot_fund_composer_or_auto(self):
         bot = self.row("cursor", "grok_bot", 82)
         for family in ("grok_bot", None, "unknown"):
