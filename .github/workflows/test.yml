@@ -169,8 +169,8 @@ jobs:
           tests/test_instruction_lint.py -q
       - name: Instruction-file lint (errors block, warnings report)
         run: uv run python bin/instruction-lint --root .
-      - name: README roster matches skills/ and bin/ (bin/ade-roster, 2026-11-07)
-        run: python3 bin/ade-roster --check
+      - name: Roster generation succeeds (stored rows are published separately)
+        run: python3 bin/ade-roster > /dev/null
 
       # S6 (2026-11-12): the hardening policy is valid on every change, and the
       # observe-only drift report is printed for the operator. Read-only: no

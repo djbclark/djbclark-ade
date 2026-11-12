@@ -1,7 +1,6 @@
 """bin/ade-roster prints README's skills and bin/ roster from the files themselves, and --check fails a stale README (2026-11-07).
 
-Every test but the last builds a throwaway repo in tmp_path and runs the real script with --root, so this checkout's
-README.md is never written. The last one checks this checkout's README: the same check CI runs.
+Fixtures exercise legacy embedded documents and standalone publication without writing this checkout's README.
 """
 import subprocess
 import sys
@@ -91,9 +90,21 @@ def test_missing_markers_or_readme_is_exit_2(tmp_path):
     assert run(root=tmp_path / "nowhere").returncode == 2
 
 
-def test_this_checkouts_readme_roster_is_current():
-    r = run("--check", root=REPO)
-    assert r.returncode == 0, r.stderr + " (run bin/ade-roster --write)"
+def test_this_checkout_links_to_published_roster_and_generates_locally():
+    assert "blob/generated-roster/ROSTER.md" in (REPO / "README.md").read_text()
+    assert "<!-- roster:start -->" not in (REPO / "README.md").read_text()
+    r = run(root=REPO)
+    assert r.returncode == 0, r.stderr
+
+
+def test_standalone_roster_links_to_source_snapshot(tmp_path):
+    root = make_repo(tmp_path)
+    (root / "README.md").unlink()
+    prefix = "https://github.com/example/repo/blob/0123456/"
+    r = run("--link-prefix", prefix, root=root)
+    assert r.returncode == 0, r.stderr
+    assert f"]({prefix}skills/alpha/SKILL.md)" in r.stdout
+    assert f"]({prefix}bin/tool-py)" in r.stdout
 
 
 def test_untracked_files_are_left_out_in_a_git_checkout(tmp_path):
@@ -154,3 +165,62 @@ def test_additions_leave_headings_stable_and_rows_sorted(tmp_path):
     assert headings(before.stdout) == headings(after.stdout)
     assert after.stdout.index("[`aardvark`]") < after.stdout.index("[`alpha`]") < after.stdout.index("[`beta`]")
     assert after.stdout.index("[`aaa-tool`]") < after.stdout.index("[`lib.py`]") < after.stdout.index("[`node.mjs`]")
+
+
+def test_publication_updates_only_generated_branch_and_tracks_add_remove(tmp_path):
+    import shutil
+    root = make_repo(tmp_path / "source")
+    shutil.copy2(SCRIPT, root / "bin" / "ade-roster")
+    remote = tmp_path / "remote.git"
+
+    def git(*args, cwd=root):
+        return subprocess.run(["git", "-C", str(cwd), *args], check=True,
+                              capture_output=True, text=True).stdout.strip()
+
+    remote.mkdir()
+    git("init", "--bare", cwd=remote)
+    git("init", "-b", "master")
+    git("config", "user.email", "test@example.com")
+    git("config", "user.name", "Test")
+    git("add", ".")
+    git("commit", "-m", "initial")
+    git("remote", "add", "origin", str(remote))
+    git("push", "origin", "master:master", "master:pr-head")
+    old = git("rev-parse", "HEAD")
+    publisher = REPO / ".github" / "scripts" / "publish-roster.py"
+
+    def publish():
+        result = subprocess.run([sys.executable, str(publisher), "--root", str(root)],
+                                capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
+        assert git("rev-parse", "HEAD") == git("rev-parse", "refs/heads/master")
+        assert git("status", "--porcelain") == ""
+        return git("show", "generated-roster:ROSTER.md", cwd=remote)
+
+    text = publish()
+    assert f"/blob/{old}/bin/tool-py" in text
+    assert "[`alpha`]" in text
+    (root / "skills" / "alpha" / "SKILL.md").unlink()
+    (root / "bin" / "new-tool").write_text("# New tool.\n")
+    git("add", ".")
+    git("commit", "-m", "inventory change")
+    new = git("rev-parse", "HEAD")
+    text = publish()
+    assert "[`alpha`]" not in text and "[`new-tool`]" in text
+    assert f"/blob/{new}/bin/new-tool" in text
+    assert git("rev-parse", "master", cwd=remote) == old
+    assert git("rev-parse", "pr-head", cwd=remote) == old
+    assert git("ls-tree", "--name-only", "generated-roster", cwd=remote) == "ROSTER.md"
+
+
+def test_publisher_is_master_only_and_never_consumes_pr_content():
+    import yaml
+    # PyYAML's YAML 1.1 treats the workflow key `on` as a boolean.
+    workflow = yaml.safe_load((REPO / ".github/workflows/roster.yml").read_text())
+    triggers = workflow.get("on", workflow.get(True))
+    assert set(triggers) == {"push", "schedule", "workflow_dispatch"}
+    assert triggers["push"]["branches"] == ["master"]
+    job = workflow["jobs"]["publish"]
+    assert job["if"] == "github.ref == 'refs/heads/master'"
+    assert job["steps"][0]["with"]["ref"] == "master"
+    assert workflow["concurrency"]["cancel-in-progress"] is False

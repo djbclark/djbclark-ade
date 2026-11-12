@@ -8,8 +8,8 @@
 The skills table has one row per tracked `skills/*/SKILL.md` (every one when ROOT is not a git checkout): the frontmatter `name` and the first sentence of its
 `description`. The bin table has one row per tracked file in `bin/`: the first sentence of the file's first docstring or
 comment paragraph (after the shebang), with a leading "<name> - " / "<name>: " dropped. The block sits in README.md
-between `<!-- roster:start -->` and `<!-- roster:end -->`; CI runs `--check`, so a new skill or tool changes the README
-in the same PR (AGENTS.md review rule 8). Headings omit inventory counts and generation timestamps so unrelated
+between `<!-- roster:start -->` and `<!-- roster:end -->`; Legacy documents may use `--write` / `--check`. The main README links to a separate
+automatically published roster; CI checks generation rather than stored-row freshness. Headings omit inventory counts and generation timestamps so unrelated
 additions do not conflict on shared metadata lines.
 
 Exit: 0 printed / up to date / written; 1 `--check` found a difference; 2 usage, README.md or its markers missing.
@@ -165,13 +165,13 @@ def bin_rows(root: Path) -> list[tuple[str, str]]:
     return rows
 
 
-def render(root: Path) -> str:
+def render(root: Path, link_prefix: str = "") -> str:
     skills = skill_rows(root)
     tools = bin_rows(root)
     out = [START, "Skills (from each `skills/*/SKILL.md`):", "", "| Skill | What |", "|---|---|"]
-    out += [f"| [`{name}`]({rel}) | {_cell(desc)} |" for name, rel, desc in skills]
+    out += [f"| [`{name}`]({link_prefix}{rel}) | {_cell(desc)} |" for name, rel, desc in skills]
     out += ["", "`bin/` (from each file's first docstring or comment):", "", "| Tool | What |", "|---|---|"]
-    out += [f"| [`{name}`](bin/{name}) | {_cell(desc)} |" for name, desc in tools]
+    out += [f"| [`{name}`]({link_prefix}bin/{name}) | {_cell(desc)} |" for name, desc in tools]
     out += [END]
     return "\n".join(out) + "\n"
 
@@ -190,6 +190,7 @@ def split_readme(text: str) -> tuple[str, str, str] | None:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="ade-roster", description=__doc__.split("\n\n")[0])
     ap.add_argument("--root", default=str(Path(__file__).resolve().parent.parent), help="repository root")
+    ap.add_argument("--link-prefix", default="", help="prefix for generated source links")
     mode = ap.add_mutually_exclusive_group()
     mode.add_argument("--check", action="store_true", help="exit 1 when README.md's roster block is stale")
     mode.add_argument("--write", action="store_true", help="rewrite README.md's roster block")
@@ -198,7 +199,7 @@ def main(argv: list[str] | None = None) -> int:
     if not (root / "skills").is_dir() or not (root / "bin").is_dir():
         print(f"ade-roster: {root} has no skills/ or bin/", file=sys.stderr)
         return 2
-    block = render(root)
+    block = render(root, args.link_prefix)
     if not (args.check or args.write):
         sys.stdout.write(block)
         return 0
