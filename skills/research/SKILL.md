@@ -280,8 +280,8 @@ pages. On a host with the `model-routing` skill (effort folded into it 2026-11-0
    cannot. The lead's own probe uses its own tools and walks the full web
    ladder before declaring a route dead: the client's MCP rungs (Firecrawl,
    `exa`, `parallel-search`, `jina`), built-in WebSearch/WebFetch, Composio
-   (`paper-search` for papers). `bin/web-get` and the written per-client ladder
-   were deleted 2026-11-06.
+   (`paper-search` for papers). `bin/ade-web` provides the bounded shell ladder (search/fetch/check);
+   see [web access](references/web-access.md) for providers, attempts and exits.
    Fix a harness failure at the root in `~/src/djbclark-ade` (code, not only
    docs); do not just route around it, then say what you changed.
 7. **Pause on missing sources (operator, 2026-10-11).** A page or search a
@@ -294,4 +294,4 @@ pages. On a host with the `model-routing` skill (effort folded into it 2026-11-0
    failed URLs and queries to the operator, and waits. **No synthesis, writer
    or gate step runs while a needed source is missing**; resume the same slice
    once the provider recovers. A page that a later rung did return is fine;
-   note the rung. (The written ladder `web-access.md` was deleted 2026-11-06.)
+   note the rung. See [web access](references/web-access.md): exits 5 and 6 both require this pause.

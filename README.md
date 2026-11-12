@@ -136,6 +136,7 @@ Skills (from each `skills/*/SKILL.md`):
 | [`ade-update`](bin/ade-update) | Keep this machine's djbclark-ade checkout current: pull, relink, say what changed. |
 | [`ade-update-auto`](bin/ade-update-auto) | S4 ``update --auto``: observe-only by default; optional this-checkout apply. |
 | [`ade-user-install`](bin/ade-user-install) | Uv/just fetch, bin/ symlink, or Linux sudo-secretspec media staging. |
+| [`ade-web`](bin/ade-web) | Bounded search and fetch failover with provider provenance. |
 | [`ade_agent_mode.py`](bin/ade_agent_mode.py) | Native Paseo mode audit/repair plan. |
 | [`ade_browser_task.py`](bin/ade_browser_task.py) | Render / relay browser-only prompts (setup-plan S7). |
 | [`ade_browser_task_state.py`](bin/ade_browser_task_state.py) | Opt-in S7 pr-access records; only authoritative GET readback proves completion. |

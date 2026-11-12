@@ -1,0 +1,260 @@
+#!/usr/bin/env -S python3 -I
+"""ade-web: bounded search and fetch failover with provider provenance.
+
+Usage: ade-web {fetch URL,search QUERY,check} [--json] [--timeout SECONDS]
+       [--max-bytes BYTES] [--crwl]
+Exit 0: usable copy; 5: all failed (pause); 6: best copy truncated (pause).
+check probes every configured fetch rung using --url (default example.com).
+Keys are read only from the environment; diagnostics never include exceptions.
+"""
+from __future__ import annotations
+
+import argparse
+import gzip
+import io
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import urllib.error
+import urllib.parse
+import urllib.request
+from html.parser import HTMLParser
+
+
+class Failure(Exception):
+    """A safe, fixed diagnostic, never a provider response or credential."""
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def valid_url(url):
+    p = urllib.parse.urlsplit(url)
+    if p.scheme not in ('http', 'https') or not p.hostname or p.username or p.password:
+        raise Failure('invalid URL')
+    return url
+
+
+def base(name, default):
+    value = os.environ.get(name, default).rstrip('/')
+    p = urllib.parse.urlsplit(valid_url(value))
+    if p.query or p.fragment or (p.scheme == 'http' and p.hostname not in ('localhost', '127.0.0.1', '::1')):
+        raise Failure('invalid provider base')
+    return value
+
+
+class Text(HTMLParser):
+    def __init__(self):
+        super().__init__(); self.parts = []; self.hidden = 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag in ('script', 'style'): self.hidden += 1
+        if tag in ('p', 'br', 'div', 'h1', 'h2', 'li'): self.parts.append('\n')
+
+    def handle_endtag(self, tag):
+        if tag in ('script', 'style'): self.hidden = max(0, self.hidden - 1)
+
+    def handle_data(self, data):
+        if not self.hidden: self.parts.append(data)
+
+
+def clean(body):
+    if re.search(r'<(?:html|body|p|div|h1)\b', body, re.I):
+        parser = Text(); parser.feed(body); body = ''.join(parser.parts)
+    return body.strip()
+
+
+def quality(body):
+    if not body.strip(): raise Failure('empty')
+    if len(body) < 5000 and re.search(
+        r'\b(access denied|verify you are human|checking your browser|captcha|'
+        r'just a moment|page not found|404 not found|enable javascript and cookies)\b', body, re.I
+    ):
+        raise Failure('block or soft-404')
+
+
+class Web:
+    def __init__(self, args):
+        self.args = args
+        self.attempts = []
+        self.best = None
+        self.fc = base('ADE_WEB_FIRECRAWL_URL', 'http://127.0.0.1:18805')
+        self.jina = base('ADE_WEB_JINA_URL', 'https://r.jina.ai')
+        self.archive = base('ADE_WEB_WAYBACK_URL', 'https://web.archive.org')
+
+    def request(self, url, data=None, key=None, limit=None):
+        valid_url(url)
+        headers = {'User-Agent': 'ade-web/1', 'Accept-Encoding': 'gzip'}
+        if key: headers['Authorization'] = 'Bearer ' + key
+        if data is not None: headers['Content-Type'] = 'application/json'
+        req = urllib.request.Request(url, data=json.dumps(data).encode() if data is not None else None, headers=headers)
+        # A keyed request never follows redirects; keyless page/PDF/archive requests may.
+        opener = urllib.request.build_opener(NoRedirect()) if key else urllib.request.build_opener()
+        cap = limit or self.args.max_bytes
+        try:
+            with opener.open(req, timeout=self.args.timeout) as response:
+                payload = response.read(cap + 1)
+                clipped = len(payload) > cap
+                payload = payload[:cap]
+                if response.headers.get('Content-Encoding', '').lower() == 'gzip':
+                    if clipped: raise Failure('compressed response over limit')
+                    with gzip.GzipFile(fileobj=io.BytesIO(payload)) as stream:
+                        payload = stream.read(cap + 1)
+                    clipped = len(payload) > cap
+                    payload = payload[:cap]
+                return payload, response.headers.get('Content-Type', ''), clipped
+        except urllib.error.HTTPError as exc:
+            raise Failure('HTTP ' + str(exc.code)) from None
+        except Failure:
+            raise
+        except Exception:
+            raise Failure('request failed') from None
+
+    def structured(self, url, data=None, key=None):
+        raw, _, clipped = self.request(url, data, key, max(self.args.max_bytes * 2, 65536))
+        if clipped: raise Failure('JSON response over limit')
+        try: return json.loads(raw)
+        except (ValueError, UnicodeError): raise Failure('invalid JSON') from None
+
+    def firecrawl(self, target, search=False):
+        data = self.structured(self.fc + ('/v2/search' if search else '/v2/scrape'),
+                               {'query': target, 'limit': 5} if search else {'url': target, 'formats': ['markdown']},
+                               os.environ.get('ADE_WEB_FIRECRAWL_KEY'))
+        if not isinstance(data, dict) or data.get('success') is False: raise Failure('provider rejected')
+        item = data.get('data')
+        if search:
+            rows = item.get('web', []) if isinstance(item, dict) else item
+            if not isinstance(rows, list) or not rows: raise Failure('no results')
+            body = '\n\n'.join(str(r.get('title', '')) + '\n' + str(r.get('url', '')) + '\n' + str(r.get('description', '')) for r in rows if isinstance(r, dict))
+            return body, False
+        if not isinstance(item, dict): raise Failure('invalid scrape')
+        meta = item.get('metadata') or {}
+        if isinstance(meta, dict) and str(meta.get('statusCode', '200'))[:1] in ('4', '5'):
+            raise Failure('page HTTP error')
+        return str(item.get('markdown') or ''), bool(item.get('truncated') or data.get('truncated'))
+
+    def jina_read(self, target, keyed=False):
+        raw, _, clipped = self.request(self.jina + '/' + target, key=os.environ.get('JINA_API_KEY') if keyed else None)
+        return raw.decode('utf-8', 'replace'), clipped
+
+    def jina_search(self, query):
+        url = base('ADE_WEB_JINA_SEARCH_URL', 'https://s.jina.ai') + '/' + urllib.parse.quote(query, safe='')
+        raw, _, clipped = self.request(url, key=os.environ['JINA_API_KEY'])
+        return raw.decode('utf-8', 'replace'), clipped
+
+    def pdf(self, target):
+        raw, content_type, clipped = self.request(target)
+        if not raw.startswith(b'%PDF-'): raise Failure('not PDF')
+        if clipped: raise Failure('PDF over limit')
+        tool = shutil.which('pdftotext')
+        if not tool: raise Failure('pdftotext unavailable')
+        with tempfile.TemporaryDirectory(prefix='ade-web-') as directory:
+            path = Path(directory) / 'page.pdf'; path.write_bytes(raw)
+            output = subprocess.run([tool, str(path), '-'], capture_output=True, timeout=self.args.timeout)
+        if output.returncode: raise Failure('PDF extraction failed')
+        return output.stdout.decode('utf-8', 'replace'), False
+
+    def archived(self, target, timestamp='0'):
+        raw, _, clipped = self.request(self.archive + '/web/' + timestamp + 'id_/' + target)
+        if raw.startswith(b'%PDF-'): raise Failure('archived PDF requires extraction')
+        return clean(raw.decode('utf-8', 'replace')), clipped
+
+    def cdx(self, target):
+        query = urllib.parse.urlencode({'url': target, 'output': 'json', 'filter': 'statuscode:200',
+                                       'fl': 'timestamp,original', 'limit': '-1'})
+        rows = self.structured(self.archive + '/cdx/search/cdx?' + query)
+        if not isinstance(rows, list) or len(rows) < 2: raise Failure('no archive capture')
+        row = rows[-1]
+        if not isinstance(row, list) or len(row) != 2 or not re.fullmatch(r'\d{14}', str(row[0])):
+            raise Failure('invalid archive capture')
+        return self.archived(valid_url(row[1]), row[0])
+
+    def crawl(self, target):
+        tool = shutil.which('crwl')
+        if not tool: raise Failure('crwl unavailable')
+        result = subprocess.run([tool, target], capture_output=True, timeout=self.args.timeout)
+        if result.returncode: raise Failure('crwl failed')
+        return clean(result.stdout.decode('utf-8', 'replace')), False
+
+    def rungs(self, target, search=False):
+        yield 'firecrawl', lambda: self.firecrawl(target, search)
+        if search:
+            if os.environ.get('JINA_API_KEY'): yield 'jina-search', lambda: self.jina_search(target)
+            return
+        yield 'jina', lambda: self.jina_read(target)
+        if os.environ.get('JINA_API_KEY'): yield 'jina-keyed', lambda: self.jina_read(target, True)
+        yield 'pdf', lambda: self.pdf(target)
+        yield 'wayback', lambda: self.archived(target)
+        yield 'wayback-cdx', lambda: self.cdx(target)
+        if self.args.crwl: yield 'crwl', lambda: self.crawl(target)
+
+    def run(self, target, search=False, check=False):
+        selected = None
+        for provider, call in self.rungs(target, search):
+            try:
+                body, truncated = call()
+                quality(body)
+                encoded = body.encode('utf-8')
+                truncated = truncated or len(encoded) > self.args.max_bytes
+                body = encoded[:self.args.max_bytes].decode('utf-8', 'ignore')
+                copy = {'provider': provider, 'body': body, 'truncated': truncated}
+                self.attempts.append({'provider': provider, 'status': 'truncated' if truncated else 'ok'})
+                if truncated:
+                    if self.best is None or len(body) > len(self.best['body']): self.best = copy
+                elif selected is None:
+                    selected = copy
+                    if not check: break
+            except Exception as exc:
+                # Never surface provider bodies, URLs, keys, or subprocess stderr.
+                error = str(exc) if isinstance(exc, Failure) else 'provider failed'
+                self.attempts.append({'provider': provider, 'status': 'failed', 'error': error})
+        selected = selected or self.best
+        code = 5 if selected is None else 6 if selected['truncated'] else 0
+        return {**(selected or {'provider': None, 'body': '', 'truncated': False}),
+                'attempts': self.attempts, 'exit_code': code}
+
+
+def positive(value):
+    number = float(value)
+    if not 0 < number <= 300: raise argparse.ArgumentTypeError('must be > 0 and <= 300')
+    return number
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    sub = parser.add_subparsers(dest='command', required=True)
+    for command in ('fetch', 'search', 'check'):
+        p = sub.add_parser(command)
+        if command != 'check': p.add_argument('target')
+        else: p.add_argument('--url', default='https://example.com')
+        p.add_argument('--json', action='store_true', help='body, provider, truncation, attempts and exit_code')
+        p.add_argument('--timeout', type=positive, default=15, help='per network/subprocess operation, seconds')
+        p.add_argument('--max-bytes', type=int, default=2_000_000)
+        p.add_argument('--crwl', action='store_true', help='enable optional final crwl rung')
+    args = parser.parse_args(argv)
+    if not 1024 <= args.max_bytes <= 20_000_000: parser.error('--max-bytes must be 1024..20000000')
+    try:
+        target = args.url if args.command == 'check' else args.target
+        if args.command != 'search': valid_url(target)
+        result = Web(args).run(target, args.command == 'search', args.command == 'check')
+    except Failure as exc:
+        result = {'provider': None, 'body': '', 'truncated': False, 'attempts': [], 'exit_code': 5}
+        print(str(exc), file=sys.stderr)
+    for attempt in result['attempts']:
+        print('provider=' + attempt['provider'] + ' status=' + attempt['status'] +
+              (' error=' + attempt['error'] if 'error' in attempt else ''), file=sys.stderr)
+    if result['exit_code'] in (5, 6):
+        print('BLOCKED: web access: ' + ('all providers failed' if result['exit_code'] == 5 else 'best copy truncated') + '; pause dependent work', file=sys.stderr)
+    print(json.dumps(result, ensure_ascii=False) if args.json else result['body'])
+    return result['exit_code']
+
+
+if __name__ == '__main__':
+    sys.exit(main())
