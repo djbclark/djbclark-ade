@@ -111,9 +111,27 @@ Checked-in ADE jobs under `config/launchd/` include `com.djbclark.deadline-sweep
   (`com.djbclark.harden-check.plist` / `just harden-check-install`;
   `com.djbclark.keys-check.plist` / `just keys-check-install`).
   `update --auto` observe-only exits 5 by default (`ade-update --auto` /
-  `ade-update-auto`); `--apply-checkout` / `ADE_UPDATE_AUTO_APPLY=1` ff-only updates
-  **this checkout** when behind (option 1). No apply plist / mid-turn skip /
-  failure ping yet (PR 359 check-only gate; options 2–3 still pending).
+  `ade-update-auto`); `--apply-checkout` / `ADE_UPDATE_AUTO_APPLY=1` ff-only
+  updates **this checkout** when behind (option 1); `--apply` (options 2–3,
+  operator ruling 2026-11-12) runs the scheduled apply: **mid-turn skip**
+  (machine-wide `paseo ls -g --background --json`; any `running`/`initializing`
+  agent defers, and an unavailable/unknown fleet reading defers too — unknown
+  or busy state defers), **durable deferral** (the deferral and the
+  applying-intent records are written atomically to
+  `~/.local/state/djbclark-ade/update-auto.json` before any write; deferral
+  exits 6), checkout fast-forward plus dependency `update_argv` with evidence
+  and one doctor-driven retry per component (`ade-install update --yes`), and
+  **one hermes-ping per failed run** (`ADE_UPDATE_HERMES_PING` overrides the
+  tool; a missing/failing ping tool is recorded, never raised). The daily
+  check job stays check-only and **no apply plist is installed or loaded by
+  this repository** — installing an apply job remains an explicit operator
+  step (`just update-check-install` is check-only).
+- Dependency update execution (2026-11-12, unit W20): `just update` with no
+  arguments runs the full S4 sequence — checkout fast-forward, then
+  `ade-install update --yes` (each candidate's own `update_argv` with
+  evidence; scoped doctor; one retry per doctor-failing component, reported,
+  never rolled back), then doctor. See docs/install-catalog.md for the exit
+  and evidence contract.
 
 ## Paseo schedules (reconcile + operator, 2026-11-10)
 

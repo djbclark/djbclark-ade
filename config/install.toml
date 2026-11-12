@@ -853,7 +853,7 @@ class = "hard"
 schedule = "daily (plist pending)"
 command = "just update --auto"
 platforms = ["mac", "linux"]
-notes = "S4: observe-only exit 5 by default; --apply-checkout / ADE_UPDATE_AUTO_APPLY=1 ff-only updates this checkout (option 1); scheduled apply plist / mid-turn skip / failure ping still pending (PR 359 check-only gate stands)."
+notes = "S4: observe-only exit 5 by default; --apply-checkout ff-only updates this checkout (option 1); --apply runs the scheduled apply with mid-turn skip + durable deferral (exit 6) + hermes-ping on failure (options 2-3, operator ruling 2026-11-12). No plist is installed by this repository; the daily check job stays check-only."
 
 [[install.jobs]]
 name = "harden-check"

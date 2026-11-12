@@ -6,6 +6,8 @@
   ade-install catalog [--root DIR] [--json]
   ade-install plan [--root DIR] [--json]
   ade-install update-plan [--root DIR] [--json]
+  ade-install update [--root DIR] [--json] [--dry-run|--yes] [--id ID ...]
+                     [--state PATH] [--prefix DIR]
   ade-install bootstrap [--root DIR] [--prefix DIR] [--dry-run|--yes] [--json]
   ade-install doctor [--root DIR] [--id ID ...] [--json]
   ade-install keys [--root DIR] [--json] [--keys-state PATH]
@@ -25,6 +27,11 @@ components. Unknown/error observations block unless --force explicitly requests
 repair; --force retains component choices and system authority. --system --dry-run /
 --print-system-argv preview system_argv. Live system_argv needs --yes --system
 --apply-system (default refuse). Secrets are never read.
+update executes each candidate's own update_argv with evidence (S4): default
+--dry-run previews; --yes runs the argv (never shell strings; system_argv is
+never touched), observes before/after, runs a scoped doctor over the updated
+ids, retries each doctor-failing component ONCE and reports (never rolls back),
+and writes evidence to <state>/updates.json. See docs/install-catalog.md.
 Default catalog reads adopt effective install/keys metadata; explicit library
 install_path reads retain the legacy unified-presence refusal. No writer expansion.
 See docs/install-catalog.md.
@@ -73,7 +80,7 @@ BIN = Path(__file__).resolve().parent
 if str(BIN) not in sys.path:
     sys.path.insert(0, str(BIN))
 
-if __name__ == "__main__" and any(command in sys.argv[1:] for command in ("update-plan", "bootstrap", "keys-plan")):
+if __name__ == "__main__" and any(command in sys.argv[1:] for command in ("update-plan", "update", "bootstrap", "keys-plan")):
     # Cover argparse's accepted option abbreviations without duplicating its
     # grammar. Suppressing bytecode if an argument value matches is harmless.
     sys.dont_write_bytecode = True
@@ -189,6 +196,50 @@ def cmd_update_plan(args: argparse.Namespace) -> int:
 
 def cmd_verify_key(args: argparse.Namespace) -> int:
     return ai.verify_key_metadata(args.provider)
+
+
+def cmd_update(args: argparse.Namespace) -> int:
+    if args.yes and args.dry_run_flag:
+        print("ade-install update: refuse both --yes and --dry-run", file=sys.stderr)
+        return 2
+    dry_run = not args.yes  # default dry-run; --yes executes
+    try:
+        catalog = ai.load_catalog(root=Path(args.root) if args.root else None)
+        report, rc = ai.apply_updates(
+            catalog,
+            dry_run=dry_run,
+            ids=set(args.id) if args.id else None,
+            prefix=Path(args.prefix) if args.prefix else None,
+            state_path=Path(args.state) if args.state else None,
+        )
+    except ai.InstallError as e:
+        if args.json:
+            _print_json({"ok": False, "errors": [str(e)]})
+        else:
+            print(str(e), file=sys.stderr)
+            print("ade-install update: FAIL", file=sys.stderr)
+        return 2
+    mode = "dry-run" if dry_run else "apply"
+    if args.json:
+        _print_json({"ok": rc == 0, "mode": mode, **report})
+    else:
+        label = "OK" if rc == 0 else "FAIL"
+        print(f"ade-install update ({mode}): {label}")
+        for entry in report["components"]:
+            extra = "" if entry.get("rc") is None else f" rc={entry['rc']}"
+            print(f"  {entry['action']:20} {entry['id']}{extra}")
+            if "argv" in entry:
+                print("    argv=" + json.dumps(entry["argv"]))
+            if entry.get("pre"):
+                print(f"    pre: {entry['pre']['status']} — {entry['pre']['detail'][:160]}")
+            if entry.get("retried"):
+                print(f"    retried once (retry_rc={entry.get('retry_rc')})")
+        doc = report["doctor"]
+        if doc["before_fail"] or doc["after_fail"]:
+            print(f"  doctor before_fail={doc['before_fail']} after_fail={doc['after_fail']}")
+        if not dry_run:
+            print(f"  evidence: {report.get('state_path')}")
+    return rc
 
 
 def cmd_bootstrap(args: argparse.Namespace) -> int:
@@ -454,6 +505,45 @@ def main(argv: list[str] | None = None) -> int:
     vp = sub.add_parser("verify-key", help="fixed metadata-authentication probe; reads injected environment only; no output except the allowlisted expiring marker")
     vp.add_argument("provider", choices=("openai", "openrouter", "anthropic", "gemini", "deepseek", "cursor", "github", "telegram"))
     vp.set_defaults(func=cmd_verify_key)
+
+    up = sub.add_parser(
+        "update",
+        parents=[shared],
+        help=(
+            "S4: execute each candidate's own update_argv with evidence; "
+            "--dry-run (default) or --yes; one doctor-driven retry per component"
+        ),
+    )
+    up.add_argument("--json", action="store_true")
+    mode = up.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--dry-run",
+        dest="dry_run_flag",
+        action="store_true",
+        help="print candidates with pre-observation and exact argv; run nothing, write nothing (default)",
+    )
+    mode.add_argument(
+        "--yes",
+        action="store_true",
+        help="execute recorded update_argv (user scope only; never system_argv), scoped doctor + one retry, evidence to updates.json",
+    )
+    up.add_argument(
+        "--id",
+        action="append",
+        default=[],
+        help="limit to this component id (repeatable)",
+    )
+    up.add_argument(
+        "--state",
+        default=None,
+        help="evidence JSON path (default: ~/.local/state/djbclark-ade/updates.json); written only with --yes",
+    )
+    up.add_argument(
+        "--prefix",
+        default=None,
+        help="user prefix for {prefix} token (default: ~/.local/bin)",
+    )
+    up.set_defaults(func=cmd_update, dry_run_flag=False)
 
     bp = sub.add_parser("bootstrap", parents=[shared], help="explicit Just bootstrap followed only by installation preview")
     bp.add_argument("--json", action="store_true")

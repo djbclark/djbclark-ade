@@ -59,14 +59,29 @@ doctor component="":
 install *args:
     "{{ root }}/bin/ade-install" apply --root "{{ root }}" {{ args }}
 
+# S4 `just update`: with no arguments, the full update — checkout fast-forward
+# (ade-update), dependency update_argv with evidence and one doctor-driven retry
+# (ade-install update --yes; never system_argv), then doctor. With arguments
+# (e.g. `just update -- --check`, `just update -- --auto`) they pass through to
+# ade-update alone, as before.
+[positional-arguments]
 update *args:
-    "{{ root }}/bin/ade-update" --repo "{{ root }}" {{ args }}
+    #!/usr/bin/env bash
+    set -eu
+    if [[ -n "${1:-}" ]]; then
+        exec "{{ root }}/bin/ade-update" --repo "{{ root }}" "$@"
+    fi
+    "{{ root }}/bin/ade-update" --repo "{{ root }}"
+    "{{ root }}/bin/ade-install" update --root "{{ root }}" --yes
+    exec "{{ root }}/bin/ade-install" doctor --root "{{ root }}"
 
 # Pure dependency command inventory; never runs updates or probes.
 update-plan:
     "{{ root }}/bin/ade-install" update-plan --root "{{ root }}"
 
-# S4 stub: observe-only then exit 5 (full auto-apply not implemented; no scheduled apply).
+# S4 `update --auto`: observe-only then exit 5 by default; `-- --apply` runs the
+# scheduled apply (mid-turn skip + durable deferral + failure ping; no job is
+# installed or loaded); `-- --apply-checkout` ff-only updates this checkout.
 update-auto *args:
     "{{ root }}/bin/ade-update-auto" --repo "{{ root }}" {{ args }}
 

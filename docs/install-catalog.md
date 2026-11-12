@@ -188,6 +188,8 @@ ade-install check [--root DIR] [--json]
 ade-install catalog [--root DIR] [--json]
 ade-install plan [--root DIR] [--json]
 ade-install update-plan [--root DIR] [--json]
+ade-install update [--root DIR] [--json] [--dry-run|--yes] [--id ID ...]
+                   [--state PATH] [--prefix DIR]
 ade-install bootstrap [--root DIR] [--prefix DIR] [--dry-run|--yes] [--json]
 ade-install doctor [--root DIR] [--id ID ...] [--json]
 ade-install keys [--root DIR] [--json] [--keys-state PATH]
@@ -208,8 +210,11 @@ just install-print-system-argv
 just doctor                 # alias of install-doctor (setup-plan S2 name)
 just doctor hermes          # selected component only (setup-plan S3a)
 just install [-- --yes]    # ade-install apply (dry-run by default; --yes for live)
-just update [-- --check|--auto|--auto --apply-checkout]
-just update-auto [-- --apply-checkout]  # default observe-only exit 5; opt-in checkout apply; plist pending
+just update              # full S4 update: checkout ff + dependency update_argv (--yes) + doctor;
+                         # args (e.g. `just update -- --check`) pass through to ade-update alone
+just update-auto [-- --apply-checkout|-- --apply]  # observe-only exit 5 by default;
+                         # --apply = scheduled apply (mid-turn skip, durable deferral,
+                         # failure ping; no job installed by this repository)
 ```
 
 Python 3.11+ must already be available as `python3` on PATH. Older Python exits
@@ -293,8 +298,29 @@ Pass `--ade` only with a durable checkout (`~/src/djbclark-ade`); never with a l
   host applicability. JSON has `mode=plan-only`, `steps` and an explanatory
   `note`; text carries the same limits. Exit 0 means a valid plan was produced,
   even with skipped/unconfigured/blocked rows; invalid catalog input exits 1.
-  This changes neither `just update` (ADE checkout/skills only) nor automatic
-  update policy, package ownership, scheduling or pool acceptance.
+  This changes neither automatic update policy, package ownership, scheduling
+  nor pool acceptance (2026-11-12: the sentence about `just update` being
+  checkout/skills only is superseded — `just update` with no arguments now runs
+  `update --yes` plus doctor, below).
+- `update` executes each candidate's own recorded `update_argv` (S4, 2026-11-12;
+  unit W20). Default `--dry-run` is print-only: candidates with their expanded
+  argv and a pre-observation (the same `probe_argv`/PATH-presence observation
+  doctor uses), no command runs, no state is written; exit 0. `--yes` runs every
+  candidate that is not clearly absent: absent binaries are skipped (the fix
+  path is `apply`, not update), each remaining candidate's argv runs exactly as
+  recorded (argv list, never a shell string; `system_argv` is never touched
+  here and `paseo_plugin` rows stay owner-managed), a scoped doctor then
+  validates exactly the updated ids, and each doctor-failing component gets
+  ONE update retry and is then reported — nothing is ever rolled back. Exit 1
+  when any update command failed or any updated component still fails doctor
+  after its retry; the outcome evidence (argv, rc, output tails, pre/post
+  observations, doctor before/after fail lists, retries) is written atomically
+  to `--state` (default `~/.local/state/djbclark-ade/updates.json`), values and
+  secrets never included. Ownership, root effects and platform compatibility
+  stay `unknown`: only catalog-selected user-scope `update_argv` runs. Unknown
+  ids to `--id` exit 2; `--yes --dry-run` exit 2. New-component installation
+  stays with `apply` (S4 bullet 3 is not automated by `update`); scheduling and
+  the scheduled-apply policy live in `ade-update-auto --apply` (docs/scheduling.md).
 - `doctor` prefers `paseo_plugin` (observe-only `paseo plugin ls --json`), else
   `probe_argv` (runs the tool; argv list, short timeout), else PATH `presence`.
   When `agents/claude/settings.json.tmpl` is present under `--root`, it also

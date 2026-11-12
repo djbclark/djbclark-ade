@@ -1597,6 +1597,180 @@ def plan(catalog: Catalog) -> list[dict[str, Any]]:
     return steps
 
 
+UPDATES_STATE_SCHEMA_VERSION = 1
+# Observation statuses that count as a broken component after an update.
+DOCTOR_FAIL_STATUSES = ("missing", "disabled", "error")
+
+
+def apply_updates(
+    catalog: Catalog,
+    *,
+    dry_run: bool = True,
+    ids: set[str] | None = None,
+    prefix: Path | None = None,
+    update_timeout_s: int = 900,
+    probe_timeout_s: float = 15.0,
+    run: Callable[[list[str]], "subprocess.CompletedProcess[str]"] | None = None,
+    doctor_fn: Callable[..., tuple[list[Observation], int]] | None = None,
+    state_path: Path | None = None,
+) -> tuple[dict[str, Any], int]:
+    """S4: execute each candidate's own ``update_argv`` with evidence.
+
+    Candidates are ``update_plan`` rows whose action is ``candidate`` (chosen
+    catalog classes with a recorded ``update_argv``); ``ids`` narrows them and
+    unknown ids are an InstallError. ``paseo_plugin`` rows stay owner-managed
+    and are never executed. Evidence: before each run the component is observed
+    (probe_argv / PATH presence, same as doctor); a clearly missing binary is
+    skipped (the fix path is ``apply``, not update). ``dry_run`` (the default)
+    runs nothing and writes no state. With ``dry_run=False`` every candidate is
+    updated, a scoped doctor then validates exactly the updated ids, each
+    doctor-failing component gets ONE update retry and is then reported
+    (never rolled back), and the outcome evidence is written atomically to
+    ``state_path`` (default ``<state_dir>/updates.json``). Exit 0 when every
+    updated component ends healthy; 1 when any update command failed or any
+    updated component still fails doctor after its retry. Ownership, root
+    effects and platform compatibility stay unknown: only catalog-selected
+    user-scope ``update_argv`` runs; ``system_argv`` is never touched here.
+    """
+    if run is None:
+        def run(argv: list[str]) -> "subprocess.CompletedProcess[str]":  # noqa: F811
+            return subprocess.run(  # noqa: S603 — argv list only
+                argv, capture_output=True, text=True, check=False,
+                timeout=update_timeout_s,
+            )
+    if doctor_fn is None:
+        def doctor_fn(catalog: Catalog, **kwargs: Any) -> tuple[list[Observation], int]:  # noqa: F811
+            return doctor(catalog, **kwargs)
+
+    candidates: dict[str, list[str]] = {}
+    for step in update_plan(catalog, prefix=prefix):
+        if step["action"] == "candidate":
+            candidates[str(step["id"])] = list(step["argv"])
+    if ids is not None:
+        unknown = ids - set(candidates)
+        if unknown:
+            raise InstallError("unknown update component id(s): " + ", ".join(sorted(unknown)))
+        candidates = {cid: argv for cid, argv in candidates.items() if cid in ids}
+
+    rows_by_id = {row["id"]: row for row in catalog.components}
+    report: dict[str, Any] = {
+        "schema_version": UPDATES_STATE_SCHEMA_VERSION,
+        "mode": "dry-run" if dry_run else "apply",
+        "components": [],
+        "doctor": {"before_fail": [], "retried": [], "after_fail": []},
+    }
+    for cid in sorted(candidates):
+        entry: dict[str, Any] = {"id": cid}
+        argv = candidates[cid]
+        entry["argv"] = argv
+        pre = observe_component(
+            rows_by_id[cid], root=catalog.root, probe_timeout_s=probe_timeout_s,
+        )
+        entry["pre"] = {"status": pre.status, "detail": pre.detail}
+        if pre.status == "missing":
+            entry.update(action="skip-not-installed", reason=pre.detail)
+            report["components"].append(entry)
+            continue
+        if dry_run:
+            entry.update(action="would-update", reason="candidate; no command run, no state written")
+            report["components"].append(entry)
+            continue
+        outcome = _run_update_argv(run, cid, argv)
+        entry.update(outcome)
+        entry["retried"] = False
+        report["components"].append(entry)
+        if entry["action"] != "updated":
+            report["doctor"]["before_fail"].append(cid)
+
+    if dry_run:
+        return report, 0
+
+    updated_ids = [e["id"] for e in report["components"] if e["action"] in ("updated", "update-failed")]
+    if updated_ids:
+        obs, _drc = doctor_fn(
+            catalog, component_ids=updated_ids, probe_timeout_s=probe_timeout_s,
+        )
+        failing = _doctor_fail_ids(obs)
+        report["doctor"]["before_fail"] = sorted(set(report["doctor"]["before_fail"]) | failing)
+        if failing:
+            report["doctor"]["retried"] = sorted(failing)
+            entries_by_id = {e["id"]: e for e in report["components"]}
+            for cid in sorted(failing):
+                entry = entries_by_id[cid]
+                retry_outcome = _run_update_argv(run, cid, entry["argv"])
+                entry["retried"] = True
+                entry["retry_rc"] = retry_outcome.get("rc")
+                if retry_outcome.get("reason"):
+                    entry["retry_reason"] = retry_outcome["reason"]
+                if retry_outcome.get("stdout_tail"):
+                    entry["retry_stdout_tail"] = retry_outcome["stdout_tail"]
+                if retry_outcome.get("stderr_tail"):
+                    entry["retry_stderr_tail"] = retry_outcome["stderr_tail"]
+            obs, _drc = doctor_fn(
+                catalog, component_ids=sorted(failing), probe_timeout_s=probe_timeout_s,
+            )
+            still = _doctor_fail_ids(obs)
+        else:
+            still = set()
+        report["doctor"]["after_fail"] = sorted(still)
+        for e in report["components"]:
+            if e["action"] in ("updated", "update-failed"):
+                e["doctor"] = "fail" if e["id"] in still else "ok"
+
+    failed = [e for e in report["components"] if e["action"] != "skip-not-installed"]
+    # rc and retry_rc are None for timeout and exec errors (no process exit).
+    # That is a failed update, not success. Only a real exit 0 counts as ok.
+    # An unretried row has no retry_rc key; a retry that never produced an exit
+    # stores None and must fail.
+    bad = [
+        e["id"] for e in failed
+        if e.get("doctor") == "fail"
+        or e.get("action") == "update-failed"
+        or e.get("rc") != 0
+        or ("retry_rc" in e and e.get("retry_rc") != 0)
+    ]
+    rc = 1 if bad else 0
+    report["exit"] = rc
+    report["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    path = state_path or (default_state_dir() / "updates.json")
+    _atomic_write_json(path, report)
+    report["state_path"] = str(path)
+    return report, rc
+
+
+def _run_update_argv(
+    run: Callable[[list[str]], "subprocess.CompletedProcess[str]"],
+    cid: str,
+    argv: list[str],
+) -> dict[str, Any]:
+    """Run one component's update argv once; outcome is evidence, never a rollback."""
+    entry: dict[str, Any] = {"id": cid, "action": "updated"}
+    try:
+        proc = run(list(argv))
+    except subprocess.TimeoutExpired:
+        entry.update(action="update-failed", rc=None, reason=f"update timed out after timeout: {shlex.join(argv)}")
+        return entry
+    except OSError as e:
+        entry.update(action="update-failed", rc=None, reason=f"update exec error: {e}")
+        return entry
+    entry["rc"] = proc.returncode
+    if proc.stdout:
+        entry["stdout_tail"] = proc.stdout.strip()[-400:]
+    if proc.stderr:
+        entry["stderr_tail"] = proc.stderr.strip()[-400:]
+    if proc.returncode != 0:
+        entry["action"] = "update-failed"
+        entry["reason"] = f"update_argv exited {proc.returncode}"
+    return entry
+
+
+def _doctor_fail_ids(obs: list[Observation]) -> set[str]:
+    return {
+        o.id for o in obs
+        if o.kind == "component" and o.status in DOCTOR_FAIL_STATUSES
+    }
+
+
 def update_plan(catalog: Catalog, *, prefix: Path | None = None) -> list[dict[str, Any]]:
     """Describe configured update candidates, without observing or changing state.
 
