@@ -134,6 +134,24 @@ skipped/unavailable reviewer as a completed review. Useful old review safeguards
 should be recovered provider-neutrally, not by reviving a hard Cursor/Codex quota
 dependency. This step explains the recommendation; no gate code changed.
 
+### 6a. Detailed review comparison requested
+
+Operator requested the before/after safeguard comparison. Source confirms
+review-pr/review-launch retain exact-head detached worktrees, head validation,
+structured verdicts, runtime limits and cleanup. Do not describe these as wholly
+lost. What was lost includes automated consumption of local review receipts,
+Codex finding/thread/request-state gates, stuck-review/re-request machinery,
+per-head duplicate locks and admission control. Recover useful behavior through
+available independent reviewers rather than reintroducing a required vendor.
+Concurrent same-head review-pr results currently share a filename (last writer
+wins), so review identity and immutable attempt evidence belong in the repair.
+The review-pr docstring still teaches body-marker pasting, superseded for owner
+PRs by the later owner-trust policy; document correction is needed.
+
+No new manual-paste requirement, invented APPROVE, provider dependency, live
+review launch or merge-gate code change is authorized by this comparison alone;
+existing feature-recovery scope and prior trust decisions govern implementation.
+
 ## 7. Remaining walkthrough
 
 Offer review-detail comparison if wanted, then cover final deletion gates and
