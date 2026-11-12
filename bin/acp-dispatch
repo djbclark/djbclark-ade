@@ -920,7 +920,9 @@ def gate_policy(a: argparse.Namespace, service: str | None, approved: set[str]) 
     router = route_module()
     svc = router.BY_NAME.get(service) if service else None
     svc = svc or router.BY_NAME.get(router.ALIASES.get(a.agent, a.agent))
-    quota = router.load_snapshot()[0] if svc is not None and a.kind in svc.plenty_kinds else None
+    needs_quota = svc is not None and (svc.plenty_kinds or svc.pool or svc.pool_family
+                                      or svc.shares_pool or svc.measured_only)
+    quota = router.load_snapshot()[0] if needs_quota else None
     ok = svc.eligible(a.kind, quota) if svc is not None else a.kind in router.DEFAULT_PROFILE
     if not ok and not getattr(a, "go_advisory", False) and "route-override" not in approved:
         die(f"{service or a.agent} is not eligible for --kind {a.kind}; override with "

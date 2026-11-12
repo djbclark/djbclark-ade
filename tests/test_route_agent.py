@@ -168,15 +168,15 @@ class TestWasteBurning(RestorableTransportPolicyCase):
         self.assertNotEqual(r.route("code", quota=q).service.name, "codex")
 
 class TestDegradation(RestorableTransportPolicyCase):
-    def test_works_with_no_quota_at_all(self):
-        """A stale or missing cache must degrade to capability-only routing, except the `github` and `realtime-web`
-        kinds, which no pool serves since copilot (2026-11-06) and the grok CLI (2026-11-07) retired."""
+    def test_missing_quota_never_authorizes_a_family_scoped_route(self):
+        """Unnamed legacy pools may degrade; named family pools require readings."""
         for kind in r.KINDS:
             c = r.route(kind, quota={})
-            if kind in ("github", "realtime-web"):
-                self.assertIsNone(c, f"{kind} has no serving pool")
-            else:
-                self.assertIsNotNone(c, f"{kind} should still route without quota")
+            if kind in ("github", "realtime-web", "judgment"):
+                self.assertIsNone(c, kind)
+            elif c is not None:
+                self.assertFalse(c.service.pool or c.service.pool_family or c.service.shares_pool)
+                self.assertFalse(c.service.measured_only)
 
     def test_unknown_kind_rejected(self):
         with self.assertRaises(ValueError):
@@ -514,6 +514,13 @@ class TestQuotaFamilyIsolation(unittest.TestCase):
                 self.assertEqual(r.main(["plan", "--kinds", "research"]), 0)
             self.assertIn("canary pool zai: max=1", out.getvalue())
 
+    def test_dispatch_model_mapping_selects_explicit_policy_family(self):
+        self.assertEqual(r.map_agent_to_provider("claude", "sonnet"), ("claude", "default"))
+        self.assertEqual(r.map_agent_to_provider("claude", "fable"), ("claude", "default"))
+        self.assertEqual(r.map_agent_to_provider("cursor", "composer-2.5"), ("cursor", "third_party"))
+        self.assertEqual(r.map_agent_to_provider("pi", "cursor/composer-2.5"), ("cursor", "third_party"))
+        self.assertEqual(r.dispatch_service_name("claude", "sonnet"), "claude")
+
     def test_cursor_grok_bot_cannot_fund_composer_or_auto(self):
         bot = self.row("cursor", "grok_bot", 82)
         for family in ("grok_bot", None, "unknown"):
@@ -638,7 +645,7 @@ class TestPlanWave(unittest.TestCase):
         with mock.patch.object(r, "load_snapshot", return_value=(self.Q, 60.0)), \
              contextlib.redirect_stdout(buf):
             self.assertEqual(r.main(["plan", "--kinds", "code,bulk"]), 0)
-        lines = buf.getvalue().strip().splitlines()
+        lines = [line for line in buf.getvalue().strip().splitlines() if not line.startswith("canary pool ")]
         self.assertEqual(len(lines), 2)
         self.assertTrue(lines[0].startswith("1. code"))
 
@@ -1447,7 +1454,7 @@ class TestQualityBand(unittest.TestCase):
 
     @mock.patch.dict(os.environ, {"ROUTE_AGENT_OMP_READY": "0"})   # omp-ready: TestOmpReadyRoster
     def test_the_2026_10_18_case_queues_code_instead_of_routing_far_down(self):
-        best = r.quality_best("code", list(r.discover(self.CASE)))
+        best = r.quality_best("code", list(r.discover(self.CASE)), quota=self.CASE)
         self.assertIsNotNone(best)
         c = r.route("code", quota=self.CASE)
         self.assertIsNone(c, c and f"{c.service.name} r{c.service.rank_for('code')}")
@@ -1461,10 +1468,10 @@ class TestQualityBand(unittest.TestCase):
         moment an in-band pool has room again, it gets the slice."""
         gap = r.QUALITY_MAX_RANK_GAP["code"]
         services = list(r.discover(self.CASE))
-        best = r.quality_best("code", services)
+        best = r.quality_best("code", services, quota=self.CASE)
         assert best is not None
         far = [s.name for s in services
-               if s.eligible("code") and s.rank_for("code") - best.rank_for("code") > gap]
+               if s.eligible("code", any_headroom=True) and s.rank_for("code") - best.rank_for("code") > gap]
         self.assertTrue(far, "fixture should include pools outside the band")
         q = dict(self.CASE, cursor={"remaining": 50.0, "age_s": 0})
         c = r.route("code", quota=q)
@@ -1485,9 +1492,9 @@ class TestQualityBand(unittest.TestCase):
     def test_an_excluded_best_pool_moves_the_band(self):
         """A failed pool passed in `exclude` no longer anchors the band (the reroute path)."""
         services = list(r.discover(self.CASE))
-        best = r.quality_best("code", services)
+        best = r.quality_best("code", services, quota=self.CASE)
         assert best is not None
-        nxt = r.quality_best("code", services, {best.name})
+        nxt = r.quality_best("code", services, {best.name}, quota=self.CASE)
         self.assertIsNotNone(nxt)
         self.assertNotEqual(nxt.name, best.name)
 
@@ -2677,7 +2684,7 @@ class TestQuotaFromPaseoUsage(unittest.TestCase):
             rep["windows"] = list(windows)
             rep["balances"] = list(balances)
         return {"id": f"{source}:default", "sourceId": source,
-                "pool_family": "default" if source == "claude" else None, "sourceLabel": source, "icon": "<svg>x</svg>", "account": "a",
+                "pool_family": {"claude": "default", "cursor": "third_party"}.get(source), "sourceLabel": source, "icon": "<svg>x</svg>", "account": "a",
                 "fetchedAt": (self.NOW - timedelta(minutes=age_min)).strftime("%Y-%m-%dT%H:%M:%SZ"), "report": rep,
                 "loginErrors": [{"message": "x"}]}
 
@@ -2776,7 +2783,7 @@ class TestQuotaFromPaseoUsage(unittest.TestCase):
         self.assertIn("report unavailable", quota["codex"]["paseo_unknown"])
         self.assertIsNone(quota["claude"]["remaining"])
         self.assertIn("report error", quota["claude"]["unknown"])
-        self.assertIsNone(r.route("judgment", quota={"claude": quota["claude"]}).remaining)   # unmeasured, not 100%
+        self.assertIsNone(r.route("judgment", quota={"claude": quota["claude"]}))   # unmeasured, not 100%
 
     def test_paseo_alone_fills_the_snapshot_when_aiuse_is_absent(self):
         quota, age, info = self.load(None, [self.row("claude", windows=[self.win("Weekly", left=77.0)])])

@@ -2620,7 +2620,7 @@ ACP_DISPATCH_STATE = Path(os.environ.get("ACP_DISPATCH_STATE")
 # Copied from bin/acp-dispatch (do not import: slice B edits that file). Agent
 # name → (aiuse provider, pool_family). cursor/opencode are model-dependent.
 _AGENT_PROVIDER_MAP: dict[str, tuple[str, str | None]] = {
-    "claude": ("claude", None),
+    "claude": ("claude", "default"),
     "codex": ("codex", None),
     "cursor": ("cursor", None),
     "cursor-cloud": ("cursor-cloud", None),
@@ -2638,7 +2638,9 @@ def map_agent_to_provider(agent: str, model: str | None) -> tuple[str, str | Non
     if agent == "pi":
         # Pi is a transport, not a billing pool. Never map every Pi model to OpenAI credits.
         provider = (model or "").split("/", 1)[0]
-        if provider in ("zai", "cursor", "deepseek", "google", "openrouter"):
+        if provider == "cursor":
+            return "cursor", "third_party"
+        if provider in ("zai", "deepseek", "google", "openrouter"):
             return provider, None
         if provider == "openai":
             return "pi", "codex_api"
@@ -2650,7 +2652,7 @@ def map_agent_to_provider(agent: str, model: str | None) -> tuple[str, str | Non
     if agent == "cursor":
         if not model or model in ("default", "auto"):
             return "cursor", "auto"
-        return "cursor", None
+        return "cursor", "third_party"
     if agent == "antigravity":
         # the Gemini 4 Argon window is its own aiuse pool family; the provider's other pools are not routed
         return ("antigravity", "gemini_argon") if (model or "").lower().startswith("gemini-4-argon") else None
