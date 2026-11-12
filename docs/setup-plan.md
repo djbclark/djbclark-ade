@@ -222,8 +222,8 @@ Hermes current like every other component.
    the answer with `ade-install hermes-choice` in the install state dir. The
    record does not edit tracked config and does not flip catalog `chosen`.
    `skip` makes `just doctor hermes` report `unchosen` with no probe. `self`
-   and `ai` run the catalog apply, then `just hermes-setup --self` or `just
-   hermes-setup`. When the catalog probe passes, scoped `doctor hermes` adds
+   and `ai` run the catalog apply; after a successful live `--yes` apply they
+   run `just hermes-setup --self` or `just hermes-setup`. When the catalog probe passes, scoped `doctor hermes` adds
    observe-only checklist probes (config file, skills root, claude-collaboration
    skill, `claude mcp list`, optional tell_chief_of_staff pointer). Plain
    `just doctor` does not add them. Firecrawl stays its own component.

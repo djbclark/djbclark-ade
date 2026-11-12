@@ -78,9 +78,8 @@ probes (never repairs, never reads a secret):
 | tell_chief_of_staff | directory present is `ok`; absent is `ok` too (optional; never configured here) |
 | search backend (firecrawl) | not probed: firecrawl is its own component |
 
-A missing required item fails this scoped doctor. Plain `just doctor` keeps the
-catalog probe only and does not add the checklist, so installation-wide output
-stays as it was. Scoped output still does not claim whole-installation health.
+A missing required item fails this scoped doctor. Plain `just doctor` applies
+the recorded component choice but does not add the checklist. Scoped output still does not claim whole-installation health.
 
 ## Related
 

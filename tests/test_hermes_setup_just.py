@@ -63,6 +63,7 @@ def test_install_recipe_offers_three_hermes_paths():
     assert "-t 0" in body
 
 
+@pytest.mark.skipif(JUST is None, reason="just not on PATH")
 @pytest.mark.parametrize("choice,live", [("skip", True), ("self", True), ("ai", True), ("ai", False)])
 def test_install_executes_choice_with_literal_args(tmp_path, choice, live):
     import json
