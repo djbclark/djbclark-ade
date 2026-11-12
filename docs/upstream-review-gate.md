@@ -41,7 +41,10 @@ simple commands; any gated write in any of them denies. `$( )`, backticks, `bash
 a shell are analysed again; wrappers (`env`, `sudo`, `timeout`, `xargs`, `nohup`, `rtk`, `bg`, ...) are looked
 through; heredoc bodies fed to `cat`, `git`, `gh` are data. Quoting shlex cannot parse (or a command over 100 KB, where shlex is quadratic) falls back to splitting on the
 shell operators with redirections dropped, so a stray apostrophe does not let a gated write through. Comments are
-removed; `export GH_REPO=...`, `GIT_DIR=` and `--git-dir` are carried to the later segments. The hook fails closed only for a gated
+removed; shell keywords (`do`, `then`, `if`, ...) are skipped; assignments (`R=cfengine/core`, `export GH_REPO=...`,
+`GIT_DIR=`) are expanded into later `$R` words and carried into nested `bash -c`/heredoc commands; `( ... )` and
+`$( ... )` restore the directory and environment on exit; `$(which gh) pr ...` is read as `gh pr ...`; a 10 s
+alarm ends a pathological input with exit 0. The hook fails closed only for a gated
 target: unrelated commands, malformed input and any internal error exit 0 with no output.
 
 **D. Contract.** Deny is stdout JSON `permissionDecision: "deny"` plus a reason that names the target, not the payload

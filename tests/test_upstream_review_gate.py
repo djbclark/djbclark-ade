@@ -519,3 +519,107 @@ def test_false_denies_found_by_the_adversary(plain):
 
 def test_off_switch_zero_does_not_disable(plain):
     assert denied("gh pr create -R cfengine/core -t x", plain, env=dict(ENV, UPSTREAM_REVIEW_GATE_OFF="0"))
+
+
+# ---- adversary round 2 (2026-11-12, head 2ad69587) --------------------------------------------------------------
+
+
+@pytest.mark.parametrize("command", [
+    "for n in 1 2 3; do gh issue close $n -R cfengine/core; done",
+    "if true; then gh pr merge 5 -R cfengine/core --squash; fi",
+    "while read n; do gh pr close $n -R cfengine/core; done < prs.txt",
+    "if true; then echo a; else gh pr close 5 -R cfengine/core; fi",
+    "for n in 1; do\n  gh pr close $n -R cfengine/core\ndone",
+    "gh pr list | while read n _; do gh pr close \"$n\" -R cfengine/core; done",
+])
+def test_reserved_words_do_not_hide_the_command(plain, command):
+    assert denied(command, plain)
+
+
+def test_one_line_loops_in_a_libntech_worktree(libntech):
+    assert denied("if git push origin main; then echo ok; fi", libntech)
+    assert denied("until git push; do sleep 1; done", libntech)
+    assert denied("if [ -n x ]; then echo a; else git push; fi", libntech)
+    assert not denied("for r in fork; do git push $r main; done", libntech)
+
+
+def test_pr_body_substitution_with_a_lone_quote_then_repo(plain):
+    cmd = ("gh pr create --title \"T\" --body \"$(cat <<'EOF'\n## Summary\nHe said \"hi.\nEOF\n)\" "
+           "--repo cfengine/core")
+    assert denied(cmd, plain)
+    assert not denied(cmd.replace("cfengine/core", "djbclark/core"), plain)
+
+
+def test_pr_body_substitution_in_a_gated_fork_with_our_repo(core_fork):
+    cmd = ("gh pr create --title \"T\" --body \"$(cat <<'EOF'\nbody \"x\nEOF\n)\" --repo djbclark/core")
+    assert not denied(cmd, core_fork)
+
+
+@pytest.mark.parametrize("command", [
+    "R=cfengine/core; gh api -X PATCH repos/$R/pulls/5 -f body=x",
+    "R=cfengine/core\nfor n in 1 2; do gh api -X POST \"repos/${R}/issues/$n/comments\" -f body=x; done",
+    "OWNER=cfengine; gh api -X POST repos/$OWNER/core/issues -f title=x",
+    "OWNER=cfengine; gh pr create -R $OWNER/core --fill",
+])
+def test_variables_in_the_owner_position(plain, command):
+    assert denied(command, plain)
+    assert not denied(command.replace("cfengine", "djbclark"), plain)
+
+
+def test_variable_remote_name(core_fork):
+    assert denied("R=upstream; git push $R main", core_fork)
+    assert not denied("R=origin; git push $R main", core_fork)
+
+
+def test_state_carries_into_nested_commands(libntech, plain, tmp_path):
+    assert denied("cd %s\nbash <<'EOF'\ngit push\nEOF" % libntech, tmp_path)
+    assert denied("export GH_REPO=cfengine/core\nbash -c 'gh issue create -t x -b y'", plain)
+    assert denied("cd %s && bash -c 'git push'" % libntech, tmp_path)
+
+
+def test_subshell_cd_does_not_leak(libntech, tmp_path):
+    other = make_repo(tmp_path / "other", origin="https://github.com/djbclark/o.git")
+    assert denied("(cd %s && ls); git push" % other, libntech)
+    assert not denied("(cd %s && ls); git push" % libntech, other)
+
+
+@pytest.mark.parametrize("command", [
+    "$(which gh) pr merge 5 -R cfengine/core",
+    "`which gh` pr merge 5 -R cfengine/core",
+    "GH=gh; $GH pr merge 5 -R cfengine/core",
+])
+def test_command_found_by_substitution_or_variable(plain, command):
+    assert denied(command, plain)
+
+
+def test_graphql_stdin_from_a_redirect(plain, ours, tmp_path):
+    (tmp_path / "m.graphql").write_text('mutation { x(owner: "cfengine") { id } }')
+    assert denied("gh api graphql -F query=@- < m.graphql", tmp_path)
+    assert denied("gh api graphql --input - < m.graphql", tmp_path)
+    (tmp_path / "q.graphql").write_text('query { viewer { login } }')
+    assert not denied("gh api graphql -F query=@- < q.graphql", tmp_path)
+
+
+def test_label_clone_and_agent_task(plain):
+    assert denied("gh label clone djbclark/core -R cfengine/core", plain)
+    assert denied("gh agent-task create -R cfengine/core 'x'", plain)
+
+
+def test_inherited_gh_repo_does_not_override_explicit_repo(plain):
+    env = dict(ENV, GH_REPO="cfengine/core")
+    assert not denied("gh issue create -R djbclark/core -t x", plain, env=env)
+    assert denied("gh issue create -t x", plain, env=env)
+
+
+def test_clustered_dry_run(libntech):
+    assert not denied("git push -vn", libntech)
+    assert not denied("git push -nv origin main", libntech)
+    assert denied("git push -v origin main", libntech)
+
+
+def test_pathological_inputs_finish(plain):
+    import time
+    for cmd in ("cat " + "<<A " * 6000, "gh api graphql -f query=mutation{x};" * 1500, "gh pr create -R $X;" * 8000):
+        t0 = time.time()
+        run(cmd, plain)
+        assert time.time() - t0 < 25

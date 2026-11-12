@@ -57,18 +57,21 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import re
 import shlex
 import subprocess
 import sys
+from functools import lru_cache
 
 GATED_OWNERS = frozenset({"cfengine", "northerntechhq"})
 GATED_TEXT = re.compile(r"(?i)(?<![\w.-])(cfengine|northerntechhq)(?![\w-]|\.\w)")
-GATED_SLASH = re.compile(r"(?i)(?<![\w.-])(cfengine|northerntechhq)/")
 MAX_DEPTH = 5
 GIT_TIMEOUT_S = 5
 MAX_FILE = 262144
 MAX_SHLEX = 100000
+MAX_DELIMS = 20
+BUDGET_S = 10
 
 SHELLS = frozenset({"bash", "sh", "zsh", "dash", "ksh", "fish"})
 WRAPPERS = frozenset({
@@ -86,7 +89,7 @@ PUNCT = ";&|()<>`\n"
 
 # gh groups that act on a repository, and the verbs in them that only read. Any other verb is a write.
 GH_GROUPS = frozenset({"pr", "issue", "release", "repo", "label", "workflow", "run", "secret", "variable",
-                       "project", "ruleset", "cache", "discussion"})
+                       "project", "ruleset", "cache", "discussion", "agent-task"})
 GH_READ_VERBS = frozenset({
     "view", "list", "ls", "status", "diff", "checks", "checkout", "co", "clone", "fork", "browse", "watch",
     "download", "get", "field-list", "item-list", "search", "verify", "verify-asset", "check", "help",
@@ -108,6 +111,16 @@ GH_VALUE_LONG = frozenset({
 GH_VALUE_SHORT = frozenset("RbtBHFfXq")   # the rest are booleans in some verbs (`pr merge -s URL`)
 
 WRITE_WORDS = re.compile(r"(?i)(?<![a-z])(create|update|add|comment|transition|delete|edit|assign|remove|link|move)(?![a-z])")
+
+
+@lru_cache(maxsize=32)
+def mentions_gated(text: str) -> bool:
+    return bool(GATED_TEXT.search(text))
+
+
+@lru_cache(maxsize=32)
+def has_mutation(text: str) -> bool:
+    return bool(re.search(r"(?i)\bmutation\b", text))
 
 
 class Finding(Exception):
@@ -157,47 +170,107 @@ def is_redirect(tok: str) -> bool:
     return bool(tok) and all(c in "<>&" for c in tok) and ("<" in tok or ">" in tok)
 
 
+def lenient_segments(text: str):
+    """Split on the shell operators and whitespace, redirections dropped; used when shlex cannot parse."""
+    out = []
+    for piece in re.split(r"[;&|()`\n]+", text.replace("\\\n", " ")):
+        words = []
+        skip_next = False
+        for w in piece.split():
+            if skip_next:
+                skip_next = False
+                continue
+            m = re.match(r"^\d?(&>|[<>]+&?)(.*)$", w)
+            if m:
+                skip_next = not m.group(2)
+                continue
+            w = w.strip("'\"")
+            if w:
+                words.append(w)
+        if words:
+            out.append(words)
+    return out
+
+
 def segments(text: str):
-    """The command text as a list of word lists, one per simple command."""
+    """The command text as a list of word lists (one per simple command) with "(" / ")" markers for subshells,
+    `$( )` and backticks. `$(which gh) pr ...` becomes ["gh", "pr", ...]. Files after `<` go to REDIR_IN."""
     toks = tokenize(text)
+    if toks is None:
+        return lenient_segments(text)
     out = []
     cur = []
-    if toks is None:                                    # unbalanced quote: split on operators, drop quote marks
-        for piece in re.split(r"[;&|()`\n]+", text.replace("\\\n", " ")):
-            words = []
-            skip_next = False
-            for w in piece.split():
-                if skip_next:
-                    skip_next = False
-                    continue
-                m = re.match(r"^\d?(&>|[<>]+&?)(.*)$", w)
-                if m:
-                    skip_next = not m.group(2)
-                    continue
-                w = w.strip("'\"")
-                if w:
-                    words.append(w)
-            if words:
-                out.append(words)
-        return out
-    skip = False
+    skip = None
+    pending = None
+    in_bt = False
+    sub_stack = []
+
+    def flush():
+        nonlocal cur
+        if cur:
+            out.append(cur)
+        cur = []
+
     for tok in toks:
-        if skip:                                        # the file or fd after a redirection
-            skip = False
+        if skip is not None:                            # the file or fd after a redirection
+            if skip == "<":
+                REDIR_IN.append(tok)
+            skip = None
             continue
         if is_boundary(tok) and set(tok) <= set(PUNCT):
-            if cur:
-                out.append(cur)
-            cur = []
+            for c in tok:
+                if c in ";|&\n":
+                    flush()
+                    pending = None
+                elif c == "(":
+                    if cur and cur[-1].endswith("$"):
+                        cur[-1] = cur[-1][:-1]
+                        if not cur[-1]:
+                            cur.pop()
+                        sub_stack.append(True)
+                    else:
+                        sub_stack.append(False)
+                    flush()
+                    out.append("(")
+                    pending = None
+                elif c == ")":
+                    flush()
+                    out.append(")")
+                    was_sub = sub_stack.pop() if sub_stack else False
+                    pending = None
+                    inner = _last_words(out)
+                    if was_sub and inner and base(inner[-1]) in ("gh", "git"):
+                        pending = base(inner[-1])
+                elif c == "`":
+                    flush()
+                    if in_bt:
+                        out.append(")")
+                        inner = _last_words(out)
+                        pending = base(inner[-1]) if inner and base(inner[-1]) in ("gh", "git") else None
+                    else:
+                        out.append("(")
+                        pending = None
+                    in_bt = not in_bt
         elif is_redirect(tok):
-            skip = True
+            skip = "<" if tok == "<" else ">"
             if len(cur) > 0 and len(cur[-1]) == 1 and cur[-1].isdigit():
                 cur.pop()                                # the fd of `2>&1` or `2>/dev/null`
         else:
+            if pending and not cur:
+                cur = [pending]
+            pending = None
             cur.append(tok)
-    if cur:
-        out.append(cur)
+    flush()
     return out
+
+
+def _last_words(out):
+    for item in reversed(out):
+        if isinstance(item, list):
+            return item
+        if item == "(":
+            return None
+    return None
 
 
 def split_heredocs(text: str):
@@ -206,6 +279,7 @@ def split_heredocs(text: str):
     out = []
     kept = []
     all_bodies = []
+    stack = []
     in_s = in_d = False
     i = 0
     while i < len(lines):
@@ -220,6 +294,18 @@ def split_heredocs(text: str):
             if in_s:
                 if c == "'":
                     in_s = False
+            elif c == "$" and line.startswith("$(", j) and not line.startswith("$((", j):
+                stack.append((in_d, 1))                  # `"$(cat <<EOF ... )"`: unquoted inside the substitution
+                in_d = False
+                j += 1
+            elif stack and not in_d and c == "(":
+                stack[-1] = (stack[-1][0], stack[-1][1] + 1)
+            elif stack and not in_d and c == ")":
+                depth_in = stack[-1][1] - 1
+                if depth_in == 0:
+                    in_d = stack.pop()[0]
+                else:
+                    stack[-1] = (stack[-1][0], depth_in)
             elif in_d:
                 if c == "\\":
                     j += 1
@@ -237,9 +323,11 @@ def split_heredocs(text: str):
             elif line.startswith("<<", j) and not line.startswith("<<<", j) and (j == 0 or line[j - 1] != "<"):
                 m = HEREDOC_DELIM.match(line, j + 2)
                 if m:
-                    delims.append((m.group(2), line.startswith("<<-", j)))
+                    if len(delims) < MAX_DELIMS:
+                        delims.append((m.group(2), line.startswith("<<-", j)))
                     j = m.end() - 1
             j += 1
+        shellish = bool(delims) and bool(SHELLISH.search(line))
         for delim, dash in delims:
             body = []
             while i < len(lines):
@@ -249,7 +337,7 @@ def split_heredocs(text: str):
                     break
                 body.append(cand)
             all_bodies.append("\n".join(body))
-            if SHELLISH.search(line):
+            if shellish:
                 kept.append("\n".join(body))
     return "\n".join(out), kept, all_bodies
 
@@ -272,6 +360,7 @@ def resolve_dir(path: str, cur: str) -> str:
 # ---- git ------------------------------------------------------------------------------------------------------
 
 _GIT_CACHE = {}
+REDIR_IN = []      # files read by `< file` redirections of the command
 DATA = []          # every heredoc body of the command: stdin for `gh api graphql -F query=@-`
 
 
@@ -323,7 +412,7 @@ def gated_remotes(dirpath: str):
     return found
 
 
-def check_git(args, cur: str, env=None) -> None:
+def check_git(args, cur: str, env=None, fulltext: str = "") -> None:
     i = 0
     dirpath = cur
     gitdir = resolve_dir(env["GIT_DIR"], cur) if env and env.get("GIT_DIR") else None
@@ -353,7 +442,7 @@ def check_git(args, cur: str, env=None) -> None:
         if a == "--":
             positionals.extend(rest[j + 1:])
             break
-        if a in ("-n", "--dry-run"):
+        if a == "--dry-run" or (re.match(r"^-[fnquv46]+$", a) and "n" in a):
             return
         if a.startswith("--repo="):
             remote = a.split("=", 1)[1]
@@ -381,7 +470,7 @@ def check_git(args, cur: str, env=None) -> None:
                 break
         remote = remote or "origin"
     if "$" in remote or "`" in remote:
-        if GATED_SLASH.search(" ".join(args)):
+        if mentions_gated(fulltext) or mentions_gated(" ".join(args)):
             raise Finding(reason_for("`git push` (remote not resolvable: %s)" % remote, "cfengine/NorthernTechHQ named in the command"))
         return
     rc, out = git(dirpath, "remote", "get-url", "--push", "--all", remote, gitdir=gitdir)
@@ -450,7 +539,9 @@ def api_target(endpoint: str):
     ep = re.sub(r"^https?://[^/]+/", "", endpoint.strip()).lstrip("/")
     m = re.match(r"repos/([^/]+)/([^/?]*)", ep)
     if m:
-        if m.group(1).startswith(("{", ":", "$")):
+        if m.group(1).startswith("$"):
+            return ("unknown", ep, "")
+        if m.group(1).startswith(("{", ":")):
             return ("cwd", "", "")
         return ("repo", m.group(1), m.group(2))
     m = re.match(r"(?:orgs|users)/([^/?]+)", ep)
@@ -493,7 +584,12 @@ def check_gh(args, env, cur: str, fulltext: str) -> None:
         has_field = any(f in flagmap for f in ("-f", "-F", "--field", "--raw-field", "--input"))
         is_graphql = re.sub(r"^https?://[^/]+/", "", ep).strip("/") == "graphql"
         if is_graphql:
-            text = fulltext + "\n" + "\n".join(DATA)
+            text = ""
+            stdin_used = any(v == "-" for v in flagmap.get("--input", [])) or any(
+                (v or "").endswith("=@-") for f in ("-f", "-F", "--field", "--raw-field") for v in flagmap.get(f, []))
+            if stdin_used:
+                for rf in REDIR_IN:
+                    text += "\n" + read_text(rf, cur)
             for f in ("-f", "-F", "--field", "--raw-field"):
                 for v in flagmap.get(f, []):
                     if v and "=@" in v:
@@ -501,9 +597,11 @@ def check_gh(args, env, cur: str, fulltext: str) -> None:
             for v in flagmap.get("--input", []):
                 if v and v != "-":
                     text += "\n" + read_text(v, cur)
-            write = bool(re.search(r"(?i)\bmutation\b", text)) and method not in ("GET", "HEAD")
+            data_text = "\n".join(DATA)
+            write = (has_mutation(text) or has_mutation(fulltext) or has_mutation(data_text)) \
+                and method not in ("GET", "HEAD")
             if write:
-                if GATED_TEXT.search(text):
+                if mentions_gated(text) or mentions_gated(fulltext) or mentions_gated(data_text):
                     raise Finding(reason_for("`gh api graphql` mutation", "cfengine/NorthernTechHQ named in the request"))
                 if gated_remotes(cur):
                     g = gated_remotes(cur)[0]
@@ -519,7 +617,9 @@ def check_gh(args, env, cur: str, fulltext: str) -> None:
         if group not in GH_GROUPS or len(pos) < 2:
             return
         verb = pos[1]
-        if verb in GH_NESTED:
+        if (group, verb) == ("label", "clone"):
+            pass                                        # copies labels INTO the -R repo: a write
+        elif verb in GH_NESTED:
             if len(pos) > 2 and pos[2] in GH_READ_VERBS:
                 return
         elif verb in GH_READ_VERBS:
@@ -538,7 +638,7 @@ def check_gh(args, env, cur: str, fulltext: str) -> None:
     for v in flagmap.get("--owner", []):
         if v:
             targets.append(("owner", v, ""))
-    if env.get("GH_REPO"):
+    if env.get("GH_REPO") and not flagmap.get("-R") and not flagmap.get("--repo"):
         s = slug_of(env["GH_REPO"])
         if s:
             targets.append(("repo", s[0], s[1]))
@@ -559,7 +659,7 @@ def check_gh(args, env, cur: str, fulltext: str) -> None:
             if "$" not in owner:
                 explicit = True
         if kind == "unknown" or "$" in owner:
-            if GATED_SLASH.search(fulltext):
+            if mentions_gated(fulltext):
                 raise Finding(reason_for("`%s` (target is a shell variable)" % label,
                                          "cfengine/NorthernTechHQ named elsewhere in the command"))
     if explicit and not any(t[0] == "cwd" for t in targets):
@@ -671,15 +771,41 @@ def command_of(words, env):
     return None
 
 
-def check_text(text: str, cwd: str, depth: int) -> None:
+RESERVED = frozenset({"if", "then", "else", "elif", "do", "while", "until", "!", "{", "}", "time", "coproc",
+                      "function", "exec"})
+
+
+def expand(word: str, senv) -> str:
+    """$NAME and ${NAME} replaced by a value assigned earlier in the command (unknown names stay)."""
+    if "$" not in word:
+        return word
+    return re.sub(r"\$\{(\w+)\}|\$(\w+)", lambda m: senv.get(m.group(1) or m.group(2), m.group(0)), word)
+
+
+def check_text(text: str, cwd: str, depth: int, senv=None):
+    """Analyse one command text; returns the (cwd, environment) its end leaves for what follows."""
     segs = segments(text)
     cur = cwd
     seglist = []
-    senv = {k: os.environ[k] for k in ("GH_REPO", "GIT_DIR") if os.environ.get(k)}
+    senv = dict(senv or {})
+    for k in ("GH_REPO", "GIT_DIR"):
+        if os.environ.get(k) and k not in senv:
+            senv[k] = os.environ[k]
+    stack = []
     for words in segs:
+        if words == "(":
+            stack.append((cur, dict(senv)))
+            continue
+        if words == ")":
+            if stack:
+                cur, senv = stack.pop()
+            continue
         for w in words:
             if ("$(" in w or "`" in w) and depth < MAX_DEPTH:
-                check_command(w, cur, depth + 1)
+                check_command(w, cur, depth + 1, senv)
+        words = [expand(w, senv) for w in words]
+        while words and words[0] in RESERVED:
+            words = words[1:]
         assigns = words[1:] if words and words[0] in ("export", "declare", "typeset", "local", "readonly") else words
         if assigns and all(ASSIGN.match(w) for w in assigns):
             for w in assigns:                           # `export GH_REPO=cfengine/core; gh issue create ...`
@@ -697,30 +823,32 @@ def check_text(text: str, cwd: str, depth: int) -> None:
         elif name in SHELLS:
             for k, a in enumerate(args):
                 if re.match(r"^-[A-Za-z]*c$", a) and k + 1 < len(args) and depth < MAX_DEPTH:
-                    check_command(args[k + 1], cur, depth + 1)
+                    check_command(args[k + 1], cur, depth + 1, env)
                     break
         elif name == "eval":
             if depth < MAX_DEPTH:
-                check_command(" ".join(args), cur, depth + 1)
+                check_command(" ".join(args), cur, depth + 1, env)
         elif name == "gh":
             check_gh(args, env, cur, text)
         elif name == "git":
-            check_git(args, cur, env)
+            check_git(args, cur, env, text)
         elif name in HTTP_TOOLS:
             seglist.append((name, args))
     for words in segs:                                  # composio, `npx composio`, `uvx composio` alike
-        if any(re.search(r"(?i)composio", w) for w in words):
+        if isinstance(words, list) and any(re.search(r"(?i)composio", w) for w in words):
             check_composio(words)
     check_jira(seglist, text)
+    return cur, senv
 
 
-def check_command(cmd: str, cwd: str, depth: int = 0) -> None:
+def check_command(cmd: str, cwd: str, depth: int = 0, senv=None) -> None:
     if depth > MAX_DEPTH or not cmd:
         return
     body, kept, bodies = split_heredocs(cmd)
     DATA.extend(bodies)
-    for text in [body] + kept:
-        check_text(text, cwd, depth)
+    cur, env = check_text(body, cwd, depth, senv)
+    for text in kept:                                   # a heredoc fed to a shell runs after the cd before it
+        check_text(text, cur, depth, env)
 
 
 def check_mcp(tool_name: str, tool_input) -> None:
@@ -738,6 +866,10 @@ def main() -> None:
         sys.exit(0)
     if not isinstance(data, dict) or os.environ.get("UPSTREAM_REVIEW_GATE_OFF", "").lower() not in ("", "0", "false", "no"):
         sys.exit(0)
+    if hasattr(signal, "SIGALRM"):                     # a pathological input must not hang: fail open
+        signal.signal(signal.SIGALRM, lambda *_: (print("upstream_review_gate: timed out", file=sys.stderr),
+                                                  sys.exit(0)))
+        signal.alarm(BUDGET_S)
     tool = str(data.get("tool_name") or "")
     tin = data.get("tool_input") or {}
     cwd = data.get("cwd") if isinstance(data.get("cwd"), str) and data.get("cwd") else os.getcwd()
