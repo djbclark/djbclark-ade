@@ -1,4 +1,4 @@
-import { applyYoloToCreateRequest, assertResumeConfig, isExempt, providerId } from "./yolo-lib.mjs";
+import { applyYoloToCreateRequest, assertResumeConfig, assertResumeIdentity, isExempt, providerId } from "./yolo-lib.mjs";
 
 async function nativeEvidence(paseo, config) {
   if (!paseo?.providers?.snapshot) throw new Error("ade-yolo: native catalog API unavailable; update host");
@@ -29,7 +29,8 @@ export function registerAdeYoloHooks(server) {
     const agent = paseo.agents.ref(request.agentId);
     const refreshed = await agent.refresh();
     const snapshot = refreshed?.agent;
-    if (isExempt({ modeId: snapshot?.currentModeId }, request.metadata)) return;
+    assertResumeIdentity(snapshot, request);
+    if (isExempt({ modeId: snapshot.currentModeId }, request.metadata)) return;
     const config = { provider: request.provider, cwd: request.cwd,
       modeId: snapshot?.currentModeId, providerOptions: snapshot?.options };
     const { catalog, controls } = await nativeEvidence(paseo, config);

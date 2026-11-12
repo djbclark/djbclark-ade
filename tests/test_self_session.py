@@ -364,3 +364,41 @@ def test_duplicate_record_must_match_daemon_kind_and_actor(setup, kind, field, v
     with pytest.raises(ss.SessionError, match='different daemon or identity'):
         call()
     assert len(native.calls) == before
+
+
+def test_omitted_mode_never_returns_saved_restrictive_transaction(setup):
+    service, native, checkpoint = setup
+    service.planner = service.verifier = None
+    native.rows[PRED]['AvailableModes'].append({'id': 'plan', 'label': 'Plan'})
+    first = service.handoff(checkpoint, quiesced=True, requested_mode='plan')
+    assert first['mode_plan']['status'] == 'exempt'
+    calls = len(native.calls)
+    with pytest.raises(ss.SessionError, match='different requested mode'):
+        service.handoff(checkpoint, quiesced=True)
+    with pytest.raises(ss.SessionError, match='different requested mode'):
+        service.handoff(checkpoint, quiesced=True, requested_mode='read-only')
+    assert service.handoff(checkpoint, quiesced=True, requested_mode='plan') == first
+    assert len(native.calls) == calls and native.created == 1
+
+
+def test_omitted_mode_duplicate_of_ordinary_transaction_still_returns_saved(setup):
+    service, native, checkpoint = setup
+    first = service.handoff(checkpoint, quiesced=True)
+    assert service.handoff(checkpoint, quiesced=True) == first
+    assert native.created == 1
+
+
+@pytest.mark.parametrize('name', ['{pred}.json', 'handoff-{pred}.lock', 'handoff-{pred}.json.bak',
+                                  'compact-{pred}-c1.json'])
+def test_load_record_requires_handoff_json_filename(setup, name):
+    service, native, record, path = start(setup)
+    odd = service.state / name.format(pred=record['predecessor'])
+    odd.write_bytes(path.read_bytes())
+    calls = len(native.calls)
+    for action in (service.reconcile, service.finish):
+        with pytest.raises(ss.SessionError, match=r'handoff-<uuid>\.json'):
+            action(odd)
+    with pytest.raises(ss.SessionError, match=r'handoff-<uuid>\.json'):
+        service.accept(odd, service.state / 'ack.json')
+    assert len(native.calls) == calls
+    assert service.load_record(path) == 'handoff-' + record['predecessor']

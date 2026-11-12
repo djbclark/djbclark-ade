@@ -42,6 +42,20 @@ test("resume drift or unavailable identity refuses; check never mutates snapshot
   assert.throws(()=>assertResumeConfig({...snapshot,id:"b"},request,row()),/identity/);
   assert.equal(snapshot.currentModeId,"bypassPermissions");
 });
+test("mismatched or missing snapshot never self-exempts through a restrictive mode",async()=>{
+  const request={agentId:"a",provider:"claude",cwd:"/repo",reason:"resume",purpose:"interactive",metadata:{}};
+  for (const mode of ["plan","read-only","dontAsk"]) {
+    for (const bad of [{id:"b",provider:"claude"},{id:"a",provider:"codex"}])
+      assert.throws(()=>assertResumeConfig({...bad,currentModeId:mode},request,row()),/identity/);
+    assert.throws(()=>assertResumeConfig(null,request,row()),/identity/);
+    assertResumeConfig({id:"a",provider:"claude",currentModeId:mode},request,row());
+  }
+  const hooks={}; registerAdeYoloHooks({addHook(n,h){hooks[n]=h;return()=>{};}});
+  const paseoWith=agent=>({providers:{snapshot:async()=>({entries:[row()]})},agents:{ref:()=>({refresh:async()=>({agent})})}});
+  await assert.rejects(hooks["agent.open.before"]({request},{paseo:paseoWith({id:"b",provider:"claude",currentModeId:"plan"})}),/identity/);
+  await assert.rejects(hooks["agent.open.before"]({request},{paseo:paseoWith(undefined)}),/identity/);
+  await hooks["agent.open.before"]({request},{paseo:paseoWith({id:"a",provider:"claude",currentModeId:"plan"})});
+});
 test("native hooks use catalog SDK and awaited exceptions stop ordinary create",async()=>{
   const hooks={}; let reads=0;
   const off=registerAdeYoloHooks({addHook(name,handler){hooks[name]=handler;return()=>delete hooks[name];}});

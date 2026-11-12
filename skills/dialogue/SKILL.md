@@ -164,10 +164,12 @@ Each turn runs a model for many minutes: in an interactive session start `round`
    turn text. A `set` entry with an effort key (`reasoning_effort=high`) becomes `--thinking high`; other
    `set` entries are ignored. Always give a `model`. `claude` (`claude -p --model <m> --effort <e>`, prompt on
    stdin, `CLAUDECODE` unset) and `cmd` (any argv with `{prompt}`/`{cwd}`) are unchanged.
-3. Defaults: the cursor route was the unprobed second route until 2026-11-07, when it became the Grok
-   seat's first route — re-probe on Paseo before relying on it. The Grok seat is Cursor's grok model
-   (`cursor` / `grok-4.7` with `reasoning_effort=high`; the standalone xAI CLI retired 2026-11-07;
-   grok-bot is the other possible occupant); Fable `claude -p --model claude-fable-5-1 --effort high`;
+3. Defaults: the cursor route was the unprobed second route until 2026-11-07, when it was listed as the Grok
+   seat's first route — as of 2026-11-12 (#568), CLI `resolve_launch_mode` only allows catalog-mode
+   providers (`claude`, `codex`, `antigravity`, `copilot`) and raises `ModeUnavailable` for `cursor` on CLI
+   `dialogue.py` and `acp-dispatch` launches because Cursor requires the SDK `auto_accept` control hook
+   (the standalone xAI CLI retired 2026-11-07; grok-bot is the other possible occupant; override a `paseo`
+   seat to a catalog-mode provider or use a `cmd` route); Fable `claude -p --model claude-fable-5-1 --effort high`;
    **Astra `codex` / `gpt-6-astra` with `reasoning_effort=xhigh`**. Astra via copilot is reserved to the
    ai-heaven lead session (operator ruling 2026-10-10); never configure it elsewhere. The second route
    in the example (the `claude` provider for Fable) is unprobed: run `probe` before relying on them.
@@ -181,8 +183,9 @@ Each turn runs a model for many minutes: in an interactive session start `round`
    `DIALOGUE_<SEAT>_SET=k=v,k2=v2` replaces the first route's `set` list (empty clears);
    `DIALOGUE_<SEAT>_POOL=<label>` changes the `aiuse` pool the quota wait reads. Examples:
    `DIALOGUE_FABLE_MODEL=claude-opus-5-5` (Fable weekly cap spent, 2026-10-10);
-   `DIALOGUE_GROK_AGENT=cursor DIALOGUE_GROK_MODEL=grok-4.7 DIALOGUE_GROK_POOL=Cursor`
-   (OpenCode/omp seats are retired; Pi is the sole 3rd-party TUI — do not point overrides at them).
+   `DIALOGUE_GROK_AGENT=codex DIALOGUE_GROK_MODEL=gpt-6.1-sol DIALOGUE_GROK_POOL="Codex 5-hour"`
+   (CLI `resolve_launch_mode` only allows catalog-mode providers while Cursor requires the SDK `auto_accept`
+   control hook; OpenCode/omp seats are retired; Pi is the sole 3rd-party TUI — do not point CLI overrides at them).
    The turn prints the override, `costs.jsonl` records it (`route`, `override`), and the
    prompt header tells the model which model holds the seat. Run `probe` with the same
    variables set before relying on the new route.

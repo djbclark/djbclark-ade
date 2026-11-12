@@ -184,7 +184,8 @@ class Service:
                 if (not isinstance(existing, dict) or existing.get('home') != str(self.home)
                         or existing.get('kind') != 'handoff' or existing.get('predecessor') != predecessor):
                     raise SessionError('existing transaction belongs to a different daemon or identity')
-                if requested_mode and existing.get('mode_plan', {}).get('mode_id') != requested_mode:
+                saved = existing.get('mode_plan') if isinstance(existing.get('mode_plan'), dict) else {}
+                if (saved.get('mode_id') if saved.get('status') == 'exempt' else None) != requested_mode:
                     raise SessionError('existing transaction has a different requested mode; no create replayed')
                 return existing  # duplicate/ambiguous creation is never replayed
             if not quiesced:
@@ -246,6 +247,8 @@ class Service:
     def load_record(self, path):
         if path.parent.resolve() != self.state:
             raise SessionError('record must be in this state directory')
+        if not re.fullmatch(r'handoff-[0-9a-f-]{36}\.json', path.name):
+            raise SessionError('record must be a handoff-<uuid>.json transaction in this state directory')
         return 'handoff-' + ident(path.stem.removeprefix('handoff-'))
 
     def reconcile(self, path):
