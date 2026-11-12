@@ -97,7 +97,9 @@ def report(quota, *, profiles=None, config=CONFIG):
                     for x in (critical, conserve, max_age))
                 and 0 <= critical < conserve <= 100 and max_age >= 0):
             raise ValueError("invalid advisory thresholds")
-        info = quota.get(pool, {})
+        info = quota.get(pool)
+        if not isinstance(info, dict):
+            info = {}
         left, age = info.get("remaining"), info.get("age_s")
         known = (type(left) in (int, float) and math.isfinite(left) and 0 <= left <= 100
                  and type(age) in (int, float) and math.isfinite(age) and 0 <= age <= max_age)
@@ -136,6 +138,8 @@ def main(argv=None):
     parser.add_argument("--name")
     parser.add_argument("--until", help="ISO-8601 timestamp with timezone")
     args = parser.parse_args(argv)
+    if args.clear_profile and (args.name is not None or args.until is not None):
+        parser.error("--name/--until require --set-profile")
     if args.set_profile or args.clear_profile:
         if args.set_profile and (not args.name or not args.until):
             parser.error("--set-profile requires --name and --until")

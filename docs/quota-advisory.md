@@ -25,6 +25,8 @@ python3 bin/quota_nudge.py --set-profile openai \
 python3 bin/quota_nudge.py --clear-profile openai
 ```
 
+`--clear-profile` rejects `--name` and `--until` without changing profile state.
+
 Use the exact pool id from `show`. A profile is visible even if its pool has
 no current measurement; that pool stays unknown. Profiles are operator intent,
 not grants: they never alter ranks, billing, disabled pools, frontier gates,

@@ -97,3 +97,30 @@ def test_cli_reads_aiuse_and_paseo_and_show(tmp_path):
         run = subprocess.run(command, env=env, capture_output=True, text=True, timeout=20)
         assert run.returncode == 0, run.stderr
         assert "claude: critical (5% left)" in run.stdout
+
+
+def test_malformed_pool_values_are_unknown(monkeypatch, capsys):
+    monkeypatch.setattr(nudge, "load_profiles", lambda: {})
+    quota = {"null": None, "list": [], "number": 42, "string": "bad"}
+    rows = nudge.report(quota)
+    assert {row["pool"] for row in rows} == set(quota)
+    assert all(row["level"] == "unknown" and row["remaining_percent"] is None for row in rows)
+    nudge.print_reminder(quota)
+    output = capsys.readouterr().out
+    for pool in quota:
+        assert f"{pool}: unknown" in output
+
+
+def test_clear_rejects_profile_options_without_writing(tmp_path, monkeypatch, capsys):
+    import pytest
+    path = tmp_path / "profiles.json"
+    original = '{"openai":{"name":"keep","until":"2099-01-01T00:00:00Z"}}'
+    path.write_text(original)
+    monkeypatch.setenv("ADE_SPENDING_PROFILES", str(path))
+    for option in (["--name", "discard"], ["--until", "2099-01-01T00:00:00Z"],
+                   ["--name", ""], ["--until", ""]):
+        with pytest.raises(SystemExit) as exc:
+            nudge.main(["--clear-profile", "openai", *option])
+        assert exc.value.code == 2
+        assert "require --set-profile" in capsys.readouterr().err
+        assert path.read_text() == original
