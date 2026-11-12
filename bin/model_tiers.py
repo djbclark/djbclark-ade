@@ -466,8 +466,47 @@ def from_dict(
     return tiers
 
 
+def unified_source(root: Path | None = None) -> Path | None:
+    """config/ade.toml when it carries ``[model_tiers]`` and no MODEL_TIERS_TOML override (W16).
+
+    Default (pathless) readers accept the unified file before anything writes it; the
+    isolated legacy path (env override or explicit ``path``) never consults it.
+    """
+    if os.environ.get("MODEL_TIERS_TOML"):
+        return None
+    cand = (root or repo_root_from_here()) / "config" / "ade.toml"
+    raw, err = _read_toml(cand)
+    if err is not None or not isinstance(raw, dict) or not isinstance(raw.get("model_tiers"), dict):
+        return None
+    return cand
+
+
+def _refuse_unified_write(path: Path | None) -> None:
+    unified = unified_source() if path is None else None
+    if unified is not None:
+        raise TiersError(
+            f"{unified} carries [model_tiers]; the legacy tier writer cannot edit it yet "
+            "(readers accept ade.toml first, a writer follows). Pass --path/MODEL_TIERS_TOML for an isolated file."
+        )
+
+
 def load(path: Path | str | None = None, *, use_cache: bool = True) -> Tiers:
     """Load and validate tiers. Missing/bad file → DEFAULTS (logged once)."""
+    if path is None:
+        unified = unified_source()
+        if unified is not None:
+            key = f"unified:{unified}"
+            if use_cache and key in _CACHE:
+                return _CACHE[key]
+            raw, _ = _read_toml(unified)
+            try:
+                tiers = from_dict(raw["model_tiers"], path=unified, source="file")
+            except TiersError as e:
+                _log_once(f"falling back to DEFAULTS ({e})")
+                tiers = Tiers(data=copy.deepcopy(DEFAULTS), path=unified, source="code", error=str(e))
+            if use_cache:
+                _CACHE[key] = tiers
+            return tiers
     p = Path(path) if path is not None else default_path()
     key = str(p)
     if use_cache and key in _CACHE:
@@ -492,8 +531,11 @@ def load(path: Path | str | None = None, *, use_cache: bool = True) -> Tiers:
 
 def defaults_match_file(path: Path | None = None) -> list[str]:
     """Return drift messages when DEFAULTS and the shipped file disagree on roles/rank/models."""
-    p = path or default_path()
+    unified = unified_source() if path is None else None
+    p = unified or path or default_path()
     raw, err = _read_toml(p)
+    if unified is not None and raw is not None:
+        raw = raw.get("model_tiers")
     if err or raw is None:
         return [f"cannot read {p}: {err}"]
     try:
@@ -784,6 +826,7 @@ def promote(
     if not isinstance(reason, str) or len(reason.strip()) < 3:
         raise TiersError("--reason must be at least 3 characters")
     reason = reason.strip()
+    _refuse_unified_write(path)
     p = Path(path) if path is not None else default_path()
     tiers = load(p, use_cache=False)
     # Promote always edits the file's content when source=file; when falling back
@@ -877,6 +920,7 @@ def set_role(
     new_id = new_id.strip()
     if not isinstance(reason, str) or len(reason.strip()) < 3:
         raise TiersError("--reason must be at least 3 characters")
+    _refuse_unified_write(path)
     p = Path(path) if path is not None else default_path()
     tiers = load(p, use_cache=False)
     data = copy.deepcopy(tiers.data)

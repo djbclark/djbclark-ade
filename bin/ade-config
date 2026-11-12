@@ -5,7 +5,11 @@
   ade-config get PATH [--root DIR] [--home DIR] [--json]
   ade-config diff [--root DIR] [--home DIR] [--json]
   ade-config set PATH VALUE [--target local|repo] [--string] [--dry-run]
-                 [--root DIR] [--home DIR] [--json]
+                 [--create-key] [--root DIR] [--home DIR] [--json]
+  ade-config export-unified [--root DIR] [--write | --check]
+
+export-unified prints the config/ade.toml generated from the legacy files (proved equal to their
+effective projection); --write creates it (never overwrites); --check exits 1 on drift, 2 if absent.
 
 check/get/diff stay read-only: no writes, no secret resolution, no network/auth.
 set performs a comment-preserving atomic scalar write (default --target local).
@@ -29,6 +33,7 @@ if str(BIN) not in sys.path:
 
 import ade_config as ac  # noqa: E402
 import ade_config_edit as ace  # noqa: E402
+import ade_config_export as acx  # noqa: E402
 
 
 def _print_json(obj: object) -> None:
@@ -117,6 +122,7 @@ def cmd_set(args: argparse.Namespace) -> int:
             root=Path(args.root) if args.root else None,
             home=Path(args.home) if args.home else None,
             dry_run=args.dry_run,
+            create_key=args.create_key,
         )
     except ac.ConfigError as e:
         print(str(e), file=sys.stderr)
@@ -147,6 +153,23 @@ def cmd_set(args: argparse.Namespace) -> int:
         print(f"  adoption={result.adoption}")
         print(f"  note={result.adoption_note}")
     return 0
+
+
+def cmd_export_unified(args: argparse.Namespace) -> int:
+    root = Path(args.root) if args.root else ac.repo_root_from_here()
+    try:
+        if args.check:
+            code, message = acx.check_unified(root)
+            print(f"ade-config export-unified: {message}", file=sys.stderr if code else sys.stdout)
+            return code
+        if args.write:
+            print(f"ade-config export-unified: wrote {acx.write_unified(root)}")
+            return 0
+        sys.stdout.write(acx.generate_unified(root))
+        return 0
+    except ac.ConfigError as e:
+        print(str(e), file=sys.stderr)
+        return 1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -197,7 +220,7 @@ def main(argv: list[str] | None = None) -> int:
         help="atomically set one scalar (default --target local; preserves comments)",
     )
     p_set.add_argument("path", help="dotted path, e.g. lead.fable_lead")
-    p_set.add_argument("value", help="TOML scalar, or any text with --string")
+    p_set.add_argument("value", help="TOML scalar or string array (documented array fields), or any text with --string")
     p_set.add_argument(
         "--target",
         choices=("local", "repo"),
@@ -215,8 +238,23 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="show the planned write without touching the file",
     )
+    p_set.add_argument(
+        "--create-key",
+        action="store_true",
+        help="allow keys.NAME.FIELD to add a new registry identity (NAME is a secret reference name)",
+    )
     p_set.add_argument("--json", action="store_true")
     p_set.set_defaults(func=cmd_set)
+
+    p_export = sub.add_parser(
+        "export-unified",
+        parents=[shared],
+        help="generate config/ade.toml from the legacy files (stdout; --write creates it, --check reports drift)",
+    )
+    mode = p_export.add_mutually_exclusive_group()
+    mode.add_argument("--write", action="store_true", help="create config/ade.toml (refuses to overwrite)")
+    mode.add_argument("--check", action="store_true", help="exit 1 when ade.toml differs from a regenerated copy")
+    p_export.set_defaults(func=cmd_export_unified)
 
     args = parser.parse_args(argv)
     args.root = getattr(args, "root", None)

@@ -118,7 +118,7 @@ Skills (from each `skills/*/SKILL.md`):
 | [`ade-backup-stores`](bin/ade-backup-stores) | One consistent copy of every agent session store, plus the Hermes JSONL export. |
 | [`ade-browser-task`](bin/ade-browser-task) | Render / relay browser-only prompts (setup-plan S7). |
 | [`ade-claim-pilot`](bin/ade-claim-pilot) | Run (or dry-run) the S4 six-case claims enforcement pilot. |
-| [`ade-config`](bin/ade-config) | Check/get/diff/set for the versioned effective ADE config (schema_version=1). |
+| [`ade-config`](bin/ade-config) | Check/get/diff/set/export-unified for the versioned effective ADE config (schema_version=1). |
 | [`ade-git-guard`](bin/ade-git-guard) | A `git` front door for what git's own hooks cannot see in a workspace another agent owns. |
 | [`ade-github-setup`](bin/ade-github-setup) | Observe / plan / apply / verify for the merge-gate App (S8). |
 | [`ade-harden`](bin/ade-harden) | Observe-only GitHub hardening drift check (setup-plan S6). |
@@ -145,7 +145,8 @@ Skills (from each `skills/*/SKILL.md`):
 | [`ade_browser_task_state.py`](bin/ade_browser_task_state.py) | Opt-in S7 browser-task records; only authoritative GET readbacks prove completion. |
 | [`ade_claims.py`](bin/ade_claims.py) | The workspace claim library, the git-guard rules and the ref hooks (isolation slice W1, 2026-10-24; O2 redesign 2026-10-25). |
 | [`ade_config.py`](bin/ade_config.py) | Versioned read-only effective ADE config (schema_version=1). |
-| [`ade_config_edit.py`](bin/ade_config_edit.py) | Comment-preserving atomic scalar set for ADE config TOML. |
+| [`ade_config_edit.py`](bin/ade_config_edit.py) | Comment-preserving atomic scalar/string-array/choice set for ADE config TOML. |
+| [`ade_config_export.py`](bin/ade_config_export.py) | Generate and prove `config/ade.toml` from the legacy domain files (`ade-config export-unified`). |
 | [`ade_gates.py`](bin/ade_gates.py) | The frontier-model allowance, from code defaults and config/gates.toml [frontier] (docs/gates.md). |
 | [`ade_github_setup.py`](bin/ade_github_setup.py) | Observe / plan / apply / verify for setup-plan S8. |
 | [`ade_harden.py`](bin/ade_harden.py) | Observe-only GitHub hardening drift check (setup-plan S6). |

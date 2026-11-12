@@ -497,6 +497,7 @@ def test_r3_main_preserves_explicit_targets(home, synthetic_root, command, place
         'cmd_get': handler,
         'cmd_diff': handler,
         'cmd_set': handler,
+        'cmd_export_unified': handler,
     }
     exec(compile(ast.Module(body=[node], type_ignores=[]), 'actual ade-config.main', 'exec'), namespace)
     assert namespace['main'](_r3_cli_targets(command, synthetic_root, home, placement)) == 0

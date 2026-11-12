@@ -38,6 +38,18 @@ ADOPTION_NOTE = (
 # Paths under these roots are refused by the scalar editor (arrays / AoT / selectors).
 _REFUSED_ROOTS = frozenset({"service"})
 KEY_METADATA_FIELDS = frozenset({"create_url", "verify", "expiry", "notes"})
+# W16 (2026-11-12): bounded string-array and choice writes. Anything not listed stays refused.
+KEY_ARRAY_FIELDS = frozenset({"verify_argv", "components"})
+COMPONENT_ARRAY_FIELDS = frozenset({"install_argv", "update_argv", "probe_argv", "system_argv",
+                                    "system_argv_darwin", "platforms"})
+JOB_ARRAY_FIELDS = frozenset({"set", "platforms"})
+CHOICE_FIELDS = frozenset({"chosen"})
+KEY_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+# install row kinds: first path part after ``install`` -> (field allowlist, identity key)
+INSTALL_ROWS = {
+    "component": (COMPONENT_ARRAY_FIELDS | CHOICE_FIELDS, "id"),
+    "jobs": (JOB_ARRAY_FIELDS | CHOICE_FIELDS, "name"),
+}
 
 
 class EditError(ac.ConfigError):
@@ -54,6 +66,8 @@ class SetTarget:
     target: str  # "local" | "repo"
     created: bool
     key_name: str | None = None
+    # Array-of-tables row edit: (header parts, identity field, identity value). None = table path.
+    row: tuple[tuple[str, ...], str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -80,9 +94,26 @@ def parse_cli_value(raw: str, *, as_string: bool) -> Any:
             f"VALUE is not a TOML scalar ({e}); quote it or pass --string"
         ) from e
     value = wrapped["_"]
-    if isinstance(value, (dict, list)):
-        raise EditError("VALUE must be a scalar (bool, number, or string); not a table or array")
+    if isinstance(value, dict):
+        raise EditError("VALUE must be a scalar (bool, number, or string) or an array of strings; not a table")
+    if isinstance(value, list):
+        _check_string_array(value)
     return value
+
+
+def _check_string_array(value: Any) -> None:
+    if not isinstance(value, list) or not all(isinstance(v, str) and v for v in value):
+        raise EditError("array VALUE must be a TOML array of non-empty strings")
+    if any(ch in v for v in value for ch in ("\0", "\n", "\r")):
+        raise EditError("array VALUE: control characters refused")
+
+
+def encode_toml_value(value: Any) -> str:
+    """Single-line TOML for a scalar or an array of strings."""
+    if isinstance(value, list):
+        _check_string_array(value)
+        return "[" + ", ".join(encode_toml_scalar(v) for v in value) + "]"
+    return encode_toml_scalar(value)
 
 
 def encode_toml_scalar(value: Any) -> str:
@@ -125,7 +156,7 @@ def values_equal(left: Any, right: Any) -> bool:
 def split_dotted_path(dotted: str) -> tuple[str, ...]:
     if not dotted or dotted.strip() != dotted:
         raise EditError("PATH must be a non-empty dotted path without surrounding whitespace")
-    if dotted.startswith(("context_budget.", "keys.")):
+    if dotted.startswith(("context_budget.", "keys.", "install.")):
         try:
             parts = ac.metadata_path_parts(dotted)
         except ac.ConfigError as error:
@@ -167,6 +198,17 @@ def set_in_tree(data: dict[str, Any], parts: tuple[str, ...], value: Any) -> dic
     return out
 
 
+def _install_row_selector(dotted: str, parts: tuple[str, ...]) -> tuple[frozenset[str], str]:
+    """Validate ``install.component.ID.FIELD`` / ``install.jobs.NAME.FIELD``; return (fields, identity key)."""
+    if len(parts) != 4 or parts[1] not in INSTALL_ROWS or parts[3] not in INSTALL_ROWS[parts[1]][0]:
+        allowed = {k: sorted(v[0]) for k, v in INSTALL_ROWS.items()}
+        raise EditError(
+            f"PATH {dotted!r}: install set supports install.component.ID.FIELD / install.jobs.NAME.FIELD "
+            f"for existing rows only, fields {allowed}"
+        )
+    return INSTALL_ROWS[parts[1]]
+
+
 def resolve_set_target(
     dotted: str,
     *,
@@ -178,14 +220,34 @@ def resolve_set_target(
     if target not in ("local", "repo"):
         raise EditError(f"unknown --target {target!r} (want local or repo)")
     parts = split_dotted_path(dotted)
-    if parts[0] == "install":
-        raise EditError(f"PATH {dotted!r}: install arrays remain unsupported by scalar set")
-    if parts[0] == "keys" and (len(parts) != 3 or parts[2] not in KEY_METADATA_FIELDS):
-        raise EditError(f"PATH {dotted!r}: keys set only supports existing named-key string metadata: {sorted(KEY_METADATA_FIELDS)}")
-    if parts[0] == "context_budget" and (len(parts) not in {3, 4} or parts[1] != "budget"):
-        raise EditError(f"PATH {dotted!r}: context set only supports numeric budget leaves")
+    install_row = _install_row_selector(dotted, parts) if parts[0] == "install" else None
+    if parts[0] == "keys" and (len(parts) != 3 or parts[2] not in KEY_METADATA_FIELDS | KEY_ARRAY_FIELDS):
+        raise EditError(
+            f"PATH {dotted!r}: keys set only supports named-key metadata "
+            f"{sorted(KEY_METADATA_FIELDS | KEY_ARRAY_FIELDS)}"
+        )
+    if parts[0] == "context_budget" and not (
+        parts == ("context_budget", "dirs") or (len(parts) in {3, 4} and parts[1] == "budget")
+    ):
+        raise EditError(f"PATH {dotted!r}: context set only supports numeric budget leaves and dirs")
     root = root.resolve()
     home = home.resolve()
+
+    if install_row is not None:
+        if target == "local":
+            raise EditError(
+                f"PATH {dotted!r}: install component/job arrays replace whole in local.toml, so a "
+                "local row edit would shadow the entire array; use --target repo"
+            )
+        new_path = ac.default_new_config_path(root)
+        if ac.input_present(new_path):
+            aot = ("install", parts[1])
+            return SetTarget(path=new_path, file_parts=(parts[3],), kind="unified", target="repo",
+                             created=False, row=(aot, install_row[1], parts[2]))
+        path = root / "config/install.toml"
+        aot = ("component",) if parts[1] == "component" else ("install", "jobs")
+        return SetTarget(path=path, file_parts=(parts[3],), kind="legacy_install", target="repo",
+                         created=not ac.input_present(path), row=(aot, install_row[1], parts[2]))
 
     if target == "local":
         path = ac.default_local_path(home)
@@ -216,7 +278,8 @@ def resolve_set_target(
     if parts[0] == "keys":
         path = root / "config/install.toml"
         return SetTarget(path=path, file_parts=(parts[2],), kind="legacy_key", target="repo",
-                         created=not ac.input_present(path), key_name=parts[1])
+                         created=not ac.input_present(path), key_name=parts[1],
+                         row=(("key",), "name", parts[1]))
     if parts[0] == "gates":
         if len(parts) < 2:
             raise EditError("PATH gates alone is a table; scalar set needs a leaf under gates.*")
@@ -450,7 +513,10 @@ def find_scalar_assignment(text: str, table_parts: tuple[str, ...], key: str) ->
                 i += 1
             continue
         if current == table_parts and key_name == key:
-            value_end = _scan_scalar_value_end(text, value_start)
+            if value_start < n and text[value_start] == "[":
+                value_end = _skip_brackets(text, value_start)
+            else:
+                value_end = _scan_scalar_value_end(text, value_start)
             # ensure rest of line is only whitespace/comment
             k = value_end
             while k < n and text[k] in " \t":
@@ -547,6 +613,25 @@ def _skip_brackets(text: str, start: int) -> int:
 def find_table_insert_point(text: str, table_parts: tuple[str, ...]) -> tuple[int, bool]:
     """Return (offset, table_exists). Offset is where a new ``key = value`` line may be inserted."""
     n = len(text)
+    if not table_parts:
+        # Root table: new keys must precede the first header.
+        i = 0
+        while i < n:
+            while i < n and text[i] in " \t\r\n\ufeff":
+                i += 1
+            if i < n and text[i] == "[":
+                return i, True
+            while i < n and text[i] not in "\r\n":
+                if text[i] == "#":
+                    while i < n and text[i] not in "\r\n":
+                        i += 1
+                elif text[i] in "\"'":
+                    i = _scan_string_end(text, i)
+                elif text[i] == "[":
+                    i = _skip_brackets(text, i)
+                else:
+                    i += 1
+        return n, True
     i = 0
     current: tuple[str, ...] = ()
     in_aot = False
@@ -621,7 +706,7 @@ def apply_scalar_edit(text: str, file_parts: tuple[str, ...], value: Any) -> str
     table_parts = file_parts[:-1]
     key = file_parts[-1]
 
-    encoded = encode_toml_scalar(value)
+    encoded = encode_toml_value(value)
     hit = find_scalar_assignment(text, table_parts, key)
     if hit is not None:
         return text[: hit.value_start] + encoded + text[hit.value_end :]
@@ -689,22 +774,32 @@ def _parse_file_tree(text: str, path: Path) -> dict[str, Any]:
     return data
 
 
-def _key_row_index(data: dict[str, Any], name: str) -> int:
-    rows = data.get("key", [])
-    if not isinstance(rows, list):
-        raise EditError("legacy key registry must be an array of tables")
-    matches = [i for i, row in enumerate(rows) if isinstance(row, dict) and row.get("name") == name]
+def _rows_at(data: dict[str, Any], aot: tuple[str, ...]) -> list[Any]:
+    cur: Any = data
+    for part in aot:
+        if not isinstance(cur, dict) or part not in cur:
+            return []
+        cur = cur[part]
+    if not isinstance(cur, list):
+        raise EditError(f"{'.'.join(aot)} must be an array of tables")
+    return cur
+
+
+def _row_index(data: dict[str, Any], row: tuple[tuple[str, ...], str, str]) -> int:
+    aot, ident_key, ident = row
+    matches = [i for i, r in enumerate(_rows_at(data, aot))
+               if isinstance(r, dict) and r.get(ident_key) == ident]
     if len(matches) != 1:
-        raise EditError(f"key {name!r}: exactly one existing legacy identity required")
+        raise EditError(f"{'.'.join(aot)} {ident_key}={ident!r}: exactly one existing row identity required")
     return matches[0]
 
 
-def _legacy_key_edit(text: str, index: int, field: str, value: Any) -> str:
-    """Edit one existing [[key]] body through a synthetic ordinary table.
+def _row_edit(text: str, aot: tuple[str, ...], index: int, field: str, value: Any) -> str:
+    """Edit one existing ``[[aot]]`` row body through a synthetic ordinary table.
 
     Lexical boundaries reuse the scalar scanner's string/bracket skipping. The
-    caller additionally proves the complete parsed catalog changed only one
-    indexed metadata field; no public array editing is enabled.
+    caller additionally proves the complete parsed tree changed only one indexed
+    field; no public array reordering or row creation is enabled here.
     """
     headers = []
     i = 0
@@ -733,23 +828,31 @@ def _legacy_key_edit(text: str, index: int, field: str, value: Any) -> str:
                     i = _skip_brackets(text, i)
                 else:
                     i += 1
-    rows = [i for i, (_, _, parsed) in enumerate(headers) if parsed == ("aot", ("key",))]
+    rows = [i for i, (_, _, parsed) in enumerate(headers) if parsed == ("aot", aot)]
     if index >= len(rows):
-        raise EditError("legacy key row could not be located in supported TOML text")
+        raise EditError("row could not be located in supported TOML text")
     header_index = rows[index]
     start, body_start, _ = headers[header_index]
     end = headers[header_index + 1][0] if header_index + 1 < len(headers) else len(text)
-    synthetic = "[__ade_key_row__]"
-    edited = apply_scalar_edit(synthetic + text[body_start:end], ("__ade_key_row__", field), value)
+    synthetic = "[__ade_row__]"
+    edited = apply_scalar_edit(synthetic + text[body_start:end], ("__ade_row__", field), value)
     if not edited.startswith(synthetic):
-        raise EditError("legacy key scalar verification failed")
+        raise EditError("row scalar verification failed")
     return text[:body_start] + edited[len(synthetic):] + text[end:]
+
+
+def _append_legacy_key_row(text: str, name: str) -> str:
+    """Append ``[[key]]`` carrying only its identity (the one supported registry creation)."""
+    if not KEY_NAME_RE.fullmatch(name):
+        raise EditError(f"key identity {name!r}: must match {KEY_NAME_RE.pattern}")
+    body = text if not text or text.endswith("\n") else text + "\n"
+    return body + ("\n" if body else "") + f"[[key]]\nname = {encode_toml_scalar(name)}\n"
 
 
 def _metadata_domain(parts: tuple[str, ...]) -> frozenset[str] | None:
     if parts[0] == "context_budget":
         return ac.CONTEXT_BUDGET_DOMAINS
-    if parts[0] == "keys":
+    if parts[0] in {"keys", "install"}:
         return ac.CATALOG_DOMAINS
     return None
 
@@ -794,7 +897,7 @@ def validate_target_tree(data: dict[str, Any], target: SetTarget, *, root: Path)
         projected = {"context_budget": data}
         ac.validate_context_budget(projected, path=target.path)
         return
-    if target.kind == "legacy_key":
+    if target.kind in {"legacy_key", "legacy_install"}:
         ac.require_schema_version(data, target.path, required=True)
         ac.validate_tree(data, ac.read_catalog_schema(root), label=str(target.path))
         try:
@@ -858,6 +961,39 @@ def _atomic_replace(path: Path, text: str, *, mode: int | None) -> None:
         raise
 
 
+def _check_value_shape(parts: tuple[str, ...], value: Any) -> None:
+    """Type the value for its path; arrays only where the allowlist names them."""
+    if isinstance(value, dict):
+        raise EditError("VALUE must be a scalar or an array of strings")
+    is_array_path = (
+        parts == ("context_budget", "dirs")
+        or (parts[0] == "keys" and len(parts) == 3 and parts[2] in KEY_ARRAY_FIELDS)
+        or (parts[0] == "install" and len(parts) == 4 and parts[1] == "component"
+            and parts[3] in COMPONENT_ARRAY_FIELDS)
+        or (parts[0] == "install" and len(parts) == 4 and parts[1] == "jobs" and parts[3] in JOB_ARRAY_FIELDS)
+    )
+    if isinstance(value, list):
+        if not is_array_path:
+            raise EditError("VALUE must be a scalar (arrays are only accepted for the documented array fields)")
+        _check_string_array(value)
+        return
+    if is_array_path:
+        raise EditError(f"{'.'.join(parts)} requires an array of non-empty strings")
+    if parts[0] == "context_budget" and not ac.is_num(value):
+        raise EditError("context budget values must be finite numeric scalars")
+    if parts[0] == "keys" and not isinstance(value, str):
+        raise EditError("key metadata values must be strings")
+    if parts[0] == "install" and parts[3] in CHOICE_FIELDS and not isinstance(value, bool):
+        raise EditError("install chosen must be true or false")
+
+
+def _install_row_exists(current: dict[str, Any], parts: tuple[str, ...]) -> bool:
+    install = current.get("install", {})
+    rows = install.get("component" if parts[1] == "component" else "jobs", []) if isinstance(install, dict) else []
+    ident_key = INSTALL_ROWS[parts[1]][1]
+    return any(isinstance(r, dict) and r.get(ident_key) == parts[2] for r in rows)
+
+
 def set_scalar(
     dotted: str,
     value: Any,
@@ -866,26 +1002,37 @@ def set_scalar(
     root: Path | None = None,
     home: Path | None = None,
     dry_run: bool = False,
+    create_key: bool = False,
 ) -> SetResult:
-    """Set one scalar path. Default target is local (per-machine)."""
-    if isinstance(value, (dict, list)):
-        raise EditError("VALUE must be a scalar")
+    """Set one scalar (or documented string-array) path. Default target is local (per-machine).
+
+    ``create_key`` permits adding a new registry identity (``keys.NAME.FIELD``): a new
+    ``[keys.NAME]`` table, or an appended ``[[key]]`` row in the legacy catalog.
+    """
     root = (root or ac.repo_root_from_here()).resolve()
     home_path = (home if home is not None else Path.home()).resolve()
     resolved = resolve_set_target(dotted, target=target, root=root, home=home_path)
     parts = split_dotted_path(dotted)
     domains = _metadata_domain(parts)
-    if parts[0] == "context_budget" and not ac.is_num(value):
-        raise EditError("context budget values must be finite numeric scalars")
-    if parts[0] == "keys" and not isinstance(value, str):
-        raise EditError("key metadata values must be strings")
+    _check_value_shape(parts, value)
+    if create_key and parts[0] != "keys":
+        raise EditError("--create-key applies only to keys.NAME.FIELD paths")
+    creating = False
 
     with _file_lock(resolved.path):
-        if parts[0] == "keys":
+        if parts[0] in {"keys", "install"}:
             current = ac.load_effective(root=root, home=home_path, domains=ac.CATALOG_DOMAINS)
             _validate_metadata_effective(current.data, root=root, domains=ac.CATALOG_DOMAINS)
-            if parts[1] not in current.data.get("keys", {}):
-                raise EditError(f"key {parts[1]!r}: creating a new registry identity is not supported")
+            if parts[0] == "keys" and parts[1] not in current.data.get("keys", {}):
+                if not create_key:
+                    raise EditError(
+                        f"key {parts[1]!r}: creating a new registry identity needs --create-key"
+                    )
+                if not KEY_NAME_RE.fullmatch(parts[1]):
+                    raise EditError(f"key identity {parts[1]!r}: must match {KEY_NAME_RE.pattern}")
+                creating = True
+            if parts[0] == "install" and not _install_row_exists(current.data, parts):
+                raise EditError(f"{dotted}: creating new install rows is not supported")
         mode: int | None = None
         exists = ac.input_present(resolved.path)
         if not exists:
@@ -902,19 +1049,24 @@ def set_scalar(
         else:
             text_before, mode = _read_text_regular(resolved.path)
             before_tree = _parse_file_tree(text_before, resolved.path)
+            if creating and resolved.row is not None:
+                # Legacy registry: append the identity row first, then edit it like any existing row.
+                text_before = _append_legacy_key_row(text_before, parts[1])
+                before_tree = _parse_file_tree(text_before, resolved.path)
             try:
-                before_value = (before_tree["key"][_key_row_index(before_tree, resolved.key_name)][resolved.file_parts[0]]
-                                if resolved.kind == "legacy_key" else get_from_tree(before_tree, resolved.file_parts))
+                if resolved.row is not None:
+                    before_value = _rows_at(before_tree, resolved.row[0])[
+                        _row_index(before_tree, resolved.row)][resolved.file_parts[0]]
+                else:
+                    before_value = get_from_tree(before_tree, resolved.file_parts)
                 missing_before = False
             except KeyError:
                 before_value = None
                 missing_before = True
-            if not missing_before and isinstance(before_value, (dict, list)):
-                raise EditError(
-                    f"{dotted}: existing value is a "
-                    f"{'table' if isinstance(before_value, dict) else 'array'}; "
-                    "scalar set refuses to replace it"
-                )
+            if not missing_before and isinstance(before_value, dict):
+                raise EditError(f"{dotted}: existing value is a table; scalar set refuses to replace it")
+            if not missing_before and isinstance(before_value, list) and not isinstance(value, list):
+                raise EditError(f"{dotted}: existing value is an array; scalar set refuses to replace it")
 
         if not missing_before and values_equal(before_value, value):
             if domains is not None:
@@ -934,7 +1086,7 @@ def set_scalar(
 
         # If the value exists in the parsed tree but we could not find a simple
         # assignment (dotted key / inline / etc.), refuse rather than double-write.
-        if not missing_before and resolved.kind != "legacy_key":
+        if not missing_before and resolved.row is None:
             hit = find_scalar_assignment(
                 text_before, resolved.file_parts[:-1], resolved.file_parts[-1]
             )
@@ -944,19 +1096,22 @@ def set_scalar(
                     "table key assignment; refused"
                 )
 
-        text_after = (_legacy_key_edit(text_before, _key_row_index(before_tree, resolved.key_name),
-                                       resolved.file_parts[0], value) if resolved.kind == "legacy_key" else
-                      apply_scalar_edit(text_before, resolved.file_parts, value))
+        if resolved.row is not None:
+            index = _row_index(before_tree, resolved.row)
+            text_after = _row_edit(text_before, resolved.row[0], index, resolved.file_parts[0], value)
+        else:
+            text_after = apply_scalar_edit(text_before, resolved.file_parts, value)
         after_tree = _parse_file_tree(text_after, resolved.path)
-        if resolved.kind == "legacy_key":
+        if resolved.row is not None:
             expected = copy.deepcopy(before_tree)
-            expected["key"][_key_row_index(expected, resolved.key_name)][resolved.file_parts[0]] = copy.deepcopy(value)
+            _rows_at(expected, resolved.row[0])[_row_index(expected, resolved.row)][resolved.file_parts[0]] = (
+                copy.deepcopy(value))
         else:
             expected = set_in_tree(before_tree, resolved.file_parts, value)
         if not values_equal(after_tree, expected):
             raise EditError(
                 f"{dotted}: edit verification failed "
-                "(parsed tree is not exactly the requested scalar change)"
+                "(parsed tree is not exactly the requested change)"
             )
         validate_target_tree(after_tree, resolved, root=root)
         if domains is not None:

@@ -39,15 +39,16 @@ def _root_path(args: argparse.Namespace) -> Path | None:
     return Path(args.root) if getattr(args, "root", None) else None
 
 
-def _tiers_path(args: argparse.Namespace) -> Path:
-    # MODEL_TIERS_TOML wins (tests); else --root/config/…; else the checkout default.
+def _tiers_path(args: argparse.Namespace) -> Path | None:
+    # MODEL_TIERS_TOML wins (tests); else --root/config/…; else None = the checkout default,
+    # which model_tiers resolves (config/ade.toml [model_tiers] when present, W16; else legacy).
     env = os.environ.get("MODEL_TIERS_TOML")
     if env:
         return Path(env)
     root = _root_path(args)
     if root is not None:
         return root / "config" / "model-tiers.toml"
-    return mt.default_path()
+    return None
 
 
 def cmd_show(args: argparse.Namespace) -> int:
@@ -100,7 +101,14 @@ def cmd_classify(args: argparse.Namespace) -> int:
 
 def cmd_validate(args: argparse.Namespace) -> int:
     path = _tiers_path(args)
-    raw, err = mt._read_toml(path)
+    unified = mt.unified_source() if path is None else None
+    if unified is not None:
+        raw, err = mt._read_toml(unified)
+        raw = (raw or {}).get("model_tiers")
+        path = unified
+    else:
+        path = path or mt.default_path()
+        raw, err = mt._read_toml(path)
     if err or raw is None:
         print(f"validate: FAIL {err}", file=sys.stderr)
         return 3
@@ -109,7 +117,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
     except mt.TiersError as e:
         print(f"validate: FAIL {e}", file=sys.stderr)
         return 3
-    drift = mt.defaults_match_file(path)
+    drift = mt.defaults_match_file(None if unified is not None else path)
     if drift:
         for msg in drift:
             print(f"drift: {msg}", file=sys.stderr)

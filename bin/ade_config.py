@@ -791,8 +791,8 @@ def metadata_path_parts(dotted: str) -> tuple[str, ...]:
     if not dotted or dotted.strip() != dotted or any(c in dotted for c in "[]\n\r\0"):
         raise ConfigError("metadata paths require a single key chain without array selectors")
     kind, parts = decode_table_key_chain("[" + dotted + "]")
-    if kind != "table" or parts[0] not in {"keys", "context_budget"}:
-        raise ConfigError("quoted metadata paths must start with keys or context_budget")
+    if kind != "table" or parts[0] not in {"keys", "context_budget", "install"}:
+        raise ConfigError("quoted metadata paths must start with keys, context_budget or install")
     return parts
 
 def get_path(data: dict[str, Any], dotted: str) -> Any:
@@ -800,7 +800,8 @@ def get_path(data: dict[str, Any], dotted: str) -> Any:
     if not dotted:
         raise ConfigError("get path is empty")
     cur: Any = data
-    parts = metadata_path_parts(dotted) if dotted.startswith(("context_budget.", "keys.")) else dotted.split(".")
+    parts = (metadata_path_parts(dotted) if dotted.startswith(("context_budget.", "keys.", "install."))
+             else dotted.split("."))
     for part in parts:
         if part.startswith("service[name=") and part.endswith("]"):
             name = part[len("service[name="):-1]
@@ -817,6 +818,12 @@ def get_path(data: dict[str, Any], dotted: str) -> Any:
         if isinstance(cur, dict) and part in cur:
             cur = cur[part]
             continue
+        if isinstance(cur, list) and not part.isdigit() and part:
+            # catalog rows are addressable by identity (``install.component.just.chosen``)
+            hits = [row for row in cur if isinstance(row, dict) and part in (row.get("id"), row.get("name"))]
+            if len(hits) == 1:
+                cur = hits[0]
+                continue
         if isinstance(cur, list) and part.isdigit():
             idx = int(part)
             if idx < 0 or idx >= len(cur):

@@ -28,8 +28,9 @@ validation/mapping lives in `bin/ade_install_catalog.py`.
 The explicit library `install_path=` override retains its isolated legacy read
 and original refusal when `config/ade.toml` is present. Default adoption does not
 change the installer, keys engine, ledger paths or system-execution permissions.
-No tracked `config/ade.toml` ships, and `ade-config set` explicitly refuses the new
-install/keys paths until writer adoption.
+No tracked `config/ade.toml` ships (W16, 2026-11-12: the generator and cut-over checklist are in
+[config-migration F](config-migration.md#f-unified-adetoml-generation-and-cut-over-2026-11-12); the commit waits
+for in-flight catalog edits). Bounded install writes are in the next-but-one section.
 
 The mapping preserves legacy row fields: `[[component]]` and `[[login]]` become
 `[[install.component]]` and `[[install.login]]`; jobs/retired jobs keep their
@@ -484,9 +485,20 @@ lock if multi-agent installs share a machine.
 `expiry` and `notes` for an existing valid registry identity. Local targets
 overlay metadata; repo targets edit unified keys when present or the unique
 legacy `[[key]]` row. The writer validates the final overlaid catalog and
-changes no credential or verification-outcome state. New identities,
-`verify_argv`, `components`, installation choices and other array fields remain
-refused. See [the scalar contract](config-migration.md#c3-bounded-metadata-writes-2026-11-10).
+changes no credential or verification-outcome state. See
+[the scalar contract](config-migration.md#c3-bounded-metadata-writes-2026-11-10).
+
+**W16 (2026-11-12).** The same command now also writes `keys.NAME.verify_argv` and
+`keys.NAME.components` (arrays of non-empty strings), adds a new identity with
+`--create-key` (`NAME` matches `[A-Za-z_][A-Za-z0-9_]*`; a unified/local `[keys.NAME]` table or an appended
+legacy `[[key]]` row), and edits **existing** install rows by identity:
+`install.component.ID.{chosen,install_argv,update_argv,probe_argv,system_argv,system_argv_darwin,platforms}` and
+`install.jobs.NAME.{chosen,set,platforms}` (quote ids containing dots: `install.component."a.b".chosen`).
+Row edits are `--target repo` only: local component/job arrays replace whole, so a local row edit would shadow the
+entire array. Every edit reparses to exactly one changed field and passes the catalog schema and semantics
+(a `hard` row cannot be unchosen; argv arrays stay non-empty). Row creation/removal/reordering, `class`, `id`,
+free-text `install`/`update`/`probe` commands and credential fields remain refused. See
+[config-migration C4](config-migration.md#c4-install-arrays-choices-and-key-identities-2026-11-12).
 
 ## I. Cached key worklist (2026-11-11)
 
