@@ -114,6 +114,7 @@ Skills (from each `skills/*/SKILL.md`):
 | [`acp-dispatch`](bin/acp-dispatch) | Hand a slice to an agent through Paseo and get its report back (a shim, slim-down E6, 2026-11-06). |
 | [`acp-dispatch-wait`](bin/acp-dispatch-wait) | DELETE with the acp-dispatch shim (Wave 6 follow-up, ledger E6/D6); was the cheap rearm waiter for one acp-dispatch record (2026-10-18). |
 | [`ade-agent-mode`](bin/ade-agent-mode) | Check native agent permission mode or plan repair (apply capability-blocked). |
+| [`ade-auto-permit`](bin/ade-auto-permit) | Approve pending requests only for a lead's descendants or selected ADE labels. |
 | [`ade-backup-stores`](bin/ade-backup-stores) | One consistent copy of every agent session store, plus the Hermes JSONL export. |
 | [`ade-browser-task`](bin/ade-browser-task) | Render / relay browser-only prompts (setup-plan S7). |
 | [`ade-claim-pilot`](bin/ade-claim-pilot) | Run (or dry-run) the S4 six-case claims enforcement pilot. |
