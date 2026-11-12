@@ -205,6 +205,10 @@ on those models, not replace them with bulk/mechanical pools for new logic
 
 ## H. Pointers
 
+H0. Pool-level hold/restore at dispatch time (not effort or model tier) shipped separately as W8, 2026-11-12:
+`route_agent.py adjust`, `docs/model-routing.md` "Launch-time pool adjustment". It honours F1/F4 (new launches only, no
+running-agent change, no config writes) and does not open G4.
+
 H1. Method: `skills/model-routing/SKILL.md` B, D, G.
 H2. Numbers: `config/routing.toml`, `config/gates.toml [frontier]`;
 `bin/route_agent.py policy --md` / `calibrate` / `plan`.

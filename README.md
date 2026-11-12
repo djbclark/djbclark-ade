@@ -199,6 +199,7 @@ Skills (from each `skills/*/SKILL.md`):
 | [`render-secret-deny`](bin/render-secret-deny) | Render config/secret-deny.toml into the files that enforce it (2026-11-04, issue #284 item 2; docs/secret-deny.md). |
 | [`review-launch`](bin/review-launch) | Run ONE `claude -p` inside a review boundary and print its structured output. |
 | [`review-pr`](bin/review-pr) | The local Claude review of a PR's exact head (docs/code-review.md rule 11), through bin/review-launch. |
+| [`route_adjust.py`](bin/route_adjust.py) | Stateful, launch-time pool adjustment with restoration (W8, 2026-11-12). |
 | [`route_agent.py`](bin/route_agent.py) | Pick which vendor should run a piece of work, from capability and headroom. |
 | [`skill-everywhere`](bin/skill-everywhere) | Make a shared skill visible to every agent TUI on this machine by symlinking it into each TUI's user-level skills dir. |
 | [`verifycmd`](bin/verifycmd) | ADE-native verify-until-pass: register an argv acceptance command and run it under deadline. |

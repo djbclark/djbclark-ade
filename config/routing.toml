@@ -91,6 +91,22 @@ never_route = ["hermes", "clinepass", "antigravity", "alibaba", "devin", "copilo
 # Go pool). The retired TUIs have no alias: they are `never_route` above.
 aliases = { claude-agent-teams = "claude", openclaude = "claude", opencode = "opencode-go", kimi = "opencode-go" }
 
+# Launch-time pool adjustment with restoration (W8, 2026-11-12; `route_agent.py adjust`, bin/route_adjust.py).
+# A kind's last routed pool that falls below its floor is held off and NEW launches of that kind go to the next
+# eligible pool; it returns once it is `restore_margin` points above its floor and held at least `min_dwell_seconds`
+# (hysteresis); with no other pool an usable held pool is restored early. Never touches a running agent; never
+# downgrades a `frontier` slice (refused and reported); never targets `never_target` (omp is always in it).
+# `enabled = false` makes `adjust` behave exactly like `plan` (no state, no log).
+[routing.adjust]
+enabled = true
+restore_margin = 10.0
+min_dwell_seconds = 900
+# A hold older than this expires even without a fresh reading; a snapshot older than max_age_seconds
+# neither holds nor releases anything.
+max_hold_seconds = 21600
+max_age_seconds = 1500
+never_target = ["omp"]
+
 # Calibrate report thresholds (route_agent.py calibrate; monthly AI re-rank).
 # Operator /steps 1.5, 2026-10-18: outcome field + AI re-ranking, not human.
 [calibrate]
