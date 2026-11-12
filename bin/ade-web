@@ -13,12 +13,15 @@ import argparse
 from contextlib import contextmanager
 import gzip
 import io
+import ipaddress
+import http.client
 import json
 import os
 from pathlib import Path
 import re
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -37,7 +40,7 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def valid_url(url):
+def valid_url(url, public=False):
     try:
         p = urllib.parse.urlsplit(url)
         p.port
@@ -45,7 +48,63 @@ def valid_url(url):
         raise Failure('invalid URL') from None
     if p.scheme not in ('http', 'https') or not p.hostname or p.username or p.password:
         raise Failure('invalid URL')
+    if public:
+        public_addresses(p.hostname, p.port or (443 if p.scheme == 'https' else 80))
     return url
+
+
+def public_addresses(host, port):
+    """Fail closed on mixed public/private DNS answers and unusual IP spellings."""
+    try:
+        rows = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+        if not rows or any(not ipaddress.ip_address(row[4][0]).is_global for row in rows):
+            raise Failure('non-public target blocked')
+        return rows
+    except Failure:
+        raise
+    except Exception:
+        raise Failure('target resolution failed') from None
+
+
+def public_connection(address, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, source_address=None):
+    # Connect to the validated numeric address: do not re-resolve the hostname.
+    rows = public_addresses(*address)
+    for family, kind, proto, _, destination in rows:
+        sock = socket.socket(family, kind, proto)
+        try:
+            if timeout is not socket._GLOBAL_DEFAULT_TIMEOUT: sock.settimeout(timeout)
+            if source_address: sock.bind(source_address)
+            sock.connect(destination)
+            return sock
+        except OSError:
+            sock.close()
+    raise Failure('connection failed')
+
+
+def connection_factory(cls, trusted):
+    def connect(host, **kwargs):
+        connection = cls(host, **kwargs)
+        if not trusted: connection._create_connection = public_connection
+        return connection
+    return connect
+
+
+class PublicHTTP(urllib.request.HTTPHandler):
+    def http_open(self, req):
+        return self.do_open(connection_factory(http.client.HTTPConnection, getattr(req, 'trusted_provider', False)), req)
+
+
+class PublicHTTPS(urllib.request.HTTPSHandler):
+    def https_open(self, req):
+        return self.do_open(connection_factory(http.client.HTTPSConnection, getattr(req, 'trusted_provider', False)),
+                            req, context=self._context)
+
+
+class PublicRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        valid_url(newurl, public=True)
+        # A redirect is always untrusted, even when the first request used a provider base.
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
 def base(name, default):
@@ -109,14 +168,16 @@ class Web:
         self.jina = base('ADE_WEB_JINA_URL', 'https://r.jina.ai')
         self.archive = base('ADE_WEB_WAYBACK_URL', 'https://web.archive.org')
 
-    def request(self, url, data=None, key=None, limit=None):
+    def request(self, url, data=None, key=None, limit=None, provider=False):
         valid_url(url)
         headers = {'User-Agent': 'ade-web/1', 'Accept-Encoding': 'gzip'}
         if key: headers['Authorization'] = 'Bearer ' + key
         if data is not None: headers['Content-Type'] = 'application/json'
         req = urllib.request.Request(url, data=json.dumps(data).encode() if data is not None else None, headers=headers)
-        # A keyed request never follows redirects; keyless page/PDF/archive requests may.
-        opener = urllib.request.build_opener(NoRedirect()) if key else urllib.request.build_opener()
+        req.trusted_provider = provider
+        # No proxy/environment bypass: only configured provider bases can reach private IPs.
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), PublicHTTP(), PublicHTTPS(),
+                                             NoRedirect() if key else PublicRedirect())
         cap = limit or self.args.max_bytes
         try:
             with deadline(self.args.timeout), opener.open(req, timeout=self.args.timeout) as response:
@@ -138,7 +199,7 @@ class Web:
             raise Failure('request failed') from None
 
     def structured(self, url, data=None, key=None):
-        raw, _, clipped = self.request(url, data, key, max(self.args.max_bytes * 2, 65536))
+        raw, _, clipped = self.request(url, data, key, max(self.args.max_bytes * 2, 65536), provider=True)
         if clipped: raise Failure('JSON response over limit')
         try: return json.loads(raw)
         except (ValueError, UnicodeError): raise Failure('invalid JSON') from None
@@ -161,12 +222,12 @@ class Web:
         return str(item.get('markdown') or ''), bool(item.get('truncated') or data.get('truncated'))
 
     def jina_read(self, target, keyed=False):
-        raw, _, clipped = self.request(self.jina + '/' + target, key=os.environ.get('JINA_API_KEY') if keyed else None)
+        raw, _, clipped = self.request(self.jina + '/' + target, key=os.environ.get('JINA_API_KEY') if keyed else None, provider=True)
         return raw.decode('utf-8', 'replace'), clipped
 
     def jina_search(self, query):
         url = base('ADE_WEB_JINA_SEARCH_URL', 'https://s.jina.ai') + '/' + urllib.parse.quote(query, safe='')
-        raw, _, clipped = self.request(url, key=os.environ['JINA_API_KEY'])
+        raw, _, clipped = self.request(url, key=os.environ['JINA_API_KEY'], provider=True)
         return raw.decode('utf-8', 'replace'), clipped
 
     def pdf(self, target):
@@ -182,7 +243,7 @@ class Web:
         return output.stdout.decode('utf-8', 'replace'), False
 
     def archived(self, target, timestamp='0'):
-        raw, _, clipped = self.request(self.archive + '/web/' + timestamp + 'id_/' + target)
+        raw, _, clipped = self.request(self.archive + '/web/' + timestamp + 'id_/' + target, provider=True)
         if raw.startswith(b'%PDF-'): raise Failure('archived PDF requires extraction')
         return clean(raw.decode('utf-8', 'replace')), clipped
 
@@ -194,14 +255,11 @@ class Web:
         row = rows[-1]
         if not isinstance(row, list) or len(row) != 2 or not re.fullmatch(r'\d{14}', str(row[0])):
             raise Failure('invalid archive capture')
-        return self.archived(valid_url(row[1]), row[0])
+        return self.archived(valid_url(row[1], public=True), row[0])
 
     def crawl(self, target):
-        tool = shutil.which('crwl')
-        if not tool: raise Failure('crwl unavailable')
-        result = subprocess.run([tool, target], capture_output=True, timeout=self.args.timeout)
-        if result.returncode: raise Failure('crwl failed')
-        return clean(result.stdout.decode('utf-8', 'replace')), False
+        # crwl owns its HTTP stack; it cannot share this CLI's redirect/IP guard.
+        raise Failure('crwl public-only redirects unavailable')
 
     def rungs(self, target, search=False):
         yield 'firecrawl', lambda: self.firecrawl(target, search)
@@ -220,7 +278,8 @@ class Web:
         for provider, call in self.rungs(target, search):
             try:
                 body, truncated = call()
-                quality(body)
+                if not body.strip(): raise Failure('empty')
+                if not search: quality(body)
                 encoded = body.encode('utf-8')
                 truncated = truncated or len(encoded) > self.args.max_bytes
                 body = encoded[:self.args.max_bytes].decode('utf-8', 'ignore')
@@ -238,7 +297,7 @@ class Web:
         selected = selected or self.best
         code = 5 if selected is None else 6 if selected['truncated'] else 0
         return {**(selected or {'provider': None, 'body': '', 'truncated': False}),
-                'attempts': self.attempts, 'exit_code': code}
+                'attempts': self.attempts, 'exit_code': code, 'untrusted': True}
 
 
 def positive(value):
@@ -254,18 +313,19 @@ def main(argv=None):
         p = sub.add_parser(command)
         if command != 'check': p.add_argument('target')
         else: p.add_argument('--url', default='https://example.com')
-        p.add_argument('--json', action='store_true', help='body, provider, truncation, attempts and exit_code')
+        p.add_argument('--json', action='store_true', help='body, provider, truncation, attempts, exit_code and untrusted=true')
         p.add_argument('--timeout', type=positive, default=15, help='per network/subprocess operation, seconds')
         p.add_argument('--max-bytes', type=int, default=2_000_000)
-        p.add_argument('--crwl', action='store_true', help='enable optional final crwl rung')
+        p.add_argument('--crwl', action='store_true', help='report optional crwl availability (blocked until public-only redirects are supported)')
     args = parser.parse_args(argv)
     if not 1024 <= args.max_bytes <= 20_000_000: parser.error('--max-bytes must be 1024..20000000')
     try:
         target = args.url if args.command == 'check' else args.target
-        if args.command != 'search': valid_url(target)
+        if args.command != 'search':
+            with deadline(args.timeout): valid_url(target, public=True)
         result = Web(args).run(target, args.command == 'search', args.command == 'check')
     except Failure as exc:
-        result = {'provider': None, 'body': '', 'truncated': False, 'attempts': [], 'exit_code': 5}
+        result = {'provider': None, 'body': '', 'truncated': False, 'attempts': [], 'exit_code': 5, 'untrusted': True}
         print(str(exc), file=sys.stderr)
     for attempt in result['attempts']:
         print('provider=' + attempt['provider'] + ' status=' + attempt['status'] +

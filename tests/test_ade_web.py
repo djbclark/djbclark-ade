@@ -3,8 +3,11 @@ import gzip
 import http.server
 import json
 import os
+import runpy
+import socket
 from pathlib import Path
 import subprocess
+import sys
 import threading
 import time
 import urllib.parse
@@ -57,13 +60,30 @@ def wire(tmp_path):
     env = {k: v for k, v in os.environ.items() if not any(s in k.upper() for s in ('KEY', 'TOKEN', 'PROXY', 'ADE_WEB'))}
     env.update(ADE_WEB_FIRECRAWL_URL=url + '/fc', ADE_WEB_JINA_URL=url + '/jina',
                ADE_WEB_JINA_SEARCH_URL=url + '/search', ADE_WEB_WAYBACK_URL=url + '/archive')
-    target = url + '/page'
+    target = 'http://93.184.216.34:' + str(server.server_port) + '/page'
 
     def run(command='fetch', value=None, *extra):
         args = [str(CLI), command]
         args += ['--url', value or target] if command == 'check' else [value or target]
-        proc = subprocess.run(args + ['--json', '--timeout', '2', *extra],
+        # Test-only transport mapping: validation sees a public IP, socket traffic stays local.
+        loader = """
+import runpy
+import socket
+import sys
+
+class LocalSocket(socket.socket):
+    def connect(self, address):
+        if address[0] == '93.184.216.34':
+            address = ('127.0.0.1', address[1])
+        return super().connect(address)
+
+socket.socket = LocalSocket
+sys.argv = sys.argv[1:]
+runpy.run_path(sys.argv[0], run_name='__main__')
+"""
+        proc = subprocess.run([sys.executable, '-I', '-c', loader, *args, '--json', '--timeout', '2', *extra],
                               env=env, capture_output=True, text=True, timeout=25)
+        assert proc.stdout, proc.stderr
         return proc, json.loads(proc.stdout)
 
     yield routes, calls, url, target, env, run, tmp_path
@@ -207,7 +227,7 @@ def test_optional_crwl(wire):
     tool.chmod(0o755)
     env['PATH'] = str(tmp) + os.pathsep + env['PATH']
     proc, result = run('fetch', target, '--crwl')
-    assert proc.returncode == 0 and result['provider'] == 'crwl'
+    assert proc.returncode == 5 and result['attempts'][-1]['error'] == 'crwl public-only redirects unavailable'
 
 
 def test_bad_cdx_timestamp(wire):
@@ -265,3 +285,79 @@ def test_malformed_base_returns_safe_json(wire):
     proc, result = run()
     assert proc.returncode == 5 and not calls
     assert 'Traceback' not in proc.stderr
+
+
+@pytest.mark.parametrize('target', [
+    'http://127.0.0.1/', 'http://localhost/', 'http://10.1.2.3/',
+    'http://172.16.0.1/', 'http://192.168.0.1/', 'http://169.254.169.254/latest/meta-data',
+    'http://[::1]/', 'http://[fe80::1]/', 'http://[::ffff:127.0.0.1]/', 'http://2130706433/',
+])
+def test_nonpublic_target_never_reaches_provider(wire, target):
+    _, calls, _, _, _, run, _ = wire
+    proc, result = run('fetch', target)
+    assert proc.returncode == 5 and not calls and result['untrusted'] is True
+    assert 'non-public target blocked' in proc.stderr
+
+
+def test_keyless_provider_redirect_cannot_reach_private(wire):
+    routes, calls, url, target, _, run, _ = wire
+    routes['/jina/' + target] = (302, '', {'Location': url + '/metadata'})
+    routes['/metadata'] = (200, ARTICLE, {})
+    proc, result = run()
+    assert proc.returncode == 5
+    assert '/metadata' not in [p for p, _ in calls]
+    assert result['attempts'][1]['error'] == 'non-public target blocked'
+
+
+def test_direct_pdf_redirect_cannot_reach_private(wire):
+    routes, calls, _, _, _, run, _ = wire
+    routes['/page'] = (302, '', {'Location': 'http://169.254.169.254/latest/meta-data'})
+    proc, result = run()
+    assert proc.returncode == 5
+    assert result['attempts'][2]['error'] == 'non-public target blocked'
+
+
+@pytest.mark.parametrize('phrase', ['captcha solving', 'access denied', '404 not found'])
+def test_search_allows_block_phrase_results(wire, phrase):
+    routes, _, _, _, _, run, _ = wire
+    routes['/fc/v2/search'] = (200, {'data': [{'title': phrase}]}, {})
+    proc, result = run('search', phrase)
+    assert proc.returncode == 0 and phrase in result['body']
+    assert result['untrusted'] is True
+
+
+def test_successful_fetch_is_untrusted(wire):
+    routes, _, _, _, _, run, _ = wire
+    routes['/fc/v2/scrape'] = (200, {'data': {'markdown': ARTICLE}}, {})
+    proc, result = run()
+    assert proc.returncode == 0 and result['untrusted'] is True
+
+
+def test_mixed_dns_answers_fail_closed(monkeypatch):
+    module = runpy.run_path(str(CLI))
+    monkeypatch.setattr(socket, 'getaddrinfo', lambda *a, **k: [
+        (socket.AF_INET, socket.SOCK_STREAM, 6, '', ('93.184.216.34', 80)),
+        (socket.AF_INET, socket.SOCK_STREAM, 6, '', ('127.0.0.1', 80)),
+    ])
+    with pytest.raises(module['Failure'], match='non-public target blocked'):
+        module['valid_url']('http://mixed.example/', public=True)
+
+
+def test_direct_connection_pins_validated_address(monkeypatch):
+    module = runpy.run_path(str(CLI))
+    lookups, connections = [], []
+
+    def addresses(*args, **kwargs):
+        lookups.append(args)
+        address = '93.184.216.34' if len(lookups) == 1 else '127.0.0.1'
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, '', (address, 80))]
+
+    class Socket:
+        def __init__(self, *args): pass
+        def settimeout(self, seconds): pass
+        def connect(self, address): connections.append(address)
+
+    monkeypatch.setattr(socket, 'getaddrinfo', addresses)
+    monkeypatch.setattr(socket, 'socket', Socket)
+    module['public_connection'](('rebind.example', 80), timeout=1)
+    assert len(lookups) == 1 and connections == [('93.184.216.34', 80)]
