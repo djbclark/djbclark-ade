@@ -1,0 +1,3 @@
+### Fixed
+
+- `bin/ade-merge-ready` (`classify`, and `merge-now --prs N --yes` for the named PRs only) re-dispatches `adversary-marker.yml` itself, once per head, when pytest-linux passed more than `--marker-grace` seconds (default 180) ago and the `adversary-marker` check never appeared (PR 587: a `workflow_run` run reports master's head, so a force-pushed tip got no check until someone dispatched by hand); the head is claimed in `~/.local/state/ade/merge-ready/marker-dispatch.json` (flock, atomic write) before the dispatch and a state file that cannot be written stops dispatching, a pending or failed check is never touched, no marker is written, `--no-marker-dispatch` opts out; documented in `docs/review-boundary.md` (#600)

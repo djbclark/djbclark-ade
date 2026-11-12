@@ -149,6 +149,30 @@ no marker paste and no herdr HTML-comment paste. Use `approve-post` only for
 `retrigger-marker` re-dispatches the Action when a tip still shows a stale
 status before the next Tests run (usually unnecessary after the push sweep).
 
+**Missing-check self-heal (2026-11-12, PR #587).** The `adversary-marker` Action runs on `workflow_run` of
+Tests, and a `workflow_run` run reports master's head SHA, not the PR's; after a force-push the run can
+simply never produce a check for the new head (#587 sat at `needs_approve`, `adversary_marker=missing`
+until a human ran `gh workflow run adversary-marker.yml -f pr=587`). The helper now does that dispatch
+itself, **once per head**, when all of these hold: class `needs_approve`, pytest-linux `pass`, the
+`adversary-marker` check **missing** (a pending or failed check is never touched), pytest-linux completed
+more than `--marker-grace` seconds ago (default 180, or `ADE_MERGE_READY_MARKER_GRACE`; finite, >= 0; the
+newest passing `completedAt` from `gh pr checks N --json name,bucket,completedAt`, unknown = no dispatch),
+and the live head still equals the listed head. Where it runs:
+
+1. `classify` (bare invoke included): every eligible open tip. This is the one deliberate exception to
+   "a bare invoke cannot fire the Action on every open PR" that `retrigger-marker` keeps.
+2. `merge-now --prs N --yes`: only the named PRs; `merge-now` still refuses until the check is `success`.
+   A dry-run `merge-now` (no `--yes`) or one without `--prs` dispatches nothing.
+
+The head is **claimed** as `repo#N@head` in `~/.local/state/ade/merge-ready/marker-dispatch.json`
+(`--state-file` / `ADE_MERGE_READY_STATE`) before the dispatch, under an flock on `<state>.lock`, with an
+atomic write and a 30-day prune; a failed dispatch releases the claim, and a state file that cannot be
+written stops all dispatching (reported as `state_unwritable`) instead of repeating it. A force-push makes a
+new head and a new single dispatch. The helper does not wait: it prints `marker-dispatch #N (sha): …`
+(stderr under `--json` and for `merge-now`), and the next run reads the result. An error on one row is
+reported on that row and never aborts the command. It never writes or fakes a marker.
+`--no-marker-dispatch` turns it off.
+
 ```sh
 bin/ade-merge-ready                  # classify open tips vs pytest-linux + adversary-marker
 bin/ade-merge-ready stacks           # bottom-up merge order + full tip SHAs
