@@ -7,6 +7,7 @@ See docs/net-resume.md. Exit 0: scan completed; 2: usage/state/CLI failure;
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
 import fcntl
 import hashlib
 import json
@@ -59,10 +60,11 @@ def transient(provider, logs):
 
 
 class Scanner:
-    def __init__(self, lead, state, apply=False, duration=120):
+    def __init__(self, lead, state, apply=False, duration=120, max_error_age_minutes=30):
         self.lead = agent_id(lead)
         self.state = state
         self.apply = apply
+        self.max_error_age = max_error_age_minutes * 60
         self.deadline = time.monotonic() + duration
 
     def remaining(self):
@@ -114,6 +116,52 @@ class Scanner:
             return result.returncode == 0 and 200 <= code < 500 and code != 429
         except (OSError, subprocess.TimeoutExpired, ValueError):
             return False
+
+    def recent_error(self, record):
+        updated = record.get("UpdatedAt")
+        if not isinstance(updated, str):
+            return False
+        try:
+            stamp = datetime.fromisoformat(updated.replace("Z", "+00:00"))
+            if stamp.tzinfo is None:
+                return False
+            age = time.time() - stamp.timestamp()
+        except (ValueError, OverflowError, OSError):
+            return False
+        return math.isfinite(age) and 0 <= age <= self.max_error_age
+
+    def delivered(self, aid, provider):
+        activity = json.loads(self.cli("logs", aid, "--json"))
+        if (not isinstance(activity, dict) or activity.get("agentId") != aid
+                or not isinstance(activity.get("items"), list)):
+            raise ScanError("invalid structured logs")
+        for item in reversed(activity["items"]):
+            if not isinstance(item, dict):
+                raise ScanError("invalid timeline item")
+            if item.get("type") == "user_message":
+                return False  # A new task invalidates earlier delivery text.
+            if item.get("type") != "assistant_message":
+                continue
+            text = item.get("text")
+            if not isinstance(text, str):
+                raise ScanError("invalid assistant output")
+            if transient(provider, text):
+                continue  # The terminal system error is rendered as assistant text.
+            # Only an unquoted, unfenced delivery line in the latest output counts.
+            fence = None
+            for line in text.splitlines():
+                marker = re.match(r"^ {0,3}(`{3,}|~{3,})", line)
+                if marker:
+                    run = marker.group(1)
+                    if fence is None:
+                        fence = run
+                    elif run[0] == fence[0] and len(run) >= len(fence) and not line[marker.end():].strip():
+                        fence = None
+                    continue
+                if fence is None and re.match(r"^done:[ \t]+\S", line):
+                    return True
+            return False
+        return False
 
     def signature(self, record, logs):
         # UpdatedAt identifies the error event; timeline rendering can vary.
@@ -171,8 +219,14 @@ class Scanner:
                             continue
                         if provider not in HOSTS:
                             continue
+                        if not self.recent_error(record):
+                            self.event(history, aid, "stale")
+                            continue
                         logs = self.cli("logs", aid)
                         if not transient(provider, logs):
+                            continue
+                        if self.delivered(aid, provider):
+                            self.event(history, aid, "delivered")
                             continue
                         signature = self.signature(record, logs)
                         attempts = [e for e in events if e.get("agent") == aid and e.get("action") == "reserved"]
@@ -190,6 +244,7 @@ class Scanner:
                         fresh = self.inspect(aid)
                         if (fresh.get("Status") != "error" or fresh.get("Archived") is not False
                                 or fresh.get("Provider") != provider or not self.descendant(aid)
+                                or not self.recent_error(fresh) or self.delivered(aid, provider)
                                 or self.signature(fresh, self.cli("logs", aid)) != signature):
                             self.event(history, aid, "changed")
                             continue
@@ -216,13 +271,17 @@ def main(argv=None):
                         help="shared cap ledger and lock; use the same directory for every invocation")
     parser.add_argument("--watch", type=float, metavar="SECONDS", help="watch for 1..3600 seconds")
     parser.add_argument("--interval", type=float, default=30, help="watch interval, 5..300 seconds")
+    parser.add_argument("--max-error-age-minutes", type=float, default=30, metavar="MINUTES",
+                        help="only consider errors this recent (default 30; positive, finite)")
     args = parser.parse_args(argv)
+    if not math.isfinite(args.max_error_age_minutes * 60) or args.max_error_age_minutes <= 0:
+        parser.error("max-error-age-minutes must be positive and finite")
     if not math.isfinite(args.interval) or not 5 <= args.interval <= 300:
         parser.error("interval must be 5..300 seconds")
     if args.watch is not None and (not math.isfinite(args.watch) or not 1 <= args.watch <= 3600):
         parser.error("watch must be 1..3600 seconds")
     try:
-        scanner = Scanner(args.lead, args.state_dir, args.apply, args.watch or 120)
+        scanner = Scanner(args.lead, args.state_dir, args.apply, args.watch or 120, args.max_error_age_minutes)
         while True:
             rc = scanner.scan()
             if not args.watch:
