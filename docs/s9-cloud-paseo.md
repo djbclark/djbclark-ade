@@ -191,6 +191,7 @@ criteria are what a later build PR must prove; this slice only names them.
 | Doc | Role |
 |---|---|
 | [`docs/setup-plan.md`](setup-plan.md) § S9, contract §8 | Product intent and signing prerequisite |
+| [`docs/signed-agent-message.md`](signed-agent-message.md) | item-24 message contract draft (2026-11-12): envelope, keys, expiry/replay, approval tokens, tool stubs — starts B1.1 on paper |
 | [`docs/queue.md`](queue.md) Carried #35 | Setup plan home; S9 last / headroom |
 | [`docs/tui-security-and-pi-migration.md`](tui-security-and-pi-migration.md) | 2026-11-08 security deferral |
 | [`docs/threat-model.md`](threat-model.md) | Cloud-agent push / PR threats |
