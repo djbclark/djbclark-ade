@@ -167,6 +167,14 @@ No quota telemetry supports a numeric remaining-budget claim.
 
 ## Detached jobs
 
+All coding workers and the independent reviewer are completed; local source
+processes are stopped and source worktrees clean. Final #567/#568 Linux and
+context checks passed. One external Cursor approval check on #562 remains
+in_progress at the final snapshot; the available tools cannot cancel it. Thus
+local coding is quiescent, but not every third-party hosted status is terminal.
+There is no uncommitted source dependency on that check. Local successor should
+refresh its status and use an available independent review if necessary.
+
 Final worker/process and GitHub check observations are in evidence.json. No
 cloud worker, reviewer, subprocess or session-local watchdog is to be depended
 on after transfer. Durable branches/PRs and these documents are the handoff.
@@ -182,7 +190,7 @@ text, not runtime state or worktree ownership.
 On the Mac, from a checkout of djbclark/djbclark-ade:
 
 ```sh
-git fetch origin local-agent-handoff-20261112
+git fetch origin local-agent-handoff-20261112 &&
 git show FETCH_HEAD:docs/handoffs/cloud-to-local-2026-11-12/RESUME.txt > /tmp/ade-resume-2026-11-12.txt && pbcopy < /tmp/ade-resume-2026-11-12.txt
 ```
 

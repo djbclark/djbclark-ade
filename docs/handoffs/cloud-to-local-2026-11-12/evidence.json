@@ -1,5 +1,5 @@
 {
-  "snapshot_utc": "2026-11-12 16:41:47 UTC",
+  "snapshot_utc": "2026-11-12 16:49:58 UTC",
   "source_master": "dc3463b16c400a3c7af00a4aef3a8cbb4a0e1276",
   "prs": [
     {
@@ -256,8 +256,8 @@
         },
         {
           "name": "pytest-linux",
-          "status": "in_progress",
-          "conclusion": null
+          "status": "completed",
+          "conclusion": "success"
         },
         {
           "name": "context-policy",
@@ -284,8 +284,8 @@
         },
         {
           "name": "pytest-linux",
-          "status": "in_progress",
-          "conclusion": null
+          "status": "completed",
+          "conclusion": "success"
         },
         {
           "name": "context-policy",
@@ -493,13 +493,13 @@
     "workers": "all coding/review workers completed; no further tasks scheduled",
     "local_processes": "no pytest/ruff/node test/git push/cherry-pick process found in root sweep; workers independently confirmed exited",
     "cloud_watchdog": "stopped; no persistent cron created",
-    "hosted_checks": "See per-PR checks; pending hosted jobs are not claimed completed"
+    "hosted_checks": "Final #567/#568 Linux/context checks passed. External Cursor approval on #562 still in_progress at snapshot; no cancellation tool available. Not claimed stopped."
   },
   "validation": {
     "pi_backup": "193 passed; exact-head independent review clean at 2104aaf; fixture-only",
     "self_session": "186 Python + 48 subtests, 10 JS passed; exact-head static review clean at 0ca4fdeb",
     "agent_modes": "56 final focused Python, 10 JS passed; exact-head review clean at f1ab363; runtime mutation refused",
-    "handoff": "Independent read-only review found no material blocker; local links/JSON and diff whitespace validated"
+    "handoff": "Independent read-only review found no material blocker; local links/JSON and diff whitespace validated; final source dependency ancestry verified by git merge-base"
   },
   "limitations": [
     "Compaction request-only; completion unconfirmed",
