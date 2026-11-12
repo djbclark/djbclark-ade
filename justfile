@@ -54,10 +54,58 @@ doctor component="":
     set -eu
     args=()
     if [[ -n "${1:-}" ]]; then args=(--id "$1"); fi
-    exec "{{ root }}/bin/ade-install" doctor --root "{{ root }}" "${args[@]}"
+    exec "{{ root }}/bin/ade-install" doctor --root "{{ root }}" ${args[@]+"${args[@]}"}
 
+# S3a: ask the three Hermes paths once, record the answer, then apply.
+# Non-interactive runs (no tty, or ADE_HERMES_CHOICE=skip|self|ai) never prompt.
+# The choice file is local state; this never edits tracked config.
+[positional-arguments]
 install *args:
-    "{{ root }}/bin/ade-install" apply --root "{{ root }}" {{ args }}
+    #!/usr/bin/env bash
+    set -euo pipefail
+    root="{{ root }}"
+    live=false
+    state_args=()
+    want_state=false
+    for arg in "$@"; do
+      if [[ "$want_state" == true ]]; then state_args=(--state-dir "$arg"); want_state=false; continue; fi
+      case "$arg" in
+        --yes) live=true ;;
+        --state-dir) want_state=true ;;
+        --state-dir=*) state_args=(--state-dir "${arg#--state-dir=}") ;;
+      esac
+    done
+    if [[ "$want_state" == true ]]; then printf '%s\n' "--state-dir needs a value" >&2; exit 2; fi
+    choice="${ADE_HERMES_CHOICE:-}"
+    if [[ -z "${choice}" && -t 0 ]]; then
+      printf '%s\n' \
+        "Hermes (setup-plan S3a). Pick one:" \
+        "  1  skip        do not install; doctor stays quiet" \
+        "  2  self        install, then print the DIY checklist" \
+        "  3  ai          install, then open Claude Code on the setup prompt"
+      printf '%s' "choice [1/2/3]: "
+      read -r pick || pick=""
+      case "${pick}" in
+        1|skip) choice=skip ;;
+        2|self) choice=self ;;
+        3|ai) choice=ai ;;
+        *) printf '%s\n' "unrecognised choice '${pick}'; nothing recorded, install not run" >&2; exit 2 ;;
+      esac
+    fi
+    if [[ -n "${choice}" ]]; then
+      case "${choice}" in
+        skip|self|ai) ;;
+        *) printf '%s\n' "ADE_HERMES_CHOICE must be skip, self or ai (got '${choice}')" >&2; exit 2 ;;
+      esac
+      "${root}/bin/ade-install" hermes-choice "${choice}" ${state_args[@]+"${state_args[@]}"}
+    fi
+    "${root}/bin/ade-install" apply --root "${root}" "$@"
+    if [[ "$live" == true && "${choice}" == self ]]; then
+      exec just --justfile "${root}/justfile" hermes-setup --self
+    fi
+    if [[ "$live" == true && "${choice}" == ai ]]; then
+      exec just --justfile "${root}/justfile" hermes-setup
+    fi
 
 # S4 `just update`: with no arguments, the full update — checkout fast-forward
 # (ade-update), dependency update_argv with evidence and one doctor-driven retry

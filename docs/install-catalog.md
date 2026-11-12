@@ -192,6 +192,7 @@ ade-install update [--root DIR] [--json] [--dry-run|--yes] [--id ID ...]
                    [--state PATH] [--prefix DIR]
 ade-install bootstrap [--root DIR] [--prefix DIR] [--dry-run|--yes] [--json]
 ade-install doctor [--root DIR] [--id ID ...] [--json]
+ade-install hermes-choice {skip,self,ai} [--state-dir DIR] [--json]
 ade-install keys [--root DIR] [--json] [--keys-state PATH]
 ade-install keys-plan [--root DIR] [--json] [--state PATH]   # cached worklist; no probes/writes
 ade-install verify-key PROVIDER  # one of the eight fixed providers above; probe exit code only
@@ -208,8 +209,8 @@ just update-plan            # configured dependency candidates only; no probes/u
 just install-apply-dry
 just install-print-system-argv
 just doctor                 # alias of install-doctor (setup-plan S2 name)
-just doctor hermes          # selected component only (setup-plan S3a)
-just install [-- --yes]    # ade-install apply (dry-run by default; --yes for live)
+just doctor hermes          # catalog probe plus S3a checklist probes (setup-plan S3a)
+just install [-- --yes]    # asks the S3a Hermes choice on a tty, records it, then apply
 just update              # full S4 update: checkout ff + dependency update_argv (--yes) + doctor;
                          # args (e.g. `just update -- --check`) pass through to ade-update alone
 just update-auto [-- --apply-checkout|-- --apply]  # observe-only exit 5 by default;

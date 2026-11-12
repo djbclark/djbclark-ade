@@ -253,6 +253,130 @@ def test_paseo_plugin_rejects_install_argv(tmp_path):
         ai.load_catalog(root=root)
 
 
+def _hermes_catalog(root):
+    catalog = ai.load_catalog(root=root)
+    catalog.data["component"].append({
+        "id": "hermes", "class": "offered", "chosen": True,
+        "probe_argv": ["hermes", "doctor"], "install_argv": ["true"],
+    })
+    return catalog
+
+
+def _hermes_ok_runner(argv, cwd):
+    return subprocess.CompletedProcess(argv, 0, stdout="hermes healthy\n", stderr="")
+
+
+def test_hermes_choice_skip_keeps_doctor_quiet(tmp_path):
+    """A recorded skip overrides catalog chosen=true: no probe, exit 0."""
+    root = _fixture_root(tmp_path)
+    catalog = _hermes_catalog(root)
+    record = {"choice": "skip"}
+    obs, rc = ai.doctor(
+        catalog, component_ids=["hermes"], hermes_choice=record,
+        runner=_hermes_ok_runner, skip_credential_bak=True,
+    )
+    hermes = [o for o in obs if o.id == "hermes"]
+    assert len(hermes) == 1
+    assert hermes[0].status == "unchosen"
+    assert not any(o.kind == "hermes-item" for o in obs)
+    assert rc == 0
+
+
+def test_hermes_choice_self_runs_checklist(tmp_path, monkeypatch):
+    """self expects Hermes; a passing catalog probe then checks the checklist."""
+    monkeypatch.setattr(ai, "_probe_executable_missing", lambda _: False)
+    root = _fixture_root(tmp_path)
+    catalog = _hermes_catalog(root)
+    home = tmp_path / "home"
+    (home / ".hermes").mkdir(parents=True)
+    (home / ".hermes" / "config.yaml").write_text("model: local\n")
+    skills = home / ".local" / "share" / "skill-everywhere" / "skills"
+    skills.mkdir(parents=True)
+    collab = home / ".hermes" / "skills" / "autonomous-ai-agents" / "claude-collaboration"
+    collab.mkdir(parents=True)
+    (collab / "SKILL.md").write_text("# claude-collaboration\n")
+
+    def runner(argv, cwd):
+        if argv[:2] == ["claude", "mcp"]:
+            return subprocess.CompletedProcess(argv, 0, stdout="hermes: connected\n", stderr="")
+        return _hermes_ok_runner(argv, cwd)
+
+    obs, rc = ai.doctor(
+        catalog, component_ids=["hermes"], hermes_choice={"choice": "self"},
+        runner=runner, hermes_home=home, skip_credential_bak=True,
+    )
+    by_id = {o.id: o for o in obs}
+    assert by_id["hermes"].status == "ok"
+    for item in (
+        "hermes-config", "hermes-skills-root", "hermes-claude-collaboration", "hermes-mcp-bridge",
+    ):
+        assert by_id[item].status == "ok", item
+    # tell_chief_of_staff is optional: absent still ok, and never fails doctor.
+    assert by_id["hermes-tell-chief"].status == "ok"
+    assert "optional" in by_id["hermes-tell-chief"].detail
+    assert rc == 0
+
+
+def test_hermes_checklist_missing_item_fails_scoped_doctor(tmp_path, monkeypatch):
+    monkeypatch.setattr(ai, "_probe_executable_missing", lambda _: False)
+    root = _fixture_root(tmp_path)
+    catalog = _hermes_catalog(root)
+    obs, rc = ai.doctor(
+        catalog, component_ids=["hermes"], hermes_choice={"choice": "ai"},
+        runner=_hermes_ok_runner, hermes_home=tmp_path / "empty-home",
+        skip_credential_bak=True,
+    )
+    by_id = {o.id: o for o in obs}
+    assert by_id["hermes"].status == "ok"
+    assert by_id["hermes-config"].status == "missing"
+    assert rc == 1
+
+
+def test_hermes_choice_roundtrip_and_refuse(tmp_path):
+    path = ai.save_hermes_choice("skip", state_dir=tmp_path)
+    assert path == tmp_path / "hermes-choice.json"
+    assert ai.load_hermes_choice(tmp_path)["choice"] == "skip"
+    with pytest.raises(ai.InstallError):
+        ai.save_hermes_choice("later", state_dir=tmp_path)
+    path.write_text("{not json")
+    with pytest.raises(ai.InstallError):
+        ai.load_hermes_choice(tmp_path)
+
+
+@pytest.mark.parametrize("choice,chosen", [("skip", True), ("self", False), ("ai", False)])
+def test_hermes_choice_controls_apply(tmp_path, monkeypatch, choice, chosen):
+    root = _fixture_root(tmp_path)
+    catalog = _hermes_catalog(root)
+    hermes = next(row for row in catalog.components if row["id"] == "hermes")
+    hermes["chosen"] = chosen
+    hermes["install_argv"] = ["true"]
+    ai.save_hermes_choice(choice, state_dir=tmp_path / "state")
+    monkeypatch.setattr(ai, "observe_component", lambda *a, **k: ai.Observation("component", "hermes", "missing", "fixture"))
+    results, rc = ai.apply(catalog, ids={"hermes"}, state_dir=tmp_path / "state")
+    assert rc == 0
+    assert results[0]["action"] == ("skip" if choice == "skip" else "would-install")
+    assert hermes["chosen"] == chosen  # overlay must not mutate catalog metadata
+
+
+def test_hermes_choice_enables_unchosen_doctor(tmp_path, monkeypatch):
+    root = _fixture_root(tmp_path)
+    catalog = _hermes_catalog(root)
+    next(row for row in catalog.components if row["id"] == "hermes")["chosen"] = False
+    monkeypatch.setattr(ai, "_probe_executable_missing", lambda _: True)
+    obs, rc = ai.doctor(catalog, component_ids=["hermes"], hermes_choice={"choice": "self"})
+    assert next(o for o in obs if o.id == "hermes").status == "missing"
+    assert rc == 1
+
+
+def test_hermes_choice_cli_records_without_install(tmp_path):
+    proc = _run("hermes-choice", "ai", "--state-dir", str(tmp_path), "--json")
+    assert proc.returncode == 0, proc.stderr
+    body = json.loads(proc.stdout)
+    assert body["choice"] == "ai"
+    assert "hermes-setup" in body["next"]
+    assert ai.load_hermes_choice(tmp_path)["choice"] == "ai"
+
+
 def test_fixture_doctor_missing_vs_unchosen(tmp_path):
     root = _fixture_root(tmp_path)
     catalog = ai.load_catalog(root=root)
@@ -1820,3 +1944,14 @@ def test_update_retry_timeout_is_failed_even_when_doctor_ok(tmp_path):
     assert entry["rc"] == 0
     assert entry["retry_rc"] is None
     assert entry["doctor"] == "ok"
+
+
+
+@pytest.mark.parametrize("choice", [None, "skip", "self", "ai"])
+def test_hermes_choice_never_stays_unselected(choice):
+    record = None if choice is None else {"choice": choice}
+    assert ai.hermes_choice_effective({"id": "hermes", "class": "never"}, record) is False
+
+
+def test_hermes_checklist_test_has_docstring():
+    assert test_hermes_choice_self_runs_checklist.__doc__

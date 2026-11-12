@@ -180,6 +180,51 @@ def default_state_dir() -> Path:
     return Path.home() / ".local" / "state" / "djbclark-ade" / "install"
 
 
+# S3a Hermes install choice (2026-11-12). Recorded beside the ledger, never in
+# tracked config: `ade-config set` still refuses component-choice writes.
+HERMES_CHOICES = ("skip", "self", "ai")
+HERMES_CHOICE_FILE = "hermes-choice.json"
+HERMES_CHOICE_SCHEMA = 1
+
+# Checklist probes for `doctor --id hermes` once a setup path was chosen.
+# Each is observe-only: a missing file or command is a finding, never a repair.
+# Paths are the ones docs/hermes-setup.md and vendor/README.md already name.
+HERMES_CHECKLIST: tuple[dict[str, Any], ...] = (
+    {
+        "id": "hermes-config",
+        "summary": "model/provider config (~/.hermes/config.yaml)",
+        "kind": "file",
+        "path": "~/.hermes/config.yaml",
+    },
+    {
+        "id": "hermes-skills-root",
+        "summary": "djbclark-ade skills root (skill-everywhere hermes target)",
+        "kind": "dir",
+        "path": "~/.local/share/skill-everywhere/skills",
+    },
+    {
+        "id": "hermes-claude-collaboration",
+        "summary": "vendored claude-collaboration skill",
+        "kind": "file",
+        "path": "~/.hermes/skills/autonomous-ai-agents/claude-collaboration/SKILL.md",
+    },
+    {
+        "id": "hermes-mcp-bridge",
+        "summary": "Claude MCP bridge registration (claude mcp list)",
+        "kind": "argv",
+        "argv": ["claude", "mcp", "list"],
+        "expect": "hermes",
+    },
+    {
+        "id": "hermes-tell-chief",
+        "summary": "tell_chief_of_staff skill pointer (optional; never configured here)",
+        "kind": "dir",
+        "path": "~/.hermes/skills/agent-tooling/tell-chief-of-staff",
+        "optional": True,
+    },
+)
+
+
 def default_keys_state_path() -> Path:
     """Atomic outcomes file for ``ade-install keys`` (no values, no hashes)."""
     env = os.environ.get("ADE_KEYS_STATE_PATH")
@@ -289,6 +334,140 @@ def load_catalog(
         "note": "joint install/keys metadata; existing consumers retain their operation boundaries",
     }
     return Catalog(data=copy.deepcopy(raw), path=path, provenance=provenance, root=root)
+
+
+def hermes_choice_path(state_dir: Path | None = None) -> Path:
+    return (state_dir or default_state_dir()) / HERMES_CHOICE_FILE
+
+
+def load_hermes_choice(state_dir: Path | None = None) -> dict[str, Any] | None:
+    """Read the recorded Hermes choice, or None when the operator has not picked.
+
+    A corrupt or unknown record raises: doctor must not treat it as "skipped".
+    """
+    path = hermes_choice_path(state_dir)
+    if not path.is_file():
+        return None
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, RecursionError) as e:
+        raise InstallError(f"{path}: unreadable Hermes choice ({e})") from e
+    if (not isinstance(raw, dict) or raw.get("choice") not in HERMES_CHOICES
+            or raw.get("schema_version") != HERMES_CHOICE_SCHEMA
+            or raw.get("component") != "hermes"):
+        raise InstallError(f"{path}: Hermes choice must be one of {', '.join(HERMES_CHOICES)}")
+    return raw
+
+
+def save_hermes_choice(choice: str, *, state_dir: Path | None = None) -> Path:
+    """Record skip / self / ai. Does not install, probe, or edit tracked config."""
+    if choice not in HERMES_CHOICES:
+        raise InstallError(f"unknown Hermes choice {choice!r}; expected {', '.join(HERMES_CHOICES)}")
+    path = hermes_choice_path(state_dir)
+    _atomic_write_json(path, {
+        "schema_version": HERMES_CHOICE_SCHEMA,
+        "component": "hermes",
+        "choice": choice,
+        "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    })
+    return path
+
+
+def hermes_choice_effective(row: dict[str, Any], record: dict[str, Any] | None) -> bool:
+    """Whether doctor should expect Hermes: the recorded choice wins over the catalog.
+
+    ``skip`` is not expected (doctor stays quiet). ``self`` and ``ai`` are
+    expected. With no record, the catalog's own ``chosen`` stands, so this
+    operator's tracked ``chosen = true`` is unchanged until a choice is made.
+    """
+    if row.get("class") == "never":
+        return False
+    if record is not None:
+        return record.get("choice") != "skip"
+    return expected_installed(row)
+
+
+def catalog_with_hermes_choice(catalog: Catalog, record: dict[str, Any] | None) -> Catalog:
+    """Overlay the local choice on a copy, retaining the original catalog."""
+    if record is None:
+        return catalog
+    result = copy.copy(catalog)
+    result.data = copy.deepcopy(catalog.data)
+    for row in result.components:
+        if row["id"] == "hermes" and row["class"] != "never":
+            row["chosen"] = record["choice"] != "skip"
+    return result
+
+
+def hermes_setup_hint(choice: str) -> str:
+    """The one next command for a recorded choice. Prints nothing secret."""
+    if choice == "skip":
+        return "Hermes recorded as not chosen; doctor stays quiet about it."
+    if choice == "self":
+        return "Next: just hermes-setup --self  (DIY checklist; no agent)."
+    return "Next: just hermes-setup  (Claude Code walks prompts/setup/hermes.md)."
+
+
+def observe_hermes_checklist(
+    *,
+    runner: Runner | None = None,
+    probe_timeout_s: float = 15.0,
+    home: Path | None = None,
+) -> list[Observation]:
+    """Observe-only probes for the S3a checklist. Never installs or edits.
+
+    A missing file or a command that is not on PATH is ``missing``. An argv
+    probe whose output lacks the expected token is ``error``. Items marked
+    optional (the tell_chief_of_staff pointer) report ``ok`` when absent so a
+    skip there cannot fail doctor.
+    """
+    base = (home or Path.home()).expanduser()
+    out: list[Observation] = []
+    for item in HERMES_CHECKLIST:
+        iid = str(item["id"])
+        optional = bool(item.get("optional"))
+        kind = item["kind"]
+        if kind in ("file", "dir"):
+            raw = str(item["path"])
+            path = Path(raw.replace("~/", str(base) + "/", 1)) if raw.startswith("~/") else Path(raw)
+            present = path.is_file() if kind == "file" else path.is_dir()
+            if present:
+                out.append(Observation("hermes-item", iid, "ok", f"{item['summary']}: {path}"))
+            elif optional:
+                out.append(Observation(
+                    "hermes-item", iid, "ok",
+                    f"{item['summary']}: absent (optional; doctor does not configure it)",
+                ))
+            else:
+                out.append(Observation("hermes-item", iid, "missing", f"{item['summary']}: not found at {path}"))
+            continue
+        argv = list(item["argv"])
+        if _probe_executable_missing(argv[0]):
+            status = "ok" if optional else "missing"
+            detail = f"{item['summary']}: {argv[0]} not on PATH"
+            if optional:
+                detail += " (optional)"
+            out.append(Observation("hermes-item", iid, status, detail))
+            continue
+        run = runner or (lambda a, cwd: _default_runner(a, cwd, timeout_s=probe_timeout_s))
+        try:
+            proc = run(argv, base)
+        except subprocess.TimeoutExpired:
+            out.append(Observation("hermes-item", iid, "error", f"{item['summary']}: timed out"))
+            continue
+        except OSError as e:
+            out.append(Observation("hermes-item", iid, "error", f"{item['summary']}: exec error: {e}"))
+            continue
+        text = ((proc.stdout or "") + "\n" + (proc.stderr or "")).lower()
+        token = str(item.get("expect") or "").lower()
+        if proc.returncode == 0 and (not token or token in text):
+            out.append(Observation("hermes-item", iid, "ok", f"{item['summary']}: present"))
+        else:
+            out.append(Observation(
+                "hermes-item", iid, "error",
+                f"{item['summary']}: not confirmed (exit {proc.returncode})",
+            ))
+    return out
 
 
 def expected_installed(row: dict[str, Any]) -> bool:
@@ -1339,6 +1518,9 @@ def doctor(
     credential_bak: Observation | None = None,
     skip_credential_bak: bool = False,
     pi_pool_acceptance_path: Path | None = None,
+    hermes_choice: dict[str, Any] | None = None,
+    hermes_choice_state_dir: Path | None = None,
+    hermes_home: Path | None = None,
 ) -> tuple[list[Observation], int]:
     """Observe-only doctor. Exit 1 if any expected component/settings/job drifts
     (including ``paseo_plugin`` missing/disabled when expected), or credential-bak
@@ -1368,8 +1550,22 @@ def doctor(
     obs: list[Observation] = [
         Observation("catalog", str(catalog.path), "ok", "catalog validated"),
     ]
+    selecting_hermes = any(row["id"] == "hermes" for row in components)
+    if hermes_choice is None and selecting_hermes:
+        hermes_choice = load_hermes_choice(hermes_choice_state_dir)
+    hermes_record = hermes_choice or None
+    effective = catalog_with_hermes_choice(catalog, hermes_record)
+    selected_ids = {row["id"] for row in components}
+    components = [row for row in effective.components if row["id"] in selected_ids]
+
     hard_missing = 0
     for row in components:
+        if str(row["id"]) == "hermes" and hermes_record is not None and not hermes_choice_effective(row, hermes_record):
+            obs.append(Observation(
+                "component", "hermes", "unchosen",
+                f"Hermes choice recorded as {hermes_record.get('choice')}; no probe",
+            ))
+            continue
         if component_ids is not None and not expected_installed(row):
             status = "never" if row["class"] == "never" else "unchosen"
             obs.append(Observation(
@@ -1388,6 +1584,18 @@ def doctor(
         # but only expected components fail the doctor exit code. Never install/enable.
         if expected_installed(row) and o.status in ("missing", "disabled", "error"):
             hard_missing += 1
+        if (
+            str(row["id"]) == "hermes"
+            and component_ids is not None
+            and hermes_choice_effective(row, hermes_record)
+            and o.status == "ok"
+        ):
+            for item in observe_hermes_checklist(
+                runner=runner, probe_timeout_s=probe_timeout_s, home=hermes_home,
+            ):
+                obs.append(item)
+                if item.status in ("missing", "error"):
+                    hard_missing += 1
     if component_ids is not None:
         return obs, (1 if hard_missing else 0)
     for row in catalog.keys:
@@ -2397,6 +2605,10 @@ def apply(
         raise InstallError("--apply-system requires --yes (refused with dry-run)")
     if reconcile_sched is None:
         reconcile_sched = ids is None
+    state_dir = state_dir or default_state_dir()
+    if any(row["id"] == "hermes" and (ids is None or "hermes" in ids)
+           for row in catalog.components):
+        catalog = catalog_with_hermes_choice(catalog, load_hermes_choice(state_dir))
     def plan_components() -> list[ApplyStep]:
         return build_apply_steps(
             catalog, ids=ids, force=force, allow_system=allow_system,
