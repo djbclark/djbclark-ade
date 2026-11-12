@@ -308,7 +308,12 @@ Keys are saved with `sudo-secretspec`, and also through Paseo if it has a secure
      Future ADE orchestration must require a real terminal and inherit its stdio directly, never collect
      values in Python, pipes, chat or logs. See [install-catalog.md](install-catalog.md) for pinned evidence.
    - The bounded `keys-plan` reporting unit describes cached outcomes and unresolved coverage only.
-     Interactive collection, retry/skip execution and delivery remain separate unfinished work.
+   - **Implemented 2026-11-12 (W15):** `ade-install keys-collect` / `just keys-collect` runs this batch (fresh
+     check and verify, one question, `set` on inherited terminal stdio, immediate verify, retry/skip/skip-all,
+     summary table); expiring-within-14-days and expired keys rejoin the batch; with no terminal it lists names
+     and exits 3. Delivery uses the no-secure-store route of item 5 (consumers read at launch under
+     `sudo-secretspec run`); the Paseo secure-store probe is still unrun. Details:
+     [install-catalog.md](install-catalog.md). Live proof at a real terminal remains.
    - In the AI-assisted setup (S3a.3) the agent stops at each key and the user types it into the prompt themselves.
 5. **Deliver to Paseo and the tools, only through a secure store.**
    - First probe whether Paseo has a secure credential store for provider keys (the Keychain on the Mac, a 0600 file

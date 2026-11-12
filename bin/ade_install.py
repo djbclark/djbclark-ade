@@ -1459,6 +1459,378 @@ def keys_observe(
     return obs, rc
 
 
+# --- S3b batch collection (W15, 2026-11-12) -------------------------------
+# One interactive batch of ``sudo-secretspec set`` calls for the selected-key
+# worklist. ade-install never sees, reads, captures or prints a value: ``set``
+# inherits this process's terminal stdio, so sudo-secretspec's own no-echo
+# prompt takes the value. Non-interactive runs only list key names.
+
+KEYS_COLLECT_EXPIRY_LEAD_DAYS = 14
+EXIT_KEYS_COLLECT_NEEDS_TERMINAL = 3
+SECRET_NAME_RE = re.compile(r"[A-Z][A-Z0-9_]*")
+_EXPIRING_DETAIL_DATE = re.compile(r"verify expiring (\d{4}-\d{2}-\d{2})")
+# Delivery route while no Paseo secure credential store has been probed
+# (setup-plan S3b.5 fallback): nothing is copied anywhere; consumers get the
+# key from the store at launch, under ``sudo-secretspec run``.
+DELIVERY_MODE = "launch-under-sudo-secretspec-run"
+_PRESENCE_SNIPPET = "import os, sys; sys.exit(0 if os.environ.get(sys.argv[1]) else 14)"
+
+
+def secretspec_set_argv(name: str) -> list[str]:
+    """``sudo-secretspec set NAME --reason …`` argv; the value is never in argv."""
+    return ["sudo-secretspec", "set", name, "--reason", f"ade-install keys-collect {name}"]
+
+
+def secretspec_presence_argv(name: str) -> list[str]:
+    """Presence-only probe under ``run`` for keys that record no verify_argv.
+
+    The child reads the injected variable and exits 0 (set) or 14 (empty); it
+    prints nothing, so no value or length reaches ade-install.
+    """
+    return [
+        "sudo-secretspec", "run", "--reason", f"ade-install keys-collect presence {name}",
+        "--", sys.executable, "-I", "-c", _PRESENCE_SNIPPET, name,
+    ]
+
+
+def observe_key_presence(
+    row: dict[str, Any],
+    *,
+    root: Path,
+    runner: Runner | None = None,
+    timeout_s: float = 30.0,
+) -> Observation:
+    """Presence of one key with no verify probe: ``present`` | ``missing`` | ``unknown``."""
+    name = str(row["name"])
+    if not SECRET_NAME_RE.fullmatch(name):
+        return Observation("key", name, "error", "invalid secret name; not probed")
+    run = runner or (lambda a, d: _default_runner(a, d, timeout_s=timeout_s))
+    try:
+        proc = run(secretspec_presence_argv(name), root)
+    except subprocess.TimeoutExpired:
+        return Observation("key", name, "unknown", f"presence probe timed out after {timeout_s}s")
+    except OSError:
+        return Observation("key", name, "unknown", "presence probe could not run")
+    if proc.returncode == 0:
+        return Observation(
+            "key", name, "present",
+            "present under sudo-secretspec run; no verify command recorded (no value read)")
+    if proc.returncode == VERIFY_EXIT_MISSING:
+        return Observation("key", name, "missing", "not set under sudo-secretspec run (no value read)")
+    return Observation(
+        "key", name, "unknown",
+        f"presence probe inconclusive (exit {proc.returncode}; no value read)")
+
+
+def keys_collect_reason(status: str, detail: str, *, today: date | None = None) -> str | None:
+    """Why a key belongs in the collection batch, or ``None`` when it does not.
+
+    Missing, invalid and no-quota keys always rejoin. An expiring key rejoins
+    when its date is within ``KEYS_COLLECT_EXPIRY_LEAD_DAYS`` (or past), or when
+    the probe reported expiry without a date; a later date waits.
+    """
+    if status in ("missing", "invalid", "no-quota"):
+        return status
+    if status != "expiring":
+        return None
+    found = _EXPIRING_DETAIL_DATE.search(detail or "")
+    if not found:
+        return "expiring (date unknown)"
+    try:
+        due = date.fromisoformat(found.group(1))
+    except ValueError:
+        return "expiring (date unknown)"
+    left = (due - (today or date.today())).days
+    if left > KEYS_COLLECT_EXPIRY_LEAD_DAYS:
+        return None
+    return f"expiring {due.isoformat()}" if left >= 0 else f"expired {due.isoformat()}"
+
+
+def keys_collect_worklist(
+    catalog: Catalog,
+    observations: list[Observation],
+    *,
+    today: date | None = None,
+) -> list[dict[str, Any]]:
+    """Selected keys needing a (new) value, from fresh observations.
+
+    Reuses ``keys_plan`` for selection (components chosen, linkage) so a key
+    nobody selected never enters the batch. Rows carry names, purposes, the
+    creation URL and the consumers (selected components) that receive the key.
+    """
+    state = {o.id: {"status": o.status} for o in observations if o.kind == "key"}
+    details = {o.id: o.detail for o in observations if o.kind == "key"}
+    plan_rows = keys_plan(
+        catalog,
+        cache={"updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "keys": state},
+        cache_status="loaded",
+    )["keys"]
+    by_name = {str(r["name"]): r for r in catalog.keys}
+    work: list[dict[str, Any]] = []
+    for row in plan_rows:
+        if row["action"] != "review-credential":
+            continue
+        name = row["name"]
+        reason = keys_collect_reason(row["cached_status"], details.get(name, ""), today=today)
+        if reason is None:
+            continue
+        work.append({
+            "name": name,
+            "reason": reason,
+            "purposes": row["purposes"],
+            "create_url": row["create_url"],
+            "consumers": row["selected_components"],
+            "delivery": DELIVERY_MODE,
+            "verifiable": bool(by_name[name].get("verify_argv")),
+        })
+    return work
+
+
+def _inherited_stdio_runner(argv: list[str], cwd: Path) -> int:
+    """Run ``argv`` on this process's own terminal: no pipes, no capture.
+
+    stdin/stdout/stderr are deliberately not passed, so ``sudo-secretspec set``
+    prompts on the real terminal and the value never touches ade-install.
+    """
+    return subprocess.run(argv, cwd=cwd, check=False).returncode
+
+
+_CHOICE_WORDS = {
+    "": "", "e": "e", "enter": "e", "s": "s", "skip": "s", "a": "a", "all": "a",
+    "r": "r", "retry": "r", "y": "y", "yes": "y", "n": "n", "no": "n",
+}
+
+
+def _printable(text: object) -> str:
+    """Catalog-derived text for the terminal: control and escape characters become ``?``."""
+    return "".join(
+        "?" if (ord(c) < 32 or 0x7F <= ord(c) <= 0x9F) else c for c in str(text))
+
+
+def _ask_choice(
+    ask: Callable[[str], str],
+    prompt: str,
+    allowed: str,
+    default: str,
+    warn: Callable[[str], None] = lambda _m: None,
+) -> str:
+    """One-letter choice from exact tokens only; EOF, interrupt or junk x3 means ``a``.
+
+    Anything that is not an exact token (a pasted key, say) is discarded
+    unread and never echoed, and its first letter is never acted on. The
+    default ``ask`` is ``getpass`` (no echo), so a value pasted by mistake does
+    not reach the scrollback either.
+    """
+    for _ in range(3):
+        try:
+            raw = ask(prompt).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return "a"
+        choice = _CHOICE_WORDS.get(raw) if len(raw) <= 6 else None
+        if choice == "":
+            return default
+        if choice and choice in allowed:
+            return choice
+        warn("  not a choice: input discarded unread (type a secret only at "
+             "sudo-secretspec's own hidden prompt)")
+    return "a"
+
+
+def scrub_key_env(catalog: Catalog, environ: Any = None) -> list[str]:
+    """Drop catalog key names from the process environment before any probe.
+
+    ``sudo-secretspec run`` hands its child the caller's environment plus the
+    store values, so a stale exported ``NAME`` would make a probe pass for a key
+    the store lacks. Returns the names removed (names only).
+    """
+    env = os.environ if environ is None else environ
+    removed = []
+    for row in catalog.keys:
+        name = str(row["name"])
+        if name in env:
+            del env[name]
+            removed.append(name)
+    return removed
+
+
+def keys_collect(
+    catalog: Catalog,
+    *,
+    interactive: bool,
+    emit: Callable[[str], None],
+    ask: Callable[[str], str] | None = None,
+    setter: Callable[[list[str], Path], int] | None = None,
+    runner: Runner | None = None,
+    timeout_s: float = 30.0,
+    keys_state_path: Path | None = None,
+    today: date | None = None,
+) -> dict[str, Any]:
+    """Check, list, then (at a terminal) collect the selected keys in one batch.
+
+    Result ``rc``: 0 nothing left to do, 1 keys skipped/failed/declined/unconfirmed,
+    2 sudo-secretspec unavailable, 3 work remains but no terminal (nothing
+    prompted, nothing set). Outcomes per key: ok | stored-unverified | skipped
+    | failed. Delivery never copies a value: consumers read the key from the
+    store at launch under ``sudo-secretspec run`` (``DELIVERY_MODE``). Choices
+    are read with ``getpass`` (no echo) unless ``ask`` is injected.
+    """
+    if ask is None:
+        import getpass  # noqa: PLC0415
+        ask = getpass.getpass
+    state_path = keys_state_path or default_keys_state_path()
+    check_text: list[str] = []
+    base_runner = runner or (lambda a, d: _default_runner(a, d, timeout_s=timeout_s))
+
+    def recording_runner(argv: list[str], cwd: Path) -> "subprocess.CompletedProcess[str]":
+        proc = base_runner(argv, cwd)
+        if list(argv) == SECRETSPEC_CHECK_ARGV:
+            check_text.append(f"{proc.stdout or ''}\n{proc.stderr or ''}")  # matched, never printed
+        return proc
+
+    obs, _rc = keys_observe(
+        catalog, runner=recording_runner, timeout_s=timeout_s, keys_state_path=state_path)
+    check = next((o for o in obs if o.kind == "secretspec"), None)
+    if check is None or check.status == "unknown":
+        emit("ade-install keys-collect: sudo-secretspec not on PATH; nothing collected")
+        return {"rc": 2, "worklist": [], "results": [], "interactive": interactive}
+    by_name = {str(r["name"]): r for r in catalog.keys}
+    # Keys with no verify probe are invisible to ``keys``; settle presence here.
+    obs = [
+        observe_key_presence(by_name[o.id], root=catalog.root, runner=recording_runner,
+                             timeout_s=timeout_s)
+        if o.kind == "key" and o.status == "unknown" and o.id in by_name
+        and not by_name[o.id].get("verify_argv") else o
+        for o in obs
+    ]
+    check_failed = check.status in ("missing", "error")
+    if check_failed:
+        # ``run`` refuses to start while a required secret is unset, so every
+        # probe above is inconclusive. Take the key names ``check`` itself
+        # reports (names matched, nothing printed from its output).
+        text = "\n".join(check_text)
+        reported = {n for n in by_name if re.search(rf"(?<![A-Z0-9_]){re.escape(n)}(?![A-Z0-9_])", text)}
+        obs = [
+            Observation("key", o.id, "missing", "reported missing by sudo-secretspec check (no value read)")
+            if o.kind == "key" and o.id in reported and o.status in ("unknown", "error") else o
+            for o in obs
+        ]
+    work = keys_collect_worklist(catalog, obs, today=today)
+    if not work:
+        save_keys_state(state_path, observations=obs)
+        if check_failed:
+            emit("ade-install keys-collect: sudo-secretspec check failed but names no selected key; "
+                 "probes cannot run, so key health is unconfirmed (nothing collected)")
+            return {"rc": 1, "worklist": [], "results": [], "interactive": interactive}
+        emit("ade-install keys-collect: no selected key is missing, failing or expiring")
+        return {"rc": 0, "worklist": [], "results": [], "interactive": interactive}
+    emit(f"ade-install keys-collect: {len(work)} selected key(s) need a value (names only; no values read)")
+    for item in work:
+        emit(f"  {_printable(item['name'])}: {_printable(item['reason'])}")
+        emit(f"    used by: {_printable(', '.join(item['consumers']) or 'UNKNOWN')}; "
+             f"purposes: {_printable('; '.join(item['purposes']) or 'UNKNOWN')}")
+        emit(f"    create at: {_printable(item['create_url'] or 'UNKNOWN')}; verify: "
+             f"{'yes' if item['verifiable'] else 'presence only'}")
+    if not interactive:
+        save_keys_state(state_path, observations=obs)
+        emit("ade-install keys-collect: no terminal; not prompting and nothing set. "
+             "Run `just keys-collect` at a terminal.")
+        return {"rc": EXIT_KEYS_COLLECT_NEEDS_TERMINAL, "worklist": work, "results": [],
+                "interactive": False}
+    run_set = setter or _inherited_stdio_runner
+    results: list[dict[str, Any]] = []
+    enter_prompt = "Press Enter to run sudo-secretspec set (it prompts for the value itself), [s]kip, skip [a]ll: "
+
+    def finish(item: dict[str, Any], outcome: str, detail: str) -> None:
+        results.append({"name": item["name"], "outcome": outcome, "detail": detail,
+                        "consumers": item["consumers"],
+                        "delivery": DELIVERY_MODE if outcome in ("ok", "stored-unverified") else None})
+
+    def choose(prompt: str, allowed: str, default: str) -> str:
+        return _ask_choice(ask, prompt, allowed, default, warn=emit)
+
+    if choose(f"Enter these {len(work)} key(s) now, one at a time? [y/N] ", "yn", "n") != "y":
+        for item in work:
+            finish(item, "skipped", "declined at the batch prompt")
+    else:
+        skip_all = False
+        for index, item in enumerate(work):
+            name = item["name"]
+            if skip_all:
+                finish(item, "skipped", "skip all")
+                continue
+            if not SECRET_NAME_RE.fullmatch(name):
+                finish(item, "failed", "invalid secret name; set not attempted")
+                continue
+            emit(f"[{index + 1}/{len(work)}] {name}: {_printable(item['reason'])}; used by "
+                 f"{_printable(', '.join(item['consumers']) or 'UNKNOWN')}; "
+                 f"create at {_printable(item['create_url'] or 'UNKNOWN')}")
+            prompt = enter_prompt
+            stored = False
+            try:
+                while True:
+                    choice = choose(prompt, "esa", "e")
+                    if choice in ("s", "a"):
+                        skip_all = skip_all or choice == "a"
+                        finish(item, "skipped", "skip all" if choice == "a" else "skipped")
+                        break
+                    try:
+                        set_rc = run_set(secretspec_set_argv(name), catalog.root)
+                    except OSError:
+                        set_rc = 127
+                    if set_rc != 0:
+                        # An undeclared name fails here; declaring it is a separate,
+                        # explicit `sudo-secretspec add`, never done silently.
+                        emit(f"  {name}: sudo-secretspec set exited {set_rc}")
+                        follow = choose(
+                            "If the name is undeclared, declare it with `sudo-secretspec add` first. "
+                            "[r]etry, [s]kip, skip [a]ll: ", "rsa", "s")
+                        if follow == "r":
+                            prompt = enter_prompt
+                            continue
+                        skip_all = skip_all or follow == "a"
+                        finish(item, "failed", f"sudo-secretspec set exited {set_rc}")
+                        break
+                    stored = True
+                    row = by_name[name]
+                    if row.get("verify_argv"):
+                        post = observe_key_verify(row, root=catalog.root, runner=runner, timeout_s=timeout_s)
+                    else:
+                        post = observe_key_presence(row, root=catalog.root, runner=runner, timeout_s=timeout_s)
+                    obs = [post if (o.kind == "key" and o.id == name) else o for o in obs]
+                    reason = keys_collect_reason(post.status, post.detail, today=today)
+                    if reason is None and post.status in ("ok", "present"):
+                        finish(item, "ok", post.detail)
+                        emit(f"  {name}: {post.status}; consumers read it at launch from sudo-secretspec "
+                             f"({DELIVERY_MODE}); nothing copied")
+                        break
+                    if reason is None:
+                        # unreachable / error / unknown: stored, but this run cannot confirm it.
+                        finish(item, "stored-unverified", post.detail)
+                        emit(f"  {name}: stored; verification inconclusive ({post.status})")
+                        break
+                    emit(f"  {name}: stored but {reason}")
+                    follow = choose(f"{name} is still {reason} - [r]etry, [s]kip, skip [a]ll: ", "rsa", "s")
+                    if follow == "r":
+                        stored = False
+                        prompt = enter_prompt
+                        continue
+                    skip_all = skip_all or follow == "a"
+                    finish(item, "failed", f"stored but {reason}")
+                    break
+            except KeyboardInterrupt:
+                skip_all = True
+                if stored:
+                    finish(item, "stored-unverified", "interrupted after set, before verification")
+                else:
+                    finish(item, "failed", "interrupted during set")
+    save_keys_state(state_path, observations=obs)
+    emit("ade-install keys-collect: summary")
+    for r in results:
+        emit(f"  {r['outcome']:17} {_printable(r['name'])}: {_printable(r['detail'])}")
+    bad = [r for r in results if r["outcome"] != "ok"]
+    return {"rc": 1 if bad else 0, "worklist": work, "results": results, "interactive": True}
+
+
 def default_pi_pool_acceptance_path(root: Path) -> Path:
     return root / "config" / "pi-pool-acceptance.toml"
 

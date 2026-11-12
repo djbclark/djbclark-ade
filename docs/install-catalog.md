@@ -148,8 +148,9 @@ requests and no free metadata endpoint is documented; `GREPTILE_API_KEY` — the
 REST metadata routes answer 404 (observed 2026-11-12) and the current API is
 MCP with OAuth, whose `get_me` is a POST JSON-RPC call and probes never post.
 Expiry reporting is wired where a provider's metadata itself exposes a date
-(github); the other metadata endpoints expose none. Collect/delivery and live
-validation remain unfinished. Component/key selection behavior is unchanged.
+(github); the other metadata endpoints expose none. Batch collection, the
+launch-time delivery route and expiry rejoin are implemented (`keys-collect`,
+2026-11-12); live validation remains unfinished. Component/key selection behavior is unchanged.
 
 The three-provider extension builds on #552's reviewed fixed transport. Its
 code tests use mocked responses only; no inference, billing or pool-acceptance
@@ -195,6 +196,7 @@ ade-install doctor [--root DIR] [--id ID ...] [--json]
 ade-install hermes-choice {skip,self,ai} [--state-dir DIR] [--json]
 ade-install keys [--root DIR] [--json] [--keys-state PATH]
 ade-install keys-plan [--root DIR] [--json] [--state PATH]   # cached worklist; no probes/writes
+ade-install keys-collect [--root DIR] [--json] [--keys-state PATH]   # batch sudo-secretspec set; terminal only, else list + exit 3
 ade-install verify-key PROVIDER  # one of the eight fixed providers above; probe exit code only
 ade-install apply [--root DIR] [--json] [--dry-run|--yes] [--id ID ...] [--force]
                   [--system] [--print-system-argv] [--apply-system]
@@ -203,6 +205,7 @@ just install-check
 just install-doctor
 just keys / just keys-check   # ade-install keys (S3b observe; keys-check is the setup-plan alias)
 just keys-plan [--json] [--state PATH]   # ade-install keys-plan (cached outcomes only)
+just keys-collect [--json]       # ade-install keys-collect (interactive batch; --json lists only)
 just keys-check-install       # daily ade-sched job for keys observe
 just install-plan
 just update-plan            # configured dependency candidates only; no probes/updates
@@ -515,7 +518,7 @@ argv or automatic replacement authorization is produced.
 Cache reads are capped at 1 MiB and use nonblocking descriptors; FIFOs, devices
 and other nonregular inputs are reported as invalid rather than read.
 
-Interactive collection remains unfinished. Source checked 2026-11-11 at
+Source checked 2026-11-11 at
 sudo-secretspec `3c37fe3511e4907d643f35d615d27d898bf3b68a` confirms
 [`set NAME --reason REASON`](https://github.com/frdminc/sudo-secretspec/blob/3c37fe3511e4907d643f35d615d27d898bf3b68a/sudo-secretspec-cli/src/main.rs#L49),
 delegated by the [broker](https://github.com/frdminc/sudo-secretspec/blob/3c37fe3511e4907d643f35d615d27d898bf3b68a/sudo-secretspec-cli/src/broker.rs#L1139)
@@ -524,5 +527,55 @@ TTY stdin invokes `inquire::Password`; non-TTY stdin reads value bytes. There is
 no companion `secrets-collect` CLI verb at that revision. Future collection must
 use direct inherited terminal stdio with no ADE value input/capture, preserve
 explicit choices and handle undeclared names without silently adding declarations.
-This audit does not establish installed runtime versions, Paseo secure storage,
-delivery/expiry policy or provider acceptance.
+This audit does not establish installed runtime versions, Paseo secure storage
+or provider acceptance.
+
+### `ade-install keys-collect` / `just keys-collect` (W15, 2026-11-12)
+
+Batch collection for the selected-key worklist (setup-plan S3b.4-5). Offline-tested
+only; no live vault, terminal session or provider call was made.
+
+1. **Fresh observation first.** It runs the `keys` path (`sudo-secretspec check`,
+   each recorded `verify_argv` under `run`) so the worklist reflects current
+   outcomes, not the cache. A key with no `verify_argv` is settled by a
+   value-free presence child under `run` (it exits 0 or 14 and prints nothing).
+   The CLI first removes every catalog key name from its own environment, because
+   `run` passes the caller's environment through and a stale exported `NAME`
+   would make a probe pass for a key the store lacks. `sudo-secretspec run`
+   refuses to start while a required secret is unset, so then every probe is
+   inconclusive: the command takes the key names `check` itself reports (names
+   matched, nothing printed) into the batch, and when `check` fails but names no
+   selected key it exits 1 as unconfirmed, never 0.
+2. **Worklist** = `keys-plan` selection (components chosen) whose fresh status is
+   `missing`, `invalid` or `no-quota`, or `expiring` with a date within 14 days
+   (or past) or with no date. A later expiry date waits, so a year-out GitHub
+   token is not nagged. Expired keys therefore rejoin the batch on the next run.
+3. **Non-interactive** (no terminal on stdin and stdout, or `--json`): prints the
+   key names, consumers, purposes and creation URLs, never prompts, never runs
+   `set`, and exits **3**. `--json` is the agent form (an agent has no terminal,
+   so the operator types values: S3a.3). Exit 2: `sudo-secretspec` not on PATH.
+4. **Interactive:** one question for the whole batch, then per key: name, reason,
+   consumers, URL, and `[Enter]` to run
+   `sudo-secretspec set NAME --reason "ade-install keys-collect NAME"` with the
+   terminal's own stdio inherited (no pipes: the value never reaches ade-install,
+   an agent, a log or the state file), `[s]kip` or skip `[a]ll`. Choices are read
+   with `getpass` (no echo) and only exact tokens count (`""`, `e`, `s`, `a`, `r`,
+   `y`, `n` or the full word); anything else, such as a key pasted at the wrong
+   prompt, is discarded unread, never echoed or acted on, and three of them mean
+   skip all. EOF and Ctrl-C also skip all; Ctrl-C after a successful `set`
+   records `stored-unverified`. Catalog-derived text is printed with control and
+   escape characters replaced by `?`. A non-zero `set` (for example an undeclared name) offers
+   retry/skip/skip-all and prints a hint to declare the name with
+   `sudo-secretspec add`; the name is never declared automatically.
+5. **Verify straight away** (probe or presence) and write the outcome to
+   `keys.json` (statuses only). Outcomes: `ok`, `stored-unverified` (stored but the
+   probe was unreachable/inconclusive), `skipped`, `failed` (still failing or
+   expiring after `set`; retry offered). The run ends with a table and exits 0
+   only when every key is `ok`.
+6. **Delivery (decided 2026-11-12, S3b.5 fallback):** no Paseo secure credential
+   store has been probed, so nothing is copied into Paseo or any tool's config.
+   Each result names its consumers (the key's selected components) and the route
+   `launch-under-sudo-secretspec-run`: the consumer reads the key from the store
+   when launched under `sudo-secretspec run`. A replaced key needs no
+   re-delivery. If a Paseo/TUI secure store is later probed and proven, a writer
+   (value on stdin or environment inside `run`, never argv) is a separate unit.
