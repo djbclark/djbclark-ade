@@ -1,0 +1,15 @@
+Resume djbclark/djbclark-ade locally after the 2026-11-12 cloud handoff.
+
+Fetch origin and read docs/handoffs/cloud-to-local-2026-11-12/HANDOFF.md from branch local-agent-handoff-20261112 (or its merged copy). Read the adjacent evidence.json and SESSION_LOG.md. Then read docs/slim/audit-walk-decisions-2026-11-12.md and change-audit-2026-11-11.md from PR #562 branch slim-change-audit-20261111 if not merged. Preserve other sessions' work; use a fresh exclusively claimed worktree.
+
+First action: refresh GitHub states/heads/review findings for PRs #558–#562 and #565–#568, reconcile the #568 mode-helper → #567 self-session dependency, and validate/review the ready changes before merging. Do not treat this handoff's snapshot as current merge approval. #563 is a later intentional merged change; preserve it.
+
+Goal: finish the setup plan AND recover useful slim-down capabilities unless exceptionally difficult. Preserve deliberate restorations (/watch load, /loadwatch, Pi, Firecrawl, required agy, GrokBot routing, ordinary YOLO). Self-compact and self-handoff-to-new-session are explicit implementation requirements. All ordinary agents, children, successors and trusted internal reviewers should be YOLO; restrict external-security-critical work and explicit operator restrictive requests. Do not invent unsupported permission modes.
+
+Pi backup PR #566 has fixture recovery proof, not live Mac/Pi proof. Progress reminder #565 is DESIGN ONLY, not a working watchdog. #567 compaction is request-only: completion remains unconfirmed; native handoff is bounded and provider-limited. #568 mode work does not yet establish universal resume/drift repair or fix trusted-review runtime defaults. Read their final limitations before extending them.
+
+Continue the recorded queue: persistent progress reminder, Pi backups, native handoff/compaction/mode coverage, provider-independent review evidence, all eight quota capabilities, web fallbacks/digests, moved-skill access, and budgeted nightly learning. Validated skill-only improvements may auto-merge after independent review/tests; standing-order changes remain proposals; suspected prompt injection blocks the affected proposal. Available independent reviewers may substitute for unavailable vendors; never count skipped review as clean or fabricate APPROVE.
+
+Keep relay.py, acp-dispatch/acp-dispatch-wait and acp-run until genuine Mac/C3 evidence, B2 drain/recapture and date gate pass, wave6-delete-check --evidence exits 0, AND operator confirms deletion. No --allow-early, invented waivers or Pi acceptance flips. review-launch stays. Outside ADE edits remain limited to authorized actual dependencies. No cloud runtime deployment was performed. No cloud worker or watcher should be assumed to survive this transfer.
+
+Do not restart the audit interview: choices are already recorded. Continue autonomously; ask only for unresolved material tradeoffs or actual blocked access. Verify local checkout/artifacts/ownership and report your first concrete action before retiring any predecessor.

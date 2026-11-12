@@ -1,0 +1,295 @@
+{
+  "snapshot": "pre-final; refresh before local merge",
+  "base": "dc3463b16c400a3c7af00a4aef3a8cbb4a0e1276",
+  "prs": [
+    {
+      "number": 558,
+      "url": "https://github.com/djbclark/djbclark-ade/pull/558",
+      "state": "open",
+      "merged": false,
+      "draft": false,
+      "head": "2634a87de05b481fc8bfa31f9d5cce1e5c5361a0",
+      "branch": "apply-inconclusive-probes",
+      "title": "Block default installs after inconclusive or failed presence probes",
+      "checks": [
+        {
+          "name": "Cursor Approval Agent: Pull Request Router and Approver",
+          "status": "completed",
+          "conclusion": "neutral"
+        },
+        {
+          "name": "Cursor Security Agent: Security Reviewer",
+          "status": "completed",
+          "conclusion": "neutral"
+        },
+        {
+          "name": "pytest",
+          "status": "completed",
+          "conclusion": "skipped"
+        },
+        {
+          "name": "context-policy",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "pytest-linux",
+          "status": "completed",
+          "conclusion": "success"
+        }
+      ]
+    },
+    {
+      "number": 559,
+      "url": "https://github.com/djbclark/djbclark-ade/pull/559",
+      "state": "open",
+      "merged": false,
+      "draft": false,
+      "head": "0f250f3c9170948004e3ba0a75c4b644641196cd",
+      "branch": "keys-plan",
+      "title": "Add cached selected-key worklist planning",
+      "checks": [
+        {
+          "name": "Cursor Approval Agent: Pull Request Router and Approver",
+          "status": "completed",
+          "conclusion": "neutral"
+        },
+        {
+          "name": "Cursor Security Agent: Security Reviewer",
+          "status": "completed",
+          "conclusion": "neutral"
+        },
+        {
+          "name": "pytest",
+          "status": "completed",
+          "conclusion": "skipped"
+        },
+        {
+          "name": "context-policy",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "pytest-linux",
+          "status": "completed",
+          "conclusion": "success"
+        }
+      ]
+    },
+    {
+      "number": 560,
+      "url": "https://github.com/djbclark/djbclark-ade/pull/560",
+      "state": "open",
+      "merged": false,
+      "draft": false,
+      "head": "1d916eaecb12a10bdb12600bb602c2acbfaba873",
+      "branch": "setup-progress-20261111",
+      "title": "Record merged setup work and continuing November 11 implementation",
+      "checks": [
+        {
+          "name": "Cursor Approval Agent: Pull Request Router and Approver",
+          "status": "completed",
+          "conclusion": "neutral"
+        },
+        {
+          "name": "Cursor Security Agent: Security Reviewer",
+          "status": "completed",
+          "conclusion": "neutral"
+        },
+        {
+          "name": "pytest",
+          "status": "completed",
+          "conclusion": "skipped"
+        },
+        {
+          "name": "pytest-linux",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "context-policy",
+          "status": "completed",
+          "conclusion": "success"
+        }
+      ]
+    },
+    {
+      "number": 561,
+      "url": "https://github.com/djbclark/djbclark-ade/pull/561",
+      "state": "open",
+      "merged": false,
+      "draft": true,
+      "head": "76dd1b7cbb8579927df5de8e7b046e42909cb453",
+      "branch": "install-ledger-lock",
+      "title": "Serialize install ledger lifecycle to retain concurrent evidence",
+      "checks": [
+        {
+          "name": "pytest",
+          "status": "completed",
+          "conclusion": "skipped"
+        },
+        {
+          "name": "context-policy",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "pytest-linux",
+          "status": "completed",
+          "conclusion": "success"
+        }
+      ]
+    },
+    {
+      "number": 562,
+      "url": "https://github.com/djbclark/djbclark-ade/pull/562",
+      "state": "open",
+      "merged": false,
+      "draft": false,
+      "head": "c6b65d8fab18fa95ffea25c6f868f7108e21beed",
+      "branch": "slim-change-audit-20261111",
+      "title": "Audit slim-down removals and protect later restorations",
+      "checks": [
+        {
+          "name": "pytest",
+          "status": "completed",
+          "conclusion": "skipped"
+        },
+        {
+          "name": "context-policy",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "pytest-linux",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "Cursor Approval Agent: Pull Request Router and Approver",
+          "status": "in_progress",
+          "conclusion": null
+        },
+        {
+          "name": "Cursor Security Agent: Security Reviewer",
+          "status": "completed",
+          "conclusion": "neutral"
+        }
+      ]
+    },
+    {
+      "number": 565,
+      "url": "https://github.com/djbclark/djbclark-ade/pull/565",
+      "state": "open",
+      "merged": false,
+      "draft": true,
+      "head": "5a1159ad80a3f2f82476296f5df38ac32ccd3907",
+      "branch": "persistent-progress-design",
+      "title": "Design a bounded persistent progress reminder without session restart",
+      "checks": [
+        {
+          "name": "pytest",
+          "status": "completed",
+          "conclusion": "skipped"
+        },
+        {
+          "name": "context-policy",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "pytest-linux",
+          "status": "completed",
+          "conclusion": "success"
+        }
+      ]
+    },
+    {
+      "number": 566,
+      "url": "https://github.com/djbclark/djbclark-ade/pull/566",
+      "state": "open",
+      "merged": false,
+      "draft": true,
+      "head": "2104aaf825dfa13186949d814aacfc4121075988",
+      "branch": "pi-backup-coverage",
+      "title": "Restore Pi session backup coverage and fixture recovery proof",
+      "checks": [
+        {
+          "name": "pytest",
+          "status": "completed",
+          "conclusion": "skipped"
+        },
+        {
+          "name": "context-policy",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "pytest-linux",
+          "status": "completed",
+          "conclusion": "success"
+        }
+      ]
+    },
+    {
+      "number": 567,
+      "url": "https://github.com/djbclark/djbclark-ade/pull/567",
+      "state": "open",
+      "merged": false,
+      "draft": true,
+      "head": "0ca4fdeb0aef49c6ee28df4c7f8b14423f8ccff6",
+      "branch": "native-self-session",
+      "title": "Restore checkpointed native self-compaction requests and acknowledged self-handoff",
+      "checks": [
+        {
+          "name": "pytest",
+          "status": "completed",
+          "conclusion": "skipped"
+        },
+        {
+          "name": "pytest-linux",
+          "status": "in_progress",
+          "conclusion": null
+        },
+        {
+          "name": "context-policy",
+          "status": "completed",
+          "conclusion": "success"
+        }
+      ]
+    },
+    {
+      "number": 568,
+      "url": "https://github.com/djbclark/djbclark-ade/pull/568",
+      "state": "open",
+      "merged": false,
+      "draft": true,
+      "head": "f1ab363e1734c9e01ffd76cfe99c38d0eb1b0cc1",
+      "branch": "ordinary-agent-modes",
+      "title": "Require native evidence for ordinary agent YOLO and mode drift checks",
+      "checks": [
+        {
+          "name": "pytest",
+          "status": "completed",
+          "conclusion": "skipped"
+        },
+        {
+          "name": "pytest-linux",
+          "status": "in_progress",
+          "conclusion": null
+        },
+        {
+          "name": "context-policy",
+          "status": "completed",
+          "conclusion": "success"
+        }
+      ]
+    }
+  ],
+  "limitations": [
+    "GitHub statuses are snapshots, not a merge verdict",
+    "No numeric quota telemetry available",
+    "No user-machine clipboard access available"
+  ],
+  "work_status": "Final worker/CI drain in progress; replaced at finalization"
+}
