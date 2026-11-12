@@ -23,7 +23,7 @@ Run it from a checkout of the repository, after the push has landed. It
                    author is the repository owner (--allow-untrusted and the authenticated-user rule never enable it)
        auto        (default) yolo for an owner-authored PR, else restricted
      The mode used is filed as `runtime` in the result.
-  6. checks that the verdict names this head, prints the marker ready to paste into the PR body
+  6. checks that the verdict names this head, prints the marker (retained for the local record):
          <!-- adversary-verdict:v1 {"verdict":"APPROVE","head":"<the 40-hex head>"} -->
      (verdict and head only: the model's free text never goes into the marker), confirms that
      bin/adversary_marker.py reads it back as the same verdict, and files
@@ -31,8 +31,11 @@ Run it from a checkout of the repository, after the push has landed. It
      the old path remains a latest-result record. Completed matching results are reused unless --retry. Earlier
      findings stay unresolved until --retry --resolve-finding ID. Only timeouts trigger --replacement-model;
      partial evidence is preserved per attempt (docs/review-boundary.md).
-  7. removes the worktree. It never posts anything to GitHub: the lead pastes the marker, then runs
-     `gh workflow run adversary-marker.yml -f pr=N` so the merge gate reads the edited body.
+  7. removes the worktree. It never posts anything to GitHub. Under owner-trust policy (PR #484,
+     docs/review-boundary.md), owner-authored PRs succeed the adversary-marker check without needing
+     an APPROVE marker pasted (keep the printed marker for the local record; do not paste into the body
+     just to satisfy the gate). On an outside PR, paste the marker into an owner issue comment (not the body),
+     then run `gh workflow run adversary-marker.yml -f pr=N` so the merge gate reads it.
 
 Exit: 0 APPROVE, 1 BLOCK, 2 usage / no such PR / not a checkout of that repository / an untrusted author /
 review-launch refused the launch, 3 the review failed (no structured output, a verdict for another head, git
