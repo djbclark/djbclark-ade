@@ -7,4 +7,4 @@
   `just hermes-setup --self` or `just hermes-setup`. Scoped `doctor hermes`
   adds observe-only checklist probes after the catalog probe passes
   (config, skills root, claude-collaboration, `claude mcp list`; the
-  tell_chief_of_staff pointer stays optional) (#0).
+  tell_chief_of_staff pointer stays optional) (#591).
