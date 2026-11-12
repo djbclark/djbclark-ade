@@ -557,3 +557,22 @@ def test_a_repeated_name_earlier_in_the_path_is_not_taken_for_the_leaf(tmp_path,
     os.chmod(shared, 0o1777)
     os.close(ai.open_state_dir(shared / "y" / "x"))  # sticky "x" is an ancestor here; the leaf "x" is private
     assert (shared / "y" / "x").is_dir()
+
+
+def test_cli_doctor_appends_install_state_rows_for_full_scope_only(tmp_path, monkeypatch, capsys):
+    import importlib.machinery, importlib.util
+    loader = importlib.machinery.SourceFileLoader("ade_install_cli", str(REPO / "bin" / "ade-install"))
+    spec = importlib.util.spec_from_loader("ade_install_cli", loader)
+    cli = importlib.util.module_from_spec(spec)
+    loader.exec_module(cli)
+    state = tmp_path / "state"
+    state.mkdir()
+    ai.save_ledger(state, {"entries": {"x": {"status": "pending", "owner": {"pid": 999999999, "start": 1}}}})
+    catalog = ai.Catalog({"schema_version": 1, "component": []}, tmp_path / "c", root=tmp_path)
+    monkeypatch.setattr(ai, "load_catalog", lambda **_: catalog)
+    monkeypatch.setattr(ai, "doctor", lambda c, component_ids=None: ([], 0))
+    assert cli.main(["doctor", "--json", "--state-dir", str(state)]) == 1
+    rows = json.loads(capsys.readouterr().out)["observations"]
+    assert [r["kind"] for r in rows] == ["install-state"] and rows[0]["status"] == "orphaned"
+    assert cli.main(["doctor", "--json", "--id", "x", "--state-dir", str(state)]) == 0  # scoped: no install-wide rows
+    assert json.loads(capsys.readouterr().out)["observations"] == []

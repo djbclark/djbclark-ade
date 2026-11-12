@@ -323,10 +323,14 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     )
     try:
         catalog = ai.load_catalog(root=Path(args.root) if args.root else None)
-        observations, rc = ai.doctor(
-            catalog, component_ids=ids,
-            install_state_dir=Path(args.state_dir) if args.state_dir else ai.default_state_dir(),
-        )
+        observations, rc = ai.doctor(catalog, component_ids=ids)
+        if ids is None:
+            # W18: installation-wide crash leftovers (orphaned pending entries, stale lock holder, temp files).
+            import ade_install_recovery as recovery
+
+            state_obs = recovery.observations(Path(args.state_dir) if args.state_dir else ai.default_state_dir())
+            observations = [*observations, *state_obs]
+            rc = 1 if rc or recovery.failing(state_obs) else 0
     except ai.InstallError as e:
         if args.json:
             _print_json({"ok": False, "scope": scope, "errors": [str(e)]})
