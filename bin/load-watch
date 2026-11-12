@@ -7,6 +7,9 @@
     load-watch ack ID "what you did"        the agent's answer to a brief (recorded in the ledger)
     load-watch ci list|check DIR|rm DIR       the CI-first decisions `bg` reads
     load-watch ci decide DIR ci "CI CMD"|local "why"|pending "note"
+    load-watch ci record DIR --job NAME --platform macos|linux|other --attempt ID --result failure|cancelled|success|slow
+    load-watch ci route DIR --job NAME --platform macos|linux|other [--slow]
+                                             TSV route (ci|local|wait), load gate (16|bypass|-), failures; exit 0
     load-watch ci-only list|add DIR "CMD"|rm DIR|check DIR   (older form of `ci`, kept for scripts)
     load-watch guard status|list|add LABEL [KEY=VALUE...] [--note N]|rm LABEL|reset LABEL
     load-watch admit [--max-per-core N] [--max-mem-churn N] [--min-free-mb N] [--max-pageins N] [--max-agents [N]] [--no-reserve]
@@ -1671,6 +1674,68 @@ def cmd_ack(a):
     return 0
 
 
+def ci_job_key(top, platform, job):
+    # Worktrees share their repository's history; wildcard policy rows do not merge unrelated repos.
+    repo = main_worktree(top) or pasture_source(top) or top
+    return json.dumps([repo, platform, job])
+
+
+def ci_attempts():
+    try:
+        data = json.loads((STATE_DIR / "ci-attempts.json").read_text())
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def record_ci_attempt(top, platform, job, attempt, result):
+    """Idempotent per-attempt updates, serialized across bg processes, replaced atomically."""
+    import fcntl
+    import tempfile
+
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    with (STATE_DIR / "ci-attempts.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        data = ci_attempts()
+        key = ci_job_key(top, platform, job)
+        history = data.get(key, {})
+        if not isinstance(history, dict):
+            history = {}
+        existing = history.get(attempt, {})
+        timestamp = existing.get("t", time.time()) if isinstance(existing, dict) else time.time()
+        history[attempt] = {"result": result, "t": timestamp}
+        data[key] = history
+        with tempfile.NamedTemporaryFile(mode="w", dir=STATE_DIR, delete=False) as out:
+            json.dump(data, out)
+        os.replace(out.name, STATE_DIR / "ci-attempts.json")
+
+
+def ci_job_route(top, platform, job, slow=False):
+    """CI first; macOS retries may run here at load <=16, or ungated after two failures."""
+    history = ci_attempts().get(ci_job_key(top, platform, job), {})
+    entries = history.values() if isinstance(history, dict) else []
+    entries = sorted((r for r in entries if isinstance(r, dict)), key=lambda r: r.get("t", 0))
+    failures = 0
+    explicit_slow = slow
+    for row in entries:
+        result = row.get("result")
+        if result == "success":
+            failures, slow = 0, False
+        elif result in ("failure", "cancelled"):
+            failures += 1
+        elif result == "slow":
+            slow = True
+    if platform != "macos" or (not failures and not (slow or explicit_slow)):
+        return "ci", "-", failures
+    if failures >= 2:
+        return "local", "bypass", failures
+    try:
+        load = os.getloadavg()[0]
+    except OSError:
+        return "wait", "16", failures
+    return ("local" if math.isfinite(load) and load <= 16 else "wait"), "16", failures
+
+
 def cmd_ci(a):
     rows = registry()
     if a.op == "list":
@@ -1681,6 +1746,15 @@ def cmd_ci(a):
         print("load-watch ci check|rm|decide needs DIR", file=sys.stderr)
         return 2
     top = a.dir.rstrip("/") if a.dir.endswith("/*") else (git_top(a.dir) or os.path.realpath(a.dir))
+    if a.op in ("record", "route"):
+        if not a.job or not a.platform or (a.op == "record" and (not a.attempt or not a.result)):
+            print("load-watch ci record|route requires --job and --platform; record also --attempt and --result", file=sys.stderr)
+            return 2
+        if a.op == "record":
+            record_ci_attempt(top, a.platform, a.job, a.attempt, a.result)
+        else:
+            print("\t".join(map(str, ci_job_route(top, a.platform, a.job, a.slow))))
+        return 0
     if a.op == "check":  # bg: "mode<TAB>text<TAB>key", exit 1 when undecided
         key, row = decision(top, rows)
         if row is None:
@@ -2430,10 +2504,15 @@ def main(supervise=False):
     p.add_argument("limits", nargs="*", metavar="KEY=VALUE")
     p.add_argument("--note")
     p = sub.add_parser("ci")
-    p.add_argument("op", choices=["list", "check", "decide", "rm"])
+    p.add_argument("op", choices=["list", "check", "decide", "rm", "record", "route"])
     p.add_argument("dir", nargs="?")
     p.add_argument("mode", nargs="?", choices=MODES)
     p.add_argument("text", nargs="?", metavar="CMD_OR_REASON")
+    p.add_argument("--job", help="stable job name, shared with bg's BG_CI_JOB")
+    p.add_argument("--platform", choices=["macos", "linux", "other"], help="job target platform")
+    p.add_argument("--attempt", help="unique CI run/job id; recording it twice does not count twice")
+    p.add_argument("--result", choices=["failure", "cancelled", "success", "slow"])
+    p.add_argument("--slow", action="store_true", help="this macOS job is especially slow on CI")
     p = sub.add_parser("renew")
     p.add_argument("id", metavar="RESERVATION", help="extend an agent reservation by LW_RESERVE_S from now")
     p = sub.add_parser("release")

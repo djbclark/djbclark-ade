@@ -677,3 +677,43 @@ def test_watcher_test_names_a_queued_line(tmp_path):
         assert run_env(tmp_path, env, "watcher", "set").returncode == 0
         r = run_env(tmp_path, {}, "watcher", "test")
         assert (r.returncode, r.stdout.strip()) == (rc, word), status
+
+
+def test_ci_macos_retry_route(tmp_path, monkeypatch):
+    lw = load_module()
+    monkeypatch.setattr(lw, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(lw, "main_worktree", lambda top: "/repo")
+    monkeypatch.setattr(lw, "pasture_source", lambda top: "")
+    monkeypatch.setattr(lw.os, "getloadavg", lambda: (16, 0, 0))
+    route = lambda platform="macos", job="build": lw.ci_job_route("/wt", platform, job)
+    record = lambda attempt, result: lw.record_ci_attempt("/wt", "macos", "build", attempt, result)
+    assert route() == ("ci", "-", 0)
+    record("run1", "cancelled")
+    record("run1", "cancelled")  # same run reported twice must not bypass the gate
+    assert route() == ("local", "16", 1)
+    assert route("linux") == ("ci", "-", 0)
+    assert route(job="other") == ("ci", "-", 0)
+    assert lw.ci_job_route("/wt", "linux", "build", True) == ("ci", "-", 0)
+    monkeypatch.setattr(lw.os, "getloadavg", lambda: (16.01, 0, 0))
+    assert route() == ("wait", "16", 1)
+    record("run2", "failure")
+    assert route() == ("local", "bypass", 2)
+    record("run3", "success")
+    record("run1", "cancelled")  # old event keeps its position before success
+    assert route() == ("ci", "-", 0)
+    assert lw.ci_job_route("/wt", "macos", "build", True) == ("wait", "16", 0)
+    monkeypatch.setattr(lw.os, "getloadavg", lambda: (15.9, 0, 0))
+    record("slow-run", "slow")
+    assert route() == ("local", "16", 0)
+    assert lw.ci_job_route("/other-wt", "macos", "build") == route()
+
+
+def test_ci_attempt_cli(tmp_path):
+    args = ("--job", "xcode", "--platform", "macos")
+    assert run(tmp_path, "ci", "record", str(tmp_path), *args).returncode == 2
+    for attempt in ("1", "2"):
+        r = run(tmp_path, "ci", "record", str(tmp_path), *args,
+                "--attempt", attempt, "--result", "failure")
+        assert r.returncode == 0, r.stderr
+    r = run(tmp_path, "ci", "route", str(tmp_path), *args)
+    assert (r.returncode, r.stdout.strip()) == (0, "local\tbypass\t2")

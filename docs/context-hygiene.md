@@ -181,6 +181,40 @@ Local focused tests use the full `bg` path. Record the explicit decision first:
 ~/ops/site-private/bin/bg bin/pytest -q claude/hooks/handoff-tools/tests/test_context_size_nudge.py
 ```
 
+### macOS CI fallback (operator ruling, 2026-11-12)
+
+CI remains first. A macOS job that is especially slow on CI, or failed/was cancelled
+once, may run locally through `~/ops/site-private-djbclark/bin/bg` at 1-minute
+machine load <=16. After two failed/cancelled CI attempts for that job, it bypasses
+the load gate. Linux/other heavy jobs stay on CI; a macOS PR leg still requires
+an explicit request. Slots and parallelism caps remain in force.
+
+`ci decide` still records the repo-wide `ci|local|pending` policy. Job retry state
+is separate: `ci record DIR --job NAME --platform macos|linux|other --attempt ID
+--result failure|cancelled|success|slow`. Use a distinct CI run/job id per attempt;
+re-recording the same id updates it without counting twice. Linked worktrees
+share their main repository's job history; separate jobs and platforms never do.
+Re-reporting an attempt preserves its original order. Success resets the failure count and persisted slow flag. An unknown or timed-out verdict
+must not be recorded as a failure. History is serialized and atomically saved in
+`LW_STATE_DIR/ci-attempts.json` (the normal load-watch state directory by default).
+
+`ci route DIR --job NAME --platform macos|linux|other [--slow]` prints three TSV
+fields: route (`ci|local|wait`), load gate (`-|16|bypass`), failure count; exit 0.
+`--slow` says this invocation is especially slow on CI without recording an
+attempt. Missing job/platform (or attempt/result for record) exits 2.
+`bg` callers set `BG_CI_JOB` to that same stable job name and `BG_CI_PLATFORM=macos`;
+Swift/Xcode commands default to macos. Set `BG_CI_SLOW=1` for the slow case.
+Set `BG_CI_ATTEMPT` to a known CI run/job id to record a definitive offload
+success/failure automatically; without it, use `ci record` with verified evidence.
+Cancelled runs require an explicit `ci record --result cancelled`, since the offload
+exit code also covers unknown verdicts. The default job name is the original command
+and arguments when `BG_CI_JOB` is unset. The fallback is evaluated per invocation; it never changes the repo's policy.
+
+```bash
+~/src/djbclark-ade/bin/load-watch ci record /absolute/worktree --job xcode-tests --platform macos --attempt RUN-JOB-ID --result cancelled
+BG_CI_PLATFORM=macos BG_CI_JOB=xcode-tests ~/ops/site-private-djbclark/bin/bg swift test
+```
+
 ## 5. Primary sources (archived OpenCode docs)
 
 1. [OpenCode V2 compaction](https://opencode.ai/v2/docs/compaction): safe-point
