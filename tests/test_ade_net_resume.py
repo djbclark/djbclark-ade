@@ -351,3 +351,12 @@ def test_delivery_appears_before_send_without_reservation(fake, monkeypatch):
     assert scan() == 0
     assert not sent.exists()
     assert '"action": "reserved"' not in (state / "events.jsonl").read_text()
+
+
+
+def test_delivery_combined_with_terminal_error_is_still_detected(fake):
+    data, scan, sent, state = fake
+    data["activity"] = [{"type": "assistant_message", "text": "done: review delivered\n" + ERROR}]
+    assert scan() == 0
+    assert not sent.exists()
+    assert '"action": "delivered"' in (state / "events.jsonl").read_text()

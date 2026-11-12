@@ -145,7 +145,7 @@ class Scanner:
             text = item.get("text")
             if not isinstance(text, str):
                 raise ScanError("invalid assistant output")
-            if transient(provider, text):
+            if len(text.strip().splitlines()) == 1 and transient(provider, text):
                 continue  # The terminal system error is rendered as assistant text.
             # Only an unquoted, unfenced delivery line in the latest output counts.
             fence = None
