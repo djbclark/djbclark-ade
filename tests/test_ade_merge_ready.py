@@ -1596,6 +1596,7 @@ def _heal_gh(
     completed_at: str,
     bucket: str = "pass",
     log: Path | None = None,
+    view_head: str = "",
 ) -> Path:
     listing = json.dumps(
         [
@@ -1622,6 +1623,7 @@ def _heal_gh(
               *"pr list"*) echo '{listing}' ;;
               *"pr checks"*"--json"*) echo '{checks_json}' ;;
               *"pr checks"*) printf '%s' '{checks_tsv}' ;;
+              *"pr view"*) echo '{{"headRefOid": "{view_head or head}"}}' ;;
               *"workflow run adversary-marker.yml"*"-f pr=587"*) echo dispatched ;;
               *) echo "unexpected: $*" >&2; exit 99 ;;
             esac
@@ -1745,6 +1747,7 @@ def test_dispatch_failure_is_reported_and_not_recorded(tmp_path: Path) -> None:
               *"pr list"*) echo '{listing}' ;;
               *"pr checks"*"--json"*) echo '{checks_json}' ;;
               *"pr checks"*) printf '%s' 'pytest-linux\tpass\t0\tx\n' ;;
+              *"pr view"*) echo '{{"headRefOid": "{head}"}}' ;;
               *"workflow run"*) echo boom >&2; exit 1 ;;
               *) exit 99 ;;
             esac
@@ -1754,7 +1757,9 @@ def test_dispatch_failure_is_reported_and_not_recorded(tmp_path: Path) -> None:
     r = run(gh, "--json", "--min", "500")
     assert r.returncode == 0, r.stderr
     assert json.loads(r.stdout)[0]["marker_dispatch"] == "dispatch_failed"
-    assert not (tmp_path / "marker-state.json").exists()
+    state = tmp_path / "marker-state.json"
+    recorded = json.loads(state.read_text())["dispatched"] if state.exists() else {}
+    assert recorded == {}  # the claim was released, so the next run retries
 
 
 def test_merge_now_dispatches_but_still_refuses_without_marker(tmp_path: Path) -> None:
@@ -1768,8 +1773,9 @@ def test_merge_now_dispatches_but_still_refuses_without_marker(tmp_path: Path) -
 
 
 def test_state_file_is_atomic_and_pruned(tmp_path: Path) -> None:
-    mod = {}
-    exec(compile(SCRIPT.read_text().split("\nif __name__")[0].split("\n", 1)[1], str(SCRIPT), "exec"), mod)
+    import runpy
+
+    mod = runpy.run_path(str(SCRIPT), run_name="ade_merge_ready_under_test")
     path = str(tmp_path / "sub" / "state.json")
     now = 10_000_000.0
     mod["save_dispatch_state"](path, {"old": 1.0, "new": now - 5}, now)
@@ -1777,3 +1783,136 @@ def test_state_file_is_atomic_and_pruned(tmp_path: Path) -> None:
     assert [p.name for p in (tmp_path / "sub").iterdir()] == ["state.json"]
     (tmp_path / "sub" / "state.json").write_text("{not json")
     assert mod["load_dispatch_state"](path) == {}
+
+
+def test_corrupt_state_file_redispatches_once_then_records(tmp_path: Path) -> None:
+    gh = _heal_gh(tmp_path, head="b" * 40, checks_tsv=PASS_ONLY, completed_at=OLD_TS)
+    (tmp_path / "marker-state.json").write_text("{not json")
+    r = run(gh, "--json", "--min", "500")
+    assert json.loads(r.stdout)[0]["marker_dispatch"] == "dispatched"
+    r2 = run(gh, "--json", "--min", "500")
+    assert json.loads(r2.stdout)[0]["marker_dispatch"] == "already_dispatched"
+    assert len(_dispatch_calls(tmp_path)) == 1
+
+
+def test_merge_now_dry_run_or_without_prs_dispatches_nothing(tmp_path: Path) -> None:
+    gh = _heal_gh(tmp_path, head="c" * 40, checks_tsv=PASS_ONLY, completed_at=OLD_TS)
+    r = run(gh, "merge-now", "--prs", "587", "--min", "500")  # dry-run
+    assert r.returncode == 2
+    r = run(gh, "merge-now", "--min", "500")  # bare
+    assert r.returncode == 2 and "requires --prs" in r.stderr
+    assert _dispatch_calls(tmp_path) == []
+
+
+def test_merge_now_heals_only_named_prs(tmp_path: Path) -> None:
+    heads = {587: "7" * 40, 588: "8" * 40}
+    listing = json.dumps(
+        [
+            {
+                "number": n,
+                "title": "t",
+                "headRefOid": h,
+                "baseRefName": "master",
+                "mergeable": "MERGEABLE",
+                "headRefName": f"b{n}",
+            }
+            for n, h in heads.items()
+        ]
+    )
+    checks_json = json.dumps(
+        [{"name": "pytest-linux", "bucket": "pass", "completedAt": OLD_TS}]
+    )
+    log = tmp_path / "calls.log"
+    gh = write_fake_gh(
+        tmp_path,
+        textwrap.dedent(
+            f"""
+            echo "$*" >> '{log}'
+            case "$*" in
+              *"pr list"*) echo '{listing}' ;;
+              *"pr checks"*"--json"*) echo '{checks_json}' ;;
+              *"pr checks"*) printf '%s' 'pytest-linux\tpass\t0\tx\n' ;;
+              *"pr view 587"*) echo '{{"headRefOid": "{heads[587]}"}}' ;;
+              *"pr view 588"*) echo '{{"headRefOid": "{heads[588]}"}}' ;;
+              *"workflow run"*) echo ok ;;
+              *) exit 99 ;;
+            esac
+            """
+        ),
+    )
+    r = run(gh, "merge-now", "--prs", "587", "--yes", "--min", "500")
+    assert r.returncode == 2
+    calls = _dispatch_calls(tmp_path)
+    assert len(calls) == 1 and "pr=587" in calls[0]
+
+
+def test_unwritable_state_stops_dispatch_and_command_still_runs(tmp_path: Path) -> None:
+    gh = _heal_gh(tmp_path, head="d" * 40, checks_tsv=PASS_ONLY, completed_at=OLD_TS)
+    env = {**os.environ, "ADE_MERGE_READY_STATE": str(tmp_path)}  # a directory
+    for _ in range(2):
+        r = subprocess.run(
+            [sys.executable, "-I", str(SCRIPT), "--gh", str(gh), "--json", "--min", "500"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=env,
+        )
+        assert r.returncode == 0, r.stderr
+        assert json.loads(r.stdout)[0]["marker_dispatch"] == "state_unwritable"
+    assert _dispatch_calls(tmp_path) == []
+
+
+def test_head_moved_since_listing_is_not_dispatched(tmp_path: Path) -> None:
+    gh = _heal_gh(
+        tmp_path,
+        head="e" * 40,
+        checks_tsv=PASS_ONLY,
+        completed_at=OLD_TS,
+        view_head="f" * 40,
+    )
+    r = run(gh, "--json", "--min", "500")
+    assert json.loads(r.stdout)[0]["marker_dispatch"] == "head_moved"
+    assert _dispatch_calls(tmp_path) == []
+
+
+@pytest.mark.parametrize("bad", ["nan", "inf", "-5", "soon"])
+def test_bad_marker_grace_is_a_clean_usage_error(tmp_path: Path, bad: str) -> None:
+    gh = _heal_gh(tmp_path, head="1" * 40, checks_tsv=PASS_ONLY, completed_at=OLD_TS)
+    r = run(gh, "--json", "--min", "500", f"--marker-grace={bad}")
+    assert r.returncode == 2 and "Traceback" not in r.stderr
+    assert _dispatch_calls(tmp_path) == []
+    env = {
+        **os.environ,
+        "ADE_MERGE_READY_STATE": str(tmp_path / "s.json"),
+        "ADE_MERGE_READY_MARKER_GRACE": bad,
+    }
+    r = subprocess.run(
+        [sys.executable, "-I", str(SCRIPT), "--gh", str(gh), "stacks", "--min", "500"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=env,
+    )
+    assert r.returncode == 2 and "Traceback" not in r.stderr
+
+
+def test_newest_pytest_linux_entry_decides_grace() -> None:
+    import datetime as dt
+    import runpy
+
+    mod = runpy.run_path(str(SCRIPT), run_name="ade_merge_ready_under_test")
+    entries = [
+        {"name": "pytest-linux", "bucket": "pass", "completedAt": "2026-11-12T10:00:00Z"},
+        {"name": "pytest-linux", "bucket": "pass", "completedAt": "2026-11-12T11:00:00Z"},
+    ]
+
+    class P:
+        returncode = 0
+        stdout = json.dumps(entries)
+
+    mod["tests_completed_epoch"].__globals__["run_gh"] = lambda *a, **k: P()
+    want = dt.datetime(2026, 11, 12, 11, 0, tzinfo=dt.timezone.utc).timestamp()
+    assert mod["tests_completed_epoch"]("gh", "o/r", 1) == want
+    entries[1]["bucket"] = "fail"
+    P.stdout = json.dumps(entries)
+    assert mod["tests_completed_epoch"]("gh", "o/r", 1) is None

@@ -6,6 +6,8 @@
   ade-merge-ready approve-paste [--base master] [--bottoms-only] [--repo …] [--min N]
   ade-merge-ready approve-post --i-reviewed --yes [--bottoms-only] [--trigger-marker] …
   ade-merge-ready retrigger-marker (--prs … | --bottoms-only | --class NAME) [--yes]
+  ade-merge-ready [classify|merge-now …] [--no-marker-dispatch] [--marker-grace SECONDS]
+                                         [--state-file PATH]   # missing-check self-heal, below
   ade-merge-ready merge-now --prs N[,N…] [--yes]   # refuses unless adversary-marker success
   ade-merge-ready stack-rebase --prs N[,N…] [--onto master] [--upstream REF]
                                [--yes --repo-dir PATH]
@@ -30,17 +32,22 @@ head — each marker names the tip `headRefOid` just collected.
 `retrigger-marker` only runs `gh workflow run adversary-marker.yml -f pr=N`
 for selected open tips (dry-run unless `--yes`); it never posts markers and
 never merges. Require at least one of `--prs`, `--bottoms-only`, or
-`--class` so a bare invoke cannot fire the Action on every open PR.
+`--class` so a bare invoke of *that* command cannot fire the Action on every
+open PR (the missing-check self-heal below is the one deliberate exception:
+a bare `classify` dispatches for tips with no marker check at all, once per head).
 **Marker self-heal (2026-11-12, PR #587: Tests passed on a force-pushed head but the
 `workflow_run`-triggered Action never produced an `adversary-marker` check, and
 a human ran `gh workflow run adversary-marker.yml -f pr=587`).** `classify` and
-`merge-now` now do that dispatch themselves, once per head: when pytest-linux
+`merge-now --yes` (only the PRs named by `--prs`) now do that dispatch themselves, once per head: when pytest-linux
 passed for the tip, there is **no** `adversary-marker` check at all (not pending,
 not failed) and pytest-linux completed more than `--marker-grace` seconds ago
 (default 180), the tool runs `gh workflow run adversary-marker.yml -f pr=N`,
-records `repo#N@head` in a state file (`--state-file`, default
-`~/.local/state/ade/merge-ready/marker-dispatch.json`, atomic write) so the same
-head is never dispatched twice, and reports it. It never writes or fakes a marker,
+claims `repo#N@head` in a state file BEFORE dispatching (`--state-file` or
+`ADE_MERGE_READY_STATE`, default `~/.local/state/ade/merge-ready/marker-dispatch.json`,
+atomic write under an flock; a state file that cannot be written stops all
+dispatching) so the same head is not dispatched twice, and reports it. The
+grace may also come from `ADE_MERGE_READY_MARKER_GRACE` (finite, >= 0). Errors
+on one row never abort the command. It never writes or fakes a marker,
 never dispatches for a head whose check failed or is pending, and does not wait:
 the next `classify` / `merge-now` run sees the result. `--no-marker-dispatch`
 turns it off.
@@ -82,7 +89,10 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import contextlib
+import fcntl
 import json
+import math
 import os
 import re
 import shutil
@@ -603,6 +613,16 @@ DEFAULT_MARKER_GRACE = 180  # seconds after pytest-linux completed (2026-11-12)
 STATE_KEEP_SECONDS = 30 * 86400
 
 
+def _grace_arg(value: str) -> float:
+    try:
+        g = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a number: {value!r}") from None
+    if not math.isfinite(g) or g < 0:
+        raise argparse.ArgumentTypeError(f"must be a finite number >= 0 (got {value!r})")
+    return g
+
+
 def default_state_path() -> str:
     env = os.environ.get("ADE_MERGE_READY_STATE", "").strip()
     if env:
@@ -673,22 +693,56 @@ def tests_completed_epoch(gh: str, repo: str, number: int) -> float | None:
         return None
     if not isinstance(doc, list):
         return None
+    # A re-run or a second event can list pytest-linux twice: the NEWEST
+    # completed entry decides, and it must itself be a pass.
+    newest: tuple[float, str] | None = None
     for c in doc:
         if not isinstance(c, dict) or c.get("name") != "pytest-linux":
             continue
-        if c.get("bucket") != "pass":
-            return None
         raw = c.get("completedAt")
         if not isinstance(raw, str) or not raw:
-            return None
+            continue
         try:
             when = dt.datetime.fromisoformat(raw.replace("Z", "+00:00"))
         except ValueError:
-            return None
+            continue
         if when.tzinfo is None:
-            return None
-        return when.timestamp()
-    return None
+            continue
+        stamp = when.timestamp()
+        if newest is None or stamp > newest[0]:
+            newest = (stamp, str(c.get("bucket")))
+    if newest is None or newest[1] != "pass":
+        return None
+    return newest[0]
+
+
+@contextlib.contextmanager
+def _state_lock(state_path: str):
+    """Exclusive flock on a sidecar file so concurrent runs cannot both dispatch a head."""
+    directory = os.path.dirname(os.path.abspath(state_path))
+    os.makedirs(directory, exist_ok=True)
+    fd = os.open(state_path + ".lock", os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
+def _current_head(gh: str, repo: str, number: int) -> str:
+    p = run_gh(
+        gh,
+        ["pr", "view", str(number), "--repo", repo, "--json", "headRefOid"],
+        timeout=60,
+    )
+    if p.returncode != 0:
+        return ""
+    try:
+        doc = json.loads(p.stdout or "{}")
+    except json.JSONDecodeError:
+        return ""
+    head = doc.get("headRefOid") if isinstance(doc, dict) else ""
+    return head if isinstance(head, str) else ""
 
 
 def heal_missing_markers(
@@ -706,58 +760,97 @@ def heal_missing_markers(
     Eligible: class needs_approve, pytest-linux pass, adversary-marker check
     *missing* (a pending or failed check is never touched), 40-hex head, and
     pytest-linux completed more than ``grace`` seconds ago. Never writes a
-    marker. Sets ``row["marker_dispatch"]`` and returns one report per eligible
-    candidate.
+    marker. Best effort: a failure on one row is reported on that row and never
+    aborts the command. The head is claimed in the state file (under an flock)
+    BEFORE the dispatch and released again if the dispatch fails, so a state
+    file that cannot be written stops all dispatching instead of repeating it.
+    Sets ``row["marker_dispatch"]`` and returns one report per candidate.
     """
     out = progress if progress is not None else sys.stdout
     ts = time.time() if now is None else now
     reports: list[dict[str, Any]] = []
-    state: dict[str, float] | None = None
-    for r in rows:
-        if (
-            r.get("class") != "needs_approve"
-            or r.get("pytest_linux") not in ("pass", "success")
-            or r.get("adversary_marker") != "missing"
-        ):
-            continue
-        head = r.get("head") or ""
-        if not SHA40.fullmatch(head):
-            continue
-        n = int(r["number"])
-        key = f"{repo}#{n}@{head}"
-        report: dict[str, Any] = {"number": n, "head": head}
-        if state is None:
-            state = load_dispatch_state(state_path)
-        if key in state:
-            report["action"] = "already_dispatched"
-        else:
-            done = tests_completed_epoch(gh, repo, n)
-            if done is None:
-                report["action"] = "unknown_tests_time"
-            elif ts - done < grace:
-                report["action"] = "waiting"
-                report["wait_seconds"] = int(grace - (ts - done)) + 1
-            else:
-                try:
-                    _trigger_adversary_marker(gh, repo, n, progress=out)
-                except (RuntimeError, subprocess.TimeoutExpired, OSError) as e:
-                    report["action"] = "dispatch_failed"
-                    report["detail"] = str(e)[:300]
+    candidates = [
+        r
+        for r in rows
+        if r.get("class") == "needs_approve"
+        and r.get("pytest_linux") in ("pass", "success")
+        and r.get("adversary_marker") == "missing"
+        and SHA40.fullmatch(r.get("head") or "")
+    ]
+    if not candidates:
+        return reports
+    try:
+        lock = _state_lock(state_path)
+        lock.__enter__()
+    except OSError as e:
+        for r in candidates:
+            r["marker_dispatch"] = "state_unwritable"
+            reports.append({"number": int(r["number"]), "action": "state_unwritable"})
+        print(f"marker-dispatch: state file unusable, not dispatching ({e})", file=out)
+        return reports
+    try:
+        state = load_dispatch_state(state_path)
+        writable = True
+        for r in candidates:
+            head = r["head"]
+            n = int(r["number"])
+            key = f"{repo}#{n}@{head}"
+            report: dict[str, Any] = {"number": n, "head": head}
+            try:
+                if key in state:
+                    report["action"] = "already_dispatched"
+                elif not writable:
+                    report["action"] = "state_unwritable"
                 else:
-                    state[key] = ts
-                    save_dispatch_state(state_path, state, ts)
-                    report["action"] = "dispatched"
-        r["marker_dispatch"] = report["action"]
-        reports.append(report)
-        note = {
-            "dispatched": "dispatched adversary-marker.yml (check never appeared; "
-            "re-run this command to read the result)",
-            "already_dispatched": "already dispatched for this head once; not repeating",
-            "waiting": f"within grace; check again in ~{report.get('wait_seconds', 0)}s",
-            "unknown_tests_time": "pytest-linux completion time unknown; not dispatching",
-            "dispatch_failed": f"dispatch failed: {report.get('detail', '')}",
-        }[report["action"]]
-        print(f"marker-dispatch #{n} ({head[:7]}): {note}", file=out)
+                    done = tests_completed_epoch(gh, repo, n)
+                    if done is None:
+                        report["action"] = "unknown_tests_time"
+                    elif ts - done < grace:
+                        report["action"] = "waiting"
+                        report["wait_seconds"] = int(grace - (ts - done)) + 1
+                    elif _current_head(gh, repo, n) != head:
+                        report["action"] = "head_moved"
+                    else:
+                        state[key] = ts
+                        try:
+                            save_dispatch_state(state_path, state, ts)
+                        except OSError as e:
+                            del state[key]
+                            writable = False
+                            report["action"] = "state_unwritable"
+                            report["detail"] = str(e)[:200]
+                        else:
+                            try:
+                                _trigger_adversary_marker(gh, repo, n, progress=out)
+                            except (RuntimeError, subprocess.TimeoutExpired, OSError) as e:
+                                del state[key]
+                                with contextlib.suppress(OSError):
+                                    save_dispatch_state(state_path, state, ts)
+                                report["action"] = "dispatch_failed"
+                                report["detail"] = str(e)[:300]
+                            else:
+                                report["action"] = "dispatched"
+            except (RuntimeError, subprocess.TimeoutExpired, OSError) as e:
+                report["action"] = "error"
+                report["detail"] = str(e)[:300]
+            r["marker_dispatch"] = report["action"]
+            reports.append(report)
+            if report["action"] == "already_dispatched":
+                continue
+            note = {
+                "dispatched": "dispatched adversary-marker.yml (check never appeared; "
+                "re-run this command to read the result)",
+                "waiting": f"within grace; check again in ~{report.get('wait_seconds', 0)}s",
+                "unknown_tests_time": "pytest-linux completion time unknown; not dispatching",
+                "head_moved": "head moved since listing; not dispatching",
+                "state_unwritable": "state file not writable; not dispatching "
+                f"({report.get('detail', '')})",
+                "dispatch_failed": f"dispatch failed: {report.get('detail', '')}",
+                "error": f"error: {report.get('detail', '')}",
+            }[report["action"]]
+            print(f"marker-dispatch #{n} ({head[:7]}): {note}", file=out)
+    finally:
+        lock.__exit__(None, None, None)
     return reports
 
 
@@ -1621,8 +1714,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     ap.add_argument(
         "--marker-grace",
-        type=float,
-        default=float(os.environ.get("ADE_MERGE_READY_MARKER_GRACE", DEFAULT_MARKER_GRACE)),
+        type=_grace_arg,
+        default=os.environ.get("ADE_MERGE_READY_MARKER_GRACE", str(DEFAULT_MARKER_GRACE)),
         metavar="SECONDS",
         help=(
             "classify / merge-now: wait this long after pytest-linux completed "
@@ -1691,18 +1784,23 @@ def main(argv: list[str] | None = None) -> int:
         if not pr_numbers:
             return die("--prs is empty")
 
-    if a.cmd in ("classify", "merge-now") and not a.no_marker_dispatch:
-        try:
-            heal_missing_markers(
-                a.gh,
-                a.repo,
-                rows,
-                grace=a.marker_grace,
-                state_path=a.state_file or default_state_path(),
-                progress=sys.stderr if (a.json or a.cmd == "merge-now") else sys.stdout,
-            )
-        except (RuntimeError, subprocess.TimeoutExpired, OSError) as e:
-            return die(f"marker self-heal: {e}")
+    # classify heals every eligible open tip. merge-now heals only with --yes and
+    # only the PRs named by --prs (a dry-run or a bare invoke never fires the Action).
+    heal_rows: list[dict[str, Any]] | None = None
+    if not a.no_marker_dispatch:
+        if a.cmd == "classify":
+            heal_rows = rows
+        elif a.cmd == "merge-now" and a.yes and pr_numbers is not None:
+            heal_rows = [r for r in rows if int(r["number"]) in pr_numbers]
+    if heal_rows:
+        heal_missing_markers(
+            a.gh,
+            a.repo,
+            heal_rows,
+            grace=a.marker_grace,
+            state_path=a.state_file or default_state_path(),
+            progress=sys.stderr if (a.json or a.cmd == "merge-now") else sys.stdout,
+        )
 
     if a.cmd == "stacks":
         stacks = build_named_stacks(
