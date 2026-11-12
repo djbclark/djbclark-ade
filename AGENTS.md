@@ -127,7 +127,9 @@ under the owner's login) is ours. The review boundary and the merge gate below a
    default 72 h; `ade-git-guard claim ls`); nothing creates claims automatically yet (a Paseo `worktree.create.after` hook
    is the planned wiring, docs/git-guard.md), so this is the rule, not yet a guard. CHANGELOG fragments (review rule 10)
    ended the shared-file conflicts. Another session's uncommitted edits in a shared checkout are migrated by their owner
-   (message it, order 10), never stashed or reset by you.
+   (message it, order 10), never stashed or reset by you. **Never `git stash` in any worktree**: a repo's worktrees share
+   one stash stack, so a pop can apply another writer's WIP (2026-11-12: two workers swapped uncommitted edits); set work
+   aside with `git diff > PATCH` and `git checkout -- PATHS`, or a WIP commit on your own branch.
 
 10. **A message to another agent is sent with `paseo send --json` or the session-finder relay shim (Wave 6 delete by
    2026-11-20), and not delivered until you have proof** (operator, 2026-10-25: "we always need to verify that the other agent
