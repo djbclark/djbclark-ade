@@ -1916,3 +1916,12 @@ def test_newest_pytest_linux_entry_decides_grace() -> None:
     entries[1]["bucket"] = "fail"
     P.stdout = json.dumps(entries)
     assert mod["tests_completed_epoch"]("gh", "o/r", 1) is None
+
+
+@pytest.mark.parametrize("blob", [b"\xff\xfe not utf8", b'{"dispatched": {"k": 1e999999}}', b'{"dispatched": {"k": 10' + b"0" * 400 + b"}}"])
+def test_corrupt_state_bytes_never_crash_classify(tmp_path: Path, blob: bytes) -> None:
+    gh = _heal_gh(tmp_path, head="2" * 40, checks_tsv=PASS_ONLY, completed_at=OLD_TS)
+    (tmp_path / "marker-state.json").write_bytes(blob)
+    r = run(gh, "--json", "--min", "500")
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout)[0]["marker_dispatch"] == "dispatched"

@@ -642,16 +642,16 @@ def load_dispatch_state(path: str) -> dict[str, float]:
     try:
         with open(path, encoding="utf-8") as f:
             doc = json.load(f)
-    except (OSError, json.JSONDecodeError):
+        raw = doc.get("dispatched") if isinstance(doc, dict) else None
+        if not isinstance(raw, dict):
+            return {}
+        return {
+            str(k): float(v)
+            for k, v in raw.items()
+            if isinstance(v, (int, float)) and not isinstance(v, bool)
+        }
+    except (OSError, ValueError, OverflowError):  # corrupt file = no record
         return {}
-    raw = doc.get("dispatched") if isinstance(doc, dict) else None
-    if not isinstance(raw, dict):
-        return {}
-    return {
-        str(k): float(v)
-        for k, v in raw.items()
-        if isinstance(v, (int, float)) and not isinstance(v, bool)
-    }
 
 
 def save_dispatch_state(path: str, state: dict[str, float], now: float) -> None:
@@ -824,10 +824,15 @@ def heal_missing_markers(
                                 _trigger_adversary_marker(gh, repo, n, progress=out)
                             except (RuntimeError, subprocess.TimeoutExpired, OSError) as e:
                                 del state[key]
-                                with contextlib.suppress(OSError):
-                                    save_dispatch_state(state_path, state, ts)
                                 report["action"] = "dispatch_failed"
                                 report["detail"] = str(e)[:300]
+                                try:
+                                    save_dispatch_state(state_path, state, ts)
+                                except OSError as e2:
+                                    report["detail"] += (
+                                        f"; claim NOT released ({str(e2)[:120]}), "
+                                        "this head will not be retried"
+                                    )
                             else:
                                 report["action"] = "dispatched"
             except (RuntimeError, subprocess.TimeoutExpired, OSError) as e:
