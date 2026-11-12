@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import subprocess
 import threading
+import time
 import urllib.parse
 
 import pytest
@@ -39,7 +40,14 @@ def wire(tmp_path):
             for key, value in headers.items():
                 self.send_header(key, value)
             self.end_headers()
-            self.wfile.write(body)
+            if headers.get('X-Test-Drip'):
+                try:
+                    for byte in body:
+                        self.wfile.write(bytes([byte])); self.wfile.flush(); time.sleep(0.03)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+            else:
+                self.wfile.write(body)
 
     server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -214,3 +222,46 @@ def test_invalid_target_and_limits(wire):
     proc, result = run('fetch', 'https://user:password@example.org')
     assert proc.returncode == 5 and not calls
     assert 'password' not in proc.stdout + proc.stderr
+
+
+def test_slow_drip_has_wall_deadline(wire):
+    routes, _, _, target, _, run, _ = wire
+    routes['/fc/v2/scrape'] = (200, ' ' * 200, {'X-Test-Drip': 'yes'})
+    started = time.monotonic()
+    proc, result = run('fetch', target, '--timeout', '0.15')
+    assert time.monotonic() - started < 2
+    assert proc.returncode == 5
+    assert result['attempts'][0]['error'] == 'request timeout'
+
+
+def test_search_truncation_walks_to_complete(wire):
+    routes, _, _, _, env, run, _ = wire
+    env['JINA_API_KEY'] = 'test-only-sentinel'
+    routes['/fc/v2/search'] = (200, {'truncated': True, 'data': [{'title': ARTICLE}]}, {})
+    routes['/search/evidence'] = (200, ARTICLE, {})
+    proc, result = run('search', 'evidence')
+    assert proc.returncode == 0 and result['provider'] == 'jina-search'
+    assert result['attempts'][0]['status'] == 'truncated'
+
+
+def test_search_only_truncated_requires_pause(wire):
+    routes, _, _, _, _, run, _ = wire
+    routes['/fc/v2/search'] = (200, {'data': {'truncated': True, 'web': [{'title': ARTICLE}]}}, {})
+    proc, result = run('search', 'evidence')
+    assert proc.returncode == 6 and result['truncated']
+
+
+@pytest.mark.parametrize('target', ['https://[broken', 'https://example.org:bad'])
+def test_malformed_target_returns_safe_json(wire, target):
+    _, calls, _, _, _, run, _ = wire
+    proc, result = run('fetch', target)
+    assert proc.returncode == 5 and not calls
+    assert 'Traceback' not in proc.stderr
+
+
+def test_malformed_base_returns_safe_json(wire):
+    _, calls, _, _, env, run, _ = wire
+    env['ADE_WEB_FIRECRAWL_URL'] = 'https://[broken'
+    proc, result = run()
+    assert proc.returncode == 5 and not calls
+    assert 'Traceback' not in proc.stderr

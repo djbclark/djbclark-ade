@@ -10,6 +10,7 @@ Keys are read only from the environment; diagnostics never include exceptions.
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import gzip
 import io
 import json
@@ -17,6 +18,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -36,7 +38,11 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def valid_url(url):
-    p = urllib.parse.urlsplit(url)
+    try:
+        p = urllib.parse.urlsplit(url)
+        p.port
+    except ValueError:
+        raise Failure('invalid URL') from None
     if p.scheme not in ('http', 'https') or not p.hostname or p.username or p.password:
         raise Failure('invalid URL')
     return url
@@ -80,6 +86,20 @@ def quality(body):
         raise Failure('block or soft-404')
 
 
+@contextmanager
+def deadline(seconds):
+    """POSIX wall deadline includes DNS, redirects and slow-drip body reads."""
+    def expired(signum, frame):
+        raise Failure('request timeout')
+    previous = signal.signal(signal.SIGALRM, expired)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+
+
 class Web:
     def __init__(self, args):
         self.args = args
@@ -99,7 +119,7 @@ class Web:
         opener = urllib.request.build_opener(NoRedirect()) if key else urllib.request.build_opener()
         cap = limit or self.args.max_bytes
         try:
-            with opener.open(req, timeout=self.args.timeout) as response:
+            with deadline(self.args.timeout), opener.open(req, timeout=self.args.timeout) as response:
                 payload = response.read(cap + 1)
                 clipped = len(payload) > cap
                 payload = payload[:cap]
@@ -133,7 +153,7 @@ class Web:
             rows = item.get('web', []) if isinstance(item, dict) else item
             if not isinstance(rows, list) or not rows: raise Failure('no results')
             body = '\n\n'.join(str(r.get('title', '')) + '\n' + str(r.get('url', '')) + '\n' + str(r.get('description', '')) for r in rows if isinstance(r, dict))
-            return body, False
+            return body, bool(data.get('truncated') or (isinstance(item, dict) and item.get('truncated')))
         if not isinstance(item, dict): raise Failure('invalid scrape')
         meta = item.get('metadata') or {}
         if isinstance(meta, dict) and str(meta.get('statusCode', '200'))[:1] in ('4', '5'):
