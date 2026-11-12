@@ -1679,6 +1679,7 @@ def test_update_doctor_fail_retries_once_then_reports(tmp_path):
     assert entry["retry_rc"] == 0
     assert entry["doctor"] == "ok"
     assert report["doctor"]["before_fail"] == ["tool-a"]
+    assert report["doctor"]["retried"] == ["tool-a"]
     assert report["doctor"]["after_fail"] == []
 
 

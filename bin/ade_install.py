@@ -1691,6 +1691,7 @@ def apply_updates(
         failing = _doctor_fail_ids(obs)
         report["doctor"]["before_fail"] = sorted(set(report["doctor"]["before_fail"]) | failing)
         if failing:
+            report["doctor"]["retried"] = sorted(failing)
             entries_by_id = {e["id"]: e for e in report["components"]}
             for cid in sorted(failing):
                 entry = entries_by_id[cid]
