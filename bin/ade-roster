@@ -9,7 +9,8 @@ The skills table has one row per tracked `skills/*/SKILL.md` (every one when ROO
 `description`. The bin table has one row per tracked file in `bin/`: the first sentence of the file's first docstring or
 comment paragraph (after the shebang), with a leading "<name> - " / "<name>: " dropped. The block sits in README.md
 between `<!-- roster:start -->` and `<!-- roster:end -->`; CI runs `--check`, so a new skill or tool changes the README
-in the same PR (AGENTS.md review rule 8).
+in the same PR (AGENTS.md review rule 8). Headings omit inventory counts and generation timestamps so unrelated
+additions do not conflict on shared metadata lines.
 
 Exit: 0 printed / up to date / written; 1 `--check` found a difference; 2 usage, README.md or its markers missing.
 Stdlib only.
@@ -167,9 +168,9 @@ def bin_rows(root: Path) -> list[tuple[str, str]]:
 def render(root: Path) -> str:
     skills = skill_rows(root)
     tools = bin_rows(root)
-    out = [START, f"Skills ({len(skills)}, from each `skills/*/SKILL.md`):", "", "| Skill | What |", "|---|---|"]
+    out = [START, "Skills (from each `skills/*/SKILL.md`):", "", "| Skill | What |", "|---|---|"]
     out += [f"| [`{name}`]({rel}) | {_cell(desc)} |" for name, rel, desc in skills]
-    out += ["", f"`bin/` ({len(tools)}, from each file's first docstring or comment):", "", "| Tool | What |", "|---|---|"]
+    out += ["", "`bin/` (from each file's first docstring or comment):", "", "| Tool | What |", "|---|---|"]
     out += [f"| [`{name}`](bin/{name}) | {_cell(desc)} |" for name, desc in tools]
     out += [END]
     return "\n".join(out) + "\n"
