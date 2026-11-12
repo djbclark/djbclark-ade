@@ -136,6 +136,10 @@ E1. Probes, in this order, per batch: `aiuse --available --json 2>/dev/null` (ex
 `.available[]`: `provider`, `pool_family`, `usable_now`, `headroom_percent`, `binding_window`; top-level `fresh` and
 `age_seconds`; add `--live` when stale), `paseo usage ls --json` (a report whose `report.status` is not `available` is
 unknown, never a pass), then `route_agent.py plan`. The contract is `aiuse schema`; never the human table.
+E1a. Top-level `fresh` is not enough: read each pool's `.available[].collected_at`. Before every dispatch wave, that
+pool's `collected_at` must be newer than the previous wave's start; if not, re-read with `aiuse --available --live --json`
+and size the wave to it (2026-11-12: one 11:53 AM EST agy reading, served as `fresh` for 25 minutes, fed ~16 agents; the
+agy Claude/GPT and Argon pools both ran out mid-wave).
 E2. `used_percent` is the share consumed: 100 means empty. Quote "X% used / Y% left".
 E3. An account is usable only if every window has headroom: the fullest binds.
 E4. One provider can hold several pools (Cursor Auto vs third-party): a 429 describes the pool the model draws on.
