@@ -6,6 +6,7 @@ named skill are separate things. The **Baton plugin** is distinct from ADE's **b
 
 | Need | Old way | Preferred way | What still matters |
 |---|---|---|---|
+| Explicit self-compact / same-model successor | Removed pane-typing `self-slash` | `bin/ade-self-session` ([contract](self-session.md), 2026-11-12) | Durable checkpoint first; compact receipt is unconfirmed; successor acknowledgement before idle-only predecessor retirement. Unsupported native APIs block. |
 | Fresh agent for a task | `hand`, `handoff`, manual clear then `baton` | `paseo-handoff` with a self-contained briefing | Its inspected version creates a child. It does not promise predecessor archival, ADE pointer updates or file transfer. |
 | Durable recovery record | ADE Tier 1 pointer and deep Tier 2 document | Baton plugin for convenient idle snapshots; retain ADE records when explicitly needed | Baton has bounded conversation input and host-local storage. It is not a drop-in replacement for ADE's ownership/lineage protocol. |
 | Resume an ADE checkpoint | ADE `baton` skill | Keep `baton` for existing Tier 1 chains | Read the exact pointer, check HEAD and owner. A native fresh-agent handoff does not make an old chain yours. |
