@@ -129,3 +129,11 @@ test("open hook: legacy Hermes/Pi/Claude agents resume without catalog lookup; s
   await assert.rejects(hooks["agent.open.before"]({request},{paseo:paseoWith({id:"a",provider:"claude",currentModeId:"auto"})}),/drift/);
   await hooks["agent.open.before"]({request},{paseo:paseoWith({id:"a",provider:"claude",currentModeId:"bypassPermissions"})});
 });
+
+test("retired providers still refuse resume even as legacy agents without evidence",async()=>{
+  const request={agentId:"a",provider:"omp",metadata:{}};
+  assert.throws(()=>assertResumeConfig({id:"a",provider:"omp"},request,row("omp",[])),/retired/);
+  const hooks={}; registerAdeYoloHooks({addHook(n,h){hooks[n]=h;return()=>{};}});
+  const paseo={agents:{ref:()=>({refresh:async()=>({agent:{id:"a",provider:"omp"}})})}};
+  await assert.rejects(hooks["agent.open.before"]({request:{...request,reason:"resume",purpose:"interactive"}},{paseo}),/retired/);
+});

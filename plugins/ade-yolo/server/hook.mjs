@@ -1,4 +1,4 @@
-import { applyYoloToCreateRequest, assertResumeConfig, assertResumeIdentity, isExempt, isLegacyWithoutEvidence,
+import { applyYoloToCreateRequest, assertNotRetired, assertResumeConfig, assertResumeIdentity, isExempt, isLegacyWithoutEvidence,
   providerId } from "./yolo-lib.mjs";
 
 async function nativeEvidence(paseo, config) {
@@ -34,6 +34,7 @@ export function registerAdeYoloHooks(server) {
     assertResumeIdentity(snapshot, request);
     if (isExempt({ modeId: snapshot.currentModeId }, request.metadata)) return;
     // Legacy agent with no saved evidence (pre-plugin, Hermes): allow and log before any catalog lookup.
+    assertNotRetired(providerId(request.provider));
     if (isLegacyWithoutEvidence(snapshot, request)) {
       log(`ade-yolo: ${request.agentId}: legacy agent without saved mode evidence; allowed`);
       return;

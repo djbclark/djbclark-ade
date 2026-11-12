@@ -1,4 +1,4 @@
-/** Pure planning from native IDs/controls. Keep parity with bin/paseo_yolo.py. */
+/** Pure planning from native IDs/controls. Mirrors bin/paseo_yolo.py except Pi: the 2026-11-12 ruling admits a modeless Pi here, while the CLI planner still reports it unverified. */
 export const YOLO_BY_PROVIDER = {
   claude: { modeId: "bypassPermissions" },
   codex: { modeId: "full-access" },
@@ -11,6 +11,12 @@ export const STAMP_METADATA_KEY = "ade-yolo.applied";
 export const RESTRICTIVE_MODE_IDS = new Set(["plan", "read-only", "dontAsk"]);
 export const SKIP_METADATA_KEY = "ade-yolo.skip";
 export const SCOPE_METADATA_KEY = "ade.work-scope";
+export const RETIRED_PROVIDERS = ["omp", "opencode", "crush", "agy", "grok"];
+/** Needs no catalog, so it also runs before the legacy resume allowance. */
+export function assertNotRetired(provider) {
+  if (RETIRED_PROVIDERS.includes(provider))
+    throw new Error(`ade-yolo: ${provider}: retired client is not an ordinary dispatch route`);
+}
 export function providerId(provider) {
   return typeof provider === "string" ? provider.trim().split("/", 1)[0] : "";
 }
@@ -28,8 +34,7 @@ export function planYoloPatch(config, metadata, catalog, controls) {
   if (isExempt(config, metadata)) return null;
   const provider = providerId(config?.provider);
   const unavailable = reason => { throw new Error(`ade-yolo: ${provider}: ${reason}`); };
-  if (["omp", "opencode", "crush", "agy", "grok"].includes(provider))
-    return unavailable("retired client is not an ordinary dispatch route");
+  assertNotRetired(provider);
   if (!catalog || catalog.provider !== provider || catalog.enabled !== true || catalog.status !== "ready" || catalog.error)
     return unavailable("native provider catalog is not enabled/ready");
   if (!Array.isArray(catalog.modes) || catalog.modes.some(m => !m || typeof m.id !== "string" || !m.id))
@@ -73,7 +78,7 @@ export function hasSavedEvidence(snapshot) {
   return !blank(snapshot?.currentModeId) || !blank(snapshot?.options?.auto_accept);
 }
 /**
- * An agent this plugin never stamped (created before install, or by a path that skipped it) is
+ * An agent this plugin never stamped (created before install, with the plugin disabled, internal, or imported) is
  * legacy. Agents expose no install-time field, so "created before install" == "no stamp".
  */
 export function isLegacyAgent(snapshot, request) {
@@ -90,6 +95,7 @@ export function assertResumeConfig(snapshot, request, catalog, controls, log = (
   const config = { provider: request.provider, modeId: snapshot.currentModeId,
     providerOptions: snapshot.options };
   if (isExempt(config, request.metadata)) return;
+  assertNotRetired(providerId(request.provider));
   if (isLegacyWithoutEvidence(snapshot, request)) {
     log(`ade-yolo: ${request.agentId}: legacy agent without saved mode evidence; allowed`);
     return;
