@@ -2975,12 +2975,13 @@ def _root_refuse(path: str, why: str) -> InstallError:
     return InstallError(f"{path}: refusing to use the install state as root: {why}; run as the target user")
 
 
-def _require_trusted_dir(fd: int, path: str) -> None:
+def _require_trusted_dir(fd: int, path: str, *, leaf: bool = False) -> None:
     st = os.fstat(fd)
     if st.st_uid not in TRUSTED_OWNER_UIDS:
         raise _root_refuse(path, f"owned by uid {st.st_uid}, not root")
-    if st.st_mode & 0o022 and not st.st_mode & stat.S_ISVTX:
-        raise _root_refuse(path, "group/world-writable without the sticky bit")
+    if st.st_mode & 0o022 and (leaf or not st.st_mode & stat.S_ISVTX):
+        # an ancestor may be sticky (like /tmp); the state directory itself may not be shared at all
+        raise _root_refuse(path, "group/world-writable" + ("" if leaf else " without the sticky bit"))
 
 
 def open_state_dir(state_dir: Path) -> int:
@@ -2989,18 +2990,23 @@ def open_state_dir(state_dir: Path) -> int:
     Non-root: a plain mkdir. Root: walk from ``/`` with directory fds (``O_NOFOLLOW``,
     ``dir_fd=``), refuse any existing component that is a symlink, is not root-owned, or is
     group/world-writable without sticky, and create missing components with ``mkdir(dir_fd=)``
-    then re-open them ``O_NOFOLLOW``. Every later open is relative to the returned fd, so a
-    swap between check and use cannot redirect it, and validated components cannot be swapped
-    by anyone but root.
+    then re-open them ``O_NOFOLLOW``. The lock and the evidence log are opened relative to the
+    returned fd, so a swap after the check cannot redirect them; the other root writers (ledger,
+    temp files) re-resolve the path, which stays safe because every validated component is
+    root-owned and not writable by others, so only root can swap it. Limits: ACL grants to other
+    users are not examined, and a ``..`` in the path is refused (it would resolve differently
+    from the normalised path that was validated).
     """
     if os.geteuid() != 0:
         state_dir.mkdir(parents=True, exist_ok=True)
         return os.open(state_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    if ".." in Path(state_dir).parts:
+        raise _root_refuse(str(state_dir), "the path contains '..'")
     names = [part for part in os.path.abspath(state_dir).split(os.sep) if part]
     here = os.sep
     fd = os.open(os.sep, _DIR_FLAGS)
     try:
-        _require_trusted_dir(fd, here)
+        _require_trusted_dir(fd, here, leaf=not names)
         for name in names:
             _before_open_component(here, name)
             path = os.path.join(here, name)
@@ -3008,13 +3014,16 @@ def open_state_dir(state_dir: Path) -> int:
                 try:
                     nxt = os.open(name, _DIR_FLAGS, dir_fd=fd)
                 except FileNotFoundError:
-                    os.mkdir(name, 0o700, dir_fd=fd)
+                    try:
+                        os.mkdir(name, 0o700, dir_fd=fd)
+                    except FileExistsError:
+                        pass  # a concurrent root installer made it; the open below judges it like any component
                     nxt = os.open(name, _DIR_FLAGS, dir_fd=fd)
             except OSError as error:
                 raise _root_refuse(path, f"not a plain directory it can open or create ({error.strerror or error})") from error
             os.close(fd)
             fd, here = nxt, path
-            _require_trusted_dir(fd, here)
+            _require_trusted_dir(fd, here, leaf=name == names[-1])
         return fd
     except BaseException:
         os.close(fd)

@@ -516,3 +516,36 @@ def test_atomic_writes_as_root_refuse_unsafe_ancestry(tmp_path, monkeypatch):
     with pytest.raises(ai.InstallError, match="as root"):
         ai._atomic_write_json(tmp_path / "x" / "ledger.json", {})
     assert not (tmp_path / "x").exists()
+
+
+def test_root_refuses_dotdot_and_a_shared_leaf_directory(tmp_path, as_root):
+    (tmp_path / "real").mkdir()
+    (tmp_path / "link").symlink_to(tmp_path / "real")
+    with pytest.raises(ai.InstallError, match="'..'"):
+        ai.open_state_dir(tmp_path / "link" / ".." / "state")  # normalised, this would name tmp/state
+    assert not (tmp_path / "state").exists()
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    os.chmod(shared, 0o1777)
+    os.close(ai.open_state_dir(shared / "sub"))  # sticky is fine for an ancestor...
+    with pytest.raises(ai.InstallError, match="group/world-writable"):
+        ai.open_state_dir(shared)  # ...never for the state directory itself
+
+
+def test_swap_of_an_already_validated_parent_cannot_redirect_the_children(tmp_path, monkeypatch, as_root):
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (tmp_path / "a").mkdir()
+    real_hook = ai._before_open_component
+
+    def hook(parent, name):
+        real_hook(parent, name)
+        if parent == str(tmp_path / "a") and name == "state":
+            os.rename(tmp_path / "a", tmp_path / "a.real")  # "a" is validated and held by fd; swap its path
+            (tmp_path / "a").symlink_to(victim)
+
+    monkeypatch.setattr(ai, "_before_open_component", hook)
+    with ai.install_ledger_lock(tmp_path / "a" / "state"):
+        pass
+    assert list(victim.iterdir()) == []  # a path-based walk would have created state/ledger.lock in the victim
+    assert (tmp_path / "a.real" / "state" / "ledger.lock").is_file()
