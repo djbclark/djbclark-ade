@@ -53,6 +53,46 @@ def test_default_push_creates_same_branch(published):
     assert git(remote, "rev-parse", "topic") == git(repo, "rev-parse", "HEAD")
 
 
+@pytest.mark.parametrize("multiple", [False, True])
+def test_different_or_multiple_push_urls_are_refused_before_remote_contact(published, multiple):
+    import shlex
+
+    repo, remote = published
+    other = remote.parent / "push.git"
+    subprocess.run(["git", "clone", "--bare", str(remote), str(other)],
+                   check=True, capture_output=True)
+    advance(repo, other)  # Only the push endpoint advances; fetch endpoint stays behind.
+    git(repo, "config", "branch.topic.commitOwnPushRef", "main")
+    if multiple:
+        git(repo, "config", "--add", "remote.origin.pushurl", str(remote))
+    git(repo, "config", "--add", "remote.origin.pushurl", str(other))
+    before = [git(r, "show-ref") for r in (remote, other)]
+    contacted = remote.parent / "contacted"
+    upload = remote.parent / "upload-probe"
+    upload.write_text("#!/bin/sh\nprintf contacted > " + shlex.quote(str(contacted))
+                      + "\nexit 99\n")
+    upload.chmod(0o755)
+    git(repo, "config", "remote.origin.uploadpack", str(upload))
+
+    result = commit(repo)
+
+    assert result.returncode == 3
+    assert "PUBLISH FAILED remote=origin ref=refs/heads/main" in result.stderr
+    assert "different fetch/push URLs or multiple push URLs" in result.stderr
+    assert "--no-push and publish explicitly" in result.stderr
+    assert not contacted.exists()
+    assert [git(r, "show-ref") for r in (remote, other)] == before
+    assert git(repo, "log", "-1", "--format=%s") == "own change"
+
+
+def test_same_explicit_fetch_and_push_url_is_allowed(published):
+    repo, remote = published
+    git(repo, "config", "remote.origin.pushurl", str(remote))
+    result = commit(repo)
+    assert result.returncode == 0, result.stderr
+    assert git(remote, "rev-parse", "topic") == git(repo, "rev-parse", "HEAD")
+
+
 def test_explicit_config_wins_over_upstream(published):
     repo, remote = published
     git(repo, "branch", "--set-upstream-to=origin/main")

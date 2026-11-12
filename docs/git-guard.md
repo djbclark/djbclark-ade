@@ -106,6 +106,9 @@ workspace contract also applies to the final checkout update.
 
 Before contacting a target, the helper resolves every push URL and applies the
 existing [upstream review gate](upstream-review-gate.md)'s shared `gated_url` policy.
+It also requires exactly one resolved push URL matching the resolved fetch URL.
+Different fetch/push endpoints or multiple push URLs cause exit 3 before any
+remote contact, naming the remote and advising `--no-push` and explicit publishing.
 It refuses GitHub targets owned by CFEngine or NorthernTechHQ even though the push
 runs as a subprocess. This helper has no environment escape: the operator can use
 `--no-push` and publish explicitly through the normal shell review gate and its

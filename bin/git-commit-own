@@ -136,6 +136,10 @@ try:
         if gated:
             raise RuntimeError(f"upstream review gate refuses publishing to {gated}; "
                                "publish to an operator-owned fork instead")
+    fetch_url = git("remote", "get-url", "--", remote)
+    if len(urls) != 1 or fetch_url != urls[0]:
+        raise RuntimeError(f"remote {remote} has different fetch/push URLs or multiple push URLs; "
+                           "use --no-push and publish explicitly")
     # A missing target is normal on a first push; other lookup failures are fatal.
     exists = git("ls-remote", "--heads", "--", remote, ref)
     if exists:
