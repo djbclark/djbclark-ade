@@ -22,6 +22,9 @@ no destination agent was launched or predecessor archived by this cloud session.
 
 First local action: refresh the PR heads/checks/findings, reconcile #568 → #567,
 and review the completed source changes for landing in claimed worktrees.
+#567 head 0ca4fdeb already includes #568 head f1ab363 ancestry and is stacked on
+ordinary-agent-modes. Reconcile means confirm current ancestry and landing order,
+not reapply the dependency. Retarget/rebase #567 after #568 lands as appropriate.
 Read [evidence.json](evidence.json) for the final pinned PR/worktree/test snapshot.
 Read [RESUME.txt](RESUME.txt) for a vendor-neutral prompt and
 [SESSION_LOG.md](SESSION_LOG.md) for the portable Tier 1 record.
@@ -79,6 +82,12 @@ Earlier source validation: #558 151 focused pass/1 skip; #559 251 focused pass;
 #565 is design-only; roster/instruction/diff checks, no runtime implementation.
 #566: 193 tests passed (baseline 186), synthetic temporary HOME, byte-for-byte
 Pi JSONL restore and fresh archive index; independent review clean at 2104aaf.
+#567 final integrated 0ca4fdeb: 186 Python tests + 48 subtests and 10 JS tests
+passed; independent static review clean. #568 f1ab363: final focused 56 Python
+and 10 JS checks passed; its race finding was resolved by refusing unsupported
+runtime repair, not by claiming an atomic mutation. Complete commands and
+limitations are in the PR bodies and respective docs. These are worker-reported
+validated runs; root did not redundantly rerun them.
 No live Pi/provider resume or active-writer snapshot guarantee. Default sessions
 root only; custom env/CLI roots are not auto-discovered. Credentials excluded.
 

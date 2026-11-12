@@ -1,6 +1,6 @@
 {
-  "snapshot": "pre-final; refresh before local merge",
-  "base": "dc3463b16c400a3c7af00a4aef3a8cbb4a0e1276",
+  "snapshot_utc": "2026-11-12 16:41:47 UTC",
+  "source_master": "dc3463b16c400a3c7af00a4aef3a8cbb4a0e1276",
   "prs": [
     {
       "number": 558,
@@ -9,6 +9,7 @@
       "merged": false,
       "draft": false,
       "head": "2634a87de05b481fc8bfa31f9d5cce1e5c5361a0",
+      "base": "master",
       "branch": "apply-inconclusive-probes",
       "title": "Block default installs after inconclusive or failed presence probes",
       "checks": [
@@ -46,6 +47,7 @@
       "merged": false,
       "draft": false,
       "head": "0f250f3c9170948004e3ba0a75c4b644641196cd",
+      "base": "master",
       "branch": "keys-plan",
       "title": "Add cached selected-key worklist planning",
       "checks": [
@@ -83,6 +85,7 @@
       "merged": false,
       "draft": false,
       "head": "1d916eaecb12a10bdb12600bb602c2acbfaba873",
+      "base": "master",
       "branch": "setup-progress-20261111",
       "title": "Record merged setup work and continuing November 11 implementation",
       "checks": [
@@ -120,6 +123,7 @@
       "merged": false,
       "draft": true,
       "head": "76dd1b7cbb8579927df5de8e7b046e42909cb453",
+      "base": "master",
       "branch": "install-ledger-lock",
       "title": "Serialize install ledger lifecycle to retain concurrent evidence",
       "checks": [
@@ -147,6 +151,7 @@
       "merged": false,
       "draft": false,
       "head": "c6b65d8fab18fa95ffea25c6f868f7108e21beed",
+      "base": "master",
       "branch": "slim-change-audit-20261111",
       "title": "Audit slim-down removals and protect later restorations",
       "checks": [
@@ -184,6 +189,7 @@
       "merged": false,
       "draft": true,
       "head": "5a1159ad80a3f2f82476296f5df38ac32ccd3907",
+      "base": "master",
       "branch": "persistent-progress-design",
       "title": "Design a bounded persistent progress reminder without session restart",
       "checks": [
@@ -211,6 +217,7 @@
       "merged": false,
       "draft": true,
       "head": "2104aaf825dfa13186949d814aacfc4121075988",
+      "base": "master",
       "branch": "pi-backup-coverage",
       "title": "Restore Pi session backup coverage and fixture recovery proof",
       "checks": [
@@ -238,6 +245,7 @@
       "merged": false,
       "draft": true,
       "head": "0ca4fdeb0aef49c6ee28df4c7f8b14423f8ccff6",
+      "base": "ordinary-agent-modes",
       "branch": "native-self-session",
       "title": "Restore checkpointed native self-compaction requests and acknowledged self-handoff",
       "checks": [
@@ -265,6 +273,7 @@
       "merged": false,
       "draft": true,
       "head": "f1ab363e1734c9e01ffd76cfe99c38d0eb1b0cc1",
+      "base": "master",
       "branch": "ordinary-agent-modes",
       "title": "Require native evidence for ordinary agent YOLO and mode drift checks",
       "checks": [
@@ -286,10 +295,221 @@
       ]
     }
   ],
-  "limitations": [
-    "GitHub statuses are snapshots, not a merge verdict",
-    "No numeric quota telemetry available",
-    "No user-machine clipboard access available"
+  "source_worktrees": [
+    {
+      "path": "/workspace/ade-apply-inconclusive-probes-wt",
+      "head": "2634a87de05b481fc8bfa31f9d5cce1e5c5361a0",
+      "branch": "apply-inconclusive-probes",
+      "dirty": "",
+      "unmerged": "",
+      "remote_branch_head": "2634a87de05b481fc8bfa31f9d5cce1e5c5361a0",
+      "remote_matches_head": true
+    },
+    {
+      "path": "/workspace/ade-effective-metadata-writer-wt",
+      "head": "62dc995d08ebf70a3dd5b17fd18a997898c07fc2",
+      "branch": "effective-metadata-writer",
+      "dirty": "",
+      "unmerged": "",
+      "remote_branch_head": "62dc995d08ebf70a3dd5b17fd18a997898c07fc2",
+      "remote_matches_head": true
+    },
+    {
+      "path": "/workspace/ade-install-ledger-lock-wt",
+      "head": "76dd1b7cbb8579927df5de8e7b046e42909cb453",
+      "branch": "install-ledger-lock",
+      "dirty": "",
+      "unmerged": "",
+      "remote_branch_head": "76dd1b7cbb8579927df5de8e7b046e42909cb453",
+      "remote_matches_head": true
+    },
+    {
+      "path": "/workspace/ade-keys-plan-wt",
+      "head": "0f250f3c9170948004e3ba0a75c4b644641196cd",
+      "branch": "keys-plan",
+      "dirty": "",
+      "unmerged": "",
+      "remote_branch_head": "0f250f3c9170948004e3ba0a75c4b644641196cd",
+      "remote_matches_head": true
+    },
+    {
+      "path": "/workspace/ade-model-key-probes-wt",
+      "head": "f0165a48e99ea0453c22c8675e7e7d5aee77a1d0",
+      "branch": "api-key-model-probes",
+      "dirty": "",
+      "unmerged": "",
+      "remote_branch_head": "f0165a48e99ea0453c22c8675e7e7d5aee77a1d0",
+      "remote_matches_head": true
+    },
+    {
+      "path": "/workspace/ade-native-self-session-wt",
+      "head": "0ca4fdeb0aef49c6ee28df4c7f8b14423f8ccff6",
+      "branch": "native-self-session",
+      "dirty": "",
+      "unmerged": "",
+      "remote_branch_head": "0ca4fdeb0aef49c6ee28df4c7f8b14423f8ccff6",
+      "remote_matches_head": true
+    },
+    {
+      "path": "/workspace/ade-ordinary-agent-modes-wt",
+      "head": "f1ab363e1734c9e01ffd76cfe99c38d0eb1b0cc1",
+      "branch": "ordinary-agent-modes",
+      "dirty": "",
+      "unmerged": "",
+      "remote_branch_head": "f1ab363e1734c9e01ffd76cfe99c38d0eb1b0cc1",
+      "remote_matches_head": true
+    },
+    {
+      "path": "/workspace/ade-persistent-progress-design-wt",
+      "head": "5a1159ad80a3f2f82476296f5df38ac32ccd3907",
+      "branch": "persistent-progress-design",
+      "dirty": "",
+      "unmerged": "",
+      "remote_branch_head": "5a1159ad80a3f2f82476296f5df38ac32ccd3907",
+      "remote_matches_head": true
+    },
+    {
+      "path": "/workspace/ade-pi-backup-coverage-wt",
+      "head": "2104aaf825dfa13186949d814aacfc4121075988",
+      "branch": "pi-backup-coverage",
+      "dirty": "",
+      "unmerged": "",
+      "remote_branch_head": "2104aaf825dfa13186949d814aacfc4121075988",
+      "remote_matches_head": true
+    },
+    {
+      "path": "/workspace/ade-progress-20261111-wt",
+      "head": "1d916eaecb12a10bdb12600bb602c2acbfaba873",
+      "branch": "setup-progress-20261111",
+      "dirty": "",
+      "unmerged": "",
+      "remote_branch_head": "1d916eaecb12a10bdb12600bb602c2acbfaba873",
+      "remote_matches_head": true
+    },
+    {
+      "path": "/workspace/ade-slim-change-audit-wt",
+      "head": "c6b65d8fab18fa95ffea25c6f868f7108e21beed",
+      "branch": "slim-change-audit-20261111",
+      "dirty": "",
+      "unmerged": "",
+      "remote_branch_head": "c6b65d8fab18fa95ffea25c6f868f7108e21beed",
+      "remote_matches_head": true
+    },
+    {
+      "path": "/workspace/ade-universal-skills",
+      "head": "bc2a112a6e16f304d273f69b16d22c93e558dc6f",
+      "branch": "",
+      "dirty": "",
+      "unmerged": "",
+      "remote_branch_head": null,
+      "remote_matches_head": null
+    },
+    {
+      "path": "/workspace/aiuse-a6-audit",
+      "head": "e794e945c9997201c3dd6e0489e759016ff587de",
+      "branch": "main",
+      "dirty": "",
+      "unmerged": ""
+    },
+    {
+      "path": "/workspace/aiuse-wave6-wt",
+      "head": "a69d2e80b0f743a65b7c54ec8421c2b9cc9ef32d",
+      "branch": "wave6/aiuse-native-client-guidance",
+      "dirty": "",
+      "unmerged": ""
+    },
+    {
+      "path": "/workspace/cfengine-all",
+      "head": "9bcc7f51eb384b23d381a3b6de9d58cff0f259d6",
+      "branch": "main",
+      "dirty": "",
+      "unmerged": ""
+    },
+    {
+      "path": "/workspace/cfengine-all-wave6-wt",
+      "head": "8ba9ce32a11802c04e390ece7dd83e0e8f129cda",
+      "branch": "wave6-native-instructions",
+      "dirty": "",
+      "unmerged": ""
+    },
+    {
+      "path": "/workspace/djbclark-ade",
+      "head": "7f0ae2add8beb5df201ba8fa447d4af8392fbb53",
+      "branch": "work",
+      "dirty": "",
+      "unmerged": ""
+    },
+    {
+      "path": "/workspace/nix2cf",
+      "head": "bf2842eca8b905a0834d2b3e9854de49d4321ecb",
+      "branch": "master",
+      "dirty": "",
+      "unmerged": ""
+    },
+    {
+      "path": "/workspace/nix2cf-wave6-wt",
+      "head": "f3965768d90b1ef2d022e9198dcc41c55b542d2b",
+      "branch": "wave6-native-routing",
+      "dirty": "",
+      "unmerged": ""
+    },
+    {
+      "path": "/workspace/site-djbclark",
+      "head": "b7e6591d2c890a42c0b3087ee392801744f567bb",
+      "branch": "master",
+      "dirty": "",
+      "unmerged": ""
+    },
+    {
+      "path": "/workspace/site-djbclark-wave6-fleet-wt",
+      "head": "8aecdd371bc7d5b921de0a6ac2537655b3986c31",
+      "branch": "wave6-fleet-native-send",
+      "dirty": "",
+      "unmerged": ""
+    },
+    {
+      "path": "/workspace/site-djbclark-wave6-home-wt",
+      "head": "05998b34c4c0e86655a131b854a0398f4ef23676",
+      "branch": "wave6-home-native-instructions",
+      "dirty": "",
+      "unmerged": ""
+    },
+    {
+      "path": "/workspace/tendcf",
+      "head": "069958d5c56e9a6331f20adc6f433c23e26faa98",
+      "branch": "master",
+      "dirty": "",
+      "unmerged": ""
+    },
+    {
+      "path": "/workspace/tendcf-wave6-wt",
+      "head": "71fe7d6b8acfb8d8b162b6f198ca8f2b7c3789ec",
+      "branch": "wave6-native-routing",
+      "dirty": "",
+      "unmerged": ""
+    }
   ],
-  "work_status": "Final worker/CI drain in progress; replaced at finalization"
+  "quiescence": {
+    "workers": "all coding/review workers completed; no further tasks scheduled",
+    "local_processes": "no pytest/ruff/node test/git push/cherry-pick process found in root sweep; workers independently confirmed exited",
+    "cloud_watchdog": "stopped; no persistent cron created",
+    "hosted_checks": "See per-PR checks; pending hosted jobs are not claimed completed"
+  },
+  "validation": {
+    "pi_backup": "193 passed; exact-head independent review clean at 2104aaf; fixture-only",
+    "self_session": "186 Python + 48 subtests, 10 JS passed; exact-head static review clean at 0ca4fdeb",
+    "agent_modes": "56 final focused Python, 10 JS passed; exact-head review clean at f1ab363; runtime mutation refused",
+    "handoff": "Independent read-only review found no material blocker; local links/JSON and diff whitespace validated"
+  },
+  "limitations": [
+    "Compaction request-only; completion unconfirmed",
+    "Mode repair application blocked by missing atomic live-only API",
+    "Trusted internal review runtime YOLO remains successor work",
+    "No live Mac/provider acceptance",
+    "No numeric quota telemetry",
+    "Clipboard access unavailable; resume text and Mac pbcopy recipe supplied"
+  ],
+  "dependency": "#567 0ca4fdeb already contains #568 f1ab363 and targets ordinary-agent-modes; land #568 then retarget/reconcile #567 without duplicate cherry-pick",
+  "handoff_branch": "local-agent-handoff-20261112",
+  "handoff_pr": 569
 }
