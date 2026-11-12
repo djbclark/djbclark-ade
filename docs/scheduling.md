@@ -118,9 +118,11 @@ Checked-in ADE jobs under `config/launchd/` include `com.djbclark.deadline-sweep
 ## Paseo schedules (reconcile + operator, 2026-11-10)
 
 The [persistent progress reminder design](persistent-progress-reminder-design.md)
-(2026-11-12) proposes a cheap host-scheduled scanner with local inbox readback.
-It adds no job or installer; automatic session restart remains outside its
-authority, and external notification needs a qualified delivery contract.
+(2026-11-12) proposes a zero-token host-scheduled scanner (an ade-sched row, later slice)
+that, for an enrolled idle agent with declared open work, writes a local inbox record, raises a
+Progress-panel item, sends one `hermes-ping` and wakes the agent via `paseo send`. No Paseo
+built-in (heartbeat, schedule) fits without a model turn per firing. It adds no job or installer
+yet; it never restarts a closed or errored session.
 
 Judgment jobs live in `paseo schedule`, not ade-sched. Inventory rows (`kind = "paseo"`) record the
 intended name, cron, `--mode`, and (for hard `context-budget`) provider/cwd/prompt for reconcile.

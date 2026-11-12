@@ -1,216 +1,188 @@
-# Persistent progress reminder — design, 2026-11-12
+# Persistent progress reminder — design, 2026-11-12 (revised for the operator's ruling)
 
-## A. Decision and bounded outcome
+## A. Decision
 
-A1. **Design only.** The operator selected a persistent, cheap progress reminder
-in the [audit walkthrough](https://github.com/djbclark/djbclark-ade/blob/bc745559008d43c6b6ae2aa1bfb675c55bfd6d7d/docs/slim/audit-walk-decisions-2026-11-12.md#L8).
-This proposal adds no executable, job, plugin, runtime setting or send. The source
-base inspected is `dc3463b16c400a3c7af00a4aef3a8cbb4a0e1276`.
+A1. **Design only.** The operator selected a persistent, cheap progress reminder in the
+[audit walkthrough](slim/audit-walk-decisions-2026-11-12.md#1-load-monitoring-and-persistent-progress). This document adds no executable,
+job, plugin, setting or send.
 
-A2. Proposed first implementation: one deterministic ADE utility and a private
-local inbox, driven by the existing host scheduler. It checks **explicitly
-declared unfinished work**, records a notice on a meaningful change or due time,
-and makes delivery uncertainty visible. No model runs in the poller. A notice
-does not complete work, authorize repair or prove that a person read it.
+A2. **Operator ruling (2026-11-12, via lead 8cd86203).** When an *enrolled* agent with
+*declared open work* has been idle at or past its threshold, deliver **both**: (a) one
+`hermes-ping "<repo>: <one line>"` to the operator and (b) a wake of that idle agent through
+native `paseo send --json --no-wait <id>` with a short nudge naming its declared work. The
+primary operator-facing surface is a Paseo inbox-style UI (section D); the local inbox is the
+durable record. The earlier "no send unless Paseo gains an atomic-admission primitive" rule is
+withdrawn: the inspect-then-send race is acknowledged and bounded (E3), not a veto.
 
-A3. Keep `/watch load`, `/loadwatch`, load-watch and process deadlines intact.
-Do not restore old relay/self-slash dependencies, self-deploying checkouts,
-mailbox crawling, automatic session creation/restart, permission answers, mode
-changes, model switching or automatic review/merge. Other selected walkthrough
-capabilities retain their own implementation owners and gates.
+A3. The ruling also asked: *is there a Paseo built-in or extension for this?* Answer in section B:
+**no built-in detects "idle >= N minutes with declared work" without a model turn**, so the
+detector is a small deterministic script run by `bin/ade-sched`; Paseo supplies the UI surface
+(Progress panel) and the wake transport (`paseo send`).
 
-## B. Evidence and facilities to reuse
+A4. Out of scope, unchanged: restoring old relay/self-slash, self-deploying checkouts, mailbox
+crawling, session creation/restart, permission answers, mode/model changes, automatic review or
+merge. `/watch load`, load-watch and `bin/deadline` stay intact.
 
-| Item | Inspected behavior | Design consequence |
+## B. Paseo built-ins and extensions, checked 2026-11-12
+
+Sources: Paseo checkout `~/src/paseo` HEAD `376be9086544a8d591533930f77ca58a9c99412c`
+(2026-10-25; its CLI package says 0.13.0) versus the installed app `0.16.0-beta.2` — source
+evidence only, **not** an installed-version compatibility result. Installed plugins were read, not
+modified. Nothing here created a heartbeat, schedule or plugin.
+
+| Candidate | Evidence | Idle + declared work, no model? | Delivers to agent / operator? | Verdict |
+|---|---|---|---|---|
+| Heartbeat (`paseo heartbeat`, MCP `create_heartbeat`) | `packages/cli/src/commands/heartbeat/index.ts:58-85`: a cron schedule whose target is the caller agent, `--max-runs`, `--expires-in`. | No. It fires a *prompt* into the agent: one model turn per firing, with no condition. | Agent only. | Rejected: a recurring model prompt (`~/CLAUDE.md` item 13). |
+| `paseo schedule` / `create_schedule` | `packages/protocol/src/schedule/types.ts:20-43`: targets are `agent` or `new-agent` only. Has `run-once`, `logs`. | No. No shell target, no predicate. | Agent or a new agent. | Rejected, same reason. Stays right for judgment jobs. |
+| `paseo wait` | `packages/cli/src/commands/agent/wait.ts`: returns on idle / timeout / permission / error. | It blocks on one agent; keeps no declarations or thresholds. | Neither. | Not a monitor. |
+| Plugin lifecycle hooks | `public-docs/plugins/reference.md:820-839` (`agent.closed`, `turn_started`, `turn_ended`, `permission_requested`, `archived`); `docs/plugins.md:429-438`: observers run in the daemon even with no app open, and must not be awaited inside agent mutations. | Could, with plugin timers: arm on `turn_ended`, fire after the threshold. It needs new plugin code and its own declaration store. No installed plugin does this. | Could call `agent.send`; operator only through some other channel. | **Best later home** for an event-driven detector (precise, no poll). Deferred: more code, deadlock rules, a plugin contract to learn. |
+| `bin/deadline` | `bin/deadline:892-915` lists agents with `status == "running"` and a stale `UpdatedAt`; `:430` calls `hermes-ping`; `:438` allows `idle/running/closed` for its own sender. | Watches **stuck-running** turns, not idle agents; it has no declarations. | Both, for its own alerts. | Different state, no overlap with idle-with-work (F3). Keep untouched; do not borrow its sender. |
+| `bin/ade-sched` ([scheduling.md](scheduling.md)) | Host jobs on launchd/systemd/cron; judgment jobs are Paseo schedules. | Yes: zero-token script every 5 minutes. | Whatever the script calls. | **Chosen scheduler.** |
+| Progress plugin (installed `@stevecastaneda/paseo-progress` 1.14.6) | README: Explorer panel plus a pill above the composer for questions and stuck items. `server/cli.ts`: `activity add/update`, `stuck set/clear` print their ids; no `--json`. `server/store.ts:40-50`: one store per **worktree realpath**, outside the repo. `paseo-progress` is a no-model CLI. | It displays; it does not detect. | Operator, through Paseo's UI. | **Chosen primary UI** (D). Needs an unfinished run in that worktree. |
+| Herald (installed 0.6.1) | `index.server.ts:24-39`, `server/hooks.ts:309-399`: attention records are built from native events (`agent:turn:<id>`). No external publish call found. | No. | Operator, but only for events it observed. | Not a sink: a notice would mean forging an event or writing its internal file. |
+| PR Radar | Manifest: a PR queue for PR-linked workspaces. | No. | — | Wrong domain. |
+| Cafe | Plugin-directory browser. | No. | — | Irrelevant. |
+| "Tasks" / "Questions please" (`paseo-asks`) | `~/.paseo/plugins/sources.json` has no such entry; the `paseo-asks` directory is empty. | — | — | No verified publication API found. This is a finding about what was inspected, not a claim that none exists anywhere. |
+| baton plugin | `baton/…/checkout/server/core.ts:8-27` has idle timers and a persistent pending entry. | Idle timers exist, but for goal handoff, not obligation reminders. | — | Pattern to reuse only if the plugin route is taken later. |
+
+B1. Plugin `timeline.append` with a stable `id` replaces its old row
+(`public-docs/plugins/reference.md:1520-1545`): a no-model dedupe building block for a *custom* ADE
+inbox plugin. It needs a renderer and plugin code, so it is the slice-3 option, not slice 1.
+
+## C. Architecture
+
+C1. One stdlib Python CLI `bin/ade-progress` (in `bin/`, tested like `bin/deadline`) with five
+subcommands: `declare`, `retire`, `scan`, `inbox`, `ack`. `bin/ade-sched` runs `scan --yes` every
+five minutes (inventory row in slice 1b). No model call, transcript read, git read or network
+request happens in a pass. Subprocesses use argv lists; each has a timeout.
+
+C2. **Declarations.** Stored in `~/.local/state/djbclark-ade/progress/v1/` (dir 0700, files 0600),
+outside worktrees. A declaration binds `{paseo_home_realpath, agent_id}` — Paseo CLI output has no
+`server_id` field (F3) — and holds: unique task id, generation, `state` (`open` | `waiting` |
+`retired`), `pending_count` (> 0 when unfinished), `idle_after_min` (default 30), `review_after`
+UTC, a one-line `summary` (the text of every nudge and notice), and the agent's `workspace` realpath
+(used only to reach the Progress store). Only the owner or orchestrator runs `declare`/`retire`;
+a stale generation is rejected. No declaration, no reminder: nothing is inferred from a quiet agent.
+
+C3. **Two checks, plus one transition** (slice 1; a pass reads `paseo ls -g --background --json`
+once and `paseo inspect <id> --json` only for enrolled agents, at most 16 declarations and 45 s):
+
+| Reason enum | Trigger | Wake? |
 |---|---|---|
-| [Old rumination-watch](https://github.com/djbclark/djbclark-ade/blob/fb3b9deb044cfde79cdc7ab2623224e2d8d7658a/bin/rumination-watch) | No-model change/due checks; idle plus declared next steps; cooldowns; ancestry-aware handoff check. Also legacy relay, self-deploy and optional seat waking/creation. | Recover the cheap checks and durable uncertainty handling; omit those runtime actions. Mere quietness previously missed idle work for hours. |
-| [deadline agent checks](../bin/deadline) | `paseo ls -g --background --json`, inspect `UpdatedAt`, age threshold and cooldown. Current sender permits closed agents; idle-alert cooldown is recorded before its detached sender finishes. | Reuse source-shape lessons, not its alert/delivery implementation. Timestamp age alone does not prove idle, unfinished work or notification. Do not disable process enforcement. |
-| [ade-sched](scheduling.md) | Host shell jobs use launchd/systemd/cron; agent judgment uses Paseo schedules. Reconcile has ownership/readback and linked-worktree guards. | A deterministic five-minute sweep belongs in ade-sched, not a paid agent schedule. Proposed new label: `com.djbclark.ade-progress`; retain the retired rumination label. |
-| [ade-recovery-d1](../bin/ade-recovery-d1) | Read-only runtime/prerequisite measurement, not a recovery guarantee. | Re-probe installed native capabilities before accepting a delivery adapter. |
-| Native Paseo source, pinned [lifecycle](https://github.com/getpaseo/paseo/blob/4df5307eaab6b22d06fe54a45c68211b3413f45c/docs/agent-lifecycle.md) and [prompt path](https://github.com/getpaseo/paseo/blob/4df5307eaab6b22d06fe54a45c68211b3413f45c/packages/server/src/server/agent/agent-prompt.ts) | Idle/running are live states; closed records can retain resumable sessions. Prompting loads a stored runtime and starts work; steering can fall back to replacement. | An idle preflight followed by ordinary `paseo send` cannot guarantee no restart/interruption. The target can close/change between calls. |
-| site-djbclark `bin/hermes-ping` / `bin/inbox-target` | Local source inspection found registered destination resolution and eventual `hermes send`; no independent delivery/readback contract in the wrapper. | Do not infer human delivery from exit zero, hard-code a chat/topic, copy the helper or alter that repository. A future adapter needs its own verified receipt/readback. |
+| `due` | `open`/`waiting` with `pending_count > 0` and `review_after <= now`. | Only if the agent is also idle by the rule below. |
+| `idle_with_work` | `open` with `pending_count > 0`; native status `idle`; not archived; no pending permission; `UpdatedAt` older than the threshold. | **Yes.** |
+| `stopped_with_open_work` (F2) | `open`/`waiting` with `pending_count > 0` and the agent is `closed`, `error` or archived. | **No.** Operator notice only; a stopped session is never restarted. |
 
-B1. No `paseo` executable was available on this cloud host. The upstream source
-pin is **not** the installed Mac version or a live compatibility result. No
-daemon, skill link, scheduler or notification endpoint was exercised. The graft
-CLI was unavailable; inspection used the named source and historical git blobs.
+A `waiting` declaration gets a `due` notice but never an `idle_with_work` wake. Missing,
+unparseable or contradictory native data is `unknown`: it is recorded as source health and neither
+paged nor woken. Over the 16-declaration cap, the pass reports `partial` and does not claim the
+rest are clear (round-robin cursors are deferred).
 
-## C. Small input and deterministic checks
+C4. **Event key and cooldown.** Key = `{paseo_home, agent_id, task, generation, reason}`. A tick, a
+new timestamp or an unrelated commit is not a new event. A new key notifies at once; an unresolved
+key may notify again after **3 hours** (one ping per pass, a digest when several are due).
+`ack` records that the operator saw it (not that the work is done); `retire` stops reminders; both
+close the Progress item (D2). Clock rollback or a future timestamp suppresses sends for that pass.
 
-C1. **Explicit enrollment.** Proposed `ade-progress declare` records an obligation
-for an exact task, host/user and `{server_id, agent_id}`. Required fields are a
-unique task ID, generation, nonnegative `pending_count`, state (`open`, `waiting`
-or `retired`; unfinished states require a positive count),
-creation/update time and `review_after` UTC. Optional fields name a checkpoint,
-one workspace realpath/claim and recorded commit, a known deadline, or an existing
-producer receipt. A declaration does not grant authority to run that receipt's
-commands. No enrollment means no inference that an arbitrary quiet agent has work.
+## D. Delivery channels
 
-C2. Declarations live outside worktrees in
-`~/.local/state/djbclark-ade/progress/v1/`, owned by the user (directory 0700,
-records 0600). Only the explicit owner/orchestrator changes a declaration;
-generation checks reject stale updates. Handoff retargeting requires the separate
-handoff protocol's successor acknowledgement, never a guessed replacement agent.
-Retiring an obligation stops reminders; it is not product acceptance evidence.
+D1. A new event writes channels in this order; each is independent, and one failing never blocks
+the next:
 
-C3. Proposed checks, each returning `clear`, `changed`, `due` or `unknown`:
+| # | Channel | Mechanism | Receipt kept |
+|---|---|---|---|
+| 1 | Local inbox (the record) | Atomic write (temp + `mv`) under a non-blocking lock; read back and hash-compare. | `published-local`. Only this advances the cooldown cursor. |
+| 2 | **Paseo Progress panel (primary operator UI)** | `paseo-progress stuck set "<summary>"` with cwd = the declaration's workspace; parse the printed `S<n>` id; read it back with `paseo-progress show`. | `ui_id=S<n>` and `verified` / `unverified` / `no-run`. |
+| 3 | Operator page | `hermes-ping "ade-progress: <task> <reason>"` (one line; full URLs if it names a PR). | `ping rc=<n>` only. Exit 0 is **not** proof the operator read it. |
+| 4 | Agent wake (`idle_with_work` only) | `paseo send --json --no-wait <agent_id> "<nudge>"` with no `--behavior` flag (the agent is idle; `~/CLAUDE.md` item 4). | `.status` of `sent` / `completed` = accepted by the daemon; anything else = `unknown`. |
 
-| Check | Deterministic trigger | Suppression/limit |
-|---|---|---|
-| Due unfinished work | Declaration remains open with positive pending count and `review_after <= observed_at`. | An explicitly waiting task gets a due review notice, never an instruction to bypass its blocker. No free-text TODO inference. |
-| Idle with declared work | Same declaration is open; exact unarchived, live native agent is positively idle, has no pending card/turn, and has been unchanged for 30 minutes. | Missing activity, busy, closed, errored, ambiguous identity and provider uncertainty are not idle. Active declared deadline/background work suppresses the idle notice. |
-| Stale handoff/checkpoint binding | Explicit checkpoint's recorded commit cannot be reconciled with the one enrolled workspace at/after its review time. | An ancestor of HEAD is normal advancement, not stale. Shallow/missing history, missing file, multiple mappings or git failure is unknown; never fetch/reset or read another workspace to guess. |
-| Registered receipt changed | A bounded, versioned producer fact for that task/attempt/head changes state. | No raw PR bodies, transcripts or broad open-PR polling. Invalid/missing producer data stays unknown. Producer authority decides completion, not this utility. |
+D2. **Why `stuck set`, not `activity add`.** `stuck` raises the "N stuck" pill above the composer
+(Progress README), the operator-visible attention signal; `activity` is a quiet feed line. It is an
+*item*, not a question: no invented human question, and the agent's own ticker is never touched.
+`ack`/`retire`/recovery run `stuck clear <id>` using the saved id, so a repeat updates one item
+rather than stacking. `paseo-progress` refuses an unfinished-run-less worktree ("The run … is
+finished"): that outcome is recorded as `no-run` and channels 3 and 4 still go. If the plugin is
+absent or errors, the same: recorded, never retried blindly, never an empty success.
 
-C4. Cheap defaults: five-minute cadence; at most 16 declarations, four native
-inspects and 45 seconds per pass. Batch one native list; inspect only candidates;
-bound each subprocess by the remaining pass budget (argv lists, no shell).
-Cache unchanged local facts by identity/generation, not solely mtime. Persist a
-round-robin cursor so overflow cannot starve later tasks. Unscanned tasks are
-explicitly partial, never resolved. No model call, transcript indexing, recursive
-workspace scan, process attribution or routine network request is part of a pass.
+D3. **Honest receipts.** `queued`/`accepted` is not `delivered`; `delivered` is not `read`; a
+process exit code proves nothing about a human. A timeout or malformed reply is `unknown`, and an
+`unknown` send is **never re-sent blindly** (no replay to another route either): it stays visible in
+the inbox, and the next attempt waits for the 3-hour cooldown *and* records the prior uncertain
+attempt. A provably refused send (non-zero exit with a structured refusal) may retry after the
+cooldown, at most three attempts per key.
 
-C5. A fixed notice template carries task ID, count, reason enum, observation
-age and a local evidence reference. It does not copy a next-step paragraph or
-execute instructions found in a checkpoint/remote artifact. Bare age/unknown
-source-health problems are combined into one health notice on transition, not
-one page per task. Clock rollback/nonfinite/future observations suppress sends
-and record clock uncertainty; they do not reset cooldowns or invent elapsed time.
+D4. **Wake nudge text** is fixed and short: task id, declared `summary`, count and "reply with
+status or `ade-progress ack`". It copies no free-text TODO or remote content, and carries no
+authority to run commands, answer permissions or change modes.
 
-## D. Notices, cooldown and verified delivery
+## E. Failure handling
 
-D1. First implementation publishes to the **local durable inbox only**. Proposed
-commands (not implemented) are `declare`, `scan`, `inbox`, `ack` and `retire`.
-State-changing commands default to `--dry-run`; explicit `--yes` is required.
-`scan --dry-run` prints the plan without creating state/locks or contacting a
-delivery endpoint; `inbox` only reads records. Read-only native observations, when
-requested, must be reported separately from a fully offline plan.
+E1. **Lock and crash.** A non-blocking per-user lock covers fresh read, event selection and state
+write; a busy lock exits without effects. Intent (`prepared`) is written before any channel
+effect. After a crash, an attempt left `prepared`/in flight is `unknown`: inbox and Progress
+artifacts are reconciled by id and hash; a wake or ping that may have gone out is not repeated.
+Corrupt state is preserved and reported; there is no empty-state fallback.
 
-D2. An event key binds host/server, task, declaration generation, reason and
-relevant evidence fingerprint. A scan tick, updated observation timestamp or
-unrelated commit is not a new event. Defaults: a newly changed condition is
-recorded once; an unresolved due/idle condition can produce another reminder
-after three hours, with at most one inbox digest per pass. Explicit snooze moves
-the next review time; acknowledgement records receipt and its generation, not
-task completion. A genuinely changed blocker can supersede an older pending
-notice; generations prevent an old acknowledgement hiding it.
+E2. **Overlap.** `bin/deadline` alerts stuck-`running` agents; `ade-progress` acts on `idle` or
+stopped agents with a declaration; the statuses are disjoint, so no shared dedupe contract is
+needed. A running deadline for the same agent suppresses nothing, because it covers a different
+state. Neither tool disables the other.
 
-D3. Delivery states are distinct:
+E3. **The inspect/send race, accepted.** Between inspect and send an agent can start a turn, close
+or raise a permission. Mitigation, not a veto: re-inspect immediately before the send, and wake
+only if the status is still `idle` with an unchanged `UpdatedAt` and zero `PendingPermissions`.
+Residual risk, recorded in the design: `paseo send` loads and, if needed, unarchives a stored
+runtime (`agent/agent-prompt.ts`), an agent send without `--behavior` defaults to `interrupt` for a
+sourceless caller (`cli/src/commands/agent/send.ts:207`), and the send path passes
+`clearPendingPermissions: true` (`server/session.ts`, send path near lines 8255-8290). So a
+permission card raised in the final moments could be cleared, and a turn started in them
+interrupted. The recheck and the idle-only rule make this a small window; this is an *accepted*
+risk, and `closed`/`error`/archived agents are never sent to at all (C3).
 
-| State | Evidence / permitted claim |
+E4. **Host availability.** Sleep or offline time is unavailable time: missed ticks coalesce into
+one evaluation after wake. A loaded timer alone proves nothing; report last successful scan and
+per-channel last receipt separately. The scanner cannot detect its own host outage.
+
+E5. **Item 13 compliance.** No recurring model prompt: the poll is a zero-token script. A wake or
+ping fires only for a deterministic transition on declared work (`pending_count > 0`), with the
+3-hour cooldown and event-key dedupe — each firing carries real work.
+
+## F. Review findings, resolved
+
+F1 **Silent sink** — resolved: every new event reaches the Progress panel, `hermes-ping` and (when
+idle) the agent itself, with the inbox as record. F2 **Stopped owner** — resolved:
+`stopped_with_open_work`, operator notice, no wake. F3 **`server_id`** — resolved: key is
+`{paseo_home_realpath, agent_id}`; deadline-vs-progress statuses stated (E2). F4 **stale blob link** —
+resolved: a repo-relative link to the walkthrough, which merged in PR 562. F5 **overbuilt slice** —
+resolved: git ancestry, producer receipts, quota/review adapters, the eight-state delivery machine
+and round-robin cursors are deferred (G3).
+
+## G. Implementation sequence
+
+G1. **Slice 1 — the first PR (after operator approval of this design).**
+
+| File | Content |
 |---|---|
-| `prepared` | Durable intent; no send claim. |
-| `published-local` | Atomic inbox artifact read back with matching notice ID, generation and content hash. Delivered to the local inbox only; user/agent has not been proved notified. |
-| `attempting` | External invocation may occur; outcome not yet known. |
-| `accepted` / `queued` | Endpoint accepted work; delivery remains pending. |
-| `delivered-transport` | Adapter-specific authoritative receipt/readback matches the exact endpoint, recipient and notice. Does not prove reading or work completion. |
-| `acknowledged` | Explicit authenticated recipient acknowledgement matches notice/generation. |
-| `unknown` | Timeout, crash, malformed/mismatched receipt or possible acceptance; no blind resend. |
-| `not-accepted` | Structured adapter evidence proves no admission; bounded retry is allowed. |
+| `bin/ade-progress` | ~350 LoC stdlib: `declare`, `retire`, `scan [--dry-run\|--yes] [--json]`, `inbox [--json]`, `ack`. State-changing commands default to `--dry-run`; `--yes` is explicit. Tool paths via env overrides in the `bin/deadline` `tool()` style (`ADE_PROGRESS_PASEO`, `…_HERMES_PING`, `…_PASEO_PROGRESS`). |
+| `tests/test_ade_progress.py` | Fixture tests with fake `paseo`, `hermes-ping` and `paseo-progress` executables. |
+| `docs/scheduling.md` | A pointer line only; no job row yet. |
+| `changelog.d/persistent-progress-design.md` | Entry ends `(#N)` of the slice-1 PR. |
 
-D4. Local publication and external notification have separate cooldowns and
-receipts. Only verified inbox readback advances the inbox publication cursor;
-only verified external delivery advances that route's delivered cooldown.
-Failed/unknown publication cannot silently count as told. An unknown external
-send remains visible in the local inbox and awaits receipt reconciliation or an
-explicit owner retry that records the prior uncertain attempt and duplicate
-risk; no exactly-once external-delivery claim or automatic alternate-route replay. Provably unaccepted
-attempts may retry after 5/15/60 minutes (three attempts), then remain unresolved.
+G2. **Required tests.** Unchanged facts stay quiet; `due` crossing, `idle_with_work` and
+`stopped_with_open_work` each notify once; cooldown holds 3 h; snooze/`ack`/`retire`/stale
+generation behave; `waiting`, busy, permission-pending, unknown and over-cap agents never wake;
+closed/error/archived agents get a notice and **no** `paseo send` (assert on the fake's call log);
+re-inspect-changed-status cancels the wake; one channel failing does not block the others; an
+`unknown` send is not replayed; `no-run` and absent `paseo-progress` are recorded; two real
+concurrent scans take the lock once; a crash between write and receipt reconciles without a
+duplicate send; a cold `--dry-run` writes nothing; no model call is made.
 
-D5. **Automatic agent prompting stays unavailable unless a native adapter can
-atomically admit only to the exact already-live idle runtime without loading,
-unarchiving, replacing, resuming or answering permissions.** Plain inspect then
-`paseo send --behavior steer` does not meet that condition. Recheck identity,
-declaration generation, pending permissions and native runtime revision in the
-same admission operation. Without demonstrated native support, keep the event
-in the inbox and say `agent_delivery=unavailable`; do not build an ADE sidecar
-that races the daemon. A future non-waking operator-notification adapter can be
-qualified separately with a registered destination and message-ID readback.
+G3. **Later slices.** 1b: an `ade-sched` inventory row `com.djbclark.ade-progress` and doctor
+expectations, enabled only after the operator has seen `scan --dry-run` on real declarations.
+2: git-handoff ancestry, producer/quota/review receipts, round-robin cursors. 3: an ADE plugin on
+`agent.turn_ended` timers plus `timeline.append` rows (B1) if polling latency or the `stuck`
+semantics prove inadequate.
 
-D6. This limit matters: an inbox-only MVP persists useful reminders but **cannot
-promise to attract attention or keep a stopped session moving**. It is not a
-replacement for an operator channel until that channel's receipt contract is
-proved. It can observe a stopped session and show a due obligation without
-waking it. No new automatic restart authority is inferred from historical
-rumination-watch's optional auto-seat behavior.
-
-## E. Recovery, persistence and adjacent capabilities
-
-E1. Use a stable nonblocking per-host/user lock over fresh reads, event selection
-and state publication. Each notification attempt has an immutable ID/receipt;
-write pending intent before effects and atomically replace state beside its
-destination. Two workers cannot send the same attempt concurrently. Lock busy
-exits without effects; OS process exit releases it. A crash does not authorize
-repeating a possibly admitted send. Corrupt state is preserved and reported;
-no empty-state fallback or automatic reconstruction from vague prose.
-
-E2. On restart, reconcile exact local artifact IDs/hashes before marking them
-published. A crash after rename/before recording publication must discover that
-same artifact rather than produce another notice. An interrupted external
-attempt becomes unknown until adapter readback resolves it. A retained receipt
-can settle delivery, never complete the subject task. Superseded/retired tasks
-retain their attempts; do not replay them to a successor or another host.
-
-E3. The scheduler runs an explicit `scan --yes` from a durable checkout through
-normal ade-sched inventory/ownership/readback. This PR adds neither that row nor
-a plist. No self-fetch, checkout movement, self-update or implicit backend switch.
-Host sleep/offline time is unavailable time: coalesce missed ticks into one
-current evaluation after wake, not a burst of historical sends. Report scanner
-build SHA, last successful local scan, per-source freshness and last verified
-delivery separately. A local scanner cannot detect its own host outage; a
-separate observer would require a separate contract. A loaded timer alone is
-not evidence of successful scans or received notices.
-
-E4. Keep interfaces narrow instead of adding a workflow/event framework:
-
-| Capability owner | Reminder integration | Outside reminder authority |
-|---|---|---|
-| Quota recovery | Later validated fact with pool ID, observation time, advisory level and next reset/review time; waiting-for-quota suppresses idle nudges. | No credential values, inferred quota, provider switch, spending profile change, resume or acceptance flip. Quota feature recovery stays selected, not silently dropped. |
-| Handoff/recovery | Exact task generation and verified successor binding; stale checkpoint notice. | No successor creation, predecessor archive or continuation. A session-local watchdog is not a persistent scanner. |
-| Review coordination | Immutable attempt/head, provider availability and due review receipt from its owner; changed/due notice. | No launch, invented verdict, marker, thread resolution or merge. An unavailable review is not a completed review. |
-| Existing deadlines/load-watch | Respect declared active work and reference their own incident/deadline IDs. | No process kill/throttle or duplicate ownership of deadline enforcement. |
-
-E5. Before enabling external idle notices, qualify **one** notice owner for
-overlapping deadline/progress alerts. Current deadline age alerts have no shared
-progress-event deduplication contract. Do not pretend otherwise or disable the
-deadline sweep globally. A later targeted filter or explicit job configuration
-can transfer idle-notice ownership while retaining process deadlines; until
-then this design adds local inbox evidence and no second automatic agent send.
-Quota/review adapters remain absent until their producer schemas and delivery
-budgets are verified; no placeholder fact is treated as authoritative.
-
-## F. Implementation and acceptance sequence
-
-F1. First source slice: enrollment validation, pure event planner, locked atomic
-local inbox and readback/recovery. Keep runtime installer/inventory absent. Add
-provider-neutral fixtures rather than copying old rumination-watch or building
-a generic workflow service. This design alone does not authorize implementation
-or installation of the persistent reminder.
-
-F2. Required fixture tests:
-
-- Determinism: unchanged facts stay quiet; due crossing and material changes
-  emit once; snooze, acknowledgement, retirement and generation conflicts work.
-- Idle plus declared work: healthy idle alone, busy/closed/archived/error agents,
-  permissions, unknown activity, active background/deadline work and stale
-  provider data never trigger agent admission. No declaration means no nudge.
-- Handoff ancestry: same/ancestor commit is normal; divergent/missing object and
-  git timeout are distinct; no checkout mutation, fetch or cross-workspace guess.
-- Concurrency/crash: two scans, stale writer, disk full, truncated JSON, crash
-  around every rename/admission/receipt write, and receiver-before-sender crash
-  preserve evidence and avoid duplicate attempts. Test real processes for locks.
-- Delivery: queued/accepted/timeout/malformed/wrong host/recipient/notice receipts
-  cannot count as delivered; ambiguous attempts never replay automatically.
-  A close-between-inspect-and-send fixture must show the unqualified path sends
-  **nothing**. Tests of a proposed atomic adapter are not installed-daemon proof.
-- Availability/cost: cold dry-run writes nothing, absent CLI/helper/scheduler is
-  explicit, capped/partial scans do not resolve unseen work, clock jumps and
-  host wake coalesce, no model calls/legacy relay/git deployment/session launch.
-
-F3. Separate later runtime acceptance: inspect installed host/CLI versions and
-native schemas, qualify no-wake delivery or retain inbox-only mode, validate
-normal scheduler activation and post-restart scan/readback, then exercise a
-closed/idle/running/card matrix and dropped receipts in an explicitly authorized
-isolated canary. Verify absence of unintended provider starts and repeated
-messages. Host/operator evidence is required; source, mocks and an accepted
-receipt cannot establish it. No live experiment ran for this design.
+G4. **Separate runtime acceptance** (not covered by source or mocks): check the installed Paseo and
+`paseo-progress` versions, run one authorized canary on a throwaway idle agent, and confirm the
+Progress pill, the ping and the single wake appear exactly once.
