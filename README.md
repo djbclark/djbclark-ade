@@ -127,6 +127,7 @@ Skills (from each `skills/*/SKILL.md`):
 | [`ade-merge-ready`](bin/ade-merge-ready) | Classify / stacks / approve / merge-now / stack-rebase for the ADE merge gate (2026-11-10). |
 | [`ade-model-tiers`](bin/ade-model-tiers) | Show/resolve/classify/validate/promote/set for config/model-tiers.toml. |
 | [`ade-net-resume`](bin/ade-net-resume) | Resume a lead's descendants after recognized transient network failures, dry-run by default. |
+| [`ade-nightly-learning`](bin/ade-nightly-learning) | Offline nightly-learning budget and proposal admission. |
 | [`ade-pi-pools`](bin/ade-pi-pools) | Report and enforce Pi pool acceptance before automatic routing (ade/auto). |
 | [`ade-recovery-d1`](bin/ade-recovery-d1) | Observe-only D1 / native-resume preflight (Carried #2, 2026-11-10). |
 | [`ade-release-ready`](bin/ade-release-ready) | Dry-run gate for the first (or next) release tag (Carried #15, 2026-11-10). |
@@ -153,6 +154,7 @@ Skills (from each `skills/*/SKILL.md`):
 | [`ade_injection_gate.py`](bin/ade_injection_gate.py) | Probability-only injection screening and payload-free measurement; no reader adoption. |
 | [`ade_install.py`](bin/ade_install.py) | Install catalog, plan, observe-only doctor/keys, bounded apply. |
 | [`ade_install_catalog.py`](bin/ade_install_catalog.py) | Pure install-catalog validation, schema projection and metadata mapping. |
+| [`ade_nightly_learning.py`](bin/ade_nightly_learning.py) | Offline nightly-learning admission primitives; no runner or adoption authority. |
 | [`ade_pi_pools.py`](bin/ade_pi_pools.py) | Pi pool acceptance for automatic routing (ade/auto / bin/pi-default). |
 | [`ade_sched.py`](bin/ade_sched.py) | Install a launchd plist as a launchd agent, a systemd user unit or a crontab block (issue #279, 2026-11-04). |
 | [`ade_self_session.py`](bin/ade_self_session.py) | Explicit same-host self-session requests; no unattended crash restart. |
