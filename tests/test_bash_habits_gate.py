@@ -37,6 +37,31 @@ def test_bare_sed_is_denied(command):
     assert denied(command)
 
 
+@pytest.mark.parametrize("mode", ["--claude", "--codex", "--cursor"])
+@pytest.mark.parametrize("command", ["echo earlier; sed -n 1p f", "echo earlier && grep -r x ."])
+def test_denial_says_nothing_ran_and_whole_command_needs_rerun(mode, command):
+    payload = ({"command": command} if mode == "--cursor" else
+               {"tool_name": "Bash", "tool_input": {"command": command}})
+    result = subprocess.run([sys.executable, str(HOOK), mode], input=json.dumps(payload),
+                            capture_output=True, text=True, timeout=30)
+    if mode == "--codex":
+        assert result.returncode == 2
+        message = result.stderr
+    else:
+        assert result.returncode == 0
+        output = json.loads(result.stdout)
+        if mode == "--cursor":
+            assert output["permission"] == "deny"
+            message = output["agent_message"]
+            assert output["user_message"] == message
+        else:
+            assert output["hookSpecificOutput"]["permissionDecision"] == "deny"
+            message = output["hookSpecificOutput"]["permissionDecisionReason"]
+    assert "NOTHING in this command ran" in message
+    assert "no earlier part executed" in message
+    assert "re-run the whole command" in message
+
+
 @pytest.mark.parametrize("command", [
     "gsed -n 1,20p f",
     "/usr/bin/sed -n 1p f",                                # a deliberate BSD call

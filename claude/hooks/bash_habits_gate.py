@@ -544,6 +544,9 @@ def main() -> None:
         reason, warn = check(str(cmd or ""))
     except (re.error, TypeError, AttributeError, IndexError):
         sys.exit(0)
+    if reason:
+        reason = ("NOTHING in this command ran; no earlier part executed. "
+                  "Fix the command and re-run the whole command. " + reason)
     if mode == "--cursor":
         msg = reason or warn
         out = {"permission": "deny" if reason else "allow"}
