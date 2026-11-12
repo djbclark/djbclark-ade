@@ -42,7 +42,7 @@ def repo(tmp_path: Path) -> Path:
 
 
 def run(repo: Path, *args: str, cwd: Path | None = None) -> subprocess.CompletedProcess:
-    return subprocess.run([str(SCRIPT), *args], cwd=cwd or repo, capture_output=True, text=True)
+    return subprocess.run([str(SCRIPT), "--no-push", *args], cwd=cwd or repo, capture_output=True, text=True)
 
 
 def test_commits_own_paths_and_never_hides_foreign_edit(repo: Path) -> None:

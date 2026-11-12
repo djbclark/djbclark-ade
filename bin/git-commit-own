@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # git-commit-own — commit only your own paths, without pre-commit's whole-tree stash.
 #
-#   git-commit-own "<message>" <path>...
+#   git-commit-own [--no-push] "<message>" <path>...
 #
 # Why (djbclark, 2026-10-24): a plain `git commit` runs pre-commit, which stashes EVERY
 # unstaged change in the worktree for the 30-60 s of the hook run and restores it afterwards.
@@ -16,10 +16,18 @@
 # then run on the staged file names and the commit takes the index only (no pathspec).
 set -euo pipefail
 
-usage() { echo "usage: git-commit-own \"<message>\" <path>...   |   git-commit-own --staged \"<message>\"" >&2; exit 2; }
+usage() { echo "usage: git-commit-own [--no-push] [--staged] \"<message>\" [<path>...] (pushes upstream, commit-own.pushRef, or origin/current-branch)" >&2; exit 2; }
 
 staged=0
-if [ "${1:-}" = "--staged" ]; then staged=1; shift; fi
+push=1
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --staged) staged=1; shift ;;
+    --no-push) push=0; shift ;;
+    --) shift; break ;;
+    *) break ;;
+  esac
+done
 [ "$#" -ge 1 ] || usage
 msg="$1"; shift
 [ -n "$msg" ] || usage
@@ -49,3 +57,72 @@ else
   [ "$(git ls-files -o --exclude-standard -- "$@" | wc -l)" -eq 0 ] || git ls-files -o --exclude-standard -z -- "$@" | xargs -0 git add --
   git commit --no-verify -m "$msg" -- "$@"
 fi
+
+[ "$push" -eq 1 ] || exit 0
+
+# Keep publishing subprocesses as argv lists and inspect their real exit codes.
+python3 - "$root" <<'PY'
+import subprocess
+import sys
+
+root = sys.argv[1]
+remote, ref = "<unresolved>", "<unresolved>"
+
+
+def git(*args, optional=False):
+    result = subprocess.run(["git", "-C", root, *args], capture_output=True,
+                            text=True, timeout=300)
+    if result.returncode and not (optional and result.returncode == 1):
+        raise RuntimeError(result.stderr.strip() or result.stdout.strip()
+                           or f"git {args[0]} exited {result.returncode}")
+    return result.stdout.strip()
+
+
+try:
+    branch = git("symbolic-ref", "--quiet", "--short", "HEAD")
+    # Git resolves upstream remote/ref names without splitting a remote/branch string.
+    upstream = git("for-each-ref", "--format=%(upstream:remotename)%09%(upstream:remoteref)",
+                   f"refs/heads/{branch}")
+    if upstream and upstream != "\t":
+        remote, ref = upstream.split("\t", 1)
+        if not remote or not ref:
+            raise RuntimeError("incomplete upstream configuration")
+    else:
+        remote = git("config", "--get", "commit-own.pushRemote", optional=True) or "origin"
+        ref = git("config", "--get", "commit-own.pushRef", optional=True) or branch
+        if ref.startswith("HEAD:"):
+            ref = ref[5:]
+        if not ref.startswith("refs/heads/"):
+            ref = f"refs/heads/{ref}"
+    git("check-ref-format", ref)
+    # A missing target is normal on a first push; other lookup failures are fatal.
+    exists = git("ls-remote", "--heads", "--", remote, ref)
+    if exists:
+        git("fetch", "--no-tags", "--", remote, ref)
+        target = git("rev-parse", "FETCH_HEAD")
+        ancestor = subprocess.run(["git", "-C", root, "merge-base", "--is-ancestor",
+                                   target, "HEAD"], capture_output=True, text=True, timeout=300)
+        if ancestor.returncode == 1:
+            if git("status", "--porcelain"):
+                raise RuntimeError("target is ahead and worktree/index is dirty; commit saved locally; "
+                                   "clean up and rebase explicitly before publishing")
+            try:
+                rebased = subprocess.run(["git", "-C", root, "-c", "rebase.autoStash=false",
+                                          "rebase", target], capture_output=True, text=True, timeout=300)
+            except subprocess.TimeoutExpired:
+                git("rebase", "--abort")
+                raise
+            if rebased.returncode:
+                git("rebase", "--abort")
+                raise RuntimeError("rebase failed and was aborted: " + rebased.stderr.strip()
+                                   + "\n" + rebased.stdout.strip())
+        elif ancestor.returncode:
+            raise RuntimeError(ancestor.stderr.strip() or "merge-base failed")
+    output = git("push", "--", remote, f"HEAD:{ref}")
+    print(f"git-commit-own: published HEAD to {remote} {ref}")
+    if output:
+        print(output)
+except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as exc:
+    print(f"git-commit-own: PUBLISH FAILED remote={remote} ref={ref}: {exc}", file=sys.stderr)
+    sys.exit(1)
+PY

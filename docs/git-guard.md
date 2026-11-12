@@ -67,6 +67,23 @@ PATH refusal, `~/.local/bin/git`, or any new refuse path.
 
 ## Commands
 
+### Commit and publish (2026-11-12)
+
+`git-commit-own [--no-push] [--staged] "MSG" [PATHS...]` commits the selected paths
+or staged index, then publishes automatically. Target precedence is the branch's
+configured upstream remote and branch, then `commit-own.pushRef` (a branch name,
+`refs/heads/NAME`, or `HEAD:NAME`), then `origin` with the current branch name.
+Without an upstream, `commit-own.pushRemote` can replace `origin`. For example,
+`git config commit-own.pushRef HEAD:master` lets an untracked worktree branch
+publish to master; a configured upstream takes precedence over this setting.
+
+Publishing fetches an existing target and rebases onto it when needed. A dirty
+index or worktree prevents that rebase; a conflicting rebase is aborted. No
+autostash or force-push is used. Failures return nonzero with `PUBLISH FAILED`,
+the remote, target ref and Git error on stderr; the successful local commit is
+retained. Fix the reported problem and publish the existing commit explicitly.
+`--no-push` commits locally without contacting a remote.
+
 | Command | What |
 |---|---|
 | `git ARGS...` (the shim) | Run the real git, or refuse: exit 77, the reason on stderr, one line in `guard.log`. |
