@@ -37,6 +37,7 @@ Each doc carries its own summary.
 | [docs/workspace-layout.md](docs/workspace-layout.md) | naming: `<topic>-pw` Paseo workspaces, `<name>-pt` tabs; renames with `paseo workspace rename`, `paseo agent update --name` |
 | [docs/scheduling.md](docs/scheduling.md) | `bin/ade-sched` (2026-11-04): a launchd plist as a launchd agent, systemd user timer or cron; judgment jobs are Paseo schedules |
 | [docs/gates.md](docs/gates.md) | the frontier allowance, `config/gates.toml [frontier]` (trimmed 2026-11-07: the Claude quota gates went with the quota guard) |
+| [docs/upstream-review-gate.md](docs/upstream-review-gate.md) | `claude/hooks/upstream_review_gate.py` (2026-11-12): denies `gh`/`git push`/Jira writes to CFEngine upstream (`cfengine`, `NorthernTechHQ`) only; target resolution, limits, registration |
 | [docs/pi-defaults.md](docs/pi-defaults.md) | Pi `ade/auto` task routing; `config/pi-pool-acceptance.toml` + `bin/ade-pi-pools check` (operator flips `accepted=true` per pool) |
 | [docs/deadline.md](docs/deadline.md) | `bin/deadline`: a maximum run time registered before a long command or wait, enforced from outside |
 | [docs/ade-verifycmd.md](docs/ade-verifycmd.md) | ADE-native verify-until-pass (verifyCmd) design (2026-11-10): register argv, exit semantics, deadline/handoff; #425 rejected goal-mode |
