@@ -29,6 +29,7 @@ Each doc carries its own summary.
 | [docs/paseo-only-rearchitecture.md](docs/paseo-only-rearchitecture.md) | the Paseo-only plan of 2026-10-30; the phases the slim-down superseded are marked |
 | [docs/queue.md](docs/queue.md) | carried work and blockers, one line each: check it before proposing new work |
 | [docs/s9-cloud-paseo.md](docs/s9-cloud-paseo.md) | design (2026-11-10): setup-plan S9 cloud ↔ Paseo — prerequisites, non-goals, phased experiments; no live wiring |
+| [docs/signed-agent-message.md](docs/signed-agent-message.md) | design (2026-11-12): item-24 signed-agent-message contract — versioned envelope (sender/provenance/recipient/payload hash/expiry/nonce), key registry, operator approval tokens, fail-closed verify order; paper only, no tool code or transport |
 | [docs/threat-model.md](docs/threat-model.md) | threat model (2026-10-20, re-based 2026-11-07): assets, actors, entry points, ranked threats |
 | [docs/code-review.md](docs/code-review.md) | reviewer checklist (rules 1–11): adversary marker, secrets, subprocess, changelog fragments, `bin/review-pr` |
 | [docs/review-boundary.md](docs/review-boundary.md) | `bin/review-launch`, `bin/review-pr` and the `adversary-marker` Action (2026-11-06): the boundary, the merge gate, what is untrusted |
