@@ -1,0 +1,187 @@
+{
+  "name": "closed-without-turn-end",
+  "load": {
+    "record": {
+      "schema": "ade.recovery.passive/v1",
+      "generation": 5,
+      "writtenAt": "2026-11-04T10:06:06.000Z",
+      "writer": {
+        "plugin": "ade-recovery",
+        "pluginVersion": "0.1.0",
+        "pid": 4242,
+        "start": "123456",
+        "daemon": {
+          "pid": 4000,
+          "start": "120000"
+        },
+        "host": "host-a",
+        "bootId": "boot-1"
+      },
+      "serverId": "srv1",
+      "paseoAgentId": "agent-1",
+      "provider": "claude",
+      "cwd": "/work",
+      "host": "host-a",
+      "bootId": "boot-1",
+      "platform": "linux",
+      "cwdRealpath": "/work",
+      "workspaceId": "ws-1",
+      "parentAgentId": null,
+      "persistence": {
+        "provider": "claude",
+        "sessionId": "sess-1",
+        "nativeHandleSha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      },
+      "state": "closed",
+      "daemonInstance": "4000:120000:boot-1",
+      "closedAt": "2026-11-04T10:06:05.000Z",
+      "archivedAt": null,
+      "turns": [
+        {
+          "turnKey": "4000:120000:boot-1:2",
+          "turnId": "turn-1",
+          "startedAt": "2026-11-04T10:05:00.000Z",
+          "endedAt": null,
+          "outcome": null,
+          "duringShutdown": false
+        }
+      ],
+      "git": {
+        "baseAtCreate": {
+          "capturedAt": "2026-11-04T10:00:00.000Z",
+          "repoTop": "/work",
+          "isLinkedWorktree": false,
+          "branch": "main",
+          "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "base": {
+            "ref": "refs/remotes/origin/HEAD",
+            "sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "method": "merge-base-origin-head"
+          },
+          "trackedFingerprint": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "trackedChanged": 1,
+          "trackedPaths": [
+            "src/x.ts"
+          ],
+          "untrackedCount": 0,
+          "untrackedPaths": [],
+          "untrackedFingerprint": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "truncated": false,
+          "errors": []
+        },
+        "atTurnStart": {
+          "capturedAt": "2026-11-04T10:05:00.000Z",
+          "repoTop": "/work",
+          "isLinkedWorktree": false,
+          "branch": "main",
+          "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "base": {
+            "ref": "refs/remotes/origin/HEAD",
+            "sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "method": "merge-base-origin-head"
+          },
+          "trackedFingerprint": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "trackedChanged": 1,
+          "trackedPaths": [
+            "src/x.ts"
+          ],
+          "untrackedCount": 0,
+          "untrackedPaths": [],
+          "untrackedFingerprint": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "truncated": false,
+          "errors": []
+        },
+        "latest": {
+          "capturedAt": "2026-11-04T10:06:05.000Z",
+          "repoTop": "/work",
+          "isLinkedWorktree": false,
+          "branch": "main",
+          "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "base": {
+            "ref": "refs/remotes/origin/HEAD",
+            "sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "method": "merge-base-origin-head"
+          },
+          "trackedFingerprint": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "trackedChanged": 1,
+          "trackedPaths": [
+            "src/x.ts"
+          ],
+          "untrackedCount": 0,
+          "untrackedPaths": [],
+          "untrackedFingerprint": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "truncated": false,
+          "errors": []
+        }
+      },
+      "interruptions": [
+        {
+          "detectedAt": "2026-11-04T10:06:05.000Z",
+          "evidence": "closed-without-turn-end",
+          "turnKey": "4000:120000:boot-1:2",
+          "detail": ""
+        }
+      ],
+      "missingTelemetry": [
+        {
+          "field": "toolCalls",
+          "reason": "v1 captures no tool calls; refetch can start a provider",
+          "at": "2026-11-04T10:00:00.000Z"
+        },
+        {
+          "field": "providerVersion",
+          "reason": "not exposed to plugins",
+          "at": "2026-11-04T10:00:00.000Z"
+        }
+      ],
+      "integrity": {
+        "alg": "sha256",
+        "digest": "0005277f182169585ab73e15fb37577fc264c8cfdd024f07c9bb04813fe93051"
+      }
+    },
+    "source": "current",
+    "problems": [],
+    "maxGenerationSeen": 5
+  },
+  "live": {
+    "now": 1793786826000,
+    "host": {
+      "host": "host-a",
+      "bootId": "boot-1",
+      "platform": "linux"
+    },
+    "git": {
+      "capturedAt": "2026-11-04T10:07:06.000Z",
+      "repoTop": "/work",
+      "isLinkedWorktree": false,
+      "branch": "main",
+      "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "base": {
+        "ref": "refs/remotes/origin/HEAD",
+        "sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "method": "merge-base-origin-head"
+      },
+      "trackedFingerprint": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "trackedChanged": 1,
+      "trackedPaths": [
+        "src/x.ts"
+      ],
+      "untrackedCount": 0,
+      "untrackedPaths": [],
+      "untrackedFingerprint": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "truncated": false,
+      "errors": []
+    },
+    "writerAlive": true,
+    "recordWriterAlive": false,
+    "recoveryScheduledElsewhere": false,
+    "serverId": "srv1"
+  },
+  "expect": {
+    "verdict": "needs-review",
+    "reasons": [
+      "interrupted:closed-without-turn-end",
+      "tools-unobserved"
+    ]
+  }
+}

@@ -111,6 +111,7 @@ Skills (25, from each `skills/*/SKILL.md`):
 
 | Tool | What |
 |---|---|
+| [`paseo-checkpoint`](bin/paseo-checkpoint) | Read-only recovery verdicts (2026-11-04) from the `ade-recovery` plugin's store; exit 0/1/2/3. |
 | [`acp-dispatch`](bin/acp-dispatch) | Hand a slice to an agent through Paseo and get its report back (a shim, slim-down E6, 2026-11-06). |
 | [`acp-dispatch-wait`](bin/acp-dispatch-wait) | DELETE with the acp-dispatch shim (Wave 6 follow-up, ledger E6/D6); was the cheap rearm waiter for one acp-dispatch record (2026-10-18). |
 | [`ade-backup-stores`](bin/ade-backup-stores) | One consistent copy of every agent session store, plus the Hermes JSONL export. |
