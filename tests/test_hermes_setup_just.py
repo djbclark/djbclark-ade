@@ -52,7 +52,7 @@ def test_hermes_setup_help_and_self_forward_args():
 def test_install_recipe_offers_three_hermes_paths():
     """just install asks skip/self/ai and records through ade-install hermes-choice."""
     text = JUSTFILE.read_text()
-    body = text.split("install *args:", 1)[1].split("\nupdate *args:", 1)[0]
+    body = text.split("install *args:", 1)[1].split("\n\n", 1)[0]
     for choice in ("skip", "self", "ai"):
         assert choice in body
     assert "hermes-choice" in body
@@ -70,7 +70,7 @@ def test_install_executes_choice_with_literal_args(tmp_path, choice, live):
     import os
     import sys
     text = JUSTFILE.read_text()
-    recipe = text.split("[positional-arguments]\ninstall ", 1)[1].split("\nupdate ", 1)[0]
+    recipe = text.split("[positional-arguments]\ninstall ", 1)[1].split("\n\n", 1)[0]
     (tmp_path / "justfile").write_text(
         'root := justfile_directory()\n[positional-arguments]\ninstall ' + recipe
         + '\n[positional-arguments]\nhermes-setup *args:\n    #!/usr/bin/env python3\n    import json, os, sys\n'
