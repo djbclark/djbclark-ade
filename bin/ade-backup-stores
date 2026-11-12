@@ -19,6 +19,9 @@ database; no data changes), and the live Hermes `state.db` is never handed to `h
      followed only when its resolved path is under $HOME and is no credential
      path (copied as the target, recorded in the manifest as `root_symlinks`, links inside it still never
      followed): a dangling link, a root resolving outside $HOME or to a credential path is an error;
+     Pi's native JSONL session/history tree is included under pi/sessions; the
+     rest of ~/.pi/agent (including auth.json) is not a configured backup root;
+     default-path scope and fixture recovery procedure: docs/pi-backup.md;
   4. `hermes sessions export` (JSONL) into <dest>/hermes-export/, run with HERMES_HOME pointing at a scratch
      copy of the hermes-state backup (removed afterwards), so `hermes` never opens the live state.db and the
      session ids, counts and exports all come from one snapshot. The export refuses a session above
@@ -217,7 +220,7 @@ def build_stores(home):
     def files(name, *roots, file_labels=()):
         return {"name": name, "kind": "files", "roots": [(label, h / rel) for label, rel in roots],
                 "file_labels": list(file_labels)}
-    # (zcode, crush, copilot, antigravity-cli, qwen, cline, pi and muse stores removed 2026-11-06, slim-down E10: those TUIs
+    # (zcode, crush, copilot, antigravity-cli, qwen, cline and muse stores removed 2026-11-06, slim-down E10: those TUIs
     # retired; antigravity-ide and antigravity-acp stay, Antigravity being a kept Paseo provider. Their credential exclusions below stay, as the named exception.)
     agy = ".gemini/antigravity"
     return [
@@ -245,6 +248,9 @@ def build_stores(home):
         files("gemini-cli", ("tmp", ".gemini/tmp")),
         files("omp", ("sessions", ".omp/agent/sessions")),
         sqlite("omp-db", ".omp/agent/history.db"),
+        # Pi was restored as the live third-party TUI. Native history is the
+        # complete JSONL tree, not the archive reader's user/assistant projection.
+        files("pi", ("sessions", ".pi/agent/sessions")),
         files("paseo", ("agents", ".paseo/agents"), ("projects", ".paseo/projects"),
               ("agent-requests", ".paseo/agent-requests")),
         files("herdr", ("session.json", ".config/herdr/session.json"),

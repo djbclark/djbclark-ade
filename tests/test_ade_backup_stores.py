@@ -225,8 +225,8 @@ def test_unknown_only_name_is_usage_error(env):
     assert run_main(mod, "--dest", str(dest), "--only", "nope") == 2
 
 
-def test_retired_tui_credential_paths_stay_excluded():
-    """Named exception (slim-down E9h Q4): the stores of retired TUIs are gone, their credential exclusions stay."""
+def test_live_and_retired_tui_credential_paths_stay_excluded():
+    """Pi sessions are restored; live and archived client credentials remain excluded."""
     mod = load()
     for path in (".pi/agent/auth.json", ".zcode/v2/credentials.json", ".copilot/data.db", ".local/share/crush/crush.json",
                  ".cline/data/settings/providers.json", ".gemini/antigravity-acp/acp_token.json"):
