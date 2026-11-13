@@ -7,19 +7,18 @@ are not replayed; a queued receipt is never completion or acknowledgement.
 from __future__ import annotations
 
 import contextlib
+import datetime
 import fcntl
 import hashlib
 import json
 import os
-from pathlib import Path
 import re
 import shlex
+import stat
 import subprocess
 import tempfile
-import stat
-import datetime
 import uuid
-from typing import Callable
+from pathlib import Path
 
 
 class SessionError(RuntimeError):
@@ -128,12 +127,25 @@ class Service:
         write_atomic(path, (json.dumps(record, sort_keys=True, indent=2) + '\n').encode())
 
     def git_head(self, cwd):
+        """Exact HEAD of the work tree containing cwd, or None when cwd is in no git repository.
+
+        Only git's own "not a git repository" refusal (exit 128) means None; a timeout, OSError,
+        unborn HEAD, unreadable repository or malformed sha still raises (2026-11-13: a session
+        whose cwd is a plain directory such as ~ could never hand off).
+        """
+        # Git's location overrides (GIT_DIR, GIT_WORK_TREE, GIT_CEILING_DIRECTORIES, ...) would
+        # change what "inside a repository" means for this cwd, so none of GIT_* is inherited.
+        env = {k: v for k, v in self.env.items() if not k.startswith('GIT_')}
+        env['LC_ALL'] = 'C'
         try:
-            p = self.runner(['git', '-C', cwd, 'rev-parse', 'HEAD'], capture_output=True,
-                            text=True, timeout=10)
-            value = p.stdout.strip()
+            p = self.runner(['git', '-C', cwd, 'rev-parse', 'HEAD'], env=env,
+                            capture_output=True, text=True, timeout=10)
+            value = (p.stdout or '').strip()
             if p.returncode == 0 and re.fullmatch(r'[0-9a-f]{40}', value):
                 return value
+            if (p.returncode == 128 and not value
+                    and re.match(r'fatal: not a git repository\b', (p.stderr or '').lstrip())):
+                return None
         except (OSError, subprocess.TimeoutExpired):
             pass
         raise SessionError('exact repository HEAD unavailable')
@@ -228,7 +240,8 @@ class Service:
                 f'Self-handoff {token}. {mode_instruction}'
                 f'Read checkpoint {preserved}. Transaction {path}. Do not write project files yet. '
                 f'Write your own nonsecret JSON acknowledgement at {self.state / (token + ".ack.json")} '
-                'containing token, checkpoint_sha256, head and next_action. Read and confirm the '
+                'containing token, checkpoint_sha256, head and next_action; head must equal the '
+                'transaction record\'s head, which is null (JSON null) when the cwd is not a git repository. Read and confirm the '
                 f'checkpoint and scope yourself, then run {common} accept {record_arg} {ack_arg}. '
                 'If creation receipt is not yet saved, wait and retry accept only. '
                 f'After acknowledgement, let predecessor finish; run {common} finish {record_arg}. '
@@ -287,7 +300,7 @@ class Service:
             if self.git_head(record['cwd']) != record['head']:
                 raise SessionError('repository HEAD changed; reconcile before acknowledgement')
             ack = json.loads(read_regular(ack_file, 65536))
-            if (not isinstance(ack, dict) or any(ack.get(k) != record[k]
+            if (not isinstance(ack, dict) or any(k not in ack or ack[k] != record[k]
                     for k in ('token', 'checkpoint_sha256', 'head'))
                     or not isinstance(ack.get('next_action'), str) or not ack['next_action'].strip() or len(ack['next_action']) > 4096):
                 raise SessionError('ack must attest token, checkpoint digest, HEAD and next action')
@@ -344,7 +357,7 @@ class Service:
                 raise SessionError('native compact unsupported or permission state unresolved')
             token = str(uuid.uuid4())
             preserved, sha = self.checkpoint(checkpoint, token=token)
-            timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            timestamp = datetime.datetime.now(datetime.UTC).isoformat()
             record = {'schema_version': 1, 'kind': 'compact', 'token': token,
                       'predecessor': predecessor, 'home': str(self.home), 'record': str(path),
                       'checkpoint': preserved, 'checkpoint_sha256': sha,

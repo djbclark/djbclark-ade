@@ -1,11 +1,13 @@
 """Mocked native self-session transitions; never create/archive live agents."""
 from __future__ import annotations
+
 import copy
 import json
 import os
-from pathlib import Path
+import re
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -18,6 +20,7 @@ SUCC = '22222222-2222-4222-8222-222222222222'
 OTHER = '33333333-3333-4333-8333-333333333333'
 WS = 'wks_8bdc13f236e8850f'
 HEAD = 'a' * 40
+NOT_A_REPO = 'fatal: not a git repository (or any of the parent directories): .git\n'
 
 
 class Native:
@@ -29,6 +32,7 @@ class Native:
         self.send_error = None
         self.archive_error = None
         self.head = HEAD
+        self.git_result = None  # (returncode, stdout, stderr) overriding the default git answer
         self.rows = {PRED: {'Id': PRED, 'Provider': 'claude', 'Model': 'sonnet',
                            'Status': 'running', 'Archived': False, 'PendingPermissions': [],
                            'Cwd': str(root), 'Mode': 'bypassPermissions', 'ParentAgentId': None,
@@ -38,6 +42,12 @@ class Native:
     def __call__(self, argv, **kwargs):
         self.calls.append((list(argv), dict(kwargs)))
         if argv[0] == 'git':
+            if isinstance(self.git_result, BaseException):
+                raise self.git_result
+            if self.git_result is not None:
+                return subprocess.CompletedProcess(argv, *self.git_result)
+            if self.head is None:
+                return subprocess.CompletedProcess(argv, 128, '', NOT_A_REPO)
             return subprocess.CompletedProcess(argv, 0, self.head + '\n', '')
         assert argv[:4] == ['paseo', '--home', kwargs['env']['PASEO_HOME'], '--json']
         args = argv[4:]
@@ -270,14 +280,13 @@ def test_quiescence_and_full_self_identity_are_required(setup):
 
 def test_transaction_lock_prevents_parallel_intent(setup):
     service, native, checkpoint = setup
-    with service.transaction('handoff-' + PRED):
-        with pytest.raises(ss.SessionError, match='busy'):
-            service.handoff(checkpoint, quiesced=True)
+    with service.transaction('handoff-' + PRED), pytest.raises(ss.SessionError, match='busy'):
+        service.handoff(checkpoint, quiesced=True)
     assert native.created == 0
 
 
 def test_checkpoint_fifo_refused_before_native_creation(setup, tmp_path):
-    service, native, checkpoint = setup
+    service, native, _checkpoint = setup
     fifo = tmp_path / 'fifo'
     os.mkfifo(fifo)
     with pytest.raises(ss.SessionError, match='regular'):
@@ -322,7 +331,7 @@ def test_cli_without_native_runtime_reports_blocked_without_creation(tmp_path):
     home.mkdir()
     result = subprocess.run([str(cli), '--state-dir', str(tmp_path / 'state'),
                              '--paseo-home', str(home), 'compact', '--checkpoint', str(tmp_path / 'not-read'),
-                             '--request-id', 'c1'], capture_output=True, text=True, timeout=5,
+                             '--request-id', 'c1'], check=False, capture_output=True, text=True, timeout=5,
                             env={**os.environ, 'PASEO_AGENT_ID': ''})
     assert result.returncode == 1
     assert json.loads(result.stdout)['status'] == 'blocked'
@@ -424,3 +433,121 @@ def test_load_record_requires_handoff_json_filename(setup, name):
         service.accept(odd, service.state / 'ack.json')
     assert len(native.calls) == calls
     assert service.load_record(path) == 'handoff-' + record['predecessor']
+
+
+def test_non_repository_cwd_records_null_head_and_accepts_and_finishes(setup):
+    service, native, checkpoint = setup
+    native.head = None
+    record = service.handoff(checkpoint, quiesced=True)
+    path = Path(record['record'])
+    assert record['head'] is None and record['status'] == 'awaiting-ack'
+    assert json.loads(path.read_text())['head'] is None
+    git = [(a, k) for a, k in native.calls if a[0] == 'git']
+    assert git and git[0][1]['env']['LC_ALL'] == 'C'
+    prompt = next(a for a, _ in native.calls if a[4:6] == ['agent', 'run'])[-1]
+    assert 'null' in prompt and 'not a git repository' in prompt
+    record = accept(service, record, path)  # ack carries head: null
+    assert record['ack']['head'] is None
+    native.rows[PRED]['Status'] = 'idle'
+    assert service.finish(path)['status'] == 'archived'
+    assert native.archived == 1
+
+
+def test_null_head_ack_must_attest_head_explicitly(setup):
+    service, native, checkpoint = setup
+    native.head = None
+    record = service.handoff(checkpoint, quiesced=True)
+    path = Path(record['record'])
+    service.env['PASEO_AGENT_ID'] = SUCC
+    ack = {k: record[k] for k in ('token', 'checkpoint_sha256')}
+    ack['next_action'] = 'Continue the authorized task.'
+    (service.state / 'ack.json').write_text(json.dumps(ack))  # no head key at all
+    with pytest.raises(ss.SessionError, match='ack must attest'):
+        service.accept(path, service.state / 'ack.json')
+    ack['head'] = HEAD  # a sha is not the recorded null
+    (service.state / 'ack.json').write_text(json.dumps(ack))
+    with pytest.raises(ss.SessionError, match='ack must attest'):
+        service.accept(path, service.state / 'ack.json')
+
+
+def test_non_repository_that_became_repository_refuses(setup):
+    service, native, checkpoint = setup
+    native.head = None
+    record = service.handoff(checkpoint, quiesced=True)
+    path = Path(record['record'])
+    native.head = HEAD
+    with pytest.raises(ss.SessionError, match='HEAD changed'):
+        accept(service, record, path)
+    native.head = None
+    accept(service, record, path)
+    native.head = HEAD
+    native.rows[PRED]['Status'] = 'idle'
+    with pytest.raises(ss.SessionError, match='HEAD changed'):
+        service.finish(path)
+    assert native.archived == 0
+
+
+def test_repository_that_stopped_being_repository_refuses(setup):
+    service, native, record, path = start(setup)
+    native.head = None
+    with pytest.raises(ss.SessionError, match='HEAD changed'):
+        accept(service, record, path)
+    native.head = HEAD
+    accept(service, record, path)
+    native.head = None
+    native.rows[PRED]['Status'] = 'idle'
+    with pytest.raises(ss.SessionError, match='HEAD changed'):
+        service.finish(path)
+    assert native.archived == 0
+
+
+@pytest.mark.parametrize('result', [
+    (128, '', 'fatal: ambiguous argument \'HEAD\': unknown revision or path not in the working tree.\n'),
+    (128, '', 'fatal: detected dubious ownership in repository at \'/x\'\n'),
+    (128, '', 'fatal: cannot change to \'/gone\': No such file or directory\n'),
+    (128, '', ''),
+    (128, 'a' * 40 + '\n', NOT_A_REPO),
+    (1, '', NOT_A_REPO),
+    (0, '', ''),
+    (0, 'not-a-sha\n', ''),
+    (0, 'A' * 40 + '\n', ''),
+    subprocess.TimeoutExpired('git', 10),
+    FileNotFoundError('git'),
+])
+def test_other_git_failures_still_refuse(setup, result):
+    service, native, checkpoint = setup
+    native.git_result = result
+    with pytest.raises(ss.SessionError, match='exact repository HEAD unavailable'):
+        service.handoff(checkpoint, quiesced=True)
+    assert native.created == 0 and not list(service.state.glob('handoff-*.json'))
+
+
+def _git(*args, cwd, env=None):
+    base = {k: v for k, v in os.environ.items() if not k.startswith('GIT_')}
+    subprocess.run(['git', *args], cwd=cwd, check=True, capture_output=True, text=True,
+                   env={**base, 'GIT_CONFIG_GLOBAL': os.devnull, 'GIT_CONFIG_NOSYSTEM': '1', **(env or {})})
+
+
+def test_real_git_non_repository_unborn_repository_and_env_overrides(tmp_path):
+    ceiling = tmp_path / 'plain'
+    ceiling.mkdir()
+    # An inherited GIT_DIR / GIT_CEILING_DIRECTORIES must not change the answer.
+    poison = {'GIT_DIR': str(tmp_path / 'nope'), 'GIT_WORK_TREE': str(tmp_path),
+              'GIT_CEILING_DIRECTORIES': str(tmp_path)}
+    service = ss.Service(tmp_path / 'state', tmp_path, env={**os.environ, **poison})
+    # tmp_path can sit inside a repository on an unusual host; make the check hermetic.
+    if subprocess.run(['git', '-C', str(ceiling), 'rev-parse', '--git-dir'], check=False, capture_output=True,
+                      env={k: v for k, v in os.environ.items() if not k.startswith('GIT_')}).returncode == 0:
+        pytest.skip('temporary directory is inside a git repository')
+    assert service.git_head(str(ceiling)) is None
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    _git('init', '-q', cwd=repo)
+    with pytest.raises(ss.SessionError, match='HEAD unavailable'):  # unborn HEAD is not "no repository"
+        service.git_head(str(repo))
+    _git('-c', 'user.name=t', '-c', 'user.email=t@example.invalid', 'commit', '-q', '--allow-empty',
+         '-m', 'x', cwd=repo)
+    head = service.git_head(str(repo))
+    assert re.fullmatch(r'[0-9a-f]{40}', head)
+    (repo / 'sub').mkdir()
+    assert service.git_head(str(repo / 'sub')) == head
