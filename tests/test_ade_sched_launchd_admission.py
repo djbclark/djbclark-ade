@@ -402,6 +402,56 @@ def test_target_that_appears_between_admission_and_write_is_not_overwritten(ld, 
     assert "deadline-sweep" not in _entries(ld)  # the pending intent was rolled back, not left as failed
 
 
+def test_defer_after_a_hand_deletion_restores_the_existing_ledger_row(ld, monkeypatch):
+    # The ledger holds a committed row (with a prior identity); the plist was deleted by hand; a writer re-creates the
+    # path after admission. The rollback must put the whole row back, not drop it (that would lose removal authority).
+    root, catalog = _installed(ld)
+    plist = ld.agents / f"{LABEL}.plist"
+    ledger = S.load_jobs_ledger(ld.state, env=ld.env)
+    ledger["entries"]["deadline-sweep"]["prior_identity"] = {**ledger["entries"]["deadline-sweep"], "generation": 0}
+    S.save_jobs_ledger(ledger, ld.state, env=ld.env)  # (same label: no removal is planned, the row must still survive whole)
+    before = _entries(ld)["deadline-sweep"]
+    ld.unload()
+    plist.unlink()
+    ld.reset()
+    real = S._log_dirs
+    monkeypatch.setattr(S, "_log_dirs", lambda job: (real(job), plist.write_text("<plist>hand managed</plist>\n")))
+    rows, rc = _reconcile(ld, root, catalog)
+    assert rc == 6, rows
+    assert plist.read_text() == "<plist>hand managed</plist>\n"  # the hook ran, so the NativeDefer path (not admission) decided
+    assert any("exists and is not the ADE render" in r for r in _deferral_reasons(ld)), _deferral_reasons(ld)
+    assert _entries(ld)["deadline-sweep"] == before and not NEVER & set(ld.verbs())
+
+
+@pytest.mark.parametrize("exc", [PermissionError("denied"), OSError(45, "Operation not supported"), UnicodeEncodeError("ascii", "x", 0, 1, "bad")])
+def test_unexpected_oserror_from_the_native_install_is_a_failed_row_not_a_traceback(ld, monkeypatch, exc):
+    root = _mini_catalog(ld.tmp)
+    catalog = ai.load_catalog(root=root)
+
+    def boom(*a, **kw):
+        raise exc
+
+    monkeypatch.setattr(S, "create_exclusive", boom)
+    rows, rc = _reconcile(ld, root, catalog)
+    assert rc == 1 and any(r["action"] == "failed" for r in rows), rows
+    assert not NEVER & set(ld.verbs()) and not (ld.agents / f"{LABEL}.plist").exists()
+
+
+def test_paseo_install_step_on_a_launchd_host_never_reaches_the_launchd_adapter(ld, monkeypatch):
+    # An unrelated missing LaunchAgent file must not admit a paid-run paseo mutation.
+    step = S.ReconcileStep("p", "install", S.OWNER_ADE, "paseo schedule create x", "x-schedule", touch=True)
+    monkeypatch.setattr(S, "plan_reconcile", lambda *a, **kw: [step])
+
+    def no_paseo(*a, **kw):
+        pytest.fail("a paseo schedule must not be created through the launchd adapter")
+
+    rows, rc = S.reconcile([{"name": "p", "kind": "paseo", "owner": S.OWNER_ADE}], [], dry_run=False, backend="launchd",
+                           root=ld.tmp, env=ld.env, state_dir=ld.state, live=S.LiveScan("launchd", ()),
+                           paseo_run=no_paseo, native_admission=True)
+    assert rc == 6 and rows[0]["action"] == "deferred", rows
+    assert ld.verbs() == []
+
+
 def test_target_that_appears_during_the_exclusive_create_is_not_overwritten(ld, monkeypatch):
     root = _mini_catalog(ld.tmp)
     catalog = ai.load_catalog(root=root)

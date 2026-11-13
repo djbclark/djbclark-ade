@@ -420,7 +420,7 @@ admission enables exactly the writes that cannot kill or overwrite under concurr
 1. **Absent job** (not loaded; nothing at `agents_dir/LABEL.plist`, not even a dangling symlink): the plist is created
    exclusively (an `O_EXCL` temp file hard-linked to the target, so an existing path is never replaced) and then
    `launchctl bootstrap` runs. If the path appeared since admission, nothing is written and the step defers with the
-   pending ledger intent rolled back. If `bootstrap` fails (for example an outside loader loaded the label meanwhile) the
+   pending ledger intent rolled back (the log directories may already exist). If `bootstrap` fails (for example an outside loader loaded the label meanwhile) the
    step is `failed` with **no** `bootout` and no unlink: the running work survives, and the new plist stays on disk and
    is named in the failure.
 2. **Unloaded job whose plist byte-matches the ADE render** (a regular file, not a symlink): `launchctl bootstrap` only,
@@ -430,7 +430,9 @@ admission enables exactly the writes that cannot kill or overwrite under concurr
    `launchctl` call and no admission (nothing is mutated on the host).
 4. **Loaded job, any state**: defers untouched (`parse_launchd_activity` only words the reason). **Every removal** defers
    before any `launchctl` call: an unlink cannot be compare-and-swap.
-5. **Label check** and **blocked rows**: a catalog `label` that differs from the plist `Label` is `blocked` at plan time
+5. **Renames and retirements** of launchd jobs stay deferred (exit 6): the removal of the old label defers, and the same
+   logical job's new-label install then defers behind it, until the follow-up below exists.
+6. **Label check** and **blocked rows**: a catalog `label` that differs from the plist `Label` is `blocked` at plan time
    and refused again before install. A blocked logical row (missing or unrenderable source, label mismatch) keeps its
    current and prior identities: `plan_reconcile` emits no removal for them (this protects low-level callers too).
 
@@ -442,7 +444,9 @@ writer shares the check-and-write. **Known limits:** a concurrent external loade
 unloaded job (this path then fails or defers and never boots it out); another writer that changes an unloaded file between
 the byte-match read and `bootstrap` gets its definition loaded (nothing is overwritten); an operator-disabled
 (`launchctl disable`), unloaded ADE job is admitted, its `bootstrap` fails and the ledger row becomes `failed`; the
-pre-existing live backend scan (`list_backend_labels`) opens every `*.plist` in the agents directory, so a FIFO planted there
+latent until removals are ever admitted: adoption does not compare the loaded job's `path =` with our plist, so a job an
+outside loader loaded can be adopted ledger-only when a matching file sits at the path (any removal follow-up must require
+a regular-file plist and a `print` `path =` equal to it); the pre-existing live backend scan (`list_backend_labels`) opens every `*.plist` in the agents directory, so a FIFO planted there
 hangs `reconcile` before admission runs.
 
 **systemd, cron and paseo keep the conservative default** (installs and removals defer, exit 6): no adapter proves their

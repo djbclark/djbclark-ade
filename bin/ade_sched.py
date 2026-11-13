@@ -951,7 +951,7 @@ def install(job: Job, backend: str | Backend | None = None, *, dry_run: bool = F
 
 
 class NativeDefer(Exception):
-    """The native launchd install found the path occupied or not provably ADE's: nothing was written; the step defers."""
+    """The native launchd install found the path occupied or not provably ADE's: no definition was written; the step defers."""
 
 
 def create_exclusive(path: Path, text: str, mode: int = 0o600) -> None:
@@ -962,8 +962,8 @@ def create_exclusive(path: Path, text: str, mode: int = 0o600) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
     try:
-        with os.fdopen(fd, "w") as fh:
-            fh.write(text)
+        with os.fdopen(fd, "wb") as fh:  # bytes: the byte-match compare is UTF-8 whatever the locale
+            fh.write(text.encode("utf-8"))
         os.chmod(tmp, mode)
         os.link(tmp, path)
     finally:
@@ -976,7 +976,8 @@ def install_launchd_native(job: Job, text: str, *, env: Mapping[str, str] | None
 
     1. The target is absent: create it exclusively, then `launchctl bootstrap` (never `bootout`).
     2. The target is a regular file that byte-matches `text` (an unloaded ADE definition): `bootstrap` only, no write.
-    3. Anything else (it appeared since admission, differs, is a symlink or special file): raise NativeDefer, nothing touched.
+    3. Anything else (it appeared since admission, differs, is a symlink or special file): raise NativeDefer; no launchd
+       definition is written (the log directories may already exist).
 
     If `bootstrap` fails (for example the label was loaded meanwhile) the error is raised without any `bootout` or unlink;
     a plist this call created stays on disk and is named in the message. Returns "created" or "bootstrapped"."""
@@ -3017,9 +3018,12 @@ def reconcile(
                                 f"refusing to act on an unadmitted label",
                             )
                         if native_install:
-                            install_launchd_native(
-                                job, next(iter(rendered.files.values())), env=env, err=err, **overrides,
-                            )
+                            try:
+                                install_launchd_native(
+                                    job, next(iter(rendered.files.values())), env=env, err=err, **overrides,
+                                )
+                            except (OSError, ValueError) as exc:  # mkdir/link/chmod/encode: a failed row, not a traceback
+                                raise SchedError(EX_ACTIVATE, f"native launchd install of {label} failed: {exc}") from exc
                         else:
                             install(
                                 job, b, dry_run=False, activate=activate,
@@ -3030,7 +3034,7 @@ def reconcile(
                         if not st.installed:
                             raise SchedError(EX_ACTIVATE, f"read-back: {label} not installed after install")
                     except NativeDefer as e:
-                        # Nothing was written: put the ledger back as it was and defer (exit 6), never "failed".
+                        # No launchd definition was written: put the ledger row back as it was and defer (exit 6), never "failed".
                         if prev is None:
                             entries.pop(step.name, None)
                         else:
