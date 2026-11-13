@@ -334,6 +334,32 @@ def test_loaded_job_that_needs_a_reload_defers_and_is_never_unloaded(ld):
     assert any("loaded" in v["reason"] for v in deferred["jobs"].values())
 
 
+def test_loaded_job_with_the_old_absolute_path_comment_defers_and_is_never_rewritten(ld):
+    # Migration (2026-11-13): installs made before the comment became repo-relative carry `from /abs/.../X.plist`. The new render
+    # differs only in that comment line; a loaded job must still defer untouched (no bootout, no rewrite, no kill).
+    root, catalog = _installed(ld)
+    plist = ld.agents / f"{LABEL}.plist"
+    src = root / "config" / "launchd" / f"{LABEL}.plist"
+    new = plist.read_text()
+    old = new.replace("from config/launchd/", f"from {src.resolve().parent}/")
+    assert old != new, new
+    plist.write_text(old)
+    ld.reset()
+    rows, rc = _reconcile(ld, root, catalog)
+    assert rc == 6 and any(r["action"] == "deferred" for r in rows), rows
+    assert plist.read_text() == old and ld.loaded()
+    assert not NEVER & set(ld.verbs()) and not ld.killed()
+
+
+def test_relative_comment_render_matches_what_the_install_wrote(ld):
+    # The same reconcile, planned again, finds the file it wrote healthy: no install step for an identical job.
+    root, catalog = _installed(ld)
+    ld.reset()
+    rows, rc = _reconcile(ld, root, catalog)
+    assert rc == 0 and not any(r["action"] in ("installed", "deferred") for r in rows), rows
+    assert not NEVER & set(ld.verbs())
+
+
 def test_work_that_starts_after_the_idle_read_is_never_signalled(ld):
     # F1: the fake starts work the moment `print` has answered "not running". Admission must make no destructive call.
     root, catalog = _installed(ld)

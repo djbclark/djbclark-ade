@@ -110,6 +110,25 @@ def default_subst(ade: str | os.PathLike[str] | None = None, env: Mapping[str, s
     return {"__ADE__": root, "@ADE@": root, "__HOME__": home, "@HOME@": home}
 
 
+def canonical_source(source: str, ade_root: str | os.PathLike[str]) -> str:
+    """The plist spelling the generated-by comment carries (2026-11-13): the repo-relative POSIX path when the plist is under
+    the ADE root, else its resolved absolute path. Relative, absolute and symlinked spellings, and the shared checkout versus
+    a worktree, all render the same text, so an artifact hash never depends on how the plist path was typed.
+    A non-path source (`<dict>`) is returned as is."""
+    if not source or source.startswith("<"):
+        return source
+    try:
+        p = Path(source).resolve()
+        root = Path(os.path.realpath(ade_root))
+        return p.relative_to(root).as_posix()
+    except (OSError, RuntimeError, ValueError):
+        pass
+    try:
+        return str(Path(source).resolve())
+    except (OSError, RuntimeError):
+        return source
+
+
 def is_linked_worktree(path: str | os.PathLike[str]) -> bool:
     """True when `path` is a linked git worktree (git-common-dir != git-dir): its `.git` is a file naming a gitdir that has
     a `commondir`. A submodule's gitdir has none. Read from the files, no git process."""
@@ -283,7 +302,8 @@ class Job:
         return cls(label=label, argv=tuple(argv), env=dict(env), cwd=_abs(raw, "WorkingDirectory"), interval=interval,
                    calendar=tuple(dict(c) for c in cals), run_at_load=_bool(raw, "RunAtLoad"), keep_alive=ka,
                    stdout=_abs(raw, "StandardOutPath"), stderr=_abs(raw, "StandardErrorPath"), nice=nice,
-                   low_io=_bool(raw, "LowPriorityIO"), process_type=pt, kill_mode=km, raw=raw, source=source,
+                   low_io=_bool(raw, "LowPriorityIO"), process_type=pt, kill_mode=km, raw=raw,
+                   source=canonical_source(source, default_subst(ade)["__ADE__"]),
                    worktree=worktree)
 
     @property
