@@ -1,0 +1,347 @@
+#!/usr/bin/env python3
+"""Launch a lead's worker into the lead's one workers window, and archive that window safely.
+
+  ade-worker-run --lead ID --slice NAME [--window-middle TEXT] [--cwd DIR] -- <paseo run args...>
+  ade-worker-run archive-window --lead ID [--window-middle TEXT] [--idle-handled] [--dry-run]
+  (both take --on-behalf-of-lead: needed when $PASEO_AGENT_ID is set and is not --lead)
+
+Launch: strips PASEO_AGENT_ID, PASEO_AGENT_CWD and PASEO_WORKSPACE_ID from every paseo call, finds the lead's
+window by exact name `workers <middle> <lead id>` in `paseo workspace ls --json` (refusing two matches), else mints
+it with the first launch (`--new-workspace local`), reads the new window's id from the launch (JSON `workspaceId`
+when paseo prints one, else the single `Created workspace wks_... - <name>` stderr line, cross-checked against the
+new agent's state file) and renames it. Every launch carries `--label ade.lead=<lead>` and `--label slice=<NAME>`
+and the tab is renamed `worker <NAME> <lead id>`. One JSON line goes to stdout: {agentId, workspaceId,
+windowName, tabName}. Pass --no-wait to paseo: a first launch renames the window only after paseo run returns.
+
+archive-window: `paseo workspace archive` only when the preconditions of docs/workspace-layout.md hold (every
+live agent labelled ade.lead=<lead> is closed, or idle with --idle-handled; no other live agent in the window;
+the window's name reads `workers ... <lead id>`); otherwise it lists the blockers and archives nothing.
+
+Exit 0: done; 1: refused or paseo failed (message on stderr; an agent already launched is named); 2: usage.
+See docs/workspace-layout.md "Worker placement" and skills/fan-out section 3.
+"""
+from __future__ import annotations
+
+import argparse
+import fcntl
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+
+STRIP = ("PASEO_AGENT_ID", "PASEO_AGENT_CWD", "PASEO_WORKSPACE_ID")
+LEAD_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+SLICE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+WKS_RE = re.compile(r"wks_[A-Za-z0-9]+")
+CREATED_RE = re.compile(r"^Created workspace (wks_[A-Za-z0-9]+) - ", re.M)
+NAME_LIMIT = 100  # docs/workspace-layout.md: keep a window or tab name under ~100 characters
+MIDDLE_LIMIT = 55
+CLI_TIMEOUT = 60
+# Flags the helper owns; a caller passing one would break the placement or the labels.
+OWNED_FLAGS = ("--workspace", "--new-workspace", "--cwd", "--dir", "-C", "--host", "--home", "-o", "--format", "-q", "--quiet")
+DETACH_FLAGS = ("--no-wait", "-d", "--background", "--detach")
+OWNED_LABEL_KEYS = ("ade.lead", "slice")
+
+
+class Refused(Exception):
+    pass
+
+
+def child_env() -> dict[str, str]:
+    return {k: v for k, v in os.environ.items() if k not in STRIP}
+
+
+def paseo(args: list[str], timeout: int | None = CLI_TIMEOUT) -> tuple[int, str, str]:
+    """One paseo call, argv list, stdout and stderr read back from files (never a pipe)."""
+    with tempfile.TemporaryFile("w+") as out, tempfile.TemporaryFile("w+") as err:
+        try:
+            rc = subprocess.run(["paseo", *args], env=child_env(), stdin=subprocess.DEVNULL, stdout=out,
+                                stderr=err, timeout=timeout).returncode
+        except FileNotFoundError:
+            raise Refused("paseo is not on PATH")
+        except subprocess.TimeoutExpired:
+            raise Refused(f"paseo {' '.join(args[:2])} timed out after {timeout}s")
+        out.seek(0)
+        err.seek(0)
+        return rc, out.read(), err.read()
+
+
+def paseo_json(args: list[str]):
+    rc, out, err = paseo(args)
+    if rc != 0:
+        raise Refused(f"paseo {' '.join(args[:2])} failed (rc {rc}): {err.strip() or out.strip()}")
+    try:
+        return json.loads(out)
+    except ValueError:
+        raise Refused(f"paseo {' '.join(args[:2])} did not print JSON")
+
+
+def window_name(middle: str, lead: str) -> str:
+    return f"workers {middle} {lead}"
+
+
+def check_names(lead: str, slice_name: str | None, middle: str | None) -> None:
+    if not LEAD_RE.fullmatch(lead):
+        raise Refused("--lead must be the lead's full agent id (a lowercase UUID)")
+    if slice_name is not None:
+        if not SLICE_RE.fullmatch(slice_name):
+            raise Refused("--slice must match [A-Za-z0-9][A-Za-z0-9._-]*")
+        if len(f"worker {slice_name} {lead}") > NAME_LIMIT:
+            raise Refused(f"tab name `worker {slice_name} {lead}` exceeds {NAME_LIMIT} characters")
+    if middle is not None:
+        if not middle.strip() or middle != middle.strip() or not middle.isprintable() or "\n" in middle:
+            raise Refused("--window-middle must be non-empty, trimmed, printable text")
+        if len(middle) > MIDDLE_LIMIT or len(window_name(middle, lead)) > NAME_LIMIT:
+            raise Refused(f"--window-middle exceeds {MIDDLE_LIMIT} characters (window name limit {NAME_LIMIT})")
+
+
+def find_window(lead: str, middle: str | None) -> dict | None:
+    """The lead's workers window from `paseo workspace ls --json`, by exact name; two matches refuse."""
+    rows = paseo_json(["workspace", "ls", "--json"])
+    if not isinstance(rows, list):
+        raise Refused("paseo workspace ls --json did not return a list")
+    suffix = f" {lead}"
+    generic, hits = [], []
+    for row in rows:
+        name = row.get("name") if isinstance(row, dict) else None
+        if not isinstance(name, str):
+            continue
+        if name.startswith("workers ") and name.endswith(suffix) and len(name) > len("workers ") + len(suffix):
+            if not WKS_RE.fullmatch(str(row.get("workspaceId", ""))):
+                raise Refused(f"window {name!r} has no usable workspaceId")
+            generic.append(row)
+            if middle is None or name == window_name(middle, lead):
+                hits.append(row)
+    if middle is not None and not hits and generic:
+        ids = ", ".join(f"{h['workspaceId']} ({h['name']})" for h in generic)
+        raise Refused(f"no window is named `{window_name(middle, lead)}`, but this lead has {ids}; "
+                      "use that --window-middle (or none), not a second window")
+    if len(hits) > 1:
+        ids = ", ".join(f"{h['workspaceId']} ({h['name']})" for h in hits)
+        raise Refused(f"{len(hits)} windows match the lead's workers window: {ids}; archive or rename the extras")
+    return hits[0] if hits else None
+
+
+def state_file(agent_id: str) -> dict | None:
+    home = Path(os.environ.get("PASEO_HOME") or Path.home() / ".paseo")
+    for p in sorted((home / "agents").glob(f"*/{agent_id}.json")):
+        try:
+            data = json.loads(p.read_text())
+        except (OSError, ValueError):
+            return None
+        return data if isinstance(data, dict) else None
+    return None
+
+
+def lock_for(lead: str):
+    d = Path(os.environ.get("ADE_WORKER_RUN_STATE") or Path.home() / ".local/state/ade/worker-run")
+    d.mkdir(parents=True, exist_ok=True)
+    fh = (d / f"{lead}.lock").open("a")
+    fcntl.flock(fh, fcntl.LOCK_EX)
+    return fh
+
+
+def check_caller(lead: str, on_behalf: bool) -> None:
+    """--lead is the caller's own agent id; a different one (a stale id in a brief) needs --on-behalf-of-lead."""
+    caller = os.environ.get("PASEO_AGENT_ID")
+    if caller and caller != lead and not on_behalf:
+        raise Refused(f"--lead {lead} is not this agent ({caller}); a wrong id would place or archive workers in another "
+                      "lead's window and label them for it. Pass --on-behalf-of-lead if that is intended")
+
+
+def passthrough_check(args: list[str]) -> None:
+    if not args:
+        raise Refused("nothing after `--`: pass the paseo run arguments (provider, mode, brief ...)")
+    if args[0] in ("paseo", "run"):
+        raise Refused("pass the paseo run arguments only, without a leading `paseo run` "
+                      "(a plan's Choice.dispatch minus that prefix)")
+    if not args[0].startswith("-"):
+        raise Refused("the first argument after `--` must be a paseo run flag (flags before the brief; a Choice.dispatch "
+                      "string is passed split into argv, not as one token)")
+    if not any(a in DETACH_FLAGS for a in args):
+        raise Refused("pass --no-wait: a foreground paseo run would hold this lead's launch lock until the worker ends")
+    for i, a in enumerate(args):
+        flag = a.split("=", 1)[0]
+        if re.fullmatch(r"-[A-Za-z][^\s]+", flag):  # a bundled short option (-oyaml, -qd) would hide an owned one
+            raise Refused(f"{flag}: pass short options separately (-d, -m x), never bundled")
+        if flag in OWNED_FLAGS:
+            raise Refused(f"{flag} is set by ade-worker-run; do not pass it")
+        if flag == "--label":
+            value = a.split("=", 1)[1] if "=" in a else (args[i + 1] if i + 1 < len(args) else "")
+            if value.split("=", 1)[0] in OWNED_LABEL_KEYS:
+                raise Refused(f"--label {value.split('=', 1)[0]}=... is set by ade-worker-run; do not pass it")
+
+
+def launch(opts, rest: list[str]) -> int:
+    lead, name = opts.lead, opts.slice
+    check_names(lead, name, opts.window_middle)
+    check_caller(lead, opts.on_behalf_of_lead)
+    passthrough_check(rest)
+    cwd = os.path.realpath(opts.cwd or os.getcwd())
+    lock = lock_for(lead)  # held to the end: launches and archive-window of one lead serialize (paseo run --no-wait is quick)
+    try:
+        win = find_window(lead, opts.window_middle)
+        if win is None:
+            middle = opts.window_middle or os.path.basename(cwd)
+            check_names(lead, name, middle)
+        else:
+            middle = None
+        wname = win["name"] if win else window_name(middle, lead)
+        tab = f"worker {name} {lead}"
+        place = ["--workspace", win["workspaceId"], "--cwd", opts.cwd and cwd or win.get("cwd") or cwd] if win \
+            else ["--new-workspace", "local", "--cwd", cwd]
+        args = ["run", *place, "--label", f"ade.lead={lead}", "--label", f"slice={name}"]
+        if "--json" not in rest:
+            args.append("--json")
+        rc, out, err = paseo([*args, *rest], timeout=300)
+        if err:
+            sys.stderr.write(err)
+        if rc != 0:
+            raise Refused(f"paseo run failed (rc {rc}): {out.strip()[:300]}")
+        try:
+            result = json.loads(out)
+            agent_id = result["agentId"]
+        except (ValueError, KeyError, TypeError):
+            raise Refused("paseo run printed no agentId; check `paseo ls -g --json` for the new agent")
+        if not isinstance(agent_id, str) or not LEAD_RE.fullmatch(agent_id):
+            raise Refused("paseo run printed an unusable agentId (expected a UUID)")
+        try:
+            wks = resolve_window_id(win, result, err, agent_id)
+            if win is None:
+                run_ok(["workspace", "rename", wks, wname])
+            run_ok(["agent", "update", agent_id, "--name", tab])
+        except Refused as e:
+            raise Refused(f"{e} (agent {agent_id} was launched; fix its placement by hand)")
+    finally:
+        if lock is not None:
+            lock.close()
+    print(json.dumps({"agentId": agent_id, "workspaceId": wks, "windowName": wname, "tabName": tab}))
+    return 0
+
+
+def resolve_window_id(win: dict | None, result: dict, err: str, agent_id: str) -> str:
+    """The window the launch landed in: structured when paseo prints it, else the one `Created workspace` line."""
+    found = set()
+    structured = result.get("workspaceId") if isinstance(result, dict) else None
+    if structured is not None:
+        if not isinstance(structured, str) or not WKS_RE.fullmatch(structured):
+            raise Refused("paseo run printed an unusable workspaceId")
+        found.add(structured)
+    if win is not None:
+        found.add(win["workspaceId"])
+    else:
+        found.update(CREATED_RE.findall(err))
+        if not found:
+            raise Refused("paseo run reported no created workspace (no JSON workspaceId, no `Created workspace wks_... -` line)")
+    state = state_file(agent_id)
+    if state and isinstance(state.get("workspaceId"), str):
+        found.add(state["workspaceId"])
+    if len(found) != 1:
+        raise Refused(f"the launch's window id is ambiguous: {sorted(found)}")
+    return found.pop()
+
+
+def run_ok(args: list[str]) -> None:
+    rc, out, err = paseo(args)
+    if rc != 0:
+        raise Refused(f"paseo {' '.join(args[:2])} failed (rc {rc}): {err.strip() or out.strip()}")
+
+
+def live_agents() -> list[dict]:
+    rows = paseo_json(["ls", "-g", "--json"])  # no -a: archived agents are not listed
+    if not isinstance(rows, list):
+        raise Refused("paseo ls -g --json did not return a list")
+    return [r for r in rows if isinstance(r, dict) and isinstance(r.get("id"), str)]
+
+
+def archive_blockers(lead: str, wks: str, idle_handled: bool) -> list[str]:
+    labelled = {r["id"] for r in (paseo_json(["ls", "-g", "--json", "--label", f"ade.lead={lead}"]) or [])
+                if isinstance(r, dict) and isinstance(r.get("id"), str)}
+    blockers = []
+    for a in live_agents():
+        aid, status = a["id"], a.get("status")
+        state = state_file(aid)
+        in_window = bool(state) and state.get("workspaceId") == wks
+        if status == "closed":
+            continue
+        if state is None or not WKS_RE.fullmatch(str(state.get("workspaceId", ""))):
+            blockers.append(f"{aid}: live ({status}) with no usable workspaceId in a state file, so its window is unknown")
+            continue
+        if aid in labelled:
+            if status == "idle" and idle_handled:
+                continue
+            blockers.append(f"{aid}: labelled ade.lead={lead}, status {status}" +
+                            (" (pass --idle-handled once its report is handled)" if status == "idle" else ""))
+        elif in_window:
+            blockers.append(f"{aid}: other live agent in the window, status {status}")
+    return blockers
+
+
+def archive_window(opts) -> int:
+    check_names(opts.lead, None, opts.window_middle)
+    check_caller(opts.lead, opts.on_behalf_of_lead)
+    lock = lock_for(opts.lead)  # a launch of this lead cannot slip in between the check and the archive
+    try:
+        return archive_locked(opts)
+    finally:
+        lock.close()
+
+
+def archive_locked(opts) -> int:
+    win = find_window(opts.lead, opts.window_middle)
+    if win is None:
+        raise Refused(f"no workers window for lead {opts.lead}")
+    name = win["name"]
+    if not (name.startswith("workers ") and name.endswith(f" {opts.lead}")):  # find_window already ensures it
+        raise Refused(f"window {win['workspaceId']} is not named `workers ... {opts.lead}`")
+    blockers = archive_blockers(opts.lead, win["workspaceId"], opts.idle_handled)
+    if blockers:
+        for b in blockers:
+            sys.stderr.write(f"blocker: {b}\n")
+        print(json.dumps({"archived": False, "workspaceId": win["workspaceId"], "windowName": name,
+                          "blockers": blockers}))
+        return 1
+    if not opts.dry_run:
+        run_ok(["workspace", "archive", win["workspaceId"]])
+    print(json.dumps({"archived": not opts.dry_run, "workspaceId": win["workspaceId"], "windowName": name,
+                      "blockers": []}))
+    return 0
+
+
+def main(argv: list[str]) -> int:
+    rest: list[str] = []
+    if "--" in argv:
+        i = argv.index("--")
+        argv, rest = argv[:i], argv[i + 1:]
+    if argv[:1] == ["archive-window"]:
+        p = argparse.ArgumentParser(prog="ade-worker-run archive-window")
+        p.add_argument("--lead", required=True)
+        p.add_argument("--window-middle")
+        p.add_argument("--idle-handled", action="store_true")
+        p.add_argument("--dry-run", action="store_true")
+        p.add_argument("--on-behalf-of-lead", action="store_true")
+        opts = p.parse_args(argv[1:])
+        if rest:
+            p.error("archive-window takes no `--` arguments")
+        run = archive_window
+    else:
+        p = argparse.ArgumentParser(prog="ade-worker-run", description=__doc__.split("\n\n")[0])
+        p.add_argument("--lead", required=True)
+        p.add_argument("--slice", required=True)
+        p.add_argument("--window-middle")
+        p.add_argument("--cwd")
+        p.add_argument("--on-behalf-of-lead", action="store_true")
+        opts = p.parse_args(argv)
+        run = lambda o: launch(o, rest)  # noqa: E731
+    try:
+        return run(opts)
+    except Refused as e:
+        sys.stderr.write(f"ade-worker-run: {e}\n")
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
