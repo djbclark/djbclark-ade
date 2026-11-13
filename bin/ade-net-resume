@@ -364,20 +364,23 @@ class Scanner:
             return "delivered" if done_line(text) else "ok"
         return "ok" if found else "changed"
 
-    def quota_waits(self, events):
+    def quota_waits(self, history, events):
+        """Latest valid `quota-wait` per agent. A malformed row is skipped with one keyed warning, never fatal."""
         waits = {}
-        for e in events:
+        for e in list(events):  # note() appends to `events` below.
             if e.get("action") != "quota-wait":
                 continue
-            if not (isinstance(e.get("agent"), str) and all(isinstance(e.get(k), str) for k in
-                    ("signature", "pool", "window_id", "resets_at", "updated_at"))
-                    and number(e.get("window_minutes"))):
-                raise ScanError("invalid quota ledger")
             try:
+                if not (isinstance(e.get("agent"), str) and all(isinstance(e.get(k), str) for k in
+                        ("signature", "pool", "window_id", "resets_at", "updated_at"))
+                        and number(e.get("window_minutes"))):
+                    raise ValueError("bad field")
                 stamp(e["resets_at"])
                 stamp(e["updated_at"])
-            except ValueError as exc:
-                raise ScanError("invalid quota ledger") from exc
+            except ValueError:
+                agent = e.get("agent") if isinstance(e.get("agent"), str) else None
+                self.note(history, events, agent, "quota-ledger-invalid", key=f"{e['time']}:{e.get('signature')}")
+                continue
             if e["agent"] not in waits or e["time"] >= waits[e["agent"]]["time"]:
                 waits[e["agent"]] = e
         return waits
@@ -395,7 +398,7 @@ class Scanner:
 
     def quota_scan(self, agents, history, events):
         self._aiuse = None
-        waits = self.quota_waits(events)
+        waits = self.quota_waits(history, events)
         firsts = self.quota_first_rows(events)
         sent = {(e.get("agent"), e.get("signature")) for e in events if e.get("action") == "reserved"}
         resumed = {}
@@ -518,7 +521,7 @@ class Scanner:
         error_time = stamp(updated)
         first = {"stage": "first-sight", "signature": signature, "updated_at": updated, "pool": pool}
         if not 0 <= time.time() - error_time:
-            self.note(history, events, aid, "stale", key=signature)  # No stage: nothing was read, nothing is "known".
+            self.note(history, events, aid, "stale", key=signature)  # No stage: this event is never "known".
             return
         # The agent is still `error` (loaded) here: the only moment its timeline can be read safely, so the
         # done:/new-instruction check is made before a wait is armed (a closed agent is never read later).
@@ -641,7 +644,8 @@ def main(argv=None):
     parser.add_argument("--quota", action="store_true",
                         help="also resume Pi agents stopped by a provider quota window after aiuse shows it reset")
     parser.add_argument("--quota-per-pool", type=int, default=1, metavar="N",
-                        help="at most N quota resumes per pool per scan (default 1)")
+                        help="at most N quota resumes per pool per scan (default 1); dry-run counting only, "
+                             "the 600 s pool gap limits --apply")
     parser.add_argument("--quota-grace-seconds", type=float, default=60, metavar="SECONDS",
                         help="wait this long past a window's reset before resuming (default 60)")
     parser.add_argument("--only-agent", action="append", default=[], metavar="UUID",
