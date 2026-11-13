@@ -143,7 +143,7 @@ class Catalog:
 
 @dataclass(frozen=True)
 class Observation:
-    kind: str  # component | key | login | catalog | settings | job | retired-job | vault | pools
+    kind: str  # component | key | login | catalog | settings | job | retired-job | vault | pools | mcp
     id: str
     status: str  # ok | missing | disabled | unknown | error | unchosen | never | planned | present | foreign | warn
     detail: str
@@ -1946,6 +1946,36 @@ def observe_pi_pools(
     )
 
 
+def observe_mcp_clients(
+    *,
+    root: Path,
+    home: Path | None = None,
+    roster_path: Path | None = None,
+) -> list[Observation]:
+    """Advisory check that Claude Code and Codex register the shared MCP servers.
+
+    Roster ``config/mcp-clients.toml`` under ``root``; absent (fixture catalogs)
+    returns ``[]``. Reads ``~/.claude.json`` and ``~/.codex/config.toml`` for key
+    names and URLs only; a gap is ``warn`` with the exact fix command in the
+    detail, never run. A bad roster or unreadable client file is ``error``.
+    Observe-only: never edits a client config (order 11).
+    """
+    import ade_mcp_clients as mc  # noqa: PLC0415
+
+    path = roster_path if roster_path is not None else mc.default_roster_path(root)
+    if not path.is_file():
+        return []
+    try:
+        roster = mc.load_roster(path)
+    except (OSError, ValueError, UnicodeDecodeError) as e:
+        return [Observation("mcp", "roster", "error", f"mcp-clients roster unreadable ({path}): {e}")]
+    out: list[Observation] = []
+    for fid, status, detail in mc.observe(roster, home=home if home is not None else Path.home()):
+        out.append(Observation("mcp", fid, "ok" if status == "ok" else "error" if status == "error" else "warn",
+                               detail if status in ("ok", "error") else f"{status}: {detail}"))
+    return out
+
+
 def doctor(
     catalog: Catalog,
     *,
@@ -1962,6 +1992,7 @@ def doctor(
     hermes_choice_state_dir: Path | None = None,
     hermes_home: Path | None = None,
     install_state_dir: Path | None = None,
+    mcp_home: Path | None = None,
 ) -> tuple[list[Observation], int]:
     """Observe-only doctor. Exit 1 if any expected component/settings/job drifts
     (including ``paseo_plugin`` missing/disabled when expected), or credential-bak
@@ -2096,6 +2127,12 @@ def doctor(
         obs.append(pools_obs)
         # Advisory warn stays exit 0; only a broken acceptance file fails doctor.
         if pools_obs.status == "error":
+            hard_missing += 1
+    # Shared-MCP client registrations: advisory warn (exit 0); only a broken
+    # roster or unreadable client config fails doctor.
+    for mcp_obs in observe_mcp_clients(root=catalog.root, home=mcp_home):
+        obs.append(mcp_obs)
+        if mcp_obs.status == "error":
             hard_missing += 1
     return obs, (1 if hard_missing else 0)
 

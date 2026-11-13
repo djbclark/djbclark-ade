@@ -21,7 +21,10 @@ why, and how to re-enable. This table is otherwise the 2026-08-23 snapshot.
 | `hindsight` | stdio: `node ~/.hindsight/coding-agents/dist/mcp-server.js` | user | Per-repo Hindsight coding-agent memory (the 🧠 banner) |
 | `hindsight-shared` | HTTP: `http://127.0.0.1:8888/mcp/hermes-shared/` | user | Shared Hindsight bank (`hermes-shared` in the URL is the bank name) |
 | `firecrawl` | HTTP: `http://127.0.0.1:18804/mcp` (LaunchAgent `com.djbclark.firecrawl-mcp`, machine-side) | Claude Code, Codex (Pi sole-TUI 2026-11-09: opencode registration dropped; Pi is not a separate MCP client here) | Scrape, search, crawl, map on self-hosted Firecrawl (SIPB Hyades), through this repo's `bin/firecrawl-router` (kept by the operator's ruling of 2026-11-07, after the slim-down first deleted it): it proxies the MCP to Hyades, answers `query`/`json` with SIPB LLMs then LiteLLM, answers developer search from GitHub, and serves Hermes' search backend on 18805. The `firecrawl` skill lives in site-djbclark. |
+| `basic-memory` | HTTP: `http://127.0.0.1:18796/mcp` (one shared server; no per-client stdio) | Claude Code, Codex | Basic Memory notes (default project `main`); registered per client like `firecrawl` |
 | claude.ai Gmail / Google Calendar / Google Drive | HTTPS (Google-hosted) | claude.ai account | Remote connectors managed on claude.ai, not in local config |
+
+**Client registration doctor (2026-11-13).** `ade-install doctor` prints an `mcp/<client>/<server>` row for each server above marked for Claude Code or Codex (roster: [config/mcp-clients.toml](../config/mcp-clients.toml)): `ok`, or a `warn` (`missing`, `wrong-url`, `wrong-type`, `disabled`) with the exact `claude mcp add --scope user --transport http …` / `codex mcp add … --url …` fix to run by hand. It reads key names and URLs from `~/.claude.json` (user-scope `mcpServers`) and `~/.codex/config.toml` only, never edits them, and an unreadable config is the only failing case.
 
 ## Firecrawl developer search (2026-10-24)
 
