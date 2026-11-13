@@ -21,7 +21,7 @@ every child's environment):
   render(job, backend, env=None, **overrides) -> Rendered(backend, files, notes, activation, cron_block)
   install(job, backend=None, *, dry_run=False, activate=True, allow_no_linger=False, env=None, out=None, err=None,
           **overrides) -> Rendered
-  uninstall(label, backend=None, *, dry_run=False, activate=True, env=None, out=None, err=None, **overrides) -> bool
+  uninstall(label, backend=None, *, dry_run=False, activate=True, env=None, out=None, err=None, ade=None, **overrides) -> bool
   status(label, backend=None, *, env=None, **overrides) -> Status(backend, label, installed, active, next_run, paths)
   installed_labels(backend=None, *, env=None, **overrides) -> list[str]
   scan_live(backend=None, *, env=None, paseo_run=None, **overrides) -> LiveScan
@@ -249,7 +249,7 @@ class Job:
         if left:
             raise SchedError(EX_USAGE, f"{source}: unfilled placeholder(s) {', '.join(sorted(left))}; pass --set KEY=VALUE")
         worktree = None
-        if uses_ade and ade is None and full["__ADE__"] == str(REPO) and is_linked_worktree(REPO):
+        if uses_ade and not ade and full["__ADE__"] == str(REPO) and is_linked_worktree(REPO):
             worktree = str(REPO)
         label = raw.get("Label")
         if not isinstance(label, str) or not LABEL_RE.fullmatch(label):
@@ -313,7 +313,7 @@ class Job:
                    stdout=_abs(raw, "StandardOutPath"), stderr=_abs(raw, "StandardErrorPath"), nice=nice,
                    low_io=_bool(raw, "LowPriorityIO"), process_type=pt, kill_mode=km, raw=raw,
                    source=canonical_source(source, default_subst(ade)["__ADE__"]),
-                   worktree=worktree, ade_root=os.path.realpath(ade) if ade is not None else None)
+                   worktree=worktree, ade_root=os.path.realpath(ade) if ade else None)   # truthiness, like default_subst: an empty --ade is no selection (realpath('') is the cwd)
 
     @property
     def ignored_keys(self) -> list[str]:
@@ -2354,7 +2354,7 @@ def require_canonical_when_loaded(c: "_Ctx", label: str, op: str, ade_root: str 
     why = loaded_wrapper_problem(out, label, admission_dir(), ade_root)
     if why is not None:
         raise SchedError(EX_ACTIVATE, f"{op} of {label} refused, nothing written: it is loaded and {why}. Its runs do not hold "
-                                      f"the canonical admission lock, so a bootout could kill running work. If its new definition is "
+                                      f"the canonical admission lock, so a bootout could kill running work (a job installed from another checkout needs `--ade DIR` naming it). If its new definition is "
                                       f"wrapped (a config/launchd plist), migrate it once at a quiet time: `ade-sched migrate-wrapper PLIST`; "
                                       f"a job that is not wrapped (load-watch, dev.herdr.server) is changed by an operator "
                                       f"`launchctl bootout` (docs/scheduling.md)")

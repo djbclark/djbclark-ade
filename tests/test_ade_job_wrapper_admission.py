@@ -1045,3 +1045,21 @@ def test_r4_a_loaded_canonical_idle_job_is_uninstalled_when_the_selected_root_ho
     ld.reset()
     assert S.uninstall(LABEL, "launchd", env=ld.env, ade=root) is True        # --ade names the root the wrapper lives in
     assert not plist.exists() and not ld.loaded()
+
+
+def test_r4_an_empty_ade_is_no_selection_not_the_current_directory(ld, tmp_path, monkeypatch):
+    root, catalog, plist = _installed_wrapped(ld)
+    other = _foreign_checkout(tmp_path)
+    d = {"Label": LABEL, "ProgramArguments": ["/x/ade-job-run", "--lock-dir", "/d", LABEL, "--", "c"]}
+    monkeypatch.chdir(other)                          # the operator happens to stand inside the other checkout
+    monkeypatch.setattr(S, "is_linked_worktree", lambda path: False)   # this suite runs in a worktree; production REPO is the primary checkout
+    assert S.Job.from_dict(d, ade="").ade_root is None and S.ade_root_of("") == str(S.REPO)
+    job = S.Job.from_plist(root / "config" / "launchd" / f"{LABEL}.plist",
+                           S.job_subst_from_row(next(j for j in catalog.jobs if j["name"] == "deadline-sweep"), root=root, env=ld.env, extra=None), ade="")
+    _set_loaded_args(ld, a0=str(other / "bin" / "ade-job-run"))
+    ld.reset()
+    with pytest.raises(S.SchedError, match="ADE root"):
+        S.install(job, "launchd", env=ld.env)
+    with pytest.raises(S.SchedError, match="ADE root"):
+        S.uninstall(LABEL, "launchd", env=ld.env, ade="")
+    assert ld.loaded() and not KILLERS & set(ld.verbs())
