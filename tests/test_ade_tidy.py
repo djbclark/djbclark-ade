@@ -789,6 +789,8 @@ def test_off_tail_retask_with_a_late_disk_ack_is_caught_by_activity(env):
     env.worker(1, text="suite running in the background", tags=["[Shell] ls"] * 38)    # no receipt in the tail
     set_state(env, W1, lastActivityAt=iso(ack + 200))
     assert env.plan()["archive_agents"] == []
+    set_state(env, W1, lastActivityAt=iso(ack + 30))                   # idled shortly after the late ack, no receipt visible
+    assert env.plan()["archive_agents"] == []
     set_state(env, W1, lastActivityAt=iso(t0 + 10))                    # idle right after its completion notice: fine
     assert [x["agent"][:8] for x in env.plan()["archive_agents"]] == ["00000001"]
 
