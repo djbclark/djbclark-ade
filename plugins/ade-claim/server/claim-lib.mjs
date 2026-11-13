@@ -156,9 +156,19 @@ export function resolveClaimMode(opts = {}) {
   return { mode: "observe", reason: "mode file not recognised" };
 }
 
+/**
+ * Drop `user:token@` from any `scheme://userinfo@host` in a logged string: `--repo-origin <remote.origin.url>`
+ * rides in the W2 argv and an https remote can embed a credential (ade_claims.py: "a credential in argv must
+ * not reach a log"). Applied to every logged string, so no field can carry one.
+ * @param {string} text
+ */
+export function redactUrlUserinfo(text) {
+  return text.replace(/([A-Za-z][A-Za-z0-9+.-]*:\/\/)[^\s/?#]*@/g, "$1<redacted>@");
+}
+
 /** Shorten any value for the log: strings capped, control characters removed. */
 function logSafe(v, depth = 0) {
-  if (typeof v === "string") return v.replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, 512);
+  if (typeof v === "string") return redactUrlUserinfo(v).replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, 512);
   if (v === null || typeof v === "number" || typeof v === "boolean") return v;
   if (depth >= 3) return String(v).slice(0, 64);
   if (Array.isArray(v)) return v.slice(0, 32).map((x) => logSafe(x, depth + 1));

@@ -37,7 +37,7 @@ Logs: one stderr line per call (`paseo plugin logs ade-claim`) and an append-onl
 `~/.local/state/djbclark-ade/ade-claim-observe.jsonl` (mode 0600, one line per call in **both** modes: `ts` UTC, `hook`,
 `mode`, `reason`, `planned` argv or env delta, `ids` worktree/agent/workspace/claim, `error`; rotates to `.jsonl.1` at 1 MiB,
 a line over 4 KiB is replaced by a stub). Launch env values are never logged, only the key names and the two values this
-plugin itself sets (`ADE_CLAIM_ID`, the agent-bin dir). The D3 soak reads this file.
+plugin itself sets (`ADE_CLAIM_ID`, the agent-bin dir). Credentials in a remote URL (`scheme://user:token@host`) are redacted from every logged string. Observe also leaves a pre-set (forged) `ADE_CLAIM_ID` in the launch env alone (the scrub is an env change); the log shows it as `ADE_CLAIM_ID: "clear"`. The D3 soak reads this file.
 
 Manifest: `id` is `ade-claim` (lowercase/hyphen only); `requirements.paseo` is `>=0.14.0` (not a top-level `paseoVersion`).
 

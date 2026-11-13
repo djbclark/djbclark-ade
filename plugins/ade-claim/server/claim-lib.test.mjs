@@ -6,6 +6,7 @@ import {
   readFileSync,
   statSync,
   symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -24,6 +25,7 @@ import {
   MODE_FILE_READ_CAP,
   appendObserveLog,
   buildObserveEntry,
+  redactUrlUserinfo,
   resolveClaimMode,
   activeClaimForPath,
   buildAdeClaimsBindOwnerArgv,
@@ -633,7 +635,7 @@ test("every hook honours ADE_CLAIM_DRY_RUN over an enforce file, and the file is
 });
 
 function rmModeFile(h) {
-  chmodSync(join(h.stateDir, CLAIM_MODE_FILE), 0o666); // odd perms (still says enforce): observe
+  unlinkSync(join(h.stateDir, CLAIM_MODE_FILE)); // deleted flag = observe
 }
 
 test("missing mode file = observe for all four hooks (fail safe)", async () => {
@@ -675,4 +677,36 @@ test("observe lookup is read-only: only git rev-parse/config and ade_claims.py l
       || (c.cmd === "python3" && c.args[1] === "list");
     assert.ok(ok, `unexpected spawn in observe: ${c.cmd} ${c.args.join(" ")}`);
   }
+});
+
+test("a credential in the remote URL never reaches the JSONL or the stderr line (both modes)", async () => {
+  const token = "ghp_SECRETTOKEN123";
+  for (const modeText of ["observe", "enforce"]) {
+    const h = harness({ modeText });
+    const spawn = h.deps.spawn;
+    h.deps.spawn = (cmd, args) => (cmd === "git" && args.slice(2).join(" ") === "config --get remote.origin.url")
+      ? { status: 0, stdout: `https://x-access-token:${token}@github.com/o/r.git\n`, stderr: "" }
+      : spawn(cmd, args);
+    registerWorktreeClaimHook(h.server, h.deps);
+    await h.hooks.get("worktree.create.after")(WT(h));
+    const logged = JSON.stringify(h.jsonl()) + h.lines.join("\n");
+    assert.ok(!logged.includes(token), `${modeText}: token leaked`);
+    assert.ok(logged.includes("https://<redacted>@github.com/o/r.git"), `${modeText}: host kept`);
+    // the real argv (enforce) still carries the URL: only the log is redacted
+    if (modeText === "enforce") {
+      const run = h.calls.find((c) => c.cmd === "python3" && c.args[1] === "new");
+      assert.ok(run.args.join(" ").includes(token));
+    }
+  }
+  assert.equal(redactUrlUserinfo("git@example.com:o/r.git"), "git@example.com:o/r.git");
+  assert.equal(redactUrlUserinfo("ssh://git@h/x https://u:p@h2/y"), "ssh://<redacted>@h/x https://<redacted>@h2/y");
+});
+
+test("enforce records the ade-git-guard install outcome", async () => {
+  const h = harness({ modeText: "enforce" });
+  const spawn = h.deps.spawn;
+  h.deps.spawn = (cmd, args) => (cmd === h.guard ? { status: 73, stdout: "", stderr: "busy" } : spawn(cmd, args));
+  registerWorktreeClaimHook(h.server, h.deps);
+  await h.hooks.get("worktree.create.after")(WT(h));
+  assert.equal(h.jsonl()[0].planned.install, "failed (exit 73) (soft)");
 });

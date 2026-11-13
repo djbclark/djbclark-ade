@@ -144,6 +144,7 @@ export function lookupClaimForCwd(cwd, script, spawn = spawnSync) {
  *
  * @param {string} worktreePath
  * @param {HookDeps} [deps]
+ * @returns {string} outcome for the log: "ok" | "skipped: …" | "failed (exit N)"
  */
 export function runTrustedAdeGitGuardInstall(worktreePath, deps = {}) {
   const ctx = hookContext(deps);
@@ -152,16 +153,17 @@ export function runTrustedAdeGitGuardInstall(worktreePath, deps = {}) {
     guard = resolveTrustedAdeGitGuard(ctx.env, { pluginRoot: ctx.pluginRoot });
   } catch (err) {
     ctx.log(`ade-claim: skipping ade-git-guard install: ${err}`);
-    return;
+    return "skipped: no trusted ade-git-guard";
   }
   const { argv } = buildAdeGitGuardInstallArgv({ adeGitGuard: guard, worktreePath });
   const run = ctx.spawn(guard, argv, { encoding: "utf8" });
-  if (run.status === 0) return;
+  if (run.status === 0) return "ok";
   const detail = (run.stderr || run.stdout || "").trim();
   const soft = INSTALL_SOFT_FAIL.has(run.status ?? -1);
   ctx.log(
     `ade-claim: ade-git-guard install failed (exit ${run.status})${soft ? " (soft)" : ""}${detail ? `: ${detail}` : ""}`,
   );
+  return `failed (exit ${run.status})${soft ? " (soft)" : ""}`;
 }
 
 /**
@@ -209,8 +211,8 @@ export function registerWorktreeClaimHook(server, deps = {}) {
         const detail = (run.stderr || run.stdout || "").trim();
         throw new Error(`ade_claims.py new failed (exit ${run.status})${detail ? `: ${detail}` : ""}`);
       }
-      record(ctx, m, "worktree.create.after", planned, ids);
-      runTrustedAdeGitGuardInstall(wt.path, deps);
+      const install = runTrustedAdeGitGuardInstall(wt.path, deps);
+      record(ctx, m, "worktree.create.after", { ...planned, install }, ids);
     } catch (err) {
       record(ctx, m, "worktree.create.after", null, ids, errText(err));
       if (observing) return;
