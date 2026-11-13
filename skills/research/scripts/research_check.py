@@ -189,12 +189,17 @@ def titles_match(a: str, b: str) -> bool:
 PAYWALL_RE = re.compile(r"buy (this )?article|purchase (pdf|access)|access through your institution|get access|rent this article", re.I)
 ACCEPT = "text/html,application/pdf,text/plain;q=0.9,*/*;q=0.5"
 # EZproxy answers HTTP 200 with this page for a host the library has no stanza for (2026-11-13: an arXiv page
-# proxied from an MIT address saved as "via proxy" with 160 words of this text).
-PROXY_REFUSED_RE = re.compile(r"has not been configured for access|not configured for access through", re.I)
+# proxied from an institutional address saved as "via proxy" with 160 words of this text).
+PROXY_REFUSED_RE = re.compile(r"has\s+not\s+been\s+configured\s+for\s+access", re.I)
 
 
 def proxy_refused(body: bytes) -> bool:
-    return len(body) < 20000 and bool(PROXY_REFUSED_RE.search(body[:20000].decode("utf-8", "replace")))
+    """True for a short HTML page carrying EZproxy's refusal wording (one install's wording: other sites
+    customise it, so a miss falls back to the old behaviour). Never true for a PDF or an article-sized page."""
+    if body[:5] == b"%PDF-":
+        return False
+    text = html_to_text(body.decode("utf-8", "replace"))
+    return len(text.split()) < 300 and bool(PROXY_REFUSED_RE.search(text))
 
 
 def fetch_via_proxy(url: str) -> tuple[bytes, str, int, str]:
@@ -216,7 +221,10 @@ def fetch_via_proxy(url: str) -> tuple[bytes, str, int, str]:
              or re.search(r"""http-equiv=["']?refresh["']?[^>]*url=([^"'>]+)""", head, re.I))
         if not m:
             break
-        body, ctype, status, final = http_get(html.unescape(m.group(1)), accept=ACCEPT)
+        hop = urllib.parse.urljoin(final, html.unescape(m.group(1)))
+        if urllib.parse.urlsplit(hop).scheme not in ("http", "https"):
+            die("proxy hand-off page points at a non-http(s) address; refusing to follow it")
+        body, ctype, status, final = http_get(hop, accept=ACCEPT)
         print(f"proxy hop: HTTP {status} {final[:140]}", file=sys.stderr)
     return body, ctype, status, final
 
@@ -250,8 +258,8 @@ def cmd_fetch(source_id: str, url: str, run: Path, via_proxy: bool = False) -> i
             if os.environ.get("RESEARCH_PROXY_URL") and looks_paywalled(body, ctype, url):
                 print("direct fetch looks paywalled or empty; retrying through RESEARCH_PROXY_URL", file=sys.stderr)
                 pbody, pctype, pstatus, pfinal = fetch_via_proxy(url)
-                if proxy_refused(pbody):
-                    print("proxy refused the host (not in the library's licence list); keeping the direct fetch", file=sys.stderr)
+                if proxy_refused(pbody) or looks_paywalled(pbody, pctype, url):
+                    print("proxy refused the host or returned a login/paywall stub; keeping the direct fetch", file=sys.stderr)
                 else:
                     body, ctype, status, final = pbody, pctype, pstatus, pfinal
                     proxied = True

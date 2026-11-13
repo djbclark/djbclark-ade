@@ -102,18 +102,20 @@ from its introduction citing another paper.
    institution-specific recipes in this public file. Cautions: a VPN
    that egresses through a cloud gateway may not present the institution's
    address to publishers, so confirm with an "Access provided by …"
-   banner in a browser before relying on it. The library's own "connect" page
-   lists three paths: an institutional IP address, the institution's VPN, or a
-   single-sign-on login through the proxy. Which one `fetch` has depends on the
-   egress address (verified 2026-11-13 with the proxy prefix over `https://`;
-   the `http://` form only redirects, so keep `https://`): from an
-   institutional address the proxy needs no login and no cookie, so `fetch`
-   works headless (a licensed host is bounced straight to the publisher, which
-   recognises the address; an unlicensed host gets a short "has not been
-   configured for access" page, which `fetch` now refuses to save as a proxied
-   source). Only from an off-network address does the proxy demand the
-   single-sign-on login, and then the read goes through a browser tool with the
-   institution's cookie, not `fetch`. Library licences usually forbid bulk
+   banner in a browser before relying on it. Libraries publish the same
+   three paths: an institutional IP address, the institution's VPN, or a
+   single-sign-on login through the proxy. What `fetch` can do depends on the
+   egress address. Observed once (2026-11-13, one institution, proxy prefix over
+   `https://`; the `http://` form only redirected): from an institutional
+   address the proxy asked for no login and set no cookie; a licensed host was
+   bounced straight to the publisher (which recognised the address, so no
+   proxied content was ever saved) and an unlicensed host got a short "has not
+   been configured for access" page. `fetch` refuses that page, and keeps the
+   direct copy when a retry returns a refusal or a login/paywall stub; the
+   wording is one EZproxy install's, so another site's page may slip through.
+   Off-network (not observed) the proxy is expected to demand the
+   single-sign-on login; do that read in a browser tool with the
+   institution's cookie. Library licences usually forbid bulk
    downloading, so read per paper and quote-sized.
 
 ## Reporting extras for literature work
