@@ -38,6 +38,19 @@ WarpBuild's [FAQ](https://www.warpbuild.com/faq) says the same ("requires a GitH
 its [migration guide](https://www.warpbuild.com/migrate/github-hosted-to-warpbuild) says it registers runners in the org's Default runner group (id 1).
 So a repository owned by a personal account stays on GitHub-hosted runners; moving it needs a transfer to an organization (operator's call).
 
+### Org pilot (2026-11-13): it works in an organization
+
+`frdminc/warpbuild-pilot` (public, runner group 1 = selected repositories, "Allow public repositories" on) ran this repo's Tests workflow
+twice, once with `warp-*` labels and once on GitHub-hosted twins of the same tree (test.yml only; same 7 `adversary-marker` test failures on
+both sides because that workflow file was left out of the copy). Jobs started within seconds on `warp-4x-x64-…` and `warp-6x-arm64-…` runners.
+
+| Job | WarpBuild | GitHub-hosted | Gain |
+|---|---|---|---|
+| pytest-linux (suite 794 s vs 851 s) | `warp-ubuntu-2404-x64-4x` 13.4 min | `ubuntu-latest` 14.4 min | about 7% |
+| macOS pytest (suite 1361 s vs 1646 s) | `warp-macos-26-arm64-6x` 23.1 min | `macos-latest` 28.1 min | about 18% |
+
+Evidence: runs 43514103522 (warp) and 43514108143 (GitHub) in that repository. The gain is modest; the macOS leg gains most.
+
 ## D. API access
 
 `https://api.warpbuild.com/api/v1`, `Authorization: Bearer wkey-…` (a key with the `ci` scope from <https://app.warpbuild.com/settings/api-keys>).
