@@ -6,6 +6,12 @@ reachable through which pool on this machine, which budget each spends, and rout
 effort × context window. The method is the `model-routing` skill (`skills/model-routing/SKILL.md`); this page is the
 record of what feeds it and why. Percentages drift constantly: re-probe, never trust a page for balances.
 
+**2026-11-13 operator ruling, Fable short:** "If we are out of Fable use for a time period we should wait, not automatically
+degrade. If we already automatically degraded, we should make a list of stuff for Fable 5.2 to check on when it comes back,
+and we should have a timer to start up work 1 minute after the next time window starts." A claude `frontier` slice is Fable or
+it waits (other frontier families are not a degrade); `bin/fable-wait` keeps the list and arms the one-shot wake
+(`skills/model-routing/SKILL.md` D3a, `docs/scheduling.md`).
+
 Current operator decision: Pi is the sole general-purpose third-party TUI; vendor monthly-plan clients and Hermes remain. The legacy omp/OpenCode transport rows below are marked `retired = true` in policy, so they cannot win automatic dispatch. Their pool metadata is preserved for a validated Pi migration. Pi catalog discovery remains disabled in the generic router to avoid merging independent vendor pools. See [migration evidence and acceptance](tui-security-and-pi-migration.md); API checks and vendor subscription allowances stay distinct.
 
 ## A. Where the numbers live
@@ -39,7 +45,7 @@ A4. **Canary waves (2026-11-12):** `[routing].canary_pools` names antigravity, o
 
 | Pool (router service) | Paseo provider | Billing | Notes |
 |---|---|---|---|
-| B1. `claude` | claude | subscription (5-hour and weekly windows; Fable a <=50% sublimit of the weekly) | the lead's own pool; Opus judgment, Sonnet code, Fable frontier |
+| B1. `claude` | claude | subscription (5-hour and weekly windows; Fable a <=50% sublimit of the weekly) | the lead's own pool; Opus judgment, Sonnet code, Fable frontier (Fable short: wait for the window, never Opus; 2026-11-13, `bin/fable-wait`) |
 | B2. `omp` (retired transport) | omp, disabled | the Claude Max plan's monthly API credits (an expiring grant) | `api-only` first, then judgment (adversary rounds), code, bulk; skipped while omp has no enabled Anthropic login |
 | B3. `codex` | codex | subscription ($100 plan, aiuse `prolite`) | astra for frontier only; everyday models while every window has `plenty_min` left |
 | B4. `cursor-auto`, `cursor` | cursor | subscription (Auto and third-party sublimits) | Auto is burn-first; GrokBot's separate Cursor pool (`grok-bot`) is never a target |
@@ -220,9 +226,12 @@ Rules, each tested offline with fixture quota:
 1. A snapshot with no readings or older than `max_age_seconds` changes no hold and releases none (the E1a
    per-pool `collected_at` rule still stands: re-read with `aiuse --available --live --json` before a wave). A pool
    with no reading is never displaced: absence of data is not a shortfall.
-2. A `frontier` slice is never silently downgraded. If the route would run on a non-frontier model (claude's Fable
-   sublimit short, so `suggest_model` falls to Opus, with no other frontier pool) `adjust` prints `REFUSED`, logs a
-   `refuse` event, leaves the kind's state alone and exits 3. A move to another frontier pool is allowed.
+2. A `frontier` slice is never silently downgraded. If the route would run on a non-frontier model `adjust` prints
+   `REFUSED`, logs a `refuse` event, leaves the kind's state alone and exits 3. A move to another frontier pool is allowed.
+   Since 2026-11-13 claude's short Fable sublimit no longer produces such a route: `suggest_model` never swaps in Opus and
+   `route` does not offer claude for `frontier` while Fable is short (operator: wait, do not degrade; `plan` prints
+   `WAIT for Fable 5.2 ...` with the window's reset, `bin/fable-wait` keeps the list and the one-shot wake), so this refusal
+   is the backstop for a profile that names a cheaper frontier model.
 3. `[routing.adjust].never_target` (omp, always, whatever the file says) is excluded from every kind and checked again
    on the result by exact match on the pool name, its agent and the model's provider prefix, or an `omp-` family name
    (never a substring: `cursor/composer-2.5` is allowed). Rules 2 and 3 also hold with `enabled = false`.

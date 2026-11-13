@@ -834,6 +834,9 @@ def _merge_pool(into: dict[str, Any], key: str, entry: dict[str, Any]) -> None:
     merged = dict(entry if take_new else prior)
     merged["windows"] = _merge_caps(prior.get("windows"), entry.get("windows"))   # per window, the tighter known reading
     merged["sublimits"] = _merge_caps(prior.get("sublimits"), entry.get("sublimits"))
+    resets = {**(entry.get("sublimit_resets") or {}), **(prior.get("sublimit_resets") or {})}
+    if resets:
+        merged["sublimit_resets"] = resets      # when each model sublimit (`fable`) next resets, for the wait message
     merged["remaining"] = e_rem if take_new else p_rem
     into[key] = merged
 
@@ -891,6 +894,8 @@ def _providers_from_available(rows: list[Any], age: float | None) -> dict[str, A
             if fkey == key:
                 entry["windows"].update(finfo.get("windows") or {})
                 entry["sublimits"] = _merge_caps(entry["sublimits"], finfo.get("sublimits"))
+                if finfo.get("sublimit_resets"):
+                    entry["sublimit_resets"] = {**(entry.get("sublimit_resets") or {}), **finfo["sublimit_resets"]}
                 for k in ("pace_ratio", "resets_at", "window_minutes"):
                     if finfo.get(k) is not None:
                         entry[k] = finfo[k]
@@ -915,6 +920,9 @@ def _providers_from_available(rows: list[Any], age: float | None) -> dict[str, A
                          else _pct(cap.get("headroom_percent")))
                 entry["sublimits"] = _merge_caps(
                     entry["sublimits"], {cap["pool_family"]: value})
+                if cap.get("available_at"):
+                    entry["sublimit_resets"] = {**(entry.get("sublimit_resets") or {}),
+                                                cap["pool_family"]: cap["available_at"]}
         _merge_pool(pools, key, entry)
     for fkey, rem in foreign:
         cur = pools.get(fkey)
@@ -951,6 +959,7 @@ def _providers_from_accounts(accounts: list[Any], age: float | None) -> dict[str
         # pace/reset fields ride with the least-remaining window (2026-10-18).
         per_key: dict[str, tuple[Any, dict[str, float | None],
                                  dict[str, float | None], dict[str, Any]]] = {}
+        sub_resets: dict[str, dict[str, Any]] = {}      # pool key -> {model sublimit family: its resets_at}
         for w in acct.get("windows") or []:
             family = w.get("pool_family")
             key = pool_service(name, family)
@@ -985,6 +994,8 @@ def _providers_from_accounts(accounts: list[Any], age: float | None) -> dict[str
                 # Cursor's auto/third-party rows are breakdowns without a cap
                 # and stay binding for the service that owns them.
                 sublimits[family or label] = rem_val
+                if w.get("resets_at"):
+                    sub_resets.setdefault(key, {})[family or label] = w["resets_at"]
             elif rem_val is not None:
                 if worst is None or rem_val < worst:
                     worst = rem_val
@@ -1041,6 +1052,8 @@ def _providers_from_accounts(accounts: list[Any], age: float | None) -> dict[str
                 "resets_at": bind.get("resets_at"),
                 "window_minutes": bind.get("window_minutes"),
             }
+            if sub_resets.get(key):
+                providers[key]["sublimit_resets"] = dict(sub_resets[key])
     return providers
 
 
@@ -1435,6 +1448,8 @@ def usage_from_paseo(rows: list[Any], now: datetime | None = None) -> dict[str, 
             family = next((f for f in SUBLIMIT_FAMILIES if f in label.lower()), None)
             if family:
                 entry["sublimits"][family] = _tighter(entry["sublimits"].get(family), rem)
+                if w.get("resetsAt"):
+                    entry.setdefault("sublimit_resets", {})[family] = w["resetsAt"]
                 continue
             entry["windows"][label] = rem
             if rem is not None and (worst is None or rem < worst):
@@ -1840,22 +1855,14 @@ class Choice:
 def suggest_model(svc: Service, kind: str, info: dict[str, Any]) -> str:
     """The model/effort to pass for `kind` on `svc`, from its profile.
 
-    claude's frontier slot is the tiers frontier role while its pool_family sublimit
-    (at most 50% of the shared weekly) has room, else the judgment role at the same effort
-    (ids from config/model-tiers.toml)."""
+    A frontier slice is never handed a cheaper model (operator 2026-11-13: "If we are out of Fable use for a time period we
+    should wait, not automatically degrade"): while claude's Fable sublimit is short `route` does not offer claude for
+    `frontier` at all (`fable_short`), so this never substitutes Opus for Fable."""
     model = svc.models.get(kind, "")
     if svc.name == "opencode-go" and model:
         from go_model_policy import classification
         if classification(model.split()[0]) != "routine":
             raise ValueError("routine Go routing requires a classified routine model")
-    if svc.name == "claude" and kind == "frontier":
-        # Prefer the declared frontier pool_family; fall back to "fable" for older snapshots.
-        pool = _model_tiers.pool("claude", "frontier", MODEL_TIERS) or {}
-        fam = pool.get("pool_family") or "fable"
-        left = (info.get("sublimits") or {}).get(fam)
-        if left is not None and left < frontier_gate()["frontier1_min_left"]:
-            judgment = _model_tiers.resolve("claude", "judgment", "claude", MODEL_TIERS)
-            model = f"{judgment} --effort high"
     return model
 
 
@@ -1874,6 +1881,9 @@ def unrouted_why(kind: str, quota: dict[str, Any] | None = None,
                  exclude: frozenset[str] | set[str] = frozenset()) -> str:
     """Why route() found nothing for `kind`, for plan's queued line."""
     gap = QUALITY_MAX_RANK_GAP.get(kind)
+    fable = fable_wait_why((quota or {}).get("claude")) if kind == "frontier" else None
+    if fable:
+        return fable
     best = quality_best(kind, list(discover(quota or {})), exclude, quota)
     if gap is None or best is None:
         return "no pool has room: keep queued"
@@ -1883,10 +1893,37 @@ def unrouted_why(kind: str, quota: dict[str, Any] | None = None,
 
 
 def fable_short(info: dict[str, Any] | None) -> bool:
-    """Is the Fable sublimit of the claude pool reading below frontier1_min_left? Then a claude frontier slice would
-    be handed to Opus (suggest_model), so claude is short for `frontier`."""
+    """Is the Fable sublimit of the claude pool reading below frontier1_min_left? Then claude is short for `frontier`: it is
+    not a candidate (never Opus in its place; operator 2026-11-13), and the slice waits for the Fable window or goes to
+    another frontier family under the usual order."""
     fable = ((info or {}).get("sublimits") or {}).get("fable")
     return fable is not None and fable < frontier_gate()["frontier1_min_left"]
+
+
+def fable_wait_why(info: dict[str, Any] | None, now: datetime | None = None) -> str | None:
+    """The plan line for a frontier slice that has no pool because claude's Fable sublimit is short: wait, never degrade to
+    Opus, naming the Fable window's reset when the quota reading carries one (`sublimit_resets`). None when Fable is not short."""
+    if not fable_short(info):
+        return None
+    left = ((info or {}).get("sublimits") or {}).get("fable")
+    floor = frontier_gate()["frontier1_min_left"]
+    when = ((info or {}).get("sublimit_resets") or {}).get("fable")
+    text = (f"WAIT for Fable 5.2, do not run this on Opus: claude's Fable window has {left:g}% left (floor {floor:g}%) and no "
+            "other frontier pool has room")
+    stamp = None
+    if when:
+        try:
+            stamp = datetime.fromisoformat(str(when))
+            stamp = stamp if stamp.tzinfo else stamp.replace(tzinfo=UTC)
+        except (ValueError, TypeError):
+            stamp = None
+    if stamp is None:
+        text += "; the Fable reset time is not in the quota reading"
+    elif stamp <= (now or datetime.now(UTC)):
+        text += f"; the Fable window's reset {stamp.astimezone(UTC):%Y-%m-%dT%H:%M:%SZ} has passed: re-read the quota"
+    else:
+        text += f"; the Fable window resets at {stamp.astimezone(UTC):%Y-%m-%dT%H:%M:%SZ}"
+    return text + "; record the work with bin/fable-wait add"
 
 
 def estimate_from_history(values: list[float], floor: float, default: float = 3.0, cap: float | None = None) -> float:
@@ -2048,8 +2085,8 @@ def base_floors() -> dict[str, float]:
 
 
 def planned_spec(svc: Service, kind: str, info: dict[str, Any]) -> tuple[str | None, str | None]:
-    """(model, effort) `plan` would hand acp-dispatch for `kind` on `svc` (`suggest_model`: claude's frontier slot is Opus while
-    Fable is short); None for a part the profile does not name."""
+    """(model, effort) `plan` would hand acp-dispatch for `kind` on `svc` (`suggest_model`: the profile's model, claude's
+    frontier slot is always Fable); None for a part the profile does not name."""
     try:
         spec = suggest_model(svc, kind, info).split()
     except ValueError:
@@ -2170,7 +2207,7 @@ def pool_usable(svc: Service, kind: str, quota: dict[str, Any], *, min_headroom:
     if not svc.eligible(kind, quota) or not service_ready(svc):
         return False
     if svc.name == "claude" and kind == "frontier" and fable_short(info):
-        return False
+        return False                       # not a candidate, never Opus in its place
     left = info.get("remaining")
     if left is None:
         return not (svc.reserve_floor or svc.fallback_after)
@@ -2222,6 +2259,8 @@ def route(kind: str, *, quota: dict[str, Any] | None = None,
             continue
         if kind != "api-only" and not service_ready(svc):
             continue                       # e.g. omp without a working Anthropic login
+        if kind == "frontier" and svc.name == "claude" and fable_short(quota.get("claude")):
+            continue                       # Fable short: wait for its window, never hand a frontier slice to Opus (operator 2026-11-13)
         if fallback_block(svc, kind, quota, services=by_name, min_headroom=min_headroom, repo=repo) is not None:
             continue                       # a fallback: only while a pool it sits behind is short
         if gap is not None and best is not None and svc.rank_for(kind) - best.rank_for(kind) > gap:
@@ -2280,10 +2319,6 @@ def route(kind: str, *, quota: dict[str, Any] | None = None,
                 tags.append(f"pace {pace_f:.1f}× (penalty {pen:g})")
         scored.append((rank, svc, remaining, tags))
 
-    if kind == "frontier" and fable_short(quota.get("claude")) and any(
-            "claude" in s.fallback_after for _, s, _, _ in scored):
-        # claude's frontier slot would be Opus (suggest_model) while its Fable sublimit is short: the fallback replaces that downgrade
-        scored = [row for row in scored if row[1].name != "claude"]
     if not scored:
         return None
     # A fallback (Argon) sorts behind every candidate it sits behind, whatever the scores say: ordering is structural, not

@@ -808,12 +808,14 @@ class TestRoutingPolicy2026_10_15(unittest.TestCase):
         q = {**IDLE, "claude": {"remaining": 90.0, "sublimits": {"fable": 97.0}}}
         self.assertEqual(r.route("judgment", quota=q).model, "opus --effort high")
 
-    def test_frontier_suggests_fable_high_then_falls_back_to_opus(self):
+    def test_frontier_suggests_fable_high_and_never_falls_back_to_opus(self):
+        """Operator 2026-11-13: out of Fable for a window means wait, not degrade (the old test pinned the Opus fallback)."""
         q = {**IDLE, "codex": {"remaining": 0.0},
              "claude": {"remaining": 90.0, "sublimits": {"fable": 97.0}}}
         self.assertEqual(r.route("frontier", quota=q).model, "fable --effort high")
         q["claude"] = {"remaining": 90.0, "sublimits": {"fable": 4.0}}
-        self.assertEqual(r.route("frontier", quota=q).model, "opus --effort high")
+        self.assertIsNone(r.route("frontier", quota=q))
+        self.assertEqual(r.suggest_model(r.BY_NAME["claude"], "frontier", q["claude"]), "fable --effort high")
         for svc in r.SERVICES:
             self.assertFalse(any("xhigh" in m and "fable" in m for m in svc.models.values()), svc.name)
 
@@ -958,7 +960,7 @@ class TestFrontierConservative2026_10_18(unittest.TestCase):
         with mock.patch.dict(os.environ, self.gate_env()):
             self.assertEqual(r.route("frontier", quota=q).model, "fable --effort high")
         with mock.patch.dict(os.environ, self.gate_env(tighten_min_left=20.0)):      # a baseline may tighten
-            self.assertEqual(r.route("frontier", quota=q).model, "opus --effort high")
+            self.assertIsNone(r.route("frontier", quota=q))              # Fable short: waits, never Opus (operator 2026-11-13)
 
     def test_the_policy_no_longer_carries_the_moved_keys(self):
         self.assertNotIn("frontier_per_wave", r.POLICY["routing"])
@@ -1011,8 +1013,7 @@ class TestFableSublimitAndCursorSplit(unittest.TestCase):
              "shared_pool_family": "default", "max_share_of_parent_percent": 50.0}]}])
         self.assertEqual(q["claude"]["remaining"], 86.0)
         self.assertEqual(q["claude"]["sublimits"], {"fable": 0.0})
-        self.assertEqual(r.route("frontier", quota={**q, "codex": {"remaining": 0.0}}).model,
-                         "opus --effort high")
+        self.assertIsNone(r.route("frontier", quota={**q, "codex": {"remaining": 0.0}}))     # waits for Fable, never Opus
 
     def test_cursor_auto_pool_is_split_from_the_tight_third_party_pool(self):
         q = self.load([{"provider": "cursor", "windows": [
@@ -2848,3 +2849,100 @@ class TestArgonFrontierFallback(unittest.TestCase):
         )
         q.pop("antigravity-argon")
         self.assertIsNone(r.route("frontier", quota=q))          # a fallback with no reading fails closed
+
+
+class TestFableWaitsNeverDegrades2026_11_13(unittest.TestCase):
+    """Operator 2026-11-13: "If we are out of Fable use for a time period we should wait, not automatically degrade." A claude
+    frontier slice is Fable or nothing; other frontier families (astra, Argon) are not a degrade and keep their order."""
+    RESET = "2026-11-20T10:00:00+00:00"
+    SHORT: ClassVar[dict[str, Any]] = {"remaining": 90.0, "sublimits": {"fable": 4.0}, "sublimit_resets": {"fable": RESET}}
+    NO_OTHER: ClassVar[dict[str, Any]] = {**IDLE, "codex": {"remaining": 0.0}}
+
+    def test_suggest_model_never_substitutes_opus(self):
+        for left in (97.0, 14.9, 0.0):
+            model = r.suggest_model(r.BY_NAME["claude"], "frontier", {"sublimits": {"fable": left}})
+            self.assertEqual(model, "fable --effort high", left)
+
+    def test_claude_is_not_a_frontier_candidate_while_fable_is_short(self):
+        q = {**self.NO_OTHER, "claude": dict(self.SHORT)}
+        self.assertIsNone(r.route("frontier", quota=q))
+        self.assertTrue(r.fable_short(q["claude"]))
+        self.assertEqual([c for k, c in r.plan(["frontier", "frontier"], quota=q)], [None, None])
+        # judgment still goes to Opus: that is the judgment role, not a degraded frontier slice
+        self.assertEqual(r.route("judgment", quota={**q, "claude": {"remaining": 90.0, "sublimits": {"fable": 4.0}}}).model,
+                         "opus --effort high")
+
+    def test_another_frontier_family_still_takes_the_slice(self):
+        q = {**IDLE, "claude": dict(self.SHORT)}                    # codex has room
+        c = r.route("frontier", quota=q)
+        self.assertEqual(c.service.name, "codex")
+        self.assertNotIn("claude", [s for s in c.alternatives])
+
+    def test_the_wait_reason_names_the_fable_reset(self):
+        why = r.unrouted_why("frontier", {**self.NO_OTHER, "claude": dict(self.SHORT)})
+        self.assertIn("WAIT for Fable 5.2", why)
+        self.assertIn("do not run this on Opus", why)
+        self.assertIn("4% left", why)
+        self.assertIn("2026-11-20T10:00:00Z", why)
+        self.assertIn("bin/fable-wait add", why)
+
+    def test_the_wait_reason_when_the_reset_is_unknown_or_past(self):
+        short = {"remaining": 90.0, "sublimits": {"fable": 4.0}}
+        self.assertIn("reset time is not in the quota reading", r.fable_wait_why(short))
+        self.assertIn("has passed", r.fable_wait_why({**short, "sublimit_resets": {"fable": "2026-11-01T00:00:00Z"}}))
+        self.assertIn("is not in the quota", r.fable_wait_why({**short, "sublimit_resets": {"fable": "garbage"}}))
+        self.assertIsNone(r.fable_wait_why({"remaining": 90.0, "sublimits": {"fable": 80.0}}))
+        self.assertIsNone(r.fable_wait_why({"remaining": 90.0}))
+        self.assertIsNone(r.fable_wait_why(None))
+
+    def test_the_wait_reason_is_only_for_frontier(self):
+        q = {**self.NO_OTHER, "claude": dict(self.SHORT)}
+        self.assertNotIn("WAIT for Fable", r.unrouted_why("code", q))
+        self.assertNotIn("WAIT for Fable", r.unrouted_why("frontier", {**self.NO_OTHER}))
+
+    def test_plan_prints_the_wait_line(self):
+        q = {**self.NO_OTHER, "claude": dict(self.SHORT)}
+        for extra in ([], ["--json"]):
+            out = io.StringIO()
+            with mock.patch.object(r, "load_snapshot", return_value=(q, 10.0)), contextlib.redirect_stdout(out):
+                rc = r.main(["plan", "--kinds", "frontier", *extra])
+            self.assertEqual(rc, 0, extra)
+            text = out.getvalue()
+            self.assertIn("WAIT for Fable 5.2", text)
+            self.assertIn("2026-11-20T10:00:00Z", text)
+            self.assertNotIn("--provider claude", text)
+
+    def test_paseo_usage_carries_the_fable_reset(self):
+        rows = [{"sourceId": "claude", "fetchedAt": r.datetime.now(r.UTC).isoformat(), "report": {"status": "available", "windows": [
+            {"id": "weekly", "label": "Weekly", "remainingPct": 84, "resetsAt": "2026-11-20T10:00:00.130048+00:00"},
+            {"id": "weekly_model_fable", "label": "Weekly · Fable", "remainingPct": 5,
+             "resetsAt": "2026-11-20T10:00:00.130176+00:00"}]}}]
+        pool = r.usage_from_paseo(rows)["claude"]
+        self.assertEqual(pool["sublimits"], {"fable": 5.0})
+        self.assertEqual(pool["sublimit_resets"], {"fable": "2026-11-20T10:00:00.130176+00:00"})
+        self.assertIn("2026-11-20T10:00:00Z", r.fable_wait_why(pool))
+
+    def test_aiuse_snapshot_carries_the_fable_reset(self):
+        q = TestFableSublimitAndCursorSplit.load(self, [{"provider": "claude", "windows": [
+            {"label": "Claude Code weekly", "pool_family": "default", "remaining_percent": 96.0, "headroom_percent": 96.0,
+             "state": "ok", "quota_scope": "shared", "resets_at": "2026-11-20T09:59:59+00:00"},
+            {"label": "Claude Code weekly - Fable", "pool_family": "fable", "remaining_percent": 0.0, "headroom_percent": 0.0,
+             "state": "exhausted", "quota_scope": "model_sublimit", "shared_pool_family": "default",
+             "max_share_of_parent_percent": 50.0, "resets_at": "2026-11-20T10:00:00+00:00"}]}])
+        self.assertEqual(q["claude"]["sublimits"], {"fable": 0.0})
+        self.assertEqual(q["claude"]["sublimit_resets"], {"fable": "2026-11-20T10:00:00+00:00"})
+
+    def test_a_merge_keeps_the_reset(self):
+        into = {"claude": {"remaining": 80.0, "windows": {}, "sublimits": {"fable": 3.0},
+                           "sublimit_resets": {"fable": self.RESET}}}
+        r._merge_pool(into, "claude", {"remaining": 70.0, "windows": {}, "sublimits": {}})
+        self.assertEqual(into["claude"]["sublimit_resets"], {"fable": self.RESET})
+        self.assertEqual(into["claude"]["remaining"], 70.0)
+
+    def test_the_frontier_fallback_pool_replaces_claude_without_naming_it(self):
+        """Before 2026-11-13 claude was dropped only when a fallback listed it; now it is dropped whatever the fallbacks say."""
+        q = {**IDLE, "claude": dict(self.SHORT), "codex": {"remaining": 0.0}}
+        with mock.patch.dict(os.environ, {"ROUTE_AGENT_CALIBRATED_FLOOR": "off"}):
+            names = [s.name for s in r.discover(q) if s.eligible("frontier", q)]
+        self.assertIn("claude", names)                       # eligible on paper ...
+        self.assertIsNone(r.route("frontier", quota=q))      # ... never offered while Fable is short

@@ -115,6 +115,16 @@ judge it significantly better than Opus 5.5, with a one-line reason (`paseo run 
 daily cap. For claude it needs a fresh, known Claude reading (aiuse or `paseo usage ls`) with the tightest window and
 the Fable cap above their floors; stale, unknown or short means the closed rules (one frontier slice per pool per wave,
 an Agent-tool Fable call asks).
+D3a. **Fable short means WAIT, never Opus (operator 2026-11-13):** "If we are out of Fable use for a time period we should
+wait, not automatically degrade." While claude's Fable sublimit reads under `frontier1_min_left`, `plan`/`route` do not
+offer claude for `frontier` at all (`suggest_model` no longer swaps in Opus). Another frontier family (`gpt-6-astra`,
+`gemini-4-argon` under its fallback rule) is not a degrade and still takes the slice; with none free the slice prints
+`WAIT for Fable 5.2 ...` naming the Fable window's reset time when the quota reading carries one. Record the waiting work
+with `bin/fable-wait add --title T --lead AGENT_ID [--brief-file F] [--note N]`; work that already ran degraded goes in the
+same list (`--kind degraded`) for Fable to re-check. `bin/fable-wait arm` installs ONE one-shot wake (via `bin/ade-sched`) at
+the window's reset + 60 s; `fire` messages each lead its open items and sends one `hermes-ping`, and starts nothing itself.
+`bin/fable-wait close ID` when an item is started. Judgment slices stay on Opus: that is the judgment role, not a degraded
+frontier slice. Agent-tool sub-agents (`model: "fable"`) are the caller's choice and are not routed.
 D4. **Quota limits are the session-guard and usage-auto-resume plugins' job** (D4, 2026-11-07): they pause a session at
 a quota limit and continue it after the reset. The fleet governor and the quota guard were deleted. When the Claude
 windows are short (`route_agent.py show`), select a fresh eligible pool through the router. Do not fall back to

@@ -1,0 +1,7 @@
+### Added
+
+- `bin/fable-wait`: the list of work that must run, or be re-checked, on Fable 5.2 (`add --title T --lead AGENT_ID [--brief-file F] [--note N] [--kind deferred|degraded]`, `close ID`, `ls [--json] [--all]`; an append-only `~/.local/state/ade/fable-wait/queue.jsonl`) and its one-shot wake: `arm` reads the Fable window's reset from `paseo usage ls --json` (claude `weekly_model_fable`, else `weekly`), refuses when it is unknown or past, and installs ONE wake through `bin/ade-sched` at reset + 60 s (re-arming replaces it); `fire` sends each lead its open items with `paseo send --json --no-wait` and one `hermes-ping`, starts nothing itself, and disarms. (#0)
+
+### Changed
+
+- `route_agent.py` never degrades a `frontier` slice from Fable to Opus (operator 2026-11-13: when Fable is out for a window, wait): `suggest_model` no longer swaps in Opus, `route`/`plan` do not offer claude for `frontier` while its Fable sublimit is under `frontier1_min_left` (before, only when a fallback pool listed claude), other frontier families keep their order, and with no frontier pool `plan` says `WAIT for Fable 5.2` and names the Fable window's reset when the quota reading carries one (new `sublimit_resets` on the claude pool entry). (#0)
