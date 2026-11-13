@@ -99,7 +99,7 @@ def test_envelope_in_tool_output_gets_no_framing(box):
 
 
 @pytest.mark.parametrize("rec", [
-    queued(block(), att_type="file"),
+    queued(block(), att_type="queued_command_v2"),
     queued(block(), entry_type="user"),
     queued(block(), origin={"kind": "peer", "from": "agent-task-1"}),
     queued(block(), origin={"kind": "human"}),
@@ -294,3 +294,27 @@ def test_unreadable_daemon_is_retried_at_most_once_a_minute(box, monkeypatch):
     os.utime(box.home / ".local/state/ade/peer-trust/s1.warned", (old, old))
     box.tool_event("PreToolUse")
     assert len(calls) == 2
+    box.tool_event("PreToolUse")
+    assert len(calls) == 2  # the retry refreshed the throttle
+
+
+@pytest.mark.parametrize("source,expect", [(None, True), ("sdk", True), ("user", False), ("system", False),
+                                           ("schedule_wakeup", False), ("loop_wakeup", False), ("poll_event", False)])
+def test_prompt_source_gate(box, source, expect):
+    payload = {"prompt": block()}
+    if source:
+        payload["source"] = source
+    assert (box(payload) is not None) is expect
+
+
+def test_missing_local_server_id_is_neutral_not_unverified(box):
+    real = block(kind="agent-notification", extra=' source-server-id="srv_local" event="finished"')
+    text = context(box({"prompt": real}))
+    assert "local server id could not be read" in text and not text.startswith("UNVERIFIED")
+
+
+def test_overflow_rows_are_logged(box):
+    ids = [f"{i:08d}-2222-4333-8444-555555555555" for i in range(7)]
+    box({"prompt": "\n\n".join(block(mid=i) for i in ids)})
+    rows = [json.loads(x) for x in (box.home / ".local/state/ade/peer-trust/decisions.jsonl").read_text().splitlines()]
+    assert sorted(r["status"] for r in rows).count("overflow") == 2
