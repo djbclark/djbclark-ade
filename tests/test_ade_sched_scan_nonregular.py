@@ -90,6 +90,54 @@ def test_systemd_scan_reports_a_fifo_and_does_not_hang(tmp_path, fake_tool):
     assert [g[:2] for g in got] == [["a.fifo", "non-regular"], ["b.ok", "generated"]]
 
 
-def test_non_regular_entry_is_report_only_in_the_plan(tmp_path):
-    lj = S.LiveJob("a.fifo", "launchd", "non-regular", None)
-    assert lj.source != "generated"  # the planner's report-only branch (never unload) takes every non-"generated" source
+def test_status_listing_skips_a_fifo_without_hanging(tmp_path, fake_tool):
+    d = tmp_path / "agents"
+    d.mkdir()
+    os.mkfifo(d / "a.fifo.plist")
+    (d / "b.ok.plist").write_text(f"<!-- {S.GENERATED} -->")
+    child = ("import sys; sys.path.insert(0, sys.argv[1]); import ade_sched as S; "
+             "print(S.installed_labels('launchd', env={'HOME': sys.argv[2]}, agents_dir=sys.argv[2], launchctl=sys.argv[3]))")
+    r = subprocess.run([sys.executable, "-c", child, str(BIN), str(d), fake_tool], capture_output=True, text=True, timeout=20)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "['b.ok']"
+
+
+def test_a_fifo_is_no_live_identity_and_is_reported_in_the_scan_notes(tmp_path, fake_tool):
+    d = tmp_path / "agents"
+    d.mkdir()
+    os.mkfifo(d / "com.djbclark.x.plist")
+    child = ("import sys, json; sys.path.insert(0, sys.argv[1]); import ade_sched as S; "
+             "b = S.detect('launchd', {'HOME': sys.argv[2]}); "
+             "sc = S.scan_live(b, env={'HOME': sys.argv[2]}, skip_paseo=True, agents_dir=sys.argv[2], launchctl=sys.argv[3]); "
+             "print(json.dumps([sorted(sc.ids), list(sc.notes), [j.source for j in sc.jobs]]))")
+    r = subprocess.run([sys.executable, "-c", child, str(BIN), str(d), fake_tool], capture_output=True, text=True, timeout=20)
+    assert r.returncode == 0, r.stderr
+    ids, notes, sources = json.loads(r.stdout)
+    assert ids == [] and sources == ["non-regular"]
+    assert len(notes) == 1 and "com.djbclark.x" in notes[0] and "not a regular file" in notes[0]
+
+
+def test_planner_reports_the_note_and_never_removes_a_fifo_entry(tmp_path):
+    live = S.LiveScan("launchd", (S.LiveJob("com.djbclark.x", "launchd", "non-regular", None),),
+                      ("launchd entry com.djbclark.x: not a regular file; never opened, not a live identity",))
+    steps = S.plan_reconcile([], [], ledger=S.empty_jobs_ledger(), live=live, backend_name="launchd", root=tmp_path)
+    assert steps and all(s.action == "report" and not s.touch for s in steps)
+    assert any("not a regular file" in s.detail for s in steps)
+
+
+def test_whole_file_reads_refuse_a_fifo_without_hanging(tmp_path):
+    child = ("import sys; sys.path.insert(0, sys.argv[1]); import ade_sched as S; from pathlib import Path\n"
+             "for n in ('f', 'l'):\n"
+             "    try: S.read_regular_bytes(Path(sys.argv[2]) / n)\n"
+             "    except OSError as e: print('refused', n)\n"
+             "print(S._on_disk_files_match is not None)")
+    os.mkfifo(tmp_path / "f")
+    (tmp_path / "l").symlink_to(tmp_path / "f")
+    r = subprocess.run([sys.executable, "-c", child, str(BIN), str(tmp_path)], capture_output=True, text=True, timeout=20)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.split() == ["refused", "f", "refused", "l", "True"]
+    reg = tmp_path / "ok"
+    reg.write_bytes(b"x" * 10)
+    assert S.read_regular_bytes(reg) == b"x" * 10
+    with pytest.raises(OSError):
+        S.read_regular_bytes(reg, limit=5)

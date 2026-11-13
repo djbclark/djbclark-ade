@@ -1023,7 +1023,7 @@ def install_launchd_native(job: Job, text: str, *, env: Mapping[str, str] | None
             st = os.lstat(plist)
             if not stat.S_ISREG(st.st_mode):
                 raise NativeDefer(f"{plist} is not a regular file")
-            have = plist.read_bytes()
+            have = read_regular_bytes(plist)
         except OSError as exc:
             raise NativeDefer(f"{plist} is unreadable ({exc})") from exc
         if have != text.encode("utf-8"):
@@ -1163,11 +1163,8 @@ def installed_labels(backend: str | Backend | None = None, *, env: Mapping[str, 
     d, ext = (c.agents_dir, ".plist") if name == "launchd" else (c.units, ".service")
     if d.is_dir():
         for p in d.glob(f"*{ext}"):
-            try:
-                head = p.read_text(errors="replace")[:4096]
-            except OSError:
-                continue
-            if GENERATED in head:
+            head = _unit_head(p)
+            if isinstance(head, str) and GENERATED in head:
                 found.add(p.name[: -len(ext)])
     return sorted(found)
 
@@ -1178,7 +1175,7 @@ class LiveJob:
 
     id: str
     backend: str  # launchd | systemd | cron | paseo
-    source: str  # generated | file | crontab | paseo
+    source: str  # generated | file | non-regular (never opened; not a live identity) | crontab | paseo
     active: bool | None = None
 
 
@@ -1190,7 +1187,8 @@ class LiveScan:
 
     @property
     def ids(self) -> set[str]:
-        return {j.id for j in self.jobs}
+        """Live schedule identities. A `non-regular` entry (a FIFO named `x.plist`) is not one: launchd cannot load it."""
+        return {j.id for j in self.jobs if j.source != "non-regular"}
 
 
 @dataclass(frozen=True)
@@ -1221,14 +1219,15 @@ _NON_REGULAR: Any = object()  # sentinel: a FIFO, socket, device or directory; r
 _HEAD_BYTES = 4096
 
 
-def _unit_head(path: Path) -> Any:
-    """First 4 KiB of a unit/plist file for the live scan, without ever blocking on it (B1, 2026-11-13).
+def _read_regular(path: Path, limit: int) -> Any:
+    """Up to `limit` bytes of a regular file without ever blocking on it (B1, 2026-11-13).
 
     A FIFO (or a symlink to one) planted among the `*.plist` files used to hang `reconcile`, because `read_text` opens
     it for reading and waits for a writer. Now: `lstat` (and `stat` for a symlink) must say regular file before any
-    open; the open is `O_NONBLOCK` (plus `O_NOFOLLOW` unless the entry is a symlink to a regular file, which the scan
-    has always followed) and `fstat` on the descriptor must say regular again, closing the lstat-to-open race. The read
-    is bounded. Returns the text, `_NON_REGULAR` for an entry that is not a regular file (never opened) or `_UNREADABLE`."""
+    open; the open is `O_NONBLOCK|O_NOCTTY` (plus `O_NOFOLLOW` unless the entry is a symlink to a regular file, which the
+    scan has always followed) and `fstat` on the descriptor must say regular again, closing the lstat-to-open race. The
+    read is bounded. Returns the bytes, `_NON_REGULAR` for an entry that is not a regular file (never opened past the
+    check) or `_UNREADABLE`."""
     try:
         lst = os.lstat(path)
         is_link = stat.S_ISLNK(lst.st_mode)
@@ -1237,7 +1236,7 @@ def _unit_head(path: Path) -> Any:
         return _UNREADABLE
     if not stat.S_ISREG(st.st_mode):
         return _NON_REGULAR
-    flags = os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
+    flags = os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOCTTY", 0)
     if not is_link:
         flags |= getattr(os, "O_NOFOLLOW", 0)
     try:
@@ -1247,11 +1246,29 @@ def _unit_head(path: Path) -> Any:
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             return _NON_REGULAR
-        return os.read(fd, _HEAD_BYTES).decode("utf-8", errors="replace")
+        return os.read(fd, limit)
     except OSError:
         return _UNREADABLE
     finally:
         os.close(fd)
+
+
+def _unit_head(path: Path) -> Any:
+    """First 4 KiB of a unit/plist file as text for the live scan: `_read_regular`'s result decoded, or its sentinel."""
+    raw = _read_regular(path, _HEAD_BYTES)
+    return raw if raw is _NON_REGULAR or raw is _UNREADABLE else raw.decode("utf-8", errors="replace")[:_HEAD_BYTES]
+
+
+def read_regular_bytes(path: Path, limit: int = 1 << 20) -> bytes:
+    """A whole (bounded) regular file for reconcile's byte-match checks: OSError for anything not a regular file."""
+    raw = _read_regular(path, limit + 1)
+    if raw is _NON_REGULAR:
+        raise OSError(f"{path} is not a regular file")
+    if raw is _UNREADABLE:
+        raise OSError(f"{path} is unreadable")
+    if len(raw) > limit:
+        raise OSError(f"{path} is larger than {limit} bytes")
+    return raw
 
 
 def list_backend_labels(backend: str | Backend | None = None, *, env: Mapping[str, str] | None = None,
@@ -1464,6 +1481,8 @@ def scan_live(
         except SchedError as e:
             notes.append(f"backend scan: {e}")
             backend_jobs = []
+        notes.extend(f"{j.backend} entry {j.id}: not a regular file; never opened, not a live identity"
+                     for j in backend_jobs if j.source == "non-regular")
     paseo_jobs: list[LiveJob] = []
     if not skip_paseo:
         paseo_jobs, pnotes = paseo_schedule_names(run=paseo_run)
@@ -1930,7 +1949,7 @@ def _on_disk_files_match(
         current: dict[Path, str] = {}
         for path in rendered.files:
             if path.is_file():
-                current[path] = path.read_text(encoding="utf-8")
+                current[path] = read_regular_bytes(path).decode("utf-8")
         return set(current) == set(rendered.files) and artifact_hash(current) == artifact_hash(rendered.files)
     except (OSError, SchedError, ValueError):  # ValueError: a non-UTF-8 file is not a match
         return False
@@ -2665,7 +2684,7 @@ def reconcile(
             try:
                 if not stat.S_ISREG(os.lstat(plist).st_mode):
                     return "not a regular file"
-                disk_hash = artifact_hash({plist: plist.read_text(encoding="utf-8")})
+                disk_hash = artifact_hash({plist: read_regular_bytes(plist).decode("utf-8")})
             except (OSError, UnicodeDecodeError) as exc:
                 return f"unreadable ({exc})"
             job_row = next((j for j in jobs if j.get("name") == step.name), None)
