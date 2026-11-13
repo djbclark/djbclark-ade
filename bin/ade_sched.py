@@ -110,6 +110,30 @@ def default_subst(ade: str | os.PathLike[str] | None = None, env: Mapping[str, s
     return {"__ADE__": root, "@ADE@": root, "__HOME__": home, "@HOME@": home}
 
 
+def _one_line(s: str) -> str:
+    return s.replace("\n", "?").replace("\r", "?")
+
+
+def canonical_source(source: str, ade_root: str | os.PathLike[str]) -> str:
+    """The plist spelling the generated-by comment carries (2026-11-13): the repo-relative POSIX path when the plist is under
+    the ADE root, else its resolved absolute path. Relative, absolute and symlinked spellings, and the shared checkout versus
+    a worktree, all render the same text, so an artifact hash never depends on how the plist path was typed.
+    A non-path source (`<dict>`) is returned as is. The result is always one line: resolving a symlink brings its target's
+    name back in, and a name may hold a newline (adversary A1, 2026-11-13: it would have added a line to the unit)."""
+    if not source or source.startswith("<"):
+        return _one_line(source)
+    try:
+        p = Path(source).resolve()
+        root = Path(os.path.realpath(ade_root))
+        return _one_line(p.relative_to(root).as_posix())
+    except (OSError, RuntimeError, ValueError):
+        pass
+    try:
+        return _one_line(str(Path(source).resolve()))
+    except (OSError, RuntimeError):
+        return _one_line(source)
+
+
 def is_linked_worktree(path: str | os.PathLike[str]) -> bool:
     """True when `path` is a linked git worktree (git-common-dir != git-dir): its `.git` is a file naming a gitdir that has
     a `commondir`. A submodule's gitdir has none. Read from the files, no git process."""
@@ -283,7 +307,8 @@ class Job:
         return cls(label=label, argv=tuple(argv), env=dict(env), cwd=_abs(raw, "WorkingDirectory"), interval=interval,
                    calendar=tuple(dict(c) for c in cals), run_at_load=_bool(raw, "RunAtLoad"), keep_alive=ka,
                    stdout=_abs(raw, "StandardOutPath"), stderr=_abs(raw, "StandardErrorPath"), nice=nice,
-                   low_io=_bool(raw, "LowPriorityIO"), process_type=pt, kill_mode=km, raw=raw, source=source,
+                   low_io=_bool(raw, "LowPriorityIO"), process_type=pt, kill_mode=km, raw=raw,
+                   source=canonical_source(source, default_subst(ade)["__ADE__"]),
                    worktree=worktree)
 
     @property
@@ -548,7 +573,8 @@ def render_cron(job: Job, home: str | None = None, flock: str | None = "auto") -
 def render_launchd(job: Job) -> str:
     raw = {k: v for k, v in job.raw.items() if k != "KillMode"}
     text = plistlib.dumps(raw, fmt=plistlib.FMT_XML, sort_keys=False).decode()
-    comment = f"<!-- {GENERATED} from {job.source.replace('--', '-')}; edit the plist -->"
+    shown = re.sub(r"-{2,}", "-", job.source)   # `--` is illegal in an XML comment (a run of three used to leave two)
+    comment = f"<!-- {GENERATED} from {shown}; edit the plist -->"
     head, sep, rest = text.partition("<plist ")
     return f"{head}{comment}\n{sep}{rest}" if sep else text
 
