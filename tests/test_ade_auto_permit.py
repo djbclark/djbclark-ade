@@ -30,6 +30,9 @@ elif a[:2] == ['agent','inspect']:
     parent = s.get('parents', {}).get(a[2])
     if parent == 'error': sys.exit(1)
     print(json.dumps({'Id': a[2], 'ParentAgentId':parent}))
+elif a[0] == 'ls' and '--label' not in a:
+    if s.get('bad_local'): print('bad'); sys.exit(0)
+    print(json.dumps([{'id':x} for x in s.get('local', [])]))
 elif a[0] == 'ls': print(json.dumps([{'id':x} for x in s.get('labelled',{}).get(a[a.index('--label')+1], [])]))
 elif a[:2] == ['permit','allow']:
     if s.get('allow_error'): sys.exit(1)
@@ -45,8 +48,8 @@ else: sys.exit(9)
     return result, calls
 
 
-def req(agent, rid='request'):
-    return {'agentId':agent, 'id':rid, 'description':'SECRET must never enter audit'}
+def req(agent, rid='request', name='Bash'):
+    return {'agentId':agent, 'id':rid, 'name':name, 'description':'SECRET must never enter audit'}
 
 
 def test_descendants_and_foreign(tmp_path):
@@ -163,3 +166,79 @@ def test_unlabelled_non_descendant_is_skipped(tmp_path):
     assert ['ls','-a','-g','--label',f'ade.lead={LEAD}'] in calls  # the lead label was really checked
     assert not any(c[:2] == ['permit','allow'] for c in calls)
     assert [(r['decision'], r['reason']) for r in audit_rows(tmp_path)] == [('skip','outside-scope')]
+
+
+def allows(calls):
+    return [c for c in calls if c[:2] == ['permit', 'allow']]
+
+
+def test_all_local_approves_unrelated_agent_and_lead(tmp_path):
+    result, calls = run_fake(tmp_path, {'requests':[req(OTHER), req(LEAD)], 'parents':{OTHER:None},
+                                      'local':[OTHER, LEAD]}, '--all-local')
+    assert result.returncode == 0, result.stderr
+    assert allows(calls) == [['permit','allow',OTHER,'request'], ['permit','allow',LEAD,'request']]
+    assert ['ls','-a','-g'] in calls
+    assert all('--host' not in c for c in calls)
+    assert {(r['decision'], r['reason']) for r in audit_rows(tmp_path)} == {('allow-attempt','all-local'), ('allowed','all-local')}
+    assert 'SECRET' not in (tmp_path/'audit.jsonl').read_text()
+
+
+def test_all_local_keeps_existing_reasons(tmp_path):
+    result, calls = run_fake(tmp_path, {'requests':[req(CHILD), req(OTHER, 'r2')],
+                                      'parents':{CHILD:LEAD, OTHER:None},
+                                      'labelled':{f'ade.lead={LEAD}':[OTHER]}, 'local':[CHILD, OTHER]}, '--all-local')
+    assert result.returncode == 0, result.stderr
+    assert {(r['agent'], r['reason']) for r in audit_rows(tmp_path) if r['decision'] == 'allowed'} == \
+        {(CHILD, 'descendant'), (OTHER, 'lead-label')}
+
+
+def test_all_local_survives_failed_inspect(tmp_path):
+    result, calls = run_fake(tmp_path, {'requests':[req(OTHER)], 'parents':{OTHER:'error'}, 'local':[OTHER]}, '--all-local')
+    assert result.returncode == 0, result.stderr
+    assert allows(calls) == [['permit','allow',OTHER,'request']]
+
+
+def test_remote_or_unlisted_agent_not_included(tmp_path):
+    result, calls = run_fake(tmp_path, {'requests':[req(OTHER)], 'parents':{OTHER:None}, 'local':[CHILD]}, '--all-local')
+    assert result.returncode == 0, result.stderr
+    assert not allows(calls)
+    assert [(r['decision'], r['reason']) for r in audit_rows(tmp_path)] == [('skip','outside-scope')]
+
+
+def test_without_flag_unrelated_agent_still_skipped(tmp_path):
+    result, calls = run_fake(tmp_path, {'requests':[req(OTHER)], 'parents':{OTHER:None}, 'local':[OTHER]})
+    assert not allows(calls)
+    assert ['ls','-a','-g'] not in calls
+
+
+def test_bad_local_listing_fails_closed(tmp_path):
+    result, calls = run_fake(tmp_path, {'requests':[req(OTHER)], 'local':[OTHER], 'bad_local':True}, '--all-local')
+    assert result.returncode == 1
+    assert not allows(calls)
+
+
+def test_operator_questions_never_approved_in_any_mode(tmp_path):
+    import itertools
+    names = ['AskUserQuestion', 'ExitPlanMode', 'EnterPlanMode', 'plan_approval', 'request_user_input', 'ask_user']
+    for i, (mode, name) in enumerate(itertools.product(['all', 'descendant', 'label'], names)):
+        d = tmp_path / f'case{i}'
+        d.mkdir()
+        scenario = {'requests':[req(CHILD, 'q', name), req(LEAD, 'q2', name)], 'parents':{CHILD:LEAD},
+                    'labelled':{'ade.task=wave':[CHILD]}, 'local':[CHILD, LEAD]}
+        extra = {'all':['--all-local'], 'descendant':[], 'label':['--ade-label','ade.task=wave']}[mode]
+        result, calls = run_fake(d, scenario, *extra)
+        assert result.returncode == 0, result.stderr
+        assert not allows(calls), (mode, name)
+        assert [r['reason'] for r in audit_rows(d)] == ['operator-question'] * 2
+
+
+def test_non_tool_kind_and_unknown_name_are_skipped(tmp_path):
+    odd = [dict(req(OTHER, 'k1'), kind='question'), dict(req(OTHER, 'k2'), kind='plan'),
+           {'agentId':OTHER, 'id':'k3', 'description':'no name'}, req(OTHER, 'k4', ''), req(OTHER, 'k5', None)]
+    result, calls = run_fake(tmp_path, {'requests':odd, 'local':[OTHER]}, '--all-local')
+    assert result.returncode == 0, result.stderr
+    assert not allows(calls)
+    ok = dict(req(OTHER, 'k6'), kind='tool')
+    (tmp_path / 'ok').mkdir()
+    result, calls = run_fake(tmp_path / 'ok', {'requests':[ok], 'local':[OTHER]}, '--all-local')
+    assert allows(calls) == [['permit','allow',OTHER,'k6']]

@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
-"""Approve pending requests only for a lead's descendants, its `ade.lead=<lead>` workers or selected ADE labels."""
+"""Approve pending tool-permission requests for a lead's descendants, its `ade.lead=<lead>` workers,
+selected ADE labels or, with `--all-local`, every agent this host's daemon lists. A request that is a question
+or plan approval meant for the operator is never answered, in any mode."""
 import argparse
 from datetime import datetime, timezone
 import fcntl
 import json
 import math
+import os
+import re
 from pathlib import Path
 import subprocess
 import time
@@ -23,9 +27,11 @@ def identifier(value):
 
 
 def call(args):
+    # Local daemon only: never pass --host, and drop any host override from the environment.
+    env = {k: v for k, v in os.environ.items() if k != "PASEO_HOST"}
     try:
         result = subprocess.run(["paseo", *args, "--json"], capture_output=True,
-                                text=True, timeout=30, check=False)
+                                text=True, timeout=30, check=False, env=env)
         if result.returncode:
             raise ProbeError("paseo command failed")
         return json.loads(result.stdout)
@@ -37,6 +43,29 @@ def rows(value):
     if not isinstance(value, list):
         raise ProbeError("expected JSON list")
     return value
+
+
+# Words (camelCase / snake_case split, lower-cased) that mark a request as an operator-facing
+# question or plan/mode approval: AskUserQuestion, ExitPlanMode, EnterPlanMode, plan_approval,
+# request_user_input, elicitation. Paseo permission kinds are tool|plan|question|mode|other; the
+# `permit ls` row only exposes `name`, so the name is checked, and `kind` too when a row carries it.
+OPERATOR_WORDS = {"ask", "askuser", "question", "questions", "plan", "elicit", "elicitation", "mode"}
+
+
+def words(name):
+    spaced = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", name)
+    return [w for w in re.split(r"[^A-Za-z0-9]+", spaced.lower()) if w]
+
+
+def operator_question(row):
+    """True when the request must stay pending for the operator. Missing/odd fields fail closed."""
+    name, kind = row.get("name"), row.get("kind")
+    if kind is not None and kind != "tool":
+        return True
+    parts = words(name) if isinstance(name, str) else []
+    if not parts:
+        return True
+    return bool(OPERATOR_WORDS.intersection(parts)) or ("user" in parts and "input" in parts)
 
 
 def log_event(log, decision, reason, agent=None, request=None):
@@ -69,9 +98,16 @@ def descendant(agent, lead, cache):
     return False
 
 
-def sweep(lead, labels, log):
+def sweep(lead, labels, log, all_local=False):
     requests = rows(call(["permit", "ls"]))
     eligible = {}
+    local = set()
+    if all_local:
+        # This host's daemon only (no --host): remote hosts' agents are never in this list.
+        for row in rows(call(["ls", "-a", "-g"])):
+            if not isinstance(row, dict) or not identifier(row.get("id")):
+                raise ProbeError("invalid local agent")
+            local.add(row["id"])
     # Installed CLI inspect/ls do not expose labels. Exact server-side filters prove them.
     # The lead's own `ade.lead=<lead>` label is always checked: a lead launches top-level
     # (env-stripped) workers that are not descendants, and they carry that label.
@@ -94,13 +130,24 @@ def sweep(lead, labels, log):
         if (agent, request) in seen:
             continue
         seen.add((agent, request))
+        if operator_question(row):
+            # A question or plan approval is the operator's to answer. Checked before scope, in every mode.
+            log_event(log, "skip", "operator-question", agent, request)
+            continue
         try:
             if agent == lead:
                 reason = None
             elif agent in eligible:
                 reason = eligible[agent]
             else:
-                reason = "descendant" if descendant(agent, lead, cache) else None
+                try:
+                    reason = "descendant" if descendant(agent, lead, cache) else None
+                except ProbeError:
+                    if not all_local:
+                        raise
+                    reason = None  # all-local does not depend on ancestry; local membership decides
+            if reason is None and all_local and agent in local:
+                reason = "all-local"
             if reason is None:
                 log_event(log, "skip", "outside-scope", agent, request)
                 continue
@@ -120,9 +167,12 @@ def sweep(lead, labels, log):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--lead", required=True, help="full lead UUID (lead itself is excluded)")
+    parser.add_argument("--lead", required=True, help="full lead UUID (the lead itself is excluded unless --all-local)")
     parser.add_argument("--ade-label", action="append", default=[], metavar="ade.KEY=VALUE",
                         help="exact ADE label selectors; any matching selector qualifies")
+    parser.add_argument("--all-local", action="store_true",
+                        help="also approve every agent this host's daemon lists, the lead included "
+                             "(never a remote host's, never an operator question or plan approval)")
     parser.add_argument("--log", required=True, type=Path, help="append-only JSONL audit path")
     parser.add_argument("--watch", action="store_true")
     parser.add_argument("--interval", type=float, default=2)
@@ -147,7 +197,7 @@ def main():
             status = 0
             while not args.watch or time.monotonic() < deadline:
                 try:
-                    status = sweep(args.lead, args.ade_label, log)
+                    status = sweep(args.lead, args.ade_label, log, args.all_local)
                 except ProbeError:
                     log_event(log, "error", "enumeration-unavailable")
                     status = 1

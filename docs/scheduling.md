@@ -398,10 +398,18 @@ bin/ade-sched --set __LEAD__=FULL_LEAD_UUID --set __STATE__=/absolute/existing/s
   render config/launchd/com.djbclark.ade-auto-permit.plist
 ```
 
-Descendants of that lead and agents labelled `ade.lead=<that lead's id>` qualify in this template (the lead label is
-checked by default, 2026-11-13); further label selectors can be
-added as explicit `--ade-label ade.KEY=VALUE` argument pairs. Audit decisions go
-to `auto-permit.jsonl`. See [fan-out](../skills/fan-out/SKILL.md) for scope and
+The template passes `--all-local` (operator ruling 2026-11-13, "All local agents"): every agent this host's daemon
+lists qualifies, the lead included (audit reason `all-local`; the operator wants no prompts, and the lead's own
+prompts are the same kind of tool request), because operator-started agents (a Bash prompt in a `bypassPermissions`
+session) were logged `skip outside-scope` every 60 s. Descendants (`descendant`), agents labelled `ade.lead=<that lead's
+id>` (`lead-label`, checked by default, 2026-11-13) and explicit `--ade-label ade.KEY=VALUE` pairs keep their reasons;
+without `--all-local` only those qualify and the lead is excluded. Only the local daemon is asked (no `--host`, any
+`PASEO_HOST` is dropped), so a remote host's agents never qualify. **In every mode a request that is a question or plan
+approval for the operator is never answered** (`AskUserQuestion`, `ExitPlanMode`, `EnterPlanMode`, `plan_approval`,
+`request_user_input` and any name with a question, plan, ask, mode or elicitation word, a non-`tool` `kind`, or a missing
+name): it is logged `skip` / `operator-question` and stays pending. Audit decisions go
+to `auto-permit.jsonl`; after a merge, `bin/ade-sched reconcile --yes` applies the template. Audit decisions go
+See [fan-out](../skills/fan-out/SKILL.md) for scope and
 failure behavior. Render/review is separate from `install`; this change does not
 activate a job. Unlike the judgment schedule defaults above, this system job
 implements the operator's explicit unattended permission grant for our agents.
