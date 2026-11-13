@@ -17,6 +17,17 @@ import ade_install as ai  # noqa: E402
 import ade_user_install as aui  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_home(tmp_path_factory, monkeypatch):
+    """Never read the operator's real HOME: ``doctor`` defaults reach the credential-bak vault
+    (a real one, inside its delete-after window, made two doctor tests exit 1 on the operator's Mac
+    and not in CI), the TUI config files and the skill links."""
+    home = tmp_path_factory.mktemp("home")
+    monkeypatch.setenv("HOME", str(home))
+    for var in ("CODEX_HOME", "HERMES_HOME", "OPS_ROOT"):
+        monkeypatch.delenv(var, raising=False)
+
+
 def _run(*args: str, root: Path | None = None) -> subprocess.CompletedProcess:
     argv = [sys.executable, "-I", "-B", str(BIN / "ade-install"), *args]
     if root is not None:
@@ -148,6 +159,14 @@ def _paseo_plugin_catalog(tmp_path: Path, *, chosen: bool = False) -> Path:
         'install = "operator paseo plugin install only"\n'
     )
     return root
+
+
+def test_doctor_default_home_is_hermetic_regression(tmp_path):
+    """A credential-bak vault in the (fake) HOME is what fails doctor; the real one must never be read."""
+    vault = Path.home() / ".local" / "state" / "ade" / "credential-bak"
+    assert not vault.exists() and str(Path.home()).startswith(str(tmp_path.parent.parent))
+    obs, _ = ai.doctor(ai.load_catalog(root=_paseo_plugin_catalog(tmp_path)))
+    assert {o.status for o in obs if o.id == "credential-bak"} == {"ok"}
 
 
 def test_paseo_plugin_missing_when_paseo_absent(tmp_path, monkeypatch):

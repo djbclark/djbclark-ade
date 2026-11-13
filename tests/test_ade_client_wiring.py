@@ -267,7 +267,8 @@ def test_skills_real_script_against_fixture_home(tmp_path):
         (bindir / b).chmod(0o755)
     (home / ".claude" / "skills" / "demo").symlink_to(ade / "demo")
     env = {"SKILL_EVERYWHERE_ADE": str(ade), "SKILL_EVERYWHERE_PRIVATE": str(tmp_path / "p"),
-           "SKILL_EVERYWHERE_SITE": str(tmp_path / "s"), "SKILL_EVERYWHERE_NO_COPY": "1"}
+           "SKILL_EVERYWHERE_SITE": str(tmp_path / "s")}
+    (home / "agent-data" / "workflows").mkdir(parents=True)  # Grok Bot copy target present, copy absent
     import os
 
     def run(argv, e):
@@ -276,6 +277,8 @@ def test_skills_real_script_against_fixture_home(tmp_path):
     out, _ = cw.observe_skills(REPO, TUIS, home=home, runner=run)
     assert out["claude"][0][:3] == ("skill", "claude/*", "ok")
     assert {r[1] for r in out["codex"]} == {"codex/missing"}
+    # copy-target rows really print `missing (<dest>)`: classified, not "other"
+    assert {r[1] for r in out["grokbot"]} == {"grokbot/missing"}
     (home / ".claude" / "skills" / "demo").unlink()
     (home / ".claude" / "skills" / "demo").symlink_to(tmp_path / "gone")
     out, _ = cw.observe_skills(REPO, TUIS, home=home, runner=run)
@@ -360,16 +363,25 @@ def test_doctor_silent_without_roster(tmp_path):
 
 # ---- adversary round 3 -----------------------------------------------------------
 
-def test_skill_env_overrides_are_scrubbed(monkeypatch):
-    for k in cw.SKILL_ENV_OVERRIDES:
+def test_skill_env_overrides_are_scrubbed(monkeypatch, tmp_path):
+    literal = ("SKILL_EVERYWHERE_ONLY", "SKILL_EVERYWHERE_NO_COPY", "SKILL_EVERYWHERE_ADE",
+               "SKILL_EVERYWHERE_PRIVATE", "SKILL_EVERYWHERE_SITE", "SKILL_EVERYWHERE_GROKBOT_NOTE")
+    relative = ("OPS_ROOT", "CODEX_HOME", "HERMES_HOME")
+    for k in literal + relative:
         monkeypatch.setenv(k, "grokbot")
-    seen = {}
 
-    def run(argv, env):
-        seen.update(env)
-        return subprocess.CompletedProcess(argv, 0, check_text({"a": ALL_OK}), "")
-    cw.observe_skills(REPO, TUIS, runner=run)
-    assert not any(k in seen for k in cw.SKILL_ENV_OVERRIDES)
+    def capture(**kw):
+        seen = {}
+
+        def run(argv, env):
+            seen.update(env)
+            return subprocess.CompletedProcess(argv, 0, check_text({"a": ALL_OK}), "")
+        cw.observe_skills(REPO, TUIS, runner=run, **kw)
+        return seen
+    seen = capture()
+    assert not any(k in seen for k in literal) and all(k in seen for k in relative)  # live: real roots kept
+    seen = capture(home=tmp_path)
+    assert not any(k in seen for k in literal + relative) and seen["HOME"] == str(tmp_path)
 
 
 def test_skills_undecodable_output_is_warn_not_crash():
@@ -387,14 +399,35 @@ def test_default_runner_decodes_with_replace(tmp_path):
     assert "\ufffd" in cp.stdout
 
 
-def test_stderr_all_scanned_and_attached_to_tui():
-    err = "\n".join(["warning: skill root /a does not exist"] * 6
-                    + ["warning: hermes no longer lists its skills dir", "error: boom"])
-    out, glob = skills({"a": ALL_OK}, stderr=err, rc=1)
-    assert any("hermes no longer" in r[3] for r in out["hermes"])
-    assert any("boom" in r[3] for r in glob + [r for rs in out.values() for r in rs])
-    out, glob = skills({"a": ALL_OK}, stderr="\n".join(f"warning: n{i}" for i in range(30)))
-    assert any("more stderr lines" in r[3] for r in glob)
+def stderr_rows(err, rc=0):
+    out, glob = skills({"a": ALL_OK}, stderr=err, rc=rc)
+    return out, glob
+
+
+def test_stderr_attribution_is_structural_not_a_word_match():
+    # a codex line whose target mentions claude belongs to codex only (it used to land on claude)
+    out, glob = stderr_rows("warning: codex global instructions dangling: /h/.codex/AGENTS.md -> /h/.claude/CLAUDE.md\n")
+    assert [r[1] for r in out["codex"] if r[0] == "skill" and r[2] == "warn"] == ["codex/warning"]
+    assert not [r for r in out["claude"] if r[2] == "warn"] and out["cursor-agent"][0][2] == "ok"
+    assert glob == []
+    # a TUI token inside a path, or a skill that shares a TUI's name, stays global
+    out, glob = stderr_rows("warning: skill root /private/tmp/claude-502/x does not exist\n"
+                            "warning: claude: render for /d failed; treating as stale copy\n")
+    assert len(glob) == 2 and not any(r[2] == "warn" for rows in out.values() for r in rows)
+    out, glob = stderr_rows("error: boom\n", rc=1)
+    assert [r[3] for r in glob] == ["error: boom"]
+
+
+def test_stderr_every_line_scanned_deduped_and_capped():
+    lines = [f"warning: skill root /r{i} does not exist" for i in range(40)]
+    out, glob = stderr_rows("\n".join(lines + ["warning: hermes no longer lists its skills dir"]))
+    assert any("hermes no longer" in r[3] for r in out["hermes"])  # last of 41 lines still attached
+    assert len(glob) == 40
+    out, glob = stderr_rows("warning: x\n" * 5)
+    assert [r[3] for r in glob] == ["warning: x (x5)"]
+    n = cw.MAX_STDERR_ROWS
+    out, glob = stderr_rows("\n".join(f"warning: n{i}" for i in range(n + 7)))
+    assert len(glob) == n + 1 and "7 more distinct" in glob[-1][3]
     _, glob = skills({"a": ALL_OK}, rc=127)
     assert any("rc 127" in r[3] for r in glob)
 
@@ -410,6 +443,15 @@ def test_sentinel_must_be_last_and_every_skill_needs_rows():
 def test_cursor_agent_inherits_claude_skill_gaps():
     out, _ = skills({"a": {**ALL_OK, "claude": "missing"}})
     assert [r[1:3] for r in out["cursor-agent"]] == [("cursor-agent/via-claude", "warn")]
+
+
+def test_cursor_agent_unknown_when_claude_unchecked_and_order_independent():
+    unchecked = {**ALL_OK, "claude": "not installed"}
+    for order in (TUIS, list(reversed(TUIS))):
+        out, _ = cw.observe_skills(REPO, order, runner=runner_for(check_text({"a": unchecked})))
+        assert out["cursor-agent"][0][2] == "unknown" and "not checked" in out["cursor-agent"][0][3]
+        out, _ = cw.observe_skills(REPO, order, runner=runner_for(check_text({"a": {**ALL_OK, "claude": "missing"}})))
+        assert out["cursor-agent"][0][1] == "cursor-agent/via-claude"
 
 
 def test_partly_unchecked_tui_is_unknown_not_ok(tmp_path, monkeypatch):

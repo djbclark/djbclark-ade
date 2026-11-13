@@ -1957,7 +1957,7 @@ def observe_client_wiring(
 
     TUI roster: the ``targets`` table of ``bin/skill-everywhere``. MCP roster:
     ``config/mcp-clients.toml``. Skills: ``skill-everywhere --check --all`` (read-only).
-    Absent roster or script (fixture catalogs) returns ``[]``. Statuses: ok, warn
+    Both roster and script absent (fixture catalogs) returns ``[]``; exactly one of them is an error. Statuses: ok, warn
     (a gap, with the exact fix in the detail, never run), unknown (TUI with no
     readable MCP config / not installed; never fails), error (unreadable roster or
     client config). Observe-only: never edits a client config (order 11).
