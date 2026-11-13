@@ -118,9 +118,11 @@ order; stop and roll back on a result not listed as expected.
    **Placement finding (2026-11-12):** the original agent-scoped command ignored the scratch `--cwd` and inherited
    the caller workspace. A retry removing only `PASEO_AGENT_ID` and `PASEO_AGENT_CWD`, also using scratch as the
    subprocess cwd, created a top-level agent but still reused the caller workspace while `PASEO_WORKSPACE_ID`
-   remained inherited. Both runs stopped before installation and archived their throwaways. Clearing workspace
-   placement as above is a proposed correction; that three-variable form has **not** passed a live canary.
-   The inspection gate must pass before this procedure can claim install/create/resume coverage.
+   remained inherited. Both runs stopped before installation and archived their throwaways. A third run removing
+   **all three** variables as above live-proved scratch `Cwd` and null `ParentAgentId` for six legacy creates
+   (Claude default/bypass, Codex, Antigravity, Pi and Cursor). The first create reported a new scratch workspace,
+   rather than reusing the shared repository workspace. This proves placement for that launch form; the full
+   plugin canary **did not pass**: Cursor legacy resume failed after installation (see below).
 2. Install from a clean pinned tree, not the shared checkout. The host records the directory path, so the
    worktree is the live plugin source: **it must persist** until rollback or reinstall. Run
    `git -C /Users/djbclark/src/djbclark-ade fetch origin`, then
@@ -150,5 +152,13 @@ no `ade-yolo` row; then `git -C /Users/djbclark/src/djbclark-ade worktree remove
 
 Source contracts were inspected at upstream `4df5307e` (0.16.0-beta.2 source).
 Older hosts without the catalog/control SDK report unavailable rather than
-claiming coverage. This cloud run had no Paseo executable/daemon; mocked tests
-prove local planning and calls, not installed runtime behavior.
+claiming coverage. The original cloud run had no Paseo executable/daemon;
+its mocked tests prove local planning and calls.
+
+**Live canary (2026-11-12):** installation from clean detached `23e965993aa30b05e26f9f59ebb0b94e6ac961e9`
+reached enabled/running without a daemon restart. Claude default, Codex, Antigravity and Pi legacy throwaways
+resumed with unchanged saved modes; observed warning values matched step 3 (including Pi `null`). Cursor legacy
+resume then failed with `Failed to send message: Invalid params: Session "<session-id>" not found`.
+The run stopped immediately, removed the plugin and source worktree, and archived all six throwaways.
+The error alone does not establish a plugin root cause. The explicit-bypass Claude resume, stamped creates,
+restrictive escape and full-canary success remain unverified; rerun the complete procedure after diagnosis.
