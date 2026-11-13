@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!-- bin/ade-progress, subcommand scan with the yes flag, every 5 minutes: a zero-token host script (no model prompt), one `paseo ls` plus an
-     inspect per enrolled agent. Inventoried in config/install.toml as `ade-progress` (slice 1b, 2026-11-12; class optional, chosen = false until
-     the operator installs it, install command in docs/scheduling.md). Not loaded by merging this file. `bin/ade-sched` fills __ADE__ and __HOME__. -->
+     inspect per enrolled agent. Inventoried in config/install.toml as `ade-progress` (slice 1b, 2026-11-12; class optional, chosen = true since 2026-11-13;
+     install command in docs/scheduling.md). Not loaded by merging this file. `bin/ade-sched` fills __ADE__ and __HOME__. -->
 <plist version="1.0">
 <dict>
   <key>Label</key><string>com.djbclark.ade-progress</string>

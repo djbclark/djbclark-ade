@@ -474,12 +474,12 @@ def test_plist_template_and_inventory_row():
     d = plistlib.loads((ROOT / "config" / "launchd" / "com.djbclark.ade-progress.plist").read_bytes())
     assert d["Label"] == "com.djbclark.ade-progress"
     assert d["ProgramArguments"] == ["__ADE__/bin/ade-progress", "scan", "--yes"] and d["StartInterval"] == 300
-    # slice 1b: inventoried, but optional and unchosen, so doctor and reconcile expect and install nothing
+    # slice 1b: inventoried as an optional row; chosen = true since 2026-11-13, so doctor expects the label
     rows = [r for r in tomllib.loads((ROOT / "config" / "install.toml").read_text())["install"]["jobs"]
             if r["name"] == "ade-progress"]
     assert len(rows) == 1
     r = rows[0]
-    assert (r["kind"], r["owner"], r["class"], r["chosen"]) == ("ade-sched", "djbclark-ade", "optional", False)
+    assert (r["kind"], r["owner"], r["class"], r["chosen"]) == ("ade-sched", "djbclark-ade", "optional", True)
     assert r["label"] == d["Label"] and r["plist"] == "config/launchd/com.djbclark.ade-progress.plist"
 
 
@@ -495,10 +495,14 @@ def test_inventory_row_doctor_expectations():
     def status(r, scan):
         return [(x.status, x.fail) for x in S.diff_jobs([r], [], scan) if x.name == "ade-progress"]
 
-    assert status(row, live) == [("unchosen", False)] and status(row, none) == [("unchosen", False)]
+    unchosen = dict(row, chosen=False)
+    assert status(unchosen, live) == [("unchosen", False)] and status(unchosen, none) == [("unchosen", False)]
     chosen = dict(row, chosen=True)
     assert status(chosen, live) == [("ok", False)]
     assert status(chosen, none) == [("missing", True)]
+    # installed but unchosen: still quiet, and the detail says the label is live
+    detail = [x.detail for x in S.diff_jobs([unchosen], [], live) if x.name == "ade-progress"]
+    assert len(detail) == 1 and "live (installed but unchosen)" in detail[0]
 
 
 def test_one_wake_per_agent_per_window_even_with_several_tasks(e):

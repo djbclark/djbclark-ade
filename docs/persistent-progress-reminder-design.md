@@ -2,7 +2,7 @@
 
 ## A. Decision
 
-A0. **Status (2026-11-12):** slice 1 (G1) is built: `bin/ade-progress`, `tests/test_ade_progress.py` and `config/launchd/com.djbclark.ade-progress.plist`. Slice 1b (G3) is built: the `ade-progress` row in `config/install.toml` (`class = "optional"`, `chosen = false`) and its doctor expectations, after the operator saw a real `scan --dry-run` (two declared waiting items, no events). Nothing is scheduled or loaded until the operator runs the install command in `docs/scheduling.md`; G4 stays open.
+A0. **Status (2026-11-12):** slice 1 (G1) is built: `bin/ade-progress`, `tests/test_ade_progress.py` and `config/launchd/com.djbclark.ade-progress.plist`. Slice 1b (G3) is built: the `ade-progress` row in `config/install.toml` (`class = "optional"`; `chosen = true` since 2026-11-13, the operator's choice) and its doctor expectations, after the operator saw a real `scan --dry-run` (two declared waiting items, no events). Doctor reports `missing` and nothing is scheduled or loaded until the lead runs the install command in `docs/scheduling.md`; G4 stays open.
 
 A1. **Design only.** The operator selected a persistent, cheap progress reminder in the
 [audit walkthrough](slim/audit-walk-decisions-2026-11-12.md#1-load-monitoring-and-persistent-progress). This document adds no executable,
@@ -218,7 +218,7 @@ concurrent scans take the lock once; a crash between write and receipt reconcile
 duplicate send; a cold `--dry-run` writes nothing; no model call is made.
 
 G3. **Later slices.** 1b (built 2026-11-12): an `ade-sched` inventory row `com.djbclark.ade-progress` and doctor
-expectations (optional until chosen), enabled after the operator saw `scan --dry-run` on real declarations.
+expectations (chosen 2026-11-13), enabled after the operator saw `scan --dry-run` on real declarations.
 2: git-handoff ancestry, producer/quota/review receipts, round-robin cursors. 3: an ADE plugin on
 `agent.turn_ended` timers plus `timeline.append` rows (B1) if polling latency or the `stuck`
 semantics prove inadequate.
