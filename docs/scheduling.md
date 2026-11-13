@@ -22,8 +22,9 @@ comment all take the line from one function (`canonical_source`).
 
 **Migration.** A job installed before this change carries `from /abs/path/X.plist`, so its on-disk file differs from the new
 render by that one comment line and `reconcile` plans an `install` for it. That is safe: a loaded launchd job defers
-untouched (no `bootout`, no rewrite, exit 6; `launchd_admission`), and systemd/cron jobs are reinstalled with the identical
-definition. To adopt without a reload, rewrite only the comment line of the installed file (launchd:
+untouched (no `bootout`, no rewrite, exit 6; `launchd_admission`) and stays deferred on every reconcile until its comment
+is rewritten as below; systemd/cron jobs are reinstalled with the identical definition (a supervised systemd service is
+restarted once). To adopt without a reload, rewrite only the comment line of the installed file (launchd:
 `~/Library/LaunchAgents/LABEL.plist`; systemd: the unit's first line; cron: the line after `# BEGIN ade-sched:LABEL`) to the
 repo-relative form, then run `reconcile`: the files now match, so the step is `adopt-ledger` (or `skip`), never a reload.
 

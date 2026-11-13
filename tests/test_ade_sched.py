@@ -185,6 +185,32 @@ def test_plist_outside_the_ade_root_keeps_its_resolved_absolute_path(fake, tmp_p
     assert any(f"from {plist.resolve()}; edit the plist" in x for x in a)
 
 
+@pytest.mark.parametrize("backend", S.BACKENDS)
+def test_symlink_target_with_a_newline_adds_no_line_to_any_artifact(backend, fake, tmp_path):
+    # adversary A1 (2026-11-13): resolving a symlink must not bring a newline back into the comment
+    root = tmp_path / "ade"
+    evil = tmp_path / "x\nExecStartPre=true\n#"
+    evil.mkdir()
+    (evil / "t.plist").write_bytes(plistlib.dumps({"Label": "t.job", "ProgramArguments": ["/bin/true"], "StartInterval": 300}))
+    (root / "config").mkdir(parents=True)
+    (root / "config" / "lnk").symlink_to(evil, target_is_directory=True)
+    j = S.Job.from_plist(root / "config" / "lnk" / "t.plist", ade=root)
+    assert "\n" not in j.source and "\r" not in j.source
+    clean = S.Job.from_dict({"Label": "t.job", "ProgramArguments": ["/bin/true"], "StartInterval": 300}, ade=root)
+    got = sum(len(x.splitlines()) for x in _rendered_texts(j, backend, fake.env))
+    want = sum(len(x.splitlines()) for x in _rendered_texts(clean, backend, fake.env))
+    assert got == want
+    assert not any(line == "ExecStartPre=true" for x in _rendered_texts(j, backend, fake.env) for line in x.splitlines())
+
+
+def test_launchd_comment_never_holds_a_double_hyphen(fake, tmp_path):
+    root = tmp_path / "ade"
+    plist = _mini_plist(root / "a---b")
+    text = next(iter(S.render(S.Job.from_plist(plist, ade=tmp_path / "other"), "launchd", env=fake.env).files.values()))
+    comment = text.split("<!--", 1)[1].split("-->", 1)[0]
+    assert "--" not in comment
+
+
 def test_non_path_source_is_left_alone():
     assert S.canonical_source("<dict>", "/") == "<dict>"
     assert job().source == "<dict>"
