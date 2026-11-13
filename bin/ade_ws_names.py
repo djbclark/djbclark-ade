@@ -85,7 +85,8 @@ def parse_legacy(name: str) -> Legacy | None:
 def normalize_work(middle: str, repo: str) -> str:
     """A legacy middle `<repo> Wave 7` becomes the work `Wave 7` (the repo is now its own field); else unchanged."""
     prefix = f"{repo} "
-    return middle[len(prefix):] if middle.startswith(prefix) and middle[len(prefix):].strip() else middle
+    rest = middle[len(prefix):].strip() if middle.startswith(prefix) else ""
+    return rest or middle.strip()
 
 
 def migrated_name(legacy: Legacy, repo: str) -> str:
@@ -97,8 +98,9 @@ def repo_of(cwd: str) -> str:
     else the directory's own basename. Never raises on a non-repo or a missing directory."""
     path = os.path.realpath(cwd)
     try:
+        env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}  # GIT_DIR & co. would name the wrong repo
         out = subprocess.run(["git", "-C", path, "rev-parse", "--path-format=absolute", "--git-common-dir"],
-                             capture_output=True, text=True, timeout=10, stdin=subprocess.DEVNULL)
+                             capture_output=True, text=True, timeout=10, stdin=subprocess.DEVNULL, env=env)
     except (OSError, subprocess.TimeoutExpired):
         out = None
     if out is not None and out.returncode == 0 and out.stdout.strip():

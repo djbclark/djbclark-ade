@@ -49,7 +49,7 @@ def test_migrated_name_folds_a_repo_prefixed_middle():
     assert wsn.migrated_name(leg, "djbclark-ade") == "WORKERS djbclark-ade (Wave 7)"
     assert wsn.migrated_name(leg, "other") == "WORKERS other (djbclark-ade Wave 7)"
     assert wsn.migrated_name(wsn.parse_legacy("MAIN djbclark-ade Wave 7"), "djbclark-ade") == "MAIN djbclark-ade (Wave 7)"
-    assert wsn.normalize_work("repo ", "repo") == "repo "  # nothing left after the prefix: keep it
+    assert wsn.normalize_work("repo ", "repo") == "repo"  # nothing left after the prefix: keep the (stripped) middle
 
 
 def test_repo_of_uses_the_main_checkout_and_falls_back_to_the_basename(tmp_path):
@@ -65,3 +65,19 @@ def test_repo_of_uses_the_main_checkout_and_falls_back_to_the_basename(tmp_path)
     plain = tmp_path / "not-a-repo"
     plain.mkdir()
     assert wsn.repo_of(str(plain)) == "not-a-repo" and wsn.repo_of(str(tmp_path / "missing")) == "missing"
+
+
+def test_repo_of_ignores_inherited_git_environment(tmp_path, monkeypatch):  # F6
+    main = tmp_path / "real-repo"
+    main.mkdir()
+    subprocess.run(["git", "-C", str(main), "init", "-q"], check=True, capture_output=True)
+    other = tmp_path / "plain"
+    other.mkdir()
+    monkeypatch.setenv("GIT_DIR", str(main / ".git"))
+    monkeypatch.setenv("GIT_COMMON_DIR", str(main / ".git"))
+    assert wsn.repo_of(str(other)) == "plain"
+
+
+def test_normalize_work_strips_what_the_repo_prefix_leaves():  # F8
+    assert wsn.normalize_work("repo  Wave 7", "repo") == "Wave 7"
+    assert wsn.migrated_name(wsn.parse_legacy("MAIN repo  Wave 7"), "repo") == "MAIN repo (Wave 7)"

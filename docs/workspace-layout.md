@@ -58,9 +58,13 @@ in a window name**; it stays in the tab name and the `ade.lead` label. `bin/ade_
 A lead's own-initiative workers and reviewers all go in **one new window per lead**, never one window per launch:
 
 1. **Finding it:** by exact name `WORKERS <repo> (<work>)` when `--window-middle` is given, else the one WORKERS window that
-   holds a live agent labelled `ade.lead=<lead id>`. With the lead id out of the name, **ownership is checked, not
-   assumed**: a matched window holding a live agent labelled for **another** lead is refused, as are two matching windows;
-   a `--window-middle` that matches nothing while the lead owns another window is refused (never a second window).
+   is this lead's by evidence. With the lead id out of the name, **a name never confers ownership**. Evidence: the
+   lead's window record (`$ADE_WORKER_RUN_STATE/<lead id>.windows.json`, written when the helper mints, migrates or adopts a
+   window; all finds and archives run under one global lock), a live agent labelled `ade.lead=<lead id>` in it, or the lead id
+   in a legacy name. A matched window registered to **another** lead, or holding any agent (closed included) labelled for
+   another lead, is refused, as are two matching windows. A name match with no evidence either way may be adopted by a launch
+   (and is then recorded) but is **never archived**. A legacy window is renamed only if its new name is free, after its ownership
+   is recorded. A `--window-middle` that matches nothing while the lead owns another window is refused (never a second window).
 2. **Why one window:** a top-level `paseo run` with the agent environment stripped (`skills/fan-out` section 3) creates a new
    "master" window per launch, because its cwd is the repo's `master` checkout; 11 piled up on 2026-11-13 and archiving an
    agent does not remove its window.
