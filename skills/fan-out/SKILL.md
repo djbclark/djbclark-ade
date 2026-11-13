@@ -40,7 +40,8 @@ sub-agent's final message: the harness cuts that at 4,000 characters.
 ## 3. Out of process: a slice in its own worktree
 
 A slice that edits code gets its own linked worktree (AGENTS.md order 9:
-`git worktree add -b NAME ~/src/<repo>-NAME-wt origin/master`) and runs as a Paseo agent there.
+`git worktree add -b NAME ~/src/<repo>-NAME-wt origin/master`); the slice works in that worktree (its absolute path is in
+the brief) while its Paseo session sits in the lead's workers window (below).
 After `route_agent.py plan` / `route` and `load-watch admit` (machine capacity — not service quota):
 
 ```bash
@@ -66,12 +67,18 @@ The env-stripped launch has no caller workspace, so each `--new-workspace` launc
 archiving an agent keeps its window). Instead:
 
 1. First launch of the run: `env -u PASEO_AGENT_ID -u PASEO_AGENT_CWD -u PASEO_WORKSPACE_ID paseo run --new-workspace local
-   --cwd ~/src/<repo> … --json` creates the window; read its `workspaceId` (or `paseo workspace ls --json`) and name it:
-   `paseo workspace rename wks_… "workers <middle> <lead agent id>"` (`<middle>` the lead's choice, e.g. `djbclark-ade Wave 7`).
+   --cwd ~/src/<repo> …` creates the window. Take its id from the `Created workspace wks_… - <name>` line on stderr (to a
+   file, not a pipe) or the new agent's state file `$PASEO_HOME/agents/*/<agent id>.json` `workspaceId`: `paseo run --json`
+   returns no workspace id and `paseo workspace ls` cannot tell the new window from another lead's, so never pick one by
+   cwd or name. Record it, then name it: `paseo workspace rename wks_… "workers <middle> <lead agent id>"` (`<middle>` the
+   lead's choice, e.g. `djbclark-ade Wave 7`).
 2. Every later launch: the same env strip, `--workspace wks_… --cwd ~/src/<repo>` (the window's own cwd; the writer's
    claimed worktree goes in its brief), never `--new-workspace`.
-3. After each launch, name the tab: `paseo agent update <id> --name "worker <middle> <lead agent id>"` (singular `worker`).
-4. When the run ends, archive the agents, then the window: `paseo workspace archive wks_…`.
+3. After each launch, name the tab: `paseo agent update <full agent id> --name "worker <middle> <lead agent id>"` (singular
+   `worker`; tabs share a name, so always pass a full agent id).
+4. When the run ends, archive the agents, then the window (`paseo workspace archive wks_…`) only if every agent labelled
+   `ade.lead=<own id>` is archived or idle with its report handled (`paseo ls -a -g --json`) and the recorded window's
+   name reads `workers … <own id>`: the archive stops every live agent and terminal in the window.
 
 A handoff **successor** is a new lead, not a worker: it starts as `skills/handoff` says (its own top-level `paseo run`), keeps
 its own placement, and opens its own workers window under its own id.
@@ -129,13 +136,14 @@ Three independent fixes in one repository, one review:
 1. Lead writes `a.md`, `b.md`, `c.md` (one owner per file set, the check each slice runs) and three
    worktrees `~/src/r-a-wt`, `~/src/r-b-wt`, `~/src/r-c-wt`.
 2. For each slice, take `route_agent.py plan --kinds code`'s `Choice.dispatch` and run it with
-   `--workspace <workspace-a|b|c> --cwd ~/src/r-<name>-wt --label ade.name=<name> --label ade.task=fixes`
-   plus the positional brief (agent and model from the plan).
+   `--workspace <the lead's workers window> --cwd ~/src/r --label ade.name=<name> --label ade.task=fixes`
+   plus the positional brief (agent and model from the plan; the brief names the slice's worktree `~/src/r-<name>-wt`
+   as an absolute path).
 3. While they run, the lead does its own part (standing order 3), then `paseo wait` on each agent id.
 4. A BLOCKED report: answer with `paseo send --json --no-wait`, or re-brief under a new `--label ade.name=…`.
 5. Each DONE slice: review its diff, push its branch, open the PR; one read-only review per PR through
    `bin/review-launch` (Claude) or a judgment `paseo run` brief that says change nothing, in the same
-   claimed workspace/cwd as the slice.
+   workers window, its brief naming the slice's worktree.
 
 ## 6. Avoid operator permission cards (2026-11-12)
 

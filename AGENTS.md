@@ -35,7 +35,7 @@ Each doc carries its own summary.
 | [docs/review-boundary.md](docs/review-boundary.md) | `bin/review-launch`, `bin/review-pr` and the `adversary-marker` Action (2026-11-06): the boundary, the merge gate, what is untrusted |
 | [docs/git-guard.md](docs/git-guard.md) | `bin/ade-git-guard`, the ref hooks and the claim registry (owner and expiry): commands, exit codes, refusal rules |
 | [docs/jj-vs-paseo-worktrees.md](docs/jj-vs-paseo-worktrees.md) | design (2026-11-10): jj vs Paseo worktrees post-CoW claims; recommendation defer / guarded pilot only |
-| [docs/workspace-layout.md](docs/workspace-layout.md) | naming: `<topic>-pw` Paseo workspaces, `<name>-pt` tabs; renames with `paseo workspace rename`, `paseo agent update --name` |
+| [docs/workspace-layout.md](docs/workspace-layout.md) | naming: project / window / tab, one `workers <middle> <lead agent id>` window per lead with `worker …` tabs (2026-11-13); renames with `paseo workspace rename`, `paseo agent update --name` |
 | [docs/scheduling.md](docs/scheduling.md) | `bin/ade-sched` (2026-11-04): a launchd plist as a launchd agent, systemd user timer or cron; judgment jobs are Paseo schedules |
 | [docs/gates.md](docs/gates.md) | the frontier allowance, `config/gates.toml [frontier]` (trimmed 2026-11-07: the Claude quota gates went with the quota guard) |
 | [docs/upstream-review-gate.md](docs/upstream-review-gate.md) | `claude/hooks/upstream_review_gate.py` (2026-11-12): denies `gh`/`git push`/Jira writes to CFEngine upstream (`cfengine`, `NorthernTechHQ`) only; target resolution, limits, registration |

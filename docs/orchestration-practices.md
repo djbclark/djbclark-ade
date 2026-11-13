@@ -99,7 +99,7 @@ the task, and the ambiguity is copied into every slice.² ³ Every brief has:
 6. **Acceptance check:** the command or observation that proves it.
 7. **Boundaries:** the concurrency contract, and what is out of scope.
 8. **Names with ids (2026-10-23, from the load watcher):** wherever a brief, message or report names a Paseo
-   workspace, give the name the GUI shows (`<topic>-pw`) and its id (`wks_…`); for an agent, its agent id too. A GUI
+   workspace, give the name the GUI shows (a workers window: `workers <middle> <lead agent id>`) and its id (`wks_…`); for an agent, its agent id too. A GUI
    rename makes a name alone unreliable, and an id alone is unreadable.
 9. **The delivery footer** ([docs/dispatch-footer.md](dispatch-footer.md)): where the report goes, the `.done`
    marker, the last line `DONE`, `BLOCKED: …` or `NO-REPORT: …`, and rule 22's push-on-completion
