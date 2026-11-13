@@ -3484,8 +3484,8 @@ def apply_sched_reconcile(
 
     Live writes only when the host backend is a reconcile write backend (systemd, cron,
     launchd). Installs and removals pass ``native_admission=True``: on launchd the
-    native adapter admits only absent jobs and unloaded jobs whose plist is provably ADE's (a loaded job defers);
-    every other backend defers (exit 6).
+    native admission enables only an exclusive create+bootstrap of an absent job and a bootstrap of an unloaded job whose
+    plist byte-matches the render; loaded jobs, other files and all removals defer, as does every other backend (exit 6).
     """
     import ade_sched as sched  # noqa: WPS433 — optional at catalog-check time
 

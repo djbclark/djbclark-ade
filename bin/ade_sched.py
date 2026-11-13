@@ -55,6 +55,7 @@ import re
 import shlex
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -947,6 +948,68 @@ def install(job: Job, backend: str | Backend | None = None, *, dry_run: bool = F
     if r.backend == "systemd":
         _cron_remove(c, job.label, err, quiet_missing=True)
     return r
+
+
+class NativeDefer(Exception):
+    """The native launchd install found the path occupied or not provably ADE's: nothing was written; the step defers."""
+
+
+def create_exclusive(path: Path, text: str, mode: int = 0o600) -> None:
+    """Create `path` with `text` only if nothing exists there: an O_EXCL temp file hard-linked to the target.
+
+    os.link never replaces, so a writer that got there first (a file, a symlink, even a dangling one) makes this raise
+    FileExistsError and its bytes survive. The temp name is removed either way; the target is never unlinked."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(text)
+        os.chmod(tmp, mode)
+        os.link(tmp, path)
+    finally:
+        Path(tmp).unlink(missing_ok=True)
+
+
+def install_launchd_native(job: Job, text: str, *, env: Mapping[str, str] | None = None, err: TextIO | None = None,
+                           **overrides: Any) -> str:
+    """The only launchd write that native admission enables: it can neither kill a running job nor replace a definition.
+
+    1. The target is absent: create it exclusively, then `launchctl bootstrap` (never `bootout`).
+    2. The target is a regular file that byte-matches `text` (an unloaded ADE definition): `bootstrap` only, no write.
+    3. Anything else (it appeared since admission, differs, is a symlink or special file): raise NativeDefer, nothing touched.
+
+    If `bootstrap` fails (for example the label was loaded meanwhile) the error is raised without any `bootout` or unlink;
+    a plist this call created stays on disk and is named in the message. Returns "created" or "bootstrapped"."""
+    err = err or sys.stderr
+    c = _ctx("launchd", env, overrides)
+    plist = c.agents_dir / f"{job.label}.plist"
+    if job.worktree:
+        raise SchedError(EX_USAGE, f"__ADE__ defaulted to {job.worktree}, a linked git worktree that is deleted after its "
+                                   f"merge; install from the primary checkout (or pass --ade DIR where the tool has it)")
+    _log_dirs(job)
+    created = False
+    if os.path.lexists(plist):
+        try:
+            st = os.lstat(plist)
+            if not stat.S_ISREG(st.st_mode):
+                raise NativeDefer(f"{plist} is not a regular file")
+            have = plist.read_bytes()
+        except OSError as exc:
+            raise NativeDefer(f"{plist} is unreadable ({exc})") from exc
+        if have != text.encode("utf-8"):
+            raise NativeDefer(f"{plist} exists and is not the ADE render; native admission never overwrites it")
+    else:
+        try:
+            create_exclusive(plist, text)
+        except FileExistsError as exc:
+            raise NativeDefer(f"{plist} appeared after admission; left untouched") from exc
+        created = True
+    try:
+        _activate(c, [c.launchctl, "bootstrap", f"gui/{c.uid}", str(plist)])
+    except SchedError as exc:
+        where = f"; {plist} was created by this run and left in place (no bootout, no unlink)" if created else ""
+        raise SchedError(exc.code, f"{exc}{where}") from exc
+    return "created" if created else "bootstrapped"
 
 
 def uninstall(label: str, backend: str | Backend | None = None, *, dry_run: bool = False, activate: bool = True,
@@ -1975,19 +2038,20 @@ def launchd_admission(
     A launch exclusion on a LOADED job does not exist from outside it. Probe, macOS 27.2 (2026-11-12): `launchctl disable`
     does not stop a loaded job's StartInterval trigger and `kickstart` still starts it; and an idle read followed by
     `bootout` is two separate launchd operations, so a trigger firing between them would be signalled (review of #619).
-    The adapter therefore runs one read-only `launchctl print gui/UID/LABEL` and decides:
+    Nor can a check of a plist and the later write be one atomic step against other writers. So the adapter admits only
+    the writes that cannot kill or overwrite (executed by `install_launchd_native`, never `bootout`, never a replace):
 
-    1. Loaded, in any state: defer (hold), nothing touched, nothing killed. A loaded job is admitted only once its launch
-       path participates in admission (follow-up: an ADE job wrapper that takes a shared admission lock per run, with
-       reconcile holding it exclusive). The updater's own busy service keeps its existing refusal.
-    2. Not loaded and no plist at `agents_dir/LABEL.plist`: no launch path exists; admitted.
-    3. Not loaded but a plist exists: admitted only if `provenance(step, plist)` returns None, i.e. the file byte-matches
-       the ADE render or the ledger owns the label and its recorded artifact hash equals the file's hash; otherwise the
-       step defers untouched (a same-label, same-path foreign or replaced definition is never overwritten or removed).
-    4. `print` failing for any reason other than "could not find service" defers.
+    1. Removal: always defer. An unlink cannot be compare-and-swap.
+    2. Loaded, in any state: defer, nothing touched. (The updater's own busy service keeps its existing refusal.)
+    3. Not loaded and nothing at `agents_dir/LABEL.plist` (not even a dangling symlink): admitted; the install creates the
+       file exclusively and bootstraps it.
+    4. Not loaded and a file exists: admitted only if `provenance(step, plist)` returns None, i.e. it byte-matches the ADE
+       render; the install then only bootstraps it. Any other file defers untouched.
+    5. `print` failing for any reason other than "could not find service" defers.
 
-    An unloaded job can still be bootstrapped by something outside this contract (a low-level `install`, a login); that is
-    the documented limit of an unloaded job's admission."""
+    Follow-up that unlocks the rest: an ADE job wrapper taking a shared admission lock per run (reconcile exclusive), and
+    a writer ownership transaction. An unloaded job can still be bootstrapped by something outside this contract (a
+    low-level `install`, a login); `install_launchd_native` never boots it out and fails or defers instead."""
     runner = run or _run
     domain = f"gui/{uid}"
 
@@ -1995,6 +2059,9 @@ def launchd_admission(
         label = step.label
         if not isinstance(label, str) or not LABEL_RE.fullmatch(label):
             return contextlib.nullcontext(JobAdmission())
+        if step.action == "remove":
+            return contextlib.nullcontext(JobAdmission(hold=(
+                f"removal of {label} defers: an unlink cannot be compare-and-swap against other writers")))
         rc, out, err_txt = runner([launchctl, "print", f"{domain}/{label}"], env)
         if rc == 0:
             activity = parse_launchd_activity(out)
@@ -2007,7 +2074,7 @@ def launchd_admission(
         if rc != LAUNCHD_NOT_LOADED_RC and "could not find service" not in err_txt.lower():
             return contextlib.nullcontext(JobAdmission(hold=f"launchd state of {label} unreadable (rc={rc})"))
         plist = agents_dir / f"{label}.plist"
-        if plist.exists():
+        if os.path.lexists(plist):
             reason = provenance(step, plist) if provenance else "no provenance check supplied"
             if reason is not None:
                 return contextlib.nullcontext(JobAdmission(hold=f"{plist} is not provably ADE's: {reason}"))
@@ -2038,6 +2105,7 @@ def plan_reconcile(
     assert isinstance(entries, dict)
     steps: list[ReconcileStep] = []
     expected_labels: dict[str, str] = {}  # label -> logical name
+    blocked_names: set[str] = set()  # logical rows blocked this plan: their removals are suppressed
     # ADE-owned ade-sched/paseo rows that carry a label but are not chosen (class optional/offered, chosen = false):
     # label -> (name, owner). An installed label of such a row is not "foreign", and a ledger-owned one is unloaded because
     # it was un-chosen. Dependency/service rows (herdr-server) are not adoptable, so they keep the old silent path.
@@ -2179,6 +2247,7 @@ def plan_reconcile(
             continue
         plist_path = (root / plist).resolve()
         if not plist_path.is_file():
+            blocked_names.add(name)
             steps.append(ReconcileStep(
                 name, "blocked", owner,
                 f"plist missing: {plist}",
@@ -2191,6 +2260,7 @@ def plan_reconcile(
             job = Job.from_plist(plist_path, subst, ade=ade)
             rendered = render(job, backend_name, env=env, **overrides)
         except SchedError as e:
+            blocked_names.add(name)
             steps.append(ReconcileStep(
                 name, "blocked", owner,
                 f"render failed: {e}",
@@ -2198,7 +2268,7 @@ def plan_reconcile(
             ))
             continue
         if job.label != label:
-            expected_labels[job.label] = name  # the plist's real label stays expected: no removal plan for it
+            blocked_names.add(name)
             steps.append(ReconcileStep(
                 name, "blocked", owner,
                 f"catalog label {label!r} differs from the plist Label {job.label!r}",
@@ -2345,6 +2415,10 @@ def plan_reconcile(
         if names is not None and logical_id not in names:
             continue
         if not isinstance(entry, dict):
+            continue
+        if logical_id in blocked_names:
+            # A blocked row (missing or unrenderable source, label mismatch) keeps its current AND prior identities:
+            # removing the last valid definition because its replacement is broken would leave nothing running.
             continue
         label = entry.get("label")
         if isinstance(label, str) and label and label not in expected_labels:
@@ -2506,39 +2580,32 @@ def reconcile(
             "ok": False,
         }], EX_UNAVAILABLE if e.code == EX_UNAVAILABLE else EX_USAGE)
 
+    native_install = False  # True: installs go through install_launchd_native (create-exclusive + bootstrap, no bootout)
     if admission is None and native_admission and b.name == "launchd" and activate:
+        native_install = True
         # The one native adapter (launchd); systemd/cron/paseo keep the conservative default. An explicit
         # `admission` always wins, and no environment or CLI switch reaches this branch.
         nc = _ctx(b, env, overrides)
 
         def plist_provenance(step: ReconcileStep, plist: Path) -> str | None:
-            """None when the plist on disk is provably ADE's: the ADE render, or the ledger's recorded artifact."""
-            if not plist.is_file():  # a FIFO or device must never be read (a read would block under the lock)
-                return "not a regular file"
+            """None only when the file on disk is a regular file that byte-matches the ADE render (then it is bootstrapped,
+            never written). A ledger hash is not enough: it could not stop a replacement between check and write."""
             try:
+                if not stat.S_ISREG(os.lstat(plist).st_mode):
+                    return "not a regular file"
                 disk_hash = artifact_hash({plist: plist.read_text(encoding="utf-8")})
             except (OSError, UnicodeDecodeError) as exc:
                 return f"unreadable ({exc})"
-            if step.action == "remove":
-                entry = _removal_entry(entries, step.name, str(step.label), snapshot=step.ledger_snapshot)
-            else:
-                job_row = next((j for j in jobs if j.get("name") == step.name), None)
-                if isinstance(job_row, dict) and isinstance(job_row.get("plist"), str):
-                    try:
-                        subst = job_subst_from_row(job_row, root=root, env=env, extra=extra_subst)
-                        job = Job.from_plist(root / str(job_row["plist"]), subst, ade=ade)
-                        if artifact_hash(render(job, b, env=env, **overrides).files) == disk_hash:
-                            return None
-                    except SchedError:
-                        pass
-                entry = entries.get(step.name)
-            if (
-                _ledger_owns(entry, label=str(step.label))
-                and entry.get("backend") == b.name
-                and entry.get("artifact_hash") == disk_hash
-            ):
-                return None
-            return "no ADE render match and no ledger ownership with a matching artifact hash"
+            job_row = next((j for j in jobs if j.get("name") == step.name), None)
+            if isinstance(job_row, dict) and isinstance(job_row.get("plist"), str):
+                try:
+                    subst = job_subst_from_row(job_row, root=root, env=env, extra=extra_subst)
+                    job = Job.from_plist(root / str(job_row["plist"]), subst, ade=ade)
+                    if artifact_hash(render(job, b, env=env, **overrides).files) == disk_hash:
+                        return None
+                except SchedError:
+                    pass
+            return "exists and does not byte-match the ADE render"
 
         launchd_native = launchd_admission(
             launchctl=nc.launchctl, uid=nc.uid, agents_dir=nc.agents_dir, env=nc.env, provenance=plist_provenance,
@@ -2640,6 +2707,19 @@ def reconcile(
             + [s for s in steps if s.action != "remove"]
         )
 
+        def record_deferral(step: ReconcileStep, reason: str, previous: Any) -> None:
+            nonlocal deferred
+            deferred = True
+            deferred_names.add(step.name)
+            target_backend = "paseo" if _step_targets_paseo(step) else b.name
+            key = json.dumps([step.name, target_backend, step.label, step.action])
+            deferrals["jobs"][key] = {
+                "logical_id": step.name, "backend": target_backend, "label": step.label,
+                "action": step.action, "reason": reason, "updated_at": _utc_now(),
+                "prior_identity": previous,
+            }
+            _atomic_write_json(deferrals_path, deferrals)
+
         for step in ordered_steps:
             with contextlib.ExitStack() as admissions:
                 row: dict[str, Any] = {
@@ -2668,16 +2748,7 @@ def reconcile(
                     reason = (evidence.refusal() if isinstance(evidence, JobAdmission)
                               else "unknown shared admission evidence")
                 if reason is not None:
-                    deferred = True
-                    deferred_names.add(step.name)
-                    target_backend = "paseo" if _step_targets_paseo(step) else b.name
-                    key = json.dumps([step.name, target_backend, step.label, step.action])
-                    deferrals["jobs"][key] = {
-                        "logical_id": step.name, "backend": target_backend, "label": step.label,
-                        "action": step.action, "reason": reason, "updated_at": _utc_now(),
-                        "prior_identity": previous,
-                    }
-                    _atomic_write_json(deferrals_path, deferrals)
+                    record_deferral(step, reason, previous)
                     row.update(action="deferred", detail=reason, touch=False, ok=False)
                     results.append(row)
                     continue
@@ -2945,14 +3016,32 @@ def reconcile(
                                 f"catalog label {label!r} differs from the plist Label {job.label!r}; "
                                 f"refusing to act on an unadmitted label",
                             )
-                        install(
-                            job, b, dry_run=False, activate=activate,
-                            allow_no_linger=allow_no_linger, env=env, out=out, err=err,
-                            **overrides,
-                        )
+                        if native_install:
+                            install_launchd_native(
+                                job, next(iter(rendered.files.values())), env=env, err=err, **overrides,
+                            )
+                        else:
+                            install(
+                                job, b, dry_run=False, activate=activate,
+                                allow_no_linger=allow_no_linger, env=env, out=out, err=err,
+                                **overrides,
+                            )
                         st = status(label, b, env=env, **overrides)
                         if not st.installed:
                             raise SchedError(EX_ACTIVATE, f"read-back: {label} not installed after install")
+                    except NativeDefer as e:
+                        # Nothing was written: put the ledger back as it was and defer (exit 6), never "failed".
+                        if prev is None:
+                            entries.pop(step.name, None)
+                        else:
+                            entries[step.name] = prev
+                        ledger["entries"] = entries
+                        save_jobs_ledger(ledger, state_dir, env=env)
+                        reason = str(e)
+                        record_deferral(step, reason, prev)
+                        row.update(action="deferred", detail=reason, touch=False, ok=False)
+                        results.append(row)
+                        continue
                     except SchedError as e:
                         entries[step.name] = _with_prior_identity(
                             _entry_for_install(

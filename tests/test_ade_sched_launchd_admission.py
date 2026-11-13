@@ -1,4 +1,4 @@
-"""W21b: the read-only native launchd admission adapter for `ade-sched reconcile` (offline; a fake launchctl records argv).
+"""W21b: the native launchd admission for `ade-sched reconcile` (offline; a fake launchctl records argv).
 
 The fake never touches the host: its "launchd" is a directory of marker files. A loaded job is never admitted (no launch
 exclusion exists from outside it: `launchctl disable` does not stop a loaded StartInterval job, and an idle read followed
@@ -11,6 +11,7 @@ import io
 import json
 import os
 import signal
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -28,6 +29,7 @@ from test_ade_jobs_reconcile import _mini_catalog  # noqa: E402
 LABEL = "com.djbclark.deadline-sweep"
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "launchd"
 NEVER = {"disable", "enable", "kickstart", "kill", "bootout", "bootstrap", "remove"}
+KILLERS = NEVER - {"bootstrap"}  # an admitted install may bootstrap; nothing may ever boot out, disable or kill
 
 FAKE_LAUNCHCTL = r"""#!/usr/bin/env python3
 import json, os, sys
@@ -54,6 +56,12 @@ if flag("fail", cmd):
     sys.stderr.write("fake failure\n"); sys.exit(int(read("fail", cmd) or 1))
 if cmd == "print":
     if not flag("loaded", label):
+        n = int(read("load_after_absent_print") or 0)   # "the Nth not-loaded answer is followed by an outside loader"
+        if n:
+            seen = int(read("absent_prints", "n") or 0) + 1
+            write(str(seen), "absent_prints", "n")
+            if seen == n:
+                touch("loaded", label); write("running", "state", label); write("4242", "pid", label)
         sys.stderr.write("Could not find service\n"); sys.exit(113)
     if flag("garbage"):
         print("something unexpected"); sys.exit(0)
@@ -74,6 +82,8 @@ elif cmd == "bootout":
     drop("loaded", label)
 elif cmd == "bootstrap":
     base = os.path.basename(argv[2])[:-len(".plist")]
+    if flag("loaded", base):
+        sys.stderr.write("Bootstrap failed: 5: Input/output error\n"); sys.exit(5)
     touch("loaded", base)
 sys.exit(0)
 """
@@ -127,7 +137,7 @@ def ld(tmp_path):
         (root / "fail" / cmd).write_text(rc)
 
     f.mark, f.fail = mark, fail
-    f.flag = lambda name: (root / name).write_text("1")
+    f.flag = lambda name, text="1": (root / name).write_text(text)
     f.loaded = lambda label=LABEL: (root / "loaded" / label).exists()
     f.killed = lambda label=LABEL: (root / "killed" / label).exists()
     f.unload = lambda label=LABEL: (root / "loaded" / label).unlink()
@@ -188,12 +198,21 @@ def test_absent_job_is_admitted(ld):
 
 
 @pytest.mark.parametrize("kw", [dict(), dict(state="running", pid=4242), dict(state="running"), dict(pid=9)])
-@pytest.mark.parametrize("action", ["install", "remove"])
-def test_loaded_job_in_any_state_defers_untouched(ld, kw, action):
+def test_loaded_job_in_any_state_defers_untouched(ld, kw):
     _existing(ld, **kw)
-    with _adapter(ld, provenance=lambda step, plist: None)(_step(action)) as ev:
+    with _adapter(ld, provenance=lambda step, plist: None)(_step("install")) as ev:
         assert "loaded" in (ev.refusal() or "")
     assert ld.loaded() and ld.verbs() == ["print"] and not ld.killed()
+
+
+@pytest.mark.parametrize("state", ["absent", "unloaded", "loaded"])
+def test_every_removal_defers_before_any_launchctl_call(ld, state):
+    # An unlink cannot be compare-and-swap against other writers: no native removal, whatever the job's state.
+    if state != "absent":
+        _existing(ld, loaded=(state == "loaded"))
+    with _adapter(ld, provenance=lambda step, plist: None)(_step("remove")) as ev:
+        assert "removal" in (ev.refusal() or "")
+    assert ld.verbs() == []
 
 
 def test_loaded_job_with_unparseable_print_defers_untouched(ld):
@@ -238,9 +257,15 @@ def test_unloaded_plist_is_admitted_only_when_provenance_proves_it(ld, reason, a
         seen.append((step.action, plist))
         return reason
 
-    with _adapter(ld, prov)(_step("remove")) as ev:
+    with _adapter(ld, prov)(_step("install")) as ev:
         assert (ev.refusal() is None) is admitted
-    assert seen == [("remove", ld.agents / f"{LABEL}.plist")] and ld.verbs() == ["print"]
+    assert seen == [("install", ld.agents / f"{LABEL}.plist")] and ld.verbs() == ["print"]
+
+
+def test_dangling_symlink_at_the_plist_path_is_not_absent(ld):
+    (ld.agents / f"{LABEL}.plist").symlink_to(ld.tmp / "nowhere")
+    with _adapter(ld, lambda step, plist: "not a regular file")(_step()) as ev:
+        assert ev.refusal() is not None
 
 
 def test_invalid_label_gets_the_conservative_default(ld):
@@ -271,6 +296,11 @@ def _entries(ld):
     return S.load_jobs_ledger(ld.state, env=ld.env)["entries"]
 
 
+def _deferral_reasons(ld):
+    deferred = json.loads((ld.state / "jobs-deferred.json").read_text())
+    return [v["reason"] for v in deferred["jobs"].values()]
+
+
 def _drift(ld, text="<!-- drift -->\n"):
     plist = ld.agents / f"{LABEL}.plist"
     plist.write_text(plist.read_text() + text)
@@ -285,7 +315,10 @@ def test_fresh_install_is_admitted_and_ledgered(ld):
     assert any(r["action"] == "installed" for r in rows)
     entry = _entries(ld)["deadline-sweep"]
     assert entry["status"] == "committed" and entry["backend"] == "launchd"
-    assert ld.loaded() and not {"disable", "enable", "kickstart", "kill"} & set(ld.verbs())
+    assert ld.loaded() and not KILLERS & set(ld.verbs()) and "bootstrap" in ld.verbs()
+    plist = ld.agents / f"{LABEL}.plist"
+    assert stat.S_IMODE(plist.stat().st_mode) == 0o600
+    assert [f.name for f in ld.agents.iterdir()] == [plist.name]  # the exclusive-create temp name is gone
 
 
 def test_loaded_job_that_needs_a_reload_defers_and_is_never_unloaded(ld):
@@ -313,26 +346,90 @@ def test_work_that_starts_after_the_idle_read_is_never_signalled(ld):
     assert (ld.root / "pid" / LABEL).read_text() == "4242"  # the job that started is still running
 
 
-def test_unloaded_job_with_the_ade_render_is_loaded(ld):
+def test_unloaded_job_with_the_ade_render_is_bootstrapped_without_any_write(ld):
     root, catalog = _installed(ld)
+    plist = ld.agents / f"{LABEL}.plist"
+    before = (plist.read_bytes(), plist.stat().st_ino, plist.stat().st_mtime_ns)
     ld.unload()
     ld.reset()
     rows, rc = _reconcile(ld, root, catalog)
     assert rc == 0 and any(r["action"] == "installed" for r in rows), rows
-    assert ld.loaded() and "bootstrap" in ld.verbs()
+    assert ld.loaded() and "bootstrap" in ld.verbs() and not KILLERS & set(ld.verbs())
+    assert (plist.read_bytes(), plist.stat().st_ino, plist.stat().st_mtime_ns) == before  # no write, no replace
 
 
-def test_unloaded_ade_owned_older_definition_is_replaced(ld):
-    # The ledger owns the file and its recorded hash equals the file's hash: ADE's own older definition.
+def test_unloaded_ade_owned_older_definition_is_deferred_not_overwritten(ld):
+    # R2: even a ledger-owned file whose recorded hash matches is never overwritten: a hash read cannot make
+    # check-and-overwrite atomic against another writer. Only a byte-match of the render is bootstrapped.
     root, catalog = _installed(ld)
     plist = _drift(ld)
+    older = plist.read_bytes()
     ledger = S.load_jobs_ledger(ld.state, env=ld.env)
     ledger["entries"]["deadline-sweep"]["artifact_hash"] = S.artifact_hash({plist: plist.read_text()})
     S.save_jobs_ledger(ledger, ld.state, env=ld.env)
     ld.unload()
+    ld.reset()
     rows, rc = _reconcile(ld, root, catalog)
-    assert rc == 0 and any(r["action"] == "installed" for r in rows), rows
-    assert "drift" not in plist.read_text() and ld.loaded()
+    assert rc == 6 and any(r["action"] == "deferred" for r in rows), rows
+    assert plist.read_bytes() == older and not NEVER & set(ld.verbs())
+    assert any("not provably ADE's" in r for r in _deferral_reasons(ld)), _deferral_reasons(ld)
+
+
+def test_outside_loader_after_an_absent_print_is_never_booted_out(ld):
+    # R1: `print` says "not loaded", then something loads the label and starts work. The install must not bootout.
+    root = _mini_catalog(ld.tmp)
+    catalog = ai.load_catalog(root=root)
+    # Fresh install reads: 2x plan-time status, then the adapter's own `print` (the 3rd not-loaded answer) before bootstrap.
+    ld.flag("load_after_absent_print", "3")
+    rows, rc = _reconcile(ld, root, catalog)
+    assert (ld.root / "absent_prints" / "n").read_text() == "3" and "bootstrap" in ld.verbs()  # the race really happened
+    assert rc == 1 and any(r["action"] == "failed" for r in rows), rows
+    assert "bootout" not in ld.verbs() and not KILLERS & set(ld.verbs())
+    assert not ld.killed() and ld.loaded() and (ld.root / "pid" / LABEL).read_text() == "4242"
+    failed = next(r for r in rows if r["action"] == "failed")
+    assert "left in place" in failed["detail"] and (ld.agents / f"{LABEL}.plist").exists()
+
+
+def test_target_that_appears_between_admission_and_write_is_not_overwritten(ld, monkeypatch):
+    root = _mini_catalog(ld.tmp)
+    catalog = ai.load_catalog(root=root)
+    plist = ld.agents / f"{LABEL}.plist"
+    real = S._log_dirs  # runs after admission, before the existence check
+    monkeypatch.setattr(S, "_log_dirs", lambda job: (real(job), plist.write_text("<plist>hand managed</plist>\n")))
+    rows, rc = _reconcile(ld, root, catalog)
+    assert rc == 6 and any(r["action"] == "deferred" for r in rows), rows
+    assert plist.read_text() == "<plist>hand managed</plist>\n" and not NEVER & set(ld.verbs())
+    assert "deadline-sweep" not in _entries(ld)  # the pending intent was rolled back, not left as failed
+
+
+def test_target_that_appears_during_the_exclusive_create_is_not_overwritten(ld, monkeypatch):
+    root = _mini_catalog(ld.tmp)
+    catalog = ai.load_catalog(root=root)
+    plist = ld.agents / f"{LABEL}.plist"
+    real = S.create_exclusive
+
+    def racing(path, text, mode=0o600):
+        path.write_text("<plist>hand managed</plist>\n")  # a writer wins right before our link
+        return real(path, text, mode)
+
+    monkeypatch.setattr(S, "create_exclusive", racing)
+    rows, rc = _reconcile(ld, root, catalog)
+    assert rc == 6, rows
+    assert plist.read_text() == "<plist>hand managed</plist>\n" and not NEVER & set(ld.verbs())
+    assert [f.name for f in ld.agents.iterdir()] == [plist.name]
+
+
+@pytest.mark.parametrize("make", ["file", "dangling-symlink"])
+def test_create_exclusive_never_replaces_anything(tmp_path, make):
+    target = tmp_path / "x.plist"
+    if make == "file":
+        target.write_text("old")
+    else:
+        target.symlink_to(tmp_path / "nowhere")
+    with pytest.raises(FileExistsError):
+        S.create_exclusive(target, "new")
+    assert (target.read_text() == "old") if make == "file" else target.is_symlink()
+    assert [f.name for f in tmp_path.iterdir()] == ["x.plist"]
 
 
 @pytest.mark.parametrize("loaded", [False, True])
@@ -348,6 +445,8 @@ def test_same_path_foreign_plist_without_ledger_is_never_overwritten(ld, loaded)
     assert rc == 6 and any(r["action"] == "deferred" for r in rows), rows
     assert plist.read_text() == "<plist>hand managed</plist>\n"
     assert not NEVER & set(ld.verbs()) and "deadline-sweep" not in _entries(ld)
+    # refused by admission itself (before any write), not only by the install-time byte compare
+    assert any("loaded" in r if loaded else "not provably ADE's" in r for r in _deferral_reasons(ld)), _deferral_reasons(ld)
 
 
 def test_plist_replaced_after_the_ledger_recorded_it_is_not_overwritten(ld):
@@ -361,22 +460,6 @@ def test_plist_replaced_after_the_ledger_recorded_it_is_not_overwritten(ld):
     assert plist.read_text() == "<plist>replaced by someone else</plist>\n" and not NEVER & set(ld.verbs())
 
 
-def test_ledger_row_of_another_backend_does_not_prove_ownership(ld, monkeypatch):
-    # plan_reconcile already defers a backend migration; force the install step so the adapter's own check is what refuses.
-    root, catalog = _installed(ld)
-    plist = _drift(ld)
-    ledger = S.load_jobs_ledger(ld.state, env=ld.env)
-    ledger["entries"]["deadline-sweep"]["artifact_hash"] = S.artifact_hash({plist: plist.read_text()})
-    ledger["entries"]["deadline-sweep"]["backend"] = "systemd"
-    S.save_jobs_ledger(ledger, ld.state, env=ld.env)
-    ld.unload()
-    ld.reset()
-    monkeypatch.setattr(S, "plan_reconcile", lambda *a, **kw: [_step()])
-    rows, rc = _reconcile(ld, root, catalog)
-    assert rc == 6, rows
-    assert "drift" in plist.read_text() and not NEVER & set(ld.verbs())
-
-
 def test_non_utf8_plist_defers_instead_of_crashing(ld):
     root = _mini_catalog(ld.tmp)
     catalog = ai.load_catalog(root=root)
@@ -387,18 +470,49 @@ def test_non_utf8_plist_defers_instead_of_crashing(ld):
     assert plist.read_bytes() == b"bplist00\xff\xfe\x80" and not NEVER & set(ld.verbs())
 
 
-def test_label_mismatch_does_not_plan_removal_of_the_installed_label(ld):
+@pytest.mark.parametrize("breakage", ["label-mismatch", "missing-source", "unrenderable-source"])
+def test_blocked_row_keeps_its_installed_definition_and_ledger_row(ld, breakage):
     root, catalog = _installed(ld)
     plist = ld.agents / f"{LABEL}.plist"
+    bytes_before = plist.read_bytes()
+    entry_before = _entries(ld)["deadline-sweep"]
     ld.unload()
-    toml = root / "config" / "install.toml"
-    toml.write_text(toml.read_text().replace(f'label = "{LABEL}"', 'label = "com.djbclark.other"'))
+    source = root / "config" / "launchd" / f"{LABEL}.plist"
+    if breakage == "label-mismatch":
+        toml = root / "config" / "install.toml"
+        toml.write_text(toml.read_text().replace(f'label = "{LABEL}"', 'label = "com.djbclark.other"'))
+    elif breakage == "missing-source":
+        source.unlink()
+    else:
+        source.write_text("<plist><dict><key>Label</key></dict>")  # not renderable
     catalog = ai.load_catalog(root=root)
     ld.reset()
     rows, rc = _reconcile(ld, root, catalog)
     assert rc == 1 and any(r["action"] == "blocked" for r in rows), rows
-    assert not any(r["action"] == "removed" for r in rows) and plist.exists()
-    assert not NEVER & set(ld.verbs())
+    assert not any(r["action"] in ("removed", "remove") for r in rows)
+    assert plist.read_bytes() == bytes_before and not NEVER & set(ld.verbs())
+    assert _entries(ld)["deadline-sweep"] == entry_before
+
+
+@pytest.mark.parametrize("breakage", ["missing-source", "unrenderable-source"])
+def test_planner_alone_suppresses_removal_for_a_blocked_row(ld, breakage):
+    # Protects low-level callers too: no admission involved, only plan_reconcile.
+    root, catalog = _installed(ld)
+    source = root / "config" / "launchd" / f"{LABEL}.plist"
+    if breakage == "missing-source":
+        source.unlink()
+    else:
+        source.write_text("<plist><dict><key>Label</key></dict>")
+    catalog = ai.load_catalog(root=root)
+    ledger = S.load_jobs_ledger(ld.state, env=ld.env)
+    ledger["entries"]["deadline-sweep"]["prior_identity"] = {**ledger["entries"]["deadline-sweep"],
+                                                            "label": "com.djbclark.older"}
+    steps = S.plan_reconcile(
+        catalog.jobs, catalog.retired_jobs, ledger=ledger, live=S.LiveScan("launchd", ()), backend_name="launchd",
+        root=root, ade=root, env=ld.env, names={"deadline-sweep"}, platform_name="mac",
+    )
+    assert [x.action for x in steps if x.name == "deadline-sweep"] == ["blocked"]
+    assert not [x for x in steps if x.action == "remove"]
 
 
 def test_fifo_at_the_plist_path_is_not_read(ld):
@@ -449,40 +563,15 @@ def _reconcile_removal(ld, root, catalog, label):
     )
 
 
-def test_removal_of_an_unloaded_ade_owned_job_with_matching_hash_proceeds(ld):
-    root, catalog, label, plist = _owned_retired_job(ld)
+@pytest.mark.parametrize("hash_ok", [True, False])
+@pytest.mark.parametrize("loaded", [False, True])
+def test_every_native_removal_defers_and_keeps_file_and_ledger(ld, loaded, hash_ok):
+    # An unlink cannot be compare-and-swap: even an unloaded, ledger-owned, hash-matching job is not removed.
+    root, catalog, label, plist = _owned_retired_job(ld, loaded=loaded, ledger_hash=None if hash_ok else "deadbeef")
     rows, rc = _reconcile_removal(ld, root, catalog, label)
-    assert rc == 0 and any(r["action"] == "removed" for r in rows), rows
-    assert not plist.exists() and "skillopt-sleep" not in _entries(ld)
-
-
-@pytest.mark.parametrize("snapshot_hash_ok", [True, False])
-def test_removal_authority_from_the_planned_snapshot_is_hash_checked_too(ld, monkeypatch, snapshot_hash_ok):
-    # The ledger row is gone but the plan carries the prior identity (removal authority, `_removal_entry`): the artifact
-    # hash that identity recorded must still match the file before the removal is admitted.
-    root, catalog, label, plist = _owned_retired_job(ld, ledger_hash=None if snapshot_hash_ok else "deadbeef")
-    snapshot = _entries(ld)["skillopt-sleep"]
-    S.save_jobs_ledger(S.empty_jobs_ledger(env=ld.env), ld.state, env=ld.env)
-    step = S.ReconcileStep("skillopt-sleep", "remove", S.OWNER_ADE, "retired", label, touch=True, ledger_snapshot=snapshot)
-    monkeypatch.setattr(S, "plan_reconcile", lambda *a, **kw: [step])
-    rows, rc = _reconcile_removal(ld, root, catalog, label)
-    assert (rc == 0) is snapshot_hash_ok, rows
-    assert plist.exists() is (not snapshot_hash_ok)
-
-
-def test_removal_authorized_by_a_stale_ledger_hash_defers(ld):
-    root, catalog, label, plist = _owned_retired_job(ld, ledger_hash="deadbeef")
-    rows, rc = _reconcile_removal(ld, root, catalog, label)
-    assert rc == 6, rows
+    assert rc == 6 and any(r["action"] == "deferred" for r in rows), rows
     assert plist.exists() and "skillopt-sleep" in _entries(ld)
-
-
-def test_removal_of_a_loaded_job_defers_and_keeps_ownership(ld):
-    root, catalog, label, plist = _owned_retired_job(ld, loaded=True)
-    rows, rc = _reconcile_removal(ld, root, catalog, label)
-    assert rc == 6, rows
-    assert plist.exists() and ld.loaded(label) and "skillopt-sleep" in _entries(ld)
-    assert not NEVER & set(ld.verbs())
+    assert ld.loaded(label) is loaded and ld.verbs() == [] and not ld.killed(label)
 
 
 def test_adopts_a_loaded_low_level_install_without_any_launchctl_mutation(ld):

@@ -402,50 +402,48 @@ running service defer without stopping work. A fleet idle snapshot is insufficie
 Before 2026-11-12 no native adapter existed and production deferred every install and removal; the launchd adapter below
 is the first.
 
-### Native launchd adapter (2026-11-12, narrowed in round 2)
+### Native launchd admission (2026-11-12, narrowed in rounds 2 and 3)
 
-`ade-sched reconcile --yes` and `ade-install apply` pass `native_admission=True`, which on the **launchd** backend (with
-activation on) installs `launchd_admission` as the `admission` callback. An explicit `admission` argument still wins, and
-no environment variable or CLI flag selects or bypasses the adapter. The adapter is **read-only**: it runs
-`launchctl print gui/UID/LABEL` and nothing else, so it can never kill, unload, disable or reload anything.
+`ade-sched reconcile --yes` and `ade-install apply` pass `native_admission=True`. On the **launchd** backend (activation
+on) that installs `launchd_admission` as the `admission` callback and routes installs through `install_launchd_native`.
+An explicit `admission` argument still wins, and no environment variable or CLI flag selects or bypasses the native path.
+The adapter runs one read-only `launchctl print gui/UID/LABEL`; the install path never calls `bootout`, never replaces
+or unlinks a file, and never disables, enables or kickstarts anything.
 
-**Why it never unloads or disables.** A live probe on macOS 27.2 (2026-11-12, throwaway label `StartInterval=5`) showed
+**Why so little is enabled.** A live probe on macOS 27.2 (2026-11-12, throwaway label `StartInterval=5`) showed
 `launchctl disable` on a *loaded* job does **not** stop its StartInterval trigger and `kickstart` still starts it. An idle
-read followed by `bootout` is two operations: a launchd trigger can start work between them and `bootout` would kill it,
-and no fake can show otherwise. No launch exclusion exists from outside the job, so a loaded job is never admitted.
+read followed by `bootout` is two operations (a trigger can start work between them), and a hash check followed by a
+replace or an unlink cannot be atomic against another writer: the reconcile lock only serializes reconcilers. So native
+admission enables exactly the writes that cannot kill or overwrite under concurrency, and everything else defers
+(durable `jobs-deferred.json`, exit 6):
 
-1. **Loaded job, any state** (idle, busy, unknown, unparseable): hold, durable deferral (exit 6), job untouched. The state
-   is parsed (`parse_launchd_activity`: the service block's own `state`/`pid` fields, one tab deep; nested coalition
-   `state = active` lines ignored) only to word the reason; the outcome is the same. Real captured output lives in
-   `tests/fixtures/launchd/`. A `print` that fails other than "could not find service" also defers.
-2. **Absent job** (not loaded and no plist at `agents_dir/LABEL.plist`): no launch path exists (RunAtLoad, StartInterval,
-   StartCalendarInterval, KeepAlive and kickstart all need it loaded); admitted.
-3. **Not loaded but a plist exists at the path**: admitted only when it is provably ADE's. For an install: it byte-matches
-   the render, or the ledger owns the label on the launchd backend and the ledger's recorded `artifact_hash` equals the
-   file's current hash. For a removal: the ownership-and-hash check that authorizes the removal (a stale ledger entry
-   alone no longer does). A foreign same-label, same-path plist, or one replaced after the ledger recorded it, defers
-   untouched and is never overwritten or removed.
-4. **Label check**: a catalog `label` that differs from the plist `Label` is `blocked` at plan time and refused again
-   before `install`.
+1. **Absent job** (not loaded; nothing at `agents_dir/LABEL.plist`, not even a dangling symlink): the plist is created
+   exclusively (an `O_EXCL` temp file hard-linked to the target, so an existing path is never replaced) and then
+   `launchctl bootstrap` runs. If the path appeared since admission, nothing is written and the step defers with the
+   pending ledger intent rolled back. If `bootstrap` fails (for example an outside loader loaded the label meanwhile) the
+   step is `failed` with **no** `bootout` and no unlink: the running work survives, and the new plist stays on disk and
+   is named in the failure.
+2. **Unloaded job whose plist byte-matches the ADE render** (a regular file, not a symlink): `launchctl bootstrap` only,
+   no write. A ledger-owned file that differs from the render is **not** overwritten (a recorded hash cannot make
+   check-and-overwrite atomic): it defers untouched, as does any foreign, replaced, non-UTF-8 or non-regular file.
+3. **Adoption** of a loaded job whose plist byte-matches the render stays a ledger-only record (`adopted`), with no
+   `launchctl` call and no admission (nothing is mutated on the host).
+4. **Loaded job, any state**: defers untouched (`parse_launchd_activity` only words the reason). **Every removal** defers
+   before any `launchctl` call: an unlink cannot be compare-and-swap.
+5. **Label check** and **blocked rows**: a catalog `label` that differs from the plist `Label` is `blocked` at plan time
+   and refused again before install. A blocked logical row (missing or unrenderable source, label mismatch) keeps its
+   current and prior identities: `plan_reconcile` emits no removal for them (this protects low-level callers too).
 
 The updater's own service (`com.djbclark.ade-update-check`) running keeps its existing refusal reason.
 
-**Consequence and follow-up.** Until a launch-path-participating admission exists, a loaded job that needs a reload or a
-removal always defers; stop it deliberately, then reconcile (an unloaded launchd job is never healthy, so the next
-reconcile plans the load). The proper fix is an ADE job wrapper that takes a shared admission lock on every run, with
-reconcile holding it exclusive; the adapter then no longer needs to refuse loaded jobs.
-
-**Known limits (not closed by this adapter).** The adapter itself never kills anything, but the step it admits still runs
-`install()`/`uninstall()`, which start with an unconditional `launchctl bootout`. If something outside the reconcile lock
-(a `just *-install` recipe, a low-level `ade-sched install`, an operator `bootstrap`) loads an admitted absent or unloaded
-job in the milliseconds between the `print` and that `bootout`, its run is signalled and the step still reports success.
-launchd itself cannot start an unloaded job, so only an external loader can open this window; closing it needs
-`install()`/`uninstall()` to skip the `bootout` for an admitted unloaded job (follow-up, not in this PR). A plist swapped in by another
-writer between the provenance read and the atomic write is overwritten the same way. An operator-disabled (`launchctl
-disable`), unloaded ADE job is admitted (no `print-disabled` read): its `bootstrap` fails, the ledger row becomes `failed`,
-and later reconciles exit 1 until the override is cleared.
-Pre-existing and out of scope: the live backend scan (`list_backend_labels`) opens every `*.plist` in the agents directory, so a
-FIFO planted there hangs `reconcile` before the adapter runs.
+**Follow-up that unlocks the rest** (loaded-job reloads, replacements, removals): an ADE job wrapper that takes a shared
+admission lock on every run, with reconcile holding it exclusive, plus a writer ownership transaction so every definition
+writer shares the check-and-write. **Known limits:** a concurrent external loader can still bootstrap an absent or
+unloaded job (this path then fails or defers and never boots it out); another writer that changes an unloaded file between
+the byte-match read and `bootstrap` gets its definition loaded (nothing is overwritten); an operator-disabled
+(`launchctl disable`), unloaded ADE job is admitted, its `bootstrap` fails and the ledger row becomes `failed`; the
+pre-existing live backend scan (`list_backend_labels`) opens every `*.plist` in the agents directory, so a FIFO planted there
+hangs `reconcile` before admission runs.
 
 **systemd, cron and paseo keep the conservative default** (installs and removals defer, exit 6): no adapter proves their
 launch paths yet. A paseo step on a launchd host also keeps it, and so does `--no-activate` (the adapter needs `launchctl`).
