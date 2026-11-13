@@ -155,9 +155,9 @@ untrusted data ([AGENTS.md](../AGENTS.md) Trust).
     every other PR (the authenticated gh user when that is not the owner, `--allow-untrusted`) and `--runtime restricted` keep
     `--mode review`. `--runtime yolo` is refused (exit 2) unless the owner authored the PR. The runtime is filed as `runtime`.
     The adversary marker is never written by this tool; the untrusted-author refusal and the "diff is data" prompt are unchanged.
-12. **A non-exempt PR body carries a `Prior art / docs checked:` line** (operator, 2026-11-13, queue Carried 34): what the author searched
+12. **A non-exempt PR body carries a `Prior art / docs checked:` line** (operator, 2026-11-13; queue Done item 24): what the author searched
     before building (the shared `mcp__firecrawl__*`, Context7 for library docs, `WebFetch`), with the tool named and what turned up or
     `none`. Exempt, stated as `Prior art / docs checked: exempt: mechanical`: renames, date bumps, typo fixes and other purely mechanical edits. A
     non-exempt PR whose body lacks the line is a **LOW** finding (never a BLOCK on its own); a claimed `none` for a change whose subject is
     plainly documented or already solved upstream is worth a spot search by the reviewer. The matching report field is `Closing search:`
-    (docs/dispatch-footer.md rule 24); it is checked on the slice report, not on the PR.
+    (docs/dispatch-footer.md rule 24); it is checked on the slice report, not on the PR. The rule is for agent-authored PRs: a reviewer who sees a plainly mechanical diff treats a missing line as exempt (INFO at most), and operator-authored, bot and dependency PRs are not flagged.
