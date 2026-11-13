@@ -30,7 +30,7 @@ The guard, the hooks and the claim library exist; claims carry an owner and expi
 
 | Wave | Hook | What |
 |---|---|---|
-| W2 | `worktree.create.after` (waiting) | `ade_claims.py new --ttl` from `{ worktree.path, worktree.branch }` plus `git rev-parse HEAD` and optional `remote.origin.url` (TTL defaults to 72 h; override with `ADE_CLAIM_TTL`); then trusted `ade-git-guard install <path>` (soft-fails on exit 73/78 or a missing binary so create is not rolled back). `ADE_CLAIM_DRY_RUN=1` observes only: logs the planned argv and skips both `new` and install. |
+| W2 | `worktree.create.after` (waiting) | `ade_claims.py new --ttl` from `{ worktree.path, worktree.branch }` plus `git rev-parse HEAD` and optional `remote.origin.url` (TTL defaults to 72 h; override with `ADE_CLAIM_TTL`); then trusted `ade-git-guard install <path>` (soft-fails on exit 73/78 or a missing binary so create is not rolled back). Observe mode (below) logs the planned argv and skips both `new` and install. |
 | W2 follow-up | `workspace.archive.after` (notification) | If an active claim exists for `workspace.cwd`, run `ade_claims.py release --id` (worktree teardown can still be pending). |
 | W3 | `agent.open.before` (waiting) | If an active claim exists for `request.cwd` **and** is unbound or owned by `request.agentId`, merge `ADE_CLAIM_ID=<claim id>` into the launch env (covers create's first open and resumes; never exports a foreign claim id). |
 | W3 | `agent.create.after` (notification) | If a claim for `agent.cwd` is unbound or already this agent, run `ade_claims.py bind-owner` (refuses overwriting another `owner.agent`). Cannot set env: Paseo's after-hook is fire-and-forget. |
@@ -43,17 +43,29 @@ Paseo fires `worktree.create.after` after a worktree exists on disk. The plugin'
 `python3 <trusted ade_claims.py> new --id … --path … --branch … --base-sha … --created-by paseo-ade-claim-plugin [--repo-origin …] --ttl <hours>`
 without spawning. The live hook then either:
 
-1. **Observe** (`ADE_CLAIM_DRY_RUN=1|true|yes`): log that argv (including `--ttl`) to stderr and return — no registry write, no `ade-git-guard install`. Safe for Mac dry-runs before `paseo plugin install` enables the plugin for real.
+1. **Observe** (default; see *Observe mode* below): log that argv (including `--ttl`) and return — no registry write, no `ade-git-guard install`. Safe for Mac dry-runs before `paseo plugin install` enables the plugin for real.
 2. **Create**: `spawnSync` the planned argv; on success soft-run trusted `ade-git-guard install <path>`.
 
 Helpers are never taken from the agent's worktree (untrusted): only `ADE_CLAIMS_PY` /
 `ADE_GIT_GUARD` / `ADE_AGENT_BIN` or `bin/ade_claims.py` / `bin/ade-git-guard` / `libexec/agent-bin` beside the
 plugin install. Claim lookup prefers `<git-dir>/ade-claim`, then `ade_claims.py list --json --state active`
 filtered by path. It is **not installed or enabled on the operator Mac yet**; nothing creates, installs or
-releases claims in a live session until `paseo plugin install` wires it (and dry-run stays observe-only even then). The operator may still run
+releases claims in a live session until `paseo plugin install` wires it (and it stays observe-only even then until the mode file says `enforce`). The operator may still run
 `ade-git-guard install <repo>` once over `~/src/*` (the dangerous case is agent B in primary P moving Z's
 branch: the hook must be in P; the shim also installs it the first time an agent runs a non-read command there).
 The operator's shell and IDEs never go through the shim.
+
+**Observe mode (2026-11-13, [#638](https://github.com/djbclark/djbclark-ade/issues/638) D1).** One predicate
+(`resolveClaimMode`, `plugins/ade-claim/server/claim-lib.mjs`) gates **all four hooks**, not only W2: in `observe` the W2 create,
+W2 follow-up archive release, W3 `agent.create.after` owner bind and W3/W4 `agent.open.before` (`ADE_CLAIM_ID` export + `libexec/agent-bin`
+`PATH` prepend) log their planned argv or env delta and return with no registry write, no `ade-git-guard install`, no env/`PATH`
+change, and no throw. It is read **per hook call**, so no daemon restart: env `ADE_CLAIM_DRY_RUN` (truthy, i.e. anything but
+`0|false|no|off|empty`) forces `observe`; otherwise `~/.local/state/djbclark-ade/ade-claim.mode` containing `enforce` enables
+the hooks; `observe`, any other text, a missing file, a symlink, a file not owned by the user or group/world-writable, a
+non-plain state dir, or more than 64 bytes all mean `observe` (fail safe: a fresh install observes). The state dir is
+`<passwd home>/.local/state/djbclark-ade`, never `$HOME`. Every call appends one JSON line (`ts` UTC, `hook`, `mode`, `planned`,
+`ids`) to `ade-claim-observe.jsonl` there (0600, rotates to `.1` at 1 MiB, lines capped at 4 KiB) for the D3 soak. This is the
+claim-plugin switch only; the hard-refusal pilot below is separate.
 
 **Doctor / catalog (2026-11-10, observe-only):** `config/install.toml` carries an `ade-claim` component with
 `paseo_plugin = "ade-claim"`. `ade-install doctor` runs `paseo plugin ls --json` and reports `missing` when the
