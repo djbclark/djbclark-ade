@@ -216,6 +216,16 @@
         "hooks": [
           {
             "type": "command",
+            "command": "f=\"$HOME/.claude/hooks/peer_trust_gate.py\"; [ -f \"$f\" ] || exit 0; exec python3 \"$f\"",
+            "timeout": 15
+          }
+        ]
+      },
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
             "command": "\"$HOME\"/ops/site-private/bin/hook-deadline 2 \"$HOME\"/.claude/hooks/context_size_nudge.py",
             "timeout": 20
           }
@@ -291,6 +301,16 @@
       }
     ],
     "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "f=\"$HOME/.claude/hooks/peer_trust_gate.py\"; [ -f \"$f\" ] || exit 0; exec python3 \"$f\"",
+            "timeout": 15
+          }
+        ]
+      },
       {
         "matcher": "Bash|mcp__.*[Cc]omposio.*",
         "hooks": [
@@ -438,6 +458,15 @@
         "hooks": [
           {
             "type": "command",
+            "command": "f=\"$HOME/.claude/hooks/peer_trust_gate.py\"; [ -f \"$f\" ] || exit 0; exec python3 \"$f\"",
+            "timeout": 15
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
             "command": "{{ .home }}/ops/site-djbclark/macos/graft-hook-timeout-fix/graft-hook-guard.sh node \"{{ .home }}/.claude/helpers/graft-hooks.cjs\" stop",
             "timeout": 12
           }
@@ -498,6 +527,15 @@
       }
     ],
     "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "f=\"$HOME/.claude/hooks/peer_trust_gate.py\"; [ -f \"$f\" ] || exit 0; exec python3 \"$f\"",
+            "timeout": 15
+          }
+        ]
+      },
       {
         "hooks": [
           {
