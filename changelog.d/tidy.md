@@ -1,0 +1,3 @@
+### Added
+
+- `skills/tidy/SKILL.md` and `bin/ade-tidy`: tidy one repo's Paseo agents and windows. Observe-only by default; `--apply` prints the plan, then acts with every precondition re-read right before its action. It inventories agents (owner class, window, status, pending permissions, a WAITING verdict), reports workers waiting on the lead and agents waiting on the operator, sends at most one plain reconnect message per agent per hour (delivery proven only by `ack`), renames windows to `<KIND> <repo> (<work>)`, and archives only verified-done own workers and provably-ours empty windows (never MAIN, never a running agent). Paseo has no command to move an agent between windows, so misplaced tabs are reported, never relaunched. (#651)
