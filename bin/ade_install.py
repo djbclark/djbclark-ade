@@ -711,6 +711,11 @@ def observe_component(
     cls = str(row["class"])
     if cls == "never":
         return Observation("component", cid, "never", "recorded as never-installed")
+    # A row's own ``probe_timeout_s`` (validated by the catalog loader) replaces
+    # the caller's default for this row only.
+    row_timeout = row.get("probe_timeout_s")
+    if isinstance(row_timeout, (int, float)) and not isinstance(row_timeout, bool):
+        probe_timeout_s = float(row_timeout)
 
     paseo_plugin = row.get("paseo_plugin")
     if isinstance(paseo_plugin, str) and paseo_plugin.strip():
