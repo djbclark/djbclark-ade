@@ -823,6 +823,26 @@ def _merge_caps(a: dict[str, Any] | None, b: dict[str, Any] | None) -> dict[str,
     return out
 
 
+def _reset_epoch(text: Any) -> float | None:
+    try:
+        stamp = datetime.fromisoformat(str(text))
+    except (ValueError, TypeError):
+        return None
+    return (stamp if stamp.tzinfo else stamp.replace(tzinfo=UTC)).timestamp()
+
+
+def _later_resets(a: dict[str, Any] | None, b: dict[str, Any] | None) -> dict[str, Any]:
+    """Per model sublimit the later reset wins: a reading taken before a window rolled over must not hide the new reset
+    (an unreadable stamp loses to a readable one)."""
+    out: dict[str, Any] = dict(a or {})
+    for fam, text in (b or {}).items():
+        have = _reset_epoch(out.get(fam)) if fam in out else None
+        new = _reset_epoch(text)
+        if fam not in out or have is None or (new is not None and new > have):
+            out[fam] = text
+    return out
+
+
 def _merge_pool(into: dict[str, Any], key: str, entry: dict[str, Any]) -> None:
     """Fold one pool entry into `into`: the tightest known remaining wins and carries its bind."""
     prior = into.get(key)
@@ -834,7 +854,7 @@ def _merge_pool(into: dict[str, Any], key: str, entry: dict[str, Any]) -> None:
     merged = dict(entry if take_new else prior)
     merged["windows"] = _merge_caps(prior.get("windows"), entry.get("windows"))   # per window, the tighter known reading
     merged["sublimits"] = _merge_caps(prior.get("sublimits"), entry.get("sublimits"))
-    resets = {**(entry.get("sublimit_resets") or {}), **(prior.get("sublimit_resets") or {})}
+    resets = _later_resets(prior.get("sublimit_resets"), entry.get("sublimit_resets"))
     if resets:
         merged["sublimit_resets"] = resets      # when each model sublimit (`fable`) next resets, for the wait message
     merged["remaining"] = e_rem if take_new else p_rem
@@ -1909,7 +1929,7 @@ def fable_wait_why(info: dict[str, Any] | None, now: datetime | None = None) -> 
     floor = frontier_gate()["frontier1_min_left"]
     when = ((info or {}).get("sublimit_resets") or {}).get("fable")
     text = (f"WAIT for Fable 5.2, do not run this on Opus: claude's Fable window has {left:g}% left (floor {floor:g}%) and no "
-            "other frontier pool has room")
+            "other frontier pool was eligible")
     stamp = None
     if when:
         try:

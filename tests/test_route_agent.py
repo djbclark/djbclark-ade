@@ -2939,6 +2939,21 @@ class TestFableWaitsNeverDegrades2026_11_13(unittest.TestCase):
         self.assertEqual(into["claude"]["sublimit_resets"], {"fable": self.RESET})
         self.assertEqual(into["claude"]["remaining"], 70.0)
 
+    def test_a_merge_takes_the_later_reset_whichever_entry_is_tighter(self):
+        old_reset, new_reset = "2026-11-13T10:00:00+00:00", "2026-11-20T10:00:00+00:00"
+        for first, second in ((old_reset, new_reset), (new_reset, old_reset)):
+            into = {"claude": {"remaining": 80.0, "windows": {}, "sublimits": {}, "sublimit_resets": {"fable": first}}}
+            r._merge_pool(into, "claude", {"remaining": 70.0, "windows": {}, "sublimits": {}, "sublimit_resets": {"fable": second}})
+            self.assertEqual(into["claude"]["sublimit_resets"], {"fable": new_reset})
+        into = {"claude": {"remaining": 80.0, "windows": {}, "sublimits": {}, "sublimit_resets": {"fable": "garbage"}}}
+        r._merge_pool(into, "claude", {"remaining": 70.0, "windows": {}, "sublimits": {}, "sublimit_resets": {"fable": new_reset}})
+        self.assertEqual(into["claude"]["sublimit_resets"], {"fable": new_reset})        # a readable stamp beats an unreadable one
+
+    def test_the_wait_reason_does_not_claim_other_pools_were_full(self):
+        why = r.fable_wait_why(dict(self.SHORT))
+        self.assertIn("no other frontier pool was eligible", why)
+        self.assertNotIn("has room", why)
+
     def test_the_frontier_fallback_pool_replaces_claude_without_naming_it(self):
         """Before 2026-11-13 claude was dropped only when a fallback listed it; now it is dropped whatever the fallbacks say."""
         q = {**IDLE, "claude": dict(self.SHORT), "codex": {"remaining": 0.0}}
