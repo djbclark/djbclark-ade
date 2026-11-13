@@ -399,10 +399,18 @@ class Scanner:
                 updated = record.get("UpdatedAt")
                 status = record.get("Status")
                 if status == "error":
-                    logs = self.cli("logs", aid)
-                    if not quota_line(pool, logs):
+                    # `paseo logs` reloads an agent that is not live, and inspect keeps reporting the stored
+                    # `error` after a daemon restart: bound the age before any logs call (like recent_error).
+                    age = time.time() - stamp(updated)
+                    if not 0 <= age <= QUOTA_MAX_WINDOW_MINUTES * 60 + self.max_error_age:
                         continue
-                    signature = self.signature(record, logs)
+                    if wait is not None and wait["pool"] == pool and wait["updated_at"] == updated:
+                        signature = wait["signature"]  # The ledger already identifies this error event.
+                    else:
+                        logs = self.cli("logs", aid)
+                        if not quota_line(pool, logs):
+                            continue
+                        signature = self.signature(record, logs)
                 elif status == "closed" and wait is not None:
                     if updated != wait["updated_at"]:
                         self.note(history, events, aid, "changed", key=str(updated))
@@ -439,7 +447,7 @@ class Scanner:
                     self.note(history, events, aid, "capped", key=signature)
                     continue
                 if not self.apply:
-                    self.event(history, aid, "would-resume-quota", signature=signature, pool=pool)
+                    self.note(history, events, aid, "would-resume-quota", key=signature, pool=pool)
                     resumed[pool] = resumed.get(pool, 0) + 1
                     continue
                 # Re-read mutable state and ancestry before sending.

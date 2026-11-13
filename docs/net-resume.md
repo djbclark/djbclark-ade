@@ -117,8 +117,8 @@ before the send, the lock, dry-run unless `--apply`, the scan deadline) plus:
    so the ledger copy is the only anchor and the resume gate still needs a fresh post-reset sample.
 4. **Resume gate.** A resume needs a fresh aiuse sample (`fresh` true, not stale, `usable_now` true) whose
    `collected_at` is at or after `resets_at` plus grace and not in the future, showing the recorded window below the
-   limit. A missing aiuse, bad JSON, a missing or ambiguous account, or a stale sample waits (`quota-waiting`,
-   once per ten minutes). The reset may be at most `--max-error-age-minutes` (default 30) in the past, else `stale`.
+   limit. A missing aiuse, bad JSON, a missing or ambiguous account, or a stale sample waits (`quota-waiting`, or
+   `aiuse-unavailable` at first sight, once per ten minutes each). The reset may be at most `--max-error-age-minutes` (default 30) in the past, else `stale`.
 5. **Agent state.** `error` is eligible after `paseo logs --json` shows the quota line still last: a newer user
    message or other output is `changed`, a `done:` line before the error is `delivered`. That check runs **before**
    `quota-wait` is armed, while the agent is still loaded, and again before a resume. `closed` is eligible only
@@ -126,14 +126,22 @@ before the send, the lock, dry-run unless `--apply`, the scan deadline) plus:
    a closed agent's timeline is never read. Which Paseo call reloads an agent (adversary reading of Paseo
    0.16.0-beta.2, 2026-11-12): `paseo agent inspect` is `fetchAgent` and returns the live agent or the stored record
    without reloading; `paseo logs` also fetches the **timeline**, which reloads an agent from persistence if it is not
-   live, and the reloaded timeline holds only the original user message. The pass therefore calls `paseo logs` only
-   for an agent whose inspect status is `error` (loaded), and never for a `closed` one (the design's B6 fallback: the
-   ledger copy is the record). Residual race: an agent unloaded between the inspect and the `logs` call is reloaded
-   and then fails the quota-line check, so it is skipped (fails closed) and never resumed. Inspect carries no
+   live, and the reloaded timeline holds only the original user message. Inspect reports the stored status of a non-live
+   agent, and that stays `error` across a daemon restart or worker crash (2026-11-12 crash, item 20 of
+   `docs/upstream-issues.md`), so `error` does **not** prove the agent is loaded. The pass therefore never calls
+   `paseo logs` for a `closed` agent, never for an `error` agent whose `UpdatedAt` is older than 360 minutes plus
+   `--max-error-age-minutes` (the quota analogue of the network path's age rule) or in the future, and after the first
+   read never again until the reset: the ledger's `UpdatedAt` and signature identify the error event. What remains
+   is a reload of an unloaded `error` agent younger than that bound, at most once per error event; the reloaded
+   timeline then fails the quota-line check, so that agent is skipped (fails closed) and never resumed. Inspect carries no
    `lastUserMessageAt` (design B4d), so the closed-agent identity check is the unchanged `UpdatedAt`, which a new
    user message changes because the agent runs.
 6. **Prompt.** `provider quota window reset; continue from where you stopped, check any interrupted operation before
    retrying, same report path`. One resume per pool per scan, so a just-reset pool is not drained at once.
+
+`--quota` shares the network pass's ledger, so a malformed `quota-wait` row fails the whole run (exit 2) after the network
+pass; a lead that replaces a quota-stopped agent with a new one should archive the old agent, or the old one may be resumed
+beside it.
 
 Not done in this slice (2026-11-12): any canary run, any live `--apply`, the launchd plist.
 

@@ -32,6 +32,7 @@ import json, os, sys
 from pathlib import Path
 d = json.loads(Path(os.environ['FAKE_DATA']).read_text())
 a = sys.argv[1:]
+open(os.environ['FAKE_CALLS'], 'a').write(json.dumps(a) + '\\n')
 if a[:1] == ['ls']:
     assert a == ['ls', '-g', '--background', '--json']
     print(json.dumps([{'id': k, 'status': v['Status']} for k,v in d['agents'].items()]))
@@ -51,6 +52,7 @@ else: sys.exit(9)
     monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
     monkeypatch.setenv("FAKE_DATA", str(fixture))
     monkeypatch.setenv("FAKE_SENT", str(sent))
+    monkeypatch.setenv("FAKE_CALLS", str(tmp_path / "calls.jsonl"))
     monkeypatch.setattr(Scanner, "healthy", lambda self, url: True)
     monkeypatch.setattr(M["time"], "time", lambda: NOW)
 
@@ -770,3 +772,47 @@ def test_closed_path_negative_cases(quota, change):
         return
     assert quota["scan"]() == 0
     assert not quota["sent"].exists()
+
+
+def logs_calls():
+    path = Path(os.environ["FAKE_CALLS"])
+    calls = [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+    return [c for c in calls if c[0] == "logs"]
+
+
+def test_closed_agent_timeline_is_never_read(quota):
+    quota["wait"]()
+    quota["data"]["agents"][CHILD]["Status"] = "closed"
+    before = len(logs_calls())
+    quota["clock"](at(20, 35))
+    quota["put"](reset_account())
+    assert quota["scan"]() == 0
+    assert quota["sent"].exists()
+    assert len(logs_calls()) == before  # Paseo's timeline fetch would reload a non-live agent.
+
+
+@pytest.mark.parametrize("stamp_", ["2026-11-09T19:59:00Z", "2026-11-12T20:00:01Z", "2026-11-12T13:00:00Z"])
+def test_old_or_future_error_agent_is_never_read(quota, stamp_):
+    quota["data"]["agents"][CHILD]["UpdatedAt"] = stamp_  # 3 days old, in the future, 7 h old (> 360 min + 30)
+    quota["put"](exhausted_account())
+    assert quota["scan"]() == 0
+    assert logs_calls() == []
+    assert quota["actions"]() == []
+
+
+def test_waiting_agent_is_not_re_read_until_the_reset(quota):
+    quota["wait"]()
+    first = len(logs_calls())
+    assert first >= 1
+    for _ in range(3):
+        assert quota["scan"]() == 0
+    assert len(logs_calls()) == first
+
+
+def test_would_resume_is_written_once_per_error_event(quota):
+    quota["wait"]()
+    quota["clock"](at(20, 35))
+    quota["put"](reset_account())
+    for _ in range(3):
+        assert quota["scan"](False) == 0
+    assert quota["actions"]().count("would-resume-quota") == 1
