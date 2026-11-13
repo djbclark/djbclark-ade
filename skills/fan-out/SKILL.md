@@ -118,7 +118,7 @@ ade-worker-run rename-main --lead LEAD [--window-middle "Wave 7"] [--repo NAME] 
    lead's WORKERS window (current or legacy name); otherwise it lists the blockers and archives nothing (`--dry-run` to only
    check). It archives only a window it can show is this lead's (window record, labelled agent, or legacy name with the lead id), never one found by name alone; a MAIN-placed worker in another window does not block it.
 
-By hand (what the helper does): the same strip, `--new-workspace` on the first launch only, the window id taken from the
+By hand (what the helper does; a hand-made window has no ownership record, so `archive-window` will not archive it until a helper launch adopted it while empty): the same strip, `--new-workspace` on the first launch only, the window id taken from the
 launch and never guessed by cwd or name, `paseo workspace rename`, `--workspace wks_…` on later launches, `paseo agent update
 <full agent id> --name "worker <NAME> <LEAD>"`.
 

@@ -62,8 +62,9 @@ A lead's own-initiative workers and reviewers all go in **one new window per lea
    lead's window record (`$ADE_WORKER_RUN_STATE/<lead id>.windows.json`, written when the helper mints, migrates or adopts a
    window; all finds and archives run under one global lock), a live agent labelled `ade.lead=<lead id>` in it, or the lead id
    in a legacy name. A matched window registered to **another** lead, or holding any agent (closed included) labelled for
-   another lead, is refused, as are two matching windows. A name match with no evidence either way may be adopted by a launch
-   (and is then recorded) but is **never archived**. A legacy window is renamed only if its new name is free, after its ownership
+   another lead, is refused, as are two matching windows. A name match with no evidence either way may be adopted by a launch only when no agent in it (any status)
+   is unlabelled for this lead, and is recorded only after that launch succeeded; it is **never archived** before that. A window
+   made by hand is unrecorded, so a lead that wants it archivable by the helper launches into it first while it is empty. A legacy window is renamed only if its new name is free, after its ownership
    is recorded. A `--window-middle` that matches nothing while the lead owns another window is refused (never a second window).
 2. **Why one window:** a top-level `paseo run` with the agent environment stripped (`skills/fan-out` section 3) creates a new
    "master" window per launch, because its cwd is the repo's `master` checkout; 11 piled up on 2026-11-13 and archiving an

@@ -539,8 +539,8 @@ def test_current_name_window_is_not_renamed(window):
 def test_legacy_and_current_window_of_the_same_work_refuse(env):
     env.data["workspaces"] = [{"workspaceId": "wks_old1", "name": LEGACY_WIN, "cwd": "/repo"},
                               {"workspaceId": "wks_new1", "name": WIN, "cwd": "/repo"}]
-    r = launch(env)
-    assert r.returncode == 1 and "wks_old1" in r.stderr and "wks_new1" in r.stderr
+    r = launch(env)  # the owned legacy window wins the match, then its rename onto the taken name is refused
+    assert r.returncode == 1 and "already has that name" in r.stderr
     assert ["run"] not in env.verbs() and rename_calls(env) == []
 
 
@@ -862,3 +862,49 @@ def test_footer_accepts_the_brief_after_flags_and_their_values(env, rest):
     r = env.run("--lead", LEAD, "--slice", "a", "--window-middle", "Wave 7", "--cwd", "/repo", "--", *rest)
     assert r.returncode == 0, r.stderr
     assert run_argv(env)[-1] == f"BRIEF\n\n{FOOTER_LINE}"
+
+
+# --- round 2 adversary findings (B1-B6) ---------------------------------------------------------------------------------
+
+def test_failed_launch_does_not_record_an_adopted_window(env):  # B1
+    env.data["workspaces"] = [{"workspaceId": "wks_u1", "name": WIN, "cwd": "/repo"}]
+    env.data["run_rc"] = 2
+    assert launch(env).returncode == 1
+    assert registry(LEAD) == set()
+    env.data["run_rc"] = 0
+    r = archive(env)
+    assert r.returncode == 1 and "never confers ownership" in r.stderr and ["workspace", "archive"] not in env.verbs()
+
+
+@pytest.mark.parametrize("status", ["running", "idle", "closed"])
+def test_adoption_refuses_a_window_holding_an_unlabelled_agent(env, status):  # B2
+    env.data["workspaces"] = [{"workspaceId": "wks_u1", "name": WIN, "cwd": "/repo"}]
+    env.data["agents"] = [{"id": "op1", "status": status, "labels": {}}]
+    env.state("op1", "wks_u1")
+    r = launch(env)
+    assert r.returncode == 1 and "not labelled for this lead" in r.stderr and "op1" in r.stderr
+    assert ["run"] not in env.verbs() and registry(LEAD) == set()
+
+
+def test_a_stray_or_foreign_named_record_file_does_not_block_other_leads(window):  # B3
+    (Path(os.environ["ADE_WORKER_RUN_STATE"]) / "junk.windows.json").write_text("{")
+    assert launch(window).returncode == 0
+
+
+def test_an_unclaimed_duplicate_name_does_not_lock_the_owner_out(window):  # B4
+    window.data["workspaces"].append({"workspaceId": "wks_dup", "name": WIN, "cwd": "/repo"})
+    r = launch(window)
+    assert r.returncode == 0, r.stderr
+    assert run_argv(window)[run_argv(window).index("--workspace") + 1] == "wks_win1"
+
+
+def test_legacy_window_in_another_leads_record_is_refused(env):  # B5
+    env.data["workspaces"] = [{"workspaceId": "wks_old1", "name": LEGACY_WIN, "cwd": "/repo"}]
+    own(OTHER_LEAD, "wks_old1")
+    r = launch(env)
+    assert r.returncode == 1 and "registered to lead" in r.stderr and rename_calls(env) == [] and registry(LEAD) == set()
+
+
+def test_no_wait_taken_as_a_flag_value_is_not_a_brief_position(env):  # B6d
+    r = env.run("--lead", LEAD, "--slice", "a", "--window-middle", "Wave 7", "--cwd", "/repo", "--", "--provider", "--no-wait", "BRIEF")
+    assert r.returncode == 1 and not env.calls()
