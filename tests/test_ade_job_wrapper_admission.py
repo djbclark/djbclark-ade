@@ -264,6 +264,7 @@ def test_sigterm_between_bootout_and_bootstrap_leaves_a_recovery_record(ld):
         "import json, sys; sys.path[:0] = [sys.argv[1], sys.argv[2]]\n"
         "import ade_install as ai, ade_sched as S\n"
         "root, state = sys.argv[3], sys.argv[4]\n"
+        "S.canonical_admission_dir = lambda: __import__('pathlib').Path(state) / 'admission'\n"
         "c = ai.load_catalog(root=__import__('pathlib').Path(root))\n"
         "S.reconcile(c.jobs, c.retired_jobs, dry_run=False, backend='launchd', root=__import__('pathlib').Path(root),\n"
         "            ade=__import__('pathlib').Path(root), state_dir=__import__('pathlib').Path(state), names={'deadline-sweep'},\n"
@@ -778,3 +779,133 @@ def test_low_level_uninstall_discards_an_interrupted_reloads_record(ld):
     assert S.uninstall(LABEL, "launchd", env=ld.env)
     assert not plist.exists() and not list((ld.state / "admission").glob("*.recovery.json"))
     assert not list((ld.state / "admission").glob("*.prior.plist"))
+
+
+# ------------------------------------------------------------------------------------------------ round 3 (F4: one canonical lock)
+
+def _elsewhere_env(ld, tmp_path):
+    """The caller's environment points everywhere except the canonical place: HOME, XDG_STATE_HOME and ADE_JOBS_STATE_DIR changed."""
+    other = tmp_path / "other-home"
+    return {**ld.env, "HOME": str(other), "XDG_STATE_HOME": str(other / "xdg"), "ADE_JOBS_STATE_DIR": str(other / "jobs")}
+
+
+def test_f4_the_canonical_lock_dir_ignores_home_xdg_and_the_state_dir_env(tmp_path, monkeypatch):
+    import pwd
+    want = Path(pwd.getpwuid(os.getuid()).pw_dir) / ".local" / "state" / "djbclark-ade" / "admission"
+    monkeypatch.setenv("HOME", str(tmp_path / "h"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "x"))
+    monkeypatch.setenv("ADE_JOBS_STATE_DIR", str(tmp_path / "j"))
+    env = {"HOME": str(tmp_path / "h2"), "XDG_STATE_HOME": str(tmp_path / "x2"), "ADE_JOBS_STATE_DIR": str(tmp_path / "j2")}
+    assert S.canonical_admission_dir() == want
+    assert S.admission_dir(tmp_path / "s", env=env) == want
+    assert S.default_subst(env=env)["__ADMISSION__"] == str(want)
+
+
+@pytest.mark.parametrize("who", ["install", "uninstall", "install_native"])
+def test_f4_a_run_holding_the_canonical_lock_stops_a_writer_whose_env_points_elsewhere(ld, tmp_path, who):
+    root, catalog, plist = _installed_wrapped(ld)
+    job = _job_of(ld, root, catalog)
+    env = _elsewhere_env(ld, tmp_path)
+    run = _hold_a_run(ld)
+    ld.reset()
+    try:
+        with pytest.raises((S.SchedError, S.NativeDefer), match="admission lock"):
+            {"install": lambda: S.install(job, "launchd", env=env),
+             "uninstall": lambda: S.uninstall(LABEL, "launchd", env=env),
+             "install_native": lambda: S.install_launchd_native(job, "x", env=env)}[who]()
+        assert run.poll() is None and not KILLERS & set(ld.verbs()) and not ld.killed()
+    finally:
+        run.terminate()
+        run.wait(timeout=10)
+
+
+@pytest.mark.parametrize("who", ["install", "uninstall"])
+def test_f4_reconcile_and_a_low_level_writer_exclude_each_other_whatever_the_env(ld, tmp_path, who):
+    root, catalog, plist = _installed_wrapped(ld)
+    job = _job_of(ld, root, catalog)
+    before = plist.read_bytes()
+    fd = S.acquire_admission_lock(LABEL, exclusive=True)          # what reconcile holds across its transaction
+    assert fd is not None
+    try:
+        env = _elsewhere_env(ld, tmp_path)
+        with pytest.raises(S.SchedError, match="admission lock"):
+            S.install(job, "launchd", env=env) if who == "install" else S.uninstall(LABEL, "launchd", env=env)
+    finally:
+        S.release_admission_lock(fd)
+    assert plist.read_bytes() == before and ld.loaded() and not KILLERS & set(ld.verbs())
+
+
+@pytest.mark.parametrize("who", ["install", "uninstall"])
+def test_f4_a_loaded_job_with_a_non_canonical_lock_dir_is_refused_untouched(ld, tmp_path, who):
+    root, catalog, plist = _installed_wrapped(ld)
+    job = _job_of(ld, root, catalog)
+    _set_loaded_args(ld, a2=str(tmp_path / "somewhere-else"))
+    ld.reset()
+    before = plist.read_bytes()
+    with pytest.raises(S.SchedError, match="migrate-wrapper") as e:
+        S.install(job, "launchd", env=ld.env) if who == "install" else S.uninstall(LABEL, "launchd", env=ld.env)
+    assert "canonical" in str(e.value) and plist.read_bytes() == before and ld.loaded() and not KILLERS & set(ld.verbs())
+
+
+@pytest.mark.parametrize("who", ["install", "uninstall"])
+def test_f4_a_loaded_pre_wrapper_job_is_refused_by_low_level_install_and_uninstall(ld, who):
+    root = _mini_catalog(ld.tmp)                          # installed with the OLD bytes: no wrapper
+    catalog = ai.load_catalog(root=root)
+    rows, rc = _reconcile(ld, root, catalog)
+    assert rc == 0, rows
+    plist = ld.agents / f"{LABEL}.plist"
+    old = plist.read_bytes()
+    job = _job_of(ld, root, catalog)
+    ld.reset()
+    with pytest.raises(S.SchedError, match="migrate-wrapper"):
+        S.install(job, "launchd", env=ld.env) if who == "install" else S.uninstall(LABEL, "launchd", env=ld.env)
+    assert plist.read_bytes() == old and ld.loaded() and not KILLERS & set(ld.verbs())
+
+
+def test_f4_a_loaded_canonical_wrapped_idle_job_can_be_reinstalled_low_level(ld):
+    root, catalog, plist = _installed_wrapped(ld)
+    job = _job_of(ld, root, catalog)
+    ld.reset()
+    S.install(job, "launchd", env=ld.env)                 # the real wrapper, canonical lock dir, idle: the proof passes
+    assert ld.verbs().count("bootout") == 1 and ld.verbs().count("bootstrap") == 1 and ld.loaded()
+
+
+def _pre_wrapper_install(ld):
+    root = _mini_catalog(ld.tmp)
+    catalog = ai.load_catalog(root=root)
+    rows, rc = _reconcile(ld, root, catalog)
+    assert rc == 0, rows
+    _wrap(root, state=ld.state)                           # the catalog moves to the wrapper
+    job = _job_of(ld, root, catalog)
+    text = next(iter(S.render(job, "launchd", env=ld.env).files.values()))
+    ld.reset()
+    return root, job, text, ld.agents / f"{LABEL}.plist"
+
+
+def test_f4_migrate_wrapper_moves_an_idle_pre_wrapper_job_under_the_canonical_lock(ld):
+    root, job, text, plist = _pre_wrapper_install(ld)
+    assert S.migrate_wrapper_launchd(job, text, env=ld.env) == "migrated"
+    assert plist.read_text() == text and ld.loaded() and ld.verbs().count("bootout") == 1
+    assert S.loaded_wrapper_problem(S._launchctl_print(S._ctx("launchd", ld.env, {}), LABEL)[1], LABEL, S.canonical_admission_dir()) is None
+    assert _lock_is_free(ld) and not list((ld.state / "admission").glob("*.recovery.json"))
+    with pytest.raises(S.SchedError, match="already runs through"):
+        S.migrate_wrapper_launchd(job, text, env=ld.env)
+
+
+def test_f4_migrate_wrapper_refuses_a_running_pre_wrapper_job(ld):
+    root, job, text, plist = _pre_wrapper_install(ld)
+    before = plist.read_bytes()
+    ld.mark("state", LABEL, "running")
+    ld.mark("pid", LABEL, "4242")
+    with pytest.raises(S.SchedError, match="quiet time"):
+        S.migrate_wrapper_launchd(job, text, env=ld.env)
+    assert plist.read_bytes() == before and ld.loaded() and not KILLERS & set(ld.verbs())
+
+
+def test_f4_migrate_wrapper_restores_the_prior_bytes_when_the_bootstrap_fails(ld):
+    root, job, text, plist = _pre_wrapper_install(ld)
+    before = plist.read_bytes()
+    ld.mark("fail_once", "bootstrap")
+    with pytest.raises(S.SchedError):
+        S.migrate_wrapper_launchd(job, text, env=ld.env)
+    assert plist.read_bytes() == before and ld.loaded()

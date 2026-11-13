@@ -35,7 +35,8 @@ def _script(path: Path, body: str) -> Path:
 
 
 @pytest.fixture
-def fake(tmp_path):
+def fake(tmp_path, monkeypatch):
+    monkeypatch.setattr(S, "canonical_admission_dir", lambda: tmp_path / "admission")   # never the real ~/.local/state lock dir
     """Fake launchctl/systemctl/loginctl; agents + unit dirs + jobs ledger under tmp (never touch host)."""
     b = tmp_path / "fakebin"
     b.mkdir()
@@ -57,10 +58,14 @@ def fake(tmp_path):
         '  lab="${2##*/}"; rm -f "$LOADED/$lab"; exit 0\n'
         'fi\n'
         'if [ "$1" = print ]; then\n'
-        '  if [ -n "$FAKE_PRINT_RC" ]; then exit "$FAKE_PRINT_RC"; fi\n'
         '  lab="${2##*/}"\n'
+        '  if [ -s "$LOADED/$lab" ]; then\n'
+        '    echo "$2 = {"; printf "\\tprogram = %s\\n\\targuments = {\\n" "$(head -n1 "$LOADED/$lab")"\n'
+        '    while IFS= read -r l; do printf "\\t\\t%s\\n" "$l"; done < "$LOADED/$lab"; printf "\\t}\\n}\\n"; exit 0\n'
+        '  fi\n'
+        '  if [ -n "$FAKE_PRINT_RC" ]; then exit "$FAKE_PRINT_RC"; fi\n'
         '  if [ -f "$LOADED/$lab" ]; then exit 0; fi\n'
-        '  exit 1\n'
+        '  echo "Could not find service" >&2; exit 113\n'
         'fi\n'
         "exit 0\n",
     )
@@ -409,6 +414,11 @@ def test_pending_intent_is_not_removal_authority(fake, tmp_path):
     assert (fake.units / f"{label}.service").is_file()
 
 
+def _loaded_wrapper_args(tmp_path, label):
+    """What `launchctl print` shows for a job loaded through the canonical wrapper (the fake prints these lines)."""
+    return "\n".join([str(REPO / "bin" / "ade-job-run"), "--lock-dir", str(tmp_path / "admission"), label, "--", "/bin/true"]) + "\n"
+
+
 def test_yes_on_launchd_installs_and_ledgers(fake, tmp_path):
     root = _mini_catalog(tmp_path)
     catalog = ai.load_catalog(root=root)
@@ -539,8 +549,8 @@ def test_yes_on_launchd_removes_ledger_owned(fake, tmp_path):
         "</dict></plist>\n",
         encoding="utf-8",
     )
-    # Mark loaded so bootout has something to clear (Codex P2 unload verify).
-    (tmp_path / "launchd-loaded" / label).write_text("")
+    # Mark loaded so bootout has something to clear (Codex P2 unload verify); it runs the canonical wrapper (F4 proof).
+    (tmp_path / "launchd-loaded" / label).write_text(_loaded_wrapper_args(tmp_path, label))
     ledger = S.empty_jobs_ledger(env=fake.env)
     ledger["generation"] = 1
     ledger["entries"]["skillopt-sleep"] = {
@@ -633,7 +643,7 @@ def test_launchd_remove_keeps_ledger_when_still_loaded(fake, tmp_path):
         "</dict></plist>\n",
         encoding="utf-8",
     )
-    (tmp_path / "launchd-loaded" / label).write_text("")
+    (tmp_path / "launchd-loaded" / label).write_text(_loaded_wrapper_args(tmp_path, label))
     # Force print to keep reporting loaded even after bootout.
     env = {**fake.env, "FAKE_PRINT_RC": "0"}
     ledger = S.empty_jobs_ledger(env=env)

@@ -102,7 +102,7 @@ def parse(argv: list[str]) -> argparse.Namespace:
                  formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
     _common(ap, top=True)
     sub = ap.add_subparsers(dest="cmd", required=True, parser_class=_Parser)
-    for name, arg, nargs in (("backend", None, None), ("render", "plist", None), ("install", "plist", None),
+    for name, arg, nargs in (("backend", None, None), ("render", "plist", None), ("install", "plist", None), ("migrate-wrapper", "plist", None),
                              ("uninstall", "label", None), ("status", "labels", "*"),
                              ("list", None, None), ("diff", None, None), ("reconcile", None, None)):
         sp = sub.add_parser(name)
@@ -308,6 +308,16 @@ def main(argv: list[str] | None = None) -> int:
                                   allow_no_linger=a.allow_no_linger)
             if not a.dry_run:
                 print(f"ade-sched: installed {job.label} on {r.backend}", file=sys.stderr)
+            return 0
+        if a.cmd == "migrate-wrapper":
+            job = ade_sched.Job.from_plist(a.plist, _subst(a), ade=a.ade)
+            r = ade_sched.render(job, ade_sched.detect(backend))
+            if r.backend != "launchd":
+                raise ade_sched.SchedError(ade_sched.EX_USAGE, "migrate-wrapper is for launchd jobs")
+            if a.dry_run:
+                print(f"# migrate {job.label}: refuse unless idle, then bootout, write, bootstrap under the canonical lock", file=sys.stderr)
+                return 0
+            print(f"ade-sched: {ade_sched.migrate_wrapper_launchd(job, next(iter(r.files.values())))} {job.label}", file=sys.stderr)
             return 0
         if a.cmd == "uninstall":
             found = ade_sched.uninstall(a.label, backend, dry_run=a.dry_run, activate=not a.no_activate)

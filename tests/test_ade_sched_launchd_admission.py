@@ -114,7 +114,8 @@ sys.exit(0)
 
 
 @pytest.fixture
-def ld(tmp_path):
+def ld(tmp_path, monkeypatch):
+    monkeypatch.setattr(S, "canonical_admission_dir", lambda: tmp_path / "jobs-state" / "admission")   # the one lock dir, injected
     root = tmp_path / "ld"
     root.mkdir()
     bin_dir = tmp_path / "fakebin"

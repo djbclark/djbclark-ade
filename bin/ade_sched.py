@@ -961,6 +961,8 @@ def install(job: Job, backend: str | Backend | None = None, *, dry_run: bool = F
     # F3 of #622: a launchd plist write (and the bootout that follows it) serializes with every other ADE writer and refuses
     # while a wrapped run of the job holds the admission lock shared; the other backends have no wrapper lock to take.
     with (writer_lock(job.label, None, c.env) if r.backend == "launchd" else contextlib.nullcontext()):
+        if r.backend == "launchd":
+            require_canonical_when_loaded(c, job.label, "install")   # F4: a loaded job must prove the canonical lock identity
         if r.backend == "systemd":
             stale = c.units / f"{job.label}.timer"
             if stale not in r.files and stale.exists():   # the job lost its schedule: the old timer would keep firing
@@ -1435,6 +1437,7 @@ def uninstall(label: str, backend: str | Backend | None = None, *, dry_run: bool
             print(f"# run: {shlex.join(cmd)}", file=out)
             return path.exists()
         with writer_lock(label, None, c.env):   # F3 of #622: serialize with every other ADE writer; refuse during a wrapped run
+            require_canonical_when_loaded(c, label, "uninstall")   # F4: a loaded job must prove the canonical lock identity
             if activate:
                 # bootout of a missing job fails: ignore that, but refuse to drop the plist
                 # while launchctl still reports the job loaded (Codex P2 on #514).
@@ -2110,8 +2113,23 @@ def reconcile_lock_path(state_dir: Path | None = None, *, env: Mapping[str, str]
 JOB_RUN_WRAPPER = "ade-job-run"
 
 
+def canonical_admission_dir() -> Path:
+    """THE per-label lock directory, one for every ADE process (review F4 of #622): `<real home>/.local/state/djbclark-ade/admission`,
+    from the password database (`pwd.getpwuid(os.getuid()).pw_dir`), never from $HOME, XDG_STATE_HOME or ADE_JOBS_STATE_DIR. The
+    wrapper's rendered `--lock-dir`, reconcile, recovery and every low-level writer lock files in it, so two ADE writers can
+    never lock one label in two places. Tests inject another directory by monkeypatching this function."""
+    try:
+        home = pwd.getpwuid(os.getuid()).pw_dir
+    except KeyError as exc:
+        raise SchedError(EX_UNAVAILABLE, f"no password-database entry for uid {os.getuid()}: the admission lock directory is unknown") from exc
+    if not home or not os.path.isabs(home):
+        raise SchedError(EX_UNAVAILABLE, f"home directory {home!r} of uid {os.getuid()} is not absolute")
+    return Path(home) / ".local" / "state" / "djbclark-ade" / "admission"
+
+
 def admission_dir(state_dir: Path | None = None, *, env: Mapping[str, str] | None = None) -> Path:
-    return (state_dir or jobs_state_dir(env)) / "admission"
+    """The canonical lock/recovery directory. `state_dir` and `env` are accepted for the callers' sake and deliberately ignored."""
+    return canonical_admission_dir()
 
 
 def admission_lock_path(label: str, state_dir: Path | None = None, *, env: Mapping[str, str] | None = None) -> Path:
@@ -2195,17 +2213,18 @@ def wrapper_route_problem(data: bytes, label: str, *, lock_dir: Path | None = No
     return None
 
 
-def wrapper_identity_problem(program: str | None, ade_root: str | os.PathLike[str]) -> str | None:
+def wrapper_identity_problem(program: str | None, ade_root: str | os.PathLike[str] | None) -> str | None:
     """Positive proof that `program` is THIS checkout's wrapper and speaks the admission protocol (review F2 of #622): its
     realpath is <ADE root>/bin/ade-job-run, its bytes equal the ade-job-run beside this ade_sched.py, and it answers
     `--admission-protocol` with `v1` (run directly, no shell, short timeout). A stale or custom executable of the same name,
     one that runs the command without the shared lock, fails here and the job defers."""
     if not program:
         return "launchctl print shows no program for the loaded definition"
-    want = os.path.join(os.path.realpath(ade_root), "bin", JOB_RUN_WRAPPER)
     got = os.path.realpath(program)
-    if got != want:
-        return f"the wrapper {program!r} is not {want} (the checkout reconcile runs from)"
+    if ade_root is not None:   # reconcile: the checkout it runs from; a low-level writer checks bytes and protocol only
+        want = os.path.join(os.path.realpath(ade_root), "bin", JOB_RUN_WRAPPER)
+        if got != want:
+            return f"the wrapper {program!r} is not {want} (the checkout reconcile runs from)"
     try:
         have = read_regular_bytes(Path(got))
         mine = read_regular_bytes(Path(os.path.realpath(__file__)).parent / JOB_RUN_WRAPPER)
@@ -2282,6 +2301,62 @@ def loaded_definition_problem(print_out: str, data: bytes, label: str, *, lock_d
     if program is None or program != args[0]:
         return f"the loaded definition runs program {program!r}, not the wrapper {args[0]!r}"
     return None
+
+
+def loaded_wrapper_problem(print_out: str, label: str, lock_dir: Path) -> str | None:
+    """None only when the LOADED job (its `launchctl print` program/arguments) runs `ade-job-run --lock-dir <lock_dir> LABEL --`."""
+    program, args = parse_launchd_definition(print_out)
+    if args is None or len(args) <= _WRAP_HEAD:
+        return "launchctl print shows no wrapper arguments for it (it does not run through ade-job-run)"
+    if (not os.path.isabs(args[0]) or os.path.basename(args[0]) != JOB_RUN_WRAPPER or args[1] != "--lock-dir"
+            or args[3] != label or args[4] != "--"):
+        return f"it does not run through {JOB_RUN_WRAPPER} --lock-dir DIR {label} -- (it runs {args[:_WRAP_HEAD]!r})"
+    if args[2] != str(lock_dir):
+        return f"it locks in {args[2]!r}, not in the canonical {lock_dir}"
+    if program is None or program != args[0]:
+        return f"the loaded definition runs program {program!r}, not the wrapper {args[0]!r}"
+    return wrapper_identity_problem(program, None)
+
+
+def require_canonical_when_loaded(c: "_Ctx", label: str, op: str) -> bool:
+    """For a low-level ADE writer holding the label's canonical lock: refuse (SchedError, nothing written) when the label is
+    LOADED and its loaded argv does not prove the canonical lock identity (review F4 of #622). Returns whether it is loaded.
+    A job that was installed before the wrapper (or with another lock dir) cannot be updated without risking its running
+    work, since its runs do not hold the canonical lock; `migrate_wrapper_launchd` is the one explicit step for it."""
+    rc, out, err_txt = _launchctl_print(c, label)
+    if rc != 0:
+        if rc == LAUNCHD_NOT_LOADED_RC or "could not find service" in err_txt.lower():
+            return False
+        raise SchedError(EX_ACTIVATE, f"{op} of {label} refused, nothing written: launchd state unreadable (rc={rc})")
+    why = loaded_wrapper_problem(out, label, admission_dir())
+    if why is not None:
+        raise SchedError(EX_ACTIVATE, f"{op} of {label} refused, nothing written: it is loaded and {why}. Its runs do not hold "
+                                      f"the canonical admission lock, so a bootout could kill running work. Migrate it once, at a quiet "
+                                      f"time: `ade-sched migrate-wrapper PLIST` (docs/scheduling.md)")
+    return True
+
+
+def migrate_wrapper_launchd(job: "Job", text: str, *, env: Mapping[str, str] | None = None, **overrides: Any) -> str:
+    """The explicit, operator-run migration of a LOADED job that does not run through the canonical wrapper (a pre-wrapper
+    install, or another lock dir): under the canonical lock, refuse unless launchd reports it idle (no pid, `not running`),
+    then record, bootout, write `text`, bootstrap and read back (`reload_launchd_locked`: the prior bytes are restored on
+    failure, the recovery record survives a kill). The old definition's runs hold no lock, so a run that starts between the
+    idle read and the bootout is the one risk of this step: choose a quiet time. Returns "migrated"."""
+    c = _ctx("launchd", env, overrides)
+    with writer_lock(job.label, None, c.env):
+        rc, out, err_txt = _launchctl_print(c, job.label)
+        if rc != 0:
+            raise SchedError(EX_ACTIVATE, f"{job.label} is not loaded (rc={rc}); use `ade-sched install PLIST`")
+        if loaded_wrapper_problem(out, job.label, admission_dir()) is None:
+            raise SchedError(EX_ACTIVATE, f"{job.label} already runs through the canonical wrapper; use `ade-sched install` or reconcile")
+        activity = parse_launchd_activity(out)
+        if activity != "idle":
+            raise SchedError(EX_ACTIVATE, f"{job.label} is {activity} (a pid or unknown state); migrate at a quiet time, nothing changed")
+        try:
+            reload_launchd_locked(job, text, state_dir=None, env=env, expect_hash=None, **overrides)
+        except NativeDefer as exc:
+            raise SchedError(EX_ACTIVATE, str(exc)) from exc
+    return "migrated"
 
 
 def recovery_record_path(label: str, state_dir: Path | None = None, *, env: Mapping[str, str] | None = None) -> Path:
