@@ -398,10 +398,23 @@ bin/ade-sched --set __LEAD__=FULL_LEAD_UUID --set __STATE__=/absolute/existing/s
   render config/launchd/com.djbclark.ade-auto-permit.plist
 ```
 
-Descendants of that lead and agents labelled `ade.lead=<that lead's id>` qualify in this template (the lead label is
-checked by default, 2026-11-13); further label selectors can be
-added as explicit `--ade-label ade.KEY=VALUE` argument pairs. Audit decisions go
-to `auto-permit.jsonl`. See [fan-out](../skills/fan-out/SKILL.md) for scope and
+The template passes `--all-local` (operator ruling 2026-11-13, "All local agents"): every local agent of a classified provider
+(`claude`, `codex`, `opencode`, `pi`, `omp`) qualifies, the lead included (audit reason `all-local`; the operator wants no prompts, and the lead's own
+prompts are the same kind of tool request), because operator-started agents (a Bash prompt in a `bypassPermissions`
+session) were logged `skip outside-scope` every 60 s. Descendants (`descendant`), agents labelled `ade.lead=<that lead's
+id>` (`lead-label`, checked by default, 2026-11-13) and explicit `--ade-label ade.KEY=VALUE` pairs keep their reasons;
+without `--all-local` only those qualify and the lead is excluded. Only the local daemon is asked (no `--host`, any
+`PASEO_HOST` is dropped), so a remote host's agents never qualify. **In every mode the job skips, and leaves for the operator, a request that looks like a question or plan
+approval** (`AskUserQuestion`, `ExitPlanMode`, Codex `request_user_input` / `CodexMcpElicitation`, Pi and OMP
+`select|input|editor|confirm`, ACP `switch_mode`, and any name carrying a question, plan, ask, mode, prompt or
+elicitation word, or a missing name): it is logged `skip` / `operator-question` and stays pending. The check is a
+best-effort, name-based denylist (`permit ls --json` rows carry no `kind`; one is honoured when present): a missing or
+empty name fails closed, but a question whose name is not listed would be approved, so only agents whose provider is
+`claude`, `codex`, `opencode`, `pi` or `omp` (names read from Paseo's source) are served; agents of any other provider,
+(ACP-backed such as copilot, cursor, hermes, cline, grok; derived profiles; plugin providers; their question names are free text) are skipped as `unclassified-provider` and keep their
+prompts for the operator. `mcp__` tools are exempt from the Pi/OMP `select|input|editor|confirm` words only. A request id that is a strict prefix of another pending id of the same agent is skipped
+(`ambiguous-request-id`), since `permit allow` matches ids by prefix (checked against the sweep's snapshot only). Audit decisions go to `auto-permit.jsonl`; after a
+merge, `bin/ade-sched reconcile --yes` applies the template. See [fan-out](../skills/fan-out/SKILL.md) for scope and
 failure behavior. Render/review is separate from `install`; this change does not
 activate a job. Unlike the judgment schedule defaults above, this system job
 implements the operator's explicit unattended permission grant for our agents.

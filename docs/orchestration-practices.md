@@ -136,8 +136,12 @@ paseo run --provider PROVIDER/MODEL --no-wait \
 
 `--label ade.lead=LEAD` (the lead's own full agent id) is required: a top-level worker started with
 `env -u PASEO_AGENT_ID -u PASEO_AGENT_CWD -u PASEO_WORKSPACE_ID paseo run …` is not a descendant of the lead, and
-`bin/ade-auto-permit` approves its permission requests only through this label (audit reason `lead-label`;
-2026-11-13 incident: a worker without it stalled 1h40m on a Bash prompt). Its tab name carries the lead's id too
+`bin/ade-auto-permit` approves its permission requests through this label (audit reason `lead-label`;
+2026-11-13 incident: a worker without it stalled 1h40m on a Bash prompt). With `--all-local`, which the checked-in plist
+passes (operator, 2026-11-13), the tool prompts of every local Claude, Codex, OpenCode, Pi and OMP agent are approved
+(reason `all-local`); a question or plan approval meant for the operator (`AskUserQuestion`, `ExitPlanMode`, Pi/OMP
+`select|input|editor|confirm`: a best-effort name denylist) is logged `operator-question` and left pending, and agents of
+any other provider id (ACP-backed such as copilot, cursor, hermes, cline, grok; derived profiles; plugin providers) keep their prompts (`unclassified-provider`; the operator's "all local agents" ruling is narrowed for them until Paseo exposes `kind`). Its tab name carries the lead's id too
 (`worker <slice> <lead id>`; window names carry none, `docs/workspace-layout.md`); a handoff successor is a new lead and keeps its own placement.
 
 ## 4. Size the run to the work

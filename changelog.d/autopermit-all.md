@@ -1,0 +1,3 @@
+### Changed
+
+- `bin/ade-auto-permit --all-local` was added: it approves tool-permission prompts of every local Claude, Codex, OpenCode, Pi and OMP agent, the lead included (audit reason `all-local`), so operator-started agents no longer stall; the launchd template passes it. In every mode the job now skips and logs requests that look like questions or plan approvals for the operator (`operator-question`, a best-effort name denylist), requests of agents of any other provider such as ACP-backed ones (`unclassified-provider`) and request ids that are a prefix of another pending id (`ambiguous-request-id`). (#653)
