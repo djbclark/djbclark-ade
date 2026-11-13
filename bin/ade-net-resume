@@ -373,6 +373,11 @@ class Scanner:
                     ("signature", "pool", "window_id", "resets_at", "updated_at"))
                     and number(e.get("window_minutes"))):
                 raise ScanError("invalid quota ledger")
+            try:
+                stamp(e["resets_at"])
+                stamp(e["updated_at"])
+            except ValueError as exc:
+                raise ScanError("invalid quota ledger") from exc
             if e["agent"] not in waits or e["time"] >= waits[e["agent"]]["time"]:
                 waits[e["agent"]] = e
         return waits
@@ -513,7 +518,7 @@ class Scanner:
         error_time = stamp(updated)
         first = {"stage": "first-sight", "signature": signature, "updated_at": updated, "pool": pool}
         if not 0 <= time.time() - error_time:
-            self.note(history, events, aid, "stale", key=signature, **first)
+            self.note(history, events, aid, "stale", key=signature)  # No stage: nothing was read, nothing is "known".
             return
         # The agent is still `error` (loaded) here: the only moment its timeline can be read safely, so the
         # done:/new-instruction check is made before a wait is armed (a closed agent is never read later).

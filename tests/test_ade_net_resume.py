@@ -868,17 +868,68 @@ def test_pre_send_reinspection_blocks_each_change(quota, monkeypatch, status, mu
     assert not quota["sent"].exists()
 
 
-def test_persistent_failure_writes_one_unavailable_row(quota):
+def test_unparseable_ledger_timestamp_is_a_malformed_ledger(quota):
     quota["wait"]()
     path = quota["state"] / "events.jsonl"
     rows = [json.loads(line) for line in path.read_text().splitlines()]
-    rows[0]["resets_at"] = "garbage"  # A string, so the ledger loads, but it cannot be parsed.
+    rows[0]["resets_at"] = "garbage"
     path.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    with pytest.raises(M["ScanError"]):
+        quota["scan"]()
+    assert not quota["sent"].exists()
+
+
+def test_persistent_failure_is_one_unavailable_row_per_ten_minutes(quota, monkeypatch):
+    quota["wait"]()
     quota["data"]["agents"][CHILD]["Status"] = "closed"
+    original = Scanner.inspect
+    def inspect(self, aid):
+        if aid == CHILD:
+            raise M["ScanError"]("persistent")
+        return original(self, aid)
+    monkeypatch.setattr(Scanner, "inspect", inspect)
+    quota["clock"](at(20, 35))
     for _ in range(3):
         assert quota["scan"]() == 0
     assert quota["actions"]().count("unavailable") == 1
+    quota["clock"](at(20, 47))  # The next ten-minute bucket, still inside the staleness window.
+    for _ in range(2):
+        assert quota["scan"]() == 0
+    assert quota["actions"]().count("unavailable") == 2
     assert not quota["sent"].exists()
+
+
+@pytest.mark.parametrize("change", ["second-activity", "different-quota-line", "not-a-quota-line"])
+def test_error_path_pre_send_log_checks(quota, monkeypatch, change):
+    quota["wait"]()
+    quota["clock"](at(20, 35))
+    quota["put"](reset_account())
+    armed = {"on": False, "used": False}
+    original_guard = Scanner.guard_pending
+    original_cli = Scanner.cli
+    original_activity = Scanner.quota_activity
+    def guard(self, aid):
+        armed["on"] = True
+        return original_guard(self, aid)
+    def cli(self, *args, **kwargs):
+        out = original_cli(self, *args, **kwargs)
+        if armed["on"] and args[:2] == ("logs", CHILD) and "--json" not in args:
+            armed["used"] = True
+            if change == "different-quota-line": return QLINE.replace("glm-5.3-flash", "glm-5.3-air")
+            if change == "not-a-quota-line": return "[System Error] something else"
+        return out
+    calls = 0
+    def activity(self, aid, pool):
+        nonlocal calls
+        calls += 1  # 1: reset check, 2: pre-send re-read
+        return "user" if (change == "second-activity" and calls == 2) else original_activity(self, aid, pool)
+    monkeypatch.setattr(Scanner, "guard_pending", guard)
+    monkeypatch.setattr(Scanner, "cli", cli)
+    monkeypatch.setattr(Scanner, "quota_activity", activity)
+    assert quota["scan"]() == 0
+    assert not quota["sent"].exists()
+    assert quota["actions"]()[-1] == "changed"
+    assert armed["used"] or change == "second-activity"
 
 
 def test_unconfirmed_agent_is_not_re_read_but_is_re_evaluated(quota):

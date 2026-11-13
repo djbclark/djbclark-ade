@@ -148,12 +148,17 @@ before the send, the lock, dry-run unless `--apply`, the scan deadline) plus:
    user message changes because the agent runs.
 6. **Prompt and dry run.** `provider quota window reset; continue from where you stopped, check any interrupted operation before
    retrying, same report path`. One resume per pool per scan, and at least 600 seconds between two quota
-   resumes of one pool (`QUOTA_POOL_GAP_SECONDS`, read from the ledger's quota `reserved` rows across scans and runs; a
+   resumes of one pool (so `--quota-per-pool` above 1 changes only a dry run's counting: under `--apply` one reservation
+   blocks the pool for 600 s, and with the default 30-minute staleness window at most about three agents per pool are
+   resumed per reset, at reset+grace, +10 and +20 minutes; widen `--max-error-age-minutes` for more) (`QUOTA_POOL_GAP_SECONDS`, read from the ledger's quota `reserved` rows across scans and runs; a
    blocked agent logs `pool-gap`), so a just-reset pool is not drained at once. A dry run counts a `would-resume-quota`
    toward the per-scan cap, so with several agents in one pool it shows only the first one (every scan) until that error
    goes stale (reset plus `--max-error-age-minutes`).
-7. **Ledger rows.** `changed`, `unavailable` and the waiting/gap notes are written once per error event (or per ten
-   minutes), not once per scan; a persistent mismatch or failure is one row.
+7. **Ledger rows.** `changed` (pre-send) and the first-sight, `capped`, `stale` and `guard-owned` notes are written once per error event;
+   `unavailable`, `quota-waiting`, `pool-gap` and `aiuse-unavailable` at most once per ten minutes (`unavailable` per
+   failure type), not once per scan. A persistent failure is therefore one row per ten minutes while the agent stays
+   listed. A `quota-wait` row whose `resets_at` or `updated_at` is not a timezone-aware timestamp is a malformed ledger
+   (exit 2), like any other bad field.
 
 `--quota` shares the network pass's ledger, so a malformed `quota-wait` row fails the whole run (exit 2) after the network
 pass; a lead that replaces a quota-stopped agent with a new one should archive the old agent, or the old one may be resumed
