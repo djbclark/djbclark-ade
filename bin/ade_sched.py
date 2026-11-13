@@ -967,7 +967,10 @@ def create_exclusive(path: Path, text: str, mode: int = 0o600) -> None:
         os.chmod(tmp, mode)
         os.link(tmp, path)
     finally:
-        Path(tmp).unlink(missing_ok=True)
+        try:
+            Path(tmp).unlink(missing_ok=True)  # only our own temp name; a failure here must not hide a successful link
+        except OSError:
+            pass
 
 
 def install_launchd_native(job: Job, text: str, *, env: Mapping[str, str] | None = None, err: TextIO | None = None,

@@ -435,6 +435,7 @@ def test_unexpected_oserror_from_the_native_install_is_a_failed_row_not_a_traceb
     rows, rc = _reconcile(ld, root, catalog)
     assert rc == 1 and any(r["action"] == "failed" for r in rows), rows
     assert not NEVER & set(ld.verbs()) and not (ld.agents / f"{LABEL}.plist").exists()
+    assert _entries(ld)["deadline-sweep"]["status"] == "failed"  # reached the existing ledger-failed handling
 
 
 def test_paseo_install_step_on_a_launchd_host_never_reaches_the_launchd_adapter(ld, monkeypatch):
@@ -467,6 +468,27 @@ def test_target_that_appears_during_the_exclusive_create_is_not_overwritten(ld, 
     assert rc == 6, rows
     assert plist.read_text() == "<plist>hand managed</plist>\n" and not NEVER & set(ld.verbs())
     assert [f.name for f in ld.agents.iterdir()] == [plist.name]
+
+
+def test_create_exclusive_writes_utf8_bytes_whatever_the_locale(tmp_path):
+    target = tmp_path / "u.plist"
+    S.create_exclusive(target, "é\n")
+    assert target.read_bytes() == "é\n".encode("utf-8") and stat.S_IMODE(target.stat().st_mode) == 0o600
+    assert [f.name for f in tmp_path.iterdir()] == ["u.plist"]
+
+
+def test_a_temp_unlink_failure_after_a_successful_link_is_not_an_error(tmp_path, monkeypatch):
+    target = tmp_path / "u.plist"
+    real = Path.unlink
+
+    def flaky(self, missing_ok=False):
+        if self.name.endswith(".tmp"):
+            raise PermissionError("busy")
+        return real(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", flaky)
+    S.create_exclusive(target, "x")  # the definition exists; the leftover temp name is harmless (no .plist suffix)
+    assert target.read_text() == "x"
 
 
 @pytest.mark.parametrize("make", ["file", "dangling-symlink"])

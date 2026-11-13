@@ -19,7 +19,7 @@ options (before or after the subcommand):
   --set KEY=VALUE       fill a placeholder, literally as written in the plist (__STATE__=..., @TARGET@=...); repeatable
   --dry-run             install/uninstall: print the artifacts and commands, change nothing;
                         reconcile: plan only (default for reconcile when --yes is absent)
-  --yes                 reconcile: execute ADE-scoped systemd/cron installs/removes and paseo schedule create/delete; launchd: only an absent-job create+bootstrap or a bootstrap of an unloaded matching plist (loaded jobs, other files and removals defer, exit 6); write jobs.json
+  --yes                 reconcile: execute only admitted writes and write jobs.json; today that is launchd only (an absent-job create+bootstrap, or a bootstrap of an unloaded plist that byte-matches the render); loaded jobs, other files, every removal, systemd/cron and paseo steps defer (exit 6)
   --name NAME           reconcile: limit to these logical job names (repeatable)
   --no-activate         install/uninstall/reconcile: write or remove the files, print the activation commands instead of running them
   --allow-no-linger     systemd install/reconcile: proceed when loginctl says Linger=no (default: exit 69 before writing, because

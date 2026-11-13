@@ -443,8 +443,8 @@ admission lock on every run, with reconcile holding it exclusive, plus a writer 
 writer shares the check-and-write. **Known limits:** a concurrent external loader can still bootstrap an absent or
 unloaded job (this path then fails or defers and never boots it out); another writer that changes an unloaded file between
 the byte-match read and `bootstrap` gets its definition loaded (nothing is overwritten); an operator-disabled
-(`launchctl disable`), unloaded ADE job is admitted, its `bootstrap` fails and the ledger row becomes `failed`; the
-latent until removals are ever admitted: adoption does not compare the loaded job's `path =` with our plist, so a job an
+(`launchctl disable`), unloaded ADE job is admitted, its `bootstrap` fails and the ledger row becomes `failed`; and, a limit that
+stays latent until removals are ever admitted, adoption does not compare the loaded job's `path =` with our plist, so a job an
 outside loader loaded can be adopted ledger-only when a matching file sits at the path (any removal follow-up must require
 a regular-file plist and a `print` `path =` equal to it); the pre-existing live backend scan (`list_backend_labels`) opens every `*.plist` in the agents directory, so a FIFO planted there
 hangs `reconcile` before admission runs.
