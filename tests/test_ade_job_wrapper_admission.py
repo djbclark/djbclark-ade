@@ -708,3 +708,73 @@ def test_f3_recovery_is_an_ade_writer_and_defers_while_a_run_holds_the_lock(ld):
         run.wait(timeout=10)
     assert any(r["action"] == "failed" and "holds its admission lock" in r["detail"] for r in rows), rows
     assert "bootstrap" not in ld.verbs() and (ld.state / "admission" / f"{LABEL}.recovery.json").exists()
+
+
+# ------------------------------------------------------------------------------------------------ round 2 adversary lows
+
+@pytest.mark.parametrize("edit,why", [
+    (lambda a: a.__setitem__(3, "com.djbclark.other"), "does not start with"),
+    (lambda a: a.__setitem__(1, "--other-flag"), "does not start with"),
+    (lambda a: a.__setitem__(4, "-x"), "does not start with"),
+])
+def test_loaded_head_must_equal_the_files_head(edit, why):
+    import plistlib
+    pa = ["/w", "--lock-dir", "/d", LABEL, "--", "cmd"]
+    data = plistlib.dumps({"Label": LABEL, "ProgramArguments": pa})
+    args = list(pa)
+    edit(args)
+    out = "x = {\n\tprogram = /w\n\targuments = {\n" + "".join(f"\t\t{a}\n" for a in args) + "\t}\n}\n"
+    assert why in (S.loaded_definition_problem(out, data, LABEL, lock_dir=Path("/d")) or "")
+    out = "x = {\n\tprogram = /other\n\targuments = {\n" + "".join(f"\t\t{a}\n" for a in pa) + "\t}\n}\n"
+    assert "not the wrapper" in (S.loaded_definition_problem(out, data, LABEL, lock_dir=Path("/d")) or "")
+
+
+def test_native_install_refuses_under_a_held_lock_and_succeeds_without_it(ld):
+    root = _mini_catalog(ld.tmp)
+    _wrap(root, state=ld.state)
+    catalog = ai.load_catalog(root=root)
+    job = _job_of(ld, root, catalog)
+    text = next(iter(S.render(job, "launchd", env=ld.env).files.values()))
+    plist = ld.agents / f"{LABEL}.plist"
+    fd = S.acquire_admission_lock(LABEL, exclusive=True, state_dir=ld.state)
+    try:
+        with pytest.raises(S.NativeDefer, match="holds its admission lock"):
+            S.install_launchd_native(job, text, env=ld.env, state_dir=ld.state)
+    finally:
+        S.release_admission_lock(fd)
+    assert not plist.exists() and "bootstrap" not in ld.verbs()
+    assert S.install_launchd_native(job, text, env=ld.env, state_dir=ld.state) == "created"   # the same call, lock free
+
+
+def test_removal_defers_when_the_label_was_loaded_after_admission(ld):
+    root, catalog, label, plist = _wrapped_retired(ld, loaded=True)       # loaded now; the caller thinks it is not
+    entry = S.load_jobs_ledger(ld.state, env=ld.env)["entries"]["skillopt-sleep"]
+    with pytest.raises(S.NativeDefer, match="loaded after admission"):
+        S.remove_launchd_locked(label, expect_hash=entry["artifact_hash"], loaded=False, state_dir=ld.state, env=ld.env)
+    assert plist.exists() and ld.loaded(label)
+
+
+def test_an_interrupt_is_not_swallowed_when_the_restore_also_fails(ld, monkeypatch):
+    root, catalog, plist = _installed_wrapped(ld)
+    job = _job_of(ld, root, catalog)
+    _drift(root)
+    text = next(iter(S.render(job, "launchd", env=ld.env).files.values()))
+
+    def interrupted(*a, **k):
+        raise KeyboardInterrupt
+
+    def restore_fails(*a, **k):
+        raise S.SchedError(1, "restore failed")
+    monkeypatch.setattr(S, "_guarded_replace", interrupted)
+    monkeypatch.setattr(S, "_restore_prior_and_load", restore_fails)
+    with pytest.raises(KeyboardInterrupt):
+        S.reload_launchd_locked(job, text, state_dir=ld.state, env=ld.env)
+    assert (ld.state / "admission" / f"{LABEL}.recovery.json").exists()    # the record stays
+
+
+def test_low_level_uninstall_discards_an_interrupted_reloads_record(ld):
+    root, catalog, plist = _installed_wrapped(ld)
+    S.write_recovery_record(LABEL, action="reload", plist=plist, prior=plist.read_bytes(), new_sha=None, state_dir=ld.state, env=ld.env)
+    assert S.uninstall(LABEL, "launchd", env=ld.env)
+    assert not plist.exists() and not list((ld.state / "admission").glob("*.recovery.json"))
+    assert not list((ld.state / "admission").glob("*.prior.plist"))

@@ -1245,6 +1245,8 @@ def reload_launchd_locked(job: Job, text: str, *, state_dir: Path | None, env: M
         try:
             _restore_prior_and_load(c, label, plist, prior, replace_only={new_sha}, expect_id=new_id)
         except (SchedError, OSError) as back:
+            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                raise exc from back   # the interrupt is not swallowed; the recovery record stays for the next reconcile
             raise SchedError(EX_ACTIVATE, f"reload of {label} failed ({exc}) and the prior definition could not be restored "
                                           f"({back}); recovery record kept in {admission_dir(state_dir, env=env)}") from exc
         clear_recovery_record(label, state_dir, env)
@@ -1274,6 +1276,10 @@ def remove_launchd_locked(label: str, *, expect_hash: str, loaded: bool, state_d
         return False
     if artifact_hash({plist: prior.decode("utf-8", errors="replace")}) != expect_hash:
         raise NativeDefer(f"{plist} no longer matches the ledger artifact; left untouched")
+    if not loaded:   # the proof was taken before the lock: a label bootstrapped since (a login, an outside loader) is loaded now
+        rc, _, _ = _launchctl_print(c, label)
+        if rc == 0:
+            raise NativeDefer(f"{label} was loaded after admission; left untouched")
     if loaded:
         write_recovery_record(label, action="remove", plist=plist, prior=prior, new_sha=None, state_dir=state_dir, env=env)
         try:
@@ -1292,6 +1298,8 @@ def remove_launchd_locked(label: str, *, expect_hash: str, loaded: bool, state_d
             try:
                 _restore_prior_and_load(c, label, plist, prior)
             except (SchedError, OSError) as back:
+                if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                    raise exc from back
                 raise SchedError(EX_ACTIVATE, f"removal of {label} failed ({exc}) and the prior definition could not be "
                                               f"restored ({back}); recovery record kept") from exc
             clear_recovery_record(label, state_dir, env)
@@ -1442,6 +1450,7 @@ def uninstall(label: str, backend: str | Backend | None = None, *, dry_run: bool
                 print(shlex.join(cmd), file=out)
             found = path.exists()
             path.unlink(missing_ok=True)
+            clear_recovery_record(label, None, c.env)   # an operator's uninstall wins over an interrupted reload's record
         return found
     if name == "systemd":
         present = [u for u in (c.units / f"{label}.timer", c.units / f"{label}.service") if u.exists()]
