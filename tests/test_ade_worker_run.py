@@ -199,7 +199,8 @@ def test_labels_present(env):
 
 @pytest.mark.parametrize("bad", [["--workspace", "wks_x"], ["--new-workspace", "local"], ["--cwd", "/x"],
                                  ["--label", "ade.lead=other"], ["--label=slice=zzz"], ["-C", "/x"],
-                                 ["--dir", "/x"], ["--new-workspace=local"], ["--host", "h:1"], ["--home", "/h"]])
+                                 ["--dir", "/x"], ["--new-workspace=local"], ["--host", "h:1"], ["--home", "/h"],
+                                 ["-q"], ["--format", "json"], ["-o", "json"]])
 def test_owned_flags_refused(env, bad):
     r = env.run("--lead", LEAD, "--slice", "alpha", "--", "--no-wait", *bad, "BRIEF")
     assert r.returncode == 1 and "set by ade-worker-run" in r.stderr
@@ -293,7 +294,8 @@ def test_archive_dry_run_archives_nothing(window):
     assert ["workspace", "archive"] not in window.verbs()
 
 
-@pytest.mark.parametrize("rest", [["paseo", "run", "--no-wait", "BRIEF"], ["run", "--no-wait", "BRIEF"]])
+@pytest.mark.parametrize("rest", [["paseo", "run", "--no-wait", "BRIEF"], ["run", "--no-wait", "BRIEF"],
+                                  ["paseo run --provider x --no-wait", "--no-wait", "BRIEF"]])
 def test_leading_paseo_run_refused(env, rest):
     r = env.run("--lead", LEAD, "--slice", "alpha", "--", *rest)
     assert r.returncode == 1 and "leading `paseo run`" in r.stderr and not env.calls()
@@ -376,6 +378,33 @@ def test_archive_waits_for_the_lead_lock(window):
         with pytest.raises(subprocess.TimeoutExpired):
             proc.wait(timeout=1.0)
         assert not window.calls()  # no paseo call before the lock is free
+        assert proc.wait(timeout=20) == 0
+    finally:
+        t.cancel()
+        proc.kill()
+        proc.communicate()
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_launch_waits_for_the_lead_lock(env, existing):
+    import fcntl
+    import threading
+    if existing:
+        env.data["workspaces"] = [{"workspaceId": "wks_me", "name": WIN, "cwd": "/repo"}]
+    lock_dir = Path(os.environ["ADE_WORKER_RUN_STATE"])
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    fh = (lock_dir / f"{LEAD}.lock").open("a")
+    fcntl.flock(fh, fcntl.LOCK_EX)
+    env.flush()
+    proc = subprocess.Popen([sys.executable, str(SCRIPT), "--lead", LEAD, "--slice", "alpha", "--window-middle",
+                             "djbclark-ade Wave 7", "--cwd", "/repo", "--", "--no-wait", "BRIEF"],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    t = threading.Timer(1.5, fh.close)
+    t.start()
+    try:
+        with pytest.raises(subprocess.TimeoutExpired):
+            proc.wait(timeout=1.0)
+        assert not env.calls()
         assert proc.wait(timeout=20) == 0
     finally:
         t.cancel()
