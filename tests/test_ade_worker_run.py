@@ -200,10 +200,10 @@ def test_labels_present(env):
 @pytest.mark.parametrize("bad", [["--workspace", "wks_x"], ["--new-workspace", "local"], ["--cwd", "/x"],
                                  ["--label", "ade.lead=other"], ["--label=slice=zzz"], ["-C", "/x"],
                                  ["--dir", "/x"], ["--new-workspace=local"], ["--host", "h:1"], ["--home", "/h"],
-                                 ["-q"], ["--format", "json"], ["-o", "json"]])
+                                 ["-q"], ["--format", "json"], ["-o", "json"], ["-oyaml"], ["-qd"]])
 def test_owned_flags_refused(env, bad):
     r = env.run("--lead", LEAD, "--slice", "alpha", "--", "--no-wait", *bad, "BRIEF")
-    assert r.returncode == 1 and "set by ade-worker-run" in r.stderr
+    assert r.returncode == 1 and ("set by ade-worker-run" in r.stderr or "bundled" in r.stderr)
     assert not env.calls()
 
 
@@ -298,7 +298,8 @@ def test_archive_dry_run_archives_nothing(window):
                                   ["paseo run --provider x --no-wait", "--no-wait", "BRIEF"]])
 def test_leading_paseo_run_refused(env, rest):
     r = env.run("--lead", LEAD, "--slice", "alpha", "--", *rest)
-    assert r.returncode == 1 and "leading `paseo run`" in r.stderr and not env.calls()
+    assert r.returncode == 1 and ("leading `paseo run`" in r.stderr or "first argument" in r.stderr)
+    assert not env.calls()
 
 
 def test_foreground_run_refused(env):
@@ -423,7 +424,11 @@ def test_lead_that_is_not_the_caller_refused(env, monkeypatch):
 def test_on_behalf_of_lead_allows_it(env, monkeypatch):
     # the stub renames the minted window, so the archive below finds it
     monkeypatch.setenv("PASEO_AGENT_ID", OTHER_LEAD)
-    assert launch(env, "alpha", "--on-behalf-of-lead").returncode == 0  # mints the window
+    r = launch(env, "alpha", "--on-behalf-of-lead")  # mints the window
+    assert r.returncode == 0
+    run = next(c["argv"] for c in env.calls() if c["argv"][0] == "run")
+    assert [run[i + 1] for i, x in enumerate(run) if x == "--label"] == [f"ade.lead={LEAD}", "slice=alpha"]
+    assert json.loads(r.stdout)["tabName"] == f"worker alpha {LEAD}"
     env.data = json.loads(env.data_path.read_text())  # keep the stub's rename
     assert env.run("archive-window", "--lead", LEAD, "--on-behalf-of-lead", "--dry-run").returncode == 0
 

@@ -79,11 +79,14 @@ ade-worker-run --lead LEAD --slice NAME [--window-middle "djbclark-ade Wave 7"] 
    launch (default: the `--cwd` directory's name) and pass `--cwd ~/src/<repo>` (default: the current directory); a later
    `--window-middle` that names no window while the lead has another is refused, never a second window.
 2. It adds `--label ade.lead=<LEAD>` and `--label slice=<NAME>` itself (so do not pass them, nor `--workspace`,
-   `--new-workspace`, `--cwd`, `--dir`, `-C`, `--host`, `--home`, `-o`, `-q`), and the arguments after `--` are `paseo run`'s own: no
-   leading `paseo run` (a plan's `Choice.dispatch` string starts with it; drop that prefix), and `--no-wait` is required. `--lead` must be the caller's own agent id: when `PASEO_AGENT_ID` is set and differs, both
-   forms refuse unless `--on-behalf-of-lead` is passed (a stale id in a brief would otherwise place, label or archive another lead's workers) and renames the tab `worker <NAME> <LEAD>` with `paseo agent update`. It prints one
-   JSON line `{agentId, workspaceId, windowName, tabName}`. It holds a per-lead lock while `paseo run --no-wait` returns, so launches and
-   `archive-window` of one lead never interleave. The brief still names the writer's claimed worktree as an absolute path.
+   `--new-workspace`, `--cwd`, `--dir`, `-C`, `--host`, `--home`, `-o`/`--format`, `-q`/`--quiet`), renames the tab
+   `worker <NAME> <LEAD>` with `paseo agent update`, and prints one JSON line `{agentId, workspaceId, windowName, tabName}`.
+   The arguments after `--` are `paseo run`'s own: flags first, then the brief; no leading `paseo run` (a plan's
+   `Choice.dispatch` string starts with it; drop that prefix and pass the rest split into argv); no bundled short options
+   (`-qd`); and `--no-wait` is required. It holds a per-lead lock while `paseo run --no-wait` returns, so launches and
+   `archive-window` of one lead never interleave. `--lead` must be the caller's own agent id: when `PASEO_AGENT_ID` is set
+   and differs, both forms refuse unless `--on-behalf-of-lead` is passed (a stale id in a brief would otherwise place, label
+   or archive another lead's workers). The brief still names the writer's claimed worktree as an absolute path.
 3. When the run ends, archive the agents, then `ade-worker-run archive-window --lead LEAD [--window-middle …]
    [--idle-handled]`: it runs `paseo workspace archive` only if every live agent labelled `ade.lead=<LEAD>` is closed (or
    idle, with `--idle-handled` once its report is handled), no other live agent sits in the window, and the window's name

@@ -155,13 +155,18 @@ def check_caller(lead: str, on_behalf: bool) -> None:
 def passthrough_check(args: list[str]) -> None:
     if not args:
         raise Refused("nothing after `--`: pass the paseo run arguments (provider, mode, brief ...)")
-    if not args[0].startswith("-") or args[0] in ("paseo", "run"):
+    if args[0] in ("paseo", "run"):
         raise Refused("pass the paseo run arguments only, without a leading `paseo run` "
                       "(a plan's Choice.dispatch minus that prefix)")
+    if not args[0].startswith("-"):
+        raise Refused("the first argument after `--` must be a paseo run flag (flags before the brief; a Choice.dispatch "
+                      "string is passed split into argv, not as one token)")
     if not any(a in DETACH_FLAGS for a in args):
         raise Refused("pass --no-wait: a foreground paseo run would hold this lead's launch lock until the worker ends")
     for i, a in enumerate(args):
         flag = a.split("=", 1)[0]
+        if re.fullmatch(r"-[A-Za-z][^\s]+", flag):  # a bundled short option (-oyaml, -qd) would hide an owned one
+            raise Refused(f"{flag}: pass short options separately (-d, -m x), never bundled")
         if flag in OWNED_FLAGS:
             raise Refused(f"{flag} is set by ade-worker-run; do not pass it")
         if flag == "--label":
