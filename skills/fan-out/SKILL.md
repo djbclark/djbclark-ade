@@ -54,6 +54,12 @@ paseo run --provider PROVIDER/MODEL --no-wait \
 # or, minting for a claimed worktree: --new-workspace local --cwd ~/src/<repo>-NAME-wt …
 ```
 
+`--label ade.lead=LEAD` (LEAD = the lead's own full agent id) is mandatory for every worker, and above all for a
+top-level worker the lead starts with `env -u PASEO_AGENT_ID -u PASEO_AGENT_CWD -u PASEO_WORKSPACE_ID paseo run …`:
+such a worker has no parent link to the lead, so `bin/ade-auto-permit` can only recognise it by this label
+(2026-11-13: worker 2c54cedf, launched env-stripped without the label, stalled 1h40m on a Bash permission prompt
+that the watcher skipped as `outside-scope`).
+
 Always pass the provider-native unattended mode at launch (Codex `--mode full-access`): switching with `set_agent_mode full-access` mid-run did not stop repeated approval cards for graft MCP, commits, pushes, gh or bg tests on 2026-11-12; Pi exposes no selectable modes and omits the flag.
 
 Take `Choice.dispatch` from a **fresh** `route_agent.py plan` **as-is** (native `paseo run --provider …`), then append
@@ -128,7 +134,9 @@ The Claude enforced review boundary remains separate (`bin/review-launch`).
 `bin/ade-auto-permit --lead FULL_LEAD_UUID --log /absolute/path/permits.jsonl`
 runs one sweep. The lead itself is excluded even if it matches an ADE label.
 Add `--watch --duration 3600 --interval 2` for a bounded watcher.
-It allows only descendants of the named lead (not the lead itself), or agents
+It allows only descendants of the named lead (not the lead itself), agents whose
+Paseo labels include `ade.lead=<that lead's id>` (audit reason `lead-label`; checked by default, no flag
+needed, so a lead's env-stripped top-level workers qualify), or agents
 matching a repeated `--ade-label ade.KEY=VALUE` selector. Any matching selector
 qualifies. The installed Paseo inspect/ls JSON omits arbitrary labels; exact server-side
 `ls -a -g --label` filters prove selected labels. A wildcard `ade.*` scan is

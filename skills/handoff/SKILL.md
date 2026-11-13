@@ -22,3 +22,8 @@ If the helper refuses before creation, launch the top-level successor yourself
 with the documented unattended fallback. Verify its acknowledgement and idle-only
 retirement; operator typing is never the fallback. Partial transfers keep the
 predecessor running, as specified by Step 9.
+
+A lead's other top-level workers (started with `env -u PASEO_AGENT_ID -u PASEO_AGENT_CWD -u PASEO_WORKSPACE_ID
+paseo run …`, so they are not its descendants) carry `--label ade.lead=<lead agent id>`; without it
+`bin/ade-auto-permit` skips their permission prompts. A successor lead labels its own workers with its own id
+and runs the watcher with `--lead <its id>` (2026-11-13).

@@ -30,7 +30,7 @@ elif a[:2] == ['agent','inspect']:
     parent = s.get('parents', {}).get(a[2])
     if parent == 'error': sys.exit(1)
     print(json.dumps({'Id': a[2], 'ParentAgentId':parent}))
-elif a[0] == 'ls': print(json.dumps([{'id':x} for x in s.get('labelled',[])]))
+elif a[0] == 'ls': print(json.dumps([{'id':x} for x in s.get('labelled',{}).get(a[a.index('--label')+1], [])]))
 elif a[:2] == ['permit','allow']:
     if s.get('allow_error'): sys.exit(1)
     print(json.dumps([{'agentId':a[2],'requestId':a[3],'result':'allowed'}]))
@@ -60,7 +60,7 @@ def test_descendants_and_foreign(tmp_path):
 
 
 def test_label_qualifies_unrelated(tmp_path):
-    result, calls = run_fake(tmp_path, {'requests':[req(OTHER)],'labelled':[OTHER]},
+    result, calls = run_fake(tmp_path, {'requests':[req(OTHER)],'labelled':{'ade.task=wave':[OTHER]}},
                             '--ade-label','ade.task=wave')
     assert result.returncode == 0
     assert ['ls','-a','-g','--label','ade.task=wave'] in calls
@@ -90,7 +90,7 @@ def test_unconfirmed_allow_audited(tmp_path):
 def test_watch_is_bounded(tmp_path):
     result, calls = run_fake(tmp_path, {'requests':[]}, '--watch','--interval','0.01','--duration','0.05')
     assert result.returncode == 0
-    assert calls and all(c == ['permit','ls'] for c in calls)
+    assert calls and all(c in (['permit','ls'], ['ls','-a','-g','--label',f'ade.lead={LEAD}']) for c in calls)
 
 
 def test_reject_foreign_selector(tmp_path):
@@ -107,7 +107,7 @@ def test_duplicate_and_option_request(tmp_path):
 
 
 def test_lead_is_excluded_even_when_labelled(tmp_path):
-    result, calls = run_fake(tmp_path, {'requests':[req(LEAD)], 'labelled':[LEAD],
+    result, calls = run_fake(tmp_path, {'requests':[req(LEAD)], 'labelled':{'ade.task=wave':[LEAD], f'ade.lead={LEAD}':[LEAD]},
                                       'parents':{LEAD:'error'}}, '--ade-label','ade.task=wave')
     assert result.returncode == 0
     assert not any(c[:2] in (['agent','inspect'], ['permit','allow']) for c in calls)
@@ -130,3 +130,36 @@ def test_watch_checks_deadline_before_each_sweep(tmp_path, monkeypatch):
     assert main() == 0
     assert swept == [0.0]  # No second sweep after sleep reaches the deadline.
     assert clock[0] == 1.0
+
+
+def audit_rows(tmp_path):
+    return [json.loads(x) for x in (tmp_path/'audit.jsonl').read_text().splitlines()]
+
+
+def test_lead_label_approves_top_level_worker(tmp_path):
+    # Env-stripped worker: no parent link to the lead, but labelled ade.lead=<lead>.
+    result, calls = run_fake(tmp_path, {'requests':[req(OTHER)], 'parents':{OTHER:None},
+                                      'labelled':{f'ade.lead={LEAD}':[OTHER]}})
+    assert result.returncode == 0, result.stderr
+    assert ['ls','-a','-g','--label',f'ade.lead={LEAD}'] in calls
+    assert ['permit','allow',OTHER,'request'] in calls
+    rows_ = audit_rows(tmp_path)
+    assert [(r['decision'], r['reason']) for r in rows_] == [('allow-attempt','lead-label'), ('allowed','lead-label')]
+    assert all(r['agent'] == OTHER for r in rows_)
+
+
+def test_label_naming_another_lead_is_skipped(tmp_path):
+    result, calls = run_fake(tmp_path, {'requests':[req(OTHER)], 'parents':{OTHER:None},
+                                      'labelled':{f'ade.lead={MID}':[OTHER]}})
+    assert result.returncode == 0, result.stderr
+    assert ['ls','-a','-g','--label',f'ade.lead={LEAD}'] in calls  # the lead label was really checked
+    assert not any(c[:2] == ['permit','allow'] for c in calls)
+    assert [(r['decision'], r['reason']) for r in audit_rows(tmp_path)] == [('skip','outside-scope')]
+
+
+def test_unlabelled_non_descendant_is_skipped(tmp_path):
+    result, calls = run_fake(tmp_path, {'requests':[req(OTHER)], 'parents':{OTHER:None}})
+    assert result.returncode == 0, result.stderr
+    assert ['ls','-a','-g','--label',f'ade.lead={LEAD}'] in calls  # the lead label was really checked
+    assert not any(c[:2] == ['permit','allow'] for c in calls)
+    assert [(r['decision'], r['reason']) for r in audit_rows(tmp_path)] == [('skip','outside-scope')]
