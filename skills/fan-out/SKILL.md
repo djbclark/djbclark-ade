@@ -150,6 +150,8 @@ report folder into a workspace.
   `done: <title>, <status>[, <report>]`) plus `Please reply: ack <your agent id> <msg-id>`
   (footer rule 22). Prefer `bin/completion-notice --send --requester <lead-id>
   --title TITLE --pr URL` (or `--status` / `--report`) so the shape stays exact.
+  This is for `paseo run` slices. An Agent-tool sub-agent (its `{lead}` is `main`) skips it: the Agent tool returns its final
+  message, and `completion-notice --send --requester main` is a no-op (2026-11-13).
   The worker ends its turn immediately after sending. Requesters prove delivery via dual routes (operator ruling 2026-11-12):
   (a) prompt `ack <worker id> <msg-id>` sent via `paseo send` only once `paseo agent inspect <id> --json` confirms status is `idle`;
   (b) atomic write of `{done}.ack` on disk next to the worker's done file (`bin/completion-notice --lead-ack --worker <id> --msg-id <msg-id> --done <done-path>`).
