@@ -1974,3 +1974,176 @@ def test_hermes_choice_never_stays_unselected(choice):
 
 def test_hermes_checklist_test_has_docstring():
     assert test_hermes_choice_self_runs_checklist.__doc__
+
+
+# --- probe_warn_exit / probe_summary_re (advisory sub-doctor exits) ---
+
+SUMMARY_RE = r"Found \d+ issue"
+HERMES_ADVISORY = (FIX / "hermes-doctor-advisory.txt").read_text()
+
+
+def _probe_row(**extra):
+    row = {
+        "id": "hermes", "class": "offered", "chosen": True,
+        "probe_argv": ["hermes", "doctor"], "install_argv": ["true"],
+    }
+    row.update(extra)
+    return row
+
+
+def _probe_runner(code, out="", err=""):
+    return lambda argv, cwd: subprocess.CompletedProcess(argv, code, stdout=out, stderr=err)
+
+
+@pytest.fixture
+def probe_present(monkeypatch):
+    monkeypatch.setattr(ai, "_probe_executable_missing", lambda _: False)
+
+
+def test_repo_hermes_row_declares_advisory_exit():
+    row = next(c for c in ai.load_catalog(root=REPO).components if c["id"] == "hermes")
+    assert row["probe_warn_exit"] == [1]
+    assert row["probe_summary_re"] == r"Found \d+ issue"
+
+
+def test_hermes_advisory_exit_is_warn_with_summary_detail(tmp_path, probe_present):
+    row = _probe_row(probe_warn_exit=[1], probe_summary_re=SUMMARY_RE)
+    o = ai.observe_component(row, root=tmp_path, runner=_probe_runner(1, HERMES_ADVISORY))
+    assert o.status == "warn"
+    assert o.detail.endswith("Found 8 issue(s) to address:")
+    assert "┌" not in o.detail and "─" not in o.detail
+
+
+def test_advisory_exit_keeps_doctor_exit_zero(tmp_path, probe_present, monkeypatch):
+    monkeypatch.setattr(ai, "observe_hermes_checklist", lambda **kw: [
+        ai.Observation("hermes-item", "sentinel", "ok", "checklist ran for a warn component")])
+    root = _fixture_root(tmp_path)
+    catalog = ai.load_catalog(root=root)
+    catalog.data["component"].append(_probe_row(probe_warn_exit=[1], probe_summary_re=SUMMARY_RE))
+    obs, rc = ai.doctor(
+        catalog, component_ids=["hermes"], runner=_probe_runner(1, HERMES_ADVISORY),
+        skip_credential_bak=True,
+    )
+    assert [o.status for o in obs if o.id == "hermes"] == ["warn"]
+    assert rc == 0
+    assert any(o.id == "sentinel" for o in obs)  # a warn Hermes still gets its checklist
+    # Same exit without the row opting in: doctor fails.
+    catalog.data["component"][-1].pop("probe_warn_exit")
+    obs, rc = ai.doctor(
+        catalog, component_ids=["hermes"], runner=_probe_runner(1, HERMES_ADVISORY),
+        skip_credential_bak=True,
+    )
+    assert [o.status for o in obs if o.id == "hermes"] == ["error"]
+    assert rc == 1
+
+
+@pytest.mark.parametrize("code,out,err", [
+    (2, HERMES_ADVISORY, ""),          # an unlisted exit stays an error
+    (1, "", ""),                       # a listed exit with no output stays an error
+    (1, "  \n", "\n"),                 # whitespace is no output
+    (127, "", "not found"),
+])
+def test_unlisted_or_silent_exit_stays_error(tmp_path, probe_present, code, out, err):
+    row = _probe_row(probe_warn_exit=[1], probe_summary_re=SUMMARY_RE)
+    o = ai.observe_component(row, root=tmp_path, runner=_probe_runner(code, out, err))
+    assert o.status == "error"
+
+
+def test_timeout_and_exec_error_stay_error_despite_warn_exit(tmp_path, probe_present):
+    row = _probe_row(probe_warn_exit=[1], probe_summary_re=SUMMARY_RE)
+
+    def boom(argv, cwd):
+        raise subprocess.TimeoutExpired(argv, 1)
+
+    def nope(argv, cwd):
+        raise OSError("exec format error")
+
+    assert ai.observe_component(row, root=tmp_path, runner=boom).status == "error"
+    assert ai.observe_component(row, root=tmp_path, runner=nope).status == "error"
+
+
+def test_without_warn_exit_nonzero_is_still_error_and_detail_skips_borders(tmp_path, probe_present):
+    o = ai.observe_component(_probe_row(), root=tmp_path, runner=_probe_runner(1, HERMES_ADVISORY))
+    assert o.status == "error"
+    assert o.detail.endswith("Hermes Doctor")  # first line with a letter, border trimmed
+
+
+def test_ok_path_skips_rule_lines(tmp_path, probe_present):
+    out = "┌────┐\n└────┘\n\n  tool 1.2.3\nmore\n"
+    o = ai.observe_component(_probe_row(), root=tmp_path, runner=_probe_runner(0, out))
+    assert o.status == "ok" and o.detail.endswith(": tool 1.2.3")
+
+
+def test_warn_needs_summary_line_on_stdout_so_a_crash_stays_error(tmp_path, probe_present):
+    row = _probe_row(probe_warn_exit=[1], probe_summary_re=SUMMARY_RE)
+    trace = "Traceback (most recent call last):\n  File x\nValueError: boom\n"
+    assert ai.observe_component(row, root=tmp_path, runner=_probe_runner(1, "", trace)).status == "error"
+    assert ai.observe_component(row, root=tmp_path, runner=_probe_runner(1, "", "hermes: config.yaml unreadable")).status == "error"
+    # The summary text on stderr is not evidence either; stdout is.
+    assert ai.observe_component(row, root=tmp_path, runner=_probe_runner(1, "", "Found 3 issue(s)")).status == "error"
+    # A stray newline on stderr does not hide a real stdout report.
+    assert ai.observe_component(row, root=tmp_path, runner=_probe_runner(1, HERMES_ADVISORY, "\n")).status == "warn"
+
+
+def test_bad_runtime_regex_matches_nothing_instead_of_crashing(tmp_path, probe_present):
+    row = _probe_row(probe_warn_exit=[1], probe_summary_re="(")
+    o = ai.observe_component(row, root=tmp_path, runner=_probe_runner(1, HERMES_ADVISORY))
+    assert o.status == "error" and o.detail.endswith("Hermes Doctor")
+
+
+def test_summary_detail_is_capped(tmp_path, probe_present):
+    row = _probe_row(probe_warn_exit=[1], probe_summary_re="x")
+    o = ai.observe_component(row, root=tmp_path, runner=_probe_runner(1, "x" * 900 + "\n"))
+    assert o.status == "warn"
+    assert o.detail.endswith("x" * 200) and "x" * 201 not in o.detail
+
+
+def test_apply_treats_warn_component_as_present(tmp_path, monkeypatch, probe_present):
+    monkeypatch.setattr(ai, "_default_runner", lambda a, cwd, **kw: subprocess.CompletedProcess(
+        a, 1, stdout=HERMES_ADVISORY, stderr=""))
+    root = _fixture_root(tmp_path)
+    catalog = ai.load_catalog(root=root)
+    catalog.data["component"].append(_probe_row(probe_warn_exit=[1], probe_summary_re=SUMMARY_RE))
+    steps = ai.build_apply_steps(catalog, ids={"hermes"})
+    assert [(s.id, s.action) for s in steps] == [("hermes", "skip")]
+
+
+@pytest.mark.parametrize("field,value,match", [
+    ("probe_warn_exit", [0], "exit codes 1-255"),
+    ("probe_warn_exit", [True], "must be integer"),
+    ("probe_warn_exit", [256], "exit codes 1-255"),
+    ("probe_warn_exit", ["1"], "must be integer"),
+    ("probe_warn_exit", [], "exit codes 1-255"),
+    ("probe_warn_exit", 1, "must be array"),
+    ("probe_summary_re", "", "too short"),
+    ("probe_summary_re", "(", "valid regex"),
+    ("probe_summary_re", 5, "must be string"),
+])
+def test_probe_output_fields_validated(tmp_path, field, value, match):
+    root = _fixture_root(tmp_path)
+    toml = (root / "config" / "install.toml").read_text()
+    import json as _json
+    lit = _json.dumps(value)
+    (root / "config" / "install.toml").write_text(
+        toml + f'\n[[component]]\nid = "p"\nclass = "optional"\nchosen = false\n'
+        f'probe_argv = ["true"]\n{field} = {lit}\n'
+    )
+    with pytest.raises(ai.InstallError, match=match):
+        ai.load_catalog(root=root)
+
+
+def test_probe_output_fields_need_probe_argv(tmp_path):
+    root = _fixture_root(tmp_path)
+    toml = (root / "config" / "install.toml").read_text()
+    (root / "config" / "install.toml").write_text(
+        toml + '\n[[component]]\nid = "p"\nclass = "optional"\nchosen = false\n'
+        "probe_warn_exit = [1]\n"
+    )
+    with pytest.raises(ai.InstallError, match="requires probe_summary_re"):
+        ai.load_catalog(root=root)
+    (root / "config" / "install.toml").write_text(
+        toml + '\n[[component]]\nid = "p"\nclass = "optional"\nchosen = false\n'
+        'probe_summary_re = "x"\n'
+    )
+    with pytest.raises(ai.InstallError, match="require probe_argv"):
+        ai.load_catalog(root=root)

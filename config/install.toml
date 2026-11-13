@@ -2,6 +2,8 @@
 # Used when config/ade.toml is absent. Values are references and recipes, never secret values.
 # install/update/probe = "UNKNOWN" means not yet recorded. presence = PATH basename fallback for doctor.
 # install_argv / probe_argv = argv lists (tokens: {bin} {root} {home} {prefix}); doctor prefers probe_argv.
+# probe_warn_exit = nonzero probe exits that mean "advisory issues" -> warn (doctor exit 0) when probe_summary_re matches a stdout line; else error.
+# probe_summary_re = regex; the first output line matching it is the doctor detail (default: first line with a letter or digit).
 # needs_system = true means package-manager/root; bounded apply refuses without a later --system unit.
 # chosen is required for offered/optional; hard components are always expected.
 
@@ -294,6 +296,8 @@ update = "hermes update"
 update_argv = ["hermes", "update"]
 probe = "hermes doctor"
 probe_argv = ["hermes", "doctor"]
+probe_warn_exit = [1]
+probe_summary_re = "Found \\d+ issue"
 presence = "hermes"
 platforms = ["mac", "linux"]
 notes = "Avoids curl|bash by urllib-fetching install.sh then argv `bash <temp>/install.sh --non-interactive` (shell=False). Non-dry-run needs ADE_USER_INSTALL_TRUST_VENDOR=1 (same CDN trust as curl|bash; no forever digest — order 8). S3a basic setup is opt-in: `just hermes-setup` (prompts/setup/hermes.md) or `just hermes-setup --self` (DIY checklist); does not force Hermes or configure peer-link live. peer-link and LiteLLM fork stay separate components."

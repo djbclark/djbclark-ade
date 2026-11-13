@@ -649,6 +649,51 @@ def observe_paseo_plugin(
     )
 
 
+_BOX_CHARS = "".join(chr(c) for c in range(0x2500, 0x2580))
+_PROBE_LINE_CAP = 500  # bound what a catalog regex ever sees per line
+
+
+def _probe_lines(raw: str) -> list[str]:
+    """Display lines of probe output: borders trimmed, lines without a letter or digit dropped."""
+    cleaned = [x[:_PROBE_LINE_CAP].strip(" \t\r" + _BOX_CHARS) for x in raw.splitlines()]
+    return [x for x in cleaned if any(ch.isalnum() for ch in x)]
+
+
+def _probe_summary_line(raw: str, pattern: object) -> str | None:
+    """First line of ``raw`` matching the catalog ``probe_summary_re``, else None.
+
+    A pattern that does not compile (a caller that skipped catalog validation)
+    matches nothing rather than crashing the whole doctor run.
+    """
+    if not isinstance(pattern, str) or not pattern:
+        return None
+    try:
+        rx = re.compile(pattern)
+    except re.error:
+        return None
+    return next((x for x in _probe_lines(raw) if rx.search(x)), None)
+
+
+def _probe_detail(
+    text: str, *, extra: str = "", pattern: object = None, cap: int,
+) -> str:
+    """One display line from a probe's output (third-party text; never env).
+
+    With ``pattern`` (a catalog ``probe_summary_re``), the first line of
+    ``text`` then ``extra`` that matches wins. Otherwise (or when nothing
+    matches) the first line holding a letter or digit, ``text`` before
+    ``extra``: pure box-drawing / rule lines are skipped and borders trimmed.
+    Capped at ``cap``.
+    """
+    hit = _probe_summary_line(text, pattern) or _probe_summary_line(extra, pattern)
+    if hit:
+        return hit[:cap]
+    for group in (_probe_lines(text), _probe_lines(extra)):
+        if group:
+            return group[0][:cap]
+    return ""
+
+
 def observe_component(
     row: dict[str, Any],
     *,
@@ -710,15 +755,31 @@ def observe_component(
             )
         except OSError as e:
             return Observation("component", cid, "error", f"probe exec error: {e}")
+        pattern = row.get("probe_summary_re")
         if proc.returncode == 0:
-            out = (proc.stdout or proc.stderr or "").strip().splitlines()
-            snippet = out[0][:120] if out else "exit 0"
+            snippet = _probe_detail(
+                proc.stdout or "", extra=proc.stderr or "",
+                pattern=pattern, cap=120,
+            ) or "exit 0"
             return Observation(
                 "component", cid, "ok",
                 f"probe ok ({shlex.join(argv)}): {snippet}",
             )
-        err = (proc.stderr or proc.stdout or "").strip().splitlines()
-        detail = err[0][:200] if err else f"exit {proc.returncode}"
+        detail = _probe_detail(
+            proc.stderr or "", extra=proc.stdout or "",
+            pattern=pattern, cap=200,
+        ) or f"exit {proc.returncode}"
+        warn_exits = row.get("probe_warn_exit")
+        if isinstance(warn_exits, list) and proc.returncode in warn_exits:
+            # Advisory exit of a sub-doctor: positive evidence only. The tool's
+            # own summary line must appear on stdout; a crash (traceback or
+            # message on stderr, exit 1) has none and stays an error.
+            summary = _probe_summary_line(proc.stdout or "", pattern)
+            if summary is not None:
+                return Observation(
+                    "component", cid, "warn",
+                    f"probe advisory exit {proc.returncode} ({shlex.join(argv)}): {summary[:200]}",
+                )
         return Observation(
             "component", cid, "error",
             f"probe failed ({shlex.join(argv)}): {detail}",
@@ -2057,7 +2118,7 @@ def doctor(
             str(row["id"]) == "hermes"
             and component_ids is not None
             and hermes_choice_effective(row, hermes_record)
-            and o.status == "ok"
+            and o.status in ("ok", "warn")
         ):
             for item in observe_hermes_checklist(
                 runner=runner, probe_timeout_s=probe_timeout_s, home=hermes_home,
@@ -3324,7 +3385,7 @@ def build_apply_steps(
             steps.append(ApplyStep(cid, "skip", None, f"class={row['class']} chosen={row.get('chosen')}"))
             continue
         obs = observe_component(row, root=catalog.root)
-        if obs.status == "ok" and not force:
+        if obs.status in ("ok", "warn") and not force:
             steps.append(ApplyStep(cid, "skip", None, f"already present ({obs.detail})"))
             continue
         if obs.status != "missing" and not force:

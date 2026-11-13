@@ -59,6 +59,17 @@ router/gate readers retain their explicit existing domain scope.
   `system_argv` (Linux) and optional `system_argv_darwin` (Homebrew).
   `--system --dry-run` / `--print-system-argv` preview the platform pick;
   live system exec needs `--yes --system --apply-system` (default refuse).
+- `probe_warn_exit` (optional, array of exit codes 1-255, needs `probe_argv` and
+  `probe_summary_re`): a probe that exits with a listed code *and prints a line
+  matching `probe_summary_re` on stdout* is `warn` (doctor exit 0; `update` and
+  `apply` count the component healthy / present), not `error`: for a
+  sub-doctor that exits 1 on advisory findings (Hermes: "Found N issue(s) to
+  address"). Without the summary line (a crash, a traceback on stderr), any
+  other nonzero exit, a timeout or an exec error it stays `error`.
+- `probe_summary_re` (optional, regex, needs `probe_argv`): the first probe
+  output line matching it is the doctor detail. Without it the detail is the
+  first line holding a letter or digit (box-drawing and rule lines skipped,
+  borders trimmed), capped at 120 (ok) / 200 (warn, error) characters.
 - `presence` is a PATH basename fallback when `probe_argv` is absent.
 - `paseo_plugin` is an observe-only Paseo plugin id. Doctor runs
   `paseo plugin ls --json` and reports `ok` / `disabled` / `missing` (never

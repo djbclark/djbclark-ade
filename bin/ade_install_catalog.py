@@ -6,6 +6,7 @@ an adapter boundary; effective config nests install metadata and names keys.
 from __future__ import annotations
 
 import copy
+import re
 from pathlib import Path
 from typing import Any
 
@@ -117,6 +118,37 @@ def _validate_argv_field(
             raise CatalogValidationError(f"{label}.{field}[{j}]: control characters refused")
 
 
+def _validate_probe_output_fields(row: dict[str, Any], *, path: Path, index: int) -> None:
+    """``probe_warn_exit`` (nonzero exit ints) needs ``probe_summary_re`` (a regex); both need a probe_argv."""
+    label = f"{path}: component[{index}] id={row.get('id')!r}"
+    warn = row.get("probe_warn_exit")
+    summary = row.get("probe_summary_re")
+    if warn is not None:
+        if (
+            not isinstance(warn, list) or not warn
+            or any(isinstance(x, bool) or not isinstance(x, int) or not 1 <= x <= 255 for x in warn)
+        ):
+            raise CatalogValidationError(
+                f"{label}: probe_warn_exit must be a non-empty array of exit codes 1-255"
+            )
+    if summary is not None:
+        if not isinstance(summary, str) or not summary:
+            raise CatalogValidationError(f"{label}: probe_summary_re must be a non-empty string")
+        try:
+            re.compile(summary)
+        except re.error as e:
+            raise CatalogValidationError(f"{label}: probe_summary_re is not a valid regex: {e}") from None
+    if warn is not None and summary is None:
+        raise CatalogValidationError(
+            f"{label}: probe_warn_exit requires probe_summary_re "
+            "(an advisory exit needs the tool's own summary line as evidence)"
+        )
+    if (warn is not None or summary is not None) and not row.get("probe_argv"):
+        raise CatalogValidationError(
+            f"{label}: probe_warn_exit / probe_summary_re require probe_argv"
+        )
+
+
 def validate_catalog_semantics(
     data: dict[str, Any], *, path: Path, require_components: bool = True,
 ) -> None:
@@ -149,6 +181,7 @@ def validate_catalog_semantics(
         _validate_argv_field(row, field="probe_argv", path=path, index=i)
         _validate_argv_field(row, field="system_argv", path=path, index=i)
         _validate_argv_field(row, field="system_argv_darwin", path=path, index=i)
+        _validate_probe_output_fields(row, path=path, index=i)
         ns = row.get("needs_system")
         if ns is not None and not isinstance(ns, bool):
             raise CatalogValidationError(
