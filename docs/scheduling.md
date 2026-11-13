@@ -462,8 +462,12 @@ the byte-match read and `bootstrap` gets its definition loaded (nothing is overw
 (`launchctl disable`), unloaded ADE job is admitted, its `bootstrap` fails and the ledger row becomes `failed`; and, a limit that
 stays latent until removals are ever admitted, adoption does not compare the loaded job's `path =` with our plist, so a job an
 outside loader loaded can be adopted ledger-only when a matching file sits at the path (any removal follow-up must require
-a regular-file plist and a `print` `path =` equal to it); the pre-existing live backend scan (`list_backend_labels`) opens every `*.plist` in the agents directory, so a FIFO planted there
-hangs `reconcile` before admission runs.
+a regular-file plist and a `print` `path =` equal to it); the live backend scan (`list_backend_labels`, `installed_labels`, and reconcile's own byte-match reads; fixed 2026-11-13)
+never opens a non-regular `*.plist`/`*.service` entry: it `lstat`s first, opens regular files `O_NONBLOCK|O_NOCTTY`
+(`O_NOFOLLOW` unless the entry is a symlink to a regular file), re-checks with `fstat`, and reads a bounded amount. A FIFO,
+device, socket, directory or symlink to one is listed with source `non-regular`: it is no live identity (`LiveScan.ids`
+omits it, so a missing job is still reported missing) and `scan_live` adds one note per entry, which `reconcile` and `diff`
+print as a report line; nothing is ever unloaded for it.
 
 **systemd, cron and paseo keep the conservative default** (installs and removals defer, exit 6): no adapter proves their
 launch paths yet. A paseo step on a launchd host also keeps it, and so does `--no-activate` (the adapter needs `launchctl`).
