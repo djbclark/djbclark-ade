@@ -1435,3 +1435,55 @@ Whether a `paseo events` command already exists in the CLI: the name comes from 
 djbclark decides whether to file. Suggested split: the terminal rename and the
 event stream as separate issues. The inspect workspace id was #7592 and is
 closed (2026-10-23) — do not re-file it.
+
+## 20. Paseo — one uncaught `kill EPERM` in a plugin timer crashes the whole daemon worker (draft, not filed, 2026-11-12)
+
+**Status: ready-to-file as a comment or a new issue** (operator decides; filing waits for the operator's yes). Related
+and open (checked 2026-11-12): [#7888](https://github.com/getpaseo/paseo/issues/7888) (Antigravity provider on macOS
+surfaces a startup timeout as `kill EPERM`; `signals.ts` ignores only `ESRCH`) and
+[#9006](https://github.com/getpaseo/paseo/issues/9006) (the same `kill EPERM` daemon crash after an internal
+Antigravity helper is closed, 0.15.2). This draft adds a third occurrence and the request that one failed timer must
+not kill the worker.
+
+**Repo:** getpaseo/paseo. **Version:** daemon `0.16.0-beta.2`, macOS (Darwin 27.2.0), 2026-11-12.
+
+### What happens
+
+1. At 2026-11-12T20:34:33.511Z (log level 60) the daemon worker (pid 42258) logged `Error: kill EPERM` with this stack:
+   `process.kill` (`node:internal/process/per_thread:277`) ← `signalProcess` (bundle line 58) ← `signalGroup`
+   (bundle line 284) ← `Timeout.eval [as _onTimeout]` (bundle line 273) ← `listOnTimeout` / `processTimers`. All three
+   frames are `eval at evaluateBundle (.../server/plugins/bundle-evaluator.js:32:21)`, i.e. plugin bundle code run in
+   the daemon process.
+2. About 260 ms later the runner logged `Worker IPC channel disconnected`, `Worker exited` (code 1) and `Worker
+   crashed (code 1). Restarting worker...`. The new worker (pid 42414) reloaded 1,249 agent records "on demand".
+3. Plugin in-memory state does not survive a worker restart (W10 design note, 2026-11-12: it drops every plugin's
+   pending timers, e.g. session-guard's pauses; not re-measured here). Agents keep their persisted identity.
+4. The log lines at 14556-14559 of `~/.paseo/20261112-1535-01-daemon.log` carry the evidence; the lines before it
+   (20:34:32) are unrelated plugin stderr (`session-recovery` "daemon version is not supported",
+   `dann-workspace-accent` `paseo.setWorkspaceLabel is not a function`) and one MCP `Unsupported protocol version`.
+
+### Request
+
+1. Treat `EPERM` like `ESRCH` when signalling a process group that may belong to another user or have been reaped
+   (this is #7888's `signals.ts` point), in whatever bundle owns `signalGroup`.
+2. Independent of 1: run plugin bundle timers (`_onTimeout` callbacks) inside a try/catch or an `uncaughtException`
+   boundary that disables or restarts that one plugin, not the daemon worker.
+3. On crash, log the plugin id that owned the failing timer. The stack above is anonymous `eval` frames, so the owner
+   cannot be recovered from the log.
+
+### Searched first (2026-11-12)
+
+`gh search issues --repo getpaseo/paseo` for "kill EPERM", "signalGroup plugin" and "worker crashed plugin timer": only
+#7888, #9006 and #6052 (Antigravity timeouts on Windows) came back; none is the plugin-timer variant.
+
+### Unverified
+
+Which plugin or provider owns `signalGroup`: `rg -a signalGroup` over `/Applications/Paseo.app/Contents/Resources/app.asar`
+and over `~/.paseo/plugins` found no definition (the resources plugin's `signalProcessRpc` handler does catch `EPERM`).
+The Antigravity provider is the likeliest owner given #7888 and #9006, but this log does not name it. What the target
+pid was is unknown. No reproduction was attempted.
+
+### Ask
+
+djbclark decides whether to comment on #9006 with this evidence or file a new issue (suggested: new, request 2 is
+broader than the Antigravity bug).

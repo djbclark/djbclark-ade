@@ -360,3 +360,370 @@ def test_delivery_combined_with_terminal_error_is_still_detected(fake):
     assert scan() == 0
     assert not sent.exists()
     assert '"action": "delivered"' in (state / "events.jsonl").read_text()
+
+
+# --- --quota pass (docs/net-resume.md, "Quota resume") ---------------------------------------------
+# The real rendered last line of a z.ai 5-hour stop (agent f2802e7c, 2026-11-12T20:20:03Z).
+QLINE = ('[System Error] 429: {"code":"1308","message":"Usage limit reached for 5 hour. '
+         'Your limit will reset at 2026-11-13 06:14:11"} (stopReason=error, model=zai/glm-5.3-flash)')
+CHILD2 = "00000000-0000-0000-0000-000000000005"
+RESET = "2026-11-12T20:30:00+00:00"
+
+
+def at(hour, minute):
+    return datetime(2026, 11, 12, hour, minute, tzinfo=timezone.utc).timestamp()
+
+
+def window(state="exhausted", used=100.0, resets=RESET, minutes=300, window_id="primary"):
+    return {"window_id": window_id, "label": "z.ai 5-hour", "state": state, "used_percent": used,
+            "window_minutes": minutes, "resets_at": resets}
+
+
+def account(windows, collected="2026-11-12T19:59:30+00:00", fresh=True, usable=False, stale=False, provider="zai"):
+    return {"provider": provider, "windows": windows, "collected_at": collected, "fresh": fresh,
+            "stale": stale, "usable_now": usable}
+
+
+def exhausted_account(**kw):
+    return account([window()], **kw)
+
+
+def reset_account(**kw):
+    options = {"collected": "2026-11-12T20:34:00+00:00", "usable": True}
+    options.update(kw)
+    return account([window("ok", 0.0, None)], **options)
+
+
+@pytest.fixture
+def quota(fake, tmp_path, monkeypatch):
+    data, base_scan, sent, state = fake
+    aiuse_file = tmp_path / "aiuse.json"
+    executable = tmp_path / "aiuse"
+    executable.write_text('#!/usr/bin/env python3\nimport os, sys\nfrom pathlib import Path\n'
+                          'p = Path(os.environ["FAKE_AIUSE"])\nif not p.exists(): sys.exit(3)\n'
+                          'sys.stdout.write(p.read_text())\n')
+    executable.chmod(0o755)
+    monkeypatch.setenv("FAKE_AIUSE", str(aiuse_file))
+    data["agents"][CHILD].update(Provider="pi", Model="zai/glm-5.3-flash", UpdatedAt="2026-11-12T19:59:00Z")
+    data["logs"] = QLINE
+    data["activity"] = [{"type": "user_message", "text": "review"}, {"type": "assistant_message", "text": QLINE}]
+    guard = tmp_path / "guard.json"
+
+    def put(*accounts, raw=None):
+        aiuse_file.write_text(raw if raw is not None else json.dumps({"snapshot": {"accounts": list(accounts)}}))
+
+    def scan(apply=True, **options):
+        return base_scan(apply, quota=True, guard_state=guard, **options)
+
+    def clock(when):
+        monkeypatch.setattr(M["time"], "time", lambda: when)
+
+    def rows():
+        path = state / "events.jsonl"
+        return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+    def actions(agent=CHILD):
+        return [r["action"] for r in rows() if r["agent"] == agent]
+
+    def waiting():
+        """Record the quota-wait at 20:00 while aiuse shows the window exhausted."""
+        put(exhausted_account())
+        assert scan() == 0
+        assert actions() == ["quota-wait"]
+
+    return {"data": data, "scan": scan, "put": put, "clock": clock, "rows": rows, "actions": actions,
+            "wait": waiting, "sent": sent, "state": state, "guard": guard}
+
+
+def test_quota_line_policy():
+    assert M["quota_line"]("zai", QLINE)
+    assert not M["transient"]("pi", QLINE)  # The network path still rejects 1308.
+    for line in [QLINE + " billing", QLINE.replace("1308", "1113"), "[System Error] 401: unauthorized",
+                 "[System Error] 403 forbidden", QLINE.replace("5 hour", "1 week"),
+                 QLINE + "\nfollow-up", "User quoted: " + QLINE, "", "[System Error] insufficient credit balance"]:
+        assert not M["quota_line"]("zai", line)
+    assert not M["quota_line"]("other", QLINE)
+
+
+def test_pool_mapping():
+    assert M["pool_of"]({"Provider": "pi", "Model": "zai/glm-5.3-flash"}) == "zai"
+    for record in [{"Provider": "claude", "Model": "zai/x"}, {"Provider": "pi", "Model": "opencode-go/x"},
+                   {"Provider": "pi"}, {"Provider": "pi", "Model": 3}]:
+        assert M["pool_of"](record) is None
+
+
+def test_d1_quota_error_records_wait_without_send(quota):
+    quota["wait"]()
+    assert not quota["sent"].exists()
+    row = next(r for r in quota["rows"]() if r["action"] == "quota-wait")
+    assert (row["pool"], row["window_id"], row["window_minutes"], row["resets_at"], row["updated_at"]) == (
+        "zai", "primary", 300, RESET, "2026-11-12T19:59:00Z")
+    assert quota["scan"]() == 0  # A repeat scan neither re-records nor sends.
+    assert quota["actions"]() == ["quota-wait"]
+    assert not quota["sent"].exists()
+
+
+def test_d2_resume_after_reset_dry_run_then_apply(quota):
+    quota["wait"]()
+    quota["clock"](at(20, 35))
+    quota["put"](reset_account())
+    assert quota["scan"](False) == 0
+    assert quota["actions"]() == ["quota-wait", "would-resume-quota"]
+    assert not quota["sent"].exists()
+    assert quota["scan"]() == 0
+    assert json.loads(quota["sent"].read_text()) == ["send", "--json", "--no-wait", "--", CHILD, M["QUOTA_PROMPT"]]
+    assert quota["actions"]() == ["quota-wait", "would-resume-quota", "reserved", "submitted"]
+    assert quota["scan"]() == 0  # One reserved row per error event: never a second send.
+    assert len(quota["sent"].read_text().splitlines()) == 1
+
+
+def test_quota_is_off_by_default(fake):
+    data, scan, sent, state = fake
+    data["agents"][CHILD].update(Provider="pi", Model="zai/glm-5.3-flash")
+    data["logs"] = QLINE
+    assert scan() == 0
+    assert not sent.exists()
+    assert not (state / "events.jsonl").exists() or "quota" not in (state / "events.jsonl").read_text()
+
+
+@pytest.mark.parametrize("sample", [
+    {"account": lambda: reset_account(fresh=False)},
+    {"account": lambda: reset_account(stale=True)},
+    {"account": lambda: reset_account(usable=False)},
+    {"account": lambda: reset_account(collected="2026-11-12T20:30:59+00:00")},  # before reset + 60 s grace
+    {"account": lambda: reset_account(collected="2026-11-12T20:36:00+00:00")},  # in the future
+    {"account": lambda: reset_account(collected="2026-11-12T20:34:00")},  # no timezone
+    {"account": lambda: account([window()], collected="2026-11-12T20:34:00+00:00", usable=True)},  # still exhausted
+    {"account": lambda: account([window("ok", 0.0, None, window_id="other")], collected="2026-11-12T20:34:00+00:00", usable=True)},
+    {"account": lambda: account([window("ok", 96.0, None)], collected="2026-11-12T20:34:00+00:00", usable=True)},
+    {"account": lambda: reset_account(provider="claude")},  # missing account
+    {"raw": "not json"}, {"raw": "[]"}, {"raw": '{"snapshot": {"accounts": "x"}}'}, {"none": True},
+])
+def test_d3_unconfirmed_reset_never_resumes(quota, sample):
+    quota["wait"]()
+    quota["clock"](at(20, 35))
+    if "account" in sample:
+        quota["put"](sample["account"]())
+    elif "raw" in sample:
+        quota["put"](raw=sample["raw"])
+    for apply in (False, True):
+        assert quota["scan"](apply) == 0
+    assert not quota["sent"].exists()
+    assert not {"would-resume-quota", "reserved", "submitted"} & set(quota["actions"]())
+
+
+def test_d3_collected_exactly_at_grace_is_enough(quota):
+    quota["wait"]()
+    quota["clock"](at(20, 35))
+    quota["put"](reset_account(collected="2026-11-12T20:31:00+00:00"))
+    assert quota["scan"]() == 0
+    assert quota["sent"].exists()
+
+
+def test_d3_missing_aiuse_binary_fails_closed(quota, monkeypatch):
+    quota["wait"]()
+    quota["clock"](at(20, 35))
+    import subprocess
+    original = subprocess.run
+    def run(argv, *args, **kwargs):
+        if argv[0] == "aiuse":
+            raise FileNotFoundError("aiuse")
+        return original(argv, *args, **kwargs)
+    monkeypatch.setattr(subprocess, "run", run)
+    assert quota["scan"]() == 0
+    assert not quota["sent"].exists()
+
+
+@pytest.mark.parametrize("change", ["toplevel", "archived", "user-message", "guard", "delivered", "output-after"])
+def test_d4_ineligible_agents_are_skipped(quota, change):
+    data = quota["data"]
+    child = data["agents"][CHILD]
+    if change == "toplevel": child["ParentAgentId"] = None
+    if change == "archived": child["Archived"] = True
+    if change == "guard":
+        quota["guard"].write_text(json.dumps({"pauses": [{"agentId": CHILD, "phase": "waiting-reset"}]}))
+    if change in ("toplevel", "archived", "guard"):
+        quota["put"](exhausted_account())
+        assert quota["scan"]() == 0
+        assert "quota-wait" not in quota["actions"]()
+        assert not quota["sent"].exists()
+        return
+    quota["wait"]()
+    quota["clock"](at(20, 35))
+    quota["put"](reset_account())
+    activity = data["activity"]
+    if change == "user-message": activity.append({"type": "user_message", "text": "new task"})
+    if change == "output-after": activity.append({"type": "assistant_message", "text": "I kept working"})
+    if change == "delivered": activity.insert(1, {"type": "assistant_message", "text": "done: W1 https://example.test/1"})
+    for apply in (False, True):
+        assert quota["scan"](apply) == 0
+    assert not quota["sent"].exists()
+    assert "reserved" not in quota["actions"]()
+
+
+def test_d4_guard_pause_in_terminal_phase_does_not_block(quota):
+    quota["guard"].write_text(json.dumps({"pauses": [{"agentId": CHILD, "phase": "resumed"},
+                                                     {"agentId": CHILD2, "phase": "waiting"}]}))
+    quota["wait"]()
+
+
+def test_d4_guard_pause_appearing_before_send_blocks(quota, monkeypatch):
+    quota["wait"]()
+    quota["clock"](at(20, 35))
+    quota["put"](reset_account())
+    calls = 0
+    def pending(self, aid):
+        nonlocal calls
+        calls += 1
+        return calls > 1
+    monkeypatch.setattr(Scanner, "guard_pending", pending)
+    assert quota["scan"]() == 0
+    assert not quota["sent"].exists()
+    assert "reserved" not in quota["actions"]()
+
+
+@pytest.mark.parametrize("line", [
+    '[System Error] 401: {"code":"1113","message":"Insufficient balance or no resource package."}',
+    "[System Error] 403 Forbidden", QLINE + " credit", QLINE.replace("1308", "1113"),
+])
+def test_d5_auth_billing_and_balance_errors_never_qualify(quota, line):
+    quota["data"]["logs"] = line
+    quota["put"](exhausted_account())
+    assert quota["scan"]() == 0
+    assert quota["actions"]() == []
+    assert not quota["sent"].exists()
+
+
+def test_d6_reset_older_than_staleness_window_is_stale(quota):
+    quota["wait"]()
+    quota["clock"](at(21, 5))  # 35 minutes after the reset; default window 30
+    quota["put"](reset_account(collected="2026-11-12T21:04:00+00:00"))
+    assert quota["scan"]() == 0
+    assert quota["actions"]() == ["quota-wait", "stale"]
+    assert not quota["sent"].exists()
+    assert quota["scan"](max_error_age_minutes=60) == 0  # The wait stays stale for this error until it is re-armed.
+    assert quota["sent"].exists()
+
+
+def test_d6_reset_farther_from_error_than_the_window_is_stale(quota):
+    quota["put"](account([window(resets="2026-11-13T01:30:00+00:00")]))  # 5.5 h after the 19:59 error
+    assert quota["scan"]() == 0
+    assert quota["actions"]() == ["stale"]
+
+
+def test_d6_reset_before_the_error_is_stale(quota):
+    quota["put"](account([window(resets="2026-11-12T19:00:00+00:00")]))
+    assert quota["scan"]() == 0
+    assert quota["actions"]() == ["stale"]
+
+
+def test_weekly_or_unconfirmed_windows_never_wait(quota):
+    quota["put"](account([window(), window("exhausted", 100.0, "2026-11-18T14:56:01+00:00", 10080, "secondary")]))
+    assert quota["scan"]() == 0
+    assert quota["actions"]() == ["quota-excluded"]
+    quota["put"](account([window("ok", 12.0, None)]))
+    assert quota["scan"]() == 0
+    assert quota["actions"]() == ["quota-excluded", "quota-unconfirmed"]
+    assert not quota["sent"].exists()
+
+
+def test_d7_one_resume_per_pool_per_scan(quota):
+    data = quota["data"]
+    data["agents"][CHILD2] = {**data["agents"][CHILD], "Id": CHILD2}
+    quota["put"](exhausted_account())
+    assert quota["scan"]() == 0
+    assert quota["actions"](CHILD) == quota["actions"](CHILD2) == ["quota-wait"]
+    quota["clock"](at(20, 35))
+    quota["put"](reset_account())
+    assert quota["scan"]() == 0
+    assert [json.loads(line)[4] for line in quota["sent"].read_text().splitlines()] == [CHILD]
+    assert quota["scan"]() == 0
+    assert [json.loads(line)[4] for line in quota["sent"].read_text().splitlines()] == [CHILD, CHILD2]
+
+
+def test_d8_closed_agent_with_unchanged_ledger_entry_is_resumed(quota):
+    quota["wait"]()
+    quota["data"]["agents"][CHILD]["Status"] = "closed"
+    quota["clock"](at(20, 35))
+    quota["put"](reset_account())
+    assert quota["scan"]() == 0
+    assert quota["sent"].exists()
+    assert quota["actions"]()[-2:] == ["reserved", "submitted"]
+
+
+def test_d8_closed_agent_with_changed_updated_at_is_changed(quota):
+    quota["wait"]()
+    quota["data"]["agents"][CHILD].update(Status="closed", UpdatedAt="2026-11-12T20:10:00Z")
+    quota["clock"](at(20, 35))
+    quota["put"](reset_account())
+    assert quota["scan"]() == 0
+    assert quota["scan"]() == 0
+    assert quota["actions"]() == ["quota-wait", "changed"]  # Recorded once, not once per scan.
+    assert not quota["sent"].exists()
+
+
+def test_closed_agent_without_a_ledger_entry_is_never_touched(quota):
+    quota["data"]["agents"][CHILD]["Status"] = "closed"
+    quota["put"](exhausted_account())
+    assert quota["scan"]() == 0
+    assert quota["actions"]() == []
+
+
+def test_d9_crash_between_reserve_and_send_is_not_retried(quota):
+    quota["wait"]()
+    quota["clock"](at(20, 35))
+    quota["put"](reset_account())
+    quota["data"]["send_rc"] = 1
+    assert quota["scan"]() == 0
+    quota["data"]["send_rc"] = 0
+    assert quota["scan"]() == 0
+    assert len(quota["sent"].read_text().splitlines()) == 1
+    assert quota["actions"]().count("reserved") == 1
+
+
+def test_short_deadline_does_not_reserve_quota_resume(quota, monkeypatch):
+    quota["wait"]()
+    quota["clock"](at(20, 35))
+    quota["put"](reset_account())
+    monkeypatch.setattr(Scanner, "remaining", lambda self: 5)
+    assert quota["scan"]() == 0
+    assert not quota["sent"].exists()
+    assert quota["actions"]()[-1] == "deadline-before-reserve"
+
+
+def test_d10_only_agent_excludes_every_other_agent(quota):
+    data = quota["data"]
+    data["agents"][CHILD2] = {**data["agents"][CHILD], "Id": CHILD2}
+    quota["put"](exhausted_account())
+    assert quota["scan"](only_agents=[CHILD2]) == 0
+    assert quota["actions"](CHILD) == []
+    assert quota["actions"](CHILD2) == ["quota-wait"]
+
+
+def test_d10_only_agent_restricts_the_network_pass_too(fake):
+    _, scan, sent, _ = fake
+    assert scan(only_agents=[MIDDLE]) == 0
+    assert not sent.exists()
+    assert scan(only_agents=[CHILD]) == 0
+    assert sent.exists()
+
+
+def test_malformed_quota_ledger_fails_closed(quota):
+    quota["wait"]()
+    path = quota["state"] / "events.jsonl"
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    del rows[0]["resets_at"]
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    with pytest.raises(M["ScanError"]):
+        quota["scan"]()
+    assert not quota["sent"].exists()
+
+
+@pytest.mark.parametrize("args", [["--quota-per-pool", "0"], ["--quota-grace-seconds", "-1"],
+                                  ["--quota-grace-seconds", "nan"], ["--only-agent", "bad"]])
+def test_quota_flag_bounds(args, tmp_path):
+    try:
+        rc = M["main"](["--lead", LEAD, "--state-dir", str(tmp_path), *args])
+    except SystemExit as exc:
+        rc = exc.code
+    assert rc == 2

@@ -82,5 +82,53 @@ The scheduler render fixtures supply `__LEAD__` using the same substitution
 contract as the merged auto-permit template (2026-11-12); unfilled placeholders
 are still refused. This PR installs or loads nothing.
 
-Offline tests use a fake Paseo executable and mocked endpoint health. CI runs
+## Quota resume (`--quota`, 2026-11-12)
+
+Session-guard resumes a quota-failed agent only when Paseo's `provider.usage.list` has a usage entry for the
+agent's provider; Pi pools (z.ai, OpenCode Go, ClinePass) have none, and a daemon idle collection turns the errored
+agent into `closed` with its `lastError` gone (design `design-quota-resume.md`, W10 evidence, 2026-11-12). `--quota`
+(off by default) adds a second pass after the network pass. The network path, its `DENIED` regex and its 30-minute
+rule are unchanged, and it still rejects every quota message. The launchd template stays dry-run and without
+`--quota`; turning `--quota --apply` on there is an operator decision (order 11).
+
+```
+bin/ade-net-resume --lead LEAD_UUID --quota --only-agent CANARY_UUID --watch 3600 --interval 60
+```
+
+Flags: `--quota-per-pool N` (default 1 resume per pool per scan), `--quota-grace-seconds S` (default 60),
+`--only-agent UUID` (repeatable; restricts **both** passes, so a canary is isolated from the fleet).
+
+Scope, all of it kept from the network path (descendants of `--lead` only, `Archived` false, the reserve-before-send
+ledger, two attempts per agent per hour, an error event sent once, an uncertain send never retried, re-inspection
+before the send, the lock, dry-run unless `--apply`, the scan deadline) plus:
+
+1. **Pi pools only.** `pool_of` maps provider `pi` with model prefix `zai/` to the aiuse provider `zai`. Claude and Codex
+   stay with session-guard; any agent with a pending guard pause (`~/.paseo/plugin-data/session-guard/state.json`,
+   `pauses[].agentId`, phase not `resumed`/`cancelled`/`dismissed`) is `guard-owned` and skipped. Add a pool only
+   with a line copied from a real stop.
+2. **Narrow classification.** The last log line must fully match the pool's rendered quota line (the z.ai 5-hour
+   code-1308 line, copied from a real stop 2026-11-12) and must not match `QUOTA_DENIED` (auth, credential, API key,
+   billing, credit, balance, 1113, 401, 403). Weekly stops do not match the pattern; a weekly window exhausted in
+   aiuse is `quota-excluded` (windows over 360 minutes never qualify).
+3. **aiuse is the reset anchor, fail closed.** On first sight of an eligible error the scan records `quota-wait`
+   (`signature`, `pool`, `window_id`, `window_minutes`, `resets_at`, `updated_at`) from the exhausted aiuse window
+   (`state` exhausted or used 95% or more). The reset must fall after the error and within `window_minutes` of it, else
+   `stale`; no exhausted window is `quota-unconfirmed`, never a resume. aiuse nulls `resets_at` after a reset, so the
+   ledger copy is the only anchor.
+4. **Resume gate.** A resume needs a fresh aiuse sample (`fresh` true, not stale, `usable_now` true) whose
+   `collected_at` is at or after `resets_at` plus grace and not in the future, showing the recorded window below the
+   limit. A missing aiuse, bad JSON, a missing or ambiguous account, or a stale sample waits (`quota-waiting`,
+   once per ten minutes). The reset may be at most `--max-error-age-minutes` (default 30) in the past, else `stale`.
+5. **Agent state.** `error` is eligible after `paseo logs --json` shows the quota line still last: a newer user
+   message or other output is `changed`, a `done:` line before the error is `delivered`. `closed` is eligible only
+   when the ledger holds a `quota-wait` for the agent whose `UpdatedAt` is unchanged (operator ruling, lead 2026-11-12);
+   nothing is read from a closed agent. The scan never calls `fetchAgent` or the timeline: a read-only `fetchAgent`
+   reloads the agent from persistence and re-triggers the idle collection (W10 J2c). Whether `paseo logs` reloads
+   a closed agent was **not verified**; the quota pass never calls it for one.
+6. **Prompt.** `provider quota window reset; continue from where you stopped, check any interrupted operation before
+   retrying, same report path`. One resume per pool per scan, so a just-reset pool is not drained at once.
+
+Not done in this slice (2026-11-12): any canary run, any live `--apply`, the launchd plist.
+
+Offline tests use a fake Paseo executable, a fake `aiuse` and mocked endpoint health. CI runs
 them on Linux; no real agent is resumed by the tests.
