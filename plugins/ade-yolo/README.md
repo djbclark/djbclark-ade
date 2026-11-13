@@ -30,7 +30,7 @@ refuses. An attach-only create passes unchanged and unstamped, with no catalog l
 the open hook can read the agent snapshot, the resume identity check (id and provider) still applies and refuses a mismatch,
 and a resume or refresh with no readable snapshot refuses as for any provider. Only an `import` (no agent record yet) may lack
 a snapshot, for this provider set only. The id match is exact (an optional `/model` suffix is Paseo's own form; surrounding
-whitespace never matches). Each exempted create/open logs `ade-yolo: <provider>: ... attach-only: mode decided by the pane's
+whitespace never matches). Accepted residual (adversary round 2, C1; the legacy allowance already allowed it): a `herdr-omp` *refresh* of an agent that has lost its persistence handle and has no bind option would have the host launch a fresh `omp`; herdr sessions normally carry a handle, so this is not expected. Each exempted create/open logs `ade-yolo: <provider>: ... attach-only: mode decided by the pane's
 launch`. The id is the Paseo provider id, which only routes to that attach provider: a Claude or Codex create cannot use it
 to skip the gate, because nothing is launched under it. No `ade-yolo.skip` metadata is involved. Reported by agent 5fd0bef1
 (paseo4herdr): every Herdr chat open and session import was refused.

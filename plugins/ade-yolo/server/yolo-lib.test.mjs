@@ -172,6 +172,14 @@ test("attach-only create passes unchanged and unstamped, with no catalog lookup 
   assert.equal(applyYoloToCreateRequest({config:{provider:"herdr-generic"}},undefined),undefined);
   assert.equal(planYoloPatch({provider:"herdr-omp",providerOptions:bind},{},row("herdr-omp",[])),null);
 });
+test("attach-only: bare herdr-omp with a bind passes; non-string terminalId refuses; skip/restrictive precedence unstamped",()=>{
+  const bind={herdrBind:{terminalId:"t1"}};
+  assert.equal(applyYoloToCreateRequest({config:{provider:"herdr-omp",providerOptions:bind}},undefined),undefined);
+  assert.throws(()=>planYoloPatch({provider:"herdr-omp",providerOptions:{herdrBind:{terminalId:5}}},{},row("herdr-omp",[])),/no source-backed/);
+  for(const [config,metadata] of [[{provider:"herdr-generic",modeId:"plan"},{}],[{provider:"herdr-generic"},{"ade-yolo.skip":true}]]){
+    const logs=[]; assert.equal(applyYoloToCreateRequest({config,metadata},undefined,undefined,m=>logs.push(m)),undefined); assert.equal(logs.length,0);
+  }
+});
 test("herdr-omp create WITHOUT the bind option launches a retired omp: not attach-only, still refuses",async()=>{
   for(const providerOptions of [undefined,{},{herdrBind:null},{herdrBind:{}},{herdrBind:{terminalId:""}},{herdrBind:"t1"}])
     assert.throws(()=>planYoloPatch({provider:"herdr-omp/native-default",providerOptions},{},row("herdr-omp",[])),/no source-backed/);
