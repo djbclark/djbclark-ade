@@ -34,7 +34,9 @@ under **Carried**, newest first, one line each; an item leaves when it ships (in
    outside the caller's claimed workspace, with failing tests and an adversary round), the six-case enforcement
    pilot (S4) before any hard refusal (`bin/ade-claim-pilot --fixture` covers cases 1–2 in CI; 3–6 need live),
    and the optional narrowing E8 declined (F3: a security decision for the operator). Lives in
-   `docs/git-guard.md`; YOLO plugin: `plugins/ade-yolo/` (#526).
+   `docs/git-guard.md`; YOLO plugin: `plugins/ade-yolo/` (#526). Rollout (observe-only install → go-live) is tracked in
+   https://github.com/djbclark/djbclark-ade/issues/638 (2026-11-13: `ADE_CLAIM_DRY_RUN` gates only W2, so an observe mode
+   for every hook comes before the install).
 6. **Drop the brew Paseo for our fork** (2026-10-24): disruptive, **ask the operator first**; after the connected-hosts work.
 7. **Paseo connected hosts** (2026-10-24): connect vps-primary (user `djbclark`) after a quiesced Paseo upgrade.
 8. **Paseo in-place model change upstream** (2026-10-23): `docs/upstream-issues.md` entry 17 (`paseo agent model <id>
@@ -121,6 +123,11 @@ under **Carried**, newest first, one line each; an item leaves when it ships (in
     continuation/quota/identity acceptance). Claude API credits remain billing-blocked, separate from the
     vendor subscription. Security implementation and SIPB reliability work are deferred; prior evidence
     remains in `docs/tui-security-and-pi-migration.md`.
+35. **`ade-sched reconcile` never creates a `kind = "paseo"` row** (2026-11-13): the admission factory has a launchd
+    adapter only, so a Paseo schedule step gets the default `JobAdmission` and defers (exit 6, "shared admission
+    incomplete"). `context-budget` was created by hand that day (`paseo schedule create`, id c98b8f3c, operator yes), so
+    the ledger does not own it. Next: a Paseo-schedule admission adapter (or record manual create as the path and let
+    reconcile adopt a matching live row). Lives in `bin/ade_sched.py` (`JobAdmission`, admit factory), `docs/scheduling.md`.
 
 ## Closed by the slim-down (2026-11-06/07; the slice that closed it)
 

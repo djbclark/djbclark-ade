@@ -389,3 +389,8 @@ litellm:
     - cline2-pass/kimi-k2.6
     - cline2-pass/qwen3.7-max
     - cline2-pass/qwen3.7-plus
+
+# 2026-11-13 (operator yes): the IPv6 route to openrouter.ai is dead here, so every IPv6-first
+# connect stalled before IPv4 answered (hermes doctor). Live ~/.hermes/config.yaml carries the same.
+network:
+  force_ipv4: true
