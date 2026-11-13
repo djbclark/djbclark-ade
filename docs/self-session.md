@@ -15,7 +15,13 @@ remaining action, exact repository/worktree, dirty and untracked work, outstandi
 jobs/permissions, claims and coordination responsibilities. Do not include keys,
 login tokens or credential-store contents. Pass that file explicitly; ADE does
 not harvest transcripts or credentials. The helper preserves a copy and SHA256
-in a private state directory, plus repository HEAD for handoff. Original worktree
+in a private state directory, plus repository HEAD for handoff. A session whose
+cwd is in no git repository (for example `~`) records `head: null` and its ack must
+attest `head: null`. That needs git's "not a git repository (or any ...)" discovery
+failure (exit 128) and no `.git` entry of any kind in the real cwd or any ancestor; any
+other `git rev-parse HEAD` failure (timeout, unborn HEAD, broken linked worktree or
+gitfile, unreadable `.git`, repository across a mount point, Apple git's
+`not a git repository: (null)`) still refuses (2026-11-13). Original worktree
 files remain in place; archiving an agent is never workspace deletion.
 
 The executable requires the full `PASEO_AGENT_ID` supplied by Paseo. Handoff also
@@ -77,7 +83,9 @@ bin/ade-self-session accept --record /absolute/state/handoff-PREDECESSOR_UUID.js
 ```
 
 The acknowledgement must contain exactly matching `token`,
-`checkpoint_sha256`, `head` and a nonempty `next_action`. The receipt binds it
+`checkpoint_sha256`, `head` (the recorded sha, or JSON `null` when the cwd is not a git
+repository; the key must be present) and a nonempty `next_action`. A cwd that became or
+stopped being a repository since handoff fails accept and finish (2026-11-13). The receipt binds it
 to the successor's actual `PASEO_AGENT_ID`. The helper verifies the checkpoint
 bytes, repository HEAD and live successor identity/provider/model/cwd, no parent,
 no pending permissions, and effective native mode/catalog readback. It does not
