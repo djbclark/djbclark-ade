@@ -1797,7 +1797,7 @@ def _on_disk_files_match(
             if path.is_file():
                 current[path] = path.read_text(encoding="utf-8")
         return set(current) == set(rendered.files) and artifact_hash(current) == artifact_hash(rendered.files)
-    except (OSError, SchedError):
+    except (OSError, SchedError, ValueError):  # ValueError: a non-UTF-8 file is not a match
         return False
 
 
@@ -1908,7 +1908,7 @@ class JobAdmission:
     activity: str = "unknown"  # idle | busy | unknown
     triggers_drained: bool = False
     updater_running: bool = False
-    hold: str | None = None  # adapter-supplied refusal reason (state unreadable, operator-disabled job, ...)
+    hold: str | None = None  # adapter-supplied refusal reason (loaded job, state unreadable, foreign plist, ...)
 
     def refusal(self) -> str | None:
         if self.updater_running:
@@ -2198,6 +2198,7 @@ def plan_reconcile(
             ))
             continue
         if job.label != label:
+            expected_labels[job.label] = name  # the plist's real label stays expected: no removal plan for it
             steps.append(ReconcileStep(
                 name, "blocked", owner,
                 f"catalog label {label!r} differs from the plist Label {job.label!r}",
@@ -2512,6 +2513,8 @@ def reconcile(
 
         def plist_provenance(step: ReconcileStep, plist: Path) -> str | None:
             """None when the plist on disk is provably ADE's: the ADE render, or the ledger's recorded artifact."""
+            if not plist.is_file():  # a FIFO or device must never be read (a read would block under the lock)
+                return "not a regular file"
             try:
                 disk_hash = artifact_hash({plist: plist.read_text(encoding="utf-8")})
             except (OSError, UnicodeDecodeError) as exc:

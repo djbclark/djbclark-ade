@@ -10,6 +10,7 @@ import contextlib
 import io
 import json
 import os
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -101,6 +102,7 @@ def ld(tmp_path):
         "ADE_JOBS_STATE_DIR": str(tmp_path / "jobs-state"),
     }
     env.pop("ADE_SCHED_BACKEND", None)
+    env["PATH"] = f"{bin_dir}:/usr/bin:/bin"  # no real paseo/launchctl/crontab: reconcile's live scan must stay offline
 
     class L:
         pass
@@ -373,6 +375,45 @@ def test_ledger_row_of_another_backend_does_not_prove_ownership(ld, monkeypatch)
     rows, rc = _reconcile(ld, root, catalog)
     assert rc == 6, rows
     assert "drift" in plist.read_text() and not NEVER & set(ld.verbs())
+
+
+def test_non_utf8_plist_defers_instead_of_crashing(ld):
+    root = _mini_catalog(ld.tmp)
+    catalog = ai.load_catalog(root=root)
+    plist = ld.agents / f"{LABEL}.plist"
+    plist.write_bytes(b"bplist00\xff\xfe\x80")
+    rows, rc = _reconcile(ld, root, catalog)
+    assert rc == 6, rows
+    assert plist.read_bytes() == b"bplist00\xff\xfe\x80" and not NEVER & set(ld.verbs())
+
+
+def test_label_mismatch_does_not_plan_removal_of_the_installed_label(ld):
+    root, catalog = _installed(ld)
+    plist = ld.agents / f"{LABEL}.plist"
+    ld.unload()
+    toml = root / "config" / "install.toml"
+    toml.write_text(toml.read_text().replace(f'label = "{LABEL}"', 'label = "com.djbclark.other"'))
+    catalog = ai.load_catalog(root=root)
+    ld.reset()
+    rows, rc = _reconcile(ld, root, catalog)
+    assert rc == 1 and any(r["action"] == "blocked" for r in rows), rows
+    assert not any(r["action"] == "removed" for r in rows) and plist.exists()
+    assert not NEVER & set(ld.verbs())
+
+
+def test_fifo_at_the_plist_path_is_not_read(ld):
+    root = _mini_catalog(ld.tmp)
+    catalog = ai.load_catalog(root=root)
+    fifo = ld.agents / f"{LABEL}.plist"
+    os.mkfifo(fifo)
+    signal.signal(signal.SIGALRM, lambda *_: pytest.fail("reconcile blocked reading the FIFO"))
+    signal.alarm(20)
+    try:
+        rows, rc = _reconcile(ld, root, catalog)  # a read of the FIFO would block forever
+    finally:
+        signal.alarm(0)
+    assert rc != 0 and not NEVER & set(ld.verbs()), rows
+    assert fifo.exists()
 
 
 def _owned_retired_job(ld, label="com.djbclark.skillopt-sleep", loaded=False, ledger_hash=None):

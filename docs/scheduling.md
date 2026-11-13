@@ -433,8 +433,17 @@ The updater's own service (`com.djbclark.ade-update-check`) running keeps its ex
 **Consequence and follow-up.** Until a launch-path-participating admission exists, a loaded job that needs a reload or a
 removal always defers; stop it deliberately, then reconcile (an unloaded launchd job is never healthy, so the next
 reconcile plans the load). The proper fix is an ADE job wrapper that takes a shared admission lock on every run, with
-reconcile holding it exclusive; the adapter then no longer needs to refuse loaded jobs. Known limit: a concurrent low-level
-`install`/login can still bootstrap an absent or unloaded job and does not take the reconcile lock.
+reconcile holding it exclusive; the adapter then no longer needs to refuse loaded jobs.
+
+**Known limits (not closed by this adapter).** The adapter itself never kills anything, but the step it admits still runs
+`install()`/`uninstall()`, which start with an unconditional `launchctl bootout`. If something outside the reconcile lock
+(a `just *-install` recipe, a low-level `ade-sched install`, an operator `bootstrap`) loads an admitted absent or unloaded
+job in the milliseconds between the `print` and that `bootout`, its run is signalled and the step still reports success.
+launchd itself cannot start an unloaded job, so only an external loader can open this window; closing it needs
+`install()`/`uninstall()` to skip the `bootout` for an admitted unloaded job (follow-up, not in this PR). A plist swapped in by another
+writer between the provenance read and the atomic write is overwritten the same way. An operator-disabled (`launchctl
+disable`), unloaded ADE job is admitted (no `print-disabled` read): its `bootstrap` fails, the ledger row becomes `failed`,
+and later reconciles exit 1 until the override is cleared.
 
 **systemd, cron and paseo keep the conservative default** (installs and removals defer, exit 6): no adapter proves their
 launch paths yet. A paseo step on a launchd host also keeps it, and so does `--no-activate` (the adapter needs `launchctl`).
