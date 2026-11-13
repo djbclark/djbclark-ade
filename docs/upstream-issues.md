@@ -1510,7 +1510,7 @@ its context. Today a misplaced tab can only be reported (`bin/ade-tidy` section 
 Installed Paseo 0.16.0-beta.2 (`/Applications/Paseo.app` bundle: `update_agent_request` is `{agentId, name?, labels?}`),
 the CLI source (`packages/cli/src/commands/agent/update.ts`: `--name`, `--label`, `--thinking`), the MCP tool
 `update_agent` (`name`, `labels`, `settings`), the releases page, and web searches for "move agent to another workspace"
-on `getpaseo/paseo`: no move command or field. Unrelated hits: discussion #3377 (fork or move a live session to another
+on `getpaseo/paseo`: no move command or field. Related third-party work: bigforcegun/dotfiles `paseo-move-chat` ([internals](https://github.com/bigforcegun/dotfiles/blob/e0915023f13e8a393280f147e9baf559a68d52fd/.rulesync-global/.rulesync/skills/paseo-move-chat/references/internals.md)) confirms `update_agent_request` carries only `name` and `labels` and moves an idle agent by archive plus `import_agent_request` with `workspaceId` (no CLI flag; checked by its author through 0.9.2). Unrelated hits: discussion #3377 (fork or move a live session to another
 *host*), issue #2641 (importing a session into a provisional workspace), the 0.16 note that Remote Control sessions keep
 their folder. No duplicate issue was found: four web searches and three `gh search issues --repo getpaseo/paseo` queries ("move agent workspace", "change workspace of agent", "reassign tab workspace", "move tab to another workspace") returned nothing relevant.
 

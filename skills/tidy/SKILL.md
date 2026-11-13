@@ -76,7 +76,11 @@ Paseo has **no way to move an agent to another window**: `paseo agent update` ta
 only; the MCP `update_agent` takes name, labels and settings; the protocol's `update_agent_request` carries
 `agentId, name, labels`; release notes (checked through the 0.16 line) list no move. An agent's window is fixed at
 launch (`paseo run --workspace` / `--new-workspace`). **Never relaunch an agent to move it**: that discards its
-context. `ade-tidy` therefore reports a misplaced tab (section F) and names the window by its majority class; place
+context. One workaround exists and is **not adopted**: a third-party "rehome" archives an idle agent and re-imports it
+with a `workspaceId` through the daemon client (`import_agent_request`; same agent id and provider session; `paseo agent
+import` has no `--workspace` flag), verified by its author only through Paseo 0.9.2
+([notes](https://github.com/bigforcegun/dotfiles/blob/e0915023f13e8a393280f147e9baf559a68d52fd/.rulesync-global/.rulesync/skills/paseo-move-chat/references/internals.md)). It needs a live check on 0.16 with a throwaway idle agent before anyone uses it, and the
+operator's yes. `ade-tidy` therefore reports a misplaced tab (section F) and names the window by its majority class; place
 new agents correctly at launch (`bin/ade-worker-run`, operator-requested workers into MAIN) instead. The upstream
 feature request is drafted in [docs/upstream-issues.md](../../docs/upstream-issues.md).
 
