@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "bin/ade-worker-run"
 LEAD = "8cd86203-d33b-49db-abde-9baba52bcf61"
 OTHER_LEAD = "11111111-2222-3333-4444-555555555555"
+AGENT = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 WIN = f"workers djbclark-ade Wave 7 {LEAD}"
 STUB = '''#!/usr/bin/env python3
 import json, os, sys
@@ -42,6 +43,8 @@ elif a[0] == "run":
     sys.exit(d.get("run_rc", 0))
 elif a[0] == "ls":
     rows = d["agents"]
+    if "-a" not in a:
+        rows = [r for r in rows if not r.get("archived")]
     if "--label" in a:
         k, v = a[a.index("--label") + 1].split("=", 1)
         rows = [r for r in rows if r.get("labels", {}).get(k) == v]
@@ -58,7 +61,7 @@ class Env:
         self.calls_path = tmp_path / "calls.jsonl"
         self.home = tmp_path / "paseo-home"
         self.data = {"workspaces": [], "created_id": "wks_abc123", "agents": [],
-                     "run_out": {"agentId": "agent-new", "status": "running"},
+                     "run_out": {"agentId": AGENT, "status": "running"},
                      "run_err": "Created workspace wks_abc123 - master (master)\nTip: pass --workspace <id>\n"}
         stub = tmp_path / "bin/paseo"
         stub.parent.mkdir()
@@ -108,7 +111,7 @@ def launch(env, slice_name="alpha", *extra):
 def test_first_launch_creates_and_renames(env):
     r = launch(env)
     assert r.returncode == 0, r.stderr
-    assert json.loads(r.stdout) == {"agentId": "agent-new", "workspaceId": "wks_abc123", "windowName": WIN,
+    assert json.loads(r.stdout) == {"agentId": AGENT, "workspaceId": "wks_abc123", "windowName": WIN,
                                     "tabName": f"worker alpha {LEAD}"}
     run = next(c["argv"] for c in env.calls() if c["argv"][0] == "run")
     assert run[run.index("--new-workspace") + 1] == "local" and "--workspace" not in run
@@ -118,7 +121,7 @@ def test_first_launch_creates_and_renames(env):
     rename = next(c["argv"] for c in env.calls() if c["argv"][:2] == ["workspace", "rename"])
     assert rename == ["workspace", "rename", "wks_abc123", WIN]
     update = next(c["argv"] for c in env.calls() if c["argv"][:2] == ["agent", "update"])
-    assert update == ["agent", "update", "agent-new", "--name", f"worker alpha {LEAD}"]
+    assert update == ["agent", "update", AGENT, "--name", f"worker alpha {LEAD}"]
 
 
 def test_second_launch_reuses_the_window(env):
@@ -152,7 +155,7 @@ def test_window_match_is_exact_not_substring(env):
 def test_missing_created_line_fails_closed(env):
     env.data["run_err"] = "Tip: pass --workspace <id>\n"
     r = launch(env)
-    assert r.returncode == 1 and "agent-new" in r.stderr and "no created workspace" in r.stderr
+    assert r.returncode == 1 and AGENT in r.stderr and "no created workspace" in r.stderr
     assert ["workspace", "rename"] not in env.verbs() and ["agent", "update"] not in env.verbs()
 
 
@@ -170,13 +173,13 @@ def test_json_workspace_id_conflicting_with_the_line_fails(env):
 
 
 def test_state_file_conflict_fails(env):
-    env.state("agent-new", "wks_different")
+    env.state(AGENT, "wks_different")
     r = launch(env)
     assert r.returncode == 1 and "ambiguous" in r.stderr
 
 
 def test_state_file_agreeing_passes(env):
-    env.state("agent-new", "wks_abc123")
+    env.state(AGENT, "wks_abc123")
     assert launch(env).returncode == 0
 
 
@@ -195,9 +198,10 @@ def test_labels_present(env):
 
 
 @pytest.mark.parametrize("bad", [["--workspace", "wks_x"], ["--new-workspace", "local"], ["--cwd", "/x"],
-                                 ["--label", "ade.lead=other"], ["--label=slice=zzz"], ["-C", "/x"]])
+                                 ["--label", "ade.lead=other"], ["--label=slice=zzz"], ["-C", "/x"],
+                                 ["--dir", "/x"], ["--new-workspace=local"], ["--host", "h:1"], ["--home", "/h"]])
 def test_owned_flags_refused(env, bad):
-    r = env.run("--lead", LEAD, "--slice", "alpha", "--", *bad, "BRIEF")
+    r = env.run("--lead", LEAD, "--slice", "alpha", "--", "--no-wait", *bad, "BRIEF")
     assert r.returncode == 1 and "set by ade-worker-run" in r.stderr
     assert not env.calls()
 
@@ -205,7 +209,7 @@ def test_owned_flags_refused(env, bad):
 @pytest.mark.parametrize("args", [["--lead", "short", "--slice", "a"], ["--lead", LEAD, "--slice", "bad name"],
                                   ["--lead", LEAD, "--slice", "a", "--window-middle", "x" * 60]])
 def test_bad_names_refused(env, args):
-    r = env.run(*args, "--", "BRIEF")
+    r = env.run(*args, "--", "--no-wait", "BRIEF")
     assert r.returncode == 1 and not env.calls()
 
 
@@ -272,7 +276,7 @@ def test_archive_ignores_agents_in_other_windows_and_closed_ones(window):
 def test_archive_unplaceable_live_agent_blocks(window):
     window.data["agents"] = [{"id": "ghost", "status": "running", "labels": {}}]
     r = archive(window)
-    assert r.returncode == 1 and "no state file" in r.stderr
+    assert r.returncode == 1 and "no usable workspaceId" in r.stderr
 
 
 def test_archive_refuses_ambiguous_and_missing_window(env):
@@ -287,3 +291,93 @@ def test_archive_dry_run_archives_nothing(window):
     r = archive(window, "--dry-run")
     assert r.returncode == 0 and json.loads(r.stdout)["archived"] is False
     assert ["workspace", "archive"] not in window.verbs()
+
+
+@pytest.mark.parametrize("rest", [["paseo", "run", "--no-wait", "BRIEF"], ["run", "--no-wait", "BRIEF"]])
+def test_leading_paseo_run_refused(env, rest):
+    r = env.run("--lead", LEAD, "--slice", "alpha", "--", *rest)
+    assert r.returncode == 1 and "leading `paseo run`" in r.stderr and not env.calls()
+
+
+def test_foreground_run_refused(env):
+    r = env.run("--lead", LEAD, "--slice", "alpha", "--", "--provider", "claude/sonnet", "BRIEF")
+    assert r.returncode == 1 and "--no-wait" in r.stderr and not env.calls()
+
+
+def test_non_uuid_agent_id_refused(env):
+    env.data["run_out"]["agentId"] = "--evil"
+    r = launch(env)
+    assert r.returncode == 1 and "unusable agentId" in r.stderr
+    assert ["workspace", "rename"] not in env.verbs()
+
+
+def test_no_middle_never_picks_another_leads_window(env):
+    env.data["workspaces"] = [{"workspaceId": "wks_o1", "name": f"workers x {OTHER_LEAD}", "cwd": "/repo"}]
+    r = env.run("--lead", LEAD, "--slice", "alpha", "--cwd", "/repo", "--", "--no-wait", "BRIEF")
+    assert r.returncode == 0, r.stderr
+    run = next(c["argv"] for c in env.calls() if c["argv"][0] == "run")
+    assert "--new-workspace" in run and "wks_o1" not in run
+    assert json.loads(r.stdout)["windowName"] == f"workers repo {LEAD}"
+
+
+def test_no_middle_reuses_own_window(env):
+    env.data["workspaces"] = [{"workspaceId": "wks_o1", "name": f"workers x {OTHER_LEAD}", "cwd": "/repo"},
+                              {"workspaceId": "wks_me", "name": WIN, "cwd": "/repo"}]
+    r = env.run("--lead", LEAD, "--slice", "alpha", "--", "--no-wait", "BRIEF")
+    assert r.returncode == 0, r.stderr
+    run = next(c["argv"] for c in env.calls() if c["argv"][0] == "run")
+    assert run[run.index("--workspace") + 1] == "wks_me"
+    assert run[run.index("--cwd") + 1] == "/repo"  # the window's own cwd, and no middle validation on reuse
+
+
+def test_changed_middle_refuses_a_second_window(env):
+    env.data["workspaces"] = [{"workspaceId": "wks_me", "name": WIN, "cwd": "/repo"}]
+    r = env.run("--lead", LEAD, "--slice", "alpha", "--window-middle", "Typo", "--cwd", "/repo", "--", "--no-wait", "B")
+    assert r.returncode == 1 and "wks_me" in r.stderr and "second window" in r.stderr
+    assert ["run"] not in env.verbs()
+
+
+def test_archive_no_middle_ignores_another_leads_window(env):
+    env.data["workspaces"] = [{"workspaceId": "wks_o1", "name": f"workers x {OTHER_LEAD}", "cwd": "/repo"}]
+    r = archive(env)
+    assert r.returncode == 1 and "no workers window" in r.stderr
+    assert ["workspace", "archive"] not in env.verbs()
+
+
+def test_archive_ignores_archived_agents(window):
+    window.data["agents"] = [{"id": "z1", "status": "idle", "archived": True, "labels": {"ade.lead": LEAD}}]
+    window.state("z1", "wks_win1", {"ade.lead": LEAD})
+    r = archive(window)
+    assert r.returncode == 0, r.stderr
+
+
+def test_archive_state_file_without_workspace_id_blocks(window):
+    window.data["agents"] = [{"id": "n1", "status": "idle", "labels": {}}]
+    p = window.home / "agents/proj/n1.json"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({"id": "n1"}))
+    r = archive(window)
+    assert r.returncode == 1 and "n1" in r.stderr
+
+
+def test_archive_waits_for_the_lead_lock(window):
+    import fcntl
+    import threading
+    lock_dir = Path(os.environ["ADE_WORKER_RUN_STATE"])
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    fh = (lock_dir / f"{LEAD}.lock").open("a")
+    fcntl.flock(fh, fcntl.LOCK_EX)
+    window.flush()
+    proc = subprocess.Popen([sys.executable, str(SCRIPT), "archive-window", "--lead", LEAD],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    t = threading.Timer(1.5, fh.close)
+    t.start()
+    try:
+        with pytest.raises(subprocess.TimeoutExpired):
+            proc.wait(timeout=1.0)
+        assert not window.calls()  # no paseo call before the lock is free
+        assert proc.wait(timeout=20) == 0
+    finally:
+        t.cancel()
+        proc.kill()
+        proc.communicate()

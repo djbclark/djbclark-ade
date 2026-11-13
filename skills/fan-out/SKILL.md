@@ -76,11 +76,13 @@ ade-worker-run --lead LEAD --slice NAME [--window-middle "djbclark-ade Wave 7"] 
    (`--new-workspace local --cwd ~/src/<repo>`), reads its id from the launch (JSON `workspaceId` if paseo prints one, else the
    single `Created workspace wks_… - <name>` stderr line, cross-checked with the agent's state file; absent or ambiguous
    fails closed and names the launched agent) and renames it `workers <middle> <LEAD>`. Give `--window-middle` on the first
-   launch (default: the `--cwd` directory's name) and pass `--cwd ~/src/<repo>` (default: the current directory).
+   launch (default: the `--cwd` directory's name) and pass `--cwd ~/src/<repo>` (default: the current directory); a later
+   `--window-middle` that names no window while the lead has another is refused, never a second window.
 2. It adds `--label ade.lead=<LEAD>` and `--label slice=<NAME>` itself (so do not pass them, nor `--workspace`,
-   `--new-workspace`, `--cwd`, `-C`) and renames the tab `worker <NAME> <LEAD>` with `paseo agent update`. It prints one
-   JSON line `{agentId, workspaceId, windowName, tabName}`. Pass `--no-wait` to `paseo run`: a first launch renames the
-   window only after `paseo run` returns. The brief still names the writer's claimed worktree as an absolute path.
+   `--new-workspace`, `--cwd`, `--dir`, `-C`, `--host`, `--home`), and the arguments after `--` are `paseo run`'s own: no
+   leading `paseo run` (a plan's `Choice.dispatch` string starts with it; drop that prefix), and `--no-wait` is required and renames the tab `worker <NAME> <LEAD>` with `paseo agent update`. It prints one
+   JSON line `{agentId, workspaceId, windowName, tabName}`. It holds a per-lead lock while `paseo run --no-wait` returns, so launches and
+   `archive-window` of one lead never interleave. The brief still names the writer's claimed worktree as an absolute path.
 3. When the run ends, archive the agents, then `ade-worker-run archive-window --lead LEAD [--window-middle …]
    [--idle-handled]`: it runs `paseo workspace archive` only if every live agent labelled `ade.lead=<LEAD>` is closed (or
    idle, with `--idle-handled` once its report is handled), no other live agent sits in the window, and the window's name
@@ -146,7 +148,7 @@ Three independent fixes in one repository, one review:
 1. Lead writes `a.md`, `b.md`, `c.md` (one owner per file set, the check each slice runs) and three
    worktrees `~/src/r-a-wt`, `~/src/r-b-wt`, `~/src/r-c-wt`.
 2. For each slice, take `route_agent.py plan --kinds code`'s `Choice.dispatch` and run it with
-   `ade-worker-run --lead <lead id> --slice <name> --cwd ~/src/r -- <the plan's dispatch> --label ade.name=<name> --label ade.task=fixes`
+   `ade-worker-run --lead <lead id> --slice <name> --cwd ~/src/r -- <the plan's dispatch minus its leading `paseo run`, as argv, with --no-wait> --label ade.name=<name> --label ade.task=fixes`
    plus the positional brief (agent and model from the plan; the brief names the slice's worktree `~/src/r-<name>-wt`
    as an absolute path).
 3. While they run, the lead does its own part (standing order 3), then `paseo wait` on each agent id.

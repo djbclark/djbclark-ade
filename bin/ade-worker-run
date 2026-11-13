@@ -40,7 +40,8 @@ NAME_LIMIT = 100  # docs/workspace-layout.md: keep a window or tab name under ~1
 MIDDLE_LIMIT = 55
 CLI_TIMEOUT = 60
 # Flags the helper owns; a caller passing one would break the placement or the labels.
-OWNED_FLAGS = ("--workspace", "--new-workspace", "--cwd", "--dir", "-C")
+OWNED_FLAGS = ("--workspace", "--new-workspace", "--cwd", "--dir", "-C", "--host", "--home")
+DETACH_FLAGS = ("--no-wait", "-d", "--background", "--detach")
 OWNED_LABEL_KEYS = ("ade.lead", "slice")
 
 
@@ -102,19 +103,21 @@ def find_window(lead: str, middle: str | None) -> dict | None:
     if not isinstance(rows, list):
         raise Refused("paseo workspace ls --json did not return a list")
     suffix = f" {lead}"
-    hits = []
+    generic, hits = [], []
     for row in rows:
         name = row.get("name") if isinstance(row, dict) else None
         if not isinstance(name, str):
             continue
-        if middle is not None:
-            ok = name == window_name(middle, lead)
-        else:
-            ok = name.startswith("workers ") and name.endswith(suffix) and len(name) > len("workers ") + len(suffix)
-        if ok:
+        if name.startswith("workers ") and name.endswith(suffix) and len(name) > len("workers ") + len(suffix):
             if not WKS_RE.fullmatch(str(row.get("workspaceId", ""))):
                 raise Refused(f"window {name!r} has no usable workspaceId")
-            hits.append(row)
+            generic.append(row)
+            if middle is None or name == window_name(middle, lead):
+                hits.append(row)
+    if middle is not None and not hits and generic:
+        ids = ", ".join(f"{h['workspaceId']} ({h['name']})" for h in generic)
+        raise Refused(f"no window is named `{window_name(middle, lead)}`, but this lead has {ids}; "
+                      "use that --window-middle (or none), not a second window")
     if len(hits) > 1:
         ids = ", ".join(f"{h['workspaceId']} ({h['name']})" for h in hits)
         raise Refused(f"{len(hits)} windows match the lead's workers window: {ids}; archive or rename the extras")
@@ -143,6 +146,11 @@ def lock_for(lead: str):
 def passthrough_check(args: list[str]) -> None:
     if not args:
         raise Refused("nothing after `--`: pass the paseo run arguments (provider, mode, brief ...)")
+    if args[0] in ("paseo", "run"):
+        raise Refused("pass the paseo run arguments only, without a leading `paseo run` "
+                      "(a plan's Choice.dispatch minus that prefix)")
+    if not any(a in DETACH_FLAGS for a in args):
+        raise Refused("pass --no-wait: a foreground paseo run would hold this lead's launch lock until the worker ends")
     for i, a in enumerate(args):
         flag = a.split("=", 1)[0]
         if flag in OWNED_FLAGS:
@@ -158,14 +166,14 @@ def launch(opts, rest: list[str]) -> int:
     check_names(lead, name, opts.window_middle)
     passthrough_check(rest)
     cwd = os.path.realpath(opts.cwd or os.getcwd())
-    lock = lock_for(lead)
+    lock = lock_for(lead)  # held to the end: launches and archive-window of one lead serialize (paseo run --no-wait is quick)
     try:
         win = find_window(lead, opts.window_middle)
-        if win is not None:
-            lock.close()  # a reuse launch does not hold up other launches
-            lock = None
-        middle = opts.window_middle or os.path.basename(cwd)
-        check_names(lead, name, middle)
+        if win is None:
+            middle = opts.window_middle or os.path.basename(cwd)
+            check_names(lead, name, middle)
+        else:
+            middle = None
         wname = win["name"] if win else window_name(middle, lead)
         tab = f"worker {name} {lead}"
         place = ["--workspace", win["workspaceId"], "--cwd", opts.cwd and cwd or win.get("cwd") or cwd] if win \
@@ -173,7 +181,7 @@ def launch(opts, rest: list[str]) -> int:
         args = ["run", *place, "--label", f"ade.lead={lead}", "--label", f"slice={name}"]
         if "--json" not in rest:
             args.append("--json")
-        rc, out, err = paseo([*args, *rest], timeout=None)
+        rc, out, err = paseo([*args, *rest], timeout=300)
         if err:
             sys.stderr.write(err)
         if rc != 0:
@@ -183,8 +191,8 @@ def launch(opts, rest: list[str]) -> int:
             agent_id = result["agentId"]
         except (ValueError, KeyError, TypeError):
             raise Refused("paseo run printed no agentId; check `paseo ls -g --json` for the new agent")
-        if not isinstance(agent_id, str) or not agent_id:
-            raise Refused("paseo run printed an unusable agentId")
+        if not isinstance(agent_id, str) or not LEAD_RE.fullmatch(agent_id):
+            raise Refused("paseo run printed an unusable agentId (expected a UUID)")
         try:
             wks = resolve_window_id(win, result, err, agent_id)
             if win is None:
@@ -242,10 +250,10 @@ def archive_blockers(lead: str, wks: str, idle_handled: bool) -> list[str]:
         aid, status = a["id"], a.get("status")
         state = state_file(aid)
         in_window = bool(state) and state.get("workspaceId") == wks
-        if state is None and status != "closed":
-            blockers.append(f"{aid}: live ({status}) with no state file, so its window is unknown")
-            continue
         if status == "closed":
+            continue
+        if state is None or not WKS_RE.fullmatch(str(state.get("workspaceId", ""))):
+            blockers.append(f"{aid}: live ({status}) with no usable workspaceId in a state file, so its window is unknown")
             continue
         if aid in labelled:
             if status == "idle" and idle_handled:
@@ -259,6 +267,14 @@ def archive_blockers(lead: str, wks: str, idle_handled: bool) -> list[str]:
 
 def archive_window(opts) -> int:
     check_names(opts.lead, None, opts.window_middle)
+    lock = lock_for(opts.lead)  # a launch of this lead cannot slip in between the check and the archive
+    try:
+        return archive_locked(opts)
+    finally:
+        lock.close()
+
+
+def archive_locked(opts) -> int:
     win = find_window(opts.lead, opts.window_middle)
     if win is None:
         raise Refused(f"no workers window for lead {opts.lead}")
