@@ -51,8 +51,11 @@ Installing no longer refuses any pre-existing agent because of its saved mode, m
 or unavailable catalog. Agents without an `ade-yolo.applied` stamp remain in their saved mode and
 are allowed with a warning, including Claude `default`, Codex `auto`, Cursor `agent` with absent/false
 `auto_accept`, and Pi/Hermes without a saved mode. Installing invalidates plugin sessions; their next
-prompt can run a `refresh` open and emit that warning. Identity checks and the existing retired-provider
-policy still apply. Stamped agents continue to refuse missing evidence or drift. The hook cannot mutate
+prompt can run a `refresh` open and emit that warning. Installation reloads live agents from their persisted
+sessions on the next open. A Cursor agent whose turns were all plan/quota rejections has no persisted
+`store.db` and cannot be reloaded; a plugin-free history load reproduces the same session-not-found failure.
+This is a Cursor persistence limitation, not an ade-yolo refusal (diagnosed 2026-11-12). Identity checks and
+the existing retired-provider policy still apply. Stamped agents continue to refuse missing evidence or drift. The hook cannot mutate
 modes; refusing a legacy agent in a more restrictive mode would only create operator work.
 
 ## Canary procedure (lead runs this after merge)
@@ -68,9 +71,74 @@ order; stop and roll back on a result not listed as expected.
    saved Mode is neither the YOLO id nor `plan`/`read-only`/`dontAsk` (typically saved `default`/`auto`), or a Cursor
    agent saving `auto_accept` other than true, remains allowed if unstamped and logs its saved configuration.
    The CLI's `unavailable`/`drift` status does not predict a legacy hook refusal. Note whether Hermes is listed (step 5).
-1. Create throwaways **before installing** so they are legacy (no stamp). Per provider, in a scratch dir:
-   `paseo run --provider <provider>/<model> --cwd <scratch dir> --wait-timeout 2m --json -- "reply with the word ok"`.
-   Record ids; also make a Claude one with `--mode bypassPermissions`.
+1. Create throwaways **before installing** so they are legacy (no stamp). Launch each one top-level
+   through Python subprocess argv lists, with both its process cwd and `--cwd` set to the scratch directory.
+   Remove inherited agent **and workspace** placement from a copy of the environment; keep the daemon/host
+   selection unchanged. Use this helper for every create in steps 1, 4 and 6:
+
+   ```python
+   import json
+   import os
+   from pathlib import Path
+   import subprocess
+
+   scratch = Path("/absolute/path/to/canary/scratch").resolve()
+   scratch.mkdir(parents=True, exist_ok=True)
+   env = os.environ.copy()
+   for key in ("PASEO_AGENT_ID", "PASEO_AGENT_CWD", "PASEO_WORKSPACE_ID"):
+       env.pop(key, None)
+
+   def create_throwaway(provider_model, mode=None):
+       argv = ["paseo", "run", "--provider", provider_model,
+               "--cwd", str(scratch), "--wait-timeout", "2m", "--json"]
+       if mode is not None:
+           argv += ["--mode", mode]
+       argv += ["--", "reply with the word ok"]
+       result = subprocess.run(argv, cwd=scratch, env=env, capture_output=True,
+                               text=True, timeout=300)
+       result.check_returncode()
+       created = json.loads(result.stdout)
+       agent_id = created["agentId"]
+       print("Created throwaway:", agent_id, flush=True)
+       # Persist this id in the canary record before inspection so rollback can archive it.
+       inspected = subprocess.run(
+           ["paseo", "agent", "inspect", agent_id, "--json"],
+           cwd=scratch, env=env, capture_output=True, text=True, timeout=300,
+           check=True,
+       )
+       snapshot = json.loads(inspected.stdout)
+       if (Path(snapshot["Cwd"]).resolve() != scratch
+               or snapshot.get("ParentAgentId") is not None):
+           raise RuntimeError(f"Unexpected placement for {agent_id}; stop and roll back")
+       return agent_id
+   ```
+
+   Call `create_throwaway("<provider>/<model>")` per enabled provider; for Cursor use
+   `create_throwaway("cursor/default")` (Auto), not a third-party model selected from unrelated quota headroom.
+   Also make a Claude one with `create_throwaway("claude/<model>", "bypassPermissions")`.
+   Record every id, including any whose placement check fails, for step 7. Inspect the **first** create before proceeding to another create or installation.
+   Require its actual `Cwd` to equal scratch and `ParentAgentId` to be null; enforce the same check for later creates.
+
+   **Placement finding (2026-11-12):** the original agent-scoped command ignored the scratch `--cwd` and inherited
+   the caller workspace. A retry removing only `PASEO_AGENT_ID` and `PASEO_AGENT_CWD`, also using scratch as the
+   subprocess cwd, created a top-level agent but still reused the caller workspace while `PASEO_WORKSPACE_ID`
+   remained inherited. Both runs stopped before installation and archived their throwaways. A third run removing
+   **all three** variables as above live-proved scratch `Cwd` and null `ParentAgentId` for six legacy creates
+   (Claude default/bypass, Codex, Antigravity, Pi and Cursor). The first create reported a new scratch workspace,
+   rather than reusing the shared repository workspace. This proves placement for that launch form; the full
+   plugin canary **did not pass**: Cursor legacy resume failed after installation (see below).
+   **Fixture gate before installation (2026-11-12):** for every legacy throwaway, read its completed-turn
+   activity (`paseo wait <id> --json`, bounded by `timeout 300`) and require a real model answer to the prompt.
+   A create reported as completed/idle is insufficient: reject plan/quota banners such as
+   `Upgrade your plan to continue`. For Cursor also require the exact native ACP session store:
+   read only `persistence.sessionId` (fallback `runtimeInfo.sessionId`) from its daemon record
+   `<daemon-home>/agents/<cwd-key>/<agent-id>.json`, then verify
+   `~/.cursor/acp-sessions/<sessionId>/store.db` exists. Never substitute another session store.
+   A failed fixture may be replaced once on the same provider/model. If its replacement also fails,
+   archive both, omit that provider from this run (including steps 3 and 4), and record the missing coverage.
+   This fixture failure before installation is not a rollback reason. Include only gated fixtures at step 2;
+   keep all created ids for step 7. Unexpected results after installation still require immediate rollback.
+
 2. Install from a clean pinned tree, not the shared checkout. The host records the directory path, so the
    worktree is the live plugin source: **it must persist** until rollback or reinstall. Run
    `git -C /Users/djbclark/src/djbclark-ade fetch origin`, then
@@ -82,14 +150,15 @@ order; stop and roll back on a result not listed as expected.
    `ade-yolo: <id>: provider=<provider> saved mode=<JSON value> auto_accept=<JSON value>; legacy agent allowed without mode mutation`.
    Expect Claude `default` or `bypassPermissions`, Codex `auto`, Antigravity `full-access`, Cursor `agent`,
    and Pi `null` as saved mode values; absent `auto_accept` logs `null`. No legacy catalog/control lookup is required.
-4. New creates: repeat step 1 per provider (now stamped). Expected `ade-agent-mode check <id> --json`
+4. New creates: repeat step 1 per provider using `create_throwaway` and its placement check (now stamped). Expected `ade-agent-mode check <id> --json`
    (absolute path): Claude `bypassPermissions`, Codex/Antigravity `full-access`: `verified`. **Cursor and Pi
    report `unavailable` (exit 2) from that CLI by design** (it passes no controls; Pi has no mode): their
    pass criterion is that the create succeeded. Also confirm hermes/cline creates (if attempted) refuse as
    expected, never as a surprise.
 5. Hermes: do not prompt it. If it was listed before install, `paseo ls -g --json` still lists it with the same
    id/status afterwards, and its next natural open shows no `ade-yolo` refusal.
-6. Restrictive escape: create a throwaway with `--mode plan` (Claude); `ade-agent-mode check` reports `exempt`.
+6. Restrictive escape: use `create_throwaway("claude/<model>", "plan")` with the same placement check;
+   `ade-agent-mode check` reports `exempt`.
    (`ade-yolo.skip` is metadata-only: reachable through MCP `create_agent` metadata, not `paseo run`.)
 7. Archive every throwaway.
 
@@ -99,5 +168,34 @@ no `ade-yolo` row; then `git -C /Users/djbclark/src/djbclark-ade worktree remove
 
 Source contracts were inspected at upstream `4df5307e` (0.16.0-beta.2 source).
 Older hosts without the catalog/control SDK report unavailable rather than
-claiming coverage. This cloud run had no Paseo executable/daemon; mocked tests
-prove local planning and calls, not installed runtime behavior.
+claiming coverage. The original cloud run had no Paseo executable/daemon;
+its mocked tests prove local planning and calls.
+
+**Live canary (2026-11-12):** installation from clean detached `23e965993aa30b05e26f9f59ebb0b94e6ac961e9`
+reached enabled/running without a daemon restart. Claude default, Codex, Antigravity and Pi legacy throwaways
+resumed with unchanged saved modes; observed warning values matched step 3 (including Pi `null`). Cursor legacy
+resume then failed with `Failed to send message: Invalid params: Session "<session-id>" not found`.
+The run stopped immediately, removed the plugin and source worktree, and archived all six throwaways.
+Subsequent diagnosis found that the hook allowed the Cursor open, but the plan-rejected fixture had no
+`store.db`; a plugin-free history load reproduced its session-not-found error. This was a broken fixture,
+not a plugin rejection. The later run below exercised the remaining stages with valid included fixtures.
+
+**Plugin-free control (2026-11-12):** a new Cursor throwaway launched with the same three-variable form;
+its immediate second-message send and a further send after 60 seconds idle were both accepted without the
+session-not-found error. Inspections bracketing the idle interval showed idle status and unchanged `UpdatedAt`.
+The activity returned `Upgrade your plan to continue`, limiting comparison with a functioning model session.
+The run stopped after the control, archived its throwaway, and left the plugin uninstalled. Those sends
+reused an in-memory process, so they did not test reload. The later plugin-free history-load diagnosis above
+isolated the unpersisted-session limitation. A session-not-found result from a fixture that passed the
+real-answer/store gate remains unexpected and requires rollback.
+
+**Gated canary (2026-11-12):** the three-variable launch form and fixture gate passed for Claude default/bypass,
+Codex, Antigravity and Pi. Cursor Auto (`cursor/default`) and its single replacement both returned plan
+rejections and had no `store.db`; both were archived and Cursor was omitted under the fixture rule.
+Installation from clean detached `cdd05c44c20242497cc05a22e3fdb1eea8c0d5b4` reached enabled/running.
+All five included legacy fixtures resumed without saved-mode mutation and emitted expected legacy warnings.
+Five new creates retained `ade-yolo.applied`: native checks verified Claude bypass and Codex/Antigravity full
+access, while Pi created successfully with the expected CLI unavailable result. Claude plan reported exempt.
+Hermes was absent before and after; none was prompted. All 13 throwaways, including rejected fixtures, were
+archived. The plugin remains installed with its source worktree retained; the daemon PID/identity stayed unchanged.
+This is a pass for the included providers; Cursor create/resume coverage remains omitted, not proven.
