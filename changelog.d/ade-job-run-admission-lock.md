@@ -7,4 +7,4 @@
   and was loaded from that plist: it takes the lock exclusive without waiting (a run in flight defers the step, nothing is
   killed), keeps it across `bootout`, write, `bootstrap` and read-back, restores the prior bytes if the new ones fail, and
   leaves a durable recovery record that the next `reconcile` acts on after a kill. Jobs not routed through the wrapper,
-  including every existing install, keep the exit-6 deferral until migrated once (docs/scheduling.md). (#PRN)
+  including every existing install, keep the exit-6 deferral until migrated once (docs/scheduling.md). (#622)
