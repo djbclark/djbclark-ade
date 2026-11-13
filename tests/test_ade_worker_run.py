@@ -908,3 +908,20 @@ def test_legacy_window_in_another_leads_record_is_refused(env):  # B5
 def test_no_wait_taken_as_a_flag_value_is_not_a_brief_position(env):  # B6d
     r = env.run("--lead", LEAD, "--slice", "a", "--window-middle", "Wave 7", "--cwd", "/repo", "--", "--provider", "--no-wait", "BRIEF")
     assert r.returncode == 1 and not env.calls()
+
+
+def test_adoption_refuses_while_a_live_agent_cannot_be_placed(env):  # round 3 B1
+    env.data["workspaces"] = [{"workspaceId": "wks_u1", "name": WIN, "cwd": "/repo"}]
+    env.data["agents"] = [{"id": "ghost", "status": "running", "labels": {}}]  # no state file
+    r = launch(env)
+    assert r.returncode == 1 and "ghost" in r.stderr and ["run"] not in env.verbs() and registry(LEAD) == set()
+
+
+def test_a_record_write_failure_after_launch_names_the_launched_agent(env, monkeypatch):  # round 3 B2
+    env.data["workspaces"] = [{"workspaceId": "wks_u1", "name": WIN, "cwd": "/repo"}]
+    env.data["run_err"] = ""
+    d = Path(os.environ["ADE_WORKER_RUN_STATE"])
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{LEAD}.windows.json").mkdir()  # a directory where the record file belongs: reading it raises, not a clean refusal
+    r = launch(env)
+    assert r.returncode == 1 and "Traceback" not in r.stderr

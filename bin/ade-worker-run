@@ -163,7 +163,11 @@ def unclaimed_agents(wks: str, lead: str) -> list[str]:
     out = []
     for a in live_agents():
         st = state_file(a["id"])
-        if not st or st.get("workspaceId") != wks:
+        if not st or not WKS_RE.fullmatch(str(st.get("workspaceId", ""))):
+            if a.get("status") != "closed":
+                out.append(f"{a['id']} ({a.get('status')}, no usable workspaceId: it may be in this window)")
+            continue
+        if st.get("workspaceId") != wks:
             continue
         labels = st.get("labels")
         if (labels.get("ade.lead") if isinstance(labels, dict) else None) != lead:
@@ -519,7 +523,7 @@ def launch(opts, rest: list[str]) -> int:
                 register_window(lead, wks)  # the window is this lead's from the moment it exists
                 run_ok(["workspace", "rename", wks, wname])
             run_ok(["agent", "update", agent_id, "--name", tab])
-        except Refused as e:
+        except (Refused, OSError) as e:
             raise Refused(f"{e} (agent {agent_id} was launched; fix its placement by hand)")
     finally:
         if lock is not None:
