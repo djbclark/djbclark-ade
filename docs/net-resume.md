@@ -95,7 +95,8 @@ rule are unchanged, and it still rejects every quota message. The launchd templa
 bin/ade-net-resume --lead LEAD_UUID --quota --only-agent CANARY_UUID --watch 3600 --interval 60
 ```
 
-Flags: `--quota-per-pool N` (default 1 resume per pool per scan), `--quota-grace-seconds S` (default 60),
+Flags: `--quota-per-pool N` (default 1 resume per pool per scan; N above 1 changes only a dry run's counting, because
+the 600 s pool gap limits `--apply`), `--quota-grace-seconds S` (default 60),
 `--only-agent UUID` (repeatable; restricts **both** passes, so a canary is isolated from the fleet).
 
 Scope, all of it kept from the network path (descendants of `--lead` only, `Archived` false, the reserve-before-send
@@ -122,7 +123,7 @@ before the send, the lock, dry-run unless `--apply`, the scan deadline) plus:
 4. **Resume gate.** A resume needs a fresh aiuse sample (`fresh` true, not stale, `usable_now` true) whose
    `collected_at` is at or after `resets_at` plus grace and not in the future, showing the recorded window below the
    limit and no window longer than 360 minutes (or of unknown length) exhausted, whatever `usable_now` says. A missing aiuse, bad JSON, a missing or ambiguous account, or a stale sample waits (`quota-waiting`, or
-   `aiuse-unavailable` at first sight, once per ten minutes each). The reset may be at most `--max-error-age-minutes` (default 30) in the past, else `stale`.
+   `aiuse-unavailable` at first sight, at most one row per clock-aligned ten-minute bucket each). The reset may be at most `--max-error-age-minutes` (default 30) in the past, else `stale`.
 5. **Agent state.** `error` is eligible after `paseo logs --json` shows the quota line still last: a newer user
    message or other output is `changed`, a `done:` line before the error is `delivered`. That check runs **before**
    `quota-wait` is armed, while the agent is still loaded, and again before a resume. `closed` is eligible only
@@ -154,14 +155,18 @@ before the send, the lock, dry-run unless `--apply`, the scan deadline) plus:
    blocked agent logs `pool-gap`), so a just-reset pool is not drained at once. A dry run counts a `would-resume-quota`
    toward the per-scan cap, so with several agents in one pool it shows only the first one (every scan) until that error
    goes stale (reset plus `--max-error-age-minutes`).
-7. **Ledger rows.** `changed` (pre-send) and the first-sight, `capped`, `stale` and `guard-owned` notes are written once per error event;
-   `unavailable`, `quota-waiting`, `pool-gap` and `aiuse-unavailable` at most once per ten minutes (`unavailable` per
-   failure type), not once per scan. A persistent failure is therefore one row per ten minutes while the agent stays
-   listed. A `quota-wait` row whose `resets_at` or `updated_at` is not a timezone-aware timestamp is a malformed ledger
-   (exit 2), like any other bad field.
+7. **Ledger rows.** Written once per error event (keyed), not once per scan: the first-sight outcomes
+   `quota-unconfirmed`, `quota-excluded`, `delivered`, `changed` and `stale`; `capped`; `guard-owned`; both `changed`
+   rows (the closed-path one keyed by `UpdatedAt`, the pre-send and reset-check ones by signature); `delivered` at the
+   reset check; `would-resume-quota`. At most one row per clock-aligned ten-minute bucket (two rows can fall seconds
+   apart across a bucket boundary): `unavailable` (per failure type), `quota-waiting`, `pool-gap` and the first-sight
+   `aiuse-unavailable`. A persistent failure is therefore about one row per ten minutes while the agent stays listed.
+   A `quota-wait` row with a missing or mistyped field, or a `resets_at`/`updated_at` that is not a timezone-aware
+   timestamp, is **skipped** with one `quota-ledger-invalid` row (keyed by the row's time and signature); the run goes
+   on, the agent is simply treated as having no wait. An `events.jsonl` that is not valid JSON, or has a non-numeric
+   `time`, still fails the whole run (exit 2).
 
-`--quota` shares the network pass's ledger, so a malformed `quota-wait` row fails the whole run (exit 2) after the network
-pass; a lead that replaces a quota-stopped agent with a new one should archive the old agent, or the old one may be resumed
+`--quota` shares the network pass's ledger. A lead that replaces a quota-stopped agent with a new one should archive the old agent, or the old one may be resumed
 beside it.
 
 Not done in this slice (2026-11-12): any canary run, any live `--apply`, the launchd plist.

@@ -726,17 +726,6 @@ def test_d10_only_agent_restricts_the_network_pass_too(fake):
     assert sent.exists()
 
 
-def test_malformed_quota_ledger_fails_closed(quota):
-    quota["wait"]()
-    path = quota["state"] / "events.jsonl"
-    rows = [json.loads(line) for line in path.read_text().splitlines()]
-    del rows[0]["resets_at"]
-    path.write_text("".join(json.dumps(r) + "\n" for r in rows))
-    with pytest.raises(M["ScanError"]):
-        quota["scan"]()
-    assert not quota["sent"].exists()
-
-
 @pytest.mark.parametrize("args", [["--quota-per-pool", "0"], ["--quota-grace-seconds", "-1"],
                                   ["--quota-grace-seconds", "nan"], ["--only-agent", "bad"]])
 def test_quota_flag_bounds(args, tmp_path):
@@ -868,15 +857,51 @@ def test_pre_send_reinspection_blocks_each_change(quota, monkeypatch, status, mu
     assert not quota["sent"].exists()
 
 
-def test_unparseable_ledger_timestamp_is_a_malformed_ledger(quota):
+@pytest.mark.parametrize("damage", [
+    ("resets_at", None), ("resets_at", "garbage"), ("resets_at", "2026-11-12T20:30:00"),
+    ("updated_at", None), ("updated_at", "garbage"), ("updated_at", "2026-11-12T19:59:00"),
+    ("signature", 7), ("window_minutes", "300"), ("window_id", None),
+])
+def test_malformed_quota_wait_is_skipped_with_one_warning(quota, damage):
+    quota["wait"]()
+    field, value = damage
+    path = quota["state"] / "events.jsonl"
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    if value is None:
+        del rows[0][field]
+    else:
+        rows[0][field] = value
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    quota["clock"](at(20, 35))
+    quota["put"](reset_account())
+    for _ in range(3):
+        assert quota["scan"]() == 0  # Skipped, not fatal.
+    assert quota["actions"]().count("quota-ledger-invalid") == 1  # One keyed warning, not one per scan.
+    assert not quota["sent"].exists()  # The agent has no valid wait, so nothing is resumed.
+
+
+def test_malformed_quota_wait_does_not_stop_the_network_pass(fake, quota):
     quota["wait"]()
     path = quota["state"] / "events.jsonl"
     rows = [json.loads(line) for line in path.read_text().splitlines()]
-    rows[0]["resets_at"] = "garbage"
+    del rows[0]["resets_at"]
     path.write_text("".join(json.dumps(r) + "\n" for r in rows))
-    with pytest.raises(M["ScanError"]):
-        quota["scan"]()
-    assert not quota["sent"].exists()
+    quota["data"]["agents"][MIDDLE] = {"Id": MIDDLE, "ParentAgentId": LEAD, "Archived": False, "Status": "error",
+                                       "Provider": "antigravity", "UpdatedAt": "2026-11-12T20:00:00Z"}
+    quota["data"]["logs"] = ERROR  # The network error is the last line for the antigravity agent
+    assert quota["scan"](only_agents=[MIDDLE]) == 0
+    assert quota["sent"].exists()  # The network pass ran and resumed MIDDLE.
+
+
+def test_future_updated_at_first_sight_note_is_never_known(quota, tmp_path):
+    scanner = Scanner(LEAD, tmp_path / "state", True)
+    (tmp_path / "state").mkdir()
+    events = []
+    with (tmp_path / "state" / "events.jsonl").open("a+") as history:
+        scanner.quota_first_sight(history, events, {}, CHILD, "zai", "2026-11-12T20:00:01Z", "sig")  # 1 s after NOW
+    assert [e["action"] for e in events] == ["stale"]
+    assert "stage" not in events[0]
+    assert M["Scanner"].quota_first_rows(events) == {}
 
 
 def test_persistent_failure_is_one_unavailable_row_per_ten_minutes(quota, monkeypatch):
