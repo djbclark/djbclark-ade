@@ -72,6 +72,11 @@ if cmd == "print":
     print(f"\tstate = {read('state', label) or 'not running'}")
     pth = read("path", label) or (os.path.join(os.environ["FAKE_AGENTS"], label + ".plist") if os.environ.get("FAKE_AGENTS") else None)
     if pth: print(f"\tpath = {pth}")
+    a = read("args", label)   # the LOADED definition, recorded at bootstrap (launchd never re-reads an edited plist)
+    if a:
+        print(f"\tprogram = {a.splitlines()[0]}"); print("\targuments = {")
+        for x in a.splitlines(): print("\t\t" + x)
+        print("\t}")
     if flag("pid", label): print(f"\tpid = {read('pid', label)}")
     print("\tresource coalition = {")
     print("\t\tstate = active")   # nested decoy: only the service block's own fields count
@@ -83,7 +88,7 @@ elif cmd == "bootout":
     # killing running work is the one thing admission must never cause
     if read("pid", label):
         write("1", "killed", label)
-    drop("loaded", label)
+    drop("loaded", label); drop("args", label)
     if flag("sigterm_after_bootout"):   # the reconcile process is terminated between bootout and bootstrap
         import signal; os.kill(os.getppid(), signal.SIGTERM); import time; time.sleep(5)
 elif cmd == "bootstrap":
@@ -91,6 +96,10 @@ elif cmd == "bootstrap":
     if flag("loaded", base):
         sys.stderr.write("Bootstrap failed: 5: Input/output error\n"); sys.exit(5)
     touch("loaded", base)
+    import plistlib
+    try: pa = plistlib.load(open(argv[2], "rb")).get("ProgramArguments") or []
+    except Exception: pa = []
+    write("\n".join(pa), "args", base)
 sys.exit(0)
 """
 

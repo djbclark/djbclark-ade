@@ -2,8 +2,9 @@
 """ade-job-run LABEL -- COMMAND [ARG...]: the launch path every ADE launchd job goes through (W21c, 2026-11-13).
 
 Each run takes a SHARED, non-blocking flock on the job's admission lock (`<jobs state dir>/admission/LABEL.lock`) and
-keeps it for the whole run: the descriptor is inherited by the exec'd command, so the lock lives exactly as long as the
-command and anything it leaves running. `ade-sched reconcile` takes the same lock EXCLUSIVE, without waiting, before it
+keeps it for the whole run: the descriptor is inherited by the exec'd command, so the lock lives as long as the
+command (a child started with close_fds=True does not inherit it; launchd kills the job's process group when the
+command exits anyway). `ade-sched reconcile` takes the same lock EXCLUSIVE, without waiting, before it
 unloads a loaded job to update or remove it. That gives both sides what they need:
 
   1. reconcile cannot get the lock while a run is in flight: it defers (exit 6) and never waits, never kills;
@@ -36,7 +37,7 @@ def main(argv: list[str]) -> int:
     if fd is None:
         print(f"ade-job-run: {label}: reconcile holds the admission lock; skipped this run", file=sys.stderr)
         return 0
-    os.set_inheritable(fd, True)   # the command keeps the shared lock until it (and anything it leaves running) exits
+    os.set_inheritable(fd, True)   # the command keeps the shared lock until it exits
     try:
         os.execvp(cmd[0], cmd)
     except OSError as exc:

@@ -26,7 +26,7 @@ from test_ade_sched_launchd_admission import KILLERS, LABEL, ld  # noqa: E402,F4
 WRAPPER = BIN / "ade-job-run"
 
 
-def _wrap(root: Path, label: str = LABEL) -> None:
+def _wrap(root: Path, label: str = LABEL, state: Path | None = None) -> None:
     """Route the mini catalog's plist through the wrapper, as config/launchd/ now does (the stub only has to be executable)."""
     stub = root / "bin" / "ade-job-run"
     stub.write_text("#!/bin/sh\nexit 0\n")
@@ -35,7 +35,10 @@ def _wrap(root: Path, label: str = LABEL) -> None:
     text = plist.read_text()
     old = "<string>__ADE__/bin/deadline</string>"
     assert old in text
-    plist.write_text(text.replace(old, f"<string>__ADE__/bin/ade-job-run</string><string>{label}</string><string>--</string>{old}"))
+    text = text.replace(old, f"<string>__ADE__/bin/ade-job-run</string><string>{label}</string><string>--</string>{old}")
+    if state is not None:   # the wrapper's own environment decides its lock directory (launchd plists set neither normally)
+        text = text.replace("<key>DEADLINE_STATE_DIR</key>", f"<key>ADE_JOBS_STATE_DIR</key><string>{state}</string>\n    <key>DEADLINE_STATE_DIR</key>")
+    plist.write_text(text)
 
 
 def _drift(root: Path, label: str = LABEL) -> None:
@@ -51,7 +54,7 @@ def _reconcile(ld, root, catalog, **kw):
 
 def _installed_wrapped(ld):
     root = _mini_catalog(ld.tmp)
-    _wrap(root)
+    _wrap(root, state=ld.state)
     catalog = ai.load_catalog(root=root)
     rows, rc = _reconcile(ld, root, catalog)
     assert rc == 0, rows
@@ -268,14 +271,17 @@ def test_sigterm_between_bootout_and_bootstrap_leaves_a_recovery_record(ld):
 
 def _wrapped_retired(ld, loaded=True):
     root = _mini_catalog(ld.tmp)
-    _wrap(root)
+    _wrap(root, state=ld.state)
     catalog = ai.load_catalog(root=root)
     label = "com.djbclark.skillopt-sleep"
     plist = ld.agents / f"{label}.plist"
     import plistlib
-    plist.write_bytes(plistlib.dumps({"Label": label, "ProgramArguments": [str(root / "bin" / "ade-job-run"), label, "--", "/bin/true"]}))
+    pa = [str(root / "bin" / "ade-job-run"), label, "--", "/bin/true"]
+    plist.write_bytes(plistlib.dumps({"Label": label, "ProgramArguments": pa,
+                                      "EnvironmentVariables": {"ADE_JOBS_STATE_DIR": str(ld.state)}}))
     if loaded:
         ld.mark("loaded", label)
+        ld.mark("args", label, "\n".join(pa))
         (ld.root / "path").mkdir(exist_ok=True)
         (ld.root / "path" / label).write_text(str(plist))
     ledger = S.empty_jobs_ledger(env=ld.env)
@@ -341,3 +347,97 @@ def test_installed_bytes_that_differ_from_the_ledger_artifact_defer_untouched(ld
     rows, rc = _reconcile(ld, root, catalog)
     assert rc == 6 and any("ledger" in r["detail"] for r in rows), rows
     assert plist.read_bytes() == edited and set(ld.verbs()) <= {"print"} and ld.loaded()
+
+
+# ------------------------------------------------------------------------------------------------ adversary round 1 (BLOCK)
+
+def test_file_says_wrapper_but_the_loaded_definition_is_unwrapped_defers_with_a_run_in_flight(ld):
+    # F1: `install --no-activate` wrote the wrapped file while the old, unwrapped definition stayed loaded.
+    root, catalog, plist = _installed_wrapped(ld)
+    (ld.root / "args").mkdir(exist_ok=True)
+    (ld.root / "args" / LABEL).write_text("/old/ade/bin/deadline\nsweep\n--\nx")        # what launchd actually runs
+    _drift(root)
+    ld.reset()
+    rows, rc = _reconcile(ld, root, catalog)
+    assert rc == 6 and any("LOADED definition" in r["detail"] for r in rows), rows
+    assert not KILLERS & set(ld.verbs()) and ld.loaded()
+
+
+def test_parse_launchd_definition_reads_program_and_arguments():
+    out = "gui/501/x = {\n\tpath = /p\n\tprogram = /a\n\targuments = {\n\t\t/a\n\t\tx\n\t\t--\n\t}\n\tinherited environment = {\n\t\tK => v\n\t}\n}\n"
+    assert S.parse_launchd_definition(out) == ("/a", ["/a", "x", "--"])
+    assert S.parse_launchd_definition("gui/501/x = {\n\tstate = running\n}\n") == (None, None)
+
+
+def test_wrapper_that_would_lock_elsewhere_defers(ld):
+    # F2: the plist does not set ADE_JOBS_STATE_DIR, so the wrapper would lock under HOME, not under reconcile's state dir.
+    root = _mini_catalog(ld.tmp)
+    _wrap(root)                                                    # no state env in the plist
+    catalog = ai.load_catalog(root=root)
+    rows, rc = _reconcile(ld, root, catalog)
+    assert rc == 0, rows
+    _drift(root)
+    ld.reset()
+    rows, rc = _reconcile(ld, root, catalog)
+    assert rc == 6 and any("would lock in" in r["detail"] for r in rows), rows
+    assert set(ld.verbs()) <= {"print"}
+
+
+def test_failure_before_the_unload_defers_and_keeps_the_committed_row(ld, monkeypatch):
+    # F3: a recovery-record write failure (ENOSPC, ...) happens before bootout: nothing changed, ownership must survive.
+    root, catalog, plist = _installed_wrapped(ld)
+    before, prior_entry = plist.read_bytes(), _entry(ld)
+    _drift(root)
+
+    def boom(*a, **k):
+        raise OSError(28, "No space left on device")
+    monkeypatch.setattr(S, "write_recovery_record", boom)
+    rows, rc = _reconcile(ld, root, catalog)
+    assert rc == 6 and "bootout" not in ld.verbs() and plist.read_bytes() == before and ld.loaded(), rows
+    assert _entry(ld) == prior_entry and _lock_is_free(ld)
+
+
+def test_restore_never_overwrites_a_file_that_is_not_ours(ld):
+    # F4: the new bytes were replaced by another writer before the rollback: the restore fails and the record stays.
+    root, catalog, plist = _installed_wrapped(ld)
+    _drift(root)
+    ld.mark("fail_once", "bootstrap")
+    orig = S._atomic_write_bytes
+
+    def write_then_foreign(path, data, mode=0o600):
+        orig(path, data, mode)
+        if path == plist:
+            path.write_bytes(b"<plist><!-- foreign --></plist>")   # someone else replaces our new bytes
+    import unittest.mock as m
+    with m.patch.object(S, "_atomic_write_bytes", write_then_foreign):
+        rows, rc = _reconcile(ld, root, catalog)
+    assert rc == 1 and b"foreign" in plist.read_bytes() and not ld.loaded(), rows
+    assert (ld.state / "admission" / f"{LABEL}.recovery.json").exists()
+
+
+def test_recovery_ignores_a_label_the_ledger_does_not_own(ld):
+    # F5: a stray record must not make reconcile load an arbitrary plist.
+    root, catalog, plist = _installed_wrapped(ld)
+    label = "com.djbclark.not-ours"
+    other = ld.agents / f"{label}.plist"
+    other.write_bytes(b"<plist/>")
+    S.write_recovery_record(label, action="reload", plist=other, prior=b"<plist/>", new_sha=None, state_dir=ld.state, env=ld.env)
+    ld.reset()
+    rows, rc = _reconcile(ld, root, catalog)
+    assert any(r["action"] == "failed" and "no ADE ledger row" in r["detail"] for r in rows), rows
+    assert "bootstrap" not in ld.verbs() and not ld.loaded(label)
+    assert (ld.state / "admission" / f"{label}.recovery.json").exists()
+
+
+def test_removal_interrupted_after_the_unlink_completes_its_ledger_row(ld):
+    # F6: bootout + unlink done, record not cleared, ledger still pending-remove.
+    root, catalog, label, plist = _wrapped_retired(ld, loaded=False)
+    S.write_recovery_record(label, action="remove", plist=plist, prior=plist.read_bytes(), new_sha=None, state_dir=ld.state, env=ld.env)
+    plist.unlink()
+    ledger = S.load_jobs_ledger(ld.state, env=ld.env)
+    ledger["entries"]["skillopt-sleep"]["status"] = "pending-remove"
+    S.save_jobs_ledger(ledger, ld.state, env=ld.env)
+    rows, rc = _remove(ld, root, catalog, label)
+    assert any(r["action"] == "recover" and r["ok"] for r in rows), rows
+    assert "skillopt-sleep" not in S.load_jobs_ledger(ld.state, env=ld.env)["entries"]
+    assert not (ld.state / "admission" / f"{label}.recovery.json").exists() and "bootstrap" not in ld.verbs()

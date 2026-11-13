@@ -460,7 +460,7 @@ The updater's own service (`com.djbclark.ade-update-check`) running keeps its ex
 Every ADE launchd job in `config/launchd/com.djbclark.*.plist` now starts through `bin/ade-job-run LABEL -- COMMAND...`
 (`dev.herdr.server`, a KeepAlive server with a hard-coded path, is not migrated). Each run takes a **shared**,
 non-blocking `flock` on `<jobs state dir>/admission/LABEL.lock` and keeps it for the whole run (the lock descriptor is
-inherited by the exec'd command, so it lives as long as the command or anything it leaves running). If it cannot, because
+inherited by the exec'd command, so it lives as long as the command; a child started with `close_fds=True` does not inherit it). If it cannot, because
 reconcile holds the lock exclusively, it logs one line to the job's stderr and exits 0 without running the command (launchd
 tries again on its own schedule). If the lock cannot be used for any other reason the command is not run (exit 75).
 
@@ -468,7 +468,12 @@ For a **loaded** job, `launchd_admission(wrapped=...)` admits a reload or a remo
 at admission: (a) the INSTALLED plist bytes parse and route every launch through the wrapper (`ProgramArguments` is
 `[<abs>/ade-job-run, LABEL, "--", command...]`, an existing executable wrapper, no `Program` key; the render is not
 trusted); (b) the ledger row is ADE's, `committed` (for a reload) or `committed`/`pending-remove` (for a removal), backend
-launchd, with the artifact hash of those very bytes; (c) `launchctl print` says it was loaded from that plist (`path =`).
+launchd, with the artifact hash of those very bytes; (c) `launchctl print` says it was loaded from that plist (`path =`) **and the LOADED definition is the wrapped one**: its
+`program`/`arguments` start with the same `[<ade-job-run>, LABEL, "--"]` (launchd never re-reads an edited plist, so a
+file written by `install --no-activate` or a failed bootstrap can show the wrapper while the old unwrapped definition runs);
+(d) the wrapper in those bytes will lock the same file reconcile does: its environment is the plist's `EnvironmentVariables`
+over the user's HOME, and `admission_dir` of that must equal reconcile's (a reconcile run with `ADE_JOBS_STATE_DIR` or
+`XDG_STATE_HOME` set defers).
 It then takes the label's lock **exclusive, non-blocking**: held by a run means busy, so the step defers (never wait, never
 kill); acquired means no run is active and none can start. The lock stays held across the whole mutation and is released
 only after the ledger commit.
@@ -480,7 +485,8 @@ bytes by atomic replace, `bootstrap`, read-back. A failure after the unload rest
 and exits 1. A SIGTERM, deadline kill or crash cannot run any cleanup, so the record is the guarantee: every `reconcile`
 first acts on records (`recover_launchd_records`; `--dry-run` lists them as `would-recover`): a loaded label clears a stale
 record; an unloaded label whose plist is still the prior (or the new) bytes is bootstrapped and its ledger row made
-committed for what is loaded; a plist that is neither is someone else's and is left alone (row `failed`, record kept).
+committed for what is loaded; recovery acts only on a label some ADE launchd ledger row names; a plist that is neither is someone else's and is left alone (row `failed`, record kept).
+A restore never overwrites a file that is neither the prior bytes nor the bytes this run wrote. A removal interrupted after the unlink (no plist, unloaded, ADE `pending-remove` row) is completed by the next run (the ledger row is dropped). Every ADE job now imports `ade_sched.py` from the shared checkout, so a broken checkout stops all of them (exit 1 or 127, not 75).
 Removal (`remove_launchd_locked`) re-hashes the file under the lock right before the unload, uses the same record while
 the job is loaded, and restores it if the unlink or read-back fails.
 
