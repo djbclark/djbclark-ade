@@ -235,6 +235,7 @@ def _cmd_reconcile(a: argparse.Namespace) -> int:
         allow_no_linger=a.allow_no_linger,
         activate=not a.no_activate,
         extra_subst=_subst(a),
+        native_admission=True,
     )
     mode = "dry-run" if dry_run else "yes"
     ledger_path = str(ade_sched.jobs_ledger_path())

@@ -399,13 +399,41 @@ context held through read-back and the ownership commit. Its `JobAdmission`
 evidence must prove all launch paths participate, per-job activity is idle,
 and future triggers are safely drained. Busy/unknown jobs and the updater's own
 running service defer without stopping work. A fleet idle snapshot is insufficient.
+Before 2026-11-13 no native adapter existed and production deferred every install and removal; the launchd adapter below
+is the first.
 
-No native backend adapter currently proves those conditions. Production therefore
-conservatively defers all installs and removals; it does not claim race-free quiescence.
-The library `admission` callback is a trusted adapter seam, not a CLI bypass or
-an environment opt-in. An adapter must retain the launch exclusion throughout
-its context and drain future triggers without killing running work. Direct low-level `install`/`uninstall` are outside this new reconcile
-admission contract; callers must not treat those paths as proof of global admission.
+### Native launchd adapter (2026-11-13)
+
+`ade-sched reconcile --yes` and `ade-install apply` pass `native_admission=True`, which on the **launchd** backend (with
+activation on) installs `launchd_admission` as the `admission` callback. It proves the contract for one label and holds it
+through read-back and the ownership commit; the reconcile lock is held the whole time. An explicit `admission` argument
+still wins, and no environment variable or CLI flag selects or bypasses the adapter.
+
+1. **Absent job** (not loaded, no plist on disk): no launch path exists, so it is admitted without any `launchctl` write.
+2. **Existing job**: `launchctl disable gui/UID/LABEL` excludes new launches (RunAtLoad, StartInterval,
+   StartCalendarInterval, KeepAlive, kickstart), and `launchctl print-disabled gui/UID` must then report the label disabled.
+   Activity comes from the service block's own `state` and `pid` fields in `launchctl print gui/UID/LABEL` (never `pgrep` or
+   a name match): a pid, `running` or a launch in progress is **busy**; only `not running` or `waiting` without a pid is
+   **idle**; anything else is **unknown**. Busy and unknown defer (exit 6) without killing the job, after re-enabling exactly
+   what the adapter disabled. Idle proceeds: mutate, read back, then restore the prior enabled/disabled state. A job the
+   operator had disabled is never enabled, so its removal proceeds and its install defers.
+3. **Install re-enable**: `bootstrap` of a disabled label fails with 119, so an install re-enables the label between the
+   `bootout` and the `bootstrap` (`install(before_bootstrap=...)`). The old definition is already unloaded then and the job
+   was idle, so the only launch left is the new generation's own RunAtLoad.
+4. **Restore** runs on every exit, including an exception mid-mutation. A restore that still fails after one retry raises
+   `SchedError` naming `launchctl enable gui/UID/LABEL`; a disabled job is never left silently.
+5. **Unreadable state** (`launchctl print` or `print-disabled` fails or cannot be parsed) defers before anything is disabled.
+   The updater's own service (`com.djbclark.ade-update-check`) running keeps its existing refusal. A stale `disable` override
+   on a label with no plist and not loaded is not read; a fresh install of it fails loudly (119), not silently.
+
+**systemd, cron and paseo keep the conservative default** (installs and removals defer, exit 6): no adapter proves their
+launch paths yet. A paseo step on a launchd host also keeps it, and so does `--no-activate` (the adapter needs `launchctl`).
+Direct low-level `install`/`uninstall` are outside this contract; callers must not treat those paths as proof of global
+admission.
+
+**Adoption.** A job installed with low-level `ade-sched install` whose files match the ADE render and which is loaded is
+recorded in the ledger by `reconcile --yes` as `adopted`, without a reload and without admission (nothing is mutated on the
+host). A job whose files differ from the render is an install/reload step and goes through the adapter.
 
 Deferral intent is atomically stored in `jobs-deferred.json` beside `jobs.json`,
 under the existing reconciliation lock, with logical ID, action, backend, label,

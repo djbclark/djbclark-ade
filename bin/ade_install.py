@@ -3550,6 +3550,7 @@ def apply_sched_reconcile(
         state_dir=state_dir or sched.jobs_state_dir(env),
         names=want,
         allow_no_linger=allow_no_linger,
+        native_admission=True,
     )
     mapped: list[dict[str, Any]] = []
     for row in results:

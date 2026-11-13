@@ -59,7 +59,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TextIO
@@ -887,10 +887,13 @@ def _log_dirs(job: Job) -> None:
 
 def install(job: Job, backend: str | Backend | None = None, *, dry_run: bool = False, activate: bool = True,
             allow_no_linger: bool = False, env: Mapping[str, str] | None = None, out: TextIO | None = None,
-            err: TextIO | None = None, **overrides: Any) -> Rendered:
+            err: TextIO | None = None, before_bootstrap: Callable[[], None] | None = None,
+            **overrides: Any) -> Rendered:
     """Install `job` on the backend (auto-detected when None). dry_run prints every artifact under a `# <path>` header and
     the commands, changing nothing; activate=False writes the files and prints the activation commands instead of running
-    them. On systemd, Linger=no is exit 69 before anything is written unless allow_no_linger. Raises SchedError."""
+    them. On systemd, Linger=no is exit 69 before anything is written unless allow_no_linger. `before_bootstrap` (launchd only)
+    runs between the bootout and the bootstrap, for a reconcile admission that disabled the label (bootstrap of a disabled
+    label fails with 119). Raises SchedError."""
     out = out or sys.stdout
     err = err or sys.stderr
     c = _ctx(backend, env, overrides)
@@ -943,6 +946,8 @@ def install(job: Job, backend: str | Backend | None = None, *, dry_run: bool = F
             print(shlex.join(argv), file=out)
         return r
     for i, argv in enumerate(r.activation):
+        if i == 1 and r.backend == "launchd" and before_bootstrap is not None:
+            before_bootstrap()
         _activate(c, argv, ignore=(r.backend == "launchd" and i == 0))   # bootout of a job not loaded fails: fine
     if r.backend == "systemd":
         _cron_remove(c, job.label, err, quiet_missing=True)
@@ -1899,18 +1904,23 @@ class JobAdmission:
     """Evidence held by an admission context across the entire mutation.
 
     An adapter must exclude new launches, observe this job's running work,
-    and stop future triggers without killing work. No native adapter currently
-    proves all launch paths participate, so the default is conservative.
+    and stop future triggers without killing work. Only the launchd adapter
+    (`launchd_admission`) proves that; every other backend keeps the conservative
+    default.
     """
 
     all_launch_paths: bool = False
     activity: str = "unknown"  # idle | busy | unknown
     triggers_drained: bool = False
     updater_running: bool = False
+    hold: str | None = None  # adapter-supplied refusal reason (state unreadable, operator-disabled job, ...)
+    before_bootstrap: Callable[[], None] | None = field(default=None, compare=False)  # launchd install only
 
     def refusal(self) -> str | None:
         if self.updater_running:
             return "updater's own running service; next generation pending"
+        if self.hold:
+            return self.hold
         if not self.all_launch_paths:
             return "shared admission incomplete; launch paths do not all participate"
         if self.activity != "idle":
@@ -1932,6 +1942,135 @@ class ReconcileStep:
     touch: bool = False
     category: str = "job"  # job | retired | foreign | ledger
     ledger_snapshot: Mapping[str, Any] | None = None  # remove: ownership at plan time
+
+
+# launchctl exit status for "Could not find service" (the label is not loaded).
+LAUNCHD_NOT_LOADED_RC = 113
+# Jobs that are the updater's own service: busy means the updater is running this reconcile.
+UPDATER_LABELS = frozenset({"com.djbclark.ade-update-check"})
+_PRINT_FIELD_RE = re.compile(r"\t(state|pid) = (.*)")
+_DISABLED_ROW_RE = re.compile(r'\s*"([^"]+)"\s*=>\s*(\w+)\s*')
+
+
+def parse_launchd_activity(text: str) -> str:
+    """idle | busy | unknown from `launchctl print gui/UID/LABEL`: the service block's own `state`/`pid` fields (one tab
+    deep), never a process-name match. A pid, `running` or a launch in progress is busy; only `not running` / `waiting`
+    without a pid is idle; anything else, including a missing field, is unknown."""
+    lines = text.splitlines()
+    if not lines or not lines[0].rstrip().endswith("= {"):
+        return "unknown"
+    fields: dict[str, str] = {}
+    for line in lines[1:]:
+        m = _PRINT_FIELD_RE.fullmatch(line.rstrip())
+        if m:
+            fields.setdefault(m.group(1), m.group(2).strip())
+    pid, state = fields.get("pid"), fields.get("state")
+    if pid is not None:
+        return "busy" if pid.isdigit() and int(pid) > 0 else "unknown"
+    if state in ("running", "spawn scheduled", "xpcproxy"):
+        return "busy"
+    return "idle" if state in ("not running", "waiting") else "unknown"
+
+
+def parse_launchd_disabled(text: str, label: str) -> bool | None:
+    """True/False: `label` is disabled/enabled in `launchctl print-disabled gui/UID`; None when the output is unreadable.
+    A label with no override row is enabled."""
+    if "disabled services" not in text:
+        return None
+    for line in text.splitlines():
+        m = _DISABLED_ROW_RE.fullmatch(line)
+        if m and m.group(1) == label:
+            word = m.group(2).lower()
+            return True if word in ("disabled", "true") else False if word in ("enabled", "false") else None
+    return False
+
+
+def launchd_admission(
+    *, launchctl: str, uid: int, agents_dir: Path, env: Mapping[str, str],
+    run: Runner | None = None,
+) -> Callable[[ReconcileStep], contextlib.AbstractContextManager[JobAdmission]]:
+    """The native launchd adapter for `reconcile(admission=...)`: one label, held through read-back and the ownership commit.
+
+    An absent job (not loaded, no plist) has no launch path and is admitted. An existing job is first excluded with
+    `launchctl disable gui/UID/LABEL` (covers RunAtLoad, StartInterval, StartCalendarInterval, KeepAlive and kickstart),
+    confirmed disabled by `print-disabled`, then read with `launchctl print`: a pid or `running` is busy and defers
+    without killing the job; an unreadable state is unknown and defers. Bootstrap of a disabled label fails (119), so an
+    install re-enables the label between the bootout and the bootstrap (`before_bootstrap`); a label the operator had
+    already disabled is never enabled, so its install defers. On exit, whatever happened, an enabled label is enabled
+    again and a disabled one was never touched. A failed restore raises SchedError naming the command to run."""
+    runner = run or _run
+    domain = f"gui/{uid}"
+
+    def launchctl_run(*args: str) -> tuple[int, str, str]:
+        return runner([launchctl, *args], env)
+
+    def read_disabled(label: str) -> bool | None:
+        rc, out, _ = launchctl_run("print-disabled", domain)
+        return parse_launchd_disabled(out, label) if rc == 0 else None
+
+    @contextlib.contextmanager
+    def admit(step: ReconcileStep) -> Iterator[JobAdmission]:
+        label = step.label
+        if not isinstance(label, str) or not LABEL_RE.fullmatch(label):
+            yield JobAdmission()
+            return
+        target = f"{domain}/{label}"
+        rc, out, err = launchctl_run("print", target)
+        if rc == 0:
+            loaded = True
+        elif rc == LAUNCHD_NOT_LOADED_RC or "could not find service" in err.lower():
+            loaded = False
+        else:
+            yield JobAdmission(hold=f"launchd state of {label} unreadable (rc={rc})")
+            return
+        if not loaded and not (agents_dir / f"{label}.plist").exists():
+            yield JobAdmission(all_launch_paths=True, activity="idle", triggers_drained=True)
+            return
+        was_disabled = read_disabled(label)
+        if was_disabled is None:
+            yield JobAdmission(hold=f"launchd enabled/disabled state of {label} unreadable")
+            return
+        restore = not was_disabled  # exactly what this admission disables is what it re-enables
+        try:
+            if not was_disabled:
+                launchctl_run("disable", target)
+            if read_disabled(label) is not True:
+                yield JobAdmission(hold=f"launchd could not disable {label}; launch paths not excluded")
+                return
+            rc, out, err = launchctl_run("print", target)
+            if rc == 0:
+                activity = parse_launchd_activity(out)
+            elif rc == LAUNCHD_NOT_LOADED_RC or "could not find service" in err.lower():
+                activity = "idle"
+            else:
+                activity = "unknown"
+            hold = None
+            hook = None
+            if step.action == "install" and was_disabled:
+                hold = f"{label} is disabled by the operator; not enabling it to apply a new definition"
+            elif step.action == "install":
+                def hook() -> None:
+                    rc2, _, err2 = launchctl_run("enable", target)
+                    if rc2 != 0:
+                        raise SchedError(EX_ACTIVATE, f"launchctl enable {target} failed (rc={rc2}): {err2.strip()}")
+            yield JobAdmission(
+                all_launch_paths=True, activity=activity, triggers_drained=True,
+                updater_running=activity == "busy" and label in UPDATER_LABELS,
+                hold=hold, before_bootstrap=hook,
+            )
+        finally:
+            if restore:
+                rc3, _, err3 = launchctl_run("enable", target)
+                if rc3 != 0:
+                    rc3, _, err3 = launchctl_run("enable", target)
+                if rc3 != 0:
+                    raise SchedError(
+                        EX_ACTIVATE,
+                        f"could not re-enable {label} after reconcile (rc={rc3}): {err3.strip()}; "
+                        f"run: launchctl enable {target}",
+                    )
+
+    return admit
 
 
 def plan_reconcile(
@@ -2369,6 +2508,7 @@ def reconcile(
     out: TextIO | None = None,
     err: TextIO | None = None,
     admission: Callable[[ReconcileStep], Any] | None = None,
+    native_admission: bool = False,
     **overrides: Any,
 ) -> tuple[list[dict[str, Any]], int]:
     """Reconcile ADE-owned ade-sched and paseo jobs; write the ownership ledger.
@@ -2379,6 +2519,10 @@ def reconcile(
     launchd LaunchAgents (``RECONCILE_WRITE_BACKENDS``). Paseo schedule create/delete
     is orthogonal (ledger ``backend="paseo"``) and does not require a host write
     backend.
+
+    ``native_admission=True`` (the ade-sched CLI and ``ade-install apply`` set it) installs the launchd
+    adapter (``launchd_admission``) when no explicit ``admission`` is given, the backend is launchd and activation is on;
+    every other case keeps the conservative default.
 
     Exit 0 when the plan is clean (dry-run) or every touch succeeded; 1 on a failed
     mutation or blocked step; 6 when work is durably deferred; 2 when ``--yes`` refuses host writes on a non-write
@@ -2410,6 +2554,19 @@ def reconcile(
             "touch": False,
             "ok": False,
         }], EX_UNAVAILABLE if e.code == EX_UNAVAILABLE else EX_USAGE)
+
+    if admission is None and native_admission and b.name == "launchd" and activate:
+        # The one native adapter (launchd); systemd/cron/paseo keep the conservative default. An explicit
+        # `admission` always wins, and no environment or CLI switch reaches this branch.
+        nc = _ctx(b, env, overrides)
+        launchd_native = launchd_admission(
+            launchctl=nc.launchctl, uid=nc.uid, agents_dir=nc.agents_dir, env=nc.env,
+        )
+
+        def admission(step: ReconcileStep) -> Any:  # noqa: F811 - the resolved adapter
+            if _step_targets_paseo(step):
+                return contextlib.nullcontext(JobAdmission())
+            return launchd_native(step)
 
     if live is None:
         try:
@@ -2515,6 +2672,7 @@ def reconcile(
                     "ok": True,
                 }
                 reason = step.detail if step.action == "defer" else None
+                evidence: Any = None
                 previous = entries.get(step.name)
                 # A missing label in a stale/incomplete scan is no absence proof.
                 # Even an initial systemd install may remove a cron trigger.
@@ -2800,10 +2958,12 @@ def reconcile(
                     ledger["entries"] = entries
                     ledger["generation"] = generation
                     save_jobs_ledger(ledger, state_dir, env=env)
+                    hook = getattr(evidence, "before_bootstrap", None)
                     try:
                         install(
                             job, b, dry_run=False, activate=activate,
                             allow_no_linger=allow_no_linger, env=env, out=out, err=err,
+                            **({"before_bootstrap": hook} if hook is not None else {}),
                             **overrides,
                         )
                         st = status(label, b, env=env, **overrides)
