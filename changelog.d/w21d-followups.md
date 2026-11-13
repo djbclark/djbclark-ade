@@ -16,7 +16,9 @@
 
 - `launchd/com.djbclark.load-watch.plist` now starts `bin/load-watch sample` through `bin/ade-job-run` (canonical `--lock-dir`),
   so once an existing install is migrated with `ade-sched migrate-wrapper`, `load-watch install` and `load-watch uninstall`
-  work on the LOADED job through the locked record-first path. (#626)
+  work on the LOADED job through the locked record-first path; an activated `ade-sched uninstall` of a LOADED canonical-wrapped job now
+  goes through `remove_launchd_locked` (recovery record and prior bytes before the `bootout`, the prior definition loaded again if the
+  unlink or read-back fails, the record kept with a manual-bootstrap hint if that fails too) instead of a bare bootout and unlink. (#626)
 - `ade-sched migrate-wrapper` also takes the OLD loaded definition's `LABEL.lock` exclusive and non-blocking, for the whole
   migration, when that definition is a wrapped job locking in a directory other than the canonical one: a run of the old wrapper
   makes it refuse with nothing changed. A pre-wrapper old definition keeps the documented idle-only race. (#626)

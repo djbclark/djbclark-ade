@@ -1472,7 +1472,12 @@ def uninstall(label: str, backend: str | Backend | None = None, *, dry_run: bool
     and have a truthy KeepAlive; a loaded `ade-job-run` argv is never removed this way (use `migrate-wrapper`). A deliberate service stop:
     the `bootout` ends the running service (not paid-work-safe), after the durable recovery record and the prior bytes are
     saved; the prior definition is loaded again if the removal fails. No effect on a canonical-wrapped loaded job; a busy
-    admission lock still refuses."""
+    admission lock still refuses.
+
+    An activated uninstall of a LOADED canonical-wrapped job (W21d round 4) goes through `remove_launchd_locked` as well:
+    recovery record and prior bytes first, then the bootout, then the unlink; a failure after the bootout loads the prior
+    definition again (ReloadRolledBack), or keeps the record with the manual-bootstrap hint when that fails too.
+    `--no-activate` and a job that is not loaded keep the plain path."""
     out = out or sys.stdout
     err = err or sys.stderr
     if not LABEL_RE.fullmatch(label):
@@ -1504,6 +1509,19 @@ def uninstall(label: str, backend: str | Backend | None = None, *, dry_run: bool
                                                  loaded=True, state_dir=None, env=c.env, **overrides)
                 except NativeDefer as exc:
                     raise SchedError(EX_ACTIVATE, str(exc)) from exc
+            if state == LOADED_CANONICAL and activate:   # W21d round 4: a LOADED wrapped job (load-watch) is removed record-first too
+                try:
+                    data = read_regular_bytes(path)   # read once; remove_launchd_locked re-hashes under the lock and refuses a different file
+                except FileNotFoundError:
+                    data = None   # loaded with no file: nothing to record or restore, the bare bootout below unloads it
+                except OSError as exc:
+                    raise SchedError(EX_ACTIVATE, f"uninstall of {label} refused, nothing removed: {path} cannot be read ({exc})") from exc
+                if data is not None:
+                    try:
+                        return remove_launchd_locked(label, expect_hash=artifact_hash({path: data.decode("utf-8", errors="replace")}),
+                                                     loaded=True, state_dir=None, env=c.env, **overrides)
+                    except NativeDefer as exc:
+                        raise SchedError(EX_ACTIVATE, str(exc)) from exc
             if activate:
                 # bootout of a missing job fails: ignore that, but refuse to drop the plist
                 # while launchctl still reports the job loaded (Codex P2 on #514).

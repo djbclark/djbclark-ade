@@ -510,7 +510,7 @@ that starts between the idle read and the bootout is not seen, so pick a quiet t
 since W21d (2026-11-13)**: `launchd/com.djbclark.load-watch.plist` starts `bin/load-watch sample` through `ade-job-run` like the nine catalog plists, so
 once an install is migrated (`bin/ade-sched migrate-wrapper launchd/com.djbclark.load-watch.plist --ade DIR`, once, at a quiet time; the
 sampler runs every 20 s and holds the shared lock only while a sample runs) `load-watch install` and `load-watch uninstall` work on the
-LOADED job through the locked record-first path above. Because every sample now goes through the wrapper, load-watch needs the shared checkout's
+LOADED job through the locked record-first path above (since round 4 of W21d an activated `uninstall` of a LOADED wrapped job really is record-first: the recovery record and the prior copy are written before the `bootout`, and a failure after it loads the prior definition again or keeps the record with the manual-bootstrap hint; `--no-activate` and a job that is not loaded keep the plain removal). Because every sample now goes through the wrapper, load-watch needs the shared checkout's
 `ade_sched.py` (the wrapper imports it) and a lockable canonical `admission/` directory on every sample: a broken `ade_sched.py` or an unusable lock
 directory (wrapper exit 75, not contention) silently stops the sampler too, the watchdog that would have reported it. An install made before W21d is a pre-wrapper job and `load-watch install`/`uninstall`
 refuse it (exit 1, naming `migrate-wrapper`) until it is migrated. Jobs that are not wrapped by design (`dev.herdr.server`, any non-catalog plist)

@@ -1145,6 +1145,68 @@ def test_w21d_a_loaded_wrapped_load_watch_installs_and_uninstalls_through_the_lo
     assert not plist.exists() and not ld.loaded(LW_LABEL)
 
 
+def _loaded_lw(ld):
+    """load-watch installed through the wrapper (canonical lock dir) and LOADED, as after `migrate-wrapper`."""
+    root = _lw_root(ld)
+    S.install(_lw_job(ld, root), "launchd", env=ld.env)
+    plist = ld.agents / f"{LW_LABEL}.plist"
+    assert ld.loaded(LW_LABEL) and plist.exists()
+    ld.reset()
+    return root, plist
+
+
+def test_w21d_r4_a_loaded_wrapped_uninstall_writes_the_recovery_record_before_the_bootout(ld, monkeypatch):
+    root, plist = _loaded_lw(ld)
+    seen, real = [], S.write_recovery_record
+    monkeypatch.setattr(S, "write_recovery_record", lambda *a, **k: (seen.append(list(ld.verbs())), real(*a, **k))[1])
+    assert S.uninstall(LW_LABEL, "launchd", env=ld.env, ade=root) is True
+    assert seen and "bootout" not in seen[0] and ld.verbs().count("bootout") == 1
+    assert not plist.exists() and not ld.loaded(LW_LABEL)
+    assert not list((ld.state / "admission").glob("*.recovery.json")) and not S.recovery_record_path(LW_LABEL).exists()
+    assert not S.recovery_prior_path(LW_LABEL).exists()
+
+
+def test_w21d_r4_a_loaded_wrapped_uninstall_restores_the_job_when_the_unlink_fails(ld, monkeypatch):
+    root, plist = _loaded_lw(ld)
+    before = plist.read_bytes()
+    monkeypatch.setattr(S, "_guarded_unlink", lambda *a, **k: (_ for _ in ()).throw(S.SchedError(S.EX_ACTIVATE, "unlink failed")))
+    with pytest.raises(S.ReloadRolledBack):                                    # unloaded, then put back
+        S.uninstall(LW_LABEL, "launchd", env=ld.env, ade=root)
+    assert plist.read_bytes() == before and ld.loaded(LW_LABEL) and not S.recovery_record_path(LW_LABEL).exists()
+    assert ld.verbs().count("bootout") == 1 and ld.verbs().count("bootstrap") == 1
+
+
+def test_w21d_r4_a_loaded_wrapped_uninstall_keeps_the_record_when_the_restore_also_fails(ld, monkeypatch):
+    root, plist = _loaded_lw(ld)
+    before = plist.read_bytes()
+    monkeypatch.setattr(S, "_guarded_unlink", lambda *a, **k: (_ for _ in ()).throw(S.SchedError(S.EX_ACTIVATE, "unlink failed")))
+    ld.fail("bootstrap")
+    with pytest.raises(S.SchedError, match="recovery record kept") as e:
+        S.uninstall(LW_LABEL, "launchd", env=ld.env, ade=root)
+    assert "DOWN" in str(e.value) and "launchctl bootstrap gui/" in str(e.value) and str(S.recovery_prior_path(LW_LABEL)) in str(e.value)
+    assert S.recovery_record_path(LW_LABEL).exists() and S.recovery_prior_path(LW_LABEL).read_bytes() == before and not ld.loaded(LW_LABEL)
+
+
+def test_w21d_r4_a_wrapped_uninstall_refuses_a_file_that_changed_since_it_was_read(ld, monkeypatch):
+    root, plist = _loaded_lw(ld)
+    real = S.remove_launchd_locked
+
+    def swapped(*a, **k):
+        plist.write_bytes(plist.read_bytes() + b"<!-- edited -->")
+        return real(*a, **k)
+
+    monkeypatch.setattr(S, "remove_launchd_locked", swapped)
+    with pytest.raises(S.SchedError, match="no longer matches"):
+        S.uninstall(LW_LABEL, "launchd", env=ld.env, ade=root)
+    assert plist.exists() and ld.loaded(LW_LABEL) and not KILLERS & set(ld.verbs())
+
+
+def test_w21d_r4_a_no_activate_wrapped_uninstall_keeps_the_plain_path(ld):
+    root, plist = _loaded_lw(ld)
+    assert S.uninstall(LW_LABEL, "launchd", env=ld.env, ade=root, activate=False) is True
+    assert not plist.exists() and not KILLERS & set(ld.verbs()) and not S.recovery_record_path(LW_LABEL).exists()
+
+
 def _service(ld, *, label=HERDR, tag="alpha", keep_alive=True, args=None, extra=None):
     """A herdr-like service definition (an absolute program, no wrapper): KeepAlive or a plain StartInterval job."""
     import plistlib
