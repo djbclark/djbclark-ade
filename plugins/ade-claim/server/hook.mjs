@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { userInfo } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -27,25 +27,39 @@ import {
 } from "./claim-lib.mjs";
 
 /**
- * Reviewed plugin directory (never the agent's worktree).
+ * Reviewed plugin directory (never the agent's worktree), and where it came from.
  *
  * Paseo bundles `index.server.ts` to CommonJS and `eval`s it (daemon `compiler-build.js` format "cjs",
  * `bundle-evaluator.js`), and never tells the plugin its own directory; so in the daemon `import.meta.url`
  * is undefined and `fileURLToPath(undefined)` threw at load ("The "path" argument must be of type string
- * or an instance of URL. Received undefined", #638 D2). Under plain Node ESM (the tests) the file URL is
- * real and wins; in the daemon the plugin falls back to the shared checkout `~/src/djbclark-ade`.
+ * or an instance of URL. Received undefined", #638 D2). Order: (1) a real `file:` URL (plain Node ESM, the
+ * tests); (2) Paseo's own install record, `<home>/.paseo/config.json` `plugins["ade-claim"].path` (the
+ * directory the code was compiled from; absolute, own-user file); (3) the shared checkout
+ * `<home>/src/djbclark-ade/plugins/ade-claim`. `<home>` is the account's home directory, never `$HOME`
+ * (an env value must not redirect where trusted helpers are looked up; same rule as the mode file).
  * `ADE_CLAIMS_PY`, `ADE_GIT_GUARD` and `ADE_AGENT_BIN` still override each tool.
  *
  * @param {{ metaUrl?: unknown, home?: string }} [opts]
+ * @returns {{ root: string, source: "file-url" | "paseo-install-record" | "home-fallback" }}
  */
-export function resolvePluginRoot({ metaUrl, home = homedir() } = {}) {
+export function resolvePluginRoot({ metaUrl, home = userInfo().homedir } = {}) {
   if (typeof metaUrl === "string" && metaUrl.startsWith("file:")) {
-    return join(dirname(fileURLToPath(metaUrl)), "..");
+    return { root: join(dirname(fileURLToPath(metaUrl)), ".."), source: "file-url" };
   }
-  return join(home, "src", "djbclark-ade", "plugins", "ade-claim");
+  try {
+    const raw = readFileSync(join(home, ".paseo", "config.json"), "utf8");
+    const path = JSON.parse(raw)?.plugins?.["ade-claim"]?.path;
+    if (typeof path === "string" && path.startsWith("/")) {
+      return { root: path, source: "paseo-install-record" };
+    }
+  } catch {
+    // no readable install record: fall through to the shared checkout
+  }
+  return { root: join(home, "src", "djbclark-ade", "plugins", "ade-claim"), source: "home-fallback" };
 }
 
-const PLUGIN_ROOT = resolvePluginRoot({ metaUrl: import.meta?.url });
+export const PLUGIN_ROOT_RESOLVED = resolvePluginRoot({ metaUrl: import.meta?.url });
+export const PLUGIN_ROOT = PLUGIN_ROOT_RESOLVED.root;
 
 /** Install soft-fail codes (do not abort worktree.create.after). */
 const INSTALL_SOFT_FAIL = new Set([73, 78]);
@@ -434,6 +448,12 @@ export function registerAgentClaimOwnerHook(server, deps = {}) {
  * @param {HookDeps} [deps]
  */
 export function registerAdeClaimHooks(server, deps = {}) {
+  if (!deps.pluginRoot) {
+    // One line at load so the soak shows which root the trusted helpers are looked up from (#638 D2 review F4).
+    (deps.log ?? ((line) => console.error(line)))(
+      `[ade-claim] plugin root ${PLUGIN_ROOT_RESOLVED.root} (${PLUGIN_ROOT_RESOLVED.source})`,
+    );
+  }
   const removeWt = registerWorktreeClaimHook(server, deps);
   const removeArchive = registerWorkspaceArchiveReleaseHook(server, deps);
   const removeEnv = registerAgentClaimEnvHook(server, deps);
