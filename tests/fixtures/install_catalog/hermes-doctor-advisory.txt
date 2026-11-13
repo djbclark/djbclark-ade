@@ -1,0 +1,24 @@
+
+┌─────────────────────────────────────────────────────────┐
+│                 🩺 Hermes Doctor                        │
+└─────────────────────────────────────────────────────────┘
+
+◆ Python Environment
+  ✓ Python 3.14.7
+  ✓ SQLite 3.53.1
+
+◆ Directory Structure
+  ✓ ~/.hermes directory exists
+  ⚠ state.db is large (1.3 GB) (consider enabling sessions.auto_prune in config.yaml to bound growth)
+
+◆ API Connectivity
+  ✓ OpenRouter API
+  ✗ ExampleProvider    (invalid API key)
+
+────────────────────────────────────────────────────────────
+  Found 8 issue(s) to address:
+
+  1. state.db is large — enable sessions.auto_prune in config.yaml
+  2. Check EXAMPLE_API_KEY in .env
+
+  Tip: run 'hermes doctor --fix' to auto-fix what's possible.

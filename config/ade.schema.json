@@ -382,6 +382,16 @@
                   "minLength": 1
                 }
               },
+              "probe_warn_exit": {
+                "type": "array",
+                "items": {
+                  "type": "integer"
+                }
+              },
+              "probe_summary_re": {
+                "type": "string",
+                "minLength": 1
+              },
               "presence": {
                 "type": "string"
               },
