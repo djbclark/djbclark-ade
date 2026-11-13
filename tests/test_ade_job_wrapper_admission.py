@@ -796,6 +796,8 @@ def test_f4_the_canonical_lock_dir_ignores_home_xdg_and_the_state_dir_env(tmp_pa
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "x"))
     monkeypatch.setenv("ADE_JOBS_STATE_DIR", str(tmp_path / "j"))
     env = {"HOME": str(tmp_path / "h2"), "XDG_STATE_HOME": str(tmp_path / "x2"), "ADE_JOBS_STATE_DIR": str(tmp_path / "j2")}
+    real = getattr(S.canonical_admission_dir, "real", S.canonical_admission_dir)   # conftest patches the function per test
+    monkeypatch.setattr(S, "canonical_admission_dir", real)
     assert S.canonical_admission_dir() == want
     assert S.admission_dir(tmp_path / "s", env=env) == want
     assert S.default_subst(env=env)["__ADMISSION__"] == str(want)
@@ -909,3 +911,84 @@ def test_f4_migrate_wrapper_restores_the_prior_bytes_when_the_bootstrap_fails(ld
     with pytest.raises(S.SchedError):
         S.migrate_wrapper_launchd(job, text, env=ld.env)
     assert plist.read_bytes() == before and ld.loaded()
+
+
+# ------------------------------------------------------------------------------------------------ round 3 review of fc9fad08 (B2-B5)
+
+def test_b2_a_loaded_canonical_install_that_cannot_bootstrap_restores_the_prior_definition(ld):
+    root, catalog, plist = _installed_wrapped(ld)
+    job = _job_of(ld, root, catalog)
+    before = plist.read_bytes()
+    ld.reset()
+    ld.mark("fail_once", "bootstrap")                     # the new definition fails to load; the restore succeeds
+    with pytest.raises(S.ReloadRolledBack):
+        S.install(job, "launchd", env=ld.env)
+    assert plist.read_bytes() == before and ld.loaded() and _lock_is_free(ld)
+    assert not list((ld.state / "admission").glob("*.recovery.json"))
+
+
+def test_b2_a_loaded_canonical_install_whose_restore_also_fails_keeps_a_recovery_record(ld):
+    root, catalog, plist = _installed_wrapped(ld)
+    job = _job_of(ld, root, catalog)
+    before = plist.read_bytes()
+    ld.reset()
+    ld.fail("bootstrap")                                  # nothing can be bootstrapped
+    with pytest.raises(S.SchedError, match="recovery record kept"):
+        S.install(job, "launchd", env=ld.env)
+    rec = S.recovery_record_path(LABEL)
+    assert rec.exists() and S.recovery_prior_path(LABEL).read_bytes() == before and not ld.loaded()
+
+
+def _unwrapped_text(plist):
+    import plistlib
+    d = plistlib.loads(plist.read_bytes())
+    d["ProgramArguments"] = d["ProgramArguments"][S._WRAP_HEAD:]
+    return plistlib.dumps(d).decode()
+
+
+def test_b3_install_over_a_loaded_wrapped_job_refuses_a_definition_that_leaves_the_wrapper(ld, monkeypatch):
+    import dataclasses
+    root, catalog, plist = _installed_wrapped(ld)
+    job = _job_of(ld, root, catalog)
+    before = plist.read_bytes()
+    ld.reset()
+    real = S._render
+    unwrapped = _unwrapped_text(plist)
+    monkeypatch.setattr(S, "_render", lambda *a, **k: (lambda r: dataclasses.replace(r, files={p: unwrapped for p in r.files}))(real(*a, **k)))
+    with pytest.raises(S.SchedError, match="would leave the canonical wrapper"):
+        S.install(job, "launchd", env=ld.env)
+    assert plist.read_bytes() == before and ld.loaded() and not KILLERS & set(ld.verbs())
+
+
+def test_b3_migrate_wrapper_refuses_a_definition_that_is_not_wrapped(ld):
+    root, job, text, plist = _pre_wrapper_install(ld)
+    before = plist.read_bytes()
+    with pytest.raises(S.SchedError, match="does not route through the canonical wrapper"):
+        S.migrate_wrapper_launchd(job, plist.read_text(), env=ld.env)    # the old, unwrapped bytes again
+    assert plist.read_bytes() == before and ld.loaded() and not KILLERS & set(ld.verbs())
+
+
+def test_b4_the_admission_placeholder_cannot_be_set(ld, tmp_path):
+    root = _mini_catalog(ld.tmp)
+    _wrap(root, state=ld.state)
+    catalog = ai.load_catalog(root=root)
+    row = next(j for j in catalog.jobs if j["name"] == "deadline-sweep")
+    plist = root / "config" / "launchd" / f"{LABEL}.plist"
+    with pytest.raises(S.SchedError, match="__ADMISSION__"):
+        S.Job.from_plist(plist, {"__ADMISSION__": str(tmp_path / "x")}, ade=root)
+    with pytest.raises(S.SchedError, match="__ADMISSION__"):
+        S.job_subst_from_row(row, root=root, env=ld.env, extra={"__ADMISSION__": str(tmp_path / "x")})
+    with pytest.raises(S.SchedError, match="__ADMISSION__"):
+        S.job_subst_from_row({**row, "set": [f"__ADMISSION__={tmp_path / 'x'}"]}, root=root, env=ld.env)
+    assert S.job_subst_from_row(row, root=root, env=ld.env)["__ADMISSION__"] == str(S.canonical_admission_dir())
+
+
+@pytest.mark.parametrize("who", ["install", "uninstall"])
+def test_b5_the_low_level_proof_checks_the_loaded_wrapper_bytes(ld, who):
+    root, catalog, plist = _installed_wrapped(ld)
+    job = _job_of(ld, root, catalog)
+    ld.reset()
+    (root / "bin" / "ade-job-run").write_text("#!/bin/sh\nexit 0\n")      # canonical argv, but not this checkout's wrapper
+    with pytest.raises(S.SchedError, match="migrate-wrapper"):
+        S.install(job, "launchd", env=ld.env) if who == "install" else S.uninstall(LABEL, "launchd", env=ld.env)
+    assert ld.loaded() and not KILLERS & set(ld.verbs())

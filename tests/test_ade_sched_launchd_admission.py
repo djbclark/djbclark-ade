@@ -794,8 +794,18 @@ def test_ade_install_apply_requests_the_native_adapter(ld, monkeypatch):
 
 def test_ade_sched_cli_reconcile_yes_uses_the_native_adapter(ld):
     root = _mini_catalog(ld.tmp)
+    # a child process is not reached by the fixture's monkeypatch: patch the canonical lock directory (never the operator's real
+    # one) before the CLI script runs, so its lock files land in the test's tmp dir
+    child = (
+        "import runpy, sys, pathlib; sys.path[:0] = [sys.argv[1]]\n"
+        "import ade_sched as S\n"
+        "S.canonical_admission_dir = lambda: pathlib.Path(sys.argv[2])\n"
+        "script = sys.argv[3]; sys.argv = ['ade-sched'] + sys.argv[4:]\n"
+        "runpy.run_path(script, run_name='__main__')\n"
+    )
     proc = subprocess.run(
-        [sys.executable, "-I", str(BIN / "ade-sched"), "--root", str(root), "--ade", str(root), "--backend", "launchd",
+        [sys.executable, "-c", child, str(BIN), str(ld.tmp / "jobs-state" / "admission"), str(BIN / "ade-sched"),
+         "--root", str(root), "--ade", str(root), "--backend", "launchd",
          "reconcile", "--yes", "--json", "--name", "deadline-sweep"],
         env=ld.env, capture_output=True, text=True, timeout=120,
     )

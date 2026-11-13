@@ -239,6 +239,8 @@ class Job:
         """Fill default_subst(ade) then `subst` (which wins) into a copy of `d`, and validate it."""
         source = source.replace("\n", "?").replace("\r", "?")
         full = {**default_subst(ade), **(subst or {})}
+        if full["__ADMISSION__"] != default_subst(ade)["__ADMISSION__"]:   # the wrapper's lock directory is not a knob (r3 review F4/B4)
+            raise SchedError(EX_USAGE, f"{source}: __ADMISSION__ is fixed to the canonical admission lock directory and cannot be set")
         rx = re.compile("|".join(re.escape(k) for k in sorted(full, key=len, reverse=True))) if full else None
         uses_ade = any(k in s for s in _strings(d) for k in ("__ADE__", "@ADE@"))
         raw = _fill(dict(d), rx, full)
@@ -961,8 +963,22 @@ def install(job: Job, backend: str | Backend | None = None, *, dry_run: bool = F
     # F3 of #622: a launchd plist write (and the bootout that follows it) serializes with every other ADE writer and refuses
     # while a wrapped run of the job holds the admission lock shared; the other backends have no wrapper lock to take.
     with (writer_lock(job.label, None, c.env) if r.backend == "launchd" else contextlib.nullcontext()):
+        loaded_launchd = False
         if r.backend == "launchd":
-            require_canonical_when_loaded(c, job.label, "install")   # F4: a loaded job must prove the canonical lock identity
+            loaded_launchd = require_canonical_when_loaded(c, job.label, "install")   # F4: a loaded job must prove the canonical lock identity
+            if loaded_launchd and activate:
+                # B2 of the r3 review: a LOADED job is replaced the record-first way (prior copy, recovery record, rollback), never
+                # by a bare write + bootout + bootstrap that could leave a ledger-owned job unloaded with nothing to recover it.
+                (_, new_text), = r.files.items()
+                why = wrapper_route_problem(new_text.encode("utf-8"), job.label, lock_dir=admission_dir())
+                if why is not None:
+                    raise SchedError(EX_ACTIVATE, f"install of {job.label} refused, nothing written: the new definition would leave the "
+                                                  f"canonical wrapper ({why}); bootout the job by hand if that is intended")
+                try:
+                    reload_launchd_locked(job, new_text, state_dir=None, env=c.env, expect_hash=None, **overrides)
+                except NativeDefer as exc:
+                    raise SchedError(EX_ACTIVATE, str(exc)) from exc
+                return r
         if r.backend == "systemd":
             stale = c.units / f"{job.label}.timer"
             if stale not in r.files and stale.exists():   # the job lost its schedule: the old timer would keep firing
@@ -2331,8 +2347,10 @@ def require_canonical_when_loaded(c: "_Ctx", label: str, op: str) -> bool:
     why = loaded_wrapper_problem(out, label, admission_dir())
     if why is not None:
         raise SchedError(EX_ACTIVATE, f"{op} of {label} refused, nothing written: it is loaded and {why}. Its runs do not hold "
-                                      f"the canonical admission lock, so a bootout could kill running work. Migrate it once, at a quiet "
-                                      f"time: `ade-sched migrate-wrapper PLIST` (docs/scheduling.md)")
+                                      f"the canonical admission lock, so a bootout could kill running work. If its new definition is "
+                                      f"wrapped (a config/launchd plist), migrate it once at a quiet time: `ade-sched migrate-wrapper PLIST`; "
+                                      f"a job that is not wrapped (load-watch, dev.herdr.server) is changed by an operator "
+                                      f"`launchctl bootout` (docs/scheduling.md)")
     return True
 
 
@@ -2349,6 +2367,12 @@ def migrate_wrapper_launchd(job: "Job", text: str, *, env: Mapping[str, str] | N
             raise SchedError(EX_ACTIVATE, f"{job.label} is not loaded (rc={rc}); use `ade-sched install PLIST`")
         if loaded_wrapper_problem(out, job.label, admission_dir()) is None:
             raise SchedError(EX_ACTIVATE, f"{job.label} already runs through the canonical wrapper; use `ade-sched install` or reconcile")
+        why_new = wrapper_route_problem(text.encode("utf-8"), job.label, lock_dir=admission_dir())
+        if why_new is not None:
+            raise SchedError(EX_ACTIVATE, f"{job.label}: the new definition does not route through the canonical wrapper ({why_new}), so "
+                                          f"migrating would not make it updatable by ADE tools; nothing changed. Jobs that are not "
+                                          f"wrapped (load-watch, dev.herdr.server, non-catalog plists) are changed by an operator "
+                                          f"`launchctl bootout` at a quiet time")
         activity = parse_launchd_activity(out)
         if activity != "idle":
             raise SchedError(EX_ACTIVATE, f"{job.label} is {activity} (a pid or unknown state); migrate at a quiet time, nothing changed")
@@ -2530,7 +2554,10 @@ def job_subst_from_row(
             raise SchedError(EX_USAGE, f"job {row.get('name')!r}: set item must be a string")
         key, val = expand_job_set_item(item, root=root, env=env)
         subst[key] = val
-    subst.setdefault("__ADMISSION__", str(admission_dir(None, env=env)))   # the wrapper's lock directory, from the same env reconcile reads
+    canon = str(admission_dir(None, env=env))   # the wrapper's lock directory: fixed, never a row `set` or `extra_subst` knob
+    if subst.get("__ADMISSION__", canon) != canon:
+        raise SchedError(EX_USAGE, f"job {row.get('name')!r}: __ADMISSION__ is fixed to {canon} and cannot be set")
+    subst["__ADMISSION__"] = canon
     return subst
 
 
