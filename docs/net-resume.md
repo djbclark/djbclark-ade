@@ -130,14 +130,21 @@ before the send, the lock, dry-run unless `--apply`, the scan deadline) plus:
    agent, and that stays `error` across a daemon restart or worker crash (2026-11-12 crash, item 20 of
    `docs/upstream-issues.md`), so `error` does **not** prove the agent is loaded. The pass therefore never calls
    `paseo logs` for a `closed` agent, never for an `error` agent whose `UpdatedAt` is older than 360 minutes plus
-   `--max-error-age-minutes` (the quota analogue of the network path's age rule) or in the future, and after the first
-   read never again until the reset: the ledger's `UpdatedAt` and signature identify the error event. What remains
-   is a reload of an unloaded `error` agent younger than that bound, at most once per error event; the reloaded
-   timeline then fails the quota-line check, so that agent is skipped (fails closed) and never resumed. Inspect carries no
+   `--max-error-age-minutes` (the quota analogue of the network path's age rule; note that widening that flag
+   widens this bound too) or in the future, and not again once a `quota-wait` is armed for that `UpdatedAt` (the
+   ledger's signature identifies the error event) until the reset check. Before a wait is armed (first sight ends in
+   `aiuse-unavailable`, `quota-unconfirmed`, `quota-excluded`, `stale`, `delivered` or `changed`) each scan reads the
+   logs again while the agent stays `error`. What remains is a reload of an unloaded `error` agent younger than the
+   bound: Paseo's reload turns its stored `error` into `idle` and drops `lastError`, so the scan reads it about once, and
+   that agent is skipped (fails closed) with **no ledger row** and no longer shows as errored; a later idle collection
+   closes it. A reload at the reset check (an armed agent unloaded by a daemon restart before its reset) writes
+   `changed`, but the agent can still be resumed later through the closed path, because the first-sight timeline check
+   passed and its `UpdatedAt` is unchanged. Inspect carries no
    `lastUserMessageAt` (design B4d), so the closed-agent identity check is the unchanged `UpdatedAt`, which a new
    user message changes because the agent runs.
-6. **Prompt.** `provider quota window reset; continue from where you stopped, check any interrupted operation before
-   retrying, same report path`. One resume per pool per scan, so a just-reset pool is not drained at once.
+6. **Prompt and dry run.** `provider quota window reset; continue from where you stopped, check any interrupted operation before
+   retrying, same report path`. One resume per pool per scan, so a just-reset pool is not drained at once. A dry run counts a `would-resume-quota` toward that cap, so with
+   several agents in one pool it shows only the first until it goes stale.
 
 `--quota` shares the network pass's ledger, so a malformed `quota-wait` row fails the whole run (exit 2) after the network
 pass; a lead that replaces a quota-stopped agent with a new one should archive the old agent, or the old one may be resumed
