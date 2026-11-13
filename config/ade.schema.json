@@ -392,6 +392,9 @@
                 "type": "string",
                 "minLength": 1
               },
+              "probe_timeout_s": {
+                "type": "number"
+              },
               "presence": {
                 "type": "string"
               },

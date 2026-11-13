@@ -6,6 +6,7 @@ an adapter boundary; effective config nests install metadata and names keys.
 from __future__ import annotations
 
 import copy
+import math
 import re
 from pathlib import Path
 from typing import Any
@@ -149,6 +150,25 @@ def _validate_probe_output_fields(row: dict[str, Any], *, path: Path, index: int
         )
 
 
+MAX_PROBE_TIMEOUT_S = 3600  # an hour: a hung probe must not block doctor without bound
+
+
+def _validate_probe_timeout(row: dict[str, Any], *, path: Path, index: int) -> None:
+    """``probe_timeout_s`` (optional): a positive finite number of seconds for this row's probes."""
+    if "probe_timeout_s" not in row:
+        return
+    val = row["probe_timeout_s"]
+    label = f"{path}: component[{index}] id={row.get('id')!r}"
+    if (
+        isinstance(val, bool) or not isinstance(val, (int, float))
+        or val <= 0 or val > MAX_PROBE_TIMEOUT_S or not math.isfinite(val)
+    ):
+        raise CatalogValidationError(
+            f"{label}: probe_timeout_s must be a positive number of seconds "
+            f"(at most {MAX_PROBE_TIMEOUT_S}), got {val!r}"
+        )
+
+
 def validate_catalog_semantics(
     data: dict[str, Any], *, path: Path, require_components: bool = True,
 ) -> None:
@@ -182,6 +202,7 @@ def validate_catalog_semantics(
         _validate_argv_field(row, field="system_argv", path=path, index=i)
         _validate_argv_field(row, field="system_argv_darwin", path=path, index=i)
         _validate_probe_output_fields(row, path=path, index=i)
+        _validate_probe_timeout(row, path=path, index=i)
         ns = row.get("needs_system")
         if ns is not None and not isinstance(ns, bool):
             raise CatalogValidationError(

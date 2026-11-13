@@ -2147,3 +2147,91 @@ def test_probe_output_fields_need_probe_argv(tmp_path):
     )
     with pytest.raises(ai.InstallError, match="require probe_argv"):
         ai.load_catalog(root=root)
+
+
+# --- per-row probe_timeout_s ---
+
+
+def _capture_timeouts(monkeypatch):
+    seen = []
+
+    def fake(argv, cwd, **kw):
+        seen.append(kw.get("timeout_s"))
+        return subprocess.CompletedProcess(argv, 0, stdout="ok\n", stderr="")
+
+    monkeypatch.setattr(ai, "_default_runner", fake)
+    return seen
+
+
+def test_row_probe_timeout_overrides_default_for_that_row_only(tmp_path, monkeypatch, probe_present):
+    seen = _capture_timeouts(monkeypatch)
+    slow = _probe_row(probe_timeout_s=75)
+    plain = _probe_row(id="other")
+    assert ai.observe_component(slow, root=tmp_path).status == "ok"
+    assert ai.observe_component(plain, root=tmp_path).status == "ok"
+    assert seen == [75.0, 15.0]
+
+
+def test_row_probe_timeout_replaces_an_explicit_caller_default(tmp_path, monkeypatch, probe_present):
+    seen = _capture_timeouts(monkeypatch)
+    ai.observe_component(_probe_row(probe_timeout_s=60), root=tmp_path, probe_timeout_s=5.0)
+    ai.observe_component(_probe_row(id="other"), root=tmp_path, probe_timeout_s=5.0)
+    assert seen == [60.0, 5.0]
+
+
+def test_row_probe_timeout_expiry_stays_error_and_names_row_value(tmp_path, monkeypatch, probe_present):
+    def boom(argv, cwd, **kw):
+        raise subprocess.TimeoutExpired(argv, kw["timeout_s"])
+
+    monkeypatch.setattr(ai, "_default_runner", boom)
+    o = ai.observe_component(_probe_row(probe_timeout_s=90), root=tmp_path)
+    assert o.status == "error" and "timed out after 90.0s" in o.detail
+
+
+def test_hermes_row_in_shipped_catalog_has_longer_probe_timeout():
+    catalog = ai.load_catalog(root=REPO)
+    rows = {r["id"]: r for r in catalog.data["component"]}
+    assert rows["hermes"]["probe_timeout_s"] > 15
+    others = [r["id"] for r in rows.values() if r["id"] != "hermes" and "probe_timeout_s" in r]
+    assert others == []
+
+
+@pytest.mark.parametrize("value,match", [
+    ("0", "positive number of seconds"),
+    ("-5", "positive number of seconds"),
+    ("0.0", "positive number of seconds"),
+    ("3601", "at most 3600"),
+    ('"60"', "must be number"),
+    ("true", "must be number"),
+    ("[60]", "must be number"),
+    ("nan", "must be number"),
+    ("inf", "must be number"),
+])
+def test_probe_timeout_s_invalid_refused(tmp_path, value, match):
+    root = _fixture_root(tmp_path)
+    toml = (root / "config" / "install.toml").read_text()
+    (root / "config" / "install.toml").write_text(
+        toml + '\n[[component]]\nid = "p"\nclass = "optional"\nchosen = false\n'
+        f'probe_argv = ["true"]\nprobe_timeout_s = {value}\n'
+    )
+    with pytest.raises(ai.InstallError, match=match):
+        ai.load_catalog(root=root)
+
+
+@pytest.mark.parametrize("value", [True, False, float("nan"), float("inf"), -1, 0, 3601, "60", 10**400, [60]])
+def test_validate_catalog_semantics_refuses_bad_probe_timeout_without_schema(value):
+    from ade_install_catalog import CatalogValidationError, validate_catalog_semantics
+    row = {"id": "p", "class": "optional", "chosen": False, "probe_argv": ["true"], "probe_timeout_s": value}
+    with pytest.raises(CatalogValidationError, match="probe_timeout_s"):
+        validate_catalog_semantics({"component": [row]}, path=Path("x.toml"))
+
+
+def test_probe_timeout_s_valid_loads(tmp_path):
+    root = _fixture_root(tmp_path)
+    toml = (root / "config" / "install.toml").read_text()
+    (root / "config" / "install.toml").write_text(
+        toml + '\n[[component]]\nid = "p"\nclass = "optional"\nchosen = false\n'
+        'probe_argv = ["true"]\nprobe_timeout_s = 45.5\n'
+    )
+    rows = {r["id"]: r for r in ai.load_catalog(root=root).data["component"]}
+    assert rows["p"]["probe_timeout_s"] == 45.5

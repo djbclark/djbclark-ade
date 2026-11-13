@@ -70,6 +70,11 @@ router/gate readers retain their explicit existing domain scope.
   output line matching it is the doctor detail. Without it the detail is the
   first line holding a letter or digit (box-drawing and rule lines skipped,
   borders trimmed), capped at 120 (ok) / 200 (warn, error) characters.
+- `probe_timeout_s` (optional, positive number of seconds, at most 3600): this row's probe
+  timeout, used in place of the global 15 s default for that row only (doctor,
+  `update`, `apply`). For a slow sub-doctor (Hermes runs ~44 connectivity
+  checks). Expiry stays `error`; zero, negative, above 3600, non-finite, boolean and
+  non-number values are refused by the catalog loader.
 - `presence` is a PATH basename fallback when `probe_argv` is absent.
 - `paseo_plugin` is an observe-only Paseo plugin id. Doctor runs
   `paseo plugin ls --json` and reports `ok` / `disabled` / `missing` (never
