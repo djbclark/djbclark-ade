@@ -44,7 +44,8 @@ at once, ~10:15Z; the next prompt resumed each). That one line is the only auth-
 auth/403 skip, matched in full; a generic 403 or a plain "Failed to authenticate" is a real logout and is skipped.
 For Claude only, a trailing `Warning: claude.ai MCP servers blocked by enterprise policy: ...` line (and blank
 lines) after the error line is ignored when picking the deciding line. A persistent 403 (a real auth problem)
-stops at the existing cap (two attempts per agent per hour, one per error event) and is reported as `capped`. Pi has testable classification
+is retried at most at the existing cap (two attempts per agent per hour, one per error event); further scans
+report it as `capped` until the hour rolls over. Pi has testable classification
 patterns but is held because its provider host depends on routing. Unknown
 errors and quota (1302/1308/429), auth, billing and refusal messages are skipped.
 Earlier quoted errors cannot authorize a send. Logs are treated as data; no
