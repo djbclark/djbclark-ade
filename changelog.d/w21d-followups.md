@@ -2,8 +2,9 @@
 
 - `ade-sched install` and `ade-sched uninstall` take `--restart-service` (low-level `install(..., restart_service=True)` /
   `uninstall(..., restart_service=True)`): the one way to replace or remove a LOADED launchd job that is not wrapped in
-  `bin/ade-job-run`, and only for a KeepAlive service (the new definition's KeepAlive for an install, the installed plist
-  file's KeepAlive for an uninstall; no file or an unparseable one is refused). It is a deliberate service restart: the
+  `bin/ade-job-run`, and only for a KeepAlive service that does not run through `ade-job-run` (the installed file must
+  provably be the loaded definition and have a truthy KeepAlive; an install also needs the new definition's KeepAlive; a
+  loaded wrapper-shaped argv is refused, use `migrate-wrapper`). It is a deliberate service restart: the
   `bootout` stops the running service. The label's canonical lock is still taken exclusive without waiting (a busy lock
   refuses), the recovery record and the prior bytes are saved before the `bootout`, the unload is proven, and the prior
   definition is restored if the new one fails (the record stays if the restore fails). Without the flag, and for a non-KeepAlive

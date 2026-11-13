@@ -1145,10 +1145,10 @@ def test_w21d_a_loaded_wrapped_load_watch_installs_and_uninstalls_through_the_lo
     assert not plist.exists() and not ld.loaded(LW_LABEL)
 
 
-def _service(ld, *, label=HERDR, tag="alpha", keep_alive=True):
+def _service(ld, *, label=HERDR, tag="alpha", keep_alive=True, args=None, extra=None):
     """A herdr-like service definition (an absolute program, no wrapper): KeepAlive or a plain StartInterval job."""
     import plistlib
-    d = {"Label": label, "ProgramArguments": ["/usr/bin/true", tag], "RunAtLoad": True}
+    d = {"Label": label, "ProgramArguments": args or ["/usr/bin/true", tag], "RunAtLoad": True, **(extra or {})}
     if keep_alive:
         d["KeepAlive"] = {"SuccessfulExit": False}
     else:
@@ -1203,13 +1203,14 @@ def test_w21d_restart_service_keeps_the_recovery_record_when_the_restore_also_fa
     job, plist = _loaded_service(ld)
     before = plist.read_bytes()
     ld.fail("bootstrap")
-    with pytest.raises(S.SchedError, match="recovery record kept"):
+    with pytest.raises(S.SchedError, match="recovery record kept") as e:
         S.install(_service(ld, tag="bravo"), "launchd", env=ld.env, restart_service=True)
+    assert "DOWN" in str(e.value) and "launchctl bootstrap gui/" in str(e.value) and str(S.recovery_prior_path(HERDR)) in str(e.value)   # F5: the manual step
     assert S.recovery_record_path(HERDR).exists() and S.recovery_prior_path(HERDR).read_bytes() == before and not ld.loaded(HERDR)
 
 
 def test_w21d_restart_service_never_restarts_a_job_that_is_not_a_keepalive_service(ld):
-    # (a) the NEW definition is not KeepAlive; (b) the loaded pre-wrapper job is not a KeepAlive service either
+    # (a) the NEW definition is not KeepAlive; (b) the LOADED pre-wrapper job is not a KeepAlive service although the NEW one is
     job, plist = _loaded_service(ld)
     before = plist.read_bytes()
     with pytest.raises(S.SchedError, match="not a KeepAlive"):
@@ -1217,9 +1218,74 @@ def test_w21d_restart_service_never_restarts_a_job_that_is_not_a_keepalive_servi
     assert plist.read_bytes() == before and ld.loaded(HERDR) and not KILLERS & set(ld.verbs())
     root, job2, text, plist2 = _pre_wrapper_install(ld)
     before2 = plist2.read_bytes()
-    with pytest.raises(S.SchedError, match="not a KeepAlive"):
-        S.install(job2, "launchd", env=ld.env, restart_service=True)
+    keep_alive_new = _service(ld, label=LABEL, tag="bravo")
+    assert keep_alive_new.supervised and not job2.supervised
+    with pytest.raises(S.SchedError, match="loaded definition of .* not a KeepAlive"):
+        S.install(keep_alive_new, "launchd", env=ld.env, restart_service=True)
     assert plist2.read_bytes() == before2 and ld.loaded() and not KILLERS & set(ld.verbs())
+
+
+def test_w21d_f1_a_loaded_non_keepalive_service_is_not_restarted_by_a_keepalive_definition(ld):
+    job, plist = _loaded_service(ld, keep_alive=False)         # a loaded StartInterval job, unwrapped
+    before = plist.read_bytes()
+    with pytest.raises(S.SchedError, match="not a KeepAlive"):
+        S.install(_service(ld, tag="bravo"), "launchd", env=ld.env, restart_service=True)
+    assert plist.read_bytes() == before and ld.loaded(HERDR) and not KILLERS & set(ld.verbs()) and not ld.killed(HERDR)
+
+
+def _wrapped_service_args(old_dir):
+    return [str(WRAPPER), "--lock-dir", str(old_dir), HERDR, "--", "/usr/bin/true", "alpha"]
+
+
+@pytest.mark.parametrize("who", ["install", "uninstall"])
+def test_w21d_f2_a_loaded_wrapped_job_with_another_lock_dir_is_never_restarted(ld, tmp_path, who):
+    old_dir = tmp_path / "old-admission"
+    job, plist = _loaded_service(ld, args=_wrapped_service_args(old_dir))      # a KeepAlive service wrapped with a NON-canonical lock dir
+    before = plist.read_bytes()
+    run = _hold_label_run(ld, HERDR, old_dir)                                  # its run holds the OLD directory's lock shared
+    try:
+        with pytest.raises(S.SchedError, match="never restarts a wrapped job"):
+            S.install(_service(ld, tag="bravo"), "launchd", env=ld.env, restart_service=True) if who == "install" \
+                else S.uninstall(HERDR, "launchd", env=ld.env, restart_service=True)
+        assert run.poll() is None and plist.read_bytes() == before and ld.loaded(HERDR)
+        assert not KILLERS & set(ld.verbs()) and not ld.killed(HERDR)
+    finally:
+        _stop(run)
+
+
+@pytest.mark.parametrize("who", ["install", "uninstall"])
+@pytest.mark.parametrize("diverge", ["other-arguments", "program-key"])
+def test_w21d_f3_a_file_that_is_not_the_loaded_definition_does_not_prove_keepalive(ld, who, diverge):
+    import plistlib
+    job, plist = _loaded_service(ld, keep_alive=False)         # loaded: NOT KeepAlive
+    d = {"Label": HERDR, "ProgramArguments": ["/usr/bin/true", "alpha"], "KeepAlive": True}
+    if diverge == "other-arguments":
+        d["ProgramArguments"] = ["/usr/bin/true", "alpha", "edited"]
+    else:
+        d["Program"] = "/usr/bin/false"
+    plist.write_bytes(plistlib.dumps(d))                       # edited after the load (launchd keeps running what it loaded)
+    ld.reset()
+    with pytest.raises(S.SchedError, match="not the loaded definition"):
+        S.install(_service(ld, tag="bravo"), "launchd", env=ld.env, restart_service=True) if who == "install" \
+            else S.uninstall(HERDR, "launchd", env=ld.env, restart_service=True)
+    assert ld.loaded(HERDR) and not KILLERS & set(ld.verbs())
+
+
+def test_w21d_f4_the_restart_uninstall_reads_the_plist_once_and_an_oserror_is_a_refusal(ld, monkeypatch):
+    job, plist = _loaded_service(ld)
+    reads, real = [], S.read_regular_bytes
+    monkeypatch.setattr(S, "read_regular_bytes", lambda path, *a, **k: (reads.append(Path(path)), real(path, *a, **k))[1])
+    assert S.uninstall(HERDR, "launchd", env=ld.env, restart_service=True) is True
+    assert reads.count(plist) == 1                             # the hash is of the bytes whose KeepAlive was parsed, not of a second read
+    job, plist = _loaded_service(ld)
+
+    def denied(path, *a, **k):
+        raise PermissionError(13, "denied")
+
+    monkeypatch.setattr(S, "read_regular_bytes", denied)
+    with pytest.raises(S.SchedError, match="cannot be read"):
+        S.uninstall(HERDR, "launchd", env=ld.env, restart_service=True)
+    assert plist.exists() and ld.loaded(HERDR) and not KILLERS & set(ld.verbs())
 
 
 def test_w21d_restart_service_without_activation_is_refused_it_is_a_bootout(ld):
@@ -1285,8 +1351,9 @@ def test_w21d_a_failed_restart_uninstall_restores_the_service_and_keeps_the_reco
         S.uninstall(HERDR, "launchd", env=ld.env, restart_service=True)
     assert plist.read_bytes() == before and ld.loaded(HERDR) and not S.recovery_record_path(HERDR).exists()
     ld.fail("bootstrap")
-    with pytest.raises(S.SchedError, match="recovery record kept"):            # unloaded and the restore fails too
+    with pytest.raises(S.SchedError, match="recovery record kept") as e:       # unloaded and the restore fails too
         S.uninstall(HERDR, "launchd", env=ld.env, restart_service=True)
+    assert "DOWN" in str(e.value) and "launchctl bootstrap gui/" in str(e.value)
     assert S.recovery_record_path(HERDR).exists() and S.recovery_prior_path(HERDR).read_bytes() == before and not ld.loaded(HERDR)
 
 
@@ -1374,6 +1441,7 @@ def test_b7_migrate_wrapper_refuses_while_a_run_of_the_old_wrapper_holds_its_loc
 
 def test_b7_migrate_wrapper_holds_the_old_lock_for_the_whole_migration_and_then_releases_it(ld, tmp_path, monkeypatch):
     root, job, text, plist, old_dir = _old_wrapped_noncanonical(ld, tmp_path)
+    old_dir.mkdir()                                                                 # the old wrapper's runs created it
     probes, real = [], S.reload_launchd_locked
 
     def probe(*a, **k):
@@ -1398,3 +1466,10 @@ def test_b7_an_old_lock_directory_that_is_the_canonical_one_under_another_name_i
     alias.symlink_to(canon)
     _set_loaded_args(ld, a2=str(alias))                                              # a different spelling of the SAME directory
     assert S.migrate_wrapper_launchd(job, text, env=ld.env) == "migrated"
+
+
+def test_b7_f6_migrate_never_creates_a_missing_old_lock_directory(ld, tmp_path):
+    root, job, text, plist, old_dir = _old_wrapped_noncanonical(ld, tmp_path)
+    assert not old_dir.exists()
+    assert S.migrate_wrapper_launchd(job, text, env=ld.env) == "migrated"       # no directory, so no lock to take: the idle check applies
+    assert not old_dir.exists()

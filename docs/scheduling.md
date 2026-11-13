@@ -503,30 +503,41 @@ ledger's artifact and reloads it normally. **The old lock too (B7, W21d).** When
 (`ade-job-run --lock-dir DIR LABEL`) whose `DIR` is not the canonical directory (a different spelling of the same directory, by
 `realpath`, does not count), `migrate-wrapper` also takes `DIR/LABEL.lock` **exclusive and non-blocking** for the whole migration and
 releases it in a `finally`: a run of the old wrapper holds that lock shared, so a busy lock refuses the migration with nothing changed
-and no `bootout`. A pre-wrapper (unwrapped) old definition has no lock to take, so its one risk stays: a run of the OLD definition
+and no `bootout`; a `DIR` that does not exist holds no lock and is never created (only the idle check applies). A pre-wrapper (unwrapped) old definition has no lock to take, so its one risk stays: a run of the OLD definition
 that starts between the idle read and the bootout is not seen, so pick a quiet time.
 
 `migrate-wrapper` refuses a new render that does not itself route through the canonical wrapper. **`com.djbclark.load-watch` is wrapped
 since W21d (2026-11-13)**: `launchd/com.djbclark.load-watch.plist` starts `bin/load-watch sample` through `ade-job-run` like the nine catalog plists, so
 once an install is migrated (`bin/ade-sched migrate-wrapper launchd/com.djbclark.load-watch.plist --ade DIR`, once, at a quiet time; the
 sampler runs every 20 s and holds the shared lock only while a sample runs) `load-watch install` and `load-watch uninstall` work on the
-LOADED job through the locked record-first path above. An install made before W21d is a pre-wrapper job and `load-watch install`/`uninstall`
+LOADED job through the locked record-first path above. Because every sample now goes through the wrapper, load-watch needs the shared checkout's
+`ade_sched.py` (the wrapper imports it) and a lockable canonical `admission/` directory on every sample: a broken `ade_sched.py` or an unusable lock
+directory (wrapper exit 75, not contention) silently stops the sampler too, the watchdog that would have reported it. An install made before W21d is a pre-wrapper job and `load-watch install`/`uninstall`
 refuse it (exit 1, naming `migrate-wrapper`) until it is migrated. Jobs that are not wrapped by design (`dev.herdr.server`, any non-catalog plist)
 cannot be installed or uninstalled by `ade-sched` while LOADED, with one exception.
 
 **`--restart-service` (W21d, 2026-11-13): a deliberate service restart, not paid-work-safe.** `ade-sched install PLIST --restart-service` and
 `ade-sched uninstall LABEL --restart-service` (low-level `install(..., restart_service=True)` / `uninstall(..., restart_service=True)`; launchd only)
-are the ONLY way to replace or remove a LOADED job whose loaded definition is not canonical-wrapped, and only for a KeepAlive service: an
-install requires the NEW definition's `KeepAlive` to be truthy, an uninstall requires the INSTALLED plist file's `KeepAlive` to be truthy
-(the file is parsed with `plistlib`; a missing, non-regular or unparseable file, or another Label, is refused). Without the flag, and for a
-non-KeepAlive unwrapped job even with it, the command refuses exactly as before (exit 1, nothing written). With it the `bootout` WILL stop the running service: nothing
+are the ONLY way to replace or remove a LOADED job whose loaded definition is not canonical-wrapped, and only for a KeepAlive service that is
+NOT running through `ade-job-run`. The LOADED side must prove it (`_restart_service_problem`, review F1-F4 of W21d): the loaded program is not an
+`ade-job-run` (any wrapper-shaped loaded argv whose lock identity is not the canonical one is refused outright, because its runs may hold another
+directory's lock: use `migrate-wrapper`), and the INSTALLED file (read once as bytes, parsed with `plistlib`) is regular, has this Label and no `Program` key,
+its `ProgramArguments` equal the `arguments` that `launchctl print` shows for the loaded job with `program == arguments[0]` (launchd never re-reads an
+edited file, so the file's `KeepAlive` counts only when the file provably IS the loaded definition; `launchctl print` does not show KeepAlive, so a
+KeepAlive-only edit of an otherwise identical file is an undetectable limit), and its `KeepAlive` is truthy. An install additionally requires the NEW
+definition's `KeepAlive` to be truthy (both sides, never only the new one). The remove/replace re-hashes exactly the bytes that were checked. Without the
+flag, and for any job that fails these proofs even with it, the command refuses exactly as before (exit 1, nothing written). With it the `bootout` WILL stop the running service: nothing
 protects its in-flight work, so use it only for a service whose restart is acceptable. The safety it keeps: the label's canonical lock is
 held exclusive without waiting (a busy lock still refuses, the flag never bypasses it), the durable recovery record and the prior-bytes
 copy are written BEFORE the `bootout`, the `bootout` is proven (the label must be unloaded), the new definition is bootstrapped and read back
 (an install) or the file removed and read back (an uninstall), and a failure puts the prior bytes back and bootstraps them (`ReloadRolledBack`);
-if that restore also fails the recovery record and the prior copy stay in `admission/` (no ledger row needs to own them) and the error says so.
-The flag has no effect on a canonical-wrapped loaded job (it takes the normal path, and a new definition that leaves the wrapper is still refused),
-and `--no-activate` with the flag is refused (exit 2: a restart is a bootout). `load-watch` itself does not forward the flag: its job is a StartInterval
+if that restore also fails the recovery record and the prior copy stay in `admission/` and the error says so, **and the service stays DOWN**: for a label
+with no ADE ledger row (a non-catalog KeepAlive service such as `dev.herdr.server`) `recover_launchd_records` never acts on the record (it reports
+`failed`, which fails every `reconcile` run and `--dry-run` until the record is discarded), so load it by hand as the error message prints: copy
+`<real home>/.local/state/djbclark-ade/admission/LABEL.prior.plist` to `~/Library/LaunchAgents/LABEL.plist`, run `launchctl bootstrap gui/UID` on it, and delete the
+`LABEL.recovery.json` and `LABEL.prior.plist` files.
+The flag has no effect on a canonical-wrapped loaded job (it takes the normal path, and a new definition that leaves the wrapper is still refused) nor on
+systemd and cron; `--no-activate` is refused (exit 2) only when the flag would restart a loaded job (a restart is a bootout), and is otherwise unaffected. `load-watch` itself does not forward the flag: its job is a StartInterval
 sampler, never a KeepAlive service.
 
 **The one deliberate exception to admission: load-watch's emergency stop (B9, W21d).** The job guard (`bin/load-watch`, `guard_stop`,
@@ -537,7 +548,7 @@ the one place where the no-kill contract above does not apply; "every ADE lifecy
 the guard, and no universal all-ADE-process no-kill or recovery guarantee covers a guarded label. It only acts on a job that crash-loops (any
 non-Apple job) or trips a limit of `~/.config/load-watch/guard.tsv`; cooldown state is kept in `state.json` in memory-first order (set before the bootout, event
 after), not in the scheduler's record-first protocol. How it meets the scheduler: (a) a **cooled-down** job is booted out and its plist stays, so `reconcile --yes`
-sees an unloaded job whose plist byte-matches the render and may `bootstrap` it again (the native install path, no admission needed for an unloaded
+sees an unloaded job whose plist byte-matches the render and may `bootstrap` it again (the native install path: it takes the exclusive writer lock, but needs no loaded-job admission for an unloaded
 job), before the guard's own `guard_restart` re-test, which then finds it loaded ("already loaded by someone else; watching it"); a `disable`d job
 (the permanent stop) makes that bootstrap fail, the ledger row `failed`, and stays off until `load-watch guard reset LABEL`. (b) A guard
 `bootout` or kill that lands DURING a locked reload or removal makes that operation take its failure path: the read-back or bootstrap fails, the prior
