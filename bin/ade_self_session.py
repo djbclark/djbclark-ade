@@ -129,9 +129,15 @@ class Service:
     def git_head(self, cwd):
         """Exact HEAD of the work tree containing cwd, or None when cwd is in no git repository.
 
-        Only git's own "not a git repository" refusal (exit 128) means None; a timeout, OSError,
-        unborn HEAD, unreadable repository or malformed sha still raises (2026-11-13: a session
-        whose cwd is a plain directory such as ~ could never hand off).
+        None needs both: git exits 128 with its discovery-failure message ("fatal: not a git
+        repository (or any of the parent directories): ..." or "... (or any parent up to mount
+        point ...)"), and no `.git` entry of any kind (file, directory, symlink, unreadable) exists
+        in realpath(cwd) or any ancestor up to /. Everything else raises: a timeout, OSError,
+        unborn HEAD, malformed sha, git's other not-a-repository forms (for example Apple git's
+        "fatal: not a git repository: (null)" for a broken gitfile), and any `.git` present
+        beside a git failure (a broken linked worktree, an unreadable repository, a repository
+        across a mount point). 2026-11-13: a session whose cwd is a plain directory such as ~
+        could never hand off.
         """
         # Git's location overrides (GIT_DIR, GIT_WORK_TREE, GIT_CEILING_DIRECTORIES, ...) would
         # change what "inside a repository" means for this cwd, so none of GIT_* is inherited.
@@ -144,11 +150,19 @@ class Service:
             if p.returncode == 0 and re.fullmatch(r'[0-9a-f]{40}', value):
                 return value
             if (p.returncode == 128 and not value
-                    and re.match(r'fatal: not a git repository\b', (p.stderr or '').lstrip())):
+                    and re.match(r'fatal: not a git repository \(or any (?:of the parent directories'
+                                 r'|parent up to mount point [^)]*)\)', (p.stderr or '').lstrip())
+                    and not self.git_entry_above(cwd)):
                 return None
         except (OSError, subprocess.TimeoutExpired):
             pass
         raise SessionError('exact repository HEAD unavailable')
+
+    @staticmethod
+    def git_entry_above(cwd):
+        """True when realpath(cwd) or any ancestor has a `.git` entry, whatever its type or mode."""
+        here = Path(os.path.realpath(cwd))
+        return any(os.path.lexists(d / '.git') for d in (here, *here.parents))
 
     def checkpoint(self, path, *, token):
         # User/agent-authored nonsecret briefing, not harvested credentials/logs.

@@ -506,6 +506,9 @@ def test_repository_that_stopped_being_repository_refuses(setup):
     (128, '', 'fatal: detected dubious ownership in repository at \'/x\'\n'),
     (128, '', 'fatal: cannot change to \'/gone\': No such file or directory\n'),
     (128, '', ''),
+    (128, '', 'fatal: not a git repository: (null)\n'),
+    (128, '', 'fatal: not a git repository: /some/gitdir\n'),
+    (128, '', 'warning: x\nfatal: not a git repository (or any of the parent directories): .git\n'),
     (128, 'a' * 40 + '\n', NOT_A_REPO),
     (1, '', NOT_A_REPO),
     (0, '', ''),
@@ -551,3 +554,46 @@ def test_real_git_non_repository_unborn_repository_and_env_overrides(tmp_path):
     assert re.fullmatch(r'[0-9a-f]{40}', head)
     (repo / 'sub').mkdir()
     assert service.git_head(str(repo / 'sub')) == head
+
+
+def test_non_repository_with_git_entry_above_refuses(setup, tmp_path):
+    service, native, checkpoint = setup
+    (tmp_path / '.git').write_text('gitdir: /nowhere\n')  # an ancestor of the cwd, git stubbed as "no repository"
+    native.head = None
+    with pytest.raises(ss.SessionError, match='HEAD unavailable'):
+        service.handoff(checkpoint, quiesced=True)
+    assert native.created == 0
+
+
+def real_git_service(tmp_path):
+    if subprocess.run(['git', '-C', str(tmp_path), 'rev-parse', '--git-dir'], check=False,
+                      capture_output=True,
+                      env={k: v for k, v in os.environ.items() if not k.startswith('GIT_')}).returncode == 0:
+        pytest.skip('temporary directory is inside a git repository')
+    return ss.Service(tmp_path / 'state', tmp_path, env=dict(os.environ))
+
+
+def test_real_git_broken_gitfile_refuses_whatever_git_prints(tmp_path):
+    service = real_git_service(tmp_path)
+    broken = tmp_path / 'broken'
+    broken.mkdir()
+    (broken / '.git').write_text('gitdir: ' + str(tmp_path / 'missing-gitdir') + '\n')
+    with pytest.raises(ss.SessionError, match='HEAD unavailable'):
+        service.git_head(str(broken))
+    (broken / 'sub').mkdir()
+    with pytest.raises(ss.SessionError, match='HEAD unavailable'):
+        service.git_head(str(broken / 'sub'))
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason='root ignores file modes')
+def test_real_git_unreadable_dot_git_refuses(tmp_path):
+    service = real_git_service(tmp_path)
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    _git('init', '-q', cwd=repo)
+    (repo / '.git').chmod(0)
+    try:
+        with pytest.raises(ss.SessionError, match='HEAD unavailable'):
+            service.git_head(str(repo))
+    finally:
+        (repo / '.git').chmod(0o755)

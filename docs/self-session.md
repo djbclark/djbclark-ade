@@ -17,8 +17,11 @@ login tokens or credential-store contents. Pass that file explicitly; ADE does
 not harvest transcripts or credentials. The helper preserves a copy and SHA256
 in a private state directory, plus repository HEAD for handoff. A session whose
 cwd is in no git repository (for example `~`) records `head: null` and its ack must
-attest `head: null`; any other `git rev-parse HEAD` failure (timeout, unborn HEAD,
-unreadable repository) still refuses (2026-11-13). Original worktree
+attest `head: null`. That needs git's "not a git repository (or any ...)" discovery
+failure (exit 128) and no `.git` entry of any kind in the real cwd or any ancestor; any
+other `git rev-parse HEAD` failure (timeout, unborn HEAD, broken linked worktree or
+gitfile, unreadable `.git`, repository across a mount point, Apple git's
+`not a git repository: (null)`) still refuses (2026-11-13). Original worktree
 files remain in place; archiving an agent is never workspace deletion.
 
 The executable requires the full `PASEO_AGENT_ID` supplied by Paseo. Handoff also
