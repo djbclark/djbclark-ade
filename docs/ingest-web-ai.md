@@ -38,7 +38,7 @@ as the only copy of the transcript.
 | **Google Takeout (Gemini)** | Gemini web history the account still holds | Bulk zip / JSON dump | Backfill only; no ongoing |
 | **X / Grok account export** | Grok web history the account still holds | Bulk export | Backfill only; no ongoing |
 | **VESTI Grok adapter (upstream)** | Grok web, if added to VESTI | Same extension contract | Preferred *ongoing* for Grok; upstreamable, not an ADE scraper |
-| **Browser automation / paseo-screen** | Any logged-in web UI | Screenshots + DOM actions | **Out of MVP.** Credentials, ToS, and prompt-injection surface; only with an explicit operator gate |
+| **Browser automation (formerly paseo-screen, disabled 2026-11-13)** | Any logged-in web UI | Screenshots + DOM actions | **Out of MVP.** Credentials, ToS, and prompt-injection surface; only with an explicit operator gate |
 | **Vendor APIs** | Where a documented export/API exists | Structured JSON | Prefer over DOM scrape when available; still order-11 for any live credential |
 
 B1. ADE does **not** ship scraping credentials, cookies, or live session

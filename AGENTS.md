@@ -54,7 +54,7 @@ Each doc carries its own summary.
 | [docs/upstream-issues.md](docs/upstream-issues.md), [docs/tui-lessons-learned.md](docs/tui-lessons-learned.md) | unfiled bug drafts for third-party projects; what each retired TUI was for and taught |
 | [.claude/workflows/graph-audit.js](.claude/workflows/graph-audit.js) | runnable micro-graph example, `/graph-audit` |
 | [skills/handoff/](skills/handoff/SKILL.md) | tab lifecycle: the successor (a new lead, not a worker: its own placement, not the WORKERS window of `docs/workspace-layout.md`) starts top-level (`env -u PASEO_AGENT_ID -u PASEO_AGENT_CWD -u PASEO_WORKSPACE_ID paseo run …`), archives its predecessor once it answers, and tells every sibling the new id; Paseo's own `paseo-handoff` once installed |
-| [skills/paseo-screen/](skills/paseo-screen/SKILL.md) | THE screen-control tool (2026-10-31): the Paseo plugin `paseo-screen`; look before clicking, safety rules |
+| [skills/paseo-screen/](skills/paseo-screen/SKILL.md) | DEPRECATED 2026-11-13 (plugin disabled, "super-buggy"): headless Playwright against the daemon web UI `http://127.0.0.1:7263/` is the route for Paseo GUI checks; safety rules |
 | [skills/tidy/](skills/tidy/SKILL.md) | `bin/ade-tidy` (2026-11-13): one repo's agents and windows: reconnect agents with no proven contact, list workers waiting on the lead and the operator, rename windows to `MAIN\|WORKERS\|USER <repo> (<work>)`, report misplaced tabs (Paseo cannot move an agent), archive finished workers and empty windows; observe-only unless `--apply` |
 | [vendor/README.md](vendor/README.md) | what this repo references that lives elsewhere (`fleet-watch`, the launchd fleet notices to Hermes, is site-djbclark's `bin/fleet-watch`; vendor/README.md lists it) |
 
@@ -168,7 +168,7 @@ The weakness is accepted (docs/threat-model.md section 5 item 9; docs/code-revie
 ## Machine context
 
 - **Paseo is the only harness (2026-10-31).** `paseo ls -a -g --json` / `paseo run` /
-  `paseo permit ls`; screen control via `paseo-screen`. Registry:
+  `paseo permit ls`; Paseo GUI checks via headless Playwright (`skills/paseo-screen`; the plugin is disabled). Registry:
   `paseo provider ls --json` (docs/model-routing.md).
 - **Two shims, one cycle each** (then Paseo directly): session-finder relay over
   `paseo send` (Wave 6 delete by 2026-11-20); dispatch shim under `bin/` + acp runner

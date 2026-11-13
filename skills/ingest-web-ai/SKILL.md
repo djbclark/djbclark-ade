@@ -29,7 +29,7 @@ Carried queue **#23**. Full design: [`docs/ingest-web-ai.md`](../../docs/ingest-
 4. **No raw export text in agent tool transcripts.** The CLI always writes
    events to an opaque file and prints only a metadata summary (counts,
    paths, role tallies) on stdout. Do not `cat` the JSONL into a prompt.
-5. Live browser capture (`paseo-screen`, logged-in scrape, localhost mirror)
+5. Live browser capture (headless browser, logged-in scrape, localhost mirror)
    needs an explicit operator gate — see the design doc §E. Do not start it
    from this skill.
 

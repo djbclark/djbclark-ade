@@ -1,22 +1,57 @@
 ---
 name: paseo-screen
 description: >-
-  The route for controlling or looking at the Mac's GUI: any visible window, the
-  desktop, a native app, a screenshot, a click, a key chord, "drive the app",
-  "verify it in the desktop app", "computer use". Uses the Paseo plugin
-  `paseo-screen` (viewer "Screen · mac" in the Paseo sidebar; RPCs
-  `screen.status`, `screen.frame`, `screen.input`). Replaces the retired Orca
-  `orca computer` / `computer-use` route (2026-10-31). Read its safety rules
-  before the first click or keystroke.
+  DEPRECATED (2026-11-13): the Paseo plugin `paseo-screen` is disabled ("super-buggy").
+  Route for checking Paseo's own GUI: headless Playwright Chromium against the daemon
+  web UI at http://127.0.0.1:7263/. Use for "verify it in the Paseo UI", plugin screens,
+  settings switches. Host-desktop control is not available to CLI sessions (Claude
+  computer-use tools exist only inside the Claude desktop app). Read the safety rules first.
 ---
 
-# paseo-screen — look at and drive the host's screen through Paseo
+# paseo-screen — DEPRECATED plugin; headless Playwright is the route for Paseo GUI checks
+
+**Status (2026-11-13): the `paseo-screen` plugin is DISABLED.** Operator ruling, relayed by agent 5fd0bef1:
+"paseo-screen is super-buggy". It is no longer "THE screen-control tool" (the 2026-10-31 ruling) and no longer
+"stays enabled when idle". Do not re-enable, reinstall or call its RPCs (`screen.*`); only the operator
+re-enables it. The plugin sections below are kept as history and for that case.
+
+## The working route: headless Playwright against the daemon web UI
+
+For a Paseo GUI check (plugin screens, plugin settings, switch state, chat and workspace views):
+
+1. Launch headless Chromium (browsers stay headless, operator rule) and open the daemon web UI,
+   `http://127.0.0.1:7263/` (no pairing needed; plugin screens and plugin settings render).
+2. Wait a few seconds after `domcontentloaded`, then click and read through Playwright locators.
+3. Read state from the ARIA snapshot (`page.locator("body").aria_snapshot()`): it shows switch state
+   (on/off), which a screenshot can hide. Also save a screenshot and read it.
+4. Report every action taken and what the next snapshot showed.
+
+Example scripts (read them, cite their paths, never copy secrets from them):
+`~/.local/state/bigteam/paseo4herdr-adapters/trial-2026-11-13/pwlib.py` (launch, `start()`, `snap()` helpers) and
+`b4.py` in the same directory (plugin settings page walk-through); `trial-report.md` there records the trial.
+
+This reaches Paseo's own UI only. A native app or the host desktop is out of reach: Claude computer-use tools
+exist only inside the Claude desktop app, not in CLI sessions.
+
+## Safety rules that still apply
+
+1. Read before you act: snapshot or screenshot, then click; snapshot again to confirm. Never claim an action landed
+   from the call returning.
+2. The web UI is the operator's live daemon: never delete, archive, send, pair a client, change plugin settings or
+   switch a plugin on or off without the operator's explicit yes for that action.
+3. Never approve a pairing request; never touch password, 1Password or lock screens.
+4. Headless only; claim no port (the daemon's 7263 is read-only use).
+
+---
+
+## Historical: the plugin (disabled 2026-11-13)
+
 
 `paseo-screen` (https://github.com/kevguy/paseo-screen, MIT; listing
 https://paseo.cafe/plugins/paseo-screen) streams the host Mac's display into a Paseo
-viewer and sends mouse and keyboard events back. **It is the one screen-control tool**
-(operator ruling, 2026-10-31); Orca's `orca computer` and the `computer-use` stub are retired from djbclark-ade (Orca itself stays installed, untouched), never
-start Orca for a GUI task. **It stays enabled when idle** (operator's choice, 2026-10-31).
+viewer and sends mouse and keyboard events back. **It was the one screen-control tool**
+(operator ruling, 2026-10-31; superseded 2026-11-13); Orca's `orca computer` and the `computer-use` stub are retired from djbclark-ade (Orca itself stays installed, untouched), never
+start Orca for a GUI task. It was left enabled when idle (operator's choice, 2026-10-31) until disabled 2026-11-13.
 
 ## Install and state
 
