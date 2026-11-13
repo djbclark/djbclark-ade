@@ -42,7 +42,7 @@ sub-agent's final message: the harness cuts that at 4,000 characters.
 A slice that edits code gets its own linked worktree (AGENTS.md order 9:
 `git worktree add -b NAME ~/src/<repo>-NAME-wt origin/master`); the slice works in that worktree (its absolute path is in
 the brief) while its Paseo session sits in the lead's workers window (below).
-After `route_agent.py plan` / `route` and `load-watch admit` (machine capacity — not service quota):
+After `route_agent.py plan` / `route` and `~/src/djbclark-ade/bin/load-watch admit` (machine capacity — not service quota; full path: `load-watch` is not on PATH, and a bare call fails with 127 so the check silently never runs; exit 75 = refused, wait before launching):
 
 ```bash
 # Re-plan immediately before EACH launch when several slices share one quota pool
