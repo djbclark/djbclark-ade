@@ -399,32 +399,45 @@ context held through read-back and the ownership commit. Its `JobAdmission`
 evidence must prove all launch paths participate, per-job activity is idle,
 and future triggers are safely drained. Busy/unknown jobs and the updater's own
 running service defer without stopping work. A fleet idle snapshot is insufficient.
-Before 2026-11-13 no native adapter existed and production deferred every install and removal; the launchd adapter below
+Before 2026-11-12 no native adapter existed and production deferred every install and removal; the launchd adapter below
 is the first.
 
-### Native launchd adapter (2026-11-13)
+### Native launchd adapter (2026-11-12)
 
 `ade-sched reconcile --yes` and `ade-install apply` pass `native_admission=True`, which on the **launchd** backend (with
 activation on) installs `launchd_admission` as the `admission` callback. It proves the contract for one label and holds it
 through read-back and the ownership commit; the reconcile lock is held the whole time. An explicit `admission` argument
 still wins, and no environment variable or CLI flag selects or bypasses the adapter.
 
-1. **Absent job** (not loaded, no plist on disk): no launch path exists, so it is admitted without any `launchctl` write.
-2. **Existing job**: `launchctl disable gui/UID/LABEL` excludes new launches (RunAtLoad, StartInterval,
-   StartCalendarInterval, KeepAlive, kickstart), and `launchctl print-disabled gui/UID` must then report the label disabled.
-   Activity comes from the service block's own `state` and `pid` fields in `launchctl print gui/UID/LABEL` (never `pgrep` or
-   a name match): a pid, `running` or a launch in progress is **busy**; only `not running` or `waiting` without a pid is
-   **idle**; anything else is **unknown**. Busy and unknown defer (exit 6) without killing the job, after re-enabling exactly
-   what the adapter disabled. Idle proceeds: mutate, read back, then restore the prior enabled/disabled state. A job the
-   operator had disabled is never enabled, so its removal proceeds and its install defers.
-3. **Install re-enable**: `bootstrap` of a disabled label fails with 119, so an install re-enables the label between the
-   `bootout` and the `bootstrap` (`install(before_bootstrap=...)`). The old definition is already unloaded then and the job
-   was idle, so the only launch left is the new generation's own RunAtLoad.
-4. **Restore** runs on every exit, including an exception mid-mutation. A restore that still fails after one retry raises
-   `SchedError` naming `launchctl enable gui/UID/LABEL`; a disabled job is never left silently.
-5. **Unreadable state** (`launchctl print` or `print-disabled` fails or cannot be parsed) defers before anything is disabled.
-   The updater's own service (`com.djbclark.ade-update-check`) running keeps its existing refusal. A stale `disable` override
-   on a label with no plist and not loaded is not read; a fresh install of it fails loudly (119), not silently.
+**Why unload, not disable.** A live probe on macOS 27.2 (2026-11-12, throwaway label `StartInterval=5`) showed that
+`launchctl disable gui/UID/LABEL` on a *loaded* job does **not** stop its StartInterval trigger (2 runs in 16 s while
+`print-disabled` reported it disabled) and `launchctl kickstart` still starts it. A disable is therefore no launch exclusion,
+and it would also leave a persistent override behind if the process died. The adapter never calls `disable`/`enable`.
+Only a job that is not loaded has no launch path (RunAtLoad, StartInterval, StartCalendarInterval, KeepAlive and kickstart
+all need it loaded), so exclusion is an unload of an *idle* job:
+
+1. **Absent job** (not loaded, no plist on disk): no launch path exists; admitted, nothing touched.
+2. **Busy or unknown job**: `launchctl print gui/UID/LABEL` is parsed for the service block's own `state` and `pid` fields
+   (one tab deep; the nested coalition `state = active` lines are ignored; never `pgrep` or a name match). A pid, `running`
+   or a launch in progress is **busy**; only `not running` or `waiting` without a pid is **idle**; anything else, or a
+   `print` that fails other than "could not find service", is **unknown**. Busy and unknown defer (exit 6) with **nothing
+   touched**: the job is never killed. Real captured output lives in `tests/fixtures/launchd/`.
+3. **Idle loaded job**: `launchctl bootout` unloads it (nothing runs, so nothing is killed) and `print` must then say it is
+   not loaded; install's own `bootout` becomes a no-op and its `bootstrap` loads the new definition. A job that is not
+   loaded but has a plist is admitted without an unload.
+4. **Operator-disabled label**: bootstrap cannot load it, so an install defers (hold) and a removal proceeds. The adapter
+   never touches the operator's override; an unreadable `print-disabled` (strict parse: header, `"label" => word` rows,
+   closing brace) defers an install.
+5. **Restore on every exit**, including an exception mid-mutation: a job the adapter unloaded whose plist is still on disk
+   and which is not loaded is bootstrapped again. A reload that fails is reported on stderr with the command to run; the
+   ledger row is `failed`/`pending`, and the next reconcile plans the load (no durable launchd override is ever left).
+6. **Label check**: a catalog `label` that differs from the plist `Label` is `blocked` at plan time and refused again before
+   `install`, so the adapter can never admit one label while install boots out another.
+
+The updater's own service (`com.djbclark.ade-update-check`) running keeps its existing refusal. Known limits: a run that
+starts between the idle read and the `bootout` (two `launchctl` calls) would be signalled, the same window the low-level
+`install` has with no check at all; a concurrent low-level `install` of an absent label does not take the reconcile lock; a
+`KeepAlive` job always reads busy, so reconcile cannot reload it (stop it deliberately, then reconcile).
 
 **systemd, cron and paseo keep the conservative default** (installs and removals defer, exit 6): no adapter proves their
 launch paths yet. A paseo step on a launchd host also keeps it, and so does `--no-activate` (the adapter needs `launchctl`).

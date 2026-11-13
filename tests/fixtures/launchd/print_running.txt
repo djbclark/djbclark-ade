@@ -1,0 +1,70 @@
+gui/501/com.djbclark.w21b-probe-run = {
+	active count = 1
+	path = /PROBE/com.djbclark.w21b-probe-run.plist
+	type = LaunchAgent
+	state = running
+
+	program = /bin/sleep
+	arguments = {
+		/bin/sleep
+		40
+	}
+
+	inherited environment = {
+		SSH_AUTH_SOCK => /var/run/com.apple.launchd.X/Listeners
+	}
+
+	default environment = {
+		PATH => /usr/bin:/bin:/usr/sbin:/sbin
+	}
+
+	environment = {
+		OSLogRateLimit => 64
+		XPC_SERVICE_NAME => com.djbclark.w21b-probe-run
+	}
+
+	domain = gui/501 [100500]
+	asid = 100500
+	minimum runtime = 10
+	exit timeout = 5
+	runs = 1
+	pid = 38593
+	immediate reason = speculative
+	forks = 0
+	execs = 1
+	initialized = 1
+	trampolined = 1
+	started suspended = 0
+	proxy started suspended = 0
+	checked allocations = 0 (queried = 1)
+	checked allocations reason = no host
+	checked allocations flags = 0x0
+	last exit code = (never exited)
+
+	resource coalition = {
+		ID = 25644
+		type = resource
+		state = active
+		active count = 1
+		name = com.djbclark.w21b-probe-run
+	}
+
+	jetsam coalition = {
+		ID = 25645
+		type = jetsam
+		state = active
+		active count = 1
+		name = com.djbclark.w21b-probe-run
+	}
+
+	spawn type = daemon (3)
+	jetsam priority = 40
+	jetsam memory limit (active) = (unlimited)
+	jetsam memory limit (inactive) = (unlimited)
+	jetsamproperties category = daemon
+	jetsam thread limit = 32
+	cpumon = default
+	sanitizer flags = 0x0
+
+	properties = runatload | inferred program
+}

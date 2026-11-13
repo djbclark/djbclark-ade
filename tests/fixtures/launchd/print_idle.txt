@@ -1,0 +1,61 @@
+gui/501/com.djbclark.w21b-probe-timer = {
+	active count = 0
+	path = /PROBE/com.djbclark.w21b-probe-timer.plist
+	type = LaunchAgent
+	state = not running
+
+	program = /bin/sh
+	arguments = {
+		/bin/sh
+		-c
+		echo x >> /PROBE/timer.log
+	}
+
+	inherited environment = {
+		SSH_AUTH_SOCK => /var/run/com.apple.launchd.X/Listeners
+	}
+
+	default environment = {
+		PATH => /usr/bin:/bin:/usr/sbin:/sbin
+	}
+
+	environment = {
+		OSLogRateLimit => 64
+		XPC_SERVICE_NAME => com.djbclark.w21b-probe-timer
+	}
+
+	domain = gui/501 [100500]
+	asid = 100500
+	minimum runtime = 10
+	exit timeout = 5
+	runs = 3
+	last exit code = 0
+
+	resource coalition = {
+		ID = 25642
+		type = resource
+		state = active
+		active count = 1
+		name = com.djbclark.w21b-probe-timer
+	}
+
+	jetsam coalition = {
+		ID = 25643
+		type = jetsam
+		state = active
+		active count = 1
+		name = com.djbclark.w21b-probe-timer
+	}
+
+	spawn type = daemon (3)
+	jetsam priority = 40
+	jetsam memory limit (active) = (unlimited)
+	jetsam memory limit (inactive) = (unlimited)
+	jetsamproperties category = daemon
+	jetsam thread limit = 32
+	cpumon = default
+	run interval = 5 seconds
+	sanitizer flags = 0x0
+
+	properties = inferred program
+}
