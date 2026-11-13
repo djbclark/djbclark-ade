@@ -51,7 +51,7 @@ POOL_MODEL_PREFIX = {"zai": "zai/"}  # Pi pools only: claude and codex belong to
 QUOTA_DENIED = re.compile(r"auth|credential|api.?key|billing|credit|balance|\b1113\b|\b40[13]\b", re.I)
 QUOTA_MAX_WINDOW_MINUTES = 360  # 5-hour and session windows; a weekly wait exceeds any staleness bound.
 QUOTA_EXHAUSTED_PERCENT = 95
-GUARD_TERMINAL = frozenset({"resumed", "cancelled", "dismissed"})
+GUARD_TERMINAL = frozenset({"resumed", "cancelled"})
 AIUSE_TIMEOUT = 30
 DENIED = re.compile(r"1302|1308|\b429\b|\b40[13]\b|quota|rate.?limit|auth|credential|api.?key|refus|policy|billing|credit|usage.?limit|capacity", re.I)
 
@@ -203,7 +203,7 @@ class Scanner:
             return False
         return math.isfinite(age) and 0 <= age <= self.max_error_age
 
-    def delivered(self, aid, provider, is_error=None):
+    def delivered(self, aid, provider):
         activity = json.loads(self.cli("logs", aid, "--json"))
         if (not isinstance(activity, dict) or activity.get("agentId") != aid
                 or not isinstance(activity.get("items"), list)):
@@ -218,7 +218,7 @@ class Scanner:
             text = item.get("text")
             if not isinstance(text, str):
                 raise ScanError("invalid assistant output")
-            if len(text.strip().splitlines()) == 1 and (is_error or (lambda t: transient(provider, t)))(text):
+            if len(text.strip().splitlines()) == 1 and transient(provider, text):
                 continue  # The terminal system error is rendered as assistant text.
             # Only an unquoted, unfenced delivery line in the latest output counts.
             return done_line(text)
@@ -472,6 +472,12 @@ class Scanner:
         error_time = stamp(updated)
         if not 0 <= time.time() - error_time:
             self.note(history, events, aid, "stale", key=signature)
+            return
+        # The agent is still `error` (loaded) here: the only moment its timeline can be read safely, so the
+        # done:/new-instruction check is made before a wait is armed (a closed agent is never read later).
+        state = self.quota_activity(aid, pool)
+        if state != "ok":
+            self.note(history, events, aid, "delivered" if state == "delivered" else "changed", key=signature)
             return
         account = self.aiuse_account(pool)
         if account is None:

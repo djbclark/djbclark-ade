@@ -400,6 +400,7 @@ def quota(fake, tmp_path, monkeypatch):
     aiuse_file = tmp_path / "aiuse.json"
     executable = tmp_path / "aiuse"
     executable.write_text('#!/usr/bin/env python3\nimport os, sys\nfrom pathlib import Path\n'
+                          'Path(os.environ["FAKE_AIUSE"] + ".called").touch()\n'
                           'p = Path(os.environ["FAKE_AIUSE"])\nif not p.exists(): sys.exit(3)\n'
                           'sys.stdout.write(p.read_text())\n')
     executable.chmod(0o755)
@@ -432,7 +433,8 @@ def quota(fake, tmp_path, monkeypatch):
         assert actions() == ["quota-wait"]
 
     return {"data": data, "scan": scan, "put": put, "clock": clock, "rows": rows, "actions": actions,
-            "wait": waiting, "sent": sent, "state": state, "guard": guard}
+            "wait": waiting, "sent": sent, "state": state, "guard": guard, "aiuse_file": aiuse_file,
+            "plain": base_scan}
 
 
 def test_quota_line_policy():
@@ -477,13 +479,12 @@ def test_d2_resume_after_reset_dry_run_then_apply(quota):
     assert len(quota["sent"].read_text().splitlines()) == 1
 
 
-def test_quota_is_off_by_default(fake):
-    data, scan, sent, state = fake
-    data["agents"][CHILD].update(Provider="pi", Model="zai/glm-5.3-flash")
-    data["logs"] = QLINE
-    assert scan() == 0
-    assert not sent.exists()
-    assert not (state / "events.jsonl").exists() or "quota" not in (state / "events.jsonl").read_text()
+def test_quota_is_off_by_default(quota):
+    quota["put"](exhausted_account())
+    assert quota["plain"]() == 0
+    assert not quota["sent"].exists()
+    assert quota["rows"]() == []
+    assert not (quota["aiuse_file"].parent / "aiuse.json.called").exists()  # aiuse was never even called
 
 
 @pytest.mark.parametrize("sample", [
@@ -502,6 +503,8 @@ def test_quota_is_off_by_default(fake):
 def test_d3_unconfirmed_reset_never_resumes(quota, sample):
     quota["wait"]()
     quota["clock"](at(20, 35))
+    if sample.get("none"):
+        quota["aiuse_file"].unlink()  # aiuse exits non-zero: no reading at all
     if "account" in sample:
         quota["put"](sample["account"]())
     elif "raw" in sample:
@@ -601,7 +604,7 @@ def test_d6_reset_older_than_staleness_window_is_stale(quota):
     assert quota["scan"]() == 0
     assert quota["actions"]() == ["quota-wait", "stale"]
     assert not quota["sent"].exists()
-    assert quota["scan"](max_error_age_minutes=60) == 0  # The wait stays stale for this error until it is re-armed.
+    assert quota["scan"](max_error_age_minutes=60) == 0  # `stale` is a note, not a terminal state: a wider window resumes.
     assert quota["sent"].exists()
 
 
@@ -727,3 +730,43 @@ def test_quota_flag_bounds(args, tmp_path):
     except SystemExit as exc:
         rc = exc.code
     assert rc == 2
+
+
+def test_delivered_before_the_stop_never_arms_a_wait(quota):
+    quota["data"]["activity"] = [{"type": "user_message", "text": "review"},
+                                 {"type": "assistant_message", "text": "done: W1 https://example.test/pr/1"},
+                                 {"type": "assistant_message", "text": QLINE}]
+    quota["put"](exhausted_account())
+    assert quota["scan"]() == 0
+    assert quota["actions"]() == ["delivered"]
+    quota["data"]["agents"][CHILD]["Status"] = "closed"  # Idle collection afterwards changes nothing.
+    quota["clock"](at(20, 35))
+    quota["put"](reset_account())
+    assert quota["scan"]() == 0
+    assert not quota["sent"].exists()
+
+
+def test_user_message_after_the_stop_never_arms_a_wait(quota):
+    quota["data"]["activity"].append({"type": "user_message", "text": "stop, do something else"})
+    quota["put"](exhausted_account())
+    assert quota["scan"]() == 0
+    assert quota["actions"]() == ["changed"]
+
+
+@pytest.mark.parametrize("change", ["archived", "guard", "old-reset", "pool", "reserved"])
+def test_closed_path_negative_cases(quota, change):
+    quota["wait"]()
+    child = quota["data"]["agents"][CHILD]
+    child["Status"] = "closed"
+    if change == "archived": child["Archived"] = True
+    if change == "guard": quota["guard"].write_text(json.dumps({"pauses": [{"agentId": CHILD, "phase": "waiting"}]}))
+    if change == "pool": child["Model"] = "opencode-go/glm"
+    quota["clock"](at(21, 5) if change == "old-reset" else at(20, 35))
+    quota["put"](reset_account(collected="2026-11-12T21:04:00+00:00") if change == "old-reset" else reset_account())
+    if change == "reserved":
+        assert quota["scan"]() == 0
+        assert quota["scan"]() == 0
+        assert len(quota["sent"].read_text().splitlines()) == 1
+        return
+    assert quota["scan"]() == 0
+    assert not quota["sent"].exists()

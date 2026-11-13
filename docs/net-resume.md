@@ -104,7 +104,7 @@ before the send, the lock, dry-run unless `--apply`, the scan deadline) plus:
 
 1. **Pi pools only.** `pool_of` maps provider `pi` with model prefix `zai/` to the aiuse provider `zai`. Claude and Codex
    stay with session-guard; any agent with a pending guard pause (`~/.paseo/plugin-data/session-guard/state.json`,
-   `pauses[].agentId`, phase not `resumed`/`cancelled`/`dismissed`) is `guard-owned` and skipped. Add a pool only
+   `pauses[].agentId`, phase not `resumed`/`cancelled`; session-guard's `dismissed` is a flag, not a phase) is `guard-owned` and skipped. Add a pool only
    with a line copied from a real stop.
 2. **Narrow classification.** The last log line must fully match the pool's rendered quota line (the z.ai 5-hour
    code-1308 line, copied from a real stop 2026-11-12) and must not match `QUOTA_DENIED` (auth, credential, API key,
@@ -113,18 +113,25 @@ before the send, the lock, dry-run unless `--apply`, the scan deadline) plus:
 3. **aiuse is the reset anchor, fail closed.** On first sight of an eligible error the scan records `quota-wait`
    (`signature`, `pool`, `window_id`, `window_minutes`, `resets_at`, `updated_at`) from the exhausted aiuse window
    (`state` exhausted or used 95% or more). The reset must fall after the error and within `window_minutes` of it, else
-   `stale`; no exhausted window is `quota-unconfirmed`, never a resume. aiuse nulls `resets_at` after a reset, so the
-   ledger copy is the only anchor.
+   `stale`; no exhausted window is `quota-unconfirmed`, never a resume. aiuse nulls `resets_at` after a reset (it can also carry an earlier reset forward as an estimate),
+   so the ledger copy is the only anchor and the resume gate still needs a fresh post-reset sample.
 4. **Resume gate.** A resume needs a fresh aiuse sample (`fresh` true, not stale, `usable_now` true) whose
    `collected_at` is at or after `resets_at` plus grace and not in the future, showing the recorded window below the
    limit. A missing aiuse, bad JSON, a missing or ambiguous account, or a stale sample waits (`quota-waiting`,
    once per ten minutes). The reset may be at most `--max-error-age-minutes` (default 30) in the past, else `stale`.
 5. **Agent state.** `error` is eligible after `paseo logs --json` shows the quota line still last: a newer user
-   message or other output is `changed`, a `done:` line before the error is `delivered`. `closed` is eligible only
+   message or other output is `changed`, a `done:` line before the error is `delivered`. That check runs **before**
+   `quota-wait` is armed, while the agent is still loaded, and again before a resume. `closed` is eligible only
    when the ledger holds a `quota-wait` for the agent whose `UpdatedAt` is unchanged (operator ruling, lead 2026-11-12);
-   nothing is read from a closed agent. The scan never calls `fetchAgent` or the timeline: a read-only `fetchAgent`
-   reloads the agent from persistence and re-triggers the idle collection (W10 J2c). Whether `paseo logs` reloads
-   a closed agent was **not verified**; the quota pass never calls it for one.
+   a closed agent's timeline is never read. Which Paseo call reloads an agent (adversary reading of Paseo
+   0.16.0-beta.2, 2026-11-12): `paseo agent inspect` is `fetchAgent` and returns the live agent or the stored record
+   without reloading; `paseo logs` also fetches the **timeline**, which reloads an agent from persistence if it is not
+   live, and the reloaded timeline holds only the original user message. The pass therefore calls `paseo logs` only
+   for an agent whose inspect status is `error` (loaded), and never for a `closed` one (the design's B6 fallback: the
+   ledger copy is the record). Residual race: an agent unloaded between the inspect and the `logs` call is reloaded
+   and then fails the quota-line check, so it is skipped (fails closed) and never resumed. Inspect carries no
+   `lastUserMessageAt` (design B4d), so the closed-agent identity check is the unchanged `UpdatedAt`, which a new
+   user message changes because the agent runs.
 6. **Prompt.** `provider quota window reset; continue from where you stopped, check any interrupted operation before
    retrying, same report path`. One resume per pool per scan, so a just-reset pool is not drained at once.
 
