@@ -47,6 +47,7 @@ def fake(tmp_path, monkeypatch):
         b / "launchctl",
         f'echo "launchctl $*" >> "{log}"\n'
         f'LOADED="{loaded}"\n'
+        f'AGENTS="{tmp_path / "agents"}"\n'
         'if [ "$1" = bootstrap ]; then\n'
         '  if [ -n "$FAKE_BOOTSTRAP_FAIL" ]; then '
         'echo "Bootstrap failed: 5: Input/output error" >&2; exit 5; fi\n'
@@ -60,7 +61,7 @@ def fake(tmp_path, monkeypatch):
         'if [ "$1" = print ]; then\n'
         '  lab="${2##*/}"\n'
         '  if [ -s "$LOADED/$lab" ]; then\n'
-        '    echo "$2 = {"; printf "\\tprogram = %s\\n\\targuments = {\\n" "$(head -n1 "$LOADED/$lab")"\n'
+        '    echo "$2 = {"; printf "\\tpath = %s\\n\\tprogram = %s\\n\\targuments = {\\n" "$AGENTS/$lab.plist" "$(head -n1 "$LOADED/$lab")"\n'
         '    while IFS= read -r l; do printf "\\t\\t%s\\n" "$l"; done < "$LOADED/$lab"; printf "\\t}\\n}\\n"; exit 0\n'
         '  fi\n'
         '  if [ -n "$FAKE_PRINT_RC" ]; then exit "$FAKE_PRINT_RC"; fi\n'
@@ -419,6 +420,15 @@ def _loaded_wrapper_args(tmp_path, label):
     return "\n".join([str(REPO / "bin" / "ade-job-run"), "--lock-dir", str(tmp_path / "admission"), label, "--", "/bin/true"]) + "\n"
 
 
+def _loaded_plist(tmp_path, label):
+    """The installed file of a job loaded through the canonical wrapper, as `render` writes it (an XML comment header, then the
+    same ProgramArguments launchd printed): a faithful definition, so removal's loaded-definition proof can pass."""
+    import plistlib
+    args = _loaded_wrapper_args(tmp_path, label).splitlines()
+    head, sep, rest = plistlib.dumps({"Label": label, "ProgramArguments": args}).decode().partition("<plist ")
+    return f"{head}<!-- {S.GENERATED} from retired; edit the plist -->\n{sep}{rest}".encode()   # the comment goes where render_launchd puts it
+
+
 def test_yes_on_launchd_installs_and_ledgers(fake, tmp_path):
     root = _mini_catalog(tmp_path)
     catalog = ai.load_catalog(root=root)
@@ -538,17 +548,7 @@ def test_yes_on_launchd_removes_ledger_owned(fake, tmp_path):
     catalog = ai.load_catalog(root=root)
     label = "com.djbclark.skillopt-sleep"
     plist = fake.agents / f"{label}.plist"
-    plist.write_text(
-        f"# {S.GENERATED} from retired\n"
-        '<?xml version="1.0" encoding="UTF-8"?>\n'
-        '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
-        '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
-        "<plist version=\"1.0\"><dict>"
-        f"<key>Label</key><string>{label}</string>"
-        "<key>ProgramArguments</key><array><string>/bin/true</string></array>"
-        "</dict></plist>\n",
-        encoding="utf-8",
-    )
+    plist.write_bytes(_loaded_plist(tmp_path, label))
     # Mark loaded so bootout has something to clear (Codex P2 unload verify); it runs the canonical wrapper (F4 proof).
     (tmp_path / "launchd-loaded" / label).write_text(_loaded_wrapper_args(tmp_path, label))
     ledger = S.empty_jobs_ledger(env=fake.env)
@@ -634,15 +634,7 @@ def test_launchd_remove_keeps_ledger_when_still_loaded(fake, tmp_path):
     catalog = ai.load_catalog(root=root)
     label = "com.djbclark.skillopt-sleep"
     plist = fake.agents / f"{label}.plist"
-    plist.write_text(
-        f"# {S.GENERATED} from retired\n"
-        '<?xml version="1.0" encoding="UTF-8"?>\n'
-        "<plist version=\"1.0\"><dict>"
-        f"<key>Label</key><string>{label}</string>"
-        "<key>ProgramArguments</key><array><string>/bin/true</string></array>"
-        "</dict></plist>\n",
-        encoding="utf-8",
-    )
+    plist.write_bytes(_loaded_plist(tmp_path, label))
     (tmp_path / "launchd-loaded" / label).write_text(_loaded_wrapper_args(tmp_path, label))
     # Force print to keep reporting loaded even after bootout.
     env = {**fake.env, "FAKE_PRINT_RC": "0"}
