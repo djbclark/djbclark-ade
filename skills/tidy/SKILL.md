@@ -62,9 +62,12 @@ current-work text; `--json` prints the machine form. Sections of the output:
    trailing text asks nothing and no card is pending. The report must not say `BLOCKED:`/`NO-REPORT:`/`STATUS: working`
    in its first lines or its last 4 KB, and `--handled` is held to the same check (plus: the report quiet for two minutes
    and not newer than a `.done`). **Re-tasking a finished worker: rename its `.done` to `.done.rN` first, then `paseo send`.**
-   ade-tidy also refuses a worker whose log tail holds a `[Message received]` entry other than a bare `ack …`, a human
-   prompt newer than `.done` (`lastUserMessageAt`, UTC), an empty or unreadable log, or an inbound message as the last
-   entry; apply re-runs this whole verdict right before each `paseo agent archive`. A `closed` worker alone is **not** archived: Paseo marks every
+   ade-tidy also refuses a worker whose log tail holds a `[Message received]` entry other than a bare `ack …`, a tool call
+   after such a receipt that is not the worker's reply (`completion-notice`, `paseo send`), a human prompt newer than the
+   worker's own completion (`max(report, .done)`, via `lastUserMessageAt`, UTC), activity (`lastActivityAt`) more than
+   90 s after that completion (more than 90 s after the `.done.ack` when the receipt is visible in the log), an empty or
+   unreadable log, or an inbound message as the last entry. Write `.done.ack` even when you also send the ack prompt. A
+   rename or relabel of a finished tab moves `lastActivityAt` too and then blocks the archive (archive by hand); apply re-runs this whole verdict right before each `paseo agent archive`. A `closed` worker alone is **not** archived: Paseo marks every
    interrupted agent `closed` at a daemon restart, so it is listed as `D#u` (resume or re-task it). Operator agents
    are only listed. A running agent is never archived (`paseo agent archive` runs without `--force`; Paseo unarchives an agent when it is resumed, but
    treat an archive as final). An empty window is archived only when all of these hold: not MAIN, `isolation` is `local` (archiving a
@@ -79,7 +82,7 @@ land in a window while it is archived. Window ownership is the lead's `<lead>.wi
 registered window is never renamed or archived), then labels or the legacy name; a renamed legacy window is registered
 before the rename and dropped from the registry after its archive. Each precondition is re-read immediately before its
 action; a skipped action is printed as `SKIP`. A worker re-tasked by `paseo send` is also caught by its state record's
-`lastActivityAt` (more than 5 minutes after the ack or `.done`), not only by the log tail or the `.done.rN` rename.
+`lastActivityAt` and the log receipt rule above, not only by the `.done.rN` rename.
 
 ## Moving tabs between windows (checked 2026-11-13)
 

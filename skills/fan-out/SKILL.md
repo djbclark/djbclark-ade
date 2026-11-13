@@ -151,6 +151,8 @@ report folder into a workspace.
 
 ## 4. Collect
 
+- **Re-tasking a worker whose round is finished:** rename its `<report>.done` to `<report>.done.rN` before the `paseo send`
+  (`skills/tidy` archives a worker only on a current `.done`; a re-task it cannot see could be archived mid-round).
 - `paseo wait <id> --json` blocks until the agent is idle; classify by the report / `.done` artifacts
   (same meanings as orchestration-practices §5): 0 DONE, 1 unfinished / still running, 3 no report,
   4 BLOCKED (or a pending permission), 124 timed out. Poll with short `paseo wait` / `paseo ls` looks when

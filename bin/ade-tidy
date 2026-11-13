@@ -190,52 +190,41 @@ def last_text(log: str | None) -> tuple[str, bool, str]:
     card = any(re.search(r"AskUserQuestion|\[Question\]|\[Permission\]", ln) for ln in tagged)
     if head.startswith(INBOUND_TAGS):
         body = [ln for ln in tail if ln.strip()]
-        if head.startswith("[Message received]") and body and ACK_BODY_RE.fullmatch(body[0]) and len(body) <= 2:
-            return "\n".join(body[1:]).strip(), card, "ok"  # the lead's receipt `ack <id> <msg-id>` + at most the worker's one-line reply
+        if head.startswith("[Message received]") and body and ACK_BODY_RE.fullmatch(body[0]):
+            return "\n".join(body[1:]).strip(), card, "ok"  # the lead's receipt `ack <id> <msg-id>` + the worker's own reply (the log does not tell them apart)
         return "\n".join(tail).strip(), card, "inbound"
     return "\n".join(tail).strip(), card, "ok"
 
 
-def log_has_retask(log: str | None) -> bool:
-    """True when the log tail holds a `[Message received]` entry whose first body line is more than a bare `ack ...`
-    receipt: the lead's `paseo send` re-task does not move the state record's lastUserMessageAt (an agent-sourced message
-    is projected as a tool call, not a user message). The initial brief is a `[User]` entry and is not counted (a human
-    prompt moves lastUserMessageAt instead). The worker's own plain-text reply follows the body in the log, so a message
-    of an `ack ...` line plus one more line is read as receipt + reply; three or more lines is a re-task. The log tail is
-    only 40 items, so `last_activity` (state record) is the backstop."""
+REPLY_TOOL_RE = re.compile(r"completion-notice|paseo send")  # the ordinary ways a worker answers an ack (footer rule 22, order 10)
+
+
+def scan_log(log: str | None) -> tuple[bool, bool]:
+    """(retask, receipt) read from the log tail. retask: a `[Message received]` entry whose first body line is not a bare
+    `ack <id> [<msg-id>]` receipt (the lead's `paseo send` re-task does not move the state record's lastUserMessageAt: an
+    agent-sourced message is projected as a tool call, not a user message), or, after a receipt, any tool call other than
+    the worker's ordinary reply (`completion-notice`, `paseo send`); `[Thought]` entries and any amount of plain text are
+    the worker's reply. receipt: a bare-ack message is in the tail. The initial brief is a `[User]` entry and is not
+    counted (a human prompt moves lastUserMessageAt). The tail is only 40 items: `verdict` bounds `lastActivityAt` too."""
     if not log:
-        return False
+        return False, False
     body: list[str] = []
-    inbound = False
-    after_receipt = False  # an `ack ...` message was seen: a finished worker does nothing but reply after it
+    inbound = receipt = False
     for line in log.splitlines() + ["[end]"]:
-        if TAG_RE.match(line):
-            lines = [b for b in body if b.strip()]
-            if after_receipt and line != "[end]" and not line.startswith(INBOUND_TAGS):
-                return True  # tool call or thought after the receipt: the worker is working again
-            if inbound:
-                if not lines or not ACK_BODY_RE.fullmatch(lines[0]) or len(lines) > 2:
-                    return True  # an ack line plus more than the worker's own one-line reply: a re-task that opens with the receipt
-                after_receipt = True
-                if line != "[end]" and not line.startswith(INBOUND_TAGS):
-                    return True  # the entry that ends the receipt is itself a tool call or thought
-            inbound = line.startswith("[Message received]")
-            body = []
-        else:
+        if not TAG_RE.match(line):
             body.append(line)
-    return False
-    body: list[str] = []
-    inbound = False
-    for line in log.splitlines() + ["[end]"]:
-        if TAG_RE.match(line):
-            lines = [b for b in body if b.strip()]
-            if inbound and (not lines or not ACK_BODY_RE.fullmatch(lines[0]) or len(lines) > 2):
-                return True  # an ack line plus more than the worker's own one-line reply: a re-task that opens with the receipt
-            inbound = line.startswith("[Message received]")
-            body = []
-        else:
-            body.append(line)
-    return False
+            continue
+        lines = [b for b in body if b.strip()]
+        if inbound:
+            if not lines or not ACK_BODY_RE.fullmatch(lines[0]):
+                return True, receipt
+            receipt = True
+        if receipt and line != "[end]" and not line.startswith(INBOUND_TAGS) and not line.startswith("[Thought]") \
+                and not REPLY_TOOL_RE.search(line):
+            return True, receipt  # a tool call after the receipt that is not the worker's reply: it is working again
+        inbound = line.startswith("[Message received]")
+        body = []
+    return False, receipt
 
 
 # ----------------------------------------------------------------------------------------------- repo + agents
@@ -349,7 +338,7 @@ def report_handled_ok(report: Path) -> bool:
 def last_user_message(agent_id: str) -> float:
     """Epoch seconds of the last human/sourceless message to the agent (state record `lastUserMessageAt`, a UTC ISO string
     with `Z`); 0 when absent; infinity when present but unparsable (fail closed: counts as a re-task). An agent-sourced
-    message (the lead's `paseo send`) does not move this field: `log_has_retask` covers that."""
+    message (the lead's `paseo send`) does not move this field: `scan_log` and `last_activity` cover that."""
     v = (state_file(agent_id) or {}).get("lastUserMessageAt")
     if v in (None, ""):
         return 0.0
@@ -371,11 +360,11 @@ def last_activity(agent_id: str) -> float:
         return float("inf")
 
 
-ACTIVITY_MARGIN = 300  # seconds of reply latency tolerated between the lead's ack (or .done) and the worker's last activity
+ACTIVITY_MARGIN = 90  # seconds of reply latency tolerated between the worker's completion (or the lead's ack) and its last activity
 
 
 def verdict(row: dict, text: str, card: bool, permit: str | None, reports_dirs: list[str], handled: set[str],
-            logstate: str = "ok", retask_log: bool = False) -> None:
+            logstate: str = "ok", retask_log: bool = False, receipt: bool = False) -> None:
     """Fill row['verdict'], row['reason'] (bounded excerpt) and row['verified_done']. Order matters: a question, a
     BLOCKED line or a card always wins over a finished report, so such an agent is shown, never archived."""
     cls, status = row["class"], row["status"]
@@ -394,10 +383,13 @@ def verdict(row: dict, text: str, card: bool, permit: str | None, reports_dirs: 
     # evidence older than the last message sent to the agent is stale (a re-task): never "done"
     done_m = mtime(Path(f"{rep}.done")) if rep else None
     ack_m = mtime(Path(f"{rep}.done.ack")) if rep else None
-    anchor = max(filter(None, (mtime(rep) if rep else None, done_m, ack_m)), default=None)  # the last completion evidence
+    done_evidence = max(filter(None, (mtime(rep) if rep else None, done_m)), default=None)  # the WORKER's own completion evidence
+    # last activity is explained by the lead's ack only when its receipt is visible in the log; else it must be near completion
+    # (a prompt-only ack with no `.done.ack` on disk explains nothing: write the file)
+    act_base = max(done_evidence, ack_m) if receipt and ack_m and done_evidence else done_evidence
     retasked = bool(rep) and (retask_log or any(rep.parent.glob(rep.name + ".done.r*"))
-                              or (anchor is not None and (last_user_message(row["id"]) > anchor + 2
-                                                          or last_activity(row["id"]) > anchor + ACTIVITY_MARGIN)))
+                              or (done_evidence is not None and (last_user_message(row["id"]) > done_evidence + 2
+                                                                 or last_activity(row["id"]) > act_base + ACTIVITY_MARGIN)))
     if retasked:
         ok = acked = False
     if logstate != "ok":
@@ -501,7 +493,7 @@ def inventory(opts, lead: str, repo: str, roots: list[str]) -> tuple[list[dict],
         else:
             log = log_tail(a["id"]) if a.get("status") != "running" else None
             text, card, lstate = last_text(log) if a.get("status") != "running" else ("", False, "ok")
-            verdict(row, text, card, permits.get(a["id"]), opts.reports_dir or [], handled, lstate, log_has_retask(log))
+            verdict(row, text, card, permits.get(a["id"]), opts.reports_dir or [], handled, lstate, *scan_log(log))
         out.append(row)
     return out, [w for w in wmap.values()]
 
@@ -1017,7 +1009,7 @@ def apply(p: dict, lead: str, repo: str, opts=None) -> list[dict]:
         # the whole verdict again: report (BLOCKED/DONE/.done/ack/.done.r*), question, inbound/empty log, re-task in the log
         fresh = {"id": aid, "class": "own-worker", "status": freshrow.get("status"), "slice": (stt.get("labels") or {}).get("slice")}
         verdict(fresh, text, card, None, (opts.reports_dir if opts else None) or [],
-                set(filter(None, ((opts.handled if opts else "") or "").split(","))), lstate, log_has_retask(log))
+                set(filter(None, ((opts.handled if opts else "") or "").split(","))), lstate, *scan_log(log))
         if not (fresh["verdict"] == "done" and fresh["verified_done"]):
             return rec("archive-agent", aid, False, "no longer verified done: " + clean(fresh.get("reason", ""), 100))
         rc, out, err = paseo(["agent", "archive", aid])  # no --force: a running agent is never interrupted

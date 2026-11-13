@@ -759,3 +759,62 @@ def test_tool_call_after_the_receipt_is_a_retask(env):
     env.report("s1", ack=True)
     env.worker(1, text="finished", tags=["[Shell] ls", "[Message received] 8cd86203", f"ack {W1} m1", "[Shell] true"])
     assert env.plan()["archive_agents"] == []
+
+
+# ---- adversary round 5 -------------------------------------------------------------------------------------------
+
+def iso(t):
+    return time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(t))
+
+
+def aged_report(env, slice_name, done_ago, ack_ago):
+    rp = env.report(slice_name, ack=True)
+    now = time.time()
+    os.utime(rp, (now - done_ago - 5, now - done_ago - 5))
+    os.utime(f"{rp}.done", (now - done_ago, now - done_ago))
+    os.utime(f"{rp}.done.ack", (now - ack_ago, now - ack_ago))
+    return now - done_ago, now - ack_ago
+
+
+def test_human_prompt_between_done_and_a_late_ack_is_a_retask(env):
+    t0, ack = aged_report(env, "s1", 6000, 600)                        # .done 100 min ago, lead acked 10 min ago
+    env.worker(1, text="Acknowledged.", last_user=iso(t0 + 600),       # the operator prompted it 90 min ago
+               tags=["[User] also rerun the suite", "[Shell] bg pytest", "[Message received] 8cd86203", f"ack {W1} m1"])
+    set_state(env, W1, lastActivityAt=iso(ack + 20))
+    assert env.plan()["archive_agents"] == []
+
+
+def test_off_tail_retask_with_a_late_disk_ack_is_caught_by_activity(env):
+    t0, ack = aged_report(env, "s1", 3000, 1000)                       # .done 50 min ago; ack written mid-round-2
+    env.worker(1, text="suite running in the background", tags=["[Shell] ls"] * 38)    # no receipt in the tail
+    set_state(env, W1, lastActivityAt=iso(ack + 200))
+    assert env.plan()["archive_agents"] == []
+    set_state(env, W1, lastActivityAt=iso(t0 + 10))                    # idle right after its completion notice: fine
+    assert [x["agent"][:8] for x in env.plan()["archive_agents"]] == ["00000001"]
+
+
+def test_thought_or_longer_or_tool_reply_to_the_ack_is_still_a_finished_worker(env):
+    t0, ack = aged_report(env, "s1", 600, 300)
+    env.worker(1, text="Acknowledged.", tags=["[Message received] 8cd86203", f"ack {W1} m1", "[Thought] they acked"])
+    aged_report(env, "s2", 600, 300)
+    env.worker(2, text="Nothing further.\nAll done.", tags=["[Message received] 8cd86203", "ack 00000002-0000-0000-0000-000000000000 m1"])
+    aged_report(env, "s3", 600, 300)
+    env.worker(3, text="checked", tags=["[Message received] 8cd86203", "ack 00000003-0000-0000-0000-000000000000 m1",
+                                        "[Shell] completion-notice --check-ack unit-s3"])
+    for n in (1, 2, 3):
+        set_state(env, f"0000000{n}-0000-0000-0000-000000000000", lastActivityAt=iso(ack + 10))
+    p = env.plan()
+    assert sorted(x["agent"][:8] for x in p["archive_agents"]) == ["00000001", "00000002", "00000003"]
+    assert p["send"] == []
+    set_state(env, "00000003-0000-0000-0000-000000000000", lastActivityAt=iso(ack + 3600))        # same tail, an hour later
+    assert "00000003" not in [x["agent"][:8] for x in env.plan()["archive_agents"]]
+
+
+def test_failed_rename_drops_the_registry_entry_it_added(env):
+    env.agent(LEAD, W_MAIN, "LEAD myrepo", "running")
+    env.worker(1, text="BLOCKED: x")
+    stub = env.tmp / "bin/paseo"
+    stub.write_text(STUB.replace('elif a[:2] == ["workspace", "rename"]:', 'elif a[:2] == ["workspace", "rename"]:\n    sys.exit(3)'))
+    assert env.run(apply=True).returncode == 0
+    reg = Path(os.environ["ADE_WORKER_RUN_STATE"]) / f"{LEAD}.windows.json"
+    assert W_WORK not in (json.loads(reg.read_text())["windows"] if reg.exists() else [])

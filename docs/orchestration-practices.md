@@ -235,7 +235,8 @@ paseo run --provider PROVIDER/MODEL --no-wait \
 5. **Push on completion (2026-11-09).** A delegated slice, once its report is finished and `.done` is touched, tells
    its requester with `paseo send --json --no-wait` (never relay): two lines, `done: <title>, <PR URL>` (or
    `done: <title>, <status>[, <report>]`) then `Please reply: ack <its id> <msg-id>`. The dispatch footer rule 22 and
-   `bin/completion-notice` hold the shape; `skills/fan-out` Collect expects it so the lead does not poll.
+   `bin/completion-notice` hold the shape; `skills/fan-out` Collect expects it so the lead does not poll. To re-task
+   a finished slice, rename its `.done` to `.done.rN` first, then send (`skills/tidy` never archives past a `.done.r*`).
    **Dual-route completion proof (operator ruling 2026-11-12):** Immediate prompt replies from a requester to a completing
    worker trigger Paseo's `sendPreparedPromptToAgent` with `replaceRunning: true`, which cancels the worker's closing turn via
    `cancelAgentRunBefore('replace') -> session.interrupt()`. On provider `antigravity`, this turn cancellation triggers a fatal
