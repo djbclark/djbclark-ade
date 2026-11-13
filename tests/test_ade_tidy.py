@@ -513,7 +513,7 @@ def test_agent_sourced_retask_in_log_blocks_archive_idle_and_closed(env):
 
 def test_bare_ack_message_is_not_a_retask(env):
     env.report("s1", ack=True)
-    env.worker(1, text="finished", tags=["[Shell] ls", "[Message received] 8cd86203", "ack 00000001-0000-0000-0000-000000000000 m1", "[Shell] true"])
+    env.worker(1, text="finished", tags=["[Shell] ls", "[Message received] 8cd86203", "ack 00000001-0000-0000-0000-000000000000 m1"])
     assert [x["agent"][:8] for x in env.plan()["archive_agents"]] == ["00000001"]
 
 
@@ -680,3 +680,82 @@ def test_apply_takes_the_lead_lock_then_the_global_lock(env):
     assert env.run(apply=True).returncode == 0
     d = Path(os.environ["ADE_WORKER_RUN_STATE"])
     assert (d / f"{LEAD}.lock").exists() and (d / "_global.lock").exists()
+
+
+# ---- adversary round 4 -------------------------------------------------------------------------------------------
+
+def set_state(env, aid, **kw):
+    p = env.home / "agents/proj" / f"{aid}.json"
+    d = json.loads(p.read_text())
+    d.update(kw)
+    p.write_text(json.dumps(d))
+
+
+def test_ack_first_retask_message_is_a_retask(env):
+    env.report("s1", ack=True)
+    env.worker(1, text="started the build", tags=["[Message received] 8cd86203", f"ack {W1} m1", "Round 2: add the tests", "[Shell] pytest"])
+    assert env.plan()["archive_agents"] == []
+
+
+def test_activity_long_after_the_ack_blocks_archive(env):
+    """A re-task by `paseo send` that scrolled out of the 40-item tail still shows in lastActivityAt."""
+    rp = env.report("s1", ack=True)
+    ack_epoch = os.stat(f"{rp}.done.ack").st_mtime
+    iso = lambda t: time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(t))
+    env.worker(1, text="finished")
+    set_state(env, W1, lastActivityAt=iso(ack_epoch + 30))                 # replied to the ack
+    assert [x["agent"][:8] for x in env.plan()["archive_agents"]] == ["00000001"]
+    set_state(env, W1, lastActivityAt=iso(ack_epoch + 3600))               # worked for an hour afterwards
+    assert env.plan()["archive_agents"] == []
+    set_state(env, W1, lastActivityAt="garbage")
+    assert env.plan()["archive_agents"] == []
+
+
+def test_handled_without_done_refuses_a_later_human_prompt(env):
+    rp = env.reports / "unit-s1.md"
+    rp.write_text("x\nDONE\n")
+    env.age(rp)
+    old = os.stat(rp).st_mtime
+    env.worker(1, text="finished", last_user=time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(old + 60)))
+    assert env.plan("--handled", W1)["archive_agents"] == []
+
+
+def test_plain_reply_to_the_ack_does_not_block_archive_or_trigger_a_ping(env):
+    env.report("s1", ack=True)
+    env.worker(1, text="Acknowledged.", tags=["[Shell] ls", "[Message received] 8cd86203", f"ack {W1} m1"])
+    p = env.plan()
+    assert by_id(p)["00000001"]["verdict"] == "done" and [x["agent"][:8] for x in p["archive_agents"]] == ["00000001"]
+    assert p["send"] == []
+
+
+def test_legacy_rename_registers_before_renaming(env):
+    d = Path(os.environ["ADE_WORKER_RUN_STATE"])
+    d.mkdir(parents=True, exist_ok=True)
+    for n in (f"{LEAD}.lock", "_global.lock"):
+        (d / n).write_text("")
+    env.agent(LEAD, W_MAIN, "LEAD myrepo", "running")
+    env.worker(1, text="BLOCKED: x")                                           # W_WORK is this lead's legacy-named window
+    d.chmod(0o500)                                                             # the registry cannot be written
+    try:
+        r = env.run(apply=True)
+    finally:
+        d.chmod(0o700)
+    assert r.returncode == 0, r.stderr
+    assert not [c for c in env.calls() if c[:2] == ["workspace", "rename"] and c[2] == W_WORK]
+
+
+def test_registry_is_pruned_after_a_window_archive(env):
+    env.agent(LEAD, W_MAIN, "LEAD myrepo", "running")
+    env.window(W_EMPTY, "WORKERS myrepo (Wave 6)")
+    env.record("0000000f-0000-0000-0000-000000000000", W_EMPTY, lead=None)
+    registry(env, LEAD, [W_EMPTY, "wks_gone"])
+    assert env.run(apply=True).returncode == 0
+    assert ["workspace", "archive", W_EMPTY] in env.calls()
+    reg = json.loads((Path(os.environ["ADE_WORKER_RUN_STATE"]) / f"{LEAD}.windows.json").read_text())
+    assert reg["windows"] == ["wks_gone"]
+
+
+def test_tool_call_after_the_receipt_is_a_retask(env):
+    env.report("s1", ack=True)
+    env.worker(1, text="finished", tags=["[Shell] ls", "[Message received] 8cd86203", f"ack {W1} m1", "[Shell] true"])
+    assert env.plan()["archive_agents"] == []

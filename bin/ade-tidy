@@ -189,6 +189,9 @@ def last_text(log: str | None) -> tuple[str, bool, str]:
     tagged = [ln for ln in lines if TAG_RE.match(ln)][-5:]
     card = any(re.search(r"AskUserQuestion|\[Question\]|\[Permission\]", ln) for ln in tagged)
     if head.startswith(INBOUND_TAGS):
+        body = [ln for ln in tail if ln.strip()]
+        if head.startswith("[Message received]") and body and ACK_BODY_RE.fullmatch(body[0]) and len(body) <= 2:
+            return "\n".join(body[1:]).strip(), card, "ok"  # the lead's receipt `ack <id> <msg-id>` + at most the worker's one-line reply
         return "\n".join(tail).strip(), card, "inbound"
     return "\n".join(tail).strip(), card, "ok"
 
@@ -197,17 +200,37 @@ def log_has_retask(log: str | None) -> bool:
     """True when the log tail holds a `[Message received]` entry whose first body line is more than a bare `ack ...`
     receipt: the lead's `paseo send` re-task does not move the state record's lastUserMessageAt (an agent-sourced message
     is projected as a tool call, not a user message). The initial brief is a `[User]` entry and is not counted (a human
-    prompt moves lastUserMessageAt instead). The worker's own plain-text reply follows the body, so only the first
-    non-empty line is judged."""
+    prompt moves lastUserMessageAt instead). The worker's own plain-text reply follows the body in the log, so a message
+    of an `ack ...` line plus one more line is read as receipt + reply; three or more lines is a re-task. The log tail is
+    only 40 items, so `last_activity` (state record) is the backstop."""
     if not log:
         return False
     body: list[str] = []
     inbound = False
+    after_receipt = False  # an `ack ...` message was seen: a finished worker does nothing but reply after it
     for line in log.splitlines() + ["[end]"]:
         if TAG_RE.match(line):
-            first = next((b for b in body if b.strip()), "")
-            if inbound and not ACK_BODY_RE.fullmatch(first):
-                return True
+            lines = [b for b in body if b.strip()]
+            if after_receipt and line != "[end]" and not line.startswith(INBOUND_TAGS):
+                return True  # tool call or thought after the receipt: the worker is working again
+            if inbound:
+                if not lines or not ACK_BODY_RE.fullmatch(lines[0]) or len(lines) > 2:
+                    return True  # an ack line plus more than the worker's own one-line reply: a re-task that opens with the receipt
+                after_receipt = True
+                if line != "[end]" and not line.startswith(INBOUND_TAGS):
+                    return True  # the entry that ends the receipt is itself a tool call or thought
+            inbound = line.startswith("[Message received]")
+            body = []
+        else:
+            body.append(line)
+    return False
+    body: list[str] = []
+    inbound = False
+    for line in log.splitlines() + ["[end]"]:
+        if TAG_RE.match(line):
+            lines = [b for b in body if b.strip()]
+            if inbound and (not lines or not ACK_BODY_RE.fullmatch(lines[0]) or len(lines) > 2):
+                return True  # an ack line plus more than the worker's own one-line reply: a re-task that opens with the receipt
             inbound = line.startswith("[Message received]")
             body = []
         else:
@@ -336,6 +359,21 @@ def last_user_message(agent_id: str) -> float:
         return float("inf")
 
 
+def last_activity(agent_id: str) -> float:
+    """Epoch seconds of the agent's last activity (state record `lastActivityAt`, UTC with Z): 0 when absent, infinity when
+    present but unparsable. A finished worker does nothing after its completion notice and the lead's ack."""
+    v = (state_file(agent_id) or {}).get("lastActivityAt")
+    if v in (None, ""):
+        return 0.0
+    try:
+        return datetime.fromisoformat(str(v).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return float("inf")
+
+
+ACTIVITY_MARGIN = 300  # seconds of reply latency tolerated between the lead's ack (or .done) and the worker's last activity
+
+
 def verdict(row: dict, text: str, card: bool, permit: str | None, reports_dirs: list[str], handled: set[str],
             logstate: str = "ok", retask_log: bool = False) -> None:
     """Fill row['verdict'], row['reason'] (bounded excerpt) and row['verified_done']. Order matters: a question, a
@@ -355,8 +393,11 @@ def verdict(row: dict, text: str, card: bool, permit: str | None, reports_dirs: 
     own = cls == "own-worker"
     # evidence older than the last message sent to the agent is stale (a re-task): never "done"
     done_m = mtime(Path(f"{rep}.done")) if rep else None
+    ack_m = mtime(Path(f"{rep}.done.ack")) if rep else None
+    anchor = max(filter(None, (mtime(rep) if rep else None, done_m, ack_m)), default=None)  # the last completion evidence
     retasked = bool(rep) and (retask_log or any(rep.parent.glob(rep.name + ".done.r*"))
-                              or (done_m is not None and last_user_message(row["id"]) > done_m + 2))
+                              or (anchor is not None and (last_user_message(row["id"]) > anchor + 2
+                                                          or last_activity(row["id"]) > anchor + ACTIVITY_MARGIN)))
     if retasked:
         ok = acked = False
     if logstate != "ok":
@@ -575,10 +616,17 @@ def other_leads_windows(lead: str) -> dict[str, str]:
 
 
 def register_window(lead: str, wks: str) -> None:
-    """Record wks as this lead's, atomically, in ade-worker-run's format (the caller holds the lead and global locks)."""
+    _write_registry(lead, read_registry(lead) | {wks})
+
+
+def unregister_window(lead: str, wks: str) -> None:
+    _write_registry(lead, read_registry(lead) - {wks})
+
+
+def _write_registry(lead: str, ids: set[str]) -> None:
+    """Atomic, in ade-worker-run's format (the caller holds the lead and global locks)."""
     path = worker_run_dir() / f"{lead}.windows.json"
     path.parent.mkdir(parents=True, exist_ok=True)
-    ids = read_registry(lead) | {wks}
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".")
     try:
         with os.fdopen(fd, "w") as fh:
@@ -939,10 +987,13 @@ def apply(p: dict, lead: str, repo: str, opts=None) -> list[dict]:
         legacy_mine = cur["name"].startswith(("workers ", "WORKERS ")) and cur["name"].endswith(f" {lead}")
         if r["windowId"] in other_leads_windows(lead):
             return rec("rename", r["windowId"], False, "registered to another lead: skipped")
+        was_registered = r["windowId"] in read_registry(lead)
+        if legacy_mine and not was_registered:  # ownership is recorded before the lead id leaves the name (ade-worker-run's order)
+            register_window(lead, r["windowId"])
         rc, out, err = paseo(["workspace", "rename", r["windowId"], r["to"]])
         rec("rename", r["windowId"], rc == 0, r["to"] if rc == 0 else clean(err or out, 120))
-        if rc == 0 and legacy_mine:  # the new name no longer carries the lead id: record ownership as ade-worker-run does
-            register_window(lead, r["windowId"])
+        if rc != 0 and legacy_mine and not was_registered:
+            unregister_window(lead, r["windowId"])  # the name still proves it; drop the entry again
 
     for r in p["renames"]:
         attempt("rename", r["windowId"], lambda r=r: do_rename(r))
@@ -996,6 +1047,8 @@ def apply(p: dict, lead: str, repo: str, opts=None) -> list[dict]:
             return rec("archive-window", wks, False, f"{len(occupants)} agent(s) still in it: skipped")
         rc, out, err = paseo(["workspace", "archive", wks])
         rec("archive-window", wks, rc == 0, "" if rc == 0 else clean(err or out, 120))
+        if rc == 0 and wks in read_registry(lead):
+            unregister_window(lead, wks)  # as ade-worker-run archive-window does
 
     for w in p["archive_windows"] if p.get("permits_ok") else []:
         attempt("archive-window", w["windowId"], lambda w=w: do_archive_window(w))

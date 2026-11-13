@@ -73,8 +73,13 @@ current-work text; `--json` prints the machine form. Sections of the output:
    `ade.lead=<lead>`, or it is a legacy `workers … <lead id>` window). Other empty windows are listed (`G#n`) for the
    operator. Occupancy is read last, right before the archive.
 
-`--apply` takes the same per-lead lock as `bin/ade-worker-run`, so a launch cannot land in a window while it is
-archived, and re-reads each precondition immediately before its action; a skipped action is printed as `SKIP`.
+`--apply` takes the lead's lock and then `_global.lock`, the same order as `bin/ade-worker-run`, for the whole run (every
+other lead's launch, archive-window and rename-main waits meanwhile, so run it when the repo is quiet), so a launch cannot
+land in a window while it is archived. Window ownership is the lead's `<lead>.windows.json` registry first (another lead's
+registered window is never renamed or archived), then labels or the legacy name; a renamed legacy window is registered
+before the rename and dropped from the registry after its archive. Each precondition is re-read immediately before its
+action; a skipped action is printed as `SKIP`. A worker re-tasked by `paseo send` is also caught by its state record's
+`lastActivityAt` (more than 5 minutes after the ack or `.done`), not only by the log tail or the `.done.rN` rename.
 
 ## Moving tabs between windows (checked 2026-11-13)
 
