@@ -90,11 +90,11 @@ class Env:
         p.write_text(json.dumps({"id": aid, "workspaceId": wks, "labels": {"ade.lead": lead} if lead else {},
                                  **({"archivedAt": "2026-11-13T00:00:00Z"} if archived else {})}))
 
-    def agent(self, aid, wks, name, status="idle", cwd=None, labels=None, text="", tags=None):
+    def agent(self, aid, wks, name, status="idle", cwd=None, labels=None, text="", tags=None, last_user=None):
         self.data["agents"].append({"id": aid, "name": name, "status": status, "cwd": str(cwd or self.repo)})
         p = self.home / "agents/proj" / f"{aid}.json"
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(json.dumps({"id": aid, "workspaceId": wks, "labels": labels or {}}))
+        p.write_text(json.dumps({"id": aid, "workspaceId": wks, "labels": labels or {}, **({"lastUserMessageAt": last_user} if last_user else {})}))
         self.data["logs"][aid] = "\n".join([*(tags or ["[Shell] ls"]), text])
 
     def worker(self, n, status="idle", wks=W_WORK, lead=LEAD, **kw):
@@ -157,10 +157,11 @@ def test_observe_changes_nothing_and_classifies(env):
     assert "which branch" in p["waiting_on_lead"][0]["reason"]
 
 
-def test_worktree_agent_and_window_project_count(env):
+def test_worktree_agent_counts_but_window_project_does_not(env):
     env.agent("00000006-0000-0000-0000-000000000000", W_USER, "in worktree", cwd=env.wt / "sub")
     env.agent("00000007-0000-0000-0000-000000000000", W_USER, "by project", cwd=env.tmp)  # cwd elsewhere, window project is the repo
-    assert {"00000006", "00000007"} <= set(by_id(env.plan()))
+    ids = set(by_id(env.plan()))
+    assert "00000006" in ids and "00000007" not in ids   # scope is the agent's own cwd, not its window's directory
 
 
 def test_verdicts(env):
@@ -405,6 +406,74 @@ def test_terminal_list_failure_blocks_window_archive(env):
     env.window(W_EMPTY, "master")
     env.record("0000000f-0000-0000-0000-000000000000", W_EMPTY)
     env.data["terminal_fail"] = True
+    r = env.run(apply=True)
+    assert r.returncode == 0, r.stderr
+    assert [c for c in env.calls() if c[:2] == ["workspace", "archive"]] == []
+
+
+def test_blocked_report_with_done_and_ack_is_not_finished(env):
+    rp = env.reports / "unit-s1.md"
+    rp.write_text("BLOCKED: need an answer\nbody\nDONE\n")
+    Path(f"{rp}.done").write_text("")
+    Path(f"{rp}.done.ack").write_text("")
+    env.worker(1, text="written: x")
+    assert env.plan()["archive_agents"] == []
+
+
+def test_retasked_worker_is_not_archived(env):
+    rp = env.report("s1", ack=True)
+    env.worker(1, text="finished", last_user="2099-01-01T00:00:00.000Z")   # a message newer than .done
+    env.worker(2, text="finished")
+    env.report("s2", ack=True)
+    Path(f"{env.reports}/unit-s2.md.done.r1").write_text("")               # re-task marker
+    assert env.plan()["archive_agents"] == []
+    # --handled does not override a re-task either
+    p = env.plan("--handled", "00000001-0000-0000-0000-000000000000,00000002-0000-0000-0000-000000000000")
+    assert p["archive_agents"] == []
+
+
+def test_inbound_message_or_unreadable_log_blocks_archive(env):
+    env.report("s1", ack=True)
+    env.worker(1, text="please also fix X", tags=["[Agent message] 8cd86203"])   # untagged body of an inbound message
+    env.report("s2", ack=True)
+    env.worker(2, text="finished")
+    env.data["logs"].pop("00000002-0000-0000-0000-000000000000")                  # fake prints an empty log
+    p = env.plan()
+    assert by_id(p)["00000001"]["verdict"] == "unknown" and "00000001" not in [x["agent"][:8] for x in p["archive_agents"]]
+
+
+def test_handled_with_report_done_but_no_done_marker_archives(env):
+    rp = env.reports / "unit-s1.md"
+    rp.write_text("x\nDONE\n")
+    env.worker(1, text="finished")
+    assert env.plan()["archive_agents"] == []
+    p = env.plan("--handled", "00000001-0000-0000-0000-000000000000")
+    assert [x["agent"][:8] for x in p["archive_agents"]] == ["00000001"]
+
+
+def test_one_unacked_send_then_no_more(env):
+    env.worker(1)
+    assert env.run(apply=True).returncode == 0 and len([c for c in env.calls() if c[0] == "send"]) == 1
+    st = json.loads(Path(os.environ["ADE_TIDY_STATE"]).read_text())
+    st["sends"]["00000001-0000-0000-0000-000000000000"]["ts"] -= 10 * 3600      # long ago, still no ack
+    Path(os.environ["ADE_TIDY_STATE"]).write_text(json.dumps(st))
+    env.calls_path.unlink()
+    p = env.plan()
+    assert p["send"] == [] and p["unreached"] == ["00000001-0000-0000-0000-000000000000"]
+
+
+def test_operator_requested_main_worker_needs_handled(env):
+    env.report("s1", ack=True)
+    env.agent("00000001-0000-0000-0000-000000000000", W_MAIN, f"worker s1 {LEAD}", labels={"ade.lead": LEAD, "slice": "s1", "ade.placement": "main"}, text="finished")
+    assert env.plan()["archive_agents"] == []
+    assert len(env.plan("--handled", "00000001-0000-0000-0000-000000000000")["archive_agents"]) == 1
+
+
+def test_unreadable_state_record_blocks_window_archive(env):
+    env.agent(LEAD, W_MAIN, "LEAD myrepo", "running")
+    env.window(W_EMPTY, "master")
+    env.record("0000000f-0000-0000-0000-000000000000", W_EMPTY)
+    (env.home / "agents/proj/broken.json").write_text("{not json")
     r = env.run(apply=True)
     assert r.returncode == 0, r.stderr
     assert [c for c in env.calls() if c[:2] == ["workspace", "archive"]] == []
