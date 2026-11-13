@@ -136,7 +136,7 @@ def test_promote_cascade_2_claude(tmp_path):
     assert reloaded.role_id("claude", "frontier") == "claude-fable-6"
     assert mt.classify("claude-opus-5-5", reloaded)[2] == "former"
     # Shared alias "fable": frontier keeps it; displaced judgment uses canonical id
-    # so suggest_model judgment fallback does not re-select the new frontier.
+    # so the judgment role does not re-select the new frontier.
     assert mt.resolve("claude", "frontier", "claude", reloaded) == "fable"
     assert mt.resolve("claude", "judgment", "claude", reloaded) == "claude-fable-5-2"
     assert mt.resolve("claude", "judgment", "claude-code", reloaded) == "claude-fable-5-2"
@@ -217,14 +217,14 @@ def test_route_agent_reads_tiers():
     assert ra.SUBLIMIT_FAMILIES == ("fable",)
     pub = ra.policy_public()
     assert pub["model_tiers"]["vendor"]["claude"]["roles"]["frontier"] == "claude-fable-5-2"
-    # Judgment fallback when the frontier pool is short.
+    # Fable short: the frontier slice keeps Fable (operator 2026-11-13: wait, not degrade); judgment stays Opus.
     svc = next(s for s in ra.SERVICES if s.name == "claude")
-    out = ra.suggest_model(svc, "frontier", {"sublimits": {"fable": 0.0}})
-    assert out.startswith("opus")
+    assert ra.suggest_model(svc, "frontier", {"sublimits": {"fable": 0.0}}).startswith("fable")
+    assert ra.suggest_model(svc, "judgment", {}).startswith("opus")
 
 
 def test_suggest_model_after_promote_shared_alias(tmp_path, monkeypatch):
-    """Judgment fallback must not return the new frontier alias after promote."""
+    """After a promote that shares the alias, judgment resolves to the displaced canonical id, never the new frontier."""
     path = tmp_path / "model-tiers.toml"
     path.write_text((REPO / "config" / "model-tiers.toml").read_text())
     mt.promote(
@@ -242,9 +242,11 @@ def test_suggest_model_after_promote_shared_alias(tmp_path, monkeypatch):
     import route_agent as ra  # noqa: E402
     importlib.reload(ra)
     svc = next(s for s in ra.SERVICES if s.name == "claude")
-    out = ra.suggest_model(svc, "frontier", {"sublimits": {"fable": 0.0}})
+    out = ra._model_tiers.resolve("claude", "judgment", "claude", ra.MODEL_TIERS)
     assert out.startswith("claude-fable-5-2"), out
     assert not out.startswith("fable"), out
+    # Frontier keeps the new alias even with the sublimit at zero: no fallback (operator 2026-11-13).
+    assert ra.suggest_model(svc, "frontier", {"sublimits": {"fable": 0.0}}).startswith("fable"), out
 
 
 def test_load_effective_projects_model_tiers(tmp_path, monkeypatch):
