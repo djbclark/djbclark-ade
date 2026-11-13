@@ -99,13 +99,22 @@ from its introduction citing another paper.
    redirect chain, and writes `via_proxy: true` into the saved header; tag
    the evidence row `via-proxy`. Use it only after the open-access ladder
    (Unpaywall, PMC, arXiv, publisher OA) fails. Never store credentials in the run folder; never put
-   institution-specific recipes in this public file. Two cautions: a VPN
+   institution-specific recipes in this public file. Cautions: a VPN
    that egresses through a cloud gateway may not present the institution's
-   address to publishers, so confirm with an "Access provided by …" banner
-   in a browser before relying on it; and an EZproxy login needs a
-   browser session with the institution's cookie, so proxied reads go
-   through a browser tool, not `fetch`. Library licences usually forbid
-   bulk downloading, so read per paper and quote-sized.
+   address to publishers, so confirm with an "Access provided by …"
+   banner in a browser before relying on it. The library's own "connect" page
+   lists three paths: an institutional IP address, the institution's VPN, or a
+   single-sign-on login through the proxy. Which one `fetch` has depends on the
+   egress address (verified 2026-11-13 with the proxy prefix over `https://`;
+   the `http://` form only redirects, so keep `https://`): from an
+   institutional address the proxy needs no login and no cookie, so `fetch`
+   works headless (a licensed host is bounced straight to the publisher, which
+   recognises the address; an unlicensed host gets a short "has not been
+   configured for access" page, which `fetch` now refuses to save as a proxied
+   source). Only from an off-network address does the proxy demand the
+   single-sign-on login, and then the read goes through a browser tool with the
+   institution's cookie, not `fetch`. Library licences usually forbid bulk
+   downloading, so read per paper and quote-sized.
 
 ## Reporting extras for literature work
 

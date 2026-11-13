@@ -188,6 +188,13 @@ def titles_match(a: str, b: str) -> bool:
 
 PAYWALL_RE = re.compile(r"buy (this )?article|purchase (pdf|access)|access through your institution|get access|rent this article", re.I)
 ACCEPT = "text/html,application/pdf,text/plain;q=0.9,*/*;q=0.5"
+# EZproxy answers HTTP 200 with this page for a host the library has no stanza for (2026-11-13: an arXiv page
+# proxied from an MIT address saved as "via proxy" with 160 words of this text).
+PROXY_REFUSED_RE = re.compile(r"has not been configured for access|not configured for access through", re.I)
+
+
+def proxy_refused(body: bytes) -> bool:
+    return len(body) < 20000 and bool(PROXY_REFUSED_RE.search(body[:20000].decode("utf-8", "replace")))
 
 
 def fetch_via_proxy(url: str) -> tuple[bytes, str, int, str]:
@@ -233,14 +240,21 @@ def cmd_fetch(source_id: str, url: str, run: Path, via_proxy: bool = False) -> i
     try:
         if via_proxy and os.environ.get("RESEARCH_PROXY_URL"):
             body, ctype, status, final = fetch_via_proxy(url)
+            if proxy_refused(body):
+                die("the proxy answered HTTP 200 but refused the host (it is not in the library's licence list); "
+                    "nothing saved. Fetch it directly.")
             proxied = True
         else:
             body, ctype, status, final = http_get(url, accept=ACCEPT)
             print(f"direct: HTTP {status} {final[:140]}", file=sys.stderr)
             if os.environ.get("RESEARCH_PROXY_URL") and looks_paywalled(body, ctype, url):
                 print("direct fetch looks paywalled or empty; retrying through RESEARCH_PROXY_URL", file=sys.stderr)
-                body, ctype, status, final = fetch_via_proxy(url)
-                proxied = True
+                pbody, pctype, pstatus, pfinal = fetch_via_proxy(url)
+                if proxy_refused(pbody):
+                    print("proxy refused the host (not in the library's licence list); keeping the direct fetch", file=sys.stderr)
+                else:
+                    body, ctype, status, final = pbody, pctype, pstatus, pfinal
+                    proxied = True
     except urllib.error.HTTPError as exc:
         die(f"fetch failed: HTTP {exc.code} {exc.reason} for {exc.url}")
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
