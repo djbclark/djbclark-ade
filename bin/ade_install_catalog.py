@@ -150,6 +150,9 @@ def _validate_probe_output_fields(row: dict[str, Any], *, path: Path, index: int
         )
 
 
+MAX_PROBE_TIMEOUT_S = 3600  # an hour: a hung probe must not block doctor without bound
+
+
 def _validate_probe_timeout(row: dict[str, Any], *, path: Path, index: int) -> None:
     """``probe_timeout_s`` (optional): a positive finite number of seconds for this row's probes."""
     if "probe_timeout_s" not in row:
@@ -158,10 +161,11 @@ def _validate_probe_timeout(row: dict[str, Any], *, path: Path, index: int) -> N
     label = f"{path}: component[{index}] id={row.get('id')!r}"
     if (
         isinstance(val, bool) or not isinstance(val, (int, float))
-        or not math.isfinite(val) or val <= 0
+        or val <= 0 or val > MAX_PROBE_TIMEOUT_S or not math.isfinite(val)
     ):
         raise CatalogValidationError(
-            f"{label}: probe_timeout_s must be a positive number of seconds, got {val!r}"
+            f"{label}: probe_timeout_s must be a positive number of seconds "
+            f"(at most {MAX_PROBE_TIMEOUT_S}), got {val!r}"
         )
 
 

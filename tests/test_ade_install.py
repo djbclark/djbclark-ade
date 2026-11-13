@@ -2196,16 +2196,34 @@ def test_hermes_row_in_shipped_catalog_has_longer_probe_timeout():
     assert others == []
 
 
-@pytest.mark.parametrize("value", ["0", "-5", "0.0", '"60"', "true", "nan", "inf", "[60]"])
-def test_probe_timeout_s_invalid_refused(tmp_path, value):
+@pytest.mark.parametrize("value,match", [
+    ("0", "positive number of seconds"),
+    ("-5", "positive number of seconds"),
+    ("0.0", "positive number of seconds"),
+    ("3601", "at most 3600"),
+    ('"60"', "must be number"),
+    ("true", "must be number"),
+    ("[60]", "must be number"),
+    ("nan", "must be number"),
+    ("inf", "must be number"),
+])
+def test_probe_timeout_s_invalid_refused(tmp_path, value, match):
     root = _fixture_root(tmp_path)
     toml = (root / "config" / "install.toml").read_text()
     (root / "config" / "install.toml").write_text(
         toml + '\n[[component]]\nid = "p"\nclass = "optional"\nchosen = false\n'
         f'probe_argv = ["true"]\nprobe_timeout_s = {value}\n'
     )
-    with pytest.raises(ai.InstallError, match="probe_timeout_s"):
+    with pytest.raises(ai.InstallError, match=match):
         ai.load_catalog(root=root)
+
+
+@pytest.mark.parametrize("value", [True, False, float("nan"), float("inf"), -1, 0, 3601, "60", 10**400, [60]])
+def test_validate_catalog_semantics_refuses_bad_probe_timeout_without_schema(value):
+    from ade_install_catalog import CatalogValidationError, validate_catalog_semantics
+    row = {"id": "p", "class": "optional", "chosen": False, "probe_argv": ["true"], "probe_timeout_s": value}
+    with pytest.raises(CatalogValidationError, match="probe_timeout_s"):
+        validate_catalog_semantics({"component": [row]}, path=Path("x.toml"))
 
 
 def test_probe_timeout_s_valid_loads(tmp_path):
