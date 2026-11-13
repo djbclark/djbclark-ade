@@ -162,6 +162,7 @@ bin/ade-sched status com.djbclark.ade-progress
 
 or in one step, `bin/ade-sched reconcile --yes --name ade-progress`, which installs it and records ledger ownership (the
 manual install is adopted by the next `reconcile --yes`). The log is `~/.local/state/djbclark-ade/progress/scan.log`;
+a full `reconcile --yes` or `ade-install apply --yes` (any host whose platform is mac or linux) installs it too;
 `bin/ade-sched uninstall com.djbclark.ade-progress` removes the job; setting `chosen = false` quiets doctor, and unloads it at the next
 `reconcile --yes` when the ledger owns it (see Inventory and drift).
 

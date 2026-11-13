@@ -1956,12 +1956,14 @@ def plan_reconcile(
     assert isinstance(entries, dict)
     steps: list[ReconcileStep] = []
     expected_labels: dict[str, str] = {}  # label -> logical name
-    # Inventory rows that carry a label but are not chosen (class optional/offered, chosen = false): label -> (name, owner).
-    # An installed label of such a row is not "foreign", and a ledger-owned one is unloaded because it was un-chosen.
+    # ADE-owned ade-sched/paseo rows that carry a label but are not chosen (class optional/offered, chosen = false):
+    # label -> (name, owner). An installed label of such a row is not "foreign", and a ledger-owned one is unloaded because
+    # it was un-chosen. Dependency/service rows (herdr-server) are not adoptable, so they keep the old silent path.
     unchosen_labels: dict[str, tuple[str, str]] = {
         str(r["label"]): (str(r["name"]), str(r.get("owner") or "?"))
         for r in jobs
         if isinstance(r.get("label"), str) and r.get("label") and not _job_expected(r)
+        and r.get("owner") == OWNER_ADE and r.get("kind") in ("ade-sched", "paseo")
     }
     write_ok = backend_name in RECONCILE_WRITE_BACKENDS
     live_ids = live.ids
@@ -2233,7 +2235,7 @@ def plan_reconcile(
             ))
             return
         why = "retired" if is_retired else ("dropped from inventory" if dropped else "orphan")
-        if label in unchosen_labels and not is_retired:
+        if not is_retired and unchosen_labels.get(label, ("",))[0] == logical_id:
             why = f"inventory row {unchosen_labels[label][0]!r} is not chosen; set chosen = true to keep it"
         detail = (
             f"paseo schedule delete {label} ({why})"

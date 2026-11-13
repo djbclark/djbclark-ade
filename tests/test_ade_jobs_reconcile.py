@@ -1744,7 +1744,7 @@ def test_paseo_deferral_identity_survives_host_backend_change(fake, tmp_path, mo
 _PROGRESS_LABEL = "com.djbclark.ade-progress"
 
 
-def _progress_plan(*, chosen: bool, live_labels=(), entry=None):
+def _progress_plan(fake, *, chosen: bool, live_labels=(), entry=None):
     import tomllib
     row = next(r for r in tomllib.loads((REPO / "config" / "install.toml").read_text())["install"]["jobs"]
                if r["name"] == "ade-progress")
@@ -1752,20 +1752,20 @@ def _progress_plan(*, chosen: bool, live_labels=(), entry=None):
     live = S.LiveScan("systemd", tuple(S.LiveJob(lab, "systemd", "generated", True) for lab in live_labels))
     ledger = {"entries": {"ade-progress": entry} if entry else {}}
     return S.plan_reconcile([row], [], ledger=ledger, live=live, backend_name="systemd", root=REPO, ade=REPO,
-                            env={}, platform_name="linux")
+                            env=fake.env, platform_name="linux")
 
 
 def _owned_entry():
     return {"owner": "djbclark-ade", "label": _PROGRESS_LABEL, "status": "committed", "backend": "systemd"}
 
 
-def test_unchosen_progress_row_plans_one_skip_and_nothing_else():
-    steps = _progress_plan(chosen=False)
+def test_unchosen_progress_row_plans_one_skip_and_nothing_else(fake):
+    steps = _progress_plan(fake, chosen=False)
     assert [(s.name, s.action, s.touch) for s in steps] == [("ade-progress", "skip", False)]
 
 
-def test_unchosen_progress_row_installed_without_ledger_is_reported_not_foreign_or_removed():
-    steps = _progress_plan(chosen=False, live_labels=[_PROGRESS_LABEL])
+def test_unchosen_progress_row_installed_without_ledger_is_reported_not_foreign_or_removed(fake):
+    steps = _progress_plan(fake, chosen=False, live_labels=[_PROGRESS_LABEL])
     live_steps = [s for s in steps if s.label == _PROGRESS_LABEL]
     assert len(live_steps) == 1
     s = live_steps[0]
@@ -1774,14 +1774,26 @@ def test_unchosen_progress_row_installed_without_ledger_is_reported_not_foreign_
     assert not any(x.action == "remove" for x in steps)
 
 
-def test_unchosen_ledger_owned_progress_row_is_unloaded_and_says_why():
-    steps = _progress_plan(chosen=False, live_labels=[_PROGRESS_LABEL], entry=_owned_entry())
+def test_unchosen_ledger_owned_progress_row_is_unloaded_and_says_why(fake):
+    steps = _progress_plan(fake, chosen=False, live_labels=[_PROGRESS_LABEL], entry=_owned_entry())
+    # exactly one step for the label: the remove, no contradictory "report only" step beside it
+    assert [s.action for s in steps if s.label == _PROGRESS_LABEL] == ["remove"]
     removes = [s for s in steps if s.action == "remove"]
     assert len(removes) == 1 and removes[0].label == _PROGRESS_LABEL and removes[0].touch
     assert "is not chosen" in removes[0].detail and "dropped from inventory" not in removes[0].detail
 
 
-def test_chosen_progress_row_missing_plans_install_and_present_with_ledger_plans_no_remove():
-    assert any(s.action == "install" and s.label == _PROGRESS_LABEL for s in _progress_plan(chosen=True))
-    steps = _progress_plan(chosen=True, live_labels=[_PROGRESS_LABEL], entry=_owned_entry())
+def test_unchosen_dependency_service_row_keeps_the_old_silent_path(fake):
+    # herdr-server (owner dependency, kind service) is not adoptable: a live copy must not get the "set chosen = true" report
+    row = {"name": "herdr-server", "kind": "service", "owner": "dependency", "class": "optional", "chosen": False,
+           "label": "dev.herdr.server", "platforms": ["mac", "linux"]}
+    live = S.LiveScan("systemd", (S.LiveJob("dev.herdr.server", "systemd", "file", True),))
+    steps = S.plan_reconcile([row], [], ledger={"entries": {}}, live=live, backend_name="systemd", root=REPO, ade=REPO,
+                             env=fake.env, platform_name="linux")
+    assert [(s.name, s.action) for s in steps] == [("herdr-server", "skip")]
+
+
+def test_chosen_progress_row_missing_plans_install_and_present_with_ledger_plans_no_remove(fake):
+    assert any(s.action == "install" and s.label == _PROGRESS_LABEL for s in _progress_plan(fake, chosen=True))
+    steps = _progress_plan(fake, chosen=True, live_labels=[_PROGRESS_LABEL], entry=_owned_entry())
     assert not any(s.action == "remove" for s in steps)
