@@ -79,7 +79,7 @@ R2-26. `bin/npm_metadata.py` and its test (0 refs): DELETE in E10.
     than an exception. The draft is signed agent messages plus operator-only approval tokens for a short list of
     high-impact actions. The Codex (astra) consultation waits until the end of this work.
   - (4) `1password`: a public generic copy goes in djbclark-ade. The private copy stays in site-private.
-  - (5) The Fable 5.1 review of `docs/slim/fable-review-later.md` runs now, through omp on the Mac. Its Group 1
+  - (5) The Fable 5.2 review of `docs/slim/fable-review-later.md` runs now, through omp on the Mac. Its Group 1
     cross-checks Argon's gate findings.
   - (6) Paseo features and plugins that cut how often agents need the operator are to be researched, without
     weakening the stance on outside content.

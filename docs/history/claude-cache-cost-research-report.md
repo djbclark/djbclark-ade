@@ -7,7 +7,7 @@ Data: the last 7 days of Claude Code transcripts on this Mac: 667 transcripts, 2
 
 ## 1. Correction first
 
-My earlier reply said cache reads were 71% of cost and navigation output at most 16%. Both figures priced every cache read at 0.1× base input. Opus 5.5 and Sonnet 5.5 reads cost 0.05× and Fable 5.1 reads 0.025×<sup>[1](#C1)</sup>, and 93% of our read tokens were on those models.
+My earlier reply said cache reads were 71% of cost and navigation output at most 16%. Both figures priced every cache read at 0.1× base input. Opus 5.5 and Sonnet 5.5 reads cost 0.05× and Fable 5.2 reads 0.025×<sup>[1](#C1)</sup>, and 93% of our read tokens were on those models.
 
 Repriced, the week cost about **$1,677 at list price**:
 
@@ -84,7 +84,7 @@ The "auto-compact skill" here is `claude/hooks/context_size_nudge.py` plus `bin/
 
 ## Outcome (2026-10-18, same day)
 
-A Fable 5.1 review checked this report, and everything it accepted or modified was then applied. It corrected the evidence in places: the 11k "MCP tools" row was exactly two Firecrawl servers; the skills row is a 1%-of-window budget, not a sum; idle compaction already fires at 200k.
+A Fable 5.2 review checked this report, and everything it accepted or modified was then applied. It corrected the evidence in places: the 11k "MCP tools" row was exactly two Firecrawl servers; the skills row is a 1%-of-window budget, not a sum; idle compaction already fires at 200k.
 
 1. 5.1 (handoff and `/new`): applied. `context_size_nudge.py` prints a once-per-session note at 150k. `self-slash` refuses a `/new` or `/compact` within 30 minutes of either.
 2. 5.2 (300k ceiling): applied. `autoCompactWindow` and the hook are at 300k; compaction fires at ~267k, the window less its 33k buffer.
@@ -113,7 +113,7 @@ Scripts: `bin/claude-cost-mix` (the cost split) and a what-if simulator of the T
 
 ## Citation footnotes
 
-1. <a id="C1"></a>C1 — Opus 5.5 and Sonnet 5.5 cache hits are 0.05× base input, Fable 5.1 0.025×; 1-hour writes 2×; no long-context premium — Anthropic pricing (docs; Anthropic), fetched 2026-10-18. <https://platform.claude.com/docs/en/about-claude/pricing>
+1. <a id="C1"></a>C1 — Opus 5.5 and Sonnet 5.5 cache hits are 0.05× base input, Fable 5.2 0.025×; 1-hour writes 2×; no long-context premium — Anthropic pricing (docs; Anthropic), fetched 2026-10-18. <https://platform.claude.com/docs/en/about-claude/pricing>
 2. <a id="C2"></a>C2 — `ENABLE_PROMPT_CACHING_1H` covers both buckets; per-bucket TTL env vars; a compaction while warm reads the cached prefix — Claude Code prompt caching (docs; Anthropic), fetched 2026-10-18. <https://code.claude.com/docs/en/prompt-caching>
 3. <a id="C3"></a>C3 — `idleCompaction` needs the 1-hour TTL, a 200,000-token default threshold and ~54 minutes idle; `CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS` (floor 100000) — Claude Code settings (docs; Anthropic), fetched 2026-10-18. <https://code.claude.com/docs/en/settings>
 4. <a id="C4"></a>C4 — "start a fresh session to execute it"; "`/clear` costs nothing" — Claude Code best practices (docs; Anthropic), fetched 2026-10-18. <https://code.claude.com/docs/en/best-practices>

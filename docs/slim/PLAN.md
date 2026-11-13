@@ -6,7 +6,7 @@ The agent launches and verifies its own successor; operator typing is never the 
 
 > **2026-11-11 preservation notice:** This document records historical slim-down work. Later restorations and dependency fixes supersede several removals. Read the [change inventory and preservation register](change-audit-2026-11-11.md), especially section B, before applying any deletion/uninstall step. `/watch load`, Pi, Firecrawl routing and required `agy` are among the intentional later changes; this is not authorization to revert them.
 
-Original lead: a Claude cloud session (Fable 5.1, effort high). Operator: djbclark.
+Original lead: a Claude cloud session (Fable 5.2, effort high). Operator: djbclark.
 Current coordination (operator, 2026-11-07): the local workhorse lead now owns both overall and local work,
 with Astra or Claude Opus 5.5 judgment delegated through the router when useful. The Claude-only ruling
 below records the original slim-down, not the later setup-plan work. See [the setup plan](../setup-plan.md).
@@ -138,7 +138,7 @@ finish the TUI retirement (E9 of this plan, E9i of the report); shrink the
 docs and the standing orders (E11); land the batch-1 PRs the rulings keep.
 
 B2. **Constraints** (operator, 2026-11-06). Claude cloud sessions; Claude
-agents only for this work (Haiku 5.5, Sonnet 5.5, Opus 5.5, Fable 5.1); one
+agents only for this work (Haiku 5.5, Sonnet 5.5, Opus 5.5, Fable 5.2); one
 long-lived branch, no PRs for the slices; prefer a Paseo feature, then a
 plugin, then an existing repo (whole or copied; relicensing allowed), over our
 own code; ask before copying external code, adopting a repo whole, or
@@ -623,7 +623,7 @@ naming every behaviour lost on purpose.
 
 ## G. Models, effort, context (confirmed against code.claude.com, 2026-11-06)
 
-G1. **Context.** Fable 5.1 runs at 1M by default; no `[1m]` variant exists
+G1. **Context.** Fable 5.2 runs at 1M by default; no `[1m]` variant exists
 for it (that suffix was for Opus 4.6 / Sonnet 4.6); `/context` shows the live
 window; `CLAUDE_CODE_DISABLE_1M_CONTEXT=1` is the only way to shrink it.
 Cloud sessions can set `/autocompact <tokens>`.
@@ -635,7 +635,7 @@ G2. **Effort.** Levels `low`–`max`; precedence `CLAUDE_CODE_EFFORT_LEVEL` >
 (2.1.316) pins it for every subagent; a subagent on another model uses that
 model's effort (2.1.317).
 
-G3. **Roster** (unchanged from v1): lead Fable 5.1 `high` (`xhigh` for the
+G3. **Roster** (unchanged from v1): lead Fable 5.2 `high` (`xhigh` for the
 ledger synthesis and the AGENTS.md rewrite, never `max`; fallback Opus 5.5
 `xhigh`); inventories Haiku 5.5 `low`; audits, research, deletion slices
 Sonnet 5.5 `medium`; rewrites and reviewers Opus 5.5 `high`; `maxTurns`
@@ -793,14 +793,14 @@ kept, local review by Claude.
 J9. [answered 2026-11-06: **park** until Wave 3 measures the native path;
 land only if a gap remains] PR 290 (`ade-recovery`): park until Wave 3
 measures native resume (R4), or land now?
-J10. [answered 2026-11-06: **a fresh cloud session**, Fable 5.1 at high,
+J10. [answered 2026-11-06: **a fresh cloud session**, Fable 5.2 at high,
 started with the K2 prompt once PR 295 lands; this session finishes PR 295
 and stops] Start the execution in this session, or in a fresh cloud session
 with the prompt in section K?
 
 ## K. Starting the work
 
-K1. **Recommendation: a fresh cloud session, Fable 5.1, effort high, on the
+K1. **Recommendation: a fresh cloud session, Fable 5.2, effort high, on the
 slim branch, with the prompt below.** This session's context is the research
 and the rulings, all of which are now on disk (`docs/slim/`); carrying it
 forward costs Fable-rate tokens on every turn for no decision it still

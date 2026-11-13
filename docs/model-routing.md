@@ -118,7 +118,7 @@ G2. Today's table (re-check with `bin/ade-model-tiers show`):
 
 | role | claude (rank 1) | codex (rank 2) |
 | --- | --- | --- |
-| frontier | `claude-fable-5-1` (`fable`) | `gpt-6-astra` |
+| frontier | `claude-fable-5-2` (`fable`) | `gpt-6-astra` |
 | judgment | `claude-opus-5-5` (`opus`) | `gpt-6.1-sol` |
 | everyday | `claude-sonnet-5-5` (`sonnet`) | `gpt-6.1-sol` |
 | bulk | `claude-haiku-5-5` (`haiku`) | `gpt-6-luna` |

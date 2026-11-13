@@ -33,7 +33,7 @@ public kit with their own private companion. The proposal is the agreed first st
    `docs/ade-everywhere-prior-art-2026-10-19.md` (three lines superseded by §12, not edited),
    `docs/ade-everywhere-codex-review-2026-10-19.md` (review of v1),
    `docs/ade-everywhere-review-evaluation-2026-10-19.md` (Opus digest of that review).
-3. Two advisory re-reviews of v2.1 are **running** (see Detached jobs): Fable 5.1 high and
+3. Two advisory re-reviews of v2.1 are **running** (see Detached jobs): Fable 5.2 high and
    Codex gpt-6-astra high, same brief, `--perm all`, role advise.
 4. Routing docs updated for the Codex $100 plan (aiuse plan label `prolite`, weekly 100%
    resets 2026-10-26): `docs/model-routing.md`, `skills/model-routing/SKILL.md`,
@@ -131,7 +131,7 @@ Directory `~/.local/state/agent-reports/ee9e515d-a74a-42f3-ba7f-3289a2417457/v21
    `ade-v21-review-claude-report.md`; done marker `ade-v21-review-claude-report.md.done`
    (absent at 13:46 EDT, status running, started 13:28); rearm
    `~/src/djbclark-ade/bin/acp-dispatch-wait <dir>/jobs/ade-v21-review-claude.json <dir>/ade-v21-review-claude-report.md.done`.
-   Advisory review of proposal v2.1 by Claude Fable 5.1 high; fold its findings into v2.2.
+   Advisory review of proposal v2.1 by Claude Fable 5.2 high; fold its findings into v2.2.
 2. Codex review: job `jobs/ade-v21-review-codex.json`; report
    `ade-v21-review-codex-report.md`; done marker `ade-v21-review-codex-report.md.done`
    (absent, running, started 13:28); rearm

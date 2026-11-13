@@ -58,7 +58,7 @@ AGENTS = [
     {"id": "aaaaaaa0-0000-0000-0000-000000000001", "title": "lead", "provider": "claude",
      "model": "claude-opus-5-5", "status": "running", "archivedAt": None},
     {"id": "bbbbbbb0-0000-0000-0000-000000000002", "title": None, "provider": "omp",
-     "model": "anthropic/claude-fable-5-1", "status": "idle", "archivedAt": "2026-10-20T00:00:00Z"},
+     "model": "anthropic/claude-fable-5-2", "status": "idle", "archivedAt": "2026-10-20T00:00:00Z"},
     {"id": "ccccccc0-0000-0000-0000-000000000003", "title": "child", "provider": "claude",
      "model": "claude-sonnet-5-5", "status": "running", "archivedAt": None, "parentAgentId": "aaaaaaa0"},
 ]
@@ -224,7 +224,7 @@ class TestNodeHalf(unittest.TestCase):
         self.assertEqual(rows, [
             {"id": AGENTS[0]["id"], "name": "lead", "provider": "claude", "model": "claude-opus-5-5",
              "status": "running", "archived": False},
-            {"id": AGENTS[1]["id"], "name": None, "provider": "omp", "model": "anthropic/claude-fable-5-1",
+            {"id": AGENTS[1]["id"], "name": None, "provider": "omp", "model": "anthropic/claude-fable-5-2",
              "status": "idle", "archived": True},
             {"id": AGENTS[2]["id"], "name": "child", "provider": "claude", "model": "claude-sonnet-5-5",
              "status": "running", "archived": False, "parentAgentId": "aaaaaaa0"},

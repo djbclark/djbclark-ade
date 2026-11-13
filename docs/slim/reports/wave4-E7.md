@@ -134,7 +134,7 @@ route_agent in prose only.
 
 ## E. model-routing and routing.toml after
 
-E1. `skills/model-routing/SKILL.md` (829 → 139 lines): A. Claude tiers by role (PLAN G: Fable 5.1 leads/architects/adversaries,
+E1. `skills/model-routing/SKILL.md` (829 → 139 lines): A. Claude tiers by role (PLAN G: Fable 5.2 leads/architects/adversaries,
 Opus 5.5 rewrites/reviewers, Sonnet 5.5 audits/deletions/inventories, Haiku 5.5 mechanical) with A6 flagging the conflict below;
 B. effort (levels, precedence, defaults, set sub-agent effort explicitly, the classification table, caching, the context window;
 from effort-routing); C. one row per surviving pool (its role and its "never"; ranks, kinds' models and numbers are left to

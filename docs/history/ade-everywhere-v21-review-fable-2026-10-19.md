@@ -1,6 +1,6 @@
 moved from docs/ on 2026-11-06 by the slim-down, E2
 
-# ADE everywhere v2.1 — advisory review (Claude Fable 5.1), 2026-10-19
+# ADE everywhere v2.1 — advisory review (Claude Fable 5.2), 2026-10-19
 
 Read-only. Inputs: `docs/ade-everywhere-proposal.md` (894 lines, §9 = 17 decisions, §12 = response to the first review), `docs/ade-everywhere-codex-review-2026-10-19.md`, `docs/ade-everywhere-review-evaluation-2026-10-19.md`, `docs/ade-everywhere-inventory-2026-10-19.md`, `AGENTS.md`, `README.md`, `tools/acp-run/README.md` ("What it adds", "Dispatch slice controls"). Local probes: `paseo --version` = 0.12.0; `~/.paseo/config.json` keys (`version, daemon{listen,hostnames,cors,relay}, app, agents, features`); `~/.local/share/opencode/opencode.db` 945.6 MB; `~/.hermes/state.db` 1.6 GB; `~/.codex/sessions -> ~/ops/site-private/.codex-runtime/sessions`; 554 Claude project dirs / 1435 top-level transcripts; repo `LICENSE` = MIT; `cass`, `chezmoi`, `syncthing` not on PATH. Web verification URLs are inline. Findings the v2 response already applied (§12) are not repeated; where a v2 fix was applied incompletely it is called out as a new finding.
 

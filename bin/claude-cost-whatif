@@ -32,7 +32,7 @@ Simulates what-if cache and compaction scenarios on local Claude Code transcript
      and subsequent reads carry preamble P rather than floor F (saving ~57.5k read tokens).
 
 Prices are API list-price dollars per model (PRICES, from platform.claude.com/docs/en/about-claude/pricing,
-2026-10-18): Opus 5.5 $4/MTok base, Sonnet 5.5 $2/MTok base, Fable 5.1 $10/MTok base; unknown models $1/MTok default;
+2026-10-18): Opus 5.5 $4/MTok base, Sonnet 5.5 $2/MTok base, Fable 5.2 (and 5.1) $10/MTok base; unknown models $1/MTok default;
 1h write 2.0x, 5m write 1.25x, output 5.0x.
 
 Exit codes:
@@ -59,7 +59,8 @@ sys.dont_write_bytecode = True
 PRICES = {
     "claude-opus-5-5": (4.0, 0.05),
     "claude-sonnet-5-5": (2.0, 0.05),
-    "claude-fable-5-1": (10.0, 0.025),
+    "claude-fable-5-2": (10.0, 0.025),  # 5.2 priced as 5.1 (unverified, 2026-11-13)
+    "claude-fable-5-1": (10.0, 0.025),  # kept: old transcripts
 }
 DEFAULT_PRICE = (1.0, 0.1)
 

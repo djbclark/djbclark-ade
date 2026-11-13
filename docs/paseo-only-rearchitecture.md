@@ -1,7 +1,7 @@
 # Paseo-only re-architecture (plan v1, 2026-10-30)
 
 Status: v1, the plan of record for the migration. v0 (2026-10-29, omp 086494f8) was refined by lead
-1e61c979 (chain `standalone-b457`) with two second opinions, codex astra (GPT-6) and Fable 5.1, two
+1e61c979 (chain `standalone-b457`) with two second opinions, codex astra (GPT-6) and Fable 5.2, two
 research passes, djbclark's answers in section F (2026-10-30), and the fixes for adversary
 round 1's findings on PR 154 (safety of probes, archive and drains; plugin scope and fail modes). Since 2026-11-07 `README.md`, `AGENTS.md` and `docs/orchestration-practices.md` describe today on Paseo (slim-down E11; D7 is superseded by its Waves 2-5); this plan records its rulings and the open phases (D1, D3, D8). Sources: section I.
 

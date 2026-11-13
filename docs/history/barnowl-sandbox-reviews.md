@@ -16,7 +16,7 @@ Perl as the operator. A SKILL.md prose rule is advice, not a boundary (Codex sec
 
 | Round | codex `gpt-6-astra` | Claude (claude TUI, monthly subscription) |
 |---|---|---|
-| Design | read-only advisor: threat model, verdict on four designs | Fable 5.1, same brief |
+| Design | read-only advisor: threat model, verdict on four designs | Fable 5.2, same brief |
 | Review 1 | BLOCK, 5 findings | Fable: BLOCK, 2 P1 |
 | Review 2 | cancelled at 67 s under load (two gaps noted) | Fable's safeguards declined; the harness retried on Opus 4.8: APPROVE |
 | Review 3 | BLOCK: resize race, session-name targeting, perl wrapper wording | not run |

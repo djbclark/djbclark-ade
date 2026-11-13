@@ -1346,7 +1346,7 @@ class TestRoutingPolicyToml(unittest.TestCase):
         with redirect_stdout(md):
             self.assertEqual(r.main(["policy", "--md"]), 0)
         self.assertIn("| lead.fable_lead | true |", md.getvalue())
-        self.assertIn("a Fable 5.1 lead is allowed", md.getvalue())
+        self.assertIn("a Fable 5.2 lead is allowed", md.getvalue())
 
     def test_a_lead_table_without_fable_lead_keeps_the_never_fable_rule(self):
         """Absent (an older file) or false: the 2026-10-23 rule; a non-boolean is refused, naming the file."""

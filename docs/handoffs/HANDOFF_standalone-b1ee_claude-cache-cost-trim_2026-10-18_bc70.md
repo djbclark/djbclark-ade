@@ -16,7 +16,7 @@ writer: claude-code
 ## The Goal
 
 djbclark asked whether graphify would save money compared with graft, and then how to cut Claude Code's
-cache cost ("3a"). The session measured where the money goes and had a Fable 5.1 review check the
+cache cost ("3a"). The session measured where the money goes and had a Fable 5.2 review check the
 recommendations. Then it implemented everything Fable accepted, ran a /doctor cleanup and a loose-ends
 sweep. **All of that is done, committed and pushed.** Only follow-up watching and three
 operator-deferred items remain.

@@ -33,7 +33,7 @@ Operator djbclark granted both waives on 2026-11-12 via question card to lead 8c
 - **Not done here (operator, no live `~/.claude` edits):** remove the live UserPromptSubmit `quota_nudge.py` line and the SessionStart `cswap_quota_context.sh` line from `~/.claude/settings.json`, and `rm ~/.claude/hooks/cswap_quota_context.sh` if present (`docs/slim/operator-batch.md` C5).
 - Carried #33's R2-18 clause closed in `docs/queue.md`; ruling text updated in `docs/slim/ledger-rulings.md`.
 
-## Wave 0 (2026-11-06, lead session 01BvGHM3M9bXWXHwGGHz6Ctd, Fable 5.1 high)
+## Wave 0 (2026-11-06, lead session 01BvGHM3M9bXWXHwGGHz6Ctd, Fable 5.2 high)
 
 Branch: the slim branch is `claude/determined-maxwell-uvddaz` (this session's designated branch), started at master e397dda (PR 295). `claude/cool-hopper-61dqzq` was PR 295's branch and is finished.
 

@@ -39,9 +39,9 @@ import tomllib
 ROLES: tuple[str, ...] = ("frontier", "judgment", "everyday", "bulk")
 SCHEMA = 1
 
-# Fail-safe copy of today's table (2026-11-09). Keep in sync with config/model-tiers.toml.
+# Fail-safe copy of today's table (2026-11-13). Keep in sync with config/model-tiers.toml.
 DEFAULTS: dict[str, Any] = {
-    "meta": {"schema": SCHEMA, "updated": "2026-11-09"},
+    "meta": {"schema": SCHEMA, "updated": "2026-11-13"},
     "rank": {
         "order": ["claude", "codex"],
         "since": "2026-10-26",
@@ -57,7 +57,7 @@ DEFAULTS: dict[str, Any] = {
                 r"(claude-[a-z]+-[0-9][\w.\[\]-]*|opus|sonnet|haiku|fable)$"
             ),
             "roles": {
-                "frontier": "claude-fable-5-1",
+                "frontier": "claude-fable-5-2",
                 "judgment": "claude-opus-5-5",
                 "everyday": "claude-sonnet-5-5",
                 "bulk": "claude-haiku-5-5",
@@ -94,10 +94,10 @@ DEFAULTS: dict[str, Any] = {
         },
     },
     "model": {
-        "claude-fable-5-1": {
+        "claude-fable-5-2": {
             "vendor": "claude",
             "alias": "fable",
-            "display": "Fable 5.1",
+            "display": "Fable 5.2",
         },
         "claude-opus-5-5": {
             "vendor": "claude",
@@ -119,7 +119,10 @@ DEFAULTS: dict[str, Any] = {
         "gpt-6.1-sol": {"vendor": "codex", "display": "GPT-6.1 Sol"},
         "gpt-6-luna": {"vendor": "codex", "display": "GPT-6 Luna"},
     },
-    "former": {},
+    "former": {
+        # Fable 5.1 held `frontier` until Fable 5.2 replaced it (operator 2026-11-13); classify() still knows the id.
+        "claude-fable-5-1": {"vendor": "claude", "last_role": "frontier", "until": "2026-11-13"},
+    },
 }
 
 _LOGGED: set[str] = set()

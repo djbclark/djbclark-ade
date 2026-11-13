@@ -5,7 +5,7 @@ moved from docs/ on 2026-11-06 by the slim-down, E2
 Proposal, version 2.4, 2026-10-20 (v2.3 of 2026-10-19 plus Q26, section 9.4). Status: **decided**: all twenty-six questions answered
 (section 9). v2.3 applies djbclark's round-3 answers (section 9.2), two of them against the
 recommendation (Q20, Q22). Implementation starts with Phase 0.
-v2.1 was reviewed the same day by Claude Fable 5.1
+v2.1 was reviewed the same day by Claude Fable 5.2
 ([ade-everywhere-v21-review-fable-2026-10-19.md](ade-everywhere-v21-review-fable-2026-10-19.md))
 and Codex `gpt-6-astra`
 ([ade-everywhere-v21-review-codex-2026-10-19.md](ade-everywhere-v21-review-codex-2026-10-19.md));
@@ -1264,7 +1264,7 @@ and LiteFS (topology), the SDK `SessionStore` (only for launches ADE owns), Tail
 Superset, OpenChamber, Happy and Conductor (weaker independence or one-harness lock-in), Nix for
 Macs, devbox, sops-nix and agenix (vps-primary only).
 
-### 12.2 Fable 5.1 and Codex reviews of v2.1 (seventeen merged findings)
+### 12.2 Fable 5.2 and Codex reviews of v2.1 (seventeen merged findings)
 
 Neither reviewer overturns a decision; every claim was checked at its source (the v21
 evaluation file).

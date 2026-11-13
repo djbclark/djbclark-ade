@@ -363,7 +363,7 @@ bin/claude-cost-whatif [--days N] [--project SUBSTR] [--root DIR] [--thresholds 
 - `--write W`: 1-hour cache write multiplier (default `2.0`).
 - `--write-5m W5`: 5-minute cache write multiplier (default `1.25`).
 - `--output O`: Output token multiplier (default `5.0`).
-- `--read R`: Override model cache-read multiplier (defaults to model list price: 0.05 Opus/Sonnet 5.5, 0.025 Fable 5.1).
+- `--read R`: Override model cache-read multiplier (defaults to model list price: 0.05 Opus/Sonnet 5.5, 0.025 Fable 5.2).
 - `--json`: Output structured JSON for automation.
 
 Exit codes: `0` success, `2` bad arguments/usage, `3` no transcripts in range. Tests: `tests/test_claude_cost_whatif.py`.

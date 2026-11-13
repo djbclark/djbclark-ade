@@ -16,7 +16,7 @@ writer: omp
 ## The Goal
 
 djbclark, 2026-10-21/23, in Paseo workspace `djbclark-ade-rework-2-pw` (agent `1dddc3ac`, omp
-`anthropic/claude-fable-5-1` high): find out why the Claude weekly window ran out on 2026-10-20
+`anthropic/claude-fable-5-2` high): find out why the Claude weekly window ran out on 2026-10-20
 (the Fable lead in `djbclark-ade-rework-p`, agent `6ebd939`), decide whether `aiuse` was wrong, and
 change routing so an orchestrator never exhausts Claude again (a weaker lead model, weaker
 sub-agents). Then own the two recommendation slices the peer lead had dispatched, drive them to

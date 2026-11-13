@@ -368,9 +368,9 @@ Total bin/ lines: 52256
 | `docs/ade-everywhere-prior-art-2026-10-19.md` | 98 | Prior art: reproducible, synchronized personal AI coding-agent environment (2026 |
 | `docs/ade-everywhere-proposal.md` | 1390 | ADE everywhere: one repo that recreates the whole agent environment on any machi |
 | `docs/ade-everywhere-review-evaluation-2026-10-19.md` | 98 | Codex review of ADE everywhere v1: accept/reject digest (2026-10-19) |
-| `docs/ade-everywhere-review-evaluation-v21-2026-10-19.md` | 230 | ADE everywhere v2.1: digest of the Fable 5.1 and Codex gpt-6-astra reviews, for  |
+| `docs/ade-everywhere-review-evaluation-v21-2026-10-19.md` | 230 | ADE everywhere v2.1: digest of the Fable 5.2 and Codex gpt-6-astra reviews, for  |
 | `docs/ade-everywhere-v21-review-codex-2026-10-19.md` | 272 | ADE everywhere v2.1 — advisory review |
-| `docs/ade-everywhere-v21-review-fable-2026-10-19.md` | 117 | ADE everywhere v2.1 — advisory review (Claude Fable 5.1), 2026-10-19 |
+| `docs/ade-everywhere-v21-review-fable-2026-10-19.md` | 117 | ADE everywhere v2.1 — advisory review (Claude Fable 5.2), 2026-10-19 |
 | `docs/agent-guard-contract.md` | 52 | Agent guard contract (2026-11-03) |
 | `docs/agent-sleep.md` | 215 | Sleeping idle agents — `herdr-sleeper` (herdr retired from djbclark-ade 2026-10- |
 | `docs/ai-memory-landscape.md` | 378 | AI memory: the six levels, where we are, and the wider field |

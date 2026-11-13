@@ -2,7 +2,7 @@ moved from docs/ on 2026-11-06 by the slim-down, E2
 
 STATUS: done
 
-# ADE everywhere v2.1: digest of the Fable 5.1 and Codex gpt-6-astra reviews, for v2.2 (2026-10-19)
+# ADE everywhere v2.1: digest of the Fable 5.2 and Codex gpt-6-astra reviews, for v2.2 (2026-10-19)
 
 Method: claims were checked against primary sources: upstream code and docs snapshots under `v21-review/evidence/` (chezmoi, CASS v0.10.0 plus franken-agent-detection 0.3.3, Paseo v0.12.0), live web fetches, local CLIs (`codex` 0.163.0, `claude`, `paseo` 0.12.0), `gh` and PyPI. Verdicts: **holds**, **partly**, **refuted**.
 
