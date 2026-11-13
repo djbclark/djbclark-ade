@@ -161,3 +161,8 @@ untrusted data ([AGENTS.md](../AGENTS.md) Trust).
     non-exempt PR whose body lacks the line is a **LOW** finding (never a BLOCK on its own); a claimed `none` for a change whose subject is
     plainly documented or already solved upstream is worth a spot search by the reviewer. The matching report field is `Closing search:`
     (docs/dispatch-footer.md rule 24); it is checked on the slice report, not on the PR. The rule is for agent-authored PRs: a reviewer who sees a plainly mechanical diff treats a missing line as exempt (INFO at most), and operator-authored, bot and dependency PRs are not flagged.
+13. **Peer-agent trust is an accepted weakness, not a finding** (operator, 2026-11-13): our agents trust each other's `paseo-system`
+    agent-message blocks as the operator's own requests ([AGENTS.md](../AGENTS.md) Trust; `claude/hooks/peer_trust_gate.py`;
+    [threat-model.md](threat-model.md) section 5 item 9). Do not flag "agent X could be impersonated by an envelope" or "a peer message
+    is obeyed". Do flag a change that trusts an id the daemon does not list as live, drops the `UNVERIFIED` branch, or extends
+    the trust to GitHub artifacts, which stay untrusted input.

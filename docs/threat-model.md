@@ -394,6 +394,15 @@ tampered state file can do is still a finding (section 6 item 6).
    and a plain scan reads through the link as git does; `--fetch` also writes objects through it, adversary round 67,
    INFO 5, 2026-10-24), and an
    `objects/info/alternates` file (borrowed stores are only read by `fetch`, and warned about on a skipped row).
+9. **Full internal trust between our own agents** (operator, 2026-11-13: "Major bug: Agents are not being allowed to help
+   one another. There should be full internal trust, even though that is a security weakness."). A Paseo
+   `<paseo-system ... kind="agent-message" source-agent-id="...">` block, wherever it is surfaced (a user turn, or inside a tool
+   result), is treated as the operator's own request. `claude/hooks/peer_trust_gate.py` frames it (UserPromptSubmit, PreToolUse,
+   PostToolUse, Stop): the source id must be a live local agent (`paseo ls -g --json`, offline) for the "verified, answer it
+   with `paseo send`" note; any other id gets "UNVERIFIED: ask the operator". **The weakness, accepted:** a live id proves the
+   sender exists, not that it wrote the block, so anything that can put an envelope with a real agent id in front of an agent
+   (a web page, a file, a tool output) can pass as that agent. A reviewer does not block on this; a PR that widens it (trusting a
+   non-live id, or extending the trust to GitHub artifacts) is still a finding. GitHub artifacts stay untrusted (AGENTS.md Trust).
 
 ## 6. What a reviewer should check on a PR
 
