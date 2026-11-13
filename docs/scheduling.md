@@ -436,8 +436,8 @@ all need it loaded), so exclusion is an unload of an *idle* job:
    unloaded until it is fixed. A reload that fails is reported on stderr with the command to run. A SIGKILL, SIGTERM or
    `bin/deadline` kill between the unload and install's `bootstrap` runs no restore; the job stays unloaded until the next
    reconcile, which plans the load because an unloaded launchd job is never healthy. No durable launchd override is ever left.
-6. **Loaded-from check**: a loaded job whose `print` `path =` is not `agents_dir/LABEL.plist` defers untouched, since the
-   restore could not bring that definition back.
+6. **Loaded-from check**: a loaded job whose `print` `path =` is not `agents_dir/LABEL.plist`, or whose plist is gone,
+   defers untouched, removal included, since the restore could not bring that definition back; stop such a job deliberately.
 7. **Label check**: a catalog `label` that differs from the plist `Label` is `blocked` at plan time and refused again before
    `install`, so the adapter can never admit one label while install boots out another.
 

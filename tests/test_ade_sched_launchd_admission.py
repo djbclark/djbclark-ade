@@ -55,7 +55,8 @@ if cmd == "print":
         print("something unexpected"); sys.exit(0)
     print(f"{argv[1]} = {{")
     print("\tactive count = 1")
-    print(f"\tpath = {read('path', label) or os.path.join(os.environ['ADE_SCHED_LAUNCH_AGENTS'], label + '.plist')}")
+    if not flag("no_path"):
+        print(f"\tpath = {read('path', label) or os.path.join(os.path.realpath(os.environ['ADE_SCHED_LAUNCH_AGENTS']), label + '.plist')}")
     print(f"\tstate = {read('state', label) or 'not running'}")
     if flag("pid", label): print(f"\tpid = {read('pid', label)}")
     print("\tresource coalition = {")
@@ -202,6 +203,8 @@ def _disabled(*rows):
     (_disabled('"other" => disabled', '"a.b" => enabled'), False),
     (_disabled('"other" => enabled'), False),
     (_disabled(), False),
+    (_disabled('"a.b" => enabled') + '\tlogin item associations = {\n\t\t"x" => com.y.app\n\t}\n', False),
+    (_disabled('"a.b" => disabled') + '\tlogin item associations = {\n\t\t"x" => com.y.app\n\t}\n', True),
     (_disabled('"a.b" => odd'), None),
     (_disabled('"a.b" => disabled,'), None),       # format drift on the operator's row: unreadable, never "enabled"
     (_disabled('a.b => disabled'), None),
@@ -330,6 +333,30 @@ def test_job_loaded_from_another_path_defers_untouched(ld):
     with _adapter(ld)(_step()) as ev:
         assert "loaded from /somewhere/else/job.plist" in (ev.refusal() or "")
     assert ld.loaded() and ld.verbs() == ["print"]
+
+
+def test_job_without_a_reported_path_defers_untouched(ld):
+    _existing(ld)
+    ld.flag("no_path")
+    with _adapter(ld)(_step()) as ev:
+        assert "unknown path" in (ev.refusal() or "")
+    assert ld.loaded() and ld.verbs() == ["print"]
+
+
+def test_loaded_job_whose_plist_is_gone_defers_untouched(ld):
+    _existing(ld, plist=False)
+    with _adapter(ld)(_step("remove")) as ev:
+        assert "cannot restore" in (ev.refusal() or "")
+    assert ld.loaded() and ld.verbs() == ["print"]
+
+
+def test_symlinked_agents_dir_still_matches_the_reported_real_path(ld):
+    link = ld.tmp / "agents-link"
+    link.symlink_to(ld.agents)
+    _existing(ld)  # the fake reports the resolved path; the adapter is given the symlinked directory
+    adapter = S.launchd_admission(launchctl=ld.launchctl, uid=ld.uid, agents_dir=link, env=ld.env)
+    with adapter(_step()) as ev:
+        assert ev.refusal() is None
 
 
 def test_absent_label_is_admitted_even_if_disabled(ld):

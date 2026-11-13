@@ -1979,10 +1979,11 @@ def parse_launchd_disabled(text: str, label: str) -> bool | None:
     """True/False: `label` is disabled/enabled in `launchctl print-disabled gui/UID`; None when the output is unreadable
     (no header, a row that is not `"label" => word`, an unknown word, or no closing brace). A label with no row is enabled."""
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-    if len(lines) < 2 or lines[0] != "disabled services = {" or lines[-1] != "}":
+    if not lines or lines[0] != "disabled services = {" or "}" not in lines:
         return None
+    block = lines[1:lines.index("}")]  # later blocks (e.g. login item associations) are not ours
     found: bool | None = False
-    for line in lines[1:-1]:
+    for line in block:
         m = _DISABLED_ROW_RE.fullmatch(line)
         if not m:
             return None
@@ -2020,7 +2021,8 @@ def launchd_admission(
        definition); a restore that fails is reported on `err` and left to the next run (the ledger shows the step as
        failed or pending, and the next reconcile plans the load). A SIGKILL or SIGTERM between the unload and install's
        bootstrap runs no restore and leaves the job unloaded until the next reconcile.
-    6. A loaded job whose `print` `path =` is not `agents_dir/LABEL.plist` defers (the restore could not bring it back).
+    6. A loaded job whose `print` `path =` is not `agents_dir/LABEL.plist`, or whose plist is gone, defers untouched
+       (the restore could not bring it back); that covers its removal too.
 
     The updater's own service (UPDATER_LABELS) reading busy keeps its existing refusal."""
     runner = run or _run
@@ -2057,9 +2059,9 @@ def launchd_admission(
         activity = parse_launchd_activity(text) if loaded else "idle"
         loaded_from = parse_launchd_path(text) if loaded else None
         if loaded and activity == "idle" and (
-            loaded_from is None or os.path.realpath(loaded_from) != os.path.realpath(plist)
+            loaded_from is None or os.path.realpath(loaded_from) != os.path.realpath(plist) or not plist.exists()
         ):
-            yield JobAdmission(hold=f"{label} is loaded from {loaded_from or 'an unknown path'}, not {plist}")
+            yield JobAdmission(hold=f"{label} is loaded from {loaded_from or 'an unknown path'}; {plist} cannot restore it")
             return
         if activity != "idle":
             yield JobAdmission(
@@ -2095,7 +2097,7 @@ def launchd_admission(
                 if rc != 0:
                     print(
                         f"ade-sched: could not reload {label} after reconcile (rc={rc}): {err_txt.strip()}; "
-                        f"run: launchctl bootstrap {domain} {plist}",
+                        f"if `launchctl print {target}` shows it absent, run: launchctl bootstrap {domain} {plist}",
                         file=err,
                     )
 
