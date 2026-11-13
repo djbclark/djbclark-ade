@@ -27,3 +27,7 @@ A lead's other top-level workers (started with `env -u PASEO_AGENT_ID -u PASEO_A
 paseo run …`, so they are not its descendants) carry `--label ade.lead=<lead agent id>`; without it
 `bin/ade-auto-permit` skips their permission prompts. A successor lead labels its own workers with its own id
 and runs the watcher with `--lead <its id>` (2026-11-13).
+
+Placement differs: workers go in the lead's one `workers <middle> <lead agent id>` window (`skills/fan-out` section 3,
+`docs/workspace-layout.md`), but a **successor is a new lead, not a worker**: it starts top-level in its own placement (not
+in the predecessor's workers window), then opens its own workers window under its own id (2026-11-13).

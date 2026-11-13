@@ -40,18 +40,20 @@ sub-agent's final message: the harness cuts that at 4,000 characters.
 ## 3. Out of process: a slice in its own worktree
 
 A slice that edits code gets its own linked worktree (AGENTS.md order 9:
-`git worktree add -b NAME ~/src/<repo>-NAME-wt origin/master`) and runs as a Paseo agent there.
+`git worktree add -b NAME ~/src/<repo>-NAME-wt origin/master`); the slice works in that worktree (its absolute path is in
+the brief) while its Paseo session sits in the lead's workers window (below).
 After `route_agent.py plan` / `route` and `load-watch admit` (machine capacity — not service quota):
 
 ```bash
 # Re-plan immediately before EACH launch when several slices share one quota pool
 # (plan/pool_fits do not yet reserve sibling in-flight usage; see model-routing D5).
 paseo run --provider PROVIDER/MODEL --no-wait \
-  --mode FULL_ACCESS_MODE --workspace wks_… --cwd ~/src/<repo>-NAME-wt \
+  --mode FULL_ACCESS_MODE --workspace wks_… --cwd ~/src/<repo> \
   --label ade.kind=KIND --label ade.name=NAME --label ade.lead=LEAD \
   --label ade.task=TASK \
   "$(cat brief-with-footer.md)"
-# or, minting for a claimed worktree: --new-workspace local --cwd ~/src/<repo>-NAME-wt …
+# the lead's FIRST launch has no workers window yet: replace --workspace wks_… with --new-workspace local --cwd ~/src/<repo>
+# (then rename the new window, below); every later launch passes --workspace of that window
 ```
 
 `--label ade.lead=LEAD` (LEAD = the lead's own full agent id) is mandatory for every worker, and above all for a
@@ -60,12 +62,35 @@ such a worker has no parent link to the lead, so `bin/ade-auto-permit` can only 
 (2026-11-13: worker 2c54cedf, launched env-stripped without the label, stalled 1h40m on a Bash permission prompt
 that the watcher skipped as `outside-scope`).
 
+**Placement: one workers window per lead (operator ruling, 2026-11-13; naming and limits in `docs/workspace-layout.md`).**
+The env-stripped launch has no caller workspace, so each `--new-workspace` launch made its own "master" window (11 piled up;
+archiving an agent keeps its window). Instead:
+
+1. First launch of the run: `env -u PASEO_AGENT_ID -u PASEO_AGENT_CWD -u PASEO_WORKSPACE_ID paseo run --new-workspace local
+   --cwd ~/src/<repo> …` creates the window. Take its id from the `Created workspace wks_… - <name>` line on stderr (to a
+   file, not a pipe) or the new agent's state file `$PASEO_HOME/agents/*/<agent id>.json` `workspaceId`: `paseo run --json`
+   returns no workspace id and `paseo workspace ls` cannot tell the new window from another lead's, so never pick one by
+   cwd or name. Record it, then name it: `paseo workspace rename wks_… "workers <middle> <lead agent id>"` (`<middle>` the
+   lead's choice, e.g. `djbclark-ade Wave 7`).
+2. Every later launch: the same env strip, `--workspace wks_… --cwd ~/src/<repo>` (the window's own cwd; the writer's
+   claimed worktree goes in its brief), never `--new-workspace`.
+3. After each launch, name the tab: `paseo agent update <full agent id> --name "worker <middle> <lead agent id>"` (singular
+   `worker`; tabs share a name, so always pass a full agent id).
+4. When the run ends, archive the agents, then the window (`paseo workspace archive wks_…`) only if every agent labelled
+   `ade.lead=<own id>` is archived or idle with its report handled (`paseo ls -a -g --json --label ade.lead=<own id>`), no
+   other live agent sits in the window, and the recorded window's name reads `workers … <own id>`: the archive stops every
+   live agent and terminal in the window, labelled or not.
+
+A handoff **successor** is a new lead, not a worker: it starts as `skills/handoff` says (its own top-level `paseo run`), keeps
+its own placement, and opens its own workers window under its own id.
+
 Always pass the provider-native unattended mode at launch (Codex `--mode full-access`): switching with `set_agent_mode full-access` mid-run did not stop repeated approval cards for graft MCP, commits, pushes, gh or bg tests on 2026-11-12; Pi exposes no selectable modes and omits the flag.
 
 Take `Choice.dispatch` from a **fresh** `route_agent.py plan` **as-is** (native `paseo run --provider …`), then append
 only placement flags and the positional brief (`paseo run` has no `--prompt-file`). Write the footer into
 the brief yourself. For parallel same-pool waves, re-plan (or stagger) so combined floor estimates stay under remaining. Create a workspace only with native `paseo workspace create` or
-`paseo run --new-workspace …` when deliberate — ordinary dispatch never mints workspaces.
+`paseo run --new-workspace …` when deliberate — ordinary dispatch never mints workspaces; the one routine mint is the
+lead's first launch of a run, which opens its workers window (above).
 As verified on 2026-11-07, agent-origin runs, or runs with `PASEO_WORKSPACE_ID` set, must explicitly select a workspace:
 `--cwd` alone inherits the parent agent's workspace and directory. Pass `--workspace` (validated against
 `paseo workspace ls --json` and `-C` / `--cwd`) and never emit `--new-workspace` on an ordinary launch.
@@ -78,9 +103,10 @@ For a review slice: Claude runs through `bin/review-launch` (the enforced review
 repository owner authored, which `bin/review-pr --runtime auto` decides, 2026-11-12); every other agent
 runs best effort, in its provider-native unattended mode with a brief note to change nothing (launch-mode correction 2026-11-12; review brief ruling 2026-11-07).
 
-The operator's temporary all-tabs-with-the-lead arrangement is described in `docs/workspace-layout.md`.
-Use the lead's existing workspace/session cwd for placement, while every writer's brief names a separate claimed
-execution worktree and every repository tool call targets it explicitly. Never turn a report folder into a workspace.
+The workers-window rule (2026-11-13) replaced the operator's temporary all-tabs-with-the-lead arrangement of 2026-11-07;
+naming, limits and `cwd` are in `docs/workspace-layout.md`. Session cwd is the workers window's `cwd`, while every writer's
+brief names a separate claimed execution worktree and every repository tool call targets it explicitly. Never turn a
+report folder into a workspace.
 
 ## 4. Collect
 
@@ -111,13 +137,14 @@ Three independent fixes in one repository, one review:
 1. Lead writes `a.md`, `b.md`, `c.md` (one owner per file set, the check each slice runs) and three
    worktrees `~/src/r-a-wt`, `~/src/r-b-wt`, `~/src/r-c-wt`.
 2. For each slice, take `route_agent.py plan --kinds code`'s `Choice.dispatch` and run it with
-   `--workspace <workspace-a|b|c> --cwd ~/src/r-<name>-wt --label ade.name=<name> --label ade.task=fixes`
-   plus the positional brief (agent and model from the plan).
+   `--workspace <the lead's workers window> --cwd ~/src/r --label ade.name=<name> --label ade.task=fixes`
+   plus the positional brief (agent and model from the plan; the brief names the slice's worktree `~/src/r-<name>-wt`
+   as an absolute path).
 3. While they run, the lead does its own part (standing order 3), then `paseo wait` on each agent id.
 4. A BLOCKED report: answer with `paseo send --json --no-wait`, or re-brief under a new `--label ade.name=…`.
 5. Each DONE slice: review its diff, push its branch, open the PR; one read-only review per PR through
    `bin/review-launch` (Claude) or a judgment `paseo run` brief that says change nothing, in the same
-   claimed workspace/cwd as the slice.
+   workers window, its brief naming the slice's worktree.
 
 ## 6. Avoid operator permission cards (2026-11-12)
 
