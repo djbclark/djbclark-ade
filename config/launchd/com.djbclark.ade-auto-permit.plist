@@ -4,6 +4,7 @@
 <plist version="1.0"><dict>
   <key>Label</key><string>com.djbclark.ade-auto-permit</string>
   <key>ProgramArguments</key><array>
+    <string>__ADE__/bin/ade-job-run</string><string>com.djbclark.ade-auto-permit</string><string>--</string>
     <string>__ADE__/bin/ade-auto-permit</string>
     <string>--lead</string><string>__LEAD__</string>
     <string>--log</string><string>__STATE__/auto-permit.jsonl</string>

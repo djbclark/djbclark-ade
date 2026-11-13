@@ -9,6 +9,7 @@
   <key>Label</key><string>com.djbclark.keys-check</string>
   <key>ProgramArguments</key>
   <array>
+    <string>__ADE__/bin/ade-job-run</string><string>com.djbclark.keys-check</string><string>--</string>
     <string>__ADE__/bin/ade-install</string>
     <string>keys</string>
     <string>--root</string>

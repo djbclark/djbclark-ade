@@ -1,0 +1,48 @@
+#!/usr/bin/env -S python3 -I
+"""ade-job-run LABEL -- COMMAND [ARG...]: the launch path every ADE launchd job goes through (W21c, 2026-11-13).
+
+Each run takes a SHARED, non-blocking flock on the job's admission lock (`<jobs state dir>/admission/LABEL.lock`) and
+keeps it for the whole run: the descriptor is inherited by the exec'd command, so the lock lives exactly as long as the
+command and anything it leaves running. `ade-sched reconcile` takes the same lock EXCLUSIVE, without waiting, before it
+unloads a loaded job to update or remove it. That gives both sides what they need:
+
+  1. reconcile cannot get the lock while a run is in flight: it defers (exit 6) and never waits, never kills;
+  2. while reconcile holds it, a run that launchd starts here cannot get the shared lock: it logs one line, exits 0
+     without running the command and launchd retries on its own schedule.
+
+If the lock cannot be taken for any other reason (no state directory, a replaced lock file) the command is NOT run and
+the exit status is 75: running unlocked would let reconcile unload it mid-run. The command is exec'd, so signals,
+exit status and launchd's process accounting are the command's own.
+"""
+import os
+import sys
+
+sys.path[:0] = [d for d in (os.path.dirname(os.path.realpath(__file__)),) if d not in sys.path]   # python3 -I has no script dir
+import ade_sched  # noqa: E402
+
+EX_TEMPFAIL = 75
+
+
+def main(argv: list[str]) -> int:
+    if len(argv) < 4 or argv[2] != "--" or not ade_sched.LABEL_RE.fullmatch(argv[1]):
+        print("usage: ade-job-run LABEL -- COMMAND [ARG...]", file=sys.stderr)
+        return 2
+    label, cmd = argv[1], argv[3:]
+    try:
+        fd = ade_sched.acquire_admission_lock(label, exclusive=False, env=os.environ)
+    except (OSError, ade_sched.SchedError) as exc:
+        print(f"ade-job-run: {label}: admission lock unavailable ({exc}); not running", file=sys.stderr)
+        return EX_TEMPFAIL
+    if fd is None:
+        print(f"ade-job-run: {label}: reconcile holds the admission lock; skipped this run", file=sys.stderr)
+        return 0
+    os.set_inheritable(fd, True)   # the command keeps the shared lock until it (and anything it leaves running) exits
+    try:
+        os.execvp(cmd[0], cmd)
+    except OSError as exc:
+        print(f"ade-job-run: {label}: cannot run {cmd[0]}: {exc}", file=sys.stderr)
+        return 127
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

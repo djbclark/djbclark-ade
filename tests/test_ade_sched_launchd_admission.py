@@ -54,6 +54,8 @@ cmd = argv[0]
 label = argv[1].rsplit("/", 1)[-1] if len(argv) > 1 else ""
 if flag("fail", cmd):
     sys.stderr.write("fake failure\n"); sys.exit(int(read("fail", cmd) or 1))
+if flag("fail_once", cmd):   # fail the next call of this verb only
+    drop("fail_once", cmd); sys.stderr.write("fake failure once\n"); sys.exit(5)
 if cmd == "print":
     if not flag("loaded", label):
         n = int(read("load_after_absent_print") or 0)   # "the Nth not-loaded answer is followed by an outside loader"
@@ -68,6 +70,8 @@ if cmd == "print":
     print(f"{argv[1]} = {{")
     print("\tactive count = 1")
     print(f"\tstate = {read('state', label) or 'not running'}")
+    pth = read("path", label) or (os.path.join(os.environ["FAKE_AGENTS"], label + ".plist") if os.environ.get("FAKE_AGENTS") else None)
+    if pth: print(f"\tpath = {pth}")
     if flag("pid", label): print(f"\tpid = {read('pid', label)}")
     print("\tresource coalition = {")
     print("\t\tstate = active")   # nested decoy: only the service block's own fields count
@@ -80,6 +84,8 @@ elif cmd == "bootout":
     if read("pid", label):
         write("1", "killed", label)
     drop("loaded", label)
+    if flag("sigterm_after_bootout"):   # the reconcile process is terminated between bootout and bootstrap
+        import signal; os.kill(os.getppid(), signal.SIGTERM); import time; time.sleep(5)
 elif cmd == "bootstrap":
     base = os.path.basename(argv[2])[:-len(".plist")]
     if flag("loaded", base):
@@ -105,6 +111,7 @@ def ld(tmp_path):
         "HOME": str(tmp_path / "home"),
         "USER": "tester",
         "FAKE_LD": str(root),
+        "FAKE_AGENTS": str(tmp_path / "agents"),
         "ADE_TIMEZONE": "America/New_York",
         "ADE_SCHED_LAUNCHCTL": str(launchctl),
         "ADE_SCHED_LAUNCH_AGENTS": str(tmp_path / "agents"),
@@ -669,7 +676,9 @@ def test_every_native_removal_defers_and_keeps_file_and_ledger(ld, loaded, hash_
     rows, rc = _reconcile_removal(ld, root, catalog, label)
     assert rc == 6 and any(r["action"] == "deferred" for r in rows), rows
     assert plist.exists() and "skillopt-sleep" in _entries(ld)
-    assert ld.loaded(label) is loaded and ld.verbs() == [] and not ld.killed(label)
+    # W21c: the adapter may now read `print` to look for wrapper routing, but a job that does not route through
+    # ade-job-run still gets no mutating call at all.
+    assert ld.loaded(label) is loaded and set(ld.verbs()) <= {"print"} and not ld.killed(label)
 
 
 def test_adopts_a_loaded_low_level_install_without_any_launchctl_mutation(ld):

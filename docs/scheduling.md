@@ -444,19 +444,56 @@ admission enables exactly the writes that cannot kill or overwrite under concurr
    check-and-overwrite atomic): it defers untouched, as does any foreign, replaced, non-UTF-8 or non-regular file.
 3. **Adoption** of a loaded job whose plist byte-matches the render stays a ledger-only record (`adopted`), with no
    `launchctl` call and no admission (nothing is mutated on the host).
-4. **Loaded job, any state**: defers untouched (`parse_launchd_activity` only words the reason). **Every removal** defers
-   before any `launchctl` call: an unlink cannot be compare-and-swap.
-5. **Renames and retirements** of launchd jobs stay deferred (exit 6): the removal of the old label defers, and the same
-   logical job's new-label install then defers behind it, until the follow-up below exists.
+4. **Loaded job, any state**: defers untouched (`parse_launchd_activity` only words the reason) **unless it is
+   wrapper-routed and provably ADE's**; see "Wrapper-routed jobs (W21c)" below. A removal defers unless the same proof holds.
+5. **Renames and retirements** of launchd jobs defer (exit 6) unless the old label is wrapper-routed and provably ADE's
+   (then its removal runs under the lock first and the new label installs as an absent job); a removal that defers
+   keeps the same logical job's new-label install deferred behind it.
 6. **Label check** and **blocked rows**: a catalog `label` that differs from the plist `Label` is `blocked` at plan time
    and refused again before install. A blocked logical row (missing or unrenderable source, label mismatch) keeps its
    current and prior identities: `plan_reconcile` emits no removal for them (this protects low-level callers too).
 
 The updater's own service (`com.djbclark.ade-update-check`) running keeps its existing refusal reason.
 
-**Follow-up that unlocks the rest** (loaded-job reloads, replacements, removals): an ADE job wrapper that takes a shared
-admission lock on every run, with reconcile holding it exclusive, plus a writer ownership transaction so every definition
-writer shares the check-and-write. **Known limits:** a concurrent external loader can still bootstrap an absent or
+### Wrapper-routed jobs (W21c, 2026-11-13)
+
+Every ADE launchd job in `config/launchd/com.djbclark.*.plist` now starts through `bin/ade-job-run LABEL -- COMMAND...`
+(`dev.herdr.server`, a KeepAlive server with a hard-coded path, is not migrated). Each run takes a **shared**,
+non-blocking `flock` on `<jobs state dir>/admission/LABEL.lock` and keeps it for the whole run (the lock descriptor is
+inherited by the exec'd command, so it lives as long as the command or anything it leaves running). If it cannot, because
+reconcile holds the lock exclusively, it logs one line to the job's stderr and exits 0 without running the command (launchd
+tries again on its own schedule). If the lock cannot be used for any other reason the command is not run (exit 75).
+
+For a **loaded** job, `launchd_admission(wrapped=...)` admits a reload or a removal only when all of these hold, each read
+at admission: (a) the INSTALLED plist bytes parse and route every launch through the wrapper (`ProgramArguments` is
+`[<abs>/ade-job-run, LABEL, "--", command...]`, an existing executable wrapper, no `Program` key; the render is not
+trusted); (b) the ledger row is ADE's, `committed` (for a reload) or `committed`/`pending-remove` (for a removal), backend
+launchd, with the artifact hash of those very bytes; (c) `launchctl print` says it was loaded from that plist (`path =`).
+It then takes the label's lock **exclusive, non-blocking**: held by a run means busy, so the step defers (never wait, never
+kill); acquired means no run is active and none can start. The lock stays held across the whole mutation and is released
+only after the ledger commit.
+
+Mutation order (`reload_launchd_locked`): a private copy of the prior bytes and a durable recovery record in
+`<state dir>/admission/`, then `bootout` (with proof it unloaded; if not, nothing changed and the step defers), the new
+bytes by atomic replace, `bootstrap`, read-back. A failure after the unload restores and bootstraps the **prior** bytes
+(`ReloadRolledBack`: the ledger keeps the old committed row and the run exits 1), or, if that also fails, keeps the record
+and exits 1. A SIGTERM, deadline kill or crash cannot run any cleanup, so the record is the guarantee: every `reconcile`
+first acts on records (`recover_launchd_records`; `--dry-run` lists them as `would-recover`): a loaded label clears a stale
+record; an unloaded label whose plist is still the prior (or the new) bytes is bootstrapped and its ledger row made
+committed for what is loaded; a plist that is neither is someone else's and is left alone (row `failed`, record kept).
+Removal (`remove_launchd_locked`) re-hashes the file under the lock right before the unload, uses the same record while
+the job is loaded, and restores it if the unlink or read-back fails.
+
+**A job not routed through the wrapper keeps #619's deferral, so every existing install defers (exit 6) until it is
+migrated once.** Migration is the operator's call, at a quiet time: the stock plists changed, so the old bytes differ from
+the render and reconcile will not reload them (a loaded job without the wrapper has no launch exclusion). Re-run the
+low-level `ade-sched install PLIST` for each job (it boots the job out and in, as it always did), after which reconcile
+adopts or reloads it normally.
+
+Not covered by the lock: a run launchd has spawned whose wrapper has not yet taken the shared lock when reconcile takes it
+(the wrapper has done no work, so the unload loses none); a writer that changes the plist between our byte-match and the
+write or unlink (the re-hash narrows this window under the lock but, with no writer-side transaction, cannot close it);
+and a job that is not an ADE job. **Known limits:** a concurrent external loader can still bootstrap an absent or
 unloaded job (this path then fails or defers and never boots it out); another writer that changes an unloaded file between
 the byte-match read and `bootstrap` gets its definition loaded (nothing is overwritten); an operator-disabled
 (`launchctl disable`), unloaded ADE job is admitted, its `bootstrap` fails and the ledger row becomes `failed`; and, a limit that
