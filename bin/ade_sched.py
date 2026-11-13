@@ -1216,6 +1216,44 @@ def _foreign_candidate(label: str) -> bool:
     return any(label.startswith(p) for p in FOREIGN_PREFIXES)
 
 
+_UNREADABLE: Any = object()   # sentinel: the entry vanished or cannot be read; the scan skips it
+_NON_REGULAR: Any = object()  # sentinel: a FIFO, socket, device or directory; reported, never opened
+_HEAD_BYTES = 4096
+
+
+def _unit_head(path: Path) -> Any:
+    """First 4 KiB of a unit/plist file for the live scan, without ever blocking on it (B1, 2026-11-13).
+
+    A FIFO (or a symlink to one) planted among the `*.plist` files used to hang `reconcile`, because `read_text` opens
+    it for reading and waits for a writer. Now: `lstat` (and `stat` for a symlink) must say regular file before any
+    open; the open is `O_NONBLOCK` (plus `O_NOFOLLOW` unless the entry is a symlink to a regular file, which the scan
+    has always followed) and `fstat` on the descriptor must say regular again, closing the lstat-to-open race. The read
+    is bounded. Returns the text, `_NON_REGULAR` for an entry that is not a regular file (never opened) or `_UNREADABLE`."""
+    try:
+        lst = os.lstat(path)
+        is_link = stat.S_ISLNK(lst.st_mode)
+        st = os.stat(path) if is_link else lst
+    except OSError:
+        return _UNREADABLE
+    if not stat.S_ISREG(st.st_mode):
+        return _NON_REGULAR
+    flags = os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
+    if not is_link:
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError:
+        return _UNREADABLE
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return _NON_REGULAR
+        return os.read(fd, _HEAD_BYTES).decode("utf-8", errors="replace")
+    except OSError:
+        return _UNREADABLE
+    finally:
+        os.close(fd)
+
+
 def list_backend_labels(backend: str | Backend | None = None, *, env: Mapping[str, str] | None = None,
                         **overrides: Any) -> list[LiveJob]:
     """All on-disk labels for the active backend (ade-sched generated and sibling unit/plist files)."""
@@ -1237,9 +1275,11 @@ def list_backend_labels(backend: str | Backend | None = None, *, env: Mapping[st
         d = c.agents_dir
         if d.is_dir():
             for p in sorted(d.glob("*.plist")):
-                try:
-                    head = p.read_text(errors="replace")[:4096]
-                except OSError:
+                head = _unit_head(p)
+                if head is _UNREADABLE:
+                    continue
+                if head is _NON_REGULAR:
+                    out.append(LiveJob(p.stem, "launchd", "non-regular", None))
                     continue
                 src = "generated" if GENERATED in head else "file"
                 st = status(p.stem, c.backend, env=c.env, agents_dir=c.agents_dir, launchctl=c.launchctl)
@@ -1249,9 +1289,11 @@ def list_backend_labels(backend: str | Backend | None = None, *, env: Mapping[st
     d = c.units
     if d.is_dir():
         for p in sorted(d.glob("*.service")):
-            try:
-                head = p.read_text(errors="replace")[:4096]
-            except OSError:
+            head = _unit_head(p)
+            if head is _UNREADABLE:
+                continue
+            if head is _NON_REGULAR:
+                out.append(LiveJob(p.stem, "systemd", "non-regular", None))
                 continue
             src = "generated" if GENERATED in head else "file"
             st = status(p.stem, c.backend, env=c.env, unit_dir=c.units, systemctl=c.systemctl)
