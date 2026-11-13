@@ -2393,24 +2393,61 @@ def loaded_wrapper_problem(print_out: str, label: str, lock_dir: Path, ade_root:
 LOADED_ABSENT, LOADED_CANONICAL, LOADED_RESTART = "absent", "canonical", "restart"
 
 
+_PRINT_PROPERTIES_RE = re.compile(r"\tproperties = (.*)")
+
+
+def parse_launchd_keepalive(text: str) -> bool:
+    """True when the LOADED definition shows KeepAlive in `launchctl print` (the service block, one tab deep): a boolean KeepAlive
+    prints as a `properties = keepalive | ...` line, a dict KeepAlive as a `semaphores = {` block. launchd never re-reads an
+    edited plist, so this, not the file, says whether the running job is a KeepAlive service."""
+    for line in text.splitlines()[1:]:
+        line = line.rstrip("\r")
+        if line == "\tsemaphores = {":
+            return True
+        m = _PRINT_PROPERTIES_RE.fullmatch(line)
+        if m and "keepalive" in {t.strip() for t in m.group(1).split("|")}:
+            return True
+    return False
+
+
+def _runs_wrapper(argv: list[str]) -> bool:
+    """True when any element of the loaded argv is (a name for) `ade-job-run`, or the argv contains a `--lock-dir DIR LABEL --`
+    sequence anywhere: a symlink or copy under another name, an interpreter or `sh -c` in front of it (W21d review B3)."""
+    for i, a in enumerate(argv):
+        if JOB_RUN_WRAPPER in a:   # the wrapper by name, also inside `sh -c 'exec .../ade-job-run ...'`
+            return True
+        if os.path.basename(os.path.realpath(a)) == JOB_RUN_WRAPPER:   # a symlink under another name
+            return True
+        if a == "--lock-dir" and i + 3 < len(argv) and argv[i + 3] == "--":   # a copy under another name
+            return True
+    return False
+
+
 def _restart_service_problem(print_out: str, plist: Path, label: str) -> tuple[str | None, bytes | None]:
     """`--restart-service`'s proof that the LOADED job is a KeepAlive service: (problem, bytes parsed), the problem None only when
-      1. the loaded program is not an `ade-job-run` (a wrapper-shaped argv whose lock identity is not the canonical one holds a lock
-         this writer does not: it is `migrate-wrapper`'s job, never a restart; W21d review F2);
-      2. the INSTALLED file is regular, parses, is this label's, has no `Program` key, and its `ProgramArguments` equal the
+      1. no element of the loaded argv is an `ade-job-run` (under any name, or a `--lock-dir DIR LABEL --` sequence): a wrapped
+         argv whose lock identity is not the canonical one holds a lock this writer does not; it is `migrate-wrapper`'s job,
+         never a restart (W21d reviews F2, B3);
+      2. the LOADED definition itself shows KeepAlive in `launchctl print` (`parse_launchd_keepalive`; B1);
+      3. the loaded `path =` is the installed plist (realpath compared; B2);
+      4. the INSTALLED file is regular, parses, is this label's, has no `Program` key, and its `ProgramArguments` equal the
          `arguments` of `launchctl print` with `program == arguments[0]` (launchd never re-reads an edited file, so the file's
-         KeepAlive counts only when the file provably IS the loaded definition; F3). A KeepAlive-only edit of an otherwise
-         identical file cannot be told apart: that limit is documented;
-      3. that file's KeepAlive is truthy.
+         KeepAlive counts only when the file provably IS the loaded definition; F3);
+      5. that file's KeepAlive is truthy.
     The bytes returned are the ones parsed, so the caller hashes exactly what was checked (F4)."""
     program, args = parse_launchd_definition(print_out)
     if not args:
         return "launchctl print shows no arguments for the loaded definition", None
-    if os.path.basename(args[0]) == JOB_RUN_WRAPPER:
+    if _runs_wrapper(args):
         return (f"the loaded definition runs through {JOB_RUN_WRAPPER} with a lock identity that is not proven canonical, so its runs may hold "
                 f"a lock this writer does not; --restart-service never restarts a wrapped job (use `ade-sched migrate-wrapper PLIST`)"), None
     if program is None or program != args[0]:
         return f"the loaded definition runs program {program!r}, not {args[0]!r}", None
+    if not parse_launchd_keepalive(print_out):
+        return f"the loaded definition of {label} is not a KeepAlive service: launchctl print shows no KeepAlive for it (a file edited after the load does not count)", None
+    loaded_path = parse_launchd_path(print_out)
+    if not loaded_path or os.path.realpath(loaded_path) != os.path.realpath(plist):
+        return f"the loaded definition came from {loaded_path!r}, not the installed plist {plist}", None
     try:
         data = read_regular_bytes(plist)
     except OSError as exc:

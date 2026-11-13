@@ -1149,7 +1149,9 @@ def _service(ld, *, label=HERDR, tag="alpha", keep_alive=True, args=None, extra=
     """A herdr-like service definition (an absolute program, no wrapper): KeepAlive or a plain StartInterval job."""
     import plistlib
     d = {"Label": label, "ProgramArguments": args or ["/usr/bin/true", tag], "RunAtLoad": True, **(extra or {})}
-    if keep_alive:
+    if keep_alive == "bool":
+        d["KeepAlive"] = True
+    elif keep_alive:
         d["KeepAlive"] = {"SuccessfulExit": False}
     else:
         d["StartInterval"] = 300
@@ -1257,7 +1259,7 @@ def test_w21d_f2_a_loaded_wrapped_job_with_another_lock_dir_is_never_restarted(l
 @pytest.mark.parametrize("diverge", ["other-arguments", "program-key"])
 def test_w21d_f3_a_file_that_is_not_the_loaded_definition_does_not_prove_keepalive(ld, who, diverge):
     import plistlib
-    job, plist = _loaded_service(ld, keep_alive=False)         # loaded: NOT KeepAlive
+    job, plist = _loaded_service(ld)                           # loaded: a KeepAlive service (so only the file check can refuse)
     d = {"Label": HERDR, "ProgramArguments": ["/usr/bin/true", "alpha"], "KeepAlive": True}
     if diverge == "other-arguments":
         d["ProgramArguments"] = ["/usr/bin/true", "alpha", "edited"]
@@ -1286,6 +1288,113 @@ def test_w21d_f4_the_restart_uninstall_reads_the_plist_once_and_an_oserror_is_a_
     with pytest.raises(S.SchedError, match="cannot be read"):
         S.uninstall(HERDR, "launchd", env=ld.env, restart_service=True)
     assert plist.exists() and ld.loaded(HERDR) and not KILLERS & set(ld.verbs())
+
+
+@pytest.mark.parametrize("who", ["install", "uninstall"])
+def test_w21d_b1_a_keepalive_only_edit_of_the_file_does_not_make_a_loaded_job_a_keepalive_service(ld, who):
+    import plistlib
+    job, plist = _loaded_service(ld, keep_alive=False)         # loaded: a StartInterval job
+    d = plistlib.loads(plist.read_bytes())
+    d["KeepAlive"] = True                                      # the file is edited after the load: same arguments, now KeepAlive
+    plist.write_bytes(plistlib.dumps(d))
+    ld.mark("state", HERDR, "running")
+    ld.mark("pid", HERDR, "4242")                              # a run is in flight: a bootout would kill it
+    with pytest.raises(S.SchedError, match="launchctl print shows no KeepAlive for it"):
+        S.install(_service(ld, tag="bravo"), "launchd", env=ld.env, restart_service=True) if who == "install" \
+            else S.uninstall(HERDR, "launchd", env=ld.env, restart_service=True)
+    assert ld.loaded(HERDR) and not ld.killed(HERDR) and not KILLERS & set(ld.verbs())
+
+
+def test_w21d_b1_the_loaded_keepalive_is_read_from_launchctl_print_boolean_or_dict_and_not_from_decoys():
+    assert S.parse_launchd_keepalive("l = {\n\tproperties = keepalive | runatload\n}\n")
+    assert S.parse_launchd_keepalive("l = {\n\tsemaphores = {\n\t\tsuccessful exit => 0\n\t}\n}\n")
+    assert not S.parse_launchd_keepalive("l = {\n\tproperties = runatload | inferred program\n}\n")
+    assert not S.parse_launchd_keepalive("l = {\n\tproperties = keepalive_not | x\n}\n")
+    assert not S.parse_launchd_keepalive("l = {\n\tstate = running\n\tother = {\n\t\tproperties = keepalive\n\t\tsemaphores = {\n\t}\n\t}\n}\n")
+
+
+def test_w21d_restart_service_also_restarts_a_boolean_keepalive_service(ld):
+    job, plist = _loaded_service(ld, keep_alive="bool")
+    S.install(_service(ld, tag="bravo", keep_alive="bool"), "launchd", env=ld.env, restart_service=True)
+    assert b"bravo" in plist.read_bytes() and ld.verbs().count("bootout") == 1 and ld.loaded(HERDR)
+
+
+@pytest.mark.parametrize("who", ["install", "uninstall"])
+def test_w21d_b2_a_job_loaded_from_another_path_is_not_the_installed_plist(ld, who):
+    job, plist = _loaded_service(ld)                           # a KeepAlive file with the same arguments as the loaded job
+    ld.mark("path", HERDR, "/elsewhere/dev.herdr.server.plist")   # but launchd loaded it from somewhere else
+    ld.mark("state", HERDR, "running")
+    ld.mark("pid", HERDR, "4242")
+    with pytest.raises(S.SchedError, match="came from '/elsewhere/dev.herdr.server.plist'"):
+        S.install(_service(ld, tag="bravo"), "launchd", env=ld.env, restart_service=True) if who == "install" \
+            else S.uninstall(HERDR, "launchd", env=ld.env, restart_service=True)
+    assert plist.exists() and ld.loaded(HERDR) and not ld.killed(HERDR) and not KILLERS & set(ld.verbs())
+
+
+def test_w21d_b2_the_loaded_path_is_compared_by_realpath(ld, tmp_path):
+    job, plist = _loaded_service(ld)
+    link = tmp_path / "agents-link"
+    link.symlink_to(ld.agents)
+    ld.mark("path", HERDR, str(link / plist.name))             # the same file under another spelling
+    S.install(_service(ld, tag="bravo"), "launchd", env=ld.env, restart_service=True)
+    assert b"bravo" in plist.read_bytes() and ld.loaded(HERDR)
+
+
+@pytest.mark.parametrize("who", ["install", "uninstall"])
+def test_w21d_f1_a_loaded_keepalive_service_whose_file_is_no_longer_keepalive_is_refused(ld, who):
+    import plistlib
+    job, plist = _loaded_service(ld)                           # loaded: KeepAlive
+    d = plistlib.loads(plist.read_bytes())
+    del d["KeepAlive"]                                         # the file now says "not a service" (same arguments)
+    plist.write_bytes(plistlib.dumps(d))
+    with pytest.raises(S.SchedError, match="is not a KeepAlive service \\(--restart-service"):
+        S.install(_service(ld, tag="bravo"), "launchd", env=ld.env, restart_service=True) if who == "install" \
+            else S.uninstall(HERDR, "launchd", env=ld.env, restart_service=True)
+    assert ld.loaded(HERDR) and not KILLERS & set(ld.verbs())
+
+
+@pytest.mark.parametrize("who", ["install", "uninstall"])
+@pytest.mark.parametrize("shape",["symlink", "copy", "env", "sh-c"])
+def test_w21d_b3_a_wrapper_under_another_name_is_never_restarted(ld, tmp_path, who, shape):
+    old_dir = tmp_path / "old-admission"
+    tail = ["--lock-dir", str(old_dir), HERDR, "--", "/usr/bin/true", "alpha"]
+    if shape == "symlink":
+        link = tmp_path / "job-run"
+        link.symlink_to(WRAPPER)
+        args = [str(link), "/usr/bin/true", "alpha"]                 # only its realpath says what it is
+    elif shape == "copy":
+        copy = tmp_path / "jobrun"
+        copy.write_bytes(Path(WRAPPER).read_bytes())
+        args = [str(copy), *tail]                                    # only the --lock-dir DIR LABEL -- sequence says what it is
+    elif shape == "env":
+        args = ["/usr/bin/env", str(WRAPPER), *tail]
+    else:
+        args = ["/bin/sh", "-c", f"exec {WRAPPER} --lock-dir {old_dir} {HERDR} -- /usr/bin/true alpha"]
+    job, plist = _loaded_service(ld, args=args)
+    before = plist.read_bytes()
+    run = _hold_label_run(ld, HERDR, old_dir)                  # a run holds the OLD directory's lock shared
+    try:
+        with pytest.raises(S.SchedError, match="never restarts a wrapped job"):
+            S.install(_service(ld, tag="bravo"), "launchd", env=ld.env, restart_service=True) if who == "install" \
+                else S.uninstall(HERDR, "launchd", env=ld.env, restart_service=True)
+        assert run.poll() is None and plist.read_bytes() == before and ld.loaded(HERDR)
+        assert not KILLERS & set(ld.verbs()) and not ld.killed(HERDR)
+    finally:
+        _stop(run)
+
+
+def test_w21d_b4_the_restart_install_rechecks_the_file_under_the_lock(ld, monkeypatch):
+    job, plist = _loaded_service(ld)
+    real = S.reload_launchd_locked
+
+    def swapped(*a, **k):                                      # the file changes after the proof, before the locked reload reads it
+        plist.write_bytes(plist.read_bytes() + b"<!-- edited -->")
+        return real(*a, **k)
+
+    monkeypatch.setattr(S, "reload_launchd_locked", swapped)
+    with pytest.raises(S.SchedError, match="no longer the ledger's artifact|left untouched"):
+        S.install(_service(ld, tag="bravo"), "launchd", env=ld.env, restart_service=True)
+    assert ld.loaded(HERDR) and not KILLERS & set(ld.verbs()) and b"bravo" not in plist.read_bytes()
 
 
 def test_w21d_restart_service_without_activation_is_refused_it_is_a_bootout(ld):
@@ -1403,6 +1512,18 @@ def test_w21d_the_ade_sched_cli_forwards_restart_service_to_install_and_uninstal
     r = _child_cli(ld, "uninstall", HERDR)
     assert r.returncode == 1 and plist.exists() and ld.loaded(HERDR)
     r = _child_cli(ld, "uninstall", HERDR, "--restart-service")
+    assert r.returncode == 0, r.stderr
+    assert not plist.exists() and not ld.loaded(HERDR)
+
+
+def test_w21d_b5_the_ade_sched_cli_takes_restart_service_before_the_subcommand_too(ld):
+    job, plist = _loaded_service(ld)
+    bravo = ld.tmp / "svc-src" / f"{HERDR}-bravo.plist"
+    _service(ld, tag="bravo")
+    r = _child_cli(ld, "--restart-service", "install", str(bravo))
+    assert r.returncode == 0, r.stderr
+    assert b"bravo" in plist.read_bytes() and ld.loaded(HERDR)
+    r = _child_cli(ld, "--restart-service", "uninstall", HERDR)
     assert r.returncode == 0, r.stderr
     assert not plist.exists() and not ld.loaded(HERDR)
 

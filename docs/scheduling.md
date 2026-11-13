@@ -519,13 +519,16 @@ cannot be installed or uninstalled by `ade-sched` while LOADED, with one excepti
 **`--restart-service` (W21d, 2026-11-13): a deliberate service restart, not paid-work-safe.** `ade-sched install PLIST --restart-service` and
 `ade-sched uninstall LABEL --restart-service` (low-level `install(..., restart_service=True)` / `uninstall(..., restart_service=True)`; launchd only)
 are the ONLY way to replace or remove a LOADED job whose loaded definition is not canonical-wrapped, and only for a KeepAlive service that is
-NOT running through `ade-job-run`. The LOADED side must prove it (`_restart_service_problem`, review F1-F4 of W21d): the loaded program is not an
-`ade-job-run` (any wrapper-shaped loaded argv whose lock identity is not the canonical one is refused outright, because its runs may hold another
-directory's lock: use `migrate-wrapper`), and the INSTALLED file (read once as bytes, parsed with `plistlib`) is regular, has this Label and no `Program` key,
-its `ProgramArguments` equal the `arguments` that `launchctl print` shows for the loaded job with `program == arguments[0]` (launchd never re-reads an
-edited file, so the file's `KeepAlive` counts only when the file provably IS the loaded definition; `launchctl print` does not show KeepAlive, so a
-KeepAlive-only edit of an otherwise identical file is an undetectable limit), and its `KeepAlive` is truthy. An install additionally requires the NEW
-definition's `KeepAlive` to be truthy (both sides, never only the new one). The remove/replace re-hashes exactly the bytes that were checked. Without the
+NOT running through `ade-job-run`. The LOADED side must prove it (`_restart_service_problem`, reviews F1-F4 and B1-B3 of W21d): no element of the loaded argv
+is an `ade-job-run` (by name, through a symlink or copy under another name, behind `env` or `sh -c`, or as a `--lock-dir DIR LABEL --` sequence anywhere: such a
+loaded argv's runs may hold another directory's lock, so use `migrate-wrapper`); `launchctl print` of the LOADED job itself shows KeepAlive (a boolean
+KeepAlive prints as a `properties = keepalive | ...` line, a dict KeepAlive as a `semaphores = {` block; launchd never re-reads an edited file, so a
+KeepAlive added to the file after the load does not count); its `path =` is the installed plist (realpath compared); and the INSTALLED file (read once as
+bytes, parsed with `plistlib`) is regular, has this Label and no `Program` key, its `ProgramArguments` equal the `arguments` that `launchctl print` shows
+for the loaded job with `program == arguments[0]`, and its `KeepAlive` is truthy. "KeepAlive service" means any truthy KeepAlive, conditional dicts
+(`SuccessfulExit`, `PathState`, ...) included, even on a job that also has a `StartInterval`: the operator who passes the flag owns that judgment. An install
+additionally requires the NEW definition's `KeepAlive` to be truthy (both sides, never only the new one). The flag acts on ANY loaded KeepAlive user agent the
+operator names, ADE-owned or not (`uninstall LABEL --restart-service` boots out and deletes it, as the unloaded `uninstall` always could delete any plist). The remove/replace re-hashes exactly the bytes that were checked. Without the
 flag, and for any job that fails these proofs even with it, the command refuses exactly as before (exit 1, nothing written). With it the `bootout` WILL stop the running service: nothing
 protects its in-flight work, so use it only for a service whose restart is acceptable. The safety it keeps: the label's canonical lock is
 held exclusive without waiting (a busy lock still refuses, the flag never bypasses it), the durable recovery record and the prior-bytes

@@ -86,6 +86,9 @@ if cmd == "print":
         print(f"\tprogram = {a.splitlines()[0]}"); print("\targuments = {")
         for x in a.splitlines(): print("\t\t" + x)
         print("\t}")
+    ka = read("ka", label)   # the LOADED KeepAlive, recorded at bootstrap like real launchd prints it (a boolean as `properties`, a dict as `semaphores`)
+    if ka == "bool": print("\tproperties = keepalive | runatload")
+    elif ka == "dict": print("\tsemaphores = {"); print("\t\tsuccessful exit => 0"); print("\t}")
     if flag("pid", label): print(f"\tpid = {read('pid', label)}")
     print("\tresource coalition = {")
     print("\t\tstate = active")   # nested decoy: only the service block's own fields count
@@ -97,7 +100,7 @@ elif cmd == "bootout":
     # killing running work is the one thing admission must never cause
     if read("pid", label):
         write("1", "killed", label)
-    drop("loaded", label); drop("args", label)
+    drop("loaded", label); drop("args", label); drop("ka", label)
     if flag("sigterm_after_bootout"):   # the reconcile process is terminated between bootout and bootstrap
         import signal; os.kill(os.getppid(), signal.SIGTERM); import time; time.sleep(5)
 elif cmd == "bootstrap":
@@ -106,9 +109,12 @@ elif cmd == "bootstrap":
         sys.stderr.write("Bootstrap failed: 5: Input/output error\n"); sys.exit(5)
     touch("loaded", base)
     import plistlib
-    try: pa = plistlib.load(open(argv[2], "rb")).get("ProgramArguments") or []
-    except Exception: pa = []
+    try: d = plistlib.load(open(argv[2], "rb"))
+    except Exception: d = {}
+    pa = d.get("ProgramArguments") or []
     write("\n".join(pa), "args", base)
+    k = d.get("KeepAlive")
+    if k: write("dict" if isinstance(k, dict) else "bool", "ka", base)
 sys.exit(0)
 """
 

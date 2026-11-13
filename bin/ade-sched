@@ -23,8 +23,9 @@ options (before or after the subcommand):
   --name NAME           reconcile: limit to these logical job names (repeatable)
   --no-activate         install/uninstall/reconcile: write or remove the files, print the activation commands instead of running them
   --restart-service     launchd install/uninstall of a LOADED job that is not canonical-wrapped: allowed ONLY for a KeepAlive service that does
-                        not run through bin/ade-job-run (the installed file must be the loaded definition, with a truthy KeepAlive; an install
-                        also needs the new definition's KeepAlive), as a deliberate service restart. The bootout STOPS the running service
+                        not run through bin/ade-job-run (the LOADED definition must itself show KeepAlive, and the installed file must be the
+                        loaded definition, at the loaded path, with a truthy KeepAlive: any truthy KeepAlive counts, conditional dicts
+                        included, ADE-owned or not; an install also needs the new definition's KeepAlive), as a deliberate service restart. The bootout STOPS the running service
                         (not paid-work-safe); the prior bytes and a recovery record are saved first and the prior definition is loaded again if
                         the new one fails (if that fails too the service stays down: the error prints the manual steps). Otherwise the job is
                         refused (exit 1). No effect on a canonical-wrapped job, systemd or cron; --no-activate is refused (exit 2) only when it
@@ -101,6 +102,7 @@ def _common(p: argparse.ArgumentParser, top: bool) -> None:
     p.add_argument("--name", action="append", metavar="NAME", dest="names" if top else "sub_names", **dflt([]))
     p.add_argument("--no-activate", action="store_true", **dflt(False))
     p.add_argument("--allow-no-linger", action="store_true", **dflt(False))
+    p.add_argument("--restart-service", action="store_true", **dflt(False))
     p.add_argument("--json", action="store_true", **dflt(False))
 
 
@@ -116,8 +118,6 @@ def parse(argv: list[str]) -> argparse.Namespace:
         _common(sp, top=False)
         if arg:
             sp.add_argument(arg, nargs=nargs) if nargs else sp.add_argument(arg)
-        if name in ("install", "uninstall"):
-            sp.add_argument("--restart-service", action="store_true")
     a = ap.parse_args(argv)
     a.subst = [*a.subst, *getattr(a, "sub_subst", [])]   # --set before and after the subcommand both count
     a.names = [*a.names, *getattr(a, "sub_names", [])]
