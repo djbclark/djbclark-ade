@@ -1,0 +1,3 @@
+### Added
+
+- Added the `ade-progress` row to `config/install.toml` `[[install.jobs]]` (slice 1b of `docs/persistent-progress-reminder-design.md`, 2026-11-12): `kind = "ade-sched"`, label `com.djbclark.ade-progress`, `class = "optional"`, `chosen = false`, so `ade-sched diff`, `just doctor` and `reconcile` stay quiet and install nothing until the operator installs the job and sets `chosen = true`, after which doctor expects the label. Merging loads nothing. Updated the plist template comment, the design doc status (A0, G3) and `docs/scheduling.md` (install and uninstall commands), and replaced the "not inventoried" test with row and doctor-expectation tests. (#PR)

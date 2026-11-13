@@ -143,10 +143,20 @@ built-in (heartbeat, schedule) fits without a model turn per firing. It adds no 
 yet; it never restarts a closed or errored session.
 
 Slice 1 (2026-11-12) ships [`bin/ade-progress`](../bin/ade-progress) (`declare`, `retire`, `scan`, `inbox`, `ack`;
-state-changing commands default to `--dry-run`) and an **uninstalled** template,
-`config/launchd/com.djbclark.ade-progress.plist` (`scan --yes` every 300 s). There is no
-`config/install.toml` row and no loaded job: slice 1b adds both after the operator has seen
-`ade-progress scan --dry-run` on real declarations.
+state-changing commands default to `--dry-run`) and the template
+`config/launchd/com.djbclark.ade-progress.plist` (`scan --yes` every 300 s). Slice 1b (2026-11-12) adds the
+`config/install.toml` row `ade-progress` (`kind = "ade-sched"`, `class = "optional"`, `chosen = false`): while unchosen,
+`ade-sched diff`, `just doctor` and `reconcile` stay quiet and install nothing. Merging loads nothing. To enable it, from the
+canonical checkout (a job installed from a linked worktree is refused):
+
+```
+bin/ade-sched render config/launchd/com.djbclark.ade-progress.plist     # review first
+bin/ade-sched install config/launchd/com.djbclark.ade-progress.plist --ade ~/src/djbclark-ade
+bin/ade-sched status com.djbclark.ade-progress
+```
+
+then set `chosen = true` on the row (a one-line change, through a workspace) so doctor expects the label. The log is
+`~/.local/state/djbclark-ade/progress/scan.log`; `bin/ade-sched uninstall com.djbclark.ade-progress` removes the job.
 
 Judgment jobs live in `paseo schedule`, not ade-sched. Inventory rows (`kind = "paseo"`) record the
 intended name, cron, `--mode`, and (for hard `context-budget`) provider/cwd/prompt for reconcile.
