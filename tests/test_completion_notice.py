@@ -312,6 +312,53 @@ def test_footer_and_teaching_require_the_shape():
     assert "atomic `<done>.ack` disk artifact" in agents
 
 
+@pytest.mark.parametrize("parent", ["main", "team-lead"])
+def test_send_to_agent_tool_parent_is_a_noop(parent, monkeypatch, capsys):
+    """2026-11-13: footer-following Agent-tool sub-agents ran `--requester main` and got "Agent not found: main"."""
+    def boom(argv):
+        raise AssertionError("paseo send must not run for an Agent-tool parent")
+
+    monkeypatch.setattr(mod, "run_send", boom)
+    rc = mod.main(["--send", "--requester", parent, "--title", "T", "--status", "DONE", "--sender", SENDER])
+    out = capsys.readouterr()
+    assert rc == 0
+    assert json.loads(out.out) == {"status": "skipped", "result": "agent-tool-parent", "requester": parent,
+                                   "exit_code": 0}
+    assert "Agent-tool parent" in out.err and "nothing sent" in out.err
+
+
+def test_cli_send_to_main_succeeds_without_paseo_or_sender(tmp_path):
+    """End to end: no paseo binary on the path and no sender id (the sub-agent's env may lack both)."""
+    r = run_cli("--send", "--requester", "main", "--title", "T", "--status", "DONE", "--sender", "",
+                "--paseo", str(tmp_path / "no-paseo"))
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout)["result"] == "agent-tool-parent"
+
+
+def test_send_to_main_still_validates_fields(capsys):
+    assert mod.main(["--send", "--requester", "main", "--title", "a, b", "--status", "DONE"]) == 2
+    assert "title" in capsys.readouterr().err
+    assert mod.main(["--send", "--requester", " main\n", "--title", "T", "--status", "DONE"]) == 0
+
+
+def test_print_to_main_still_prints_the_shape():
+    r = run_cli("--print", "--requester", "main", "--title", "T", "--status", "DONE", "--sender", SENDER)
+    assert r.returncode == 0 and r.stdout.startswith("done: T, DONE\n")
+
+
+def test_real_paseo_requester_still_sends(monkeypatch, capsys):
+    seen = []
+    monkeypatch.setattr(mod, "run_send", lambda argv: (seen.append(list(argv)) or (0, json.dumps({"status": "queued"}), "")))
+    rc = mod.main(["--send", "--requester", REQUESTER, "--title", "T", "--status", "DONE", "--sender", SENDER])
+    assert rc == 5 and seen and REQUESTER in seen[0]
+
+
+def test_footer_tells_agent_tool_sub_agents_to_skip_the_notice():
+    footer = FOOTER.read_text()
+    assert "If `{lead}` is `main` or `team-lead` you are an Agent-tool sub-agent: skip this rule" in footer
+    assert "Agent not found: main" in footer
+
+
 @pytest.mark.parametrize("with_disk", [False, True])
 def test_lead_ack_failed_send_requires_a_successful_route(tmp_path, monkeypatch, with_disk):
     monkeypatch.setattr(mod, "wait_for_idle", lambda *a, **kw: True)

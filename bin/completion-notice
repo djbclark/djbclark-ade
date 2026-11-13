@@ -22,6 +22,9 @@ Per Operator Ruling 2026-11-12, completion delivery proof uses BOTH routes:
   (b) Disk ack: The lead atomically writes `<done-path>.ack` next to the worker's done file.
 Every notice and ack carries a unique message ID (UUID) for deduplication.
 
+A requester of `main` or `team-lead` is the parent of a Claude Code Agent-tool sub-agent, not a Paseo agent:
+--send then sends nothing, says so, and exits 0 (the Agent tool already returns the final message).
+
 Exit codes:
   0: Success (printed, sourceless delivery, verified disk ack, or lead ack completed)
   5: Agent send accepted by Paseo (queued, delivery pending peer ack per order 10; not an error)
@@ -42,6 +45,11 @@ import sys
 import time
 from typing import Any, Sequence
 import uuid
+
+# SendMessage names for the parent of a Claude Code Agent-tool sub-agent. They are not Paseo agent ids:
+# `paseo send` to them fails with "Agent not found: main" (2026-11-13), and the Agent tool already
+# returns the sub-agent's final message to its parent, so there is nothing to push.
+AGENT_TOOL_PARENTS = frozenset({"main", "team-lead"})
 
 # One line: "done: <title>, <detail>" with an optional ", <report>" third field.
 # Title and detail must be non-empty and must not themselves introduce a newline.
@@ -343,6 +351,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not args.requester or not args.title or not detail_s:
         sys.stderr.write("completion-notice: --requester, --title, and (--pr | --status) are required\n")
         return 2
+
+    if args.do_send and args.requester.strip() in AGENT_TOOL_PARENTS:
+        # An Agent-tool sub-agent has no Paseo requester id; its final message reaches the parent through the
+        # Agent tool itself. Succeed without sending so a footer-following sub-agent is not told it failed.
+        requester = args.requester.strip()
+        try:  # same field validation as a real send; the sender id may be absent here, so use a stand-in
+            build_message(title=args.title, detail=detail_s, report=args.report,
+                          sender=args.sender or "agent-tool", msg_id=args.msg_id)
+        except ValueError as e:
+            print(f"completion-notice: {e}", file=sys.stderr)
+            return 2
+        print(json.dumps({"status": "skipped", "result": "agent-tool-parent", "requester": requester,
+                          "exit_code": 0}))
+        sys.stderr.write(
+            f"completion-notice: requester '{requester}' is the Agent-tool parent, not a Paseo agent id; "
+            "nothing sent. The Agent tool returns your final message to it (an agent-team teammate uses "
+            "SendMessage instead). For a Paseo requester pass its agent id (from `paseo ls -g`).\n")
+        return 0
 
     try:
         message = build_message(
