@@ -75,7 +75,7 @@ race after the final check; the CLI has no conditional-send transaction.
 Exit codes: 0 completed scan/watch, 2 invalid usage or unreadable CLI/state,
 3 lock held for a one-shot (watch retries at the next interval). The unloaded template
 `config/launchd/com.djbclark.ade-net-resume.plist` runs a one-shot **dry-run with `--quota`**
-every minute (operator ruling, 2026-11-13). Render it with `ade-sched render ... --set __LEAD__=UUID
+every minute (template update, 2026-11-12). Render it with `ade-sched render ... --set __LEAD__=UUID
 --set __STATE__=/absolute/log/dir`; installing requires a deliberate operator
 action, and enabling sends also requires adding `--apply` to the template.
 The scheduler render fixtures supply `__LEAD__` using the same substitution
@@ -89,8 +89,9 @@ agent's provider; Pi pools (z.ai, OpenCode Go, ClinePass) have none, and a daemo
 agent into `closed` with its `lastError` gone (design `design-quota-resume.md`, W10 evidence, 2026-11-12). `--quota`
 (off by default) adds a second pass after the network pass. The network path, its `DENIED` regex and its 30-minute
 rule are unchanged, and it still rejects every quota message. The launchd template includes `--quota`
-but stays **dry-run**, with no `--apply` (operator ruling, 2026-11-13). Enabling sends remains a separate
-operator decision (order 11); reinstalling the template after merge enables quota observations only.
+but stays **dry-run**, with no `--apply` (template update, 2026-11-12). Enabling sends remains a separate
+operator decision (order 11); reinstalling the template after merge runs the quota pass in dry-run mode and logs
+`would-resume-quota` decisions without sending resume prompts.
 
 ```
 bin/ade-net-resume --lead LEAD_UUID --quota --only-agent CANARY_UUID --watch 3600 --interval 60
@@ -171,7 +172,7 @@ before the send, the lock, dry-run unless `--apply`, the scan deadline) plus:
 beside it.
 
 The quota implementation slice (2026-11-12) did not change the launchd plist or run a canary or live `--apply`.
-The template update (2026-11-13) adds only dry-run quota scanning; it installs or loads nothing.
+The template update (2026-11-12) adds only dry-run quota scanning; it installs or loads nothing.
 
 Offline tests use a fake Paseo executable, a fake `aiuse` and mocked endpoint health. CI runs
 them on Linux; no real agent is resumed by the tests.

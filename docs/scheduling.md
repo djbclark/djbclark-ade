@@ -43,12 +43,13 @@ Checked-in ADE jobs under `config/launchd/` include `com.djbclark.deadline-sweep
 ```
 
 The `com.djbclark.ade-net-resume` template runs a one-shot network and quota scan
-every minute with `--quota`, **dry-run only** (no `--apply`; operator ruling,
-2026-11-13). After merge, the lead must reinstall the updated template from the
-canonical checkout; a source change alone does not update the installed job:
+every minute with `--quota`, **dry-run only** (no `--apply`; template update,
+2026-11-12). After merge, the lead must reinstall the updated template from the
+canonical checkout, replacing `LEAD_UUID` with the intended lead UUID. A source
+change alone does not update the installed job:
 
 ```sh
-bin/ade-sched --set __LEAD__=8cd86203-d33b-49db-abde-9baba52bcf61 --set __STATE__=$HOME/.local/state/ade/net-resume install config/launchd/com.djbclark.ade-net-resume.plist
+bin/ade-sched --set __LEAD__=LEAD_UUID --set __STATE__=$HOME/.local/state/ade/net-resume install config/launchd/com.djbclark.ade-net-resume.plist
 ```
 
 This command activates the dry-run job; it does not enable resumes. See
