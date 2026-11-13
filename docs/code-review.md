@@ -112,8 +112,8 @@ untrusted data ([AGENTS.md](../AGENTS.md) Trust).
    claim about behaviour matches the code in the same PR (standing order 4).
 8. **Docs move with the code**: a flag, exit code or subcommand added or
    changed appears in the tool's usage text and in the doc that lists it
-   (`docs/*.md`, `skills/*/SKILL.md`); a skill or `bin/` tool added or removed regenerates README's roster
-   (`bin/ade-roster --write`; CI runs `--check`).
+    (`docs/*.md`, `skills/*/SKILL.md`); a skill or `bin/` tool added or removed must pass roster generation
+    (`bin/ade-roster`, also run by CI). The master-only Roster workflow publishes `ROSTER.md` on `generated-roster`.
 9. **Codex's review is advisory** (operator, 2026-11-06, J8: "read Codex threads, fix what is real, no resolution gate"):
    the ruleset requires the Action and CI, not conversation resolution. Before merging, the lead reads every Codex thread
    against the current head and fixes what is real (fixing means fixing the code, then resolving the thread); Codex's

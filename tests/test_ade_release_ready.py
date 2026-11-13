@@ -316,3 +316,11 @@ def test_this_checkout_smoke_does_not_tag():
     rep = json.loads(r.stdout)
     assert rep["plan"]["performed"] == []
     assert "v0.1.0" == rep["plan"]["tag"]
+
+
+def test_roster_generation_accepts_readme_with_published_link(tmp_path):
+    repo = make_ready_repo(tmp_path)
+    (repo / "README.md").write_text("[Roster](https://example.com/ROSTER.md)\n")
+    r = run(repo, "--json")
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert json.loads(r.stdout)["checks"]["ade_roster"]["rc"] == 0

@@ -24,7 +24,8 @@ It checks:
    Fragment files alone are not enough: an interrupted fold can leave fragments whose
    entries already sit under a dated section.
 2. **CI** — `.github/workflows/test.yml` and `adversary-marker.yml` are present;
-   trusted `ade-roster --check` passes (same local gate CI's `context-policy` runs);
+    trusted `ade-roster` generation passes (same local gate CI's `context-policy` runs);
+    the master-only Roster workflow publishes `ROSTER.md` on `generated-roster` after merges;
    inspected `bin/ade-roster` is present as content settle (not executed).
 3. **`ade-update`** — inspected `bin/ade-update` exists and advertises `--check`;
    sibling `bin/changelog-fold` is present (content settle; not executed).

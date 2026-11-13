@@ -20,7 +20,7 @@ Checks (queue Carried #15: "tag once CI, rule 10 and ade-update are settled"):
      at least one `- ` entry — fragment presence alone is not enough (interrupted-fold
      recovery can leave only already-shipped entries)
   2. CI     — `.github/workflows/test.yml` and `adversary-marker.yml` are present;
-     trusted `ade-roster --check` passes (the same local gate CI's context-policy runs);
+     trusted `ade-roster` passes (the same local gate CI's context-policy runs);
      inspected `bin/ade-roster` is present (content settle; not executed)
   3. ade-update — inspected `bin/ade-update` and sibling `bin/changelog-fold` exist;
      ade-update's usage text advertises `--check` (content settle; not executed)
@@ -281,7 +281,7 @@ def assess(repo: Path, version: str, release_date: str) -> dict:
 
     roster_rc = None
     if not repo_roster.is_file():
-        problems.append("ci: bin/ade-roster missing (CI context-policy runs --check)")
+        problems.append("ci: bin/ade-roster missing (CI context-policy checks generation)")
         checks["ade_roster_present"] = False
     else:
         checks["ade_roster_present"] = True
@@ -293,13 +293,13 @@ def assess(repo: Path, version: str, release_date: str) -> dict:
         checks["ade_roster"] = "trusted-missing"
     else:
         roster_rc, roster_out, roster_err = run(
-            [sys.executable, str(trusted_roster), "--check", "--root", str(repo)], timeout=60
+            [sys.executable, str(trusted_roster), "--root", str(repo)], timeout=60
         )
-        checks["ade_roster"] = {"rc": roster_rc, "err": (roster_err or roster_out).strip()[:200]}
+        checks["ade_roster"] = {"rc": roster_rc, "err": roster_err.strip()[:200]}
         if roster_rc != 0:
             problems.append(
-                f"ci: ade-roster --check failed (rc={roster_rc}): "
-                f"{(roster_err or roster_out).strip()[:200] or 'stale or missing roster block'}"
+                f"ci: ade-roster failed (rc={roster_rc}): "
+                f"{(roster_err or roster_out).strip()[:200] or 'roster generation failed'}"
             )
 
     # --- ade-update (inspected content only; never executed) ---

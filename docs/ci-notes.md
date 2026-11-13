@@ -8,7 +8,7 @@ Snapshot **2026-11-09** (measured on `pytest-linux` for PR #324 / run 4265362375
 |---|---|---|
 | `pytest-linux` | Every PR/push unless `workflow_dispatch` sets `context_only` | Full `pytest tests/ -q` on `ubuntu-latest` (required for merges) |
 | `pytest` (macOS) | Manual `workflow_dispatch` with `macos: true` only | Same suite on `macos-latest` |
-| `context-policy` | Every PR/push | Focused Go/context/instruction-lint + `ade-roster --check` (~15 s) |
+| `context-policy` | Every PR/push | Focused Go/context/instruction-lint + `ade-roster` generation (~15 s) |
 | `adversary-marker` | Separate workflow | Required merge gate; do not weaken |
 
 ## B. Why `pytest-linux` is ~11 minutes
@@ -33,3 +33,17 @@ Local contrast: `tests/test_ade_install.py` alone is ~1 s. The full tree is ~87 
 ## D. Practice while CI is slow
 
 Draft the next path-disjoint unit while `pytest-linux` runs (CI-overlap). Do not dual-write shared `config/install.toml` / `bin/ade_install.py` across parallel PRs. Prefer focused local pytest for the touched module; full CI remains the merge gate.
+
+## Published roster (2026-11-12)
+
+README links to `ROSTER.md` on the dedicated `generated-roster` branch. `roster.yml` runs on every
+master push, on a daily recovery schedule, or by manual dispatch on master. It checks out master only,
+generates from tracked source with immutable source-commit links, and publishes only that document.
+The job has contents-write permission; it never consumes PR artifacts, checks out a PR head, or writes
+to a PR branch. PR Tests keep read-only permissions and check generation without comparing stored rows.
+The strict `ade-roster --check` / `--write` interface remains for legacy embedded documents.
+
+The first successful run after this change merges creates the publication branch. Publication failures
+appear in the linked workflow; a daily scheduled run retries even if no new merge occurs. Concurrency
+serializes publishers, and each run checks out the current master rather than its older event SHA.
+`ade-release-ready` checks generation using its trusted helper, matching context-policy.
